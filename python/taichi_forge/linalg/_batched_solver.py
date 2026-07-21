@@ -9,6 +9,10 @@ import weakref
 import numpy as np
 
 from taichi_forge._lib import core as _ti_core
+from taichi_forge.graph._submission import (
+    _new_submission_lane,
+    _reserve_paced_submission,
+)
 from taichi_forge.lang._ndarray import ScalarNdarray
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang.impl import get_runtime
@@ -69,6 +73,7 @@ class SolveSubmission:
         "_runtime",
         "_solution",
         "_issued_iterations",
+        "_admission",
         "__weakref__",
     )
 
@@ -82,6 +87,7 @@ class SolveSubmission:
         operator_session,
         preconditioner_session,
         issued_iterations,
+        admission=None,
     ):
         self._plan = plan
         self._completion = completion
@@ -91,6 +97,7 @@ class SolveSubmission:
         self._operator_session = operator_session
         self._preconditioner_session = preconditioner_session
         self._issued_iterations = issued_iterations
+        self._admission = admission
         self._result = None
         self._failure = None
         self._invalid_reason = None
@@ -101,7 +108,9 @@ class SolveSubmission:
             return True
         if self._invalid_reason is not None:
             return True
-        return self._completion.done()
+        if self._admission is None:
+            return self._completion.done()
+        return self._admission._completion_done(self._completion)
 
     def wait(self):
         """Waits, snapshots terminal state, and releases the workspace slot."""
@@ -325,6 +334,7 @@ class BatchedSolvePlan:
         self._completed_submissions = 0
         self._submission_rejections = 0
         self._pending_submission = None
+        self._submission_lane = _new_submission_lane("batched_solve_plan")
         self._lifecycle_lock = threading.RLock()
         self._build_workspace()
         get_runtime().register_runtime_object(self)
@@ -431,7 +441,12 @@ class BatchedSolvePlan:
             )
             if submission is not None:
                 try:
-                    submission._completion.wait()
+                    if submission._admission is None:
+                        submission._completion.wait()
+                    else:
+                        submission._admission._completion_wait(
+                            submission._completion
+                        )
                 except Exception as exc:  # fault remains in RuntimeFaultDomain
                     submission._failure = exc
                 self._mark_sessions_synchronized(
@@ -736,12 +751,23 @@ class BatchedSolvePlan:
             ),
         )
 
-    def submit(self, rhs, *, initial_guess=None, out=None):
+    def submit(
+        self,
+        rhs,
+        *,
+        initial_guess=None,
+        out=None,
+        pacer=None,
+        lane=None,
+        on_saturation="wait",
+    ):
         """Submits one fixed-budget GPU solve without waiting for completion.
 
         The plan owns one workspace slot. A second submission is rejected
         until the first ticket is waited or materialized with ``result()``;
-        use :meth:`clone_workspace` for explicit concurrent solves.
+        use :meth:`clone_workspace` for explicit concurrent solves. Workspace
+        clones may share a ``SubmissionPacer`` with Graph work to bound backend
+        backlog and arbitrate complete host submissions across lanes.
         """
         arch = self._program.config().arch if self._program is not None else None
         if arch not in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan):
@@ -772,67 +798,106 @@ class BatchedSolvePlan:
             rhs, initial_guess, out = self._validate_solve_io(
                 rhs, initial_guess, out
             )
-            transaction = self._program._begin_runtime_submission_transaction()
-            operator_session = None
-            preconditioner_session = None
-            try:
-                self._initialize_output(initial_guess, out)
-                operator_session, preconditioner_session = (
-                    self._begin_provider_sessions()
-                )
-                self._initialize_recurrence(
-                    rhs, out, operator_session, preconditioner_session
-                )
-                for iteration in range(self.max_iterations):
-                    self._issue_iteration(
-                        out,
-                        operator_session,
-                        preconditioner_session,
-                        iteration + 1 < self.max_iterations,
-                    )
-                _kernels.mark_max_iterations(
-                    self._float_state,
-                    self._int_state,
-                    self._counters,
-                    self.batch_size,
-                )
-                transaction._mark_submission()
-                completion = transaction._finish()
-            except Exception:
-                try:
-                    transaction._mark_submission()
-                    failed_completion = transaction._finish()
-                    failed_completion.wait()
-                except Exception:
-                    if operator_session is not None:
-                        try:
-                            operator_session._wait()
-                        except Exception:
-                            pass
-                if operator_session is not None:
-                    self._mark_sessions_synchronized(
-                        operator_session, preconditioner_session
-                    )
-                raise
 
-            self._solve_calls += 1
-            self._submission_calls += 1
-            if self._solve_calls > 1:
-                self._workspace_reuses += 1
-            submission = SolveSubmission(
-                self,
-                completion,
-                runtime,
-                rhs,
-                out,
-                operator_session,
-                preconditioner_session,
-                self.max_iterations,
-            )
-            self._pending_submission = weakref.ref(submission)
-            if completion.has_backend_work:
-                runtime.retain_runtime_submission_owner(completion, submission)
-            return submission
+        admission = _reserve_paced_submission(
+            pacer,
+            runtime,
+            self._submission_lane,
+            lane=lane,
+            on_saturation=on_saturation,
+        )
+        try:
+            with self._lifecycle_lock:
+                if runtime is not get_runtime() or self._program is None:
+                    raise TaichiRuntimeError(
+                        "BatchedSolvePlan cannot be used after ti.reset()"
+                    )
+                runtime.collect_ready_runtime_submission_owners()
+                pending = (
+                    self._pending_submission()
+                    if self._pending_submission is not None
+                    else None
+                )
+                if pending is not None:
+                    self._submission_rejections += 1
+                    raise TaichiRuntimeError(
+                        "BatchedSolvePlan workspace slot is occupied; call "
+                        "wait()/result() on the pending SolveSubmission or use "
+                        "clone_workspace()"
+                    )
+
+                transaction = (
+                    self._program._begin_runtime_submission_transaction()
+                )
+                operator_session = None
+                preconditioner_session = None
+                try:
+                    self._initialize_output(initial_guess, out)
+                    operator_session, preconditioner_session = (
+                        self._begin_provider_sessions()
+                    )
+                    self._initialize_recurrence(
+                        rhs, out, operator_session, preconditioner_session
+                    )
+                    for iteration in range(self.max_iterations):
+                        self._issue_iteration(
+                            out,
+                            operator_session,
+                            preconditioner_session,
+                            iteration + 1 < self.max_iterations,
+                        )
+                    _kernels.mark_max_iterations(
+                        self._float_state,
+                        self._int_state,
+                        self._counters,
+                        self.batch_size,
+                    )
+                    transaction._mark_submission()
+                    completion = transaction._finish()
+                except Exception:
+                    try:
+                        transaction._mark_submission()
+                        failed_completion = transaction._finish()
+                        failed_completion.wait()
+                    except Exception:
+                        if operator_session is not None:
+                            try:
+                                operator_session._wait()
+                            except Exception:
+                                pass
+                    if operator_session is not None:
+                        self._mark_sessions_synchronized(
+                            operator_session, preconditioner_session
+                        )
+                    raise
+
+                self._solve_calls += 1
+                self._submission_calls += 1
+                if self._solve_calls > 1:
+                    self._workspace_reuses += 1
+                submission = SolveSubmission(
+                    self,
+                    completion,
+                    runtime,
+                    rhs,
+                    out,
+                    operator_session,
+                    preconditioner_session,
+                    self.max_iterations,
+                    admission,
+                )
+                self._pending_submission = weakref.ref(submission)
+                if completion.has_backend_work:
+                    runtime.retain_runtime_submission_owner(
+                        completion, submission
+                    )
+                if admission is not None:
+                    admission._attach(completion)
+                return submission
+        except BaseException:
+            if admission is not None:
+                admission._cancel()
+            raise
 
     def _complete_submission(self, submission):
         with self._lifecycle_lock:
@@ -850,7 +915,12 @@ class BatchedSolvePlan:
                     "SolveSubmission no longer owns this plan's workspace slot"
                 )
             try:
-                submission._completion.wait()
+                if submission._admission is None:
+                    submission._completion.wait()
+                else:
+                    submission._admission._completion_wait(
+                        submission._completion
+                    )
                 self._host_synchronizations += 1
                 self._mark_sessions_synchronized(
                     submission._operator_session,
@@ -880,7 +950,7 @@ class BatchedSolvePlan:
                 raise TaichiRuntimeError(
                     "BatchedSolvePlan cannot be used after ti.reset()"
                 )
-            return BatchedSolvePlan(
+            clone = BatchedSolvePlan(
                 self.operator,
                 self.batch_size,
                 independent_systems=True,
@@ -892,6 +962,11 @@ class BatchedSolvePlan:
                 execution_policy=self.execution_policy,
                 check_interval=self.check_interval,
             )
+            # Cloning expands workspace capacity, not scheduling identity.
+            # Keeping one default lane prevents clone proliferation from
+            # bypassing round-robin fairness.
+            clone._submission_lane = self._submission_lane
+            return clone
 
     def solve(self, rhs, *, initial_guess=None, out=None):
         """Solves one flat batch and returns per-system terminal metadata."""

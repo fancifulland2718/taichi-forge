@@ -357,8 +357,15 @@ def test_independent_batched_fixed_budget_submission_and_workspace_slots():
     clone = plan.clone_workspace()
     original_out = ti.ndarray(ti.f32, shape=total_size)
     clone_out = ti.ndarray(ti.f32, shape=total_size)
-    original_submission = plan.submit(rhs, out=original_out)
-    clone_submission = clone.submit(rhs, out=clone_out)
+    pacer = ti.graph.SubmissionPacer(
+        2, max_in_flight_per_lane=1, max_queued=4
+    )
+    original_submission = plan.submit(
+        rhs, out=original_out, pacer=pacer, lane="primary"
+    )
+    clone_submission = clone.submit(
+        rhs, out=clone_out, pacer=pacer, lane="secondary"
+    )
     original_result = original_submission.result()
     clone_result = clone_submission.result()
     assert original_result.all_converged and clone_result.all_converged
@@ -368,6 +375,11 @@ def test_independent_batched_fixed_budget_submission_and_workspace_slots():
     np.testing.assert_allclose(
         clone_out.to_numpy(), exact, rtol=3e-4, atol=3e-4
     )
+    pacing = pacer.statistics()
+    assert pacing["peak_in_flight"] <= 2
+    assert pacing["completed"] == 2
+    assert pacing["lanes"]["primary"]["completed"] == 1
+    assert pacing["lanes"]["secondary"]["completed"] == 1
 
     chunked = experimental.BatchedSolvePlan(
         operator,
