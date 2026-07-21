@@ -1001,6 +1001,8 @@ The module provides fixed CSR/BSR patterns, value-only updates, scale-aware
 iterative convergence, CPU MINRES/BiCGSTAB, and validated symbolic
 factorization reuse. The complete usage and backend matrix is in
 [Sparse runtime and linear algebra](sparse_runtime_and_linear_algebra.en.md).
+The runtime-bound operator API is documented separately in
+[Experimental LinearOperator and SolvePlan](linear_operator.en.md).
 
 | API | Purpose | Supported boundary |
 | --- | --- | --- |
@@ -1012,6 +1014,14 @@ factorization reuse. The complete usage and backend matrix is in
 | `ti.linalg.SparseMINRES(A, b, ..., atol, rtol)` | Solve an explicitly stored symmetric-indefinite system. | CPU mutable/fixed CSR/BSR, `f32/f64`; identity preconditioner. |
 | `ti.linalg.SparseBiCGSTAB(A, b, ..., atol, rtol)` | Solve an explicitly stored nonsymmetric system. | CPU mutable/fixed CSR/BSR, `f32/f64`. |
 | `ti.linalg.SparseSolver` | Direct LLT/LDLT/LU factorization and solve. | CPU mutable Eigen providers and documented CUDA scalar-CSR route; no Vulkan. |
+| `ti.linalg.experimental.OperatorTraits(...)` / `.spd()` | Declare mathematical properties without sampling or inference. | CG/PCG require trusted self-adjoint and positive-definite traits. |
+| `ti.linalg.experimental.LinearOperator.from_sparse_matrix(A, traits=...)` | Bind fixed CSR/BSR as a runtime-owned linear map. | CPU `f32/f64`; CUDA/Vulkan `f32`; no copy or fallback. |
+| `LinearOperator.from_kernel(...)` / `.from_graph(...)` | Bind an exact f32 ndarray kernel ABI or a role-qualified compiled Graph. | CPU, CUDA, Vulkan; topology/numeric/workspace resources are operator-owned snapshots. |
+| `operator.apply(x, out=None)` / `operator @ x` | Apply one operator synchronously to a scalar 1-D Taichi ndarray. | All supported providers; exact dtype/extent and current runtime required. |
+| `operator.scaled(...)`, `operator + other`, `.compose(...)`, `.adjoint()`, `block_diagonal(...)`, `identity(...)` | Construct minimal linear-operator algebra. | CPU composition; explicit adjoint capability required. |
+| `ti.linalg.experimental.SolvePlan(operator, method=..., ...)` | Build a persistent CG, fixed stored PCG, or CPU BiCGSTAB plan. | Provider-qualified CPU/CUDA/Vulkan matrix; Vulkan uses absolute tolerance only. |
+| `plan.solve(rhs, initial_guess=None, out=None)` | Return an immutable `SolveResult` with solution and terminal residual/status fields. | Scalar 1-D Taichi ndarrays; no RHS/output aliasing or host staging. |
+| `operator.statistics()` / `plan.statistics()` | Return provider/plan execution and workspace diagnostics. | Diagnostic snapshot; not part of the numerical result. |
 
 Iterative convergence uses
 `||b - A x||_2 <= max(atol, rtol * ||b||_2)`. Taichi does not infer

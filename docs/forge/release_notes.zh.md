@@ -65,12 +65,19 @@
   `SparseBiCGSTAB`，用于非对称 CSR/BSR。迭代 solver 根据真实残差合同
   `||b-Ax|| <= max(atol, rtol*||b||)` 报告收敛；CUDA/Vulkan stored MINRES 和
   BiCGSTAB 仍不支持。
+- 增加实验性 `ti.linalg.experimental.LinearOperator` 与 `SolvePlan` API。fixed
+  stored CSR/BSR、精确 compiled-kernel provider 和按 role 分类的 compiled Graph
+  使用统一 runtime/lifetime/capability 合同。显式数学 trait 作为 CG/PCG 门禁；
+  persistent plan 通过统一 `SolveResult` 返回 terminal state，并在文档支持矩阵内提供
+  CPU/CUDA/Vulkan CG、fixed stored Jacobi/block-Jacobi PCG 和 CPU BiCGSTAB。CPU
+  还支持最小 operator composition。
 - 强化 direct solver symbolic reuse：只有完整 compressed index pattern 相同，
   `factorize()` 才能复用已分析 pattern；factorization 后更新 values 会使分解
   stale，必须刷新后才能 solve。stable-fluid example 固定 pressure gauge，implicit
   mass-spring example 跨 value-only step 复用 symbolic analysis。
 - 完整用户流程、特性、backend/format/dtype 矩阵、失败语义和生命周期规则见
   [稀疏 runtime 与线性代数](sparse_runtime_and_linear_algebra.zh.md)，并可参考
+  [实验性 LinearOperator 与 SolvePlan](linear_operator.zh.md)、
   [稀疏布局选择指南](sparse_layout_selection.zh.md)与
   [物理稀疏 solver 选择指南](physics_sparse_solver_selection.zh.md)。
 

@@ -75,6 +75,13 @@ retroactively attributed to the 0.5.0 artifact:
   Iterative solvers report convergence from the true residual contract
   `||b-Ax|| <= max(atol, rtol*||b||)`; CUDA/Vulkan stored MINRES and
   BiCGSTAB remain unsupported.
+- Added the experimental `ti.linalg.experimental.LinearOperator` and
+  `SolvePlan` API. Fixed stored CSR/BSR, exact compiled-kernel providers, and
+  role-qualified compiled Graphs share one runtime/lifetime/capability
+  contract. Explicit mathematical traits gate CG/PCG; persistent plans expose
+  unified `SolveResult` terminal state and support CPU/CUDA/Vulkan CG, fixed
+  stored Jacobi/block-Jacobi PCG, and CPU BiCGSTAB within the documented
+  provider matrix. CPU also supports minimal operator composition.
 - Hardened direct-solver symbolic reuse. `factorize()` may reuse an analyzed
   pattern only when the complete compressed index pattern is identical, and a
   value update after factorization makes the factorization stale until it is
@@ -84,6 +91,8 @@ retroactively attributed to the 0.5.0 artifact:
 - The user workflow, feature set, backend/format/dtype matrix, failure
   semantics, and lifecycle rules are documented in
   [Sparse runtime and linear algebra](sparse_runtime_and_linear_algebra.en.md).
+  The general operator API is documented in
+  [Experimental LinearOperator and SolvePlan](linear_operator.en.md).
   See also [layout selection](sparse_layout_selection.en.md) and
   [physics solver selection](physics_sparse_solver_selection.en.md).
 

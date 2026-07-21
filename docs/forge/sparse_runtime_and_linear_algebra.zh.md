@@ -173,9 +173,26 @@ ndarray RHS；CUDA 文档路径要求 Taichi ndarray。shape 与 dtype 必须与
 | `SparseBiCGSTAB` | 显式非对称 square matrix | mutable CSR/CSC 与 fixed CSR/BSR，`f32/f64` | 不支持 | 不支持 |
 | `MatrixFreeCG` | SPD 应用 operator | field/kernel 路径 | field/kernel 路径 | backend/dtype 支持该 operator 时可用 |
 | `MatrixFreeBICGSTAB` | 非对称应用 operator | field/kernel 路径 | field/kernel 路径 | backend/dtype 支持该 operator 时可用 |
+| `experimental.SolvePlan(method="cg")` | trait-qualified SPD stored/kernel/Graph operator | fixed CSR/BSR 与 composition，`f32/f64`；compiled provider 为 `f32` | fixed CSR 与 compiled provider，`f32` | fixed CSR/BSR 与 compiled provider，`f32`；absolute tolerance |
+| `experimental.SolvePlan(method="pcg")` | trait-qualified SPD fixed stored operator | CSR Jacobi 或 BSR block-Jacobi，`f32/f64` | CSR Jacobi 或 BSR block-Jacobi，`f32` | CSR Jacobi 或 BSR block-Jacobi，`f32`；absolute tolerance |
+| `experimental.SolvePlan(method="bicgstab")` | 一般 square operator | 任意受支持 experimental CPU provider，`f32/f64` | 不支持 | 不支持 |
 
 Taichi 不会从 CSR/BSR shape 推断 symmetry、definiteness、nullspace 或
 conditioning，这些数学合同由调用方负责。
+
+### 绑定 runtime 的 LinearOperator
+
+`ti.linalg.experimental.LinearOperator` 使用统一 capability 与 lifecycle 合同覆盖 fixed
+stored CSR/BSR、compiled-kernel 和 compiled-Graph apply。vector 使用一维 scalar Taichi
+ndarray，operator 保留可复用 native execution plan。数学性质通过 `OperatorTraits`
+附加；SPD 性质未知时，CG/PCG 会拒绝构造。CPU 提供最小的
+scale/sum/composition/adjoint/block-diagonal 代数；不受支持的 GPU composition 明确失败，
+不执行 host fallback。
+
+`experimental.SolvePlan` 跨 RHS 调用保留 solver workspace，并返回同时包含 solution 与
+完整 terminal state 的 `SolveResult`。该 API 不替代 mutable Eigen sparse matrix、MINRES
+或 direct factorization。provider ABI、所有权、update generation、示例和精确 backend
+矩阵见[实验性 LinearOperator 与 SolvePlan](linear_operator.zh.md)。
 
 ### CG 与 preconditioner
 

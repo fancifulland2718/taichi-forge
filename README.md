@@ -97,6 +97,7 @@ English public docs are grouped by use case:
 
 ### Physics and linear algebra
 
+- [Experimental LinearOperator and SolvePlan](docs/forge/linear_operator.en.md)
 - [Sparse runtime and linear algebra: API, backend matrix, and lifecycle](docs/forge/sparse_runtime_and_linear_algebra.en.md)
 - [Choosing sparse operators and solvers for physics workloads](docs/forge/physics_sparse_solver_selection.en.md)
 - [Linear solvers](docs/lang/articles/math/linear_solver.md)

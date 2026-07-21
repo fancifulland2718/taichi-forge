@@ -882,7 +882,8 @@ canvas.submit_frame(frame)
 该模块提供 fixed CSR/BSR pattern、value-only update、scale-aware iterative
 convergence、CPU MINRES/BiCGSTAB，以及经过验证的 symbolic factorization 复用合同。
 完整用法与后端矩阵见
-[稀疏 runtime 与线性代数](sparse_runtime_and_linear_algebra.zh.md)。
+[稀疏 runtime 与线性代数](sparse_runtime_and_linear_algebra.zh.md)。绑定 runtime 的
+operator API 另见[实验性 LinearOperator 与 SolvePlan](linear_operator.zh.md)。
 
 | API | 用途 | 支持边界 |
 | --- | --- | --- |
@@ -894,6 +895,14 @@ convergence、CPU MINRES/BiCGSTAB，以及经过验证的 symbolic factorization
 | `ti.linalg.SparseMINRES(A, b, ..., atol, rtol)` | 求解显式存储的对称不定系统。 | CPU mutable/fixed CSR/BSR、`f32/f64`；identity preconditioner。 |
 | `ti.linalg.SparseBiCGSTAB(A, b, ..., atol, rtol)` | 求解显式存储的非对称系统。 | CPU mutable/fixed CSR/BSR、`f32/f64`。 |
 | `ti.linalg.SparseSolver` | 直接 LLT/LDLT/LU 分解和求解。 | CPU mutable Eigen provider 与文档列出的 CUDA scalar-CSR 路径；Vulkan 不支持。 |
+| `ti.linalg.experimental.OperatorTraits(...)` / `.spd()` | 不通过 sampling 或 inference，显式声明数学性质。 | CG/PCG 要求可信的 self-adjoint 与 positive-definite trait。 |
+| `ti.linalg.experimental.LinearOperator.from_sparse_matrix(A, traits=...)` | 把 fixed CSR/BSR 绑定为 runtime-owned linear map。 | CPU `f32/f64`；CUDA/Vulkan `f32`；不复制、不 fallback。 |
+| `LinearOperator.from_kernel(...)` / `.from_graph(...)` | 绑定精确 f32 ndarray kernel ABI 或按 role 分类的 compiled Graph。 | CPU、CUDA、Vulkan；topology/numeric/workspace 为 operator-owned snapshot。 |
+| `operator.apply(x, out=None)` / `operator @ x` | 对一维 scalar Taichi ndarray 同步应用 operator。 | 所有受支持 provider；dtype/extent 必须精确匹配并属于当前 runtime。 |
+| `operator.scaled(...)`、`operator + other`、`.compose(...)`、`.adjoint()`、`block_diagonal(...)`、`identity(...)` | 构造最小线性算子代数。 | CPU composition；adjoint 需要显式 capability。 |
+| `ti.linalg.experimental.SolvePlan(operator, method=..., ...)` | 构造 persistent CG、fixed stored PCG 或 CPU BiCGSTAB plan。 | provider-qualified CPU/CUDA/Vulkan 矩阵；Vulkan 只使用 absolute tolerance。 |
+| `plan.solve(rhs, initial_guess=None, out=None)` | 返回 immutable `SolveResult`，包含 solution 与 terminal residual/status 字段。 | 一维 scalar Taichi ndarray；禁止 RHS/output alias 和 host staging。 |
+| `operator.statistics()` / `plan.statistics()` | 返回 provider/plan execution 与 workspace 诊断。 | diagnostic snapshot，不属于数值结果。 |
 
 迭代收敛条件为
 `||b - A x||_2 <= max(atol, rtol * ||b||_2)`。Taichi 不会自动推断
