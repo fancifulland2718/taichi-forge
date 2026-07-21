@@ -870,6 +870,19 @@ def test_public_bsr_pattern_matrix_spmv_update_and_sharing():
 
     matrix_a.update_values(values_b)
     np.testing.assert_allclose((matrix_a @ vector).to_numpy(), 2.0 * vector_host)
+    if ti.lang.impl.current_cfg().arch == ti.cpu:
+        exact = np.asarray([0.5, -1.0, 1.5, -2.0], dtype=np.float32)
+        rhs = ti.ndarray(dtype=ti.f32, shape=4)
+        solution = ti.ndarray(dtype=ti.f32, shape=4)
+        rhs.from_numpy(2.0 * exact)
+        solution.fill(0.0)
+        program = ti.lang.impl.get_runtime().prog
+        solver = ti._lib.core._make_cpu_operator_cg_solver(
+            program, matrix_a.matrix, 8, 1e-6, 0.0
+        )
+        solver.solve(program, solution.arr, rhs.arr)
+        assert solver.is_success()
+        np.testing.assert_allclose(solution.to_numpy(), exact, rtol=2e-5, atol=2e-5)
     contract = matrix_a._get_format_contract()
     supports_public_cg = ti.lang.impl.current_cfg().arch in (ti.cpu, ti.cuda)
     assert contract["pattern"]["ownership"] == "shared_immutable"

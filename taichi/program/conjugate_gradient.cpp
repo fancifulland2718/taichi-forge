@@ -570,9 +570,8 @@ std::unique_ptr<CUCG> make_cuda_compiled_kernel_pcg_solver(
 }
 
 struct CpuSparseCGPlan::PreconditionerBinding {
-  OperatorAction action;
+  OperatorBinding binding;
   std::function<void(Program *)> validate;
-  std::function<SparseMatrix::NumericAccessGuard()> acquire_numeric_guard;
   std::string method;
 };
 
@@ -582,6 +581,26 @@ OperatorDescriptor square_operator_descriptor(const SparseMatrix &matrix) {
   const OperatorSpaceDesc space{matrix.get_data_type(),
                                 static_cast<std::size_t>(matrix.num_rows())};
   return {space, space};
+}
+
+OperatorBinding bind_cpu_operator_compatibility(Program *program,
+                                                SparseMatrix &matrix) {
+  if (auto *csr = dynamic_cast<CpuSparseCsrMatrix *>(&matrix)) {
+    return make_cpu_csr_operator_binding(program, *csr);
+  }
+  if (auto *bsr = dynamic_cast<CpuSparseBsrMatrix *>(&matrix)) {
+    return make_cpu_bsr_operator_binding(program, *bsr);
+  }
+  if (auto *kernel =
+          dynamic_cast<CompiledKernelLinearOperator *>(&matrix)) {
+    return make_cpu_program_kernel_operator_binding(program, *kernel);
+  }
+  const auto statistics = matrix.debug_runtime_statistics();
+  TI_ERROR(
+      "CPU operator CG compatibility factory does not support backend '{}' "
+      "with storage format '{}' (provider '{}'); no fallback was performed.",
+      statistics.backend_family, statistics.storage_format,
+      statistics.provider_name);
 }
 
 OperatorResourceStamp preconditioner_stamp(
@@ -620,11 +639,10 @@ CpuSparseCGPlan::bind_preconditioner(
         preconditioner.apply(program, *input.ndarray, *output.ndarray);
       });
   return std::make_unique<PreconditionerBinding>(PreconditionerBinding{
-      std::move(action),
+      OperatorBinding(std::move(action)),
       [&matrix, &preconditioner](Program *candidate) {
         preconditioner.validate_compatible(candidate, matrix);
       },
-      {},
       "jacobi"});
 }
 
@@ -651,11 +669,10 @@ CpuSparseCGPlan::bind_preconditioner(
         preconditioner.apply(program, *input.ndarray, *output.ndarray);
       });
   return std::make_unique<PreconditionerBinding>(PreconditionerBinding{
-      std::move(action),
+      OperatorBinding(std::move(action)),
       [&matrix, &preconditioner](Program *candidate) {
         preconditioner.validate_compatible(candidate, matrix);
       },
-      {},
       "block_jacobi"});
 }
 
@@ -682,12 +699,14 @@ CpuSparseCGPlan::bind_preconditioner(
         preconditioner.apply(program, matrix, *input.ndarray, *output.ndarray);
       });
   return std::make_unique<PreconditionerBinding>(PreconditionerBinding{
-      std::move(action),
+      OperatorBinding(
+          std::move(action),
+          [&preconditioner] {
+            return OperatorResourceLease::hold(
+                preconditioner.acquire_numeric_access_guard());
+          }),
       [&matrix, &preconditioner](Program *candidate) {
         preconditioner.validate_compatible(candidate, matrix);
-      },
-      [&preconditioner] {
-        return preconditioner.acquire_numeric_access_guard();
       },
       "compiled_kernel_inverse_apply"});
 }
@@ -698,7 +717,7 @@ CpuSparseCGPlan::CpuSparseCGPlan(Program *program,
                                  double absolute_tolerance,
                                  double relative_tolerance)
     : CpuSparseCGPlan(program,
-                      matrix,
+                      bind_cpu_operator_compatibility(program, matrix),
                       nullptr,
                       max_iterations,
                       absolute_tolerance,
@@ -712,7 +731,7 @@ CpuSparseCGPlan::CpuSparseCGPlan(Program *program,
                                  double absolute_tolerance,
                                  double relative_tolerance)
     : CpuSparseCGPlan(program,
-                      matrix,
+                      bind_cpu_operator_compatibility(program, matrix),
                       bind_preconditioner(program, matrix, preconditioner),
                       max_iterations,
                       absolute_tolerance,
@@ -727,7 +746,7 @@ CpuSparseCGPlan::CpuSparseCGPlan(
     double absolute_tolerance,
     double relative_tolerance)
     : CpuSparseCGPlan(program,
-                      matrix,
+                      bind_cpu_operator_compatibility(program, matrix),
                       bind_preconditioner(program, matrix, preconditioner),
                       max_iterations,
                       absolute_tolerance,
@@ -742,7 +761,7 @@ CpuSparseCGPlan::CpuSparseCGPlan(
     double absolute_tolerance,
     double relative_tolerance)
     : CpuSparseCGPlan(program,
-                      matrix,
+                      bind_cpu_operator_compatibility(program, matrix),
                       bind_preconditioner(program, matrix, preconditioner),
                       max_iterations,
                       absolute_tolerance,
@@ -751,23 +770,30 @@ CpuSparseCGPlan::CpuSparseCGPlan(
 
 CpuSparseCGPlan::CpuSparseCGPlan(
     Program *program,
-    SparseMatrix &matrix,
+    OperatorBinding operator_binding,
     std::unique_ptr<PreconditionerBinding> preconditioner,
     int max_iterations,
     double absolute_tolerance,
     double relative_tolerance)
     : program_(program),
-      matrix_(&matrix),
       preconditioner_binding_(std::move(preconditioner)),
-      dtype_(matrix.get_data_type()),
       max_iterations_(max_iterations),
       absolute_tolerance_(absolute_tolerance),
       relative_tolerance_(relative_tolerance) {
   TI_ERROR_IF(!program_ || !arch_is_cpu(program_->compile_config().arch),
               "CPU operator CG/PCG requires an active CPU Program.");
-  TI_ERROR_IF(
-      matrix_->num_rows() <= 0 || matrix_->num_rows() != matrix_->num_cols(),
-      "CPU operator CG/PCG requires a non-empty square operator.");
+  const auto &descriptor = operator_binding.action().descriptor();
+  TI_ERROR_IF(descriptor.domain.scalar_type !=
+                      descriptor.range.scalar_type ||
+                  descriptor.domain.scalar_extent !=
+                      descriptor.range.scalar_extent ||
+                  descriptor.range.scalar_extent >
+                      static_cast<std::size_t>(
+                          std::numeric_limits<int>::max()),
+              "CPU operator CG/PCG requires a non-empty square operator.");
+  dtype_ = descriptor.range.scalar_type;
+  rows_ = static_cast<int>(descriptor.range.scalar_extent);
+  cols_ = static_cast<int>(descriptor.domain.scalar_extent);
   TI_ERROR_IF(dtype_ != PrimitiveType::f32 && dtype_ != PrimitiveType::f64,
               "CPU operator CG/PCG requires f32 or f64 values.");
   TI_ERROR_IF(max_iterations_ < 0,
@@ -779,15 +805,20 @@ CpuSparseCGPlan::CpuSparseCGPlan(
               "CPU operator CG/PCG requires finite non-negative atol and rtol "
               "with at least one positive tolerance.");
   operator_plan_ = std::make_unique<OperatorPlan>(
-      program_, make_cpu_sparse_matrix_operator_action(program_, matrix));
+      program_, std::move(operator_binding));
+  const auto initial_stamp = operator_plan_->resource_stamp();
+  TI_ERROR_IF(
+      initial_stamp.program_identity !=
+          reinterpret_cast<std::uintptr_t>(program_),
+      "CPU operator CG/PCG binding belongs to a different Program.");
   if (preconditioner_binding_) {
     preconditioner_plan_ = std::make_unique<OperatorPlan>(
-        program_, preconditioner_binding_->action);
+        program_, preconditioner_binding_->binding);
   }
   validate_preconditioner(program_);
   try {
     for (auto &vector : workspace_) {
-      vector = program_->create_ndarray(dtype_, {matrix_->num_rows()},
+      vector = program_->create_ndarray(dtype_, {rows_},
                                         ExternalArrayLayout::kNull, false);
     }
   } catch (...) {
@@ -847,7 +878,7 @@ void CpuSparseCGPlan::solve_typed(T *x,
                                   const T *b,
                                   const std::array<T *, 4> &workspace,
                                   const Ndarray &solution_array) {
-  const int rows = matrix_->num_rows();
+  const int rows = rows_;
   T *ax = workspace[0];
   T *residual = workspace[1];
   T *direction = workspace[2];
@@ -986,7 +1017,7 @@ void CpuSparseCGPlan::solve(Program *program,
   TI_ERROR_IF(program != program_,
               "CPU operator CG/PCG must be solved by its construction "
               "Program.");
-  const int rows = matrix_->num_rows();
+  const int rows = rows_;
   auto validate_vector = [&](const char *role, const Ndarray &array) {
     TI_ERROR_IF(array.get_element_data_type() != dtype_ ||
                     !array.get_element_shape().empty() ||
@@ -1008,23 +1039,21 @@ void CpuSparseCGPlan::solve(Program *program,
               "CPU operator CG/PCG solution and RHS must not alias.");
 
   std::lock_guard<std::mutex> lock(solve_mutex_);
-  auto numeric_guard = matrix_->acquire_numeric_access_guard();
-  SparseMatrix::NumericAccessGuard preconditioner_numeric_guard;
-  if (preconditioner_binding_ &&
-      preconditioner_binding_->acquire_numeric_guard) {
-    preconditioner_numeric_guard =
-        preconditioner_binding_->acquire_numeric_guard();
-  }
+  auto operator_lease = operator_plan_->acquire_resource_lease();
+  auto preconditioner_lease =
+      preconditioner_plan_
+          ? preconditioner_plan_->acquire_resource_lease()
+          : OperatorResourceLease{};
   validate_preconditioner(program);
-  const auto operator_stats = matrix_->debug_runtime_statistics();
+  const auto operator_stamp = operator_plan_->resource_stamp();
   if (has_solved_) {
     workspace_reuses_++;
   } else {
     has_solved_ = true;
   }
   solve_calls_++;
-  last_solve_pattern_version_ = operator_stats.pattern_version;
-  last_solve_numeric_version_ = operator_stats.numeric_version;
+  last_solve_pattern_version_ = operator_stamp.topology_revision;
+  last_solve_numeric_version_ = operator_stamp.numeric_revision;
   status_ = SparseSolveStatus::kNotRun;
   iterations_ = 0;
   initial_residual_norm_ = 0.0;
@@ -1054,7 +1083,8 @@ void CpuSparseCGPlan::solve(Program *program,
 SparseSolvePlanRuntimeStatistics CpuSparseCGPlan::debug_runtime_statistics()
     const {
   std::lock_guard<std::mutex> lock(solve_mutex_);
-  const auto operator_stats = matrix_->debug_runtime_statistics();
+  auto operator_lease = operator_plan_->acquire_resource_lease();
+  const auto operator_stamp = operator_plan_->resource_stamp();
   SparseSolvePlanRuntimeStatistics result;
   result.backend_family = "cpu";
   if (!preconditioner_binding_) {
@@ -1066,15 +1096,15 @@ SparseSolvePlanRuntimeStatistics CpuSparseCGPlan::debug_runtime_statistics()
     result.method = "pcg_" + preconditioner_binding_->method;
   }
   result.dtype = data_type_name(dtype_);
-  result.rows = matrix_->num_rows();
-  result.cols = matrix_->num_cols();
+  result.rows = rows_;
+  result.cols = cols_;
   result.max_iterations = max_iterations_;
   result.absolute_tolerance = absolute_tolerance_;
   result.relative_tolerance = relative_tolerance_;
   result.last_relative_reference_norm = relative_reference_norm_;
   result.last_effective_tolerance = effective_tolerance_;
-  result.operator_pattern_version = operator_stats.pattern_version;
-  result.operator_numeric_version = operator_stats.numeric_version;
+  result.operator_pattern_version = operator_stamp.topology_revision;
+  result.operator_numeric_version = operator_stamp.numeric_revision;
   result.last_solve_pattern_version = last_solve_pattern_version_;
   result.last_solve_numeric_version = last_solve_numeric_version_;
   result.operator_pattern_changed_since_last_solve =
@@ -1097,7 +1127,7 @@ SparseSolvePlanRuntimeStatistics CpuSparseCGPlan::debug_runtime_statistics()
   result.bounded_masked_execution = false;
   result.persistent_vector_count = 4;
   result.persistent_vector_reserved_bytes =
-      4 * static_cast<std::uint64_t>(matrix_->num_rows()) *
+      4 * static_cast<std::uint64_t>(rows_) *
       data_type_size(dtype_);
   result.external_preconditioner = preconditioner_binding_ != nullptr;
   result.preconditioner_ownership_scope =

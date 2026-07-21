@@ -7,6 +7,7 @@
 #include <memory>
 #include <thread>
 
+#include "taichi/program/linear_operator.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/program.h"
 #include "taichi/program/sparse_matrix.h"
@@ -19,9 +20,8 @@ namespace {
 using namespace std::chrono_literals;
 
 template <typename Operation>
-void expect_blocked_by_numeric_transaction(SparseMatrix &matrix,
-                                           Operation operation) {
-  auto transaction = matrix.acquire_numeric_access_guard();
+void expect_blocked_by_resource_lease(OperatorResourceLease transaction,
+                                      Operation operation) {
   std::promise<void> started_promise;
   auto started = started_promise.get_future();
   std::packaged_task<void()> task(
@@ -34,7 +34,7 @@ void expect_blocked_by_numeric_transaction(SparseMatrix &matrix,
 
   EXPECT_EQ(started.wait_for(2s), std::future_status::ready);
   EXPECT_EQ(completed.wait_for(50ms), std::future_status::timeout);
-  transaction.unlock();
+  transaction = OperatorResourceLease{};
   EXPECT_EQ(completed.wait_for(2s), std::future_status::ready);
   worker.join();
   completed.get();
@@ -65,17 +65,21 @@ TEST(CpuSparseNumericTransaction, CsrPinsValueUpdateAndRawApply) {
       program, 2, 2, *row_offsets, *column_indices);
   CpuSparseCsrMatrix matrix(std::move(pattern), *values);
   const auto numeric_version = matrix.numeric_version();
-  expect_blocked_by_numeric_transaction(
-      matrix, [&] { matrix.update_values(program, *replacement); });
+  auto binding = make_cpu_csr_operator_binding(program, matrix);
+  expect_blocked_by_resource_lease(
+      binding.acquire_resource_lease(),
+      [&] { matrix.update_values(program, *replacement); });
   EXPECT_EQ(matrix.numeric_version(), numeric_version + 1);
 
   std::array<float, 2> input{2.0f, 3.0f};
   std::array<float, 2> output{};
-  expect_blocked_by_numeric_transaction(matrix, [&] {
-    matrix.spmv_cpu_raw(
-        program, reinterpret_cast<std::uintptr_t>(input.data()),
-        reinterpret_cast<std::uintptr_t>(output.data()));
-  });
+  expect_blocked_by_resource_lease(
+      OperatorResourceLease::hold(matrix.acquire_numeric_access_guard()),
+      [&] {
+        matrix.spmv_cpu_raw(
+            program, reinterpret_cast<std::uintptr_t>(input.data()),
+            reinterpret_cast<std::uintptr_t>(output.data()));
+      });
   EXPECT_FLOAT_EQ(output[0], 10.0f);
   EXPECT_FLOAT_EQ(output[1], 21.0f);
 }
@@ -106,17 +110,21 @@ TEST(CpuSparseNumericTransaction, BsrPinsValueUpdateAndRawApply) {
   CpuSparseBsrMatrix matrix(program, 1, 1, 2, *row_offsets,
                             *column_indices, *values);
   const auto numeric_version = matrix.numeric_version();
-  expect_blocked_by_numeric_transaction(
-      matrix, [&] { matrix.update_values(program, *replacement); });
+  auto binding = make_cpu_bsr_operator_binding(program, matrix);
+  expect_blocked_by_resource_lease(
+      binding.acquire_resource_lease(),
+      [&] { matrix.update_values(program, *replacement); });
   EXPECT_EQ(matrix.numeric_version(), numeric_version + 1);
 
   std::array<float, 2> input{2.0f, 3.0f};
   std::array<float, 2> output{};
-  expect_blocked_by_numeric_transaction(matrix, [&] {
-    matrix.spmv_cpu_raw(
-        program, reinterpret_cast<std::uintptr_t>(input.data()),
-        reinterpret_cast<std::uintptr_t>(output.data()));
-  });
+  expect_blocked_by_resource_lease(
+      OperatorResourceLease::hold(matrix.acquire_numeric_access_guard()),
+      [&] {
+        matrix.spmv_cpu_raw(
+            program, reinterpret_cast<std::uintptr_t>(input.data()),
+            reinterpret_cast<std::uintptr_t>(output.data()));
+      });
   EXPECT_FLOAT_EQ(output[0], 7.0f);
   EXPECT_FLOAT_EQ(output[1], 18.0f);
 }

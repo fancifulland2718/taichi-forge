@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 import taichi_forge as ti
 from taichi_forge.lang import impl
@@ -76,6 +77,13 @@ def test_compiled_graph_operator_runs_data_dependent_dispatches():
         {"numeric": numeric.arr},
         {"workspace": workspace.arr},
     )
+    if impl.current_cfg().arch == ti.cpu:
+        with pytest.raises(
+            RuntimeError,
+            match="does not support backend 'cpu' with storage format "
+            "'matrix_free_graph'",
+        ):
+            ti._lib.core._make_cpu_operator_cg_solver(program, operator, 8, 1e-6, 0.0)
 
     first_input = np.linspace(-1.5, 2.0, size, dtype=np.float32)
     input_array.from_numpy(first_input)

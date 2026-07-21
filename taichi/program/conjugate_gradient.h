@@ -20,6 +20,7 @@ class SparseJacobiPreconditionerPlan;
 class SparseBlockJacobiPreconditionerPlan;
 class CompiledKernelPreconditionerPlan;
 class OperatorPlan;
+class OperatorBinding;
 
 enum class SparseSolveStatus : int {
   kNotRun = -1,
@@ -584,7 +585,7 @@ class CpuSparseCGPlan {
                    const std::array<T *, 4> &workspace,
                    const Ndarray &solution_array);
   CpuSparseCGPlan(Program *program,
-                  SparseMatrix &matrix,
+                  OperatorBinding operator_binding,
                   std::unique_ptr<PreconditionerBinding> preconditioner,
                   int max_iterations,
                   double absolute_tolerance,
@@ -607,11 +608,12 @@ class CpuSparseCGPlan {
   void release_workspace();
 
   Program *program_{nullptr};
-  SparseMatrix *matrix_{nullptr};
   std::unique_ptr<PreconditionerBinding> preconditioner_binding_;
   std::unique_ptr<OperatorPlan> operator_plan_;
   std::unique_ptr<OperatorPlan> preconditioner_plan_;
   DataType dtype_{PrimitiveType::f32};
+  int rows_{0};
+  int cols_{0};
   int max_iterations_{0};
   double absolute_tolerance_{0.0};
   double relative_tolerance_{0.0};

@@ -14,7 +14,6 @@ namespace taichi::lang {
 
 class Ndarray;
 class Program;
-class SparseMatrix;
 class CpuSparseCsrMatrix;
 class CpuSparseBsrMatrix;
 class CompiledKernelLinearOperator;
@@ -208,10 +207,5 @@ OperatorBinding make_cpu_bsr_operator_binding(Program *program,
 OperatorBinding make_cpu_program_kernel_operator_binding(
     Program *program,
     CompiledKernelLinearOperator &matrix);
-
-// Internal compatibility adapter used while stored and compiled providers
-// still expose their apply primitive through SparseMatrix::nd_spmv().
-OperatorAction make_cpu_sparse_matrix_operator_action(Program *program,
-                                                      SparseMatrix &matrix);
 
 }  // namespace taichi::lang
