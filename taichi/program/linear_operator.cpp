@@ -185,6 +185,26 @@ void OperatorAction::apply_overwrite(OperatorApplyMode mode,
   state_->overwrite_apply(mode, input, output);
 }
 
+OperatorResourceLease::OperatorResourceLease(std::shared_ptr<void> state)
+    : state_(std::move(state)) {
+}
+
+OperatorBinding::OperatorBinding(
+    OperatorAction action,
+    AcquireResourceLeaseFn acquire_resource_lease)
+    : action_(std::move(action)),
+      acquire_resource_lease_(std::move(acquire_resource_lease)) {
+}
+
+const OperatorAction &OperatorBinding::action() const {
+  return action_;
+}
+
+OperatorResourceLease OperatorBinding::acquire_resource_lease() const {
+  return acquire_resource_lease_ ? acquire_resource_lease_()
+                                 : OperatorResourceLease{};
+}
+
 struct OperatorPlan::Scratch {
   OperatorSpaceDesc space;
   Ndarray *array{nullptr};
@@ -193,7 +213,11 @@ struct OperatorPlan::Scratch {
 };
 
 OperatorPlan::OperatorPlan(Program *program, OperatorAction action)
-    : program_(program), action_(std::move(action)) {
+    : OperatorPlan(program, OperatorBinding(std::move(action))) {
+}
+
+OperatorPlan::OperatorPlan(Program *program, OperatorBinding binding)
+    : program_(program), binding_(std::move(binding)) {
   TI_ERROR_IF(program_ && !arch_is_cpu(program_->compile_config().arch),
               "M1 generalized operator lowering currently requires a CPU "
               "Program; no host fallback was performed.");
@@ -209,19 +233,23 @@ OperatorPlan::~OperatorPlan() {
 }
 
 const OperatorDescriptor &OperatorPlan::descriptor() const {
-  return action_.descriptor();
+  return binding_.action().descriptor();
 }
 
 const OperatorCapabilities &OperatorPlan::capabilities() const {
-  return action_.capabilities();
+  return binding_.action().capabilities();
 }
 
 const std::string &OperatorPlan::provider_name() const {
-  return action_.provider_name();
+  return binding_.action().provider_name();
 }
 
 OperatorResourceStamp OperatorPlan::resource_stamp() const {
-  return action_.resource_stamp();
+  return binding_.action().resource_stamp();
+}
+
+OperatorResourceLease OperatorPlan::acquire_resource_lease() const {
+  return binding_.acquire_resource_lease();
 }
 
 OperatorVectorView OperatorPlan::scratch_for(const OperatorSpaceDesc &space,
@@ -285,10 +313,11 @@ OperatorSubmission OperatorPlan::submit(const OperatorApplyRequest &request) {
   }
 
   statistics_.submissions++;
+  const auto &action = binding_.action();
   if (request.alpha == 1.0 && request.beta == 0.0) {
-    action_.apply_overwrite(request.mode, request.input, request.output);
+    action.apply_overwrite(request.mode, request.input, request.output);
     statistics_.primitive_apply_calls++;
-    return {action_.resource_stamp(), true};
+    return {action.resource_stamp(), true};
   }
 
   statistics_.generalized_lowerings++;
@@ -296,7 +325,7 @@ OperatorSubmission OperatorPlan::submit(const OperatorApplyRequest &request) {
   OperatorVectorView *applied_ptr = nullptr;
   if (request.alpha != 0.0) {
     applied = scratch_for(expected_output, request.mode);
-    action_.apply_overwrite(request.mode, request.input, applied);
+    action.apply_overwrite(request.mode, request.input, applied);
     statistics_.primitive_apply_calls++;
     applied_ptr = &applied;
   }
@@ -309,7 +338,7 @@ OperatorSubmission OperatorPlan::submit(const OperatorApplyRequest &request) {
     axpby<float64>(applied_ptr, addend, request.output, request.alpha,
                    request.beta);
   }
-  return {action_.resource_stamp(), true};
+  return {action.resource_stamp(), true};
 }
 
 OperatorPlanRuntimeStatistics OperatorPlan::debug_runtime_statistics() const {
@@ -369,6 +398,84 @@ OperatorAction make_dense_reference_operator_action(
           apply(float64{});
         }
       });
+}
+
+namespace {
+
+template <typename Provider>
+OperatorBinding make_cpu_typed_operator_binding(
+    Program *program,
+    Provider &provider,
+    const char *expected_provider,
+    const char *expected_storage) {
+  TI_ERROR_IF(!program || !arch_is_cpu(program->compile_config().arch),
+              "CPU operator bindings require an active CPU Program.");
+  const auto initial = provider.debug_runtime_statistics();
+  TI_ERROR_IF(initial.backend_family != "cpu" ||
+                  initial.provider_name != expected_provider ||
+                  initial.storage_format != expected_storage,
+              "CPU operator binding expected provider '{}' with storage "
+              "'{}', got provider '{}' on backend '{}' with storage '{}'; "
+              "no fallback was performed.",
+              expected_provider, expected_storage, initial.provider_name,
+              initial.backend_family, initial.storage_format);
+  OperatorDescriptor descriptor;
+  descriptor.domain = {
+      provider.get_data_type(),
+      static_cast<std::size_t>(provider.num_cols())};
+  descriptor.range = {
+      provider.get_data_type(),
+      static_cast<std::size_t>(provider.num_rows())};
+  auto action = OperatorAction(
+      descriptor, OperatorCapabilities{}, expected_provider,
+      [program, &provider] {
+        const auto statistics = provider.debug_runtime_statistics();
+        return OperatorResourceStamp{
+            reinterpret_cast<std::uintptr_t>(program),
+            1,
+            statistics.pattern_version,
+            statistics.numeric_version,
+            provider.matrix_id()};
+      },
+      [program, &provider](OperatorApplyMode mode,
+                           const OperatorVectorView &input,
+                           const OperatorVectorView &output) {
+        TI_ERROR_IF(mode != OperatorApplyMode::forward || !input.ndarray ||
+                        !output.ndarray,
+                    "CPU operator binding requires forward ndarray views; "
+                    "no fallback was performed.");
+        provider.nd_spmv(program, *input.ndarray, *output.ndarray);
+      });
+  return OperatorBinding(
+      std::move(action), [&provider] {
+        return OperatorResourceLease::hold(
+            provider.acquire_numeric_access_guard());
+      });
+}
+
+}  // namespace
+
+OperatorBinding make_cpu_csr_operator_binding(Program *program,
+                                              CpuSparseCsrMatrix &matrix) {
+  return make_cpu_typed_operator_binding(
+      program, matrix, "forge_cpu_native", "csr");
+}
+
+OperatorBinding make_cpu_bsr_operator_binding(Program *program,
+                                              CpuSparseBsrMatrix &matrix) {
+  return make_cpu_typed_operator_binding(
+      program, matrix, "forge_cpu_native", "bsr");
+}
+
+OperatorBinding make_cpu_program_kernel_operator_binding(
+    Program *program,
+    CompiledKernelLinearOperator &matrix) {
+  TI_ERROR_IF(matrix.owning_program() != program,
+              "CPU program-kernel operator binding requires its owning "
+              "Program; no fallback was performed.");
+  return make_cpu_typed_operator_binding(
+      program, matrix, "forge_compiled_taichi_kernel",
+      "matrix_free_kernel");
 }
 
 OperatorAction make_cpu_sparse_matrix_operator_action(Program *program,

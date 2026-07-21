@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "taichi/ir/type.h"
@@ -14,6 +15,9 @@ namespace taichi::lang {
 class Ndarray;
 class Program;
 class SparseMatrix;
+class CpuSparseCsrMatrix;
+class CpuSparseBsrMatrix;
+class CompiledKernelLinearOperator;
 
 enum class OperatorInnerProductKind : std::uint8_t {
   euclidean,
@@ -89,6 +93,29 @@ struct OperatorSubmission {
   bool completed_synchronously{true};
 };
 
+// Type-erased ownership for one provider transaction. Bindings use this to
+// keep provider-specific locks and snapshots alive without exposing their
+// concrete types to plans or solvers.
+class OperatorResourceLease {
+ public:
+  OperatorResourceLease() = default;
+
+  template <typename Lease>
+  static OperatorResourceLease hold(Lease lease) {
+    return OperatorResourceLease(
+        std::make_shared<Lease>(std::move(lease)));
+  }
+
+  explicit operator bool() const {
+    return state_ != nullptr;
+  }
+
+ private:
+  explicit OperatorResourceLease(std::shared_ptr<void> state);
+
+  std::shared_ptr<void> state_;
+};
+
 class OperatorAction {
  public:
   using ResourceStampFn = std::function<OperatorResourceStamp()>;
@@ -115,6 +142,23 @@ class OperatorAction {
   std::shared_ptr<const State> state_;
 };
 
+class OperatorBinding {
+ public:
+  using AcquireResourceLeaseFn =
+      std::function<OperatorResourceLease()>;
+
+  explicit OperatorBinding(
+      OperatorAction action,
+      AcquireResourceLeaseFn acquire_resource_lease = {});
+
+  const OperatorAction &action() const;
+  OperatorResourceLease acquire_resource_lease() const;
+
+ private:
+  OperatorAction action_;
+  AcquireResourceLeaseFn acquire_resource_lease_;
+};
+
 struct OperatorPlanRuntimeStatistics {
   std::uint64_t submissions{0};
   std::uint64_t primitive_apply_calls{0};
@@ -127,6 +171,7 @@ struct OperatorPlanRuntimeStatistics {
 class OperatorPlan {
  public:
   OperatorPlan(Program *program, OperatorAction action);
+  OperatorPlan(Program *program, OperatorBinding binding);
   OperatorPlan(const OperatorPlan &) = delete;
   OperatorPlan &operator=(const OperatorPlan &) = delete;
   ~OperatorPlan();
@@ -135,6 +180,7 @@ class OperatorPlan {
   const OperatorCapabilities &capabilities() const;
   const std::string &provider_name() const;
   OperatorResourceStamp resource_stamp() const;
+  OperatorResourceLease acquire_resource_lease() const;
   OperatorSubmission submit(const OperatorApplyRequest &request);
   OperatorPlanRuntimeStatistics debug_runtime_statistics() const;
 
@@ -145,7 +191,7 @@ class OperatorPlan {
   void release_scratch(Scratch &scratch);
 
   Program *program_{nullptr};
-  OperatorAction action_;
+  OperatorBinding binding_;
   std::unique_ptr<Scratch> forward_scratch_;
   std::unique_ptr<Scratch> adjoint_scratch_;
   OperatorPlanRuntimeStatistics statistics_;
@@ -154,6 +200,14 @@ class OperatorPlan {
 OperatorAction make_dense_reference_operator_action(
     OperatorDescriptor descriptor,
     std::vector<double> row_major_values);
+
+OperatorBinding make_cpu_csr_operator_binding(Program *program,
+                                              CpuSparseCsrMatrix &matrix);
+OperatorBinding make_cpu_bsr_operator_binding(Program *program,
+                                              CpuSparseBsrMatrix &matrix);
+OperatorBinding make_cpu_program_kernel_operator_binding(
+    Program *program,
+    CompiledKernelLinearOperator &matrix);
 
 // Internal compatibility adapter used while stored and compiled providers
 // still expose their apply primitive through SparseMatrix::nd_spmv().

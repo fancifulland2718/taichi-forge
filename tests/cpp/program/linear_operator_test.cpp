@@ -12,6 +12,50 @@ OperatorSpaceDesc scalar_space(DataType type, std::size_t extent) {
   return {type, extent};
 }
 
+class LeaseProbe {
+ public:
+  explicit LeaseProbe(int *release_count) : release_count_(release_count) {
+  }
+  LeaseProbe(const LeaseProbe &) = delete;
+  LeaseProbe &operator=(const LeaseProbe &) = delete;
+  LeaseProbe(LeaseProbe &&other) noexcept
+      : release_count_(other.release_count_) {
+    other.release_count_ = nullptr;
+  }
+  ~LeaseProbe() {
+    if (release_count_) {
+      (*release_count_)++;
+    }
+  }
+
+ private:
+  int *release_count_{nullptr};
+};
+
+TEST(LinearOperator, BindingTypeErasesProviderResourceLease) {
+  OperatorDescriptor descriptor{scalar_space(PrimitiveType::f32, 2),
+                                scalar_space(PrimitiveType::f32, 2)};
+  int acquire_count = 0;
+  int release_count = 0;
+  OperatorBinding binding(
+      make_dense_reference_operator_action(
+          descriptor, {1.0, 0.0, 0.0, 1.0}),
+      [&] {
+        acquire_count++;
+        return OperatorResourceLease::hold(LeaseProbe(&release_count));
+      });
+  OperatorPlan plan(nullptr, std::move(binding));
+
+  EXPECT_EQ(plan.provider_name(), "dense_reference");
+  {
+    auto lease = plan.acquire_resource_lease();
+    EXPECT_TRUE(static_cast<bool>(lease));
+    EXPECT_EQ(acquire_count, 1);
+    EXPECT_EQ(release_count, 0);
+  }
+  EXPECT_EQ(release_count, 1);
+}
+
 TEST(LinearOperator, DenseReferenceSupportsRectangularForwardAndAdjoint) {
   OperatorDescriptor descriptor{scalar_space(PrimitiveType::f64, 3),
                                 scalar_space(PrimitiveType::f64, 2)};
