@@ -15,6 +15,11 @@ from taichi_forge.types._argument_descriptor import (
 )
 from taichi_forge.types.texture_type import FORMAT2TY_CH, TY_CH2FORMAT
 from taichi_forge.graph._native import compile_native_graph_node
+from taichi_forge.graph._submission import (
+    SubmissionPacer,
+    _new_submission_lane,
+    _reserve_paced_submission,
+)
 
 ArgKind = _ti_core.ArgKind
 
@@ -1044,20 +1049,27 @@ class SubmissionTicket:
     the ticket without waiting.
     """
 
-    __slots__ = ("_completion", "_runtime")
+    __slots__ = ("_admission", "_completion", "_runtime")
 
-    def __init__(self, completion, runtime):
+    def __init__(self, completion, runtime, admission=None):
+        self._admission = admission
         self._completion = completion
         self._runtime = runtime
 
     def done(self):
-        ready = self._completion.done()
+        if self._admission is None:
+            ready = self._completion.done()
+        else:
+            ready = self._admission._completion_done(self._completion)
         if ready:
             self._runtime.release_runtime_submission_owner(self._completion)
         return ready
 
     def wait(self):
-        self._completion.wait()
+        if self._admission is None:
+            self._completion.wait()
+        else:
+            self._admission._completion_wait(self._completion)
         self._runtime.release_runtime_submission_owner(self._completion)
 
     @property
@@ -1087,6 +1099,7 @@ class Graph:
             node = _CompiledCGraphNode(compiled_graph, 0, ())
             self._spec = _GraphSpec([node], aot_compiled_graph=compiled_graph)
         self._contains_native_nodes_value = self._spec.native_count > 0
+        self._submission_lane = _new_submission_lane("graph")
         self._execution_definition = self._spec.execution_definition
         self._execution_arch = _ti_core.arch_name(impl.current_cfg().arch)
         self._instances = {}
@@ -1125,65 +1138,104 @@ class Graph:
                     "forward AD and would omit dual propagation. Run the Graph "
                     "outside automatic AD."
                 )
-            runtime.prog._record_runtime_graph_submission()
             # Runtime AD state is process-global rather than thread-local. The
-            # signed state closes the window where this native call releases
-            # the GIL and another Python thread enters Tape/FwdMode.
-            # Updates and AD-entry checks are atomic with respect to each other
-            # on supported CPython builds because they execute while holding
-            # the GIL. This does not serialize independent Graph submissions.
+            # signed state closes the window where a native call releases the
+            # GIL and another Python thread enters Tape/FwdMode. Publish the
+            # increment before the first native call: otherwise two independent
+            # Graphs can both snapshot zero, overwrite the count with one, and
+            # drive it negative when their paired finally blocks run.
             runtime._active_graph_submissions = submission_state + 1
             try:
+                runtime.prog._record_runtime_graph_submission()
                 self._run_impl(args)
             finally:
                 runtime._active_graph_submissions -= 1
 
-    def submit(self, args):
+    def submit(
+        self,
+        args,
+        *,
+        pacer=None,
+        lane=None,
+        on_saturation="wait",
+    ):
         """Submit one Graph invocation and return a ``SubmissionTicket``.
 
         Submission is asynchronous on CUDA/Vulkan when backend work remains;
         CPU tickets are already complete. The runtime argument, lifecycle,
         concurrency, and automatic-differentiation rules are identical to
-        ``run()``.
+        ``run()``. A shared ``SubmissionPacer`` can bound backend backlog and
+        fairly arbitrate complete host submissions before they enqueue work.
         """
+        runtime = impl.pytaichi
         with self._lifecycle_lock:
             self._check_runtime_valid()
-            runtime = impl.pytaichi
             self._spec.validate_runtime_args(args, "Graph.submit")
-            submission_state = runtime._active_graph_submissions
-            if submission_state < 0:
-                raise TaichiRuntimeError(
-                    "Graph submission cannot start while another Python "
-                    "thread is entering ti.ad.Tape() or ti.ad.FwdMode()."
-                )
-            if runtime.target_tape is not None:
-                raise TaichiRuntimeError(
-                    "Graph submission is primal-only and cannot execute "
-                    "inside an active ti.ad.Tape()."
-                )
-            if runtime.fwd_mode_manager is not None:
-                raise TaichiRuntimeError(
-                    "Graph submission is primal-only and cannot execute "
-                    "inside an active ti.ad.FwdMode()."
-                )
+        admission = _reserve_paced_submission(
+            pacer,
+            runtime,
+            self._submission_lane,
+            lane=lane,
+            on_saturation=on_saturation,
+        )
+        try:
+            with self._lifecycle_lock:
+                self._check_runtime_valid()
+                if runtime is not impl.pytaichi:
+                    raise TaichiRuntimeError(
+                        "This graph was compiled before ti.reset() or a "
+                        "runtime reinitialization. Please rebuild the graph "
+                        "after ti.init()."
+                    )
+                self._spec.validate_runtime_args(args, "Graph.submit")
+                submission_state = runtime._active_graph_submissions
+                if submission_state < 0:
+                    raise TaichiRuntimeError(
+                        "Graph submission cannot start while another Python "
+                        "thread is entering ti.ad.Tape() or ti.ad.FwdMode()."
+                    )
+                if runtime.target_tape is not None:
+                    raise TaichiRuntimeError(
+                        "Graph submission is primal-only and cannot execute "
+                        "inside an active ti.ad.Tape()."
+                    )
+                if runtime.fwd_mode_manager is not None:
+                    raise TaichiRuntimeError(
+                        "Graph submission is primal-only and cannot execute "
+                        "inside an active ti.ad.FwdMode()."
+                    )
 
-            transaction = runtime.prog._begin_runtime_submission_transaction()
-            runtime.prog._record_runtime_graph_submission()
-            runtime._active_graph_submissions = submission_state + 1
-            try:
-                self._run_impl(args)
-                # CGraph/kernel paths publish work themselves. Native plans use
-                # Program methods outside that launch path, so publish once for
-                # the whole native portion without adding work to Graph.run().
-                if self._contains_native_nodes_value:
-                    transaction._mark_submission()
-                completion = transaction._finish()
-            finally:
-                runtime._active_graph_submissions -= 1
+                # Publish the AD exclusion count before transaction creation:
+                # the pybind call may release the GIL while waiting for another
+                # runtime submission reader/writer boundary.
+                runtime._active_graph_submissions = submission_state + 1
+                try:
+                    transaction = (
+                        runtime.prog._begin_runtime_submission_transaction()
+                    )
+                    runtime.prog._record_runtime_graph_submission()
+                    self._run_impl(args)
+                    # CGraph/kernel paths publish work themselves. Native plans
+                    # use Program methods outside that launch path, so publish
+                    # once for the whole native portion without changing run().
+                    if self._contains_native_nodes_value:
+                        transaction._mark_submission()
+                    completion = transaction._finish()
+                finally:
+                    runtime._active_graph_submissions -= 1
 
-            if self._contains_native_nodes_value and completion.has_backend_work:
-                runtime.retain_runtime_submission_owner(completion, self)
-            return SubmissionTicket(completion, runtime)
+                if (
+                    self._contains_native_nodes_value
+                    and completion.has_backend_work
+                ):
+                    runtime.retain_runtime_submission_owner(completion, self)
+        except BaseException:
+            if admission is not None:
+                admission._cancel()
+            raise
+        if admission is not None:
+            admission._attach(completion)
+        return SubmissionTicket(completion, runtime, admission)
 
     def _instance_for_current_runtime(self):
         key = self._spec.instance_key()
@@ -1521,6 +1573,7 @@ __all__ = [
     "GraphBuilder",
     "Graph",
     "SubmissionTicket",
+    "SubmissionPacer",
     "GraphExecutionCounters",
     "GraphExecutionSegmentReport",
     "GraphExecutionReport",

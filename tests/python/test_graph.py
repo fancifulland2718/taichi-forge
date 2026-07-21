@@ -661,6 +661,23 @@ def test_graph_submit_returns_one_public_completion_ticket():
     assert ticket.wait() is None
     assert result.to_numpy()[0] == 42
 
+    pacer = ti.graph.SubmissionPacer(
+        2, max_in_flight_per_lane=1, max_queued=4
+    )
+    paced = graph.submit(
+        {"dst": result}, pacer=pacer, lane="simulation"
+    )
+    assert paced.wait() is None
+    pacing = pacer.statistics()
+    assert pacing["admission_calls"] == 1
+    assert pacing["grants"] == 1
+    assert pacing["completed"] == 1
+    assert pacing["in_flight"] == 0
+    assert pacing["lanes"]["simulation"]["completed"] == 1
+
+    with pytest.raises(TaichiRuntimeError, match="require a SubmissionPacer"):
+        graph.submit({"dst": result}, lane="unpaced")
+
 
 @test_utils.test(arch=ti.cpu)
 def test_runtime_submission_owner_registry_retains_until_ready():
@@ -778,6 +795,45 @@ def test_same_graph_two_thread_invocations_do_not_interleave():
     assert not errors
     assert max_active == 1
     assert counter[None] == 16
+
+
+@test_utils.test(arch=ti.cpu)
+def test_independent_graph_submit_balances_runtime_ad_exclusion_count():
+    counter = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def increment():
+        counter[None] += 1
+
+    first_builder = ti.graph.GraphBuilder()
+    first_builder.dispatch(increment)
+    first = first_builder.compile()
+    second_builder = ti.graph.GraphBuilder()
+    second_builder.dispatch(increment)
+    second = second_builder.compile()
+    start = threading.Barrier(2)
+    errors = []
+
+    def worker(graph):
+        try:
+            start.wait()
+            for _ in range(32):
+                graph.submit({}).wait()
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=worker, args=(first,)),
+        threading.Thread(target=worker, args=(second,)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not errors
+    assert ti.lang.impl.get_runtime()._active_graph_submissions == 0
+    assert counter[None] == 64
 
 
 @test_utils.test(arch=ti.cpu)
