@@ -331,6 +331,31 @@ submission.wait()
 result = submission.result()
 ```
 
+多个异步 solve producer 共享 GPU 时，可为 workspace clone 指定独立 lane，并用同一个
+`SubmissionPacer` 控制整体 backlog 与公平准入：
+
+~~~python
+secondary = plan.clone_workspace()
+pacer = ti.graph.SubmissionPacer(
+    2,
+    max_in_flight_per_lane=1,
+    max_queued=8,
+)
+primary_ticket = plan.submit(
+    rhs_a, out=x_a, pacer=pacer, lane='primary_physics'
+)
+secondary_ticket = secondary.submit(
+    rhs_b, out=x_b, pacer=pacer, lane='secondary_physics'
+)
+primary_result = primary_ticket.result()
+secondary_result = secondary_ticket.result()
+~~~
+
+完整 solve 的 host launch 序列以一次准入 turn 提交；提交结束后，两次 solve 可在
+`max_in_flight` 边界内保持 backend asynchronous。`max_in_flight_per_lane` 防止高频 producer
+独占全部 slot，lane 间 round-robin 则保证已有等待者获得有限的准入延迟。该控制只覆盖共享
+同一 pacer 的调用，不能代替 engine 自身的 frame deadline、任务依赖或取消策略。
+
 `SolveSubmission.done()` 只观察 backend completion，不释放 workspace slot。`wait()` 在
 需要时等待、生成完整逐系统 terminal snapshot，并释放 slot；`result()` 在需要时执行
 相同操作并返回 immutable `BatchedSolveResult`。submission 会保留精确的 A/M

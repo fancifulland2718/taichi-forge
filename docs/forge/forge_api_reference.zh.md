@@ -699,7 +699,7 @@ graph.run({"slot": 3})
 | --- | --- |
 | `GraphBuilder.compile()` | 后续修改 builder 或原 `Sequential` 不改变已编译 graph。 |
 | `Graph.run(args)` | `args` 必须是字典，key 与声明参数完全一致；missing/extra key 会抛 `TaichiRuntimeError`。 |
-| `Graph.submit(args)` | 与 `run()` 使用相同的精确参数、生命周期、并发和 AD 合同，并返回 `SubmissionTicket`。 |
+| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait')` | 与 `run()` 使用相同的精确参数、生命周期、并发和 AD 合同，并返回 `SubmissionTicket`；可选择加入共享准入节奏。 |
 | `Graph._prewarm()` | 预热当前 runtime 的 backend plan；这是内部/高级入口，不改变 graph 参数合同。 |
 
 同一个 graph 的并发 host 调用以完整 invocation 为单位排队；不同 graph 不共享该锁。
@@ -742,6 +742,45 @@ CPU 票据返回时已经完成。CUDA/Vulkan 票据可能仍在执行，但极�
 owner 仍会保留到后端完成；`ti.sync()` 和 `ti.reset()` 也会安全退役待处理票据。票据只是
 完成句柄，不是 `asyncio` future、callback scheduler、跨 Graph dependency 对象或跨
 Program 同步原语。
+
+### `SubmissionPacer`
+
+位置：`taichi_forge.graph`。该对象为共享它的 `Graph.submit()` 与 CUDA/Vulkan
+`BatchedSolvePlan.submit()` 提供有界、协作式的异步准入：
+
+~~~python
+pacer = ti.graph.SubmissionPacer(
+    2,
+    max_in_flight_per_lane=1,
+    max_queued=8,
+)
+physics = solve_plan.submit(
+    rhs, out=x, pacer=pacer, lane='physics'
+)
+render = render_graph.submit(
+    render_args, pacer=pacer, lane='render'
+)
+physics.wait()
+render.wait()
+~~~
+
+| API / 参数 | 合同 |
+| --- | --- |
+| `SubmissionPacer(max_in_flight, *, max_in_flight_per_lane=None, max_queued=64)` | `max_in_flight` 限制已进入 backend 的未完成 invocation；可选单 lane 上限避免一个 producer 占满全部容量；`max_queued` 限制等待准入的调用数。 |
+| `lane` | 非空字符串。不同对象使用相同名称时属于同一调度 lane；未指定时每个 Graph 使用独立默认 lane，而同一 batch plan 的 workspace clone 共享默认 lane。 |
+| `on_saturation='wait'` | 等待容量，并在 lane 间按 work-conserving round-robin、lane 内按 FIFO 获得完整 host launch turn。 |
+| `on_saturation='raise'` | 若不能立即获得 launch turn，则在提交任何 backend work 前抛出 `TaichiRuntimeError`。 |
+| `pacer.statistics()` | 返回当前/峰值 in-flight 与 queued 数、grant/rejection/completion/failure 计数、准入等待时间和逐 lane 统计。统计调用会非阻塞回收已经完成的票据。 |
+
+一个 invocation 的 host launch turn 不与另一个 paced invocation 交错；launch 完成后，最多
+`max_in_flight` 个 invocation 仍可在 backend 异步执行。已完成项会先被非阻塞回收；当
+单 lane 上限阻塞当前调用时，进度等待优先观察同 lane completion，避免慢 lane 造成不必要的
+跨 lane 完成队头阻塞。
+
+该合同是显式协作边界：未使用同一 pacer 的提交不受其控制；它不会重新排序已经进入
+CUDA stream 或 Vulkan queue 的命令，也不是 priority scheduler、dependency graph 或
+`asyncio` executor。一个 pacer 只属于首次绑定的 runtime generation；`ti.reset()` 后必须重建。
+若 backend completion 报错，pacer 会 fail closed，拒绝后续准入并保留第一次完成错误。
 
 ### 致命后端错误与 runtime reset
 
@@ -905,7 +944,7 @@ operator API 另见[实验性 LinearOperator 与 SolvePlan](linear_operator.zh.m
 | `plan.execution_capabilities()` | 返回 backend/provider 执行策略矩阵与结构化 unsupported reason。 | 当前不支持 `device_convergent`；显式请求不会 fallback，也不会自动改变 policy。 |
 | `ti.linalg.experimental.BatchedSolvePlan(operator, batch_size, independent_systems=True, ...)` | 在连续扁平分区上构造同构、相互独立的 f32 CG/PCG plan。 | CPU/CUDA/Vulkan；逐系统 tolerance、status 与 iteration count；已验证 fixed stored 或 compiled-kernel A/M。 |
 | `batch_plan.solve(rhs_flat, initial_guess=None, out=None)` | 返回扁平 solution 与逐系统 immutable `BatchedSolveResult` tuple。 | 只表示 independent direct-sum system；不是 multi-RHS 或 block Krylov。 |
-| `batch_plan.submit(rhs_flat, initial_guess=None, out=None)` | 提交一次 solve 并返回 `SolveSubmission`。 | CUDA/Vulkan 的 `fixed_budget_masked`；一个 plan-owned slot；精确 generation 与 array 保留到 completion。 |
+| `batch_plan.submit(rhs_flat, initial_guess=None, out=None, pacer=None, lane=None, on_saturation='wait')` | 提交一次 solve 并返回 `SolveSubmission`。 | CUDA/Vulkan 的 `fixed_budget_masked`；一个 plan-owned slot；可加入共享 `SubmissionPacer`；精确 generation 与 array 保留到 completion。 |
 | `SolveSubmission.done()` / `.wait()` / `.result()` | 观察 completion、生成 terminal state 并返回 `BatchedSolveResult`。 | `done()` 不释放 slot；`wait()`/`result()` 抛出 backend error 并释放 slot。 |
 | `batch_plan.clone_workspace()` | 创建具有独立 Krylov state 的等价 plan。 | 并发 submission 必须使用；每个 clone 拥有另一套完整 workspace。 |
 | `operator.statistics()` / `plan.statistics()` | 返回 provider/plan execution 与 workspace 诊断。 | diagnostic snapshot，不属于数值结果。 |

@@ -112,6 +112,25 @@ workspace 由 Python runtime owner registry 保留到同一 completion ready，�
 因此遗弃票据不会使后端 tracking 无限制增长。这是刻意保持较小的完成 API：callback、
 `asyncio` 适配、跨 Program 排序与显式 Graph dependency scheduler 均不在当前范围内。
 
+## 有界协作式提交节奏
+
+多个异步 producer 共享同一后端时，应把完成票据与显式准入节奏组合使用。创建一个
+`ti.graph.SubmissionPacer` 并传给相关 `Graph.submit()` 或 CUDA/Vulkan batch solve
+submission，可同时限定 backend 在途 invocation、单 lane 在途量以及等待准入的调用数。
+准入在 backend enqueue 之前发生，因此一个完整 invocation 的 host launch 序列不会和另一
+个 paced invocation 交错；已进入 backend 的 invocation 仍保持异步执行。
+
+调度在 lane 间采用 work-conserving round-robin，在 lane 内采用 FIFO。建议为 physics、
+render、streaming 等独立节奏指定稳定 lane，并在需要防止单一 producer 占满容量时设置
+`max_in_flight_per_lane`。`on_saturation='wait'` 提供 backpressure；实时循环若不能阻塞，
+可使用 `on_saturation='raise'`，在没有提交 backend work 的前提下显式处理本帧降级或跳过。
+
+该机制只协调共享同一 pacer 的调用，不接管普通 kernel、`Graph.run()` 或未 paced 的
+submission。`statistics()` 提供当前/峰值 in-flight 与 queued、逐 lane grant/completion、
+rejection、backend failure 和准入等待时间，可用于验证容量和节奏配置。pacer 不提供优先级、
+deadline、callback 或跨 Program dependency；真正需要这些语义的应用 scheduler 应在这一
+准入边界之上实现。
+
 ## CUDA capture 与 replay
 
 每个 CUDA graph executable 持有自己的 capture stream、稳定 argument buffer、resource

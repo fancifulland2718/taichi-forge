@@ -793,7 +793,7 @@ the same execution path and returns a completion ticket.
 | --- | --- |
 | `GraphBuilder.compile()` | Later changes to the builder or original `Sequential` do not modify the compiled graph. |
 | `Graph.run(args)` | `args` must be a dictionary with exactly the declared keys; missing or extra keys raise `TaichiRuntimeError`. |
-| `Graph.submit(args)` | Uses the same exact argument, lifecycle, concurrency, and AD contract as `run()`, and returns a `SubmissionTicket`. |
+| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait')` | Uses the same exact argument, lifecycle, concurrency, and AD contract as `run()`, returns a `SubmissionTicket`, and can opt into shared admission pacing. |
 | `Graph._prewarm()` | Warm the current runtime's backend plan; this internal/advanced entry point does not change the argument contract. |
 
 Concurrent host calls on one graph queue at the complete-invocation boundary;
@@ -846,6 +846,51 @@ even if application code drops the ticket. `ti.sync()` and `ti.reset()` also
 retire pending tickets safely. A ticket is a completion handle, not an
 `asyncio` future, callback scheduler, cross-Graph dependency object, or
 cross-Program synchronization primitive.
+
+### `SubmissionPacer`
+
+Location: `taichi_forge.graph`. A pacer provides bounded, cooperative
+asynchronous admission for `Graph.submit()` and CUDA/Vulkan
+`BatchedSolvePlan.submit()` calls that share it:
+
+~~~python
+pacer = ti.graph.SubmissionPacer(
+    2,
+    max_in_flight_per_lane=1,
+    max_queued=8,
+)
+physics = solve_plan.submit(
+    rhs, out=x, pacer=pacer, lane='physics'
+)
+render = render_graph.submit(
+    render_args, pacer=pacer, lane='render'
+)
+physics.wait()
+render.wait()
+~~~
+
+| API / parameter | Contract |
+| --- | --- |
+| `SubmissionPacer(max_in_flight, *, max_in_flight_per_lane=None, max_queued=64)` | `max_in_flight` bounds incomplete invocations admitted to the backend. The optional per-lane limit prevents one producer from occupying every slot. `max_queued` bounds calls waiting for admission. |
+| `lane` | A non-empty string. Equal names on different objects join one scheduling lane. Without a name, each Graph has a distinct default lane, while workspace clones from one batch plan share its default lane. |
+| `on_saturation='wait'` | Wait for capacity. Complete host launch turns are granted by work-conserving round robin across lanes and FIFO within a lane. |
+| `on_saturation='raise'` | If a launch turn is not immediately available, raise `TaichiRuntimeError` before submitting backend work. |
+| `pacer.statistics()` | Return current and peak in-flight/queued counts, grant/rejection/completion/failure counters, admission wait time, and per-lane telemetry. The snapshot first polls ready tickets without blocking. |
+
+The host launch turn for one invocation does not interleave with another paced
+invocation. After launch, up to `max_in_flight` invocations may continue
+asynchronously on the backend. Ready work is polled first. When a per-lane cap
+blocks the current call, progress waiting prefers a completion from that lane,
+avoiding unnecessary cross-lane completion head-of-line blocking behind a slow
+lane.
+
+This is an explicit cooperative boundary. Submissions that do not use the same
+pacer remain outside its control, and it cannot reorder commands already in a
+CUDA stream or Vulkan queue. It is not a priority scheduler, dependency graph,
+or `asyncio` executor. A pacer belongs to the first runtime generation it binds;
+create a new one after `ti.reset()`. A backend completion error makes the pacer
+fail closed: later admission is rejected while the first completion failure is
+preserved.
 
 ### Fatal backend errors and runtime reset
 
@@ -1024,7 +1069,7 @@ The runtime-bound operator API is documented separately in
 | `plan.execution_capabilities()` | Return the backend/provider policy matrix and structured unsupported reason. | `device_convergent` is currently unsupported; explicit requests fail without fallback or automatic policy changes. |
 | `ti.linalg.experimental.BatchedSolvePlan(operator, batch_size, independent_systems=True, ...)` | Build homogeneous independent f32 CG/PCG over contiguous flat partitions. | CPU/CUDA/Vulkan; per-system tolerance, status, and iteration count; fixed stored or compiled-kernel A/M qualified. |
 | `batch_plan.solve(rhs_flat, initial_guess=None, out=None)` | Return a flat solution and immutable per-system `BatchedSolveResult` tuples. | Independent direct-sum systems only; not multi-RHS or block Krylov. |
-| `batch_plan.submit(rhs_flat, initial_guess=None, out=None)` | Submit a solve and return `SolveSubmission`. | CUDA/Vulkan with `fixed_budget_masked`; one plan-owned slot; exact generations and arrays are retained through completion. |
+| `batch_plan.submit(rhs_flat, initial_guess=None, out=None, pacer=None, lane=None, on_saturation='wait')` | Submit a solve and return `SolveSubmission`. | CUDA/Vulkan with `fixed_budget_masked`; one plan-owned slot; optional shared `SubmissionPacer`; exact generations and arrays are retained through completion. |
 | `SolveSubmission.done()` / `.wait()` / `.result()` | Observe completion, materialize terminal state, and return `BatchedSolveResult`. | `done()` does not release the slot; `wait()`/`result()` surface backend faults and release it. |
 | `batch_plan.clone_workspace()` | Create an equivalent plan with independent Krylov state. | Required for concurrent submissions; each clone owns another full workspace. |
 | `operator.statistics()` / `plan.statistics()` | Return provider/plan execution and workspace diagnostics. | Diagnostic snapshot; not part of the numerical result. |

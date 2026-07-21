@@ -371,6 +371,35 @@ submission.wait()
 result = submission.result()
 ```
 
+When multiple asynchronous solve producers share a GPU, assign independent
+lanes to workspace clones and use one `SubmissionPacer` to bound aggregate
+backlog and provide fair admission:
+
+~~~python
+secondary = plan.clone_workspace()
+pacer = ti.graph.SubmissionPacer(
+    2,
+    max_in_flight_per_lane=1,
+    max_queued=8,
+)
+primary_ticket = plan.submit(
+    rhs_a, out=x_a, pacer=pacer, lane='primary_physics'
+)
+secondary_ticket = secondary.submit(
+    rhs_b, out=x_b, pacer=pacer, lane='secondary_physics'
+)
+primary_result = primary_ticket.result()
+secondary_result = secondary_ticket.result()
+~~~
+
+The complete host launch sequence for one solve is submitted in one admission
+turn. After launch, both solves may remain asynchronous within the
+`max_in_flight` bound. `max_in_flight_per_lane` prevents a high-rate producer
+from occupying every slot, while cross-lane round robin gives an existing
+waiter bounded admission delay. Only calls sharing the same pacer are covered;
+engine frame deadlines, task dependencies, and cancellation remain application
+policies.
+
 `SolveSubmission.done()` observes backend completion without releasing the
 workspace slot. `wait()` waits when necessary, materializes the complete
 per-system terminal snapshot, and releases the slot. `result()` performs the

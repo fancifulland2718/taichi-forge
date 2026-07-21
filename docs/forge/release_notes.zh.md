@@ -82,6 +82,11 @@
   provider 已完成资格验证。CUDA/Vulkan fixed-budget plan 还提供 `submit()`、
   `SolveSubmission` 与显式 workspace clone，用于有界并发执行。执行策略 capability 与
   unsupported reason 可查询；当前未启用 device-convergent 条件执行。
+- 增加 `ti.graph.SubmissionPacer`，为共享 CUDA/Vulkan backend 的
+  `Graph.submit()` 与 fixed-budget batch solve 提供显式协作式节奏控制。全局/单 lane
+  in-flight 上限、有限等待队列、跨 lane round-robin 与 lane 内 FIFO 可组合配置；调用方可
+  选择阻塞 backpressure 或提交前立即拒绝。公开统计覆盖队列峰值、准入等待、逐 lane 完成
+  与后端失败；runtime reset 与第一次 completion failure 均采用明确的失效语义。
 - 强化 direct solver symbolic reuse：只有完整 compressed index pattern 相同，
   `factorize()` 才能复用已分析 pattern；factorization 后更新 values 会使分解
   stale，必须刷新后才能 solve。stable-fluid example 固定 pressure gauge，implicit

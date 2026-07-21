@@ -97,6 +97,14 @@ retroactively attributed to the 0.5.0 artifact:
   `SolveSubmission`, and explicit workspace cloning for bounded concurrent
   execution. Execution-policy capabilities and unsupported reasons are
   queryable; conditional device-convergent execution is not enabled.
+- Added `ti.graph.SubmissionPacer` for explicit cooperative cadence control
+  across `Graph.submit()` and fixed-budget batch solves sharing CUDA or Vulkan.
+  Global and per-lane in-flight bounds, a finite admission queue, cross-lane
+  round robin, and per-lane FIFO can be configured together. Callers may choose
+  blocking backpressure or rejection before backend submission. Public
+  telemetry covers queue peaks, admission waits, per-lane completion, and
+  backend failure; runtime reset and the first completion failure have explicit
+  invalidation semantics.
 - Hardened direct-solver symbolic reuse. `factorize()` may reuse an analyzed
   pattern only when the complete compressed index pattern is identical, and a
   value update after factorization makes the factorization stale until it is

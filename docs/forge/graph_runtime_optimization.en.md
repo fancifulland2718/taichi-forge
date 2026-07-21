@@ -141,6 +141,31 @@ backend tracking grow without limit. This is a deliberately small completion
 API: callbacks, `asyncio` adaptation, cross-Program ordering, and an explicit
 Graph dependency scheduler remain out of scope.
 
+## Bounded cooperative submission pacing
+
+Applications with multiple asynchronous producers should combine completion
+tickets with explicit admission pacing. Share a `ti.graph.SubmissionPacer`
+across related `Graph.submit()` calls or CUDA/Vulkan batch-solve submissions to
+bound backend invocations in flight, per-lane occupancy, and calls waiting for
+admission. Admission occurs before backend enqueue, so the complete host launch
+sequence of one paced invocation does not interleave with another. Invocations
+already admitted to the backend remain asynchronous.
+
+Scheduling is work-conserving round robin across lanes and FIFO within a lane.
+Assign stable lanes to independent rhythms such as physics, rendering, and
+streaming. Set `max_in_flight_per_lane` when one producer must not occupy every
+slot. `on_saturation='wait'` applies backpressure. A real-time loop that cannot
+block can use `on_saturation='raise'` and explicitly degrade or skip that frame
+before any backend work has been submitted.
+
+The mechanism coordinates only calls sharing that pacer; ordinary kernels,
+`Graph.run()`, and unpaced submissions remain outside its control.
+`statistics()` exposes current and peak in-flight/queued counts, per-lane
+grants and completions, rejections, backend failures, and admission wait time
+for capacity and cadence validation. The pacer does not provide priorities,
+deadlines, callbacks, or cross-Program dependencies. Applications needing
+those policies should implement them above this admission boundary.
+
 ## CUDA capture and replay
 
 Each CUDA graph executable owns its capture stream, stable argument buffers,
