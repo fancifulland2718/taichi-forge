@@ -119,9 +119,10 @@ if(LINUX)
 endif()
 add_test(NAME ${TESTS_NAME} COMMAND ${TESTS_NAME})
 
-# Keep the backend-neutral runtime state-machine tests independently runnable.
-# The aggregate executable also compiles backend/compiler mocks, so an
-# unrelated mock API change must not hide lifecycle regressions in this layer.
+# Keep the focused runtime state-machine and CPU provider contract tests
+# independently runnable. The aggregate executable also compiles
+# backend/compiler mocks, so an unrelated mock API change must not hide
+# lifecycle regressions in this layer.
 set(TAICHI_RUNTIME_FOUNDATION_TESTS_NAME taichi_runtime_foundation_tests)
 add_executable(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
   tests/cpp/program/linear_operator_test.cpp
@@ -130,6 +131,7 @@ add_executable(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
   tests/cpp/program/runtime_fault_test.cpp
   tests/cpp/program/runtime_statistics_test.cpp
   tests/cpp/program/runtime_trace_test.cpp
+  tests/cpp/program/sparse_numeric_transaction_test.cpp
   tests/cpp/rhi/common/host_memory_pool_test.cpp)
 target_link_libraries(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
   PRIVATE
@@ -182,6 +184,11 @@ if (LINUX)
 endif()
 add_test(NAME ${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
   COMMAND ${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME})
+if (TI_WITH_LLVM)
+  set_tests_properties(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME} PROPERTIES
+    ENVIRONMENT
+      "TI_LIB_DIR=${PROJECT_SOURCE_DIR}/taichi/runtime/llvm/runtime_module")
+endif()
 
 # F5 measurement-only host allocator benchmark. Keep it independent from the
 # aggregate C++ tests so unrelated compiler/backend mocks cannot block the

@@ -1684,6 +1684,7 @@ void CpuSparseCsrMatrix::spmv_cpu_raw(Program *prog,
                   input == 0 || output == 0 || input == output,
               "Internal CPU CSR raw SpMV requires its owning CPU Program "
               "and distinct non-null input/output pointers.");
+  auto numeric_guard = acquire_numeric_access_guard();
   std::lock_guard<std::mutex> lock(spmv_mutex_);
   record_spmv_call();
   if (spmv_plan_initialized_) {
@@ -1721,6 +1722,7 @@ void CpuSparseCsrMatrix::update_values(Program *prog,
               nnz_, data_type_name(dtype_));
   const auto source = reinterpret_cast<const void *>(
       prog->get_ndarray_data_ptr_as_int(&values));
+  auto numeric_guard = acquire_numeric_access_guard();
   std::lock_guard<std::mutex> lock(spmv_mutex_);
   if (dtype_ == PrimitiveType::f32) {
     std::memcpy(values_f32_.data(), source,
@@ -2188,6 +2190,7 @@ void CpuSparseBsrMatrix::spmv_cpu_raw(Program *prog,
                   input == 0 || output == 0 || input == output,
               "Internal CPU BSR raw SpMV requires its owning CPU Program "
               "and distinct non-null input/output pointers.");
+  auto numeric_guard = acquire_numeric_access_guard();
   std::lock_guard<std::mutex> lock(spmv_mutex_);
   record_spmv_call();
   if (spmv_plan_initialized_) {
@@ -2226,6 +2229,7 @@ void CpuSparseBsrMatrix::update_values(Program *prog,
               value_count_, data_type_name(dtype_));
   const auto source = reinterpret_cast<const void *>(
       prog->get_ndarray_data_ptr_as_int(&values));
+  auto numeric_guard = acquire_numeric_access_guard();
   std::lock_guard<std::mutex> lock(spmv_mutex_);
   if (dtype_ == PrimitiveType::f32) {
     std::memcpy(values_f32_.data(), source,
