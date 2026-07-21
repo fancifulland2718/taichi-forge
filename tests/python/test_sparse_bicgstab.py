@@ -363,11 +363,14 @@ def test_sparse_bicgstab_solves_fixed_csr_without_eigen_shadow(ti_dtype):
     matrix_first = matrix._debug_runtime_stats()
     assert first["identity"]["method"] == "bicgstab"
     assert first["identity"]["preconditioner_method"] == "identity"
+    assert first["identity"]["operator_action_provider"] == "forge_cpu_native"
     assert first["operations"]["workspace_builds"] == 1
     assert first["operations"]["workspace_reuses"] == 0
     assert first["operations"]["operator_apply_calls"] >= 3
     assert first["operations"]["host_scalar_reductions"] > 0
     assert first["operations"]["preconditioner_apply_calls"] == 0
+    assert first["operations"]["operator_generation_pins"] == 1
+    assert first["operations"]["operator_plan_invalidations"] == 0
     assert first["resources"]["persistent_vector_count"] == 8
     assert first["resources"]["transient_solver_workspace_bytes"] == 0
     assert matrix_first["operations"]["pattern_builds"] == 0
@@ -387,6 +390,9 @@ def test_sparse_bicgstab_solves_fixed_csr_without_eigen_shadow(ti_dtype):
     second = solver._debug_runtime_stats()
     assert second["operations"]["workspace_builds"] == 1
     assert second["operations"]["workspace_reuses"] == 1
+    assert second["operations"]["operator_generation_pins"] == 2
+    assert second["operations"]["operator_generation_changes"] == 1
+    assert second["operations"]["operator_numeric_generation_changes"] == 1
     assert second["identity"]["operator_numeric_version"] == 2
 
 
@@ -424,6 +430,9 @@ def test_sparse_bicgstab_solves_fixed_bsr_without_scalar_expansion(ti_dtype):
     stats = solver._debug_runtime_stats()
     assert stats["operations"]["workspace_builds"] == 1
     assert stats["operations"]["workspace_reuses"] == 1
+    assert stats["identity"]["operator_action_provider"] == "forge_cpu_native"
+    assert stats["operations"]["operator_generation_pins"] == 2
+    assert stats["operations"]["operator_numeric_generation_changes"] == 1
 
 
 @test_utils.test(arch=[ti.cpu], offline_cache=False)

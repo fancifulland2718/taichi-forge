@@ -8,6 +8,7 @@
 #include "taichi/program/linear_operator.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/program.h"
+#include "taichi/program/sparse_fixed_bicgstab.h"
 
 namespace taichi::lang {
 namespace {
@@ -465,6 +466,32 @@ TEST(LinearOperator, TraitDecorationFollowsPublishedGenerations) {
   EXPECT_TRUE(next.mathematical_traits().self_adjoint.value);
   EXPECT_EQ(next.mathematical_traits().self_adjoint.validity_scope, scope);
   EXPECT_EQ(next.resource_stamp().numeric_revision, 4u);
+}
+
+TEST(LinearOperator, BiCGSTABConsumesDenseOperatorAction) {
+  const OperatorSpaceDesc space = scalar_space(PrimitiveType::f64, 3);
+  OperatorBinding binding(make_dense_reference_operator_action(
+      {space, space}, {4.0, 1.0, 0.0,
+                       0.0, 3.0, 1.0,
+                       1.0, 0.0, 2.0}));
+  FixedSparseBiCGSTAB<Eigen::VectorXd, double> solver(
+      nullptr, std::move(binding), 20, 1e-12, false);
+  Eigen::VectorXd expected(3);
+  expected << 1.0, -2.0, 0.5;
+  Eigen::VectorXd rhs(3);
+  rhs << 2.0, -5.5, 2.0;
+  Eigen::VectorXd initial = Eigen::VectorXd::Zero(3);
+  solver.set_b(rhs);
+  solver.set_x(initial);
+
+  solver.solve();
+
+  EXPECT_TRUE(solver.is_success());
+  EXPECT_LE((solver.get_x() - expected).norm(), 1e-11);
+  const auto statistics = solver.debug_runtime_statistics();
+  EXPECT_EQ(statistics.operator_action_provider, "dense_reference");
+  EXPECT_EQ(statistics.operator_generation_pins, 1u);
+  EXPECT_GT(statistics.operator_apply_calls, 0u);
 }
 
 TEST(LinearOperator, BindingTypeErasesProviderResourceLease) {

@@ -15,6 +15,7 @@ namespace taichi::lang {
 
 class Ndarray;
 class Program;
+class SparseMatrix;
 class CpuSparseCsrMatrix;
 class CpuSparseBsrMatrix;
 class CuSparseMatrix;
@@ -485,6 +486,9 @@ OperatorBinding make_cpu_csr_operator_binding(Program *program,
                                               CpuSparseCsrMatrix &matrix);
 OperatorBinding make_cpu_bsr_operator_binding(Program *program,
                                               CpuSparseBsrMatrix &matrix);
+OperatorBinding make_cpu_fixed_sparse_operator_binding(
+    Program *program,
+    SparseMatrix &matrix);
 OperatorBinding make_cpu_program_kernel_operator_binding(
     Program *program,
     CompiledKernelLinearOperator &matrix);

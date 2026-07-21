@@ -1101,11 +1101,17 @@ OperatorBinding make_cpu_typed_operator_binding(Program *program,
       [program, &provider](OperatorApplyMode mode,
                            const OperatorVectorView &input,
                            const OperatorVectorView &output) {
-        TI_ERROR_IF(mode != OperatorApplyMode::forward || !input.ndarray ||
-                        !output.ndarray,
-                    "CPU operator binding requires forward ndarray views; "
-                    "no fallback was performed.");
-        provider.nd_spmv(program, *input.ndarray, *output.ndarray);
+        TI_ERROR_IF(mode != OperatorApplyMode::forward,
+                    "CPU sparse operator bindings support forward apply "
+                    "only.");
+        if (input.ndarray && output.ndarray) {
+          provider.nd_spmv(program, *input.ndarray, *output.ndarray);
+          return;
+        }
+        TI_ERROR_IF(input.ndarray || output.ndarray,
+                    "CPU sparse operator input/output views must both use "
+                    "ndarrays or both use raw Program pointers.");
+        provider.spmv_cpu_raw(program, input.data, output.data);
       });
   return OperatorBinding(std::move(action), [&provider] {
     return OperatorResourceLease::hold(provider.acquire_numeric_access_guard());
@@ -1176,6 +1182,23 @@ OperatorBinding make_cpu_bsr_operator_binding(Program *program,
                                               CpuSparseBsrMatrix &matrix) {
   return make_cpu_typed_operator_binding(program, matrix, "forge_cpu_native",
                                          "bsr");
+}
+
+OperatorBinding make_cpu_fixed_sparse_operator_binding(
+    Program *program,
+    SparseMatrix &matrix) {
+  if (auto *csr = dynamic_cast<CpuSparseCsrMatrix *>(&matrix)) {
+    return make_cpu_csr_operator_binding(program, *csr);
+  }
+  if (auto *bsr = dynamic_cast<CpuSparseBsrMatrix *>(&matrix)) {
+    return make_cpu_bsr_operator_binding(program, *bsr);
+  }
+  const auto statistics = matrix.debug_runtime_statistics();
+  TI_ERROR(
+      "CPU fixed sparse operator binding does not support backend '{}' with "
+      "storage '{}' (provider '{}'); no fallback was performed.",
+      statistics.backend_family, statistics.storage_format,
+      statistics.provider_name);
 }
 
 OperatorBinding make_cpu_program_kernel_operator_binding(

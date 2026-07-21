@@ -1,13 +1,15 @@
 #pragma once
 
 #include "taichi/program/conjugate_gradient.h"
+#include "taichi/program/linear_operator.h"
 
 #include <limits>
 
 namespace taichi::lang {
 
-// Identity-preconditioned BiCGSTAB for caller-owned fixed CPU CSR/BSR
-// operators. Mutable Eigen matrices keep using their existing provider path.
+// Identity-preconditioned BiCGSTAB over a provider-neutral OperatorPlan.
+// Public fixed CSR/BSR matrices enter through a construction-time
+// compatibility binding; the recurrence only consumes one pinned action.
 template <typename EigenT, typename DT>
 class FixedSparseBiCGSTAB {
  public:
@@ -17,35 +19,47 @@ class FixedSparseBiCGSTAB {
                       DT absolute_tolerance,
                       bool verbose,
                       DT relative_tolerance = static_cast<DT>(0))
+      : FixedSparseBiCGSTAB(
+            program,
+            make_cpu_fixed_sparse_operator_binding(program, matrix),
+            max_iterations,
+            absolute_tolerance,
+            verbose,
+            relative_tolerance) {
+  }
+
+  FixedSparseBiCGSTAB(Program *program,
+                      OperatorBinding operator_binding,
+                      int max_iterations,
+                      DT absolute_tolerance,
+                      bool verbose,
+                      DT relative_tolerance = static_cast<DT>(0))
       : program_(program),
-        matrix_(matrix),
         max_iterations_(max_iterations),
         absolute_tolerance_(absolute_tolerance),
         relative_tolerance_(relative_tolerance),
         verbose_(verbose) {
-    TI_ERROR_IF(!program_ || !arch_is_cpu(program_->compile_config().arch),
-                "Fixed SparseBiCGSTAB requires an owning CPU Program.");
-    const auto operator_stats = matrix_.debug_runtime_statistics();
-    csr_matrix_ = dynamic_cast<CpuSparseCsrMatrix *>(&matrix_);
-    bsr_matrix_ = dynamic_cast<CpuSparseBsrMatrix *>(&matrix_);
-    const bool is_public_fixed =
-        operator_stats.backend_family == "cpu" &&
-        operator_stats.provider_name == "forge_cpu_native" &&
-        operator_stats.pattern_storage_shared &&
-        operator_stats.pattern_builds == 0 &&
-        ((csr_matrix_ && operator_stats.storage_format == "csr") ||
-         (bsr_matrix_ && operator_stats.storage_format == "bsr"));
-    TI_ERROR_IF(!is_public_fixed,
-                "Fixed SparseBiCGSTAB requires a caller-owned fixed CPU "
-                "CSR/BSR pattern.");
-    TI_ERROR_IF(
-        matrix_.num_rows() <= 0 || matrix_.num_rows() != matrix_.num_cols(),
-        "Fixed SparseBiCGSTAB requires a non-empty square matrix.");
+    TI_ERROR_IF(program_ && !arch_is_cpu(program_->compile_config().arch),
+                "Operator BiCGSTAB supports host-reference or CPU Program "
+                "bindings only.");
+    operator_plan_ = std::make_unique<OperatorPlan>(
+        program_, std::move(operator_binding));
+    const auto &descriptor = operator_plan_->descriptor();
+    validate_operator_solver_compatibility(
+        descriptor, operator_plan_->mathematical_traits(),
+        OperatorSolverFamily::bicgstab);
+    TI_ERROR_IF(descriptor.domain.scalar_extent >
+                    static_cast<std::size_t>(
+                        std::numeric_limits<int>::max()),
+                "Operator BiCGSTAB extent exceeds the supported int range.");
+    rows_ = static_cast<int>(descriptor.range.scalar_extent);
+    cols_ = static_cast<int>(descriptor.domain.scalar_extent);
+    dtype_ = descriptor.range.scalar_type;
     const DataType expected_dtype =
         std::is_same_v<DT, float64> ? DataType(PrimitiveType::f64)
                                     : DataType(PrimitiveType::f32);
-    TI_ERROR_IF(matrix_.get_data_type() != expected_dtype,
-                "Fixed SparseBiCGSTAB matrix dtype does not match the "
+    TI_ERROR_IF(dtype_ != expected_dtype,
+                "Operator BiCGSTAB dtype does not match the "
                 "selected f32/f64 recurrence.");
     TI_ERROR_IF(max_iterations_ < 0,
                 "Fixed SparseBiCGSTAB requires non-negative max "
@@ -59,7 +73,7 @@ class FixedSparseBiCGSTAB {
                 "Fixed SparseBiCGSTAB requires finite non-negative atol and "
                 "rtol with at least one positive tolerance.");
 
-    const int size = matrix_.num_rows();
+    const int size = rows_;
     x_ = EigenT::Zero(size);
     b_ = EigenT::Zero(size);
     residual_ = EigenT::Zero(size);
@@ -71,9 +85,9 @@ class FixedSparseBiCGSTAB {
   }
 
   void set_x(EigenT &x) {
-    TI_ERROR_IF(x.size() != matrix_.num_cols(),
+    TI_ERROR_IF(x.size() != cols_,
                 "SparseBiCGSTAB initial guess must have {} entries, got {}.",
-                matrix_.num_cols(), x.size());
+                cols_, x.size());
     x_ = x;
   }
 
@@ -82,27 +96,31 @@ class FixedSparseBiCGSTAB {
   }
 
   void set_b(EigenT &b) {
-    TI_ERROR_IF(b.size() != matrix_.num_rows(),
+    TI_ERROR_IF(b.size() != rows_,
                 "SparseBiCGSTAB RHS must have {} entries, got {}.",
-                matrix_.num_rows(), b.size());
+                rows_, b.size());
     b_ = b;
   }
 
   void set_x_ndarray(Program *program, Ndarray &x) {
     const auto address = program->get_ndarray_data_ptr_as_int(&x);
-    x_ = Eigen::Map<EigenT>(reinterpret_cast<DT *>(address),
-                            matrix_.num_cols());
+    x_ = Eigen::Map<EigenT>(reinterpret_cast<DT *>(address), cols_);
   }
 
   void set_b_ndarray(Program *program, Ndarray &b) {
     const auto address = program->get_ndarray_data_ptr_as_int(&b);
-    b_ = Eigen::Map<EigenT>(reinterpret_cast<DT *>(address),
-                            matrix_.num_rows());
+    b_ = Eigen::Map<EigenT>(reinterpret_cast<DT *>(address), rows_);
   }
 
   void solve() {
-    const auto operator_stats = matrix_.debug_runtime_statistics();
-    reset_last_result(operator_stats);
+    auto operator_generation = operator_plan_->pin();
+    reset_last_result(operator_generation.resource_stamp());
+    auto apply_operator = [&](const EigenT &input, EigenT &output) {
+      this->apply_operator(operator_generation, input, output);
+    };
+    auto true_residual_norm = [&] {
+      return this->true_residual_norm(operator_generation);
+    };
     const auto previous_solve_calls =
         solve_calls_.fetch_add(1, std::memory_order_relaxed);
     if (previous_solve_calls > 0) {
@@ -201,7 +219,7 @@ class FixedSparseBiCGSTAB {
           terminated = true;
           break;
         }
-        for (int index = 0; index < matrix_.num_rows(); ++index) {
+        for (int index = 0; index < rows_; ++index) {
           direction_[index] = static_cast<DT>(
               static_cast<double>(residual_[index]) +
               beta * (static_cast<double>(direction_[index]) -
@@ -229,7 +247,7 @@ class FixedSparseBiCGSTAB {
         terminated = true;
         break;
       }
-      for (int index = 0; index < matrix_.num_rows(); ++index) {
+      for (int index = 0; index < rows_; ++index) {
         intermediate_residual_[index] = static_cast<DT>(
             static_cast<double>(residual_[index]) -
             alpha * static_cast<double>(operator_direction_[index]));
@@ -300,7 +318,7 @@ class FixedSparseBiCGSTAB {
         terminated = true;
         break;
       }
-      for (int index = 0; index < matrix_.num_rows(); ++index) {
+      for (int index = 0; index < rows_; ++index) {
         residual_[index] = static_cast<DT>(
             static_cast<double>(intermediate_residual_[index]) -
             omega * static_cast<double>(operator_intermediate_[index]));
@@ -395,20 +413,21 @@ class FixedSparseBiCGSTAB {
   }
 
   SparseSolvePlanRuntimeStatistics debug_runtime_statistics() const {
-    const auto operator_stats = matrix_.debug_runtime_statistics();
+    const auto operator_stamp = operator_plan_->resource_stamp();
+    const auto plan_statistics = operator_plan_->debug_runtime_statistics();
     SparseSolvePlanRuntimeStatistics result;
     result.backend_family = "cpu";
     result.method = "bicgstab";
-    result.dtype = data_type_name(matrix_.get_data_type());
-    result.rows = matrix_.num_rows();
-    result.cols = matrix_.num_cols();
+    result.dtype = data_type_name(dtype_);
+    result.rows = rows_;
+    result.cols = cols_;
     result.max_iterations = max_iterations_;
     result.absolute_tolerance = static_cast<double>(absolute_tolerance_);
     result.relative_tolerance = static_cast<double>(relative_tolerance_);
     result.last_relative_reference_norm = relative_reference_norm_;
     result.last_effective_tolerance = effective_tolerance_;
-    result.operator_pattern_version = operator_stats.pattern_version;
-    result.operator_numeric_version = operator_stats.numeric_version;
+    result.operator_pattern_version = operator_stamp.topology_revision;
+    result.operator_numeric_version = operator_stamp.numeric_revision;
     result.last_solve_pattern_version =
         last_solve_pattern_version_.load(std::memory_order_relaxed);
     result.last_solve_numeric_version =
@@ -428,6 +447,16 @@ class FixedSparseBiCGSTAB {
     result.operator_apply_calls =
         operator_apply_calls_.load(std::memory_order_relaxed);
     result.operator_apply_calls_available = true;
+    result.operator_action_provider = operator_plan_->provider_name();
+    result.operator_asynchronous_submit =
+        operator_plan_->capabilities().asynchronous_submit;
+    result.operator_generation_pins = plan_statistics.generation_pins;
+    result.operator_generation_changes = plan_statistics.generation_changes;
+    result.operator_numeric_generation_changes =
+        plan_statistics.numeric_generation_changes;
+    result.operator_binding_generation_changes =
+        plan_statistics.binding_generation_changes;
+    result.operator_plan_invalidations = plan_statistics.invalidations;
     result.host_scalar_reductions =
         host_scalar_reductions_.load(std::memory_order_relaxed);
     result.preconditioner_method = "identity";
@@ -437,7 +466,7 @@ class FixedSparseBiCGSTAB {
     result.persistent_vector_count = 8;
     result.persistent_vector_reserved_bytes =
         static_cast<std::uint64_t>(8) *
-        static_cast<std::uint64_t>(matrix_.num_rows()) * sizeof(DT);
+        static_cast<std::uint64_t>(rows_) * sizeof(DT);
     result.solver_state_rebuilt_each_solve = false;
     result.transient_solver_workspace_bytes = 0;
     result.transient_solver_workspace_bytes_available = true;
@@ -445,22 +474,22 @@ class FixedSparseBiCGSTAB {
   }
 
  private:
-  void reset_last_result(const SparseMatrixRuntimeStatistics &stats) {
+  void reset_last_result(const OperatorResourceStamp &stamp) {
     status_ = SparseSolveStatus::kNotRun;
     iterations_ = 0;
     initial_residual_norm_ = 0.0;
     residual_norm_ = 0.0;
     relative_reference_norm_ = 0.0;
     effective_tolerance_ = static_cast<double>(absolute_tolerance_);
-    last_solve_pattern_version_.store(stats.pattern_version,
+    last_solve_pattern_version_.store(stamp.topology_revision,
                                       std::memory_order_relaxed);
-    last_solve_numeric_version_.store(stats.numeric_version,
+    last_solve_numeric_version_.store(stamp.numeric_revision,
                                       std::memory_order_relaxed);
   }
 
   double dot(const EigenT &left, const EigenT &right) {
     double result = 0.0;
-    for (int index = 0; index < matrix_.num_rows(); ++index) {
+    for (int index = 0; index < rows_; ++index) {
       result += static_cast<double>(left[index]) *
                 static_cast<double>(right[index]);
     }
@@ -475,29 +504,40 @@ class FixedSparseBiCGSTAB {
                : std::numeric_limits<double>::quiet_NaN();
   }
 
-  void apply_operator(const EigenT &input, EigenT &output) {
-    if (csr_matrix_) {
-      csr_matrix_->spmv_cpu_raw(
-          program_, reinterpret_cast<std::uintptr_t>(input.data()),
-          reinterpret_cast<std::uintptr_t>(output.data()));
-    } else {
-      bsr_matrix_->spmv_cpu_raw(
-          program_, reinterpret_cast<std::uintptr_t>(input.data()),
-          reinterpret_cast<std::uintptr_t>(output.data()));
-    }
+  void apply_operator(const OperatorPinnedAction &generation,
+                      const EigenT &input,
+                      EigenT &output) {
+    const auto &descriptor = operator_plan_->descriptor();
+    const auto input_address =
+        reinterpret_cast<std::uintptr_t>(input.data());
+    const auto output_address =
+        reinterpret_cast<std::uintptr_t>(output.data());
+    const auto input_view =
+        program_ ? OperatorVectorView::from_device_pointer(
+                       program_, input_address, descriptor.domain, false)
+                 : OperatorVectorView::from_const_host(input.data(),
+                                                       descriptor.domain);
+    const auto output_view =
+        program_ ? OperatorVectorView::from_device_pointer(
+                       program_, output_address, descriptor.range, true)
+                 : OperatorVectorView::from_mutable_host(output.data(),
+                                                         descriptor.range);
+    operator_plan_->submit(
+        generation,
+        {OperatorApplyMode::forward, input_view, nullptr, output_view});
     operator_apply_calls_.fetch_add(1, std::memory_order_relaxed);
   }
 
-  double true_residual_norm() {
-    apply_operator(x_, residual_);
-    for (int index = 0; index < matrix_.num_rows(); ++index) {
+  double true_residual_norm(const OperatorPinnedAction &generation) {
+    apply_operator(generation, x_, residual_);
+    for (int index = 0; index < rows_; ++index) {
       residual_[index] = b_[index] - residual_[index];
     }
     return vector_norm(residual_);
   }
 
   void update_solution(double alpha, double omega) {
-    for (int index = 0; index < matrix_.num_rows(); ++index) {
+    for (int index = 0; index < rows_; ++index) {
       x_[index] = static_cast<DT>(
           static_cast<double>(x_[index]) +
           alpha * static_cast<double>(direction_[index]) +
@@ -528,9 +568,10 @@ class FixedSparseBiCGSTAB {
   }
 
   Program *program_{nullptr};
-  SparseMatrix &matrix_;
-  CpuSparseCsrMatrix *csr_matrix_{nullptr};
-  CpuSparseBsrMatrix *bsr_matrix_{nullptr};
+  std::unique_ptr<OperatorPlan> operator_plan_;
+  DataType dtype_{PrimitiveType::f32};
+  int rows_{0};
+  int cols_{0};
   EigenT x_;
   EigenT b_;
   EigenT residual_;
