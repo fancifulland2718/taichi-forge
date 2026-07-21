@@ -244,6 +244,71 @@ tail。Vulkan fixed-budget execution 可以执行完整的 `max_iterations`，�
 较快选择取决于 vector size、operator 成本、iteration count、driver 与 backend。不受支持
 的 policy 或 interval 会在 plan 构造时失败，不会静默 fallback。
 
+## 独立批量 CG 与 PCG
+
+`BatchedSolvePlan` 使用一个持久 plan 求解一组同构、相互独立的 SPD 系统。它接受 shape
+为 `(B * N, B * N)` 的扁平 direct-sum operator，并把每个 vector 划分为 `B` 个连续、
+长度均为 `N` 的系统：
+
+```python
+plan = ti.linalg.experimental.BatchedSolvePlan(
+    operator,
+    batch_size=B,
+    independent_systems=True,
+    method="cg",
+    max_iterations=100,
+    atol=1e-7,
+    rtol=1e-5,
+    execution_policy="host_check_every_k",
+    check_interval=4,
+)
+result = plan.solve(rhs_flat, out=x_flat)
+
+for env, reason in enumerate(result.termination_reasons):
+    if not result.converged[env]:
+        raise RuntimeError(f"system {env}: {reason}")
+```
+
+`independent_systems=True` 是调用方必须给出的显式断言。系统 operator 以及 PCG 的
+fixed-linear preconditioner 都必须保持分区：环境 `e` 的 output 只能依赖环境 `e` 的
+input。全局 SPD trait 不能证明这一分区性质。违反该合同得到的是无效的独立批量问题，
+而不是一个耦合系统求解。
+
+首个公开布局有意保持同构和扁平：
+
+- operator extent 必须能被 `batch_size` 整除；
+- 所有系统使用相同 scalar extent 与 f32 dtype；
+- `rhs`、`initial_guess` 和 `out` 的 shape 为 `(B * N,)`；
+- `atol` 与 `rtol` 可以是 scalar，也可以是长度为 `B` 的 sequence；
+- variable offset、active compaction 与 ragged system 不属于当前合同。
+
+`method="cg"` 使用 identity preconditioner。`method="pcg"` 要求一个可信 SPD
+`LinearOperator`，在相同扁平分区上应用 fixed-linear 近似逆。CPU、CUDA 与 Vulkan
+均已验证 fixed stored 和 compiled-kernel A/M provider。其它 provider kind 仍受其普通
+backend capability 与资格边界约束；batch plan 不会经 host staging，也不会切换 provider。
+
+每个环境拥有独立的 recurrence scalar、effective tolerance、status、逻辑 iteration count
+和 residual norm。一个环境可以收敛、breakdown 或达到 `max_iterations`，而不改变其它
+环境的 terminal result。`BatchedSolveResult` 用 immutable tuple 暴露这些值，并单独返回
+扁平 solution ndarray。batch size 为 1 时使用同一套单系统 CG/PCG 数值合同。
+
+CPU 使用 `"host_each_iteration"`。CUDA 与 Vulkan 默认使用 K=4 的
+`"host_check_every_k"`；也可选择 K=8、显式 `"host_each_iteration"` 或
+`"fixed_budget_masked"`。host-check chunk 在观察到所有环境已终止前，可能发出 inactive
+tail iteration。recurrence 与 vector-update kernel 会屏蔽 inactive 环境，但整体 A/M
+provider 仍作用于完整扁平 batch；因此 convergence masking 不代表 provider apply 已做
+compaction。
+
+`statistics()` 会分别报告 executed system iteration、provider system iteration、masked
+provider system iteration、active efficiency、host check、transfer 和 persistent resource
+大小，使上述区别可观察。CG plan 拥有三个长度为 `B * N` 的 workspace vector，PCG 拥有
+四个；此外还保留逐环境 recurrence、tolerance 与 status state。调用方拥有的 RHS、
+solution、initial guess 和 provider resource 不计入这些 plan workspace 数字。
+
+该 API 表示 independent batching，不是对隐式耦合 block matrix 使用 global-scalar CG，
+也不是 multi-RHS CG、block CG 或其它 block Krylov 方法。耦合系统必须使用在数学上显式
+表达该耦合关系的 operator 与 solver。
+
 ## 支持矩阵
 
 ### Provider 与 apply
@@ -265,6 +330,7 @@ tail。Vulkan fixed-budget execution 可以执行完整的 `max_iterations`，�
 | PCG + Jacobi | fixed CSR，`f32/f64` | fixed CSR，`f32` | fixed CSR，`f32` |
 | PCG + block-Jacobi | fixed BSR，`f32/f64` | fixed BSR，`f32` | fixed BSR，`f32` |
 | PCG + fixed-linear operator | 受支持 provider，`f32/f64` | compiled-kernel A/M，`f32` | compiled-kernel A/M，`f32` |
+| 独立批量 CG/PCG | fixed stored 或 compiled-kernel A/M，`f32` | fixed stored 或 compiled-kernel A/M，`f32` | fixed stored 或 compiled-kernel A/M，`f32` |
 | BiCGSTAB | 任意受支持 CPU operator，`f32/f64` | 不支持 | 不支持 |
 
 MINRES 和 direct factorization 继续使用 stored-matrix API。

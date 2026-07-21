@@ -1021,6 +1021,8 @@ The runtime-bound operator API is documented separately in
 | `operator.scaled(...)`, `operator + other`, `.compose(...)`, `.adjoint()`, `block_diagonal(...)`, `identity(...)` | Construct minimal linear-operator algebra. | CPU composition; explicit adjoint capability required. |
 | `ti.linalg.experimental.SolvePlan(operator, method=..., preconditioner=..., execution_policy=..., check_interval=...)` | Build a persistent CG, PCG, or CPU BiCGSTAB plan. | Built-in Jacobi/block-Jacobi or trusted fixed-linear PCG; CUDA/Vulkan support `host_check_every_k` with K=4/8 and absolute/relative tolerance. |
 | `plan.solve(rhs, initial_guess=None, out=None)` | Return an immutable `SolveResult` with solution and terminal residual/status fields. | Scalar 1-D Taichi ndarrays; no RHS/output aliasing or host staging. |
+| `ti.linalg.experimental.BatchedSolvePlan(operator, batch_size, independent_systems=True, ...)` | Build homogeneous independent f32 CG/PCG over contiguous flat partitions. | CPU/CUDA/Vulkan; per-system tolerance, status, and iteration count; fixed stored or compiled-kernel A/M qualified. |
+| `batch_plan.solve(rhs_flat, initial_guess=None, out=None)` | Return a flat solution and immutable per-system `BatchedSolveResult` tuples. | Independent direct-sum systems only; not multi-RHS or block Krylov. |
 | `operator.statistics()` / `plan.statistics()` | Return provider/plan execution and workspace diagnostics. | Diagnostic snapshot; not part of the numerical result. |
 
 Iterative convergence uses

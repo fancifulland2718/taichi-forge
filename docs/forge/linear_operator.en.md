@@ -271,6 +271,83 @@ faster choice depends on vector size, operator cost, iteration count, driver,
 and backend. Unsupported policies and intervals fail during plan
 construction; they do not silently fall back.
 
+## Independent batched CG and PCG
+
+`BatchedSolvePlan` solves a homogeneous batch of independent SPD systems with
+one persistent plan. It uses one flat direct-sum operator with shape
+`(B * N, B * N)` and partitions every vector into `B` contiguous systems of
+length `N`:
+
+```python
+plan = ti.linalg.experimental.BatchedSolvePlan(
+    operator,
+    batch_size=B,
+    independent_systems=True,
+    method="cg",
+    max_iterations=100,
+    atol=1e-7,
+    rtol=1e-5,
+    execution_policy="host_check_every_k",
+    check_interval=4,
+)
+result = plan.solve(rhs_flat, out=x_flat)
+
+for env, reason in enumerate(result.termination_reasons):
+    if not result.converged[env]:
+        raise RuntimeError(f"system {env}: {reason}")
+```
+
+`independent_systems=True` is a required caller assertion. The system
+operator and, for PCG, the fixed-linear preconditioner must preserve every
+partition: output entries for environment `e` may depend only on input entries
+from environment `e`. Global SPD traits do not prove this partition property.
+Violating it gives an invalid independent-batch problem rather than a coupled
+solve.
+
+The first public layout is deliberately homogeneous and flat:
+
+- the operator extent must be divisible by `batch_size`;
+- all systems have the same scalar extent and f32 dtype;
+- `rhs`, `initial_guess`, and `out` have shape `(B * N,)`;
+- `atol` and `rtol` may be scalars or length-`B` sequences; and
+- variable offsets, active compaction, and ragged systems are not part of this
+  contract.
+
+`method="cg"` uses identity preconditioning. `method="pcg"` requires a
+trusted SPD `LinearOperator` that applies a fixed-linear approximate inverse
+over the same flat partitions. Fixed stored and compiled-kernel A/M providers
+are qualified on CPU, CUDA, and Vulkan. Other provider kinds remain subject to
+their ordinary backend capability and qualification boundaries; the batched
+plan never stages through the host or changes provider.
+
+Each environment owns its recurrence scalars, effective tolerance, status,
+logical iteration count, and residual norms. One environment may converge,
+break down, or reach `max_iterations` without changing another environment's
+terminal result. `BatchedSolveResult` exposes these values as immutable tuples
+and returns the flat solution ndarray separately. A batch of one follows the
+same numerical contract as a single-system CG/PCG solve.
+
+CPU uses `"host_each_iteration"`. CUDA and Vulkan default to
+`"host_check_every_k"` with `K=4`; they also accept `K=8`, explicit
+`"host_each_iteration"`, or `"fixed_budget_masked"`. A host-check chunk may
+issue inactive tail iterations before observing that all environments have
+terminated. Recurrence and vector-update kernels mask inactive environments,
+but the monolithic A/M provider still applies to the full flat batch. Provider
+apply compaction is therefore not implied by convergence masking.
+
+`statistics()` makes this distinction observable through executed system
+iterations, provider system iterations, masked provider system iterations,
+active efficiency, host checks, transfers, and persistent resource sizes. A CG
+plan owns three length-`B * N` workspace vectors; PCG owns four. It also owns
+per-environment recurrence, tolerance, and status state. Caller-owned RHS,
+solution, initial guess, and provider resources are excluded from these plan
+workspace counts.
+
+This API is independent batching. It is not global-scalar CG over an
+implicitly coupled block matrix, multi-RHS CG, block CG, or another block
+Krylov method. Coupled systems require an operator and solver whose mathematics
+model that coupling explicitly.
+
 ## Support matrix
 
 ### Providers and apply
@@ -292,6 +369,7 @@ construction; they do not silently fall back.
 | PCG + Jacobi | Fixed CSR, `f32/f64` | Fixed CSR, `f32` | Fixed CSR, `f32` |
 | PCG + block-Jacobi | Fixed BSR, `f32/f64` | Fixed BSR, `f32` | Fixed BSR, `f32` |
 | PCG + fixed-linear operator | Supported providers, `f32/f64` | Compiled-kernel A/M, `f32` | Compiled-kernel A/M, `f32` |
+| Independent batched CG/PCG | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` |
 | BiCGSTAB | Any supported CPU operator, `f32/f64` | Unsupported | Unsupported |
 
 MINRES and direct factorization remain stored-matrix APIs.
