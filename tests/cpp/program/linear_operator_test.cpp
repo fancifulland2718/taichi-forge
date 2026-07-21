@@ -552,6 +552,58 @@ TEST(LinearOperator, DenseReferenceSupportsRectangularForwardAndAdjoint) {
   EXPECT_EQ(statistics.scratch_builds, 0u);
 }
 
+TEST(LinearOperator, ExplicitAdjointBindingSatisfiesDotProductIdentity) {
+  const OperatorDescriptor descriptor{
+      scalar_space(PrimitiveType::f64, 3),
+      scalar_space(PrimitiveType::f64, 2)};
+  OperatorBinding source(make_dense_reference_operator_action(
+      descriptor, {1.0, 2.0, 3.0, 4.0, 5.0, 6.0}));
+  OperatorPlan forward(nullptr, source);
+  OperatorPlan adjoint(nullptr,
+                       make_adjoint_operator_binding(std::move(source)));
+
+  EXPECT_EQ(adjoint.descriptor().domain, descriptor.range);
+  EXPECT_EQ(adjoint.descriptor().range, descriptor.domain);
+  EXPECT_EQ(adjoint.provider_name(), "adjoint(dense_reference)");
+  EXPECT_TRUE(adjoint.capabilities().adjoint_apply);
+
+  std::array<double, 3> x{1.0, -2.0, 0.5};
+  std::array<double, 2> y{2.0, -1.0};
+  std::array<double, 2> dx{};
+  std::array<double, 3> d_star_y{};
+  forward.submit(
+      {OperatorApplyMode::forward,
+       OperatorVectorView::from_const_host(x.data(), descriptor.domain),
+       nullptr,
+       OperatorVectorView::from_mutable_host(dx.data(), descriptor.range)});
+  adjoint.submit(
+      {OperatorApplyMode::forward,
+       OperatorVectorView::from_const_host(y.data(), descriptor.range),
+       nullptr,
+       OperatorVectorView::from_mutable_host(d_star_y.data(),
+                                             descriptor.domain)});
+  const double left = dx[0] * y[0] + dx[1] * y[1];
+  const double right = x[0] * d_star_y[0] + x[1] * d_star_y[1] +
+                       x[2] * d_star_y[2];
+  EXPECT_DOUBLE_EQ(left, right);
+
+  std::array<double, 2> round_trip{};
+  adjoint.submit(
+      {OperatorApplyMode::adjoint,
+       OperatorVectorView::from_const_host(x.data(), descriptor.domain),
+       nullptr,
+       OperatorVectorView::from_mutable_host(round_trip.data(),
+                                             descriptor.range)});
+  EXPECT_EQ(round_trip, dx);
+}
+
+TEST(LinearOperator, AdjointBindingRequiresExplicitProviderAction) {
+  const OperatorResourceStamp stamp{0, 0, 1, 1, 1, 1};
+  EXPECT_ANY_THROW(
+      make_adjoint_operator_binding(OperatorBinding(make_scale_action(
+          stamp, 2.0f))));
+}
+
 TEST(LinearOperator, GeneralizedApplyAllowsAddendOutputAlias) {
   OperatorDescriptor descriptor{scalar_space(PrimitiveType::f32, 2),
                                 scalar_space(PrimitiveType::f32, 2)};

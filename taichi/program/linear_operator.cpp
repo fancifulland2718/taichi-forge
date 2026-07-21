@@ -380,6 +380,17 @@ OperatorPinnedAction::OperatorPinnedAction(OperatorAction action,
       resource_lease_(std::move(resource_lease)) {
 }
 
+OperatorPinnedAction OperatorPinnedAction::from_retained_action(
+    OperatorAction action,
+    OperatorResourceStamp stamp,
+    OperatorResourceLease resource_lease) {
+  TI_ERROR_IF(operator_resource_changes(action.resource_stamp(), stamp) != 0,
+              "Retained operator action and resource stamp must describe "
+              "the same immutable generation.");
+  return OperatorPinnedAction(std::move(action), stamp,
+                              std::move(resource_lease));
+}
+
 OperatorPinnedAction::operator bool() const {
   return action_ != nullptr;
 }
@@ -1061,6 +1072,74 @@ OperatorAction make_dense_reference_operator_action(
         } else {
           apply(float64{});
         }
+      });
+}
+
+OperatorBinding make_adjoint_operator_binding(OperatorBinding operand) {
+  const auto &source = operand.action();
+  TI_ERROR_IF(!source.capabilities().adjoint_apply,
+              "Operator provider '{}' cannot form an adjoint binding "
+              "because explicit adjoint apply is unavailable; no "
+              "materialization or symmetry fallback was performed.",
+              source.provider_name());
+
+  const OperatorDescriptor descriptor{source.descriptor().range,
+                                      source.descriptor().domain};
+  OperatorMathematicalTraits traits;
+  if (source.descriptor().domain == source.descriptor().range) {
+    const auto derive = [](const OperatorTraitClaim &claim) {
+      if (!claim.known()) {
+        return OperatorTraitClaim{};
+      }
+      const auto provenance =
+          claim.provenance == OperatorTraitProvenance::empirically_checked
+              ? OperatorTraitProvenance::empirically_checked
+              : OperatorTraitProvenance::derived_structurally;
+      return OperatorTraitClaim{claim.value, provenance,
+                                claim.validity_scope};
+    };
+    const auto &source_traits = source.mathematical_traits();
+    traits.self_adjoint = derive(source_traits.self_adjoint);
+    traits.positive_definite = derive(source_traits.positive_definite);
+    traits.positive_semidefinite =
+        derive(source_traits.positive_semidefinite);
+    traits.singular = derive(source_traits.singular);
+  }
+
+  auto capabilities = source.capabilities();
+  capabilities.forward_apply = true;
+  capabilities.adjoint_apply = true;
+  capabilities.native_generalized_apply = false;
+  const std::string provider_name =
+      "adjoint(" + source.provider_name() + ")";
+  auto metadata = OperatorAction(
+      descriptor, traits, capabilities, provider_name,
+      [operand] { return operand.pin().resource_stamp(); },
+      [](OperatorApplyMode, const OperatorVectorView &,
+         const OperatorVectorView &) {
+        TI_ERROR("Adjoint operator metadata action cannot be submitted "
+                 "without pinning its operand generation.");
+      });
+  return OperatorBinding::from_generation_publisher(
+      std::move(metadata),
+      [operand = std::move(operand), descriptor, traits, capabilities,
+       provider_name] {
+        auto source_generation = operand.pin();
+        const auto stamp = source_generation.resource_stamp();
+        auto action = OperatorAction(
+            descriptor, traits, capabilities, provider_name,
+            [stamp] { return stamp; },
+            [source_generation = std::move(source_generation)](
+                OperatorApplyMode mode, const OperatorVectorView &input,
+                const OperatorVectorView &output) {
+              source_generation.apply_overwrite(
+                  mode == OperatorApplyMode::forward
+                      ? OperatorApplyMode::adjoint
+                      : OperatorApplyMode::forward,
+                  input, output);
+            });
+        return OperatorPinnedAction::from_retained_action(std::move(action),
+                                                          stamp);
       });
 }
 

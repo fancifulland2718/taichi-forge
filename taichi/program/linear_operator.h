@@ -237,6 +237,10 @@ class OperatorAction {
 class OperatorPinnedAction {
  public:
   OperatorPinnedAction() = default;
+  static OperatorPinnedAction from_retained_action(
+      OperatorAction action,
+      OperatorResourceStamp stamp,
+      OperatorResourceLease resource_lease = {});
 
   explicit operator bool() const;
   const OperatorDescriptor &descriptor() const;
@@ -481,6 +485,8 @@ class PreconditionerPlan {
 OperatorAction make_dense_reference_operator_action(
     OperatorDescriptor descriptor,
     std::vector<double> row_major_values);
+
+OperatorBinding make_adjoint_operator_binding(OperatorBinding operand);
 
 OperatorBinding make_cpu_csr_operator_binding(Program *program,
                                               CpuSparseCsrMatrix &matrix);
