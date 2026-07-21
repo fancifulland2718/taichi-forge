@@ -633,7 +633,9 @@ SparseSolvePlanRuntimeStatistics CUCG::debug_runtime_statistics() const {
                 static_cast<std::uint64_t>(workspace_size_) * sizeof(float);
   result.cublas_handle_count = handle_ != nullptr ? 1 : 0;
   result.device_to_device_bytes = device_to_device_bytes_;
-  append_operator_plan_statistics(*operator_plan_, false, result);
+  if (operator_plan_) {
+    append_operator_plan_statistics(*operator_plan_, false, result);
+  }
   if (preconditioner_plan_) {
     append_preconditioner_plan_statistics(*preconditioner_plan_, result);
   }
