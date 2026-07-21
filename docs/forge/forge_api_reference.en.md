@@ -1019,7 +1019,7 @@ The runtime-bound operator API is documented separately in
 | `LinearOperator.from_kernel(...)` / `.from_graph(...)` | Bind an exact f32 ndarray kernel ABI or a role-qualified compiled Graph. | CPU, CUDA, Vulkan; topology/numeric/workspace resources are operator-owned snapshots. |
 | `operator.apply(x, out=None)` / `operator @ x` | Apply one operator synchronously to a scalar 1-D Taichi ndarray. | All supported providers; exact dtype/extent and current runtime required. |
 | `operator.scaled(...)`, `operator + other`, `.compose(...)`, `.adjoint()`, `block_diagonal(...)`, `identity(...)` | Construct minimal linear-operator algebra. | CPU composition; explicit adjoint capability required. |
-| `ti.linalg.experimental.SolvePlan(operator, method=..., ...)` | Build a persistent CG, fixed stored PCG, or CPU BiCGSTAB plan. | Provider-qualified CPU/CUDA/Vulkan matrix; Vulkan uses absolute tolerance only. |
+| `ti.linalg.experimental.SolvePlan(operator, method=..., preconditioner=..., execution_policy=..., check_interval=...)` | Build a persistent CG, PCG, or CPU BiCGSTAB plan. | Built-in Jacobi/block-Jacobi or trusted fixed-linear PCG; CUDA/Vulkan support `host_check_every_k` with K=4/8 and absolute/relative tolerance. |
 | `plan.solve(rhs, initial_guess=None, out=None)` | Return an immutable `SolveResult` with solution and terminal residual/status fields. | Scalar 1-D Taichi ndarrays; no RHS/output aliasing or host staging. |
 | `operator.statistics()` / `plan.statistics()` | Return provider/plan execution and workspace diagnostics. | Diagnostic snapshot; not part of the numerical result. |
 

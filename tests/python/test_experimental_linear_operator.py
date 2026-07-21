@@ -198,7 +198,7 @@ def test_experimental_fixed_linear_operator_pcg():
     exact = np.asarray([0.5, -1.0, 2.0, 1.5], dtype=np.float32)
     rhs = _vector(diagonal.to_numpy() * exact)
     plan_options = {}
-    if impl.current_cfg().arch == ti.cuda:
+    if impl.current_cfg().arch in (ti.cuda, ti.vulkan):
         plan_options.update(
             execution_policy="host_check_every_k", check_interval=4
         )
@@ -221,12 +221,19 @@ def test_experimental_fixed_linear_operator_pcg():
     assert stats["operations"]["preconditioner_apply_calls"] > 0
     assert stats["operations"]["preconditioner_update_noops"] == 2
     assert stats["resources"]["external_preconditioner"]
-    if impl.current_cfg().arch == ti.cuda:
+    if impl.current_cfg().arch in (ti.cuda, ti.vulkan):
         assert stats["operations"]["host_scalar_reductions"] == 0
         assert stats["operations"]["wasted_iterations"] == 6
         assert stats["operations"]["executed_iterations"] == 8
         assert stats["operations"]["logical_iterations"] == 2
+    if impl.current_cfg().arch == ti.cuda:
         assert stats["resources"]["cublas_device_pointer_mode"]
+    if impl.current_cfg().arch == ti.vulkan:
+        assert (
+            stats["identity"]["solver_execution_policy"]
+            == "host_check_every_k"
+        )
+        assert stats["operations"]["solver_chunk_direct_submissions"] == 2
 
     operator.update_numeric(
         _vector(2.0 * diagonal.to_numpy()),

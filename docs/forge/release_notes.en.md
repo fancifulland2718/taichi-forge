@@ -82,6 +82,14 @@ retroactively attributed to the 0.5.0 artifact:
   unified `SolveResult` terminal state and support CPU/CUDA/Vulkan CG, fixed
   stored Jacobi/block-Jacobi PCG, and CPU BiCGSTAB within the documented
   provider matrix. CPU also supports minimal operator composition.
+- Extended `SolvePlan(method="pcg")` with trusted fixed-linear
+  `LinearOperator` preconditioners. CPU accepts supported operator provider
+  combinations; CUDA and Vulkan accept paired compiled-kernel A/M providers.
+  CUDA can keep CG recurrence scalars device-resident and check convergence
+  every 4 or 8 iterations. Vulkan supports the same chunk sizes and relative
+  tolerance while retaining fixed-budget masked execution as its compatible
+  default. Logical, executed, and wasted iterations and host checks are
+  reported separately.
 - Hardened direct-solver symbolic reuse. `factorize()` may reuse an analyzed
   pattern only when the complete compressed index pattern is identical, and a
   value update after factorization makes the factorization stale until it is

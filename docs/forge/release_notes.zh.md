@@ -71,6 +71,12 @@
   persistent plan 通过统一 `SolveResult` 返回 terminal state，并在文档支持矩阵内提供
   CPU/CUDA/Vulkan CG、fixed stored Jacobi/block-Jacobi PCG 和 CPU BiCGSTAB。CPU
   还支持最小 operator composition。
+- 扩展 `SolvePlan(method="pcg")`，支持可信 fixed-linear `LinearOperator`
+  preconditioner。CPU 接受受支持的 operator provider 组合；CUDA/Vulkan 接受成对的
+  compiled-kernel A/M provider。CUDA 可把 CG recurrence scalar 常驻 device，并每 4
+  或 8 iteration 检查收敛；Vulkan 支持相同 chunk size 与 relative tolerance，同时保留
+  fixed-budget masked execution 作为兼容默认值。logical、executed、wasted iteration
+  与 host check 会分别报告。
 - 强化 direct solver symbolic reuse：只有完整 compressed index pattern 相同，
   `factorize()` 才能复用已分析 pattern；factorization 后更新 values 会使分解
   stale，必须刷新后才能 solve。stable-fluid example 固定 pressure gauge，implicit

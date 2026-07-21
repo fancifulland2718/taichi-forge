@@ -177,8 +177,9 @@ implicit staging path.
 calls. Supported methods are:
 
 - `method="cg"`: identity-preconditioned conjugate gradient for SPD systems;
-- `method="pcg"`: ordinary PCG with a fixed-linear `"jacobi"` or
-  `"block_jacobi"` preconditioner on fixed stored matrices; and
+- `method="pcg"`: PCG with `"jacobi"` on fixed CSR,
+  `"block_jacobi"` on fixed BSR, or a trusted SPD `LinearOperator`
+  that applies a fixed-linear approximate inverse; and
 - `method="bicgstab"`: identity-preconditioned CPU BiCGSTAB for general square
   systems.
 
@@ -187,6 +188,28 @@ result = plan.solve(rhs, initial_guess=x0, out=x)
 print(result.iterations, result.residual_norm, result.termination_reason)
 stats = plan.statistics()
 ```
+
+A fixed-linear preconditioner is passed as an operator rather than as an
+application callback:
+
+```python
+plan = ti.linalg.experimental.SolvePlan(
+    operator,
+    method="pcg",
+    preconditioner=inverse_operator,
+    max_iterations=200,
+    atol=1e-7,
+    rtol=1e-5,
+)
+```
+
+`inverse_operator` maps the range of `operator` back to its domain and must
+have the same dtype. It must carry trusted self-adjoint, positive-definite,
+and nonsingular traits. CPU accepts any provider combination supported by
+the operator execution plan. CUDA and Vulkan require both the system
+operator and preconditioner to be compiled-kernel providers. Their topology
+and numeric generations are pinned together for each solve; there is no
+host callback or backend fallback.
 
 `rhs`, `initial_guess`, and `out` must match the operator dtype and scalar
 extent and belong to the current runtime. If `out` is omitted, the plan creates
@@ -204,9 +227,49 @@ The result record is frozen; its `solution` ndarray remains caller-writable.
 ||b - A x||_2 <= max(atol, rtol * ||b||_2)
 ```
 
-Vulkan currently uses bounded masked convergence and accepts `rtol=0` only.
 `statistics()` exposes backend-neutral plan/provider/workspace counters; it is
 diagnostic data, not part of the numerical result.
+
+### GPU execution policy
+
+`execution_policy` controls when a GPU solve observes convergence on the
+host:
+
+```python
+plan = ti.linalg.experimental.SolvePlan(
+    operator,
+    method="cg",
+    max_iterations=200,
+    atol=1e-7,
+    rtol=1e-5,
+    execution_policy="host_check_every_k",
+    check_interval=8,
+)
+```
+
+- CPU supports `"host_each_iteration"` only.
+- CUDA defaults to `"host_each_iteration"` for compatibility and also
+  supports `"host_check_every_k"` with `check_interval=4` or `8`.
+  The chunked policy keeps recurrence scalars on the device and reads one
+  terminal snapshot per chunk.
+- Vulkan defaults to `"fixed_budget_masked"` and also supports
+  `"host_check_every_k"` with `check_interval=4` or `8`. Both policies
+  support `atol`, `rtol`, and their combined effective tolerance.
+
+A chunk always completes before its terminal state is inspected. The reported
+`SolveResult.iterations` is the logical convergence or breakdown iteration;
+`statistics()["operations"]` separately reports `executed_iterations`,
+`wasted_iterations`, host synchronization counts, and direct chunk
+submissions. A chunked solve can therefore execute up to `K - 1` masked
+or otherwise inactive tail iterations. Vulkan fixed-budget execution may
+execute the full `max_iterations` while preserving an earlier logical
+termination result.
+
+Use `K=4` when earlier termination is more important than synchronization
+frequency and `K=8` when amortizing host checks is more important. The
+faster choice depends on vector size, operator cost, iteration count, driver,
+and backend. Unsupported policies and intervals fail during plan
+construction; they do not silently fall back.
 
 ## Support matrix
 
@@ -223,15 +286,14 @@ diagnostic data, not part of the numerical result.
 
 | Method/provider | CPU | CUDA | Vulkan |
 | --- | --- | --- | --- |
-| CG, fixed stored | CSR/BSR, `f32/f64` | CSR, `f32` | CSR/BSR, `f32`, absolute tolerance |
-| CG, compiled kernel/Graph | `f32` | `f32` | `f32`, absolute tolerance |
+| CG, fixed stored | CSR/BSR, `f32/f64` | CSR, `f32` | CSR/BSR, `f32` |
+| CG, compiled kernel/Graph | `f32` | `f32` | `f32` |
 | CG, CPU composition | `f32/f64` | Unsupported | Unsupported |
-| PCG + Jacobi | Fixed CSR, `f32/f64` | Fixed CSR, `f32` | Fixed CSR, `f32`, absolute tolerance |
-| PCG + block-Jacobi | Fixed BSR, `f32/f64` | Fixed BSR, `f32` | Fixed BSR, `f32`, absolute tolerance |
+| PCG + Jacobi | Fixed CSR, `f32/f64` | Fixed CSR, `f32` | Fixed CSR, `f32` |
+| PCG + block-Jacobi | Fixed BSR, `f32/f64` | Fixed BSR, `f32` | Fixed BSR, `f32` |
+| PCG + fixed-linear operator | Supported providers, `f32/f64` | Compiled-kernel A/M, `f32` | Compiled-kernel A/M, `f32` |
 | BiCGSTAB | Any supported CPU operator, `f32/f64` | Unsupported | Unsupported |
 
-Compiled-kernel inverse preconditioners remain available through lower-level
-provider APIs but are not accepted by this public `SolvePlan` contract.
 MINRES and direct factorization remain stored-matrix APIs.
 
 ## Numeric updates and ownership

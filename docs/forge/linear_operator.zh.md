@@ -161,8 +161,9 @@ scale、sum、composition、block diagonal 和 identity 当前在 CPU 上执行�
 `SolvePlan` 会跨多次调用保留 operator、solver state 和 persistent workspace。支持：
 
 - `method="cg"`：面向 SPD 系统、使用 identity preconditioner 的 conjugate gradient；
-- `method="pcg"`：fixed stored matrix 上使用 fixed-linear `"jacobi"` 或
-  `"block_jacobi"` 的普通 PCG；
+- `method="pcg"`：fixed CSR 上使用 `"jacobi"`、fixed BSR 上使用
+  `"block_jacobi"`，或使用一个可信 SPD `LinearOperator` 应用 fixed-linear
+  近似逆的 PCG；
 - `method="bicgstab"`：面向一般 square 系统、使用 identity preconditioner 的 CPU
   BiCGSTAB。
 
@@ -171,6 +172,25 @@ result = plan.solve(rhs, initial_guess=x0, out=x)
 print(result.iterations, result.residual_norm, result.termination_reason)
 stats = plan.statistics()
 ```
+
+fixed-linear preconditioner 作为 operator 传入，而不是应用回调：
+
+```python
+plan = ti.linalg.experimental.SolvePlan(
+    operator,
+    method="pcg",
+    preconditioner=inverse_operator,
+    max_iterations=200,
+    atol=1e-7,
+    rtol=1e-5,
+)
+```
+
+`inverse_operator` 必须把 `operator` 的 range 映射回 domain，且 dtype 相同；它必须
+携带可信的 self-adjoint、positive-definite 与 nonsingular trait。CPU 接受 operator
+execution plan 支持的 provider 组合；CUDA/Vulkan 要求系统 operator 与 preconditioner
+都是 compiled-kernel provider。每次 solve 会成对 pin 它们的 topology 与 numeric
+generation，不调用 host callback，也不执行 backend fallback。
 
 `rhs`、`initial_guess` 和 `out` 必须与 operator 的 dtype、scalar extent 一致，并属于当前
 runtime。未提供 `out` 时会创建结果 ndarray；未提供 `initial_guess` 时结果初始化为零。
@@ -186,8 +206,43 @@ result record 本身是 frozen 的；其中的 `solution` ndarray 仍可由调�
 ||b - A x||_2 <= max(atol, rtol * ||b||_2)
 ```
 
-Vulkan 当前使用 bounded masked convergence，只接受 `rtol=0`。`statistics()` 返回
-backend-neutral plan/provider/workspace counter；它是诊断信息，不属于数值结果。
+`statistics()` 返回 backend-neutral plan/provider/workspace counter；它是诊断信息，
+不属于数值结果。
+
+### GPU 执行策略
+
+`execution_policy` 控制 GPU solve 在何时由 host 观察收敛状态：
+
+```python
+plan = ti.linalg.experimental.SolvePlan(
+    operator,
+    method="cg",
+    max_iterations=200,
+    atol=1e-7,
+    rtol=1e-5,
+    execution_policy="host_check_every_k",
+    check_interval=8,
+)
+```
+
+- CPU 只支持 `"host_each_iteration"`。
+- CUDA 为兼容性默认使用 `"host_each_iteration"`，还支持
+  `"host_check_every_k"`，其中 `check_interval` 可为 4 或 8。分块策略把 recurrence
+  scalar 保留在 device 上，每个 chunk 只读取一次 terminal snapshot。
+- Vulkan 默认使用 `"fixed_budget_masked"`，还支持
+  `"host_check_every_k"`，其中 `check_interval` 可为 4 或 8。两种策略均支持
+  `atol`、`rtol` 及其组合后的 effective tolerance。
+
+host 检查状态前，一个 chunk 总会完整执行。`SolveResult.iterations` 表示逻辑上的
+convergence 或 breakdown iteration；`statistics()["operations"]` 另行报告
+`executed_iterations`、`wasted_iterations`、host synchronization 次数和 direct
+chunk submission。因此 chunked solve 最多可能多执行 `K - 1` 轮 masked 或其它 inactive
+tail。Vulkan fixed-budget execution 可以执行完整的 `max_iterations`，同时保留更早发生
+的逻辑终止结果。
+
+当更早终止比同步频率更重要时可选 `K=4`；当摊薄 host check 更重要时可选 `K=8`。
+较快选择取决于 vector size、operator 成本、iteration count、driver 与 backend。不受支持
+的 policy 或 interval 会在 plan 构造时失败，不会静默 fallback。
 
 ## 支持矩阵
 
@@ -204,15 +259,15 @@ backend-neutral plan/provider/workspace counter；它是诊断信息，不属于
 
 | Method/provider | CPU | CUDA | Vulkan |
 | --- | --- | --- | --- |
-| CG，fixed stored | CSR/BSR，`f32/f64` | CSR，`f32` | CSR/BSR，`f32`，absolute tolerance |
-| CG，compiled kernel/Graph | `f32` | `f32` | `f32`，absolute tolerance |
+| CG，fixed stored | CSR/BSR，`f32/f64` | CSR，`f32` | CSR/BSR，`f32` |
+| CG，compiled kernel/Graph | `f32` | `f32` | `f32` |
 | CG，CPU composition | `f32/f64` | 不支持 | 不支持 |
-| PCG + Jacobi | fixed CSR，`f32/f64` | fixed CSR，`f32` | fixed CSR，`f32`，absolute tolerance |
-| PCG + block-Jacobi | fixed BSR，`f32/f64` | fixed BSR，`f32` | fixed BSR，`f32`，absolute tolerance |
+| PCG + Jacobi | fixed CSR，`f32/f64` | fixed CSR，`f32` | fixed CSR，`f32` |
+| PCG + block-Jacobi | fixed BSR，`f32/f64` | fixed BSR，`f32` | fixed BSR，`f32` |
+| PCG + fixed-linear operator | 受支持 provider，`f32/f64` | compiled-kernel A/M，`f32` | compiled-kernel A/M，`f32` |
 | BiCGSTAB | 任意受支持 CPU operator，`f32/f64` | 不支持 | 不支持 |
 
-compiled-kernel inverse preconditioner 仍可通过低层 provider API 使用，但不属于此公开
-`SolvePlan` 合同。MINRES 和 direct factorization 继续使用 stored-matrix API。
+MINRES 和 direct factorization 继续使用 stored-matrix API。
 
 ## Numeric update 与所有权
 

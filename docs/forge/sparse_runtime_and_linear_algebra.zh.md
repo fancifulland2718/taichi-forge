@@ -173,8 +173,8 @@ ndarray RHS；CUDA 文档路径要求 Taichi ndarray。shape 与 dtype 必须与
 | `SparseBiCGSTAB` | 显式非对称 square matrix | mutable CSR/CSC 与 fixed CSR/BSR，`f32/f64` | 不支持 | 不支持 |
 | `MatrixFreeCG` | SPD 应用 operator | field/kernel 路径 | field/kernel 路径 | backend/dtype 支持该 operator 时可用 |
 | `MatrixFreeBICGSTAB` | 非对称应用 operator | field/kernel 路径 | field/kernel 路径 | backend/dtype 支持该 operator 时可用 |
-| `experimental.SolvePlan(method="cg")` | trait-qualified SPD stored/kernel/Graph operator | fixed CSR/BSR 与 composition，`f32/f64`；compiled provider 为 `f32` | fixed CSR 与 compiled provider，`f32` | fixed CSR/BSR 与 compiled provider，`f32`；absolute tolerance |
-| `experimental.SolvePlan(method="pcg")` | trait-qualified SPD fixed stored operator | CSR Jacobi 或 BSR block-Jacobi，`f32/f64` | CSR Jacobi 或 BSR block-Jacobi，`f32` | CSR Jacobi 或 BSR block-Jacobi，`f32`；absolute tolerance |
+| `experimental.SolvePlan(method="cg")` | trait-qualified SPD stored/kernel/Graph operator | fixed CSR/BSR 与 composition，`f32/f64`；compiled provider 为 `f32` | fixed CSR 与 compiled provider，`f32` | fixed CSR/BSR 与 compiled provider，`f32` |
+| `experimental.SolvePlan(method="pcg")` | trait-qualified SPD operator 与 preconditioner | CSR Jacobi、BSR block-Jacobi 或 fixed-linear operator，`f32/f64` | CSR/BSR 内置项或 compiled-kernel A/M，`f32` | CSR/BSR 内置项或 compiled-kernel A/M，`f32` |
 | `experimental.SolvePlan(method="bicgstab")` | 一般 square operator | 任意受支持 experimental CPU provider，`f32/f64` | 不支持 | 不支持 |
 
 Taichi 不会从 CSR/BSR shape 推断 symmetry、definiteness、nullspace 或
@@ -190,7 +190,9 @@ scale/sum/composition/adjoint/block-diagonal 代数；不受支持的 GPU compos
 不执行 host fallback。
 
 `experimental.SolvePlan` 跨 RHS 调用保留 solver workspace，并返回同时包含 solution 与
-完整 terminal state 的 `SolveResult`。该 API 不替代 mutable Eigen sparse matrix、MINRES
+完整 terminal state 的 `SolveResult`。CUDA/Vulkan 支持显式的 4 或 8 iteration
+host-check chunk；Vulkan 还保留 fixed-budget masked execution 作为默认策略。两个 GPU
+backend 使用相同的 absolute/relative residual 合同。该 API 不替代 mutable Eigen sparse matrix、MINRES
 或 direct factorization。provider ABI、所有权、update generation、示例和精确 backend
 矩阵见[实验性 LinearOperator 与 SolvePlan](linear_operator.zh.md)。
 

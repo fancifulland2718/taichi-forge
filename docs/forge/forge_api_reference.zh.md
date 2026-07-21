@@ -900,7 +900,7 @@ operator API 另见[实验性 LinearOperator 与 SolvePlan](linear_operator.zh.m
 | `LinearOperator.from_kernel(...)` / `.from_graph(...)` | 绑定精确 f32 ndarray kernel ABI 或按 role 分类的 compiled Graph。 | CPU、CUDA、Vulkan；topology/numeric/workspace 为 operator-owned snapshot。 |
 | `operator.apply(x, out=None)` / `operator @ x` | 对一维 scalar Taichi ndarray 同步应用 operator。 | 所有受支持 provider；dtype/extent 必须精确匹配并属于当前 runtime。 |
 | `operator.scaled(...)`、`operator + other`、`.compose(...)`、`.adjoint()`、`block_diagonal(...)`、`identity(...)` | 构造最小线性算子代数。 | CPU composition；adjoint 需要显式 capability。 |
-| `ti.linalg.experimental.SolvePlan(operator, method=..., ...)` | 构造 persistent CG、fixed stored PCG 或 CPU BiCGSTAB plan。 | provider-qualified CPU/CUDA/Vulkan 矩阵；Vulkan 只使用 absolute tolerance。 |
+| `ti.linalg.experimental.SolvePlan(operator, method=..., preconditioner=..., execution_policy=..., check_interval=...)` | 构造 persistent CG、PCG 或 CPU BiCGSTAB plan。 | PCG 可用内置 Jacobi/block-Jacobi 或可信 fixed-linear operator；CUDA/Vulkan 支持 K=4/8 的 `host_check_every_k` 与 absolute/relative tolerance。 |
 | `plan.solve(rhs, initial_guess=None, out=None)` | 返回 immutable `SolveResult`，包含 solution 与 terminal residual/status 字段。 | 一维 scalar Taichi ndarray；禁止 RHS/output alias 和 host staging。 |
 | `operator.statistics()` / `plan.statistics()` | 返回 provider/plan execution 与 workspace 诊断。 | diagnostic snapshot，不属于数值结果。 |
 
