@@ -9,6 +9,30 @@
 namespace taichi::lang {
 namespace {
 
+OperatorMathematicalTraits legacy_cg_traits() {
+  const auto scope =
+      operator_dependency(OperatorResourceDependency::program) |
+      operator_dependency(OperatorResourceDependency::schema) |
+      operator_dependency(OperatorResourceDependency::topology) |
+      operator_dependency(OperatorResourceDependency::numeric);
+  return make_spd_operator_traits(
+      OperatorTraitProvenance::asserted_by_user, scope);
+}
+
+OperatorBinding with_legacy_cg_traits(OperatorBinding binding) {
+  return binding.with_mathematical_traits(legacy_cg_traits());
+}
+
+void validate_cg_plan(const OperatorPlan &operator_plan,
+                      const PreconditionerPlan *preconditioner_plan) {
+  validate_operator_solver_compatibility(
+      operator_plan.descriptor(), operator_plan.mathematical_traits(),
+      preconditioner_plan ? OperatorSolverFamily::pcg
+                          : OperatorSolverFamily::cg,
+      preconditioner_plan ? preconditioner_plan->behavior()
+                          : PreconditionerBehavior::fixed_linear);
+}
+
 OperatorBinding bind_preconditioner_action(
     Program *program,
     SparseMatrix &matrix,
@@ -90,12 +114,13 @@ CUCG::CUCG(Program *program,
   TI_ERROR_IF(!cuda_csr_operator_,
               "CUDA Jacobi-PCG currently requires a CSR matrix.");
   operator_plan_ = std::make_unique<OperatorPlan>(
-      program_, make_cuda_csr_operator_binding(program_,
-                                               *cuda_csr_operator_));
+      program_, with_legacy_cg_traits(make_cuda_csr_operator_binding(
+                    program_, *cuda_csr_operator_)));
   validate_controls();
   preconditioner_plan_ = make_fixed_preconditioner_plan(
       program_, *operator_plan_, A_, preconditioner, "cuda_jacobi",
       "jacobi");
+  validate_cg_plan(*operator_plan_, preconditioner_plan_.get());
   init_solver();
 }
 
@@ -117,12 +142,13 @@ CUCG::CUCG(Program *program,
   TI_ERROR_IF(!cuda_bsr_operator_,
               "CUDA block-Jacobi PCG requires an internal BSR matrix.");
   operator_plan_ = std::make_unique<OperatorPlan>(
-      program_, make_cuda_bsr_operator_binding(program_,
-                                               *cuda_bsr_operator_));
+      program_, with_legacy_cg_traits(make_cuda_bsr_operator_binding(
+                    program_, *cuda_bsr_operator_)));
   validate_controls();
   preconditioner_plan_ = make_fixed_preconditioner_plan(
       program_, *operator_plan_, A_, preconditioner, "cuda_block_jacobi",
       "block_jacobi");
+  validate_cg_plan(*operator_plan_, preconditioner_plan_.get());
   init_solver();
 }
 
@@ -146,12 +172,14 @@ CUCG::CUCG(Program *program,
               "CUDA compiled-kernel CG requires its owning CUDA Program.");
   validate_controls();
   operator_plan_ = std::make_unique<OperatorPlan>(
-      program_, make_cuda_program_kernel_operator_binding(program_, A));
+      program_, with_legacy_cg_traits(
+                    make_cuda_program_kernel_operator_binding(program_, A)));
   if (compiled_kernel_preconditioner_) {
     preconditioner_plan_ = make_fixed_preconditioner_plan(
         program_, *operator_plan_, A, *compiled_kernel_preconditioner_,
         "cuda_compiled_inverse_apply", "compiled_kernel_inverse_apply");
   }
+  validate_cg_plan(*operator_plan_, preconditioner_plan_.get());
   init_solver();
 }
 
@@ -240,8 +268,9 @@ void CUCG::ensure_operator_plan(Program *program) {
               "Program and CSR operator.");
   program_ = program;
   operator_plan_ = std::make_unique<OperatorPlan>(
-      program_, make_cuda_csr_operator_binding(program_,
-                                               *cuda_csr_operator_));
+      program_, with_legacy_cg_traits(make_cuda_csr_operator_binding(
+                    program_, *cuda_csr_operator_)));
+  validate_cg_plan(*operator_plan_, nullptr);
 }
 
 void CUCG::init_solver() {
@@ -1105,7 +1134,7 @@ CpuSparseCGPlan::CpuSparseCGPlan(
               "CPU operator CG/PCG requires finite non-negative atol and rtol "
               "with at least one positive tolerance.");
   operator_plan_ = std::make_unique<OperatorPlan>(
-      program_, std::move(operator_binding));
+      program_, with_legacy_cg_traits(std::move(operator_binding)));
   auto initial_generation = operator_plan_->pin();
   const auto initial_stamp = initial_generation.resource_stamp();
   TI_ERROR_IF(
@@ -1121,6 +1150,7 @@ CpuSparseCGPlan::CpuSparseCGPlan(
         std::move(preconditioner_binding_->update));
     preconditioner_plan_->setup(initial_generation);
   }
+  validate_cg_plan(*operator_plan_, preconditioner_plan_.get());
   try {
     for (auto &vector : workspace_) {
       vector = program_->create_ndarray(dtype_, {rows_},
@@ -1629,14 +1659,19 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
   adaptive_ = adaptive;
   if (compiled_kernel_operator_) {
     operator_plan_ = std::make_unique<OperatorPlan>(
-        program_, make_vulkan_program_kernel_operator_binding(
-                      program_, *compiled_kernel_operator_));
+        program_, with_legacy_cg_traits(
+                      make_vulkan_program_kernel_operator_binding(
+                          program_, *compiled_kernel_operator_)));
   } else if (bsr_matrix_) {
     operator_plan_ = std::make_unique<OperatorPlan>(
-        program_, make_vulkan_bsr_operator_binding(program_, *bsr_matrix_));
+        program_, with_legacy_cg_traits(
+                      make_vulkan_bsr_operator_binding(program_,
+                                                       *bsr_matrix_)));
   } else {
     operator_plan_ = std::make_unique<OperatorPlan>(
-        program_, make_vulkan_csr_operator_binding(program_, *csr_matrix_));
+        program_, with_legacy_cg_traits(
+                      make_vulkan_csr_operator_binding(program_,
+                                                       *csr_matrix_)));
   }
   if (preconditioner_) {
     preconditioner_plan_ = make_fixed_preconditioner_plan(
@@ -1652,6 +1687,7 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
         *compiled_kernel_preconditioner_,
         "vulkan_compiled_inverse_apply", "compiled_kernel_inverse_apply");
   }
+  validate_cg_plan(*operator_plan_, preconditioner_plan_.get());
   const int n = matrix.num_rows();
   auto create_vector = [&]() {
     return program->create_ndarray(PrimitiveType::f32, {n},

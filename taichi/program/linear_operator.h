@@ -57,6 +57,44 @@ struct OperatorCapabilities {
   bool asynchronous_submit{false};
 };
 
+using OperatorDependencyMask = std::uint32_t;
+
+enum class OperatorTraitProvenance : std::uint8_t {
+  unspecified,
+  asserted_by_user,
+  derived_structurally,
+  constructed_by_framework,
+  empirically_checked,
+};
+
+struct OperatorTraitClaim {
+  bool value{false};
+  OperatorTraitProvenance provenance{
+      OperatorTraitProvenance::unspecified};
+  OperatorDependencyMask validity_scope{0};
+
+  bool known() const {
+    return provenance != OperatorTraitProvenance::unspecified;
+  }
+};
+
+struct OperatorMathematicalTraits {
+  OperatorTraitClaim self_adjoint;
+  OperatorTraitClaim positive_definite;
+  OperatorTraitClaim positive_semidefinite;
+  OperatorTraitClaim singular;
+};
+
+OperatorMathematicalTraits make_spd_operator_traits(
+    OperatorTraitProvenance provenance,
+    OperatorDependencyMask validity_scope);
+
+enum class OperatorSolverFamily : std::uint8_t {
+  cg,
+  pcg,
+  bicgstab,
+};
+
 struct OperatorResourceStamp {
   std::uintptr_t program_identity{0};
   std::uint64_t program_generation{0};
@@ -73,8 +111,6 @@ enum class OperatorResourceDependency : std::uint32_t {
   numeric = 1u << 3,
   binding = 1u << 4,
 };
-
-using OperatorDependencyMask = std::uint32_t;
 
 constexpr OperatorDependencyMask operator_dependency(
     OperatorResourceDependency dependency) {
@@ -172,14 +208,23 @@ class OperatorAction {
                  std::string provider_name,
                  ResourceStampFn resource_stamp,
                  OverwriteApplyFn overwrite_apply);
+  OperatorAction(OperatorDescriptor descriptor,
+                 OperatorMathematicalTraits mathematical_traits,
+                 OperatorCapabilities capabilities,
+                 std::string provider_name,
+                 ResourceStampFn resource_stamp,
+                 OverwriteApplyFn overwrite_apply);
 
   const OperatorDescriptor &descriptor() const;
+  const OperatorMathematicalTraits &mathematical_traits() const;
   const OperatorCapabilities &capabilities() const;
   const std::string &provider_name() const;
   OperatorResourceStamp resource_stamp() const;
   void apply_overwrite(OperatorApplyMode mode,
                        const OperatorVectorView &input,
                        const OperatorVectorView &output) const;
+  OperatorAction with_mathematical_traits(
+      OperatorMathematicalTraits mathematical_traits) const;
 
  private:
   struct State;
@@ -194,12 +239,15 @@ class OperatorPinnedAction {
 
   explicit operator bool() const;
   const OperatorDescriptor &descriptor() const;
+  const OperatorMathematicalTraits &mathematical_traits() const;
   const OperatorCapabilities &capabilities() const;
   const std::string &provider_name() const;
   OperatorResourceStamp resource_stamp() const;
   void apply_overwrite(OperatorApplyMode mode,
                        const OperatorVectorView &input,
                        const OperatorVectorView &output) const;
+  OperatorPinnedAction with_mathematical_traits(
+      OperatorMathematicalTraits mathematical_traits) const;
 
  private:
   friend class OperatorBinding;
@@ -287,6 +335,8 @@ class OperatorBinding {
       AcquirePinnedActionFn acquire_pinned_action);
 
   const OperatorAction &action() const;
+  OperatorBinding with_mathematical_traits(
+      OperatorMathematicalTraits mathematical_traits) const;
   OperatorResourceLease acquire_resource_lease() const;
   OperatorPinnedAction pin() const;
 
@@ -329,6 +379,7 @@ class OperatorPlan {
   ~OperatorPlan();
 
   const OperatorDescriptor &descriptor() const;
+  const OperatorMathematicalTraits &mathematical_traits() const;
   const OperatorCapabilities &capabilities() const;
   const std::string &provider_name() const;
   OperatorDependencyMask dependencies() const;
@@ -365,6 +416,13 @@ enum class PreconditionerBehavior : std::uint8_t {
   variable_linear,
   nonlinear,
 };
+
+void validate_operator_solver_compatibility(
+    const OperatorDescriptor &descriptor,
+    const OperatorMathematicalTraits &traits,
+    OperatorSolverFamily family,
+    PreconditionerBehavior preconditioner_behavior =
+        PreconditionerBehavior::fixed_linear);
 
 struct PreconditionerPlanRuntimeStatistics {
   std::uint64_t setup_calls{0};

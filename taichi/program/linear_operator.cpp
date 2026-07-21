@@ -155,6 +155,81 @@ bool OperatorSpaceDesc::operator==(const OperatorSpaceDesc &other) const {
          inner_product_kind == other.inner_product_kind;
 }
 
+OperatorMathematicalTraits make_spd_operator_traits(
+    OperatorTraitProvenance provenance,
+    OperatorDependencyMask validity_scope) {
+  TI_ERROR_IF(provenance == OperatorTraitProvenance::unspecified ||
+                  validity_scope == 0,
+              "SPD traits require explicit provenance and validity scope.");
+  OperatorMathematicalTraits traits;
+  traits.self_adjoint = {true, provenance, validity_scope};
+  traits.positive_definite = {true, provenance, validity_scope};
+  traits.positive_semidefinite = {true, provenance, validity_scope};
+  traits.singular = {false, provenance, validity_scope};
+  return traits;
+}
+
+namespace {
+
+bool trait_is_trusted_true(const OperatorTraitClaim &claim) {
+  return claim.known() && claim.value &&
+         claim.provenance != OperatorTraitProvenance::empirically_checked;
+}
+
+void validate_trait_claim(const OperatorTraitClaim &claim,
+                          const char *name) {
+  TI_ERROR_IF(claim.known() && claim.validity_scope == 0,
+              "Operator trait '{}' requires a non-empty validity scope.",
+              name);
+  TI_ERROR_IF(!claim.known() && claim.validity_scope != 0,
+              "Unknown operator trait '{}' must not carry validity scope.",
+              name);
+}
+
+bool same_trait_claim(const OperatorTraitClaim &left,
+                      const OperatorTraitClaim &right) {
+  return left.value == right.value &&
+         left.provenance == right.provenance &&
+         left.validity_scope == right.validity_scope;
+}
+
+bool same_mathematical_traits(const OperatorMathematicalTraits &left,
+                              const OperatorMathematicalTraits &right) {
+  return same_trait_claim(left.self_adjoint, right.self_adjoint) &&
+         same_trait_claim(left.positive_definite,
+                          right.positive_definite) &&
+         same_trait_claim(left.positive_semidefinite,
+                          right.positive_semidefinite) &&
+         same_trait_claim(left.singular, right.singular);
+}
+
+}  // namespace
+
+void validate_operator_solver_compatibility(
+    const OperatorDescriptor &descriptor,
+    const OperatorMathematicalTraits &traits,
+    OperatorSolverFamily family,
+    PreconditionerBehavior preconditioner_behavior) {
+  TI_ERROR_IF(descriptor.domain != descriptor.range,
+              "Krylov solver requires a square operator descriptor.");
+  if (family == OperatorSolverFamily::bicgstab) {
+    return;
+  }
+  TI_ERROR_IF(family == OperatorSolverFamily::pcg &&
+                  preconditioner_behavior !=
+                      PreconditionerBehavior::fixed_linear,
+              "Ordinary PCG requires a fixed-linear preconditioner; "
+              "flexible or nonlinear behavior needs a compatible solver.");
+  TI_ERROR_IF(!trait_is_trusted_true(traits.self_adjoint),
+              "CG/PCG requires a trusted self-adjoint trait; "
+              "unknown or empirically-checked claims are insufficient.");
+  TI_ERROR_IF(!trait_is_trusted_true(traits.positive_definite),
+              "CG/PCG requires a trusted positive-definite trait; "
+              "unknown or empirically-checked claims are insufficient.");
+  TI_ERROR_IF(traits.singular.known() && traits.singular.value,
+              "CG/PCG rejects operators declared singular.");
+}
+
 OperatorVectorView OperatorVectorView::from_const_host(
     const void *data,
     const OperatorSpaceDesc &space) {
@@ -207,6 +282,7 @@ OperatorVectorView OperatorVectorView::from_device_pointer(
 
 struct OperatorAction::State {
   OperatorDescriptor descriptor;
+  OperatorMathematicalTraits mathematical_traits;
   OperatorCapabilities capabilities;
   std::string provider_name;
   ResourceStampFn resource_stamp;
@@ -217,20 +293,49 @@ OperatorAction::OperatorAction(OperatorDescriptor descriptor,
                                OperatorCapabilities capabilities,
                                std::string provider_name,
                                ResourceStampFn resource_stamp,
-                               OverwriteApplyFn overwrite_apply) {
+                               OverwriteApplyFn overwrite_apply)
+    : OperatorAction(std::move(descriptor), OperatorMathematicalTraits{},
+                     capabilities, std::move(provider_name),
+                     std::move(resource_stamp), std::move(overwrite_apply)) {
+}
+
+OperatorAction::OperatorAction(
+    OperatorDescriptor descriptor,
+    OperatorMathematicalTraits mathematical_traits,
+    OperatorCapabilities capabilities,
+    std::string provider_name,
+    ResourceStampFn resource_stamp,
+    OverwriteApplyFn overwrite_apply) {
   validate_space(descriptor.domain, "domain");
   validate_space(descriptor.range, "range");
+  validate_trait_claim(mathematical_traits.self_adjoint, "self_adjoint");
+  validate_trait_claim(mathematical_traits.positive_definite,
+                       "positive_definite");
+  validate_trait_claim(mathematical_traits.positive_semidefinite,
+                       "positive_semidefinite");
+  validate_trait_claim(mathematical_traits.singular, "singular");
+  TI_ERROR_IF(mathematical_traits.positive_definite.known() &&
+                  mathematical_traits.positive_definite.value &&
+                  (!mathematical_traits.self_adjoint.known() ||
+                   !mathematical_traits.self_adjoint.value),
+              "A positive-definite trait requires an explicit true "
+              "self-adjoint trait.");
   TI_ERROR_IF(provider_name.empty() || !resource_stamp || !overwrite_apply ||
                   !capabilities.forward_apply,
               "OperatorAction requires a named forward provider, resource "
               "stamp, and overwrite apply function.");
-  state_ = std::make_shared<State>(
-      State{std::move(descriptor), capabilities, std::move(provider_name),
-            std::move(resource_stamp), std::move(overwrite_apply)});
+  state_ = std::make_shared<State>(State{
+      std::move(descriptor), std::move(mathematical_traits), capabilities,
+      std::move(provider_name), std::move(resource_stamp),
+      std::move(overwrite_apply)});
 }
 
 const OperatorDescriptor &OperatorAction::descriptor() const {
   return state_->descriptor;
+}
+
+const OperatorMathematicalTraits &OperatorAction::mathematical_traits() const {
+  return state_->mathematical_traits;
 }
 
 const OperatorCapabilities &OperatorAction::capabilities() const {
@@ -256,6 +361,13 @@ void OperatorAction::apply_overwrite(OperatorApplyMode mode,
   state_->overwrite_apply(mode, input, output);
 }
 
+OperatorAction OperatorAction::with_mathematical_traits(
+    OperatorMathematicalTraits mathematical_traits) const {
+  return OperatorAction(state_->descriptor, std::move(mathematical_traits),
+                        state_->capabilities, state_->provider_name,
+                        state_->resource_stamp, state_->overwrite_apply);
+}
+
 OperatorResourceLease::OperatorResourceLease(std::shared_ptr<void> state)
     : state_(std::move(state)) {
 }
@@ -275,6 +387,12 @@ OperatorPinnedAction::operator bool() const {
 const OperatorDescriptor &OperatorPinnedAction::descriptor() const {
   TI_ERROR_IF(!action_, "Operator generation pin is empty.");
   return action_->descriptor();
+}
+
+const OperatorMathematicalTraits &
+OperatorPinnedAction::mathematical_traits() const {
+  TI_ERROR_IF(!action_, "Operator generation pin is empty.");
+  return action_->mathematical_traits();
 }
 
 const OperatorCapabilities &OperatorPinnedAction::capabilities() const {
@@ -298,6 +416,14 @@ void OperatorPinnedAction::apply_overwrite(
     const OperatorVectorView &output) const {
   TI_ERROR_IF(!action_, "Operator generation pin is empty.");
   action_->apply_overwrite(mode, input, output);
+}
+
+OperatorPinnedAction OperatorPinnedAction::with_mathematical_traits(
+    OperatorMathematicalTraits mathematical_traits) const {
+  TI_ERROR_IF(!action_, "Operator generation pin is empty.");
+  return OperatorPinnedAction(
+      action_->with_mathematical_traits(std::move(mathematical_traits)),
+      stamp_, resource_lease_);
 }
 
 OperatorSubmission::OperatorSubmission(OperatorPinnedAction generation,
@@ -475,6 +601,18 @@ const OperatorAction &OperatorBinding::action() const {
   return action_;
 }
 
+OperatorBinding OperatorBinding::with_mathematical_traits(
+    OperatorMathematicalTraits mathematical_traits) const {
+  auto source = *this;
+  auto metadata = action_.with_mathematical_traits(mathematical_traits);
+  return OperatorBinding::from_generation_publisher(
+      std::move(metadata),
+      [source = std::move(source),
+       mathematical_traits = std::move(mathematical_traits)] {
+        return source.pin().with_mathematical_traits(mathematical_traits);
+      });
+}
+
 OperatorResourceLease OperatorBinding::acquire_resource_lease() const {
   if (acquire_pinned_action_) {
     return OperatorResourceLease::hold(acquire_pinned_action_());
@@ -543,6 +681,10 @@ const OperatorDescriptor &OperatorPlan::descriptor() const {
   return binding_.action().descriptor();
 }
 
+const OperatorMathematicalTraits &OperatorPlan::mathematical_traits() const {
+  return binding_.action().mathematical_traits();
+}
+
 const OperatorCapabilities &OperatorPlan::capabilities() const {
   return binding_.action().capabilities();
 }
@@ -568,9 +710,11 @@ OperatorPinnedAction OperatorPlan::pin() {
   auto pinned = binding_.pin();
   TI_ERROR_IF(pinned.descriptor().domain != descriptor().domain ||
                   pinned.descriptor().range != descriptor().range ||
-                  pinned.provider_name() != provider_name(),
-              "Operator generation changed descriptor or provider identity "
-              "without rebuilding its binding.");
+                  pinned.provider_name() != provider_name() ||
+                  !same_mathematical_traits(
+                      pinned.mathematical_traits(), mathematical_traits()),
+              "Operator generation changed descriptor, mathematical traits, "
+              "or provider identity without rebuilding its binding.");
   const auto stamp = pinned.resource_stamp();
   const auto invalidation =
       evaluate_operator_plan_invalidation(planned_stamp_, stamp, dependencies_);

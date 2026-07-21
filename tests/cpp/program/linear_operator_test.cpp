@@ -404,6 +404,69 @@ TEST(LinearOperator, PreconditionerRejectsUnsupportedBehaviorAndStaleAction) {
   EXPECT_EQ(stale_plan.debug_runtime_statistics().update_failures, 1u);
 }
 
+TEST(LinearOperator, SolverGateRequiresTrustedMathematicalTraits) {
+  const OperatorSpaceDesc space = scalar_space(PrimitiveType::f64, 3);
+  const OperatorDescriptor square{space, space};
+  OperatorMathematicalTraits unknown;
+  EXPECT_ANY_THROW(validate_operator_solver_compatibility(
+      square, unknown, OperatorSolverFamily::cg));
+  EXPECT_NO_THROW(validate_operator_solver_compatibility(
+      square, unknown, OperatorSolverFamily::bicgstab));
+
+  const auto scope =
+      operator_dependency(OperatorResourceDependency::schema) |
+      operator_dependency(OperatorResourceDependency::topology) |
+      operator_dependency(OperatorResourceDependency::numeric);
+  const auto checked = make_spd_operator_traits(
+      OperatorTraitProvenance::empirically_checked, scope);
+  EXPECT_ANY_THROW(validate_operator_solver_compatibility(
+      square, checked, OperatorSolverFamily::cg));
+
+  const auto asserted = make_spd_operator_traits(
+      OperatorTraitProvenance::asserted_by_user, scope);
+  EXPECT_NO_THROW(validate_operator_solver_compatibility(
+      square, asserted, OperatorSolverFamily::cg));
+  EXPECT_NO_THROW(validate_operator_solver_compatibility(
+      square, asserted, OperatorSolverFamily::pcg,
+      PreconditionerBehavior::fixed_linear));
+  EXPECT_ANY_THROW(validate_operator_solver_compatibility(
+      square, asserted, OperatorSolverFamily::pcg,
+      PreconditionerBehavior::variable_linear));
+
+  const OperatorDescriptor rectangular{
+      scalar_space(PrimitiveType::f64, 3),
+      scalar_space(PrimitiveType::f64, 2)};
+  EXPECT_ANY_THROW(validate_operator_solver_compatibility(
+      rectangular, unknown, OperatorSolverFamily::bicgstab));
+}
+
+TEST(LinearOperator, TraitDecorationFollowsPublishedGenerations) {
+  OperatorResourceGenerationPublisher publisher;
+  OperatorResourceStamp stamp{17, 201, 1, 2, 3, 4};
+  auto metadata = make_scale_action(stamp, 2.0f);
+  publisher.publish(metadata);
+  OperatorBinding source = OperatorBinding::from_generation_publisher(
+      metadata, [&publisher] { return publisher.acquire(); });
+  const auto scope =
+      operator_dependency(OperatorResourceDependency::schema) |
+      operator_dependency(OperatorResourceDependency::topology) |
+      operator_dependency(OperatorResourceDependency::numeric);
+  OperatorPlan plan(
+      nullptr, source.with_mathematical_traits(make_spd_operator_traits(
+                   OperatorTraitProvenance::derived_structurally, scope)));
+
+  auto first = plan.pin();
+  EXPECT_EQ(first.mathematical_traits().positive_definite.provenance,
+            OperatorTraitProvenance::derived_structurally);
+  auto next_stamp = stamp;
+  next_stamp.numeric_revision++;
+  publisher.publish(make_scale_action(next_stamp, 3.0f));
+  auto next = plan.pin();
+  EXPECT_TRUE(next.mathematical_traits().self_adjoint.value);
+  EXPECT_EQ(next.mathematical_traits().self_adjoint.validity_scope, scope);
+  EXPECT_EQ(next.resource_stamp().numeric_revision, 4u);
+}
+
 TEST(LinearOperator, BindingTypeErasesProviderResourceLease) {
   OperatorDescriptor descriptor{scalar_space(PrimitiveType::f32, 2),
                                 scalar_space(PrimitiveType::f32, 2)};
