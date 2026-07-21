@@ -112,6 +112,19 @@ def test_cuda_compiled_kernel_cg_reuses_persistent_workspace():
         diagonal.size * 12
     )
     assert stats["resources"]["cublas_handle_count"] == 1
+    assert stats["resources"]["cublas_stream_bound"]
+    assert not stats["resources"]["cublas_device_pointer_mode"]
+    assert stats["identity"]["solver_scalar_location"] == "host"
+    assert stats["identity"]["solver_stream_policy"] == (
+        "legacy_default_stream"
+    )
+    assert stats["operations"]["logical_iterations"] == (
+        stats["operations"]["total_iterations"]
+    )
+    assert stats["operations"]["executed_iterations"] == (
+        stats["operations"]["logical_iterations"]
+    )
+    assert stats["operations"]["wasted_iterations"] == 0
     assert not stats["resources"]["external_preconditioner"]
     assert not stats["resources"]["solver_state_rebuilt_each_solve"]
 

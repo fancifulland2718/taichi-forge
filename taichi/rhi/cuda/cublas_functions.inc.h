@@ -1,6 +1,22 @@
 PER_CUBLAS_FUNCTION(cubCreate, cublasCreate_v2, cublasHandle_t *);
 PER_CUBLAS_FUNCTION(cubDestroy, cublasDestroy_v2, cublasHandle_t);
 PER_CUBLAS_FUNCTION(cubGetVersion, cublasGetVersion_v2, cublasHandle_t, int *);
+PER_CUBLAS_FUNCTION(cubSetPointerMode,
+                    cublasSetPointerMode_v2,
+                    cublasHandle_t,
+                    cublasPointerMode_t);
+PER_CUBLAS_FUNCTION(cubGetPointerMode,
+                    cublasGetPointerMode_v2,
+                    cublasHandle_t,
+                    cublasPointerMode_t *);
+PER_CUBLAS_FUNCTION(cubSetStream,
+                    cublasSetStream_v2,
+                    cublasHandle_t,
+                    CUstream);
+PER_CUBLAS_FUNCTION(cubGetStream,
+                    cublasGetStream_v2,
+                    cublasHandle_t,
+                    CUstream *);
 PER_CUBLAS_FUNCTION(cubSaxpy,
                     cublasSaxpy_v2,
                     cublasHandle_t,

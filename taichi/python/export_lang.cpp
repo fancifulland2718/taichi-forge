@@ -4826,9 +4826,17 @@ void export_lang(py::module &m) {
             stats.operator_backend_execution_path;
         identity["solver_execution_policy"] =
             stats.solver_execution_policy;
+        identity["requested_solver_execution_policy"] =
+            stats.requested_solver_execution_policy;
         identity["host_check_interval"] = stats.host_check_interval;
         identity["solver_graph_enabled"] =
             stats.solver_graph_enabled;
+        identity["solver_replay_unavailable_reason"] =
+            stats.solver_replay_unavailable_reason;
+        identity["solver_scalar_location"] =
+            stats.solver_scalar_location;
+        identity["solver_stream_policy"] =
+            stats.solver_stream_policy;
         identity["preconditioner_action_provider"] =
             stats.preconditioner_action_provider;
         identity["preconditioner_behavior"] =
@@ -4865,6 +4873,24 @@ void export_lang(py::module &m) {
             stats.host_scalar_readbacks;
         operations["host_synchronizations"] =
             stats.host_synchronizations;
+        operations["logical_iterations"] =
+            stats.logical_iterations;
+        operations["executed_iterations"] =
+            stats.executed_iterations;
+        operations["wasted_iterations"] =
+            stats.wasted_iterations;
+        operations["solver_chunk_builds"] =
+            stats.solver_chunk_builds;
+        operations["solver_chunk_reuses"] =
+            stats.solver_chunk_reuses;
+        operations["solver_chunk_direct_submissions"] =
+            stats.solver_chunk_direct_submissions;
+        operations["solver_chunk_replays"] =
+            stats.solver_chunk_replays;
+        operations["solver_chunk_rebinds"] =
+            stats.solver_chunk_rebinds;
+        operations["solver_chunk_invalidations"] =
+            stats.solver_chunk_invalidations;
         operations["fixed_iteration_only"] =
             stats.fixed_iteration_only;
         operations["bounded_masked_execution"] =
@@ -4934,6 +4960,10 @@ void export_lang(py::module &m) {
         resources["persistent_scalar_reserved_bytes"] =
             stats.persistent_scalar_reserved_bytes;
         resources["cublas_handle_count"] = stats.cublas_handle_count;
+        resources["cublas_stream_bound"] =
+            stats.cublas_stream_bound;
+        resources["cublas_device_pointer_mode"] =
+            stats.cublas_device_pointer_mode;
         resources["external_preconditioner"] =
             stats.external_preconditioner;
         resources["preconditioner_ownership_scope"] =

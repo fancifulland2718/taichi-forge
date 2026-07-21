@@ -605,6 +605,11 @@ typedef enum {
   CUBLAS_STATUS_LICENSE_ERROR = 16
 } cublasStatus_t;
 
+typedef enum {
+  CUBLAS_POINTER_MODE_HOST = 0,
+  CUBLAS_POINTER_MODE_DEVICE = 1
+} cublasPointerMode_t;
+
 /* Opaque structure holding CUBLAS library context */
 struct cublasContext;
 typedef struct cublasContext *cublasHandle_t;

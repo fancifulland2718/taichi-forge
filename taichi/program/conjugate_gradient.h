@@ -140,9 +140,22 @@ struct SparseSolvePlanRuntimeStatistics {
   std::uint64_t device_scalar_operations{0};
   std::uint64_t host_scalar_readbacks{0};
   std::uint64_t host_synchronizations{0};
+  std::uint64_t logical_iterations{0};
+  std::uint64_t executed_iterations{0};
+  std::uint64_t wasted_iterations{0};
+  std::uint64_t solver_chunk_builds{0};
+  std::uint64_t solver_chunk_reuses{0};
+  std::uint64_t solver_chunk_direct_submissions{0};
+  std::uint64_t solver_chunk_replays{0};
+  std::uint64_t solver_chunk_rebinds{0};
+  std::uint64_t solver_chunk_invalidations{0};
+  std::string requested_solver_execution_policy{"host_each_iteration"};
   std::string solver_execution_policy{"host_each_iteration"};
   int host_check_interval{1};
   bool solver_graph_enabled{false};
+  std::string solver_replay_unavailable_reason{"not_requested"};
+  std::string solver_scalar_location{"host"};
+  std::string solver_stream_policy{"backend_default"};
   bool fixed_iteration_only{false};
   bool bounded_masked_execution{false};
   std::string preconditioner_method{"identity"};
@@ -154,6 +167,8 @@ struct SparseSolvePlanRuntimeStatistics {
   std::uint64_t persistent_scalar_count{0};
   std::uint64_t persistent_scalar_reserved_bytes{0};
   std::uint64_t cublas_handle_count{0};
+  bool cublas_stream_bound{false};
+  bool cublas_device_pointer_mode{false};
   bool external_preconditioner{false};
   std::string preconditioner_ownership_scope{"none"};
   bool solver_state_rebuilt_each_solve{false};
@@ -500,6 +515,9 @@ class CUCG {
                       const Ndarray *output_array);
 
   cublasHandle_t handle_{nullptr};
+  CUstream solver_stream_{nullptr};
+  bool cublas_stream_bound_{false};
+  bool cublas_device_pointer_mode_{false};
   Program *program_{nullptr};
   SparseMatrix &A_;
   CuSparseMatrix *cuda_csr_operator_{nullptr};
@@ -893,6 +911,7 @@ class VulkanCGIterationPlan {
   double residual_norm_{0.0};
   std::uint64_t solve_calls_{0};
   std::uint64_t total_iterations_{0};
+  std::uint64_t executed_iterations_{0};
   std::uint64_t workspace_builds_{1};
   std::uint64_t workspace_reuses_{0};
   std::uint64_t operator_apply_calls_{0};

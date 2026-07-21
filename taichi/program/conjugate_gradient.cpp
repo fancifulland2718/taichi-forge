@@ -368,9 +368,34 @@ void CUCG::init_solver() {
       TI_ERROR("Failed to load cublas library!");
     }
   }
-  CUBLASDriver::get_instance().cubCreate(&handle_);
+  auto &cublas = CUBLASDriver::get_instance();
+  TI_ERROR_IF(!cublas.cubSetPointerMode.available() ||
+                  !cublas.cubGetPointerMode.available() ||
+                  !cublas.cubSetStream.available() ||
+                  !cublas.cubGetStream.available(),
+              "CUDA CG requires cuBLAS pointer-mode and stream binding "
+              "symbols.");
+  cublas.cubCreate(&handle_);
+  TI_ERROR_IF(!handle_,
+              "CUDA CG failed to create its dedicated cuBLAS handle.");
+  // Program CUDA work currently uses the legacy default stream. Keep the
+  // solver stream behind one explicit binding point so a future RHI stream
+  // handoff cannot silently diverge from operator actions.
+  solver_stream_ = nullptr;
+  cublas.cubSetStream(handle_, solver_stream_);
+  CUstream bound_stream = reinterpret_cast<CUstream>(1);
+  cublas.cubGetStream(handle_, &bound_stream);
+  TI_ERROR_IF(bound_stream != solver_stream_,
+              "CUDA CG cuBLAS stream binding could not be verified.");
+  cublas_stream_bound_ = true;
+  cublas.cubSetPointerMode(handle_, CUBLAS_POINTER_MODE_HOST);
+  cublasPointerMode_t pointer_mode = CUBLAS_POINTER_MODE_DEVICE;
+  cublas.cubGetPointerMode(handle_, &pointer_mode);
+  TI_ERROR_IF(pointer_mode != CUBLAS_POINTER_MODE_HOST,
+              "CUDA CG cuBLAS pointer mode could not be verified.");
+  cublas_device_pointer_mode_ = false;
   int version;
-  CUBLASDriver::get_instance().cubGetVersion(handle_, &version);
+  cublas.cubGetVersion(handle_, &version);
   TI_TRACE("CUBLAS version: {}\n", version);
 #endif
 }
@@ -703,6 +728,9 @@ SparseSolvePlanRuntimeStatistics CUCG::debug_runtime_statistics() const {
                               result.last_solve_numeric_version;
   result.solve_calls = solve_calls_;
   result.total_iterations = total_iterations_;
+  result.logical_iterations = total_iterations_;
+  result.executed_iterations = total_iterations_;
+  result.wasted_iterations = 0;
   result.workspace_builds = workspace_builds_;
   result.workspace_reuses = workspace_reuses_;
   result.operator_apply_calls = operator_apply_calls_;
@@ -721,6 +749,10 @@ SparseSolvePlanRuntimeStatistics CUCG::debug_runtime_statistics() const {
           : result.persistent_vector_count *
                 static_cast<std::uint64_t>(workspace_size_) * sizeof(float);
   result.cublas_handle_count = handle_ != nullptr ? 1 : 0;
+  result.cublas_stream_bound = cublas_stream_bound_;
+  result.cublas_device_pointer_mode = cublas_device_pointer_mode_;
+  result.solver_scalar_location = "host";
+  result.solver_stream_policy = "legacy_default_stream";
   result.device_to_device_bytes = device_to_device_bytes_;
   if (operator_plan_) {
     append_operator_plan_statistics(*operator_plan_, false, result);
@@ -1617,6 +1649,9 @@ SparseSolvePlanRuntimeStatistics CpuSparseCGPlan::debug_runtime_statistics()
       result.operator_numeric_version != result.last_solve_numeric_version;
   result.solve_calls = solve_calls_;
   result.total_iterations = total_iterations_;
+  result.logical_iterations = total_iterations_;
+  result.executed_iterations = total_iterations_;
+  result.wasted_iterations = 0;
   result.workspace_builds = workspace_builds_;
   result.workspace_reuses = workspace_reuses_;
   result.operator_apply_calls = operator_apply_calls_;
@@ -2137,6 +2172,8 @@ void VulkanCGIterationPlan::solve(Program *program,
                     static_cast<int>(SparseSolveStatus::kMaxIterations) &&
                 finite_residuals;
   total_iterations_ += static_cast<std::uint64_t>(iterations_);
+  executed_iterations_ +=
+      static_cast<std::uint64_t>(fixed_iterations_);
   operator_apply_calls_ +=
       static_cast<std::uint64_t>(fixed_iterations_ + 1);
   if (has_preconditioner()) {
@@ -2216,6 +2253,9 @@ VulkanCGIterationPlan::debug_runtime_statistics() const {
                               result.last_solve_numeric_version;
   result.solve_calls = solve_calls_;
   result.total_iterations = total_iterations_;
+  result.logical_iterations = total_iterations_;
+  result.executed_iterations = executed_iterations_;
+  result.wasted_iterations = executed_iterations_ - total_iterations_;
   result.workspace_builds = workspace_builds_;
   result.workspace_reuses = workspace_reuses_;
   result.operator_apply_calls = operator_apply_calls_;
@@ -2232,6 +2272,10 @@ VulkanCGIterationPlan::debug_runtime_statistics() const {
   result.host_check_interval =
       adaptive_ ? fixed_iterations_ : 0;
   result.solver_graph_enabled = false;
+  result.solver_replay_unavailable_reason =
+      "fixed_budget_not_chunked";
+  result.solver_scalar_location = "device";
+  result.solver_stream_policy = "program_submission_order";
   result.fixed_iteration_only = !adaptive_;
   result.bounded_masked_execution = adaptive_;
   result.persistent_vector_count = has_preconditioner() ? 4 : 3;
