@@ -1159,6 +1159,7 @@ class SolvePlan:
 from taichi_forge.linalg._batched_solver import (  # noqa: E402
     BatchedSolvePlan,
     BatchedSolveResult,
+    SolveSubmission,
 )
 
 
@@ -1170,6 +1171,7 @@ __all__ = [
     "OperatorTraits",
     "SolvePlan",
     "SolveResult",
+    "SolveSubmission",
     "aslinearoperator",
     "block_diagonal",
     "identity",

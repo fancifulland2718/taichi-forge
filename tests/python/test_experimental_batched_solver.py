@@ -305,6 +305,107 @@ def test_independent_batch_one_matches_single_solve_plan():
     )
 
 
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_independent_batched_fixed_budget_submission_and_workspace_slots():
+    experimental = ti.linalg.experimental
+    batch_size = 3
+    system_size = 4
+    total_size = batch_size * system_size
+    diagonal = np.resize(
+        np.asarray([2.0, 3.0, 5.0], dtype=np.float32), total_size
+    )
+    operator = experimental.aslinearoperator(
+        _fixed_diagonal(diagonal),
+        traits=experimental.OperatorTraits.spd(),
+    )
+    plan = experimental.BatchedSolvePlan(
+        operator,
+        batch_size,
+        independent_systems=True,
+        max_iterations=4,
+        atol=1e-6,
+        execution_policy="fixed_budget_masked",
+    )
+    exact = np.linspace(-1.0, 1.0, total_size, dtype=np.float32)
+    rhs = _vector(diagonal * exact)
+
+    submission = plan.submit(rhs)
+    assert isinstance(submission, experimental.SolveSubmission)
+    assert submission.backend in ("cuda", "vulkan")
+    assert submission.sequence > 0
+    assert isinstance(submission.done(), bool)
+    pending = plan.statistics()
+    assert pending["submission"]["qualified"]
+    assert pending["submission"]["pending_submissions"] == 1
+    assert pending["resources"]["pending_workspace_slots"] == 1
+    with pytest.raises(RuntimeError, match="workspace slot is occupied"):
+        plan.submit(rhs)
+
+    submission.wait()
+    first = submission.result()
+    assert first.all_converged
+    np.testing.assert_allclose(
+        first.solution.to_numpy(), exact, rtol=3e-4, atol=3e-4
+    )
+    completed = plan.statistics()
+    assert completed["submission"]["pending_submissions"] == 0
+    assert completed["operations"]["submission_calls"] == 1
+    assert completed["operations"]["completed_submissions"] == 1
+    assert completed["operations"]["submission_rejections"] == 1
+    assert completed["operations"]["host_checks"] == 0
+
+    clone = plan.clone_workspace()
+    original_out = ti.ndarray(ti.f32, shape=total_size)
+    clone_out = ti.ndarray(ti.f32, shape=total_size)
+    original_submission = plan.submit(rhs, out=original_out)
+    clone_submission = clone.submit(rhs, out=clone_out)
+    original_result = original_submission.result()
+    clone_result = clone_submission.result()
+    assert original_result.all_converged and clone_result.all_converged
+    np.testing.assert_allclose(
+        original_out.to_numpy(), exact, rtol=3e-4, atol=3e-4
+    )
+    np.testing.assert_allclose(
+        clone_out.to_numpy(), exact, rtol=3e-4, atol=3e-4
+    )
+
+    chunked = experimental.BatchedSolvePlan(
+        operator,
+        batch_size,
+        independent_systems=True,
+        max_iterations=4,
+        atol=1e-6,
+        execution_policy="host_check_every_k",
+        check_interval=4,
+    )
+    with pytest.raises(RuntimeError, match="fixed_budget_masked"):
+        chunked.submit(rhs)
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_independent_batched_pending_submission_is_reset_safe():
+    experimental = ti.linalg.experimental
+    diagonal = np.resize(
+        np.asarray([2.0, 3.0, 5.0], dtype=np.float32), 16
+    )
+    operator = experimental.aslinearoperator(
+        _fixed_diagonal(diagonal),
+        traits=experimental.OperatorTraits.spd(),
+    )
+    plan = experimental.BatchedSolvePlan(
+        operator,
+        4,
+        independent_systems=True,
+        max_iterations=4,
+        atol=1e-6,
+        execution_policy="fixed_budget_masked",
+    )
+    submission = plan.submit(_vector(diagonal))
+    ti.reset()
+    with pytest.raises(RuntimeError, match="after ti.reset"):
+        submission.result()
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_independent_batched_contract_and_zero_budget():
     experimental = ti.linalg.experimental
@@ -345,3 +446,7 @@ def test_independent_batched_contract_and_zero_budget():
     np.testing.assert_allclose(
         result.residual_norms, [np.sqrt(5.0), 5.0], rtol=1e-6
     )
+    with pytest.raises(RuntimeError, match="CUDA or Vulkan"):
+        plan.submit(_vector([1.0, 2.0, 3.0, 4.0]))
+    cloned = plan.clone_workspace()
+    assert cloned.statistics()["resources"]["workspace_builds"] == 1
