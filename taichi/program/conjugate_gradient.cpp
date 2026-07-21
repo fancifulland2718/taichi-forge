@@ -1181,7 +1181,8 @@ CpuSparseCGPlan::CpuSparseCGPlan(Program *program,
                       nullptr,
                       max_iterations,
                       absolute_tolerance,
-                      relative_tolerance) {
+                      relative_tolerance,
+                      true) {
 }
 
 CpuSparseCGPlan::CpuSparseCGPlan(Program *program,
@@ -1195,7 +1196,8 @@ CpuSparseCGPlan::CpuSparseCGPlan(Program *program,
                       bind_preconditioner(program, matrix, preconditioner),
                       max_iterations,
                       absolute_tolerance,
-                      relative_tolerance) {
+                      relative_tolerance,
+                      true) {
 }
 
 CpuSparseCGPlan::CpuSparseCGPlan(
@@ -1210,7 +1212,8 @@ CpuSparseCGPlan::CpuSparseCGPlan(
                       bind_preconditioner(program, matrix, preconditioner),
                       max_iterations,
                       absolute_tolerance,
-                      relative_tolerance) {
+                      relative_tolerance,
+                      true) {
 }
 
 CpuSparseCGPlan::CpuSparseCGPlan(
@@ -1225,7 +1228,23 @@ CpuSparseCGPlan::CpuSparseCGPlan(
                       bind_preconditioner(program, matrix, preconditioner),
                       max_iterations,
                       absolute_tolerance,
-                      relative_tolerance) {
+                      relative_tolerance,
+                      true) {
+}
+
+CpuSparseCGPlan::CpuSparseCGPlan(
+    Program *program,
+    ExperimentalLinearOperatorHandle &operator_handle,
+    int max_iterations,
+    double absolute_tolerance,
+    double relative_tolerance)
+    : CpuSparseCGPlan(program,
+                      operator_handle.binding(),
+                      nullptr,
+                      max_iterations,
+                      absolute_tolerance,
+                      relative_tolerance,
+                      false) {
 }
 
 CpuSparseCGPlan::CpuSparseCGPlan(
@@ -1234,7 +1253,8 @@ CpuSparseCGPlan::CpuSparseCGPlan(
     std::unique_ptr<PreconditionerBinding> preconditioner,
     int max_iterations,
     double absolute_tolerance,
-    double relative_tolerance)
+    double relative_tolerance,
+    bool assert_legacy_spd)
     : program_(program),
       preconditioner_binding_(std::move(preconditioner)),
       max_iterations_(max_iterations),
@@ -1268,7 +1288,9 @@ CpuSparseCGPlan::CpuSparseCGPlan(
               "CPU operator CG/PCG requires finite non-negative atol and rtol "
               "with at least one positive tolerance.");
   operator_plan_ = std::make_unique<OperatorPlan>(
-      program_, with_legacy_cg_traits(std::move(operator_binding)));
+      program_, assert_legacy_spd
+                    ? with_legacy_cg_traits(std::move(operator_binding))
+                    : std::move(operator_binding));
   auto initial_generation = operator_plan_->pin();
   const auto initial_stamp = initial_generation.resource_stamp();
   TI_ERROR_IF(
@@ -1628,6 +1650,18 @@ std::unique_ptr<CpuSparseCGPlan> make_cpu_operator_cg_solver(
     double relative_tolerance) {
   return std::make_unique<CpuSparseCGPlan>(
       program, matrix, max_iterations, absolute_tolerance, relative_tolerance);
+}
+
+std::unique_ptr<CpuSparseCGPlan>
+make_cpu_experimental_linear_operator_cg_solver(
+    Program *program,
+    ExperimentalLinearOperatorHandle &operator_handle,
+    int max_iterations,
+    double absolute_tolerance,
+    double relative_tolerance) {
+  return std::make_unique<CpuSparseCGPlan>(
+      program, operator_handle, max_iterations, absolute_tolerance,
+      relative_tolerance);
 }
 
 std::unique_ptr<CpuSparseCGPlan> make_cpu_jacobi_pcg_solver(

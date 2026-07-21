@@ -483,6 +483,40 @@ class OperatorPlan {
   OperatorPlanRuntimeStatistics statistics_;
 };
 
+// Opaque native state behind the experimental Python LinearOperator API.
+// It deliberately exposes neither provider resources nor submission tickets:
+// the public synchronous boundary owns one reusable OperatorPlan and keeps all
+// provider-specific execution/lifetime rules in this layer.
+class ExperimentalLinearOperatorHandle {
+ public:
+  ExperimentalLinearOperatorHandle(Program *program,
+                                   OperatorBinding binding);
+  ExperimentalLinearOperatorHandle(
+      const ExperimentalLinearOperatorHandle &) = delete;
+  ExperimentalLinearOperatorHandle &operator=(
+      const ExperimentalLinearOperatorHandle &) = delete;
+  ~ExperimentalLinearOperatorHandle();
+
+  Program *program() const;
+  const OperatorDescriptor &descriptor() const;
+  const OperatorMathematicalTraits &mathematical_traits() const;
+  const OperatorCapabilities &capabilities() const;
+  const std::string &provider_name() const;
+  OperatorExecutionKind execution_kind() const;
+  OperatorResourceStamp resource_stamp() const;
+  OperatorPlanRuntimeStatistics debug_runtime_statistics() const;
+  OperatorBinding binding() const;
+
+  void apply(Program *program,
+             const Ndarray &input,
+             const Ndarray &output);
+
+ private:
+  Program *program_{nullptr};
+  OperatorBinding binding_;
+  std::unique_ptr<OperatorPlan> plan_;
+};
+
 enum class PreconditionerBehavior : std::uint8_t {
   fixed_linear,
   variable_linear,
@@ -600,5 +634,44 @@ OperatorBinding make_vulkan_program_kernel_operator_binding(
 OperatorBinding make_vulkan_program_graph_operator_binding(
     Program *program,
     CompiledGraphLinearOperator &matrix);
+
+// Compatibility selection for the public experimental provider factory. The
+// concrete provider remains fixed: unsupported backend/storage combinations
+// fail instead of materializing or copying through a different provider.
+OperatorBinding make_program_sparse_operator_binding(Program *program,
+                                                      SparseMatrix &matrix);
+
+OperatorMathematicalTraits make_asserted_operator_traits(
+    int self_adjoint,
+    int positive_definite,
+    int positive_semidefinite,
+    int singular);
+
+std::unique_ptr<ExperimentalLinearOperatorHandle>
+make_experimental_linear_operator_handle(
+    Program *program,
+    SparseMatrix &matrix,
+    OperatorMathematicalTraits mathematical_traits);
+std::unique_ptr<ExperimentalLinearOperatorHandle>
+make_experimental_identity_operator_handle(Program *program,
+                                           OperatorSpaceDesc space);
+std::unique_ptr<ExperimentalLinearOperatorHandle>
+make_experimental_adjoint_operator_handle(
+    ExperimentalLinearOperatorHandle &operand);
+std::unique_ptr<ExperimentalLinearOperatorHandle>
+make_experimental_scaled_operator_handle(
+    double scale,
+    ExperimentalLinearOperatorHandle &operand);
+std::unique_ptr<ExperimentalLinearOperatorHandle>
+make_experimental_sum_operator_handle(
+    ExperimentalLinearOperatorHandle &left,
+    ExperimentalLinearOperatorHandle &right);
+std::unique_ptr<ExperimentalLinearOperatorHandle>
+make_experimental_composed_operator_handle(
+    ExperimentalLinearOperatorHandle &outer,
+    ExperimentalLinearOperatorHandle &inner);
+std::unique_ptr<ExperimentalLinearOperatorHandle>
+make_experimental_block_diagonal_operator_handle(
+    const std::vector<ExperimentalLinearOperatorHandle *> &blocks);
 
 }  // namespace taichi::lang

@@ -23,6 +23,7 @@ class OperatorPlan;
 class OperatorBinding;
 class OperatorPinnedAction;
 class PreconditionerPlan;
+class ExperimentalLinearOperatorHandle;
 
 enum class SparseSolveStatus : int {
   kNotRun = -1,
@@ -616,6 +617,11 @@ class CpuSparseCGPlan {
                   int max_iterations,
                   double absolute_tolerance,
                   double relative_tolerance = 0.0);
+  CpuSparseCGPlan(Program *program,
+                  ExperimentalLinearOperatorHandle &operator_handle,
+                  int max_iterations,
+                  double absolute_tolerance,
+                  double relative_tolerance = 0.0);
   ~CpuSparseCGPlan();
 
   void solve(Program *program, const Ndarray &x, const Ndarray &b);
@@ -663,7 +669,8 @@ class CpuSparseCGPlan {
                   std::unique_ptr<PreconditionerBinding> preconditioner,
                   int max_iterations,
                   double absolute_tolerance,
-                  double relative_tolerance);
+                  double relative_tolerance,
+                  bool assert_legacy_spd);
   static std::unique_ptr<PreconditionerBinding> bind_preconditioner(
       Program *program,
       SparseMatrix &matrix,
@@ -721,6 +728,14 @@ using CpuBsrCGPlan = CpuSparseCGPlan;
 std::unique_ptr<CpuSparseCGPlan> make_cpu_operator_cg_solver(
     Program *program,
     SparseMatrix &matrix,
+    int max_iterations,
+    double absolute_tolerance,
+    double relative_tolerance = 0.0);
+
+std::unique_ptr<CpuSparseCGPlan>
+make_cpu_experimental_linear_operator_cg_solver(
+    Program *program,
+    ExperimentalLinearOperatorHandle &operator_handle,
     int max_iterations,
     double absolute_tolerance,
     double relative_tolerance = 0.0);

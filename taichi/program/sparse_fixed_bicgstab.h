@@ -112,6 +112,16 @@ class FixedSparseBiCGSTAB {
     b_ = Eigen::Map<EigenT>(reinterpret_cast<DT *>(address), rows_);
   }
 
+  void solve_ndarray(Program *program, Ndarray &x, Ndarray &b) {
+    TI_ERROR_IF(program != program_,
+                "Operator BiCGSTAB solve must use its construction Program.");
+    set_x_ndarray(program, x);
+    set_b_ndarray(program, b);
+    solve();
+    const auto address = program->get_ndarray_data_ptr_as_int(&x);
+    Eigen::Map<EigenT>(reinterpret_cast<DT *>(address), cols_) = x_;
+  }
+
   void solve() {
     auto operator_generation = operator_plan_->pin();
     reset_last_result(operator_generation.resource_stamp());

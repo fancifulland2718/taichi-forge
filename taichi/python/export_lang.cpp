@@ -5069,6 +5069,168 @@ void export_lang(py::module &m) {
         result["contract"] = std::move(contract);
         return result;
       };
+
+  py::class_<ExperimentalLinearOperatorHandle>(
+      m, "ExperimentalLinearOperatorHandle")
+      .def("_apply", &ExperimentalLinearOperatorHandle::apply,
+           py::keep_alive<1, 2>(), py::arg("program"),
+           py::arg("input"), py::arg("output"))
+      .def("_metadata", [](const ExperimentalLinearOperatorHandle &handle) {
+        const auto &descriptor = handle.descriptor();
+        const auto &capabilities = handle.capabilities();
+        const auto &traits = handle.mathematical_traits();
+        const auto stamp = handle.resource_stamp();
+        const auto claim_to_dict = [](const OperatorTraitClaim &claim) {
+          py::dict result;
+          result["known"] = claim.known();
+          result["value"] = claim.known()
+                                  ? py::cast(claim.value)
+                                  : py::none();
+          const char *provenance = "unspecified";
+          switch (claim.provenance) {
+            case OperatorTraitProvenance::asserted_by_user:
+              provenance = "asserted_by_user";
+              break;
+            case OperatorTraitProvenance::derived_structurally:
+              provenance = "derived_structurally";
+              break;
+            case OperatorTraitProvenance::constructed_by_framework:
+              provenance = "constructed_by_framework";
+              break;
+            case OperatorTraitProvenance::empirically_checked:
+              provenance = "empirically_checked";
+              break;
+            case OperatorTraitProvenance::unspecified:
+              break;
+          }
+          result["provenance"] = provenance;
+          result["validity_scope"] = claim.validity_scope;
+          return result;
+        };
+        py::dict capabilities_dict;
+        capabilities_dict["forward_apply"] = capabilities.forward_apply;
+        capabilities_dict["adjoint_apply"] = capabilities.adjoint_apply;
+        capabilities_dict["native_generalized_apply"] =
+            capabilities.native_generalized_apply;
+        capabilities_dict["asynchronous_submit"] =
+            capabilities.asynchronous_submit;
+        capabilities_dict["explicit_sequence"] =
+            capabilities.explicit_sequence;
+        capabilities_dict["compiled_graph"] = capabilities.compiled_graph;
+        capabilities_dict["runtime_capture"] = capabilities.runtime_capture;
+        capabilities_dict["binding_rebind"] = capabilities.binding_rebind;
+        capabilities_dict["persistent_workspace"] =
+            capabilities.persistent_workspace;
+        py::dict traits_dict;
+        traits_dict["self_adjoint"] =
+            claim_to_dict(traits.self_adjoint);
+        traits_dict["positive_definite"] =
+            claim_to_dict(traits.positive_definite);
+        traits_dict["positive_semidefinite"] =
+            claim_to_dict(traits.positive_semidefinite);
+        traits_dict["singular"] = claim_to_dict(traits.singular);
+        py::dict resource_stamp;
+        resource_stamp["program_generation"] = stamp.program_generation;
+        resource_stamp["schema_revision"] = stamp.schema_revision;
+        resource_stamp["topology_revision"] = stamp.topology_revision;
+        resource_stamp["numeric_revision"] = stamp.numeric_revision;
+        resource_stamp["binding_revision"] = stamp.binding_revision;
+        py::dict result;
+        result["schema_version"] = 1;
+        result["provider"] = handle.provider_name();
+        result["dtype"] = data_type_name(descriptor.domain.scalar_type);
+        result["shape"] = py::make_tuple(
+            descriptor.range.scalar_extent,
+            descriptor.domain.scalar_extent);
+        result["entry_shape"] = descriptor.domain.entry_shape;
+        result["execution_kind"] =
+            operator_execution_kind_name(handle.execution_kind());
+        result["capabilities"] = std::move(capabilities_dict);
+        result["traits"] = std::move(traits_dict);
+        result["resource_stamp"] = std::move(resource_stamp);
+        return result;
+      })
+      .def("_debug_runtime_stats",
+           [](const ExperimentalLinearOperatorHandle &handle) {
+             const auto stats = handle.debug_runtime_statistics();
+             py::dict result;
+             result["schema_version"] = 1;
+             result["provider"] = handle.provider_name();
+             result["execution_kind"] =
+                 operator_execution_kind_name(stats.execution_kind);
+             result["submissions"] = stats.submissions;
+             result["primitive_apply_calls"] =
+                 stats.primitive_apply_calls;
+             result["generalized_lowerings"] =
+                 stats.generalized_lowerings;
+             result["scratch_builds"] = stats.scratch_builds;
+             result["scratch_reuses"] = stats.scratch_reuses;
+             result["scratch_reserved_bytes"] =
+                 stats.scratch_reserved_bytes;
+             result["generation_pins"] = stats.generation_pins;
+             result["generation_changes"] = stats.generation_changes;
+             result["invalidations"] = stats.invalidations;
+             result["execution_plan_builds"] =
+                 stats.execution_plan_builds;
+             result["execution_plan_reuses"] =
+                 stats.execution_plan_reuses;
+             result["binding_rebinds"] = stats.binding_rebinds;
+             result["backend_path"] =
+                 operator_backend_execution_path_name(
+                     stats.last_backend_path);
+             return result;
+           });
+
+  m.def(
+      "_make_experimental_linear_operator",
+      [](Program *program, SparseMatrix &matrix, int self_adjoint,
+         int positive_definite, int positive_semidefinite, int singular) {
+        return make_experimental_linear_operator_handle(
+            program, matrix,
+            make_asserted_operator_traits(
+                self_adjoint, positive_definite,
+                positive_semidefinite, singular));
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::arg("program"), py::arg("matrix"),
+      py::arg("self_adjoint") = -1,
+      py::arg("positive_definite") = -1,
+      py::arg("positive_semidefinite") = -1,
+      py::arg("singular") = -1);
+  m.def(
+      "_make_experimental_identity_operator",
+      [](Program *program, DataType dtype, std::size_t size) {
+        return make_experimental_identity_operator_handle(
+            program, OperatorSpaceDesc{dtype, size});
+      },
+      py::keep_alive<0, 1>(), py::arg("program"),
+      py::arg("dtype"), py::arg("size"));
+  m.def("_make_experimental_adjoint_operator",
+        make_experimental_adjoint_operator_handle,
+        py::keep_alive<0, 1>(), py::arg("operand"));
+  m.def("_make_experimental_scaled_operator",
+        make_experimental_scaled_operator_handle,
+        py::keep_alive<0, 2>(), py::arg("scale"), py::arg("operand"));
+  m.def("_make_experimental_sum_operator",
+        make_experimental_sum_operator_handle,
+        py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+        py::arg("left"), py::arg("right"));
+  m.def("_make_experimental_composed_operator",
+        make_experimental_composed_operator_handle,
+        py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+        py::arg("outer"), py::arg("inner"));
+  m.def(
+      "_make_experimental_block_diagonal_operator",
+      [](const py::iterable &items) {
+        std::vector<ExperimentalLinearOperatorHandle *> blocks;
+        for (const auto &item : items) {
+          blocks.push_back(
+              py::cast<ExperimentalLinearOperatorHandle *>(item));
+        }
+        return make_experimental_block_diagonal_operator_handle(blocks);
+      },
+      py::arg("blocks"));
+
   py::class_<SparseJacobiPreconditionerPlan>(
       m, "SparseJacobiPreconditionerPlan")
       .def("_refresh_numeric",
@@ -5279,6 +5441,8 @@ void export_lang(py::module &m) {
   py::class_<FixedSparseBiCGSTAB<Eigen::VectorXf, float>>(
       m, "FixedSparseBiCGSTABf")
       .def("solve", &FixedSparseBiCGSTAB<Eigen::VectorXf, float>::solve)
+      .def("solve_ndarray",
+           &FixedSparseBiCGSTAB<Eigen::VectorXf, float>::solve_ndarray)
       .def("set_x", &FixedSparseBiCGSTAB<Eigen::VectorXf, float>::set_x)
       .def("reset_x",
            &FixedSparseBiCGSTAB<Eigen::VectorXf, float>::reset_x)
@@ -5314,6 +5478,8 @@ void export_lang(py::module &m) {
   py::class_<FixedSparseBiCGSTAB<Eigen::VectorXd, double>>(
       m, "FixedSparseBiCGSTABd")
       .def("solve", &FixedSparseBiCGSTAB<Eigen::VectorXd, double>::solve)
+      .def("solve_ndarray",
+           &FixedSparseBiCGSTAB<Eigen::VectorXd, double>::solve_ndarray)
       .def("set_x", &FixedSparseBiCGSTAB<Eigen::VectorXd, double>::set_x)
       .def("reset_x",
            &FixedSparseBiCGSTAB<Eigen::VectorXd, double>::reset_x)
@@ -5374,6 +5540,38 @@ void export_lang(py::module &m) {
       py::arg("program"), py::arg("matrix"),
       py::arg("max_iterations"), py::arg("absolute_tolerance"),
       py::arg("verbose"), py::arg("relative_tolerance") = 0.0);
+  m.def(
+      "_make_float_cpu_experimental_linear_operator_bicgstab_solver",
+      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+         int max_iterations, float absolute_tolerance,
+         float relative_tolerance) {
+        TI_ERROR_IF(operator_handle.program() != program,
+                    "BiCGSTAB operator belongs to a different Program.");
+        return std::make_unique<
+            FixedSparseBiCGSTAB<Eigen::VectorXf, float>>(
+            program, operator_handle.binding(), max_iterations,
+            absolute_tolerance, false, relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::arg("program"), py::arg("operator"),
+      py::arg("max_iterations"), py::arg("absolute_tolerance"),
+      py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "_make_double_cpu_experimental_linear_operator_bicgstab_solver",
+      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+         int max_iterations, double absolute_tolerance,
+         double relative_tolerance) {
+        TI_ERROR_IF(operator_handle.program() != program,
+                    "BiCGSTAB operator belongs to a different Program.");
+        return std::make_unique<
+            FixedSparseBiCGSTAB<Eigen::VectorXd, double>>(
+            program, operator_handle.binding(), max_iterations,
+            absolute_tolerance, false, relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::arg("program"), py::arg("operator"),
+      py::arg("max_iterations"), py::arg("absolute_tolerance"),
+      py::arg("relative_tolerance") = 0.0);
 
   py::class_<SparseMINRES<Eigen::VectorXf, float>>(m, "SparseMINRESf")
       .def("solve", &SparseMINRES<Eigen::VectorXf, float>::solve)
@@ -5594,6 +5792,13 @@ void export_lang(py::module &m) {
       },
       py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
       py::arg("program"), py::arg("matrix"),
+      py::arg("max_iterations"), py::arg("absolute_tolerance"),
+      py::arg("relative_tolerance") = 0.0);
+  m.def(
+      "_make_cpu_experimental_linear_operator_cg_solver",
+      make_cpu_experimental_linear_operator_cg_solver,
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::arg("program"), py::arg("operator"),
       py::arg("max_iterations"), py::arg("absolute_tolerance"),
       py::arg("relative_tolerance") = 0.0);
   m.def(

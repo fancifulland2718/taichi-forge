@@ -2127,4 +2127,264 @@ OperatorBinding make_vulkan_program_graph_operator_binding(
       OperatorExecutionKind::compiled_graph);
 }
 
+ExperimentalLinearOperatorHandle::ExperimentalLinearOperatorHandle(
+    Program *program,
+    OperatorBinding binding)
+    : program_(program),
+      binding_(std::move(binding)),
+      plan_(std::make_unique<OperatorPlan>(program_, binding_)) {
+  TI_ERROR_IF(!program_,
+              "Experimental LinearOperator requires an active Program.");
+  const auto stamp = plan_->resource_stamp();
+  TI_ERROR_IF(stamp.program_identity !=
+                  reinterpret_cast<std::uintptr_t>(program_),
+              "LinearOperator provider belongs to a different Program; "
+              "no cross-runtime binding was performed.");
+}
+
+ExperimentalLinearOperatorHandle::~ExperimentalLinearOperatorHandle() =
+    default;
+
+Program *ExperimentalLinearOperatorHandle::program() const {
+  return program_;
+}
+
+const OperatorDescriptor &
+ExperimentalLinearOperatorHandle::descriptor() const {
+  return plan_->descriptor();
+}
+
+const OperatorMathematicalTraits &
+ExperimentalLinearOperatorHandle::mathematical_traits() const {
+  return plan_->mathematical_traits();
+}
+
+const OperatorCapabilities &
+ExperimentalLinearOperatorHandle::capabilities() const {
+  return plan_->capabilities();
+}
+
+const std::string &ExperimentalLinearOperatorHandle::provider_name() const {
+  return plan_->provider_name();
+}
+
+OperatorExecutionKind
+ExperimentalLinearOperatorHandle::execution_kind() const {
+  return plan_->execution_kind();
+}
+
+OperatorResourceStamp
+ExperimentalLinearOperatorHandle::resource_stamp() const {
+  return plan_->resource_stamp();
+}
+
+OperatorPlanRuntimeStatistics
+ExperimentalLinearOperatorHandle::debug_runtime_statistics() const {
+  return plan_->debug_runtime_statistics();
+}
+
+OperatorBinding ExperimentalLinearOperatorHandle::binding() const {
+  return binding_;
+}
+
+void ExperimentalLinearOperatorHandle::apply(Program *program,
+                                             const Ndarray &input,
+                                             const Ndarray &output) {
+  TI_ERROR_IF(program != program_,
+              "LinearOperator apply must use its construction Program.");
+  const auto &descriptor = plan_->descriptor();
+  auto submission = plan_->submit(
+      {OperatorApplyMode::forward,
+       OperatorVectorView::from_ndarray(program_, input,
+                                        descriptor.domain, false),
+       nullptr,
+       OperatorVectorView::from_ndarray(program_, output,
+                                        descriptor.range, true)});
+  submission.wait();
+}
+
+OperatorBinding make_program_sparse_operator_binding(Program *program,
+                                                      SparseMatrix &matrix) {
+  TI_ERROR_IF(!program,
+              "LinearOperator provider binding requires an active Program.");
+  if (auto *kernel =
+          dynamic_cast<CompiledKernelLinearOperator *>(&matrix)) {
+    if (arch_is_cpu(program->compile_config().arch)) {
+      return make_cpu_program_kernel_operator_binding(program, *kernel);
+    }
+    if (program->compile_config().arch == Arch::cuda) {
+      return make_cuda_program_kernel_operator_binding(program, *kernel);
+    }
+    if (program->compile_config().arch == Arch::vulkan) {
+      return make_vulkan_program_kernel_operator_binding(program, *kernel);
+    }
+  }
+  if (auto *graph =
+          dynamic_cast<CompiledGraphLinearOperator *>(&matrix)) {
+    if (arch_is_cpu(program->compile_config().arch)) {
+      return make_cpu_program_graph_operator_binding(program, *graph);
+    }
+    if (program->compile_config().arch == Arch::cuda) {
+      return make_cuda_program_graph_operator_binding(program, *graph);
+    }
+    if (program->compile_config().arch == Arch::vulkan) {
+      return make_vulkan_program_graph_operator_binding(program, *graph);
+    }
+  }
+  if (arch_is_cpu(program->compile_config().arch)) {
+    return make_cpu_fixed_sparse_operator_binding(program, matrix);
+  }
+  if (program->compile_config().arch == Arch::cuda) {
+    if (auto *csr = dynamic_cast<CuSparseMatrix *>(&matrix)) {
+      return make_cuda_csr_operator_binding(program, *csr);
+    }
+    if (auto *bsr = dynamic_cast<CuSparseBsrMatrix *>(&matrix)) {
+      return make_cuda_bsr_operator_binding(program, *bsr);
+    }
+  }
+  if (program->compile_config().arch == Arch::vulkan) {
+    if (auto *csr = dynamic_cast<VulkanSparseMatrix *>(&matrix)) {
+      return make_vulkan_csr_operator_binding(program, *csr);
+    }
+    if (auto *bsr = dynamic_cast<VulkanSparseBsrMatrix *>(&matrix)) {
+      return make_vulkan_bsr_operator_binding(program, *bsr);
+    }
+  }
+  const auto statistics = matrix.debug_runtime_statistics();
+  TI_ERROR(
+      "LinearOperator does not support backend '{}' with storage '{}' "
+      "(provider '{}'); no fallback or materialization was performed.",
+      statistics.backend_family, statistics.storage_format,
+      statistics.provider_name);
+}
+
+OperatorMathematicalTraits make_asserted_operator_traits(
+    int self_adjoint,
+    int positive_definite,
+    int positive_semidefinite,
+    int singular) {
+  const auto scope =
+      operator_dependency(OperatorResourceDependency::program) |
+      operator_dependency(OperatorResourceDependency::schema) |
+      operator_dependency(OperatorResourceDependency::topology) |
+      operator_dependency(OperatorResourceDependency::numeric) |
+      operator_dependency(OperatorResourceDependency::binding);
+  const auto claim = [scope](int value, const char *name) {
+    TI_ERROR_IF(value < -1 || value > 1,
+                "LinearOperator trait '{}' must be -1, 0, or 1.", name);
+    return value < 0
+               ? OperatorTraitClaim{}
+               : OperatorTraitClaim{
+                     value != 0,
+                     OperatorTraitProvenance::asserted_by_user, scope};
+  };
+  OperatorMathematicalTraits result;
+  result.self_adjoint = claim(self_adjoint, "self_adjoint");
+  result.positive_definite =
+      claim(positive_definite, "positive_definite");
+  result.positive_semidefinite =
+      claim(positive_semidefinite, "positive_semidefinite");
+  result.singular = claim(singular, "singular");
+  TI_ERROR_IF(result.positive_definite.known() &&
+                  result.positive_definite.value &&
+                  result.self_adjoint.known() &&
+                  !result.self_adjoint.value,
+              "A positive-definite LinearOperator cannot be declared "
+              "non-self-adjoint.");
+  TI_ERROR_IF(result.positive_definite.known() &&
+                  result.positive_definite.value &&
+                  result.singular.known() && result.singular.value,
+              "A positive-definite LinearOperator cannot be declared "
+              "singular.");
+  return result;
+}
+
+std::unique_ptr<ExperimentalLinearOperatorHandle>
+make_experimental_linear_operator_handle(
+    Program *program,
+    SparseMatrix &matrix,
+    OperatorMathematicalTraits mathematical_traits) {
+  auto binding = make_program_sparse_operator_binding(program, matrix)
+                     .with_mathematical_traits(
+                         std::move(mathematical_traits));
+  return std::make_unique<ExperimentalLinearOperatorHandle>(
+      program, std::move(binding));
+}
+
+std::unique_ptr<ExperimentalLinearOperatorHandle>
+make_experimental_identity_operator_handle(Program *program,
+                                           OperatorSpaceDesc space) {
+  return std::make_unique<ExperimentalLinearOperatorHandle>(
+      program, make_identity_operator_binding(std::move(space), program));
+}
+
+std::unique_ptr<ExperimentalLinearOperatorHandle>
+make_experimental_adjoint_operator_handle(
+    ExperimentalLinearOperatorHandle &operand) {
+  return std::make_unique<ExperimentalLinearOperatorHandle>(
+      operand.program(), make_adjoint_operator_binding(operand.binding()));
+}
+
+std::unique_ptr<ExperimentalLinearOperatorHandle>
+make_experimental_scaled_operator_handle(
+    double scale,
+    ExperimentalLinearOperatorHandle &operand) {
+  return std::make_unique<ExperimentalLinearOperatorHandle>(
+      operand.program(),
+      make_scaled_operator_binding(scale, operand.binding()));
+}
+
+namespace {
+
+void validate_same_public_operator_program(
+    const ExperimentalLinearOperatorHandle &left,
+    const ExperimentalLinearOperatorHandle &right,
+    const char *operation) {
+  TI_ERROR_IF(left.program() != right.program(),
+              "LinearOperator {} operands must belong to the same Program.",
+              operation);
+}
+
+}  // namespace
+
+std::unique_ptr<ExperimentalLinearOperatorHandle>
+make_experimental_sum_operator_handle(
+    ExperimentalLinearOperatorHandle &left,
+    ExperimentalLinearOperatorHandle &right) {
+  validate_same_public_operator_program(left, right, "sum");
+  return std::make_unique<ExperimentalLinearOperatorHandle>(
+      left.program(),
+      make_sum_operator_binding(left.binding(), right.binding()));
+}
+
+std::unique_ptr<ExperimentalLinearOperatorHandle>
+make_experimental_composed_operator_handle(
+    ExperimentalLinearOperatorHandle &outer,
+    ExperimentalLinearOperatorHandle &inner) {
+  validate_same_public_operator_program(outer, inner, "composition");
+  return std::make_unique<ExperimentalLinearOperatorHandle>(
+      outer.program(),
+      make_composed_operator_binding(outer.binding(), inner.binding()));
+}
+
+std::unique_ptr<ExperimentalLinearOperatorHandle>
+make_experimental_block_diagonal_operator_handle(
+    const std::vector<ExperimentalLinearOperatorHandle *> &blocks) {
+  TI_ERROR_IF(blocks.empty(),
+              "LinearOperator block_diagonal requires at least one block.");
+  TI_ERROR_IF(!blocks.front(),
+              "LinearOperator block_diagonal received a null block.");
+  Program *program = blocks.front()->program();
+  std::vector<OperatorBinding> bindings;
+  bindings.reserve(blocks.size());
+  for (const auto *block : blocks) {
+    TI_ERROR_IF(!block || block->program() != program,
+                "LinearOperator block_diagonal operands must belong to the "
+                "same Program.");
+    bindings.push_back(block->binding());
+  }
+  return std::make_unique<ExperimentalLinearOperatorHandle>(
+      program, make_block_diagonal_operator_binding(std::move(bindings)));
+}
+
 }  // namespace taichi::lang
