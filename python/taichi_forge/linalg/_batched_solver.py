@@ -18,6 +18,7 @@ from taichi_forge.linalg.experimental import (
     _current_program,
     _require_current_scalar_ndarray,
     _require_positive_size,
+    _solver_execution_capabilities,
 )
 from taichi_forge.types import f32, i32
 
@@ -340,6 +341,17 @@ class BatchedSolvePlan:
         if not isinstance(policy, str):
             raise TaichiRuntimeError("execution_policy must be a string")
         policy = policy.casefold()
+        if policy == "device_convergent":
+            capability = _solver_execution_capabilities(
+                self._program,
+                self.operator._provider_kind,
+                batched=True,
+            )["device_convergent"]
+            raise TaichiRuntimeError(
+                "BatchedSolvePlan execution_policy='device_convergent' is "
+                "unsupported; no fallback was performed: "
+                f"{capability['unsupported_reason']}"
+            )
         if policy not in (
             "host_each_iteration",
             "host_check_every_k",
@@ -950,6 +962,20 @@ class BatchedSolvePlan:
         with self._lifecycle_lock:
             return self._statistics_locked()
 
+    def execution_capabilities(self):
+        """Returns qualified execution policies and explicit failure reasons."""
+        with self._lifecycle_lock:
+            if self.operator is None or self._program is None:
+                raise TaichiRuntimeError(
+                    "BatchedSolvePlan cannot be used after ti.reset()"
+                )
+            self.operator._ensure_valid()
+            return _solver_execution_capabilities(
+                self._program,
+                self.operator._provider_kind,
+                batched=True,
+            )
+
     def _statistics_locked(self):
         if self.operator is None or self._program is None:
             raise TaichiRuntimeError(
@@ -973,6 +999,11 @@ class BatchedSolvePlan:
             "total_size": self.total_size,
             "execution_policy": self.execution_policy,
             "check_interval": self.check_interval,
+            "execution_capabilities": _solver_execution_capabilities(
+                self._program,
+                self.operator._provider_kind,
+                batched=True,
+            ),
             "submission": {
                 "qualified": (
                     self._program.config().arch

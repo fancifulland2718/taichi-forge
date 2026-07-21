@@ -643,6 +643,71 @@ def _validate_solve_controls(dtype, max_iterations, atol, rtol):
     return max_iterations, atol, rtol
 
 
+def _solver_execution_capabilities(program, provider_kind, *, batched):
+    arch = program.config().arch
+    cpu_arches = (_ti_core.Arch.x64, _ti_core.Arch.arm64)
+    is_cpu = arch in cpu_arches
+    is_cuda = arch == _ti_core.Arch.cuda
+    is_vulkan = arch == _ti_core.Arch.vulkan
+    if is_cuda:
+        conditional_primitive = "cuda_conditional_graph"
+        unavailable_reason = "cuda_conditional_graph_runtime_path_not_compiled"
+        prerequisites = (
+            "conditional graph driver functions in the CUDA dynamic table",
+            "device-side conditional-handle setter lowering",
+            "provider capture/body/update qualification",
+        )
+    elif is_vulkan:
+        conditional_primitive = "vulkan_dispatch_indirect"
+        if provider_kind == "stored":
+            unavailable_reason = (
+                "vulkan_stored_solver_indirect_dispatch_path_not_compiled"
+            )
+        elif provider_kind == "kernel":
+            unavailable_reason = (
+                "vulkan_compiled_kernel_indirect_dispatch_not_qualified"
+            )
+        elif provider_kind == "graph":
+            unavailable_reason = (
+                "vulkan_compiled_graph_indirect_dispatch_not_qualified"
+            )
+        else:
+            unavailable_reason = "vulkan_provider_indirect_dispatch_unsupported"
+        prerequisites = (
+            "backend-neutral indirect compute-dispatch command contract",
+            "indirect buffer visibility and zero-dispatch validation",
+            "provider record/replay and numeric-rebind qualification",
+        )
+    else:
+        conditional_primitive = "none"
+        unavailable_reason = "device_convergent_is_gpu_only"
+        prerequisites = ()
+
+    policies = {
+        "host_each_iteration": is_cpu or (batched and (is_cuda or is_vulkan)),
+        "host_check_every_k": is_cuda or is_vulkan,
+        "fixed_budget_masked": is_vulkan or (
+            batched and is_cuda
+        ),
+        "device_convergent": False,
+    }
+    return {
+        "backend": _ti_core.arch_name(arch),
+        "provider_kind": provider_kind,
+        "execution_policies": policies,
+        "device_convergent": {
+            "supported": False,
+            "primitive": conditional_primitive,
+            "runtime_path_compiled": False,
+            "provider_qualified": False,
+            "unsupported_reason": unavailable_reason,
+            "prerequisites": prerequisites,
+        },
+        "automatic_policy_change": False,
+        "explicit_request_fallback": False,
+    }
+
+
 class SolvePlan:
     """Persistent CG, PCG, or BiCGSTAB execution plan.
 
@@ -714,6 +779,17 @@ class SolvePlan:
         if not isinstance(policy, str):
             raise TaichiRuntimeError("execution_policy must be a string")
         policy = policy.casefold()
+        if policy == "device_convergent":
+            capability = _solver_execution_capabilities(
+                self._program,
+                self.operator._provider_kind,
+                batched=False,
+            )["device_convergent"]
+            raise TaichiRuntimeError(
+                "SolvePlan execution_policy='device_convergent' is "
+                "unsupported; no fallback was performed: "
+                f"{capability['unsupported_reason']}"
+            )
         if arch in cpu_arches:
             if policy != "host_each_iteration":
                 raise TaichiRuntimeError(
@@ -1151,7 +1227,20 @@ class SolvePlan:
         if self.operator is None or self._solver is None:
             raise TaichiRuntimeError("SolvePlan cannot be used after ti.reset()")
         self.operator._ensure_valid()
-        return dict(self._solver._debug_runtime_stats())
+        result = dict(self._solver._debug_runtime_stats())
+        result["execution_capabilities"] = self.execution_capabilities()
+        return result
+
+    def execution_capabilities(self):
+        """Returns qualified execution policies and explicit failure reasons."""
+        if self.operator is None or self._solver is None:
+            raise TaichiRuntimeError("SolvePlan cannot be used after ti.reset()")
+        self.operator._ensure_valid()
+        return _solver_execution_capabilities(
+            self._program,
+            self.operator._provider_kind,
+            batched=False,
+        )
 
 
 # Imported last because the batched implementation deliberately reuses the

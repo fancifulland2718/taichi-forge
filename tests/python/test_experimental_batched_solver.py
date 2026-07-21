@@ -406,6 +406,89 @@ def test_independent_batched_pending_submission_is_reset_safe():
         submission.result()
 
 
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False
+)
+def test_solver_conditional_execution_capabilities_are_explicit():
+    experimental = ti.linalg.experimental
+    operator = experimental.aslinearoperator(
+        _fixed_diagonal(np.ones(8, dtype=np.float32)),
+        traits=experimental.OperatorTraits.spd(),
+    )
+    single = experimental.SolvePlan(
+        operator, max_iterations=4, atol=1e-6
+    )
+    batched = experimental.BatchedSolvePlan(
+        operator,
+        2,
+        independent_systems=True,
+        max_iterations=4,
+        atol=1e-6,
+    )
+
+    for capabilities in (
+        single.execution_capabilities(),
+        batched.execution_capabilities(),
+    ):
+        conditional = capabilities["device_convergent"]
+        assert not conditional["supported"]
+        assert not conditional["runtime_path_compiled"]
+        assert not conditional["provider_qualified"]
+        assert conditional["unsupported_reason"]
+        assert not capabilities["automatic_policy_change"]
+        assert not capabilities["explicit_request_fallback"]
+        assert not capabilities["execution_policies"][
+            "device_convergent"
+        ]
+
+    arch = impl.current_cfg().arch
+    conditional = single.execution_capabilities()["device_convergent"]
+    if arch == ti.cuda:
+        assert conditional["primitive"] == "cuda_conditional_graph"
+        assert conditional["unsupported_reason"] == (
+            "cuda_conditional_graph_runtime_path_not_compiled"
+        )
+    elif arch == ti.vulkan:
+        assert conditional["primitive"] == "vulkan_dispatch_indirect"
+        assert conditional["unsupported_reason"] == (
+            "vulkan_stored_solver_indirect_dispatch_path_not_compiled"
+        )
+    else:
+        assert conditional["primitive"] == "none"
+        assert conditional["unsupported_reason"] == (
+            "device_convergent_is_gpu_only"
+        )
+
+    assert (
+        single.statistics()["execution_capabilities"]
+        == single.execution_capabilities()
+    )
+    assert (
+        batched.statistics()["execution_capabilities"]
+        == batched.execution_capabilities()
+    )
+    with pytest.raises(
+        RuntimeError, match="unsupported; no fallback was performed"
+    ):
+        experimental.SolvePlan(
+            operator,
+            max_iterations=4,
+            atol=1e-6,
+            execution_policy="device_convergent",
+        )
+    with pytest.raises(
+        RuntimeError, match="unsupported; no fallback was performed"
+    ):
+        experimental.BatchedSolvePlan(
+            operator,
+            2,
+            independent_systems=True,
+            max_iterations=4,
+            atol=1e-6,
+            execution_policy="device_convergent",
+        )
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_independent_batched_contract_and_zero_budget():
     experimental = ti.linalg.experimental
