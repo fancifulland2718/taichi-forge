@@ -448,8 +448,12 @@ OperatorPinnedAction OperatorBinding::pin() const {
   if (acquire_pinned_action_) {
     return acquire_pinned_action_();
   }
-  return OperatorPinnedAction(action_, action_.resource_stamp(),
-                              acquire_resource_lease());
+  // Acquire the provider transaction before reading its stamp. Function
+  // argument evaluation order must not decide whether the stamp and retained
+  // resources describe the same numeric generation.
+  auto resource_lease = acquire_resource_lease();
+  const auto stamp = action_.resource_stamp();
+  return OperatorPinnedAction(action_, stamp, std::move(resource_lease));
 }
 
 struct OperatorPlan::Scratch {

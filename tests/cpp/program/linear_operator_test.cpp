@@ -50,6 +50,31 @@ OperatorAction make_scale_action(OperatorResourceStamp stamp, float scale) {
       });
 }
 
+TEST(LinearOperator, BindingPinsLeaseBeforeReadingResourceStamp) {
+  std::vector<int> order;
+  OperatorDescriptor descriptor{scalar_space(PrimitiveType::f32, 1),
+                                scalar_space(PrimitiveType::f32, 1)};
+  OperatorAction action(
+      descriptor, OperatorCapabilities{}, "ordered_binding",
+      [&order] {
+        order.push_back(2);
+        return OperatorResourceStamp{};
+      },
+      [](OperatorApplyMode, const OperatorVectorView &,
+         const OperatorVectorView &) {});
+  OperatorBinding binding(
+      std::move(action), [&order] {
+        order.push_back(1);
+        return OperatorResourceLease{};
+      });
+
+  auto generation = binding.pin();
+  ASSERT_TRUE(generation);
+  ASSERT_EQ(order.size(), 2u);
+  EXPECT_EQ(order[0], 1);
+  EXPECT_EQ(order[1], 2);
+}
+
 TEST(LinearOperator, DependencyMaskClassifiesPlanInvalidation) {
   OperatorResourceStamp planned{11, 101, 2, 3, 4, 5};
   auto current = planned;

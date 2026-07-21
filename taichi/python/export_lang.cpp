@@ -4816,6 +4816,14 @@ void export_lang(py::module &m) {
             stats.last_effective_tolerance;
         identity["preconditioner_method"] =
             stats.preconditioner_method;
+        identity["operator_action_provider"] =
+            stats.operator_action_provider;
+        identity["operator_asynchronous_submit"] =
+            stats.operator_asynchronous_submit;
+        identity["preconditioner_action_provider"] =
+            stats.preconditioner_action_provider;
+        identity["preconditioner_asynchronous_submit"] =
+            stats.preconditioner_asynchronous_submit;
         identity["operator_pattern_version"] =
             stats.operator_pattern_version;
         identity["operator_numeric_version"] =
@@ -4854,6 +4862,26 @@ void export_lang(py::module &m) {
             stats.preconditioner_apply_calls_available
                 ? py::cast(stats.preconditioner_apply_calls)
                 : py::none();
+        operations["operator_generation_pins"] =
+            stats.operator_generation_pins;
+        operations["operator_generation_changes"] =
+            stats.operator_generation_changes;
+        operations["operator_numeric_generation_changes"] =
+            stats.operator_numeric_generation_changes;
+        operations["operator_binding_generation_changes"] =
+            stats.operator_binding_generation_changes;
+        operations["operator_plan_invalidations"] =
+            stats.operator_plan_invalidations;
+        operations["preconditioner_generation_pins"] =
+            stats.preconditioner_generation_pins;
+        operations["preconditioner_generation_changes"] =
+            stats.preconditioner_generation_changes;
+        operations["preconditioner_numeric_generation_changes"] =
+            stats.preconditioner_numeric_generation_changes;
+        operations["preconditioner_binding_generation_changes"] =
+            stats.preconditioner_binding_generation_changes;
+        operations["preconditioner_plan_invalidations"] =
+            stats.preconditioner_plan_invalidations;
 
         py::dict resources;
         resources["persistent_vector_count"] =

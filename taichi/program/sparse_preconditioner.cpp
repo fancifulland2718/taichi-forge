@@ -1,5 +1,6 @@
 #include "taichi/program/sparse_preconditioner.h"
 
+#include "taichi/program/linear_operator.h"
 #include "taichi/program/program.h"
 
 #if defined(TI_WITH_CUDA)
@@ -507,7 +508,8 @@ SparseJacobiPreconditionerPlan::~SparseJacobiPreconditionerPlan() {
 void SparseJacobiPreconditionerPlan::validate_compatible(
     Program *program,
     const SparseMatrix &matrix) const {
-  std::lock_guard<std::mutex> lock(apply_mutex_);
+  auto matrix_guard = matrix_->acquire_numeric_access_guard();
+  std::lock_guard<std::recursive_mutex> lock(apply_mutex_);
   TI_ERROR_IF(program != program_,
               "Sparse Jacobi plan must be used by its construction "
               "Program.");
@@ -525,7 +527,8 @@ void SparseJacobiPreconditionerPlan::validate_compatible(
 }
 
 void SparseJacobiPreconditionerPlan::refresh_numeric(Program *program) {
-  std::lock_guard<std::mutex> lock(apply_mutex_);
+  auto matrix_guard = matrix_->acquire_numeric_access_guard();
+  std::lock_guard<std::recursive_mutex> lock(apply_mutex_);
   numeric_refresh_calls_++;
   try {
     TI_ERROR_IF(program != program_,
@@ -662,7 +665,8 @@ void SparseJacobiPreconditionerPlan::apply(Program *program,
                   program_->get_ndarray_data_ptr_as_int(&output));
     return;
   }
-  std::lock_guard<std::mutex> lock(apply_mutex_);
+  auto matrix_guard = matrix_->acquire_numeric_access_guard();
+  std::lock_guard<std::recursive_mutex> lock(apply_mutex_);
   const auto current = matrix_->debug_runtime_statistics();
   TI_ERROR_IF(
       current.pattern_version != pattern_version_at_build_ ||
@@ -713,7 +717,8 @@ void SparseJacobiPreconditionerPlan::apply_cpu_raw(
                   output == 0,
               "CPU Sparse Jacobi raw apply requires CPU storage and non-null "
               "input/output pointers.");
-  std::lock_guard<std::mutex> lock(apply_mutex_);
+  auto matrix_guard = matrix_->acquire_numeric_access_guard();
+  std::lock_guard<std::recursive_mutex> lock(apply_mutex_);
   const auto current = matrix_->debug_runtime_statistics();
   TI_ERROR_IF(
       current.pattern_version != pattern_version_at_build_ ||
@@ -752,7 +757,8 @@ void SparseJacobiPreconditionerPlan::apply_cuda_raw(
   TI_ERROR_IF(backend_family_ != "cuda" || input == 0 || output == 0,
               "CUDA Sparse Jacobi raw apply requires CUDA storage and "
               "non-null input/output pointers.");
-  std::lock_guard<std::mutex> lock(apply_mutex_);
+  auto matrix_guard = matrix_->acquire_numeric_access_guard();
+  std::lock_guard<std::recursive_mutex> lock(apply_mutex_);
   const auto current = matrix_->debug_runtime_statistics();
   TI_ERROR_IF(
       current.pattern_version != pattern_version_at_build_ ||
@@ -778,9 +784,21 @@ void SparseJacobiPreconditionerPlan::apply_cuda_raw(
   apply_calls_++;
 }
 
+OperatorResourceLease
+SparseJacobiPreconditionerPlan::acquire_resource_lease() const {
+  struct ResourcePin {
+    SparseMatrix::NumericAccessGuard matrix;
+    std::unique_lock<std::recursive_mutex> preconditioner;
+  };
+  return OperatorResourceLease::hold(ResourcePin{
+      matrix_->acquire_numeric_access_guard(),
+      std::unique_lock<std::recursive_mutex>(apply_mutex_)});
+}
+
 SparsePreconditionerPlanRuntimeStatistics
 SparseJacobiPreconditionerPlan::debug_runtime_statistics() const {
-  std::lock_guard<std::mutex> lock(apply_mutex_);
+  auto matrix_guard = matrix_->acquire_numeric_access_guard();
+  std::lock_guard<std::recursive_mutex> lock(apply_mutex_);
   const auto current = matrix_->debug_runtime_statistics();
   SparsePreconditionerPlanRuntimeStatistics result;
   result.backend_family = backend_family_;
@@ -1001,7 +1019,8 @@ SparseBlockJacobiPreconditionerPlan::~SparseBlockJacobiPreconditionerPlan() {
 void SparseBlockJacobiPreconditionerPlan::validate_compatible(
     Program *program,
     const SparseMatrix &matrix) const {
-  std::lock_guard<std::mutex> lock(apply_mutex_);
+  auto matrix_guard = matrix_->acquire_numeric_access_guard();
+  std::lock_guard<std::recursive_mutex> lock(apply_mutex_);
   TI_ERROR_IF(program != program_,
               "Sparse block-Jacobi plan must be used by its construction "
               "Program.");
@@ -1020,7 +1039,8 @@ void SparseBlockJacobiPreconditionerPlan::validate_compatible(
 
 void SparseBlockJacobiPreconditionerPlan::refresh_numeric(
     Program *program) {
-  std::lock_guard<std::mutex> lock(apply_mutex_);
+  auto matrix_guard = matrix_->acquire_numeric_access_guard();
+  std::lock_guard<std::recursive_mutex> lock(apply_mutex_);
   numeric_refresh_calls_++;
   try {
     TI_ERROR_IF(
@@ -1173,7 +1193,8 @@ void SparseBlockJacobiPreconditionerPlan::apply(
                   program_->get_ndarray_data_ptr_as_int(&output));
     return;
   }
-  std::lock_guard<std::mutex> lock(apply_mutex_);
+  auto matrix_guard = matrix_->acquire_numeric_access_guard();
+  std::lock_guard<std::recursive_mutex> lock(apply_mutex_);
   const auto current = matrix_->debug_runtime_statistics();
   TI_ERROR_IF(
       current.pattern_version != pattern_version_at_build_ ||
@@ -1221,7 +1242,8 @@ void SparseBlockJacobiPreconditionerPlan::apply_cpu_raw(
   TI_ERROR_IF(backend_family_ != "cpu" || input == 0 || output == 0,
               "CPU Sparse block-Jacobi raw apply requires non-null "
               "input/output pointers and CPU storage.");
-  std::lock_guard<std::mutex> lock(apply_mutex_);
+  auto matrix_guard = matrix_->acquire_numeric_access_guard();
+  std::lock_guard<std::recursive_mutex> lock(apply_mutex_);
   const auto current = matrix_->debug_runtime_statistics();
   TI_ERROR_IF(
       current.pattern_version != pattern_version_at_build_ ||
@@ -1258,7 +1280,8 @@ void SparseBlockJacobiPreconditionerPlan::apply_cuda_raw(
   TI_ERROR_IF(backend_family_ != "cuda" || input == 0 || output == 0,
               "CUDA Sparse block-Jacobi raw apply requires non-null "
               "input/output pointers and CUDA storage.");
-  std::lock_guard<std::mutex> lock(apply_mutex_);
+  auto matrix_guard = matrix_->acquire_numeric_access_guard();
+  std::lock_guard<std::recursive_mutex> lock(apply_mutex_);
   const auto current = matrix_->debug_runtime_statistics();
   TI_ERROR_IF(
       current.pattern_version != pattern_version_at_build_ ||
@@ -1284,9 +1307,21 @@ void SparseBlockJacobiPreconditionerPlan::apply_cuda_raw(
   apply_calls_++;
 }
 
+OperatorResourceLease
+SparseBlockJacobiPreconditionerPlan::acquire_resource_lease() const {
+  struct ResourcePin {
+    SparseMatrix::NumericAccessGuard matrix;
+    std::unique_lock<std::recursive_mutex> preconditioner;
+  };
+  return OperatorResourceLease::hold(ResourcePin{
+      matrix_->acquire_numeric_access_guard(),
+      std::unique_lock<std::recursive_mutex>(apply_mutex_)});
+}
+
 SparsePreconditionerPlanRuntimeStatistics
 SparseBlockJacobiPreconditionerPlan::debug_runtime_statistics() const {
-  std::lock_guard<std::mutex> lock(apply_mutex_);
+  auto matrix_guard = matrix_->acquire_numeric_access_guard();
+  std::lock_guard<std::recursive_mutex> lock(apply_mutex_);
   const auto current = matrix_->debug_runtime_statistics();
   SparsePreconditionerPlanRuntimeStatistics result;
   result.backend_family = backend_family_;
@@ -1412,7 +1447,7 @@ void CompiledKernelPreconditionerPlan::validate_compatible(
     const CompiledKernelLinearOperator &target_operator) const {
   auto target_guard = target_operator_->acquire_numeric_access_guard();
   auto inverse_guard = inverse_apply_operator_->acquire_numeric_access_guard();
-  std::lock_guard<std::mutex> lock(apply_mutex_);
+  std::lock_guard<std::recursive_mutex> lock(apply_mutex_);
   validate_compatible_locked(program, target_operator);
 }
 
@@ -1423,22 +1458,30 @@ void CompiledKernelPreconditionerPlan::apply(
     const Ndarray &output) {
   auto target_guard = target_operator_->acquire_numeric_access_guard();
   auto inverse_guard = inverse_apply_operator_->acquire_numeric_access_guard();
-  std::lock_guard<std::mutex> lock(apply_mutex_);
+  std::lock_guard<std::recursive_mutex> lock(apply_mutex_);
   validate_compatible_locked(program, target_operator);
   inverse_apply_operator_->nd_spmv(program, input, output);
   apply_calls_++;
 }
 
-SparseMatrix::NumericAccessGuard
-CompiledKernelPreconditionerPlan::acquire_numeric_access_guard() const {
-  return inverse_apply_operator_->acquire_numeric_access_guard();
+OperatorResourceLease
+CompiledKernelPreconditionerPlan::acquire_resource_lease() const {
+  struct ResourcePin {
+    SparseMatrix::NumericAccessGuard target;
+    SparseMatrix::NumericAccessGuard inverse;
+    std::unique_lock<std::recursive_mutex> preconditioner;
+  };
+  return OperatorResourceLease::hold(ResourcePin{
+      target_operator_->acquire_numeric_access_guard(),
+      inverse_apply_operator_->acquire_numeric_access_guard(),
+      std::unique_lock<std::recursive_mutex>(apply_mutex_)});
 }
 
 SparsePreconditionerPlanRuntimeStatistics
 CompiledKernelPreconditionerPlan::debug_runtime_statistics() const {
   auto target_guard = target_operator_->acquire_numeric_access_guard();
   auto inverse_guard = inverse_apply_operator_->acquire_numeric_access_guard();
-  std::lock_guard<std::mutex> lock(apply_mutex_);
+  std::lock_guard<std::recursive_mutex> lock(apply_mutex_);
   const auto target_stats = target_operator_->debug_runtime_statistics();
   const auto inverse_stats =
       inverse_apply_operator_->debug_runtime_statistics();

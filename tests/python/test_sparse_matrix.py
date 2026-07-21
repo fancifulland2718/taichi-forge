@@ -910,6 +910,20 @@ def test_public_bsr_pattern_matrix_spmv_update_and_sharing():
         assert plan_stats["operations"]["workspace_builds"] == 1
         assert plan_stats["operations"]["workspace_reuses"] == 1
         assert plan_stats["operations"]["preconditioner_apply_calls"] > 0
+        assert plan_stats["identity"]["operator_action_provider"] == "cusparse"
+        assert (
+            plan_stats["identity"]["preconditioner_action_provider"]
+            == "cuda_block_jacobi"
+        )
+        assert plan_stats["identity"]["operator_asynchronous_submit"]
+        assert plan_stats["identity"]["preconditioner_asynchronous_submit"]
+        assert plan_stats["operations"]["operator_generation_pins"] == 2
+        assert plan_stats["operations"]["preconditioner_generation_pins"] == 2
+        assert plan_stats["operations"]["operator_plan_invalidations"] == 0
+        assert (
+            plan_stats["operations"]["preconditioner_plan_invalidations"]
+            == 0
+        )
     elif ti.lang.impl.current_cfg().arch == ti.vulkan:
         exact = np.asarray([0.5, -1.0, 1.5, -2.0], dtype=np.float32)
         rhs = ti.ndarray(dtype=ti.f32, shape=4)
@@ -939,6 +953,23 @@ def test_public_bsr_pattern_matrix_spmv_update_and_sharing():
         assert plan_stats["operations"]["workspace_builds"] == 1
         assert plan_stats["operations"]["workspace_reuses"] == 1
         assert plan_stats["operations"]["preconditioner_apply_calls"] > 0
+        assert (
+            plan_stats["identity"]["operator_action_provider"]
+            == "forge_vulkan_native"
+        )
+        assert (
+            plan_stats["identity"]["preconditioner_action_provider"]
+            == "vulkan_block_jacobi"
+        )
+        assert plan_stats["identity"]["operator_asynchronous_submit"]
+        assert plan_stats["identity"]["preconditioner_asynchronous_submit"]
+        assert plan_stats["operations"]["operator_generation_pins"] == 2
+        assert plan_stats["operations"]["preconditioner_generation_pins"] == 2
+        assert plan_stats["operations"]["operator_plan_invalidations"] == 0
+        assert (
+            plan_stats["operations"]["preconditioner_plan_invalidations"]
+            == 0
+        )
     contract = matrix_a._get_format_contract()
     supports_public_cg = ti.lang.impl.current_cfg().arch in (ti.cpu, ti.cuda)
     assert contract["pattern"]["ownership"] == "shared_immutable"

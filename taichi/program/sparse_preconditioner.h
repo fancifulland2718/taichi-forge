@@ -9,6 +9,8 @@
 
 namespace taichi::lang {
 
+class OperatorResourceLease;
+
 struct SparsePreconditionerPlanRuntimeStatistics {
   std::string backend_family{"unknown"};
   std::string method{"jacobi"};
@@ -64,6 +66,7 @@ class SparseJacobiPreconditionerPlan final {
                       std::uintptr_t input,
                       std::uintptr_t output);
   void apply(Program *program, const Ndarray &input, const Ndarray &output);
+  OperatorResourceLease acquire_resource_lease() const;
   SparsePreconditionerPlanRuntimeStatistics debug_runtime_statistics() const;
 
  private:
@@ -80,7 +83,7 @@ class SparseJacobiPreconditionerPlan final {
   std::vector<float64> host_inverse_f64_;
   std::vector<int32_t> diagonal_offsets_;
   Ndarray *device_inverse_{nullptr};
-  mutable std::mutex apply_mutex_;
+  mutable std::recursive_mutex apply_mutex_;
   std::uint64_t apply_calls_{0};
   std::uint64_t construction_device_to_host_bytes_{0};
   std::uint64_t construction_host_to_device_bytes_{0};
@@ -120,6 +123,7 @@ class SparseBlockJacobiPreconditionerPlan final {
                       std::uintptr_t input,
                       std::uintptr_t output);
   void apply(Program *program, const Ndarray &input, const Ndarray &output);
+  OperatorResourceLease acquire_resource_lease() const;
   SparsePreconditionerPlanRuntimeStatistics debug_runtime_statistics() const;
 
  private:
@@ -139,7 +143,7 @@ class SparseBlockJacobiPreconditionerPlan final {
   std::vector<float32> host_inverse_blocks_f32_;
   std::vector<float64> host_inverse_blocks_f64_;
   Ndarray *device_inverse_blocks_{nullptr};
-  mutable std::mutex apply_mutex_;
+  mutable std::recursive_mutex apply_mutex_;
   std::uint64_t apply_calls_{0};
   std::uint64_t construction_device_to_host_bytes_{0};
   std::uint64_t construction_host_to_device_bytes_{0};
@@ -179,7 +183,7 @@ class CompiledKernelPreconditionerPlan final {
              const CompiledKernelLinearOperator &target_operator,
              const Ndarray &input,
              const Ndarray &output);
-  SparseMatrix::NumericAccessGuard acquire_numeric_access_guard() const;
+  OperatorResourceLease acquire_resource_lease() const;
   SparsePreconditionerPlanRuntimeStatistics debug_runtime_statistics() const;
 
  private:
@@ -194,7 +198,7 @@ class CompiledKernelPreconditionerPlan final {
   std::uint64_t target_numeric_version_at_build_{0};
   std::uint64_t inverse_pattern_version_at_build_{0};
   std::uint64_t inverse_numeric_version_at_build_{0};
-  mutable std::mutex apply_mutex_;
+  mutable std::recursive_mutex apply_mutex_;
   std::uint64_t apply_calls_{0};
 };
 

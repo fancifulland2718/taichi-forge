@@ -71,6 +71,20 @@ struct SparseSolvePlanRuntimeStatistics {
   std::uint64_t last_solve_numeric_version{0};
   bool operator_pattern_changed_since_last_solve{false};
   bool operator_numeric_changed_since_last_solve{false};
+  std::string operator_action_provider{"unavailable"};
+  bool operator_asynchronous_submit{false};
+  std::uint64_t operator_generation_pins{0};
+  std::uint64_t operator_generation_changes{0};
+  std::uint64_t operator_numeric_generation_changes{0};
+  std::uint64_t operator_binding_generation_changes{0};
+  std::uint64_t operator_plan_invalidations{0};
+  std::string preconditioner_action_provider{"identity"};
+  bool preconditioner_asynchronous_submit{false};
+  std::uint64_t preconditioner_generation_pins{0};
+  std::uint64_t preconditioner_generation_changes{0};
+  std::uint64_t preconditioner_numeric_generation_changes{0};
+  std::uint64_t preconditioner_binding_generation_changes{0};
+  std::uint64_t preconditioner_plan_invalidations{0};
 
   std::uint64_t solve_calls{0};
   std::uint64_t total_iterations{0};
@@ -421,6 +435,7 @@ class CUCG {
   bool has_preconditioner() const;
   void validate_preconditioner(Program *program) const;
   void apply_preconditioner(Program *program,
+                            const OperatorPinnedAction &generation,
                             float *input,
                             float *output,
                             const Ndarray *input_array,
@@ -438,6 +453,7 @@ class CUCG {
   CuSparseMatrix *cuda_csr_operator_{nullptr};
   CuSparseBsrMatrix *cuda_bsr_operator_{nullptr};
   std::unique_ptr<OperatorPlan> operator_plan_;
+  std::unique_ptr<OperatorPlan> preconditioner_plan_;
   SparseJacobiPreconditionerPlan *preconditioner_{nullptr};
   SparseBlockJacobiPreconditionerPlan *block_preconditioner_{nullptr};
   CompiledKernelLinearOperator *compiled_kernel_operator_{nullptr};
@@ -753,6 +769,7 @@ class VulkanCGIterationPlan {
   bool has_preconditioner() const;
   void validate_preconditioner(Program *program) const;
   void apply_preconditioner(Program *program,
+                            const OperatorPinnedAction &generation,
                             const Ndarray &input,
                             const Ndarray &output);
   void apply_operator(Program *program,
@@ -766,6 +783,7 @@ class VulkanCGIterationPlan {
   VulkanSparseMatrix *csr_matrix_{nullptr};
   VulkanSparseBsrMatrix *bsr_matrix_{nullptr};
   std::unique_ptr<OperatorPlan> operator_plan_;
+  std::unique_ptr<OperatorPlan> preconditioner_plan_;
   SparseJacobiPreconditionerPlan *preconditioner_{nullptr};
   SparseBlockJacobiPreconditionerPlan *block_preconditioner_{nullptr};
   CompiledKernelPreconditionerPlan *compiled_kernel_preconditioner_{nullptr};

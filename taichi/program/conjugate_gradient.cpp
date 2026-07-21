@@ -7,6 +7,33 @@
 #include <limits>
 
 namespace taichi::lang {
+namespace {
+
+OperatorBinding bind_preconditioner_action(
+    Program *program,
+    SparseMatrix &matrix,
+    SparseJacobiPreconditionerPlan &preconditioner,
+    std::string provider_name);
+OperatorBinding bind_preconditioner_action(
+    Program *program,
+    SparseMatrix &matrix,
+    SparseBlockJacobiPreconditionerPlan &preconditioner,
+    std::string provider_name);
+OperatorBinding bind_preconditioner_action(
+    Program *program,
+    CompiledKernelLinearOperator &matrix,
+    CompiledKernelPreconditionerPlan &preconditioner,
+    std::string provider_name);
+void validate_preconditioner_generation(
+    const OperatorPinnedAction &operator_generation,
+    const OperatorPinnedAction &preconditioner_generation);
+void append_operator_plan_statistics(
+    const OperatorPlan &plan,
+    bool preconditioner,
+    SparseSolvePlanRuntimeStatistics &statistics);
+
+}  // namespace
+
 CUCG::CUCG(SparseMatrix &A,
            int max_iters,
            float absolute_tolerance,
@@ -46,6 +73,9 @@ CUCG::CUCG(Program *program,
                                                *cuda_csr_operator_));
   validate_controls();
   preconditioner_->validate_compatible(program_, A_);
+  preconditioner_plan_ = std::make_unique<OperatorPlan>(
+      program_, bind_preconditioner_action(program_, A_, preconditioner,
+                                           "cuda_jacobi"));
   init_solver();
 }
 
@@ -71,6 +101,9 @@ CUCG::CUCG(Program *program,
                                                *cuda_bsr_operator_));
   validate_controls();
   block_preconditioner_->validate_compatible(program_, A_);
+  preconditioner_plan_ = std::make_unique<OperatorPlan>(
+      program_, bind_preconditioner_action(program_, A_, preconditioner,
+                                           "cuda_block_jacobi"));
   init_solver();
 }
 
@@ -98,6 +131,12 @@ CUCG::CUCG(Program *program,
   }
   operator_plan_ = std::make_unique<OperatorPlan>(
       program_, make_cuda_program_kernel_operator_binding(program_, A));
+  if (compiled_kernel_preconditioner_) {
+    preconditioner_plan_ = std::make_unique<OperatorPlan>(
+        program_, bind_preconditioner_action(
+                      program_, A, *compiled_kernel_preconditioner_,
+                      "cuda_compiled_inverse_apply"));
+  }
   init_solver();
 }
 
@@ -131,27 +170,31 @@ void CUCG::validate_preconditioner(Program *program) const {
 }
 
 void CUCG::apply_preconditioner(Program *program,
+                                const OperatorPinnedAction &generation,
                                 float *input,
                                 float *output,
                                 const Ndarray *input_array,
                                 const Ndarray *output_array) {
-  if (preconditioner_) {
-    preconditioner_->apply_cuda_raw(
-        program, reinterpret_cast<std::uintptr_t>(input),
-        reinterpret_cast<std::uintptr_t>(output));
-  } else if (block_preconditioner_) {
-    block_preconditioner_->apply_cuda_raw(
-        program, reinterpret_cast<std::uintptr_t>(input),
-        reinterpret_cast<std::uintptr_t>(output));
-  } else if (compiled_kernel_preconditioner_) {
-    TI_ERROR_IF(!input_array || !output_array,
-                "CUDA compiled-kernel preconditioning requires registered "
-                "ndarray workspace views.");
-    compiled_kernel_preconditioner_->apply(
-        program, *compiled_kernel_operator_, *input_array, *output_array);
-  } else {
-    TI_ERROR("CUDA CG has no preconditioner to apply.");
-  }
+  TI_ERROR_IF(!preconditioner_plan_,
+              "CUDA CG preconditioner plan is not initialized.");
+  const auto &descriptor = preconditioner_plan_->descriptor();
+  const auto input_view =
+      input_array
+          ? OperatorVectorView::from_ndarray(
+                program, *input_array, descriptor.domain, false)
+          : OperatorVectorView::from_device_pointer(
+                program, reinterpret_cast<std::uintptr_t>(input),
+                descriptor.domain, false);
+  const auto output_view =
+      output_array
+          ? OperatorVectorView::from_ndarray(
+                program, *output_array, descriptor.range, true)
+          : OperatorVectorView::from_device_pointer(
+                program, reinterpret_cast<std::uintptr_t>(output),
+                descriptor.range, true);
+  preconditioner_plan_->submit(
+      generation,
+      {OperatorApplyMode::forward, input_view, nullptr, output_view});
 }
 
 void CUCG::apply_operator(Program *program,
@@ -320,16 +363,16 @@ void CUCG::solve(Program *prog, const Ndarray &x, const Ndarray &b) {
       "its construction Program.");
   ensure_operator_plan(prog);
   auto operator_generation = operator_plan_->pin();
-  SparseMatrix::NumericAccessGuard preconditioner_numeric_guard;
-  if (compiled_kernel_preconditioner_) {
-    preconditioner_numeric_guard =
-        compiled_kernel_preconditioner_->acquire_numeric_access_guard();
-  }
+  auto preconditioner_generation =
+      preconditioner_plan_ ? preconditioner_plan_->pin()
+                           : OperatorPinnedAction{};
   if (has_preconditioner()) {
     TI_ERROR_IF(prog != program_,
                 "CUDA preconditioned CG must be solved by its construction "
                 "Program.");
     validate_preconditioner(prog);
+    validate_preconditioner_generation(operator_generation,
+                                       preconditioner_generation);
   }
   const auto operator_stamp = operator_generation.resource_stamp();
   solve_calls_++;
@@ -403,8 +446,8 @@ void CUCG::solve(Program *prog, const Ndarray &x, const Ndarray &b) {
       effective_tolerance_ * effective_tolerance_;
   if (!breakdown && has_preconditioner() && r1 > tolerance_squared &&
       max_iters_ > 0) {
-    apply_preconditioner(prog, d_r, d_z, workspace_r_ndarray_,
-                         workspace_z_ndarray_);
+    apply_preconditioner(prog, preconditioner_generation, d_r, d_z,
+                         workspace_r_ndarray_, workspace_z_ndarray_);
     preconditioner_apply_calls_++;
     CUBLASDriver::get_instance().cubSdot(handle_, m, d_r, 1, d_z, 1,
                                          &rho);
@@ -465,8 +508,8 @@ void CUCG::solve(Program *prog, const Ndarray &x, const Ndarray &b) {
     iterations_++;
     if (has_preconditioner() && std::isfinite(r1) &&
         r1 > tolerance_squared && iterations_ < max_iters_) {
-      apply_preconditioner(prog, d_r, d_z, workspace_r_ndarray_,
-                           workspace_z_ndarray_);
+      apply_preconditioner(prog, preconditioner_generation, d_r, d_z,
+                           workspace_r_ndarray_, workspace_z_ndarray_);
       preconditioner_apply_calls_++;
       CUBLASDriver::get_instance().cubSdot(handle_, m, d_r, 1, d_z, 1,
                                            &rho);
@@ -558,6 +601,10 @@ SparseSolvePlanRuntimeStatistics CUCG::debug_runtime_statistics() const {
                 static_cast<std::uint64_t>(workspace_size_) * sizeof(float);
   result.cublas_handle_count = handle_ != nullptr ? 1 : 0;
   result.device_to_device_bytes = device_to_device_bytes_;
+  append_operator_plan_statistics(*operator_plan_, false, result);
+  if (preconditioner_plan_) {
+    append_operator_plan_statistics(*preconditioner_plan_, true, result);
+  }
   return result;
 }
 
@@ -669,15 +716,17 @@ OperatorResourceStamp preconditioner_stamp(
   };
 }
 
-}  // namespace
-
-std::unique_ptr<CpuSparseCGPlan::PreconditionerBinding>
-CpuSparseCGPlan::bind_preconditioner(
+OperatorBinding bind_preconditioner_action(
     Program *program,
     SparseMatrix &matrix,
-    SparseJacobiPreconditionerPlan &preconditioner) {
+    SparseJacobiPreconditionerPlan &preconditioner,
+    std::string provider_name) {
+  OperatorCapabilities capabilities;
+  capabilities.asynchronous_submit =
+      !arch_is_cpu(program->compile_config().arch);
   auto action = OperatorAction(
-      square_operator_descriptor(matrix), OperatorCapabilities{}, "cpu_jacobi",
+      square_operator_descriptor(matrix), capabilities,
+      std::move(provider_name),
       [program, &preconditioner] {
         return preconditioner_stamp(program,
                                     preconditioner.debug_runtime_statistics(),
@@ -686,13 +735,166 @@ CpuSparseCGPlan::bind_preconditioner(
       [program, &preconditioner](OperatorApplyMode mode,
                                  const OperatorVectorView &input,
                                  const OperatorVectorView &output) {
+        TI_ERROR_IF(mode != OperatorApplyMode::forward,
+                    "Jacobi preconditioner action supports forward apply "
+                    "only.");
+        const auto arch = program->compile_config().arch;
+        if (arch_is_cuda(arch)) {
+          preconditioner.apply_cuda_raw(program, input.data, output.data);
+          return;
+        }
+        if (arch == Arch::vulkan) {
+          TI_ERROR_IF(!input.ndarray || !output.ndarray,
+                      "Vulkan Jacobi action requires ndarray views.");
+          preconditioner.apply(program, *input.ndarray, *output.ndarray);
+          return;
+        }
+        TI_ERROR_IF(!arch_is_cpu(arch),
+                    "Jacobi action supports CPU, CUDA, and Vulkan only.");
+        preconditioner.apply_cpu_raw(program, input.data, output.data);
+      });
+  return OperatorBinding(
+      std::move(action),
+      [&preconditioner] { return preconditioner.acquire_resource_lease(); });
+}
+
+OperatorBinding bind_preconditioner_action(
+    Program *program,
+    SparseMatrix &matrix,
+    SparseBlockJacobiPreconditionerPlan &preconditioner,
+    std::string provider_name) {
+  OperatorCapabilities capabilities;
+  capabilities.asynchronous_submit =
+      !arch_is_cpu(program->compile_config().arch);
+  auto action = OperatorAction(
+      square_operator_descriptor(matrix), capabilities,
+      std::move(provider_name),
+      [program, &preconditioner] {
+        return preconditioner_stamp(program,
+                                    preconditioner.debug_runtime_statistics(),
+                                    &preconditioner);
+      },
+      [program, &preconditioner](OperatorApplyMode mode,
+                                 const OperatorVectorView &input,
+                                 const OperatorVectorView &output) {
+        TI_ERROR_IF(mode != OperatorApplyMode::forward,
+                    "Block-Jacobi preconditioner action supports forward "
+                    "apply only.");
+        const auto arch = program->compile_config().arch;
+        if (arch_is_cuda(arch)) {
+          preconditioner.apply_cuda_raw(program, input.data, output.data);
+          return;
+        }
+        if (arch == Arch::vulkan) {
+          TI_ERROR_IF(!input.ndarray || !output.ndarray,
+                      "Vulkan block-Jacobi action requires ndarray views.");
+          preconditioner.apply(program, *input.ndarray, *output.ndarray);
+          return;
+        }
+        TI_ERROR_IF(
+            !arch_is_cpu(arch),
+            "Block-Jacobi action supports CPU, CUDA, and Vulkan only.");
+        preconditioner.apply_cpu_raw(program, input.data, output.data);
+      });
+  return OperatorBinding(
+      std::move(action),
+      [&preconditioner] { return preconditioner.acquire_resource_lease(); });
+}
+
+OperatorBinding bind_preconditioner_action(
+    Program *program,
+    CompiledKernelLinearOperator &matrix,
+    CompiledKernelPreconditionerPlan &preconditioner,
+    std::string provider_name) {
+  OperatorCapabilities capabilities;
+  capabilities.asynchronous_submit =
+      !arch_is_cpu(program->compile_config().arch);
+  auto action = OperatorAction(
+      square_operator_descriptor(matrix), capabilities,
+      std::move(provider_name),
+      [program, &preconditioner] {
+        return preconditioner_stamp(program,
+                                    preconditioner.debug_runtime_statistics(),
+                                    &preconditioner);
+      },
+      [program, &matrix, &preconditioner](
+          OperatorApplyMode mode, const OperatorVectorView &input,
+          const OperatorVectorView &output) {
         TI_ERROR_IF(mode != OperatorApplyMode::forward || !input.ndarray ||
                         !output.ndarray,
-                    "CPU Jacobi action requires forward ndarray views.");
-        preconditioner.apply(program, *input.ndarray, *output.ndarray);
+                    "Compiled inverse action requires forward ndarray "
+                    "views.");
+        preconditioner.apply(program, matrix, *input.ndarray,
+                             *output.ndarray);
       });
+  return OperatorBinding(
+      std::move(action),
+      [&preconditioner] { return preconditioner.acquire_resource_lease(); });
+}
+
+void validate_preconditioner_generation(
+    const OperatorPinnedAction &operator_generation,
+    const OperatorPinnedAction &preconditioner_generation) {
+  const auto operator_stamp = operator_generation.resource_stamp();
+  const auto preconditioner_stamp =
+      preconditioner_generation.resource_stamp();
+  TI_ERROR_IF(
+      operator_stamp.program_identity !=
+              preconditioner_stamp.program_identity ||
+          operator_stamp.program_generation !=
+              preconditioner_stamp.program_generation ||
+          operator_stamp.topology_revision !=
+              preconditioner_stamp.topology_revision ||
+          operator_stamp.numeric_revision !=
+              preconditioner_stamp.numeric_revision,
+      "Pinned preconditioner generation does not match the pinned target "
+      "operator generation.");
+}
+
+void append_operator_plan_statistics(
+    const OperatorPlan &plan,
+    bool preconditioner,
+    SparseSolvePlanRuntimeStatistics &statistics) {
+  const auto plan_statistics = plan.debug_runtime_statistics();
+  if (preconditioner) {
+    statistics.preconditioner_action_provider = plan.provider_name();
+    statistics.preconditioner_asynchronous_submit =
+        plan.capabilities().asynchronous_submit;
+    statistics.preconditioner_generation_pins =
+        plan_statistics.generation_pins;
+    statistics.preconditioner_generation_changes =
+        plan_statistics.generation_changes;
+    statistics.preconditioner_numeric_generation_changes =
+        plan_statistics.numeric_generation_changes;
+    statistics.preconditioner_binding_generation_changes =
+        plan_statistics.binding_generation_changes;
+    statistics.preconditioner_plan_invalidations =
+        plan_statistics.invalidations;
+    return;
+  }
+  statistics.operator_action_provider = plan.provider_name();
+  statistics.operator_asynchronous_submit =
+      plan.capabilities().asynchronous_submit;
+  statistics.operator_generation_pins = plan_statistics.generation_pins;
+  statistics.operator_generation_changes =
+      plan_statistics.generation_changes;
+  statistics.operator_numeric_generation_changes =
+      plan_statistics.numeric_generation_changes;
+  statistics.operator_binding_generation_changes =
+      plan_statistics.binding_generation_changes;
+  statistics.operator_plan_invalidations = plan_statistics.invalidations;
+}
+
+}  // namespace
+
+std::unique_ptr<CpuSparseCGPlan::PreconditionerBinding>
+CpuSparseCGPlan::bind_preconditioner(
+    Program *program,
+    SparseMatrix &matrix,
+    SparseJacobiPreconditionerPlan &preconditioner) {
   return std::make_unique<PreconditionerBinding>(PreconditionerBinding{
-      OperatorBinding(std::move(action)),
+      bind_preconditioner_action(program, matrix, preconditioner,
+                                 "cpu_jacobi"),
       [&matrix, &preconditioner](Program *candidate) {
         preconditioner.validate_compatible(candidate, matrix);
       },
@@ -704,25 +906,9 @@ CpuSparseCGPlan::bind_preconditioner(
     Program *program,
     SparseMatrix &matrix,
     SparseBlockJacobiPreconditionerPlan &preconditioner) {
-  auto action = OperatorAction(
-      square_operator_descriptor(matrix), OperatorCapabilities{},
-      "cpu_block_jacobi",
-      [program, &preconditioner] {
-        return preconditioner_stamp(program,
-                                    preconditioner.debug_runtime_statistics(),
-                                    &preconditioner);
-      },
-      [program, &preconditioner](OperatorApplyMode mode,
-                                 const OperatorVectorView &input,
-                                 const OperatorVectorView &output) {
-        TI_ERROR_IF(mode != OperatorApplyMode::forward || !input.ndarray ||
-                        !output.ndarray,
-                    "CPU block-Jacobi action requires forward ndarray "
-                    "views.");
-        preconditioner.apply(program, *input.ndarray, *output.ndarray);
-      });
   return std::make_unique<PreconditionerBinding>(PreconditionerBinding{
-      OperatorBinding(std::move(action)),
+      bind_preconditioner_action(program, matrix, preconditioner,
+                                 "cpu_block_jacobi"),
       [&matrix, &preconditioner](Program *candidate) {
         preconditioner.validate_compatible(candidate, matrix);
       },
@@ -734,30 +920,9 @@ CpuSparseCGPlan::bind_preconditioner(
     Program *program,
     CompiledKernelLinearOperator &matrix,
     CompiledKernelPreconditionerPlan &preconditioner) {
-  auto action = OperatorAction(
-      square_operator_descriptor(matrix), OperatorCapabilities{},
-      "compiled_kernel_inverse_apply",
-      [program, &preconditioner] {
-        return preconditioner_stamp(program,
-                                    preconditioner.debug_runtime_statistics(),
-                                    &preconditioner);
-      },
-      [program, &matrix, &preconditioner](OperatorApplyMode mode,
-                                          const OperatorVectorView &input,
-                                          const OperatorVectorView &output) {
-        TI_ERROR_IF(mode != OperatorApplyMode::forward || !input.ndarray ||
-                        !output.ndarray,
-                    "CPU compiled-kernel preconditioner action requires "
-                    "forward ndarray views.");
-        preconditioner.apply(program, matrix, *input.ndarray, *output.ndarray);
-      });
   return std::make_unique<PreconditionerBinding>(PreconditionerBinding{
-      OperatorBinding(
-          std::move(action),
-          [&preconditioner] {
-            return OperatorResourceLease::hold(
-                preconditioner.acquire_numeric_access_guard());
-          }),
+      bind_preconditioner_action(program, matrix, preconditioner,
+                                 "compiled_kernel_inverse_apply"),
       [&matrix, &preconditioner](Program *candidate) {
         preconditioner.validate_compatible(candidate, matrix);
       },
@@ -1111,6 +1276,10 @@ void CpuSparseCGPlan::solve(Program *program,
       preconditioner_plan_ ? preconditioner_plan_->pin()
                            : OperatorPinnedAction{};
   validate_preconditioner(program);
+  if (preconditioner_plan_) {
+    validate_preconditioner_generation(operator_generation,
+                                       preconditioner_generation);
+  }
   const auto operator_stamp = operator_generation.resource_stamp();
   if (has_solved_) {
     workspace_reuses_++;
@@ -1153,8 +1322,7 @@ void CpuSparseCGPlan::solve(Program *program,
 SparseSolvePlanRuntimeStatistics CpuSparseCGPlan::debug_runtime_statistics()
     const {
   std::lock_guard<std::mutex> lock(solve_mutex_);
-  auto operator_generation = operator_plan_->pin();
-  const auto operator_stamp = operator_generation.resource_stamp();
+  const auto operator_stamp = operator_plan_->resource_stamp();
   SparseSolvePlanRuntimeStatistics result;
   result.backend_family = "cpu";
   if (!preconditioner_binding_) {
@@ -1203,6 +1371,10 @@ SparseSolvePlanRuntimeStatistics CpuSparseCGPlan::debug_runtime_statistics()
   result.preconditioner_ownership_scope =
       preconditioner_binding_ ? "external_plan" : "none";
   result.solver_state_rebuilt_each_solve = false;
+  append_operator_plan_statistics(*operator_plan_, false, result);
+  if (preconditioner_plan_) {
+    append_operator_plan_statistics(*preconditioner_plan_, true, result);
+  }
   return result;
 }
 
@@ -1372,14 +1544,14 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
   preconditioner_ = preconditioner;
   block_preconditioner_ = block_preconditioner;
   compiled_kernel_preconditioner_ = compiled_kernel_preconditioner;
+  compiled_kernel_operator_ =
+      allow_compiled_kernel_operator ? compiled_kernel_operator : nullptr;
   if (has_preconditioner()) {
     validate_preconditioner(program_);
   }
   fixed_iterations_ = max_iterations;
   absolute_tolerance_ = absolute_tolerance;
   adaptive_ = adaptive;
-  compiled_kernel_operator_ =
-      allow_compiled_kernel_operator ? compiled_kernel_operator : nullptr;
   if (compiled_kernel_operator_) {
     operator_plan_ = std::make_unique<OperatorPlan>(
         program_, make_vulkan_program_kernel_operator_binding(
@@ -1390,6 +1562,23 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
   } else {
     operator_plan_ = std::make_unique<OperatorPlan>(
         program_, make_vulkan_csr_operator_binding(program_, *csr_matrix_));
+  }
+  if (preconditioner_) {
+    preconditioner_plan_ = std::make_unique<OperatorPlan>(
+        program_, bind_preconditioner_action(
+                      program_, matrix, *preconditioner_,
+                      "vulkan_jacobi"));
+  } else if (block_preconditioner_) {
+    preconditioner_plan_ = std::make_unique<OperatorPlan>(
+        program_, bind_preconditioner_action(
+                      program_, matrix, *block_preconditioner_,
+                      "vulkan_block_jacobi"));
+  } else if (compiled_kernel_preconditioner_) {
+    preconditioner_plan_ = std::make_unique<OperatorPlan>(
+        program_, bind_preconditioner_action(
+                      program_, *compiled_kernel_operator_,
+                      *compiled_kernel_preconditioner_,
+                      "vulkan_compiled_inverse_apply"));
   }
   const int n = matrix.num_rows();
   auto create_vector = [&]() {
@@ -1446,35 +1635,30 @@ void VulkanCGIterationPlan::validate_preconditioner(Program *program) const {
   } else if (block_preconditioner_) {
     block_preconditioner_->validate_compatible(program, *matrix_);
   } else if (compiled_kernel_preconditioner_) {
-    auto *compiled_kernel_operator =
-        dynamic_cast<CompiledKernelLinearOperator *>(matrix_);
-    TI_ERROR_IF(!compiled_kernel_operator,
-                "Compiled-kernel preconditioning requires a compiled-kernel "
-                "target operator.");
+    TI_ERROR_IF(!compiled_kernel_operator_,
+                "Compiled-kernel preconditioning requires its typed target "
+                "binding.");
     compiled_kernel_preconditioner_->validate_compatible(
-        program, *compiled_kernel_operator);
+        program, *compiled_kernel_operator_);
   }
 }
 
 void VulkanCGIterationPlan::apply_preconditioner(
     Program *program,
+    const OperatorPinnedAction &generation,
     const Ndarray &input,
     const Ndarray &output) {
-  if (preconditioner_) {
-    preconditioner_->apply(program, input, output);
-  } else if (block_preconditioner_) {
-    block_preconditioner_->apply(program, input, output);
-  } else if (compiled_kernel_preconditioner_) {
-    auto *compiled_kernel_operator =
-        dynamic_cast<CompiledKernelLinearOperator *>(matrix_);
-    TI_ERROR_IF(!compiled_kernel_operator,
-                "Compiled-kernel preconditioning requires a compiled-kernel "
-                "target operator.");
-    compiled_kernel_preconditioner_->apply(
-        program, *compiled_kernel_operator, input, output);
-  } else {
-    TI_ERROR("Vulkan CG has no preconditioner to apply.");
-  }
+  TI_ERROR_IF(!preconditioner_plan_,
+              "Vulkan CG preconditioner plan is not initialized.");
+  const auto &descriptor = preconditioner_plan_->descriptor();
+  preconditioner_plan_->submit(
+      generation,
+      {OperatorApplyMode::forward,
+       OperatorVectorView::from_ndarray(
+           program, input, descriptor.domain, false),
+       nullptr,
+       OperatorVectorView::from_ndarray(
+           program, output, descriptor.range, true)});
 }
 
 void VulkanCGIterationPlan::apply_operator(Program *program,
@@ -1523,8 +1707,13 @@ void VulkanCGIterationPlan::solve(Program *program,
 
   std::lock_guard<std::mutex> lock(solve_mutex_);
   auto operator_generation = operator_plan_->pin();
+  auto preconditioner_generation =
+      preconditioner_plan_ ? preconditioner_plan_->pin()
+                           : OperatorPinnedAction{};
   if (has_preconditioner()) {
     validate_preconditioner(program);
+    validate_preconditioner_generation(operator_generation,
+                                       preconditioner_generation);
   }
   auto submission_guard =
       program->acquire_runtime_resource_submission_guard();
@@ -1570,7 +1759,7 @@ void VulkanCGIterationPlan::solve(Program *program,
         tolerance_squared, 0);
   }
   if (has_preconditioner()) {
-    apply_preconditioner(program, *residual_,
+    apply_preconditioner(program, preconditioner_generation, *residual_,
                          *preconditioned_residual_);
     program->vulkan_sparse_dot(residual_, preconditioned_residual_, rr_a_,
                                n);
@@ -1600,7 +1789,7 @@ void VulkanCGIterationPlan::solve(Program *program,
             completed_iterations_scalar_, tolerance_squared,
             static_cast<std::uint32_t>(iteration + 1));
       }
-      apply_preconditioner(program, *residual_,
+      apply_preconditioner(program, preconditioner_generation, *residual_,
                            *preconditioned_residual_);
       program->vulkan_sparse_dot(residual_, preconditioned_residual_,
                                  next_rr, n);
@@ -1759,6 +1948,10 @@ VulkanCGIterationPlan::debug_runtime_statistics() const {
   result.device_to_device_bytes = device_to_device_bytes_;
   result.device_to_host_bytes = device_to_host_bytes_;
   result.host_to_device_bytes = host_to_device_bytes_;
+  append_operator_plan_statistics(*operator_plan_, false, result);
+  if (preconditioner_plan_) {
+    append_operator_plan_statistics(*preconditioner_plan_, true, result);
+  }
   return result;
 }
 
