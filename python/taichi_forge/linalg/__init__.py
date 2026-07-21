@@ -1,5 +1,6 @@
 """Taichi support module for sparse matrix operations."""
 
+from taichi_forge.linalg import experimental
 from taichi_forge.linalg.sparse_cg import SparseCG
 from taichi_forge.linalg.sparse_bicgstab import SparseBiCGSTAB
 from taichi_forge.linalg.sparse_minres import SparseMINRES
