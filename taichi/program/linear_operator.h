@@ -16,6 +16,8 @@ class Ndarray;
 class Program;
 class CpuSparseCsrMatrix;
 class CpuSparseBsrMatrix;
+class CuSparseMatrix;
+class CuSparseBsrMatrix;
 class CompiledKernelLinearOperator;
 
 enum class OperatorInnerProductKind : std::uint8_t {
@@ -118,6 +120,11 @@ struct OperatorVectorView {
                                          const Ndarray &array,
                                          const OperatorSpaceDesc &space,
                                          bool writable);
+  static OperatorVectorView from_device_pointer(
+      Program *program,
+      std::uintptr_t data,
+      const OperatorSpaceDesc &space,
+      bool writable);
 };
 
 struct OperatorApplyRequest {
@@ -338,6 +345,13 @@ OperatorBinding make_cpu_csr_operator_binding(Program *program,
 OperatorBinding make_cpu_bsr_operator_binding(Program *program,
                                               CpuSparseBsrMatrix &matrix);
 OperatorBinding make_cpu_program_kernel_operator_binding(
+    Program *program,
+    CompiledKernelLinearOperator &matrix);
+OperatorBinding make_cuda_csr_operator_binding(Program *program,
+                                               CuSparseMatrix &matrix);
+OperatorBinding make_cuda_bsr_operator_binding(Program *program,
+                                               CuSparseBsrMatrix &matrix);
+OperatorBinding make_cuda_program_kernel_operator_binding(
     Program *program,
     CompiledKernelLinearOperator &matrix);
 

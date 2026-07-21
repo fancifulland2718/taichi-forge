@@ -66,9 +66,9 @@ void validate_view(const OperatorVectorView &view,
               "access mode.",
               role);
   if (program) {
-    TI_ERROR_IF(view.program != program || !view.ndarray,
-                "Program-bound operator {} view must retain an ndarray "
-                "owned by the plan Program.",
+    TI_ERROR_IF(view.program != program,
+                "Program-bound operator {} view must belong to the plan "
+                "Program.",
                 role);
   } else {
     TI_ERROR_IF(view.program || view.ndarray,
@@ -190,6 +190,18 @@ OperatorVectorView OperatorVectorView::from_ndarray(
       &array,
       program,
       writable};
+}
+
+OperatorVectorView OperatorVectorView::from_device_pointer(
+    Program *program,
+    std::uintptr_t data,
+    const OperatorSpaceDesc &space,
+    bool writable) {
+  validate_space(space, "device pointer");
+  TI_ERROR_IF(!program || data == 0,
+              "Operator device pointer view requires an active Program and "
+              "non-null device address.");
+  return {space, data, data, nullptr, program, writable};
 }
 
 struct OperatorAction::State {
@@ -460,9 +472,11 @@ OperatorPlan::OperatorPlan(Program *program,
       binding_(std::move(binding)),
       dependencies_(dependencies),
       planned_stamp_(binding_.action().resource_stamp()) {
-  TI_ERROR_IF(program_ && !arch_is_cpu(program_->compile_config().arch),
-              "M1 generalized operator lowering currently requires a CPU "
-              "Program; no host fallback was performed.");
+  TI_ERROR_IF(program_ && !arch_is_cpu(program_->compile_config().arch) &&
+                  !arch_is_cuda(program_->compile_config().arch) &&
+                  program_->compile_config().arch != Arch::vulkan,
+              "OperatorPlan supports CPU, CUDA, and Vulkan Programs only; "
+              "no fallback was performed.");
   if (program_) {
     TI_ERROR_IF(
         planned_stamp_.program_identity !=
@@ -625,6 +639,11 @@ OperatorSubmission OperatorPlan::submit(
     return {pinned.resource_stamp(), true};
   }
 
+  TI_ERROR_IF(program_ &&
+                  !arch_is_cpu(program_->compile_config().arch),
+              "Generalized operator lowering is unavailable on this GPU "
+              "backend; only overwrite apply is supported and no host "
+              "fallback was performed.");
   statistics_.generalized_lowerings++;
   OperatorVectorView applied;
   OperatorVectorView *applied_ptr = nullptr;
@@ -759,6 +778,64 @@ OperatorBinding make_cpu_typed_operator_binding(
       });
 }
 
+template <typename Provider, typename Apply>
+OperatorBinding make_gpu_typed_operator_binding(
+    Program *program,
+    Provider &provider,
+    Arch expected_arch,
+    const char *expected_backend,
+    const char *expected_provider,
+    const char *expected_storage,
+    Apply apply) {
+  TI_ERROR_IF(!program || program->compile_config().arch != expected_arch,
+              "{} operator bindings require their owning {} Program.",
+              expected_backend, expected_backend);
+  const auto initial = provider.debug_runtime_statistics();
+  TI_ERROR_IF(initial.backend_family != expected_backend ||
+                  initial.provider_name != expected_provider ||
+                  initial.storage_format != expected_storage,
+              "{} operator binding expected provider '{}' with storage "
+              "'{}', got provider '{}' on backend '{}' with storage '{}'; "
+              "no fallback was performed.",
+              expected_backend, expected_provider, expected_storage,
+              initial.provider_name, initial.backend_family,
+              initial.storage_format);
+  OperatorDescriptor descriptor;
+  descriptor.domain = {
+      provider.get_data_type(),
+      static_cast<std::size_t>(provider.num_cols())};
+  descriptor.range = {
+      provider.get_data_type(),
+      static_cast<std::size_t>(provider.num_rows())};
+  OperatorCapabilities capabilities;
+  capabilities.asynchronous_submit = true;
+  auto action = OperatorAction(
+      descriptor, capabilities, expected_provider,
+      [program, &provider] {
+        const auto statistics = provider.debug_runtime_statistics();
+        return OperatorResourceStamp{
+            reinterpret_cast<std::uintptr_t>(program),
+            program->runtime_program_generation(),
+            1,
+            statistics.pattern_version,
+            statistics.numeric_version,
+            provider.matrix_id()};
+      },
+      [apply = std::move(apply)](
+          OperatorApplyMode mode, const OperatorVectorView &input,
+          const OperatorVectorView &output) {
+        TI_ERROR_IF(mode != OperatorApplyMode::forward,
+                    "GPU sparse operator bindings support forward apply "
+                    "only.");
+        apply(input, output);
+      });
+  return OperatorBinding(
+      std::move(action), [&provider] {
+        return OperatorResourceLease::hold(
+            provider.acquire_numeric_access_guard());
+      });
+}
+
 }  // namespace
 
 OperatorBinding make_cpu_csr_operator_binding(Program *program,
@@ -779,6 +856,36 @@ OperatorBinding make_cpu_program_kernel_operator_binding(
   TI_ERROR_IF(matrix.owning_program() != program,
               "CPU program-kernel operator binding requires its owning "
               "Program; no fallback was performed.");
+  return matrix.make_operator_binding();
+}
+
+OperatorBinding make_cuda_csr_operator_binding(Program *program,
+                                               CuSparseMatrix &matrix) {
+  return make_gpu_typed_operator_binding(
+      program, matrix, Arch::cuda, "cuda", "cusparse", "csr",
+      [&matrix](const OperatorVectorView &input,
+                const OperatorVectorView &output) {
+        matrix.spmv(input.data, output.data);
+      });
+}
+
+OperatorBinding make_cuda_bsr_operator_binding(Program *program,
+                                               CuSparseBsrMatrix &matrix) {
+  return make_gpu_typed_operator_binding(
+      program, matrix, Arch::cuda, "cuda", "cusparse", "bsr",
+      [&matrix](const OperatorVectorView &input,
+                const OperatorVectorView &output) {
+        matrix.spmv(input.data, output.data);
+      });
+}
+
+OperatorBinding make_cuda_program_kernel_operator_binding(
+    Program *program,
+    CompiledKernelLinearOperator &matrix) {
+  TI_ERROR_IF(!program || program->compile_config().arch != Arch::cuda ||
+                  matrix.owning_program() != program,
+              "CUDA program-kernel binding requires its owning CUDA "
+              "Program.");
   return matrix.make_operator_binding();
 }
 

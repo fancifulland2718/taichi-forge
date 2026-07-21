@@ -2683,6 +2683,7 @@ void CuSparseMatrix::reset_spmv_resources() {
 
 void CuSparseMatrix::update_values(Program *prog, const Ndarray &values) {
 #if defined(TI_WITH_CUDA)
+  auto numeric_guard = acquire_numeric_access_guard();
   TI_ERROR_IF(pattern_ && prog != pattern_->program(),
               "Internal shared CUDA CSR value updates require the owning "
               "Program.");
@@ -3013,6 +3014,7 @@ std::unique_ptr<SparseMatrix> CuSparseMatrix::transpose() const {
 
 void CuSparseMatrix::spmv(size_t dX, size_t dY) {
 #if defined(TI_WITH_CUDA)
+  auto numeric_guard = acquire_numeric_access_guard();
   std::lock_guard<std::mutex> lock(spmv_mutex_);
   record_spmv_call();
   if (!spmv_handle_) {
@@ -3234,6 +3236,7 @@ CuSparseBsrMatrix::~CuSparseBsrMatrix() {
 
 void CuSparseBsrMatrix::spmv(size_t dX, size_t dY) {
 #if defined(TI_WITH_CUDA)
+  auto numeric_guard = acquire_numeric_access_guard();
   std::lock_guard<std::mutex> lock(spmv_mutex_);
   record_spmv_call();
   if (!spmv_handle_) {
@@ -3311,6 +3314,7 @@ void CuSparseBsrMatrix::nd_spmv(Program *prog,
 
 void CuSparseBsrMatrix::update_values(Program *prog, const Ndarray &values) {
 #if defined(TI_WITH_CUDA)
+  auto numeric_guard = acquire_numeric_access_guard();
   TI_ERROR_IF(!prog || prog != pattern_->program() ||
                   !arch_is_cuda(prog->compile_config().arch),
               "Internal BSR value updates require the owning CUDA Program.");

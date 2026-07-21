@@ -7,6 +7,23 @@
 #include <limits>
 
 namespace taichi::lang {
+CUCG::CUCG(SparseMatrix &A,
+           int max_iters,
+           float absolute_tolerance,
+           bool verbose,
+           float relative_tolerance)
+    : A_(A),
+      cuda_csr_operator_(dynamic_cast<CuSparseMatrix *>(&A)),
+      max_iters_(max_iters),
+      absolute_tolerance_(absolute_tolerance),
+      relative_tolerance_(relative_tolerance),
+      verbose_(verbose) {
+  TI_ERROR_IF(!cuda_csr_operator_,
+              "CUDA conjugate gradient currently requires a CSR matrix.");
+  validate_controls();
+  init_solver();
+}
+
 CUCG::CUCG(Program *program,
            SparseMatrix &A,
            SparseJacobiPreconditionerPlan &preconditioner,
@@ -16,13 +33,17 @@ CUCG::CUCG(Program *program,
            float relative_tolerance)
     : program_(program),
       A_(A),
+      cuda_csr_operator_(dynamic_cast<CuSparseMatrix *>(&A)),
       preconditioner_(&preconditioner),
       max_iters_(max_iters),
       absolute_tolerance_(absolute_tolerance),
       relative_tolerance_(relative_tolerance),
       verbose_(verbose) {
-  TI_ERROR_IF(dynamic_cast<CuSparseMatrix *>(&A_) == nullptr,
+  TI_ERROR_IF(!cuda_csr_operator_,
               "CUDA Jacobi-PCG currently requires a CSR matrix.");
+  operator_plan_ = std::make_unique<OperatorPlan>(
+      program_, make_cuda_csr_operator_binding(program_,
+                                               *cuda_csr_operator_));
   validate_controls();
   preconditioner_->validate_compatible(program_, A_);
   init_solver();
@@ -37,13 +58,17 @@ CUCG::CUCG(Program *program,
            float relative_tolerance)
     : program_(program),
       A_(A),
+      cuda_bsr_operator_(dynamic_cast<CuSparseBsrMatrix *>(&A)),
       block_preconditioner_(&preconditioner),
       max_iters_(max_iters),
       absolute_tolerance_(absolute_tolerance),
       relative_tolerance_(relative_tolerance),
       verbose_(verbose) {
-  TI_ERROR_IF(dynamic_cast<CuSparseBsrMatrix *>(&A_) == nullptr,
+  TI_ERROR_IF(!cuda_bsr_operator_,
               "CUDA block-Jacobi PCG requires an internal BSR matrix.");
+  operator_plan_ = std::make_unique<OperatorPlan>(
+      program_, make_cuda_bsr_operator_binding(program_,
+                                               *cuda_bsr_operator_));
   validate_controls();
   block_preconditioner_->validate_compatible(program_, A_);
   init_solver();
@@ -71,6 +96,8 @@ CUCG::CUCG(Program *program,
   if (compiled_kernel_preconditioner_) {
     compiled_kernel_preconditioner_->validate_compatible(program_, A);
   }
+  operator_plan_ = std::make_unique<OperatorPlan>(
+      program_, make_cuda_program_kernel_operator_binding(program_, A));
   init_solver();
 }
 
@@ -128,22 +155,45 @@ void CUCG::apply_preconditioner(Program *program,
 }
 
 void CUCG::apply_operator(Program *program,
+                          const OperatorPinnedAction &generation,
                           std::uintptr_t input,
                           std::uintptr_t output,
                           const Ndarray *input_array,
                           const Ndarray *output_array) {
-  if (auto *csr = dynamic_cast<CuSparseMatrix *>(&A_)) {
-    csr->spmv(input, output);
-  } else if (auto *bsr = dynamic_cast<CuSparseBsrMatrix *>(&A_)) {
-    bsr->spmv(input, output);
-  } else if (compiled_kernel_operator_) {
-    TI_ERROR_IF(!input_array || !output_array,
-                "CUDA compiled-kernel CG requires registered ndarray "
-                "workspace views.");
-    compiled_kernel_operator_->nd_spmv(program, *input_array, *output_array);
-  } else {
-    TI_ERROR("CUDA CG received an unsupported sparse operator.");
+  TI_ERROR_IF(!operator_plan_,
+              "CUDA CG operator plan is not initialized.");
+  const auto &descriptor = operator_plan_->descriptor();
+  const auto input_view =
+      input_array
+          ? OperatorVectorView::from_ndarray(
+                program, *input_array, descriptor.domain, false)
+          : OperatorVectorView::from_device_pointer(
+                program, input, descriptor.domain, false);
+  const auto output_view =
+      output_array
+          ? OperatorVectorView::from_ndarray(
+                program, *output_array, descriptor.range, true)
+          : OperatorVectorView::from_device_pointer(
+                program, output, descriptor.range, true);
+  operator_plan_->submit(
+      generation,
+      {OperatorApplyMode::forward, input_view, nullptr, output_view});
+}
+
+void CUCG::ensure_operator_plan(Program *program) {
+  if (operator_plan_) {
+    TI_ERROR_IF(program_ && program != program_,
+                "CUDA CG must keep using its construction Program.");
+    return;
   }
+  TI_ERROR_IF(!program || program->compile_config().arch != Arch::cuda ||
+                  !cuda_csr_operator_,
+              "CUDA CG compatibility binding requires an active CUDA "
+              "Program and CSR operator.");
+  program_ = program;
+  operator_plan_ = std::make_unique<OperatorPlan>(
+      program_, make_cuda_csr_operator_binding(program_,
+                                               *cuda_csr_operator_));
 }
 
 void CUCG::init_solver() {
@@ -268,7 +318,8 @@ void CUCG::solve(Program *prog, const Ndarray &x, const Ndarray &b) {
            b.owning_program() != program_),
       "CUDA compiled-kernel CG requires solution and RHS ndarrays owned by "
       "its construction Program.");
-  auto numeric_guard = A_.acquire_numeric_access_guard();
+  ensure_operator_plan(prog);
+  auto operator_generation = operator_plan_->pin();
   SparseMatrix::NumericAccessGuard preconditioner_numeric_guard;
   if (compiled_kernel_preconditioner_) {
     preconditioner_numeric_guard =
@@ -280,10 +331,10 @@ void CUCG::solve(Program *prog, const Ndarray &x, const Ndarray &b) {
                 "Program.");
     validate_preconditioner(prog);
   }
-  const auto operator_stats = A_.debug_runtime_statistics();
+  const auto operator_stamp = operator_generation.resource_stamp();
   solve_calls_++;
-  last_solve_pattern_version_ = operator_stats.pattern_version;
-  last_solve_numeric_version_ = operator_stats.numeric_version;
+  last_solve_pattern_version_ = operator_stamp.topology_revision;
+  last_solve_numeric_version_ = operator_stamp.numeric_revision;
   status_ = SparseSolveStatus::kNotRun;
   iterations_ = 0;
   initial_residual_norm_ = 0.0;
@@ -308,7 +359,8 @@ void CUCG::solve(Program *prog, const Ndarray &x, const Ndarray &b) {
   device_to_device_bytes_ += sizeof(float) * m;
 
   // Ax = A @ x
-  apply_operator(prog, dX, size_t(d_Ax), &x, workspace_ax_ndarray_);
+  apply_operator(prog, operator_generation, dX, size_t(d_Ax), &x,
+                 workspace_ax_ndarray_);
   operator_apply_calls_++;
 
   // r = r - Ax = b - Ax
@@ -381,8 +433,8 @@ void CUCG::solve(Program *prog, const Ndarray &x, const Ndarray &b) {
     }
 
     // Ap = A @ p
-    apply_operator(prog, size_t(d_p), size_t(d_Ax), workspace_p_ndarray_,
-                   workspace_ax_ndarray_);
+    apply_operator(prog, operator_generation, size_t(d_p), size_t(d_Ax),
+                   workspace_p_ndarray_, workspace_ax_ndarray_);
     operator_apply_calls_++;
     // dot = p @ Ap
     CUBLASDriver::get_instance().cubSdot(handle_, m, d_p, 1, d_Ax, 1, &dot);

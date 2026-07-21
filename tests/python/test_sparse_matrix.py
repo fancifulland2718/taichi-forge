@@ -883,6 +883,33 @@ def test_public_bsr_pattern_matrix_spmv_update_and_sharing():
         solver.solve(program, solution.arr, rhs.arr)
         assert solver.is_success()
         np.testing.assert_allclose(solution.to_numpy(), exact, rtol=2e-5, atol=2e-5)
+    elif ti.lang.impl.current_cfg().arch == ti.cuda:
+        exact = np.asarray([0.5, -1.0, 1.5, -2.0], dtype=np.float32)
+        rhs = ti.ndarray(dtype=ti.f32, shape=4)
+        solution = ti.ndarray(dtype=ti.f32, shape=4)
+        rhs.from_numpy(2.0 * exact)
+        solution.fill(0.0)
+        cg = ti.linalg.SparseCG(
+            matrix_a,
+            rhs,
+            solution,
+            max_iter=8,
+            atol=1e-6,
+            preconditioner="block_jacobi",
+        )
+        solved, converged = cg.solve()
+        assert converged
+        np.testing.assert_allclose(solved.to_numpy(), exact, rtol=2e-5, atol=2e-5)
+        solution.fill(0.0)
+        solved_again, converged_again = cg.solve()
+        assert converged_again
+        np.testing.assert_allclose(
+            solved_again.to_numpy(), exact, rtol=2e-5, atol=2e-5
+        )
+        plan_stats = cg._debug_runtime_stats()
+        assert plan_stats["operations"]["workspace_builds"] == 1
+        assert plan_stats["operations"]["workspace_reuses"] == 1
+        assert plan_stats["operations"]["preconditioner_apply_calls"] > 0
     contract = matrix_a._get_format_contract()
     supports_public_cg = ti.lang.impl.current_cfg().arch in (ti.cpu, ti.cuda)
     assert contract["pattern"]["ownership"] == "shared_immutable"

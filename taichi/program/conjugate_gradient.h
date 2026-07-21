@@ -356,17 +356,7 @@ class CUCG {
        int max_iters,
        float absolute_tolerance,
        bool verbose,
-       float relative_tolerance = 0.0f)
-      : A_(A),
-        max_iters_(max_iters),
-        absolute_tolerance_(absolute_tolerance),
-        relative_tolerance_(relative_tolerance),
-        verbose_(verbose) {
-    TI_ERROR_IF(dynamic_cast<CuSparseMatrix *>(&A_) == nullptr,
-                "CUDA conjugate gradient currently requires a CSR matrix.");
-    validate_controls();
-    init_solver();
-  }
+       float relative_tolerance = 0.0f);
   CUCG(Program *program,
        SparseMatrix &A,
        SparseJacobiPreconditionerPlan &preconditioner,
@@ -426,6 +416,7 @@ class CUCG {
   void init_solver();
   void validate_controls() const;
   void ensure_workspace(Program *program, int size);
+  void ensure_operator_plan(Program *program);
   void release_workspace();
   bool has_preconditioner() const;
   void validate_preconditioner(Program *program) const;
@@ -435,6 +426,7 @@ class CUCG {
                             const Ndarray *input_array,
                             const Ndarray *output_array);
   void apply_operator(Program *program,
+                      const OperatorPinnedAction &generation,
                       std::uintptr_t input,
                       std::uintptr_t output,
                       const Ndarray *input_array,
@@ -443,6 +435,9 @@ class CUCG {
   cublasHandle_t handle_{nullptr};
   Program *program_{nullptr};
   SparseMatrix &A_;
+  CuSparseMatrix *cuda_csr_operator_{nullptr};
+  CuSparseBsrMatrix *cuda_bsr_operator_{nullptr};
+  std::unique_ptr<OperatorPlan> operator_plan_;
   SparseJacobiPreconditionerPlan *preconditioner_{nullptr};
   SparseBlockJacobiPreconditionerPlan *block_preconditioner_{nullptr};
   CompiledKernelLinearOperator *compiled_kernel_operator_{nullptr};
