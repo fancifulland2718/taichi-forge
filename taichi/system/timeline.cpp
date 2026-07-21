@@ -155,7 +155,9 @@ void Timelines::insert_timeline(Timeline *timeline) {
 
 void Timelines::remove_timeline(Timeline *timeline) {
   std::lock_guard<std::mutex> _(mut_);
-  trash(std::remove(timelines_.begin(), timelines_.end(), timeline));
+  timelines_.erase(
+      std::remove(timelines_.begin(), timelines_.end(), timeline),
+      timelines_.end());
 }
 
 bool Timelines::get_enabled() const {

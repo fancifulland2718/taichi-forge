@@ -219,6 +219,22 @@ TEST(DiagnosticMemory, TimelineDropsEventsAfterGlobalBudget) {
       ::taichi::Timelines::kDefaultEventCapacity);
 }
 
+TEST(DiagnosticMemory, ExitedThreadTimelinesAreRetired) {
+  auto &timelines = ::taichi::Timelines::get_instance();
+  std::thread worker([] {
+    auto &timeline = ::taichi::Timeline::get_this_thread_instance();
+    timeline.set_name("retired-worker");
+  });
+  worker.join();
+
+  // The thread-local Timeline destructor must remove its registry entry.
+  // clear() traverses every live entry and therefore deterministically catches
+  // a dangling pointer left by remove-without-erase.
+  timelines.clear();
+  EXPECT_EQ(timelines.recorded_event_count(), 0);
+  EXPECT_EQ(timelines.dropped_event_count(), 0);
+}
+
 TEST(DiagnosticMemory, CompileTraceDropsEventsAfterBudget) {
   auto &profiling = ::taichi::Profiling::get_instance();
   profiling.set_trace_event_capacity_for_testing(8);
