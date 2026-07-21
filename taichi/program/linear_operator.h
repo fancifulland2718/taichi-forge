@@ -54,11 +54,53 @@ struct OperatorCapabilities {
 
 struct OperatorResourceStamp {
   std::uintptr_t program_identity{0};
+  std::uint64_t program_generation{0};
   std::uint64_t schema_revision{1};
   std::uint64_t topology_revision{1};
   std::uint64_t numeric_revision{1};
   std::uint64_t binding_revision{1};
 };
+
+enum class OperatorResourceDependency : std::uint32_t {
+  program = 1u << 0,
+  schema = 1u << 1,
+  topology = 1u << 2,
+  numeric = 1u << 3,
+  binding = 1u << 4,
+};
+
+using OperatorDependencyMask = std::uint32_t;
+
+constexpr OperatorDependencyMask operator_dependency(
+    OperatorResourceDependency dependency) {
+  return static_cast<OperatorDependencyMask>(dependency);
+}
+
+constexpr OperatorDependencyMask operator_plan_schema_dependencies() {
+  return operator_dependency(OperatorResourceDependency::program) |
+         operator_dependency(OperatorResourceDependency::schema);
+}
+
+enum class OperatorPlanInvalidationKind : std::uint8_t {
+  current,
+  refresh_binding,
+  rebuild,
+  program_invalid,
+};
+
+struct OperatorPlanInvalidation {
+  OperatorDependencyMask changes{0};
+  OperatorDependencyMask relevant_changes{0};
+  OperatorPlanInvalidationKind kind{OperatorPlanInvalidationKind::current};
+};
+
+OperatorDependencyMask operator_resource_changes(
+    const OperatorResourceStamp &planned,
+    const OperatorResourceStamp &current);
+OperatorPlanInvalidation evaluate_operator_plan_invalidation(
+    const OperatorResourceStamp &planned,
+    const OperatorResourceStamp &current,
+    OperatorDependencyMask dependencies);
 
 struct OperatorVectorView {
   OperatorSpaceDesc space;
@@ -141,21 +183,91 @@ class OperatorAction {
   std::shared_ptr<const State> state_;
 };
 
+// One immutable action/resource generation. The action and its retained
+// resources always originate from the same atomic publisher snapshot.
+class OperatorPinnedAction {
+ public:
+  OperatorPinnedAction() = default;
+
+  explicit operator bool() const;
+  const OperatorDescriptor &descriptor() const;
+  const OperatorCapabilities &capabilities() const;
+  const std::string &provider_name() const;
+  OperatorResourceStamp resource_stamp() const;
+  void apply_overwrite(OperatorApplyMode mode,
+                       const OperatorVectorView &input,
+                       const OperatorVectorView &output) const;
+
+ private:
+  friend class OperatorBinding;
+  friend class OperatorResourceGenerationPublisher;
+
+  OperatorPinnedAction(OperatorAction action,
+                       OperatorResourceStamp stamp,
+                       OperatorResourceLease resource_lease);
+
+  std::unique_ptr<OperatorAction> action_;
+  OperatorResourceStamp stamp_;
+  OperatorResourceLease resource_lease_;
+};
+
+struct OperatorResourceGenerationStatistics {
+  std::uint64_t published{0};
+  std::uint64_t retired{0};
+  std::uint64_t released{0};
+  std::uint64_t active_leases{0};
+  bool has_current{false};
+};
+
+// Linearizable publish/acquire/retire state machine for immutable operator
+// generations. Retiring a generation rejects new acquisition while existing
+// pins remain usable until their last lease is released.
+class OperatorResourceGenerationPublisher {
+ public:
+  OperatorResourceGenerationPublisher();
+  OperatorResourceGenerationPublisher(
+      const OperatorResourceGenerationPublisher &) = delete;
+  OperatorResourceGenerationPublisher &operator=(
+      const OperatorResourceGenerationPublisher &) = delete;
+  ~OperatorResourceGenerationPublisher();
+
+  void publish(OperatorAction action,
+               OperatorResourceLease resources = {});
+  OperatorPinnedAction acquire() const;
+  void retire_current();
+  OperatorResourceGenerationStatistics debug_statistics() const;
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
 class OperatorBinding {
  public:
   using AcquireResourceLeaseFn =
       std::function<OperatorResourceLease()>;
+  using AcquirePinnedActionFn = std::function<OperatorPinnedAction()>;
 
   explicit OperatorBinding(
       OperatorAction action,
       AcquireResourceLeaseFn acquire_resource_lease = {});
 
+  static OperatorBinding from_generation_publisher(
+      OperatorAction metadata_action,
+      AcquirePinnedActionFn acquire_pinned_action);
+
   const OperatorAction &action() const;
   OperatorResourceLease acquire_resource_lease() const;
+  OperatorPinnedAction pin() const;
 
  private:
+  OperatorBinding(OperatorAction metadata_action,
+                  AcquirePinnedActionFn acquire_pinned_action,
+                  bool generation_bound);
+
   OperatorAction action_;
   AcquireResourceLeaseFn acquire_resource_lease_;
+  AcquirePinnedActionFn acquire_pinned_action_;
 };
 
 struct OperatorPlanRuntimeStatistics {
@@ -165,12 +277,25 @@ struct OperatorPlanRuntimeStatistics {
   std::uint64_t scratch_builds{0};
   std::uint64_t scratch_reuses{0};
   std::uint64_t scratch_reserved_bytes{0};
+  std::uint64_t generation_pins{0};
+  std::uint64_t generation_changes{0};
+  std::uint64_t numeric_generation_changes{0};
+  std::uint64_t binding_generation_changes{0};
+  std::uint64_t invalidations{0};
 };
 
 class OperatorPlan {
  public:
-  OperatorPlan(Program *program, OperatorAction action);
-  OperatorPlan(Program *program, OperatorBinding binding);
+  OperatorPlan(
+      Program *program,
+      OperatorAction action,
+      OperatorDependencyMask dependencies =
+          operator_plan_schema_dependencies());
+  OperatorPlan(
+      Program *program,
+      OperatorBinding binding,
+      OperatorDependencyMask dependencies =
+          operator_plan_schema_dependencies());
   OperatorPlan(const OperatorPlan &) = delete;
   OperatorPlan &operator=(const OperatorPlan &) = delete;
   ~OperatorPlan();
@@ -178,9 +303,13 @@ class OperatorPlan {
   const OperatorDescriptor &descriptor() const;
   const OperatorCapabilities &capabilities() const;
   const std::string &provider_name() const;
+  OperatorDependencyMask dependencies() const;
   OperatorResourceStamp resource_stamp() const;
   OperatorResourceLease acquire_resource_lease() const;
+  OperatorPinnedAction pin();
   OperatorSubmission submit(const OperatorApplyRequest &request);
+  OperatorSubmission submit(const OperatorPinnedAction &pinned,
+                            const OperatorApplyRequest &request);
   OperatorPlanRuntimeStatistics debug_runtime_statistics() const;
 
  private:
@@ -191,6 +320,10 @@ class OperatorPlan {
 
   Program *program_{nullptr};
   OperatorBinding binding_;
+  OperatorDependencyMask dependencies_{operator_plan_schema_dependencies()};
+  OperatorResourceStamp planned_stamp_;
+  OperatorResourceStamp last_pinned_stamp_;
+  bool has_pinned_generation_{false};
   std::unique_ptr<Scratch> forward_scratch_;
   std::unique_ptr<Scratch> adjoint_scratch_;
   OperatorPlanRuntimeStatistics statistics_;

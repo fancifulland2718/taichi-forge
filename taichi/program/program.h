@@ -518,6 +518,12 @@ class TI_DLL_EXPORT Program {
   // this Program's LLVM runtime and is never a process-global worker pool.
   ThreadPool *get_cpu_thread_pool();
 
+  // Process-unique identity for this Program lifetime. Unlike the Program
+  // address, this token cannot alias a later Program after reset/destruction.
+  std::uint64_t runtime_program_generation() const noexcept {
+    return runtime_completion_domain_;
+  }
+
   // Internal host-API transaction guard used by native primitives. It does
   // not wait for GPU completion; it only prevents reset/retire from crossing
   // the interval in which a native entry point validates and submits work.

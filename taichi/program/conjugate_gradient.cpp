@@ -609,6 +609,7 @@ OperatorResourceStamp preconditioner_stamp(
     const void *identity) {
   return {
       reinterpret_cast<std::uintptr_t>(program),
+      program->runtime_program_generation(),
       1,
       statistics.operator_pattern_version_current,
       statistics.operator_numeric_version_current,

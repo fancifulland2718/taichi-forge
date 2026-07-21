@@ -1,6 +1,8 @@
 #include "gtest/gtest.h"
 
 #include <array>
+#include <atomic>
+#include <thread>
 #include <vector>
 
 #include "taichi/program/linear_operator.h"
@@ -31,6 +33,169 @@ class LeaseProbe {
  private:
   int *release_count_{nullptr};
 };
+
+OperatorAction make_scale_action(OperatorResourceStamp stamp, float scale) {
+  OperatorDescriptor descriptor{scalar_space(PrimitiveType::f32, 2),
+                                scalar_space(PrimitiveType::f32, 2)};
+  return OperatorAction(
+      descriptor, OperatorCapabilities{}, "scale_generation",
+      [stamp] { return stamp; },
+      [scale](OperatorApplyMode mode, const OperatorVectorView &input,
+              const OperatorVectorView &output) {
+        ASSERT_EQ(mode, OperatorApplyMode::forward);
+        const auto *source = reinterpret_cast<const float *>(input.data);
+        auto *target = reinterpret_cast<float *>(output.data);
+        target[0] = scale * source[0];
+        target[1] = scale * source[1];
+      });
+}
+
+TEST(LinearOperator, DependencyMaskClassifiesPlanInvalidation) {
+  OperatorResourceStamp planned{11, 101, 2, 3, 4, 5};
+  auto current = planned;
+  current.numeric_revision++;
+  current.binding_revision++;
+
+  auto schema_only = evaluate_operator_plan_invalidation(
+      planned, current, operator_plan_schema_dependencies());
+  EXPECT_EQ(schema_only.kind, OperatorPlanInvalidationKind::current);
+  EXPECT_EQ(schema_only.relevant_changes, 0u);
+  EXPECT_NE(schema_only.changes &
+                operator_dependency(OperatorResourceDependency::numeric),
+            0u);
+
+  auto numeric_dependent = evaluate_operator_plan_invalidation(
+      planned, current,
+      operator_dependency(OperatorResourceDependency::numeric));
+  EXPECT_EQ(numeric_dependent.kind, OperatorPlanInvalidationKind::rebuild);
+
+  current = planned;
+  current.binding_revision++;
+  auto binding_dependent = evaluate_operator_plan_invalidation(
+      planned, current,
+      operator_dependency(OperatorResourceDependency::binding));
+  EXPECT_EQ(binding_dependent.kind,
+            OperatorPlanInvalidationKind::refresh_binding);
+
+  current = planned;
+  current.program_generation++;
+  auto program_dependent = evaluate_operator_plan_invalidation(
+      planned, current,
+      operator_dependency(OperatorResourceDependency::program));
+  EXPECT_EQ(program_dependent.kind,
+            OperatorPlanInvalidationKind::program_invalid);
+}
+
+TEST(LinearOperator, PublishedGenerationRemainsUsableUntilPinRelease) {
+  OperatorResourceGenerationPublisher publisher;
+  int release_count = 0;
+  OperatorResourceStamp first_stamp{11, 101, 1, 1, 1, 1};
+  publisher.publish(
+      make_scale_action(first_stamp, 2.0f),
+      OperatorResourceLease::hold(LeaseProbe(&release_count)));
+  auto first = publisher.acquire();
+
+  OperatorResourceStamp second_stamp = first_stamp;
+  second_stamp.numeric_revision++;
+  second_stamp.binding_revision++;
+  publisher.publish(
+      make_scale_action(second_stamp, 3.0f),
+      OperatorResourceLease::hold(LeaseProbe(&release_count)));
+  auto second = publisher.acquire();
+  auto statistics = publisher.debug_statistics();
+  EXPECT_EQ(statistics.published, 2u);
+  EXPECT_EQ(statistics.retired, 1u);
+  EXPECT_EQ(statistics.released, 0u);
+  EXPECT_EQ(statistics.active_leases, 2u);
+
+  std::array<float, 2> input{1.0f, -2.0f};
+  std::array<float, 2> old_output{};
+  std::array<float, 2> new_output{};
+  const auto space = scalar_space(PrimitiveType::f32, 2);
+  first.apply_overwrite(
+      OperatorApplyMode::forward,
+      OperatorVectorView::from_const_host(input.data(), space),
+      OperatorVectorView::from_mutable_host(old_output.data(), space));
+  second.apply_overwrite(
+      OperatorApplyMode::forward,
+      OperatorVectorView::from_const_host(input.data(), space),
+      OperatorVectorView::from_mutable_host(new_output.data(), space));
+  EXPECT_EQ(old_output, (std::array<float, 2>{2.0f, -4.0f}));
+  EXPECT_EQ(new_output, (std::array<float, 2>{3.0f, -6.0f}));
+
+  first = OperatorPinnedAction{};
+  statistics = publisher.debug_statistics();
+  EXPECT_EQ(statistics.released, 1u);
+  EXPECT_EQ(release_count, 1);
+
+  publisher.retire_current();
+  EXPECT_ANY_THROW(publisher.acquire());
+  second.apply_overwrite(
+      OperatorApplyMode::forward,
+      OperatorVectorView::from_const_host(input.data(), space),
+      OperatorVectorView::from_mutable_host(new_output.data(), space));
+  EXPECT_EQ(new_output, (std::array<float, 2>{3.0f, -6.0f}));
+  second = OperatorPinnedAction{};
+  statistics = publisher.debug_statistics();
+  EXPECT_EQ(statistics.released, 2u);
+  EXPECT_EQ(release_count, 2);
+}
+
+TEST(LinearOperator, RetiredGenerationPinSurvivesConcurrentPublish) {
+  OperatorResourceGenerationPublisher publisher;
+  OperatorResourceStamp stamp{12, 102, 1, 1, 1, 1};
+  publisher.publish(make_scale_action(stamp, 2.0f));
+  auto pinned = publisher.acquire();
+  std::atomic<bool> published{false};
+  std::thread updater([&] {
+    auto next = stamp;
+    next.numeric_revision++;
+    publisher.publish(make_scale_action(next, 4.0f));
+    published.store(true, std::memory_order_release);
+  });
+  updater.join();
+  ASSERT_TRUE(published.load(std::memory_order_acquire));
+
+  std::array<float, 2> input{2.0f, 3.0f};
+  std::array<float, 2> output{};
+  const auto space = scalar_space(PrimitiveType::f32, 2);
+  pinned.apply_overwrite(
+      OperatorApplyMode::forward,
+      OperatorVectorView::from_const_host(input.data(), space),
+      OperatorVectorView::from_mutable_host(output.data(), space));
+  EXPECT_EQ(output, (std::array<float, 2>{4.0f, 6.0f}));
+}
+
+TEST(LinearOperator, PlanPinsNewNumericGenerationWithoutSchemaRebuild) {
+  OperatorResourceGenerationPublisher publisher;
+  OperatorResourceStamp first_stamp{13, 103, 1, 1, 1, 1};
+  auto first_action = make_scale_action(first_stamp, 2.0f);
+  publisher.publish(first_action);
+  OperatorPlan plan(
+      nullptr, OperatorBinding::from_generation_publisher(
+                   first_action, [&publisher] { return publisher.acquire(); }));
+
+  auto first_pin = plan.pin();
+  auto second_stamp = first_stamp;
+  second_stamp.numeric_revision++;
+  second_stamp.binding_revision++;
+  publisher.publish(make_scale_action(second_stamp, 3.0f));
+  auto second_pin = plan.pin();
+  EXPECT_EQ(first_pin.resource_stamp().numeric_revision, 1u);
+  EXPECT_EQ(second_pin.resource_stamp().numeric_revision, 2u);
+  auto statistics = plan.debug_runtime_statistics();
+  EXPECT_EQ(statistics.generation_pins, 2u);
+  EXPECT_EQ(statistics.generation_changes, 1u);
+  EXPECT_EQ(statistics.numeric_generation_changes, 1u);
+  EXPECT_EQ(statistics.binding_generation_changes, 1u);
+  EXPECT_EQ(statistics.invalidations, 0u);
+
+  auto incompatible = second_stamp;
+  incompatible.schema_revision++;
+  publisher.publish(make_scale_action(incompatible, 4.0f));
+  EXPECT_ANY_THROW(plan.pin());
+  EXPECT_EQ(plan.debug_runtime_statistics().invalidations, 1u);
+}
 
 TEST(LinearOperator, BindingTypeErasesProviderResourceLease) {
   OperatorDescriptor descriptor{scalar_space(PrimitiveType::f32, 2),
