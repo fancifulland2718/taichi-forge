@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 import taichi_forge as ti
+from taichi_forge.lang import impl
 from tests import test_utils
 
 
@@ -10,6 +11,21 @@ def _vector(values):
     result = ti.ndarray(ti.f32, shape=values.size)
     result.from_numpy(values)
     return result
+
+
+def _fixed_diagonal(values):
+    values = np.asarray(values, dtype=np.float32)
+    size = values.size
+    row_offsets = ti.ndarray(ti.i32, shape=size + 1)
+    column_indices = ti.ndarray(ti.i32, shape=size)
+    numeric = ti.ndarray(ti.f32, shape=size)
+    row_offsets.from_numpy(np.arange(size + 1, dtype=np.int32))
+    column_indices.from_numpy(np.arange(size, dtype=np.int32))
+    numeric.from_numpy(values)
+    pattern = ti.linalg.SparsePattern.csr(
+        size, size, row_offsets, column_indices
+    )
+    return pattern.matrix(numeric)
 
 
 @test_utils.test(
@@ -175,7 +191,118 @@ def test_independent_batched_fixed_operator_pcg():
     stats = plan.statistics()
     assert stats["operations"]["preconditioner_apply_calls"] > 0
     assert stats["resources"]["workspace_vectors"] == 4
+    assert stats["resources"]["state_bytes"] == 68 * batch_size + 8
+    assert (
+        stats["operations"]["host_synchronizations"]
+        > stats["operations"]["host_checks"]
+    )
     assert stats["contract"]["per_system_status"]
+
+
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False
+)
+def test_independent_batched_stored_operator_and_numeric_update():
+    experimental = ti.linalg.experimental
+    batch_size = 3
+    system_size = 4
+    total_size = batch_size * system_size
+    diagonal_host = np.resize(
+        np.asarray([2.0, 3.0, 5.0], dtype=np.float32), total_size
+    )
+    inverse_host = 1.0 / diagonal_host
+    operator = experimental.aslinearoperator(
+        _fixed_diagonal(diagonal_host),
+        traits=experimental.OperatorTraits.spd(),
+    )
+    preconditioner = experimental.aslinearoperator(
+        _fixed_diagonal(inverse_host),
+        traits=experimental.OperatorTraits.spd(),
+    )
+    plan = experimental.BatchedSolvePlan(
+        operator,
+        batch_size,
+        independent_systems=True,
+        method="pcg",
+        preconditioner=preconditioner,
+        max_iterations=4,
+        atol=1e-6,
+    )
+    exact = np.linspace(-1.0, 1.0, total_size, dtype=np.float32)
+    first = plan.solve(_vector(diagonal_host * exact))
+    assert first.all_converged
+    assert first.iterations == (1, 1, 1)
+
+    updated_diagonal = diagonal_host * 2.0
+    operator.update_numeric(_vector(updated_diagonal))
+    preconditioner.update_numeric(_vector(1.0 / updated_diagonal))
+    second = plan.solve(_vector(updated_diagonal * exact))
+    assert second.all_converged
+    np.testing.assert_allclose(
+        second.solution.to_numpy(), exact, rtol=2e-4, atol=2e-4
+    )
+
+
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False
+)
+def test_independent_batch_one_matches_single_solve_plan():
+    experimental = ti.linalg.experimental
+    size = 8
+    topology = ti.ndarray(ti.i32, shape=size)
+    topology.from_numpy(np.arange(size, dtype=np.int32))
+    diagonal_host = np.resize(
+        np.asarray([2.0, 3.0, 5.0], dtype=np.float32), size
+    )
+    diagonal = _vector(diagonal_host)
+
+    @ti.kernel
+    def diagonal_apply(
+        active_size: ti.i32,
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        numeric_data: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(active_size):
+            y[index] = numeric_data[index] * x[topology_data[index]]
+
+    operator = experimental.LinearOperator.from_kernel(
+        diagonal_apply,
+        size,
+        topology,
+        numeric=diagonal,
+        traits=experimental.OperatorTraits.spd(),
+    )
+    options = {}
+    if impl.current_cfg().arch in (ti.cuda, ti.vulkan):
+        options.update(
+            execution_policy="host_check_every_k", check_interval=4
+        )
+    single = experimental.SolvePlan(
+        operator, max_iterations=8, atol=1e-6, **options
+    )
+    batched = experimental.BatchedSolvePlan(
+        operator,
+        1,
+        independent_systems=True,
+        max_iterations=8,
+        atol=1e-6,
+        **options,
+    )
+    exact = np.linspace(-1.0, 1.0, size, dtype=np.float32)
+    rhs = _vector(diagonal_host * exact)
+    single_result = single.solve(rhs)
+    batched_result = batched.solve(rhs)
+    assert single_result.converged
+    assert batched_result.converged == (True,)
+    assert batched_result.iterations == (single_result.iterations,)
+    assert batched_result.residual_norms[0] == pytest.approx(
+        single_result.residual_norm, rel=2e-4, abs=5e-7
+    )
+    np.testing.assert_allclose(
+        batched_result.solution.to_numpy(), exact, rtol=3e-4, atol=3e-4
+    )
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

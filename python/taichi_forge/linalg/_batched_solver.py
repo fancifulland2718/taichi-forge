@@ -553,7 +553,9 @@ class BatchedSolvePlan:
                 self.batch_size,
             )
         operator_session._wait()
-        self._host_synchronizations += 1
+        # One explicit provider wait plus one synchronization boundary for
+        # each terminal ndarray snapshot copied below.
+        self._host_synchronizations += 4
         if preconditioner_session is not None:
             preconditioner_session._mark_synchronized()
 
@@ -671,6 +673,9 @@ class BatchedSolvePlan:
                     * np.dtype(np.int32).itemsize
                     + _kernels.COUNTER_SLOTS
                     * np.dtype(np.int32).itemsize
+                    + 2
+                    * self.batch_size
+                    * np.dtype(np.float32).itemsize
                 ),
             },
             "operations": {
