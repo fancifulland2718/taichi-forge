@@ -381,8 +381,12 @@ def test_shared_cpu_csr_jacobi_pcg_reuses_workspace_and_numeric_refresh(
     assert stats["identity"]["preconditioner_action_provider"] == "cpu_jacobi"
     assert not stats["identity"]["operator_asynchronous_submit"]
     assert not stats["identity"]["preconditioner_asynchronous_submit"]
-    assert stats["operations"]["operator_generation_pins"] == 2
-    assert stats["operations"]["preconditioner_generation_pins"] == 2
+    assert stats["identity"]["preconditioner_behavior"] == "fixed_linear"
+    assert stats["operations"]["operator_generation_pins"] == 3
+    assert stats["operations"]["preconditioner_generation_pins"] == 3
+    assert stats["operations"]["preconditioner_setup_calls"] == 1
+    assert stats["operations"]["preconditioner_update_calls"] == 2
+    assert stats["operations"]["preconditioner_update_noops"] == 2
     assert stats["operations"]["operator_apply_calls"] == (
         2 + total_iterations
     )
@@ -419,8 +423,13 @@ def test_shared_cpu_csr_jacobi_pcg_reuses_workspace_and_numeric_refresh(
     assert refreshed["operations"]["solve_calls"] == 3
     assert refreshed["operations"]["workspace_builds"] == 1
     assert refreshed["operations"]["workspace_reuses"] == 2
-    assert refreshed["operations"]["operator_generation_pins"] == 4
+    assert refreshed["operations"]["operator_generation_pins"] == 5
     assert refreshed["operations"]["preconditioner_generation_pins"] == 4
+    assert refreshed["operations"]["preconditioner_setup_calls"] == 1
+    assert refreshed["operations"]["preconditioner_update_calls"] == 4
+    assert refreshed["operations"]["preconditioner_update_successes"] == 1
+    assert refreshed["operations"]["preconditioner_update_noops"] == 2
+    assert refreshed["operations"]["preconditioner_update_failures"] == 1
     assert refreshed["operations"]["operator_generation_changes"] == 1
     assert (
         refreshed["operations"]["preconditioner_generation_changes"] == 1

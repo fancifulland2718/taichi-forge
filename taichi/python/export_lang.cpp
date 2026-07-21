@@ -4822,6 +4822,8 @@ void export_lang(py::module &m) {
             stats.operator_asynchronous_submit;
         identity["preconditioner_action_provider"] =
             stats.preconditioner_action_provider;
+        identity["preconditioner_behavior"] =
+            stats.preconditioner_behavior;
         identity["preconditioner_asynchronous_submit"] =
             stats.preconditioner_asynchronous_submit;
         identity["operator_pattern_version"] =
@@ -4882,6 +4884,16 @@ void export_lang(py::module &m) {
             stats.preconditioner_binding_generation_changes;
         operations["preconditioner_plan_invalidations"] =
             stats.preconditioner_plan_invalidations;
+        operations["preconditioner_setup_calls"] =
+            stats.preconditioner_setup_calls;
+        operations["preconditioner_update_calls"] =
+            stats.preconditioner_update_calls;
+        operations["preconditioner_update_successes"] =
+            stats.preconditioner_update_successes;
+        operations["preconditioner_update_noops"] =
+            stats.preconditioner_update_noops;
+        operations["preconditioner_update_failures"] =
+            stats.preconditioner_update_failures;
 
         py::dict resources;
         resources["persistent_vector_count"] =

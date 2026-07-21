@@ -22,6 +22,7 @@ class CompiledKernelPreconditionerPlan;
 class OperatorPlan;
 class OperatorBinding;
 class OperatorPinnedAction;
+class PreconditionerPlan;
 
 enum class SparseSolveStatus : int {
   kNotRun = -1,
@@ -85,6 +86,12 @@ struct SparseSolvePlanRuntimeStatistics {
   std::uint64_t preconditioner_numeric_generation_changes{0};
   std::uint64_t preconditioner_binding_generation_changes{0};
   std::uint64_t preconditioner_plan_invalidations{0};
+  std::string preconditioner_behavior{"identity"};
+  std::uint64_t preconditioner_setup_calls{0};
+  std::uint64_t preconditioner_update_calls{0};
+  std::uint64_t preconditioner_update_successes{0};
+  std::uint64_t preconditioner_update_noops{0};
+  std::uint64_t preconditioner_update_failures{0};
 
   std::uint64_t solve_calls{0};
   std::uint64_t total_iterations{0};
@@ -433,7 +440,6 @@ class CUCG {
   void ensure_operator_plan(Program *program);
   void release_workspace();
   bool has_preconditioner() const;
-  void validate_preconditioner(Program *program) const;
   void apply_preconditioner(Program *program,
                             const OperatorPinnedAction &generation,
                             float *input,
@@ -453,7 +459,7 @@ class CUCG {
   CuSparseMatrix *cuda_csr_operator_{nullptr};
   CuSparseBsrMatrix *cuda_bsr_operator_{nullptr};
   std::unique_ptr<OperatorPlan> operator_plan_;
-  std::unique_ptr<OperatorPlan> preconditioner_plan_;
+  std::unique_ptr<PreconditionerPlan> preconditioner_plan_;
   SparseJacobiPreconditionerPlan *preconditioner_{nullptr};
   SparseBlockJacobiPreconditionerPlan *block_preconditioner_{nullptr};
   CompiledKernelLinearOperator *compiled_kernel_operator_{nullptr};
@@ -616,7 +622,6 @@ class CpuSparseCGPlan {
       Program *program,
       CompiledKernelLinearOperator &matrix,
       CompiledKernelPreconditionerPlan &preconditioner);
-  void validate_preconditioner(Program *program) const;
   void apply_operator(const OperatorPinnedAction &generation,
                       const Ndarray &input,
                       const Ndarray &output);
@@ -628,7 +633,7 @@ class CpuSparseCGPlan {
   Program *program_{nullptr};
   std::unique_ptr<PreconditionerBinding> preconditioner_binding_;
   std::unique_ptr<OperatorPlan> operator_plan_;
-  std::unique_ptr<OperatorPlan> preconditioner_plan_;
+  std::unique_ptr<PreconditionerPlan> preconditioner_plan_;
   DataType dtype_{PrimitiveType::f32};
   int rows_{0};
   int cols_{0};
@@ -767,7 +772,6 @@ class VulkanCGIterationPlan {
                         CompiledKernelPreconditionerPlan
                             *compiled_kernel_preconditioner);
   bool has_preconditioner() const;
-  void validate_preconditioner(Program *program) const;
   void apply_preconditioner(Program *program,
                             const OperatorPinnedAction &generation,
                             const Ndarray &input,
@@ -783,7 +787,7 @@ class VulkanCGIterationPlan {
   VulkanSparseMatrix *csr_matrix_{nullptr};
   VulkanSparseBsrMatrix *bsr_matrix_{nullptr};
   std::unique_ptr<OperatorPlan> operator_plan_;
-  std::unique_ptr<OperatorPlan> preconditioner_plan_;
+  std::unique_ptr<PreconditionerPlan> preconditioner_plan_;
   SparseJacobiPreconditionerPlan *preconditioner_{nullptr};
   SparseBlockJacobiPreconditionerPlan *block_preconditioner_{nullptr};
   CompiledKernelPreconditionerPlan *compiled_kernel_preconditioner_{nullptr};

@@ -917,8 +917,11 @@ def test_public_bsr_pattern_matrix_spmv_update_and_sharing():
         )
         assert plan_stats["identity"]["operator_asynchronous_submit"]
         assert plan_stats["identity"]["preconditioner_asynchronous_submit"]
-        assert plan_stats["operations"]["operator_generation_pins"] == 2
-        assert plan_stats["operations"]["preconditioner_generation_pins"] == 2
+        assert plan_stats["identity"]["preconditioner_behavior"] == "fixed_linear"
+        assert plan_stats["operations"]["operator_generation_pins"] == 3
+        assert plan_stats["operations"]["preconditioner_generation_pins"] == 3
+        assert plan_stats["operations"]["preconditioner_setup_calls"] == 1
+        assert plan_stats["operations"]["preconditioner_update_calls"] == 2
         assert plan_stats["operations"]["operator_plan_invalidations"] == 0
         assert (
             plan_stats["operations"]["preconditioner_plan_invalidations"]
@@ -963,8 +966,11 @@ def test_public_bsr_pattern_matrix_spmv_update_and_sharing():
         )
         assert plan_stats["identity"]["operator_asynchronous_submit"]
         assert plan_stats["identity"]["preconditioner_asynchronous_submit"]
-        assert plan_stats["operations"]["operator_generation_pins"] == 2
-        assert plan_stats["operations"]["preconditioner_generation_pins"] == 2
+        assert plan_stats["identity"]["preconditioner_behavior"] == "fixed_linear"
+        assert plan_stats["operations"]["operator_generation_pins"] == 3
+        assert plan_stats["operations"]["preconditioner_generation_pins"] == 3
+        assert plan_stats["operations"]["preconditioner_setup_calls"] == 1
+        assert plan_stats["operations"]["preconditioner_update_calls"] == 2
         assert plan_stats["operations"]["operator_plan_invalidations"] == 0
         assert (
             plan_stats["operations"]["preconditioner_plan_invalidations"]
