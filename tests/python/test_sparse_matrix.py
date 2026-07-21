@@ -910,6 +910,35 @@ def test_public_bsr_pattern_matrix_spmv_update_and_sharing():
         assert plan_stats["operations"]["workspace_builds"] == 1
         assert plan_stats["operations"]["workspace_reuses"] == 1
         assert plan_stats["operations"]["preconditioner_apply_calls"] > 0
+    elif ti.lang.impl.current_cfg().arch == ti.vulkan:
+        exact = np.asarray([0.5, -1.0, 1.5, -2.0], dtype=np.float32)
+        rhs = ti.ndarray(dtype=ti.f32, shape=4)
+        solution = ti.ndarray(dtype=ti.f32, shape=4)
+        rhs.from_numpy(2.0 * exact)
+        solution.fill(0.0)
+        program = ti.lang.impl.get_runtime().prog
+        preconditioner = (
+            ti._lib.core._make_sparse_block_jacobi_preconditioner_plan(
+                program, matrix_a.matrix
+            )
+        )
+        plan = (
+            ti._lib.core._make_vulkan_block_jacobi_pcg_convergence_plan(
+                program, matrix_a.matrix, preconditioner, 8, 1e-6
+            )
+        )
+        plan.solve(program, solution.arr, rhs.arr)
+        assert plan.is_success()
+        np.testing.assert_allclose(
+            solution.to_numpy(), exact, rtol=2e-5, atol=2e-5
+        )
+        solution.fill(0.0)
+        plan.solve(program, solution.arr, rhs.arr)
+        assert plan.is_success()
+        plan_stats = plan._debug_runtime_stats()
+        assert plan_stats["operations"]["workspace_builds"] == 1
+        assert plan_stats["operations"]["workspace_reuses"] == 1
+        assert plan_stats["operations"]["preconditioner_apply_calls"] > 0
     contract = matrix_a._get_format_contract()
     supports_public_cg = ti.lang.impl.current_cfg().arch in (ti.cpu, ti.cuda)
     assert contract["pattern"]["ownership"] == "shared_immutable"

@@ -59,7 +59,8 @@ void validate_view(const OperatorVectorView &view,
                    Program *program,
                    const char *role,
                    bool require_writable) {
-  TI_ERROR_IF(view.space != expected || view.data == 0 ||
+  TI_ERROR_IF(view.space != expected ||
+                  (view.data == 0 && !view.ndarray) ||
                   view.allocation_identity == 0 ||
                   (require_writable && !view.writable),
               "Operator {} view does not match its declared space or "
@@ -885,6 +886,42 @@ OperatorBinding make_cuda_program_kernel_operator_binding(
   TI_ERROR_IF(!program || program->compile_config().arch != Arch::cuda ||
                   matrix.owning_program() != program,
               "CUDA program-kernel binding requires its owning CUDA "
+              "Program.");
+  return matrix.make_operator_binding();
+}
+
+OperatorBinding make_vulkan_csr_operator_binding(
+    Program *program,
+    VulkanSparseMatrix &matrix) {
+  return make_gpu_typed_operator_binding(
+      program, matrix, Arch::vulkan, "vulkan", "forge_vulkan_native",
+      "csr", [program, &matrix](const OperatorVectorView &input,
+                                const OperatorVectorView &output) {
+        TI_ERROR_IF(!input.ndarray || !output.ndarray,
+                    "Vulkan CSR operator binding requires ndarray views.");
+        matrix.nd_spmv(program, *input.ndarray, *output.ndarray);
+      });
+}
+
+OperatorBinding make_vulkan_bsr_operator_binding(
+    Program *program,
+    VulkanSparseBsrMatrix &matrix) {
+  return make_gpu_typed_operator_binding(
+      program, matrix, Arch::vulkan, "vulkan", "forge_vulkan_native",
+      "bsr", [program, &matrix](const OperatorVectorView &input,
+                                const OperatorVectorView &output) {
+        TI_ERROR_IF(!input.ndarray || !output.ndarray,
+                    "Vulkan BSR operator binding requires ndarray views.");
+        matrix.nd_spmv(program, *input.ndarray, *output.ndarray);
+      });
+}
+
+OperatorBinding make_vulkan_program_kernel_operator_binding(
+    Program *program,
+    CompiledKernelLinearOperator &matrix) {
+  TI_ERROR_IF(!program || program->compile_config().arch != Arch::vulkan ||
+                  matrix.owning_program() != program,
+              "Vulkan program-kernel binding requires its owning Vulkan "
               "Program.");
   return matrix.make_operator_binding();
 }

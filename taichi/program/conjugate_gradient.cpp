@@ -1380,6 +1380,17 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
   adaptive_ = adaptive;
   compiled_kernel_operator_ =
       allow_compiled_kernel_operator ? compiled_kernel_operator : nullptr;
+  if (compiled_kernel_operator_) {
+    operator_plan_ = std::make_unique<OperatorPlan>(
+        program_, make_vulkan_program_kernel_operator_binding(
+                      program_, *compiled_kernel_operator_));
+  } else if (bsr_matrix_) {
+    operator_plan_ = std::make_unique<OperatorPlan>(
+        program_, make_vulkan_bsr_operator_binding(program_, *bsr_matrix_));
+  } else {
+    operator_plan_ = std::make_unique<OperatorPlan>(
+        program_, make_vulkan_csr_operator_binding(program_, *csr_matrix_));
+  }
   const int n = matrix.num_rows();
   auto create_vector = [&]() {
     return program->create_ndarray(PrimitiveType::f32, {n},
@@ -1467,17 +1478,21 @@ void VulkanCGIterationPlan::apply_preconditioner(
 }
 
 void VulkanCGIterationPlan::apply_operator(Program *program,
+                                           const OperatorPinnedAction
+                                               &generation,
                                            const Ndarray &input,
                                            const Ndarray &output) {
-  if (csr_matrix_) {
-    csr_matrix_->nd_spmv(program, input, output);
-  } else if (bsr_matrix_) {
-    bsr_matrix_->nd_spmv(program, input, output);
-  } else if (compiled_kernel_operator_) {
-    compiled_kernel_operator_->nd_spmv(program, input, output);
-  } else {
-    TI_ERROR("Vulkan CG received an unsupported sparse operator.");
-  }
+  TI_ERROR_IF(!operator_plan_,
+              "Vulkan CG operator plan is not initialized.");
+  const auto &descriptor = operator_plan_->descriptor();
+  operator_plan_->submit(
+      generation,
+      {OperatorApplyMode::forward,
+       OperatorVectorView::from_ndarray(
+           program, input, descriptor.domain, false),
+       nullptr,
+       OperatorVectorView::from_ndarray(
+           program, output, descriptor.range, true)});
 }
 
 VulkanCGIterationPlan::~VulkanCGIterationPlan() {
@@ -1507,7 +1522,7 @@ void VulkanCGIterationPlan::solve(Program *program,
               "Vulkan CG iteration plan solution and RHS must not alias.");
 
   std::lock_guard<std::mutex> lock(solve_mutex_);
-  auto numeric_guard = matrix_->acquire_numeric_access_guard();
+  auto operator_generation = operator_plan_->pin();
   if (has_preconditioner()) {
     validate_preconditioner(program);
   }
@@ -1521,15 +1536,15 @@ void VulkanCGIterationPlan::solve(Program *program,
       completed_iterations_scalar_};
   program->retain_ndarrays_for_external_submission(
       resources, std::size(resources));
-  const auto operator_stats = matrix_->debug_runtime_statistics();
+  const auto operator_stamp = operator_generation.resource_stamp();
   if (has_solved_) {
     workspace_reuses_++;
   } else {
     has_solved_ = true;
   }
   solve_calls_++;
-  last_solve_pattern_version_ = operator_stats.pattern_version;
-  last_solve_numeric_version_ = operator_stats.numeric_version;
+  last_solve_pattern_version_ = operator_stamp.topology_revision;
+  last_solve_numeric_version_ = operator_stamp.numeric_revision;
   is_success_ = false;
   iterations_ = 0;
   status_ = static_cast<int>(SparseSolveStatus::kMaxIterations);
@@ -1544,7 +1559,7 @@ void VulkanCGIterationPlan::solve(Program *program,
                                zero_status_scalar_);
   }
   program->copy_ndarray_fast(residual_, mutable_b);
-  apply_operator(program, x, *ap_);
+  apply_operator(program, operator_generation, x, *ap_);
   program->vulkan_sparse_axpy(ap_, residual_, n, -1.0f);
   program->vulkan_sparse_dot(residual_, residual_, initial_rr_, n);
   if (adaptive_) {
@@ -1568,7 +1583,7 @@ void VulkanCGIterationPlan::solve(Program *program,
   Ndarray *current_rr = rr_a_;
   Ndarray *next_rr = rr_b_;
   for (int iteration = 0; iteration < fixed_iterations_; ++iteration) {
-    apply_operator(program, *direction_, *ap_);
+    apply_operator(program, operator_generation, *direction_, *ap_);
     program->vulkan_sparse_dot(direction_, ap_, p_ap_, n);
     program->vulkan_sparse_scalar_divide(current_rr, p_ap_, alpha_,
                                          status_scalar_);

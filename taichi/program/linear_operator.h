@@ -18,6 +18,8 @@ class CpuSparseCsrMatrix;
 class CpuSparseBsrMatrix;
 class CuSparseMatrix;
 class CuSparseBsrMatrix;
+class VulkanSparseMatrix;
+class VulkanSparseBsrMatrix;
 class CompiledKernelLinearOperator;
 
 enum class OperatorInnerProductKind : std::uint8_t {
@@ -352,6 +354,15 @@ OperatorBinding make_cuda_csr_operator_binding(Program *program,
 OperatorBinding make_cuda_bsr_operator_binding(Program *program,
                                                CuSparseBsrMatrix &matrix);
 OperatorBinding make_cuda_program_kernel_operator_binding(
+    Program *program,
+    CompiledKernelLinearOperator &matrix);
+OperatorBinding make_vulkan_csr_operator_binding(
+    Program *program,
+    VulkanSparseMatrix &matrix);
+OperatorBinding make_vulkan_bsr_operator_binding(
+    Program *program,
+    VulkanSparseBsrMatrix &matrix);
+OperatorBinding make_vulkan_program_kernel_operator_binding(
     Program *program,
     CompiledKernelLinearOperator &matrix);
 

@@ -756,6 +756,7 @@ class VulkanCGIterationPlan {
                             const Ndarray &input,
                             const Ndarray &output);
   void apply_operator(Program *program,
+                      const OperatorPinnedAction &generation,
                       const Ndarray &input,
                       const Ndarray &output);
   void release_workspace();
@@ -764,6 +765,7 @@ class VulkanCGIterationPlan {
   SparseMatrix *matrix_{nullptr};
   VulkanSparseMatrix *csr_matrix_{nullptr};
   VulkanSparseBsrMatrix *bsr_matrix_{nullptr};
+  std::unique_ptr<OperatorPlan> operator_plan_;
   SparseJacobiPreconditionerPlan *preconditioner_{nullptr};
   SparseBlockJacobiPreconditionerPlan *block_preconditioner_{nullptr};
   CompiledKernelPreconditionerPlan *compiled_kernel_preconditioner_{nullptr};

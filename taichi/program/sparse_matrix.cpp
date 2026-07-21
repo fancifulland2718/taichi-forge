@@ -4190,6 +4190,7 @@ void VulkanSparseMatrix::nd_spmv(Program *prog,
                                  const Ndarray &x,
                                  const Ndarray &y) {
 #if defined(TI_WITH_VULKAN)
+  auto numeric_guard = acquire_numeric_access_guard();
   TI_ERROR_IF(prog != program_,
               "Internal Vulkan CSR SpMV requires its owning Program.");
   std::lock_guard<std::mutex> lock(spmv_mutex_);
@@ -4213,6 +4214,7 @@ void VulkanSparseMatrix::nd_spmv(Program *prog,
 void VulkanSparseMatrix::update_values(Program *prog,
                                        const Ndarray &values) {
 #if defined(TI_WITH_VULKAN)
+  auto numeric_guard = acquire_numeric_access_guard();
   TI_ERROR_IF(prog != program_,
               "Internal Vulkan CSR value updates require the owning Program.");
   TI_ERROR_IF(values.get_element_data_type() != PrimitiveType::f32 ||
@@ -4365,6 +4367,7 @@ void VulkanSparseBsrMatrix::nd_spmv(Program *prog,
                                     const Ndarray &x,
                                     const Ndarray &y) {
 #if defined(TI_WITH_VULKAN)
+  auto numeric_guard = acquire_numeric_access_guard();
   TI_ERROR_IF(prog != program_,
               "Internal Vulkan BSR SpMV requires its owning Program.");
   std::lock_guard<std::mutex> lock(spmv_mutex_);
@@ -4388,6 +4391,7 @@ void VulkanSparseBsrMatrix::nd_spmv(Program *prog,
 void VulkanSparseBsrMatrix::update_values(Program *prog,
                                           const Ndarray &values) {
 #if defined(TI_WITH_VULKAN)
+  auto numeric_guard = acquire_numeric_access_guard();
   TI_ERROR_IF(prog != program_,
               "Internal Vulkan BSR value updates require the owning "
               "Program.");
