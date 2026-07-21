@@ -16,6 +16,7 @@
 #include "taichi/aot/graph_data.h"
 #include "taichi/ir/type_factory.h"
 #include "taichi/program/kernel.h"
+#include "taichi/program/linear_operator.h"
 
 #define BUILD(TYPE)                                                         \
   {                                                                         \
@@ -86,6 +87,82 @@ T2 get_element_from_csr(int row,
 }  // namespace
 
 namespace taichi::lang {
+
+struct CompiledKernelLinearOperator::TopologyState {
+  TopologyState(Program *program, Ndarray *data)
+      : program(program), data(data) {
+  }
+
+  ~TopologyState() {
+    if (program && data) {
+      program->delete_ndarray(data);
+    }
+  }
+
+  Program *program{nullptr};
+  Ndarray *data{nullptr};
+};
+
+struct CompiledKernelLinearOperator::ResourceGeneration {
+  ResourceGeneration(
+      Program *program,
+      const CompiledKernelData *compiled_kernel,
+      Kernel *kernel,
+      int size,
+      std::shared_ptr<TopologyState> topology,
+      Ndarray *numeric_data,
+      std::size_t input_arg_index,
+      std::size_t output_arg_index)
+      : program(program),
+        compiled_kernel(compiled_kernel),
+        topology(std::move(topology)),
+        numeric_data(numeric_data),
+        input_arg_index(input_arg_index),
+        output_arg_index(output_arg_index),
+        launch_context(std::make_unique<LaunchContextBuilder>(kernel)) {
+    launch_context->set_arg_int({0}, size);
+    launch_context->set_arg_ndarray({1}, *this->topology->data);
+    if (this->numeric_data) {
+      launch_context->set_arg_ndarray({2}, *this->numeric_data);
+    }
+  }
+
+  ~ResourceGeneration() {
+    if (program && numeric_data) {
+      program->delete_ndarray(numeric_data);
+    }
+  }
+
+  void apply(OperatorApplyMode mode,
+             const OperatorVectorView &input,
+             const OperatorVectorView &output) {
+    TI_ERROR_IF(mode != OperatorApplyMode::forward || !input.ndarray ||
+                    !output.ndarray,
+                "Compiled-kernel operator generation requires forward "
+                "ndarray views.");
+    std::lock_guard<std::mutex> lock(launch_mutex);
+    // CPU launchers lower kNdarray placeholders to raw pointers in place.
+    // Restore every fixed slot so this context remains generation-stable.
+    launch_context->set_arg_ndarray({1}, *topology->data);
+    if (numeric_data) {
+      launch_context->set_arg_ndarray({2}, *numeric_data);
+    }
+    launch_context->set_arg_ndarray(
+        {static_cast<int>(input_arg_index)}, *input.ndarray);
+    launch_context->set_arg_ndarray(
+        {static_cast<int>(output_arg_index)}, *output.ndarray);
+    program->launch_kernel(*compiled_kernel, *launch_context);
+  }
+
+  Program *program{nullptr};
+  const CompiledKernelData *compiled_kernel{nullptr};
+  std::shared_ptr<TopologyState> topology;
+  Ndarray *numeric_data{nullptr};
+  std::size_t input_arg_index{0};
+  std::size_t output_arg_index{0};
+  std::unique_ptr<LaunchContextBuilder> launch_context;
+  std::mutex launch_mutex;
+};
 
 namespace {
 std::atomic<std::uint64_t> next_sparse_matrix_id{1};
@@ -235,6 +312,31 @@ void validate_compiled_operator_data(Program *program,
               role);
 }
 
+class ProgramNdarrayOwner {
+ public:
+  ProgramNdarrayOwner(Program *program, Ndarray *array)
+      : program_(program), array_(array) {
+  }
+  ~ProgramNdarrayOwner() {
+    if (program_ && array_) {
+      program_->delete_ndarray(array_);
+    }
+  }
+  ProgramNdarrayOwner(const ProgramNdarrayOwner &) = delete;
+  ProgramNdarrayOwner &operator=(const ProgramNdarrayOwner &) = delete;
+
+  Ndarray *get() const {
+    return array_;
+  }
+  Ndarray *release() {
+    return std::exchange(array_, nullptr);
+  }
+
+ private:
+  Program *program_{nullptr};
+  Ndarray *array_{nullptr};
+};
+
 }  // namespace
 
 CompiledKernelLinearOperator::CompiledKernelLinearOperator(
@@ -331,7 +433,6 @@ CompiledKernelLinearOperator::CompiledKernelLinearOperator(
 
   Ndarray *owned_topology_data = nullptr;
   Ndarray *owned_numeric_data = nullptr;
-  std::unique_ptr<LaunchContextBuilder> launch_context;
   try {
     owned_topology_data = program->create_ndarray(
         topology_dtype, topology_data.shape, topology_data.layout, false);
@@ -344,12 +445,6 @@ CompiledKernelLinearOperator::CompiledKernelLinearOperator(
       program->copy_ndarray_fast(
           owned_numeric_data, const_cast<Ndarray *>(numeric_data));
     }
-    launch_context = std::make_unique<LaunchContextBuilder>(&kernel);
-    launch_context->set_arg_int({0}, size);
-    launch_context->set_arg_ndarray({1}, *owned_topology_data);
-    if (has_numeric_data) {
-      launch_context->set_arg_ndarray({2}, *owned_numeric_data);
-    }
   } catch (...) {
     if (owned_numeric_data) {
       program->delete_ndarray(owned_numeric_data);
@@ -360,12 +455,22 @@ CompiledKernelLinearOperator::CompiledKernelLinearOperator(
     throw;
   }
 
+  ProgramNdarrayOwner topology_owner(program, owned_topology_data);
+  ProgramNdarrayOwner numeric_owner(program, owned_numeric_data);
   program_ = program;
   kernel_ = &kernel;
   compiled_kernel_ = &compiled;
-  topology_data_ = owned_topology_data;
-  numeric_data_ = owned_numeric_data;
-  launch_context_ = std::move(launch_context);
+  topology_state_ =
+      std::make_shared<TopologyState>(program, topology_owner.get());
+  topology_owner.release();
+  resource_generations_ =
+      std::make_unique<OperatorResourceGenerationPublisher>();
+  has_numeric_data_ = has_numeric_data;
+  if (numeric_data) {
+    numeric_data_type_ = numeric_data->get_element_data_type();
+    numeric_data_shape_ = numeric_data->shape;
+    numeric_data_layout_ = numeric_data->layout;
+  }
   topology_data_bytes_ = static_cast<std::uint64_t>(
       topology_data.get_nelement() * topology_data.get_element_size());
   numeric_data_bytes_ =
@@ -377,6 +482,9 @@ CompiledKernelLinearOperator::CompiledKernelLinearOperator(
   output_arg_index_ = output_arg_index;
   topology_version_ = topology_version;
   numeric_version_ = numeric_version;
+  generation_apply_calls_ =
+      std::make_shared<std::atomic<std::uint64_t>>(0);
+  publish_resource_generation(numeric_owner.release(), numeric_version_, 1);
   record_pattern_build();
   record_spmv_plan_build();
   record_transfer_bytes(0, 0,
@@ -384,12 +492,89 @@ CompiledKernelLinearOperator::CompiledKernelLinearOperator(
 }
 
 CompiledKernelLinearOperator::~CompiledKernelLinearOperator() {
-  if (program_ && numeric_data_) {
-    program_->delete_ndarray(numeric_data_);
+  try {
+    if (resource_generations_) {
+      resource_generations_->retire_current();
+      resource_generations_.reset();
+    }
+    topology_state_.reset();
+  } catch (...) {
   }
-  if (program_ && topology_data_) {
-    program_->delete_ndarray(topology_data_);
-  }
+}
+
+void CompiledKernelLinearOperator::publish_resource_generation(
+    Ndarray *owned_numeric_data,
+    std::uint64_t numeric_version,
+    std::uint64_t binding_revision) {
+  ProgramNdarrayOwner numeric_owner(program_, owned_numeric_data);
+  auto generation = std::make_shared<ResourceGeneration>(
+      program_, compiled_kernel_, kernel_, rows_, topology_state_,
+      numeric_owner.get(), input_arg_index_, output_arg_index_);
+  numeric_owner.release();
+
+  OperatorDescriptor descriptor;
+  descriptor.domain = {
+      PrimitiveType::f32, static_cast<std::size_t>(cols_)};
+  descriptor.range = {
+      PrimitiveType::f32, static_cast<std::size_t>(rows_)};
+  OperatorCapabilities capabilities;
+  capabilities.asynchronous_submit =
+      !arch_is_cpu(program_->compile_config().arch);
+  const OperatorResourceStamp stamp{
+      reinterpret_cast<std::uintptr_t>(program_),
+      program_->runtime_program_generation(),
+      1,
+      topology_version_,
+      numeric_version,
+      binding_revision};
+  auto apply_calls = generation_apply_calls_;
+  auto action = OperatorAction(
+      descriptor, capabilities, "forge_compiled_taichi_kernel",
+      [stamp] { return stamp; },
+      [generation = std::move(generation), apply_calls](
+          OperatorApplyMode mode, const OperatorVectorView &input,
+          const OperatorVectorView &output) {
+        generation->apply(mode, input, output);
+        apply_calls->fetch_add(1, std::memory_order_relaxed);
+      });
+  resource_generations_->publish(std::move(action));
+}
+
+OperatorPinnedAction
+CompiledKernelLinearOperator::pin_operator_generation() const {
+  TI_ERROR_IF(!resource_generations_,
+              "Compiled-kernel operator resource generations are retired.");
+  return resource_generations_->acquire();
+}
+
+OperatorResourceStamp
+CompiledKernelLinearOperator::current_operator_resource_stamp() const {
+  return pin_operator_generation().resource_stamp();
+}
+
+OperatorBinding CompiledKernelLinearOperator::make_operator_binding() {
+  OperatorDescriptor descriptor;
+  descriptor.domain = {
+      PrimitiveType::f32, static_cast<std::size_t>(cols_)};
+  descriptor.range = {
+      PrimitiveType::f32, static_cast<std::size_t>(rows_)};
+  OperatorCapabilities capabilities;
+  capabilities.asynchronous_submit =
+      !arch_is_cpu(program_->compile_config().arch);
+  auto metadata_action = OperatorAction(
+      descriptor, capabilities, "forge_compiled_taichi_kernel",
+      [this] { return current_operator_resource_stamp(); },
+      [this](OperatorApplyMode mode, const OperatorVectorView &input,
+             const OperatorVectorView &output) {
+        TI_ERROR_IF(mode != OperatorApplyMode::forward || !input.ndarray ||
+                        !output.ndarray,
+                    "Compiled-kernel operator binding requires forward "
+                    "ndarray views.");
+        nd_spmv(program_, *input.ndarray, *output.ndarray);
+      });
+  return OperatorBinding::from_generation_publisher(
+      std::move(metadata_action),
+      [this] { return pin_operator_generation(); });
 }
 
 void CompiledKernelLinearOperator::nd_spmv(Program *program,
@@ -415,22 +600,13 @@ void CompiledKernelLinearOperator::nd_spmv(Program *program,
               "Compiled-kernel linear operator input and output must not "
               "alias.");
 
-  auto numeric_guard = acquire_numeric_access_guard();
-  std::lock_guard<std::mutex> lock(spmv_mutex_);
-  // CPU launchers lower kNdarray placeholders to raw pointers in place. Rebind
-  // every ndarray slot before reuse so the persistent context is backend-
-  // neutral and generation validation observes only the current resources.
-  launch_context_->set_arg_ndarray({1}, *topology_data_);
-  if (numeric_data_) {
-    launch_context_->set_arg_ndarray({2}, *numeric_data_);
-  }
-  launch_context_->set_arg_ndarray(
-      {static_cast<int>(input_arg_index_)}, input);
-  launch_context_->set_arg_ndarray(
-      {static_cast<int>(output_arg_index_)}, output);
-  record_spmv_call();
-  record_spmv_plan_reuse();
-  program_->launch_kernel(*compiled_kernel_, *launch_context_);
+  auto generation = pin_operator_generation();
+  const OperatorSpaceDesc space{
+      PrimitiveType::f32, static_cast<std::size_t>(rows_)};
+  generation.apply_overwrite(
+      OperatorApplyMode::forward,
+      OperatorVectorView::from_ndarray(program_, input, space, false),
+      OperatorVectorView::from_ndarray(program_, output, space, true));
 }
 
 void CompiledKernelLinearOperator::update_numeric_data(
@@ -438,12 +614,11 @@ void CompiledKernelLinearOperator::update_numeric_data(
     const Ndarray &numeric_data,
     std::uint64_t expected_topology_version,
     std::uint64_t expected_numeric_version) {
-  TI_ERROR_IF(program != program_ || !numeric_data_,
+  TI_ERROR_IF(program != program_ || !has_numeric_data_,
               "Compiled-kernel numeric update requires the owning Program "
               "and a dual-resource operator.");
   validate_compiled_operator_data(program, numeric_data, "numeric update");
 
-  auto numeric_guard = acquire_numeric_access_guard();
   std::lock_guard<std::mutex> lock(spmv_mutex_);
   TI_ERROR_IF(expected_topology_version != topology_version_ ||
                   expected_numeric_version != numeric_version_,
@@ -453,16 +628,29 @@ void CompiledKernelLinearOperator::update_numeric_data(
               topology_version_, numeric_version_);
   TI_ERROR_IF(numeric_version_ == std::numeric_limits<std::uint64_t>::max(),
               "Compiled-kernel numeric version overflow.");
-  TI_ERROR_IF(numeric_data.get_element_data_type() !=
-                      numeric_data_->get_element_data_type() ||
-                  numeric_data.shape != numeric_data_->shape ||
-                  numeric_data.layout != numeric_data_->layout,
+  TI_ERROR_IF(binding_revision_ == std::numeric_limits<std::uint64_t>::max(),
+              "Compiled-kernel binding revision overflow.");
+  TI_ERROR_IF(numeric_data.get_element_data_type() != numeric_data_type_ ||
+                  numeric_data.shape != numeric_data_shape_ ||
+                  numeric_data.layout != numeric_data_layout_,
               "Compiled-kernel numeric update must preserve dtype, shape, "
               "and layout.");
 
-  program_->copy_ndarray_fast(numeric_data_,
-                              const_cast<Ndarray *>(&numeric_data));
-  numeric_version_++;
+  Ndarray *replacement = program_->create_ndarray(
+      numeric_data_type_, numeric_data_shape_, numeric_data_layout_, false);
+  try {
+    program_->copy_ndarray_fast(replacement,
+                                const_cast<Ndarray *>(&numeric_data));
+  } catch (...) {
+    program_->delete_ndarray(replacement);
+    throw;
+  }
+  const auto next_numeric_version = numeric_version_ + 1;
+  const auto next_binding_revision = binding_revision_ + 1;
+  publish_resource_generation(replacement, next_numeric_version,
+                              next_binding_revision);
+  numeric_version_ = next_numeric_version;
+  binding_revision_ = next_binding_revision;
   record_numeric_update(numeric_data_bytes_);
   record_transfer_bytes(0, 0, numeric_data_bytes_);
 }
@@ -476,6 +664,17 @@ CompiledKernelLinearOperator::debug_runtime_statistics() const {
   result.provider_name = "forge_compiled_taichi_kernel";
   result.pattern_version = topology_version_;
   result.numeric_version = numeric_version_;
+  result.spmv_calls =
+      generation_apply_calls_->load(std::memory_order_relaxed);
+  result.spmv_plan_reuses = result.spmv_calls;
+  const auto generation_stats =
+      resource_generations_->debug_statistics();
+  result.resource_generations_published = generation_stats.published;
+  result.resource_generations_retired = generation_stats.retired;
+  result.resource_generations_released = generation_stats.released;
+  result.resource_generation_active_leases =
+      generation_stats.active_leases;
+  result.resource_generation_current = generation_stats.has_current;
   result.nnz = 0;
   result.pattern_reserved_bytes = topology_data_bytes_;
   result.values_reserved_bytes = numeric_data_bytes_;
@@ -483,6 +682,8 @@ CompiledKernelLinearOperator::debug_runtime_statistics() const {
       topology_data_bytes_ + numeric_data_bytes_;
   result.operator_exclusive_reserved_bytes =
       topology_data_bytes_ + numeric_data_bytes_;
+  result.numeric_update_peak_temporary_bytes =
+      result.numeric_updates > 0 ? numeric_data_bytes_ : 0;
   return result;
 }
 

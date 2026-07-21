@@ -28,6 +28,10 @@ class VulkanSparseAssemblyPlan;
 class Kernel;
 class CompiledKernelData;
 class LaunchContextBuilder;
+class OperatorBinding;
+class OperatorPinnedAction;
+class OperatorResourceGenerationPublisher;
+struct OperatorResourceStamp;
 namespace aot {
 struct CompiledGraph;
 struct CompiledGraphJITCache;
@@ -66,6 +70,11 @@ struct SparseMatrixRuntimeStatistics {
   std::uint64_t dense_vector_descriptor_creations{0};
   std::uint64_t dense_vector_descriptor_rebinds{0};
   std::uint64_t spmv_workspace_allocations{0};
+  std::uint64_t resource_generations_published{0};
+  std::uint64_t resource_generations_retired{0};
+  std::uint64_t resource_generations_released{0};
+  std::uint64_t resource_generation_active_leases{0};
+  bool resource_generation_current{false};
 
   std::uint64_t pattern_reserved_bytes{0};
   std::uint64_t values_reserved_bytes{0};
@@ -350,6 +359,9 @@ class CompiledKernelLinearOperator final : public SparseMatrix {
                            std::uint64_t expected_topology_version,
                            std::uint64_t expected_numeric_version);
   SparseMatrixRuntimeStatistics debug_runtime_statistics() const override;
+  OperatorBinding make_operator_binding();
+  OperatorPinnedAction pin_operator_generation() const;
+  OperatorResourceStamp current_operator_resource_stamp() const;
 
   Program *owning_program() const {
     return program_;
@@ -360,6 +372,9 @@ class CompiledKernelLinearOperator final : public SparseMatrix {
   }
 
  private:
+  struct TopologyState;
+  struct ResourceGeneration;
+
   CompiledKernelLinearOperator(Program *program,
                                Kernel &kernel,
                                int size,
@@ -367,19 +382,29 @@ class CompiledKernelLinearOperator final : public SparseMatrix {
                                std::uint64_t numeric_version,
                                const Ndarray &topology_data,
                                const Ndarray *numeric_data);
+  void publish_resource_generation(Ndarray *owned_numeric_data,
+                                   std::uint64_t numeric_version,
+                                   std::uint64_t binding_revision);
 
   Program *program_{nullptr};
   Kernel *kernel_{nullptr};
   const CompiledKernelData *compiled_kernel_{nullptr};
-  Ndarray *topology_data_{nullptr};
-  Ndarray *numeric_data_{nullptr};
-  std::unique_ptr<LaunchContextBuilder> launch_context_;
+  std::shared_ptr<TopologyState> topology_state_;
+  std::unique_ptr<OperatorResourceGenerationPublisher>
+      resource_generations_;
+  DataType numeric_data_type_{PrimitiveType::unknown};
+  std::vector<int> numeric_data_shape_;
+  ExternalArrayLayout numeric_data_layout_{ExternalArrayLayout::kNull};
+  bool has_numeric_data_{false};
   std::uint64_t topology_data_bytes_{0};
   std::uint64_t numeric_data_bytes_{0};
   std::size_t input_arg_index_{2};
   std::size_t output_arg_index_{3};
   std::uint64_t topology_version_{0};
   std::uint64_t numeric_version_{0};
+  std::uint64_t binding_revision_{1};
+  std::shared_ptr<std::atomic<std::uint64_t>>
+      generation_apply_calls_;
   mutable std::mutex spmv_mutex_;
 };
 

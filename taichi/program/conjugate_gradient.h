@@ -21,6 +21,7 @@ class SparseBlockJacobiPreconditionerPlan;
 class CompiledKernelPreconditionerPlan;
 class OperatorPlan;
 class OperatorBinding;
+class OperatorPinnedAction;
 
 enum class SparseSolveStatus : int {
   kNotRun = -1,
@@ -583,7 +584,9 @@ class CpuSparseCGPlan {
   void solve_typed(T *x,
                    const T *b,
                    const std::array<T *, 4> &workspace,
-                   const Ndarray &solution_array);
+                   const Ndarray &solution_array,
+                   const OperatorPinnedAction &operator_generation,
+                   const OperatorPinnedAction *preconditioner_generation);
   CpuSparseCGPlan(Program *program,
                   OperatorBinding operator_binding,
                   std::unique_ptr<PreconditionerBinding> preconditioner,
@@ -603,8 +606,12 @@ class CpuSparseCGPlan {
       CompiledKernelLinearOperator &matrix,
       CompiledKernelPreconditionerPlan &preconditioner);
   void validate_preconditioner(Program *program) const;
-  void apply_operator(const Ndarray &input, const Ndarray &output);
-  void apply_preconditioner(const Ndarray &input, const Ndarray &output);
+  void apply_operator(const OperatorPinnedAction &generation,
+                      const Ndarray &input,
+                      const Ndarray &output);
+  void apply_preconditioner(const OperatorPinnedAction &generation,
+                            const Ndarray &input,
+                            const Ndarray &output);
   void release_workspace();
 
   Program *program_{nullptr};

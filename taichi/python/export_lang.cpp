@@ -4360,6 +4360,12 @@ void export_lang(py::module &m) {
             stats.dense_vector_descriptor_rebinds;
         operations["spmv_workspace_allocations"] =
             stats.spmv_workspace_allocations;
+        operations["resource_generations_published"] =
+            stats.resource_generations_published;
+        operations["resource_generations_retired"] =
+            stats.resource_generations_retired;
+        operations["resource_generations_released"] =
+            stats.resource_generations_released;
 
         py::dict resources;
         resources["pattern_reserved_bytes"] =
@@ -4371,6 +4377,10 @@ void export_lang(py::module &m) {
             stats.operator_owned_reserved_bytes;
         resources["numeric_update_peak_temporary_bytes"] =
             stats.numeric_update_peak_temporary_bytes;
+        resources["resource_generation_active_leases"] =
+            stats.resource_generation_active_leases;
+        resources["resource_generation_current"] =
+            stats.resource_generation_current;
         resources["operator_exclusive_reserved_bytes"] =
             stats.pattern_storage_shared
                 ? stats.operator_exclusive_reserved_bytes

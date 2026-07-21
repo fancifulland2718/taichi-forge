@@ -850,35 +850,47 @@ void CpuSparseCGPlan::validate_preconditioner(Program *program) const {
   }
 }
 
-void CpuSparseCGPlan::apply_operator(const Ndarray &input,
-                                     const Ndarray &output) {
+void CpuSparseCGPlan::apply_operator(
+    const OperatorPinnedAction &generation,
+    const Ndarray &input,
+    const Ndarray &output) {
   const auto &descriptor = operator_plan_->descriptor();
-  operator_plan_->submit({OperatorApplyMode::forward,
-                          OperatorVectorView::from_ndarray(
-                              program_, input, descriptor.domain, false),
-                          nullptr,
-                          OperatorVectorView::from_ndarray(
-                              program_, output, descriptor.range, true)});
+  operator_plan_->submit(
+      generation,
+      {OperatorApplyMode::forward,
+       OperatorVectorView::from_ndarray(
+           program_, input, descriptor.domain, false),
+       nullptr,
+       OperatorVectorView::from_ndarray(
+           program_, output, descriptor.range, true)});
 }
 
-void CpuSparseCGPlan::apply_preconditioner(const Ndarray &input,
-                                           const Ndarray &output) {
+void CpuSparseCGPlan::apply_preconditioner(
+    const OperatorPinnedAction &generation,
+    const Ndarray &input,
+    const Ndarray &output) {
   TI_ERROR_IF(!preconditioner_plan_,
               "Identity CG has no preconditioner action.");
   const auto &descriptor = preconditioner_plan_->descriptor();
-  preconditioner_plan_->submit({OperatorApplyMode::forward,
-                                OperatorVectorView::from_ndarray(
-                                    program_, input, descriptor.domain, false),
-                                nullptr,
-                                OperatorVectorView::from_ndarray(
-                                    program_, output, descriptor.range, true)});
+  preconditioner_plan_->submit(
+      generation,
+      {OperatorApplyMode::forward,
+       OperatorVectorView::from_ndarray(
+           program_, input, descriptor.domain, false),
+       nullptr,
+       OperatorVectorView::from_ndarray(
+           program_, output, descriptor.range, true)});
 }
 
 template <typename T>
 void CpuSparseCGPlan::solve_typed(T *x,
                                   const T *b,
                                   const std::array<T *, 4> &workspace,
-                                  const Ndarray &solution_array) {
+                                  const Ndarray &solution_array,
+                                  const OperatorPinnedAction
+                                      &operator_generation,
+                                  const OperatorPinnedAction
+                                      *preconditioner_generation) {
   const int rows = rows_;
   T *ax = workspace[0];
   T *residual = workspace[1];
@@ -911,7 +923,7 @@ void CpuSparseCGPlan::solve_typed(T *x,
     }
   }
 
-  apply_operator(solution_array, *workspace_[0]);
+  apply_operator(operator_generation, solution_array, *workspace_[0]);
   operator_apply_calls_++;
   for (int index = 0; index < rows; ++index) {
     residual[index] = b[index] - ax[index];
@@ -933,7 +945,8 @@ void CpuSparseCGPlan::solve_typed(T *x,
 
   double rho = rr;
   if (preconditioner_plan_) {
-    apply_preconditioner(*workspace_[1], *workspace_[3]);
+    apply_preconditioner(*preconditioner_generation, *workspace_[1],
+                         *workspace_[3]);
     preconditioner_apply_calls_++;
     rho = dot(residual, preconditioned_residual);
   }
@@ -947,7 +960,7 @@ void CpuSparseCGPlan::solve_typed(T *x,
 
   bool breakdown = false;
   while (iterations_ < max_iterations_ && rr > tolerance_squared) {
-    apply_operator(*workspace_[2], *workspace_[0]);
+    apply_operator(operator_generation, *workspace_[2], *workspace_[0]);
     operator_apply_calls_++;
     const double p_ap = dot(direction, ax);
     if (!std::isfinite(p_ap) || p_ap <= 0.0) {
@@ -977,7 +990,8 @@ void CpuSparseCGPlan::solve_typed(T *x,
 
     double next_rho = rr;
     if (preconditioner_plan_) {
-      apply_preconditioner(*workspace_[1], *workspace_[3]);
+      apply_preconditioner(*preconditioner_generation, *workspace_[1],
+                           *workspace_[3]);
       preconditioner_apply_calls_++;
       next_rho = dot(residual, preconditioned_residual);
     }
@@ -1040,13 +1054,12 @@ void CpuSparseCGPlan::solve(Program *program,
               "CPU operator CG/PCG solution and RHS must not alias.");
 
   std::lock_guard<std::mutex> lock(solve_mutex_);
-  auto operator_lease = operator_plan_->acquire_resource_lease();
-  auto preconditioner_lease =
-      preconditioner_plan_
-          ? preconditioner_plan_->acquire_resource_lease()
-          : OperatorResourceLease{};
+  auto operator_generation = operator_plan_->pin();
+  auto preconditioner_generation =
+      preconditioner_plan_ ? preconditioner_plan_->pin()
+                           : OperatorPinnedAction{};
   validate_preconditioner(program);
-  const auto operator_stamp = operator_plan_->resource_stamp();
+  const auto operator_stamp = operator_generation.resource_stamp();
   if (has_solved_) {
     workspace_reuses_++;
   } else {
@@ -1068,7 +1081,9 @@ void CpuSparseCGPlan::solve(Program *program,
           program_->get_ndarray_data_ptr_as_int(workspace_[index]));
     }
     solve_typed(reinterpret_cast<float32 *>(solution),
-                reinterpret_cast<const float32 *>(rhs), workspace, x);
+                reinterpret_cast<const float32 *>(rhs), workspace, x,
+                operator_generation,
+                preconditioner_plan_ ? &preconditioner_generation : nullptr);
   } else {
     std::array<float64 *, 4> workspace{};
     for (int index = 0; index < 4; ++index) {
@@ -1076,7 +1091,9 @@ void CpuSparseCGPlan::solve(Program *program,
           program_->get_ndarray_data_ptr_as_int(workspace_[index]));
     }
     solve_typed(reinterpret_cast<float64 *>(solution),
-                reinterpret_cast<const float64 *>(rhs), workspace, x);
+                reinterpret_cast<const float64 *>(rhs), workspace, x,
+                operator_generation,
+                preconditioner_plan_ ? &preconditioner_generation : nullptr);
   }
   total_iterations_ += static_cast<std::uint64_t>(iterations_);
 }
@@ -1084,8 +1101,8 @@ void CpuSparseCGPlan::solve(Program *program,
 SparseSolvePlanRuntimeStatistics CpuSparseCGPlan::debug_runtime_statistics()
     const {
   std::lock_guard<std::mutex> lock(solve_mutex_);
-  auto operator_lease = operator_plan_->acquire_resource_lease();
-  const auto operator_stamp = operator_plan_->resource_stamp();
+  auto operator_generation = operator_plan_->pin();
+  const auto operator_stamp = operator_generation.resource_stamp();
   SparseSolvePlanRuntimeStatistics result;
   result.backend_family = "cpu";
   if (!preconditioner_binding_) {

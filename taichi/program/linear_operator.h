@@ -206,7 +206,7 @@ class OperatorPinnedAction {
                        OperatorResourceStamp stamp,
                        OperatorResourceLease resource_lease);
 
-  std::unique_ptr<OperatorAction> action_;
+  std::shared_ptr<OperatorAction> action_;
   OperatorResourceStamp stamp_;
   OperatorResourceLease resource_lease_;
 };

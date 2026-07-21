@@ -251,7 +251,7 @@ OperatorPinnedAction::OperatorPinnedAction(
     OperatorAction action,
     OperatorResourceStamp stamp,
     OperatorResourceLease resource_lease)
-    : action_(std::make_unique<OperatorAction>(std::move(action))),
+    : action_(std::make_shared<OperatorAction>(std::move(action))),
       stamp_(stamp),
       resource_lease_(std::move(resource_lease)) {
 }
@@ -779,9 +779,7 @@ OperatorBinding make_cpu_program_kernel_operator_binding(
   TI_ERROR_IF(matrix.owning_program() != program,
               "CPU program-kernel operator binding requires its owning "
               "Program; no fallback was performed.");
-  return make_cpu_typed_operator_binding(
-      program, matrix, "forge_compiled_taichi_kernel",
-      "matrix_free_kernel");
+  return matrix.make_operator_binding();
 }
 
 }  // namespace taichi::lang

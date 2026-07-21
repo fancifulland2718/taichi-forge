@@ -344,7 +344,16 @@ def test_compiled_kernel_numeric_update_preserves_inflight_generation():
     assert stats["operations"]["spmv_calls"] == 2
     assert stats["operations"]["spmv_plan_builds"] == 1
     assert stats["operations"]["spmv_plan_reuses"] == 2
+    assert stats["operations"]["resource_generations_published"] == 2
+    assert stats["operations"]["resource_generations_retired"] == 1
+    assert stats["operations"]["resource_generations_released"] == 1
     assert stats["resources"]["operator_owned_reserved_bytes"] == (diagonal.size * 8)
+    assert (
+        stats["resources"]["numeric_update_peak_temporary_bytes"]
+        == diagonal.size * 4
+    )
+    assert stats["resources"]["resource_generation_active_leases"] == 0
+    assert stats["resources"]["resource_generation_current"]
     assert stats["transfers"]["device_to_host_bytes"] == 0
     assert stats["transfers"]["device_to_device_bytes"] == diagonal.size * 12
 
