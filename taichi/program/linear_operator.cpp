@@ -1145,6 +1145,627 @@ OperatorBinding make_adjoint_operator_binding(OperatorBinding operand) {
 
 namespace {
 
+void validate_synchronous_composite_operand(const OperatorAction &operand,
+                                            const char *role) {
+  TI_ERROR_IF(operand.capabilities().asynchronous_submit,
+              "M3 {} operator composition requires a synchronous operand; "
+              "GPU/Graph composite lowering is deferred.",
+              role);
+}
+
+void validate_host_composite_views(const OperatorVectorView &input,
+                                   const OperatorVectorView &output) {
+  TI_ERROR_IF(input.program != output.program,
+              "Composite operator input and output must belong to the same "
+              "Program.");
+  TI_ERROR_IF(input.program &&
+                  !arch_is_cpu(input.program->compile_config().arch),
+              "M3 composite operators support host and CPU views only; "
+              "GPU/Graph lowering is deferred.");
+}
+
+OperatorVectorView as_raw_composite_view(const OperatorVectorView &view,
+                                         bool writable) {
+  auto result = view;
+  result.allocation_identity = view.data;
+  result.ndarray = nullptr;
+  result.writable = writable;
+  return result;
+}
+
+template <typename T>
+void copy_composite_vector(const OperatorVectorView &input,
+                           const OperatorVectorView &output) {
+  const auto *source = reinterpret_cast<const T *>(input.data);
+  auto *target = reinterpret_cast<T *>(output.data);
+  std::copy(source, source + output.space.scalar_extent, target);
+}
+
+template <typename T>
+void scale_composite_vector(double scale,
+                            const OperatorVectorView &output) {
+  auto *target = reinterpret_cast<T *>(output.data);
+  for (std::size_t i = 0; i < output.space.scalar_extent; ++i) {
+    target[i] = static_cast<T>(scale * static_cast<double>(target[i]));
+  }
+}
+
+template <typename T>
+void add_composite_vector(const OperatorVectorView &addend,
+                          const OperatorVectorView &output) {
+  const auto *source = reinterpret_cast<const T *>(addend.data);
+  auto *target = reinterpret_cast<T *>(output.data);
+  for (std::size_t i = 0; i < output.space.scalar_extent; ++i) {
+    target[i] += source[i];
+  }
+}
+
+void copy_composite_vector(const OperatorVectorView &input,
+                           const OperatorVectorView &output) {
+  if (output.space.scalar_type == PrimitiveType::f32) {
+    copy_composite_vector<float32>(input, output);
+  } else {
+    copy_composite_vector<float64>(input, output);
+  }
+}
+
+void scale_composite_vector(double scale,
+                            const OperatorVectorView &output) {
+  if (output.space.scalar_type == PrimitiveType::f32) {
+    scale_composite_vector<float32>(scale, output);
+  } else {
+    scale_composite_vector<float64>(scale, output);
+  }
+}
+
+void add_composite_vector(const OperatorVectorView &addend,
+                          const OperatorVectorView &output) {
+  if (output.space.scalar_type == PrimitiveType::f32) {
+    add_composite_vector<float32>(addend, output);
+  } else {
+    add_composite_vector<float64>(addend, output);
+  }
+}
+
+struct HostCompositeScratch {
+  explicit HostCompositeScratch(OperatorSpaceDesc space)
+      : space(std::move(space)),
+        words((space_bytes(this->space) + sizeof(std::uint64_t) - 1) /
+              sizeof(std::uint64_t)) {
+  }
+
+  OperatorVectorView view(Program *program) {
+    if (program) {
+      return OperatorVectorView::from_device_pointer(
+          program, reinterpret_cast<std::uintptr_t>(words.data()), space,
+          true);
+    }
+    return OperatorVectorView::from_mutable_host(words.data(), space);
+  }
+
+  OperatorSpaceDesc space;
+  std::vector<std::uint64_t> words;
+};
+
+struct SumCompositeScratch {
+  explicit SumCompositeScratch(const OperatorDescriptor &descriptor)
+      : forward(descriptor.range), adjoint(descriptor.domain) {
+  }
+
+  std::mutex mutex;
+  HostCompositeScratch forward;
+  HostCompositeScratch adjoint;
+};
+
+struct ProductCompositeScratch {
+  explicit ProductCompositeScratch(OperatorSpaceDesc intermediate)
+      : intermediate(std::move(intermediate)) {
+  }
+
+  std::mutex mutex;
+  HostCompositeScratch intermediate;
+};
+
+OperatorTraitClaim structurally_derived_claim(
+    const OperatorTraitClaim &source) {
+  if (!source.known()) {
+    return {};
+  }
+  const auto provenance =
+      source.provenance == OperatorTraitProvenance::empirically_checked
+          ? OperatorTraitProvenance::empirically_checked
+          : OperatorTraitProvenance::derived_structurally;
+  return {source.value, provenance, source.validity_scope};
+}
+
+OperatorTraitClaim structurally_derived_true_claim(
+    const OperatorTraitClaim &left,
+    const OperatorTraitClaim &right) {
+  if (!left.known() || !left.value || !right.known() || !right.value) {
+    return {};
+  }
+  const auto provenance =
+      left.provenance == OperatorTraitProvenance::empirically_checked ||
+              right.provenance ==
+                  OperatorTraitProvenance::empirically_checked
+          ? OperatorTraitProvenance::empirically_checked
+          : OperatorTraitProvenance::derived_structurally;
+  return {true, provenance, left.validity_scope | right.validity_scope};
+}
+
+std::uint64_t combine_operator_revision(std::uint64_t seed,
+                                        std::uint64_t revision) {
+  seed ^= revision + 0x9e3779b97f4a7c15ull + (seed << 6) + (seed >> 2);
+  return seed == 0 ? 1 : seed;
+}
+
+OperatorResourceStamp combine_operator_generations(
+    const std::vector<OperatorPinnedAction> &operands) {
+  TI_ERROR_IF(operands.empty(),
+              "Composite operator requires at least one operand.");
+  const auto first = operands.front().resource_stamp();
+  OperatorResourceStamp result{first.program_identity,
+                               first.program_generation,
+                               0xcbf29ce484222325ull,
+                               0xcbf29ce484222325ull,
+                               0xcbf29ce484222325ull,
+                               0xcbf29ce484222325ull};
+  for (const auto &operand : operands) {
+    const auto stamp = operand.resource_stamp();
+    TI_ERROR_IF(stamp.program_identity != result.program_identity ||
+                    stamp.program_generation != result.program_generation,
+                "Composite operator operands must belong to the same "
+                "Program generation.");
+    result.schema_revision =
+        combine_operator_revision(result.schema_revision,
+                                  stamp.schema_revision);
+    result.topology_revision =
+        combine_operator_revision(result.topology_revision,
+                                  stamp.topology_revision);
+    result.numeric_revision =
+        combine_operator_revision(result.numeric_revision,
+                                  stamp.numeric_revision);
+    result.binding_revision =
+        combine_operator_revision(result.binding_revision,
+                                  stamp.binding_revision);
+  }
+  return result;
+}
+
+std::vector<OperatorPinnedAction> pin_composite_operands(
+    const std::vector<OperatorBinding> &operands) {
+  std::vector<OperatorPinnedAction> result;
+  result.reserve(operands.size());
+  for (const auto &operand : operands) {
+    result.push_back(operand.pin());
+  }
+  return result;
+}
+
+OperatorAction make_composite_metadata_action(
+    OperatorDescriptor descriptor,
+    OperatorMathematicalTraits traits,
+    OperatorCapabilities capabilities,
+    std::string provider_name,
+    OperatorAction::ResourceStampFn resource_stamp) {
+  auto error_provider_name = provider_name;
+  return OperatorAction(
+      std::move(descriptor), std::move(traits), capabilities,
+      std::move(provider_name), std::move(resource_stamp),
+      [error_provider_name = std::move(error_provider_name)](
+          OperatorApplyMode, const OperatorVectorView &,
+          const OperatorVectorView &) {
+        TI_ERROR("Composite operator metadata '{}' cannot be submitted "
+                 "without pinning all operand generations.",
+                 error_provider_name);
+      });
+}
+
+OperatorMathematicalTraits scaled_operator_traits(
+    double scale,
+    const OperatorAction &operand) {
+  OperatorMathematicalTraits traits;
+  if (operand.descriptor().domain != operand.descriptor().range) {
+    return traits;
+  }
+  if (scale == 0.0) {
+    const auto scope =
+        operator_dependency(OperatorResourceDependency::schema);
+    traits.self_adjoint = {
+        true, OperatorTraitProvenance::constructed_by_framework, scope};
+    traits.positive_definite = {
+        false, OperatorTraitProvenance::constructed_by_framework, scope};
+    traits.positive_semidefinite = {
+        true, OperatorTraitProvenance::constructed_by_framework, scope};
+    traits.singular = {
+        true, OperatorTraitProvenance::constructed_by_framework, scope};
+    return traits;
+  }
+  const auto &source = operand.mathematical_traits();
+  traits.self_adjoint = structurally_derived_claim(source.self_adjoint);
+  traits.singular = structurally_derived_claim(source.singular);
+  if (scale > 0.0) {
+    traits.positive_definite =
+        structurally_derived_claim(source.positive_definite);
+    traits.positive_semidefinite =
+        structurally_derived_claim(source.positive_semidefinite);
+  }
+  return traits;
+}
+
+OperatorMathematicalTraits sum_operator_traits(const OperatorAction &left,
+                                               const OperatorAction &right) {
+  OperatorMathematicalTraits traits;
+  if (left.descriptor().domain != left.descriptor().range) {
+    return traits;
+  }
+  const auto &left_traits = left.mathematical_traits();
+  const auto &right_traits = right.mathematical_traits();
+  traits.self_adjoint = structurally_derived_true_claim(
+      left_traits.self_adjoint, right_traits.self_adjoint);
+  traits.positive_semidefinite = structurally_derived_true_claim(
+      left_traits.positive_semidefinite,
+      right_traits.positive_semidefinite);
+  auto positive_definite = structurally_derived_true_claim(
+      left_traits.positive_definite,
+      right_traits.positive_semidefinite);
+  if (!positive_definite.known()) {
+    positive_definite = structurally_derived_true_claim(
+        left_traits.positive_semidefinite,
+        right_traits.positive_definite);
+  }
+  if (!traits.self_adjoint.known() || !traits.self_adjoint.value) {
+    positive_definite = {};
+  }
+  traits.positive_definite = positive_definite;
+  if (positive_definite.known() && positive_definite.value) {
+    traits.singular = {false, positive_definite.provenance,
+                       positive_definite.validity_scope};
+  }
+  return traits;
+}
+
+}  // namespace
+
+OperatorBinding make_identity_operator_binding(OperatorSpaceDesc space,
+                                                Program *program) {
+  validate_space(space, "identity");
+  TI_ERROR_IF(program && !arch_is_cpu(program->compile_config().arch),
+              "M3 identity composition supports host and CPU Programs only.");
+  const OperatorDescriptor descriptor{space, space};
+  const auto scope =
+      operator_dependency(OperatorResourceDependency::schema);
+  auto traits = make_spd_operator_traits(
+      OperatorTraitProvenance::constructed_by_framework, scope);
+  OperatorCapabilities capabilities;
+  capabilities.adjoint_apply = true;
+  auto action = OperatorAction(
+      descriptor, traits, capabilities, "identity",
+      [program] {
+        return program
+                   ? OperatorResourceStamp{
+                         reinterpret_cast<std::uintptr_t>(program),
+                         program->runtime_program_generation(), 1, 1, 1, 1}
+                   : OperatorResourceStamp{};
+      },
+      [](OperatorApplyMode, const OperatorVectorView &input,
+         const OperatorVectorView &output) {
+        validate_host_composite_views(input, output);
+        copy_composite_vector(input, output);
+      });
+  return OperatorBinding(std::move(action));
+}
+
+OperatorBinding make_scaled_operator_binding(double scale,
+                                              OperatorBinding operand) {
+  TI_ERROR_IF(!std::isfinite(scale),
+              "Scaled operator requires a finite scalar.");
+  const auto &source = operand.action();
+  validate_synchronous_composite_operand(source, "scaled");
+  const auto descriptor = source.descriptor();
+  const auto traits = scaled_operator_traits(scale, source);
+  auto capabilities = source.capabilities();
+  capabilities.native_generalized_apply = false;
+  capabilities.asynchronous_submit = false;
+  const std::string provider_name =
+      "scale(" + source.provider_name() + ")";
+  auto metadata = make_composite_metadata_action(
+      descriptor, traits, capabilities, provider_name,
+      [operand] { return operand.pin().resource_stamp(); });
+  return OperatorBinding::from_generation_publisher(
+      std::move(metadata),
+      [operand = std::move(operand), descriptor, traits, capabilities,
+       provider_name, scale] {
+        auto source_generation = operand.pin();
+        const auto stamp = source_generation.resource_stamp();
+        auto action = OperatorAction(
+            descriptor, traits, capabilities, provider_name,
+            [stamp] { return stamp; },
+            [source_generation = std::move(source_generation), scale](
+                OperatorApplyMode mode, const OperatorVectorView &input,
+                const OperatorVectorView &output) {
+              validate_host_composite_views(input, output);
+              source_generation.apply_overwrite(mode, input, output);
+              scale_composite_vector(scale, output);
+            });
+        return OperatorPinnedAction::from_retained_action(std::move(action),
+                                                          stamp);
+      });
+}
+
+namespace {
+
+OperatorTraitClaim structurally_derived_all_true_claim(
+    const std::vector<OperatorTraitClaim> &claims) {
+  TI_ERROR_IF(claims.empty(),
+              "Composite trait derivation requires at least one operand.");
+  auto result = structurally_derived_claim(claims.front());
+  if (!result.known() || !result.value) {
+    return {};
+  }
+  for (std::size_t i = 1; i < claims.size(); ++i) {
+    result = structurally_derived_true_claim(result, claims[i]);
+    if (!result.known()) {
+      return {};
+    }
+  }
+  return result;
+}
+
+OperatorMathematicalTraits block_diagonal_operator_traits(
+    const std::vector<OperatorBinding> &blocks,
+    const OperatorDescriptor &descriptor) {
+  OperatorMathematicalTraits traits;
+  if (descriptor.domain != descriptor.range) {
+    return traits;
+  }
+  std::vector<OperatorTraitClaim> self_adjoint;
+  std::vector<OperatorTraitClaim> positive_definite;
+  std::vector<OperatorTraitClaim> positive_semidefinite;
+  self_adjoint.reserve(blocks.size());
+  positive_definite.reserve(blocks.size());
+  positive_semidefinite.reserve(blocks.size());
+  for (const auto &block : blocks) {
+    const auto &block_traits = block.action().mathematical_traits();
+    self_adjoint.push_back(block_traits.self_adjoint);
+    positive_definite.push_back(block_traits.positive_definite);
+    positive_semidefinite.push_back(
+        block_traits.positive_semidefinite);
+  }
+  traits.self_adjoint =
+      structurally_derived_all_true_claim(self_adjoint);
+  traits.positive_definite =
+      structurally_derived_all_true_claim(positive_definite);
+  traits.positive_semidefinite =
+      structurally_derived_all_true_claim(positive_semidefinite);
+  if (traits.positive_definite.known() &&
+      traits.positive_definite.value) {
+    traits.singular = {false, traits.positive_definite.provenance,
+                       traits.positive_definite.validity_scope};
+  }
+  return traits;
+}
+
+bool same_composite_space_kind(const OperatorSpaceDesc &left,
+                               const OperatorSpaceDesc &right) {
+  return left.scalar_type == right.scalar_type &&
+         left.entry_shape == right.entry_shape &&
+         left.inner_product_kind == right.inner_product_kind;
+}
+
+OperatorVectorView composite_subview(const OperatorVectorView &view,
+                                     const OperatorSpaceDesc &space,
+                                     std::size_t scalar_offset) {
+  auto result = as_raw_composite_view(view, view.writable);
+  result.space = space;
+  result.data += scalar_offset * data_type_size(space.scalar_type);
+  result.allocation_identity = result.data;
+  return result;
+}
+
+}  // namespace
+
+OperatorBinding make_sum_operator_binding(OperatorBinding left,
+                                           OperatorBinding right) {
+  const auto &left_action = left.action();
+  const auto &right_action = right.action();
+  TI_ERROR_IF(left_action.descriptor().domain !=
+                      right_action.descriptor().domain ||
+                  left_action.descriptor().range !=
+                      right_action.descriptor().range,
+              "Operator sum requires identical operand descriptors.");
+  validate_synchronous_composite_operand(left_action, "sum");
+  validate_synchronous_composite_operand(right_action, "sum");
+
+  const auto descriptor = left_action.descriptor();
+  const auto traits = sum_operator_traits(left_action, right_action);
+  OperatorCapabilities capabilities;
+  capabilities.adjoint_apply =
+      left_action.capabilities().adjoint_apply &&
+      right_action.capabilities().adjoint_apply;
+  const std::string provider_name =
+      "sum(" + left_action.provider_name() + "," +
+      right_action.provider_name() + ")";
+  std::vector<OperatorBinding> operands;
+  operands.push_back(std::move(left));
+  operands.push_back(std::move(right));
+  auto scratch = std::make_shared<SumCompositeScratch>(descriptor);
+  auto metadata = make_composite_metadata_action(
+      descriptor, traits, capabilities, provider_name, [operands] {
+        return combine_operator_generations(
+            pin_composite_operands(operands));
+      });
+  return OperatorBinding::from_generation_publisher(
+      std::move(metadata),
+      [operands = std::move(operands), scratch, descriptor, traits,
+       capabilities, provider_name] {
+        auto pins = pin_composite_operands(operands);
+        const auto stamp = combine_operator_generations(pins);
+        auto action = OperatorAction(
+            descriptor, traits, capabilities, provider_name,
+            [stamp] { return stamp; },
+            [pins = std::move(pins), scratch](
+                OperatorApplyMode mode, const OperatorVectorView &input,
+                const OperatorVectorView &output) {
+              validate_host_composite_views(input, output);
+              std::lock_guard<std::mutex> lock(scratch->mutex);
+              auto raw_input = as_raw_composite_view(input, false);
+              auto raw_output = as_raw_composite_view(output, true);
+              auto temporary =
+                  (mode == OperatorApplyMode::forward
+                       ? scratch->forward
+                       : scratch->adjoint)
+                      .view(input.program);
+              pins[0].apply_overwrite(mode, raw_input, raw_output);
+              pins[1].apply_overwrite(mode, raw_input, temporary);
+              add_composite_vector(temporary, raw_output);
+            });
+        return OperatorPinnedAction::from_retained_action(std::move(action),
+                                                          stamp);
+      });
+}
+
+OperatorBinding make_composed_operator_binding(OperatorBinding outer,
+                                                OperatorBinding inner) {
+  const auto &outer_action = outer.action();
+  const auto &inner_action = inner.action();
+  TI_ERROR_IF(inner_action.descriptor().range !=
+                  outer_action.descriptor().domain,
+              "Operator composition requires the inner range to equal the "
+              "outer domain.");
+  validate_synchronous_composite_operand(outer_action, "product");
+  validate_synchronous_composite_operand(inner_action, "product");
+
+  const OperatorDescriptor descriptor{inner_action.descriptor().domain,
+                                      outer_action.descriptor().range};
+  const auto intermediate_space = inner_action.descriptor().range;
+  const OperatorMathematicalTraits traits;
+  OperatorCapabilities capabilities;
+  capabilities.adjoint_apply =
+      outer_action.capabilities().adjoint_apply &&
+      inner_action.capabilities().adjoint_apply;
+  const std::string provider_name =
+      "compose(" + outer_action.provider_name() + "," +
+      inner_action.provider_name() + ")";
+  std::vector<OperatorBinding> operands;
+  operands.push_back(std::move(outer));
+  operands.push_back(std::move(inner));
+  auto scratch = std::make_shared<ProductCompositeScratch>(
+      intermediate_space);
+  auto metadata = make_composite_metadata_action(
+      descriptor, traits, capabilities, provider_name, [operands] {
+        return combine_operator_generations(
+            pin_composite_operands(operands));
+      });
+  return OperatorBinding::from_generation_publisher(
+      std::move(metadata),
+      [operands = std::move(operands), scratch, descriptor, traits,
+       capabilities, provider_name] {
+        auto pins = pin_composite_operands(operands);
+        const auto stamp = combine_operator_generations(pins);
+        auto action = OperatorAction(
+            descriptor, traits, capabilities, provider_name,
+            [stamp] { return stamp; },
+            [pins = std::move(pins), scratch](
+                OperatorApplyMode mode, const OperatorVectorView &input,
+                const OperatorVectorView &output) {
+              validate_host_composite_views(input, output);
+              std::lock_guard<std::mutex> lock(scratch->mutex);
+              auto raw_input = as_raw_composite_view(input, false);
+              auto raw_output = as_raw_composite_view(output, true);
+              auto temporary = scratch->intermediate.view(input.program);
+              if (mode == OperatorApplyMode::forward) {
+                pins[1].apply_overwrite(mode, raw_input, temporary);
+                pins[0].apply_overwrite(mode, temporary, raw_output);
+              } else {
+                pins[0].apply_overwrite(mode, raw_input, temporary);
+                pins[1].apply_overwrite(mode, temporary, raw_output);
+              }
+            });
+        return OperatorPinnedAction::from_retained_action(std::move(action),
+                                                          stamp);
+      });
+}
+
+OperatorBinding make_block_diagonal_operator_binding(
+    std::vector<OperatorBinding> blocks) {
+  TI_ERROR_IF(blocks.empty(),
+              "Block-diagonal operator requires at least one block.");
+  const auto first_descriptor = blocks.front().action().descriptor();
+  OperatorDescriptor descriptor = first_descriptor;
+  descriptor.domain.scalar_extent = 0;
+  descriptor.range.scalar_extent = 0;
+  bool adjoint_apply = true;
+  for (const auto &block : blocks) {
+    const auto &action = block.action();
+    validate_synchronous_composite_operand(action, "block-diagonal");
+    TI_ERROR_IF(!same_composite_space_kind(
+                    action.descriptor().domain, first_descriptor.domain) ||
+                    !same_composite_space_kind(
+                        action.descriptor().range, first_descriptor.range),
+                "Block-diagonal operator requires compatible scalar spaces.");
+    TI_ERROR_IF(
+        descriptor.domain.scalar_extent >
+                (std::numeric_limits<std::size_t>::max)() -
+                    action.descriptor().domain.scalar_extent ||
+            descriptor.range.scalar_extent >
+                (std::numeric_limits<std::size_t>::max)() -
+                    action.descriptor().range.scalar_extent,
+        "Block-diagonal operator scalar extent overflow.");
+    descriptor.domain.scalar_extent +=
+        action.descriptor().domain.scalar_extent;
+    descriptor.range.scalar_extent +=
+        action.descriptor().range.scalar_extent;
+    adjoint_apply =
+        adjoint_apply && action.capabilities().adjoint_apply;
+  }
+  const auto traits =
+      block_diagonal_operator_traits(blocks, descriptor);
+  OperatorCapabilities capabilities;
+  capabilities.adjoint_apply = adjoint_apply;
+  const std::string provider_name = "block_diagonal";
+  auto metadata = make_composite_metadata_action(
+      descriptor, traits, capabilities, provider_name, [blocks] {
+        return combine_operator_generations(
+            pin_composite_operands(blocks));
+      });
+  return OperatorBinding::from_generation_publisher(
+      std::move(metadata),
+      [blocks = std::move(blocks), descriptor, traits, capabilities,
+       provider_name] {
+        auto pins = pin_composite_operands(blocks);
+        const auto stamp = combine_operator_generations(pins);
+        auto action = OperatorAction(
+            descriptor, traits, capabilities, provider_name,
+            [stamp] { return stamp; },
+            [pins = std::move(pins)](
+                OperatorApplyMode mode, const OperatorVectorView &input,
+                const OperatorVectorView &output) {
+              validate_host_composite_views(input, output);
+              std::size_t input_offset = 0;
+              std::size_t output_offset = 0;
+              for (const auto &pin : pins) {
+                const auto &block_descriptor = pin.descriptor();
+                const auto &block_input =
+                    input_space(block_descriptor, mode);
+                const auto &block_output =
+                    output_space(block_descriptor, mode);
+                auto input_view =
+                    composite_subview(input, block_input, input_offset);
+                auto output_view =
+                    composite_subview(output, block_output, output_offset);
+                pin.apply_overwrite(mode, input_view, output_view);
+                input_offset += block_input.scalar_extent;
+                output_offset += block_output.scalar_extent;
+              }
+            });
+        return OperatorPinnedAction::from_retained_action(std::move(action),
+                                                          stamp);
+      });
+}
+
+namespace {
+
 template <typename Provider>
 OperatorBinding make_cpu_typed_operator_binding(Program *program,
                                                 Provider &provider,

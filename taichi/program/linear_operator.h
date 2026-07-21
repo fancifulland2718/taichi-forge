@@ -487,6 +487,16 @@ OperatorAction make_dense_reference_operator_action(
     std::vector<double> row_major_values);
 
 OperatorBinding make_adjoint_operator_binding(OperatorBinding operand);
+OperatorBinding make_identity_operator_binding(OperatorSpaceDesc space,
+                                                Program *program = nullptr);
+OperatorBinding make_scaled_operator_binding(double scale,
+                                              OperatorBinding operand);
+OperatorBinding make_sum_operator_binding(OperatorBinding left,
+                                           OperatorBinding right);
+OperatorBinding make_composed_operator_binding(OperatorBinding outer,
+                                                OperatorBinding inner);
+OperatorBinding make_block_diagonal_operator_binding(
+    std::vector<OperatorBinding> blocks);
 
 OperatorBinding make_cpu_csr_operator_binding(Program *program,
                                               CpuSparseCsrMatrix &matrix);

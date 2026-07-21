@@ -604,6 +604,119 @@ TEST(LinearOperator, AdjointBindingRequiresExplicitProviderAction) {
           stamp, 2.0f))));
 }
 
+TEST(LinearOperator, MinimalCompositionBuildsRegularizedNormalOperator) {
+  const OperatorSpaceDesc domain =
+      scalar_space(PrimitiveType::f64, 3);
+  const OperatorDescriptor descriptor{
+      domain, scalar_space(PrimitiveType::f64, 2)};
+  OperatorBinding derivative(make_dense_reference_operator_action(
+      descriptor, {1.0, 2.0, 0.0, 0.0, -1.0, 3.0}));
+  auto normal = make_composed_operator_binding(
+      make_adjoint_operator_binding(derivative), derivative);
+  auto regularizer =
+      make_scaled_operator_binding(0.5,
+                                   make_identity_operator_binding(domain));
+  EXPECT_TRUE(
+      regularizer.action().mathematical_traits().positive_definite.value);
+  EXPECT_EQ(regularizer.action()
+                .mathematical_traits()
+                .positive_definite.provenance,
+            OperatorTraitProvenance::derived_structurally);
+  OperatorPlan plan(
+      nullptr,
+      make_sum_operator_binding(std::move(normal),
+                                std::move(regularizer)));
+
+  std::array<double, 3> input{1.0, -2.0, 0.5};
+  std::array<double, 3> output{};
+  plan.submit(
+      {OperatorApplyMode::forward,
+       OperatorVectorView::from_const_host(input.data(), domain), nullptr,
+       OperatorVectorView::from_mutable_host(output.data(), domain)});
+  EXPECT_EQ(output, (std::array<double, 3>{-2.5, -10.5, 10.75}));
+
+  std::array<double, 3> adjoint_output{};
+  plan.submit(
+      {OperatorApplyMode::adjoint,
+       OperatorVectorView::from_const_host(input.data(), domain), nullptr,
+       OperatorVectorView::from_mutable_host(adjoint_output.data(), domain)});
+  EXPECT_EQ(adjoint_output, output);
+  EXPECT_TRUE(plan.capabilities().adjoint_apply);
+}
+
+#ifdef TI_WITH_LLVM
+TEST(LinearOperator, MinimalCompositionSupportsCpuProgramViews) {
+  Program program(Arch::x64);
+  const OperatorSpaceDesc space =
+      scalar_space(PrimitiveType::f32, 3);
+  auto *input = program.create_ndarray(PrimitiveType::f32, {3},
+                                       ExternalArrayLayout::kNull, false);
+  auto *output = program.create_ndarray(PrimitiveType::f32, {3},
+                                        ExternalArrayLayout::kNull, false);
+  auto product = make_composed_operator_binding(
+      make_identity_operator_binding(space, &program),
+      make_identity_operator_binding(space, &program));
+  auto scaled =
+      make_scaled_operator_binding(2.0, std::move(product));
+  OperatorPlan plan(
+      &program,
+      make_sum_operator_binding(
+          std::move(scaled),
+          make_identity_operator_binding(space, &program)));
+  const std::array<float, 3> source{1.0f, -2.0f, 0.5f};
+  program.copy_ndarray_from_host(input, source.data(), sizeof(source));
+
+  plan.submit(
+      {OperatorApplyMode::forward,
+       OperatorVectorView::from_ndarray(&program, *input, space, false),
+       nullptr,
+       OperatorVectorView::from_ndarray(&program, *output, space, true)});
+  std::array<float, 3> result{};
+  program.copy_ndarray_to_host(output, result.data(), sizeof(result));
+  EXPECT_EQ(result, (std::array<float, 3>{3.0f, -6.0f, 1.5f}));
+
+  program.delete_ndarray(output);
+  program.delete_ndarray(input);
+}
+#endif
+
+TEST(LinearOperator, BlockDiagonalSupportsForwardAndAdjointActions) {
+  const OperatorSpaceDesc pair =
+      scalar_space(PrimitiveType::f64, 2);
+  const OperatorSpaceDesc scalar =
+      scalar_space(PrimitiveType::f64, 1);
+  std::vector<OperatorBinding> blocks;
+  blocks.emplace_back(make_dense_reference_operator_action(
+      {pair, pair}, {2.0, 1.0, 0.0, 3.0}));
+  blocks.emplace_back(make_dense_reference_operator_action(
+      {scalar, scalar}, {-1.0}));
+  OperatorPlan plan(
+      nullptr,
+      make_block_diagonal_operator_binding(std::move(blocks)));
+  const auto &descriptor = plan.descriptor();
+  EXPECT_EQ(descriptor.domain.scalar_extent, 3u);
+  EXPECT_EQ(descriptor.range.scalar_extent, 3u);
+
+  std::array<double, 3> input{1.0, 2.0, 4.0};
+  std::array<double, 3> forward{};
+  plan.submit(
+      {OperatorApplyMode::forward,
+       OperatorVectorView::from_const_host(input.data(), descriptor.domain),
+       nullptr,
+       OperatorVectorView::from_mutable_host(forward.data(),
+                                             descriptor.range)});
+  EXPECT_EQ(forward, (std::array<double, 3>{4.0, 6.0, -4.0}));
+
+  std::array<double, 3> adjoint{};
+  plan.submit(
+      {OperatorApplyMode::adjoint,
+       OperatorVectorView::from_const_host(input.data(), descriptor.range),
+       nullptr,
+       OperatorVectorView::from_mutable_host(adjoint.data(),
+                                             descriptor.domain)});
+  EXPECT_EQ(adjoint, (std::array<double, 3>{2.0, 7.0, -4.0}));
+}
+
 TEST(LinearOperator, GeneralizedApplyAllowsAddendOutputAlias) {
   OperatorDescriptor descriptor{scalar_space(PrimitiveType::f32, 2),
                                 scalar_space(PrimitiveType::f32, 2)};
