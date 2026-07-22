@@ -116,7 +116,10 @@ retroactively attributed to the 0.5.0 artifact:
 - Added homogeneous independent batched f32 CG/PCG on CPU, CUDA, and Vulkan.
   Each contiguous system has independent tolerance, status, iteration, and
   residual state; fixed stored and compiled-kernel A/M providers are
-  qualified. CUDA/Vulkan fixed-budget plans also provide `submit()`,
+  qualified. CUDA/Vulkan plans reuse plan-owned Taichi Graphs for the stable
+  iteration recurrence while retaining A/M as pinned provider actions; output
+  replacement patches the Graph binding, and workspace clones own independent
+  replay plans. CUDA/Vulkan fixed-budget plans also provide `submit()`,
   `SolveSubmission`, and explicit workspace cloning for bounded concurrent
   execution. Execution-policy capabilities and unsupported reasons are
   queryable; conditional device-convergent execution is not enabled. Plan

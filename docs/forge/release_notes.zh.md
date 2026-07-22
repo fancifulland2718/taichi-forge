@@ -96,7 +96,10 @@
   consumer 时返回明确 unsupported reason。
 - 增加 CPU、CUDA 与 Vulkan 上的同构独立批量 f32 CG/PCG。每个连续系统拥有独立
   tolerance、status、iteration 与 residual state；fixed stored 和 compiled-kernel A/M
-  provider 已完成资格验证。CUDA/Vulkan fixed-budget plan 还提供 `submit()`、
+  provider 已完成资格验证。CUDA/Vulkan plan 会复用 plan-owned Taichi Graph 执行稳定的
+  iteration recurrence，同时把 A/M 保持为 pinned provider action；更换 output 会 patch
+  Graph binding，每个 workspace clone 拥有独立 replay plan。CUDA/Vulkan fixed-budget plan
+  还提供 `submit()`、
   `SolveSubmission` 与显式 workspace clone，用于有界并发执行。执行策略 capability 与
   unsupported reason 可查询；当前未启用 device-convergent 条件执行。plan 统计报告每个
   clone 的逻辑 workspace payload 与排除项；host 异步 completion 不代表设备并行保证。

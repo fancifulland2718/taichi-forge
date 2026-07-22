@@ -965,7 +965,7 @@ operator API 另见[实验性 LinearOperator 与 SolvePlan](linear_operator.zh.m
 | `batch_plan.submit(rhs_flat, initial_guess=None, out=None, pacer=None, lane=None, on_saturation='wait')` | 提交一次 solve 并返回 `SolveSubmission`。 | CUDA/Vulkan 的 `fixed_budget_masked`；一个 plan-owned slot；可加入共享 `SubmissionPacer`；精确 generation 与 array 保留到 completion。 |
 | `SolveSubmission.done()` / `.wait()` / `.result()` | 观察 completion、生成 terminal state 并返回 `BatchedSolveResult`。 | `done()` 不释放 slot；`wait()`/`result()` 抛出 backend error 并释放 slot。 |
 | `batch_plan.clone_workspace()` | 创建具有独立 Krylov state 的等价 plan。 | 并发 submission 必须使用；每个 clone 拥有另一套完整 workspace，应在构造 pool 前检查 `clone_workspace_payload_bytes`。 |
-| `operator.statistics()` / `plan.statistics()` | 返回 provider/plan execution 与 workspace 诊断。 | 单系统 GPU plan 报告 chunk build/replay/direct/rebind/invalidation；Batched plan schema v3 区分 host asynchronous completion 与设备并行保证，并报告逻辑 workspace payload；diagnostic snapshot 不属于数值结果。 |
+| `operator.statistics()` / `plan.statistics()` | 返回 provider/plan execution 与 workspace 诊断。 | 单系统 GPU plan 报告 chunk build/replay/direct/rebind/invalidation；batch plan schema v4 还会报告 plan-owned recurrence Graph 的 build/replay/rebind/direct counter，并明确 A/M provider action 不属于该 replay 范围；同时区分 host asynchronous completion 与设备并行保证，并报告逻辑 workspace payload。该 diagnostic snapshot 不属于数值结果。 |
 
 迭代收敛条件为
 `||b - A x||_2 <= max(atol, rtol * ||b||_2)`。Taichi 不会自动推断

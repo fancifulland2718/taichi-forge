@@ -391,11 +391,23 @@ tail iteration。recurrence 与 vector-update kernel 会屏蔽 inactive 环境�
 provider 仍作用于完整扁平 batch；因此 convergence masking 不代表 provider apply 已做
 compaction。
 
+CUDA 与 Vulkan 会把稳定的 iteration recurrence 编译为 plan-owned Taichi Graph，并在
+后续 solve 中复用。CG 每轮提交一个 recurrence Graph；PCG 在 A 之后和 M 之后分别提交一个
+segment。operator 与 preconditioner 仍是 Graph 外部的 pinned provider action，因此 stored
+和 compiled-kernel generation 继续遵循原有 update/retirement 合同。上一轮 solve 完成后
+更换 `out` 只需 patch Graph binding。每个 workspace clone 拥有独立 replay plan，不会因
+共享另一 clone 的 Graph lock 而串行化。
+
 `statistics()` 会分别报告 executed system iteration、provider system iteration、masked
 provider system iteration、active efficiency、host check、transfer 和 persistent resource
 大小，使上述区别可观察。CG plan 拥有三个长度为 `B * N` 的 workspace vector，PCG 拥有
 四个；此外还保留逐环境 recurrence、tolerance 与 status state。调用方拥有的 RHS、
-solution、initial guess 和 provider resource 不计入这些 plan workspace 数字。
+solution、initial guess 和 provider resource 不计入这些 plan workspace 数字。batch plan
+统计使用 schema version 4，并报告 `recurrence_replay_builds`、
+`recurrence_replay_graph_builds`、`recurrence_replay_submissions`、
+`recurrence_replay_logical_kernels`、output `recurrence_replay_rebinds` 与 direct recurrence
+kernel submission；`recurrence_replay` record 会明确说明 A/M provider apply 不属于 Graph
+replay 范围。
 
 ### 异步 fixed-budget submission
 

@@ -446,13 +446,27 @@ terminated. Recurrence and vector-update kernels mask inactive environments,
 but the monolithic A/M provider still applies to the full flat batch. Provider
 apply compaction is therefore not implied by convergence masking.
 
+CUDA and Vulkan compile the stable iteration recurrence into plan-owned
+Taichi Graphs and reuse those graphs across solves. CG submits one recurrence
+Graph per iteration; PCG submits one segment after A and another after M. The
+operator and preconditioner remain pinned provider actions outside these
+graphs, so stored and compiled-kernel generations retain their normal update
+and retirement contracts. Replacing `out` patches the Graph binding after the
+previous solve completes. Each workspace clone owns an independent replay
+plan and therefore does not serialize through another clone's Graph lock.
+
 `statistics()` makes this distinction observable through executed system
 iterations, provider system iterations, masked provider system iterations,
 active efficiency, host checks, transfers, and persistent resource sizes. A CG
 plan owns three length-`B * N` workspace vectors; PCG owns four. It also owns
 per-environment recurrence, tolerance, and status state. Caller-owned RHS,
 solution, initial guess, and provider resources are excluded from these plan
-workspace counts.
+workspace counts. Batched-plan statistics use schema version 4 and report
+`recurrence_replay_builds`, `recurrence_replay_graph_builds`,
+`recurrence_replay_submissions`, `recurrence_replay_logical_kernels`, output
+`recurrence_replay_rebinds`, and direct recurrence-kernel submissions. The
+`recurrence_replay` record explicitly states that A/M provider applies are not
+part of the Graph replay scope.
 
 ### Asynchronous fixed-budget submission
 
