@@ -948,10 +948,14 @@ operator API 另见[实验性 LinearOperator 与 SolvePlan](linear_operator.zh.m
 | `ti.linalg.SparseSolver` | 直接 LLT/LDLT/LU 分解和求解。 | CPU mutable Eigen provider 与文档列出的 CUDA scalar-CSR 路径；Vulkan 不支持。 |
 | `ti.linalg.experimental.OperatorTraits(...)` / `.spd()` | 不通过 sampling 或 inference，显式声明数学性质。 | CG/PCG 要求可信的 self-adjoint 与 positive-definite trait。 |
 | `ti.linalg.experimental.LinearOperator.from_sparse_matrix(A, traits=...)` | 把 fixed CSR/BSR 绑定为 runtime-owned linear map。 | CPU `f32/f64`；CUDA/Vulkan `f32`；不复制、不 fallback。 |
-| `LinearOperator.from_kernel(...)` / `.from_graph(...)` | 绑定精确 f32 ndarray kernel ABI 或按 role 分类的 compiled Graph。 | CPU、CUDA、Vulkan；topology/numeric/workspace 为 operator-owned snapshot。 |
-| `operator.apply(x, out=None)` / `operator @ x` | 对一维 scalar Taichi ndarray 同步应用 operator。 | 所有受支持 provider；dtype/extent 必须精确匹配并属于当前 runtime。 |
+| `LinearOperator.from_kernel(..., adjoint=...)` / `.from_graph(..., adjoint=...)` | 绑定精确 f32 ndarray kernel ABI 或按 role 分类的 compiled Graph；整数 size 是方阵简写，tuple 表示 `(range, domain)`。 | CPU、CUDA、Vulkan；显式 adjoint；topology/numeric/workspace 为 operator-owned snapshot。 |
+| `operator.apply(x, out=None, *, alpha=1, beta=0, addend=None)` / `operator @ x` | 同步执行 `out = alpha * A(x) + beta * addend`。 | CPU 支持通用系数；CUDA/Vulkan 支持 overwrite；`beta=0` 不读取 addend；禁止 input/output alias。 |
 | `operator.scaled(...)`、`operator + other`、`.compose(...)`、`.adjoint()`、`block_diagonal(...)`、`identity(...)` | 构造最小线性算子代数。 | CPU composition；adjoint 需要显式 capability。 |
-| `ti.linalg.experimental.SolvePlan(operator, method=..., preconditioner=..., execution_policy=..., check_interval=...)` | 构造 persistent CG、PCG 或 CPU BiCGSTAB plan。 | PCG 可用内置 Jacobi/block-Jacobi 或可信 fixed-linear operator；CUDA/Vulkan 支持 K=4/8 的 `host_check_every_k` 与 absolute/relative tolerance。 |
+| `ti.linalg.experimental.qualify_operator(operator, reference=..., ...)` | 生成版本化、JSON 可序列化的 provider-neutral 协议证据。 | 记录 oracle/adjoint/generalized apply、同步计时、resource stamp 与 native counter；unsupported 不 fallback。 |
+| `summarize_operator_qualifications(reports)` | 从 detached report 生成确定性的 backend/provider 支持矩阵。 | schema-v1 JSON 字典；保留每项 check 的 passed/failed/unsupported 状态。 |
+| `ti.linalg.experimental.PreconditionerPlan(target, action, method=...).setup()` | 建立 fixed-linear 近似逆的 provenance/compatibility 生命周期。 | CPU/CUDA/Vulkan；target 更新默认 stale；`update()` 声明 rebuild，`update(accept_reuse=True)` 显式批准 lagged reuse。 |
+| `preconditioner.pin()` / `.apply(r, out=None)` / `.metadata` / `.statistics()` | pin 精确 target/action generation 并应用 native action。 | 无 Python hot-path callback；报告 build/accepted stamp 和 generation publish/retire/release。 |
+| `ti.linalg.experimental.SolvePlan(operator, method=..., preconditioner=..., execution_policy=..., check_interval=...)` | 构造 persistent CG、PCG 或 CPU BiCGSTAB plan。 | PCG 可用内置 Jacobi/block-Jacobi、可信 fixed-linear operator 或 `PreconditionerPlan`；CUDA/Vulkan 支持 K=4/8 的 `host_check_every_k` 与 absolute/relative tolerance。 |
 | `plan.solve(rhs, initial_guess=None, out=None)` | 返回 immutable `SolveResult`，包含 solution 与 terminal residual/status 字段。 | 一维 scalar Taichi ndarray；禁止 RHS/output alias 和 host staging。 |
 | `plan.execution_capabilities()` | 返回 backend/provider 执行策略矩阵与结构化 unsupported reason。 | 当前不支持 `device_convergent`；显式请求不会 fallback，也不会自动改变 policy。 |
 | `ti.linalg.experimental.BatchedSolvePlan(operator, batch_size, independent_systems=True, ...)` | 在连续扁平分区上构造同构、相互独立的 f32 CG/PCG plan。 | CPU/CUDA/Vulkan；逐系统 tolerance、status 与 iteration count；已验证 fixed stored 或 compiled-kernel A/M。 |

@@ -91,6 +91,25 @@ operator = ti.linalg.experimental.LinearOperator.from_kernel(
 )
 ```
 
+`size` may also be `(range_extent, domain_extent)`. A rectangular provider
+must register an independent adjoint kernel through `adjoint=` before
+`operator.adjoint()` is available:
+
+```python
+operator = ti.linalg.experimental.LinearOperator.from_kernel(
+    forward_kernel,
+    (rows, columns),
+    topology,
+    adjoint=adjoint_kernel,
+    numeric=values,
+)
+```
+
+The forward `active_size` is the range extent and the adjoint `active_size` is
+the domain extent. Put dimensions required by both actions in an explicit
+topology resource. A missing adjoint fails explicitly; the implementation does
+not use autodiff, host materialization, or a self-adjoint trait as a fallback.
+
 Without `numeric=`, the exact signature is `(active_size, operator_data, x,
 y)`. All data arguments are scalar ndarrays; topology and numeric inputs may
 have their own scalar dtypes but vectors are f32. The kernel must overwrite
@@ -116,12 +135,17 @@ operator = ti.linalg.experimental.LinearOperator.from_graph(
 )
 ```
 
-The provider is square and f32. It requires at least one topology ndarray and
-rejects SNode-dependent dispatches. Topology, numeric data, and workspace are
-copied into operator-owned resources. CPU lowers the Graph to an explicit
+The provider is f32. `size` may be an integer square shorthand or `(range,
+domain)`, and `adjoint=adjoint_graph` may register an independent adjoint Graph
+with the same resource-role schema. It requires at least one topology ndarray
+and rejects SNode-dependent dispatches. Topology, numeric data, and workspace
+are copied into operator-owned resources. CPU lowers the Graph to an explicit
 sequence; CUDA and Vulkan use the compiled-Graph execution contract. Backend
 capture/replay may use an ordinary Graph fallback when the documented Graph
-runtime rules require it, without changing the mathematical provider.
+runtime rules require it, without changing the mathematical provider. Vulkan
+Graph replay requires at least two dispatches. A one-dispatch Graph still
+executes correctly, while `operator.statistics()` reports
+`ordinary_graph_fallback`.
 
 ## Mathematical traits
 
@@ -152,6 +176,7 @@ traits they can prove; unsupported inferences remain unknown.
 ```python
 y = operator.apply(x)
 operator.apply(x, out=y)
+y = operator.apply(x, alpha=2.0, beta=-0.5, addend=z)
 y = operator @ x
 
 B = 2.0 * operator
@@ -162,7 +187,14 @@ F = ti.linalg.experimental.block_diagonal((operator, B))
 I = ti.linalg.experimental.identity(size, dtype=ti.f32)
 ```
 
-Input/output aliasing is rejected. `adjoint()` is available only when the
+The generalized form is `out = alpha * A(x) + beta * addend`. Input/output
+aliasing is always rejected. `addend` may alias `out` for in-place
+accumulation. When `beta == 0`, `addend` is neither validated nor read.
+Generalized coefficient lowering is currently available on CPU. CUDA and
+Vulkan accept overwrite apply (`alpha == 1`, `beta == 0`) and fail explicitly
+for other combinations without a host fallback.
+
+`adjoint()` is available only when the
 provider exposes explicit adjoint application; no self-adjointness assumption
 is used as an implementation fallback.
 
@@ -178,7 +210,8 @@ calls. Supported methods are:
 
 - `method="cg"`: identity-preconditioned conjugate gradient for SPD systems;
 - `method="pcg"`: PCG with `"jacobi"` on fixed CSR,
-  `"block_jacobi"` on fixed BSR, or a trusted SPD `LinearOperator`
+  `"block_jacobi"` on fixed BSR, or a trusted SPD `LinearOperator` or
+  `PreconditionerPlan`
   that applies a fixed-linear approximate inverse; and
 - `method="bicgstab"`: identity-preconditioned CPU BiCGSTAB for general square
   systems.
@@ -189,8 +222,9 @@ print(result.iterations, result.residual_norm, result.termination_reason)
 stats = plan.statistics()
 ```
 
-A fixed-linear preconditioner is passed as an operator rather than as an
-application callback:
+For the coefficient-invariant compatibility path, a fixed-linear
+preconditioner may be passed as an operator rather than as an application
+callback:
 
 ```python
 plan = ti.linalg.experimental.SolvePlan(
@@ -210,6 +244,56 @@ the operator execution plan. CUDA and Vulkan require both the system
 operator and preconditioner to be compiled-kernel providers. Their topology
 and numeric generations are pinned together for each solve; there is no
 host callback or backend fallback.
+
+## PreconditionerPlan lifecycle
+
+Use `PreconditionerPlan` when coefficients change or when provenance, explicit
+reuse, and generation telemetry are required:
+
+```python
+preconditioner = ti.linalg.experimental.PreconditionerPlan(
+    operator,
+    inverse_operator,
+    method="external_block_inverse",
+).setup()
+
+z = preconditioner.apply(r)
+pinned = preconditioner.pin()
+
+# Each provider publishes its next numeric generation first.
+operator.update_numeric(next_a, expected_topology_version=1,
+                        expected_numeric_version=3)
+inverse_operator.update_numeric(next_m, expected_topology_version=1,
+                                expected_numeric_version=7)
+preconditioner.update()  # next_m was rebuilt from the current operator
+
+pcg = ti.linalg.experimental.SolvePlan(
+    operator, method="pcg", preconditioner=preconditioner
+)
+```
+
+`built_from_operator_stamp` records the operator generation from which the
+action was actually built. `accepted_target_stamp` records the generation the
+action is currently approved to serve. A target update makes the plan stale by
+default. If lagged preconditioning is valid, call
+`preconditioner.update(accept_reuse=True)` while the action is unchanged. This
+updates only compatibility and preserves provenance. A changed action requires
+an ordinary `update()` rebuild attestation.
+
+`pin()` retains the exact target and action generations together. The returned
+`PreconditionerSession` can continue applying that old action after later
+generations are published. `metadata` exposes provenance and compatibility
+stamps. `statistics()` reports setup, rebuild, reuse, stale rejections, and
+approved-generation publish/retire/release counters. Setup and update execute
+at host boundaries; session apply and PCG iterations invoke native
+`OperatorAction` objects without Python callbacks.
+
+`fixed_linear` is the first fully supported behavior. `variable_linear` and
+`nonlinear` can be described and expose a structured unsupported reason, but
+cannot be set up or passed to `SolvePlan` until a qualified flexible consumer
+exists. Built-in Jacobi and block-Jacobi use the same native setup/update/pin
+lifecycle and remain selected with `preconditioner="jacobi"` or
+`"block_jacobi"`.
 
 `rhs`, `initial_guess`, and `out` must match the operator dtype and scalar
 extent and belong to the current runtime. If `out` is omitted, the plan creates
@@ -454,6 +538,10 @@ model that coupling explicitly.
 | Compiled Graph | `f32` | `f32` | `f32` |
 | Identity/composition | `f32`, `f64` | Unsupported | Unsupported |
 
+Kernel and Graph providers support rectangular shapes and explicit adjoints.
+Generalized `alpha/beta` apply is available on CPU; GPU currently supports
+overwrite apply only.
+
 ### Solvers
 
 | Method/provider | CPU | CUDA | Vulkan |
@@ -463,7 +551,7 @@ model that coupling explicitly.
 | CG, CPU composition | `f32/f64` | Unsupported | Unsupported |
 | PCG + Jacobi | Fixed CSR, `f32/f64` | Fixed CSR, `f32` | Fixed CSR, `f32` |
 | PCG + block-Jacobi | Fixed BSR, `f32/f64` | Fixed BSR, `f32` | Fixed BSR, `f32` |
-| PCG + fixed-linear operator | Supported providers, `f32/f64` | Compiled-kernel A/M, `f32` | Compiled-kernel A/M, `f32` |
+| PCG + fixed-linear operator/plan | Supported providers, `f32/f64` | Compiled-kernel A/M, `f32` | Compiled-kernel A/M, `f32` |
 | Independent batched CG/PCG | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` |
 | Batched fixed-budget submission | Unsupported | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` |
 | Device-convergent conditional execution | Unsupported | Unsupported | Unsupported |
@@ -510,11 +598,37 @@ schedule is attached to this experimental API.
 
 ## Qualification boundary
 
-The API is covered by backend correctness, lifecycle, trait, composition, and
-solver regression tests. Application production qualification remains
-workload-specific: validate operator semantics, conditioning, tolerances,
-preconditioner suitability, failure handling, memory budgets, and backend
-driver behavior on representative physical and non-physical systems.
+`qualify_operator()` generates versioned, JSON-serializable protocol evidence
+for any public `LinearOperator`:
+
+```python
+report = ti.linalg.experimental.qualify_operator(
+    operator,
+    reference=dense_reference,
+    samples=4,
+    warmup=2,
+    repetitions=10,
+    metadata={"case": "poisson_level_3"},
+)
+report.to_json()
+matrix = ti.linalg.experimental.summarize_operator_qualifications([report])
+```
+
+The report contains backend/build identity, provider, shape, capabilities,
+resource stamps, forward/adjoint oracle errors, linearity and dot-product
+identity, generalized-apply `beta=0` no-read status, synchronous boundary
+timing, and native counters. `summarize_operator_qualifications()` builds a
+deterministic support matrix from detached backend/provider reports. An
+unsupported GPU generalized coefficient is recorded as `unsupported`; it is
+neither reported as a pass nor executed by a host fallback. Timing describes
+the current machine and run and is not a cross-machine performance gate.
+
+The API is covered by backend correctness, lifecycle, trait, composition, 10k
+approved-generation churn, and solver regression tests. Application production
+qualification remains workload-specific: validate operator semantics,
+conditioning, tolerances, preconditioner suitability, failure handling, memory
+budgets, and backend driver behavior on representative physical and
+non-physical systems.
 
 See also [Sparse runtime and linear algebra](sparse_runtime_and_linear_algebra.en.md)
 and [Choosing sparse operators and solvers](physics_sparse_solver_selection.en.md).

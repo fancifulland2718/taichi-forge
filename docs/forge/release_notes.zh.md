@@ -71,12 +71,24 @@
   persistent plan 通过统一 `SolveResult` 返回 terminal state，并在文档支持矩阵内提供
   CPU/CUDA/Vulkan CG、fixed stored Jacobi/block-Jacobi PCG 和 CPU BiCGSTAB。CPU
   还支持最小 operator composition。
+- 扩展 compiled-kernel/Graph `LinearOperator`，支持 `(range, domain)` 矩形
+  shape、独立显式 adjoint、`A.adjoint().adjoint()` 和共享 immutable numeric
+  generation。`apply()` 增加 CPU 通用 `alpha/beta/addend` 合同与 `beta=0`
+  no-read 语义；GPU 不支持的系数组合明确失败。新增 provider-neutral
+  `qualify_operator()`，生成包含 oracle、adjoint、capability、计时和 native counter 的
+  版本化 JSON 证据。
 - 扩展 `SolvePlan(method="pcg")`，支持可信 fixed-linear `LinearOperator`
   preconditioner。CPU 接受受支持的 operator provider 组合；CUDA/Vulkan 接受成对的
   compiled-kernel A/M provider。CUDA 可把 CG recurrence scalar 常驻 device，并每 4
   或 8 iteration 检查收敛；Vulkan 支持相同 chunk size 与 relative tolerance，同时保留
   fixed-budget masked execution 作为兼容默认值。logical、executed、wasted iteration
   与 host check 会分别报告。
+- 增加公开 `PreconditionerPlan` 与 pinned `PreconditionerSession`。外部近似逆可显式执行
+  setup、rebuild update 或 lagged reuse，并分别记录 built-from provenance 与 accepted-target
+  compatibility；target 更新默认 stale。CPU/CUDA/Vulkan PCG 消费批准后的 immutable
+  generation，不在 iteration 热路径执行 Python callback。10k numeric-generation churn
+  验证 retired generation 有界释放；variable-linear/nonlinear behavior 在缺少 qualified
+  consumer 时返回明确 unsupported reason。
 - 增加 CPU、CUDA 与 Vulkan 上的同构独立批量 f32 CG/PCG。每个连续系统拥有独立
   tolerance、status、iteration 与 residual state；fixed stored 和 compiled-kernel A/M
   provider 已完成资格验证。CUDA/Vulkan fixed-budget plan 还提供 `submit()`、

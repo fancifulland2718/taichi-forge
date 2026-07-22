@@ -82,6 +82,14 @@ retroactively attributed to the 0.5.0 artifact:
   unified `SolveResult` terminal state and support CPU/CUDA/Vulkan CG, fixed
   stored Jacobi/block-Jacobi PCG, and CPU BiCGSTAB within the documented
   provider matrix. CPU also supports minimal operator composition.
+- Extended compiled-kernel and Graph `LinearOperator` providers with
+  `(range, domain)` rectangular shapes, independent explicit adjoints,
+  `A.adjoint().adjoint()`, and shared immutable numeric generations.
+  `apply()` adds the CPU generalized `alpha/beta/addend` contract with
+  `beta=0` no-read semantics; unsupported GPU coefficient combinations fail
+  explicitly. The provider-neutral `qualify_operator()` produces versioned
+  JSON evidence with oracle, adjoint, capability, timing, and native-counter
+  records.
 - Extended `SolvePlan(method="pcg")` with trusted fixed-linear
   `LinearOperator` preconditioners. CPU accepts supported operator provider
   combinations; CUDA and Vulkan accept paired compiled-kernel A/M providers.
@@ -90,6 +98,14 @@ retroactively attributed to the 0.5.0 artifact:
   tolerance while retaining fixed-budget masked execution as its compatible
   default. Logical, executed, and wasted iterations and host checks are
   reported separately.
+- Added public `PreconditionerPlan` and pinned `PreconditionerSession` types.
+  External approximate inverses support explicit setup, rebuild updates, and
+  lagged reuse while recording built-from provenance separately from
+  accepted-target compatibility. Target updates are stale by default.
+  CPU/CUDA/Vulkan PCG consumes approved immutable generations without a Python
+  callback in the iteration hot path. A 10k numeric-generation churn contract
+  verifies bounded retirement, while variable-linear and nonlinear behaviors
+  report an explicit unsupported reason until qualified consumers exist.
 - Added homogeneous independent batched f32 CG/PCG on CPU, CUDA, and Vulkan.
   Each contiguous system has independent tolerance, status, iteration, and
   residual state; fixed stored and compiled-kernel A/M providers are

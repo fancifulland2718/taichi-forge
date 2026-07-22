@@ -85,6 +85,23 @@ operator = ti.linalg.experimental.LinearOperator.from_kernel(
 )
 ```
 
+`size` 也可以写成 `(range_extent, domain_extent)`。矩形 provider 必须通过
+`adjoint=` 登记独立的伴随 kernel，才能使用 `operator.adjoint()`：
+
+```python
+operator = ti.linalg.experimental.LinearOperator.from_kernel(
+    forward_kernel,
+    (rows, columns),
+    topology,
+    adjoint=adjoint_kernel,
+    numeric=values,
+)
+```
+
+forward 的 `active_size` 是 range extent，adjoint 的 `active_size` 是 domain
+extent；两侧共同需要的尺寸必须存放在显式 topology resource 中。没有登记 adjoint
+时会明确失败，不使用 autodiff、host materialization 或 self-adjoint trait 猜测。
+
 未传入 `numeric=` 时，精确签名为 `(active_size, operator_data, x, y)`。所有 data
 参数都是 scalar ndarray；topology 与 numeric 可以有各自的 scalar dtype，vector 必须是
 f32。kernel 必须覆盖写入每个 output entry，且不能依赖 SNode tree。构造时编译一个
@@ -107,11 +124,15 @@ operator = ti.linalg.experimental.LinearOperator.from_graph(
 )
 ```
 
-该 provider 是 square f32 operator，至少需要一个 topology ndarray，并拒绝依赖 SNode
-的 dispatch。topology、numeric data 与 workspace 会复制到 operator-owned resource。
+该 provider 是 f32 operator；`size` 可为整数方阵简写或 `(range, domain)`，并可通过
+`adjoint=adjoint_graph` 登记具有相同 resource role schema 的独立伴随 Graph。它至少需要
+一个 topology ndarray，并拒绝依赖 SNode 的 dispatch。topology、numeric data 与
+workspace 会复制到 operator-owned resource。
 CPU 把 Graph lowering 成 explicit sequence；CUDA/Vulkan 使用 compiled-Graph execution
 合同。当已记录的 Graph runtime 规则要求时，backend capture/replay 可以使用 ordinary
-Graph fallback，但不会改变数学 provider。
+Graph fallback，但不会改变数学 provider。Vulkan Graph replay 要求至少两个 dispatch；
+单 dispatch Graph 仍正确执行，但 `operator.statistics()` 会将路径报告为
+`ordinary_graph_fallback`。
 
 ## 数学 trait
 
@@ -139,6 +160,7 @@ trait 是 operator 后续使用的每个 numeric generation 都必须满足的�
 ```python
 y = operator.apply(x)
 operator.apply(x, out=y)
+y = operator.apply(x, alpha=2.0, beta=-0.5, addend=z)
 y = operator @ x
 
 B = 2.0 * operator
@@ -149,7 +171,12 @@ F = ti.linalg.experimental.block_diagonal((operator, B))
 I = ti.linalg.experimental.identity(size, dtype=ti.f32)
 ```
 
-input/output alias 会被拒绝。只有 provider 提供显式 adjoint apply 时才能调用
+通用形式为 `out = alpha * A(x) + beta * addend`。input/output alias 始终被拒绝；
+`addend` 可以与 `out` 相同，以表达原地累加。当 `beta == 0` 时，`addend` 不会被验证或
+读取。通用系数 lowering 当前支持 CPU；CUDA/Vulkan 只接受 `alpha == 1`、`beta == 0`
+的 overwrite apply，其它组合明确失败且不经 host fallback。
+
+只有 provider 提供显式 adjoint apply 时才能调用
 `adjoint()`；实现不会把 self-adjoint trait 当作 fallback。
 
 scale、sum、composition、block diagonal 和 identity 当前在 CPU 上执行，GPU lowering
@@ -162,7 +189,7 @@ scale、sum、composition、block diagonal 和 identity 当前在 CPU 上执行�
 
 - `method="cg"`：面向 SPD 系统、使用 identity preconditioner 的 conjugate gradient；
 - `method="pcg"`：fixed CSR 上使用 `"jacobi"`、fixed BSR 上使用
-  `"block_jacobi"`，或使用一个可信 SPD `LinearOperator` 应用 fixed-linear
+  `"block_jacobi"`，或使用一个可信 SPD `LinearOperator`/`PreconditionerPlan` 应用 fixed-linear
   近似逆的 PCG；
 - `method="bicgstab"`：面向一般 square 系统、使用 identity preconditioner 的 CPU
   BiCGSTAB。
@@ -173,7 +200,8 @@ print(result.iterations, result.residual_norm, result.termination_reason)
 stats = plan.statistics()
 ```
 
-fixed-linear preconditioner 作为 operator 传入，而不是应用回调：
+对于系数不变的兼容路径，fixed-linear preconditioner 可以直接作为 operator 传入，而不是
+应用回调：
 
 ```python
 plan = ti.linalg.experimental.SolvePlan(
@@ -191,6 +219,49 @@ plan = ti.linalg.experimental.SolvePlan(
 execution plan 支持的 provider 组合；CUDA/Vulkan 要求系统 operator 与 preconditioner
 都是 compiled-kernel provider。每次 solve 会成对 pin 它们的 topology 与 numeric
 generation，不调用 host callback，也不执行 backend fallback。
+
+## PreconditionerPlan 生命周期
+
+需要更新系数、显式复用或审计来源时，应使用 `PreconditionerPlan`：
+
+```python
+preconditioner = ti.linalg.experimental.PreconditionerPlan(
+    operator,
+    inverse_operator,
+    method="external_block_inverse",
+).setup()
+
+z = preconditioner.apply(r)
+pinned = preconditioner.pin()
+
+# 应用先通过各自 provider 发布新的 numeric generation。
+operator.update_numeric(next_a, expected_topology_version=1,
+                        expected_numeric_version=3)
+inverse_operator.update_numeric(next_m, expected_topology_version=1,
+                                expected_numeric_version=7)
+preconditioner.update()  # 声明 next_m 由当前 operator generation 重建
+
+pcg = ti.linalg.experimental.SolvePlan(
+    operator, method="pcg", preconditioner=preconditioner
+)
+```
+
+`built_from_operator_stamp` 记录 action 实际由哪个 operator generation 构建；
+`accepted_target_stamp` 记录它当前被批准服务于哪个 generation。target 更新后 plan 默认
+stale。若算法允许 lagged preconditioning，可在 action 未改变时显式调用
+`preconditioner.update(accept_reuse=True)`；此操作只更新 accepted stamp，不改写来源。
+action 已改变时必须使用普通 `update()`。
+
+`pin()` 同时保留精确 target 与 action generation，返回的 `PreconditionerSession` 可在后续
+generation 发布后继续安全应用旧 action。`metadata` 暴露 provenance/compatibility stamp，
+`statistics()` 暴露 setup、rebuild、reuse、stale rejection 以及 approved generation 的
+publish/retire/release 计数。setup/update 在 host 边界执行；session apply 与 PCG iteration
+只调用 native `OperatorAction`，不执行 Python callback。
+
+首个完整行为是 `fixed_linear`。`variable_linear` 与 `nonlinear` 可被描述并返回结构化
+unsupported reason，但在有合格的 flexible solver consumer 前不能 setup 或交给
+`SolvePlan`。内置 Jacobi/block-Jacobi 使用同一 native setup/update/pin 生命周期；其
+provider 构造仍通过 `preconditioner="jacobi"` 或 `"block_jacobi"` 选择。
 
 `rhs`、`initial_guess` 和 `out` 必须与 operator 的 dtype、scalar extent 一致，并属于当前
 runtime。未提供 `out` 时会创建结果 ndarray；未提供 `initial_guess` 时结果初始化为零。
@@ -399,6 +470,9 @@ work，再把尚未完成取值的 ticket 明确标记为 stale。
 | Compiled Graph | `f32` | `f32` | `f32` |
 | Identity/composition | `f32`、`f64` | 不支持 | 不支持 |
 
+kernel/Graph provider 支持矩形 shape 和显式 adjoint。通用 `alpha/beta` apply 支持 CPU；
+GPU 当前只支持 overwrite apply。
+
 ### Solver
 
 | Method/provider | CPU | CUDA | Vulkan |
@@ -408,7 +482,7 @@ work，再把尚未完成取值的 ticket 明确标记为 stale。
 | CG，CPU composition | `f32/f64` | 不支持 | 不支持 |
 | PCG + Jacobi | fixed CSR，`f32/f64` | fixed CSR，`f32` | fixed CSR，`f32` |
 | PCG + block-Jacobi | fixed BSR，`f32/f64` | fixed BSR，`f32` | fixed BSR，`f32` |
-| PCG + fixed-linear operator | 受支持 provider，`f32/f64` | compiled-kernel A/M，`f32` | compiled-kernel A/M，`f32` |
+| PCG + fixed-linear operator/plan | 受支持 provider，`f32/f64` | compiled-kernel A/M，`f32` | compiled-kernel A/M，`f32` |
 | 独立批量 CG/PCG | fixed stored 或 compiled-kernel A/M，`f32` | fixed stored 或 compiled-kernel A/M，`f32` | fixed stored 或 compiled-kernel A/M，`f32` |
 | 批量 fixed-budget submission | 不支持 | fixed stored 或 compiled-kernel A/M，`f32` | fixed stored 或 compiled-kernel A/M，`f32` |
 | device-convergent 条件执行 | 不支持 | 不支持 | 不支持 |
@@ -450,7 +524,30 @@ trait。现有应用可以在具备这些合同前继续保留 legacy 路径；�
 
 ## 资格验证边界
 
-API 已覆盖 backend correctness、lifecycle、trait、composition 和 solver regression。
+`qualify_operator()` 可对任意公开 `LinearOperator` 生成版本化、JSON 可序列化的协议证据：
+
+```python
+report = ti.linalg.experimental.qualify_operator(
+    operator,
+    reference=dense_reference,
+    samples=4,
+    warmup=2,
+    repetitions=10,
+    metadata={"case": "poisson_level_3"},
+)
+report.to_json()
+matrix = ti.linalg.experimental.summarize_operator_qualifications([report])
+```
+
+报告包含 backend/build、provider、shape、capability、resource stamp、forward/adjoint oracle
+误差、线性与 dot-product identity、通用 apply 的 `beta=0` no-read 状态、同步边界计时和
+native counter。`summarize_operator_qualifications()` 可从多组 detached
+backend/provider report 自动生成确定性的支持矩阵。GPU 不支持的通用系数会记录为
+`unsupported`，不会伪装为通过或触发 host fallback。计时只描述本机本次运行；它不是
+跨机器性能门。
+
+API 已覆盖 backend correctness、lifecycle、trait、composition、10k approved-generation
+churn 和 solver regression。
 应用的生产资格验证仍由 workload 决定：应在具有代表性的物理与非物理系统上验证
 operator 语义、conditioning、tolerance、preconditioner 适用性、失败处理、内存预算和
 backend driver 行为。
