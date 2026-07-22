@@ -2304,6 +2304,289 @@ void ExperimentalLinearOperatorSession::mark_synchronized() {
   submitted_ = false;
 }
 
+ExperimentalPreconditionerSession::ExperimentalPreconditionerSession(
+    Program *program,
+    OperatorPlan *action_plan,
+    OperatorPinnedAction target_generation,
+    OperatorPinnedAction action_generation,
+    std::shared_ptr<std::atomic<std::uint64_t>> apply_counter)
+    : program_(program),
+      action_plan_(action_plan),
+      target_generation_(std::move(target_generation)),
+      action_generation_(std::move(action_generation)),
+      apply_counter_(std::move(apply_counter)) {
+  TI_ERROR_IF(!program_ || !action_plan_ || !target_generation_ ||
+                  !action_generation_ || !apply_counter_,
+              "Preconditioner session requires a live Program, plan, "
+              "target generation, and action generation.");
+}
+
+ExperimentalPreconditionerSession::~ExperimentalPreconditionerSession() =
+    default;
+
+void ExperimentalPreconditionerSession::apply(Program *program,
+                                              const Ndarray &input,
+                                              const Ndarray &output) {
+  TI_ERROR_IF(program != program_,
+              "Preconditioner session must use its construction Program.");
+  const auto &descriptor = action_plan_->descriptor();
+  (void)action_plan_->submit(
+      action_generation_,
+      {OperatorApplyMode::forward,
+       OperatorVectorView::from_ndarray(program_, input, descriptor.domain,
+                                        false),
+       nullptr,
+       OperatorVectorView::from_ndarray(program_, output, descriptor.range,
+                                        true)});
+  // Pinned hot-loop submissions deliberately use an externally managed
+  // completion boundary. This public convenience method is synchronous, so
+  // it owns that boundary explicitly instead of waiting on a ticket that has
+  // no per-submit backend completion object.
+  program_->synchronize();
+  apply_counter_->fetch_add(1, std::memory_order_relaxed);
+}
+
+OperatorResourceStamp ExperimentalPreconditionerSession::target_stamp()
+    const {
+  return target_generation_.resource_stamp();
+}
+
+OperatorResourceStamp ExperimentalPreconditionerSession::action_stamp()
+    const {
+  return action_generation_.resource_stamp();
+}
+
+ExperimentalPreconditionerPlanHandle::ExperimentalPreconditionerPlanHandle(
+    Program *program,
+    ExperimentalLinearOperatorHandle &target,
+    ExperimentalLinearOperatorHandle &action,
+    std::string method)
+    : program_(program),
+      target_descriptor_(target.descriptor()),
+      target_binding_(target.binding()),
+      action_plan_(
+          std::make_unique<OperatorPlan>(program, action.binding())),
+      approved_generations_(
+          std::make_unique<OperatorResourceGenerationPublisher>()),
+      method_(std::move(method)),
+      apply_counter_(
+          std::make_shared<std::atomic<std::uint64_t>>(0)) {
+  TI_ERROR_IF(!program_ || target.program() != program_ ||
+                  action.program() != program_,
+              "PreconditionerPlan target and action must belong to its "
+              "construction Program.");
+  validate_preconditioner_descriptor(target_descriptor_,
+                                     action_plan_->descriptor());
+  TI_ERROR_IF(method_.empty(),
+              "PreconditionerPlan method must be non-empty.");
+}
+
+ExperimentalPreconditionerPlanHandle::~ExperimentalPreconditionerPlanHandle() {
+  try {
+    if (approved_generations_) {
+      approved_generations_->retire_current();
+      approved_generations_.reset();
+    }
+    action_plan_.reset();
+  } catch (...) {
+  }
+}
+
+void ExperimentalPreconditionerPlanHandle::validate_program(
+    Program *program) const {
+  TI_ERROR_IF(program != program_,
+              "PreconditionerPlan must use its construction Program.");
+}
+
+void ExperimentalPreconditionerPlanHandle::setup(Program *program) {
+  validate_program(program);
+  std::lock_guard<std::mutex> lock(mutex_);
+  TI_ERROR_IF(is_setup_, "PreconditionerPlan setup may only run once.");
+  statistics_.setup_calls++;
+  auto target_generation = target_binding_.pin();
+  auto action_generation = action_plan_->pin();
+  publish_approved_generation(target_generation, action_generation);
+  built_from_operator_stamp_ = target_generation.resource_stamp();
+  accepted_target_stamp_ = built_from_operator_stamp_;
+  accepted_action_stamp_ = action_generation.resource_stamp();
+  is_setup_ = true;
+  statistics_.rebuild_attestations++;
+}
+
+void ExperimentalPreconditionerPlanHandle::update(Program *program,
+                                                  bool accept_reuse) {
+  validate_program(program);
+  std::lock_guard<std::mutex> lock(mutex_);
+  TI_ERROR_IF(!is_setup_,
+              "PreconditionerPlan must be setup before update.");
+  statistics_.update_calls++;
+  try {
+    auto target_generation = target_binding_.pin();
+    auto action_generation = action_plan_->pin();
+    const auto target_stamp = target_generation.resource_stamp();
+    const auto action_stamp = action_generation.resource_stamp();
+    const bool target_changed =
+        operator_resource_changes(accepted_target_stamp_, target_stamp) != 0;
+    const bool action_changed =
+        operator_resource_changes(accepted_action_stamp_, action_stamp) != 0;
+    if (target_changed) {
+      statistics_.target_generation_changes++;
+    }
+    if (action_changed) {
+      statistics_.action_generation_changes++;
+    }
+    if (!target_changed && !action_changed) {
+      statistics_.update_noops++;
+      return;
+    }
+    TI_ERROR_IF(
+        target_changed && !action_changed && !accept_reuse,
+        "PreconditionerPlan target changed while its action did not; publish "
+        "a rebuilt action or explicitly set accept_reuse=True.");
+    TI_ERROR_IF(
+        accept_reuse && action_changed,
+        "PreconditionerPlan accept_reuse=True requires the previously "
+        "approved action generation; use a rebuild update for a new action.");
+    if (accept_reuse) {
+      publish_approved_generation(target_generation, action_generation);
+      accepted_target_stamp_ = target_stamp;
+      statistics_.reuse_attestations++;
+    } else {
+      publish_approved_generation(target_generation, action_generation);
+      built_from_operator_stamp_ = target_stamp;
+      accepted_target_stamp_ = target_stamp;
+      accepted_action_stamp_ = action_stamp;
+      statistics_.rebuild_attestations++;
+    }
+    statistics_.update_successes++;
+  } catch (...) {
+    statistics_.update_failures++;
+    throw;
+  }
+}
+
+std::unique_ptr<ExperimentalPreconditionerSession>
+ExperimentalPreconditionerPlanHandle::pin_locked() {
+  TI_ERROR_IF(!is_setup_,
+              "PreconditionerPlan must be setup before pin/apply.");
+  auto target_generation = target_binding_.pin();
+  auto action_generation = action_plan_->pin();
+  const bool target_stale =
+      operator_resource_changes(accepted_target_stamp_,
+                                target_generation.resource_stamp()) != 0;
+  const bool action_stale =
+      operator_resource_changes(accepted_action_stamp_,
+                                action_generation.resource_stamp()) != 0;
+  if (target_stale || action_stale) {
+    statistics_.stale_rejections++;
+    TI_ERROR(
+        "PreconditionerPlan is stale: {}{} generation changed without an "
+        "explicit update.",
+        target_stale ? "target" : "",
+        target_stale && action_stale
+            ? " and action"
+            : (action_stale ? "action" : ""));
+  }
+  const auto target_stamp = target_generation.resource_stamp();
+  const auto action_stamp = action_generation.resource_stamp();
+  TI_ERROR_IF(
+      target_stamp.program_identity != action_stamp.program_identity ||
+          target_stamp.program_generation != action_stamp.program_generation,
+      "PreconditionerPlan target and action belong to different Program "
+      "generations.");
+  statistics_.pins++;
+  return std::make_unique<ExperimentalPreconditionerSession>(
+      program_, action_plan_.get(), std::move(target_generation),
+      std::move(action_generation), apply_counter_);
+}
+
+void ExperimentalPreconditionerPlanHandle::publish_approved_generation(
+    const OperatorPinnedAction &target_generation,
+    const OperatorPinnedAction &action_generation) {
+  const auto accepted_stamp = target_generation.resource_stamp();
+  auto action = OperatorAction(
+      action_generation.descriptor(),
+      action_generation.mathematical_traits(),
+      action_generation.capabilities(), "forge_preconditioner_plan_action",
+      [accepted_stamp] { return accepted_stamp; },
+      [target_generation, action_generation](
+          OperatorApplyMode mode, const OperatorVectorView &input,
+          const OperatorVectorView &output) {
+        (void)target_generation;
+        action_generation.apply_overwrite(mode, input, output);
+      });
+  approved_generations_->publish(std::move(action));
+}
+
+OperatorBinding ExperimentalPreconditionerPlanHandle::consumer_binding() {
+  auto metadata_action = OperatorAction(
+      action_plan_->descriptor(), action_plan_->mathematical_traits(),
+      action_plan_->capabilities(), "forge_preconditioner_plan_action",
+      [this] {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return is_setup_ ? accepted_target_stamp_
+                         : target_binding_.action().resource_stamp();
+      },
+      [this](OperatorApplyMode mode, const OperatorVectorView &input,
+             const OperatorVectorView &output) {
+        auto approved = approved_generations_->acquire();
+        approved.apply_overwrite(mode, input, output);
+      });
+  auto binding = OperatorBinding::from_generation_publisher(
+      std::move(metadata_action),
+      [this] { return approved_generations_->acquire(); });
+  return binding.with_execution_lowering(action_plan_->execution_kind());
+}
+
+std::unique_ptr<ExperimentalPreconditionerSession>
+ExperimentalPreconditionerPlanHandle::pin(Program *program) {
+  validate_program(program);
+  std::lock_guard<std::mutex> lock(mutex_);
+  return pin_locked();
+}
+
+bool ExperimentalPreconditionerPlanHandle::is_setup() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return is_setup_;
+}
+
+const std::string &ExperimentalPreconditionerPlanHandle::method() const {
+  return method_;
+}
+
+OperatorResourceStamp
+ExperimentalPreconditionerPlanHandle::built_from_operator_stamp() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return built_from_operator_stamp_;
+}
+
+OperatorResourceStamp
+ExperimentalPreconditionerPlanHandle::accepted_target_stamp() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return accepted_target_stamp_;
+}
+
+OperatorResourceStamp
+ExperimentalPreconditionerPlanHandle::accepted_action_stamp() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return accepted_action_stamp_;
+}
+
+ExperimentalPreconditionerPlanRuntimeStatistics
+ExperimentalPreconditionerPlanHandle::debug_runtime_statistics() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto result = statistics_;
+  result.apply_calls =
+      apply_counter_->load(std::memory_order_relaxed);
+  const auto generations = approved_generations_->debug_statistics();
+  result.approved_generations_published = generations.published;
+  result.approved_generations_retired = generations.retired;
+  result.approved_generations_released = generations.released;
+  result.approved_generation_active_leases = generations.active_leases;
+  result.has_current_approved_generation = generations.has_current;
+  return result;
+}
+
 OperatorBinding make_program_sparse_operator_binding(Program *program,
                                                       SparseMatrix &matrix) {
   TI_ERROR_IF(!program,
@@ -3588,6 +3871,24 @@ make_experimental_block_diagonal_operator_handle(
   }
   return std::make_unique<ExperimentalLinearOperatorHandle>(
       program, make_block_diagonal_operator_binding(std::move(bindings)));
+}
+
+std::unique_ptr<ExperimentalPreconditionerPlanHandle>
+make_experimental_preconditioner_plan_handle(
+    Program *program,
+    ExperimentalLinearOperatorHandle &target,
+    ExperimentalLinearOperatorHandle &action,
+    std::string method) {
+  return std::make_unique<ExperimentalPreconditionerPlanHandle>(
+      program, target, action, std::move(method));
+}
+
+std::unique_ptr<ExperimentalLinearOperatorHandle>
+make_experimental_preconditioner_action_handle(
+    Program *program,
+    ExperimentalPreconditionerPlanHandle &plan) {
+  return std::make_unique<ExperimentalLinearOperatorHandle>(
+      program, plan.consumer_binding());
 }
 
 }  // namespace taichi::lang

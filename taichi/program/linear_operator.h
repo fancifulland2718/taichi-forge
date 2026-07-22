@@ -1,9 +1,11 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -576,6 +578,109 @@ class ExperimentalLinearOperatorSession {
   bool submitted_{false};
 };
 
+struct ExperimentalPreconditionerPlanRuntimeStatistics {
+  std::uint64_t setup_calls{0};
+  std::uint64_t update_calls{0};
+  std::uint64_t update_successes{0};
+  std::uint64_t update_noops{0};
+  std::uint64_t update_failures{0};
+  std::uint64_t target_generation_changes{0};
+  std::uint64_t action_generation_changes{0};
+  std::uint64_t rebuild_attestations{0};
+  std::uint64_t reuse_attestations{0};
+  std::uint64_t pins{0};
+  std::uint64_t apply_calls{0};
+  std::uint64_t stale_rejections{0};
+  std::uint64_t approved_generations_published{0};
+  std::uint64_t approved_generations_retired{0};
+  std::uint64_t approved_generations_released{0};
+  std::uint64_t approved_generation_active_leases{0};
+  bool has_current_approved_generation{false};
+};
+
+// One immutable, explicitly approved target/action generation pair. The
+// target pin is retained even though only the approximate-inverse action is
+// submitted, preventing either side of the consumer scope from being retired
+// independently.
+class ExperimentalPreconditionerSession {
+ public:
+  ExperimentalPreconditionerSession(
+      Program *program,
+      OperatorPlan *action_plan,
+      OperatorPinnedAction target_generation,
+      OperatorPinnedAction action_generation,
+      std::shared_ptr<std::atomic<std::uint64_t>> apply_counter);
+  ExperimentalPreconditionerSession(
+      const ExperimentalPreconditionerSession &) = delete;
+  ExperimentalPreconditionerSession &operator=(
+      const ExperimentalPreconditionerSession &) = delete;
+  ~ExperimentalPreconditionerSession();
+
+  void apply(Program *program,
+             const Ndarray &input,
+             const Ndarray &output);
+  OperatorResourceStamp target_stamp() const;
+  OperatorResourceStamp action_stamp() const;
+
+ private:
+  Program *program_{nullptr};
+  OperatorPlan *action_plan_{nullptr};
+  OperatorPinnedAction target_generation_;
+  OperatorPinnedAction action_generation_;
+  std::shared_ptr<std::atomic<std::uint64_t>> apply_counter_;
+};
+
+// Public fixed-linear lifecycle state. External code updates the target and
+// action providers at a host boundary, then explicitly attests either a
+// rebuild or lagged reuse. apply()/pin() never invoke a Python callback.
+class ExperimentalPreconditionerPlanHandle {
+ public:
+  ExperimentalPreconditionerPlanHandle(
+      Program *program,
+      ExperimentalLinearOperatorHandle &target,
+      ExperimentalLinearOperatorHandle &action,
+      std::string method);
+  ExperimentalPreconditionerPlanHandle(
+      const ExperimentalPreconditionerPlanHandle &) = delete;
+  ExperimentalPreconditionerPlanHandle &operator=(
+      const ExperimentalPreconditionerPlanHandle &) = delete;
+  ~ExperimentalPreconditionerPlanHandle();
+
+  void setup(Program *program);
+  void update(Program *program, bool accept_reuse);
+  std::unique_ptr<ExperimentalPreconditionerSession> pin(Program *program);
+  bool is_setup() const;
+  const std::string &method() const;
+  OperatorResourceStamp built_from_operator_stamp() const;
+  OperatorResourceStamp accepted_target_stamp() const;
+  OperatorResourceStamp accepted_action_stamp() const;
+  OperatorBinding consumer_binding();
+  ExperimentalPreconditionerPlanRuntimeStatistics
+  debug_runtime_statistics() const;
+
+ private:
+  std::unique_ptr<ExperimentalPreconditionerSession> pin_locked();
+  void publish_approved_generation(
+      const OperatorPinnedAction &target_generation,
+      const OperatorPinnedAction &action_generation);
+  void validate_program(Program *program) const;
+
+  Program *program_{nullptr};
+  OperatorDescriptor target_descriptor_;
+  OperatorBinding target_binding_;
+  std::unique_ptr<OperatorPlan> action_plan_;
+  std::unique_ptr<OperatorResourceGenerationPublisher>
+      approved_generations_;
+  std::string method_;
+  bool is_setup_{false};
+  OperatorResourceStamp built_from_operator_stamp_;
+  OperatorResourceStamp accepted_target_stamp_;
+  OperatorResourceStamp accepted_action_stamp_;
+  ExperimentalPreconditionerPlanRuntimeStatistics statistics_;
+  std::shared_ptr<std::atomic<std::uint64_t>> apply_counter_;
+  mutable std::mutex mutex_;
+};
+
 enum class PreconditionerBehavior : std::uint8_t {
   fixed_linear,
   variable_linear,
@@ -758,5 +863,15 @@ make_experimental_composed_operator_handle(
 std::unique_ptr<ExperimentalLinearOperatorHandle>
 make_experimental_block_diagonal_operator_handle(
     const std::vector<ExperimentalLinearOperatorHandle *> &blocks);
+std::unique_ptr<ExperimentalPreconditionerPlanHandle>
+make_experimental_preconditioner_plan_handle(
+    Program *program,
+    ExperimentalLinearOperatorHandle &target,
+    ExperimentalLinearOperatorHandle &action,
+    std::string method);
+std::unique_ptr<ExperimentalLinearOperatorHandle>
+make_experimental_preconditioner_action_handle(
+    Program *program,
+    ExperimentalPreconditionerPlanHandle &plan);
 
 }  // namespace taichi::lang

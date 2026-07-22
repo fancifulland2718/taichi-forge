@@ -1325,12 +1325,235 @@ def _solver_execution_capabilities(program, provider_kind, *, batched):
     }
 
 
+class PreconditionerSession:
+    """Pinned immutable target/action generations for one consumer scope."""
+
+    def __init__(self, plan, native):
+        self._plan = plan
+        self._native = native
+        self._program = plan._program
+        self._metadata_snapshot = dict(native._metadata())
+        get_runtime().register_runtime_object(self)
+
+    def _ensure_valid(self):
+        if self._native is None or self._program is not _current_program():
+            raise TaichiRuntimeError(
+                "PreconditionerSession cannot be used after ti.reset()"
+            )
+
+    def _invalidate_runtime(self):
+        self._native = None
+        self._plan = None
+        self._program = None
+
+    @property
+    def metadata(self):
+        return _readonly_copy(self._metadata_snapshot)
+
+    def apply(self, residual, out=None):
+        """Applies the pinned approximate-inverse action synchronously."""
+        self._ensure_valid()
+        action = self._plan.action
+        residual = _require_current_scalar_ndarray(
+            residual,
+            "PreconditionerSession residual",
+            action.shape[1],
+            action.dtype,
+        )
+        if out is None:
+            out = ScalarNdarray(action.dtype, (action.shape[0],))
+        else:
+            out = _require_current_scalar_ndarray(
+                out,
+                "PreconditionerSession output",
+                action.shape[0],
+                action.dtype,
+            )
+        if out is residual:
+            raise TaichiRuntimeError(
+                "PreconditionerSession input/output may not alias"
+            )
+        self._native._apply(self._program, residual.arr, out.arr)
+        return out
+
+
+class PreconditionerPlan:
+    """Versions a target operator and one external approximate-inverse action.
+
+    The first qualified behavior is ``fixed_linear``. External code publishes
+    target/action numeric generations through their ordinary
+    :class:`LinearOperator` providers, then calls :meth:`update` to attest a
+    rebuild or an explicit lagged reuse. No Python callback runs in
+    :meth:`apply`, a pinned session, or a solver iteration.
+    """
+
+    _UNSUPPORTED_BEHAVIORS = {
+        "variable_linear": (
+            "variable_linear preconditioners have no qualified flexible "
+            "solver consumer"
+        ),
+        "nonlinear": (
+            "nonlinear preconditioners have no qualified solver consumer"
+        ),
+    }
+
+    def __init__(
+        self,
+        target,
+        action,
+        *,
+        method="external",
+        behavior="fixed_linear",
+    ):
+        if not isinstance(target, LinearOperator):
+            raise TypeError("target must be experimental.LinearOperator")
+        if not isinstance(action, LinearOperator):
+            raise TypeError("action must be experimental.LinearOperator")
+        target._ensure_valid()
+        action._ensure_valid()
+        if target._program is not action._program:
+            raise TaichiRuntimeError(
+                "PreconditionerPlan target and action must share a runtime"
+            )
+        expected_shape = (target.shape[1], target.shape[0])
+        if target.shape[0] != target.shape[1]:
+            raise TaichiRuntimeError(
+                "PreconditionerPlan currently requires a square target"
+            )
+        if action.shape != expected_shape or action.dtype != target.dtype:
+            raise TaichiRuntimeError(
+                "PreconditionerPlan action must map the target range back "
+                "to its domain with the same dtype"
+            )
+        if not isinstance(method, str) or not method.strip():
+            raise TaichiRuntimeError(
+                "PreconditionerPlan method must be a non-empty string"
+            )
+        if not isinstance(behavior, str):
+            raise TaichiRuntimeError(
+                "PreconditionerPlan behavior must be a string"
+            )
+        behavior = behavior.casefold()
+        if behavior not in ("fixed_linear", *self._UNSUPPORTED_BEHAVIORS):
+            raise TaichiRuntimeError(
+                "PreconditionerPlan behavior must be fixed_linear, "
+                "variable_linear, or nonlinear"
+            )
+        self.target = target
+        self.action = action
+        self.method = method.strip()
+        self.behavior = behavior
+        self._program = target._program
+        self._unsupported_reason = self._UNSUPPORTED_BEHAVIORS.get(behavior)
+        self._handle = None
+        self._consumer_action = None
+        if self._unsupported_reason is None:
+            self._handle = _ti_core._make_experimental_preconditioner_plan(
+                self._program,
+                target._handle,
+                action._handle,
+                self.method,
+            )
+        get_runtime().register_runtime_object(self)
+
+    def _ensure_valid(self, *, require_supported=True):
+        if self._program is not _current_program() or self.target is None:
+            raise TaichiRuntimeError(
+                "PreconditionerPlan cannot be used after ti.reset()"
+            )
+        self.target._ensure_valid()
+        self.action._ensure_valid()
+        if require_supported and self._handle is None:
+            raise TaichiRuntimeError(
+                "PreconditionerPlan behavior is unsupported: "
+                f"{self._unsupported_reason}"
+            )
+
+    def _invalidate_runtime(self):
+        self._consumer_action = None
+        self._handle = None
+        self.target = None
+        self.action = None
+        self._program = None
+
+    def _require_target(self, target):
+        self._ensure_valid()
+        if target is not self.target:
+            raise TaichiRuntimeError(
+                "PreconditionerPlan was built for a different target "
+                "LinearOperator"
+            )
+
+    @property
+    def metadata(self):
+        self._ensure_valid(require_supported=False)
+        if self._handle is None:
+            return _readonly_copy(
+                {
+                    "schema_version": 1,
+                    "method": self.method,
+                    "behavior": self.behavior,
+                    "supported": False,
+                    "unsupported_reason": self._unsupported_reason,
+                    "is_setup": False,
+                }
+            )
+        result = dict(self._handle._metadata())
+        result["target_provider"] = self.target.provider
+        result["action_provider"] = self.action.provider
+        return _readonly_copy(result)
+
+    def setup(self):
+        """Attests that the current action was built from the current target."""
+        self._ensure_valid()
+        self._handle._setup(self._program)
+        consumer_handle = _ti_core._make_experimental_preconditioner_action(
+            self._program, self._handle
+        )
+        self._consumer_action = LinearOperator._from_handle(
+            consumer_handle,
+            provider_kind=self.action._provider_kind,
+            retained=(self.target, self.action),
+        )
+        return self
+
+    def update(self, *, accept_reuse=False):
+        """Approves current generations as a rebuild or explicit reuse.
+
+        With the default ``accept_reuse=False``, a changed target requires a
+        changed action generation. ``accept_reuse=True`` approves the exact
+        previously accepted action for a newer target while preserving its
+        original ``built_from_operator_stamp`` provenance.
+        """
+        self._ensure_valid()
+        if not isinstance(accept_reuse, bool):
+            raise TaichiRuntimeError("accept_reuse must be bool")
+        self._handle._update(self._program, accept_reuse)
+        return self
+
+    def pin(self):
+        """Pins one approved target/action generation pair."""
+        self._ensure_valid()
+        return PreconditionerSession(
+            self, self._handle._pin(self._program)
+        )
+
+    def apply(self, residual, out=None):
+        """Pins the current approved pair and applies its action once."""
+        return self.pin().apply(residual, out=out)
+
+    def statistics(self):
+        self._ensure_valid()
+        return dict(self._handle._debug_runtime_stats())
+
+
 class SolvePlan:
     """Persistent CG, PCG, or BiCGSTAB execution plan.
 
     ``pcg`` accepts fixed stored CSR/BSR providers with explicit ``"jacobi"``
     or ``"block_jacobi"`` selection. It also accepts a trusted SPD
-    :class:`LinearOperator` as a fixed-linear preconditioner. GPU custom
+    :class:`LinearOperator` or an explicitly versioned
+    :class:`PreconditionerPlan` as a fixed-linear preconditioner. GPU custom
     preconditioners currently require compiled-kernel A and M providers.
     BiCGSTAB is CPU-only. Vulkan supports bounded masked execution or
     chunked host convergence checks, including relative tolerance.
@@ -1637,8 +1860,20 @@ class SolvePlan:
                 )
             raise TaichiRuntimeError("unsupported SolvePlan backend")
 
-        if isinstance(self.preconditioner, LinearOperator):
-            self._require_fixed_linear_preconditioner(self.preconditioner)
+        if isinstance(
+            self.preconditioner, (LinearOperator, PreconditionerPlan)
+        ):
+            if isinstance(self.preconditioner, PreconditionerPlan):
+                self.preconditioner._require_target(self.operator)
+                # Validate and pin the exact approved pair across native
+                # solver construction. The solver owns its own generation
+                # pins after the factory returns.
+                preconditioner_scope = self.preconditioner.pin()
+                preconditioner_action = self.preconditioner._consumer_action
+            else:
+                preconditioner_scope = None
+                preconditioner_action = self.preconditioner
+            self._require_fixed_linear_preconditioner(preconditioner_action)
             if arch in cpu_arches:
                 factory = (
                     _ti_core._make_cpu_experimental_linear_operator_pcg_solver
@@ -1646,14 +1881,14 @@ class SolvePlan:
                 return factory(
                     self._program,
                     self.operator._handle,
-                    self.preconditioner._handle,
+                    preconditioner_action._handle,
                     self.max_iterations,
                     self.atol,
                     self.rtol,
                 )
             if (
                 kind != "kernel"
-                or self.preconditioner._provider_kind != "kernel"
+                or preconditioner_action._provider_kind != "kernel"
             ):
                 raise TaichiRuntimeError(
                     "GPU fixed-linear PCG currently requires compiled-kernel "
@@ -1667,7 +1902,7 @@ class SolvePlan:
                     factory(
                         self._program,
                         core,
-                        self.preconditioner._handle,
+                        preconditioner_action._handle,
                         self.max_iterations,
                         self.atol,
                         False,
@@ -1682,7 +1917,7 @@ class SolvePlan:
                     factory(
                         self._program,
                         core,
-                        self.preconditioner._handle,
+                        preconditioner_action._handle,
                         self.max_iterations,
                         self.atol,
                         self.rtol,
@@ -1692,7 +1927,7 @@ class SolvePlan:
 
         if not isinstance(self.preconditioner, str):
             raise TaichiRuntimeError(
-                "PCG requires a fixed LinearOperator or "
+                "PCG requires a fixed LinearOperator, PreconditionerPlan, or "
                 "preconditioner='jacobi'/'block_jacobi'"
             )
         preconditioner = self.preconditioner.casefold()
@@ -1832,6 +2067,10 @@ class SolvePlan:
             identity = dict(preconditioner_stats["identity"])
             if identity["operator_stale"]:
                 self._native_preconditioner._refresh_numeric(self._program)
+        preconditioner_scope = None
+        if isinstance(self.preconditioner, PreconditionerPlan):
+            self.preconditioner._require_target(self.operator)
+            preconditioner_scope = self.preconditioner.pin()
         if self.method == "bicgstab":
             self._solver.solve_ndarray(self._program, out.arr, rhs.arr)
         else:
@@ -1845,6 +2084,10 @@ class SolvePlan:
             raise TaichiRuntimeError("SolvePlan cannot be used after ti.reset()")
         self.operator._ensure_valid()
         result = dict(self._solver._debug_runtime_stats())
+        if isinstance(self.preconditioner, PreconditionerPlan):
+            result["preconditioner_lifecycle"] = (
+                self.preconditioner.statistics()
+            )
         result["execution_capabilities"] = self.execution_capabilities()
         return result
 
@@ -1875,6 +2118,8 @@ __all__ = [
     "LinearOperator",
     "OperatorCapabilities",
     "OperatorTraits",
+    "PreconditionerPlan",
+    "PreconditionerSession",
     "SolvePlan",
     "SolveResult",
     "SolveSubmission",

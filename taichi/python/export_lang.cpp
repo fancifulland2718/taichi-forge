@@ -5110,6 +5110,97 @@ void export_lang(py::module &m) {
       .def("_mark_synchronized",
            &ExperimentalLinearOperatorSession::mark_synchronized);
 
+  py::class_<ExperimentalPreconditionerSession>(
+      m, "ExperimentalPreconditionerSession")
+      .def("_apply", &ExperimentalPreconditionerSession::apply,
+           py::keep_alive<1, 2>(), py::arg("program"), py::arg("input"),
+           py::arg("output"))
+      .def("_metadata", [](const ExperimentalPreconditionerSession &session) {
+        auto stamp_to_dict = [](const OperatorResourceStamp &stamp) {
+          py::dict result;
+          result["program_generation"] = stamp.program_generation;
+          result["schema_revision"] = stamp.schema_revision;
+          result["topology_revision"] = stamp.topology_revision;
+          result["numeric_revision"] = stamp.numeric_revision;
+          result["binding_revision"] = stamp.binding_revision;
+          return result;
+        };
+        py::dict result;
+        result["schema_version"] = 1;
+        result["target_stamp"] =
+            stamp_to_dict(session.target_stamp());
+        result["action_stamp"] =
+            stamp_to_dict(session.action_stamp());
+        return result;
+      });
+
+  py::class_<ExperimentalPreconditionerPlanHandle>(
+      m, "ExperimentalPreconditionerPlanHandle")
+      .def("_setup", &ExperimentalPreconditionerPlanHandle::setup,
+           py::keep_alive<1, 2>(), py::arg("program"))
+      .def("_update", &ExperimentalPreconditionerPlanHandle::update,
+           py::keep_alive<1, 2>(), py::arg("program"),
+           py::arg("accept_reuse"))
+      .def("_pin", &ExperimentalPreconditionerPlanHandle::pin,
+           py::keep_alive<0, 1>(), py::keep_alive<1, 2>(),
+           py::arg("program"))
+      .def("_metadata", [](const ExperimentalPreconditionerPlanHandle &plan) {
+        auto stamp_to_dict = [](const OperatorResourceStamp &stamp) {
+          py::dict result;
+          result["program_generation"] = stamp.program_generation;
+          result["schema_revision"] = stamp.schema_revision;
+          result["topology_revision"] = stamp.topology_revision;
+          result["numeric_revision"] = stamp.numeric_revision;
+          result["binding_revision"] = stamp.binding_revision;
+          return result;
+        };
+        py::dict result;
+        result["schema_version"] = 1;
+        result["method"] = plan.method();
+        result["behavior"] = "fixed_linear";
+        result["supported"] = true;
+        result["is_setup"] = plan.is_setup();
+        result["built_from_operator_stamp"] =
+            stamp_to_dict(plan.built_from_operator_stamp());
+        result["accepted_target_stamp"] =
+            stamp_to_dict(plan.accepted_target_stamp());
+        result["accepted_action_stamp"] =
+            stamp_to_dict(plan.accepted_action_stamp());
+        return result;
+      })
+      .def("_debug_runtime_stats",
+           [](const ExperimentalPreconditionerPlanHandle &plan) {
+             const auto stats = plan.debug_runtime_statistics();
+             py::dict result;
+             result["schema_version"] = 1;
+             result["setup_calls"] = stats.setup_calls;
+             result["update_calls"] = stats.update_calls;
+             result["update_successes"] = stats.update_successes;
+             result["update_noops"] = stats.update_noops;
+             result["update_failures"] = stats.update_failures;
+             result["target_generation_changes"] =
+                 stats.target_generation_changes;
+             result["action_generation_changes"] =
+                 stats.action_generation_changes;
+             result["rebuild_attestations"] =
+                 stats.rebuild_attestations;
+             result["reuse_attestations"] = stats.reuse_attestations;
+             result["pins"] = stats.pins;
+             result["apply_calls"] = stats.apply_calls;
+             result["stale_rejections"] = stats.stale_rejections;
+             result["approved_generations_published"] =
+                 stats.approved_generations_published;
+             result["approved_generations_retired"] =
+                 stats.approved_generations_retired;
+             result["approved_generations_released"] =
+                 stats.approved_generations_released;
+             result["approved_generation_active_leases"] =
+                 stats.approved_generation_active_leases;
+             result["has_current_approved_generation"] =
+                 stats.has_current_approved_generation;
+             return result;
+           });
+
   py::class_<ExperimentalLinearOperatorHandle>(
       m, "ExperimentalLinearOperatorHandle")
       .def("_apply", &ExperimentalLinearOperatorHandle::apply,
@@ -5289,6 +5380,15 @@ void export_lang(py::module &m) {
       py::arg("positive_definite") = -1,
       py::arg("positive_semidefinite") = -1,
       py::arg("singular") = -1);
+  m.def("_make_experimental_preconditioner_plan",
+        make_experimental_preconditioner_plan_handle,
+        py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+        py::keep_alive<0, 3>(), py::arg("program"), py::arg("target"),
+        py::arg("action"), py::arg("method"));
+  m.def("_make_experimental_preconditioner_action",
+        make_experimental_preconditioner_action_handle,
+        py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+        py::arg("program"), py::arg("plan"));
   m.def(
       "_make_experimental_compiled_kernel_operator",
       [](Program *program, Kernel &forward_kernel,
