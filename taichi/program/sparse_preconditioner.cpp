@@ -585,6 +585,7 @@ void SparseJacobiPreconditionerPlan::refresh_numeric(Program *program) {
       CUDADriver::get_instance().memcpy_device_to_host(
           values.data(), cuda_matrix->get_val_ptr(), value_bytes);
       refresh_device_to_host_bytes_ += value_bytes;
+      refresh_full_values_device_to_host_bytes_ += value_bytes;
 #else
       TI_NOT_IMPLEMENTED;
 #endif
@@ -600,6 +601,7 @@ void SparseJacobiPreconditionerPlan::refresh_numeric(Program *program) {
           const_cast<Ndarray *>(vulkan_matrix->get_values()), values.data(),
           value_bytes);
       refresh_device_to_host_bytes_ += value_bytes;
+      refresh_full_values_device_to_host_bytes_ += value_bytes;
 #else
       TI_NOT_IMPLEMENTED;
 #endif
@@ -620,6 +622,7 @@ void SparseJacobiPreconditionerPlan::refresh_numeric(Program *program) {
     try {
       replacement = program_->create_ndarray(
           PrimitiveType::f32, {rows_}, ExternalArrayLayout::kNull, false);
+      refresh_device_allocations_++;
       refresh_peak_temporary_device_bytes_ = std::max(
           refresh_peak_temporary_device_bytes_,
           static_cast<std::uint64_t>(inverse.size() * sizeof(float32)));
@@ -822,6 +825,7 @@ SparseJacobiPreconditionerPlan::debug_runtime_statistics() const {
   result.persistent_inverse_count = 1;
   result.persistent_inverse_reserved_bytes =
       static_cast<std::uint64_t>(rows_) * data_type_size(dtype_);
+  result.persistent_refresh_reserved_bytes = 0;
   result.construction_device_to_host_bytes =
       construction_device_to_host_bytes_;
   result.construction_host_to_device_bytes =
@@ -833,14 +837,23 @@ SparseJacobiPreconditionerPlan::debug_runtime_statistics() const {
   result.numeric_refresh_noops = numeric_refresh_noops_;
   result.numeric_refresh_failures = numeric_refresh_failures_;
   result.refresh_device_to_host_bytes = refresh_device_to_host_bytes_;
+  result.refresh_full_values_device_to_host_bytes =
+      refresh_full_values_device_to_host_bytes_;
+  result.refresh_status_device_to_host_bytes =
+      refresh_status_device_to_host_bytes_;
   result.refresh_host_to_device_bytes = refresh_host_to_device_bytes_;
+  result.refresh_device_to_device_bytes = refresh_device_to_device_bytes_;
   result.refresh_host_synchronizations =
       refresh_host_synchronizations_;
+  result.refresh_device_kernel_launches = refresh_device_kernel_launches_;
+  result.refresh_device_allocations = refresh_device_allocations_;
   result.refresh_peak_temporary_host_bytes =
       refresh_peak_temporary_host_bytes_;
   result.refresh_peak_temporary_device_bytes =
       refresh_peak_temporary_device_bytes_;
   result.numeric_refresh_supported = true;
+  result.device_native_numeric_refresh = false;
+  result.stable_refresh_binding = backend_family_ == "cpu";
   return result;
 }
 
@@ -1133,6 +1146,7 @@ void SparseBlockJacobiPreconditionerPlan::refresh_numeric(
                backend_family_);
     }
     refresh_device_to_host_bytes_ += value_bytes;
+    refresh_full_values_device_to_host_bytes_ += value_bytes;
 
     for (int block_row = 0; block_row < block_rows_; ++block_row) {
       const int32_t offset = diagonal_block_offsets_[block_row];
@@ -1154,6 +1168,7 @@ void SparseBlockJacobiPreconditionerPlan::refresh_numeric(
           PrimitiveType::f32,
           {static_cast<int>(inverse_blocks.size())},
           ExternalArrayLayout::kNull, false);
+      refresh_device_allocations_++;
       refresh_peak_temporary_device_bytes_ = std::max(
           refresh_peak_temporary_device_bytes_,
           static_cast<std::uint64_t>(inverse_bytes));
@@ -1356,6 +1371,7 @@ SparseBlockJacobiPreconditionerPlan::debug_runtime_statistics() const {
   result.persistent_inverse_reserved_bytes =
       static_cast<std::uint64_t>(block_rows_) * block_size_ * block_size_ *
       data_type_size(dtype_);
+  result.persistent_refresh_reserved_bytes = 0;
   result.construction_device_to_host_bytes =
       construction_device_to_host_bytes_;
   result.construction_host_to_device_bytes =
@@ -1367,14 +1383,23 @@ SparseBlockJacobiPreconditionerPlan::debug_runtime_statistics() const {
   result.numeric_refresh_noops = numeric_refresh_noops_;
   result.numeric_refresh_failures = numeric_refresh_failures_;
   result.refresh_device_to_host_bytes = refresh_device_to_host_bytes_;
+  result.refresh_full_values_device_to_host_bytes =
+      refresh_full_values_device_to_host_bytes_;
+  result.refresh_status_device_to_host_bytes =
+      refresh_status_device_to_host_bytes_;
   result.refresh_host_to_device_bytes = refresh_host_to_device_bytes_;
+  result.refresh_device_to_device_bytes = refresh_device_to_device_bytes_;
   result.refresh_host_synchronizations =
       refresh_host_synchronizations_;
+  result.refresh_device_kernel_launches = refresh_device_kernel_launches_;
+  result.refresh_device_allocations = refresh_device_allocations_;
   result.refresh_peak_temporary_host_bytes =
       refresh_peak_temporary_host_bytes_;
   result.refresh_peak_temporary_device_bytes =
       refresh_peak_temporary_device_bytes_;
   result.numeric_refresh_supported = true;
+  result.device_native_numeric_refresh = false;
+  result.stable_refresh_binding = backend_family_ == "cpu";
   return result;
 }
 

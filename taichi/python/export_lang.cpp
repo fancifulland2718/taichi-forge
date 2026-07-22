@@ -5047,6 +5047,8 @@ void export_lang(py::module &m) {
             stats.persistent_inverse_count;
         resources["persistent_inverse_reserved_bytes"] =
             stats.persistent_inverse_reserved_bytes;
+        resources["persistent_refresh_reserved_bytes"] =
+            stats.persistent_refresh_reserved_bytes;
         resources["refresh_peak_temporary_host_bytes"] =
             stats.refresh_peak_temporary_host_bytes;
         resources["refresh_peak_temporary_device_bytes"] =
@@ -5071,10 +5073,20 @@ void export_lang(py::module &m) {
             stats.construction_host_synchronizations;
         transfers["refresh_device_to_host_bytes"] =
             stats.refresh_device_to_host_bytes;
+        transfers["refresh_full_values_device_to_host_bytes"] =
+            stats.refresh_full_values_device_to_host_bytes;
+        transfers["refresh_status_device_to_host_bytes"] =
+            stats.refresh_status_device_to_host_bytes;
         transfers["refresh_host_to_device_bytes"] =
             stats.refresh_host_to_device_bytes;
+        transfers["refresh_device_to_device_bytes"] =
+            stats.refresh_device_to_device_bytes;
         transfers["refresh_host_synchronizations"] =
             stats.refresh_host_synchronizations;
+        transfers["refresh_device_kernel_launches"] =
+            stats.refresh_device_kernel_launches;
+        transfers["refresh_device_allocations"] =
+            stats.refresh_device_allocations;
         transfers["apply_host_transfer_bytes"] = 0;
 
         py::dict contract;
@@ -5084,6 +5096,10 @@ void export_lang(py::module &m) {
             stats.in_place_apply_supported;
         contract["numeric_refresh_supported"] =
             stats.numeric_refresh_supported;
+        contract["device_native_numeric_refresh"] =
+            stats.device_native_numeric_refresh;
+        contract["stable_refresh_binding"] =
+            stats.stable_refresh_binding;
         contract["numeric_update_requires_refresh"] =
             stats.numeric_refresh_supported;
         contract["numeric_update_requires_rebuild"] =
@@ -5092,7 +5108,7 @@ void export_lang(py::module &m) {
         contract["public_solver_integration"] = false;
 
         py::dict result;
-        result["schema_version"] = 2;
+        result["schema_version"] = 3;
         result["identity"] = std::move(identity);
         result["operations"] = std::move(operations);
         result["resources"] = std::move(resources);

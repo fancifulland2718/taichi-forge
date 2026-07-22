@@ -41,7 +41,7 @@ def test_fixed_csr_jacobi_plan_apply_reuse_and_stale_version():
     np.testing.assert_allclose(rhs.to_numpy(), rhs_host / diagonal)
 
     stats = plan._debug_runtime_stats()
-    assert stats["schema_version"] == 2
+    assert stats["schema_version"] == 3
     assert stats["identity"]["method"] == "jacobi"
     assert stats["identity"]["dtype"] == "f32"
     assert stats["identity"]["rows"] == n
@@ -52,6 +52,10 @@ def test_fixed_csr_jacobi_plan_apply_reuse_and_stale_version():
     assert stats["transfers"]["apply_host_transfer_bytes"] == 0
     assert stats["contract"]["in_place_apply_supported"]
     assert stats["contract"]["numeric_refresh_supported"]
+    assert not stats["contract"]["device_native_numeric_refresh"]
+    assert stats["contract"]["stable_refresh_binding"] == (
+        stats["identity"]["backend_family"] == "cpu"
+    )
     assert stats["contract"]["numeric_update_requires_refresh"]
     assert not stats["contract"]["numeric_update_requires_rebuild"]
     assert stats["contract"]["pattern_update_requires_rebuild"]
@@ -102,7 +106,17 @@ def test_fixed_csr_jacobi_plan_apply_reuse_and_stale_version():
             == 0
         )
         assert refreshed["transfers"]["refresh_device_to_host_bytes"] == 0
+        assert (
+            refreshed["transfers"][
+                "refresh_full_values_device_to_host_bytes"
+            ]
+            == 0
+        )
+        assert refreshed["transfers"]["refresh_status_device_to_host_bytes"] == 0
         assert refreshed["transfers"]["refresh_host_to_device_bytes"] == 0
+        assert refreshed["transfers"]["refresh_device_to_device_bytes"] == 0
+        assert refreshed["transfers"]["refresh_device_kernel_launches"] == 0
+        assert refreshed["transfers"]["refresh_device_allocations"] == 0
         assert refreshed["transfers"]["refresh_host_synchronizations"] == 0
     else:
         assert (
@@ -110,9 +124,19 @@ def test_fixed_csr_jacobi_plan_apply_reuse_and_stale_version():
             == n * 4
         )
         assert (
+            refreshed["transfers"][
+                "refresh_full_values_device_to_host_bytes"
+            ]
+            == n * 4
+        )
+        assert refreshed["transfers"]["refresh_status_device_to_host_bytes"] == 0
+        assert (
             refreshed["transfers"]["refresh_host_to_device_bytes"]
             == n * 4
         )
+        assert refreshed["transfers"]["refresh_device_to_device_bytes"] == 0
+        assert refreshed["transfers"]["refresh_device_kernel_launches"] == 0
+        assert refreshed["transfers"]["refresh_device_allocations"] == 1
         assert refreshed["transfers"]["refresh_host_synchronizations"] == (
             1 if backend == "vulkan" else 0
         )
