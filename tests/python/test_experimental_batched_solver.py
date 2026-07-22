@@ -1,3 +1,6 @@
+import threading
+import weakref
+
 import numpy as np
 import pytest
 
@@ -26,6 +29,55 @@ def _fixed_diagonal(values):
         size, size, row_offsets, column_indices
     )
     return pattern.matrix(numeric)
+
+
+def test_solve_submission_releases_retained_owner_after_wait():
+    experimental = ti.linalg.experimental
+
+    class FakeCompletion:
+        backend = 'cuda'
+        sequence = 7
+
+        def __init__(self):
+            self.has_backend_work = True
+
+        def wait(self):
+            self.has_backend_work = False
+
+    class FakeRuntime:
+        def __init__(self):
+            self.released = []
+
+        def release_runtime_submission_owner(self, completion):
+            self.released.append(completion)
+
+    plan = object.__new__(experimental.BatchedSolvePlan)
+    plan._lifecycle_lock = threading.Lock()
+    plan._completed_submissions = 0
+    plan._host_synchronizations = 0
+    plan._mark_sessions_synchronized = lambda operator, preconditioner: None
+    plan._snapshot_result = lambda solution, iterations: 'snapshot'
+
+    completion = FakeCompletion()
+    runtime = FakeRuntime()
+    submission = experimental.SolveSubmission(
+        plan,
+        completion,
+        runtime,
+        None,
+        object(),
+        object(),
+        None,
+        4,
+    )
+    plan._pending_submission = weakref.ref(submission)
+
+    submission.wait()
+
+    assert submission.result() == 'snapshot'
+    assert runtime.released == [completion]
+    assert plan._completed_submissions == 1
+    assert plan._pending_submission is None
 
 
 @test_utils.test(

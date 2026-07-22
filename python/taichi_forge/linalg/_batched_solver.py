@@ -914,6 +914,7 @@ class BatchedSolvePlan:
                 raise TaichiRuntimeError(
                     "SolveSubmission no longer owns this plan's workspace slot"
                 )
+            completion_observed = False
             try:
                 if submission._admission is None:
                     submission._completion.wait()
@@ -921,6 +922,7 @@ class BatchedSolvePlan:
                     submission._admission._completion_wait(
                         submission._completion
                     )
+                completion_observed = True
                 self._host_synchronizations += 1
                 self._mark_sessions_synchronized(
                     submission._operator_session,
@@ -934,7 +936,11 @@ class BatchedSolvePlan:
                 submission._failure = exc
                 raise
             finally:
-                if submission._completion.has_backend_work:
+                # has_backend_work becomes false as soon as wait succeeds, so
+                # it cannot tell whether submit retained a Python owner.
+                # Release is idempotent; perform it after every successfully
+                # observed completion, even if terminal snapshotting fails.
+                if completion_observed:
                     submission._runtime.release_runtime_submission_owner(
                         submission._completion
                     )
