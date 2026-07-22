@@ -528,6 +528,12 @@ class ExperimentalLinearOperatorHandle {
   void apply(Program *program,
              const Ndarray &input,
              const Ndarray &output);
+  void apply_generalized(Program *program,
+                         const Ndarray &input,
+                         const Ndarray *addend,
+                         const Ndarray &output,
+                         double alpha,
+                         double beta);
   void update_numeric(Program *program,
                       const NumericUpdateArguments &arguments,
                       std::uint64_t expected_topology_version,

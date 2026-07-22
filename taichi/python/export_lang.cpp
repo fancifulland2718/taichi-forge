@@ -5116,6 +5116,24 @@ void export_lang(py::module &m) {
            py::keep_alive<1, 2>(), py::arg("program"),
            py::arg("input"), py::arg("output"))
       .def(
+          "_apply_generalized",
+          [](ExperimentalLinearOperatorHandle &handle, Program *program,
+             const Ndarray &input, const py::object &addend,
+             const Ndarray &output, double alpha, double beta) {
+            const Ndarray *native_addend = nullptr;
+            if (beta != 0.0) {
+              TI_ERROR_IF(addend.is_none(),
+                          "LinearOperator generalized apply with nonzero "
+                          "beta requires an addend.");
+              native_addend = &py::cast<const Ndarray &>(addend);
+            }
+            handle.apply_generalized(program, input, native_addend, output,
+                                     alpha, beta);
+          },
+          py::keep_alive<1, 2>(), py::arg("program"), py::arg("input"),
+          py::arg("addend"), py::arg("output"), py::arg("alpha"),
+          py::arg("beta"))
+      .def(
           "_update_numeric",
           [](ExperimentalLinearOperatorHandle &handle, Program *program,
              const py::dict &arguments,

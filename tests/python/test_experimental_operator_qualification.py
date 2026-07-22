@@ -37,6 +37,7 @@ def test_operator_qualification_report_is_versioned_and_detached():
     assert record["operator"]["capabilities"]["adjoint_apply"]
     statuses = {check["name"]: check["status"] for check in record["checks"]}
     assert statuses["linearity"] == "passed"
+    assert statuses["generalized_apply"] == "passed"
     assert statuses["forward_reference"] == "passed"
     assert statuses["adjoint_dot_product"] == "passed"
     assert statuses["adjoint_reference"] == "passed"

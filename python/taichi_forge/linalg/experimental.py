@@ -583,9 +583,27 @@ class LinearOperator:
     def traits(self):
         return _readonly_copy(self._metadata_snapshot["traits"])
 
-    def apply(self, input, out=None):
-        """Applies the operator and synchronously returns a scalar ndarray."""
+    def apply(self, input, out=None, *, alpha=1.0, beta=0.0, addend=None):
+        """Synchronously computes ``alpha * self(input) + beta * addend``.
+
+        ``input`` and ``out`` may not alias. ``addend`` may alias ``out`` so
+        callers can express in-place accumulation. When ``beta`` is zero,
+        ``addend`` is neither validated nor read. Generalized coefficients are
+        currently lowered on CPU; GPU providers fail closed unless
+        ``alpha == 1`` and ``beta == 0``.
+        """
         self._ensure_valid()
+        try:
+            alpha = float(alpha)
+            beta = float(beta)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise TaichiRuntimeError(
+                "LinearOperator apply coefficients must be finite"
+            ) from exc
+        if not math.isfinite(alpha) or not math.isfinite(beta):
+            raise TaichiRuntimeError(
+                "LinearOperator apply coefficients must be finite"
+            )
         input = _require_current_scalar_ndarray(
             input, "LinearOperator input", self.shape[1], self.dtype
         )
@@ -599,7 +617,30 @@ class LinearOperator:
             raise TaichiRuntimeError(
                 "LinearOperator.apply does not permit input/output aliasing"
             )
-        self._handle._apply(self._program, input.arr, out.arr)
+        if beta != 0.0:
+            if addend is None:
+                raise TaichiRuntimeError(
+                    "LinearOperator.apply with nonzero beta requires addend"
+                )
+            addend = _require_current_scalar_ndarray(
+                addend,
+                "LinearOperator addend",
+                self.shape[0],
+                self.dtype,
+            )
+        else:
+            addend = None
+        if alpha == 1.0 and beta == 0.0:
+            self._handle._apply(self._program, input.arr, out.arr)
+        else:
+            self._handle._apply_generalized(
+                self._program,
+                input.arr,
+                None if addend is None else addend.arr,
+                out.arr,
+                alpha,
+                beta,
+            )
         return out
 
     def __matmul__(self, input):
@@ -937,6 +978,72 @@ def qualify_operator(
             {"nonfinite_values": 0},
         )
     )
+
+    baseline_output = timing_output.to_numpy()
+    generalized_alpha = numpy_dtype(-0.75)
+    generalized_beta = numpy_dtype(0.5)
+    poison = np.full(rows, np.nan, dtype=numpy_dtype)
+    finite_addend = rng.standard_normal(rows).astype(numpy_dtype)
+    try:
+        no_read_output = operator.apply(
+            timing_input,
+            alpha=generalized_alpha,
+            beta=0.0,
+            addend=_qualification_ndarray(poison, operator.dtype),
+        ).to_numpy()
+        accumulated_output = operator.apply(
+            timing_input,
+            alpha=generalized_alpha,
+            beta=generalized_beta,
+            addend=_qualification_ndarray(finite_addend, operator.dtype),
+        ).to_numpy()
+        no_read_error = _qualification_error(
+            no_read_output, generalized_alpha * baseline_output
+        )
+        accumulation_error = _qualification_error(
+            accumulated_output,
+            generalized_alpha * baseline_output
+            + generalized_beta * finite_addend,
+        )
+        absolute = max(no_read_error[0], accumulation_error[0])
+        relative = max(no_read_error[1], accumulation_error[1])
+        checks.append(
+            _qualification_check(
+                "generalized_apply",
+                absolute <= atol or relative <= rtol,
+                {
+                    "max_absolute_error": absolute,
+                    "max_relative_error": relative,
+                    "beta_zero_output_finite": bool(
+                        np.all(np.isfinite(no_read_output))
+                    ),
+                },
+                {"atol": atol, "rtol": rtol},
+                "beta=0 poison-addend no-read and finite accumulation",
+            )
+        )
+    except RuntimeError as exc:
+        details = str(exc)
+        if "Generalized operator lowering is unavailable" in details:
+            checks.append(
+                {
+                    "name": "generalized_apply",
+                    "status": "unsupported",
+                    "metrics": {},
+                    "tolerance": {"atol": atol, "rtol": rtol},
+                    "details": details,
+                }
+            )
+        else:
+            checks.append(
+                {
+                    "name": "generalized_apply",
+                    "status": "failed",
+                    "metrics": {},
+                    "tolerance": {"atol": atol, "rtol": rtol},
+                    "details": details,
+                }
+            )
 
     maxima = {
         "linearity": [0.0, 0.0],

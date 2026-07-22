@@ -2203,16 +2203,38 @@ ExperimentalLinearOperatorHandle::begin_session() {
 void ExperimentalLinearOperatorHandle::apply(Program *program,
                                              const Ndarray &input,
                                              const Ndarray &output) {
+  apply_generalized(program, input, nullptr, output, 1.0, 0.0);
+}
+
+void ExperimentalLinearOperatorHandle::apply_generalized(
+    Program *program,
+    const Ndarray &input,
+    const Ndarray *addend,
+    const Ndarray &output,
+    double alpha,
+    double beta) {
   TI_ERROR_IF(program != program_,
               "LinearOperator apply must use its construction Program.");
   const auto &descriptor = plan_->descriptor();
+  OperatorVectorView addend_view;
+  const OperatorVectorView *addend_view_ptr = nullptr;
+  if (beta != 0.0) {
+    TI_ERROR_IF(!addend,
+                "LinearOperator generalized apply with nonzero beta "
+                "requires an addend.");
+    addend_view = OperatorVectorView::from_ndarray(
+        program_, *addend, descriptor.range, false);
+    addend_view_ptr = &addend_view;
+  }
   auto submission = plan_->submit(
       {OperatorApplyMode::forward,
        OperatorVectorView::from_ndarray(program_, input,
                                         descriptor.domain, false),
-       nullptr,
+       addend_view_ptr,
        OperatorVectorView::from_ndarray(program_, output,
-                                        descriptor.range, true)});
+                                        descriptor.range, true),
+       alpha,
+       beta});
   submission.wait();
 }
 
