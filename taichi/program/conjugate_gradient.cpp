@@ -1792,7 +1792,7 @@ void validate_fixed_linear_operator_preconditioner(
                   !traits.positive_definite.known() ||
                   !traits.positive_definite.value ||
                   (traits.singular.known() && traits.singular.value),
-              "Fixed-linear PCG requires the preconditioner operator to "
+              "A fixed-linear Krylov preconditioner must "
               "have trusted self_adjoint=True, positive_definite=True, "
               "and non-singular traits.");
 }
@@ -1893,6 +1893,41 @@ void append_preconditioner_plan_statistics(
 }
 
 }  // namespace
+
+std::unique_ptr<PreconditionerPlan> make_solver_preconditioner_plan(
+    Program *program,
+    OperatorPlan &target_plan,
+    SparseMatrix &matrix,
+    SparseJacobiPreconditionerPlan &preconditioner,
+    std::string method) {
+  std::string provider =
+      arch_name(program->compile_config().arch) + "_" + method;
+  return make_fixed_preconditioner_plan(
+      program, target_plan, matrix, preconditioner, std::move(provider),
+      std::move(method));
+}
+
+std::unique_ptr<PreconditionerPlan> make_solver_preconditioner_plan(
+    Program *program,
+    OperatorPlan &target_plan,
+    SparseMatrix &matrix,
+    SparseBlockJacobiPreconditionerPlan &preconditioner,
+    std::string method) {
+  std::string provider =
+      arch_name(program->compile_config().arch) + "_" + method;
+  return make_fixed_preconditioner_plan(
+      program, target_plan, matrix, preconditioner, std::move(provider),
+      std::move(method));
+}
+
+std::unique_ptr<PreconditionerPlan> make_solver_preconditioner_plan(
+    Program *program,
+    OperatorPlan &target_plan,
+    ExperimentalLinearOperatorHandle &preconditioner,
+    std::string method) {
+  return make_fixed_preconditioner_plan(program, target_plan,
+                                        preconditioner, std::move(method));
+}
 
 std::unique_ptr<CpuSparseCGPlan::PreconditionerBinding>
 CpuSparseCGPlan::bind_preconditioner(

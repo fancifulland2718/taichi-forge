@@ -682,6 +682,24 @@ make_cuda_experimental_linear_operator_pcg_solver(
     bool verbose,
     float relative_tolerance = 0.0f);
 
+std::unique_ptr<PreconditionerPlan> make_solver_preconditioner_plan(
+    Program *program,
+    OperatorPlan &target_plan,
+    SparseMatrix &matrix,
+    SparseJacobiPreconditionerPlan &preconditioner,
+    std::string method);
+std::unique_ptr<PreconditionerPlan> make_solver_preconditioner_plan(
+    Program *program,
+    OperatorPlan &target_plan,
+    SparseMatrix &matrix,
+    SparseBlockJacobiPreconditionerPlan &preconditioner,
+    std::string method);
+std::unique_ptr<PreconditionerPlan> make_solver_preconditioner_plan(
+    Program *program,
+    OperatorPlan &target_plan,
+    ExperimentalLinearOperatorHandle &preconditioner,
+    std::string method);
+
 class CpuSparseCGPlan {
  public:
   CpuSparseCGPlan(Program *program,

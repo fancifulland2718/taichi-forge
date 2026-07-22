@@ -1611,8 +1611,10 @@ class SolvePlan:
     :class:`LinearOperator` or an explicitly versioned
     :class:`PreconditionerPlan` as a fixed-linear preconditioner. GPU custom
     preconditioners currently require compiled-kernel A and M providers.
-    MINRES and BiCGSTAB are CPU-only. Vulkan supports bounded masked execution or
-    chunked host convergence checks, including relative tolerance.
+    MINRES supports CPU ``f32``/``f64`` identity preconditioning and device-
+    resident CUDA/Vulkan ``f32`` identity or trusted fixed-linear SPD
+    preconditioning. BiCGSTAB is CPU-only. Vulkan supports bounded masked
+    execution or chunked host convergence checks, including relative tolerance.
     """
 
     def __init__(
@@ -1809,9 +1811,10 @@ class SolvePlan:
         self_adjoint = dict(traits["self_adjoint"])
         positive_definite = dict(traits["positive_definite"])
         singular = dict(traits["singular"])
+        solver_name = self.method.upper()
         if not self_adjoint["known"] or self_adjoint["value"] is not True:
             raise TaichiRuntimeError(
-                "fixed-linear PCG requires preconditioner "
+                f"fixed-linear {solver_name} requires preconditioner "
                 "self_adjoint=True"
             )
         if (
@@ -1819,12 +1822,12 @@ class SolvePlan:
             or positive_definite["value"] is not True
         ):
             raise TaichiRuntimeError(
-                "fixed-linear PCG requires preconditioner "
+                f"fixed-linear {solver_name} requires preconditioner "
                 "positive_definite=True"
             )
         if singular["known"] and singular["value"] is True:
             raise TaichiRuntimeError(
-                "fixed-linear PCG rejects singular preconditioners"
+                f"fixed-linear {solver_name} rejects singular preconditioners"
             )
 
     def _build_solver(self):
@@ -1832,6 +1835,7 @@ class SolvePlan:
         core = self.operator._provider_core
         kind = self.operator._provider_kind
         cpu_arches = (_ti_core.Arch.x64, _ti_core.Arch.arm64)
+        gpu_arches = (_ti_core.Arch.cuda, _ti_core.Arch.vulkan)
         if self.operator.dtype == f64 and arch not in cpu_arches:
             raise TaichiRuntimeError("GPU SolvePlan currently requires f32")
 
@@ -1840,23 +1844,120 @@ class SolvePlan:
 
         if self.method == "minres":
             self._require_self_adjoint()
-            if self.preconditioner is not None:
-                raise TaichiRuntimeError(
-                    "experimental MINRES uses identity preconditioning only"
+            if arch in cpu_arches:
+                if self.preconditioner is not None:
+                    raise TaichiRuntimeError(
+                        "CPU experimental MINRES currently uses identity "
+                        "preconditioning only"
+                    )
+                factory = (
+                    _ti_core._make_float_cpu_experimental_linear_operator_minres_solver
+                    if self.operator.dtype == f32
+                    else _ti_core._make_double_cpu_experimental_linear_operator_minres_solver
                 )
-            if arch not in cpu_arches:
-                raise TaichiRuntimeError("MINRES SolvePlan is CPU-only")
-            factory = (
-                _ti_core._make_float_cpu_experimental_linear_operator_minres_solver
-                if self.operator.dtype == f32
-                else _ti_core._make_double_cpu_experimental_linear_operator_minres_solver
+                return factory(
+                    self._program,
+                    self.operator._handle,
+                    self.max_iterations,
+                    self.atol,
+                    self.rtol,
+                )
+            if arch not in gpu_arches:
+                raise TaichiRuntimeError("unsupported MINRES backend")
+
+            configure = (
+                self._configure_cuda_solver
+                if arch == _ti_core.Arch.cuda
+                else self._configure_vulkan_solver
             )
-            return factory(
-                self._program,
-                self.operator._handle,
-                self.max_iterations,
-                self.atol,
-                self.rtol,
+            if self.preconditioner is None:
+                factory = (
+                    _ti_core._make_device_fixed_sparse_minres_solver
+                    if kind == "stored"
+                    else _ti_core._make_device_experimental_linear_operator_minres_solver
+                )
+                arguments = [self._program, self.operator._handle]
+                if kind == "stored":
+                    arguments.append(core)
+                arguments.extend(
+                    [self.max_iterations, self.atol, self.rtol]
+                )
+                return configure(factory(*arguments))
+
+            if isinstance(
+                self.preconditioner, (LinearOperator, PreconditionerPlan)
+            ):
+                if isinstance(self.preconditioner, PreconditionerPlan):
+                    self.preconditioner._require_target(self.operator)
+                    preconditioner_scope = self.preconditioner.pin()
+                    preconditioner_action = (
+                        self.preconditioner._consumer_action
+                    )
+                else:
+                    preconditioner_action = self.preconditioner
+                self._require_fixed_linear_preconditioner(
+                    preconditioner_action
+                )
+                return configure(
+                    _ti_core._make_device_operator_preconditioned_minres_solver(
+                        self._program,
+                        self.operator._handle,
+                        preconditioner_action._handle,
+                        self.max_iterations,
+                        self.atol,
+                        self.rtol,
+                    )
+                )
+
+            if not isinstance(self.preconditioner, str):
+                raise TaichiRuntimeError(
+                    "MINRES requires a fixed LinearOperator, "
+                    "PreconditionerPlan, or "
+                    "preconditioner='jacobi'/'block_jacobi'"
+                )
+            preconditioner = self.preconditioner.casefold()
+            if preconditioner not in ("jacobi", "block_jacobi"):
+                raise TaichiRuntimeError(
+                    "MINRES requires preconditioner='jacobi' or "
+                    "'block_jacobi'"
+                )
+            if kind != "stored":
+                raise TaichiRuntimeError(
+                    "built-in MINRES preconditioning requires a fixed "
+                    "stored CSR/BSR provider"
+                )
+            contract = self.operator._source._get_format_contract()
+            storage = contract["identity"]["storage_format"]
+            required = "csr" if preconditioner == "jacobi" else "bsr"
+            if storage != required:
+                raise TaichiRuntimeError(
+                    f"{preconditioner} MINRES requires "
+                    f"{required.upper()} storage, got {storage.upper()}"
+                )
+            if preconditioner == "jacobi":
+                self._native_preconditioner = (
+                    _ti_core._make_sparse_jacobi_preconditioner_plan(
+                        self._program, core
+                    )
+                )
+                factory = _ti_core._make_device_jacobi_minres_solver
+            else:
+                self._native_preconditioner = (
+                    _ti_core._make_sparse_block_jacobi_preconditioner_plan(
+                        self._program, core
+                    )
+                )
+                factory = _ti_core._make_device_block_jacobi_minres_solver
+            return configure(
+                factory(
+                    self._program,
+                    self.operator._handle,
+                    core,
+                    self._native_preconditioner,
+                    self.max_iterations,
+                    self.atol,
+                    self.rtol,
+                )
             )
 
         if self.method == "bicgstab":
@@ -2164,7 +2265,11 @@ class SolvePlan:
         if isinstance(self.preconditioner, PreconditionerPlan):
             self.preconditioner._require_target(self.operator)
             preconditioner_scope = self.preconditioner.pin()
-        if self.method in ("minres", "bicgstab"):
+        cpu_arches = (_ti_core.Arch.x64, _ti_core.Arch.arm64)
+        if self.method == "bicgstab" or (
+            self.method == "minres"
+            and self._program.config().arch in cpu_arches
+        ):
             self._solver.solve_ndarray(self._program, out.arr, rhs.arr)
         else:
             self._solver.solve(self._program, out.arr, rhs.arr)

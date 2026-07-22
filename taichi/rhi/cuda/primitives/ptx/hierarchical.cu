@@ -959,6 +959,7 @@ extern "C" __global__ void sparse_minres_scalar_f32(
     for (u32 index = 0; index < kFloatCount + 8u; ++index) {
       state[index] = 0u;
     }
+    store_float(state, kDot, 1.0f);
     store_int(state, kStatus, kNotRun);
     store_int(state, kActive, 1);
     store_int(state, kHasPreconditioner,
@@ -1131,8 +1132,8 @@ extern "C" __global__ void sparse_minres_scalar_f32(
   store_int(state, kKrylovClosed, closed ? 1 : 0);
   const bool provisional_stop =
       load_int(state, kStopOnEstimate) != 0 &&
-      (abs(next_phibar) <= load_float(state, kEffectiveTolerance) || closed);
-  store_int(state, kActive, provisional_stop ? 0 : 1);
+      abs(next_phibar) <= load_float(state, kEffectiveTolerance);
+  store_int(state, kActive, closed || provisional_stop ? 0 : 1);
 }
 
 extern "C" __global__ void sparse_minres_vector_state_f32(

@@ -96,6 +96,7 @@ void main() {
     for (uint index = 0u; index < kFloatCount + 8u; ++index) {
       state_buf.data[index] = 0u;
     }
+    store_float(0u, 1.0);
     store_int(kStatus, kNotRun);
     store_int(kActive, 1);
     store_int(kHasPreconditioner, has_preconditioner ? 1 : 0);
@@ -262,6 +263,6 @@ void main() {
   bool closed = beta_new == 0.0;
   store_int(kKrylovClosed, closed ? 1 : 0);
   bool provisional_stop = stop_on_estimate &&
-      (abs(next_phibar) <= load_float(kEffectiveTolerance) || closed);
-  store_int(kActive, provisional_stop ? 0 : 1);
+      abs(next_phibar) <= load_float(kEffectiveTolerance);
+  store_int(kActive, closed || provisional_stop ? 0 : 1);
 }

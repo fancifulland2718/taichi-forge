@@ -39,6 +39,7 @@
 #include "taichi/program/sparse_fixed_bicgstab.h"
 #include "taichi/program/sparse_minres.h"
 #include "taichi/program/sparse_operator_minres.h"
+#include "taichi/program/sparse_device_minres.h"
 #include "taichi/aot/graph_data.h"
 #include "taichi/runtime/gfx/runtime.h"
 #include "taichi/ir/mesh.h"
@@ -5917,6 +5918,119 @@ void export_lang(py::module &m) {
       py::arg("program"), py::arg("operator"),
       py::arg("max_iterations"), py::arg("absolute_tolerance"),
       py::arg("relative_tolerance") = 0.0);
+
+  py::class_<DeviceMINRES>(m, "DeviceMINRES")
+      .def("solve", &DeviceMINRES::solve)
+      .def(
+          "_configure_execution_policy",
+          [](DeviceMINRES &solver, const std::string &policy,
+             int check_interval) {
+            SparseSolveExecutionPolicy native_policy;
+            if (policy == "host_each_iteration") {
+              native_policy =
+                  SparseSolveExecutionPolicy::host_each_iteration;
+            } else if (policy == "host_check_every_k") {
+              native_policy =
+                  SparseSolveExecutionPolicy::host_check_every_k;
+            } else if (policy == "fixed_budget_masked") {
+              native_policy =
+                  SparseSolveExecutionPolicy::fixed_budget_masked;
+            } else {
+              TI_ERROR("Unsupported device MINRES execution policy '{}'.",
+                       policy);
+            }
+            solver.configure_execution_policy(native_policy,
+                                              check_interval);
+          },
+          py::arg("policy"), py::arg("check_interval"))
+      .def("is_success", &DeviceMINRES::is_success)
+      .def("get_status", &DeviceMINRES::get_status)
+      .def("get_iterations", &DeviceMINRES::get_iterations)
+      .def("get_initial_residual_norm",
+           &DeviceMINRES::get_initial_residual_norm)
+      .def("get_residual_norm", &DeviceMINRES::get_residual_norm)
+      .def("_get_last_result",
+           [sparse_solve_result_to_dict](const DeviceMINRES &solver) {
+             return sparse_solve_result_to_dict(solver.get_last_result());
+           })
+      .def("_debug_runtime_stats",
+           [sparse_solve_plan_stats_to_dict](const DeviceMINRES &solver) {
+             return sparse_solve_plan_stats_to_dict(
+                 solver.debug_runtime_statistics());
+           });
+  m.def(
+      "_make_device_experimental_linear_operator_minres_solver",
+      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+         int max_iterations, float absolute_tolerance,
+         float relative_tolerance) {
+        return make_device_minres_solver(
+            program, operator_handle, nullptr, nullptr, nullptr, nullptr,
+            max_iterations, absolute_tolerance, relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::arg("program"), py::arg("operator"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"), py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "_make_device_fixed_sparse_minres_solver",
+      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+         SparseMatrix &matrix, int max_iterations,
+         float absolute_tolerance, float relative_tolerance) {
+        return make_device_minres_solver(
+            program, operator_handle, &matrix, nullptr, nullptr, nullptr,
+            max_iterations, absolute_tolerance, relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(), py::arg("program"), py::arg("operator"),
+      py::arg("matrix"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"), py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "_make_device_jacobi_minres_solver",
+      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+         SparseMatrix &matrix, SparseJacobiPreconditionerPlan &preconditioner,
+         int max_iterations, float absolute_tolerance,
+         float relative_tolerance) {
+        return make_device_minres_solver(
+            program, operator_handle, &matrix, &preconditioner, nullptr,
+            nullptr, max_iterations, absolute_tolerance,
+            relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(), py::keep_alive<0, 4>(),
+      py::arg("program"), py::arg("operator"), py::arg("matrix"),
+      py::arg("preconditioner"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"), py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "_make_device_block_jacobi_minres_solver",
+      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+         SparseMatrix &matrix,
+         SparseBlockJacobiPreconditionerPlan &preconditioner,
+         int max_iterations, float absolute_tolerance,
+         float relative_tolerance) {
+        return make_device_minres_solver(
+            program, operator_handle, &matrix, nullptr, &preconditioner,
+            nullptr, max_iterations, absolute_tolerance,
+            relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(), py::keep_alive<0, 4>(),
+      py::arg("program"), py::arg("operator"), py::arg("matrix"),
+      py::arg("preconditioner"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"), py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "_make_device_operator_preconditioned_minres_solver",
+      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+         ExperimentalLinearOperatorHandle &preconditioner,
+         int max_iterations, float absolute_tolerance,
+         float relative_tolerance) {
+        return make_device_minres_solver(
+            program, operator_handle, nullptr, nullptr, nullptr,
+            &preconditioner, max_iterations, absolute_tolerance,
+            relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(), py::arg("program"), py::arg("operator"),
+      py::arg("preconditioner"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"), py::arg("relative_tolerance") = 0.0f);
 
   py::class_<SparseMINRES<Eigen::VectorXf, float>>(m, "SparseMINRESf")
       .def("solve", &SparseMINRES<Eigen::VectorXf, float>::solve)
