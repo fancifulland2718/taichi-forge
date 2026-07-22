@@ -46,6 +46,15 @@ def test_operator_qualification_report_is_versioned_and_detached():
     assert record["metadata"]["workload"] == "canonical_identity"
     assert json.loads(report.to_json())["passed"]
 
+    matrix = experimental.summarize_operator_qualifications([report])
+    assert (
+        matrix["schema"]
+        == "taichi_forge.linalg.operator_qualification_matrix.v1"
+    )
+    assert matrix["summary"] == {"reports": 1, "passed": 1, "failed": 0}
+    assert matrix["rows"][0]["checks"]["generalized_apply"] == "passed"
+    assert json.loads(json.dumps(matrix))["rows"][0]["shape"] == [5, 5]
+
     record["operator"]["shape"][0] = 99
     assert report.to_dict()["operator"]["shape"] == [5, 5]
     with pytest.raises(TypeError):
@@ -104,3 +113,5 @@ def test_operator_qualification_rejects_invalid_controls_and_oracle_shape():
         )
     with pytest.raises(RuntimeError, match="JSON-serializable"):
         experimental.qualify_operator(operator, metadata={"bad": object()})
+    with pytest.raises(TypeError, match="OperatorQualificationReport"):
+        experimental.summarize_operator_qualifications([object()])

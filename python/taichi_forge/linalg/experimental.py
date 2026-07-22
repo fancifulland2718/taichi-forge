@@ -1226,6 +1226,62 @@ def qualify_operator(
     return OperatorQualificationReport(record)
 
 
+def summarize_operator_qualifications(reports):
+    """Builds a deterministic backend/provider matrix from reports."""
+    reports = tuple(reports)
+    rows = []
+    passed = 0
+    failed = 0
+    for report in reports:
+        if not isinstance(report, OperatorQualificationReport):
+            raise TypeError(
+                "reports must contain OperatorQualificationReport values"
+            )
+        record = report.to_dict()
+        checks = {
+            check["name"]: check["status"] for check in record["checks"]
+        }
+        row = {
+            "backend": record["environment"]["backend"],
+            "provider": record["operator"]["provider"],
+            "provider_kind": record["operator"]["provider_kind"],
+            "execution_kind": record["operator"]["execution_kind"],
+            "dtype": record["operator"]["dtype"],
+            "shape": list(record["operator"]["shape"]),
+            "passed": bool(record["passed"]),
+            "checks": checks,
+            "unsupported_checks": sorted(
+                name for name, status in checks.items()
+                if status == "unsupported"
+            ),
+        }
+        rows.append(row)
+        if row["passed"]:
+            passed += 1
+        else:
+            failed += 1
+    rows.sort(
+        key=lambda row: (
+            row["backend"],
+            row["provider"],
+            row["provider_kind"],
+            row["execution_kind"],
+            row["dtype"],
+            tuple(row["shape"]),
+        )
+    )
+    return {
+        "schema": "taichi_forge.linalg.operator_qualification_matrix.v1",
+        "schema_version": 1,
+        "summary": {
+            "reports": len(rows),
+            "passed": passed,
+            "failed": failed,
+        },
+        "rows": rows,
+    }
+
+
 def _validate_solve_controls(dtype, max_iterations, atol, rtol):
     if isinstance(max_iterations, bool):
         raise TaichiRuntimeError("max_iterations must be non-negative")
@@ -2123,6 +2179,7 @@ __all__ = [
     "SolvePlan",
     "SolveResult",
     "SolveSubmission",
+    "summarize_operator_qualifications",
     "aslinearoperator",
     "block_diagonal",
     "identity",
