@@ -53,6 +53,22 @@ def _wait_until(predicate):
     raise AssertionError("condition did not become true")
 
 
+def test_submission_pacer_reports_count_based_resource_contract():
+    stats = SubmissionPacer(2).statistics()
+
+    assert stats["schema_version"] == 2
+    assert stats["contract"] == {
+        "admission_unit": "whole_invocation",
+        "capacity_metric": "invocation_count",
+        "host_launch_turn_serialized": True,
+        "device_execution_concurrency_guaranteed": False,
+        "device_work_preemptible": False,
+        "persistent_workspace_bytes_budgeted": False,
+        "provider_generation_bytes_budgeted": False,
+        "unpaced_submissions_controlled": False,
+    }
+
+
 def test_submission_pacer_round_robins_lanes_after_bounded_backlog():
     runtime = _FakeRuntime()
     pacer = SubmissionPacer(2, max_queued=4)

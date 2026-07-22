@@ -596,4 +596,20 @@ def test_independent_batched_contract_and_zero_budget():
     with pytest.raises(RuntimeError, match="CUDA or Vulkan"):
         plan.submit(_vector([1.0, 2.0, 3.0, 4.0]))
     cloned = plan.clone_workspace()
-    assert cloned.statistics()["resources"]["workspace_builds"] == 1
+    stats = cloned.statistics()
+    assert stats["schema_version"] == 3
+    assert stats["submission"]["asynchrony_scope"] == "host_completion"
+    assert stats["submission"]["admission_unit"] == (
+        "whole_solve_invocation"
+    )
+    assert not stats["submission"][
+        "device_execution_concurrency_guaranteed"
+    ]
+    resources = stats["resources"]
+    assert resources["workspace_builds"] == 1
+    assert resources["workspace_vector_bytes"] == 3 * 4 * 4
+    assert resources["state_bytes"] == 68 * 2 + 8
+    assert resources["workspace_payload_bytes"] == 192
+    assert resources["clone_workspace_payload_bytes"] == 192
+    assert resources["byte_accounting"] == "logical_ndarray_payload_only"
+    assert "allocator_rounding" in resources["byte_accounting_excludes"]

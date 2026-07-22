@@ -123,8 +123,10 @@ class SubmissionPacer:
     one complete invocation is serialized, but up to ``max_in_flight`` already
     launched invocations may remain in flight on the backend.
 
-    This is a cooperative boundary: submissions that do not use the same pacer
-    are not controlled by it.
+    This is a cooperative, count-based boundary: submissions that do not use
+    the same pacer are not controlled by it. Admission does not guarantee
+    concurrent device execution, preempt work already queued on the device, or
+    budget persistent workspace and provider-generation memory.
     """
 
     def __init__(
@@ -507,7 +509,17 @@ class SubmissionPacer:
                 snapshot["queued"] = len(self._waiters.get(lane, ()))
                 lanes[_lane_label(lane)] = snapshot
             return {
-                "schema_version": 1,
+                "schema_version": 2,
+                "contract": {
+                    "admission_unit": "whole_invocation",
+                    "capacity_metric": "invocation_count",
+                    "host_launch_turn_serialized": True,
+                    "device_execution_concurrency_guaranteed": False,
+                    "device_work_preemptible": False,
+                    "persistent_workspace_bytes_budgeted": False,
+                    "provider_generation_bytes_budgeted": False,
+                    "unpaced_submissions_controlled": False,
+                },
                 "valid": self._valid,
                 "faulted": self._failure is not None,
                 "max_in_flight": self.max_in_flight,

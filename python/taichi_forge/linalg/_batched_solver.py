@@ -767,7 +767,9 @@ class BatchedSolvePlan:
         until the first ticket is waited or materialized with ``result()``;
         use :meth:`clone_workspace` for explicit concurrent solves. Workspace
         clones may share a ``SubmissionPacer`` with Graph work to bound backend
-        backlog and arbitrate complete host submissions across lanes.
+        backlog and arbitrate complete host submissions across lanes. Host-side
+        asynchronous completion does not guarantee concurrent kernel execution
+        on the device.
         """
         arch = self._program.config().arch if self._program is not None else None
         if arch not in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan):
@@ -950,7 +952,13 @@ class BatchedSolvePlan:
                 self._pending_submission = None
 
     def clone_workspace(self):
-        """Returns an equivalent plan with an independent single workspace."""
+        """Returns an equivalent plan with an independent single workspace.
+
+        A clone allocates another complete logical workspace payload. Inspect
+        ``statistics()["resources"]["clone_workspace_payload_bytes"]`` before
+        creating pools; allocator rounding, driver objects, operator resources,
+        and caller-owned vectors are not included in that number.
+        """
         with self._lifecycle_lock:
             if self.operator is None or self._program is None:
                 raise TaichiRuntimeError(
@@ -1065,13 +1073,30 @@ class BatchedSolvePlan:
         provider = self._last_issued_iterations * self.batch_size
         executed = self._last_executed_system_iterations
         vectors = 4 if self.method == "pcg" else 3
+        workspace_vector_bytes = (
+            vectors * self.total_size * np.dtype(np.float32).itemsize
+        )
+        state_bytes = (
+            _kernels.FLOAT_STATE_SLOTS
+            * self.batch_size
+            * np.dtype(np.float32).itemsize
+            + _kernels.INT_STATE_SLOTS
+            * self.batch_size
+            * np.dtype(np.int32).itemsize
+            + _kernels.COUNTER_SLOTS
+            * np.dtype(np.int32).itemsize
+            + 2
+            * self.batch_size
+            * np.dtype(np.float32).itemsize
+        )
+        workspace_payload_bytes = workspace_vector_bytes + state_bytes
         pending_submission = (
             self._pending_submission()
             if self._pending_submission is not None
             else None
         )
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "backend_family": str(self._program.config().arch),
             "method": self.method,
             "dtype": "f32",
@@ -1099,6 +1124,9 @@ class BatchedSolvePlan:
                     else "requires_gpu_fixed_budget_masked"
                 ),
                 "workspace_slots": 1,
+                "asynchrony_scope": "host_completion",
+                "admission_unit": "whole_solve_invocation",
+                "device_execution_concurrency_guaranteed": False,
                 "pending_submissions": int(
                     pending_submission is not None
                 ),
@@ -1112,23 +1140,16 @@ class BatchedSolvePlan:
                     pending_submission is not None
                 ),
                 "workspace_vectors": vectors,
-                "workspace_vector_bytes": (
-                    vectors
-                    * self.total_size
-                    * np.dtype(np.float32).itemsize
-                ),
-                "state_bytes": (
-                    _kernels.FLOAT_STATE_SLOTS
-                    * self.batch_size
-                    * np.dtype(np.float32).itemsize
-                    + _kernels.INT_STATE_SLOTS
-                    * self.batch_size
-                    * np.dtype(np.int32).itemsize
-                    + _kernels.COUNTER_SLOTS
-                    * np.dtype(np.int32).itemsize
-                    + 2
-                    * self.batch_size
-                    * np.dtype(np.float32).itemsize
+                "workspace_vector_bytes": workspace_vector_bytes,
+                "state_bytes": state_bytes,
+                "workspace_payload_bytes": workspace_payload_bytes,
+                "clone_workspace_payload_bytes": workspace_payload_bytes,
+                "byte_accounting": "logical_ndarray_payload_only",
+                "byte_accounting_excludes": (
+                    "allocator_rounding",
+                    "backend_driver_objects",
+                    "rhs_output_initial_guess",
+                    "operator_and_preconditioner_resources",
                 ),
             },
             "operations": {
