@@ -8,6 +8,7 @@
 #include <mutex>
 #include <utility>
 
+#include "taichi/aot/graph_data.h"
 #include "taichi/common/core.h"
 #include "taichi/ir/type_factory.h"
 #include "taichi/program/kernel.h"
@@ -2843,6 +2844,627 @@ make_experimental_compiled_kernel_operator_handle(
       std::move(mathematical_traits));
   ExperimentalLinearOperatorHandle::NumericUpdateFn update;
   if (numeric_data) {
+    update = [provider](
+                 Program *update_program,
+                 const ExperimentalLinearOperatorHandle::NumericUpdateArguments
+                     &arguments,
+                 std::uint64_t expected_topology_version,
+                 std::uint64_t expected_numeric_version) {
+      provider->update_numeric(update_program, arguments,
+                               expected_topology_version,
+                               expected_numeric_version);
+    };
+  }
+  return std::make_unique<ExperimentalLinearOperatorHandle>(
+      program, std::move(binding), provider, std::move(update));
+}
+
+namespace {
+
+using GraphFixedI32Arguments =
+    std::unordered_map<std::string, std::int32_t>;
+using GraphNdarrayArguments =
+    std::unordered_map<std::string, const Ndarray *>;
+
+struct GraphActionOwnedResource {
+  std::string name;
+  Ndarray *value{nullptr};
+};
+
+struct GraphActionNumericSpec {
+  std::string name;
+  DataType dtype{PrimitiveType::unknown};
+  std::vector<int> shape;
+  ExternalArrayLayout layout{ExternalArrayLayout::kNull};
+};
+
+struct GraphActionDefinition {
+  GraphActionDefinition(Program *program,
+                        const aot::CompiledGraph &forward_graph,
+                        const aot::CompiledGraph *adjoint_graph)
+      : program(program),
+        forward(std::make_unique<aot::CompiledGraph>(forward_graph)) {
+    if (adjoint_graph) {
+      adjoint = std::make_unique<aot::CompiledGraph>(*adjoint_graph);
+    }
+  }
+
+  ~GraphActionDefinition() {
+    adjoint.reset();
+    forward.reset();
+    if (program) {
+      for (auto &resource : fixed_ndarrays) {
+        if (resource.value) {
+          program->delete_ndarray(resource.value);
+        }
+      }
+    }
+  }
+
+  aot::CompiledGraph &graph(OperatorApplyMode mode) const {
+    if (mode == OperatorApplyMode::forward) {
+      return *forward;
+    }
+    TI_ERROR_IF(!adjoint,
+                "Compiled-Graph action has no explicit adjoint provider.");
+    return *adjoint;
+  }
+
+  Program *program{nullptr};
+  std::unique_ptr<aot::CompiledGraph> forward;
+  std::unique_ptr<aot::CompiledGraph> adjoint;
+  GraphFixedI32Arguments fixed_i32;
+  std::vector<GraphActionOwnedResource> fixed_ndarrays;
+  std::vector<GraphActionNumericSpec> numeric_specs;
+  mutable std::mutex launch_mutex;
+};
+
+void validate_compiled_graph_action(
+    Program *program,
+    const aot::CompiledGraph &graph,
+    const char *role,
+    const GraphFixedI32Arguments &fixed_i32,
+    const GraphNdarrayArguments &topology,
+    const GraphNdarrayArguments &numeric,
+    const GraphNdarrayArguments &workspace) {
+  const Arch arch = program->compile_config().arch;
+  TI_ERROR_IF(graph.dispatches.empty(),
+              "Compiled-Graph action {} requires at least one dispatch.",
+              role);
+  TI_ERROR_IF(!graph.snode_tree_dependencies.empty(),
+              "Compiled-Graph action {} must not depend on an SNodeTree.",
+              role);
+  for (const auto &dispatch : graph.dispatches) {
+    TI_ERROR_IF(!dispatch.ti_kernel ||
+                    dispatch.ti_kernel->program != program ||
+                    dispatch.ti_kernel->arch != arch ||
+                    !dispatch.snode_tree_dependencies.empty(),
+                "Compiled-Graph action {} dispatches must be JIT kernels "
+                "owned by the same Program/backend without SNodeTree "
+                "dependencies.",
+                role);
+  }
+
+  enum class ArgumentRole {
+    input,
+    output,
+    fixed_i32,
+    topology,
+    numeric,
+    workspace,
+  };
+  std::unordered_map<std::string, ArgumentRole> roles;
+  auto register_role = [&](const std::string &name, ArgumentRole argument_role) {
+    TI_ERROR_IF(name.empty() || !roles.emplace(name, argument_role).second,
+                "Compiled-Graph action arguments must be non-empty and have "
+                "one role; duplicate '{}'.",
+                name);
+  };
+  register_role("input", ArgumentRole::input);
+  register_role("output", ArgumentRole::output);
+  for (const auto &[name, value] : fixed_i32) {
+    (void)value;
+    register_role(name, ArgumentRole::fixed_i32);
+  }
+  auto register_ndarrays = [&](const GraphNdarrayArguments &arguments,
+                               ArgumentRole argument_role) {
+    for (const auto &[name, source] : arguments) {
+      TI_ERROR_IF(!source,
+                  "Compiled-Graph action fixed ndarray '{}' is null.", name);
+      validate_action_resource(program, *source, name.c_str());
+      register_role(name, argument_role);
+    }
+  };
+  register_ndarrays(topology, ArgumentRole::topology);
+  register_ndarrays(numeric, ArgumentRole::numeric);
+  register_ndarrays(workspace, ArgumentRole::workspace);
+  TI_ERROR_IF(roles.size() != graph.args.size(),
+              "Compiled-Graph action {} has {} arguments but {} explicit "
+              "roles were supplied.",
+              role, graph.args.size(), roles.size());
+
+  auto source_for_role = [&](const std::string &name,
+                             ArgumentRole argument_role) -> const Ndarray * {
+    const GraphNdarrayArguments *arguments = nullptr;
+    if (argument_role == ArgumentRole::topology) {
+      arguments = &topology;
+    } else if (argument_role == ArgumentRole::numeric) {
+      arguments = &numeric;
+    } else if (argument_role == ArgumentRole::workspace) {
+      arguments = &workspace;
+    }
+    if (!arguments) {
+      return nullptr;
+    }
+    const auto found = arguments->find(name);
+    return found == arguments->end() ? nullptr : found->second;
+  };
+  for (const auto &[name, argument] : graph.args) {
+    const auto role_it = roles.find(name);
+    TI_ERROR_IF(role_it == roles.end(),
+                "Compiled-Graph action argument '{}' has no explicit role.",
+                name);
+    const auto argument_role = role_it->second;
+    if (argument_role == ArgumentRole::input ||
+        argument_role == ArgumentRole::output) {
+      TI_ERROR_IF(argument.tag != aot::ArgKind::kNdarray ||
+                      argument.dtype() != PrimitiveType::f32 ||
+                      !argument.element_shape.empty() ||
+                      argument.field_dim != 1,
+                  "Compiled-Graph action reserved '{}' argument must be a "
+                  "scalar f32 one-dimensional ndarray.",
+                  name);
+    } else if (argument_role == ArgumentRole::fixed_i32) {
+      TI_ERROR_IF(argument.tag != aot::ArgKind::kScalar ||
+                      argument.dtype() != PrimitiveType::i32,
+                  "Compiled-Graph action fixed scalar '{}' must be i32.",
+                  name);
+    } else {
+      const Ndarray *source = source_for_role(name, argument_role);
+      TI_ASSERT(source != nullptr);
+      TI_ERROR_IF(argument.tag != aot::ArgKind::kNdarray ||
+                      argument.dtype() != source->get_element_data_type() ||
+                      !argument.element_shape.empty() ||
+                      argument.field_dim != source->shape.size(),
+                  "Compiled-Graph action fixed ndarray '{}' does not match "
+                  "the graph dtype/rank declaration.",
+                  name);
+    }
+  }
+}
+
+struct GraphActionExecutionState {
+  explicit GraphActionExecutionState(OperatorExecutionKind kind,
+                                     bool has_adjoint)
+      : kind(kind) {
+    if (kind == OperatorExecutionKind::compiled_graph ||
+        kind == OperatorExecutionKind::runtime_capture) {
+      forward_cache = std::make_unique<aot::CompiledGraphJITCache>();
+      forward_cache->debug_graph_stats();
+      if (has_adjoint) {
+        adjoint_cache = std::make_unique<aot::CompiledGraphJITCache>();
+        adjoint_cache->debug_graph_stats();
+      }
+    }
+  }
+
+  ~GraphActionExecutionState() {
+    if (adjoint_cache) {
+      adjoint_cache->clear_runtime_state();
+    }
+    if (forward_cache) {
+      forward_cache->clear_runtime_state();
+    }
+  }
+
+  aot::CompiledGraphJITCache *cache(OperatorApplyMode mode) const {
+    return mode == OperatorApplyMode::forward ? forward_cache.get()
+                                               : adjoint_cache.get();
+  }
+
+  OperatorExecutionKind kind{OperatorExecutionKind::direct};
+  std::unique_ptr<aot::CompiledGraphJITCache> forward_cache;
+  std::unique_ptr<aot::CompiledGraphJITCache> adjoint_cache;
+  std::atomic<std::uint64_t> sequence_submissions{0};
+  std::atomic<std::uint64_t> graph_submissions{0};
+  std::atomic<std::uint64_t> capture_submissions{0};
+};
+
+OperatorBackendExecutionPath graph_action_backend_path(
+    aot::CompiledGraphExecutionPath path) {
+  switch (path) {
+    case aot::CompiledGraphExecutionPath::ordinary_fallback:
+      return OperatorBackendExecutionPath::ordinary_graph_fallback;
+    case aot::CompiledGraphExecutionPath::cuda_capture:
+      return OperatorBackendExecutionPath::cuda_capture;
+    case aot::CompiledGraphExecutionPath::cuda_exact_replay:
+      return OperatorBackendExecutionPath::cuda_exact_replay;
+    case aot::CompiledGraphExecutionPath::cuda_patched_replay:
+      return OperatorBackendExecutionPath::cuda_patched_replay;
+    case aot::CompiledGraphExecutionPath::vulkan_record:
+      return OperatorBackendExecutionPath::vulkan_record;
+    case aot::CompiledGraphExecutionPath::vulkan_replay:
+      return OperatorBackendExecutionPath::vulkan_replay;
+    case aot::CompiledGraphExecutionPath::none:
+      return OperatorBackendExecutionPath::unavailable;
+  }
+  TI_UNREACHABLE;
+}
+
+struct GraphActionGeneration {
+  GraphActionGeneration(
+      Program *program,
+      std::shared_ptr<GraphActionDefinition> definition,
+      std::vector<GraphActionOwnedResource> numeric_ndarrays)
+      : program(program),
+        definition(std::move(definition)),
+        numeric_ndarrays(std::move(numeric_ndarrays)) {
+  }
+
+  ~GraphActionGeneration() {
+    if (program) {
+      for (auto &resource : numeric_ndarrays) {
+        if (resource.value) {
+          program->delete_ndarray(resource.value);
+        }
+      }
+    }
+  }
+
+  void apply(OperatorApplyMode mode,
+             const OperatorVectorView &input,
+             const OperatorVectorView &output,
+             const std::shared_ptr<GraphActionExecutionState> &state) {
+    TI_ERROR_IF(!input.ndarray || !output.ndarray,
+                "Compiled-Graph actions require ndarray views.");
+    std::lock_guard<std::mutex> lock(definition->launch_mutex);
+    std::unordered_map<std::string, aot::IValue> arguments;
+    arguments.reserve(2 + definition->fixed_i32.size() +
+                      definition->fixed_ndarrays.size() +
+                      numeric_ndarrays.size());
+    arguments.emplace("input", aot::IValue::create(*input.ndarray));
+    arguments.emplace("output", aot::IValue::create(*output.ndarray));
+    for (const auto &[name, value] : definition->fixed_i32) {
+      arguments.emplace(name, aot::IValue::create(value));
+    }
+    for (const auto &resource : definition->fixed_ndarrays) {
+      arguments.emplace(resource.name,
+                        aot::IValue::create(*resource.value));
+    }
+    for (const auto &resource : numeric_ndarrays) {
+      arguments.emplace(resource.name,
+                        aot::IValue::create(*resource.value));
+    }
+    auto &graph = definition->graph(mode);
+    if (state->kind == OperatorExecutionKind::direct ||
+        state->kind == OperatorExecutionKind::explicit_sequence) {
+      state->sequence_submissions.fetch_add(1, std::memory_order_relaxed);
+      graph.jit_run(program->compile_config(), arguments);
+      return;
+    }
+    auto *cache = state->cache(mode);
+    TI_ERROR_IF(!cache,
+                "Compiled-Graph action execution cache is unavailable.");
+    if (state->kind == OperatorExecutionKind::compiled_graph) {
+      state->graph_submissions.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      state->capture_submissions.fetch_add(1, std::memory_order_relaxed);
+    }
+    graph.jit_run_cached(program->compile_config(), arguments, *cache);
+  }
+
+  Program *program{nullptr};
+  std::shared_ptr<GraphActionDefinition> definition;
+  std::vector<GraphActionOwnedResource> numeric_ndarrays;
+};
+
+class CompiledGraphActionProvider {
+ public:
+  CompiledGraphActionProvider(
+      Program *program,
+      const aot::CompiledGraph &forward_graph,
+      const aot::CompiledGraph *adjoint_graph,
+      OperatorDescriptor descriptor,
+      std::uint64_t topology_version,
+      std::uint64_t numeric_version,
+      GraphFixedI32Arguments fixed_i32,
+      GraphNdarrayArguments topology,
+      GraphNdarrayArguments numeric,
+      GraphNdarrayArguments workspace)
+      : program_(program),
+        descriptor_(std::move(descriptor)),
+        topology_version_(topology_version),
+        numeric_version_(numeric_version) {
+    TI_ERROR_IF(!program_ || topology.empty() ||
+                    descriptor_.domain.scalar_extent == 0 ||
+                    descriptor_.range.scalar_extent == 0 ||
+                    topology_version_ == 0 || numeric_version_ == 0,
+                "Compiled-Graph actions require an owning Program, positive "
+                "domain/range extents and versions, and topology resources.");
+    TI_ERROR_IF(descriptor_.domain.scalar_type != PrimitiveType::f32 ||
+                    descriptor_.range.scalar_type != PrimitiveType::f32 ||
+                    !descriptor_.domain.entry_shape.empty() ||
+                    !descriptor_.range.entry_shape.empty(),
+                "Compiled-Graph actions currently require scalar f32 domain "
+                "and range spaces.");
+    const Arch arch = program_->compile_config().arch;
+    TI_ERROR_IF(!arch_is_cpu(arch) && !arch_is_cuda(arch) &&
+                    arch != Arch::vulkan,
+                "Compiled-Graph actions support CPU, CUDA, and Vulkan only; "
+                "got {}. No fallback was performed.",
+                arch_name(arch));
+    validate_compiled_graph_action(program_, forward_graph, "forward",
+                                   fixed_i32, topology, numeric, workspace);
+    if (adjoint_graph) {
+      validate_compiled_graph_action(program_, *adjoint_graph, "adjoint",
+                                     fixed_i32, topology, numeric, workspace);
+    }
+    definition_ = std::make_shared<GraphActionDefinition>(
+        program_, forward_graph, adjoint_graph);
+    definition_->fixed_i32 = std::move(fixed_i32);
+    has_adjoint_ = adjoint_graph != nullptr;
+    execution_state_ = std::make_shared<GraphActionExecutionState>(
+        arch_is_cpu(arch) ? OperatorExecutionKind::explicit_sequence
+                          : OperatorExecutionKind::compiled_graph,
+        has_adjoint_);
+
+    auto snapshot_fixed = [&](const GraphNdarrayArguments &arguments) {
+      for (const auto &[name, source] : arguments) {
+        Ndarray *owned = program_->create_ndarray(
+            source->get_element_data_type(), source->shape, source->layout,
+            false);
+        try {
+          program_->copy_ndarray_fast(owned, const_cast<Ndarray *>(source));
+          definition_->fixed_ndarrays.push_back({name, owned});
+        } catch (...) {
+          program_->delete_ndarray(owned);
+          throw;
+        }
+      }
+    };
+    snapshot_fixed(topology);
+    snapshot_fixed(workspace);
+    for (const auto &[name, source] : numeric) {
+      definition_->numeric_specs.push_back(
+          {name, source->get_element_data_type(), source->shape,
+           source->layout});
+    }
+    generations_ =
+        std::make_unique<OperatorResourceGenerationPublisher>();
+    publish(snapshot_numeric(numeric), numeric_version_, binding_revision_);
+  }
+
+  ~CompiledGraphActionProvider() {
+    try {
+      if (generations_) {
+        generations_->retire_current();
+        generations_.reset();
+      }
+      execution_state_.reset();
+      definition_.reset();
+    } catch (...) {
+    }
+  }
+
+  OperatorBinding binding() {
+    const Arch arch = program_->compile_config().arch;
+    const OperatorExecutionKind execution_kind =
+        arch_is_cpu(arch) ? OperatorExecutionKind::explicit_sequence
+                          : OperatorExecutionKind::compiled_graph;
+    const auto capabilities = make_capabilities();
+    auto state = execution_state_;
+    TI_ASSERT(state && state->kind == execution_kind);
+    auto metadata_action = OperatorAction(
+        descriptor_, capabilities, "forge_compiled_graph_action",
+        [this] { return current_stamp(); },
+        [this, state](OperatorApplyMode mode,
+                      const OperatorVectorView &input,
+                      const OperatorVectorView &output) {
+          auto generation = generations_->acquire();
+          generation.apply_overwrite(mode, input, output);
+        });
+    auto binding = OperatorBinding::from_generation_publisher(
+        std::move(metadata_action),
+        [this] { return generations_->acquire(); });
+    return binding.with_execution_lowering(
+        execution_kind, [state] { return execution_statistics(state); });
+  }
+
+  bool has_numeric_resources() const {
+    return !definition_->numeric_specs.empty();
+  }
+
+  void update_numeric(
+      Program *program,
+      const ExperimentalLinearOperatorHandle::NumericUpdateArguments
+          &arguments,
+      std::uint64_t expected_topology_version,
+      std::uint64_t expected_numeric_version) {
+    TI_ERROR_IF(program != program_ || !has_numeric_resources(),
+                "Compiled-Graph action numeric update requires its owning "
+                "Program and numeric resources.");
+    std::lock_guard<std::mutex> lock(update_mutex_);
+    TI_ERROR_IF(expected_topology_version != topology_version_ ||
+                    expected_numeric_version != numeric_version_,
+                "Compiled-Graph action numeric update version mismatch: "
+                "expected topology/numeric ({}, {}), current ({}, {}).",
+                expected_topology_version, expected_numeric_version,
+                topology_version_, numeric_version_);
+    TI_ERROR_IF(numeric_version_ ==
+                        (std::numeric_limits<std::uint64_t>::max)() ||
+                    binding_revision_ ==
+                        (std::numeric_limits<std::uint64_t>::max)(),
+                "Compiled-Graph action resource version overflow.");
+    GraphNdarrayArguments native_arguments;
+    native_arguments.reserve(arguments.size());
+    for (const auto &[name, value] : arguments) {
+      native_arguments.emplace(name, value);
+    }
+    const auto next_numeric = numeric_version_ + 1;
+    const auto next_binding = binding_revision_ + 1;
+    publish(snapshot_numeric(native_arguments), next_numeric, next_binding);
+    numeric_version_ = next_numeric;
+    binding_revision_ = next_binding;
+  }
+
+ private:
+  static OperatorBinding::ExecutionRuntimeStatistics execution_statistics(
+      const std::shared_ptr<GraphActionExecutionState> &state) {
+    OperatorBinding::ExecutionRuntimeStatistics result;
+    result.sequence_submissions =
+        state->sequence_submissions.load(std::memory_order_relaxed);
+    result.compiled_graph_submissions =
+        state->graph_submissions.load(std::memory_order_relaxed);
+    result.runtime_capture_submissions =
+        state->capture_submissions.load(std::memory_order_relaxed);
+    if (state->kind == OperatorExecutionKind::explicit_sequence) {
+      result.last_backend_path =
+          OperatorBackendExecutionPath::explicit_sequence;
+      return result;
+    }
+    auto accumulate_cache = [&](aot::CompiledGraphJITCache *cache) {
+      if (!cache) {
+        return;
+      }
+      const auto snapshot = cache->debug_graph_stats();
+      if (snapshot.stats.last_path != aot::CompiledGraphExecutionPath::none) {
+        result.last_backend_path =
+            graph_action_backend_path(snapshot.stats.last_path);
+      }
+      result.backend_captures +=
+          snapshot.stats.captures + snapshot.stats.records;
+      result.backend_replays += snapshot.stats.exact_replays +
+                                snapshot.stats.patched_replays +
+                                snapshot.stats.replays;
+      result.ordinary_fallbacks += snapshot.stats.ordinary_fallbacks;
+    };
+    accumulate_cache(state->forward_cache.get());
+    accumulate_cache(state->adjoint_cache.get());
+    return result;
+  }
+
+  OperatorCapabilities make_capabilities() const {
+    const Arch arch = program_->compile_config().arch;
+    OperatorCapabilities capabilities;
+    capabilities.adjoint_apply = has_adjoint_;
+    // The public handle is synchronous. Async reuse of mutable Graph
+    // workspace has not been qualified for this new provider.
+    capabilities.asynchronous_submit = false;
+    capabilities.explicit_sequence = true;
+    capabilities.compiled_graph = arch_is_cuda(arch) || arch == Arch::vulkan;
+    capabilities.runtime_capture = arch_is_cuda(arch);
+    capabilities.binding_rebind = true;
+    capabilities.persistent_workspace = true;
+    return capabilities;
+  }
+
+  std::vector<GraphActionOwnedResource> snapshot_numeric(
+      const GraphNdarrayArguments &arguments) const {
+    TI_ERROR_IF(arguments.size() != definition_->numeric_specs.size(),
+                "Compiled-Graph action numeric update must provide exactly "
+                "the declared resource names.");
+    std::vector<GraphActionOwnedResource> owned_resources;
+    try {
+      for (const auto &spec : definition_->numeric_specs) {
+        const auto found = arguments.find(spec.name);
+        TI_ERROR_IF(found == arguments.end() || !found->second,
+                    "Compiled-Graph action numeric resource '{}' is missing.",
+                    spec.name);
+        const Ndarray &source = *found->second;
+        validate_action_resource(program_, source, spec.name.c_str());
+        TI_ERROR_IF(source.get_element_data_type() != spec.dtype ||
+                        source.shape != spec.shape ||
+                        source.layout != spec.layout,
+                    "Compiled-Graph action numeric resource '{}' must "
+                    "preserve dtype, shape, and layout.",
+                    spec.name);
+        Ndarray *owned = program_->create_ndarray(
+            spec.dtype, spec.shape, spec.layout, false);
+        try {
+          program_->copy_ndarray_fast(owned,
+                                      const_cast<Ndarray *>(&source));
+          owned_resources.push_back({spec.name, owned});
+        } catch (...) {
+          program_->delete_ndarray(owned);
+          throw;
+        }
+      }
+    } catch (...) {
+      for (auto &resource : owned_resources) {
+        program_->delete_ndarray(resource.value);
+      }
+      throw;
+    }
+    return owned_resources;
+  }
+
+  OperatorResourceStamp current_stamp() const {
+    return generations_->acquire().resource_stamp();
+  }
+
+  void publish(std::vector<GraphActionOwnedResource> numeric_resources,
+               std::uint64_t numeric_version,
+               std::uint64_t binding_revision) {
+    auto generation = std::make_shared<GraphActionGeneration>(
+        program_, definition_, std::move(numeric_resources));
+    const OperatorResourceStamp stamp{
+        reinterpret_cast<std::uintptr_t>(program_),
+        program_->runtime_program_generation(), 1, topology_version_,
+        numeric_version, binding_revision};
+    const auto capabilities = make_capabilities();
+    auto state = execution_state_;
+    TI_ASSERT(state != nullptr);
+    auto action = OperatorAction(
+        descriptor_, capabilities, "forge_compiled_graph_action",
+        [stamp] { return stamp; },
+        [generation = std::move(generation), state](
+            OperatorApplyMode mode, const OperatorVectorView &input,
+            const OperatorVectorView &output) {
+          generation->apply(mode, input, output, state);
+        });
+    generations_->publish(std::move(action));
+  }
+
+  Program *program_{nullptr};
+  OperatorDescriptor descriptor_;
+  std::shared_ptr<GraphActionDefinition> definition_;
+  std::unique_ptr<OperatorResourceGenerationPublisher> generations_;
+  std::shared_ptr<GraphActionExecutionState> execution_state_;
+  bool has_adjoint_{false};
+  std::uint64_t topology_version_{0};
+  std::uint64_t numeric_version_{0};
+  std::uint64_t binding_revision_{1};
+  std::mutex update_mutex_;
+};
+
+}  // namespace
+
+std::unique_ptr<ExperimentalLinearOperatorHandle>
+make_experimental_compiled_graph_operator_handle(
+    Program *program,
+    const aot::CompiledGraph &forward_graph,
+    const aot::CompiledGraph *adjoint_graph,
+    std::size_t range_extent,
+    std::size_t domain_extent,
+    std::uint64_t topology_version,
+    std::uint64_t numeric_version,
+    GraphFixedI32Arguments fixed_i32_arguments,
+    GraphNdarrayArguments topology_arguments,
+    GraphNdarrayArguments numeric_arguments,
+    GraphNdarrayArguments workspace_arguments,
+    OperatorMathematicalTraits mathematical_traits) {
+  const OperatorDescriptor descriptor{
+      OperatorSpaceDesc{PrimitiveType::f32, domain_extent},
+      OperatorSpaceDesc{PrimitiveType::f32, range_extent}};
+  auto provider = std::make_shared<CompiledGraphActionProvider>(
+      program, forward_graph, adjoint_graph, descriptor, topology_version,
+      numeric_version, std::move(fixed_i32_arguments),
+      std::move(topology_arguments), std::move(numeric_arguments),
+      std::move(workspace_arguments));
+  auto binding = provider->binding().with_mathematical_traits(
+      std::move(mathematical_traits));
+  ExperimentalLinearOperatorHandle::NumericUpdateFn update;
+  if (provider->has_numeric_resources()) {
     update = [provider](
                  Program *update_program,
                  const ExperimentalLinearOperatorHandle::NumericUpdateArguments

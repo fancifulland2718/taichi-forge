@@ -425,6 +425,7 @@ class LinearOperator:
         graph,
         size,
         *,
+        adjoint=None,
         fixed_i32=None,
         topology,
         numeric=None,
@@ -433,13 +434,16 @@ class LinearOperator:
         numeric_version=1,
         traits=None,
     ):
-        """Binds a compiled multi-kernel f32 Graph as one square operator.
+        """Binds compiled multi-kernel f32 Graph actions.
 
         Runtime vector arguments must be named ``input`` and ``output``.
         Every other argument is assigned exactly one fixed, topology, numeric,
-        or workspace role. SNode-dependent Graphs are rejected.
+        or workspace role. ``size`` may be an integer square shorthand or a
+        ``(range, domain)`` shape. An explicit adjoint Graph must expose the
+        same fixed resource schema. SNode-dependent Graphs are rejected.
         """
-        size = _require_positive_size(size)
+        shape, legacy_square = _normalize_operator_shape(size)
+        range_extent, domain_extent = shape
         topology_version = _require_positive_size(
             topology_version, "topology_version"
         )
@@ -482,27 +486,72 @@ class LinearOperator:
             raise TaichiRuntimeError(
                 "LinearOperator.from_graph expects a compiled ti.graph.Graph"
             ) from exc
+        compiled_adjoint = None
+        if adjoint is not None:
+            try:
+                compiled_adjoint = adjoint._compiled_graph
+            except AttributeError as exc:
+                raise TaichiRuntimeError(
+                    "LinearOperator.from_graph adjoint must be a compiled "
+                    "ti.graph.Graph"
+                ) from exc
         program = _current_program()
-        core = program._create_compiled_graph_linear_operator(
+        topology_native = {
+            name: value.arr for name, value in topology_arrays.items()
+        }
+        numeric_native = {
+            name: value.arr for name, value in numeric_arrays.items()
+        }
+        workspace_native = {
+            name: value.arr for name, value in workspace_arrays.items()
+        }
+        if legacy_square and adjoint is None:
+            core = program._create_compiled_graph_linear_operator(
+                compiled_graph,
+                range_extent,
+                topology_version,
+                numeric_version,
+                fixed,
+                topology_native,
+                numeric_native,
+                workspace_native,
+            )
+            handle = _ti_core._make_experimental_linear_operator(
+                program, core, *traits._native_values()
+            )
+            return cls._from_handle(
+                handle,
+                provider_kind="graph",
+                provider_core=core,
+                source=graph,
+                retained=(
+                    graph,
+                    tuple(topology_arrays.values()),
+                    tuple(numeric_arrays.values()),
+                    tuple(workspace_arrays.values()),
+                ),
+            )
+        handle = _ti_core._make_experimental_compiled_graph_operator(
+            program,
             compiled_graph,
-            size,
+            compiled_adjoint,
+            range_extent,
+            domain_extent,
             topology_version,
             numeric_version,
             fixed,
-            {name: value.arr for name, value in topology_arrays.items()},
-            {name: value.arr for name, value in numeric_arrays.items()},
-            {name: value.arr for name, value in workspace_arrays.items()},
-        )
-        handle = _ti_core._make_experimental_linear_operator(
-            program, core, *traits._native_values()
+            topology_native,
+            numeric_native,
+            workspace_native,
+            *traits._native_values(),
         )
         return cls._from_handle(
             handle,
-            provider_kind="graph",
-            provider_core=core,
-            source=graph,
+            provider_kind="graph_action",
+            source=(graph, adjoint),
             retained=(
                 graph,
+                adjoint,
                 tuple(topology_arrays.values()),
                 tuple(numeric_arrays.values()),
                 tuple(workspace_arrays.values()),
@@ -665,6 +714,17 @@ class LinearOperator:
             self._handle._update_numeric(
                 self._program,
                 {"numeric": values.arr},
+                topology_version,
+                numeric_version,
+            )
+            return
+        if self._provider_kind == "graph_action":
+            values = _normalized_resource_mapping(
+                values, "numeric", require_nonempty=True
+            )
+            self._handle._update_numeric(
+                self._program,
+                {name: value.arr for name, value in values.items()},
                 topology_version,
                 numeric_version,
             )

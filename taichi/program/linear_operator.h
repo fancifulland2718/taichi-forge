@@ -14,6 +14,10 @@
 
 namespace taichi::lang {
 
+namespace aot {
+struct CompiledGraph;
+}
+
 class Ndarray;
 class Kernel;
 class Program;
@@ -712,6 +716,20 @@ make_experimental_compiled_kernel_operator_handle(
     std::uint64_t numeric_version,
     const Ndarray &topology_data,
     const Ndarray *numeric_data,
+    OperatorMathematicalTraits mathematical_traits);
+std::unique_ptr<ExperimentalLinearOperatorHandle>
+make_experimental_compiled_graph_operator_handle(
+    Program *program,
+    const aot::CompiledGraph &forward_graph,
+    const aot::CompiledGraph *adjoint_graph,
+    std::size_t range_extent,
+    std::size_t domain_extent,
+    std::uint64_t topology_version,
+    std::uint64_t numeric_version,
+    std::unordered_map<std::string, std::int32_t> fixed_i32_arguments,
+    std::unordered_map<std::string, const Ndarray *> topology_arguments,
+    std::unordered_map<std::string, const Ndarray *> numeric_arguments,
+    std::unordered_map<std::string, const Ndarray *> workspace_arguments,
     OperatorMathematicalTraits mathematical_traits);
 std::unique_ptr<ExperimentalLinearOperatorHandle>
 make_experimental_identity_operator_handle(Program *program,

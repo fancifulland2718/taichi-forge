@@ -5237,6 +5237,18 @@ void export_lang(py::module &m) {
              result["execution_plan_reuses"] =
                  stats.execution_plan_reuses;
              result["binding_rebinds"] = stats.binding_rebinds;
+             result["sequence_submissions"] =
+                 stats.sequence_submissions;
+             result["compiled_graph_submissions"] =
+                 stats.compiled_graph_submissions;
+             result["runtime_capture_submissions"] =
+                 stats.runtime_capture_submissions;
+             result["backend_captures"] = stats.backend_captures;
+             result["backend_replays"] = stats.backend_replays;
+             result["ordinary_fallbacks"] =
+                 stats.ordinary_fallbacks;
+             result["cache_invalidations"] =
+                 stats.cache_invalidations;
              result["backend_path"] =
                  operator_backend_execution_path_name(
                      stats.last_backend_path);
@@ -5287,6 +5299,51 @@ void export_lang(py::module &m) {
       py::arg("range_extent"), py::arg("domain_extent"),
       py::arg("topology_version"), py::arg("numeric_version"),
       py::arg("topology_data"), py::arg("numeric_data"),
+      py::arg("self_adjoint") = -1,
+      py::arg("positive_definite") = -1,
+      py::arg("positive_semidefinite") = -1,
+      py::arg("singular") = -1);
+  m.def(
+      "_make_experimental_compiled_graph_operator",
+      [](Program *program, const aot::CompiledGraph &forward_graph,
+         const py::object &adjoint_graph, std::size_t range_extent,
+         std::size_t domain_extent, std::uint64_t topology_version,
+         std::uint64_t numeric_version, const py::dict &fixed_i32_args,
+         const py::dict &topology_args, const py::dict &numeric_args,
+         const py::dict &workspace_args, int self_adjoint,
+         int positive_definite, int positive_semidefinite, int singular) {
+        const aot::CompiledGraph *adjoint = nullptr;
+        if (!adjoint_graph.is_none()) {
+          adjoint = &py::cast<const aot::CompiledGraph &>(adjoint_graph);
+        }
+        std::unordered_map<std::string, std::int32_t> fixed_i32;
+        for (const auto &item : fixed_i32_args) {
+          fixed_i32.emplace(py::cast<std::string>(item.first),
+                            py::cast<std::int32_t>(item.second));
+        }
+        auto parse_ndarrays = [](const py::dict &arguments) {
+          std::unordered_map<std::string, const Ndarray *> result;
+          for (const auto &item : arguments) {
+            result.emplace(py::cast<std::string>(item.first),
+                           &py::cast<const Ndarray &>(item.second));
+          }
+          return result;
+        };
+        return make_experimental_compiled_graph_operator_handle(
+            program, forward_graph, adjoint, range_extent, domain_extent,
+            topology_version, numeric_version, std::move(fixed_i32),
+            parse_ndarrays(topology_args), parse_ndarrays(numeric_args),
+            parse_ndarrays(workspace_args),
+            make_asserted_operator_traits(
+                self_adjoint, positive_definite, positive_semidefinite,
+                singular));
+      },
+      py::keep_alive<0, 1>(), py::arg("program"),
+      py::arg("forward_graph"), py::arg("adjoint_graph"),
+      py::arg("range_extent"), py::arg("domain_extent"),
+      py::arg("topology_version"), py::arg("numeric_version"),
+      py::arg("fixed_i32_arguments"), py::arg("topology_arguments"),
+      py::arg("numeric_arguments"), py::arg("workspace_arguments"),
       py::arg("self_adjoint") = -1,
       py::arg("positive_definite") = -1,
       py::arg("positive_semidefinite") = -1,
