@@ -2,12 +2,162 @@
 #include "linear_operator.h"
 #include "sparse_preconditioner.h"
 #include "taichi/rhi/cuda/primitives/solver_ptx.h"
+#include "taichi/util/environ_config.h"
+
+#if defined(TI_WITH_CUDA)
+#include "taichi/rhi/cuda/cuda_context.h"
+#endif
+
+#if defined(TI_WITH_VULKAN)
+#include "taichi/program/vulkan_command_replay.h"
+#endif
 
 #include <algorithm>
 #include <functional>
 #include <limits>
+#include <optional>
+#include <vector>
 
 namespace taichi::lang {
+
+#if defined(TI_WITH_CUDA)
+
+struct CudaSolverChunkReplayKey {
+  RuntimeResourceHandle solution;
+  std::uint64_t program_generation{0};
+  std::uint64_t schema_revision{0};
+  std::uint64_t topology_revision{0};
+  std::uint64_t binding_revision{0};
+  std::uint64_t preconditioner_schema_revision{0};
+  std::uint64_t preconditioner_topology_revision{0};
+  std::uint64_t preconditioner_binding_revision{0};
+  std::uintptr_t x{0};
+  std::uintptr_t ax{0};
+  std::uintptr_t residual{0};
+  std::uintptr_t direction{0};
+  std::uintptr_t preconditioned_residual{0};
+  std::uintptr_t scalars{0};
+  std::uintptr_t provider{0};
+  std::uintptr_t preconditioner{0};
+  int rows{0};
+  int iterations{0};
+
+  bool operator==(const CudaSolverChunkReplayKey &other) const {
+    return solution == other.solution &&
+           program_generation == other.program_generation &&
+           schema_revision == other.schema_revision &&
+           topology_revision == other.topology_revision &&
+           binding_revision == other.binding_revision &&
+           preconditioner_schema_revision ==
+               other.preconditioner_schema_revision &&
+           preconditioner_topology_revision ==
+               other.preconditioner_topology_revision &&
+           preconditioner_binding_revision ==
+               other.preconditioner_binding_revision &&
+           x == other.x && ax == other.ax && residual == other.residual &&
+           direction == other.direction &&
+           preconditioned_residual == other.preconditioned_residual &&
+           scalars == other.scalars && provider == other.provider &&
+           preconditioner == other.preconditioner && rows == other.rows &&
+           iterations == other.iterations;
+  }
+};
+
+struct CudaSolverChunkReplayEntry {
+  CUgraphExec executable{nullptr};
+  CudaSolverChunkReplayKey key;
+  bool key_valid{false};
+  std::uint64_t operator_numeric_revision{0};
+  std::uint64_t preconditioner_numeric_revision{0};
+  std::optional<Program::NdarrayResourceLease> solution_lease;
+
+  void reset() {
+    if (executable != nullptr) {
+      CUDADriver::get_instance().graph_exec_destroy(executable);
+      executable = nullptr;
+    }
+    key_valid = false;
+    solution_lease.reset();
+  }
+};
+
+struct CudaSolverChunkReplayState {
+  CUstream capture_stream{nullptr};
+  std::array<CudaSolverChunkReplayEntry, 9> entries;
+  bool disabled{false};
+  std::string unavailable_reason{"not_built"};
+
+  ~CudaSolverChunkReplayState() {
+    CUDAContext::get_instance().make_current();
+    CUDADriver::get_instance().stream_synchronize(nullptr);
+    for (auto &entry : entries) {
+      entry.reset();
+    }
+    if (capture_stream != nullptr) {
+      CUDADriver::get_instance().stream_destroy(capture_stream);
+      capture_stream = nullptr;
+    }
+  }
+
+  CUstream ensure_capture_stream() {
+    if (capture_stream == nullptr) {
+      CUDAContext::get_instance().make_current();
+      CUDADriver::get_instance().stream_create(
+          reinterpret_cast<void **>(&capture_stream), CU_STREAM_NON_BLOCKING);
+    }
+    return capture_stream;
+  }
+
+  void reset_entries() {
+    CUDAContext::get_instance().make_current();
+    CUDADriver::get_instance().stream_synchronize(nullptr);
+    for (auto &entry : entries) {
+      entry.reset();
+    }
+  }
+};
+
+#else
+
+struct CudaSolverChunkReplayState {};
+
+#endif
+
+#if defined(TI_WITH_VULKAN)
+
+struct VulkanSolverChunkReplayState {
+  struct Slot {
+    VulkanCommandReplayCache cache;
+    RuntimeResourceHandle solution_handle;
+    std::optional<Program::NdarrayResourceLease> solution_lease;
+    std::uint64_t operator_numeric_revision{0};
+    std::uint64_t preconditioner_numeric_revision{0};
+  };
+
+  std::vector<std::unique_ptr<Slot>> slots;
+  std::string unavailable_reason{"not_built"};
+
+  Slot &slot(std::size_t index) {
+    if (slots.size() <= index) {
+      slots.resize(index + 1);
+    }
+    if (!slots[index]) {
+      slots[index] = std::make_unique<Slot>();
+    }
+    return *slots[index];
+  }
+
+  void reset() {
+    slots.clear();
+  }
+};
+
+#else
+
+struct VulkanSolverChunkReplayState {};
+
+#endif
+
 namespace {
 
 OperatorMathematicalTraits legacy_cg_traits() {
@@ -23,6 +173,32 @@ OperatorMathematicalTraits legacy_cg_traits() {
 OperatorBinding with_legacy_cg_traits(OperatorBinding binding) {
   return binding.with_mathematical_traits(legacy_cg_traits());
 }
+
+#if defined(TI_WITH_VULKAN)
+void push_solver_chunk_resource(VulkanCommandReplayKey &key,
+                                const Ndarray *array) {
+  if (array == nullptr) {
+    key.push(0);
+    key.push(0);
+    key.push(0);
+    key.push(0);
+    return;
+  }
+  const auto handle = array->runtime_resource_handle();
+  key.push(handle.domain);
+  key.push(handle.kind);
+  key.push(handle.index);
+  key.push(handle.generation);
+}
+
+void push_solver_chunk_stamp(VulkanCommandReplayKey &key,
+                             const OperatorResourceStamp &stamp) {
+  key.push(stamp.program_generation);
+  key.push(stamp.schema_revision);
+  key.push(stamp.topology_revision);
+  key.push(stamp.binding_revision);
+}
+#endif
 
 void validate_cg_plan(const OperatorPlan &operator_plan,
                       const PreconditionerPlan *preconditioner_plan) {
@@ -412,6 +588,255 @@ void CUCG::ensure_operator_plan(Program *program) {
   validate_cg_plan(*operator_plan_, nullptr);
 }
 
+bool CUCG::native_solver_chunk_eligible() const {
+  return native_solver_chunk_unavailable_reason() == "none";
+}
+
+std::string CUCG::native_solver_chunk_unavailable_reason() const {
+#if defined(TI_WITH_CUDA)
+  if (get_environ_config("TI_CUDA_SOLVER_CHUNK_REPLAY", 1) == 0) {
+    return "native_solver_chunk_replay_disabled";
+  }
+  if (!program_) {
+    return "program_unavailable";
+  }
+  if (program_->compile_config().debug) {
+    return "debug_mode_enabled";
+  }
+  if ((!cuda_csr_operator_ && !cuda_bsr_operator_) ||
+      (has_preconditioner() && !preconditioner_ && !block_preconditioner_)) {
+    return "provider_not_capture_composable";
+  }
+  const bool stream_binding =
+      cuda_csr_operator_
+          ? cuda_csr_operator_->supports_spmv_stream_binding()
+          : cuda_bsr_operator_->supports_spmv_stream_binding();
+  if (!stream_binding) {
+    return "spmv_stream_binding_unavailable";
+  }
+  auto &driver = CUDADriver::get_instance();
+  if (!driver.stream_begin_capture.available() ||
+      !driver.stream_end_capture.available() ||
+      !driver.graph_instantiate_with_flags.available() ||
+      !driver.graph_launch.available() || !driver.graph_destroy.available() ||
+      !driver.graph_exec_destroy.available()) {
+    return "cuda_graph_capture_unavailable";
+  }
+  return "none";
+#else
+  return "cuda_backend_unavailable";
+#endif
+}
+
+void CUCG::issue_native_solver_iteration(
+    Program *program,
+    CUstream stream,
+    float *d_x,
+    float *d_ax,
+    float *d_r,
+    float *d_p,
+    float *d_z,
+    cuda::CudaCGScalarState *state) {
+#if defined(TI_WITH_CUDA)
+  if (cuda_csr_operator_) {
+    cuda_csr_operator_->spmv(reinterpret_cast<std::uintptr_t>(d_p),
+                             reinterpret_cast<std::uintptr_t>(d_ax), stream);
+  } else {
+    TI_ASSERT(cuda_bsr_operator_);
+    cuda_bsr_operator_->spmv(reinterpret_cast<std::uintptr_t>(d_p),
+                             reinterpret_cast<std::uintptr_t>(d_ax), stream);
+  }
+  auto &cublas = CUBLASDriver::get_instance();
+  const int rows = A_.num_rows();
+  cublas.cubSdot(handle_, rows, d_p, 1, d_ax, 1, &state->p_ap);
+  cuda::driver_cg_prepare_alpha(state, stream);
+  cublas.cubSaxpy(handle_, rows, &state->alpha, d_p, 1, d_x, 1);
+  cublas.cubSaxpy(handle_, rows, &state->negative_alpha, d_ax, 1, d_r, 1);
+  cublas.cubSdot(handle_, rows, d_r, 1, d_r, 1, &state->rr_next);
+  cuda::driver_cg_finish_iteration(state, stream);
+  if (preconditioner_) {
+    preconditioner_->apply_cuda_raw(
+        program, reinterpret_cast<std::uintptr_t>(d_r),
+        reinterpret_cast<std::uintptr_t>(d_z), stream);
+    cublas.cubSdot(handle_, rows, d_r, 1, d_z, 1, &state->rho_next);
+  } else if (block_preconditioner_) {
+    block_preconditioner_->apply_cuda_raw(
+        program, reinterpret_cast<std::uintptr_t>(d_r),
+        reinterpret_cast<std::uintptr_t>(d_z), stream);
+    cublas.cubSdot(handle_, rows, d_r, 1, d_z, 1, &state->rho_next);
+  }
+  cuda::driver_cg_prepare_direction(state, stream);
+  cublas.cubSscal(handle_, rows, &state->beta, d_p, 1);
+  cublas.cubSaxpy(handle_, rows, &state->source_scale,
+                  has_preconditioner() ? d_z : d_r, 1, d_p, 1);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+bool CUCG::try_submit_solver_chunk(
+    Program *program,
+    const Ndarray &x,
+    const OperatorPinnedAction &operator_generation,
+    const OperatorPinnedAction &preconditioner_generation,
+    int chunk_iterations,
+    float *d_x,
+    float *d_ax,
+    float *d_r,
+    float *d_p,
+    float *d_z,
+    cuda::CudaCGScalarState *state) {
+#if defined(TI_WITH_CUDA)
+  if (!native_solver_chunk_eligible() || chunk_iterations <= 0 ||
+      chunk_iterations > 8) {
+    return false;
+  }
+  if (!solver_chunk_replay_state_) {
+    solver_chunk_replay_state_ =
+        std::make_unique<CudaSolverChunkReplayState>();
+  }
+  auto &replay = *solver_chunk_replay_state_;
+  if (replay.disabled) {
+    return false;
+  }
+  const auto operator_stamp = operator_generation.resource_stamp();
+  const auto preconditioner_stamp =
+      preconditioner_generation
+          ? preconditioner_generation.resource_stamp()
+          : OperatorResourceStamp{};
+  CudaSolverChunkReplayKey key;
+  key.solution = x.runtime_resource_handle();
+  key.program_generation = operator_stamp.program_generation;
+  key.schema_revision = operator_stamp.schema_revision;
+  key.topology_revision = operator_stamp.topology_revision;
+  key.binding_revision = operator_stamp.binding_revision;
+  key.preconditioner_schema_revision = preconditioner_stamp.schema_revision;
+  key.preconditioner_topology_revision =
+      preconditioner_stamp.topology_revision;
+  key.preconditioner_binding_revision =
+      preconditioner_stamp.binding_revision;
+  key.x = reinterpret_cast<std::uintptr_t>(d_x);
+  key.ax = reinterpret_cast<std::uintptr_t>(d_ax);
+  key.residual = reinterpret_cast<std::uintptr_t>(d_r);
+  key.direction = reinterpret_cast<std::uintptr_t>(d_p);
+  key.preconditioned_residual = reinterpret_cast<std::uintptr_t>(d_z);
+  key.scalars = reinterpret_cast<std::uintptr_t>(state);
+  key.provider = reinterpret_cast<std::uintptr_t>(
+      cuda_csr_operator_ ? static_cast<void *>(cuda_csr_operator_)
+                         : static_cast<void *>(cuda_bsr_operator_));
+  key.preconditioner = reinterpret_cast<std::uintptr_t>(
+      preconditioner_ ? static_cast<void *>(preconditioner_)
+                      : static_cast<void *>(block_preconditioner_));
+  key.rows = A_.num_rows();
+  key.iterations = chunk_iterations;
+
+  auto &entry = replay.entries[static_cast<std::size_t>(chunk_iterations)];
+  if (entry.executable != nullptr && entry.key_valid && entry.key == key) {
+    if (entry.operator_numeric_revision != operator_stamp.numeric_revision ||
+        entry.preconditioner_numeric_revision !=
+            preconditioner_stamp.numeric_revision) {
+      entry.operator_numeric_revision = operator_stamp.numeric_revision;
+      entry.preconditioner_numeric_revision =
+          preconditioner_stamp.numeric_revision;
+      ++solver_chunk_rebinds_;
+    }
+    CUDADriver::get_instance().graph_launch(entry.executable, nullptr);
+    if (preconditioner_) {
+      preconditioner_->record_replayed_apply_calls(chunk_iterations);
+    } else if (block_preconditioner_) {
+      block_preconditioner_->record_replayed_apply_calls(chunk_iterations);
+    }
+    ++solver_chunk_reuses_;
+    ++solver_chunk_replays_;
+    replay.unavailable_reason = "none";
+    return true;
+  }
+
+  if (entry.executable != nullptr) {
+    if (entry.key_valid && entry.key.solution != key.solution) {
+      ++solver_chunk_rebinds_;
+    }
+    CUDADriver::get_instance().stream_synchronize(nullptr);
+    entry.reset();
+    ++solver_chunk_invalidations_;
+  }
+
+  // Warm cuSPARSE descriptors and external storage before capture. The extra
+  // SpMV is a cold-build cost only; the captured iteration overwrites d_ax
+  // before any solver scalar consumes it.
+  if (cuda_csr_operator_) {
+    cuda_csr_operator_->spmv(reinterpret_cast<std::uintptr_t>(d_p),
+                             reinterpret_cast<std::uintptr_t>(d_ax), nullptr);
+  } else {
+    cuda_bsr_operator_->spmv(reinterpret_cast<std::uintptr_t>(d_p),
+                             reinterpret_cast<std::uintptr_t>(d_ax), nullptr);
+  }
+
+  auto &driver = CUDADriver::get_instance();
+  auto &cublas = CUBLASDriver::get_instance();
+  const CUstream capture_stream = replay.ensure_capture_stream();
+  driver.stream_synchronize(capture_stream);
+  cublas.cubSetStream(handle_, capture_stream);
+  CUgraph graph = nullptr;
+  auto capture_lock = CUDAContext::get_instance().get_graph_capture_lock_guard();
+  const auto begin_error = driver.stream_begin_capture.call(
+      capture_stream, CU_STREAM_CAPTURE_MODE_RELAXED);
+  if (begin_error != CUDA_SUCCESS) {
+    cublas.cubSetStream(handle_, solver_stream_);
+    replay.disabled = true;
+    replay.unavailable_reason = "stream_capture_begin_failed";
+    return false;
+  }
+  try {
+    for (int i = 0; i < chunk_iterations; ++i) {
+      issue_native_solver_iteration(program, capture_stream, d_x, d_ax, d_r,
+                                    d_p, d_z, state);
+    }
+  } catch (...) {
+    (void)driver.stream_end_capture.call(capture_stream, &graph);
+    if (graph != nullptr) {
+      driver.graph_destroy.call(graph);
+    }
+    cublas.cubSetStream(handle_, solver_stream_);
+    throw;
+  }
+  const auto end_error =
+      driver.stream_end_capture.call(capture_stream, &graph);
+  cublas.cubSetStream(handle_, solver_stream_);
+  if (end_error != CUDA_SUCCESS || graph == nullptr) {
+    if (graph != nullptr) {
+      driver.graph_destroy.call(graph);
+    }
+    replay.disabled = true;
+    replay.unavailable_reason = "stream_capture_end_failed";
+    return false;
+  }
+  CUgraphExec executable = nullptr;
+  const auto instantiate_error = driver.graph_instantiate_with_flags.call(
+      &executable, graph, 0);
+  driver.graph_destroy.call(graph);
+  if (instantiate_error != CUDA_SUCCESS || executable == nullptr) {
+    replay.disabled = true;
+    replay.unavailable_reason = "graph_instantiate_failed";
+    return false;
+  }
+  entry.executable = executable;
+  entry.key = key;
+  entry.key_valid = true;
+  entry.operator_numeric_revision = operator_stamp.numeric_revision;
+  entry.preconditioner_numeric_revision =
+      preconditioner_stamp.numeric_revision;
+  entry.solution_lease.emplace(
+      program->acquire_ndarray_external_lease(key.solution));
+  ++solver_chunk_builds_;
+  replay.unavailable_reason = "none";
+  driver.graph_launch(entry.executable, nullptr);
+  return true;
+#else
+  return false;
+#endif
+}
+
 void CUCG::init_solver() {
 #if defined(TI_WITH_CUDA)
   if (!CUBLASDriver::get_instance().is_loaded()) {
@@ -469,9 +894,6 @@ void CUCG::ensure_workspace(Program *program, int size) {
       workspace_p_ && (!has_preconditioner() || workspace_z_) &&
       (!needs_scalars || workspace_scalars_)) {
     workspace_reuses_++;
-    if (needs_scalars) {
-      solver_chunk_reuses_++;
-    }
     return;
   }
   release_workspace();
@@ -513,9 +935,6 @@ void CUCG::ensure_workspace(Program *program, int size) {
     }
     workspace_size_ = size;
     workspace_builds_++;
-    if (needs_scalars) {
-      solver_chunk_builds_++;
-    }
     return;
   }
   CUDADriver::get_instance().malloc((void **)&workspace_ax_,
@@ -531,7 +950,6 @@ void CUCG::ensure_workspace(Program *program, int size) {
   if (needs_scalars) {
     CUDADriver::get_instance().malloc(
         &workspace_scalars_, sizeof(cuda::CudaCGScalarState));
-    solver_chunk_builds_++;
   }
   workspace_size_ = size;
   workspace_builds_++;
@@ -540,6 +958,7 @@ void CUCG::ensure_workspace(Program *program, int size) {
 
 void CUCG::release_workspace() {
 #if defined(TI_WITH_CUDA)
+  solver_chunk_replay_state_.reset();
   if (workspace_ax_ndarray_ && program_)
     program_->delete_ndarray(workspace_ax_ndarray_);
   else if (workspace_ax_)
@@ -650,39 +1069,46 @@ void CUCG::solve_device_scalar(
   while (host_state.active != 0 && issued_iterations < max_iters_) {
     const int chunk_iterations =
         std::min(host_check_interval_, max_iters_ - issued_iterations);
-    solver_chunk_direct_submissions_++;
-    for (int chunk_index = 0; chunk_index < chunk_iterations;
-         ++chunk_index) {
-      apply_operator(prog, operator_generation,
-                     reinterpret_cast<std::uintptr_t>(d_p),
-                     reinterpret_cast<std::uintptr_t>(d_ax),
-                     workspace_p_ndarray_, workspace_ax_ndarray_);
-      operator_apply_calls_++;
-      cublas.cubSdot(handle_, rows, d_p, 1, d_ax, 1, &state->p_ap);
-      cuda::driver_cg_prepare_alpha(state, solver_stream_);
-      cublas.cubSaxpy(handle_, rows, &state->alpha, d_p, 1,
-                      reinterpret_cast<float *>(d_x), 1);
-      cublas.cubSaxpy(handle_, rows, &state->negative_alpha, d_ax, 1, d_r,
-                      1);
-      cublas.cubSdot(handle_, rows, d_r, 1, d_r, 1, &state->rr_next);
-      cuda::driver_cg_finish_iteration(state, solver_stream_);
-      device_scalar_operations_ += 4;
-
-      if (has_preconditioner()) {
-        apply_preconditioner(prog, preconditioner_generation, d_r, d_z,
-                             workspace_r_ndarray_, workspace_z_ndarray_);
-        preconditioner_apply_calls_++;
-        cublas.cubSdot(handle_, rows, d_r, 1, d_z, 1,
-                       &state->rho_next);
-        device_scalar_operations_++;
+    const bool submitted = try_submit_solver_chunk(
+        prog, x, operator_generation, preconditioner_generation,
+        chunk_iterations, reinterpret_cast<float *>(d_x), d_ax, d_r, d_p,
+        d_z, state);
+    if (!submitted) {
+      ++solver_chunk_direct_submissions_;
+      for (int chunk_index = 0; chunk_index < chunk_iterations;
+           ++chunk_index) {
+        apply_operator(prog, operator_generation,
+                       reinterpret_cast<std::uintptr_t>(d_p),
+                       reinterpret_cast<std::uintptr_t>(d_ax),
+                       workspace_p_ndarray_, workspace_ax_ndarray_);
+        cublas.cubSdot(handle_, rows, d_p, 1, d_ax, 1, &state->p_ap);
+        cuda::driver_cg_prepare_alpha(state, solver_stream_);
+        cublas.cubSaxpy(handle_, rows, &state->alpha, d_p, 1,
+                        reinterpret_cast<float *>(d_x), 1);
+        cublas.cubSaxpy(handle_, rows, &state->negative_alpha, d_ax, 1, d_r,
+                        1);
+        cublas.cubSdot(handle_, rows, d_r, 1, d_r, 1, &state->rr_next);
+        cuda::driver_cg_finish_iteration(state, solver_stream_);
+        if (has_preconditioner()) {
+          apply_preconditioner(prog, preconditioner_generation, d_r, d_z,
+                               workspace_r_ndarray_, workspace_z_ndarray_);
+          cublas.cubSdot(handle_, rows, d_r, 1, d_z, 1,
+                         &state->rho_next);
+        }
+        cuda::driver_cg_prepare_direction(state, solver_stream_);
+        cublas.cubSscal(handle_, rows, &state->beta, d_p, 1);
+        cublas.cubSaxpy(handle_, rows, &state->source_scale,
+                        has_preconditioner() ? d_z : d_r, 1, d_p, 1);
       }
-      cuda::driver_cg_prepare_direction(state, solver_stream_);
-      device_scalar_operations_++;
-      cublas.cubSscal(handle_, rows, &state->beta, d_p, 1);
-      cublas.cubSaxpy(handle_, rows, &state->source_scale,
-                      has_preconditioner() ? d_z : d_r, 1, d_p, 1);
-      issued_iterations++;
-      executed_iterations_++;
+    }
+    issued_iterations += chunk_iterations;
+    executed_iterations_ += static_cast<std::uint64_t>(chunk_iterations);
+    operator_apply_calls_ += static_cast<std::uint64_t>(chunk_iterations);
+    device_scalar_operations_ += static_cast<std::uint64_t>(
+        chunk_iterations * (has_preconditioner() ? 6 : 5));
+    if (has_preconditioner()) {
+      preconditioner_apply_calls_ +=
+          static_cast<std::uint64_t>(chunk_iterations);
     }
     read_state();
     if (verbose_) {
@@ -968,10 +1394,19 @@ SparseSolvePlanRuntimeStatistics CUCG::debug_runtime_statistics() const {
   result.solver_chunk_reuses = solver_chunk_reuses_;
   result.solver_chunk_direct_submissions =
       solver_chunk_direct_submissions_;
-  result.solver_graph_enabled = false;
+  result.solver_chunk_replays = solver_chunk_replays_;
+  result.solver_chunk_rebinds = solver_chunk_rebinds_;
+  result.solver_chunk_invalidations = solver_chunk_invalidations_;
+  result.solver_graph_enabled = solver_chunk_builds_ > 0;
   result.solver_replay_unavailable_reason =
       execution_policy_ == SparseSolveExecutionPolicy::host_check_every_k
-          ? "legacy_default_stream_not_capture_qualified"
+          ? (result.solver_graph_enabled
+                 ? "none"
+                 : (solver_chunk_replay_state_
+                        ? solver_chunk_replay_state_->unavailable_reason
+                        : (native_solver_chunk_eligible()
+                               ? "not_built"
+                               : native_solver_chunk_unavailable_reason())))
           : "not_requested";
   result.persistent_vector_count =
       workspace_ax_ != nullptr && workspace_r_ != nullptr &&
@@ -991,7 +1426,9 @@ SparseSolvePlanRuntimeStatistics CUCG::debug_runtime_statistics() const {
       execution_policy_ == SparseSolveExecutionPolicy::host_check_every_k
           ? "device"
           : "host";
-  result.solver_stream_policy = "legacy_default_stream";
+  result.solver_stream_policy = result.solver_graph_enabled
+                                    ? "capture_stream_default_replay"
+                                    : "legacy_default_stream";
   result.persistent_scalar_count = workspace_scalars_ ? 23 : 0;
   result.persistent_scalar_reserved_bytes =
       workspace_scalars_ ? sizeof(cuda::CudaCGScalarState) : 0;
@@ -2536,58 +2973,202 @@ void VulkanCGIterationPlan::solve(Program *program,
   Ndarray *next_rr = rr_b_;
   int executed_this_solve = 0;
   bool terminal = initial_terminal;
+  const bool native_chunk_provider =
+      (csr_matrix_ != nullptr || bsr_matrix_ != nullptr) &&
+      (!has_preconditioner() || preconditioner_ != nullptr ||
+       block_preconditioner_ != nullptr);
+  const bool native_chunk_requested =
+      get_environ_config("TI_VULKAN_SOLVER_CHUNK_REPLAY", 1) != 0 &&
+      native_chunk_provider && program->profiler == nullptr;
+  if (native_chunk_requested && !solver_chunk_replay_state_) {
+    solver_chunk_replay_state_ =
+        std::make_unique<VulkanSolverChunkReplayState>();
+  }
+  auto issue_iteration = [&](int iteration, Ndarray *iteration_rr,
+                             Ndarray *iteration_next_rr) {
+    apply_operator(program, operator_generation, *direction_, *ap_);
+    program->vulkan_sparse_dot(direction_, ap_, p_ap_, n);
+    program->vulkan_sparse_scalar_divide(iteration_rr, p_ap_, alpha_,
+                                         status_scalar_);
+    program->vulkan_sparse_cg_update(direction_, ap_, alpha_, mutable_x,
+                                     residual_, n);
+    if (has_preconditioner()) {
+      program->vulkan_sparse_dot(residual_, residual_,
+                                 residual_norm_scalar_, n);
+      if (adaptive_) {
+        program->vulkan_sparse_convergence(
+            residual_norm_scalar_, status_scalar_,
+            completed_iterations_scalar_, rhs_squared_, absolute_tolerance_,
+            relative_tolerance_, static_cast<std::uint32_t>(iteration + 1));
+      }
+      apply_preconditioner(program, preconditioner_generation, *residual_,
+                           *preconditioned_residual_);
+      program->vulkan_sparse_dot(residual_, preconditioned_residual_,
+                                 iteration_next_rr, n);
+    } else {
+      program->vulkan_sparse_dot(residual_, residual_, iteration_next_rr, n);
+      if (adaptive_) {
+        program->vulkan_sparse_convergence(
+            iteration_next_rr, status_scalar_, completed_iterations_scalar_,
+            rhs_squared_, absolute_tolerance_, relative_tolerance_,
+            static_cast<std::uint32_t>(iteration + 1));
+      }
+    }
+    if (iteration + 1 < fixed_iterations_) {
+      program->vulkan_sparse_scalar_divide(iteration_next_rr, iteration_rr,
+                                           beta_, status_scalar_);
+      program->vulkan_sparse_cg_direction(
+          has_preconditioner() ? preconditioned_residual_ : residual_, beta_,
+          direction_, n);
+    }
+  };
+  std::size_t chunk_slot_index = 0;
   while (!terminal && executed_this_solve < fixed_iterations_) {
     const int chunk_iterations =
         host_check_every_k
             ? std::min(host_check_interval_,
                        fixed_iterations_ - executed_this_solve)
-            : fixed_iterations_ - executed_this_solve;
-    if (host_check_every_k) {
-      solver_chunk_direct_submissions_++;
-    }
-    for (int local_iteration = 0; local_iteration < chunk_iterations;
-         ++local_iteration) {
-      const int iteration = executed_this_solve;
-      apply_operator(program, operator_generation, *direction_, *ap_);
-      program->vulkan_sparse_dot(direction_, ap_, p_ap_, n);
-      program->vulkan_sparse_scalar_divide(current_rr, p_ap_, alpha_,
-                                           status_scalar_);
-      program->vulkan_sparse_cg_update(direction_, ap_, alpha_, mutable_x,
-                                       residual_, n);
-      if (has_preconditioner()) {
-        program->vulkan_sparse_dot(residual_, residual_,
-                                   residual_norm_scalar_, n);
-        if (adaptive_) {
-          program->vulkan_sparse_convergence(
-              residual_norm_scalar_, status_scalar_,
-              completed_iterations_scalar_, rhs_squared_,
-              absolute_tolerance_, relative_tolerance_,
-              static_cast<std::uint32_t>(iteration + 1));
+            : (native_chunk_requested
+                   ? std::min(8, fixed_iterations_ - executed_this_solve)
+                   : fixed_iterations_ - executed_this_solve);
+    const int chunk_start_iteration = executed_this_solve;
+    bool submitted = false;
+    if (native_chunk_requested) {
+      auto &slot =
+          solver_chunk_replay_state_->slot(chunk_slot_index);
+      VulkanCommandReplayKey key;
+      key.push(200);
+      key.push(program->runtime_program_generation());
+      key.push(program->vulkan_sparse_algebra_replay_generation());
+      key.push(static_cast<std::uint64_t>(chunk_start_iteration));
+      key.push(static_cast<std::uint64_t>(chunk_iterations));
+      key.push(has_preconditioner() ? 1 : 0);
+      key.push(adaptive_ ? 1 : 0);
+      push_solver_chunk_stamp(key, operator_stamp);
+      push_solver_chunk_stamp(
+          key, preconditioner_generation
+                   ? preconditioner_generation.resource_stamp()
+                   : OperatorResourceStamp{});
+      const Ndarray *chunk_resources[] = {
+          &x,
+          ap_,
+          residual_,
+          direction_,
+          preconditioned_residual_,
+          initial_rr_,
+          rhs_squared_,
+          rr_a_,
+          rr_b_,
+          p_ap_,
+          alpha_,
+          beta_,
+          residual_norm_scalar_,
+          status_scalar_,
+          completed_iterations_scalar_};
+      for (const auto *resource : chunk_resources) {
+        push_solver_chunk_resource(key, resource);
+      }
+
+      const auto solution_handle = x.runtime_resource_handle();
+      if (slot.solution_handle != solution_handle) {
+        if (slot.solution_handle) {
+          slot.cache.reset();
+          slot.solution_lease.reset();
+          ++solver_chunk_invalidations_;
+          ++solver_chunk_rebinds_;
         }
-        apply_preconditioner(program, preconditioner_generation, *residual_,
-                             *preconditioned_residual_);
-        preconditioner_applies_this_solve++;
-        program->vulkan_sparse_dot(residual_, preconditioned_residual_,
-                                   next_rr, n);
+        slot.solution_handle = solution_handle;
+        slot.solution_lease.emplace(
+            program->acquire_ndarray_external_lease(solution_handle));
+      }
+      const auto preconditioner_stamp =
+          preconditioner_generation
+              ? preconditioner_generation.resource_stamp()
+              : OperatorResourceStamp{};
+      if (slot.operator_numeric_revision != 0 &&
+          (slot.operator_numeric_revision != operator_stamp.numeric_revision ||
+           slot.preconditioner_numeric_revision !=
+               preconditioner_stamp.numeric_revision)) {
+        ++solver_chunk_rebinds_;
+      }
+      slot.operator_numeric_revision = operator_stamp.numeric_revision;
+      slot.preconditioner_numeric_revision =
+          preconditioner_stamp.numeric_revision;
+      const bool replaces_recording =
+          slot.cache.entry.cmdlist != nullptr &&
+          slot.cache.entry.key != key;
+
+      (void)program->flush_if_pending();
+      auto record_chunk = [&](Device *device, CommandList *cmdlist) {
+        VulkanNativeCommandRecordingScope recording(program, device, cmdlist);
+        Ndarray *record_current_rr = current_rr;
+        Ndarray *record_next_rr = next_rr;
+        for (int local_iteration = 0; local_iteration < chunk_iterations;
+             ++local_iteration) {
+          const int iteration = chunk_start_iteration + local_iteration;
+          issue_iteration(iteration, record_current_rr, record_next_rr);
+          if (iteration + 1 < fixed_iterations_) {
+            std::swap(record_current_rr, record_next_rr);
+          }
+        }
+      };
+      submitted = slot.cache.submit_or_record(
+          program, program->get_compute_device(), key,
+          program->profiler != nullptr, record_chunk);
+      if (submitted) {
+        if (slot.cache.last_path ==
+            VulkanCommandReplayCache::LastPath::record) {
+          ++solver_chunk_builds_;
+          if (replaces_recording) {
+            ++solver_chunk_invalidations_;
+          }
+        } else if (slot.cache.last_path ==
+                   VulkanCommandReplayCache::LastPath::replay) {
+          if (preconditioner_) {
+            preconditioner_->record_replayed_apply_calls(chunk_iterations);
+          } else if (block_preconditioner_) {
+            block_preconditioner_->record_replayed_apply_calls(
+                chunk_iterations);
+          }
+          ++solver_chunk_reuses_;
+          ++solver_chunk_replays_;
+        }
+        solver_chunk_replay_state_->unavailable_reason = "none";
       } else {
-        program->vulkan_sparse_dot(residual_, residual_, next_rr, n);
-        if (adaptive_) {
-          program->vulkan_sparse_convergence(
-              next_rr, status_scalar_, completed_iterations_scalar_,
-              rhs_squared_, absolute_tolerance_, relative_tolerance_,
-              static_cast<std::uint32_t>(iteration + 1));
+        solver_chunk_replay_state_->unavailable_reason =
+            "native_command_replay_fallback";
+      }
+    }
+    if (!submitted) {
+      if (host_check_every_k || native_chunk_requested) {
+        ++solver_chunk_direct_submissions_;
+      }
+      for (int local_iteration = 0; local_iteration < chunk_iterations;
+           ++local_iteration) {
+        const int iteration = chunk_start_iteration + local_iteration;
+        issue_iteration(iteration, current_rr, next_rr);
+        if (iteration + 1 < fixed_iterations_) {
+          std::swap(current_rr, next_rr);
         }
       }
-      if (iteration + 1 < fixed_iterations_) {
-        program->vulkan_sparse_scalar_divide(next_rr, current_rr, beta_,
-                                             status_scalar_);
-        program->vulkan_sparse_cg_direction(
-            has_preconditioner() ? preconditioned_residual_ : residual_,
-            beta_, direction_, n);
+    } else {
+      int rr_swaps = 0;
+      for (int local_iteration = 0; local_iteration < chunk_iterations;
+           ++local_iteration) {
+        if (chunk_start_iteration + local_iteration + 1 < fixed_iterations_) {
+          ++rr_swaps;
+        }
+      }
+      if ((rr_swaps & 1) != 0) {
         std::swap(current_rr, next_rr);
       }
-      executed_this_solve++;
     }
+    executed_this_solve += chunk_iterations;
+    if (has_preconditioner()) {
+      preconditioner_applies_this_solve +=
+          static_cast<std::uint64_t>(chunk_iterations);
+    }
+    ++chunk_slot_index;
     if (host_check_every_k) {
       int32_t chunk_status_host = 0;
       int32_t chunk_completed_host = 0;
@@ -2766,15 +3347,31 @@ VulkanCGIterationPlan::debug_runtime_statistics() const {
   result.solver_chunk_reuses = solver_chunk_reuses_;
   result.solver_chunk_direct_submissions =
       solver_chunk_direct_submissions_;
-  result.solver_graph_enabled = false;
+  result.solver_chunk_replays = solver_chunk_replays_;
+  result.solver_chunk_rebinds = solver_chunk_rebinds_;
+  result.solver_chunk_invalidations = solver_chunk_invalidations_;
+  result.solver_graph_enabled = solver_chunk_builds_ > 0;
   result.solver_replay_unavailable_reason =
-      adaptive_ &&
+      result.solver_graph_enabled
+          ? "none"
+          : ((adaptive_ &&
               execution_policy_ ==
-                  SparseSolveExecutionPolicy::host_check_every_k
-          ? "combined_solver_sequence_not_composable"
-          : "not_requested";
+                  SparseSolveExecutionPolicy::host_check_every_k)
+                 ? (solver_chunk_replay_state_
+                        ? solver_chunk_replay_state_->unavailable_reason
+                        : (((csr_matrix_ != nullptr || bsr_matrix_ != nullptr) &&
+                            (!has_preconditioner() ||
+                             preconditioner_ != nullptr ||
+                             block_preconditioner_ != nullptr))
+                               ? (program_->profiler != nullptr
+                                      ? "runtime_profiler_scopes_enabled"
+                                      : "native_command_replay_disabled")
+                               : "provider_not_record_composable"))
+                 : "not_requested");
   result.solver_scalar_location = "device";
-  result.solver_stream_policy = "program_submission_order";
+  result.solver_stream_policy = result.solver_graph_enabled
+                                    ? "recorded_compute_sequence"
+                                    : "program_submission_order";
   result.fixed_iteration_only = !adaptive_;
   result.bounded_masked_execution = adaptive_;
   result.persistent_vector_count = has_preconditioner() ? 4 : 3;
@@ -2801,6 +3398,7 @@ VulkanCGIterationPlan::debug_runtime_statistics() const {
 
 void VulkanCGIterationPlan::release_workspace() {
 #if defined(TI_WITH_VULKAN)
+  solver_chunk_replay_state_.reset();
   if (!program_) {
     return;
   }

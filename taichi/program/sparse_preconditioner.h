@@ -64,8 +64,10 @@ class SparseJacobiPreconditionerPlan final {
                      std::uintptr_t output);
   void apply_cuda_raw(Program *program,
                       std::uintptr_t input,
-                      std::uintptr_t output);
+                      std::uintptr_t output,
+                      CUstream stream = nullptr);
   void apply(Program *program, const Ndarray &input, const Ndarray &output);
+  void record_replayed_apply_calls(std::uint64_t count);
   OperatorResourceLease acquire_resource_lease() const;
   SparsePreconditionerPlanRuntimeStatistics debug_runtime_statistics() const;
 
@@ -121,8 +123,10 @@ class SparseBlockJacobiPreconditionerPlan final {
                      std::uintptr_t output);
   void apply_cuda_raw(Program *program,
                       std::uintptr_t input,
-                      std::uintptr_t output);
+                      std::uintptr_t output,
+                      CUstream stream = nullptr);
   void apply(Program *program, const Ndarray &input, const Ndarray &output);
+  void record_replayed_apply_calls(std::uint64_t count);
   OperatorResourceLease acquire_resource_lease() const;
   SparsePreconditionerPlanRuntimeStatistics debug_runtime_statistics() const;
 

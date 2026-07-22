@@ -534,6 +534,7 @@ def test_device_fixed_csr_jacobi_pcg_composition_and_stale_version():
     identity.solve(prog, identity_solution.arr, rhs.arr)
     pcg.solve(prog, pcg_solution.arr, rhs.arr)
 
+
     assert identity.get_status() == 2
     assert pcg.get_status() == 2
     assert dict(identity._get_last_result())["termination_reason"] == (
@@ -669,3 +670,249 @@ def test_device_fixed_csr_jacobi_pcg_composition_and_stale_version():
             "apply_calls"
         ]
     )
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_native_stored_csr_pcg_chunk_replay():
+    n = 16
+    max_iterations = 16
+    tolerance = 1e-5
+    builder = ti.linalg.SparseMatrixBuilder(
+        n,
+        n,
+        max_num_triplets=3 * n - 2,
+        dtype=ti.f32,
+        storage_format="row_major",
+    )
+
+    @ti.kernel
+    def assemble(matrix: ti.types.sparse_matrix_builder()):
+        for i in range(n):
+            matrix[i, i] += 3.0 + 0.02 * i
+            if i > 0:
+                matrix[i, i - 1] += -1.0
+            if i + 1 < n:
+                matrix[i, i + 1] += -1.0
+
+    assemble(builder)
+    matrix = builder.build()
+    exact = np.sin(
+        np.linspace(0.1, 2.4, n, dtype=np.float32)
+    ).astype(np.float32)
+    diagonal = 3.0 + 0.02 * np.arange(n, dtype=np.float32)
+    rhs_host = diagonal * exact
+    rhs_host[1:] -= exact[:-1]
+    rhs_host[:-1] -= exact[1:]
+    rhs = ti.ndarray(dtype=ti.f32, shape=n)
+    solution = ti.ndarray(dtype=ti.f32, shape=n)
+    rhs.from_numpy(rhs_host)
+    solution.from_numpy(np.zeros(n, dtype=np.float32))
+    prog = ti.lang.impl.get_runtime().prog
+    if prog.config().arch == ti._lib.core.Arch.cuda:
+        identity_plan = ti._lib.core.make_cucg_solver(
+            matrix.matrix, max_iterations, tolerance, False
+        )
+    else:
+        identity_plan = ti._lib.core._make_vulkan_cg_convergence_plan(
+            prog, matrix.matrix, max_iterations, tolerance
+        )
+    identity_plan._configure_execution_policy("host_check_every_k", 4)
+    identity_plan.solve(prog, solution.arr, rhs.arr)
+    assert identity_plan.get_status() == 2
+    identity_first = identity_plan._debug_runtime_stats()
+    assert identity_first["identity"]["solver_graph_enabled"]
+    assert identity_first["operations"]["solver_chunk_builds"] >= 1
+    solution.from_numpy(np.zeros(n, dtype=np.float32))
+    identity_plan.solve(prog, solution.arr, rhs.arr)
+    identity_second = identity_plan._debug_runtime_stats()
+    assert identity_second["operations"]["solver_chunk_builds"] == (
+        identity_first["operations"]["solver_chunk_builds"]
+    )
+    assert identity_second["operations"]["solver_chunk_replays"] > (
+        identity_first["operations"]["solver_chunk_replays"]
+    )
+    np.testing.assert_allclose(
+        solution.to_numpy(), exact, rtol=3e-3, atol=3e-3
+    )
+    solution.from_numpy(np.zeros(n, dtype=np.float32))
+    preconditioner = ti._lib.core._make_sparse_jacobi_preconditioner_plan(
+        prog, matrix.matrix
+    )
+    if prog.config().arch == ti._lib.core.Arch.cuda:
+        plan = ti._lib.core._make_cuda_jacobi_pcg_solver(
+            prog,
+            matrix.matrix,
+            preconditioner,
+            max_iterations,
+            tolerance,
+            False,
+        )
+    else:
+        plan = ti._lib.core._make_vulkan_jacobi_pcg_convergence_plan(
+            prog,
+            matrix.matrix,
+            preconditioner,
+            max_iterations,
+            tolerance,
+        )
+    plan._configure_execution_policy("host_check_every_k", 4)
+
+    plan.solve(prog, solution.arr, rhs.arr)
+    assert plan.get_status() == 2
+    np.testing.assert_allclose(
+        solution.to_numpy(), exact, rtol=3e-3, atol=3e-3
+    )
+    first = plan._debug_runtime_stats()
+    assert first["identity"]["solver_graph_enabled"]
+    assert first["identity"]["solver_replay_unavailable_reason"] == "none"
+    assert first["operations"]["solver_chunk_builds"] >= 1
+    assert first["operations"]["solver_chunk_direct_submissions"] == 0
+
+    solution.from_numpy(np.zeros(n, dtype=np.float32))
+    plan.solve(prog, solution.arr, rhs.arr)
+    assert plan.get_status() == 2
+    np.testing.assert_allclose(
+        solution.to_numpy(), exact, rtol=3e-3, atol=3e-3
+    )
+    second = plan._debug_runtime_stats()
+    assert second["operations"]["solver_chunk_builds"] == first[
+        "operations"
+    ]["solver_chunk_builds"]
+    assert second["operations"]["solver_chunk_replays"] > first[
+        "operations"
+    ]["solver_chunk_replays"]
+    assert second["operations"]["solver_chunk_direct_submissions"] == 0
+    assert second["operations"]["solver_chunk_invalidations"] == 0
+
+    compressed_values = []
+    for row in range(n):
+        if row > 0:
+            compressed_values.append(-1.0)
+        compressed_values.append(float(diagonal[row]))
+        if row + 1 < n:
+            compressed_values.append(-1.0)
+    updated_values = ti.ndarray(dtype=ti.f32, shape=3 * n - 2)
+    updated_values.from_numpy(
+        np.asarray(compressed_values, dtype=np.float32) * 1.25
+    )
+    matrix._update_values(updated_values)
+    preconditioner._refresh_numeric(prog)
+    solution.from_numpy(np.zeros(n, dtype=np.float32))
+    plan.solve(prog, solution.arr, rhs.arr)
+    np.testing.assert_allclose(
+        solution.to_numpy(), exact / 1.25, rtol=3e-3, atol=3e-3
+    )
+    rebound = plan._debug_runtime_stats()
+    assert rebound["operations"]["solver_chunk_builds"] == second[
+        "operations"
+    ]["solver_chunk_builds"]
+    assert rebound["operations"]["solver_chunk_rebinds"] > second[
+        "operations"
+    ]["solver_chunk_rebinds"]
+    assert rebound["operations"]["solver_chunk_invalidations"] == 0
+
+    replacement_solution = ti.ndarray(dtype=ti.f32, shape=n)
+    replacement_solution.from_numpy(np.zeros(n, dtype=np.float32))
+    plan.solve(prog, replacement_solution.arr, rhs.arr)
+    np.testing.assert_allclose(
+        replacement_solution.to_numpy(),
+        exact / 1.25,
+        rtol=3e-3,
+        atol=3e-3,
+    )
+    rebound_address = plan._debug_runtime_stats()
+    assert rebound_address["operations"]["solver_chunk_builds"] > rebound[
+        "operations"
+    ]["solver_chunk_builds"]
+    assert rebound_address["operations"]["solver_chunk_rebinds"] > rebound[
+        "operations"
+    ]["solver_chunk_rebinds"]
+    assert rebound_address["operations"][
+        "solver_chunk_invalidations"
+    ] > rebound["operations"]["solver_chunk_invalidations"]
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_native_stored_bsr_block_jacobi_pcg_chunk_replay():
+    block_size = 2
+    block_rows = 4
+    n = block_size * block_rows
+    row_offsets = ti.ndarray(dtype=ti.i32, shape=block_rows + 1)
+    column_indices = ti.ndarray(dtype=ti.i32, shape=block_rows)
+    row_offsets.from_numpy(np.arange(block_rows + 1, dtype=np.int32))
+    column_indices.from_numpy(np.arange(block_rows, dtype=np.int32))
+    pattern = ti.linalg.SparsePattern.bsr(
+        block_rows=block_rows,
+        block_cols=block_rows,
+        block_size=block_size,
+        row_offsets=row_offsets,
+        column_indices=column_indices,
+    )
+    blocks = np.asarray(
+        [
+            [[3.0, 0.25], [0.25, 2.0]],
+            [[2.5, -0.2], [-0.2, 4.0]],
+            [[4.0, 0.3], [0.3, 3.0]],
+            [[3.5, -0.15], [-0.15, 2.5]],
+        ],
+        dtype=np.float32,
+    )
+    values = ti.ndarray(dtype=ti.f32, shape=blocks.size)
+    values.from_numpy(blocks.reshape(-1))
+    matrix = pattern.matrix(values)
+    exact = np.linspace(-0.8, 1.1, n, dtype=np.float32)
+    rhs_host = np.concatenate(
+        [blocks[i] @ exact[2 * i : 2 * i + 2] for i in range(block_rows)]
+    ).astype(np.float32)
+    rhs = ti.ndarray(dtype=ti.f32, shape=n)
+    solution = ti.ndarray(dtype=ti.f32, shape=n)
+    rhs.from_numpy(rhs_host)
+    solution.fill(0.0)
+    prog = ti.lang.impl.get_runtime().prog
+    preconditioner = (
+        ti._lib.core._make_sparse_block_jacobi_preconditioner_plan(
+            prog, matrix.matrix
+        )
+    )
+    if prog.config().arch == ti._lib.core.Arch.cuda:
+        plan = ti._lib.core._make_cuda_block_jacobi_pcg_solver(
+            prog,
+            matrix.matrix,
+            preconditioner,
+            8,
+            1e-6,
+            False,
+        )
+    else:
+        plan = (
+            ti._lib.core._make_vulkan_block_jacobi_pcg_convergence_plan(
+                prog, matrix.matrix, preconditioner, 8, 1e-6
+            )
+        )
+    plan._configure_execution_policy("host_check_every_k", 4)
+
+    plan.solve(prog, solution.arr, rhs.arr)
+    assert plan.get_status() == 2
+    np.testing.assert_allclose(
+        solution.to_numpy(), exact, rtol=3e-4, atol=3e-4
+    )
+    first = plan._debug_runtime_stats()
+    assert first["identity"]["solver_graph_enabled"]
+    assert first["operations"]["solver_chunk_builds"] >= 1
+    assert first["operations"]["solver_chunk_direct_submissions"] == 0
+
+    solution.fill(0.0)
+    plan.solve(prog, solution.arr, rhs.arr)
+    assert plan.get_status() == 2
+    np.testing.assert_allclose(
+        solution.to_numpy(), exact, rtol=3e-4, atol=3e-4
+    )
+    second = plan._debug_runtime_stats()
+    assert second["operations"]["solver_chunk_builds"] == first[
+        "operations"
+    ]["solver_chunk_builds"]
+    assert second["operations"]["solver_chunk_replays"] > first[
+        "operations"
+    ]["solver_chunk_replays"]
+    assert second["operations"]["solver_chunk_direct_submissions"] == 0
+    assert second["operations"]["solver_chunk_invalidations"] == 0

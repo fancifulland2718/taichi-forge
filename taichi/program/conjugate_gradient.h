@@ -16,6 +16,10 @@
 
 namespace taichi::lang {
 
+namespace cuda {
+struct CudaCGScalarState;
+}
+
 class SparseJacobiPreconditionerPlan;
 class SparseBlockJacobiPreconditionerPlan;
 class CompiledKernelPreconditionerPlan;
@@ -24,6 +28,8 @@ class OperatorBinding;
 class OperatorPinnedAction;
 class PreconditionerPlan;
 class ExperimentalLinearOperatorHandle;
+struct CudaSolverChunkReplayState;
+struct VulkanSolverChunkReplayState;
 
 enum class SparseSolveStatus : int {
   kNotRun = -1,
@@ -529,6 +535,28 @@ class CUCG {
       const Ndarray &b,
       const OperatorPinnedAction &operator_generation,
       const OperatorPinnedAction &preconditioner_generation);
+  bool try_submit_solver_chunk(
+      Program *program,
+      const Ndarray &x,
+      const OperatorPinnedAction &operator_generation,
+      const OperatorPinnedAction &preconditioner_generation,
+      int chunk_iterations,
+      float *d_x,
+      float *d_ax,
+      float *d_r,
+      float *d_p,
+      float *d_z,
+      cuda::CudaCGScalarState *state);
+  void issue_native_solver_iteration(Program *program,
+                                     CUstream stream,
+                                     float *d_x,
+                                     float *d_ax,
+                                     float *d_r,
+                                     float *d_p,
+                                     float *d_z,
+                                     cuda::CudaCGScalarState *state);
+  bool native_solver_chunk_eligible() const;
+  std::string native_solver_chunk_unavailable_reason() const;
 
   cublasHandle_t handle_{nullptr};
   CUstream solver_stream_{nullptr};
@@ -584,6 +612,10 @@ class CUCG {
   std::uint64_t solver_chunk_builds_{0};
   std::uint64_t solver_chunk_reuses_{0};
   std::uint64_t solver_chunk_direct_submissions_{0};
+  std::uint64_t solver_chunk_replays_{0};
+  std::uint64_t solver_chunk_rebinds_{0};
+  std::uint64_t solver_chunk_invalidations_{0};
+  std::unique_ptr<CudaSolverChunkReplayState> solver_chunk_replay_state_;
   std::uint64_t device_to_device_bytes_{0};
   std::uint64_t device_to_host_bytes_{0};
   std::uint64_t host_to_device_bytes_{0};
@@ -1001,6 +1033,10 @@ class VulkanCGIterationPlan {
   std::uint64_t solver_chunk_builds_{0};
   std::uint64_t solver_chunk_reuses_{0};
   std::uint64_t solver_chunk_direct_submissions_{0};
+  std::uint64_t solver_chunk_replays_{0};
+  std::uint64_t solver_chunk_rebinds_{0};
+  std::uint64_t solver_chunk_invalidations_{0};
+  std::unique_ptr<VulkanSolverChunkReplayState> solver_chunk_replay_state_;
   std::uint64_t workspace_builds_{1};
   std::uint64_t workspace_reuses_{0};
   std::uint64_t operator_apply_calls_{0};

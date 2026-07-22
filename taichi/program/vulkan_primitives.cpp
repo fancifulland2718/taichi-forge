@@ -4571,6 +4571,7 @@ struct VulkanMetricReduceCache {
 
 struct VulkanSparseAlgebraCache {
   Device *device{nullptr};
+  std::uint64_t replay_generation{1};
   size_t partial_capacity{0};
   size_t cached_bytes{0};
   DeviceAllocation partial{kDeviceNullAllocation};
@@ -4630,6 +4631,7 @@ struct VulkanSparseAlgebraCache {
   VulkanCommandReplayCache sparse_assembly_finalize_control_command_replay;
 
   void reset_resource_sets() {
+    ++replay_generation;
     csr_spmv_bindings.reset();
     bsr_spmv_bindings.reset();
     sparse_axpy_bindings.reset();
@@ -4930,6 +4932,7 @@ struct VulkanSparseAlgebraCache {
   }
 
   void clear_partial_alloc() {
+    ++replay_generation;
     sparse_dot_partial_bindings.reset();
     sparse_dot_partial_command_replay.reset();
     if (device && partial != kDeviceNullAllocation) {
@@ -17272,6 +17275,16 @@ std::size_t Program::vulkan_sparse_algebra_workspace_bytes() const {
       .reserved_bytes;
 }
 
+std::uint64_t Program::vulkan_sparse_algebra_replay_generation() {
+  TI_ERROR_IF(!vulkan_sparse_algebra_available(),
+              "Vulkan sparse replay generation is only available on Vulkan.");
+  Device *device = get_compute_device();
+  TI_ERROR_IF(!device,
+              "Vulkan sparse replay generation requires a compute device.");
+  auto cache_lease = get_sparse_algebra_cache(this, device);
+  return cache_lease->replay_generation;
+}
+
 std::size_t Program::vulkan_transform_workspace_bytes() const {
   return primitive_workspace_arena_
       .snapshot(PrimitiveWorkspaceBackend::vulkan,
@@ -18492,6 +18505,10 @@ std::size_t Program::vulkan_metric_reduce_workspace_bytes() const {
 }
 
 std::size_t Program::vulkan_sparse_algebra_workspace_bytes() const {
+  return 0;
+}
+
+std::uint64_t Program::vulkan_sparse_algebra_replay_generation() {
   return 0;
 }
 

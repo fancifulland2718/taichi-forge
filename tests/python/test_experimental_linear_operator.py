@@ -407,7 +407,7 @@ def test_vulkan_experimental_host_check_relative_cg_chunk_contract():
         assert not identity["solver_graph_enabled"]
         assert (
             identity["solver_replay_unavailable_reason"]
-            == "combined_solver_sequence_not_composable"
+            == "provider_not_record_composable"
         )
 
 

@@ -750,7 +750,8 @@ void SparseJacobiPreconditionerPlan::apply_cpu_raw(
 void SparseJacobiPreconditionerPlan::apply_cuda_raw(
     Program *program,
     std::uintptr_t input,
-    std::uintptr_t output) {
+    std::uintptr_t output,
+    CUstream stream) {
   TI_ERROR_IF(program != program_,
               "Sparse Jacobi plan must be applied by its construction "
               "Program.");
@@ -777,11 +778,17 @@ void SparseJacobiPreconditionerPlan::apply_cuda_raw(
       reinterpret_cast<void *>(
           program_->get_ndarray_data_ptr_as_int(device_inverse_)),
       reinterpret_cast<void *>(input), reinterpret_cast<void *>(output),
-      rows_, nullptr);
+      rows_, stream);
 #else
   TI_NOT_IMPLEMENTED;
 #endif
   apply_calls_++;
+}
+
+void SparseJacobiPreconditionerPlan::record_replayed_apply_calls(
+    std::uint64_t count) {
+  std::lock_guard<std::recursive_mutex> lock(apply_mutex_);
+  apply_calls_ += count;
 }
 
 OperatorResourceLease
@@ -1273,7 +1280,8 @@ void SparseBlockJacobiPreconditionerPlan::apply_cpu_raw(
 void SparseBlockJacobiPreconditionerPlan::apply_cuda_raw(
     Program *program,
     std::uintptr_t input,
-    std::uintptr_t output) {
+    std::uintptr_t output,
+    CUstream stream) {
   TI_ERROR_IF(program != program_,
               "Sparse block-Jacobi plan must be applied by its "
               "construction Program.");
@@ -1300,11 +1308,17 @@ void SparseBlockJacobiPreconditionerPlan::apply_cuda_raw(
       reinterpret_cast<void *>(
           program_->get_ndarray_data_ptr_as_int(device_inverse_blocks_)),
       reinterpret_cast<void *>(input), reinterpret_cast<void *>(output),
-      block_rows_, block_size_, nullptr);
+      block_rows_, block_size_, stream);
 #else
   TI_NOT_IMPLEMENTED;
 #endif
   apply_calls_++;
+}
+
+void SparseBlockJacobiPreconditionerPlan::record_replayed_apply_calls(
+    std::uint64_t count) {
+  std::lock_guard<std::recursive_mutex> lock(apply_mutex_);
+  apply_calls_ += count;
 }
 
 OperatorResourceLease

@@ -2400,6 +2400,7 @@ class TI_DLL_EXPORT Program {
   void vulkan_sparse_algebra_clear_workspace();
 
   std::size_t vulkan_sparse_algebra_workspace_bytes() const;
+  std::uint64_t vulkan_sparse_algebra_replay_generation();
 
   bool vulkan_transform_available() const;
 
