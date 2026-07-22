@@ -2166,6 +2166,11 @@ from taichi_forge.linalg._batched_solver import (  # noqa: E402
     BatchedSolveResult,
     SolveSubmission,
 )
+from taichi_forge.linalg._solve_qualification import (  # noqa: E402
+    SolveQualificationReport,
+    qualify_solve_plan,
+    summarize_solve_qualifications,
+)
 
 
 __all__ = [
@@ -2177,9 +2182,12 @@ __all__ = [
     "PreconditionerPlan",
     "PreconditionerSession",
     "SolvePlan",
+    "SolveQualificationReport",
     "SolveResult",
     "SolveSubmission",
+    "qualify_solve_plan",
     "summarize_operator_qualifications",
+    "summarize_solve_qualifications",
     "aslinearoperator",
     "block_diagonal",
     "identity",
