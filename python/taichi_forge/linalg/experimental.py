@@ -1604,14 +1604,14 @@ class PreconditionerPlan:
 
 
 class SolvePlan:
-    """Persistent CG, PCG, or BiCGSTAB execution plan.
+    """Persistent CG, PCG, MINRES, or BiCGSTAB execution plan.
 
     ``pcg`` accepts fixed stored CSR/BSR providers with explicit ``"jacobi"``
     or ``"block_jacobi"`` selection. It also accepts a trusted SPD
     :class:`LinearOperator` or an explicitly versioned
     :class:`PreconditionerPlan` as a fixed-linear preconditioner. GPU custom
     preconditioners currently require compiled-kernel A and M providers.
-    BiCGSTAB is CPU-only. Vulkan supports bounded masked execution or
+    MINRES and BiCGSTAB are CPU-only. Vulkan supports bounded masked execution or
     chunked host convergence checks, including relative tolerance.
     """
 
@@ -1631,9 +1631,10 @@ class SolvePlan:
             raise TypeError("operator must be experimental.LinearOperator")
         operator._ensure_valid()
         method = str(method).casefold()
-        if method not in ("cg", "pcg", "bicgstab"):
+        if method not in ("cg", "pcg", "minres", "bicgstab"):
             raise TaichiRuntimeError(
-                "SolvePlan method must be 'cg', 'pcg', or 'bicgstab'"
+                "SolvePlan method must be 'cg', 'pcg', 'minres', or "
+                "'bicgstab'"
             )
         if operator.shape[0] != operator.shape[1]:
             raise TaichiRuntimeError("Krylov SolvePlan requires a square operator")
@@ -1773,6 +1774,21 @@ class SolvePlan:
         if singular["known"] and singular["value"] is True:
             raise TaichiRuntimeError("CG/PCG rejects singular operators")
 
+    def _require_self_adjoint(self):
+        traits = self.operator._metadata_snapshot["traits"]
+        self_adjoint = dict(traits["self_adjoint"])
+        singular = dict(traits["singular"])
+        if not self_adjoint["known"] or self_adjoint["value"] is not True:
+            raise TaichiRuntimeError(
+                "MINRES requires an explicit or structurally derived "
+                "self_adjoint=True trait"
+            )
+        if singular["known"] and singular["value"] is True:
+            raise TaichiRuntimeError(
+                "MINRES does not provide singular minimum-length semantics "
+                "and rejects operators declared singular"
+            )
+
     def _require_fixed_linear_preconditioner(self, preconditioner):
         preconditioner._ensure_valid()
         if preconditioner._program is not self._program:
@@ -1821,6 +1837,27 @@ class SolvePlan:
 
         if self.method in ("cg", "pcg"):
             self._require_spd()
+
+        if self.method == "minres":
+            self._require_self_adjoint()
+            if self.preconditioner is not None:
+                raise TaichiRuntimeError(
+                    "experimental MINRES uses identity preconditioning only"
+                )
+            if arch not in cpu_arches:
+                raise TaichiRuntimeError("MINRES SolvePlan is CPU-only")
+            factory = (
+                _ti_core._make_float_cpu_experimental_linear_operator_minres_solver
+                if self.operator.dtype == f32
+                else _ti_core._make_double_cpu_experimental_linear_operator_minres_solver
+            )
+            return factory(
+                self._program,
+                self.operator._handle,
+                self.max_iterations,
+                self.atol,
+                self.rtol,
+            )
 
         if self.method == "bicgstab":
             if self.preconditioner is not None:
@@ -2127,7 +2164,7 @@ class SolvePlan:
         if isinstance(self.preconditioner, PreconditionerPlan):
             self.preconditioner._require_target(self.operator)
             preconditioner_scope = self.preconditioner.pin()
-        if self.method == "bicgstab":
+        if self.method in ("minres", "bicgstab"):
             self._solver.solve_ndarray(self._program, out.arr, rhs.arr)
         else:
             self._solver.solve(self._program, out.arr, rhs.arr)

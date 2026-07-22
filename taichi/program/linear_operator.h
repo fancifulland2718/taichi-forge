@@ -131,6 +131,7 @@ OperatorMathematicalTraits make_spd_operator_traits(
 enum class OperatorSolverFamily : std::uint8_t {
   cg,
   pcg,
+  minres,
   bicgstab,
 };
 

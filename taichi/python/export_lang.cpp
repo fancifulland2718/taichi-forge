@@ -38,6 +38,7 @@
 #include "taichi/program/sparse_bicgstab.h"
 #include "taichi/program/sparse_fixed_bicgstab.h"
 #include "taichi/program/sparse_minres.h"
+#include "taichi/program/sparse_operator_minres.h"
 #include "taichi/aot/graph_data.h"
 #include "taichi/runtime/gfx/runtime.h"
 #include "taichi/ir/mesh.h"
@@ -5852,6 +5853,65 @@ void export_lang(py::module &m) {
             FixedSparseBiCGSTAB<Eigen::VectorXd, double>>(
             program, operator_handle.binding(), max_iterations,
             absolute_tolerance, false, relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::arg("program"), py::arg("operator"),
+      py::arg("max_iterations"), py::arg("absolute_tolerance"),
+      py::arg("relative_tolerance") = 0.0);
+
+  py::class_<OperatorMINRES<Eigen::VectorXf, float>>(m, "OperatorMINRESf")
+      .def("solve_ndarray",
+           &OperatorMINRES<Eigen::VectorXf, float>::solve_ndarray)
+      .def("_get_last_result",
+           [sparse_solve_result_to_dict](
+               const OperatorMINRES<Eigen::VectorXf, float> &solver) {
+             return sparse_solve_result_to_dict(solver.get_last_result());
+           })
+      .def("_debug_runtime_stats",
+           [sparse_solve_plan_stats_to_dict](
+               const OperatorMINRES<Eigen::VectorXf, float> &solver) {
+             return sparse_solve_plan_stats_to_dict(
+                 solver.debug_runtime_statistics());
+           });
+  py::class_<OperatorMINRES<Eigen::VectorXd, double>>(m, "OperatorMINRESd")
+      .def("solve_ndarray",
+           &OperatorMINRES<Eigen::VectorXd, double>::solve_ndarray)
+      .def("_get_last_result",
+           [sparse_solve_result_to_dict](
+               const OperatorMINRES<Eigen::VectorXd, double> &solver) {
+             return sparse_solve_result_to_dict(solver.get_last_result());
+           })
+      .def("_debug_runtime_stats",
+           [sparse_solve_plan_stats_to_dict](
+               const OperatorMINRES<Eigen::VectorXd, double> &solver) {
+             return sparse_solve_plan_stats_to_dict(
+                 solver.debug_runtime_statistics());
+           });
+  m.def(
+      "_make_float_cpu_experimental_linear_operator_minres_solver",
+      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+         int max_iterations, float absolute_tolerance,
+         float relative_tolerance) {
+        TI_ERROR_IF(operator_handle.program() != program,
+                    "MINRES operator belongs to a different Program.");
+        return std::make_unique<OperatorMINRES<Eigen::VectorXf, float>>(
+            program, operator_handle.binding(), max_iterations,
+            absolute_tolerance, relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::arg("program"), py::arg("operator"),
+      py::arg("max_iterations"), py::arg("absolute_tolerance"),
+      py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "_make_double_cpu_experimental_linear_operator_minres_solver",
+      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+         int max_iterations, double absolute_tolerance,
+         double relative_tolerance) {
+        TI_ERROR_IF(operator_handle.program() != program,
+                    "MINRES operator belongs to a different Program.");
+        return std::make_unique<OperatorMINRES<Eigen::VectorXd, double>>(
+            program, operator_handle.binding(), max_iterations,
+            absolute_tolerance, relative_tolerance);
       },
       py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
       py::arg("program"), py::arg("operator"),

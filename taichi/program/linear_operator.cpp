@@ -274,6 +274,15 @@ void validate_operator_solver_compatibility(
   if (family == OperatorSolverFamily::bicgstab) {
     return;
   }
+  if (family == OperatorSolverFamily::minres) {
+    TI_ERROR_IF(!trait_is_trusted_true(traits.self_adjoint),
+                "MINRES requires a trusted self-adjoint trait; unknown or "
+                "empirically-checked claims are insufficient.");
+    TI_ERROR_IF(traits.singular.known() && traits.singular.value,
+                "MINRES does not provide singular minimum-length semantics "
+                "and rejects operators declared singular.");
+    return;
+  }
   TI_ERROR_IF(family == OperatorSolverFamily::pcg &&
                   preconditioner_behavior !=
                       PreconditionerBehavior::fixed_linear,
