@@ -125,6 +125,11 @@ render、streaming 等独立节奏指定稳定 lane，并在需要防止单一 p
 `max_in_flight_per_lane`。`on_saturation='wait'` 提供 backpressure；实时循环若不能阻塞，
 可使用 `on_saturation='raise'`，在没有提交 backend work 的前提下显式处理本帧降级或跳过。
 
+调用因容量不足而等待时，pacer 会复用该等待调用，以有界自适应退避轮询全部 in-flight
+completion，使较晚完成的快 invocation 无需等待最早的慢 invocation 即可释放容量；该机制
+不需要常驻 worker thread。`max_in_flight_per_lane` 仍是为低频 producer 保留容量的手段，
+completion 轮询不会抢占已经进入设备队列的工作。
+
 该机制只协调共享同一 pacer 的调用，不接管普通 kernel、`Graph.run()` 或未 paced 的
 submission。`statistics()` 提供当前/峰值 in-flight 与 queued、逐 lane grant/completion、
 rejection、backend failure 和准入等待时间，可用于验证容量和节奏配置。pacer 不提供优先级、

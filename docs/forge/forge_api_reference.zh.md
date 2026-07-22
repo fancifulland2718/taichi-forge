@@ -773,9 +773,10 @@ render.wait()
 | `pacer.statistics()` | 返回当前/峰值 in-flight 与 queued 数、grant/rejection/completion/failure 计数、准入等待时间和逐 lane 统计。统计调用会非阻塞回收已经完成的票据。 |
 
 一个 invocation 的 host launch turn 不与另一个 paced invocation 交错；launch 完成后，最多
-`max_in_flight` 个 invocation 仍可在 backend 异步执行。已完成项会先被非阻塞回收；当
-单 lane 上限阻塞当前调用时，进度等待优先观察同 lane completion，避免慢 lane 造成不必要的
-跨 lane 完成队头阻塞。
+`max_in_flight` 个 invocation 仍可在 backend 异步执行。准入需要等待时，一个已经阻塞的调用
+会作为协作式 progress steward，以有界自适应退避轮询全部 in-flight completion；存在单 lane
+上限时先检查受限 lane，但较晚完成的快任务仍可在更早提交的慢任务结束前释放全局容量。轮询
+只在存在等待调用期间运行，pacer 不创建后台 worker thread。
 
 该合同是显式协作边界：未使用同一 pacer 的提交不受其控制；它不会重新排序已经进入
 CUDA stream 或 Vulkan queue 的命令，也不是 priority scheduler、dependency graph 或

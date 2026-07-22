@@ -879,10 +879,12 @@ render.wait()
 
 The host launch turn for one invocation does not interleave with another paced
 invocation. After launch, up to `max_in_flight` invocations may continue
-asynchronously on the backend. Ready work is polled first. When a per-lane cap
-blocks the current call, progress waiting prefers a completion from that lane,
-avoiding unnecessary cross-lane completion head-of-line blocking behind a slow
-lane.
+asynchronously on the backend. When admission must wait, one blocked caller
+acts as a cooperative progress steward and polls all in-flight completions with
+bounded adaptive backoff. A completion from the constrained lane is checked
+first when a per-lane cap applies, but a later fast completion can release
+global capacity before an older slow invocation finishes. Polling is active
+only while callers are waiting; the pacer creates no background worker thread.
 
 This is an explicit cooperative boundary. Submissions that do not use the same
 pacer remain outside its control, and it cannot reorder commands already in a

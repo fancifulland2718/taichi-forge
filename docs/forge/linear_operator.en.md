@@ -396,9 +396,11 @@ The complete host launch sequence for one solve is submitted in one admission
 turn. After launch, both solves may remain asynchronous within the
 `max_in_flight` bound. `max_in_flight_per_lane` prevents a high-rate producer
 from occupying every slot, while cross-lane round robin gives an existing
-waiter bounded admission delay. Only calls sharing the same pacer are covered;
-engine frame deadlines, task dependencies, and cancellation remain application
-policies.
+waiter bounded admission delay. A blocked caller polls all in-flight
+completions with bounded adaptive backoff, so a later fast solve may release
+capacity before an older slow solve completes. Only calls sharing the same
+pacer are covered; engine frame deadlines, task dependencies, and cancellation
+remain application policies.
 
 `SolveSubmission.done()` observes backend completion without releasing the
 workspace slot. `wait()` waits when necessary, materializes the complete

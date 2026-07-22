@@ -158,6 +158,13 @@ slot. `on_saturation='wait'` applies backpressure. A real-time loop that cannot
 block can use `on_saturation='raise'` and explicitly degrade or skip that frame
 before any backend work has been submitted.
 
+While a caller is blocked for capacity, the pacer uses that caller to poll all
+in-flight completions with bounded adaptive backoff. This allows a later fast
+invocation to free capacity without waiting for the oldest slow invocation and
+does not require a persistent worker thread. The per-lane limit remains the
+mechanism that reserves capacity against a high-rate producer; completion
+polling does not preempt work already queued on the device.
+
 The mechanism coordinates only calls sharing that pacer; ordinary kernels,
 `Graph.run()`, and unpaced submissions remain outside its control.
 `statistics()` exposes current and peak in-flight/queued counts, per-lane

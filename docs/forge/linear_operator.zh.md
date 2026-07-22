@@ -353,8 +353,10 @@ secondary_result = secondary_ticket.result()
 
 完整 solve 的 host launch 序列以一次准入 turn 提交；提交结束后，两次 solve 可在
 `max_in_flight` 边界内保持 backend asynchronous。`max_in_flight_per_lane` 防止高频 producer
-独占全部 slot，lane 间 round-robin 则保证已有等待者获得有限的准入延迟。该控制只覆盖共享
-同一 pacer 的调用，不能代替 engine 自身的 frame deadline、任务依赖或取消策略。
+独占全部 slot，lane 间 round-robin 则保证已有等待者获得有限的准入延迟。阻塞调用会以有界
+自适应退避轮询全部 in-flight completion，使较晚完成的快 solve 可以先于更早提交的慢 solve
+释放容量。该控制只覆盖共享同一 pacer 的调用，不能代替 engine 自身的 frame deadline、
+任务依赖或取消策略。
 
 `SolveSubmission.done()` 只观察 backend completion，不释放 workspace slot。`wait()` 在
 需要时等待、生成完整逐系统 terminal snapshot，并释放 slot；`result()` 在需要时执行
