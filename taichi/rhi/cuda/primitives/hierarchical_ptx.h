@@ -123,6 +123,14 @@ void driver_sparse_diagonal_apply_f32(void *inverse_diagonal,
                                       int num_items,
                                       void *stream);
 
+void driver_sparse_diagonal_refresh_f32(void *values,
+                                        void *diagonal_offsets,
+                                        void *staging_inverse,
+                                        void *status,
+                                        int rows,
+                                        int nnz,
+                                        void *stream);
+
 void driver_sparse_block_diagonal_apply_f32(void *inverse_blocks,
                                             void *input,
                                             void *output,

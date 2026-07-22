@@ -843,6 +843,59 @@ DEFINE_ADD_SCALED_KERNEL(add_scaled_strided_f64, double)
 DEFINE_GATHER_ADD_KERNEL(gather_add_strided_f32, float)
 DEFINE_GATHER_ADD_KERNEL(gather_add_strided_f64, double)
 
+__device__ void sparse_refresh_atomic_min_u32(u32 *address, u32 value) {
+  u32 previous;
+  asm volatile("atom.global.min.u32 %0, [%1], %2;"
+               : "=r"(previous)
+               : "l"(address), "r"(value)
+               : "memory");
+}
+
+__device__ bool sparse_refresh_finite_f32(float value) {
+  return (bit_cast<u32>(value) & 0x7f800000u) != 0x7f800000u;
+}
+
+extern "C" __global__ void sparse_diagonal_refresh_f32(
+    const float *values,
+    const i32 *diagonal_offsets,
+    float *staging_inverse,
+    u32 *status,
+    u32 rows,
+    u32 nnz) {
+  const u32 row = blockIdx.x * blockDim.x + threadIdx.x;
+  if (row >= rows) {
+    return;
+  }
+  constexpr u32 kReasonDiagonalNotFinite = 1u;
+  constexpr u32 kReasonDiagonalZero = 2u;
+  constexpr u32 kReasonInverseNotFinite = 3u;
+  constexpr u32 kReasonOffsetInvalid = 4u;
+  const i32 signed_offset = diagonal_offsets[row];
+  if (signed_offset < 0 || static_cast<u32>(signed_offset) >= nnz) {
+    sparse_refresh_atomic_min_u32(
+        status, (row << 3u) | kReasonOffsetInvalid);
+    return;
+  }
+  const float diagonal = values[static_cast<u32>(signed_offset)];
+  if (!sparse_refresh_finite_f32(diagonal)) {
+    sparse_refresh_atomic_min_u32(
+        status, (row << 3u) | kReasonDiagonalNotFinite);
+    return;
+  }
+  if ((bit_cast<u32>(diagonal) & 0x7fffffffu) == 0u) {
+    sparse_refresh_atomic_min_u32(
+        status, (row << 3u) | kReasonDiagonalZero);
+    return;
+  }
+  const float inverse = 1.0f / diagonal;
+  if (!sparse_refresh_finite_f32(inverse)) {
+    sparse_refresh_atomic_min_u32(
+        status, (row << 3u) | kReasonInverseNotFinite);
+    return;
+  }
+  staging_inverse[row] = inverse;
+}
+
 extern "C" __global__ void sparse_diagonal_apply_f32(
     const float *inverse_diagonal,
     const float *input,

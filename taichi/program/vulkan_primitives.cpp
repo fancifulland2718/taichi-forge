@@ -803,6 +803,9 @@ static const uint32_t kSparseAxpyF32Spv[] =
 static const uint32_t kSparseDiagonalApplyF32Spv[] =
 #include "taichi/program/vulkan_sort_shaders/sparse_diagonal_apply_f32.comp.spv.h"
     ;
+static const uint32_t kSparseDiagonalRefreshF32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/sparse_diagonal_refresh_f32.comp.spv.h"
+    ;
 static const uint32_t kSparseBlockDiagonalApplyF32Spv[] =
 #include "taichi/program/vulkan_sort_shaders/sparse_block_diagonal_apply_f32.comp.spv.h"
     ;
@@ -4579,6 +4582,7 @@ struct VulkanSparseAlgebraCache {
   std::unique_ptr<Pipeline> bsr_spmv_f32;
   std::unique_ptr<Pipeline> sparse_axpy_f32;
   std::unique_ptr<Pipeline> sparse_diagonal_apply_f32;
+  std::unique_ptr<Pipeline> sparse_diagonal_refresh_f32;
   std::unique_ptr<Pipeline> sparse_block_diagonal_apply_f32;
   std::unique_ptr<Pipeline> sparse_dot_partial_f32;
   std::unique_ptr<Pipeline> sparse_sqrt_scalar_f32;
@@ -4597,6 +4601,7 @@ struct VulkanSparseAlgebraCache {
   VulkanResourceSetReplayRing<5> bsr_spmv_bindings;
   VulkanResourceSetReplayRing<2> sparse_axpy_bindings;
   VulkanResourceSetReplayRing<3> sparse_diagonal_apply_bindings;
+  VulkanResourceSetReplayRing<4> sparse_diagonal_refresh_bindings;
   VulkanResourceSetReplayRing<3> sparse_block_diagonal_apply_bindings;
   VulkanResourceSetReplayRing<3> sparse_dot_partial_bindings;
   VulkanResourceSetReplayRing<1> sparse_sqrt_scalar_bindings;
@@ -4615,6 +4620,7 @@ struct VulkanSparseAlgebraCache {
   VulkanCommandReplayCache bsr_spmv_command_replay;
   VulkanCommandReplayCache sparse_axpy_command_replay;
   VulkanCommandReplayCache sparse_diagonal_apply_command_replay;
+  VulkanCommandReplayCache sparse_diagonal_refresh_command_replay;
   VulkanCommandReplayCache sparse_block_diagonal_apply_command_replay;
   VulkanCommandReplayCache sparse_dot_partial_command_replay;
   VulkanCommandReplayCache sparse_sqrt_scalar_command_replay;
@@ -4636,6 +4642,7 @@ struct VulkanSparseAlgebraCache {
     bsr_spmv_bindings.reset();
     sparse_axpy_bindings.reset();
     sparse_diagonal_apply_bindings.reset();
+    sparse_diagonal_refresh_bindings.reset();
     sparse_block_diagonal_apply_bindings.reset();
     sparse_dot_partial_bindings.reset();
     sparse_sqrt_scalar_bindings.reset();
@@ -4654,6 +4661,7 @@ struct VulkanSparseAlgebraCache {
     bsr_spmv_command_replay.reset();
     sparse_axpy_command_replay.reset();
     sparse_diagonal_apply_command_replay.reset();
+    sparse_diagonal_refresh_command_replay.reset();
     sparse_block_diagonal_apply_command_replay.reset();
     sparse_dot_partial_command_replay.reset();
     sparse_sqrt_scalar_command_replay.reset();
@@ -4693,6 +4701,7 @@ struct VulkanSparseAlgebraCache {
     bsr_spmv_f32.reset();
     sparse_axpy_f32.reset();
     sparse_diagonal_apply_f32.reset();
+    sparse_diagonal_refresh_f32.reset();
     sparse_block_diagonal_apply_f32.reset();
     sparse_dot_partial_f32.reset();
     sparse_sqrt_scalar_f32.reset();
@@ -4759,6 +4768,17 @@ struct VulkanSparseAlgebraCache {
           "vulkan_sparse_diagonal_apply_f32");
     }
     return sparse_diagonal_apply_f32.get();
+  }
+
+  Pipeline *sparse_diagonal_refresh_pipeline(Device *dev) {
+    ensure_device(dev);
+    if (!sparse_diagonal_refresh_f32) {
+      sparse_diagonal_refresh_f32 = create_pipeline_from_spv(
+          dev, kSparseDiagonalRefreshF32Spv,
+          sizeof(kSparseDiagonalRefreshF32Spv),
+          "vulkan_sparse_diagonal_refresh_f32");
+    }
+    return sparse_diagonal_refresh_f32.get();
   }
 
   Pipeline *sparse_block_diagonal_apply_pipeline(Device *dev) {
@@ -5024,6 +5044,25 @@ struct VulkanSparseAlgebraCache {
             rw_buffer_request(inverse_diagonal, 0, inverse_bytes),
             rw_buffer_request(input, 0, input_bytes),
             rw_buffer_request(output, 0, output_bytes)});
+  }
+
+  VulkanReplayResourceSet<4> bind_sparse_diagonal_refresh(
+      Program *program,
+      DeviceAllocation values,
+      size_t values_bytes,
+      DeviceAllocation diagonal_offsets,
+      size_t offsets_bytes,
+      DeviceAllocation staging_inverse,
+      size_t inverse_bytes,
+      DeviceAllocation status,
+      size_t status_bytes) {
+    return sparse_diagonal_refresh_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 4>{
+            rw_buffer_request(values, 0, values_bytes),
+            rw_buffer_request(diagonal_offsets, 0, offsets_bytes),
+            rw_buffer_request(staging_inverse, 0, inverse_bytes),
+            rw_buffer_request(status, 0, status_bytes)});
   }
 
   VulkanReplayResourceSet<3> bind_sparse_block_diagonal_apply(
@@ -10231,6 +10270,21 @@ void check_vulkan_sparse_i32_status(Ndarray *status) {
               "scalar i32 entry.");
 }
 
+void check_vulkan_sparse_i32_vector(const char *role,
+                                    Ndarray *array,
+                                    std::size_t n) {
+  TI_ERROR_IF(!array, "Vulkan sparse algebra received a null {} vector.",
+              role);
+  TI_ERROR_IF(array->shape.size() != 1 ||
+                  array->get_element_data_type() != PrimitiveType::i32 ||
+                  !array->get_element_shape().empty() ||
+                  array->get_element_size() != sizeof(int32_t) ||
+                  array->get_nelement() != n,
+              "Vulkan sparse algebra {} must contain exactly {} scalar i32 "
+              "entries.",
+              role, n);
+}
+
 uint32_t vulkan_sparse_f32_word(float value) {
   uint32_t word = 0;
   static_assert(sizeof(word) == sizeof(value));
@@ -10298,6 +10352,101 @@ std::size_t Program::vulkan_sparse_axpy(Ndarray *x,
   if (!cache.sparse_axpy_command_replay.submit_or_record(
           this, device, command_key, profiler_scopes, record_axpy)) {
     enqueue_compute_op_lambda(record_axpy, {});
+  }
+  return cache.allocated_bytes();
+}
+
+std::size_t Program::vulkan_sparse_diagonal_refresh(
+    Ndarray *values,
+    Ndarray *diagonal_offsets,
+    Ndarray *staging_inverse,
+    Ndarray *status,
+    std::size_t rows,
+    std::size_t nnz) {
+  auto submission_guard = acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(!vulkan_sparse_algebra_available(),
+              "Vulkan sparse diagonal refresh is only available on "
+              "Vulkan.");
+  TI_ERROR_IF(rows == 0 || nnz == 0 ||
+                  rows > std::numeric_limits<uint32_t>::max() ||
+                  nnz > std::numeric_limits<uint32_t>::max(),
+              "Vulkan sparse diagonal refresh geometry must fit in "
+              "non-zero uint32 ranges.");
+  check_vulkan_sparse_f32_vector("values", values, nnz);
+  check_vulkan_sparse_i32_vector("diagonal offsets", diagonal_offsets,
+                                 rows);
+  check_vulkan_sparse_f32_vector("staging inverse", staging_inverse,
+                                 rows);
+  check_vulkan_sparse_i32_status(status);
+  const auto values_alloc = values->get_device_allocation();
+  const auto offsets_alloc = diagonal_offsets->get_device_allocation();
+  const auto staging_alloc = staging_inverse->get_device_allocation();
+  const auto status_alloc = status->get_device_allocation();
+  TI_ERROR_IF(values_alloc == offsets_alloc || values_alloc == staging_alloc ||
+                  values_alloc == status_alloc ||
+                  offsets_alloc == staging_alloc ||
+                  offsets_alloc == status_alloc ||
+                  staging_alloc == status_alloc,
+              "Vulkan sparse diagonal refresh resources must not alias.");
+
+  const Ndarray *resources[] = {values, diagonal_offsets, staging_inverse,
+                                status};
+  retain_ndarrays_for_external_submission(resources, std::size(resources));
+  const size_t values_bytes = nnz * sizeof(float32);
+  const size_t offsets_bytes = rows * sizeof(int32_t);
+  const size_t inverse_bytes = rows * sizeof(float32);
+  const size_t status_bytes = sizeof(int32_t);
+  Device *device = get_compute_device();
+  TI_ERROR_IF(!device,
+              "Vulkan sparse diagonal refresh requires a compute device.");
+  auto cache_lease = get_sparse_algebra_cache(this, device);
+  auto &cache = *cache_lease;
+  Pipeline *pipeline = cache.sparse_diagonal_refresh_pipeline(device);
+  ShaderResourceSet *bindings =
+      cache
+          .bind_sparse_diagonal_refresh(
+              this, values_alloc, values_bytes, offsets_alloc,
+              offsets_bytes, staging_alloc, inverse_bytes, status_alloc,
+              status_bytes)
+          .bindings;
+  const std::array<uint32_t, 4> param_words{
+      static_cast<uint32_t>(rows), static_cast<uint32_t>(nnz), 0u, 0u};
+  const uint32_t push_bytes =
+      static_cast<uint32_t>(param_words.size() * sizeof(uint32_t));
+  constexpr std::size_t kMaxDispatchGroups = 65535;
+  const uint32_t groups = static_cast<uint32_t>(std::min(
+      kMaxDispatchGroups, (rows + kBlockSize - 1) / kBlockSize));
+  const bool profiler_scopes = profiler != nullptr;
+  auto record_refresh =
+      [staging_alloc, status_alloc, inverse_bytes, status_bytes, pipeline,
+       bindings, param_words, push_bytes, groups,
+       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
+        dispatch_pipeline_with_push_constants(
+            cmdlist, pipeline, bindings, param_words.data(), push_bytes,
+            groups, 1, 1,
+            profiler_scopes ? "vulkan_sparse_diagonal_refresh_f32"
+                            : nullptr);
+        cmdlist->buffer_barrier(staging_alloc.get_ptr(0), inverse_bytes);
+        cmdlist->buffer_barrier(status_alloc.get_ptr(0), status_bytes);
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(148);
+  push_vulkan_command_key_range(command_key, values_alloc, 0, values_bytes);
+  push_vulkan_command_key_range(command_key, offsets_alloc, 0,
+                                offsets_bytes);
+  push_vulkan_command_key_range(command_key, staging_alloc, 0,
+                                inverse_bytes);
+  push_vulkan_command_key_range(command_key, status_alloc, 0,
+                                status_bytes);
+  for (uint32_t word : param_words) {
+    command_key.push(word);
+  }
+  command_key.push(groups);
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.sparse_diagonal_refresh_command_replay.submit_or_record(
+          this, device, command_key, profiler_scopes, record_refresh)) {
+    enqueue_compute_op_lambda(record_refresh, {});
   }
   return cache.allocated_bytes();
 }
@@ -17461,6 +17610,17 @@ std::size_t Program::vulkan_sparse_axpy(Ndarray *x,
                                         Ndarray *y,
                                         std::size_t n,
                                         float alpha) {
+  TI_NOT_IMPLEMENTED;
+  return 0;
+}
+
+std::size_t Program::vulkan_sparse_diagonal_refresh(
+    Ndarray *values,
+    Ndarray *diagonal_offsets,
+    Ndarray *staging_inverse,
+    Ndarray *status,
+    std::size_t rows,
+    std::size_t nnz) {
   TI_NOT_IMPLEMENTED;
   return 0;
 }

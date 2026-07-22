@@ -44,6 +44,7 @@ struct KernelSet {
   std::array<void *, 6> scatter_add{};
   std::array<void *, 6> zero{};
   void *sparse_diagonal_apply_f32{nullptr};
+  void *sparse_diagonal_refresh_f32{nullptr};
   void *sparse_block_diagonal_apply_f32{nullptr};
   std::array<void *, 2> zero_bins{};
   std::array<std::array<void *, 2>, 2> histogram{};
@@ -178,6 +179,9 @@ void load_kernel_set_once() {
   driver.module_get_function(&kernel_set.sparse_diagonal_apply_f32,
                              kernel_set.module,
                              "sparse_diagonal_apply_f32");
+  driver.module_get_function(&kernel_set.sparse_diagonal_refresh_f32,
+                             kernel_set.module,
+                             "sparse_diagonal_refresh_f32");
   driver.module_get_function(&kernel_set.sparse_block_diagonal_apply_f32,
                              kernel_set.module,
                              "sparse_block_diagonal_apply_f32");
@@ -1031,6 +1035,32 @@ void driver_sparse_diagonal_apply_f32(void *inverse_diagonal,
       kernels().sparse_diagonal_apply_f32,
       "cuda_driver_sparse_diagonal_apply_f32", args, {}, grid, kBlockDim, 0,
       stream);
+}
+
+void driver_sparse_diagonal_refresh_f32(void *values,
+                                        void *diagonal_offsets,
+                                        void *staging_inverse,
+                                        void *status,
+                                        int rows,
+                                        int nnz,
+                                        void *stream) {
+  TI_ERROR_IF(rows <= 0 || nnz <= 0 || !values || !diagonal_offsets ||
+                  !staging_inverse || !status,
+              "CUDA Driver sparse diagonal refresh received invalid "
+              "geometry or a null pointer.");
+  void *values_arg = values;
+  void *offsets_arg = diagonal_offsets;
+  void *staging_arg = staging_inverse;
+  void *status_arg = status;
+  std::uint32_t rows_arg = static_cast<std::uint32_t>(rows);
+  std::uint32_t nnz_arg = static_cast<std::uint32_t>(nnz);
+  std::vector<void *> args{&values_arg, &offsets_arg, &staging_arg,
+                           &status_arg, &rows_arg, &nnz_arg};
+  const unsigned grid = (rows_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().sparse_diagonal_refresh_f32,
+      "cuda_driver_sparse_diagonal_refresh_f32", args, {}, grid,
+      kBlockDim, 0, stream);
 }
 
 void driver_sparse_block_diagonal_apply_f32(void *inverse_blocks,

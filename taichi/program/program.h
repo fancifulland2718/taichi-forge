@@ -2351,6 +2351,13 @@ class TI_DLL_EXPORT Program {
                                  std::size_t n,
                                  float alpha);
 
+  std::size_t vulkan_sparse_diagonal_refresh(Ndarray *values,
+                                             Ndarray *diagonal_offsets,
+                                             Ndarray *staging_inverse,
+                                             Ndarray *status,
+                                             std::size_t rows,
+                                             std::size_t nnz);
+
   std::size_t vulkan_sparse_diagonal_apply(Ndarray *inverse_diagonal,
                                            Ndarray *input,
                                            Ndarray *output,

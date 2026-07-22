@@ -93,6 +93,9 @@ class SparseJacobiPreconditionerPlan final {
   std::vector<float64> host_inverse_f64_;
   std::vector<int32_t> diagonal_offsets_;
   Ndarray *device_inverse_{nullptr};
+  Ndarray *device_diagonal_offsets_{nullptr};
+  Ndarray *device_refresh_staging_{nullptr};
+  Ndarray *device_refresh_status_{nullptr};
   mutable std::recursive_mutex apply_mutex_;
   std::uint64_t apply_calls_{0};
   std::uint64_t construction_device_to_host_bytes_{0};

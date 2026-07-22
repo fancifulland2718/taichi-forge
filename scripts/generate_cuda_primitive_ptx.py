@@ -28,6 +28,7 @@ REQUIRED_ENTRIES = (
     "gather_add_strided_f32",
     "gather_add_strided_f64",
     "sparse_diagonal_apply_f32",
+    "sparse_diagonal_refresh_f32",
     "sparse_block_diagonal_apply_f32",
     *(f"scatter_add_strided_{suffix}" for suffix in SUFFIXES),
     *(f"zero_strided_{suffix}" for suffix in SUFFIXES),

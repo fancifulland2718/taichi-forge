@@ -1,0 +1,71 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Values {
+  float data[];
+} values_buf;
+
+layout(set = 0, binding = 1, std430) readonly buffer DiagonalOffsets {
+  int data[];
+} offsets_buf;
+
+layout(set = 0, binding = 2, std430) writeonly buffer StagingInverse {
+  float data[];
+} staging_buf;
+
+layout(set = 0, binding = 3, std430) buffer Status {
+  uint data[];
+} status_buf;
+
+layout(push_constant) uniform Params {
+  uint rows;
+  uint nnz;
+  uint unused0;
+  uint unused1;
+} params;
+
+const uint kReasonDiagonalNotFinite = 1u;
+const uint kReasonDiagonalZero = 2u;
+const uint kReasonInverseNotFinite = 3u;
+const uint kReasonOffsetInvalid = 4u;
+
+bool finite_f32(float value) {
+  return (floatBitsToUint(value) & 0x7f800000u) != 0x7f800000u;
+}
+
+void record_failure(uint row, uint reason) {
+  atomicMin(status_buf.data[0], (row << 3u) | reason);
+}
+
+void main() {
+  uint row = gl_GlobalInvocationID.x;
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  while (row < params.rows) {
+    int signed_offset = offsets_buf.data[row];
+    if (signed_offset < 0 || uint(signed_offset) >= params.nnz) {
+      record_failure(row, kReasonOffsetInvalid);
+      row += stride;
+      continue;
+    }
+    float diagonal = values_buf.data[uint(signed_offset)];
+    if (!finite_f32(diagonal)) {
+      record_failure(row, kReasonDiagonalNotFinite);
+      row += stride;
+      continue;
+    }
+    if ((floatBitsToUint(diagonal) & 0x7fffffffu) == 0u) {
+      record_failure(row, kReasonDiagonalZero);
+      row += stride;
+      continue;
+    }
+    float inverse = 1.0f / diagonal;
+    if (!finite_f32(inverse)) {
+      record_failure(row, kReasonInverseNotFinite);
+      row += stride;
+      continue;
+    }
+    staging_buf.data[row] = inverse;
+    row += stride;
+  }
+}

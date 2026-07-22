@@ -49,13 +49,18 @@ def test_fixed_csr_jacobi_plan_apply_reuse_and_stale_version():
     assert stats["operations"]["apply_calls"] == 2
     assert stats["resources"]["persistent_inverse_count"] == 1
     assert stats["resources"]["persistent_inverse_reserved_bytes"] == n * 4
+    backend = stats["identity"]["backend_family"]
+    expected_refresh_bytes = 0 if backend == "cpu" else 2 * n * 4 + 4
+    assert stats["resources"]["persistent_refresh_reserved_bytes"] == (
+        expected_refresh_bytes
+    )
     assert stats["transfers"]["apply_host_transfer_bytes"] == 0
     assert stats["contract"]["in_place_apply_supported"]
     assert stats["contract"]["numeric_refresh_supported"]
-    assert not stats["contract"]["device_native_numeric_refresh"]
-    assert stats["contract"]["stable_refresh_binding"] == (
-        stats["identity"]["backend_family"] == "cpu"
+    assert stats["contract"]["device_native_numeric_refresh"] == (
+        backend != "cpu"
     )
+    assert stats["contract"]["stable_refresh_binding"]
     assert stats["contract"]["numeric_update_requires_refresh"]
     assert not stats["contract"]["numeric_update_requires_rebuild"]
     assert stats["contract"]["pattern_update_requires_rebuild"]
@@ -69,7 +74,10 @@ def test_fixed_csr_jacobi_plan_apply_reuse_and_stale_version():
             stats["transfers"]["construction_device_to_host_bytes"]
             == expected_readback
         )
-        assert stats["transfers"]["construction_host_to_device_bytes"] == n * 4
+        assert (
+            stats["transfers"]["construction_host_to_device_bytes"]
+            == 2 * n * 4
+        )
         expected_syncs = (
             1 if stats["identity"]["backend_family"] == "vulkan" else 0
         )
@@ -121,33 +129,30 @@ def test_fixed_csr_jacobi_plan_apply_reuse_and_stale_version():
     else:
         assert (
             refreshed["transfers"]["refresh_device_to_host_bytes"]
-            == n * 4
+            == 4
         )
         assert (
             refreshed["transfers"][
                 "refresh_full_values_device_to_host_bytes"
             ]
-            == n * 4
+            == 0
         )
-        assert refreshed["transfers"]["refresh_status_device_to_host_bytes"] == 0
+        assert refreshed["transfers"]["refresh_status_device_to_host_bytes"] == 4
+        assert refreshed["transfers"]["refresh_host_to_device_bytes"] == 0
         assert (
-            refreshed["transfers"]["refresh_host_to_device_bytes"]
+            refreshed["transfers"]["refresh_device_to_device_bytes"]
             == n * 4
         )
-        assert refreshed["transfers"]["refresh_device_to_device_bytes"] == 0
-        assert refreshed["transfers"]["refresh_device_kernel_launches"] == 0
-        assert refreshed["transfers"]["refresh_device_allocations"] == 1
+        assert refreshed["transfers"]["refresh_device_kernel_launches"] == 1
+        assert refreshed["transfers"]["refresh_device_allocations"] == 0
         assert refreshed["transfers"]["refresh_host_synchronizations"] == (
             1 if backend == "vulkan" else 0
         )
         assert (
             refreshed["resources"]["refresh_peak_temporary_host_bytes"]
-            == 2 * n * 4
+            == 4
         )
-        assert (
-            refreshed["resources"]["refresh_peak_temporary_device_bytes"]
-            == n * 4
-        )
+        assert refreshed["resources"]["refresh_peak_temporary_device_bytes"] == 0
     rhs.from_numpy(rhs_host)
     plan.apply(prog, rhs.arr, output.arr)
     np.testing.assert_allclose(output.to_numpy(), rhs_host / updated_diagonal)
@@ -175,12 +180,13 @@ def test_fixed_csr_jacobi_plan_apply_reuse_and_stale_version():
     if backend != "cpu":
         assert (
             failed["transfers"]["refresh_device_to_host_bytes"]
-            == 2 * n * 4
+            == 8
         )
-        assert (
-            failed["transfers"]["refresh_host_to_device_bytes"]
-            == n * 4
-        )
+        assert failed["transfers"]["refresh_status_device_to_host_bytes"] == 8
+        assert failed["transfers"]["refresh_host_to_device_bytes"] == 0
+        assert failed["transfers"]["refresh_device_to_device_bytes"] == n * 4
+        assert failed["transfers"]["refresh_device_kernel_launches"] == 2
+        assert failed["transfers"]["refresh_device_allocations"] == 0
         assert failed["transfers"]["refresh_host_synchronizations"] == (
             2 if backend == "vulkan" else 0
         )
@@ -200,6 +206,14 @@ def test_fixed_csr_jacobi_plan_apply_reuse_and_stale_version():
     assert recovered["operations"]["numeric_refresh_calls"] == 4
     assert recovered["operations"]["numeric_refresh_successes"] == 2
     assert recovered["operations"]["numeric_refresh_failures"] == 1
+    if backend != "cpu":
+        assert recovered["transfers"]["refresh_device_to_host_bytes"] == 12
+        assert recovered["transfers"]["refresh_status_device_to_host_bytes"] == 12
+        assert recovered["transfers"]["refresh_device_to_device_bytes"] == (
+            2 * n * 4
+        )
+        assert recovered["transfers"]["refresh_device_kernel_launches"] == 3
+        assert recovered["transfers"]["refresh_device_allocations"] == 0
     rhs.from_numpy(rhs_host)
     plan.apply(prog, rhs.arr, output.arr)
     np.testing.assert_allclose(

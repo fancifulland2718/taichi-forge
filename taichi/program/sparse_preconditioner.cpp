@@ -17,6 +17,31 @@
 namespace taichi::lang {
 namespace {
 
+constexpr std::uint32_t kSparseRefreshSuccess =
+    std::numeric_limits<std::uint32_t>::max();
+
+void throw_sparse_diagonal_refresh_failure(std::uint32_t status, int nnz) {
+  const std::uint32_t row = status >> 3u;
+  const std::uint32_t reason = status & 7u;
+  switch (reason) {
+    case 1:
+      TI_ERROR("Sparse Jacobi diagonal at row {} is not finite.", row);
+    case 2:
+      TI_ERROR("Sparse Jacobi diagonal at row {} is zero.", row);
+    case 3:
+      TI_ERROR("Sparse Jacobi inverse diagonal at row {} is not finite.",
+               row);
+    case 4:
+      TI_ERROR("Sparse Jacobi diagonal offset for row {} is outside the "
+               "fixed values array of length {}.",
+               row, nnz);
+    default:
+      TI_ERROR("Sparse Jacobi device numeric refresh returned invalid "
+               "status {}.",
+               status);
+  }
+}
+
 void validate_vector(const char *role,
                      const Ndarray &array,
                      int rows,
@@ -426,6 +451,11 @@ SparseJacobiPreconditionerPlan::SparseJacobiPreconditionerPlan(
               "{} Sparse Jacobi plans currently require f32 matrices, got "
               "{}.",
               backend_family_, data_type_name(dtype_));
+  TI_ERROR_IF(static_cast<std::uint32_t>(rows_) >
+                  (kSparseRefreshSuccess >> 3u),
+              "{} Sparse Jacobi plans require at most {} rows for "
+              "device refresh status encoding.",
+              backend_family_, kSparseRefreshSuccess >> 3u);
   const int nnz = matrix.num_nonzero();
   TI_ERROR_IF(nnz <= 0,
               "Sparse Jacobi plans require at least one stored value.");
@@ -492,13 +522,24 @@ SparseJacobiPreconditionerPlan::SparseJacobiPreconditionerPlan(
   try {
     device_inverse_ = program_->create_ndarray(
         PrimitiveType::f32, {rows_}, ExternalArrayLayout::kNull, false);
+    device_diagonal_offsets_ = program_->create_ndarray(
+        PrimitiveType::i32, {rows_}, ExternalArrayLayout::kNull, false);
+    device_refresh_staging_ = program_->create_ndarray(
+        PrimitiveType::f32, {rows_}, ExternalArrayLayout::kNull, false);
+    device_refresh_status_ = program_->create_ndarray(
+        PrimitiveType::i32, {1}, ExternalArrayLayout::kNull, false);
     program_->copy_ndarray_from_host(
         device_inverse_, inverse.data(), inverse.size() * sizeof(float32));
+    program_->copy_ndarray_from_host(
+        device_diagonal_offsets_, diagonal_offsets_.data(),
+        diagonal_offsets_.size() * sizeof(int32_t));
   } catch (...) {
     release_resources();
     throw;
   }
-  construction_host_to_device_bytes_ = inverse.size() * sizeof(float32);
+  construction_host_to_device_bytes_ =
+      inverse.size() * sizeof(float32) +
+      diagonal_offsets_.size() * sizeof(int32_t);
 }
 
 SparseJacobiPreconditionerPlan::~SparseJacobiPreconditionerPlan() {
@@ -564,28 +605,43 @@ void SparseJacobiPreconditionerPlan::refresh_numeric(Program *program) {
       return;
     }
 
-    std::vector<float32> inverse(static_cast<std::size_t>(rows_));
     const int nnz = matrix_->num_nonzero();
     TI_ERROR_IF(
         nnz <= 0 ||
             diagonal_offsets_.size() != static_cast<std::size_t>(rows_),
         "Sparse Jacobi numeric refresh has invalid fixed-CSR metadata.");
-    std::vector<float32> values(static_cast<std::size_t>(nnz));
-    const std::size_t value_bytes = values.size() * sizeof(float32);
+    TI_ERROR_IF(!device_inverse_ || !device_diagonal_offsets_ ||
+                    !device_refresh_staging_ || !device_refresh_status_,
+                "Sparse Jacobi device numeric refresh resources are "
+                "incomplete.");
+    const std::size_t inverse_bytes =
+        static_cast<std::size_t>(rows_) * sizeof(float32);
     refresh_peak_temporary_host_bytes_ = std::max(
-        refresh_peak_temporary_host_bytes_,
-        static_cast<std::uint64_t>(value_bytes +
-                                   inverse.size() * sizeof(float32)));
+        refresh_peak_temporary_host_bytes_, sizeof(std::uint32_t));
+    program_->fill_ndarray_fast_u32(device_refresh_status_,
+                                    kSparseRefreshSuccess);
     if (backend_family_ == "cuda") {
 #if defined(TI_WITH_CUDA)
+      auto submission_guard =
+          program_->acquire_runtime_resource_submission_guard();
       auto *cuda_matrix = dynamic_cast<CuSparseMatrix *>(matrix_);
       TI_ERROR_IF(!cuda_matrix,
                   "CUDA Sparse Jacobi numeric refresh requires scalar "
                   "CSR storage.");
-      CUDADriver::get_instance().memcpy_device_to_host(
-          values.data(), cuda_matrix->get_val_ptr(), value_bytes);
-      refresh_device_to_host_bytes_ += value_bytes;
-      refresh_full_values_device_to_host_bytes_ += value_bytes;
+      const Ndarray *resources[] = {device_diagonal_offsets_,
+                                    device_refresh_staging_,
+                                    device_refresh_status_};
+      program_->retain_ndarrays_for_external_submission(resources,
+                                                        std::size(resources));
+      cuda::driver_sparse_diagonal_refresh_f32(
+          cuda_matrix->get_val_ptr(),
+          reinterpret_cast<void *>(program_->get_ndarray_data_ptr_as_int(
+              device_diagonal_offsets_)),
+          reinterpret_cast<void *>(program_->get_ndarray_data_ptr_as_int(
+              device_refresh_staging_)),
+          reinterpret_cast<void *>(program_->get_ndarray_data_ptr_as_int(
+              device_refresh_status_)),
+          rows_, nnz, nullptr);
 #else
       TI_NOT_IMPLEMENTED;
 #endif
@@ -595,13 +651,12 @@ void SparseJacobiPreconditionerPlan::refresh_numeric(Program *program) {
       TI_ERROR_IF(!vulkan_matrix,
                   "Vulkan Sparse Jacobi numeric refresh requires internal "
                   "fixed CSR storage.");
+      program_->vulkan_sparse_diagonal_refresh(
+          const_cast<Ndarray *>(vulkan_matrix->get_values()),
+          device_diagonal_offsets_, device_refresh_staging_,
+          device_refresh_status_, rows_, nnz);
       program_->synchronize();
       refresh_host_synchronizations_++;
-      program_->copy_ndarray_to_host(
-          const_cast<Ndarray *>(vulkan_matrix->get_values()), values.data(),
-          value_bytes);
-      refresh_device_to_host_bytes_ += value_bytes;
-      refresh_full_values_device_to_host_bytes_ += value_bytes;
 #else
       TI_NOT_IMPLEMENTED;
 #endif
@@ -609,37 +664,30 @@ void SparseJacobiPreconditionerPlan::refresh_numeric(Program *program) {
       TI_ERROR("Sparse Jacobi numeric refresh does not support backend {}.",
                backend_family_);
     }
-    for (int row = 0; row < rows_; ++row) {
-      const int32_t offset = diagonal_offsets_[row];
-      TI_ERROR_IF(offset < 0 || offset >= nnz,
-                  "Sparse Jacobi diagonal offset for row {} is outside the "
-                  "fixed values array.",
-                  row);
-      inverse[row] = invert_diagonal_value(values[offset], row);
-    }
 
-    Ndarray *replacement = nullptr;
-    try {
-      replacement = program_->create_ndarray(
-          PrimitiveType::f32, {rows_}, ExternalArrayLayout::kNull, false);
-      refresh_device_allocations_++;
-      refresh_peak_temporary_device_bytes_ = std::max(
-          refresh_peak_temporary_device_bytes_,
-          static_cast<std::uint64_t>(inverse.size() * sizeof(float32)));
-      program_->copy_ndarray_from_host(
-          replacement, inverse.data(), inverse.size() * sizeof(float32));
-    } catch (...) {
-      if (replacement) {
-        program_->delete_ndarray(replacement);
-      }
-      throw;
+    std::uint32_t status = kSparseRefreshSuccess;
+    if (backend_family_ == "cuda") {
+#if defined(TI_WITH_CUDA)
+      CUDADriver::get_instance().memcpy_device_to_host(
+          &status,
+          reinterpret_cast<void *>(program_->get_ndarray_data_ptr_as_int(
+              device_refresh_status_)),
+          sizeof(status));
+#else
+      TI_NOT_IMPLEMENTED;
+#endif
+    } else {
+      program_->copy_ndarray_to_host(device_refresh_status_, &status,
+                                     sizeof(status));
     }
-    Ndarray *old_inverse = device_inverse_;
-    device_inverse_ = replacement;
-    if (old_inverse) {
-      program_->delete_ndarray(old_inverse);
+    refresh_device_to_host_bytes_ += sizeof(status);
+    refresh_status_device_to_host_bytes_ += sizeof(status);
+    refresh_device_kernel_launches_++;
+    if (status != kSparseRefreshSuccess) {
+      throw_sparse_diagonal_refresh_failure(status, nnz);
     }
-    refresh_host_to_device_bytes_ += inverse.size() * sizeof(float32);
+    program_->copy_ndarray_fast(device_inverse_, device_refresh_staging_);
+    refresh_device_to_device_bytes_ += inverse_bytes;
     numeric_version_at_build_ = current.numeric_version;
     numeric_refresh_successes_++;
   } catch (...) {
@@ -652,6 +700,18 @@ void SparseJacobiPreconditionerPlan::release_resources() {
   if (device_inverse_ && program_) {
     program_->delete_ndarray(device_inverse_);
     device_inverse_ = nullptr;
+  }
+  if (device_diagonal_offsets_ && program_) {
+    program_->delete_ndarray(device_diagonal_offsets_);
+    device_diagonal_offsets_ = nullptr;
+  }
+  if (device_refresh_staging_ && program_) {
+    program_->delete_ndarray(device_refresh_staging_);
+    device_refresh_staging_ = nullptr;
+  }
+  if (device_refresh_status_ && program_) {
+    program_->delete_ndarray(device_refresh_status_);
+    device_refresh_status_ = nullptr;
   }
 }
 
@@ -825,7 +885,11 @@ SparseJacobiPreconditionerPlan::debug_runtime_statistics() const {
   result.persistent_inverse_count = 1;
   result.persistent_inverse_reserved_bytes =
       static_cast<std::uint64_t>(rows_) * data_type_size(dtype_);
-  result.persistent_refresh_reserved_bytes = 0;
+  if (backend_family_ != "cpu") {
+    result.persistent_refresh_reserved_bytes =
+        2 * static_cast<std::uint64_t>(rows_) * sizeof(float32) +
+        sizeof(int32_t);
+  }
   result.construction_device_to_host_bytes =
       construction_device_to_host_bytes_;
   result.construction_host_to_device_bytes =
@@ -852,8 +916,8 @@ SparseJacobiPreconditionerPlan::debug_runtime_statistics() const {
   result.refresh_peak_temporary_device_bytes =
       refresh_peak_temporary_device_bytes_;
   result.numeric_refresh_supported = true;
-  result.device_native_numeric_refresh = false;
-  result.stable_refresh_binding = backend_family_ == "cpu";
+  result.device_native_numeric_refresh = backend_family_ != "cpu";
+  result.stable_refresh_binding = true;
   return result;
 }
 
