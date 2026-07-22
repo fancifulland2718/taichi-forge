@@ -17,6 +17,14 @@ from taichi_forge.lang.exception import TaichiRuntimeError
 
 _lane_ids = itertools.count(1)
 
+# Runtime completions expose nonblocking ``done()`` and blocking ``wait()``,
+# but no backend-neutral wait-any primitive. A saturated pacer therefore uses
+# one of its already-blocked callers as a cooperative progress steward. The
+# bounded backoff avoids both a permanent wait on the oldest (possibly slow)
+# completion and an unbounded driver-query loop.
+_PROGRESS_POLL_INITIAL_SECONDS = 0.0005
+_PROGRESS_POLL_MAX_SECONDS = 0.005
+
 
 @dataclass(frozen=True)
 class _DefaultSubmissionLane:
@@ -289,20 +297,6 @@ class SubmissionPacer:
         self._queued_count -= 1
         return True
 
-    def _oldest_completion_locked(self, preferred_lane=None):
-        if preferred_lane is not None:
-            for lease in self._active.values():
-                if (
-                    lease._lane == preferred_lane
-                    and lease._completion is not None
-                    and not lease._released
-                ):
-                    return lease, lease._completion
-        for lease in self._active.values():
-            if lease._completion is not None and not lease._released:
-                return lease, lease._completion
-        return None, None
-
     def _preferred_progress_lane_locked(self, lane):
         if self.max_in_flight_per_lane is None:
             return None
@@ -310,15 +304,19 @@ class SubmissionPacer:
             return lane
         return None
 
-    def _poll_ready_completions(self):
+    def _poll_ready_completions(self, preferred_lane=None):
         with self._condition:
-            snapshot = tuple(
+            snapshot = list(
                 (lease, lease._completion)
                 for lease in self._active.values()
                 if lease._completion is not None and not lease._released
             )
+        if preferred_lane is not None:
+            snapshot.sort(key=lambda item: item[0]._lane != preferred_lane)
+        observed_ready = False
         for lease, completion in snapshot:
-            lease._completion_done(completion)
+            observed_ready = lease._completion_done(completion) or observed_ready
+        return observed_ready
 
     def _reserve(self, runtime, default_lane, *, lane, on_saturation):
         lane = _normalize_lane(default_lane, lane)
@@ -364,15 +362,20 @@ class SubmissionPacer:
             self._peak_queued = max(self._peak_queued, self._queued_count)
             request.waited = True
 
+        owns_progress = False
+        progress_poll_seconds = _PROGRESS_POLL_INITIAL_SECONDS
         try:
             while True:
-                completion_to_wait = None
-                lease_to_wait = None
+                preferred_lane = None
                 with self._condition:
                     if request.lease is not None:
                         if self._failure is not None or not self._valid:
                             self._finish_lease_locked(request.lease, completed=False)
                         else:
+                            if owns_progress:
+                                self._progress_waiter = False
+                                owns_progress = False
+                                self._condition.notify_all()
                             return request.lease
                     if self._failure is not None:
                         self._remove_waiter_locked(request)
@@ -380,31 +383,39 @@ class SubmissionPacer:
                     if not self._valid:
                         self._remove_waiter_locked(request)
                         raise TaichiRuntimeError(self._invalid_reason)
-                    if not self._progress_waiter:
-                        preferred_lane = self._preferred_progress_lane_locked(
-                            request.lane
-                        )
-                        lease_to_wait, completion_to_wait = (
-                            self._oldest_completion_locked(preferred_lane)
-                        )
-                        if completion_to_wait is not None:
-                            self._progress_waiter = True
-                    if completion_to_wait is None:
+                    if not owns_progress and not self._progress_waiter:
+                        self._progress_waiter = True
+                        owns_progress = True
+                    if not owns_progress:
                         self._condition.wait()
                         continue
+                    preferred_lane = self._preferred_progress_lane_locked(
+                        request.lane
+                    )
 
-                try:
-                    completion_to_wait.wait()
-                except Exception as exc:
-                    self._completion_failed(lease_to_wait, exc)
-                else:
-                    self._release_lease(lease_to_wait, completed=True)
-                finally:
-                    with self._condition:
-                        self._progress_waiter = False
+                observed_ready = self._poll_ready_completions(preferred_lane)
+                with self._condition:
+                    if observed_ready:
+                        progress_poll_seconds = _PROGRESS_POLL_INITIAL_SECONDS
                         self._condition.notify_all()
+                    else:
+                        notified = self._condition.wait(
+                            timeout=progress_poll_seconds
+                        )
+                        if notified:
+                            progress_poll_seconds = (
+                                _PROGRESS_POLL_INITIAL_SECONDS
+                            )
+                        else:
+                            progress_poll_seconds = min(
+                                progress_poll_seconds * 2.0,
+                                _PROGRESS_POLL_MAX_SECONDS,
+                            )
         except BaseException:
             with self._condition:
+                if owns_progress:
+                    self._progress_waiter = False
+                    owns_progress = False
                 if request.lease is not None:
                     self._finish_lease_locked(request.lease, completed=False)
                 else:

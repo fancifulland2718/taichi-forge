@@ -252,6 +252,59 @@ def test_submission_pacer_avoids_cross_lane_completion_head_of_line_blocking():
     assert pacer.statistics()["completed"] == 3
 
 
+def test_submission_pacer_avoids_global_completion_head_of_line_blocking():
+    runtime = _FakeRuntime()
+    pacer = SubmissionPacer(2)
+    default_lane = _new_submission_lane("test")
+
+    slow_completion = _FakeCompletion()
+    slow = pacer._reserve(
+        runtime,
+        default_lane,
+        lane="slow",
+        on_saturation="wait",
+    )
+    slow._attach(slow_completion)
+    fast_completion = _FakeCompletion()
+    fast = pacer._reserve(
+        runtime,
+        default_lane,
+        lane="fast",
+        on_saturation="wait",
+    )
+    fast._attach(fast_completion)
+
+    granted = []
+    errors = []
+
+    def reserve_next():
+        try:
+            granted.append(
+                pacer._reserve(
+                    runtime,
+                    default_lane,
+                    lane="next",
+                    on_saturation="wait",
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    waiter = threading.Thread(target=reserve_next)
+    waiter.start()
+    _wait_until(lambda: pacer.statistics()["queued"] == 1)
+    fast_completion.complete()
+    waiter.join(2.0)
+
+    assert not waiter.is_alive()
+    assert not errors
+    assert len(granted) == 1
+    granted[0]._attach(_FakeCompletion(backend_work=False))
+    slow_completion.complete()
+    slow._completion_wait(slow_completion)
+    assert pacer.statistics()["completed"] == 3
+
+
 def test_submission_pacer_fails_closed_after_backend_completion_failure():
     runtime = _FakeRuntime()
     pacer = SubmissionPacer(1)
