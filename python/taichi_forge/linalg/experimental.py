@@ -5,11 +5,17 @@ This module is separate from the legacy field-based
 use scalar 1-D ndarrays, and never change providers through a hidden fallback.
 """
 
+import copy
 from dataclasses import dataclass
+import json
 import math
 import operator as _operator
+import platform
+import time
 from types import MappingProxyType
 from typing import Mapping, Optional, Sequence
+
+import numpy as np
 
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang._ndarray import ScalarNdarray
@@ -78,6 +84,31 @@ class OperatorCapabilities:
     runtime_capture: bool
     binding_rebind: bool
     persistent_workspace: bool
+
+
+class OperatorQualificationReport:
+    """Immutable, JSON-serializable LinearOperator qualification evidence."""
+
+    SCHEMA = "taichi_forge.linalg.operator_qualification.v1"
+
+    def __init__(self, record):
+        self._record = copy.deepcopy(record)
+
+    @property
+    def passed(self):
+        return bool(self._record["passed"])
+
+    @property
+    def record(self):
+        return _readonly_copy(self._record)
+
+    def to_dict(self):
+        """Returns a detached mutable copy suitable for persistence."""
+        return copy.deepcopy(self._record)
+
+    def to_json(self, *, indent=2):
+        """Serializes the qualification record without writing a file."""
+        return json.dumps(self._record, indent=indent, sort_keys=True)
 
 
 @dataclass(frozen=True)
@@ -607,6 +638,345 @@ def block_diagonal(blocks: Sequence[LinearOperator]):
     return LinearOperator._from_handle(
         handle, provider_kind="composition", retained=blocks
     )
+
+
+def _qualification_non_negative_integer(value, role):
+    if isinstance(value, bool):
+        raise TaichiRuntimeError(f"{role} must be a non-negative integer")
+    try:
+        value = _operator.index(value)
+    except TypeError as exc:
+        raise TaichiRuntimeError(
+            f"{role} must be a non-negative integer"
+        ) from exc
+    if value < 0:
+        raise TaichiRuntimeError(f"{role} must be a non-negative integer")
+    return value
+
+
+def _qualification_tolerance(value, default, role):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        raise TaichiRuntimeError(f"{role} must be finite and non-negative")
+    try:
+        value = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TaichiRuntimeError(
+            f"{role} must be finite and non-negative"
+        ) from exc
+    if not math.isfinite(value) or value < 0.0:
+        raise TaichiRuntimeError(f"{role} must be finite and non-negative")
+    return value
+
+
+def _qualification_ndarray(values, dtype):
+    result = ScalarNdarray(dtype, values.shape)
+    result.from_numpy(values)
+    return result
+
+
+def _qualification_error(actual, expected):
+    actual = np.asarray(actual)
+    expected = np.asarray(expected)
+    difference = actual - expected
+    max_absolute = float(np.max(np.abs(difference), initial=0.0))
+    reference_norm = float(np.linalg.norm(expected.reshape(-1)))
+    error_norm = float(np.linalg.norm(difference.reshape(-1)))
+    relative_l2 = error_norm / max(reference_norm, np.finfo(actual.dtype).tiny)
+    return max_absolute, relative_l2
+
+
+def _qualification_check(name, passed, metrics, tolerance, details=""):
+    return {
+        "name": name,
+        "status": "passed" if passed else "failed",
+        "metrics": metrics,
+        "tolerance": tolerance,
+        "details": details,
+    }
+
+
+def qualify_operator(
+    operator,
+    *,
+    reference=None,
+    adjoint_reference=None,
+    samples=3,
+    seed=0,
+    atol=None,
+    rtol=None,
+    warmup=1,
+    repetitions=5,
+    metadata=None,
+):
+    """Qualifies public LinearOperator contracts and returns evidence.
+
+    References may be NumPy matrices or callables accepting and returning
+    one-dimensional NumPy arrays. A matrix reference uses the public
+    ``(range, domain)`` shape convention. The runner performs synchronous
+    public ``apply`` calls and never changes the provider or execution policy.
+    """
+    if not isinstance(operator, LinearOperator):
+        raise TypeError("operator must be experimental.LinearOperator")
+    operator._ensure_valid()
+    samples = _qualification_non_negative_integer(samples, "samples")
+    warmup = _qualification_non_negative_integer(warmup, "warmup")
+    repetitions = _qualification_non_negative_integer(
+        repetitions, "repetitions"
+    )
+    if samples == 0:
+        raise TaichiRuntimeError("samples must be positive")
+    if repetitions == 0:
+        raise TaichiRuntimeError("repetitions must be positive")
+    if isinstance(seed, bool):
+        raise TaichiRuntimeError("seed must be an integer")
+    try:
+        seed = _operator.index(seed)
+    except TypeError as exc:
+        raise TaichiRuntimeError("seed must be an integer") from exc
+    default_tolerance = 5e-5 if operator.dtype == f32 else 1e-11
+    atol = _qualification_tolerance(atol, default_tolerance, "atol")
+    rtol = _qualification_tolerance(rtol, default_tolerance, "rtol")
+    metadata = {} if metadata is None else metadata
+    if not isinstance(metadata, Mapping) or any(
+        not isinstance(name, str) for name in metadata
+    ):
+        raise TaichiRuntimeError("metadata must be a mapping with string keys")
+    custom_metadata = copy.deepcopy(dict(metadata))
+    try:
+        json.dumps(custom_metadata)
+    except (TypeError, ValueError) as exc:
+        raise TaichiRuntimeError("metadata must be JSON-serializable") from exc
+
+    rows, columns = operator.shape
+    numpy_dtype = np.float32 if operator.dtype == f32 else np.float64
+
+    def normalize_reference(candidate, expected_shape, role):
+        if candidate is None:
+            return None
+        if callable(candidate):
+            return candidate
+        matrix = np.asarray(candidate, dtype=numpy_dtype)
+        if matrix.shape != expected_shape:
+            raise TaichiRuntimeError(
+                f"{role} must have shape {expected_shape}, got {matrix.shape}"
+            )
+        return lambda values: matrix @ values
+
+    forward_oracle = normalize_reference(
+        reference, (rows, columns), "reference"
+    )
+    if (
+        adjoint_reference is None
+        and reference is not None
+        and not callable(reference)
+    ):
+        reference_matrix = np.asarray(reference, dtype=numpy_dtype)
+        adjoint_reference = reference_matrix.T
+    adjoint_oracle = normalize_reference(
+        adjoint_reference, (columns, rows), "adjoint_reference"
+    )
+
+    rng = np.random.default_rng(seed)
+    checks = []
+    initial_statistics = operator.statistics()
+    timing_input_host = rng.standard_normal(columns).astype(numpy_dtype)
+    timing_input = _qualification_ndarray(timing_input_host, operator.dtype)
+    timing_output = ScalarNdarray(operator.dtype, (rows,))
+    start_ns = time.perf_counter_ns()
+    operator.apply(timing_input, out=timing_output)
+    first_apply_ns = time.perf_counter_ns() - start_ns
+
+    finite = bool(np.all(np.isfinite(timing_output.to_numpy())))
+    checks.append(
+        _qualification_check(
+            "finite_forward",
+            finite,
+            {"nonfinite_values": 0 if finite else 1},
+            {"nonfinite_values": 0},
+        )
+    )
+
+    maxima = {
+        "linearity": [0.0, 0.0],
+        "forward_reference": [0.0, 0.0],
+        "adjoint_dot_product": [0.0, 0.0],
+        "adjoint_reference": [0.0, 0.0],
+    }
+    adjoint_operator = (
+        operator.adjoint() if operator.capabilities.adjoint_apply else None
+    )
+
+    def accumulate(name, absolute, relative):
+        maxima[name][0] = max(maxima[name][0], absolute)
+        maxima[name][1] = max(maxima[name][1], relative)
+
+    for _ in range(samples):
+        left = rng.standard_normal(columns).astype(numpy_dtype)
+        right = rng.standard_normal(columns).astype(numpy_dtype)
+        alpha = numpy_dtype(rng.uniform(-1.25, 1.25))
+        beta = numpy_dtype(rng.uniform(-1.25, 1.25))
+        combined = alpha * left + beta * right
+        applied_left = operator.apply(
+            _qualification_ndarray(left, operator.dtype)
+        ).to_numpy()
+        applied_right = operator.apply(
+            _qualification_ndarray(right, operator.dtype)
+        ).to_numpy()
+        applied_combined = operator.apply(
+            _qualification_ndarray(combined, operator.dtype)
+        ).to_numpy()
+        absolute, relative = _qualification_error(
+            applied_combined, alpha * applied_left + beta * applied_right
+        )
+        accumulate("linearity", absolute, relative)
+
+        if forward_oracle is not None:
+            expected = np.asarray(forward_oracle(left), dtype=numpy_dtype)
+            if expected.shape != (rows,):
+                raise TaichiRuntimeError(
+                    f"reference callable must return shape ({rows},)"
+                )
+            accumulate(
+                "forward_reference",
+                *_qualification_error(applied_left, expected),
+            )
+
+        if adjoint_operator is not None:
+            range_vector = rng.standard_normal(rows).astype(numpy_dtype)
+            applied_adjoint = adjoint_operator.apply(
+                _qualification_ndarray(range_vector, operator.dtype)
+            ).to_numpy()
+            lhs = float(np.dot(applied_left.astype(np.float64), range_vector))
+            rhs = float(np.dot(left.astype(np.float64), applied_adjoint))
+            absolute = abs(lhs - rhs)
+            relative = absolute / max(
+                abs(lhs), abs(rhs), np.finfo(np.float64).tiny
+            )
+            accumulate("adjoint_dot_product", absolute, relative)
+            if adjoint_oracle is not None:
+                expected_adjoint = np.asarray(
+                    adjoint_oracle(range_vector), dtype=numpy_dtype
+                )
+                if expected_adjoint.shape != (columns,):
+                    raise TaichiRuntimeError(
+                        "adjoint_reference callable must return shape "
+                        f"({columns},)"
+                    )
+                accumulate(
+                    "adjoint_reference",
+                    *_qualification_error(applied_adjoint, expected_adjoint),
+                )
+
+    def append_error_check(name):
+        absolute, relative = maxima[name]
+        checks.append(
+            _qualification_check(
+                name,
+                absolute <= atol or relative <= rtol,
+                {
+                    "max_absolute_error": absolute,
+                    "max_relative_error": relative,
+                },
+                {"atol": atol, "rtol": rtol},
+            )
+        )
+
+    append_error_check("linearity")
+    if forward_oracle is None:
+        checks.append(
+            {
+                "name": "forward_reference",
+                "status": "not_requested",
+                "metrics": {},
+                "tolerance": {"atol": atol, "rtol": rtol},
+                "details": "No reference was supplied.",
+            }
+        )
+    else:
+        append_error_check("forward_reference")
+
+    if adjoint_operator is None:
+        checks.append(
+            {
+                "name": "adjoint_dot_product",
+                "status": "unsupported",
+                "metrics": {},
+                "tolerance": {"atol": atol, "rtol": rtol},
+                "details": "The provider does not claim adjoint_apply.",
+            }
+        )
+    else:
+        append_error_check("adjoint_dot_product")
+        if adjoint_oracle is not None:
+            append_error_check("adjoint_reference")
+
+    for _ in range(warmup):
+        operator.apply(timing_input, out=timing_output)
+    warm_ns = []
+    for _ in range(repetitions):
+        start_ns = time.perf_counter_ns()
+        operator.apply(timing_input, out=timing_output)
+        warm_ns.append(time.perf_counter_ns() - start_ns)
+
+    program = _current_program()
+    final_statistics = operator.statistics()
+    capabilities = {
+        name: getattr(operator.capabilities, name)
+        for name in OperatorCapabilities.__dataclass_fields__
+    }
+    record = {
+        "schema": OperatorQualificationReport.SCHEMA,
+        "schema_version": 1,
+        "passed": not any(check["status"] == "failed" for check in checks),
+        "environment": {
+            "taichi_version": _ti_core.get_version_string(),
+            "taichi_commit": _ti_core.get_commit_hash(),
+            "backend": _ti_core.arch_name(program.config().arch),
+            "device": None,
+            "driver": None,
+            "python": platform.python_version(),
+            "platform": platform.platform(),
+        },
+        "operator": {
+            "provider": operator.provider,
+            "provider_kind": operator._provider_kind,
+            "execution_kind": operator.execution_kind,
+            "shape": list(operator.shape),
+            "dtype": operator._metadata_snapshot["dtype"],
+            "capabilities": capabilities,
+            "traits": copy.deepcopy(operator._metadata_snapshot["traits"]),
+            "resource_stamp": copy.deepcopy(
+                operator._metadata_snapshot["resource_stamp"]
+            ),
+        },
+        "configuration": {
+            "samples": samples,
+            "seed": seed,
+            "atol": atol,
+            "rtol": rtol,
+            "warmup": warmup,
+            "repetitions": repetitions,
+        },
+        "checks": checks,
+        "timing": {
+            "boundary": "synchronous_public_apply",
+            "first_apply_ms": first_apply_ns / 1e6,
+            "warm_apply_ms": {
+                "minimum": min(warm_ns) / 1e6,
+                "median": float(np.median(warm_ns)) / 1e6,
+                "maximum": max(warm_ns) / 1e6,
+            },
+            "device_time_available": False,
+        },
+        "statistics": {
+            "before": initial_statistics,
+            "after": final_statistics,
+        },
+        "metadata": custom_metadata,
+    }
+    return OperatorQualificationReport(record)
 
 
 def _validate_solve_controls(dtype, max_iterations, atol, rtol):
