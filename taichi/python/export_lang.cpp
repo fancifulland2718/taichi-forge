@@ -5115,6 +5115,25 @@ void export_lang(py::module &m) {
       .def("_apply", &ExperimentalLinearOperatorHandle::apply,
            py::keep_alive<1, 2>(), py::arg("program"),
            py::arg("input"), py::arg("output"))
+      .def(
+          "_update_numeric",
+          [](ExperimentalLinearOperatorHandle &handle, Program *program,
+             const py::dict &arguments,
+             std::uint64_t expected_topology_version,
+             std::uint64_t expected_numeric_version) {
+            ExperimentalLinearOperatorHandle::NumericUpdateArguments native;
+            for (const auto &item : arguments) {
+              native.emplace(py::cast<std::string>(item.first),
+                             &py::cast<const Ndarray &>(item.second));
+            }
+            handle.update_numeric(program, native, expected_topology_version,
+                                  expected_numeric_version);
+          },
+          py::keep_alive<1, 2>(), py::arg("program"), py::arg("arguments"),
+          py::arg("expected_topology_version"),
+          py::arg("expected_numeric_version"))
+      .def("_supports_numeric_update",
+           &ExperimentalLinearOperatorHandle::supports_numeric_update)
       .def("_begin_session",
            &ExperimentalLinearOperatorHandle::begin_session,
            py::keep_alive<0, 1>())

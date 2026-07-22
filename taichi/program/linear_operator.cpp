@@ -2129,8 +2129,12 @@ OperatorBinding make_vulkan_program_graph_operator_binding(
 
 ExperimentalLinearOperatorHandle::ExperimentalLinearOperatorHandle(
     Program *program,
-    OperatorBinding binding)
+    OperatorBinding binding,
+    std::shared_ptr<void> provider_owner,
+    NumericUpdateFn numeric_update)
     : program_(program),
+      provider_owner_(std::move(provider_owner)),
+      numeric_update_(std::move(numeric_update)),
       binding_(std::move(binding)),
       plan_(std::make_unique<OperatorPlan>(program_, binding_)) {
   TI_ERROR_IF(!program_,
@@ -2207,6 +2211,24 @@ void ExperimentalLinearOperatorHandle::apply(Program *program,
        OperatorVectorView::from_ndarray(program_, output,
                                         descriptor.range, true)});
   submission.wait();
+}
+
+void ExperimentalLinearOperatorHandle::update_numeric(
+    Program *program,
+    const NumericUpdateArguments &arguments,
+    std::uint64_t expected_topology_version,
+    std::uint64_t expected_numeric_version) {
+  TI_ERROR_IF(program != program_,
+              "LinearOperator numeric update must use its construction "
+              "Program.");
+  TI_ERROR_IF(!numeric_update_,
+              "LinearOperator provider does not support numeric updates.");
+  numeric_update_(program, arguments, expected_topology_version,
+                  expected_numeric_version);
+}
+
+bool ExperimentalLinearOperatorHandle::supports_numeric_update() const {
+  return static_cast<bool>(numeric_update_);
 }
 
 ExperimentalLinearOperatorSession::ExperimentalLinearOperatorSession(

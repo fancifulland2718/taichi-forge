@@ -5,6 +5,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -489,8 +490,18 @@ class OperatorPlan {
 // provider-specific execution/lifetime rules in this layer.
 class ExperimentalLinearOperatorHandle {
  public:
+  using NumericUpdateArguments =
+      std::unordered_map<std::string, const Ndarray *>;
+  using NumericUpdateFn = std::function<void(
+      Program *,
+      const NumericUpdateArguments &,
+      std::uint64_t,
+      std::uint64_t)>;
+
   ExperimentalLinearOperatorHandle(Program *program,
-                                   OperatorBinding binding);
+                                   OperatorBinding binding,
+                                   std::shared_ptr<void> provider_owner = {},
+                                   NumericUpdateFn numeric_update = {});
   ExperimentalLinearOperatorHandle(
       const ExperimentalLinearOperatorHandle &) = delete;
   ExperimentalLinearOperatorHandle &operator=(
@@ -512,9 +523,16 @@ class ExperimentalLinearOperatorHandle {
   void apply(Program *program,
              const Ndarray &input,
              const Ndarray &output);
+  void update_numeric(Program *program,
+                      const NumericUpdateArguments &arguments,
+                      std::uint64_t expected_topology_version,
+                      std::uint64_t expected_numeric_version);
+  bool supports_numeric_update() const;
 
  private:
   Program *program_{nullptr};
+  std::shared_ptr<void> provider_owner_;
+  NumericUpdateFn numeric_update_;
   OperatorBinding binding_;
   std::unique_ptr<OperatorPlan> plan_;
 };
