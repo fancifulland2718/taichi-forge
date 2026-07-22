@@ -1026,6 +1026,16 @@ def test_stored_bsr_block_jacobi_cholesky_apply_refresh_and_failures():
         with pytest.raises(RuntimeError, match="block 2 contains a non-finite"):
             plan._refresh_numeric(prog)
 
+        nonsymmetric_blocks = scaled_blocks.copy()
+        nonsymmetric_blocks[0, 0, 1] += np.float32(0.25)
+        nonsymmetric_values = ti.ndarray(
+            dtype=ti.f32, shape=nonsymmetric_blocks.size
+        )
+        nonsymmetric_values.from_numpy(nonsymmetric_blocks.reshape(-1))
+        matrix.update_values(nonsymmetric_values)
+        with pytest.raises(RuntimeError, match="block 0 is not symmetric"):
+            plan._refresh_numeric(prog)
+
         recovered_values = ti.ndarray(dtype=ti.f32, shape=blocks.size)
         recovered_values.from_numpy(blocks.reshape(-1))
         matrix.update_values(recovered_values)
@@ -1037,13 +1047,118 @@ def test_stored_bsr_block_jacobi_cholesky_apply_refresh_and_failures():
         )
         recovered = plan._debug_runtime_stats()
         assert recovered["operations"]["numeric_refresh_successes"] == 2
-        assert recovered["operations"]["numeric_refresh_failures"] == 2
+        assert recovered["operations"]["numeric_refresh_failures"] == 3
         if backend != "cpu":
             assert recovered["transfers"]["refresh_device_allocations"] == 0
             assert recovered["transfers"]["refresh_host_to_device_bytes"] == 0
             assert recovered["transfers"]["refresh_device_to_device_bytes"] == (
                 2 * factor_bytes
             )
+
+
+@test_utils.test(arch=[ti.cpu], offline_cache=False)
+def test_cpu_f64_block_jacobi_cholesky_supports_all_block_sizes():
+    block_rows = 2
+    prog = ti.lang.impl.get_runtime().prog
+    for block_size in (2, 3, 6, 12):
+        row_offsets = ti.ndarray(dtype=ti.i32, shape=block_rows + 1)
+        column_indices = ti.ndarray(dtype=ti.i32, shape=block_rows)
+        row_offsets.from_numpy(np.arange(block_rows + 1, dtype=np.int32))
+        column_indices.from_numpy(np.arange(block_rows, dtype=np.int32))
+        pattern = ti.linalg.SparsePattern.bsr(
+            block_rows,
+            block_rows,
+            block_size,
+            row_offsets,
+            column_indices,
+        )
+        blocks = []
+        for block_row in range(block_rows):
+            factor = np.eye(block_size, dtype=np.float64) * (
+                1.5 + 0.25 * block_row
+            )
+            for row in range(1, block_size):
+                for column in range(row):
+                    factor[row, column] = 0.01 * (
+                        1 + (row + column + block_row) % 7
+                    )
+            blocks.append(factor @ factor.T)
+        blocks = np.asarray(blocks, dtype=np.float64)
+        values = ti.ndarray(dtype=ti.f64, shape=blocks.size)
+        values.from_numpy(blocks.reshape(-1))
+        matrix = pattern.matrix(values)
+        plan = ti._lib.core._make_sparse_block_jacobi_preconditioner_plan(
+            prog, matrix.matrix
+        )
+        n = block_rows * block_size
+        rhs_host = np.cos(np.linspace(0.1, 1.3, n, dtype=np.float64))
+        rhs = ti.ndarray(dtype=ti.f64, shape=n)
+        output = ti.ndarray(dtype=ti.f64, shape=n)
+        rhs.from_numpy(rhs_host)
+        expected = np.concatenate(
+            [
+                np.linalg.solve(
+                    blocks[block_row],
+                    rhs_host[
+                        block_row * block_size : (block_row + 1) * block_size
+                    ],
+                )
+                for block_row in range(block_rows)
+            ]
+        )
+        plan.apply(prog, rhs.arr, output.arr)
+        np.testing.assert_allclose(
+            output.to_numpy(), expected, rtol=2e-12, atol=2e-12
+        )
+        scaled_blocks = blocks * 1.125
+        scaled_values = ti.ndarray(dtype=ti.f64, shape=scaled_blocks.size)
+        scaled_values.from_numpy(scaled_blocks.reshape(-1))
+        matrix.update_values(scaled_values)
+        plan._refresh_numeric(prog)
+        plan.apply(prog, rhs.arr, output.arr)
+        np.testing.assert_allclose(
+            output.to_numpy(), expected / 1.125, rtol=2e-12, atol=2e-12
+        )
+        stats = plan._debug_runtime_stats()
+        assert stats["identity"]["dtype"] == "f64"
+        assert stats["operations"]["numeric_refresh_successes"] == 1
+        assert stats["transfers"]["refresh_device_to_host_bytes"] == 0
+        assert stats["transfers"]["refresh_host_to_device_bytes"] == 0
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_stored_bsr_block_jacobi_rejects_missing_diagonal_transactionally():
+    block_rows = 2
+    block_size = 2
+    row_offsets = ti.ndarray(dtype=ti.i32, shape=block_rows + 1)
+    column_indices = ti.ndarray(dtype=ti.i32, shape=block_rows)
+    row_offsets.from_numpy(np.asarray([0, 1, 2], dtype=np.int32))
+    column_indices.from_numpy(np.asarray([1, 0], dtype=np.int32))
+    pattern = ti.linalg.SparsePattern.bsr(
+        block_rows,
+        block_rows,
+        block_size,
+        row_offsets,
+        column_indices,
+    )
+    values = ti.ndarray(dtype=ti.f32, shape=block_rows * block_size**2)
+    values.from_numpy(
+        np.tile(np.eye(block_size, dtype=np.float32).reshape(-1), block_rows)
+    )
+    matrix = pattern.matrix(values)
+    before = matrix._debug_runtime_stats()
+    prog = ti.lang.impl.get_runtime().prog
+    with pytest.raises(RuntimeError, match="block row 0 has no stored diagonal"):
+        ti._lib.core._make_sparse_block_jacobi_preconditioner_plan(
+            prog, matrix.matrix
+        )
+    after = matrix._debug_runtime_stats()
+    assert after["identity"]["pattern_version"] == before["identity"][
+        "pattern_version"
+    ]
+    assert after["identity"]["numeric_version"] == before["identity"][
+        "numeric_version"
+    ]
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
@@ -1130,3 +1245,37 @@ def test_device_native_stored_bsr_block_jacobi_pcg_chunk_replay():
     ]["solver_chunk_replays"]
     assert second["operations"]["solver_chunk_direct_submissions"] == 0
     assert second["operations"]["solver_chunk_invalidations"] == 0
+
+    scaled_values = ti.ndarray(dtype=ti.f32, shape=blocks.size)
+    scaled_values.from_numpy((blocks * np.float32(1.25)).reshape(-1))
+    matrix.update_values(scaled_values)
+    preconditioner._refresh_numeric(prog)
+    solution.fill(0.0)
+    plan.solve(prog, solution.arr, rhs.arr)
+    assert plan.get_status() == 2
+    np.testing.assert_allclose(
+        solution.to_numpy(), exact / np.float32(1.25),
+        rtol=3e-4, atol=3e-4
+    )
+    rebound = plan._debug_runtime_stats()
+    assert rebound["operations"]["solver_chunk_builds"] == second[
+        "operations"
+    ]["solver_chunk_builds"]
+    assert rebound["operations"]["solver_chunk_rebinds"] > second[
+        "operations"
+    ]["solver_chunk_rebinds"]
+    assert rebound["operations"]["solver_chunk_invalidations"] == 0
+    preconditioner_stats = preconditioner._debug_runtime_stats()
+    assert preconditioner_stats["contract"]["stable_refresh_binding"]
+    assert (
+        preconditioner_stats["operations"]["numeric_refresh_successes"]
+        == 1
+    )
+    assert (
+        preconditioner_stats["transfers"][
+            "refresh_full_values_device_to_host_bytes"
+        ]
+        == 0
+    )
+    assert preconditioner_stats["transfers"]["refresh_host_to_device_bytes"] == 0
+    assert preconditioner_stats["transfers"]["refresh_device_allocations"] == 0
