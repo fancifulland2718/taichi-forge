@@ -2405,6 +2405,36 @@ class TI_DLL_EXPORT Program {
                                          Ndarray *direction,
                                          std::size_t n);
 
+  std::size_t vulkan_sparse_minres_scalar(
+      Ndarray *initial_residual_squared,
+      Ndarray *rhs_squared,
+      Ndarray *dot,
+      Ndarray *state,
+      float absolute_tolerance,
+      float relative_tolerance,
+      std::uint32_t stage,
+      bool limit_reached,
+      bool has_preconditioner,
+      bool stop_on_estimate);
+
+  std::size_t vulkan_sparse_minres_vector_state(Ndarray *source,
+                                                Ndarray *destination,
+                                                Ndarray *state,
+                                                std::size_t n,
+                                                std::uint32_t coefficient,
+                                                bool add);
+
+  std::size_t vulkan_sparse_minres_commit(Ndarray *v,
+                                          Ndarray *r1,
+                                          Ndarray *r2,
+                                          Ndarray *lanczos_residual,
+                                          Ndarray *w_older,
+                                          Ndarray *w_old,
+                                          Ndarray *w,
+                                          Ndarray *solution,
+                                          Ndarray *state,
+                                          std::size_t n);
+
   std::size_t vulkan_sparse_convergence(Ndarray *residual_squared,
                                         Ndarray *status,
                                         Ndarray *completed_iterations,

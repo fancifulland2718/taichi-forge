@@ -1,0 +1,72 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer V {
+  float data[];
+} v_buf;
+layout(set = 0, binding = 1, std430) buffer R1 {
+  float data[];
+} r1_buf;
+layout(set = 0, binding = 2, std430) buffer R2 {
+  float data[];
+} r2_buf;
+layout(set = 0, binding = 3, std430) readonly buffer LanczosResidual {
+  float data[];
+} lanczos_residual_buf;
+layout(set = 0, binding = 4, std430) buffer WOlder {
+  float data[];
+} w_older_buf;
+layout(set = 0, binding = 5, std430) buffer WOld {
+  float data[];
+} w_old_buf;
+layout(set = 0, binding = 6, std430) buffer W {
+  float data[];
+} w_buf;
+layout(set = 0, binding = 7, std430) buffer Solution {
+  float data[];
+} solution_buf;
+layout(set = 0, binding = 8, std430) readonly buffer State {
+  uint data[];
+} state_buf;
+
+layout(push_constant) uniform Params {
+  uint n;
+  uint unused0;
+  uint unused1;
+  uint unused2;
+} params;
+
+const uint kOldEpsln = 14u;
+const uint kDelta = 15u;
+const uint kInverseGamma = 16u;
+const uint kPhi = 17u;
+const uint kUpdateEnabled = 28u;
+
+void main() {
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  uint index = gl_GlobalInvocationID.x;
+  if (int(state_buf.data[kUpdateEnabled]) == 0) {
+    return;
+  }
+  float oldeps = uintBitsToFloat(state_buf.data[kOldEpsln]);
+  float delta = uintBitsToFloat(state_buf.data[kDelta]);
+  float inverse_gamma = uintBitsToFloat(state_buf.data[kInverseGamma]);
+  float phi = uintBitsToFloat(state_buf.data[kPhi]);
+  while (index < params.n) {
+    float old_w_old = w_old_buf.data[index];
+    float old_w = w_buf.data[index];
+    float new_w = (v_buf.data[index] - oldeps * old_w_old -
+                   delta * old_w) * inverse_gamma;
+    w_older_buf.data[index] = old_w_old;
+    w_old_buf.data[index] = old_w;
+    w_buf.data[index] = new_w;
+    solution_buf.data[index] += phi * new_w;
+    r1_buf.data[index] = r2_buf.data[index];
+    r2_buf.data[index] = lanczos_residual_buf.data[index];
+    if (params.n - index <= stride) {
+      break;
+    }
+    index += stride;
+  }
+}

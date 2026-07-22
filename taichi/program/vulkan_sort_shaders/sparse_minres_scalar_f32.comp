@@ -1,0 +1,267 @@
+#version 450
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer InitialResidualSquared {
+  float data[];
+} initial_residual_squared_buf;
+
+layout(set = 0, binding = 1, std430) readonly buffer RhsSquared {
+  float data[];
+} rhs_squared_buf;
+
+layout(set = 0, binding = 2, std430) readonly buffer Dot {
+  float data[];
+} dot_buf;
+
+layout(set = 0, binding = 3, std430) buffer State {
+  uint data[];
+} state_buf;
+
+layout(push_constant) uniform Params {
+  float absolute_tolerance;
+  float relative_tolerance;
+  uint stage;
+  uint flags;
+} params;
+
+const uint kTrueResidualSquared = 1u;
+const uint kRhsSquared = 2u;
+const uint kBeta = 3u;
+const uint kOldBeta = 4u;
+const uint kAlpha = 5u;
+const uint kCosine = 6u;
+const uint kSine = 7u;
+const uint kDbar = 8u;
+const uint kEpsln = 9u;
+const uint kPhibar = 10u;
+const uint kInverseBeta = 11u;
+const uint kOldResidualScale = 12u;
+const uint kAlphaResidualScale = 13u;
+const uint kOldEpsln = 14u;
+const uint kDelta = 15u;
+const uint kInverseGamma = 16u;
+const uint kPhi = 17u;
+const uint kEstimatedResidual = 18u;
+const uint kAbsoluteTolerance = 19u;
+const uint kRelativeTolerance = 20u;
+const uint kRelativeReferenceNorm = 21u;
+const uint kEffectiveTolerance = 22u;
+const uint kToleranceSquared = 23u;
+const uint kInitialResidualSquared = 24u;
+const uint kFloatCount = 25u;
+const uint kStatus = kFloatCount + 0u;
+const uint kCompletedIterations = kFloatCount + 1u;
+const uint kActive = kFloatCount + 2u;
+const uint kUpdateEnabled = kFloatCount + 3u;
+const uint kKrylovClosed = kFloatCount + 4u;
+const uint kHasPreconditioner = kFloatCount + 5u;
+const uint kStopOnEstimate = kFloatCount + 6u;
+const int kNotRun = -1;
+const int kMaxIterations = 0;
+const int kBreakdown = 1;
+const int kConverged = 2;
+
+float load_float(uint index) {
+  return uintBitsToFloat(state_buf.data[index]);
+}
+
+void store_float(uint index, float value) {
+  state_buf.data[index] = floatBitsToUint(value);
+}
+
+int load_int(uint index) {
+  return int(state_buf.data[index]);
+}
+
+void store_int(uint index, int value) {
+  state_buf.data[index] = uint(value);
+}
+
+bool finite_value(float value) {
+  return !isnan(value) && !isinf(value);
+}
+
+void fail() {
+  store_int(kStatus, kBreakdown);
+  store_int(kActive, 0);
+  store_int(kUpdateEnabled, 0);
+}
+
+void main() {
+  bool limit_reached = (params.flags & 1u) != 0u;
+  bool has_preconditioner = (params.flags & 2u) != 0u;
+  bool stop_on_estimate = (params.flags & 4u) != 0u;
+  if (params.stage == 0u) {
+    for (uint index = 0u; index < kFloatCount + 8u; ++index) {
+      state_buf.data[index] = 0u;
+    }
+    store_int(kStatus, kNotRun);
+    store_int(kActive, 1);
+    store_int(kHasPreconditioner, has_preconditioner ? 1 : 0);
+    store_int(kStopOnEstimate, stop_on_estimate ? 1 : 0);
+    float rr = initial_residual_squared_buf.data[0];
+    float rhs2 = rhs_squared_buf.data[0];
+    float beta2 = dot_buf.data[0];
+    store_float(kTrueResidualSquared, rr);
+    store_float(kInitialResidualSquared, rr);
+    store_float(kRhsSquared, rhs2);
+    store_float(kAbsoluteTolerance, params.absolute_tolerance);
+    store_float(kRelativeTolerance, params.relative_tolerance);
+    if (!finite_value(rr) || rr < 0.0 || !finite_value(rhs2) ||
+        rhs2 < 0.0) {
+      fail();
+      return;
+    }
+    float reference = sqrt(rhs2);
+    float relative = params.relative_tolerance * reference;
+    float tolerance = max(params.absolute_tolerance, relative);
+    float tolerance_squared = tolerance * tolerance;
+    if (!finite_value(reference) || !finite_value(tolerance) ||
+        !finite_value(tolerance_squared)) {
+      fail();
+      return;
+    }
+    store_float(kRelativeReferenceNorm, reference);
+    store_float(kEffectiveTolerance, tolerance);
+    store_float(kToleranceSquared, tolerance_squared);
+    if (rr <= tolerance_squared) {
+      store_int(kStatus, kConverged);
+      store_int(kActive, 0);
+      return;
+    }
+    if (!finite_value(beta2) || beta2 <= 0.0) {
+      fail();
+      return;
+    }
+    float beta = sqrt(beta2);
+    if (!finite_value(beta) || beta <= 0.0) {
+      fail();
+      return;
+    }
+    store_float(kBeta, beta);
+    store_float(kCosine, -1.0);
+    store_float(kPhibar, beta);
+    store_float(kEstimatedResidual, beta);
+    if (limit_reached) {
+      store_int(kStatus, kMaxIterations);
+      store_int(kActive, 0);
+    }
+    return;
+  }
+
+  store_int(kUpdateEnabled, 0);
+  if (params.stage == 4u) {
+    if (load_int(kStatus) == kBreakdown) {
+      return;
+    }
+    float rr = dot_buf.data[0];
+    store_float(kTrueResidualSquared, rr);
+    if (!finite_value(rr) || rr < 0.0) {
+      fail();
+      return;
+    }
+    if (rr <= load_float(kToleranceSquared)) {
+      store_int(kStatus, kConverged);
+      store_int(kActive, 0);
+    } else if (load_int(kKrylovClosed) != 0) {
+      fail();
+    } else if (limit_reached) {
+      store_int(kStatus, kMaxIterations);
+      store_int(kActive, 0);
+    } else {
+      store_int(kStatus, kNotRun);
+      store_int(kActive, 1);
+    }
+    return;
+  }
+
+  if (load_int(kActive) == 0) {
+    return;
+  }
+  float beta = load_float(kBeta);
+  if (!finite_value(beta) || beta <= 0.0) {
+    fail();
+    return;
+  }
+  if (params.stage == 1u) {
+    store_float(kInverseBeta, 1.0 / beta);
+    int completed = load_int(kCompletedIterations);
+    float old_residual_scale = 0.0;
+    if (completed > 0) {
+      float old_beta = load_float(kOldBeta);
+      if (!finite_value(old_beta) || old_beta <= 0.0) {
+        fail();
+        return;
+      }
+      old_residual_scale = -beta / old_beta;
+    }
+    store_float(kOldResidualScale, old_residual_scale);
+    return;
+  }
+  if (params.stage == 2u) {
+    float alpha = dot_buf.data[0];
+    if (!finite_value(alpha)) {
+      fail();
+      return;
+    }
+    store_float(kAlpha, alpha);
+    store_float(kAlphaResidualScale, -alpha / beta);
+    return;
+  }
+  if (params.stage != 3u) {
+    fail();
+    return;
+  }
+
+  float beta2 = dot_buf.data[0];
+  if (!finite_value(beta2) || beta2 < 0.0) {
+    fail();
+    return;
+  }
+  float beta_new = sqrt(beta2);
+  float alpha = load_float(kAlpha);
+  float cs = load_float(kCosine);
+  float sn = load_float(kSine);
+  float dbar = load_float(kDbar);
+  float oldeps = load_float(kEpsln);
+  float phibar = load_float(kPhibar);
+  float delta = cs * dbar + sn * alpha;
+  float gbar = sn * dbar - cs * alpha;
+  float next_epsln = sn * beta_new;
+  float next_dbar = -cs * beta_new;
+  float gamma = sqrt(gbar * gbar + beta_new * beta_new);
+  if (!finite_value(beta_new) || !finite_value(delta) ||
+      !finite_value(gamma) || gamma <= 0.0) {
+    fail();
+    return;
+  }
+  float next_cs = gbar / gamma;
+  float next_sn = beta_new / gamma;
+  float phi = next_cs * phibar;
+  float next_phibar = next_sn * phibar;
+  if (!finite_value(next_cs) || !finite_value(next_sn) ||
+      !finite_value(phi) || !finite_value(next_phibar)) {
+    fail();
+    return;
+  }
+  store_float(kOldEpsln, oldeps);
+  store_float(kDelta, delta);
+  store_float(kInverseGamma, 1.0 / gamma);
+  store_float(kPhi, phi);
+  store_float(kOldBeta, beta);
+  store_float(kBeta, beta_new);
+  store_float(kCosine, next_cs);
+  store_float(kSine, next_sn);
+  store_float(kDbar, next_dbar);
+  store_float(kEpsln, next_epsln);
+  store_float(kPhibar, next_phibar);
+  store_float(kEstimatedResidual, abs(next_phibar));
+  store_int(kCompletedIterations, load_int(kCompletedIterations) + 1);
+  store_int(kUpdateEnabled, 1);
+  bool closed = beta_new == 0.0;
+  store_int(kKrylovClosed, closed ? 1 : 0);
+  bool provisional_stop = stop_on_estimate &&
+      (abs(next_phibar) <= load_float(kEffectiveTolerance) || closed);
+  store_int(kActive, provisional_stop ? 0 : 1);
+}

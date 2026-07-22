@@ -1,0 +1,44 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Source {
+  float data[];
+} source_buf;
+
+layout(set = 0, binding = 1, std430) buffer Destination {
+  float data[];
+} destination_buf;
+
+layout(set = 0, binding = 2, std430) readonly buffer State {
+  uint data[];
+} state_buf;
+
+layout(push_constant) uniform Params {
+  uint n;
+  uint coefficient_index;
+  uint add;
+  uint unused;
+} params;
+
+const uint kActive = 27u;
+
+void main() {
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  uint index = gl_GlobalInvocationID.x;
+  if (int(state_buf.data[kActive]) == 0) {
+    return;
+  }
+  float coefficient = uintBitsToFloat(
+      state_buf.data[params.coefficient_index]);
+  while (index < params.n) {
+    float value = coefficient * source_buf.data[index];
+    destination_buf.data[index] = params.add != 0u
+        ? destination_buf.data[index] + value
+        : value;
+    if (params.n - index <= stride) {
+      break;
+    }
+    index += stride;
+  }
+}

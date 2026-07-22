@@ -147,6 +147,38 @@ void driver_sparse_block_diagonal_apply_f32(void *factor_blocks,
                                             int block_size,
                                             void *stream);
 
+void driver_sparse_minres_scalar_f32(void *initial_residual_squared,
+                                     void *rhs_squared,
+                                     void *dot,
+                                     void *state,
+                                     float absolute_tolerance,
+                                     float relative_tolerance,
+                                     int stage,
+                                     bool limit_reached,
+                                     bool has_preconditioner,
+                                     bool stop_on_estimate,
+                                     void *stream);
+
+void driver_sparse_minres_vector_state_f32(void *source,
+                                           void *destination,
+                                           void *state,
+                                           int num_items,
+                                           int coefficient_index,
+                                           bool add,
+                                           void *stream);
+
+void driver_sparse_minres_commit_f32(void *v,
+                                     void *r1,
+                                     void *r2,
+                                     void *lanczos_residual,
+                                     void *w_older,
+                                     void *w_old,
+                                     void *w,
+                                     void *solution,
+                                     void *state,
+                                     int num_items,
+                                     void *stream);
+
 std::size_t driver_compact_strided(void *values,
                                    void *flags,
                                    void *output,

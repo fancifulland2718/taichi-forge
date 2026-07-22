@@ -865,6 +865,327 @@ __device__ float sparse_refresh_sqrt_f32(float value) {
   return result;
 }
 
+namespace sparse_minres {
+
+constexpr u32 kDot = 0u;
+constexpr u32 kTrueResidualSquared = 1u;
+constexpr u32 kRhsSquared = 2u;
+constexpr u32 kBeta = 3u;
+constexpr u32 kOldBeta = 4u;
+constexpr u32 kAlpha = 5u;
+constexpr u32 kCosine = 6u;
+constexpr u32 kSine = 7u;
+constexpr u32 kDbar = 8u;
+constexpr u32 kEpsln = 9u;
+constexpr u32 kPhibar = 10u;
+constexpr u32 kInverseBeta = 11u;
+constexpr u32 kOldResidualScale = 12u;
+constexpr u32 kAlphaResidualScale = 13u;
+constexpr u32 kOldEpsln = 14u;
+constexpr u32 kDelta = 15u;
+constexpr u32 kInverseGamma = 16u;
+constexpr u32 kPhi = 17u;
+constexpr u32 kEstimatedResidual = 18u;
+constexpr u32 kAbsoluteTolerance = 19u;
+constexpr u32 kRelativeTolerance = 20u;
+constexpr u32 kRelativeReferenceNorm = 21u;
+constexpr u32 kEffectiveTolerance = 22u;
+constexpr u32 kToleranceSquared = 23u;
+constexpr u32 kInitialResidualSquared = 24u;
+constexpr u32 kFloatCount = 25u;
+
+constexpr u32 kStatus = kFloatCount + 0u;
+constexpr u32 kCompletedIterations = kFloatCount + 1u;
+constexpr u32 kActive = kFloatCount + 2u;
+constexpr u32 kUpdateEnabled = kFloatCount + 3u;
+constexpr u32 kKrylovClosed = kFloatCount + 4u;
+constexpr u32 kHasPreconditioner = kFloatCount + 5u;
+constexpr u32 kStopOnEstimate = kFloatCount + 6u;
+constexpr u32 kReserved = kFloatCount + 7u;
+
+constexpr i32 kNotRun = -1;
+constexpr i32 kMaxIterations = 0;
+constexpr i32 kBreakdown = 1;
+constexpr i32 kConverged = 2;
+
+__device__ float load_float(const u32 *state, u32 index) {
+  return bit_cast<float>(state[index]);
+}
+
+__device__ void store_float(u32 *state, u32 index, float value) {
+  state[index] = bit_cast<u32>(value);
+}
+
+__device__ i32 load_int(const u32 *state, u32 index) {
+  return bit_cast<i32>(state[index]);
+}
+
+__device__ void store_int(u32 *state, u32 index, i32 value) {
+  state[index] = bit_cast<u32>(value);
+}
+
+__device__ bool finite(float value) {
+  return sparse_refresh_finite_f32(value);
+}
+
+__device__ float abs(float value) {
+  return sparse_refresh_abs_f32(value);
+}
+
+__device__ void fail(u32 *state) {
+  store_int(state, kStatus, kBreakdown);
+  store_int(state, kActive, 0);
+  store_int(state, kUpdateEnabled, 0);
+}
+
+}  // namespace sparse_minres
+
+extern "C" __global__ void sparse_minres_scalar_f32(
+    const float *initial_residual_squared,
+    const float *rhs_squared,
+    const float *dot,
+    u32 *state,
+    float absolute_tolerance,
+    float relative_tolerance,
+    u32 stage,
+    u32 limit_reached,
+    u32 has_preconditioner,
+    u32 stop_on_estimate) {
+  if (blockIdx.x != 0u || threadIdx.x != 0u) {
+    return;
+  }
+  using namespace sparse_minres;
+  if (stage == 0u) {
+    for (u32 index = 0; index < kFloatCount + 8u; ++index) {
+      state[index] = 0u;
+    }
+    store_int(state, kStatus, kNotRun);
+    store_int(state, kActive, 1);
+    store_int(state, kHasPreconditioner,
+              has_preconditioner != 0u ? 1 : 0);
+    store_int(state, kStopOnEstimate, stop_on_estimate != 0u ? 1 : 0);
+    const float rr = initial_residual_squared[0];
+    const float rhs2 = rhs_squared[0];
+    const float beta2 = dot[0];
+    store_float(state, kTrueResidualSquared, rr);
+    store_float(state, kInitialResidualSquared, rr);
+    store_float(state, kRhsSquared, rhs2);
+    store_float(state, kAbsoluteTolerance, absolute_tolerance);
+    store_float(state, kRelativeTolerance, relative_tolerance);
+    if (!finite(rr) || rr < 0.0f || !finite(rhs2) || rhs2 < 0.0f ||
+        !finite(beta2) || beta2 < 0.0f) {
+      fail(state);
+      return;
+    }
+    const float reference = sparse_refresh_sqrt_f32(rhs2);
+    const float relative = relative_tolerance * reference;
+    const float tolerance =
+        absolute_tolerance > relative ? absolute_tolerance : relative;
+    const float tolerance_squared = tolerance * tolerance;
+    if (!finite(reference) || !finite(tolerance) ||
+        !finite(tolerance_squared)) {
+      fail(state);
+      return;
+    }
+    store_float(state, kRelativeReferenceNorm, reference);
+    store_float(state, kEffectiveTolerance, tolerance);
+    store_float(state, kToleranceSquared, tolerance_squared);
+    if (rr <= tolerance_squared) {
+      store_int(state, kStatus, kConverged);
+      store_int(state, kActive, 0);
+      return;
+    }
+    if (beta2 <= 0.0f) {
+      fail(state);
+      return;
+    }
+    const float beta = sparse_refresh_sqrt_f32(beta2);
+    if (!finite(beta) || beta <= 0.0f) {
+      fail(state);
+      return;
+    }
+    store_float(state, kBeta, beta);
+    store_float(state, kCosine, -1.0f);
+    store_float(state, kPhibar, beta);
+    store_float(state, kEstimatedResidual, beta);
+    if (limit_reached != 0u) {
+      store_int(state, kStatus, kMaxIterations);
+      store_int(state, kActive, 0);
+    }
+    return;
+  }
+
+  store_int(state, kUpdateEnabled, 0);
+  if (stage == 4u) {
+    if (load_int(state, kStatus) == kBreakdown) {
+      return;
+    }
+    const float rr = dot[0];
+    store_float(state, kTrueResidualSquared, rr);
+    if (!finite(rr) || rr < 0.0f) {
+      fail(state);
+      return;
+    }
+    if (rr <= load_float(state, kToleranceSquared)) {
+      store_int(state, kStatus, kConverged);
+      store_int(state, kActive, 0);
+    } else if (load_int(state, kKrylovClosed) != 0) {
+      fail(state);
+    } else if (limit_reached != 0u) {
+      store_int(state, kStatus, kMaxIterations);
+      store_int(state, kActive, 0);
+    } else {
+      store_int(state, kStatus, kNotRun);
+      store_int(state, kActive, 1);
+    }
+    return;
+  }
+
+  if (load_int(state, kActive) == 0) {
+    return;
+  }
+  const float beta = load_float(state, kBeta);
+  if (!finite(beta) || beta <= 0.0f) {
+    fail(state);
+    return;
+  }
+  if (stage == 1u) {
+    store_float(state, kInverseBeta, 1.0f / beta);
+    const i32 completed = load_int(state, kCompletedIterations);
+    float old_residual_scale = 0.0f;
+    if (completed > 0) {
+      const float old_beta = load_float(state, kOldBeta);
+      if (!finite(old_beta) || old_beta <= 0.0f) {
+        fail(state);
+        return;
+      }
+      old_residual_scale = -beta / old_beta;
+    }
+    store_float(state, kOldResidualScale, old_residual_scale);
+    return;
+  }
+  if (stage == 2u) {
+    const float alpha = dot[0];
+    if (!finite(alpha)) {
+      fail(state);
+      return;
+    }
+    store_float(state, kAlpha, alpha);
+    store_float(state, kAlphaResidualScale, -alpha / beta);
+    return;
+  }
+  if (stage != 3u) {
+    fail(state);
+    return;
+  }
+
+  const float beta2 = dot[0];
+  if (!finite(beta2) || beta2 < 0.0f) {
+    fail(state);
+    return;
+  }
+  const float beta_new = sparse_refresh_sqrt_f32(beta2);
+  const float alpha = load_float(state, kAlpha);
+  const float cs = load_float(state, kCosine);
+  const float sn = load_float(state, kSine);
+  const float dbar = load_float(state, kDbar);
+  const float epsln = load_float(state, kEpsln);
+  const float phibar = load_float(state, kPhibar);
+  const float oldeps = epsln;
+  const float delta = cs * dbar + sn * alpha;
+  const float gbar = sn * dbar - cs * alpha;
+  const float next_epsln = sn * beta_new;
+  const float next_dbar = -cs * beta_new;
+  const float gamma =
+      sparse_refresh_sqrt_f32(gbar * gbar + beta_new * beta_new);
+  if (!finite(beta_new) || !finite(delta) || !finite(gamma) ||
+      gamma <= 0.0f) {
+    fail(state);
+    return;
+  }
+  const float next_cs = gbar / gamma;
+  const float next_sn = beta_new / gamma;
+  const float phi = next_cs * phibar;
+  const float next_phibar = next_sn * phibar;
+  if (!finite(next_cs) || !finite(next_sn) || !finite(phi) ||
+      !finite(next_phibar)) {
+    fail(state);
+    return;
+  }
+  store_float(state, kOldEpsln, oldeps);
+  store_float(state, kDelta, delta);
+  store_float(state, kInverseGamma, 1.0f / gamma);
+  store_float(state, kPhi, phi);
+  store_float(state, kOldBeta, beta);
+  store_float(state, kBeta, beta_new);
+  store_float(state, kCosine, next_cs);
+  store_float(state, kSine, next_sn);
+  store_float(state, kDbar, next_dbar);
+  store_float(state, kEpsln, next_epsln);
+  store_float(state, kPhibar, next_phibar);
+  store_float(state, kEstimatedResidual, abs(next_phibar));
+  store_int(state, kCompletedIterations,
+            load_int(state, kCompletedIterations) + 1);
+  store_int(state, kUpdateEnabled, 1);
+  const bool closed = beta_new == 0.0f;
+  store_int(state, kKrylovClosed, closed ? 1 : 0);
+  const bool provisional_stop =
+      load_int(state, kStopOnEstimate) != 0 &&
+      (abs(next_phibar) <= load_float(state, kEffectiveTolerance) || closed);
+  store_int(state, kActive, provisional_stop ? 0 : 1);
+}
+
+extern "C" __global__ void sparse_minres_vector_state_f32(
+    const float *source,
+    float *destination,
+    const u32 *state,
+    u32 n,
+    u32 coefficient_index,
+    u32 add) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= n ||
+      sparse_minres::load_int(state, sparse_minres::kActive) == 0) {
+    return;
+  }
+  const float coefficient =
+      sparse_minres::load_float(state, coefficient_index);
+  const float value = coefficient * source[index];
+  destination[index] = add != 0u ? destination[index] + value : value;
+}
+
+extern "C" __global__ void sparse_minres_commit_f32(
+    const float *v,
+    float *r1,
+    float *r2,
+    const float *lanczos_residual,
+    float *w_older,
+    float *w_old,
+    float *w,
+    float *solution,
+    const u32 *state,
+    u32 n) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= n ||
+      sparse_minres::load_int(state, sparse_minres::kUpdateEnabled) == 0) {
+    return;
+  }
+  const float old_w_old = w_old[index];
+  const float old_w = w[index];
+  const float new_w =
+      (v[index] -
+       sparse_minres::load_float(state, sparse_minres::kOldEpsln) *
+           old_w_old -
+       sparse_minres::load_float(state, sparse_minres::kDelta) * old_w) *
+      sparse_minres::load_float(state, sparse_minres::kInverseGamma);
+  w_older[index] = old_w_old;
+  w_old[index] = old_w;
+  w[index] = new_w;
+  solution[index] +=
+      sparse_minres::load_float(state, sparse_minres::kPhi) * new_w;
+  r1[index] = r2[index];
+  r2[index] = lanczos_residual[index];
+}
+
 extern "C" __global__ void sparse_diagonal_refresh_f32(
     const float *values,
     const i32 *diagonal_offsets,

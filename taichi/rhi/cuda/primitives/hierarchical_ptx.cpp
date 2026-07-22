@@ -47,6 +47,9 @@ struct KernelSet {
   void *sparse_diagonal_refresh_f32{nullptr};
   void *sparse_block_cholesky_refresh_f32{nullptr};
   void *sparse_block_diagonal_apply_f32{nullptr};
+  void *sparse_minres_scalar_f32{nullptr};
+  void *sparse_minres_vector_state_f32{nullptr};
+  void *sparse_minres_commit_f32{nullptr};
   std::array<void *, 2> zero_bins{};
   std::array<std::array<void *, 2>, 2> histogram{};
   void *compact_rank_tiles{nullptr};
@@ -189,6 +192,15 @@ void load_kernel_set_once() {
   driver.module_get_function(&kernel_set.sparse_block_diagonal_apply_f32,
                              kernel_set.module,
                              "sparse_block_diagonal_apply_f32");
+  driver.module_get_function(&kernel_set.sparse_minres_scalar_f32,
+                             kernel_set.module,
+                             "sparse_minres_scalar_f32");
+  driver.module_get_function(&kernel_set.sparse_minres_vector_state_f32,
+                             kernel_set.module,
+                             "sparse_minres_vector_state_f32");
+  driver.module_get_function(&kernel_set.sparse_minres_commit_f32,
+                             kernel_set.module,
+                             "sparse_minres_commit_f32");
   driver.module_get_function(&kernel_set.gather_add[0], kernel_set.module,
                              "gather_add_strided_f32");
   driver.module_get_function(&kernel_set.gather_add[1], kernel_set.module,
@@ -1131,6 +1143,100 @@ void driver_sparse_block_diagonal_apply_f32(void *factor_blocks,
       kernels().sparse_block_diagonal_apply_f32,
       "cuda_driver_sparse_block_diagonal_apply_f32", args, {}, grid,
       kBlockDim, 0, stream);
+}
+
+void driver_sparse_minres_scalar_f32(void *initial_residual_squared,
+                                     void *rhs_squared,
+                                     void *dot,
+                                     void *state,
+                                     float absolute_tolerance,
+                                     float relative_tolerance,
+                                     int stage,
+                                     bool limit_reached,
+                                     bool has_preconditioner,
+                                     bool stop_on_estimate,
+                                     void *stream) {
+  TI_ERROR_IF(!initial_residual_squared || !rhs_squared || !dot || !state ||
+                  stage < 0 || stage > 4,
+              "CUDA Driver sparse MINRES scalar stage received an invalid "
+              "pointer or stage.");
+  void *initial_arg = initial_residual_squared;
+  void *rhs_arg = rhs_squared;
+  void *dot_arg = dot;
+  void *state_arg = state;
+  std::uint32_t stage_arg = static_cast<std::uint32_t>(stage);
+  std::uint32_t limit_arg = limit_reached ? 1u : 0u;
+  std::uint32_t preconditioner_arg = has_preconditioner ? 1u : 0u;
+  std::uint32_t stop_arg = stop_on_estimate ? 1u : 0u;
+  std::vector<void *> args{&initial_arg, &rhs_arg, &dot_arg, &state_arg,
+                           &absolute_tolerance, &relative_tolerance,
+                           &stage_arg, &limit_arg, &preconditioner_arg,
+                           &stop_arg};
+  CUDAContext::get_instance().launch(
+      kernels().sparse_minres_scalar_f32,
+      "cuda_driver_sparse_minres_scalar_f32", args, {}, 1, 1, 0, stream);
+}
+
+void driver_sparse_minres_vector_state_f32(void *source,
+                                           void *destination,
+                                           void *state,
+                                           int num_items,
+                                           int coefficient_index,
+                                           bool add,
+                                           void *stream) {
+  TI_ERROR_IF(!source || !destination || !state || num_items <= 0 ||
+                  coefficient_index < 0 || coefficient_index >= 25,
+              "CUDA Driver sparse MINRES vector stage received invalid "
+              "geometry or a null pointer.");
+  void *source_arg = source;
+  void *destination_arg = destination;
+  void *state_arg = state;
+  std::uint32_t count_arg = static_cast<std::uint32_t>(num_items);
+  std::uint32_t coefficient_arg =
+      static_cast<std::uint32_t>(coefficient_index);
+  std::uint32_t add_arg = add ? 1u : 0u;
+  std::vector<void *> args{&source_arg, &destination_arg, &state_arg,
+                           &count_arg, &coefficient_arg, &add_arg};
+  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().sparse_minres_vector_state_f32,
+      "cuda_driver_sparse_minres_vector_state_f32", args, {}, grid,
+      kBlockDim, 0, stream);
+}
+
+void driver_sparse_minres_commit_f32(void *v,
+                                     void *r1,
+                                     void *r2,
+                                     void *lanczos_residual,
+                                     void *w_older,
+                                     void *w_old,
+                                     void *w,
+                                     void *solution,
+                                     void *state,
+                                     int num_items,
+                                     void *stream) {
+  TI_ERROR_IF(!v || !r1 || !r2 || !lanczos_residual || !w_older ||
+                  !w_old || !w || !solution || !state || num_items <= 0,
+              "CUDA Driver sparse MINRES commit received invalid geometry "
+              "or a null pointer.");
+  void *v_arg = v;
+  void *r1_arg = r1;
+  void *r2_arg = r2;
+  void *lanczos_arg = lanczos_residual;
+  void *w_older_arg = w_older;
+  void *w_old_arg = w_old;
+  void *w_arg = w;
+  void *solution_arg = solution;
+  void *state_arg = state;
+  std::uint32_t count_arg = static_cast<std::uint32_t>(num_items);
+  std::vector<void *> args{&v_arg, &r1_arg, &r2_arg, &lanczos_arg,
+                           &w_older_arg, &w_old_arg, &w_arg, &solution_arg,
+                           &state_arg, &count_arg};
+  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().sparse_minres_commit_f32,
+      "cuda_driver_sparse_minres_commit_f32", args, {}, grid, kBlockDim,
+      0, stream);
 }
 
 void driver_sparse_assembly_pack_validate(void *triplet_rows,
