@@ -18,7 +18,7 @@
 | mass-spring或SPD implicit FEM | fixed CSR/BSR + CG和Jacobi/block-Jacobi；天然2/3/6/12-DOF block优先BSR |
 | active grid变化的implicit MPM | 空间装配使用SNode；迭代前发布compact DOF和显式或matrix-free operator |
 | 每步particle/contact adjacency | 用count-scan-fill或sorted arrays建立拓扑；这属于装配，不是solver选择 |
-| bilateral constraint或对称KKT | 完整对称CSR/BSR + MINRES；stored-matrix支持仅CPU |
+| bilateral constraint或对称KKT | 完整对称 CSR/BSR 或 compiled self-adjoint operator + `experimental.SolvePlan(method="minres")`；旧 `SparseMINRES` class 仍仅支持 CPU |
 | friction或其它非对称线性化 | 在受支持stored matrix上用BiCGSTAB，或对应用自有operator用`MatrixFreeBICGSTAB` |
 
 不存在只看矩阵size、CSR/BSR格式或“稀疏”标签就安全的selector。Taichi不会从storage
@@ -40,12 +40,19 @@ fixed BSR在format capability允许时可选block-Jacobi。CG运行到breakdown�
 ### 对称不定
 
 bilateral constraint、saddle-point、mixed formulation和KKT matrix可能对称但不定。
-必须存储两个对称off-diagonal half，并使用`SparseMINRES`；不能因为它们是square或
-block sparse就送进CG。
+不能因为它们是 square 或 block sparse 就送进 CG。旧 `SparseMINRES` class 支持 CPU
+mutable CSR/CSC 与 caller-owned fixed CSR/BSR，并使用 identity preconditioner。
 
-`SparseMINRES`支持CPU mutable CSR/CSC和caller-owned fixed CSR/BSR。
-CUDA/Vulkan stored matrix会明确拒绝，不会silent host solve。本发布线没有
-matrix-free MINRES，也没有通用field-split/Schur provider。
+`experimental.SolvePlan(method="minres")` 接受携带可信 self-adjoint trait 的
+`LinearOperator`。CPU 支持 identity-preconditioned `f32/f64`；CUDA/Vulkan 支持 `f32`
+fixed CSR/BSR 与 compiled provider。GPU 路径可使用 identity、文档列出的 fixed-CSR
+Jacobi、fixed-BSR SPD block-Jacobi，或兼容的可信 fixed-linear preconditioner。显式 matrix
+必须完整且一致地存储两个对称 off-diagonal half。
+
+这是可复用的线性 runtime primitive，不是完整的 constraint 或 multiphysics solver。
+operator 分类、nullspace 消除、scaling、constraint regularization、nonlinear/active-set
+执行顺序与领域 preconditioner 设计仍由应用负责。该路径拒绝声明为 singular 的 operator，
+也不提供 MINRES-QLP、minimum-length、field-split 或 Schur-complement policy。
 
 ### 非对称
 
@@ -81,6 +88,7 @@ padding成统一6-lane BSR。
 | `SparseSolver` direct solve | CSR/CSC providers | 文档列出的CSR provider | 不支持 |
 | `SparseCG` | mutable和fixed CSR/BSR capabilities | CSR和fixed BSR capabilities；受dtype/format限制 | 不支持 |
 | `SparseMINRES` | mutable和fixed CSR/BSR capabilities | 不支持 | 不支持 |
+| `experimental.SolvePlan(method="minres")` | 兼容 operator、identity，`f32/f64` | fixed CSR/BSR 或 compiled operator，支持 identity/内置项/兼容 fixed-linear preconditioner，`f32` | fixed CSR/BSR 或 compiled operator，支持 identity/内置项/兼容 fixed-linear preconditioner，`f32` |
 | `SparseBiCGSTAB` | mutable和fixed CSR/BSR capabilities | 不支持 | 不支持 |
 | `MatrixFreeCG` | kernel/field路径 | kernel/field路径 | backend/dtype受支持时可用 |
 | `MatrixFreeBICGSTAB` | kernel/field路径 | kernel/field路径 | backend/dtype受支持时可用 |
@@ -106,9 +114,10 @@ treatment，而不是取决于“MPM”这个名称。
 ### contact与constraint
 
 contact adjacency和linear solve必须分层。能先得到count时，应精确构造row offsets和
-payload，不应通过`dynamic`逐项append。对称bilateral KKT可使用CPU MINRES；friction
-或其它非对称系统需要BiCGSTAB/GMRES类别。当前CUDA/Vulkan stored non-SPD solver继续
-明确unsupported。
+payload，不应通过`dynamic`逐项append。经过资格确认的 nonsingular 对称 bilateral KKT
+可在受支持的 CPU/CUDA/Vulkan provider 上使用实验性 MINRES plan；旧 stored-matrix class
+仍仅支持 CPU。friction 或其它非对称系统仍需要受支持的 BiCGSTAB/GMRES 类别路径；
+MINRES 不提供 complementarity 或 active-set 处理。
 
 ## 失败与生命周期规则
 

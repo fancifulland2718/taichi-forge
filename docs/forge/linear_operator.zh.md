@@ -191,6 +191,8 @@ scale、sum、composition、block diagonal 和 identity 当前在 CPU 上执行�
 - `method="pcg"`：fixed CSR 上使用 `"jacobi"`、fixed BSR 上使用
   `"block_jacobi"`，或使用一个可信 SPD `LinearOperator`/`PreconditionerPlan` 应用 fixed-linear
   近似逆的 PCG；
+- `method="minres"`：面向允许不定的 square self-adjoint 系统，使用 identity 或 SPD
+  preconditioner 的 MINRES；
 - `method="bicgstab"`：面向一般 square 系统、使用 identity preconditioner 的 CPU
   BiCGSTAB。
 
@@ -219,6 +221,48 @@ plan = ti.linalg.experimental.SolvePlan(
 execution plan 支持的 provider 组合；CUDA/Vulkan 要求系统 operator 与 preconditioner
 都是 compiled-kernel provider。每次 solve 会成对 pin 它们的 topology 与 numeric
 generation，不调用 host callback，也不执行 backend fallback。
+
+### MINRES
+
+`method="minres"` 使用与 CG/PCG 相同的 `LinearOperator` 与 lifecycle 合同，但要求可信的
+`self_adjoint=True` trait，而不要求 operator 为正定：
+
+```python
+operator = ti.linalg.experimental.LinearOperator.from_sparse_matrix(
+    A,
+    traits=ti.linalg.experimental.OperatorTraits(
+        self_adjoint=True,
+        singular=False,
+    ),
+)
+plan = ti.linalg.experimental.SolvePlan(
+    operator,
+    method="minres",
+    max_iterations=300,
+    atol=1e-8,
+    rtol=1e-5,
+    execution_policy="host_check_every_k",
+    check_interval=4,
+)
+result = plan.solve(rhs)
+```
+
+CPU 为所有兼容的 CPU operator provider 提供 identity-preconditioned `f32/f64` MINRES。
+CUDA 与 Vulkan 为 fixed CSR/BSR 和 compiled provider 提供 `f32`
+identity-preconditioned MINRES。在 CUDA/Vulkan 上，fixed CSR 可选择 `"jacobi"`，block
+size 为 2、3、6 或 12 的 fixed BSR 可选择 `"block_jacobi"`，也可直接提供可信的
+device-native fixed-linear `LinearOperator` 或 `PreconditionerPlan`。MINRES preconditioner
+必须 self-adjoint、positive-definite 且 nonsingular；应用仍需保证所选 scalar Jacobi
+inverse 满足该数学合同。
+
+MINRES 拒绝声明为 `singular=True` 的 operator，不提供 MINRES-QLP，也不提供兼容 singular
+系统的 minimum-length 语义。显式存储的对称 matrix 必须完整且一致地保存两个 half。
+即使启用 preconditioner，terminal status 也使用原系统的真实 residual 进行资格判断。
+
+一个 CUDA/Vulkan MINRES plan 持有九个长度为 `n` 的持久 `f32` vector 与 144 bytes
+持久 scalar state。该数字不包含调用方持有的 operator values、preconditioner resource、
+RHS/output array、backend handle 与原生 replay object；具体配置应通过 `statistics()`
+检查完整 plan/provider telemetry。
 
 ## PreconditionerPlan 生命周期
 
@@ -269,7 +313,7 @@ RHS/output alias 会被拒绝。
 
 `SolveResult` 同时包含 solution 与 terminal snapshot：status code、termination reason、
 convergence/breakdown/max-iteration flag、iteration count、初始与最终 residual norm、两个
-tolerance、relative reference norm 和 effective tolerance。CG、PCG、BiCGSTAB 使用：
+tolerance、relative reference norm 和 effective tolerance。CG、PCG、MINRES、BiCGSTAB 使用：
 
 result record 本身是 frozen 的；其中的 `solution` ndarray 仍可由调用方写入。
 
@@ -306,8 +350,8 @@ plan = ti.linalg.experimental.SolvePlan(
 
 对于 fixed stored f32 CSR/BSR，CUDA 的 `host_check_every_k` 以及 Vulkan 的
 `host_check_every_k`/`fixed_budget_masked` 会把受支持的 CG/PCG iteration chunk
-录制为可复用的原生执行序列。当前可录制组合包括 identity、stored Jacobi 和 stored
-block-Jacobi preconditioner。首次兼容执行建立 CUDA Graph 或 Vulkan command sequence；
+录制为可复用的原生执行序列。当前可录制的 CG/PCG/MINRES 组合包括 identity、stored
+Jacobi 和 stored block-Jacobi preconditioner。首次兼容执行建立 CUDA Graph 或 Vulkan command sequence；
 相同 topology、workspace 与 output binding 的后续执行直接 replay。仅更新 matrix values
 并刷新 preconditioner numeric state 时不重录；更换 output ndarray、改变 topology/schema
 或重建 runtime 会使旧序列失效并安全重建。
@@ -511,12 +555,15 @@ GPU 当前只支持 overwrite apply。
 | PCG + Jacobi | fixed CSR，`f32/f64` | fixed CSR，`f32` | fixed CSR，`f32` |
 | PCG + block-Jacobi | fixed BSR，`f32/f64` | fixed BSR，`f32` | fixed BSR，`f32` |
 | PCG + fixed-linear operator/plan | 受支持 provider，`f32/f64` | compiled-kernel A/M，`f32` | compiled-kernel A/M，`f32` |
+| MINRES + identity | 受支持 provider，`f32/f64` | fixed CSR/BSR 或 compiled provider，`f32` | fixed CSR/BSR 或 compiled provider，`f32` |
+| MINRES + Jacobi/block-Jacobi | 不支持 | 分别为 fixed CSR/BSR，`f32` | 分别为 fixed CSR/BSR，`f32` |
+| MINRES + fixed-linear operator/plan | 不支持 | 兼容的 device-native A/M，`f32` | 兼容的 device-native A/M，`f32` |
 | 独立批量 CG/PCG | fixed stored 或 compiled-kernel A/M，`f32` | fixed stored 或 compiled-kernel A/M，`f32` | fixed stored 或 compiled-kernel A/M，`f32` |
 | 批量 fixed-budget submission | 不支持 | fixed stored 或 compiled-kernel A/M，`f32` | fixed stored 或 compiled-kernel A/M，`f32` |
 | device-convergent 条件执行 | 不支持 | 不支持 | 不支持 |
 | BiCGSTAB | 任意受支持 CPU operator，`f32/f64` | 不支持 | 不支持 |
 
-MINRES 和 direct factorization 继续使用 stored-matrix API。
+direct factorization 继续使用 stored-matrix API。
 
 ## Numeric update 与所有权
 

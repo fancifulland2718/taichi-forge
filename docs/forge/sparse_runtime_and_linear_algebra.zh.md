@@ -175,6 +175,7 @@ ndarray RHS；CUDA 文档路径要求 Taichi ndarray。shape 与 dtype 必须与
 | `MatrixFreeBICGSTAB` | 非对称应用 operator | field/kernel 路径 | field/kernel 路径 | backend/dtype 支持该 operator 时可用 |
 | `experimental.SolvePlan(method="cg")` | trait-qualified SPD stored/kernel/Graph operator | fixed CSR/BSR 与 composition，`f32/f64`；compiled provider 为 `f32` | fixed CSR 与 compiled provider，`f32` | fixed CSR/BSR 与 compiled provider，`f32` |
 | `experimental.SolvePlan(method="pcg")` | trait-qualified SPD operator 与 preconditioner | CSR Jacobi、BSR block-Jacobi 或 fixed-linear operator，`f32/f64` | CSR/BSR 内置项或 compiled-kernel A/M，`f32` | CSR/BSR 内置项或 compiled-kernel A/M，`f32` |
+| `experimental.SolvePlan(method="minres")` | trait-qualified self-adjoint、使用时 nonsingular 的 operator；若有 preconditioner 则必须 SPD | identity、任意兼容 provider，`f32/f64` | fixed CSR/BSR 或 compiled provider，支持 identity、内置项或兼容 fixed-linear preconditioning，`f32` | fixed CSR/BSR 或 compiled provider，支持 identity、内置项或兼容 fixed-linear preconditioning，`f32` |
 | `experimental.SolvePlan(method="bicgstab")` | 一般 square operator | 任意受支持 experimental CPU provider，`f32/f64` | 不支持 | 不支持 |
 
 Taichi 不会从 CSR/BSR shape 推断 symmetry、definiteness、nullspace 或
@@ -192,9 +193,11 @@ scale/sum/composition/adjoint/block-diagonal 代数；不受支持的 GPU compos
 `experimental.SolvePlan` 跨 RHS 调用保留 solver workspace，并返回同时包含 solution 与
 完整 terminal state 的 `SolveResult`。CUDA/Vulkan 支持显式的 4 或 8 iteration
 host-check chunk；Vulkan 还保留 fixed-budget masked execution 作为默认策略。两个 GPU
-backend 使用相同的 absolute/relative residual 合同。该 API 不替代 mutable Eigen sparse matrix、MINRES
-或 direct factorization。provider ABI、所有权、update generation、示例和精确 backend
-矩阵见[实验性 LinearOperator 与 SolvePlan](linear_operator.zh.md)。
+backend 使用相同的 absolute/relative residual 合同。该 API 不替代 mutable Eigen sparse
+matrix 或 direct factorization；它为 fixed 与 compiled operator 提供 provider-neutral
+MINRES，而旧 `SparseMINRES` 构造器保留 CPU stored-matrix 合同。provider ABI、所有权、
+update generation、示例和精确 backend 矩阵见
+[实验性 LinearOperator 与 SolvePlan](linear_operator.zh.md)。
 
 ### CG 与 preconditioner
 
@@ -248,8 +251,33 @@ solver = ti.linalg.SparseMINRES(A, rhs, max_iter=300, atol=1e-8, rtol=1e-5)
 x, converged = solver.solve()
 ```
 
-受支持 provider 仅包含 CPU，且使用 identity preconditioner。两个对称
-off-diagonal half 必须一致地存储。matrix 为 square 或 diagonal 为正，都不足以满足
+旧 `SparseMINRES` 路径仅支持 CPU 与 identity preconditioner。fixed 或 compiled
+`LinearOperator` 应使用绑定 runtime 的 plan：
+
+```python
+operator = ti.linalg.experimental.LinearOperator.from_sparse_matrix(
+    A,
+    traits=ti.linalg.experimental.OperatorTraits(
+        self_adjoint=True,
+        singular=False,
+    ),
+)
+plan = ti.linalg.experimental.SolvePlan(
+    operator,
+    method="minres",
+    max_iterations=300,
+    atol=1e-8,
+    rtol=1e-5,
+)
+result = plan.solve(rhs)
+```
+
+实验性路径支持 identity-preconditioned CPU `f32/f64` 与 CUDA/Vulkan `f32`。
+CUDA/Vulkan fixed CSR/BSR 可选择文档列出的 Jacobi/block-Jacobi，也可用
+`LinearOperator` 或 `PreconditionerPlan` 提供兼容的 device-native fixed-linear action；
+preconditioner 必须 SPD。该路径不提供 MINRES-QLP 或 minimum-length 语义，因此拒绝声明为
+singular 的 operator。两个对称 off-diagonal half 必须一致地存储。matrix 为 square 或
+diagonal 为正，都不足以满足
 MINRES 合同。
 
 ### 用于非对称系统的 BiCGSTAB
@@ -344,7 +372,8 @@ offline-cache metadata 现在由进程持有的 OS advisory lock 保护。持久
 - 使用 `rtol` 获得与 scale 相关的收敛条件，同时保留有意义的
   `atol` 下限。
 - 只有完整 compressed pattern 相同时才复用 direct symbolic analysis。
-- Vulkan 用于 sparse operator/SpMV；Vulkan 上不提供 stored sparse solver。
+- Vulkan 不提供旧 stored sparse solver class。provider-neutral `f32` MINRES 应使用
+  `experimental.SolvePlan` 与受支持的 fixed 或 compiled operator。
 - 分别测量 payload、metadata、list/workspace、重叠 generation 和 driver memory。
 - `ti.reset()` 后重建所有 sparse runtime object。
 

@@ -189,6 +189,7 @@ the matrix exactly, and no implicit host fallback is performed.
 | `MatrixFreeBICGSTAB` | Nonsymmetric application operator | Field/kernel route | Field/kernel route | Available where the backend and dtype support the operator |
 | `experimental.SolvePlan(method="cg")` | Trait-qualified SPD stored/kernel/Graph operator | Fixed CSR/BSR and compositions, `f32/f64`; compiled providers `f32` | Fixed CSR and compiled providers, `f32` | Fixed CSR/BSR and compiled providers, `f32` |
 | `experimental.SolvePlan(method="pcg")` | Trait-qualified SPD operator and preconditioner | CSR Jacobi, BSR block-Jacobi, or fixed-linear operator, `f32/f64` | CSR/BSR built-in or compiled-kernel A/M, `f32` | CSR/BSR built-in or compiled-kernel A/M, `f32` |
+| `experimental.SolvePlan(method="minres")` | Trait-qualified self-adjoint, nonsingular-in-use operator; SPD preconditioner when present | Identity, any compatible provider, `f32/f64` | Fixed CSR/BSR or compiled provider, with identity, built-in, or compatible fixed-linear preconditioning, `f32` | Fixed CSR/BSR or compiled provider, with identity, built-in, or compatible fixed-linear preconditioning, `f32` |
 | `experimental.SolvePlan(method="bicgstab")` | General square operator | Any supported experimental CPU provider, `f32/f64` | Unsupported | Unsupported |
 
 Taichi does not infer symmetry, definiteness, nullspaces, or conditioning from
@@ -208,10 +209,12 @@ composition fails without a host fallback.
 a `SolveResult` containing the solution and complete terminal state. CUDA and
 Vulkan support explicit 4- or 8-iteration host-check chunks; Vulkan also keeps
 fixed-budget masked execution as its default. Both GPU backends use the same
-absolute/relative residual contract. This API
-does not replace mutable Eigen sparse matrices, MINRES, or direct
-factorization. See [Experimental LinearOperator and SolvePlan](linear_operator.en.md)
-for provider ABIs, ownership, update generations, examples, and the exact
+absolute/relative residual contract. This API does not replace mutable Eigen
+sparse matrices or direct factorization. It provides provider-neutral MINRES
+for fixed and compiled operators, while the legacy `SparseMINRES` constructor
+retains its CPU stored-matrix contract. See
+[Experimental LinearOperator and SolvePlan](linear_operator.en.md) for provider
+ABIs, ownership, update generations, examples, and the exact
 backend matrix.
 
 ### CG and preconditioners
@@ -269,9 +272,35 @@ solver = ti.linalg.SparseMINRES(A, rhs, max_iter=300, atol=1e-8, rtol=1e-5)
 x, converged = solver.solve()
 ```
 
-The supported provider is CPU-only and identity-preconditioned. Both symmetric
-off-diagonal halves must be stored consistently. A square matrix or positive
-diagonal alone does not satisfy the contract.
+This legacy `SparseMINRES` route is CPU-only and identity-preconditioned. For a
+fixed or compiled `LinearOperator`, use the runtime-bound plan:
+
+```python
+operator = ti.linalg.experimental.LinearOperator.from_sparse_matrix(
+    A,
+    traits=ti.linalg.experimental.OperatorTraits(
+        self_adjoint=True,
+        singular=False,
+    ),
+)
+plan = ti.linalg.experimental.SolvePlan(
+    operator,
+    method="minres",
+    max_iterations=300,
+    atol=1e-8,
+    rtol=1e-5,
+)
+result = plan.solve(rhs)
+```
+
+The experimental route supports identity-preconditioned CPU `f32/f64` and
+CUDA/Vulkan `f32`. CUDA/Vulkan fixed CSR/BSR may use the documented
+Jacobi/block-Jacobi options, and compatible device-native fixed-linear actions
+may be supplied as a `LinearOperator` or `PreconditionerPlan`. A preconditioner
+must be SPD. Operators declared singular are rejected because this route does
+not provide MINRES-QLP or minimum-length semantics. Both symmetric
+off-diagonal halves must be stored consistently; square shape or a positive
+diagonal alone does not satisfy the operator contract.
 
 ### BiCGSTAB for nonsymmetric systems
 
@@ -376,8 +405,9 @@ exclusive creation of compiled cache artifacts. See
   `atol` floor.
 - Reuse direct symbolic analysis only while the complete compressed pattern is
   identical.
-- Treat Vulkan as a sparse-operator/SpMV backend; stored sparse solvers are not
-  available on Vulkan.
+- Vulkan does not provide the legacy stored sparse solver classes. For
+  provider-neutral `f32` MINRES, use `experimental.SolvePlan` with a supported
+  fixed or compiled operator.
 - Measure payload, metadata, list/workspace, overlapping generations, and driver
   memory separately.
 - Recreate all sparse runtime objects after `ti.reset()`.

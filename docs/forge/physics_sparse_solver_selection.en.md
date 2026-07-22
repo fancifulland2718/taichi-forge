@@ -20,7 +20,7 @@ Choose in this order:
 | Mass-spring or SPD implicit FEM | Fixed CSR/BSR + CG with Jacobi/block-Jacobi; use BSR for natural 2/3/6/12-DOF blocks |
 | Implicit MPM with a changing active grid | Use SNodes for spatial assembly, then publish compact DOFs and an explicit or matrix-free operator before iteration |
 | Per-step particle/contact adjacency | Count-scan-fill or sorted arrays for topology; this is assembly, not a solver choice |
-| Bilateral constraints or symmetric KKT | Complete symmetric CSR/BSR + MINRES; stored-matrix support is CPU-only |
+| Bilateral constraints or symmetric KKT | Complete symmetric CSR/BSR or a compiled self-adjoint operator + `experimental.SolvePlan(method="minres")`; the legacy `SparseMINRES` class remains CPU-only |
 | Frictional or other nonsymmetric linearization | BiCGSTAB on a supported stored matrix, or `MatrixFreeBICGSTAB` for an application-owned operator |
 
 There is no safe selector based only on matrix size, CSR/BSR format, or the word
@@ -44,14 +44,23 @@ classifying the operator.
 ### Symmetric-indefinite
 
 Bilateral constraints, saddle-point systems, mixed formulations, and KKT
-matrices can be symmetric but indefinite. Store both symmetric off-diagonal
-halves and use `SparseMINRES`; do not route them to CG because they are square
-or block sparse.
+matrices can be symmetric but indefinite. Do not route them to CG because they
+are square or block sparse. The legacy `SparseMINRES` class supports CPU
+mutable CSR/CSC and caller-owned fixed CSR/BSR with identity preconditioning.
 
-`SparseMINRES` supports CPU mutable CSR/CSC and caller-owned
-fixed CSR/BSR providers. CUDA and Vulkan stored matrices are rejected without
-a silent host solve. There is no matrix-free MINRES or general
-field-split/Schur provider in this release.
+`experimental.SolvePlan(method="minres")` accepts a trusted self-adjoint
+`LinearOperator`. CPU supports identity-preconditioned `f32/f64`; CUDA and
+Vulkan support `f32` fixed CSR/BSR and compiled providers. The GPU route may
+use identity, the documented fixed-CSR Jacobi or fixed-BSR SPD block-Jacobi,
+or a compatible trusted fixed-linear preconditioner. Explicit matrices must
+store both symmetric off-diagonal halves consistently.
+
+This is a reusable linear-runtime primitive, not a complete constraint or
+multiphysics solver. The application remains responsible for operator
+classification, nullspace removal, scaling, constraint regularization,
+nonlinear/active-set sequencing, and domain-specific preconditioner design.
+The route rejects operators declared singular and does not provide
+MINRES-QLP, minimum-length, field-split, or Schur-complement policy.
 
 ### Nonsymmetric
 
@@ -91,6 +100,7 @@ solver interface.
 | `SparseSolver` direct solve | CSR/CSC providers | Documented CSR provider | Unsupported |
 | `SparseCG` | Mutable and fixed CSR/BSR capabilities | CSR and fixed BSR capabilities; dtype/format restrictions apply | Unsupported |
 | `SparseMINRES` | Mutable and fixed CSR/BSR capabilities | Unsupported | Unsupported |
+| `experimental.SolvePlan(method="minres")` | Compatible operator, identity, `f32/f64` | Fixed CSR/BSR or compiled operator, identity/built-in/compatible fixed-linear preconditioner, `f32` | Fixed CSR/BSR or compiled operator, identity/built-in/compatible fixed-linear preconditioner, `f32` |
 | `SparseBiCGSTAB` | Mutable and fixed CSR/BSR capabilities | Unsupported | Unsupported |
 | `MatrixFreeCG` | Kernel/field route | Kernel/field route | Available where the backend/dtype is supported |
 | `MatrixFreeBICGSTAB` | Kernel/field route | Kernel/field route | Available where the backend/dtype is supported |
@@ -120,9 +130,11 @@ linearization and contact/material treatment, not on MPM itself.
 
 Separate contact adjacency from the linear solve. If counts are available,
 build row offsets and payload exactly instead of appending through `dynamic`.
-A symmetric bilateral KKT can use CPU MINRES; frictional or otherwise
-nonsymmetric systems need BiCGSTAB/GMRES-class treatment. Current CUDA/Vulkan
-stored non-SPD solvers remain explicitly unsupported.
+A qualified nonsingular symmetric bilateral KKT can use the experimental
+MINRES plan on a supported CPU/CUDA/Vulkan provider. The legacy stored-matrix
+class remains CPU-only. Frictional or otherwise nonsymmetric systems still
+need a supported BiCGSTAB/GMRES-class route; MINRES does not provide
+complementarity or active-set handling.
 
 ## Failure and lifecycle rules
 

@@ -930,8 +930,8 @@ canvas.submit_frame(frame)
 
 ## `taichi_forge.linalg` 稀疏线性代数
 
-该模块提供 fixed CSR/BSR pattern、value-only update、scale-aware iterative
-convergence、CPU MINRES/BiCGSTAB，以及经过验证的 symbolic factorization 复用合同。
+该模块提供 fixed CSR/BSR pattern、value-only update、scale-aware iterative convergence、
+provider-neutral MINRES、CPU BiCGSTAB，以及经过验证的 symbolic factorization 复用合同。
 完整用法与后端矩阵见
 [稀疏 runtime 与线性代数](sparse_runtime_and_linear_algebra.zh.md)。绑定 runtime 的
 operator API 另见[实验性 LinearOperator 与 SolvePlan](linear_operator.zh.md)。
@@ -946,7 +946,7 @@ operator API 另见[实验性 LinearOperator 与 SolvePlan](linear_operator.zh.m
 | `ti.linalg.SparseMINRES(A, b, ..., atol, rtol)` | 求解显式存储的对称不定系统。 | CPU mutable/fixed CSR/BSR、`f32/f64`；identity preconditioner。 |
 | `ti.linalg.SparseBiCGSTAB(A, b, ..., atol, rtol)` | 求解显式存储的非对称系统。 | CPU mutable/fixed CSR/BSR、`f32/f64`。 |
 | `ti.linalg.SparseSolver` | 直接 LLT/LDLT/LU 分解和求解。 | CPU mutable Eigen provider 与文档列出的 CUDA scalar-CSR 路径；Vulkan 不支持。 |
-| `ti.linalg.experimental.OperatorTraits(...)` / `.spd()` | 不通过 sampling 或 inference，显式声明数学性质。 | CG/PCG 要求可信的 self-adjoint 与 positive-definite trait。 |
+| `ti.linalg.experimental.OperatorTraits(...)` / `.spd()` | 不通过 sampling 或 inference，显式声明数学性质。 | CG/PCG 要求可信的 self-adjoint 与 positive-definite trait；MINRES 要求可信 self-adjoint，并拒绝声明为 singular 的 operator。 |
 | `ti.linalg.experimental.LinearOperator.from_sparse_matrix(A, traits=...)` | 把 fixed CSR/BSR 绑定为 runtime-owned linear map。 | CPU `f32/f64`；CUDA/Vulkan `f32`；不复制、不 fallback。 |
 | `LinearOperator.from_kernel(..., adjoint=...)` / `.from_graph(..., adjoint=...)` | 绑定精确 f32 ndarray kernel ABI 或按 role 分类的 compiled Graph；整数 size 是方阵简写，tuple 表示 `(range, domain)`。 | CPU、CUDA、Vulkan；显式 adjoint；topology/numeric/workspace 为 operator-owned snapshot。 |
 | `operator.apply(x, out=None, *, alpha=1, beta=0, addend=None)` / `operator @ x` | 同步执行 `out = alpha * A(x) + beta * addend`。 | CPU 支持通用系数；CUDA/Vulkan 支持 overwrite；`beta=0` 不读取 addend；禁止 input/output alias。 |
@@ -957,7 +957,7 @@ operator API 另见[实验性 LinearOperator 与 SolvePlan](linear_operator.zh.m
 | `summarize_solve_qualifications(reports)` | 从 detached report 构造确定性的 solver/backend/provider/policy 矩阵。 | schema-v1 JSON 字典；保留 check、计时 availability、归一化 work metric 和原始 telemetry。 |
 | `ti.linalg.experimental.PreconditionerPlan(target, action, method=...).setup()` | 建立 fixed-linear 近似逆的 provenance/compatibility 生命周期。 | CPU/CUDA/Vulkan；target 更新默认 stale；`update()` 声明 rebuild，`update(accept_reuse=True)` 显式批准 lagged reuse。 |
 | `preconditioner.pin()` / `.apply(r, out=None)` / `.metadata` / `.statistics()` | pin 精确 target/action generation 并应用 native action。 | 无 Python hot-path callback；报告 build/accepted stamp、generation publish/retire/release，以及 refresh operation/transfer/resource counter。 |
-| `ti.linalg.experimental.SolvePlan(operator, method=..., preconditioner=..., execution_policy=..., check_interval=...)` | 构造 persistent CG、PCG 或 CPU BiCGSTAB plan。 | PCG 可用内置 scalar Jacobi、SPD block-Jacobi Cholesky（BSR block size 2/3/6/12）、可信 fixed-linear operator 或 `PreconditionerPlan`；CUDA/Vulkan `f32` value-only refresh 在 device 上完成并保持 replay binding 稳定；GPU plan 支持 K=4/8 的 `host_check_every_k` 与 absolute/relative tolerance；fixed stored CSR/BSR 的合格组合支持 native chunk replay。 |
+| `ti.linalg.experimental.SolvePlan(operator, method=..., preconditioner=..., execution_policy=..., check_interval=...)` | 构造 persistent CG、PCG、MINRES 或 CPU BiCGSTAB plan。 | CPU MINRES 为 identity-only（`f32/f64`）；CUDA/Vulkan `f32` 支持 identity、fixed-CSR Jacobi、fixed-BSR SPD block-Jacobi Cholesky（block size 2/3/6/12）与兼容的可信 fixed-linear action。GPU value-only refresh 在 device 上完成并保持 replay binding 稳定；plan 支持 K=4/8 host check、absolute/relative tolerance，以及合格 fixed stored 组合的 native chunk replay。 |
 | `plan.solve(rhs, initial_guess=None, out=None)` | 返回 immutable `SolveResult`，包含 solution 与 terminal residual/status 字段。 | 一维 scalar Taichi ndarray；禁止 RHS/output alias 和 host staging。 |
 | `plan.execution_capabilities()` | 返回 backend/provider 执行策略矩阵与结构化 unsupported reason。 | 当前不支持 `device_convergent`；显式请求不会 fallback，也不会自动改变 policy。 |
 | `ti.linalg.experimental.BatchedSolvePlan(operator, batch_size, independent_systems=True, ...)` | 在连续扁平分区上构造同构、相互独立的 f32 CG/PCG plan。 | CPU/CUDA/Vulkan；逐系统 tolerance、status 与 iteration count；已验证 fixed stored 或 compiled-kernel A/M。 |

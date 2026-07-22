@@ -213,6 +213,8 @@ calls. Supported methods are:
   `"block_jacobi"` on fixed BSR, or a trusted SPD `LinearOperator` or
   `PreconditionerPlan`
   that applies a fixed-linear approximate inverse; and
+- `method="minres"`: identity- or SPD-preconditioned MINRES for square,
+  self-adjoint systems that may be indefinite; and
 - `method="bicgstab"`: identity-preconditioned CPU BiCGSTAB for general square
   systems.
 
@@ -244,6 +246,54 @@ the operator execution plan. CUDA and Vulkan require both the system
 operator and preconditioner to be compiled-kernel providers. Their topology
 and numeric generations are pinned together for each solve; there is no
 host callback or backend fallback.
+
+### MINRES
+
+`method="minres"` consumes the same `LinearOperator` and lifecycle contracts
+as CG/PCG, but requires a trusted `self_adjoint=True` trait rather than
+positive definiteness:
+
+```python
+operator = ti.linalg.experimental.LinearOperator.from_sparse_matrix(
+    A,
+    traits=ti.linalg.experimental.OperatorTraits(
+        self_adjoint=True,
+        singular=False,
+    ),
+)
+plan = ti.linalg.experimental.SolvePlan(
+    operator,
+    method="minres",
+    max_iterations=300,
+    atol=1e-8,
+    rtol=1e-5,
+    execution_policy="host_check_every_k",
+    check_interval=4,
+)
+result = plan.solve(rhs)
+```
+
+CPU supports identity-preconditioned `f32/f64` MINRES for every compatible
+CPU operator provider. CUDA and Vulkan support `f32` identity-preconditioned
+MINRES for fixed CSR/BSR and compiled providers. On CUDA and Vulkan, a fixed
+CSR may select `"jacobi"`, a fixed BSR with block size 2, 3, 6, or 12 may
+select `"block_jacobi"`, and a trusted device-native fixed-linear
+`LinearOperator` or `PreconditionerPlan` may be supplied directly. A MINRES
+preconditioner must be self-adjoint, positive-definite, and nonsingular;
+applications remain responsible for ensuring that a selected scalar Jacobi
+inverse satisfies that mathematical contract.
+
+MINRES rejects an operator declared `singular=True`. It does not implement
+MINRES-QLP or minimum-length semantics for compatible singular systems. Both
+halves of an explicitly stored symmetric matrix must be present and
+consistent. The terminal status is qualified with the true residual of the
+original system, including when preconditioning is active.
+
+A CUDA/Vulkan MINRES plan owns nine persistent length-`n` `f32` vectors and
+144 bytes of persistent scalar state. These figures exclude caller-owned
+operator values, preconditioner resources, RHS/output arrays, backend handles,
+and native replay objects. Inspect `statistics()` for the exact plan/provider
+telemetry of a concrete configuration.
 
 ## PreconditionerPlan lifecycle
 
@@ -303,7 +353,7 @@ zero. RHS/output aliasing is rejected.
 `SolveResult` contains the solution and a terminal snapshot: status code,
 termination reason, convergence/breakdown/max-iteration flags, iteration
 count, initial and final residual norms, both tolerances, relative reference
-norm, and effective tolerance. CG, PCG, and BiCGSTAB use:
+norm, and effective tolerance. CG, PCG, MINRES, and BiCGSTAB use:
 
 The result record is frozen; its `solution` ndarray remains caller-writable.
 
@@ -341,7 +391,7 @@ plan = ti.linalg.experimental.SolvePlan(
   support `atol`, `rtol`, and their combined effective tolerance.
 
 For fixed stored f32 CSR/BSR, CUDA `host_check_every_k` and Vulkan
-`host_check_every_k`/`fixed_budget_masked` record supported CG/PCG iteration
+`host_check_every_k`/`fixed_budget_masked` record supported CG/PCG/MINRES iteration
 chunks as reusable native execution sequences. The recordable combinations
 currently include identity, stored Jacobi, and stored block-Jacobi
 preconditioners. The first compatible execution builds a CUDA Graph or Vulkan
@@ -587,12 +637,15 @@ overwrite apply only.
 | PCG + Jacobi | Fixed CSR, `f32/f64` | Fixed CSR, `f32` | Fixed CSR, `f32` |
 | PCG + block-Jacobi | Fixed BSR, `f32/f64` | Fixed BSR, `f32` | Fixed BSR, `f32` |
 | PCG + fixed-linear operator/plan | Supported providers, `f32/f64` | Compiled-kernel A/M, `f32` | Compiled-kernel A/M, `f32` |
+| MINRES + identity | Supported providers, `f32/f64` | Fixed CSR/BSR or compiled provider, `f32` | Fixed CSR/BSR or compiled provider, `f32` |
+| MINRES + Jacobi/block-Jacobi | Unsupported | Fixed CSR/BSR respectively, `f32` | Fixed CSR/BSR respectively, `f32` |
+| MINRES + fixed-linear operator/plan | Unsupported | Compatible device-native A/M, `f32` | Compatible device-native A/M, `f32` |
 | Independent batched CG/PCG | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` |
 | Batched fixed-budget submission | Unsupported | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` |
 | Device-convergent conditional execution | Unsupported | Unsupported | Unsupported |
 | BiCGSTAB | Any supported CPU operator, `f32/f64` | Unsupported | Unsupported |
 
-MINRES and direct factorization remain stored-matrix APIs.
+Direct factorization remains a stored-matrix API.
 
 ## Numeric updates and ownership
 

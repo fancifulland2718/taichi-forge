@@ -1062,8 +1062,8 @@ See also [Display frame submission](display_frame.en.md).
 ## `taichi_forge.linalg` Sparse Linear Algebra
 
 The module provides fixed CSR/BSR patterns, value-only updates, scale-aware
-iterative convergence, CPU MINRES/BiCGSTAB, and validated symbolic
-factorization reuse. The complete usage and backend matrix is in
+iterative convergence, provider-neutral MINRES, CPU BiCGSTAB, and validated
+symbolic factorization reuse. The complete usage and backend matrix is in
 [Sparse runtime and linear algebra](sparse_runtime_and_linear_algebra.en.md).
 The runtime-bound operator API is documented separately in
 [Experimental LinearOperator and SolvePlan](linear_operator.en.md).
@@ -1078,7 +1078,7 @@ The runtime-bound operator API is documented separately in
 | `ti.linalg.SparseMINRES(A, b, ..., atol, rtol)` | Solve an explicitly stored symmetric-indefinite system. | CPU mutable/fixed CSR/BSR, `f32/f64`; identity preconditioner. |
 | `ti.linalg.SparseBiCGSTAB(A, b, ..., atol, rtol)` | Solve an explicitly stored nonsymmetric system. | CPU mutable/fixed CSR/BSR, `f32/f64`. |
 | `ti.linalg.SparseSolver` | Direct LLT/LDLT/LU factorization and solve. | CPU mutable Eigen providers and documented CUDA scalar-CSR route; no Vulkan. |
-| `ti.linalg.experimental.OperatorTraits(...)` / `.spd()` | Declare mathematical properties without sampling or inference. | CG/PCG require trusted self-adjoint and positive-definite traits. |
+| `ti.linalg.experimental.OperatorTraits(...)` / `.spd()` | Declare mathematical properties without sampling or inference. | CG/PCG require trusted self-adjoint and positive-definite traits; MINRES requires trusted self-adjointness and rejects a declared-singular operator. |
 | `ti.linalg.experimental.LinearOperator.from_sparse_matrix(A, traits=...)` | Bind fixed CSR/BSR as a runtime-owned linear map. | CPU `f32/f64`; CUDA/Vulkan `f32`; no copy or fallback. |
 | `LinearOperator.from_kernel(..., adjoint=...)` / `.from_graph(..., adjoint=...)` | Bind an exact f32 ndarray kernel ABI or role-qualified compiled Graph; an integer size is square shorthand and a tuple is `(range, domain)`. | CPU, CUDA, Vulkan; explicit adjoint; operator-owned topology/numeric/workspace snapshots. |
 | `operator.apply(x, out=None, *, alpha=1, beta=0, addend=None)` / `operator @ x` | Synchronously compute `out = alpha * A(x) + beta * addend`. | General coefficients on CPU; overwrite on CUDA/Vulkan; `beta=0` does not read addend; no input/output alias. |
@@ -1089,7 +1089,7 @@ The runtime-bound operator API is documented separately in
 | `summarize_solve_qualifications(reports)` | Build a deterministic solver/backend/provider/policy matrix from detached reports. | Schema-v1 JSON dictionary retaining checks, timing availability, normalized work metrics, and original telemetry. |
 | `ti.linalg.experimental.PreconditionerPlan(target, action, method=...).setup()` | Establish provenance and compatibility for a fixed-linear approximate inverse. | CPU/CUDA/Vulkan; target updates are stale by default; `update()` attests rebuild and `update(accept_reuse=True)` explicitly approves lagged reuse. |
 | `preconditioner.pin()` / `.apply(r, out=None)` / `.metadata` / `.statistics()` | Pin an exact target/action generation pair and apply its native action. | No Python hot-path callback; build/accepted stamps, generation publish/retire/release telemetry, and refresh operation/transfer/resource counters. |
-| `ti.linalg.experimental.SolvePlan(operator, method=..., preconditioner=..., execution_policy=..., check_interval=...)` | Build a persistent CG, PCG, or CPU BiCGSTAB plan. | Built-in scalar Jacobi or SPD block-Jacobi Cholesky (BSR block sizes 2/3/6/12), a trusted fixed-linear operator, or `PreconditionerPlan`; CUDA/Vulkan `f32` value-only refresh is device-native and preserves replay bindings; GPU plans support `host_check_every_k` with K=4/8 and absolute/relative tolerance; qualified fixed stored CSR/BSR combinations support native chunk replay. |
+| `ti.linalg.experimental.SolvePlan(operator, method=..., preconditioner=..., execution_policy=..., check_interval=...)` | Build a persistent CG, PCG, MINRES, or CPU BiCGSTAB plan. | MINRES is identity-only on CPU (`f32/f64`); CUDA/Vulkan `f32` support identity, fixed-CSR Jacobi, fixed-BSR SPD block-Jacobi Cholesky (block sizes 2/3/6/12), and compatible trusted fixed-linear actions. GPU value-only refresh is device-native and preserves replay bindings; plans support K=4/8 host checks, absolute/relative tolerance, and native chunk replay for qualified fixed stored combinations. |
 | `plan.solve(rhs, initial_guess=None, out=None)` | Return an immutable `SolveResult` with solution and terminal residual/status fields. | Scalar 1-D Taichi ndarrays; no RHS/output aliasing or host staging. |
 | `plan.execution_capabilities()` | Return the backend/provider policy matrix and structured unsupported reason. | `device_convergent` is currently unsupported; explicit requests fail without fallback or automatic policy changes. |
 | `ti.linalg.experimental.BatchedSolvePlan(operator, batch_size, independent_systems=True, ...)` | Build homogeneous independent f32 CG/PCG over contiguous flat partitions. | CPU/CUDA/Vulkan; per-system tolerance, status, and iteration count; fixed stored or compiled-kernel A/M qualified. |
