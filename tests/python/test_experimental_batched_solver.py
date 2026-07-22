@@ -447,6 +447,142 @@ def test_independent_batched_fixed_budget_submission_and_workspace_slots():
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_batched_recurrence_graph_replay_reuses_plan_and_rebinds_output(
+    monkeypatch,
+):
+    monkeypatch.delenv("TI_CUDA_BATCHED_RECURRENCE_REPLAY", raising=False)
+    monkeypatch.delenv("TI_VULKAN_BATCHED_RECURRENCE_REPLAY", raising=False)
+    experimental = ti.linalg.experimental
+    batch_size = 3
+    system_size = 4
+    total_size = batch_size * system_size
+    diagonal = np.resize(
+        np.asarray([2.0, 3.0, 5.0], dtype=np.float32), total_size
+    )
+    operator = experimental.aslinearoperator(
+        _fixed_diagonal(diagonal),
+        traits=experimental.OperatorTraits.spd(),
+    )
+    plan = experimental.BatchedSolvePlan(
+        operator,
+        batch_size,
+        independent_systems=True,
+        max_iterations=4,
+        atol=1e-6,
+        execution_policy="fixed_budget_masked",
+    )
+    exact = np.linspace(-1.0, 1.0, total_size, dtype=np.float32)
+    rhs = _vector(diagonal * exact)
+    first_output = ti.ndarray(ti.f32, shape=total_size)
+    second_output = ti.ndarray(ti.f32, shape=total_size)
+
+    first = plan.solve(rhs, out=first_output)
+    first_stats = plan.statistics()
+    second = plan.solve(rhs, out=second_output)
+    second_stats = plan.statistics()
+
+    assert first.all_converged and second.all_converged
+    np.testing.assert_allclose(
+        second_output.to_numpy(), exact, rtol=3e-4, atol=3e-4
+    )
+    replay = second_stats["recurrence_replay"]
+    assert replay["qualified"] and replay["enabled"]
+    assert replay["plan_built"]
+    assert replay["scope"] == "iteration_recurrence_only"
+    assert not replay["operator_apply_included"]
+    operations = second_stats["operations"]
+    assert operations["recurrence_replay_builds"] == 1
+    assert operations["recurrence_replay_graph_builds"] == 2
+    assert operations["recurrence_replay_submissions"] == 8
+    assert operations["recurrence_replay_logical_kernels"] == 30
+    assert operations["recurrence_replay_rebinds"] == 1
+    assert operations["recurrence_direct_kernel_submissions"] == 0
+    assert first_stats["operations"]["recurrence_replay_rebinds"] == 0
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_batched_pcg_replays_post_preconditioner_recurrence(monkeypatch):
+    monkeypatch.delenv("TI_CUDA_BATCHED_RECURRENCE_REPLAY", raising=False)
+    monkeypatch.delenv("TI_VULKAN_BATCHED_RECURRENCE_REPLAY", raising=False)
+    experimental = ti.linalg.experimental
+    batch_size = 3
+    system_size = 4
+    total_size = batch_size * system_size
+    diagonal = np.resize(
+        np.asarray([2.0, 3.0, 5.0], dtype=np.float32), total_size
+    )
+    operator = experimental.aslinearoperator(
+        _fixed_diagonal(diagonal),
+        traits=experimental.OperatorTraits.spd(),
+    )
+    preconditioner = experimental.aslinearoperator(
+        _fixed_diagonal(1.0 / diagonal),
+        traits=experimental.OperatorTraits.spd(),
+    )
+    plan = experimental.BatchedSolvePlan(
+        operator,
+        batch_size,
+        independent_systems=True,
+        method="pcg",
+        preconditioner=preconditioner,
+        max_iterations=4,
+        atol=1e-6,
+        execution_policy="fixed_budget_masked",
+    )
+    exact = np.linspace(-0.5, 1.0, total_size, dtype=np.float32)
+    result = plan.solve(_vector(diagonal * exact))
+
+    assert result.all_converged
+    np.testing.assert_allclose(
+        result.solution.to_numpy(), exact, rtol=3e-4, atol=3e-4
+    )
+    operations = plan.statistics()["operations"]
+    assert operations["recurrence_replay_builds"] == 1
+    assert operations["recurrence_replay_graph_builds"] == 3
+    assert operations["recurrence_replay_submissions"] == 7
+    assert operations["recurrence_replay_logical_kernels"] == 18
+    assert operations["recurrence_direct_kernel_submissions"] == 0
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_batched_recurrence_graph_replay_can_be_disabled(monkeypatch):
+    env_name = (
+        "TI_CUDA_BATCHED_RECURRENCE_REPLAY"
+        if impl.current_cfg().arch == ti.cuda
+        else "TI_VULKAN_BATCHED_RECURRENCE_REPLAY"
+    )
+    monkeypatch.setenv(env_name, "0")
+    experimental = ti.linalg.experimental
+    diagonal = np.resize(
+        np.asarray([2.0, 3.0, 5.0], dtype=np.float32), 8
+    )
+    operator = experimental.aslinearoperator(
+        _fixed_diagonal(diagonal),
+        traits=experimental.OperatorTraits.spd(),
+    )
+    plan = experimental.BatchedSolvePlan(
+        operator,
+        2,
+        independent_systems=True,
+        max_iterations=4,
+        atol=1e-6,
+        execution_policy="fixed_budget_masked",
+    )
+    result = plan.solve(_vector(diagonal))
+
+    assert result.all_converged
+    stats = plan.statistics()
+    assert not stats["recurrence_replay"]["enabled"]
+    assert stats["recurrence_replay"]["unsupported_reason"] == (
+        "disabled_by_environment"
+    )
+    operations = stats["operations"]
+    assert operations["recurrence_replay_builds"] == 0
+    assert operations["recurrence_replay_submissions"] == 0
+    assert operations["recurrence_direct_kernel_submissions"] == 15
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
 def test_independent_batched_pending_submission_is_reset_safe():
     experimental = ti.linalg.experimental
     diagonal = np.resize(
@@ -597,7 +733,7 @@ def test_independent_batched_contract_and_zero_budget():
         plan.submit(_vector([1.0, 2.0, 3.0, 4.0]))
     cloned = plan.clone_workspace()
     stats = cloned.statistics()
-    assert stats["schema_version"] == 3
+    assert stats["schema_version"] == 4
     assert stats["submission"]["asynchrony_scope"] == "host_completion"
     assert stats["submission"]["admission_unit"] == (
         "whole_solve_invocation"

@@ -3,12 +3,14 @@
 from dataclasses import dataclass
 import math
 import operator as _operator
+import os
 import threading
 import weakref
 
 import numpy as np
 
 from taichi_forge._lib import core as _ti_core
+from taichi_forge.graph import Arg, ArgKind, GraphBuilder
 from taichi_forge.graph._submission import (
     _new_submission_lane,
     _reserve_paced_submission,
@@ -25,6 +27,225 @@ from taichi_forge.linalg.experimental import (
     _solver_execution_capabilities,
 )
 from taichi_forge.types import f32, i32
+
+
+_CUDA_BATCHED_RECURRENCE_REPLAY_ENV = "TI_CUDA_BATCHED_RECURRENCE_REPLAY"
+_VULKAN_BATCHED_RECURRENCE_REPLAY_ENV = "TI_VULKAN_BATCHED_RECURRENCE_REPLAY"
+
+
+def _feature_enabled_from_env(name):
+    value = os.environ.get(name)
+    if value is None:
+        return True
+    return value.strip().casefold() not in ("0", "false", "off", "no")
+
+
+def _batched_recurrence_replay_capability(program):
+    arch = program.config().arch
+    if arch == _ti_core.Arch.cuda:
+        env_name = _CUDA_BATCHED_RECURRENCE_REPLAY_ENV
+        backend = "cuda"
+    elif arch == _ti_core.Arch.vulkan:
+        env_name = _VULKAN_BATCHED_RECURRENCE_REPLAY_ENV
+        backend = "vulkan"
+    else:
+        return {
+            "qualified": False,
+            "enabled": False,
+            "backend": _ti_core.arch_name(arch),
+            "environment_control": None,
+            "unsupported_reason": "gpu_backend_required",
+        }
+    enabled = _feature_enabled_from_env(env_name)
+    return {
+        "qualified": True,
+        "enabled": enabled,
+        "backend": backend,
+        "environment_control": env_name,
+        "unsupported_reason": None if enabled else "disabled_by_environment",
+    }
+
+
+def _graph_ndarray_arg(name, dtype):
+    return Arg(ArgKind.NDARRAY, name, dtype, ndim=1)
+
+
+def _graph_i32_arg(name):
+    return Arg(ArgKind.SCALAR, name, i32)
+
+
+class _BatchedRecurrenceReplay:
+    """Plan-owned Graph replay for iteration recurrence kernels only.
+
+    Operator and preconditioner actions intentionally remain outside these
+    graphs so their pinned generation and provider-specific submission
+    contracts stay unchanged. Each BatchedSolvePlan owns its graphs and bound
+    argument dictionaries; workspace clones therefore remain independently
+    submitable instead of serializing through one shared Graph lock.
+    """
+
+    def __init__(self, plan):
+        self.method = plan.method
+        self._alpha_final = self._build_alpha_graph(
+            preconditioned=self.method == "pcg",
+            prepare_direction=False,
+        )
+        self._alpha_continue = (
+            self._build_alpha_graph(
+                preconditioned=False,
+                prepare_direction=True,
+            )
+            if self.method == "cg"
+            else self._alpha_final
+        )
+        self._direction = (
+            self._build_direction_graph() if self.method == "pcg" else None
+        )
+        self.graph_builds = 3 if self.method == "pcg" else 2
+        self._alpha_args = {
+            "direction": plan._direction,
+            "applied": plan._ap,
+            "solution": None,
+            "residual": plan._residual,
+            "float_state": plan._float_state,
+            "int_state": plan._int_state,
+            "counters": plan._counters,
+            "total_size": plan.total_size,
+            "system_size": plan.system_size,
+            "batch_size": plan.batch_size,
+        }
+        self._direction_args = (
+            {
+                "source": plan._preconditioned_residual,
+                "residual": plan._residual,
+                "direction": plan._direction,
+                "float_state": plan._float_state,
+                "int_state": plan._int_state,
+                "counters": plan._counters,
+                "total_size": plan.total_size,
+                "system_size": plan.system_size,
+                "batch_size": plan.batch_size,
+            }
+            if self.method == "pcg"
+            else None
+        )
+        self._solution = None
+
+    @staticmethod
+    def _build_alpha_graph(*, preconditioned, prepare_direction):
+        direction = _graph_ndarray_arg("direction", f32)
+        applied = _graph_ndarray_arg("applied", f32)
+        solution = _graph_ndarray_arg("solution", f32)
+        residual = _graph_ndarray_arg("residual", f32)
+        float_state = _graph_ndarray_arg("float_state", f32)
+        int_state = _graph_ndarray_arg("int_state", i32)
+        counters = _graph_ndarray_arg("counters", i32)
+        total_size = _graph_i32_arg("total_size")
+        system_size = _graph_i32_arg("system_size")
+        batch_size = _graph_i32_arg("batch_size")
+        builder = GraphBuilder()
+        builder.dispatch(
+            _kernels.reduce_dot,
+            direction,
+            applied,
+            float_state,
+            int_state,
+            total_size,
+            system_size,
+            batch_size,
+            template_args={"state_slot": _kernels.P_AP},
+        )
+        builder.dispatch(
+            _kernels.prepare_alpha,
+            float_state,
+            int_state,
+            counters,
+            batch_size,
+            template_args={"preconditioned": preconditioned},
+        )
+        builder.dispatch(
+            _kernels.update_solution_residual,
+            direction,
+            applied,
+            solution,
+            residual,
+            float_state,
+            int_state,
+            counters,
+            total_size,
+            system_size,
+            batch_size,
+        )
+        if prepare_direction:
+            builder.dispatch(
+                _kernels.prepare_direction,
+                residual,
+                direction,
+                float_state,
+                int_state,
+                counters,
+                total_size,
+                system_size,
+                batch_size,
+                template_args={"preconditioned": False},
+            )
+        return builder.compile()
+
+    @staticmethod
+    def _build_direction_graph():
+        source = _graph_ndarray_arg("source", f32)
+        residual = _graph_ndarray_arg("residual", f32)
+        direction = _graph_ndarray_arg("direction", f32)
+        float_state = _graph_ndarray_arg("float_state", f32)
+        int_state = _graph_ndarray_arg("int_state", i32)
+        counters = _graph_ndarray_arg("counters", i32)
+        total_size = _graph_i32_arg("total_size")
+        system_size = _graph_i32_arg("system_size")
+        batch_size = _graph_i32_arg("batch_size")
+        builder = GraphBuilder()
+        builder.dispatch(
+            _kernels.reduce_dot,
+            residual,
+            source,
+            float_state,
+            int_state,
+            total_size,
+            system_size,
+            batch_size,
+            template_args={"state_slot": _kernels.RHO_NEXT},
+        )
+        builder.dispatch(
+            _kernels.prepare_direction,
+            source,
+            direction,
+            float_state,
+            int_state,
+            counters,
+            total_size,
+            system_size,
+            batch_size,
+            template_args={"preconditioned": True},
+        )
+        return builder.compile()
+
+    def run_alpha(self, solution, *, prepare_next):
+        rebound = False
+        if solution is not self._solution:
+            rebound = self._solution is not None
+            self._solution = solution
+            self._alpha_args["solution"] = solution
+        graph = (
+            self._alpha_continue
+            if self.method == "cg" and prepare_next
+            else self._alpha_final
+        )
+        graph.run(self._alpha_args)
+        logical_kernels = 4 if self.method == "cg" and prepare_next else 3
+        return logical_kernels, rebound
+
+    def run_direction(self):
+        self._direction.run(self._direction_args)
+        return 2
 
 
 @dataclass(frozen=True)
@@ -335,6 +556,14 @@ class BatchedSolvePlan:
         self._submission_rejections = 0
         self._pending_submission = None
         self._submission_lane = _new_submission_lane("batched_solve_plan")
+        self._recurrence_replay_capability = _batched_recurrence_replay_capability(self._program)
+        self._recurrence_replay = None
+        self._recurrence_replay_builds = 0
+        self._recurrence_replay_graph_builds = 0
+        self._recurrence_replay_submissions = 0
+        self._recurrence_replay_logical_kernels = 0
+        self._recurrence_replay_rebinds = 0
+        self._recurrence_direct_kernel_submissions = 0
         self._lifecycle_lock = threading.RLock()
         self._build_workspace()
         get_runtime().register_runtime_object(self)
@@ -472,6 +701,7 @@ class BatchedSolvePlan:
         self._counters = None
         self._absolute_tolerance = None
         self._relative_tolerance = None
+        self._recurrence_replay = None
 
     def _mark_sessions_synchronized(
         self, operator_session, preconditioner_session
@@ -494,6 +724,16 @@ class BatchedSolvePlan:
 
     def _submit(self, session, input, output):
         session._submit(self._program, input.arr, output.arr)
+
+    def _get_recurrence_replay(self):
+        if not self._recurrence_replay_capability["enabled"]:
+            return None
+        if self._recurrence_replay is None:
+            replay = _BatchedRecurrenceReplay(self)
+            self._recurrence_replay = replay
+            self._recurrence_replay_builds += 1
+            self._recurrence_replay_graph_builds += replay.graph_builds
+        return self._recurrence_replay
 
     def _validate_solve_io(self, rhs, initial_guess, out):
         if self.operator is None or self._program is None:
@@ -615,35 +855,45 @@ class BatchedSolvePlan:
     ):
         self._submit(operator_session, self._direction, self._ap)
         self._operator_apply_calls += 1
-        _kernels.reduce_dot(
-            self._direction,
-            self._ap,
-            self._float_state,
-            self._int_state,
-            self.total_size,
-            self.system_size,
-            self.batch_size,
-            _kernels.P_AP,
-        )
-        _kernels.prepare_alpha(
-            self._float_state,
-            self._int_state,
-            self._counters,
-            self.batch_size,
-            self.method == "pcg",
-        )
-        _kernels.update_solution_residual(
-            self._direction,
-            self._ap,
-            out,
-            self._residual,
-            self._float_state,
-            self._int_state,
-            self._counters,
-            self.total_size,
-            self.system_size,
-            self.batch_size,
-        )
+        replay = self._get_recurrence_replay()
+        if replay is None:
+            _kernels.reduce_dot(
+                self._direction,
+                self._ap,
+                self._float_state,
+                self._int_state,
+                self.total_size,
+                self.system_size,
+                self.batch_size,
+                _kernels.P_AP,
+            )
+            _kernels.prepare_alpha(
+                self._float_state,
+                self._int_state,
+                self._counters,
+                self.batch_size,
+                self.method == "pcg",
+            )
+            _kernels.update_solution_residual(
+                self._direction,
+                self._ap,
+                out,
+                self._residual,
+                self._float_state,
+                self._int_state,
+                self._counters,
+                self.total_size,
+                self.system_size,
+                self.batch_size,
+            )
+            self._recurrence_direct_kernel_submissions += 3
+        else:
+            logical_kernels, rebound = replay.run_alpha(
+                out, prepare_next=prepare_next
+            )
+            self._recurrence_replay_submissions += 1
+            self._recurrence_replay_logical_kernels += logical_kernels
+            self._recurrence_replay_rebinds += int(rebound)
         self._provider_system_iterations += self.batch_size
         if not prepare_next:
             return
@@ -654,16 +904,24 @@ class BatchedSolvePlan:
                 self._preconditioned_residual,
             )
             self._preconditioner_apply_calls += 1
-            _kernels.reduce_dot(
-                self._residual,
-                self._preconditioned_residual,
-                self._float_state,
-                self._int_state,
-                self.total_size,
-                self.system_size,
-                self.batch_size,
-                _kernels.RHO_NEXT,
-            )
+            if replay is None:
+                _kernels.reduce_dot(
+                    self._residual,
+                    self._preconditioned_residual,
+                    self._float_state,
+                    self._int_state,
+                    self.total_size,
+                    self.system_size,
+                    self.batch_size,
+                    _kernels.RHO_NEXT,
+                )
+        if replay is not None:
+            if self.method == "pcg":
+                self._recurrence_replay_logical_kernels += (
+                    replay.run_direction()
+                )
+                self._recurrence_replay_submissions += 1
+            return
         source = (
             self._preconditioned_residual
             if self.method == "pcg"
@@ -680,6 +938,11 @@ class BatchedSolvePlan:
             self.batch_size,
             self.method == "pcg",
         )
+        self._recurrence_direct_kernel_submissions += 1
+        if self.method == "pcg":
+            # PCG's rho reduction remains adjacent to direction preparation
+            # on the direct path and is counted as its own kernel submission.
+            self._recurrence_direct_kernel_submissions += 1
 
     def _snapshot_result(self, out, issued_iterations):
         float_state = self._float_state.to_numpy()
@@ -1095,8 +1358,18 @@ class BatchedSolvePlan:
             if self._pending_submission is not None
             else None
         )
+        recurrence_replay = dict(self._recurrence_replay_capability)
+        recurrence_replay.update(
+            {
+                "implementation": "taichi_graph",
+                "scope": "iteration_recurrence_only",
+                "operator_apply_included": False,
+                "preconditioner_apply_included": False,
+                "plan_built": self._recurrence_replay is not None,
+            }
+        )
         return {
-            "schema_version": 3,
+            "schema_version": 4,
             "backend_family": str(self._program.config().arch),
             "method": self.method,
             "dtype": "f32",
@@ -1110,6 +1383,7 @@ class BatchedSolvePlan:
                 self.operator._provider_kind,
                 batched=True,
             ),
+            "recurrence_replay": recurrence_replay,
             "submission": {
                 "qualified": (
                     self._program.config().arch
@@ -1176,6 +1450,12 @@ class BatchedSolvePlan:
                 "submission_calls": self._submission_calls,
                 "completed_submissions": self._completed_submissions,
                 "submission_rejections": self._submission_rejections,
+                "recurrence_replay_builds": self._recurrence_replay_builds,
+                "recurrence_replay_graph_builds": self._recurrence_replay_graph_builds,
+                "recurrence_replay_submissions": self._recurrence_replay_submissions,
+                "recurrence_replay_logical_kernels": self._recurrence_replay_logical_kernels,
+                "recurrence_replay_rebinds": self._recurrence_replay_rebinds,
+                "recurrence_direct_kernel_submissions": self._recurrence_direct_kernel_submissions,
             },
             "transfers": {
                 "device_to_host_bytes": self._device_to_host_bytes,
@@ -1187,6 +1467,12 @@ class BatchedSolvePlan:
                 "per_system_tolerance": True,
                 "per_system_status": True,
                 "recurrence_masking": True,
+                "iteration_recurrence_graph_replay": bool(
+                    self._recurrence_replay_capability["enabled"]
+                ),
+                "iteration_recurrence_replay_scope": (
+                    "recurrence_only; provider actions remain direct"
+                ),
                 "provider_apply_masking": False,
                 "asynchronous_submission": (
                     self._program.config().arch
