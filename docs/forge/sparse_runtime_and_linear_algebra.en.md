@@ -250,9 +250,14 @@ Preconditioner behavior:
 - unsupported names and format/backend combinations fail instead of degrading
   to another solver.
 
-After `update_values()`, fixed CSR/BSR CG refreshes the numeric
-Jacobi or block inverse before the next solve while retaining the immutable
-pattern and solve workspace.
+After `update_values()`, fixed CSR/BSR CG refreshes its numeric preconditioner
+before the next solve while retaining the immutable pattern and solve
+workspace. CSR Jacobi stores diagonal reciprocals. BSR block-Jacobi stores
+lower Cholesky factors for block sizes 2, 3, 6, and 12 and requires every
+diagonal block to be finite, symmetric, and positive definite. CUDA and Vulkan
+perform warm value-only refreshes on the device with stable committed resource
+addresses, no complete-values or factor transfer through the host, and no
+device allocation. Invalid blocks fail without regularization or fallback.
 
 ### MINRES for symmetric-indefinite systems
 

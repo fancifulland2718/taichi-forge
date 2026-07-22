@@ -610,9 +610,23 @@ operator.update_numeric(
 Graph updates pass a complete mapping of numeric roles. A successful compiled
 update publishes the next immutable numeric generation. In-flight work keeps
 its pinned generation alive; later apply/solve calls observe the new
-generation. A stored Jacobi/block-Jacobi PCG plan refreshes its numeric inverse
-before the next solve while retaining its pattern and Krylov workspace.
-Topology changes require constructing a new operator.
+generation. A stored Jacobi/block-Jacobi PCG plan refreshes its numeric
+preconditioner before the next solve while retaining its pattern and Krylov
+workspace. Scalar CSR Jacobi stores diagonal reciprocals. BSR block-Jacobi
+stores a lower Cholesky factor for every diagonal block; supported block sizes
+are 2, 3, 6, and 12. Every block must be finite, symmetric, and positive
+definite. Invalid blocks fail explicitly without symmetrization,
+regularization, or fallback, and a failed refresh does not publish a new
+preconditioner generation. Topology changes require constructing a new
+operator.
+
+CUDA and Vulkan perform value-only Jacobi and block-Jacobi refreshes on the
+device. A successful refresh preserves the committed resource address, so a
+replayable solve plan may rebind the numeric generation without rebuilding its
+recurrence program. Warm refreshes do not copy the complete values or factors
+through the host and do not allocate device memory; validation reads back only
+a fixed-size status. `statistics()` exposes the refresh contract, operation
+counters, transfer bytes, and device-allocation count.
 
 The public API has no borrowed-resource mode. Stored operators strongly retain
 their matrix; compiled providers own copied topology/numeric/workspace

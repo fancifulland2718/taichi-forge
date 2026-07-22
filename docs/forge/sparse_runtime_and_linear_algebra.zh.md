@@ -232,7 +232,11 @@ preconditioner 行为：
 - 不支持的名称或 format/backend 组合会明确失败，不会退化成其它 solver。
 
 `update_values()` 之后，fixed CSR/BSR CG 会在下次 solve 前刷新 numeric
-Jacobi 或 block inverse，同时保留 immutable pattern 和 solve workspace。
+preconditioner，同时保留 immutable pattern 和 solve workspace。CSR Jacobi 保存
+diagonal reciprocal；BSR block-Jacobi 为 block size 2、3、6、12 保存 lower Cholesky
+factor，并要求每个 diagonal block 都有限、对称且正定。CUDA 与 Vulkan 在 device 上完成
+warm value-only refresh，保持 committed resource address 稳定，不经 host 传输完整 values
+或 factor，也不分配 device memory。不合法的 block 会明确失败，不执行正则化或 fallback。
 
 ### 用于对称不定系统的 MINRES
 

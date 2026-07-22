@@ -534,7 +534,17 @@ operator.update_numeric(
 Graph update 传入完整 numeric role mapping。compiled update 成功后会发布下一个 immutable
 numeric generation。in-flight work 会继续保留其 pinned generation；后续 apply/solve
 观察新 generation。stored Jacobi/block-Jacobi PCG plan 会在下一次 solve 前刷新 numeric
-inverse，同时保留 pattern 与 Krylov workspace。topology 改变后必须构造新 operator。
+preconditioner，同时保留 pattern 与 Krylov workspace。scalar CSR Jacobi 保存 diagonal
+reciprocal；BSR block-Jacobi 为每个 diagonal block 保存 lower Cholesky factor，支持的
+block size 为 2、3、6 和 12。每个 block 都必须有限、对称且正定；不合法的 block 会明确
+失败，不会执行对称化、正则化或 fallback，失败的 refresh 也不会发布新的 preconditioner
+generation。topology 改变后必须构造新 operator。
+
+CUDA 与 Vulkan 在 device 上完成 value-only Jacobi 和 block-Jacobi refresh。成功刷新后
+committed resource address 保持稳定，因此可重放 solve plan 可以只 rebind numeric
+generation，而不必重建 recurrence program。warm refresh 不经 host 复制完整 values 或
+factor，也不分配 device memory；validation 只回读固定大小的 status。`statistics()` 提供
+refresh contract、operation counter、transfer bytes 和 device-allocation count。
 
 公开 API 不提供 borrowed-resource 模式。stored operator 强引用 matrix；compiled
 provider 拥有复制后的 topology/numeric/workspace resource；composition 与 solve plan
