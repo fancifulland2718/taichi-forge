@@ -44,6 +44,7 @@
 #endif
 
 #ifdef TI_WITH_VULKAN
+#include "taichi/program/vulkan_command_replay.h"
 #include "taichi/runtime/program_impls/vulkan/vulkan_program.h"
 #include "taichi/rhi/vulkan/vulkan_loader.h"
 #endif
@@ -19245,6 +19246,11 @@ int Program::allocate_snode_tree_id() {
 void Program::enqueue_compute_op_lambda(
     std::function<void(Device *device, CommandList *cmdlist)> op,
     const std::vector<ComputeOpImageRef> &image_refs) {
+#ifdef TI_WITH_VULKAN
+  if (try_record_vulkan_native_command(this, op)) {
+    return;
+  }
+#endif
   program_impl_->enqueue_compute_op_lambda(op, image_refs);
 }
 

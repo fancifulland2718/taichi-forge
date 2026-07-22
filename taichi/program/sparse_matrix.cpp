@@ -2861,6 +2861,7 @@ void CuSparseMatrix::reset_spmv_resources() {
   spmv_vec_x_ = nullptr;
   spmv_vec_y_ = nullptr;
   spmv_handle_ = nullptr;
+  spmv_stream_ = nullptr;
   spmv_buffer_ = nullptr;
   spmv_x_ptr_ = 0;
   spmv_y_ptr_ = 0;
@@ -3200,14 +3201,36 @@ std::unique_ptr<SparseMatrix> CuSparseMatrix::transpose() const {
 #endif
 }
 
-void CuSparseMatrix::spmv(size_t dX, size_t dY) {
+bool CuSparseMatrix::supports_spmv_stream_binding() const {
+#if defined(TI_WITH_CUDA)
+  auto &driver = CUSPARSEDriver::get_instance();
+  return driver.cpSetStream.available() && driver.cpGetStream.available();
+#else
+  return false;
+#endif
+}
+
+void CuSparseMatrix::spmv(size_t dX, size_t dY, CUstream stream) {
 #if defined(TI_WITH_CUDA)
   auto numeric_guard = acquire_numeric_access_guard();
   std::lock_guard<std::mutex> lock(spmv_mutex_);
   record_spmv_call();
   if (!spmv_handle_) {
     CUSPARSEDriver::get_instance().cpCreate(&spmv_handle_);
+    spmv_stream_ = nullptr;
     record_spmv_handle_creation();
+  }
+  if (spmv_stream_ != stream) {
+    auto &driver = CUSPARSEDriver::get_instance();
+    TI_ERROR_IF(!driver.cpSetStream.available() ||
+                    !driver.cpGetStream.available(),
+                "CUDA CSR SpMV cannot bind the requested execution stream.");
+    driver.cpSetStream(spmv_handle_, stream);
+    CUstream bound_stream = reinterpret_cast<CUstream>(1);
+    driver.cpGetStream(spmv_handle_, &bound_stream);
+    TI_ERROR_IF(bound_stream != stream,
+                "CUDA CSR SpMV stream binding could not be verified.");
+    spmv_stream_ = stream;
   }
   if (!spmv_vec_x_ || spmv_x_ptr_ != dX) {
     const bool rebind = spmv_vec_x_ != nullptr;
@@ -3402,6 +3425,7 @@ void CuSparseBsrMatrix::reset_spmv_resources() {
   spmv_vec_x_ = nullptr;
   spmv_vec_y_ = nullptr;
   spmv_handle_ = nullptr;
+  spmv_stream_ = nullptr;
   spmv_buffer_ = nullptr;
   spmv_x_ptr_ = 0;
   spmv_y_ptr_ = 0;
@@ -3422,14 +3446,36 @@ CuSparseBsrMatrix::~CuSparseBsrMatrix() {
 #endif
 }
 
-void CuSparseBsrMatrix::spmv(size_t dX, size_t dY) {
+bool CuSparseBsrMatrix::supports_spmv_stream_binding() const {
+#if defined(TI_WITH_CUDA)
+  auto &driver = CUSPARSEDriver::get_instance();
+  return driver.cpSetStream.available() && driver.cpGetStream.available();
+#else
+  return false;
+#endif
+}
+
+void CuSparseBsrMatrix::spmv(size_t dX, size_t dY, CUstream stream) {
 #if defined(TI_WITH_CUDA)
   auto numeric_guard = acquire_numeric_access_guard();
   std::lock_guard<std::mutex> lock(spmv_mutex_);
   record_spmv_call();
   if (!spmv_handle_) {
     CUSPARSEDriver::get_instance().cpCreate(&spmv_handle_);
+    spmv_stream_ = nullptr;
     record_spmv_handle_creation();
+  }
+  if (spmv_stream_ != stream) {
+    auto &driver = CUSPARSEDriver::get_instance();
+    TI_ERROR_IF(!driver.cpSetStream.available() ||
+                    !driver.cpGetStream.available(),
+                "CUDA BSR SpMV cannot bind the requested execution stream.");
+    driver.cpSetStream(spmv_handle_, stream);
+    CUstream bound_stream = reinterpret_cast<CUstream>(1);
+    driver.cpGetStream(spmv_handle_, &bound_stream);
+    TI_ERROR_IF(bound_stream != stream,
+                "CUDA BSR SpMV stream binding could not be verified.");
+    spmv_stream_ = stream;
   }
   if (!spmv_vec_x_ || spmv_x_ptr_ != dX) {
     const bool rebind = spmv_vec_x_ != nullptr;

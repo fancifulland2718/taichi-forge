@@ -3,6 +3,8 @@
 // cusparse setup
 PER_CUSPARSE_FUNCTION(cpCreate, cusparseCreate, cusparseHandle_t *);
 PER_CUSPARSE_FUNCTION(cpDestroy, cusparseDestroy, cusparseHandle_t);
+PER_CUSPARSE_FUNCTION(cpSetStream, cusparseSetStream, cusparseHandle_t, CUstream);
+PER_CUSPARSE_FUNCTION(cpGetStream, cusparseGetStream, cusparseHandle_t, CUstream *);
 
 // cusparse sparse matrix description
 PER_CUSPARSE_FUNCTION(cpCreateCoo, cusparseCreateCoo, cusparseSpMatDescr_t*, int, int, int,void*, void*, void*,cusparseIndexType_t, cusparseIndexBase_t,cudaDataType );

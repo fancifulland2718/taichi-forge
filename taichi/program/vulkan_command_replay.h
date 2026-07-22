@@ -12,6 +12,52 @@
 
 namespace taichi::lang {
 
+struct VulkanNativeCommandRecordingContext {
+  Program *program{nullptr};
+  Device *device{nullptr};
+  CommandList *cmdlist{nullptr};
+};
+
+inline thread_local VulkanNativeCommandRecordingContext
+    *vulkan_native_command_recording_context = nullptr;
+
+class VulkanNativeCommandRecordingScope {
+ public:
+  VulkanNativeCommandRecordingScope(Program *program,
+                                    Device *device,
+                                    CommandList *cmdlist)
+      : context_{program, device, cmdlist},
+        previous_(vulkan_native_command_recording_context) {
+    TI_ERROR_IF(previous_ != nullptr,
+                "Nested Vulkan native command recording is unsupported.");
+    vulkan_native_command_recording_context = &context_;
+  }
+
+  ~VulkanNativeCommandRecordingScope() {
+    TI_ASSERT(vulkan_native_command_recording_context == &context_);
+    vulkan_native_command_recording_context = previous_;
+  }
+
+  VulkanNativeCommandRecordingScope(
+      const VulkanNativeCommandRecordingScope &) = delete;
+  VulkanNativeCommandRecordingScope &operator=(
+      const VulkanNativeCommandRecordingScope &) = delete;
+
+ private:
+  VulkanNativeCommandRecordingContext context_;
+  VulkanNativeCommandRecordingContext *previous_{nullptr};
+};
+
+template <typename RecordFn>
+bool try_record_vulkan_native_command(Program *program, RecordFn &&record) {
+  auto *context = vulkan_native_command_recording_context;
+  if (context == nullptr || context->program != program) {
+    return false;
+  }
+  record(context->device, context->cmdlist);
+  return true;
+}
+
 inline bool vulkan_native_command_replay_enabled() {
   return get_environ_config("TI_VULKAN_NATIVE_COMMAND_REPLAY", 1) != 0;
 }
@@ -48,6 +94,14 @@ struct VulkanCommandReplayKey {
 };
 
 struct VulkanCommandReplayCache {
+  enum class LastPath : uint8_t {
+    none,
+    fallback,
+    record,
+    replay,
+    nested_record,
+  };
+
   struct Entry {
     VulkanCommandReplayKey key;
     std::unique_ptr<CommandList> cmdlist;
@@ -57,10 +111,14 @@ struct VulkanCommandReplayCache {
   // Last-key replay avoids reusing command buffers whose descriptor sets may
   // have been rebound for a newer key.
   Entry entry;
+  LastPath last_path{LastPath::none};
+  uint64_t records{0};
+  uint64_t replays{0};
 
   void reset() {
     entry.cmdlist = nullptr;
     device = nullptr;
+    last_path = LastPath::none;
   }
 
   template <typename RecordFn>
@@ -69,9 +127,15 @@ struct VulkanCommandReplayCache {
                         const VulkanCommandReplayKey &new_key,
                         bool profiler_scopes,
                         RecordFn &&record) {
+    if (try_record_vulkan_native_command(program,
+                                         std::forward<RecordFn>(record))) {
+      last_path = LastPath::nested_record;
+      return true;
+    }
     static const bool replay_enabled = vulkan_native_command_replay_enabled();
     if (!replay_enabled || profiler_scopes) {
       reset();
+      last_path = LastPath::fallback;
       return false;
     }
     if (device != dev) {
@@ -80,6 +144,7 @@ struct VulkanCommandReplayCache {
     }
     if (program->has_pending_gfx_command_list()) {
       reset();
+      last_path = LastPath::fallback;
       return false;
     }
 
@@ -87,6 +152,8 @@ struct VulkanCommandReplayCache {
     static const std::vector<StreamSemaphore> kNoWaits;
     if (entry.cmdlist && entry.key == new_key) {
       stream->submit(entry.cmdlist.get(), kNoWaits);
+      last_path = LastPath::replay;
+      ++replays;
       return true;
     }
 
@@ -99,6 +166,8 @@ struct VulkanCommandReplayCache {
     entry.key = new_key;
     entry.cmdlist = std::move(recorded_cmdlist);
     stream->submit(entry.cmdlist.get(), kNoWaits);
+    last_path = LastPath::record;
+    ++records;
     return true;
   }
 };

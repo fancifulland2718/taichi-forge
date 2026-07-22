@@ -1020,7 +1020,9 @@ class CuSparseMatrix : public SparseMatrix {
 
   void nd_spmv(Program *prog, const Ndarray &x, const Ndarray &y);
 
-  void spmv(size_t x, size_t y);
+  void spmv(size_t x, size_t y, CUstream stream = nullptr);
+
+  bool supports_spmv_stream_binding() const;
 
   const void *get_matrix() const override {
     return &matrix_;
@@ -1064,6 +1066,7 @@ class CuSparseMatrix : public SparseMatrix {
   std::shared_ptr<SparseCsrPattern> pattern_;
   mutable std::mutex spmv_mutex_;
   cusparseHandle_t spmv_handle_{nullptr};
+  CUstream spmv_stream_{nullptr};
   cusparseDnVecDescr_t spmv_vec_x_{nullptr};
   cusparseDnVecDescr_t spmv_vec_y_{nullptr};
   size_t spmv_x_ptr_{0};
@@ -1091,7 +1094,8 @@ class CuSparseBsrMatrix final : public SparseMatrix {
   ~CuSparseBsrMatrix() override;
 
   void nd_spmv(Program *prog, const Ndarray &x, const Ndarray &y);
-  void spmv(size_t x, size_t y);
+  void spmv(size_t x, size_t y, CUstream stream = nullptr);
+  bool supports_spmv_stream_binding() const;
   void update_values(Program *prog, const Ndarray &values) override;
   SparseMatrixRuntimeStatistics debug_runtime_statistics() const override;
 
@@ -1145,6 +1149,7 @@ class CuSparseBsrMatrix final : public SparseMatrix {
   void *values_{nullptr};
   mutable std::mutex spmv_mutex_;
   cusparseHandle_t spmv_handle_{nullptr};
+  CUstream spmv_stream_{nullptr};
   cusparseDnVecDescr_t spmv_vec_x_{nullptr};
   cusparseDnVecDescr_t spmv_vec_y_{nullptr};
   size_t spmv_x_ptr_{0};
