@@ -131,7 +131,16 @@ void driver_sparse_diagonal_refresh_f32(void *values,
                                         int nnz,
                                         void *stream);
 
-void driver_sparse_block_diagonal_apply_f32(void *inverse_blocks,
+void driver_sparse_block_cholesky_refresh_f32(void *values,
+                                              void *diagonal_block_offsets,
+                                              void *staging_factors,
+                                              void *status,
+                                              int block_rows,
+                                              int block_nnz,
+                                              int block_size,
+                                              void *stream);
+
+void driver_sparse_block_diagonal_apply_f32(void *factor_blocks,
                                             void *input,
                                             void *output,
                                             int block_rows,

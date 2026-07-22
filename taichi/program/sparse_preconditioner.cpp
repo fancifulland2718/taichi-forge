@@ -42,6 +42,36 @@ void throw_sparse_diagonal_refresh_failure(std::uint32_t status, int nnz) {
   }
 }
 
+void throw_sparse_block_cholesky_refresh_failure(std::uint32_t status,
+                                                  int block_nnz) {
+  const std::uint32_t block_row = status >> 3u;
+  const std::uint32_t reason = status & 7u;
+  switch (reason) {
+    case 1:
+      TI_ERROR("Sparse block-Jacobi diagonal block {} contains a non-finite "
+               "value.",
+               block_row);
+    case 2:
+      TI_ERROR("Sparse block-Jacobi diagonal block {} is not symmetric.",
+               block_row);
+    case 3:
+      TI_ERROR("Sparse block-Jacobi diagonal block {} is not positive "
+               "definite.",
+               block_row);
+    case 4:
+      TI_ERROR("Sparse block-Jacobi Cholesky factor {} is not finite.",
+               block_row);
+    case 5:
+      TI_ERROR("Sparse block-Jacobi diagonal block offset for row {} is "
+               "outside the fixed values array of length {}.",
+               block_row, block_nnz);
+    default:
+      TI_ERROR("Sparse block-Jacobi device numeric refresh returned invalid "
+               "status {}.",
+               status);
+  }
+}
+
 void validate_vector(const char *role,
                      const Ndarray &array,
                      int rows,
@@ -203,12 +233,11 @@ std::vector<T> refresh_cpu_csr_inverse(
 }
 
 template <typename T>
-std::vector<T> invert_dense_block(const T *block,
-                                  int block_size,
-                                  int block_row) {
-  const int augmented_columns = 2 * block_size;
-  std::vector<double> augmented(
-      static_cast<std::size_t>(block_size * augmented_columns), 0.0);
+std::vector<T> cholesky_factor_dense_block(const T *block,
+                                           int block_size,
+                                           int block_row) {
+  std::vector<double> factor(
+      static_cast<std::size_t>(block_size * block_size), 0.0);
   for (int row = 0; row < block_size; ++row) {
     for (int column = 0; column < block_size; ++column) {
       const T value = block[row * block_size + column];
@@ -216,68 +245,54 @@ std::vector<T> invert_dense_block(const T *block,
                   "Sparse block-Jacobi diagonal block {} contains a "
                   "non-finite value.",
                   block_row);
-      augmented[row * augmented_columns + column] = value;
     }
-    augmented[row * augmented_columns + block_size + row] = 1.0;
   }
-
-  for (int pivot = 0; pivot < block_size; ++pivot) {
-    int selected_row = pivot;
-    double selected_magnitude =
-        std::abs(augmented[pivot * augmented_columns + pivot]);
-    for (int row = pivot + 1; row < block_size; ++row) {
-      const double magnitude =
-          std::abs(augmented[row * augmented_columns + pivot]);
-      if (magnitude > selected_magnitude) {
-        selected_magnitude = magnitude;
-        selected_row = row;
-      }
-    }
-    TI_ERROR_IF(selected_magnitude == 0.0 ||
-                    !std::isfinite(selected_magnitude),
-                "Sparse block-Jacobi diagonal block {} is singular.",
-                block_row);
-    if (selected_row != pivot) {
-      for (int column = 0; column < augmented_columns; ++column) {
-        std::swap(augmented[pivot * augmented_columns + column],
-                  augmented[selected_row * augmented_columns + column]);
-      }
-    }
-    const double pivot_value =
-        augmented[pivot * augmented_columns + pivot];
-    for (int column = 0; column < augmented_columns; ++column) {
-      augmented[pivot * augmented_columns + column] /= pivot_value;
-    }
-    for (int row = 0; row < block_size; ++row) {
-      if (row == pivot) {
-        continue;
-      }
-      const double scale = augmented[row * augmented_columns + pivot];
-      for (int column = 0; column < augmented_columns; ++column) {
-        augmented[row * augmented_columns + column] -=
-            scale * augmented[pivot * augmented_columns + column];
-      }
+  const double symmetry_epsilon =
+      32.0 * static_cast<double>(std::numeric_limits<T>::epsilon());
+  for (int row = 1; row < block_size; ++row) {
+    for (int column = 0; column < row; ++column) {
+      const double lower = block[row * block_size + column];
+      const double upper = block[column * block_size + row];
+      const double scale =
+          std::max({1.0, std::abs(lower), std::abs(upper)});
+      TI_ERROR_IF(std::abs(lower - upper) > symmetry_epsilon * scale,
+                  "Sparse block-Jacobi diagonal block {} is not "
+                  "symmetric.",
+                  block_row);
     }
   }
 
-  std::vector<T> inverse(
-      static_cast<std::size_t>(block_size * block_size));
   for (int row = 0; row < block_size; ++row) {
-    for (int column = 0; column < block_size; ++column) {
-      const double value = augmented[
-          row * augmented_columns + block_size + column];
+    for (int column = 0; column <= row; ++column) {
+      double value = block[row * block_size + column];
+      for (int k = 0; k < column; ++k) {
+        value -= factor[row * block_size + k] *
+                 factor[column * block_size + k];
+      }
+      if (row == column) {
+        TI_ERROR_IF(!std::isfinite(value) || value <= 0.0,
+                    "Sparse block-Jacobi diagonal block {} is not positive "
+                    "definite.",
+                    block_row);
+        value = std::sqrt(value);
+      } else {
+        value /= factor[column * block_size + column];
+      }
       const T stored = static_cast<T>(value);
       TI_ERROR_IF(!std::isfinite(value) || !std::isfinite(stored),
-                  "Sparse block-Jacobi inverse block {} is not finite.",
+                  "Sparse block-Jacobi Cholesky factor {} is not finite.",
                   block_row);
-      inverse[row * block_size + column] = stored;
+      factor[row * block_size + column] = value;
     }
   }
-  return inverse;
+  std::vector<T> stored_factor(factor.size());
+  std::transform(factor.begin(), factor.end(), stored_factor.begin(),
+                 [](double value) { return static_cast<T>(value); });
+  return stored_factor;
 }
 
 template <typename T>
-std::vector<T> extract_host_bsr_inverse_blocks(
+std::vector<T> extract_host_bsr_cholesky_factors(
     const std::vector<int32_t> &row_offsets,
     const std::vector<int32_t> &column_indices,
     const std::vector<T> &values,
@@ -295,7 +310,7 @@ std::vector<T> extract_host_bsr_inverse_blocks(
                       static_cast<int32_t>(column_indices.size()),
               "Sparse block-Jacobi BSR row offsets must start at zero and "
               "end at block nnz.");
-  std::vector<T> inverse_blocks(
+  std::vector<T> factor_blocks(
       static_cast<std::size_t>(block_rows) * block_width);
   if (diagonal_offsets) {
     diagonal_offsets->assign(static_cast<std::size_t>(block_rows), -1);
@@ -330,19 +345,19 @@ std::vector<T> extract_host_bsr_inverse_blocks(
     if (diagonal_offsets) {
       (*diagonal_offsets)[block_row] = diagonal_offset;
     }
-    auto inverse = invert_dense_block(
+    auto factor = cholesky_factor_dense_block(
         values.data() + static_cast<std::size_t>(diagonal_offset) *
                             block_width,
         block_size, block_row);
-    std::copy(inverse.begin(), inverse.end(),
-              inverse_blocks.begin() +
+    std::copy(factor.begin(), factor.end(),
+              factor_blocks.begin() +
                   static_cast<std::size_t>(block_row) * block_width);
   }
-  return inverse_blocks;
+  return factor_blocks;
 }
 
 template <typename T>
-std::vector<T> invert_bsr_diagonal_blocks(
+std::vector<T> factor_bsr_diagonal_blocks(
     const T *values,
     int block_nnz,
     const std::vector<int32_t> &diagonal_block_offsets,
@@ -356,7 +371,7 @@ std::vector<T> invert_bsr_diagonal_blocks(
               static_cast<std::size_t>(block_rows),
       "Sparse block-Jacobi numeric refresh has invalid fixed-BSR "
       "metadata.");
-  std::vector<T> inverse_blocks(
+  std::vector<T> factor_blocks(
       static_cast<std::size_t>(block_rows) * block_width);
   for (int block_row = 0; block_row < block_rows; ++block_row) {
     const int32_t offset = diagonal_block_offsets[block_row];
@@ -364,18 +379,18 @@ std::vector<T> invert_bsr_diagonal_blocks(
                 "Sparse block-Jacobi diagonal block offset for row {} is "
                 "outside the fixed values array.",
                 block_row);
-    auto inverse = invert_dense_block(
+    auto factor = cholesky_factor_dense_block(
         values + static_cast<std::size_t>(offset) * block_width,
         block_size, block_row);
-    std::copy(inverse.begin(), inverse.end(),
-              inverse_blocks.begin() +
+    std::copy(factor.begin(), factor.end(),
+              factor_blocks.begin() +
                   static_cast<std::size_t>(block_row) * block_width);
   }
-  return inverse_blocks;
+  return factor_blocks;
 }
 
 template <typename T>
-void cpu_block_diagonal_apply(const T *inverse_blocks,
+void cpu_block_cholesky_apply(const T *factor_blocks,
                               const T *input,
                               T *output,
                               int block_rows,
@@ -383,22 +398,35 @@ void cpu_block_diagonal_apply(const T *inverse_blocks,
   const std::size_t block_width =
       static_cast<std::size_t>(block_size * block_size);
   for (int block_row = 0; block_row < block_rows; ++block_row) {
-    T local_input[12];
+    T local_solution[12];
     const std::size_t base =
         static_cast<std::size_t>(block_row) * block_size;
+    const T *factor =
+        factor_blocks + static_cast<std::size_t>(block_row) * block_width;
+    // Forward solve: L y = b.
     for (int local_row = 0; local_row < block_size; ++local_row) {
-      local_input[local_row] = input[base + local_row];
-    }
-    const T *inverse =
-        inverse_blocks + static_cast<std::size_t>(block_row) * block_width;
-    for (int local_row = 0; local_row < block_size; ++local_row) {
-      T sum = static_cast<T>(0);
-      for (int local_column = 0; local_column < block_size;
+      T value = input[base + local_row];
+      for (int local_column = 0; local_column < local_row;
            ++local_column) {
-        sum += inverse[local_row * block_size + local_column] *
-               local_input[local_column];
+        value -= factor[local_row * block_size + local_column] *
+                 local_solution[local_column];
       }
-      output[base + local_row] = sum;
+      local_solution[local_row] =
+          value / factor[local_row * block_size + local_row];
+    }
+    // Backward solve: L^T x = y. The local copy makes in-place apply safe.
+    for (int local_row = block_size - 1; local_row >= 0; --local_row) {
+      T value = local_solution[local_row];
+      for (int local_column = local_row + 1; local_column < block_size;
+           ++local_column) {
+        value -= factor[local_column * block_size + local_row] *
+                 local_solution[local_column];
+      }
+      local_solution[local_row] =
+          value / factor[local_row * block_size + local_row];
+    }
+    for (int local_row = 0; local_row < block_size; ++local_row) {
+      output[base + local_row] = local_solution[local_row];
     }
   }
 }
@@ -1068,30 +1096,48 @@ SparseBlockJacobiPreconditionerPlan::SparseBlockJacobiPreconditionerPlan(
         row_bytes + column_bytes + value_bytes;
   }
   if (dtype_ == PrimitiveType::f32) {
-    auto inverse_blocks = extract_host_bsr_inverse_blocks(
+    auto factor_blocks = extract_host_bsr_cholesky_factors(
         row_offsets, column_indices, values_f32, block_rows_, block_size_,
         &diagonal_block_offsets_);
     if (backend_family_ == "cpu") {
-      host_inverse_blocks_f32_ = std::move(inverse_blocks);
+      host_factor_blocks_f32_ = std::move(factor_blocks);
       return;
     }
+    TI_ERROR_IF(static_cast<std::uint32_t>(block_rows_) >
+                    (kSparseRefreshSuccess >> 3u),
+                "{} Sparse block-Jacobi plans require at most {} block "
+                "rows for device refresh status encoding.",
+                backend_family_, kSparseRefreshSuccess >> 3u);
     try {
-      device_inverse_blocks_ = program_->create_ndarray(
+      device_factor_blocks_ = program_->create_ndarray(
           PrimitiveType::f32,
-          {static_cast<int>(inverse_blocks.size())},
+          {static_cast<int>(factor_blocks.size())},
           ExternalArrayLayout::kNull, false);
+      device_diagonal_block_offsets_ = program_->create_ndarray(
+          PrimitiveType::i32, {block_rows_},
+          ExternalArrayLayout::kNull, false);
+      device_refresh_staging_ = program_->create_ndarray(
+          PrimitiveType::f32,
+          {static_cast<int>(factor_blocks.size())},
+          ExternalArrayLayout::kNull, false);
+      device_refresh_status_ = program_->create_ndarray(
+          PrimitiveType::i32, {1}, ExternalArrayLayout::kNull, false);
       program_->copy_ndarray_from_host(
-          device_inverse_blocks_, inverse_blocks.data(),
-          inverse_blocks.size() * sizeof(float32));
+          device_factor_blocks_, factor_blocks.data(),
+          factor_blocks.size() * sizeof(float32));
+      program_->copy_ndarray_from_host(
+          device_diagonal_block_offsets_, diagonal_block_offsets_.data(),
+          diagonal_block_offsets_.size() * sizeof(int32_t));
     } catch (...) {
       release_resources();
       throw;
     }
     construction_host_to_device_bytes_ =
-        inverse_blocks.size() * sizeof(float32);
+        factor_blocks.size() * sizeof(float32) +
+        diagonal_block_offsets_.size() * sizeof(int32_t);
     return;
   }
-  host_inverse_blocks_f64_ = extract_host_bsr_inverse_blocks(
+  host_factor_blocks_f64_ = extract_host_bsr_cholesky_factors(
       row_offsets, column_indices, values_f64, block_rows_, block_size_,
       &diagonal_block_offsets_);
 }
@@ -1153,54 +1199,71 @@ void SparseBlockJacobiPreconditionerPlan::refresh_numeric(
         "metadata.");
     if (backend_family_ == "cpu") {
       auto *typed = static_cast<CpuSparseBsrMatrix *>(matrix_);
-      const std::size_t inverse_count =
+      const std::size_t factor_count =
           static_cast<std::size_t>(block_rows_) * block_width;
-      const std::size_t inverse_bytes =
-          inverse_count * data_type_size(dtype_);
+      const std::size_t factor_bytes =
+          factor_count * data_type_size(dtype_);
       refresh_peak_temporary_host_bytes_ = std::max(
           refresh_peak_temporary_host_bytes_,
-          static_cast<std::uint64_t>(inverse_bytes));
+          static_cast<std::uint64_t>(factor_bytes));
       if (dtype_ == PrimitiveType::f32) {
-        auto inverse_blocks = invert_bsr_diagonal_blocks(
+        auto factor_blocks = factor_bsr_diagonal_blocks(
             static_cast<const float32 *>(typed->get_block_values()),
             block_nnz, diagonal_block_offsets_, block_rows_, block_size_);
-        host_inverse_blocks_f32_.swap(inverse_blocks);
+        host_factor_blocks_f32_.swap(factor_blocks);
       } else {
-        auto inverse_blocks = invert_bsr_diagonal_blocks(
+        auto factor_blocks = factor_bsr_diagonal_blocks(
             static_cast<const float64 *>(typed->get_block_values()),
             block_nnz, diagonal_block_offsets_, block_rows_, block_size_);
-        host_inverse_blocks_f64_.swap(inverse_blocks);
+        host_factor_blocks_f64_.swap(factor_blocks);
       }
       numeric_version_at_build_ = current.numeric_version;
       numeric_refresh_successes_++;
       return;
     }
-    std::vector<float32> values(
-        static_cast<std::size_t>(block_nnz) * block_width);
-    std::vector<float32> inverse_blocks(
-        static_cast<std::size_t>(block_rows_) * block_width);
-    const std::size_t value_bytes = values.size() * sizeof(float32);
-    const std::size_t inverse_bytes =
-        inverse_blocks.size() * sizeof(float32);
+    TI_ERROR_IF(!device_factor_blocks_ ||
+                    !device_diagonal_block_offsets_ ||
+                    !device_refresh_staging_ || !device_refresh_status_,
+                "Sparse block-Jacobi device numeric refresh resources are "
+                "incomplete.");
+    const std::size_t factor_bytes =
+        static_cast<std::size_t>(block_rows_) * block_width *
+        sizeof(float32);
     refresh_peak_temporary_host_bytes_ = std::max(
-        refresh_peak_temporary_host_bytes_,
-        static_cast<std::uint64_t>(value_bytes + inverse_bytes));
+        refresh_peak_temporary_host_bytes_, sizeof(std::uint32_t));
+    program_->fill_ndarray_fast_u32(device_refresh_status_,
+                                    kSparseRefreshSuccess);
     if (backend_family_ == "cuda") {
 #if defined(TI_WITH_CUDA)
       auto *typed = static_cast<CuSparseBsrMatrix *>(matrix_);
-      CUDADriver::get_instance().memcpy_device_to_host(
-          values.data(), typed->get_block_values(), value_bytes);
+      auto submission_guard =
+          program_->acquire_runtime_resource_submission_guard();
+      const Ndarray *resources[] = {device_diagonal_block_offsets_,
+                                    device_refresh_staging_,
+                                    device_refresh_status_};
+      program_->retain_ndarrays_for_external_submission(resources,
+                                                        std::size(resources));
+      cuda::driver_sparse_block_cholesky_refresh_f32(
+          typed->get_block_values(),
+          reinterpret_cast<void *>(program_->get_ndarray_data_ptr_as_int(
+              device_diagonal_block_offsets_)),
+          reinterpret_cast<void *>(program_->get_ndarray_data_ptr_as_int(
+              device_refresh_staging_)),
+          reinterpret_cast<void *>(program_->get_ndarray_data_ptr_as_int(
+              device_refresh_status_)),
+          block_rows_, block_nnz, block_size_, nullptr);
 #else
       TI_NOT_IMPLEMENTED;
 #endif
     } else if (backend_family_ == "vulkan") {
 #if defined(TI_WITH_VULKAN)
       auto *typed = static_cast<VulkanSparseBsrMatrix *>(matrix_);
+      program_->vulkan_sparse_block_cholesky_refresh(
+          const_cast<Ndarray *>(typed->get_block_values()),
+          device_diagonal_block_offsets_, device_refresh_staging_,
+          device_refresh_status_, block_rows_, block_nnz_, block_size_);
       program_->synchronize();
       refresh_host_synchronizations_++;
-      program_->copy_ndarray_to_host(
-          const_cast<Ndarray *>(typed->get_block_values()), values.data(),
-          value_bytes);
 #else
       TI_NOT_IMPLEMENTED;
 #endif
@@ -1209,47 +1272,30 @@ void SparseBlockJacobiPreconditionerPlan::refresh_numeric(
                "backend {}.",
                backend_family_);
     }
-    refresh_device_to_host_bytes_ += value_bytes;
-    refresh_full_values_device_to_host_bytes_ += value_bytes;
-
-    for (int block_row = 0; block_row < block_rows_; ++block_row) {
-      const int32_t offset = diagonal_block_offsets_[block_row];
-      TI_ERROR_IF(offset < 0 || offset >= block_nnz,
-                  "Sparse block-Jacobi diagonal block offset for row {} "
-                  "is outside the fixed values array.",
-                  block_row);
-      auto inverse = invert_dense_block(
-          values.data() + static_cast<std::size_t>(offset) * block_width,
-          block_size_, block_row);
-      std::copy(inverse.begin(), inverse.end(),
-                inverse_blocks.begin() +
-                    static_cast<std::size_t>(block_row) * block_width);
+    std::uint32_t status = kSparseRefreshSuccess;
+    if (backend_family_ == "cuda") {
+#if defined(TI_WITH_CUDA)
+      CUDADriver::get_instance().memcpy_device_to_host(
+          &status,
+          reinterpret_cast<void *>(program_->get_ndarray_data_ptr_as_int(
+              device_refresh_status_)),
+          sizeof(status));
+#else
+      TI_NOT_IMPLEMENTED;
+#endif
+    } else {
+      program_->copy_ndarray_to_host(device_refresh_status_, &status,
+                                     sizeof(status));
     }
-
-    Ndarray *replacement = nullptr;
-    try {
-      replacement = program_->create_ndarray(
-          PrimitiveType::f32,
-          {static_cast<int>(inverse_blocks.size())},
-          ExternalArrayLayout::kNull, false);
-      refresh_device_allocations_++;
-      refresh_peak_temporary_device_bytes_ = std::max(
-          refresh_peak_temporary_device_bytes_,
-          static_cast<std::uint64_t>(inverse_bytes));
-      program_->copy_ndarray_from_host(replacement, inverse_blocks.data(),
-                                       inverse_bytes);
-    } catch (...) {
-      if (replacement) {
-        program_->delete_ndarray(replacement);
-      }
-      throw;
+    refresh_device_to_host_bytes_ += sizeof(status);
+    refresh_status_device_to_host_bytes_ += sizeof(status);
+    refresh_device_kernel_launches_++;
+    if (status != kSparseRefreshSuccess) {
+      throw_sparse_block_cholesky_refresh_failure(status, block_nnz);
     }
-    Ndarray *old_inverse = device_inverse_blocks_;
-    device_inverse_blocks_ = replacement;
-    if (old_inverse) {
-      program_->delete_ndarray(old_inverse);
-    }
-    refresh_host_to_device_bytes_ += inverse_bytes;
+    program_->copy_ndarray_fast(device_factor_blocks_,
+                                device_refresh_staging_);
+    refresh_device_to_device_bytes_ += factor_bytes;
     numeric_version_at_build_ = current.numeric_version;
     numeric_refresh_successes_++;
   } catch (...) {
@@ -1259,9 +1305,21 @@ void SparseBlockJacobiPreconditionerPlan::refresh_numeric(
 }
 
 void SparseBlockJacobiPreconditionerPlan::release_resources() {
-  if (device_inverse_blocks_ && program_) {
-    program_->delete_ndarray(device_inverse_blocks_);
-    device_inverse_blocks_ = nullptr;
+  if (device_factor_blocks_ && program_) {
+    program_->delete_ndarray(device_factor_blocks_);
+    device_factor_blocks_ = nullptr;
+  }
+  if (device_diagonal_block_offsets_ && program_) {
+    program_->delete_ndarray(device_diagonal_block_offsets_);
+    device_diagonal_block_offsets_ = nullptr;
+  }
+  if (device_refresh_staging_ && program_) {
+    program_->delete_ndarray(device_refresh_staging_);
+    device_refresh_staging_ = nullptr;
+  }
+  if (device_refresh_status_ && program_) {
+    program_->delete_ndarray(device_refresh_status_);
+    device_refresh_status_ = nullptr;
   }
 }
 
@@ -1293,12 +1351,12 @@ void SparseBlockJacobiPreconditionerPlan::apply(
 #if defined(TI_WITH_CUDA)
     auto submission_guard =
         program_->acquire_runtime_resource_submission_guard();
-    const Ndarray *resources[] = {device_inverse_blocks_, &input, &output};
+    const Ndarray *resources[] = {device_factor_blocks_, &input, &output};
     program_->retain_ndarrays_for_external_submission(resources,
                                                        std::size(resources));
     cuda::driver_sparse_block_diagonal_apply_f32(
         reinterpret_cast<void *>(
-            program_->get_ndarray_data_ptr_as_int(device_inverse_blocks_)),
+            program_->get_ndarray_data_ptr_as_int(device_factor_blocks_)),
         reinterpret_cast<void *>(
             program_->get_ndarray_data_ptr_as_int(&input)),
         reinterpret_cast<void *>(
@@ -1309,7 +1367,7 @@ void SparseBlockJacobiPreconditionerPlan::apply(
 #endif
   } else if (backend_family_ == "vulkan") {
     program_->vulkan_sparse_block_diagonal_apply(
-        device_inverse_blocks_, const_cast<Ndarray *>(&input),
+        device_factor_blocks_, const_cast<Ndarray *>(&input),
         const_cast<Ndarray *>(&output), block_rows_, block_size_);
   } else {
     TI_ERROR("Sparse block-Jacobi apply does not support backend {}.",
@@ -1339,17 +1397,17 @@ void SparseBlockJacobiPreconditionerPlan::apply_cpu_raw(
       pattern_version_at_build_, numeric_version_at_build_,
       current.pattern_version, current.numeric_version);
   if (dtype_ == PrimitiveType::f32) {
-    TI_ERROR_IF(host_inverse_blocks_f32_.empty(),
-                "CPU Sparse block-Jacobi f32 inverse storage is empty.");
-    cpu_block_diagonal_apply(
-        host_inverse_blocks_f32_.data(),
+    TI_ERROR_IF(host_factor_blocks_f32_.empty(),
+                "CPU Sparse block-Jacobi f32 factor storage is empty.");
+    cpu_block_cholesky_apply(
+        host_factor_blocks_f32_.data(),
         reinterpret_cast<const float32 *>(input),
         reinterpret_cast<float32 *>(output), block_rows_, block_size_);
   } else {
-    TI_ERROR_IF(host_inverse_blocks_f64_.empty(),
-                "CPU Sparse block-Jacobi f64 inverse storage is empty.");
-    cpu_block_diagonal_apply(
-        host_inverse_blocks_f64_.data(),
+    TI_ERROR_IF(host_factor_blocks_f64_.empty(),
+                "CPU Sparse block-Jacobi f64 factor storage is empty.");
+    cpu_block_cholesky_apply(
+        host_factor_blocks_f64_.data(),
         reinterpret_cast<const float64 *>(input),
         reinterpret_cast<float64 *>(output), block_rows_, block_size_);
   }
@@ -1380,12 +1438,12 @@ void SparseBlockJacobiPreconditionerPlan::apply_cuda_raw(
 #if defined(TI_WITH_CUDA)
   auto submission_guard =
       program_->acquire_runtime_resource_submission_guard();
-  const Ndarray *resources[] = {device_inverse_blocks_};
+  const Ndarray *resources[] = {device_factor_blocks_};
   program_->retain_ndarrays_for_external_submission(resources,
                                                      std::size(resources));
   cuda::driver_sparse_block_diagonal_apply_f32(
       reinterpret_cast<void *>(
-          program_->get_ndarray_data_ptr_as_int(device_inverse_blocks_)),
+          program_->get_ndarray_data_ptr_as_int(device_factor_blocks_)),
       reinterpret_cast<void *>(input), reinterpret_cast<void *>(output),
       block_rows_, block_size_, stream);
 #else
@@ -1435,7 +1493,13 @@ SparseBlockJacobiPreconditionerPlan::debug_runtime_statistics() const {
   result.persistent_inverse_reserved_bytes =
       static_cast<std::uint64_t>(block_rows_) * block_size_ * block_size_ *
       data_type_size(dtype_);
-  result.persistent_refresh_reserved_bytes = 0;
+  if (backend_family_ != "cpu") {
+    result.persistent_refresh_reserved_bytes =
+        static_cast<std::uint64_t>(block_rows_) * sizeof(int32_t) +
+        static_cast<std::uint64_t>(block_rows_) * block_size_ * block_size_ *
+            sizeof(float32) +
+        sizeof(int32_t);
+  }
   result.construction_device_to_host_bytes =
       construction_device_to_host_bytes_;
   result.construction_host_to_device_bytes =
@@ -1462,8 +1526,8 @@ SparseBlockJacobiPreconditionerPlan::debug_runtime_statistics() const {
   result.refresh_peak_temporary_device_bytes =
       refresh_peak_temporary_device_bytes_;
   result.numeric_refresh_supported = true;
-  result.device_native_numeric_refresh = false;
-  result.stable_refresh_binding = backend_family_ == "cpu";
+  result.device_native_numeric_refresh = backend_family_ != "cpu";
+  result.stable_refresh_binding = true;
   return result;
 }
 

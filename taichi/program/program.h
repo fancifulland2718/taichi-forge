@@ -2363,8 +2363,17 @@ class TI_DLL_EXPORT Program {
                                            Ndarray *output,
                                            std::size_t n);
 
+  std::size_t vulkan_sparse_block_cholesky_refresh(
+      Ndarray *values,
+      Ndarray *diagonal_block_offsets,
+      Ndarray *staging_factors,
+      Ndarray *status,
+      std::size_t block_rows,
+      std::size_t block_nnz,
+      std::size_t block_size);
+
   std::size_t vulkan_sparse_block_diagonal_apply(
-      Ndarray *inverse_blocks,
+      Ndarray *factor_blocks,
       Ndarray *input,
       Ndarray *output,
       std::size_t block_rows,

@@ -806,8 +806,11 @@ static const uint32_t kSparseDiagonalApplyF32Spv[] =
 static const uint32_t kSparseDiagonalRefreshF32Spv[] =
 #include "taichi/program/vulkan_sort_shaders/sparse_diagonal_refresh_f32.comp.spv.h"
     ;
-static const uint32_t kSparseBlockDiagonalApplyF32Spv[] =
-#include "taichi/program/vulkan_sort_shaders/sparse_block_diagonal_apply_f32.comp.spv.h"
+static const uint32_t kSparseBlockCholeskyRefreshF32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/sparse_block_cholesky_refresh_f32.comp.spv.h"
+    ;
+static const uint32_t kSparseBlockCholeskyApplyF32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/sparse_block_cholesky_apply_f32.comp.spv.h"
     ;
 static const uint32_t kSparseDotPartialF32Spv[] =
 #include "taichi/program/vulkan_sort_shaders/sparse_dot_partial_f32.comp.spv.h"
@@ -4583,7 +4586,8 @@ struct VulkanSparseAlgebraCache {
   std::unique_ptr<Pipeline> sparse_axpy_f32;
   std::unique_ptr<Pipeline> sparse_diagonal_apply_f32;
   std::unique_ptr<Pipeline> sparse_diagonal_refresh_f32;
-  std::unique_ptr<Pipeline> sparse_block_diagonal_apply_f32;
+  std::unique_ptr<Pipeline> sparse_block_cholesky_refresh_f32;
+  std::unique_ptr<Pipeline> sparse_block_cholesky_apply_f32;
   std::unique_ptr<Pipeline> sparse_dot_partial_f32;
   std::unique_ptr<Pipeline> sparse_sqrt_scalar_f32;
   std::unique_ptr<Pipeline> sparse_scalar_divide_f32;
@@ -4602,7 +4606,8 @@ struct VulkanSparseAlgebraCache {
   VulkanResourceSetReplayRing<2> sparse_axpy_bindings;
   VulkanResourceSetReplayRing<3> sparse_diagonal_apply_bindings;
   VulkanResourceSetReplayRing<4> sparse_diagonal_refresh_bindings;
-  VulkanResourceSetReplayRing<3> sparse_block_diagonal_apply_bindings;
+  VulkanResourceSetReplayRing<4> sparse_block_cholesky_refresh_bindings;
+  VulkanResourceSetReplayRing<3> sparse_block_cholesky_apply_bindings;
   VulkanResourceSetReplayRing<3> sparse_dot_partial_bindings;
   VulkanResourceSetReplayRing<1> sparse_sqrt_scalar_bindings;
   VulkanResourceSetReplayRing<4> sparse_scalar_divide_bindings;
@@ -4621,7 +4626,8 @@ struct VulkanSparseAlgebraCache {
   VulkanCommandReplayCache sparse_axpy_command_replay;
   VulkanCommandReplayCache sparse_diagonal_apply_command_replay;
   VulkanCommandReplayCache sparse_diagonal_refresh_command_replay;
-  VulkanCommandReplayCache sparse_block_diagonal_apply_command_replay;
+  VulkanCommandReplayCache sparse_block_cholesky_refresh_command_replay;
+  VulkanCommandReplayCache sparse_block_cholesky_apply_command_replay;
   VulkanCommandReplayCache sparse_dot_partial_command_replay;
   VulkanCommandReplayCache sparse_sqrt_scalar_command_replay;
   VulkanCommandReplayCache sparse_scalar_divide_command_replay;
@@ -4643,7 +4649,8 @@ struct VulkanSparseAlgebraCache {
     sparse_axpy_bindings.reset();
     sparse_diagonal_apply_bindings.reset();
     sparse_diagonal_refresh_bindings.reset();
-    sparse_block_diagonal_apply_bindings.reset();
+    sparse_block_cholesky_refresh_bindings.reset();
+    sparse_block_cholesky_apply_bindings.reset();
     sparse_dot_partial_bindings.reset();
     sparse_sqrt_scalar_bindings.reset();
     sparse_scalar_divide_bindings.reset();
@@ -4662,7 +4669,8 @@ struct VulkanSparseAlgebraCache {
     sparse_axpy_command_replay.reset();
     sparse_diagonal_apply_command_replay.reset();
     sparse_diagonal_refresh_command_replay.reset();
-    sparse_block_diagonal_apply_command_replay.reset();
+    sparse_block_cholesky_refresh_command_replay.reset();
+    sparse_block_cholesky_apply_command_replay.reset();
     sparse_dot_partial_command_replay.reset();
     sparse_sqrt_scalar_command_replay.reset();
     sparse_scalar_divide_command_replay.reset();
@@ -4702,7 +4710,8 @@ struct VulkanSparseAlgebraCache {
     sparse_axpy_f32.reset();
     sparse_diagonal_apply_f32.reset();
     sparse_diagonal_refresh_f32.reset();
-    sparse_block_diagonal_apply_f32.reset();
+    sparse_block_cholesky_refresh_f32.reset();
+    sparse_block_cholesky_apply_f32.reset();
     sparse_dot_partial_f32.reset();
     sparse_sqrt_scalar_f32.reset();
     sparse_scalar_divide_f32.reset();
@@ -4781,15 +4790,26 @@ struct VulkanSparseAlgebraCache {
     return sparse_diagonal_refresh_f32.get();
   }
 
-  Pipeline *sparse_block_diagonal_apply_pipeline(Device *dev) {
+  Pipeline *sparse_block_cholesky_refresh_pipeline(Device *dev) {
     ensure_device(dev);
-    if (!sparse_block_diagonal_apply_f32) {
-      sparse_block_diagonal_apply_f32 = create_pipeline_from_spv(
-          dev, kSparseBlockDiagonalApplyF32Spv,
-          sizeof(kSparseBlockDiagonalApplyF32Spv),
-          "vulkan_sparse_block_diagonal_apply_f32");
+    if (!sparse_block_cholesky_refresh_f32) {
+      sparse_block_cholesky_refresh_f32 = create_pipeline_from_spv(
+          dev, kSparseBlockCholeskyRefreshF32Spv,
+          sizeof(kSparseBlockCholeskyRefreshF32Spv),
+          "vulkan_sparse_block_cholesky_refresh_f32");
     }
-    return sparse_block_diagonal_apply_f32.get();
+    return sparse_block_cholesky_refresh_f32.get();
+  }
+
+  Pipeline *sparse_block_cholesky_apply_pipeline(Device *dev) {
+    ensure_device(dev);
+    if (!sparse_block_cholesky_apply_f32) {
+      sparse_block_cholesky_apply_f32 = create_pipeline_from_spv(
+          dev, kSparseBlockCholeskyApplyF32Spv,
+          sizeof(kSparseBlockCholeskyApplyF32Spv),
+          "vulkan_sparse_block_cholesky_apply_f32");
+    }
+    return sparse_block_cholesky_apply_f32.get();
   }
 
   Pipeline *sparse_dot_partial_pipeline(Device *dev) {
@@ -5065,18 +5085,37 @@ struct VulkanSparseAlgebraCache {
             rw_buffer_request(status, 0, status_bytes)});
   }
 
-  VulkanReplayResourceSet<3> bind_sparse_block_diagonal_apply(
+  VulkanReplayResourceSet<4> bind_sparse_block_cholesky_refresh(
       Program *program,
-      DeviceAllocation inverse_blocks,
-      size_t inverse_bytes,
+      DeviceAllocation values,
+      size_t values_bytes,
+      DeviceAllocation diagonal_block_offsets,
+      size_t offsets_bytes,
+      DeviceAllocation staging_factors,
+      size_t factor_bytes,
+      DeviceAllocation status,
+      size_t status_bytes) {
+    return sparse_block_cholesky_refresh_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 4>{
+            rw_buffer_request(values, 0, values_bytes),
+            rw_buffer_request(diagonal_block_offsets, 0, offsets_bytes),
+            rw_buffer_request(staging_factors, 0, factor_bytes),
+            rw_buffer_request(status, 0, status_bytes)});
+  }
+
+  VulkanReplayResourceSet<3> bind_sparse_block_cholesky_apply(
+      Program *program,
+      DeviceAllocation factor_blocks,
+      size_t factor_bytes,
       DeviceAllocation input,
       size_t input_bytes,
       DeviceAllocation output,
       size_t output_bytes) {
-    return sparse_block_diagonal_apply_bindings.bind(
+    return sparse_block_cholesky_apply_bindings.bind(
         program, device,
         std::array<VulkanRwBufferBindingRequest, 3>{
-            rw_buffer_request(inverse_blocks, 0, inverse_bytes),
+            rw_buffer_request(factor_blocks, 0, factor_bytes),
             rw_buffer_request(input, 0, input_bytes),
             rw_buffer_request(output, 0, output_bytes)});
   }
@@ -10523,8 +10562,126 @@ std::size_t Program::vulkan_sparse_diagonal_apply(
   return cache.allocated_bytes();
 }
 
+std::size_t Program::vulkan_sparse_block_cholesky_refresh(
+    Ndarray *values,
+    Ndarray *diagonal_block_offsets,
+    Ndarray *staging_factors,
+    Ndarray *status,
+    std::size_t block_rows,
+    std::size_t block_nnz,
+    std::size_t block_size) {
+  auto submission_guard = acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(!vulkan_sparse_algebra_available(),
+              "Vulkan sparse block Cholesky refresh is only available on "
+              "Vulkan.");
+  TI_ERROR_IF(block_rows == 0 || block_nnz == 0 ||
+                  block_rows > std::numeric_limits<uint32_t>::max() ||
+                  block_nnz > std::numeric_limits<uint32_t>::max(),
+              "Vulkan sparse block Cholesky refresh geometry must fit in "
+              "non-zero uint32 ranges.");
+  TI_ERROR_IF(block_size != 2 && block_size != 3 && block_size != 6 &&
+                  block_size != 12,
+              "Vulkan sparse block Cholesky refresh supports block sizes "
+              "2, 3, 6, and 12, got {}.",
+              block_size);
+  TI_ERROR_IF(block_nnz >
+                      std::numeric_limits<std::size_t>::max() /
+                          block_size / block_size ||
+                  block_rows >
+                      std::numeric_limits<std::size_t>::max() /
+                          block_size / block_size,
+              "Vulkan sparse block Cholesky refresh dimensions overflow "
+              "size_t.");
+  const std::size_t value_count = block_nnz * block_size * block_size;
+  const std::size_t factor_count = block_rows * block_size * block_size;
+  check_vulkan_sparse_f32_vector("values", values, value_count);
+  check_vulkan_sparse_i32_vector("diagonal block offsets",
+                                 diagonal_block_offsets, block_rows);
+  check_vulkan_sparse_f32_vector("staging factors", staging_factors,
+                                 factor_count);
+  check_vulkan_sparse_i32_status(status);
+  const auto values_alloc = values->get_device_allocation();
+  const auto offsets_alloc =
+      diagonal_block_offsets->get_device_allocation();
+  const auto staging_alloc = staging_factors->get_device_allocation();
+  const auto status_alloc = status->get_device_allocation();
+  TI_ERROR_IF(values_alloc == offsets_alloc || values_alloc == staging_alloc ||
+                  values_alloc == status_alloc ||
+                  offsets_alloc == staging_alloc ||
+                  offsets_alloc == status_alloc ||
+                  staging_alloc == status_alloc,
+              "Vulkan sparse block Cholesky refresh resources must not "
+              "alias.");
+
+  const Ndarray *resources[] = {values, diagonal_block_offsets,
+                                staging_factors, status};
+  retain_ndarrays_for_external_submission(resources, std::size(resources));
+  const size_t values_bytes = value_count * sizeof(float32);
+  const size_t offsets_bytes = block_rows * sizeof(int32_t);
+  const size_t factor_bytes = factor_count * sizeof(float32);
+  const size_t status_bytes = sizeof(int32_t);
+  Device *device = get_compute_device();
+  TI_ERROR_IF(!device,
+              "Vulkan sparse block Cholesky refresh requires a compute "
+              "device.");
+  auto cache_lease = get_sparse_algebra_cache(this, device);
+  auto &cache = *cache_lease;
+  Pipeline *pipeline = cache.sparse_block_cholesky_refresh_pipeline(device);
+  ShaderResourceSet *bindings =
+      cache
+          .bind_sparse_block_cholesky_refresh(
+              this, values_alloc, values_bytes, offsets_alloc,
+              offsets_bytes, staging_alloc, factor_bytes, status_alloc,
+              status_bytes)
+          .bindings;
+  const std::array<uint32_t, 4> param_words{
+      static_cast<uint32_t>(block_rows),
+      static_cast<uint32_t>(block_nnz),
+      static_cast<uint32_t>(block_size), 0u};
+  const uint32_t push_bytes =
+      static_cast<uint32_t>(param_words.size() * sizeof(uint32_t));
+  constexpr std::size_t kMaxDispatchGroups = 65535;
+  const uint32_t groups = static_cast<uint32_t>(std::min(
+      kMaxDispatchGroups,
+      (block_rows + kBlockSize - 1) / kBlockSize));
+  const bool profiler_scopes = profiler != nullptr;
+  auto record_refresh =
+      [staging_alloc, status_alloc, factor_bytes, status_bytes, pipeline,
+       bindings, param_words, push_bytes, groups,
+       profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
+        dispatch_pipeline_with_push_constants(
+            cmdlist, pipeline, bindings, param_words.data(), push_bytes,
+            groups, 1, 1,
+            profiler_scopes
+                ? "vulkan_sparse_block_cholesky_refresh_f32"
+                : nullptr);
+        cmdlist->buffer_barrier(staging_alloc.get_ptr(0), factor_bytes);
+        cmdlist->buffer_barrier(status_alloc.get_ptr(0), status_bytes);
+      };
+  VulkanCommandReplayKey command_key;
+  command_key.push(149);
+  push_vulkan_command_key_range(command_key, values_alloc, 0, values_bytes);
+  push_vulkan_command_key_range(command_key, offsets_alloc, 0,
+                                offsets_bytes);
+  push_vulkan_command_key_range(command_key, staging_alloc, 0,
+                                factor_bytes);
+  push_vulkan_command_key_range(command_key, status_alloc, 0,
+                                status_bytes);
+  for (uint32_t word : param_words) {
+    command_key.push(word);
+  }
+  command_key.push(groups);
+  command_key.push_ptr(pipeline);
+  command_key.push_ptr(bindings);
+  if (!cache.sparse_block_cholesky_refresh_command_replay.submit_or_record(
+          this, device, command_key, profiler_scopes, record_refresh)) {
+    enqueue_compute_op_lambda(record_refresh, {});
+  }
+  return cache.allocated_bytes();
+}
+
 std::size_t Program::vulkan_sparse_block_diagonal_apply(
-    Ndarray *inverse_blocks,
+    Ndarray *factor_blocks,
     Ndarray *input,
     Ndarray *output,
     std::size_t block_rows,
@@ -10548,25 +10705,25 @@ std::size_t Program::vulkan_sparse_block_diagonal_apply(
               std::numeric_limits<std::size_t>::max() / block_size,
       "Vulkan sparse block diagonal apply dimensions overflow size_t.");
   const std::size_t rows = block_rows * block_size;
-  const std::size_t inverse_count = rows * block_size;
+  const std::size_t factor_count = rows * block_size;
   TI_ERROR_IF(rows > std::numeric_limits<uint32_t>::max() ||
-                  inverse_count > std::numeric_limits<uint32_t>::max(),
+                  factor_count > std::numeric_limits<uint32_t>::max(),
               "Vulkan sparse block diagonal apply scalar dimensions exceed "
               "UINT32_MAX.");
-  check_vulkan_sparse_f32_vector("inverse blocks", inverse_blocks,
-                                 inverse_count);
+  check_vulkan_sparse_f32_vector("Cholesky factors", factor_blocks,
+                                 factor_count);
   check_vulkan_sparse_f32_vector("input", input, rows);
   check_vulkan_sparse_f32_vector("output", output, rows);
-  const auto inverse_alloc = inverse_blocks->get_device_allocation();
+  const auto factor_alloc = factor_blocks->get_device_allocation();
   const auto input_alloc = input->get_device_allocation();
   const auto output_alloc = output->get_device_allocation();
-  TI_ERROR_IF(inverse_alloc == input_alloc || inverse_alloc == output_alloc,
-              "Vulkan sparse block diagonal inverse storage must not alias "
+  TI_ERROR_IF(factor_alloc == input_alloc || factor_alloc == output_alloc,
+              "Vulkan sparse block Cholesky storage must not alias "
               "an input or output vector.");
 
-  const Ndarray *resources[] = {inverse_blocks, input, output};
+  const Ndarray *resources[] = {factor_blocks, input, output};
   retain_ndarrays_for_external_submission(resources, std::size(resources));
-  const size_t inverse_bytes = inverse_count * sizeof(float32);
+  const size_t factor_bytes = factor_count * sizeof(float32);
   const size_t vector_bytes = rows * sizeof(float32);
   Device *device = get_compute_device();
   TI_ERROR_IF(!device,
@@ -10574,12 +10731,11 @@ std::size_t Program::vulkan_sparse_block_diagonal_apply(
               "device.");
   auto cache_lease = get_sparse_algebra_cache(this, device);
   auto &cache = *cache_lease;
-  Pipeline *pipeline =
-      cache.sparse_block_diagonal_apply_pipeline(device);
+  Pipeline *pipeline = cache.sparse_block_cholesky_apply_pipeline(device);
   ShaderResourceSet *bindings =
       cache
-          .bind_sparse_block_diagonal_apply(
-              this, inverse_alloc, inverse_bytes, input_alloc, vector_bytes,
+          .bind_sparse_block_cholesky_apply(
+              this, factor_alloc, factor_bytes, input_alloc, vector_bytes,
               output_alloc, vector_bytes)
           .bindings;
   const std::array<uint32_t, 4> param_words{
@@ -10600,13 +10756,13 @@ std::size_t Program::vulkan_sparse_block_diagonal_apply(
             cmdlist, pipeline, bindings, param_words.data(), push_bytes,
             groups, 1, 1,
             profiler_scopes
-                ? "vulkan_sparse_block_diagonal_apply_f32"
+                ? "vulkan_sparse_block_cholesky_apply_f32"
                 : nullptr);
         cmdlist->buffer_barrier(output_alloc.get_ptr(0), vector_bytes);
       };
   VulkanCommandReplayKey command_key;
   command_key.push(143);
-  push_vulkan_command_key_range(command_key, inverse_alloc, 0, inverse_bytes);
+  push_vulkan_command_key_range(command_key, factor_alloc, 0, factor_bytes);
   push_vulkan_command_key_range(command_key, input_alloc, 0, vector_bytes);
   push_vulkan_command_key_range(command_key, output_alloc, 0, vector_bytes);
   for (uint32_t word : param_words) {
@@ -10615,7 +10771,7 @@ std::size_t Program::vulkan_sparse_block_diagonal_apply(
   command_key.push(groups);
   command_key.push_ptr(pipeline);
   command_key.push_ptr(bindings);
-  if (!cache.sparse_block_diagonal_apply_command_replay.submit_or_record(
+  if (!cache.sparse_block_cholesky_apply_command_replay.submit_or_record(
           this, device, command_key, profiler_scopes, record_apply)) {
     enqueue_compute_op_lambda(record_apply, {});
   }
@@ -17634,8 +17790,20 @@ std::size_t Program::vulkan_sparse_diagonal_apply(
   return 0;
 }
 
+std::size_t Program::vulkan_sparse_block_cholesky_refresh(
+    Ndarray *values,
+    Ndarray *diagonal_block_offsets,
+    Ndarray *staging_factors,
+    Ndarray *status,
+    std::size_t block_rows,
+    std::size_t block_nnz,
+    std::size_t block_size) {
+  TI_NOT_IMPLEMENTED;
+  return 0;
+}
+
 std::size_t Program::vulkan_sparse_block_diagonal_apply(
-    Ndarray *inverse_blocks,
+    Ndarray *factor_blocks,
     Ndarray *input,
     Ndarray *output,
     std::size_t block_rows,

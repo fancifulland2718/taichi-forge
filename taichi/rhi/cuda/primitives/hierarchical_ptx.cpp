@@ -45,6 +45,7 @@ struct KernelSet {
   std::array<void *, 6> zero{};
   void *sparse_diagonal_apply_f32{nullptr};
   void *sparse_diagonal_refresh_f32{nullptr};
+  void *sparse_block_cholesky_refresh_f32{nullptr};
   void *sparse_block_diagonal_apply_f32{nullptr};
   std::array<void *, 2> zero_bins{};
   std::array<std::array<void *, 2>, 2> histogram{};
@@ -182,6 +183,9 @@ void load_kernel_set_once() {
   driver.module_get_function(&kernel_set.sparse_diagonal_refresh_f32,
                              kernel_set.module,
                              "sparse_diagonal_refresh_f32");
+  driver.module_get_function(
+      &kernel_set.sparse_block_cholesky_refresh_f32, kernel_set.module,
+      "sparse_block_cholesky_refresh_f32");
   driver.module_get_function(&kernel_set.sparse_block_diagonal_apply_f32,
                              kernel_set.module,
                              "sparse_block_diagonal_apply_f32");
@@ -1063,7 +1067,44 @@ void driver_sparse_diagonal_refresh_f32(void *values,
       kBlockDim, 0, stream);
 }
 
-void driver_sparse_block_diagonal_apply_f32(void *inverse_blocks,
+void driver_sparse_block_cholesky_refresh_f32(
+    void *values,
+    void *diagonal_block_offsets,
+    void *staging_factors,
+    void *status,
+    int block_rows,
+    int block_nnz,
+    int block_size,
+    void *stream) {
+  TI_ERROR_IF(block_rows <= 0 || block_nnz <= 0 ||
+                  (block_size != 2 && block_size != 3 && block_size != 6 &&
+                   block_size != 12) ||
+                  !values || !diagonal_block_offsets || !staging_factors ||
+                  !status,
+              "CUDA Driver sparse block Cholesky refresh received invalid "
+              "geometry or a null pointer.");
+  void *values_arg = values;
+  void *offsets_arg = diagonal_block_offsets;
+  void *staging_arg = staging_factors;
+  void *status_arg = status;
+  std::uint32_t block_rows_arg =
+      static_cast<std::uint32_t>(block_rows);
+  std::uint32_t block_nnz_arg =
+      static_cast<std::uint32_t>(block_nnz);
+  std::uint32_t block_size_arg =
+      static_cast<std::uint32_t>(block_size);
+  std::vector<void *> args{&values_arg, &offsets_arg, &staging_arg,
+                           &status_arg, &block_rows_arg, &block_nnz_arg,
+                           &block_size_arg};
+  const unsigned grid =
+      (block_rows_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().sparse_block_cholesky_refresh_f32,
+      "cuda_driver_sparse_block_cholesky_refresh_f32", args, {}, grid,
+      kBlockDim, 0, stream);
+}
+
+void driver_sparse_block_diagonal_apply_f32(void *factor_blocks,
                                             void *input,
                                             void *output,
                                             int block_rows,
@@ -1072,17 +1113,17 @@ void driver_sparse_block_diagonal_apply_f32(void *inverse_blocks,
   TI_ERROR_IF(block_rows <= 0 ||
                   (block_size != 2 && block_size != 3 && block_size != 6 &&
                    block_size != 12) ||
-                  !inverse_blocks || !input || !output,
+                  !factor_blocks || !input || !output,
               "CUDA Driver sparse block diagonal apply received invalid "
               "geometry or a null pointer.");
-  void *inverse_arg = inverse_blocks;
+  void *factor_arg = factor_blocks;
   void *input_arg = input;
   void *output_arg = output;
   std::uint32_t block_rows_arg =
       static_cast<std::uint32_t>(block_rows);
   std::uint32_t block_size_arg =
       static_cast<std::uint32_t>(block_size);
-  std::vector<void *> args{&inverse_arg, &input_arg, &output_arg,
+  std::vector<void *> args{&factor_arg, &input_arg, &output_arg,
                            &block_rows_arg, &block_size_arg};
   const unsigned grid =
       (block_rows_arg + kBlockDim - 1u) / kBlockDim;

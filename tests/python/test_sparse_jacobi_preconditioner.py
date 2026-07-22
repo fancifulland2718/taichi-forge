@@ -870,6 +870,182 @@ def test_device_native_stored_csr_pcg_chunk_replay():
     ] > rebound["operations"]["solver_chunk_invalidations"]
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_stored_bsr_block_jacobi_cholesky_apply_refresh_and_failures():
+    block_rows = 3
+    prog = ti.lang.impl.get_runtime().prog
+    backend = (
+        "cuda"
+        if prog.config().arch == ti._lib.core.Arch.cuda
+        else "vulkan"
+        if prog.config().arch == ti._lib.core.Arch.vulkan
+        else "cpu"
+    )
+
+    for block_size in (2, 3, 6, 12):
+        row_offsets = ti.ndarray(dtype=ti.i32, shape=block_rows + 1)
+        column_indices = ti.ndarray(dtype=ti.i32, shape=block_rows)
+        row_offsets.from_numpy(np.arange(block_rows + 1, dtype=np.int32))
+        column_indices.from_numpy(np.arange(block_rows, dtype=np.int32))
+        pattern = ti.linalg.SparsePattern.bsr(
+            block_rows=block_rows,
+            block_cols=block_rows,
+            block_size=block_size,
+            row_offsets=row_offsets,
+            column_indices=column_indices,
+        )
+        blocks = []
+        for block_row in range(block_rows):
+            factor = np.eye(block_size, dtype=np.float32) * (
+                1.25 + 0.125 * block_row
+            )
+            for row in range(1, block_size):
+                for column in range(row):
+                    factor[row, column] = (
+                        0.015
+                        * (1 + (row + 2 * column + block_row) % 5)
+                    )
+            blocks.append(factor @ factor.T)
+        blocks = np.asarray(blocks, dtype=np.float32)
+        values = ti.ndarray(dtype=ti.f32, shape=blocks.size)
+        values.from_numpy(blocks.reshape(-1))
+        matrix = pattern.matrix(values)
+        plan = ti._lib.core._make_sparse_block_jacobi_preconditioner_plan(
+            prog, matrix.matrix
+        )
+        n = block_rows * block_size
+        rhs_host = np.linspace(-1.25, 1.5, n, dtype=np.float32)
+        rhs = ti.ndarray(dtype=ti.f32, shape=n)
+        output = ti.ndarray(dtype=ti.f32, shape=n)
+        rhs.from_numpy(rhs_host)
+
+        expected = np.concatenate(
+            [
+                np.linalg.solve(
+                    blocks[block_row],
+                    rhs_host[
+                        block_row * block_size : (block_row + 1) * block_size
+                    ],
+                )
+                for block_row in range(block_rows)
+            ]
+        )
+        plan.apply(prog, rhs.arr, output.arr)
+        np.testing.assert_allclose(
+            output.to_numpy(), expected, rtol=8e-5, atol=8e-5
+        )
+        rhs.from_numpy(rhs_host)
+        plan.apply(prog, rhs.arr, rhs.arr)
+        np.testing.assert_allclose(
+            rhs.to_numpy(), expected, rtol=8e-5, atol=8e-5
+        )
+
+        initial = plan._debug_runtime_stats()
+        factor_bytes = block_rows * block_size * block_size * 4
+        assert initial["identity"]["method"] == "block_jacobi"
+        assert initial["identity"]["block_rows"] == block_rows
+        assert initial["identity"]["block_size"] == block_size
+        assert initial["operations"]["apply_calls"] == 2
+        assert initial["resources"]["persistent_inverse_count"] == block_rows
+        assert (
+            initial["resources"]["persistent_inverse_reserved_bytes"]
+            == factor_bytes
+        )
+        refresh_bytes = (
+            0 if backend == "cpu" else block_rows * 4 + factor_bytes + 4
+        )
+        assert (
+            initial["resources"]["persistent_refresh_reserved_bytes"]
+            == refresh_bytes
+        )
+        assert initial["contract"]["device_native_numeric_refresh"] == (
+            backend != "cpu"
+        )
+        assert initial["contract"]["stable_refresh_binding"]
+
+        scaled_blocks = blocks * np.float32(1.75)
+        scaled_values = ti.ndarray(dtype=ti.f32, shape=scaled_blocks.size)
+        scaled_values.from_numpy(scaled_blocks.reshape(-1))
+        matrix.update_values(scaled_values)
+        with pytest.raises(RuntimeError, match="plan is stale"):
+            plan.apply(prog, rhs.arr, output.arr)
+        plan._refresh_numeric(prog)
+        rhs.from_numpy(rhs_host)
+        plan.apply(prog, rhs.arr, output.arr)
+        np.testing.assert_allclose(
+            output.to_numpy(), expected / np.float32(1.75),
+            rtol=1.2e-4, atol=1.2e-4
+        )
+        refreshed = plan._debug_runtime_stats()
+        assert refreshed["operations"]["numeric_refresh_successes"] == 1
+        assert refreshed["operations"]["numeric_refresh_failures"] == 0
+        if backend == "cpu":
+            assert refreshed["transfers"]["refresh_device_to_host_bytes"] == 0
+            assert refreshed["transfers"]["refresh_device_to_device_bytes"] == 0
+            assert refreshed["transfers"]["refresh_device_kernel_launches"] == 0
+        else:
+            assert refreshed["transfers"]["refresh_device_to_host_bytes"] == 4
+            assert (
+                refreshed["transfers"]["refresh_full_values_device_to_host_bytes"]
+                == 0
+            )
+            assert refreshed["transfers"]["refresh_status_device_to_host_bytes"] == 4
+            assert refreshed["transfers"]["refresh_host_to_device_bytes"] == 0
+            assert (
+                refreshed["transfers"]["refresh_device_to_device_bytes"]
+                == factor_bytes
+            )
+            assert refreshed["transfers"]["refresh_device_kernel_launches"] == 1
+            assert refreshed["transfers"]["refresh_device_allocations"] == 0
+
+        invalid_blocks = scaled_blocks.copy()
+        invalid_blocks[1, 0, 0] = -1.0
+        invalid_values = ti.ndarray(dtype=ti.f32, shape=invalid_blocks.size)
+        invalid_values.from_numpy(invalid_blocks.reshape(-1))
+        matrix.update_values(invalid_values)
+        with pytest.raises(RuntimeError, match="block 1 is not positive definite"):
+            plan._refresh_numeric(prog)
+        failed = plan._debug_runtime_stats()
+        assert failed["identity"]["operator_stale"]
+        assert failed["operations"]["numeric_refresh_successes"] == 1
+        assert failed["operations"]["numeric_refresh_failures"] == 1
+        if backend != "cpu":
+            assert failed["transfers"]["refresh_status_device_to_host_bytes"] == 8
+            assert (
+                failed["transfers"]["refresh_device_to_device_bytes"]
+                == factor_bytes
+            )
+            assert failed["transfers"]["refresh_device_kernel_launches"] == 2
+            assert failed["transfers"]["refresh_device_allocations"] == 0
+
+        nonfinite_blocks = scaled_blocks.copy()
+        nonfinite_blocks[2, 0, 0] = np.nan
+        nonfinite_values = ti.ndarray(dtype=ti.f32, shape=nonfinite_blocks.size)
+        nonfinite_values.from_numpy(nonfinite_blocks.reshape(-1))
+        matrix.update_values(nonfinite_values)
+        with pytest.raises(RuntimeError, match="block 2 contains a non-finite"):
+            plan._refresh_numeric(prog)
+
+        recovered_values = ti.ndarray(dtype=ti.f32, shape=blocks.size)
+        recovered_values.from_numpy(blocks.reshape(-1))
+        matrix.update_values(recovered_values)
+        plan._refresh_numeric(prog)
+        rhs.from_numpy(rhs_host)
+        plan.apply(prog, rhs.arr, output.arr)
+        np.testing.assert_allclose(
+            output.to_numpy(), expected, rtol=8e-5, atol=8e-5
+        )
+        recovered = plan._debug_runtime_stats()
+        assert recovered["operations"]["numeric_refresh_successes"] == 2
+        assert recovered["operations"]["numeric_refresh_failures"] == 2
+        if backend != "cpu":
+            assert recovered["transfers"]["refresh_device_allocations"] == 0
+            assert recovered["transfers"]["refresh_host_to_device_bytes"] == 0
+            assert recovered["transfers"]["refresh_device_to_device_bytes"] == (
+                2 * factor_bytes
+            )
+
+
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
 def test_device_native_stored_bsr_block_jacobi_pcg_chunk_replay():
     block_size = 2

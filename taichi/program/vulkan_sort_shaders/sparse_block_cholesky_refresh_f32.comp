@@ -1,0 +1,128 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Values {
+  float data[];
+} values_buf;
+
+layout(set = 0, binding = 1, std430) readonly buffer DiagonalBlockOffsets {
+  int data[];
+} offsets_buf;
+
+layout(set = 0, binding = 2, std430) writeonly buffer StagingFactors {
+  float data[];
+} staging_buf;
+
+layout(set = 0, binding = 3, std430) buffer Status {
+  uint data[];
+} status_buf;
+
+layout(push_constant) uniform Params {
+  uint block_rows;
+  uint block_nnz;
+  uint block_size;
+  uint unused;
+} params;
+
+const uint kReasonValueNotFinite = 1u;
+const uint kReasonNotSymmetric = 2u;
+const uint kReasonNotPositiveDefinite = 3u;
+const uint kReasonFactorNotFinite = 4u;
+const uint kReasonOffsetInvalid = 5u;
+const float kSymmetryEpsilon = 3.814697265625e-6;
+
+bool finite_f32(float value) {
+  return (floatBitsToUint(value) & 0x7f800000u) != 0x7f800000u;
+}
+
+void record_failure(uint block_row, uint reason) {
+  atomicMin(status_buf.data[0], (block_row << 3u) | reason);
+}
+
+void main() {
+  uint block_row = gl_GlobalInvocationID.x;
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  while (block_row < params.block_rows) {
+    int signed_offset = offsets_buf.data[block_row];
+    if (signed_offset < 0 || uint(signed_offset) >= params.block_nnz) {
+      record_failure(block_row, kReasonOffsetInvalid);
+      block_row += stride;
+      continue;
+    }
+
+    float factor[144];
+    uint block_width = params.block_size * params.block_size;
+    uint source_base = uint(signed_offset) * block_width;
+    bool valid = true;
+    for (uint index = 0; index < block_width; ++index) {
+      float value = values_buf.data[source_base + index];
+      if (!finite_f32(value)) {
+        record_failure(block_row, kReasonValueNotFinite);
+        valid = false;
+        break;
+      }
+      factor[index] = value;
+    }
+    if (!valid) {
+      block_row += stride;
+      continue;
+    }
+
+    for (uint row = 1; row < params.block_size && valid; ++row) {
+      for (uint column = 0; column < row; ++column) {
+        float lower = factor[row * params.block_size + column];
+        float upper = factor[column * params.block_size + row];
+        float scale = max(1.0, max(abs(lower), abs(upper)));
+        if (abs(lower - upper) > kSymmetryEpsilon * scale) {
+          record_failure(block_row, kReasonNotSymmetric);
+          valid = false;
+          break;
+        }
+      }
+    }
+    if (!valid) {
+      block_row += stride;
+      continue;
+    }
+
+    for (uint row = 0; row < params.block_size && valid; ++row) {
+      for (uint column = 0; column <= row; ++column) {
+        float value = factor[row * params.block_size + column];
+        for (uint k = 0; k < column; ++k) {
+          value -= factor[row * params.block_size + k] *
+                   factor[column * params.block_size + k];
+        }
+        if (row == column) {
+          if (!finite_f32(value) || value <= 0.0) {
+            record_failure(block_row, kReasonNotPositiveDefinite);
+            valid = false;
+            break;
+          }
+          value = sqrt(value);
+        } else {
+          value /= factor[column * params.block_size + column];
+        }
+        if (!finite_f32(value)) {
+          record_failure(block_row, kReasonFactorNotFinite);
+          valid = false;
+          break;
+        }
+        factor[row * params.block_size + column] = value;
+      }
+    }
+    if (!valid) {
+      block_row += stride;
+      continue;
+    }
+
+    uint target_base = block_row * block_width;
+    for (uint row = 0; row < params.block_size; ++row) {
+      for (uint column = 0; column < params.block_size; ++column) {
+        staging_buf.data[target_base + row * params.block_size + column] =
+            column <= row ? factor[row * params.block_size + column] : 0.0;
+      }
+    }
+    block_row += stride;
+  }
+}

@@ -855,6 +855,16 @@ __device__ bool sparse_refresh_finite_f32(float value) {
   return (bit_cast<u32>(value) & 0x7f800000u) != 0x7f800000u;
 }
 
+__device__ float sparse_refresh_abs_f32(float value) {
+  return bit_cast<float>(bit_cast<u32>(value) & 0x7fffffffu);
+}
+
+__device__ float sparse_refresh_sqrt_f32(float value) {
+  float result;
+  asm("sqrt.rn.f32 %0, %1;" : "=f"(result) : "f"(value));
+  return result;
+}
+
 extern "C" __global__ void sparse_diagonal_refresh_f32(
     const float *values,
     const i32 *diagonal_offsets,
@@ -907,8 +917,95 @@ extern "C" __global__ void sparse_diagonal_apply_f32(
   }
 }
 
+extern "C" __global__ void sparse_block_cholesky_refresh_f32(
+    const float *values,
+    const i32 *diagonal_block_offsets,
+    float *staging_factors,
+    u32 *status,
+    u32 block_rows,
+    u32 block_nnz,
+    u32 block_size) {
+  const u32 block_row = blockIdx.x * blockDim.x + threadIdx.x;
+  if (block_row >= block_rows) {
+    return;
+  }
+  constexpr u32 kReasonValueNotFinite = 1u;
+  constexpr u32 kReasonNotSymmetric = 2u;
+  constexpr u32 kReasonNotPositiveDefinite = 3u;
+  constexpr u32 kReasonFactorNotFinite = 4u;
+  constexpr u32 kReasonOffsetInvalid = 5u;
+  constexpr float kSymmetryEpsilon = 3.814697265625e-6f;
+  const i32 signed_offset = diagonal_block_offsets[block_row];
+  if (signed_offset < 0 || static_cast<u32>(signed_offset) >= block_nnz) {
+    sparse_refresh_atomic_min_u32(
+        status, (block_row << 3u) | kReasonOffsetInvalid);
+    return;
+  }
+  float factor[144];
+  const u32 block_width = block_size * block_size;
+  const u32 source_base = static_cast<u32>(signed_offset) * block_width;
+  for (u32 index = 0; index < block_width; ++index) {
+    const float value = values[source_base + index];
+    if (!sparse_refresh_finite_f32(value)) {
+      sparse_refresh_atomic_min_u32(
+          status, (block_row << 3u) | kReasonValueNotFinite);
+      return;
+    }
+    factor[index] = value;
+  }
+  for (u32 row = 1; row < block_size; ++row) {
+    for (u32 column = 0; column < row; ++column) {
+      const float lower = factor[row * block_size + column];
+      const float upper = factor[column * block_size + row];
+      const float lower_abs = sparse_refresh_abs_f32(lower);
+      const float upper_abs = sparse_refresh_abs_f32(upper);
+      float scale = lower_abs > upper_abs ? lower_abs : upper_abs;
+      scale = scale > 1.0f ? scale : 1.0f;
+      if (sparse_refresh_abs_f32(lower - upper) >
+          kSymmetryEpsilon * scale) {
+        sparse_refresh_atomic_min_u32(
+            status, (block_row << 3u) | kReasonNotSymmetric);
+        return;
+      }
+    }
+  }
+  for (u32 row = 0; row < block_size; ++row) {
+    for (u32 column = 0; column <= row; ++column) {
+      float value = factor[row * block_size + column];
+      for (u32 k = 0; k < column; ++k) {
+        value -= factor[row * block_size + k] *
+                 factor[column * block_size + k];
+      }
+      if (row == column) {
+        if (!sparse_refresh_finite_f32(value) || value <= 0.0f) {
+          sparse_refresh_atomic_min_u32(
+              status,
+              (block_row << 3u) | kReasonNotPositiveDefinite);
+          return;
+        }
+        value = sparse_refresh_sqrt_f32(value);
+      } else {
+        value /= factor[column * block_size + column];
+      }
+      if (!sparse_refresh_finite_f32(value)) {
+        sparse_refresh_atomic_min_u32(
+            status, (block_row << 3u) | kReasonFactorNotFinite);
+        return;
+      }
+      factor[row * block_size + column] = value;
+    }
+  }
+  const u32 target_base = block_row * block_width;
+  for (u32 row = 0; row < block_size; ++row) {
+    for (u32 column = 0; column < block_size; ++column) {
+      staging_factors[target_base + row * block_size + column] =
+          column <= row ? factor[row * block_size + column] : 0.0f;
+    }
+  }
+}
+
 extern "C" __global__ void sparse_block_diagonal_apply_f32(
-    const float *inverse_blocks,
+    const float *factor_blocks,
     const float *input,
     float *output,
     u32 block_rows,
@@ -917,21 +1014,32 @@ extern "C" __global__ void sparse_block_diagonal_apply_f32(
   if (block_row >= block_rows) {
     return;
   }
-  float local_input[12] = {0.0f};
-  float local_output[12] = {0.0f};
+  float local_solution[12] = {0.0f};
   const u32 vector_base = block_row * block_size;
   const u32 block_base = block_row * block_size * block_size;
-  for (u32 column = 0; column < block_size; ++column) {
-    local_input[column] = input[vector_base + column];
-  }
+  // Forward solve: L y = b.
   for (u32 row = 0; row < block_size; ++row) {
-    for (u32 column = 0; column < block_size; ++column) {
-      local_output[row] += inverse_blocks[
-          block_base + row * block_size + column] * local_input[column];
+    float value = input[vector_base + row];
+    for (u32 column = 0; column < row; ++column) {
+      value -= factor_blocks[block_base + row * block_size + column] *
+               local_solution[column];
     }
+    local_solution[row] =
+        value / factor_blocks[block_base + row * block_size + row];
+  }
+  // Backward solve: L^T x = y.
+  for (i32 row = static_cast<i32>(block_size) - 1; row >= 0; --row) {
+    float value = local_solution[row];
+    for (u32 column = static_cast<u32>(row) + 1; column < block_size;
+         ++column) {
+      value -= factor_blocks[block_base + column * block_size + row] *
+               local_solution[column];
+    }
+    local_solution[row] =
+        value / factor_blocks[block_base + row * block_size + row];
   }
   for (u32 row = 0; row < block_size; ++row) {
-    output[vector_base + row] = local_output[row];
+    output[vector_base + row] = local_solution[row];
   }
 }
 

@@ -122,9 +122,10 @@ make_sparse_jacobi_preconditioner_plan(Program *program,
                                        SparseMatrix &matrix);
 
 // Internal CPU/CUDA/Vulkan BSR baseline for 2/3/6/12-DOF dense diagonal
-// blocks.
-// It keeps one row-major inverse block per block row and shares the same
-// stale-version and transactional numeric-refresh contract as scalar Jacobi.
+// blocks. Each diagonal block must be symmetric positive definite. The plan
+// keeps one row-major lower Cholesky factor per block row and applies the
+// logical inverse with forward/back substitution. It shares scalar Jacobi's
+// stale-version and transactional numeric-refresh contract.
 class SparseBlockJacobiPreconditionerPlan final {
  public:
   SparseBlockJacobiPreconditionerPlan(Program *program,
@@ -160,9 +161,12 @@ class SparseBlockJacobiPreconditionerPlan final {
   std::uint64_t pattern_version_at_build_{0};
   std::uint64_t numeric_version_at_build_{0};
   std::vector<int32_t> diagonal_block_offsets_;
-  std::vector<float32> host_inverse_blocks_f32_;
-  std::vector<float64> host_inverse_blocks_f64_;
-  Ndarray *device_inverse_blocks_{nullptr};
+  std::vector<float32> host_factor_blocks_f32_;
+  std::vector<float64> host_factor_blocks_f64_;
+  Ndarray *device_factor_blocks_{nullptr};
+  Ndarray *device_diagonal_block_offsets_{nullptr};
+  Ndarray *device_refresh_staging_{nullptr};
+  Ndarray *device_refresh_status_{nullptr};
   mutable std::recursive_mutex apply_mutex_;
   std::uint64_t apply_calls_{0};
   std::uint64_t construction_device_to_host_bytes_{0};

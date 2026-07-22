@@ -1,0 +1,61 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer FactorBlocks {
+  float data[];
+} factor_blocks_buf;
+
+layout(set = 0, binding = 1, std430) readonly buffer InputVector {
+  float data[];
+} input_buf;
+
+layout(set = 0, binding = 2, std430) writeonly buffer OutputVector {
+  float data[];
+} output_buf;
+
+layout(push_constant) uniform Params {
+  uint block_rows;
+  uint block_size;
+  uint unused0;
+  uint unused1;
+} params;
+
+void main() {
+  uint block_row = gl_GlobalInvocationID.x;
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  while (block_row < params.block_rows) {
+    float local_solution[12];
+    uint vector_base = block_row * params.block_size;
+    uint block_base = block_row * params.block_size * params.block_size;
+    // Forward solve: L y = b.
+    for (uint row = 0; row < params.block_size; ++row) {
+      float value = input_buf.data[vector_base + row];
+      for (uint column = 0; column < row; ++column) {
+        value -= factor_blocks_buf.data[
+                     block_base + row * params.block_size + column] *
+                 local_solution[column];
+      }
+      local_solution[row] =
+          value / factor_blocks_buf.data[
+                      block_base + row * params.block_size + row];
+    }
+    // Backward solve: L^T x = y.
+    for (int row = int(params.block_size) - 1; row >= 0; --row) {
+      float value = local_solution[row];
+      for (uint column = uint(row) + 1; column < params.block_size;
+           ++column) {
+        value -= factor_blocks_buf.data[
+                     block_base + column * params.block_size + uint(row)] *
+                 local_solution[column];
+      }
+      local_solution[row] =
+          value / factor_blocks_buf.data[
+                      block_base + uint(row) * params.block_size + uint(row)];
+    }
+    for (uint row = 0; row < params.block_size; ++row) {
+      output_buf.data[vector_base + row] = local_solution[row];
+    }
+    block_row += stride;
+  }
+}
