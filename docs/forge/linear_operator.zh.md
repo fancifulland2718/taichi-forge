@@ -351,8 +351,9 @@ primary_result = primary_ticket.result()
 secondary_result = secondary_ticket.result()
 ~~~
 
-完整 solve 的 host launch 序列以一次准入 turn 提交；提交结束后，两次 solve 可在
-`max_in_flight` 边界内保持 backend asynchronous。`max_in_flight_per_lane` 防止高频 producer
+完整 solve 的 host launch 序列以一次准入 turn 提交；提交结束后，两张票据可在
+`max_in_flight` 边界内同时保持未完成。这里的异步只承诺宿主完成边界，不承诺两次 solve 的
+GPU kernel 并发执行、独立 stream/queue 或设备抢占。`max_in_flight_per_lane` 防止高频 producer
 独占全部 slot，lane 间 round-robin 则保证已有等待者获得有限的准入延迟。阻塞调用会以有界
 自适应退避轮询全部 in-flight completion，使较晚完成的快 solve 可以先于更早提交的慢 solve
 释放容量。该控制只覆盖共享同一 pacer 的调用，不能代替 engine 自身的 frame deadline、
@@ -365,11 +366,23 @@ generation、input/output ndarray、workspace 和 backend completion，直到这
 backend error 会由 `wait()` / `result()` 重新抛出；`ti.reset()` 会先等待已保留的 backend
 work，再把尚未完成取值的 ticket 明确标记为 stale。
 
+若在旧 submission 完成前发布新的 operator/preconditioner numeric generation，旧 generation
+仍会保留到对应 completion。因此频繁数值更新可能使多个完整 values buffer 同时驻留；应用应
+把 update cadence 纳入显存预算，或在更新前完成相关 ticket。Pacer 只限制共享它的 invocation
+数量，不按 generation 字节数准入。
+
 一个 `BatchedSolvePlan` 只拥有一个 submission slot。在 pending ticket 完成并生成结果前
 再次提交会失败，不会共享 Krylov vector。需要多个独立 in-flight submission 时，使用
 `clone = plan.clone_workspace()`；每个 clone 都拥有另一套完整 CG/PCG workspace vector
 与 state。chunked host-check policy 和 CPU plan 没有通过 `submit()` 资格；调用会明确
 失败，而不是把同步循环移动到 worker thread。
+
+对 batch size `B`、每个系统大小 `N`，f32 CG 每个 plan/clone 的逻辑 workspace payload 为
+`12 * B * N + 68 * B + 8` 字节，PCG 为 `16 * B * N + 68 * B + 8` 字节。使用
+`statistics()["resources"]["clone_workspace_payload_bytes"]` 在创建 clone pool 前计算总量。
+该数字不包含 allocator/driver 开销、调用方 vector 或 operator/preconditioner 资源。大型 solve
+默认使用 `max_in_flight=1`；只有 profile 证明宿主重叠带来有效收益且资源与尾延迟仍满足预算时，
+才增加到 2。小系统应优先扩大 batch，而不是按物理实体创建 plan clone。
 
 该 API 表示 independent batching，不是对隐式耦合 block matrix 使用 global-scalar CG，
 也不是 multi-RHS CG、block CG 或其它 block Krylov 方法。耦合系统必须使用在数学上显式

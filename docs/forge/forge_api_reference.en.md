@@ -875,7 +875,7 @@ render.wait()
 | `lane` | A non-empty string. Equal names on different objects join one scheduling lane. Without a name, each Graph has a distinct default lane, while workspace clones from one batch plan share its default lane. |
 | `on_saturation='wait'` | Wait for capacity. Complete host launch turns are granted by work-conserving round robin across lanes and FIFO within a lane. |
 | `on_saturation='raise'` | If a launch turn is not immediately available, raise `TaichiRuntimeError` before submitting backend work. |
-| `pacer.statistics()` | Return current and peak in-flight/queued counts, grant/rejection/completion/failure counters, admission wait time, and per-lane telemetry. The snapshot first polls ready tickets without blocking. |
+| `pacer.statistics()` | Return a schema-v2 snapshot with current and peak in-flight/queued counts, grant/rejection/completion/failure counters, admission wait time, per-lane telemetry, and `contract`. The snapshot first polls ready tickets without blocking. |
 
 The host launch turn for one invocation does not interleave with another paced
 invocation. After launch, up to `max_in_flight` invocations may continue
@@ -885,6 +885,23 @@ bounded adaptive backoff. A completion from the constrained lane is checked
 first when a per-lane cap applies, but a later fast completion can release
 global capacity before an older slow invocation finishes. Polling is active
 only while callers are waiting; the pacer creates no background worker thread.
+
+The pacer measures capacity in complete invocation counts, not memory bytes,
+kernel counts, or estimated GPU time. `max_in_flight > 1` only permits multiple
+tickets to remain incomplete at once; the API does not create or guarantee
+independent CUDA streams, Vulkan queues, concurrent kernel execution, or device
+preemption. Each invocation may retain argument allocations, Graph replay
+state, operator numeric generations, and caller resources. Persistent solver
+workspaces and submissions that do not share the pacer remain outside its
+budget. `statistics()["contract"]` reports these limits in machine-readable
+form.
+
+For a large solve or Graph on one GPU, start with `max_in_flight=1`. Increase
+it to 2 only when a trace demonstrates useful host overlap, improved device
+utilization, and acceptable memory and tail latency. Real-time loops should use
+a small `max_queued` and prefer `on_saturation='raise'` when they must degrade
+or skip work before enqueue. Coarsen many small tasks into a Graph or batch
+instead of using ticket count as a substitute for batching.
 
 This is an explicit cooperative boundary. Submissions that do not use the same
 pacer remain outside its control, and it cannot reorder commands already in a
@@ -1073,13 +1090,20 @@ The runtime-bound operator API is documented separately in
 | `batch_plan.solve(rhs_flat, initial_guess=None, out=None)` | Return a flat solution and immutable per-system `BatchedSolveResult` tuples. | Independent direct-sum systems only; not multi-RHS or block Krylov. |
 | `batch_plan.submit(rhs_flat, initial_guess=None, out=None, pacer=None, lane=None, on_saturation='wait')` | Submit a solve and return `SolveSubmission`. | CUDA/Vulkan with `fixed_budget_masked`; one plan-owned slot; optional shared `SubmissionPacer`; exact generations and arrays are retained through completion. |
 | `SolveSubmission.done()` / `.wait()` / `.result()` | Observe completion, materialize terminal state, and return `BatchedSolveResult`. | `done()` does not release the slot; `wait()`/`result()` surface backend faults and release it. |
-| `batch_plan.clone_workspace()` | Create an equivalent plan with independent Krylov state. | Required for concurrent submissions; each clone owns another full workspace. |
-| `operator.statistics()` / `plan.statistics()` | Return provider/plan execution and workspace diagnostics. | Diagnostic snapshot; not part of the numerical result. |
+| `batch_plan.clone_workspace()` | Create an equivalent plan with independent Krylov state. | Required for concurrent submissions; each clone owns another full workspace. Inspect `clone_workspace_payload_bytes` before constructing a pool. |
+| `operator.statistics()` / `plan.statistics()` | Return provider/plan execution and workspace diagnostics. | Batched-plan schema v3 separates host-asynchronous completion from device-parallel guarantees and reports logical workspace payload. A diagnostic snapshot is not part of the numerical result. |
 
 Iterative convergence uses
 `||b - A x||_2 <= max(atol, rtol * ||b||_2)`. Taichi does not infer
 symmetry or positive definiteness. Unsupported format/backend operations fail
 without a host fallback.
+
+For batch size `B`, per-system size `N`, and f32 storage, one CG plan has a
+logical ndarray workspace payload of `12 * B * N + 68 * B + 8` bytes. PCG uses
+`16 * B * N + 68 * B + 8` bytes. Every `clone_workspace()` adds the same
+payload. These values exclude allocator rounding and reservation, backend
+driver objects, RHS/output/initial-guess vectors, and operator/preconditioner
+resources; `statistics()["resources"]` also reports the exclusion list.
 
 `SparseSolver.analyze_pattern(A)` may be reused across
 `factorize(B)` calls only when the complete compressed index pattern

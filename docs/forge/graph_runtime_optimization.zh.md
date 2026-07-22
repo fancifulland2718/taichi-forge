@@ -136,6 +136,25 @@ rejection、backend failure 和准入等待时间，可用于验证容量和节�
 deadline、callback 或跨 Program dependency；真正需要这些语义的应用 scheduler 应在这一
 准入边界之上实现。
 
+### 并发度与资源预算
+
+宿主异步不能作为设备并行度的替代指标。当前公开合同不保证 paced invocation 被分配到独立
+CUDA stream 或 Vulkan queue；`max_in_flight` 增大时，首先确定增加的是允许排队和保留资源的
+invocation 数，而不是可用 GPU core 数。一个未完成 Graph 可能保留 runtime argument
+allocation、native workspace、replay command state 和 completion 对象；与 solve 混用时，还要
+叠加 plan clone workspace 和 operator numeric generation。
+
+Pacer 采用 invocation-count admission，不进行显存或预计 GPU 时间加权。其 schema v2
+`statistics()["contract"]` 明确报告 admission unit、无 device-concurrency 保证、不可抢占以及
+未覆盖的 workspace/generation/unpaced submission。Graph 的 `execution_stats()` 可用于观察
+`persistent_argument_bytes` 和 `replay_slot_saturation_fallbacks`，但 driver 内部 command buffer、
+descriptor pool 与 allocator reservation 仍需通过后端 profiler 和进程显存测量评估。
+
+推荐从一个在途 invocation 开始配置。只有 Nsight 或等价 trace 证明宿主 enqueue/wait 能与
+有效 GPU 工作重叠，且峰值显存、p95/p99 尾延迟与 replay saturation 均满足预算时，才提高到
+两个。不要把 runtime completion 的内部安全上限当作应用队列深度，也不要为每个小任务创建
+独立异步票据；应先合并 Graph 节点或扩大 batch。
+
 ## CUDA capture 与 replay
 
 每个 CUDA graph executable 持有自己的 capture stream、稳定 argument buffer、resource

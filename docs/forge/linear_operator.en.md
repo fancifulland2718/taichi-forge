@@ -393,8 +393,10 @@ secondary_result = secondary_ticket.result()
 ~~~
 
 The complete host launch sequence for one solve is submitted in one admission
-turn. After launch, both solves may remain asynchronous within the
-`max_in_flight` bound. `max_in_flight_per_lane` prevents a high-rate producer
+turn. After launch, both tickets may remain incomplete within the
+`max_in_flight` bound. Asynchrony here defines a host-completion boundary; it
+does not guarantee concurrent GPU kernels, independent streams or queues, or
+device preemption. `max_in_flight_per_lane` prevents a high-rate producer
 from occupying every slot, while cross-lane round robin gives an existing
 waiter bounded admission delay. A blocked caller polls all in-flight
 completions with bounded adaptive backoff, so a later fast solve may release
@@ -411,6 +413,13 @@ workspace, and backend completion until this boundary. Backend failures are
 re-raised by `wait()` and `result()`; `ti.reset()` waits for retained backend
 work and makes an outstanding ticket explicitly stale.
 
+Publishing a new operator or preconditioner numeric generation before an old
+submission completes retains the old generation through its completion. A high
+update rate can therefore keep multiple complete value buffers resident. Include
+update cadence in the memory budget, or complete the relevant tickets before
+publishing. A pacer bounds participating invocation counts, not generation
+bytes.
+
 One `BatchedSolvePlan` owns one submission slot. Submitting again before the
 pending ticket is completed and materialized fails instead of sharing Krylov
 vectors. Use `clone = plan.clone_workspace()` when independent submissions
@@ -418,6 +427,16 @@ must be in flight concurrently. Each clone owns another complete set of CG or
 PCG workspace vectors and state. Chunked host-check policies and CPU plans are
 not qualified for `submit()`; a call fails explicitly rather than moving a
 synchronous loop to a worker thread.
+
+For batch size `B` and per-system size `N`, each f32 CG plan or clone has a
+logical workspace payload of `12 * B * N + 68 * B + 8` bytes. PCG uses
+`16 * B * N + 68 * B + 8` bytes. Inspect
+`statistics()["resources"]["clone_workspace_payload_bytes"]` before creating
+a clone pool. Allocator and driver overhead, caller vectors, and operator or
+preconditioner resources are excluded. Use `max_in_flight=1` by default for a
+large solve. Increase it to 2 only when profiling demonstrates useful host
+overlap with acceptable memory and tail latency. For small systems, increase
+batching instead of creating one plan clone per application entity.
 
 This API is independent batching. It is not global-scalar CG over an
 implicitly coupled block matrix, multi-RHS CG, block CG, or another block

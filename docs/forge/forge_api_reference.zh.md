@@ -770,13 +770,24 @@ render.wait()
 | `lane` | 非空字符串。不同对象使用相同名称时属于同一调度 lane；未指定时每个 Graph 使用独立默认 lane，而同一 batch plan 的 workspace clone 共享默认 lane。 |
 | `on_saturation='wait'` | 等待容量，并在 lane 间按 work-conserving round-robin、lane 内按 FIFO 获得完整 host launch turn。 |
 | `on_saturation='raise'` | 若不能立即获得 launch turn，则在提交任何 backend work 前抛出 `TaichiRuntimeError`。 |
-| `pacer.statistics()` | 返回当前/峰值 in-flight 与 queued 数、grant/rejection/completion/failure 计数、准入等待时间和逐 lane 统计。统计调用会非阻塞回收已经完成的票据。 |
+| `pacer.statistics()` | 返回 schema v2 snapshot，包含当前/峰值 in-flight 与 queued 数、grant/rejection/completion/failure 计数、准入等待时间、逐 lane 统计和 `contract`。统计调用会非阻塞回收已经完成的票据。 |
 
 一个 invocation 的 host launch turn 不与另一个 paced invocation 交错；launch 完成后，最多
 `max_in_flight` 个 invocation 仍可在 backend 异步执行。准入需要等待时，一个已经阻塞的调用
 会作为协作式 progress steward，以有界自适应退避轮询全部 in-flight completion；存在单 lane
 上限时先检查受限 lane，但较晚完成的快任务仍可在更早提交的慢任务结束前释放全局容量。轮询
 只在存在等待调用期间运行，pacer 不创建后台 worker thread。
+
+Pacer 的容量单位是完整 invocation 的数量，不是显存字节、kernel 数或预计 GPU 时间。
+`max_in_flight > 1` 只表示多个票据可以同时处于未完成状态；API 不创建或承诺独立的 CUDA
+stream、Vulkan queue、kernel 并发或设备抢占。每个在途 invocation 还可能保留参数 allocation、
+Graph replay state、operator numeric generation 和调用方资源。Pacer 不统计持久 solver workspace，
+也不限制未共享该 pacer 的提交。`statistics()["contract"]` 以机器可读形式报告这些边界。
+
+对于单 GPU 上的大型 solve 或 Graph，建议从 `max_in_flight=1` 开始；只有 trace 同时证明存在
+可隐藏的宿主等待、设备利用率改善且显存/尾延迟可接受时，才提升到 2。实时循环应使用较小的
+`max_queued`，并优先用 `on_saturation='raise'` 在入队前执行跳帧或降级。大量小任务应先在一个
+Graph 或 batch 中合并，不应通过增加 ticket 数量代替批处理。
 
 该合同是显式协作边界：未使用同一 pacer 的提交不受其控制；它不会重新排序已经进入
 CUDA stream 或 Vulkan queue 的命令，也不是 priority scheduler、dependency graph 或
@@ -947,13 +958,19 @@ operator API 另见[实验性 LinearOperator 与 SolvePlan](linear_operator.zh.m
 | `batch_plan.solve(rhs_flat, initial_guess=None, out=None)` | 返回扁平 solution 与逐系统 immutable `BatchedSolveResult` tuple。 | 只表示 independent direct-sum system；不是 multi-RHS 或 block Krylov。 |
 | `batch_plan.submit(rhs_flat, initial_guess=None, out=None, pacer=None, lane=None, on_saturation='wait')` | 提交一次 solve 并返回 `SolveSubmission`。 | CUDA/Vulkan 的 `fixed_budget_masked`；一个 plan-owned slot；可加入共享 `SubmissionPacer`；精确 generation 与 array 保留到 completion。 |
 | `SolveSubmission.done()` / `.wait()` / `.result()` | 观察 completion、生成 terminal state 并返回 `BatchedSolveResult`。 | `done()` 不释放 slot；`wait()`/`result()` 抛出 backend error 并释放 slot。 |
-| `batch_plan.clone_workspace()` | 创建具有独立 Krylov state 的等价 plan。 | 并发 submission 必须使用；每个 clone 拥有另一套完整 workspace。 |
-| `operator.statistics()` / `plan.statistics()` | 返回 provider/plan execution 与 workspace 诊断。 | diagnostic snapshot，不属于数值结果。 |
+| `batch_plan.clone_workspace()` | 创建具有独立 Krylov state 的等价 plan。 | 并发 submission 必须使用；每个 clone 拥有另一套完整 workspace，应在构造 pool 前检查 `clone_workspace_payload_bytes`。 |
+| `operator.statistics()` / `plan.statistics()` | 返回 provider/plan execution 与 workspace 诊断。 | Batched plan schema v3 区分 host asynchronous completion 与设备并行保证，并报告逻辑 workspace payload；diagnostic snapshot 不属于数值结果。 |
 
 迭代收敛条件为
 `||b - A x||_2 <= max(atol, rtol * ||b||_2)`。Taichi 不会自动推断
 symmetry 或 positive definiteness；不支持的 format/backend 会明确失败，不做 host
 fallback。
+
+对 batch size `B`、每个系统大小 `N` 的 f32 plan，单个 CG workspace 的逻辑 ndarray payload
+为 `12 * B * N + 68 * B + 8` 字节，PCG 为 `16 * B * N + 68 * B + 8` 字节。每次
+`clone_workspace()` 都增加一份同样大小的 payload。该数字不包含 allocator 对齐/保留、后端
+driver 对象、RHS/output/initial guess 以及 operator/preconditioner 资源；这些排除项也由
+`statistics()["resources"]` 报告。
 
 只有完整 compressed index pattern 相同，`SparseSolver.analyze_pattern(A)`
 才能跨 `factorize(B)` 复用。factorization 后更新 values 会使分解 stale，

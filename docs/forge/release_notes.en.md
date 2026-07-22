@@ -96,15 +96,18 @@ retroactively attributed to the 0.5.0 artifact:
   qualified. CUDA/Vulkan fixed-budget plans also provide `submit()`,
   `SolveSubmission`, and explicit workspace cloning for bounded concurrent
   execution. Execution-policy capabilities and unsupported reasons are
-  queryable; conditional device-convergent execution is not enabled.
+  queryable; conditional device-convergent execution is not enabled. Plan
+  telemetry reports the logical workspace payload and exclusions for every
+  clone; host-asynchronous completion is not a device-parallel guarantee.
 - Added `ti.graph.SubmissionPacer` for explicit cooperative cadence control
   across `Graph.submit()` and fixed-budget batch solves sharing CUDA or Vulkan.
   Global and per-lane in-flight bounds, a finite admission queue, cross-lane
   round robin, and per-lane FIFO can be configured together. Callers may choose
   blocking backpressure or rejection before backend submission. Public
   telemetry covers queue peaks, admission waits, per-lane completion, and
-  backend failure; runtime reset and the first completion failure have explicit
-  invalidation semantics.
+  backend failure. It also states that admission is measured in invocation
+  counts and does not budget workspace or numeric-generation bytes. Runtime
+  reset and the first completion failure have explicit invalidation semantics.
 - Hardened direct-solver symbolic reuse. `factorize()` may reuse an analyzed
   pattern only when the complete compressed index pattern is identical, and a
   value update after factorization makes the factorization stale until it is

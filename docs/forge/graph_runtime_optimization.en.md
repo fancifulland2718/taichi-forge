@@ -173,6 +173,32 @@ for capacity and cadence validation. The pacer does not provide priorities,
 deadlines, callbacks, or cross-Program dependencies. Applications needing
 those policies should implement them above this admission boundary.
 
+### Concurrency and resource budgeting
+
+Host asynchrony is not a proxy for device parallelism. The public contract does
+not guarantee that paced invocations receive independent CUDA streams or Vulkan
+queues. Increasing `max_in_flight` first increases the number of invocations
+allowed to queue and retain resources, not the number of available GPU cores.
+An incomplete Graph may retain runtime-argument allocations, native
+workspaces, replay command state, and a completion object. Mixing Graph and
+solve work also adds plan-clone workspaces and operator numeric generations.
+
+Pacer admission is based on invocation count and does not weight memory or
+estimated GPU time. Its schema-v2 `statistics()["contract"]` identifies the
+admission unit, lack of a device-concurrency guarantee, non-preemptive behavior,
+and workspace, generation, and unpaced-submission exclusions. Graph
+`execution_stats()` exposes `persistent_argument_bytes` and
+`replay_slot_saturation_fallbacks`, but backend-driver command buffers,
+descriptor pools, and allocator reservation still require backend profiling
+and process-memory measurement.
+
+Start with one invocation in flight. Increase the limit to two only when an
+Nsight or equivalent trace demonstrates useful overlap between host enqueue or
+wait and productive GPU work, while peak memory, p95/p99 latency, and replay
+saturation remain within budget. Do not treat the runtime completion safety cap
+as an application queue depth. Coarsen Graph work or increase batching before
+creating one asynchronous ticket per small task.
+
 ## CUDA capture and replay
 
 Each CUDA graph executable owns its capture stream, stable argument buffers,
