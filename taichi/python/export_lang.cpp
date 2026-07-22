@@ -5260,6 +5260,38 @@ void export_lang(py::module &m) {
       py::arg("positive_semidefinite") = -1,
       py::arg("singular") = -1);
   m.def(
+      "_make_experimental_compiled_kernel_operator",
+      [](Program *program, Kernel &forward_kernel,
+         const py::object &adjoint_kernel, std::size_t range_extent,
+         std::size_t domain_extent, std::uint64_t topology_version,
+         std::uint64_t numeric_version, const Ndarray &topology_data,
+         const py::object &numeric_data, int self_adjoint,
+         int positive_definite, int positive_semidefinite, int singular) {
+        Kernel *adjoint = nullptr;
+        if (!adjoint_kernel.is_none()) {
+          adjoint = &py::cast<Kernel &>(adjoint_kernel);
+        }
+        const Ndarray *numeric = nullptr;
+        if (!numeric_data.is_none()) {
+          numeric = &py::cast<const Ndarray &>(numeric_data);
+        }
+        return make_experimental_compiled_kernel_operator_handle(
+            program, forward_kernel, adjoint, range_extent, domain_extent,
+            topology_version, numeric_version, topology_data, numeric,
+            make_asserted_operator_traits(
+                self_adjoint, positive_definite, positive_semidefinite,
+                singular));
+      },
+      py::keep_alive<0, 1>(), py::arg("program"),
+      py::arg("forward_kernel"), py::arg("adjoint_kernel"),
+      py::arg("range_extent"), py::arg("domain_extent"),
+      py::arg("topology_version"), py::arg("numeric_version"),
+      py::arg("topology_data"), py::arg("numeric_data"),
+      py::arg("self_adjoint") = -1,
+      py::arg("positive_definite") = -1,
+      py::arg("positive_semidefinite") = -1,
+      py::arg("singular") = -1);
+  m.def(
       "_make_experimental_identity_operator",
       [](Program *program, DataType dtype, std::size_t size) {
         return make_experimental_identity_operator_handle(

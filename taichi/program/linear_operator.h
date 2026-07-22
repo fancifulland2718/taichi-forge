@@ -15,6 +15,7 @@
 namespace taichi::lang {
 
 class Ndarray;
+class Kernel;
 class Program;
 class SparseMatrix;
 class CpuSparseCsrMatrix;
@@ -699,6 +700,18 @@ std::unique_ptr<ExperimentalLinearOperatorHandle>
 make_experimental_linear_operator_handle(
     Program *program,
     SparseMatrix &matrix,
+    OperatorMathematicalTraits mathematical_traits);
+std::unique_ptr<ExperimentalLinearOperatorHandle>
+make_experimental_compiled_kernel_operator_handle(
+    Program *program,
+    Kernel &forward_kernel,
+    Kernel *adjoint_kernel,
+    std::size_t range_extent,
+    std::size_t domain_extent,
+    std::uint64_t topology_version,
+    std::uint64_t numeric_version,
+    const Ndarray &topology_data,
+    const Ndarray *numeric_data,
     OperatorMathematicalTraits mathematical_traits);
 std::unique_ptr<ExperimentalLinearOperatorHandle>
 make_experimental_identity_operator_handle(Program *program,

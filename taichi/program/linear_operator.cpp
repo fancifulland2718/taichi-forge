@@ -9,6 +9,8 @@
 #include <utility>
 
 #include "taichi/common/core.h"
+#include "taichi/ir/type_factory.h"
+#include "taichi/program/kernel.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/program.h"
 #include "taichi/program/runtime_resource_registry.h"
@@ -2373,6 +2375,487 @@ OperatorMathematicalTraits make_asserted_operator_traits(
               "A positive-definite LinearOperator cannot be declared "
               "singular.");
   return result;
+}
+
+namespace {
+
+bool is_action_scalar_kernel_parameter(
+    const CallableBase::Parameter &parameter,
+    DataType dtype) {
+  return parameter.ptype == ParameterType::kScalar && !parameter.is_array &&
+         parameter.get_dtype() == dtype;
+}
+
+bool is_action_scalar_ndarray_kernel_parameter(
+    const CallableBase::Parameter &parameter,
+    DataType dtype,
+    std::size_t dimensions) {
+  const DataType expected_type(
+      TypeFactory::get_instance().get_ndarray_struct_type(
+          dtype, static_cast<int>(dimensions), false));
+  return parameter.ptype == ParameterType::kNdarray && parameter.is_array &&
+         !parameter.needs_grad && parameter.get_dtype() == expected_type &&
+         parameter.get_element_shape().empty() &&
+         parameter.total_dim == dimensions;
+}
+
+void validate_action_resource(Program *program,
+                              const Ndarray &data,
+                              const char *role) {
+  TI_ERROR_IF(data.owning_program() != program ||
+                  !data.get_element_shape().empty() || data.shape.empty() ||
+                  data.get_nelement() == 0,
+              "Compiled-kernel action {} must be a non-empty scalar ndarray "
+              "owned by the same Program.",
+              role);
+}
+
+class ActionNdarrayOwner {
+ public:
+  ActionNdarrayOwner(Program *program, Ndarray *array)
+      : program_(program), array_(array) {
+  }
+  ~ActionNdarrayOwner() {
+    if (program_ && array_) {
+      program_->delete_ndarray(array_);
+    }
+  }
+  ActionNdarrayOwner(const ActionNdarrayOwner &) = delete;
+  ActionNdarrayOwner &operator=(const ActionNdarrayOwner &) = delete;
+
+  Ndarray *get() const {
+    return array_;
+  }
+  Ndarray *release() {
+    return std::exchange(array_, nullptr);
+  }
+
+ private:
+  Program *program_{nullptr};
+  Ndarray *array_{nullptr};
+};
+
+struct CompiledKernelActionTopology {
+  CompiledKernelActionTopology(Program *program, Ndarray *data)
+      : program(program), data(data) {
+  }
+  ~CompiledKernelActionTopology() {
+    if (program && data) {
+      program->delete_ndarray(data);
+    }
+  }
+
+  Program *program{nullptr};
+  Ndarray *data{nullptr};
+};
+
+class CompiledKernelActionLaunch {
+ public:
+  CompiledKernelActionLaunch(Program *program,
+                             Kernel *kernel,
+                             const CompiledKernelData *compiled_kernel,
+                             int active_size,
+                             std::shared_ptr<CompiledKernelActionTopology>
+                                 topology,
+                             Ndarray *numeric_data,
+                             std::size_t input_arg_index,
+                             std::size_t output_arg_index)
+      : program_(program),
+        compiled_kernel_(compiled_kernel),
+        topology_(std::move(topology)),
+        numeric_data_(numeric_data),
+        input_arg_index_(input_arg_index),
+        output_arg_index_(output_arg_index),
+        launch_context_(std::make_unique<LaunchContextBuilder>(kernel)) {
+    launch_context_->set_arg_int({0}, active_size);
+    restore_fixed_arguments();
+  }
+
+  void apply(const OperatorVectorView &input,
+             const OperatorVectorView &output) {
+    TI_ERROR_IF(!input.ndarray || !output.ndarray,
+                "Compiled-kernel actions require ndarray views.");
+    std::lock_guard<std::mutex> lock(launch_mutex_);
+    // CPU launchers lower ndarray placeholders to raw pointers in place.
+    // Restore fixed resources so this context remains generation-stable.
+    restore_fixed_arguments();
+    launch_context_->set_arg_ndarray(
+        {static_cast<int>(input_arg_index_)}, *input.ndarray);
+    launch_context_->set_arg_ndarray(
+        {static_cast<int>(output_arg_index_)}, *output.ndarray);
+    program_->launch_kernel(*compiled_kernel_, *launch_context_);
+  }
+
+ private:
+  void restore_fixed_arguments() {
+    launch_context_->set_arg_ndarray({1}, *topology_->data);
+    if (numeric_data_) {
+      launch_context_->set_arg_ndarray({2}, *numeric_data_);
+    }
+  }
+
+  Program *program_{nullptr};
+  const CompiledKernelData *compiled_kernel_{nullptr};
+  std::shared_ptr<CompiledKernelActionTopology> topology_;
+  Ndarray *numeric_data_{nullptr};
+  std::size_t input_arg_index_{0};
+  std::size_t output_arg_index_{0};
+  std::unique_ptr<LaunchContextBuilder> launch_context_;
+  std::mutex launch_mutex_;
+};
+
+struct CompiledKernelActionGeneration {
+  CompiledKernelActionGeneration(
+      Program *program,
+      Kernel *forward_kernel,
+      const CompiledKernelData *forward_compiled,
+      Kernel *adjoint_kernel,
+      const CompiledKernelData *adjoint_compiled,
+      const OperatorDescriptor &descriptor,
+      std::shared_ptr<CompiledKernelActionTopology> topology,
+      Ndarray *numeric_data,
+      std::size_t input_arg_index,
+      std::size_t output_arg_index)
+      : program(program), numeric_data(numeric_data) {
+    forward = std::make_unique<CompiledKernelActionLaunch>(
+        program, forward_kernel, forward_compiled,
+        static_cast<int>(descriptor.range.scalar_extent), topology,
+        numeric_data, input_arg_index, output_arg_index);
+    if (adjoint_kernel) {
+      adjoint = std::make_unique<CompiledKernelActionLaunch>(
+          program, adjoint_kernel, adjoint_compiled,
+          static_cast<int>(descriptor.domain.scalar_extent),
+          std::move(topology), numeric_data, input_arg_index,
+          output_arg_index);
+    }
+  }
+
+  ~CompiledKernelActionGeneration() {
+    // Launch contexts only borrow the numeric ndarray. Destroy them first.
+    adjoint.reset();
+    forward.reset();
+    if (program && numeric_data) {
+      program->delete_ndarray(numeric_data);
+    }
+  }
+
+  void apply(OperatorApplyMode mode,
+             const OperatorVectorView &input,
+             const OperatorVectorView &output) {
+    if (mode == OperatorApplyMode::forward) {
+      forward->apply(input, output);
+      return;
+    }
+    TI_ERROR_IF(!adjoint,
+                "Compiled-kernel action has no explicit adjoint provider.");
+    adjoint->apply(input, output);
+  }
+
+  Program *program{nullptr};
+  Ndarray *numeric_data{nullptr};
+  std::unique_ptr<CompiledKernelActionLaunch> forward;
+  std::unique_ptr<CompiledKernelActionLaunch> adjoint;
+};
+
+class CompiledKernelActionProvider {
+ public:
+  CompiledKernelActionProvider(Program *program,
+                               Kernel &forward_kernel,
+                               Kernel *adjoint_kernel,
+                               OperatorDescriptor descriptor,
+                               std::uint64_t topology_version,
+                               std::uint64_t numeric_version,
+                               const Ndarray &topology_data,
+                               const Ndarray *numeric_data)
+      : program_(program),
+        forward_kernel_(&forward_kernel),
+        adjoint_kernel_(adjoint_kernel),
+        descriptor_(std::move(descriptor)),
+        topology_version_(topology_version),
+        numeric_version_(numeric_version) {
+    TI_ERROR_IF(!program_ || descriptor_.domain.scalar_extent == 0 ||
+                    descriptor_.range.scalar_extent == 0 ||
+                    descriptor_.domain.scalar_extent >
+                        static_cast<std::size_t>(
+                            (std::numeric_limits<int>::max)()) ||
+                    descriptor_.range.scalar_extent >
+                        static_cast<std::size_t>(
+                            (std::numeric_limits<int>::max)()) ||
+                    topology_version_ == 0 || numeric_version_ == 0,
+                "Compiled-kernel actions require an owning Program, positive "
+                "f32 domain/range extents, and positive resource versions.");
+    TI_ERROR_IF(descriptor_.domain.scalar_type != PrimitiveType::f32 ||
+                    descriptor_.range.scalar_type != PrimitiveType::f32 ||
+                    !descriptor_.domain.entry_shape.empty() ||
+                    !descriptor_.range.entry_shape.empty(),
+                "Compiled-kernel actions currently require scalar f32 "
+                "domain and range spaces.");
+    const Arch arch = program_->compile_config().arch;
+    TI_ERROR_IF(!arch_is_cpu(arch) && !arch_is_cuda(arch) &&
+                    arch != Arch::vulkan,
+                "Compiled-kernel actions support CPU, CUDA, and Vulkan only; "
+                "got {}. No fallback was performed.",
+                arch_name(arch));
+    validate_action_resource(program_, topology_data, "topology data");
+    if (numeric_data) {
+      validate_action_resource(program_, *numeric_data, "numeric data");
+    }
+    has_numeric_data_ = numeric_data != nullptr;
+    if (numeric_data) {
+      numeric_type_ = numeric_data->get_element_data_type();
+      numeric_shape_ = numeric_data->shape;
+      numeric_layout_ = numeric_data->layout;
+    }
+    input_arg_index_ = has_numeric_data_ ? 3 : 2;
+    output_arg_index_ = input_arg_index_ + 1;
+
+    Ndarray *owned_topology = nullptr;
+    Ndarray *owned_numeric = nullptr;
+    try {
+      owned_topology = program_->create_ndarray(
+          topology_data.get_element_data_type(), topology_data.shape,
+          topology_data.layout, false);
+      program_->copy_ndarray_fast(
+          owned_topology, const_cast<Ndarray *>(&topology_data));
+      if (numeric_data) {
+        owned_numeric = program_->create_ndarray(
+            numeric_data->get_element_data_type(), numeric_data->shape,
+            numeric_data->layout, false);
+        program_->copy_ndarray_fast(
+            owned_numeric, const_cast<Ndarray *>(numeric_data));
+      }
+    } catch (...) {
+      if (owned_numeric) {
+        program_->delete_ndarray(owned_numeric);
+      }
+      if (owned_topology) {
+        program_->delete_ndarray(owned_topology);
+      }
+      throw;
+    }
+    ActionNdarrayOwner topology_owner(program_, owned_topology);
+    ActionNdarrayOwner numeric_owner(program_, owned_numeric);
+    topology_ = std::make_shared<CompiledKernelActionTopology>(
+        program_, topology_owner.get());
+    topology_owner.release();
+    forward_compiled_ = validate_and_compile(forward_kernel, "forward");
+    if (adjoint_kernel_) {
+      adjoint_compiled_ =
+          validate_and_compile(*adjoint_kernel_, "adjoint");
+    }
+    generations_ =
+        std::make_unique<OperatorResourceGenerationPublisher>();
+    publish(numeric_owner.release(), numeric_version_, binding_revision_);
+  }
+
+  ~CompiledKernelActionProvider() {
+    try {
+      if (generations_) {
+        generations_->retire_current();
+        generations_.reset();
+      }
+      topology_.reset();
+    } catch (...) {
+    }
+  }
+
+  OperatorBinding binding() {
+    const auto capabilities = make_capabilities();
+    auto metadata_action = OperatorAction(
+        descriptor_, capabilities, "forge_compiled_kernel_action",
+        [this] { return current_stamp(); },
+        [this](OperatorApplyMode mode, const OperatorVectorView &input,
+               const OperatorVectorView &output) {
+          auto generation = generations_->acquire();
+          generation.apply_overwrite(mode, input, output);
+        });
+    return OperatorBinding::from_generation_publisher(
+        std::move(metadata_action),
+        [this] { return generations_->acquire(); });
+  }
+
+  void update_numeric(
+      Program *program,
+      const ExperimentalLinearOperatorHandle::NumericUpdateArguments
+          &arguments,
+      std::uint64_t expected_topology_version,
+      std::uint64_t expected_numeric_version) {
+    TI_ERROR_IF(program != program_ || !has_numeric_data_,
+                "Compiled-kernel action numeric update requires its owning "
+                "Program and a numeric resource.");
+    TI_ERROR_IF(arguments.size() != 1 ||
+                    arguments.find("numeric") == arguments.end() ||
+                    !arguments.at("numeric"),
+                "Compiled-kernel action numeric update requires exactly the "
+                "'numeric' ndarray.");
+    const Ndarray &numeric_data = *arguments.at("numeric");
+    validate_action_resource(program_, numeric_data, "numeric update");
+    std::lock_guard<std::mutex> lock(update_mutex_);
+    TI_ERROR_IF(expected_topology_version != topology_version_ ||
+                    expected_numeric_version != numeric_version_,
+                "Compiled-kernel action numeric update version mismatch: "
+                "expected topology/numeric ({}, {}), current ({}, {}).",
+                expected_topology_version, expected_numeric_version,
+                topology_version_, numeric_version_);
+    TI_ERROR_IF(numeric_version_ ==
+                        (std::numeric_limits<std::uint64_t>::max)() ||
+                    binding_revision_ ==
+                        (std::numeric_limits<std::uint64_t>::max)(),
+                "Compiled-kernel action resource version overflow.");
+    TI_ERROR_IF(numeric_data.get_element_data_type() != numeric_type_ ||
+                    numeric_data.shape != numeric_shape_ ||
+                    numeric_data.layout != numeric_layout_,
+                "Compiled-kernel action numeric update must preserve dtype, "
+                "shape, and layout.");
+    Ndarray *replacement = program_->create_ndarray(
+        numeric_type_, numeric_shape_, numeric_layout_, false);
+    try {
+      program_->copy_ndarray_fast(replacement,
+                                  const_cast<Ndarray *>(&numeric_data));
+    } catch (...) {
+      program_->delete_ndarray(replacement);
+      throw;
+    }
+    const auto next_numeric = numeric_version_ + 1;
+    const auto next_binding = binding_revision_ + 1;
+    publish(replacement, next_numeric, next_binding);
+    numeric_version_ = next_numeric;
+    binding_revision_ = next_binding;
+  }
+
+ private:
+  const CompiledKernelData *validate_and_compile(Kernel &kernel,
+                                                  const char *role) {
+    TI_ERROR_IF(kernel.program != program_ ||
+                    kernel.arch != program_->compile_config().arch,
+                "Compiled-kernel action {} kernel must belong to the same "
+                "Program and backend.",
+                role);
+    const auto &parameters = kernel.parameter_list;
+    const std::size_t expected_count = output_arg_index_ + 1;
+    bool valid = parameters.size() == expected_count && kernel.rets.empty() &&
+                 is_action_scalar_kernel_parameter(
+                     parameters[0], PrimitiveType::i32) &&
+                 is_action_scalar_ndarray_kernel_parameter(
+                     parameters[1], topology_->data->get_element_data_type(),
+                     topology_->data->shape.size());
+    if (has_numeric_data_) {
+      valid = valid && is_action_scalar_ndarray_kernel_parameter(
+                           parameters[2], numeric_type_,
+                           numeric_shape_.size());
+    }
+    valid = valid && is_action_scalar_ndarray_kernel_parameter(
+                         parameters[input_arg_index_], PrimitiveType::f32, 1) &&
+            is_action_scalar_ndarray_kernel_parameter(
+                parameters[output_arg_index_], PrimitiveType::f32, 1);
+    TI_ERROR_IF(!valid,
+                "Compiled-kernel action {} ABI must be exactly active_size, "
+                "topology, optional numeric, f32[1D] input, f32[1D] output "
+                "with no return values.",
+                role);
+    const auto &compiled = program_->compile_kernel(
+        program_->compile_config(), program_->get_device_caps(), kernel);
+    TI_ERROR_IF(!compiled.snode_tree_ids().empty(),
+                "Compiled-kernel actions must not depend on an SNodeTree; "
+                "use explicit topology/numeric ndarray arguments.");
+    return &compiled;
+  }
+
+  OperatorCapabilities make_capabilities() const {
+    OperatorCapabilities capabilities;
+    capabilities.adjoint_apply = adjoint_kernel_ != nullptr;
+    capabilities.asynchronous_submit =
+        !arch_is_cpu(program_->compile_config().arch);
+    capabilities.binding_rebind = true;
+    return capabilities;
+  }
+
+  OperatorResourceStamp current_stamp() const {
+    return generations_->acquire().resource_stamp();
+  }
+
+  void publish(Ndarray *numeric_data,
+               std::uint64_t numeric_version,
+               std::uint64_t binding_revision) {
+    ActionNdarrayOwner numeric_owner(program_, numeric_data);
+    auto generation = std::make_shared<CompiledKernelActionGeneration>(
+        program_, forward_kernel_, forward_compiled_, adjoint_kernel_,
+        adjoint_compiled_, descriptor_, topology_, numeric_owner.get(),
+        input_arg_index_, output_arg_index_);
+    numeric_owner.release();
+    const OperatorResourceStamp stamp{
+        reinterpret_cast<std::uintptr_t>(program_),
+        program_->runtime_program_generation(), 1, topology_version_,
+        numeric_version, binding_revision};
+    const auto capabilities = make_capabilities();
+    auto action = OperatorAction(
+        descriptor_, capabilities, "forge_compiled_kernel_action",
+        [stamp] { return stamp; },
+        [generation = std::move(generation)](
+            OperatorApplyMode mode, const OperatorVectorView &input,
+            const OperatorVectorView &output) {
+          generation->apply(mode, input, output);
+        });
+    generations_->publish(std::move(action));
+  }
+
+  Program *program_{nullptr};
+  Kernel *forward_kernel_{nullptr};
+  Kernel *adjoint_kernel_{nullptr};
+  const CompiledKernelData *forward_compiled_{nullptr};
+  const CompiledKernelData *adjoint_compiled_{nullptr};
+  OperatorDescriptor descriptor_;
+  std::shared_ptr<CompiledKernelActionTopology> topology_;
+  std::unique_ptr<OperatorResourceGenerationPublisher> generations_;
+  DataType numeric_type_{PrimitiveType::unknown};
+  std::vector<int> numeric_shape_;
+  ExternalArrayLayout numeric_layout_{ExternalArrayLayout::kNull};
+  bool has_numeric_data_{false};
+  std::size_t input_arg_index_{2};
+  std::size_t output_arg_index_{3};
+  std::uint64_t topology_version_{0};
+  std::uint64_t numeric_version_{0};
+  std::uint64_t binding_revision_{1};
+  std::mutex update_mutex_;
+};
+
+}  // namespace
+
+std::unique_ptr<ExperimentalLinearOperatorHandle>
+make_experimental_compiled_kernel_operator_handle(
+    Program *program,
+    Kernel &forward_kernel,
+    Kernel *adjoint_kernel,
+    std::size_t range_extent,
+    std::size_t domain_extent,
+    std::uint64_t topology_version,
+    std::uint64_t numeric_version,
+    const Ndarray &topology_data,
+    const Ndarray *numeric_data,
+    OperatorMathematicalTraits mathematical_traits) {
+  const OperatorDescriptor descriptor{
+      OperatorSpaceDesc{PrimitiveType::f32, domain_extent},
+      OperatorSpaceDesc{PrimitiveType::f32, range_extent}};
+  auto provider = std::make_shared<CompiledKernelActionProvider>(
+      program, forward_kernel, adjoint_kernel, descriptor, topology_version,
+      numeric_version, topology_data, numeric_data);
+  auto binding = provider->binding().with_mathematical_traits(
+      std::move(mathematical_traits));
+  ExperimentalLinearOperatorHandle::NumericUpdateFn update;
+  if (numeric_data) {
+    update = [provider](
+                 Program *update_program,
+                 const ExperimentalLinearOperatorHandle::NumericUpdateArguments
+                     &arguments,
+                 std::uint64_t expected_topology_version,
+                 std::uint64_t expected_numeric_version) {
+      provider->update_numeric(update_program, arguments,
+                               expected_topology_version,
+                               expected_numeric_version);
+    };
+  }
+  return std::make_unique<ExperimentalLinearOperatorHandle>(
+      program, std::move(binding), provider, std::move(update));
 }
 
 std::unique_ptr<ExperimentalLinearOperatorHandle>

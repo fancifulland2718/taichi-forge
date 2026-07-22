@@ -153,6 +153,20 @@ def _require_positive_size(size, role="size"):
     return result
 
 
+def _normalize_operator_shape(size):
+    if isinstance(size, Sequence) and not isinstance(size, (str, bytes)):
+        if len(size) != 2:
+            raise TaichiRuntimeError(
+                "LinearOperator shape must contain (range, domain) extents"
+            )
+        return (
+            _require_positive_size(size[0], "range extent"),
+            _require_positive_size(size[1], "domain extent"),
+        ), False
+    extent = _require_positive_size(size)
+    return (extent, extent), True
+
+
 def _require_current_scalar_ndarray(value, role, size=None, dtype=None):
     if not isinstance(value, ScalarNdarray):
         raise TaichiRuntimeError(
@@ -274,6 +288,7 @@ class LinearOperator:
         size,
         topology,
         *,
+        adjoint=None,
         numeric=None,
         topology_version=1,
         numeric_version=1,
@@ -283,9 +298,13 @@ class LinearOperator:
 
         With ``numeric`` the signature is ``(active_size, topology, numeric,
         input, output)``; otherwise it is ``(active_size, operator_data,
-        input, output)``. Inputs are copied into operator-owned snapshots.
+        input, output)``. ``size`` may be an integer square shorthand or a
+        ``(range, domain)`` shape. Rectangular operators and explicit adjoints
+        use an action provider independent of ``SparseMatrix``. Resources are
+        copied into operator-owned snapshots.
         """
-        size = _require_positive_size(size)
+        shape, legacy_square = _normalize_operator_shape(size)
+        range_extent, domain_extent = shape
         topology = _require_current_scalar_ndarray(topology, "topology")
         if numeric is not None:
             numeric = _require_current_scalar_ndarray(numeric, "numeric")
@@ -298,54 +317,106 @@ class LinearOperator:
         traits = OperatorTraits() if traits is None else traits
         if not isinstance(traits, OperatorTraits):
             raise TypeError("traits must be OperatorTraits")
-        try:
-            primal = kernel._primal
-        except AttributeError as exc:
-            raise TaichiRuntimeError(
-                "LinearOperator.from_kernel expects a @ti.kernel"
-            ) from exc
-        compile_input = ScalarNdarray(f32, (size,))
-        compile_output = ScalarNdarray(f32, (size,))
-        compile_args = (size, topology, compile_input, compile_output)
-        if numeric is not None:
+
+        def compile_action(action, active_size, input_size, output_size, role):
+            try:
+                primal = action._primal
+            except AttributeError as exc:
+                raise TaichiRuntimeError(
+                    f"LinearOperator.from_kernel {role} must be a @ti.kernel"
+                ) from exc
+            compile_input = ScalarNdarray(f32, (input_size,))
+            compile_output = ScalarNdarray(f32, (output_size,))
             compile_args = (
-                size,
+                active_size,
                 topology,
-                numeric,
                 compile_input,
                 compile_output,
             )
-        key = primal.ensure_compiled(*compile_args)
-        kernel_cpp = primal.compiled_kernels[key]
+            if numeric is not None:
+                compile_args = (
+                    active_size,
+                    topology,
+                    numeric,
+                    compile_input,
+                    compile_output,
+                )
+            key = primal.ensure_compiled(*compile_args)
+            return primal.compiled_kernels[key]
+
+        kernel_cpp = compile_action(
+            kernel,
+            range_extent,
+            domain_extent,
+            range_extent,
+            "forward kernel",
+        )
+        adjoint_cpp = None
+        if adjoint is not None:
+            adjoint_cpp = compile_action(
+                adjoint,
+                domain_extent,
+                range_extent,
+                domain_extent,
+                "adjoint kernel",
+            )
         program = _current_program()
-        if numeric is None:
+        if legacy_square and adjoint is None and numeric is None:
             core = program._create_compiled_kernel_linear_operator(
                 kernel_cpp,
-                size,
+                range_extent,
                 topology_version,
                 numeric_version,
                 topology.arr,
             )
-        else:
+            handle = _ti_core._make_experimental_linear_operator(
+                program, core, *traits._native_values()
+            )
+            return cls._from_handle(
+                handle,
+                provider_kind="kernel",
+                provider_core=core,
+                source=kernel,
+                retained=(kernel, topology),
+            )
+        if legacy_square and adjoint is None:
             core = (
                 program._create_compiled_kernel_linear_operator_with_numeric_data(
                     kernel_cpp,
-                    size,
+                    range_extent,
                     topology_version,
                     numeric_version,
                     topology.arr,
                     numeric.arr,
                 )
             )
-        handle = _ti_core._make_experimental_linear_operator(
-            program, core, *traits._native_values()
+            handle = _ti_core._make_experimental_linear_operator(
+                program, core, *traits._native_values()
+            )
+            return cls._from_handle(
+                handle,
+                provider_kind="kernel",
+                provider_core=core,
+                source=kernel,
+                retained=(kernel, topology, numeric),
+            )
+        handle = _ti_core._make_experimental_compiled_kernel_operator(
+            program,
+            kernel_cpp,
+            adjoint_cpp,
+            range_extent,
+            domain_extent,
+            topology_version,
+            numeric_version,
+            topology.arr,
+            None if numeric is None else numeric.arr,
+            *traits._native_values(),
         )
         return cls._from_handle(
             handle,
-            provider_kind="kernel",
-            provider_core=core,
-            source=kernel,
-            retained=(kernel, topology, numeric),
+            provider_kind="kernel_action",
+            source=(kernel, adjoint),
+            retained=(kernel, adjoint, topology, numeric),
         )
 
     @classmethod
@@ -585,6 +656,15 @@ class LinearOperator:
             self._provider_core.update_numeric_data(
                 self._program,
                 {name: value.arr for name, value in values.items()},
+                topology_version,
+                numeric_version,
+            )
+            return
+        if self._provider_kind == "kernel_action":
+            values = _require_current_scalar_ndarray(values, "numeric")
+            self._handle._update_numeric(
+                self._program,
+                {"numeric": values.arr},
                 topology_version,
                 numeric_version,
             )
