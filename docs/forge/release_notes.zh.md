@@ -95,6 +95,11 @@
   `SolveSubmission` 与显式 workspace clone，用于有界并发执行。执行策略 capability 与
   unsupported reason 可查询；当前未启用 device-convergent 条件执行。plan 统计报告每个
   clone 的逻辑 workspace payload 与排除项；host 异步 completion 不代表设备并行保证。
+- 增加面向 `SolvePlan`/`BatchedSolvePlan` 的 provider-neutral solver qualification。
+  版本化 detached report 覆盖 solution/真实残差、terminal state、A/M 身份、policy、
+  logical/executed/provider work、chunk counter、transfer、resource、memory-pool 增量和可选
+  pacing。factory build、first solve、warm wall time 与合格 fixed-budget host submit 分开记录；
+  无法取得的 device timestamp 与 driver identity 明确保持 unavailable，不进行推测。
 - 增加 `ti.graph.SubmissionPacer`，为共享 CUDA/Vulkan backend 的
   `Graph.submit()` 与 fixed-budget batch solve 提供显式协作式节奏控制。全局/单 lane
   in-flight 上限、有限等待队列、跨 lane round-robin 与 lane 内 FIFO 可组合配置；调用方可

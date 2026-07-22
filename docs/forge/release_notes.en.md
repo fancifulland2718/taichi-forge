@@ -115,6 +115,13 @@ retroactively attributed to the 0.5.0 artifact:
   queryable; conditional device-convergent execution is not enabled. Plan
   telemetry reports the logical workspace payload and exclusions for every
   clone; host-asynchronous completion is not a device-parallel guarantee.
+- Added provider-neutral solve qualification for `SolvePlan` and
+  `BatchedSolvePlan`. Versioned detached reports cover solution and true
+  residual checks, terminal state, A/M identity, policy, logical/executed/
+  provider work, chunk counters, transfers, resources, memory-pool deltas, and
+  optional pacing. Factory construction, first solve, warm wall time, and
+  qualified fixed-budget host submission are separated; unavailable device
+  timestamps and driver identity remain explicit rather than inferred.
 - Added `ti.graph.SubmissionPacer` for explicit cooperative cadence control
   across `Graph.submit()` and fixed-budget batch solves sharing CUDA or Vulkan.
   Global and per-lane in-flight bounds, a finite admission queue, cross-lane

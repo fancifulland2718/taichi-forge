@@ -623,6 +623,54 @@ unsupported GPU generalized coefficient is recorded as `unsupported`; it is
 neither reported as a pass nor executed by a host fallback. Timing describes
 the current machine and run and is not a cross-machine performance gate.
 
+`qualify_solve_plan()` produces the corresponding execution evidence for a
+public `SolvePlan` or `BatchedSolvePlan`:
+
+```python
+report = ti.linalg.experimental.qualify_solve_plan(
+    lambda: ti.linalg.experimental.SolvePlan(
+        operator,
+        method="pcg",
+        preconditioner=preconditioner,
+        execution_policy="host_check_every_k",
+        check_interval=4,
+    ),
+    rhs,
+    reference=expected_solution,
+    expected_termination="converged",
+    warmup=2,
+    repetitions=10,
+    metadata={"case": "poisson_level_3"},
+)
+matrix = ti.linalg.experimental.summarize_solve_qualifications([report])
+```
+
+The example uses the CUDA/Vulkan chunked policy; a CPU factory uses
+`host_each_iteration` instead.
+
+Passing a zero-argument factory records plan construction separately. An
+already constructed plan is also accepted, with build timing explicitly
+unavailable. `reference` is either a flat expected solution or a callable
+receiving a detached NumPy copy of the RHS. Independent batches use one flat
+reference and may provide one expected termination reason per system.
+
+The report separates first and warm synchronous wall time. A qualified
+fixed-budget GPU batch additionally separates host submission from completion
+wait and may record a supplied `SubmissionPacer`. It records A/M providers,
+policy and check interval, terminal state, an independent `b - A(x)` residual,
+logical/executed/provider iterations, inactive-work efficiency, chunk
+direct/replay counters, transfers, plan resources, and process-global device
+pool deltas. Device timestamp spans, device identity, and driver versions stay
+explicitly unavailable when the runtime has no safe query; wall time is never
+relabeled as device time. Nsight or another profiler can be retained as a
+sidecar using the report metadata.
+
+Qualification performs one first solve, the requested warmups and repetitions,
+and one untimed operator apply for the independent true residual. It mutates
+the plan counters and output supplied to it. Use a dedicated plan/workspace for
+performance evidence, especially when measuring an asynchronous batch or a
+shared pacer. The function returns detached evidence and never writes files.
+
 The API is covered by backend correctness, lifecycle, trait, composition, 10k
 approved-generation churn, and solver regression tests. Application production
 qualification remains workload-specific: validate operator semantics,

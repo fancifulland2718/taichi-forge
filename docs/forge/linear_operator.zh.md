@@ -546,6 +546,44 @@ backend/provider report 自动生成确定性的支持矩阵。GPU 不支持的�
 `unsupported`，不会伪装为通过或触发 host fallback。计时只描述本机本次运行；它不是
 跨机器性能门。
 
+`qualify_solve_plan()` 为公开 `SolvePlan` 或 `BatchedSolvePlan` 生成对应的执行证据：
+
+```python
+report = ti.linalg.experimental.qualify_solve_plan(
+    lambda: ti.linalg.experimental.SolvePlan(
+        operator,
+        method="pcg",
+        preconditioner=preconditioner,
+        execution_policy="host_check_every_k",
+        check_interval=4,
+    ),
+    rhs,
+    reference=expected_solution,
+    expected_termination="converged",
+    warmup=2,
+    repetitions=10,
+    metadata={"case": "poisson_level_3"},
+)
+matrix = ti.linalg.experimental.summarize_solve_qualifications([report])
+```
+
+该示例使用 CUDA/Vulkan chunk policy；CPU factory 应改用 `host_each_iteration`。
+
+传入零参数 factory 时会单独记录 plan 构建时间；也可以传入已构造的 plan，此时 build timing
+明确记为 unavailable。`reference` 可以是扁平 expected solution，也可以是接收 RHS NumPy
+副本的 callable。独立 batch 使用一份 flat reference，并可逐系统指定 expected termination。
+
+报告区分首次与稳态同步 wall time。合格的 GPU fixed-budget batch 还会拆分 host submit 和
+completion wait，并可记录调用方提供的 `SubmissionPacer`。记录内容包括 A/M provider、policy/K、
+terminal state、独立计算的 `b - A(x)` 真实残差、logical/executed/provider iteration、inactive-work
+efficiency、chunk direct/replay counter、transfer、plan resource 和进程全局 device pool 增量。runtime
+没有安全查询时，device timestamp span、device identity 和 driver version 会明确保持 unavailable；
+不会把 wall time 改名为 device time。Nsight 等 profiler 结果可通过 metadata 作为 sidecar 保存。
+
+一次资格运行会执行一次 first solve、指定数量的 warmup/repetition，并额外执行一次不计时的 operator
+apply 来计算独立真实残差；因此会改变 plan counter 和传入的 output。性能证据应使用专用 plan/workspace，
+尤其不要让异步 batch 或共享 pacer 的资格运行污染生产调度。函数只返回 detached evidence，不写文件。
+
 API 已覆盖 backend correctness、lifecycle、trait、composition、10k approved-generation
 churn 和 solver regression。
 应用的生产资格验证仍由 workload 决定：应在具有代表性的物理与非物理系统上验证
