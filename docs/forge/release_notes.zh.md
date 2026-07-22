@@ -83,6 +83,11 @@
   或 8 iteration 检查收敛；Vulkan 支持相同 chunk size 与 relative tolerance，同时保留
   fixed-budget masked execution 作为兼容默认值。logical、executed、wasted iteration
   与 host check 会分别报告。
+- 为 fixed stored f32 CSR/BSR 增加 CUDA/Vulkan 原生 solver-chunk replay。CUDA 将
+  K=4/8 的 CG/PCG chunk capture 为 CUDA Graph；Vulkan 将相同 sparse recurrence 录制为
+  可复用 command sequence，并覆盖 identity、Jacobi 与 block-Jacobi。values-only numeric
+  refresh 保留既有序列，外部 output binding 或结构变化会显式失效并重建；compiled-kernel/
+  Graph A/M 保持 direct submission，不做 host fallback。
 - 增加公开 `PreconditionerPlan` 与 pinned `PreconditionerSession`。外部近似逆可显式执行
   setup、rebuild update 或 lagged reuse，并分别记录 built-from provenance 与 accepted-target
   compatibility；target 更新默认 stale。CPU/CUDA/Vulkan PCG 消费批准后的 immutable

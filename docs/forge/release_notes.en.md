@@ -98,6 +98,13 @@ retroactively attributed to the 0.5.0 artifact:
   tolerance while retaining fixed-budget masked execution as its compatible
   default. Logical, executed, and wasted iterations and host checks are
   reported separately.
+- Added native CUDA/Vulkan solver-chunk replay for fixed stored f32 CSR/BSR.
+  CUDA captures K=4/8 CG/PCG chunks as CUDA Graphs; Vulkan records the same
+  sparse recurrence as reusable command sequences, covering identity, Jacobi,
+  and block-Jacobi. Values-only numeric refresh preserves the recorded
+  sequence, while external output-binding or structural changes explicitly
+  invalidate and rebuild it. Compiled-kernel and Graph A/M providers retain
+  direct submission without a host fallback.
 - Added public `PreconditionerPlan` and pinned `PreconditionerSession` types.
   External approximate inverses support explicit setup, rebuild updates, and
   lagged reuse while recording built-from provenance separately from

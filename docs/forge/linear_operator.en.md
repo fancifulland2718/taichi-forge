@@ -340,6 +340,27 @@ plan = ti.linalg.experimental.SolvePlan(
   `"host_check_every_k"` with `check_interval=4` or `8`. Both policies
   support `atol`, `rtol`, and their combined effective tolerance.
 
+For fixed stored f32 CSR/BSR, CUDA `host_check_every_k` and Vulkan
+`host_check_every_k`/`fixed_budget_masked` record supported CG/PCG iteration
+chunks as reusable native execution sequences. The recordable combinations
+currently include identity, stored Jacobi, and stored block-Jacobi
+preconditioners. The first compatible execution builds a CUDA Graph or Vulkan
+command sequence; later executions with the same topology, workspace, and
+output binding replay it. A values-only matrix update followed by a numeric
+preconditioner refresh does not re-record the sequence. Replacing the output
+ndarray, changing topology or schema, or recreating the runtime invalidates and
+safely rebuilds it.
+
+Compiled-kernel and compiled Graph A/M providers continue to use direct chunk
+submission. They are not staged through the host or replaced with another
+provider to obtain replay. If the runtime cannot record safely, it preserves
+the same numerical path and reports the reason. `statistics()` exposes this
+boundary through `solver_chunk_builds`, `solver_chunk_replays`,
+`solver_chunk_direct_submissions`, `solver_chunk_rebinds`,
+`solver_chunk_invalidations`, `solver_graph_enabled`, and
+`solver_replay_unavailable_reason`. Build cost belongs to cold execution, so
+qualification should report first-solve and warm-solve timing separately.
+
 A chunk always completes before its terminal state is inspected. The reported
 `SolveResult.iterations` is the logical convergence or breakdown iteration;
 `statistics()["operations"]` separately reports `executed_iterations`,

@@ -304,6 +304,22 @@ plan = ti.linalg.experimental.SolvePlan(
   `"host_check_every_k"`，其中 `check_interval` 可为 4 或 8。两种策略均支持
   `atol`、`rtol` 及其组合后的 effective tolerance。
 
+对于 fixed stored f32 CSR/BSR，CUDA 的 `host_check_every_k` 以及 Vulkan 的
+`host_check_every_k`/`fixed_budget_masked` 会把受支持的 CG/PCG iteration chunk
+录制为可复用的原生执行序列。当前可录制组合包括 identity、stored Jacobi 和 stored
+block-Jacobi preconditioner。首次兼容执行建立 CUDA Graph 或 Vulkan command sequence；
+相同 topology、workspace 与 output binding 的后续执行直接 replay。仅更新 matrix values
+并刷新 preconditioner numeric state 时不重录；更换 output ndarray、改变 topology/schema
+或重建 runtime 会使旧序列失效并安全重建。
+
+compiled-kernel 与 compiled Graph A/M provider 仍按 direct chunk submission 执行；它们不会
+为取得 replay 而进行 host staging 或更换 provider。runtime 无法安全录制时也会保持相同数值
+路径并报告不可用原因。`statistics()` 通过 `solver_chunk_builds`、
+`solver_chunk_replays`、`solver_chunk_direct_submissions`、`solver_chunk_rebinds`、
+`solver_chunk_invalidations`、`solver_graph_enabled` 和
+`solver_replay_unavailable_reason` 暴露这一边界。构建开销属于 cold execution，性能资格应分别
+记录 first solve 与 warm solve。
+
 host 检查状态前，一个 chunk 总会完整执行。`SolveResult.iterations` 表示逻辑上的
 convergence 或 breakdown iteration；`statistics()["operations"]` 另行报告
 `executed_iterations`、`wasted_iterations`、host synchronization 次数和 direct
