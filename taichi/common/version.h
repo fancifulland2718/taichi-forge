@@ -1,7 +1,7 @@
 #pragma once
 #define TI_VERSION_MAJOR 0
 #define TI_VERSION_MINOR 5
-#define TI_VERSION_PATCH 0
+#define TI_VERSION_PATCH 1
 // Compatibility version of the slim libdevice bitcode bundled with this
 // package. This must not use CUDA_VERSION: NVIDIA CUDA headers reserve that
 // macro for their numeric toolkit version.
