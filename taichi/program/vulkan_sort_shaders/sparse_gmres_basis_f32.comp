@@ -1,0 +1,41 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Source {
+  float data[];
+} source_buf;
+layout(set = 0, binding = 1, std430) buffer Basis {
+  float data[];
+} basis_buf;
+layout(set = 0, binding = 2, std430) readonly buffer State {
+  uint data[];
+} state_buf;
+
+layout(push_constant) uniform Params {
+  uint n;
+  uint basis_stride;
+  uint row;
+  uint mode;
+} params;
+
+const uint kBeta = 6u;
+const uint kNextNorm = 9u;
+const uint kSolveActive = 18u;
+const uint kCycleActive = 19u;
+
+void main() {
+  uint index = gl_GlobalInvocationID.x;
+  if (index >= params.n) {
+    return;
+  }
+  bool enabled = params.mode == 0u
+      ? int(state_buf.data[kSolveActive]) != 0
+      : int(state_buf.data[kCycleActive]) != 0;
+  float denominator = uintBitsToFloat(
+      state_buf.data[params.mode == 0u ? kBeta : kNextNorm]);
+  basis_buf.data[params.row * params.basis_stride + index] =
+      enabled && denominator != 0.0
+          ? source_buf.data[index] / denominator
+          : 0.0;
+}

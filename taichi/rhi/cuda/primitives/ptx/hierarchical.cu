@@ -1591,6 +1591,478 @@ extern "C" __global__ void sparse_bicgstab_reconcile_f32(
   operator_direction[index] = 0.0f;
 }
 
+namespace sparse_gmres {
+
+constexpr u32 kInitialResidualSquared = 0u;
+constexpr u32 kTrueResidualSquared = 1u;
+constexpr u32 kRhsSquared = 2u;
+constexpr u32 kRelativeReferenceNorm = 3u;
+constexpr u32 kEffectiveTolerance = 4u;
+constexpr u32 kToleranceSquared = 5u;
+constexpr u32 kBeta = 6u;
+constexpr u32 kEstimatedResidual = 7u;
+constexpr u32 kPreorthogonalNorm = 8u;
+constexpr u32 kNextNorm = 9u;
+constexpr u32 kFloatCount = 16u;
+constexpr u32 kStatus = kFloatCount + 0u;
+constexpr u32 kCompletedIterations = kFloatCount + 1u;
+constexpr u32 kSolveActive = kFloatCount + 2u;
+constexpr u32 kCycleActive = kFloatCount + 3u;
+constexpr u32 kCycleCompleted = kFloatCount + 4u;
+constexpr u32 kHappy = kFloatCount + 5u;
+constexpr u32 kBreakdownReason = kFloatCount + 6u;
+constexpr u32 kCommitEnabled = kFloatCount + 7u;
+constexpr u32 kRestartCycles = kFloatCount + 8u;
+constexpr u32 kHappyBreakdowns = kFloatCount + 9u;
+constexpr u32 kStateWords = 32u;
+
+constexpr i32 kNotRun = -1;
+constexpr i32 kMaxIterations = 0;
+constexpr i32 kBreakdown = 1;
+constexpr i32 kConverged = 2;
+constexpr i32 kReasonNone = 0;
+constexpr i32 kReasonNonfinite = 1;
+constexpr i32 kReasonArnoldi = 6;
+constexpr i32 kReasonOrthogonalization = 7;
+constexpr i32 kReasonHessenberg = 8;
+
+__device__ float load_float(const u32 *state, u32 index) {
+  return bit_cast<float>(state[index]);
+}
+
+__device__ void store_float(u32 *state, u32 index, float value) {
+  state[index] = bit_cast<u32>(value);
+}
+
+__device__ i32 load_int(const u32 *state, u32 index) {
+  return bit_cast<i32>(state[index]);
+}
+
+__device__ void store_int(u32 *state, u32 index, i32 value) {
+  state[index] = bit_cast<u32>(value);
+}
+
+__device__ bool finite(float value) {
+  return sparse_refresh_finite_f32(value);
+}
+
+__device__ float abs(float value) {
+  return value < 0.0f ? -value : value;
+}
+
+__device__ float max(float lhs, float rhs) {
+  return lhs > rhs ? lhs : rhs;
+}
+
+__device__ void fail(u32 *state, i32 reason) {
+  store_int(state, kStatus, kBreakdown);
+  store_int(state, kSolveActive, 0);
+  store_int(state, kCycleActive, 0);
+  store_int(state, kCommitEnabled, 0);
+  store_int(state, kBreakdownReason, reason);
+}
+
+}  // namespace sparse_gmres
+
+// Computes every Arnoldi inner product while loading each work element once.
+// The group-major partials are finalized without floating-point atomics so the
+// primitive has the same numerical contract on CUDA and Vulkan.
+extern "C" __global__ void sparse_gmres_multi_dot_partial_f32(
+    const float *basis,
+    const float *work,
+    float *partials,
+    const u32 *state,
+    u32 n,
+    u32 basis_stride,
+    u32 basis_count,
+    u32 group_count) {
+  __shared__ float partial_sum[256];
+  const u32 local = threadIdx.x;
+  const u32 group = blockIdx.x;
+  if (group >= group_count || basis_count == 0u || basis_count > 32u) {
+    return;
+  }
+  float sums[32];
+  for (u32 row = 0u; row < basis_count; ++row) {
+    sums[row] = 0.0f;
+  }
+  if (sparse_gmres::load_int(state, sparse_gmres::kCycleActive) != 0) {
+    u32 block_begin = group * 1024u;
+    const u32 block_stride = group_count * 1024u;
+    while (block_begin < n) {
+      const u32 remaining = n - block_begin;
+      const u32 block_size = remaining < 1024u ? remaining : 1024u;
+      const u32 block_end = block_begin + block_size;
+      for (u32 index = block_begin + local; index < block_end;
+           index += 256u) {
+        const float value = work[index];
+        for (u32 row = 0u; row < basis_count; ++row) {
+          sums[row] += basis[row * basis_stride + index] * value;
+        }
+      }
+      if (remaining <= block_stride) {
+        break;
+      }
+      block_begin += block_stride;
+    }
+  }
+  for (u32 row = 0u; row < basis_count; ++row) {
+    partial_sum[local] = sums[row];
+    block_barrier();
+    for (u32 stride = 128u; stride > 0u; stride >>= 1u) {
+      if (local < stride) {
+        partial_sum[local] += partial_sum[local + stride];
+      }
+      block_barrier();
+    }
+    if (local == 0u) {
+      partials[row * group_count + group] = partial_sum[0];
+    }
+    block_barrier();
+  }
+}
+
+extern "C" __global__ void sparse_gmres_multi_dot_final_f32(
+    const float *partials,
+    float *projection,
+    const u32 *state,
+    u32 group_count,
+    u32 basis_count) {
+  __shared__ float partial_sum[256];
+  const u32 row = blockIdx.x;
+  const u32 local = threadIdx.x;
+  if (row >= basis_count) {
+    return;
+  }
+  float sum = 0.0f;
+  if (sparse_gmres::load_int(state, sparse_gmres::kCycleActive) != 0) {
+    for (u32 group = local; group < group_count; group += 256u) {
+      sum += partials[row * group_count + group];
+    }
+  }
+  partial_sum[local] = sum;
+  block_barrier();
+  for (u32 stride = 128u; stride > 0u; stride >>= 1u) {
+    if (local < stride) {
+      partial_sum[local] += partial_sum[local + stride];
+    }
+    block_barrier();
+  }
+  if (local == 0u) {
+    projection[row] = partial_sum[0];
+  }
+}
+
+extern "C" __global__ void sparse_gmres_projection_f32(
+    const float *basis,
+    float *work,
+    const float *projection,
+    float *hessenberg,
+    const u32 *state,
+    u32 n,
+    u32 basis_stride,
+    u32 restart,
+    u32 step,
+    u32 pass) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index == 0u &&
+      sparse_gmres::load_int(state, sparse_gmres::kCycleActive) != 0) {
+    for (u32 row = 0u; row <= step; ++row) {
+      float &entry = hessenberg[row * restart + step];
+      entry = pass == 0u ? projection[row] : entry + projection[row];
+    }
+  }
+  if (index >= n ||
+      sparse_gmres::load_int(state, sparse_gmres::kCycleActive) == 0) {
+    return;
+  }
+  float value = work[index];
+  for (u32 row = 0u; row <= step; ++row) {
+    value -= projection[row] * basis[row * basis_stride + index];
+  }
+  work[index] = value;
+}
+
+extern "C" __global__ void sparse_gmres_basis_f32(
+    const float *source,
+    float *basis,
+    const u32 *state,
+    u32 n,
+    u32 basis_stride,
+    u32 row,
+    u32 mode) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= n) {
+    return;
+  }
+  const bool active = mode == 0u
+      ? sparse_gmres::load_int(state, sparse_gmres::kSolveActive) != 0
+      : sparse_gmres::load_int(state, sparse_gmres::kCycleActive) != 0;
+  const float denominator = sparse_gmres::load_float(
+      state, mode == 0u ? sparse_gmres::kBeta : sparse_gmres::kNextNorm);
+  basis[row * basis_stride + index] =
+      active && denominator != 0.0f ? source[index] / denominator : 0.0f;
+}
+
+extern "C" __global__ void sparse_gmres_combine_f32(
+    const float *basis,
+    const float *coefficients,
+    float *update,
+    const u32 *state,
+    u32 n,
+    u32 basis_stride) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= n) {
+    return;
+  }
+  float value = 0.0f;
+  if (sparse_gmres::load_int(state, sparse_gmres::kCommitEnabled) != 0) {
+    const u32 used = static_cast<u32>(sparse_gmres::load_int(
+        state, sparse_gmres::kCycleCompleted));
+    for (u32 row = 0u; row < used; ++row) {
+      value += coefficients[row] * basis[row * basis_stride + index];
+    }
+  }
+  update[index] = value;
+}
+
+extern "C" __global__ void sparse_gmres_scalar_f32(
+    const float *initial_residual_squared,
+    const float *rhs_squared,
+    const float *dot0,
+    const float *dot1,
+    float *hessenberg,
+    float *cosines,
+    float *sines,
+    float *g,
+    float *coefficients,
+    u32 *state,
+    float absolute_tolerance,
+    float relative_tolerance,
+    u32 restart,
+    u32 max_iterations,
+    u32 stage,
+    u32 step,
+    u32 limit_reached) {
+  if (blockIdx.x != 0u || threadIdx.x != 0u) {
+    return;
+  }
+  using namespace sparse_gmres;
+  if (stage == 0u) {
+    for (u32 index = 0u; index < kStateWords; ++index) {
+      state[index] = 0u;
+    }
+    store_int(state, kStatus, kNotRun);
+    const float rr = initial_residual_squared[0];
+    const float rhs2 = rhs_squared[0];
+    store_float(state, kInitialResidualSquared, rr);
+    store_float(state, kTrueResidualSquared, rr);
+    store_float(state, kRhsSquared, rhs2);
+    if (!finite(rr) || rr < 0.0f || !finite(rhs2) || rhs2 < 0.0f) {
+      fail(state, kReasonNonfinite);
+      return;
+    }
+    const float reference = sparse_refresh_sqrt_f32(rhs2);
+    const float relative = relative_tolerance * reference;
+    const float tolerance =
+        absolute_tolerance > relative ? absolute_tolerance : relative;
+    const float tolerance_squared = tolerance * tolerance;
+    store_float(state, kRelativeReferenceNorm, reference);
+    store_float(state, kEffectiveTolerance, tolerance);
+    store_float(state, kToleranceSquared, tolerance_squared);
+    store_float(state, kEstimatedResidual, sparse_refresh_sqrt_f32(rr));
+    if (!finite(reference) || !finite(tolerance) ||
+        !finite(tolerance_squared)) {
+      fail(state, kReasonNonfinite);
+    } else if (rr <= tolerance_squared) {
+      store_int(state, kStatus, kConverged);
+    } else if (max_iterations == 0u || limit_reached != 0u) {
+      store_int(state, kStatus, kMaxIterations);
+    } else {
+      store_int(state, kSolveActive, 1);
+    }
+    return;
+  }
+  if (stage == 1u) {
+    store_int(state, kCycleCompleted, 0);
+    store_int(state, kHappy, 0);
+    store_int(state, kCommitEnabled, 0);
+    for (u32 index = 0u; index < restart * (restart + 1u); ++index) {
+      hessenberg[index] = 0.0f;
+    }
+    for (u32 index = 0u; index < restart; ++index) {
+      cosines[index] = 0.0f;
+      sines[index] = 0.0f;
+      coefficients[index] = 0.0f;
+      g[index] = 0.0f;
+    }
+    g[restart] = 0.0f;
+    if (load_int(state, kSolveActive) == 0) {
+      store_int(state, kCycleActive, 0);
+      return;
+    }
+    const float beta = sparse_refresh_sqrt_f32(
+        load_float(state, kTrueResidualSquared));
+    if (!finite(beta) || beta == 0.0f) {
+      fail(state, kReasonOrthogonalization);
+      return;
+    }
+    store_float(state, kBeta, beta);
+    store_float(state, kEstimatedResidual, beta);
+    g[0] = beta;
+    store_int(state, kCycleActive, 1);
+    return;
+  }
+  if (stage == 2u) {
+    if (load_int(state, kCycleActive) == 0) {
+      return;
+    }
+    const float pre_squared = dot0[0];
+    const float next_squared = dot1[0];
+    if (!finite(pre_squared) || pre_squared < 0.0f ||
+        !finite(next_squared) || next_squared < 0.0f) {
+      fail(state, kReasonOrthogonalization);
+      return;
+    }
+    const float pre_norm = sparse_refresh_sqrt_f32(pre_squared);
+    const float next_norm = sparse_refresh_sqrt_f32(next_squared);
+    if (!finite(pre_norm) || !finite(next_norm)) {
+      fail(state, kReasonOrthogonalization);
+      return;
+    }
+    store_float(state, kPreorthogonalNorm, pre_norm);
+    store_float(state, kNextNorm, next_norm);
+    hessenberg[(step + 1u) * restart + step] = next_norm;
+    for (u32 row = 0u; row < step; ++row) {
+      const float upper = hessenberg[row * restart + step];
+      const float lower = hessenberg[(row + 1u) * restart + step];
+      hessenberg[row * restart + step] =
+          cosines[row] * upper + sines[row] * lower;
+      hessenberg[(row + 1u) * restart + step] =
+          -sines[row] * upper + cosines[row] * lower;
+    }
+    const float diagonal = hessenberg[step * restart + step];
+    const float magnitude = sparse_refresh_sqrt_f32(
+        diagonal * diagonal + next_norm * next_norm);
+    if (!finite(diagonal) || !finite(magnitude)) {
+      fail(state, kReasonOrthogonalization);
+      return;
+    }
+    const bool happy = next_norm <=
+        7.62939453125e-6f * max(pre_norm, 1.1754943508222875e-38f);
+    float cosine = 1.0f;
+    float sine = 0.0f;
+    if (magnitude != 0.0f) {
+      cosine = diagonal / magnitude;
+      sine = next_norm / magnitude;
+    }
+    cosines[step] = cosine;
+    sines[step] = sine;
+    hessenberg[step * restart + step] = magnitude;
+    hessenberg[(step + 1u) * restart + step] = 0.0f;
+    const float previous_g = g[step];
+    g[step] = cosine * previous_g;
+    g[step + 1u] = -sine * previous_g;
+    const float estimate = abs(g[step + 1u]);
+    store_float(state, kEstimatedResidual, estimate);
+    store_int(state, kCompletedIterations,
+              load_int(state, kCompletedIterations) + 1);
+    store_int(state, kCycleCompleted,
+              load_int(state, kCycleCompleted) + 1);
+    store_int(state, kHappy, happy ? 1 : 0);
+    const bool converged =
+        estimate <= load_float(state, kEffectiveTolerance);
+    const bool at_limit = static_cast<u32>(
+        load_int(state, kCompletedIterations)) >= max_iterations;
+    if (happy || converged || at_limit || step + 1u >= restart) {
+      store_int(state, kCycleActive, 0);
+    }
+    return;
+  }
+  if (stage == 3u) {
+    store_int(state, kCommitEnabled, 0);
+    if (load_int(state, kSolveActive) == 0) {
+      return;
+    }
+    const i32 signed_used = load_int(state, kCycleCompleted);
+    if (signed_used <= 0 || static_cast<u32>(signed_used) > restart) {
+      fail(state, kReasonHessenberg);
+      return;
+    }
+    const u32 used = static_cast<u32>(signed_used);
+    for (i32 row = signed_used - 1; row >= 0; --row) {
+      float value = g[static_cast<u32>(row)];
+      float row_scale = 1.0f;
+      for (u32 column = static_cast<u32>(row) + 1u; column < used;
+           ++column) {
+        const float entry =
+            hessenberg[static_cast<u32>(row) * restart + column];
+        value -= entry * coefficients[column];
+        row_scale = max(row_scale, abs(entry));
+      }
+      const float pivot =
+          hessenberg[static_cast<u32>(row) * restart +
+                     static_cast<u32>(row)];
+      if (!finite(value) || !finite(pivot) ||
+          abs(pivot) <= 3.814697265625e-6f * row_scale) {
+        fail(state, kReasonHessenberg);
+        return;
+      }
+      coefficients[static_cast<u32>(row)] = value / pivot;
+      if (!finite(coefficients[static_cast<u32>(row)])) {
+        fail(state, kReasonHessenberg);
+        return;
+      }
+    }
+    store_int(state, kCommitEnabled, 1);
+    return;
+  }
+  if (stage == 4u) {
+    store_int(state, kCommitEnabled, 0);
+    store_int(state, kRestartCycles,
+              load_int(state, kRestartCycles) + 1);
+    const float rr = dot0[0];
+    store_float(state, kTrueResidualSquared, rr);
+    if (!finite(rr) || rr < 0.0f) {
+      fail(state, kReasonNonfinite);
+      return;
+    }
+    if (rr <= load_float(state, kToleranceSquared)) {
+      if (load_int(state, kHappy) != 0) {
+        store_int(state, kHappyBreakdowns,
+                  load_int(state, kHappyBreakdowns) + 1);
+      }
+      store_int(state, kStatus, kConverged);
+      store_int(state, kSolveActive, 0);
+      store_int(state, kCycleActive, 0);
+      store_int(state, kBreakdownReason, kReasonNone);
+      return;
+    }
+    if (load_int(state, kStatus) == kBreakdown) {
+      store_int(state, kSolveActive, 0);
+      return;
+    }
+    if (load_int(state, kHappy) != 0) {
+      fail(state, kReasonArnoldi);
+      return;
+    }
+    if (static_cast<u32>(load_int(state, kCompletedIterations)) >=
+            max_iterations ||
+        limit_reached != 0u) {
+      store_int(state, kStatus, kMaxIterations);
+      store_int(state, kSolveActive, 0);
+      store_int(state, kCycleActive, 0);
+      return;
+    }
+    store_int(state, kStatus, kNotRun);
+    store_int(state, kSolveActive, 1);
+    store_int(state, kCycleActive, 0);
+    store_int(state, kBreakdownReason, kReasonNone);
+    return;
+  }
+  fail(state, kReasonNonfinite);
+}
+
 extern "C" __global__ void sparse_diagonal_refresh_f32(
     const float *values,
     const i32 *diagonal_offsets,

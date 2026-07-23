@@ -854,6 +854,24 @@ static const uint32_t kSparseBicgstabCommitF32Spv[] =
 static const uint32_t kSparseBicgstabReconcileF32Spv[] =
 #include "taichi/program/vulkan_sort_shaders/sparse_bicgstab_reconcile_f32.comp.spv.h"
     ;
+static const uint32_t kSparseGmresMultiDotPartialF32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/sparse_gmres_multi_dot_partial_f32.comp.spv.h"
+    ;
+static const uint32_t kSparseGmresMultiDotFinalF32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/sparse_gmres_multi_dot_final_f32.comp.spv.h"
+    ;
+static const uint32_t kSparseGmresProjectionF32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/sparse_gmres_projection_f32.comp.spv.h"
+    ;
+static const uint32_t kSparseGmresBasisF32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/sparse_gmres_basis_f32.comp.spv.h"
+    ;
+static const uint32_t kSparseGmresCombineF32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/sparse_gmres_combine_f32.comp.spv.h"
+    ;
+static const uint32_t kSparseGmresScalarF32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/sparse_gmres_scalar_f32.comp.spv.h"
+    ;
 static const uint32_t kSparseTripletPackF32Spv[] =
 #include "taichi/program/vulkan_sort_shaders/sparse_triplet_pack_f32.comp.spv.h"
     ;
@@ -4626,6 +4644,12 @@ struct VulkanSparseAlgebraCache {
   std::unique_ptr<Pipeline> sparse_bicgstab_intermediate_f32;
   std::unique_ptr<Pipeline> sparse_bicgstab_commit_f32;
   std::unique_ptr<Pipeline> sparse_bicgstab_reconcile_f32;
+  std::unique_ptr<Pipeline> sparse_gmres_multi_dot_partial_f32;
+  std::unique_ptr<Pipeline> sparse_gmres_multi_dot_final_f32;
+  std::unique_ptr<Pipeline> sparse_gmres_projection_f32;
+  std::unique_ptr<Pipeline> sparse_gmres_basis_f32;
+  std::unique_ptr<Pipeline> sparse_gmres_combine_f32;
+  std::unique_ptr<Pipeline> sparse_gmres_scalar_f32;
   std::unique_ptr<Pipeline> sparse_triplet_pack_f32;
   std::unique_ptr<Pipeline> sparse_triplet_pack_packed_f32;
   std::unique_ptr<Pipeline> sparse_segment_flags_u64;
@@ -4655,6 +4679,12 @@ struct VulkanSparseAlgebraCache {
   VulkanResourceSetReplayRing<4> sparse_bicgstab_intermediate_bindings;
   VulkanResourceSetReplayRing<7> sparse_bicgstab_commit_bindings;
   VulkanResourceSetReplayRing<7> sparse_bicgstab_reconcile_bindings;
+  VulkanResourceSetReplayRing<4> sparse_gmres_multi_dot_partial_bindings;
+  VulkanResourceSetReplayRing<3> sparse_gmres_multi_dot_final_bindings;
+  VulkanResourceSetReplayRing<5> sparse_gmres_projection_bindings;
+  VulkanResourceSetReplayRing<3> sparse_gmres_basis_bindings;
+  VulkanResourceSetReplayRing<4> sparse_gmres_combine_bindings;
+  VulkanResourceSetReplayRing<10> sparse_gmres_scalar_bindings;
   VulkanResourceSetReplayRing<5> sparse_triplet_pack_packed_bindings;
   VulkanResourceSetReplayRing<4> sparse_segment_flags_bindings;
   VulkanResourceSetReplayRing<6> sparse_segment_scatter_bindings;
@@ -4683,6 +4713,12 @@ struct VulkanSparseAlgebraCache {
   VulkanCommandReplayCache sparse_bicgstab_intermediate_command_replay;
   VulkanCommandReplayCache sparse_bicgstab_commit_command_replay;
   VulkanCommandReplayCache sparse_bicgstab_reconcile_command_replay;
+  VulkanCommandReplayCache sparse_gmres_multi_dot_partial_command_replay;
+  VulkanCommandReplayCache sparse_gmres_multi_dot_final_command_replay;
+  VulkanCommandReplayCache sparse_gmres_projection_command_replay;
+  VulkanCommandReplayCache sparse_gmres_basis_command_replay;
+  VulkanCommandReplayCache sparse_gmres_combine_command_replay;
+  VulkanCommandReplayCache sparse_gmres_scalar_command_replay;
   VulkanCommandReplayCache sparse_triplet_pack_packed_command_replay;
   VulkanCommandReplayCache sparse_segment_flags_command_replay;
   VulkanCommandReplayCache sparse_segment_scatter_command_replay;
@@ -4714,6 +4750,12 @@ struct VulkanSparseAlgebraCache {
     sparse_bicgstab_intermediate_bindings.reset();
     sparse_bicgstab_commit_bindings.reset();
     sparse_bicgstab_reconcile_bindings.reset();
+    sparse_gmres_multi_dot_partial_bindings.reset();
+    sparse_gmres_multi_dot_final_bindings.reset();
+    sparse_gmres_projection_bindings.reset();
+    sparse_gmres_basis_bindings.reset();
+    sparse_gmres_combine_bindings.reset();
+    sparse_gmres_scalar_bindings.reset();
     sparse_triplet_pack_packed_bindings.reset();
     sparse_segment_flags_bindings.reset();
     sparse_segment_scatter_bindings.reset();
@@ -4742,6 +4784,12 @@ struct VulkanSparseAlgebraCache {
     sparse_bicgstab_intermediate_command_replay.reset();
     sparse_bicgstab_commit_command_replay.reset();
     sparse_bicgstab_reconcile_command_replay.reset();
+    sparse_gmres_multi_dot_partial_command_replay.reset();
+    sparse_gmres_multi_dot_final_command_replay.reset();
+    sparse_gmres_projection_command_replay.reset();
+    sparse_gmres_basis_command_replay.reset();
+    sparse_gmres_combine_command_replay.reset();
+    sparse_gmres_scalar_command_replay.reset();
     sparse_triplet_pack_packed_command_replay.reset();
     sparse_segment_flags_command_replay.reset();
     sparse_segment_scatter_command_replay.reset();
@@ -4790,6 +4838,12 @@ struct VulkanSparseAlgebraCache {
     sparse_bicgstab_intermediate_f32.reset();
     sparse_bicgstab_commit_f32.reset();
     sparse_bicgstab_reconcile_f32.reset();
+    sparse_gmres_multi_dot_partial_f32.reset();
+    sparse_gmres_multi_dot_final_f32.reset();
+    sparse_gmres_projection_f32.reset();
+    sparse_gmres_basis_f32.reset();
+    sparse_gmres_combine_f32.reset();
+    sparse_gmres_scalar_f32.reset();
     sparse_triplet_pack_f32.reset();
     sparse_triplet_pack_packed_f32.reset();
     sparse_segment_flags_u64.reset();
@@ -5028,6 +5082,66 @@ struct VulkanSparseAlgebraCache {
           "vulkan_sparse_bicgstab_reconcile_f32");
     }
     return sparse_bicgstab_reconcile_f32.get();
+  }
+
+  Pipeline *sparse_gmres_multi_dot_partial_pipeline(Device *dev) {
+    ensure_device(dev);
+    if (!sparse_gmres_multi_dot_partial_f32) {
+      sparse_gmres_multi_dot_partial_f32 = create_pipeline_from_spv(
+          dev, kSparseGmresMultiDotPartialF32Spv,
+          sizeof(kSparseGmresMultiDotPartialF32Spv),
+          "vulkan_sparse_gmres_multi_dot_partial_f32");
+    }
+    return sparse_gmres_multi_dot_partial_f32.get();
+  }
+  Pipeline *sparse_gmres_multi_dot_final_pipeline(Device *dev) {
+    ensure_device(dev);
+    if (!sparse_gmres_multi_dot_final_f32) {
+      sparse_gmres_multi_dot_final_f32 = create_pipeline_from_spv(
+          dev, kSparseGmresMultiDotFinalF32Spv,
+          sizeof(kSparseGmresMultiDotFinalF32Spv),
+          "vulkan_sparse_gmres_multi_dot_final_f32");
+    }
+    return sparse_gmres_multi_dot_final_f32.get();
+  }
+  Pipeline *sparse_gmres_projection_pipeline(Device *dev) {
+    ensure_device(dev);
+    if (!sparse_gmres_projection_f32) {
+      sparse_gmres_projection_f32 = create_pipeline_from_spv(
+          dev, kSparseGmresProjectionF32Spv,
+          sizeof(kSparseGmresProjectionF32Spv),
+          "vulkan_sparse_gmres_projection_f32");
+    }
+    return sparse_gmres_projection_f32.get();
+  }
+  Pipeline *sparse_gmres_basis_pipeline(Device *dev) {
+    ensure_device(dev);
+    if (!sparse_gmres_basis_f32) {
+      sparse_gmres_basis_f32 = create_pipeline_from_spv(
+          dev, kSparseGmresBasisF32Spv, sizeof(kSparseGmresBasisF32Spv),
+          "vulkan_sparse_gmres_basis_f32");
+    }
+    return sparse_gmres_basis_f32.get();
+  }
+  Pipeline *sparse_gmres_combine_pipeline(Device *dev) {
+    ensure_device(dev);
+    if (!sparse_gmres_combine_f32) {
+      sparse_gmres_combine_f32 = create_pipeline_from_spv(
+          dev, kSparseGmresCombineF32Spv,
+          sizeof(kSparseGmresCombineF32Spv),
+          "vulkan_sparse_gmres_combine_f32");
+    }
+    return sparse_gmres_combine_f32.get();
+  }
+  Pipeline *sparse_gmres_scalar_pipeline(Device *dev) {
+    ensure_device(dev);
+    if (!sparse_gmres_scalar_f32) {
+      sparse_gmres_scalar_f32 = create_pipeline_from_spv(
+          dev, kSparseGmresScalarF32Spv,
+          sizeof(kSparseGmresScalarF32Spv),
+          "vulkan_sparse_gmres_scalar_f32");
+    }
+    return sparse_gmres_scalar_f32.get();
   }
 
   Pipeline *sparse_triplet_pack_pipeline(Device *dev) {
@@ -5477,6 +5591,100 @@ struct VulkanSparseAlgebraCache {
             rw_buffer_request(allocs[4], 0, vector_bytes),
             rw_buffer_request(allocs[5], 0, vector_bytes),
             rw_buffer_request(allocs[6], 0, 24 * sizeof(uint32_t))});
+  }
+
+  VulkanReplayResourceSet<4> bind_sparse_gmres_multi_dot_partial(
+      Program *program,
+      const std::array<DeviceAllocation, 4> &allocs,
+      size_t basis_bytes,
+      size_t vector_bytes,
+      size_t partial_bytes) {
+    return sparse_gmres_multi_dot_partial_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 4>{
+            rw_buffer_request(allocs[0], 0, basis_bytes),
+            rw_buffer_request(allocs[1], 0, vector_bytes),
+            rw_buffer_request(allocs[2], 0, partial_bytes),
+            rw_buffer_request(allocs[3], 0, 32 * sizeof(uint32_t))});
+  }
+
+  VulkanReplayResourceSet<3> bind_sparse_gmres_multi_dot_final(
+      Program *program,
+      const std::array<DeviceAllocation, 3> &allocs,
+      size_t partial_bytes,
+      size_t projection_bytes) {
+    return sparse_gmres_multi_dot_final_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 3>{
+            rw_buffer_request(allocs[0], 0, partial_bytes),
+            rw_buffer_request(allocs[1], 0, projection_bytes),
+            rw_buffer_request(allocs[2], 0, 32 * sizeof(uint32_t))});
+  }
+
+  VulkanReplayResourceSet<5> bind_sparse_gmres_projection(
+      Program *program,
+      const std::array<DeviceAllocation, 5> &allocs,
+      size_t basis_bytes,
+      size_t vector_bytes,
+      size_t projection_bytes,
+      size_t hessenberg_bytes) {
+    return sparse_gmres_projection_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 5>{
+            rw_buffer_request(allocs[0], 0, basis_bytes),
+            rw_buffer_request(allocs[1], 0, vector_bytes),
+            rw_buffer_request(allocs[2], 0, projection_bytes),
+            rw_buffer_request(allocs[3], 0, hessenberg_bytes),
+            rw_buffer_request(allocs[4], 0, 32 * sizeof(uint32_t))});
+  }
+
+  VulkanReplayResourceSet<3> bind_sparse_gmres_basis(
+      Program *program,
+      const std::array<DeviceAllocation, 3> &allocs,
+      size_t vector_bytes,
+      size_t basis_bytes) {
+    return sparse_gmres_basis_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 3>{
+            rw_buffer_request(allocs[0], 0, vector_bytes),
+            rw_buffer_request(allocs[1], 0, basis_bytes),
+            rw_buffer_request(allocs[2], 0, 32 * sizeof(uint32_t))});
+  }
+
+  VulkanReplayResourceSet<4> bind_sparse_gmres_combine(
+      Program *program,
+      const std::array<DeviceAllocation, 4> &allocs,
+      size_t basis_bytes,
+      size_t coefficient_bytes,
+      size_t vector_bytes) {
+    return sparse_gmres_combine_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 4>{
+            rw_buffer_request(allocs[0], 0, basis_bytes),
+            rw_buffer_request(allocs[1], 0, coefficient_bytes),
+            rw_buffer_request(allocs[2], 0, vector_bytes),
+            rw_buffer_request(allocs[3], 0, 32 * sizeof(uint32_t))});
+  }
+
+  VulkanReplayResourceSet<10> bind_sparse_gmres_scalar(
+      Program *program,
+      const std::array<DeviceAllocation, 10> &allocs,
+      size_t hessenberg_bytes,
+      size_t restart_bytes,
+      size_t g_bytes) {
+    return sparse_gmres_scalar_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 10>{
+            rw_buffer_request(allocs[0], 0, sizeof(float32)),
+            rw_buffer_request(allocs[1], 0, sizeof(float32)),
+            rw_buffer_request(allocs[2], 0, sizeof(float32)),
+            rw_buffer_request(allocs[3], 0, sizeof(float32)),
+            rw_buffer_request(allocs[4], 0, hessenberg_bytes),
+            rw_buffer_request(allocs[5], 0, restart_bytes),
+            rw_buffer_request(allocs[6], 0, restart_bytes),
+            rw_buffer_request(allocs[7], 0, g_bytes),
+            rw_buffer_request(allocs[8], 0, restart_bytes),
+            rw_buffer_request(allocs[9], 0, 32 * sizeof(uint32_t))});
   }
 
   VulkanReplayResourceSet<7> bind_sparse_triplet_pack(
@@ -12049,6 +12257,526 @@ std::size_t Program::vulkan_sparse_bicgstab_reconcile(
   key.push_ptr(pipeline);
   key.push_ptr(bindings);
   if (!cache.sparse_bicgstab_reconcile_command_replay.submit_or_record(
+          this, device, key, profiler_scopes, record)) {
+    enqueue_compute_op_lambda(record, {});
+  }
+  return cache.allocated_bytes();
+}
+
+std::size_t Program::vulkan_sparse_gmres_multi_dot(
+    Ndarray *basis,
+    Ndarray *work,
+    Ndarray *partials,
+    Ndarray *projection,
+    Ndarray *state,
+    std::size_t n,
+    std::size_t basis_stride,
+    std::size_t basis_count,
+    std::size_t group_count) {
+  auto submission_guard = acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(!vulkan_sparse_algebra_available(),
+              "Vulkan sparse GMRES is only available on Vulkan.");
+  TI_ERROR_IF(n == 0 || n > std::numeric_limits<uint32_t>::max() ||
+                  basis_stride < n ||
+                  basis_stride > std::numeric_limits<uint32_t>::max() ||
+                  basis_count == 0 || basis_count > 32 ||
+                  group_count == 0 || group_count > 65535,
+              "Vulkan sparse GMRES multi-dot received invalid geometry.");
+  TI_ERROR_IF(!basis || basis->shape.size() != 1 ||
+                  basis->get_element_data_type() != PrimitiveType::f32 ||
+                  !basis->get_element_shape().empty() ||
+                  basis->get_element_size() != sizeof(float32) ||
+                  basis->get_nelement() < basis_count * basis_stride,
+              "Vulkan sparse GMRES basis storage is too small.");
+  check_vulkan_sparse_f32_vector("GMRES work", work, n);
+  check_vulkan_sparse_f32_vector(
+      "GMRES multi-dot partials", partials, basis_count * group_count);
+  check_vulkan_sparse_f32_vector(
+      "GMRES projection", projection, basis_count);
+  check_vulkan_sparse_i32_vector("GMRES state", state, 32);
+  const std::array<DeviceAllocation, 5> all_allocs{
+      basis->get_device_allocation(), work->get_device_allocation(),
+      partials->get_device_allocation(), projection->get_device_allocation(),
+      state->get_device_allocation()};
+  for (std::size_t i = 0; i < all_allocs.size(); ++i) {
+    for (std::size_t j = i + 1; j < all_allocs.size(); ++j) {
+      TI_ERROR_IF(all_allocs[i] == all_allocs[j],
+                  "Vulkan sparse GMRES multi-dot buffers must not alias.");
+    }
+  }
+  const Ndarray *resources[] = {basis, work, partials, projection, state};
+  retain_ndarrays_for_external_submission(resources, std::size(resources));
+  const size_t basis_bytes =
+      basis->get_nelement() * sizeof(float32);
+  const size_t vector_bytes = n * sizeof(float32);
+  const size_t partial_bytes =
+      basis_count * group_count * sizeof(float32);
+  const size_t projection_bytes = basis_count * sizeof(float32);
+  Device *device = get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan sparse GMRES requires a compute device.");
+  auto cache_lease = get_sparse_algebra_cache(this, device);
+  auto &cache = *cache_lease;
+  Pipeline *partial_pipeline =
+      cache.sparse_gmres_multi_dot_partial_pipeline(device);
+  const std::array<DeviceAllocation, 4> partial_allocs{
+      all_allocs[0], all_allocs[1], all_allocs[2], all_allocs[4]};
+  ShaderResourceSet *partial_bindings =
+      cache
+          .bind_sparse_gmres_multi_dot_partial(
+              this, partial_allocs, basis_bytes, vector_bytes, partial_bytes)
+          .bindings;
+  const std::array<uint32_t, 4> partial_params{
+      static_cast<uint32_t>(n), static_cast<uint32_t>(basis_stride),
+      static_cast<uint32_t>(basis_count),
+      static_cast<uint32_t>(group_count)};
+  const bool profiler_scopes = profiler != nullptr;
+  auto record_partial =
+      [partial_allocs, partial_bytes, partial_pipeline, partial_bindings,
+       partial_params,
+       profiler_scopes](Device *, CommandList *cmdlist) {
+        dispatch_pipeline_with_push_constants(
+            cmdlist, partial_pipeline, partial_bindings,
+            partial_params.data(), sizeof(partial_params),
+            partial_params[3], 1, 1,
+            profiler_scopes
+                ? "vulkan_sparse_gmres_multi_dot_partial_f32"
+                : nullptr);
+        cmdlist->buffer_barrier(partial_allocs[2].get_ptr(0),
+                                partial_bytes);
+      };
+  VulkanCommandReplayKey partial_key;
+  partial_key.push(160);
+  push_vulkan_command_key_range(partial_key, partial_allocs[0], 0,
+                                basis_bytes);
+  push_vulkan_command_key_range(partial_key, partial_allocs[1], 0,
+                                vector_bytes);
+  push_vulkan_command_key_range(partial_key, partial_allocs[2], 0,
+                                partial_bytes);
+  push_vulkan_command_key_range(partial_key, partial_allocs[3], 0,
+                                32 * sizeof(uint32_t));
+  for (uint32_t word : partial_params) {
+    partial_key.push(word);
+  }
+  partial_key.push_ptr(partial_pipeline);
+  partial_key.push_ptr(partial_bindings);
+  if (!cache.sparse_gmres_multi_dot_partial_command_replay.submit_or_record(
+          this, device, partial_key, profiler_scopes, record_partial)) {
+    enqueue_compute_op_lambda(record_partial, {});
+  }
+
+  Pipeline *final_pipeline =
+      cache.sparse_gmres_multi_dot_final_pipeline(device);
+  const std::array<DeviceAllocation, 3> final_allocs{
+      all_allocs[2], all_allocs[3], all_allocs[4]};
+  ShaderResourceSet *final_bindings =
+      cache
+          .bind_sparse_gmres_multi_dot_final(
+              this, final_allocs, partial_bytes, projection_bytes)
+          .bindings;
+  const std::array<uint32_t, 4> final_params{
+      static_cast<uint32_t>(group_count),
+      static_cast<uint32_t>(basis_count), 0u, 0u};
+  auto record_final =
+      [final_allocs, projection_bytes, final_pipeline, final_bindings,
+       final_params,
+       profiler_scopes](Device *, CommandList *cmdlist) {
+        dispatch_pipeline_with_push_constants(
+            cmdlist, final_pipeline, final_bindings, final_params.data(),
+            sizeof(final_params), final_params[1], 1, 1,
+            profiler_scopes
+                ? "vulkan_sparse_gmres_multi_dot_final_f32"
+                : nullptr);
+        cmdlist->buffer_barrier(final_allocs[1].get_ptr(0),
+                                projection_bytes);
+      };
+  VulkanCommandReplayKey final_key;
+  final_key.push(161);
+  push_vulkan_command_key_range(final_key, final_allocs[0], 0,
+                                partial_bytes);
+  push_vulkan_command_key_range(final_key, final_allocs[1], 0,
+                                projection_bytes);
+  push_vulkan_command_key_range(final_key, final_allocs[2], 0,
+                                32 * sizeof(uint32_t));
+  for (uint32_t word : final_params) {
+    final_key.push(word);
+  }
+  final_key.push_ptr(final_pipeline);
+  final_key.push_ptr(final_bindings);
+  if (!cache.sparse_gmres_multi_dot_final_command_replay.submit_or_record(
+          this, device, final_key, profiler_scopes, record_final)) {
+    enqueue_compute_op_lambda(record_final, {});
+  }
+  return cache.allocated_bytes();
+}
+
+std::size_t Program::vulkan_sparse_gmres_projection(
+    Ndarray *basis,
+    Ndarray *work,
+    Ndarray *projection,
+    Ndarray *hessenberg,
+    Ndarray *state,
+    std::size_t n,
+    std::size_t basis_stride,
+    std::size_t restart,
+    std::size_t step,
+    std::size_t pass) {
+  auto submission_guard = acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(!vulkan_sparse_algebra_available(),
+              "Vulkan sparse GMRES is only available on Vulkan.");
+  TI_ERROR_IF(n == 0 || n > std::numeric_limits<uint32_t>::max() ||
+                  basis_stride < n ||
+                  basis_stride > std::numeric_limits<uint32_t>::max() ||
+                  (restart != 8 && restart != 16 && restart != 32) ||
+                  step >= restart || pass > 1,
+              "Vulkan sparse GMRES projection received invalid controls.");
+  check_vulkan_sparse_f32_vector(
+      "GMRES basis", basis, (restart + 1) * basis_stride);
+  check_vulkan_sparse_f32_vector("GMRES work", work, n);
+  check_vulkan_sparse_f32_vector("GMRES projection", projection, restart);
+  check_vulkan_sparse_f32_vector(
+      "GMRES Hessenberg storage", hessenberg, restart * (restart + 1));
+  check_vulkan_sparse_i32_vector("GMRES state", state, 32);
+  const std::array<DeviceAllocation, 5> allocs{
+      basis->get_device_allocation(), work->get_device_allocation(),
+      projection->get_device_allocation(), hessenberg->get_device_allocation(),
+      state->get_device_allocation()};
+  for (std::size_t i = 0; i < allocs.size(); ++i) {
+    for (std::size_t j = i + 1; j < allocs.size(); ++j) {
+      TI_ERROR_IF(allocs[i] == allocs[j],
+                  "Vulkan sparse GMRES projection buffers must not alias.");
+    }
+  }
+  const Ndarray *resources[] = {basis, work, projection, hessenberg, state};
+  retain_ndarrays_for_external_submission(resources, std::size(resources));
+  const size_t basis_bytes =
+      (restart + 1) * basis_stride * sizeof(float32);
+  const size_t vector_bytes = n * sizeof(float32);
+  const size_t projection_bytes = restart * sizeof(float32);
+  const size_t hessenberg_bytes =
+      restart * (restart + 1) * sizeof(float32);
+  Device *device = get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan sparse GMRES requires a compute device.");
+  auto cache_lease = get_sparse_algebra_cache(this, device);
+  auto &cache = *cache_lease;
+  Pipeline *pipeline = cache.sparse_gmres_projection_pipeline(device);
+  ShaderResourceSet *bindings =
+      cache
+          .bind_sparse_gmres_projection(
+              this, allocs, basis_bytes, vector_bytes, projection_bytes,
+              hessenberg_bytes)
+          .bindings;
+  const std::array<uint32_t, 5> params{
+      static_cast<uint32_t>(n), static_cast<uint32_t>(basis_stride),
+      static_cast<uint32_t>(restart), static_cast<uint32_t>(step),
+      static_cast<uint32_t>(pass)};
+  constexpr std::size_t kMaxDispatchGroups = 65535;
+  const uint32_t groups = static_cast<uint32_t>(std::min(
+      kMaxDispatchGroups, (n + kBlockSize - 1) / kBlockSize));
+  const bool profiler_scopes = profiler != nullptr;
+  auto record =
+      [allocs, vector_bytes, hessenberg_bytes, pipeline, bindings, params,
+       groups, profiler_scopes](Device *, CommandList *cmdlist) {
+        dispatch_pipeline_with_push_constants(
+            cmdlist, pipeline, bindings, params.data(), sizeof(params),
+            groups, 1, 1,
+            profiler_scopes ? "vulkan_sparse_gmres_projection_f32"
+                            : nullptr);
+        cmdlist->buffer_barrier(allocs[1].get_ptr(0), vector_bytes);
+        cmdlist->buffer_barrier(allocs[3].get_ptr(0), hessenberg_bytes);
+      };
+  VulkanCommandReplayKey key;
+  key.push(162);
+  push_vulkan_command_key_range(key, allocs[0], 0, basis_bytes);
+  push_vulkan_command_key_range(key, allocs[1], 0, vector_bytes);
+  push_vulkan_command_key_range(key, allocs[2], 0, projection_bytes);
+  push_vulkan_command_key_range(key, allocs[3], 0, hessenberg_bytes);
+  push_vulkan_command_key_range(key, allocs[4], 0,
+                                32 * sizeof(uint32_t));
+  for (uint32_t word : params) {
+    key.push(word);
+  }
+  key.push(groups);
+  key.push_ptr(pipeline);
+  key.push_ptr(bindings);
+  if (!cache.sparse_gmres_projection_command_replay.submit_or_record(
+          this, device, key, profiler_scopes, record)) {
+    enqueue_compute_op_lambda(record, {});
+  }
+  return cache.allocated_bytes();
+}
+
+std::size_t Program::vulkan_sparse_gmres_basis(
+    Ndarray *source,
+    Ndarray *basis,
+    Ndarray *state,
+    std::size_t n,
+    std::size_t basis_stride,
+    std::size_t row,
+    std::size_t mode) {
+  auto submission_guard = acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(!vulkan_sparse_algebra_available(),
+              "Vulkan sparse GMRES is only available on Vulkan.");
+  TI_ERROR_IF(n == 0 || n > std::numeric_limits<uint32_t>::max() ||
+                  basis_stride < n ||
+                  basis_stride > std::numeric_limits<uint32_t>::max() ||
+                  row > 32 || mode > 1,
+              "Vulkan sparse GMRES basis update received invalid controls.");
+  check_vulkan_sparse_f32_vector("GMRES basis source", source, n);
+  TI_ERROR_IF(!basis || basis->shape.size() != 1 ||
+                  basis->get_element_data_type() != PrimitiveType::f32 ||
+                  !basis->get_element_shape().empty() ||
+                  basis->get_element_size() != sizeof(float32) ||
+                  basis->get_nelement() < (row + 1) * basis_stride,
+              "Vulkan sparse GMRES basis storage is too small.");
+  check_vulkan_sparse_i32_vector("GMRES state", state, 32);
+  const std::array<DeviceAllocation, 3> allocs{
+      source->get_device_allocation(), basis->get_device_allocation(),
+      state->get_device_allocation()};
+  TI_ERROR_IF(allocs[0] == allocs[1] || allocs[0] == allocs[2] ||
+                  allocs[1] == allocs[2],
+              "Vulkan sparse GMRES basis buffers must not alias.");
+  const Ndarray *resources[] = {source, basis, state};
+  retain_ndarrays_for_external_submission(resources, std::size(resources));
+  const size_t vector_bytes = n * sizeof(float32);
+  const size_t basis_bytes = basis->get_nelement() * sizeof(float32);
+  Device *device = get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan sparse GMRES requires a compute device.");
+  auto cache_lease = get_sparse_algebra_cache(this, device);
+  auto &cache = *cache_lease;
+  Pipeline *pipeline = cache.sparse_gmres_basis_pipeline(device);
+  ShaderResourceSet *bindings =
+      cache.bind_sparse_gmres_basis(
+               this, allocs, vector_bytes, basis_bytes)
+          .bindings;
+  const std::array<uint32_t, 4> params{
+      static_cast<uint32_t>(n), static_cast<uint32_t>(basis_stride),
+      static_cast<uint32_t>(row), static_cast<uint32_t>(mode)};
+  constexpr std::size_t kMaxDispatchGroups = 65535;
+  const uint32_t groups = static_cast<uint32_t>(std::min(
+      kMaxDispatchGroups, (n + kBlockSize - 1) / kBlockSize));
+  const bool profiler_scopes = profiler != nullptr;
+  auto record = [allocs, basis_bytes, pipeline, bindings, params, groups,
+                 profiler_scopes](Device *, CommandList *cmdlist) {
+    dispatch_pipeline_with_push_constants(
+        cmdlist, pipeline, bindings, params.data(), sizeof(params), groups,
+        1, 1, profiler_scopes ? "vulkan_sparse_gmres_basis_f32" : nullptr);
+    cmdlist->buffer_barrier(allocs[1].get_ptr(0), basis_bytes);
+  };
+  VulkanCommandReplayKey key;
+  key.push(163);
+  push_vulkan_command_key_range(key, allocs[0], 0, vector_bytes);
+  push_vulkan_command_key_range(key, allocs[1], 0, basis_bytes);
+  push_vulkan_command_key_range(key, allocs[2], 0,
+                                32 * sizeof(uint32_t));
+  for (uint32_t word : params) {
+    key.push(word);
+  }
+  key.push(groups);
+  key.push_ptr(pipeline);
+  key.push_ptr(bindings);
+  if (!cache.sparse_gmres_basis_command_replay.submit_or_record(
+          this, device, key, profiler_scopes, record)) {
+    enqueue_compute_op_lambda(record, {});
+  }
+  return cache.allocated_bytes();
+}
+
+std::size_t Program::vulkan_sparse_gmres_combine(
+    Ndarray *basis,
+    Ndarray *coefficients,
+    Ndarray *update,
+    Ndarray *state,
+    std::size_t n,
+    std::size_t basis_stride) {
+  auto submission_guard = acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(!vulkan_sparse_algebra_available(),
+              "Vulkan sparse GMRES is only available on Vulkan.");
+  TI_ERROR_IF(n == 0 || n > std::numeric_limits<uint32_t>::max() ||
+                  basis_stride < n ||
+                  basis_stride > std::numeric_limits<uint32_t>::max(),
+              "Vulkan sparse GMRES basis combination received invalid "
+              "geometry.");
+  const std::size_t restart = coefficients->get_nelement();
+  TI_ERROR_IF(restart != 8 && restart != 16 && restart != 32,
+              "Vulkan sparse GMRES coefficients require restart 8, 16, or "
+              "32.");
+  check_vulkan_sparse_f32_vector(
+      "GMRES basis", basis, (restart + 1) * basis_stride);
+  check_vulkan_sparse_f32_vector(
+      "GMRES coefficients", coefficients, restart);
+  check_vulkan_sparse_f32_vector("GMRES update", update, n);
+  check_vulkan_sparse_i32_vector("GMRES state", state, 32);
+  const std::array<DeviceAllocation, 4> allocs{
+      basis->get_device_allocation(), coefficients->get_device_allocation(),
+      update->get_device_allocation(), state->get_device_allocation()};
+  for (std::size_t i = 0; i < allocs.size(); ++i) {
+    for (std::size_t j = i + 1; j < allocs.size(); ++j) {
+      TI_ERROR_IF(allocs[i] == allocs[j],
+                  "Vulkan sparse GMRES combination buffers must not alias.");
+    }
+  }
+  const Ndarray *resources[] = {basis, coefficients, update, state};
+  retain_ndarrays_for_external_submission(resources, std::size(resources));
+  const size_t basis_bytes =
+      (restart + 1) * basis_stride * sizeof(float32);
+  const size_t coefficient_bytes = restart * sizeof(float32);
+  const size_t vector_bytes = n * sizeof(float32);
+  Device *device = get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan sparse GMRES requires a compute device.");
+  auto cache_lease = get_sparse_algebra_cache(this, device);
+  auto &cache = *cache_lease;
+  Pipeline *pipeline = cache.sparse_gmres_combine_pipeline(device);
+  ShaderResourceSet *bindings =
+      cache
+          .bind_sparse_gmres_combine(
+              this, allocs, basis_bytes, coefficient_bytes, vector_bytes)
+          .bindings;
+  const std::array<uint32_t, 4> params{
+      static_cast<uint32_t>(n), static_cast<uint32_t>(basis_stride), 0u, 0u};
+  constexpr std::size_t kMaxDispatchGroups = 65535;
+  const uint32_t groups = static_cast<uint32_t>(std::min(
+      kMaxDispatchGroups, (n + kBlockSize - 1) / kBlockSize));
+  const bool profiler_scopes = profiler != nullptr;
+  auto record = [allocs, vector_bytes, pipeline, bindings, params, groups,
+                 profiler_scopes](Device *, CommandList *cmdlist) {
+    dispatch_pipeline_with_push_constants(
+        cmdlist, pipeline, bindings, params.data(), sizeof(params), groups,
+        1, 1,
+        profiler_scopes ? "vulkan_sparse_gmres_combine_f32" : nullptr);
+    cmdlist->buffer_barrier(allocs[2].get_ptr(0), vector_bytes);
+  };
+  VulkanCommandReplayKey key;
+  key.push(164);
+  push_vulkan_command_key_range(key, allocs[0], 0, basis_bytes);
+  push_vulkan_command_key_range(key, allocs[1], 0, coefficient_bytes);
+  push_vulkan_command_key_range(key, allocs[2], 0, vector_bytes);
+  push_vulkan_command_key_range(key, allocs[3], 0,
+                                32 * sizeof(uint32_t));
+  for (uint32_t word : params) {
+    key.push(word);
+  }
+  key.push(groups);
+  key.push_ptr(pipeline);
+  key.push_ptr(bindings);
+  if (!cache.sparse_gmres_combine_command_replay.submit_or_record(
+          this, device, key, profiler_scopes, record)) {
+    enqueue_compute_op_lambda(record, {});
+  }
+  return cache.allocated_bytes();
+}
+
+std::size_t Program::vulkan_sparse_gmres_scalar(
+    Ndarray *initial_residual_squared,
+    Ndarray *rhs_squared,
+    Ndarray *dot0,
+    Ndarray *dot1,
+    Ndarray *hessenberg,
+    Ndarray *cosines,
+    Ndarray *sines,
+    Ndarray *g,
+    Ndarray *coefficients,
+    Ndarray *state,
+    float absolute_tolerance,
+    float relative_tolerance,
+    std::size_t restart,
+    std::size_t max_iterations,
+    std::size_t stage,
+    std::size_t step,
+    bool limit_reached) {
+  auto submission_guard = acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(!vulkan_sparse_algebra_available(),
+              "Vulkan sparse GMRES is only available on Vulkan.");
+  TI_ERROR_IF((restart != 8 && restart != 16 && restart != 32) ||
+                  max_iterations > std::numeric_limits<uint32_t>::max() ||
+                  stage > 4 || step >= restart ||
+                  !std::isfinite(absolute_tolerance) ||
+                  !std::isfinite(relative_tolerance) ||
+                  absolute_tolerance < 0.0f || relative_tolerance < 0.0f ||
+                  (absolute_tolerance == 0.0f &&
+                   relative_tolerance == 0.0f),
+              "Vulkan sparse GMRES scalar stage received invalid "
+              "controls.");
+  check_vulkan_sparse_f32_output(initial_residual_squared);
+  check_vulkan_sparse_f32_output(rhs_squared);
+  check_vulkan_sparse_f32_output(dot0);
+  check_vulkan_sparse_f32_output(dot1);
+  check_vulkan_sparse_f32_vector(
+      "GMRES Hessenberg storage", hessenberg, restart * (restart + 1));
+  check_vulkan_sparse_f32_vector("GMRES cosines", cosines, restart);
+  check_vulkan_sparse_f32_vector("GMRES sines", sines, restart);
+  check_vulkan_sparse_f32_vector("GMRES least-squares rhs", g, restart + 1);
+  check_vulkan_sparse_f32_vector(
+      "GMRES coefficients", coefficients, restart);
+  check_vulkan_sparse_i32_vector("GMRES state", state, 32);
+  const std::array<DeviceAllocation, 10> allocs{
+      initial_residual_squared->get_device_allocation(),
+      rhs_squared->get_device_allocation(), dot0->get_device_allocation(),
+      dot1->get_device_allocation(), hessenberg->get_device_allocation(),
+      cosines->get_device_allocation(), sines->get_device_allocation(),
+      g->get_device_allocation(), coefficients->get_device_allocation(),
+      state->get_device_allocation()};
+  for (std::size_t i = 0; i < allocs.size(); ++i) {
+    for (std::size_t j = i + 1; j < allocs.size(); ++j) {
+      TI_ERROR_IF(allocs[i] == allocs[j],
+                  "Vulkan sparse GMRES scalar buffers must not alias.");
+    }
+  }
+  const Ndarray *resources[] = {initial_residual_squared, rhs_squared, dot0,
+                                dot1, hessenberg, cosines, sines, g,
+                                coefficients, state};
+  retain_ndarrays_for_external_submission(resources, std::size(resources));
+  const size_t hessenberg_bytes =
+      restart * (restart + 1) * sizeof(float32);
+  const size_t restart_bytes = restart * sizeof(float32);
+  const size_t g_bytes = (restart + 1) * sizeof(float32);
+  Device *device = get_compute_device();
+  TI_ERROR_IF(!device, "Vulkan sparse GMRES requires a compute device.");
+  auto cache_lease = get_sparse_algebra_cache(this, device);
+  auto &cache = *cache_lease;
+  Pipeline *pipeline = cache.sparse_gmres_scalar_pipeline(device);
+  ShaderResourceSet *bindings =
+      cache
+          .bind_sparse_gmres_scalar(
+              this, allocs, hessenberg_bytes, restart_bytes, g_bytes)
+          .bindings;
+  const std::array<uint32_t, 7> params{
+      vulkan_sparse_f32_word(absolute_tolerance),
+      vulkan_sparse_f32_word(relative_tolerance),
+      static_cast<uint32_t>(restart),
+      static_cast<uint32_t>(max_iterations),
+      static_cast<uint32_t>(stage), static_cast<uint32_t>(step),
+      limit_reached ? 1u : 0u};
+  const bool profiler_scopes = profiler != nullptr;
+  auto record =
+      [allocs, hessenberg_bytes, restart_bytes, g_bytes, pipeline, bindings,
+       params, profiler_scopes](Device *, CommandList *cmdlist) {
+        dispatch_pipeline_with_push_constants(
+            cmdlist, pipeline, bindings, params.data(), sizeof(params), 1, 1,
+            1, profiler_scopes ? "vulkan_sparse_gmres_scalar_f32"
+                               : nullptr);
+        cmdlist->buffer_barrier(allocs[4].get_ptr(0), hessenberg_bytes);
+        cmdlist->buffer_barrier(allocs[5].get_ptr(0), restart_bytes);
+        cmdlist->buffer_barrier(allocs[6].get_ptr(0), restart_bytes);
+        cmdlist->buffer_barrier(allocs[7].get_ptr(0), g_bytes);
+        cmdlist->buffer_barrier(allocs[8].get_ptr(0), restart_bytes);
+        cmdlist->buffer_barrier(allocs[9].get_ptr(0),
+                                32 * sizeof(uint32_t));
+      };
+  VulkanCommandReplayKey key;
+  key.push(165);
+  const std::array<size_t, 10> bytes{
+      sizeof(float32), sizeof(float32), sizeof(float32), sizeof(float32),
+      hessenberg_bytes, restart_bytes, restart_bytes, g_bytes,
+      restart_bytes, 32 * sizeof(uint32_t)};
+  for (std::size_t index = 0; index < allocs.size(); ++index) {
+    push_vulkan_command_key_range(key, allocs[index], 0, bytes[index]);
+  }
+  for (uint32_t word : params) {
+    key.push(word);
+  }
+  key.push_ptr(pipeline);
+  key.push_ptr(bindings);
+  if (!cache.sparse_gmres_scalar_command_replay.submit_or_record(
           this, device, key, profiler_scopes, record)) {
     enqueue_compute_op_lambda(record, {});
   }
@@ -18887,6 +19615,80 @@ std::size_t Program::vulkan_sparse_bicgstab_reconcile(
     Ndarray *solution,
     Ndarray *state,
     std::size_t n) {
+  TI_NOT_IMPLEMENTED;
+  return 0;
+}
+
+std::size_t Program::vulkan_sparse_gmres_multi_dot(
+    Ndarray *basis,
+    Ndarray *work,
+    Ndarray *partials,
+    Ndarray *projection,
+    Ndarray *state,
+    std::size_t n,
+    std::size_t basis_stride,
+    std::size_t basis_count,
+    std::size_t group_count) {
+  TI_NOT_IMPLEMENTED;
+  return 0;
+}
+
+std::size_t Program::vulkan_sparse_gmres_projection(
+    Ndarray *basis,
+    Ndarray *work,
+    Ndarray *projection,
+    Ndarray *hessenberg,
+    Ndarray *state,
+    std::size_t n,
+    std::size_t basis_stride,
+    std::size_t restart,
+    std::size_t step,
+    std::size_t pass) {
+  TI_NOT_IMPLEMENTED;
+  return 0;
+}
+
+std::size_t Program::vulkan_sparse_gmres_basis(
+    Ndarray *source,
+    Ndarray *basis,
+    Ndarray *state,
+    std::size_t n,
+    std::size_t basis_stride,
+    std::size_t row,
+    std::size_t mode) {
+  TI_NOT_IMPLEMENTED;
+  return 0;
+}
+
+std::size_t Program::vulkan_sparse_gmres_combine(
+    Ndarray *basis,
+    Ndarray *coefficients,
+    Ndarray *update,
+    Ndarray *state,
+    std::size_t n,
+    std::size_t basis_stride) {
+  TI_NOT_IMPLEMENTED;
+  return 0;
+}
+
+std::size_t Program::vulkan_sparse_gmres_scalar(
+    Ndarray *initial_residual_squared,
+    Ndarray *rhs_squared,
+    Ndarray *dot0,
+    Ndarray *dot1,
+    Ndarray *hessenberg,
+    Ndarray *cosines,
+    Ndarray *sines,
+    Ndarray *g,
+    Ndarray *coefficients,
+    Ndarray *state,
+    float absolute_tolerance,
+    float relative_tolerance,
+    std::size_t restart,
+    std::size_t max_iterations,
+    std::size_t stage,
+    std::size_t step,
+    bool limit_reached) {
   TI_NOT_IMPLEMENTED;
   return 0;
 }

@@ -1,0 +1,52 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Basis {
+  float data[];
+} basis_buf;
+layout(set = 0, binding = 1, std430) buffer Work {
+  float data[];
+} work_buf;
+layout(set = 0, binding = 2, std430) readonly buffer Projection {
+  float data[];
+} projection_buf;
+layout(set = 0, binding = 3, std430) buffer Hessenberg {
+  float data[];
+} hessenberg_buf;
+layout(set = 0, binding = 4, std430) readonly buffer State {
+  uint data[];
+} state_buf;
+
+layout(push_constant) uniform Params {
+  uint n;
+  uint basis_stride;
+  uint restart;
+  uint step;
+  uint pass;
+} params;
+
+const uint kCycleActive = 19u;
+
+void main() {
+  uint index = gl_GlobalInvocationID.x;
+  bool enabled = int(state_buf.data[kCycleActive]) != 0;
+  if (index == 0u && enabled) {
+    for (uint row = 0u; row <= params.step; ++row) {
+      uint offset = row * params.restart + params.step;
+      hessenberg_buf.data[offset] =
+          params.pass == 0u
+              ? projection_buf.data[row]
+              : hessenberg_buf.data[offset] + projection_buf.data[row];
+    }
+  }
+  if (index >= params.n || !enabled) {
+    return;
+  }
+  float value = work_buf.data[index];
+  for (uint row = 0u; row <= params.step; ++row) {
+    value -= projection_buf.data[row] *
+             basis_buf.data[row * params.basis_stride + index];
+  }
+  work_buf.data[index] = value;
+}

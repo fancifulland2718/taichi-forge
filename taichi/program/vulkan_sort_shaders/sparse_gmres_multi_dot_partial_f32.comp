@@ -1,0 +1,73 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Basis {
+  float data[];
+} basis_buf;
+layout(set = 0, binding = 1, std430) readonly buffer Work {
+  float data[];
+} work_buf;
+layout(set = 0, binding = 2, std430) writeonly buffer Partials {
+  float data[];
+} partials_buf;
+layout(set = 0, binding = 3, std430) readonly buffer State {
+  uint data[];
+} state_buf;
+
+layout(push_constant) uniform Params {
+  uint n;
+  uint basis_stride;
+  uint basis_count;
+  uint group_count;
+} params;
+
+const uint kCycleActive = 19u;
+shared float partial_sum[256];
+
+void main() {
+  uint local_index = gl_LocalInvocationID.x;
+  uint group = gl_WorkGroupID.x;
+  if (group >= params.group_count || params.basis_count == 0u ||
+      params.basis_count > 32u) {
+    return;
+  }
+  float sums[32];
+  for (uint row = 0u; row < params.basis_count; ++row) {
+    sums[row] = 0.0;
+  }
+  if (int(state_buf.data[kCycleActive]) != 0) {
+    uint block_begin = group * 1024u;
+    uint block_stride = params.group_count * 1024u;
+    while (block_begin < params.n) {
+      uint block_size = min(1024u, params.n - block_begin);
+      uint block_end = block_begin + block_size;
+      for (uint index = block_begin + local_index; index < block_end;
+           index += 256u) {
+        float value = work_buf.data[index];
+        for (uint row = 0u; row < params.basis_count; ++row) {
+          sums[row] +=
+              basis_buf.data[row * params.basis_stride + index] * value;
+        }
+      }
+      if (params.n - block_begin <= block_stride) {
+        break;
+      }
+      block_begin += block_stride;
+    }
+  }
+  for (uint row = 0u; row < params.basis_count; ++row) {
+    partial_sum[local_index] = sums[row];
+    barrier();
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+      if (local_index < stride) {
+        partial_sum[local_index] += partial_sum[local_index + stride];
+      }
+      barrier();
+    }
+    if (local_index == 0u) {
+      partials_buf.data[row * params.group_count + group] = partial_sum[0];
+    }
+    barrier();
+  }
+}

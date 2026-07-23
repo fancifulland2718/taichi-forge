@@ -55,6 +55,12 @@ struct KernelSet {
   void *sparse_bicgstab_intermediate_f32{nullptr};
   void *sparse_bicgstab_commit_f32{nullptr};
   void *sparse_bicgstab_reconcile_f32{nullptr};
+  void *sparse_gmres_multi_dot_partial_f32{nullptr};
+  void *sparse_gmres_multi_dot_final_f32{nullptr};
+  void *sparse_gmres_projection_f32{nullptr};
+  void *sparse_gmres_basis_f32{nullptr};
+  void *sparse_gmres_combine_f32{nullptr};
+  void *sparse_gmres_scalar_f32{nullptr};
   std::array<void *, 2> zero_bins{};
   std::array<std::array<void *, 2>, 2> histogram{};
   void *compact_rank_tiles{nullptr};
@@ -221,6 +227,24 @@ void load_kernel_set_once() {
   driver.module_get_function(&kernel_set.sparse_bicgstab_reconcile_f32,
                              kernel_set.module,
                              "sparse_bicgstab_reconcile_f32");
+  driver.module_get_function(&kernel_set.sparse_gmres_multi_dot_partial_f32,
+                             kernel_set.module,
+                             "sparse_gmres_multi_dot_partial_f32");
+  driver.module_get_function(&kernel_set.sparse_gmres_multi_dot_final_f32,
+                             kernel_set.module,
+                             "sparse_gmres_multi_dot_final_f32");
+  driver.module_get_function(&kernel_set.sparse_gmres_projection_f32,
+                             kernel_set.module,
+                             "sparse_gmres_projection_f32");
+  driver.module_get_function(&kernel_set.sparse_gmres_basis_f32,
+                             kernel_set.module,
+                             "sparse_gmres_basis_f32");
+  driver.module_get_function(&kernel_set.sparse_gmres_combine_f32,
+                             kernel_set.module,
+                             "sparse_gmres_combine_f32");
+  driver.module_get_function(&kernel_set.sparse_gmres_scalar_f32,
+                             kernel_set.module,
+                             "sparse_gmres_scalar_f32");
   driver.module_get_function(&kernel_set.gather_add[0], kernel_set.module,
                              "gather_add_strided_f32");
   driver.module_get_function(&kernel_set.gather_add[1], kernel_set.module,
@@ -1402,6 +1426,193 @@ void driver_sparse_bicgstab_reconcile_f32(void *true_residual,
       kernels().sparse_bicgstab_reconcile_f32,
       "cuda_driver_sparse_bicgstab_reconcile_f32", args, {}, grid,
       kBlockDim, 0, stream);
+}
+
+void driver_sparse_gmres_multi_dot_f32(void *basis,
+                                       void *work,
+                                       void *partials,
+                                       void *projection,
+                                       void *state,
+                                       int num_items,
+                                       int basis_stride,
+                                       int basis_count,
+                                       int group_count,
+                                       void *stream) {
+  TI_ERROR_IF(!basis || !work || !partials || !projection || !state ||
+                  num_items <= 0 || basis_stride < num_items ||
+                  basis_count <= 0 || basis_count > 32 ||
+                  group_count <= 0 || group_count > 65535,
+              "CUDA Driver sparse GMRES multi-dot received invalid "
+              "geometry or a null pointer.");
+  void *basis_arg = basis;
+  void *work_arg = work;
+  void *partials_arg = partials;
+  void *projection_arg = projection;
+  void *state_arg = state;
+  std::uint32_t count_arg = static_cast<std::uint32_t>(num_items);
+  std::uint32_t stride_arg = static_cast<std::uint32_t>(basis_stride);
+  std::uint32_t basis_count_arg =
+      static_cast<std::uint32_t>(basis_count);
+  std::uint32_t group_count_arg =
+      static_cast<std::uint32_t>(group_count);
+  std::vector<void *> partial_args{
+      &basis_arg, &work_arg, &partials_arg, &state_arg, &count_arg,
+      &stride_arg, &basis_count_arg, &group_count_arg};
+  CUDAContext::get_instance().launch(
+      kernels().sparse_gmres_multi_dot_partial_f32,
+      "cuda_driver_sparse_gmres_multi_dot_partial_f32", partial_args, {},
+      group_count_arg, kBlockDim, 0, stream);
+  std::vector<void *> final_args{
+      &partials_arg, &projection_arg, &state_arg, &group_count_arg,
+      &basis_count_arg};
+  CUDAContext::get_instance().launch(
+      kernels().sparse_gmres_multi_dot_final_f32,
+      "cuda_driver_sparse_gmres_multi_dot_final_f32", final_args, {},
+      basis_count_arg, kBlockDim, 0, stream);
+}
+
+void driver_sparse_gmres_projection_f32(void *basis,
+                                        void *work,
+                                        void *projection,
+                                        void *hessenberg,
+                                        void *state,
+                                        int num_items,
+                                        int basis_stride,
+                                        int restart,
+                                        int step,
+                                        int pass,
+                                        void *stream) {
+  TI_ERROR_IF(!basis || !work || !projection || !hessenberg || !state ||
+                  num_items <= 0 || basis_stride < num_items ||
+                  (restart != 8 && restart != 16 && restart != 32) ||
+                  step < 0 || step >= restart || pass < 0 || pass > 1,
+              "CUDA Driver sparse GMRES projection received invalid "
+              "geometry, controls, or a null pointer.");
+  void *basis_arg = basis;
+  void *work_arg = work;
+  void *projection_arg = projection;
+  void *hessenberg_arg = hessenberg;
+  void *state_arg = state;
+  std::uint32_t count_arg = static_cast<std::uint32_t>(num_items);
+  std::uint32_t stride_arg = static_cast<std::uint32_t>(basis_stride);
+  std::uint32_t restart_arg = static_cast<std::uint32_t>(restart);
+  std::uint32_t step_arg = static_cast<std::uint32_t>(step);
+  std::uint32_t pass_arg = static_cast<std::uint32_t>(pass);
+  std::vector<void *> args{
+      &basis_arg, &work_arg, &projection_arg, &hessenberg_arg, &state_arg,
+      &count_arg, &stride_arg, &restart_arg, &step_arg, &pass_arg};
+  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().sparse_gmres_projection_f32,
+      "cuda_driver_sparse_gmres_projection_f32", args, {}, grid,
+      kBlockDim, 0, stream);
+}
+
+void driver_sparse_gmres_basis_f32(void *source,
+                                   void *basis,
+                                   void *state,
+                                   int num_items,
+                                   int basis_stride,
+                                   int row,
+                                   int mode,
+                                   void *stream) {
+  TI_ERROR_IF(!source || !basis || !state || num_items <= 0 ||
+                  basis_stride < num_items || row < 0 || row > 32 ||
+                  mode < 0 || mode > 1,
+              "CUDA Driver sparse GMRES basis update received invalid "
+              "geometry, controls, or a null pointer.");
+  void *source_arg = source;
+  void *basis_arg = basis;
+  void *state_arg = state;
+  std::uint32_t count_arg = static_cast<std::uint32_t>(num_items);
+  std::uint32_t stride_arg = static_cast<std::uint32_t>(basis_stride);
+  std::uint32_t row_arg = static_cast<std::uint32_t>(row);
+  std::uint32_t mode_arg = static_cast<std::uint32_t>(mode);
+  std::vector<void *> args{&source_arg, &basis_arg, &state_arg, &count_arg,
+                           &stride_arg, &row_arg, &mode_arg};
+  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().sparse_gmres_basis_f32,
+      "cuda_driver_sparse_gmres_basis_f32", args, {}, grid, kBlockDim, 0,
+      stream);
+}
+
+void driver_sparse_gmres_combine_f32(void *basis,
+                                     void *coefficients,
+                                     void *update,
+                                     void *state,
+                                     int num_items,
+                                     int basis_stride,
+                                     void *stream) {
+  TI_ERROR_IF(!basis || !coefficients || !update || !state ||
+                  num_items <= 0 || basis_stride < num_items,
+              "CUDA Driver sparse GMRES basis combination received invalid "
+              "geometry or a null pointer.");
+  void *basis_arg = basis;
+  void *coefficients_arg = coefficients;
+  void *update_arg = update;
+  void *state_arg = state;
+  std::uint32_t count_arg = static_cast<std::uint32_t>(num_items);
+  std::uint32_t stride_arg = static_cast<std::uint32_t>(basis_stride);
+  std::vector<void *> args{&basis_arg, &coefficients_arg, &update_arg,
+                           &state_arg, &count_arg, &stride_arg};
+  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().sparse_gmres_combine_f32,
+      "cuda_driver_sparse_gmres_combine_f32", args, {}, grid, kBlockDim, 0,
+      stream);
+}
+
+void driver_sparse_gmres_scalar_f32(void *initial_residual_squared,
+                                    void *rhs_squared,
+                                    void *dot0,
+                                    void *dot1,
+                                    void *hessenberg,
+                                    void *cosines,
+                                    void *sines,
+                                    void *g,
+                                    void *coefficients,
+                                    void *state,
+                                    float absolute_tolerance,
+                                    float relative_tolerance,
+                                    int restart,
+                                    int max_iterations,
+                                    int stage,
+                                    int step,
+                                    bool limit_reached,
+                                    void *stream) {
+  TI_ERROR_IF(!initial_residual_squared || !rhs_squared || !dot0 || !dot1 ||
+                  !hessenberg || !cosines || !sines || !g ||
+                  !coefficients || !state ||
+                  (restart != 8 && restart != 16 && restart != 32) ||
+                  max_iterations < 0 || stage < 0 || stage > 4 ||
+                  step < 0 || step >= restart,
+              "CUDA Driver sparse GMRES scalar stage received invalid "
+              "controls or a null pointer.");
+  void *initial_arg = initial_residual_squared;
+  void *rhs_arg = rhs_squared;
+  void *dot0_arg = dot0;
+  void *dot1_arg = dot1;
+  void *hessenberg_arg = hessenberg;
+  void *cosines_arg = cosines;
+  void *sines_arg = sines;
+  void *g_arg = g;
+  void *coefficients_arg = coefficients;
+  void *state_arg = state;
+  std::uint32_t restart_arg = static_cast<std::uint32_t>(restart);
+  std::uint32_t max_iterations_arg =
+      static_cast<std::uint32_t>(max_iterations);
+  std::uint32_t stage_arg = static_cast<std::uint32_t>(stage);
+  std::uint32_t step_arg = static_cast<std::uint32_t>(step);
+  std::uint32_t limit_arg = limit_reached ? 1u : 0u;
+  std::vector<void *> args{
+      &initial_arg, &rhs_arg, &dot0_arg, &dot1_arg, &hessenberg_arg,
+      &cosines_arg, &sines_arg, &g_arg, &coefficients_arg, &state_arg,
+      &absolute_tolerance, &relative_tolerance, &restart_arg,
+      &max_iterations_arg, &stage_arg, &step_arg, &limit_arg};
+  CUDAContext::get_instance().launch(
+      kernels().sparse_gmres_scalar_f32,
+      "cuda_driver_sparse_gmres_scalar_f32", args, {}, 1, 1, 0, stream);
 }
 
 void driver_sparse_assembly_pack_validate(void *triplet_rows,

@@ -1,0 +1,49 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Partials {
+  float data[];
+} partials_buf;
+layout(set = 0, binding = 1, std430) writeonly buffer Projection {
+  float data[];
+} projection_buf;
+layout(set = 0, binding = 2, std430) readonly buffer State {
+  uint data[];
+} state_buf;
+
+layout(push_constant) uniform Params {
+  uint group_count;
+  uint basis_count;
+  uint unused0;
+  uint unused1;
+} params;
+
+const uint kCycleActive = 19u;
+shared float partial_sum[256];
+
+void main() {
+  uint row = gl_WorkGroupID.x;
+  uint local_index = gl_LocalInvocationID.x;
+  if (row >= params.basis_count) {
+    return;
+  }
+  float sum = 0.0;
+  if (int(state_buf.data[kCycleActive]) != 0) {
+    for (uint group = local_index; group < params.group_count;
+         group += 256u) {
+      sum += partials_buf.data[row * params.group_count + group];
+    }
+  }
+  partial_sum[local_index] = sum;
+  barrier();
+  for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+    if (local_index < stride) {
+      partial_sum[local_index] += partial_sum[local_index + stride];
+    }
+    barrier();
+  }
+  if (local_index == 0u) {
+    projection_buf.data[row] = partial_sum[0];
+  }
+}

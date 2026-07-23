@@ -1,0 +1,316 @@
+#version 450
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer InitialResidualSquared {
+  float data[];
+} initial_residual_squared_buf;
+layout(set = 0, binding = 1, std430) readonly buffer RhsSquared {
+  float data[];
+} rhs_squared_buf;
+layout(set = 0, binding = 2, std430) readonly buffer Dot0 {
+  float data[];
+} dot0_buf;
+layout(set = 0, binding = 3, std430) readonly buffer Dot1 {
+  float data[];
+} dot1_buf;
+layout(set = 0, binding = 4, std430) buffer Hessenberg {
+  float data[];
+} hessenberg_buf;
+layout(set = 0, binding = 5, std430) buffer Cosines {
+  float data[];
+} cosines_buf;
+layout(set = 0, binding = 6, std430) buffer Sines {
+  float data[];
+} sines_buf;
+layout(set = 0, binding = 7, std430) buffer G {
+  float data[];
+} g_buf;
+layout(set = 0, binding = 8, std430) buffer Coefficients {
+  float data[];
+} coefficients_buf;
+layout(set = 0, binding = 9, std430) buffer State {
+  uint data[];
+} state_buf;
+
+layout(push_constant) uniform Params {
+  float absolute_tolerance;
+  float relative_tolerance;
+  uint restart;
+  uint max_iterations;
+  uint stage;
+  uint step;
+  uint limit_reached;
+} params;
+
+const uint kInitialResidualSquared = 0u;
+const uint kTrueResidualSquared = 1u;
+const uint kRhsSquared = 2u;
+const uint kRelativeReferenceNorm = 3u;
+const uint kEffectiveTolerance = 4u;
+const uint kToleranceSquared = 5u;
+const uint kBeta = 6u;
+const uint kEstimatedResidual = 7u;
+const uint kPreorthogonalNorm = 8u;
+const uint kNextNorm = 9u;
+const uint kStatus = 16u;
+const uint kCompletedIterations = 17u;
+const uint kSolveActive = 18u;
+const uint kCycleActive = 19u;
+const uint kCycleCompleted = 20u;
+const uint kHappy = 21u;
+const uint kBreakdownReason = 22u;
+const uint kCommitEnabled = 23u;
+const uint kRestartCycles = 24u;
+const uint kHappyBreakdowns = 25u;
+const uint kStateWords = 32u;
+
+const int kNotRun = -1;
+const int kMaxIterations = 0;
+const int kBreakdown = 1;
+const int kConverged = 2;
+const int kReasonNone = 0;
+const int kReasonNonfinite = 1;
+const int kReasonArnoldi = 6;
+const int kReasonOrthogonalization = 7;
+const int kReasonHessenberg = 8;
+
+float load_float(uint index) {
+  return uintBitsToFloat(state_buf.data[index]);
+}
+void store_float(uint index, float value) {
+  state_buf.data[index] = floatBitsToUint(value);
+}
+int load_int(uint index) {
+  return int(state_buf.data[index]);
+}
+void store_int(uint index, int value) {
+  state_buf.data[index] = uint(value);
+}
+bool finite_value(float value) {
+  return !isnan(value) && !isinf(value);
+}
+void fail(int reason) {
+  store_int(kStatus, kBreakdown);
+  store_int(kSolveActive, 0);
+  store_int(kCycleActive, 0);
+  store_int(kCommitEnabled, 0);
+  store_int(kBreakdownReason, reason);
+}
+
+void main() {
+  if (params.stage == 0u) {
+    for (uint index = 0u; index < kStateWords; ++index) {
+      state_buf.data[index] = 0u;
+    }
+    store_int(kStatus, kNotRun);
+    float rr = initial_residual_squared_buf.data[0];
+    float rhs2 = rhs_squared_buf.data[0];
+    store_float(kInitialResidualSquared, rr);
+    store_float(kTrueResidualSquared, rr);
+    store_float(kRhsSquared, rhs2);
+    if (!finite_value(rr) || rr < 0.0 ||
+        !finite_value(rhs2) || rhs2 < 0.0) {
+      fail(kReasonNonfinite);
+      return;
+    }
+    float reference = sqrt(rhs2);
+    float tolerance = max(params.absolute_tolerance,
+                          params.relative_tolerance * reference);
+    float tolerance_squared = tolerance * tolerance;
+    store_float(kRelativeReferenceNorm, reference);
+    store_float(kEffectiveTolerance, tolerance);
+    store_float(kToleranceSquared, tolerance_squared);
+    store_float(kEstimatedResidual, sqrt(rr));
+    if (!finite_value(reference) || !finite_value(tolerance) ||
+        !finite_value(tolerance_squared)) {
+      fail(kReasonNonfinite);
+    } else if (rr <= tolerance_squared) {
+      store_int(kStatus, kConverged);
+    } else if (params.max_iterations == 0u ||
+               params.limit_reached != 0u) {
+      store_int(kStatus, kMaxIterations);
+    } else {
+      store_int(kSolveActive, 1);
+    }
+    return;
+  }
+  if (params.stage == 1u) {
+    store_int(kCycleCompleted, 0);
+    store_int(kHappy, 0);
+    store_int(kCommitEnabled, 0);
+    for (uint index = 0u;
+         index < params.restart * (params.restart + 1u); ++index) {
+      hessenberg_buf.data[index] = 0.0;
+    }
+    for (uint index = 0u; index < params.restart; ++index) {
+      cosines_buf.data[index] = 0.0;
+      sines_buf.data[index] = 0.0;
+      coefficients_buf.data[index] = 0.0;
+      g_buf.data[index] = 0.0;
+    }
+    g_buf.data[params.restart] = 0.0;
+    if (load_int(kSolveActive) == 0) {
+      store_int(kCycleActive, 0);
+      return;
+    }
+    float beta = sqrt(load_float(kTrueResidualSquared));
+    if (!finite_value(beta) || beta == 0.0) {
+      fail(kReasonOrthogonalization);
+      return;
+    }
+    store_float(kBeta, beta);
+    store_float(kEstimatedResidual, beta);
+    g_buf.data[0] = beta;
+    store_int(kCycleActive, 1);
+    return;
+  }
+  if (params.stage == 2u) {
+    if (load_int(kCycleActive) == 0) {
+      return;
+    }
+    float pre_squared = dot0_buf.data[0];
+    float next_squared = dot1_buf.data[0];
+    if (!finite_value(pre_squared) || pre_squared < 0.0 ||
+        !finite_value(next_squared) || next_squared < 0.0) {
+      fail(kReasonOrthogonalization);
+      return;
+    }
+    float pre_norm = sqrt(pre_squared);
+    float next_norm = sqrt(next_squared);
+    if (!finite_value(pre_norm) || !finite_value(next_norm)) {
+      fail(kReasonOrthogonalization);
+      return;
+    }
+    store_float(kPreorthogonalNorm, pre_norm);
+    store_float(kNextNorm, next_norm);
+    hessenberg_buf.data[(params.step + 1u) * params.restart +
+                         params.step] = next_norm;
+    for (uint row = 0u; row < params.step; ++row) {
+      uint upper_offset = row * params.restart + params.step;
+      uint lower_offset = (row + 1u) * params.restart + params.step;
+      float upper = hessenberg_buf.data[upper_offset];
+      float lower = hessenberg_buf.data[lower_offset];
+      hessenberg_buf.data[upper_offset] =
+          cosines_buf.data[row] * upper + sines_buf.data[row] * lower;
+      hessenberg_buf.data[lower_offset] =
+          -sines_buf.data[row] * upper + cosines_buf.data[row] * lower;
+    }
+    uint diagonal_offset =
+        params.step * params.restart + params.step;
+    float diagonal = hessenberg_buf.data[diagonal_offset];
+    float magnitude =
+        sqrt(diagonal * diagonal + next_norm * next_norm);
+    if (!finite_value(diagonal) || !finite_value(magnitude)) {
+      fail(kReasonOrthogonalization);
+      return;
+    }
+    bool happy = next_norm <=
+        7.62939453125e-6 * max(pre_norm, 1.1754943508222875e-38);
+    float cosine = 1.0;
+    float sine = 0.0;
+    if (magnitude != 0.0) {
+      cosine = diagonal / magnitude;
+      sine = next_norm / magnitude;
+    }
+    cosines_buf.data[params.step] = cosine;
+    sines_buf.data[params.step] = sine;
+    hessenberg_buf.data[diagonal_offset] = magnitude;
+    hessenberg_buf.data[(params.step + 1u) * params.restart +
+                         params.step] = 0.0;
+    float previous_g = g_buf.data[params.step];
+    g_buf.data[params.step] = cosine * previous_g;
+    g_buf.data[params.step + 1u] = -sine * previous_g;
+    float estimate = abs(g_buf.data[params.step + 1u]);
+    store_float(kEstimatedResidual, estimate);
+    store_int(kCompletedIterations, load_int(kCompletedIterations) + 1);
+    store_int(kCycleCompleted, load_int(kCycleCompleted) + 1);
+    store_int(kHappy, happy ? 1 : 0);
+    bool converged = estimate <= load_float(kEffectiveTolerance);
+    bool at_limit =
+        uint(load_int(kCompletedIterations)) >= params.max_iterations;
+    if (happy || converged || at_limit ||
+        params.step + 1u >= params.restart) {
+      store_int(kCycleActive, 0);
+    }
+    return;
+  }
+  if (params.stage == 3u) {
+    store_int(kCommitEnabled, 0);
+    if (load_int(kSolveActive) == 0) {
+      return;
+    }
+    int signed_used = load_int(kCycleCompleted);
+    if (signed_used <= 0 || uint(signed_used) > params.restart) {
+      fail(kReasonHessenberg);
+      return;
+    }
+    uint used = uint(signed_used);
+    for (int signed_row = signed_used - 1; signed_row >= 0; --signed_row) {
+      uint row = uint(signed_row);
+      float value = g_buf.data[row];
+      float row_scale = 1.0;
+      for (uint column = row + 1u; column < used; ++column) {
+        float entry =
+            hessenberg_buf.data[row * params.restart + column];
+        value -= entry * coefficients_buf.data[column];
+        row_scale = max(row_scale, abs(entry));
+      }
+      float pivot =
+          hessenberg_buf.data[row * params.restart + row];
+      if (!finite_value(value) || !finite_value(pivot) ||
+          abs(pivot) <= 3.814697265625e-6 * row_scale) {
+        fail(kReasonHessenberg);
+        return;
+      }
+      coefficients_buf.data[row] = value / pivot;
+      if (!finite_value(coefficients_buf.data[row])) {
+        fail(kReasonHessenberg);
+        return;
+      }
+    }
+    store_int(kCommitEnabled, 1);
+    return;
+  }
+  if (params.stage == 4u) {
+    store_int(kCommitEnabled, 0);
+    store_int(kRestartCycles, load_int(kRestartCycles) + 1);
+    float rr = dot0_buf.data[0];
+    store_float(kTrueResidualSquared, rr);
+    if (!finite_value(rr) || rr < 0.0) {
+      fail(kReasonNonfinite);
+      return;
+    }
+    if (rr <= load_float(kToleranceSquared)) {
+      if (load_int(kHappy) != 0) {
+        store_int(kHappyBreakdowns, load_int(kHappyBreakdowns) + 1);
+      }
+      store_int(kStatus, kConverged);
+      store_int(kSolveActive, 0);
+      store_int(kCycleActive, 0);
+      store_int(kBreakdownReason, kReasonNone);
+      return;
+    }
+    if (load_int(kStatus) == kBreakdown) {
+      store_int(kSolveActive, 0);
+      return;
+    }
+    if (load_int(kHappy) != 0) {
+      fail(kReasonArnoldi);
+      return;
+    }
+    if (uint(load_int(kCompletedIterations)) >= params.max_iterations ||
+        params.limit_reached != 0u) {
+      store_int(kStatus, kMaxIterations);
+      store_int(kSolveActive, 0);
+      store_int(kCycleActive, 0);
+      return;
+    }
+    store_int(kStatus, kNotRun);
+    store_int(kSolveActive, 1);
+    store_int(kCycleActive, 0);
+    store_int(kBreakdownReason, kReasonNone);
+    return;
+  }
+  fail(kReasonNonfinite);
+}

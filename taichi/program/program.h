@@ -2480,6 +2480,64 @@ class TI_DLL_EXPORT Program {
       Ndarray *state,
       std::size_t n);
 
+  std::size_t vulkan_sparse_gmres_multi_dot(
+      Ndarray *basis,
+      Ndarray *work,
+      Ndarray *partials,
+      Ndarray *projection,
+      Ndarray *state,
+      std::size_t n,
+      std::size_t basis_stride,
+      std::size_t basis_count,
+      std::size_t group_count);
+
+  std::size_t vulkan_sparse_gmres_projection(
+      Ndarray *basis,
+      Ndarray *work,
+      Ndarray *projection,
+      Ndarray *hessenberg,
+      Ndarray *state,
+      std::size_t n,
+      std::size_t basis_stride,
+      std::size_t restart,
+      std::size_t step,
+      std::size_t pass);
+
+  std::size_t vulkan_sparse_gmres_basis(Ndarray *source,
+                                        Ndarray *basis,
+                                        Ndarray *state,
+                                        std::size_t n,
+                                        std::size_t basis_stride,
+                                        std::size_t row,
+                                        std::size_t mode);
+
+  std::size_t vulkan_sparse_gmres_combine(
+      Ndarray *basis,
+      Ndarray *coefficients,
+      Ndarray *update,
+      Ndarray *state,
+      std::size_t n,
+      std::size_t basis_stride);
+
+  std::size_t vulkan_sparse_gmres_scalar(
+      Ndarray *initial_residual_squared,
+      Ndarray *rhs_squared,
+      Ndarray *dot0,
+      Ndarray *dot1,
+      Ndarray *hessenberg,
+      Ndarray *cosines,
+      Ndarray *sines,
+      Ndarray *g,
+      Ndarray *coefficients,
+      Ndarray *state,
+      float absolute_tolerance,
+      float relative_tolerance,
+      std::size_t restart,
+      std::size_t max_iterations,
+      std::size_t stage,
+      std::size_t step,
+      bool limit_reached);
+
   std::size_t vulkan_sparse_convergence(Ndarray *residual_squared,
                                         Ndarray *status,
                                         Ndarray *completed_iterations,

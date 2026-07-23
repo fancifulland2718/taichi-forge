@@ -1,0 +1,42 @@
+#version 450
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Basis {
+  float data[];
+} basis_buf;
+layout(set = 0, binding = 1, std430) readonly buffer Coefficients {
+  float data[];
+} coefficients_buf;
+layout(set = 0, binding = 2, std430) writeonly buffer Update {
+  float data[];
+} update_buf;
+layout(set = 0, binding = 3, std430) readonly buffer State {
+  uint data[];
+} state_buf;
+
+layout(push_constant) uniform Params {
+  uint n;
+  uint basis_stride;
+  uint unused0;
+  uint unused1;
+} params;
+
+const uint kCycleCompleted = 20u;
+const uint kCommitEnabled = 23u;
+
+void main() {
+  uint index = gl_GlobalInvocationID.x;
+  if (index >= params.n) {
+    return;
+  }
+  float value = 0.0;
+  if (int(state_buf.data[kCommitEnabled]) != 0) {
+    uint used = state_buf.data[kCycleCompleted];
+    for (uint row = 0u; row < used; ++row) {
+      value += coefficients_buf.data[row] *
+               basis_buf.data[row * params.basis_stride + index];
+    }
+  }
+  update_buf.data[index] = value;
+}
