@@ -3394,7 +3394,7 @@ LLVMCompiledTask LLVMCompiledTask::clone() const {
 }
 
 LLVMCompiledKernel LLVMCompiledKernel::clone() const {
-  return {tasks, llvm::CloneModule(*module)};
+  return {tasks, llvm::CloneModule(*module), module_context_owner};
 }
 
 }  // namespace taichi::lang

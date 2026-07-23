@@ -929,9 +929,14 @@ void TaichiLLVMContext::register_thread_exit(
 }
 
 TaichiLLVMContext::ThreadLocalData *TaichiLLVMContext::get_this_thread_data() {
+  return get_this_thread_data_owner().get();
+}
+
+std::shared_ptr<TaichiLLVMContext::ThreadLocalData>
+TaichiLLVMContext::get_this_thread_data_owner() {
   auto registry = thread_data_registry_;
   const auto tid = std::this_thread::get_id();
-  ThreadLocalData *result = nullptr;
+  std::shared_ptr<ThreadLocalData> result;
   bool inserted = false;
   {
     std::lock_guard<std::mutex> lock(registry->mutex);
@@ -940,14 +945,14 @@ TaichiLLVMContext::ThreadLocalData *TaichiLLVMContext::get_this_thread_data() {
       std::stringstream ss;
       ss << tid;
       TI_TRACE("Creating thread local data for thread {}", ss.str());
-      auto candidate = std::make_unique<ThreadLocalData>(
+      auto candidate = std::make_shared<ThreadLocalData>(
           std::make_unique<llvm::orc::ThreadSafeContext>(
               std::make_unique<llvm::LLVMContext>()));
-      result = candidate.get();
+      result = candidate;
       registry->data.emplace(tid, std::move(candidate));
       inserted = true;
     } else {
-      result = iter->second.get();
+      result = iter->second;
     }
   }
   if (inserted && tid != main_thread_id_) {
@@ -1198,10 +1203,16 @@ LLVMCompiledKernel TaichiLLVMContext::link_compiled_tasks(
   eliminate_unused_functions(mod.get(), [&](std::string func_name) -> bool {
     return offloaded_names.count(func_name);
   });
-  // Hand off to caller's TLS context so subsequent optimize/verify/print
-  // are free of shared-context contention.
-  auto *caller_ctx = get_this_thread_data()->llvm_context;
+  // Hand off to the caller's TLS context so subsequent optimize/verify/print
+  // are free of shared-context contention. The compiled result retains the
+  // ThreadLocalData owner: callers such as Python async producers and the
+  // temporary compile_kernels executor may terminate before Program reset,
+  // but llvm::Module must never outlive its LLVMContext.
+  auto caller_data = get_this_thread_data_owner();
+  auto *caller_ctx = caller_data->llvm_context;
   linked.module = clone_module_to_context(mod.get(), caller_ctx);
+  linked.module_context_owner =
+      std::shared_ptr<llvm::LLVMContext>(std::move(caller_data), caller_ctx);
   return linked;
 }
 

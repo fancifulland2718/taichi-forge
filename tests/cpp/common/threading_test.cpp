@@ -265,6 +265,39 @@ TEST(LLVMContextThreadData, ReleasesExitedWorkerContexts) {
   EXPECT_TRUE(valid.load(std::memory_order_relaxed));
   EXPECT_EQ(context.debug_thread_local_data_count(), 1u);
 }
+
+TEST(LLVMContextThreadData, CompiledModuleRetainsExitedWorkerContext) {
+  lang::CompileConfig config;
+  lang::TaichiLLVMContext context(config, host_arch());
+  std::unique_ptr<lang::LLVMCompiledKernel> compiled;
+
+  std::thread worker([&] {
+    compiled = std::make_unique<lang::LLVMCompiledKernel>(
+        context.link_compiled_tasks({}));
+  });
+  worker.join();
+
+  // The registry must still retire exited threads, while the compiled module
+  // keeps just its originating ThreadLocalData alive until module destruction.
+  EXPECT_EQ(context.debug_thread_local_data_count(), 1u);
+  ASSERT_NE(compiled, nullptr);
+  ASSERT_NE(compiled->module, nullptr);
+  ASSERT_NE(compiled->module_context_owner, nullptr);
+  EXPECT_EQ(&compiled->module->getContext(),
+            compiled->module_context_owner.get());
+  std::weak_ptr<llvm::LLVMContext> context_lifetime =
+      compiled->module_context_owner;
+  EXPECT_FALSE(context_lifetime.expired());
+
+  std::string llvm_ir;
+  llvm::raw_string_ostream stream(llvm_ir);
+  compiled->module->print(stream, nullptr);
+  stream.flush();
+  EXPECT_FALSE(llvm_ir.empty());
+
+  compiled.reset();
+  EXPECT_TRUE(context_lifetime.expired());
+}
 #endif
 
 }  // namespace

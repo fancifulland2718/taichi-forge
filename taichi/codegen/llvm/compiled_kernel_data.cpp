@@ -38,6 +38,9 @@ std::size_t CompiledKernelData::task_count() const {
 CompiledKernelData::Err CompiledKernelData::check() const {
   const auto &compiled_data = data_.compiled_data;
   const auto &tasks = compiled_data.tasks;
+  if (!compiled_data.module) {
+    return Err::kCompiledKernelDataBroken;
+  }
   if (llvm::verifyModule(*compiled_data.module, &llvm::errs())) {
     return Err::kCompiledKernelDataBroken;
   }
@@ -73,6 +76,9 @@ CompiledKernelData::Err CompiledKernelData::load_impl(
 
 CompiledKernelData::Err CompiledKernelData::dump_impl(
     CompiledKernelDataFile &file) const {
+  if (!data_.compiled_data.module) {
+    return Err::kCompiledKernelDataBroken;
+  }
   file.set_arch(arch_);
   try {
     file.set_metadata(liong::json::print(liong::json::serialize(data_)));

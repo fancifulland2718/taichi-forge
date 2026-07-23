@@ -68,13 +68,23 @@ struct LLVMCompiledTask {
 
 struct LLVMCompiledKernel {
   std::vector<OffloadedTask> tasks;
+  // Modules are tied to their LLVMContext. Parallel compilation can finish on
+  // a short-lived worker thread, so retain that worker's context independently
+  // of the thread-local registry until every module clone has been released.
+  // Keep this member before `module`: reverse destruction order must destroy
+  // the module before releasing its context owner.
+  std::shared_ptr<llvm::LLVMContext> module_context_owner;
   std::unique_ptr<llvm::Module> module{nullptr};
   LLVMCompiledKernel() = default;
   LLVMCompiledKernel(LLVMCompiledKernel &&) = default;
   LLVMCompiledKernel &operator=(LLVMCompiledKernel &&) = default;
   LLVMCompiledKernel(std::vector<OffloadedTask> tasks,
-                     std::unique_ptr<llvm::Module> module)
-      : tasks(std::move(tasks)), module(std::move(module)) {
+                     std::unique_ptr<llvm::Module> module,
+                     std::shared_ptr<llvm::LLVMContext> module_context_owner =
+                         nullptr)
+      : tasks(std::move(tasks)),
+        module_context_owner(std::move(module_context_owner)),
+        module(std::move(module)) {
   }
   LLVMCompiledKernel clone() const;
   TI_IO_DEF(tasks);

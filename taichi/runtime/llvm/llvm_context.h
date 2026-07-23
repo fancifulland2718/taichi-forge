@@ -45,7 +45,7 @@ class TaichiLLVMContext {
 
     const std::uint64_t id;
     mutable std::mutex mutex;
-    std::unordered_map<std::thread::id, std::unique_ptr<ThreadLocalData>> data;
+    std::unordered_map<std::thread::id, std::shared_ptr<ThreadLocalData>> data;
   };
 
   struct ThreadExitRegistration {
@@ -190,6 +190,7 @@ class TaichiLLVMContext {
       llvm::Module *module);
 
   ThreadLocalData *get_this_thread_data();
+  std::shared_ptr<ThreadLocalData> get_this_thread_data_owner();
   static void register_thread_exit(
       const std::shared_ptr<ThreadDataRegistry> &registry,
       std::thread::id thread_id);
