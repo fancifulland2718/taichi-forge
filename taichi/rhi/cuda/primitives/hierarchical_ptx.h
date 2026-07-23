@@ -249,6 +249,7 @@ void driver_sparse_gmres_projection_f32(void *basis,
 
 void driver_sparse_gmres_basis_f32(void *source,
                                    void *basis,
+                                   void *current,
                                    void *state,
                                    int num_items,
                                    int basis_stride,

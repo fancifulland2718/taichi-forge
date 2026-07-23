@@ -41,6 +41,7 @@
 #include "taichi/program/sparse_minres.h"
 #include "taichi/program/sparse_operator_minres.h"
 #include "taichi/program/sparse_device_bicgstab.h"
+#include "taichi/program/sparse_device_gmres.h"
 #include "taichi/program/sparse_device_minres.h"
 #include "taichi/aot/graph_data.h"
 #include "taichi/runtime/gfx/runtime.h"
@@ -6210,6 +6211,86 @@ void export_lang(py::module &m) {
       py::keep_alive<0, 3>(), py::arg("program"), py::arg("operator"),
       py::arg("preconditioner"), py::arg("max_iterations"),
       py::arg("absolute_tolerance"), py::arg("relative_tolerance") = 0.0f);
+
+  py::class_<DeviceGMRES>(m, "DeviceGMRES")
+      .def("solve", &DeviceGMRES::solve)
+      .def(
+          "_configure_execution_policy",
+          [](DeviceGMRES &solver, const std::string &policy,
+             int check_interval) {
+            SparseSolveExecutionPolicy native_policy;
+            if (policy == "host_check_every_k") {
+              native_policy =
+                  SparseSolveExecutionPolicy::host_check_every_k;
+            } else if (policy == "fixed_budget_masked") {
+              native_policy =
+                  SparseSolveExecutionPolicy::fixed_budget_masked;
+            } else {
+              TI_ERROR("Unsupported device GMRES execution policy '{}'.",
+                       policy);
+            }
+            solver.configure_execution_policy(native_policy,
+                                              check_interval);
+          },
+          py::arg("policy"), py::arg("check_interval"))
+      .def("is_success", &DeviceGMRES::is_success)
+      .def("get_status", &DeviceGMRES::get_status)
+      .def("get_iterations", &DeviceGMRES::get_iterations)
+      .def("get_initial_residual_norm",
+           &DeviceGMRES::get_initial_residual_norm)
+      .def("get_residual_norm", &DeviceGMRES::get_residual_norm)
+      .def("_get_last_result",
+           [sparse_solve_result_to_dict](const DeviceGMRES &solver) {
+             return sparse_solve_result_to_dict(solver.get_last_result());
+           })
+      .def("_debug_runtime_stats",
+           [sparse_solve_plan_stats_to_dict](const DeviceGMRES &solver) {
+             return sparse_solve_plan_stats_to_dict(
+                 solver.debug_runtime_statistics());
+           });
+  m.def(
+      "_make_device_experimental_linear_operator_gmres_solver",
+      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+         int max_iterations, int restart, float absolute_tolerance,
+         float relative_tolerance) {
+        return make_device_gmres_solver(
+            program, operator_handle, nullptr, nullptr, max_iterations,
+            restart, absolute_tolerance, relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::arg("program"), py::arg("operator"), py::arg("max_iterations"),
+      py::arg("restart"), py::arg("absolute_tolerance"),
+      py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "_make_device_fixed_sparse_gmres_solver",
+      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+         SparseMatrix &matrix, int max_iterations, int restart,
+         float absolute_tolerance, float relative_tolerance) {
+        return make_device_gmres_solver(
+            program, operator_handle, &matrix, nullptr, max_iterations,
+            restart, absolute_tolerance, relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(), py::arg("program"), py::arg("operator"),
+      py::arg("matrix"), py::arg("max_iterations"), py::arg("restart"),
+      py::arg("absolute_tolerance"),
+      py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "_make_device_operator_preconditioned_gmres_solver",
+      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+         ExperimentalLinearOperatorHandle &preconditioner,
+         int max_iterations, int restart, float absolute_tolerance,
+         float relative_tolerance) {
+        return make_device_gmres_solver(
+            program, operator_handle, nullptr, &preconditioner,
+            max_iterations, restart, absolute_tolerance,
+            relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(), py::arg("program"), py::arg("operator"),
+      py::arg("preconditioner"), py::arg("max_iterations"),
+      py::arg("restart"), py::arg("absolute_tolerance"),
+      py::arg("relative_tolerance") = 0.0f);
 
   py::class_<DeviceBiCGSTAB>(m, "DeviceBiCGSTAB")
       .def("solve", &DeviceBiCGSTAB::solve)

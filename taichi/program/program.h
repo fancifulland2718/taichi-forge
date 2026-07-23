@@ -2505,6 +2505,7 @@ class TI_DLL_EXPORT Program {
 
   std::size_t vulkan_sparse_gmres_basis(Ndarray *source,
                                         Ndarray *basis,
+                                        Ndarray *current,
                                         Ndarray *state,
                                         std::size_t n,
                                         std::size_t basis_stride,

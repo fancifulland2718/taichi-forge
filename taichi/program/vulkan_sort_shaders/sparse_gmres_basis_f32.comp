@@ -8,7 +8,10 @@ layout(set = 0, binding = 0, std430) readonly buffer Source {
 layout(set = 0, binding = 1, std430) buffer Basis {
   float data[];
 } basis_buf;
-layout(set = 0, binding = 2, std430) readonly buffer State {
+layout(set = 0, binding = 2, std430) writeonly buffer Current {
+  float data[];
+} current_buf;
+layout(set = 0, binding = 3, std430) readonly buffer State {
   uint data[];
 } state_buf;
 
@@ -34,8 +37,9 @@ void main() {
       : int(state_buf.data[kCycleActive]) != 0;
   float denominator = uintBitsToFloat(
       state_buf.data[params.mode == 0u ? kBeta : kNextNorm]);
-  basis_buf.data[params.row * params.basis_stride + index] =
-      enabled && denominator != 0.0
-          ? source_buf.data[index] / denominator
-          : 0.0;
+  float value = enabled && denominator != 0.0
+      ? source_buf.data[index] / denominator
+      : 0.0;
+  basis_buf.data[params.row * params.basis_stride + index] = value;
+  current_buf.data[index] = value;
 }

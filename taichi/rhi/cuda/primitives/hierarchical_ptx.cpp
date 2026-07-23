@@ -1510,26 +1510,29 @@ void driver_sparse_gmres_projection_f32(void *basis,
 
 void driver_sparse_gmres_basis_f32(void *source,
                                    void *basis,
+                                   void *current,
                                    void *state,
                                    int num_items,
                                    int basis_stride,
                                    int row,
                                    int mode,
                                    void *stream) {
-  TI_ERROR_IF(!source || !basis || !state || num_items <= 0 ||
+  TI_ERROR_IF(!source || !basis || !current || !state || num_items <= 0 ||
                   basis_stride < num_items || row < 0 || row > 32 ||
                   mode < 0 || mode > 1,
               "CUDA Driver sparse GMRES basis update received invalid "
               "geometry, controls, or a null pointer.");
   void *source_arg = source;
   void *basis_arg = basis;
+  void *current_arg = current;
   void *state_arg = state;
   std::uint32_t count_arg = static_cast<std::uint32_t>(num_items);
   std::uint32_t stride_arg = static_cast<std::uint32_t>(basis_stride);
   std::uint32_t row_arg = static_cast<std::uint32_t>(row);
   std::uint32_t mode_arg = static_cast<std::uint32_t>(mode);
-  std::vector<void *> args{&source_arg, &basis_arg, &state_arg, &count_arg,
-                           &stride_arg, &row_arg, &mode_arg};
+  std::vector<void *> args{&source_arg, &basis_arg, &current_arg,
+                           &state_arg, &count_arg, &stride_arg, &row_arg,
+                           &mode_arg};
   const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
   CUDAContext::get_instance().launch(
       kernels().sparse_gmres_basis_f32,

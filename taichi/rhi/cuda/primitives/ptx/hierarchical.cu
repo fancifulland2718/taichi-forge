@@ -1786,6 +1786,7 @@ extern "C" __global__ void sparse_gmres_projection_f32(
 extern "C" __global__ void sparse_gmres_basis_f32(
     const float *source,
     float *basis,
+    float *current,
     const u32 *state,
     u32 n,
     u32 basis_stride,
@@ -1800,8 +1801,10 @@ extern "C" __global__ void sparse_gmres_basis_f32(
       : sparse_gmres::load_int(state, sparse_gmres::kCycleActive) != 0;
   const float denominator = sparse_gmres::load_float(
       state, mode == 0u ? sparse_gmres::kBeta : sparse_gmres::kNextNorm);
-  basis[row * basis_stride + index] =
+  const float value =
       active && denominator != 0.0f ? source[index] / denominator : 0.0f;
+  basis[row * basis_stride + index] = value;
+  current[index] = value;
 }
 
 extern "C" __global__ void sparse_gmres_combine_f32(

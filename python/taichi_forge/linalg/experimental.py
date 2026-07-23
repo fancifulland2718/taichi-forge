@@ -2098,7 +2098,51 @@ class SolvePlan:
                     self.atol,
                     self.rtol,
                 )
-            raise TaichiRuntimeError("unsupported GMRES backend")
+            if arch not in gpu_arches:
+                raise TaichiRuntimeError("unsupported GMRES backend")
+            if self.operator.dtype != f32:
+                raise TaichiRuntimeError(
+                    "GPU GMRES currently supports f32 only"
+                )
+            configure = (
+                self._configure_cuda_solver
+                if arch == _ti_core.Arch.cuda
+                else self._configure_vulkan_solver
+            )
+            if preconditioner_action is not None:
+                return configure(
+                    _ti_core._make_device_operator_preconditioned_gmres_solver(
+                        self._program,
+                        self.operator._handle,
+                        preconditioner_action._handle,
+                        self.max_iterations,
+                        self.restart,
+                        self.atol,
+                        self.rtol,
+                    )
+                )
+            if kind == "stored":
+                return configure(
+                    _ti_core._make_device_fixed_sparse_gmres_solver(
+                        self._program,
+                        self.operator._handle,
+                        core,
+                        self.max_iterations,
+                        self.restart,
+                        self.atol,
+                        self.rtol,
+                    )
+                )
+            return configure(
+                _ti_core._make_device_experimental_linear_operator_gmres_solver(
+                    self._program,
+                    self.operator._handle,
+                    self.max_iterations,
+                    self.restart,
+                    self.atol,
+                    self.rtol,
+                )
+            )
 
         if self.method == "bicgstab":
             preconditioner_action = None
