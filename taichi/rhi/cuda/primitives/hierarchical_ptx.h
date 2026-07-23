@@ -179,6 +179,51 @@ void driver_sparse_minres_commit_f32(void *v,
                                      int num_items,
                                      void *stream);
 
+void driver_sparse_bicgstab_scalar_f32(void *initial_residual_squared,
+                                       void *rhs_squared,
+                                       void *dot0,
+                                       void *dot1,
+                                       void *state,
+                                       float absolute_tolerance,
+                                       float relative_tolerance,
+                                       int stage,
+                                       bool limit_reached,
+                                       void *stream);
+
+void driver_sparse_bicgstab_direction_f32(void *residual,
+                                          void *direction,
+                                          void *operator_direction,
+                                          void *state,
+                                          int num_items,
+                                          void *stream);
+
+void driver_sparse_bicgstab_intermediate_f32(void *residual,
+                                             void *operator_direction,
+                                             void *intermediate,
+                                             void *state,
+                                             int num_items,
+                                             void *stream);
+
+void driver_sparse_bicgstab_commit_f32(void *solution_direction,
+                                       void *solution_intermediate,
+                                       void *intermediate,
+                                       void *operator_intermediate,
+                                       void *solution,
+                                       void *residual,
+                                       void *state,
+                                       int num_items,
+                                       void *stream);
+
+void driver_sparse_bicgstab_reconcile_f32(void *true_residual,
+                                          void *residual,
+                                          void *shadow_residual,
+                                          void *direction,
+                                          void *operator_direction,
+                                          void *solution,
+                                          void *state,
+                                          int num_items,
+                                          void *stream);
+
 std::size_t driver_compact_strided(void *values,
                                    void *flags,
                                    void *output,

@@ -1187,6 +1187,410 @@ extern "C" __global__ void sparse_minres_commit_f32(
   r2[index] = lanczos_residual[index];
 }
 
+namespace sparse_bicgstab {
+
+constexpr u32 kRhoOld = 0u;
+constexpr u32 kAlpha = 1u;
+constexpr u32 kOmega = 2u;
+constexpr u32 kRho = 3u;
+constexpr u32 kBeta = 4u;
+constexpr u32 kAlphaDenominator = 5u;
+constexpr u32 kOmegaNumerator = 6u;
+constexpr u32 kOmegaDenominator = 7u;
+constexpr u32 kIntermediateResidualSquared = 8u;
+constexpr u32 kResidualSquared = 9u;
+constexpr u32 kTrueResidualSquared = 10u;
+constexpr u32 kInitialResidualSquared = 11u;
+constexpr u32 kRhsSquared = 12u;
+constexpr u32 kRelativeReferenceNorm = 13u;
+constexpr u32 kEffectiveTolerance = 14u;
+constexpr u32 kToleranceSquared = 15u;
+constexpr u32 kFloatCount = 16u;
+
+constexpr u32 kStatus = kFloatCount + 0u;
+constexpr u32 kCompletedIterations = kFloatCount + 1u;
+constexpr u32 kActive = kFloatCount + 2u;
+constexpr u32 kCommitEnabled = kFloatCount + 3u;
+constexpr u32 kFreshDirection = kFloatCount + 4u;
+constexpr u32 kStopKind = kFloatCount + 5u;
+constexpr u32 kBreakdownReason = kFloatCount + 6u;
+constexpr u32 kReconcileMode = kFloatCount + 7u;
+constexpr u32 kStateWords = kFloatCount + 8u;
+
+constexpr i32 kNotRun = -1;
+constexpr i32 kMaxIterations = 0;
+constexpr i32 kBreakdown = 1;
+constexpr i32 kConverged = 2;
+
+constexpr i32 kStopNone = 0;
+constexpr i32 kStopRestart = 1;
+constexpr i32 kStopBreakdown = 2;
+
+constexpr i32 kReasonNone = 0;
+constexpr i32 kReasonNonfinite = 1;
+constexpr i32 kReasonRho = 2;
+constexpr i32 kReasonAlphaDenominator = 3;
+constexpr i32 kReasonOmegaDenominator = 4;
+constexpr i32 kReasonOmega = 5;
+
+__device__ float load_float(const u32 *state, u32 index) {
+  return bit_cast<float>(state[index]);
+}
+
+__device__ void store_float(u32 *state, u32 index, float value) {
+  state[index] = bit_cast<u32>(value);
+}
+
+__device__ i32 load_int(const u32 *state, u32 index) {
+  return bit_cast<i32>(state[index]);
+}
+
+__device__ void store_int(u32 *state, u32 index, i32 value) {
+  state[index] = bit_cast<u32>(value);
+}
+
+__device__ bool finite(float value) {
+  return sparse_refresh_finite_f32(value);
+}
+
+__device__ void fail(u32 *state, i32 reason) {
+  store_int(state, kStatus, kBreakdown);
+  store_int(state, kActive, 0);
+  store_int(state, kCommitEnabled, 0);
+  store_int(state, kStopKind, kStopBreakdown);
+  store_int(state, kBreakdownReason, reason);
+}
+
+}  // namespace sparse_bicgstab
+
+extern "C" __global__ void sparse_bicgstab_scalar_f32(
+    const float *initial_residual_squared,
+    const float *rhs_squared,
+    const float *dot0,
+    const float *dot1,
+    u32 *state,
+    float absolute_tolerance,
+    float relative_tolerance,
+    u32 stage,
+    u32 limit_reached) {
+  if (blockIdx.x != 0u || threadIdx.x != 0u) {
+    return;
+  }
+  using namespace sparse_bicgstab;
+  if (stage == 0u) {
+    for (u32 index = 0; index < kStateWords; ++index) {
+      state[index] = 0u;
+    }
+    store_float(state, kRhoOld, 1.0f);
+    store_float(state, kAlpha, 1.0f);
+    store_float(state, kOmega, 1.0f);
+    store_int(state, kStatus, kNotRun);
+    store_int(state, kActive, 1);
+    store_int(state, kFreshDirection, 1);
+    store_int(state, kReconcileMode, 1);
+    const float rr = initial_residual_squared[0];
+    const float rhs2 = rhs_squared[0];
+    store_float(state, kTrueResidualSquared, rr);
+    store_float(state, kInitialResidualSquared, rr);
+    store_float(state, kRhsSquared, rhs2);
+    if (!finite(rr) || rr < 0.0f || !finite(rhs2) || rhs2 < 0.0f) {
+      fail(state, kReasonNonfinite);
+      store_int(state, kReconcileMode, 0);
+      return;
+    }
+    const float reference = sparse_refresh_sqrt_f32(rhs2);
+    const float relative = relative_tolerance * reference;
+    const float tolerance =
+        absolute_tolerance > relative ? absolute_tolerance : relative;
+    const float tolerance_squared = tolerance * tolerance;
+    if (!finite(reference) || !finite(tolerance) ||
+        !finite(tolerance_squared)) {
+      fail(state, kReasonNonfinite);
+      store_int(state, kReconcileMode, 0);
+      return;
+    }
+    store_float(state, kRelativeReferenceNorm, reference);
+    store_float(state, kEffectiveTolerance, tolerance);
+    store_float(state, kToleranceSquared, tolerance_squared);
+    if (rr <= tolerance_squared) {
+      store_int(state, kStatus, kConverged);
+      store_int(state, kActive, 0);
+      store_int(state, kReconcileMode, 0);
+    } else if (limit_reached != 0u) {
+      store_int(state, kStatus, kMaxIterations);
+      store_int(state, kActive, 0);
+      store_int(state, kReconcileMode, 0);
+    } else if (rhs2 == 0.0f) {
+      store_float(state, kTrueResidualSquared, 0.0f);
+      store_int(state, kStatus, kConverged);
+      store_int(state, kActive, 0);
+      store_int(state, kReconcileMode, 2);
+    }
+    return;
+  }
+
+  if (stage == 6u) {
+    const float rr = dot0[0];
+    store_float(state, kTrueResidualSquared, rr);
+    store_int(state, kReconcileMode, 0);
+    if (!finite(rr) || rr < 0.0f) {
+      fail(state, kReasonNonfinite);
+      return;
+    }
+    if (rr <= load_float(state, kToleranceSquared)) {
+      store_int(state, kStatus, kConverged);
+      store_int(state, kActive, 0);
+      store_int(state, kBreakdownReason, kReasonNone);
+      return;
+    }
+    const i32 stop_kind = load_int(state, kStopKind);
+    if (stop_kind == kStopRestart) {
+      store_float(state, kRhoOld, 1.0f);
+      store_float(state, kAlpha, 1.0f);
+      store_float(state, kOmega, 1.0f);
+      store_int(state, kStatus, kNotRun);
+      store_int(state, kActive, 1);
+      store_int(state, kFreshDirection, 1);
+      store_int(state, kStopKind, kStopNone);
+      store_int(state, kBreakdownReason, kReasonNone);
+      store_int(state, kReconcileMode, 1);
+      return;
+    }
+    if (stop_kind == kStopBreakdown ||
+        load_int(state, kStatus) == kBreakdown) {
+      store_int(state, kStatus, kBreakdown);
+      store_int(state, kActive, 0);
+      return;
+    }
+    if (limit_reached != 0u) {
+      store_int(state, kStatus, kMaxIterations);
+      store_int(state, kActive, 0);
+    } else {
+      store_int(state, kStatus, kNotRun);
+      store_int(state, kActive, 1);
+    }
+    return;
+  }
+
+  if (load_int(state, kActive) == 0) {
+    return;
+  }
+  if (stage == 1u) {
+    const float rho = dot0[0];
+    store_float(state, kRho, rho);
+    if (!finite(rho)) {
+      fail(state, kReasonNonfinite);
+      return;
+    }
+    if (rho == 0.0f) {
+      store_int(state, kActive, 0);
+      store_int(state, kStopKind, kStopRestart);
+      store_int(state, kBreakdownReason, kReasonRho);
+      return;
+    }
+    if (load_int(state, kFreshDirection) != 0) {
+      store_float(state, kBeta, 0.0f);
+      return;
+    }
+    const float rho_old = load_float(state, kRhoOld);
+    const float alpha = load_float(state, kAlpha);
+    const float omega = load_float(state, kOmega);
+    if (rho_old == 0.0f) {
+      fail(state, kReasonRho);
+      return;
+    }
+    if (omega == 0.0f) {
+      fail(state, kReasonOmega);
+      return;
+    }
+    const float beta = (rho / rho_old) * (alpha / omega);
+    if (!finite(beta)) {
+      fail(state, kReasonNonfinite);
+      return;
+    }
+    store_float(state, kBeta, beta);
+    return;
+  }
+  if (stage == 2u) {
+    const float denominator = dot0[0];
+    store_float(state, kAlphaDenominator, denominator);
+    if (!finite(denominator)) {
+      fail(state, kReasonNonfinite);
+      return;
+    }
+    if (denominator == 0.0f) {
+      fail(state, kReasonAlphaDenominator);
+      return;
+    }
+    const float alpha = load_float(state, kRho) / denominator;
+    if (!finite(alpha)) {
+      fail(state, kReasonNonfinite);
+      return;
+    }
+    store_float(state, kAlpha, alpha);
+    return;
+  }
+  if (stage == 3u) {
+    const float rr = dot0[0];
+    store_float(state, kIntermediateResidualSquared, rr);
+    if (!finite(rr) || rr < 0.0f) {
+      fail(state, kReasonNonfinite);
+      return;
+    }
+    if (rr <= load_float(state, kToleranceSquared)) {
+      store_int(state, kStopKind, kStopRestart);
+      store_int(state, kBreakdownReason, kReasonNone);
+    }
+    return;
+  }
+  if (stage == 4u) {
+    float omega = 0.0f;
+    if (load_int(state, kStopKind) == kStopNone) {
+      const float numerator = dot0[0];
+      const float denominator = dot1[0];
+      store_float(state, kOmegaNumerator, numerator);
+      store_float(state, kOmegaDenominator, denominator);
+      if (!finite(numerator) || !finite(denominator)) {
+        fail(state, kReasonNonfinite);
+        return;
+      }
+      if (denominator == 0.0f) {
+        store_int(state, kStopKind, kStopBreakdown);
+        store_int(state, kBreakdownReason, kReasonOmegaDenominator);
+      } else {
+        omega = numerator / denominator;
+        if (!finite(omega)) {
+          fail(state, kReasonNonfinite);
+          return;
+        }
+        if (omega == 0.0f) {
+          store_int(state, kStopKind, kStopBreakdown);
+          store_int(state, kBreakdownReason, kReasonOmega);
+        }
+      }
+    }
+    store_float(state, kOmega, omega);
+    store_int(state, kCommitEnabled, 1);
+    store_int(state, kFreshDirection, 0);
+    store_int(state, kCompletedIterations,
+              load_int(state, kCompletedIterations) + 1);
+    return;
+  }
+  if (stage == 5u) {
+    store_int(state, kCommitEnabled, 0);
+    const float rr = dot0[0];
+    store_float(state, kResidualSquared, rr);
+    if (!finite(rr) || rr < 0.0f) {
+      fail(state, kReasonNonfinite);
+      return;
+    }
+    if (load_int(state, kStopKind) != kStopNone) {
+      store_int(state, kActive, 0);
+      return;
+    }
+    if (rr <= load_float(state, kToleranceSquared)) {
+      store_int(state, kStopKind, kStopRestart);
+      store_int(state, kActive, 0);
+      return;
+    }
+    store_float(state, kRhoOld, load_float(state, kRho));
+    return;
+  }
+  fail(state, kReasonNonfinite);
+}
+
+extern "C" __global__ void sparse_bicgstab_direction_f32(
+    const float *residual,
+    float *direction,
+    const float *operator_direction,
+    const u32 *state,
+    u32 n) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= n || sparse_bicgstab::load_int(
+                        state, sparse_bicgstab::kActive) == 0) {
+    return;
+  }
+  if (sparse_bicgstab::load_int(
+          state, sparse_bicgstab::kFreshDirection) != 0) {
+    direction[index] = residual[index];
+    return;
+  }
+  const float beta = sparse_bicgstab::load_float(
+      state, sparse_bicgstab::kBeta);
+  const float omega = sparse_bicgstab::load_float(
+      state, sparse_bicgstab::kOmega);
+  direction[index] = residual[index] +
+                     beta * (direction[index] -
+                             omega * operator_direction[index]);
+}
+
+extern "C" __global__ void sparse_bicgstab_intermediate_f32(
+    const float *residual,
+    const float *operator_direction,
+    float *intermediate,
+    const u32 *state,
+    u32 n) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= n || sparse_bicgstab::load_int(
+                        state, sparse_bicgstab::kActive) == 0) {
+    return;
+  }
+  intermediate[index] = residual[index] -
+      sparse_bicgstab::load_float(state, sparse_bicgstab::kAlpha) *
+          operator_direction[index];
+}
+
+extern "C" __global__ void sparse_bicgstab_commit_f32(
+    const float *solution_direction,
+    const float *solution_intermediate,
+    const float *intermediate,
+    const float *operator_intermediate,
+    float *solution,
+    float *residual,
+    const u32 *state,
+    u32 n) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= n || sparse_bicgstab::load_int(
+                        state, sparse_bicgstab::kCommitEnabled) == 0) {
+    return;
+  }
+  const float alpha = sparse_bicgstab::load_float(
+      state, sparse_bicgstab::kAlpha);
+  const float omega = sparse_bicgstab::load_float(
+      state, sparse_bicgstab::kOmega);
+  solution[index] += alpha * solution_direction[index] +
+                     omega * solution_intermediate[index];
+  residual[index] = intermediate[index] -
+                    omega * operator_intermediate[index];
+}
+
+extern "C" __global__ void sparse_bicgstab_reconcile_f32(
+    const float *true_residual,
+    float *residual,
+    float *shadow_residual,
+    float *direction,
+    float *operator_direction,
+    float *solution,
+    const u32 *state,
+    u32 n) {
+  const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
+  const i32 mode = sparse_bicgstab::load_int(
+      state, sparse_bicgstab::kReconcileMode);
+  if (index >= n || mode == 0) {
+    return;
+  }
+  if (mode == 2) {
+    solution[index] = 0.0f;
+    residual[index] = 0.0f;
+    shadow_residual[index] = 0.0f;
+  } else {
+    residual[index] = true_residual[index];
+    shadow_residual[index] = true_residual[index];
+  }
+  direction[index] = 0.0f;
+  operator_direction[index] = 0.0f;
+}
+
 extern "C" __global__ void sparse_diagonal_refresh_f32(
     const float *values,
     const i32 *diagonal_offsets,

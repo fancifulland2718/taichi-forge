@@ -50,6 +50,11 @@ struct KernelSet {
   void *sparse_minres_scalar_f32{nullptr};
   void *sparse_minres_vector_state_f32{nullptr};
   void *sparse_minres_commit_f32{nullptr};
+  void *sparse_bicgstab_scalar_f32{nullptr};
+  void *sparse_bicgstab_direction_f32{nullptr};
+  void *sparse_bicgstab_intermediate_f32{nullptr};
+  void *sparse_bicgstab_commit_f32{nullptr};
+  void *sparse_bicgstab_reconcile_f32{nullptr};
   std::array<void *, 2> zero_bins{};
   std::array<std::array<void *, 2>, 2> histogram{};
   void *compact_rank_tiles{nullptr};
@@ -201,6 +206,21 @@ void load_kernel_set_once() {
   driver.module_get_function(&kernel_set.sparse_minres_commit_f32,
                              kernel_set.module,
                              "sparse_minres_commit_f32");
+  driver.module_get_function(&kernel_set.sparse_bicgstab_scalar_f32,
+                             kernel_set.module,
+                             "sparse_bicgstab_scalar_f32");
+  driver.module_get_function(&kernel_set.sparse_bicgstab_direction_f32,
+                             kernel_set.module,
+                             "sparse_bicgstab_direction_f32");
+  driver.module_get_function(&kernel_set.sparse_bicgstab_intermediate_f32,
+                             kernel_set.module,
+                             "sparse_bicgstab_intermediate_f32");
+  driver.module_get_function(&kernel_set.sparse_bicgstab_commit_f32,
+                             kernel_set.module,
+                             "sparse_bicgstab_commit_f32");
+  driver.module_get_function(&kernel_set.sparse_bicgstab_reconcile_f32,
+                             kernel_set.module,
+                             "sparse_bicgstab_reconcile_f32");
   driver.module_get_function(&kernel_set.gather_add[0], kernel_set.module,
                              "gather_add_strided_f32");
   driver.module_get_function(&kernel_set.gather_add[1], kernel_set.module,
@@ -1237,6 +1257,151 @@ void driver_sparse_minres_commit_f32(void *v,
       kernels().sparse_minres_commit_f32,
       "cuda_driver_sparse_minres_commit_f32", args, {}, grid, kBlockDim,
       0, stream);
+}
+
+void driver_sparse_bicgstab_scalar_f32(void *initial_residual_squared,
+                                       void *rhs_squared,
+                                       void *dot0,
+                                       void *dot1,
+                                       void *state,
+                                       float absolute_tolerance,
+                                       float relative_tolerance,
+                                       int stage,
+                                       bool limit_reached,
+                                       void *stream) {
+  TI_ERROR_IF(!initial_residual_squared || !rhs_squared || !dot0 || !dot1 ||
+                  !state || stage < 0 || stage > 6,
+              "CUDA Driver sparse BiCGSTAB scalar stage received an "
+              "invalid pointer or stage.");
+  void *initial_arg = initial_residual_squared;
+  void *rhs_arg = rhs_squared;
+  void *dot0_arg = dot0;
+  void *dot1_arg = dot1;
+  void *state_arg = state;
+  std::uint32_t stage_arg = static_cast<std::uint32_t>(stage);
+  std::uint32_t limit_arg = limit_reached ? 1u : 0u;
+  std::vector<void *> args{&initial_arg, &rhs_arg, &dot0_arg, &dot1_arg,
+                           &state_arg, &absolute_tolerance,
+                           &relative_tolerance, &stage_arg, &limit_arg};
+  CUDAContext::get_instance().launch(
+      kernels().sparse_bicgstab_scalar_f32,
+      "cuda_driver_sparse_bicgstab_scalar_f32", args, {}, 1, 1, 0,
+      stream);
+}
+
+void driver_sparse_bicgstab_direction_f32(void *residual,
+                                          void *direction,
+                                          void *operator_direction,
+                                          void *state,
+                                          int num_items,
+                                          void *stream) {
+  TI_ERROR_IF(!residual || !direction || !operator_direction || !state ||
+                  num_items <= 0,
+              "CUDA Driver sparse BiCGSTAB direction received invalid "
+              "geometry or a null pointer.");
+  void *residual_arg = residual;
+  void *direction_arg = direction;
+  void *operator_direction_arg = operator_direction;
+  void *state_arg = state;
+  std::uint32_t count_arg = static_cast<std::uint32_t>(num_items);
+  std::vector<void *> args{&residual_arg, &direction_arg,
+                           &operator_direction_arg, &state_arg,
+                           &count_arg};
+  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().sparse_bicgstab_direction_f32,
+      "cuda_driver_sparse_bicgstab_direction_f32", args, {}, grid,
+      kBlockDim, 0, stream);
+}
+
+void driver_sparse_bicgstab_intermediate_f32(void *residual,
+                                             void *operator_direction,
+                                             void *intermediate,
+                                             void *state,
+                                             int num_items,
+                                             void *stream) {
+  TI_ERROR_IF(!residual || !operator_direction || !intermediate || !state ||
+                  num_items <= 0,
+              "CUDA Driver sparse BiCGSTAB intermediate received invalid "
+              "geometry or a null pointer.");
+  void *residual_arg = residual;
+  void *operator_direction_arg = operator_direction;
+  void *intermediate_arg = intermediate;
+  void *state_arg = state;
+  std::uint32_t count_arg = static_cast<std::uint32_t>(num_items);
+  std::vector<void *> args{&residual_arg, &operator_direction_arg,
+                           &intermediate_arg, &state_arg, &count_arg};
+  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().sparse_bicgstab_intermediate_f32,
+      "cuda_driver_sparse_bicgstab_intermediate_f32", args, {}, grid,
+      kBlockDim, 0, stream);
+}
+
+void driver_sparse_bicgstab_commit_f32(void *solution_direction,
+                                       void *solution_intermediate,
+                                       void *intermediate,
+                                       void *operator_intermediate,
+                                       void *solution,
+                                       void *residual,
+                                       void *state,
+                                       int num_items,
+                                       void *stream) {
+  TI_ERROR_IF(!solution_direction || !solution_intermediate ||
+                  !intermediate || !operator_intermediate || !solution ||
+                  !residual || !state || num_items <= 0,
+              "CUDA Driver sparse BiCGSTAB commit received invalid "
+              "geometry or a null pointer.");
+  void *solution_direction_arg = solution_direction;
+  void *solution_intermediate_arg = solution_intermediate;
+  void *intermediate_arg = intermediate;
+  void *operator_intermediate_arg = operator_intermediate;
+  void *solution_arg = solution;
+  void *residual_arg = residual;
+  void *state_arg = state;
+  std::uint32_t count_arg = static_cast<std::uint32_t>(num_items);
+  std::vector<void *> args{
+      &solution_direction_arg, &solution_intermediate_arg,
+      &intermediate_arg, &operator_intermediate_arg, &solution_arg,
+      &residual_arg, &state_arg, &count_arg};
+  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().sparse_bicgstab_commit_f32,
+      "cuda_driver_sparse_bicgstab_commit_f32", args, {}, grid,
+      kBlockDim, 0, stream);
+}
+
+void driver_sparse_bicgstab_reconcile_f32(void *true_residual,
+                                          void *residual,
+                                          void *shadow_residual,
+                                          void *direction,
+                                          void *operator_direction,
+                                          void *solution,
+                                          void *state,
+                                          int num_items,
+                                          void *stream) {
+  TI_ERROR_IF(!true_residual || !residual || !shadow_residual || !direction ||
+                  !operator_direction || !solution || !state ||
+                  num_items <= 0,
+              "CUDA Driver sparse BiCGSTAB reconcile received invalid "
+              "geometry or a null pointer.");
+  void *true_residual_arg = true_residual;
+  void *residual_arg = residual;
+  void *shadow_residual_arg = shadow_residual;
+  void *direction_arg = direction;
+  void *operator_direction_arg = operator_direction;
+  void *solution_arg = solution;
+  void *state_arg = state;
+  std::uint32_t count_arg = static_cast<std::uint32_t>(num_items);
+  std::vector<void *> args{
+      &true_residual_arg, &residual_arg, &shadow_residual_arg,
+      &direction_arg, &operator_direction_arg, &solution_arg,
+      &state_arg, &count_arg};
+  const unsigned grid = (count_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().sparse_bicgstab_reconcile_f32,
+      "cuda_driver_sparse_bicgstab_reconcile_f32", args, {}, grid,
+      kBlockDim, 0, stream);
 }
 
 void driver_sparse_assembly_pack_validate(void *triplet_rows,
