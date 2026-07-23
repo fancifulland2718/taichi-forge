@@ -413,6 +413,26 @@ Python iteration callback、自动 restart 选择、block GMRES 或领域 outer-
 把 variable-linear plan 传给 CG、PCG、MINRES、BiCGSTAB 或普通 GMRES 会在 plan 构造
 阶段失败。
 
+### 当前未支持边界
+
+`0.5.1` 数值工具合同有意不提供：
+
+- nonlinear、依赖 residual、adaptive 或 Python callback 驱动的 preconditioner；
+- 自动 restart 选择、block/multi-RHS Krylov、recycling、deflation、pipelining 或
+  communication-avoiding GMRES 变体；
+- MINRES-QLP、singular minimum-norm/minimum-length 保证或自动 nullspace 处理；
+- GPU `f64` GMRES-family 执行、GPU operator composition 或通用 GPU
+  `alpha/beta/addend` apply；
+- variable-action CUDA Graph/Vulkan command replay、single-system 异步 solve
+  submission 或 device-convergent 条件终止；
+- dynamic-topology solve plan、ragged batch 或透明 host fallback；
+- 内建 IC/ILU/AMG、multigrid hierarchy 构建、Schur/field split、domain
+  decomposition、离散、contact/KKT policy 或 nonlinear outer iteration。
+
+独立 fixed-size batched CG/PCG 与 block Krylov/multi-RHS solve 是不同合同。不受支持的
+backend/provider/policy 组合会在构造或 capability 校验阶段失败；系统不会通过更换
+provider、execution policy 或数学问题来近似执行。
+
 ## PreconditionerPlan 生命周期
 
 需要更新系数、显式复用或审计来源时，应使用 `PreconditionerPlan`：

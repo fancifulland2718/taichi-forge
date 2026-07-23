@@ -1,7 +1,7 @@
 # Taichi Forge 版本更新说明
 
-本文是 Taichi Forge 用户可见更新的唯一版本索引。当前声明的包版本是 `0.5.0`；
-`master` 还包含下方明确分开的“未发布”更新。`0.4.25` 是最后一个公开的
+本文是 Taichi Forge 用户可见更新的唯一版本索引。当前声明的包版本是 `0.5.1`。
+`0.5.0` 保留为上一个已发布 runtime 源码边界，`0.4.25` 是最后一个公开的
 `0.4.x` 基线。
 
 由于 PyPI 项目容量有限，部分不再重要的旧发行文件已经移除。因此，当前 PyPI 列表中
@@ -12,7 +12,8 @@
 
 | 版本 | 历史状态 | 源码边界 | 主要范围 |
 | --- | --- | --- | --- |
-| [未发布](#未发布) | 已发布 0.5.0 runtime 边界之后的当前源码 | 当前 `master` | 稀疏 runtime/线性代数、driver-only CUDA primitive、宿主内存/生命周期有界化与 TODO 合同补全 |
+| [未发布](#未发布) | 当前声明的 0.5.1 源码边界之后的更新 | 当前 `master` | 为后续用户可见更新保留 |
+| [0.5.1](#051) | 当前声明的源码版本；发行文件可能仍待发布 | 当前 `master` | 稀疏 runtime/线性代数、driver-only CUDA primitive、宿主内存/生命周期有界化与 runtime 合同补全 |
 | [0.1.0](#010) | 历史源码版本；发行文件可能已移除 | `91ad177685` | scikit-build-core 迁移与 Forge 发行包重命名 |
 | [0.1.1](#011) | 历史源码版本；发行文件可能已移除 | `c771969781` | `taichi_forge` import 重命名与安装布局修复 |
 | [0.1.2](#012) | 历史源码版本；发行文件可能已移除 | `fe5844390b` | import 修复与 CUDA 构建选项 |
@@ -38,11 +39,31 @@
 
 ## 未发布
 
-以下内容晚于已发布的 0.5.0 runtime 源码边界，不会追溯写成 0.5.0 产物行为：
+当前没有晚于 `0.5.1` 声明源码边界的用户可见更新。
+
+## 0.5.1
+
+`0.5.1` 汇总已发布 `0.5.0` runtime 源码边界之后的更新，不会追溯改写
+`0.5.0` 发行产物的行为归属：
 
 - Offline-cache metadata lock 改为由打开文件句柄持有的操作系统 advisory lock。进程
   终止会自动释放所有权，因此持久 `.lock` 文件不再导致反复的 load/dump 警告，也不再
   要求删除已编译 cache 状态。
+
+### 数值工具支持边界
+
+`0.5.1` 的 `LinearOperator` 工具支持 fixed-topology、runtime-owned operator，以及
+经过资格验证的 CPU/CUDA/Vulkan Krylov 执行。文档 provider 矩阵覆盖 CG/PCG、
+MINRES、BiCGSTAB、restarted GMRES，以及使用有限 cyclic variable-linear action table
+的 FGMRES。solver plan 提供真实 residual 终止、immutable generation 所有权、持久
+workspace、结构化 capability 结果与 provider-neutral qualification report。
+
+当前合同不包括 nonlinear 或 callback 驱动的 preconditioner、自动 restart 选择、
+block/recycling/pipelined GMRES、MINRES-QLP 或 singular minimum-norm 语义、GPU
+`f64` GMRES-family 执行、variable-action CUDA Graph/Vulkan command replay，以及
+single-system 异步提交。Forge 也不构造 IC/ILU/AMG、multigrid、Schur/field split、
+domain decomposition、contact、KKT 或 nonlinear outer-solver policy。不受支持的
+组合会明确失败，不进行 silent host staging 或 provider replacement。
 
 ### 稀疏 runtime 与线性代数现代化
 

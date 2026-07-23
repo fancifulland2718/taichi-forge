@@ -1,9 +1,9 @@
 # Taichi Forge Release Notes
 
 This is the canonical version index for Taichi Forge user-visible changes.
-The declared package version is `0.5.0`; current `master` also contains the
-explicitly separated Unreleased changes below. `0.4.25` is the final public
-`0.4.x` baseline.
+The declared package version is `0.5.1`. Version `0.5.0` remains the previous
+published runtime source boundary, and `0.4.25` is the final public `0.4.x`
+baseline.
 
 PyPI storage is limited, so some nonessential older distributions have been
 removed. Absence from the current PyPI release list does not mean that a
@@ -15,7 +15,8 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
-| [Unreleased](#unreleased) | current source after the published 0.5.0 runtime boundary | current `master` | sparse runtime/linear algebra, driver-only CUDA primitives, bounded host-memory/lifetimes, and TODO contract completion |
+| [Unreleased](#unreleased) | changes after the declared 0.5.1 source boundary | current `master` | reserved for later user-visible changes |
+| [0.5.1](#051) | current declared source release; publication artifacts may be pending | current `master` | sparse runtime/linear algebra, driver-only CUDA primitives, bounded host-memory/lifetimes, and completed runtime contracts |
 | [0.1.0](#010) | historical source release; artifact may be removed | `91ad177685` | scikit-build-core migration and Forge distribution rebrand |
 | [0.1.1](#011) | historical source release; artifact may be removed | `c771969781` | `taichi_forge` import rename and install-layout fixes |
 | [0.1.2](#012) | historical source release; artifact may be removed | `fe5844390b` | import fixes and CUDA build option |
@@ -41,13 +42,37 @@ grouped under the behavior they shipped.
 
 ## Unreleased
 
-These changes are after the published 0.5.0 runtime source boundary and are not
-retroactively attributed to the 0.5.0 artifact:
+No user-visible changes are currently recorded after the declared `0.5.1`
+source boundary.
+
+## 0.5.1
+
+Version `0.5.1` consolidates the changes after the published `0.5.0` runtime
+source boundary. It does not retroactively change the behavior attributed to
+the `0.5.0` artifacts:
 
 - Offline-cache metadata locks now use operating-system advisory locks held by
   an open file handle. Process termination releases ownership automatically, so
   a persistent `.lock` file no longer causes repeated load/dump warnings or
   requires deleting compiled cache state.
+
+### Numerical tooling support boundary
+
+The `0.5.1` `LinearOperator` tooling supports fixed-topology, runtime-owned
+operators and qualified CPU/CUDA/Vulkan Krylov execution. The documented
+provider matrix covers CG/PCG, MINRES, BiCGSTAB, restarted GMRES, and FGMRES
+with a finite cyclic variable-linear action table. Solver plans expose true
+residual termination, immutable generation ownership, persistent workspace,
+structured capability results, and provider-neutral qualification reports.
+
+The current contract does not include nonlinear or callback-driven
+preconditioners, automatic restart selection, block/recycling/pipelined GMRES,
+MINRES-QLP or singular minimum-norm semantics, GPU `f64` GMRES-family
+execution, variable-action CUDA Graph/Vulkan command replay, or asynchronous
+single-system submission. Forge also does not construct IC/ILU/AMG,
+multigrid, Schur/field-split, domain-decomposition, contact, KKT, or nonlinear
+outer-solver policy. Unsupported combinations fail explicitly without silent
+host staging or provider replacement.
 
 ### Sparse runtime and linear algebra modernization
 

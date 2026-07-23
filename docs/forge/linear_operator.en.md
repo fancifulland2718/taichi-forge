@@ -465,6 +465,30 @@ restart selection, block GMRES, or domain-specific outer-solver policy.
 Passing a variable-linear plan to CG, PCG, MINRES, BiCGSTAB, or ordinary GMRES
 fails during plan construction.
 
+### Current unsupported boundary
+
+The `0.5.1` numerical-tooling contract intentionally does not provide:
+
+- nonlinear, residual-dependent, adaptive, or Python-callback preconditioners;
+- automatic restart selection, block or multi-RHS Krylov methods, recycling,
+  deflation, pipelining, or communication-avoiding GMRES variants;
+- MINRES-QLP, singular minimum-norm/minimum-length guarantees, or automatic
+  nullspace handling;
+- GPU `f64` GMRES-family execution, GPU operator composition, or generalized
+  GPU `alpha/beta/addend` apply;
+- variable-action CUDA Graph/Vulkan command replay, single-system asynchronous
+  solve submission, or device-convergent conditional termination;
+- dynamic-topology solve plans, ragged batches, or transparent host fallback;
+  and
+- built-in IC/ILU/AMG, multigrid hierarchy construction, Schur/field splitting,
+  domain decomposition, discretization, contact/KKT policy, or nonlinear outer
+  iteration.
+
+Independent fixed-size batched CG/PCG remains distinct from block Krylov or
+multi-RHS solving. Unsupported backend/provider/policy combinations fail at
+construction or capability validation; they are not approximated by changing
+the provider, execution policy, or mathematical problem.
+
 ## PreconditionerPlan lifecycle
 
 Use `PreconditionerPlan` when coefficients change or when provenance, explicit
