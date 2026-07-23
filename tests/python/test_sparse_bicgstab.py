@@ -460,6 +460,9 @@ def test_sparse_bicgstab_fixed_zero_operator_reports_finite_breakdown():
     np.testing.assert_array_equal(solution, np.zeros(2, dtype=np.float32))
     assert solver._last_solve_result.termination_reason == "breakdown"
     assert solver._last_solve_result.breakdown
+    assert (
+        solver._last_solve_result.breakdown_reason == "alpha_denominator"
+    )
     assert np.isfinite(solver._last_solve_result.residual_norm)
     assert solver._last_solve_result.iterations == 0
 

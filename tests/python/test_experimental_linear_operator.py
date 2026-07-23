@@ -28,6 +28,24 @@ def _fixed_diagonal(values):
     return pattern.matrix(numeric)
 
 
+def _fixed_csr(dense):
+    dense = np.asarray(dense, dtype=np.float32)
+    rows, columns = dense.shape
+    row_offsets = ti.ndarray(ti.i32, shape=rows + 1)
+    column_indices = ti.ndarray(ti.i32, shape=rows * columns)
+    numeric = ti.ndarray(ti.f32, shape=rows * columns)
+    row_offsets.from_numpy(
+        np.arange(0, rows * columns + 1, columns, dtype=np.int32)
+    )
+    column_indices.from_numpy(
+        np.tile(np.arange(columns, dtype=np.int32), rows)
+    )
+    numeric.from_numpy(dense.reshape(-1))
+    return ti.linalg.SparsePattern.csr(
+        rows, columns, row_offsets, column_indices
+    ).matrix(numeric)
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_experimental_identity_composition_and_apply():
     experimental = ti.linalg.experimental
@@ -86,6 +104,49 @@ def test_experimental_cg_and_bicgstab_reuse_plans():
     result = bicgstab.solve(rhs)
     assert result.converged
     np.testing.assert_allclose(result.solution.to_numpy(), expected)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_experimental_bicgstab_fixed_linear_right_preconditioner():
+    experimental = ti.linalg.experimental
+    dense = np.asarray(
+        [[40.0, 2.0, 0.0], [-3.0, 5.0, 1.0], [0.0, -1.0, 0.5]],
+        dtype=np.float32,
+    )
+    inverse_action = np.diag(1.0 / np.diag(dense)).astype(np.float32)
+    inverse_action[0, 1] = np.float32(-0.01)
+    operator = experimental.aslinearoperator(_fixed_csr(dense))
+    preconditioner = experimental.aslinearoperator(
+        _fixed_csr(inverse_action),
+        traits=experimental.OperatorTraits(
+            self_adjoint=False, singular=False
+        ),
+    )
+    exact = np.asarray([0.75, -1.25, 2.0], dtype=np.float32)
+    plan = experimental.SolvePlan(
+        operator,
+        method="bicgstab",
+        preconditioner=preconditioner,
+        max_iterations=12,
+        atol=2e-5,
+    )
+
+    first = plan.solve(_vector(dense @ exact))
+    second = plan.solve(_vector(dense @ exact))
+    assert first.converged and second.converged
+    assert first.breakdown_reason == "none"
+    np.testing.assert_allclose(
+        second.solution.to_numpy(), exact, rtol=3e-5, atol=3e-5
+    )
+    stats = plan.statistics()
+    assert stats["identity"]["preconditioning_side"] == "right"
+    assert stats["identity"]["preconditioner_method"] == "linear_operator"
+    assert stats["identity"]["preconditioner_behavior"] == "fixed_linear"
+    assert stats["identity"]["last_breakdown_reason"] == "none"
+    assert stats["operations"]["preconditioner_apply_calls"] > 0
+    assert stats["operations"]["preconditioner_update_noops"] == 2
+    assert stats["resources"]["persistent_vector_count"] == 10
+    assert stats["resources"]["transient_solver_workspace_bytes"] == 0
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
