@@ -42,6 +42,24 @@ def _diagonal_operator(values):
     )
 
 
+def _stored_diagonal_operator(values):
+    values = np.asarray(values, dtype=np.float32)
+    size = values.size
+    offsets = ti.ndarray(ti.i32, shape=size + 1)
+    indices = ti.ndarray(ti.i32, shape=size)
+    numeric = ti.ndarray(ti.f32, shape=size)
+    offsets.from_numpy(np.arange(size + 1, dtype=np.int32))
+    indices.from_numpy(np.arange(size, dtype=np.int32))
+    numeric.from_numpy(values)
+    matrix = ti.linalg.SparsePattern.csr(
+        size, size, offsets, indices
+    ).matrix(numeric)
+    return ti.linalg.experimental.LinearOperator.from_sparse_matrix(
+        matrix,
+        traits=ti.linalg.experimental.OperatorTraits(singular=False),
+    )
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_single_solve_qualification_factory_true_residual_and_matrix():
     experimental = ti.linalg.experimental
@@ -192,6 +210,45 @@ def test_solve_qualification_records_public_preconditioner_provenance():
     assert preconditioner_record["method"] == "external_diagonal"
     assert preconditioner_record["metadata"]["supported"]
     assert json.loads(report.to_json())["passed"]
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_solve_qualification_records_fgmres_action_table():
+    experimental = ti.linalg.experimental
+    diagonal = np.asarray([2.0, 3.0, 5.0, 7.0], dtype=np.float32)
+    operator = _stored_diagonal_operator(diagonal)
+    action0 = _stored_diagonal_operator(0.8 / diagonal)
+    action1 = _stored_diagonal_operator(1.2 / diagonal)
+    preconditioner = experimental.PreconditionerPlan(
+        operator,
+        (action0, action1),
+        method="alternating_diagonal",
+        behavior="variable_linear",
+    ).setup()
+    plan = experimental.SolvePlan(
+        operator,
+        method="fgmres",
+        preconditioner=preconditioner,
+        restart=8,
+        max_iterations=8,
+        atol=1e-5,
+        rtol=1e-5,
+    )
+    exact = np.asarray([0.5, -1.0, 2.0, 1.5], dtype=np.float32)
+    report = experimental.qualify_solve_plan(
+        plan,
+        _vector(diagonal * exact),
+        reference=exact,
+        warmup=0,
+        repetitions=1,
+    )
+
+    assert report.passed
+    preconditioner_record = report.to_dict()["plan"]["preconditioner"]
+    assert preconditioner_record["behavior"] == "variable_linear"
+    assert preconditioner_record["selection"] == "cyclic"
+    assert preconditioner_record["action_count"] == 2
+    assert len(preconditioner_record["actions"]) == 2
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

@@ -121,12 +121,23 @@ def _preconditioner_record(plan):
         result["kind"] = "linear_operator"
         return result
     if isinstance(preconditioner, PreconditionerPlan):
-        result = _provider_record(preconditioner.action)
+        actions = [
+            _provider_record(action) for action in preconditioner.actions
+        ]
+        result = dict(actions[0])
+        if any(
+            action["provider"] != actions[0]["provider"]
+            for action in actions[1:]
+        ):
+            result["provider"] = "mixed_action_table"
         result.update(
             {
                 "kind": "preconditioner_plan",
                 "method": preconditioner.method,
                 "behavior": preconditioner.behavior,
+                "selection": preconditioner.selection,
+                "action_count": len(actions),
+                "actions": actions,
                 "metadata": _json_copy(preconditioner.metadata),
             }
         )
