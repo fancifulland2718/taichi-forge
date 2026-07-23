@@ -303,7 +303,18 @@ void StructCompilerLLVM::run(SNode &root) {
     writer.write(module.get());
   }
 
-  TI_ASSERT((int)snodes.size() <= taichi_max_num_snodes);
+  TI_ERROR_IF(
+      snodes.size() > static_cast<std::size_t>(taichi_max_num_snodes),
+      "An LLVM SNode tree contains {} nodes, exceeding the runtime capacity "
+      "of {}.",
+      snodes.size(), taichi_max_num_snodes);
+  for (const auto *snode : snodes) {
+    TI_ERROR_IF(
+        snode->id < 0 || snode->id >= taichi_max_num_snodes,
+        "LLVM SNode id {} exceeds the runtime capacity of {}. SNode ids are "
+        "global across all materialized trees in one Program.",
+        snode->id, taichi_max_num_snodes);
+  }
 
   auto node_type = get_llvm_node_type(module.get(), &root);
   root_size = tlctx_->get_type_size(node_type);

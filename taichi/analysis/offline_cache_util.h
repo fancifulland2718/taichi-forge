@@ -110,7 +110,12 @@ class Kernel;
 //       the existing exact dirty-epoch/parent-version contract, and LLVMRuntime
 //       appends a task-local reuse signal for debug attribution. Cached CPU
 //       kernels must recompile with listgen reuse enabled.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 23;
+//  23 - E4 fixed sparse linear systems (2026-07). Native sparse assembly and
+//       solver lowering gained device-resident execution paths and metadata.
+//  24 - Program-global SNode capacity (2026-07). LLVMRuntime expands every
+//       SNode-id-indexed table from 1024 to 4096 entries. Cached LLVM kernels
+//       embed runtime field offsets and are ABI-incompatible with this layout.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 24;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

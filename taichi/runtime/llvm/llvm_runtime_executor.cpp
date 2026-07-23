@@ -607,6 +607,20 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
   const int tree_id = field_cache_data.tree_id;
   const int root_id = field_cache_data.root_id;
 
+  TI_ERROR_IF(tree_id < 0 || tree_id >= kMaxNumSnodeTreesLlvm,
+              "LLVM SNode tree id {} exceeds the runtime capacity of {}.",
+              tree_id, kMaxNumSnodeTreesLlvm);
+  TI_ERROR_IF(root_id < 0 || root_id >= taichi_max_num_snodes,
+              "LLVM root SNode id {} exceeds the runtime capacity of {}.",
+              root_id, taichi_max_num_snodes);
+  for (const auto &meta : snode_metas) {
+    TI_ERROR_IF(
+        meta.id < 0 || meta.id >= taichi_max_num_snodes,
+        "LLVM SNode id {} exceeds the runtime capacity of {}. Refusing to "
+        "index runtime metadata out of bounds.",
+        meta.id, taichi_max_num_snodes);
+  }
+
   bool all_dense = config_.demote_dense_struct_fors;
   DeviceAllocationUnique *sparse_tree_pool_alloc = nullptr;
   for (size_t i = 0; i < snode_metas.size(); i++) {
