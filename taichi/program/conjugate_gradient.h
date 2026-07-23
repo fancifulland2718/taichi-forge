@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdint>
 #include <mutex>
+#include <string>
 
 namespace taichi::lang {
 
@@ -37,6 +38,18 @@ enum class SparseSolveStatus : int {
   kBreakdown = 1,
   kConverged = 2,
 };
+
+enum class SparseSolveBreakdownReason : std::uint8_t {
+  none,
+  nonfinite,
+  rho,
+  alpha_denominator,
+  omega_denominator,
+  omega,
+};
+
+const char *sparse_solve_breakdown_reason_name(
+    SparseSolveBreakdownReason reason);
 
 enum class SparseSolveExecutionPolicy : std::uint8_t {
   host_each_iteration,
@@ -71,6 +84,8 @@ struct SparseSolveResult {
   double relative_tolerance{0.0};
   double relative_reference_norm{0.0};
   double effective_tolerance{0.0};
+  SparseSolveBreakdownReason breakdown_reason{
+      SparseSolveBreakdownReason::none};
 
   bool converged() const {
     return status == SparseSolveStatus::kConverged;
@@ -96,6 +111,7 @@ struct SparseSolvePlanRuntimeStatistics {
   double relative_tolerance{0.0};
   double last_relative_reference_norm{0.0};
   double last_effective_tolerance{0.0};
+  std::string last_breakdown_reason{"none"};
 
   std::uint64_t operator_pattern_version{0};
   std::uint64_t operator_numeric_version{0};
@@ -142,6 +158,10 @@ struct SparseSolvePlanRuntimeStatistics {
   std::uint64_t workspace_reuses{0};
   std::uint64_t operator_apply_calls{0};
   bool operator_apply_calls_available{false};
+  std::uint64_t dot_product_calls{0};
+  bool dot_product_calls_available{false};
+  std::uint64_t vector_update_calls{0};
+  bool vector_update_calls_available{false};
   std::uint64_t host_scalar_reductions{0};
   std::uint64_t device_scalar_operations{0};
   std::uint64_t host_scalar_readbacks{0};
@@ -162,6 +182,7 @@ struct SparseSolvePlanRuntimeStatistics {
   std::string solver_replay_unavailable_reason{"not_requested"};
   std::string solver_scalar_location{"host"};
   std::string solver_stream_policy{"backend_default"};
+  std::string preconditioning_side{"none"};
   bool fixed_iteration_only{false};
   bool bounded_masked_execution{false};
   std::string preconditioner_method{"identity"};
@@ -699,6 +720,14 @@ std::unique_ptr<PreconditionerPlan> make_solver_preconditioner_plan(
     OperatorPlan &target_plan,
     ExperimentalLinearOperatorHandle &preconditioner,
     std::string method);
+std::unique_ptr<PreconditionerPlan> make_solver_right_preconditioner_plan(
+    Program *program,
+    OperatorPlan &target_plan,
+    ExperimentalLinearOperatorHandle &preconditioner,
+    std::string method);
+void append_solver_preconditioner_plan_statistics(
+    const PreconditionerPlan &plan,
+    SparseSolvePlanRuntimeStatistics &statistics);
 
 class CpuSparseCGPlan {
  public:

@@ -839,6 +839,21 @@ static const uint32_t kSparseMinresVectorStateF32Spv[] =
 static const uint32_t kSparseMinresCommitF32Spv[] =
 #include "taichi/program/vulkan_sort_shaders/sparse_minres_commit_f32.comp.spv.h"
     ;
+static const uint32_t kSparseBicgstabScalarF32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/sparse_bicgstab_scalar_f32.comp.spv.h"
+    ;
+static const uint32_t kSparseBicgstabDirectionF32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/sparse_bicgstab_direction_f32.comp.spv.h"
+    ;
+static const uint32_t kSparseBicgstabIntermediateF32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/sparse_bicgstab_intermediate_f32.comp.spv.h"
+    ;
+static const uint32_t kSparseBicgstabCommitF32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/sparse_bicgstab_commit_f32.comp.spv.h"
+    ;
+static const uint32_t kSparseBicgstabReconcileF32Spv[] =
+#include "taichi/program/vulkan_sort_shaders/sparse_bicgstab_reconcile_f32.comp.spv.h"
+    ;
 static const uint32_t kSparseTripletPackF32Spv[] =
 #include "taichi/program/vulkan_sort_shaders/sparse_triplet_pack_f32.comp.spv.h"
     ;
@@ -4606,6 +4621,11 @@ struct VulkanSparseAlgebraCache {
   std::unique_ptr<Pipeline> sparse_minres_scalar_f32;
   std::unique_ptr<Pipeline> sparse_minres_vector_state_f32;
   std::unique_ptr<Pipeline> sparse_minres_commit_f32;
+  std::unique_ptr<Pipeline> sparse_bicgstab_scalar_f32;
+  std::unique_ptr<Pipeline> sparse_bicgstab_direction_f32;
+  std::unique_ptr<Pipeline> sparse_bicgstab_intermediate_f32;
+  std::unique_ptr<Pipeline> sparse_bicgstab_commit_f32;
+  std::unique_ptr<Pipeline> sparse_bicgstab_reconcile_f32;
   std::unique_ptr<Pipeline> sparse_triplet_pack_f32;
   std::unique_ptr<Pipeline> sparse_triplet_pack_packed_f32;
   std::unique_ptr<Pipeline> sparse_segment_flags_u64;
@@ -4630,6 +4650,11 @@ struct VulkanSparseAlgebraCache {
   VulkanResourceSetReplayRing<3> sparse_minres_vector_state_bindings;
   VulkanResourceSetReplayRing<9> sparse_minres_commit_bindings;
   VulkanResourceSetReplayRing<7> sparse_triplet_pack_bindings;
+  VulkanResourceSetReplayRing<5> sparse_bicgstab_scalar_bindings;
+  VulkanResourceSetReplayRing<4> sparse_bicgstab_direction_bindings;
+  VulkanResourceSetReplayRing<4> sparse_bicgstab_intermediate_bindings;
+  VulkanResourceSetReplayRing<7> sparse_bicgstab_commit_bindings;
+  VulkanResourceSetReplayRing<7> sparse_bicgstab_reconcile_bindings;
   VulkanResourceSetReplayRing<5> sparse_triplet_pack_packed_bindings;
   VulkanResourceSetReplayRing<4> sparse_segment_flags_bindings;
   VulkanResourceSetReplayRing<6> sparse_segment_scatter_bindings;
@@ -4653,6 +4678,11 @@ struct VulkanSparseAlgebraCache {
   VulkanCommandReplayCache sparse_minres_vector_state_command_replay;
   VulkanCommandReplayCache sparse_minres_commit_command_replay;
   VulkanCommandReplayCache sparse_triplet_pack_command_replay;
+  VulkanCommandReplayCache sparse_bicgstab_scalar_command_replay;
+  VulkanCommandReplayCache sparse_bicgstab_direction_command_replay;
+  VulkanCommandReplayCache sparse_bicgstab_intermediate_command_replay;
+  VulkanCommandReplayCache sparse_bicgstab_commit_command_replay;
+  VulkanCommandReplayCache sparse_bicgstab_reconcile_command_replay;
   VulkanCommandReplayCache sparse_triplet_pack_packed_command_replay;
   VulkanCommandReplayCache sparse_segment_flags_command_replay;
   VulkanCommandReplayCache sparse_segment_scatter_command_replay;
@@ -4679,6 +4709,11 @@ struct VulkanSparseAlgebraCache {
     sparse_minres_vector_state_bindings.reset();
     sparse_minres_commit_bindings.reset();
     sparse_triplet_pack_bindings.reset();
+    sparse_bicgstab_scalar_bindings.reset();
+    sparse_bicgstab_direction_bindings.reset();
+    sparse_bicgstab_intermediate_bindings.reset();
+    sparse_bicgstab_commit_bindings.reset();
+    sparse_bicgstab_reconcile_bindings.reset();
     sparse_triplet_pack_packed_bindings.reset();
     sparse_segment_flags_bindings.reset();
     sparse_segment_scatter_bindings.reset();
@@ -4702,6 +4737,11 @@ struct VulkanSparseAlgebraCache {
     sparse_minres_vector_state_command_replay.reset();
     sparse_minres_commit_command_replay.reset();
     sparse_triplet_pack_command_replay.reset();
+    sparse_bicgstab_scalar_command_replay.reset();
+    sparse_bicgstab_direction_command_replay.reset();
+    sparse_bicgstab_intermediate_command_replay.reset();
+    sparse_bicgstab_commit_command_replay.reset();
+    sparse_bicgstab_reconcile_command_replay.reset();
     sparse_triplet_pack_packed_command_replay.reset();
     sparse_segment_flags_command_replay.reset();
     sparse_segment_scatter_command_replay.reset();
@@ -4745,6 +4785,11 @@ struct VulkanSparseAlgebraCache {
     sparse_minres_scalar_f32.reset();
     sparse_minres_vector_state_f32.reset();
     sparse_minres_commit_f32.reset();
+    sparse_bicgstab_scalar_f32.reset();
+    sparse_bicgstab_direction_f32.reset();
+    sparse_bicgstab_intermediate_f32.reset();
+    sparse_bicgstab_commit_f32.reset();
+    sparse_bicgstab_reconcile_f32.reset();
     sparse_triplet_pack_f32.reset();
     sparse_triplet_pack_packed_f32.reset();
     sparse_segment_flags_u64.reset();
@@ -4755,7 +4800,7 @@ struct VulkanSparseAlgebraCache {
     clear_allocs();
   }
 
-  void ensure_device(Device *dev) {
+ void ensure_device(Device *dev) {
     if (device == dev) {
       return;
     }
@@ -4932,6 +4977,57 @@ struct VulkanSparseAlgebraCache {
           "vulkan_sparse_minres_commit_f32");
     }
     return sparse_minres_commit_f32.get();
+  }
+
+  Pipeline *sparse_bicgstab_scalar_pipeline(Device *dev) {
+    ensure_device(dev);
+    if (!sparse_bicgstab_scalar_f32) {
+      sparse_bicgstab_scalar_f32 = create_pipeline_from_spv(
+          dev, kSparseBicgstabScalarF32Spv,
+          sizeof(kSparseBicgstabScalarF32Spv),
+          "vulkan_sparse_bicgstab_scalar_f32");
+    }
+    return sparse_bicgstab_scalar_f32.get();
+  }
+  Pipeline *sparse_bicgstab_direction_pipeline(Device *dev) {
+    ensure_device(dev);
+    if (!sparse_bicgstab_direction_f32) {
+      sparse_bicgstab_direction_f32 = create_pipeline_from_spv(
+          dev, kSparseBicgstabDirectionF32Spv,
+          sizeof(kSparseBicgstabDirectionF32Spv),
+          "vulkan_sparse_bicgstab_direction_f32");
+    }
+    return sparse_bicgstab_direction_f32.get();
+  }
+  Pipeline *sparse_bicgstab_intermediate_pipeline(Device *dev) {
+    ensure_device(dev);
+    if (!sparse_bicgstab_intermediate_f32) {
+      sparse_bicgstab_intermediate_f32 = create_pipeline_from_spv(
+          dev, kSparseBicgstabIntermediateF32Spv,
+          sizeof(kSparseBicgstabIntermediateF32Spv),
+          "vulkan_sparse_bicgstab_intermediate_f32");
+    }
+    return sparse_bicgstab_intermediate_f32.get();
+  }
+  Pipeline *sparse_bicgstab_commit_pipeline(Device *dev) {
+    ensure_device(dev);
+    if (!sparse_bicgstab_commit_f32) {
+      sparse_bicgstab_commit_f32 = create_pipeline_from_spv(
+          dev, kSparseBicgstabCommitF32Spv,
+          sizeof(kSparseBicgstabCommitF32Spv),
+          "vulkan_sparse_bicgstab_commit_f32");
+    }
+    return sparse_bicgstab_commit_f32.get();
+  }
+  Pipeline *sparse_bicgstab_reconcile_pipeline(Device *dev) {
+    ensure_device(dev);
+    if (!sparse_bicgstab_reconcile_f32) {
+      sparse_bicgstab_reconcile_f32 = create_pipeline_from_spv(
+          dev, kSparseBicgstabReconcileF32Spv,
+          sizeof(kSparseBicgstabReconcileF32Spv),
+          "vulkan_sparse_bicgstab_reconcile_f32");
+    }
+    return sparse_bicgstab_reconcile_f32.get();
   }
 
   Pipeline *sparse_triplet_pack_pipeline(Device *dev) {
@@ -5314,6 +5410,73 @@ struct VulkanSparseAlgebraCache {
             rw_buffer_request(allocs[6], 0, vector_bytes),
             rw_buffer_request(allocs[7], 0, vector_bytes),
             rw_buffer_request(allocs[8], 0, 33 * sizeof(uint32_t))});
+  }
+
+  VulkanReplayResourceSet<5> bind_sparse_bicgstab_scalar(
+      Program *program,
+      const std::array<DeviceAllocation, 5> &allocs) {
+    return sparse_bicgstab_scalar_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 5>{
+            rw_buffer_request(allocs[0], 0, sizeof(float32)),
+            rw_buffer_request(allocs[1], 0, sizeof(float32)),
+            rw_buffer_request(allocs[2], 0, sizeof(float32)),
+            rw_buffer_request(allocs[3], 0, sizeof(float32)),
+            rw_buffer_request(allocs[4], 0, 24 * sizeof(uint32_t))});
+  }
+  VulkanReplayResourceSet<4> bind_sparse_bicgstab_direction(
+      Program *program,
+      const std::array<DeviceAllocation, 4> &allocs,
+      size_t vector_bytes) {
+    return sparse_bicgstab_direction_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 4>{
+            rw_buffer_request(allocs[0], 0, vector_bytes),
+            rw_buffer_request(allocs[1], 0, vector_bytes),
+            rw_buffer_request(allocs[2], 0, vector_bytes),
+            rw_buffer_request(allocs[3], 0, 24 * sizeof(uint32_t))});
+  }
+  VulkanReplayResourceSet<4> bind_sparse_bicgstab_intermediate(
+      Program *program,
+      const std::array<DeviceAllocation, 4> &allocs,
+      size_t vector_bytes) {
+    return sparse_bicgstab_intermediate_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 4>{
+            rw_buffer_request(allocs[0], 0, vector_bytes),
+            rw_buffer_request(allocs[1], 0, vector_bytes),
+            rw_buffer_request(allocs[2], 0, vector_bytes),
+            rw_buffer_request(allocs[3], 0, 24 * sizeof(uint32_t))});
+  }
+  VulkanReplayResourceSet<7> bind_sparse_bicgstab_commit(
+      Program *program,
+      const std::array<DeviceAllocation, 7> &allocs,
+      size_t vector_bytes) {
+    return sparse_bicgstab_commit_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 7>{
+            rw_buffer_request(allocs[0], 0, vector_bytes),
+            rw_buffer_request(allocs[1], 0, vector_bytes),
+            rw_buffer_request(allocs[2], 0, vector_bytes),
+            rw_buffer_request(allocs[3], 0, vector_bytes),
+            rw_buffer_request(allocs[4], 0, vector_bytes),
+            rw_buffer_request(allocs[5], 0, vector_bytes),
+            rw_buffer_request(allocs[6], 0, 24 * sizeof(uint32_t))});
+  }
+  VulkanReplayResourceSet<7> bind_sparse_bicgstab_reconcile(
+      Program *program,
+      const std::array<DeviceAllocation, 7> &allocs,
+      size_t vector_bytes) {
+    return sparse_bicgstab_reconcile_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 7>{
+            rw_buffer_request(allocs[0], 0, vector_bytes),
+            rw_buffer_request(allocs[1], 0, vector_bytes),
+            rw_buffer_request(allocs[2], 0, vector_bytes),
+            rw_buffer_request(allocs[3], 0, vector_bytes),
+            rw_buffer_request(allocs[4], 0, vector_bytes),
+            rw_buffer_request(allocs[5], 0, vector_bytes),
+            rw_buffer_request(allocs[6], 0, 24 * sizeof(uint32_t))});
   }
 
   VulkanReplayResourceSet<7> bind_sparse_triplet_pack(
@@ -11474,6 +11637,420 @@ std::size_t Program::vulkan_sparse_minres_commit(
   if (!cache.sparse_minres_commit_command_replay.submit_or_record(
           this, device, command_key, profiler_scopes, record_commit)) {
     enqueue_compute_op_lambda(record_commit, {});
+  }
+  return cache.allocated_bytes();
+}
+
+std::size_t Program::vulkan_sparse_bicgstab_scalar(
+    Ndarray *initial_residual_squared,
+    Ndarray *rhs_squared,
+    Ndarray *dot0,
+    Ndarray *dot1,
+    Ndarray *state,
+    float absolute_tolerance,
+    float relative_tolerance,
+    std::uint32_t stage,
+    bool limit_reached) {
+  auto submission_guard = acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(!vulkan_sparse_algebra_available(),
+              "Vulkan sparse BiCGSTAB is only available on Vulkan.");
+  TI_ERROR_IF(stage > 6 || !std::isfinite(absolute_tolerance) ||
+                  !std::isfinite(relative_tolerance) ||
+                  absolute_tolerance < 0.0f || relative_tolerance < 0.0f ||
+                  (absolute_tolerance == 0.0f &&
+                   relative_tolerance == 0.0f),
+              "Vulkan sparse BiCGSTAB scalar stage received invalid "
+              "controls.");
+  check_vulkan_sparse_f32_output(initial_residual_squared);
+  check_vulkan_sparse_f32_output(rhs_squared);
+  check_vulkan_sparse_f32_output(dot0);
+  check_vulkan_sparse_f32_output(dot1);
+  check_vulkan_sparse_i32_vector("BiCGSTAB state", state, 24);
+  const std::array<DeviceAllocation, 5> allocs{
+      initial_residual_squared->get_device_allocation(),
+      rhs_squared->get_device_allocation(), dot0->get_device_allocation(),
+      dot1->get_device_allocation(), state->get_device_allocation()};
+  for (std::size_t i = 0; i < allocs.size(); ++i) {
+    for (std::size_t j = i + 1; j < allocs.size(); ++j) {
+      TI_ERROR_IF(allocs[i] == allocs[j],
+                  "Vulkan sparse BiCGSTAB scalar buffers must not alias.");
+    }
+  }
+  const Ndarray *resources[] = {initial_residual_squared, rhs_squared, dot0,
+                                dot1, state};
+  retain_ndarrays_for_external_submission(resources, std::size(resources));
+  Device *device = get_compute_device();
+  TI_ERROR_IF(!device,
+              "Vulkan sparse BiCGSTAB requires a compute device.");
+  auto cache_lease = get_sparse_algebra_cache(this, device);
+  auto &cache = *cache_lease;
+  Pipeline *pipeline = cache.sparse_bicgstab_scalar_pipeline(device);
+  ShaderResourceSet *bindings =
+      cache.bind_sparse_bicgstab_scalar(this, allocs).bindings;
+  const std::array<uint32_t, 4> param_words{
+      vulkan_sparse_f32_word(absolute_tolerance),
+      vulkan_sparse_f32_word(relative_tolerance), stage,
+      limit_reached ? 1u : 0u};
+  const uint32_t push_bytes =
+      static_cast<uint32_t>(param_words.size() * sizeof(uint32_t));
+  const bool profiler_scopes = profiler != nullptr;
+  auto record = [allocs, pipeline, bindings, param_words, push_bytes,
+                 profiler_scopes](Device *, CommandList *cmdlist) {
+    dispatch_pipeline_with_push_constants(
+        cmdlist, pipeline, bindings, param_words.data(), push_bytes, 1, 1, 1,
+        profiler_scopes ? "vulkan_sparse_bicgstab_scalar_f32" : nullptr);
+    cmdlist->buffer_barrier(allocs[4].get_ptr(0),
+                            24 * sizeof(uint32_t));
+  };
+  VulkanCommandReplayKey key;
+  key.push(153);
+  for (std::size_t index = 0; index < allocs.size(); ++index) {
+    push_vulkan_command_key_range(
+        key, allocs[index], 0,
+        index == 4 ? 24 * sizeof(uint32_t) : sizeof(float32));
+  }
+  for (uint32_t word : param_words) {
+    key.push(word);
+  }
+  key.push_ptr(pipeline);
+  key.push_ptr(bindings);
+  if (!cache.sparse_bicgstab_scalar_command_replay.submit_or_record(
+          this, device, key, profiler_scopes, record)) {
+    enqueue_compute_op_lambda(record, {});
+  }
+  return cache.allocated_bytes();
+}
+
+std::size_t Program::vulkan_sparse_bicgstab_direction(
+    Ndarray *residual,
+    Ndarray *direction,
+    Ndarray *operator_direction,
+    Ndarray *state,
+    std::size_t n) {
+  auto submission_guard = acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(!vulkan_sparse_algebra_available(),
+              "Vulkan sparse BiCGSTAB is only available on Vulkan.");
+  TI_ERROR_IF(n == 0 || n > std::numeric_limits<uint32_t>::max(),
+              "Vulkan sparse BiCGSTAB direction received invalid "
+              "geometry.");
+  check_vulkan_sparse_f32_vector("BiCGSTAB residual", residual, n);
+  check_vulkan_sparse_f32_vector("BiCGSTAB direction", direction, n);
+  check_vulkan_sparse_f32_vector(
+      "BiCGSTAB operator direction", operator_direction, n);
+  check_vulkan_sparse_i32_vector("BiCGSTAB state", state, 24);
+  const std::array<DeviceAllocation, 4> allocs{
+      residual->get_device_allocation(), direction->get_device_allocation(),
+      operator_direction->get_device_allocation(),
+      state->get_device_allocation()};
+  for (std::size_t i = 0; i < allocs.size(); ++i) {
+    for (std::size_t j = i + 1; j < allocs.size(); ++j) {
+      TI_ERROR_IF(allocs[i] == allocs[j],
+                  "Vulkan sparse BiCGSTAB direction buffers must not "
+                  "alias.");
+    }
+  }
+  const Ndarray *resources[] = {residual, direction, operator_direction,
+                                state};
+  retain_ndarrays_for_external_submission(resources, std::size(resources));
+  const size_t vector_bytes = n * sizeof(float32);
+  Device *device = get_compute_device();
+  TI_ERROR_IF(!device,
+              "Vulkan sparse BiCGSTAB requires a compute device.");
+  auto cache_lease = get_sparse_algebra_cache(this, device);
+  auto &cache = *cache_lease;
+  Pipeline *pipeline = cache.sparse_bicgstab_direction_pipeline(device);
+  ShaderResourceSet *bindings =
+      cache.bind_sparse_bicgstab_direction(this, allocs, vector_bytes)
+          .bindings;
+  const std::array<uint32_t, 4> param_words{
+      static_cast<uint32_t>(n), 0u, 0u, 0u};
+  const uint32_t push_bytes =
+      static_cast<uint32_t>(param_words.size() * sizeof(uint32_t));
+  constexpr std::size_t kMaxDispatchGroups = 65535;
+  const uint32_t groups = static_cast<uint32_t>(std::min(
+      kMaxDispatchGroups, (n + kBlockSize - 1) / kBlockSize));
+  const bool profiler_scopes = profiler != nullptr;
+  auto record = [allocs, vector_bytes, pipeline, bindings, param_words,
+                 push_bytes, groups,
+                 profiler_scopes](Device *, CommandList *cmdlist) {
+    dispatch_pipeline_with_push_constants(
+        cmdlist, pipeline, bindings, param_words.data(), push_bytes, groups,
+        1, 1,
+        profiler_scopes ? "vulkan_sparse_bicgstab_direction_f32" : nullptr);
+    cmdlist->buffer_barrier(allocs[1].get_ptr(0), vector_bytes);
+  };
+  VulkanCommandReplayKey key;
+  key.push(154);
+  for (std::size_t index = 0; index < allocs.size(); ++index) {
+    push_vulkan_command_key_range(
+        key, allocs[index], 0,
+        index == 3 ? 24 * sizeof(uint32_t) : vector_bytes);
+  }
+  key.push(static_cast<uint32_t>(n));
+  key.push(groups);
+  key.push_ptr(pipeline);
+  key.push_ptr(bindings);
+  if (!cache.sparse_bicgstab_direction_command_replay.submit_or_record(
+          this, device, key, profiler_scopes, record)) {
+    enqueue_compute_op_lambda(record, {});
+  }
+  return cache.allocated_bytes();
+}
+
+std::size_t Program::vulkan_sparse_bicgstab_intermediate(
+    Ndarray *residual,
+    Ndarray *operator_direction,
+    Ndarray *intermediate,
+    Ndarray *state,
+    std::size_t n) {
+  auto submission_guard = acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(!vulkan_sparse_algebra_available(),
+              "Vulkan sparse BiCGSTAB is only available on Vulkan.");
+  TI_ERROR_IF(n == 0 || n > std::numeric_limits<uint32_t>::max(),
+              "Vulkan sparse BiCGSTAB intermediate received invalid "
+              "geometry.");
+  check_vulkan_sparse_f32_vector("BiCGSTAB residual", residual, n);
+  check_vulkan_sparse_f32_vector(
+      "BiCGSTAB operator direction", operator_direction, n);
+  check_vulkan_sparse_f32_vector(
+      "BiCGSTAB intermediate residual", intermediate, n);
+  check_vulkan_sparse_i32_vector("BiCGSTAB state", state, 24);
+  const std::array<DeviceAllocation, 4> allocs{
+      residual->get_device_allocation(),
+      operator_direction->get_device_allocation(),
+      intermediate->get_device_allocation(), state->get_device_allocation()};
+  for (std::size_t i = 0; i < allocs.size(); ++i) {
+    for (std::size_t j = i + 1; j < allocs.size(); ++j) {
+      TI_ERROR_IF(allocs[i] == allocs[j],
+                  "Vulkan sparse BiCGSTAB intermediate buffers must not "
+                  "alias.");
+    }
+  }
+  const Ndarray *resources[] = {residual, operator_direction, intermediate,
+                                state};
+  retain_ndarrays_for_external_submission(resources, std::size(resources));
+  const size_t vector_bytes = n * sizeof(float32);
+  Device *device = get_compute_device();
+  TI_ERROR_IF(!device,
+              "Vulkan sparse BiCGSTAB requires a compute device.");
+  auto cache_lease = get_sparse_algebra_cache(this, device);
+  auto &cache = *cache_lease;
+  Pipeline *pipeline = cache.sparse_bicgstab_intermediate_pipeline(device);
+  ShaderResourceSet *bindings =
+      cache.bind_sparse_bicgstab_intermediate(this, allocs, vector_bytes)
+          .bindings;
+  const std::array<uint32_t, 4> param_words{
+      static_cast<uint32_t>(n), 0u, 0u, 0u};
+  const uint32_t push_bytes =
+      static_cast<uint32_t>(param_words.size() * sizeof(uint32_t));
+  constexpr std::size_t kMaxDispatchGroups = 65535;
+  const uint32_t groups = static_cast<uint32_t>(std::min(
+      kMaxDispatchGroups, (n + kBlockSize - 1) / kBlockSize));
+  const bool profiler_scopes = profiler != nullptr;
+  auto record = [allocs, vector_bytes, pipeline, bindings, param_words,
+                 push_bytes, groups,
+                 profiler_scopes](Device *, CommandList *cmdlist) {
+    dispatch_pipeline_with_push_constants(
+        cmdlist, pipeline, bindings, param_words.data(), push_bytes, groups,
+        1, 1,
+        profiler_scopes ? "vulkan_sparse_bicgstab_intermediate_f32"
+                        : nullptr);
+    cmdlist->buffer_barrier(allocs[2].get_ptr(0), vector_bytes);
+  };
+  VulkanCommandReplayKey key;
+  key.push(155);
+  for (std::size_t index = 0; index < allocs.size(); ++index) {
+    push_vulkan_command_key_range(
+        key, allocs[index], 0,
+        index == 3 ? 24 * sizeof(uint32_t) : vector_bytes);
+  }
+  key.push(static_cast<uint32_t>(n));
+  key.push(groups);
+  key.push_ptr(pipeline);
+  key.push_ptr(bindings);
+  if (!cache.sparse_bicgstab_intermediate_command_replay.submit_or_record(
+          this, device, key, profiler_scopes, record)) {
+    enqueue_compute_op_lambda(record, {});
+  }
+  return cache.allocated_bytes();
+}
+
+std::size_t Program::vulkan_sparse_bicgstab_commit(
+    Ndarray *solution_direction,
+    Ndarray *solution_intermediate,
+    Ndarray *intermediate,
+    Ndarray *operator_intermediate,
+    Ndarray *solution,
+    Ndarray *residual,
+    Ndarray *state,
+    std::size_t n) {
+  auto submission_guard = acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(!vulkan_sparse_algebra_available(),
+              "Vulkan sparse BiCGSTAB is only available on Vulkan.");
+  TI_ERROR_IF(n == 0 || n > std::numeric_limits<uint32_t>::max(),
+              "Vulkan sparse BiCGSTAB commit received invalid geometry.");
+  Ndarray *vectors[] = {solution_direction, solution_intermediate,
+                        intermediate, operator_intermediate, solution,
+                        residual};
+  const char *roles[] = {"solution direction", "solution intermediate",
+                         "intermediate residual", "operator intermediate",
+                         "solution", "residual"};
+  for (std::size_t i = 0; i < std::size(vectors); ++i) {
+    check_vulkan_sparse_f32_vector(roles[i], vectors[i], n);
+  }
+  check_vulkan_sparse_i32_vector("BiCGSTAB state", state, 24);
+  const std::array<DeviceAllocation, 7> allocs{
+      solution_direction->get_device_allocation(),
+      solution_intermediate->get_device_allocation(),
+      intermediate->get_device_allocation(),
+      operator_intermediate->get_device_allocation(),
+      solution->get_device_allocation(), residual->get_device_allocation(),
+      state->get_device_allocation()};
+  TI_ERROR_IF(allocs[4] == allocs[5] || allocs[4] == allocs[6] ||
+                  allocs[5] == allocs[6],
+              "Vulkan sparse BiCGSTAB commit output/state buffers must not "
+              "alias.");
+  for (std::size_t index = 0; index < 4; ++index) {
+    TI_ERROR_IF(allocs[index] == allocs[4] ||
+                    allocs[index] == allocs[5] ||
+                    allocs[index] == allocs[6],
+                "Vulkan sparse BiCGSTAB commit inputs must not alias its "
+                "output/state buffers.");
+  }
+  const Ndarray *resources[] = {
+      solution_direction, solution_intermediate, intermediate,
+      operator_intermediate, solution, residual, state};
+  retain_ndarrays_for_external_submission(resources, std::size(resources));
+  const size_t vector_bytes = n * sizeof(float32);
+  Device *device = get_compute_device();
+  TI_ERROR_IF(!device,
+              "Vulkan sparse BiCGSTAB requires a compute device.");
+  auto cache_lease = get_sparse_algebra_cache(this, device);
+  auto &cache = *cache_lease;
+  Pipeline *pipeline = cache.sparse_bicgstab_commit_pipeline(device);
+  ShaderResourceSet *bindings =
+      cache.bind_sparse_bicgstab_commit(this, allocs, vector_bytes).bindings;
+  const std::array<uint32_t, 4> param_words{
+      static_cast<uint32_t>(n), 0u, 0u, 0u};
+  const uint32_t push_bytes =
+      static_cast<uint32_t>(param_words.size() * sizeof(uint32_t));
+  constexpr std::size_t kMaxDispatchGroups = 65535;
+  const uint32_t groups = static_cast<uint32_t>(std::min(
+      kMaxDispatchGroups, (n + kBlockSize - 1) / kBlockSize));
+  const bool profiler_scopes = profiler != nullptr;
+  auto record = [allocs, vector_bytes, pipeline, bindings, param_words,
+                 push_bytes, groups,
+                 profiler_scopes](Device *, CommandList *cmdlist) {
+    dispatch_pipeline_with_push_constants(
+        cmdlist, pipeline, bindings, param_words.data(), push_bytes, groups,
+        1, 1,
+        profiler_scopes ? "vulkan_sparse_bicgstab_commit_f32" : nullptr);
+    cmdlist->buffer_barrier(allocs[4].get_ptr(0), vector_bytes);
+    cmdlist->buffer_barrier(allocs[5].get_ptr(0), vector_bytes);
+  };
+  VulkanCommandReplayKey key;
+  key.push(156);
+  for (std::size_t index = 0; index < allocs.size(); ++index) {
+    push_vulkan_command_key_range(
+        key, allocs[index], 0,
+        index == 6 ? 24 * sizeof(uint32_t) : vector_bytes);
+  }
+  key.push(static_cast<uint32_t>(n));
+  key.push(groups);
+  key.push_ptr(pipeline);
+  key.push_ptr(bindings);
+  if (!cache.sparse_bicgstab_commit_command_replay.submit_or_record(
+          this, device, key, profiler_scopes, record)) {
+    enqueue_compute_op_lambda(record, {});
+  }
+  return cache.allocated_bytes();
+}
+
+std::size_t Program::vulkan_sparse_bicgstab_reconcile(
+    Ndarray *true_residual,
+    Ndarray *residual,
+    Ndarray *shadow_residual,
+    Ndarray *direction,
+    Ndarray *operator_direction,
+    Ndarray *solution,
+    Ndarray *state,
+    std::size_t n) {
+  auto submission_guard = acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(!vulkan_sparse_algebra_available(),
+              "Vulkan sparse BiCGSTAB is only available on Vulkan.");
+  TI_ERROR_IF(n == 0 || n > std::numeric_limits<uint32_t>::max(),
+              "Vulkan sparse BiCGSTAB reconcile received invalid "
+              "geometry.");
+  Ndarray *vectors[] = {true_residual, residual, shadow_residual, direction,
+                        operator_direction, solution};
+  const char *roles[] = {"true residual", "residual", "shadow residual",
+                         "direction", "operator direction", "solution"};
+  for (std::size_t i = 0; i < std::size(vectors); ++i) {
+    check_vulkan_sparse_f32_vector(roles[i], vectors[i], n);
+  }
+  check_vulkan_sparse_i32_vector("BiCGSTAB state", state, 24);
+  const std::array<DeviceAllocation, 7> allocs{
+      true_residual->get_device_allocation(),
+      residual->get_device_allocation(),
+      shadow_residual->get_device_allocation(),
+      direction->get_device_allocation(),
+      operator_direction->get_device_allocation(),
+      solution->get_device_allocation(), state->get_device_allocation()};
+  for (std::size_t i = 0; i < allocs.size(); ++i) {
+    for (std::size_t j = i + 1; j < allocs.size(); ++j) {
+      TI_ERROR_IF(allocs[i] == allocs[j],
+                  "Vulkan sparse BiCGSTAB reconcile buffers must not "
+                  "alias.");
+    }
+  }
+  const Ndarray *resources[] = {true_residual, residual, shadow_residual,
+                                direction, operator_direction, solution,
+                                state};
+  retain_ndarrays_for_external_submission(resources, std::size(resources));
+  const size_t vector_bytes = n * sizeof(float32);
+  Device *device = get_compute_device();
+  TI_ERROR_IF(!device,
+              "Vulkan sparse BiCGSTAB requires a compute device.");
+  auto cache_lease = get_sparse_algebra_cache(this, device);
+  auto &cache = *cache_lease;
+  Pipeline *pipeline = cache.sparse_bicgstab_reconcile_pipeline(device);
+  ShaderResourceSet *bindings =
+      cache.bind_sparse_bicgstab_reconcile(this, allocs, vector_bytes)
+          .bindings;
+  const std::array<uint32_t, 4> param_words{
+      static_cast<uint32_t>(n), 0u, 0u, 0u};
+  const uint32_t push_bytes =
+      static_cast<uint32_t>(param_words.size() * sizeof(uint32_t));
+  constexpr std::size_t kMaxDispatchGroups = 65535;
+  const uint32_t groups = static_cast<uint32_t>(std::min(
+      kMaxDispatchGroups, (n + kBlockSize - 1) / kBlockSize));
+  const bool profiler_scopes = profiler != nullptr;
+  auto record = [allocs, vector_bytes, pipeline, bindings, param_words,
+                 push_bytes, groups,
+                 profiler_scopes](Device *, CommandList *cmdlist) {
+    dispatch_pipeline_with_push_constants(
+        cmdlist, pipeline, bindings, param_words.data(), push_bytes, groups,
+        1, 1,
+        profiler_scopes ? "vulkan_sparse_bicgstab_reconcile_f32"
+                        : nullptr);
+    for (std::size_t index = 1; index <= 5; ++index) {
+      cmdlist->buffer_barrier(allocs[index].get_ptr(0), vector_bytes);
+    }
+  };
+  VulkanCommandReplayKey key;
+  key.push(157);
+  for (std::size_t index = 0; index < allocs.size(); ++index) {
+    push_vulkan_command_key_range(
+        key, allocs[index], 0,
+        index == 6 ? 24 * sizeof(uint32_t) : vector_bytes);
+  }
+  key.push(static_cast<uint32_t>(n));
+  key.push(groups);
+  key.push_ptr(pipeline);
+  key.push_ptr(bindings);
+  if (!cache.sparse_bicgstab_reconcile_command_replay.submit_or_record(
+          this, device, key, profiler_scopes, record)) {
+    enqueue_compute_op_lambda(record, {});
   }
   return cache.allocated_bytes();
 }
@@ -18247,6 +18824,66 @@ std::size_t Program::vulkan_sparse_minres_commit(
     Ndarray *w_older,
     Ndarray *w_old,
     Ndarray *w,
+    Ndarray *solution,
+    Ndarray *state,
+    std::size_t n) {
+  TI_NOT_IMPLEMENTED;
+  return 0;
+}
+
+std::size_t Program::vulkan_sparse_bicgstab_scalar(
+    Ndarray *initial_residual_squared,
+    Ndarray *rhs_squared,
+    Ndarray *dot0,
+    Ndarray *dot1,
+    Ndarray *state,
+    float absolute_tolerance,
+    float relative_tolerance,
+    std::uint32_t stage,
+    bool limit_reached) {
+  TI_NOT_IMPLEMENTED;
+  return 0;
+}
+
+std::size_t Program::vulkan_sparse_bicgstab_direction(
+    Ndarray *residual,
+    Ndarray *direction,
+    Ndarray *operator_direction,
+    Ndarray *state,
+    std::size_t n) {
+  TI_NOT_IMPLEMENTED;
+  return 0;
+}
+
+std::size_t Program::vulkan_sparse_bicgstab_intermediate(
+    Ndarray *residual,
+    Ndarray *operator_direction,
+    Ndarray *intermediate,
+    Ndarray *state,
+    std::size_t n) {
+  TI_NOT_IMPLEMENTED;
+  return 0;
+}
+
+std::size_t Program::vulkan_sparse_bicgstab_commit(
+    Ndarray *solution_direction,
+    Ndarray *solution_intermediate,
+    Ndarray *intermediate,
+    Ndarray *operator_intermediate,
+    Ndarray *solution,
+    Ndarray *residual,
+    Ndarray *state,
+    std::size_t n) {
+  TI_NOT_IMPLEMENTED;
+  return 0;
+}
+
+std::size_t Program::vulkan_sparse_bicgstab_reconcile(
+    Ndarray *true_residual,
+    Ndarray *residual,
+    Ndarray *shadow_residual,
+    Ndarray *direction,
+    Ndarray *operator_direction,
     Ndarray *solution,
     Ndarray *state,
     std::size_t n) {

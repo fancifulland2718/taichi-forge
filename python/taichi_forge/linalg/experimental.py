@@ -128,6 +128,7 @@ class SolveResult:
     relative_tolerance: float
     relative_reference_norm: float
     effective_tolerance: float
+    breakdown_reason: str
 
 
 def _current_program():
@@ -1613,7 +1614,9 @@ class SolvePlan:
     preconditioners currently require compiled-kernel A and M providers.
     MINRES supports CPU ``f32``/``f64`` identity preconditioning and device-
     resident CUDA/Vulkan ``f32`` identity or trusted fixed-linear SPD
-    preconditioning. BiCGSTAB is CPU-only. Vulkan supports bounded masked
+    preconditioning. BiCGSTAB supports CPU ``f32``/``f64`` host actions and
+    device-resident CUDA/Vulkan ``f32`` actions with an optional fixed-linear
+    right preconditioner. Vulkan supports bounded masked
     execution or chunked host convergence checks, including relative tolerance.
     """
 
@@ -1830,6 +1833,31 @@ class SolvePlan:
                 f"fixed-linear {solver_name} rejects singular preconditioners"
             )
 
+    def _require_fixed_linear_right_preconditioner(self, preconditioner):
+        preconditioner._ensure_valid()
+        if preconditioner._program is not self._program:
+            raise TaichiRuntimeError(
+                "preconditioner must belong to the SolvePlan runtime"
+            )
+        expected_shape = (self.operator.shape[1], self.operator.shape[0])
+        if preconditioner.shape != expected_shape:
+            raise TaichiRuntimeError(
+                "right preconditioner must map the operator range back "
+                "to its domain"
+            )
+        if preconditioner.dtype != self.operator.dtype:
+            raise TaichiRuntimeError(
+                "operator and preconditioner must have the same dtype"
+            )
+        singular = dict(
+            preconditioner._metadata_snapshot["traits"]["singular"]
+        )
+        if singular["known"] and singular["value"] is True:
+            raise TaichiRuntimeError(
+                "fixed-linear right BiCGSTAB rejects singular "
+                "preconditioners"
+            )
+
     def _build_solver(self):
         arch = self._program.config().arch
         core = self.operator._provider_core
@@ -1961,23 +1989,89 @@ class SolvePlan:
             )
 
         if self.method == "bicgstab":
-            if self.preconditioner is not None:
-                raise TaichiRuntimeError(
-                    "experimental BiCGSTAB uses identity preconditioning only"
+            preconditioner_action = None
+            if isinstance(
+                self.preconditioner, (LinearOperator, PreconditionerPlan)
+            ):
+                if isinstance(self.preconditioner, PreconditionerPlan):
+                    self.preconditioner._require_target(self.operator)
+                    preconditioner_scope = self.preconditioner.pin()
+                    preconditioner_action = (
+                        self.preconditioner._consumer_action
+                    )
+                else:
+                    preconditioner_scope = None
+                    preconditioner_action = self.preconditioner
+                self._require_fixed_linear_right_preconditioner(
+                    preconditioner_action
                 )
-            if arch not in cpu_arches:
-                raise TaichiRuntimeError("BiCGSTAB SolvePlan is CPU-only")
-            factory = (
-                _ti_core._make_float_cpu_experimental_linear_operator_bicgstab_solver
-                if self.operator.dtype == f32
-                else _ti_core._make_double_cpu_experimental_linear_operator_bicgstab_solver
+            elif self.preconditioner is not None:
+                raise TaichiRuntimeError(
+                    "BiCGSTAB requires a fixed LinearOperator or "
+                    "PreconditionerPlan right preconditioner"
+                )
+            if arch in cpu_arches:
+                if kind in ("kernel", "graph") or (
+                    preconditioner_action is not None
+                    and preconditioner_action._provider_kind
+                    in ("kernel", "graph")
+                ):
+                    raise TaichiRuntimeError(
+                        "CPU BiCGSTAB does not consume compiled ndarray "
+                        "operator actions"
+                    )
+                factory = (
+                    _ti_core._make_float_cpu_preconditioned_experimental_linear_operator_bicgstab_solver
+                    if self.operator.dtype == f32
+                    else _ti_core._make_double_cpu_preconditioned_experimental_linear_operator_bicgstab_solver
+                ) if preconditioner_action is not None else (
+                    _ti_core._make_float_cpu_experimental_linear_operator_bicgstab_solver
+                    if self.operator.dtype == f32
+                    else _ti_core._make_double_cpu_experimental_linear_operator_bicgstab_solver
+                )
+                arguments = [self._program, self.operator._handle]
+                if preconditioner_action is not None:
+                    arguments.append(preconditioner_action._handle)
+                arguments.extend([self.max_iterations, self.atol, self.rtol])
+                return factory(*arguments)
+
+            if arch not in gpu_arches:
+                raise TaichiRuntimeError("unsupported BiCGSTAB backend")
+            configure = (
+                self._configure_cuda_solver
+                if arch == _ti_core.Arch.cuda
+                else self._configure_vulkan_solver
             )
-            return factory(
-                self._program,
-                self.operator._handle,
-                self.max_iterations,
-                self.atol,
-                self.rtol,
+            if preconditioner_action is not None:
+                return configure(
+                    _ti_core._make_device_operator_preconditioned_bicgstab_solver(
+                        self._program,
+                        self.operator._handle,
+                        preconditioner_action._handle,
+                        self.max_iterations,
+                        self.atol,
+                        self.rtol,
+                    )
+                )
+            if kind == "stored":
+                return configure(
+                    _ti_core._make_device_fixed_sparse_bicgstab_solver(
+                        self._program,
+                        self.operator._handle,
+                        core,
+                        self.max_iterations,
+                        self.atol,
+                        self.rtol,
+                    )
+                )
+            return configure(
+                _ti_core._make_device_experimental_linear_operator_bicgstab_solver(
+                    self._program,
+                    self.operator._handle,
+                    self.max_iterations,
+                    self.atol,
+                    self.rtol,
+                )
             )
 
         if self.method == "cg":
@@ -2266,8 +2360,8 @@ class SolvePlan:
             self.preconditioner._require_target(self.operator)
             preconditioner_scope = self.preconditioner.pin()
         cpu_arches = (_ti_core.Arch.x64, _ti_core.Arch.arm64)
-        if self.method == "bicgstab" or (
-            self.method == "minres"
+        if (
+            self.method in ("bicgstab", "minres")
             and self._program.config().arch in cpu_arches
         ):
             self._solver.solve_ndarray(self._program, out.arr, rhs.arr)

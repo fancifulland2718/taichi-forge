@@ -39,6 +39,7 @@
 #include "taichi/program/sparse_fixed_bicgstab.h"
 #include "taichi/program/sparse_minres.h"
 #include "taichi/program/sparse_operator_minres.h"
+#include "taichi/program/sparse_device_bicgstab.h"
 #include "taichi/program/sparse_device_minres.h"
 #include "taichi/aot/graph_data.h"
 #include "taichi/runtime/gfx/runtime.h"
@@ -4800,6 +4801,13 @@ void export_lang(py::module &m) {
     snapshot["relative_reference_norm"] =
         result.relative_reference_norm;
     snapshot["effective_tolerance"] = result.effective_tolerance;
+    snapshot["breakdown_reason"] =
+        result.breakdown()
+            ? (result.breakdown_reason == SparseSolveBreakdownReason::none
+                   ? "unspecified"
+                   : sparse_solve_breakdown_reason_name(
+                         result.breakdown_reason))
+            : "none";
     return snapshot;
   };
   auto sparse_solve_plan_stats_to_dict =
@@ -4817,6 +4825,7 @@ void export_lang(py::module &m) {
             stats.last_relative_reference_norm;
         identity["last_effective_tolerance"] =
             stats.last_effective_tolerance;
+        identity["last_breakdown_reason"] = stats.last_breakdown_reason;
         identity["preconditioner_method"] =
             stats.preconditioner_method;
         identity["operator_action_provider"] =
@@ -4840,6 +4849,7 @@ void export_lang(py::module &m) {
             stats.solver_scalar_location;
         identity["solver_stream_policy"] =
             stats.solver_stream_policy;
+        identity["preconditioning_side"] = stats.preconditioning_side;
         identity["preconditioner_action_provider"] =
             stats.preconditioner_action_provider;
         identity["preconditioner_behavior"] =
@@ -4867,6 +4877,14 @@ void export_lang(py::module &m) {
         operations["operator_apply_calls"] =
             stats.operator_apply_calls_available
                 ? py::cast(stats.operator_apply_calls)
+                : py::none();
+        operations["dot_product_calls"] =
+            stats.dot_product_calls_available
+                ? py::cast(stats.dot_product_calls)
+                : py::none();
+        operations["vector_update_calls"] =
+            stats.vector_update_calls_available
+                ? py::cast(stats.vector_update_calls)
                 : py::none();
         operations["host_scalar_reductions"] =
             stats.host_scalar_reductions;
@@ -5859,6 +5877,46 @@ void export_lang(py::module &m) {
       py::arg("program"), py::arg("operator"),
       py::arg("max_iterations"), py::arg("absolute_tolerance"),
       py::arg("relative_tolerance") = 0.0);
+  m.def(
+      "_make_float_cpu_preconditioned_experimental_linear_operator_bicgstab_solver",
+      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+         ExperimentalLinearOperatorHandle &preconditioner,
+         int max_iterations, float absolute_tolerance,
+         float relative_tolerance) {
+        TI_ERROR_IF(operator_handle.program() != program ||
+                        preconditioner.program() != program,
+                    "BiCGSTAB operator and preconditioner must belong to "
+                    "the target Program.");
+        return std::make_unique<
+            FixedSparseBiCGSTAB<Eigen::VectorXf, float>>(
+            program, operator_handle.binding(), preconditioner,
+            max_iterations, absolute_tolerance, false,
+            relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(), py::arg("program"), py::arg("operator"),
+      py::arg("preconditioner"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"), py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "_make_double_cpu_preconditioned_experimental_linear_operator_bicgstab_solver",
+      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+         ExperimentalLinearOperatorHandle &preconditioner,
+         int max_iterations, double absolute_tolerance,
+         double relative_tolerance) {
+        TI_ERROR_IF(operator_handle.program() != program ||
+                        preconditioner.program() != program,
+                    "BiCGSTAB operator and preconditioner must belong to "
+                    "the target Program.");
+        return std::make_unique<
+            FixedSparseBiCGSTAB<Eigen::VectorXd, double>>(
+            program, operator_handle.binding(), preconditioner,
+            max_iterations, absolute_tolerance, false,
+            relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(), py::arg("program"), py::arg("operator"),
+      py::arg("preconditioner"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"), py::arg("relative_tolerance") = 0.0);
 
   py::class_<OperatorMINRES<Eigen::VectorXf, float>>(m, "OperatorMINRESf")
       .def("solve_ndarray",
@@ -6026,6 +6084,86 @@ void export_lang(py::module &m) {
             program, operator_handle, nullptr, nullptr, nullptr,
             &preconditioner, max_iterations, absolute_tolerance,
             relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(), py::arg("program"), py::arg("operator"),
+      py::arg("preconditioner"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"), py::arg("relative_tolerance") = 0.0f);
+
+  py::class_<DeviceBiCGSTAB>(m, "DeviceBiCGSTAB")
+      .def("solve", &DeviceBiCGSTAB::solve)
+      .def(
+          "_configure_execution_policy",
+          [](DeviceBiCGSTAB &solver, const std::string &policy,
+             int check_interval) {
+            SparseSolveExecutionPolicy native_policy;
+            if (policy == "host_each_iteration") {
+              native_policy =
+                  SparseSolveExecutionPolicy::host_each_iteration;
+            } else if (policy == "host_check_every_k") {
+              native_policy =
+                  SparseSolveExecutionPolicy::host_check_every_k;
+            } else if (policy == "fixed_budget_masked") {
+              native_policy =
+                  SparseSolveExecutionPolicy::fixed_budget_masked;
+            } else {
+              TI_ERROR(
+                  "Unsupported device BiCGSTAB execution policy '{}'.",
+                  policy);
+            }
+            solver.configure_execution_policy(native_policy,
+                                              check_interval);
+          },
+          py::arg("policy"), py::arg("check_interval"))
+      .def("is_success", &DeviceBiCGSTAB::is_success)
+      .def("get_status", &DeviceBiCGSTAB::get_status)
+      .def("get_iterations", &DeviceBiCGSTAB::get_iterations)
+      .def("get_initial_residual_norm",
+           &DeviceBiCGSTAB::get_initial_residual_norm)
+      .def("get_residual_norm", &DeviceBiCGSTAB::get_residual_norm)
+      .def("_get_last_result",
+           [sparse_solve_result_to_dict](const DeviceBiCGSTAB &solver) {
+             return sparse_solve_result_to_dict(solver.get_last_result());
+           })
+      .def("_debug_runtime_stats",
+           [sparse_solve_plan_stats_to_dict](const DeviceBiCGSTAB &solver) {
+             return sparse_solve_plan_stats_to_dict(
+                 solver.debug_runtime_statistics());
+           });
+  m.def(
+      "_make_device_experimental_linear_operator_bicgstab_solver",
+      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+         int max_iterations, float absolute_tolerance,
+         float relative_tolerance) {
+        return make_device_bicgstab_solver(
+            program, operator_handle, nullptr, nullptr, max_iterations,
+            absolute_tolerance, relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::arg("program"), py::arg("operator"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"), py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "_make_device_fixed_sparse_bicgstab_solver",
+      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+         SparseMatrix &matrix, int max_iterations,
+         float absolute_tolerance, float relative_tolerance) {
+        return make_device_bicgstab_solver(
+            program, operator_handle, &matrix, nullptr, max_iterations,
+            absolute_tolerance, relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(), py::arg("program"), py::arg("operator"),
+      py::arg("matrix"), py::arg("max_iterations"),
+      py::arg("absolute_tolerance"), py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "_make_device_operator_preconditioned_bicgstab_solver",
+      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+         ExperimentalLinearOperatorHandle &preconditioner,
+         int max_iterations, float absolute_tolerance,
+         float relative_tolerance) {
+        return make_device_bicgstab_solver(
+            program, operator_handle, nullptr, &preconditioner,
+            max_iterations, absolute_tolerance, relative_tolerance);
       },
       py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
       py::keep_alive<0, 3>(), py::arg("program"), py::arg("operator"),

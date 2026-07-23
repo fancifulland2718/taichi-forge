@@ -1,0 +1,25 @@
+#version 450
+
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, std430) readonly buffer Residual { float data[]; } residual_buf;
+layout(set = 0, binding = 1, std430) buffer Direction { float data[]; } direction_buf;
+layout(set = 0, binding = 2, std430) readonly buffer OperatorDirection { float data[]; } operator_direction_buf;
+layout(set = 0, binding = 3, std430) readonly buffer State { uint data[]; } state_buf;
+layout(push_constant) uniform Params { uint n; uint unused0; uint unused1; uint unused2; } params;
+
+void main() {
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  uint index = gl_GlobalInvocationID.x;
+  if (int(state_buf.data[18]) == 0) return;
+  float beta = uintBitsToFloat(state_buf.data[4]);
+  float omega = uintBitsToFloat(state_buf.data[2]);
+  bool fresh = int(state_buf.data[20]) != 0;
+  while (index < params.n) {
+    direction_buf.data[index] = fresh
+        ? residual_buf.data[index]
+        : residual_buf.data[index] + beta *
+              (direction_buf.data[index] - omega * operator_direction_buf.data[index]);
+    if (params.n - index <= stride) break;
+    index += stride;
+  }
+}

@@ -7,7 +7,8 @@
 
 namespace taichi::lang {
 
-// Identity-preconditioned BiCGSTAB over a provider-neutral OperatorPlan.
+// BiCGSTAB over a provider-neutral OperatorPlan, with identity or one
+// fixed-linear right preconditioner action.
 // Public fixed CSR/BSR matrices enter through a construction-time
 // compatibility binding; the recurrence only consumes one pinned action.
 template <typename EigenT, typename DT>
@@ -84,6 +85,23 @@ class FixedSparseBiCGSTAB {
     operator_intermediate_ = EigenT::Zero(size);
   }
 
+  FixedSparseBiCGSTAB(Program *program,
+                      OperatorBinding operator_binding,
+                      ExperimentalLinearOperatorHandle &preconditioner,
+                      int max_iterations,
+                      DT absolute_tolerance,
+                      bool verbose,
+                      DT relative_tolerance = static_cast<DT>(0))
+      : FixedSparseBiCGSTAB(program, std::move(operator_binding),
+                            max_iterations, absolute_tolerance, verbose,
+                            relative_tolerance) {
+    preconditioner_plan_ = make_solver_right_preconditioner_plan(
+        program_, *operator_plan_, preconditioner, "linear_operator");
+    const int size = rows_;
+    preconditioned_direction_ = EigenT::Zero(size);
+    preconditioned_intermediate_ = EigenT::Zero(size);
+  }
+
   void set_x(EigenT &x) {
     TI_ERROR_IF(x.size() != cols_,
                 "SparseBiCGSTAB initial guess must have {} entries, got {}.",
@@ -124,9 +142,17 @@ class FixedSparseBiCGSTAB {
 
   void solve() {
     auto operator_generation = operator_plan_->pin();
+    OperatorPinnedAction preconditioner_generation;
+    if (preconditioner_plan_) {
+      preconditioner_generation =
+          preconditioner_plan_->update_and_pin(operator_generation);
+    }
     reset_last_result(operator_generation.resource_stamp());
     auto apply_operator = [&](const EigenT &input, EigenT &output) {
       this->apply_operator(operator_generation, input, output);
+    };
+    auto apply_preconditioner = [&](const EigenT &input, EigenT &output) {
+      this->apply_preconditioner(preconditioner_generation, input, output);
     };
     auto true_residual_norm = [&] {
       return this->true_residual_norm(operator_generation);
@@ -139,7 +165,7 @@ class FixedSparseBiCGSTAB {
     if (!x_.allFinite() || !b_.allFinite()) {
       initial_residual_norm_ = std::numeric_limits<double>::infinity();
       residual_norm_ = initial_residual_norm_;
-      status_ = SparseSolveStatus::kBreakdown;
+      set_breakdown(SparseSolveBreakdownReason::nonfinite);
       finish_solve();
       return;
     }
@@ -154,7 +180,7 @@ class FixedSparseBiCGSTAB {
     if (!std::isfinite(rhs_norm) ||
         !std::isfinite(effective_tolerance_) ||
         !std::isfinite(initial_residual_norm_)) {
-      status_ = SparseSolveStatus::kBreakdown;
+      set_breakdown(SparseSolveBreakdownReason::nonfinite);
       finish_solve();
       return;
     }
@@ -188,14 +214,14 @@ class FixedSparseBiCGSTAB {
     for (int iteration = 0; iteration < max_iterations_; ++iteration) {
       double rho = dot(shadow_residual_, residual_);
       if (!std::isfinite(rho)) {
-        status_ = SparseSolveStatus::kBreakdown;
+        set_breakdown(SparseSolveBreakdownReason::nonfinite);
         terminated = true;
         break;
       }
       if (rho == 0.0) {
         residual_norm_ = true_residual_norm();
         if (!x_.allFinite() || !std::isfinite(residual_norm_)) {
-          status_ = SparseSolveStatus::kBreakdown;
+          set_breakdown(SparseSolveBreakdownReason::nonfinite);
           terminated = true;
           break;
         }
@@ -207,8 +233,13 @@ class FixedSparseBiCGSTAB {
         restart_from_true_residual(rho_old, alpha, omega,
                                    fresh_direction);
         rho = dot(shadow_residual_, residual_);
-        if (!std::isfinite(rho) || rho <= 0.0) {
-          status_ = SparseSolveStatus::kBreakdown;
+        if (!std::isfinite(rho)) {
+          set_breakdown(SparseSolveBreakdownReason::nonfinite);
+          terminated = true;
+          break;
+        }
+        if (rho == 0.0) {
+          set_breakdown(SparseSolveBreakdownReason::rho);
           terminated = true;
           break;
         }
@@ -218,14 +249,19 @@ class FixedSparseBiCGSTAB {
         direction_ = residual_;
         fresh_direction = false;
       } else {
-        if (rho_old == 0.0 || omega == 0.0) {
-          status_ = SparseSolveStatus::kBreakdown;
+        if (rho_old == 0.0) {
+          set_breakdown(SparseSolveBreakdownReason::rho);
+          terminated = true;
+          break;
+        }
+        if (omega == 0.0) {
+          set_breakdown(SparseSolveBreakdownReason::omega);
           terminated = true;
           break;
         }
         const double beta = (rho / rho_old) * (alpha / omega);
         if (!std::isfinite(beta)) {
-          status_ = SparseSolveStatus::kBreakdown;
+          set_breakdown(SparseSolveBreakdownReason::nonfinite);
           terminated = true;
           break;
         }
@@ -237,23 +273,33 @@ class FixedSparseBiCGSTAB {
                           static_cast<double>(operator_direction_[index])));
         }
         if (!direction_.allFinite()) {
-          status_ = SparseSolveStatus::kBreakdown;
+          set_breakdown(SparseSolveBreakdownReason::nonfinite);
           terminated = true;
           break;
         }
       }
 
-      apply_operator(direction_, operator_direction_);
+      const EigenT *operator_direction_input = &direction_;
+      if (preconditioner_plan_) {
+        apply_preconditioner(direction_, preconditioned_direction_);
+        operator_direction_input = &preconditioned_direction_;
+      }
+      apply_operator(*operator_direction_input, operator_direction_);
       const double alpha_denominator =
           dot(shadow_residual_, operator_direction_);
-      if (!std::isfinite(alpha_denominator) || alpha_denominator == 0.0) {
-        status_ = SparseSolveStatus::kBreakdown;
+      if (!std::isfinite(alpha_denominator)) {
+        set_breakdown(SparseSolveBreakdownReason::nonfinite);
+        terminated = true;
+        break;
+      }
+      if (alpha_denominator == 0.0) {
+        set_breakdown(SparseSolveBreakdownReason::alpha_denominator);
         terminated = true;
         break;
       }
       alpha = rho / alpha_denominator;
       if (!std::isfinite(alpha)) {
-        status_ = SparseSolveStatus::kBreakdown;
+        set_breakdown(SparseSolveBreakdownReason::nonfinite);
         terminated = true;
         break;
       }
@@ -264,7 +310,7 @@ class FixedSparseBiCGSTAB {
       }
       const double intermediate_norm = vector_norm(intermediate_residual_);
       if (!std::isfinite(intermediate_norm)) {
-        status_ = SparseSolveStatus::kBreakdown;
+        set_breakdown(SparseSolveBreakdownReason::nonfinite);
         terminated = true;
         break;
       }
@@ -272,7 +318,7 @@ class FixedSparseBiCGSTAB {
         update_solution(alpha, 0.0);
         iterations_ = iteration + 1;
         if (!x_.allFinite()) {
-          status_ = SparseSolveStatus::kBreakdown;
+          set_breakdown(SparseSolveBreakdownReason::nonfinite);
           terminated = true;
           break;
         }
@@ -284,7 +330,7 @@ class FixedSparseBiCGSTAB {
           break;
         }
         if (!std::isfinite(residual_norm_)) {
-          status_ = SparseSolveStatus::kBreakdown;
+          set_breakdown(SparseSolveBreakdownReason::nonfinite);
           terminated = true;
           break;
         }
@@ -293,14 +339,20 @@ class FixedSparseBiCGSTAB {
         continue;
       }
 
-      apply_operator(intermediate_residual_, operator_intermediate_);
+      const EigenT *operator_intermediate_input = &intermediate_residual_;
+      if (preconditioner_plan_) {
+        apply_preconditioner(intermediate_residual_,
+                             preconditioned_intermediate_);
+        operator_intermediate_input = &preconditioned_intermediate_;
+      }
+      apply_operator(*operator_intermediate_input, operator_intermediate_);
       const double omega_denominator =
           dot(operator_intermediate_, operator_intermediate_);
       const double omega_numerator =
           dot(operator_intermediate_, intermediate_residual_);
       if (!std::isfinite(omega_denominator) ||
           !std::isfinite(omega_numerator)) {
-        status_ = SparseSolveStatus::kBreakdown;
+        set_breakdown(SparseSolveBreakdownReason::nonfinite);
         terminated = true;
         break;
       }
@@ -312,19 +364,25 @@ class FixedSparseBiCGSTAB {
                           residual_norm_ <= effective_tolerance_
                       ? SparseSolveStatus::kConverged
                       : SparseSolveStatus::kBreakdown;
+        if (status_ == SparseSolveStatus::kBreakdown) {
+          breakdown_reason_ =
+              x_.allFinite() && std::isfinite(residual_norm_)
+                  ? SparseSolveBreakdownReason::omega_denominator
+                  : SparseSolveBreakdownReason::nonfinite;
+        }
         terminated = true;
         break;
       }
       omega = omega_numerator / omega_denominator;
       if (!std::isfinite(omega)) {
-        status_ = SparseSolveStatus::kBreakdown;
+        set_breakdown(SparseSolveBreakdownReason::nonfinite);
         terminated = true;
         break;
       }
       update_solution(alpha, omega);
       iterations_ = iteration + 1;
       if (!x_.allFinite()) {
-        status_ = SparseSolveStatus::kBreakdown;
+        set_breakdown(SparseSolveBreakdownReason::nonfinite);
         terminated = true;
         break;
       }
@@ -334,20 +392,20 @@ class FixedSparseBiCGSTAB {
             omega * static_cast<double>(operator_intermediate_[index]));
       }
       if (!residual_.allFinite()) {
-        status_ = SparseSolveStatus::kBreakdown;
+        set_breakdown(SparseSolveBreakdownReason::nonfinite);
         terminated = true;
         break;
       }
       const double recurrence_residual_norm = vector_norm(residual_);
       if (!std::isfinite(recurrence_residual_norm)) {
-        status_ = SparseSolveStatus::kBreakdown;
+        set_breakdown(SparseSolveBreakdownReason::nonfinite);
         terminated = true;
         break;
       }
       if (recurrence_residual_norm <= effective_tolerance_) {
         residual_norm_ = true_residual_norm();
         if (!std::isfinite(residual_norm_) || !x_.allFinite()) {
-          status_ = SparseSolveStatus::kBreakdown;
+          set_breakdown(SparseSolveBreakdownReason::nonfinite);
           terminated = true;
           break;
         }
@@ -366,6 +424,12 @@ class FixedSparseBiCGSTAB {
                           residual_norm_ <= effective_tolerance_
                       ? SparseSolveStatus::kConverged
                       : SparseSolveStatus::kBreakdown;
+        if (status_ == SparseSolveStatus::kBreakdown) {
+          breakdown_reason_ =
+              x_.allFinite() && std::isfinite(residual_norm_)
+                  ? SparseSolveBreakdownReason::omega
+                  : SparseSolveBreakdownReason::nonfinite;
+        }
         terminated = true;
         break;
       }
@@ -375,7 +439,7 @@ class FixedSparseBiCGSTAB {
     if (!terminated) {
       residual_norm_ = true_residual_norm();
       if (!x_.allFinite() || !std::isfinite(residual_norm_)) {
-        status_ = SparseSolveStatus::kBreakdown;
+        set_breakdown(SparseSolveBreakdownReason::nonfinite);
       } else if (residual_norm_ <= effective_tolerance_) {
         status_ = SparseSolveStatus::kConverged;
       } else {
@@ -419,7 +483,8 @@ class FixedSparseBiCGSTAB {
     return {status_, iterations_, initial_residual_norm_, residual_norm_,
             static_cast<double>(absolute_tolerance_),
             static_cast<double>(relative_tolerance_),
-            relative_reference_norm_, effective_tolerance_};
+            relative_reference_norm_, effective_tolerance_,
+            breakdown_reason_};
   }
 
   SparseSolvePlanRuntimeStatistics debug_runtime_statistics() const {
@@ -436,6 +501,8 @@ class FixedSparseBiCGSTAB {
     result.relative_tolerance = static_cast<double>(relative_tolerance_);
     result.last_relative_reference_norm = relative_reference_norm_;
     result.last_effective_tolerance = effective_tolerance_;
+    result.last_breakdown_reason =
+        sparse_solve_breakdown_reason_name(breakdown_reason_);
     result.operator_pattern_version = operator_stamp.topology_revision;
     result.operator_numeric_version = operator_stamp.numeric_revision;
     result.last_solve_pattern_version =
@@ -469,14 +536,24 @@ class FixedSparseBiCGSTAB {
     result.operator_plan_invalidations = plan_statistics.invalidations;
     result.host_scalar_reductions =
         host_scalar_reductions_.load(std::memory_order_relaxed);
-    result.preconditioner_method = "identity";
-    result.preconditioner_apply_calls = 0;
+    result.preconditioner_method =
+        preconditioner_plan_ ? preconditioner_plan_->method() : "identity";
+    result.preconditioner_apply_calls =
+        preconditioner_apply_calls_.load(std::memory_order_relaxed);
     result.preconditioner_apply_calls_available = true;
-    result.preconditioner_ownership_scope = "none";
-    result.persistent_vector_count = 8;
+    result.preconditioning_side = preconditioner_plan_ ? "right" : "none";
+    result.preconditioner_ownership_scope =
+        preconditioner_plan_ ? "solver_plan" : "none";
+    const std::uint64_t persistent_vectors =
+        preconditioner_plan_ ? 10 : 8;
+    result.persistent_vector_count = persistent_vectors;
     result.persistent_vector_reserved_bytes =
-        static_cast<std::uint64_t>(8) *
+        persistent_vectors *
         static_cast<std::uint64_t>(rows_) * sizeof(DT);
+    if (preconditioner_plan_) {
+      append_solver_preconditioner_plan_statistics(*preconditioner_plan_,
+                                                    result);
+    }
     result.solver_state_rebuilt_each_solve = false;
     result.transient_solver_workspace_bytes = 0;
     result.transient_solver_workspace_bytes_available = true;
@@ -486,6 +563,7 @@ class FixedSparseBiCGSTAB {
  private:
   void reset_last_result(const OperatorResourceStamp &stamp) {
     status_ = SparseSolveStatus::kNotRun;
+    breakdown_reason_ = SparseSolveBreakdownReason::none;
     iterations_ = 0;
     initial_residual_norm_ = 0.0;
     residual_norm_ = 0.0;
@@ -538,6 +616,33 @@ class FixedSparseBiCGSTAB {
     operator_apply_calls_.fetch_add(1, std::memory_order_relaxed);
   }
 
+  void apply_preconditioner(const OperatorPinnedAction &generation,
+                            const EigenT &input,
+                            EigenT &output) {
+    TI_ASSERT(preconditioner_plan_ && generation);
+    auto &plan = preconditioner_plan_->action();
+    const auto &descriptor = plan.descriptor();
+    const auto input_address =
+        reinterpret_cast<std::uintptr_t>(input.data());
+    const auto output_address =
+        reinterpret_cast<std::uintptr_t>(output.data());
+    const auto input_view =
+        program_ ? OperatorVectorView::from_device_pointer(
+                       program_, input_address, descriptor.domain, false)
+                 : OperatorVectorView::from_const_host(input.data(),
+                                                       descriptor.domain);
+    const auto output_view =
+        program_ ? OperatorVectorView::from_device_pointer(
+                       program_, output_address, descriptor.range, true)
+                 : OperatorVectorView::from_mutable_host(output.data(),
+                                                         descriptor.range);
+    plan.submit(generation,
+                {OperatorApplyMode::forward, input_view, nullptr,
+                 output_view});
+    preconditioner_apply_calls_.fetch_add(1,
+                                          std::memory_order_relaxed);
+  }
+
   double true_residual_norm(const OperatorPinnedAction &generation) {
     apply_operator(generation, x_, residual_);
     for (int index = 0; index < rows_; ++index) {
@@ -547,12 +652,22 @@ class FixedSparseBiCGSTAB {
   }
 
   void update_solution(double alpha, double omega) {
+    const auto &solution_direction =
+        preconditioner_plan_ ? preconditioned_direction_ : direction_;
+    const auto &solution_intermediate =
+        preconditioner_plan_ ? preconditioned_intermediate_
+                             : intermediate_residual_;
     for (int index = 0; index < rows_; ++index) {
       x_[index] = static_cast<DT>(
           static_cast<double>(x_[index]) +
-          alpha * static_cast<double>(direction_[index]) +
-          omega * static_cast<double>(intermediate_residual_[index]));
+          alpha * static_cast<double>(solution_direction[index]) +
+          omega * static_cast<double>(solution_intermediate[index]));
     }
+  }
+
+  void set_breakdown(SparseSolveBreakdownReason reason) {
+    status_ = SparseSolveStatus::kBreakdown;
+    breakdown_reason_ = reason;
   }
 
   void restart_from_true_residual(double &rho_old,
@@ -562,6 +677,10 @@ class FixedSparseBiCGSTAB {
     shadow_residual_ = residual_;
     direction_.setZero();
     operator_direction_.setZero();
+    if (preconditioner_plan_) {
+      preconditioned_direction_.setZero();
+      preconditioned_intermediate_.setZero();
+    }
     rho_old = 1.0;
     alpha = 1.0;
     omega = 1.0;
@@ -579,6 +698,7 @@ class FixedSparseBiCGSTAB {
 
   Program *program_{nullptr};
   std::unique_ptr<OperatorPlan> operator_plan_;
+  std::unique_ptr<PreconditionerPlan> preconditioner_plan_;
   DataType dtype_{PrimitiveType::f32};
   int rows_{0};
   int cols_{0};
@@ -590,6 +710,8 @@ class FixedSparseBiCGSTAB {
   EigenT operator_direction_;
   EigenT intermediate_residual_;
   EigenT operator_intermediate_;
+  EigenT preconditioned_direction_;
+  EigenT preconditioned_intermediate_;
   int max_iterations_{0};
   DT absolute_tolerance_{0};
   DT relative_tolerance_{0};
@@ -600,10 +722,13 @@ class FixedSparseBiCGSTAB {
   double residual_norm_{0.0};
   double relative_reference_norm_{0.0};
   double effective_tolerance_{0.0};
+  SparseSolveBreakdownReason breakdown_reason_{
+      SparseSolveBreakdownReason::none};
   std::atomic<std::uint64_t> solve_calls_{0};
   std::atomic<std::uint64_t> total_iterations_{0};
   std::atomic<std::uint64_t> workspace_reuses_{0};
   std::atomic<std::uint64_t> operator_apply_calls_{0};
+  std::atomic<std::uint64_t> preconditioner_apply_calls_{0};
   std::atomic<std::uint64_t> host_scalar_reductions_{0};
   std::atomic<std::uint64_t> last_solve_pattern_version_{0};
   std::atomic<std::uint64_t> last_solve_numeric_version_{0};

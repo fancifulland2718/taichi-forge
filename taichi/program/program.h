@@ -2435,6 +2435,51 @@ class TI_DLL_EXPORT Program {
                                           Ndarray *state,
                                           std::size_t n);
 
+  std::size_t vulkan_sparse_bicgstab_scalar(
+      Ndarray *initial_residual_squared,
+      Ndarray *rhs_squared,
+      Ndarray *dot0,
+      Ndarray *dot1,
+      Ndarray *state,
+      float absolute_tolerance,
+      float relative_tolerance,
+      std::uint32_t stage,
+      bool limit_reached);
+
+  std::size_t vulkan_sparse_bicgstab_direction(
+      Ndarray *residual,
+      Ndarray *direction,
+      Ndarray *operator_direction,
+      Ndarray *state,
+      std::size_t n);
+
+  std::size_t vulkan_sparse_bicgstab_intermediate(
+      Ndarray *residual,
+      Ndarray *operator_direction,
+      Ndarray *intermediate,
+      Ndarray *state,
+      std::size_t n);
+
+  std::size_t vulkan_sparse_bicgstab_commit(
+      Ndarray *solution_direction,
+      Ndarray *solution_intermediate,
+      Ndarray *intermediate,
+      Ndarray *operator_intermediate,
+      Ndarray *solution,
+      Ndarray *residual,
+      Ndarray *state,
+      std::size_t n);
+
+  std::size_t vulkan_sparse_bicgstab_reconcile(
+      Ndarray *true_residual,
+      Ndarray *residual,
+      Ndarray *shadow_residual,
+      Ndarray *direction,
+      Ndarray *operator_direction,
+      Ndarray *solution,
+      Ndarray *state,
+      std::size_t n);
+
   std::size_t vulkan_sparse_convergence(Ndarray *residual_squared,
                                         Ndarray *status,
                                         Ndarray *completed_iterations,

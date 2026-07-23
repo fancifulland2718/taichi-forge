@@ -26,6 +26,7 @@ class _SparseSolveResult:
     relative_tolerance: float
     relative_reference_norm: float
     effective_tolerance: float
+    breakdown_reason: str
 
 
 def _validate_sparse_solver_controls(

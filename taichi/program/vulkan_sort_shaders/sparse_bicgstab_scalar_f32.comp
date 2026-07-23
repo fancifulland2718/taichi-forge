@@ -1,0 +1,310 @@
+#version 450
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer InitialResidualSquared {
+  float data[];
+} initial_residual_squared_buf;
+layout(set = 0, binding = 1, std430) readonly buffer RhsSquared {
+  float data[];
+} rhs_squared_buf;
+layout(set = 0, binding = 2, std430) readonly buffer Dot0 {
+  float data[];
+} dot0_buf;
+layout(set = 0, binding = 3, std430) readonly buffer Dot1 {
+  float data[];
+} dot1_buf;
+layout(set = 0, binding = 4, std430) buffer State {
+  uint data[];
+} state_buf;
+
+layout(push_constant) uniform Params {
+  float absolute_tolerance;
+  float relative_tolerance;
+  uint stage;
+  uint limit_reached;
+} params;
+
+const uint kRhoOld = 0u;
+const uint kAlpha = 1u;
+const uint kOmega = 2u;
+const uint kRho = 3u;
+const uint kBeta = 4u;
+const uint kAlphaDenominator = 5u;
+const uint kOmegaNumerator = 6u;
+const uint kOmegaDenominator = 7u;
+const uint kIntermediateResidualSquared = 8u;
+const uint kResidualSquared = 9u;
+const uint kTrueResidualSquared = 10u;
+const uint kInitialResidualSquared = 11u;
+const uint kRhsSquared = 12u;
+const uint kRelativeReferenceNorm = 13u;
+const uint kEffectiveTolerance = 14u;
+const uint kToleranceSquared = 15u;
+const uint kFloatCount = 16u;
+const uint kStatus = 16u;
+const uint kCompletedIterations = 17u;
+const uint kActive = 18u;
+const uint kCommitEnabled = 19u;
+const uint kFreshDirection = 20u;
+const uint kStopKind = 21u;
+const uint kBreakdownReason = 22u;
+const uint kReconcileMode = 23u;
+const uint kStateWords = 24u;
+
+const int kNotRun = -1;
+const int kMaxIterations = 0;
+const int kBreakdown = 1;
+const int kConverged = 2;
+const int kStopNone = 0;
+const int kStopRestart = 1;
+const int kStopBreakdown = 2;
+const int kReasonNone = 0;
+const int kReasonNonfinite = 1;
+const int kReasonRho = 2;
+const int kReasonAlphaDenominator = 3;
+const int kReasonOmegaDenominator = 4;
+const int kReasonOmega = 5;
+
+float load_float(uint index) {
+  return uintBitsToFloat(state_buf.data[index]);
+}
+void store_float(uint index, float value) {
+  state_buf.data[index] = floatBitsToUint(value);
+}
+int load_int(uint index) {
+  return int(state_buf.data[index]);
+}
+void store_int(uint index, int value) {
+  state_buf.data[index] = uint(value);
+}
+bool finite_value(float value) {
+  return !isnan(value) && !isinf(value);
+}
+void fail(int reason) {
+  store_int(kStatus, kBreakdown);
+  store_int(kActive, 0);
+  store_int(kCommitEnabled, 0);
+  store_int(kStopKind, kStopBreakdown);
+  store_int(kBreakdownReason, reason);
+}
+
+void main() {
+  if (params.stage == 0u) {
+    for (uint index = 0u; index < kStateWords; ++index) {
+      state_buf.data[index] = 0u;
+    }
+    store_float(kRhoOld, 1.0);
+    store_float(kAlpha, 1.0);
+    store_float(kOmega, 1.0);
+    store_int(kStatus, kNotRun);
+    store_int(kActive, 1);
+    store_int(kFreshDirection, 1);
+    store_int(kReconcileMode, 1);
+    float rr = initial_residual_squared_buf.data[0];
+    float rhs2 = rhs_squared_buf.data[0];
+    store_float(kTrueResidualSquared, rr);
+    store_float(kInitialResidualSquared, rr);
+    store_float(kRhsSquared, rhs2);
+    if (!finite_value(rr) || rr < 0.0 || !finite_value(rhs2) || rhs2 < 0.0) {
+      fail(kReasonNonfinite);
+      store_int(kReconcileMode, 0);
+      return;
+    }
+    float reference = sqrt(rhs2);
+    float tolerance = max(params.absolute_tolerance,
+                          params.relative_tolerance * reference);
+    float tolerance_squared = tolerance * tolerance;
+    if (!finite_value(reference) || !finite_value(tolerance) ||
+        !finite_value(tolerance_squared)) {
+      fail(kReasonNonfinite);
+      store_int(kReconcileMode, 0);
+      return;
+    }
+    store_float(kRelativeReferenceNorm, reference);
+    store_float(kEffectiveTolerance, tolerance);
+    store_float(kToleranceSquared, tolerance_squared);
+    if (rr <= tolerance_squared) {
+      store_int(kStatus, kConverged);
+      store_int(kActive, 0);
+      store_int(kReconcileMode, 0);
+    } else if (params.limit_reached != 0u) {
+      store_int(kStatus, kMaxIterations);
+      store_int(kActive, 0);
+      store_int(kReconcileMode, 0);
+    } else if (rhs2 == 0.0) {
+      store_float(kTrueResidualSquared, 0.0);
+      store_int(kStatus, kConverged);
+      store_int(kActive, 0);
+      store_int(kReconcileMode, 2);
+    }
+    return;
+  }
+
+  if (params.stage == 6u) {
+    float rr = dot0_buf.data[0];
+    store_float(kTrueResidualSquared, rr);
+    store_int(kReconcileMode, 0);
+    if (!finite_value(rr) || rr < 0.0) {
+      fail(kReasonNonfinite);
+      return;
+    }
+    if (rr <= load_float(kToleranceSquared)) {
+      store_int(kStatus, kConverged);
+      store_int(kActive, 0);
+      store_int(kBreakdownReason, kReasonNone);
+      return;
+    }
+    int stop_kind = load_int(kStopKind);
+    if (stop_kind == kStopRestart) {
+      store_float(kRhoOld, 1.0);
+      store_float(kAlpha, 1.0);
+      store_float(kOmega, 1.0);
+      store_int(kStatus, kNotRun);
+      store_int(kActive, 1);
+      store_int(kFreshDirection, 1);
+      store_int(kStopKind, kStopNone);
+      store_int(kBreakdownReason, kReasonNone);
+      store_int(kReconcileMode, 1);
+      return;
+    }
+    if (stop_kind == kStopBreakdown || load_int(kStatus) == kBreakdown) {
+      store_int(kStatus, kBreakdown);
+      store_int(kActive, 0);
+      return;
+    }
+    if (params.limit_reached != 0u) {
+      store_int(kStatus, kMaxIterations);
+      store_int(kActive, 0);
+    } else {
+      store_int(kStatus, kNotRun);
+      store_int(kActive, 1);
+    }
+    return;
+  }
+
+  if (load_int(kActive) == 0) {
+    return;
+  }
+  if (params.stage == 1u) {
+    float rho = dot0_buf.data[0];
+    store_float(kRho, rho);
+    if (!finite_value(rho)) {
+      fail(kReasonNonfinite);
+      return;
+    }
+    if (rho == 0.0) {
+      store_int(kActive, 0);
+      store_int(kStopKind, kStopRestart);
+      store_int(kBreakdownReason, kReasonRho);
+      return;
+    }
+    if (load_int(kFreshDirection) != 0) {
+      store_float(kBeta, 0.0);
+      return;
+    }
+    float rho_old = load_float(kRhoOld);
+    float alpha = load_float(kAlpha);
+    float omega = load_float(kOmega);
+    if (rho_old == 0.0) {
+      fail(kReasonRho);
+      return;
+    }
+    if (omega == 0.0) {
+      fail(kReasonOmega);
+      return;
+    }
+    float beta = (rho / rho_old) * (alpha / omega);
+    if (!finite_value(beta)) {
+      fail(kReasonNonfinite);
+      return;
+    }
+    store_float(kBeta, beta);
+    return;
+  }
+  if (params.stage == 2u) {
+    float denominator = dot0_buf.data[0];
+    store_float(kAlphaDenominator, denominator);
+    if (!finite_value(denominator)) {
+      fail(kReasonNonfinite);
+      return;
+    }
+    if (denominator == 0.0) {
+      fail(kReasonAlphaDenominator);
+      return;
+    }
+    float alpha = load_float(kRho) / denominator;
+    if (!finite_value(alpha)) {
+      fail(kReasonNonfinite);
+      return;
+    }
+    store_float(kAlpha, alpha);
+    return;
+  }
+  if (params.stage == 3u) {
+    float rr = dot0_buf.data[0];
+    store_float(kIntermediateResidualSquared, rr);
+    if (!finite_value(rr) || rr < 0.0) {
+      fail(kReasonNonfinite);
+      return;
+    }
+    if (rr <= load_float(kToleranceSquared)) {
+      store_int(kStopKind, kStopRestart);
+      store_int(kBreakdownReason, kReasonNone);
+    }
+    return;
+  }
+  if (params.stage == 4u) {
+    float omega = 0.0;
+    if (load_int(kStopKind) == kStopNone) {
+      float numerator = dot0_buf.data[0];
+      float denominator = dot1_buf.data[0];
+      store_float(kOmegaNumerator, numerator);
+      store_float(kOmegaDenominator, denominator);
+      if (!finite_value(numerator) || !finite_value(denominator)) {
+        fail(kReasonNonfinite);
+        return;
+      }
+      if (denominator == 0.0) {
+        store_int(kStopKind, kStopBreakdown);
+        store_int(kBreakdownReason, kReasonOmegaDenominator);
+      } else {
+        omega = numerator / denominator;
+        if (!finite_value(omega)) {
+          fail(kReasonNonfinite);
+          return;
+        }
+        if (omega == 0.0) {
+          store_int(kStopKind, kStopBreakdown);
+          store_int(kBreakdownReason, kReasonOmega);
+        }
+      }
+    }
+    store_float(kOmega, omega);
+    store_int(kCommitEnabled, 1);
+    store_int(kFreshDirection, 0);
+    store_int(kCompletedIterations, load_int(kCompletedIterations) + 1);
+    return;
+  }
+  if (params.stage == 5u) {
+    store_int(kCommitEnabled, 0);
+    float rr = dot0_buf.data[0];
+    store_float(kResidualSquared, rr);
+    if (!finite_value(rr) || rr < 0.0) {
+      fail(kReasonNonfinite);
+      return;
+    }
+    if (load_int(kStopKind) != kStopNone) {
+      store_int(kActive, 0);
+      return;
+    }
+    if (rr <= load_float(kToleranceSquared)) {
+      store_int(kStopKind, kStopRestart);
+      store_int(kActive, 0);
+      return;
+    }
+    store_float(kRhoOld, load_float(kRho));
+    return;
+  }
+  fail(kReasonNonfinite);
+}

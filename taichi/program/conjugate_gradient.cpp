@@ -261,6 +261,25 @@ void append_preconditioner_plan_statistics(
 
 }  // namespace
 
+const char *sparse_solve_breakdown_reason_name(
+    SparseSolveBreakdownReason reason) {
+  switch (reason) {
+    case SparseSolveBreakdownReason::none:
+      return "none";
+    case SparseSolveBreakdownReason::nonfinite:
+      return "nonfinite";
+    case SparseSolveBreakdownReason::rho:
+      return "rho";
+    case SparseSolveBreakdownReason::alpha_denominator:
+      return "alpha_denominator";
+    case SparseSolveBreakdownReason::omega_denominator:
+      return "omega_denominator";
+    case SparseSolveBreakdownReason::omega:
+      return "omega";
+  }
+  return "unknown";
+}
+
 const char *sparse_solve_execution_policy_name(
     SparseSolveExecutionPolicy policy) {
   switch (policy) {
@@ -1797,6 +1816,24 @@ void validate_fixed_linear_operator_preconditioner(
               "and non-singular traits.");
 }
 
+void validate_fixed_linear_right_operator_preconditioner(
+    Program *program,
+    const OperatorDescriptor &target_descriptor,
+    ExperimentalLinearOperatorHandle &preconditioner) {
+  TI_ERROR_IF(!program || preconditioner.program() != program,
+              "LinearOperator preconditioner must belong to the target "
+              "Program generation.");
+  const auto &descriptor = preconditioner.descriptor();
+  TI_ERROR_IF(descriptor.domain != target_descriptor.range ||
+                  descriptor.range != target_descriptor.domain,
+              "Right LinearOperator preconditioner must map the target "
+              "range back to its domain.");
+  const auto &traits = preconditioner.mathematical_traits();
+  TI_ERROR_IF(traits.singular.known() && traits.singular.value,
+              "A fixed-linear right Krylov preconditioner must not be "
+              "declared singular.");
+}
+
 std::unique_ptr<PreconditionerPlan> make_fixed_preconditioner_plan(
     Program *program,
     OperatorPlan &target_plan,
@@ -1927,6 +1964,32 @@ std::unique_ptr<PreconditionerPlan> make_solver_preconditioner_plan(
     std::string method) {
   return make_fixed_preconditioner_plan(program, target_plan,
                                         preconditioner, std::move(method));
+}
+
+std::unique_ptr<PreconditionerPlan> make_solver_right_preconditioner_plan(
+    Program *program,
+    OperatorPlan &target_plan,
+    ExperimentalLinearOperatorHandle &preconditioner,
+    std::string method) {
+  validate_fixed_linear_right_operator_preconditioner(
+      program, target_plan.descriptor(), preconditioner);
+  auto plan = std::make_unique<PreconditionerPlan>(
+      program, target_plan.descriptor(), preconditioner.binding(),
+      PreconditionerBehavior::fixed_linear, std::move(method),
+      [program, &preconditioner](const OperatorResourceStamp &, bool) {
+        TI_ERROR_IF(preconditioner.program() != program,
+                    "Right LinearOperator preconditioner changed Program "
+                    "generation.");
+      });
+  auto target_generation = target_plan.pin();
+  plan->setup(target_generation);
+  return plan;
+}
+
+void append_solver_preconditioner_plan_statistics(
+    const PreconditionerPlan &plan,
+    SparseSolvePlanRuntimeStatistics &statistics) {
+  append_preconditioner_plan_statistics(plan, statistics);
 }
 
 std::unique_ptr<CpuSparseCGPlan::PreconditionerBinding>

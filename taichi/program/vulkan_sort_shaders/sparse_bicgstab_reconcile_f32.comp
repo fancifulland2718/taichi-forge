@@ -1,0 +1,32 @@
+#version 450
+
+layout(local_size_x = 256) in;
+layout(set = 0, binding = 0, std430) readonly buffer TrueResidual { float data[]; } true_residual_buf;
+layout(set = 0, binding = 1, std430) buffer Residual { float data[]; } residual_buf;
+layout(set = 0, binding = 2, std430) buffer ShadowResidual { float data[]; } shadow_residual_buf;
+layout(set = 0, binding = 3, std430) buffer Direction { float data[]; } direction_buf;
+layout(set = 0, binding = 4, std430) buffer OperatorDirection { float data[]; } operator_direction_buf;
+layout(set = 0, binding = 5, std430) buffer Solution { float data[]; } solution_buf;
+layout(set = 0, binding = 6, std430) readonly buffer State { uint data[]; } state_buf;
+layout(push_constant) uniform Params { uint n; uint unused0; uint unused1; uint unused2; } params;
+
+void main() {
+  uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+  uint index = gl_GlobalInvocationID.x;
+  int mode = int(state_buf.data[23]);
+  if (mode == 0) return;
+  while (index < params.n) {
+    if (mode == 2) {
+      solution_buf.data[index] = 0.0;
+      residual_buf.data[index] = 0.0;
+      shadow_residual_buf.data[index] = 0.0;
+    } else {
+      residual_buf.data[index] = true_residual_buf.data[index];
+      shadow_residual_buf.data[index] = true_residual_buf.data[index];
+    }
+    direction_buf.data[index] = 0.0;
+    operator_direction_buf.data[index] = 0.0;
+    if (params.n - index <= stride) break;
+    index += stride;
+  }
+}
