@@ -70,8 +70,8 @@
   使用统一 runtime/lifetime/capability 合同。显式数学 trait 作为 CG/PCG 门禁；
   persistent plan 通过统一 `SolveResult` 返回 terminal state，并在文档支持矩阵内提供
   CPU/CUDA/Vulkan CG、fixed stored Jacobi/block-Jacobi PCG、provider-neutral
-  MINRES、provider-neutral BiCGSTAB 与 restarted GMRES。CPU 还支持最小
-  operator composition。
+  MINRES、provider-neutral BiCGSTAB、restarted GMRES 与 variable-linear FGMRES。
+  CPU 还支持最小 operator composition。
 - 扩展 compiled-kernel/Graph `LinearOperator`，支持 `(range, domain)` 矩形
   shape、独立显式 adjoint、`A.adjoint().adjoint()` 和共享 immutable numeric
   generation。`apply()` 增加 CPU 通用 `alpha/beta/addend` 合同与 `beta=0`
@@ -103,12 +103,19 @@
   或 Vulkan command replay，其它合格 provider 使用 direct native submission。
   `statistics()` 报告 basis/workspace bytes、A/M、dot/multi-dot/vector work、
   restart cycle、happy breakdown 与 logical/executed/wasted iteration。
+- 增加 restarted `SolvePlan(method="fgmres")`，消费有界 variable-linear
+  `PreconditionerPlan` action table。1 到 32 个兼容 linear action 按 solve-global
+  scheduled inner iteration 循环选择，restart boundary 不重置调度。CPU 支持
+  `f32/f64` host action；CUDA/Vulkan 支持兼容 device-native `f32` fixed stored
+  与 compiled provider。solve 进入时会 pin 全部 action generation，持久 `Z` basis
+  保存预条件 vector；`statistics()` 报告其 bytes、action selection、schedule wrap 与
+  update outcome。GPU 使用 direct native submission，并显式报告 replay 合同不可用。
 - 增加公开 `PreconditionerPlan` 与 pinned `PreconditionerSession`。外部近似逆可显式执行
   setup、rebuild update 或 lagged reuse，并分别记录 built-from provenance 与 accepted-target
   compatibility；target 更新默认 stale。CPU/CUDA/Vulkan PCG 消费批准后的 immutable
-  generation，不在 iteration 热路径执行 Python callback。10k numeric-generation churn
-  验证 retired generation 有界释放；variable-linear/nonlinear behavior 在缺少 qualified
-  consumer 时返回明确 unsupported reason。
+  generation，不在 iteration 热路径执行 Python callback。variable-linear table 在发布
+  update 前会 preflight 全部 action，并且只由 FGMRES 消费。10k numeric-generation churn
+  验证 retired generation 有界释放；nonlinear behavior 仍明确不受支持。
 - 增加 CPU、CUDA 与 Vulkan 上的同构独立批量 f32 CG/PCG。每个连续系统拥有独立
   tolerance、status、iteration 与 residual state；fixed stored 和 compiled-kernel A/M
   provider 已完成资格验证。CUDA/Vulkan plan 会复用 plan-owned Taichi Graph 执行稳定的
@@ -120,7 +127,8 @@
   clone 的逻辑 workspace payload 与排除项；host 异步 completion 不代表设备并行保证。
 - 增加面向 `SolvePlan`/`BatchedSolvePlan` 的 provider-neutral solver qualification。
   版本化 detached report 覆盖 solution/真实残差、terminal state、A/M 身份、policy、
-  logical/executed/provider work、chunk counter、transfer、resource、memory-pool 增量和可选
+  logical/executed/provider work、完整 preconditioner action-table provenance、chunk
+  counter、transfer、resource、memory-pool 增量和可选
   pacing。factory build、first solve、warm wall time 与合格 fixed-budget host submit 分开记录；
   无法取得的 device timestamp 与 driver identity 明确保持 unavailable，不进行推测。
 - 增加 `ti.graph.SubmissionPacer`，为共享 CUDA/Vulkan backend 的

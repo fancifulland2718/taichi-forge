@@ -71,7 +71,14 @@ CPU `f32/f64` host action，以及 CUDA/Vulkan `f32` fixed 或 compiled provider
 可使用 identity 或 fixed-linear 右 preconditioner。restart 可为 8、16 或 32，plan
 会预分配完整 basis，并报告 basis/workspace bytes 与 logical/executed work。
 每个 restart boundary 都检查原系统真实 residual。这是通用线性代数 primitive，
-不提供 contact policy、active-set/Newton outer loop、FGMRES 或领域 preconditioner。
+不提供 contact policy、active-set/Newton outer loop 或领域 preconditioner。
+
+当应用已经持有一个有界 linear 近似逆 action 序列时，
+`experimental.SolvePlan(method="fgmres")` 可接收包含 1 到 32 个 action 的
+variable-linear `PreconditionerPlan`。cyclic selection 跨 restart boundary 连续，solve
+期间会 pin 全部 generation，并预留持久 preconditioned `Z` basis。这只是为外部设计
+action 提供 execution/lifecycle primitive；它不会构造 multilevel cycle、field split、
+Schur complement、contact preconditioner 或 nonlinear outer policy。
 
 ## 根据拓扑生命周期选择存储
 
@@ -102,6 +109,7 @@ padding成统一6-lane BSR。
 | `SparseBiCGSTAB` | mutable和fixed CSR/BSR capabilities | 不支持 | 不支持 |
 | `experimental.SolvePlan(method="bicgstab")` | 兼容 host action、identity/fixed-linear 右 preconditioner，`f32/f64` | fixed CSR/BSR 或 compiled A/M，`f32` | fixed CSR/BSR 或 compiled A/M，`f32` |
 | `experimental.SolvePlan(method="gmres")` | 兼容 host action、identity/fixed-linear 右 preconditioner，`f32/f64` | fixed CSR/BSR 或 compiled A/M、restart 8/16/32，`f32` | fixed CSR/BSR 或 compiled A/M、restart 8/16/32，`f32` |
+| `experimental.SolvePlan(method="fgmres")` | 兼容 host A/actions、variable-linear table，`f32/f64` | 兼容 device-native A/actions、restart 8/16/32，`f32` | 兼容 device-native A/actions、restart 8/16/32，`f32` |
 | `MatrixFreeCG` | kernel/field路径 | kernel/field路径 | backend/dtype受支持时可用 |
 | `MatrixFreeBICGSTAB` | kernel/field路径 | kernel/field路径 | backend/dtype受支持时可用 |
 
@@ -130,8 +138,9 @@ payload，不应通过`dynamic`逐项append。经过资格确认的 nonsingular 
 可在受支持的 CPU/CUDA/Vulkan provider 上使用实验性 MINRES plan；旧 stored-matrix class
 仍仅支持 CPU。friction 或其它非对称系统可在受支持 fixed 或 compiled provider 上使用
 实验性 BiCGSTAB 或 restarted GMRES plan。BiCGSTAB 仍是可能发生数值 breakdown
-的低存储方法；GMRES 以预分配 basis 与 restart-cycle 工作量换取 Arnoldi
-minimum-residual 路径。两者都不提供 complementarity 或 active-set 处理。
+的低存储方法；应用提供 variable-linear table 时也可以使用 FGMRES。GMRES-family
+以预分配 V/Z basis 与 restart-cycle 工作量换取 Arnoldi minimum-residual 路径。
+这些路径都不提供 complementarity 或 active-set 处理。
 
 ## 失败与生命周期规则
 

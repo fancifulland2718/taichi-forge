@@ -196,7 +196,9 @@ scale、sum、composition、block diagonal 和 identity 当前在 CPU 上执行�
 - `method="bicgstab"`：面向一般 square 系统、使用 identity 或 fixed-linear 右
   preconditioner 的 BiCGSTAB；
 - `method="gmres"`：面向一般 square 系统、使用 identity 或 fixed-linear 右
-  preconditioner 的 restarted GMRES。
+  preconditioner 的 restarted GMRES；
+- `method="fgmres"`：使用有限 variable-linear 右预条件 action table 的 restarted
+  flexible GMRES。
 
 ```python
 result = plan.solve(rhs, initial_guess=x0, out=x)
@@ -338,8 +340,8 @@ vector 发起一次由 host 观察的 dot product。每个 cycle 在 device 上�
 CPU 支持兼容的 `f32/f64` host-action provider；CUDA/Vulkan 支持 `f32` fixed
 CSR/BSR 与 compiled kernel/Graph provider。可选 preconditioner 必须是 nonsingular
 fixed-linear map，把 operator 的 range 映射回 domain，并应用在右侧；它不需要 PCG
-或 MINRES 所要求的 SPD trait。这是 fixed-preconditioner GMRES，而不是 FGMRES；
-variable-linear 与 nonlinear preconditioner 仍不受支持。
+或 MINRES 所要求的 SPD trait。`method="gmres"` 有意只接受 identity 或 fixed-linear
+preconditioning；受支持的 variable-linear schedule 应使用 FGMRES。
 
 plan 会预分配连续的 `(restart + 1) * n` basis。device identity plan 持有
 `restart + 5` 个长度为 `n` 的持久 vector；右预条件再增加一个 vector。
@@ -358,6 +360,58 @@ command replay 覆盖完整 restart cycle。compiled provider 与右预条件 pl
 `fixed_budget_masked`。host 观察 terminal state 前会提交完整 cycle，因此最多可能执行
 `restart - 1` 个 inactive tail step。更大的 restart 可能改善困难系统的收敛，但也会
 同时扩大 basis 内存、cycle 工作量和最坏情况下的 inactive tail。
+
+### 使用 variable-linear action table 的 FGMRES
+
+`method="fgmres"` 接受 `behavior="variable_linear"` 的 `PreconditionerPlan`。plan
+包含 1 到 32 个 linear action 的有限表；这一有界结构使 allocation、generation pinning
+和 backend execution 均可显式审计，同时不会把 Python callback 引入 Arnoldi step：
+
+```python
+schedule = ti.linalg.experimental.PreconditionerPlan(
+    operator,
+    (inverse0, inverse1, inverse2),
+    method="external_multilevel_cycle",
+    behavior="variable_linear",
+    selection="cyclic",
+).setup()
+
+plan = ti.linalg.experimental.SolvePlan(
+    operator,
+    method="fgmres",
+    preconditioner=schedule,
+    restart=16,
+    max_iterations=160,
+    atol=1e-8,
+    rtol=1e-5,
+    execution_policy="host_check_every_k",
+    check_interval=16,
+)
+result = plan.solve(rhs)
+```
+
+solve-global scheduled inner slot `k` 选择 `actions[k % len(actions)]`，restart 不会重置
+调度。CPU 的 scheduled slot 与 logical slot 一致；masked GPU execution 在较早发生逻辑
+终止后仍可能调度 inactive tail slot，因此 telemetry 会把 action selection 与 executed
+iteration 同 logical iteration 分开报告。每次 solve 进入时会同时 pin target 和所有
+action generation。每个 action 都必须属于同一 Program、使用 solver dtype、把 operator
+range 映射回 domain，并且不能声明为 singular。
+
+CPU 支持兼容的 `f32/f64` host-action provider；CUDA/Vulkan 支持 `f32` 兼容 fixed
+stored 与 compiled kernel/Graph provider。FGMRES 复用 GMRES 的 CGS2 Arnoldi、真实
+residual 终止、restart 取值和 GPU observation policy，但会把每个预条件 basis vector
+保存在持久 `Z` basis 中。额外预留量为 `restart * n * sizeof(dtype)` bytes，并通过
+`preconditioned_basis_vector_count` 与 `preconditioned_basis_reserved_bytes` 暴露。
+当 `restart=8` 时，经过资格验证的 CPU/device plan 分别持有 20/22 个 solver 持久
+vector；该数字不包含 operator、action、RHS/output、backend 与 replay resource。
+
+variable-action FGMRES 当前采用 direct native submission。只有 action table 中每个
+action 都具备经过资格验证的 capture/binding 合同后，系统才会声明 CUDA Graph 或 Vulkan
+command replay；当前 `solver_replay_unavailable_reason` 返回
+`variable_action_capture_contract_unavailable`。API 不支持 nonlinear preconditioner、
+Python iteration callback、自动 restart 选择、block GMRES 或领域 outer-solver policy。
+把 variable-linear plan 传给 CG、PCG、MINRES、BiCGSTAB 或普通 GMRES 会在 plan 构造
+阶段失败。
 
 ## PreconditionerPlan 生命周期
 
@@ -392,15 +446,23 @@ stale。若算法允许 lagged preconditioning，可在 action 未改变时显�
 action 已改变时必须使用普通 `update()`。
 
 `pin()` 同时保留精确 target 与 action generation，返回的 `PreconditionerSession` 可在后续
-generation 发布后继续安全应用旧 action。`metadata` 暴露 provenance/compatibility stamp，
-`statistics()` 暴露 setup、rebuild、reuse、stale rejection 以及 approved generation 的
-publish/retire/release 计数。setup/update 在 host 边界执行；session apply 与 PCG iteration
-只调用 native `OperatorAction`，不执行 Python callback。
+generation 发布后继续安全应用旧 generation。fixed-linear session 使用
+`apply(r, out=None)`；variable-linear session 可通过 `iteration=k` 选择该 scheduled
+slot 对应的 pinned cyclic action，默认 `iteration=0` 选择第一个 action。`metadata`
+暴露 provenance/compatibility stamp；`PreconditionerPlan.statistics()` 暴露 setup、
+rebuild、reuse、stale rejection、schedule update success/failure 以及 approved
+generation 的 publish/retire/release 计数，`SolvePlan.statistics()` 另行报告 action
+selection 与 schedule wrap。setup/update 在 host 边界执行；session apply 与 solver
+iteration 只调用 native `OperatorAction`，不执行 Python callback。
 
-首个完整行为是 `fixed_linear`。`variable_linear` 与 `nonlinear` 可被描述并返回结构化
-unsupported reason，但在有合格的 flexible solver consumer 前不能 setup 或交给
-`SolvePlan`。内置 Jacobi/block-Jacobi 使用同一 native setup/update/pin 生命周期；其
-provider 构造仍通过 `preconditioner="jacobi"` 或 `"block_jacobi"` 选择。
+对于 variable-linear table，`update(accept_reuse=...)` 可以接收一个应用于所有 action 的
+boolean，也可以为每个 action 分别提供 boolean。任何 generation 发布前都会验证完整的
+next table；一个 stale 或不兼容 action 会拒绝整个 update。已经 pin 旧 table 的 solve
+继续持有该 immutable snapshot。`fixed_linear` 由文档列出的 PCG、MINRES、BiCGSTAB 与
+GMRES consumer 支持；`variable_linear` 仅由 FGMRES 支持。`nonlinear` 仍只有描述能力，
+并返回结构化 unsupported reason。内置 Jacobi/block-Jacobi 使用同一 native
+setup/update/pin 生命周期；其 provider 构造仍通过 `preconditioner="jacobi"` 或
+`"block_jacobi"` 选择。
 
 `rhs`、`initial_guess` 和 `out` 必须与 operator 的 dtype、scalar extent 一致，并属于当前
 runtime。未提供 `out` 时会创建结果 ndarray；未提供 `initial_guess` 时结果初始化为零。
@@ -409,7 +471,7 @@ RHS/output alias 会被拒绝。
 `SolveResult` 同时包含 solution 与 terminal snapshot：status code、termination reason、
 convergence/breakdown/max-iteration flag、iteration count、初始与最终 residual norm、两个
 tolerance、relative reference norm 和 effective tolerance。CG、PCG、MINRES、
-BiCGSTAB 与 GMRES 使用：
+BiCGSTAB、GMRES 与 FGMRES 使用：
 
 result record 本身是 frozen 的；其中的 `solution` ndarray 仍可由调用方写入。
 
@@ -439,11 +501,11 @@ plan = ti.linalg.experimental.SolvePlan(
 - CPU 只支持 `"host_each_iteration"`。
 - CUDA 对 CG/PCG/MINRES/BiCGSTAB 默认使用 `"host_each_iteration"`，还支持
   `"host_check_every_k"`，其中 `check_interval` 可为 4 或 8。分块策略把 recurrence
-  scalar 保留在 device 上，每个 chunk 只读取一次 terminal snapshot。CUDA GMRES
+  scalar 保留在 device 上，每个 chunk 只读取一次 terminal snapshot。CUDA GMRES/FGMRES
   默认使用 `"host_check_every_k"`，并要求 `check_interval == restart`。
 - Vulkan 默认使用 `"fixed_budget_masked"`，还支持
   `"host_check_every_k"`。CG/PCG/MINRES/BiCGSTAB 接受 interval 4 或 8；
-  GMRES 要求 `check_interval == restart`。两种策略均支持 `atol`、`rtol`
+  GMRES/FGMRES 要求 `check_interval == restart`。两种策略均支持 `atol`、`rtol`
   及其组合后的 effective tolerance。
 
 对于 fixed stored f32 CSR/BSR，CUDA 的 `host_check_every_k` 以及 Vulkan 的
@@ -457,6 +519,9 @@ topology、workspace 与 output binding 的后续执行直接 replay。仅更新
 现有 CG/PCG/MINRES 序列。更换 output ndarray、改变 topology/schema 或重建 runtime
 会使旧序列失效并安全重建。
 
+FGMRES action table 在两个 GPU backend 上都使用 direct native submission；系统不会为
+variable action schedule 静默复用 identity-GMRES replay 路径。
+
 compiled-kernel 与 compiled Graph A/M provider 仍按 direct chunk submission 执行；它们不会
 为取得 replay 而进行 host staging 或更换 provider。runtime 无法安全录制时也会保持相同数值
 路径并报告不可用原因。`statistics()` 通过 `solver_chunk_builds`、
@@ -465,7 +530,7 @@ compiled-kernel 与 compiled Graph A/M provider 仍按 direct chunk submission �
 `solver_replay_unavailable_reason` 暴露这一边界。构建开销属于 cold execution，性能资格应分别
 记录 first solve 与 warm solve。
 
-host 检查状态前，一个 chunk 或 GMRES restart cycle 总会完整执行。
+host 检查状态前，一个 chunk 或 GMRES-family restart cycle 总会完整执行。
 `SolveResult.iterations` 表示逻辑上的
 convergence 或 breakdown iteration；`statistics()["operations"]` 另行报告
 `executed_iterations`、`wasted_iterations`、host synchronization 次数和 direct
@@ -474,7 +539,7 @@ tail。Vulkan fixed-budget execution 可以执行完整的 `max_iterations`，�
 的逻辑终止结果。
 
 对于 CG/PCG/MINRES/BiCGSTAB，当更早终止比同步频率更重要时可选 `K=4`；
-当摊薄 host check 更重要时可选 `K=8`。GMRES 使用选定的 restart 作为观察 interval。
+当摊薄 host check 更重要时可选 `K=8`。GMRES 与 FGMRES 使用选定的 restart 作为观察 interval。
 较快选择取决于 vector size、operator 成本、iteration count、driver 与 backend。
 不受支持的 policy 或 interval 会在 plan 构造时失败，不会静默 fallback。
 
@@ -668,6 +733,7 @@ GPU 当前只支持 overwrite apply。
 | BiCGSTAB + fixed-linear 右预条件 | 受支持 host-action provider，`f32/f64` | 兼容的 device-native A/M，`f32` | 兼容的 device-native A/M，`f32` |
 | GMRES + identity | 受支持 host-action provider，`f32/f64` | fixed CSR/BSR 或 compiled provider，`f32` | fixed CSR/BSR 或 compiled provider，`f32` |
 | GMRES + fixed-linear 右预条件 | 受支持 host-action provider，`f32/f64` | 兼容的 device-native A/M，`f32` | 兼容的 device-native A/M，`f32` |
+| FGMRES + variable-linear action table | 受支持 host-action provider，`f32/f64` | 兼容的 device-native A/actions，`f32` | 兼容的 device-native A/actions，`f32` |
 
 direct factorization 继续使用 stored-matrix API。
 

@@ -81,8 +81,9 @@ retroactively attributed to the 0.5.0 artifact:
   contract. Explicit mathematical traits gate CG/PCG; persistent plans expose
   unified `SolveResult` terminal state and support CPU/CUDA/Vulkan CG, fixed
   stored Jacobi/block-Jacobi PCG, provider-neutral MINRES, and
-  provider-neutral BiCGSTAB and restarted GMRES within the documented provider
-  matrix. CPU also supports minimal operator composition.
+  provider-neutral BiCGSTAB, restarted GMRES, and variable-linear FGMRES
+  within the documented provider matrix. CPU also supports minimal operator
+  composition.
 - Extended compiled-kernel and Graph `LinearOperator` providers with
   `(range, domain)` rectangular shapes, independent explicit adjoints,
   `A.adjoint().adjoint()`, and shared immutable numeric generations.
@@ -124,14 +125,25 @@ retroactively attributed to the 0.5.0 artifact:
   submission. Basis/workspace bytes, A/M, dot/multi-dot/vector work, restart
   cycles, happy breakdowns, and logical/executed/wasted iterations are
   reported through `statistics()`.
+- Added restarted `SolvePlan(method="fgmres")` with a bounded
+  variable-linear `PreconditionerPlan` action table. One to 32 compatible
+  linear actions are selected cyclically by solve-global scheduled inner
+  iteration without resetting at restart boundaries. CPU supports `f32/f64`
+  host actions; CUDA/Vulkan support compatible device-native `f32` fixed
+  stored and compiled providers. All action generations are pinned at solve
+  entry, a persistent `Z` basis stores preconditioned vectors, and
+  `statistics()` reports its bytes, action selections, schedule wraps, and
+  update outcomes. GPU execution uses direct native submission and reports
+  the unavailable replay contract explicitly.
 - Added public `PreconditionerPlan` and pinned `PreconditionerSession` types.
   External approximate inverses support explicit setup, rebuild updates, and
   lagged reuse while recording built-from provenance separately from
   accepted-target compatibility. Target updates are stale by default.
   CPU/CUDA/Vulkan PCG consumes approved immutable generations without a Python
-  callback in the iteration hot path. A 10k numeric-generation churn contract
-  verifies bounded retirement, while variable-linear and nonlinear behaviors
-  report an explicit unsupported reason until qualified consumers exist.
+  callback in the iteration hot path. Variable-linear tables preflight every
+  action before publishing an update and are consumed only by FGMRES. A 10k
+  numeric-generation churn contract verifies bounded retirement; nonlinear
+  behavior remains explicitly unsupported.
 - Added homogeneous independent batched f32 CG/PCG on CPU, CUDA, and Vulkan.
   Each contiguous system has independent tolerance, status, iteration, and
   residual state; fixed stored and compiled-kernel A/M providers are
@@ -147,7 +159,8 @@ retroactively attributed to the 0.5.0 artifact:
 - Added provider-neutral solve qualification for `SolvePlan` and
   `BatchedSolvePlan`. Versioned detached reports cover solution and true
   residual checks, terminal state, A/M identity, policy, logical/executed/
-  provider work, chunk counters, transfers, resources, memory-pool deltas, and
+  provider work, complete preconditioner action-table provenance, chunk
+  counters, transfers, resources, memory-pool deltas, and
   optional pacing. Factory construction, first solve, warm wall time, and
   qualified fixed-budget host submission are separated; unavailable device
   timestamps and driver identity remain explicit rather than inferred.

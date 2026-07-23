@@ -192,6 +192,7 @@ the matrix exactly, and no implicit host fallback is performed.
 | `experimental.SolvePlan(method="minres")` | Trait-qualified self-adjoint, nonsingular-in-use operator; SPD preconditioner when present | Identity, any compatible provider, `f32/f64` | Fixed CSR/BSR or compiled provider, with identity, built-in, or compatible fixed-linear preconditioning, `f32` | Fixed CSR/BSR or compiled provider, with identity, built-in, or compatible fixed-linear preconditioning, `f32` |
 | `experimental.SolvePlan(method="bicgstab")` | General square operator | Any supported experimental CPU provider, `f32/f64` | Fixed CSR/BSR or compiled A/M, `f32` | Fixed CSR/BSR or compiled A/M, `f32` |
 | `experimental.SolvePlan(method="gmres")` | General square operator; fixed restart 8/16/32 | Any supported experimental CPU provider, `f32/f64` | Fixed CSR/BSR or compiled A/M, `f32` | Fixed CSR/BSR or compiled A/M, `f32` |
+| `experimental.SolvePlan(method="fgmres")` | General square operator; finite cyclic variable-linear action table; fixed restart 8/16/32 | Compatible CPU A/actions, `f32/f64` | Compatible device-native A/actions, `f32` | Compatible device-native A/actions, `f32` |
 
 Taichi does not infer symmetry, definiteness, nullspaces, or conditioning from
 CSR/BSR shape. The caller owns those mathematical contracts.
@@ -209,12 +210,12 @@ composition fails without a host fallback.
 `experimental.SolvePlan` retains solver workspace across RHS calls and returns
 a `SolveResult` containing the solution and complete terminal state. CUDA and
 Vulkan support explicit 4- or 8-iteration host-check chunks for the
-short-recurrence solvers. Restarted GMRES instead observes at its selected
+  short-recurrence solvers. Restarted GMRES and FGMRES instead observe at their selected
 restart boundary (8, 16, or 32); Vulkan also supports fixed-budget masked
 execution. Both GPU backends use the same absolute/relative true-residual
 contract. This API does not replace mutable Eigen sparse matrices or direct
-factorization. It provides provider-neutral MINRES, BiCGSTAB, and restarted
-GMRES for fixed and compiled operators, while the legacy `SparseMINRES` and
+  factorization. It provides provider-neutral MINRES, BiCGSTAB, restarted
+  GMRES, and variable-linear FGMRES for fixed and compiled operators, while the legacy `SparseMINRES` and
 `SparseBiCGSTAB` constructors retain their CPU stored-matrix contracts. See
 [Experimental LinearOperator and SolvePlan](linear_operator.en.md) for provider
 ABIs, ownership, update generations, examples, and the exact
@@ -369,9 +370,18 @@ The plan preallocates `restart + 1` basis vectors. Device identity plans own
 `restart + 5` length-`n` vectors in total, with one additional vector for
 right preconditioning. Fixed stored identity cycles can use CUDA Graph or
 Vulkan command replay; compiled and preconditioned providers use direct native
-submission. This route does not provide FGMRES, variable/nonlinear
-preconditioning, automatic restart selection, block GMRES, or singular
-minimum-norm semantics.
+submission.
+
+For a bounded variable-linear schedule, use `method="fgmres"` with a
+`PreconditionerPlan` containing 1 to 32 actions and
+`behavior="variable_linear"`. Action `k % action_count` is selected from the
+solve-global scheduled inner slot, including across restart boundaries. All
+generations are pinned at solve entry, and the persistent `Z` basis adds
+`restart * n * sizeof(dtype)` bytes. CPU supports compatible `f32/f64` actions;
+CUDA and Vulkan support compatible device-native `f32` actions and use direct
+native submission. Nonlinear preconditioning, Python iteration callbacks,
+automatic restart selection, block GMRES, and singular minimum-norm semantics
+are not provided.
 
 ### Direct factorization and symbolic reuse
 

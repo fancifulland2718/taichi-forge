@@ -218,7 +218,9 @@ calls. Supported methods are:
 - `method="bicgstab"`: identity- or fixed-linear right-preconditioned
   BiCGSTAB for general square systems; and
 - `method="gmres"`: restarted, identity- or fixed-linear
-  right-preconditioned GMRES for general square systems.
+  right-preconditioned GMRES for general square systems; and
+- `method="fgmres"`: restarted flexible GMRES with a finite
+  variable-linear right-preconditioner action table.
 
 ```python
 result = plan.solve(rhs, initial_guess=x0, out=x)
@@ -378,8 +380,9 @@ CPU supports compatible `f32/f64` host-action providers. CUDA and Vulkan
 support `f32` fixed CSR/BSR and compiled kernel/Graph providers. An optional
 preconditioner must be a nonsingular fixed-linear map from the operator range
 back to its domain and is applied on the right. It need not carry the SPD
-traits required by PCG or MINRES. This is fixed-preconditioner GMRES, not
-FGMRES: variable-linear and nonlinear preconditioners remain unsupported.
+traits required by PCG or MINRES. `method="gmres"` intentionally accepts only
+identity or fixed-linear preconditioning; use FGMRES for the supported
+variable-linear schedule.
 
 A plan preallocates a contiguous `(restart + 1) * n` basis. Device identity
 plans own `restart + 5` persistent length-`n` vectors; right preconditioning
@@ -401,6 +404,66 @@ direct native submission. CUDA supports `host_check_every_k` with
 observes its terminal state, so up to `restart - 1` inactive tail steps can be
 executed. Larger restarts may improve a difficult system's convergence but
 also increase basis memory, cycle work, and its worst-case inactive tail.
+
+### FGMRES with a variable-linear action table
+
+`method="fgmres"` accepts a `PreconditionerPlan` whose
+`behavior="variable_linear"`. The plan contains a finite table of 1 to 32
+linear actions; this bounded table makes allocation, generation pinning, and
+backend execution explicit without introducing a Python callback into an
+Arnoldi step:
+
+```python
+schedule = ti.linalg.experimental.PreconditionerPlan(
+    operator,
+    (inverse0, inverse1, inverse2),
+    method="external_multilevel_cycle",
+    behavior="variable_linear",
+    selection="cyclic",
+).setup()
+
+plan = ti.linalg.experimental.SolvePlan(
+    operator,
+    method="fgmres",
+    preconditioner=schedule,
+    restart=16,
+    max_iterations=160,
+    atol=1e-8,
+    rtol=1e-5,
+    execution_policy="host_check_every_k",
+    check_interval=16,
+)
+result = plan.solve(rhs)
+```
+
+The selected action for solve-global scheduled inner slot `k` is
+`actions[k % len(actions)]`. A restart does not reset the schedule. CPU
+scheduled and logical slots coincide; masked GPU execution may schedule
+inactive tail slots after an earlier logical termination, so telemetry reports
+selection and executed-iteration counts separately from logical iterations.
+All target and action generations are pinned at solve entry. Every action must
+belong to the same Program, have the solver dtype, map the operator range back
+to its domain, and not be declared singular.
+
+CPU supports compatible `f32/f64` host-action providers. CUDA and Vulkan
+support `f32` compatible fixed stored and compiled kernel/Graph providers.
+FGMRES uses the same CGS2 Arnoldi, true-residual termination, restart values,
+and GPU observation policies as GMRES, but stores every preconditioned basis
+vector in a persistent `Z` basis. The additional reservation is
+`restart * n * sizeof(dtype)` bytes and is exposed as
+`preconditioned_basis_vector_count` and
+`preconditioned_basis_reserved_bytes`. For `restart=8`, the qualified CPU and
+device plans own 20 and 22 persistent solver vectors respectively, excluding
+operator, action, RHS/output, backend, and replay resources.
+
+Variable-action FGMRES currently uses direct native submission. It does not
+claim CUDA Graph or Vulkan command replay until every action in the table has
+a qualified capture and binding contract; `solver_replay_unavailable_reason`
+reports `variable_action_capture_contract_unavailable`. The API does not
+support nonlinear preconditioners, Python iteration callbacks, automatic
+restart selection, block GMRES, or domain-specific outer-solver policy.
+Passing a variable-linear plan to CG, PCG, MINRES, BiCGSTAB, or ordinary GMRES
+fails during plan construction.
 
 ## PreconditionerPlan lifecycle
 
@@ -438,19 +501,28 @@ updates only compatibility and preserves provenance. A changed action requires
 an ordinary `update()` rebuild attestation.
 
 `pin()` retains the exact target and action generations together. The returned
-`PreconditionerSession` can continue applying that old action after later
-generations are published. `metadata` exposes provenance and compatibility
-stamps. `statistics()` reports setup, rebuild, reuse, stale rejections, and
-approved-generation publish/retire/release counters. Setup and update execute
-at host boundaries; session apply and PCG iterations invoke native
-`OperatorAction` objects without Python callbacks.
+`PreconditionerSession` can continue applying that old generation after later
+generations are published. A fixed-linear session uses `apply(r, out=None)`;
+a variable-linear session accepts `iteration=k` and selects the pinned cyclic
+action for that scheduled slot; the default `iteration=0` selects the first
+action. `metadata` exposes provenance and compatibility stamps.
+`PreconditionerPlan.statistics()` reports setup, rebuild, reuse, stale
+rejections, schedule update success/failure, and approved-generation
+publish/retire/release counters. `SolvePlan.statistics()` additionally reports
+action selections and schedule wraps. Setup and update execute at host
+boundaries; session apply and solver iterations invoke native `OperatorAction`
+objects without Python callbacks.
 
-`fixed_linear` is the first fully supported behavior. `variable_linear` and
-`nonlinear` can be described and expose a structured unsupported reason, but
-cannot be set up or passed to `SolvePlan` until a qualified flexible consumer
-exists. Built-in Jacobi and block-Jacobi use the same native setup/update/pin
-lifecycle and remain selected with `preconditioner="jacobi"` or
-`"block_jacobi"`.
+For a variable-linear table, `update(accept_reuse=...)` accepts either one
+boolean for all actions or one boolean per action. The complete next table is
+validated before any generation is published: one stale or incompatible
+action rejects the whole update. A solve that already pinned the previous
+table retains that immutable snapshot. `fixed_linear` is supported by the
+documented PCG, MINRES, BiCGSTAB, and GMRES consumers; `variable_linear` is
+supported only by FGMRES. `nonlinear` remains descriptive and returns a
+structured unsupported reason. Built-in Jacobi and block-Jacobi use the same
+native setup/update/pin lifecycle and remain selected with
+`preconditioner="jacobi"` or `"block_jacobi"`.
 
 `rhs`, `initial_guess`, and `out` must match the operator dtype and scalar
 extent and belong to the current runtime. If `out` is omitted, the plan creates
@@ -460,7 +532,7 @@ zero. RHS/output aliasing is rejected.
 `SolveResult` contains the solution and a terminal snapshot: status code,
 termination reason, convergence/breakdown/max-iteration flags, iteration
 count, initial and final residual norms, both tolerances, relative reference
-norm, and effective tolerance. CG, PCG, MINRES, BiCGSTAB, and GMRES use:
+norm, and effective tolerance. CG, PCG, MINRES, BiCGSTAB, GMRES, and FGMRES use:
 
 The result record is frozen; its `solution` ndarray remains caller-writable.
 
@@ -492,11 +564,11 @@ plan = ti.linalg.experimental.SolvePlan(
 - CUDA defaults to `"host_each_iteration"` for CG/PCG/MINRES/BiCGSTAB and
   also supports `"host_check_every_k"` with `check_interval=4` or `8`.
   The chunked policy keeps recurrence scalars on the device and reads one
-  terminal snapshot per chunk. CUDA GMRES instead defaults to
-  `"host_check_every_k"` and requires `check_interval == restart`.
+  terminal snapshot per chunk. CUDA GMRES/FGMRES instead default to
+  `"host_check_every_k"` and require `check_interval == restart`.
 - Vulkan defaults to `"fixed_budget_masked"` and also supports
   `"host_check_every_k"`. CG/PCG/MINRES/BiCGSTAB accept intervals 4 or 8;
-  GMRES requires `check_interval == restart`. Both policies support `atol`,
+  GMRES/FGMRES require `check_interval == restart`. Both policies support `atol`,
   `rtol`, and their combined effective tolerance.
 
 For fixed stored f32 CSR/BSR, CUDA `host_check_every_k` and Vulkan
@@ -512,6 +584,9 @@ preconditioner refreshes retain the existing CG/PCG/MINRES sequence.
 Replacing the output ndarray, changing topology or schema, or recreating the
 runtime invalidates and safely rebuilds it.
 
+FGMRES action tables use direct native submission on both GPU backends. No
+identity-GMRES replay path is silently reused for a variable action schedule.
+
 Compiled-kernel and compiled Graph A/M providers continue to use direct chunk
 submission. They are not staged through the host or replaced with another
 provider to obtain replay. If the runtime cannot record safely, it preserves
@@ -522,7 +597,7 @@ boundary through `solver_chunk_builds`, `solver_chunk_replays`,
 `solver_replay_unavailable_reason`. Build cost belongs to cold execution, so
 qualification should report first-solve and warm-solve timing separately.
 
-A chunk or GMRES restart cycle always completes before its terminal state is
+A chunk or GMRES-family restart cycle always completes before its terminal state is
 inspected. The reported
 `SolveResult.iterations` is the logical convergence or breakdown iteration;
 `statistics()["operations"]` separately reports `executed_iterations`,
@@ -534,8 +609,8 @@ termination result.
 
 For CG/PCG/MINRES/BiCGSTAB, use `K=4` when earlier termination is more
 important than synchronization frequency and `K=8` when amortizing host
-checks is more important. GMRES uses its selected restart as the observation
-interval. The faster choice depends on vector size, operator cost, iteration
+checks is more important. GMRES and FGMRES use their selected restart as the
+observation interval. The faster choice depends on vector size, operator cost, iteration
 count, driver, and backend. Unsupported policies and intervals fail during
 plan construction; they do not silently fall back.
 
@@ -760,6 +835,7 @@ overwrite apply only.
 | BiCGSTAB + fixed-linear right preconditioner | Supported host-action providers, `f32/f64` | Compatible device-native A/M, `f32` | Compatible device-native A/M, `f32` |
 | GMRES + identity | Supported host-action providers, `f32/f64` | Fixed CSR/BSR or compiled provider, `f32` | Fixed CSR/BSR or compiled provider, `f32` |
 | GMRES + fixed-linear right preconditioner | Supported host-action providers, `f32/f64` | Compatible device-native A/M, `f32` | Compatible device-native A/M, `f32` |
+| FGMRES + variable-linear action table | Supported host-action providers, `f32/f64` | Compatible device-native A/actions, `f32` | Compatible device-native A/actions, `f32` |
 
 Direct factorization remains a stored-matrix API.
 

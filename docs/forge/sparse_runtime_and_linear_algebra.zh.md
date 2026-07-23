@@ -178,6 +178,7 @@ ndarray RHS；CUDA 文档路径要求 Taichi ndarray。shape 与 dtype 必须与
 | `experimental.SolvePlan(method="minres")` | trait-qualified self-adjoint、使用时 nonsingular 的 operator；若有 preconditioner 则必须 SPD | identity、任意兼容 provider，`f32/f64` | fixed CSR/BSR 或 compiled provider，支持 identity、内置项或兼容 fixed-linear preconditioning，`f32` | fixed CSR/BSR 或 compiled provider，支持 identity、内置项或兼容 fixed-linear preconditioning，`f32` |
 | `experimental.SolvePlan(method="bicgstab")` | 一般 square operator | 任意受支持 experimental CPU provider，`f32/f64` | fixed CSR/BSR 或 compiled A/M，`f32` | fixed CSR/BSR 或 compiled A/M，`f32` |
 | `experimental.SolvePlan(method="gmres")` | 一般 square operator；fixed restart 8/16/32 | 任意受支持 experimental CPU provider，`f32/f64` | fixed CSR/BSR 或 compiled A/M，`f32` | fixed CSR/BSR 或 compiled A/M，`f32` |
+| `experimental.SolvePlan(method="fgmres")` | 一般 square operator；有限 cyclic variable-linear action table；fixed restart 8/16/32 | 兼容 CPU A/actions，`f32/f64` | 兼容 device-native A/actions，`f32` | 兼容 device-native A/actions，`f32` |
 
 Taichi 不会从 CSR/BSR shape 推断 symmetry、definiteness、nullspace 或
 conditioning，这些数学合同由调用方负责。
@@ -193,11 +194,11 @@ scale/sum/composition/adjoint/block-diagonal 代数；不受支持的 GPU compos
 
 `experimental.SolvePlan` 跨 RHS 调用保留 solver workspace，并返回同时包含 solution 与
 完整 terminal state 的 `SolveResult`。CUDA/Vulkan 为 short-recurrence solver 支持显式的
-4 或 8 iteration host-check chunk；restarted GMRES 改在选定的 restart boundary
+  4 或 8 iteration host-check chunk；restarted GMRES 与 FGMRES 改在选定的 restart boundary
 （8、16 或 32）观察状态，Vulkan 还支持 fixed-budget masked execution。两个 GPU
 backend 使用相同的 absolute/relative true-residual 合同。该 API 不替代 mutable Eigen
 sparse matrix 或 direct factorization；它为 fixed 与 compiled operator 提供
-provider-neutral MINRES、BiCGSTAB 与 restarted GMRES，而旧 `SparseMINRES` 和
+  provider-neutral MINRES、BiCGSTAB、restarted GMRES 与 variable-linear FGMRES，而旧 `SparseMINRES` 和
 `SparseBiCGSTAB` 构造器保留 CPU stored-matrix 合同。provider ABI、所有权、
 update generation、示例和精确 backend 矩阵见
 [实验性 LinearOperator 与 SolvePlan](linear_operator.zh.md)。
@@ -342,8 +343,16 @@ compiled kernel/Graph A/M。可选 preconditioner 是 fixed-linear 右 precondit
 plan 预分配 `restart + 1` 个 basis vector。device identity plan 共持有
 `restart + 5` 个长度为 `n` 的 vector，右预条件再增加一个。fixed stored identity
 cycle 可使用 CUDA Graph 或 Vulkan command replay；compiled 与 preconditioned
-provider 使用 direct native submission。该路径不提供 FGMRES、variable/nonlinear
-preconditioning、自动 restart 选择、block GMRES 或 singular minimum-norm 语义。
+provider 使用 direct native submission。
+
+对于有界 variable-linear schedule，使用 `method="fgmres"`，并提供包含 1 到 32 个
+action、`behavior="variable_linear"` 的 `PreconditionerPlan`。系统按 solve-global
+scheduled inner slot 选择 `k % action_count`，跨 restart boundary 不重置。solve 进入时
+会 pin 全部 generation，持久 `Z` basis 额外占用
+`restart * n * sizeof(dtype)` bytes。CPU 支持兼容 `f32/f64` action；CUDA/Vulkan
+支持兼容 device-native `f32` action，并使用 direct native submission。该路径不提供
+nonlinear preconditioning、Python iteration callback、自动 restart 选择、block GMRES
+或 singular minimum-norm 语义。
 
 ### 直接分解与 symbolic reuse
 
