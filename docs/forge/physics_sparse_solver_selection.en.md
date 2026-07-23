@@ -21,7 +21,7 @@ Choose in this order:
 | Implicit MPM with a changing active grid | Use SNodes for spatial assembly, then publish compact DOFs and an explicit or matrix-free operator before iteration |
 | Per-step particle/contact adjacency | Count-scan-fill or sorted arrays for topology; this is assembly, not a solver choice |
 | Bilateral constraints or symmetric KKT | Complete symmetric CSR/BSR or a compiled self-adjoint operator + `experimental.SolvePlan(method="minres")`; the legacy `SparseMINRES` class remains CPU-only |
-| Frictional or other nonsymmetric linearization | BiCGSTAB on a supported stored matrix, or `MatrixFreeBICGSTAB` for an application-owned operator |
+| Frictional or other nonsymmetric linearization | `experimental.SolvePlan(method="bicgstab")` on a supported fixed/compiled operator; the legacy stored and field-based routes remain available within their documented boundaries |
 
 There is no safe selector based only on matrix size, CSR/BSR format, or the word
 "sparse". Taichi does not infer symmetry or positive definiteness from storage.
@@ -65,9 +65,12 @@ MINRES-QLP, minimum-length, field-split, or Schur-complement policy.
 ### Nonsymmetric
 
 Frictional contact linearization, advection-like terms, and some coupled
-systems are nonsymmetric. `SparseBiCGSTAB` supports the documented CPU
-stored-matrix providers. `MatrixFreeBICGSTAB` is available for an
-application-supplied `LinearOperator` on supported Taichi backends.
+systems are nonsymmetric. `experimental.SolvePlan(method="bicgstab")`
+supports compatible CPU `f32/f64` host actions and CUDA/Vulkan `f32` fixed
+or compiled providers. It accepts identity or a fixed-linear right
+preconditioner and qualifies convergence with the original-system true
+residual. The legacy `SparseBiCGSTAB` remains a CPU stored-matrix route;
+`MatrixFreeBICGSTAB` remains the field-based route.
 
 BiCGSTAB can break down and does not prove conditioning. Complementarity,
 active-set logic, Newton iteration, and nonlinear contact remain outside the
@@ -102,6 +105,7 @@ solver interface.
 | `SparseMINRES` | Mutable and fixed CSR/BSR capabilities | Unsupported | Unsupported |
 | `experimental.SolvePlan(method="minres")` | Compatible operator, identity, `f32/f64` | Fixed CSR/BSR or compiled operator, identity/built-in/compatible fixed-linear preconditioner, `f32` | Fixed CSR/BSR or compiled operator, identity/built-in/compatible fixed-linear preconditioner, `f32` |
 | `SparseBiCGSTAB` | Mutable and fixed CSR/BSR capabilities | Unsupported | Unsupported |
+| `experimental.SolvePlan(method="bicgstab")` | Compatible host action, identity/fixed-linear right preconditioner, `f32/f64` | Fixed CSR/BSR or compiled A/M, `f32` | Fixed CSR/BSR or compiled A/M, `f32` |
 | `MatrixFreeCG` | Kernel/field route | Kernel/field route | Available where the backend/dtype is supported |
 | `MatrixFreeBICGSTAB` | Kernel/field route | Kernel/field route | Available where the backend/dtype is supported |
 
@@ -132,9 +136,11 @@ Separate contact adjacency from the linear solve. If counts are available,
 build row offsets and payload exactly instead of appending through `dynamic`.
 A qualified nonsingular symmetric bilateral KKT can use the experimental
 MINRES plan on a supported CPU/CUDA/Vulkan provider. The legacy stored-matrix
-class remains CPU-only. Frictional or otherwise nonsymmetric systems still
-need a supported BiCGSTAB/GMRES-class route; MINRES does not provide
-complementarity or active-set handling.
+class remains CPU-only. Frictional or otherwise nonsymmetric systems can use
+the experimental BiCGSTAB plan on a supported fixed or compiled provider.
+BiCGSTAB remains a low-storage method with possible numerical breakdown; a
+GMRES-family route may still be required for robustness. Neither route
+provides complementarity or active-set handling.
 
 ## Failure and lifecycle rules
 

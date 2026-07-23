@@ -63,14 +63,14 @@
   value update 后只自动刷新 numeric Jacobi/block-Jacobi state。
 - 增加 CPU `SparseMINRES`，用于完整显式对称不定 CSR/BSR；增加 CPU
   `SparseBiCGSTAB`，用于非对称 CSR/BSR。迭代 solver 根据真实残差合同
-  `||b-Ax|| <= max(atol, rtol*||b||)` 报告收敛；CUDA/Vulkan stored MINRES 和
-  BiCGSTAB 仍不支持。
+  `||b-Ax|| <= max(atol, rtol*||b||)` 报告收敛。这两个旧 stored-solver
+  constructor 仍仅支持 CPU。
 - 增加实验性 `ti.linalg.experimental.LinearOperator` 与 `SolvePlan` API。fixed
   stored CSR/BSR、精确 compiled-kernel provider 和按 role 分类的 compiled Graph
   使用统一 runtime/lifetime/capability 合同。显式数学 trait 作为 CG/PCG 门禁；
   persistent plan 通过统一 `SolveResult` 返回 terminal state，并在文档支持矩阵内提供
-  CPU/CUDA/Vulkan CG、fixed stored Jacobi/block-Jacobi PCG 和 CPU BiCGSTAB。CPU
-  还支持最小 operator composition。
+  CPU/CUDA/Vulkan CG、fixed stored Jacobi/block-Jacobi PCG、provider-neutral
+  MINRES 与 provider-neutral BiCGSTAB。CPU 还支持最小 operator composition。
 - 扩展 compiled-kernel/Graph `LinearOperator`，支持 `(range, domain)` 矩形
   shape、独立显式 adjoint、`A.adjoint().adjoint()` 和共享 immutable numeric
   generation。`apply()` 增加 CPU 通用 `alpha/beta/addend` 合同与 `beta=0`
@@ -88,6 +88,12 @@
   可复用 command sequence，并覆盖 identity、Jacobi 与 block-Jacobi。values-only numeric
   refresh 保留既有序列，外部 output binding 或结构变化会显式失效并重建；compiled-kernel/
   Graph A/M 保持 direct submission，不做 host fallback。
+- 扩展 `SolvePlan(method="bicgstab")`，支持 fixed-linear 右预条件与
+  CUDA/Vulkan `f32` 执行。device plan 保持 recurrence state 常驻，以原系统真实
+  residual 认定 terminal status，并报告结构化 rho/alpha/omega breakdown reason。
+  fixed stored identity plan 复用 CUDA Graph 或 Vulkan command-sequence chunk；
+  compiled A/M action 保持 direct submission。`statistics()` 精确报告 A/M、dot、
+  vector、logical/executed/wasted work 与持久 workspace。
 - 增加公开 `PreconditionerPlan` 与 pinned `PreconditionerSession`。外部近似逆可显式执行
   setup、rebuild update 或 lagged reuse，并分别记录 built-from provenance 与 accepted-target
   compatibility；target 更新默认 stale。CPU/CUDA/Vulkan PCG 消费批准后的 immutable

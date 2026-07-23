@@ -304,7 +304,7 @@ diagonal alone does not satisfy the operator contract.
 
 ### BiCGSTAB for nonsymmetric systems
 
-Use `SparseBiCGSTAB` for explicit nonsymmetric systems:
+The legacy `SparseBiCGSTAB` constructor serves explicit CPU systems:
 
 ```python
 solver = ti.linalg.SparseBiCGSTAB(
@@ -313,10 +313,30 @@ solver = ti.linalg.SparseBiCGSTAB(
 x, converged = solver.solve()
 ```
 
-The stored-matrix provider is CPU-only. The final true residual is
-checked before reporting convergence. Numerical breakdown remains possible and
-is not evidence that the matrix is symmetric-indefinite; classify such systems
-before selecting a solver.
+For a runtime-bound fixed or compiled operator, use the provider-neutral plan:
+
+```python
+operator = ti.linalg.experimental.LinearOperator.from_sparse_matrix(A)
+plan = ti.linalg.experimental.SolvePlan(
+    operator,
+    method="bicgstab",
+    preconditioner="identity",
+    max_iterations=300,
+    atol=1e-8,
+    rtol=1e-5,
+)
+result = plan.solve(rhs)
+```
+
+CPU supports compatible `f32/f64` host-action providers. CUDA and Vulkan
+support `f32` fixed CSR/BSR and compiled providers. A fixed-linear
+preconditioner is applied on the right and must not be declared singular; it
+does not need the SPD traits required by PCG or MINRES. Fixed stored identity
+plans can replay native iteration chunks, while compiled A/M actions use direct
+submissions. The final true residual is checked before reporting convergence,
+and `breakdown_reason` identifies rho/alpha/omega failures. Numerical
+breakdown remains possible and is not evidence that the matrix is
+symmetric-indefinite; classify such systems before selecting a solver.
 
 ### Direct factorization and symbolic reuse
 
@@ -406,8 +426,8 @@ exclusive creation of compiled cache artifacts. See
 - Reuse direct symbolic analysis only while the complete compressed pattern is
   identical.
 - Vulkan does not provide the legacy stored sparse solver classes. For
-  provider-neutral `f32` MINRES, use `experimental.SolvePlan` with a supported
-  fixed or compiled operator.
+  provider-neutral `f32` MINRES or BiCGSTAB, use `experimental.SolvePlan`
+  with a supported fixed or compiled operator.
 - Measure payload, metadata, list/workspace, overlapping generations, and driver
   memory separately.
 - Recreate all sparse runtime objects after `ti.reset()`.

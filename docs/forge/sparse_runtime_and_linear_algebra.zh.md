@@ -282,7 +282,7 @@ MINRES 合同。
 
 ### 用于非对称系统的 BiCGSTAB
 
-显式非对称系统应使用 `SparseBiCGSTAB`：
+旧 `SparseBiCGSTAB` constructor 用于显式 CPU 非对称系统：
 
 ```python
 solver = ti.linalg.SparseBiCGSTAB(
@@ -291,9 +291,27 @@ solver = ti.linalg.SparseBiCGSTAB(
 x, converged = solver.solve()
 ```
 
-stored-matrix provider 仅支持 CPU。报告收敛前会检查最终真实残差。数值
-breakdown 仍可能发生，也不能据此认定 matrix 属于对称不定；应在选择 solver 前完成
-分类。
+runtime-bound fixed 或 compiled operator 应使用 provider-neutral plan：
+
+```python
+operator = ti.linalg.experimental.LinearOperator.from_sparse_matrix(A)
+plan = ti.linalg.experimental.SolvePlan(
+    operator,
+    method="bicgstab",
+    preconditioner="identity",
+    max_iterations=300,
+    atol=1e-8,
+    rtol=1e-5,
+)
+result = plan.solve(rhs)
+```
+
+CPU 支持兼容的 `f32/f64` host-action provider；CUDA/Vulkan 支持 `f32` fixed
+CSR/BSR 与 compiled provider。fixed-linear preconditioner 在右侧应用，不能声明为
+singular，但不要求 PCG/MINRES 所需的 SPD trait。fixed stored identity plan 可重放
+原生 iteration chunk，compiled A/M action 使用 direct submission。报告收敛前会检查
+最终真实 residual，`breakdown_reason` 会区分 rho/alpha/omega failure。数值
+breakdown 仍可能发生，也不能据此认定 matrix 属于对称不定；应在选择 solver 前完成分类。
 
 ### 直接分解与 symbolic reuse
 
@@ -373,7 +391,8 @@ offline-cache metadata 现在由进程持有的 OS advisory lock 保护。持久
   `atol` 下限。
 - 只有完整 compressed pattern 相同时才复用 direct symbolic analysis。
 - Vulkan 不提供旧 stored sparse solver class。provider-neutral `f32` MINRES 应使用
-  `experimental.SolvePlan` 与受支持的 fixed 或 compiled operator。
+  `experimental.SolvePlan` 与受支持的 fixed 或 compiled operator；同一路径也提供
+  provider-neutral `f32` BiCGSTAB。
 - 分别测量 payload、metadata、list/workspace、重叠 generation 和 driver memory。
 - `ti.reset()` 后重建所有 sparse runtime object。
 

@@ -193,8 +193,8 @@ scale、sum、composition、block diagonal 和 identity 当前在 CPU 上执行�
   近似逆的 PCG；
 - `method="minres"`：面向允许不定的 square self-adjoint 系统，使用 identity 或 SPD
   preconditioner 的 MINRES；
-- `method="bicgstab"`：面向一般 square 系统、使用 identity preconditioner 的 CPU
-  BiCGSTAB。
+- `method="bicgstab"`：面向一般 square 系统、使用 identity 或 fixed-linear 右
+  preconditioner 的 BiCGSTAB。
 
 ```python
 result = plan.solve(rhs, initial_guess=x0, out=x)
@@ -263,6 +263,47 @@ MINRES 拒绝声明为 `singular=True` 的 operator，不提供 MINRES-QLP，也
 持久 scalar state。该数字不包含调用方持有的 operator values、preconditioner resource、
 RHS/output array、backend handle 与原生 replay object；具体配置应通过 `statistics()`
 检查完整 plan/provider telemetry。
+
+### BiCGSTAB
+
+`method="bicgstab"` 为 square 非对称 operator 提供固定内存 Krylov 路径。它可使用
+identity preconditioner，也可在右侧应用 fixed-linear
+`LinearOperator`/`PreconditionerPlan`：
+
+```python
+plan = ti.linalg.experimental.SolvePlan(
+    operator,
+    method="bicgstab",
+    preconditioner=inverse_operator,
+    max_iterations=300,
+    atol=1e-8,
+    rtol=1e-5,
+    execution_policy="host_check_every_k",
+    check_interval=4,
+)
+result = plan.solve(rhs)
+```
+
+preconditioner 必须把 operator 的 range 映射回 domain、dtype 相同、为 fixed-linear，
+并且不能声明为 singular。它与 PCG/MINRES preconditioner 不同，不要求 self-adjoint
+或 positive-definite。右预条件使 terminal qualification 保持在原系统上：只有计算
+真实 residual `b - A x` 后，求解才会报告收敛。
+
+CPU 支持 `f32/f64` host-action provider。CUDA/Vulkan 支持 `f32` fixed CSR/BSR
+以及 compiled kernel/Graph provider。compiled A/M provider 采用直接原生提交；
+identity-preconditioned fixed stored A 可复用 CUDA Graph 或 Vulkan command-sequence
+iteration chunk。系统不会为了适配其它 backend 路径把 provider 复制到 host。
+
+device identity plan 持有六个长度为 `n` 的持久 vector；右预条件额外持有两个
+preconditioned direction vector。两种配置均持有 112 bytes scalar state。
+`statistics()` 精确报告 A/M apply、dot product、vector update、
+logical/executed/wasted iteration、host observation、replay、workspace bytes 与
+`preconditioning_side`。`SolveResult.breakdown_reason` 将 `nonfinite`、`rho`、
+`alpha_denominator`、`omega_denominator`、`omega` 与普通 max-iteration
+终止区分开。
+
+BiCGSTAB 在 nonsingular 问题上仍可能停滞或 breakdown。它是低存储一般系统选项，
+不能替代经过资格验证的 GMRES-family 方法在稳定性上的作用。
 
 ## PreconditionerPlan 生命周期
 
@@ -349,10 +390,11 @@ plan = ti.linalg.experimental.SolvePlan(
   `atol`、`rtol` 及其组合后的 effective tolerance。
 
 对于 fixed stored f32 CSR/BSR，CUDA 的 `host_check_every_k` 以及 Vulkan 的
-`host_check_every_k`/`fixed_budget_masked` 会把受支持的 CG/PCG iteration chunk
-录制为可复用的原生执行序列。当前可录制的 CG/PCG/MINRES 组合包括 identity、stored
-Jacobi 和 stored block-Jacobi preconditioner。首次兼容执行建立 CUDA Graph 或 Vulkan command sequence；
-相同 topology、workspace 与 output binding 的后续执行直接 replay。仅更新 matrix values
+`host_check_every_k`/`fixed_budget_masked` 会把受支持的 CG/PCG/MINRES 与
+identity-preconditioned BiCGSTAB iteration chunk 录制为可复用的原生执行序列。
+可录制的 CG/PCG/MINRES 组合包括 identity、stored Jacobi 和 stored block-Jacobi
+preconditioner。首次兼容执行建立 CUDA Graph 或 Vulkan command sequence；相同
+topology、workspace 与 output binding 的后续执行直接 replay。仅更新 matrix values
 并刷新 preconditioner numeric state 时不重录；更换 output ndarray、改变 topology/schema
 或重建 runtime 会使旧序列失效并安全重建。
 
@@ -561,7 +603,8 @@ GPU 当前只支持 overwrite apply。
 | 独立批量 CG/PCG | fixed stored 或 compiled-kernel A/M，`f32` | fixed stored 或 compiled-kernel A/M，`f32` | fixed stored 或 compiled-kernel A/M，`f32` |
 | 批量 fixed-budget submission | 不支持 | fixed stored 或 compiled-kernel A/M，`f32` | fixed stored 或 compiled-kernel A/M，`f32` |
 | device-convergent 条件执行 | 不支持 | 不支持 | 不支持 |
-| BiCGSTAB | 任意受支持 CPU operator，`f32/f64` | 不支持 | 不支持 |
+| BiCGSTAB + identity | 受支持 host-action provider，`f32/f64` | fixed CSR/BSR 或 compiled provider，`f32` | fixed CSR/BSR 或 compiled provider，`f32` |
+| BiCGSTAB + fixed-linear 右预条件 | 受支持 host-action provider，`f32/f64` | 兼容的 device-native A/M，`f32` | 兼容的 device-native A/M，`f32` |
 
 direct factorization 继续使用 stored-matrix API。
 

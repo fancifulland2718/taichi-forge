@@ -73,15 +73,16 @@ retroactively attributed to the 0.5.0 artifact:
 - Added CPU `SparseMINRES` for complete symmetric-indefinite
   CSR/BSR systems and CPU `SparseBiCGSTAB` for nonsymmetric CSR/BSR systems.
   Iterative solvers report convergence from the true residual contract
-  `||b-Ax|| <= max(atol, rtol*||b||)`; CUDA/Vulkan stored MINRES and
-  BiCGSTAB remain unsupported.
+  `||b-Ax|| <= max(atol, rtol*||b||)`. These legacy stored-solver
+  constructors remain CPU-only.
 - Added the experimental `ti.linalg.experimental.LinearOperator` and
   `SolvePlan` API. Fixed stored CSR/BSR, exact compiled-kernel providers, and
   role-qualified compiled Graphs share one runtime/lifetime/capability
   contract. Explicit mathematical traits gate CG/PCG; persistent plans expose
   unified `SolveResult` terminal state and support CPU/CUDA/Vulkan CG, fixed
-  stored Jacobi/block-Jacobi PCG, and CPU BiCGSTAB within the documented
-  provider matrix. CPU also supports minimal operator composition.
+  stored Jacobi/block-Jacobi PCG, provider-neutral MINRES, and
+  provider-neutral BiCGSTAB within the documented provider matrix. CPU also
+  supports minimal operator composition.
 - Extended compiled-kernel and Graph `LinearOperator` providers with
   `(range, domain)` rectangular shapes, independent explicit adjoints,
   `A.adjoint().adjoint()`, and shared immutable numeric generations.
@@ -105,6 +106,14 @@ retroactively attributed to the 0.5.0 artifact:
   sequence, while external output-binding or structural changes explicitly
   invalidate and rebuild it. Compiled-kernel and Graph A/M providers retain
   direct submission without a host fallback.
+- Extended `SolvePlan(method="bicgstab")` with fixed-linear right
+  preconditioning and CUDA/Vulkan `f32` execution. Device plans keep
+  recurrence state resident, qualify terminal status with the original-system
+  true residual, and report structured rho/alpha/omega breakdown reasons.
+  Fixed stored identity plans reuse CUDA Graph or Vulkan command-sequence
+  chunks; compiled A/M actions retain direct submission. Exact A/M, dot,
+  vector, logical/executed/wasted work and persistent workspace are exposed
+  through `statistics()`.
 - Added public `PreconditionerPlan` and pinned `PreconditionerSession` types.
   External approximate inverses support explicit setup, rebuild updates, and
   lagged reuse while recording built-from provenance separately from

@@ -215,8 +215,8 @@ calls. Supported methods are:
   that applies a fixed-linear approximate inverse; and
 - `method="minres"`: identity- or SPD-preconditioned MINRES for square,
   self-adjoint systems that may be indefinite; and
-- `method="bicgstab"`: identity-preconditioned CPU BiCGSTAB for general square
-  systems.
+- `method="bicgstab"`: identity- or fixed-linear right-preconditioned
+  BiCGSTAB for general square systems.
 
 ```python
 result = plan.solve(rhs, initial_guess=x0, out=x)
@@ -294,6 +294,52 @@ A CUDA/Vulkan MINRES plan owns nine persistent length-`n` `f32` vectors and
 operator values, preconditioner resources, RHS/output arrays, backend handles,
 and native replay objects. Inspect `statistics()` for the exact plan/provider
 telemetry of a concrete configuration.
+
+### BiCGSTAB
+
+`method="bicgstab"` is the fixed-memory Krylov route for square nonsymmetric
+operators. It accepts identity preconditioning or a fixed-linear
+`LinearOperator`/`PreconditionerPlan` applied on the right:
+
+```python
+plan = ti.linalg.experimental.SolvePlan(
+    operator,
+    method="bicgstab",
+    preconditioner=inverse_operator,
+    max_iterations=300,
+    atol=1e-8,
+    rtol=1e-5,
+    execution_policy="host_check_every_k",
+    check_interval=4,
+)
+result = plan.solve(rhs)
+```
+
+The preconditioner maps the operator range back to its domain, has the same
+dtype, is fixed-linear, and must not be declared singular. Unlike PCG and
+MINRES preconditioners, it is not required to be self-adjoint or positive
+definite. Right preconditioning keeps terminal qualification in the original
+system: convergence is accepted only after evaluating the true residual
+`b - A x`.
+
+CPU supports `f32/f64` host-action providers. CUDA and Vulkan support `f32`
+fixed CSR/BSR and compiled kernel/Graph providers. Compiled A/M providers use
+direct native submissions. Identity-preconditioned fixed stored A providers
+can reuse CUDA Graph or Vulkan command-sequence iteration chunks. No provider
+is copied to the host to satisfy another backend path.
+
+A device identity plan owns six persistent length-`n` vectors; right
+preconditioning adds two vectors for the preconditioned directions. Both
+configurations own 112 bytes of scalar state. `statistics()` reports exact
+A/M applications, dot products, vector updates, logical/executed/wasted
+iterations, host observations, replay activity, workspace bytes, and
+`preconditioning_side`. `SolveResult.breakdown_reason` distinguishes
+`nonfinite`, `rho`, `alpha_denominator`, `omega_denominator`, and `omega`
+failures from ordinary maximum-iteration termination.
+
+BiCGSTAB can stagnate or break down on a nonsingular problem. It is a
+low-storage general-system option, not a stability substitute for a qualified
+GMRES-family method.
 
 ## PreconditionerPlan lifecycle
 
@@ -391,15 +437,15 @@ plan = ti.linalg.experimental.SolvePlan(
   support `atol`, `rtol`, and their combined effective tolerance.
 
 For fixed stored f32 CSR/BSR, CUDA `host_check_every_k` and Vulkan
-`host_check_every_k`/`fixed_budget_masked` record supported CG/PCG/MINRES iteration
-chunks as reusable native execution sequences. The recordable combinations
-currently include identity, stored Jacobi, and stored block-Jacobi
-preconditioners. The first compatible execution builds a CUDA Graph or Vulkan
-command sequence; later executions with the same topology, workspace, and
-output binding replay it. A values-only matrix update followed by a numeric
-preconditioner refresh does not re-record the sequence. Replacing the output
-ndarray, changing topology or schema, or recreating the runtime invalidates and
-safely rebuilds it.
+`host_check_every_k`/`fixed_budget_masked` record supported CG/PCG/MINRES and
+identity-preconditioned BiCGSTAB iteration chunks as reusable native execution
+sequences. The recordable CG/PCG/MINRES combinations include identity, stored
+Jacobi, and stored block-Jacobi preconditioners. The first compatible execution
+builds a CUDA Graph or Vulkan command sequence; later executions with the same
+topology, workspace, and output binding replay it. A values-only matrix update
+followed by a numeric preconditioner refresh does not re-record the sequence.
+Replacing the output ndarray, changing topology or schema, or recreating the
+runtime invalidates and safely rebuilds it.
 
 Compiled-kernel and compiled Graph A/M providers continue to use direct chunk
 submission. They are not staged through the host or replaced with another
@@ -643,7 +689,8 @@ overwrite apply only.
 | Independent batched CG/PCG | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` |
 | Batched fixed-budget submission | Unsupported | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` |
 | Device-convergent conditional execution | Unsupported | Unsupported | Unsupported |
-| BiCGSTAB | Any supported CPU operator, `f32/f64` | Unsupported | Unsupported |
+| BiCGSTAB + identity | Supported host-action providers, `f32/f64` | Fixed CSR/BSR or compiled provider, `f32` | Fixed CSR/BSR or compiled provider, `f32` |
+| BiCGSTAB + fixed-linear right preconditioner | Supported host-action providers, `f32/f64` | Compatible device-native A/M, `f32` | Compatible device-native A/M, `f32` |
 
 Direct factorization remains a stored-matrix API.
 

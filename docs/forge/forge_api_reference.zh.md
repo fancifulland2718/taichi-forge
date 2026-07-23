@@ -931,7 +931,7 @@ canvas.submit_frame(frame)
 ## `taichi_forge.linalg` 稀疏线性代数
 
 该模块提供 fixed CSR/BSR pattern、value-only update、scale-aware iterative convergence、
-provider-neutral MINRES、CPU BiCGSTAB，以及经过验证的 symbolic factorization 复用合同。
+provider-neutral MINRES 与 BiCGSTAB，以及经过验证的 symbolic factorization 复用合同。
 完整用法与后端矩阵见
 [稀疏 runtime 与线性代数](sparse_runtime_and_linear_algebra.zh.md)。绑定 runtime 的
 operator API 另见[实验性 LinearOperator 与 SolvePlan](linear_operator.zh.md)。
@@ -957,15 +957,15 @@ operator API 另见[实验性 LinearOperator 与 SolvePlan](linear_operator.zh.m
 | `summarize_solve_qualifications(reports)` | 从 detached report 构造确定性的 solver/backend/provider/policy 矩阵。 | schema-v1 JSON 字典；保留 check、计时 availability、归一化 work metric 和原始 telemetry。 |
 | `ti.linalg.experimental.PreconditionerPlan(target, action, method=...).setup()` | 建立 fixed-linear 近似逆的 provenance/compatibility 生命周期。 | CPU/CUDA/Vulkan；target 更新默认 stale；`update()` 声明 rebuild，`update(accept_reuse=True)` 显式批准 lagged reuse。 |
 | `preconditioner.pin()` / `.apply(r, out=None)` / `.metadata` / `.statistics()` | pin 精确 target/action generation 并应用 native action。 | 无 Python hot-path callback；报告 build/accepted stamp、generation publish/retire/release，以及 refresh operation/transfer/resource counter。 |
-| `ti.linalg.experimental.SolvePlan(operator, method=..., preconditioner=..., execution_policy=..., check_interval=...)` | 构造 persistent CG、PCG、MINRES 或 CPU BiCGSTAB plan。 | CPU MINRES 为 identity-only（`f32/f64`）；CUDA/Vulkan `f32` 支持 identity、fixed-CSR Jacobi、fixed-BSR SPD block-Jacobi Cholesky（block size 2/3/6/12）与兼容的可信 fixed-linear action。GPU value-only refresh 在 device 上完成并保持 replay binding 稳定；plan 支持 K=4/8 host check、absolute/relative tolerance，以及合格 fixed stored 组合的 native chunk replay。 |
-| `plan.solve(rhs, initial_guess=None, out=None)` | 返回 immutable `SolveResult`，包含 solution 与 terminal residual/status 字段。 | 一维 scalar Taichi ndarray；禁止 RHS/output alias 和 host staging。 |
+| `ti.linalg.experimental.SolvePlan(operator, method=..., preconditioner=..., execution_policy=..., check_interval=...)` | 构造 persistent CG、PCG、MINRES 或 BiCGSTAB plan。 | CPU 在兼容的 `f32/f64` host action 上支持 identity MINRES 以及 identity/fixed-linear 右预条件 BiCGSTAB。CUDA/Vulkan `f32` MINRES 支持 identity、文档列出的内置 SPD preconditioner 和兼容 fixed-linear action；BiCGSTAB 支持 fixed stored 或 compiled A，以及 identity 或兼容的 fixed-linear 右 preconditioner。合格 fixed stored 组合支持 K=4/8 host check 与 native chunk replay。 |
+| `plan.solve(rhs, initial_guess=None, out=None)` | 返回 immutable `SolveResult`，包含 solution、真实 residual terminal state 与结构化 `breakdown_reason`。 | 一维 scalar Taichi ndarray；禁止 RHS/output alias 和 host staging。 |
 | `plan.execution_capabilities()` | 返回 backend/provider 执行策略矩阵与结构化 unsupported reason。 | 当前不支持 `device_convergent`；显式请求不会 fallback，也不会自动改变 policy。 |
 | `ti.linalg.experimental.BatchedSolvePlan(operator, batch_size, independent_systems=True, ...)` | 在连续扁平分区上构造同构、相互独立的 f32 CG/PCG plan。 | CPU/CUDA/Vulkan；逐系统 tolerance、status 与 iteration count；已验证 fixed stored 或 compiled-kernel A/M。 |
 | `batch_plan.solve(rhs_flat, initial_guess=None, out=None)` | 返回扁平 solution 与逐系统 immutable `BatchedSolveResult` tuple。 | 只表示 independent direct-sum system；不是 multi-RHS 或 block Krylov。 |
 | `batch_plan.submit(rhs_flat, initial_guess=None, out=None, pacer=None, lane=None, on_saturation='wait')` | 提交一次 solve 并返回 `SolveSubmission`。 | CUDA/Vulkan 的 `fixed_budget_masked`；一个 plan-owned slot；可加入共享 `SubmissionPacer`；精确 generation 与 array 保留到 completion。 |
 | `SolveSubmission.done()` / `.wait()` / `.result()` | 观察 completion、生成 terminal state 并返回 `BatchedSolveResult`。 | `done()` 不释放 slot；`wait()`/`result()` 抛出 backend error 并释放 slot。 |
 | `batch_plan.clone_workspace()` | 创建具有独立 Krylov state 的等价 plan。 | 并发 submission 必须使用；每个 clone 拥有另一套完整 workspace，应在构造 pool 前检查 `clone_workspace_payload_bytes`。 |
-| `operator.statistics()` / `plan.statistics()` | 返回 provider/plan execution 与 workspace 诊断。 | 单系统 GPU plan 报告 chunk build/replay/direct/rebind/invalidation；batch plan schema v4 还会报告 plan-owned recurrence Graph 的 build/replay/rebind/direct counter，并明确 A/M provider action 不属于该 replay 范围；同时区分 host asynchronous completion 与设备并行保证，并报告逻辑 workspace payload。该 diagnostic snapshot 不属于数值结果。 |
+| `operator.statistics()` / `plan.statistics()` | 返回 provider/plan execution 与 workspace 诊断。 | 单系统 GPU plan 在可用时精确报告 A/M、dot product、vector update work、logical/executed/wasted iteration、workspace bytes、preconditioning side 与 chunk build/replay/direct/rebind/invalidation；batch plan schema v4 另行报告 plan-owned recurrence Graph 活动，并明确 A/M provider action 不属于该 replay 范围。diagnostic snapshot 不属于数值结果。 |
 
 迭代收敛条件为
 `||b - A x||_2 <= max(atol, rtol * ||b||_2)`。Taichi 不会自动推断
