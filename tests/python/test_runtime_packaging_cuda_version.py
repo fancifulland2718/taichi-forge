@@ -733,6 +733,16 @@ def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():
     )
 
 
+def test_runtime_project_defaults_to_driver_only():
+    runtime_project = (
+        REPO_ROOT / "packaging" / "runtime" / "pyproject.toml"
+    ).read_text(encoding="utf-8")
+
+    assert 'TI_WITH_CUDA_TOOLKIT = "OFF"' in runtime_project
+    assert 'TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE = "OFF"' in runtime_project
+    assert 'TI_WITH_CUPTI = "OFF"' in runtime_project
+
+
 def test_cuda_toolkit_reference_workflow_is_non_publishing_and_separate():
     workflow = (
         REPO_ROOT
