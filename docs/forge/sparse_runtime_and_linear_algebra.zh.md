@@ -176,7 +176,8 @@ ndarray RHS；CUDA 文档路径要求 Taichi ndarray。shape 与 dtype 必须与
 | `experimental.SolvePlan(method="cg")` | trait-qualified SPD stored/kernel/Graph operator | fixed CSR/BSR 与 composition，`f32/f64`；compiled provider 为 `f32` | fixed CSR 与 compiled provider，`f32` | fixed CSR/BSR 与 compiled provider，`f32` |
 | `experimental.SolvePlan(method="pcg")` | trait-qualified SPD operator 与 preconditioner | CSR Jacobi、BSR block-Jacobi 或 fixed-linear operator，`f32/f64` | CSR/BSR 内置项或 compiled-kernel A/M，`f32` | CSR/BSR 内置项或 compiled-kernel A/M，`f32` |
 | `experimental.SolvePlan(method="minres")` | trait-qualified self-adjoint、使用时 nonsingular 的 operator；若有 preconditioner 则必须 SPD | identity、任意兼容 provider，`f32/f64` | fixed CSR/BSR 或 compiled provider，支持 identity、内置项或兼容 fixed-linear preconditioning，`f32` | fixed CSR/BSR 或 compiled provider，支持 identity、内置项或兼容 fixed-linear preconditioning，`f32` |
-| `experimental.SolvePlan(method="bicgstab")` | 一般 square operator | 任意受支持 experimental CPU provider，`f32/f64` | 不支持 | 不支持 |
+| `experimental.SolvePlan(method="bicgstab")` | 一般 square operator | 任意受支持 experimental CPU provider，`f32/f64` | fixed CSR/BSR 或 compiled A/M，`f32` | fixed CSR/BSR 或 compiled A/M，`f32` |
+| `experimental.SolvePlan(method="gmres")` | 一般 square operator；fixed restart 8/16/32 | 任意受支持 experimental CPU provider，`f32/f64` | fixed CSR/BSR 或 compiled A/M，`f32` | fixed CSR/BSR 或 compiled A/M，`f32` |
 
 Taichi 不会从 CSR/BSR shape 推断 symmetry、definiteness、nullspace 或
 conditioning，这些数学合同由调用方负责。
@@ -191,11 +192,13 @@ scale/sum/composition/adjoint/block-diagonal 代数；不受支持的 GPU compos
 不执行 host fallback。
 
 `experimental.SolvePlan` 跨 RHS 调用保留 solver workspace，并返回同时包含 solution 与
-完整 terminal state 的 `SolveResult`。CUDA/Vulkan 支持显式的 4 或 8 iteration
-host-check chunk；Vulkan 还保留 fixed-budget masked execution 作为默认策略。两个 GPU
-backend 使用相同的 absolute/relative residual 合同。该 API 不替代 mutable Eigen sparse
-matrix 或 direct factorization；它为 fixed 与 compiled operator 提供 provider-neutral
-MINRES，而旧 `SparseMINRES` 构造器保留 CPU stored-matrix 合同。provider ABI、所有权、
+完整 terminal state 的 `SolveResult`。CUDA/Vulkan 为 short-recurrence solver 支持显式的
+4 或 8 iteration host-check chunk；restarted GMRES 改在选定的 restart boundary
+（8、16 或 32）观察状态，Vulkan 还支持 fixed-budget masked execution。两个 GPU
+backend 使用相同的 absolute/relative true-residual 合同。该 API 不替代 mutable Eigen
+sparse matrix 或 direct factorization；它为 fixed 与 compiled operator 提供
+provider-neutral MINRES、BiCGSTAB 与 restarted GMRES，而旧 `SparseMINRES` 和
+`SparseBiCGSTAB` 构造器保留 CPU stored-matrix 合同。provider ABI、所有权、
 update generation、示例和精确 backend 矩阵见
 [实验性 LinearOperator 与 SolvePlan](linear_operator.zh.md)。
 
@@ -312,6 +315,35 @@ singular，但不要求 PCG/MINRES 所需的 SPD trait。fixed stored identity p
 原生 iteration chunk，compiled A/M action 使用 direct submission。报告收敛前会检查
 最终真实 residual，`breakdown_reason` 会区分 rho/alpha/omega failure。数值
 breakdown 仍可能发生，也不能据此认定 matrix 属于对称不定；应在选择 solver 前完成分类。
+
+### 用于非对称系统的 restarted GMRES
+
+一般 square 系统需要 Arnoldi minimum-residual 方法，而不是 BiCGSTAB 的短 recurrence
+时，可使用 restarted GMRES：
+
+```python
+plan = ti.linalg.experimental.SolvePlan(
+    operator,
+    method="gmres",
+    preconditioner=inverse_operator,
+    restart=16,
+    max_iterations=160,
+    atol=1e-8,
+    rtol=1e-5,
+)
+result = plan.solve(rhs)
+```
+
+CPU 支持兼容的 `f32/f64` provider；CUDA/Vulkan 支持 `f32` fixed CSR/BSR 与
+compiled kernel/Graph A/M。可选 preconditioner 是 fixed-linear 右 preconditioner。
+每个 Arnoldi step 都执行两遍 CGS，并使用 multi-dot reduction 和 fused projection；
+每个 restart boundary 都会校验原系统的真实 residual。
+
+plan 预分配 `restart + 1` 个 basis vector。device identity plan 共持有
+`restart + 5` 个长度为 `n` 的 vector，右预条件再增加一个。fixed stored identity
+cycle 可使用 CUDA Graph 或 Vulkan command replay；compiled 与 preconditioned
+provider 使用 direct native submission。该路径不提供 FGMRES、variable/nonlinear
+preconditioning、自动 restart 选择、block GMRES 或 singular minimum-norm 语义。
 
 ### 直接分解与 symbolic reuse
 

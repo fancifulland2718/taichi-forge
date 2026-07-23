@@ -1062,8 +1062,9 @@ See also [Display frame submission](display_frame.en.md).
 ## `taichi_forge.linalg` Sparse Linear Algebra
 
 The module provides fixed CSR/BSR patterns, value-only updates, scale-aware
-iterative convergence, provider-neutral MINRES and BiCGSTAB, and validated
-symbolic factorization reuse. The complete usage and backend matrix is in
+iterative convergence, provider-neutral MINRES, BiCGSTAB, and restarted
+GMRES, and validated symbolic factorization reuse. The complete usage and
+backend matrix is in
 [Sparse runtime and linear algebra](sparse_runtime_and_linear_algebra.en.md).
 The runtime-bound operator API is documented separately in
 [Experimental LinearOperator and SolvePlan](linear_operator.en.md).
@@ -1089,7 +1090,7 @@ The runtime-bound operator API is documented separately in
 | `summarize_solve_qualifications(reports)` | Build a deterministic solver/backend/provider/policy matrix from detached reports. | Schema-v1 JSON dictionary retaining checks, timing availability, normalized work metrics, and original telemetry. |
 | `ti.linalg.experimental.PreconditionerPlan(target, action, method=...).setup()` | Establish provenance and compatibility for a fixed-linear approximate inverse. | CPU/CUDA/Vulkan; target updates are stale by default; `update()` attests rebuild and `update(accept_reuse=True)` explicitly approves lagged reuse. |
 | `preconditioner.pin()` / `.apply(r, out=None)` / `.metadata` / `.statistics()` | Pin an exact target/action generation pair and apply its native action. | No Python hot-path callback; build/accepted stamps, generation publish/retire/release telemetry, and refresh operation/transfer/resource counters. |
-| `ti.linalg.experimental.SolvePlan(operator, method=..., preconditioner=..., execution_policy=..., check_interval=...)` | Build a persistent CG, PCG, MINRES, or BiCGSTAB plan. | CPU supports identity MINRES and identity/fixed-linear right-preconditioned BiCGSTAB on compatible `f32/f64` host actions. CUDA/Vulkan `f32` MINRES supports identity, documented built-in SPD preconditioners, and compatible fixed-linear actions; BiCGSTAB supports fixed stored or compiled A with identity or a compatible fixed-linear right preconditioner. K=4/8 host checks and native chunk replay are available for qualified fixed stored combinations. |
+| `ti.linalg.experimental.SolvePlan(operator, method=..., preconditioner=..., execution_policy=..., check_interval=..., restart=...)` | Build a persistent CG, PCG, MINRES, BiCGSTAB, or restarted GMRES plan. | CPU GMRES supports compatible `f32/f64` host actions. CUDA/Vulkan `f32` GMRES supports fixed stored or compiled A with identity or a compatible fixed-linear right preconditioner; restart is 8, 16, or 32, and a fixed-stored identity cycle can use native replay. See the detailed guide for the complete MINRES/BiCGSTAB/GMRES provider and policy matrix. |
 | `plan.solve(rhs, initial_guess=None, out=None)` | Return an immutable `SolveResult` with solution, true-residual terminal state, and structured `breakdown_reason`. | Scalar 1-D Taichi ndarrays; no RHS/output aliasing or host staging. |
 | `plan.execution_capabilities()` | Return the backend/provider policy matrix and structured unsupported reason. | `device_convergent` is currently unsupported; explicit requests fail without fallback or automatic policy changes. |
 | `ti.linalg.experimental.BatchedSolvePlan(operator, batch_size, independent_systems=True, ...)` | Build homogeneous independent f32 CG/PCG over contiguous flat partitions. | CPU/CUDA/Vulkan; per-system tolerance, status, and iteration count; fixed stored or compiled-kernel A/M qualified. |
@@ -1097,7 +1098,7 @@ The runtime-bound operator API is documented separately in
 | `batch_plan.submit(rhs_flat, initial_guess=None, out=None, pacer=None, lane=None, on_saturation='wait')` | Submit a solve and return `SolveSubmission`. | CUDA/Vulkan with `fixed_budget_masked`; one plan-owned slot; optional shared `SubmissionPacer`; exact generations and arrays are retained through completion. |
 | `SolveSubmission.done()` / `.wait()` / `.result()` | Observe completion, materialize terminal state, and return `BatchedSolveResult`. | `done()` does not release the slot; `wait()`/`result()` surface backend faults and release it. |
 | `batch_plan.clone_workspace()` | Create an equivalent plan with independent Krylov state. | Required for concurrent submissions; each clone owns another full workspace. Inspect `clone_workspace_payload_bytes` before constructing a pool. |
-| `operator.statistics()` / `plan.statistics()` | Return provider/plan execution and workspace diagnostics. | Single-system GPU plans report exact A/M, dot-product and vector-update work where available, logical/executed/wasted iterations, workspace bytes, preconditioning side, and chunk build/replay/direct/rebind/invalidation. Batched-plan schema v4 separately reports plan-owned recurrence Graph activity and excludes A/M provider actions from that replay scope. A diagnostic snapshot is not part of the numerical result. |
+| `operator.statistics()` / `plan.statistics()` | Return provider/plan execution and workspace diagnostics. | Single-system GPU plans report exact A/M, dot-product, multi-dot, and vector-update work where available, logical/executed/wasted iterations, basis/workspace bytes, preconditioning side, and chunk build/replay/direct/rebind/invalidation. Batched-plan schema v4 separately reports plan-owned recurrence Graph activity and excludes A/M provider actions from that replay scope. A diagnostic snapshot is not part of the numerical result. |
 
 Iterative convergence uses
 `||b - A x||_2 <= max(atol, rtol * ||b||_2)`. Taichi does not infer

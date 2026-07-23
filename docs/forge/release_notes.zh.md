@@ -70,7 +70,8 @@
   使用统一 runtime/lifetime/capability 合同。显式数学 trait 作为 CG/PCG 门禁；
   persistent plan 通过统一 `SolveResult` 返回 terminal state，并在文档支持矩阵内提供
   CPU/CUDA/Vulkan CG、fixed stored Jacobi/block-Jacobi PCG、provider-neutral
-  MINRES 与 provider-neutral BiCGSTAB。CPU 还支持最小 operator composition。
+  MINRES、provider-neutral BiCGSTAB 与 restarted GMRES。CPU 还支持最小
+  operator composition。
 - 扩展 compiled-kernel/Graph `LinearOperator`，支持 `(range, domain)` 矩形
   shape、独立显式 adjoint、`A.adjoint().adjoint()` 和共享 immutable numeric
   generation。`apply()` 增加 CPU 通用 `alpha/beta/addend` 合同与 `beta=0`
@@ -94,6 +95,14 @@
   fixed stored identity plan 复用 CUDA Graph 或 Vulkan command-sequence chunk；
   compiled A/M action 保持 direct submission。`statistics()` 精确报告 A/M、dot、
   vector、logical/executed/wasted work 与持久 workspace。
+- 增加 restarted `SolvePlan(method="gmres")`，restart 可为 8、16 或 32。
+  CPU 支持兼容的 `f32/f64` provider；CUDA/Vulkan 支持 `f32` fixed CSR/BSR
+  与 compiled kernel/Graph provider。每个 Arnoldi step 使用两遍 CGS、
+  multi-dot reduction 与 fused projection，每个 restart boundary 校验原系统真实
+  residual。支持 fixed-linear 右预条件。fixed stored identity cycle 使用 CUDA Graph
+  或 Vulkan command replay，其它合格 provider 使用 direct native submission。
+  `statistics()` 报告 basis/workspace bytes、A/M、dot/multi-dot/vector work、
+  restart cycle、happy breakdown 与 logical/executed/wasted iteration。
 - 增加公开 `PreconditionerPlan` 与 pinned `PreconditionerSession`。外部近似逆可显式执行
   setup、rebuild update 或 lagged reuse，并分别记录 built-from provenance 与 accepted-target
   compatibility；target 更新默认 stale。CPU/CUDA/Vulkan PCG 消费批准后的 immutable

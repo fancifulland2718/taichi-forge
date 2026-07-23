@@ -190,7 +190,8 @@ the matrix exactly, and no implicit host fallback is performed.
 | `experimental.SolvePlan(method="cg")` | Trait-qualified SPD stored/kernel/Graph operator | Fixed CSR/BSR and compositions, `f32/f64`; compiled providers `f32` | Fixed CSR and compiled providers, `f32` | Fixed CSR/BSR and compiled providers, `f32` |
 | `experimental.SolvePlan(method="pcg")` | Trait-qualified SPD operator and preconditioner | CSR Jacobi, BSR block-Jacobi, or fixed-linear operator, `f32/f64` | CSR/BSR built-in or compiled-kernel A/M, `f32` | CSR/BSR built-in or compiled-kernel A/M, `f32` |
 | `experimental.SolvePlan(method="minres")` | Trait-qualified self-adjoint, nonsingular-in-use operator; SPD preconditioner when present | Identity, any compatible provider, `f32/f64` | Fixed CSR/BSR or compiled provider, with identity, built-in, or compatible fixed-linear preconditioning, `f32` | Fixed CSR/BSR or compiled provider, with identity, built-in, or compatible fixed-linear preconditioning, `f32` |
-| `experimental.SolvePlan(method="bicgstab")` | General square operator | Any supported experimental CPU provider, `f32/f64` | Unsupported | Unsupported |
+| `experimental.SolvePlan(method="bicgstab")` | General square operator | Any supported experimental CPU provider, `f32/f64` | Fixed CSR/BSR or compiled A/M, `f32` | Fixed CSR/BSR or compiled A/M, `f32` |
+| `experimental.SolvePlan(method="gmres")` | General square operator; fixed restart 8/16/32 | Any supported experimental CPU provider, `f32/f64` | Fixed CSR/BSR or compiled A/M, `f32` | Fixed CSR/BSR or compiled A/M, `f32` |
 
 Taichi does not infer symmetry, definiteness, nullspaces, or conditioning from
 CSR/BSR shape. The caller owns those mathematical contracts.
@@ -207,12 +208,14 @@ composition fails without a host fallback.
 
 `experimental.SolvePlan` retains solver workspace across RHS calls and returns
 a `SolveResult` containing the solution and complete terminal state. CUDA and
-Vulkan support explicit 4- or 8-iteration host-check chunks; Vulkan also keeps
-fixed-budget masked execution as its default. Both GPU backends use the same
-absolute/relative residual contract. This API does not replace mutable Eigen
-sparse matrices or direct factorization. It provides provider-neutral MINRES
-for fixed and compiled operators, while the legacy `SparseMINRES` constructor
-retains its CPU stored-matrix contract. See
+Vulkan support explicit 4- or 8-iteration host-check chunks for the
+short-recurrence solvers. Restarted GMRES instead observes at its selected
+restart boundary (8, 16, or 32); Vulkan also supports fixed-budget masked
+execution. Both GPU backends use the same absolute/relative true-residual
+contract. This API does not replace mutable Eigen sparse matrices or direct
+factorization. It provides provider-neutral MINRES, BiCGSTAB, and restarted
+GMRES for fixed and compiled operators, while the legacy `SparseMINRES` and
+`SparseBiCGSTAB` constructors retain their CPU stored-matrix contracts. See
 [Experimental LinearOperator and SolvePlan](linear_operator.en.md) for provider
 ABIs, ownership, update generations, examples, and the exact
 backend matrix.
@@ -337,6 +340,38 @@ submissions. The final true residual is checked before reporting convergence,
 and `breakdown_reason` identifies rho/alpha/omega failures. Numerical
 breakdown remains possible and is not evidence that the matrix is
 symmetric-indefinite; classify such systems before selecting a solver.
+
+### Restarted GMRES for nonsymmetric systems
+
+Use restarted GMRES when a general square system needs an Arnoldi
+minimum-residual method rather than BiCGSTAB's short recurrence:
+
+```python
+plan = ti.linalg.experimental.SolvePlan(
+    operator,
+    method="gmres",
+    preconditioner=inverse_operator,
+    restart=16,
+    max_iterations=160,
+    atol=1e-8,
+    rtol=1e-5,
+)
+result = plan.solve(rhs)
+```
+
+CPU supports compatible `f32/f64` providers; CUDA and Vulkan support `f32`
+fixed CSR/BSR and compiled kernel/Graph A/M. The optional preconditioner is a
+fixed-linear right preconditioner. Every Arnoldi step uses two-pass CGS with
+multi-dot reduction and fused projection, and every restart boundary verifies
+the original-system true residual.
+
+The plan preallocates `restart + 1` basis vectors. Device identity plans own
+`restart + 5` length-`n` vectors in total, with one additional vector for
+right preconditioning. Fixed stored identity cycles can use CUDA Graph or
+Vulkan command replay; compiled and preconditioned providers use direct native
+submission. This route does not provide FGMRES, variable/nonlinear
+preconditioning, automatic restart selection, block GMRES, or singular
+minimum-norm semantics.
 
 ### Direct factorization and symbolic reuse
 

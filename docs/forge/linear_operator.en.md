@@ -216,7 +216,9 @@ calls. Supported methods are:
 - `method="minres"`: identity- or SPD-preconditioned MINRES for square,
   self-adjoint systems that may be indefinite; and
 - `method="bicgstab"`: identity- or fixed-linear right-preconditioned
-  BiCGSTAB for general square systems.
+  BiCGSTAB for general square systems; and
+- `method="gmres"`: restarted, identity- or fixed-linear
+  right-preconditioned GMRES for general square systems.
 
 ```python
 result = plan.solve(rhs, initial_guess=x0, out=x)
@@ -341,6 +343,65 @@ BiCGSTAB can stagnate or break down on a nonsingular problem. It is a
 low-storage general-system option, not a stability substitute for a qualified
 GMRES-family method.
 
+### Restarted GMRES
+
+`method="gmres"` provides a bounded-memory Krylov route for general square
+operators when BiCGSTAB's short recurrence is not sufficiently robust.
+`restart` is a plan-build parameter and must be `8`, `16`, or `32`; the
+default is `16`.
+
+```python
+plan = ti.linalg.experimental.SolvePlan(
+    operator,
+    method="gmres",
+    preconditioner=inverse_operator,
+    restart=16,
+    max_iterations=160,
+    atol=1e-8,
+    rtol=1e-5,
+    execution_policy="host_check_every_k",
+    check_interval=16,
+)
+result = plan.solve(rhs)
+```
+
+The implementation uses two-pass classical Gram-Schmidt (CGS2) on every
+Arnoldi step. Orthogonalization uses a multi-dot reduction followed by a
+fused projection, rather than issuing one host-observed dot product for every
+basis vector. A cycle applies Givens rotations on device and qualifies its
+terminal result with the original-system true residual `b - A x`.
+`happy_breakdown` is counted separately from
+`arnoldi_breakdown`, `orthogonalization_failure`,
+`hessenberg_singular`, and `nonfinite` failures.
+
+CPU supports compatible `f32/f64` host-action providers. CUDA and Vulkan
+support `f32` fixed CSR/BSR and compiled kernel/Graph providers. An optional
+preconditioner must be a nonsingular fixed-linear map from the operator range
+back to its domain and is applied on the right. It need not carry the SPD
+traits required by PCG or MINRES. This is fixed-preconditioner GMRES, not
+FGMRES: variable-linear and nonlinear preconditioners remain unsupported.
+
+A plan preallocates a contiguous `(restart + 1) * n` basis. Device identity
+plans own `restart + 5` persistent length-`n` vectors; right preconditioning
+adds one vector. Hessenberg, Givens, least-squares, multi-dot partial, and
+terminal state storage is also persistent, and warm solves allocate no
+transient solver workspace. `statistics()` reports
+`basis_vector_count`, `basis_reserved_bytes`,
+`persistent_vector_reserved_bytes`, `persistent_scalar_reserved_bytes`,
+exact A/M, dot, multi-dot, and vector-pass counts, restart cycles,
+logical/executed/wasted iterations, and replay activity. Applications should
+inspect these values before selecting a larger restart.
+
+For fixed stored identity-preconditioned operators, CUDA Graph and Vulkan
+command replay cover a complete restart cycle. Compiled providers and
+right-preconditioned plans retain the same numerical implementation but use
+direct native submission. CUDA supports `host_check_every_k` with
+`check_interval == restart`; Vulkan supports that policy and
+`fixed_budget_masked`. The complete cycle is submitted before the host
+observes its terminal state, so up to `restart - 1` inactive tail steps can be
+executed. Larger restarts may improve a difficult system's convergence but
+also increase basis memory, cycle work, and its worst-case inactive tail.
+
 ## PreconditionerPlan lifecycle
 
 Use `PreconditionerPlan` when coefficients change or when provenance, explicit
@@ -399,7 +460,7 @@ zero. RHS/output aliasing is rejected.
 `SolveResult` contains the solution and a terminal snapshot: status code,
 termination reason, convergence/breakdown/max-iteration flags, iteration
 count, initial and final residual norms, both tolerances, relative reference
-norm, and effective tolerance. CG, PCG, MINRES, and BiCGSTAB use:
+norm, and effective tolerance. CG, PCG, MINRES, BiCGSTAB, and GMRES use:
 
 The result record is frozen; its `solution` ndarray remains caller-writable.
 
@@ -428,22 +489,26 @@ plan = ti.linalg.experimental.SolvePlan(
 ```
 
 - CPU supports `"host_each_iteration"` only.
-- CUDA defaults to `"host_each_iteration"` for compatibility and also
-  supports `"host_check_every_k"` with `check_interval=4` or `8`.
+- CUDA defaults to `"host_each_iteration"` for CG/PCG/MINRES/BiCGSTAB and
+  also supports `"host_check_every_k"` with `check_interval=4` or `8`.
   The chunked policy keeps recurrence scalars on the device and reads one
-  terminal snapshot per chunk.
+  terminal snapshot per chunk. CUDA GMRES instead defaults to
+  `"host_check_every_k"` and requires `check_interval == restart`.
 - Vulkan defaults to `"fixed_budget_masked"` and also supports
-  `"host_check_every_k"` with `check_interval=4` or `8`. Both policies
-  support `atol`, `rtol`, and their combined effective tolerance.
+  `"host_check_every_k"`. CG/PCG/MINRES/BiCGSTAB accept intervals 4 or 8;
+  GMRES requires `check_interval == restart`. Both policies support `atol`,
+  `rtol`, and their combined effective tolerance.
 
 For fixed stored f32 CSR/BSR, CUDA `host_check_every_k` and Vulkan
 `host_check_every_k`/`fixed_budget_masked` record supported CG/PCG/MINRES and
-identity-preconditioned BiCGSTAB iteration chunks as reusable native execution
+identity-preconditioned BiCGSTAB iteration chunks and
+identity-preconditioned GMRES restart cycles as reusable native execution
 sequences. The recordable CG/PCG/MINRES combinations include identity, stored
 Jacobi, and stored block-Jacobi preconditioners. The first compatible execution
 builds a CUDA Graph or Vulkan command sequence; later executions with the same
 topology, workspace, and output binding replay it. A values-only matrix update
-followed by a numeric preconditioner refresh does not re-record the sequence.
+does not re-record an identity-preconditioned GMRES sequence; supported
+preconditioner refreshes retain the existing CG/PCG/MINRES sequence.
 Replacing the output ndarray, changing topology or schema, or recreating the
 runtime invalidates and safely rebuilds it.
 
@@ -457,7 +522,8 @@ boundary through `solver_chunk_builds`, `solver_chunk_replays`,
 `solver_replay_unavailable_reason`. Build cost belongs to cold execution, so
 qualification should report first-solve and warm-solve timing separately.
 
-A chunk always completes before its terminal state is inspected. The reported
+A chunk or GMRES restart cycle always completes before its terminal state is
+inspected. The reported
 `SolveResult.iterations` is the logical convergence or breakdown iteration;
 `statistics()["operations"]` separately reports `executed_iterations`,
 `wasted_iterations`, host synchronization counts, and direct chunk
@@ -466,11 +532,12 @@ or otherwise inactive tail iterations. Vulkan fixed-budget execution may
 execute the full `max_iterations` while preserving an earlier logical
 termination result.
 
-Use `K=4` when earlier termination is more important than synchronization
-frequency and `K=8` when amortizing host checks is more important. The
-faster choice depends on vector size, operator cost, iteration count, driver,
-and backend. Unsupported policies and intervals fail during plan
-construction; they do not silently fall back.
+For CG/PCG/MINRES/BiCGSTAB, use `K=4` when earlier termination is more
+important than synchronization frequency and `K=8` when amortizing host
+checks is more important. GMRES uses its selected restart as the observation
+interval. The faster choice depends on vector size, operator cost, iteration
+count, driver, and backend. Unsupported policies and intervals fail during
+plan construction; they do not silently fall back.
 
 `plan.execution_capabilities()` reports the policy matrix and a structured
 reason for unavailable conditional execution. `"device_convergent"` is not a
@@ -691,6 +758,8 @@ overwrite apply only.
 | Device-convergent conditional execution | Unsupported | Unsupported | Unsupported |
 | BiCGSTAB + identity | Supported host-action providers, `f32/f64` | Fixed CSR/BSR or compiled provider, `f32` | Fixed CSR/BSR or compiled provider, `f32` |
 | BiCGSTAB + fixed-linear right preconditioner | Supported host-action providers, `f32/f64` | Compatible device-native A/M, `f32` | Compatible device-native A/M, `f32` |
+| GMRES + identity | Supported host-action providers, `f32/f64` | Fixed CSR/BSR or compiled provider, `f32` | Fixed CSR/BSR or compiled provider, `f32` |
+| GMRES + fixed-linear right preconditioner | Supported host-action providers, `f32/f64` | Compatible device-native A/M, `f32` | Compatible device-native A/M, `f32` |
 
 Direct factorization remains a stored-matrix API.
 

@@ -194,7 +194,9 @@ scale、sum、composition、block diagonal 和 identity 当前在 CPU 上执行�
 - `method="minres"`：面向允许不定的 square self-adjoint 系统，使用 identity 或 SPD
   preconditioner 的 MINRES；
 - `method="bicgstab"`：面向一般 square 系统、使用 identity 或 fixed-linear 右
-  preconditioner 的 BiCGSTAB。
+  preconditioner 的 BiCGSTAB；
+- `method="gmres"`：面向一般 square 系统、使用 identity 或 fixed-linear 右
+  preconditioner 的 restarted GMRES。
 
 ```python
 result = plan.solve(rhs, initial_guess=x0, out=x)
@@ -305,6 +307,58 @@ logical/executed/wasted iteration、host observation、replay、workspace bytes 
 BiCGSTAB 在 nonsingular 问题上仍可能停滞或 breakdown。它是低存储一般系统选项，
 不能替代经过资格验证的 GMRES-family 方法在稳定性上的作用。
 
+### Restarted GMRES
+
+当 BiCGSTAB 的短 recurrence 不够稳健时，`method="gmres"` 为一般 square operator
+提供有界内存的 Krylov 路径。`restart` 是 plan 构造参数，只能取 `8`、`16` 或
+`32`，默认值为 `16`。
+
+```python
+plan = ti.linalg.experimental.SolvePlan(
+    operator,
+    method="gmres",
+    preconditioner=inverse_operator,
+    restart=16,
+    max_iterations=160,
+    atol=1e-8,
+    rtol=1e-5,
+    execution_policy="host_check_every_k",
+    check_interval=16,
+)
+result = plan.solve(rhs)
+```
+
+每个 Arnoldi step 都执行两遍 classical Gram-Schmidt（CGS2）。正交化先通过
+multi-dot reduction 一次生成一组内积，再执行 fused projection，而不是为每个 basis
+vector 发起一次由 host 观察的 dot product。每个 cycle 在 device 上更新 Givens rotation，
+并使用原系统真实 residual `b - A x` 判断最终状态。`happy_breakdown` 单独计数，
+不会与 `arnoldi_breakdown`、`orthogonalization_failure`、
+`hessenberg_singular` 或 `nonfinite` 混为一类。
+
+CPU 支持兼容的 `f32/f64` host-action provider；CUDA/Vulkan 支持 `f32` fixed
+CSR/BSR 与 compiled kernel/Graph provider。可选 preconditioner 必须是 nonsingular
+fixed-linear map，把 operator 的 range 映射回 domain，并应用在右侧；它不需要 PCG
+或 MINRES 所要求的 SPD trait。这是 fixed-preconditioner GMRES，而不是 FGMRES；
+variable-linear 与 nonlinear preconditioner 仍不受支持。
+
+plan 会预分配连续的 `(restart + 1) * n` basis。device identity plan 持有
+`restart + 5` 个长度为 `n` 的持久 vector；右预条件再增加一个 vector。
+Hessenberg、Givens、least-squares、multi-dot partial 与 terminal state 也都使用
+持久内存，warm solve 不分配 transient solver workspace。`statistics()` 报告
+`basis_vector_count`、`basis_reserved_bytes`、
+`persistent_vector_reserved_bytes`、`persistent_scalar_reserved_bytes`、
+精确的 A/M、dot、multi-dot、vector-pass 计数、restart cycle、
+logical/executed/wasted iteration 与 replay 活动。应用在选择更大的 restart 前应检查
+这些数据。
+
+对于使用 identity preconditioner 的 fixed stored operator，CUDA Graph 与 Vulkan
+command replay 覆盖完整 restart cycle。compiled provider 与右预条件 plan 保持相同
+数值实现，但采用 direct native submission。CUDA 支持
+`host_check_every_k` 且要求 `check_interval == restart`；Vulkan 支持该策略与
+`fixed_budget_masked`。host 观察 terminal state 前会提交完整 cycle，因此最多可能执行
+`restart - 1` 个 inactive tail step。更大的 restart 可能改善困难系统的收敛，但也会
+同时扩大 basis 内存、cycle 工作量和最坏情况下的 inactive tail。
+
 ## PreconditionerPlan 生命周期
 
 需要更新系数、显式复用或审计来源时，应使用 `PreconditionerPlan`：
@@ -354,7 +408,8 @@ RHS/output alias 会被拒绝。
 
 `SolveResult` 同时包含 solution 与 terminal snapshot：status code、termination reason、
 convergence/breakdown/max-iteration flag、iteration count、初始与最终 residual norm、两个
-tolerance、relative reference norm 和 effective tolerance。CG、PCG、MINRES、BiCGSTAB 使用：
+tolerance、relative reference norm 和 effective tolerance。CG、PCG、MINRES、
+BiCGSTAB 与 GMRES 使用：
 
 result record 本身是 frozen 的；其中的 `solution` ndarray 仍可由调用方写入。
 
@@ -382,21 +437,25 @@ plan = ti.linalg.experimental.SolvePlan(
 ```
 
 - CPU 只支持 `"host_each_iteration"`。
-- CUDA 为兼容性默认使用 `"host_each_iteration"`，还支持
+- CUDA 对 CG/PCG/MINRES/BiCGSTAB 默认使用 `"host_each_iteration"`，还支持
   `"host_check_every_k"`，其中 `check_interval` 可为 4 或 8。分块策略把 recurrence
-  scalar 保留在 device 上，每个 chunk 只读取一次 terminal snapshot。
+  scalar 保留在 device 上，每个 chunk 只读取一次 terminal snapshot。CUDA GMRES
+  默认使用 `"host_check_every_k"`，并要求 `check_interval == restart`。
 - Vulkan 默认使用 `"fixed_budget_masked"`，还支持
-  `"host_check_every_k"`，其中 `check_interval` 可为 4 或 8。两种策略均支持
-  `atol`、`rtol` 及其组合后的 effective tolerance。
+  `"host_check_every_k"`。CG/PCG/MINRES/BiCGSTAB 接受 interval 4 或 8；
+  GMRES 要求 `check_interval == restart`。两种策略均支持 `atol`、`rtol`
+  及其组合后的 effective tolerance。
 
 对于 fixed stored f32 CSR/BSR，CUDA 的 `host_check_every_k` 以及 Vulkan 的
 `host_check_every_k`/`fixed_budget_masked` 会把受支持的 CG/PCG/MINRES 与
-identity-preconditioned BiCGSTAB iteration chunk 录制为可复用的原生执行序列。
+identity-preconditioned BiCGSTAB iteration chunk 与 identity-preconditioned GMRES
+restart cycle 录制为可复用的原生执行序列。
 可录制的 CG/PCG/MINRES 组合包括 identity、stored Jacobi 和 stored block-Jacobi
 preconditioner。首次兼容执行建立 CUDA Graph 或 Vulkan command sequence；相同
 topology、workspace 与 output binding 的后续执行直接 replay。仅更新 matrix values
-并刷新 preconditioner numeric state 时不重录；更换 output ndarray、改变 topology/schema
-或重建 runtime 会使旧序列失效并安全重建。
+不会重录 identity-preconditioned GMRES 序列；受支持的 preconditioner refresh 会保留
+现有 CG/PCG/MINRES 序列。更换 output ndarray、改变 topology/schema 或重建 runtime
+会使旧序列失效并安全重建。
 
 compiled-kernel 与 compiled Graph A/M provider 仍按 direct chunk submission 执行；它们不会
 为取得 replay 而进行 host staging 或更换 provider。runtime 无法安全录制时也会保持相同数值
@@ -406,16 +465,18 @@ compiled-kernel 与 compiled Graph A/M provider 仍按 direct chunk submission �
 `solver_replay_unavailable_reason` 暴露这一边界。构建开销属于 cold execution，性能资格应分别
 记录 first solve 与 warm solve。
 
-host 检查状态前，一个 chunk 总会完整执行。`SolveResult.iterations` 表示逻辑上的
+host 检查状态前，一个 chunk 或 GMRES restart cycle 总会完整执行。
+`SolveResult.iterations` 表示逻辑上的
 convergence 或 breakdown iteration；`statistics()["operations"]` 另行报告
 `executed_iterations`、`wasted_iterations`、host synchronization 次数和 direct
 chunk submission。因此 chunked solve 最多可能多执行 `K - 1` 轮 masked 或其它 inactive
 tail。Vulkan fixed-budget execution 可以执行完整的 `max_iterations`，同时保留更早发生
 的逻辑终止结果。
 
-当更早终止比同步频率更重要时可选 `K=4`；当摊薄 host check 更重要时可选 `K=8`。
-较快选择取决于 vector size、operator 成本、iteration count、driver 与 backend。不受支持
-的 policy 或 interval 会在 plan 构造时失败，不会静默 fallback。
+对于 CG/PCG/MINRES/BiCGSTAB，当更早终止比同步频率更重要时可选 `K=4`；
+当摊薄 host check 更重要时可选 `K=8`。GMRES 使用选定的 restart 作为观察 interval。
+较快选择取决于 vector size、operator 成本、iteration count、driver 与 backend。
+不受支持的 policy 或 interval 会在 plan 构造时失败，不会静默 fallback。
 
 `plan.execution_capabilities()` 返回执行策略矩阵，以及条件执行不可用时的结构化原因。
 当前 CPU、CUDA 和 Vulkan solver 路径均不支持 `"device_convergent"`。显式请求会直接
@@ -605,6 +666,8 @@ GPU 当前只支持 overwrite apply。
 | device-convergent 条件执行 | 不支持 | 不支持 | 不支持 |
 | BiCGSTAB + identity | 受支持 host-action provider，`f32/f64` | fixed CSR/BSR 或 compiled provider，`f32` | fixed CSR/BSR 或 compiled provider，`f32` |
 | BiCGSTAB + fixed-linear 右预条件 | 受支持 host-action provider，`f32/f64` | 兼容的 device-native A/M，`f32` | 兼容的 device-native A/M，`f32` |
+| GMRES + identity | 受支持 host-action provider，`f32/f64` | fixed CSR/BSR 或 compiled provider，`f32` | fixed CSR/BSR 或 compiled provider，`f32` |
+| GMRES + fixed-linear 右预条件 | 受支持 host-action provider，`f32/f64` | 兼容的 device-native A/M，`f32` | 兼容的 device-native A/M，`f32` |
 
 direct factorization 继续使用 stored-matrix API。
 

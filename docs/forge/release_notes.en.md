@@ -81,8 +81,8 @@ retroactively attributed to the 0.5.0 artifact:
   contract. Explicit mathematical traits gate CG/PCG; persistent plans expose
   unified `SolveResult` terminal state and support CPU/CUDA/Vulkan CG, fixed
   stored Jacobi/block-Jacobi PCG, provider-neutral MINRES, and
-  provider-neutral BiCGSTAB within the documented provider matrix. CPU also
-  supports minimal operator composition.
+  provider-neutral BiCGSTAB and restarted GMRES within the documented provider
+  matrix. CPU also supports minimal operator composition.
 - Extended compiled-kernel and Graph `LinearOperator` providers with
   `(range, domain)` rectangular shapes, independent explicit adjoints,
   `A.adjoint().adjoint()`, and shared immutable numeric generations.
@@ -114,6 +114,16 @@ retroactively attributed to the 0.5.0 artifact:
   chunks; compiled A/M actions retain direct submission. Exact A/M, dot,
   vector, logical/executed/wasted work and persistent workspace are exposed
   through `statistics()`.
+- Added restarted `SolvePlan(method="gmres")` with restart 8, 16, or 32.
+  CPU supports compatible `f32/f64` providers; CUDA and Vulkan support `f32`
+  fixed CSR/BSR and compiled kernel/Graph providers. Every Arnoldi step uses
+  two-pass CGS with multi-dot reduction and fused projection, and every
+  restart boundary verifies the original-system true residual. Fixed-linear
+  right preconditioning is supported. Fixed stored identity cycles use CUDA
+  Graph or Vulkan command replay; other qualified providers use direct native
+  submission. Basis/workspace bytes, A/M, dot/multi-dot/vector work, restart
+  cycles, happy breakdowns, and logical/executed/wasted iterations are
+  reported through `statistics()`.
 - Added public `PreconditionerPlan` and pinned `PreconditionerSession` types.
   External approximate inverses support explicit setup, rebuild updates, and
   lagged reuse while recording built-from provenance separately from
