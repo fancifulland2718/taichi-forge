@@ -226,3 +226,43 @@ def test_preconditioner_10k_generation_churn_is_bounded():
         rtol=2e-5,
         atol=2e-5,
     )
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_variable_preconditioner_update_preflights_complete_table():
+    experimental = ti.linalg.experimental
+    target = _diagonal_operator([2.0, 3.0])
+    action0 = _diagonal_operator([0.5, 1.0 / 3.0])
+    action1 = _diagonal_operator([0.4, 0.25])
+    plan = experimental.PreconditionerPlan(
+        target,
+        (action0, action1),
+        behavior="variable_linear",
+    ).setup()
+    accepted_before = tuple(
+        dict(stamp) for stamp in plan.metadata["accepted_action_stamps"]
+    )
+
+    _update(target, [2.5, 3.5], 1)
+    _update(action0, [0.4, 1.0 / 3.5], 1)
+    with pytest.raises(RuntimeError, match="action did not"):
+        plan.update()
+    accepted_after_failure = tuple(
+        dict(stamp) for stamp in plan.metadata["accepted_action_stamps"]
+    )
+    assert accepted_after_failure == accepted_before
+    stats = plan.statistics()
+    assert stats["schedule_update_calls"] == 1
+    assert stats["schedule_update_successes"] == 0
+    assert stats["schedule_update_failures"] == 1
+
+    _update(action1, [0.35, 0.2], 1)
+    plan.update()
+    accepted_after_success = tuple(
+        dict(stamp) for stamp in plan.metadata["accepted_action_stamps"]
+    )
+    assert accepted_after_success != accepted_before
+    stats = plan.statistics()
+    assert stats["schedule_update_calls"] == 2
+    assert stats["schedule_update_successes"] == 1
+    assert stats["schedule_update_failures"] == 1

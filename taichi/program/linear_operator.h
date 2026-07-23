@@ -649,6 +649,7 @@ class ExperimentalPreconditionerPlanHandle {
   ~ExperimentalPreconditionerPlanHandle();
 
   void setup(Program *program);
+  void validate_update(Program *program, bool accept_reuse);
   void update(Program *program, bool accept_reuse);
   std::unique_ptr<ExperimentalPreconditionerSession> pin(Program *program);
   bool is_setup() const;

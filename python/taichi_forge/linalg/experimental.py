@@ -1598,6 +1598,9 @@ class PreconditionerPlan:
         self._handles = ()
         self._consumer_action = None
         self._consumer_actions = ()
+        self._schedule_update_calls = 0
+        self._schedule_update_successes = 0
+        self._schedule_update_failures = 0
         if self._unsupported_reason is None:
             self._handles = tuple(
                 _ti_core._make_experimental_preconditioner_plan(
@@ -1744,8 +1747,19 @@ class PreconditionerPlan:
             raise TaichiRuntimeError(
                 "accept_reuse must be bool or one bool per variable action"
             )
-        for handle, reuse_action in zip(self._handles, reuse):
-            handle._update(self._program, reuse_action)
+        self._schedule_update_calls += 1
+        try:
+            if self.behavior == "variable_linear":
+                for handle, reuse_action in zip(self._handles, reuse):
+                    handle._validate_update(
+                        self._program, reuse_action
+                    )
+            for handle, reuse_action in zip(self._handles, reuse):
+                handle._update(self._program, reuse_action)
+        except Exception:
+            self._schedule_update_failures += 1
+            raise
+        self._schedule_update_successes += 1
         return self
 
     def pin(self):
@@ -1811,6 +1825,13 @@ class PreconditionerPlan:
         result["behavior"] = self.behavior
         result["selection"] = self.selection
         result["period"] = len(self.actions)
+        result["schedule_update_calls"] = self._schedule_update_calls
+        result["schedule_update_successes"] = (
+            self._schedule_update_successes
+        )
+        result["schedule_update_failures"] = (
+            self._schedule_update_failures
+        )
         return result
 
 

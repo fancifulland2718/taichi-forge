@@ -5203,6 +5203,10 @@ void export_lang(py::module &m) {
       m, "ExperimentalPreconditionerPlanHandle")
       .def("_setup", &ExperimentalPreconditionerPlanHandle::setup,
            py::keep_alive<1, 2>(), py::arg("program"))
+      .def("_validate_update",
+           &ExperimentalPreconditionerPlanHandle::validate_update,
+           py::keep_alive<1, 2>(), py::arg("program"),
+           py::arg("accept_reuse"))
       .def("_update", &ExperimentalPreconditionerPlanHandle::update,
            py::keep_alive<1, 2>(), py::arg("program"),
            py::arg("accept_reuse"))

@@ -2423,6 +2423,30 @@ void ExperimentalPreconditionerPlanHandle::setup(Program *program) {
   statistics_.rebuild_attestations++;
 }
 
+void ExperimentalPreconditionerPlanHandle::validate_update(
+    Program *program,
+    bool accept_reuse) {
+  validate_program(program);
+  std::lock_guard<std::mutex> lock(mutex_);
+  TI_ERROR_IF(!is_setup_,
+              "PreconditionerPlan must be setup before update.");
+  const auto target_stamp =
+      target_binding_.action().resource_stamp();
+  const auto action_stamp = action_plan_->resource_stamp();
+  const bool target_changed =
+      operator_resource_changes(accepted_target_stamp_, target_stamp) != 0;
+  const bool action_changed =
+      operator_resource_changes(accepted_action_stamp_, action_stamp) != 0;
+  TI_ERROR_IF(
+      target_changed && !action_changed && !accept_reuse,
+      "PreconditionerPlan target changed while its action did not; publish "
+      "a rebuilt action or explicitly set accept_reuse=True.");
+  TI_ERROR_IF(
+      accept_reuse && action_changed,
+      "PreconditionerPlan accept_reuse=True requires the previously "
+      "approved action generation; use a rebuild update for a new action.");
+}
+
 void ExperimentalPreconditionerPlanHandle::update(Program *program,
                                                   bool accept_reuse) {
   validate_program(program);
