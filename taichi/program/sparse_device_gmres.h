@@ -15,10 +15,10 @@ class PreconditionerPlan;
 struct DeviceGMRESCudaReplayState;
 struct DeviceGMRESVulkanReplayState;
 
-// Provider-neutral restarted GMRES(m) for scalar f32 CUDA/Vulkan operators.
-// It uses classical Gram-Schmidt with one unconditional refinement pass,
-// keeps the Arnoldi basis and recurrence state device-resident, and applies a
-// fixed linear right preconditioner without storing a separate Z basis.
+// Provider-neutral restarted GMRES(m)/FGMRES(m) for scalar f32 CUDA/Vulkan
+// operators. FGMRES pins a finite variable-linear action table for one solve,
+// selects it by solve-global scheduled inner slot, and keeps a separate Z
+// basis.
 class DeviceGMRES {
  public:
   DeviceGMRES(Program *program,
@@ -28,7 +28,9 @@ class DeviceGMRES {
               int max_iterations,
               int restart,
               float absolute_tolerance,
-              float relative_tolerance);
+              float relative_tolerance,
+              std::vector<ExperimentalLinearOperatorHandle *>
+                  flexible_preconditioners = {});
   ~DeviceGMRES();
 
   DeviceGMRES(const DeviceGMRES &) = delete;
@@ -63,6 +65,7 @@ class DeviceGMRES {
   void initialize_cuda();
   void release_cuda();
   bool has_preconditioner() const;
+  bool flexible() const;
   bool native_stored_provider() const;
   std::uintptr_t address(const Ndarray *array) const;
   void apply_operator(const OperatorPinnedAction &generation,
@@ -71,6 +74,10 @@ class DeviceGMRES {
                       void *stream,
                       bool native_capture);
   void apply_preconditioner(const OperatorPinnedAction &generation,
+                            const Ndarray &input,
+                            const Ndarray &output);
+  void apply_preconditioner(PreconditionerPlan &plan,
+                            const OperatorPinnedAction &generation,
                             const Ndarray &input,
                             const Ndarray &output);
   void backend_dot(const Ndarray &left,
@@ -90,6 +97,7 @@ class DeviceGMRES {
                      int row,
                      int mode,
                      void *stream);
+  void backend_store_preconditioned_basis(int row, void *stream);
   void backend_multi_dot(int basis_count, void *stream);
   void backend_projection(int step, int pass, void *stream);
   void backend_combine(void *stream);
@@ -98,25 +106,32 @@ class DeviceGMRES {
                           void *stream);
   void issue_cycle(const OperatorPinnedAction &operator_generation,
                    const OperatorPinnedAction &preconditioner_generation,
+                   const std::vector<OperatorPinnedAction>
+                       &flexible_generations,
                    const Ndarray &x,
                    const Ndarray &b,
                    int cycle_steps,
+                   int solve_iteration_offset,
                    bool limit_reached,
                    void *stream,
                    bool native_capture);
   bool try_submit_cuda_cycle(
       const OperatorPinnedAction &operator_generation,
       const OperatorPinnedAction &preconditioner_generation,
+      const std::vector<OperatorPinnedAction> &flexible_generations,
       const Ndarray &x,
       const Ndarray &b,
       int cycle_steps,
+      int solve_iteration_offset,
       bool limit_reached);
   bool try_submit_vulkan_cycle(
       const OperatorPinnedAction &operator_generation,
       const OperatorPinnedAction &preconditioner_generation,
+      const std::vector<OperatorPinnedAction> &flexible_generations,
       const Ndarray &x,
       const Ndarray &b,
       int cycle_steps,
+      int solve_iteration_offset,
       bool limit_reached,
       std::size_t slot_index);
   void read_state(bool synchronize);
@@ -125,8 +140,12 @@ class DeviceGMRES {
   ExperimentalLinearOperatorHandle *operator_handle_{nullptr};
   SparseMatrix *stored_matrix_{nullptr};
   ExperimentalLinearOperatorHandle *operator_preconditioner_{nullptr};
+  std::vector<ExperimentalLinearOperatorHandle *>
+      operator_flexible_preconditioners_;
   std::unique_ptr<OperatorPlan> operator_plan_;
   std::unique_ptr<PreconditionerPlan> preconditioner_plan_;
+  std::vector<std::unique_ptr<PreconditionerPlan>>
+      flexible_preconditioner_plans_;
   int rows_{0};
   int max_iterations_{0};
   int restart_{16};
@@ -138,6 +157,7 @@ class DeviceGMRES {
   int host_check_interval_{16};
 
   Ndarray *basis_{nullptr};
+  Ndarray *preconditioned_basis_{nullptr};
   Ndarray *residual_{nullptr};
   Ndarray *current_{nullptr};
   Ndarray *work_{nullptr};
@@ -178,6 +198,8 @@ class DeviceGMRES {
   std::uint64_t workspace_reuses_{0};
   std::uint64_t operator_apply_calls_{0};
   std::uint64_t preconditioner_apply_calls_{0};
+  std::uint64_t preconditioner_action_selections_{0};
+  std::uint64_t preconditioner_schedule_wraps_{0};
   std::uint64_t dot_product_calls_{0};
   std::uint64_t multi_dot_calls_{0};
   std::uint64_t vector_update_calls_{0};
@@ -205,6 +227,14 @@ std::unique_ptr<DeviceGMRES> make_device_gmres_solver(
     ExperimentalLinearOperatorHandle &operator_handle,
     SparseMatrix *stored_matrix,
     ExperimentalLinearOperatorHandle *preconditioner,
+    int max_iterations,
+    int restart,
+    float absolute_tolerance,
+    float relative_tolerance);
+std::unique_ptr<DeviceGMRES> make_device_fgmres_solver(
+    Program *program,
+    ExperimentalLinearOperatorHandle &operator_handle,
+    std::vector<ExperimentalLinearOperatorHandle *> preconditioners,
     int max_iterations,
     int restart,
     float absolute_tolerance,

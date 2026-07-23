@@ -129,7 +129,7 @@ def test_cpu_fgmres_cyclic_actions_z_basis_and_reuse(dtype):
     assert identity["preconditioner_behavior"] == "variable_linear"
     assert identity["preconditioner_action_count"] == 2
     assert identity["preconditioner_action_selection"] == (
-        "solve_global_iteration_mod_period"
+        "solve_global_scheduled_inner_iteration_mod_period"
     )
     assert operations["preconditioner_apply_calls"] == (
         operations["total_iterations"]
@@ -193,3 +193,152 @@ def test_fgmres_behavior_boundaries_fail_closed():
     assert not unsupported.metadata["supported"]
     with pytest.raises(RuntimeError, match="no qualified solver"):
         unsupported.setup()
+
+
+@pytest.mark.parametrize("provider", ["kernel", "graph"])
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_fgmres_compiled_action_table_and_z_basis(provider):
+    experimental = ti.linalg.experimental
+    size = 12
+    dense = np.diag(np.linspace(2.0, 5.0, size, dtype=np.float32))
+    for row in range(size):
+        if row + 1 < size:
+            dense[row, row + 1] = np.float32(0.35)
+        if row > 0:
+            dense[row, row - 1] = np.float32(-0.2)
+    inverse_diagonal = 1.0 / np.diag(dense)
+    scales = (
+        np.linspace(0.7, 1.1, size, dtype=np.float32),
+        np.linspace(1.2, 0.8, size, dtype=np.float32),
+        np.asarray(
+            [0.9 if index % 2 == 0 else 1.15 for index in range(size)],
+            dtype=np.float32,
+        ),
+    )
+    action_values = tuple(
+        np.diag(inverse_diagonal * scale).astype(np.float32)
+        for scale in scales
+    )
+    topology = ti.ndarray(ti.i32, shape=size)
+    topology.from_numpy(np.arange(size, dtype=np.int32))
+
+    @ti.kernel
+    def matrix_action(
+        active_size: ti.i32,
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        numeric_data: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        input: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for row in range(active_size):
+            total = 0.0
+            for column in range(active_size):
+                total += numeric_data[row * active_size + column] * input[
+                    topology_data[column]
+                ]
+            output[row] = total
+
+    def compiled(values):
+        numeric = _vector(np.asarray(values).reshape(-1), ti.f32)
+        traits = experimental.OperatorTraits(singular=False)
+        if provider == "kernel":
+            return experimental.LinearOperator.from_kernel(
+                matrix_action,
+                size,
+                topology,
+                numeric=numeric,
+                traits=traits,
+            )
+        active_arg = ti.graph.Arg(
+            ti.graph.ArgKind.SCALAR, "active_size", ti.i32
+        )
+        topology_arg = ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY, "topology", ti.i32, ndim=1
+        )
+        numeric_arg = ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY, "numeric", ti.f32, ndim=1
+        )
+        input_arg = ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY, "input", ti.f32, ndim=1
+        )
+        output_arg = ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1
+        )
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(
+            matrix_action,
+            active_arg,
+            topology_arg,
+            numeric_arg,
+            input_arg,
+            output_arg,
+        )
+        return experimental.LinearOperator.from_graph(
+            builder.compile(),
+            size,
+            fixed_i32={"active_size": size},
+            topology={"topology": topology},
+            numeric={"numeric": numeric},
+            traits=traits,
+        )
+
+    operator = compiled(dense)
+    variable = experimental.PreconditionerPlan(
+        operator,
+        tuple(compiled(values) for values in action_values),
+        method="three_phase_diagonal",
+        behavior="variable_linear",
+    ).setup()
+    exact = np.linspace(-1.0, 1.0, size, dtype=np.float32)
+    plan = experimental.SolvePlan(
+        operator,
+        method="fgmres",
+        preconditioner=variable,
+        restart=8,
+        max_iterations=24,
+        atol=1e-5,
+        rtol=1e-5,
+        execution_policy=(
+            "host_check_every_k"
+            if ti.lang.impl.current_cfg().arch == ti.cuda
+            else "fixed_budget_masked"
+        ),
+        check_interval=(
+            8
+            if ti.lang.impl.current_cfg().arch == ti.cuda
+            else None
+        ),
+    )
+    result = plan.solve(_vector(dense @ exact, ti.f32))
+    assert result.converged, (
+        result.residual_norm,
+        result.effective_tolerance,
+        result.iterations,
+    )
+    np.testing.assert_allclose(
+        result.solution.to_numpy(), exact, rtol=8e-5, atol=8e-5
+    )
+
+    stats = plan.statistics()
+    identity = stats["identity"]
+    operations = stats["operations"]
+    resources = stats["resources"]
+    assert identity["method"] == "fgmres"
+    assert identity["preconditioner_behavior"] == "variable_linear"
+    assert identity["preconditioner_action_count"] == 3
+    assert identity["solver_replay_unavailable_reason"] == (
+        "variable_action_capture_contract_unavailable"
+    )
+    assert not identity["solver_graph_enabled"]
+    assert operations["solver_chunk_direct_submissions"] > 0
+    assert operations["preconditioner_apply_calls"] == (
+        operations["executed_iterations"]
+    )
+    assert operations["preconditioner_action_selections"] == (
+        operations["executed_iterations"]
+    )
+    assert resources["preconditioned_basis_vector_count"] == 8
+    assert resources["persistent_vector_count"] == 22
+    assert resources["preconditioner_ownership_scope"] == (
+        "solve_plan_action_table_snapshot"
+    )

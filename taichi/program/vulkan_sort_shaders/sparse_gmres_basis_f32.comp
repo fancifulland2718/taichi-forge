@@ -35,8 +35,10 @@ void main() {
   bool enabled = params.mode == 0u
       ? int(state_buf.data[kSolveActive]) != 0
       : int(state_buf.data[kCycleActive]) != 0;
-  float denominator = uintBitsToFloat(
-      state_buf.data[params.mode == 0u ? kBeta : kNextNorm]);
+  float denominator = params.mode == 2u
+      ? 1.0
+      : uintBitsToFloat(
+            state_buf.data[params.mode == 0u ? kBeta : kNextNorm]);
   float value = enabled && denominator != 0.0
       ? source_buf.data[index] / denominator
       : 0.0;

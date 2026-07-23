@@ -12530,7 +12530,7 @@ std::size_t Program::vulkan_sparse_gmres_basis(
   TI_ERROR_IF(n == 0 || n > std::numeric_limits<uint32_t>::max() ||
                   basis_stride < n ||
                   basis_stride > std::numeric_limits<uint32_t>::max() ||
-                  row > 32 || mode > 1,
+                  row > 32 || mode > 2,
               "Vulkan sparse GMRES basis update received invalid controls.");
   check_vulkan_sparse_f32_vector("GMRES basis source", source, n);
   check_vulkan_sparse_f32_vector("GMRES current basis vector", current, n);
@@ -12619,8 +12619,12 @@ std::size_t Program::vulkan_sparse_gmres_combine(
   TI_ERROR_IF(restart != 8 && restart != 16 && restart != 32,
               "Vulkan sparse GMRES coefficients require restart 8, 16, or "
               "32.");
-  check_vulkan_sparse_f32_vector(
-      "GMRES basis", basis, (restart + 1) * basis_stride);
+  TI_ERROR_IF(!basis || basis->shape.size() != 1 ||
+                  basis->get_element_data_type() != PrimitiveType::f32 ||
+                  !basis->get_element_shape().empty() ||
+                  basis->get_element_size() != sizeof(float32) ||
+                  basis->get_nelement() < restart * basis_stride,
+              "Vulkan GMRES/FGMRES basis storage is too small.");
   check_vulkan_sparse_f32_vector(
       "GMRES coefficients", coefficients, restart);
   check_vulkan_sparse_f32_vector("GMRES update", update, n);
@@ -12637,7 +12641,7 @@ std::size_t Program::vulkan_sparse_gmres_combine(
   const Ndarray *resources[] = {basis, coefficients, update, state};
   retain_ndarrays_for_external_submission(resources, std::size(resources));
   const size_t basis_bytes =
-      (restart + 1) * basis_stride * sizeof(float32);
+      basis->get_nelement() * sizeof(float32);
   const size_t coefficient_bytes = restart * sizeof(float32);
   const size_t vector_bytes = n * sizeof(float32);
   Device *device = get_compute_device();

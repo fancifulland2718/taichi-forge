@@ -98,7 +98,7 @@ struct DeviceGMRESCudaReplayState {
     RuntimeResourceHandle solution;
     RuntimeResourceHandle rhs;
     OperatorResourceStamp operator_stamp;
-    std::array<std::uintptr_t, 18> resources{};
+    std::array<std::uintptr_t, 19> resources{};
     std::uintptr_t provider{0};
     int rows{0};
     int restart{0};
@@ -212,11 +212,15 @@ DeviceGMRES::DeviceGMRES(
     int max_iterations,
     int restart,
     float absolute_tolerance,
-    float relative_tolerance)
+    float relative_tolerance,
+    std::vector<ExperimentalLinearOperatorHandle *>
+        flexible_preconditioners)
     : program_(program),
       operator_handle_(&operator_handle),
       stored_matrix_(stored_matrix),
       operator_preconditioner_(preconditioner),
+      operator_flexible_preconditioners_(
+          std::move(flexible_preconditioners)),
       max_iterations_(max_iterations),
       restart_(restart),
       absolute_tolerance_(absolute_tolerance),
@@ -255,6 +259,20 @@ DeviceGMRES::DeviceGMRES(
     preconditioner_plan_ = make_solver_right_preconditioner_plan(
         program_, *operator_plan_, *operator_preconditioner_,
         "linear_operator");
+  }
+  TI_ERROR_IF(operator_preconditioner_ &&
+                  !operator_flexible_preconditioners_.empty(),
+              "Device GMRES cannot combine fixed and variable right "
+              "preconditioner bindings.");
+  TI_ERROR_IF(operator_flexible_preconditioners_.size() > 32,
+              "Device FGMRES supports at most 32 scheduled actions.");
+  for (auto *action : operator_flexible_preconditioners_) {
+    TI_ERROR_IF(!action,
+                "Device FGMRES action table contains a null action.");
+    flexible_preconditioner_plans_.push_back(
+        make_solver_flexible_right_preconditioner_plan(
+            program_, *operator_plan_, *action,
+            "variable_linear_action"));
   }
   try {
     allocate_workspace();
@@ -300,6 +318,10 @@ void DeviceGMRES::allocate_workspace() {
   };
   try {
     basis_ = f32(static_cast<std::size_t>(restart_ + 1) * rows_);
+    if (flexible()) {
+      preconditioned_basis_ =
+          f32(static_cast<std::size_t>(restart_) * rows_);
+    }
     residual_ = f32(rows_);
     current_ = f32(rows_);
     work_ = f32(rows_);
@@ -353,6 +375,7 @@ void DeviceGMRES::release_workspace() {
   release(work_);
   release(current_);
   release(residual_);
+  release(preconditioned_basis_);
   release(basis_);
 }
 
@@ -422,7 +445,12 @@ void DeviceGMRES::configure_execution_policy(
 }
 
 bool DeviceGMRES::has_preconditioner() const {
-  return preconditioner_plan_ != nullptr;
+  return preconditioner_plan_ != nullptr ||
+         !flexible_preconditioner_plans_.empty();
+}
+
+bool DeviceGMRES::flexible() const {
+  return !flexible_preconditioner_plans_.empty();
 }
 
 bool DeviceGMRES::native_stored_provider() const {
@@ -482,7 +510,15 @@ void DeviceGMRES::apply_preconditioner(
     const Ndarray &output) {
   TI_ERROR_IF(!preconditioner_plan_,
               "Device GMRES preconditioner plan is unavailable.");
-  auto &action = preconditioner_plan_->action();
+  apply_preconditioner(*preconditioner_plan_, generation, input, output);
+}
+
+void DeviceGMRES::apply_preconditioner(
+    PreconditionerPlan &preconditioner,
+    const OperatorPinnedAction &generation,
+    const Ndarray &input,
+    const Ndarray &output) {
+  auto &action = preconditioner.action();
   const auto &descriptor = action.descriptor();
   action.submit(
       generation,
@@ -601,6 +637,27 @@ void DeviceGMRES::backend_basis(const Ndarray &source,
       row, mode);
 }
 
+void DeviceGMRES::backend_store_preconditioned_basis(int row,
+                                                     void *stream) {
+  TI_ASSERT(flexible() && preconditioned_basis_ && preconditioned_);
+  if (program_->compile_config().arch == Arch::cuda) {
+#if defined(TI_WITH_CUDA)
+    cuda::driver_sparse_gmres_basis_f32(
+        reinterpret_cast<void *>(address(preconditioned_)),
+        reinterpret_cast<void *>(address(preconditioned_basis_)),
+        reinterpret_cast<void *>(address(update_)),
+        reinterpret_cast<void *>(address(state_)), rows_, rows_, row, 2,
+        stream);
+#else
+    TI_NOT_IMPLEMENTED;
+#endif
+    return;
+  }
+  program_->vulkan_sparse_gmres_basis(
+      preconditioned_, preconditioned_basis_, update_, state_, rows_, rows_,
+      row, 2);
+}
+
 void DeviceGMRES::backend_multi_dot(int basis_count, void *stream) {
   if (program_->compile_config().arch == Arch::cuda) {
 #if defined(TI_WITH_CUDA)
@@ -642,10 +699,12 @@ void DeviceGMRES::backend_projection(int step, int pass, void *stream) {
 }
 
 void DeviceGMRES::backend_combine(void *stream) {
+  Ndarray *combination_basis =
+      flexible() ? preconditioned_basis_ : basis_;
   if (program_->compile_config().arch == Arch::cuda) {
 #if defined(TI_WITH_CUDA)
     cuda::driver_sparse_gmres_combine_f32(
-        reinterpret_cast<void *>(address(basis_)),
+        reinterpret_cast<void *>(address(combination_basis)),
         reinterpret_cast<void *>(address(coefficients_)),
         reinterpret_cast<void *>(address(update_)),
         reinterpret_cast<void *>(address(state_)), rows_, rows_, stream);
@@ -655,7 +714,7 @@ void DeviceGMRES::backend_combine(void *stream) {
     return;
   }
   program_->vulkan_sparse_gmres_combine(
-      basis_, coefficients_, update_, state_, rows_, rows_);
+      combination_basis, coefficients_, update_, state_, rows_, rows_);
 }
 
 void DeviceGMRES::backend_add_update(const Ndarray &x,
@@ -681,16 +740,28 @@ void DeviceGMRES::backend_add_update(const Ndarray &x,
 void DeviceGMRES::issue_cycle(
     const OperatorPinnedAction &operator_generation,
     const OperatorPinnedAction &preconditioner_generation,
+    const std::vector<OperatorPinnedAction> &flexible_generations,
     const Ndarray &x,
     const Ndarray &b,
     int cycle_steps,
+    int solve_iteration_offset,
     bool limit_reached,
     void *stream,
     bool native_capture) {
   backend_scalar_stage(1, 0, false, stream);
   backend_basis(*residual_, 0, 0, stream);
   for (int step = 0; step < cycle_steps; ++step) {
-    if (has_preconditioner()) {
+    if (flexible()) {
+      const std::size_t action_index =
+          static_cast<std::size_t>(solve_iteration_offset + step) %
+          flexible_preconditioner_plans_.size();
+      apply_preconditioner(
+          *flexible_preconditioner_plans_[action_index],
+          flexible_generations[action_index], *current_, *preconditioned_);
+      backend_store_preconditioned_basis(step, stream);
+      apply_operator(operator_generation, *preconditioned_, *work_, stream,
+                     native_capture);
+    } else if (has_preconditioner()) {
       apply_preconditioner(
           preconditioner_generation, *current_, *preconditioned_);
       apply_operator(operator_generation, *preconditioned_, *work_, stream,
@@ -710,7 +781,7 @@ void DeviceGMRES::issue_cycle(
   }
   backend_scalar_stage(3, 0, false, stream);
   backend_combine(stream);
-  if (has_preconditioner()) {
+  if (preconditioner_plan_) {
     apply_preconditioner(
         preconditioner_generation, *update_, *preconditioned_);
     backend_add_update(x, *preconditioned_, stream);
@@ -724,9 +795,11 @@ void DeviceGMRES::issue_cycle(
 bool DeviceGMRES::try_submit_cuda_cycle(
     const OperatorPinnedAction &operator_generation,
     const OperatorPinnedAction &preconditioner_generation,
+    const std::vector<OperatorPinnedAction> &flexible_generations,
     const Ndarray &x,
     const Ndarray &b,
     int cycle_steps,
+    int solve_iteration_offset,
     bool limit_reached) {
 #if defined(TI_WITH_CUDA)
   if (program_->compile_config().arch != Arch::cuda ||
@@ -760,7 +833,8 @@ bool DeviceGMRES::try_submit_cuda_cycle(
   key.rhs = b.runtime_resource_handle();
   key.operator_stamp = operator_generation.resource_stamp();
   const Ndarray *arrays[] = {
-      basis_, residual_, current_, work_, update_, preconditioned_,
+      basis_, preconditioned_basis_, residual_, current_, work_, update_,
+      preconditioned_,
       multi_dot_partials_, projection_, hessenberg_, cosines_, sines_,
       least_squares_rhs_, coefficients_, initial_residual_squared_,
       rhs_squared_, dot0_, dot1_, state_};
@@ -816,8 +890,9 @@ bool DeviceGMRES::try_submit_cuda_cycle(
     return false;
   }
   try {
-    issue_cycle(operator_generation, preconditioner_generation, x, b,
-                cycle_steps, limit_reached, capture_stream, true);
+    issue_cycle(operator_generation, preconditioner_generation,
+                flexible_generations, x, b, cycle_steps,
+                solve_iteration_offset, limit_reached, capture_stream, true);
   } catch (...) {
     (void)driver.stream_end_capture.call(capture_stream, &graph);
     if (graph) {
@@ -868,9 +943,11 @@ bool DeviceGMRES::try_submit_cuda_cycle(
 bool DeviceGMRES::try_submit_vulkan_cycle(
     const OperatorPinnedAction &operator_generation,
     const OperatorPinnedAction &preconditioner_generation,
+    const std::vector<OperatorPinnedAction> &flexible_generations,
     const Ndarray &x,
     const Ndarray &b,
     int cycle_steps,
+    int solve_iteration_offset,
     bool limit_reached,
     std::size_t slot_index) {
 #if defined(TI_WITH_VULKAN)
@@ -893,7 +970,8 @@ bool DeviceGMRES::try_submit_vulkan_cycle(
   key.push(limit_reached ? 1 : 0);
   push_gmres_stamp(key, operator_generation.resource_stamp());
   const Ndarray *resources[] = {
-      &x, &b, basis_, residual_, current_, work_, update_,
+      &x, &b, basis_, preconditioned_basis_, residual_, current_, work_,
+      update_,
       preconditioned_, multi_dot_partials_, projection_, hessenberg_,
       cosines_, sines_, least_squares_rhs_, coefficients_,
       initial_residual_squared_, rhs_squared_, dot0_, dot1_, state_};
@@ -928,8 +1006,9 @@ bool DeviceGMRES::try_submit_vulkan_cycle(
   (void)program_->flush_if_pending();
   auto record = [&](Device *device, CommandList *cmdlist) {
     VulkanNativeCommandRecordingScope scope(program_, device, cmdlist);
-    issue_cycle(operator_generation, preconditioner_generation, x, b,
-                cycle_steps, limit_reached, nullptr, true);
+    issue_cycle(operator_generation, preconditioner_generation,
+                flexible_generations, x, b, cycle_steps,
+                solve_iteration_offset, limit_reached, nullptr, true);
   };
   const bool submitted = slot.cache.submit_or_record(
       program_, program_->get_compute_device(), key, false, record);
@@ -998,6 +1077,12 @@ void DeviceGMRES::solve(Program *program,
       preconditioner_plan_
           ? preconditioner_plan_->update_and_pin(operator_generation)
           : OperatorPinnedAction{};
+  std::vector<OperatorPinnedAction> flexible_generations;
+  flexible_generations.reserve(flexible_preconditioner_plans_.size());
+  for (auto &plan : flexible_preconditioner_plans_) {
+    flexible_generations.push_back(
+        plan->update_and_pin(operator_generation));
+  }
   auto submission_guard =
       program_->acquire_runtime_resource_submission_guard();
   std::vector<const Ndarray *> resources = {
@@ -1022,6 +1107,9 @@ void DeviceGMRES::solve(Program *program,
       state_};
   if (preconditioned_) {
     resources.push_back(preconditioned_);
+  }
+  if (preconditioned_basis_) {
+    resources.push_back(preconditioned_basis_);
   }
   program_->retain_ndarrays_for_external_submission(
       resources.data(), resources.size());
@@ -1060,17 +1148,19 @@ void DeviceGMRES::solve(Program *program,
     const bool limit_reached =
         executed + cycle_steps >= max_iterations_;
     bool submitted = try_submit_cuda_cycle(
-        operator_generation, preconditioner_generation, x, b, cycle_steps,
-        limit_reached);
+        operator_generation, preconditioner_generation,
+        flexible_generations, x, b, cycle_steps, executed, limit_reached);
     if (!submitted) {
       submitted = try_submit_vulkan_cycle(
-          operator_generation, preconditioner_generation, x, b, cycle_steps,
-          limit_reached, slot_index);
+          operator_generation, preconditioner_generation,
+          flexible_generations, x, b, cycle_steps, executed, limit_reached,
+          slot_index);
     }
     if (!submitted) {
       ++solver_chunk_direct_submissions_;
-      issue_cycle(operator_generation, preconditioner_generation, x, b,
-                  cycle_steps, limit_reached, nullptr, false);
+      issue_cycle(operator_generation, preconditioner_generation,
+                  flexible_generations, x, b, cycle_steps, executed,
+                  limit_reached, nullptr, false);
     }
     executed += cycle_steps;
     ++physical_cycles;
@@ -1118,12 +1208,21 @@ void DeviceGMRES::solve(Program *program,
       static_cast<std::uint64_t>(state_int(host_state_, kHappyBreakdowns));
   const std::uint64_t physical = static_cast<std::uint64_t>(executed);
   operator_apply_calls_ += 1u + physical + physical_cycles;
-  preconditioner_apply_calls_ += has_preconditioner()
-      ? physical + physical_cycles
-      : 0u;
+  preconditioner_apply_calls_ +=
+      flexible() ? physical
+                 : (has_preconditioner() ? physical + physical_cycles : 0u);
+  if (flexible()) {
+    preconditioner_action_selections_ += physical;
+    preconditioner_schedule_wraps_ +=
+        physical > 0
+            ? (physical - 1u) / flexible_preconditioner_plans_.size()
+            : 0u;
+  }
   dot_product_calls_ += 2u + 2u * physical + physical_cycles;
   multi_dot_calls_ += 2u * physical;
-  vector_update_calls_ += 1u + 3u * physical + 4u * physical_cycles;
+  vector_update_calls_ +=
+      1u + 3u * physical + 4u * physical_cycles +
+      (flexible() ? physical : 0u);
   device_scalar_operations_ +=
       1u + physical + 3u * physical_cycles;
   const std::uint64_t vector_bytes =
@@ -1147,7 +1246,7 @@ DeviceGMRES::debug_runtime_statistics() const {
   std::lock_guard<std::mutex> lock(solve_mutex_);
   SparseSolvePlanRuntimeStatistics result;
   result.backend_family = arch_name(program_->compile_config().arch);
-  result.method = "gmres";
+  result.method = flexible() ? "fgmres" : "gmres";
   result.dtype = "f32";
   result.rows = rows_;
   result.cols = rows_;
@@ -1216,7 +1315,10 @@ DeviceGMRES::debug_runtime_statistics() const {
       result.requested_solver_execution_policy;
   result.host_check_interval = host_check_interval_;
   result.solver_graph_enabled = solver_chunk_builds_ > 0;
-  if (!native_stored_provider()) {
+  if (flexible()) {
+    result.solver_replay_unavailable_reason =
+        "variable_action_capture_contract_unavailable";
+  } else if (!native_stored_provider()) {
     result.solver_replay_unavailable_reason =
         "provider_not_capture_composable";
   } else if (program_->compile_config().arch == Arch::cuda) {
@@ -1268,14 +1370,24 @@ DeviceGMRES::debug_runtime_statistics() const {
       execution_policy_ ==
       SparseSolveExecutionPolicy::fixed_budget_masked;
   result.preconditioner_method =
-      preconditioner_plan_ ? preconditioner_plan_->method() : "identity";
+      preconditioner_plan_
+          ? preconditioner_plan_->method()
+          : (flexible() ? "variable_linear_action_table" : "identity");
   result.preconditioner_behavior =
-      preconditioner_plan_ ? "fixed_linear" : "identity";
+      preconditioner_plan_
+          ? "fixed_linear"
+          : (flexible() ? "variable_linear" : "identity");
   result.preconditioner_apply_calls = preconditioner_apply_calls_;
+  result.preconditioner_action_selections =
+      preconditioner_action_selections_;
+  result.preconditioner_schedule_wraps =
+      preconditioner_schedule_wraps_;
   result.preconditioner_apply_calls_available = true;
-  result.external_preconditioner = operator_preconditioner_ != nullptr;
+  result.external_preconditioner =
+      operator_preconditioner_ != nullptr || flexible();
   result.preconditioner_ownership_scope =
-      preconditioner_plan_ ? "solve_plan" : "none";
+      flexible() ? "solve_plan_action_table_snapshot"
+                 : (preconditioner_plan_ ? "solve_plan" : "none");
   if (preconditioner_plan_) {
     const auto &action = preconditioner_plan_->action();
     result.preconditioner_action_provider = action.provider_name();
@@ -1297,14 +1409,27 @@ DeviceGMRES::debug_runtime_statistics() const {
     result.preconditioner_update_successes = lifecycle.update_successes;
     result.preconditioner_update_noops = lifecycle.update_noops;
     result.preconditioner_update_failures = lifecycle.update_failures;
+    result.preconditioner_action_count = 1;
+    result.preconditioner_action_selection = "fixed";
+  } else if (flexible()) {
+    append_solver_flexible_preconditioner_plan_statistics(
+        flexible_preconditioner_plans_, result);
   }
   const std::uint64_t basis_count =
       static_cast<std::uint64_t>(restart_ + 1);
   const std::uint64_t auxiliary_vectors = has_preconditioner() ? 5u : 4u;
+  const std::uint64_t preconditioned_basis_count =
+      flexible() ? static_cast<std::uint64_t>(restart_) : 0u;
   result.basis_vector_count = basis_count;
   result.basis_reserved_bytes =
       basis_count * static_cast<std::uint64_t>(rows_) * sizeof(float);
-  result.persistent_vector_count = basis_count + auxiliary_vectors;
+  result.preconditioned_basis_vector_count =
+      preconditioned_basis_count;
+  result.preconditioned_basis_reserved_bytes =
+      preconditioned_basis_count * static_cast<std::uint64_t>(rows_) *
+      sizeof(float);
+  result.persistent_vector_count =
+      basis_count + auxiliary_vectors + preconditioned_basis_count;
   result.persistent_vector_reserved_bytes =
       result.persistent_vector_count *
       static_cast<std::uint64_t>(rows_) * sizeof(float);
@@ -1340,6 +1465,22 @@ std::unique_ptr<DeviceGMRES> make_device_gmres_solver(
   return std::make_unique<DeviceGMRES>(
       program, operator_handle, stored_matrix, preconditioner,
       max_iterations, restart, absolute_tolerance, relative_tolerance);
+}
+
+std::unique_ptr<DeviceGMRES> make_device_fgmres_solver(
+    Program *program,
+    ExperimentalLinearOperatorHandle &operator_handle,
+    std::vector<ExperimentalLinearOperatorHandle *> preconditioners,
+    int max_iterations,
+    int restart,
+    float absolute_tolerance,
+    float relative_tolerance) {
+  TI_ERROR_IF(preconditioners.empty(),
+              "Device FGMRES requires a non-empty action table.");
+  return std::make_unique<DeviceGMRES>(
+      program, operator_handle, nullptr, nullptr, max_iterations, restart,
+      absolute_tolerance, relative_tolerance,
+      std::move(preconditioners));
 }
 
 }  // namespace taichi::lang

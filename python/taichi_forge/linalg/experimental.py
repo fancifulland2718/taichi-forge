@@ -1387,7 +1387,7 @@ class PreconditionerSession:
 
     A variable-linear session owns the complete action-table snapshot.
     `iteration` selects the same cyclic action that FGMRES uses for that
-    logical Arnoldi iteration. Selection is local and deterministic; it does
+    scheduled Arnoldi slot. Selection is local and deterministic; it does
     not invoke a Python callback from a solver hot loop.
     """
 
@@ -1477,7 +1477,7 @@ class PreconditionerPlan:
     """Versions a target operator and external approximate-inverse actions.
 
     ``fixed_linear`` owns one action. ``variable_linear`` owns a finite cyclic
-    table selected by the solve-global logical Arnoldi iteration:
+    table selected by the solve-global scheduled inner slot:
     ``actions[k % len(actions)]``. External code publishes target/action
     numeric generations through their ordinary
     :class:`LinearOperator` providers, then calls :meth:`update` to attest a

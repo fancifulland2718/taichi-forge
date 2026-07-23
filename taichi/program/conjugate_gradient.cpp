@@ -2029,7 +2029,7 @@ void append_solver_flexible_preconditioner_plan_statistics(
   statistics.preconditioner_behavior = "variable_linear";
   statistics.preconditioner_action_count = plans.size();
   statistics.preconditioner_action_selection =
-      "solve_global_iteration_mod_period";
+      "solve_global_scheduled_inner_iteration_mod_period";
   statistics.preconditioner_action_provider =
       plans.front()->action().provider_name();
   statistics.preconditioner_asynchronous_submit = true;

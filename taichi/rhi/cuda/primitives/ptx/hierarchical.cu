@@ -1799,8 +1799,11 @@ extern "C" __global__ void sparse_gmres_basis_f32(
   const bool active = mode == 0u
       ? sparse_gmres::load_int(state, sparse_gmres::kSolveActive) != 0
       : sparse_gmres::load_int(state, sparse_gmres::kCycleActive) != 0;
-  const float denominator = sparse_gmres::load_float(
-      state, mode == 0u ? sparse_gmres::kBeta : sparse_gmres::kNextNorm);
+  const float denominator = mode == 2u
+      ? 1.0f
+      : sparse_gmres::load_float(
+            state, mode == 0u ? sparse_gmres::kBeta
+                              : sparse_gmres::kNextNorm);
   const float value =
       active && denominator != 0.0f ? source[index] / denominator : 0.0f;
   basis[row * basis_stride + index] = value;

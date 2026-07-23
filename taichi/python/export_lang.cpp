@@ -6355,6 +6355,33 @@ void export_lang(py::module &m) {
       py::arg("preconditioner"), py::arg("max_iterations"),
       py::arg("restart"), py::arg("absolute_tolerance"),
       py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "_make_device_variable_preconditioned_gmres_solver",
+      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+         const py::list &preconditioners, int max_iterations, int restart,
+         float absolute_tolerance, float relative_tolerance) {
+        std::vector<ExperimentalLinearOperatorHandle *> actions;
+        actions.reserve(preconditioners.size());
+        for (const auto &item : preconditioners) {
+          auto *action =
+              item.cast<ExperimentalLinearOperatorHandle *>();
+          TI_ERROR_IF(!action || action->program() != program,
+                      "Device FGMRES actions must belong to the target "
+                      "Program.");
+          actions.push_back(action);
+        }
+        TI_ERROR_IF(operator_handle.program() != program,
+                    "Device FGMRES operator belongs to a different "
+                    "Program.");
+        return make_device_fgmres_solver(
+            program, operator_handle, std::move(actions), max_iterations,
+            restart, absolute_tolerance, relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(), py::arg("program"), py::arg("operator"),
+      py::arg("preconditioners"), py::arg("max_iterations"),
+      py::arg("restart"), py::arg("absolute_tolerance"),
+      py::arg("relative_tolerance") = 0.0f);
 
   py::class_<DeviceBiCGSTAB>(m, "DeviceBiCGSTAB")
       .def("solve", &DeviceBiCGSTAB::solve)

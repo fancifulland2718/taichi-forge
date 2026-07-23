@@ -1519,7 +1519,7 @@ void driver_sparse_gmres_basis_f32(void *source,
                                    void *stream) {
   TI_ERROR_IF(!source || !basis || !current || !state || num_items <= 0 ||
                   basis_stride < num_items || row < 0 || row > 32 ||
-                  mode < 0 || mode > 1,
+                  mode < 0 || mode > 2,
               "CUDA Driver sparse GMRES basis update received invalid "
               "geometry, controls, or a null pointer.");
   void *source_arg = source;

@@ -13,7 +13,7 @@ namespace taichi::lang {
 // Provider-neutral restarted GMRES and FGMRES. Ordinary GMRES may apply one
 // fixed-linear right preconditioner after combining V*y. FGMRES pins a finite
 // variable-linear action table for the whole solve, selects M[k % period] by
-// the solve-global logical Arnoldi iteration, and stores every resulting Z_j.
+// the solve-global scheduled inner slot, and stores every resulting Z_j.
 template <typename EigenT, typename DT>
 class FixedSparseGMRES {
  public:
