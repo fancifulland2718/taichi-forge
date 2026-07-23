@@ -1927,7 +1927,9 @@ void append_preconditioner_plan_statistics(
   statistics.preconditioner_behavior =
       plan.behavior() == PreconditionerBehavior::fixed_linear
           ? "fixed_linear"
-          : "unsupported";
+          : (plan.behavior() == PreconditionerBehavior::variable_linear
+                 ? "variable_linear"
+                 : "unsupported");
   statistics.preconditioner_setup_calls = lifecycle.setup_calls;
   statistics.preconditioner_update_calls = lifecycle.update_calls;
   statistics.preconditioner_update_successes = lifecycle.update_successes;
@@ -1992,10 +1994,76 @@ std::unique_ptr<PreconditionerPlan> make_solver_right_preconditioner_plan(
   return plan;
 }
 
+std::unique_ptr<PreconditionerPlan>
+make_solver_flexible_right_preconditioner_plan(
+    Program *program,
+    OperatorPlan &target_plan,
+    ExperimentalLinearOperatorHandle &preconditioner,
+    std::string method) {
+  validate_fixed_linear_right_operator_preconditioner(
+      program, target_plan.descriptor(), preconditioner);
+  auto plan = std::make_unique<PreconditionerPlan>(
+      program, target_plan.descriptor(), preconditioner.binding(),
+      PreconditionerBehavior::variable_linear, std::move(method),
+      [program, &preconditioner](const OperatorResourceStamp &, bool) {
+        TI_ERROR_IF(preconditioner.program() != program,
+                    "Flexible right LinearOperator preconditioner changed "
+                    "Program generation.");
+      });
+  auto target_generation = target_plan.pin();
+  plan->setup(target_generation);
+  return plan;
+}
+
 void append_solver_preconditioner_plan_statistics(
     const PreconditionerPlan &plan,
     SparseSolvePlanRuntimeStatistics &statistics) {
   append_preconditioner_plan_statistics(plan, statistics);
+}
+
+void append_solver_flexible_preconditioner_plan_statistics(
+    const std::vector<std::unique_ptr<PreconditionerPlan>> &plans,
+    SparseSolvePlanRuntimeStatistics &statistics) {
+  TI_ERROR_IF(plans.empty(),
+              "FGMRES telemetry requires a non-empty action table.");
+  statistics.preconditioner_behavior = "variable_linear";
+  statistics.preconditioner_action_count = plans.size();
+  statistics.preconditioner_action_selection =
+      "solve_global_iteration_mod_period";
+  statistics.preconditioner_action_provider =
+      plans.front()->action().provider_name();
+  statistics.preconditioner_asynchronous_submit = true;
+  for (const auto &plan : plans) {
+    TI_ASSERT(plan);
+    const auto &action = plan->action();
+    if (action.provider_name() !=
+        statistics.preconditioner_action_provider) {
+      statistics.preconditioner_action_provider =
+          "mixed_action_table";
+    }
+    statistics.preconditioner_asynchronous_submit &=
+        action.capabilities().asynchronous_submit;
+    const auto action_statistics =
+        action.debug_runtime_statistics();
+    statistics.preconditioner_generation_pins +=
+        action_statistics.generation_pins;
+    statistics.preconditioner_generation_changes +=
+        action_statistics.generation_changes;
+    statistics.preconditioner_numeric_generation_changes +=
+        action_statistics.numeric_generation_changes;
+    statistics.preconditioner_binding_generation_changes +=
+        action_statistics.binding_generation_changes;
+    statistics.preconditioner_plan_invalidations +=
+        action_statistics.invalidations;
+    const auto lifecycle = plan->debug_runtime_statistics();
+    statistics.preconditioner_setup_calls += lifecycle.setup_calls;
+    statistics.preconditioner_update_calls += lifecycle.update_calls;
+    statistics.preconditioner_update_successes +=
+        lifecycle.update_successes;
+    statistics.preconditioner_update_noops += lifecycle.update_noops;
+    statistics.preconditioner_update_failures +=
+        lifecycle.update_failures;
+  }
 }
 
 std::unique_ptr<CpuSparseCGPlan::PreconditionerBinding>

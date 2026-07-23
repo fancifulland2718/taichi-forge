@@ -1383,13 +1383,34 @@ def _solver_execution_capabilities(program, provider_kind, *, batched):
 
 
 class PreconditionerSession:
-    """Pinned immutable target/action generations for one consumer scope."""
+    """Pinned immutable target/action generations for one consumer scope.
+
+    A variable-linear session owns the complete action-table snapshot.
+    `iteration` selects the same cyclic action that FGMRES uses for that
+    logical Arnoldi iteration. Selection is local and deterministic; it does
+    not invoke a Python callback from a solver hot loop.
+    """
 
     def __init__(self, plan, native):
         self._plan = plan
         self._native = native
+        self._natives = (
+            tuple(native) if isinstance(native, (tuple, list)) else (native,)
+        )
         self._program = plan._program
-        self._metadata_snapshot = dict(native._metadata())
+        action_metadata = tuple(
+            _readonly_copy(dict(item._metadata())) for item in self._natives
+        )
+        if plan.behavior == "fixed_linear":
+            self._metadata_snapshot = dict(action_metadata[0])
+        else:
+            self._metadata_snapshot = {
+                "schema_version": 1,
+                "behavior": "variable_linear",
+                "selection": plan.selection,
+                "period": len(action_metadata),
+                "actions": action_metadata,
+            }
         get_runtime().register_runtime_object(self)
 
     def _ensure_valid(self):
@@ -1400,6 +1421,7 @@ class PreconditionerSession:
 
     def _invalidate_runtime(self):
         self._native = None
+        self._natives = ()
         self._plan = None
         self._program = None
 
@@ -1407,10 +1429,25 @@ class PreconditionerSession:
     def metadata(self):
         return _readonly_copy(self._metadata_snapshot)
 
-    def apply(self, residual, out=None):
+    def apply(self, residual, out=None, *, iteration=0):
         """Applies the pinned approximate-inverse action synchronously."""
         self._ensure_valid()
-        action = self._plan.action
+        if isinstance(iteration, bool):
+            raise TaichiRuntimeError("iteration must be a non-negative integer")
+        try:
+            iteration = _operator.index(iteration)
+        except TypeError as exc:
+            raise TaichiRuntimeError(
+                "iteration must be a non-negative integer"
+            ) from exc
+        if iteration < 0:
+            raise TaichiRuntimeError("iteration must be a non-negative integer")
+        action_index = (
+            iteration % len(self._natives)
+            if self._plan.behavior == "variable_linear"
+            else 0
+        )
+        action = self._plan.actions[action_index]
         residual = _require_current_scalar_ndarray(
             residual,
             "PreconditionerSession residual",
@@ -1430,25 +1467,25 @@ class PreconditionerSession:
             raise TaichiRuntimeError(
                 "PreconditionerSession input/output may not alias"
             )
-        self._native._apply(self._program, residual.arr, out.arr)
+        self._natives[action_index]._apply(
+            self._program, residual.arr, out.arr
+        )
         return out
 
 
 class PreconditionerPlan:
-    """Versions a target operator and one external approximate-inverse action.
+    """Versions a target operator and external approximate-inverse actions.
 
-    The first qualified behavior is ``fixed_linear``. External code publishes
-    target/action numeric generations through their ordinary
+    ``fixed_linear`` owns one action. ``variable_linear`` owns a finite cyclic
+    table selected by the solve-global logical Arnoldi iteration:
+    ``actions[k % len(actions)]``. External code publishes target/action
+    numeric generations through their ordinary
     :class:`LinearOperator` providers, then calls :meth:`update` to attest a
     rebuild or an explicit lagged reuse. No Python callback runs in
     :meth:`apply`, a pinned session, or a solver iteration.
     """
 
     _UNSUPPORTED_BEHAVIORS = {
-        "variable_linear": (
-            "variable_linear preconditioners have no qualified flexible "
-            "solver consumer"
-        ),
         "nonlinear": (
             "nonlinear preconditioners have no qualified solver consumer"
         ),
@@ -1461,27 +1498,50 @@ class PreconditionerPlan:
         *,
         method="external",
         behavior="fixed_linear",
+        selection=None,
     ):
         if not isinstance(target, LinearOperator):
             raise TypeError("target must be experimental.LinearOperator")
-        if not isinstance(action, LinearOperator):
-            raise TypeError("action must be experimental.LinearOperator")
         target._ensure_valid()
-        action._ensure_valid()
-        if target._program is not action._program:
-            raise TaichiRuntimeError(
-                "PreconditionerPlan target and action must share a runtime"
+        if isinstance(action, LinearOperator):
+            actions = (action,)
+        elif isinstance(action, (tuple, list)):
+            actions = tuple(action)
+        else:
+            raise TypeError(
+                "action must be a LinearOperator or a finite action sequence"
             )
+        if not actions:
+            raise TaichiRuntimeError(
+                "PreconditionerPlan action sequence must not be empty"
+            )
+        if len(actions) > 32:
+            raise TaichiRuntimeError(
+                "PreconditionerPlan supports at most 32 scheduled actions"
+            )
+        for item in actions:
+            if not isinstance(item, LinearOperator):
+                raise TypeError(
+                    "every PreconditionerPlan action must be a "
+                    "LinearOperator"
+                )
+            item._ensure_valid()
+            if target._program is not item._program:
+                raise TaichiRuntimeError(
+                    "PreconditionerPlan target and actions must share a "
+                    "runtime"
+                )
         expected_shape = (target.shape[1], target.shape[0])
         if target.shape[0] != target.shape[1]:
             raise TaichiRuntimeError(
                 "PreconditionerPlan currently requires a square target"
             )
-        if action.shape != expected_shape or action.dtype != target.dtype:
-            raise TaichiRuntimeError(
-                "PreconditionerPlan action must map the target range back "
-                "to its domain with the same dtype"
-            )
+        for item in actions:
+            if item.shape != expected_shape or item.dtype != target.dtype:
+                raise TaichiRuntimeError(
+                    "every PreconditionerPlan action must map the target "
+                    "range back to its domain with the same dtype"
+                )
         if not isinstance(method, str) or not method.strip():
             raise TaichiRuntimeError(
                 "PreconditionerPlan method must be a non-empty string"
@@ -1491,26 +1551,64 @@ class PreconditionerPlan:
                 "PreconditionerPlan behavior must be a string"
             )
         behavior = behavior.casefold()
-        if behavior not in ("fixed_linear", *self._UNSUPPORTED_BEHAVIORS):
+        if behavior not in (
+            "fixed_linear",
+            "variable_linear",
+            *self._UNSUPPORTED_BEHAVIORS,
+        ):
             raise TaichiRuntimeError(
                 "PreconditionerPlan behavior must be fixed_linear, "
                 "variable_linear, or nonlinear"
             )
+        if behavior == "fixed_linear":
+            if len(actions) != 1:
+                raise TaichiRuntimeError(
+                    "fixed_linear PreconditionerPlan requires exactly one "
+                    "action"
+                )
+            if selection is not None:
+                raise TaichiRuntimeError(
+                    "selection is accepted only for variable_linear behavior"
+                )
+            selection = "fixed"
+        elif behavior == "variable_linear":
+            if selection is None:
+                selection = "cyclic"
+            if not isinstance(selection, str) or (
+                selection.casefold() != "cyclic"
+            ):
+                raise TaichiRuntimeError(
+                    "variable_linear PreconditionerPlan currently requires "
+                    "selection='cyclic'"
+                )
+            selection = "cyclic"
+        elif selection is not None:
+            raise TaichiRuntimeError(
+                "selection is accepted only for variable_linear behavior"
+            )
         self.target = target
-        self.action = action
+        self.actions = actions
+        self.action = actions[0] if behavior == "fixed_linear" else actions
         self.method = method.strip()
         self.behavior = behavior
+        self.selection = selection
         self._program = target._program
         self._unsupported_reason = self._UNSUPPORTED_BEHAVIORS.get(behavior)
         self._handle = None
+        self._handles = ()
         self._consumer_action = None
+        self._consumer_actions = ()
         if self._unsupported_reason is None:
-            self._handle = _ti_core._make_experimental_preconditioner_plan(
-                self._program,
-                target._handle,
-                action._handle,
-                self.method,
+            self._handles = tuple(
+                _ti_core._make_experimental_preconditioner_plan(
+                    self._program,
+                    target._handle,
+                    item._handle,
+                    self.method,
+                )
+                for item in actions
             )
+            self._handle = self._handles[0]
         get_runtime().register_runtime_object(self)
 
     def _ensure_valid(self, *, require_supported=True):
@@ -1519,7 +1617,8 @@ class PreconditionerPlan:
                 "PreconditionerPlan cannot be used after ti.reset()"
             )
         self.target._ensure_valid()
-        self.action._ensure_valid()
+        for action in self.actions:
+            action._ensure_valid()
         if require_supported and self._handle is None:
             raise TaichiRuntimeError(
                 "PreconditionerPlan behavior is unsupported: "
@@ -1528,9 +1627,12 @@ class PreconditionerPlan:
 
     def _invalidate_runtime(self):
         self._consumer_action = None
+        self._consumer_actions = ()
         self._handle = None
+        self._handles = ()
         self.target = None
         self.action = None
+        self.actions = ()
         self._program = None
 
     def _require_target(self, target):
@@ -1539,6 +1641,13 @@ class PreconditionerPlan:
             raise TaichiRuntimeError(
                 "PreconditionerPlan was built for a different target "
                 "LinearOperator"
+            )
+
+    def _require_fixed_behavior(self, consumer):
+        if self.behavior != "fixed_linear":
+            raise TaichiRuntimeError(
+                f"{consumer} requires behavior='fixed_linear'; "
+                "variable_linear actions are consumed only by FGMRES"
             )
 
     @property
@@ -1555,57 +1664,158 @@ class PreconditionerPlan:
                     "is_setup": False,
                 }
             )
-        result = dict(self._handle._metadata())
+        action_metadata = tuple(
+            dict(handle._metadata()) for handle in self._handles
+        )
+        result = dict(action_metadata[0])
+        result["behavior"] = self.behavior
+        result["selection"] = self.selection
+        result["period"] = len(self.actions)
         result["target_provider"] = self.target.provider
-        result["action_provider"] = self.action.provider
+        result["action_providers"] = tuple(
+            action.provider for action in self.actions
+        )
+        if self.behavior == "fixed_linear":
+            result["action_provider"] = self.actions[0].provider
+        else:
+            result["is_setup"] = all(
+                item["is_setup"] for item in action_metadata
+            )
+            result["built_from_operator_stamps"] = tuple(
+                item["built_from_operator_stamp"]
+                for item in action_metadata
+            )
+            result["accepted_target_stamps"] = tuple(
+                item["accepted_target_stamp"] for item in action_metadata
+            )
+            result["accepted_action_stamps"] = tuple(
+                item["accepted_action_stamp"] for item in action_metadata
+            )
+            result["actions"] = action_metadata
         return _readonly_copy(result)
 
     def setup(self):
-        """Attests that the current action was built from the current target."""
+        """Attests that current actions were built from the current target."""
         self._ensure_valid()
-        self._handle._setup(self._program)
-        consumer_handle = _ti_core._make_experimental_preconditioner_action(
-            self._program, self._handle
+        for handle in self._handles:
+            handle._setup(self._program)
+        consumer_handles = tuple(
+            _ti_core._make_experimental_preconditioner_action(
+                self._program, handle
+            )
+            for handle in self._handles
         )
-        self._consumer_action = LinearOperator._from_handle(
-            consumer_handle,
-            provider_kind=self.action._provider_kind,
-            retained=(self.target, self.action),
+        self._consumer_actions = tuple(
+            LinearOperator._from_handle(
+                consumer_handle,
+                provider_kind=action._provider_kind,
+                retained=(self.target, action),
+            )
+            for consumer_handle, action in zip(
+                consumer_handles, self.actions
+            )
         )
+        self._consumer_action = self._consumer_actions[0]
         return self
 
     def update(self, *, accept_reuse=False):
         """Approves current generations as a rebuild or explicit reuse.
 
-        With the default ``accept_reuse=False``, a changed target requires a
-        changed action generation. ``accept_reuse=True`` approves the exact
-        previously accepted action for a newer target while preserving its
-        original ``built_from_operator_stamp`` provenance.
+        With the default ``accept_reuse=False``, a changed target requires
+        every action generation to change. Variable-linear plans also accept
+        one boolean per action, allowing an explicit mix of rebuilt and
+        lagged actions. Reuse preserves each action's original
+        ``built_from_operator_stamp`` provenance.
         """
         self._ensure_valid()
-        if not isinstance(accept_reuse, bool):
-            raise TaichiRuntimeError("accept_reuse must be bool")
-        self._handle._update(self._program, accept_reuse)
+        if isinstance(accept_reuse, bool):
+            reuse = (accept_reuse,) * len(self._handles)
+        elif self.behavior == "variable_linear" and isinstance(
+            accept_reuse, (tuple, list)
+        ):
+            reuse = tuple(accept_reuse)
+            if len(reuse) != len(self._handles) or not all(
+                isinstance(item, bool) for item in reuse
+            ):
+                raise TaichiRuntimeError(
+                    "accept_reuse sequence must contain one bool per action"
+                )
+        else:
+            raise TaichiRuntimeError(
+                "accept_reuse must be bool or one bool per variable action"
+            )
+        for handle, reuse_action in zip(self._handles, reuse):
+            handle._update(self._program, reuse_action)
         return self
 
     def pin(self):
-        """Pins one approved target/action generation pair."""
+        """Pins the complete approved target/action-table snapshot."""
         self._ensure_valid()
+        natives = tuple(
+            handle._pin(self._program) for handle in self._handles
+        )
         return PreconditionerSession(
-            self, self._handle._pin(self._program)
+            self, natives if self.behavior == "variable_linear" else natives[0]
         )
 
-    def apply(self, residual, out=None):
-        """Pins the current approved pair and applies its action once."""
-        return self.pin().apply(residual, out=out)
+    def apply(self, residual, out=None, *, iteration=0):
+        """Pins the approved snapshot and applies its selected action once."""
+        return self.pin().apply(
+            residual, out=out, iteration=iteration
+        )
 
     def statistics(self):
         self._ensure_valid()
-        return dict(self._handle._debug_runtime_stats())
+        action_statistics = tuple(
+            dict(handle._debug_runtime_stats())
+            for handle in self._handles
+        )
+        if self.behavior == "fixed_linear":
+            result = dict(action_statistics[0])
+        else:
+            summed_keys = (
+                "setup_calls",
+                "update_calls",
+                "update_successes",
+                "update_noops",
+                "update_failures",
+                "target_generation_changes",
+                "action_generation_changes",
+                "rebuild_attestations",
+                "reuse_attestations",
+                "pins",
+                "apply_calls",
+                "stale_rejections",
+                "approved_generations_published",
+                "approved_generations_retired",
+                "approved_generations_released",
+                "approved_generation_active_leases",
+            )
+            result = {
+                key: sum(item[key] for item in action_statistics)
+                for key in summed_keys
+            }
+            result.update(
+                {
+                    "schema_version": 1,
+                    "behavior": self.behavior,
+                    "selection": self.selection,
+                    "period": len(self.actions),
+                    "has_current_approved_generation": all(
+                        item["has_current_approved_generation"]
+                        for item in action_statistics
+                    ),
+                    "actions": action_statistics,
+                }
+            )
+        result["behavior"] = self.behavior
+        result["selection"] = self.selection
+        result["period"] = len(self.actions)
+        return result
 
 
 class SolvePlan:
-    """Persistent CG, PCG, MINRES, BiCGSTAB, or restarted GMRES plan.
+    """Persistent CG, PCG, MINRES, BiCGSTAB, GMRES, or FGMRES plan.
 
     ``pcg`` accepts fixed stored CSR/BSR providers with explicit ``"jacobi"``
     or ``"block_jacobi"`` selection. It also accepts a trusted SPD
@@ -1637,10 +1847,17 @@ class SolvePlan:
             raise TypeError("operator must be experimental.LinearOperator")
         operator._ensure_valid()
         method = str(method).casefold()
-        if method not in ("cg", "pcg", "minres", "bicgstab", "gmres"):
+        if method not in (
+            "cg",
+            "pcg",
+            "minres",
+            "bicgstab",
+            "gmres",
+            "fgmres",
+        ):
             raise TaichiRuntimeError(
                 "SolvePlan method must be 'cg', 'pcg', 'minres', "
-                "'bicgstab', or 'gmres'"
+                "'bicgstab', 'gmres', or 'fgmres'"
             )
         if operator.shape[0] != operator.shape[1]:
             raise TaichiRuntimeError("Krylov SolvePlan requires a square operator")
@@ -1653,26 +1870,26 @@ class SolvePlan:
         self.atol = atol
         self.rtol = rtol
         self.preconditioner = preconditioner
-        if method == "gmres":
+        if method in ("gmres", "fgmres"):
             if restart is None:
                 restart = 16
             if isinstance(restart, bool):
                 raise TaichiRuntimeError(
-                    "GMRES restart must be one of 8, 16, or 32"
+                    f"{method.upper()} restart must be one of 8, 16, or 32"
                 )
             try:
                 restart = _operator.index(restart)
             except TypeError as exc:
                 raise TaichiRuntimeError(
-                    "GMRES restart must be one of 8, 16, or 32"
+                    f"{method.upper()} restart must be one of 8, 16, or 32"
                 ) from exc
             if restart not in (8, 16, 32):
                 raise TaichiRuntimeError(
-                    "GMRES restart must be one of 8, 16, or 32"
+                    f"{method.upper()} restart must be one of 8, 16, or 32"
                 )
         elif restart is not None:
             raise TaichiRuntimeError(
-                "restart is accepted only for method='gmres'"
+                "restart is accepted only for method='gmres' or 'fgmres'"
             )
         self.restart = restart
         self._program = _current_program()
@@ -1697,7 +1914,9 @@ class SolvePlan:
         arch = self._program.config().arch
         cpu_arches = (_ti_core.Arch.x64, _ti_core.Arch.arm64)
         if policy is None:
-            if self.method == "gmres" and arch == _ti_core.Arch.cuda:
+            if self.method in ("gmres", "fgmres") and (
+                arch == _ti_core.Arch.cuda
+            ):
                 policy = "host_check_every_k"
             elif arch == _ti_core.Arch.vulkan:
                 policy = "fixed_budget_masked"
@@ -1726,19 +1945,19 @@ class SolvePlan:
         elif arch == _ti_core.Arch.cuda:
             supported = (
                 ("host_check_every_k",)
-                if self.method == "gmres"
+                if self.method in ("gmres", "fgmres")
                 else ("host_each_iteration", "host_check_every_k")
             )
             if policy not in supported:
                 raise TaichiRuntimeError(
-                    "CUDA GMRES supports host_check_every_k only"
-                    if self.method == "gmres"
+                    "CUDA GMRES/FGMRES supports host_check_every_k only"
+                    if self.method in ("gmres", "fgmres")
                     else "CUDA SolvePlan supports host_each_iteration or "
                     "host_check_every_k"
                 )
             expected_interval = (
                 self.restart
-                if self.method == "gmres"
+                if self.method in ("gmres", "fgmres")
                 else (4 if policy == "host_check_every_k" else 1)
             )
         elif arch == _ti_core.Arch.vulkan:
@@ -1779,16 +1998,16 @@ class SolvePlan:
                 "check_interval is configurable only for host_check_every_k"
             )
         if (
-            self.method == "gmres"
+            self.method in ("gmres", "fgmres")
             and policy == "host_check_every_k"
             and check_interval != self.restart
         ):
             raise TaichiRuntimeError(
-                "GMRES host_check_every_k requires "
+                "GMRES/FGMRES host_check_every_k requires "
                 "check_interval == restart"
             )
         if (
-            self.method != "gmres"
+            self.method not in ("gmres", "fgmres")
             and policy == "host_check_every_k"
             and check_interval not in (4, 8)
         ):
@@ -1969,6 +2188,7 @@ class SolvePlan:
             ):
                 if isinstance(self.preconditioner, PreconditionerPlan):
                     self.preconditioner._require_target(self.operator)
+                    self.preconditioner._require_fixed_behavior("MINRES")
                     preconditioner_scope = self.preconditioner.pin()
                     preconditioner_action = (
                         self.preconditioner._consumer_action
@@ -2040,6 +2260,76 @@ class SolvePlan:
                 )
             )
 
+        if self.method == "fgmres":
+            if not isinstance(self.preconditioner, PreconditionerPlan):
+                raise TaichiRuntimeError(
+                    "FGMRES requires PreconditionerPlan("
+                    "behavior='variable_linear')"
+                )
+            self.preconditioner._require_target(self.operator)
+            if self.preconditioner.behavior != "variable_linear":
+                raise TaichiRuntimeError(
+                    "FGMRES requires behavior='variable_linear'; use GMRES "
+                    "for fixed-linear right preconditioning"
+                )
+            preconditioner_actions = (
+                self.preconditioner._consumer_actions
+            )
+            if len(preconditioner_actions) != len(
+                self.preconditioner.actions
+            ):
+                raise TaichiRuntimeError(
+                    "variable_linear PreconditionerPlan must be setup before "
+                    "constructing FGMRES"
+                )
+            for action in preconditioner_actions:
+                self._require_fixed_linear_right_preconditioner(action)
+            if arch in cpu_arches:
+                if kind in ("kernel", "graph") or any(
+                    action._provider_kind in ("kernel", "graph")
+                    for action in preconditioner_actions
+                ):
+                    raise TaichiRuntimeError(
+                        "CPU FGMRES does not consume compiled ndarray "
+                        "operator actions"
+                    )
+                factory = (
+                    _ti_core._make_float_cpu_variable_preconditioned_experimental_linear_operator_gmres_solver
+                    if self.operator.dtype == f32
+                    else _ti_core._make_double_cpu_variable_preconditioned_experimental_linear_operator_gmres_solver
+                )
+                return factory(
+                    self._program,
+                    self.operator._handle,
+                    [action._handle for action in preconditioner_actions],
+                    self.max_iterations,
+                    self.restart,
+                    self.atol,
+                    self.rtol,
+                )
+            if arch not in gpu_arches:
+                raise TaichiRuntimeError("unsupported FGMRES backend")
+            if self.operator.dtype != f32:
+                raise TaichiRuntimeError(
+                    "GPU FGMRES currently supports f32 only"
+                )
+            configure = (
+                self._configure_cuda_solver
+                if arch == _ti_core.Arch.cuda
+                else self._configure_vulkan_solver
+            )
+            return configure(
+                _ti_core._make_device_variable_preconditioned_gmres_solver(
+                    self._program,
+                    self.operator._handle,
+                    [action._handle for action in preconditioner_actions],
+                    self.max_iterations,
+                    self.restart,
+                    self.atol,
+                    self.rtol,
+                )
+            )
+
         if self.method == "gmres":
             preconditioner_action = None
             if isinstance(
@@ -2047,6 +2337,7 @@ class SolvePlan:
             ):
                 if isinstance(self.preconditioner, PreconditionerPlan):
                     self.preconditioner._require_target(self.operator)
+                    self.preconditioner._require_fixed_behavior("GMRES")
                     preconditioner_action = (
                         self.preconditioner._consumer_action
                     )
@@ -2151,6 +2442,7 @@ class SolvePlan:
             ):
                 if isinstance(self.preconditioner, PreconditionerPlan):
                     self.preconditioner._require_target(self.operator)
+                    self.preconditioner._require_fixed_behavior("BiCGSTAB")
                     preconditioner_scope = self.preconditioner.pin()
                     preconditioner_action = (
                         self.preconditioner._consumer_action
@@ -2309,6 +2601,7 @@ class SolvePlan:
         ):
             if isinstance(self.preconditioner, PreconditionerPlan):
                 self.preconditioner._require_target(self.operator)
+                self.preconditioner._require_fixed_behavior("PCG")
                 # Validate and pin the exact approved pair across native
                 # solver construction. The solver owns its own generation
                 # pins after the factory returns.
@@ -2517,7 +2810,7 @@ class SolvePlan:
             preconditioner_scope = self.preconditioner.pin()
         cpu_arches = (_ti_core.Arch.x64, _ti_core.Arch.arm64)
         if (
-            self.method in ("bicgstab", "gmres", "minres")
+            self.method in ("bicgstab", "gmres", "fgmres", "minres")
             and self._program.config().arch in cpu_arches
         ):
             self._solver.solve_ndarray(self._program, out.arr, rhs.arr)

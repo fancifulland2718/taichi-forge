@@ -917,8 +917,8 @@ PreconditionerPlan::PreconditionerPlan(Program *program,
   validate_space(target_descriptor_.range, "preconditioner target range");
   validate_preconditioner_descriptor(target_descriptor_,
                                      action_plan_->descriptor());
-  TI_ERROR_IF(behavior_ != PreconditionerBehavior::fixed_linear,
-              "M3 PreconditionerPlan implements fixed-linear behavior only.");
+  TI_ERROR_IF(behavior_ == PreconditionerBehavior::nonlinear,
+              "PreconditionerPlan does not execute nonlinear actions.");
   TI_ERROR_IF(method_.empty() || !update_,
               "PreconditionerPlan requires a method name and update "
               "callback.");

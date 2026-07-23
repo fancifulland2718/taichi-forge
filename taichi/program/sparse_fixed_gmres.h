@@ -10,9 +10,10 @@
 
 namespace taichi::lang {
 
-// Provider-neutral restarted GMRES with fixed-linear right preconditioning.
-// The fixed action permits reconstructing M^-1(V y) once per restart cycle,
-// so ordinary GMRES stores V but not the Z basis required by FGMRES.
+// Provider-neutral restarted GMRES and FGMRES. Ordinary GMRES may apply one
+// fixed-linear right preconditioner after combining V*y. FGMRES pins a finite
+// variable-linear action table for the whole solve, selects M[k % period] by
+// the solve-global logical Arnoldi iteration, and stores every resulting Z_j.
 template <typename EigenT, typename DT>
 class FixedSparseGMRES {
  public:
@@ -104,6 +105,35 @@ class FixedSparseGMRES {
     preconditioned_work_ = EigenT::Zero(rows_);
   }
 
+  FixedSparseGMRES(
+      Program *program,
+      OperatorBinding operator_binding,
+      const std::vector<ExperimentalLinearOperatorHandle *> &preconditioners,
+      int max_iterations,
+      int restart,
+      DT absolute_tolerance,
+      bool verbose,
+      DT relative_tolerance = static_cast<DT>(0))
+      : FixedSparseGMRES(program, std::move(operator_binding),
+                         max_iterations, restart, absolute_tolerance,
+                         verbose, relative_tolerance) {
+    TI_ERROR_IF(preconditioners.empty() || preconditioners.size() > 32,
+                "FGMRES requires between 1 and 32 scheduled actions.");
+    flexible_preconditioner_plans_.reserve(preconditioners.size());
+    for (auto *preconditioner : preconditioners) {
+      TI_ERROR_IF(!preconditioner,
+                  "FGMRES action table contains a null action.");
+      flexible_preconditioner_plans_.push_back(
+          make_solver_flexible_right_preconditioner_plan(
+              program_, *operator_plan_, *preconditioner,
+              "variable_linear_action"));
+    }
+    preconditioned_basis_.reserve(static_cast<std::size_t>(restart_));
+    for (int i = 0; i < restart_; ++i) {
+      preconditioned_basis_.push_back(EigenT::Zero(rows_));
+    }
+  }
+
   void set_x(EigenT &x) {
     TI_ERROR_IF(x.size() != cols_,
                 "GMRES initial guess must have {} entries, got {}.", cols_,
@@ -147,6 +177,12 @@ class FixedSparseGMRES {
     if (preconditioner_plan_) {
       preconditioner_generation =
           preconditioner_plan_->update_and_pin(operator_generation);
+    }
+    std::vector<OperatorPinnedAction> flexible_generations;
+    flexible_generations.reserve(flexible_preconditioner_plans_.size());
+    for (auto &plan : flexible_preconditioner_plans_) {
+      flexible_generations.push_back(
+          plan->update_and_pin(operator_generation));
     }
     reset_last_result(operator_generation.resource_stamp());
     const auto previous_solve_calls =
@@ -213,7 +249,22 @@ class FixedSparseGMRES {
       bool happy = false;
       for (int j = 0; j < cycle_limit; ++j) {
         const EigenT *operator_input = &basis_[j];
-        if (preconditioner_plan_) {
+        if (!flexible_preconditioner_plans_.empty()) {
+          const std::size_t action_index =
+              static_cast<std::size_t>(iterations_) %
+              flexible_preconditioner_plans_.size();
+          apply_preconditioner(
+              *flexible_preconditioner_plans_[action_index],
+              flexible_generations[action_index], basis_[j],
+              preconditioned_basis_[j]);
+          operator_input = &preconditioned_basis_[j];
+          preconditioner_action_selections_.fetch_add(
+              1, std::memory_order_relaxed);
+          if (iterations_ > 0 && action_index == 0) {
+            preconditioner_schedule_wraps_.fetch_add(
+                1, std::memory_order_relaxed);
+          }
+        } else if (preconditioner_plan_) {
           apply_preconditioner(preconditioner_generation, basis_[j],
                                preconditioned_work_);
           operator_input = &preconditioned_work_;
@@ -307,8 +358,12 @@ class FixedSparseGMRES {
       }
 
       update_.setZero();
+      const auto &update_basis =
+          flexible_preconditioner_plans_.empty()
+              ? basis_
+              : preconditioned_basis_;
       for (int i = 0; i < used; ++i) {
-        update_.noalias() += coefficients_[i] * basis_[i];
+        update_.noalias() += coefficients_[i] * update_basis[i];
       }
       vector_update_calls_.fetch_add(1, std::memory_order_relaxed);
       if (preconditioner_plan_) {
@@ -379,7 +434,8 @@ class FixedSparseGMRES {
     SparseSolvePlanRuntimeStatistics result;
     result.backend_family = program_ ? arch_name(program_->compile_config().arch)
                                      : "host_reference";
-    result.method = "gmres";
+    const bool flexible = !flexible_preconditioner_plans_.empty();
+    result.method = flexible ? "fgmres" : "gmres";
     result.dtype = dtype_ == PrimitiveType::f64 ? "f64" : "f32";
     result.rows = rows_;
     result.cols = cols_;
@@ -446,31 +502,55 @@ class FixedSparseGMRES {
     result.solver_execution_policy = "host_each_iteration";
     result.host_check_interval = 1;
     result.solver_scalar_location = "host";
-    result.preconditioning_side = preconditioner_plan_ ? "right" : "none";
+    result.preconditioning_side =
+        (preconditioner_plan_ || flexible) ? "right" : "none";
     result.preconditioner_method =
-        preconditioner_plan_ ? preconditioner_plan_->method() : "identity";
+        preconditioner_plan_
+            ? preconditioner_plan_->method()
+            : (flexible ? "variable_linear_action_table" : "identity");
     result.preconditioner_behavior =
-        preconditioner_plan_ ? "fixed_linear" : "identity";
+        preconditioner_plan_
+            ? "fixed_linear"
+            : (flexible ? "variable_linear" : "identity");
     result.preconditioner_apply_calls =
         preconditioner_apply_calls_.load(std::memory_order_relaxed);
     result.preconditioner_apply_calls_available = true;
-    result.external_preconditioner = preconditioner_plan_ != nullptr;
+    result.preconditioner_action_selections =
+        preconditioner_action_selections_.load(std::memory_order_relaxed);
+    result.preconditioner_schedule_wraps =
+        preconditioner_schedule_wraps_.load(std::memory_order_relaxed);
+    result.external_preconditioner =
+        preconditioner_plan_ != nullptr || flexible;
     result.preconditioner_ownership_scope =
-        preconditioner_plan_ ? "solve_plan" : "none";
+        flexible ? "solve_plan_action_table_snapshot"
+                 : (preconditioner_plan_ ? "solve_plan" : "none");
     if (preconditioner_plan_) {
       append_solver_preconditioner_plan_statistics(*preconditioner_plan_,
                                                    result);
+      result.preconditioner_action_count = 1;
+      result.preconditioner_action_selection = "fixed";
+    } else if (flexible) {
+      append_solver_flexible_preconditioner_plan_statistics(
+          flexible_preconditioner_plans_, result);
     }
     const std::uint64_t basis_count =
         static_cast<std::uint64_t>(restart_ + 1);
     const std::uint64_t auxiliary_count = preconditioner_plan_ ? 4u : 3u;
-    result.persistent_vector_count = basis_count + auxiliary_count;
+    const std::uint64_t preconditioned_basis_count =
+        flexible ? static_cast<std::uint64_t>(restart_) : 0u;
+    result.persistent_vector_count =
+        basis_count + auxiliary_count + preconditioned_basis_count;
     result.persistent_vector_reserved_bytes =
         result.persistent_vector_count * static_cast<std::uint64_t>(rows_) *
         sizeof(DT);
     result.basis_vector_count = basis_count;
     result.basis_reserved_bytes =
         basis_count * static_cast<std::uint64_t>(rows_) * sizeof(DT);
+    result.preconditioned_basis_vector_count =
+        preconditioned_basis_count;
+    result.preconditioned_basis_reserved_bytes =
+        preconditioned_basis_count * static_cast<std::uint64_t>(rows_) *
+        sizeof(DT);
     result.persistent_scalar_count =
         static_cast<std::uint64_t>(restart_) * restart_ +
         6u * static_cast<std::uint64_t>(restart_) + 1u;
@@ -543,7 +623,15 @@ class FixedSparseGMRES {
                             const EigenT &input,
                             EigenT &output) {
     TI_ASSERT(preconditioner_plan_ && generation);
-    auto &plan = preconditioner_plan_->action();
+    apply_preconditioner(*preconditioner_plan_, generation, input, output);
+  }
+
+  void apply_preconditioner(PreconditionerPlan &preconditioner,
+                            const OperatorPinnedAction &generation,
+                            const EigenT &input,
+                            EigenT &output) {
+    TI_ASSERT(generation);
+    auto &plan = preconditioner.action();
     const auto &descriptor = plan.descriptor();
     const auto input_address =
         reinterpret_cast<std::uintptr_t>(input.data());
@@ -644,6 +732,8 @@ class FixedSparseGMRES {
   Program *program_{nullptr};
   std::unique_ptr<OperatorPlan> operator_plan_;
   std::unique_ptr<PreconditionerPlan> preconditioner_plan_;
+  std::vector<std::unique_ptr<PreconditionerPlan>>
+      flexible_preconditioner_plans_;
   DataType dtype_{PrimitiveType::f32};
   int rows_{0};
   int cols_{0};
@@ -654,6 +744,7 @@ class FixedSparseGMRES {
   EigenT update_;
   EigenT preconditioned_work_;
   std::vector<EigenT> basis_;
+  std::vector<EigenT> preconditioned_basis_;
   DenseMatrix hessenberg_;
   EigenT givens_cosine_;
   EigenT givens_sine_;
@@ -678,6 +769,8 @@ class FixedSparseGMRES {
   std::atomic<std::uint64_t> workspace_reuses_{0};
   std::atomic<std::uint64_t> operator_apply_calls_{0};
   std::atomic<std::uint64_t> preconditioner_apply_calls_{0};
+  std::atomic<std::uint64_t> preconditioner_action_selections_{0};
+  std::atomic<std::uint64_t> preconditioner_schedule_wraps_{0};
   std::atomic<std::uint64_t> dot_product_calls_{0};
   std::atomic<std::uint64_t> multi_dot_calls_{0};
   std::atomic<std::uint64_t> vector_update_calls_{0};

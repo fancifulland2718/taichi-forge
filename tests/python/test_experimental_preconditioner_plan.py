@@ -174,12 +174,13 @@ def test_preconditioner_behavior_support_and_reset_fail_closed():
     experimental = ti.linalg.experimental
     target = _diagonal_operator([2.0, 3.0])
     action = _diagonal_operator([0.5, 1.0 / 3.0])
-    unsupported = experimental.PreconditionerPlan(
+    variable = experimental.PreconditionerPlan(
         target, action, behavior="variable_linear"
     )
-    assert not unsupported.metadata["supported"]
-    with pytest.raises(RuntimeError, match="no qualified flexible solver"):
-        unsupported.setup()
+    assert variable.metadata["supported"]
+    assert variable.metadata["selection"] == "cyclic"
+    assert variable.metadata["period"] == 1
+    variable.setup()
 
     plan = experimental.PreconditionerPlan(target, action).setup()
     session = plan.pin()

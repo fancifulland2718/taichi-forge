@@ -4858,6 +4858,10 @@ void export_lang(py::module &m) {
             stats.preconditioner_behavior;
         identity["preconditioner_asynchronous_submit"] =
             stats.preconditioner_asynchronous_submit;
+        identity["preconditioner_action_count"] =
+            stats.preconditioner_action_count;
+        identity["preconditioner_action_selection"] =
+            stats.preconditioner_action_selection;
         identity["operator_pattern_version"] =
             stats.operator_pattern_version;
         identity["operator_numeric_version"] =
@@ -4933,6 +4937,10 @@ void export_lang(py::module &m) {
             stats.preconditioner_apply_calls_available
                 ? py::cast(stats.preconditioner_apply_calls)
                 : py::none();
+        operations["preconditioner_action_selections"] =
+            stats.preconditioner_action_selections;
+        operations["preconditioner_schedule_wraps"] =
+            stats.preconditioner_schedule_wraps;
         operations["operator_generation_pins"] =
             stats.operator_generation_pins;
         operations["operator_generation_changes"] =
@@ -4997,6 +5005,10 @@ void export_lang(py::module &m) {
             stats.basis_vector_count;
         resources["basis_reserved_bytes"] =
             stats.basis_reserved_bytes;
+        resources["preconditioned_basis_vector_count"] =
+            stats.preconditioned_basis_vector_count;
+        resources["preconditioned_basis_reserved_bytes"] =
+            stats.preconditioned_basis_reserved_bytes;
         resources["cublas_handle_count"] = stats.cublas_handle_count;
         resources["cublas_stream_bound"] =
             stats.cublas_stream_bound;
@@ -6037,6 +6049,58 @@ void export_lang(py::module &m) {
       py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
       py::keep_alive<0, 3>(), py::arg("program"), py::arg("operator"),
       py::arg("preconditioner"), py::arg("max_iterations"),
+      py::arg("restart"), py::arg("absolute_tolerance"),
+      py::arg("relative_tolerance") = 0.0);
+  m.def(
+      "_make_float_cpu_variable_preconditioned_experimental_linear_operator_gmres_solver",
+      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+         const py::list &preconditioners, int max_iterations, int restart,
+         float absolute_tolerance, float relative_tolerance) {
+        std::vector<ExperimentalLinearOperatorHandle *> actions;
+        actions.reserve(preconditioners.size());
+        for (const auto &item : preconditioners) {
+          auto *action =
+              item.cast<ExperimentalLinearOperatorHandle *>();
+          TI_ERROR_IF(!action || action->program() != program,
+                      "FGMRES actions must belong to the target Program.");
+          actions.push_back(action);
+        }
+        TI_ERROR_IF(operator_handle.program() != program,
+                    "FGMRES operator belongs to a different Program.");
+        return std::make_unique<
+            FixedSparseGMRES<Eigen::VectorXf, float>>(
+            program, operator_handle.binding(), actions, max_iterations,
+            restart, absolute_tolerance, false, relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(), py::arg("program"), py::arg("operator"),
+      py::arg("preconditioners"), py::arg("max_iterations"),
+      py::arg("restart"), py::arg("absolute_tolerance"),
+      py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "_make_double_cpu_variable_preconditioned_experimental_linear_operator_gmres_solver",
+      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+         const py::list &preconditioners, int max_iterations, int restart,
+         double absolute_tolerance, double relative_tolerance) {
+        std::vector<ExperimentalLinearOperatorHandle *> actions;
+        actions.reserve(preconditioners.size());
+        for (const auto &item : preconditioners) {
+          auto *action =
+              item.cast<ExperimentalLinearOperatorHandle *>();
+          TI_ERROR_IF(!action || action->program() != program,
+                      "FGMRES actions must belong to the target Program.");
+          actions.push_back(action);
+        }
+        TI_ERROR_IF(operator_handle.program() != program,
+                    "FGMRES operator belongs to a different Program.");
+        return std::make_unique<
+            FixedSparseGMRES<Eigen::VectorXd, double>>(
+            program, operator_handle.binding(), actions, max_iterations,
+            restart, absolute_tolerance, false, relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(), py::arg("program"), py::arg("operator"),
+      py::arg("preconditioners"), py::arg("max_iterations"),
       py::arg("restart"), py::arg("absolute_tolerance"),
       py::arg("relative_tolerance") = 0.0);
 

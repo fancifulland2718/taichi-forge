@@ -143,6 +143,8 @@ struct SparseSolvePlanRuntimeStatistics {
   std::uint64_t operator_plan_invalidations{0};
   std::string preconditioner_action_provider{"identity"};
   bool preconditioner_asynchronous_submit{false};
+  std::uint64_t preconditioner_action_count{0};
+  std::string preconditioner_action_selection{"none"};
   std::uint64_t preconditioner_generation_pins{0};
   std::uint64_t preconditioner_generation_changes{0};
   std::uint64_t preconditioner_numeric_generation_changes{0};
@@ -198,6 +200,8 @@ struct SparseSolvePlanRuntimeStatistics {
   std::string preconditioner_method{"identity"};
   std::uint64_t preconditioner_apply_calls{0};
   bool preconditioner_apply_calls_available{true};
+  std::uint64_t preconditioner_action_selections{0};
+  std::uint64_t preconditioner_schedule_wraps{0};
 
   std::uint64_t persistent_vector_count{0};
   std::uint64_t persistent_vector_reserved_bytes{0};
@@ -205,6 +209,8 @@ struct SparseSolvePlanRuntimeStatistics {
   std::uint64_t persistent_scalar_reserved_bytes{0};
   std::uint64_t basis_vector_count{0};
   std::uint64_t basis_reserved_bytes{0};
+  std::uint64_t preconditioned_basis_vector_count{0};
+  std::uint64_t preconditioned_basis_reserved_bytes{0};
   std::uint64_t cublas_handle_count{0};
   bool cublas_stream_bound{false};
   bool cublas_device_pointer_mode{false};
@@ -737,8 +743,17 @@ std::unique_ptr<PreconditionerPlan> make_solver_right_preconditioner_plan(
     OperatorPlan &target_plan,
     ExperimentalLinearOperatorHandle &preconditioner,
     std::string method);
+std::unique_ptr<PreconditionerPlan>
+make_solver_flexible_right_preconditioner_plan(
+    Program *program,
+    OperatorPlan &target_plan,
+    ExperimentalLinearOperatorHandle &preconditioner,
+    std::string method);
 void append_solver_preconditioner_plan_statistics(
     const PreconditionerPlan &plan,
+    SparseSolvePlanRuntimeStatistics &statistics);
+void append_solver_flexible_preconditioner_plan_statistics(
+    const std::vector<std::unique_ptr<PreconditionerPlan>> &plans,
     SparseSolvePlanRuntimeStatistics &statistics);
 
 class CpuSparseCGPlan {
