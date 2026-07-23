@@ -133,6 +133,7 @@ enum class OperatorSolverFamily : std::uint8_t {
   pcg,
   minres,
   bicgstab,
+  gmres,
 };
 
 struct OperatorResourceStamp {

@@ -37,6 +37,7 @@
 #include "taichi/program/conjugate_gradient.h"
 #include "taichi/program/sparse_bicgstab.h"
 #include "taichi/program/sparse_fixed_bicgstab.h"
+#include "taichi/program/sparse_fixed_gmres.h"
 #include "taichi/program/sparse_minres.h"
 #include "taichi/program/sparse_operator_minres.h"
 #include "taichi/program/sparse_device_bicgstab.h"
@@ -4882,6 +4883,10 @@ void export_lang(py::module &m) {
             stats.dot_product_calls_available
                 ? py::cast(stats.dot_product_calls)
                 : py::none();
+        operations["multi_dot_calls"] =
+            stats.multi_dot_calls_available
+                ? py::cast(stats.multi_dot_calls)
+                : py::none();
         operations["vector_update_calls"] =
             stats.vector_update_calls_available
                 ? py::cast(stats.vector_update_calls)
@@ -4912,6 +4917,13 @@ void export_lang(py::module &m) {
             stats.solver_chunk_rebinds;
         operations["solver_chunk_invalidations"] =
             stats.solver_chunk_invalidations;
+        operations["restart_cycles"] = stats.restart_cycles;
+        operations["happy_breakdowns"] = stats.happy_breakdowns;
+        operations["restart"] = stats.restart;
+        operations["orthogonalization_strategy"] =
+            stats.orthogonalization_strategy;
+        operations["orthogonalization_passes"] =
+            stats.orthogonalization_passes;
         operations["fixed_iteration_only"] =
             stats.fixed_iteration_only;
         operations["bounded_masked_execution"] =
@@ -4980,6 +4992,10 @@ void export_lang(py::module &m) {
             stats.persistent_scalar_count;
         resources["persistent_scalar_reserved_bytes"] =
             stats.persistent_scalar_reserved_bytes;
+        resources["basis_vector_count"] =
+            stats.basis_vector_count;
+        resources["basis_reserved_bytes"] =
+            stats.basis_reserved_bytes;
         resources["cublas_handle_count"] = stats.cublas_handle_count;
         resources["cublas_stream_bound"] =
             stats.cublas_stream_bound;
@@ -5917,6 +5933,111 @@ void export_lang(py::module &m) {
       py::keep_alive<0, 3>(), py::arg("program"), py::arg("operator"),
       py::arg("preconditioner"), py::arg("max_iterations"),
       py::arg("absolute_tolerance"), py::arg("relative_tolerance") = 0.0);
+
+  py::class_<FixedSparseGMRES<Eigen::VectorXf, float>>(
+      m, "FixedSparseGMRESf")
+      .def("solve_ndarray",
+           &FixedSparseGMRES<Eigen::VectorXf, float>::solve_ndarray)
+      .def("_get_last_result",
+           [sparse_solve_result_to_dict](
+               const FixedSparseGMRES<Eigen::VectorXf, float> &solver) {
+             return sparse_solve_result_to_dict(solver.get_last_result());
+           })
+      .def("_debug_runtime_stats",
+           [sparse_solve_plan_stats_to_dict](
+               const FixedSparseGMRES<Eigen::VectorXf, float> &solver) {
+             return sparse_solve_plan_stats_to_dict(
+                 solver.debug_runtime_statistics());
+           });
+  py::class_<FixedSparseGMRES<Eigen::VectorXd, double>>(
+      m, "FixedSparseGMRESd")
+      .def("solve_ndarray",
+           &FixedSparseGMRES<Eigen::VectorXd, double>::solve_ndarray)
+      .def("_get_last_result",
+           [sparse_solve_result_to_dict](
+               const FixedSparseGMRES<Eigen::VectorXd, double> &solver) {
+             return sparse_solve_result_to_dict(solver.get_last_result());
+           })
+      .def("_debug_runtime_stats",
+           [sparse_solve_plan_stats_to_dict](
+               const FixedSparseGMRES<Eigen::VectorXd, double> &solver) {
+             return sparse_solve_plan_stats_to_dict(
+                 solver.debug_runtime_statistics());
+           });
+  m.def(
+      "_make_float_cpu_experimental_linear_operator_gmres_solver",
+      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+         int max_iterations, int restart, float absolute_tolerance,
+         float relative_tolerance) {
+        TI_ERROR_IF(operator_handle.program() != program,
+                    "GMRES operator belongs to a different Program.");
+        return std::make_unique<
+            FixedSparseGMRES<Eigen::VectorXf, float>>(
+            program, operator_handle.binding(), max_iterations, restart,
+            absolute_tolerance, false, relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::arg("program"), py::arg("operator"),
+      py::arg("max_iterations"), py::arg("restart"),
+      py::arg("absolute_tolerance"), py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "_make_double_cpu_experimental_linear_operator_gmres_solver",
+      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+         int max_iterations, int restart, double absolute_tolerance,
+         double relative_tolerance) {
+        TI_ERROR_IF(operator_handle.program() != program,
+                    "GMRES operator belongs to a different Program.");
+        return std::make_unique<
+            FixedSparseGMRES<Eigen::VectorXd, double>>(
+            program, operator_handle.binding(), max_iterations, restart,
+            absolute_tolerance, false, relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::arg("program"), py::arg("operator"),
+      py::arg("max_iterations"), py::arg("restart"),
+      py::arg("absolute_tolerance"), py::arg("relative_tolerance") = 0.0);
+  m.def(
+      "_make_float_cpu_preconditioned_experimental_linear_operator_gmres_solver",
+      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+         ExperimentalLinearOperatorHandle &preconditioner,
+         int max_iterations, int restart, float absolute_tolerance,
+         float relative_tolerance) {
+        TI_ERROR_IF(operator_handle.program() != program ||
+                        preconditioner.program() != program,
+                    "GMRES operator and preconditioner must belong to "
+                    "the target Program.");
+        return std::make_unique<
+            FixedSparseGMRES<Eigen::VectorXf, float>>(
+            program, operator_handle.binding(), preconditioner,
+            max_iterations, restart, absolute_tolerance, false,
+            relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(), py::arg("program"), py::arg("operator"),
+      py::arg("preconditioner"), py::arg("max_iterations"),
+      py::arg("restart"), py::arg("absolute_tolerance"),
+      py::arg("relative_tolerance") = 0.0f);
+  m.def(
+      "_make_double_cpu_preconditioned_experimental_linear_operator_gmres_solver",
+      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+         ExperimentalLinearOperatorHandle &preconditioner,
+         int max_iterations, int restart, double absolute_tolerance,
+         double relative_tolerance) {
+        TI_ERROR_IF(operator_handle.program() != program ||
+                        preconditioner.program() != program,
+                    "GMRES operator and preconditioner must belong to "
+                    "the target Program.");
+        return std::make_unique<
+            FixedSparseGMRES<Eigen::VectorXd, double>>(
+            program, operator_handle.binding(), preconditioner,
+            max_iterations, restart, absolute_tolerance, false,
+            relative_tolerance);
+      },
+      py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+      py::keep_alive<0, 3>(), py::arg("program"), py::arg("operator"),
+      py::arg("preconditioner"), py::arg("max_iterations"),
+      py::arg("restart"), py::arg("absolute_tolerance"),
+      py::arg("relative_tolerance") = 0.0);
 
   py::class_<OperatorMINRES<Eigen::VectorXf, float>>(m, "OperatorMINRESf")
       .def("solve_ndarray",

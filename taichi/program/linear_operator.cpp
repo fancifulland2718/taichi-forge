@@ -271,7 +271,8 @@ void validate_operator_solver_compatibility(
     PreconditionerBehavior preconditioner_behavior) {
   TI_ERROR_IF(descriptor.domain != descriptor.range,
               "Krylov solver requires a square operator descriptor.");
-  if (family == OperatorSolverFamily::bicgstab) {
+  if (family == OperatorSolverFamily::bicgstab ||
+      family == OperatorSolverFamily::gmres) {
     return;
   }
   if (family == OperatorSolverFamily::minres) {

@@ -56,7 +56,7 @@ SparseSolveBreakdownReason decode_breakdown_reason(std::int32_t value) {
   TI_ERROR_IF(value < static_cast<std::int32_t>(
                           SparseSolveBreakdownReason::none) ||
                   value > static_cast<std::int32_t>(
-                              SparseSolveBreakdownReason::omega),
+                              SparseSolveBreakdownReason::hessenberg_singular),
               "Device BiCGSTAB returned invalid breakdown reason {}.",
               value);
   return static_cast<SparseSolveBreakdownReason>(value);

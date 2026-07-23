@@ -1605,7 +1605,7 @@ class PreconditionerPlan:
 
 
 class SolvePlan:
-    """Persistent CG, PCG, MINRES, or BiCGSTAB execution plan.
+    """Persistent CG, PCG, MINRES, BiCGSTAB, or restarted GMRES plan.
 
     ``pcg`` accepts fixed stored CSR/BSR providers with explicit ``"jacobi"``
     or ``"block_jacobi"`` selection. It also accepts a trusted SPD
@@ -1631,15 +1631,16 @@ class SolvePlan:
         rtol=0.0,
         execution_policy=None,
         check_interval=None,
+        restart=None,
     ):
         if not isinstance(operator, LinearOperator):
             raise TypeError("operator must be experimental.LinearOperator")
         operator._ensure_valid()
         method = str(method).casefold()
-        if method not in ("cg", "pcg", "minres", "bicgstab"):
+        if method not in ("cg", "pcg", "minres", "bicgstab", "gmres"):
             raise TaichiRuntimeError(
-                "SolvePlan method must be 'cg', 'pcg', 'minres', or "
-                "'bicgstab'"
+                "SolvePlan method must be 'cg', 'pcg', 'minres', "
+                "'bicgstab', or 'gmres'"
             )
         if operator.shape[0] != operator.shape[1]:
             raise TaichiRuntimeError("Krylov SolvePlan requires a square operator")
@@ -1652,6 +1653,28 @@ class SolvePlan:
         self.atol = atol
         self.rtol = rtol
         self.preconditioner = preconditioner
+        if method == "gmres":
+            if restart is None:
+                restart = 16
+            if isinstance(restart, bool):
+                raise TaichiRuntimeError(
+                    "GMRES restart must be one of 8, 16, or 32"
+                )
+            try:
+                restart = _operator.index(restart)
+            except TypeError as exc:
+                raise TaichiRuntimeError(
+                    "GMRES restart must be one of 8, 16, or 32"
+                ) from exc
+            if restart not in (8, 16, 32):
+                raise TaichiRuntimeError(
+                    "GMRES restart must be one of 8, 16, or 32"
+                )
+        elif restart is not None:
+            raise TaichiRuntimeError(
+                "restart is accepted only for method='gmres'"
+            )
+        self.restart = restart
         self._program = _current_program()
         self.execution_policy, self.check_interval = (
             self._normalize_execution_policy(
@@ -1674,7 +1697,9 @@ class SolvePlan:
         arch = self._program.config().arch
         cpu_arches = (_ti_core.Arch.x64, _ti_core.Arch.arm64)
         if policy is None:
-            if arch == _ti_core.Arch.vulkan:
+            if self.method == "gmres" and arch == _ti_core.Arch.cuda:
+                policy = "host_check_every_k"
+            elif arch == _ti_core.Arch.vulkan:
                 policy = "fixed_budget_masked"
             else:
                 policy = "host_each_iteration"
@@ -1699,15 +1724,23 @@ class SolvePlan:
                 )
             expected_interval = 1
         elif arch == _ti_core.Arch.cuda:
-            if policy not in (
-                "host_each_iteration",
-                "host_check_every_k",
-            ):
+            supported = (
+                ("host_check_every_k",)
+                if self.method == "gmres"
+                else ("host_each_iteration", "host_check_every_k")
+            )
+            if policy not in supported:
                 raise TaichiRuntimeError(
-                    "CUDA SolvePlan supports host_each_iteration or "
+                    "CUDA GMRES supports host_check_every_k only"
+                    if self.method == "gmres"
+                    else "CUDA SolvePlan supports host_each_iteration or "
                     "host_check_every_k"
                 )
-            expected_interval = 4 if policy == "host_check_every_k" else 1
+            expected_interval = (
+                self.restart
+                if self.method == "gmres"
+                else (4 if policy == "host_check_every_k" else 1)
+            )
         elif arch == _ti_core.Arch.vulkan:
             if policy not in (
                 "fixed_budget_masked",
@@ -1718,8 +1751,14 @@ class SolvePlan:
                     "host_check_every_k"
                 )
             expected_interval = (
-                4 if policy == "host_check_every_k"
-                else self.max_iterations
+                self.restart
+                if self.method == "gmres"
+                and policy == "host_check_every_k"
+                else (
+                    4
+                    if policy == "host_check_every_k"
+                    else self.max_iterations
+                )
             )
         else:
             raise TaichiRuntimeError("unsupported SolvePlan backend")
@@ -1739,7 +1778,20 @@ class SolvePlan:
             raise TaichiRuntimeError(
                 "check_interval is configurable only for host_check_every_k"
             )
-        if policy == "host_check_every_k" and check_interval not in (4, 8):
+        if (
+            self.method == "gmres"
+            and policy == "host_check_every_k"
+            and check_interval != self.restart
+        ):
+            raise TaichiRuntimeError(
+                "GMRES host_check_every_k requires "
+                "check_interval == restart"
+            )
+        if (
+            self.method != "gmres"
+            and policy == "host_check_every_k"
+            and check_interval not in (4, 8)
+        ):
             raise TaichiRuntimeError(
                 "host_check_every_k currently supports K=4 or K=8"
             )
@@ -1854,7 +1906,7 @@ class SolvePlan:
         )
         if singular["known"] and singular["value"] is True:
             raise TaichiRuntimeError(
-                "fixed-linear right BiCGSTAB rejects singular "
+                f"fixed-linear right {self.method.upper()} rejects singular "
                 "preconditioners"
             )
 
@@ -1987,6 +2039,66 @@ class SolvePlan:
                     self.rtol,
                 )
             )
+
+        if self.method == "gmres":
+            preconditioner_action = None
+            if isinstance(
+                self.preconditioner, (LinearOperator, PreconditionerPlan)
+            ):
+                if isinstance(self.preconditioner, PreconditionerPlan):
+                    self.preconditioner._require_target(self.operator)
+                    preconditioner_action = (
+                        self.preconditioner._consumer_action
+                    )
+                else:
+                    preconditioner_action = self.preconditioner
+                self._require_fixed_linear_right_preconditioner(
+                    preconditioner_action
+                )
+            elif self.preconditioner is not None:
+                raise TaichiRuntimeError(
+                    "GMRES requires a fixed LinearOperator or "
+                    "PreconditionerPlan right preconditioner"
+                )
+            if arch in cpu_arches:
+                if kind in ("kernel", "graph") or (
+                    preconditioner_action is not None
+                    and preconditioner_action._provider_kind
+                    in ("kernel", "graph")
+                ):
+                    raise TaichiRuntimeError(
+                        "CPU GMRES does not consume compiled ndarray "
+                        "operator actions"
+                    )
+                if preconditioner_action is None:
+                    factory = (
+                        _ti_core._make_float_cpu_experimental_linear_operator_gmres_solver
+                        if self.operator.dtype == f32
+                        else _ti_core._make_double_cpu_experimental_linear_operator_gmres_solver
+                    )
+                    return factory(
+                        self._program,
+                        self.operator._handle,
+                        self.max_iterations,
+                        self.restart,
+                        self.atol,
+                        self.rtol,
+                    )
+                factory = (
+                    _ti_core._make_float_cpu_preconditioned_experimental_linear_operator_gmres_solver
+                    if self.operator.dtype == f32
+                    else _ti_core._make_double_cpu_preconditioned_experimental_linear_operator_gmres_solver
+                )
+                return factory(
+                    self._program,
+                    self.operator._handle,
+                    preconditioner_action._handle,
+                    self.max_iterations,
+                    self.restart,
+                    self.atol,
+                    self.rtol,
+                )
+            raise TaichiRuntimeError("unsupported GMRES backend")
 
         if self.method == "bicgstab":
             preconditioner_action = None
@@ -2361,7 +2473,7 @@ class SolvePlan:
             preconditioner_scope = self.preconditioner.pin()
         cpu_arches = (_ti_core.Arch.x64, _ti_core.Arch.arm64)
         if (
-            self.method in ("bicgstab", "minres")
+            self.method in ("bicgstab", "gmres", "minres")
             and self._program.config().arch in cpu_arches
         ):
             self._solver.solve_ndarray(self._program, out.arr, rhs.arr)

@@ -46,6 +46,9 @@ enum class SparseSolveBreakdownReason : std::uint8_t {
   alpha_denominator,
   omega_denominator,
   omega,
+  arnoldi_breakdown,
+  orthogonalization_failure,
+  hessenberg_singular,
 };
 
 const char *sparse_solve_breakdown_reason_name(
@@ -160,6 +163,8 @@ struct SparseSolvePlanRuntimeStatistics {
   bool operator_apply_calls_available{false};
   std::uint64_t dot_product_calls{0};
   bool dot_product_calls_available{false};
+  std::uint64_t multi_dot_calls{0};
+  bool multi_dot_calls_available{false};
   std::uint64_t vector_update_calls{0};
   bool vector_update_calls_available{false};
   std::uint64_t host_scalar_reductions{0};
@@ -175,6 +180,11 @@ struct SparseSolvePlanRuntimeStatistics {
   std::uint64_t solver_chunk_replays{0};
   std::uint64_t solver_chunk_rebinds{0};
   std::uint64_t solver_chunk_invalidations{0};
+  std::uint64_t restart_cycles{0};
+  std::uint64_t happy_breakdowns{0};
+  int restart{0};
+  std::string orthogonalization_strategy{"not_applicable"};
+  int orthogonalization_passes{0};
   std::string requested_solver_execution_policy{"host_each_iteration"};
   std::string solver_execution_policy{"host_each_iteration"};
   int host_check_interval{1};
@@ -193,6 +203,8 @@ struct SparseSolvePlanRuntimeStatistics {
   std::uint64_t persistent_vector_reserved_bytes{0};
   std::uint64_t persistent_scalar_count{0};
   std::uint64_t persistent_scalar_reserved_bytes{0};
+  std::uint64_t basis_vector_count{0};
+  std::uint64_t basis_reserved_bytes{0};
   std::uint64_t cublas_handle_count{0};
   bool cublas_stream_bound{false};
   bool cublas_device_pointer_mode{false};

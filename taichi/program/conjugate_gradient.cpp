@@ -276,6 +276,12 @@ const char *sparse_solve_breakdown_reason_name(
       return "omega_denominator";
     case SparseSolveBreakdownReason::omega:
       return "omega";
+    case SparseSolveBreakdownReason::arnoldi_breakdown:
+      return "arnoldi_breakdown";
+    case SparseSolveBreakdownReason::orthogonalization_failure:
+      return "orthogonalization_failure";
+    case SparseSolveBreakdownReason::hessenberg_singular:
+      return "hessenberg_singular";
   }
   return "unknown";
 }
