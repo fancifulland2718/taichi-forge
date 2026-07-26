@@ -18,12 +18,81 @@ Taichi DSL。
 - 可观察的 capability 与 resource-generation metadata；
 - 一个可复用的 native execution plan。
 
-公开 vector 参数是一维 scalar Taichi ndarray。`apply()` 返回前会完成本次应用。它不接受
-NumPy array，不经 host copy，不 materialize matrix-free provider；请求不受支持的操作时
-也不会切换 backend。
+公开 vector 参数保持一维 scalar-flat 数学 ABI，但 `apply()` 与单系统
+`SolvePlan.solve()` 的边界可以接收一维 scalar Taichi ndarray、受支持的 dense field，
+或显式 `VectorView`。vector payload 不经 host copy，不 materialize matrix-free
+provider；请求不受支持的操作时也不会切换 backend。
 
-operator、plan、provider 和 ndarray 都属于同一 runtime generation。执行 `ti.reset()`
-后它们全部失效，也不能重新绑定到后续 `ti.init()` session。
+operator、plan、provider、ndarray、field view 都属于同一 runtime generation。执行
+`ti.reset()` 后它们全部失效，也不能重新绑定到后续 `ti.init()` session。
+
+## Dense field 与 VectorView
+
+受支持的 dense field 可以直接作为 `LinearOperator.apply()` 的 `input`、`out` 或
+`addend`，也可以作为 `SolvePlan.solve()` 的 `rhs`、`initial_guess` 或 `out`：
+
+```python
+rhs = ti.field(ti.f32, shape=(nx, ny))
+solution = ti.field(ti.f32, shape=(nx, ny))
+
+operator.apply(rhs, out=solution)
+result = plan.solve(rhs, initial_guess=solution, out=solution)
+assert result.solution is solution
+```
+
+支持的 field 合同为：
+
+- `ti.f32` 或 `ti.f64`；具体 operator/provider/backend 仍须支持相同 dtype；
+- 1D、2D 或 3D `root -> dense -> place` scalar field；
+- canonical packed `ti.Vector.field` 或 `ti.Matrix.field`；
+- fixed shape、当前 `Program` 和仍然存活的 `SNodeTree`。
+
+field 按 scalar-flat 顺序映射到 operator space：先按 index shape 的 canonical 顺序遍历，
+再按 Vector lane 或 Matrix row-major component 顺序展开。因此 scalar extent 为
+`prod(index_shape) * prod(element_shape)`，并且必须与 operator 的 domain/range extent
+精确匹配。`pointer`、`bitmasked`、`dynamic`、`hash` 等 sparse SNode、quantized storage、
+arbitrary nested dense tree 和 noncanonical component placement 会在提交前明确失败。
+
+`vector_view()` 可声明 dense field 的显式 scalar 子集或排列：
+
+```python
+indices = ti.ndarray(ti.i32, shape=active_size)
+indices.from_numpy(active_scalar_indices)
+
+rhs_view = ti.linalg.experimental.vector_view(rhs, indices=indices)
+solution_view = ti.linalg.experimental.vector_view(solution, indices=indices)
+result = active_plan.solve(rhs_view, out=solution_view)
+```
+
+`indices` 可以是一维 `ti.i32` ndarray 或 root-dense scalar field。构造 view 时会复制、
+检查并冻结 index topology；index 必须非空、在 source scalar extent 范围内且唯一。
+后续修改原始 indices 不会改变既有 view。该构造执行一次显式 host validation；vector
+数值的 apply/solve 路径始终留在设备上。indexed scatter 只覆盖选中的 scalar entry，
+其它 field entry 保持不变。
+
+dense field 互操作采用设备 staging，而不是宣称 zero-copy：
+
+```text
+dense field/view -> device pack or gather -> scalar ndarray provider ABI
+scalar ndarray solver result -> device unpack or scatter -> dense field/view
+```
+
+每个 operator/plan 持有并复用兼容的 staging ndarray。warm solve 不重新分配 staging，
+转换只发生在 apply/solve 边界，不进入 Krylov iteration。field `out` 会在同步 API 返回前
+完成一次 unpack/scatter；`out=None` 继续返回一维 scalar ndarray。RHS/input 不能与 output
+重叠；`initial_guess` 或 `addend` 可以与 output 是精确相同的 view，非精确重叠会失败。
+
+可以查询支持面和实际转换开销：
+
+```python
+capabilities = ti.linalg.experimental.vector_io_capabilities()
+view_metadata = rhs_view.metadata
+stats = plan.statistics()["vector_io"]
+```
+
+`stats` 报告 staging build/reuse/reserved bytes、pack/unpack、indexed gather/scatter、
+logical bytes、direct ndarray binding 和同步完成次数。`execution_mode="device_staged"`
+表示支持 field API 且数值不经过 host；它不等同于 provider-native zero-copy。
 
 ## Stored operator 与 CG
 

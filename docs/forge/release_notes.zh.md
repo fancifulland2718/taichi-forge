@@ -39,7 +39,15 @@
 
 ## 未发布
 
-当前没有晚于 `0.5.1` 声明源码边界的用户可见更新。
+- `ti.linalg.experimental.LinearOperator.apply()` 与单系统
+  `SolvePlan.solve()` 现在直接接受受支持的 1D/2D/3D root-dense scalar、Vector 和
+  Matrix field。field 在 CPU、CUDA 和 Vulkan 上通过可复用的 device staging 映射到
+  既有 scalar-flat ndarray provider ABI；warm solve 不重新分配 staging，转换不进入
+  Krylov iteration。
+- 新增 runtime-bound `VectorView` 与 `vector_view(field, indices=...)`，用于声明经过
+  验证、冻结的 scalar subset/permutation。新增版本化 capability、layout metadata 和
+  staging/pack/unpack/indexed-copy telemetry。sparse SNode、noncanonical layout、非法
+  index 与不安全 alias 明确失败，不执行 host vector fallback。
 
 ## 0.5.1
 

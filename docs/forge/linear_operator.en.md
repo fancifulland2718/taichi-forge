@@ -21,14 +21,94 @@ A `LinearOperator` represents `y = A x` with:
 - observable capabilities and resource-generation metadata; and
 - one reusable native execution plan.
 
-Public vector arguments are one-dimensional scalar Taichi ndarrays. `apply()`
-completes before returning. It does not accept NumPy arrays, copy through the
-host, materialize a matrix-free provider, or change backend when a requested
-operation is unsupported.
+Public vector arguments retain a one-dimensional scalar-flat mathematical ABI,
+while `apply()` and single-system `SolvePlan.solve()` boundaries accept scalar
+one-dimensional Taichi ndarrays, supported dense fields, or explicit
+`VectorView` objects. Vector payloads do not pass through the host, matrix-free
+providers are not materialized, and unsupported operations do not change
+backend.
 
-All operators, plans, providers, and ndarrays belong to one runtime generation.
-They become invalid after `ti.reset()` and cannot be rebound to a later
-`ti.init()` session.
+All operators, plans, providers, ndarrays, and field views belong to one runtime
+generation. They become invalid after `ti.reset()` and cannot be rebound to a
+later `ti.init()` session.
+
+## Dense fields and VectorView
+
+A supported dense field may be passed directly as `input`, `out`, or `addend`
+to `LinearOperator.apply()`, and as `rhs`, `initial_guess`, or `out` to
+`SolvePlan.solve()`:
+
+```python
+rhs = ti.field(ti.f32, shape=(nx, ny))
+solution = ti.field(ti.f32, shape=(nx, ny))
+
+operator.apply(rhs, out=solution)
+result = plan.solve(rhs, initial_guess=solution, out=solution)
+assert result.solution is solution
+```
+
+The supported field contract is:
+
+- `ti.f32` or `ti.f64`, subject to matching dtype support in the selected
+  operator, provider, and backend;
+- a 1D, 2D, or 3D `root -> dense -> place` scalar field;
+- a canonically packed `ti.Vector.field` or `ti.Matrix.field`; and
+- fixed shape, the current `Program`, and a live `SNodeTree`.
+
+A field maps to operator space in scalar-flat order: canonical index-shape
+order first, followed by Vector lanes or row-major Matrix components. The
+scalar extent is therefore `prod(index_shape) * prod(element_shape)` and must
+match the operator domain or range exactly. Sparse SNodes such as `pointer`,
+`bitmasked`, `dynamic`, and `hash`, quantized storage, arbitrary nested dense
+trees, and noncanonical component placement fail before submission.
+
+Use `vector_view()` to declare an explicit scalar subset or permutation of a
+dense field:
+
+```python
+indices = ti.ndarray(ti.i32, shape=active_size)
+indices.from_numpy(active_scalar_indices)
+
+rhs_view = ti.linalg.experimental.vector_view(rhs, indices=indices)
+solution_view = ti.linalg.experimental.vector_view(solution, indices=indices)
+result = active_plan.solve(rhs_view, out=solution_view)
+```
+
+`indices` may be a one-dimensional `ti.i32` ndarray or root-dense scalar field.
+View construction copies, validates, and freezes the index topology. Indices
+must be nonempty, in the source scalar-extent range, and unique. Later mutation
+of the original indices does not change an existing view. Construction performs
+one explicit host validation; vector values remain device resident throughout
+apply and solve. Indexed scatter overwrites selected scalar entries only and
+leaves all other field entries unchanged.
+
+Dense-field interoperability uses device staging; it is not a zero-copy claim:
+
+```text
+dense field/view -> device pack or gather -> scalar ndarray provider ABI
+scalar ndarray solver result -> device unpack or scatter -> dense field/view
+```
+
+Each operator or plan owns and reuses compatible staging ndarrays. A warm solve
+does not allocate staging, and conversions occur only at apply/solve boundaries,
+never inside a Krylov iteration. A field `out` is unpacked or scattered before
+the synchronous API returns. `out=None` continues to return a scalar
+one-dimensional ndarray. RHS/input may not overlap output. An `initial_guess`
+or `addend` may be the exact same view as output; nonexact overlap fails.
+
+Capabilities and actual conversion costs are observable:
+
+```python
+capabilities = ti.linalg.experimental.vector_io_capabilities()
+view_metadata = rhs_view.metadata
+stats = plan.statistics()["vector_io"]
+```
+
+The statistics report staging builds/reuses/reserved bytes, pack/unpack and
+indexed gather/scatter calls, logical bytes, direct ndarray bindings, and
+completion synchronizations. `execution_mode="device_staged"` means the field
+API is supported without moving vector values through the host; it does not
+mean provider-native zero-copy.
 
 ## Stored operator and CG
 

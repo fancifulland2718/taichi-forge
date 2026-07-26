@@ -42,8 +42,17 @@ grouped under the behavior they shipped.
 
 ## Unreleased
 
-No user-visible changes are currently recorded after the declared `0.5.1`
-source boundary.
+- `ti.linalg.experimental.LinearOperator.apply()` and single-system
+  `SolvePlan.solve()` now accept supported 1D/2D/3D root-dense scalar, Vector,
+  and Matrix fields directly. CPU, CUDA, and Vulkan use reusable device staging
+  to map fields to the established scalar-flat ndarray provider ABI. Warm
+  solves do not allocate staging, and conversion never enters a Krylov
+  iteration.
+- Added runtime-bound `VectorView` and `vector_view(field, indices=...)` for
+  validated, frozen scalar subsets or permutations, together with versioned
+  capability, layout metadata, and staging/pack/unpack/indexed-copy telemetry.
+  Sparse SNodes, noncanonical layouts, invalid indices, and unsafe aliases fail
+  explicitly without a host vector fallback.
 
 ## 0.5.1
 
