@@ -48,6 +48,9 @@ grouped under the behavior they shipped.
   to map fields to the established scalar-flat ndarray provider ABI. Warm
   solves do not allocate staging, and conversion never enters a Krylov
   iteration.
+  Stable raw-field bindings now reuse qualified implicit views and compiled
+  conversion Graphs. Field-output overwrite apply also shares one completion
+  boundary between provider execution and output conversion.
 - Added runtime-bound `VectorView` and `vector_view(field, indices=...)` for
   validated, frozen scalar subsets or permutations, together with versioned
   capability, layout metadata, and staging/pack/unpack/indexed-copy telemetry.

@@ -26,7 +26,6 @@ from taichi_forge.lang.impl import get_runtime
 from taichi_forge.linalg._vector_io import (
     VectorView,
     _VectorIOCache,
-    _as_vector_view,
     vector_io_capabilities as _vector_io_capabilities,
     vector_view,
 )
@@ -209,8 +208,8 @@ class _VectorOperand:
     alias_owner_key: tuple
 
 
-def _require_compatible_vector_view(value, role, size, dtype):
-    view = _as_vector_view(value, role)
+def _require_compatible_vector_view(value, role, size, dtype, cache):
+    view = cache.view(value, role)
     if view is None:
         raise TaichiRuntimeError(
             f"{role} must be a one-dimensional scalar Taichi ndarray or a "
@@ -242,7 +241,7 @@ def _prepare_vector_input(
         cache.record_direct_input()
         identity = ("ndarray", id(array.arr))
         return _VectorOperand(value, array, None, identity, identity)
-    view = _require_compatible_vector_view(value, role, size, dtype)
+    view = _require_compatible_vector_view(value, role, size, dtype, cache)
     array = cache.pack(view, staging_role, dtype, size)
     return _VectorOperand(
         value,
@@ -266,7 +265,7 @@ def _prepare_vector_output(
         cache.record_direct_output()
         identity = ("ndarray", id(array.arr))
         return _VectorOperand(value, array, None, identity, identity)
-    view = _require_compatible_vector_view(value, role, size, dtype)
+    view = _require_compatible_vector_view(value, role, size, dtype, cache)
     array = cache.buffer(staging_role, dtype, size)
     return _VectorOperand(
         value,
@@ -285,10 +284,15 @@ def _vector_operands_exact(left, right):
     return left.exact_key == right.exact_key
 
 
-def _finish_vector_output(cache, operand, dtype, size):
+def _finish_vector_output(
+    cache, operand, dtype, size, synchronized_session=None
+):
     if operand.view is not None:
         cache.unpack(operand.array, operand.view, dtype, size)
         get_runtime().sync()
+        if synchronized_session is not None:
+            synchronized_session._mark_synchronized()
+            cache.record_coalesced_operator_sync()
         cache.record_completion_sync()
 
 
@@ -737,7 +741,7 @@ class LinearOperator:
                 raise TaichiRuntimeError(
                     "LinearOperator.apply with nonzero beta requires addend"
                 )
-            addend_view = _as_vector_view(addend, "LinearOperator addend")
+            addend_view = self._vector_io.view(addend, "LinearOperator addend")
             shares_output = (
                 addend_view is not None
                 and output_operand.view is not None
@@ -764,12 +768,21 @@ class LinearOperator:
                     "LinearOperator addend and output overlap without being "
                     "the same vector view"
                 )
+        coalesced_session = None
         if alpha == 1.0 and beta == 0.0:
-            self._handle._apply(
-                self._program,
-                input_operand.array.arr,
-                output_operand.array.arr,
-            )
+            if output_operand.view is not None:
+                coalesced_session = self._handle._begin_session()
+                coalesced_session._submit(
+                    self._program,
+                    input_operand.array.arr,
+                    output_operand.array.arr,
+                )
+            else:
+                self._handle._apply(
+                    self._program,
+                    input_operand.array.arr,
+                    output_operand.array.arr,
+                )
         else:
             self._handle._apply_generalized(
                 self._program,
@@ -788,6 +801,7 @@ class LinearOperator:
             output_operand,
             self.dtype,
             self.shape[0],
+            coalesced_session,
         )
         return out
 
@@ -2976,7 +2990,7 @@ class SolvePlan:
         if initial_guess is None:
             output_operand.array.fill(0)
         else:
-            initial_view = _as_vector_view(
+            initial_view = self._vector_io.view(
                 initial_guess, "SolvePlan initial_guess"
             )
             shares_output = (

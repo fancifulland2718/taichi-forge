@@ -95,6 +95,12 @@ never inside a Krylov iteration. A field `out` is unpacked or scattered before
 the synchronous API returns. `out=None` continues to return a scalar
 one-dimensional ndarray. RHS/input may not overlap output. An `initial_guess`
 or `addend` may be the exact same view as output; nonexact overlap fails.
+Stable raw-field bindings are qualified once per operator or plan and then
+reuse the same implicit view. Field/staging conversions replay a compiled Graph
+instead of repeating kernel specialization and argument preparation. An
+overwrite `apply()` with field output submits the provider and output conversion
+under one completion boundary; generalized coefficient paths retain their
+existing synchronization contract.
 
 Capabilities and actual conversion costs are observable:
 
@@ -104,11 +110,13 @@ view_metadata = rhs_view.metadata
 stats = plan.statistics()["vector_io"]
 ```
 
-The statistics report staging builds/reuses/reserved bytes, pack/unpack and
-indexed gather/scatter calls, logical bytes, direct ndarray bindings, and
-completion synchronizations. `execution_mode="device_staged"` means the field
-API is supported without moving vector values through the host; it does not
-mean provider-native zero-copy.
+The statistics report staging builds/reuses/reserved bytes, implicit-view and
+compiled-transfer-plan builds/reuses/evictions, Graph submissions,
+pack/unpack and indexed gather/scatter calls, logical bytes, direct ndarray
+bindings, completion synchronizations, and coalesced operator synchronizations.
+`execution_mode="device_staged"` means the field API is supported without
+moving vector values through the host; it does not mean provider-native
+zero-copy.
 
 ## Stored operator and CG
 

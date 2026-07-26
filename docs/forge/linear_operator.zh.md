@@ -81,6 +81,10 @@ scalar ndarray solver result -> device unpack or scatter -> dense field/view
 转换只发生在 apply/solve 边界，不进入 Krylov iteration。field `out` 会在同步 API 返回前
 完成一次 unpack/scatter；`out=None` 继续返回一维 scalar ndarray。RHS/input 不能与 output
 重叠；`initial_guess` 或 `addend` 可以与 output 是精确相同的 view，非精确重叠会失败。
+稳定的 raw field binding 会在每个 operator/plan 内只完成一次资格解析，并复用同一个 implicit
+view。field/staging 转换通过已编译 Graph replay 提交，不再重复 kernel specialization 与参数准备。
+field output 的 overwrite `apply()` 在同一 completion boundary 内提交 provider 与 output
+conversion；generalized coefficient 路径保持既有同步合同。
 
 可以查询支持面和实际转换开销：
 
@@ -90,9 +94,11 @@ view_metadata = rhs_view.metadata
 stats = plan.statistics()["vector_io"]
 ```
 
-`stats` 报告 staging build/reuse/reserved bytes、pack/unpack、indexed gather/scatter、
-logical bytes、direct ndarray binding 和同步完成次数。`execution_mode="device_staged"`
-表示支持 field API 且数值不经过 host；它不等同于 provider-native zero-copy。
+`stats` 报告 staging build/reuse/reserved bytes、implicit view 与 compiled transfer plan 的
+build/reuse/eviction、Graph submission、pack/unpack、indexed gather/scatter、logical bytes、
+direct ndarray binding、completion sync 和合并的 operator sync 次数。
+`execution_mode="device_staged"` 表示支持 field API 且数值不经过 host；它不等同于
+provider-native zero-copy。
 
 ## Stored operator 与 CG
 

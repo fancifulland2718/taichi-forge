@@ -31,6 +31,8 @@ from taichi_forge.types.annotations import template
 
 _VECTOR_IO_SCHEMA = "taichi_forge.linalg.vector_io.v1"
 _SUPPORTED_VALUE_DTYPES = (f32, f64)
+_IMPLICIT_VIEW_CACHE_LIMIT = 16
+_TRANSFER_PLAN_CACHE_LIMIT = 32
 
 
 @func
@@ -780,6 +782,90 @@ def _as_vector_view(value, role):
     return None
 
 
+class _CompiledVectorTransfer:
+    """One replayable field/staging conversion with fixed resource identity."""
+
+    def __init__(self, view, staging, direction):
+        from taichi_forge.graph import (  # pylint: disable=import-outside-toplevel
+            Arg,
+            ArgKind,
+            GraphBuilder,
+        )
+
+        self._field = view._field
+        self._indices = view._indices
+        self._staging = staging
+        self._exact_view_key = view._exact_view_key
+        self._direction = direction
+
+        staging_arg = Arg(ArgKind.NDARRAY, "staging", view.dtype, ndim=1)
+        builder = GraphBuilder()
+        template_args = {"field": self._field}
+        if view.indexed:
+            indices_arg = Arg(ArgKind.NDARRAY, "indices", i32, ndim=1)
+            if direction == "pack":
+                transfer_kernel = (
+                    _gather_scalar_field
+                    if view._descriptor.storage_kind == "dense_scalar"
+                    else _gather_tensor_field
+                )
+                builder.dispatch(
+                    transfer_kernel,
+                    indices_arg,
+                    staging_arg,
+                    template_args=template_args,
+                )
+            else:
+                transfer_kernel = (
+                    _scatter_scalar_field
+                    if view._descriptor.storage_kind == "dense_scalar"
+                    else _scatter_tensor_field
+                )
+                builder.dispatch(
+                    transfer_kernel,
+                    staging_arg,
+                    indices_arg,
+                    template_args=template_args,
+                )
+            self._arguments = {
+                "indices": self._indices,
+                "staging": self._staging,
+            }
+        else:
+            if direction == "pack":
+                transfer_kernel = (
+                    _pack_scalar_field
+                    if view._descriptor.storage_kind == "dense_scalar"
+                    else _pack_tensor_field
+                )
+            else:
+                transfer_kernel = (
+                    _unpack_scalar_field
+                    if view._descriptor.storage_kind == "dense_scalar"
+                    else _unpack_tensor_field
+                )
+            builder.dispatch(
+                transfer_kernel,
+                staging_arg,
+                template_args=template_args,
+            )
+            self._arguments = {"staging": self._staging}
+        self._graph = builder.compile()
+
+    def matches(self, view, staging, direction):
+        return (
+            direction == self._direction
+            and view._field is self._field
+            and view._indices is self._indices
+            and view._exact_view_key == self._exact_view_key
+            and staging is self._staging
+        )
+
+    def run(self, view):
+        view._ensure_valid("VectorView transfer")
+        self._graph.run(self._arguments)
+
+
 def vector_io_capabilities():
     """Returns the backend-neutral dense vector I/O capability contract."""
 
@@ -805,6 +891,7 @@ def vector_io_capabilities():
             "value_host_transfer": False,
             "staging_reuse": "operator_or_plan_owned",
             "conversion_scope": "apply_or_solve_boundary_only",
+            "conversion_submission": "compiled_graph_replay",
             "zero_copy": False,
         },
         "sparse_snode": {
@@ -821,11 +908,20 @@ class _VectorIOCache:
 
     def __init__(self):
         self._buffers = {}
+        self._implicit_views = {}
+        self._transfer_plans = {}
         self._stats = {
             "schema": _VECTOR_IO_SCHEMA,
             "staging_buffer_builds": 0,
             "staging_buffer_reuses": 0,
             "staging_reserved_bytes": 0,
+            "implicit_view_builds": 0,
+            "implicit_view_reuses": 0,
+            "implicit_view_evictions": 0,
+            "transfer_plan_builds": 0,
+            "transfer_plan_reuses": 0,
+            "transfer_plan_evictions": 0,
+            "transfer_graph_submissions": 0,
             "pack_calls": 0,
             "unpack_calls": 0,
             "indexed_gather_calls": 0,
@@ -834,6 +930,7 @@ class _VectorIOCache:
             "unpacked_logical_bytes": 0,
             "direct_bindings": 0,
             "completion_syncs": 0,
+            "coalesced_operator_syncs": 0,
             "last_input_storage": "unavailable",
             "last_output_storage": "unavailable",
             "last_input_execution_mode": "unavailable",
@@ -858,9 +955,48 @@ class _VectorIOCache:
         )
         return buffer
 
+    def view(self, value, role):
+        if isinstance(value, VectorView):
+            return value._ensure_valid(role)
+        if not _is_dense_field_value(value):
+            return None
+        key = id(value)
+        cached = self._implicit_views.get(key)
+        if cached is not None and cached._field is value:
+            self._stats["implicit_view_reuses"] += 1
+            return cached._ensure_valid(role)
+        descriptor = _describe_value_field(value, role)
+        view = VectorView(VectorView._TOKEN, value, descriptor, None, None)
+        if len(self._implicit_views) >= _IMPLICIT_VIEW_CACHE_LIMIT:
+            self._implicit_views.pop(next(iter(self._implicit_views)))
+            self._stats["implicit_view_evictions"] += 1
+        self._implicit_views[key] = view
+        self._stats["implicit_view_builds"] += 1
+        return view
+
+    def _transfer(self, view, staging, direction):
+        key = (
+            direction,
+            view._exact_view_key,
+            id(view._indices) if view.indexed else 0,
+            id(staging),
+        )
+        plan = self._transfer_plans.get(key)
+        if plan is not None and plan.matches(view, staging, direction):
+            self._stats["transfer_plan_reuses"] += 1
+        else:
+            plan = _CompiledVectorTransfer(view, staging, direction)
+            if len(self._transfer_plans) >= _TRANSFER_PLAN_CACHE_LIMIT:
+                self._transfer_plans.pop(next(iter(self._transfer_plans)))
+                self._stats["transfer_plan_evictions"] += 1
+            self._transfer_plans[key] = plan
+            self._stats["transfer_plan_builds"] += 1
+        plan.run(view)
+        self._stats["transfer_graph_submissions"] += 1
+
     def pack(self, view, role, dtype, size):
         staging = self.buffer(role, dtype, size)
-        view._pack_to(staging)
+        self._transfer(view, staging, "pack")
         logical_bytes = int(size) * self._value_bytes(dtype)
         self._stats["pack_calls"] += 1
         self._stats["packed_logical_bytes"] += logical_bytes
@@ -873,7 +1009,7 @@ class _VectorIOCache:
         return staging
 
     def unpack(self, staging, view, dtype, size):
-        view._unpack_from(staging)
+        self._transfer(view, staging, "unpack")
         logical_bytes = int(size) * self._value_bytes(dtype)
         self._stats["unpack_calls"] += 1
         self._stats["unpacked_logical_bytes"] += logical_bytes
@@ -896,6 +1032,9 @@ class _VectorIOCache:
 
     def record_completion_sync(self):
         self._stats["completion_syncs"] += 1
+
+    def record_coalesced_operator_sync(self):
+        self._stats["coalesced_operator_syncs"] += 1
 
     def statistics(self):
         return dict(self._stats)

@@ -38,12 +38,19 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
 
     operator = _compiled_identity(values.size)
     assert operator.apply(source, out=applied) is applied
+    assert operator.apply(source, out=applied) is applied
     np.testing.assert_array_equal(applied.to_numpy(), values)
     operator_stats = operator.statistics()["vector_io"]
     assert operator_stats["staging_buffer_builds"] == 2
-    assert operator_stats["pack_calls"] == 1
-    assert operator_stats["unpack_calls"] == 1
-    assert operator_stats["completion_syncs"] == 1
+    assert operator_stats["implicit_view_builds"] == 2
+    assert operator_stats["implicit_view_reuses"] == 2
+    assert operator_stats["transfer_plan_builds"] == 2
+    assert operator_stats["transfer_plan_reuses"] == 2
+    assert operator_stats["transfer_graph_submissions"] == 4
+    assert operator_stats["pack_calls"] == 2
+    assert operator_stats["unpack_calls"] == 2
+    assert operator_stats["completion_syncs"] == 2
+    assert operator_stats["coalesced_operator_syncs"] == 2
 
     plan = ti.linalg.experimental.SolvePlan(
         operator,
@@ -61,6 +68,11 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
     vector_stats = stats["vector_io"]
     assert vector_stats["staging_buffer_builds"] == 2
     assert vector_stats["staging_buffer_reuses"] == 2
+    assert vector_stats["implicit_view_builds"] == 2
+    assert vector_stats["implicit_view_reuses"] == 2
+    assert vector_stats["transfer_plan_builds"] == 2
+    assert vector_stats["transfer_plan_reuses"] == 2
+    assert vector_stats["transfer_graph_submissions"] == 4
     assert vector_stats["pack_calls"] == 2
     assert vector_stats["unpack_calls"] == 2
     assert vector_stats["completion_syncs"] == 2
@@ -73,6 +85,9 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
     assert capabilities["dense_field"]["value_host_transfer"] is False
     assert capabilities["dense_field"]["conversion_scope"] == (
         "apply_or_solve_boundary_only"
+    )
+    assert capabilities["dense_field"]["conversion_submission"] == (
+        "compiled_graph_replay"
     )
 
     volume_values = np.arange(8, dtype=np.float32).reshape(2, 2, 2)
