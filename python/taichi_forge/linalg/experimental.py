@@ -2,7 +2,9 @@
 
 This module is separate from the legacy field-based
 ``ti.linalg.LinearOperator``. Operators here bind one current Taichi runtime,
-use scalar 1-D ndarrays, and never change providers through a hidden fallback.
+retain a scalar-flat mathematical ABI, and never change providers through a
+hidden fallback. Public apply/solve boundaries accept scalar 1-D ndarrays or
+qualified dense-field vector views without host staging.
 """
 
 import copy
@@ -21,6 +23,13 @@ from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang._ndarray import ScalarNdarray
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang.impl import get_runtime
+from taichi_forge.linalg._vector_io import (
+    VectorView,
+    _VectorIOCache,
+    _as_vector_view,
+    vector_io_capabilities as _vector_io_capabilities,
+    vector_view,
+)
 from taichi_forge.linalg.sparse_matrix import SparseMatrix
 from taichi_forge.types import f32, f64
 
@@ -115,7 +124,7 @@ class OperatorQualificationReport:
 class SolveResult:
     """Immutable terminal snapshot returned by :meth:`SolvePlan.solve`."""
 
-    solution: ScalarNdarray
+    solution: object
     status_code: int
     termination_reason: str
     converged: bool
@@ -191,6 +200,98 @@ def _require_current_scalar_ndarray(value, role, size=None, dtype=None):
     return value
 
 
+@dataclass(frozen=True)
+class _VectorOperand:
+    public: object
+    array: ScalarNdarray
+    view: Optional[VectorView]
+    exact_key: tuple
+    alias_owner_key: tuple
+
+
+def _require_compatible_vector_view(value, role, size, dtype):
+    view = _as_vector_view(value, role)
+    if view is None:
+        raise TaichiRuntimeError(
+            f"{role} must be a one-dimensional scalar Taichi ndarray or a "
+            "supported dense field/vector_view; implicit host transfers are "
+            "not performed"
+        )
+    if view.scalar_extent != size:
+        raise TaichiRuntimeError(
+            f"{role} must have scalar extent {size}, got "
+            f"{view.scalar_extent}"
+        )
+    if view.dtype != dtype:
+        raise TaichiRuntimeError(
+            f"{role} must have dtype {dtype}, got {view.dtype}"
+        )
+    return view
+
+
+def _prepare_vector_input(
+    value,
+    role,
+    size,
+    dtype,
+    cache,
+    staging_role,
+):
+    if isinstance(value, ScalarNdarray):
+        array = _require_current_scalar_ndarray(value, role, size, dtype)
+        cache.record_direct_input()
+        identity = ("ndarray", id(array.arr))
+        return _VectorOperand(value, array, None, identity, identity)
+    view = _require_compatible_vector_view(value, role, size, dtype)
+    array = cache.pack(view, staging_role, dtype, size)
+    return _VectorOperand(
+        value,
+        array,
+        view,
+        ("dense_field", view._exact_view_key),
+        ("dense_field", view._alias_owner_key),
+    )
+
+
+def _prepare_vector_output(
+    value,
+    role,
+    size,
+    dtype,
+    cache,
+    staging_role,
+):
+    if isinstance(value, ScalarNdarray):
+        array = _require_current_scalar_ndarray(value, role, size, dtype)
+        cache.record_direct_output()
+        identity = ("ndarray", id(array.arr))
+        return _VectorOperand(value, array, None, identity, identity)
+    view = _require_compatible_vector_view(value, role, size, dtype)
+    array = cache.buffer(staging_role, dtype, size)
+    return _VectorOperand(
+        value,
+        array,
+        view,
+        ("dense_field", view._exact_view_key),
+        ("dense_field", view._alias_owner_key),
+    )
+
+
+def _vector_operands_overlap(left, right):
+    return left.alias_owner_key == right.alias_owner_key
+
+
+def _vector_operands_exact(left, right):
+    return left.exact_key == right.exact_key
+
+
+def _finish_vector_output(cache, operand, dtype, size):
+    if operand.view is not None:
+        cache.unpack(operand.array, operand.view, dtype, size)
+        get_runtime().sync()
+        cache.record_completion_sync()
+
+
 def _normalized_resource_mapping(values, role, require_nonempty=False):
     values = {} if values is None else values
     if not isinstance(values, Mapping):
@@ -240,6 +341,7 @@ class LinearOperator:
         self._provider_core = provider_core
         self._source = source
         self._retained = tuple(retained)
+        self._vector_io = _VectorIOCache()
         metadata = dict(handle._metadata())
         metadata["capabilities"] = dict(metadata["capabilities"])
         metadata["traits"] = {
@@ -573,6 +675,7 @@ class LinearOperator:
         self._provider_core = None
         self._source = None
         self._retained = ()
+        self._vector_io = None
         self._program = None
 
     @property
@@ -587,8 +690,9 @@ class LinearOperator:
     def apply(self, input, out=None, *, alpha=1.0, beta=0.0, addend=None):
         """Synchronously computes ``alpha * self(input) + beta * addend``.
 
-        ``input`` and ``out`` may not alias. ``addend`` may alias ``out`` so
-        callers can express in-place accumulation. When ``beta`` is zero,
+        ``input`` and ``out`` may not alias. ``addend`` may be the exact same
+        vector/view as ``out`` so callers can express in-place accumulation;
+        nonexact field-view overlap is rejected. When ``beta`` is zero,
         ``addend`` is neither validated nor read. Generalized coefficients are
         currently lowered on CPU; GPU providers fail closed unless
         ``alpha == 1`` and ``beta == 0``.
@@ -605,43 +709,86 @@ class LinearOperator:
             raise TaichiRuntimeError(
                 "LinearOperator apply coefficients must be finite"
             )
-        input = _require_current_scalar_ndarray(
-            input, "LinearOperator input", self.shape[1], self.dtype
+        input_operand = _prepare_vector_input(
+            input,
+            "LinearOperator input",
+            self.shape[1],
+            self.dtype,
+            self._vector_io,
+            "apply_input",
         )
         if out is None:
             out = ScalarNdarray(self.dtype, (self.shape[0],))
-        else:
-            out = _require_current_scalar_ndarray(
-                out, "LinearOperator output", self.shape[0], self.dtype
-            )
-        if out is input:
+        output_operand = _prepare_vector_output(
+            out,
+            "LinearOperator output",
+            self.shape[0],
+            self.dtype,
+            self._vector_io,
+            "apply_output",
+        )
+        if _vector_operands_overlap(input_operand, output_operand):
             raise TaichiRuntimeError(
                 "LinearOperator.apply does not permit input/output aliasing"
             )
+        addend_operand = None
         if beta != 0.0:
             if addend is None:
                 raise TaichiRuntimeError(
                     "LinearOperator.apply with nonzero beta requires addend"
                 )
-            addend = _require_current_scalar_ndarray(
-                addend,
+            addend_view = _as_vector_view(addend, "LinearOperator addend")
+            shares_output = (
+                addend_view is not None
+                and output_operand.view is not None
+                and addend_view._exact_view_key
+                == output_operand.view._exact_view_key
+            )
+            addend_operand = _prepare_vector_input(
+                (
+                    addend_view if addend_view is not None else addend
+                ),
                 "LinearOperator addend",
                 self.shape[0],
                 self.dtype,
+                self._vector_io,
+                "apply_output" if shares_output else "apply_addend",
             )
-        else:
-            addend = None
+            if (
+                _vector_operands_overlap(addend_operand, output_operand)
+                and not _vector_operands_exact(
+                    addend_operand, output_operand
+                )
+            ):
+                raise TaichiRuntimeError(
+                    "LinearOperator addend and output overlap without being "
+                    "the same vector view"
+                )
         if alpha == 1.0 and beta == 0.0:
-            self._handle._apply(self._program, input.arr, out.arr)
+            self._handle._apply(
+                self._program,
+                input_operand.array.arr,
+                output_operand.array.arr,
+            )
         else:
             self._handle._apply_generalized(
                 self._program,
-                input.arr,
-                None if addend is None else addend.arr,
-                out.arr,
+                input_operand.array.arr,
+                (
+                    None
+                    if addend_operand is None
+                    else addend_operand.array.arr
+                ),
+                output_operand.array.arr,
                 alpha,
                 beta,
             )
+        _finish_vector_output(
+            self._vector_io,
+            output_operand,
+            self.dtype,
+            self.shape[0],
+        )
         return out
 
     def __matmul__(self, input):
@@ -778,7 +925,19 @@ class LinearOperator:
     def statistics(self):
         """Returns native execution counters for this operator plan."""
         self._ensure_valid()
-        return dict(self._handle._debug_runtime_stats())
+        result = dict(self._handle._debug_runtime_stats())
+        result["vector_io"] = self._vector_io.statistics()
+        return result
+
+    def vector_io_capabilities(self):
+        """Returns supported operand storage and conversion modes."""
+        self._ensure_valid()
+        return _readonly_copy(_vector_io_capabilities())
+
+
+def vector_io_capabilities():
+    """Returns the backend-neutral dense vector I/O capability contract."""
+    return _readonly_copy(_vector_io_capabilities())
 
 
 def identity(size, dtype=f32):
@@ -1920,6 +2079,7 @@ class SolvePlan:
             )
         )
         self._native_preconditioner = None
+        self._vector_io = _VectorIOCache()
         self._solver = self._build_solver()
         get_runtime().register_runtime_object(self)
 
@@ -1928,6 +2088,7 @@ class SolvePlan:
         # Program allocator/backend teardown.
         self._solver = None
         self._native_preconditioner = None
+        self._vector_io = None
         self.operator = None
         self._program = None
 
@@ -2792,32 +2953,68 @@ class SolvePlan:
         if self._program is not _current_program():
             raise TaichiRuntimeError("SolvePlan cannot be used after ti.reset()")
         size = self.operator.shape[0]
-        rhs = _require_current_scalar_ndarray(
-            rhs, "SolvePlan RHS", size, self.operator.dtype
+        rhs_operand = _prepare_vector_input(
+            rhs,
+            "SolvePlan RHS",
+            size,
+            self.operator.dtype,
+            self._vector_io,
+            "solve_rhs",
         )
         if out is None:
             out = ScalarNdarray(self.operator.dtype, (size,))
-        else:
-            out = _require_current_scalar_ndarray(
-                out, "SolvePlan output", size, self.operator.dtype
-            )
-        if out is rhs:
+        output_operand = _prepare_vector_output(
+            out,
+            "SolvePlan output",
+            size,
+            self.operator.dtype,
+            self._vector_io,
+            "solve_output",
+        )
+        if _vector_operands_overlap(rhs_operand, output_operand):
             raise TaichiRuntimeError("SolvePlan RHS and output may not alias")
         if initial_guess is None:
-            out.fill(0)
+            output_operand.array.fill(0)
         else:
-            initial_guess = _require_current_scalar_ndarray(
-                initial_guess,
+            initial_view = _as_vector_view(
+                initial_guess, "SolvePlan initial_guess"
+            )
+            shares_output = (
+                initial_view is not None
+                and output_operand.view is not None
+                and initial_view._exact_view_key
+                == output_operand.view._exact_view_key
+            )
+            initial_operand = _prepare_vector_input(
+                (
+                    initial_view
+                    if initial_view is not None
+                    else initial_guess
+                ),
                 "SolvePlan initial_guess",
                 size,
                 self.operator.dtype,
+                self._vector_io,
+                "solve_output" if shares_output else "solve_initial",
             )
-            if initial_guess is rhs:
+            if _vector_operands_overlap(initial_operand, rhs_operand):
                 raise TaichiRuntimeError(
                     "SolvePlan RHS and initial_guess may not alias"
                 )
-            if initial_guess is not out:
-                out.copy_from(initial_guess)
+            if (
+                _vector_operands_overlap(initial_operand, output_operand)
+                and not _vector_operands_exact(
+                    initial_operand, output_operand
+                )
+            ):
+                raise TaichiRuntimeError(
+                    "SolvePlan initial_guess and output overlap without "
+                    "being the same vector view"
+                )
+            if not _vector_operands_exact(
+                initial_operand, output_operand
+            ):
+                output_operand.array.copy_from(initial_operand.array)
         if self._native_preconditioner is not None:
             preconditioner_stats = dict(
                 self._native_preconditioner._debug_runtime_stats()
@@ -2834,9 +3031,23 @@ class SolvePlan:
             self.method in ("bicgstab", "gmres", "fgmres", "minres")
             and self._program.config().arch in cpu_arches
         ):
-            self._solver.solve_ndarray(self._program, out.arr, rhs.arr)
+            self._solver.solve_ndarray(
+                self._program,
+                output_operand.array.arr,
+                rhs_operand.array.arr,
+            )
         else:
-            self._solver.solve(self._program, out.arr, rhs.arr)
+            self._solver.solve(
+                self._program,
+                output_operand.array.arr,
+                rhs_operand.array.arr,
+            )
+        _finish_vector_output(
+            self._vector_io,
+            output_operand,
+            self.operator.dtype,
+            size,
+        )
         snapshot = dict(self._solver._get_last_result())
         return SolveResult(solution=out, **snapshot)
 
@@ -2850,6 +3061,7 @@ class SolvePlan:
             result["preconditioner_lifecycle"] = (
                 self.preconditioner.statistics()
             )
+        result["vector_io"] = self._vector_io.statistics()
         result["execution_capabilities"] = self.execution_capabilities()
         return result
 
@@ -2858,11 +3070,13 @@ class SolvePlan:
         if self.operator is None or self._solver is None:
             raise TaichiRuntimeError("SolvePlan cannot be used after ti.reset()")
         self.operator._ensure_valid()
-        return _solver_execution_capabilities(
+        result = _solver_execution_capabilities(
             self._program,
             self.operator._provider_kind,
             batched=False,
         )
+        result["vector_io"] = _vector_io_capabilities()
+        return result
 
 
 # Imported last because the batched implementation deliberately reuses the
@@ -2891,10 +3105,13 @@ __all__ = [
     "SolveQualificationReport",
     "SolveResult",
     "SolveSubmission",
+    "VectorView",
     "qualify_solve_plan",
     "summarize_operator_qualifications",
     "summarize_solve_qualifications",
     "aslinearoperator",
     "block_diagonal",
     "identity",
+    "vector_io_capabilities",
+    "vector_view",
 ]
