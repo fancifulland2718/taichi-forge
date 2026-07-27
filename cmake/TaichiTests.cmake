@@ -132,6 +132,7 @@ add_executable(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
   tests/cpp/program/runtime_statistics_test.cpp
   tests/cpp/program/runtime_trace_test.cpp
   tests/cpp/program/sparse_numeric_transaction_test.cpp
+  tests/cpp/program/storage_view_test.cpp
   tests/cpp/rhi/common/host_memory_pool_test.cpp)
 target_link_libraries(${TAICHI_RUNTIME_FOUNDATION_TESTS_NAME}
   PRIVATE
