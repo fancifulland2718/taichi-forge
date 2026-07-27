@@ -2158,6 +2158,18 @@ void export_lang(py::module &m) {
            py::arg("dst"), py::arg("src"), py::arg("value_type"),
            py::arg("n"), py::arg("lane_count"),
            py::call_guard<py::gil_scoped_release>())
+      .def("_copy_dense_field_to_ndarray",
+           tracked_native_program_method(
+               &Program::copy_dense_field_to_ndarray),
+           py::arg("dst"), py::arg("src"), py::arg("value_type"),
+           py::arg("n"), py::arg("lane_count"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("_copy_ndarray_to_dense_field",
+           tracked_native_program_method(
+               &Program::copy_ndarray_to_dense_field),
+           py::arg("dst"), py::arg("src"), py::arg("value_type"),
+           py::arg("n"), py::arg("lane_count"),
+           py::call_guard<py::gil_scoped_release>())
       .def(
           "copy_dense_field_from_host",
           [](Program &program, SNode *dst, py::buffer src, int value_type,

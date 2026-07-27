@@ -345,7 +345,14 @@ class LinearOperator:
         self._provider_core = provider_core
         self._source = source
         self._retained = tuple(retained)
-        self._vector_io = _VectorIOCache()
+        self._vector_io = _VectorIOCache(
+            allow_native_bulk=self._program.config().arch
+            in (
+                _ti_core.Arch.x64,
+                _ti_core.Arch.arm64,
+                _ti_core.Arch.vulkan,
+            )
+        )
         metadata = dict(handle._metadata())
         metadata["capabilities"] = dict(metadata["capabilities"])
         metadata["traits"] = {
@@ -2093,7 +2100,14 @@ class SolvePlan:
             )
         )
         self._native_preconditioner = None
-        self._vector_io = _VectorIOCache()
+        self._vector_io = _VectorIOCache(
+            allow_native_bulk=self._program.config().arch
+            in (
+                _ti_core.Arch.x64,
+                _ti_core.Arch.arm64,
+                _ti_core.Arch.vulkan,
+            )
+        )
         self._solver = self._build_solver()
         get_runtime().register_runtime_object(self)
 

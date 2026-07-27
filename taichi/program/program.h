@@ -1554,6 +1554,18 @@ class TI_DLL_EXPORT Program {
                                std::size_t n,
                                int lane_count);
 
+  void copy_dense_field_to_ndarray(Ndarray *dst,
+                                   SNode *src,
+                                   int value_type,
+                                   std::size_t n,
+                                   int lane_count);
+
+  void copy_ndarray_to_dense_field(SNode *dst,
+                                   Ndarray *src,
+                                   int value_type,
+                                   std::size_t n,
+                                   int lane_count);
+
   void copy_dense_field_from_host(SNode *dst,
                                   std::uintptr_t src,
                                   std::size_t src_bytes,

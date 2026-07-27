@@ -14389,6 +14389,171 @@ void Program::copy_dense_field_packed(SNode *dst,
   std::memcpy(dst_ptr, src_ptr, bytes);
 }
 
+void Program::copy_dense_field_to_ndarray(Ndarray *dst,
+                                          SNode *src,
+                                          int value_type,
+                                          std::size_t n,
+                                          int lane_count) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
+  auto resource_submission_guard =
+      acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(!dst || !src,
+              "Native dense-field-to-ndarray copy received a null operand.");
+  const Arch arch = compile_config().arch;
+  TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
+              "Native dense-field-to-ndarray copy is only available on CPU, "
+              "CUDA, and Vulkan backends.");
+  const std::size_t bytes = dense_field_packed_bytes(
+      value_type, n, lane_count, "Native dense-field-to-ndarray copy");
+  TI_ERROR_IF(dst->get_nelement() * dst->get_element_size() != bytes,
+              "Native dense-field-to-ndarray copy requires an exactly sized "
+              "destination ndarray.");
+  check_dense_field_packed_stride(
+      this, src, value_type, lane_count,
+      "Native dense-field-to-ndarray copy");
+  if (bytes == 0) {
+    return;
+  }
+  auto leases = acquire_ndarray_leases({dst});
+  ScopedRuntimeTransferStatistics transfer_statistics(
+      this, RuntimeTransferKind::kDeviceToDevice, bytes);
+
+  if (arch == Arch::cuda || arch == Arch::vulkan) {
+    DevicePtr src_ptr = get_dense_field_device_ptr(src);
+    const DeviceAllocation dst_alloc = dst->ndarray_alloc_;
+    Device *device = program_impl_->get_compute_device();
+    TI_ERROR_IF(!device || src_ptr.device != device ||
+                    dst_alloc.device != device,
+                "Native dense-field-to-ndarray copy received invalid device "
+                "storage.");
+    if (arch == Arch::vulkan) {
+      DeviceAllocation src_alloc{src_ptr.device, src_ptr.alloc_id};
+      enqueue_compute_op_lambda(
+          [dst_alloc, src_alloc, src_offset = src_ptr.offset,
+           bytes](Device * /*device*/, CommandList *cmdlist) {
+            cmdlist->buffer_copy(dst_alloc.get_ptr(0),
+                                 src_alloc.get_ptr(src_offset), bytes);
+            cmdlist->buffer_barrier(dst_alloc);
+          },
+          {});
+      mark_runtime_submission_pending();
+      pin_ndarray_launch_leases(leases);
+      return;
+    }
+    Device::memcpy_direct(dst_alloc.get_ptr(0), src_ptr, bytes);
+    return;
+  }
+
+  auto *dst_ptr = reinterpret_cast<uint8_t *>(
+      program_impl_->get_device_alloc_info_ptr(dst->ndarray_alloc_));
+  const auto *src_ptr = map_cpu_dense_field_packed(
+      this, src, value_type, n, lane_count,
+      "Native dense-field-to-ndarray copy");
+  TI_ERROR_IF(!dst_ptr,
+              "Native dense-field-to-ndarray copy received null CPU ndarray "
+              "storage.");
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const std::size_t chunk_bytes =
+      bytes <= (4 << 20) ? (1 << 20) : (256 << 10);
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((bytes + chunk_bytes - 1) / chunk_bytes,
+                            static_cast<std::size_t>(max_threads)));
+  if (bytes >= (1 << 20) && target_threads > 1) {
+    CpuCopyTaskContext ctx;
+    ctx.dst = dst_ptr;
+    ctx.src = src_ptr;
+    ctx.bytes = bytes;
+    ctx.num_threads = target_threads;
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx, cpu_copy_task);
+    return;
+  }
+  std::memcpy(dst_ptr, src_ptr, bytes);
+}
+
+void Program::copy_ndarray_to_dense_field(SNode *dst,
+                                          Ndarray *src,
+                                          int value_type,
+                                          std::size_t n,
+                                          int lane_count) {
+  ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
+  auto resource_submission_guard =
+      acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(!dst || !src,
+              "Native ndarray-to-dense-field copy received a null operand.");
+  const Arch arch = compile_config().arch;
+  TI_ERROR_IF(!native_dense_field_bulk_arch(arch),
+              "Native ndarray-to-dense-field copy is only available on CPU, "
+              "CUDA, and Vulkan backends.");
+  const std::size_t bytes = dense_field_packed_bytes(
+      value_type, n, lane_count, "Native ndarray-to-dense-field copy");
+  TI_ERROR_IF(src->get_nelement() * src->get_element_size() != bytes,
+              "Native ndarray-to-dense-field copy requires an exactly sized "
+              "source ndarray.");
+  check_dense_field_packed_stride(
+      this, dst, value_type, lane_count,
+      "Native ndarray-to-dense-field copy");
+  if (bytes == 0) {
+    return;
+  }
+  auto leases = acquire_ndarray_leases({src});
+  ScopedRuntimeTransferStatistics transfer_statistics(
+      this, RuntimeTransferKind::kDeviceToDevice, bytes);
+
+  if (arch == Arch::cuda || arch == Arch::vulkan) {
+    DevicePtr dst_ptr = get_dense_field_device_ptr(dst);
+    const DeviceAllocation src_alloc = src->ndarray_alloc_;
+    Device *device = program_impl_->get_compute_device();
+    TI_ERROR_IF(!device || dst_ptr.device != device ||
+                    src_alloc.device != device,
+                "Native ndarray-to-dense-field copy received invalid device "
+                "storage.");
+    if (arch == Arch::vulkan) {
+      DeviceAllocation dst_alloc{dst_ptr.device, dst_ptr.alloc_id};
+      enqueue_compute_op_lambda(
+          [dst_alloc, src_alloc, dst_offset = dst_ptr.offset,
+           bytes](Device * /*device*/, CommandList *cmdlist) {
+            cmdlist->buffer_copy(dst_alloc.get_ptr(dst_offset),
+                                 src_alloc.get_ptr(0), bytes);
+            cmdlist->buffer_barrier(dst_alloc.get_ptr(dst_offset), bytes);
+          },
+          {});
+      mark_runtime_submission_pending();
+      pin_ndarray_launch_leases(leases);
+      return;
+    }
+    Device::memcpy_direct(dst_ptr, src_alloc.get_ptr(0), bytes);
+    return;
+  }
+
+  auto *dst_ptr = map_cpu_dense_field_packed(
+      this, dst, value_type, n, lane_count,
+      "Native ndarray-to-dense-field copy");
+  const auto *src_ptr = reinterpret_cast<const uint8_t *>(
+      program_impl_->get_device_alloc_info_ptr(src->ndarray_alloc_));
+  TI_ERROR_IF(!src_ptr,
+              "Native ndarray-to-dense-field copy received null CPU ndarray "
+              "storage.");
+  const int max_threads =
+      std::max(1, static_cast<int>(compile_config().cpu_max_num_threads));
+  const std::size_t chunk_bytes =
+      bytes <= (4 << 20) ? (1 << 20) : (256 << 10);
+  const int target_threads = static_cast<int>(
+      std::min<std::size_t>((bytes + chunk_bytes - 1) / chunk_bytes,
+                            static_cast<std::size_t>(max_threads)));
+  if (bytes >= (1 << 20) && target_threads > 1) {
+    CpuCopyTaskContext ctx;
+    ctx.dst = dst_ptr;
+    ctx.src = src_ptr;
+    ctx.bytes = bytes;
+    ctx.num_threads = target_threads;
+    auto pool = get_cpu_primitive_thread_pool(max_threads);
+    pool->run(target_threads, target_threads, &ctx, cpu_copy_task);
+    return;
+  }
+  std::memcpy(dst_ptr, src_ptr, bytes);
+}
 void Program::copy_dense_field_from_host(SNode *dst,
                                          std::uintptr_t src,
                                          std::size_t src_bytes,

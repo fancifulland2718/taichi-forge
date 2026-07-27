@@ -96,8 +96,10 @@ the synchronous API returns. `out=None` continues to return a scalar
 one-dimensional ndarray. RHS/input may not overlap output. An `initial_guess`
 or `addend` may be the exact same view as output; nonexact overlap fails.
 Stable raw-field bindings are qualified once per operator or plan and then
-reuse the same implicit view. Field/staging conversions replay a compiled Graph
-instead of repeating kernel specialization and argument preparation. An
+reuse the same implicit view. Canonical contiguous full-field conversions use
+native bulk copies on CPU and Vulkan. CUDA, indexed views, and strided field
+views use compiled Graph replay. Both routes avoid repeated kernel
+specialization and argument preparation. An
 overwrite `apply()` with field output submits the provider and output conversion
 under one completion boundary; generalized coefficient paths retain their
 existing synchronization contract.

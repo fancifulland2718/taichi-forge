@@ -19,6 +19,7 @@ from taichi_forge.lang._ndarray import ScalarNdarray
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang.field import (
     ScalarField,
+    _dense_host_copy_value_type,
     _dense_native_field_layout_supported,
 )
 from taichi_forge.lang.impl import grouped, static
@@ -782,6 +783,88 @@ def _as_vector_view(value, role):
     return None
 
 
+
+def _native_transfer_arch_supported():
+    return impl.current_cfg().arch in (
+        _ti_core.Arch.x64,
+        _ti_core.Arch.arm64,
+        _ti_core.Arch.cuda,
+        _ti_core.Arch.vulkan,
+    )
+
+
+class _NativeVectorTransfer:
+    """One direct contiguous field/staging bulk copy."""
+
+    @classmethod
+    def try_create(cls, view, staging, direction, allow_native_bulk):
+        descriptor = view._descriptor
+        program = _current_program()
+        method_name = (
+            "_copy_dense_field_to_ndarray"
+            if direction == "pack"
+            else "_copy_ndarray_to_dense_field"
+        )
+        if (
+            not allow_native_bulk
+            or view.indexed
+            or not _native_transfer_arch_supported()
+            or not hasattr(program, method_name)
+            or descriptor.item_stride
+            != descriptor.lane_count * _dtype_bytes(descriptor.dtype)
+        ):
+            return None
+        return cls(view, staging, direction, program, method_name)
+
+    def __init__(self, view, staging, direction, program, method_name):
+        self._field = view._field
+        self._staging = staging
+        self._exact_view_key = view._exact_view_key
+        self._direction = direction
+        self._program = program
+        self._method = getattr(program, method_name)
+        self._value_type = _dense_host_copy_value_type(view.dtype)
+        self._item_count = view._descriptor.item_count
+        self._lane_count = view._descriptor.lane_count
+        if view._descriptor.storage_kind == "dense_scalar":
+            self._snode = self._field.snode.ptr
+        else:
+            first_index = next(
+                iter(self._field._native_dense_component_indices())
+            )
+            self._snode = self._field.get_scalar_field(
+                *first_index
+            ).snode.ptr
+
+    def matches(self, view, staging, direction):
+        return (
+            direction == self._direction
+            and view._field is self._field
+            and view._exact_view_key == self._exact_view_key
+            and staging is self._staging
+            and _current_program() is self._program
+        )
+
+    def run(self, view):
+        view._ensure_valid("VectorView transfer")
+        if self._direction == "pack":
+            self._method(
+                self._staging.arr,
+                self._snode,
+                self._value_type,
+                self._item_count,
+                self._lane_count,
+            )
+        else:
+            self._method(
+                self._snode,
+                self._staging.arr,
+                self._value_type,
+                self._item_count,
+                self._lane_count,
+            )
+
+
 class _CompiledVectorTransfer:
     """One replayable field/staging conversion with fixed resource identity."""
 
@@ -891,7 +974,9 @@ def vector_io_capabilities():
             "value_host_transfer": False,
             "staging_reuse": "operator_or_plan_owned",
             "conversion_scope": "apply_or_solve_boundary_only",
-            "conversion_submission": "compiled_graph_replay",
+            "conversion_submission": (
+                "native_bulk_copy_or_compiled_graph_replay"
+            ),
             "zero_copy": False,
         },
         "sparse_snode": {
@@ -906,7 +991,8 @@ def vector_io_capabilities():
 class _VectorIOCache:
     """Reusable scalar ndarray staging and operation telemetry."""
 
-    def __init__(self):
+    def __init__(self, *, allow_native_bulk):
+        self._allow_native_bulk = bool(allow_native_bulk)
         self._buffers = {}
         self._implicit_views = {}
         self._transfer_plans = {}
@@ -922,6 +1008,7 @@ class _VectorIOCache:
             "transfer_plan_reuses": 0,
             "transfer_plan_evictions": 0,
             "transfer_graph_submissions": 0,
+            "transfer_native_submissions": 0,
             "pack_calls": 0,
             "unpack_calls": 0,
             "indexed_gather_calls": 0,
@@ -985,14 +1072,24 @@ class _VectorIOCache:
         if plan is not None and plan.matches(view, staging, direction):
             self._stats["transfer_plan_reuses"] += 1
         else:
-            plan = _CompiledVectorTransfer(view, staging, direction)
+            plan = _NativeVectorTransfer.try_create(
+                view,
+                staging,
+                direction,
+                self._allow_native_bulk,
+            )
+            if plan is None:
+                plan = _CompiledVectorTransfer(view, staging, direction)
             if len(self._transfer_plans) >= _TRANSFER_PLAN_CACHE_LIMIT:
                 self._transfer_plans.pop(next(iter(self._transfer_plans)))
                 self._stats["transfer_plan_evictions"] += 1
             self._transfer_plans[key] = plan
             self._stats["transfer_plan_builds"] += 1
         plan.run(view)
-        self._stats["transfer_graph_submissions"] += 1
+        if isinstance(plan, _NativeVectorTransfer):
+            self._stats["transfer_native_submissions"] += 1
+        else:
+            self._stats["transfer_graph_submissions"] += 1
 
     def pack(self, view, role, dtype, size):
         staging = self.buffer(role, dtype, size)

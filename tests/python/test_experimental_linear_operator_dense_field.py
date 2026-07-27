@@ -46,7 +46,12 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
     assert operator_stats["implicit_view_reuses"] == 2
     assert operator_stats["transfer_plan_builds"] == 2
     assert operator_stats["transfer_plan_reuses"] == 2
-    assert operator_stats["transfer_graph_submissions"] == 4
+    assert operator_stats["transfer_native_submissions"] == (
+        0 if impl.current_cfg().arch == ti.cuda else 4
+    )
+    assert operator_stats["transfer_graph_submissions"] == (
+        4 if impl.current_cfg().arch == ti.cuda else 0
+    )
     assert operator_stats["pack_calls"] == 2
     assert operator_stats["unpack_calls"] == 2
     assert operator_stats["completion_syncs"] == 2
@@ -72,7 +77,12 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
     assert vector_stats["implicit_view_reuses"] == 2
     assert vector_stats["transfer_plan_builds"] == 2
     assert vector_stats["transfer_plan_reuses"] == 2
-    assert vector_stats["transfer_graph_submissions"] == 4
+    assert vector_stats["transfer_native_submissions"] == (
+        0 if impl.current_cfg().arch == ti.cuda else 4
+    )
+    assert vector_stats["transfer_graph_submissions"] == (
+        4 if impl.current_cfg().arch == ti.cuda else 0
+    )
     assert vector_stats["pack_calls"] == 2
     assert vector_stats["unpack_calls"] == 2
     assert vector_stats["completion_syncs"] == 2
@@ -87,7 +97,7 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
         "apply_or_solve_boundary_only"
     )
     assert capabilities["dense_field"]["conversion_submission"] == (
-        "compiled_graph_replay"
+        "native_bulk_copy_or_compiled_graph_replay"
     )
 
     volume_values = np.arange(8, dtype=np.float32).reshape(2, 2, 2)
@@ -198,6 +208,8 @@ def test_indexed_dense_views_snapshot_topology_and_scatter_selected_values():
     )
     stats = operator.statistics()["vector_io"]
     assert stats["indexed_gather_calls"] == 1
+    assert stats["transfer_native_submissions"] == 0
+    assert stats["transfer_graph_submissions"] == 2
     assert stats["indexed_scatter_calls"] == 1
     assert source_view.metadata["layout_kind"] == "indexed_scalar_flat"
     assert source_view.metadata["index_validation"] == (
