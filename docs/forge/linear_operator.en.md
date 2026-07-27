@@ -55,12 +55,16 @@ The supported field contract is:
 - a canonically packed `ti.Vector.field` or `ti.Matrix.field`; and
 - fixed shape, the current `Program`, and a live `SNodeTree`.
 
+A scalar field whose records contain fixed sibling padding can still be a
+supported staged full view, but it is not a direct compact candidate. Packed
+Vector and Matrix fields must retain their canonical component layout.
+
 A field maps to operator space in scalar-flat order: canonical index-shape
 order first, followed by Vector lanes or row-major Matrix components. The
 scalar extent is therefore `prod(index_shape) * prod(element_shape)` and must
 match the operator domain or range exactly. Sparse SNodes such as `pointer`,
 `bitmasked`, `dynamic`, and `hash`, quantized storage, arbitrary nested dense
-trees, and noncanonical component placement fail before submission.
+trees, and noncanonical packed-component placement fail before submission.
 
 Use `vector_view()` to declare an explicit scalar subset or permutation of a
 dense field:
@@ -82,27 +86,39 @@ one explicit host validation; vector values remain device resident throughout
 apply and solve. Indexed scatter overwrites selected scalar entries only and
 leaves all other field entries unchanged.
 
-Dense-field interoperability uses device staging; it is not a zero-copy claim:
+Dense-field execution is provider-qualified. The overwrite form
+`operator.apply(input, out=output, alpha=1, beta=0)` directly binds canonical
+compact full fields when the selected provider reports
+`dense_storage_operands=True`:
+
+```text
+dense field descriptor -> resolved range + submission lease -> provider operands
+```
+
+Compiled-kernel providers accept direct field operands on CPU, CUDA, and
+Vulkan. Fixed native CSR/BSR providers accept them on CPU and CUDA; the Vulkan
+native sparse provider remains staged. Compiled Graph providers do not accept
+direct field operands. Direct input and output must be non-aliasing, have the
+exact dtype and scalar extent, and both qualify for a compact scalar-flat
+mapping.
+
+All other supported cases retain an explicit device-staging path:
 
 ```text
 dense field/view -> device pack or gather -> scalar ndarray provider ABI
-scalar ndarray solver result -> device unpack or scatter -> dense field/view
+scalar ndarray result -> device unpack or scatter -> dense field/view
 ```
 
-Each operator or plan owns and reuses compatible staging ndarrays. A warm solve
-does not allocate staging, and conversions occur only at apply/solve boundaries,
-never inside a Krylov iteration. A field `out` is unpacked or scattered before
-the synchronous API returns. `out=None` continues to return a scalar
-one-dimensional ndarray. RHS/input may not overlap output. An `initial_guess`
-or `addend` may be the exact same view as output; nonexact overlap fails.
-Stable raw-field bindings are qualified once per operator or plan and then
-reuse the same implicit view. Canonical contiguous full-field conversions use
-native bulk copies on CPU and Vulkan. CUDA, indexed views, and strided field
-views use compiled Graph replay. Both routes avoid repeated kernel
-specialization and argument preparation. An
-overwrite `apply()` with field output submits the provider and output conversion
-under one completion boundary; generalized coefficient paths retain their
-existing synchronization contract.
+This includes indexed views, padded or non-compact fields, generalized apply,
+`out=None`, and every `SolvePlan.solve()` field boundary. Each operator or plan
+owns and reuses compatible staging ndarrays. A warm solve does not allocate
+staging, and conversions occur only at apply/solve boundaries, never inside a
+Krylov iteration. A field `out` is unpacked or scattered before the synchronous
+API returns. RHS/input may not overlap output. An `initial_guess` or `addend`
+may be the exact same view as output; nonexact overlap fails. Stable raw-field
+bindings are qualified once per operator or plan and then reuse the same
+implicit view and transfer plan. Native bulk transfer is used where the backend
+supports it; other staged layouts use compiled conversion Graph replay.
 
 Capabilities and actual conversion costs are observable:
 
@@ -112,13 +128,16 @@ view_metadata = rhs_view.metadata
 stats = plan.statistics()["vector_io"]
 ```
 
-The statistics report staging builds/reuses/reserved bytes, implicit-view and
-compiled-transfer-plan builds/reuses/evictions, Graph submissions,
+`VectorView.metadata["zero_copy_candidate"]` reports only whether the physical
+full-field layout can be flattened without a copy; the provider capability and
+the requested operation still decide execution. Statistics report direct
+dense-field submissions, staging builds/reuses/reserved bytes, implicit-view
+and transfer-plan builds/reuses/evictions, native/Graph transfer submissions,
 pack/unpack and indexed gather/scatter calls, logical bytes, direct ndarray
-bindings, completion synchronizations, and coalesced operator synchronizations.
-`execution_mode="device_staged"` means the field API is supported without
-moving vector values through the host; it does not mean provider-native
-zero-copy.
+bindings, completion synchronizations, and coalesced operator
+synchronizations. `execution_mode="device_staged"` means the field API is
+supported without moving vector values through the host; it does not mean
+provider-native zero-copy.
 
 ## Stored operator and CG
 

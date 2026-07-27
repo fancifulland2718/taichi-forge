@@ -54,13 +54,50 @@ back to staging when qualification fails.
 | Padded or non-canonical dense field | No | No | No | Rejected; no materialization |
 | Bitmasked, pointer, dynamic, hash, or bit-packed SNode | No | No | No | Not a dense affine view |
 | Indexed subset or permutation | No | No | No | Requires an explicit indexed consumer |
-| StructNdarray member stride | No | No | No | Reserved for the record-stride execution stage |
+| StructNdarray member stride | No | No | No | Described by the shared storage model and accepted only by record-stride-aware consumers |
 | Graph capture/replay or ArgPack nesting | No | No | No | Rejected before backend submission |
 | Automatic differentiation through view gradients | No | No | No | No gradient owner is bound |
 
 “Qualified” means that Forge proves a compact byte range, native alignment,
 an Ndarray-compatible layout, and unique writable addressing. Source class
 alone does not guarantee acceptance.
+
+## Consumer-specific execution
+
+The storage descriptor is shared by several runtime consumers, but each
+consumer publishes its own execution capability. A descriptor that is valid
+for a native strided algorithm is not automatically a valid Ndarray kernel
+argument or a direct linear-operator operand.
+
+For `ti.linalg.experimental.LinearOperator.apply()`, a canonical compact full
+field can bypass scalar-vector staging when all of the following hold:
+
+- `out` is supplied and the operation is the overwrite form
+  `alpha=1, beta=0`;
+- input and output are non-aliasing full fields with the exact operator dtype
+  and scalar extent; and
+- the selected provider reports `dense_storage_operands=True`.
+
+The current provider matrix is:
+
+| LinearOperator provider | CPU | CUDA | Vulkan |
+| --- | --- | --- | --- |
+| Compiled Taichi kernel | Direct | Direct | Direct |
+| Fixed native CSR/BSR | Direct | Direct | Device staged |
+| Compiled Graph | Device staged | Device staged | Device staged |
+| `SolvePlan.solve()` vector boundary | Device staged | Device staged | Device staged |
+
+Indexed views, padded/non-compact fields, generalized apply coefficients, and
+`out=None` use the established device-staging path. They never move vector
+values through the host. Query `operator.capabilities.dense_storage_operands`,
+`vector_io_capabilities()`, `VectorView.metadata`, and
+`operator.statistics()["vector_io"]` to distinguish a qualified candidate from
+the path that actually executed.
+
+Native algorithms use the same descriptor for dtype, shape, owner, offset,
+and record stride while retaining their provider-specific handles. Warm plan
+replay for the same objects reuses the native plan without rebuilding the
+descriptor.
 
 ## Lifetime and failure behavior
 

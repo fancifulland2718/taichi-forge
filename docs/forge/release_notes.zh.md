@@ -45,17 +45,22 @@
   enqueue 前失败，GPU submission 会把 runtime resource 保留到执行完成。
 - `ti.linalg.experimental.LinearOperator.apply()` 与单系统
   `SolvePlan.solve()` 现在直接接受受支持的 1D/2D/3D root-dense scalar、Vector 和
-  Matrix field。field 在 CPU、CUDA 和 Vulkan 上通过可复用的 device staging 映射到
-  既有 scalar-flat ndarray provider ABI；warm solve 不重新分配 staging，转换不进入
-  Krylov iteration。
-  稳定 raw field binding 现在复用已验证的 implicit view 与 transfer plan；canonical
-  contiguous full-field 在 CPU/Vulkan 使用 native bulk copy，CUDA 与 indexed/strided view
-  使用 compiled conversion Graph。field-output overwrite apply 还会让 provider execution
-  与 output conversion 共享同一 completion boundary。
+  Matrix field。当 provider 声明支持 dense-storage operand 时，overwrite
+  `LinearOperator.apply()` 会直接绑定 canonical compact full field：compiled-kernel
+  provider 覆盖 CPU/CUDA/Vulkan，fixed native CSR/BSR provider 覆盖 CPU/CUDA。其它 apply
+  形式、compiled Graph 与 Vulkan native sparse provider、indexed/non-compact view，以及
+  全部 `SolvePlan.solve()` field 边界使用可复用 device staging。warm solve 不重新分配
+  staging，转换不进入 Krylov iteration。
+  稳定 raw field binding 复用已验证的 implicit view 与 transfer plan；执行遥测明确区分
+  direct submission、native pack/unpack 和 compiled Graph pack/unpack 路径。
 - 新增 runtime-bound `VectorView` 与 `vector_view(field, indices=...)`，用于声明经过
-  验证、冻结的 scalar subset/permutation。新增版本化 capability、layout metadata 和
-  staging/pack/unpack/indexed-copy telemetry。sparse SNode、noncanonical layout、非法
-  index 与不安全 alias 明确失败，不执行 host vector fallback。
+  验证、冻结的 scalar subset/permutation。新增版本化 capability、layout metadata、
+  direct/staging/pack/unpack/indexed-copy telemetry 与 provider-qualified zero-copy
+  candidate 报告。sparse SNode、noncanonical layout、非法 index 与不安全 alias 明确
+  失败，不执行 host vector fallback。
+- native algorithm 与 LinearOperator vector adapter 现在统一从 dense storage descriptor
+  获取 dtype、shape、owner generation、byte range、offset 与 record stride，同时保留
+  provider 特定 handle 和 warm native-plan replay。
 
 ## 0.5.1
 

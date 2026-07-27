@@ -49,20 +49,26 @@ grouped under the behavior they shipped.
   enqueue, and GPU submissions retain the runtime resource through completion.
 - `ti.linalg.experimental.LinearOperator.apply()` and single-system
   `SolvePlan.solve()` now accept supported 1D/2D/3D root-dense scalar, Vector,
-  and Matrix fields directly. CPU, CUDA, and Vulkan use reusable device staging
-  to map fields to the established scalar-flat ndarray provider ABI. Warm
-  solves do not allocate staging, and conversion never enters a Krylov
-  iteration.
-  Stable raw-field bindings now reuse qualified implicit views and transfer
-  plans. Canonical contiguous full fields use native bulk copies on CPU/Vulkan;
-  CUDA and indexed/strided views use compiled conversion Graphs. Field-output
-  overwrite apply also shares one completion boundary between provider
-  execution and output conversion.
+  and Matrix fields. Overwrite `LinearOperator.apply()` binds canonical compact
+  full fields directly when the provider declares dense-storage operands:
+  compiled-kernel providers do so on CPU/CUDA/Vulkan and fixed native CSR/BSR
+  providers on CPU/CUDA. Other apply forms, compiled Graph and Vulkan native
+  sparse providers, indexed/non-compact views, and all `SolvePlan.solve()` field
+  boundaries use reusable device staging. Warm solves do not allocate staging,
+  and conversion never enters a Krylov iteration.
+  Stable raw-field bindings reuse qualified implicit views and transfer plans;
+  execution telemetry distinguishes direct submissions from native or compiled
+  Graph pack/unpack paths.
 - Added runtime-bound `VectorView` and `vector_view(field, indices=...)` for
   validated, frozen scalar subsets or permutations, together with versioned
-  capability, layout metadata, and staging/pack/unpack/indexed-copy telemetry.
+  capability, layout metadata, direct/staging/pack/unpack/indexed-copy
+  telemetry, and provider-qualified zero-copy candidate reporting.
   Sparse SNodes, noncanonical layouts, invalid indices, and unsafe aliases fail
   explicitly without a host vector fallback.
+- Native algorithms and LinearOperator vector adapters now derive dtype, shape,
+  owner generation, byte range, offset, and record stride from the shared dense
+  storage descriptor. Provider-specific handles and warm native-plan replay are
+  preserved.
 
 ## 0.5.1
 

@@ -47,11 +47,14 @@ assert result.solution is solution
 - canonical packed `ti.Vector.field` 或 `ti.Matrix.field`；
 - fixed shape、当前 `Program` 和仍然存活的 `SNodeTree`。
 
+scalar field 的 record 即使含有固定 sibling padding，仍可作为 staged full view，但不属于
+direct compact candidate。Vector/Matrix field 必须保持 canonical component layout。
+
 field 按 scalar-flat 顺序映射到 operator space：先按 index shape 的 canonical 顺序遍历，
 再按 Vector lane 或 Matrix row-major component 顺序展开。因此 scalar extent 为
 `prod(index_shape) * prod(element_shape)`，并且必须与 operator 的 domain/range extent
 精确匹配。`pointer`、`bitmasked`、`dynamic`、`hash` 等 sparse SNode、quantized storage、
-arbitrary nested dense tree 和 noncanonical component placement 会在提交前明确失败。
+arbitrary nested dense tree 和 noncanonical packed-component placement 会在提交前明确失败。
 
 `vector_view()` 可声明 dense field 的显式 scalar 子集或排列：
 
@@ -70,22 +73,33 @@ result = active_plan.solve(rhs_view, out=solution_view)
 数值的 apply/solve 路径始终留在设备上。indexed scatter 只覆盖选中的 scalar entry，
 其它 field entry 保持不变。
 
-dense field 互操作采用设备 staging，而不是宣称 zero-copy：
+dense field 的执行路径由 provider capability 决定。对于
+`operator.apply(input, out=output, alpha=1, beta=0)` overwrite 形式，当 provider 报告
+`dense_storage_operands=True` 时，canonical compact full field 会直接绑定：
+
+```text
+dense field descriptor -> resolved range + submission lease -> provider operands
+```
+
+compiled-kernel provider 在 CPU、CUDA、Vulkan 上均接受 direct field operand。fixed native
+CSR/BSR provider 在 CPU 与 CUDA 上接受，Vulkan native sparse provider 仍使用 staging；
+compiled Graph provider 不接受 direct field operand。direct input/output 必须互不 alias，
+dtype 与 scalar extent 精确匹配，并且都能证明是 compact scalar-flat mapping。
+
+其它受支持的情况继续使用显式 device staging：
 
 ```text
 dense field/view -> device pack or gather -> scalar ndarray provider ABI
-scalar ndarray solver result -> device unpack or scatter -> dense field/view
+scalar ndarray result -> device unpack or scatter -> dense field/view
 ```
 
-每个 operator/plan 持有并复用兼容的 staging ndarray。warm solve 不重新分配 staging，
-转换只发生在 apply/solve 边界，不进入 Krylov iteration。field `out` 会在同步 API 返回前
-完成一次 unpack/scatter；`out=None` 继续返回一维 scalar ndarray。RHS/input 不能与 output
+这包括 indexed view、padded 或 non-compact field、generalized apply、`out=None`，以及
+全部 `SolvePlan.solve()` field 边界。每个 operator/plan 持有并复用兼容的 staging
+ndarray；warm solve 不重新分配，转换只发生在 apply/solve 边界，不进入 Krylov
+iteration。field `out` 会在同步 API 返回前完成 unpack/scatter。RHS/input 不能与 output
 重叠；`initial_guess` 或 `addend` 可以与 output 是精确相同的 view，非精确重叠会失败。
-稳定的 raw field binding 会在每个 operator/plan 内只完成一次资格解析，并复用同一个 implicit
-view。canonical contiguous full-field 转换在 CPU/Vulkan 上使用原生 bulk copy；CUDA 以及 indexed
-或带步幅的 field view 使用已编译 Graph replay。两条路径都避免重复 kernel specialization 与参数准备。
-field output 的 overwrite `apply()` 在同一 completion boundary 内提交 provider 与 output
-conversion；generalized coefficient 路径保持既有同步合同。
+稳定 raw field binding 只完成一次资格解析，并复用 implicit view 与 transfer plan；backend
+支持时使用 native bulk transfer，其它 staged layout 使用 compiled conversion Graph replay。
 
 可以查询支持面和实际转换开销：
 
@@ -95,9 +109,12 @@ view_metadata = rhs_view.metadata
 stats = plan.statistics()["vector_io"]
 ```
 
-`stats` 报告 staging build/reuse/reserved bytes、implicit view 与 transfer plan 的
-build/reuse/eviction、native bulk/Graph submission、pack/unpack、indexed gather/scatter、logical bytes、
-direct ndarray binding、completion sync 和合并的 operator sync 次数。
+`VectorView.metadata["zero_copy_candidate"]` 只表示 full-field 的物理 layout 可无复制地
+flatten；实际执行仍由 provider capability 与本次 operation 决定。`stats` 报告 direct
+dense-field submission、staging build/reuse/reserved bytes、implicit view 与 transfer plan
+的 build/reuse/eviction、native/Graph transfer submission、pack/unpack、indexed
+gather/scatter、logical bytes、direct ndarray binding、completion sync 和合并的 operator
+sync 次数。
 `execution_mode="device_staged"` 表示支持 field API 且数值不经过 host；它不等同于
 provider-native zero-copy。
 

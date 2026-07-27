@@ -49,12 +49,44 @@ element shape 必须与 kernel annotation 匹配。该 view 不公开 gradient s
 | Padded 或 non-canonical dense field | 不支持 | 不支持 | 不支持 | 明确拒绝，不 materialize |
 | Bitmasked、pointer、dynamic、hash、bit-packed SNode | 不支持 | 不支持 | 不支持 | 不属于 dense affine view |
 | Indexed subset 或 permutation | 不支持 | 不支持 | 不支持 | 需要显式 indexed consumer |
-| StructNdarray member stride | 不支持 | 不支持 | 不支持 | 留给 record-stride 执行阶段 |
+| StructNdarray member stride | 不支持 | 不支持 | 不支持 | 由共享 storage 模型描述，仅供理解 record stride 的 consumer 使用 |
 | Graph capture/replay 或 ArgPack 嵌套 | 不支持 | 不支持 | 不支持 | backend submission 前拒绝 |
 | 通过 view gradient 自动微分 | 不支持 | 不支持 | 不支持 | 不绑定 gradient owner |
 
 “资格验证”表示 Forge 已证明 byte range compact、满足 native alignment、布局兼容
 Ndarray ABI，并且 writable address mapping 唯一。仅凭 source class 不能保证一定接受。
+
+## Consumer 特定的执行能力
+
+多个 runtime consumer 共享同一 storage descriptor，但每个 consumer 都独立发布执行
+capability。一个 descriptor 可被原生 strided algorithm 接受，不代表它必然可作为
+Ndarray kernel 参数或 LinearOperator direct operand。
+
+对于 `ti.linalg.experimental.LinearOperator.apply()`，canonical compact full field
+只有同时满足以下条件时才绕过 scalar-vector staging：
+
+- 显式传入 `out`，并使用 `alpha=1, beta=0` 的 overwrite 形式；
+- input/output 是不互相 alias、dtype 与 scalar extent 精确匹配的 full field；
+- 当前 provider 报告 `dense_storage_operands=True`。
+
+当前 provider 矩阵如下：
+
+| LinearOperator provider | CPU | CUDA | Vulkan |
+| --- | --- | --- | --- |
+| 已编译 Taichi kernel | Direct | Direct | Direct |
+| Fixed native CSR/BSR | Direct | Direct | Device staged |
+| 已编译 Graph | Device staged | Device staged | Device staged |
+| `SolvePlan.solve()` vector 边界 | Device staged | Device staged | Device staged |
+
+indexed view、padded/non-compact field、generalized apply coefficient 和 `out=None`
+沿用 device-staging 路径，vector 数值不会经过 host。可以通过
+`operator.capabilities.dense_storage_operands`、`vector_io_capabilities()`、
+`VectorView.metadata` 和 `operator.statistics()["vector_io"]` 区分“可作为 direct
+候选”与实际执行路径。
+
+原生算法也使用同一 descriptor 获取 dtype、shape、owner、offset 与 record stride，
+同时保留 provider 特定的 handle。对相同对象进行 warm plan replay 时，会直接复用 native
+plan，不重新构造 descriptor。
 
 ## 生命周期与失败行为
 
