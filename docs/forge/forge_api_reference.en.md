@@ -21,6 +21,18 @@ Import Forge as:
 import taichi_forge as ti
 ```
 
+### `ti.experimental.ndarray_view(source, *, access="readwrite")`
+
+Creates an explicit non-owning, zero-copy Ndarray-ABI view over a qualified
+Forge `Ndarray` or canonical root-dense field. The returned view is accepted by
+`ti.types.ndarray(...)` kernel arguments on CPU, CUDA, and Vulkan. Unsupported
+layouts raise before submission; the API does not allocate staging storage or
+silently copy. The current contract is read-write, has no gradient binding, and
+does not support Graph capture/replay or ArgPack nesting.
+
+See [Experimental zero-copy dense storage views](storage_views.en.md) for the
+layout matrix, lifetime behavior, and examples.
+
 ### `ti.compile_kernels(kernels)`
 
 Location: `taichi_forge.lang.misc`; exported as `ti.compile_kernels`.

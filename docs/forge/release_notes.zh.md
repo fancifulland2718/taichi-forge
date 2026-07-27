@@ -39,6 +39,10 @@
 
 ## 未发布
 
+- 新增 `ti.experimental.ndarray_view()`，可在 CPU、CUDA、Vulkan 上把经过资格验证的
+  contiguous Ndarray 与 canonical root-dense field 严格 zero-copy 地绑定到现有
+  `ti.types.ndarray(...)` kernel ABI。不支持的 layout 不会 staging；stale owner 在
+  enqueue 前失败，GPU submission 会把 runtime resource 保留到执行完成。
 - `ti.linalg.experimental.LinearOperator.apply()` 与单系统
   `SolvePlan.solve()` 现在直接接受受支持的 1D/2D/3D root-dense scalar、Vector 和
   Matrix field。field 在 CPU、CUDA 和 Vulkan 上通过可复用的 device staging 映射到

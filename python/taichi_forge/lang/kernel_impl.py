@@ -592,14 +592,16 @@ class TaichiCallableTemplateMapper:
 
     @staticmethod
     def _arg_uses_weak_feature_cache(arg):
-        return isinstance(
+        if isinstance(
             arg,
             (
                 taichi_forge.lang._ndarray.Ndarray,
                 taichi_forge.lang._ndarray.StructNdarrayScalarMemberView,
                 taichi_forge.lang._ndarray.StructNdarrayTensorMemberView,
             ),
-        )
+        ):
+            return True
+        return getattr(arg, "_is_dense_ndarray_view", False)
 
     @staticmethod
     def _arg_feature_cache_token(arg, anno):
@@ -676,6 +678,17 @@ class TaichiCallableTemplateMapper:
             # support mip-mapping.
             return arg.num_dims, arg.fmt, 0
         if isinstance(anno, ndarray_type.NdarrayType):
+            from taichi_forge.lang._storage_view import DenseNdarrayView  # pylint: disable=C0415
+
+            if isinstance(arg, DenseNdarrayView):
+                arg_type = arg.get_type()
+                anno.check_matched(arg_type, arg_name)
+                needs_grad = False if anno.needs_grad is None else anno.needs_grad
+                if needs_grad:
+                    raise TaichiRuntimeTypeError(
+                        f"Dense storage view argument {arg_name} does not support gradients"
+                    )
+                return arg_type.element_type, len(arg.shape), False, anno.boundary
             if isinstance(arg, taichi_forge.lang._ndarray.StructNdarrayTensorMemberView):
                 anno.check_matched(arg.get_type(), arg_name)
                 needs_grad = False if anno.needs_grad is None else anno.needs_grad
@@ -1338,6 +1351,9 @@ class Kernel:
         def set_arg_struct_member_ndarray(indices, v):
             launch_ctx.set_arg_ndarray(indices, v.base.arr)
 
+        def set_arg_dense_storage(indices, v):
+            launch_ctx.set_arg_dense_storage(indices, v.descriptor)
+
         set_later_list = []
 
         def recursive_set_args(needed, provided, v, indices):
@@ -1401,6 +1417,16 @@ class Kernel:
                     return 0
                 set_arg_struct_member_ndarray(indices, v)
                 return 1
+            if isinstance(needed, ndarray_type.NdarrayType):
+                from taichi_forge.lang._storage_view import DenseNdarrayView  # pylint: disable=C0415
+
+                if isinstance(v, DenseNdarrayView):
+                    if in_argpack:
+                        raise TaichiRuntimeTypeError(
+                            "Dense storage views are not supported inside ArgPack"
+                        )
+                    set_arg_dense_storage(indices, v)
+                    return 1
             if isinstance(needed, ndarray_type.NdarrayType) and isinstance(v, taichi_forge.lang._ndarray.Ndarray):
                 if in_argpack:
                     set_later_list.append((set_arg_ndarray, (v,)))

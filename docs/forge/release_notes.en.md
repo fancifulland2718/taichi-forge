@@ -42,6 +42,11 @@ grouped under the behavior they shipped.
 
 ## Unreleased
 
+- Added `ti.experimental.ndarray_view()` for strict zero-copy binding of
+  qualified contiguous Ndarrays and canonical root-dense fields to the
+  existing `ti.types.ndarray(...)` kernel ABI on CPU, CUDA, and Vulkan.
+  Unsupported layouts fail without staging; stale owners are rejected before
+  enqueue, and GPU submissions retain the runtime resource through completion.
 - `ti.linalg.experimental.LinearOperator.apply()` and single-system
   `SolvePlan.solve()` now accept supported 1D/2D/3D root-dense scalar, Vector,
   and Matrix fields directly. CPU, CUDA, and Vulkan use reusable device staging

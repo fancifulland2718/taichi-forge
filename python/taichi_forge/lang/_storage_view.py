@@ -19,6 +19,7 @@ from taichi_forge.lang._ndarray import (
 )
 from taichi_forge.lang.field import ScalarField
 from taichi_forge.lang.matrix import MatrixField
+from taichi_forge.types.ndarray_type import NdarrayTypeMetadata
 
 
 _SHADOW_ENV = "TI_STORAGE_VIEW_SHADOW"
@@ -91,6 +92,60 @@ class StorageDescription:
         if descriptor is None:
             return MappingProxyType({})
         return MappingProxyType(dict(descriptor.properties))
+
+
+class DenseNdarrayView:
+    """Explicit non-owning ndarray-ABI view over existing dense storage."""
+
+    __slots__ = (
+        "_source",
+        "_description",
+        "_descriptor",
+        "_element_type",
+        "_type_metadata",
+        "shape",
+        "grad",
+        "__weakref__",
+    )
+    _is_dense_ndarray_view = True
+
+    def __init__(self, source, description):
+        descriptor = description.descriptor
+        if descriptor is None:
+            raise ValueError(f"cannot view unsupported storage: {description.failure_reason}")
+        element_shape = tuple(int(extent) for extent in descriptor.element_shape)
+        if len(element_shape) == 0:
+            element_type = descriptor.scalar_type
+        elif len(element_shape) <= 2:
+            element_type = _ti_core.get_type_factory_instance().get_tensor_type(
+                element_shape, descriptor.scalar_type
+            )
+        else:
+            raise ValueError("ndarray_view supports scalar, vector, or matrix elements")
+        self._source = source
+        self._description = description
+        self._descriptor = descriptor
+        self._element_type = element_type
+        self.shape = tuple(int(extent) for extent in descriptor.index_shape)
+        self.grad = None
+        self._type_metadata = NdarrayTypeMetadata(element_type, self.shape, False)
+
+    @property
+    def description(self):
+        return self._description
+
+    @property
+    def descriptor(self):
+        return self._descriptor
+
+    def get_type(self):
+        return self._type_metadata
+
+    def __repr__(self):
+        return (
+            f"DenseNdarrayView(shape={self.shape}, element_type={self._element_type}, "
+            f"source={self.descriptor.source_kind})"
+        )
 
 
 def _shape_tuple(value):
@@ -179,6 +234,36 @@ def describe_storage(obj, *, access="readwrite"):
     if field_result is not None:
         return StorageDescription(field_result)
     return StorageDescription(_failure_reason="kUnsupportedStorageKind")
+
+
+def ndarray_view(obj, *, access="readwrite"):
+    """Create an explicit zero-copy ndarray ABI view when safely possible.
+
+    The initial execution contract is deliberately read-write and contiguous.
+    Unsupported layouts fail without allocating or materializing a temporary.
+    """
+
+    if access != "readwrite":
+        raise ValueError("executable ndarray_view currently requires access='readwrite'")
+    description = describe_storage(obj, access=access)
+    if not description.supported:
+        raise ValueError(f"storage cannot be described: {description.failure_reason}")
+    qualification = qualify_storage(
+        description,
+        StorageRequirement(
+            max_element_rank=2,
+            require_ndarray_abi=True,
+            require_unique_mapping=True,
+            require_writable=True,
+            allow_materialization=False,
+        ),
+    )
+    if not qualification["supported"] or qualification["requires_materialization"]:
+        raise ValueError(
+            "storage cannot be bound as a zero-copy ndarray view: "
+            f"{qualification['reason']}"
+        )
+    return DenseNdarrayView(obj, description)
 
 
 def validate_storage_owner(description):
@@ -338,10 +423,12 @@ def shadow_validate_dense_field_descriptor(field, legacy):
 
 
 __all__ = [
+    "DenseNdarrayView",
     "StorageDescription",
     "StorageRequirement",
     "analyze_storage_alias",
     "describe_storage",
+    "ndarray_view",
     "qualify_storage",
     "validate_storage_owner",
 ]

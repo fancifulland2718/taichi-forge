@@ -186,3 +186,129 @@ def test_storage_view_shadow_checks_existing_algorithm_descriptors(monkeypatch):
     wrong_shape = replace(legacy_field, index_shape=(5,))
     with pytest.raises(RuntimeError, match="index_shape"):
         shadow_validate_dense_field_descriptor(field, wrong_shape)
+
+
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    exclude=[(ti.vulkan, "Darwin")],
+    offline_cache=False,
+)
+def test_ndarray_view_binds_field_and_ndarray_without_temporary_storage():
+    @ti.kernel
+    def add_bias(values: ti.types.ndarray(dtype=ti.f32, ndim=1), bias: ti.f32):
+        for i in values:
+            values[i] += bias
+
+    field = ti.field(ti.f32, shape=16)
+    array = ti.ndarray(ti.f32, shape=16)
+    field.fill(2.0)
+    array.fill(5.0)
+
+    program = impl.get_runtime().prog
+    before = program._debug_ndarray_resource_stats()
+    binding_before = program._debug_dense_storage_binding_stats()
+    field_view = ti.experimental.ndarray_view(field)
+    array_view = ti.experimental.ndarray_view(array)
+    after_describe = program._debug_ndarray_resource_stats()
+    assert after_describe["live"] == before["live"]
+    assert after_describe["created_total"] == before["created_total"]
+
+    add_bias(field_view, 3.0)
+    add_bias(array_view, 7.0)
+    assert (field.to_numpy() == 5.0).all()
+    assert (array.to_numpy() == 12.0).all()
+
+    after_launch = program._debug_ndarray_resource_stats()
+    assert after_launch["live"] == before["live"]
+    assert after_launch["created_total"] == before["created_total"]
+    binding_after = program._debug_dense_storage_binding_stats()
+    assert binding_after["direct_submissions"] == binding_before["direct_submissions"] + 2
+    assert binding_after["resolved_bindings"] == binding_before["resolved_bindings"] + 2
+    assert binding_after["field_bindings"] == binding_before["field_bindings"] + 1
+    assert binding_after["ndarray_bindings"] == binding_before["ndarray_bindings"] + 1
+    assert binding_after["temporary_allocations"] == 0
+    assert binding_after["temporary_bytes"] == 0
+
+
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    exclude=[(ti.vulkan, "Darwin")],
+    offline_cache=False,
+)
+def test_ndarray_view_supports_canonical_packed_compound_fields():
+    vec3 = ti.types.vector(3, ti.f32)
+    mat2 = ti.types.matrix(2, 2, ti.f32)
+
+    @ti.kernel
+    def update_vector(values: ti.types.ndarray(dtype=vec3, ndim=1)):
+        for i in values:
+            values[i] = values[i] + vec3(1.0, 2.0, 3.0)
+
+    @ti.kernel
+    def update_matrix(values: ti.types.ndarray(dtype=mat2, ndim=1)):
+        for i in values:
+            values[i][0, 0] += 1.0
+            values[i][0, 1] += 2.0
+            values[i][1, 0] += 3.0
+            values[i][1, 1] += 4.0
+
+    field = ti.Vector.field(3, ti.f32, shape=8)
+    field.fill(4.0)
+    view = ti.experimental.ndarray_view(field)
+    update_vector(view)
+    result = field.to_numpy()
+    assert (result[:, 0] == 5.0).all()
+    assert (result[:, 1] == 6.0).all()
+    assert (result[:, 2] == 7.0).all()
+
+    matrix_field = ti.Matrix.field(2, 2, ti.f32, shape=8)
+    matrix_field.fill(5.0)
+    matrix_view = ti.experimental.ndarray_view(matrix_field)
+    update_matrix(matrix_view)
+    matrix_result = matrix_field.to_numpy()
+    assert (matrix_result[:, 0, 0] == 6.0).all()
+    assert (matrix_result[:, 0, 1] == 7.0).all()
+    assert (matrix_result[:, 1, 0] == 8.0).all()
+    assert (matrix_result[:, 1, 1] == 9.0).all()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_ndarray_view_rejects_stale_owners_before_launch():
+    @ti.kernel
+    def touch(values: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+        for i in values:
+            values[i] += 1.0
+
+    field = ti.field(ti.f32)
+    builder = ti.FieldsBuilder()
+    builder.dense(ti.i, 8).place(field)
+    tree = builder.finalize()
+    field_view = ti.experimental.ndarray_view(field)
+    touch(field_view)
+    tree.destroy()
+    with pytest.raises(RuntimeError, match="retired SNodeTree|generation"):
+        touch(field_view)
+
+    array = ti.ndarray(ti.f32, shape=8)
+    array_view = ti.experimental.ndarray_view(array)
+    touch(array_view)
+    program = impl.get_runtime().prog
+    native = array.arr
+    array._invalidate_runtime()
+    program.delete_ndarray(native)
+    with pytest.raises(RuntimeError, match="stale or retired Ndarray"):
+        touch(array_view)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_ndarray_view_rejects_padded_dense_layout_without_materializing():
+    lhs = ti.field(ti.f32)
+    rhs = ti.field(ti.f32)
+    builder = ti.FieldsBuilder()
+    builder.dense(ti.i, 8).place(lhs, rhs)
+    tree = builder.finalize()
+    try:
+        with pytest.raises(ValueError, match="zero-copy ndarray view"):
+            ti.experimental.ndarray_view(lhs)
+    finally:
+        tree.destroy()

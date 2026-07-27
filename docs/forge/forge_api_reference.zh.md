@@ -18,6 +18,17 @@ device primitive、graph replay、显示帧提交、稀疏布局实验能力和�
 import taichi_forge as ti
 ```
 
+### `ti.experimental.ndarray_view(source, *, access="readwrite")`
+
+为经过资格验证的 Forge `Ndarray` 或 canonical root-dense field 创建显式、non-owning、
+zero-copy 的 Ndarray-ABI view。返回对象可在 CPU、CUDA、Vulkan 上传给
+`ti.types.ndarray(...)` kernel 参数。不支持的 layout 会在 submission 前失败；该 API
+不分配 staging storage，也不静默复制。当前合同仅支持 read-write，不绑定 gradient，
+且不支持 Graph capture/replay 或 ArgPack 嵌套。
+
+完整 layout matrix、生命周期行为与示例见
+[实验性 Dense Storage 零拷贝视图](storage_views.zh.md)。
+
 ### `ti.compile_kernels(kernels)`
 
 位置：`taichi_forge.lang.misc`，导出为 `ti.compile_kernels`。
