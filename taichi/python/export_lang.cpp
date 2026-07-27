@@ -26,6 +26,7 @@
 #include "taichi/program/extension.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/matrix.h"
+#include "taichi/python/export_storage_view.h"
 #include "taichi/python/export.h"
 #include "taichi/math/svd.h"
 #include "taichi/system/timeline.h"
@@ -3201,6 +3202,8 @@ void export_lang(py::module &m) {
       .def("element_data_type", &Ndarray::get_element_data_type)
       .def_readonly("dtype", &Ndarray::dtype)
       .def_readonly("shape", &Ndarray::shape);
+
+  export_storage_view(m);
 
   py::class_<ArgPack>(m, "ArgPack")
       .def("device_allocation_ptr", &ArgPack::get_device_allocation_ptr_as_int)

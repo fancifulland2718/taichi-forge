@@ -185,8 +185,8 @@ TEST(StorageViewTest, FingerprintContainsStableOwnerAndLogicalMapping) {
 TEST(StorageViewTest, LogicalAliasAnalysisIsTriState) {
   RuntimeResourceHandle handle{51, 7, 0, 1};
   RuntimeResourceHandle other_handle{51, 7, 1, 1};
-  auto owner = StorageOwnerRef::program_ndarray(handle);
-  auto other_owner = StorageOwnerRef::program_ndarray(other_handle);
+  auto owner = StorageOwnerRef::program_ndarray(61, handle);
+  auto other_owner = StorageOwnerRef::program_ndarray(61, other_handle);
 
   auto first =
       build_f32({4}, {4}, {}, {}, 0, owner, StorageSourceKind::kNdarray);

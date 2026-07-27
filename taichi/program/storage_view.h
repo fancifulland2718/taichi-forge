@@ -113,7 +113,8 @@ struct StorageOwnerRef {
   std::uint32_t external_slot{0};
   std::uint32_t external_generation{0};
 
-  static StorageOwnerRef program_ndarray(RuntimeResourceHandle handle);
+  static StorageOwnerRef program_ndarray(std::uint64_t program_domain,
+                                         RuntimeResourceHandle handle);
   static StorageOwnerRef snode_payload(std::uint64_t program_domain,
                                        SNodeTreeDependency tree,
                                        int anchor_snode_id,

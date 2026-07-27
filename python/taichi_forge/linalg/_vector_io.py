@@ -9,6 +9,7 @@ device resident throughout that conversion.
 from dataclasses import dataclass
 import hashlib
 import math
+import os
 from types import MappingProxyType
 
 import numpy as np
@@ -541,13 +542,31 @@ def _describe_matrix_field(field, role):
     )
 
 
-def _describe_value_field(field, role):
+def _describe_value_field_legacy(field, role):
     impl.get_runtime().materialize()
     if isinstance(field, ScalarField):
         return _describe_scalar_field(
             field, role, allowed_dtypes=_SUPPORTED_VALUE_DTYPES
         )
     return _describe_matrix_field(field, role)
+
+
+_storage_shadow_setting = os.environ.get(
+    "TI_STORAGE_VIEW_SHADOW", "off"
+).strip().lower()
+if _storage_shadow_setting not in ("", "0", "false", "no", "off"):
+    from taichi_forge.lang._storage_view import (
+        shadow_validate_dense_field_descriptor as _shadow_validate_dense_field_descriptor,
+    )
+
+    def _describe_value_field(field, role):
+        descriptor = _describe_value_field_legacy(field, role)
+        _shadow_validate_dense_field_descriptor(field, descriptor)
+        return descriptor
+
+else:
+    _describe_value_field = _describe_value_field_legacy
+
 
 
 def _validate_indices_ndarray(indices, role):

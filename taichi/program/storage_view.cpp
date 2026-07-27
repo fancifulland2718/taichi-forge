@@ -308,10 +308,11 @@ bool is_program_ndarray_owner(const StorageOwnerRef &owner) noexcept {
 
 }  // namespace
 
-StorageOwnerRef StorageOwnerRef::program_ndarray(RuntimeResourceHandle handle) {
+StorageOwnerRef StorageOwnerRef::program_ndarray(std::uint64_t program_domain,
+                                                 RuntimeResourceHandle handle) {
   StorageOwnerRef owner;
   owner.kind = StorageOwnerKind::kProgramNdarray;
-  owner.program_domain = handle.domain;
+  owner.program_domain = program_domain;
   owner.ndarray_handle = handle;
   return owner;
 }
@@ -352,8 +353,7 @@ StorageOwnerRef StorageOwnerRef::submission_scoped_host(
 bool StorageOwnerRef::valid() const noexcept {
   switch (kind) {
     case StorageOwnerKind::kProgramNdarray:
-      return program_domain != 0 && ndarray_handle &&
-             ndarray_handle.domain == program_domain;
+      return program_domain != 0 && ndarray_handle;
     case StorageOwnerKind::kSNodePayload:
       return program_domain != 0 && tree.tree_id >= 0 && tree.generation != 0 &&
              anchor_snode_id >= 0;
@@ -827,8 +827,7 @@ DenseStorageBuildResult describe_ndarray_storage(const Ndarray &array,
   DenseStorageBuildResult invalid;
   Program *program = array.owning_program();
   const RuntimeResourceHandle handle = array.runtime_resource_handle();
-  if (program == nullptr || !handle ||
-      handle.domain != program->runtime_program_generation()) {
+  if (program == nullptr || !handle) {
     invalid.reason = StorageFailureReason::kInvalidOwner;
     return invalid;
   }
@@ -839,8 +838,9 @@ DenseStorageBuildResult describe_ndarray_storage(const Ndarray &array,
   }
   layout.access = access;
   return build_dense_storage_descriptor(
-      StorageOwnerRef::program_ndarray(handle), StorageSourceKind::kNdarray,
-      layout);
+      StorageOwnerRef::program_ndarray(program->runtime_program_generation(),
+                                       handle),
+      StorageSourceKind::kNdarray, layout);
 }
 
 DenseStorageBuildResult describe_struct_member_storage(
@@ -855,8 +855,7 @@ DenseStorageBuildResult describe_struct_member_storage(
   DenseStorageBuildResult invalid;
   Program *program = base.owning_program();
   const RuntimeResourceHandle handle = base.runtime_resource_handle();
-  if (program == nullptr || !handle ||
-      handle.domain != program->runtime_program_generation()) {
+  if (program == nullptr || !handle) {
     invalid.reason = StorageFailureReason::kInvalidOwner;
     return invalid;
   }
@@ -904,7 +903,9 @@ DenseStorageBuildResult describe_struct_member_storage(
     return invalid;
   }
   return build_dense_storage_descriptor(
-      StorageOwnerRef::program_ndarray(handle), source_kind, layout);
+      StorageOwnerRef::program_ndarray(program->runtime_program_generation(),
+                                       handle),
+      source_kind, layout);
 }
 
 DenseStorageBuildResult describe_dense_field_storage(

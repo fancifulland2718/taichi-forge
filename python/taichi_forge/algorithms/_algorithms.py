@@ -1294,7 +1294,7 @@ def _dense_field_view(arr):
     )
 
 
-def _primitive_view(arr):
+def _primitive_view_legacy(arr):
     if _is_struct_scalar_member_view(arr):
         return _PrimitiveView(
             "struct_scalar_member",
@@ -1342,6 +1342,24 @@ def _primitive_view(arr):
     if dense_field is not None:
         return dense_field
     return None
+
+
+_storage_shadow_setting = os.environ.get(
+    "TI_STORAGE_VIEW_SHADOW", "off"
+).strip().lower()
+if _storage_shadow_setting not in ("", "0", "false", "no", "off"):
+    from taichi_forge.lang._storage_view import (
+        shadow_validate_primitive_view as _shadow_validate_primitive_view,
+    )
+
+    def _primitive_view(arr):
+        view = _primitive_view_legacy(arr)
+        if view is not None:
+            _shadow_validate_primitive_view(arr, view)
+        return view
+
+else:
+    _primitive_view = _primitive_view_legacy
 
 
 def _snode_descriptor_key(snode):
