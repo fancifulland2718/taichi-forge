@@ -32,6 +32,10 @@ class VulkanSparseMatrix;
 class VulkanSparseBsrMatrix;
 class CompiledKernelLinearOperator;
 class CompiledGraphLinearOperator;
+namespace storage {
+class DenseStorageDescriptor;
+struct ResolvedDenseBinding;
+}  // namespace storage
 
 enum class OperatorInnerProductKind : std::uint8_t {
   euclidean,
@@ -94,6 +98,7 @@ struct OperatorCapabilities {
   bool runtime_capture{false};
   bool binding_rebind{false};
   bool persistent_workspace{false};
+  bool dense_storage_operands{false};
 };
 
 using OperatorDependencyMask = std::uint32_t;
@@ -191,6 +196,12 @@ struct OperatorVectorView {
   const Ndarray *ndarray{nullptr};
   Program *program{nullptr};
   bool writable{false};
+  const storage::DenseStorageDescriptor *dense_storage{nullptr};
+  const storage::ResolvedDenseBinding *resolved_dense_storage{nullptr};
+  const void *allocation_device_identity{nullptr};
+  std::uint64_t allocation_id{0};
+  std::uint64_t byte_begin{0};
+  std::uint64_t byte_end{0};
 
   static OperatorVectorView from_const_host(const void *data,
                                             const OperatorSpaceDesc &space);
@@ -204,6 +215,12 @@ struct OperatorVectorView {
                                                 std::uintptr_t data,
                                                 const OperatorSpaceDesc &space,
                                                 bool writable);
+  static OperatorVectorView from_dense_storage(
+      Program *program,
+      const storage::DenseStorageDescriptor &descriptor,
+      const storage::ResolvedDenseBinding &binding,
+      const OperatorSpaceDesc &space,
+      bool writable);
 };
 
 struct OperatorApplyRequest {
@@ -538,6 +555,10 @@ class ExperimentalLinearOperatorHandle {
                          const Ndarray &output,
                          double alpha,
                          double beta);
+  void apply_dense_storage(
+      Program *program,
+      const storage::DenseStorageDescriptor &input,
+      const storage::DenseStorageDescriptor &output);
   void update_numeric(Program *program,
                       const NumericUpdateArguments &arguments,
                       std::uint64_t expected_topology_version,

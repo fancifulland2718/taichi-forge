@@ -306,6 +306,14 @@ TI_DLL_EXPORT DenseStorageBuildResult
 describe_ndarray_storage(const Ndarray &array,
                          StorageAccess access = StorageAccess::kReadWrite);
 
+// Reinterpret a proven compact dense byte range as a scalar 1-D vector.
+// This changes only logical shape/stride metadata: ownership, byte offset,
+// access, and storage source remain unchanged and no allocation or copy is
+// performed. Non-compact or non-unique mappings fail closed.
+TI_DLL_EXPORT DenseStorageBuildResult
+flatten_dense_storage_to_scalar_vector(
+    const DenseStorageDescriptor &descriptor);
+
 TI_DLL_EXPORT DenseStorageBuildResult describe_struct_member_storage(
     const Ndarray &base,
     DataType scalar_type,

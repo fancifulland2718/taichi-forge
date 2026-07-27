@@ -383,6 +383,20 @@ void LaunchContextBuilder::set_resolved_dense_storage(
   dense_storage_ptrs[resource_index].resolved = binding;
 }
 
+void LaunchContextBuilder::set_arg_resolved_dense_storage(
+    const std::vector<int> &arg_id,
+    const storage::DenseStorageDescriptor &descriptor,
+    const storage::ResolvedDenseBinding &binding) {
+  set_arg_dense_storage(arg_id, descriptor);
+  const int arg_offset = args_type->get_element_offset(arg_id);
+  const auto found = std::find_if(
+      dense_storage_ptrs.begin(), dense_storage_ptrs.end(),
+      [arg_offset](const auto &ref) { return ref.arg_offset == arg_offset; });
+  TI_ASSERT(found != dense_storage_ptrs.end());
+  set_resolved_dense_storage(
+      static_cast<std::size_t>(found - dense_storage_ptrs.begin()), binding);
+}
+
 const storage::ResolvedDenseBinding &
 LaunchContextBuilder::get_resolved_dense_storage(
     const std::vector<int> &arg_id) const {

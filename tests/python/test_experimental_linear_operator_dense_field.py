@@ -41,21 +41,21 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
     assert operator.apply(source, out=applied) is applied
     np.testing.assert_array_equal(applied.to_numpy(), values)
     operator_stats = operator.statistics()["vector_io"]
-    assert operator_stats["staging_buffer_builds"] == 2
+    assert operator.capabilities.dense_storage_operands
+    assert operator_stats["staging_buffer_builds"] == 0
     assert operator_stats["implicit_view_builds"] == 2
     assert operator_stats["implicit_view_reuses"] == 2
-    assert operator_stats["transfer_plan_builds"] == 2
-    assert operator_stats["transfer_plan_reuses"] == 2
-    assert operator_stats["transfer_native_submissions"] == (
-        0 if impl.current_cfg().arch == ti.cuda else 4
-    )
-    assert operator_stats["transfer_graph_submissions"] == (
-        4 if impl.current_cfg().arch == ti.cuda else 0
-    )
-    assert operator_stats["pack_calls"] == 2
-    assert operator_stats["unpack_calls"] == 2
-    assert operator_stats["completion_syncs"] == 2
-    assert operator_stats["coalesced_operator_syncs"] == 2
+    assert operator_stats["transfer_plan_builds"] == 0
+    assert operator_stats["transfer_native_submissions"] == 0
+    assert operator_stats["transfer_graph_submissions"] == 0
+    assert operator_stats["pack_calls"] == 0
+    assert operator_stats["unpack_calls"] == 0
+    assert operator_stats["direct_bindings"] == 4
+    assert operator_stats["direct_dense_field_submissions"] == 2
+    assert operator_stats["completion_syncs"] == 0
+    assert operator_stats["coalesced_operator_syncs"] == 0
+    assert operator_stats["last_input_execution_mode"] == "direct_contiguous"
+    assert operator_stats["last_output_execution_mode"] == "direct_contiguous"
 
     plan = ti.linalg.experimental.SolvePlan(
         operator,
@@ -88,10 +88,13 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
     assert vector_stats["completion_syncs"] == 2
     assert stats["execution_capabilities"]["vector_io"]["dense_field"][
         "execution_mode"
-    ] == "device_staged"
+    ] == "provider_qualified"
     capabilities = ti.linalg.experimental.vector_io_capabilities()
     assert capabilities["ndarray"]["zero_copy"] is True
     assert capabilities["dense_field"]["zero_copy"] is False
+    assert capabilities["dense_field"]["zero_copy_condition"] == (
+        "canonical full field and provider dense_storage_operands"
+    )
     assert capabilities["dense_field"]["value_host_transfer"] is False
     assert capabilities["dense_field"]["conversion_scope"] == (
         "apply_or_solve_boundary_only"
@@ -108,6 +111,29 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
         volume_source, out=volume_output
     )
     np.testing.assert_array_equal(volume_output.to_numpy(), volume_values)
+
+
+def _fixed_csr(dense):
+    dense = np.asarray(dense, dtype=np.float32)
+    rows, columns = dense.shape
+    row_offsets = [0]
+    column_indices = []
+    values = []
+    for row in range(rows):
+        for column in range(columns):
+            if dense[row, column] != 0:
+                column_indices.append(column)
+                values.append(dense[row, column])
+        row_offsets.append(len(values))
+    offsets = ti.ndarray(ti.i32, shape=len(row_offsets))
+    indices = ti.ndarray(ti.i32, shape=len(column_indices))
+    numeric = ti.ndarray(ti.f32, shape=len(values))
+    offsets.from_numpy(np.asarray(row_offsets, dtype=np.int32))
+    indices.from_numpy(np.asarray(column_indices, dtype=np.int32))
+    numeric.from_numpy(np.asarray(values, dtype=np.float32))
+    return ti.linalg.SparsePattern.csr(
+        rows, columns, offsets, indices
+    ).matrix(numeric)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
@@ -180,6 +206,35 @@ def test_packed_vector_and_matrix_fields_use_scalar_flat_lane_order():
         expected = np.full(values.shape, -1, dtype=np.float32)
         expected.reshape(-1)[selected] = values.reshape(-1)[selected]
         np.testing.assert_array_equal(shaped_output.to_numpy(), expected)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_stored_csr_dense_field_path_is_provider_qualified():
+    dense = np.asarray(
+        [[3.0, -1.0, 0.0], [0.5, 2.0, 1.0], [0.0, -2.0, 4.0]],
+        dtype=np.float32,
+    )
+    values = np.asarray([2.0, -1.0, 0.5], dtype=np.float32)
+    source = ti.field(ti.f32, shape=3)
+    output = ti.field(ti.f32, shape=3)
+    source.from_numpy(values)
+    operator = ti.linalg.experimental.LinearOperator.from_sparse_matrix(
+        _fixed_csr(dense),
+        traits=ti.linalg.experimental.OperatorTraits(singular=False),
+    )
+    operator.apply(source, out=output)
+    np.testing.assert_allclose(output.to_numpy(), dense @ values, rtol=1e-6)
+    stats = operator.statistics()["vector_io"]
+    if impl.current_cfg().arch == ti.vulkan:
+        assert not operator.capabilities.dense_storage_operands
+        assert stats["direct_dense_field_submissions"] == 0
+        assert stats["pack_calls"] == 1
+        assert stats["unpack_calls"] == 1
+    else:
+        assert operator.capabilities.dense_storage_operands
+        assert stats["direct_dense_field_submissions"] == 1
+        assert stats["pack_calls"] == 0
+        assert stats["unpack_calls"] == 0
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
@@ -333,3 +388,34 @@ def test_dense_field_f64_and_unsupported_sparse_layout():
             ti.linalg.experimental.vector_view(sparse)
     finally:
         tree.destroy()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_padded_dense_field_remains_explicitly_staged():
+    source = ti.field(ti.f32)
+    source_guard = ti.field(ti.f32)
+    output = ti.field(ti.f32)
+    output_guard = ti.field(ti.f32)
+    source_builder = ti.FieldsBuilder()
+    source_builder.dense(ti.i, 8).place(source, source_guard)
+    source_tree = source_builder.finalize()
+    output_builder = ti.FieldsBuilder()
+    output_builder.dense(ti.i, 8).place(output, output_guard)
+    output_tree = output_builder.finalize()
+    try:
+        values = np.arange(8, dtype=np.float32)
+        source.from_numpy(values)
+        output_guard.fill(17.0)
+        operator = _compiled_identity(8)
+        operator.apply(source, out=output)
+        np.testing.assert_array_equal(output.to_numpy(), values)
+        assert (output_guard.to_numpy() == 17.0).all()
+        stats = operator.statistics()["vector_io"]
+        assert stats["direct_dense_field_submissions"] == 0
+        assert stats["pack_calls"] == 1
+        assert stats["unpack_calls"] == 1
+        assert stats["last_input_execution_mode"] == "device_staged"
+        assert stats["last_output_execution_mode"] == "device_staged"
+    finally:
+        output_tree.destroy()
+        source_tree.destroy()

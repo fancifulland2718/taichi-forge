@@ -157,6 +157,10 @@ void export_storage_view(py::module &m) {
       },
       py::arg("array"), py::arg("access") = "readwrite");
 
+  m.def("_flatten_dense_storage_to_scalar_vector",
+        &flatten_dense_storage_to_scalar_vector,
+        py::arg("descriptor"));
+
   m.def(
       "_describe_struct_member_storage",
       [](const Ndarray &base, DataType scalar_type,

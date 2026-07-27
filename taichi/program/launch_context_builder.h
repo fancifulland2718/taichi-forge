@@ -120,6 +120,10 @@ class LaunchContextBuilder {
   void set_arg_dense_storage(
       const std::vector<int> &arg_id,
       const storage::DenseStorageDescriptor &descriptor);
+  void set_arg_resolved_dense_storage(
+      const std::vector<int> &arg_id,
+      const storage::DenseStorageDescriptor &descriptor,
+      const storage::ResolvedDenseBinding &binding);
   void set_resolved_dense_storage(
       std::size_t resource_index,
       const storage::ResolvedDenseBinding &binding);

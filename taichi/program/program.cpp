@@ -6053,12 +6053,9 @@ Program::NdarrayLaunchLeases Program::acquire_ndarray_launch_leases(
   return leases;
 }
 
-void Program::resolve_dense_storage_launch_context(
-    LaunchContextBuilder &ctx,
+storage::ResolvedDenseBinding Program::resolve_dense_storage_descriptor(
+    const storage::DenseStorageDescriptor &descriptor,
     NdarrayLaunchLeases &ndarray_leases) {
-  if (ctx.dense_storage_ptrs.empty()) {
-    return;
-  }
   TI_ERROR_IF(!ndarray_resources_open_,
               "Cannot resolve dense storage after Program finalize");
 
@@ -6080,110 +6077,165 @@ void Program::resolve_dense_storage_launch_context(
     return visit(visit, root);
   };
 
-  for (std::size_t i = 0; i < ctx.dense_storage_ptrs.size(); ++i) {
-    TI_ERROR_IF(ctx.dense_storage_ptrs[i].descriptor == nullptr,
-                "Dense storage launch context lost its descriptor");
-    const auto &descriptor = *ctx.dense_storage_ptrs[i].descriptor;
-    const auto &owner = descriptor.owner();
-    const auto &properties = descriptor.properties();
-    TI_ERROR_IF(owner.program_domain != runtime_program_generation(),
-                "Dense storage binding belongs to another Program "
-                "generation");
-    TI_ERROR_IF(!properties.ndarray_abi_compatible ||
-                    properties.uniqueness !=
-                        storage::StorageMappingUniqueness::kProvenUnique ||
-                    properties.reachable_begin < 0 ||
-                    properties.reachable_end < properties.reachable_begin ||
-                    properties.reachable_begin != descriptor.byte_offset(),
-                "Dense storage binding is not a compact unique ndarray "
-                "range");
+  const auto &owner = descriptor.owner();
+  const auto &properties = descriptor.properties();
+  TI_ERROR_IF(owner.program_domain != runtime_program_generation(),
+              "Dense storage binding belongs to another Program generation");
+  TI_ERROR_IF(!properties.ndarray_abi_compatible ||
+                  properties.uniqueness !=
+                      storage::StorageMappingUniqueness::kProvenUnique ||
+                  properties.reachable_begin < 0 ||
+                  properties.reachable_end < properties.reachable_begin ||
+                  properties.reachable_begin != descriptor.byte_offset(),
+              "Dense storage binding is not a compact unique ndarray range");
 
-    storage::ResolvedDenseBinding binding;
-    binding.byte_offset =
-        static_cast<std::uint64_t>(properties.reachable_begin);
-    binding.byte_size = static_cast<std::uint64_t>(
-        properties.reachable_end - properties.reachable_begin);
+  storage::ResolvedDenseBinding binding;
+  binding.byte_offset =
+      static_cast<std::uint64_t>(properties.reachable_begin);
+  binding.byte_size = static_cast<std::uint64_t>(
+      properties.reachable_end - properties.reachable_begin);
 
-    if (owner.kind == storage::StorageOwnerKind::kProgramNdarray) {
-      const auto handle = owner.ndarray_handle;
-      TI_ERROR_IF(handle.index >= ndarray_view_slots_.size(),
-                  "Dense storage binding references a stale or retired "
-                  "Ndarray");
-      const auto &slot = ndarray_view_slots_[handle.index];
-      TI_ERROR_IF(slot.view == nullptr || slot.handle != handle,
-                  "Dense storage binding references a stale or retired "
-                  "Ndarray");
-      const Ndarray *array = slot.view;
-      if (arch_is_gpu(compile_config().arch) &&
-          ndarray_leases.find(handle) == nullptr &&
-          ndarray_inflight_leases_.find(ndarray_lease_key(handle)) ==
-              ndarray_inflight_leases_.end()) {
-        const auto found = ndarray_views_.find(array);
-        TI_ASSERT(found != ndarray_views_.end() &&
-                  found->second.handle == handle && found->second.lease);
-        auto lease = found->second.lease.clone();
-        TI_ERROR_IF(!lease,
-                    "Dense storage binding could not clone its Ndarray "
-                    "lease");
-        ndarray_leases.add(std::move(lease));
-      }
-      TI_ASSERT(array != nullptr);
-      const std::size_t element_size = array->get_element_size();
-      const std::size_t element_count = array->get_nelement();
-      TI_ERROR_IF(element_size != 0 &&
-                      element_count >
-                          (std::numeric_limits<std::size_t>::max)() /
-                              element_size,
-                  "Ndarray byte span overflow while resolving storage");
-      const std::size_t allocation_bytes = element_size * element_count;
-      TI_ERROR_IF(binding.byte_offset > allocation_bytes ||
-                      binding.byte_size >
-                          allocation_bytes - binding.byte_offset,
-                  "Dense storage range exceeds its Ndarray allocation");
-      binding.allocation = array->get_device_allocation();
-      dense_storage_ndarray_bindings_.fetch_add(1,
-                                                std::memory_order_relaxed);
-    } else if (owner.kind == storage::StorageOwnerKind::kSNodePayload) {
-      const int tree_id = owner.tree.tree_id;
-      TI_ERROR_IF(tree_id < 0 ||
-                      static_cast<std::size_t>(tree_id) >=
-                          snode_trees_.size() ||
-                      static_cast<std::size_t>(tree_id) >=
-                          snode_tree_active_.size() ||
-                      !snode_tree_active_[tree_id] ||
-                      snode_trees_[tree_id] == nullptr,
-                  "Dense storage binding references a retired SNodeTree");
-      SNodeTree *tree = snode_trees_[tree_id].get();
-      TI_ERROR_IF(tree->generation() != owner.tree.generation,
-                  "Dense storage binding references a retired SNodeTree "
-                  "generation");
-      TI_ERROR_IF(tree->layout_fingerprint() !=
-                      owner.tree.layout_fingerprint,
-                  "Dense storage binding SNodeTree layout has changed");
-      SNode *anchor = find_snode(tree->root(), owner.anchor_snode_id);
-      TI_ERROR_IF(anchor == nullptr || anchor->type != SNodeType::place,
-                  "Dense storage binding anchor is no longer available");
-      const DevicePtr field_ptr = get_dense_field_device_ptr(anchor);
-      TI_ERROR_IF(field_ptr.offset != binding.byte_offset,
-                  "Dense storage binding offset no longer matches its "
-                  "SNode layout");
-      binding.allocation =
-          DeviceAllocation{field_ptr.device, field_ptr.alloc_id};
-      dense_storage_field_bindings_.fetch_add(1,
-                                              std::memory_order_relaxed);
-    } else {
-      TI_ERROR("Dense storage kernel binding does not accept this owner "
-               "kind");
+  if (owner.kind == storage::StorageOwnerKind::kProgramNdarray) {
+    const auto handle = owner.ndarray_handle;
+    TI_ERROR_IF(handle.index >= ndarray_view_slots_.size(),
+                "Dense storage binding references a stale or retired Ndarray");
+    const auto &slot = ndarray_view_slots_[handle.index];
+    TI_ERROR_IF(slot.view == nullptr || slot.handle != handle,
+                "Dense storage binding references a stale or retired Ndarray");
+    const Ndarray *array = slot.view;
+    if (arch_is_gpu(compile_config().arch) &&
+        ndarray_leases.find(handle) == nullptr &&
+        ndarray_inflight_leases_.find(ndarray_lease_key(handle)) ==
+            ndarray_inflight_leases_.end()) {
+      const auto found = ndarray_views_.find(array);
+      TI_ASSERT(found != ndarray_views_.end() &&
+                found->second.handle == handle && found->second.lease);
+      auto lease = found->second.lease.clone();
+      TI_ERROR_IF(!lease,
+                  "Dense storage binding could not clone its Ndarray lease");
+      ndarray_leases.add(std::move(lease));
     }
-
-    binding.valid = true;
-    ctx.set_resolved_dense_storage(i, binding);
-    dense_storage_resolved_bindings_.fetch_add(1,
-                                               std::memory_order_relaxed);
-    dense_storage_resolved_bytes_.fetch_add(binding.byte_size,
+    TI_ASSERT(array != nullptr);
+    const std::size_t element_size = array->get_element_size();
+    const std::size_t element_count = array->get_nelement();
+    TI_ERROR_IF(element_size != 0 &&
+                    element_count >
+                        (std::numeric_limits<std::size_t>::max)() /
+                            element_size,
+                "Ndarray byte span overflow while resolving storage");
+    const std::size_t allocation_bytes = element_size * element_count;
+    TI_ERROR_IF(binding.byte_offset > allocation_bytes ||
+                    binding.byte_size >
+                        allocation_bytes - binding.byte_offset,
+                "Dense storage range exceeds its Ndarray allocation");
+    binding.allocation = array->get_device_allocation();
+    dense_storage_ndarray_bindings_.fetch_add(1,
+                                              std::memory_order_relaxed);
+  } else if (owner.kind == storage::StorageOwnerKind::kSNodePayload) {
+    const int tree_id = owner.tree.tree_id;
+    TI_ERROR_IF(tree_id < 0 ||
+                    static_cast<std::size_t>(tree_id) >= snode_trees_.size() ||
+                    static_cast<std::size_t>(tree_id) >=
+                        snode_tree_active_.size() ||
+                    !snode_tree_active_[tree_id] ||
+                    snode_trees_[tree_id] == nullptr,
+                "Dense storage binding references a retired SNodeTree");
+    SNodeTree *tree = snode_trees_[tree_id].get();
+    TI_ERROR_IF(tree->generation() != owner.tree.generation,
+                "Dense storage binding references a retired SNodeTree "
+                "generation");
+    TI_ERROR_IF(tree->layout_fingerprint() != owner.tree.layout_fingerprint,
+                "Dense storage binding SNodeTree layout has changed");
+    SNode *anchor = find_snode(tree->root(), owner.anchor_snode_id);
+    TI_ERROR_IF(anchor == nullptr || anchor->type != SNodeType::place,
+                "Dense storage binding anchor is no longer available");
+    const DevicePtr field_ptr = get_dense_field_device_ptr(anchor);
+    TI_ERROR_IF(field_ptr.offset != binding.byte_offset,
+                "Dense storage binding offset no longer matches its SNode "
+                "layout");
+    binding.allocation =
+        DeviceAllocation{field_ptr.device, field_ptr.alloc_id};
+    dense_storage_field_bindings_.fetch_add(1,
                                             std::memory_order_relaxed);
+  } else {
+    TI_ERROR("Dense storage binding does not accept this owner kind");
   }
-  dense_storage_direct_submissions_.fetch_add(1, std::memory_order_relaxed);
+
+  binding.valid = true;
+  dense_storage_resolved_bindings_.fetch_add(1, std::memory_order_relaxed);
+  dense_storage_resolved_bytes_.fetch_add(binding.byte_size,
+                                          std::memory_order_relaxed);
+  return binding;
+}
+
+void Program::resolve_dense_storage_launch_context(
+    LaunchContextBuilder &ctx,
+    NdarrayLaunchLeases &ndarray_leases) {
+  bool resolved_here = false;
+  for (std::size_t i = 0; i < ctx.dense_storage_ptrs.size(); ++i) {
+    auto &resource = ctx.dense_storage_ptrs[i];
+    TI_ERROR_IF(resource.descriptor == nullptr,
+                "Dense storage launch context lost its descriptor");
+    if (resource.resolved.valid) {
+      continue;
+    }
+    ctx.set_resolved_dense_storage(
+        i, resolve_dense_storage_descriptor(*resource.descriptor,
+                                            ndarray_leases));
+    resolved_here = true;
+  }
+  if (resolved_here) {
+    dense_storage_direct_submissions_.fetch_add(1,
+                                                std::memory_order_relaxed);
+  }
+}
+
+void Program::with_resolved_dense_storage_bindings(
+    const std::vector<const storage::DenseStorageDescriptor *> &descriptors,
+    const DenseStorageBindingCallback &callback) {
+  ensure_runtime_submission_allowed("dense storage submission");
+  TI_ERROR_IF(descriptors.empty() || !callback,
+              "Dense storage submission requires descriptors and a callback");
+  std::optional<SNodeTreeLifecycleReadGuard> lifecycle_guard;
+  if (active_snode_tree_lifecycle_program != this) {
+    lifecycle_guard.emplace(acquire_snode_tree_lifecycle_read_guard());
+  }
+  std::lock_guard<std::recursive_mutex> resource_submission_lock(
+      runtime_resource_submission_mutex_);
+  NdarrayLaunchLeases ndarray_leases;
+  std::vector<storage::ResolvedDenseBinding> bindings;
+  bindings.reserve(descriptors.size());
+  for (const auto *descriptor : descriptors) {
+    TI_ERROR_IF(descriptor == nullptr,
+                "Dense storage submission received a null descriptor");
+    bindings.push_back(
+        resolve_dense_storage_descriptor(*descriptor, ndarray_leases));
+  }
+  dense_storage_direct_submissions_.fetch_add(1,
+                                              std::memory_order_relaxed);
+  // The callback is deliberately synchronous. It must complete provider work
+  // before returning so these owner leases and the SNode lifecycle guard do
+  // not escape through a raw address.
+  callback(bindings.data(), bindings.size());
+}
+
+intptr_t Program::get_dense_storage_data_ptr_as_int(
+    const storage::ResolvedDenseBinding &binding) {
+  TI_ERROR_IF(!binding.valid,
+              "Cannot access an unresolved dense storage binding");
+  if (!arch_is_cpu(compile_config().arch) &&
+      compile_config().arch != Arch::cuda &&
+      compile_config().arch != Arch::amdgpu) {
+    return 0;
+  }
+  auto *base = program_impl_->get_device_alloc_info_ptr(binding.allocation);
+  TI_ERROR_IF(base == nullptr && binding.byte_size != 0,
+              "Dense storage binding resolved to a null device address");
+  if (base == nullptr) {
+    return 0;
+  }
+  return reinterpret_cast<intptr_t>(
+      reinterpret_cast<std::uint8_t *>(base) + binding.byte_offset);
 }
 
 Program::TextureLaunchLeases Program::acquire_texture_launch_leases(

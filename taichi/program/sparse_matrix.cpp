@@ -17,6 +17,7 @@
 #include "taichi/ir/type_factory.h"
 #include "taichi/program/kernel.h"
 #include "taichi/program/linear_operator.h"
+#include "taichi/program/storage_view.h"
 
 #define BUILD(TYPE)                                                         \
   {                                                                         \
@@ -136,10 +137,14 @@ struct CompiledKernelLinearOperator::ResourceGeneration {
   void apply(OperatorApplyMode mode,
              const OperatorVectorView &input,
              const OperatorVectorView &output) {
-    TI_ERROR_IF(mode != OperatorApplyMode::forward || !input.ndarray ||
-                    !output.ndarray,
+    auto valid_operand = [](const OperatorVectorView &view) {
+      return view.ndarray ||
+             (view.dense_storage && view.resolved_dense_storage);
+    };
+    TI_ERROR_IF(mode != OperatorApplyMode::forward || !valid_operand(input) ||
+                    !valid_operand(output),
                 "Compiled-kernel operator generation requires forward "
-                "ndarray views.");
+                "ndarray or resolved dense storage views.");
     std::lock_guard<std::mutex> lock(launch_mutex);
     // CPU launchers lower kNdarray placeholders to raw pointers in place.
     // Restore every fixed slot so this context remains generation-stable.
@@ -147,10 +152,18 @@ struct CompiledKernelLinearOperator::ResourceGeneration {
     if (numeric_data) {
       launch_context->set_arg_ndarray({2}, *numeric_data);
     }
-    launch_context->set_arg_ndarray(
-        {static_cast<int>(input_arg_index)}, *input.ndarray);
-    launch_context->set_arg_ndarray(
-        {static_cast<int>(output_arg_index)}, *output.ndarray);
+    auto bind_operand = [&](std::size_t argument,
+                            const OperatorVectorView &view) {
+      const std::vector<int> arg_id{static_cast<int>(argument)};
+      if (view.dense_storage) {
+        launch_context->set_arg_resolved_dense_storage(
+            arg_id, *view.dense_storage, *view.resolved_dense_storage);
+      } else {
+        launch_context->set_arg_ndarray(arg_id, *view.ndarray);
+      }
+    };
+    bind_operand(input_arg_index, input);
+    bind_operand(output_arg_index, output);
     program->launch_kernel(*compiled_kernel, *launch_context);
   }
 
@@ -520,6 +533,7 @@ void CompiledKernelLinearOperator::publish_resource_generation(
   OperatorCapabilities capabilities;
   capabilities.asynchronous_submit =
       !arch_is_cpu(program_->compile_config().arch);
+  capabilities.dense_storage_operands = true;
   const OperatorResourceStamp stamp{
       reinterpret_cast<std::uintptr_t>(program_),
       program_->runtime_program_generation(),
@@ -561,16 +575,17 @@ OperatorBinding CompiledKernelLinearOperator::make_operator_binding() {
   OperatorCapabilities capabilities;
   capabilities.asynchronous_submit =
       !arch_is_cpu(program_->compile_config().arch);
+  capabilities.dense_storage_operands = true;
   auto metadata_action = OperatorAction(
       descriptor, capabilities, "forge_compiled_taichi_kernel",
       [this] { return current_operator_resource_stamp(); },
       [this](OperatorApplyMode mode, const OperatorVectorView &input,
              const OperatorVectorView &output) {
-        TI_ERROR_IF(mode != OperatorApplyMode::forward || !input.ndarray ||
-                        !output.ndarray,
+        TI_ERROR_IF(mode != OperatorApplyMode::forward,
                     "Compiled-kernel operator binding requires forward "
-                    "ndarray views.");
-        nd_spmv(program_, *input.ndarray, *output.ndarray);
+                    "views.");
+        auto generation = pin_operator_generation();
+        generation.apply_overwrite(mode, input, output);
       });
   return OperatorBinding::from_generation_publisher(
       std::move(metadata_action),

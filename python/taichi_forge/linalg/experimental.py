@@ -92,6 +92,7 @@ class OperatorCapabilities:
     runtime_capture: bool
     binding_rebind: bool
     persistent_workspace: bool
+    dense_storage_operands: bool
 
 
 class OperatorQualificationReport:
@@ -720,6 +721,49 @@ class LinearOperator:
             raise TaichiRuntimeError(
                 "LinearOperator apply coefficients must be finite"
             )
+        if (
+            out is not None
+            and alpha == 1.0
+            and beta == 0.0
+            and self.capabilities.dense_storage_operands
+        ):
+            direct_input = self._vector_io.view(
+                input, "LinearOperator input"
+            )
+            direct_output = self._vector_io.view(
+                out, "LinearOperator output"
+            )
+            if (
+                direct_input is not None
+                and direct_output is not None
+                and direct_input._direct_storage_descriptor is not None
+                and direct_output._direct_storage_descriptor is not None
+            ):
+                direct_input = _require_compatible_vector_view(
+                    direct_input,
+                    "LinearOperator input",
+                    self.shape[1],
+                    self.dtype,
+                    self._vector_io,
+                )
+                direct_output = _require_compatible_vector_view(
+                    direct_output,
+                    "LinearOperator output",
+                    self.shape[0],
+                    self.dtype,
+                    self._vector_io,
+                )
+                if direct_input._alias_owner_key == direct_output._alias_owner_key:
+                    raise TaichiRuntimeError(
+                        "LinearOperator.apply does not permit input/output aliasing"
+                    )
+                self._handle._apply_dense_storage(
+                    self._program,
+                    direct_input._direct_storage_descriptor,
+                    direct_output._direct_storage_descriptor,
+                )
+                self._vector_io.record_direct_dense_fields()
+                return out
         input_operand = _prepare_vector_input(
             input,
             "LinearOperator input",

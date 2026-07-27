@@ -128,6 +128,7 @@ from taichi_forge.lang._ndarray import (
 )
 from taichi_forge.lang.field import _dense_native_field_layout_supported
 from taichi_forge.lang.exception import TaichiRuntimeError
+from taichi_forge.lang._storage_view import describe_storage
 from taichi_forge.lang.kernel_impl import data_oriented
 from taichi_forge.lang.matrix import Matrix, MatrixField
 from taichi_forge.lang.misc import arm64, cuda, vulkan, x64
@@ -903,6 +904,7 @@ class _PrimitiveView:
     __slots__ = (
         "storage",
         "arr",
+        "description",
         "dtype",
         "shape",
         "element_shape",
@@ -923,9 +925,11 @@ class _PrimitiveView:
         offset=0,
         stride=0,
         snode=None,
+        description=None,
     ):
         self.storage = storage
         self.arr = arr
+        self.description = description
         self.dtype = dtype
         self.shape = shape
         self.element_shape = element_shape
@@ -1344,22 +1348,91 @@ def _primitive_view_legacy(arr):
     return None
 
 
-_storage_shadow_setting = os.environ.get(
-    "TI_STORAGE_VIEW_SHADOW", "off"
-).strip().lower()
-if _storage_shadow_setting not in ("", "0", "false", "no", "off"):
-    from taichi_forge.lang._storage_view import (
-        shadow_validate_primitive_view as _shadow_validate_primitive_view,
+def _primitive_view_from_description(
+    storage, arr, description, *, payload_arr=None, snode=None
+):
+    descriptor = description.descriptor
+    if descriptor is None:
+        return None
+    properties = description.properties
+    return _PrimitiveView(
+        storage,
+        arr,
+        descriptor.scalar_type,
+        tuple(int(extent) for extent in descriptor.index_shape),
+        tuple(int(extent) for extent in descriptor.element_shape),
+        payload_arr=payload_arr,
+        offset=int(descriptor.byte_offset),
+        stride=int(properties["record_stride"]),
+        snode=snode,
+        description=description,
     )
 
-    def _primitive_view(arr):
-        view = _primitive_view_legacy(arr)
-        if view is not None:
-            _shadow_validate_primitive_view(arr, view)
-        return view
 
-else:
-    _primitive_view = _primitive_view_legacy
+def _primitive_view(arr):
+    """Build a provider-role view from authoritative storage metadata.
+
+    Native algorithms still need the concrete ndarray/SNode handle selected by
+    their provider. Dtype, shape, offset, stride, owner generation, and cache
+    identity come from the shared descriptor instead of being parsed again.
+    """
+
+    if _is_opaque_raw_payload(arr):
+        # Opaque StructNdarray payload is a provider-owned record, not one
+        # logical dense member. It remains outside DenseStorageDescriptor.
+        return _primitive_view_legacy(arr)
+
+    if _is_struct_scalar_member_view(arr):
+        description = describe_storage(arr)
+        if not description.supported:
+            return None
+        return _primitive_view_from_description(
+            "struct_scalar_member",
+            arr,
+            description,
+            payload_arr=arr.base.arr,
+        )
+
+    if _is_struct_tensor_member_view(arr):
+        description = describe_storage(arr)
+        if not description.supported:
+            return None
+        return _primitive_view_from_description(
+            "struct_tensor_member",
+            arr,
+            description,
+            payload_arr=arr.base.arr,
+        )
+
+    if isinstance(arr, Ndarray):
+        description = describe_storage(arr)
+        if not description.supported:
+            return None
+        return _primitive_view_from_description(
+            "ndarray", arr, description, payload_arr=arr.arr
+        )
+
+    if not (
+        hasattr(arr, "_get_field_members")
+        and hasattr(arr, "_snode")
+        and hasattr(arr, "shape")
+        and len(arr._get_field_members()) == 1
+        and arr._snode.ptr.type == _ti_core.SNodeType.place
+        and _dense_native_field_layout_supported(arr)
+    ):
+        return None
+    shape = _tuple_shape(arr.shape)
+    if len(shape) > 1:
+        return None
+    description = describe_storage(arr)
+    if not description.supported:
+        return None
+    return _primitive_view_from_description(
+        "scalar_field" if len(shape) == 0 else "dense_field",
+        arr,
+        description,
+        snode=arr._snode.ptr,
+    )
 
 
 def _snode_descriptor_key(snode):
@@ -1367,6 +1440,12 @@ def _snode_descriptor_key(snode):
 
 
 def _primitive_view_descriptor_key(view):
+    if view.description is not None:
+        return (
+            "storage_descriptor",
+            view.storage,
+            int(view.description.descriptor.fingerprint),
+        )
     dtype_key = str(view.dtype)
     shape_key = tuple(view.shape)
     element_shape_key = tuple(view.element_shape)

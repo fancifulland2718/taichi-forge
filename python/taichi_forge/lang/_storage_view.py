@@ -236,6 +236,19 @@ def describe_storage(obj, *, access="readwrite"):
     return StorageDescription(_failure_reason="kUnsupportedStorageKind")
 
 
+def _flatten_storage_to_scalar_vector(description):
+    """Return a no-copy scalar-flat description for compact dense storage."""
+
+    if not isinstance(description, StorageDescription):
+        raise TypeError("description must be a StorageDescription")
+    descriptor = description.descriptor
+    if descriptor is None:
+        return StorageDescription(_failure_reason=description.failure_reason)
+    return StorageDescription(
+        _ti_core._flatten_dense_storage_to_scalar_vector(descriptor)
+    )
+
+
 def ndarray_view(obj, *, access="readwrite"):
     """Create an explicit zero-copy ndarray ABI view when safely possible.
 

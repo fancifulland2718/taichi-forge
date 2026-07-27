@@ -16,6 +16,7 @@
 #include "taichi/program/program.h"
 #include "taichi/program/runtime_resource_registry.h"
 #include "taichi/program/sparse_matrix.h"
+#include "taichi/program/storage_view.h"
 
 namespace taichi::lang {
 namespace {
@@ -63,7 +64,8 @@ void validate_view(const OperatorVectorView &view,
                    Program *program,
                    const char *role,
                    bool require_writable) {
-  TI_ERROR_IF(view.space != expected || (view.data == 0 && !view.ndarray) ||
+  TI_ERROR_IF(view.space != expected ||
+                  (view.data == 0 && !view.ndarray && !view.dense_storage) ||
                   view.allocation_identity == 0 ||
                   (require_writable && !view.writable),
               "Operator {} view does not match its declared space or "
@@ -75,11 +77,31 @@ void validate_view(const OperatorVectorView &view,
                 "Program.",
                 role);
   } else {
-    TI_ERROR_IF(view.program || view.ndarray,
+    TI_ERROR_IF(view.program || view.ndarray || view.dense_storage,
                 "Host-reference operator {} view must not carry Program "
                 "state.",
                 role);
   }
+}
+
+bool operator_views_overlap(const OperatorVectorView &lhs,
+                            const OperatorVectorView &rhs) {
+  if (lhs.resolved_dense_storage && rhs.resolved_dense_storage) {
+    const auto &left = *lhs.resolved_dense_storage;
+    const auto &right = *rhs.resolved_dense_storage;
+    if (left.allocation != right.allocation) {
+      return false;
+    }
+    const std::uint64_t left_end = left.byte_offset + left.byte_size;
+    const std::uint64_t right_end = right.byte_offset + right.byte_size;
+    return left.byte_offset < right_end && right.byte_offset < left_end;
+  }
+  if (lhs.dense_storage && rhs.dense_storage) {
+    return storage::analyze_logical_storage_alias(*lhs.dense_storage,
+                                                  *rhs.dense_storage) !=
+           storage::StorageAliasRelation::kProvenDisjoint;
+  }
+  return lhs.allocation_identity == rhs.allocation_identity;
 }
 
 template <typename T>
@@ -347,6 +369,42 @@ OperatorVectorView OperatorVectorView::from_device_pointer(
               "Operator device pointer view requires an active Program and "
               "non-null device address.");
   return {space, data, data, nullptr, program, writable};
+}
+
+OperatorVectorView OperatorVectorView::from_dense_storage(
+    Program *program,
+    const storage::DenseStorageDescriptor &descriptor,
+    const storage::ResolvedDenseBinding &binding,
+    const OperatorSpaceDesc &space,
+    bool writable) {
+  validate_space(space, "dense storage");
+  TI_ERROR_IF(!program || !binding.valid ||
+                  descriptor.scalar_type() != space.scalar_type ||
+                  descriptor.properties().scalar_count !=
+                      space.scalar_extent,
+              "Operator dense storage must match Program, dtype, and scalar "
+              "extent.");
+  const auto address = static_cast<std::uintptr_t>(
+      program->get_dense_storage_data_ptr_as_int(binding));
+  std::uintptr_t identity = address;
+  if (identity == 0) {
+    identity = reinterpret_cast<std::uintptr_t>(binding.allocation.device) ^
+               static_cast<std::uintptr_t>(binding.allocation.alloc_id) ^
+               static_cast<std::uintptr_t>(binding.byte_offset) ^
+               static_cast<std::uintptr_t>(descriptor.fingerprint());
+    if (identity == 0) {
+      identity = 1;
+    }
+  }
+  OperatorVectorView result{
+      space, address, identity, nullptr, program, writable};
+  result.dense_storage = &descriptor;
+  result.resolved_dense_storage = &binding;
+  result.allocation_device_identity = binding.allocation.device;
+  result.allocation_id = binding.allocation.alloc_id;
+  result.byte_begin = binding.byte_offset;
+  result.byte_end = binding.byte_offset + binding.byte_size;
+  return result;
 }
 
 struct OperatorAction::State {
@@ -1081,7 +1139,7 @@ OperatorSubmission OperatorPlan::submit(const OperatorPinnedAction &pinned,
   validate_view(request.input, expected_input, program_, "input", false);
   validate_view(request.output, expected_output, program_, "output", true);
   TI_ERROR_IF(
-      request.input.allocation_identity == request.output.allocation_identity,
+      operator_views_overlap(request.input, request.output),
       "Operator input and output must not alias.");
   if (request.beta != 0.0) {
     TI_ERROR_IF(!request.addend,
@@ -1568,6 +1626,7 @@ OperatorBinding make_identity_operator_binding(OperatorSpaceDesc space,
       OperatorTraitProvenance::constructed_by_framework, scope);
   OperatorCapabilities capabilities;
   capabilities.adjoint_apply = true;
+  capabilities.dense_storage_operands = program != nullptr;
   auto action = OperatorAction(
       descriptor, traits, capabilities, "identity",
       [program] {
@@ -1916,8 +1975,10 @@ OperatorBinding make_cpu_typed_operator_binding(Program *program,
                        static_cast<std::size_t>(provider.num_cols())};
   descriptor.range = {provider.get_data_type(),
                       static_cast<std::size_t>(provider.num_rows())};
+  OperatorCapabilities capabilities;
+  capabilities.dense_storage_operands = true;
   auto action = OperatorAction(
-      descriptor, OperatorCapabilities{}, expected_provider,
+      descriptor, capabilities, expected_provider,
       [program, &provider] {
         const auto statistics = provider.debug_runtime_statistics();
         return OperatorResourceStamp{reinterpret_cast<std::uintptr_t>(program),
@@ -1975,6 +2036,7 @@ OperatorBinding make_gpu_typed_operator_binding(Program *program,
                       static_cast<std::size_t>(provider.num_rows())};
   OperatorCapabilities capabilities;
   capabilities.asynchronous_submit = true;
+  capabilities.dense_storage_operands = expected_arch == Arch::cuda;
   auto action = OperatorAction(
       descriptor, capabilities, expected_provider,
       [program, &provider] {
@@ -2246,6 +2308,36 @@ void ExperimentalLinearOperatorHandle::apply_generalized(
        alpha,
        beta});
   submission.wait();
+}
+
+void ExperimentalLinearOperatorHandle::apply_dense_storage(
+    Program *program,
+    const storage::DenseStorageDescriptor &input,
+    const storage::DenseStorageDescriptor &output) {
+  TI_ERROR_IF(program != program_,
+              "LinearOperator dense storage apply must use its construction "
+              "Program.");
+  TI_ERROR_IF(!plan_->capabilities().dense_storage_operands,
+              "LinearOperator provider does not accept direct dense storage "
+              "operands.");
+  const std::vector<const storage::DenseStorageDescriptor *> descriptors{
+      &input, &output};
+  program_->with_resolved_dense_storage_bindings(
+      descriptors,
+      [&](const storage::ResolvedDenseBinding *bindings, std::size_t count) {
+        TI_ASSERT(count == 2);
+        const auto &operator_descriptor = plan_->descriptor();
+        auto submission = plan_->submit(
+            {OperatorApplyMode::forward,
+             OperatorVectorView::from_dense_storage(
+                 program_, input, bindings[0], operator_descriptor.domain,
+                 false),
+             nullptr,
+             OperatorVectorView::from_dense_storage(
+                 program_, output, bindings[1], operator_descriptor.range,
+                 true)});
+        submission.wait();
+      });
 }
 
 void ExperimentalLinearOperatorHandle::update_numeric(
@@ -2813,16 +2905,29 @@ class CompiledKernelActionLaunch {
 
   void apply(const OperatorVectorView &input,
              const OperatorVectorView &output) {
-    TI_ERROR_IF(!input.ndarray || !output.ndarray,
-                "Compiled-kernel actions require ndarray views.");
+    auto valid_operand = [](const OperatorVectorView &view) {
+      return view.ndarray ||
+             (view.dense_storage && view.resolved_dense_storage);
+    };
+    TI_ERROR_IF(!valid_operand(input) || !valid_operand(output),
+                "Compiled-kernel actions require ndarray or resolved dense "
+                "storage views.");
     std::lock_guard<std::mutex> lock(launch_mutex_);
     // CPU launchers lower ndarray placeholders to raw pointers in place.
     // Restore fixed resources so this context remains generation-stable.
     restore_fixed_arguments();
-    launch_context_->set_arg_ndarray(
-        {static_cast<int>(input_arg_index_)}, *input.ndarray);
-    launch_context_->set_arg_ndarray(
-        {static_cast<int>(output_arg_index_)}, *output.ndarray);
+    auto bind_operand = [&](std::size_t argument,
+                            const OperatorVectorView &view) {
+      const std::vector<int> arg_id{static_cast<int>(argument)};
+      if (view.dense_storage) {
+        launch_context_->set_arg_resolved_dense_storage(
+            arg_id, *view.dense_storage, *view.resolved_dense_storage);
+      } else {
+        launch_context_->set_arg_ndarray(arg_id, *view.ndarray);
+      }
+    };
+    bind_operand(input_arg_index_, input);
+    bind_operand(output_arg_index_, output);
     program_->launch_kernel(*compiled_kernel_, *launch_context_);
   }
 
@@ -3107,6 +3212,7 @@ class CompiledKernelActionProvider {
     capabilities.asynchronous_submit =
         !arch_is_cpu(program_->compile_config().arch);
     capabilities.binding_rebind = true;
+    capabilities.dense_storage_operands = true;
     return capabilities;
   }
 

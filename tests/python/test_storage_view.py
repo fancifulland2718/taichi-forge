@@ -7,6 +7,7 @@ from tests import test_utils
 from taichi_forge.lang import impl
 from taichi_forge.lang._storage_view import (
     StorageRequirement,
+    _flatten_storage_to_scalar_vector,
     analyze_storage_alias,
     describe_storage,
     qualify_storage,
@@ -77,6 +78,16 @@ def test_storage_view_describes_existing_dense_storage_without_copy():
     assert tuple(vector_field_view.descriptor.element_shape) == (3,)
     assert vector_field_view.descriptor.source_kind == "kDensePackedField"
     assert vector_field_view.properties["array_layout"] == "kAos"
+
+    flat_vector_field = _flatten_storage_to_scalar_vector(vector_field_view)
+    assert flat_vector_field.supported
+    assert tuple(flat_vector_field.descriptor.index_shape) == (12,)
+    assert tuple(flat_vector_field.descriptor.element_shape) == ()
+    assert flat_vector_field.descriptor.byte_offset == (
+        vector_field_view.descriptor.byte_offset
+    )
+    assert flat_vector_field.descriptor.owner_kind == "kSNodePayload"
+    assert flat_vector_field.properties["compact_contiguous"]
 
     direct_record = qualify_storage(
         scalar_member_view,
@@ -178,6 +189,12 @@ def test_storage_view_shadow_checks_existing_algorithm_descriptors(monkeypatch):
     description = shadow_validate_primitive_view(array, primitive)
     assert description.supported
 
+    authoritative = _algorithms._primitive_view(array)
+    assert authoritative.description is not None
+    assert authoritative.description.descriptor.fingerprint == (
+        describe_storage(array).descriptor.fingerprint
+    )
+
     field = ti.Vector.field(3, ti.f32, shape=4)
     legacy_field = _vector_io._describe_value_field_legacy(field, "value")
     description = shadow_validate_dense_field_descriptor(field, legacy_field)
@@ -186,6 +203,50 @@ def test_storage_view_shadow_checks_existing_algorithm_descriptors(monkeypatch):
     wrong_shape = replace(legacy_field, index_shape=(5,))
     with pytest.raises(RuntimeError, match="index_shape"):
         shadow_validate_dense_field_descriptor(field, wrong_shape)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_native_plan_hot_replay_does_not_reparse_storage(monkeypatch):
+    from taichi_forge.algorithms import _algorithms
+
+    program = impl.get_runtime().prog
+    if not program.cpu_transform_available():
+        pytest.skip("CPU native transform is unavailable")
+
+    source = ti.field(ti.i32, shape=32)
+    output = ti.field(ti.i32, shape=32)
+    source.fill(3)
+    workspace = ti.algorithms.TransformWorkspace(max_items=32)
+    ti.algorithms.experimental_transform(
+        source,
+        output,
+        scale=2,
+        bias=1,
+        method="cpu_native",
+        workspace=workspace,
+    )
+
+    descriptor_builds = 0
+    original_describe_storage = _algorithms.describe_storage
+
+    def count_descriptions(value):
+        nonlocal descriptor_builds
+        descriptor_builds += 1
+        return original_describe_storage(value)
+
+    monkeypatch.setattr(_algorithms, "describe_storage", count_descriptions)
+    for _ in range(4):
+        ti.algorithms.experimental_transform(
+            source,
+            output,
+            scale=2,
+            bias=1,
+            method="cpu_native",
+            workspace=workspace,
+        )
+
+    assert descriptor_builds == 0
+    assert (output.to_numpy() == 7).all()
 
 
 @test_utils.test(

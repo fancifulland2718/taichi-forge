@@ -9,7 +9,6 @@ device resident throughout that conversion.
 from dataclasses import dataclass
 import hashlib
 import math
-import os
 from types import MappingProxyType
 
 import numpy as np
@@ -18,6 +17,10 @@ from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import ScalarNdarray
 from taichi_forge.lang.exception import TaichiRuntimeError
+from taichi_forge.lang._storage_view import (
+    _flatten_storage_to_scalar_vector,
+    describe_storage,
+)
 from taichi_forge.lang.field import (
     ScalarField,
     _dense_host_copy_value_type,
@@ -357,6 +360,8 @@ class _DenseFieldDescriptor:
     item_stride: int
     runtime_generation: int
     program_identity: int
+    storage_description: object = None
+    flat_storage_description: object = None
 
     @property
     def alias_owner_key(self):
@@ -551,21 +556,87 @@ def _describe_value_field_legacy(field, role):
     return _describe_matrix_field(field, role)
 
 
-_storage_shadow_setting = os.environ.get(
-    "TI_STORAGE_VIEW_SHADOW", "off"
-).strip().lower()
-if _storage_shadow_setting not in ("", "0", "false", "no", "off"):
-    from taichi_forge.lang._storage_view import (
-        shadow_validate_dense_field_descriptor as _shadow_validate_dense_field_descriptor,
+def _describe_value_field(field, role):
+    """Describe vector semantics from the shared physical descriptor."""
+
+    if not isinstance(field, (ScalarField, MatrixField)):
+        raise TaichiRuntimeError(
+            f"{role} must be a scalar, vector, or matrix Taichi field"
+        )
+    if field.dtype not in _SUPPORTED_VALUE_DTYPES:
+        raise TaichiRuntimeError(
+            f"{role} must have dtype ti.f32 or ti.f64, got {field.dtype}"
+        )
+    shape = _shape_tuple(field)
+    _require_dense_index_shape(shape, role)
+    description = describe_storage(field)
+    if not description.supported:
+        raise TaichiRuntimeError(
+            f"{role} must use a supported root-dense-place SNode layout "
+            f"({description.failure_reason})"
+        )
+    descriptor = description.descriptor
+    source_kind = descriptor.source_kind
+    if source_kind not in ("kDenseScalarField", "kDensePackedField"):
+        raise TaichiRuntimeError(
+            f"{role} must use a supported root-dense-place SNode layout"
+        )
+    if tuple(int(extent) for extent in descriptor.index_shape) != shape:
+        raise TaichiRuntimeError(f"{role} storage shape is inconsistent")
+
+    properties = description.properties
+    item_count = int(properties["item_count"])
+    scalar_extent = int(properties["scalar_count"])
+    if item_count <= 0 or scalar_extent <= 0 or scalar_extent % item_count:
+        raise TaichiRuntimeError(f"{role} storage extent is inconsistent")
+    lane_count = scalar_extent // item_count
+    element_shape = tuple(
+        int(extent) for extent in descriptor.element_shape
     )
+    if isinstance(field, ScalarField):
+        if source_kind != "kDenseScalarField" or element_shape or lane_count != 1:
+            raise TaichiRuntimeError(f"{role} scalar field layout is inconsistent")
+        storage_kind = "dense_scalar"
+    else:
+        expected_element_shape = (
+            (int(field.n),)
+            if int(field.ndim) == 1
+            else (int(field.n), int(field.m))
+        )
+        if (
+            source_kind != "kDensePackedField"
+            or element_shape != expected_element_shape
+            or lane_count != math.prod(expected_element_shape)
+        ):
+            raise TaichiRuntimeError(
+                f"{role} must use a canonical packed root-dense-place layout"
+            )
+        storage_kind = "dense_packed"
 
-    def _describe_value_field(field, role):
-        descriptor = _describe_value_field_legacy(field, role)
-        _shadow_validate_dense_field_descriptor(field, descriptor)
-        return descriptor
-
-else:
-    _describe_value_field = _describe_value_field_legacy
+    flat_description = _flatten_storage_to_scalar_vector(description)
+    if not flat_description.supported:
+        flat_description = None
+    tree_identity = descriptor.tree_identity
+    if tree_identity is None:
+        raise TaichiRuntimeError(f"{role} has no live SNodeTree owner")
+    program = _current_program()
+    return _DenseFieldDescriptor(
+        storage_kind=storage_kind,
+        dtype=descriptor.scalar_type,
+        index_shape=shape,
+        element_shape=element_shape,
+        item_count=item_count,
+        lane_count=lane_count,
+        scalar_extent=scalar_extent,
+        tree_id=int(tree_identity[0]),
+        node_ids=tuple(int(value) for value in descriptor.component_snode_ids),
+        byte_offset=int(descriptor.byte_offset),
+        item_stride=int(properties["record_stride"]),
+        runtime_generation=int(impl.runtime_generation()),
+        program_identity=id(program),
+        storage_description=description,
+        flat_storage_description=flat_description,
+    )
 
 
 
@@ -654,6 +725,17 @@ class VectorView:
         return self._indexed
 
     @property
+    def _direct_storage_description(self):
+        if self.indexed:
+            return None
+        return self._descriptor.flat_storage_description
+
+    @property
+    def _direct_storage_descriptor(self):
+        description = self._direct_storage_description
+        return None if description is None else description.descriptor
+
+    @property
     def metadata(self):
         return MappingProxyType(
             {
@@ -664,8 +746,15 @@ class VectorView:
                     if self.indexed
                     else "full_scalar_flat"
                 ),
-                "execution_mode": "device_staged",
+                "execution_mode": (
+                    "provider_qualified_direct_or_staged"
+                    if self._direct_storage_description is not None
+                    else "device_staged"
+                ),
                 "value_host_transfer": False,
+                "zero_copy_candidate": (
+                    self._direct_storage_description is not None
+                ),
                 "zero_copy": False,
                 "index_validation": (
                     "host_once_immutable_snapshot"
@@ -980,7 +1069,11 @@ def vector_io_capabilities():
             "zero_copy": True,
         },
         "dense_field": {
-            "execution_mode": "device_staged",
+            "execution_mode": "provider_qualified",
+            "full_field_execution_modes": (
+                "direct_contiguous",
+                "device_staged",
+            ),
             "dtypes": ("f32", "f64"),
             "layouts": (
                 "root_dense_scalar_1d_2d_3d",
@@ -997,6 +1090,9 @@ def vector_io_capabilities():
                 "native_bulk_copy_or_compiled_graph_replay"
             ),
             "zero_copy": False,
+            "zero_copy_condition": (
+                "canonical full field and provider dense_storage_operands"
+            ),
         },
         "sparse_snode": {
             "execution_mode": "unavailable",
@@ -1035,6 +1131,7 @@ class _VectorIOCache:
             "packed_logical_bytes": 0,
             "unpacked_logical_bytes": 0,
             "direct_bindings": 0,
+            "direct_dense_field_submissions": 0,
             "completion_syncs": 0,
             "coalesced_operator_syncs": 0,
             "last_input_storage": "unavailable",
@@ -1145,6 +1242,14 @@ class _VectorIOCache:
         self._stats["direct_bindings"] += 1
         self._stats["last_output_storage"] = "ndarray"
         self._stats["last_output_execution_mode"] = "direct"
+
+    def record_direct_dense_fields(self):
+        self._stats["direct_bindings"] += 2
+        self._stats["direct_dense_field_submissions"] += 1
+        self._stats["last_input_storage"] = "dense_field"
+        self._stats["last_output_storage"] = "dense_field"
+        self._stats["last_input_execution_mode"] = "direct_contiguous"
+        self._stats["last_output_execution_mode"] = "direct_contiguous"
 
     def record_completion_sync(self):
         self._stats["completion_syncs"] += 1

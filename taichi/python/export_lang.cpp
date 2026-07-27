@@ -5294,6 +5294,10 @@ void export_lang(py::module &m) {
       .def("_apply", &ExperimentalLinearOperatorHandle::apply,
            py::keep_alive<1, 2>(), py::arg("program"),
            py::arg("input"), py::arg("output"))
+      .def("_apply_dense_storage",
+           &ExperimentalLinearOperatorHandle::apply_dense_storage,
+           py::keep_alive<1, 2>(), py::arg("program"), py::arg("input"),
+           py::arg("output"))
       .def(
           "_apply_generalized",
           [](ExperimentalLinearOperatorHandle &handle, Program *program,
@@ -5380,6 +5384,8 @@ void export_lang(py::module &m) {
         capabilities_dict["binding_rebind"] = capabilities.binding_rebind;
         capabilities_dict["persistent_workspace"] =
             capabilities.persistent_workspace;
+        capabilities_dict["dense_storage_operands"] =
+            capabilities.dense_storage_operands;
         py::dict traits_dict;
         traits_dict["self_adjoint"] =
             claim_to_dict(traits.self_adjoint);

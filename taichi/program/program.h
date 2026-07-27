@@ -60,6 +60,10 @@ struct CudaSparseAssemblyDispatchInfo {
 };
 
 class Program;
+namespace storage {
+class DenseStorageDescriptor;
+struct ResolvedDenseBinding;
+}  // namespace storage
 namespace runtime_completion_detail {
 Program *&active_runtime_submission_program() noexcept;
 }  // namespace runtime_completion_detail
@@ -640,6 +644,14 @@ class TI_DLL_EXPORT Program {
   debug_dense_field_staging_stats();
   std::unordered_map<std::string, std::uint64_t>
   debug_dense_storage_binding_stats() const;
+
+  using DenseStorageBindingCallback = std::function<void(
+      const storage::ResolvedDenseBinding *, std::size_t)>;
+  void with_resolved_dense_storage_bindings(
+      const std::vector<const storage::DenseStorageDescriptor *> &descriptors,
+      const DenseStorageBindingCallback &callback);
+  intptr_t get_dense_storage_data_ptr_as_int(
+      const storage::ResolvedDenseBinding &binding);
 
   Texture *create_texture(BufferFormat buffer_format,
                           const std::vector<int> &shape);
@@ -3164,6 +3176,9 @@ class TI_DLL_EXPORT Program {
       LaunchContextBuilder &ctx);
   void resolve_dense_storage_launch_context(
       LaunchContextBuilder &ctx,
+      NdarrayLaunchLeases &ndarray_leases);
+  storage::ResolvedDenseBinding resolve_dense_storage_descriptor(
+      const storage::DenseStorageDescriptor &descriptor,
       NdarrayLaunchLeases &ndarray_leases);
   NdarrayLaunchLeases acquire_ndarray_leases(
       std::initializer_list<const Ndarray *> views);

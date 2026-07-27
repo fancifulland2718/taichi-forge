@@ -843,6 +843,35 @@ DenseStorageBuildResult describe_ndarray_storage(const Ndarray &array,
       StorageSourceKind::kNdarray, layout);
 }
 
+DenseStorageBuildResult flatten_dense_storage_to_scalar_vector(
+    const DenseStorageDescriptor &descriptor) {
+  DenseStorageBuildResult invalid;
+  const DenseStorageProperties &properties = descriptor.properties();
+  if (!properties.compact_contiguous ||
+      properties.uniqueness != StorageMappingUniqueness::kProvenUnique ||
+      properties.has_negative_stride || properties.reachable_begin < 0 ||
+      properties.reachable_begin != descriptor.byte_offset() ||
+      properties.scalar_size == 0 ||
+      properties.scalar_count > static_cast<std::uint64_t>(
+                                    (std::numeric_limits<std::int64_t>::max)()) ||
+      properties.scalar_size > static_cast<std::uint64_t>(
+                                   (std::numeric_limits<std::int64_t>::max)())) {
+    invalid.reason = StorageFailureReason::kUnsupportedLayout;
+    return invalid;
+  }
+
+  DenseStorageLayoutSpec layout;
+  layout.scalar_type = descriptor.scalar_type();
+  layout.index_shape = {
+      static_cast<std::int64_t>(properties.scalar_count)};
+  layout.index_strides_bytes = {
+      static_cast<std::int64_t>(properties.scalar_size)};
+  layout.byte_offset = descriptor.byte_offset();
+  layout.access = descriptor.access();
+  return build_dense_storage_descriptor(
+      descriptor.owner(), descriptor.source_kind(), layout);
+}
+
 DenseStorageBuildResult describe_struct_member_storage(
     const Ndarray &base,
     DataType scalar_type,
