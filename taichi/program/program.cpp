@@ -4989,7 +4989,7 @@ void Program::launch_kernel(const CompiledKernelData &compiled_kernel_data,
                             LaunchContextBuilder &ctx) {
   ensure_runtime_submission_allowed("kernel launch");
   if (ctx.argpack_ptrs.empty() && ctx.ndarray_ptrs.empty() &&
-      ctx.texture_ptrs.empty()) {
+      ctx.texture_ptrs.empty() && ctx.dense_storage_ptrs.empty()) {
     // Keep the pre-registry ordinary-launch machine path intact. Routing this
     // overwhelmingly common case through launch_kernel_impl() added an
     // out-of-line call, optional guard construction, and a registered-handle
@@ -5033,6 +5033,9 @@ void Program::launch_kernel(const CompiledKernelData &compiled_kernel_data,
     // owner/handle checks remain, but no registry lookup or recursive lock is
     // needed here.
     TI_ASSERT(ctx.argpack_ptrs.empty());
+    TI_ERROR_IF(!ctx.dense_storage_ptrs.empty(),
+                "Dense storage views are not yet supported by Graph "
+                "capture or replay");
     resolve_ndarray_launch_context_under_guard(ctx);
     resolve_texture_launch_context_under_guard(ctx);
     auto completion_scope = acquire_runtime_submission_scope();
@@ -5057,6 +5060,13 @@ void Program::launch_kernel_impl(
     const CompiledKernelData &compiled_kernel_data,
     LaunchContextBuilder &ctx,
     const KernelLaunchHandle *registered_handle) {
+  struct ResolvedDenseBindingReset {
+    LaunchContextBuilder *ctx;
+    ~ResolvedDenseBindingReset() {
+      ctx->clear_resolved_dense_storage();
+    }
+  } resolved_dense_binding_reset{&ctx};
+
   std::optional<SNodeTreeLifecycleReadGuard> lifecycle_guard;
   if (active_snode_tree_lifecycle_program != this) {
     // Global lock order is SNodeTree lifecycle -> runtime-resource submission.
@@ -5067,7 +5077,7 @@ void Program::launch_kernel_impl(
   // ownership-oriented slow path. Keep a defensive fast path for internal
   // registered-handle callers that do not make the same promise.
   if (ctx.argpack_ptrs.empty() && ctx.ndarray_ptrs.empty() &&
-      ctx.texture_ptrs.empty()) {
+      ctx.texture_ptrs.empty() && ctx.dense_storage_ptrs.empty()) {
     auto completion_scope = acquire_runtime_submission_scope();
     if (registered_handle) {
       program_impl_->get_kernel_launcher().launch_registered_kernel(
@@ -5083,6 +5093,9 @@ void Program::launch_kernel_impl(
 
   if (active_runtime_resource_graph_program == this) {
     TI_ASSERT(ctx.argpack_ptrs.empty());
+    TI_ERROR_IF(!ctx.dense_storage_ptrs.empty(),
+                "Dense storage views are not yet supported by Graph "
+                "capture or replay");
     resolve_ndarray_launch_context_under_guard(ctx);
     resolve_texture_launch_context_under_guard(ctx);
     auto completion_scope = acquire_runtime_submission_scope();
@@ -5098,7 +5111,8 @@ void Program::launch_kernel_impl(
     return;
   }
 
-  if (ctx.argpack_ptrs.empty() && ctx.ndarray_ptrs.empty()) {
+  if (ctx.argpack_ptrs.empty() && ctx.ndarray_ptrs.empty() &&
+      ctx.dense_storage_ptrs.empty()) {
     // Texture-only kernels are common in staging and visualization. Do not
     // value-initialize the unrelated ArgPack/Ndarray inline lease arrays on
     // every submission. This keeps the same submission transaction and
@@ -5174,6 +5188,9 @@ void Program::launch_kernel_impl(
     } else {
       resolve_ndarray_launch_context(ctx);
     }
+  }
+  if (!ctx.dense_storage_ptrs.empty()) {
+    resolve_dense_storage_launch_context(ctx, ndarray_leases);
   }
   TextureLaunchLeases texture_leases;
   if (!ctx.texture_ptrs.empty()) {
@@ -5540,6 +5557,21 @@ bool Program::NdarrayLaunchLeases::contains(
     }
   }
   return false;
+}
+
+Ndarray *Program::NdarrayLaunchLeases::find(
+    NdarrayResourceHandle handle) const noexcept {
+  for (std::size_t i = 0; i < inline_count_; ++i) {
+    if (inline_leases_[i]->handle() == handle) {
+      return inline_leases_[i]->get();
+    }
+  }
+  for (const auto &lease : overflow_leases_) {
+    if (lease.handle() == handle) {
+      return lease.get();
+    }
+  }
+  return nullptr;
 }
 
 bool Program::NdarrayLaunchLeases::empty() const noexcept {
@@ -6019,6 +6051,139 @@ Program::NdarrayLaunchLeases Program::acquire_ndarray_launch_leases(
                  resource_ref.grad_handle);
   }
   return leases;
+}
+
+void Program::resolve_dense_storage_launch_context(
+    LaunchContextBuilder &ctx,
+    NdarrayLaunchLeases &ndarray_leases) {
+  if (ctx.dense_storage_ptrs.empty()) {
+    return;
+  }
+  TI_ERROR_IF(!ndarray_resources_open_,
+              "Cannot resolve dense storage after Program finalize");
+
+  auto find_snode = [](SNode *root, int target_id) -> SNode * {
+    auto visit = [&](auto &&self, SNode *node) -> SNode * {
+      if (node == nullptr) {
+        return nullptr;
+      }
+      if (node->id == target_id) {
+        return node;
+      }
+      for (const auto &child : node->ch) {
+        if (SNode *found = self(self, child.get())) {
+          return found;
+        }
+      }
+      return nullptr;
+    };
+    return visit(visit, root);
+  };
+
+  for (std::size_t i = 0; i < ctx.dense_storage_ptrs.size(); ++i) {
+    TI_ERROR_IF(ctx.dense_storage_ptrs[i].descriptor == nullptr,
+                "Dense storage launch context lost its descriptor");
+    const auto &descriptor = *ctx.dense_storage_ptrs[i].descriptor;
+    const auto &owner = descriptor.owner();
+    const auto &properties = descriptor.properties();
+    TI_ERROR_IF(owner.program_domain != runtime_program_generation(),
+                "Dense storage binding belongs to another Program "
+                "generation");
+    TI_ERROR_IF(!properties.ndarray_abi_compatible ||
+                    properties.uniqueness !=
+                        storage::StorageMappingUniqueness::kProvenUnique ||
+                    properties.reachable_begin < 0 ||
+                    properties.reachable_end < properties.reachable_begin ||
+                    properties.reachable_begin != descriptor.byte_offset(),
+                "Dense storage binding is not a compact unique ndarray "
+                "range");
+
+    storage::ResolvedDenseBinding binding;
+    binding.byte_offset =
+        static_cast<std::uint64_t>(properties.reachable_begin);
+    binding.byte_size = static_cast<std::uint64_t>(
+        properties.reachable_end - properties.reachable_begin);
+
+    if (owner.kind == storage::StorageOwnerKind::kProgramNdarray) {
+      const auto handle = owner.ndarray_handle;
+      TI_ERROR_IF(handle.index >= ndarray_view_slots_.size(),
+                  "Dense storage binding references a stale or retired "
+                  "Ndarray");
+      const auto &slot = ndarray_view_slots_[handle.index];
+      TI_ERROR_IF(slot.view == nullptr || slot.handle != handle,
+                  "Dense storage binding references a stale or retired "
+                  "Ndarray");
+      const Ndarray *array = slot.view;
+      if (arch_is_gpu(compile_config().arch) &&
+          ndarray_leases.find(handle) == nullptr &&
+          ndarray_inflight_leases_.find(ndarray_lease_key(handle)) ==
+              ndarray_inflight_leases_.end()) {
+        const auto found = ndarray_views_.find(array);
+        TI_ASSERT(found != ndarray_views_.end() &&
+                  found->second.handle == handle && found->second.lease);
+        auto lease = found->second.lease.clone();
+        TI_ERROR_IF(!lease,
+                    "Dense storage binding could not clone its Ndarray "
+                    "lease");
+        ndarray_leases.add(std::move(lease));
+      }
+      TI_ASSERT(array != nullptr);
+      const std::size_t element_size = array->get_element_size();
+      const std::size_t element_count = array->get_nelement();
+      TI_ERROR_IF(element_size != 0 &&
+                      element_count >
+                          (std::numeric_limits<std::size_t>::max)() /
+                              element_size,
+                  "Ndarray byte span overflow while resolving storage");
+      const std::size_t allocation_bytes = element_size * element_count;
+      TI_ERROR_IF(binding.byte_offset > allocation_bytes ||
+                      binding.byte_size >
+                          allocation_bytes - binding.byte_offset,
+                  "Dense storage range exceeds its Ndarray allocation");
+      binding.allocation = array->get_device_allocation();
+      dense_storage_ndarray_bindings_.fetch_add(1,
+                                                std::memory_order_relaxed);
+    } else if (owner.kind == storage::StorageOwnerKind::kSNodePayload) {
+      const int tree_id = owner.tree.tree_id;
+      TI_ERROR_IF(tree_id < 0 ||
+                      static_cast<std::size_t>(tree_id) >=
+                          snode_trees_.size() ||
+                      static_cast<std::size_t>(tree_id) >=
+                          snode_tree_active_.size() ||
+                      !snode_tree_active_[tree_id] ||
+                      snode_trees_[tree_id] == nullptr,
+                  "Dense storage binding references a retired SNodeTree");
+      SNodeTree *tree = snode_trees_[tree_id].get();
+      TI_ERROR_IF(tree->generation() != owner.tree.generation,
+                  "Dense storage binding references a retired SNodeTree "
+                  "generation");
+      TI_ERROR_IF(tree->layout_fingerprint() !=
+                      owner.tree.layout_fingerprint,
+                  "Dense storage binding SNodeTree layout has changed");
+      SNode *anchor = find_snode(tree->root(), owner.anchor_snode_id);
+      TI_ERROR_IF(anchor == nullptr || anchor->type != SNodeType::place,
+                  "Dense storage binding anchor is no longer available");
+      const DevicePtr field_ptr = get_dense_field_device_ptr(anchor);
+      TI_ERROR_IF(field_ptr.offset != binding.byte_offset,
+                  "Dense storage binding offset no longer matches its "
+                  "SNode layout");
+      binding.allocation =
+          DeviceAllocation{field_ptr.device, field_ptr.alloc_id};
+      dense_storage_field_bindings_.fetch_add(1,
+                                              std::memory_order_relaxed);
+    } else {
+      TI_ERROR("Dense storage kernel binding does not accept this owner "
+               "kind");
+    }
+
+    binding.valid = true;
+    ctx.set_resolved_dense_storage(i, binding);
+    dense_storage_resolved_bindings_.fetch_add(1,
+                                               std::memory_order_relaxed);
+    dense_storage_resolved_bytes_.fetch_add(binding.byte_size,
+                                            std::memory_order_relaxed);
+  }
+  dense_storage_direct_submissions_.fetch_add(1, std::memory_order_relaxed);
 }
 
 Program::TextureLaunchLeases Program::acquire_texture_launch_leases(
@@ -6701,6 +6866,7 @@ void Program::close_ndarray_resources() {
   std::lock_guard<std::mutex> lifecycle_lock(ndarray_lifecycle_mutex_);
   ndarray_resources_open_ = false;
   ndarray_views_.clear();
+  ndarray_view_slots_.clear();
 }
 
 void Program::close_texture_resources() {
@@ -7148,16 +7314,31 @@ Ndarray *Program::create_ndarray(const DataType type,
   view->bind_runtime_resource_handle(handle);
   bool inserted = false;
   try {
+    if (handle.index >= ndarray_view_slots_.size()) {
+      ndarray_view_slots_.resize(static_cast<std::size_t>(handle.index) + 1);
+    }
     inserted = ndarray_views_
                    .emplace(view,
                             NdarrayResourceView{handle, std::move(lease)})
                    .second;
+    if (inserted) {
+      TI_ASSERT(ndarray_view_slots_[handle.index].view == nullptr);
+      ndarray_view_slots_[handle.index] = {view, handle};
+    }
   } catch (...) {
+    if (handle.index < ndarray_view_slots_.size() &&
+        ndarray_view_slots_[handle.index].view == view) {
+      ndarray_view_slots_[handle.index] = {};
+    }
     lock.unlock();
     ndarray_resources_.retire(handle);
     throw;
   }
   if (!inserted) {
+    if (handle.index < ndarray_view_slots_.size() &&
+        ndarray_view_slots_[handle.index].view == view) {
+      ndarray_view_slots_[handle.index] = {};
+    }
     lock.unlock();
     ndarray_resources_.retire(handle);
     TI_ERROR("Ndarray view identity collision inside one Program");
@@ -7269,6 +7450,10 @@ void Program::delete_ndarray(Ndarray *ndarray) {
     // backend dereference to protect. Creating a new lease here would retain a
     // resource after its completion has already proved safety and force an
     // unrelated later ti.sync(). Texture/ArgPack already follow this rule.
+    TI_ASSERT(handle.index < ndarray_view_slots_.size() &&
+              ndarray_view_slots_[handle.index].view == ndarray &&
+              ndarray_view_slots_[handle.index].handle == handle);
+    ndarray_view_slots_[handle.index] = {};
     ndarray_views_.erase(found);
   }
   const auto result = ndarray_resources_.retire(handle);
@@ -13846,6 +14031,24 @@ Program::debug_dense_field_staging_stats() {
     result["has_readback"] = staging.readback ? 1u : 0u;
   }
   return result;
+}
+
+std::unordered_map<std::string, std::uint64_t>
+Program::debug_dense_storage_binding_stats() const {
+  return {
+      {"direct_submissions",
+       dense_storage_direct_submissions_.load(std::memory_order_relaxed)},
+      {"resolved_bindings",
+       dense_storage_resolved_bindings_.load(std::memory_order_relaxed)},
+      {"resolved_bytes",
+       dense_storage_resolved_bytes_.load(std::memory_order_relaxed)},
+      {"ndarray_bindings",
+       dense_storage_ndarray_bindings_.load(std::memory_order_relaxed)},
+      {"field_bindings",
+       dense_storage_field_bindings_.load(std::memory_order_relaxed)},
+      {"temporary_allocations", 0},
+      {"temporary_bytes", 0},
+  };
 }
 
 void Program::fill_dense_field(SNode *dst,

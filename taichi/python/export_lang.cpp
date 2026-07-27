@@ -1403,6 +1403,8 @@ void export_lang(py::module &m) {
            &Program::debug_texture_resource_identity)
       .def("_debug_dense_field_staging_stats",
            &Program::debug_dense_field_staging_stats)
+      .def("_debug_dense_storage_binding_stats",
+           &Program::debug_dense_storage_binding_stats)
       .def(
           "create_texture",
           [&](Program *program, BufferFormat fmt, const std::vector<int> &shape)
@@ -3607,6 +3609,8 @@ void export_lang(py::module &m) {
       .def("set_arg_ndarray", &LaunchContextBuilder::set_arg_ndarray)
       .def("set_arg_ndarray_with_grad",
            &LaunchContextBuilder::set_arg_ndarray_with_grad)
+      .def("set_arg_dense_storage",
+           &LaunchContextBuilder::set_arg_dense_storage)
       .def("_debug_set_ndarray_resource_handle",
            [](LaunchContextBuilder &ctx, const std::vector<int> &arg_id,
               std::uint64_t domain, std::uint32_t kind, std::uint32_t index,

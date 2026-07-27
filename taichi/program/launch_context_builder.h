@@ -5,6 +5,7 @@
 #include "taichi/program/texture.h"
 #include "taichi/program/matrix.h"
 #include "taichi/program/runtime_resource_registry.h"
+#include "taichi/program/storage_view.h"
 
 namespace taichi::lang {
 
@@ -18,6 +19,7 @@ class LaunchContextBuilder {
     kTexture = 2,
     kRWTexture = 3,
     kArgPack = 4,
+    kDenseStorage = 5,
   };
 
   struct NdarrayResourceRef {
@@ -37,6 +39,15 @@ class LaunchContextBuilder {
     Program *owner{nullptr};
     const Texture *texture{nullptr};
     RuntimeResourceHandle handle;
+  };
+
+  struct DenseStorageResourceRef {
+    int arg_offset{-1};
+    // Non-owning immutable metadata. Ordinary launch callers keep the Python
+    // view/C++ descriptor alive through submission; Graph deliberately rejects
+    // this resource kind before it can outlive that scope.
+    const storage::DenseStorageDescriptor *descriptor{nullptr};
+    storage::ResolvedDenseBinding resolved;
   };
 
   explicit LaunchContextBuilder(CallableBase *kernel);
@@ -106,6 +117,15 @@ class LaunchContextBuilder {
   void set_arg_ndarray_with_grad(const std::vector<int> &arg_id,
                                  const Ndarray &arr,
                                  const Ndarray &arr_grad);
+  void set_arg_dense_storage(
+      const std::vector<int> &arg_id,
+      const storage::DenseStorageDescriptor &descriptor);
+  void set_resolved_dense_storage(
+      std::size_t resource_index,
+      const storage::ResolvedDenseBinding &binding);
+  const storage::ResolvedDenseBinding &get_resolved_dense_storage(
+      const std::vector<int> &arg_id) const;
+  void clear_resolved_dense_storage() noexcept;
   void debug_set_ndarray_resource_handle(
       const std::vector<int> &arg_id,
       RuntimeResourceHandle handle);
@@ -183,6 +203,7 @@ class LaunchContextBuilder {
   // arg_id is retained only for the generation-fault injection debug hook.
   std::vector<NdarrayResourceRef> ndarray_ptrs;
   std::vector<TextureResourceRef> texture_ptrs;
+  std::vector<DenseStorageResourceRef> dense_storage_ptrs;
 };
 
 }  // namespace taichi::lang

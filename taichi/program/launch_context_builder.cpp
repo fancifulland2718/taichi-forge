@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <limits>
 
 #include <taichi/program/launch_context_builder.h>
 #include "taichi/program/program.h"
@@ -325,6 +326,79 @@ void LaunchContextBuilder::set_arg_ndarray_with_grad(
                  "External array cannot have > {max_num_indices} indices");
   set_arg_ndarray_impl(arg_id, arr.get_device_allocation_ptr_as_int(), arr.shape,
                        arr_grad.get_device_allocation_ptr_as_int());
+}
+
+void LaunchContextBuilder::set_arg_dense_storage(
+    const std::vector<int> &arg_id,
+    const storage::DenseStorageDescriptor &descriptor) {
+  TI_ASSERT_INFO(
+      kernel_->nested_parameters[arg_id].is_array,
+      "Assigning a dense storage view to a scalar argument is not allowed.");
+  const auto &properties = descriptor.properties();
+  TI_ERROR_IF(
+      !properties.ndarray_abi_compatible ||
+          properties.uniqueness !=
+              storage::StorageMappingUniqueness::kProvenUnique,
+      "Dense storage kernel binding requires a unique ndarray-compatible "
+      "layout");
+  TI_ERROR_IF(descriptor.access() != storage::StorageAccess::kReadWrite,
+              "Dense storage kernel binding currently requires read-write "
+              "access");
+
+  const int arg_offset = args_type->get_element_offset(arg_id);
+  const auto found = std::find_if(
+      dense_storage_ptrs.begin(), dense_storage_ptrs.end(),
+      [arg_offset](const auto &ref) { return ref.arg_offset == arg_offset; });
+  if (found == dense_storage_ptrs.end()) {
+    dense_storage_ptrs.push_back(
+        DenseStorageResourceRef{arg_offset, &descriptor, {}});
+  } else {
+    auto &ref = *found;
+    ref.descriptor = &descriptor;
+    ref.resolved = {};
+  }
+
+  const std::size_t index_rank = descriptor.index_rank();
+  TI_ASSERT_INFO(index_rank <= taichi_max_num_indices,
+                 "Dense storage view cannot have too many indices");
+  for (std::size_t i = 0; i < index_rank; ++i) {
+    const std::int64_t extent = descriptor.index_extent(i);
+    TI_ERROR_IF(extent < 0 ||
+                    static_cast<std::uint64_t>(extent) >
+                        static_cast<std::uint64_t>(
+                            (std::numeric_limits<std::int32_t>::max)()),
+                "Dense storage view shape is outside the ndarray ABI");
+    set_struct_arg(concatenate_vector<int>(arg_id, {0, (int32)i}),
+                   static_cast<int32>(extent));
+  }
+  set_array_runtime_size(arg_id, properties.item_count);
+  set_array_device_allocation_type(arg_id, DevAllocType::kDenseStorage);
+}
+
+void LaunchContextBuilder::set_resolved_dense_storage(
+    std::size_t resource_index,
+    const storage::ResolvedDenseBinding &binding) {
+  TI_ERROR_IF(resource_index >= dense_storage_ptrs.size() || !binding.valid,
+              "Cannot install an invalid resolved dense storage binding");
+  dense_storage_ptrs[resource_index].resolved = binding;
+}
+
+const storage::ResolvedDenseBinding &
+LaunchContextBuilder::get_resolved_dense_storage(
+    const std::vector<int> &arg_id) const {
+  const int arg_offset = args_type->get_element_offset(arg_id);
+  const auto found = std::find_if(
+      dense_storage_ptrs.begin(), dense_storage_ptrs.end(),
+      [arg_offset](const auto &ref) { return ref.arg_offset == arg_offset; });
+  TI_ERROR_IF(found == dense_storage_ptrs.end() || !found->resolved.valid,
+              "Dense storage binding was not resolved for this submission");
+  return found->resolved;
+}
+
+void LaunchContextBuilder::clear_resolved_dense_storage() noexcept {
+  for (auto &ref : dense_storage_ptrs) {
+    ref.resolved = {};
+  }
 }
 
 void LaunchContextBuilder::bind_ndarray_resource_ref(

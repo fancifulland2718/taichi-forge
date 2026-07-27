@@ -432,6 +432,14 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
 
         ctx.set_ndarray_ptrs(key, (uint64)device_ptrs[data_ptr_idx],
                              (uint64)device_ptrs[grad_ptr_idx]);
+      } else if (ctx.device_allocation_type[key] ==
+                 LaunchContextBuilder::DevAllocType::kDenseStorage) {
+        const auto &binding = ctx.get_resolved_dense_storage(key);
+        auto *base = reinterpret_cast<char *>(
+            executor->get_device_alloc_info_ptr(binding.allocation));
+        device_ptrs[data_ptr_idx] = base + binding.byte_offset;
+        device_ptrs[grad_ptr_idx] = nullptr;
+        ctx.set_ndarray_ptrs(key, (uint64)device_ptrs[data_ptr_idx], 0);
       } else if (arr_sz > 0) {
         // Ndarray
         DeviceAllocation *ptr = static_cast<DeviceAllocation *>(data_ptr);

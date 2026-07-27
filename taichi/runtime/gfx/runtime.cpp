@@ -113,11 +113,17 @@ class HostDeviceContextBlitter {
         // Substitute in the device address.
 
         if ((alloc_type == LaunchContextBuilder::DevAllocType::kNone ||
-             alloc_type == LaunchContextBuilder::DevAllocType::kNdarray) &&
+             alloc_type == LaunchContextBuilder::DevAllocType::kNdarray ||
+             alloc_type ==
+                 LaunchContextBuilder::DevAllocType::kDenseStorage) &&
             device_->get_caps().get(
                 DeviceCapability::spirv_has_physical_storage_buffer)) {
           uint64_t addr =
               device_->get_memory_physical_pointer(ext_arrays.at(indices));
+          if (alloc_type ==
+              LaunchContextBuilder::DevAllocType::kDenseStorage) {
+            addr += host_ctx_.get_resolved_dense_storage(indices).byte_offset;
+          }
           uint64_t grad_addr = 0;
           if (alloc_type == LaunchContextBuilder::DevAllocType::kNdarray &&
               host_ctx_.array_ptrs[array_arg.grad_ptr_indices] != nullptr) {
@@ -1312,16 +1318,27 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
             devalloc = *(DeviceAllocation *)(host_ctx.array_ptrs[indices]);
           }
 
-          if (alloc_type == LaunchContextBuilder::DevAllocType::kNdarray) {
+          if (alloc_type == LaunchContextBuilder::DevAllocType::kNdarray ||
+              alloc_type ==
+                  LaunchContextBuilder::DevAllocType::kDenseStorage) {
+            if (alloc_type ==
+                LaunchContextBuilder::DevAllocType::kDenseStorage) {
+              devalloc =
+                  host_ctx.get_resolved_dense_storage(indices).allocation;
+            }
             any_arrays[indices] = devalloc;
             any_arrays[array_arg.data_ptr_indices] = devalloc;
             ndarrays_in_use_.insert(devalloc.alloc_id);
-            auto grad_it = host_ctx.array_ptrs.find(array_arg.grad_ptr_indices);
-            if (grad_it != host_ctx.array_ptrs.end() &&
-                grad_it->second != nullptr) {
-              auto grad_alloc = *(DeviceAllocation *)(grad_it->second);
-              any_arrays[array_arg.grad_ptr_indices] = grad_alloc;
-              ndarrays_in_use_.insert(grad_alloc.alloc_id);
+            if (alloc_type ==
+                LaunchContextBuilder::DevAllocType::kNdarray) {
+              auto grad_it =
+                  host_ctx.array_ptrs.find(array_arg.grad_ptr_indices);
+              if (grad_it != host_ctx.array_ptrs.end() &&
+                  grad_it->second != nullptr) {
+                auto grad_alloc = *(DeviceAllocation *)(grad_it->second);
+                any_arrays[array_arg.grad_ptr_indices] = grad_alloc;
+                ndarrays_in_use_.insert(grad_alloc.alloc_id);
+              }
             }
           } else if (alloc_type == LaunchContextBuilder::DevAllocType::kTexture) {
             textures[indices] = devalloc;
@@ -1505,7 +1522,20 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
         continue;
       }
       if (bind.kind == CompiledTaichiKernel::BufferBindingKind::ExtArrRw) {
-        bindings->rw_buffer(bind.binding, any_arrays.at(bind.buffer.root_id));
+        if (host_ctx.device_allocation_type[bind.buffer.root_id] ==
+            LaunchContextBuilder::DevAllocType::kDenseStorage) {
+          const auto &binding =
+              host_ctx.get_resolved_dense_storage(bind.buffer.root_id);
+          if (binding.byte_size == 0) {
+            bindings->rw_buffer(bind.binding, binding.allocation);
+          } else {
+            bindings->rw_buffer(bind.binding, binding.device_ptr(),
+                                binding.byte_size);
+          }
+        } else {
+          bindings->rw_buffer(bind.binding,
+                              any_arrays.at(bind.buffer.root_id));
+        }
         continue;
       }
       if (bind.kind == CompiledTaichiKernel::BufferBindingKind::Args) {

@@ -638,6 +638,8 @@ class TI_DLL_EXPORT Program {
   debug_texture_resource_identity(const Texture *view) const;
   std::unordered_map<std::string, std::uint64_t>
   debug_dense_field_staging_stats();
+  std::unordered_map<std::string, std::uint64_t>
+  debug_dense_storage_binding_stats() const;
 
   Texture *create_texture(BufferFormat buffer_format,
                           const std::vector<int> &shape);
@@ -3063,6 +3065,7 @@ class TI_DLL_EXPORT Program {
    private:
     friend class Program;
     bool contains(NdarrayResourceHandle handle) const noexcept;
+    Ndarray *find(NdarrayResourceHandle handle) const noexcept;
     bool empty() const noexcept;
     void add(NdarrayResourceLease lease);
 
@@ -3076,6 +3079,11 @@ class TI_DLL_EXPORT Program {
   struct NdarrayResourceView {
     NdarrayResourceHandle handle;
     NdarrayResourceLease lease;
+  };
+
+  struct NdarrayResourceSlotView {
+    const Ndarray *view{nullptr};
+    NdarrayResourceHandle handle;
   };
 
   using NdarrayInflightLeaseMap =
@@ -3154,6 +3162,9 @@ class TI_DLL_EXPORT Program {
   static std::uint64_t argpack_lease_key(ArgPackResourceHandle handle);
   NdarrayLaunchLeases acquire_ndarray_launch_leases(
       LaunchContextBuilder &ctx);
+  void resolve_dense_storage_launch_context(
+      LaunchContextBuilder &ctx,
+      NdarrayLaunchLeases &ndarray_leases);
   NdarrayLaunchLeases acquire_ndarray_leases(
       std::initializer_list<const Ndarray *> views);
   NdarrayLaunchLeases acquire_ndarray_leases(
@@ -3250,6 +3261,11 @@ class TI_DLL_EXPORT Program {
   DenseFieldStagingHandle dense_field_staging_handle_;
   DenseFieldStagingLease dense_field_staging_lease_;
   bool dense_field_staging_open_{true};
+  std::atomic<std::uint64_t> dense_storage_direct_submissions_{0};
+  std::atomic<std::uint64_t> dense_storage_resolved_bindings_{0};
+  std::atomic<std::uint64_t> dense_storage_resolved_bytes_{0};
+  std::atomic<std::uint64_t> dense_storage_ndarray_bindings_{0};
+  std::atomic<std::uint64_t> dense_storage_field_bindings_{0};
   float64 total_compilation_time_{0.0};
   static std::atomic<int> num_instances_;
   bool finalized_{false};
@@ -3267,6 +3283,7 @@ class TI_DLL_EXPORT Program {
   mutable std::mutex ndarray_lifecycle_mutex_;
   bool ndarray_resources_open_{true};
   std::unordered_map<const Ndarray *, NdarrayResourceView> ndarray_views_;
+  std::vector<NdarrayResourceSlotView> ndarray_view_slots_;
   NdarrayInflightLeaseMap ndarray_inflight_leases_;
   TextureResourceRegistry texture_resources_;
   mutable std::mutex texture_lifecycle_mutex_;

@@ -39,13 +39,27 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
           ctx.device_allocation_type[key] !=
               LaunchContextBuilder::DevAllocType::kNone &&
           ctx.array_runtime_sizes[key] > 0) {
-        DeviceAllocation *ptr =
-            static_cast<DeviceAllocation *>(ctx.array_ptrs[data_ptr_idx]);
-        uint64 host_ptr = (uint64)executor->get_device_alloc_info_ptr(*ptr);
+        const auto alloc_type = ctx.device_allocation_type[key];
+        uint64 host_ptr = 0;
+        if (alloc_type ==
+            LaunchContextBuilder::DevAllocType::kDenseStorage) {
+          const auto &binding = ctx.get_resolved_dense_storage(key);
+          auto *base = reinterpret_cast<char *>(
+              executor->get_device_alloc_info_ptr(binding.allocation));
+          host_ptr = reinterpret_cast<uint64>(base + binding.byte_offset);
+        } else {
+          DeviceAllocation *ptr =
+              static_cast<DeviceAllocation *>(ctx.array_ptrs[data_ptr_idx]);
+          host_ptr =
+              (uint64)executor->get_device_alloc_info_ptr(*ptr);
+        }
         ctx.set_array_device_allocation_type(
             key, LaunchContextBuilder::DevAllocType::kNone);
 
-        auto grad_ptr = ctx.array_ptrs[grad_ptr_idx];
+        auto grad_ptr = alloc_type ==
+                                LaunchContextBuilder::DevAllocType::kDenseStorage
+                            ? nullptr
+                            : ctx.array_ptrs[grad_ptr_idx];
         uint64 host_ptr_grad =
             grad_ptr == nullptr
                 ? 0

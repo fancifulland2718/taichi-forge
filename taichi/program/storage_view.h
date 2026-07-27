@@ -9,6 +9,7 @@
 #include "taichi/inc/constants.h"
 #include "taichi/ir/type.h"
 #include "taichi/program/runtime_resource_registry.h"
+#include "taichi/rhi/public_device.h"
 #include "taichi/struct/snode_tree.h"
 
 namespace taichi::lang {
@@ -158,6 +159,21 @@ struct DenseStorageProperties {
   std::int64_t record_stride{0};
   StorageArrayLayout array_layout{StorageArrayLayout::kNone};
   StorageMappingUniqueness uniqueness{StorageMappingUniqueness::kUnknown};
+};
+
+// Submission-scoped device capability derived from an immutable descriptor
+// only after its owner generation has been validated. Descriptors deliberately
+// do not contain DeviceAllocation or raw-pointer state; backends may consume
+// this value only while Program owns the corresponding launch transaction.
+struct ResolvedDenseBinding {
+  DeviceAllocation allocation{kDeviceNullAllocation};
+  std::uint64_t byte_offset{0};
+  std::uint64_t byte_size{0};
+  bool valid{false};
+
+  DevicePtr device_ptr() const {
+    return allocation.get_ptr(byte_offset);
+  }
 };
 
 struct DenseStorageBuildResult;
