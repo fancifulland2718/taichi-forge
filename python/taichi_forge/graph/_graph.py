@@ -494,7 +494,7 @@ class _GraphRunContext:
                     flattened[k] = (
                         view,
                         view._runtime_storage_argument(
-                            "graph_replay", "replay"
+                            ndarray_consumer, ndarray_mode
                         ),
                     )
                 elif isinstance(v, Texture):

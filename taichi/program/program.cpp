@@ -5946,6 +5946,23 @@ void Program::retain_runtime_storage_for_graph_submission(
   }
 }
 
+storage::ResolvedDenseBinding
+Program::resolve_runtime_storage_argument_under_graph_guard(
+    const storage::RuntimeStorageArgument &argument) {
+  TI_ERROR_IF(active_snode_tree_lifecycle_program != this ||
+                  active_runtime_resource_graph_program != this,
+              "Runtime storage Graph signature resolution requires active "
+              "SNodeTree and resource guards");
+  NdarrayLaunchLeases ndarray_leases;
+  ExternalDenseStorageLaunchLeases external_leases;
+  auto binding = resolve_dense_storage_descriptor(
+      argument.descriptor(), ndarray_leases, external_leases, &argument);
+  TI_ERROR_IF(!ndarray_leases.empty() || !external_leases.empty(),
+              "Graph runtime storage was not retained before signature "
+              "resolution");
+  return binding;
+}
+
 void Program::validate_ndarrays_for_external_submission(
     const std::vector<const Ndarray *> &views) {
   validate_ndarrays_for_external_submission(views.data(), views.size());

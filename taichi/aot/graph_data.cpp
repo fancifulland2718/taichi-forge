@@ -473,9 +473,9 @@ struct CudaGraphArgSignatureEntry {
 
   bool structurally_equals(const CudaGraphArgSignatureEntry &other) const {
     return name == other.name && tag == other.tag && device == other.device &&
-           byte_offset == other.byte_offset && byte_size == other.byte_size &&
-           dtype_id == other.dtype_id && layout == other.layout &&
-           shape == other.shape && element_shape == other.element_shape;
+           byte_size == other.byte_size && dtype_id == other.dtype_id &&
+           layout == other.layout && shape == other.shape &&
+           element_shape == other.element_shape;
   }
 };
 
@@ -907,6 +907,7 @@ CompiledGraphCudaState *get_cuda_graph_state(CompiledGraphJITCache &cache) {
 
 std::optional<CudaGraphSignatureCandidate>
 make_cuda_graph_signature(const CompiledGraph &graph,
+                          Program &program,
                           const std::unordered_map<std::string, IValue> &args) {
   CudaGraphSignatureCandidate signature;
   signature.entries.reserve(args.size());
@@ -925,39 +926,82 @@ make_cuda_graph_signature(const CompiledGraph &graph,
     entry.element_shape = declared_it->second.element_shape;
 
     if (kv.second.tag == ArgKind::kNdarray) {
-      auto *arr = reinterpret_cast<Ndarray *>(kv.second.val);
+      DeviceAllocation allocation = kDeviceNullAllocation;
       if (kv.second.runtime_storage != nullptr) {
-        const auto &qualification = kv.second.runtime_storage->qualification();
-        if (!qualification.capabilities.capturable) {
+        const auto &argument = *kv.second.runtime_storage;
+        const auto &qualification = argument.qualification();
+        const auto &descriptor = argument.descriptor();
+        const auto owner_kind = descriptor.owner().kind;
+        if (!qualification.capabilities.capturable ||
+            (owner_kind != storage::StorageOwnerKind::kProgramNdarray &&
+             owner_kind != storage::StorageOwnerKind::kSNodePayload) ||
+            argument.synchronization_domain_identity() != 0) {
           return std::nullopt;
         }
-        entry.runtime_signature = kv.second.runtime_storage->stable_signature();
+        const auto binding =
+            program.resolve_runtime_storage_argument_under_graph_guard(
+                argument);
+        if (!binding.valid || binding.allocation == kDeviceNullAllocation) {
+          return std::nullopt;
+        }
+        allocation = binding.allocation;
+        entry.device = allocation.device;
+        entry.alloc_id = allocation.alloc_id;
+        entry.byte_offset = binding.byte_offset;
+        entry.byte_size = binding.byte_size;
+        entry.runtime_signature = binding.runtime_signature;
+        entry.dtype_id =
+            descriptor.scalar_type()->as<PrimitiveType>()->type;
+        entry.shape.reserve(descriptor.index_rank());
+        for (std::size_t axis = 0; axis < descriptor.index_rank(); ++axis) {
+          const std::int64_t extent = descriptor.index_extent(axis);
+          if (extent < 0 || extent > (std::numeric_limits<int>::max)()) {
+            return std::nullopt;
+          }
+          entry.shape.push_back(static_cast<int>(extent));
+        }
+        entry.element_shape.reserve(descriptor.element_rank());
+        for (std::size_t axis = 0; axis < descriptor.element_rank(); ++axis) {
+          const std::int64_t extent = descriptor.element_extent(axis);
+          if (extent < 0 || extent > (std::numeric_limits<int>::max)()) {
+            return std::nullopt;
+          }
+          entry.element_shape.push_back(static_cast<int>(extent));
+        }
+        switch (descriptor.properties().array_layout) {
+          case storage::StorageArrayLayout::kScalar:
+            entry.layout = ExternalArrayLayout::kNull;
+            break;
+          case storage::StorageArrayLayout::kAos:
+            entry.layout = ExternalArrayLayout::kAOS;
+            break;
+          case storage::StorageArrayLayout::kSoa:
+            entry.layout = ExternalArrayLayout::kSOA;
+            break;
+          case storage::StorageArrayLayout::kNone:
+            return std::nullopt;
+        }
+      } else {
+        auto *arr = reinterpret_cast<Ndarray *>(kv.second.val);
+        if (arr == nullptr) {
+          return std::nullopt;
+        }
+        allocation = arr->get_device_allocation();
+        entry.device = allocation.device;
+        entry.alloc_id = allocation.alloc_id;
+        entry.byte_offset = 0;
+        entry.byte_size = arr->get_nelement() * arr->get_element_size();
+        entry.dtype_id = arr->get_element_data_type()
+                             ->as<PrimitiveType>()
+                             ->type;
+        entry.layout = arr->layout;
+        entry.shape = arr->shape;
+        entry.element_shape = arr->get_element_shape();
       }
-      // G0 admits pure dense Field/view arguments for ordinary replay. CUDA
-      // capture still requires an owning Ndarray until G1 can retain and patch
-      // arbitrary resolved bindings explicitly.
-      if (arr == nullptr) {
-        return std::nullopt;
-      }
-      DeviceAllocation allocation = arr->get_device_allocation();
       auto *device = dynamic_cast<cuda::CudaDevice *>(allocation.device);
       if (device == nullptr) {
         return std::nullopt;
       }
-      entry.device = allocation.device;
-      entry.alloc_id = allocation.alloc_id;
-      // Ndarray currently represents its complete DeviceAllocation and has no
-      // subview offset. Keep the zero offset explicit so a future view type
-      // cannot accidentally inherit the same replay identity.
-      entry.byte_offset = 0;
-      entry.byte_size = arr->get_nelement() * arr->get_element_size();
-      entry.dtype_id = arr->get_element_data_type()
-                           ->as<PrimitiveType>()
-                           ->type;
-      entry.layout = arr->layout;
-      entry.shape = arr->shape;
-      entry.element_shape = arr->get_element_shape();
-
       const bool already_listed =
           std::find(signature.allocations.begin(),
                     signature.allocations.end(),
@@ -970,8 +1014,7 @@ make_cuda_graph_signature(const CompiledGraph &graph,
       entry.value = kv.second.val;
     } else if (kv.second.tag == ArgKind::kMatrix) {
       auto *matrix = reinterpret_cast<Matrix *>(kv.second.val);
-      entry.byte_size =
-          matrix->length() * data_type_size(matrix->dtype());
+      entry.byte_size = matrix->length() * data_type_size(matrix->dtype());
       if (entry.byte_size > 128) {
         return std::nullopt;
       }
@@ -1002,7 +1045,6 @@ make_cuda_graph_signature(const CompiledGraph &graph,
             });
   return signature;
 }
-
 std::optional<
     std::vector<std::unique_ptr<cuda::CudaDevice::AllocationLease>>>
 acquire_cuda_graph_allocation_leases(
@@ -1114,6 +1156,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
                         const CompileConfig &compile_config,
                         const std::unordered_map<std::string, IValue> &args,
                         CompiledGraphJITCache &cache,
+                        Program &program,
                         RuntimeStatistics *statistics) {
   auto *state = get_cuda_graph_state(cache);
   if (state->diagnostics_enabled) {
@@ -1131,7 +1174,16 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
         *state, CompiledGraphFallbackReason::insufficient_dispatches, true);
     return false;
   }
-  auto signature = make_cuda_graph_signature(graph, args);
+  std::optional<CudaGraphSignatureCandidate> signature;
+  try {
+    signature = make_cuda_graph_signature(graph, program, args);
+  } catch (...) {
+    // A runtime Field may have been destroyed after this executable was last
+    // used. Retire the cached graph before surfacing the stale-generation
+    // error so no later cleanup keeps an executable with a dead root address.
+    state->retire();
+    throw;
+  }
   if (!signature.has_value()) {
     mark_cuda_graph_fallback(
         *state, CompiledGraphFallbackReason::unsupported_arguments, true);
@@ -1174,9 +1226,10 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
         *state, CompiledGraphFallbackReason::resource_unavailable);
     return false;
   }
-  if (state->graph_exec &&
-      cuda_graph_signatures_are_structurally_compatible(
-          state->signature, signature->entries)) {
+  const bool structurally_compatible =
+      state->graph_exec && cuda_graph_signatures_are_structurally_compatible(
+                               state->signature, signature->entries);
+  if (structurally_compatible) {
     std::vector<std::vector<uint8_t>> host_arg_buffers;
     if (patch_cuda_graph_arguments(graph, args, *state, host_arg_buffers)) {
       std::vector<std::unique_ptr<cuda::CudaDevice::AllocationLease>>
@@ -1792,11 +1845,9 @@ void CompiledGraph::jit_run_cached(
   }
 #if defined(TI_WITH_CUDA)
   if (compile_config.arch == Arch::cuda) {
-    if (try_run_cuda_graph(*this, compile_config, args, cache,
-                           program != nullptr
-                               ? &program->runtime_statistics()
-                               : nullptr)) {
-      TI_ASSERT(program != nullptr);
+    TI_ASSERT(program != nullptr);
+    if (try_run_cuda_graph(*this, compile_config, args, cache, *program,
+                           &program->runtime_statistics())) {
       program->mark_runtime_submission(
           RuntimeSubmissionKind::kGraphBackendSubmission);
       return;

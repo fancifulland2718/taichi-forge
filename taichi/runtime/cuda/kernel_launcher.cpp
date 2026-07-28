@@ -234,6 +234,10 @@ bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
   }
 
   context = ctx.get_context();
+  // A zero-size result buffer is never dereferenced by the compiled tasks.
+  // Canonicalize it so capture packets do not retain a transient host address
+  // and compatible argument updates do not spuriously require recapture.
+  context.result_buffer = nullptr;
   return true;
 }
 

@@ -407,10 +407,13 @@ def test_graph_automatically_normalizes_dense_field_and_view_without_copy():
     arch = impl.current_cfg().arch
     if arch == ti.cuda:
         stats = graph._graph_stats[0]
-        assert stats["ordinary_fallbacks"] == 18
-        assert stats["captures"] == 0
-        assert stats["last_path"] == "ordinary_fallback"
-        assert stats["last_fallback_reason"] == "unsupported_arguments"
+        assert stats["ordinary_fallbacks"] == 0
+        assert stats["captures"] == 1
+        assert stats["patched_replays"] == 1
+        assert stats["exact_replays"] == 16
+        assert stats["recaptures"] == 0
+        assert stats["last_path"] == "cuda_exact_replay"
+        assert stats["last_fallback_reason"] == "none"
     elif arch == ti.vulkan:
         stats = graph._graph_stats[0]
         assert stats["records"] == 16
@@ -438,15 +441,23 @@ def test_graph_automatically_normalizes_packed_dense_field():
     builder = ti.graph.GraphBuilder()
     builder.dispatch(update, symbolic)
     graph = builder.compile()
+    graph.execution_stats()
 
     values = ti.Vector.field(3, ti.f32, shape=8)
     values.fill(4.0)
     graph.run({"values": values})
+    graph.run({"values": values})
     ti.sync()
     result = values.to_numpy()
-    np.testing.assert_array_equal(result[:, 0], np.full(8, 5.0))
-    np.testing.assert_array_equal(result[:, 1], np.full(8, 6.0))
-    np.testing.assert_array_equal(result[:, 2], np.full(8, 7.0))
+    np.testing.assert_array_equal(result[:, 0], np.full(8, 6.0))
+    np.testing.assert_array_equal(result[:, 1], np.full(8, 8.0))
+    np.testing.assert_array_equal(result[:, 2], np.full(8, 10.0))
+    if impl.current_cfg().arch == ti.cuda:
+        stats = graph._graph_stats[0]
+        assert stats["captures"] == 1
+        assert stats["exact_replays"] == 1
+        assert stats["ordinary_fallbacks"] == 0
+        assert stats["last_path"] == "cuda_exact_replay"
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
@@ -500,6 +511,63 @@ def test_graph_dense_field_runtime_argument_rejects_retired_tree():
         RuntimeError, match="retired SNodeTree|generation"
     ):
         graph.run({"values": values})
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_graph_borrowed_field_rejects_retired_generation_and_recaptures():
+    @ti.kernel
+    def touch(values: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+        for i in values:
+            values[i] += 1.0
+
+    symbolic = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "values", ti.f32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(touch, symbolic)
+    builder.dispatch(touch, symbolic)
+    graph = builder.compile()
+    graph.execution_stats()
+
+    old_values = ti.field(ti.f32)
+    old_builder = ti.FieldsBuilder()
+    old_builder.dense(ti.i, 8).place(old_values)
+    old_tree = old_builder.finalize()
+    old_identity = (old_tree.id, old_tree.generation)
+    graph.run({"values": old_values})
+    graph.run({"values": old_values})
+    ti.sync()
+    np.testing.assert_array_equal(
+        old_values.to_numpy(), np.full(8, 4.0, dtype=np.float32)
+    )
+    first_stats = graph._graph_stats[0]
+    assert first_stats["captures"] == 1
+    assert first_stats["exact_replays"] == 1
+
+    old_tree.destroy()
+    with pytest.raises(RuntimeError, match="retired SNodeTree|generation"):
+        graph.run({"values": old_values})
+
+    new_values = ti.field(ti.f32)
+    new_builder = ti.FieldsBuilder()
+    new_builder.dense(ti.i, 8).place(new_values)
+    new_tree = new_builder.finalize()
+    assert new_tree.id == old_identity[0]
+    assert new_tree.generation > old_identity[1]
+    graph.run({"values": new_values})
+    graph.run({"values": new_values})
+    ti.sync()
+    np.testing.assert_array_equal(
+        new_values.to_numpy(), np.full(8, 4.0, dtype=np.float32)
+    )
+    final_stats = graph._graph_stats[0]
+    assert final_stats["captures"] == 2
+    assert final_stats["recaptures"] == 1
+    assert final_stats["exact_replays"] == 2
+    assert final_stats["patched_replays"] == 0
+    assert final_stats["ordinary_fallbacks"] == 0
+    assert final_stats["last_path"] == "cuda_exact_replay"
+    new_tree.destroy()
+
 
 @test_utils.test(
     arch=[ti.cpu, ti.cuda, ti.vulkan],

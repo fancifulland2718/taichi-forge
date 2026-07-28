@@ -878,12 +878,14 @@ RuntimeStorageQualification qualify_runtime_storage(
   result.capabilities.zero_copy_qualified = true;
   const bool stable_identity = owner_has_stable_runtime_identity(owner_kind);
   result.capabilities.replayable = stable_identity;
+  const bool program_owned_dense =
+      owner_kind == StorageOwnerKind::kProgramNdarray ||
+      owner_kind == StorageOwnerKind::kSNodePayload;
   result.capabilities.capturable =
-      stable_identity &&
+      stable_identity && program_owned_dense &&
       requirement.consumer == RuntimeStorageConsumer::kGraphCapture &&
       requirement.mode == RuntimeStorageMode::kCapture &&
       requirement.backend == Arch::cuda &&
-      owner_kind == StorageOwnerKind::kProgramNdarray &&
       result.dense.execution_mode == StorageExecutionMode::kDirectContiguous &&
       synchronization_domain_identity == 0;
 

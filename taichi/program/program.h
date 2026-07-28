@@ -566,6 +566,9 @@ class TI_DLL_EXPORT Program {
   void retain_runtime_storage_for_graph_submission(
       const storage::RuntimeStorageArgument *const *arguments,
       std::size_t count);
+  storage::ResolvedDenseBinding
+  resolve_runtime_storage_argument_under_graph_guard(
+      const storage::RuntimeStorageArgument &argument);
   void validate_ndarrays_for_external_submission(
       const std::vector<const Ndarray *> &views);
   void validate_ndarrays_for_external_submission(const Ndarray *const *views,
