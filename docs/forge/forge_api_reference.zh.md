@@ -689,8 +689,12 @@ graph.run({"slot": 3})
 
 - `ti.template()` 参数必须按 kernel 参数名提供；未知、缺失或绑定到普通 scalar/matrix
   参数的名称会在构图期抛出 `TaichiCompilationError`；
-- Field 是 definition-time binding。其内容可在不同 `run()` 之间变化，但 Field 不出现在
-  runtime 参数字典中；
+- 闭包引用或通过 `template_args` 绑定的 Field 是 definition-time binding。其内容可在
+  不同 `run()` 之间变化，但该静态 Field 不出现在 runtime 参数字典中；
+- JIT Graph 的 `ArgKind.NDARRAY` runtime slot 接受兼容 `ti.ndarray`、canonical compact
+  dense scalar/vector/matrix Field 或显式 `ti.experimental.ndarray_view()`。Graph 自动生成
+  runtime storage argument；dtype、ndim、element shape 与 layout 不匹配会明确失败，不复制
+  或隐式 staging。AOT Graph 当前仍要求 owning Ndarray；
 - dense Field dependency 以 SNodeTree id + generation 跟踪；销毁被引用 tree 会使 Graph
   失效，之后复用相同数值 id 的新 tree 也不会让旧 Graph 恢复；
 - ndarray/texture 可在 `template_args` 中提供 compile exemplar，但仍须有对应的

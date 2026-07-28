@@ -2,10 +2,10 @@
 
 > 首次公开于 `0.5.0`；版本归属见[版本更新说明](release_notes.zh.md)。
 
-Dense Field Graph 是 Taichi Forge `0.5.x` 的能力，用于编译和 replay 闭包引用
-dense `ti.field`、vector Field 与 matrix Field 的 kernel。Field binding 保持静态，
-Field 内容可在不同 run 之间变化；CPU、CUDA 和 Vulkan 使用同一套公开
-`ti.graph.GraphBuilder` API。
+Dense Field Graph 是 Taichi Forge `0.5.x` 的能力，用于编译和 replay 闭包引用或通过
+runtime 参数接收 dense `ti.field`、vector Field 与 matrix Field 的 kernel。静态 Field
+binding 与 runtime dense-storage binding 使用同一套公开 `ti.graph.GraphBuilder` API，
+且都不复制 Field payload。
 
 本文是 Dense Field Graph 支持范围、生命周期、并发、自动微分、性能和平台状态的公开
 事实源。通用 Graph 架构仍见
@@ -34,8 +34,34 @@ graph.run({})
 graph.run({})
 ```
 
-这里的空字典是有意设计：不新增 `ArgKind.FIELD`。scalar、ndarray、matrix 等 runtime
-参数仍按普通 graph argument 处理，传入的 key 集必须与声明严格一致。
+这里的空字典是有意设计：闭包或 `template_args` Field 是静态 dependency，不需要
+`ArgKind.FIELD`。
+
+需要在不同 invocation 之间替换兼容 Field 时，使用已有的 `ArgKind.NDARRAY` symbolic
+ABI。Graph 会自动把 canonical compact dense Field 规范化为 runtime storage argument：
+
+```python
+@ti.kernel
+def advance_runtime(
+    state: ti.types.ndarray(dtype=ti.f32, ndim=1),
+):
+    for i in state:
+        state[i] = state[i] * 0.99 + 0.01
+
+state_arg = ti.graph.Arg(
+    ti.graph.ArgKind.NDARRAY, "state", ti.f32, ndim=1
+)
+builder = ti.graph.GraphBuilder()
+builder.dispatch(advance_runtime, state_arg)
+graph = builder.compile()
+
+graph.run({"state": state})
+```
+
+同一 runtime slot 也接受兼容的 `ti.ndarray` 或显式
+`ti.experimental.ndarray_view(field)`。dtype、logical ndim 与 vector/matrix element
+shape 必须与 symbolic argument 精确一致；不支持的 sparse、padded 或非唯一 layout
+会明确失败，不创建 shadow ndarray，也不执行隐式 staging。
 
 data-oriented kernel 可在构图期固定 `self` 或其他 `ti.template()` 参数：
 
@@ -60,24 +86,31 @@ graph.run({"dt": 1.0e-3})
 | 放置 | 同节点 AOS-style 与分离节点 SOA-style placement |
 | 所有权 | 一张 Graph 可引用一个或多个 SNodeTree |
 | 组合 | Field-only、混合 runtime 参数、混合 Forge-native segment |
+| runtime 参数 | 仅 canonical compact、unique、full-Field 的 ndarray-ABI mapping |
 
 pointer、bitmasked、dynamic、hash、activation-list 等稀疏拓扑不属于本合同。稀疏
 支持具有独立的后端和生命周期要求，不会被静默当作 dense 处理。
 
-## 静态 binding 与生命周期
+## Binding 与生命周期
 
-Field payload 可变，但 binding 是静态的：
+闭包引用或通过 	emplate_args 绑定的 Field payload 可变，但 binding 是静态的：
 
 | 不同 run 之间可变 | 必须重建 Graph |
 | --- | --- |
-| Field 数值 | Field identity |
-| runtime scalar/matrix 数值 | SNodeTree generation |
+| Field 数值 | 静态/闭包 Field identity |
+| 兼容 runtime dense Field 的 identity 与内容 | 静态 dependency 的 SNodeTree generation |
+| runtime scalar/matrix 数值 | symbolic dtype、rank、element shape 或不兼容 layout |
 | runtime ndarray 内容与兼容 resource binding | shape、dtype、element shape 或 layout |
 | slot-owned snapshot 内容 | `ti.reset()` 后的新 runtime |
 
 Forge 将每个被引用的 SNodeTree 记录为 id+generation dependency。销毁其中任一 tree
 都会使 compiled Graph stale；复用相同数值 tree id 也不能把旧 Graph 重定向到新
-allocation。替换 Field 或其 layout 后必须重建 Graph。
+allocation。替换静态 Field 或其 layout 后必须重建 Graph。
+
+runtime dense Field 不进入 Graph 的静态 dependency 集。每次提交都会校验 descriptor 的
+Program domain、SNodeTree id+generation、layout fingerprint、dtype、rank、element shape
+与 byte range。销毁其 tree 后继续传入旧 Field 会在 enqueue 前失败；新的兼容 Field 可绑定
+到同一个 symbolic slot，无需重建 Graph。`ti.reset()` 后 Graph 与 view 仍整体失效。
 
 SNodeTree 销毁对已登记 Graph 和 runtime object 使用事务式处理。若 retirement prepare
 失败，已经 prepare 的对象会回滚，native tree 保持存活。native 销毁成功后，即使后续
@@ -93,11 +126,13 @@ high-water mark 或 driver-retained memory。
 | 后端 | Dense Field Graph 路径 | 重要边界 |
 | --- | --- | --- |
 | CPU | cached compiled dispatch plan | 保持 Graph 语义，但不是 device-graph capture |
-| CUDA | 条件满足时使用 Driver API capture 与 executable replay | 零 runtime 参数 Field Graph 可 exact replay；binding 变化时 patch、recapture 或 ordinary fallback |
+| CUDA | 条件满足时使用 Driver API capture 与 executable replay | 零 runtime 参数的静态 Field Graph 可 exact replay；runtime dense Field 参数当前使用 ordinary dispatch，capture/patch 资格属于后续合同 |
 | Vulkan | runtime-owned command record 与 replay | 使用有界八 slot 在途策略；饱和时可 ordinary dispatch，不扩张持久 driver resource |
 
 优化路径可以回退到 ordinary dispatch，但不得改变 binding、dispatch order 或结果。
-使用 `Graph.execution_stats()` 可在不增加 `ti.sync()` 的情况下检查真实路径。
+使用 `Graph.execution_stats()` 可在不增加 `ti.sync()` 的情况下检查真实路径。runtime dense
+Field 参数属于 runtime-bound JIT Graph 合同；AOT Graph 当前仍要求 owning Ndarray，不接受
+借用的 dense storage argument。
 
 ## 异步仿真与渲染
 

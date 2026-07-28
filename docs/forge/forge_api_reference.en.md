@@ -778,8 +778,15 @@ Contract:
 - Every `ti.template()` parameter must be provided by kernel argument name.
   Unknown, missing, or ordinary scalar/matrix names raise
   `TaichiCompilationError` while the graph is built.
-- A Field is a definition-time binding. Its contents may change between runs,
-  but the Field does not appear in the runtime argument dictionary.
+- A Field closed over by a kernel or bound through `template_args` is a
+  definition-time binding. Its contents may change between runs, but that
+  static Field does not appear in the runtime argument dictionary.
+- A JIT Graph `ArgKind.NDARRAY` runtime slot accepts a compatible `ti.ndarray`,
+  canonical compact dense scalar/vector/matrix Field, or explicit
+  `ti.experimental.ndarray_view()`. Graph creates the runtime storage argument
+  automatically. Dtype, ndim, element-shape, or layout mismatches fail
+  explicitly without copying or implicit staging. AOT Graph currently still
+  requires an owning Ndarray.
 - Dense Field dependencies are tracked by SNodeTree id and generation.
   Destroying a referenced tree invalidates the Graph; a later tree that reuses
   the numeric id does not revive it.

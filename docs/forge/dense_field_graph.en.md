@@ -3,10 +3,10 @@
 > First available in `0.5.0`; see [release notes](release_notes.en.md).
 
 Dense Field Graph is a Taichi Forge `0.5.x` capability for compiling and
-replaying kernels that close over dense `ti.field`, vector fields, and matrix
-fields. It keeps Field binding static while allowing Field contents to change
-between runs. The same public `ti.graph.GraphBuilder` API is used on CPU, CUDA,
-and Vulkan.
+replaying kernels that either close over or receive dense `ti.field`, vector
+fields, and matrix fields as runtime arguments. Static Field bindings and
+runtime dense-storage bindings use the same public `ti.graph.GraphBuilder` API
+and neither copies the Field payload.
 
 This document is the public source of truth for Dense Field Graph support,
 lifetime, concurrency, automatic differentiation, performance, and platform
@@ -36,9 +36,37 @@ graph.run({})
 graph.run({})
 ```
 
-The empty dictionary is intentional: no `ArgKind.FIELD` is added. Runtime
-arguments such as scalars, ndarrays, and matrices remain ordinary graph
-arguments and must still match the declared key set exactly.
+The empty dictionary is intentional: a closed-over Field or a Field supplied
+through `template_args` is a static dependency and does not need
+`ArgKind.FIELD`.
+
+Use the existing `ArgKind.NDARRAY` symbolic ABI when compatible Fields must be
+replaceable between invocations. Graph automatically normalizes a canonical
+compact dense Field into a runtime storage argument:
+
+```python
+@ti.kernel
+def advance_runtime(
+    state: ti.types.ndarray(dtype=ti.f32, ndim=1),
+):
+    for i in state:
+        state[i] = state[i] * 0.99 + 0.01
+
+state_arg = ti.graph.Arg(
+    ti.graph.ArgKind.NDARRAY, "state", ti.f32, ndim=1
+)
+builder = ti.graph.GraphBuilder()
+builder.dispatch(advance_runtime, state_arg)
+graph = builder.compile()
+
+graph.run({"state": state})
+```
+
+The same runtime slot accepts a compatible `ti.ndarray` or an explicit
+`ti.experimental.ndarray_view(field)`. Dtype, logical ndim, and vector/matrix
+element shape must exactly match the symbolic argument. Unsupported sparse,
+padded, or non-unique layouts fail explicitly without a shadow ndarray or
+implicit staging.
 
 For data-oriented kernels, bind `self` or another `ti.template()` parameter at
 definition time:
@@ -64,26 +92,36 @@ graph.run({"dt": 1.0e-3})
 | Placement | Same-node AOS-style and separate-node SOA-style placement |
 | Ownership | One or multiple SNodeTrees in one Graph |
 | Composition | Field-only, mixed runtime arguments, and mixed Forge-native segments |
+| Runtime argument | Canonical compact, unique, full-Field ndarray-ABI mapping only |
 
 Pointer, bitmasked, dynamic, hash, activation-list, and other sparse topology
 behavior is outside this contract. Sparse support has separate backend and
 lifetime requirements; it is not silently treated as dense.
 
-## Static binding and lifetime
+## Binding and lifetime
 
-The Field payload is mutable, but its binding is static:
+A Field closed over by a kernel or bound through `template_args` has a mutable
+payload but a static binding:
 
 | May change between runs | Requires rebuilding the Graph |
 | --- | --- |
-| Field values | Field identity |
-| Runtime scalar/matrix values | SNodeTree generation |
+| Field values | Static/closed-over Field identity |
+| Compatible runtime dense Field identity and contents | SNodeTree generation of a static dependency |
+| Runtime scalar/matrix values | Symbolic dtype, rank, element shape, or an incompatible layout |
 | Runtime ndarray contents and compatible resource bindings | Shape, dtype, element shape, or layout |
 | Slot-owned snapshot contents | Owning runtime after `ti.reset()` |
 
 Forge records every referenced SNodeTree as an id-plus-generation dependency.
 Destroying one of those trees makes the compiled Graph stale. Reusing the same
 numeric tree id cannot redirect an old Graph to a new allocation. Rebuild the
-Graph after replacing a Field or its layout.
+Graph after replacing a static Field or its layout.
+
+A runtime dense Field is not added to the Graph's static dependency set. Every
+submission validates the descriptor's Program domain, SNodeTree id and
+generation, layout fingerprint, dtype, rank, element shape, and byte range.
+Passing the old Field after destroying its tree fails before enqueue; a new
+compatible Field can bind to the same symbolic slot without rebuilding the
+Graph. `ti.reset()` still invalidates the Graph and all views as a unit.
 
 SNodeTree destruction is transactional with respect to registered Graph and
 runtime objects. If retirement preparation fails, objects already prepared are
@@ -102,12 +140,14 @@ memory.
 | Backend | Dense Field Graph path | Important boundary |
 | --- | --- | --- |
 | CPU | Cached compiled dispatch plan | Preserves Graph semantics; it is not device-graph capture |
-| CUDA | Driver-API capture and executable replay when eligible | Zero-runtime-argument Field Graphs can use exact replay; binding changes require patch, recapture, or ordinary fallback |
+| CUDA | Driver-API capture and executable replay when eligible | Static zero-runtime-argument Field Graphs can use exact replay; runtime dense Field arguments currently use ordinary dispatch, while capture/patch qualification remains a later contract |
 | Vulkan | Runtime-owned command recording and replay | Uses the bounded eight-slot in-flight policy; saturation may use ordinary dispatch instead of growing persistent driver resources |
 
 An optimized path may fall back to ordinary dispatch, but it may not change
 bindings, dispatch order, or results. Use `Graph.execution_stats()` to inspect
-the actual path without adding a `ti.sync()`.
+the actual path without adding a `ti.sync()`. Runtime dense Field arguments are
+a runtime-bound JIT Graph contract; AOT Graph currently still requires an
+owning Ndarray and does not accept borrowed dense storage arguments.
 
 ## Asynchronous simulation and rendering
 

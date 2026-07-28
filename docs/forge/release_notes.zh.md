@@ -43,6 +43,12 @@
   contiguous Ndarray 与 canonical root-dense field 严格 zero-copy 地绑定到现有
   `ti.types.ndarray(...)` kernel ABI。不支持的 layout 不会 staging；stale owner 在
   enqueue 前失败，GPU submission 会把 runtime resource 保留到执行完成。
+- JIT Graph 的 `ArgKind.NDARRAY` runtime 参数现在自动接受 canonical compact dense
+  scalar、vector、matrix Field 与显式 `DenseNdarrayView`。Graph 通过通用 runtime-storage
+  协议规范化输入，每次提交校验 dtype/rank/element shape 与 owner generation，并直接绑定
+  既有 allocation，不创建 shadow ndarray，也不执行隐式 staging。CPU 使用 cached ordinary
+  dispatch plan，Vulkan 支持 command replay；CUDA 对借用的 runtime Field binding 保持
+  ordinary Graph 执行，capture 仍仅覆盖合格的 owning Ndarray 或零 runtime 参数 Graph。
 - `ti.linalg.experimental.LinearOperator.apply()` 与单系统
   `SolvePlan.solve()` 现在直接接受受支持的 1D/2D/3D root-dense scalar、Vector 和
   Matrix field。当 provider 声明支持 dense-storage operand 时，overwrite

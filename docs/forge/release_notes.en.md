@@ -47,6 +47,15 @@ grouped under the behavior they shipped.
   existing `ti.types.ndarray(...)` kernel ABI on CPU, CUDA, and Vulkan.
   Unsupported layouts fail without staging; stale owners are rejected before
   enqueue, and GPU submissions retain the runtime resource through completion.
+- JIT Graph `ArgKind.NDARRAY` runtime arguments now accept canonical compact
+  dense scalar, vector, and matrix Fields, as well as explicit
+  `DenseNdarrayView` objects. Graph normalizes these values through the common
+  runtime-storage protocol, validates dtype/rank/element shape and owner
+  generation on each submission, and binds the existing allocation without a
+  shadow ndarray or implicit staging. CPU uses its cached ordinary dispatch
+  plan and Vulkan supports command replay. CUDA preserves ordinary Graph
+  execution for borrowed runtime Field bindings; CUDA capture remains limited
+  to qualified owning Ndarray or zero-runtime-argument Graphs.
 - `ti.linalg.experimental.LinearOperator.apply()` and single-system
   `SolvePlan.solve()` now accept supported 1D/2D/3D root-dense scalar, Vector,
   and Matrix fields. Overwrite `LinearOperator.apply()` binds canonical compact
