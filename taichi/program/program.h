@@ -63,6 +63,7 @@ class Program;
 namespace storage {
 class DenseStorageDescriptor;
 struct ResolvedDenseBinding;
+struct StorageOwnerRef;
 }  // namespace storage
 namespace runtime_completion_detail {
 Program *&active_runtime_submission_program() noexcept;
@@ -644,6 +645,23 @@ class TI_DLL_EXPORT Program {
   debug_dense_field_staging_stats();
   std::unordered_map<std::string, std::uint64_t>
   debug_dense_storage_binding_stats() const;
+
+  using ExternalDenseStorageRelease = std::function<void()>;
+  // Registers a range that is already addressable by this Program's compute
+  // Device. This is a lifecycle/binding primitive, not an OS-handle or raw
+  // CUDA/Vulkan memory importer. On success, release is invoked exactly once
+  // after retirement/finalization and all submission leases have drained. It
+  // may run on a completion or teardown thread and should be nonblocking.
+  // Failed registration does not transfer ownership or invoke release.
+  storage::StorageOwnerRef register_external_dense_storage(
+      DeviceAllocation allocation,
+      std::uint64_t allocation_bytes,
+      ExternalDenseStorageRelease release = {});
+  void retire_external_dense_storage(const storage::StorageOwnerRef &owner);
+  bool validate_external_dense_storage_owner(
+      const storage::StorageOwnerRef &owner) noexcept;
+  std::unordered_map<std::string, std::uint64_t>
+  debug_external_dense_storage_stats() const;
 
   using DenseStorageBindingCallback = std::function<void(
       const storage::ResolvedDenseBinding *, std::size_t)>;
@@ -3138,16 +3156,86 @@ class TI_DLL_EXPORT Program {
   using TextureInflightLeaseMap =
       std::unordered_map<std::uint64_t, TextureResourceLease>;
 
+  class ExternalDenseStorageResource {
+   public:
+    ExternalDenseStorageResource(DeviceAllocation allocation,
+                                 std::uint64_t allocation_bytes,
+                                 ExternalDenseStorageRelease release)
+        : allocation(allocation),
+          allocation_bytes(allocation_bytes),
+          release_(std::move(release)) {
+    }
+    ExternalDenseStorageResource(const ExternalDenseStorageResource &) = delete;
+    ExternalDenseStorageResource &operator=(
+        const ExternalDenseStorageResource &) = delete;
+    ~ExternalDenseStorageResource() noexcept = default;
+
+    void finalize();
+
+    DeviceAllocation allocation{kDeviceNullAllocation};
+    std::uint64_t allocation_bytes{0};
+
+   private:
+    ExternalDenseStorageRelease release_;
+    bool finalized_{false};
+  };
+
+  struct ExternalDenseStorageFinalizer {
+    void operator()(ExternalDenseStorageResource &resource) const {
+      resource.finalize();
+    }
+  };
+
+  using ExternalDenseStorageRegistry =
+      RuntimeResourceRegistry<ExternalDenseStorageResource,
+                              ExternalDenseStorageFinalizer>;
+  using ExternalDenseStorageHandle = ExternalDenseStorageRegistry::Handle;
+  using ExternalDenseStorageLease = ExternalDenseStorageRegistry::Lease;
+  static constexpr ExternalDenseStorageRegistry::Kind
+      kExternalDenseStorageResourceKind = 5;
+  static constexpr std::size_t kInlineExternalDenseStorageLaunchLeases = 8;
+
+  class ExternalDenseStorageLaunchLeases {
+   public:
+    ExternalDenseStorageLaunchLeases() = default;
+    ExternalDenseStorageLaunchLeases(const ExternalDenseStorageLaunchLeases &) =
+        delete;
+    ExternalDenseStorageLaunchLeases &operator=(
+        const ExternalDenseStorageLaunchLeases &) = delete;
+    ExternalDenseStorageLaunchLeases(
+        ExternalDenseStorageLaunchLeases &&) noexcept = default;
+    ExternalDenseStorageLaunchLeases &operator=(
+        ExternalDenseStorageLaunchLeases &&) noexcept = default;
+
+   private:
+    friend class Program;
+    ExternalDenseStorageResource *find(
+        ExternalDenseStorageHandle handle) const noexcept;
+    bool empty() const noexcept;
+    void add(ExternalDenseStorageLease lease);
+
+    std::array<std::optional<ExternalDenseStorageLease>,
+               kInlineExternalDenseStorageLaunchLeases>
+        inline_leases_;
+    std::size_t inline_count_{0};
+    std::vector<ExternalDenseStorageLease> overflow_leases_;
+  };
+
+  using ExternalDenseStorageInflightLeaseMap =
+      std::unordered_map<std::uint64_t, ExternalDenseStorageLease>;
+
   struct RuntimeCompletionResourceBatch final
       : public RuntimeCompletionResources {
     ArgPackInflightLeaseMap argpacks;
     NdarrayInflightLeaseMap ndarrays;
     TextureInflightLeaseMap textures;
+    ExternalDenseStorageInflightLeaseMap external_dense_storage;
 
     std::size_t retained_resource_count(
         std::uint32_t kind) const noexcept override;
     bool empty() const noexcept {
-      return argpacks.empty() && ndarrays.empty() && textures.empty();
+      return argpacks.empty() && ndarrays.empty() && textures.empty() &&
+             external_dense_storage.empty();
     }
   };
 
@@ -3176,10 +3264,12 @@ class TI_DLL_EXPORT Program {
       LaunchContextBuilder &ctx);
   void resolve_dense_storage_launch_context(
       LaunchContextBuilder &ctx,
-      NdarrayLaunchLeases &ndarray_leases);
+      NdarrayLaunchLeases &ndarray_leases,
+      ExternalDenseStorageLaunchLeases &external_leases);
   storage::ResolvedDenseBinding resolve_dense_storage_descriptor(
       const storage::DenseStorageDescriptor &descriptor,
-      NdarrayLaunchLeases &ndarray_leases);
+      NdarrayLaunchLeases &ndarray_leases,
+      ExternalDenseStorageLaunchLeases &external_leases);
   NdarrayLaunchLeases acquire_ndarray_leases(
       std::initializer_list<const Ndarray *> views);
   NdarrayLaunchLeases acquire_ndarray_leases(
@@ -3205,6 +3295,14 @@ class TI_DLL_EXPORT Program {
   void release_completed_texture_leases();
   void close_texture_resources();
   static std::uint64_t texture_lease_key(TextureResourceHandle handle);
+  void pin_external_dense_storage_launch_leases(
+      ExternalDenseStorageLaunchLeases &leases);
+  void release_completed_external_dense_storage_leases();
+  void close_external_dense_storage_resources();
+  static std::uint64_t external_dense_storage_lease_key(
+      ExternalDenseStorageHandle handle);
+  ExternalDenseStorageHandle external_dense_storage_handle(
+      const storage::StorageOwnerRef &owner) const noexcept;
   DenseFieldHostCopyStagingResource &dense_field_staging_resource();
   void close_dense_field_staging_resource();
   std::shared_ptr<RuntimeCompletionResourceBatch>
@@ -3281,6 +3379,7 @@ class TI_DLL_EXPORT Program {
   std::atomic<std::uint64_t> dense_storage_resolved_bytes_{0};
   std::atomic<std::uint64_t> dense_storage_ndarray_bindings_{0};
   std::atomic<std::uint64_t> dense_storage_field_bindings_{0};
+  std::atomic<std::uint64_t> dense_storage_external_bindings_{0};
   float64 total_compilation_time_{0.0};
   static std::atomic<int> num_instances_;
   bool finalized_{false};
@@ -3309,6 +3408,10 @@ class TI_DLL_EXPORT Program {
   // captured handle.
   std::vector<TextureResourceSlotView> texture_view_slots_;
   TextureInflightLeaseMap texture_inflight_leases_;
+  ExternalDenseStorageRegistry external_dense_storage_resources_;
+  mutable std::mutex external_dense_storage_lifecycle_mutex_;
+  bool external_dense_storage_resources_open_{true};
+  ExternalDenseStorageInflightLeaseMap external_dense_storage_inflight_leases_;
 };
 
 TI_FORCE_INLINE Program::RuntimeSubmissionScope::RuntimeSubmissionScope(

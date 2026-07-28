@@ -4576,7 +4576,9 @@ Program::Program(Arch desired_arch)
       dense_field_staging_resources_(allocate_runtime_resource_domain()),
       argpack_resources_(allocate_runtime_resource_domain()),
       ndarray_resources_(allocate_runtime_resource_domain()),
-      texture_resources_(allocate_runtime_resource_domain()) {
+      texture_resources_(allocate_runtime_resource_domain()),
+      external_dense_storage_resources_(
+          allocate_runtime_resource_domain()) {
   TI_TRACE("Program initializing...");
 
   auto [staging_result, staging_handle] =
@@ -5189,8 +5191,10 @@ void Program::launch_kernel_impl(
       resolve_ndarray_launch_context(ctx);
     }
   }
+  ExternalDenseStorageLaunchLeases external_dense_storage_leases;
   if (!ctx.dense_storage_ptrs.empty()) {
-    resolve_dense_storage_launch_context(ctx, ndarray_leases);
+    resolve_dense_storage_launch_context(ctx, ndarray_leases,
+                                         external_dense_storage_leases);
   }
   TextureLaunchLeases texture_leases;
   if (!ctx.texture_ptrs.empty()) {
@@ -5217,6 +5221,10 @@ void Program::launch_kernel_impl(
       if (!texture_leases.empty()) {
         pin_texture_launch_leases(texture_leases);
       }
+      if (!external_dense_storage_leases.empty()) {
+        pin_external_dense_storage_launch_leases(
+            external_dense_storage_leases);
+      }
     } catch (...) {
       // Submission already happened. If metadata allocation fails, complete
       // the backend work before allowing the stack leases to unwind.
@@ -5224,6 +5232,7 @@ void Program::launch_kernel_impl(
       release_completed_argpack_leases();
       release_completed_ndarray_leases();
       release_completed_texture_leases();
+      release_completed_external_dense_storage_leases();
       throw;
     }
   };
@@ -5506,6 +5515,17 @@ void Program::debug_reset_sparse_listgen_statistics() {
   program_impl_->get_kernel_launcher().debug_reset_sparse_listgen_statistics();
 }
 
+void Program::ExternalDenseStorageResource::finalize() {
+  if (finalized_) {
+    return;
+  }
+  finalized_ = true;
+  auto release = std::move(release_);
+  if (release) {
+    release();
+  }
+}
+
 SNode *Program::get_snode_root(int tree_id) {
   std::shared_lock<std::shared_mutex> lifecycle_lock(
       snode_tree_lifecycle_mutex_);
@@ -5613,6 +5633,35 @@ void Program::TextureLaunchLeases::add(TextureResourceLease lease) {
   overflow_leases_.push_back(std::move(lease));
 }
 
+Program::ExternalDenseStorageResource *
+Program::ExternalDenseStorageLaunchLeases::find(
+    ExternalDenseStorageHandle handle) const noexcept {
+  for (std::size_t i = 0; i < inline_count_; ++i) {
+    if (inline_leases_[i]->handle() == handle) {
+      return inline_leases_[i]->get();
+    }
+  }
+  for (const auto &lease : overflow_leases_) {
+    if (lease.handle() == handle) {
+      return lease.get();
+    }
+  }
+  return nullptr;
+}
+
+bool Program::ExternalDenseStorageLaunchLeases::empty() const noexcept {
+  return inline_count_ == 0 && overflow_leases_.empty();
+}
+
+void Program::ExternalDenseStorageLaunchLeases::add(
+    ExternalDenseStorageLease lease) {
+  if (inline_count_ < inline_leases_.size()) {
+    inline_leases_[inline_count_++].emplace(std::move(lease));
+    return;
+  }
+  overflow_leases_.push_back(std::move(lease));
+}
+
 std::uint64_t Program::argpack_lease_key(ArgPackResourceHandle handle) {
   return (static_cast<std::uint64_t>(handle.generation) << 32u) |
          static_cast<std::uint64_t>(handle.index);
@@ -5626,6 +5675,24 @@ std::uint64_t Program::ndarray_lease_key(NdarrayResourceHandle handle) {
 std::uint64_t Program::texture_lease_key(TextureResourceHandle handle) {
   return (static_cast<std::uint64_t>(handle.generation) << 32u) |
          static_cast<std::uint64_t>(handle.index);
+}
+
+std::uint64_t Program::external_dense_storage_lease_key(
+    ExternalDenseStorageHandle handle) {
+  return (static_cast<std::uint64_t>(handle.generation) << 32u) |
+         static_cast<std::uint64_t>(handle.index);
+}
+
+Program::ExternalDenseStorageHandle Program::external_dense_storage_handle(
+    const storage::StorageOwnerRef &owner) const noexcept {
+  if (owner.kind != storage::StorageOwnerKind::kExternalManaged ||
+      owner.external_owner_domain !=
+          external_dense_storage_resources_.domain()) {
+    return {};
+  }
+  return ExternalDenseStorageHandle{
+      owner.external_owner_domain, kExternalDenseStorageResourceKind,
+      owner.external_slot, owner.external_generation};
 }
 
 RuntimeResourceHandle Program::capture_argpack_resource_handle(
@@ -6055,7 +6122,8 @@ Program::NdarrayLaunchLeases Program::acquire_ndarray_launch_leases(
 
 storage::ResolvedDenseBinding Program::resolve_dense_storage_descriptor(
     const storage::DenseStorageDescriptor &descriptor,
-    NdarrayLaunchLeases &ndarray_leases) {
+    NdarrayLaunchLeases &ndarray_leases,
+    ExternalDenseStorageLaunchLeases &external_leases) {
   TI_ERROR_IF(!ndarray_resources_open_,
               "Cannot resolve dense storage after Program finalize");
 
@@ -6079,8 +6147,14 @@ storage::ResolvedDenseBinding Program::resolve_dense_storage_descriptor(
 
   const auto &owner = descriptor.owner();
   const auto &properties = descriptor.properties();
-  TI_ERROR_IF(owner.program_domain != runtime_program_generation(),
-              "Dense storage binding belongs to another Program generation");
+  if (owner.kind == storage::StorageOwnerKind::kExternalManaged) {
+    TI_ERROR_IF(owner.external_owner_domain !=
+                    external_dense_storage_resources_.domain(),
+                "External dense storage belongs to another Program");
+  } else {
+    TI_ERROR_IF(owner.program_domain != runtime_program_generation(),
+                "Dense storage binding belongs to another Program generation");
+  }
   TI_ERROR_IF(!properties.ndarray_abi_compatible ||
                   properties.uniqueness !=
                       storage::StorageMappingUniqueness::kProvenUnique ||
@@ -6090,10 +6164,9 @@ storage::ResolvedDenseBinding Program::resolve_dense_storage_descriptor(
               "Dense storage binding is not a compact unique ndarray range");
 
   storage::ResolvedDenseBinding binding;
-  binding.byte_offset =
-      static_cast<std::uint64_t>(properties.reachable_begin);
-  binding.byte_size = static_cast<std::uint64_t>(
-      properties.reachable_end - properties.reachable_begin);
+  binding.byte_offset = static_cast<std::uint64_t>(properties.reachable_begin);
+  binding.byte_size = static_cast<std::uint64_t>(properties.reachable_end -
+                                                 properties.reachable_begin);
 
   if (owner.kind == storage::StorageOwnerKind::kProgramNdarray) {
     const auto handle = owner.ndarray_handle;
@@ -6119,27 +6192,23 @@ storage::ResolvedDenseBinding Program::resolve_dense_storage_descriptor(
     const std::size_t element_size = array->get_element_size();
     const std::size_t element_count = array->get_nelement();
     TI_ERROR_IF(element_size != 0 &&
-                    element_count >
-                        (std::numeric_limits<std::size_t>::max)() /
-                            element_size,
+                    element_count > (std::numeric_limits<std::size_t>::max)() /
+                                        element_size,
                 "Ndarray byte span overflow while resolving storage");
     const std::size_t allocation_bytes = element_size * element_count;
     TI_ERROR_IF(binding.byte_offset > allocation_bytes ||
-                    binding.byte_size >
-                        allocation_bytes - binding.byte_offset,
+                    binding.byte_size > allocation_bytes - binding.byte_offset,
                 "Dense storage range exceeds its Ndarray allocation");
     binding.allocation = array->get_device_allocation();
-    dense_storage_ndarray_bindings_.fetch_add(1,
-                                              std::memory_order_relaxed);
+    dense_storage_ndarray_bindings_.fetch_add(1, std::memory_order_relaxed);
   } else if (owner.kind == storage::StorageOwnerKind::kSNodePayload) {
     const int tree_id = owner.tree.tree_id;
-    TI_ERROR_IF(tree_id < 0 ||
-                    static_cast<std::size_t>(tree_id) >= snode_trees_.size() ||
-                    static_cast<std::size_t>(tree_id) >=
-                        snode_tree_active_.size() ||
-                    !snode_tree_active_[tree_id] ||
-                    snode_trees_[tree_id] == nullptr,
-                "Dense storage binding references a retired SNodeTree");
+    TI_ERROR_IF(
+        tree_id < 0 ||
+            static_cast<std::size_t>(tree_id) >= snode_trees_.size() ||
+            static_cast<std::size_t>(tree_id) >= snode_tree_active_.size() ||
+            !snode_tree_active_[tree_id] || snode_trees_[tree_id] == nullptr,
+        "Dense storage binding references a retired SNodeTree");
     SNodeTree *tree = snode_trees_[tree_id].get();
     TI_ERROR_IF(tree->generation() != owner.tree.generation,
                 "Dense storage binding references a retired SNodeTree "
@@ -6153,10 +6222,38 @@ storage::ResolvedDenseBinding Program::resolve_dense_storage_descriptor(
     TI_ERROR_IF(field_ptr.offset != binding.byte_offset,
                 "Dense storage binding offset no longer matches its SNode "
                 "layout");
-    binding.allocation =
-        DeviceAllocation{field_ptr.device, field_ptr.alloc_id};
-    dense_storage_field_bindings_.fetch_add(1,
-                                            std::memory_order_relaxed);
+    binding.allocation = DeviceAllocation{field_ptr.device, field_ptr.alloc_id};
+    dense_storage_field_bindings_.fetch_add(1, std::memory_order_relaxed);
+  } else if (owner.kind == storage::StorageOwnerKind::kExternalManaged) {
+    const auto handle = external_dense_storage_handle(owner);
+    TI_ERROR_IF(!handle, "External dense storage belongs to another Program");
+    ExternalDenseStorageResource *resource = external_leases.find(handle);
+    if (resource == nullptr) {
+      // An inflight lease keeps retired storage physically alive, but must not
+      // make a retired generation eligible for a new submission. Acquire from
+      // the registry first to validate the current live state, then reuse the
+      // existing ownership only as a launch-time optimization.
+      auto [result, lease] = external_dense_storage_resources_.acquire(handle);
+      TI_ERROR_IF(
+          result != ExternalDenseStorageRegistry::Result::kSuccess || !lease,
+          "External dense storage is stale or retired");
+      const auto inflight = external_dense_storage_inflight_leases_.find(
+          external_dense_storage_lease_key(handle));
+      if (inflight != external_dense_storage_inflight_leases_.end()) {
+        resource = inflight->second.get();
+      } else {
+        external_leases.add(std::move(lease));
+        resource = external_leases.find(handle);
+      }
+    }
+    TI_ERROR_IF(resource == nullptr,
+                "External dense storage lease was not acquired");
+    TI_ERROR_IF(binding.byte_offset > resource->allocation_bytes ||
+                    binding.byte_size >
+                        resource->allocation_bytes - binding.byte_offset,
+                "Dense storage range exceeds its external allocation");
+    binding.allocation = resource->allocation;
+    dense_storage_external_bindings_.fetch_add(1, std::memory_order_relaxed);
   } else {
     TI_ERROR("Dense storage binding does not accept this owner kind");
   }
@@ -6170,7 +6267,8 @@ storage::ResolvedDenseBinding Program::resolve_dense_storage_descriptor(
 
 void Program::resolve_dense_storage_launch_context(
     LaunchContextBuilder &ctx,
-    NdarrayLaunchLeases &ndarray_leases) {
+    NdarrayLaunchLeases &ndarray_leases,
+    ExternalDenseStorageLaunchLeases &external_leases) {
   bool resolved_here = false;
   for (std::size_t i = 0; i < ctx.dense_storage_ptrs.size(); ++i) {
     auto &resource = ctx.dense_storage_ptrs[i];
@@ -6181,12 +6279,11 @@ void Program::resolve_dense_storage_launch_context(
     }
     ctx.set_resolved_dense_storage(
         i, resolve_dense_storage_descriptor(*resource.descriptor,
-                                            ndarray_leases));
+                                            ndarray_leases, external_leases));
     resolved_here = true;
   }
   if (resolved_here) {
-    dense_storage_direct_submissions_.fetch_add(1,
-                                                std::memory_order_relaxed);
+    dense_storage_direct_submissions_.fetch_add(1, std::memory_order_relaxed);
   }
 }
 
@@ -6203,20 +6300,42 @@ void Program::with_resolved_dense_storage_bindings(
   std::lock_guard<std::recursive_mutex> resource_submission_lock(
       runtime_resource_submission_mutex_);
   NdarrayLaunchLeases ndarray_leases;
+  ExternalDenseStorageLaunchLeases external_leases;
   std::vector<storage::ResolvedDenseBinding> bindings;
   bindings.reserve(descriptors.size());
   for (const auto *descriptor : descriptors) {
     TI_ERROR_IF(descriptor == nullptr,
                 "Dense storage submission received a null descriptor");
-    bindings.push_back(
-        resolve_dense_storage_descriptor(*descriptor, ndarray_leases));
+    bindings.push_back(resolve_dense_storage_descriptor(
+        *descriptor, ndarray_leases, external_leases));
   }
-  dense_storage_direct_submissions_.fetch_add(1,
-                                              std::memory_order_relaxed);
-  // The callback is deliberately synchronous. It must complete provider work
-  // before returning so these owner leases and the SNode lifecycle guard do
-  // not escape through a raw address.
-  callback(bindings.data(), bindings.size());
+  dense_storage_direct_submissions_.fetch_add(1, std::memory_order_relaxed);
+  // Resolved allocations are submission-scoped capabilities. The callback
+  // may enqueue backend work, but must not retain a binding after returning.
+  // GPU owner leases are pinned before this transaction unlocks and are then
+  // released by RuntimeCompletion or synchronize/finalize.
+  try {
+    callback(bindings.data(), bindings.size());
+    if (arch_is_gpu(compile_config().arch)) {
+      if (!ndarray_leases.empty()) {
+        pin_ndarray_launch_leases(ndarray_leases);
+      }
+      if (!external_leases.empty()) {
+        pin_external_dense_storage_launch_leases(external_leases);
+      }
+    }
+  } catch (...) {
+    const std::exception_ptr submission_error = std::current_exception();
+    if (arch_is_gpu(compile_config().arch)) {
+      try {
+        program_impl_->synchronize();
+        release_completed_ndarray_leases();
+        release_completed_external_dense_storage_leases();
+      } catch (...) {
+      }
+    }
+    std::rethrow_exception(submission_error);
+  }
 }
 
 intptr_t Program::get_dense_storage_data_ptr_as_int(
@@ -6330,6 +6449,27 @@ void Program::pin_texture_launch_leases(TextureLaunchLeases &leases) {
   }
 }
 
+void Program::pin_external_dense_storage_launch_leases(
+    ExternalDenseStorageLaunchLeases &leases) {
+  std::lock_guard<std::mutex> lock(external_dense_storage_lifecycle_mutex_);
+  auto pin_lease = [&](ExternalDenseStorageLease &lease) {
+    if (!lease) {
+      return;
+    }
+    const auto key = external_dense_storage_lease_key(lease.handle());
+    if (external_dense_storage_inflight_leases_.find(key) ==
+        external_dense_storage_inflight_leases_.end()) {
+      external_dense_storage_inflight_leases_.emplace(key, std::move(lease));
+    }
+  };
+  for (std::size_t i = 0; i < leases.inline_count_; ++i) {
+    pin_lease(*leases.inline_leases_[i]);
+  }
+  for (auto &lease : leases.overflow_leases_) {
+    pin_lease(lease);
+  }
+}
+
 void Program::release_completed_argpack_leases() {
   ArgPackInflightLeaseMap completed;
   {
@@ -6357,6 +6497,15 @@ void Program::release_completed_texture_leases() {
   completed.clear();
 }
 
+void Program::release_completed_external_dense_storage_leases() {
+  ExternalDenseStorageInflightLeaseMap completed;
+  {
+    std::lock_guard<std::mutex> lock(external_dense_storage_lifecycle_mutex_);
+    completed.swap(external_dense_storage_inflight_leases_);
+  }
+  completed.clear();
+}
+
 std::size_t Program::RuntimeCompletionResourceBatch::retained_resource_count(
     std::uint32_t kind) const noexcept {
   if (kind == kArgPackResourceKind) {
@@ -6367,6 +6516,9 @@ std::size_t Program::RuntimeCompletionResourceBatch::retained_resource_count(
   }
   if (kind == kTextureResourceKind) {
     return textures.size();
+  }
+  if (kind == kExternalDenseStorageResourceKind) {
+    return external_dense_storage.size();
   }
   return 0;
 }
@@ -6387,6 +6539,10 @@ Program::detach_runtime_completion_resources() {
     has_resources = !texture_inflight_leases_.empty();
   }
   if (!has_resources) {
+    std::lock_guard<std::mutex> lock(external_dense_storage_lifecycle_mutex_);
+    has_resources = !external_dense_storage_inflight_leases_.empty();
+  }
+  if (!has_resources) {
     return nullptr;
   }
 
@@ -6404,6 +6560,10 @@ Program::detach_runtime_completion_resources() {
   {
     std::lock_guard<std::mutex> lock(texture_lifecycle_mutex_);
     batch->textures.swap(texture_inflight_leases_);
+  }
+  {
+    std::lock_guard<std::mutex> lock(external_dense_storage_lifecycle_mutex_);
+    batch->external_dense_storage.swap(external_dense_storage_inflight_leases_);
   }
   TI_ASSERT(!batch->empty());
   return batch;
@@ -6624,6 +6784,7 @@ RuntimeCompletion Program::record_runtime_completion() {
         release_completed_argpack_leases();
         release_completed_ndarray_leases();
         release_completed_texture_leases();
+        release_completed_external_dense_storage_leases();
       }
       last_runtime_completion_submission_epoch_.store(
           submission_epoch, std::memory_order_release);
@@ -6639,6 +6800,7 @@ RuntimeCompletion Program::record_runtime_completion() {
         release_completed_argpack_leases();
         release_completed_ndarray_leases();
         release_completed_texture_leases();
+        release_completed_external_dense_storage_leases();
         last_runtime_completion_submission_epoch_.store(
             submission_epoch, std::memory_order_release);
         std::rethrow_exception(submission_error);
@@ -6659,6 +6821,7 @@ RuntimeCompletion Program::record_runtime_completion() {
           release_completed_argpack_leases();
           release_completed_ndarray_leases();
           release_completed_texture_leases();
+          release_completed_external_dense_storage_leases();
           last_runtime_completion_submission_epoch_.store(
               submission_epoch, std::memory_order_release);
         }
@@ -6669,6 +6832,7 @@ RuntimeCompletion Program::record_runtime_completion() {
       release_completed_argpack_leases();
       release_completed_ndarray_leases();
       release_completed_texture_leases();
+      release_completed_external_dense_storage_leases();
       last_runtime_completion_submission_epoch_.store(
           submission_epoch, std::memory_order_release);
       throw;
@@ -6930,6 +7094,88 @@ void Program::close_texture_resources() {
   texture_view_slots_.clear();
 }
 
+void Program::close_external_dense_storage_resources() {
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  std::lock_guard<std::mutex> lifecycle_lock(
+      external_dense_storage_lifecycle_mutex_);
+  external_dense_storage_resources_open_ = false;
+}
+
+storage::StorageOwnerRef Program::register_external_dense_storage(
+    DeviceAllocation allocation,
+    std::uint64_t allocation_bytes,
+    ExternalDenseStorageRelease release) {
+  ensure_runtime_submission_allowed("external dense storage registration");
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  std::lock_guard<std::mutex> lifecycle_lock(
+      external_dense_storage_lifecycle_mutex_);
+  TI_ERROR_IF(!external_dense_storage_resources_open_ || finalized_,
+              "Cannot register external dense storage after finalize");
+  TI_ERROR_IF(allocation_bytes != 0 && allocation == kDeviceNullAllocation,
+              "Non-empty external dense storage requires an allocation");
+  TI_ERROR_IF(allocation != kDeviceNullAllocation &&
+                  allocation.device != program_impl_->get_compute_device(),
+              "External dense storage belongs to another compute device");
+  auto [result, handle] = external_dense_storage_resources_.emplace(
+      kExternalDenseStorageResourceKind, allocation, allocation_bytes,
+      std::move(release));
+  TI_ERROR_IF(result != ExternalDenseStorageRegistry::Result::kSuccess,
+              "Unable to register external dense storage resource");
+  return storage::StorageOwnerRef::external_managed(handle.domain, handle.index,
+                                                    handle.generation);
+}
+
+void Program::retire_external_dense_storage(
+    const storage::StorageOwnerRef &owner) {
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  const auto handle = external_dense_storage_handle(owner);
+  TI_ERROR_IF(!handle, "External dense storage belongs to another Program");
+  TI_ERROR_IF(external_dense_storage_resources_.retire(handle) !=
+                  ExternalDenseStorageRegistry::Result::kSuccess,
+              "External dense storage is stale or already retired");
+}
+
+bool Program::validate_external_dense_storage_owner(
+    const storage::StorageOwnerRef &owner) noexcept {
+  try {
+    std::lock_guard<std::recursive_mutex> submission_lock(
+        runtime_resource_submission_mutex_);
+    const auto handle = external_dense_storage_handle(owner);
+    if (!handle) {
+      return false;
+    }
+    auto [result, lease] = external_dense_storage_resources_.acquire(handle);
+    return result == ExternalDenseStorageRegistry::Result::kSuccess &&
+           static_cast<bool>(lease);
+  } catch (...) {
+    return false;
+  }
+}
+
+std::unordered_map<std::string, std::uint64_t>
+Program::debug_external_dense_storage_stats() const {
+  const auto completion_inflight =
+      runtime_completion_resource_count(kExternalDenseStorageResourceKind);
+  std::lock_guard<std::mutex> lifecycle_lock(
+      external_dense_storage_lifecycle_mutex_);
+  const auto stats = external_dense_storage_resources_.stats();
+  return {{"slots", stats.slots},
+          {"live", stats.live},
+          {"retiring", stats.retiring},
+          {"released", stats.released},
+          {"leases", stats.leases},
+          {"created_total", stats.created_total},
+          {"retired_total", stats.retired_total},
+          {"released_total", stats.released_total},
+          {"release_errors", stats.release_errors},
+          {"inflight", external_dense_storage_inflight_leases_.size() +
+                           completion_inflight},
+          {"closed", stats.closed ? 1u : 0u}};
+}
+
 std::unordered_map<std::string, std::uint64_t>
 Program::debug_argpack_resource_stats() const {
   const auto completion_inflight =
@@ -7058,6 +7304,7 @@ void Program::synchronize() {
         release_completed_argpack_leases();
         release_completed_ndarray_leases();
         release_completed_texture_leases();
+        release_completed_external_dense_storage_leases();
       }
       throw;
     }
@@ -7075,6 +7322,7 @@ void Program::synchronize() {
     release_completed_argpack_leases();
     release_completed_ndarray_leases();
     release_completed_texture_leases();
+    release_completed_external_dense_storage_leases();
     last_runtime_completion_submission_epoch_.store(
         submission_epoch, std::memory_order_release);
   }
@@ -7211,6 +7459,7 @@ void Program::finalize() {
     close_argpack_resources();
     close_ndarray_resources();
     close_texture_resources();
+    close_external_dense_storage_resources();
     dense_field_staging_open_ = false;
   });
   TI_TRACE("Program finalizing...");
@@ -7236,6 +7485,7 @@ void Program::finalize() {
       release_completed_argpack_leases();
       release_completed_ndarray_leases();
       release_completed_texture_leases();
+      release_completed_external_dense_storage_leases();
       last_runtime_completion_submission_epoch_.store(
           submission_epoch, std::memory_order_release);
     });
@@ -7251,6 +7501,7 @@ void Program::finalize() {
     release_completed_argpack_leases();
     release_completed_ndarray_leases();
     release_completed_texture_leases();
+    release_completed_external_dense_storage_leases();
   }
   best_effort("clear primitive workspace arena",
               [&] { primitive_workspace_arena_.clear(); });
@@ -7264,6 +7515,10 @@ void Program::finalize() {
               [&] { ndarray_resources_.finalize({kNdarrayResourceKind}); });
   best_effort("finalize Texture resources",
               [&] { texture_resources_.finalize({kTextureResourceKind}); });
+  best_effort("finalize external dense storage", [&] {
+    external_dense_storage_resources_.finalize(
+        {kExternalDenseStorageResourceKind});
+  });
   best_effort("close dense-field staging", [&] {
     std::lock_guard<std::recursive_mutex> submission_lock(
         runtime_resource_submission_mutex_);
@@ -14098,6 +14353,8 @@ Program::debug_dense_storage_binding_stats() const {
        dense_storage_ndarray_bindings_.load(std::memory_order_relaxed)},
       {"field_bindings",
        dense_storage_field_bindings_.load(std::memory_order_relaxed)},
+      {"external_bindings",
+       dense_storage_external_bindings_.load(std::memory_order_relaxed)},
       {"temporary_allocations", 0},
       {"temporary_bytes", 0},
   };

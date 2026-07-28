@@ -1091,6 +1091,11 @@ StorageFailureReason validate_storage_owner(
         return StorageFailureReason::kStaleOwner;
       }
     }
+    if (owner.kind == StorageOwnerKind::kExternalManaged) {
+      return program.validate_external_dense_storage_owner(owner)
+                 ? StorageFailureReason::kNone
+                 : StorageFailureReason::kStaleOwner;
+    }
     return StorageFailureReason::kNone;
   } catch (...) {
     return StorageFailureReason::kStaleOwner;
