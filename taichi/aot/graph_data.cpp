@@ -2,6 +2,7 @@
 #include "taichi/program/program.h"
 #include "taichi/program/runtime_fault.h"
 #include "taichi/program/ndarray.h"
+#include "taichi/program/storage_view.h"
 #include "taichi/program/texture.h"
 #include "taichi/program/kernel.h"
 #include "taichi/program/matrix.h"
@@ -314,6 +315,11 @@ void init_runtime_context_from_plan(
                 arg_plan.name, PrimitiveType::get(arg_plan.dtype_id).to_string(),
                 arr_primitive_dtype.to_string());
 
+    if (ival.runtime_storage != nullptr) {
+      ctx.set_arg_runtime_storage(arg_plan.arg_id, *ival.runtime_storage);
+      continue;
+    }
+
     intptr_t ptr = arr->get_device_allocation_ptr_as_int();
     ctx.array_ptrs[arg_plan.ndarray_data_ptr_key] = (void *)ptr;
     if (ptr != 0) {
@@ -364,6 +370,9 @@ bool try_launch_cached_llvm_kernel(Program *prog,
   if (!launch_ctx.ndarray_ptrs.empty()) {
     prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
   }
+  if (!launch_ctx.dense_storage_ptrs.empty()) {
+    prog->resolve_runtime_storage_launch_context_under_guard(launch_ctx);
+  }
   if (!launch_ctx.texture_ptrs.empty()) {
     prog->resolve_texture_launch_context_under_guard(launch_ctx);
   }
@@ -407,6 +416,7 @@ struct CudaGraphArgSignatureEntry {
   DeviceAllocationId alloc_id{0};
   uint64_t byte_offset{0};
   uint64_t byte_size{0};
+  uint64_t runtime_signature{0};
   PrimitiveTypeID dtype_id{PrimitiveTypeID::unknown};
   ExternalArrayLayout layout{ExternalArrayLayout::kNull};
   std::vector<int> shape;
@@ -416,6 +426,7 @@ struct CudaGraphArgSignatureEntry {
 
   bool operator==(const CudaGraphArgSignatureEntry &other) const {
     return structurally_equals(other) && alloc_id == other.alloc_id &&
+           runtime_signature == other.runtime_signature &&
            value == other.value && value_bytes == other.value_bytes;
   }
 
@@ -874,6 +885,13 @@ make_cuda_graph_signature(const CompiledGraph &graph,
 
     if (kv.second.tag == ArgKind::kNdarray) {
       auto *arr = reinterpret_cast<Ndarray *>(kv.second.val);
+      if (kv.second.runtime_storage != nullptr) {
+        const auto &qualification = kv.second.runtime_storage->qualification();
+        if (!qualification.capabilities.capturable) {
+          return std::nullopt;
+        }
+        entry.runtime_signature = kv.second.runtime_storage->stable_signature();
+      }
       DeviceAllocation allocation = arr->get_device_allocation();
       auto *device = dynamic_cast<cuda::CudaDevice *>(allocation.device);
       if (device == nullptr) {
@@ -980,6 +998,7 @@ bool patch_cuda_graph_arguments(
     LaunchContextBuilder launch_ctx(dispatch.ti_kernel);
     graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
     prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
+    prog->resolve_runtime_storage_launch_context_under_guard(launch_ctx);
     prog->resolve_texture_launch_context_under_guard(launch_ctx);
     host_arg_buffers.emplace_back();
     if (!launcher->update_cuda_graph_launch(
@@ -1186,6 +1205,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
     LaunchContextBuilder launch_ctx(dispatch.ti_kernel);
     graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
     prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
+    prog->resolve_runtime_storage_launch_context_under_guard(launch_ctx);
     prog->resolve_texture_launch_context_under_guard(launch_ctx);
     CudaGraphCapturePacket capture_packet(capture_stream);
     capture_packet.launcher = launcher;
@@ -1374,6 +1394,8 @@ bool try_run_vulkan_graph(const CompiledGraph &graph,
     graph.init_runtime_context(dispatch.symbolic_args, args,
                                *launch_contexts.back());
     prog->resolve_ndarray_launch_context_under_guard(*launch_contexts.back());
+    prog->resolve_runtime_storage_launch_context_under_guard(
+        *launch_contexts.back());
     prog->resolve_texture_launch_context_under_guard(*launch_contexts.back());
     gfx_dispatches.push_back({handle, launch_contexts.back().get()});
   }
@@ -1836,7 +1858,11 @@ void CompiledGraph::init_runtime_context(
                   "dtype={} but got an ndarray with dtype={}",
                   symbolic_arg.name, symbolic_arg_primitive_dtype.to_string(),
                   arr_primitive_dtype.to_string());
-      ctx.set_arg_ndarray(arg_id, *arr);
+      if (ival.runtime_storage != nullptr) {
+        ctx.set_arg_runtime_storage(arg_id, *ival.runtime_storage);
+      } else {
+        ctx.set_arg_ndarray(arg_id, *arr);
+      }
     } else if (symbolic_arg.tag == aot::ArgKind::kScalar) {
       TI_ASSERT(ival.tag == aot::ArgKind::kScalar);
       // Matrix args are flattened so they're same as scalars.

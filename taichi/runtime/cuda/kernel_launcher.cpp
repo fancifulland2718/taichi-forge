@@ -205,6 +205,13 @@ bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
         }
         ctx.set_ndarray_ptrs(key, reinterpret_cast<uint64>(data_device_ptr),
                              reinterpret_cast<uint64>(grad_device_ptr));
+      } else if (ctx.device_allocation_type[key] ==
+                 LaunchContextBuilder::DevAllocType::kDenseStorage) {
+        const auto &binding = ctx.get_resolved_dense_storage(key);
+        auto *base = reinterpret_cast<char *>(
+            executor->get_device_alloc_info_ptr(binding.allocation));
+        ctx.set_ndarray_ptrs(
+            key, reinterpret_cast<uint64>(base + binding.byte_offset), 0);
       } else {
         return false;
       }

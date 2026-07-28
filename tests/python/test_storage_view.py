@@ -1,5 +1,6 @@
 from dataclasses import replace
 
+import numpy as np
 import pytest
 
 import taichi_forge as ti
@@ -270,6 +271,13 @@ def test_ndarray_view_binds_field_and_ndarray_without_temporary_storage():
     binding_before = program._debug_dense_storage_binding_stats()
     field_view = ti.experimental.ndarray_view(field)
     array_view = ti.experimental.ndarray_view(array)
+    for view in (field_view, array_view):
+        qualification = view.runtime_argument.qualification
+        assert qualification["describable"]
+        assert qualification["bindable"]
+        assert qualification["zero_copy_qualified"]
+        assert qualification["reason"] == "kNone"
+        assert view.runtime_argument.stable_signature != 0
     after_describe = program._debug_ndarray_resource_stats()
     assert after_describe["live"] == before["live"]
     assert after_describe["created_total"] == before["created_total"]
@@ -289,6 +297,61 @@ def test_ndarray_view_binds_field_and_ndarray_without_temporary_storage():
     assert binding_after["ndarray_bindings"] == binding_before["ndarray_bindings"] + 1
     assert binding_after["temporary_allocations"] == 0
     assert binding_after["temporary_bytes"] == 0
+
+
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    exclude=[(ti.vulkan, "Darwin")],
+    offline_cache=False,
+)
+def test_graph_ndarray_prepares_runtime_storage_without_temporary_allocations():
+    @ti.kernel
+    def increment(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in values:
+            values[i] += i + 1
+
+    values = ti.ndarray(ti.i32, shape=32)
+    values.fill(0)
+    symbolic = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(increment, symbolic)
+    builder.dispatch(increment, symbolic)
+    graph = builder.compile()
+    graph.execution_stats()
+
+    program = impl.get_runtime().prog
+    before = program._debug_dense_storage_binding_stats()
+    resources_before = program._debug_ndarray_resource_stats()
+    graph.run({"values": values})
+    graph.run({"values": values})
+    ti.sync()
+
+    np.testing.assert_array_equal(
+        values.to_numpy(), (np.arange(32, dtype=np.int32) + 1) * 4
+    )
+    after = program._debug_dense_storage_binding_stats()
+    resources_after = program._debug_ndarray_resource_stats()
+    assert after["resolved_bindings"] >= before["resolved_bindings"] + 2
+    assert after["ndarray_bindings"] >= before["ndarray_bindings"] + 2
+    assert after["temporary_allocations"] == 0
+    assert after["temporary_bytes"] == 0
+    assert resources_after["created_total"] == resources_before["created_total"]
+    assert resources_after["live"] <= resources_before["live"]
+
+    arch = impl.current_cfg().arch
+    if arch == ti.cuda:
+        stats = graph._graph_stats[0]
+        assert stats["captures"] == 1
+        assert stats["exact_replays"] == 1
+        assert stats["ordinary_fallbacks"] == 0
+        assert stats["last_path"] == "cuda_exact_replay"
+    elif arch == ti.vulkan:
+        stats = graph._graph_stats[0]
+        assert stats["records"] == 2
+        assert stats["ordinary_fallbacks"] == 0
+        assert stats["last_path"] == "vulkan_record"
 
 
 @test_utils.test(

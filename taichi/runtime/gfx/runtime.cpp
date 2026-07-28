@@ -1692,22 +1692,34 @@ bool GfxRuntime::GraphReplayExecutable::refresh_prepared_cache(
       auto &pd = prepared[i];
       cache.any_arrays.clear();
       for (const auto &array_arg : pd.kernel->runtime_array_args()) {
-        auto data_it =
-            pd.host_ctx->array_ptrs.find(array_arg.data_ptr_indices);
-        TI_ASSERT(data_it != pd.host_ctx->array_ptrs.end() &&
-                  data_it->second != nullptr);
-        DeviceAllocation devalloc =
-            *static_cast<DeviceAllocation *>(data_it->second);
+        const auto alloc_type =
+            pd.host_ctx->device_allocation_type[array_arg.indices];
+        DeviceAllocation devalloc = kDeviceNullAllocation;
+        if (alloc_type == LaunchContextBuilder::DevAllocType::kDenseStorage) {
+          devalloc =
+              pd.host_ctx->get_resolved_dense_storage(array_arg.indices)
+                  .allocation;
+        } else {
+          TI_ASSERT(alloc_type ==
+                    LaunchContextBuilder::DevAllocType::kNdarray);
+          auto data_it =
+              pd.host_ctx->array_ptrs.find(array_arg.data_ptr_indices);
+          TI_ASSERT(data_it != pd.host_ctx->array_ptrs.end() &&
+                    data_it->second != nullptr);
+          devalloc = *static_cast<DeviceAllocation *>(data_it->second);
+        }
         cache.any_arrays[array_arg.indices] = devalloc;
         cache.any_arrays[array_arg.data_ptr_indices] = devalloc;
 
-        auto grad_it =
-            pd.host_ctx->array_ptrs.find(array_arg.grad_ptr_indices);
-        if (grad_it != pd.host_ctx->array_ptrs.end() &&
-            grad_it->second != nullptr) {
-          DeviceAllocation grad_alloc =
-              *static_cast<DeviceAllocation *>(grad_it->second);
-          cache.any_arrays[array_arg.grad_ptr_indices] = grad_alloc;
+        if (alloc_type == LaunchContextBuilder::DevAllocType::kNdarray) {
+          auto grad_it =
+              pd.host_ctx->array_ptrs.find(array_arg.grad_ptr_indices);
+          if (grad_it != pd.host_ctx->array_ptrs.end() &&
+              grad_it->second != nullptr) {
+            DeviceAllocation grad_alloc =
+                *static_cast<DeviceAllocation *>(grad_it->second);
+            cache.any_arrays[array_arg.grad_ptr_indices] = grad_alloc;
+          }
         }
       }
     }
@@ -1924,32 +1936,42 @@ bool GfxRuntime::try_launch_graph(
     for (const auto &array_arg : ti_kernel->runtime_array_args()) {
       const auto alloc_type =
           dispatch.host_ctx->device_allocation_type[array_arg.indices];
-      if (alloc_type != LaunchContextBuilder::DevAllocType::kNdarray) {
-        return reject();
-      }
-      auto data_it =
-          dispatch.host_ctx->array_ptrs.find(array_arg.data_ptr_indices);
-      if (data_it == dispatch.host_ctx->array_ptrs.end() ||
-          data_it->second == nullptr) {
-        return reject();
-      }
-      DeviceAllocation devalloc =
-          *static_cast<DeviceAllocation *>(data_it->second);
-      ndarrays_in_use_.insert(devalloc.alloc_id);
-      key.push_back(0xA001u);
-      push_graph_allocation_key(key, devalloc);
-
-      auto grad_it =
-          dispatch.host_ctx->array_ptrs.find(array_arg.grad_ptr_indices);
-      if (grad_it != dispatch.host_ctx->array_ptrs.end() &&
-          grad_it->second != nullptr) {
-        DeviceAllocation grad_alloc =
-            *static_cast<DeviceAllocation *>(grad_it->second);
-        ndarrays_in_use_.insert(grad_alloc.alloc_id);
-        key.push_back(0xA002u);
-        push_graph_allocation_key(key, grad_alloc);
-      } else {
+      if (alloc_type == LaunchContextBuilder::DevAllocType::kDenseStorage) {
+        const auto &binding =
+            dispatch.host_ctx->get_resolved_dense_storage(array_arg.indices);
+        ndarrays_in_use_.insert(binding.allocation.alloc_id);
+        key.push_back(0xA004u);
+        push_graph_allocation_key(key, binding.allocation,
+                                  binding.byte_offset, binding.byte_size);
+        key.push_back(binding.runtime_signature);
         key.push_back(0xA003u);
+      } else if (alloc_type == LaunchContextBuilder::DevAllocType::kNdarray) {
+        auto data_it =
+            dispatch.host_ctx->array_ptrs.find(array_arg.data_ptr_indices);
+        if (data_it == dispatch.host_ctx->array_ptrs.end() ||
+            data_it->second == nullptr) {
+          return reject();
+        }
+        DeviceAllocation devalloc =
+            *static_cast<DeviceAllocation *>(data_it->second);
+        ndarrays_in_use_.insert(devalloc.alloc_id);
+        key.push_back(0xA001u);
+        push_graph_allocation_key(key, devalloc);
+
+        auto grad_it =
+            dispatch.host_ctx->array_ptrs.find(array_arg.grad_ptr_indices);
+        if (grad_it != dispatch.host_ctx->array_ptrs.end() &&
+            grad_it->second != nullptr) {
+          DeviceAllocation grad_alloc =
+              *static_cast<DeviceAllocation *>(grad_it->second);
+          ndarrays_in_use_.insert(grad_alloc.alloc_id);
+          key.push_back(0xA002u);
+          push_graph_allocation_key(key, grad_alloc);
+        } else {
+          key.push_back(0xA003u);
+        }
+      } else {
+        return reject();
       }
     }
 
@@ -2133,8 +2155,20 @@ bool GfxRuntime::try_launch_graph(
             break;
           }
           case CompiledTaichiKernel::BufferBindingKind::ExtArrRw:
-            bindings->rw_buffer(bind.binding,
-                                pd.any_arrays->at(bind.buffer.root_id));
+            if (pd.host_ctx->device_allocation_type[bind.buffer.root_id] ==
+                LaunchContextBuilder::DevAllocType::kDenseStorage) {
+              const auto &binding =
+                  pd.host_ctx->get_resolved_dense_storage(bind.buffer.root_id);
+              if (binding.byte_size == 0) {
+                bindings->rw_buffer(bind.binding, binding.allocation);
+              } else {
+                bindings->rw_buffer(bind.binding, binding.device_ptr(),
+                                    binding.byte_size);
+              }
+            } else {
+              bindings->rw_buffer(bind.binding,
+                                  pd.any_arrays->at(bind.buffer.root_id));
+            }
             break;
           case CompiledTaichiKernel::BufferBindingKind::Args:
             bindings->buffer(bind.binding,

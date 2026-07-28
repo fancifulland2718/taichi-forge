@@ -1352,7 +1352,7 @@ class Kernel:
             launch_ctx.set_arg_ndarray(indices, v.base.arr)
 
         def set_arg_dense_storage(indices, v):
-            launch_ctx.set_arg_dense_storage(indices, v.descriptor)
+            launch_ctx.set_arg_runtime_storage(indices, v.runtime_argument)
 
         set_later_list = []
 

@@ -434,8 +434,14 @@ class _GraphRunContext:
             return self._empty_args
 
         signature = []
-        flattened = {}
         dynamic_items = []
+        arch = self.compile_config().arch
+        if arch == _ti_core.Arch.cuda:
+            storage_consumer = "graph_capture"
+            storage_mode = "capture"
+        else:
+            storage_consumer = "graph_replay"
+            storage_mode = "replay"
         for k, v in args.items():
             if isinstance(v, Ndarray):
                 if v.arr is None:
@@ -443,14 +449,12 @@ class _GraphRunContext:
                         "Cannot submit an Ndarray to Graph.run() after its Taichi runtime has been reset"
                     )
                 signature.append((k, "ndarray", id(v), id(v.arr)))
-                flattened[k] = v.arr
             elif isinstance(v, Texture):
                 if v.tex is None:
                     raise TaichiRuntimeError(
                         "Cannot submit a Texture to Graph.run() after its Taichi runtime has been reset"
                     )
                 signature.append((k, "texture", id(v), id(v.tex)))
-                flattened[k] = v.tex
             elif isinstance(v, Matrix):
                 signature.append((k, "matrix"))
                 dynamic_items.append((k, v.entries))
@@ -466,6 +470,17 @@ class _GraphRunContext:
         if signature == self._last_arg_signature:
             flattened = self._last_flattened
         else:
+            flattened = {}
+            for k, v in args.items():
+                if isinstance(v, Ndarray):
+                    flattened[k] = (
+                        v.arr,
+                        v._runtime_storage_argument(
+                            storage_consumer, storage_mode
+                        ),
+                    )
+                elif isinstance(v, Texture):
+                    flattened[k] = v.tex
             self._last_arg_signature = signature
             self._last_flattened = flattened
         for k, v in dynamic_items:

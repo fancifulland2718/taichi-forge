@@ -26,6 +26,7 @@
 #include "taichi/program/extension.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/matrix.h"
+#include "taichi/program/storage_view.h"
 #include "taichi/python/export_storage_view.h"
 #include "taichi/python/export.h"
 #include "taichi/math/svd.h"
@@ -3317,8 +3318,20 @@ void export_lang(py::module &m) {
           TI_ASSERT(pyargs.contains(arg_name.c_str()));
           auto pyarg = pyargs[arg_name.c_str()];
           if (tag == aot::ArgKind::kNdarray) {
-            auto &val = pyarg.cast<Ndarray &>();
-            args.insert({arg_name, aot::IValue::create(val)});
+            if (py::isinstance<py::tuple>(pyarg)) {
+              auto runtime_pair = pyarg.cast<py::tuple>();
+              TI_ERROR_IF(runtime_pair.size() != 2,
+                          "Graph ndarray runtime storage tuple must contain "
+                          "the owner and argument");
+              auto &val = runtime_pair[0].cast<Ndarray &>();
+              auto &runtime_argument =
+                  runtime_pair[1].cast<storage::RuntimeStorageArgument &>();
+              args.insert(
+                  {arg_name, aot::IValue::create(val, runtime_argument)});
+            } else {
+              auto &val = pyarg.cast<Ndarray &>();
+              args.insert({arg_name, aot::IValue::create(val)});
+            }
           } else if (tag == aot::ArgKind::kTexture ||
                      tag == aot::ArgKind::kRWTexture) {
             auto &val = pyarg.cast<Texture &>();
@@ -3611,6 +3624,8 @@ void export_lang(py::module &m) {
            &LaunchContextBuilder::set_arg_ndarray_with_grad)
       .def("set_arg_dense_storage",
            &LaunchContextBuilder::set_arg_dense_storage)
+      .def("set_arg_runtime_storage",
+           &LaunchContextBuilder::set_arg_runtime_storage)
       .def("_debug_set_ndarray_resource_handle",
            [](LaunchContextBuilder &ctx, const std::vector<int> &arg_id,
               std::uint64_t domain, std::uint32_t kind, std::uint32_t index,

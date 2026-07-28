@@ -30,6 +30,9 @@ class Matrix;
 class Kernel;
 class CompiledKernelData;
 class Program;
+namespace storage {
+class RuntimeStorageArgument;
+}
 
 namespace aot {
 
@@ -158,9 +161,17 @@ struct TI_DLL_EXPORT IValue {
  public:
   uint64 val;
   ArgKind tag;
+  const storage::RuntimeStorageArgument *runtime_storage{nullptr};
 
   static IValue create(const Ndarray &ndarray) {
     return IValue(reinterpret_cast<intptr_t>(&ndarray), ArgKind::kNdarray);
+  }
+
+  static IValue create(const Ndarray &ndarray,
+                       const storage::RuntimeStorageArgument &runtime_storage) {
+    IValue value(reinterpret_cast<intptr_t>(&ndarray), ArgKind::kNdarray);
+    value.runtime_storage = &runtime_storage;
+    return value;
   }
 
   static IValue create(const Texture &tex) {

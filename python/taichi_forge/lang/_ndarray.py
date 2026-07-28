@@ -243,6 +243,7 @@ class Ndarray:
         self.layout = Layout.AOS
         self.grad = None
         self._runtime_prog = None
+        self._runtime_storage_arguments = {}
 
     def _register_runtime_object(self):
         runtime = impl.get_runtime()
@@ -254,6 +255,43 @@ class Ndarray:
         self.arr = None
         self._runtime_prog = None
         self.grad = None
+        self._runtime_storage_arguments.clear()
+
+    def _runtime_storage_argument(self, consumer, mode):
+        if self.arr is None:
+            raise RuntimeError(
+                "Cannot prepare storage metadata after the Ndarray runtime "
+                "has been reset"
+            )
+        program = impl.get_runtime().prog
+        if program is None or program is not self._runtime_prog:
+            raise RuntimeError("Ndarray belongs to another Taichi runtime")
+        key = (id(self.arr), impl.current_cfg().arch, consumer, mode)
+        cached = self._runtime_storage_arguments.get(key)
+        if cached is not None:
+            return cached
+        described = _ti_core._describe_ndarray_storage(self.arr, "readwrite")
+        if not described.ok:
+            raise RuntimeError(
+                "Cannot describe Ndarray runtime storage: "
+                f"{described.reason}"
+            )
+        argument = _ti_core._make_runtime_storage_argument(
+            program, described.descriptor, consumer, mode
+        )
+        qualification = argument.qualification
+        if not qualification["bindable"] or not qualification["replayable"]:
+            raise RuntimeError(
+                "Ndarray runtime storage is not Graph eligible: "
+                f"{qualification['reason']}"
+            )
+        if mode == "capture" and not qualification["capturable"]:
+            raise RuntimeError(
+                "Ndarray runtime storage is not Graph-capturable: "
+                f"{qualification['reason']}"
+            )
+        self._runtime_storage_arguments[key] = argument
+        return argument
 
     def _delete_runtime_ndarray(self):
         prog = self._runtime_prog

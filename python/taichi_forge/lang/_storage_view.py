@@ -101,6 +101,7 @@ class DenseNdarrayView:
         "_source",
         "_description",
         "_descriptor",
+        "_runtime_argument",
         "_element_type",
         "_type_metadata",
         "shape",
@@ -125,6 +126,18 @@ class DenseNdarrayView:
         self._source = source
         self._description = description
         self._descriptor = descriptor
+        self._runtime_argument = _ti_core._make_runtime_storage_argument(
+            _current_program(), descriptor, "ordinary_kernel", "ordinary"
+        )
+        qualification = self._runtime_argument.qualification
+        if (
+            not qualification["bindable"]
+            or not qualification["zero_copy_qualified"]
+        ):
+            raise ValueError(
+                "storage cannot be bound as a runtime argument: "
+                f"{qualification['reason']}"
+            )
         self._element_type = element_type
         self.shape = tuple(int(extent) for extent in descriptor.index_shape)
         self.grad = None
@@ -137,6 +150,10 @@ class DenseNdarrayView:
     @property
     def descriptor(self):
         return self._descriptor
+
+    @property
+    def runtime_argument(self):
+        return self._runtime_argument
 
     def get_type(self):
         return self._type_metadata
