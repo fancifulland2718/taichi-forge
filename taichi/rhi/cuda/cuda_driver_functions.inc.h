@@ -6,6 +6,7 @@ PER_CUDA_FUNCTION(init, cuInit, int);
 // Device management
 PER_CUDA_FUNCTION(device_get_count, cuDeviceGetCount, int *);
 PER_CUDA_FUNCTION(device_get, cuDeviceGet, void *, void *);
+PER_CUDA_FUNCTION(device_get_uuid, cuDeviceGetUuid, CUuuid *, void *);
 PER_CUDA_FUNCTION(device_get_name, cuDeviceGetName, char *, int, void *);
 PER_CUDA_FUNCTION(device_get_attribute, cuDeviceGetAttribute, int *, uint32, void *);
 PER_CUDA_FUNCTION(device_get_default_mem_pool, cuDeviceGetDefaultMemPool, void **, void *);
@@ -80,4 +81,5 @@ PER_CUDA_FUNCTION(surf_object_create,cuSurfObjectCreate,CUsurfObject *, const CU
 PER_CUDA_FUNCTION(signal_external_semaphore_async,cuSignalExternalSemaphoresAsync,const CUexternalSemaphore * , const CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS * , unsigned int  , CUstream)
 PER_CUDA_FUNCTION(wait_external_semaphore_async,cuWaitExternalSemaphoresAsync,const CUexternalSemaphore * , const CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS * , unsigned int  , CUstream)
 PER_CUDA_FUNCTION(import_external_semaphore, cuImportExternalSemaphore,CUexternalSemaphore * , const CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC *)
+PER_CUDA_FUNCTION(external_semaphore_destroy, cuDestroyExternalSemaphore, CUexternalSemaphore)
 // clang-format on

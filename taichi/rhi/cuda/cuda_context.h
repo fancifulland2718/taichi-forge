@@ -85,6 +85,10 @@ class CUDAContext {
     return context_;
   }
 
+  void *get_device() const {
+    return device_;
+  }
+
   void make_current() {
     driver_.context_set_current(context_);
   }

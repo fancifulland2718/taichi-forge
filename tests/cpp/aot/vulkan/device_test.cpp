@@ -6,7 +6,11 @@
 #include "tests/cpp/aot/gfx_utils.h"
 
 #if defined(TI_WITH_CUDA)
+#include "taichi/program/program.h"
+#include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/rhi/cuda/cuda_device.h"
+#include "taichi/rhi/cuda/cuda_driver.h"
+#include "taichi/rhi/interop/vulkan_cuda_interop.h"
 #endif
 
 #include <array>
@@ -53,6 +57,92 @@ std::vector<uint32_t> make_spirv_header(
   builder.init_header();
   return builder.finalize();
 }
+
+#if defined(TI_WITH_CUDA)
+class CudaInteropStream {
+ public:
+  CudaInteropStream() {
+    auto context_guard = CUDAContext::get_instance().get_guard();
+    CUDADriver::get_instance().stream_create(&stream_, CU_STREAM_NON_BLOCKING);
+  }
+
+  ~CudaInteropStream() {
+    if (stream_ == nullptr) {
+      return;
+    }
+    try {
+      auto context_guard = CUDAContext::get_instance().get_guard();
+      CUDADriver::get_instance().stream_synchronize(stream_);
+      CUDADriver::get_instance().stream_destroy(stream_);
+    } catch (...) {
+    }
+  }
+
+  CUstream get() const noexcept {
+    return stream_;
+  }
+
+ private:
+  CUstream stream_{nullptr};
+};
+
+class CudaInteropAddKernel {
+ public:
+  CudaInteropAddKernel() {
+    static constexpr char kPtx[] = R"ptx(
+.version 6.4
+.target sm_75
+.address_size 64
+
+.visible .entry add_constant(
+    .param .u64 data,
+    .param .u32 count,
+    .param .u32 increment)
+{
+    .reg .pred %p<2>;
+    .reg .b32 %r<5>;
+    .reg .b64 %rd<4>;
+
+    ld.param.u64 %rd1, [data];
+    ld.param.u32 %r1, [count];
+    ld.param.u32 %r2, [increment];
+    mov.u32 %r3, %tid.x;
+    setp.ge.u32 %p1, %r3, %r1;
+    @%p1 bra DONE;
+    mul.wide.u32 %rd2, %r3, 4;
+    add.s64 %rd3, %rd1, %rd2;
+    ld.global.u32 %r4, [%rd3];
+    add.u32 %r4, %r4, %r2;
+    st.global.u32 [%rd3], %r4;
+DONE:
+    ret;
+}
+)ptx";
+    auto context_guard = CUDAContext::get_instance().get_guard();
+    auto &driver = CUDADriver::get_instance();
+    driver.module_load_data_ex(&module_, kPtx, 0, nullptr, nullptr);
+    driver.module_get_function(&function_, module_, "add_constant");
+  }
+
+  ~CudaInteropAddKernel() {
+    if (module_ != nullptr) {
+      auto context_guard = CUDAContext::get_instance().get_guard();
+      CUDADriver::get_instance().module_unload(module_);
+    }
+  }
+
+  void launch(void *data, uint32_t count, uint32_t increment, CUstream stream) {
+    void *data_arg = data;
+    void *args[] = {&data_arg, &count, &increment};
+    CUDADriver::get_instance().launch_kernel(function_, 1, 1, 1, count, 1, 1, 0,
+                                             stream, args, nullptr);
+  }
+
+ private:
+  void *module_{nullptr};
+  void *function_{nullptr};
+};
+#endif
 
 }  // namespace
 
@@ -650,6 +740,105 @@ TEST(VulkanCudaInteropTest, ExternalMemoryCacheReleasesWithAllocation) {
   vulkan_device->dealloc_memory(vulkan_allocation);
   cuda_device.dealloc_memory(cuda_source);
   cuda_device.dealloc_memory(cuda_destination);
+}
+
+TEST(VulkanCudaInteropTest,
+     ExternalAllocationSemaphoreRoundTripAndLiveOwnerReset) {
+  if (!vulkan::is_vulkan_api_available() ||
+      !CUDADriver::get_instance_without_context().detected()) {
+    GTEST_SKIP();
+  }
+
+  vulkan::VulkanDeviceCreator::Params params;
+  params.api_version = std::nullopt;
+  auto creator = std::make_unique<vulkan::VulkanDeviceCreator>(params);
+  auto *vulkan_device = static_cast<vulkan::VulkanDevice *>(creator->device());
+  if (!vulkan_device->vk_caps().external_memory ||
+      !vulkan_device->vk_caps().external_semaphore) {
+    GTEST_SKIP();
+  }
+
+  Program program(Arch::cuda);
+  auto *cuda_device =
+      dynamic_cast<cuda::CudaDevice *>(program.get_compute_device());
+  ASSERT_NE(cuda_device, nullptr);
+
+  constexpr uint32_t kElementCount = 32;
+  constexpr size_t kBytes = sizeof(uint32_t) * kElementCount;
+  Device::AllocParams shared_params;
+  shared_params.size = kBytes;
+  shared_params.export_sharing = true;
+  shared_params.usage = AllocUsage::Storage;
+  DeviceAllocation shared_allocation;
+  ASSERT_EQ(vulkan_device->allocate_memory(shared_params, &shared_allocation),
+            RhiResult::success);
+
+  Device::AllocParams destination_params;
+  destination_params.size = kBytes;
+  destination_params.usage = AllocUsage::Storage;
+  DeviceAllocation destination;
+  ASSERT_EQ(vulkan_device->allocate_memory(destination_params, &destination),
+            RhiResult::success);
+
+  auto adapter = VulkanCudaExternalAllocation::create(
+      vulkan_device, cuda_device, shared_allocation);
+  ASSERT_NE(adapter, nullptr);
+  ASSERT_EQ(adapter->allocation_size(), kBytes);
+  EXPECT_EQ(adapter->access_state(),
+            VulkanCudaExternalAllocation::AccessState::kVulkanOwned);
+  auto *vulkan_stream =
+      static_cast<vulkan::VulkanStream *>(vulkan_device->get_compute_stream());
+
+  auto [producer, producer_result] = vulkan_stream->new_command_list_unique();
+  ASSERT_EQ(producer_result, RhiResult::success);
+  producer->buffer_fill(shared_allocation.get_ptr(), kBytes, 7u);
+  ASSERT_TRUE(adapter->release_vulkan_to_cuda(*vulkan_stream, producer.get()));
+
+  CudaInteropStream cuda_stream;
+  const auto stream_domain =
+      ExternalStreamDomain::cuda(program.runtime_program_generation(),
+                                 adapter->identity(), cuda_stream.get());
+  adapter->acquire_for_consumer(stream_domain);
+  EXPECT_EQ(adapter->access_state(),
+            VulkanCudaExternalAllocation::AccessState::kCudaOwned);
+  CudaInteropAddKernel add_kernel;
+  void *shared_cuda_ptr =
+      cuda_device->get_memory_addr(adapter->cuda_allocation());
+  ASSERT_NE(shared_cuda_ptr, nullptr);
+  add_kernel.launch(shared_cuda_ptr, kElementCount, 5u, cuda_stream.get());
+  adapter->release_from_consumer(stream_domain);
+  EXPECT_EQ(adapter->access_state(),
+            VulkanCudaExternalAllocation::AccessState::kAwaitingVulkanAcquire);
+
+  auto [consumer, consumer_result] = vulkan_stream->new_command_list_unique();
+  ASSERT_EQ(consumer_result, RhiResult::success);
+  consumer->buffer_copy(destination.get_ptr(), shared_allocation.get_ptr(),
+                        kBytes);
+  auto completion =
+      adapter->acquire_vulkan_from_cuda(*vulkan_stream, consumer.get());
+  ASSERT_TRUE(completion);
+  ASSERT_TRUE(completion->wait());
+
+  std::array<uint32_t, kElementCount> output{};
+  void *output_ptr = output.data();
+  size_t copy_size = kBytes;
+  DevicePtr destination_ptr = destination.get_ptr();
+  ASSERT_EQ(
+      vulkan_device->readback_data(&destination_ptr, &output_ptr, &copy_size),
+      RhiResult::success);
+  for (const uint32_t value : output) {
+    EXPECT_EQ(value, 12u);
+  }
+
+  const auto owner = program.register_external_dense_storage(
+      adapter->cuda_allocation(), adapter->allocation_size(),
+      [adapter] { adapter->close(); });
+  EXPECT_TRUE(program.validate_external_dense_storage_owner(owner));
+  program.finalize();
+  EXPECT_TRUE(adapter->closed());
+
+  vulkan_device->dealloc_memory(destination);
+  vulkan_device->dealloc_memory(shared_allocation);
 }
 
 TEST(VulkanCudaInteropTest, HostFallbackWithoutExternalMemory) {

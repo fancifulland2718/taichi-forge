@@ -21,6 +21,9 @@ typedef struct csrluInfoHost *csrluInfoHost_t;
 
 using CUexternalMemory = void *;
 using CUexternalSemaphore = void *;
+typedef struct CUuuid_st {
+  char bytes[16];
+} CUuuid;
 using CUsurfObject = uint64_t;
 using CUstream = void *;
 using CUgraph = void *;
