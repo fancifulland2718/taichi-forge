@@ -572,6 +572,8 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
   // capability only when both pieces are available on the device we create.
   bool has_external_memory_base = vk_api_version >= VK_API_VERSION_1_1;
   bool has_external_memory_platform_handle = false;
+  bool has_external_semaphore_base = vk_api_version >= VK_API_VERSION_1_1;
+  bool has_external_semaphore_platform_handle = false;
 
   [[maybe_unused]] bool portability_subset_enabled = false;
 
@@ -618,6 +620,18 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       has_external_memory_platform_handle = true;
       enabled_extensions.push_back(ext.extensionName);
 #endif
+    } else if (name == VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME) {
+      has_external_semaphore_base = true;
+      enabled_extensions.push_back(ext.extensionName);
+#if defined(_WIN32) || defined(_WIN64)
+    } else if (name == VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME) {
+      has_external_semaphore_platform_handle = true;
+      enabled_extensions.push_back(ext.extensionName);
+#else
+    } else if (name == VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME) {
+      has_external_semaphore_platform_handle = true;
+      enabled_extensions.push_back(ext.extensionName);
+#endif
     } else if (name == VK_KHR_VARIABLE_POINTERS_EXTENSION_NAME) {
       enabled_extensions.push_back(ext.extensionName);
     } else if (name == VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME) {
@@ -660,6 +674,8 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
 
   ti_device_->vk_caps().external_memory =
       has_external_memory_base && has_external_memory_platform_handle;
+  ti_device_->vk_caps().external_semaphore =
+      has_external_semaphore_base && has_external_semaphore_platform_handle;
 
   if (has_swapchain) {
     ti_device_->vk_caps().present = true;

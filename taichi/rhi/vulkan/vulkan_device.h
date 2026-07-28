@@ -684,6 +684,14 @@ class VulkanStream : public Stream {
   StreamSemaphore submit(
       CommandList *cmdlist,
       const std::vector<StreamSemaphore> &wait_semaphores = {}) override;
+  // Backend-specific submission seam for external interop. The returned
+  // semaphore remains the completion token owned by this stream; additional
+  // signal semaphores are signaled by the same queue submission and retained
+  // until its fence completes.
+  StreamSemaphore submit_with_semaphores(
+      CommandList *cmdlist,
+      const std::vector<StreamSemaphore> &wait_semaphores,
+      const std::vector<StreamSemaphore> &signal_semaphores);
   StreamSemaphore submit_synced(
       CommandList *cmdlist,
       const std::vector<StreamSemaphore> &wait_semaphores = {}) override;
@@ -719,6 +727,7 @@ struct VulkanCapabilities {
   uint32_t max_per_stage_descriptor_storage_buffers{0};
   bool physical_device_features2{false};
   bool external_memory{false};
+  bool external_semaphore{false};
   bool wide_line{false};
   bool surface{false};
   bool present{false};

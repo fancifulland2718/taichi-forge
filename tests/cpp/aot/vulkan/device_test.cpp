@@ -476,6 +476,36 @@ TEST(VulkanPipelineCacheTest, ConcurrentSnapshots) {
   EXPECT_TRUE(succeeded.load(std::memory_order_relaxed));
 }
 
+TEST(VulkanStreamTest, AdditionalSignalSemaphoreChainsSubmission) {
+  if (!vulkan::is_vulkan_api_available()) {
+    GTEST_SKIP();
+  }
+
+  vulkan::VulkanDeviceCreator::Params params;
+  params.api_version = std::nullopt;
+  auto creator = std::make_unique<vulkan::VulkanDeviceCreator>(params);
+  auto *device = static_cast<vulkan::VulkanDevice *>(creator->device());
+  auto *stream = static_cast<vulkan::VulkanStream *>(
+      device->get_compute_stream());
+  auto [producer, producer_result] = stream->new_command_list_unique();
+  auto [consumer, consumer_result] = stream->new_command_list_unique();
+  ASSERT_EQ(producer_result, RhiResult::success);
+  ASSERT_EQ(consumer_result, RhiResult::success);
+
+  producer->memory_barrier();
+  consumer->memory_barrier();
+  auto additional_vk_semaphore =
+      vkapi::create_semaphore(device->vk_device(), 0);
+  auto additional_semaphore =
+      std::make_shared<vulkan::VulkanStreamSemaphoreObject>(
+          device->backend_fault_reporter(), additional_vk_semaphore);
+  ASSERT_TRUE(stream->submit_with_semaphores(
+      producer.get(), {}, {additional_semaphore}));
+  auto completion = stream->submit(consumer.get(), {additional_semaphore});
+  ASSERT_TRUE(completion);
+  EXPECT_TRUE(completion->wait());
+}
+
 TEST(VulkanProfilerTest, CommandListScopesKeepTheirOwnQueryPools) {
   if (!vulkan::is_vulkan_api_available()) {
     return;

@@ -2698,6 +2698,13 @@ void VulkanStream::apply_in_flight_backpressure() {
 StreamSemaphore VulkanStream::submit(
     CommandList *cmdlist_,
     const std::vector<StreamSemaphore> &wait_semaphores) {
+  return submit_with_semaphores(cmdlist_, wait_semaphores, {});
+}
+
+StreamSemaphore VulkanStream::submit_with_semaphores(
+    CommandList *cmdlist_,
+    const std::vector<StreamSemaphore> &wait_semaphores,
+    const std::vector<StreamSemaphore> &signal_semaphores) {
   device_.throw_if_backend_submission_disallowed("Vulkan queue submit");
   std::lock_guard<std::mutex> submission_lock(submission_mutex_);
   VulkanCommandList *cmdlist = static_cast<VulkanCommandList *>(cmdlist_);
@@ -2734,8 +2741,19 @@ StreamSemaphore VulkanStream::submit(
   auto semaphore = vkapi::create_semaphore(buffer->device, 0);
   submit_refs.push_back(semaphore);
 
-  submit_info.signalSemaphoreCount = 1;
-  submit_info.pSignalSemaphores = &semaphore->semaphore;
+  std::vector<VkSemaphore> vk_signal_semaphores;
+  vk_signal_semaphores.reserve(signal_semaphores.size() + 1);
+  vk_signal_semaphores.push_back(semaphore->semaphore);
+  for (const StreamSemaphore &sema_ : signal_semaphores) {
+    auto sema = std::static_pointer_cast<VulkanStreamSemaphoreObject>(sema_);
+    TI_ERROR_IF(!sema || !sema->vkapi_ref,
+                "Vulkan submission received an invalid signal semaphore");
+    vk_signal_semaphores.push_back(sema->vkapi_ref->semaphore);
+    submit_refs.push_back(sema->vkapi_ref);
+  }
+  submit_info.signalSemaphoreCount =
+      static_cast<uint32_t>(vk_signal_semaphores.size());
+  submit_info.pSignalSemaphores = vk_signal_semaphores.data();
 
   auto fence = vkapi::create_fence(buffer->device, 0);
 
