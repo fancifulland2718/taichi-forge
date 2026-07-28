@@ -39,6 +39,11 @@ dependencies = [
   "taichi-forge-runtime==0.5.1",
 ]
 
+[project.optional-dependencies]
+cuda-interop = [
+  "cuda-bindings>=13.2,<14",
+]
+
 [project.urls]
 Homepage = "https://github.com/fancifulland2718/taichi-forge"
 Issues = "https://github.com/fancifulland2718/taichi-forge/issues"

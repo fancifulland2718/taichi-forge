@@ -42,6 +42,10 @@ from taichi_forge.lang.matrix import MatrixType
 from taichi_forge.lang.shell import _shell_pop_print
 from taichi_forge.lang.struct import StructType
 from taichi_forge.lang.util import cook_dtype, has_paddle, has_pytorch, to_taichi_type
+from taichi_forge.interop.cuda_external import (
+    is_cuda_external_array,
+    validate_cuda_external_array,
+)
 from taichi_forge.types import (
     ndarray_type,
     primitive_types,
@@ -394,10 +398,7 @@ class Func:
             # P9.A-1 (F1) — measure AST inline expansion wall time.
             # Active when profile flag is set or auto_real_function is on
             # (the latter needs the data to drive the F2 heuristic).
-            measure = (
-                runtime._ti_func_expansion_profile
-                or impl.default_cfg().auto_real_function
-            )
+            measure = runtime._ti_func_expansion_profile or impl.default_cfg().auto_real_function
             with python_compile_profile_event(f"python.func.inline_transform:{self.func.__name__}"):
                 if measure:
                     t0 = time.perf_counter_ns()
@@ -629,11 +630,7 @@ class TaichiCallableTemplateMapper:
                     "Ndarray shouldn't be passed in via `ti.template()`, please annotate your kernel using `ti.types.ndarray(...)` instead"
                 )
 
-            if (
-                isinstance(arg, Field)
-                or isinstance(arg, (list, tuple, dict, set))
-                or hasattr(arg, "_data_oriented")
-            ):
+            if isinstance(arg, Field) or isinstance(arg, (list, tuple, dict, set)) or hasattr(arg, "_data_oriented"):
                 # [Composite arguments] Return weak reference to the object
                 # Taichi kernel will cache the extracted arguments, thus we can't simply return the original argument.
                 # Instead, a weak reference to the original value is returned to avoid memory leak.
@@ -685,9 +682,7 @@ class TaichiCallableTemplateMapper:
                 anno.check_matched(arg_type, arg_name)
                 needs_grad = False if anno.needs_grad is None else anno.needs_grad
                 if needs_grad:
-                    raise TaichiRuntimeTypeError(
-                        f"Dense storage view argument {arg_name} does not support gradients"
-                    )
+                    raise TaichiRuntimeTypeError(f"Dense storage view argument {arg_name} does not support gradients")
                 return arg_type.element_type, len(arg.shape), False, anno.boundary
             if isinstance(arg, taichi_forge.lang._ndarray.StructNdarrayTensorMemberView):
                 anno.check_matched(arg.get_type(), arg_name)
@@ -744,6 +739,13 @@ class TaichiCallableTemplateMapper:
                 anno.check_matched(arg.get_type(), arg_name)
                 return ty.element_type, len(arg.shape), ty.needs_grad, anno.boundary
             # external arrays
+            if is_cuda_external_array(arg):
+                validate_cuda_external_array(arg)
+                if anno.needs_grad:
+                    raise TaichiRuntimeTypeError(
+                        "CudaExternalArray arguments do not support gradients; "
+                        "declare the kernel argument with needs_grad=False"
+                    )
             shape = getattr(arg, "shape", None)
             if shape is None:
                 raise TaichiRuntimeTypeError(f"Invalid type for argument {arg_name}, got {arg}")
@@ -850,9 +852,7 @@ class TaichiCallableTemplateMapper:
         # one so explicit SNodeTree churn does not retain every historical
         # Python Field wrapper. IDs remain monotonic to avoid aliasing a still
         # cached compiled specialization with a newer object.
-        dead_keys = [
-            key for key in self.mapping if self._cache_key_is_dead(key)
-        ]
+        dead_keys = [key for key in self.mapping if self._cache_key_is_dead(key)]
         for key in dead_keys:
             del self.mapping[key]
 
@@ -875,10 +875,7 @@ class TaichiCallableTemplateMapper:
         if isinstance(value, weakref.ReferenceType):
             return value() is None
         if isinstance(value, tuple):
-            return any(
-                TaichiCallableTemplateMapper._cache_key_is_dead(item)
-                for item in value
-            )
+            return any(TaichiCallableTemplateMapper._cache_key_is_dead(item) for item in value)
         return False
 
 
@@ -894,6 +891,7 @@ def _get_global_vars(_func):
             global_vars[name] = value
 
     return global_vars
+
 
 class Kernel:
     counter = 0
@@ -922,8 +920,7 @@ class Kernel:
         # invocation.
         if opt_level is not None and opt_level not in Kernel._VALID_OPT_LEVELS:
             raise ValueError(
-                f"@ti.kernel(opt_level=...) must be one of {Kernel._VALID_OPT_LEVELS} "
-                f"or None, got {opt_level!r}."
+                f"@ti.kernel(opt_level=...) must be one of {Kernel._VALID_OPT_LEVELS} " f"or None, got {opt_level!r}."
             )
         self.opt_level = opt_level
         self.extract_arguments()
@@ -1088,16 +1085,12 @@ class Kernel:
 
         self._materializing_external_grad_accesses.clear()
         try:
-            taichi_kernel = impl.get_runtime().prog.create_kernel(
-                taichi_ast_generator, kernel_name, self.autodiff_mode
-            )
+            taichi_kernel = impl.get_runtime().prog.create_kernel(taichi_ast_generator, kernel_name, self.autodiff_mode)
         except Exception:
             self._materializing_external_grad_accesses.clear()
             raise
         if self._materializing_external_grad_accesses:
-            self._external_grad_accesses[key] = frozenset(
-                self._materializing_external_grad_accesses
-            )
+            self._external_grad_accesses[key] = frozenset(self._materializing_external_grad_accesses)
         self._materializing_external_grad_accesses.clear()
         # P-Compile-6: apply per-kernel compile_tier override (if set on the
         # decorator). Stored on the C++ Kernel; consumed in
@@ -1130,13 +1123,9 @@ class Kernel:
             v_primal = v.arr
             v_grad = v.grad.arr if v.grad else None
             if v_primal is None:
-                raise TaichiRuntimeError(
-                    "Cannot submit an Ndarray after its Taichi runtime has been reset"
-                )
+                raise TaichiRuntimeError("Cannot submit an Ndarray after its Taichi runtime has been reset")
             if v.grad is not None and v_grad is None:
-                raise TaichiRuntimeError(
-                    "Cannot submit an Ndarray gradient after its Taichi runtime has been reset"
-                )
+                raise TaichiRuntimeError("Cannot submit an Ndarray gradient after its Taichi runtime has been reset")
             if v_grad is None:
                 launch_ctx.set_arg_ndarray(indices, v_primal)
             else:
@@ -1144,16 +1133,12 @@ class Kernel:
 
         def set_arg_texture(indices, v):
             if v.tex is None:
-                raise TaichiRuntimeError(
-                    "Cannot submit a Texture after its Taichi runtime has been reset"
-                )
+                raise TaichiRuntimeError("Cannot submit a Texture after its Taichi runtime has been reset")
             launch_ctx.set_arg_texture(indices, v.tex)
 
         def set_arg_rw_texture(indices, v):
             if v.tex is None:
-                raise TaichiRuntimeError(
-                    "Cannot submit a Texture after its Taichi runtime has been reset"
-                )
+                raise TaichiRuntimeError("Cannot submit a Texture after its Taichi runtime has been reset")
             launch_ctx.set_arg_rw_texture(indices, v.tex)
 
         def set_arg_ext_array(indices, v, needed):
@@ -1170,7 +1155,26 @@ class Kernel:
             else:
                 element_dim = needed.dtype.ndim
                 array_shape = v.shape[element_dim:] if is_soa else v.shape[:-element_dim]
-            if isinstance(v, np.ndarray):
+            if is_cuda_external_array(v):
+                validate_cuda_external_array(v)
+                if needed.needs_grad or _allocate_all_external_grad or indices in _explicit_external_grad_args:
+                    raise TaichiRuntimeTypeError("CudaExternalArray arguments do not support gradients")
+                if self.runtime.prog.config().arch != _ti_core.Arch.cuda:
+                    raise TaichiRuntimeTypeError(
+                        "CudaExternalArray arguments are only supported by Taichi kernels running on arch=ti.cuda"
+                    )
+                # CUDAContext::ContextGuard binds the shared Taichi primary
+                # context around the native launch.  Do not require a context
+                # to be current while Python binds arguments: async simulation
+                # threads commonly have no current CUDA context at this point.
+                launch_ctx.set_arg_external_array_with_shape(
+                    indices,
+                    v.data_ptr(),
+                    v.nbytes,
+                    array_shape,
+                    0,
+                )
+            elif isinstance(v, np.ndarray):
                 if v.flags.c_contiguous:
                     launch_ctx.set_arg_external_array_with_shape(indices, int(v.ctypes.data), v.nbytes, array_shape, 0)
                 elif v.flags.f_contiguous:
@@ -1372,9 +1376,7 @@ class Kernel:
                     idx_new += recursive_set_args(anno, type(v[name]), v[name], indices + (idx_new,))
                 native_argpack = v._ArgPack__argpack
                 if native_argpack is None:
-                    raise TaichiRuntimeError(
-                        "Cannot submit an ArgPack after its Taichi runtime has been reset"
-                    )
+                    raise TaichiRuntimeError("Cannot submit an ArgPack after its Taichi runtime has been reset")
                 launch_ctx.set_arg_argpack(indices, native_argpack)
                 return 1
             # Note: do not use sth like "needed == f32". That would be slow.
@@ -1422,9 +1424,7 @@ class Kernel:
 
                 if isinstance(v, DenseNdarrayView):
                     if in_argpack:
-                        raise TaichiRuntimeTypeError(
-                            "Dense storage views are not supported inside ArgPack"
-                        )
+                        raise TaichiRuntimeTypeError("Dense storage views are not supported inside ArgPack")
                     set_arg_dense_storage(indices, v)
                     return 1
             if isinstance(needed, ndarray_type.NdarrayType) and isinstance(v, taichi_forge.lang._ndarray.Ndarray):
@@ -1487,9 +1487,7 @@ class Kernel:
             # lifecycle transaction. This also removes a cross-language call
             # from the steady path while preventing explicit tree destruction
             # from retiring the compiled handle between the two operations.
-            prog.compile_and_launch_kernel(
-                prog.config(), prog.get_device_caps(), t_kernel, launch_ctx
-            )
+            prog.compile_and_launch_kernel(prog.config(), prog.get_device_caps(), t_kernel, launch_ctx)
         except Exception as e:
             e = handle_exception_from_cpp(e)
             if impl.get_runtime().print_full_traceback:
@@ -1589,9 +1587,7 @@ class Kernel:
             kernel_cpp,
             *args,
             _allocate_all_external_grad=allocate_all_external_grad,
-            _explicit_external_grad_args=self._external_grad_accesses.get(
-                key, frozenset()
-            ),
+            _explicit_external_grad_args=self._external_grad_accesses.get(key, frozenset()),
         )
 
 
