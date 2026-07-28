@@ -209,11 +209,11 @@ struct DeviceMINRESVulkanReplayState {};
 
 DeviceMINRES::DeviceMINRES(
     Program *program,
-    ExperimentalLinearOperatorHandle &operator_handle,
+    LinearOperatorHandle &operator_handle,
     SparseMatrix *stored_matrix,
     SparseJacobiPreconditionerPlan *jacobi,
     SparseBlockJacobiPreconditionerPlan *block_jacobi,
-    ExperimentalLinearOperatorHandle *preconditioner,
+    LinearOperatorHandle *preconditioner,
     int max_iterations,
     float absolute_tolerance,
     float relative_tolerance)
@@ -1263,11 +1263,11 @@ DeviceMINRES::debug_runtime_statistics() const {
 
 std::unique_ptr<DeviceMINRES> make_device_minres_solver(
     Program *program,
-    ExperimentalLinearOperatorHandle &operator_handle,
+    LinearOperatorHandle &operator_handle,
     SparseMatrix *stored_matrix,
     SparseJacobiPreconditionerPlan *jacobi,
     SparseBlockJacobiPreconditionerPlan *block_jacobi,
-    ExperimentalLinearOperatorHandle *preconditioner,
+    LinearOperatorHandle *preconditioner,
     int max_iterations,
     float absolute_tolerance,
     float relative_tolerance) {

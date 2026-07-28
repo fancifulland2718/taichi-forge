@@ -17,10 +17,10 @@ def _vector(values):
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_operator_qualification_report_is_versioned_and_detached():
     experimental = ti.linalg.experimental
-    operator = 2.0 * experimental.identity(5)
+    operator = 2.0 * ti.linalg.identity(5)
     reference = 2.0 * np.eye(5, dtype=np.float32)
 
-    report = experimental.qualify_operator(
+    report = ti.linalg.qualify_operator(
         operator,
         reference=reference,
         samples=2,
@@ -46,7 +46,7 @@ def test_operator_qualification_report_is_versioned_and_detached():
     assert record["metadata"]["workload"] == "canonical_identity"
     assert json.loads(report.to_json())["passed"]
 
-    matrix = experimental.summarize_operator_qualifications([report])
+    matrix = ti.linalg.summarize_operator_qualifications([report])
     assert (
         matrix["schema"]
         == "taichi_forge.linalg.operator_qualification_matrix.v1"
@@ -80,11 +80,11 @@ def test_operator_qualification_callable_reference_and_unsupported_adjoint():
         for index in range(active_size):
             y[index] = numeric_data[index] * x[topology_data[index]]
 
-    operator = experimental.LinearOperator.from_kernel(
+    operator = ti.linalg.LinearOperator.from_kernel(
         diagonal, size, topology, numeric=numeric
     )
     diagonal_host = numeric.to_numpy()
-    report = experimental.qualify_operator(
+    report = ti.linalg.qualify_operator(
         operator,
         reference=lambda values: diagonal_host * values,
         samples=2,
@@ -103,15 +103,15 @@ def test_operator_qualification_callable_reference_and_unsupported_adjoint():
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_operator_qualification_rejects_invalid_controls_and_oracle_shape():
     experimental = ti.linalg.experimental
-    operator = experimental.identity(3)
+    operator = ti.linalg.identity(3)
 
     with pytest.raises(RuntimeError, match="samples must be positive"):
-        experimental.qualify_operator(operator, samples=0)
+        ti.linalg.qualify_operator(operator, samples=0)
     with pytest.raises(RuntimeError, match="reference must have shape"):
-        experimental.qualify_operator(
+        ti.linalg.qualify_operator(
             operator, reference=np.eye(4, dtype=np.float32)
         )
     with pytest.raises(RuntimeError, match="JSON-serializable"):
-        experimental.qualify_operator(operator, metadata={"bad": object()})
+        ti.linalg.qualify_operator(operator, metadata={"bad": object()})
     with pytest.raises(TypeError, match="OperatorQualificationReport"):
-        experimental.summarize_operator_qualifications([object()])
+        ti.linalg.summarize_operator_qualifications([object()])

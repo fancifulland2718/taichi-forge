@@ -99,7 +99,7 @@ def test_rectangular_graph_explicit_adjoint_update_and_qualification():
         for column in range(topology_data[1]):
             y[column] = 1.0 * y[column]
 
-    operator = experimental.LinearOperator.from_graph(
+    operator = ti.linalg.LinearOperator.from_graph(
         _compile_action_graph(forward, finish_forward),
         (rows, columns),
         adjoint=_compile_action_graph(adjoint, finish_adjoint),
@@ -138,7 +138,7 @@ def test_rectangular_graph_explicit_adjoint_update_and_qualification():
         atol=2e-5,
     )
 
-    report = experimental.qualify_operator(
+    report = ti.linalg.qualify_operator(
         operator, reference=matrix, samples=2, warmup=0, repetitions=1
     )
     assert report.passed
@@ -194,7 +194,7 @@ def test_rectangular_graph_without_adjoint_fails_closed():
         for row in range(topology_data[0]):
             y[row] = numeric_data[row] * x[row]
 
-    operator = ti.linalg.experimental.LinearOperator.from_graph(
+    operator = ti.linalg.LinearOperator.from_graph(
         _compile_action_graph(forward),
         (2, 3),
         topology={"topology": topology},

@@ -1,7 +1,7 @@
 import math
 
 import pytest
-from taichi_forge.linalg import LinearOperator, MatrixFreeBICGSTAB
+from taichi_forge.linalg import FieldLinearOperator, MatrixFreeBICGSTAB
 
 import taichi_forge as ti
 from tests import test_utils
@@ -28,7 +28,7 @@ def test_matrixfree_bicgstab(ti_dtype):
     @ti.kernel
     def compute_Ax(v: ti.template(), mv: ti.template()):
         for i, j in v:
-            # Notice the LinearOperator A here is non-symmetric!
+            # Notice the FieldLinearOperator A here is non-symmetric!
             l = 2.0 * v[i - 1, j] if i - 1 >= 0 else 0.0
             r = v[i + 1, j] if i + 1 <= GRID - 1 else 0.0
             t = 3.0 * v[i, j + 1] if j + 1 <= GRID - 1 else 0.0
@@ -46,7 +46,7 @@ def test_matrixfree_bicgstab(ti_dtype):
                 exit_code = False
         return exit_code
 
-    A = LinearOperator(compute_Ax)
+    A = FieldLinearOperator(compute_Ax)
     init()
     MatrixFreeBICGSTAB(A, b, x, maxiter=10 * GRID * GRID, tol=1e-18, quiet=True)
     compute_Ax(x, Ax)
@@ -79,7 +79,7 @@ def test_matrixfree_bicgstab_uses_absolute_residual_norm_at_zero_iterations(
     initialize(rhs_value)
     assert (
         MatrixFreeBICGSTAB(
-            LinearOperator(identity),
+            FieldLinearOperator(identity),
             b,
             x,
             tol=0.01,

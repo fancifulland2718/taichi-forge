@@ -698,7 +698,7 @@ class VectorView:
 
     def __init__(self, token, field, descriptor, indices, indices_digest):
         if token is not self._TOKEN:
-            raise TypeError("Use ti.linalg.experimental.vector_view()")
+            raise TypeError("Use ti.linalg.vector_view()")
         self._field = field
         self._descriptor = descriptor
         self._indices = indices
@@ -1132,6 +1132,9 @@ class _VectorIOCache:
             "unpacked_logical_bytes": 0,
             "direct_bindings": 0,
             "direct_dense_field_submissions": 0,
+            "direct_dense_view_submissions": 0,
+            "direct_storage_operand_builds": 0,
+            "direct_storage_operand_reuses": 0,
             "completion_syncs": 0,
             "coalesced_operator_syncs": 0,
             "last_input_storage": "unavailable",
@@ -1243,13 +1246,48 @@ class _VectorIOCache:
         self._stats["last_output_storage"] = "ndarray"
         self._stats["last_output_execution_mode"] = "direct"
 
-    def record_direct_dense_fields(self):
+    def record_direct_storage_operand(self, *, reused):
+        key = (
+            "direct_storage_operand_reuses"
+            if reused
+            else "direct_storage_operand_builds"
+        )
+        self._stats[key] += 1
+
+    def record_direct_dense_storage(
+        self,
+        input_storage,
+        output_storage,
+        input_execution_mode,
+        output_execution_mode,
+    ):
+        def public_mode(mode):
+            return {
+                "kDirectContiguous": "direct_contiguous",
+                "kDirectAffine": "direct_affine",
+            }[mode]
+
         self._stats["direct_bindings"] += 2
-        self._stats["direct_dense_field_submissions"] += 1
-        self._stats["last_input_storage"] = "dense_field"
-        self._stats["last_output_storage"] = "dense_field"
-        self._stats["last_input_execution_mode"] = "direct_contiguous"
-        self._stats["last_output_execution_mode"] = "direct_contiguous"
+        if input_storage == output_storage == "dense_field":
+            self._stats["direct_dense_field_submissions"] += 1
+        else:
+            self._stats["direct_dense_view_submissions"] += 1
+        self._stats["last_input_storage"] = input_storage
+        self._stats["last_output_storage"] = output_storage
+        self._stats["last_input_execution_mode"] = public_mode(
+            input_execution_mode
+        )
+        self._stats["last_output_execution_mode"] = public_mode(
+            output_execution_mode
+        )
+
+    def record_direct_dense_fields(self):
+        self.record_direct_dense_storage(
+            "dense_field",
+            "dense_field",
+            "kDirectContiguous",
+            "kDirectContiguous",
+        )
 
     def record_completion_sync(self):
         self._stats["completion_syncs"] += 1

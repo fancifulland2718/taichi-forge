@@ -41,9 +41,9 @@ def _fixed_csr(dense, dtype):
 
 
 def _operator(dense, dtype):
-    return ti.linalg.experimental.LinearOperator.from_sparse_matrix(
+    return ti.linalg.LinearOperator.from_sparse_matrix(
         _fixed_csr(dense, dtype),
-        traits=ti.linalg.experimental.OperatorTraits(singular=False),
+        traits=ti.linalg.OperatorTraits(singular=False),
     )
 
 
@@ -204,9 +204,9 @@ def test_gmres_restart_and_provider_boundaries():
         ti.linalg.experimental.SolvePlan(
             operator, method="bicgstab", restart=8, atol=1e-6
         )
-    singular_pc = ti.linalg.experimental.LinearOperator.from_sparse_matrix(
+    singular_pc = ti.linalg.LinearOperator.from_sparse_matrix(
         _fixed_csr(np.eye(3, dtype=np.float32), ti.f32),
-        traits=ti.linalg.experimental.OperatorTraits(singular=True),
+        traits=ti.linalg.OperatorTraits(singular=True),
     )
     with pytest.raises(Exception, match="GMRES rejects singular"):
         ti.linalg.experimental.SolvePlan(

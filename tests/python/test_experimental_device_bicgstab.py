@@ -37,9 +37,9 @@ def _fixed_csr(matrix):
 
 
 def _nonsymmetric_operator(matrix):
-    return ti.linalg.experimental.LinearOperator.from_sparse_matrix(
+    return ti.linalg.LinearOperator.from_sparse_matrix(
         matrix,
-        traits=ti.linalg.experimental.OperatorTraits(singular=False),
+        traits=ti.linalg.OperatorTraits(singular=False),
     )
 
 
@@ -231,7 +231,7 @@ def test_device_bicgstab_compiled_a_m_right_preconditioner(provider):
     def compiled(values, traits):
         numeric = _vector(np.asarray(values, dtype=np.float32).reshape(-1))
         if provider == "kernel":
-            return experimental.LinearOperator.from_kernel(
+            return ti.linalg.LinearOperator.from_kernel(
                 matrix_action,
                 3,
                 topology,
@@ -262,7 +262,7 @@ def test_device_bicgstab_compiled_a_m_right_preconditioner(provider):
             input_arg,
             output_arg,
         )
-        return experimental.LinearOperator.from_graph(
+        return ti.linalg.LinearOperator.from_graph(
             builder.compile(),
             3,
             fixed_i32={"active_size": 3},
@@ -272,11 +272,11 @@ def test_device_bicgstab_compiled_a_m_right_preconditioner(provider):
         )
 
     operator = compiled(
-        dense, experimental.OperatorTraits(singular=False)
+        dense, ti.linalg.OperatorTraits(singular=False)
     )
     action = compiled(
         right_inverse,
-        experimental.OperatorTraits(self_adjoint=False, singular=False),
+        ti.linalg.OperatorTraits(self_adjoint=False, singular=False),
     )
     preconditioner = experimental.PreconditionerPlan(
         operator, action, method="external_right"

@@ -116,12 +116,12 @@ def test_independent_batched_cg_status_isolation_and_reuse():
         for index in range(active_size):
             y[index] = numeric_data[index] * x[topology_data[index]]
 
-    operator = experimental.LinearOperator.from_kernel(
+    operator = ti.linalg.LinearOperator.from_kernel(
         diagonal_apply,
         total_size,
         topology,
         numeric=diagonal,
-        traits=experimental.OperatorTraits.spd(),
+        traits=ti.linalg.OperatorTraits.spd(),
     )
     exact = np.linspace(-1.0, 1.0, total_size, dtype=np.float32)
     exact[:system_size] = 0.0
@@ -208,15 +208,15 @@ def test_independent_batched_fixed_operator_pcg():
         for index in range(active_size):
             y[index] = numeric_data[index] * x[topology_data[index]]
 
-    traits = experimental.OperatorTraits.spd()
-    operator = experimental.LinearOperator.from_kernel(
+    traits = ti.linalg.OperatorTraits.spd()
+    operator = ti.linalg.LinearOperator.from_kernel(
         diagonal_apply,
         total_size,
         topology,
         numeric=diagonal,
         traits=traits,
     )
-    preconditioner = experimental.LinearOperator.from_kernel(
+    preconditioner = ti.linalg.LinearOperator.from_kernel(
         diagonal_apply,
         total_size,
         topology,
@@ -263,13 +263,13 @@ def test_independent_batched_stored_operator_and_numeric_update():
         np.asarray([2.0, 3.0, 5.0], dtype=np.float32), total_size
     )
     inverse_host = 1.0 / diagonal_host
-    operator = experimental.aslinearoperator(
+    operator = ti.linalg.aslinearoperator(
         _fixed_diagonal(diagonal_host),
-        traits=experimental.OperatorTraits.spd(),
+        traits=ti.linalg.OperatorTraits.spd(),
     )
-    preconditioner = experimental.aslinearoperator(
+    preconditioner = ti.linalg.aslinearoperator(
         _fixed_diagonal(inverse_host),
-        traits=experimental.OperatorTraits.spd(),
+        traits=ti.linalg.OperatorTraits.spd(),
     )
     plan = experimental.BatchedSolvePlan(
         operator,
@@ -319,12 +319,12 @@ def test_independent_batch_one_matches_single_solve_plan():
         for index in range(active_size):
             y[index] = numeric_data[index] * x[topology_data[index]]
 
-    operator = experimental.LinearOperator.from_kernel(
+    operator = ti.linalg.LinearOperator.from_kernel(
         diagonal_apply,
         size,
         topology,
         numeric=diagonal,
-        traits=experimental.OperatorTraits.spd(),
+        traits=ti.linalg.OperatorTraits.spd(),
     )
     options = {}
     if impl.current_cfg().arch in (ti.cuda, ti.vulkan):
@@ -366,9 +366,9 @@ def test_independent_batched_fixed_budget_submission_and_workspace_slots():
     diagonal = np.resize(
         np.asarray([2.0, 3.0, 5.0], dtype=np.float32), total_size
     )
-    operator = experimental.aslinearoperator(
+    operator = ti.linalg.aslinearoperator(
         _fixed_diagonal(diagonal),
-        traits=experimental.OperatorTraits.spd(),
+        traits=ti.linalg.OperatorTraits.spd(),
     )
     plan = experimental.BatchedSolvePlan(
         operator,
@@ -459,9 +459,9 @@ def test_batched_recurrence_graph_replay_reuses_plan_and_rebinds_output(
     diagonal = np.resize(
         np.asarray([2.0, 3.0, 5.0], dtype=np.float32), total_size
     )
-    operator = experimental.aslinearoperator(
+    operator = ti.linalg.aslinearoperator(
         _fixed_diagonal(diagonal),
-        traits=experimental.OperatorTraits.spd(),
+        traits=ti.linalg.OperatorTraits.spd(),
     )
     plan = experimental.BatchedSolvePlan(
         operator,
@@ -511,13 +511,13 @@ def test_batched_pcg_replays_post_preconditioner_recurrence(monkeypatch):
     diagonal = np.resize(
         np.asarray([2.0, 3.0, 5.0], dtype=np.float32), total_size
     )
-    operator = experimental.aslinearoperator(
+    operator = ti.linalg.aslinearoperator(
         _fixed_diagonal(diagonal),
-        traits=experimental.OperatorTraits.spd(),
+        traits=ti.linalg.OperatorTraits.spd(),
     )
-    preconditioner = experimental.aslinearoperator(
+    preconditioner = ti.linalg.aslinearoperator(
         _fixed_diagonal(1.0 / diagonal),
-        traits=experimental.OperatorTraits.spd(),
+        traits=ti.linalg.OperatorTraits.spd(),
     )
     plan = experimental.BatchedSolvePlan(
         operator,
@@ -556,9 +556,9 @@ def test_batched_recurrence_graph_replay_can_be_disabled(monkeypatch):
     diagonal = np.resize(
         np.asarray([2.0, 3.0, 5.0], dtype=np.float32), 8
     )
-    operator = experimental.aslinearoperator(
+    operator = ti.linalg.aslinearoperator(
         _fixed_diagonal(diagonal),
-        traits=experimental.OperatorTraits.spd(),
+        traits=ti.linalg.OperatorTraits.spd(),
     )
     plan = experimental.BatchedSolvePlan(
         operator,
@@ -588,9 +588,9 @@ def test_independent_batched_pending_submission_is_reset_safe():
     diagonal = np.resize(
         np.asarray([2.0, 3.0, 5.0], dtype=np.float32), 16
     )
-    operator = experimental.aslinearoperator(
+    operator = ti.linalg.aslinearoperator(
         _fixed_diagonal(diagonal),
-        traits=experimental.OperatorTraits.spd(),
+        traits=ti.linalg.OperatorTraits.spd(),
     )
     plan = experimental.BatchedSolvePlan(
         operator,
@@ -611,9 +611,9 @@ def test_independent_batched_pending_submission_is_reset_safe():
 )
 def test_solver_conditional_execution_capabilities_are_explicit():
     experimental = ti.linalg.experimental
-    operator = experimental.aslinearoperator(
+    operator = ti.linalg.aslinearoperator(
         _fixed_diagonal(np.ones(8, dtype=np.float32)),
-        traits=experimental.OperatorTraits.spd(),
+        traits=ti.linalg.OperatorTraits.spd(),
     )
     single = experimental.SolvePlan(
         operator, max_iterations=4, atol=1e-6
@@ -692,14 +692,14 @@ def test_solver_conditional_execution_capabilities_are_explicit():
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_independent_batched_contract_and_zero_budget():
     experimental = ti.linalg.experimental
-    identity = experimental.identity(4)
+    identity = ti.linalg.identity(4)
     with pytest.raises(RuntimeError, match="independent_systems=True"):
         experimental.BatchedSolvePlan(
             identity, 2, independent_systems=False
         )
     with pytest.raises(RuntimeError, match="divisible"):
         experimental.BatchedSolvePlan(
-            experimental.identity(5), 2, independent_systems=True
+            ti.linalg.identity(5), 2, independent_systems=True
         )
     with pytest.raises(RuntimeError, match=r"shape \(2,"):
         experimental.BatchedSolvePlan(

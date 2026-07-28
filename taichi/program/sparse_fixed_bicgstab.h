@@ -87,7 +87,7 @@ class FixedSparseBiCGSTAB {
 
   FixedSparseBiCGSTAB(Program *program,
                       OperatorBinding operator_binding,
-                      ExperimentalLinearOperatorHandle &preconditioner,
+                      LinearOperatorHandle &preconditioner,
                       int max_iterations,
                       DT absolute_tolerance,
                       bool verbose,

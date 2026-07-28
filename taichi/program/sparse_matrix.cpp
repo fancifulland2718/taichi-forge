@@ -534,6 +534,7 @@ void CompiledKernelLinearOperator::publish_resource_generation(
   capabilities.asynchronous_submit =
       !arch_is_cpu(program_->compile_config().arch);
   capabilities.dense_storage_operands = true;
+  capabilities.dense_storage_affine_operands = true;
   const OperatorResourceStamp stamp{
       reinterpret_cast<std::uintptr_t>(program_),
       program_->runtime_program_generation(),
@@ -576,6 +577,7 @@ OperatorBinding CompiledKernelLinearOperator::make_operator_binding() {
   capabilities.asynchronous_submit =
       !arch_is_cpu(program_->compile_config().arch);
   capabilities.dense_storage_operands = true;
+  capabilities.dense_storage_affine_operands = true;
   auto metadata_action = OperatorAction(
       descriptor, capabilities, "forge_compiled_taichi_kernel",
       [this] { return current_operator_resource_stamp(); },
@@ -961,37 +963,30 @@ OperatorBackendExecutionPath operator_backend_path(
 
 void CompiledGraphLinearOperator::apply_with_execution(
     Program *program,
-    const Ndarray &input,
-    const Ndarray &output,
+    const OperatorVectorView &input,
+    const OperatorVectorView &output,
     OperatorExecutionKind execution_kind,
     aot::CompiledGraphJITCache *cache) {
   TI_ERROR_IF(program != program_,
               "Compiled-graph linear operator apply requires its owning "
               "Program; no fallback was performed.");
-  auto validate_vector = [&](const char *role, const Ndarray &array) {
-    TI_ERROR_IF(array.owning_program() != program_ ||
-                    array.get_element_data_type() != PrimitiveType::f32 ||
-                    !array.get_element_shape().empty() ||
-                    array.shape.size() != 1 ||
-                    array.get_nelement() != static_cast<std::size_t>(rows_),
-                "Compiled-graph linear operator {} must contain exactly {} "
-                "scalar f32 entries owned by the same Program.",
-                role, rows_);
+  const auto graph_value = [](const OperatorVectorView &view) {
+    if (view.runtime_storage) {
+      return aot::IValue::create(*view.runtime_storage);
+    }
+    TI_ERROR_IF(!view.ndarray,
+                "Compiled-graph linear operator requires ndarray or "
+                "runtime-storage operands.");
+    return aot::IValue::create(*view.ndarray);
   };
-  validate_vector("input", input);
-  validate_vector("output", output);
-  TI_ERROR_IF(input.get_device_allocation_ptr_as_int() ==
-                  output.get_device_allocation_ptr_as_int(),
-              "Compiled-graph linear operator input and output must not "
-              "alias.");
 
   auto numeric_guard = acquire_numeric_access_guard();
   std::lock_guard<std::mutex> lock(spmv_mutex_);
   std::unordered_map<std::string, aot::IValue> arguments;
   arguments.reserve(2 + fixed_i32_arguments_.size() +
                     owned_ndarray_arguments_.size());
-  arguments.emplace("input", aot::IValue::create(input));
-  arguments.emplace("output", aot::IValue::create(output));
+  arguments.emplace("input", graph_value(input));
+  arguments.emplace("output", graph_value(output));
   for (const auto &[name, value] : fixed_i32_arguments_) {
     arguments.emplace(name, aot::IValue::create(value));
   }
@@ -1017,8 +1012,13 @@ void CompiledGraphLinearOperator::apply_with_execution(
 void CompiledGraphLinearOperator::nd_spmv(Program *program,
                                           const Ndarray &input,
                                           const Ndarray &output) {
-  apply_with_execution(program, input, output,
-                       OperatorExecutionKind::compiled_graph, cache_.get());
+  const OperatorSpaceDesc space{
+      PrimitiveType::f32, static_cast<std::size_t>(rows_)};
+  apply_with_execution(
+      program,
+      OperatorVectorView::from_ndarray(program_, input, space, false),
+      OperatorVectorView::from_ndarray(program_, output, space, true),
+      OperatorExecutionKind::compiled_graph, cache_.get());
 }
 
 OperatorBinding CompiledGraphLinearOperator::make_operator_binding(
@@ -1031,6 +1031,8 @@ OperatorBinding CompiledGraphLinearOperator::make_operator_binding(
   capabilities.runtime_capture = arch_is_cuda(arch);
   capabilities.binding_rebind = true;
   capabilities.persistent_workspace = true;
+  capabilities.dense_storage_operands = true;
+  capabilities.dense_storage_affine_operands = true;
 
   // Validate before allocating a cache. Unsupported requests are explicit;
   // selecting Graph or capture must never silently become ordinary launches.
@@ -1079,9 +1081,6 @@ OperatorBinding CompiledGraphLinearOperator::make_operator_binding(
         TI_ERROR_IF(mode != OperatorApplyMode::forward,
                     "Compiled-graph operator bindings support forward apply "
                     "only.");
-        TI_ERROR_IF(!input.ndarray || !output.ndarray,
-                    "Compiled-graph operator bindings require ndarray "
-                    "input/output views.");
         switch (state->kind) {
           case OperatorExecutionKind::direct:
             state->direct_submissions.fetch_add(1,
@@ -1100,8 +1099,8 @@ OperatorBinding CompiledGraphLinearOperator::make_operator_binding(
                                                  std::memory_order_relaxed);
             break;
         }
-        apply_with_execution(program_, *input.ndarray, *output.ndarray,
-                             state->kind, state->cache.get());
+        apply_with_execution(program_, input, output, state->kind,
+                             state->cache.get());
       });
   auto binding = OperatorBinding(std::move(action), [this] {
     return OperatorResourceLease::hold(acquire_numeric_access_guard());

@@ -91,7 +91,7 @@ class FixedSparseGMRES {
 
   FixedSparseGMRES(Program *program,
                    OperatorBinding operator_binding,
-                   ExperimentalLinearOperatorHandle &preconditioner,
+                   LinearOperatorHandle &preconditioner,
                    int max_iterations,
                    int restart,
                    DT absolute_tolerance,
@@ -108,7 +108,7 @@ class FixedSparseGMRES {
   FixedSparseGMRES(
       Program *program,
       OperatorBinding operator_binding,
-      const std::vector<ExperimentalLinearOperatorHandle *> &preconditioners,
+      const std::vector<LinearOperatorHandle *> &preconditioners,
       int max_iterations,
       int restart,
       DT absolute_tolerance,

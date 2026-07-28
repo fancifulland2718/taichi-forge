@@ -19,7 +19,7 @@ from taichi_forge.lang._ndarray import ScalarNdarray
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang.impl import get_runtime
 from taichi_forge.linalg import _batched_solver_kernels as _kernels
-from taichi_forge.linalg.experimental import (
+from taichi_forge.linalg._runtime import (
     LinearOperator,
     _current_program,
     _require_current_scalar_ndarray,
@@ -451,7 +451,7 @@ class BatchedSolvePlan:
         check_interval=None,
     ):
         if not isinstance(operator, LinearOperator):
-            raise TypeError("operator must be experimental.LinearOperator")
+            raise TypeError("operator must be ti.linalg.LinearOperator")
         operator._ensure_valid()
         if independent_systems is not True:
             raise TaichiRuntimeError(

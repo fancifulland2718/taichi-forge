@@ -16,7 +16,7 @@ def _array(dtype, values):
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_generalized_apply_cpu_contract_and_aliasing():
     for dtype in (ti.f32, ti.f64):
-        operator = ti.linalg.experimental.identity(4, dtype=dtype)
+        operator = ti.linalg.identity(4, dtype=dtype)
         input_values = np.asarray([1.0, -2.0, 0.5, 3.0])
         addend_values = np.asarray([-0.5, 1.0, 4.0, -2.0])
         input_array = _array(dtype, input_values)
@@ -87,7 +87,7 @@ def test_generalized_apply_gpu_fails_closed_without_host_fallback():
         for index in range(active_size):
             y[index] = x[topology_data[index]]
 
-    operator = ti.linalg.experimental.LinearOperator.from_kernel(
+    operator = ti.linalg.LinearOperator.from_kernel(
         identity_kernel, size, topology
     )
     values = _array(ti.f32, [1.0, -2.0, 0.5, 3.0])

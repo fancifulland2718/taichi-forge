@@ -37,9 +37,9 @@ def _operator(dense, dtype):
     matrix = ti.linalg.SparsePattern.csr(
         rows, columns, offsets, indices
     ).matrix(numeric)
-    return ti.linalg.experimental.LinearOperator.from_sparse_matrix(
+    return ti.linalg.LinearOperator.from_sparse_matrix(
         matrix,
-        traits=ti.linalg.experimental.OperatorTraits(singular=False),
+        traits=ti.linalg.OperatorTraits(singular=False),
     )
 
 
@@ -240,9 +240,9 @@ def test_device_fgmres_compiled_action_table_and_z_basis(provider):
 
     def compiled(values):
         numeric = _vector(np.asarray(values).reshape(-1), ti.f32)
-        traits = experimental.OperatorTraits(singular=False)
+        traits = ti.linalg.OperatorTraits(singular=False)
         if provider == "kernel":
-            return experimental.LinearOperator.from_kernel(
+            return ti.linalg.LinearOperator.from_kernel(
                 matrix_action,
                 size,
                 topology,
@@ -273,7 +273,7 @@ def test_device_fgmres_compiled_action_table_and_z_basis(provider):
             input_arg,
             output_arg,
         )
-        return experimental.LinearOperator.from_graph(
+        return ti.linalg.LinearOperator.from_graph(
             builder.compile(),
             size,
             fixed_i32={"active_size": size},

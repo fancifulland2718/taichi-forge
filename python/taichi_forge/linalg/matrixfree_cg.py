@@ -45,7 +45,7 @@ def _residual_norm(residual_squared):
 
 
 @ti.data_oriented
-class LinearOperator:
+class FieldLinearOperator:
     def __init__(self, matvec_kernel):
         self._matvec = matvec_kernel
 
@@ -59,11 +59,11 @@ def MatrixFreeCG(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
     """Matrix-free conjugate-gradient solver.
 
     Use conjugate-gradient method to solve the linear system Ax = b, where A is implicitly
-    represented as a LinearOperator. A must be symmetric positive-definite;
+    represented as a FieldLinearOperator. A must be symmetric positive-definite;
     this property is supplied by the caller and is not checked automatically.
 
     Args:
-        A (LinearOperator): The coefficient matrix A of the linear system.
+        A (FieldLinearOperator): The coefficient matrix A of the linear system.
         b (Field): The right-hand side of the linear system.
         x (Field): The initial guess for the solution.
         tol (float): Positive absolute tolerance for ``||b - A x||_2``.
@@ -194,10 +194,10 @@ def MatrixFreeBICGSTAB(A, b, x, tol=1e-6, maxiter=5000, quiet=True):
     """Matrix-free biconjugate-gradient stabilized solver (BiCGSTAB).
 
     Use BiCGSTAB method to solve the linear system Ax = b, where A is implicitly
-    represented as a LinearOperator.
+    represented as a FieldLinearOperator.
 
     Args:
-        A (LinearOperator): The coefficient matrix A of the linear system.
+        A (FieldLinearOperator): The coefficient matrix A of the linear system.
         b (Field): The right-hand side of the linear system.
         x (Field): The initial guess for the solution.
         tol (float): Positive absolute tolerance for ``||b - A x||_2``.

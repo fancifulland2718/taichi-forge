@@ -8,7 +8,7 @@
 
 namespace taichi::lang {
 
-class ExperimentalLinearOperatorHandle;
+class LinearOperatorHandle;
 class OperatorPlan;
 class OperatorPinnedAction;
 class PreconditionerPlan;
@@ -23,9 +23,9 @@ struct DeviceBiCGSTABVulkanReplayState;
 class DeviceBiCGSTAB {
  public:
   DeviceBiCGSTAB(Program *program,
-                 ExperimentalLinearOperatorHandle &operator_handle,
+                 LinearOperatorHandle &operator_handle,
                  SparseMatrix *stored_matrix,
-                 ExperimentalLinearOperatorHandle *preconditioner,
+                 LinearOperatorHandle *preconditioner,
                  int max_iterations,
                  float absolute_tolerance,
                  float relative_tolerance);
@@ -123,9 +123,9 @@ class DeviceBiCGSTAB {
   std::uintptr_t address(const Ndarray *array) const;
 
   Program *program_{nullptr};
-  ExperimentalLinearOperatorHandle *operator_handle_{nullptr};
+  LinearOperatorHandle *operator_handle_{nullptr};
   SparseMatrix *stored_matrix_{nullptr};
-  ExperimentalLinearOperatorHandle *operator_preconditioner_{nullptr};
+  LinearOperatorHandle *operator_preconditioner_{nullptr};
   std::unique_ptr<OperatorPlan> operator_plan_;
   std::unique_ptr<PreconditionerPlan> preconditioner_plan_;
   int rows_{0};
@@ -194,9 +194,9 @@ class DeviceBiCGSTAB {
 
 std::unique_ptr<DeviceBiCGSTAB> make_device_bicgstab_solver(
     Program *program,
-    ExperimentalLinearOperatorHandle &operator_handle,
+    LinearOperatorHandle &operator_handle,
     SparseMatrix *stored_matrix,
-    ExperimentalLinearOperatorHandle *preconditioner,
+    LinearOperatorHandle *preconditioner,
     int max_iterations,
     float absolute_tolerance,
     float relative_tolerance);

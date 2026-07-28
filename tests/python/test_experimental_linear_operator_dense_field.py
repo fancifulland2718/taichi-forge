@@ -20,11 +20,11 @@ def _compiled_identity(size):
         for index in range(active_size):
             y[index] = x[topology_data[index]]
 
-    return ti.linalg.experimental.LinearOperator.from_kernel(
+    return ti.linalg.LinearOperator.from_kernel(
         apply_identity,
         size,
         topology,
-        traits=ti.linalg.experimental.OperatorTraits.spd(),
+        traits=ti.linalg.OperatorTraits.spd(),
     )
 
 
@@ -89,7 +89,7 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
     assert stats["execution_capabilities"]["vector_io"]["dense_field"][
         "execution_mode"
     ] == "provider_qualified"
-    capabilities = ti.linalg.experimental.vector_io_capabilities()
+    capabilities = ti.linalg.vector_io_capabilities()
     assert capabilities["ndarray"]["zero_copy"] is True
     assert capabilities["dense_field"]["zero_copy"] is False
     assert capabilities["dense_field"]["zero_copy_condition"] == (
@@ -143,7 +143,7 @@ def test_packed_vector_and_matrix_fields_use_scalar_flat_lane_order():
     vector_output = ti.Vector.field(3, ti.f32, shape=(2, 2))
     vector_source.from_numpy(vector_values)
 
-    vector_view = ti.linalg.experimental.vector_view(vector_source)
+    vector_view = ti.linalg.vector_view(vector_source)
     assert vector_view.element_shape == (3,)
     assert vector_view.scalar_extent == vector_values.size
     _compiled_identity(vector_values.size).apply(
@@ -156,7 +156,7 @@ def test_packed_vector_and_matrix_fields_use_scalar_flat_lane_order():
     matrix_output = ti.Matrix.field(2, 2, ti.f32, shape=(2, 2))
     matrix_source.from_numpy(matrix_values)
 
-    matrix_view = ti.linalg.experimental.vector_view(matrix_source)
+    matrix_view = ti.linalg.vector_view(matrix_source)
     assert matrix_view.element_shape == (2, 2)
     assert matrix_view.scalar_extent == matrix_values.size
     _compiled_identity(matrix_values.size).apply(
@@ -170,10 +170,10 @@ def test_packed_vector_and_matrix_fields_use_scalar_flat_lane_order():
     indexed_output.fill(-1)
     indices = ti.ndarray(ti.i32, shape=4)
     indices.from_numpy(np.asarray([0, 1, 2, 11], dtype=np.int32))
-    source_view = ti.linalg.experimental.vector_view(
+    source_view = ti.linalg.vector_view(
         vector_source, indices=indices
     )
-    output_view = ti.linalg.experimental.vector_view(
+    output_view = ti.linalg.vector_view(
         indexed_output, indices=indices
     )
     _compiled_identity(4).apply(source_view, out=output_view)
@@ -196,10 +196,10 @@ def test_packed_vector_and_matrix_fields_use_scalar_flat_lane_order():
         selected = np.asarray([0, 1, scalar_extent - 1], dtype=np.int32)
         shaped_indices.from_numpy(selected)
         _compiled_identity(3).apply(
-            ti.linalg.experimental.vector_view(
+            ti.linalg.vector_view(
                 shaped_source, indices=shaped_indices
             ),
-            out=ti.linalg.experimental.vector_view(
+            out=ti.linalg.vector_view(
                 shaped_output, indices=shaped_indices
             ),
         )
@@ -218,9 +218,9 @@ def test_stored_csr_dense_field_path_is_provider_qualified():
     source = ti.field(ti.f32, shape=3)
     output = ti.field(ti.f32, shape=3)
     source.from_numpy(values)
-    operator = ti.linalg.experimental.LinearOperator.from_sparse_matrix(
+    operator = ti.linalg.LinearOperator.from_sparse_matrix(
         _fixed_csr(dense),
-        traits=ti.linalg.experimental.OperatorTraits(singular=False),
+        traits=ti.linalg.OperatorTraits(singular=False),
     )
     operator.apply(source, out=output)
     np.testing.assert_allclose(output.to_numpy(), dense @ values, rtol=1e-6)
@@ -246,10 +246,10 @@ def test_indexed_dense_views_snapshot_topology_and_scatter_selected_values():
 
     indices = ti.field(ti.i32, shape=3)
     indices.from_numpy(np.asarray([5, 1, 3], dtype=np.int32))
-    source_view = ti.linalg.experimental.vector_view(
+    source_view = ti.linalg.vector_view(
         source, indices=indices
     )
-    output_view = ti.linalg.experimental.vector_view(
+    output_view = ti.linalg.vector_view(
         output, indices=indices
     )
 
@@ -306,7 +306,7 @@ def test_dense_vector_view_validation_alias_and_tree_lifetime():
 
     permutation = ti.ndarray(ti.i32, shape=4)
     permutation.from_numpy(np.asarray([1, 0, 2, 3], dtype=np.int32))
-    permuted_output = ti.linalg.experimental.vector_view(
+    permuted_output = ti.linalg.vector_view(
         output, indices=permutation
     )
     with pytest.raises(RuntimeError, match="addend and output overlap"):
@@ -323,19 +323,19 @@ def test_dense_vector_view_validation_alias_and_tree_lifetime():
     duplicate = ti.ndarray(ti.i32, shape=2)
     duplicate.from_numpy(np.asarray([1, 1], dtype=np.int32))
     with pytest.raises(RuntimeError, match="must be unique"):
-        ti.linalg.experimental.vector_view(source, indices=duplicate)
+        ti.linalg.vector_view(source, indices=duplicate)
 
     out_of_range = ti.ndarray(ti.i32, shape=2)
     out_of_range.from_numpy(np.asarray([0, 4], dtype=np.int32))
     with pytest.raises(RuntimeError, match="within the scalar-flat"):
-        ti.linalg.experimental.vector_view(source, indices=out_of_range)
+        ti.linalg.vector_view(source, indices=out_of_range)
 
     field = ti.field(ti.f32)
     builder = ti.FieldsBuilder()
     builder.dense(ti.i, 4).place(field)
     tree = builder.finalize()
     retired_tree_id = int(tree.ptr.id())
-    stale_view = ti.linalg.experimental.vector_view(field)
+    stale_view = ti.linalg.vector_view(field)
     tree.destroy()
     with pytest.raises(RuntimeError, match="destroyed SNodeTree"):
         operator.apply(stale_view)
@@ -345,7 +345,7 @@ def test_dense_vector_view_validation_alias_and_tree_lifetime():
     replacement_builder.dense(ti.i, 4).place(replacement_field)
     replacement_tree = replacement_builder.finalize()
     assert int(replacement_tree.ptr.id()) == retired_tree_id
-    replacement_view = ti.linalg.experimental.vector_view(
+    replacement_view = ti.linalg.vector_view(
         replacement_field
     )
 
@@ -372,7 +372,7 @@ def test_dense_field_f64_and_unsupported_sparse_layout():
     output = ti.field(ti.f64, shape=4)
     source.from_numpy(values)
 
-    operator = ti.linalg.experimental.identity(4, dtype=ti.f64)
+    operator = ti.linalg.identity(4, dtype=ti.f64)
     result = ti.linalg.experimental.SolvePlan(
         operator, method="cg", max_iterations=4, atol=1e-12
     ).solve(source, out=output)
@@ -385,7 +385,7 @@ def test_dense_field_f64_and_unsupported_sparse_layout():
     tree = builder.finalize()
     try:
         with pytest.raises(RuntimeError, match="root-dense-place"):
-            ti.linalg.experimental.vector_view(sparse)
+            ti.linalg.vector_view(sparse)
     finally:
         tree.destroy()
 
@@ -419,3 +419,135 @@ def test_padded_dense_field_remains_explicitly_staged():
     finally:
         output_tree.destroy()
         source_tree.destroy()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_linear_operator_public_api_is_stable_and_unambiguous():
+    assert not hasattr(ti.linalg.experimental, "LinearOperator")
+    assert ti.linalg.FieldLinearOperator is not ti.linalg.LinearOperator
+
+
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    exclude=[(ti.vulkan, "Darwin")],
+    offline_cache=False,
+)
+def test_runtime_dense_views_bind_directly_without_staging():
+    compact_source = ti.ndarray(ti.f32, shape=(2, 3))
+    compact_output = ti.ndarray(ti.f32, shape=(2, 3))
+    values = np.arange(6, dtype=np.float32).reshape(2, 3)
+    compact_source.from_numpy(values)
+
+    compact_operator = _compiled_identity(6)
+    compact_input = ti.experimental.ndarray_view(compact_source)
+    compact_result = ti.experimental.ndarray_view(compact_output)
+    assert compact_operator.apply(compact_input, out=compact_result) is compact_result
+    assert compact_operator.apply(compact_input, out=compact_result) is compact_result
+    np.testing.assert_array_equal(compact_output.to_numpy(), values)
+    compact_stats = compact_operator.statistics()["vector_io"]
+    assert compact_stats["staging_buffer_builds"] == 0
+    assert compact_stats["direct_dense_view_submissions"] == 2
+    assert compact_stats["direct_storage_operand_builds"] == 2
+    assert compact_stats["direct_storage_operand_reuses"] == 2
+    assert compact_stats["last_input_execution_mode"] == "direct_contiguous"
+    assert compact_stats["last_output_execution_mode"] == "direct_contiguous"
+
+    affine_source = ti.ndarray(ti.f32, shape=8)
+    affine_output = ti.ndarray(ti.f32, shape=8)
+    affine_values = np.arange(8, dtype=np.float32)
+    affine_source.from_numpy(affine_values)
+    affine_output.fill(-1.0)
+    affine_input = ti.experimental.ndarray_view(
+        affine_source, slices=slice(0, 8, 2)
+    )
+    affine_result = ti.experimental.ndarray_view(
+        affine_output, slices=slice(1, 8, 2)
+    )
+
+    affine_operator = _compiled_identity(4)
+    assert affine_operator.capabilities.dense_storage_affine_operands
+    assert affine_operator.apply(affine_input, out=affine_result) is affine_result
+    expected = np.full(8, -1.0, dtype=np.float32)
+    expected[1::2] = affine_values[0::2]
+    np.testing.assert_array_equal(affine_output.to_numpy(), expected)
+    affine_stats = affine_operator.statistics()["vector_io"]
+    assert affine_stats["staging_buffer_builds"] == 0
+    assert affine_stats["direct_dense_view_submissions"] == 1
+    assert affine_stats["last_input_execution_mode"] == "direct_affine"
+    assert affine_stats["last_output_execution_mode"] == "direct_affine"
+
+
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    exclude=[(ti.vulkan, "Darwin")],
+    offline_cache=False,
+)
+def test_compiled_graph_accepts_affine_runtime_storage_views():
+    size = 4
+    topology = ti.ndarray(ti.i32, shape=size)
+    topology.from_numpy(np.arange(size, dtype=np.int32))
+
+    @ti.kernel
+    def copy_by_topology(
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for i in range(size):
+            y[i] = x[topology_data[i]]
+
+    topology_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "topology", ti.i32, ndim=1
+    )
+    input_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "input", ti.f32, ndim=1
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(copy_by_topology, topology_arg, input_arg, output_arg)
+    operator = ti.linalg.LinearOperator.from_graph(
+        builder.compile(),
+        size,
+        topology={"topology": topology},
+        traits=ti.linalg.OperatorTraits.spd(),
+    )
+
+    source = ti.ndarray(ti.f32, shape=8)
+    output = ti.ndarray(ti.f32, shape=8)
+    values = np.arange(8, dtype=np.float32)
+    source.from_numpy(values)
+    output.fill(-1.0)
+    input_view = ti.experimental.ndarray_view(source, slices=slice(0, 8, 2))
+    output_view = ti.experimental.ndarray_view(output, slices=slice(1, 8, 2))
+
+    assert operator.capabilities.dense_storage_operands
+    assert operator.capabilities.dense_storage_affine_operands
+    assert operator.apply(input_view, out=output_view) is output_view
+    expected = np.full(8, -1.0, dtype=np.float32)
+    expected[1::2] = values[0::2]
+    np.testing.assert_array_equal(output.to_numpy(), expected)
+    stats = operator.statistics()["vector_io"]
+    assert stats["staging_buffer_builds"] == 0
+    assert stats["direct_dense_view_submissions"] == 1
+    assert stats["last_input_execution_mode"] == "direct_affine"
+    assert stats["last_output_execution_mode"] == "direct_affine"
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_affine_runtime_view_fails_closed_for_native_sparse_provider():
+    operator = ti.linalg.LinearOperator.from_sparse_matrix(
+        _fixed_csr(np.eye(4, dtype=np.float32)),
+        traits=ti.linalg.OperatorTraits.spd(),
+    )
+    source = ti.ndarray(ti.f32, shape=8)
+    output = ti.ndarray(ti.f32, shape=8)
+    input_view = ti.experimental.ndarray_view(source, slices=slice(0, 8, 2))
+    output_view = ti.experimental.ndarray_view(output, slices=slice(1, 8, 2))
+
+    assert not operator.capabilities.dense_storage_affine_operands
+    with pytest.raises(RuntimeError, match="provider-qualified"):
+        operator.apply(input_view, out=output_view)
+    with pytest.raises(RuntimeError, match="explicit out"):
+        ti.linalg.identity(4).apply(input_view)

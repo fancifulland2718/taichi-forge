@@ -8,7 +8,7 @@
 
 namespace taichi::lang {
 
-class ExperimentalLinearOperatorHandle;
+class LinearOperatorHandle;
 class OperatorPlan;
 class OperatorPinnedAction;
 class PreconditionerPlan;
@@ -25,11 +25,11 @@ struct DeviceMINRESVulkanReplayState;
 class DeviceMINRES {
  public:
   DeviceMINRES(Program *program,
-               ExperimentalLinearOperatorHandle &operator_handle,
+               LinearOperatorHandle &operator_handle,
                SparseMatrix *stored_matrix,
                SparseJacobiPreconditionerPlan *jacobi,
                SparseBlockJacobiPreconditionerPlan *block_jacobi,
-               ExperimentalLinearOperatorHandle *preconditioner,
+               LinearOperatorHandle *preconditioner,
                int max_iterations,
                float absolute_tolerance,
                float relative_tolerance);
@@ -129,11 +129,11 @@ class DeviceMINRES {
   std::uintptr_t address(const Ndarray *array) const;
 
   Program *program_{nullptr};
-  ExperimentalLinearOperatorHandle *operator_handle_{nullptr};
+  LinearOperatorHandle *operator_handle_{nullptr};
   SparseMatrix *stored_matrix_{nullptr};
   SparseJacobiPreconditionerPlan *jacobi_{nullptr};
   SparseBlockJacobiPreconditionerPlan *block_jacobi_{nullptr};
-  ExperimentalLinearOperatorHandle *operator_preconditioner_{nullptr};
+  LinearOperatorHandle *operator_preconditioner_{nullptr};
   std::unique_ptr<OperatorPlan> operator_plan_;
   std::unique_ptr<PreconditionerPlan> preconditioner_plan_;
   int rows_{0};
@@ -199,11 +199,11 @@ class DeviceMINRES {
 
 std::unique_ptr<DeviceMINRES> make_device_minres_solver(
     Program *program,
-    ExperimentalLinearOperatorHandle &operator_handle,
+    LinearOperatorHandle &operator_handle,
     SparseMatrix *stored_matrix,
     SparseJacobiPreconditionerPlan *jacobi,
     SparseBlockJacobiPreconditionerPlan *block_jacobi,
-    ExperimentalLinearOperatorHandle *preconditioner,
+    LinearOperatorHandle *preconditioner,
     int max_iterations,
     float absolute_tolerance,
     float relative_tolerance);

@@ -5226,14 +5226,14 @@ void export_lang(py::module &m) {
         return result;
       };
 
-  py::class_<ExperimentalLinearOperatorSession>(
-      m, "ExperimentalLinearOperatorSession")
-      .def("_submit", &ExperimentalLinearOperatorSession::submit,
+  py::class_<LinearOperatorSession>(
+      m, "LinearOperatorSession")
+      .def("_submit", &LinearOperatorSession::submit,
            py::keep_alive<1, 2>(), py::arg("program"), py::arg("input"),
            py::arg("output"))
-      .def("_wait", &ExperimentalLinearOperatorSession::wait)
+      .def("_wait", &LinearOperatorSession::wait)
       .def("_mark_synchronized",
-           &ExperimentalLinearOperatorSession::mark_synchronized);
+           &LinearOperatorSession::mark_synchronized);
 
   py::class_<ExperimentalPreconditionerSession>(
       m, "ExperimentalPreconditionerSession")
@@ -5330,18 +5330,18 @@ void export_lang(py::module &m) {
              return result;
            });
 
-  py::class_<ExperimentalLinearOperatorHandle>(
-      m, "ExperimentalLinearOperatorHandle")
-      .def("_apply", &ExperimentalLinearOperatorHandle::apply,
+  py::class_<LinearOperatorHandle>(
+      m, "LinearOperatorHandle")
+      .def("_apply", &LinearOperatorHandle::apply,
            py::keep_alive<1, 2>(), py::arg("program"),
            py::arg("input"), py::arg("output"))
       .def("_apply_dense_storage",
-           &ExperimentalLinearOperatorHandle::apply_dense_storage,
+           &LinearOperatorHandle::apply_dense_storage,
            py::keep_alive<1, 2>(), py::arg("program"), py::arg("input"),
            py::arg("output"))
       .def(
           "_apply_generalized",
-          [](ExperimentalLinearOperatorHandle &handle, Program *program,
+          [](LinearOperatorHandle &handle, Program *program,
              const Ndarray &input, const py::object &addend,
              const Ndarray &output, double alpha, double beta) {
             const Ndarray *native_addend = nullptr;
@@ -5359,11 +5359,11 @@ void export_lang(py::module &m) {
           py::arg("beta"))
       .def(
           "_update_numeric",
-          [](ExperimentalLinearOperatorHandle &handle, Program *program,
+          [](LinearOperatorHandle &handle, Program *program,
              const py::dict &arguments,
              std::uint64_t expected_topology_version,
              std::uint64_t expected_numeric_version) {
-            ExperimentalLinearOperatorHandle::NumericUpdateArguments native;
+            LinearOperatorHandle::NumericUpdateArguments native;
             for (const auto &item : arguments) {
               native.emplace(py::cast<std::string>(item.first),
                              &py::cast<const Ndarray &>(item.second));
@@ -5375,11 +5375,11 @@ void export_lang(py::module &m) {
           py::arg("expected_topology_version"),
           py::arg("expected_numeric_version"))
       .def("_supports_numeric_update",
-           &ExperimentalLinearOperatorHandle::supports_numeric_update)
+           &LinearOperatorHandle::supports_numeric_update)
       .def("_begin_session",
-           &ExperimentalLinearOperatorHandle::begin_session,
+           &LinearOperatorHandle::begin_session,
            py::keep_alive<0, 1>())
-      .def("_metadata", [](const ExperimentalLinearOperatorHandle &handle) {
+      .def("_metadata", [](const LinearOperatorHandle &handle) {
         const auto &descriptor = handle.descriptor();
         const auto &capabilities = handle.capabilities();
         const auto &traits = handle.mathematical_traits();
@@ -5427,6 +5427,8 @@ void export_lang(py::module &m) {
             capabilities.persistent_workspace;
         capabilities_dict["dense_storage_operands"] =
             capabilities.dense_storage_operands;
+        capabilities_dict["dense_storage_affine_operands"] =
+            capabilities.dense_storage_affine_operands;
         py::dict traits_dict;
         traits_dict["self_adjoint"] =
             claim_to_dict(traits.self_adjoint);
@@ -5457,7 +5459,7 @@ void export_lang(py::module &m) {
         return result;
       })
       .def("_debug_runtime_stats",
-           [](const ExperimentalLinearOperatorHandle &handle) {
+           [](const LinearOperatorHandle &handle) {
              const auto stats = handle.debug_runtime_statistics();
              py::dict result;
              result["schema_version"] = 1;
@@ -5500,10 +5502,10 @@ void export_lang(py::module &m) {
            });
 
   m.def(
-      "_make_experimental_linear_operator",
+      "_make_linear_operator",
       [](Program *program, SparseMatrix &matrix, int self_adjoint,
          int positive_definite, int positive_semidefinite, int singular) {
-        return make_experimental_linear_operator_handle(
+        return make_linear_operator_handle(
             program, matrix,
             make_asserted_operator_traits(
                 self_adjoint, positive_definite,
@@ -5525,7 +5527,7 @@ void export_lang(py::module &m) {
         py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
         py::arg("program"), py::arg("plan"));
   m.def(
-      "_make_experimental_compiled_kernel_operator",
+      "_make_compiled_kernel_operator",
       [](Program *program, Kernel &forward_kernel,
          const py::object &adjoint_kernel, std::size_t range_extent,
          std::size_t domain_extent, std::uint64_t topology_version,
@@ -5540,7 +5542,7 @@ void export_lang(py::module &m) {
         if (!numeric_data.is_none()) {
           numeric = &py::cast<const Ndarray &>(numeric_data);
         }
-        return make_experimental_compiled_kernel_operator_handle(
+        return make_compiled_kernel_operator_handle(
             program, forward_kernel, adjoint, range_extent, domain_extent,
             topology_version, numeric_version, topology_data, numeric,
             make_asserted_operator_traits(
@@ -5557,7 +5559,7 @@ void export_lang(py::module &m) {
       py::arg("positive_semidefinite") = -1,
       py::arg("singular") = -1);
   m.def(
-      "_make_experimental_compiled_graph_operator",
+      "_make_compiled_graph_operator",
       [](Program *program, const aot::CompiledGraph &forward_graph,
          const py::object &adjoint_graph, std::size_t range_extent,
          std::size_t domain_extent, std::uint64_t topology_version,
@@ -5582,7 +5584,7 @@ void export_lang(py::module &m) {
           }
           return result;
         };
-        return make_experimental_compiled_graph_operator_handle(
+        return make_compiled_graph_operator_handle(
             program, forward_graph, adjoint, range_extent, domain_extent,
             topology_version, numeric_version, std::move(fixed_i32),
             parse_ndarrays(topology_args), parse_ndarrays(numeric_args),
@@ -5602,36 +5604,36 @@ void export_lang(py::module &m) {
       py::arg("positive_semidefinite") = -1,
       py::arg("singular") = -1);
   m.def(
-      "_make_experimental_identity_operator",
+      "_make_identity_operator",
       [](Program *program, DataType dtype, std::size_t size) {
-        return make_experimental_identity_operator_handle(
+        return make_identity_operator_handle(
             program, OperatorSpaceDesc{dtype, size});
       },
       py::keep_alive<0, 1>(), py::arg("program"),
       py::arg("dtype"), py::arg("size"));
-  m.def("_make_experimental_adjoint_operator",
-        make_experimental_adjoint_operator_handle,
+  m.def("_make_adjoint_operator",
+        make_adjoint_operator_handle,
         py::keep_alive<0, 1>(), py::arg("operand"));
-  m.def("_make_experimental_scaled_operator",
-        make_experimental_scaled_operator_handle,
+  m.def("_make_scaled_operator",
+        make_scaled_operator_handle,
         py::keep_alive<0, 2>(), py::arg("scale"), py::arg("operand"));
-  m.def("_make_experimental_sum_operator",
-        make_experimental_sum_operator_handle,
+  m.def("_make_sum_operator",
+        make_sum_operator_handle,
         py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
         py::arg("left"), py::arg("right"));
-  m.def("_make_experimental_composed_operator",
-        make_experimental_composed_operator_handle,
+  m.def("_make_composed_operator",
+        make_composed_operator_handle,
         py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
         py::arg("outer"), py::arg("inner"));
   m.def(
-      "_make_experimental_block_diagonal_operator",
+      "_make_block_diagonal_operator",
       [](const py::iterable &items) {
-        std::vector<ExperimentalLinearOperatorHandle *> blocks;
+        std::vector<LinearOperatorHandle *> blocks;
         for (const auto &item : items) {
           blocks.push_back(
-              py::cast<ExperimentalLinearOperatorHandle *>(item));
+              py::cast<LinearOperatorHandle *>(item));
         }
-        return make_experimental_block_diagonal_operator_handle(blocks);
+        return make_block_diagonal_operator_handle(blocks);
       },
       py::arg("blocks"));
 
@@ -5945,8 +5947,8 @@ void export_lang(py::module &m) {
       py::arg("max_iterations"), py::arg("absolute_tolerance"),
       py::arg("verbose"), py::arg("relative_tolerance") = 0.0);
   m.def(
-      "_make_float_cpu_experimental_linear_operator_bicgstab_solver",
-      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+      "_make_float_cpu_experimental_bicgstab_solver",
+      [](Program *program, LinearOperatorHandle &operator_handle,
          int max_iterations, float absolute_tolerance,
          float relative_tolerance) {
         TI_ERROR_IF(operator_handle.program() != program,
@@ -5961,8 +5963,8 @@ void export_lang(py::module &m) {
       py::arg("max_iterations"), py::arg("absolute_tolerance"),
       py::arg("relative_tolerance") = 0.0f);
   m.def(
-      "_make_double_cpu_experimental_linear_operator_bicgstab_solver",
-      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+      "_make_double_cpu_experimental_bicgstab_solver",
+      [](Program *program, LinearOperatorHandle &operator_handle,
          int max_iterations, double absolute_tolerance,
          double relative_tolerance) {
         TI_ERROR_IF(operator_handle.program() != program,
@@ -5977,9 +5979,9 @@ void export_lang(py::module &m) {
       py::arg("max_iterations"), py::arg("absolute_tolerance"),
       py::arg("relative_tolerance") = 0.0);
   m.def(
-      "_make_float_cpu_preconditioned_experimental_linear_operator_bicgstab_solver",
-      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
-         ExperimentalLinearOperatorHandle &preconditioner,
+      "_make_float_cpu_preconditioned_experimental_bicgstab_solver",
+      [](Program *program, LinearOperatorHandle &operator_handle,
+         LinearOperatorHandle &preconditioner,
          int max_iterations, float absolute_tolerance,
          float relative_tolerance) {
         TI_ERROR_IF(operator_handle.program() != program ||
@@ -5997,9 +5999,9 @@ void export_lang(py::module &m) {
       py::arg("preconditioner"), py::arg("max_iterations"),
       py::arg("absolute_tolerance"), py::arg("relative_tolerance") = 0.0f);
   m.def(
-      "_make_double_cpu_preconditioned_experimental_linear_operator_bicgstab_solver",
-      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
-         ExperimentalLinearOperatorHandle &preconditioner,
+      "_make_double_cpu_preconditioned_experimental_bicgstab_solver",
+      [](Program *program, LinearOperatorHandle &operator_handle,
+         LinearOperatorHandle &preconditioner,
          int max_iterations, double absolute_tolerance,
          double relative_tolerance) {
         TI_ERROR_IF(operator_handle.program() != program ||
@@ -6048,8 +6050,8 @@ void export_lang(py::module &m) {
                  solver.debug_runtime_statistics());
            });
   m.def(
-      "_make_float_cpu_experimental_linear_operator_gmres_solver",
-      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+      "_make_float_cpu_experimental_gmres_solver",
+      [](Program *program, LinearOperatorHandle &operator_handle,
          int max_iterations, int restart, float absolute_tolerance,
          float relative_tolerance) {
         TI_ERROR_IF(operator_handle.program() != program,
@@ -6064,8 +6066,8 @@ void export_lang(py::module &m) {
       py::arg("max_iterations"), py::arg("restart"),
       py::arg("absolute_tolerance"), py::arg("relative_tolerance") = 0.0f);
   m.def(
-      "_make_double_cpu_experimental_linear_operator_gmres_solver",
-      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+      "_make_double_cpu_experimental_gmres_solver",
+      [](Program *program, LinearOperatorHandle &operator_handle,
          int max_iterations, int restart, double absolute_tolerance,
          double relative_tolerance) {
         TI_ERROR_IF(operator_handle.program() != program,
@@ -6080,9 +6082,9 @@ void export_lang(py::module &m) {
       py::arg("max_iterations"), py::arg("restart"),
       py::arg("absolute_tolerance"), py::arg("relative_tolerance") = 0.0);
   m.def(
-      "_make_float_cpu_preconditioned_experimental_linear_operator_gmres_solver",
-      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
-         ExperimentalLinearOperatorHandle &preconditioner,
+      "_make_float_cpu_preconditioned_experimental_gmres_solver",
+      [](Program *program, LinearOperatorHandle &operator_handle,
+         LinearOperatorHandle &preconditioner,
          int max_iterations, int restart, float absolute_tolerance,
          float relative_tolerance) {
         TI_ERROR_IF(operator_handle.program() != program ||
@@ -6101,9 +6103,9 @@ void export_lang(py::module &m) {
       py::arg("restart"), py::arg("absolute_tolerance"),
       py::arg("relative_tolerance") = 0.0f);
   m.def(
-      "_make_double_cpu_preconditioned_experimental_linear_operator_gmres_solver",
-      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
-         ExperimentalLinearOperatorHandle &preconditioner,
+      "_make_double_cpu_preconditioned_experimental_gmres_solver",
+      [](Program *program, LinearOperatorHandle &operator_handle,
+         LinearOperatorHandle &preconditioner,
          int max_iterations, int restart, double absolute_tolerance,
          double relative_tolerance) {
         TI_ERROR_IF(operator_handle.program() != program ||
@@ -6122,15 +6124,15 @@ void export_lang(py::module &m) {
       py::arg("restart"), py::arg("absolute_tolerance"),
       py::arg("relative_tolerance") = 0.0);
   m.def(
-      "_make_float_cpu_variable_preconditioned_experimental_linear_operator_gmres_solver",
-      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+      "_make_float_cpu_variable_preconditioned_experimental_gmres_solver",
+      [](Program *program, LinearOperatorHandle &operator_handle,
          const py::list &preconditioners, int max_iterations, int restart,
          float absolute_tolerance, float relative_tolerance) {
-        std::vector<ExperimentalLinearOperatorHandle *> actions;
+        std::vector<LinearOperatorHandle *> actions;
         actions.reserve(preconditioners.size());
         for (const auto &item : preconditioners) {
           auto *action =
-              item.cast<ExperimentalLinearOperatorHandle *>();
+              item.cast<LinearOperatorHandle *>();
           TI_ERROR_IF(!action || action->program() != program,
                       "FGMRES actions must belong to the target Program.");
           actions.push_back(action);
@@ -6148,15 +6150,15 @@ void export_lang(py::module &m) {
       py::arg("restart"), py::arg("absolute_tolerance"),
       py::arg("relative_tolerance") = 0.0f);
   m.def(
-      "_make_double_cpu_variable_preconditioned_experimental_linear_operator_gmres_solver",
-      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+      "_make_double_cpu_variable_preconditioned_experimental_gmres_solver",
+      [](Program *program, LinearOperatorHandle &operator_handle,
          const py::list &preconditioners, int max_iterations, int restart,
          double absolute_tolerance, double relative_tolerance) {
-        std::vector<ExperimentalLinearOperatorHandle *> actions;
+        std::vector<LinearOperatorHandle *> actions;
         actions.reserve(preconditioners.size());
         for (const auto &item : preconditioners) {
           auto *action =
-              item.cast<ExperimentalLinearOperatorHandle *>();
+              item.cast<LinearOperatorHandle *>();
           TI_ERROR_IF(!action || action->program() != program,
                       "FGMRES actions must belong to the target Program.");
           actions.push_back(action);
@@ -6203,8 +6205,8 @@ void export_lang(py::module &m) {
                  solver.debug_runtime_statistics());
            });
   m.def(
-      "_make_float_cpu_experimental_linear_operator_minres_solver",
-      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+      "_make_float_cpu_experimental_minres_solver",
+      [](Program *program, LinearOperatorHandle &operator_handle,
          int max_iterations, float absolute_tolerance,
          float relative_tolerance) {
         TI_ERROR_IF(operator_handle.program() != program,
@@ -6218,8 +6220,8 @@ void export_lang(py::module &m) {
       py::arg("max_iterations"), py::arg("absolute_tolerance"),
       py::arg("relative_tolerance") = 0.0f);
   m.def(
-      "_make_double_cpu_experimental_linear_operator_minres_solver",
-      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+      "_make_double_cpu_experimental_minres_solver",
+      [](Program *program, LinearOperatorHandle &operator_handle,
          int max_iterations, double absolute_tolerance,
          double relative_tolerance) {
         TI_ERROR_IF(operator_handle.program() != program,
@@ -6273,8 +6275,8 @@ void export_lang(py::module &m) {
                  solver.debug_runtime_statistics());
            });
   m.def(
-      "_make_device_experimental_linear_operator_minres_solver",
-      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+      "_make_device_experimental_minres_solver",
+      [](Program *program, LinearOperatorHandle &operator_handle,
          int max_iterations, float absolute_tolerance,
          float relative_tolerance) {
         return make_device_minres_solver(
@@ -6286,7 +6288,7 @@ void export_lang(py::module &m) {
       py::arg("absolute_tolerance"), py::arg("relative_tolerance") = 0.0f);
   m.def(
       "_make_device_fixed_sparse_minres_solver",
-      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+      [](Program *program, LinearOperatorHandle &operator_handle,
          SparseMatrix &matrix, int max_iterations,
          float absolute_tolerance, float relative_tolerance) {
         return make_device_minres_solver(
@@ -6299,7 +6301,7 @@ void export_lang(py::module &m) {
       py::arg("absolute_tolerance"), py::arg("relative_tolerance") = 0.0f);
   m.def(
       "_make_device_jacobi_minres_solver",
-      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+      [](Program *program, LinearOperatorHandle &operator_handle,
          SparseMatrix &matrix, SparseJacobiPreconditionerPlan &preconditioner,
          int max_iterations, float absolute_tolerance,
          float relative_tolerance) {
@@ -6315,7 +6317,7 @@ void export_lang(py::module &m) {
       py::arg("absolute_tolerance"), py::arg("relative_tolerance") = 0.0f);
   m.def(
       "_make_device_block_jacobi_minres_solver",
-      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+      [](Program *program, LinearOperatorHandle &operator_handle,
          SparseMatrix &matrix,
          SparseBlockJacobiPreconditionerPlan &preconditioner,
          int max_iterations, float absolute_tolerance,
@@ -6332,8 +6334,8 @@ void export_lang(py::module &m) {
       py::arg("absolute_tolerance"), py::arg("relative_tolerance") = 0.0f);
   m.def(
       "_make_device_operator_preconditioned_minres_solver",
-      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
-         ExperimentalLinearOperatorHandle &preconditioner,
+      [](Program *program, LinearOperatorHandle &operator_handle,
+         LinearOperatorHandle &preconditioner,
          int max_iterations, float absolute_tolerance,
          float relative_tolerance) {
         return make_device_minres_solver(
@@ -6383,8 +6385,8 @@ void export_lang(py::module &m) {
                  solver.debug_runtime_statistics());
            });
   m.def(
-      "_make_device_experimental_linear_operator_gmres_solver",
-      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+      "_make_device_experimental_gmres_solver",
+      [](Program *program, LinearOperatorHandle &operator_handle,
          int max_iterations, int restart, float absolute_tolerance,
          float relative_tolerance) {
         return make_device_gmres_solver(
@@ -6397,7 +6399,7 @@ void export_lang(py::module &m) {
       py::arg("relative_tolerance") = 0.0f);
   m.def(
       "_make_device_fixed_sparse_gmres_solver",
-      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+      [](Program *program, LinearOperatorHandle &operator_handle,
          SparseMatrix &matrix, int max_iterations, int restart,
          float absolute_tolerance, float relative_tolerance) {
         return make_device_gmres_solver(
@@ -6411,8 +6413,8 @@ void export_lang(py::module &m) {
       py::arg("relative_tolerance") = 0.0f);
   m.def(
       "_make_device_operator_preconditioned_gmres_solver",
-      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
-         ExperimentalLinearOperatorHandle &preconditioner,
+      [](Program *program, LinearOperatorHandle &operator_handle,
+         LinearOperatorHandle &preconditioner,
          int max_iterations, int restart, float absolute_tolerance,
          float relative_tolerance) {
         return make_device_gmres_solver(
@@ -6427,14 +6429,14 @@ void export_lang(py::module &m) {
       py::arg("relative_tolerance") = 0.0f);
   m.def(
       "_make_device_variable_preconditioned_gmres_solver",
-      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+      [](Program *program, LinearOperatorHandle &operator_handle,
          const py::list &preconditioners, int max_iterations, int restart,
          float absolute_tolerance, float relative_tolerance) {
-        std::vector<ExperimentalLinearOperatorHandle *> actions;
+        std::vector<LinearOperatorHandle *> actions;
         actions.reserve(preconditioners.size());
         for (const auto &item : preconditioners) {
           auto *action =
-              item.cast<ExperimentalLinearOperatorHandle *>();
+              item.cast<LinearOperatorHandle *>();
           TI_ERROR_IF(!action || action->program() != program,
                       "Device FGMRES actions must belong to the target "
                       "Program.");
@@ -6494,8 +6496,8 @@ void export_lang(py::module &m) {
                  solver.debug_runtime_statistics());
            });
   m.def(
-      "_make_device_experimental_linear_operator_bicgstab_solver",
-      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+      "_make_device_experimental_bicgstab_solver",
+      [](Program *program, LinearOperatorHandle &operator_handle,
          int max_iterations, float absolute_tolerance,
          float relative_tolerance) {
         return make_device_bicgstab_solver(
@@ -6507,7 +6509,7 @@ void export_lang(py::module &m) {
       py::arg("absolute_tolerance"), py::arg("relative_tolerance") = 0.0f);
   m.def(
       "_make_device_fixed_sparse_bicgstab_solver",
-      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
+      [](Program *program, LinearOperatorHandle &operator_handle,
          SparseMatrix &matrix, int max_iterations,
          float absolute_tolerance, float relative_tolerance) {
         return make_device_bicgstab_solver(
@@ -6520,8 +6522,8 @@ void export_lang(py::module &m) {
       py::arg("absolute_tolerance"), py::arg("relative_tolerance") = 0.0f);
   m.def(
       "_make_device_operator_preconditioned_bicgstab_solver",
-      [](Program *program, ExperimentalLinearOperatorHandle &operator_handle,
-         ExperimentalLinearOperatorHandle &preconditioner,
+      [](Program *program, LinearOperatorHandle &operator_handle,
+         LinearOperatorHandle &preconditioner,
          int max_iterations, float absolute_tolerance,
          float relative_tolerance) {
         return make_device_bicgstab_solver(
@@ -6741,8 +6743,8 @@ void export_lang(py::module &m) {
       py::arg("absolute_tolerance"), py::arg("verbose"),
       py::arg("relative_tolerance") = 0.0f);
   m.def(
-      "_make_cuda_experimental_linear_operator_pcg_solver",
-      make_cuda_experimental_linear_operator_pcg_solver,
+      "_make_cuda_experimental_pcg_solver",
+      make_cuda_experimental_pcg_solver,
       py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
       py::keep_alive<0, 3>(), py::arg("program"), py::arg("matrix"),
       py::arg("preconditioner"), py::arg("max_iterations"),
@@ -6780,15 +6782,15 @@ void export_lang(py::module &m) {
       py::arg("max_iterations"), py::arg("absolute_tolerance"),
       py::arg("relative_tolerance") = 0.0);
   m.def(
-      "_make_cpu_experimental_linear_operator_cg_solver",
-      make_cpu_experimental_linear_operator_cg_solver,
+      "_make_cpu_experimental_cg_solver",
+      make_cpu_experimental_cg_solver,
       py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
       py::arg("program"), py::arg("operator"),
       py::arg("max_iterations"), py::arg("absolute_tolerance"),
       py::arg("relative_tolerance") = 0.0);
   m.def(
-      "_make_cpu_experimental_linear_operator_pcg_solver",
-      make_cpu_experimental_linear_operator_pcg_solver,
+      "_make_cpu_experimental_pcg_solver",
+      make_cpu_experimental_pcg_solver,
       py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
       py::keep_alive<0, 3>(), py::arg("program"), py::arg("operator"),
       py::arg("preconditioner"), py::arg("max_iterations"),
@@ -6911,8 +6913,8 @@ void export_lang(py::module &m) {
         py::arg("preconditioner"), py::arg("max_iterations"),
         py::arg("absolute_tolerance"),
         py::arg("relative_tolerance") = 0.0f);
-  m.def("_make_vulkan_experimental_linear_operator_pcg_convergence_plan",
-        make_vulkan_experimental_linear_operator_pcg_convergence_plan,
+  m.def("_make_vulkan_experimental_pcg_convergence_plan",
+        make_vulkan_experimental_pcg_convergence_plan,
         py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
         py::keep_alive<0, 3>(), py::arg("program"), py::arg("matrix"),
         py::arg("preconditioner"), py::arg("max_iterations"),

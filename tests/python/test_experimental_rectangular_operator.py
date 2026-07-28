@@ -63,7 +63,7 @@ def test_rectangular_kernel_explicit_adjoint_update_and_qualification():
                 )
             y[column] = total
 
-    operator = experimental.LinearOperator.from_kernel(
+    operator = ti.linalg.LinearOperator.from_kernel(
         forward,
         (rows, columns),
         topology,
@@ -100,7 +100,7 @@ def test_rectangular_kernel_explicit_adjoint_update_and_qualification():
         atol=2e-5,
     )
 
-    report = experimental.qualify_operator(
+    report = ti.linalg.qualify_operator(
         operator,
         reference=matrix,
         samples=2,
@@ -153,7 +153,7 @@ def test_rectangular_kernel_without_adjoint_fails_closed():
         for row in range(active_size):
             y[row] = x[row] + x[row + 1]
 
-    operator = experimental.LinearOperator.from_kernel(
+    operator = ti.linalg.LinearOperator.from_kernel(
         forward, (2, 3), topology
     )
     assert operator.shape == (2, 3)
@@ -180,10 +180,10 @@ def test_rectangular_kernel_rejects_invalid_shape():
             y[row] = x[row]
 
     with pytest.raises(RuntimeError, match="range, domain"):
-        ti.linalg.experimental.LinearOperator.from_kernel(
+        ti.linalg.LinearOperator.from_kernel(
             forward, (2, 3, 4), topology
         )
     with pytest.raises(RuntimeError, match="domain extent must be positive"):
-        ti.linalg.experimental.LinearOperator.from_kernel(
+        ti.linalg.LinearOperator.from_kernel(
             forward, (2, 0), topology
         )

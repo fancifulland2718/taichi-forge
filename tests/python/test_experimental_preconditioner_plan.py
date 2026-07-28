@@ -32,12 +32,12 @@ def _diagonal_operator(values):
         for index in range(active_size):
             y[index] = numeric_data[index] * x[topology_data[index]]
 
-    operator = ti.linalg.experimental.LinearOperator.from_kernel(
+    operator = ti.linalg.LinearOperator.from_kernel(
         diagonal,
         size,
         topology,
         numeric=numeric,
-        traits=ti.linalg.experimental.OperatorTraits.spd(),
+        traits=ti.linalg.OperatorTraits.spd(),
     )
     return operator
 

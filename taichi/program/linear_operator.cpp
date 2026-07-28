@@ -373,10 +373,11 @@ OperatorVectorView OperatorVectorView::from_device_pointer(
 
 OperatorVectorView OperatorVectorView::from_dense_storage(
     Program *program,
-    const storage::DenseStorageDescriptor &descriptor,
+    const storage::RuntimeStorageArgument &argument,
     const storage::ResolvedDenseBinding &binding,
     const OperatorSpaceDesc &space,
     bool writable) {
+  const auto &descriptor = argument.descriptor();
   validate_space(space, "dense storage");
   TI_ERROR_IF(!program || !binding.valid ||
                   descriptor.scalar_type() != space.scalar_type ||
@@ -399,6 +400,7 @@ OperatorVectorView OperatorVectorView::from_dense_storage(
   OperatorVectorView result{
       space, address, identity, nullptr, program, writable};
   result.dense_storage = &descriptor;
+  result.runtime_storage = &argument;
   result.resolved_dense_storage = &binding;
   result.allocation_device_identity = binding.allocation.device;
   result.allocation_id = binding.allocation.alloc_id;
@@ -2202,7 +2204,7 @@ OperatorBinding make_vulkan_program_graph_operator_binding(
       OperatorExecutionKind::compiled_graph);
 }
 
-ExperimentalLinearOperatorHandle::ExperimentalLinearOperatorHandle(
+LinearOperatorHandle::LinearOperatorHandle(
     Program *program,
     OperatorBinding binding,
     std::shared_ptr<void> provider_owner,
@@ -2221,64 +2223,64 @@ ExperimentalLinearOperatorHandle::ExperimentalLinearOperatorHandle(
               "no cross-runtime binding was performed.");
 }
 
-ExperimentalLinearOperatorHandle::~ExperimentalLinearOperatorHandle() =
+LinearOperatorHandle::~LinearOperatorHandle() =
     default;
 
-Program *ExperimentalLinearOperatorHandle::program() const {
+Program *LinearOperatorHandle::program() const {
   return program_;
 }
 
 const OperatorDescriptor &
-ExperimentalLinearOperatorHandle::descriptor() const {
+LinearOperatorHandle::descriptor() const {
   return plan_->descriptor();
 }
 
 const OperatorMathematicalTraits &
-ExperimentalLinearOperatorHandle::mathematical_traits() const {
+LinearOperatorHandle::mathematical_traits() const {
   return plan_->mathematical_traits();
 }
 
 const OperatorCapabilities &
-ExperimentalLinearOperatorHandle::capabilities() const {
+LinearOperatorHandle::capabilities() const {
   return plan_->capabilities();
 }
 
-const std::string &ExperimentalLinearOperatorHandle::provider_name() const {
+const std::string &LinearOperatorHandle::provider_name() const {
   return plan_->provider_name();
 }
 
 OperatorExecutionKind
-ExperimentalLinearOperatorHandle::execution_kind() const {
+LinearOperatorHandle::execution_kind() const {
   return plan_->execution_kind();
 }
 
 OperatorResourceStamp
-ExperimentalLinearOperatorHandle::resource_stamp() const {
+LinearOperatorHandle::resource_stamp() const {
   return plan_->resource_stamp();
 }
 
 OperatorPlanRuntimeStatistics
-ExperimentalLinearOperatorHandle::debug_runtime_statistics() const {
+LinearOperatorHandle::debug_runtime_statistics() const {
   return plan_->debug_runtime_statistics();
 }
 
-OperatorBinding ExperimentalLinearOperatorHandle::binding() const {
+OperatorBinding LinearOperatorHandle::binding() const {
   return binding_;
 }
 
-std::unique_ptr<ExperimentalLinearOperatorSession>
-ExperimentalLinearOperatorHandle::begin_session() {
-  return std::make_unique<ExperimentalLinearOperatorSession>(
+std::unique_ptr<LinearOperatorSession>
+LinearOperatorHandle::begin_session() {
+  return std::make_unique<LinearOperatorSession>(
       program_, plan_.get(), plan_->pin());
 }
 
-void ExperimentalLinearOperatorHandle::apply(Program *program,
+void LinearOperatorHandle::apply(Program *program,
                                              const Ndarray &input,
                                              const Ndarray &output) {
   apply_generalized(program, input, nullptr, output, 1.0, 0.0);
 }
 
-void ExperimentalLinearOperatorHandle::apply_generalized(
+void LinearOperatorHandle::apply_generalized(
     Program *program,
     const Ndarray &input,
     const Ndarray *addend,
@@ -2310,20 +2312,38 @@ void ExperimentalLinearOperatorHandle::apply_generalized(
   submission.wait();
 }
 
-void ExperimentalLinearOperatorHandle::apply_dense_storage(
+void LinearOperatorHandle::apply_dense_storage(
     Program *program,
-    const storage::DenseStorageDescriptor &input,
-    const storage::DenseStorageDescriptor &output) {
+    const storage::RuntimeStorageArgument &input,
+    const storage::RuntimeStorageArgument &output) {
   TI_ERROR_IF(program != program_,
               "LinearOperator dense storage apply must use its construction "
               "Program.");
-  TI_ERROR_IF(!plan_->capabilities().dense_storage_operands,
+  const auto &capabilities = plan_->capabilities();
+  TI_ERROR_IF(!capabilities.dense_storage_operands,
               "LinearOperator provider does not accept direct dense storage "
               "operands.");
-  const std::vector<const storage::DenseStorageDescriptor *> descriptors{
+  const auto validate_argument = [&](const storage::RuntimeStorageArgument &arg,
+                                     const char *role) {
+    const auto &qualification = arg.qualification();
+    TI_ERROR_IF(!qualification.capabilities.bindable ||
+                    !qualification.capabilities.zero_copy_qualified,
+                "LinearOperator {} runtime storage is not directly bindable: "
+                "{}.",
+                role, storage::to_string(qualification.reason));
+    TI_ERROR_IF(qualification.dense.execution_mode ==
+                        storage::StorageExecutionMode::kDirectAffine &&
+                    !capabilities.dense_storage_affine_operands,
+                "LinearOperator provider does not accept affine dense storage "
+                "{} operands.",
+                role);
+  };
+  validate_argument(input, "input");
+  validate_argument(output, "output");
+  const std::vector<const storage::RuntimeStorageArgument *> arguments{
       &input, &output};
-  program_->with_resolved_dense_storage_bindings(
-      descriptors,
+  program_->with_resolved_runtime_storage_arguments(
+      arguments,
       [&](const storage::ResolvedDenseBinding *bindings, std::size_t count) {
         TI_ASSERT(count == 2);
         const auto &operator_descriptor = plan_->descriptor();
@@ -2340,7 +2360,7 @@ void ExperimentalLinearOperatorHandle::apply_dense_storage(
       });
 }
 
-void ExperimentalLinearOperatorHandle::update_numeric(
+void LinearOperatorHandle::update_numeric(
     Program *program,
     const NumericUpdateArguments &arguments,
     std::uint64_t expected_topology_version,
@@ -2354,11 +2374,11 @@ void ExperimentalLinearOperatorHandle::update_numeric(
                   expected_numeric_version);
 }
 
-bool ExperimentalLinearOperatorHandle::supports_numeric_update() const {
+bool LinearOperatorHandle::supports_numeric_update() const {
   return static_cast<bool>(numeric_update_);
 }
 
-ExperimentalLinearOperatorSession::ExperimentalLinearOperatorSession(
+LinearOperatorSession::LinearOperatorSession(
     Program *program,
     OperatorPlan *plan,
     OperatorPinnedAction generation)
@@ -2367,7 +2387,7 @@ ExperimentalLinearOperatorSession::ExperimentalLinearOperatorSession(
               "LinearOperator session requires a live operator plan.");
 }
 
-ExperimentalLinearOperatorSession::~ExperimentalLinearOperatorSession() {
+LinearOperatorSession::~LinearOperatorSession() {
   if (submitted_ && program_) {
     try {
       program_->synchronize();
@@ -2378,7 +2398,7 @@ ExperimentalLinearOperatorSession::~ExperimentalLinearOperatorSession() {
   }
 }
 
-void ExperimentalLinearOperatorSession::submit(Program *program,
+void LinearOperatorSession::submit(Program *program,
                                                const Ndarray &input,
                                                const Ndarray &output) {
   TI_ERROR_IF(program != program_,
@@ -2395,14 +2415,14 @@ void ExperimentalLinearOperatorSession::submit(Program *program,
   submitted_ = true;
 }
 
-void ExperimentalLinearOperatorSession::wait() {
+void LinearOperatorSession::wait() {
   if (submitted_) {
     program_->synchronize();
     submitted_ = false;
   }
 }
 
-void ExperimentalLinearOperatorSession::mark_synchronized() {
+void LinearOperatorSession::mark_synchronized() {
   submitted_ = false;
 }
 
@@ -2460,8 +2480,8 @@ OperatorResourceStamp ExperimentalPreconditionerSession::action_stamp()
 
 ExperimentalPreconditionerPlanHandle::ExperimentalPreconditionerPlanHandle(
     Program *program,
-    ExperimentalLinearOperatorHandle &target,
-    ExperimentalLinearOperatorHandle &action,
+    LinearOperatorHandle &target,
+    LinearOperatorHandle &action,
     std::string method)
     : program_(program),
       target_descriptor_(target.descriptor()),
@@ -3121,7 +3141,7 @@ class CompiledKernelActionProvider {
 
   void update_numeric(
       Program *program,
-      const ExperimentalLinearOperatorHandle::NumericUpdateArguments
+      const LinearOperatorHandle::NumericUpdateArguments
           &arguments,
       std::uint64_t expected_topology_version,
       std::uint64_t expected_numeric_version) {
@@ -3213,6 +3233,7 @@ class CompiledKernelActionProvider {
         !arch_is_cpu(program_->compile_config().arch);
     capabilities.binding_rebind = true;
     capabilities.dense_storage_operands = true;
+    capabilities.dense_storage_affine_operands = true;
     return capabilities;
   }
 
@@ -3267,8 +3288,8 @@ class CompiledKernelActionProvider {
 
 }  // namespace
 
-std::unique_ptr<ExperimentalLinearOperatorHandle>
-make_experimental_compiled_kernel_operator_handle(
+std::unique_ptr<LinearOperatorHandle>
+make_compiled_kernel_operator_handle(
     Program *program,
     Kernel &forward_kernel,
     Kernel *adjoint_kernel,
@@ -3287,11 +3308,11 @@ make_experimental_compiled_kernel_operator_handle(
       numeric_version, topology_data, numeric_data);
   auto binding = provider->binding().with_mathematical_traits(
       std::move(mathematical_traits));
-  ExperimentalLinearOperatorHandle::NumericUpdateFn update;
+  LinearOperatorHandle::NumericUpdateFn update;
   if (numeric_data) {
     update = [provider](
                  Program *update_program,
-                 const ExperimentalLinearOperatorHandle::NumericUpdateArguments
+                 const LinearOperatorHandle::NumericUpdateArguments
                      &arguments,
                  std::uint64_t expected_topology_version,
                  std::uint64_t expected_numeric_version) {
@@ -3300,7 +3321,7 @@ make_experimental_compiled_kernel_operator_handle(
                                expected_numeric_version);
     };
   }
-  return std::make_unique<ExperimentalLinearOperatorHandle>(
+  return std::make_unique<LinearOperatorHandle>(
       program, std::move(binding), provider, std::move(update));
 }
 
@@ -3560,15 +3581,26 @@ struct GraphActionGeneration {
              const OperatorVectorView &input,
              const OperatorVectorView &output,
              const std::shared_ptr<GraphActionExecutionState> &state) {
-    TI_ERROR_IF(!input.ndarray || !output.ndarray,
-                "Compiled-Graph actions require ndarray views.");
+    const auto valid_operand = [](const OperatorVectorView &view) {
+      return view.ndarray != nullptr || view.runtime_storage != nullptr;
+    };
+    TI_ERROR_IF(!valid_operand(input) || !valid_operand(output),
+                "Compiled-Graph actions require ndarray or runtime-storage "
+                "views.");
     std::lock_guard<std::mutex> lock(definition->launch_mutex);
     std::unordered_map<std::string, aot::IValue> arguments;
     arguments.reserve(2 + definition->fixed_i32.size() +
                       definition->fixed_ndarrays.size() +
                       numeric_ndarrays.size());
-    arguments.emplace("input", aot::IValue::create(*input.ndarray));
-    arguments.emplace("output", aot::IValue::create(*output.ndarray));
+    const auto graph_value = [](const OperatorVectorView &view) {
+      if (view.runtime_storage) {
+        return aot::IValue::create(*view.runtime_storage);
+      }
+      TI_ASSERT(view.ndarray != nullptr);
+      return aot::IValue::create(*view.ndarray);
+    };
+    arguments.emplace("input", graph_value(input));
+    arguments.emplace("output", graph_value(output));
     for (const auto &[name, value] : definition->fixed_i32) {
       arguments.emplace(name, aot::IValue::create(value));
     }
@@ -3721,7 +3753,7 @@ class CompiledGraphActionProvider {
 
   void update_numeric(
       Program *program,
-      const ExperimentalLinearOperatorHandle::NumericUpdateArguments
+      const LinearOperatorHandle::NumericUpdateArguments
           &arguments,
       std::uint64_t expected_topology_version,
       std::uint64_t expected_numeric_version) {
@@ -3800,6 +3832,8 @@ class CompiledGraphActionProvider {
     capabilities.runtime_capture = arch_is_cuda(arch);
     capabilities.binding_rebind = true;
     capabilities.persistent_workspace = true;
+    capabilities.dense_storage_operands = true;
+    capabilities.dense_storage_affine_operands = true;
     return capabilities;
   }
 
@@ -3884,8 +3918,8 @@ class CompiledGraphActionProvider {
 
 }  // namespace
 
-std::unique_ptr<ExperimentalLinearOperatorHandle>
-make_experimental_compiled_graph_operator_handle(
+std::unique_ptr<LinearOperatorHandle>
+make_compiled_graph_operator_handle(
     Program *program,
     const aot::CompiledGraph &forward_graph,
     const aot::CompiledGraph *adjoint_graph,
@@ -3908,11 +3942,11 @@ make_experimental_compiled_graph_operator_handle(
       std::move(workspace_arguments));
   auto binding = provider->binding().with_mathematical_traits(
       std::move(mathematical_traits));
-  ExperimentalLinearOperatorHandle::NumericUpdateFn update;
+  LinearOperatorHandle::NumericUpdateFn update;
   if (provider->has_numeric_resources()) {
     update = [provider](
                  Program *update_program,
-                 const ExperimentalLinearOperatorHandle::NumericUpdateArguments
+                 const LinearOperatorHandle::NumericUpdateArguments
                      &arguments,
                  std::uint64_t expected_topology_version,
                  std::uint64_t expected_numeric_version) {
@@ -3921,41 +3955,41 @@ make_experimental_compiled_graph_operator_handle(
                                expected_numeric_version);
     };
   }
-  return std::make_unique<ExperimentalLinearOperatorHandle>(
+  return std::make_unique<LinearOperatorHandle>(
       program, std::move(binding), provider, std::move(update));
 }
 
-std::unique_ptr<ExperimentalLinearOperatorHandle>
-make_experimental_linear_operator_handle(
+std::unique_ptr<LinearOperatorHandle>
+make_linear_operator_handle(
     Program *program,
     SparseMatrix &matrix,
     OperatorMathematicalTraits mathematical_traits) {
   auto binding = make_program_sparse_operator_binding(program, matrix)
                      .with_mathematical_traits(
                          std::move(mathematical_traits));
-  return std::make_unique<ExperimentalLinearOperatorHandle>(
+  return std::make_unique<LinearOperatorHandle>(
       program, std::move(binding));
 }
 
-std::unique_ptr<ExperimentalLinearOperatorHandle>
-make_experimental_identity_operator_handle(Program *program,
+std::unique_ptr<LinearOperatorHandle>
+make_identity_operator_handle(Program *program,
                                            OperatorSpaceDesc space) {
-  return std::make_unique<ExperimentalLinearOperatorHandle>(
+  return std::make_unique<LinearOperatorHandle>(
       program, make_identity_operator_binding(std::move(space), program));
 }
 
-std::unique_ptr<ExperimentalLinearOperatorHandle>
-make_experimental_adjoint_operator_handle(
-    ExperimentalLinearOperatorHandle &operand) {
-  return std::make_unique<ExperimentalLinearOperatorHandle>(
+std::unique_ptr<LinearOperatorHandle>
+make_adjoint_operator_handle(
+    LinearOperatorHandle &operand) {
+  return std::make_unique<LinearOperatorHandle>(
       operand.program(), make_adjoint_operator_binding(operand.binding()));
 }
 
-std::unique_ptr<ExperimentalLinearOperatorHandle>
-make_experimental_scaled_operator_handle(
+std::unique_ptr<LinearOperatorHandle>
+make_scaled_operator_handle(
     double scale,
-    ExperimentalLinearOperatorHandle &operand) {
-  return std::make_unique<ExperimentalLinearOperatorHandle>(
+    LinearOperatorHandle &operand) {
+  return std::make_unique<LinearOperatorHandle>(
       operand.program(),
       make_scaled_operator_binding(scale, operand.binding()));
 }
@@ -3963,8 +3997,8 @@ make_experimental_scaled_operator_handle(
 namespace {
 
 void validate_same_public_operator_program(
-    const ExperimentalLinearOperatorHandle &left,
-    const ExperimentalLinearOperatorHandle &right,
+    const LinearOperatorHandle &left,
+    const LinearOperatorHandle &right,
     const char *operation) {
   TI_ERROR_IF(left.program() != right.program(),
               "LinearOperator {} operands must belong to the same Program.",
@@ -3973,29 +4007,29 @@ void validate_same_public_operator_program(
 
 }  // namespace
 
-std::unique_ptr<ExperimentalLinearOperatorHandle>
-make_experimental_sum_operator_handle(
-    ExperimentalLinearOperatorHandle &left,
-    ExperimentalLinearOperatorHandle &right) {
+std::unique_ptr<LinearOperatorHandle>
+make_sum_operator_handle(
+    LinearOperatorHandle &left,
+    LinearOperatorHandle &right) {
   validate_same_public_operator_program(left, right, "sum");
-  return std::make_unique<ExperimentalLinearOperatorHandle>(
+  return std::make_unique<LinearOperatorHandle>(
       left.program(),
       make_sum_operator_binding(left.binding(), right.binding()));
 }
 
-std::unique_ptr<ExperimentalLinearOperatorHandle>
-make_experimental_composed_operator_handle(
-    ExperimentalLinearOperatorHandle &outer,
-    ExperimentalLinearOperatorHandle &inner) {
+std::unique_ptr<LinearOperatorHandle>
+make_composed_operator_handle(
+    LinearOperatorHandle &outer,
+    LinearOperatorHandle &inner) {
   validate_same_public_operator_program(outer, inner, "composition");
-  return std::make_unique<ExperimentalLinearOperatorHandle>(
+  return std::make_unique<LinearOperatorHandle>(
       outer.program(),
       make_composed_operator_binding(outer.binding(), inner.binding()));
 }
 
-std::unique_ptr<ExperimentalLinearOperatorHandle>
-make_experimental_block_diagonal_operator_handle(
-    const std::vector<ExperimentalLinearOperatorHandle *> &blocks) {
+std::unique_ptr<LinearOperatorHandle>
+make_block_diagonal_operator_handle(
+    const std::vector<LinearOperatorHandle *> &blocks) {
   TI_ERROR_IF(blocks.empty(),
               "LinearOperator block_diagonal requires at least one block.");
   TI_ERROR_IF(!blocks.front(),
@@ -4009,25 +4043,25 @@ make_experimental_block_diagonal_operator_handle(
                 "same Program.");
     bindings.push_back(block->binding());
   }
-  return std::make_unique<ExperimentalLinearOperatorHandle>(
+  return std::make_unique<LinearOperatorHandle>(
       program, make_block_diagonal_operator_binding(std::move(bindings)));
 }
 
 std::unique_ptr<ExperimentalPreconditionerPlanHandle>
 make_experimental_preconditioner_plan_handle(
     Program *program,
-    ExperimentalLinearOperatorHandle &target,
-    ExperimentalLinearOperatorHandle &action,
+    LinearOperatorHandle &target,
+    LinearOperatorHandle &action,
     std::string method) {
   return std::make_unique<ExperimentalPreconditionerPlanHandle>(
       program, target, action, std::move(method));
 }
 
-std::unique_ptr<ExperimentalLinearOperatorHandle>
+std::unique_ptr<LinearOperatorHandle>
 make_experimental_preconditioner_action_handle(
     Program *program,
     ExperimentalPreconditionerPlanHandle &plan) {
-  return std::make_unique<ExperimentalLinearOperatorHandle>(
+  return std::make_unique<LinearOperatorHandle>(
       program, plan.consumer_binding());
 }
 

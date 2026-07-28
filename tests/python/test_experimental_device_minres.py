@@ -56,9 +56,9 @@ def _fixed_bsr(block_size, row_offsets, column_indices, blocks):
 
 
 def _indefinite_operator(matrix):
-    return ti.linalg.experimental.LinearOperator.from_sparse_matrix(
+    return ti.linalg.LinearOperator.from_sparse_matrix(
         matrix,
-        traits=ti.linalg.experimental.OperatorTraits(
+        traits=ti.linalg.OperatorTraits(
             self_adjoint=True, positive_definite=False, singular=False
         ),
     )
@@ -147,9 +147,9 @@ def test_device_minres_stored_identity_replay_and_terminal_contracts():
     assert nonfinite.breakdown and not nonfinite.converged
 
     scalar_dense = np.eye(3, dtype=np.float32) * np.float32(2.0)
-    scalar_operator = ti.linalg.experimental.LinearOperator.from_sparse_matrix(
+    scalar_operator = ti.linalg.LinearOperator.from_sparse_matrix(
         _fixed_csr(scalar_dense),
-        traits=ti.linalg.experimental.OperatorTraits(
+        traits=ti.linalg.OperatorTraits(
             self_adjoint=True, singular=False
         ),
     )
@@ -298,10 +298,10 @@ def test_device_minres_compiled_kernel_graph_and_fixed_linear_plan():
             topology_data[1]
         ]
 
-    traits = experimental.OperatorTraits(
+    traits = ti.linalg.OperatorTraits(
         self_adjoint=True, positive_definite=False, singular=False
     )
-    kernel_operator = experimental.LinearOperator.from_kernel(
+    kernel_operator = ti.linalg.LinearOperator.from_kernel(
         symmetric_indefinite, 2, topology, numeric=numeric, traits=traits
     )
     exact = np.asarray([1.25, -0.75], dtype=np.float32)
@@ -347,7 +347,7 @@ def test_device_minres_compiled_kernel_graph_and_fixed_linear_plan():
         input_arg,
         output_arg,
     )
-    graph_operator = experimental.LinearOperator.from_graph(
+    graph_operator = ti.linalg.LinearOperator.from_graph(
         builder.compile(),
         2,
         fixed_i32={"active_size": 2},
@@ -383,12 +383,12 @@ def test_device_minres_compiled_kernel_graph_and_fixed_linear_plan():
         for index in range(active_size):
             y[index] = numeric_data[index] * x[topology_data[index]]
 
-    preconditioner_action = experimental.LinearOperator.from_kernel(
+    preconditioner_action = ti.linalg.LinearOperator.from_kernel(
         inverse_diagonal,
         2,
         topology,
         numeric=inverse_numeric,
-        traits=experimental.OperatorTraits.spd(),
+        traits=ti.linalg.OperatorTraits.spd(),
     )
     preconditioner = experimental.PreconditionerPlan(
         kernel_operator,
@@ -417,12 +417,12 @@ def test_device_minres_compiled_kernel_graph_and_fixed_linear_plan():
     assert preconditioned_stats["operations"]["preconditioner_apply_calls"] > 0
     assert preconditioned_stats["operations"]["preconditioner_generation_pins"] > 0
 
-    untrusted = experimental.LinearOperator.from_kernel(
+    untrusted = ti.linalg.LinearOperator.from_kernel(
         inverse_diagonal,
         2,
         topology,
         numeric=inverse_numeric,
-        traits=experimental.OperatorTraits(self_adjoint=True),
+        traits=ti.linalg.OperatorTraits(self_adjoint=True),
     )
     with pytest.raises(RuntimeError, match="positive_definite=True"):
         experimental.SolvePlan(

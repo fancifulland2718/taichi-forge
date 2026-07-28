@@ -21,6 +21,7 @@
 namespace taichi::lang {
 
 class SparseMatrix;
+struct OperatorVectorView;
 std::uint64_t allocate_sparse_matrix_id();
 
 class CudaSparseAssemblyPlan;
@@ -470,8 +471,8 @@ class CompiledGraphLinearOperator final : public SparseMatrix {
   };
 
   void apply_with_execution(Program *program,
-                            const Ndarray &input,
-                            const Ndarray &output,
+                            const OperatorVectorView &input,
+                            const OperatorVectorView &output,
                             OperatorExecutionKind execution_kind,
                             aot::CompiledGraphJITCache *cache);
 

@@ -33,12 +33,12 @@ def _diagonal_operator(values):
         for index in range(active_size):
             y[index] = numeric_data[index] * x[topology_data[index]]
 
-    return ti.linalg.experimental.LinearOperator.from_kernel(
+    return ti.linalg.LinearOperator.from_kernel(
         diagonal,
         size,
         topology,
         numeric=numeric,
-        traits=ti.linalg.experimental.OperatorTraits.spd(),
+        traits=ti.linalg.OperatorTraits.spd(),
     )
 
 
@@ -54,9 +54,9 @@ def _stored_diagonal_operator(values):
     matrix = ti.linalg.SparsePattern.csr(
         size, size, offsets, indices
     ).matrix(numeric)
-    return ti.linalg.experimental.LinearOperator.from_sparse_matrix(
+    return ti.linalg.LinearOperator.from_sparse_matrix(
         matrix,
-        traits=ti.linalg.experimental.OperatorTraits(singular=False),
+        traits=ti.linalg.OperatorTraits(singular=False),
     )
 
 

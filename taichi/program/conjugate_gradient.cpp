@@ -249,7 +249,7 @@ std::unique_ptr<PreconditionerPlan> make_fixed_preconditioner_plan(
 std::unique_ptr<PreconditionerPlan> make_fixed_preconditioner_plan(
     Program *program,
     OperatorPlan &target_plan,
-    ExperimentalLinearOperatorHandle &preconditioner,
+    LinearOperatorHandle &preconditioner,
     std::string method);
 void append_operator_plan_statistics(
     const OperatorPlan &plan,
@@ -455,7 +455,7 @@ CUCG::CUCG(Program *program,
 
 CUCG::CUCG(Program *program,
            CompiledKernelLinearOperator &A,
-           ExperimentalLinearOperatorHandle &preconditioner,
+           LinearOperatorHandle &preconditioner,
            int max_iters,
            float absolute_tolerance,
            bool verbose,
@@ -1541,10 +1541,10 @@ std::unique_ptr<CUCG> make_cuda_compiled_kernel_pcg_solver(
 }
 
 std::unique_ptr<CUCG>
-make_cuda_experimental_linear_operator_pcg_solver(
+make_cuda_experimental_pcg_solver(
     Program *program,
     CompiledKernelLinearOperator &A,
-    ExperimentalLinearOperatorHandle &preconditioner,
+    LinearOperatorHandle &preconditioner,
     int max_iters,
     float absolute_tolerance,
     bool verbose,
@@ -1802,7 +1802,7 @@ std::unique_ptr<PreconditionerPlan> make_fixed_preconditioner_plan(
 void validate_fixed_linear_operator_preconditioner(
     Program *program,
     const OperatorDescriptor &target_descriptor,
-    ExperimentalLinearOperatorHandle &preconditioner) {
+    LinearOperatorHandle &preconditioner) {
   TI_ERROR_IF(!program || preconditioner.program() != program,
               "LinearOperator preconditioner must belong to the target "
               "Program generation.");
@@ -1825,7 +1825,7 @@ void validate_fixed_linear_operator_preconditioner(
 void validate_fixed_linear_right_operator_preconditioner(
     Program *program,
     const OperatorDescriptor &target_descriptor,
-    ExperimentalLinearOperatorHandle &preconditioner) {
+    LinearOperatorHandle &preconditioner) {
   TI_ERROR_IF(!program || preconditioner.program() != program,
               "LinearOperator preconditioner must belong to the target "
               "Program generation.");
@@ -1843,7 +1843,7 @@ void validate_fixed_linear_right_operator_preconditioner(
 std::unique_ptr<PreconditionerPlan> make_fixed_preconditioner_plan(
     Program *program,
     OperatorPlan &target_plan,
-    ExperimentalLinearOperatorHandle &preconditioner,
+    LinearOperatorHandle &preconditioner,
     std::string method) {
   validate_fixed_linear_operator_preconditioner(
       program, target_plan.descriptor(), preconditioner);
@@ -1968,7 +1968,7 @@ std::unique_ptr<PreconditionerPlan> make_solver_preconditioner_plan(
 std::unique_ptr<PreconditionerPlan> make_solver_preconditioner_plan(
     Program *program,
     OperatorPlan &target_plan,
-    ExperimentalLinearOperatorHandle &preconditioner,
+    LinearOperatorHandle &preconditioner,
     std::string method) {
   return make_fixed_preconditioner_plan(program, target_plan,
                                         preconditioner, std::move(method));
@@ -1977,7 +1977,7 @@ std::unique_ptr<PreconditionerPlan> make_solver_preconditioner_plan(
 std::unique_ptr<PreconditionerPlan> make_solver_right_preconditioner_plan(
     Program *program,
     OperatorPlan &target_plan,
-    ExperimentalLinearOperatorHandle &preconditioner,
+    LinearOperatorHandle &preconditioner,
     std::string method) {
   validate_fixed_linear_right_operator_preconditioner(
       program, target_plan.descriptor(), preconditioner);
@@ -1998,7 +1998,7 @@ std::unique_ptr<PreconditionerPlan>
 make_solver_flexible_right_preconditioner_plan(
     Program *program,
     OperatorPlan &target_plan,
-    ExperimentalLinearOperatorHandle &preconditioner,
+    LinearOperatorHandle &preconditioner,
     std::string method) {
   validate_fixed_linear_right_operator_preconditioner(
       program, target_plan.descriptor(), preconditioner);
@@ -2116,7 +2116,7 @@ CpuSparseCGPlan::bind_preconditioner(
 std::unique_ptr<CpuSparseCGPlan::PreconditionerBinding>
 CpuSparseCGPlan::bind_preconditioner(
     Program *program,
-    ExperimentalLinearOperatorHandle &preconditioner) {
+    LinearOperatorHandle &preconditioner) {
   TI_ERROR_IF(preconditioner.program() != program,
               "CPU LinearOperator preconditioner must belong to the "
               "construction Program.");
@@ -2202,7 +2202,7 @@ CpuSparseCGPlan::CpuSparseCGPlan(
 
 CpuSparseCGPlan::CpuSparseCGPlan(
     Program *program,
-    ExperimentalLinearOperatorHandle &operator_handle,
+    LinearOperatorHandle &operator_handle,
     int max_iterations,
     double absolute_tolerance,
     double relative_tolerance)
@@ -2217,8 +2217,8 @@ CpuSparseCGPlan::CpuSparseCGPlan(
 
 CpuSparseCGPlan::CpuSparseCGPlan(
     Program *program,
-    ExperimentalLinearOperatorHandle &operator_handle,
-    ExperimentalLinearOperatorHandle &preconditioner,
+    LinearOperatorHandle &operator_handle,
+    LinearOperatorHandle &preconditioner,
     int max_iterations,
     double absolute_tolerance,
     double relative_tolerance)
@@ -2640,9 +2640,9 @@ std::unique_ptr<CpuSparseCGPlan> make_cpu_operator_cg_solver(
 }
 
 std::unique_ptr<CpuSparseCGPlan>
-make_cpu_experimental_linear_operator_cg_solver(
+make_cpu_experimental_cg_solver(
     Program *program,
-    ExperimentalLinearOperatorHandle &operator_handle,
+    LinearOperatorHandle &operator_handle,
     int max_iterations,
     double absolute_tolerance,
     double relative_tolerance) {
@@ -2652,10 +2652,10 @@ make_cpu_experimental_linear_operator_cg_solver(
 }
 
 std::unique_ptr<CpuSparseCGPlan>
-make_cpu_experimental_linear_operator_pcg_solver(
+make_cpu_experimental_pcg_solver(
     Program *program,
-    ExperimentalLinearOperatorHandle &operator_handle,
-    ExperimentalLinearOperatorHandle &preconditioner,
+    LinearOperatorHandle &operator_handle,
+    LinearOperatorHandle &preconditioner,
     int max_iterations,
     double absolute_tolerance,
     double relative_tolerance) {
@@ -2782,7 +2782,7 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(
 VulkanCGIterationPlan::VulkanCGIterationPlan(
     Program *program,
     CompiledKernelLinearOperator &matrix,
-    ExperimentalLinearOperatorHandle &preconditioner,
+    LinearOperatorHandle &preconditioner,
     int max_iterations,
     float absolute_tolerance,
     float relative_tolerance)
@@ -2806,7 +2806,7 @@ VulkanCGIterationPlan::VulkanCGIterationPlan(Program *program,
                                                  *block_preconditioner,
                                              CompiledKernelPreconditionerPlan
                                                  *compiled_kernel_preconditioner,
-                                             ExperimentalLinearOperatorHandle
+                                             LinearOperatorHandle
                                                  *operator_preconditioner) {
 #if defined(TI_WITH_VULKAN)
   TI_ERROR_IF(!program || program->compile_config().arch != Arch::vulkan,
@@ -3681,10 +3681,10 @@ make_vulkan_compiled_kernel_pcg_convergence_plan(
 }
 
 std::unique_ptr<VulkanCGIterationPlan>
-make_vulkan_experimental_linear_operator_pcg_convergence_plan(
+make_vulkan_experimental_pcg_convergence_plan(
     Program *program,
     CompiledKernelLinearOperator &matrix,
-    ExperimentalLinearOperatorHandle &preconditioner,
+    LinearOperatorHandle &preconditioner,
     int max_iterations,
     float absolute_tolerance,
     float relative_tolerance) {

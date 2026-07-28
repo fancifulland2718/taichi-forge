@@ -206,14 +206,14 @@ struct DeviceGMRESVulkanReplayState {};
 
 DeviceGMRES::DeviceGMRES(
     Program *program,
-    ExperimentalLinearOperatorHandle &operator_handle,
+    LinearOperatorHandle &operator_handle,
     SparseMatrix *stored_matrix,
-    ExperimentalLinearOperatorHandle *preconditioner,
+    LinearOperatorHandle *preconditioner,
     int max_iterations,
     int restart,
     float absolute_tolerance,
     float relative_tolerance,
-    std::vector<ExperimentalLinearOperatorHandle *>
+    std::vector<LinearOperatorHandle *>
         flexible_preconditioners)
     : program_(program),
       operator_handle_(&operator_handle),
@@ -1455,9 +1455,9 @@ DeviceGMRES::debug_runtime_statistics() const {
 
 std::unique_ptr<DeviceGMRES> make_device_gmres_solver(
     Program *program,
-    ExperimentalLinearOperatorHandle &operator_handle,
+    LinearOperatorHandle &operator_handle,
     SparseMatrix *stored_matrix,
-    ExperimentalLinearOperatorHandle *preconditioner,
+    LinearOperatorHandle *preconditioner,
     int max_iterations,
     int restart,
     float absolute_tolerance,
@@ -1469,8 +1469,8 @@ std::unique_ptr<DeviceGMRES> make_device_gmres_solver(
 
 std::unique_ptr<DeviceGMRES> make_device_fgmres_solver(
     Program *program,
-    ExperimentalLinearOperatorHandle &operator_handle,
-    std::vector<ExperimentalLinearOperatorHandle *> preconditioners,
+    LinearOperatorHandle &operator_handle,
+    std::vector<LinearOperatorHandle *> preconditioners,
     int max_iterations,
     int restart,
     float absolute_tolerance,

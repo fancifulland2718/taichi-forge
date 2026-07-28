@@ -52,9 +52,9 @@ def test_provider_neutral_minres_fixed_csr_reuses_workspace_and_generation(dtype
         dtype=np.float64 if dtype == ti.f64 else np.float32,
     )
     matrix = _fixed_csr(matrix_host, dtype)
-    operator = experimental.LinearOperator.from_sparse_matrix(
+    operator = ti.linalg.LinearOperator.from_sparse_matrix(
         matrix,
-        traits=experimental.OperatorTraits(
+        traits=ti.linalg.OperatorTraits(
             self_adjoint=True, positive_definite=False, singular=False
         ),
     )
@@ -105,12 +105,12 @@ def test_provider_neutral_minres_compiled_kernel_and_terminal_contracts():
         y[0] = numeric_data[0] * x[0] + numeric_data[1] * x[1]
         y[1] = numeric_data[2] * x[0] + numeric_data[3] * x[1]
 
-    operator = experimental.LinearOperator.from_kernel(
+    operator = ti.linalg.LinearOperator.from_kernel(
         symmetric_indefinite,
         2,
         topology,
         numeric=numeric,
-        traits=experimental.OperatorTraits(
+        traits=ti.linalg.OperatorTraits(
             self_adjoint=True, positive_definite=False, singular=False
         ),
     )
@@ -141,20 +141,20 @@ def test_provider_neutral_minres_compiled_kernel_and_terminal_contracts():
 def test_provider_neutral_minres_trait_and_preconditioner_gates():
     experimental = ti.linalg.experimental
     matrix = _fixed_csr(np.diag([1.0, -2.0]).astype(np.float32), ti.f32)
-    unknown = experimental.LinearOperator.from_sparse_matrix(matrix)
+    unknown = ti.linalg.LinearOperator.from_sparse_matrix(matrix)
     with pytest.raises(RuntimeError, match="self_adjoint=True"):
         experimental.SolvePlan(unknown, method="minres")
 
-    singular = experimental.LinearOperator.from_sparse_matrix(
+    singular = ti.linalg.LinearOperator.from_sparse_matrix(
         matrix,
-        traits=experimental.OperatorTraits(self_adjoint=True, singular=True),
+        traits=ti.linalg.OperatorTraits(self_adjoint=True, singular=True),
     )
     with pytest.raises(RuntimeError, match="minimum-length"):
         experimental.SolvePlan(singular, method="minres")
 
-    valid = experimental.LinearOperator.from_sparse_matrix(
+    valid = ti.linalg.LinearOperator.from_sparse_matrix(
         matrix,
-        traits=experimental.OperatorTraits(
+        traits=ti.linalg.OperatorTraits(
             self_adjoint=True, positive_definite=False, singular=False
         ),
     )
@@ -162,5 +162,5 @@ def test_provider_neutral_minres_trait_and_preconditioner_gates():
         experimental.SolvePlan(
             valid,
             method="minres",
-            preconditioner=experimental.identity(2),
+            preconditioner=ti.linalg.identity(2),
         )

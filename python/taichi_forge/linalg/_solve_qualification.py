@@ -12,7 +12,7 @@ import numpy as np
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang._ndarray import ScalarNdarray
 from taichi_forge.lang.exception import TaichiRuntimeError
-from taichi_forge.linalg.experimental import (
+from taichi_forge.linalg._runtime import (
     BatchedSolvePlan,
     LinearOperator,
     PreconditionerPlan,

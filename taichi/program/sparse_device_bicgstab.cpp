@@ -202,9 +202,9 @@ struct DeviceBiCGSTABVulkanReplayState {};
 
 DeviceBiCGSTAB::DeviceBiCGSTAB(
     Program *program,
-    ExperimentalLinearOperatorHandle &operator_handle,
+    LinearOperatorHandle &operator_handle,
     SparseMatrix *stored_matrix,
-    ExperimentalLinearOperatorHandle *preconditioner,
+    LinearOperatorHandle *preconditioner,
     int max_iterations,
     float absolute_tolerance,
     float relative_tolerance)
@@ -1243,9 +1243,9 @@ DeviceBiCGSTAB::debug_runtime_statistics() const {
 
 std::unique_ptr<DeviceBiCGSTAB> make_device_bicgstab_solver(
     Program *program,
-    ExperimentalLinearOperatorHandle &operator_handle,
+    LinearOperatorHandle &operator_handle,
     SparseMatrix *stored_matrix,
-    ExperimentalLinearOperatorHandle *preconditioner,
+    LinearOperatorHandle *preconditioner,
     int max_iterations,
     float absolute_tolerance,
     float relative_tolerance) {

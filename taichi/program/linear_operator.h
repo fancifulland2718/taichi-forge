@@ -34,6 +34,7 @@ class CompiledKernelLinearOperator;
 class CompiledGraphLinearOperator;
 namespace storage {
 class DenseStorageDescriptor;
+class RuntimeStorageArgument;
 struct ResolvedDenseBinding;
 }  // namespace storage
 
@@ -99,6 +100,7 @@ struct OperatorCapabilities {
   bool binding_rebind{false};
   bool persistent_workspace{false};
   bool dense_storage_operands{false};
+  bool dense_storage_affine_operands{false};
 };
 
 using OperatorDependencyMask = std::uint32_t;
@@ -197,6 +199,7 @@ struct OperatorVectorView {
   Program *program{nullptr};
   bool writable{false};
   const storage::DenseStorageDescriptor *dense_storage{nullptr};
+  const storage::RuntimeStorageArgument *runtime_storage{nullptr};
   const storage::ResolvedDenseBinding *resolved_dense_storage{nullptr};
   const void *allocation_device_identity{nullptr};
   std::uint64_t allocation_id{0};
@@ -217,7 +220,7 @@ struct OperatorVectorView {
                                                 bool writable);
   static OperatorVectorView from_dense_storage(
       Program *program,
-      const storage::DenseStorageDescriptor &descriptor,
+      const storage::RuntimeStorageArgument &argument,
       const storage::ResolvedDenseBinding &binding,
       const OperatorSpaceDesc &space,
       bool writable);
@@ -510,11 +513,11 @@ class OperatorPlan {
   OperatorPlanRuntimeStatistics statistics_;
 };
 
-// Opaque native state behind the experimental Python LinearOperator API.
+// Opaque native state behind the stable Python LinearOperator API.
 // It deliberately exposes neither provider resources nor submission tickets:
 // the public synchronous boundary owns one reusable OperatorPlan and keeps all
 // provider-specific execution/lifetime rules in this layer.
-class ExperimentalLinearOperatorHandle {
+class LinearOperatorHandle {
  public:
   using NumericUpdateArguments =
       std::unordered_map<std::string, const Ndarray *>;
@@ -524,15 +527,15 @@ class ExperimentalLinearOperatorHandle {
       std::uint64_t,
       std::uint64_t)>;
 
-  ExperimentalLinearOperatorHandle(Program *program,
+  LinearOperatorHandle(Program *program,
                                    OperatorBinding binding,
                                    std::shared_ptr<void> provider_owner = {},
                                    NumericUpdateFn numeric_update = {});
-  ExperimentalLinearOperatorHandle(
-      const ExperimentalLinearOperatorHandle &) = delete;
-  ExperimentalLinearOperatorHandle &operator=(
-      const ExperimentalLinearOperatorHandle &) = delete;
-  ~ExperimentalLinearOperatorHandle();
+  LinearOperatorHandle(
+      const LinearOperatorHandle &) = delete;
+  LinearOperatorHandle &operator=(
+      const LinearOperatorHandle &) = delete;
+  ~LinearOperatorHandle();
 
   Program *program() const;
   const OperatorDescriptor &descriptor() const;
@@ -544,7 +547,7 @@ class ExperimentalLinearOperatorHandle {
   OperatorPlanRuntimeStatistics debug_runtime_statistics() const;
   OperatorBinding binding() const;
 
-  std::unique_ptr<class ExperimentalLinearOperatorSession> begin_session();
+  std::unique_ptr<class LinearOperatorSession> begin_session();
 
   void apply(Program *program,
              const Ndarray &input,
@@ -557,8 +560,8 @@ class ExperimentalLinearOperatorHandle {
                          double beta);
   void apply_dense_storage(
       Program *program,
-      const storage::DenseStorageDescriptor &input,
-      const storage::DenseStorageDescriptor &output);
+      const storage::RuntimeStorageArgument &input,
+      const storage::RuntimeStorageArgument &output);
   void update_numeric(Program *program,
                       const NumericUpdateArguments &arguments,
                       std::uint64_t expected_topology_version,
@@ -577,16 +580,16 @@ class ExperimentalLinearOperatorHandle {
 // provider submissions with backend-native recurrence kernels. It is private
 // to the Python experimental API: ordinary LinearOperator.apply() remains a
 // synchronous boundary.
-class ExperimentalLinearOperatorSession {
+class LinearOperatorSession {
  public:
-  ExperimentalLinearOperatorSession(Program *program,
+  LinearOperatorSession(Program *program,
                                     OperatorPlan *plan,
                                     OperatorPinnedAction generation);
-  ExperimentalLinearOperatorSession(
-      const ExperimentalLinearOperatorSession &) = delete;
-  ExperimentalLinearOperatorSession &operator=(
-      const ExperimentalLinearOperatorSession &) = delete;
-  ~ExperimentalLinearOperatorSession();
+  LinearOperatorSession(
+      const LinearOperatorSession &) = delete;
+  LinearOperatorSession &operator=(
+      const LinearOperatorSession &) = delete;
+  ~LinearOperatorSession();
 
   void submit(Program *program,
               const Ndarray &input,
@@ -660,8 +663,8 @@ class ExperimentalPreconditionerPlanHandle {
  public:
   ExperimentalPreconditionerPlanHandle(
       Program *program,
-      ExperimentalLinearOperatorHandle &target,
-      ExperimentalLinearOperatorHandle &action,
+      LinearOperatorHandle &target,
+      LinearOperatorHandle &action,
       std::string method);
   ExperimentalPreconditionerPlanHandle(
       const ExperimentalPreconditionerPlanHandle &) = delete;
@@ -835,13 +838,13 @@ OperatorMathematicalTraits make_asserted_operator_traits(
     int positive_semidefinite,
     int singular);
 
-std::unique_ptr<ExperimentalLinearOperatorHandle>
-make_experimental_linear_operator_handle(
+std::unique_ptr<LinearOperatorHandle>
+make_linear_operator_handle(
     Program *program,
     SparseMatrix &matrix,
     OperatorMathematicalTraits mathematical_traits);
-std::unique_ptr<ExperimentalLinearOperatorHandle>
-make_experimental_compiled_kernel_operator_handle(
+std::unique_ptr<LinearOperatorHandle>
+make_compiled_kernel_operator_handle(
     Program *program,
     Kernel &forward_kernel,
     Kernel *adjoint_kernel,
@@ -852,8 +855,8 @@ make_experimental_compiled_kernel_operator_handle(
     const Ndarray &topology_data,
     const Ndarray *numeric_data,
     OperatorMathematicalTraits mathematical_traits);
-std::unique_ptr<ExperimentalLinearOperatorHandle>
-make_experimental_compiled_graph_operator_handle(
+std::unique_ptr<LinearOperatorHandle>
+make_compiled_graph_operator_handle(
     Program *program,
     const aot::CompiledGraph &forward_graph,
     const aot::CompiledGraph *adjoint_graph,
@@ -866,34 +869,34 @@ make_experimental_compiled_graph_operator_handle(
     std::unordered_map<std::string, const Ndarray *> numeric_arguments,
     std::unordered_map<std::string, const Ndarray *> workspace_arguments,
     OperatorMathematicalTraits mathematical_traits);
-std::unique_ptr<ExperimentalLinearOperatorHandle>
-make_experimental_identity_operator_handle(Program *program,
+std::unique_ptr<LinearOperatorHandle>
+make_identity_operator_handle(Program *program,
                                            OperatorSpaceDesc space);
-std::unique_ptr<ExperimentalLinearOperatorHandle>
-make_experimental_adjoint_operator_handle(
-    ExperimentalLinearOperatorHandle &operand);
-std::unique_ptr<ExperimentalLinearOperatorHandle>
-make_experimental_scaled_operator_handle(
+std::unique_ptr<LinearOperatorHandle>
+make_adjoint_operator_handle(
+    LinearOperatorHandle &operand);
+std::unique_ptr<LinearOperatorHandle>
+make_scaled_operator_handle(
     double scale,
-    ExperimentalLinearOperatorHandle &operand);
-std::unique_ptr<ExperimentalLinearOperatorHandle>
-make_experimental_sum_operator_handle(
-    ExperimentalLinearOperatorHandle &left,
-    ExperimentalLinearOperatorHandle &right);
-std::unique_ptr<ExperimentalLinearOperatorHandle>
-make_experimental_composed_operator_handle(
-    ExperimentalLinearOperatorHandle &outer,
-    ExperimentalLinearOperatorHandle &inner);
-std::unique_ptr<ExperimentalLinearOperatorHandle>
-make_experimental_block_diagonal_operator_handle(
-    const std::vector<ExperimentalLinearOperatorHandle *> &blocks);
+    LinearOperatorHandle &operand);
+std::unique_ptr<LinearOperatorHandle>
+make_sum_operator_handle(
+    LinearOperatorHandle &left,
+    LinearOperatorHandle &right);
+std::unique_ptr<LinearOperatorHandle>
+make_composed_operator_handle(
+    LinearOperatorHandle &outer,
+    LinearOperatorHandle &inner);
+std::unique_ptr<LinearOperatorHandle>
+make_block_diagonal_operator_handle(
+    const std::vector<LinearOperatorHandle *> &blocks);
 std::unique_ptr<ExperimentalPreconditionerPlanHandle>
 make_experimental_preconditioner_plan_handle(
     Program *program,
-    ExperimentalLinearOperatorHandle &target,
-    ExperimentalLinearOperatorHandle &action,
+    LinearOperatorHandle &target,
+    LinearOperatorHandle &action,
     std::string method);
-std::unique_ptr<ExperimentalLinearOperatorHandle>
+std::unique_ptr<LinearOperatorHandle>
 make_experimental_preconditioner_action_handle(
     Program *program,
     ExperimentalPreconditionerPlanHandle &plan);

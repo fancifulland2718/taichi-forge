@@ -1,9 +1,27 @@
-"""Taichi support module for sparse matrix operations."""
+"""Runtime-bound and sparse linear algebra support."""
 
 from taichi_forge.linalg import experimental
-from taichi_forge.linalg.sparse_cg import SparseCG
+from taichi_forge.linalg._runtime import (
+    LinearOperator,
+    OperatorCapabilities,
+    OperatorQualificationReport,
+    OperatorTraits,
+    VectorView,
+    aslinearoperator,
+    block_diagonal,
+    identity,
+    qualify_operator,
+    summarize_operator_qualifications,
+    vector_io_capabilities,
+    vector_view,
+)
+from taichi_forge.linalg.matrixfree_cg import (
+    FieldLinearOperator,
+    MatrixFreeBICGSTAB,
+    MatrixFreeCG,
+)
 from taichi_forge.linalg.sparse_bicgstab import SparseBiCGSTAB
+from taichi_forge.linalg.sparse_cg import SparseCG
 from taichi_forge.linalg.sparse_minres import SparseMINRES
 from taichi_forge.linalg.sparse_matrix import *
 from taichi_forge.linalg.sparse_solver import SparseSolver
-from taichi_forge.linalg.matrixfree_cg import *

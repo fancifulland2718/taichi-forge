@@ -28,7 +28,7 @@ class OperatorPlan;
 class OperatorBinding;
 class OperatorPinnedAction;
 class PreconditionerPlan;
-class ExperimentalLinearOperatorHandle;
+class LinearOperatorHandle;
 struct CudaSolverChunkReplayState;
 struct VulkanSolverChunkReplayState;
 
@@ -501,7 +501,7 @@ class CUCG {
        float relative_tolerance = 0.0f);
   CUCG(Program *program,
        CompiledKernelLinearOperator &A,
-       ExperimentalLinearOperatorHandle &preconditioner,
+       LinearOperatorHandle &preconditioner,
        int max_iters,
        float absolute_tolerance,
        bool verbose,
@@ -612,7 +612,7 @@ class CUCG {
   CompiledKernelLinearOperator *compiled_kernel_operator_{nullptr};
   CompiledGraphLinearOperator *compiled_graph_operator_{nullptr};
   CompiledKernelPreconditionerPlan *compiled_kernel_preconditioner_{nullptr};
-  ExperimentalLinearOperatorHandle *operator_preconditioner_{nullptr};
+  LinearOperatorHandle *operator_preconditioner_{nullptr};
   int max_iters_{0};
   float absolute_tolerance_{0.0f};
   float relative_tolerance_{0.0f};
@@ -712,10 +712,10 @@ std::unique_ptr<CUCG> make_cuda_compiled_kernel_pcg_solver(
     float relative_tolerance = 0.0f);
 
 std::unique_ptr<CUCG>
-make_cuda_experimental_linear_operator_pcg_solver(
+make_cuda_experimental_pcg_solver(
     Program *program,
     CompiledKernelLinearOperator &A,
-    ExperimentalLinearOperatorHandle &preconditioner,
+    LinearOperatorHandle &preconditioner,
     int max_iters,
     float absolute_tolerance,
     bool verbose,
@@ -736,18 +736,18 @@ std::unique_ptr<PreconditionerPlan> make_solver_preconditioner_plan(
 std::unique_ptr<PreconditionerPlan> make_solver_preconditioner_plan(
     Program *program,
     OperatorPlan &target_plan,
-    ExperimentalLinearOperatorHandle &preconditioner,
+    LinearOperatorHandle &preconditioner,
     std::string method);
 std::unique_ptr<PreconditionerPlan> make_solver_right_preconditioner_plan(
     Program *program,
     OperatorPlan &target_plan,
-    ExperimentalLinearOperatorHandle &preconditioner,
+    LinearOperatorHandle &preconditioner,
     std::string method);
 std::unique_ptr<PreconditionerPlan>
 make_solver_flexible_right_preconditioner_plan(
     Program *program,
     OperatorPlan &target_plan,
-    ExperimentalLinearOperatorHandle &preconditioner,
+    LinearOperatorHandle &preconditioner,
     std::string method);
 void append_solver_preconditioner_plan_statistics(
     const PreconditionerPlan &plan,
@@ -782,13 +782,13 @@ class CpuSparseCGPlan {
                   double absolute_tolerance,
                   double relative_tolerance = 0.0);
   CpuSparseCGPlan(Program *program,
-                  ExperimentalLinearOperatorHandle &operator_handle,
+                  LinearOperatorHandle &operator_handle,
                   int max_iterations,
                   double absolute_tolerance,
                   double relative_tolerance = 0.0);
   CpuSparseCGPlan(Program *program,
-                  ExperimentalLinearOperatorHandle &operator_handle,
-                  ExperimentalLinearOperatorHandle &preconditioner,
+                  LinearOperatorHandle &operator_handle,
+                  LinearOperatorHandle &preconditioner,
                   int max_iterations,
                   double absolute_tolerance,
                   double relative_tolerance = 0.0);
@@ -855,7 +855,7 @@ class CpuSparseCGPlan {
       CompiledKernelPreconditionerPlan &preconditioner);
   static std::unique_ptr<PreconditionerBinding> bind_preconditioner(
       Program *program,
-      ExperimentalLinearOperatorHandle &preconditioner);
+      LinearOperatorHandle &preconditioner);
   void apply_operator(const OperatorPinnedAction &generation,
                       const Ndarray &input,
                       const Ndarray &output);
@@ -906,18 +906,18 @@ std::unique_ptr<CpuSparseCGPlan> make_cpu_operator_cg_solver(
     double relative_tolerance = 0.0);
 
 std::unique_ptr<CpuSparseCGPlan>
-make_cpu_experimental_linear_operator_cg_solver(
+make_cpu_experimental_cg_solver(
     Program *program,
-    ExperimentalLinearOperatorHandle &operator_handle,
+    LinearOperatorHandle &operator_handle,
     int max_iterations,
     double absolute_tolerance,
     double relative_tolerance = 0.0);
 
 std::unique_ptr<CpuSparseCGPlan>
-make_cpu_experimental_linear_operator_pcg_solver(
+make_cpu_experimental_pcg_solver(
     Program *program,
-    ExperimentalLinearOperatorHandle &operator_handle,
-    ExperimentalLinearOperatorHandle &preconditioner,
+    LinearOperatorHandle &operator_handle,
+    LinearOperatorHandle &preconditioner,
     int max_iterations,
     double absolute_tolerance,
     double relative_tolerance = 0.0);
@@ -990,7 +990,7 @@ class VulkanCGIterationPlan {
   VulkanCGIterationPlan(
       Program *program,
       CompiledKernelLinearOperator &matrix,
-      ExperimentalLinearOperatorHandle &preconditioner,
+      LinearOperatorHandle &preconditioner,
       int max_iterations,
       float absolute_tolerance,
       float relative_tolerance = 0.0f);
@@ -1045,7 +1045,7 @@ class VulkanCGIterationPlan {
                             *block_preconditioner,
                         CompiledKernelPreconditionerPlan
                             *compiled_kernel_preconditioner,
-                        ExperimentalLinearOperatorHandle
+                        LinearOperatorHandle
                             *operator_preconditioner);
   bool has_preconditioner() const;
   void apply_preconditioner(Program *program,
@@ -1067,7 +1067,7 @@ class VulkanCGIterationPlan {
   SparseJacobiPreconditionerPlan *preconditioner_{nullptr};
   SparseBlockJacobiPreconditionerPlan *block_preconditioner_{nullptr};
   CompiledKernelPreconditionerPlan *compiled_kernel_preconditioner_{nullptr};
-  ExperimentalLinearOperatorHandle *operator_preconditioner_{nullptr};
+  LinearOperatorHandle *operator_preconditioner_{nullptr};
   int fixed_iterations_{0};
   float absolute_tolerance_{0.0f};
   float relative_tolerance_{0.0f};
@@ -1181,10 +1181,10 @@ make_vulkan_compiled_kernel_pcg_convergence_plan(
     float relative_tolerance = 0.0f);
 
 std::unique_ptr<VulkanCGIterationPlan>
-make_vulkan_experimental_linear_operator_pcg_convergence_plan(
+make_vulkan_experimental_pcg_convergence_plan(
     Program *program,
     CompiledKernelLinearOperator &matrix,
-    ExperimentalLinearOperatorHandle &preconditioner,
+    LinearOperatorHandle &preconditioner,
     int max_iterations,
     float absolute_tolerance,
     float relative_tolerance = 0.0f);

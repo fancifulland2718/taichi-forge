@@ -49,7 +49,7 @@ def _fixed_csr(dense):
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_experimental_identity_composition_and_apply():
     experimental = ti.linalg.experimental
-    identity = experimental.identity(4)
+    identity = ti.linalg.identity(4)
     values = _vector([1.0, -2.0, 3.0, 0.5])
 
     np.testing.assert_allclose(identity.apply(values).to_numpy(), values.to_numpy())
@@ -65,8 +65,8 @@ def test_experimental_identity_composition_and_apply():
         2.0 * values.to_numpy(),
     )
 
-    blocks = experimental.block_diagonal(
-        (experimental.identity(2), experimental.identity(3))
+    blocks = ti.linalg.block_diagonal(
+        (ti.linalg.identity(2), ti.linalg.identity(3))
     )
     block_input = _vector([1.0, 2.0, -3.0, 4.0, 5.0])
     np.testing.assert_allclose(
@@ -83,7 +83,7 @@ def test_experimental_identity_composition_and_apply():
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_experimental_cg_and_bicgstab_reuse_plans():
     experimental = ti.linalg.experimental
-    operator = 2.0 * experimental.identity(4)
+    operator = 2.0 * ti.linalg.identity(4)
     rhs = _vector([2.0, -4.0, 6.0, 1.0])
     expected = rhs.to_numpy() / 2.0
 
@@ -115,10 +115,10 @@ def test_experimental_bicgstab_fixed_linear_right_preconditioner():
     )
     inverse_action = np.diag(1.0 / np.diag(dense)).astype(np.float32)
     inverse_action[0, 1] = np.float32(-0.01)
-    operator = experimental.aslinearoperator(_fixed_csr(dense))
-    preconditioner = experimental.aslinearoperator(
+    operator = ti.linalg.aslinearoperator(_fixed_csr(dense))
+    preconditioner = ti.linalg.aslinearoperator(
         _fixed_csr(inverse_action),
-        traits=experimental.OperatorTraits(
+        traits=ti.linalg.OperatorTraits(
             self_adjoint=False, singular=False
         ),
     )
@@ -168,18 +168,18 @@ def test_experimental_kernel_traits_numeric_update_and_cg():
         for index in range(active_size):
             y[index] = numeric_data[index] * x[topology_data[index]]
 
-    unknown = experimental.LinearOperator.from_kernel(
+    unknown = ti.linalg.LinearOperator.from_kernel(
         diagonal, size, topology, numeric=numeric
     )
     with pytest.raises(RuntimeError, match="self_adjoint=True"):
         experimental.SolvePlan(unknown, method="cg")
 
-    operator = experimental.LinearOperator.from_kernel(
+    operator = ti.linalg.LinearOperator.from_kernel(
         diagonal,
         size,
         topology,
         numeric=numeric,
-        traits=experimental.OperatorTraits.spd(),
+        traits=ti.linalg.OperatorTraits.spd(),
     )
     exact = np.asarray([0.5, -1.0, 2.0, 1.5], dtype=np.float32)
     rhs = _vector(numeric.to_numpy() * exact)
@@ -203,8 +203,8 @@ def test_experimental_stored_jacobi_pcg():
     experimental = ti.linalg.experimental
     diagonal = np.asarray([2.0, 3.0, 5.0, 7.0], dtype=np.float32)
     matrix = _fixed_diagonal(diagonal)
-    operator = experimental.aslinearoperator(
-        matrix, traits=experimental.OperatorTraits.spd()
+    operator = ti.linalg.aslinearoperator(
+        matrix, traits=ti.linalg.OperatorTraits.spd()
     )
     exact = np.asarray([0.5, -1.0, 2.0, 1.5], dtype=np.float32)
     plan = experimental.SolvePlan(
@@ -249,11 +249,11 @@ def test_experimental_fixed_linear_operator_pcg():
         for index in range(active_size):
             y[index] = numeric_data[index] * x[topology_data[index]]
 
-    traits = experimental.OperatorTraits.spd()
-    operator = experimental.LinearOperator.from_kernel(
+    traits = ti.linalg.OperatorTraits.spd()
+    operator = ti.linalg.LinearOperator.from_kernel(
         diagonal_apply, size, topology, numeric=diagonal, traits=traits
     )
-    preconditioner = experimental.LinearOperator.from_kernel(
+    preconditioner = ti.linalg.LinearOperator.from_kernel(
         diagonal_apply, size, topology, numeric=inverse, traits=traits
     )
     exact = np.asarray([0.5, -1.0, 2.0, 1.5], dtype=np.float32)
@@ -327,12 +327,12 @@ def test_cuda_experimental_host_check_cg_chunk_contract():
         for index in range(active_size):
             y[index] = numeric_data[index] * x[topology_data[index]]
 
-    operator = experimental.LinearOperator.from_kernel(
+    operator = ti.linalg.LinearOperator.from_kernel(
         diagonal_apply,
         size,
         topology,
         numeric=diagonal,
-        traits=experimental.OperatorTraits.spd(),
+        traits=ti.linalg.OperatorTraits.spd(),
     )
     exact = np.linspace(-1.0, 1.0, size, dtype=np.float32)
     rhs = _vector(diagonal_host * exact)
@@ -416,12 +416,12 @@ def test_vulkan_experimental_host_check_relative_cg_chunk_contract():
         for index in range(active_size):
             y[index] = numeric_data[index] * x[topology_data[index]]
 
-    operator = experimental.LinearOperator.from_kernel(
+    operator = ti.linalg.LinearOperator.from_kernel(
         diagonal_apply,
         size,
         topology,
         numeric=diagonal,
-        traits=experimental.OperatorTraits.spd(),
+        traits=ti.linalg.OperatorTraits.spd(),
     )
     exact = np.linspace(-1.0, 1.0, size, dtype=np.float32)
     rhs_host = diagonal_host * exact
@@ -512,13 +512,13 @@ def test_experimental_graph_provider_apply_and_cg():
         output_arg,
     )
     graph = builder.compile()
-    operator = experimental.LinearOperator.from_graph(
+    operator = ti.linalg.LinearOperator.from_graph(
         graph,
         size,
         fixed_i32={"active_size": size},
         topology={"topology": topology},
         numeric={"numeric": numeric},
-        traits=experimental.OperatorTraits.spd(),
+        traits=ti.linalg.OperatorTraits.spd(),
     )
     exact = np.asarray([0.5, -1.0, 2.0, 1.5], dtype=np.float32)
     np.testing.assert_allclose(
@@ -541,7 +541,7 @@ def test_experimental_graph_provider_apply_and_cg():
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_experimental_operator_rejects_alias_and_runtime_reset():
     experimental = ti.linalg.experimental
-    operator = experimental.identity(3)
+    operator = ti.linalg.identity(3)
     plan = experimental.SolvePlan(operator, max_iterations=4, atol=1e-6)
     values = _vector([1.0, 2.0, 3.0])
     with pytest.raises(RuntimeError, match="aliasing"):
