@@ -438,6 +438,12 @@ class _GraphRunContext:
         signature = []
         dynamic_items = []
         arch = self.compile_config().arch
+        runtime_storage_backend = arch in (
+            _ti_core.Arch.x64,
+            _ti_core.Arch.arm64,
+            _ti_core.Arch.cuda,
+            _ti_core.Arch.vulkan,
+        )
         if arch == _ti_core.Arch.cuda:
             ndarray_consumer = "graph_capture"
             ndarray_mode = "capture"
@@ -450,7 +456,9 @@ class _GraphRunContext:
                     raise TaichiRuntimeError(
                         "Cannot submit an Ndarray to Graph.run() after its Taichi runtime has been reset"
                     )
-                signature.append((k, "ndarray", id(v), id(v.arr)))
+                signature.append(
+                    (k, "ndarray", v._runtime_allocation_identity)
+                )
             elif isinstance(v, (DenseNdarrayView, ScalarField, MatrixField)):
                 signature.append((k, "dense_storage", id(v)))
             elif isinstance(v, Texture):
@@ -479,24 +487,37 @@ class _GraphRunContext:
             flattened = {}
             for k, v in args.items():
                 if isinstance(v, Ndarray):
-                    flattened[k] = (
-                        v.arr,
-                        v._runtime_storage_argument(
-                            ndarray_consumer, ndarray_mode
-                        ),
-                    )
+                    if runtime_storage_backend:
+                        flattened[k] = (
+                            v.arr,
+                            v._runtime_storage_argument(
+                                ndarray_consumer, ndarray_mode
+                            ),
+                        )
+                    else:
+                        flattened[k] = v.arr
                 elif isinstance(v, (DenseNdarrayView, ScalarField, MatrixField)):
+                    if not runtime_storage_backend:
+                        raise TaichiRuntimeError(
+                            "Dense storage Graph runtime arguments are supported "
+                            "on CPU, CUDA, and Vulkan"
+                        )
                     view = (
                         v
                         if isinstance(v, DenseNdarrayView)
                         else ndarray_view(v)
                     )
-                    flattened[k] = (
-                        view,
-                        view._runtime_storage_argument(
+                    try:
+                        runtime_argument = view._runtime_storage_argument(
                             ndarray_consumer, ndarray_mode
-                        ),
-                    )
+                        )
+                    except ValueError:
+                        if arch != _ti_core.Arch.cuda:
+                            raise
+                        runtime_argument = view._runtime_storage_argument(
+                            "graph_replay", "replay"
+                        )
+                    flattened[k] = (view, runtime_argument)
                 elif isinstance(v, Texture):
                     flattened[k] = v.tex
             self._last_arg_signature = signature

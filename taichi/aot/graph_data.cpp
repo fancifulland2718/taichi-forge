@@ -223,10 +223,15 @@ void validate_graph_runtime_storage_argument(
               "Graph runtime storage argument {} is not replayable: {}", name,
               storage::to_string(qualification.reason));
   const auto &descriptor = argument.descriptor();
+  const char *actual_storage =
+      descriptor.source_kind() == storage::StorageSourceKind::kNdarray
+          ? "an ndarray"
+          : "dense storage";
   TI_ERROR_IF(descriptor.index_rank() != expected_index_rank,
               "Dispatch node is compiled for argument {} with field_dim={} "
-              "but got dense storage with field_dim={}",
-              name, expected_index_rank, descriptor.index_rank());
+              "but got {} with field_dim={}",
+              name, expected_index_rank, actual_storage,
+              descriptor.index_rank());
   const auto element_shape = descriptor.element_shape();
   TI_ERROR_IF(element_shape.size() != expected_element_shape.size(),
               "Mismatched element rank for Graph argument {}", name);
@@ -238,8 +243,9 @@ void validate_graph_runtime_storage_argument(
       get_primitive_type_id(descriptor.scalar_type());
   TI_ERROR_IF(actual_dtype_id != expected_dtype_id,
               "Dispatch node is compiled for argument {} with dtype={} but "
-              "got dense storage with dtype={}",
+              "got {} with dtype={}",
               name, PrimitiveType::get(expected_dtype_id).to_string(),
+              actual_storage,
               PrimitiveType::get(actual_dtype_id).to_string());
 }
 template <typename T>

@@ -243,17 +243,20 @@ class Ndarray:
         self.layout = Layout.AOS
         self.grad = None
         self._runtime_prog = None
+        self._runtime_allocation_identity = None
         self._runtime_storage_arguments = {}
 
     def _register_runtime_object(self):
         runtime = impl.get_runtime()
         self._runtime_prog = runtime.prog
+        self._runtime_allocation_identity = self.arr.device_allocation().alloc_id
         runtime.register_runtime_object(self)
 
     def _invalidate_runtime(self):
         self.host_accessor = None
         self.arr = None
         self._runtime_prog = None
+        self._runtime_allocation_identity = None
         self.grad = None
         self._runtime_storage_arguments.clear()
 
