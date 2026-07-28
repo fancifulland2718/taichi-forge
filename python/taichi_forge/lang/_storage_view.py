@@ -101,7 +101,8 @@ class DenseNdarrayView:
         "_source",
         "_description",
         "_descriptor",
-        "_runtime_argument",
+        "_runtime_prog",
+        "_runtime_storage_arguments",
         "_element_type",
         "_type_metadata",
         "shape",
@@ -126,18 +127,9 @@ class DenseNdarrayView:
         self._source = source
         self._description = description
         self._descriptor = descriptor
-        self._runtime_argument = _ti_core._make_runtime_storage_argument(
-            _current_program(), descriptor, "ordinary_kernel", "ordinary"
-        )
-        qualification = self._runtime_argument.qualification
-        if (
-            not qualification["bindable"]
-            or not qualification["zero_copy_qualified"]
-        ):
-            raise ValueError(
-                "storage cannot be bound as a runtime argument: "
-                f"{qualification['reason']}"
-            )
+        self._runtime_prog = _current_program()
+        self._runtime_storage_arguments = {}
+        self._runtime_storage_argument("ordinary_kernel", "ordinary")
         self._element_type = element_type
         self.shape = tuple(int(extent) for extent in descriptor.index_shape)
         self.grad = None
@@ -151,9 +143,44 @@ class DenseNdarrayView:
     def descriptor(self):
         return self._descriptor
 
+    def _runtime_storage_argument(self, consumer, mode):
+        program = _current_program()
+        if program is not self._runtime_prog:
+            raise RuntimeError(
+                "dense storage view belongs to another Taichi runtime"
+            )
+        key = (impl.current_cfg().arch, consumer, mode)
+        cached = self._runtime_storage_arguments.get(key)
+        if cached is not None:
+            return cached
+        argument = _ti_core._make_runtime_storage_argument(
+            program, self._descriptor, consumer, mode
+        )
+        qualification = argument.qualification
+        if (
+            not qualification["bindable"]
+            or not qualification["zero_copy_qualified"]
+        ):
+            raise ValueError(
+                "storage cannot be bound as a runtime argument: "
+                f"{qualification['reason']}"
+            )
+        if mode in ("replay", "capture") and not qualification["replayable"]:
+            raise ValueError(
+                "storage cannot be replayed as a Graph argument: "
+                f"{qualification['reason']}"
+            )
+        if mode == "capture" and not qualification["capturable"]:
+            raise ValueError(
+                "storage cannot be captured as a Graph argument: "
+                f"{qualification['reason']}"
+            )
+        self._runtime_storage_arguments[key] = argument
+        return argument
+
     @property
     def runtime_argument(self):
-        return self._runtime_argument
+        return self._runtime_storage_argument("ordinary_kernel", "ordinary")
 
     def get_type(self):
         return self._type_metadata

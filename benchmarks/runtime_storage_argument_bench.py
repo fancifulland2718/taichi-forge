@@ -216,6 +216,27 @@ def run(args):
     def run_array_graph():
         graph.run(graph_args)
 
+    field_graph_args = {
+        "source": field_source,
+        "temporary": field_temporary,
+        "output": field_output,
+        "scale": float(scale),
+        "bias": float(bias),
+    }
+    field_view_graph_args = {
+        "source": field_source_view,
+        "temporary": field_temporary_view,
+        "output": field_output_view,
+        "scale": float(scale),
+        "bias": float(bias),
+    }
+
+    def run_field_graph():
+        graph.run(field_graph_args)
+
+    def run_field_view_graph():
+        graph.run(field_view_graph_args)
+
     available_cases = {
         "ordinary_ndarray": (run_array_kernels, make_check(array_output)),
         "ordinary_dense_field_view": (
@@ -223,6 +244,11 @@ def run(args):
             make_check(field_output),
         ),
         "graph_ndarray": (run_array_graph, make_check(array_output)),
+        "graph_dense_field": (run_field_graph, make_check(field_output)),
+        "graph_dense_field_view": (
+            run_field_view_graph,
+            make_check(field_output),
+        ),
     }
     requested_cases = (
         list(available_cases)
@@ -280,7 +306,8 @@ def main():
         default="all",
         help=(
             "comma-separated subset of ordinary_ndarray, "
-            "ordinary_dense_field_view, graph_ndarray"
+            "ordinary_dense_field_view, graph_ndarray, graph_dense_field, "
+            "graph_dense_field_view"
         ),
     )
     parser.add_argument("--performance", action="store_true")

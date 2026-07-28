@@ -7,9 +7,11 @@ from taichi_forge._lib import core as _ti_core
 from taichi_forge.aot.utils import produce_injected_args_for_graph
 from taichi_forge.lang import enums, impl, kernel_impl
 from taichi_forge.lang._ndarray import Ndarray
+from taichi_forge.lang._storage_view import DenseNdarrayView, ndarray_view
 from taichi_forge.lang._texture import Texture
 from taichi_forge.lang.exception import TaichiCompilationError, TaichiRuntimeError
-from taichi_forge.lang.matrix import Matrix, MatrixType
+from taichi_forge.lang.field import ScalarField
+from taichi_forge.lang.matrix import Matrix, MatrixField, MatrixType
 from taichi_forge.types._argument_descriptor import (
     describe_element_type,
 )
@@ -437,11 +439,11 @@ class _GraphRunContext:
         dynamic_items = []
         arch = self.compile_config().arch
         if arch == _ti_core.Arch.cuda:
-            storage_consumer = "graph_capture"
-            storage_mode = "capture"
+            ndarray_consumer = "graph_capture"
+            ndarray_mode = "capture"
         else:
-            storage_consumer = "graph_replay"
-            storage_mode = "replay"
+            ndarray_consumer = "graph_replay"
+            ndarray_mode = "replay"
         for k, v in args.items():
             if isinstance(v, Ndarray):
                 if v.arr is None:
@@ -449,6 +451,8 @@ class _GraphRunContext:
                         "Cannot submit an Ndarray to Graph.run() after its Taichi runtime has been reset"
                     )
                 signature.append((k, "ndarray", id(v), id(v.arr)))
+            elif isinstance(v, (DenseNdarrayView, ScalarField, MatrixField)):
+                signature.append((k, "dense_storage", id(v)))
             elif isinstance(v, Texture):
                 if v.tex is None:
                     raise TaichiRuntimeError(
@@ -463,7 +467,9 @@ class _GraphRunContext:
                 dynamic_items.append((k, v))
             else:
                 raise TaichiRuntimeError(
-                    f"Only python int, float, ti.Matrix and ti.Ndarray are supported as runtime arguments but got {type(v)}"
+                    "Only Python scalars, ti.Matrix, ti.Ndarray, canonical "
+                    "dense Field, and DenseNdarrayView are supported as "
+                    f"runtime arguments but got {type(v)}"
                 )
 
         signature = tuple(signature)
@@ -476,7 +482,19 @@ class _GraphRunContext:
                     flattened[k] = (
                         v.arr,
                         v._runtime_storage_argument(
-                            storage_consumer, storage_mode
+                            ndarray_consumer, ndarray_mode
+                        ),
+                    )
+                elif isinstance(v, (DenseNdarrayView, ScalarField, MatrixField)):
+                    view = (
+                        v
+                        if isinstance(v, DenseNdarrayView)
+                        else ndarray_view(v)
+                    )
+                    flattened[k] = (
+                        view,
+                        view._runtime_storage_argument(
+                            "graph_replay", "replay"
                         ),
                     )
                 elif isinstance(v, Texture):

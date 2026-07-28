@@ -359,6 +359,153 @@ def test_graph_ndarray_prepares_runtime_storage_without_temporary_allocations():
     exclude=[(ti.vulkan, "Darwin")],
     offline_cache=False,
 )
+def test_graph_automatically_normalizes_dense_field_and_view_without_copy():
+    @ti.kernel
+    def increment(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in values:
+            values[i] += i + 1
+
+    symbolic = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(increment, symbolic)
+    builder.dispatch(increment, symbolic)
+    graph = builder.compile()
+    graph.execution_stats()
+
+    automatic = ti.field(ti.i32, shape=32)
+    explicit_field = ti.field(ti.i32, shape=32)
+    explicit = ti.experimental.ndarray_view(explicit_field)
+    program = impl.get_runtime().prog
+    bindings_before = program._debug_dense_storage_binding_stats()
+    resources_before = program._debug_ndarray_resource_stats()
+
+    for runtime_value, field in (
+        (automatic, automatic),
+        (explicit, explicit_field),
+    ):
+        for run_index in range(9):
+            if run_index == 8:
+                ti.sync()
+            graph.run({"values": runtime_value})
+        ti.sync()
+        np.testing.assert_array_equal(
+            field.to_numpy(), (np.arange(32, dtype=np.int32) + 1) * 18
+        )
+
+    bindings_after = program._debug_dense_storage_binding_stats()
+    resources_after = program._debug_ndarray_resource_stats()
+    assert bindings_after["field_bindings"] >= (
+        bindings_before["field_bindings"] + 18
+    )
+    assert bindings_after["temporary_allocations"] == 0
+    assert bindings_after["temporary_bytes"] == 0
+    assert resources_after["created_total"] == resources_before["created_total"]
+    assert resources_after["live"] == resources_before["live"]
+
+    arch = impl.current_cfg().arch
+    if arch == ti.cuda:
+        stats = graph._graph_stats[0]
+        assert stats["ordinary_fallbacks"] == 18
+        assert stats["captures"] == 0
+        assert stats["last_path"] == "ordinary_fallback"
+        assert stats["last_fallback_reason"] == "unsupported_arguments"
+    elif arch == ti.vulkan:
+        stats = graph._graph_stats[0]
+        assert stats["records"] == 16
+        assert stats["replays"] == 2
+        assert stats["ordinary_fallbacks"] == 0
+        assert stats["last_path"] == "vulkan_replay"
+
+
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    exclude=[(ti.vulkan, "Darwin")],
+    offline_cache=False,
+)
+def test_graph_automatically_normalizes_packed_dense_field():
+    vec3 = ti.types.vector(3, ti.f32)
+
+    @ti.kernel
+    def update(values: ti.types.ndarray(dtype=vec3, ndim=1)):
+        for i in values:
+            values[i] += vec3(1.0, 2.0, 3.0)
+
+    symbolic = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "values", vec3, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(update, symbolic)
+    graph = builder.compile()
+
+    values = ti.Vector.field(3, ti.f32, shape=8)
+    values.fill(4.0)
+    graph.run({"values": values})
+    ti.sync()
+    result = values.to_numpy()
+    np.testing.assert_array_equal(result[:, 0], np.full(8, 5.0))
+    np.testing.assert_array_equal(result[:, 1], np.full(8, 6.0))
+    np.testing.assert_array_equal(result[:, 2], np.full(8, 7.0))
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_graph_dense_field_runtime_argument_validates_declared_type_and_rank():
+    @ti.kernel
+    def touch(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in values:
+            values[i] += 1
+
+    symbolic = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(touch, symbolic)
+    graph = builder.compile()
+
+    wrong_dtype = ti.field(ti.f32, shape=8)
+    with pytest.raises(RuntimeError, match="dtype"):
+        graph.run({"values": wrong_dtype})
+
+    wrong_rank = ti.field(ti.i32, shape=(2, 4))
+    with pytest.raises(RuntimeError, match="field_dim"):
+        graph.run({"values": wrong_rank})
+
+    wrong_element = ti.Vector.field(2, ti.i32, shape=8)
+    with pytest.raises(RuntimeError, match="element rank"):
+        graph.run({"values": wrong_element})
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_graph_dense_field_runtime_argument_rejects_retired_tree():
+    @ti.kernel
+    def touch(values: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+        for i in values:
+            values[i] += 1.0
+
+    symbolic = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "values", ti.f32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(touch, symbolic)
+    graph = builder.compile()
+
+    values = ti.field(ti.f32)
+    fields_builder = ti.FieldsBuilder()
+    fields_builder.dense(ti.i, 8).place(values)
+    tree = fields_builder.finalize()
+    graph.run({"values": values})
+    tree.destroy()
+    with pytest.raises(
+        RuntimeError, match="retired SNodeTree|generation"
+    ):
+        graph.run({"values": values})
+
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    exclude=[(ti.vulkan, "Darwin")],
+    offline_cache=False,
+)
 def test_ndarray_view_supports_canonical_packed_compound_fields():
     vec3 = ti.types.vector(3, ti.f32)
     mat2 = ti.types.matrix(2, 2, ti.f32)
