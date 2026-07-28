@@ -18,15 +18,21 @@ device primitive、graph replay、显示帧提交、稀疏布局实验能力和�
 import taichi_forge as ti
 ```
 
-### `ti.experimental.ndarray_view(source, *, access="readwrite")`
+### `ti.experimental.ndarray_view(source, *, slices=None, access="readwrite")`
 
-为经过资格验证的 Forge `Ndarray` 或 canonical root-dense field 创建显式、non-owning、
-zero-copy 的 Ndarray-ABI view。返回对象可在 CPU、CUDA、Vulkan 上传给
-`ti.types.ndarray(...)` kernel 参数。不支持的 layout 会在 submission 前失败；该 API
-不分配 staging storage，也不静默复制。当前合同仅支持 read-write，不绑定 gradient，
-且不支持 Graph capture/replay 或 ArgPack 嵌套。
+为经过资格验证的 Forge `Ndarray`、`DenseNdarrayView` 或 root-dense field 创建显式、
+non-owning、zero-copy 的 dense storage view。`slices` 可选地为每个 logical index axis
+提供一个正 step 的 Python `slice`，并保持 rank 不变。组合 view 时只合并 byte offset 与
+per-axis stride，不分配也不复制。
 
-完整 layout matrix、生命周期行为与示例见
+返回对象可在 CPU、CUDA、Vulkan 上传给 `ti.types.ndarray(...)` kernel 参数。compact
+internal storage 可使用 CUDA Graph capture/replay；positive affine view 在 CUDA Graph
+中使用 ordinary execution，在 Vulkan 中使用 command record/replay。不支持的 layout 会
+在 submission 前失败，不存在 staging fallback。当前合同仅支持 read-write，不绑定
+gradient owner，也不支持 ArgPack 嵌套、负或 broadcast stride、overlap、axis
+permutation、integer indexing 与 external ownership。
+
+完整 layout matrix、生命周期、Graph 路径与示例见
 [实验性 Dense Storage 零拷贝视图](storage_views.zh.md)。
 
 ### `ti.compile_kernels(kernels)`

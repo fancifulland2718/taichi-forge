@@ -59,9 +59,10 @@ graph.run({"state": state})
 ```
 
 同一 runtime slot 也接受兼容的 `ti.ndarray` 或显式
-`ti.experimental.ndarray_view(field)`。dtype、logical ndim 与 vector/matrix element
-shape 必须与 symbolic argument 精确一致；不支持的 sparse、padded 或非唯一 layout
-会明确失败，不创建 shadow ndarray，也不执行隐式 staging。
+`ti.experimental.ndarray_view(field, slices=...)`。dtype、logical ndim 与
+vector/matrix element shape 必须与 symbolic argument 精确一致。经过资格验证的正步长
+padded field 与保持 rank 的 subview 会 direct binding；sparse、负 stride、broadcast、
+overlap 或其它不支持的 layout 会明确失败，不创建 shadow ndarray，也不执行隐式 staging。
 
 data-oriented kernel 可在构图期固定 `self` 或其他 `ti.template()` 参数：
 
@@ -86,7 +87,7 @@ graph.run({"dt": 1.0e-3})
 | 放置 | 同节点 AOS-style 与分离节点 SOA-style placement |
 | 所有权 | 一张 Graph 可引用一个或多个 SNodeTree |
 | 组合 | Field-only、混合 runtime 参数、混合 Forge-native segment |
-| runtime 参数 | 仅 canonical compact、unique、full-Field 的 ndarray-ABI mapping |
+| runtime 参数 | 经过资格验证的 compact 或正步长、element-contiguous、unique dense mapping；支持 full Field 与保持 rank 的 subview |
 
 pointer、bitmasked、dynamic、hash、activation-list 等稀疏拓扑不属于本合同。稀疏
 支持具有独立的后端和生命周期要求，不会被静默当作 dense 处理。
@@ -126,7 +127,7 @@ high-water mark 或 driver-retained memory。
 | 后端 | Dense Field Graph 路径 | 重要边界 |
 | --- | --- | --- |
 | CPU | cached compiled dispatch plan | 保持 Graph 语义，但不是 device-graph capture |
-| CUDA | 条件满足时使用 Driver API capture 与 executable replay | 零 runtime 参数的静态 Field Graph 可 exact replay；runtime dense Field 参数当前使用 ordinary dispatch，capture/patch 资格属于后续合同 |
+| CUDA | 对 compact internal storage 使用 Driver API capture 与 executable replay | 相同 binding exact replay，兼容 internal allocation 变化可 patch；positive affine runtime argument 使用 ordinary fallback |
 | Vulkan | runtime-owned command record 与 replay | 使用有界八 slot 在途策略；饱和时可 ordinary dispatch，不扩张持久 driver resource |
 
 优化路径可以回退到 ordinary dispatch，但不得改变 binding、dispatch order 或结果。

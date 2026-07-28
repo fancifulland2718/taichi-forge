@@ -28,33 +28,58 @@ view 创建和提交不会执行 pack、copy，也不会分配临时 storage。k
 ## API
 
 ```python
-ti.experimental.ndarray_view(source, *, access="readwrite")
+ti.experimental.ndarray_view(
+    source,
+    *,
+    slices=None,
+    access="readwrite",
+)
 ```
 
-`source` 可以是 Forge `Ndarray`，也可以是经过资格验证的 root-dense scalar、Vector 或
-Matrix field。返回对象可传给使用 `ti.types.ndarray(...)` 标注的 kernel 参数。
+`source` 可以是 Forge `Ndarray`、另一个 `DenseNdarrayView`，也可以是经过资格验证的
+root-dense scalar、Vector 或 Matrix field。返回对象可传给使用
+`ti.types.ndarray(...)` 标注的 kernel 参数。
 
-当前可执行合同只接受 `access="readwrite"`。dtype、index rank，以及 vector/matrix
-element shape 必须与 kernel annotation 匹配。该 view 不公开 gradient storage。
+`slices` 可选地选择保持 rank 不变的正步长 subview。每个 logical index axis 对应一个
+Python `slice`；rank-1 source 也可直接传入单个 `slice`。边界遵循 Python 的 slice
+规范化规则。组合 view 时只合并 offset 与 stride，不分配也不复制：
 
-调用只会创建 direct view 或抛出 `ValueError`；资格验证失败时绝不静默退回 staging。
+```python
+particles = ti.Vector.field(3, dtype=ti.f32, shape=8192)
+even_particles = ti.experimental.ndarray_view(
+    particles,
+    slices=slice(0, None, 2),
+)
+```
+
+integer indexing、axis insertion/permutation、负或零 step、broadcast stride 与可写 overlap
+会被拒绝。切片不改变 source rank，也不改变 vector/matrix element shape。
+
+当前可执行合同只接受 `access="readwrite"`。dtype、index rank 与 element shape 必须和
+kernel annotation 匹配；该 view 不公开 gradient storage。
+
+调用只会创建经过资格验证的 direct view 或抛出 `ValueError`；资格验证失败时绝不静默
+退回 staging。
 
 ## 当前支持面
 
 | Source 或用途 | CPU | CUDA | Vulkan | 行为 |
 | --- | --- | --- | --- | --- |
 | Contiguous Forge `Ndarray` | 支持 | 支持 | 支持 | 直接绑定已有 allocation |
-| Canonical root-dense scalar field | 支持 | 支持 | 支持 | 直接绑定 SNode root allocation 与 byte offset |
-| Canonically packed root-dense Vector/Matrix field | 资格验证 | 资格验证 | 资格验证 | 仅在布局兼容 Ndarray ABI 时 direct |
-| Padded 或 non-canonical dense field | 不支持 | 不支持 | 不支持 | 明确拒绝，不 materialize |
+| 合格的 root-dense scalar、Vector 或 Matrix field | 支持 | 支持 | 支持 | 直接绑定 SNode root allocation 与 byte offset |
+| 保持 rank 的正步长 `slices` | 支持 | 支持 | 支持 | direct affine addressing，不 pack、copy 或分配临时 storage |
+| Padded dense field | 资格验证 | 资格验证 | 资格验证 | element storage contiguous 且可证明 writable address 唯一时接受 |
 | Bitmasked、pointer、dynamic、hash、bit-packed SNode | 不支持 | 不支持 | 不支持 | 不属于 dense affine view |
-| Indexed subset 或 permutation | 不支持 | 不支持 | 不支持 | 需要显式 indexed consumer |
-| StructNdarray member stride | 不支持 | 不支持 | 不支持 | 由共享 storage 模型描述，仅供理解 record stride 的 consumer 使用 |
-| Graph capture/replay 或 ArgPack 嵌套 | 不支持 | 不支持 | 不支持 | backend submission 前拒绝 |
+| 负 stride、broadcast、overlap、axis permutation 或 integer indexing | 不支持 | 不支持 | 不支持 | 需要不同的 read/scatter 合同 |
+| StructNdarray member stride | 不支持 | 不支持 | 不支持 | 由共享 storage 模型描述，仅由理解 record stride 的 consumer 接受 |
+| 使用 compact internal storage 的 Graph | Cached dispatch | CUDA Graph capture/replay | Command record/replay | submission 前重新验证 runtime owner 与 generation |
+| 使用 positive affine view 的 Graph | Ordinary dispatch | Ordinary fallback | Command record/replay | 结果合同相同；CUDA capture 仍仅接受 compact mapping |
+| ArgPack 嵌套 | 不支持 | 不支持 | 不支持 | backend submission 前拒绝 |
 | 通过 view gradient 自动微分 | 不支持 | 不支持 | 不支持 | 不绑定 gradient owner |
 
-“资格验证”表示 Forge 已证明 byte range compact、满足 native alignment、布局兼容
-Ndarray ABI，并且 writable address mapping 唯一。仅凭 source class 不能保证一定接受。
+“资格验证”表示 Forge 已证明 reachable byte range、native alignment、正 index stride、
+contiguous element storage 与唯一 writable addressing。compact view 还必须满足 canonical
+Ndarray ABI。仅凭 source class 不能保证一定接受。
 
 ## Consumer 特定的执行能力
 
@@ -103,12 +128,13 @@ pointer。
 - view 不是 owning tensor，也不会改变 source 原有的 indexing API；
 - `copy=False` 语义是严格的：不支持的 storage 会失败，而不是复制；
 - zero-copy 不等于不需要同步，consumer 仍须遵守 Taichi kernel 与 stream 的正常顺序；
-- Graph capture、外部框架 ownership、DLPack 和一般 affine stride 需要额外生命周期与
-  同步合同，不能从本 API 推导得到。
+- 外部框架 ownership、DLPack，以及负 stride、broadcast、overlap 或任意 element stride
+  等一般 affine mapping 需要额外生命周期与同步合同，不能从本 API 推导得到。
 
 ## 何时使用
 
-当可复用 kernel 已接受 Ndarray ABI，而同一份 dense 数据由 Forge field 持有时，可使用
-`ndarray_view()` 消除边界 staging。若数据本来就是 `Ndarray`，且不存在需要统一抽象的
-consumer 边界，继续直接传入即可。indexed、sparse 或 non-canonical layout 应使用显式
-pack/gather/scatter 工具；这些操作具有不同 storage 语义，应保持可见。
+当可复用 kernel 接受 Ndarray argument model，而同一份 dense 数据由 Forge field 持有，
+或保持 rank 的正步长 subset 需要继续 zero-copy 时，可以使用 `ndarray_view()`。数据本来
+就是 `Ndarray` 且不需要 abstraction boundary 或 subview 时，继续直接传入即可。sparse、
+permuted、overlapping 或其它不支持的 layout 应使用显式 pack/gather/scatter 工具；这些
+操作具有不同 storage 语义，应保持可见。

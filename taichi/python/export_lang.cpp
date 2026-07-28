@@ -4029,6 +4029,24 @@ void export_lang(py::module &m) {
                 expr, i, expr->dbg_info));
             args.back()->type_check(nullptr);
           }
+          for (int i = 0; i < external_tensor_expr->ndim; i++) {
+            args.push_back(Expr::make<GetElementExpression>(
+                expr,
+                std::vector<int>{
+                    TypeFactory::SHAPE_POS_IN_NDARRAY,
+                    TypeFactory::stride_pos_in_ndarray(
+                        external_tensor_expr->ndim, i)},
+                dbg_info));
+            args.back()->type_check(nullptr);
+          }
+          args.push_back(Expr::make<GetElementExpression>(
+              expr,
+              std::vector<int>{
+                  TypeFactory::SHAPE_POS_IN_NDARRAY,
+                  TypeFactory::affine_mode_pos_in_ndarray(
+                      external_tensor_expr->ndim)},
+              dbg_info));
+          args.back()->type_check(nullptr);
 
           args.push_back(Expr::make<ExternalTensorBasePtrExpression>(
               expr, /*is_grad=*/false, dbg_info));

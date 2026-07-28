@@ -845,6 +845,7 @@ RuntimeStorageQualification qualify_runtime_storage(
     const RuntimeStorageRequirement &requirement,
     std::uint64_t synchronization_domain_identity) {
   RuntimeStorageQualification result;
+  const DenseStorageProperties &properties = descriptor.properties();
   result.capabilities.describable = true;
   result.stable_signature = runtime_storage_signature(
       descriptor, requirement, synchronization_domain_identity);
@@ -864,7 +865,20 @@ RuntimeStorageQualification qualify_runtime_storage(
     return result;
   }
 
+  const bool direct_affine =
+      result.dense.execution_mode == StorageExecutionMode::kDirectAffine;
+  if (direct_affine &&
+      (properties.has_negative_stride || !properties.element_contiguous ||
+       properties.uniqueness != StorageMappingUniqueness::kProvenUnique)) {
+    result.reason = StorageFailureReason::kUnsupportedStride;
+    return result;
+  }
+
   const StorageOwnerKind owner_kind = descriptor.owner().kind;
+  if (direct_affine && owner_kind == StorageOwnerKind::kExternalManaged) {
+    result.reason = StorageFailureReason::kExternalOwnerNotAccepted;
+    return result;
+  }
   const bool external_sync_ready =
       owner_kind != StorageOwnerKind::kExternalManaged ||
       !requirement.require_external_sync ||
@@ -994,6 +1008,68 @@ DenseStorageBuildResult flatten_dense_storage_to_scalar_vector(
       descriptor.owner(), descriptor.source_kind(), layout);
 }
 
+DenseStorageBuildResult slice_dense_storage(
+    const DenseStorageDescriptor &descriptor,
+    const std::vector<std::int64_t> &starts,
+    const std::vector<std::int64_t> &lengths,
+    const std::vector<std::int64_t> &steps) {
+  DenseStorageBuildResult invalid;
+  const std::size_t rank = descriptor.index_rank();
+  const DenseStorageProperties &properties = descriptor.properties();
+  if (starts.size() != rank || lengths.size() != rank ||
+      steps.size() != rank) {
+    invalid.reason = StorageFailureReason::kInvalidRank;
+    return invalid;
+  }
+  if (properties.has_negative_stride || !properties.element_contiguous ||
+      properties.uniqueness != StorageMappingUniqueness::kProvenUnique) {
+    invalid.reason = StorageFailureReason::kUnsupportedLayout;
+    return invalid;
+  }
+
+  DenseStorageLayoutSpec layout;
+  layout.scalar_type = descriptor.scalar_type();
+  layout.element_shape = descriptor.element_shape();
+  layout.element_strides_bytes = descriptor.element_strides_bytes();
+  layout.byte_offset = descriptor.byte_offset();
+  layout.access = descriptor.access();
+  layout.index_shape.reserve(rank);
+  layout.index_strides_bytes.reserve(rank);
+
+  for (std::size_t axis = 0; axis < rank; ++axis) {
+    const std::int64_t source_extent = descriptor.index_extent(axis);
+    const std::int64_t source_stride = descriptor.index_stride_bytes(axis);
+    const std::int64_t start = starts[axis];
+    const std::int64_t length = lengths[axis];
+    const std::int64_t step = steps[axis];
+    if (start < 0 || length < 0 || step <= 0 || start > source_extent ||
+        (length > 0 && start == source_extent)) {
+      invalid.reason = StorageFailureReason::kInvalidShape;
+      return invalid;
+    }
+
+    std::int64_t last_delta = 0;
+    if (length > 1 &&
+        (!checked_mul_nonnegative(step, length - 1, &last_delta) ||
+         last_delta > source_extent - start - 1)) {
+      invalid.reason = StorageFailureReason::kInvalidShape;
+      return invalid;
+    }
+    std::int64_t start_delta = 0;
+    std::int64_t composed_stride = 0;
+    if (!checked_mul_nonnegative(source_stride, start, &start_delta) ||
+        !checked_add(layout.byte_offset, start_delta, &layout.byte_offset) ||
+        !checked_mul_nonnegative(source_stride, step, &composed_stride)) {
+      invalid.reason = StorageFailureReason::kArithmeticOverflow;
+      return invalid;
+    }
+    layout.index_shape.push_back(length);
+    layout.index_strides_bytes.push_back(composed_stride);
+  }
+
+  return build_dense_storage_descriptor(
+      descriptor.owner(), descriptor.source_kind(), layout);
+}
 DenseStorageBuildResult describe_struct_member_storage(
     const Ndarray &base,
     DataType scalar_type,

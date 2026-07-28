@@ -392,6 +392,15 @@ TI_DLL_EXPORT DenseStorageBuildResult
 flatten_dense_storage_to_scalar_vector(
     const DenseStorageDescriptor &descriptor);
 
+// Compose a zero-copy positive-stride subview over the logical index axes.
+// Starts, lengths, and steps are already normalized by the caller. The owner,
+// access mode, element layout, and lifecycle generation are preserved.
+TI_DLL_EXPORT DenseStorageBuildResult slice_dense_storage(
+    const DenseStorageDescriptor &descriptor,
+    const std::vector<std::int64_t> &starts,
+    const std::vector<std::int64_t> &lengths,
+    const std::vector<std::int64_t> &steps);
+
 TI_DLL_EXPORT DenseStorageBuildResult describe_struct_member_storage(
     const Ndarray &base,
     DataType scalar_type,

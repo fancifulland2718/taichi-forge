@@ -6231,13 +6231,19 @@ storage::ResolvedDenseBinding Program::resolve_dense_storage_descriptor(
     TI_ERROR_IF(owner.program_domain != runtime_program_generation(),
                 "Dense storage binding belongs to another Program generation");
   }
-  TI_ERROR_IF(!properties.ndarray_abi_compatible ||
-                  properties.uniqueness !=
-                      storage::StorageMappingUniqueness::kProvenUnique ||
+  const bool safe_positive_affine =
+      !properties.has_negative_stride && properties.element_contiguous &&
+      properties.uniqueness ==
+          storage::StorageMappingUniqueness::kProvenUnique;
+  TI_ERROR_IF((!properties.ndarray_abi_compatible && !safe_positive_affine) ||
                   properties.reachable_begin < 0 ||
                   properties.reachable_end < properties.reachable_begin ||
                   properties.reachable_begin != descriptor.byte_offset(),
-              "Dense storage binding is not a compact unique ndarray range");
+              "Dense storage binding is not a supported unique dense range");
+  TI_ERROR_IF(!properties.ndarray_abi_compatible &&
+                  owner.kind == storage::StorageOwnerKind::kExternalManaged,
+              "Affine external dense storage requires an external access "
+              "epoch and is not supported for runtime affine bindings");
 
   storage::ResolvedDenseBinding binding;
   if (runtime_argument != nullptr) {

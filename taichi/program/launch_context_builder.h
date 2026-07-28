@@ -156,6 +156,11 @@ class LaunchContextBuilder {
   RuntimeContext &get_context();
 
  private:
+  void set_array_shape_and_strides(
+      const std::vector<int> &arg_id,
+      const std::vector<std::int64_t> &shape,
+      const std::vector<std::int64_t> *strides_bytes,
+      bool affine_mode);
   void bind_ndarray_resource_ref(NdarrayResourceRef ref);
   TypedConstant fetch_ret_impl(int offset, const Type *dt);
   CallableBase *kernel_;

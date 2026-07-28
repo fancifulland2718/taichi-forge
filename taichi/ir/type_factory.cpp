@@ -195,14 +195,32 @@ DataType TypeFactory::create_tensor_type(std::vector<int> shape,
   return TypeFactory::get_instance().get_tensor_type(shape, element);
 }
 
+int TypeFactory::ndarray_shape_member_count(int ndim) {
+  return std::max(1, ndim);
+}
+
+int TypeFactory::stride_pos_in_ndarray(int ndim, int axis) {
+  TI_ASSERT(axis >= 0 && axis < ndim);
+  return ndarray_shape_member_count(ndim) + axis;
+}
+
+int TypeFactory::affine_mode_pos_in_ndarray(int ndim) {
+  return ndarray_shape_member_count(ndim) + ndim;
+}
+
 const Type *TypeFactory::get_ndarray_struct_type(DataType dt,
                                                  int ndim,
                                                  bool needs_grad) {
-  ndim = std::max(1, ndim);  // Avoiding empty struct
+  const int shape_member_count = ndarray_shape_member_count(ndim);
   std::vector<AbstractDictionaryMember> shape_members;
-  for (int i = 0; i < ndim; i++) {
+  for (int i = 0; i < shape_member_count; i++) {
     shape_members.push_back({PrimitiveType::i32, fmt::format("dim_{}", i)});
   }
+  for (int i = 0; i < ndim; i++) {
+    shape_members.push_back(
+        {PrimitiveType::i32, fmt::format("stride_bytes_{}", i)});
+  }
+  shape_members.push_back({PrimitiveType::i32, "affine_mode"});
   auto *shape_type = get_struct_type(shape_members);
   std::vector<AbstractDictionaryMember> members;
   members.push_back({shape_type, "shape"});
@@ -213,7 +231,6 @@ const Type *TypeFactory::get_ndarray_struct_type(DataType dt,
   }
   return get_struct_type(members);
 }
-
 const Type *TypeFactory::get_rwtexture_struct_type() {
   return get_ndarray_struct_type(PrimitiveType::f32, 3);
 }

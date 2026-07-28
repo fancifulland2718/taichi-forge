@@ -30,37 +30,62 @@ backend synchronization rules still apply.
 ## API
 
 ```python
-ti.experimental.ndarray_view(source, *, access="readwrite")
+ti.experimental.ndarray_view(
+    source,
+    *,
+    slices=None,
+    access="readwrite",
+)
 ```
 
-`source` may be a Forge `Ndarray` or a qualified root-dense scalar, Vector, or
-Matrix field. The returned object can be passed to a kernel argument annotated
-with `ti.types.ndarray(...)`.
+`source` may be a Forge `Ndarray`, another `DenseNdarrayView`, or a qualified
+root-dense scalar, Vector, or Matrix field. The returned object can be passed
+to a kernel argument annotated with `ti.types.ndarray(...)`.
+
+`slices` optionally selects a rank-preserving positive-stride subview. Supply
+one Python `slice` per logical index axis; a rank-1 source also accepts a
+single `slice`. Bounds use normal Python slice normalization. View composition
+combines offsets and strides without allocating or copying:
+
+```python
+particles = ti.Vector.field(3, dtype=ti.f32, shape=8192)
+even_particles = ti.experimental.ndarray_view(
+    particles,
+    slices=slice(0, None, 2),
+)
+```
+
+Integer indexing, axis insertion or permutation, negative or zero steps,
+broadcast strides, and writable overlap are rejected. Slicing preserves the
+source rank and vector or matrix element shape.
 
 The current executable contract accepts only `access="readwrite"`. The dtype,
-index rank, and vector or matrix element shape must match the kernel
-annotation. Gradient storage is not exposed by this view.
+index rank, and element shape must match the kernel annotation. Gradient
+storage is not exposed by this view.
 
-The call either creates a direct view or raises `ValueError`. It never falls
-back to staging when qualification fails.
+The call either creates a qualified direct view or raises `ValueError`. It
+never falls back to staging when qualification fails.
 
 ## Current support
 
 | Source or use | CPU | CUDA | Vulkan | Behavior |
 | --- | --- | --- | --- | --- |
 | Contiguous Forge `Ndarray` | Yes | Yes | Yes | Direct binding of the existing allocation |
-| Canonical root-dense scalar field | Yes | Yes | Yes | Direct binding of the SNode root allocation and byte offset |
-| Canonically packed root-dense Vector or Matrix field | Qualified | Qualified | Qualified | Direct only when the layout is compatible with the Ndarray ABI |
-| Padded or non-canonical dense field | No | No | No | Rejected; no materialization |
+| Qualified root-dense scalar, Vector, or Matrix field | Yes | Yes | Yes | Direct binding of the SNode root allocation and byte offset |
+| Positive-stride, rank-preserving `slices` | Yes | Yes | Yes | Direct affine addressing; no pack, copy, or temporary allocation |
+| Padded dense field | Qualified | Qualified | Qualified | Accepted when element storage is contiguous and writable addresses are proven unique |
 | Bitmasked, pointer, dynamic, hash, or bit-packed SNode | No | No | No | Not a dense affine view |
-| Indexed subset or permutation | No | No | No | Requires an explicit indexed consumer |
+| Negative stride, broadcast, overlap, axis permutation, or integer indexing | No | No | No | Requires a different read/scatter contract |
 | StructNdarray member stride | No | No | No | Described by the shared storage model and accepted only by record-stride-aware consumers |
-| Graph capture/replay or ArgPack nesting | No | No | No | Rejected before backend submission |
+| Graph with compact internal storage | Cached dispatch | CUDA Graph capture/replay | Command record/replay | Runtime owner and generation are revalidated before submission |
+| Graph with a positive affine view | Ordinary dispatch | Ordinary fallback | Command record/replay | Same result contract; CUDA capture remains compact-only |
+| ArgPack nesting | No | No | No | Rejected before backend submission |
 | Automatic differentiation through view gradients | No | No | No | No gradient owner is bound |
 
-“Qualified” means that Forge proves a compact byte range, native alignment,
-an Ndarray-compatible layout, and unique writable addressing. Source class
-alone does not guarantee acceptance.
+“Qualified” means that Forge proves the reachable byte range, native
+alignment, positive index strides, contiguous element storage, and unique
+writable addressing. Compact views additionally satisfy the canonical Ndarray
+ABI. Source class alone does not guarantee acceptance.
 
 ## Consumer-specific execution
 
@@ -118,14 +143,17 @@ Keep these boundaries in mind:
   copying.
 - Zero-copy does not mean synchronization-free. Consumers must still obey
   normal Taichi kernel and stream ordering.
-- Graph capture, external framework ownership, DLPack, and general affine
-  strides require additional lifetime and synchronization contracts and are
-  not implied by this API.
+- External framework ownership, DLPack, and general affine mappings such as
+  negative strides, broadcast, overlap, or arbitrary element strides require
+  additional lifetime and synchronization contracts and are not implied by
+  this API.
 
 ## Choosing this API
 
-Use `ndarray_view()` when a reusable kernel already accepts the Ndarray ABI and
-the same dense data is owned by a Forge field. Continue to pass an `Ndarray`
-directly when no abstraction boundary requires a view. Use explicit
-pack/gather/scatter facilities for indexed, sparse, or non-canonical layouts;
-those operations have different storage semantics and should remain visible.
+Use `ndarray_view()` when a reusable kernel accepts the Ndarray argument model
+and the same dense data is owned by a Forge field, or when a positive-stride
+rank-preserving subset should remain zero-copy. Continue to pass an `Ndarray`
+directly when no abstraction boundary or subview is required. Use explicit
+pack/gather/scatter facilities for sparse, permuted, overlapping, or otherwise
+unsupported layouts; those operations have different storage semantics and
+should remain visible.

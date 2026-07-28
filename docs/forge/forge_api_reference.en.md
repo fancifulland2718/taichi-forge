@@ -21,17 +21,24 @@ Import Forge as:
 import taichi_forge as ti
 ```
 
-### `ti.experimental.ndarray_view(source, *, access="readwrite")`
+### `ti.experimental.ndarray_view(source, *, slices=None, access="readwrite")`
 
-Creates an explicit non-owning, zero-copy Ndarray-ABI view over a qualified
-Forge `Ndarray` or canonical root-dense field. The returned view is accepted by
-`ti.types.ndarray(...)` kernel arguments on CPU, CUDA, and Vulkan. Unsupported
-layouts raise before submission; the API does not allocate staging storage or
-silently copy. The current contract is read-write, has no gradient binding, and
-does not support Graph capture/replay or ArgPack nesting.
+Creates an explicit non-owning zero-copy dense storage view over a qualified
+Forge `Ndarray`, `DenseNdarrayView`, or root-dense field. `slices` optionally
+supplies one positive-step Python `slice` per logical index axis and preserves
+rank. View composition combines byte offsets and per-axis strides without
+allocation or copy.
+
+The returned view is accepted by `ti.types.ndarray(...)` kernel arguments on
+CPU, CUDA, and Vulkan. Compact internal storage is eligible for CUDA Graph
+capture/replay; positive affine views use ordinary CUDA Graph execution and
+Vulkan command record/replay. Unsupported layouts raise before submission;
+there is no staging fallback. The current contract is read-write, binds no
+gradient owner, and does not support ArgPack nesting, negative or broadcast
+strides, overlap, axis permutation, integer indexing, or external ownership.
 
 See [Experimental zero-copy dense storage views](storage_views.en.md) for the
-layout matrix, lifetime behavior, and examples.
+layout matrix, lifetime behavior, Graph paths, and examples.
 
 ### `ti.compile_kernels(kernels)`
 

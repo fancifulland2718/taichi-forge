@@ -629,7 +629,7 @@ def test_ndarray_view_rejects_stale_owners_before_launch():
         touch(field_view)
 
     array = ti.ndarray(ti.f32, shape=8)
-    array_view = ti.experimental.ndarray_view(array)
+    array_view = ti.experimental.ndarray_view(array, slices=slice(0, 8, 2))
     touch(array_view)
     program = impl.get_runtime().prog
     native = array.arr
@@ -639,15 +639,159 @@ def test_ndarray_view_rejects_stale_owners_before_launch():
         touch(array_view)
 
 
-@test_utils.test(arch=ti.cpu, offline_cache=False)
-def test_ndarray_view_rejects_padded_dense_layout_without_materializing():
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    exclude=[(ti.vulkan, "Darwin")],
+    offline_cache=False,
+)
+def test_ndarray_view_executes_positive_padded_dense_layout_without_copy():
+    @ti.kernel
+    def touch(values: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+        for i in values:
+            values[i] += 3.0
+
     lhs = ti.field(ti.f32)
     rhs = ti.field(ti.f32)
     builder = ti.FieldsBuilder()
     builder.dense(ti.i, 8).place(lhs, rhs)
     tree = builder.finalize()
     try:
-        with pytest.raises(ValueError, match="zero-copy ndarray view"):
-            ti.experimental.ndarray_view(lhs)
+        lhs.fill(2.0)
+        rhs.fill(17.0)
+        view = ti.experimental.ndarray_view(lhs)
+        assert view.description.properties["element_contiguous"]
+        assert not view.description.properties["ndarray_abi_compatible"]
+        touch(view)
+        assert (lhs.to_numpy() == 5.0).all()
+        assert (rhs.to_numpy() == 17.0).all()
     finally:
         tree.destroy()
+
+
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    exclude=[(ti.vulkan, "Darwin")],
+    offline_cache=False,
+)
+def test_positive_multiaxis_affine_view_matches_ordinary_and_graph_addressing():
+    @ti.kernel
+    def write(values: ti.types.ndarray(dtype=ti.f32, ndim=2), bias: ti.f32):
+        for i, j in values:
+            values[i, j] = bias + i * 10.0 + j
+
+    @ti.kernel
+    def increment(values: ti.types.ndarray(dtype=ti.f32, ndim=2)):
+        for i, j in values:
+            values[i, j] += 1.0
+
+    initial = np.full((7, 8), -7.0, dtype=np.float32)
+    base = ti.ndarray(ti.f32, shape=(7, 8))
+    base.from_numpy(initial)
+    view = ti.experimental.ndarray_view(
+        base,
+        slices=(slice(1, 7, 2), slice(2, 8, 3)),
+    )
+    assert view.shape == (3, 2)
+    assert tuple(view.descriptor.index_strides_bytes) == (64, 12)
+    assert view.descriptor.byte_offset == 40
+    assert view.description.properties["uniqueness"] == "kProvenUnique"
+    assert view.description.properties["element_contiguous"]
+    assert not view.description.properties["ndarray_abi_compatible"]
+
+    write(view, 20.0)
+    expected = initial.copy()
+    expected[np.ix_([1, 3, 5], [2, 5])] = np.array(
+        [[20.0, 21.0], [30.0, 31.0], [40.0, 41.0]], dtype=np.float32
+    )
+    np.testing.assert_array_equal(base.to_numpy(), expected)
+
+    symbolic_values = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "values", ti.f32, ndim=2
+    )
+    symbolic_bias = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "bias", ti.f32)
+    graph_builder = ti.graph.GraphBuilder()
+    graph_builder.dispatch(write, symbolic_values, symbolic_bias)
+    graph_builder.dispatch(increment, symbolic_values)
+    graph = graph_builder.compile()
+    graph.execution_stats()
+    for _ in range(9):
+        graph.run({"values": view, "bias": 100.0})
+    expected[np.ix_([1, 3, 5], [2, 5])] = np.array(
+        [[101.0, 102.0], [111.0, 112.0], [121.0, 122.0]], dtype=np.float32
+    )
+    np.testing.assert_array_equal(base.to_numpy(), expected)
+
+    if impl.current_cfg().arch == ti.cuda:
+        stats = graph._graph_stats[0]
+        assert stats["captures"] == 0
+        assert stats["ordinary_fallbacks"] == 9
+        assert stats["last_path"] == "ordinary_fallback"
+    elif impl.current_cfg().arch == ti.vulkan:
+        stats = graph._graph_stats[0]
+        assert stats["records"] == 8
+        assert stats["replays"] == 1
+        assert stats["ordinary_fallbacks"] == 0
+        assert stats["last_path"] == "vulkan_replay"
+
+
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan],
+    exclude=[(ti.vulkan, "Darwin")],
+    offline_cache=False,
+)
+def test_positive_affine_view_preserves_contiguous_vector_elements():
+    vec3 = ti.types.vector(3, ti.f32)
+
+    @ti.kernel
+    def update(values: ti.types.ndarray(dtype=vec3, ndim=1)):
+        for i in values:
+            values[i][0] += 1.0
+            values[i][1] += 2.0
+            values[i][2] += 3.0
+
+    base = ti.Vector.ndarray(3, ti.f32, shape=6)
+    base.fill(4.0)
+    view = ti.experimental.ndarray_view(base, slices=slice(1, 6, 2))
+    assert view.shape == (3,)
+    assert tuple(view.descriptor.element_shape) == (3,)
+    assert tuple(view.descriptor.index_strides_bytes) == (24,)
+    assert tuple(view.descriptor.element_strides_bytes) == (4,)
+    assert view.descriptor.byte_offset == 12
+    update(view)
+
+    expected = np.full((6, 3), 4.0, dtype=np.float32)
+    expected[[1, 3, 5], :] += np.array([1.0, 2.0, 3.0], dtype=np.float32)
+    np.testing.assert_array_equal(base.to_numpy(), expected)
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_affine_view_composition_and_a1_exclusions():
+    base = ti.ndarray(ti.f32, shape=(8, 9))
+    first = ti.experimental.ndarray_view(
+        base, slices=(slice(1, 8, 2), slice(0, 9, 3))
+    )
+    second = ti.experimental.ndarray_view(
+        first, slices=(slice(1, 4, 2), slice(1, 3))
+    )
+    assert second.shape == (2, 2)
+    assert tuple(second.descriptor.index_strides_bytes) == (144, 12)
+    assert second.descriptor.byte_offset == 120
+    assert second.descriptor.resource_identity == first.descriptor.resource_identity
+
+    empty = ti.experimental.ndarray_view(
+        base, slices=(slice(8, 8), slice(None))
+    )
+    assert empty.shape == (0, 9)
+    assert empty.description.properties["empty"]
+
+    with pytest.raises(ValueError, match="strictly positive"):
+        ti.experimental.ndarray_view(base, slices=(slice(None, None, -1), slice(None)))
+    with pytest.raises(ValueError, match="strictly positive"):
+        ti.experimental.ndarray_view(base, slices=(slice(None, None, 0), slice(None)))
+    with pytest.raises(TypeError, match="bounds must be integers"):
+        ti.experimental.ndarray_view(
+            base, slices=(slice(None, None, 1.5), slice(None))
+        )
+    with pytest.raises(TypeError, match="one slice per index axis"):
+        ti.experimental.ndarray_view(base, slices=(1, slice(None)))
+    with pytest.raises(ValueError, match="exactly 2"):
+        ti.experimental.ndarray_view(base, slices=(slice(None),))

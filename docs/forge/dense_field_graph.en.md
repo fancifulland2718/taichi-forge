@@ -63,10 +63,12 @@ graph.run({"state": state})
 ```
 
 The same runtime slot accepts a compatible `ti.ndarray` or an explicit
-`ti.experimental.ndarray_view(field)`. Dtype, logical ndim, and vector/matrix
-element shape must exactly match the symbolic argument. Unsupported sparse,
-padded, or non-unique layouts fail explicitly without a shadow ndarray or
-implicit staging.
+`ti.experimental.ndarray_view(field, slices=...)`. Dtype, logical ndim, and
+vector/matrix element shape must exactly match the symbolic argument.
+Qualified positive-stride padded fields and rank-preserving subviews bind
+directly. Sparse, negative-stride, broadcast, overlapping, or otherwise
+unsupported layouts fail explicitly without a shadow ndarray or implicit
+staging.
 
 For data-oriented kernels, bind `self` or another `ti.template()` parameter at
 definition time:
@@ -92,7 +94,7 @@ graph.run({"dt": 1.0e-3})
 | Placement | Same-node AOS-style and separate-node SOA-style placement |
 | Ownership | One or multiple SNodeTrees in one Graph |
 | Composition | Field-only, mixed runtime arguments, and mixed Forge-native segments |
-| Runtime argument | Canonical compact, unique, full-Field ndarray-ABI mapping only |
+| Runtime argument | Qualified compact or positive-stride, element-contiguous, unique dense mapping; full Field or rank-preserving subview |
 
 Pointer, bitmasked, dynamic, hash, activation-list, and other sparse topology
 behavior is outside this contract. Sparse support has separate backend and
@@ -140,7 +142,7 @@ memory.
 | Backend | Dense Field Graph path | Important boundary |
 | --- | --- | --- |
 | CPU | Cached compiled dispatch plan | Preserves Graph semantics; it is not device-graph capture |
-| CUDA | Driver-API capture and executable replay when eligible | Static zero-runtime-argument Field Graphs can use exact replay; runtime dense Field arguments currently use ordinary dispatch, while capture/patch qualification remains a later contract |
+| CUDA | Driver-API capture and executable replay for compact internal storage | Exact binding replays in place and compatible internal allocation changes may patch; positive affine runtime arguments use ordinary fallback |
 | Vulkan | Runtime-owned command recording and replay | Uses the bounded eight-slot in-flight policy; saturation may use ordinary dispatch instead of growing persistent driver resources |
 
 An optimized path may fall back to ordinary dispatch, but it may not change

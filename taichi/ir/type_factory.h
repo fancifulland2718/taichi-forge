@@ -70,6 +70,10 @@ class TypeFactory {
   constexpr static int GRAD_PTR_POS_IN_NDARRAY = 2;
   constexpr static int DATA_PTR_POS_IN_ARGPACK = 0;
 
+  static int ndarray_shape_member_count(int ndim);
+  static int stride_pos_in_ndarray(int ndim, int axis);
+  static int affine_mode_pos_in_ndarray(int ndim);
+
  private:
   TypeFactory();
 

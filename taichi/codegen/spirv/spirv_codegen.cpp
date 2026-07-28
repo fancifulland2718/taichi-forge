@@ -3490,6 +3490,58 @@ class TaskCodegen : public IRVisitor {
                                         static_cast<int>(element_bytes)));
         }
       }
+      if (stmt->byte_stride == 0) {
+        std::vector<int> mode_indices = arg_id;
+        mode_indices.push_back(TypeFactory::SHAPE_POS_IN_NDARRAY);
+        mode_indices.push_back(
+            TypeFactory::affine_mode_pos_in_ndarray(stmt->ndim));
+        auto mode_ptr = ir_->make_access_chain(
+            ir_->get_pointer_type(ir_->i32_type(), spv::StorageClassUniform),
+            get_buffer_value(BufferType::Args, PrimitiveType::i32),
+            mode_indices);
+        auto mode = ir_->load_variable(mode_ptr, ir_->i32_type());
+        auto affine_offset =
+            ir_->int_immediate_number(ir_->i32_type(), 0);
+        const int num_array_indices =
+            num_indices - static_cast<int>(element_shape.size());
+        for (int i = 0; i < num_array_indices; ++i) {
+          std::vector<int> stride_indices = arg_id;
+          stride_indices.push_back(TypeFactory::SHAPE_POS_IN_NDARRAY);
+          stride_indices.push_back(
+              TypeFactory::stride_pos_in_ndarray(stmt->ndim, i));
+          auto stride_ptr = ir_->make_access_chain(
+              ir_->get_pointer_type(ir_->i32_type(), spv::StorageClassUniform),
+              get_buffer_value(BufferType::Args, PrimitiveType::i32),
+              stride_indices);
+          auto stride = ir_->load_variable(stride_ptr, ir_->i32_type());
+          auto index = ir_->query_value(stmt->indices[i]->raw_name());
+          affine_offset =
+              ir_->add(affine_offset, ir_->mul(index, stride));
+        }
+        auto inner_offset =
+            ir_->int_immediate_number(ir_->i32_type(), 0);
+        for (int i = 0; i < element_shape.size(); ++i) {
+          inner_offset = ir_->mul(
+              inner_offset,
+              ir_->int_immediate_number(ir_->i32_type(), element_shape[i]));
+          inner_offset = ir_->add(
+              inner_offset,
+              ir_->query_value(
+                  stmt->indices[num_array_indices + i]->raw_name()));
+        }
+        inner_offset = ir_->mul(
+            inner_offset,
+            ir_->int_immediate_number(
+                ir_->i32_type(),
+                static_cast<int>(
+                    data_type_size(stmt->ret_type.ptr_removed()))));
+        affine_offset = ir_->add(affine_offset, inner_offset);
+        auto affine_enabled = ir_->make_value(
+            spv::OpINotEqual, ir_->bool_type(), mode,
+            ir_->int_immediate_number(ir_->i32_type(), 0));
+        linear_offset =
+            ir_->select(affine_enabled, affine_offset, linear_offset);
+      }
       if (caps_->get(DeviceCapability::spirv_has_no_integer_wrap_decoration)) {
         ir_->decorate(spv::OpDecorate, linear_offset,
                       spv::DecorationNoSignedWrap);

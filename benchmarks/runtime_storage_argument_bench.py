@@ -184,6 +184,38 @@ def run(args):
         stage0(field_source_view, field_temporary_view, scale, bias)
         stage1(field_temporary_view, field_output_view)
 
+    affine_guard = np.float32(-4096.0)
+    affine_source_np = np.full(n * 2, affine_guard, dtype=np.float32)
+    affine_source_np[::2] = source_np
+    affine_source = ti.ndarray(ti.f32, shape=n * 2)
+    affine_temporary = ti.ndarray(ti.f32, shape=n * 2)
+    affine_output = ti.ndarray(ti.f32, shape=n * 2)
+    affine_source.from_numpy(affine_source_np)
+    affine_temporary.fill(float(affine_guard))
+    affine_output.fill(float(affine_guard))
+    affine_source_view = ti.experimental.ndarray_view(
+        affine_source, slices=slice(0, n * 2, 2)
+    )
+    affine_temporary_view = ti.experimental.ndarray_view(
+        affine_temporary, slices=slice(0, n * 2, 2)
+    )
+    affine_output_view = ti.experimental.ndarray_view(
+        affine_output, slices=slice(0, n * 2, 2)
+    )
+
+    def run_affine_view_kernels():
+        stage0(affine_source_view, affine_temporary_view, scale, bias)
+        stage1(affine_temporary_view, affine_output_view)
+
+    def check_affine_output():
+        actual = affine_output.to_numpy()
+        selected_delta = np.abs(actual[::2] - expected)
+        guard_delta = np.abs(actual[1::2] - affine_guard)
+        correct = np.allclose(
+            actual[::2], expected, rtol=1.0e-6, atol=1.0e-6
+        ) and np.array_equal(actual[1::2], np.full(n, affine_guard))
+        return correct, max(np.max(selected_delta), np.max(guard_delta))
+
     symbolic_source = ti.graph.Arg(
         ti.graph.ArgKind.NDARRAY, "source", ti.f32, ndim=1
     )
@@ -237,17 +269,36 @@ def run(args):
     def run_field_view_graph():
         graph.run(field_view_graph_args)
 
+    affine_graph_args = {
+        "source": affine_source_view,
+        "temporary": affine_temporary_view,
+        "output": affine_output_view,
+        "scale": float(scale),
+        "bias": float(bias),
+    }
+
+    def run_affine_view_graph():
+        graph.run(affine_graph_args)
+
     available_cases = {
         "ordinary_ndarray": (run_array_kernels, make_check(array_output)),
         "ordinary_dense_field_view": (
             run_field_view_kernels,
             make_check(field_output),
         ),
+        "ordinary_positive_affine_view": (
+            run_affine_view_kernels,
+            check_affine_output,
+        ),
         "graph_ndarray": (run_array_graph, make_check(array_output)),
         "graph_dense_field": (run_field_graph, make_check(field_output)),
         "graph_dense_field_view": (
             run_field_view_graph,
             make_check(field_output),
+        ),
+        "graph_positive_affine_view": (
+            run_affine_view_graph,
+            check_affine_output,
         ),
     }
     requested_cases = (
@@ -306,8 +357,9 @@ def main():
         default="all",
         help=(
             "comma-separated subset of ordinary_ndarray, "
-            "ordinary_dense_field_view, graph_ndarray, graph_dense_field, "
-            "graph_dense_field_view"
+            "ordinary_dense_field_view, ordinary_positive_affine_view, "
+            "graph_ndarray, graph_dense_field, graph_dense_field_view, "
+            "graph_positive_affine_view"
         ),
     )
     parser.add_argument("--performance", action="store_true")

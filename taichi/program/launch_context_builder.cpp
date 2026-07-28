@@ -223,6 +223,74 @@ void LaunchContextBuilder::set_array_device_allocation_type(
   device_allocation_type[i] = usage;
 }
 
+void LaunchContextBuilder::set_array_shape_and_strides(
+    const std::vector<int> &arg_id,
+    const std::vector<std::int64_t> &shape,
+    const std::vector<std::int64_t> *strides_bytes,
+    bool affine_mode) {
+  const auto parameter = kernel_->nested_parameters.find(arg_id);
+  TI_ASSERT(parameter != kernel_->nested_parameters.end());
+  const std::size_t index_rank =
+      parameter->second.total_dim - parameter->second.element_shape.size();
+  TI_ERROR_IF(shape.size() != index_rank,
+              "Array shape rank does not match the kernel argument");
+  TI_ERROR_IF(strides_bytes != nullptr && strides_bytes->size() != index_rank,
+              "Array stride rank does not match the kernel argument");
+
+  std::vector<std::int64_t> canonical_strides(index_rank);
+  if (strides_bytes == nullptr) {
+    const auto *array_type =
+        args_type->get_element_type(arg_id)->as<StructType>();
+    const auto scalar_type =
+        array_type->get_element_type({TypeFactory::DATA_PTR_POS_IN_NDARRAY})
+            ->as<PointerType>()
+            ->get_pointee_type();
+    std::int64_t stride = data_type_size(scalar_type);
+    for (int extent : parameter->second.element_shape) {
+      TI_ERROR_IF(extent < 0 ||
+                      (extent > 0 &&
+                       stride > (std::numeric_limits<std::int32_t>::max)() /
+                                    extent),
+                  "Array element shape exceeds the int32 indexing ABI");
+      stride *= extent;
+    }
+    for (std::size_t reverse = 0; reverse < index_rank; ++reverse) {
+      const std::size_t axis = index_rank - reverse - 1;
+      canonical_strides[axis] = stride;
+      TI_ERROR_IF(shape[axis] < 0 ||
+                      (shape[axis] > 0 &&
+                       stride > (std::numeric_limits<std::int32_t>::max)() /
+                                    shape[axis]),
+                  "Array shape exceeds the int32 indexing ABI");
+      stride *= shape[axis];
+    }
+    strides_bytes = &canonical_strides;
+  }
+
+  for (std::size_t axis = 0; axis < index_rank; ++axis) {
+    TI_ERROR_IF(shape[axis] < 0 ||
+                    shape[axis] > (std::numeric_limits<std::int32_t>::max)(),
+                "Array shape exceeds the int32 indexing ABI");
+    const std::int64_t stride = (*strides_bytes)[axis];
+    TI_ERROR_IF(stride < 0 ||
+                    stride > (std::numeric_limits<std::int32_t>::max)(),
+                "Array byte stride exceeds the positive int32 affine ABI");
+    set_struct_arg(concatenate_vector<int>(arg_id, {0, (int32)axis}),
+                   static_cast<int32>(shape[axis]));
+    set_struct_arg(
+        concatenate_vector<int>(
+            arg_id,
+            {0, TypeFactory::stride_pos_in_ndarray(
+                    static_cast<int>(index_rank), static_cast<int>(axis))}),
+        static_cast<int32>(stride));
+  }
+  set_struct_arg(
+      concatenate_vector<int>(
+          arg_id,
+          {0, TypeFactory::affine_mode_pos_in_ndarray(
+                  static_cast<int>(index_rank))}),
+      static_cast<int32>(affine_mode));
+}
 void LaunchContextBuilder::set_arg_external_array_with_shape(
     const std::vector<int> &arg_id,
     uintptr_t ptr,
@@ -241,10 +309,7 @@ void LaunchContextBuilder::set_arg_external_array_with_shape(
       arg_id, {TypeFactory::GRAD_PTR_POS_IN_NDARRAY})] = (void *)grad_ptr;
   set_array_runtime_size(arg_id, size);
   set_array_device_allocation_type(arg_id, DevAllocType::kNone);
-  for (uint64 i = 0; i < shape.size(); ++i) {
-    set_struct_arg(concatenate_vector<int>(arg_id, {0, (int32)i}),
-                   (int32)shape[i]);
-  }
+  set_array_shape_and_strides(arg_id, shape, nullptr, false);
 }
 
 void LaunchContextBuilder::set_arg_ndarray(const std::vector<int> &arg_id,
@@ -335,12 +400,13 @@ void LaunchContextBuilder::set_arg_dense_storage(
       kernel_->nested_parameters[arg_id].is_array,
       "Assigning a dense storage view to a scalar argument is not allowed.");
   const auto &properties = descriptor.properties();
-  TI_ERROR_IF(
-      !properties.ndarray_abi_compatible ||
-          properties.uniqueness !=
-              storage::StorageMappingUniqueness::kProvenUnique,
-      "Dense storage kernel binding requires a unique ndarray-compatible "
-      "layout");
+  const bool safe_positive_affine =
+      !properties.has_negative_stride && properties.element_contiguous &&
+      properties.uniqueness ==
+          storage::StorageMappingUniqueness::kProvenUnique;
+  TI_ERROR_IF(!properties.ndarray_abi_compatible && !safe_positive_affine,
+              "Dense storage kernel binding requires a unique, positive, "
+              "element-contiguous affine layout");
   TI_ERROR_IF(descriptor.access() != storage::StorageAccess::kReadWrite,
               "Dense storage kernel binding currently requires read-write "
               "access");
@@ -362,16 +428,10 @@ void LaunchContextBuilder::set_arg_dense_storage(
   const std::size_t index_rank = descriptor.index_rank();
   TI_ASSERT_INFO(index_rank <= taichi_max_num_indices,
                  "Dense storage view cannot have too many indices");
-  for (std::size_t i = 0; i < index_rank; ++i) {
-    const std::int64_t extent = descriptor.index_extent(i);
-    TI_ERROR_IF(extent < 0 ||
-                    static_cast<std::uint64_t>(extent) >
-                        static_cast<std::uint64_t>(
-                            (std::numeric_limits<std::int32_t>::max)()),
-                "Dense storage view shape is outside the ndarray ABI");
-    set_struct_arg(concatenate_vector<int>(arg_id, {0, (int32)i}),
-                   static_cast<int32>(extent));
-  }
+  const auto shape = descriptor.index_shape();
+  const auto strides = descriptor.index_strides_bytes();
+  set_array_shape_and_strides(arg_id, shape, &strides,
+                              !properties.ndarray_abi_compatible);
   set_array_runtime_size(arg_id, properties.item_count);
   set_array_device_allocation_type(arg_id, DevAllocType::kDenseStorage);
 }
@@ -542,11 +602,13 @@ void LaunchContextBuilder::set_arg_ndarray_impl(const std::vector<int> &arg_id,
   set_array_device_allocation_type(arg_id, DevAllocType::kNdarray);
   TI_ASSERT(shape.size() <= taichi_max_num_indices);
   size_t total_size = 1;
-  for (int i = 0; i < shape.size(); i++) {
-    set_struct_arg(concatenate_vector<int>(arg_id, {0, (int32)i}),
-                   (int32)shape[i]);
-    total_size *= shape[i];
+  std::vector<std::int64_t> runtime_shape;
+  runtime_shape.reserve(shape.size());
+  for (int extent : shape) {
+    runtime_shape.push_back(extent);
+    total_size *= extent;
   }
+  set_array_shape_and_strides(arg_id, runtime_shape, nullptr, false);
   set_array_runtime_size(arg_id, total_size);
 }
 

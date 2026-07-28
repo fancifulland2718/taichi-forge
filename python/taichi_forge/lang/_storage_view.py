@@ -246,6 +246,11 @@ def _describe_field(field, access):
 def describe_storage(obj, *, access="readwrite"):
     """Describe an existing dense storage object without resolving a pointer."""
 
+    if isinstance(obj, DenseNdarrayView):
+        if access != obj.descriptor.access.removeprefix("k").lower():
+            if access != "readwrite" or obj.descriptor.access != "kReadWrite":
+                return StorageDescription(_failure_reason="kReadOnlySource")
+        return obj.description
     if isinstance(obj, StructNdarrayScalarMemberView):
         result = _ti_core._describe_struct_member_storage(
             obj.base.arr,
@@ -293,11 +298,57 @@ def _flatten_storage_to_scalar_vector(description):
     )
 
 
-def ndarray_view(obj, *, access="readwrite"):
-    """Create an explicit zero-copy ndarray ABI view when safely possible.
+def _slice_storage_description(description, slices):
+    descriptor = description.descriptor
+    rank = len(tuple(descriptor.index_shape))
+    if isinstance(slices, slice):
+        slices = (slices,)
+    else:
+        slices = tuple(slices)
+    if len(slices) != rank:
+        raise ValueError(f"ndarray_view requires exactly {rank} index slices")
 
-    The initial execution contract is deliberately read-write and contiguous.
-    Unsupported layouts fail without allocating or materializing a temporary.
+    starts = []
+    lengths = []
+    steps = []
+    for extent, item in zip(descriptor.index_shape, slices):
+        if not isinstance(item, slice):
+            raise TypeError(
+                "ndarray_view accepts one slice per index axis; "
+                "integer indexing, ellipsis, and axis permutation are unsupported"
+            )
+        try:
+            start, stop, step = item.indices(int(extent))
+        except TypeError as exc:
+            raise TypeError("ndarray_view slice bounds must be integers") from exc
+        except ValueError as exc:
+            raise ValueError(
+                "ndarray_view requires strictly positive slice steps"
+            ) from exc
+        if step <= 0:
+            raise ValueError("ndarray_view requires strictly positive slice steps")
+        starts.append(start)
+        lengths.append(len(range(start, stop, step)))
+        steps.append(step)
+
+    result = _ti_core._slice_dense_storage(
+        descriptor, starts, lengths, steps
+    )
+    if not result.ok:
+        raise ValueError(
+            "storage cannot form a positive-stride affine view: "
+            f"{result.reason}"
+        )
+    return StorageDescription(result)
+
+
+def ndarray_view(obj, *, slices=None, access="readwrite"):
+    """Create an explicit zero-copy dense view over existing storage.
+
+    ``slices`` may contain one positive-step :class:`slice` per logical index
+    axis. The view preserves rank and element layout. Negative steps, integer
+    indexing, broadcast/overlap, axis permutation, and arbitrary element
+    strides are intentionally outside the current execution contract.
     """
 
     if access != "readwrite":
@@ -305,11 +356,13 @@ def ndarray_view(obj, *, access="readwrite"):
     description = describe_storage(obj, access=access)
     if not description.supported:
         raise ValueError(f"storage cannot be described: {description.failure_reason}")
+    if slices is not None:
+        description = _slice_storage_description(description, slices)
     qualification = qualify_storage(
         description,
         StorageRequirement(
             max_element_rank=2,
-            require_ndarray_abi=True,
+            accept_general_affine=True,
             require_unique_mapping=True,
             require_writable=True,
             allow_materialization=False,
@@ -317,11 +370,10 @@ def ndarray_view(obj, *, access="readwrite"):
     )
     if not qualification["supported"] or qualification["requires_materialization"]:
         raise ValueError(
-            "storage cannot be bound as a zero-copy ndarray view: "
+            "storage cannot be bound as a zero-copy dense view: "
             f"{qualification['reason']}"
         )
     return DenseNdarrayView(obj, description)
-
 
 def validate_storage_owner(description):
     """Return a stable owner-status code for the current Program."""

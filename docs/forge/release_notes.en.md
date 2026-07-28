@@ -42,20 +42,23 @@ grouped under the behavior they shipped.
 
 ## Unreleased
 
-- Added `ti.experimental.ndarray_view()` for strict zero-copy binding of
-  qualified contiguous Ndarrays and canonical root-dense fields to the
-  existing `ti.types.ndarray(...)` kernel ABI on CPU, CUDA, and Vulkan.
-  Unsupported layouts fail without staging; stale owners are rejected before
-  enqueue, and GPU submissions retain the runtime resource through completion.
-- JIT Graph `ArgKind.NDARRAY` runtime arguments now accept canonical compact
-  dense scalar, vector, and matrix Fields, as well as explicit
-  `DenseNdarrayView` objects. Graph normalizes these values through the common
-  runtime-storage protocol, validates dtype/rank/element shape and owner
-  generation on each submission, and binds the existing allocation without a
-  shadow ndarray or implicit staging. CPU uses its cached ordinary dispatch
-  plan and Vulkan supports command replay. CUDA preserves ordinary Graph
-  execution for borrowed runtime Field bindings; CUDA capture remains limited
-  to qualified owning Ndarray or zero-runtime-argument Graphs.
+- Added `ti.experimental.ndarray_view(source, slices=...)` for strict zero-copy
+  binding of qualified runtime-owned dense storage to `ti.types.ndarray(...)`
+  kernel arguments on CPU, CUDA, and Vulkan. It accepts contiguous Ndarrays,
+  qualified dense scalar/vector/matrix fields, and rank-preserving
+  positive-stride subviews. View composition combines checked byte offsets and
+  per-axis strides without staging or temporary allocation. Negative,
+  broadcast, overlapping, permuted, sparse, and externally owned layouts fail
+  before enqueue. Stale owners are rejected and GPU submissions retain the
+  runtime resource through completion.
+- JIT Graph `ArgKind.NDARRAY` runtime arguments now consume the common runtime
+  storage protocol for Ndarrays, dense fields, and explicit
+  `DenseNdarrayView` objects. Compact Program-owned Ndarray and SNode payload
+  bindings are eligible for CUDA capture, exact replay, and compatible
+  allocation patching; owner generation and byte ranges are revalidated before
+  replay. Positive affine views execute through CUDA ordinary fallback and
+  Vulkan command record/replay with the same result contract. AOT borrowed
+  storage, external-owner capture, and ArgPack nesting remain unsupported.
 - `ti.linalg.experimental.LinearOperator.apply()` and single-system
   `SolvePlan.solve()` now accept supported 1D/2D/3D root-dense scalar, Vector,
   and Matrix fields. Overwrite `LinearOperator.apply()` binds canonical compact

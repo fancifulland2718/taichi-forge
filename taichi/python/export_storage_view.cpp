@@ -234,7 +234,8 @@ void export_storage_view(py::module &m) {
          bool require_external_sync) {
         RuntimeStorageRequirement requirement;
         requirement.dense.max_element_rank = 2;
-        requirement.dense.require_ndarray_abi = true;
+        requirement.dense.require_ndarray_abi = false;
+        requirement.dense.accept_general_affine = true;
         requirement.dense.require_unique_mapping = true;
         requirement.dense.require_writable = true;
         requirement.dense.accept_external_owner = true;
@@ -261,6 +262,10 @@ void export_storage_view(py::module &m) {
   m.def("_flatten_dense_storage_to_scalar_vector",
         &flatten_dense_storage_to_scalar_vector,
         py::arg("descriptor"));
+
+  m.def("_slice_dense_storage", &slice_dense_storage,
+        py::arg("descriptor"), py::arg("starts"), py::arg("lengths"),
+        py::arg("steps"));
 
   m.def(
       "_describe_struct_member_storage",

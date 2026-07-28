@@ -2263,6 +2263,52 @@ void TaskCodeGenLLVM::visit(ExternalPtrStmt *stmt) {
   }
   TI_ASSERT(size_var_index == num_indices - num_element_indices);
 
+  llvm::Value *affine_condition = nullptr;
+  llvm::Value *affine_address_offset = nullptr;
+  if (stmt->byte_stride == 0) {
+    auto mode_arg = builder->CreateGEP(
+        struct_type, llvm_val[stmt->base_ptr],
+        {tlctx->get_constant(0),
+         tlctx->get_constant(TypeFactory::SHAPE_POS_IN_NDARRAY),
+         tlctx->get_constant(
+             TypeFactory::affine_mode_pos_in_ndarray(stmt->ndim))});
+    mode_arg = builder->CreateLoad(
+        tlctx->get_data_type(PrimitiveType::i32), mode_arg);
+    affine_condition = builder->CreateICmpNE(mode_arg, tlctx->get_constant(0));
+    affine_address_offset =
+        tlctx->get_constant(get_data_type<int64>(), 0);
+    for (int i = 0; i < num_array_args; ++i) {
+      auto stride_arg = builder->CreateGEP(
+          struct_type, llvm_val[stmt->base_ptr],
+          {tlctx->get_constant(0),
+           tlctx->get_constant(TypeFactory::SHAPE_POS_IN_NDARRAY),
+           tlctx->get_constant(
+               TypeFactory::stride_pos_in_ndarray(stmt->ndim, i))});
+      stride_arg = builder->CreateLoad(
+          tlctx->get_data_type(PrimitiveType::i32), stride_arg);
+      auto stride = builder->CreateSExt(
+          stride_arg, llvm::Type::getInt64Ty(*llvm_context));
+      auto index = builder->CreateSExt(
+          llvm_val[stmt->indices[i]], llvm::Type::getInt64Ty(*llvm_context));
+      affine_address_offset = builder->CreateAdd(
+          affine_address_offset, builder->CreateMul(index, stride));
+    }
+    auto inner_linear = tlctx->get_constant(0);
+    for (int i = 0; i < num_element_indices; ++i) {
+      inner_linear = builder->CreateMul(
+          inner_linear, tlctx->get_constant(stmt->element_shape[i]));
+      inner_linear = builder->CreateAdd(
+          inner_linear, llvm_val[stmt->indices[num_array_args + i]]);
+    }
+    auto inner_bytes = builder->CreateSExt(
+        inner_linear, llvm::Type::getInt64Ty(*llvm_context));
+    inner_bytes = builder->CreateMul(
+        inner_bytes,
+        tlctx->get_constant(get_data_type<int64>(), data_type_size(arg_type)));
+    affine_address_offset =
+        builder->CreateAdd(affine_address_offset, inner_bytes);
+  }
+
   /*
     llvm::GEP implicitly indicates alignment when used upon llvm::VectorType.
     For example:
@@ -2298,8 +2344,17 @@ void TaskCodeGenLLVM::visit(ExternalPtrStmt *stmt) {
 
     auto ret_ptr = builder->CreateGEP(tlctx->get_data_type(arg_type), ptr_val,
                                       address_offset);
-    llvm_val[stmt] = builder->CreateBitCast(
+    auto canonical_ptr = builder->CreateBitCast(
         ret_ptr, llvm::PointerType::get(tlctx->get_data_type(dt), 0));
+    auto i8_ty = llvm::Type::getInt8Ty(*llvm_context);
+    auto affine_base = builder->CreateBitCast(
+        ptr_val, llvm::PointerType::get(i8_ty, 0));
+    auto affine_i8_ptr = builder->CreateGEP(
+        i8_ty, affine_base, affine_address_offset);
+    auto affine_ptr = builder->CreateBitCast(
+        affine_i8_ptr, llvm::PointerType::get(tlctx->get_data_type(dt), 0));
+    llvm_val[stmt] =
+        builder->CreateSelect(affine_condition, affine_ptr, canonical_ptr);
 
   } else {
     auto base_ty = tlctx->get_data_type(dt);
@@ -2323,7 +2378,16 @@ void TaskCodeGenLLVM::visit(ExternalPtrStmt *stmt) {
     } else {
       auto base =
           builder->CreateBitCast(ptr_val, llvm::PointerType::get(base_ty, 0));
-      llvm_val[stmt] = builder->CreateGEP(base_ty, base, linear_index);
+      auto canonical_ptr = builder->CreateGEP(base_ty, base, linear_index);
+      auto i8_ty = llvm::Type::getInt8Ty(*llvm_context);
+      auto affine_base = builder->CreateBitCast(
+          ptr_val, llvm::PointerType::get(i8_ty, 0));
+      auto affine_i8_ptr = builder->CreateGEP(
+          i8_ty, affine_base, affine_address_offset);
+      auto affine_ptr = builder->CreateBitCast(
+          affine_i8_ptr, llvm::PointerType::get(base_ty, 0));
+      llvm_val[stmt] =
+          builder->CreateSelect(affine_condition, affine_ptr, canonical_ptr);
     }
   }
 }
@@ -3254,12 +3318,26 @@ void TaskCodeGenLLVM::set_struct_to_buffer(
     int &current_element,
     std::vector<llvm::Value *> &current_index) {
   if (auto primitive_type = current_type->cast<PrimitiveType>()) {
-    TI_ASSERT((Type *)elements[current_element]->ret_type == current_type);
+    TI_ERROR_IF(current_element >= elements.size() ||
+                    (Type *)elements[current_element]->ret_type != current_type,
+                "Real-function argument flatten mismatch at {}: expected {}, "
+                "got {}",
+                current_element, current_type->to_string(),
+                current_element < elements.size()
+                    ? elements[current_element]->ret_type->to_string()
+                    : std::string("<missing>"));
     auto *gep = builder->CreateGEP(buffer_type, buffer, current_index);
     builder->CreateStore(llvm_val[elements[current_element]], gep);
     current_element++;
   } else if (auto pointer_type = current_type->cast<PointerType>()) {
-    TI_ASSERT((Type *)elements[current_element]->ret_type == current_type);
+    TI_ERROR_IF(current_element >= elements.size() ||
+                    (Type *)elements[current_element]->ret_type != current_type,
+                "Real-function argument flatten mismatch at {}: expected {}, "
+                "got {}",
+                current_element, current_type->to_string(),
+                current_element < elements.size()
+                    ? elements[current_element]->ret_type->to_string()
+                    : std::string("<missing>"));
     auto *gep = builder->CreateGEP(buffer_type, buffer, current_index);
     builder->CreateStore(llvm_val[elements[current_element]], gep);
     current_element++;

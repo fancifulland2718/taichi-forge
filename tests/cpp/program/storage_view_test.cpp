@@ -144,6 +144,34 @@ TEST(StorageViewTest, NegativeStrideIsDescribedButNotCalledContiguous) {
   EXPECT_EQ(qualification.execution_mode, StorageExecutionMode::kDirectAffine);
 }
 
+TEST(StorageViewTest, PositiveStrideSliceComposesCheckedAffineMapping) {
+  auto base = build_f32({8, 9}, {36, 4});
+  ASSERT_TRUE(base);
+
+  auto sliced = slice_dense_storage(*base.descriptor, {1, 2}, {3, 2}, {2, 3});
+  ASSERT_TRUE(sliced);
+  EXPECT_EQ(sliced.descriptor->index_shape(),
+            (std::vector<std::int64_t>{3, 2}));
+  EXPECT_EQ(sliced.descriptor->index_strides_bytes(),
+            (std::vector<std::int64_t>{72, 12}));
+  EXPECT_EQ(sliced.descriptor->byte_offset(), 44);
+  EXPECT_EQ(sliced.descriptor->properties().reachable_begin, 44);
+  EXPECT_EQ(sliced.descriptor->properties().reachable_end, 204);
+  EXPECT_EQ(sliced.descriptor->properties().uniqueness,
+            StorageMappingUniqueness::kProvenUnique);
+  EXPECT_TRUE(sliced.descriptor->properties().element_contiguous);
+  EXPECT_FALSE(sliced.descriptor->properties().ndarray_abi_compatible);
+
+  auto invalid_step =
+      slice_dense_storage(*base.descriptor, {0, 0}, {2, 2}, {-1, 1});
+  EXPECT_FALSE(invalid_step);
+  EXPECT_EQ(invalid_step.reason, StorageFailureReason::kInvalidShape);
+
+  auto out_of_range =
+      slice_dense_storage(*base.descriptor, {7, 0}, {2, 1}, {1, 1});
+  EXPECT_FALSE(out_of_range);
+  EXPECT_EQ(out_of_range.reason, StorageFailureReason::kInvalidShape);
+}
 TEST(StorageViewTest, CheckedArithmeticRejectsInvalidMappings) {
   auto invalid_owner = build_f32({4}, {4}, {}, {}, 0, StorageOwnerRef{});
   EXPECT_FALSE(invalid_owner);
