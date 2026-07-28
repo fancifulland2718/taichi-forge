@@ -26,6 +26,43 @@ lang::storage::StorageAccess parse_storage_access(const std::string &access) {
       "storage access must be 'readonly', 'writeonly', or 'readwrite'");
 }
 
+lang::storage::RuntimeStorageConsumer parse_runtime_storage_consumer(
+    const std::string &consumer) {
+  using lang::storage::RuntimeStorageConsumer;
+  if (consumer == "ordinary_kernel") {
+    return RuntimeStorageConsumer::kOrdinaryKernel;
+  }
+  if (consumer == "graph_replay") {
+    return RuntimeStorageConsumer::kGraphReplay;
+  }
+  if (consumer == "graph_capture") {
+    return RuntimeStorageConsumer::kGraphCapture;
+  }
+  if (consumer == "native_consumer") {
+    return RuntimeStorageConsumer::kNativeConsumer;
+  }
+  if (consumer == "external_interop") {
+    return RuntimeStorageConsumer::kExternalInterop;
+  }
+  throw py::value_error("unsupported runtime storage consumer");
+}
+
+lang::storage::RuntimeStorageMode parse_runtime_storage_mode(
+    const std::string &mode) {
+  using lang::storage::RuntimeStorageMode;
+  if (mode == "ordinary") {
+    return RuntimeStorageMode::kOrdinary;
+  }
+  if (mode == "replay") {
+    return RuntimeStorageMode::kReplay;
+  }
+  if (mode == "capture") {
+    return RuntimeStorageMode::kCapture;
+  }
+  throw py::value_error(
+      "runtime storage mode must be ordinary, replay, or capture");
+}
+
 py::dict dense_storage_properties(
     const lang::storage::DenseStorageDescriptor &descriptor) {
   using lang::storage::to_string;
@@ -50,6 +87,23 @@ py::dict dense_storage_properties(
   result["record_stride"] = properties.record_stride;
   result["array_layout"] = to_string(properties.array_layout);
   result["uniqueness"] = to_string(properties.uniqueness);
+  return result;
+}
+
+py::dict runtime_storage_qualification_dict(
+    const lang::storage::RuntimeStorageQualification &qualification) {
+  py::dict result;
+  result["describable"] = qualification.capabilities.describable;
+  result["bindable"] = qualification.capabilities.bindable;
+  result["replayable"] = qualification.capabilities.replayable;
+  result["capturable"] = qualification.capabilities.capturable;
+  result["zero_copy_qualified"] =
+      qualification.capabilities.zero_copy_qualified;
+  result["dense_supported"] = qualification.dense.supported;
+  result["execution_mode"] =
+      lang::storage::to_string(qualification.dense.execution_mode);
+  result["reason"] = lang::storage::to_string(qualification.reason);
+  result["stable_signature"] = qualification.stable_signature;
   return result;
 }
 
@@ -133,6 +187,28 @@ void export_storage_view(py::module &m) {
                              })
       .def_property_readonly("properties", &dense_storage_properties);
 
+  py::class_<RuntimeStorageArgument>(m, "_RuntimeStorageArgument")
+      .def_property_readonly("descriptor", &RuntimeStorageArgument::descriptor,
+                             py::return_value_policy::reference_internal)
+      .def_property_readonly("stable_signature",
+                             &RuntimeStorageArgument::stable_signature)
+      .def_property_readonly(
+          "synchronization_domain_identity",
+          &RuntimeStorageArgument::synchronization_domain_identity)
+      .def_property_readonly(
+          "consumer",
+          [](const RuntimeStorageArgument &argument) {
+            return to_string(argument.requirement().consumer);
+          })
+      .def_property_readonly("mode",
+                             [](const RuntimeStorageArgument &argument) {
+                               return to_string(argument.requirement().mode);
+                             })
+      .def_property_readonly(
+          "qualification", [](const RuntimeStorageArgument &argument) {
+            return runtime_storage_qualification_dict(argument.qualification());
+          });
+
   py::class_<DenseStorageBuildResult>(m, "_DenseStorageBuildResult")
       .def_property_readonly("ok",
                              [](const DenseStorageBuildResult &result) {
@@ -149,6 +225,31 @@ void export_storage_view(py::module &m) {
             return result.descriptor ? &*result.descriptor : nullptr;
           },
           py::return_value_policy::reference_internal);
+
+  m.def(
+      "_make_runtime_storage_argument",
+      [](Program &program, const DenseStorageDescriptor &descriptor,
+         const std::string &consumer, const std::string &mode,
+         std::uint64_t synchronization_domain_identity,
+         bool require_external_sync) {
+        RuntimeStorageRequirement requirement;
+        requirement.dense.max_element_rank = 2;
+        requirement.dense.require_ndarray_abi = true;
+        requirement.dense.require_unique_mapping = true;
+        requirement.dense.require_writable = true;
+        requirement.dense.accept_external_owner = true;
+        requirement.dense.allow_materialization = false;
+        requirement.consumer = parse_runtime_storage_consumer(consumer);
+        requirement.mode = parse_runtime_storage_mode(mode);
+        requirement.backend = program.compile_config().arch;
+        requirement.require_external_sync = require_external_sync;
+        return RuntimeStorageArgument(descriptor, requirement,
+                                      synchronization_domain_identity);
+      },
+      py::arg("program"), py::arg("descriptor"),
+      py::arg("consumer") = "ordinary_kernel", py::arg("mode") = "ordinary",
+      py::arg("synchronization_domain_identity") = 0,
+      py::arg("require_external_sync") = false);
 
   m.def(
       "_describe_ndarray_storage",

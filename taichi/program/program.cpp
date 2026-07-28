@@ -16,6 +16,7 @@
 #include "taichi/program/snode_expr_utils.h"
 #include "taichi/math/arithmetic.h"
 #include "taichi/rhi/common/host_memory_pool.h"
+#include "taichi/rhi/interop/external_sync.h"
 #ifdef TI_WITH_LLVM
 #include "taichi/rhi/cpu/cpu_device.h"
 #endif
@@ -5035,10 +5036,8 @@ void Program::launch_kernel(const CompiledKernelData &compiled_kernel_data,
     // owner/handle checks remain, but no registry lookup or recursive lock is
     // needed here.
     TI_ASSERT(ctx.argpack_ptrs.empty());
-    TI_ERROR_IF(!ctx.dense_storage_ptrs.empty(),
-                "Dense storage views are not yet supported by Graph "
-                "capture or replay");
     resolve_ndarray_launch_context_under_guard(ctx);
+    resolve_runtime_storage_launch_context_under_guard(ctx);
     resolve_texture_launch_context_under_guard(ctx);
     auto completion_scope = acquire_runtime_submission_scope();
     program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
@@ -5095,10 +5094,8 @@ void Program::launch_kernel_impl(
 
   if (active_runtime_resource_graph_program == this) {
     TI_ASSERT(ctx.argpack_ptrs.empty());
-    TI_ERROR_IF(!ctx.dense_storage_ptrs.empty(),
-                "Dense storage views are not yet supported by Graph "
-                "capture or replay");
     resolve_ndarray_launch_context_under_guard(ctx);
+    resolve_runtime_storage_launch_context_under_guard(ctx);
     resolve_texture_launch_context_under_guard(ctx);
     auto completion_scope = acquire_runtime_submission_scope();
     if (registered_handle) {
@@ -6053,6 +6050,19 @@ void Program::resolve_ndarray_launch_context_under_guard(
   }
 }
 
+void Program::resolve_runtime_storage_launch_context_under_guard(
+    LaunchContextBuilder &ctx) {
+  if (ctx.dense_storage_ptrs.empty()) {
+    return;
+  }
+  NdarrayLaunchLeases ndarray_leases;
+  ExternalDenseStorageLaunchLeases external_leases;
+  resolve_dense_storage_launch_context(ctx, ndarray_leases, external_leases);
+  TI_ERROR_IF(!ndarray_leases.empty() || !external_leases.empty(),
+              "Graph runtime storage arguments were not retained before "
+              "dispatch");
+}
+
 void Program::resolve_texture_launch_context(LaunchContextBuilder &ctx) {
   if (ctx.texture_ptrs.empty()) {
     return;
@@ -6123,9 +6133,26 @@ Program::NdarrayLaunchLeases Program::acquire_ndarray_launch_leases(
 storage::ResolvedDenseBinding Program::resolve_dense_storage_descriptor(
     const storage::DenseStorageDescriptor &descriptor,
     NdarrayLaunchLeases &ndarray_leases,
-    ExternalDenseStorageLaunchLeases &external_leases) {
+    ExternalDenseStorageLaunchLeases &external_leases,
+    const storage::RuntimeStorageArgument *runtime_argument) {
   TI_ERROR_IF(!ndarray_resources_open_,
               "Cannot resolve dense storage after Program finalize");
+
+  if (runtime_argument != nullptr) {
+    const auto &qualification = runtime_argument->qualification();
+    TI_ERROR_IF(&runtime_argument->descriptor() != &descriptor,
+                "Runtime storage argument descriptor identity was lost");
+    TI_ERROR_IF(
+        runtime_argument->requirement().backend != compile_config().arch,
+        "Runtime storage argument was qualified for backend {} but "
+        "submitted to {}",
+        arch_name(runtime_argument->requirement().backend),
+        arch_name(compile_config().arch));
+    TI_ERROR_IF(!qualification.capabilities.bindable ||
+                    !qualification.capabilities.zero_copy_qualified,
+                "Runtime storage argument is not zero-copy bindable: {}",
+                storage::to_string(qualification.reason));
+  }
 
   auto find_snode = [](SNode *root, int target_id) -> SNode * {
     auto visit = [&](auto &&self, SNode *node) -> SNode * {
@@ -6164,6 +6191,12 @@ storage::ResolvedDenseBinding Program::resolve_dense_storage_descriptor(
               "Dense storage binding is not a compact unique ndarray range");
 
   storage::ResolvedDenseBinding binding;
+  if (runtime_argument != nullptr) {
+    binding.runtime_signature = runtime_argument->stable_signature();
+    binding.synchronization_domain_identity =
+        runtime_argument->synchronization_domain_identity();
+    binding.capabilities = runtime_argument->qualification().capabilities;
+  }
   binding.byte_offset = static_cast<std::uint64_t>(properties.reachable_begin);
   binding.byte_size = static_cast<std::uint64_t>(properties.reachable_end -
                                                  properties.reachable_begin);
@@ -6248,6 +6281,14 @@ storage::ResolvedDenseBinding Program::resolve_dense_storage_descriptor(
     }
     TI_ERROR_IF(resource == nullptr,
                 "External dense storage lease was not acquired");
+    if (runtime_argument != nullptr &&
+        runtime_argument->synchronization_domain_identity() != 0) {
+      TI_ERROR_IF(!resource->synchronization_domain ||
+                      resource->synchronization_domain->identity() !=
+                          runtime_argument->synchronization_domain_identity(),
+                  "External dense storage synchronization domain is stale or "
+                  "mismatched");
+    }
     TI_ERROR_IF(binding.byte_offset > resource->allocation_bytes ||
                     binding.byte_size >
                         resource->allocation_bytes - binding.byte_offset,
@@ -6279,7 +6320,8 @@ void Program::resolve_dense_storage_launch_context(
     }
     ctx.set_resolved_dense_storage(
         i, resolve_dense_storage_descriptor(*resource.descriptor,
-                                            ndarray_leases, external_leases));
+                                            ndarray_leases, external_leases,
+                                            resource.runtime_argument));
     resolved_here = true;
   }
   if (resolved_here) {
@@ -6314,6 +6356,53 @@ void Program::with_resolved_dense_storage_bindings(
   // may enqueue backend work, but must not retain a binding after returning.
   // GPU owner leases are pinned before this transaction unlocks and are then
   // released by RuntimeCompletion or synchronize/finalize.
+  try {
+    callback(bindings.data(), bindings.size());
+    if (arch_is_gpu(compile_config().arch)) {
+      if (!ndarray_leases.empty()) {
+        pin_ndarray_launch_leases(ndarray_leases);
+      }
+      if (!external_leases.empty()) {
+        pin_external_dense_storage_launch_leases(external_leases);
+      }
+    }
+  } catch (...) {
+    const std::exception_ptr submission_error = std::current_exception();
+    if (arch_is_gpu(compile_config().arch)) {
+      try {
+        program_impl_->synchronize();
+        release_completed_ndarray_leases();
+        release_completed_external_dense_storage_leases();
+      } catch (...) {
+      }
+    }
+    std::rethrow_exception(submission_error);
+  }
+}
+
+void Program::with_resolved_runtime_storage_arguments(
+    const std::vector<const storage::RuntimeStorageArgument *> &arguments,
+    const DenseStorageBindingCallback &callback) {
+  ensure_runtime_submission_allowed("runtime storage submission");
+  TI_ERROR_IF(arguments.empty() || !callback,
+              "Runtime storage submission requires arguments and a callback");
+  std::optional<SNodeTreeLifecycleReadGuard> lifecycle_guard;
+  if (active_snode_tree_lifecycle_program != this) {
+    lifecycle_guard.emplace(acquire_snode_tree_lifecycle_read_guard());
+  }
+  std::lock_guard<std::recursive_mutex> resource_submission_lock(
+      runtime_resource_submission_mutex_);
+  NdarrayLaunchLeases ndarray_leases;
+  ExternalDenseStorageLaunchLeases external_leases;
+  std::vector<storage::ResolvedDenseBinding> bindings;
+  bindings.reserve(arguments.size());
+  for (const auto *argument : arguments) {
+    TI_ERROR_IF(argument == nullptr,
+                "Runtime storage submission received a null argument");
+    bindings.push_back(resolve_dense_storage_descriptor(
+        argument->descriptor(), ndarray_leases, external_leases, argument));
+  }
+  dense_storage_direct_submissions_.fetch_add(1, std::memory_order_relaxed);
   try {
     callback(bindings.data(), bindings.size());
     if (arch_is_gpu(compile_config().arch)) {
@@ -7105,7 +7194,8 @@ void Program::close_external_dense_storage_resources() {
 storage::StorageOwnerRef Program::register_external_dense_storage(
     DeviceAllocation allocation,
     std::uint64_t allocation_bytes,
-    ExternalDenseStorageRelease release) {
+    ExternalDenseStorageRelease release,
+    std::shared_ptr<ExternalSynchronizationDomain> synchronization_domain) {
   ensure_runtime_submission_allowed("external dense storage registration");
   std::lock_guard<std::recursive_mutex> submission_lock(
       runtime_resource_submission_mutex_);
@@ -7120,7 +7210,7 @@ storage::StorageOwnerRef Program::register_external_dense_storage(
               "External dense storage belongs to another compute device");
   auto [result, handle] = external_dense_storage_resources_.emplace(
       kExternalDenseStorageResourceKind, allocation, allocation_bytes,
-      std::move(release));
+      std::move(release), std::move(synchronization_domain));
   TI_ERROR_IF(result != ExternalDenseStorageRegistry::Result::kSuccess,
               "Unable to register external dense storage resource");
   return storage::StorageOwnerRef::external_managed(handle.domain, handle.index,

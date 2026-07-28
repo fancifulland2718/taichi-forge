@@ -60,8 +60,10 @@ struct CudaSparseAssemblyDispatchInfo {
 };
 
 class Program;
+class ExternalSynchronizationDomain;
 namespace storage {
 class DenseStorageDescriptor;
+class RuntimeStorageArgument;
 struct ResolvedDenseBinding;
 struct StorageOwnerRef;
 }  // namespace storage
@@ -567,6 +569,8 @@ class TI_DLL_EXPORT Program {
                                                   std::size_t count);
   void resolve_ndarray_launch_context(LaunchContextBuilder &ctx);
   void resolve_ndarray_launch_context_under_guard(LaunchContextBuilder &ctx);
+  void resolve_runtime_storage_launch_context_under_guard(
+      LaunchContextBuilder &ctx);
   void retain_textures_for_external_submission(
       const std::vector<const Texture *> &views);
   void retain_textures_for_external_submission(const Texture *const *views,
@@ -656,7 +660,9 @@ class TI_DLL_EXPORT Program {
   storage::StorageOwnerRef register_external_dense_storage(
       DeviceAllocation allocation,
       std::uint64_t allocation_bytes,
-      ExternalDenseStorageRelease release = {});
+      ExternalDenseStorageRelease release = {},
+      std::shared_ptr<ExternalSynchronizationDomain> synchronization_domain =
+          {});
   void retire_external_dense_storage(const storage::StorageOwnerRef &owner);
   bool validate_external_dense_storage_owner(
       const storage::StorageOwnerRef &owner) noexcept;
@@ -667,6 +673,9 @@ class TI_DLL_EXPORT Program {
       const storage::ResolvedDenseBinding *, std::size_t)>;
   void with_resolved_dense_storage_bindings(
       const std::vector<const storage::DenseStorageDescriptor *> &descriptors,
+      const DenseStorageBindingCallback &callback);
+  void with_resolved_runtime_storage_arguments(
+      const std::vector<const storage::RuntimeStorageArgument *> &arguments,
       const DenseStorageBindingCallback &callback);
   intptr_t get_dense_storage_data_ptr_as_int(
       const storage::ResolvedDenseBinding &binding);
@@ -3158,11 +3167,14 @@ class TI_DLL_EXPORT Program {
 
   class ExternalDenseStorageResource {
    public:
-    ExternalDenseStorageResource(DeviceAllocation allocation,
-                                 std::uint64_t allocation_bytes,
-                                 ExternalDenseStorageRelease release)
+    ExternalDenseStorageResource(
+        DeviceAllocation allocation,
+        std::uint64_t allocation_bytes,
+        ExternalDenseStorageRelease release,
+        std::shared_ptr<ExternalSynchronizationDomain> synchronization_domain)
         : allocation(allocation),
           allocation_bytes(allocation_bytes),
+          synchronization_domain(std::move(synchronization_domain)),
           release_(std::move(release)) {
     }
     ExternalDenseStorageResource(const ExternalDenseStorageResource &) = delete;
@@ -3174,6 +3186,7 @@ class TI_DLL_EXPORT Program {
 
     DeviceAllocation allocation{kDeviceNullAllocation};
     std::uint64_t allocation_bytes{0};
+    std::shared_ptr<ExternalSynchronizationDomain> synchronization_domain;
 
    private:
     ExternalDenseStorageRelease release_;
@@ -3269,7 +3282,8 @@ class TI_DLL_EXPORT Program {
   storage::ResolvedDenseBinding resolve_dense_storage_descriptor(
       const storage::DenseStorageDescriptor &descriptor,
       NdarrayLaunchLeases &ndarray_leases,
-      ExternalDenseStorageLaunchLeases &external_leases);
+      ExternalDenseStorageLaunchLeases &external_leases,
+      const storage::RuntimeStorageArgument *runtime_argument = nullptr);
   NdarrayLaunchLeases acquire_ndarray_leases(
       std::initializer_list<const Ndarray *> views);
   NdarrayLaunchLeases acquire_ndarray_leases(

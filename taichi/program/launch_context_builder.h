@@ -43,10 +43,10 @@ class LaunchContextBuilder {
 
   struct DenseStorageResourceRef {
     int arg_offset{-1};
-    // Non-owning immutable metadata. Ordinary launch callers keep the Python
-    // view/C++ descriptor alive through submission; Graph deliberately rejects
-    // this resource kind before it can outlive that scope.
+    // Non-owning immutable metadata. Ordinary launch and Graph callers keep
+    // the source object alive through the complete submission transaction.
     const storage::DenseStorageDescriptor *descriptor{nullptr};
+    const storage::RuntimeStorageArgument *runtime_argument{nullptr};
     storage::ResolvedDenseBinding resolved;
   };
 
@@ -120,6 +120,8 @@ class LaunchContextBuilder {
   void set_arg_dense_storage(
       const std::vector<int> &arg_id,
       const storage::DenseStorageDescriptor &descriptor);
+  void set_arg_runtime_storage(const std::vector<int> &arg_id,
+                               const storage::RuntimeStorageArgument &argument);
   void set_arg_resolved_dense_storage(
       const std::vector<int> &arg_id,
       const storage::DenseStorageDescriptor &descriptor,

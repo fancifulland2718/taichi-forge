@@ -351,10 +351,11 @@ void LaunchContextBuilder::set_arg_dense_storage(
       [arg_offset](const auto &ref) { return ref.arg_offset == arg_offset; });
   if (found == dense_storage_ptrs.end()) {
     dense_storage_ptrs.push_back(
-        DenseStorageResourceRef{arg_offset, &descriptor, {}});
+        DenseStorageResourceRef{arg_offset, &descriptor, nullptr, {}});
   } else {
     auto &ref = *found;
     ref.descriptor = &descriptor;
+    ref.runtime_argument = nullptr;
     ref.resolved = {};
   }
 
@@ -373,6 +374,23 @@ void LaunchContextBuilder::set_arg_dense_storage(
   }
   set_array_runtime_size(arg_id, properties.item_count);
   set_array_device_allocation_type(arg_id, DevAllocType::kDenseStorage);
+}
+
+void LaunchContextBuilder::set_arg_runtime_storage(
+    const std::vector<int> &arg_id,
+    const storage::RuntimeStorageArgument &argument) {
+  const auto &qualification = argument.qualification();
+  TI_ERROR_IF(!qualification.capabilities.bindable ||
+                  !qualification.capabilities.zero_copy_qualified,
+              "Runtime storage argument is not directly bindable: {}",
+              storage::to_string(qualification.reason));
+  set_arg_dense_storage(arg_id, argument.descriptor());
+  const int arg_offset = args_type->get_element_offset(arg_id);
+  const auto found = std::find_if(
+      dense_storage_ptrs.begin(), dense_storage_ptrs.end(),
+      [arg_offset](const auto &ref) { return ref.arg_offset == arg_offset; });
+  TI_ASSERT(found != dense_storage_ptrs.end());
+  found->runtime_argument = &argument;
 }
 
 void LaunchContextBuilder::set_resolved_dense_storage(

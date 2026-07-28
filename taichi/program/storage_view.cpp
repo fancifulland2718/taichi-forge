@@ -22,6 +22,10 @@ void fingerprint_byte(std::uint64_t &value, std::uint8_t byte) noexcept {
   value *= kFnvPrime;
 }
 
+void fingerprint_integer(std::uint64_t &value, bool input) noexcept {
+  fingerprint_byte(value, input ? 1u : 0u);
+}
+
 template <typename T>
 void fingerprint_integer(std::uint64_t &value, T input) noexcept {
   using Unsigned = std::make_unsigned_t<T>;
@@ -249,6 +253,47 @@ std::uint64_t descriptor_fingerprint(
     fingerprint_integer(value, strides[axis]);
   }
   fingerprint_integer(value, byte_offset);
+  return value;
+}
+
+bool runtime_backend_supported(Arch backend) noexcept {
+  return backend == Arch::x64 || backend == Arch::arm64 ||
+         backend == Arch::cuda || backend == Arch::vulkan;
+}
+
+bool owner_has_stable_runtime_identity(StorageOwnerKind kind) noexcept {
+  return kind == StorageOwnerKind::kProgramNdarray ||
+         kind == StorageOwnerKind::kSNodePayload ||
+         kind == StorageOwnerKind::kExternalManaged;
+}
+
+std::uint64_t runtime_storage_signature(
+    const DenseStorageDescriptor &descriptor,
+    const RuntimeStorageRequirement &requirement,
+    std::uint64_t synchronization_domain_identity) noexcept {
+  std::uint64_t value = kFnvOffsetBasis;
+  fingerprint_integer(value, descriptor.fingerprint());
+  fingerprint_integer(value, requirement.consumer);
+  fingerprint_integer(value, requirement.mode);
+  fingerprint_integer(value, requirement.backend);
+  fingerprint_integer(value, requirement.require_external_sync);
+  const auto &dense = requirement.dense;
+  fingerprint_integer(value, dense.require_scalar_type);
+  if (dense.require_scalar_type) {
+    fingerprint_integer(value, dense.scalar_type.hash());
+  }
+  fingerprint_integer(value, dense.min_index_rank);
+  fingerprint_integer(value, dense.max_index_rank);
+  fingerprint_integer(value, dense.max_element_rank);
+  fingerprint_integer(value, dense.require_ndarray_abi);
+  fingerprint_integer(value, dense.accept_compact_subrange);
+  fingerprint_integer(value, dense.accept_single_record_stride);
+  fingerprint_integer(value, dense.accept_general_affine);
+  fingerprint_integer(value, dense.require_unique_mapping);
+  fingerprint_integer(value, dense.require_writable);
+  fingerprint_integer(value, dense.accept_external_owner);
+  fingerprint_integer(value, dense.allow_materialization);
+  fingerprint_integer(value, synchronization_domain_identity);
   return value;
 }
 
@@ -795,6 +840,81 @@ StorageQualification qualify_dense_storage(
   return reject(StorageFailureReason::kUnsupportedStride);
 }
 
+RuntimeStorageQualification qualify_runtime_storage(
+    const DenseStorageDescriptor &descriptor,
+    const RuntimeStorageRequirement &requirement,
+    std::uint64_t synchronization_domain_identity) {
+  RuntimeStorageQualification result;
+  result.capabilities.describable = true;
+  result.stable_signature = runtime_storage_signature(
+      descriptor, requirement, synchronization_domain_identity);
+  result.dense = qualify_dense_storage(descriptor, requirement.dense);
+  result.reason = result.dense.reason;
+
+  if (!runtime_backend_supported(requirement.backend)) {
+    result.reason = StorageFailureReason::kUnsupportedBackend;
+    return result;
+  }
+
+  const bool direct =
+      result.dense.supported && !result.dense.requires_materialization &&
+      (result.dense.execution_mode == StorageExecutionMode::kDirectContiguous ||
+       result.dense.execution_mode == StorageExecutionMode::kDirectAffine);
+  if (!direct) {
+    return result;
+  }
+
+  const StorageOwnerKind owner_kind = descriptor.owner().kind;
+  const bool external_sync_ready =
+      owner_kind != StorageOwnerKind::kExternalManaged ||
+      !requirement.require_external_sync ||
+      synchronization_domain_identity != 0;
+  if (!external_sync_ready) {
+    result.reason = StorageFailureReason::kExternalSyncUnavailable;
+    return result;
+  }
+
+  result.capabilities.bindable = true;
+  result.capabilities.zero_copy_qualified = true;
+  const bool stable_identity = owner_has_stable_runtime_identity(owner_kind);
+  result.capabilities.replayable = stable_identity;
+  result.capabilities.capturable =
+      stable_identity &&
+      requirement.consumer == RuntimeStorageConsumer::kGraphCapture &&
+      requirement.mode == RuntimeStorageMode::kCapture &&
+      requirement.backend == Arch::cuda &&
+      owner_kind == StorageOwnerKind::kProgramNdarray &&
+      result.dense.execution_mode == StorageExecutionMode::kDirectContiguous &&
+      synchronization_domain_identity == 0;
+
+  if ((requirement.mode == RuntimeStorageMode::kReplay ||
+       requirement.mode == RuntimeStorageMode::kCapture) &&
+      !stable_identity) {
+    result.reason = StorageFailureReason::kGraphIdentityUnstable;
+    return result;
+  }
+  if (requirement.mode == RuntimeStorageMode::kCapture &&
+      !result.capabilities.capturable) {
+    result.reason = StorageFailureReason::kGraphIdentityUnstable;
+    return result;
+  }
+  result.reason = StorageFailureReason::kNone;
+  return result;
+}
+
+RuntimeStorageArgument::RuntimeStorageArgument(
+    DenseStorageDescriptor descriptor,
+    RuntimeStorageRequirement requirement,
+    std::uint64_t synchronization_domain_identity)
+    : descriptor_(std::move(descriptor)),
+      requirement_(std::move(requirement)),
+      synchronization_domain_identity_(synchronization_domain_identity),
+      qualification_(
+          qualify_runtime_storage(descriptor_,
+                                  requirement_,
+                                  synchronization_domain_identity_)) {
+}
+
 StorageAliasRelation analyze_logical_storage_alias(
     const DenseStorageDescriptor &lhs,
     const DenseStorageDescriptor &rhs) noexcept {
@@ -1167,6 +1287,26 @@ const char *to_string(StorageExecutionMode value) noexcept {
     STORAGE_ENUM_TO_STRING_CASE(kUnsupported);
   }
   return "kUnsupported";
+}
+
+const char *to_string(RuntimeStorageConsumer value) noexcept {
+  switch (value) {
+    STORAGE_ENUM_TO_STRING_CASE(kOrdinaryKernel);
+    STORAGE_ENUM_TO_STRING_CASE(kGraphReplay);
+    STORAGE_ENUM_TO_STRING_CASE(kGraphCapture);
+    STORAGE_ENUM_TO_STRING_CASE(kNativeConsumer);
+    STORAGE_ENUM_TO_STRING_CASE(kExternalInterop);
+  }
+  return "kOrdinaryKernel";
+}
+
+const char *to_string(RuntimeStorageMode value) noexcept {
+  switch (value) {
+    STORAGE_ENUM_TO_STRING_CASE(kOrdinary);
+    STORAGE_ENUM_TO_STRING_CASE(kReplay);
+    STORAGE_ENUM_TO_STRING_CASE(kCapture);
+  }
+  return "kOrdinary";
 }
 
 const char *to_string(StorageArrayLayout value) noexcept {

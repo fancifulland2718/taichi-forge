@@ -67,6 +67,28 @@ enum class StorageExecutionMode : std::uint8_t {
   kUnsupported,
 };
 
+enum class RuntimeStorageConsumer : std::uint8_t {
+  kOrdinaryKernel,
+  kGraphReplay,
+  kGraphCapture,
+  kNativeConsumer,
+  kExternalInterop,
+};
+
+enum class RuntimeStorageMode : std::uint8_t {
+  kOrdinary,
+  kReplay,
+  kCapture,
+};
+
+struct RuntimeStorageCapabilities {
+  bool describable{false};
+  bool bindable{false};
+  bool replayable{false};
+  bool capturable{false};
+  bool zero_copy_qualified{false};
+};
+
 enum class StorageArrayLayout : std::uint8_t {
   kNone,
   kScalar,
@@ -169,6 +191,9 @@ struct ResolvedDenseBinding {
   DeviceAllocation allocation{kDeviceNullAllocation};
   std::uint64_t byte_offset{0};
   std::uint64_t byte_size{0};
+  std::uint64_t runtime_signature{0};
+  std::uint64_t synchronization_domain_identity{0};
+  RuntimeStorageCapabilities capabilities;
   bool valid{false};
 
   DevicePtr device_ptr() const {
@@ -289,6 +314,54 @@ struct StorageQualification {
   std::uint64_t estimated_copy_bytes{0};
 };
 
+struct RuntimeStorageRequirement {
+  DenseStorageRequirement dense;
+  RuntimeStorageConsumer consumer{RuntimeStorageConsumer::kOrdinaryKernel};
+  RuntimeStorageMode mode{RuntimeStorageMode::kOrdinary};
+  Arch backend{Arch::x64};
+  bool require_external_sync{false};
+};
+
+struct RuntimeStorageQualification {
+  StorageQualification dense;
+  RuntimeStorageCapabilities capabilities;
+  StorageFailureReason reason{StorageFailureReason::kNone};
+  std::uint64_t stable_signature{0};
+};
+
+// Immutable logical argument passed between Python adapters, Graph preparation,
+// ordinary launch contexts, and native/external consumers. It owns descriptor
+// metadata but never a raw pointer, DeviceAllocation, OS handle, or runtime
+// lease. Those remain submission-scoped in ResolvedDenseBinding.
+class TI_DLL_EXPORT RuntimeStorageArgument {
+ public:
+  RuntimeStorageArgument(DenseStorageDescriptor descriptor,
+                         RuntimeStorageRequirement requirement,
+                         std::uint64_t synchronization_domain_identity = 0);
+
+  const DenseStorageDescriptor &descriptor() const noexcept {
+    return descriptor_;
+  }
+  const RuntimeStorageRequirement &requirement() const noexcept {
+    return requirement_;
+  }
+  std::uint64_t synchronization_domain_identity() const noexcept {
+    return synchronization_domain_identity_;
+  }
+  const RuntimeStorageQualification &qualification() const noexcept {
+    return qualification_;
+  }
+  std::uint64_t stable_signature() const noexcept {
+    return qualification_.stable_signature;
+  }
+
+ private:
+  DenseStorageDescriptor descriptor_;
+  RuntimeStorageRequirement requirement_;
+  std::uint64_t synchronization_domain_identity_{0};
+  RuntimeStorageQualification qualification_;
+};
+
 TI_DLL_EXPORT DenseStorageBuildResult
 build_dense_storage_descriptor(StorageOwnerRef owner,
                                StorageSourceKind source_kind,
@@ -297,6 +370,11 @@ build_dense_storage_descriptor(StorageOwnerRef owner,
 TI_DLL_EXPORT StorageQualification
 qualify_dense_storage(const DenseStorageDescriptor &descriptor,
                       const DenseStorageRequirement &requirement);
+
+TI_DLL_EXPORT RuntimeStorageQualification
+qualify_runtime_storage(const DenseStorageDescriptor &descriptor,
+                        const RuntimeStorageRequirement &requirement,
+                        std::uint64_t synchronization_domain_identity = 0);
 
 TI_DLL_EXPORT StorageAliasRelation
 analyze_logical_storage_alias(const DenseStorageDescriptor &lhs,
@@ -343,6 +421,8 @@ TI_DLL_EXPORT const char *to_string(StorageAccess value) noexcept;
 TI_DLL_EXPORT const char *to_string(StorageMappingUniqueness value) noexcept;
 TI_DLL_EXPORT const char *to_string(StorageAliasRelation value) noexcept;
 TI_DLL_EXPORT const char *to_string(StorageExecutionMode value) noexcept;
+TI_DLL_EXPORT const char *to_string(RuntimeStorageConsumer value) noexcept;
+TI_DLL_EXPORT const char *to_string(RuntimeStorageMode value) noexcept;
 TI_DLL_EXPORT const char *to_string(StorageArrayLayout value) noexcept;
 TI_DLL_EXPORT const char *to_string(StorageFailureReason value) noexcept;
 

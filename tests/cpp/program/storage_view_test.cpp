@@ -269,8 +269,81 @@ TEST(StorageViewTest, RandomizedPropertiesNeverOverclaimAddressMapping) {
   }
 }
 
+TEST(StorageViewTest, RuntimeArgumentSeparatesBindingReplayAndCapture) {
+  RuntimeResourceHandle handle{71, 4, 2, 9};
+  auto built = build_f32({8}, {4}, {}, {}, 0,
+                         StorageOwnerRef::program_ndarray(81, handle),
+                         StorageSourceKind::kNdarray);
+  ASSERT_TRUE(built);
+
+  RuntimeStorageRequirement ordinary;
+  ordinary.backend = Arch::cuda;
+  ordinary.dense.require_ndarray_abi = true;
+  ordinary.dense.require_unique_mapping = true;
+  ordinary.dense.require_writable = true;
+  RuntimeStorageArgument ordinary_argument(*built.descriptor, ordinary);
+  const auto &ordinary_caps = ordinary_argument.qualification().capabilities;
+  EXPECT_TRUE(ordinary_caps.describable);
+  EXPECT_TRUE(ordinary_caps.bindable);
+  EXPECT_TRUE(ordinary_caps.replayable);
+  EXPECT_FALSE(ordinary_caps.capturable);
+  EXPECT_TRUE(ordinary_caps.zero_copy_qualified);
+  EXPECT_EQ(ordinary_argument.qualification().reason,
+            StorageFailureReason::kNone);
+
+  RuntimeStorageRequirement capture = ordinary;
+  capture.consumer = RuntimeStorageConsumer::kGraphCapture;
+  capture.mode = RuntimeStorageMode::kCapture;
+  RuntimeStorageArgument capture_argument(*built.descriptor, capture);
+  EXPECT_TRUE(capture_argument.qualification().capabilities.capturable);
+  EXPECT_NE(capture_argument.stable_signature(),
+            ordinary_argument.stable_signature());
+
+  RuntimeStorageArgument same_capture(*built.descriptor, capture);
+  EXPECT_EQ(same_capture.stable_signature(),
+            capture_argument.stable_signature());
+}
+
+TEST(StorageViewTest, RuntimeArgumentFailsClosedForIdentityAndSync) {
+  auto host = build_f32({4}, {4});
+  ASSERT_TRUE(host);
+  RuntimeStorageRequirement replay;
+  replay.backend = Arch::vulkan;
+  replay.consumer = RuntimeStorageConsumer::kGraphReplay;
+  replay.mode = RuntimeStorageMode::kReplay;
+  replay.dense.require_ndarray_abi = true;
+  replay.dense.require_unique_mapping = true;
+  RuntimeStorageArgument host_argument(*host.descriptor, replay);
+  EXPECT_TRUE(host_argument.qualification().capabilities.bindable);
+  EXPECT_FALSE(host_argument.qualification().capabilities.replayable);
+  EXPECT_EQ(host_argument.qualification().reason,
+            StorageFailureReason::kGraphIdentityUnstable);
+
+  auto external = build_f32({4}, {4}, {}, {}, 0,
+                            StorageOwnerRef::external_managed(91, 3, 7),
+                            StorageSourceKind::kExternalDense);
+  ASSERT_TRUE(external);
+  RuntimeStorageRequirement external_replay = replay;
+  external_replay.dense.accept_external_owner = true;
+  external_replay.require_external_sync = true;
+  RuntimeStorageArgument missing_sync(*external.descriptor, external_replay);
+  EXPECT_FALSE(missing_sync.qualification().capabilities.bindable);
+  EXPECT_FALSE(missing_sync.qualification().capabilities.zero_copy_qualified);
+  EXPECT_EQ(missing_sync.qualification().reason,
+            StorageFailureReason::kExternalSyncUnavailable);
+
+  RuntimeStorageArgument synchronized(*external.descriptor, external_replay,
+                                      0x1234);
+  EXPECT_TRUE(synchronized.qualification().capabilities.bindable);
+  EXPECT_TRUE(synchronized.qualification().capabilities.replayable);
+  EXPECT_TRUE(synchronized.qualification().capabilities.zero_copy_qualified);
+  EXPECT_EQ(synchronized.qualification().reason, StorageFailureReason::kNone);
+  EXPECT_NE(synchronized.stable_signature(), missing_sync.stable_signature());
+}
+
 TEST(StorageViewTest, DescriptorMetadataStaysInlineAndBounded) {
   EXPECT_LE(sizeof(DenseStorageDescriptor), 512u);
+  EXPECT_LE(sizeof(RuntimeStorageArgument), 640u);
 }
 
 }  // namespace

@@ -4,14 +4,36 @@
 #include <chrono>
 #include <cstdint>
 #include <future>
+#include <memory>
 #include <vector>
 
 #include "taichi/program/ndarray.h"
 #include "taichi/program/program.h"
 #include "taichi/program/storage_view.h"
+#include "taichi/rhi/interop/external_sync.h"
 
 namespace taichi::lang {
 namespace {
+
+class TestSynchronizationDomain final : public ExternalSynchronizationDomain {
+ public:
+  explicit TestSynchronizationDomain(std::uint64_t identity)
+      : identity_(identity) {
+  }
+
+  std::uint64_t identity() const noexcept override {
+    return identity_;
+  }
+
+  void acquire_for_consumer(const ExternalStreamDomain &) override {
+  }
+
+  void release_from_consumer(const ExternalStreamDomain &) override {
+  }
+
+ private:
+  std::uint64_t identity_{0};
+};
 
 storage::DenseStorageBuildResult build_external_f32(
     storage::StorageOwnerRef owner,
@@ -95,6 +117,74 @@ TEST(ExternalDenseStorageTest, FailedRegistrationDoesNotAssumeOwnership) {
   EXPECT_ANY_THROW(program.register_external_dense_storage(
       kDeviceNullAllocation, sizeof(float), [&] { ++releases; }));
   EXPECT_EQ(releases.load(), 0);
+}
+
+TEST(ExternalDenseStorageTest, RuntimeArgumentRequiresMatchingSyncDomain) {
+  Program program(Arch::x64);
+  auto *backing = program.create_ndarray(PrimitiveType::f32, {8},
+                                         ExternalArrayLayout::kNull, false);
+  auto sync = std::make_shared<TestSynchronizationDomain>(73);
+  const auto owner = program.register_external_dense_storage(
+      backing->get_device_allocation(), 8 * sizeof(float), {}, sync);
+  auto built = build_external_f32(owner, {8}, {sizeof(float)});
+  ASSERT_TRUE(built);
+
+  storage::RuntimeStorageRequirement requirement;
+  requirement.backend = Arch::x64;
+  requirement.consumer = storage::RuntimeStorageConsumer::kExternalInterop;
+  requirement.dense.require_ndarray_abi = true;
+  requirement.dense.require_unique_mapping = true;
+  requirement.dense.require_writable = true;
+  requirement.dense.accept_external_owner = true;
+  requirement.require_external_sync = true;
+
+  storage::RuntimeStorageArgument argument(*built.descriptor, requirement,
+                                           sync->identity());
+  ASSERT_TRUE(argument.qualification().capabilities.bindable);
+  program.with_resolved_runtime_storage_arguments(
+      {&argument},
+      [&](const storage::ResolvedDenseBinding *bindings, std::size_t count) {
+        ASSERT_EQ(count, 1u);
+        EXPECT_TRUE(bindings[0].valid);
+        EXPECT_EQ(bindings[0].runtime_signature, argument.stable_signature());
+        EXPECT_EQ(bindings[0].synchronization_domain_identity,
+                  sync->identity());
+        EXPECT_TRUE(bindings[0].capabilities.zero_copy_qualified);
+      });
+
+  storage::RuntimeStorageArgument mismatched(*built.descriptor, requirement,
+                                             sync->identity() + 1);
+  EXPECT_ANY_THROW(program.with_resolved_runtime_storage_arguments(
+      {&mismatched}, [](const auto *, std::size_t) {}));
+
+  program.retire_external_dense_storage(owner);
+  program.delete_ndarray(backing);
+}
+
+TEST(ExternalDenseStorageTest, RuntimeArgumentRejectsMissingSyncOwner) {
+  Program program(Arch::x64);
+  auto *backing = program.create_ndarray(PrimitiveType::f32, {4},
+                                         ExternalArrayLayout::kNull, false);
+  const auto owner = program.register_external_dense_storage(
+      backing->get_device_allocation(), 4 * sizeof(float));
+  auto built = build_external_f32(owner, {4}, {sizeof(float)});
+  ASSERT_TRUE(built);
+
+  storage::RuntimeStorageRequirement requirement;
+  requirement.backend = Arch::x64;
+  requirement.consumer = storage::RuntimeStorageConsumer::kExternalInterop;
+  requirement.dense.require_ndarray_abi = true;
+  requirement.dense.require_unique_mapping = true;
+  requirement.dense.require_writable = true;
+  requirement.dense.accept_external_owner = true;
+  requirement.require_external_sync = true;
+  storage::RuntimeStorageArgument argument(*built.descriptor, requirement, 91);
+  ASSERT_TRUE(argument.qualification().capabilities.bindable);
+  EXPECT_ANY_THROW(program.with_resolved_runtime_storage_arguments(
+      {&argument}, [](const auto *, std::size_t) {}));
+
+  program.retire_external_dense_storage(owner);
+  program.delete_ndarray(backing);
 }
 
 TEST(ExternalDenseStorageTest, RetireWaitsForSubmissionTransaction) {
