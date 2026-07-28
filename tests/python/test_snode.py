@@ -45,3 +45,26 @@ def test_global_snode_ids_above_legacy_1024_limit():
 
     copy()
     assert (dst.to_numpy() == [i * 3 + 1 for i in range(16)]).all()
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_snode_id_above_previous_4096_limit():
+    # Keep this in one tree so the test exercises the SNode-id-indexed runtime
+    # tables without approaching the independent LLVM SNode-tree limit.
+    fields = [ti.field(ti.i32) for _ in range(4100)]
+    builder = ti.FieldsBuilder()
+    dense = builder.dense(ti.i, 1)
+    for field in fields:
+        dense.place(field)
+    tree = builder.finalize()
+
+    target = fields[-1]
+    assert target.snode.ptr.id >= 4096
+
+    @ti.kernel
+    def write_target():
+        target[0] = 37
+
+    write_target()
+    assert target[0] == 37
+    tree.destroy()
