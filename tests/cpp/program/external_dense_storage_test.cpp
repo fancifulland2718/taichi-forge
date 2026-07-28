@@ -187,6 +187,44 @@ TEST(ExternalDenseStorageTest, RuntimeArgumentRejectsMissingSyncOwner) {
   program.delete_ndarray(backing);
 }
 
+TEST(ExternalDenseStorageTest, GraphScopeRetainsReplayableExternalOwner) {
+  Program program(Arch::x64);
+  auto *backing = program.create_ndarray(PrimitiveType::f32, {8},
+                                         ExternalArrayLayout::kNull, false);
+  const auto owner = program.register_external_dense_storage(
+      backing->get_device_allocation(), 8 * sizeof(float));
+  auto built = build_external_f32(owner, {8}, {sizeof(float)});
+  ASSERT_TRUE(built);
+
+  storage::RuntimeStorageRequirement requirement;
+  requirement.backend = Arch::x64;
+  requirement.consumer = storage::RuntimeStorageConsumer::kGraphReplay;
+  requirement.mode = storage::RuntimeStorageMode::kReplay;
+  requirement.dense.require_ndarray_abi = true;
+  requirement.dense.require_unique_mapping = true;
+  requirement.dense.require_writable = true;
+  requirement.dense.accept_external_owner = true;
+  storage::RuntimeStorageArgument argument(*built.descriptor, requirement);
+  ASSERT_TRUE(argument.qualification().capabilities.replayable);
+
+  const storage::RuntimeStorageArgument *arguments[] = {&argument};
+  EXPECT_ANY_THROW(
+      program.retain_runtime_storage_for_graph_submission(arguments, 1));
+
+  std::future<void> retire;
+  {
+    auto graph_scope = program.acquire_runtime_resource_graph_scope();
+    program.retain_runtime_storage_for_graph_submission(arguments, 1);
+    retire = std::async(std::launch::async,
+                        [&] { program.retire_external_dense_storage(owner); });
+    EXPECT_EQ(retire.wait_for(std::chrono::milliseconds(25)),
+              std::future_status::timeout);
+  }
+  EXPECT_EQ(retire.wait_for(std::chrono::seconds(2)),
+            std::future_status::ready);
+  retire.get();
+  program.delete_ndarray(backing);
+}
 TEST(ExternalDenseStorageTest, RetireWaitsForSubmissionTransaction) {
   std::atomic<int> releases{0};
   Program program(Arch::x64);

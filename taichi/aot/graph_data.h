@@ -173,6 +173,12 @@ struct TI_DLL_EXPORT IValue {
     value.runtime_storage = &runtime_storage;
     return value;
   }
+  static IValue create(
+      const storage::RuntimeStorageArgument &runtime_storage) {
+    IValue value(0, ArgKind::kNdarray);
+    value.runtime_storage = &runtime_storage;
+    return value;
+  }
 
   static IValue create(const Texture &tex) {
     return IValue(reinterpret_cast<intptr_t>(&tex), ArgKind::kTexture);

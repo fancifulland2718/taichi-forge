@@ -110,10 +110,11 @@ class InlineUniqueViewList {
 
 struct GraphRuntimeResourceViews {
   InlineUniqueViewList<Ndarray> ndarrays;
+  InlineUniqueViewList<storage::RuntimeStorageArgument> runtime_storage;
   InlineUniqueViewList<Texture> textures;
 
   bool empty() const noexcept {
-    return ndarrays.empty() && textures.empty();
+    return ndarrays.empty() && runtime_storage.empty() && textures.empty();
   }
 };
 
@@ -124,6 +125,10 @@ GraphRuntimeResourceViews graph_runtime_resource_views(
   for (const auto &[name, value] : args) {
     (void)name;
     if (value.tag == ArgKind::kNdarray) {
+      if (value.runtime_storage != nullptr) {
+        views.runtime_storage.add(value.runtime_storage);
+        continue;
+      }
       auto *view = reinterpret_cast<const Ndarray *>(value.val);
       TI_ERROR_IF(view == nullptr, "Graph received a null Ndarray runtime arg");
       Program *owner = view->owning_program();
@@ -205,6 +210,38 @@ PrimitiveTypeID get_primitive_type_id(DataType dtype) {
   return get_primitive_dtype(dtype)->as<PrimitiveType>()->type;
 }
 
+void validate_graph_runtime_storage_argument(
+    const storage::RuntimeStorageArgument &argument,
+    const std::string &name,
+    PrimitiveTypeID expected_dtype_id,
+    std::size_t expected_index_rank,
+    const std::vector<int> &expected_element_shape) {
+  const auto &qualification = argument.qualification();
+  TI_ERROR_IF(!qualification.capabilities.bindable ||
+                  !qualification.capabilities.replayable ||
+                  !qualification.capabilities.zero_copy_qualified,
+              "Graph runtime storage argument {} is not replayable: {}", name,
+              storage::to_string(qualification.reason));
+  const auto &descriptor = argument.descriptor();
+  TI_ERROR_IF(descriptor.index_rank() != expected_index_rank,
+              "Dispatch node is compiled for argument {} with field_dim={} "
+              "but got dense storage with field_dim={}",
+              name, expected_index_rank, descriptor.index_rank());
+  const auto element_shape = descriptor.element_shape();
+  TI_ERROR_IF(element_shape.size() != expected_element_shape.size(),
+              "Mismatched element rank for Graph argument {}", name);
+  for (std::size_t i = 0; i < element_shape.size(); ++i) {
+    TI_ERROR_IF(element_shape[i] != expected_element_shape[i],
+                "Mismatched element shape for Graph argument {}", name);
+  }
+  const PrimitiveTypeID actual_dtype_id =
+      get_primitive_type_id(descriptor.scalar_type());
+  TI_ERROR_IF(actual_dtype_id != expected_dtype_id,
+              "Dispatch node is compiled for argument {} with dtype={} but "
+              "got dense storage with dtype={}",
+              name, PrimitiveType::get(expected_dtype_id).to_string(),
+              PrimitiveType::get(actual_dtype_id).to_string());
+}
 template <typename T>
 void write_arg_buffer(char *arg_buffer, int offset, uint64 value) {
   T typed_value = taichi_union_cast_with_different_sizes<T>(value);
@@ -297,7 +334,15 @@ void init_runtime_context_from_plan(
 
     TI_ASSERT(arg_plan.tag == ArgKind::kNdarray);
     TI_ASSERT(ival.tag == ArgKind::kNdarray);
+    if (ival.runtime_storage != nullptr) {
+      validate_graph_runtime_storage_argument(
+          *ival.runtime_storage, arg_plan.name, arg_plan.dtype_id,
+          arg_plan.field_dim, arg_plan.element_shape);
+      ctx.set_arg_runtime_storage(arg_plan.arg_id, *ival.runtime_storage);
+      continue;
+    }
     Ndarray *arr = reinterpret_cast<Ndarray *>(ival.val);
+    TI_ERROR_IF(arr == nullptr, "Graph received a null Ndarray runtime arg");
     TI_ERROR_IF(arr->get_element_shape() != arg_plan.element_shape,
                 "Mismatched shape information for argument {}",
                 arg_plan.name);
@@ -315,10 +360,6 @@ void init_runtime_context_from_plan(
                 arg_plan.name, PrimitiveType::get(arg_plan.dtype_id).to_string(),
                 arr_primitive_dtype.to_string());
 
-    if (ival.runtime_storage != nullptr) {
-      ctx.set_arg_runtime_storage(arg_plan.arg_id, *ival.runtime_storage);
-      continue;
-    }
 
     intptr_t ptr = arr->get_device_allocation_ptr_as_int();
     ctx.array_ptrs[arg_plan.ndarray_data_ptr_key] = (void *)ptr;
@@ -891,6 +932,12 @@ make_cuda_graph_signature(const CompiledGraph &graph,
           return std::nullopt;
         }
         entry.runtime_signature = kv.second.runtime_storage->stable_signature();
+      }
+      // G0 admits pure dense Field/view arguments for ordinary replay. CUDA
+      // capture still requires an owning Ndarray until G1 can retain and patch
+      // arbitrary resolved bindings explicitly.
+      if (arr == nullptr) {
+        return std::nullopt;
       }
       DeviceAllocation allocation = arr->get_device_allocation();
       auto *device = dynamic_cast<cuda::CudaDevice *>(allocation.device);
@@ -1557,6 +1604,10 @@ void CompiledGraph::run(
     TI_ASSERT(dispatch.compiled_kernel);
     LaunchContextBuilder launch_ctx(dispatch.compiled_kernel);
     init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
+    TI_ERROR_IF(
+        !launch_ctx.dense_storage_ptrs.empty(),
+        "AOT Graph does not support runtime dense storage arguments; use an "
+        "owning Ndarray or a JIT Graph");
     Program *program = nullptr;
     std::vector<const Ndarray *> ndarray_views;
     std::vector<const Texture *> texture_views;
@@ -1626,6 +1677,11 @@ void CompiledGraph::jit_run(
         program->retain_ndarrays_for_external_submission(
             resource_views.ndarrays.data(), resource_views.ndarrays.size());
       }
+      if (!resource_views.runtime_storage.empty()) {
+        program->retain_runtime_storage_for_graph_submission(
+            resource_views.runtime_storage.data(),
+            resource_views.runtime_storage.size());
+      }
       if (!resource_views.textures.empty()) {
         program->retain_textures_for_external_submission(
             resource_views.textures.data(), resource_views.textures.size());
@@ -1688,6 +1744,11 @@ void CompiledGraph::jit_run_cached(
       if (!resource_views.ndarrays.empty()) {
         program->retain_ndarrays_for_external_submission(
             resource_views.ndarrays.data(), resource_views.ndarrays.size());
+      }
+      if (!resource_views.runtime_storage.empty()) {
+        program->retain_runtime_storage_for_graph_submission(
+            resource_views.runtime_storage.data(),
+            resource_views.runtime_storage.size());
       }
       if (!resource_views.textures.empty()) {
         program->retain_textures_for_external_submission(
@@ -1830,7 +1891,15 @@ void CompiledGraph::init_runtime_context(
     const aot::IValue &ival = found->second;
     if (symbolic_arg.tag == aot::ArgKind::kNdarray) {
       TI_ASSERT(ival.tag == aot::ArgKind::kNdarray);
+      if (ival.runtime_storage != nullptr) {
+        validate_graph_runtime_storage_argument(
+            *ival.runtime_storage, symbolic_arg.name, symbolic_arg.dtype_id,
+            symbolic_arg.field_dim, symbolic_arg.element_shape);
+        ctx.set_arg_runtime_storage(arg_id, *ival.runtime_storage);
+        continue;
+      }
       Ndarray *arr = reinterpret_cast<Ndarray *>(ival.val);
+      TI_ERROR_IF(arr == nullptr, "Graph received a null Ndarray runtime arg");
 
       TI_ERROR_IF(arr->get_element_shape() != symbolic_arg.element_shape,
                   "Mismatched shape information for argument {}",
@@ -1858,11 +1927,7 @@ void CompiledGraph::init_runtime_context(
                   "dtype={} but got an ndarray with dtype={}",
                   symbolic_arg.name, symbolic_arg_primitive_dtype.to_string(),
                   arr_primitive_dtype.to_string());
-      if (ival.runtime_storage != nullptr) {
-        ctx.set_arg_runtime_storage(arg_id, *ival.runtime_storage);
-      } else {
-        ctx.set_arg_ndarray(arg_id, *arr);
-      }
+      ctx.set_arg_ndarray(arg_id, *arr);
     } else if (symbolic_arg.tag == aot::ArgKind::kScalar) {
       TI_ASSERT(ival.tag == aot::ArgKind::kScalar);
       // Matrix args are flattened so they're same as scalars.

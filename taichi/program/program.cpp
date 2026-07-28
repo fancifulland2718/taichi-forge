@@ -5914,6 +5914,38 @@ void Program::retain_ndarrays_for_external_submission(
   }
 }
 
+void Program::retain_runtime_storage_for_graph_submission(
+    const storage::RuntimeStorageArgument *const *arguments,
+    std::size_t count) {
+  TI_ERROR_IF(active_runtime_resource_graph_program != this,
+              "Runtime storage retention requires an active Graph scope");
+  NdarrayLaunchLeases ndarray_leases;
+  ExternalDenseStorageLaunchLeases external_leases;
+  for (std::size_t i = 0; i < count; ++i) {
+    const auto *argument = arguments[i];
+    TI_ERROR_IF(argument == nullptr,
+                "Graph received a null runtime storage argument");
+    if (argument->descriptor().owner().kind ==
+        storage::StorageOwnerKind::kSNodePayload) {
+      // The Graph already owns the SNodeTree lifecycle read guard. Dense
+      // Field payloads never create allocator leases, so resolving them here
+      // would duplicate every dispatch's address validation without adding
+      // lifetime protection.
+      continue;
+    }
+    resolve_dense_storage_descriptor(argument->descriptor(), ndarray_leases,
+                                     external_leases, argument);
+  }
+  if (arch_is_gpu(compile_config().arch)) {
+    if (!ndarray_leases.empty()) {
+      pin_ndarray_launch_leases(ndarray_leases);
+    }
+    if (!external_leases.empty()) {
+      pin_external_dense_storage_launch_leases(external_leases);
+    }
+  }
+}
+
 void Program::validate_ndarrays_for_external_submission(
     const std::vector<const Ndarray *> &views) {
   validate_ndarrays_for_external_submission(views.data(), views.size());

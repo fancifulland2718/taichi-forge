@@ -3323,11 +3323,19 @@ void export_lang(py::module &m) {
               TI_ERROR_IF(runtime_pair.size() != 2,
                           "Graph ndarray runtime storage tuple must contain "
                           "the owner and argument");
-              auto &val = runtime_pair[0].cast<Ndarray &>();
               auto &runtime_argument =
                   runtime_pair[1].cast<storage::RuntimeStorageArgument &>();
-              args.insert(
-                  {arg_name, aot::IValue::create(val, runtime_argument)});
+              if (py::isinstance<Ndarray>(runtime_pair[0])) {
+                auto &val = runtime_pair[0].cast<Ndarray &>();
+                args.insert(
+                    {arg_name, aot::IValue::create(val, runtime_argument)});
+              } else {
+                // The first tuple item is a Python keepalive for a dense
+                // Field/view. Its immutable descriptor is the complete C++
+                // runtime value; no owning Ndarray is fabricated.
+                args.insert(
+                    {arg_name, aot::IValue::create(runtime_argument)});
+              }
             } else {
               auto &val = pyarg.cast<Ndarray &>();
               args.insert({arg_name, aot::IValue::create(val)});

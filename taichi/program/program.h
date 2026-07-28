@@ -563,6 +563,9 @@ class TI_DLL_EXPORT Program {
       const std::vector<const Ndarray *> &views);
   void retain_ndarrays_for_external_submission(const Ndarray *const *views,
                                                 std::size_t count);
+  void retain_runtime_storage_for_graph_submission(
+      const storage::RuntimeStorageArgument *const *arguments,
+      std::size_t count);
   void validate_ndarrays_for_external_submission(
       const std::vector<const Ndarray *> &views);
   void validate_ndarrays_for_external_submission(const Ndarray *const *views,
