@@ -1,12 +1,14 @@
-# 实验性 LinearOperator 与 SolvePlan
+# LinearOperator 与实验性 SolvePlan
 
-`ti.linalg.experimental` 提供绑定 runtime 的线性映射抽象，可使用 fixed sparse
+`ti.linalg.LinearOperator` 提供绑定 runtime 的线性映射抽象，可使用 fixed sparse
 matrix、已编译 Taichi kernel 或已编译 Graph 作为 provider。这是通用数值 API：应用可以
 用它处理离散 PDE、隐式系统、图问题、优化和其它线性代数任务，无需把物理领域对象引入
 Taichi DSL。
 
-该命名空间目前属于实验性 API。本文定义 provider、生命周期、能力和失败合同；在提升到
-稳定的 `ti.linalg` 命名空间之前，source compatibility 仍可能调整。
+`LinearOperator`、`OperatorTraits`、storage-view helper、composition helper 与 operator
+qualification 是公开的 `ti.linalg` API。`SolvePlan`、`PreconditionerPlan` 与
+`BatchedSolvePlan` 等求解执行对象仍位于 `ti.linalg.experimental`；下文分别说明其 backend
+和数值支持边界。
 
 ## 核心模型
 
@@ -18,11 +20,11 @@ Taichi DSL。
 - 可观察的 capability 与 resource-generation metadata；
 - 一个可复用的 native execution plan。
 
-公开 vector 参数保持一维 scalar-flat 数学 ABI，但 `apply()` 与单系统
-`SolvePlan.solve()` 的边界可以接收一维 scalar Taichi ndarray、受支持的 dense field，
-或显式 `VectorView`。vector payload 不经 host copy，不 materialize matrix-free
-provider；请求不受支持的操作时也不会切换 backend。
-
+公开 vector 参数保持一维 scalar-flat 数学 ABI。`LinearOperator.apply()` 可接收一维
+scalar Taichi ndarray、受支持的 dense field、显式 `DenseNdarrayView` 或 `VectorView`。
+单系统 `SolvePlan.solve()` 可接收一维 scalar ndarray、受支持的 dense field 或
+`VectorView`；显式 `DenseNdarrayView` 不属于其合同。vector payload 不经 host copy，
+也不 materialize matrix-free provider；请求不受支持的操作时不会切换 backend。
 operator、plan、provider、ndarray、field view 都属于同一 runtime generation。执行
 `ti.reset()` 后它们全部失效，也不能重新绑定到后续 `ti.init()` session。
 
@@ -62,8 +64,8 @@ arbitrary nested dense tree 和 noncanonical packed-component placement 会在�
 indices = ti.ndarray(ti.i32, shape=active_size)
 indices.from_numpy(active_scalar_indices)
 
-rhs_view = ti.linalg.experimental.vector_view(rhs, indices=indices)
-solution_view = ti.linalg.experimental.vector_view(solution, indices=indices)
+rhs_view = ti.linalg.vector_view(rhs, indices=indices)
+solution_view = ti.linalg.vector_view(solution, indices=indices)
 result = active_plan.solve(rhs_view, out=solution_view)
 ```
 
@@ -104,7 +106,7 @@ iteration。field `out` 会在同步 API 返回前完成 unpack/scatter。RHS/in
 可以查询支持面和实际转换开销：
 
 ```python
-capabilities = ti.linalg.experimental.vector_io_capabilities()
+capabilities = ti.linalg.vector_io_capabilities()
 view_metadata = rhs_view.metadata
 stats = plan.statistics()["vector_io"]
 ```
@@ -129,9 +131,9 @@ import taichi_forge as ti
 
 ti.init(arch=ti.cuda)
 
-operator = ti.linalg.experimental.aslinearoperator(
+operator = ti.linalg.aslinearoperator(
     A,
-    traits=ti.linalg.experimental.OperatorTraits.spd(),
+    traits=ti.linalg.OperatorTraits.spd(),
 )
 
 plan = ti.linalg.experimental.SolvePlan(
@@ -169,12 +171,12 @@ def apply_diagonal(
     for i in range(active_size):
         y[i] = numeric[i] * x[topology[i]]
 
-operator = ti.linalg.experimental.LinearOperator.from_kernel(
+operator = ti.linalg.LinearOperator.from_kernel(
     apply_diagonal,
     size,
     topology,
     numeric=numeric,
-    traits=ti.linalg.experimental.OperatorTraits.spd(),
+    traits=ti.linalg.OperatorTraits.spd(),
 )
 ```
 
@@ -182,7 +184,7 @@ operator = ti.linalg.experimental.LinearOperator.from_kernel(
 `adjoint=` 登记独立的伴随 kernel，才能使用 `operator.adjoint()`：
 
 ```python
-operator = ti.linalg.experimental.LinearOperator.from_kernel(
+operator = ti.linalg.LinearOperator.from_kernel(
     forward_kernel,
     (rows, columns),
     topology,
@@ -206,14 +208,14 @@ specialization，并把 topology/numeric 输入复制到 operator-owned snapshot
 `input` 与 `output`。其它每个 Graph 参数必须且只能分配一个角色：
 
 ```python
-operator = ti.linalg.experimental.LinearOperator.from_graph(
+operator = ti.linalg.LinearOperator.from_graph(
     graph,
     size,
     fixed_i32={"active_size": size},
     topology={"row_offsets": row_offsets, "columns": columns},
     numeric={"values": values},
     workspace={"temporary": temporary},
-    traits=ti.linalg.experimental.OperatorTraits.spd(),
+    traits=ti.linalg.OperatorTraits.spd(),
 )
 ```
 
@@ -232,7 +234,7 @@ Graph fallback，但不会改变数学 provider。Vulkan Graph replay 要求至�
 `OperatorTraits` 用 `None` 表示未知，用 `bool` 表示调用方的显式声明：
 
 ```python
-traits = ti.linalg.experimental.OperatorTraits(
+traits = ti.linalg.OperatorTraits(
     self_adjoint=True,
     positive_definite=True,
     positive_semidefinite=True,
@@ -260,8 +262,8 @@ B = 2.0 * operator
 C = operator + B
 D = operator.compose(B)       # operator(B(x))
 E = operator.adjoint()
-F = ti.linalg.experimental.block_diagonal((operator, B))
-I = ti.linalg.experimental.identity(size, dtype=ti.f32)
+F = ti.linalg.block_diagonal((operator, B))
+I = ti.linalg.identity(size, dtype=ti.f32)
 ```
 
 通用形式为 `out = alpha * A(x) + beta * addend`。input/output alias 始终被拒绝；
@@ -325,9 +327,9 @@ generation，不调用 host callback，也不执行 backend fallback。
 `self_adjoint=True` trait，而不要求 operator 为正定：
 
 ```python
-operator = ti.linalg.experimental.LinearOperator.from_sparse_matrix(
+operator = ti.linalg.LinearOperator.from_sparse_matrix(
     A,
-    traits=ti.linalg.experimental.OperatorTraits(
+    traits=ti.linalg.OperatorTraits(
         self_adjoint=True,
         singular=False,
     ),
@@ -884,20 +886,21 @@ provider 拥有复制后的 topology/numeric/workspace resource；composition �
 
 ## 与 legacy matrix-free API 的关系
 
-field-based `ti.linalg.LinearOperator`、`MatrixFreeCG` 和 `MatrixFreeBICGSTAB` 继续保留原有
-行为。它们使用 field-shaped vector 与 `(x, y)` kernel callback；由于该 ABI 不携带显式
-topology、numeric resource、runtime generation 和 capability 信息，不会执行隐式转换。
+callback-based `ti.linalg.FieldLinearOperator`、`MatrixFreeCG` 和
+`MatrixFreeBICGSTAB` 保留 field-shaped vector ABI。它们使用 `(x, y)` kernel callback；
+由于该 ABI 不携带显式 topology、numeric resource、runtime generation 和 capability
+信息，不会执行隐式转换。
 
-迁移需要提供显式 scalar-ndarray kernel 或 Graph provider、显式 vector extent 和数学
-trait。现有应用可以在具备这些合同前继续保留 legacy 路径；此实验性 API 不附带旧路径的
-移除计划。
+应用明确需要旧版 field callback 合同时使用 `FieldLinearOperator`；需要 provider
+capability、resource generation、runtime storage view、composition 或 solver-plan 集成时
+使用 `LinearOperator`。
 
 ## 资格验证边界
 
 `qualify_operator()` 可对任意公开 `LinearOperator` 生成版本化、JSON 可序列化的协议证据：
 
 ```python
-report = ti.linalg.experimental.qualify_operator(
+report = ti.linalg.qualify_operator(
     operator,
     reference=dense_reference,
     samples=4,
@@ -906,7 +909,7 @@ report = ti.linalg.experimental.qualify_operator(
     metadata={"case": "poisson_level_3"},
 )
 report.to_json()
-matrix = ti.linalg.experimental.summarize_operator_qualifications([report])
+matrix = ti.linalg.summarize_operator_qualifications([report])
 ```
 
 报告包含 backend/build、provider、shape、capability、resource stamp、forward/adjoint oracle

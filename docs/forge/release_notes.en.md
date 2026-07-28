@@ -15,7 +15,6 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
-| [Unreleased](#unreleased) | changes after the declared 0.5.1 source boundary | current `master` | reserved for later user-visible changes |
 | [0.5.1](#051) | current declared source release; publication artifacts may be pending | current `master` | sparse runtime/linear algebra, driver-only CUDA primitives, bounded host-memory/lifetimes, and completed runtime contracts |
 | [0.1.0](#010) | historical source release; artifact may be removed | `91ad177685` | scikit-build-core migration and Forge distribution rebrand |
 | [0.1.1](#011) | historical source release; artifact may be removed | `c771969781` | `taichi_forge` import rename and install-layout fixes |
@@ -40,7 +39,16 @@ grouped under the behavior they shipped.
 | [0.4.25](#0425) | retained on PyPI; final public 0.4.x baseline | `7dad067ca` | GGUI event-pump and ImGui lifecycle fixes |
 | [0.5.0](#050) | published runtime source boundary | `95626e8036` | async runtime safety, Graph replay/lifetime work, Dense Field Graph |
 
-## Unreleased
+## 0.5.1
+
+Version `0.5.1` consolidates the changes after the published `0.5.0` runtime
+source boundary. It does not retroactively change the behavior attributed to
+the `0.5.0` artifacts:
+
+- Offline-cache metadata locks now use operating-system advisory locks held by
+  an open file handle. Process termination releases ownership automatically, so
+  a persistent `.lock` file no longer causes repeated load/dump warnings or
+  requires deleting compiled cache state.
 
 - Added `ti.experimental.ndarray_view(source, slices=...)` for strict zero-copy
   binding of qualified runtime-owned dense storage to `ti.types.ndarray(...)`
@@ -59,15 +67,14 @@ grouped under the behavior they shipped.
   replay. Positive affine views execute through CUDA ordinary fallback and
   Vulkan command record/replay with the same result contract. AOT borrowed
   storage, external-owner capture, and ArgPack nesting remain unsupported.
-- `ti.linalg.experimental.LinearOperator.apply()` and single-system
-  `SolvePlan.solve()` now accept supported 1D/2D/3D root-dense scalar, Vector,
-  and Matrix fields. Overwrite `LinearOperator.apply()` binds canonical compact
-  full fields directly when the provider declares dense-storage operands:
-  compiled-kernel providers do so on CPU/CUDA/Vulkan and fixed native CSR/BSR
-  providers on CPU/CUDA. Other apply forms, compiled Graph and Vulkan native
-  sparse providers, indexed/non-compact views, and all `SolvePlan.solve()` field
-  boundaries use reusable device staging. Warm solves do not allocate staging,
-  and conversion never enters a Krylov iteration.
+- `ti.linalg.LinearOperator.apply()` and single-system `SolvePlan.solve()` accept
+  supported 1D/2D/3D root-dense scalar, Vector, and Matrix fields. Overwrite
+  `LinearOperator.apply()` directly binds canonical compact full fields for
+  compiled-kernel and compiled-Graph providers on CPU/CUDA/Vulkan, and for
+  fixed native CSR/BSR providers on CPU/CUDA. Generalized apply forms, Vulkan
+  native sparse providers, indexed/non-compact views, and all
+  `SolvePlan.solve()` field boundaries use reusable device staging. Warm solves
+  do not allocate staging, and conversion never enters a Krylov iteration.
   Stable raw-field bindings reuse qualified implicit views and transfer plans;
   execution telemetry distinguishes direct submissions from native or compiled
   Graph pack/unpack paths.
@@ -82,16 +89,18 @@ grouped under the behavior they shipped.
   storage descriptor. Provider-specific handles and warm native-plan replay are
   preserved.
 
-## 0.5.1
-
-Version `0.5.1` consolidates the changes after the published `0.5.0` runtime
-source boundary. It does not retroactively change the behavior attributed to
-the `0.5.0` artifacts:
-
-- Offline-cache metadata locks now use operating-system advisory locks held by
-  an open file handle. Process termination releases ownership automatically, so
-  a persistent `.lock` file no longer causes repeated load/dump warnings or
-  requires deleting compiled cache state.
+- `ti.linalg.LinearOperator` is now the public runtime-bound operator API.
+  Operator traits, composition, vector views, and operator qualification are
+  exported from `ti.linalg`. The callback-only field wrapper is named
+  `ti.linalg.FieldLinearOperator`, removing the former ambiguity between two
+  unrelated `LinearOperator` contracts. Solver execution plans remain under
+  `ti.linalg.experimental`.
+- LinearOperator compiled-kernel and compiled-Graph providers now bind qualified
+  Program-owned Ndarrays, dense fields, and explicit `DenseNdarrayView` objects
+  through the common runtime-storage argument protocol. Compact operands bind
+  directly on CPU, CUDA, and Vulkan. Rank-one scalar positive-stride views bind
+  directly to compiled kernels and preserve zero-copy Graph execution; provider
+  combinations without affine support fail explicitly.
 
 ### Numerical tooling support boundary
 
@@ -137,7 +146,7 @@ host staging or provider replacement.
   Iterative solvers report convergence from the true residual contract
   `||b-Ax|| <= max(atol, rtol*||b||)`. These legacy stored-solver
   constructors remain CPU-only.
-- Added the experimental `ti.linalg.experimental.LinearOperator` and
+- Added `ti.linalg.LinearOperator` and the experimental
   `SolvePlan` API. Fixed stored CSR/BSR, exact compiled-kernel providers, and
   role-qualified compiled Graphs share one runtime/lifetime/capability
   contract. Explicit mathematical traits gate CG/PCG; persistent plans expose
@@ -245,7 +254,7 @@ host staging or provider replacement.
   semantics, and lifecycle rules are documented in
   [Sparse runtime and linear algebra](sparse_runtime_and_linear_algebra.en.md).
   The general operator API is documented in
-  [Experimental LinearOperator and SolvePlan](linear_operator.en.md).
+  [LinearOperator and SolvePlan](linear_operator.en.md).
   See also [layout selection](sparse_layout_selection.en.md) and
   [physics solver selection](physics_sparse_solver_selection.en.md).
 

@@ -12,7 +12,6 @@
 
 | 版本 | 历史状态 | 源码边界 | 主要范围 |
 | --- | --- | --- | --- |
-| [未发布](#未发布) | 当前声明的 0.5.1 源码边界之后的更新 | 当前 `master` | 为后续用户可见更新保留 |
 | [0.5.1](#051) | 当前声明的源码版本；发行文件可能仍待发布 | 当前 `master` | 稀疏 runtime/线性代数、driver-only CUDA primitive、宿主内存/生命周期有界化与 runtime 合同补全 |
 | [0.1.0](#010) | 历史源码版本；发行文件可能已移除 | `91ad177685` | scikit-build-core 迁移与 Forge 发行包重命名 |
 | [0.1.1](#011) | 历史源码版本；发行文件可能已移除 | `c771969781` | `taichi_forge` import 重命名与安装布局修复 |
@@ -37,7 +36,14 @@
 | [0.4.25](#0425) | PyPI 当前保留；最后一个公开 0.4.x 基线 | `7dad067ca` | GGUI 事件泵与 ImGui 生命周期修复 |
 | [0.5.0](#050) | 已发布 runtime 源码边界 | `95626e8036` | 异步 runtime 安全、Graph replay/lifetime、Dense Field Graph |
 
-## 未发布
+## 0.5.1
+
+`0.5.1` 汇总已发布 `0.5.0` runtime 源码边界之后的更新，不会追溯改写
+`0.5.0` 发行产物的行为归属：
+
+- Offline-cache metadata lock 改为由打开文件句柄持有的操作系统 advisory lock。进程
+  终止会自动释放所有权，因此持久 `.lock` 文件不再导致反复的 load/dump 警告，也不再
+  要求删除已编译 cache 状态。
 
 - 新增 `ti.experimental.ndarray_view(source, slices=...)`，可在 CPU、CUDA、Vulkan
   上把经过资格验证、由 runtime 持有的 dense storage 严格 zero-copy 地绑定到
@@ -53,16 +59,15 @@
   replay 前会重新验证 owner generation 与 byte range。positive affine view 在 CUDA
   使用 ordinary fallback，在 Vulkan 使用 command record/replay，并保持相同结果合同。
   AOT borrowed storage、external-owner capture 与 ArgPack 嵌套仍不支持。
-- `ti.linalg.experimental.LinearOperator.apply()` 与单系统
-  `SolvePlan.solve()` 现在直接接受受支持的 1D/2D/3D root-dense scalar、Vector 和
-  Matrix field。当 provider 声明支持 dense-storage operand 时，overwrite
-  `LinearOperator.apply()` 会直接绑定 canonical compact full field：compiled-kernel
-  provider 覆盖 CPU/CUDA/Vulkan，fixed native CSR/BSR provider 覆盖 CPU/CUDA。其它 apply
-  形式、compiled Graph 与 Vulkan native sparse provider、indexed/non-compact view，以及
-  全部 `SolvePlan.solve()` field 边界使用可复用 device staging。warm solve 不重新分配
-  staging，转换不进入 Krylov iteration。
-  稳定 raw field binding 复用已验证的 implicit view 与 transfer plan；执行遥测明确区分
-  direct submission、native pack/unpack 和 compiled Graph pack/unpack 路径。
+- `ti.linalg.LinearOperator.apply()` 与单系统 `SolvePlan.solve()` 接受受支持的
+  1D/2D/3D root-dense scalar、Vector 和 Matrix field。overwrite
+  `LinearOperator.apply()` 可在 CPU/CUDA/Vulkan 的 compiled-kernel 与
+  compiled-Graph provider 上直接绑定 canonical compact full field，fixed native
+  CSR/BSR provider 则覆盖 CPU/CUDA。generalized apply、Vulkan native sparse
+  provider、indexed/non-compact view 以及全部 `SolvePlan.solve()` field 边界使用可复用
+  device staging。warm solve 不重新分配 staging，转换不会进入 Krylov iteration。
+  稳定 raw-field binding 复用已验证的 implicit view 与 transfer plan；执行 telemetry
+  明确区分 direct submission、native pack/unpack 和 compiled Graph pack/unpack 路径。
 - 新增 runtime-bound `VectorView` 与 `vector_view(field, indices=...)`，用于声明经过
   验证、冻结的 scalar subset/permutation。新增版本化 capability、layout metadata、
   direct/staging/pack/unpack/indexed-copy telemetry 与 provider-qualified zero-copy
@@ -72,14 +77,16 @@
   获取 dtype、shape、owner generation、byte range、offset 与 record stride，同时保留
   provider 特定 handle 和 warm native-plan replay。
 
-## 0.5.1
-
-`0.5.1` 汇总已发布 `0.5.0` runtime 源码边界之后的更新，不会追溯改写
-`0.5.0` 发行产物的行为归属：
-
-- Offline-cache metadata lock 改为由打开文件句柄持有的操作系统 advisory lock。进程
-  终止会自动释放所有权，因此持久 `.lock` 文件不再导致反复的 load/dump 警告，也不再
-  要求删除已编译 cache 状态。
+- `ti.linalg.LinearOperator` 现在是公开的 runtime-bound operator API。
+  operator trait、composition、vector view 与 operator qualification 均从
+  `ti.linalg` 导出。仅接受 field callback 的旧包装类型命名为
+  `ti.linalg.FieldLinearOperator`，从而消除两个不同 `LinearOperator` 合同之间的歧义。
+  solver execution plan 仍位于 `ti.linalg.experimental`。
+- LinearOperator 的 compiled-kernel 与 compiled-Graph provider 现在通过统一
+  runtime-storage argument 协议绑定经过资格验证的 Program-owned Ndarray、dense field
+  和显式 `DenseNdarrayView`。compact operand 在 CPU、CUDA 与 Vulkan 上直接绑定；一维
+  scalar positive-stride view 可直接绑定 compiled kernel，并在 Graph 中保持 zero-copy
+  执行。不支持 affine 的 provider 组合会明确失败。
 
 ### 数值工具支持边界
 
@@ -117,7 +124,7 @@ domain decomposition、contact、KKT 或 nonlinear outer-solver policy。不受�
   `SparseBiCGSTAB`，用于非对称 CSR/BSR。迭代 solver 根据真实残差合同
   `||b-Ax|| <= max(atol, rtol*||b||)` 报告收敛。这两个旧 stored-solver
   constructor 仍仅支持 CPU。
-- 增加实验性 `ti.linalg.experimental.LinearOperator` 与 `SolvePlan` API。fixed
+- 增加 `ti.linalg.LinearOperator` 与实验性 `SolvePlan` API。fixed
   stored CSR/BSR、精确 compiled-kernel provider 和按 role 分类的 compiled Graph
   使用统一 runtime/lifetime/capability 合同。显式数学 trait 作为 CG/PCG 门禁；
   persistent plan 通过统一 `SolveResult` 返回 terminal state，并在文档支持矩阵内提供
@@ -195,7 +202,7 @@ domain decomposition、contact、KKT 或 nonlinear outer-solver policy。不受�
   mass-spring example 跨 value-only step 复用 symbolic analysis。
 - 完整用户流程、特性、backend/format/dtype 矩阵、失败语义和生命周期规则见
   [稀疏 runtime 与线性代数](sparse_runtime_and_linear_algebra.zh.md)，并可参考
-  [实验性 LinearOperator 与 SolvePlan](linear_operator.zh.md)、
+  [LinearOperator 与 SolvePlan](linear_operator.zh.md)、
   [稀疏布局选择指南](sparse_layout_selection.zh.md)与
   [物理稀疏 solver 选择指南](physics_sparse_solver_selection.zh.md)。
 

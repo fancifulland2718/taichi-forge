@@ -199,7 +199,7 @@ CSR/BSR shape. The caller owns those mathematical contracts.
 
 ### Runtime-bound LinearOperator
 
-`ti.linalg.experimental.LinearOperator` unifies fixed stored CSR/BSR,
+`ti.linalg.LinearOperator` unifies fixed stored CSR/BSR,
 compiled-kernel, and compiled-Graph apply behind one capability and lifecycle
 contract. It uses scalar one-dimensional Taichi ndarrays and retains a reusable
 native execution plan. Mathematical properties are attached through
@@ -217,7 +217,7 @@ contract. This API does not replace mutable Eigen sparse matrices or direct
   factorization. It provides provider-neutral MINRES, BiCGSTAB, restarted
   GMRES, and variable-linear FGMRES for fixed and compiled operators, while the legacy `SparseMINRES` and
 `SparseBiCGSTAB` constructors retain their CPU stored-matrix contracts. See
-[Experimental LinearOperator and SolvePlan](linear_operator.en.md) for provider
+[LinearOperator and SolvePlan](linear_operator.en.md) for provider
 ABIs, ownership, update generations, examples, and the exact
 backend matrix.
 
@@ -280,9 +280,9 @@ This legacy `SparseMINRES` route is CPU-only and identity-preconditioned. For a
 fixed or compiled `LinearOperator`, use the runtime-bound plan:
 
 ```python
-operator = ti.linalg.experimental.LinearOperator.from_sparse_matrix(
+operator = ti.linalg.LinearOperator.from_sparse_matrix(
     A,
-    traits=ti.linalg.experimental.OperatorTraits(
+    traits=ti.linalg.OperatorTraits(
         self_adjoint=True,
         singular=False,
     ),
@@ -320,7 +320,7 @@ x, converged = solver.solve()
 For a runtime-bound fixed or compiled operator, use the provider-neutral plan:
 
 ```python
-operator = ti.linalg.experimental.LinearOperator.from_sparse_matrix(A)
+operator = ti.linalg.LinearOperator.from_sparse_matrix(A)
 plan = ti.linalg.experimental.SolvePlan(
     operator,
     method="bicgstab",

@@ -83,35 +83,43 @@ Ndarray ABI。仅凭 source class 不能保证一定接受。
 
 ## Consumer 特定的执行能力
 
-多个 runtime consumer 共享同一 storage descriptor，但每个 consumer 都独立发布执行
-capability。一个 descriptor 可被原生 strided algorithm 接受，不代表它必然可作为
-Ndarray kernel 参数或 LinearOperator direct operand。
+多个 runtime consumer 共享同一 storage descriptor，但每个 consumer 独立发布执行
+capability。descriptor 可被 native strided algorithm 接受，不代表它必然可作为 Ndarray
+kernel 参数或 LinearOperator direct operand。
 
-对于 `ti.linalg.experimental.LinearOperator.apply()`，canonical compact full field
-只有同时满足以下条件时才绕过 scalar-vector staging：
+`ti.linalg.LinearOperator.apply()` 使用统一 runtime-storage argument 协议。overwrite
+形式 `operator.apply(input, out=output)` 只有同时满足以下条件才直接绑定 storage：
 
-- 显式传入 `out`，并使用 `alpha=1, beta=0` 的 overwrite 形式；
-- input/output 是不互相 alias、dtype 与 scalar extent 精确匹配的 full field；
-- 当前 provider 报告 `dense_storage_operands=True`。
+- input/output 是不互相 alias、由当前 Program 拥有的 Ndarray、dense field 或显式
+  `DenseNdarrayView`；
+- dtype 与 scalar extent 精确匹配 operator space；
+- 每个 operand 都能线性化为 compact scalar vector，或本身是一维 scalar positive-stride
+  view；
+- provider 报告 `dense_storage_operands=True`；strided operand 还要求
+  `dense_storage_affine_operands=True`。
 
-当前 provider 矩阵如下：
+资格验证后的 provider 矩阵如下：
 
-| LinearOperator provider | CPU | CUDA | Vulkan |
-| --- | --- | --- | --- |
-| 已编译 Taichi kernel | Direct | Direct | Direct |
-| Fixed native CSR/BSR | Direct | Direct | Device staged |
-| 已编译 Graph | Device staged | Device staged | Device staged |
-| `SolvePlan.solve()` vector 边界 | Device staged | Device staged | Device staged |
+| LinearOperator consumer | Compact runtime storage | 一维 scalar positive stride |
+| --- | --- | --- |
+| 已编译 Taichi kernel，CPU/CUDA/Vulkan | Direct | Direct |
+| 已编译 Graph，CPU | Direct ordinary dispatch | Direct ordinary dispatch |
+| 已编译 Graph，CUDA | Direct；可进入 capture/replay | Direct ordinary fallback |
+| 已编译 Graph，Vulkan | Direct command replay | Direct command replay |
+| Fixed native CSR/BSR，CPU/CUDA | Direct | 不支持 |
+| Fixed native CSR/BSR，Vulkan | dense-field device staging | 不支持 |
+| `SolvePlan.solve()` dense field / `VectorView` | Device staged | 不适用 |
+| `SolvePlan.solve()` 显式 `DenseNdarrayView` | 不支持 | 不支持 |
 
-indexed view、padded/non-compact field、generalized apply coefficient 和 `out=None`
-沿用 device-staging 路径，vector 数值不会经过 host。可以通过
-`operator.capabilities.dense_storage_operands`、`vector_io_capabilities()`、
-`VectorView.metadata` 和 `operator.statistics()["vector_io"]` 区分“可作为 direct
-候选”与实际执行路径。
+direct binding 不分配 scalar-vector staging buffer，也不复制 payload。CUDA Graph
+capture 仍限于 compact mapping；affine Graph operand 通过已记录的 ordinary fallback
+保持 zero-copy addressing。显式 `DenseNdarrayView` 若不被选中的 provider 接受，会明确
+失败而不会静默改变布局。indexed `VectorView` 与符合条件的 noncanonical field 继续使用
+既有 device-staging 路径；payload 数值不会经过 host array。
 
-原生算法也使用同一 descriptor 获取 dtype、shape、owner、offset 与 record stride，
-同时保留 provider 特定的 handle。对相同对象进行 warm plan replay 时，会直接复用 native
-plan，不重新构造 descriptor。
+可通过 `operator.capabilities`、`vector_io_capabilities()`、storage-view metadata 和
+`operator.statistics()["vector_io"]` 区分资格与实际执行路径。telemetry 会报告 direct
+field/view submission、经过资格验证的 operand metadata build/reuse，以及最近一次 contiguous 或 affine execution mode。
 
 ## 生命周期与失败行为
 

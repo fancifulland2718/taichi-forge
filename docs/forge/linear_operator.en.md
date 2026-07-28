@@ -1,14 +1,16 @@
-# Experimental LinearOperator and SolvePlan
+# LinearOperator and Experimental SolvePlan
 
-`ti.linalg.experimental` provides a runtime-bound linear-map abstraction for
+`ti.linalg.LinearOperator` provides a runtime-bound linear-map abstraction for
 stored sparse matrices, compiled Taichi kernels, and compiled Graphs. It is a
 general numerical API: applications may use it for discretized PDEs, implicit
 systems, graph problems, optimization, or other linear algebra without
 introducing physics-domain objects into the Taichi DSL.
 
-The namespace is experimental. Its provider, lifetime, capability, and
-failure contracts are defined here; source compatibility may still change
-before promotion into the stable `ti.linalg` namespace.
+`LinearOperator`, `OperatorTraits`, storage-view helpers, composition helpers,
+and operator qualification are public `ti.linalg` APIs. Solver execution
+objects such as `SolvePlan`, `PreconditionerPlan`, and `BatchedSolvePlan`
+remain under `ti.linalg.experimental`; their backend and numerical support
+boundaries are documented separately below.
 
 ## Core model
 
@@ -21,13 +23,14 @@ A `LinearOperator` represents `y = A x` with:
 - observable capabilities and resource-generation metadata; and
 - one reusable native execution plan.
 
-Public vector arguments retain a one-dimensional scalar-flat mathematical ABI,
-while `apply()` and single-system `SolvePlan.solve()` boundaries accept scalar
-one-dimensional Taichi ndarrays, supported dense fields, or explicit
-`VectorView` objects. Vector payloads do not pass through the host, matrix-free
-providers are not materialized, and unsupported operations do not change
-backend.
-
+Public vector arguments retain a one-dimensional scalar-flat mathematical ABI.
+`LinearOperator.apply()` accepts scalar one-dimensional Taichi ndarrays,
+supported dense fields, explicit `DenseNdarrayView` objects, or `VectorView`
+objects. Single-system `SolvePlan.solve()` accepts scalar one-dimensional
+ndarrays, supported dense fields, or `VectorView` objects; explicit
+`DenseNdarrayView` operands are not part of its contract. Vector payloads do
+not pass through the host, matrix-free providers are not materialized, and
+unsupported operations do not change backend.
 All operators, plans, providers, ndarrays, and field views belong to one runtime
 generation. They become invalid after `ti.reset()` and cannot be rebound to a
 later `ti.init()` session.
@@ -73,8 +76,8 @@ dense field:
 indices = ti.ndarray(ti.i32, shape=active_size)
 indices.from_numpy(active_scalar_indices)
 
-rhs_view = ti.linalg.experimental.vector_view(rhs, indices=indices)
-solution_view = ti.linalg.experimental.vector_view(solution, indices=indices)
+rhs_view = ti.linalg.vector_view(rhs, indices=indices)
+solution_view = ti.linalg.vector_view(solution, indices=indices)
 result = active_plan.solve(rhs_view, out=solution_view)
 ```
 
@@ -123,7 +126,7 @@ supports it; other staged layouts use compiled conversion Graph replay.
 Capabilities and actual conversion costs are observable:
 
 ```python
-capabilities = ti.linalg.experimental.vector_io_capabilities()
+capabilities = ti.linalg.vector_io_capabilities()
 view_metadata = rhs_view.metadata
 stats = plan.statistics()["vector_io"]
 ```
@@ -150,9 +153,9 @@ import taichi_forge as ti
 
 ti.init(arch=ti.cuda)
 
-operator = ti.linalg.experimental.aslinearoperator(
+operator = ti.linalg.aslinearoperator(
     A,
-    traits=ti.linalg.experimental.OperatorTraits.spd(),
+    traits=ti.linalg.OperatorTraits.spd(),
 )
 
 plan = ti.linalg.experimental.SolvePlan(
@@ -171,7 +174,7 @@ x = result.solution
 
 Mutable Eigen CSR/CSC matrices remain supported by the established
 `SparseCG`, `SparseMINRES`, `SparseBiCGSTAB`, and `SparseSolver` APIs. The
-experimental stored provider accepts fixed CSR/BSR only so that topology,
+stored provider accepts fixed CSR/BSR only so that topology,
 numeric generations, and provider ownership have one stable contract.
 
 ## Compiled kernel provider
@@ -191,12 +194,12 @@ def apply_diagonal(
     for i in range(active_size):
         y[i] = numeric[i] * x[topology[i]]
 
-operator = ti.linalg.experimental.LinearOperator.from_kernel(
+operator = ti.linalg.LinearOperator.from_kernel(
     apply_diagonal,
     size,
     topology,
     numeric=numeric,
-    traits=ti.linalg.experimental.OperatorTraits.spd(),
+    traits=ti.linalg.OperatorTraits.spd(),
 )
 ```
 
@@ -205,7 +208,7 @@ must register an independent adjoint kernel through `adjoint=` before
 `operator.adjoint()` is available:
 
 ```python
-operator = ti.linalg.experimental.LinearOperator.from_kernel(
+operator = ti.linalg.LinearOperator.from_kernel(
     forward_kernel,
     (rows, columns),
     topology,
@@ -233,14 +236,14 @@ arguments are named `input` and `output`. Every other Graph argument must be
 assigned exactly one role:
 
 ```python
-operator = ti.linalg.experimental.LinearOperator.from_graph(
+operator = ti.linalg.LinearOperator.from_graph(
     graph,
     size,
     fixed_i32={"active_size": size},
     topology={"row_offsets": row_offsets, "columns": columns},
     numeric={"values": values},
     workspace={"temporary": temporary},
-    traits=ti.linalg.experimental.OperatorTraits.spd(),
+    traits=ti.linalg.OperatorTraits.spd(),
 )
 ```
 
@@ -262,7 +265,7 @@ executes correctly, while `operator.statistics()` reports
 claim:
 
 ```python
-traits = ti.linalg.experimental.OperatorTraits(
+traits = ti.linalg.OperatorTraits(
     self_adjoint=True,
     positive_definite=True,
     positive_semidefinite=True,
@@ -292,8 +295,8 @@ B = 2.0 * operator
 C = operator + B
 D = operator.compose(B)       # operator(B(x))
 E = operator.adjoint()
-F = ti.linalg.experimental.block_diagonal((operator, B))
-I = ti.linalg.experimental.identity(size, dtype=ti.f32)
+F = ti.linalg.block_diagonal((operator, B))
+I = ti.linalg.identity(size, dtype=ti.f32)
 ```
 
 The generalized form is `out = alpha * A(x) + beta * addend`. Input/output
@@ -367,9 +370,9 @@ as CG/PCG, but requires a trusted `self_adjoint=True` trait rather than
 positive definiteness:
 
 ```python
-operator = ti.linalg.experimental.LinearOperator.from_sparse_matrix(
+operator = ti.linalg.LinearOperator.from_sparse_matrix(
     A,
-    traits=ti.linalg.experimental.OperatorTraits(
+    traits=ti.linalg.OperatorTraits(
         self_adjoint=True,
         singular=False,
     ),
@@ -1012,16 +1015,16 @@ resources; compositions and solve plans strongly retain their operands.
 
 ## Relationship to the legacy matrix-free API
 
-The field-based `ti.linalg.LinearOperator`, `MatrixFreeCG`, and
-`MatrixFreeBICGSTAB` remain available with their existing behavior. They use
-field-shaped vectors and a `(x, y)` kernel callback and are not implicitly
-adapted because that ABI does not carry explicit topology, numeric-resource,
-runtime-generation, or capability information.
+The callback-based `ti.linalg.FieldLinearOperator`, `MatrixFreeCG`, and
+`MatrixFreeBICGSTAB` retain their field-shaped vector ABI. They use a `(x, y)`
+kernel callback and are not implicitly adapted because that ABI does not carry
+explicit topology, numeric-resource, runtime-generation, or capability
+information.
 
-Migration requires an explicit scalar-ndarray kernel or Graph provider, an
-explicit vector extent, and mathematical traits. Existing applications may
-retain the legacy route until those contracts are available; no removal
-schedule is attached to this experimental API.
+Use `FieldLinearOperator` when an application intentionally needs the legacy
+field callback contract. Use `LinearOperator` when provider capabilities,
+resource generations, runtime storage views, composition, or solver-plan
+integration are required.
 
 ## Qualification boundary
 
@@ -1029,7 +1032,7 @@ schedule is attached to this experimental API.
 for any public `LinearOperator`:
 
 ```python
-report = ti.linalg.experimental.qualify_operator(
+report = ti.linalg.qualify_operator(
     operator,
     reference=dense_reference,
     samples=4,
@@ -1038,7 +1041,7 @@ report = ti.linalg.experimental.qualify_operator(
     metadata={"case": "poisson_level_3"},
 )
 report.to_json()
-matrix = ti.linalg.experimental.summarize_operator_qualifications([report])
+matrix = ti.linalg.summarize_operator_qualifications([report])
 ```
 
 The report contains backend/build identity, provider, shape, capabilities,

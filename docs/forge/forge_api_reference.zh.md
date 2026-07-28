@@ -956,7 +956,7 @@ provider-neutral MINRES、BiCGSTAB、restarted GMRES、variable-linear FGMRES，
 factorization 复用合同。
 完整用法与后端矩阵见
 [稀疏 runtime 与线性代数](sparse_runtime_and_linear_algebra.zh.md)。绑定 runtime 的
-operator API 另见[实验性 LinearOperator 与 SolvePlan](linear_operator.zh.md)。
+operator API 另见[LinearOperator 与 SolvePlan](linear_operator.zh.md)。
 
 | API | 用途 | 支持边界 |
 | --- | --- | --- |
@@ -968,14 +968,15 @@ operator API 另见[实验性 LinearOperator 与 SolvePlan](linear_operator.zh.m
 | `ti.linalg.SparseMINRES(A, b, ..., atol, rtol)` | 求解显式存储的对称不定系统。 | CPU mutable/fixed CSR/BSR、`f32/f64`；identity preconditioner。 |
 | `ti.linalg.SparseBiCGSTAB(A, b, ..., atol, rtol)` | 求解显式存储的非对称系统。 | CPU mutable/fixed CSR/BSR、`f32/f64`。 |
 | `ti.linalg.SparseSolver` | 直接 LLT/LDLT/LU 分解和求解。 | CPU mutable Eigen provider 与文档列出的 CUDA scalar-CSR 路径；Vulkan 不支持。 |
-| `ti.linalg.experimental.OperatorTraits(...)` / `.spd()` | 不通过 sampling 或 inference，显式声明数学性质。 | CG/PCG 要求可信的 self-adjoint 与 positive-definite trait；MINRES 要求可信 self-adjoint，并拒绝声明为 singular 的 operator。 |
-| `ti.linalg.experimental.LinearOperator.from_sparse_matrix(A, traits=...)` | 把 fixed CSR/BSR 绑定为 runtime-owned linear map。 | CPU `f32/f64`；CUDA/Vulkan `f32`；不复制、不 fallback。 |
+| `ti.linalg.OperatorTraits(...)` / `.spd()` | 不通过 sampling 或 inference，显式声明数学性质。 | CG/PCG 要求可信的 self-adjoint 与 positive-definite trait；MINRES 要求可信 self-adjoint，并拒绝声明为 singular 的 operator。 |
+| `ti.linalg.LinearOperator.from_sparse_matrix(A, traits=...)` | 把 fixed CSR/BSR 绑定为 runtime-owned linear map。 | CPU `f32/f64`；CUDA/Vulkan `f32`；不复制、不 fallback。 |
 | `LinearOperator.from_kernel(..., adjoint=...)` / `.from_graph(..., adjoint=...)` | 绑定精确 f32 ndarray kernel ABI 或按 role 分类的 compiled Graph；整数 size 是方阵简写，tuple 表示 `(range, domain)`。 | CPU、CUDA、Vulkan；显式 adjoint；topology/numeric/workspace 为 operator-owned snapshot。 |
-| `ti.linalg.experimental.vector_view(field, indices=None)` | 把 canonical root-dense scalar/Vector/Matrix field 声明为 runtime-bound scalar-flat vector；可选显式 indexed subset/permutation。 | 1D/2D/3D、`f32/f64`，并服从 operator/provider/backend 的 dtype 支持；indices 为非空、范围内、唯一的一维 `i32` ndarray/dense field，并在构造时验证和冻结；sparse SNode 与 noncanonical layout 明确失败。 |
-| `ti.linalg.experimental.vector_io_capabilities()` / `view.metadata` | 查询版本化 storage、layout、execution mode、zero-copy candidate 与 indexed topology 合同。 | ndarray 为 direct。canonical compact full field 仅在 overwrite `apply()` 且 provider 报告 `dense_storage_operands` 时 direct：compiled kernel 覆盖 CPU/CUDA/Vulkan，fixed native CSR/BSR 覆盖 CPU/CUDA。其它 field operation、indexed/non-compact view、Graph/Vulkan-native-sparse provider 和 solve 边界使用可复用 device staging；稳定 raw field binding 复用同一 implicit view 与 transfer plan。 |
-| `operator.apply(x, out=None, *, alpha=1, beta=0, addend=None)` / `operator @ x` | 同步执行 `out = alpha * A(x) + beta * addend`。 | 一维 scalar ndarray 或受支持 field/view；CPU 支持通用系数；CUDA/Vulkan 支持 overwrite；field-output overwrite 合并 provider 与 unpack completion；`beta=0` 不读取 addend；禁止 input/output alias。 |
+| `ti.linalg.FieldLinearOperator(matvec_kernel)` | 包装 `MatrixFreeCG` 与 `MatrixFreeBICGSTAB` 使用的 callback-only `(x, y)` field ABI。 | field-shaped legacy 合同；不提供 provider capability、resource generation、storage view、composition 或 SolvePlan 适配。 |
+| `ti.linalg.vector_view(field, indices=None)` | 把 canonical root-dense scalar/Vector/Matrix field 声明为 runtime-bound scalar-flat vector；可选显式 indexed subset/permutation。 | 1D/2D/3D、`f32/f64`，并服从 operator/provider/backend 的 dtype 支持；indices 为非空、范围内、唯一的一维 `i32` ndarray/dense field，并在构造时验证和冻结；sparse SNode 与 noncanonical layout 明确失败。 |
+| `ti.linalg.vector_io_capabilities()` / storage-view metadata | 查询版本化 storage、layout、execution mode、zero-copy 资格与 indexed topology 合同。 | compiled kernel 在 CPU/CUDA/Vulkan 上直接绑定 compact 与一维 scalar affine runtime storage。compiled Graph 直接绑定 compact storage，并通过 backend-qualified dispatch 保持 affine zero-copy 执行。native CSR/BSR 在 CPU/CUDA 上接受 compact direct storage；Vulkan dense field 与 solve boundary 使用可复用 device staging。 |
+| `operator.apply(x, out=None, *, alpha=1, beta=0, addend=None)` / `operator @ x` | 同步执行 `out = alpha * A(x) + beta * addend`。 | 一维 scalar ndarray、可 scalar-linearize 的 dense field/view 或经过资格验证的 `DenseNdarrayView`；CPU 支持通用系数；CUDA/Vulkan 支持 overwrite；`beta=0` 不读取 addend；禁止 input/output alias。 |
 | `operator.scaled(...)`、`operator + other`、`.compose(...)`、`.adjoint()`、`block_diagonal(...)`、`identity(...)` | 构造最小线性算子代数。 | CPU composition；adjoint 需要显式 capability。 |
-| `ti.linalg.experimental.qualify_operator(operator, reference=..., ...)` | 生成版本化、JSON 可序列化的 provider-neutral 协议证据。 | 记录 oracle/adjoint/generalized apply、同步计时、resource stamp 与 native counter；unsupported 不 fallback。 |
+| `ti.linalg.qualify_operator(operator, reference=..., ...)` | 生成版本化、JSON 可序列化的 provider-neutral 协议证据。 | 记录 oracle/adjoint/generalized apply、同步计时、resource stamp 与 native counter；unsupported 不 fallback。 |
 | `summarize_operator_qualifications(reports)` | 从 detached report 生成确定性的 backend/provider 支持矩阵。 | schema-v1 JSON 字典；保留每项 check 的 passed/failed/unsupported 状态。 |
 | `ti.linalg.experimental.qualify_solve_plan(plan_or_factory, rhs, reference=..., ...)` | 为单系统或独立 batch plan 生成版本化 correctness/lifecycle/execution 证据。 | 区分 build/first/warm wall time 与合格异步 submit；记录真实残差、A/M 身份、iteration/work/resource/pacer telemetry；不推测 device time。 |
 | `summarize_solve_qualifications(reports)` | 从 detached report 构造确定性的 solver/backend/provider/policy 矩阵。 | schema-v1 JSON 字典；保留 check、计时 availability、归一化 work metric 和原始 telemetry。 |

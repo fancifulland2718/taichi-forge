@@ -185,7 +185,7 @@ conditioning，这些数学合同由调用方负责。
 
 ### 绑定 runtime 的 LinearOperator
 
-`ti.linalg.experimental.LinearOperator` 使用统一 capability 与 lifecycle 合同覆盖 fixed
+`ti.linalg.LinearOperator` 使用统一 capability 与 lifecycle 合同覆盖 fixed
 stored CSR/BSR、compiled-kernel 和 compiled-Graph apply。vector 使用一维 scalar Taichi
 ndarray，operator 保留可复用 native execution plan。数学性质通过 `OperatorTraits`
 附加；SPD 性质未知时，CG/PCG 会拒绝构造。CPU 提供最小的
@@ -201,7 +201,7 @@ sparse matrix 或 direct factorization；它为 fixed 与 compiled operator 提�
   provider-neutral MINRES、BiCGSTAB、restarted GMRES 与 variable-linear FGMRES，而旧 `SparseMINRES` 和
 `SparseBiCGSTAB` 构造器保留 CPU stored-matrix 合同。provider ABI、所有权、
 update generation、示例和精确 backend 矩阵见
-[实验性 LinearOperator 与 SolvePlan](linear_operator.zh.md)。
+[LinearOperator 与 SolvePlan](linear_operator.zh.md)。
 
 ### CG 与 preconditioner
 
@@ -259,9 +259,9 @@ x, converged = solver.solve()
 `LinearOperator` 应使用绑定 runtime 的 plan：
 
 ```python
-operator = ti.linalg.experimental.LinearOperator.from_sparse_matrix(
+operator = ti.linalg.LinearOperator.from_sparse_matrix(
     A,
-    traits=ti.linalg.experimental.OperatorTraits(
+    traits=ti.linalg.OperatorTraits(
         self_adjoint=True,
         singular=False,
     ),
@@ -298,7 +298,7 @@ x, converged = solver.solve()
 runtime-bound fixed 或 compiled operator 应使用 provider-neutral plan：
 
 ```python
-operator = ti.linalg.experimental.LinearOperator.from_sparse_matrix(A)
+operator = ti.linalg.LinearOperator.from_sparse_matrix(A)
 plan = ti.linalg.experimental.SolvePlan(
     operator,
     method="bicgstab",

@@ -89,40 +89,48 @@ ABI. Source class alone does not guarantee acceptance.
 
 ## Consumer-specific execution
 
-The storage descriptor is shared by several runtime consumers, but each
-consumer publishes its own execution capability. A descriptor that is valid
-for a native strided algorithm is not automatically a valid Ndarray kernel
-argument or a direct linear-operator operand.
+The storage descriptor is shared by runtime consumers, while every consumer
+publishes its own execution capability. A descriptor accepted by a native
+strided algorithm is not automatically valid as an Ndarray kernel argument or
+a direct linear-operator operand.
 
-For `ti.linalg.experimental.LinearOperator.apply()`, a canonical compact full
-field can bypass scalar-vector staging when all of the following hold:
+`ti.linalg.LinearOperator.apply()` uses the common runtime-storage argument
+protocol. The overwrite form `operator.apply(input, out=output)` binds storage
+directly when all of the following hold:
 
-- `out` is supplied and the operation is the overwrite form
-  `alpha=1, beta=0`;
-- input and output are non-aliasing full fields with the exact operator dtype
-  and scalar extent; and
-- the selected provider reports `dense_storage_operands=True`.
+- input and output are non-aliasing, Program-owned Ndarrays, dense fields, or
+  explicit `DenseNdarrayView` objects;
+- dtype and scalar extent exactly match the operator spaces;
+- each operand is either compact and scalar-linearizable or a rank-one scalar
+  positive-stride view; and
+- the provider reports `dense_storage_operands=True`, plus
+  `dense_storage_affine_operands=True` for a strided operand.
 
-The current provider matrix is:
+The qualified provider matrix is:
 
-| LinearOperator provider | CPU | CUDA | Vulkan |
-| --- | --- | --- | --- |
-| Compiled Taichi kernel | Direct | Direct | Direct |
-| Fixed native CSR/BSR | Direct | Direct | Device staged |
-| Compiled Graph | Device staged | Device staged | Device staged |
-| `SolvePlan.solve()` vector boundary | Device staged | Device staged | Device staged |
+| LinearOperator consumer | Compact runtime storage | Rank-one scalar positive stride |
+| --- | --- | --- |
+| Compiled Taichi kernel, CPU/CUDA/Vulkan | Direct | Direct |
+| Compiled Graph, CPU | Direct ordinary dispatch | Direct ordinary dispatch |
+| Compiled Graph, CUDA | Direct; capture/replay eligible | Direct ordinary fallback |
+| Compiled Graph, Vulkan | Direct command replay | Direct command replay |
+| Fixed native CSR/BSR, CPU/CUDA | Direct | Unsupported |
+| Fixed native CSR/BSR, Vulkan | Dense-field device staging | Unsupported |
+| `SolvePlan.solve()` dense field / `VectorView` | Device staged | Not applicable |
+| `SolvePlan.solve()` explicit `DenseNdarrayView` | Unsupported | Unsupported |
 
-Indexed views, padded/non-compact fields, generalized apply coefficients, and
-`out=None` use the established device-staging path. They never move vector
-values through the host. Query `operator.capabilities.dense_storage_operands`,
-`vector_io_capabilities()`, `VectorView.metadata`, and
-`operator.statistics()["vector_io"]` to distinguish a qualified candidate from
-the path that actually executed.
+Direct bindings do not allocate a scalar-vector staging buffer and do not copy
+payload values. CUDA Graph capture remains limited to compact mappings; affine
+Graph operands preserve zero-copy addressing through the documented ordinary
+fallback. An explicit `DenseNdarrayView` that is not accepted by the selected
+provider fails closed instead of being silently relaid out. Indexed
+`VectorView` objects and eligible noncanonical fields continue to use the
+existing device-staging path; payload values never pass through host arrays.
 
-Native algorithms use the same descriptor for dtype, shape, owner, offset,
-and record stride while retaining their provider-specific handles. Warm plan
-replay for the same objects reuses the native plan without rebuilding the
-descriptor.
+Query `operator.capabilities`, `vector_io_capabilities()`, storage-view
+metadata, and `operator.statistics()["vector_io"]` to distinguish eligibility
+from the path that executed. The telemetry reports direct field/view
+submissions, qualified operand metadata builds/reuses, and the last contiguous or affine execution mode.
 
 ## Lifetime and failure behavior
 
