@@ -52,6 +52,9 @@ struct SparseMatrixRuntimeStatistics {
   int provider_version_patch{-1};
   bool provider_bsr_descriptor_available{false};
   bool provider_generic_bsr_spmv_available{false};
+  bool provider_spmv_preprocess_available{false};
+  bool spmv_preprocess_active{false};
+  std::uint32_t spmv_preprocess_last_error{0};
   int rows{0};
   int cols{0};
   int nnz{0};
@@ -72,6 +75,9 @@ struct SparseMatrixRuntimeStatistics {
   std::uint64_t dense_vector_descriptor_creations{0};
   std::uint64_t dense_vector_descriptor_rebinds{0};
   std::uint64_t spmv_workspace_allocations{0};
+  std::uint64_t spmv_preprocess_builds{0};
+  std::uint64_t spmv_preprocess_reuses{0};
+  std::uint64_t spmv_preprocess_fallbacks{0};
   std::uint64_t resource_generations_published{0};
   std::uint64_t resource_generations_retired{0};
   std::uint64_t resource_generations_released{0};
@@ -1075,6 +1081,12 @@ class CuSparseMatrix : public SparseMatrix {
   void *spmv_buffer_{nullptr};
   size_t spmv_buffer_size_{0};
   bool spmv_buffer_initialized_{false};
+  bool spmv_preprocessed_{false};
+  bool spmv_preprocess_disabled_{false};
+  std::uint32_t spmv_preprocess_last_error_{0};
+  std::uint64_t spmv_preprocess_builds_{0};
+  std::uint64_t spmv_preprocess_reuses_{0};
+  std::uint64_t spmv_preprocess_fallbacks_{0};
 };
 
 // Internal CUDA-only prototype for already-compressed, square dense blocks.

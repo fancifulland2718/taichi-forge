@@ -258,6 +258,7 @@ struct CUSPARSEProviderCapabilities {
   int library_version_patch{-1};
   bool bsr_descriptor_available{false};
   bool generic_bsr_spmv_available{false};
+  bool spmv_preprocess_available{false};
 };
 
 class CUSPARSEDriver : protected CUDADriverBase {
@@ -286,6 +287,18 @@ class CUSPARSEDriver : protected CUDADriverBase {
                      cudaDataType,
                      cusparseOrder_t>
       cpCreateBsr;
+  CUDADriverFunction<cusparseHandle_t,
+                     cusparseOperation_t,
+                     const void *,
+                     cusparseSpMatDescr_t,
+                     cusparseDnVecDescr_t,
+                     const void *,
+                     cusparseDnVecDescr_t,
+                     cudaDataType,
+                     cusparseSpMVAlg_t,
+                     void *>
+      cpSpMVPreprocess;
+
 
   bool load_cusparse();
 

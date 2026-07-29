@@ -4426,6 +4426,12 @@ void export_lang(py::module &m) {
             stats.dense_vector_descriptor_rebinds;
         operations["spmv_workspace_allocations"] =
             stats.spmv_workspace_allocations;
+        operations["spmv_preprocess_builds"] =
+            stats.spmv_preprocess_builds;
+        operations["spmv_preprocess_reuses"] =
+            stats.spmv_preprocess_reuses;
+        operations["spmv_preprocess_fallbacks"] =
+            stats.spmv_preprocess_fallbacks;
         operations["resource_generations_published"] =
             stats.resource_generations_published;
         operations["resource_generations_retired"] =
@@ -4499,6 +4505,12 @@ void export_lang(py::module &m) {
             stats.provider_bsr_descriptor_available;
         provider["generic_bsr_spmv_available"] =
             stats.provider_generic_bsr_spmv_available;
+        provider["spmv_preprocess_available"] =
+            stats.provider_spmv_preprocess_available;
+        provider["spmv_preprocess_active"] =
+            stats.spmv_preprocess_active;
+        provider["spmv_preprocess_last_error"] =
+            stats.spmv_preprocess_last_error;
         provider["selected_storage_format"] = stats.storage_format;
         provider["capability_scope"] =
             "loaded_library_symbols_and_version_not_performance";

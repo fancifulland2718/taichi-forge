@@ -18,6 +18,7 @@
 #include "taichi/program/kernel.h"
 #include "taichi/program/linear_operator.h"
 #include "taichi/program/storage_view.h"
+#include "taichi/util/environ_config.h"
 
 #define BUILD(TYPE)                                                         \
   {                                                                         \
@@ -2881,6 +2882,9 @@ void CuSparseMatrix::reset_spmv_resources() {
   spmv_y_ptr_ = 0;
   spmv_buffer_size_ = 0;
   spmv_buffer_initialized_ = false;
+  spmv_preprocessed_ = false;
+  spmv_preprocess_disabled_ = false;
+  spmv_preprocess_last_error_ = 0;
 #endif
 }
 
@@ -3280,10 +3284,34 @@ void CuSparseMatrix::spmv(size_t dX, size_t dY, CUstream stream) {
   } else {
     record_spmv_plan_reuse();
   }
-  CUSPARSEDriver::get_instance().cpSpMV(
-      spmv_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matrix_,
-      spmv_vec_x_, &beta, spmv_vec_y_, CUDA_R_32F,
-      CUSPARSE_SPMV_CSR_ALG1, spmv_buffer_);
+  auto &cusparse = CUSPARSEDriver::get_instance();
+  const bool preprocess_enabled =
+      get_environ_config("TI_CUDA_CUSPARSE_SPMV_PREPROCESS", 1) != 0;
+  if (preprocess_enabled && cusparse.cpSpMVPreprocess.available() &&
+      !spmv_preprocess_disabled_) {
+    if (!spmv_preprocessed_) {
+      const auto preprocess_error = cusparse.cpSpMVPreprocess.call(
+          spmv_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matrix_,
+          spmv_vec_x_, &beta, spmv_vec_y_, CUDA_R_32F,
+          CUSPARSE_SPMV_CSR_ALG1, spmv_buffer_);
+      if (preprocess_error == 0) {
+        spmv_preprocessed_ = true;
+        spmv_preprocess_last_error_ = 0;
+        ++spmv_preprocess_builds_;
+      } else {
+        spmv_preprocess_disabled_ = true;
+        spmv_preprocess_last_error_ = preprocess_error;
+        ++spmv_preprocess_fallbacks_;
+      }
+    } else {
+      ++spmv_preprocess_reuses_;
+    }
+  } else {
+    ++spmv_preprocess_fallbacks_;
+  }
+  cusparse.cpSpMV(spmv_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha,
+                  matrix_, spmv_vec_x_, &beta, spmv_vec_y_, CUDA_R_32F,
+                  CUSPARSE_SPMV_CSR_ALG1, spmv_buffer_);
 #endif
 }
 
@@ -3300,6 +3328,13 @@ SparseMatrixRuntimeStatistics CuSparseMatrix::debug_runtime_statistics() const {
       provider.bsr_descriptor_available;
   result.provider_generic_bsr_spmv_available =
       provider.generic_bsr_spmv_available;
+  result.provider_spmv_preprocess_available =
+      provider.spmv_preprocess_available;
+  result.spmv_preprocess_active = spmv_preprocessed_;
+  result.spmv_preprocess_last_error = spmv_preprocess_last_error_;
+  result.spmv_preprocess_builds = spmv_preprocess_builds_;
+  result.spmv_preprocess_reuses = spmv_preprocess_reuses_;
+  result.spmv_preprocess_fallbacks = spmv_preprocess_fallbacks_;
   result.nnz = nnz_;
   result.pattern_reserved_bytes =
       (static_cast<std::uint64_t>(rows_) + 1 +

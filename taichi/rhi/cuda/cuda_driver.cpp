@@ -297,6 +297,11 @@ bool CUSPARSEDriver::load_cusparse() {
       loader_->load_function_optional("cusparseGetProperty"));
   cp_get_property_.set_lock(&lock_);
   cp_get_property_.set_names("cp_get_property_", "cusparseGetProperty");
+  cpSpMVPreprocess.set(
+      loader_->load_function_optional("cusparseSpMV_preprocess"));
+  cpSpMVPreprocess.set_lock(&lock_);
+  cpSpMVPreprocess.set_names("cpSpMVPreprocess", "cusparseSpMV_preprocess");
+
 
   capabilities_ = {};
   if (cp_get_property_.available()) {
@@ -319,6 +324,8 @@ bool CUSPARSEDriver::load_cusparse() {
   cpCreateBsr.set_lock(&lock_);
   cpCreateBsr.set_names("cpCreateBsr", "cusparseCreateBsr");
   capabilities_.bsr_descriptor_available = cpCreateBsr.available();
+  capabilities_.spmv_preprocess_available =
+      cpSpMVPreprocess.available();
   const auto version_at_least = [&](int major, int minor, int patch) {
     const auto actual = std::make_tuple(
         capabilities_.library_version_major,
