@@ -626,34 +626,52 @@ def test_solver_conditional_execution_capabilities_are_explicit():
         atol=1e-6,
     )
 
-    for capabilities in (
-        single.execution_capabilities(),
-        batched.execution_capabilities(),
-    ):
-        conditional = capabilities["device_convergent"]
-        assert not conditional["supported"]
-        assert not conditional["runtime_path_compiled"]
-        assert not conditional["provider_qualified"]
-        assert conditional["unsupported_reason"]
+    arch = impl.current_cfg().arch
+    single_capabilities = single.execution_capabilities()
+    batched_capabilities = batched.execution_capabilities()
+    for capabilities in (single_capabilities, batched_capabilities):
         assert not capabilities["automatic_policy_change"]
         assert not capabilities["explicit_request_fallback"]
-        assert not capabilities["execution_policies"][
-            "device_convergent"
-        ]
 
-    arch = impl.current_cfg().arch
-    conditional = single.execution_capabilities()["device_convergent"]
+    batched_conditional = batched_capabilities["device_convergent"]
+    assert not batched_conditional["supported"]
+    assert not batched_conditional["provider_qualified"]
+    assert batched_conditional["unsupported_reason"] == (
+        "solver_contract_not_qualified_for_device_convergent"
+    )
+
+    conditional = single_capabilities["device_convergent"]
     if arch == ti.cuda:
         assert conditional["primitive"] == "cuda_conditional_graph"
-        assert conditional["unsupported_reason"] == (
-            "cuda_conditional_graph_runtime_path_not_compiled"
-        )
+        cuda_conditional = single_capabilities[
+            "cuda_conditional_graph"
+        ]
+        assert cuda_conditional["minimum_driver_api_version"] == 12080
+        assert conditional["runtime_path_compiled"]
+        assert conditional["provider_qualified"]
+        if cuda_conditional["fully_available"]:
+            assert conditional["supported"]
+            assert conditional["unsupported_reason"] == "none"
+            assert single_capabilities["execution_policies"][
+                "device_convergent"
+            ]
+        else:
+            assert not conditional["supported"]
+            assert conditional["unsupported_reason"] != "none"
     elif arch == ti.vulkan:
+        assert not conditional["supported"]
+        assert conditional["rhi_primitive_compiled"]
+        assert not conditional["runtime_path_compiled"]
+        assert not conditional["provider_qualified"]
         assert conditional["primitive"] == "vulkan_dispatch_indirect"
         assert conditional["unsupported_reason"] == (
             "vulkan_stored_solver_indirect_dispatch_path_not_compiled"
         )
     else:
+        assert not conditional["supported"]
+        assert not conditional["rhi_primitive_compiled"]
+        assert not conditional["runtime_path_compiled"]
+        assert not conditional["provider_qualified"]
         assert conditional["primitive"] == "none"
         assert conditional["unsupported_reason"] == (
             "device_convergent_is_gpu_only"
@@ -667,15 +685,34 @@ def test_solver_conditional_execution_capabilities_are_explicit():
         batched.statistics()["execution_capabilities"]
         == batched.execution_capabilities()
     )
-    with pytest.raises(
-        RuntimeError, match="unsupported; no fallback was performed"
-    ):
-        experimental.SolvePlan(
+    if conditional["supported"]:
+        direct_conditional = experimental.SolvePlan(
             operator,
             max_iterations=4,
             atol=1e-6,
             execution_policy="device_convergent",
         )
+        direct_result = direct_conditional.solve(
+            _vector(np.arange(1, 9, dtype=np.float32))
+        )
+        assert direct_result.converged
+        direct_stats = direct_conditional.statistics()
+        assert direct_stats["identity"]["bounded_control_path"] == (
+            "cuda_conditional_graph"
+        )
+        assert direct_stats["operations"][
+            "last_convergence_observation_boundaries"
+        ] == [0, direct_result.iterations]
+    else:
+        with pytest.raises(
+            RuntimeError, match="unsupported; no fallback was performed"
+        ):
+            experimental.SolvePlan(
+                operator,
+                max_iterations=4,
+                atol=1e-6,
+                execution_policy="device_convergent",
+            )
     with pytest.raises(
         RuntimeError, match="unsupported; no fallback was performed"
     ):

@@ -1,3 +1,5 @@
+import threading
+
 import numpy as np
 import pytest
 
@@ -227,6 +229,458 @@ def test_experimental_stored_jacobi_pcg():
     assert stats["identity"]["preconditioner_method"] == "jacobi"
     assert stats["operations"]["solve_calls"] == 2
     assert stats["operations"]["workspace_reuses"] == 1
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_experimental_bounded_convergent_stored_cg_contract():
+    experimental = ti.linalg.experimental
+    size = 24
+    dense = np.diag(np.full(size, 3.0, dtype=np.float32))
+    dense += np.diag(np.full(size - 1, -1.0, dtype=np.float32), 1)
+    dense += np.diag(np.full(size - 1, -1.0, dtype=np.float32), -1)
+    matrix = _fixed_csr(dense)
+    operator = ti.linalg.aslinearoperator(
+        matrix, traits=ti.linalg.OperatorTraits.spd()
+    )
+    exact = np.sin(np.linspace(0.1, 2.4, size, dtype=np.float32))
+    rhs = _vector(dense @ exact)
+    plan = experimental.SolvePlan(
+        operator,
+        method="cg",
+        max_iterations=64,
+        atol=1e-5,
+        execution_policy="bounded_convergent",
+        check_interval=16,
+        bounded_mode="portable",
+    )
+
+    capabilities = plan.execution_capabilities()
+    bounded = capabilities["bounded_convergent"]
+    assert bounded["supported"]
+    assert capabilities["execution_policies"]["bounded_convergent"]
+    assert bounded["chunk_schedule"] == (1, 1, 2, 4, 8, 16)
+
+    first = plan.solve(rhs)
+    first_solution = first.solution.to_numpy().copy()
+    second = plan.solve(rhs)
+    assert first.converged and second.converged
+    assert first.iterations == second.iterations
+    assert first.solution is not second.solution
+    np.testing.assert_allclose(first.solution.to_numpy(), first_solution)
+    np.testing.assert_allclose(
+        second.solution.to_numpy(), exact, rtol=3e-3, atol=3e-3
+    )
+    stats = plan.statistics()
+    identity = stats["identity"]
+    operations = stats["operations"]
+    resources = stats["resources"]
+    default_binding = stats["default_solution_binding"]
+    assert not default_binding["enabled"]
+    assert not default_binding["workspace_allocated"]
+    assert default_binding["workspace_builds"] == 0
+    assert default_binding["workspace_reuses"] == 0
+    assert default_binding["result_copies"] == 0
+    assert default_binding["return_ownership"] == "independent_result"
+    assert default_binding["disabled_reason"] == (
+        "independent_result_requires_allocation"
+    )
+    assert default_binding["fast_path"] == "pass_explicit_out"
+    assert identity["requested_solver_execution_policy"] == (
+        "bounded_convergent"
+    )
+    assert identity["bounded_mode"] == "portable"
+    assert not identity["bounded_native_upgrade_used"]
+    assert resources["solver_replay_opaque_bytes"] is None
+
+    arch = impl.current_cfg().arch
+    if arch == ti.cpu:
+        assert bounded["primitive"] == "native_cpu_solver_loop"
+        assert identity["solver_execution_policy"] == (
+            "host_each_iteration"
+        )
+        assert identity["bounded_control_path"] == "native_cpu_solver_loop"
+        assert operations["solver_chunk_submissions"] == 0
+        assert operations["convergence_observations"] == 0
+        assert operations["last_logical_iterations"] == second.iterations
+        assert operations["last_executed_iterations"] == second.iterations
+        assert not operations[
+            "last_convergence_observation_boundaries"
+        ]
+    else:
+        expected_primitive = (
+            "cuda_graph_chunked_host_check"
+            if arch == ti.cuda
+            else "vulkan_command_chunked_host_check"
+        )
+        assert bounded["primitive"] == expected_primitive
+        assert identity["solver_execution_policy"] == (
+            "host_check_every_k"
+        )
+        assert identity["bounded_control_path"] == expected_primitive
+        assert identity["bounded_chunk_limit"] == 16
+        assert "1,1,2,4,8,16" in identity["bounded_chunk_schedule"]
+        assert operations["solver_chunk_submissions"] > 0
+        assert operations["convergence_observations"] == (
+            operations["solver_chunk_submissions"]
+            + operations["solve_calls"]
+        )
+        assert operations["executed_iterations"] >= (
+            operations["logical_iterations"]
+        )
+        assert operations["wasted_iterations"] <= 30
+        assert identity["solver_graph_enabled"]
+        assert resources["solver_replay_executable_count"] > 0
+        assert operations["last_logical_iterations"] == second.iterations
+        assert operations["last_executed_iterations"] >= second.iterations
+        boundaries = operations[
+            "last_convergence_observation_boundaries"
+        ]
+        assert boundaries[0] == 0
+        assert boundaries[-1] == operations["last_executed_iterations"]
+        assert all(
+            left < right for left, right in zip(boundaries, boundaries[1:])
+        )
+        assert all(
+            right - left <= identity["bounded_chunk_limit"]
+            for left, right in zip(boundaries, boundaries[1:])
+        )
+        if arch == ti.vulkan:
+            assert identity["control_readback_strategy"] == (
+                "batched_rhi_readback"
+            )
+            assert operations["host_readback_batches"] == operations[
+                "host_synchronizations"
+            ]
+            assert operations["host_readback_batches"] < operations[
+                "host_scalar_readbacks"
+            ]
+
+    if arch == ti.cuda and bounded["native_upgrade_available"]:
+        native_plan = experimental.SolvePlan(
+            operator,
+            method="cg",
+            max_iterations=64,
+            atol=1e-5,
+            execution_policy="bounded_convergent",
+            check_interval=16,
+            bounded_mode="native_required",
+        )
+        native_out = ti.ndarray(ti.f32, shape=size)
+        native_result = native_plan.solve(rhs, out=native_out)
+        assert native_result.converged
+        native_stats = native_plan.statistics()
+        native_identity = native_stats["identity"]
+        native_operations = native_stats["operations"]
+        assert native_identity["bounded_native_upgrade_used"]
+        assert native_identity["solver_execution_policy"] == (
+            "device_convergent"
+        )
+        assert native_identity["bounded_control_path"] == (
+            "cuda_conditional_graph"
+        )
+        assert native_operations["last_logical_iterations"] == (
+            native_result.iterations
+        )
+        assert native_operations["last_executed_iterations"] == (
+            native_result.iterations
+        )
+        assert native_operations[
+            "last_convergence_observation_boundaries"
+        ] == [0, native_result.iterations]
+        assert native_stats["resources"][
+            "solver_replay_executable_count"
+        ] == 1
+
+        updated_dense = 1.25 * dense
+        operator.update_numeric(_vector(updated_dense.reshape(-1)))
+        rebound_result = native_plan.solve(
+            _vector(updated_dense @ exact), out=native_out
+        )
+        assert rebound_result.converged
+        np.testing.assert_allclose(
+            rebound_result.solution.to_numpy(),
+            exact,
+            rtol=3e-3,
+            atol=3e-3,
+        )
+        rebound_stats = native_plan.statistics()
+        assert rebound_stats["operations"]["solver_chunk_builds"] == 1
+        assert rebound_stats["operations"]["solver_chunk_rebinds"] >= 1
+        assert rebound_stats["operations"][
+            "last_logical_iterations"
+        ] == rebound_result.iterations
+        assert rebound_stats["operations"][
+            "last_executed_iterations"
+        ] == rebound_result.iterations
+    else:
+        with pytest.raises(
+            RuntimeError, match="native_required.*unsupported"
+        ):
+            experimental.SolvePlan(
+                operator,
+                method="cg",
+                max_iterations=8,
+                atol=1e-5,
+                execution_policy="bounded_convergent",
+                bounded_mode="native_required",
+            )
+
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_batched_control_readback_disable_fallback(monkeypatch):
+    monkeypatch.setenv("TI_VULKAN_SOLVER_BATCHED_READBACK", "0")
+    size = 24
+    dense = np.diag(np.full(size, 3.0, dtype=np.float32))
+    dense += np.diag(np.full(size - 1, -1.0, dtype=np.float32), 1)
+    dense += np.diag(np.full(size - 1, -1.0, dtype=np.float32), -1)
+    operator = ti.linalg.aslinearoperator(
+        _fixed_csr(dense), traits=ti.linalg.OperatorTraits.spd()
+    )
+    exact = np.sin(np.linspace(0.1, 2.4, size, dtype=np.float32))
+    plan = ti.linalg.experimental.SolvePlan(
+        operator,
+        method="cg",
+        max_iterations=64,
+        atol=1e-5,
+        execution_policy="bounded_convergent",
+        check_interval=16,
+        bounded_mode="portable",
+    )
+    output = ti.ndarray(ti.f32, shape=size)
+    result = plan.solve(_vector(dense @ exact), out=output)
+
+    assert result.converged
+    assert result.iterations < 64
+    np.testing.assert_allclose(output.to_numpy(), exact, rtol=3e-3, atol=3e-3)
+    stats = plan.statistics()
+    identity = stats["identity"]
+    operations = stats["operations"]
+    assert identity["control_readback_strategy"] == (
+        "per_scalar_rhi_readback"
+    )
+    assert operations["host_readback_batches"] == operations[
+        "host_scalar_readbacks"
+    ]
+    assert operations["host_synchronizations"] == (
+        operations["host_readback_batches"]
+        + operations["convergence_observations"]
+        + operations["solve_calls"]
+    )
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_conditional_graph_runtime_disable_fallback(monkeypatch):
+    experimental = ti.linalg.experimental
+    size = 24
+    dense = np.diag(np.full(size, 3.0, dtype=np.float32))
+    dense += np.diag(np.full(size - 1, -1.0, dtype=np.float32), 1)
+    dense += np.diag(np.full(size - 1, -1.0, dtype=np.float32), -1)
+    operator = ti.linalg.aslinearoperator(
+        _fixed_csr(dense), traits=ti.linalg.OperatorTraits.spd()
+    )
+    exact = np.sin(np.linspace(0.1, 2.4, size, dtype=np.float32))
+    rhs = _vector(dense @ exact)
+    probe = experimental.SolvePlan(
+        operator, method="cg", max_iterations=64, atol=1e-5
+    )
+    if not probe.execution_capabilities()["device_convergent"][
+        "supported"
+    ]:
+        pytest.skip("CUDA conditional Graph is unavailable on this driver")
+
+    monkeypatch.setenv("TI_CUDA_SOLVER_CONDITIONAL_GRAPH", "0")
+    fallback = experimental.SolvePlan(
+        operator,
+        method="cg",
+        max_iterations=64,
+        atol=1e-5,
+        execution_policy="bounded_convergent",
+        bounded_mode="auto",
+    )
+    fallback_result = fallback.solve(rhs)
+    assert fallback_result.converged
+    fallback_stats = fallback.statistics()
+    fallback_identity = fallback_stats["identity"]
+    fallback_operations = fallback_stats["operations"]
+    assert not fallback_identity["bounded_native_upgrade_used"]
+    assert fallback_identity["bounded_control_path"] == (
+        "cuda_graph_chunked_host_check_fallback"
+    )
+    assert fallback_identity["bounded_native_upgrade_unavailable_reason"] == (
+        "cuda_conditional_graph_disabled"
+    )
+    assert fallback_operations["last_logical_iterations"] == (
+        fallback_result.iterations
+    )
+    assert fallback_operations["last_executed_iterations"] >= (
+        fallback_result.iterations
+    )
+    assert fallback_operations[
+        "last_convergence_observation_boundaries"
+    ][-1] == fallback_operations["last_executed_iterations"]
+
+    required = experimental.SolvePlan(
+        operator,
+        method="cg",
+        max_iterations=64,
+        atol=1e-5,
+        execution_policy="bounded_convergent",
+        bounded_mode="native_required",
+    )
+    with pytest.raises(
+        RuntimeError,
+        match="conditional Graph path is unavailable: "
+        "cuda_conditional_graph_disabled",
+    ):
+        required.solve(rhs)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_conditional_graph_jacobi_pcg_early_stop():
+    size = 32
+    dense = np.diag(np.full(size, 3.0, dtype=np.float32))
+    dense += np.diag(np.full(size - 1, -1.0, dtype=np.float32), 1)
+    dense += np.diag(np.full(size - 1, -1.0, dtype=np.float32), -1)
+    operator = ti.linalg.aslinearoperator(
+        _fixed_csr(dense), traits=ti.linalg.OperatorTraits.spd()
+    )
+    exact = np.sin(np.linspace(0.1, 2.4, size, dtype=np.float32))
+    plan = ti.linalg.experimental.SolvePlan(
+        operator,
+        method="pcg",
+        preconditioner="jacobi",
+        max_iterations=64,
+        atol=1e-5,
+        execution_policy="bounded_convergent",
+        bounded_mode="auto",
+    )
+    if not plan.execution_capabilities()["device_convergent"]["supported"]:
+        pytest.skip("CUDA conditional Graph is unavailable on this driver")
+    result = plan.solve(_vector(dense @ exact))
+    assert result.converged
+    assert result.iterations < 64
+    np.testing.assert_allclose(
+        result.solution.to_numpy(), exact, rtol=3e-3, atol=3e-3
+    )
+    stats = plan.statistics()
+    assert stats["identity"]["method"] == "pcg_jacobi"
+    assert stats["identity"]["bounded_control_path"] == (
+        "cuda_conditional_graph"
+    )
+    assert stats["operations"]["last_logical_iterations"] == (
+        result.iterations
+    )
+    assert stats["operations"]["last_executed_iterations"] == (
+        result.iterations
+    )
+    assert stats["operations"][
+        "last_convergence_observation_boundaries"
+    ] == [0, result.iterations]
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_conditional_graph_independent_plans_concurrent_replay():
+    experimental = ti.linalg.experimental
+    size = 64
+    dense = np.diag(np.full(size, 3.0, dtype=np.float32))
+    dense += np.diag(np.full(size - 1, -1.0, dtype=np.float32), 1)
+    dense += np.diag(np.full(size - 1, -1.0, dtype=np.float32), -1)
+    operator = ti.linalg.aslinearoperator(
+        _fixed_csr(dense), traits=ti.linalg.OperatorTraits.spd()
+    )
+    exact = np.sin(np.linspace(0.1, 2.4, size, dtype=np.float32))
+    rhs = _vector(dense @ exact)
+    plans = [
+        experimental.SolvePlan(
+            operator,
+            method="cg",
+            max_iterations=64,
+            atol=1e-5,
+            execution_policy="bounded_convergent",
+            bounded_mode="auto",
+        )
+        for _ in range(2)
+    ]
+    if not plans[0].execution_capabilities()["device_convergent"][
+        "supported"
+    ]:
+        pytest.skip("CUDA conditional Graph is unavailable on this driver")
+    outputs = [ti.ndarray(ti.f32, shape=size) for _ in plans]
+    for plan, output in zip(plans, outputs):
+        assert plan.solve(rhs, out=output).converged
+
+    start = threading.Barrier(2)
+    failures = []
+    observed_iterations = [[], []]
+
+    def replay(index):
+        try:
+            start.wait(timeout=10)
+            for _ in range(4):
+                result = plans[index].solve(rhs, out=outputs[index])
+                assert result.converged
+                observed_iterations[index].append(result.iterations)
+        except BaseException as exc:
+            failures.append(exc)
+
+    threads = [threading.Thread(target=replay, args=(index,)) for index in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert all(not thread.is_alive() for thread in threads), "solve deadlocked"
+    if failures:
+        raise failures[0]
+    ti.sync()
+    for iterations, output, plan in zip(observed_iterations, outputs, plans):
+        assert len(iterations) == 4
+        assert len(set(iterations)) == 1
+        np.testing.assert_allclose(
+            output.to_numpy(), exact, rtol=3e-3, atol=3e-3
+        )
+        stats = plan.statistics()
+        assert stats["identity"]["bounded_control_path"] == (
+            "cuda_conditional_graph"
+        )
+        assert stats["resources"]["solver_replay_executable_count"] == 1
+        assert stats["operations"][
+            "last_convergence_observation_boundaries"
+        ] == [0, iterations[-1]]
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_bounded_convergent_respects_iteration_budget():
+    size = 24
+    dense = np.diag(np.full(size, 3.0, dtype=np.float32))
+    dense += np.diag(np.full(size - 1, -1.0, dtype=np.float32), 1)
+    dense += np.diag(np.full(size - 1, -1.0, dtype=np.float32), -1)
+    operator = ti.linalg.aslinearoperator(
+        _fixed_csr(dense), traits=ti.linalg.OperatorTraits.spd()
+    )
+    exact = np.sin(np.linspace(0.1, 2.4, size, dtype=np.float32))
+    plan = ti.linalg.experimental.SolvePlan(
+        operator,
+        method="cg",
+        max_iterations=3,
+        atol=1e-12,
+        execution_policy="bounded_convergent",
+        bounded_mode="auto",
+    )
+    result = plan.solve(_vector(dense @ exact))
+    assert not result.converged
+    assert result.reached_max_iterations
+    assert result.termination_reason == "max_iterations"
+    assert result.iterations == 3
+    operations = plan.statistics()["operations"]
+    assert operations["last_logical_iterations"] == 3
+    assert operations["last_executed_iterations"] == 3
+    boundaries = operations["last_convergence_observation_boundaries"]
+    if impl.current_cfg().arch == ti.cpu:
+        assert not boundaries
+    else:
+        assert boundaries[0] == 0
+        assert boundaries[-1] == 3
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

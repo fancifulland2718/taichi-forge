@@ -270,6 +270,27 @@ def test_solve_qualification_rejects_invalid_controls_and_shapes():
             rhs,
             expected_termination=("converged", "converged"),
         )
+    with pytest.raises(RuntimeError, match="must be bool"):
+        experimental.qualify_solve_plan(
+            plan, rhs, use_plan_default_output=1
+        )
+    output = ti.ndarray(ti.f32, shape=2)
+    with pytest.raises(RuntimeError, match="requires out=None"):
+        experimental.qualify_solve_plan(
+            plan,
+            rhs,
+            out=output,
+            use_plan_default_output=True,
+        )
+    native_default = experimental.qualify_solve_plan(
+        plan,
+        rhs,
+        reference=[1.0, 1.0],
+        use_plan_default_output=True,
+        warmup=0,
+        repetitions=2,
+    )
+    assert native_default.passed
     failed = experimental.qualify_solve_plan(
         plan,
         rhs,

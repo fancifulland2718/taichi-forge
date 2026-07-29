@@ -147,6 +147,7 @@ def test_sparse_matrix_operator_runtime_statistics():
     after_spmv = matrix._debug_runtime_stats()
     operations = after_spmv["operations"]
     resources = after_spmv["resources"]
+    provider = after_spmv["provider"]
     assert operations["spmv_calls"] == 2
     if identity["backend_family"] == "cpu":
         assert operations["spmv_plan_builds"] == 0
@@ -166,14 +167,74 @@ def test_sparse_matrix_operator_runtime_statistics():
         assert after_spmv["transfers"]["host_to_device_bytes"] == 0
         assert after_spmv["transfers"]["device_to_host_bytes"] == 0
         assert after_spmv["transfers"]["device_to_device_bytes"] > 0
+        if provider["spmv_preprocess_available"]:
+            assert provider["spmv_preprocess_active"]
+            assert provider["spmv_preprocess_last_error"] == 0
+            assert operations["spmv_preprocess_builds"] == 1
+            assert operations["spmv_preprocess_reuses"] == 1
+            assert operations["spmv_preprocess_fallbacks"] == 0
+        else:
+            assert not provider["spmv_preprocess_active"]
+            assert operations["spmv_preprocess_builds"] == 0
+            assert operations["spmv_preprocess_reuses"] == 0
+            assert operations["spmv_preprocess_fallbacks"] == 2
+
 
     values = ti.ndarray(dtype=ti.f32, shape=n)
     values.fill(2)
     matrix._update_values(values)
+    matrix.matrix.spmv(prog, x.arr, y.arr)
+    ti.sync()
+
+    import numpy as np
+
+    np.testing.assert_allclose(y.to_numpy(), np.full(n, 2.0, dtype=np.float32))
     updated = matrix._debug_runtime_stats()
     assert updated["identity"]["pattern_version"] == 1
     assert updated["identity"]["numeric_version"] == 2
     assert updated["operations"]["numeric_updates"] == 1
     assert updated["operations"]["numeric_update_bytes"] == n * 4
+    assert updated["operations"]["spmv_calls"] == 3
     if identity["backend_family"] == "cuda":
+        if provider["spmv_preprocess_available"]:
+            assert updated["operations"]["spmv_preprocess_builds"] == 1
+            assert updated["operations"]["spmv_preprocess_reuses"] == 2
+            assert updated["operations"]["spmv_preprocess_fallbacks"] == 0
+        else:
+            assert updated["operations"]["spmv_preprocess_builds"] == 0
+            assert updated["operations"]["spmv_preprocess_reuses"] == 0
+            assert updated["operations"]["spmv_preprocess_fallbacks"] == 3
         assert updated["transfers"]["device_to_device_bytes"] >= n * 4
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_spmv_preprocess_runtime_disable(monkeypatch):
+    monkeypatch.setenv("TI_CUDA_CUSPARSE_SPMV_PREPROCESS", "0")
+    n = 4
+    builder = ti.linalg.SparseMatrixBuilder(
+        n, n, max_num_triplets=n, dtype=ti.f32, storage_format="row_major"
+    )
+
+    @ti.kernel
+    def fill(matrix: ti.types.sparse_matrix_builder()):
+        for i in range(n):
+            matrix[i, i] += i + 1
+
+    fill(builder)
+    matrix = builder.build()
+    x = ti.ndarray(dtype=ti.f32, shape=n)
+    y = ti.ndarray(dtype=ti.f32, shape=n)
+    x.fill(1)
+    prog = ti.lang.impl.get_runtime().prog
+    matrix.matrix.spmv(prog, x.arr, y.arr)
+    matrix.matrix.spmv(prog, x.arr, y.arr)
+    ti.sync()
+
+    stats = matrix._debug_runtime_stats()
+    provider = stats["provider"]
+    operations = stats["operations"]
+    assert not provider["spmv_preprocess_active"]
+    assert provider["spmv_preprocess_last_error"] == 0
+    assert operations["spmv_preprocess_builds"] == 0
+    assert operations["spmv_preprocess_reuses"] == 0
+    assert operations["spmv_preprocess_fallbacks"] == 2
