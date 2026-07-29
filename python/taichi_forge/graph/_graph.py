@@ -1517,6 +1517,36 @@ def _cuda_while_upgrade_status(arch, mode):
     return False, reason
 
 
+def _cuda_branch_upgrade_status(arch, mode, kind):
+    if mode not in ("auto", "portable", "native_required"):
+        raise TaichiRuntimeError(
+            f"Graph {kind} lowering_mode must be auto, portable, or "
+            "native_required"
+        )
+    if mode == "portable":
+        return False, "forced_portable"
+    if arch != _ti_core.Arch.cuda:
+        if mode == "native_required":
+            raise TaichiRuntimeError(
+                f"Graph {kind} native_required mode needs CUDA"
+            )
+        return False, "not_cuda"
+    capabilities = dict(_ti_core.cuda_conditional_graph_capabilities())
+    if not capabilities["driver_version_eligible"]:
+        reason = "cuda_driver_api_version_below_12_8"
+    elif not capabilities["conditional_graph_symbols_loaded"]:
+        reason = "cuda_conditional_graph_symbols_not_loaded"
+    elif not capabilities.get("general_device_setter_lowering_compiled", False):
+        reason = "cuda_conditional_setter_lowering_not_compiled"
+    else:
+        return True, "eligible"
+    if mode == "native_required":
+        raise TaichiRuntimeError(
+            f"Graph {kind} native CUDA lowering unavailable: {reason}"
+        )
+    return False, reason
+
+
 def _compile_sequential_runtime_node(
     sequences,
     *,
@@ -2012,6 +2042,7 @@ class _CompiledIfGraphNode:
         *,
         predicate,
         control_inputs,
+        lowering_mode,
         name,
     ):
         if not isinstance(condition, Sequential) or condition._dispatch_count == 0:
@@ -2031,6 +2062,7 @@ class _CompiledIfGraphNode:
         self.name = name
         self.predicate = predicate
         self.control_inputs = tuple(control_inputs)
+        self.lowering_mode = lowering_mode
         required = {predicate, *self.control_inputs}
         missing = sorted(required.difference(condition._runtime_arg_names))
         if missing:
@@ -2053,6 +2085,25 @@ class _CompiledIfGraphNode:
                 (else_region,), name=f"{name}_else", region_kind="if_branch"
             )
         )
+        branch_sequences = (
+            (then_region,)
+            if else_region is None
+            else (then_region, else_region)
+        )
+        self._native_branches = _compile_sequential_runtime_node(
+            branch_sequences,
+            name=f"{name}_native_branches",
+            region_kind="if_branch",
+            region_kinds=("if_branch",) * len(branch_sequences),
+        )
+        self._native_branch_dispatch_counts = tuple(
+            region._dispatch_count for region in branch_sequences
+        )
+        arch = impl.current_cfg().arch
+        self._native_upgrade_eligible, self._native_upgrade_reason = (
+            _cuda_branch_upgrade_status(arch, lowering_mode, "if")
+        )
+        self._native_jit_cache = _ti_core.CompiledGraphJITCache()
         nodes = tuple(
             node for node in (self._condition, self._then, self._else) if node
         )
@@ -2111,11 +2162,66 @@ class _CompiledIfGraphNode:
             name=name,
         )
         self._last_report = None
+        self._pending_report = None
+
+    @property
+    def supports_native_submission(self):
+        return (
+            self.lowering_mode == "native_required"
+            and self._native_upgrade_eligible
+        )
+
+    def _run_native_branch(self, context):
+        predicate_object = context.runtime_args()[self.predicate]
+        predicate_ndarray = getattr(predicate_object, "arr", None)
+        if predicate_ndarray is None:
+            return False
+        return self._native_branches.compiled_graph.jit_run_conditional_cuda_cached(
+            context.compile_config(),
+            context.flattened_args(
+                self._native_branches.recording_runtime_arg_names
+            ),
+            self._native_jit_cache,
+            predicate_ndarray,
+            self._native_branch_dispatch_counts,
+            0,
+            -1,
+        )
+
+    def run_for_submission(self, context, temporaries=None):
+        if not self.supports_native_submission:
+            raise TaichiRuntimeError(
+                "Graph if submission requires native_required CUDA lowering"
+            )
+        self._last_report = None
+        self._pending_report = None
+        self._condition.run(context)
+        if not self._run_native_branch(context):
+            raise TaichiRuntimeError(
+                "Native CUDA Graph if submission became unavailable; "
+                "synchronous fallback is disabled"
+            )
 
     def run(self, context, temporaries=None):
         self._condition.run(context)
         runtime_args = context.runtime_args()
         arch = impl.current_cfg().arch
+        native_selected = False
+        native_reason = self._native_upgrade_reason
+        if self._native_upgrade_eligible:
+            native_selected = self._run_native_branch(context)
+            native_reason = (
+                "selected" if native_selected else "conditional_capture_fallback"
+            )
+            if not native_selected and self.lowering_mode == "native_required":
+                raise TaichiRuntimeError(
+                    f"Graph if native CUDA lowering failed: {native_reason}"
+                )
+        if native_selected:
+            self._last_report = None
+            self._pending_report = (runtime_args[self.predicate], arch)
+            return
+        self._pending_report = None
         observed, byte_count = _control_scalar_values(
             [runtime_args[self.predicate]],
             [self.predicate],
@@ -2125,11 +2231,13 @@ class _CompiledIfGraphNode:
         if predicate_value != 0:
             selected = "then"
             selected_dispatches = self.then_dispatch_count
-            self._then.run(context)
+            if not native_selected:
+                self._then.run(context)
         elif self._else is not None:
             selected = "else"
             selected_dispatches = self.else_dispatch_count
-            self._else.run(context)
+            if not native_selected:
+                self._else.run(context)
         else:
             selected = "none"
             selected_dispatches = 0
@@ -2137,7 +2245,11 @@ class _CompiledIfGraphNode:
             name=self.name,
             backend=_backend_name(_ti_core.arch_name(arch)),
             kind="if",
-            lowering=_structured_host_lowering(arch),
+            lowering=(
+                "cuda_conditional_graph"
+                if native_selected
+                else _structured_host_lowering(arch)
+            ),
             selector_resource=self.predicate,
             selector_value=predicate_value,
             selected_branch=selected,
@@ -2148,7 +2260,44 @@ class _CompiledIfGraphNode:
             control_inputs=self.control_inputs,
         )
 
+    def materialize_pending_report(self):
+        if self._pending_report is None:
+            return
+        predicate_object, arch = self._pending_report
+        observed, byte_count = _control_scalar_values(
+            [predicate_object],
+            [self.predicate],
+            use_transfer_planner=_control_transfer_uses_planner(arch),
+        )
+        predicate_value = observed[0]
+        if predicate_value != 0:
+            selected = "then"
+            selected_dispatches = self.then_dispatch_count
+        elif self._else is not None:
+            selected = "else"
+            selected_dispatches = self.else_dispatch_count
+        else:
+            selected = "none"
+            selected_dispatches = 0
+        self._last_report = GraphBranchReport(
+            name=self.name,
+            backend=_backend_name(_ti_core.arch_name(arch)),
+            kind="if",
+            lowering="cuda_conditional_graph",
+            selector_resource=self.predicate,
+            selector_value=predicate_value,
+            selected_branch=selected,
+            observation_scalar_count=1,
+            device_to_host_bytes=byte_count,
+            condition_dispatch_count=self.condition_dispatch_count,
+            branch_dispatch_count=selected_dispatches,
+            control_inputs=self.control_inputs,
+        )
+        self._pending_report = None
+
     def invalidate_runtime(self):
+        self._pending_report = None
+        self._native_jit_cache.clear_runtime_state()
         self._condition.invalidate_runtime()
         self._then.invalidate_runtime()
         if self._else is not None:
@@ -2159,7 +2308,10 @@ class _CompiledIfGraphNode:
         nodes = tuple(
             node for node in (self._condition, self._then, self._else) if node
         )
-        return tuple(node.debug_graph_stats for node in nodes)
+        child_stats = tuple(node.debug_graph_stats for node in nodes)
+        if not self._native_upgrade_eligible:
+            return child_stats
+        return (self._native_jit_cache._debug_graph_stats(), *child_stats)
 
     @property
     def last_report(self):
@@ -2174,7 +2326,8 @@ class _CompiledIfGraphNode:
             "then_dispatch_count": self.then_dispatch_count,
             "else_dispatch_count": self.else_dispatch_count,
             "control_input_count": len(self.control_inputs),
-            "lowering": _structured_host_lowering(impl.current_cfg().arch),
+            "lowering_mode": self.lowering_mode,
+            "native_upgrade_eligible": self._native_upgrade_eligible,
         }
 
 
@@ -2191,6 +2344,7 @@ class _CompiledSwitchGraphNode:
         *,
         selector,
         control_inputs,
+        lowering_mode,
         name,
     ):
         if not isinstance(condition, Sequential) or condition._dispatch_count == 0:
@@ -2215,6 +2369,7 @@ class _CompiledSwitchGraphNode:
         self.name = name
         self.selector = selector
         self.control_inputs = tuple(control_inputs)
+        self.lowering_mode = lowering_mode
         required = {selector, *self.control_inputs}
         missing = sorted(required.difference(condition._runtime_arg_names))
         if missing:
@@ -2244,6 +2399,26 @@ class _CompiledSwitchGraphNode:
                 region_kind="switch_branch",
             )
         )
+        branch_sequences = branches
+        if default_region is not None:
+            branch_sequences = (*branch_sequences, default_region)
+        self._native_branches = _compile_sequential_runtime_node(
+            branch_sequences,
+            name=f"{name}_native_branches",
+            region_kind="switch_branch",
+            region_kinds=("switch_branch",) * len(branch_sequences),
+        )
+        self._native_branch_dispatch_counts = tuple(
+            region._dispatch_count for region in branch_sequences
+        )
+        self._native_default_branch = (
+            -1 if default_region is None else len(branches)
+        )
+        arch = impl.current_cfg().arch
+        self._native_upgrade_eligible, self._native_upgrade_reason = (
+            _cuda_branch_upgrade_status(arch, lowering_mode, "switch")
+        )
+        self._native_jit_cache = _ti_core.CompiledGraphJITCache()
         nodes = (self._condition, *self._branches)
         if self._default is not None:
             nodes = (*nodes, self._default)
@@ -2305,11 +2480,66 @@ class _CompiledSwitchGraphNode:
             name=name,
         )
         self._last_report = None
+        self._pending_report = None
+
+    @property
+    def supports_native_submission(self):
+        return (
+            self.lowering_mode == "native_required"
+            and self._native_upgrade_eligible
+        )
+
+    def _run_native_branch(self, context):
+        selector_object = context.runtime_args()[self.selector]
+        selector_ndarray = getattr(selector_object, "arr", None)
+        if selector_ndarray is None:
+            return False
+        return self._native_branches.compiled_graph.jit_run_conditional_cuda_cached(
+            context.compile_config(),
+            context.flattened_args(
+                self._native_branches.recording_runtime_arg_names
+            ),
+            self._native_jit_cache,
+            selector_ndarray,
+            self._native_branch_dispatch_counts,
+            2,
+            self._native_default_branch,
+        )
+
+    def run_for_submission(self, context, temporaries=None):
+        if not self.supports_native_submission:
+            raise TaichiRuntimeError(
+                "Graph switch submission requires native_required CUDA lowering"
+            )
+        self._last_report = None
+        self._pending_report = None
+        self._condition.run(context)
+        if not self._run_native_branch(context):
+            raise TaichiRuntimeError(
+                "Native CUDA Graph switch submission became unavailable; "
+                "synchronous fallback is disabled"
+            )
 
     def run(self, context, temporaries=None):
         self._condition.run(context)
         runtime_args = context.runtime_args()
         arch = impl.current_cfg().arch
+        native_selected = False
+        native_reason = self._native_upgrade_reason
+        if self._native_upgrade_eligible:
+            native_selected = self._run_native_branch(context)
+            native_reason = (
+                "selected" if native_selected else "conditional_capture_fallback"
+            )
+            if not native_selected and self.lowering_mode == "native_required":
+                raise TaichiRuntimeError(
+                    f"Graph switch native CUDA lowering failed: {native_reason}"
+                )
+        if native_selected:
+            self._last_report = None
+            self._pending_report = (runtime_args[self.selector], arch)
+            return
+        self._pending_report = None
         observed, byte_count = _control_scalar_values(
             [runtime_args[self.selector]],
             [self.selector],
@@ -2319,11 +2549,13 @@ class _CompiledSwitchGraphNode:
         if 0 <= selector_value < len(self._branches):
             selected = f"case_{selector_value}"
             selected_dispatches = self.branch_dispatch_counts[selector_value]
-            self._branches[selector_value].run(context)
+            if not native_selected:
+                self._branches[selector_value].run(context)
         elif self._default is not None:
             selected = "default"
             selected_dispatches = self.default_dispatch_count
-            self._default.run(context)
+            if not native_selected:
+                self._default.run(context)
         else:
             selected = "none"
             selected_dispatches = 0
@@ -2331,7 +2563,11 @@ class _CompiledSwitchGraphNode:
             name=self.name,
             backend=_backend_name(_ti_core.arch_name(arch)),
             kind="switch",
-            lowering=_structured_host_lowering(arch),
+            lowering=(
+                "cuda_conditional_graph"
+                if native_selected
+                else _structured_host_lowering(arch)
+            ),
             selector_resource=self.selector,
             selector_value=selector_value,
             selected_branch=selected,
@@ -2342,7 +2578,44 @@ class _CompiledSwitchGraphNode:
             control_inputs=self.control_inputs,
         )
 
+    def materialize_pending_report(self):
+        if self._pending_report is None:
+            return
+        selector_object, arch = self._pending_report
+        observed, byte_count = _control_scalar_values(
+            [selector_object],
+            [self.selector],
+            use_transfer_planner=_control_transfer_uses_planner(arch),
+        )
+        selector_value = int(observed[0])
+        if 0 <= selector_value < len(self._branches):
+            selected = f"case_{selector_value}"
+            selected_dispatches = self.branch_dispatch_counts[selector_value]
+        elif self._default is not None:
+            selected = "default"
+            selected_dispatches = self.default_dispatch_count
+        else:
+            selected = "none"
+            selected_dispatches = 0
+        self._last_report = GraphBranchReport(
+            name=self.name,
+            backend=_backend_name(_ti_core.arch_name(arch)),
+            kind="switch",
+            lowering="cuda_conditional_graph",
+            selector_resource=self.selector,
+            selector_value=selector_value,
+            selected_branch=selected,
+            observation_scalar_count=1,
+            device_to_host_bytes=byte_count,
+            condition_dispatch_count=self.condition_dispatch_count,
+            branch_dispatch_count=selected_dispatches,
+            control_inputs=self.control_inputs,
+        )
+        self._pending_report = None
+
     def invalidate_runtime(self):
+        self._pending_report = None
+        self._native_jit_cache.clear_runtime_state()
         self._condition.invalidate_runtime()
         for branch in self._branches:
             branch.invalidate_runtime()
@@ -2354,7 +2627,10 @@ class _CompiledSwitchGraphNode:
         nodes = (self._condition, *self._branches)
         if self._default is not None:
             nodes = (*nodes, self._default)
-        return tuple(node.debug_graph_stats for node in nodes)
+        child_stats = tuple(node.debug_graph_stats for node in nodes)
+        if not self._native_upgrade_eligible:
+            return child_stats
+        return (self._native_jit_cache._debug_graph_stats(), *child_stats)
 
     @property
     def last_report(self):
@@ -2369,7 +2645,8 @@ class _CompiledSwitchGraphNode:
             "branch_dispatch_counts": self.branch_dispatch_counts,
             "default_dispatch_count": self.default_dispatch_count,
             "control_input_count": len(self.control_inputs),
-            "lowering": _structured_host_lowering(impl.current_cfg().arch),
+            "lowering_mode": self.lowering_mode,
+            "native_upgrade_eligible": self._native_upgrade_eligible,
         }
 
 
@@ -2630,8 +2907,7 @@ class _GraphSpec:
             )
         ]
         return bool(structured_nodes) and all(
-            isinstance(node, _CompiledWhileGraphNode)
-            and node.supports_native_submission
+            node.supports_native_submission
             for node in structured_nodes
         )
 
@@ -2918,7 +3194,14 @@ class _GraphExecutable:
             )
         try:
             for node in self.spec.nodes:
-                if isinstance(node, _CompiledWhileGraphNode):
+                if isinstance(
+                    node,
+                    (
+                        _CompiledWhileGraphNode,
+                        _CompiledIfGraphNode,
+                        _CompiledSwitchGraphNode,
+                    ),
+                ):
                     node.run_for_submission(context, temporaries)
                 else:
                     node.run(context, temporaries)
@@ -3648,6 +3931,7 @@ class GraphBuilder:
         predicate,
         control_inputs=(),
         else_region=None,
+        lowering_mode="auto",
         name="if",
     ):
         """Append a structured conditional region."""
@@ -3659,6 +3943,7 @@ class GraphBuilder:
                 else_region,
                 predicate=self._control_name(predicate, "if predicate"),
                 control_inputs=self._control_names(control_inputs, "if control_inputs"),
+                lowering_mode=lowering_mode,
                 name=name,
             )
         )
@@ -3672,6 +3957,7 @@ class GraphBuilder:
         selector,
         control_inputs=(),
         default_region=None,
+        lowering_mode="auto",
         name="switch",
     ):
         """Append a zero-based structured switch region."""
@@ -3685,6 +3971,7 @@ class GraphBuilder:
                 control_inputs=self._control_names(
                     control_inputs, "switch control_inputs"
                 ),
+                lowering_mode=lowering_mode,
                 name=name,
             )
         )
@@ -4109,6 +4396,10 @@ class Graph:
                     "for explicit terminal state, or Graph.run() for a "
                     "synchronous control-flow report."
                 )
+            for node in self._spec.nodes:
+                materialize = getattr(node, "materialize_pending_report", None)
+                if materialize is not None:
+                    materialize()
             return tuple(
                 node.last_report
                 for node in self._spec.nodes

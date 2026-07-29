@@ -3374,7 +3374,11 @@ void export_lang(py::module &m) {
                           aot::CompiledGraphJITCache *cache,
                           Ndarray *bounded_predicate = nullptr,
                           int bounded_max_iterations = 0,
-                          bool continue_while_nonzero = true) -> bool {
+                          bool continue_while_nonzero = true,
+                          Ndarray *conditional_selector = nullptr,
+                          const std::vector<int> *branch_dispatch_counts = nullptr,
+                          int conditional_type = -1,
+                          int default_branch = -1) -> bool {
         std::unordered_map<std::string, aot::IValue> args;
         auto insert_scalar_arg = [&args](std::string arg_name,
                                          DataType expected_dtype,
@@ -3523,6 +3527,13 @@ void export_lang(py::module &m) {
           return self->jit_run_bounded_cuda_cached(
               compile_config, args, *cache, bounded_predicate,
               bounded_max_iterations, continue_while_nonzero);
+        }
+        if (conditional_selector != nullptr) {
+          TI_ASSERT(cache != nullptr);
+          TI_ASSERT(branch_dispatch_counts != nullptr);
+          return self->jit_run_conditional_cuda_cached(
+              compile_config, args, *cache, conditional_selector,
+              *branch_dispatch_counts, conditional_type, default_branch);
         }
         if (cache) {
           self->jit_run_cached(compile_config, args, *cache);
@@ -3781,7 +3792,23 @@ void export_lang(py::module &m) {
            py::arg("compile_config"), py::arg("args"),
            py::arg("cache"), py::arg("predicate"),
            py::arg("max_iterations"),
-           py::arg("continue_while_nonzero"));
+           py::arg("continue_while_nonzero"))
+      .def("jit_run_conditional_cuda_cached",
+           [jit_run_graph](aot::CompiledGraph *self,
+                           const CompileConfig &compile_config,
+                           const py::dict &pyargs,
+                           aot::CompiledGraphJITCache &cache,
+                           Ndarray &selector,
+                           const std::vector<int> &branch_dispatch_counts,
+                           int conditional_type, int default_branch) {
+             return jit_run_graph(
+                 self, compile_config, pyargs, &cache, nullptr, 0, true,
+                 &selector, &branch_dispatch_counts, conditional_type,
+                 default_branch);
+           },
+           py::arg("compile_config"), py::arg("args"), py::arg("cache"),
+           py::arg("selector"), py::arg("branch_dispatch_counts"),
+           py::arg("conditional_type"), py::arg("default_branch") = -1);
 
   py::class_<Kernel>(m, "Kernel")
       .def("no_activate",

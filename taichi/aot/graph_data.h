@@ -519,6 +519,14 @@ struct TI_DLL_EXPORT CompiledGraph {
       Ndarray *predicate,
       int max_iterations,
       bool continue_while_nonzero) const;
+  bool jit_run_conditional_cuda_cached(
+      const CompileConfig &compile_config,
+      const std::unordered_map<std::string, IValue> &args,
+      CompiledGraphJITCache &cache,
+      Ndarray *selector,
+      const std::vector<int> &branch_dispatch_counts,
+      int conditional_type,
+      int default_branch) const;
 
   TI_IO_DEF(dispatches);
 

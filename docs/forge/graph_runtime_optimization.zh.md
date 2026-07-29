@@ -142,7 +142,7 @@ work 与数值 breakdown。它写入只包含一个整数的 `predicate` ndarray
 | 后端 | 结构化 `while` | `if` / `switch` |
 | --- | --- | --- |
 | CPU | 精确 `cpu_host_loop`；condition/body 使用 cached compiled dispatch plan | 精确 portable host control |
-| CUDA | Driver API 不低于 12.8 且具备所需 symbol/lowering 时，`auto` 使用原生 CUDA conditional Graph；否则使用精确 portable replay | 精确 portable host control |
+| CUDA | Driver API 不低于 12.8 且具备所需 symbol/lowering 时，`auto` 使用原生 CUDA conditional Graph；否则使用精确 portable replay | 资格满足时，`auto` 使用单个原生 CUDA IF/SWITCH node；否则使用精确 portable host control |
 | Vulkan | 默认使用精确 portable replay；可选 masked chunk replay 可减少观测，并分别报告逻辑/实际执行迭代 | 精确 portable host control |
 
 `lowering_mode="portable"` 强制 portable 路径。
@@ -157,17 +157,17 @@ Graph memory plan 为每个正在执行的 invocation 分配一个有界 arena s
 对齐，返回完整的符号映射，并在 backend 工作提交前拒绝不兼容的 storage。
 
 `Graph.control_flow_stats()` 为最近一次 `run()` 的每个结构化 region 返回 immutable
-`GraphWhileReport` 或 `GraphBranchReport`。while report 包含实际 lowering、逻辑/执行
+`GraphWhileReport` 或 `GraphBranchReport`。原生 CUDA IF/SWITCH 保持 `Graph.run()` 的
+fire-and-continue 合同：selector 回读和 report 构造延迟到请求 `control_flow_stats()` 时，
+因此该诊断调用是显式同步点。while report 包含实际 lowering、逻辑/执行
 迭代、观测边界、predicate/counter/status 轨迹、终止状态、传输字节与 native upgrade
 原因。portable 结构化 region 使用同步 `Graph.run()`；`Graph.submit()` 会明确拒绝，
 不会把 host-observed 控制隐藏在异步 ticket 后面。在 CUDA conditional Graph lowering
-可用时，声明 `lowering_mode='native_required'` 的 `while_loop` 可以使用
-`Graph.submit()`。有序 device setter 会在 bounded conditional child 前判断初始
-predicate，因此 masked 与 unmasked body 使用相同的无回读合同。初始 condition、
-有界 device loop 以及显式终态
-`GraphBuilder.observe()` snapshot 会连续入队，不读取 host predicate。
-`Graph.control_flow_stats()` 仍是同步诊断；异步结构化提交后应通过
-`ticket.observations()` 读取终态，或再次调用 `Graph.run()` 取得新的控制流报告。
+可用时，声明 `lowering_mode='native_required'` 的 `while_loop`、`if_then_else` 与
+`switch` 都可使用 `Graph.submit()`。有序 device setter 会在 conditional child 前读取
+predicate 或 selector，因此 condition、选定 branch/有界 device loop 以及显式终态
+`GraphBuilder.observe()` snapshot 会连续入队，不做 host 控制回读。异步结构化提交后应
+通过 `ticket.observations()` 读取终态；该次 submission 不提供同步控制流报告。
 
 ## 按需完成票据
 

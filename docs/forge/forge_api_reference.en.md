@@ -825,9 +825,9 @@ Contract:
 | API | Contract |
 | --- | --- |
 | `GraphBuilder.while_loop(condition, body, *, predicate, max_iterations, control_inputs=(), carried_state=(), counter=None, status=None, chunk_size=None, masked_execution=False, lowering_mode="auto", name="while")` | Append a fixed-schema bounded loop. `condition` and `body` are nonempty `Sequential` values. `predicate`, optional `counter`, and optional distinct `status` are one-element device ndarrays. |
-| `GraphBuilder.if_then_else(condition, then_region, *, predicate, control_inputs=(), else_region=None, name="if")` | Append a fixed two-way branch. Only the selected branch executes. |
-| `GraphBuilder.switch(condition, branches, *, selector, control_inputs=(), default_region=None, name="switch")` | Append a zero-based fixed branch table with an optional default. |
-| `Graph.control_flow_stats()` | Return immutable `GraphWhileReport` / `GraphBranchReport` values for the latest synchronous run. |
+| `GraphBuilder.if_then_else(condition, then_region, *, predicate, control_inputs=(), else_region=None, lowering_mode="auto", name="if")` | Append a fixed two-way branch. Only the selected branch executes. |
+| `GraphBuilder.switch(condition, branches, *, selector, control_inputs=(), default_region=None, lowering_mode="auto", name="switch")` | Append a zero-based fixed branch table with an optional default. |
+| `Graph.control_flow_stats()` | Return immutable `GraphWhileReport` / `GraphBranchReport` values for the latest run. Native CUDA branch reports are materialized lazily, so requesting them is an explicit synchronization point. |
 
 Condition regions combine multiple device values in ordinary Taichi kernels;
 structured control does not invoke Python callbacks. Graph treats `status` as
@@ -841,13 +841,14 @@ they use exact portable replay. Vulkan currently uses portable exact or
 explicit masked-chunk replay. CUDA native conditional control requires Driver
 API 12.8 or newer and the qualified conditional symbols/lowering. `portable`
 forces fallback; `native_required` fails when native CUDA control cannot be
-selected. `if` and `switch` currently use portable host control on all three
-backends. Portable structured-control Graphs use `run()` and reject `submit()`.
-A CUDA `while_loop` with `lowering_mode='native_required'` supports `submit()`
-when conditional Graph lowering is available. An ordered device setter checks
-the initial predicate, including for unmasked bodies. Its ticket can expose
-explicit terminal `GraphBuilder.observe()` snapshots; synchronous
-`control_flow_stats()` are unavailable until a later `run()`.
+selected. Eligible CUDA `if` and `switch` regions use native IF/SWITCH nodes;
+CPU and Vulkan retain exact portable host control. Portable structured-control
+Graphs use `run()` and reject `submit()`. CUDA `native_required` while, if, and
+switch regions support `submit()` when conditional Graph lowering is available.
+An ordered device setter reads the predicate or selector without host control
+readback. A ticket can expose explicit terminal `GraphBuilder.observe()`
+snapshots; synchronous `control_flow_stats()` are unavailable for that
+asynchronous submission.
 
 ### `GraphBuilder.compile()`, `Graph.run(args)`, and `Graph.submit(args)`
 
@@ -860,7 +861,7 @@ the same execution path and returns a completion ticket.
 | --- | --- |
 | `GraphBuilder.compile()` | Later changes to the builder or original `Sequential` do not modify the compiled graph. |
 | `Graph.run(args)` | `args` must be a dictionary with exactly the declared keys; missing or extra keys raise `TaichiRuntimeError`. |
-| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait')` | Uses the same exact argument, lifecycle, concurrency, and AD contract as `run()`, returns a `SubmissionTicket`, and can opt into shared admission pacing. Structured submission is limited to CUDA `native_required` while regions with available conditional Graph lowering; portable control fails explicitly. |
+| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait')` | Uses the same exact argument, lifecycle, concurrency, and AD contract as `run()`, returns a `SubmissionTicket`, and can opt into shared admission pacing. Structured submission is limited to CUDA `native_required` while/if/switch regions with available conditional Graph lowering; portable control fails explicitly. |
 | `Graph._prewarm()` | Warm the current runtime's backend plan; this internal/advanced entry point does not change the argument contract. |
 
 Concurrent host calls on one graph queue at the complete-invocation boundary;

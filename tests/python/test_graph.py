@@ -2759,14 +2759,18 @@ def test_structured_if_uses_multiple_control_inputs():
     then_region.dispatch(write_then, arg_out)
     else_region = builder.create_sequential()
     else_region.dispatch(write_else, arg_out)
+    arch = ti.lang.impl.current_cfg().arch
     builder.if_then_else(
         condition,
         then_region,
         predicate=arg_predicate,
         control_inputs=(arg_left, arg_right),
         else_region=else_region,
+        lowering_mode=("native_required" if arch == ti.cuda else "auto"),
         name="ordered_branch",
     )
+    if arch == ti.cuda:
+        builder.observe(arg_predicate, arg_out, name="terminal")
     graph = builder.compile()
 
     predicate = ti.ndarray(ti.i32, shape=())
@@ -2777,10 +2781,21 @@ def test_structured_if_uses_multiple_control_inputs():
     assert report.kind == "if"
     assert report.selected_branch == "then"
     assert report.control_inputs == ("left", "right")
+    if arch == ti.cuda:
+        assert report.lowering == "cuda_conditional_graph"
 
     graph.run({"left": 8, "right": 5, "predicate": predicate, "out": out})
     assert out.to_numpy()[()] == -3
     assert graph.control_flow_stats()[0].selected_branch == "else"
+    if arch == ti.cuda:
+        ticket = graph.submit(
+            {"left": -4, "right": 1, "predicate": predicate, "out": out}
+        )
+        assert ticket.observations() == {
+            "terminal": {"predicate": 1, "out": 7}
+        }
+        with pytest.raises(TaichiRuntimeError, match="unavailable after asynchronous"):
+            graph.control_flow_stats()
     ir = graph._ir_debug_info
     assert ir["analysis"]["if_regions"] == 1
     assert ir["root"]["children"][0]["has_else"]
@@ -2819,14 +2834,18 @@ def test_structured_switch_selects_case_and_default():
     case_one.dispatch(write_case_one, arg_out)
     default = builder.create_sequential()
     default.dispatch(write_default, arg_out)
+    arch = ti.lang.impl.current_cfg().arch
     builder.switch(
         condition,
         (case_zero, case_one),
         selector=arg_selector,
         control_inputs=(arg_choice,),
         default_region=default,
+        lowering_mode=("native_required" if arch == ti.cuda else "auto"),
         name="choice_switch",
     )
+    if arch == ti.cuda:
+        builder.observe(arg_selector, arg_out, name="terminal")
     graph = builder.compile()
 
     selector = ti.ndarray(ti.i32, shape=())
@@ -2841,9 +2860,98 @@ def test_structured_switch_selects_case_and_default():
         report = graph.control_flow_stats()[0]
         assert report.kind == "switch"
         assert report.selected_branch == selected
+        if arch == ti.cuda:
+            assert report.lowering == "cuda_conditional_graph"
+    if arch == ti.cuda:
+        ticket = graph.submit({"choice": -8, "selector": selector, "out": out})
+        assert ticket.observations() == {
+            "terminal": {"selector": -8, "out": 99}
+        }
+        with pytest.raises(TaichiRuntimeError, match="unavailable after asynchronous"):
+            graph.control_flow_stats()
     ir = graph._ir_debug_info
     assert ir["analysis"]["switch_regions"] == 1
     assert ir["root"]["children"][0]["branch_count"] == 2
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_native_if_and_switch_skip_missing_branches():
+    capabilities = dict(ti_core.cuda_conditional_graph_capabilities())
+    if not (
+        capabilities["driver_version_eligible"]
+        and capabilities["conditional_graph_symbols_loaded"]
+        and capabilities["general_device_setter_lowering_compiled"]
+    ):
+        pytest.skip("general CUDA conditional Graph is unavailable")
+
+    @ti.kernel
+    def set_control(
+        value: ti.i32,
+        control: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        control[None] = value
+
+    @ti.kernel
+    def increment(output: ti.types.ndarray(dtype=ti.i32, ndim=0)):
+        output[None] += 1
+
+    control_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "control", ti.i32, ndim=0
+    )
+    value_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "value", ti.i32)
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=0
+    )
+
+    if_builder = ti.graph.GraphBuilder()
+    if_condition = if_builder.create_sequential()
+    if_condition.dispatch(set_control, value_arg, control_arg)
+    then_region = if_builder.create_sequential()
+    then_region.dispatch(increment, output_arg)
+    if_builder.if_then_else(
+        if_condition,
+        then_region,
+        predicate=control_arg,
+        control_inputs=(value_arg,),
+        lowering_mode="native_required",
+    )
+    if_builder.observe(control_arg, output_arg, name="terminal")
+    if_graph = if_builder.compile()
+
+    switch_builder = ti.graph.GraphBuilder()
+    switch_condition = switch_builder.create_sequential()
+    switch_condition.dispatch(set_control, value_arg, control_arg)
+    only_case = switch_builder.create_sequential()
+    only_case.dispatch(increment, output_arg)
+    switch_builder.switch(
+        switch_condition,
+        (only_case,),
+        selector=control_arg,
+        control_inputs=(value_arg,),
+        lowering_mode="native_required",
+    )
+    switch_builder.observe(control_arg, output_arg, name="terminal")
+    switch_graph = switch_builder.compile()
+
+    control = ti.ndarray(ti.i32, shape=())
+    output = ti.ndarray(ti.i32, shape=())
+    output.fill(5)
+    args = {"value": 0, "control": control, "output": output}
+    assert if_graph.submit(args).observations() == {
+        "terminal": {"control": 0, "output": 5}
+    }
+    args["value"] = 1
+    assert if_graph.submit(args).observations() == {
+        "terminal": {"control": 1, "output": 6}
+    }
+    args["value"] = 7
+    assert switch_graph.submit(args).observations() == {
+        "terminal": {"control": 7, "output": 6}
+    }
+    args["value"] = 0
+    assert switch_graph.submit(args).observations() == {
+        "terminal": {"control": 0, "output": 7}
+    }
 
 
 @test_utils.test(arch=ti.cuda)

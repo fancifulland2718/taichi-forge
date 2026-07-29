@@ -727,9 +727,9 @@ graph.run({"slot": 3})
 | API | 合同 |
 | --- | --- |
 | `GraphBuilder.while_loop(condition, body, *, predicate, max_iterations, control_inputs=(), carried_state=(), counter=None, status=None, chunk_size=None, masked_execution=False, lowering_mode="auto", name="while")` | 追加 fixed-schema 有界循环。`condition` 与 `body` 必须是非空 `Sequential`；`predicate`、可选 `counter` 和可选且独立的 `status` 都是单元素 device ndarray。 |
-| `GraphBuilder.if_then_else(condition, then_region, *, predicate, control_inputs=(), else_region=None, name="if")` | 追加固定双分支，只执行被选中的 branch。 |
-| `GraphBuilder.switch(condition, branches, *, selector, control_inputs=(), default_region=None, name="switch")` | 追加零基固定 branch table，可指定 default。 |
-| `Graph.control_flow_stats()` | 返回最近一次同步 run 的 immutable `GraphWhileReport` / `GraphBranchReport`。 |
+| `GraphBuilder.if_then_else(condition, then_region, *, predicate, control_inputs=(), else_region=None, lowering_mode="auto", name="if")` | 追加固定双分支，只执行被选中的 branch。 |
+| `GraphBuilder.switch(condition, branches, *, selector, control_inputs=(), default_region=None, lowering_mode="auto", name="switch")` | 追加零基固定 branch table，可指定 default。 |
+| `Graph.control_flow_stats()` | 返回最近一次 run 的 immutable `GraphWhileReport` / `GraphBranchReport`。原生 CUDA branch report 延迟物化，因此请求该报告是显式同步点。 |
 
 condition region 在普通 Taichi kernel 中组合多个 device 值；结构化控制不会调用 Python
 callback。Graph 将 `status` 视为用户定义整数，并与 continue predicate 独立报告。即使
@@ -739,12 +739,12 @@ CPU 在 cached dispatch plan 上使用精确 host control。满足资格的 CUDA
 `lowering_mode="auto"` 下使用原生 conditional Graph，否则使用精确 portable replay。
 Vulkan 当前使用 portable exact 或显式 masked-chunk replay。CUDA 原生条件控制要求 Driver
 API 12.8 或更高版本，并具备所需 conditional symbol/lowering。`portable` 强制 fallback；
-`native_required` 在无法选择 CUDA 原生控制时失败。`if` 与 `switch` 当前在三个后端都使用
-portable host control。portable 结构化 Graph 使用 `run()` 并明确拒绝 `submit()`；当
-conditional Graph lowering 可用时，声明 `lowering_mode='native_required'` 的 CUDA
-`while_loop` 支持 `submit()`。有序 device setter 会判断初始 predicate，并支持
-unmasked body。其 ticket 可返回显式 `GraphBuilder.observe()` 终态；再次
-同步 `run()` 之前不能读取 `control_flow_stats()`。
+`native_required` 在无法选择 CUDA 原生控制时失败。满足资格的 CUDA `if` 与 `switch`
+使用原生 IF/SWITCH node；CPU/Vulkan 保持精确 portable host control。portable 结构化
+Graph 使用 `run()` 并明确拒绝 `submit()`；当 conditional Graph lowering 可用时，CUDA
+`native_required` while/if/switch 都支持 `submit()`。有序 device setter 不经 host 回读
+直接读取 predicate 或 selector。ticket 可返回显式 `GraphBuilder.observe()` 终态；该次
+异步 submission 不提供同步 `control_flow_stats()`。
 
 ### `GraphBuilder.compile()`、`Graph.run(args)` 与 `Graph.submit(args)`
 
@@ -756,7 +756,7 @@ unmasked body。其 ticket 可返回显式 `GraphBuilder.observe()` 终态；再
 | --- | --- |
 | `GraphBuilder.compile()` | 后续修改 builder 或原 `Sequential` 不改变已编译 graph。 |
 | `Graph.run(args)` | `args` 必须是字典，key 与声明参数完全一致；missing/extra key 会抛 `TaichiRuntimeError`。 |
-| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait')` | 与 `run()` 使用相同的精确参数、生命周期、并发和 AD 合同，并返回 `SubmissionTicket`；可选择加入共享准入节奏。结构化提交仅限 conditional Graph lowering 可用的 CUDA `native_required` while region；portable 控制会明确失败。 |
+| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait')` | 与 `run()` 使用相同的精确参数、生命周期、并发和 AD 合同，并返回 `SubmissionTicket`；可选择加入共享准入节奏。结构化提交仅限 conditional Graph lowering 可用的 CUDA `native_required` while/if/switch region；portable 控制会明确失败。 |
 | `Graph._prewarm()` | 预热当前 runtime 的 backend plan；这是内部/高级入口，不改变 graph 参数合同。 |
 
 同一个 graph 的并发 host 调用以完整 invocation 为单位排队；不同 graph 不共享该锁。

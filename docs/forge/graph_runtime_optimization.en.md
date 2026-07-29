@@ -167,7 +167,7 @@ Current lowering is explicit:
 | Backend | Structured `while` | `if` / `switch` |
 | --- | --- | --- |
 | CPU | Exact `cpu_host_loop`; condition and body use cached compiled dispatch plans | Exact portable host control |
-| CUDA | `auto` uses a native CUDA conditional Graph when the Driver API is at least 12.8 and the required symbols/lowering are available; otherwise exact portable replay | Exact portable host control |
+| CUDA | `auto` uses a native CUDA conditional Graph when the Driver API is at least 12.8 and the required symbols/lowering are available; otherwise exact portable replay | `auto` uses one native CUDA IF/SWITCH node when qualified; otherwise exact portable host control |
 | Vulkan | Exact portable replay by default; optional masked chunk replay may reduce observations while reporting logical and executed iterations separately | Exact portable host control |
 
 `lowering_mode="portable"` forces the portable route.
@@ -186,21 +186,23 @@ and alignment requirements, return the complete declared symbol mapping, and
 reject incompatible storage before backend work is submitted.
 
 `Graph.control_flow_stats()` returns one immutable `GraphWhileReport` or
-`GraphBranchReport` per structured region for the latest `run()`. While reports
+`GraphBranchReport` per structured region for the latest `run()`. Native CUDA
+IF/SWITCH execution keeps `Graph.run()` fire-and-continue: selector readback and
+report construction are deferred until `control_flow_stats()` is requested, so
+that diagnostic call is the explicit synchronization point. While reports
 include the selected lowering, logical and executed iterations, observation
 boundaries, predicate/counter/status traces, terminal status, transfer bytes,
 and native-upgrade reason. Portable structured regions use synchronous
 `Graph.run()` and are rejected by `Graph.submit()` rather than being hidden
-behind an asynchronous ticket. A CUDA `while_loop` declared with
-`lowering_mode='native_required'` may use `Graph.submit()` when conditional
-Graph lowering is available. An ordered device setter evaluates the initial
-predicate before the bounded conditional child, so masked and unmasked bodies
-share the same no-readback contract. The initial condition, bounded loop, and
-any explicit terminal `GraphBuilder.observe()` snapshot are enqueued without a
-host predicate readback. `Graph.control_flow_stats()` remains a synchronous
-diagnostic; after asynchronous structured submission, read terminal state from
-`ticket.observations()` or call `Graph.run()` to obtain a new control-flow
-report.
+behind an asynchronous ticket. CUDA `while_loop`, `if_then_else`, and `switch`
+regions declared with `lowering_mode='native_required'` may use `Graph.submit()`
+when conditional Graph lowering is available. An ordered device setter reads
+the predicate or selector before the conditional child, so the condition,
+selected branch or bounded loop, and any explicit terminal
+`GraphBuilder.observe()` snapshot are enqueued without a host control readback.
+After asynchronous structured submission, read terminal state from
+`ticket.observations()`; synchronous control-flow reports remain unavailable
+for that submission.
 
 ## Opt-in completion tickets
 

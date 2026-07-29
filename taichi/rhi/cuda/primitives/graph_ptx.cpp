@@ -55,11 +55,49 @@ PREDICATE_READY:
     call.uni cudaGraphSetConditional, (call_handle, call_value);
     ret;
 }
+
+.visible .entry graph_set_branch_conditional(
+    .param .u64 control_param,
+    .param .u64 handle_param
+)
+{
+    .reg .pred %p<6>;
+    .reg .b32 %r<8>;
+    .reg .b64 %rd<4>;
+    .param .b64 call_handle;
+    .param .b32 call_value;
+
+    ld.param.u64 %rd1, [control_param];
+    ld.param.u64 %rd2, [handle_param];
+    ld.global.u64 %rd3, [%rd1+0];
+    ld.global.u32 %r1, [%rd1+8];
+    ld.global.u32 %r2, [%rd1+12];
+    ld.global.u32 %r3, [%rd1+16];
+    ld.global.u32 %r4, [%rd3];
+
+    setp.eq.u32 %p1, %r1, 0;
+    @!%p1 bra SWITCH_SELECTOR;
+    setp.ne.u32 %p2, %r4, 0;
+    selp.u32 %r7, 1, 0, %p2;
+    bra SELECTOR_READY;
+SWITCH_SELECTOR:
+    setp.lt.u32 %p3, %r4, %r2;
+    setp.lt.u32 %p4, %r3, %r2;
+    and.pred %p5, %p4, !%p3;
+    selp.u32 %r5, %r3, %r2, %p5;
+    selp.u32 %r7, %r4, %r5, %p3;
+SELECTOR_READY:
+    st.param.b64 [call_handle], %rd2;
+    st.param.b32 [call_value], %r7;
+    call.uni cudaGraphSetConditional, (call_handle, call_value);
+    ret;
+}
 )ptx";
 
 std::once_flag module_once;
 void *conditional_module{nullptr};
 void *set_conditional_func{nullptr};
+void *set_branch_conditional_func{nullptr};
 
 void load_module_once() {
   auto &context = CUDAContext::get_instance();
@@ -69,6 +107,8 @@ void load_module_once() {
                              nullptr, nullptr);
   driver.module_get_function(&set_conditional_func, conditional_module,
                              "graph_set_conditional");
+  driver.module_get_function(&set_branch_conditional_func, conditional_module,
+                             "graph_set_branch_conditional");
 }
 
 void ensure_module() {
@@ -94,6 +134,18 @@ void driver_graph_set_conditional(
   void *handle_arg = &conditional_handle;
   CUDAContext::get_instance().launch(
       set_conditional_func, "cuda_graph_set_conditional",
+      {&control_arg, handle_arg}, {}, 1, 1, 0, stream);
+}
+
+void driver_graph_set_branch_conditional(
+    CudaGraphConditionalControl *control,
+    std::uint64_t conditional_handle,
+    void *stream) {
+  ensure_module();
+  void *control_arg = control;
+  void *handle_arg = &conditional_handle;
+  CUDAContext::get_instance().launch(
+      set_branch_conditional_func, "cuda_graph_set_branch_conditional",
       {&control_arg, handle_arg}, {}, 1, 1, 0, stream);
 }
 

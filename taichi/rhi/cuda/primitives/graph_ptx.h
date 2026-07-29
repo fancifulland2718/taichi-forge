@@ -26,5 +26,9 @@ void driver_graph_set_conditional(
     CudaGraphConditionalControl *control,
     std::uint64_t conditional_handle,
     void *stream = nullptr);
+void driver_graph_set_branch_conditional(
+    CudaGraphConditionalControl *control,
+    std::uint64_t conditional_handle,
+    void *stream = nullptr);
 
 }  // namespace taichi::lang::cuda
