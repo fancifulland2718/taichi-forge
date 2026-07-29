@@ -828,6 +828,7 @@ Contract:
 | `GraphBuilder.if_then_else(condition, then_region, *, predicate, control_inputs=(), else_region=None, lowering_mode="auto", name="if")` | Append a fixed two-way branch. Only the selected branch executes. |
 | `GraphBuilder.switch(condition, branches, *, selector, control_inputs=(), default_region=None, lowering_mode="auto", name="switch")` | Append a zero-based fixed branch table with an optional default. |
 | `Graph.control_flow_stats()` | Return immutable `GraphWhileReport` / `GraphBranchReport` values for the latest run. Native CUDA branch reports are materialized lazily, so requesting them is an explicit synchronization point. |
+| `ti.graph.structured_control_capabilities()` | Return schema-v1 portable and device-control qualification for the active backend. It separates an available RHI primitive from a complete structured runtime path; Vulkan indirect dispatch is reported without claiming device-controlled structured submission. |
 
 Condition regions combine multiple device values in ordinary Taichi kernels;
 structured control does not invoke Python callbacks. Graph treats `status` as
@@ -1024,6 +1025,9 @@ Per-segment data distinguishes CPU `ordinary`, CUDA capture/exact
 replay/patched replay/recapture, Vulkan record/replay, native dispatch, and
 ordinary fallback. It also reports bounded persistent argument bytes, replay
 eligibility, fallback classification, retry state, and detailed counters.
+CUDA conditional replay additionally reports asynchronous control uploads,
+waits caused by the two-batch deferred-resource bound, and the peak number of
+deferred batches.
 
 Detailed GPU counters are opt-in. The first call enables them for later
 executions; if GPU work ran before opt-in, `counters_complete` remains false
@@ -1060,6 +1064,9 @@ Graph assigns bounded per-invocation arena storage and keeps those bindings out
 of the public runtime argument dictionary. Concurrent tickets use independent
 arena slots. Providers that cannot record their action, cannot bind the active
 slot, or do not qualify the current backend fail before submission.
+Consecutive ordinary CGraph and compatible recordable-provider segments are
+compiled as one backend region; conflicting fixed or private bindings fail
+before backend work is submitted.
 
 Limits:
 
@@ -1174,7 +1181,7 @@ The runtime-bound operator API is documented separately in
 | `preconditioner.pin()` / `.apply(r, out=None, iteration=0)` / `.metadata` / `.statistics()` | Pin exact target/action generations and apply a native action. | No Python hot-path callback; `iteration` selects a variable-linear action. Reports build/accepted stamps, schedule update counters, generation publish/retire/release telemetry, and refresh operation/transfer/resource counters. Solver telemetry separately reports action selections and wraps. |
 | `ti.linalg.experimental.SolvePlan(operator, method=..., preconditioner=..., execution_policy=..., check_interval=..., restart=...)` | Build a persistent CG, PCG, MINRES, BiCGSTAB, restarted GMRES, or FGMRES plan. | CPU GMRES/FGMRES support compatible `f32/f64` host actions. CUDA/Vulkan `f32` support fixed stored or compiled providers; FGMRES consumes a finite variable-linear action table, stores `restart` preconditioned basis vectors, and uses direct native submission. Restart is 8, 16, or 32. See the detailed guide for the complete provider and policy matrix. |
 | `plan.solve(rhs, initial_guess=None, out=None)` | Return an immutable `SolveResult` with solution, true-residual terminal state, and structured `breakdown_reason`. | Scalar one-dimensional ndarray or supported dense field/view. Fields use device pack/gather and unpack/scatter at the solve boundary; warm plans reuse staging and never convert inside an iteration. RHS/output aliasing is prohibited. |
-| `plan.execution_capabilities()` | Return the backend/provider policy matrix, selected default, automatic replay primitive, and structured unsupported reason. | CUDA stored f32 CSR/BSR CG/PCG defaults to auto-upgrading `bounded_convergent`; replay-qualified stored CUDA MINRES/BiCGSTAB/GMRES and Vulkan CG/PCG/MINRES/BiCGSTAB/GMRES select reusable Graph or command chunks automatically. Direct `device_convergent` requests fail without fallback when unavailable. |
+| `plan.execution_capabilities()` | Return the backend/provider policy matrix, selected default, automatic replay primitive, and structured unsupported reason. | CUDA stored f32 CSR/BSR CG/PCG defaults to auto-upgrading `bounded_convergent`; replay-qualified stored CUDA MINRES/BiCGSTAB/GMRES and Vulkan CG/PCG/MINRES/BiCGSTAB/GMRES select reusable Graph or command chunks automatically. CUDA compiled-kernel f32 CG/PCG reports `device_convergent` as `explicit_only`; its automatic default remains `host_check_every_k`. Direct requests fail without fallback when unavailable. |
 | `ti.linalg.experimental.BatchedSolvePlan(operator, batch_size, independent_systems=True, ...)` | Build homogeneous independent f32 CG/PCG over contiguous flat partitions. | CPU/CUDA/Vulkan; per-system tolerance, status, and iteration count; fixed stored or compiled-kernel A/M qualified. |
 | `batch_plan.solve(rhs_flat, initial_guess=None, out=None)` | Return a flat solution and immutable per-system `BatchedSolveResult` tuples. | Independent direct-sum systems only; not multi-RHS or block Krylov. |
 | `batch_plan.submit(rhs_flat, initial_guess=None, out=None, pacer=None, lane=None, on_saturation='wait')` | Submit a solve and return `SolveSubmission`. | CUDA/Vulkan with `fixed_budget_masked`; one plan-owned slot; optional shared `SubmissionPacer`; exact generations and arrays are retained through completion. |

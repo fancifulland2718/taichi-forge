@@ -769,6 +769,14 @@ plan = ti.linalg.experimental.SolvePlan(
   BiCGSTAB with a compiled Graph provider retains `"host_each_iteration"` by
   default because short converging solves did not show a stable K=4 benefit;
   callers can still opt in.
+- CUDA compiled-kernel f32 CG/PCG may explicitly request
+  `execution_policy="device_convergent"` when conditional Graph support is
+  available. The generic structured Graph records the A action and, for PCG,
+  the fixed-linear compiled-kernel M action, keeps recurrence control on the
+  device, and reads one terminal packet per solve. This combination is
+  correctness-qualified but marked `qualification_scope="explicit_only"`;
+  its automatic default remains the latency-qualified K=4
+  `"host_check_every_k"` path.
 - CUDA GMRES/FGMRES defaults to `"host_check_every_k"` and requires
   `check_interval == restart`. Stored identity-preconditioned GMRES records a
   reusable restart-cycle Graph; FGMRES and other non-recordable provider
@@ -856,14 +864,17 @@ replay was selected, whether the operator and preconditioner combination is
 qualified, and the backend primitive (`cuda_conditional_graph_or_chunk_replay`,
 `cuda_graph_chunk_replay`, or `vulkan_command_replay`). Post-solve statistics
 remain authoritative for the actual replay or direct-submission path.
-Direct `"device_convergent"` execution is qualified only for single-system
-stored f32 CSR/BSR CG/PCG on CUDA when the driver,
-conditional-Graph entry points, device setter, provider capture, and cuBLAS
-workspace requirements are all satisfied. An explicit direct request fails
-without fallback. The default `"bounded_convergent"` policy instead attempts
-that native path automatically and uses its documented chunked fallback when
-necessary. Compiled-kernel, compiled Graph, batched, CPU, and Vulkan providers
-do not claim CUDA conditional-Graph execution.
+Direct `"device_convergent"` execution has two qualified CUDA scopes. A
+single-system stored f32 CSR/BSR CG/PCG plan is eligible for automatic
+selection through `"bounded_convergent"` when the driver, conditional-Graph
+entry points, device setter, provider capture, and cuBLAS workspace
+requirements are satisfied; otherwise the documented chunk fallback is used.
+A single-system compiled-kernel f32 CG/PCG plan may request the generic
+structured-Graph path explicitly when its A/M actions are recordable, but is
+not selected automatically. `device_convergent.qualification_scope` and
+`automatic_selection_qualified` expose this distinction. Explicit requests
+fail without fallback. Compiled-Graph, batched, CPU, and Vulkan providers do not
+claim device-convergent execution.
 
 ## Independent batched CG and PCG
 
@@ -1075,7 +1086,7 @@ overwrite apply only.
 | MINRES + fixed-linear operator/plan | Unsupported | Compatible device-native A/M, `f32` | Compatible device-native A/M, `f32` |
 | Independent batched CG/PCG | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` |
 | Batched fixed-budget submission | Unsupported | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` |
-| Device-convergent conditional execution | Unsupported | Unsupported | Unsupported |
+| Device-convergent conditional execution | Unsupported | Stored f32 CSR/BSR CG/PCG automatic; compiled-kernel f32 CG/PCG explicit-only | Unsupported |
 | BiCGSTAB + identity | Supported host-action providers, `f32/f64` | Fixed CSR/BSR or compiled provider, `f32` | Fixed CSR/BSR or compiled provider, `f32` |
 | BiCGSTAB + fixed-linear right preconditioner | Supported host-action providers, `f32/f64` | Compatible device-native A/M, `f32` | Compatible device-native A/M, `f32` |
 | GMRES + identity | Supported host-action providers, `f32/f64` | Fixed CSR/BSR or compiled provider, `f32` | Fixed CSR/BSR or compiled provider, `f32` |

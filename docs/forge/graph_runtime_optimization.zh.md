@@ -145,6 +145,12 @@ work 与数值 breakdown。它写入只包含一个整数的 `predicate` ndarray
 | CUDA | Driver API 不低于 12.8 且具备所需 symbol/lowering 时，`auto` 使用原生 CUDA conditional Graph；否则使用精确 portable replay | 资格满足时，`auto` 使用单个原生 CUDA IF/SWITCH node；否则使用精确 portable host control |
 | Vulkan | 默认使用精确 portable replay；可选 masked chunk replay 可减少观测，并分别报告逻辑/实际执行迭代 | 精确 portable host control |
 
+`ti.graph.structured_control_capabilities()` 返回当前 backend 的 portable lowering 与
+device-control 资格。报告会刻意区分 RHI primitive 和完整的结构化 runtime 路径：Vulkan
+RHI 已具备 indirect compute dispatch，但在 predicate 生成、可见性、zero-dispatch、replay
+与终态观测形成统一的已资格化 runtime 合同之前，不宣称支持 device-controlled `while`、
+`if` 或 `switch`。
+
 `lowering_mode="portable"` 强制 portable 路径。
 `lowering_mode="native_required"` 要求已资格化的 CUDA conditional 路径，不可用时会在
 执行前失败。recordable provider action 只有在 provider 声明适合结构化 body 时才能进入
@@ -155,6 +161,11 @@ Graph memory plan 为每个正在执行的 invocation 分配一个有界 arena s
 私有符号，并且不把它们暴露为 `Graph.run()` / `Graph.submit()` 参数。同一个 arena slot
 重复执行时复用绑定；异步执行选择其他 slot 时重新绑定。provider 必须准确声明字节数和
 对齐，返回完整的符号映射，并在 backend 工作提交前拒绝不兼容的 storage。
+
+在 Graph root，连续的 ordinary CGraph segment 与兼容的 recordable-provider action 会
+lowering 为一个 backend region。fixed binding 与私有 temporary binding 会在编译前合并；
+冲突会明确失败。结构化 region 只有在 provider 对相应 condition/body/branch role 完成
+资格声明后，才会 inline 同一组 provider dispatch。
 
 `Graph.control_flow_stats()` 为最近一次 `run()` 的每个结构化 region 返回 immutable
 `GraphWhileReport` 或 `GraphBranchReport`。原生 CUDA IF/SWITCH 保持 `Graph.run()` 的
@@ -168,6 +179,12 @@ fire-and-continue 合同：selector 回读和 report 构造延迟到请求 `cont
 predicate 或 selector，因此 condition、选定 branch/有界 device loop 以及显式终态
 `GraphBuilder.observe()` snapshot 会连续入队，不做 host 控制回读。异步结构化提交后应
 通过 `ticket.observations()` 读取终态；该次 submission 不提供同步控制流报告。
+
+conditional-control metadata 会在有序 default stream 上异步上传，并保留到对应 replay
+完成。runtime 最多保留两个 deferred replay batch；第三次快速提交会等待最早 batch，而不是
+让 host staging 与 event state 无界增长。该 backpressure 不创建 worker thread、额外 CUDA
+stream 或设备并发。`Graph.execution_stats()` 通过 `asynchronous_control_updates`、
+`deferred_replay_waits` 与 `peak_deferred_replay_batches` 暴露该行为，供资格检查使用。
 
 ## 按需完成票据
 
@@ -339,8 +356,8 @@ dispatch 校验结果，不能只看吞吐。
 `benchmarks/graph_structured_control_bench.py` 分别测量 preparation、first run、
 steady wall time、control observation，以及 backend profiler 可见时的 device kernel time。
 本地 Windows RTX 5090 回归中，262,144 个 f32 数值、16 轮迭代的 CUDA native
-conditional control steady median 为 452.8 us，forced portable replay 为 1,406.7 us，
-缩短 67.8%（3.11x）；control observation 从 17 batch / 204 bytes 降为
+conditional control steady median 为 464.8 us，forced portable replay 为 1,436.6 us，
+缩短 67.6%（3.09x）；control observation 从 17 batch / 204 bytes 降为
 2 batch / 24 bytes。首次 conditional capture 为 20.4 ms，单独计入 preparation。相同
 无插桩 probe 的 CPU host control 为 6,513.6 us，Vulkan portable control 为
 4,375.4 us；这些后端数字只描述本次测试的执行边界，不构成跨设备性能承诺。

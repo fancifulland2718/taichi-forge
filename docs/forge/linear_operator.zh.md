@@ -674,6 +674,12 @@ plan = ti.linalg.experimental.SolvePlan(
   显式选择 K=8；在支持的组合上也可显式使用 `"host_each_iteration"`。CUDA
   BiCGSTAB 的 compiled Graph provider 默认保留 `"host_each_iteration"`，因为短程收敛
   workload 上 K=4 没有表现出稳定收益；调用方仍可显式 opt in。
+- CUDA compiled-kernel f32 CG/PCG 在 conditional Graph 可用时，可显式请求
+  `execution_policy="device_convergent"`。通用结构化 Graph 会录制 A action；PCG 还会录制
+  fixed-linear compiled-kernel M action，在 device 上保持 recurrence control，并且每次 solve
+  只读取一个 terminal packet。该组合完成 correctness 资格，但标记为
+  `qualification_scope="explicit_only"`；自动默认仍采用满足 latency 资格的 K=4
+  `"host_check_every_k"` 路径。
 - CUDA GMRES/FGMRES 默认使用 `"host_check_every_k"`，并要求
   `check_interval == restart`。stored identity-preconditioned GMRES 会录制可复用的
   restart-cycle Graph；FGMRES 与其它不可录制的 provider 组合保持 direct submission。
@@ -743,12 +749,13 @@ preconditioner
 组合是否满足资格，以及具体 backend primitive（`cuda_conditional_graph_or_chunk_replay`、
 `cuda_graph_chunk_replay` 或 `vulkan_command_replay`）。solve 完成后的 statistics
 仍是实际 replay 或 direct-submission 路径的权威记录。
-直接使用 `"device_convergent"` 仅适用于 CUDA 上的单系统 stored f32 CSR/BSR CG/PCG，
-并要求 driver、conditional-Graph 入口、device setter、provider capture 与 cuBLAS
-workspace 均满足资格。显式直接请求不可用时会失败，不做 fallback。
-默认的 `"bounded_convergent"` 会自动尝试该原生路径，并在必要时使用文档规定的
-Graph chunk fallback。compiled-kernel、compiled Graph、batched、CPU 与 Vulkan
-provider 均不宣称支持 CUDA conditional-Graph execution。
+直接使用 `"device_convergent"` 有两个已资格化的 CUDA 范围。单系统 stored f32
+CSR/BSR CG/PCG 在 driver、conditional-Graph 入口、device setter、provider capture 与
+cuBLAS workspace 均满足资格时，可通过 `"bounded_convergent"` 自动选择；否则使用文档
+规定的 chunk fallback。单系统 compiled-kernel f32 CG/PCG 在 A/M action 可录制时，可显式
+请求通用结构化 Graph 路径，但不会自动选中。`device_convergent.qualification_scope` 与
+`automatic_selection_qualified` 会公开该区别。显式请求不可用时失败，不做 fallback。
+compiled-Graph、batched、CPU 与 Vulkan provider 不宣称支持 device-convergent execution。
 
 ## 独立批量 CG 与 PCG
 
@@ -930,7 +937,7 @@ GPU 当前只支持 overwrite apply。
 | MINRES + fixed-linear operator/plan | 不支持 | 兼容的 device-native A/M，`f32` | 兼容的 device-native A/M，`f32` |
 | 独立批量 CG/PCG | fixed stored 或 compiled-kernel A/M，`f32` | fixed stored 或 compiled-kernel A/M，`f32` | fixed stored 或 compiled-kernel A/M，`f32` |
 | 批量 fixed-budget submission | 不支持 | fixed stored 或 compiled-kernel A/M，`f32` | fixed stored 或 compiled-kernel A/M，`f32` |
-| device-convergent 条件执行 | 不支持 | 不支持 | 不支持 |
+| device-convergent 条件执行 | 不支持 | stored f32 CSR/BSR CG/PCG 自动；compiled-kernel f32 CG/PCG 仅显式 | 不支持 |
 | BiCGSTAB + identity | 受支持 host-action provider，`f32/f64` | fixed CSR/BSR 或 compiled provider，`f32` | fixed CSR/BSR 或 compiled provider，`f32` |
 | BiCGSTAB + fixed-linear 右预条件 | 受支持 host-action provider，`f32/f64` | 兼容的 device-native A/M，`f32` | 兼容的 device-native A/M，`f32` |
 | GMRES + identity | 受支持 host-action provider，`f32/f64` | fixed CSR/BSR 或 compiled provider，`f32` | fixed CSR/BSR 或 compiled provider，`f32` |

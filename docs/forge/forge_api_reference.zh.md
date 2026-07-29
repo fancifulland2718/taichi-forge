@@ -730,6 +730,7 @@ graph.run({"slot": 3})
 | `GraphBuilder.if_then_else(condition, then_region, *, predicate, control_inputs=(), else_region=None, lowering_mode="auto", name="if")` | 追加固定双分支，只执行被选中的 branch。 |
 | `GraphBuilder.switch(condition, branches, *, selector, control_inputs=(), default_region=None, lowering_mode="auto", name="switch")` | 追加零基固定 branch table，可指定 default。 |
 | `Graph.control_flow_stats()` | 返回最近一次 run 的 immutable `GraphWhileReport` / `GraphBranchReport`。原生 CUDA branch report 延迟物化，因此请求该报告是显式同步点。 |
+| `ti.graph.structured_control_capabilities()` | 返回当前 backend 的 schema-v1 portable 与 device-control 资格；区分可用的 RHI primitive 与完整结构化 runtime 路径。会报告 Vulkan indirect dispatch，但不据此宣称支持 device-controlled 结构化提交。 |
 
 condition region 在普通 Taichi kernel 中组合多个 device 值；结构化控制不会调用 Python
 callback。Graph 将 `status` 视为用户定义整数，并与 continue predicate 独立报告。即使
@@ -889,6 +890,8 @@ handle。这不是原地恢复：真实 CUDA context loss 或 Vulkan device loss
 per-segment 数据可区分 CPU `ordinary`、CUDA capture/exact replay/patched
 replay/recapture、Vulkan record/replay、native dispatch 和 ordinary fallback；同时报告
 有界 persistent argument bytes、replay eligibility、fallback 分类、retry 状态与详细计数。
+CUDA conditional replay 还会报告异步 control upload、因两个 deferred batch 上限产生的等待，
+以及 deferred batch 峰值。
 
 GPU 详细 counter 为 opt-in：第一次调用只为之后的执行启用。若 opt-in 前已有 GPU 工作，
 `counters_complete` 会在该 runtime epoch 保持 false，而不会伪装成已统计旧执行。
@@ -922,6 +925,8 @@ recordable native node 可进入 mixed dispatch region 和结构化控制。prov
 workspace requirement；Graph 为每个 invocation 分配有界 arena storage，并且不把这些
 绑定暴露到公开 runtime 参数字典。并发 ticket 使用独立 arena slot。不能记录 action、
 不能绑定当前 slot 或尚未资格化当前 backend 的 provider 会在提交前明确失败。
+连续的 ordinary CGraph 与兼容 recordable-provider segment 会编译为一个 backend region；
+fixed/private binding 冲突会在提交 backend work 前明确失败。
 
 局限：
 
@@ -1028,7 +1033,7 @@ operator API 另见[LinearOperator 与 SolvePlan](linear_operator.zh.md)。
 | `preconditioner.pin()` / `.apply(r, out=None, iteration=0)` / `.metadata` / `.statistics()` | pin 精确 target/action generation 并应用 native action。 | 无 Python hot-path callback；`iteration` 选择 variable-linear action。报告 build/accepted stamp、schedule update counter、generation publish/retire/release，以及 refresh operation/transfer/resource counter；solver telemetry 另行报告 action selection/wrap。 |
 | `ti.linalg.experimental.SolvePlan(operator, method=..., preconditioner=..., execution_policy=..., check_interval=..., restart=...)` | 构造 persistent CG、PCG、MINRES、BiCGSTAB、restarted GMRES 或 FGMRES plan。 | CPU GMRES/FGMRES 支持兼容的 `f32/f64` host action；CUDA/Vulkan `f32` 支持 fixed stored 或 compiled provider。FGMRES 消费有限 variable-linear action table，持有 `restart` 个预条件 basis vector，并使用 direct native submission。restart 可为 8、16 或 32；完整 provider/policy 矩阵见详细指南。 |
 | `plan.solve(rhs, initial_guess=None, out=None)` | 返回 immutable `SolveResult`，包含 solution、真实 residual terminal state 与结构化 `breakdown_reason`。 | 一维 scalar ndarray 或受支持 dense field/view；field 在 solve 边界做 device pack/gather 与 unpack/scatter，warm plan 复用 staging，迭代内部不转换；禁止 RHS/output alias。 |
-| `plan.execution_capabilities()` | 返回 backend/provider 执行策略矩阵、选定的默认 policy、自动 replay primitive 与结构化 unsupported reason。 | CUDA stored f32 CSR/BSR CG/PCG 默认使用可自动升级的 `bounded_convergent`；具备 replay 资格的 stored CUDA MINRES/BiCGSTAB/GMRES 与 Vulkan CG/PCG/MINRES/BiCGSTAB/GMRES 会自动选择可复用 Graph 或 command chunk。直接请求 `device_convergent` 在不可用时会失败且不做 fallback。 |
+| `plan.execution_capabilities()` | 返回 backend/provider 执行策略矩阵、选定的默认 policy、自动 replay primitive 与结构化 unsupported reason。 | CUDA stored f32 CSR/BSR CG/PCG 默认使用可自动升级的 `bounded_convergent`；具备 replay 资格的 stored CUDA MINRES/BiCGSTAB/GMRES 与 Vulkan CG/PCG/MINRES/BiCGSTAB/GMRES 会自动选择可复用 Graph 或 command chunk。CUDA compiled-kernel f32 CG/PCG 将 `device_convergent` 报告为 `explicit_only`，自动默认仍为 `host_check_every_k`。直接请求在不可用时会失败且不做 fallback。 |
 | `ti.linalg.experimental.BatchedSolvePlan(operator, batch_size, independent_systems=True, ...)` | 在连续扁平分区上构造同构、相互独立的 f32 CG/PCG plan。 | CPU/CUDA/Vulkan；逐系统 tolerance、status 与 iteration count；已验证 fixed stored 或 compiled-kernel A/M。 |
 | `batch_plan.solve(rhs_flat, initial_guess=None, out=None)` | 返回扁平 solution 与逐系统 immutable `BatchedSolveResult` tuple。 | 只表示 independent direct-sum system；不是 multi-RHS 或 block Krylov。 |
 | `batch_plan.submit(rhs_flat, initial_guess=None, out=None, pacer=None, lane=None, on_saturation='wait')` | 提交一次 solve 并返回 `SolveSubmission`。 | CUDA/Vulkan 的 `fixed_budget_masked`；一个 plan-owned slot；可加入共享 `SubmissionPacer`；精确 generation 与 array 保留到 completion。 |

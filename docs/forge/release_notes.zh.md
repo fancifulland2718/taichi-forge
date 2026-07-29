@@ -79,14 +79,23 @@
   `if_then_else()` 与 `switch()`。condition kernel 可组合 tolerance、用户取消、active
   状态与 breakdown，不调用 Python callback。continue predicate 与用户定义 terminal
   status 保持独立；`Graph.control_flow_stats()` 报告 lowering、逻辑/执行迭代、状态轨迹、
-  观测流量与 fallback 原因。满足资格的 CUDA `while` 自动使用原生 conditional Graph；
-  CPU/Vulkan 保留明确的精确 portable 路径。结构化控制使用同步执行，并从
-  `Graph.submit()` 明确失败。
+  观测流量与 fallback 原因。满足资格的 CUDA `while`、`if` 与 `switch` 使用原生
+  conditional node；`native_required` region 可通过 `Graph.submit()` 异步提交，且不做
+  host 控制回读。conditional metadata 异步上传，并最多保留两个 deferred replay batch。
+  CPU/Vulkan 保留明确的精确 portable 路径；`structured_control_capabilities()` 会把
+  Vulkan 的 RHI indirect-dispatch primitive 与尚未形成的完整结构化 runtime 路径分开报告。
 - 新增 `LinearOperator.graph_action()`，可把 compiled-kernel f32 provider 直接录入
   Graph root 或结构化 body。provider-owned topology/numeric generation 保持 zero-copy
   fixed binding，input/output dense storage 使用通用 runtime 协议；numeric generation
   失效后必须重建 Graph。通用控制与 provider 合同通过 preconditioned CG 和非对称
-  BiCGSTAB 程序完成资格验证，不增加 solver-specific Graph API。
+  BiCGSTAB 程序完成资格验证，不增加 solver-specific Graph API。连续 CGraph/provider
+  region 会融合为一个 backend region；provider 可绑定 invocation-private Graph temporary，
+  而不把它公开为 runtime 参数。
+- 新增 compiled-kernel f32 CG/PCG 的显式 CUDA `device_convergent` 执行。该路径通过通用
+  结构化 Graph 和可录制 A/M action 完成，每次 solve 只读取一个 terminal packet，并在
+  provider 不可用或 stale 时明确失败。它以 `explicit_only` 完成 correctness 资格；自动
+  compiled-kernel plan 保留满足 latency 资格的 K=4 `host_check_every_k`。stored f32
+  CSR/BSR CG/PCG 继续保留自动 conditional-Graph upgrade。
 - `ti.linalg.LinearOperator.apply()` 与单系统 `SolvePlan.solve()` 接受受支持的
   1D/2D/3D root-dense scalar、Vector 和 Matrix field。overwrite
   `LinearOperator.apply()` 可在 CPU/CUDA/Vulkan 的 compiled-kernel 与

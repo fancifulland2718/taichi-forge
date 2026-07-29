@@ -170,6 +170,14 @@ Current lowering is explicit:
 | CUDA | `auto` uses a native CUDA conditional Graph when the Driver API is at least 12.8 and the required symbols/lowering are available; otherwise exact portable replay | `auto` uses one native CUDA IF/SWITCH node when qualified; otherwise exact portable host control |
 | Vulkan | Exact portable replay by default; optional masked chunk replay may reduce observations while reporting logical and executed iterations separately | Exact portable host control |
 
+`ti.graph.structured_control_capabilities()` returns the active backend's
+portable lowering and device-control qualification. The report intentionally
+separates an RHI primitive from a complete structured runtime path: Vulkan has
+indirect compute dispatch in its RHI, but does not claim device-controlled
+`while`, `if`, or `switch` until predicate production, visibility,
+zero-dispatch behavior, replay, and terminal observation are qualified as one
+runtime contract.
+
 `lowering_mode="portable"` forces the portable route.
 `lowering_mode="native_required"` requires the qualified CUDA conditional
 route and fails before execution when unavailable. Recordable provider actions
@@ -184,6 +192,12 @@ Bindings are reused for repeated execution of the same arena slot and rebound
 when another asynchronous slot is selected. Providers must declare exact byte
 and alignment requirements, return the complete declared symbol mapping, and
 reject incompatible storage before backend work is submitted.
+
+At the Graph root, consecutive ordinary CGraph segments and compatible
+recordable-provider actions are lowered into one backend region. Fixed and
+private temporary bindings are merged before compilation; conflicting bindings
+fail explicitly. Structured regions inline the same provider dispatches only
+when the provider has qualified the corresponding condition/body/branch role.
 
 `Graph.control_flow_stats()` returns one immutable `GraphWhileReport` or
 `GraphBranchReport` per structured region for the latest `run()`. Native CUDA
@@ -203,6 +217,15 @@ selected branch or bounded loop, and any explicit terminal
 After asynchronous structured submission, read terminal state from
 `ticket.observations()`; synchronous control-flow reports remain unavailable
 for that submission.
+
+Conditional-control metadata is uploaded asynchronously on the ordered default
+stream and retained until the associated replay completes. The runtime keeps at
+most two deferred replay batches; a third rapid submission waits for the oldest
+batch instead of growing host staging and event state without bound. This
+backpressure does not create a worker thread, an additional CUDA stream, or
+device concurrency. `Graph.execution_stats()` exposes
+`asynchronous_control_updates`, `deferred_replay_waits`, and
+`peak_deferred_replay_batches` for qualification.
 
 ## Opt-in completion tickets
 
@@ -423,8 +446,8 @@ throughput.
 steady wall time, control observations, and (where the backend profiler can see
 the launches) device kernel time separately. On a local Windows RTX 5090
 regression run with 262,144 f32 values and 16 iterations, CUDA native
-conditional control had a 452.8 us steady median versus 1,406.7 us for forced
-portable replay, a 67.8% reduction (3.11x). Control observations decreased from
+conditional control had a 464.8 us steady median versus 1,436.6 us for forced
+portable replay, a 67.6% reduction (3.09x). Control observations decreased from
 17 batches / 204 bytes to 2 batches / 24 bytes. First conditional capture was
 20.4 ms and remains preparation cost. The same uninstrumented probe measured
 6,513.6 us on CPU host control and 4,375.4 us on Vulkan portable control; these

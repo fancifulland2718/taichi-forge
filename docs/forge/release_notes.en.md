@@ -94,16 +94,29 @@ the `0.5.0` artifacts:
   Continue predicates and user-defined terminal status are independent;
   `Graph.control_flow_stats()` reports lowering, logical/executed iterations,
   status traces, observation traffic, and fallback reasons. Qualified CUDA
-  `while` regions automatically use a native conditional Graph; CPU and Vulkan
-  retain explicit exact portable paths. Structured control is synchronous and
-  fails explicitly from `Graph.submit()`.
+  `while`, `if`, and `switch` regions automatically use native conditional
+  Graph nodes; `native_required` regions also support asynchronous
+  `Graph.submit()` without a host control readback. Conditional metadata upload
+  is asynchronous and retains at most two deferred replay batches. CPU and
+  Vulkan retain explicit exact portable paths, and
+  `structured_control_capabilities()` separates Vulkan's RHI indirect-dispatch
+  primitive from an unavailable full structured runtime path.
 - Added `LinearOperator.graph_action()` for recording compiled-kernel f32
   providers directly into Graph roots and structured bodies. Provider-owned
   topology/numeric generations remain zero-copy fixed bindings, input/output
   dense storage uses the common runtime protocol, and stale numeric generations
   require rebuilding the Graph. The generic control and provider contracts are
   qualified with preconditioned CG and nonsymmetric BiCGSTAB programs without
-  adding solver-specific Graph APIs.
+  adding solver-specific Graph APIs. Consecutive CGraph/provider regions fuse
+  into one backend region, and providers may bind private per-invocation Graph
+  temporaries without exposing them as runtime arguments.
+- Added explicit CUDA `device_convergent` execution for compiled-kernel f32
+  CG/PCG through the generic structured Graph and recordable A/M actions. It
+  reads one terminal packet per solve and fails closed on unavailable or stale
+  providers. This path is correctness-qualified as `explicit_only`; automatic
+  compiled-kernel plans retain the latency-qualified K=4
+  `host_check_every_k` policy. Stored f32 CSR/BSR CG/PCG retains its automatic
+  conditional-Graph upgrade.
 - `ti.linalg.LinearOperator.apply()` and single-system `SolvePlan.solve()` accept
   supported 1D/2D/3D root-dense scalar, Vector, and Matrix fields. Overwrite
   `LinearOperator.apply()` directly binds canonical compact full fields for
