@@ -231,6 +231,7 @@ def qualify_solve_plan(
     reference=None,
     initial_guess=None,
     out=None,
+    use_plan_default_output=False,
     expected_termination="converged",
     warmup=1,
     repetitions=5,
@@ -247,7 +248,10 @@ def qualify_solve_plan(
     A factory lets the report measure plan construction separately. Timing is
     synchronous wall time unless a qualified fixed-budget batch exposes its
     public asynchronous submission boundary. No device timestamp is inferred
-    from wall time.
+    from wall time. By default the qualification helper allocates and reuses
+    one output array when ``out`` is omitted. Set
+    ``use_plan_default_output=True`` to benchmark the plan's native
+    ``out=None`` return path instead.
     """
     warmup = _qualification_non_negative_integer(warmup, "warmup")
     repetitions = _qualification_non_negative_integer(
@@ -303,7 +307,13 @@ def qualify_solve_plan(
     expected_termination = _normalize_expected_termination(
         expected_termination, system_count
     )
-    if out is None:
+    if not isinstance(use_plan_default_output, bool):
+        raise TaichiRuntimeError("use_plan_default_output must be bool")
+    if use_plan_default_output and out is not None:
+        raise TaichiRuntimeError(
+            "use_plan_default_output=True requires out=None"
+        )
+    if out is None and not use_plan_default_output:
         out = ScalarNdarray(plan.operator.dtype, (total_size,))
 
     rhs = _require_current_scalar_ndarray(
@@ -343,8 +353,9 @@ def qualify_solve_plan(
     submit_ns = []
     completion_ns = []
     results = []
+    iteration_trace = []
     provider_system_iterations = 0
-    for _ in range(repetitions):
+    for repetition in range(repetitions):
         result, elapsed_ns, submission_ns = _run_once(
             plan, rhs, initial_guess, out, pacer, lane, on_saturation
         )
@@ -353,8 +364,72 @@ def qualify_solve_plan(
         if submission_ns is not None:
             submit_ns.append(submission_ns)
             completion_ns.append(max(elapsed_ns - submission_ns, 0))
+        terminal_snapshot = _terminal_snapshot(result, batched)
+        per_solve_statistics = _json_copy(plan.statistics())
+        per_solve_operations = _json_copy(
+            per_solve_statistics.get("operations", {})
+        )
         if batched:
-            provider_system_iterations += plan.statistics()["operations"][
+            iteration_trace.append(
+                {
+                    "repetition": repetition,
+                    "stop_reasons": terminal_snapshot[
+                        "termination_reasons"
+                    ],
+                    "logical_iterations": terminal_snapshot["iterations"],
+                    "issued_iterations": per_solve_operations.get(
+                        "last_issued_iterations"
+                    ),
+                    "executed_system_iterations": (
+                        per_solve_operations.get(
+                            "last_executed_system_iterations"
+                        )
+                    ),
+                    "provider_system_iterations": (
+                        per_solve_operations.get(
+                            "last_provider_system_iterations"
+                        )
+                    ),
+                    "convergence_observation_boundaries": None,
+                    "observation_boundaries_unavailable_reason": (
+                        "batched_plan_does_not_export_per_system_boundaries"
+                    ),
+                }
+            )
+        else:
+            logical = int(result.iterations)
+            boundaries = list(
+                per_solve_operations.get(
+                    "last_convergence_observation_boundaries", []
+                )
+            )
+            reported_executed = per_solve_operations.get(
+                "last_executed_iterations"
+            )
+            backend_family = per_solve_statistics.get("identity", {}).get(
+                "backend_family"
+            )
+            if reported_executed is None or (
+                int(reported_executed) < logical
+                and backend_family in ("cpu", "x64", "arm64")
+            ):
+                executed = logical
+                executed_source = "logical_fallback_cpu_unreported"
+            else:
+                executed = int(reported_executed)
+                executed_source = "backend_last_executed_iterations"
+            iteration_trace.append(
+                {
+                    "repetition": repetition,
+                    "stop_reason": result.termination_reason,
+                    "logical_stop_iteration": logical,
+                    "executed_through_iteration": executed,
+                    "executed_through_source": executed_source,
+                    "convergence_observation_boundaries": boundaries,
+                }
+            )
+        if batched:
+            provider_system_iterations += per_solve_operations[
                 "last_provider_system_iterations"
             ]
     final_statistics = _json_copy(plan.statistics())
@@ -496,6 +571,47 @@ def qualify_solve_plan(
             },
         )
     )
+    if batched:
+        trace_passed = all(
+            entry["issued_iterations"] is not None
+            and entry["executed_system_iterations"] is not None
+            and entry["provider_system_iterations"] is not None
+            and sum(entry["logical_iterations"])
+            <= entry["executed_system_iterations"]
+            <= entry["provider_system_iterations"]
+            for entry in iteration_trace
+        )
+    else:
+        trace_passed = True
+        for entry in iteration_trace:
+            logical = entry["logical_stop_iteration"]
+            executed = entry["executed_through_iteration"]
+            boundaries = entry["convergence_observation_boundaries"]
+            monotonic = all(
+                left < right
+                for left, right in zip(boundaries, boundaries[1:])
+            )
+            endpoints_valid = not boundaries or (
+                boundaries[0] == 0 and boundaries[-1] == executed
+            )
+            trace_passed = trace_passed and (
+                0 <= logical <= executed <= plan.max_iterations
+                and monotonic
+                and endpoints_valid
+            )
+    checks.append(
+        _qualification_check(
+            "iteration_stop_trace",
+            trace_passed,
+            {"per_solve": iteration_trace},
+            {
+                "logical_lte_executed_lte_budget": True,
+                "observation_boundaries_strictly_increasing": True,
+                "last_observation_equals_executed": True,
+            },
+            "Per-solve stopping telemetry is sampled outside the timed solve.",
+        )
+    )
 
     program = _current_program()
     backend = _ti_core.arch_name(program.config().arch)
@@ -600,6 +716,7 @@ def qualify_solve_plan(
             "provider_iterations": provider_iterations,
             "wasted_provider_iterations": wasted_iterations,
             "active_efficiency": active_efficiency,
+            "iteration_trace": iteration_trace,
             "true_residual_norms": true_residual_norms,
             "operation_delta": operation_delta,
             "transfer_delta": transfer_delta,

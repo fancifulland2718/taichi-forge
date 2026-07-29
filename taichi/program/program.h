@@ -700,6 +700,11 @@ class TI_DLL_EXPORT Program {
                               std::size_t bytes);
 
   void copy_ndarray_to_host(Ndarray *src, void *dst, std::size_t bytes);
+  void copy_ndarrays_to_host(const Ndarray *const *srcs,
+                             void *const *dsts,
+                             const std::size_t *bytes,
+                             std::size_t count);
+
 
   bool cuda_device_transform_available() const;
 

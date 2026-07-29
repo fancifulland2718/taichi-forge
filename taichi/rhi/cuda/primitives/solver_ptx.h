@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace taichi::lang::cuda {
@@ -31,8 +32,12 @@ struct CudaCGScalarState {
 };
 
 static_assert(sizeof(CudaCGScalarState) == 92);
+static_assert(offsetof(CudaCGScalarState, completed_iterations) == 80);
+static_assert(offsetof(CudaCGScalarState, active) == 84);
 
 bool driver_cg_scalar_available();
+bool driver_cg_conditional_setter_compiled();
+void driver_cg_prepare_conditional_setter();
 void driver_cg_initialize(CudaCGScalarState *state, void *stream = nullptr);
 void driver_cg_validate_rho(CudaCGScalarState *state,
                             void *stream = nullptr);
@@ -42,5 +47,9 @@ void driver_cg_finish_iteration(CudaCGScalarState *state,
                                 void *stream = nullptr);
 void driver_cg_prepare_direction(CudaCGScalarState *state,
                                  void *stream = nullptr);
+void driver_cg_set_conditional(CudaCGScalarState *state,
+                               std::uint64_t conditional_handle,
+                               int max_iterations,
+                               void *stream = nullptr);
 
 }  // namespace taichi::lang::cuda

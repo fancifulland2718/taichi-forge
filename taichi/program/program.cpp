@@ -8248,6 +8248,82 @@ void Program::copy_ndarray_to_host(Ndarray *src,
               "copy_ndarray_to_host failed: {}", res);
 }
 
+void Program::copy_ndarrays_to_host(const Ndarray *const *srcs,
+                                    void *const *dsts,
+                                    const std::size_t *bytes,
+                                    std::size_t count) {
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  TI_ERROR_IF(count > 0 && (!srcs || !dsts || !bytes),
+              "copy_ndarrays_to_host received a null pointer table.");
+  if (count == 0) {
+    return;
+  }
+  TI_ERROR_IF(count > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "copy_ndarrays_to_host count {} exceeds the RHI limit.",
+              count);
+  auto leases = acquire_ndarray_leases(srcs, count);
+  std::size_t total_bytes = 0;
+  for (std::size_t i = 0; i < count; ++i) {
+    TI_ERROR_IF(!srcs[i] || !dsts[i],
+                "copy_ndarrays_to_host received a null pointer at index {}.",
+                i);
+    const std::size_t expected_bytes =
+        srcs[i]->get_nelement() * srcs[i]->get_element_size();
+    TI_ERROR_IF(bytes[i] != expected_bytes,
+                "copy_ndarrays_to_host expected {} bytes at index {}, but "
+                "received {}.",
+                expected_bytes, i, bytes[i]);
+    TI_ERROR_IF(bytes[i] > std::numeric_limits<std::size_t>::max() -
+                               total_bytes,
+                "copy_ndarrays_to_host byte count overflow.");
+    total_bytes += bytes[i];
+  }
+  if (total_bytes == 0) {
+    return;
+  }
+  ScopedRuntimeTransferStatistics transfer_statistics(
+      this, RuntimeTransferKind::kDeviceToHost, total_bytes);
+
+  if (arch_is_cpu(compile_config().arch)) {
+    for (std::size_t i = 0; i < count; ++i) {
+      if (bytes[i] == 0) {
+        continue;
+      }
+      auto *src_ptr = reinterpret_cast<const uint8_t *>(
+          program_impl_->get_device_alloc_info_ptr(srcs[i]->ndarray_alloc_));
+      TI_ERROR_IF(!src_ptr,
+                  "CPU ndarray host readback received a null data pointer.");
+      std::memcpy(dsts[i], src_ptr, bytes[i]);
+    }
+    return;
+  }
+
+  if (compile_config().arch == Arch::vulkan) {
+    (void)flush_if_pending();
+  }
+  auto *device = program_impl_->get_compute_device();
+  std::vector<DevicePtr> device_ptrs;
+  std::vector<void *> host_ptrs;
+  std::vector<std::size_t> copy_sizes;
+  device_ptrs.reserve(count);
+  host_ptrs.reserve(count);
+  copy_sizes.reserve(count);
+  for (std::size_t i = 0; i < count; ++i) {
+    if (bytes[i] == 0) {
+      continue;
+    }
+    device_ptrs.push_back(srcs[i]->ndarray_alloc_.get_ptr(0));
+    host_ptrs.push_back(dsts[i]);
+    copy_sizes.push_back(bytes[i]);
+  }
+  const RhiResult res = device->readback_data(
+      device_ptrs.data(), host_ptrs.data(), copy_sizes.data(),
+      static_cast<int>(device_ptrs.size()));
+  TI_ERROR_IF(res != RhiResult::success,
+              "copy_ndarrays_to_host failed: {}", res);
+}
+
 bool Program::cuda_device_transform_available() const {
 #ifdef TI_WITH_CUDA
   return compile_config().arch == Arch::cuda &&

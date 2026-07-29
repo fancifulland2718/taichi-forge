@@ -55,9 +55,23 @@ PER_CUDA_FUNCTION(kernel_set_attribute, cuFuncSetAttribute, void *, CUfunction_a
 // Stream management
 PER_CUDA_FUNCTION(stream_synchronize, cuStreamSynchronize, void *);
 PER_CUDA_FUNCTION(stream_begin_capture, cuStreamBeginCapture_v2, void *, CUstreamCaptureMode);
+PER_CUDA_FUNCTION(stream_begin_capture_to_graph, cuStreamBeginCaptureToGraph,
+                  void *, CUgraph, const void *, const void *, std::size_t,
+                  CUstreamCaptureMode);
 PER_CUDA_FUNCTION(stream_end_capture, cuStreamEndCapture, void *, CUgraph *);
 
 // CUDA graph
+PER_CUDA_FUNCTION(graph_create, cuGraphCreate, CUgraph *, unsigned int);
+PER_CUDA_FUNCTION(graph_debug_dot_print, cuGraphDebugDotPrint, CUgraph,
+                  const char *, unsigned int);
+PER_CUDA_FUNCTION(graph_conditional_handle_create,
+                  cuGraphConditionalHandleCreate, std::uint64_t *, CUgraph,
+                  void *, unsigned int, unsigned int);
+PER_CUDA_FUNCTION(graph_add_node, cuGraphAddNode, void **, CUgraph,
+                  const void *, std::size_t,
+                  const TaichiCudaGraphNodeParams *);
+PER_CUDA_FUNCTION(graph_instantiate_log, cuGraphInstantiate_v2, CUgraphExec *,
+                  CUgraph, void **, char *, std::size_t);
 PER_CUDA_FUNCTION(graph_instantiate_with_flags, cuGraphInstantiateWithFlags, CUgraphExec *, CUgraph, unsigned long long);
 PER_CUDA_FUNCTION(graph_launch, cuGraphLaunch, CUgraphExec, void *);
 PER_CUDA_FUNCTION(graph_destroy, cuGraphDestroy, CUgraph);

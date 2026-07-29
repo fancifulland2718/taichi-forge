@@ -331,6 +331,8 @@ class CUBLASDriver : protected CUDADriverBase {
  public:
   static CUBLASDriver &get_instance();
 
+  CUDADriverFunction<cublasHandle_t, void *, size_t> cubSetWorkspace;
+
 #define PER_CUBLAS_FUNCTION(name, symbol_name, ...) \
   CUDADriverFunction<__VA_ARGS__> name;
 #include "taichi/rhi/cuda/cublas_functions.inc.h"

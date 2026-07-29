@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace taichi::lang {
 
@@ -30,6 +31,7 @@ class OperatorPinnedAction;
 class PreconditionerPlan;
 class LinearOperatorHandle;
 struct CudaSolverChunkReplayState;
+struct CudaSolverConditionalReplayState;
 struct VulkanSolverChunkReplayState;
 
 enum class SparseSolveStatus : int {
@@ -57,6 +59,7 @@ const char *sparse_solve_breakdown_reason_name(
 enum class SparseSolveExecutionPolicy : std::uint8_t {
   host_each_iteration,
   host_check_every_k,
+  bounded_convergent,
   fixed_budget_masked,
   device_convergent,
 };
@@ -67,6 +70,7 @@ const char *sparse_solve_execution_policy_name(
 struct SparseSolveExecutionCapabilities {
   bool host_each_iteration{false};
   bool host_check_every_k{false};
+  bool bounded_convergent{false};
   bool fixed_budget_masked{false};
   bool device_convergent{false};
 };
@@ -172,6 +176,7 @@ struct SparseSolvePlanRuntimeStatistics {
   std::uint64_t host_scalar_reductions{0};
   std::uint64_t device_scalar_operations{0};
   std::uint64_t host_scalar_readbacks{0};
+  std::uint64_t host_readback_batches{0};
   std::uint64_t host_synchronizations{0};
   std::uint64_t logical_iterations{0};
   std::uint64_t executed_iterations{0};
@@ -182,6 +187,12 @@ struct SparseSolvePlanRuntimeStatistics {
   std::uint64_t solver_chunk_replays{0};
   std::uint64_t solver_chunk_rebinds{0};
   std::uint64_t solver_chunk_invalidations{0};
+  std::uint64_t solver_chunk_submissions{0};
+  std::uint64_t convergence_observations{0};
+  std::uint64_t solver_replay_executable_count{0};
+  int last_logical_iterations{0};
+  int last_executed_iterations{0};
+  std::vector<int> last_convergence_observation_boundaries;
   std::uint64_t restart_cycles{0};
   std::uint64_t happy_breakdowns{0};
   int restart{0};
@@ -190,10 +201,15 @@ struct SparseSolvePlanRuntimeStatistics {
   std::string requested_solver_execution_policy{"host_each_iteration"};
   std::string solver_execution_policy{"host_each_iteration"};
   int host_check_interval{1};
+  int bounded_chunk_limit{0};
+  int bounded_preferred_chunk_size{0};
+  std::string bounded_control_path{"none"};
+  std::string bounded_chunk_schedule{"none"};
   bool solver_graph_enabled{false};
   std::string solver_replay_unavailable_reason{"not_requested"};
   std::string solver_scalar_location{"host"};
   std::string solver_stream_policy{"backend_default"};
+  std::string control_readback_strategy{"not_applicable"};
   std::string preconditioning_side{"none"};
   bool fixed_iteration_only{false};
   bool bounded_masked_execution{false};
@@ -207,6 +223,7 @@ struct SparseSolvePlanRuntimeStatistics {
   std::uint64_t persistent_vector_reserved_bytes{0};
   std::uint64_t persistent_scalar_count{0};
   std::uint64_t persistent_scalar_reserved_bytes{0};
+  std::uint64_t solver_library_workspace_reserved_bytes{0};
   std::uint64_t basis_vector_count{0};
   std::uint64_t basis_reserved_bytes{0};
   std::uint64_t preconditioned_basis_vector_count{0};
@@ -547,7 +564,8 @@ class CUCG {
   SparseSolvePlanRuntimeStatistics debug_runtime_statistics() const;
 
   void configure_execution_policy(SparseSolveExecutionPolicy policy,
-                                  int host_check_interval);
+                                  int host_check_interval,
+                                  bool require_native_device_convergent = false);
 
  private:
   void init_solver();
@@ -586,6 +604,17 @@ class CUCG {
       float *d_p,
       float *d_z,
       cuda::CudaCGScalarState *state);
+  bool try_submit_conditional_solver(
+      Program *program,
+      const Ndarray &x,
+      const OperatorPinnedAction &operator_generation,
+      const OperatorPinnedAction &preconditioner_generation,
+      float *d_x,
+      float *d_ax,
+      float *d_r,
+      float *d_p,
+      float *d_z,
+      cuda::CudaCGScalarState *state);
   void issue_native_solver_iteration(Program *program,
                                      CUstream stream,
                                      float *d_x,
@@ -596,6 +625,9 @@ class CUCG {
                                      cuda::CudaCGScalarState *state);
   bool native_solver_chunk_eligible() const;
   std::string native_solver_chunk_unavailable_reason() const;
+  bool native_solver_conditional_eligible() const;
+  std::string native_solver_conditional_unavailable_reason() const;
+  bool bind_cublas_stream_workspace(CUstream stream);
 
   cublasHandle_t handle_{nullptr};
   CUstream solver_stream_{nullptr};
@@ -633,10 +665,13 @@ class CUCG {
   Ndarray *workspace_p_ndarray_{nullptr};
   Ndarray *workspace_z_ndarray_{nullptr};
   void *workspace_scalars_{nullptr};
+  void *workspace_cublas_{nullptr};
+  std::size_t workspace_cublas_bytes_{0};
   int workspace_size_{0};
   SparseSolveExecutionPolicy execution_policy_{
       SparseSolveExecutionPolicy::host_each_iteration};
   int host_check_interval_{1};
+  bool require_native_device_convergent_{false};
   std::uint64_t solve_calls_{0};
   std::uint64_t total_iterations_{0};
   std::uint64_t workspace_builds_{0};
@@ -654,7 +689,16 @@ class CUCG {
   std::uint64_t solver_chunk_replays_{0};
   std::uint64_t solver_chunk_rebinds_{0};
   std::uint64_t solver_chunk_invalidations_{0};
+  std::uint64_t solver_chunk_submissions_{0};
+  std::uint64_t convergence_observations_{0};
+  int last_executed_iterations_{0};
+  std::vector<int> last_convergence_observation_boundaries_;
+  int bounded_preferred_chunk_size_{0};
   std::unique_ptr<CudaSolverChunkReplayState> solver_chunk_replay_state_;
+  std::unique_ptr<CudaSolverConditionalReplayState>
+      solver_conditional_replay_state_;
+  bool last_native_conditional_used_{false};
+  std::string last_native_conditional_fallback_reason_{"not_requested"};
   std::uint64_t device_to_device_bytes_{0};
   std::uint64_t device_to_host_bytes_{0};
   std::uint64_t host_to_device_bytes_{0};
@@ -1110,6 +1154,11 @@ class VulkanCGIterationPlan {
   std::uint64_t solver_chunk_replays_{0};
   std::uint64_t solver_chunk_rebinds_{0};
   std::uint64_t solver_chunk_invalidations_{0};
+  std::uint64_t solver_chunk_submissions_{0};
+  std::uint64_t convergence_observations_{0};
+  int last_executed_iterations_{0};
+  std::vector<int> last_convergence_observation_boundaries_;
+  int bounded_preferred_chunk_size_{0};
   std::unique_ptr<VulkanSolverChunkReplayState> solver_chunk_replay_state_;
   std::uint64_t workspace_builds_{1};
   std::uint64_t workspace_reuses_{0};
@@ -1117,6 +1166,7 @@ class VulkanCGIterationPlan {
   std::uint64_t preconditioner_apply_calls_{0};
   std::uint64_t device_scalar_operations_{0};
   std::uint64_t host_scalar_readbacks_{0};
+  std::uint64_t host_readback_batches_{0};
   std::uint64_t host_synchronizations_{0};
   std::uint64_t device_to_device_bytes_{0};
   std::uint64_t device_to_host_bytes_{0};

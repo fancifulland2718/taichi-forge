@@ -83,7 +83,7 @@ struct CudaSolverChunkReplayEntry {
 
 struct CudaSolverChunkReplayState {
   CUstream capture_stream{nullptr};
-  std::array<CudaSolverChunkReplayEntry, 9> entries;
+  std::array<CudaSolverChunkReplayEntry, 17> entries;
   bool disabled{false};
   std::string unavailable_reason{"not_built"};
 
@@ -117,9 +117,37 @@ struct CudaSolverChunkReplayState {
   }
 };
 
+struct CudaSolverConditionalReplayState {
+  CUstream capture_stream{nullptr};
+  CudaSolverChunkReplayEntry entry;
+  std::uint64_t conditional_handle{0};
+  bool disabled{false};
+  std::string unavailable_reason{"not_built"};
+
+  ~CudaSolverConditionalReplayState() {
+    CUDAContext::get_instance().make_current();
+    CUDADriver::get_instance().stream_synchronize(nullptr);
+    entry.reset();
+    if (capture_stream != nullptr) {
+      CUDADriver::get_instance().stream_destroy(capture_stream);
+      capture_stream = nullptr;
+    }
+  }
+
+  CUstream ensure_capture_stream() {
+    if (capture_stream == nullptr) {
+      CUDAContext::get_instance().make_current();
+      CUDADriver::get_instance().stream_create(
+          reinterpret_cast<void **>(&capture_stream), CU_STREAM_NON_BLOCKING);
+    }
+    return capture_stream;
+  }
+};
+
 #else
 
 struct CudaSolverChunkReplayState {};
+struct CudaSolverConditionalReplayState {};
 
 #endif
 
@@ -159,6 +187,16 @@ struct VulkanSolverChunkReplayState {};
 #endif
 
 namespace {
+
+int bounded_chunk_iterations(std::uint64_t chunk_ordinal,
+                             int chunk_limit,
+                             int remaining_iterations) {
+  static constexpr std::array<int, 6> kGrowthSchedule{1, 1, 2, 4, 8, 16};
+  const auto schedule_index = std::min<std::size_t>(
+      static_cast<std::size_t>(chunk_ordinal), kGrowthSchedule.size() - 1);
+  const int scheduled = std::min(kGrowthSchedule[schedule_index], chunk_limit);
+  return std::min(scheduled, remaining_iterations);
+}
 
 OperatorMathematicalTraits legacy_cg_traits() {
   const auto scope =
@@ -293,6 +331,8 @@ const char *sparse_solve_execution_policy_name(
       return "host_each_iteration";
     case SparseSolveExecutionPolicy::host_check_every_k:
       return "host_check_every_k";
+    case SparseSolveExecutionPolicy::bounded_convergent:
+      return "bounded_convergent";
     case SparseSolveExecutionPolicy::fixed_budget_masked:
       return "fixed_budget_masked";
     case SparseSolveExecutionPolicy::device_convergent:
@@ -306,11 +346,15 @@ SparseSolveExecutionCapabilities sparse_solve_execution_capabilities(
   SparseSolveExecutionCapabilities result;
   if (arch_is_cpu(arch)) {
     result.host_each_iteration = true;
+    result.bounded_convergent = true;
   } else if (arch == Arch::cuda) {
     result.host_each_iteration = true;
     result.host_check_every_k = true;
+    result.bounded_convergent = true;
+    result.device_convergent = true;
   } else if (arch == Arch::vulkan) {
     result.host_check_every_k = true;
+    result.bounded_convergent = true;
     result.fixed_budget_masked = true;
   }
   return result;
@@ -324,9 +368,12 @@ void validate_sparse_solve_execution_policy(
               "Solver host-check interval must be positive.");
   TI_ERROR_IF(policy !=
                       SparseSolveExecutionPolicy::host_check_every_k &&
+                  policy != SparseSolveExecutionPolicy::bounded_convergent &&
+                  policy != SparseSolveExecutionPolicy::device_convergent &&
                   host_check_interval != 1,
-              "Only host_check_every_k accepts a host-check interval other "
-              "than one.");
+              "Only host_check_every_k, bounded_convergent, and "
+              "device_convergent accept a host-check interval other than "
+              "one.");
   const auto capabilities = sparse_solve_execution_capabilities(arch);
   bool supported = false;
   switch (policy) {
@@ -335,6 +382,9 @@ void validate_sparse_solve_execution_policy(
       break;
     case SparseSolveExecutionPolicy::host_check_every_k:
       supported = capabilities.host_check_every_k;
+      break;
+    case SparseSolveExecutionPolicy::bounded_convergent:
+      supported = capabilities.bounded_convergent;
       break;
     case SparseSolveExecutionPolicy::fixed_budget_masked:
       supported = capabilities.fixed_budget_masked;
@@ -513,7 +563,8 @@ bool CUCG::has_preconditioner() const {
 
 void CUCG::configure_execution_policy(
     SparseSolveExecutionPolicy policy,
-    int host_check_interval) {
+    int host_check_interval,
+    bool require_native_device_convergent) {
   std::lock_guard<std::mutex> lock(solve_mutex_);
   TI_ERROR_IF(solve_calls_ != 0,
               "CUDA CG execution policy must be configured before solve.");
@@ -522,8 +573,24 @@ void CUCG::configure_execution_policy(
   TI_ERROR_IF(policy == SparseSolveExecutionPolicy::host_check_every_k &&
                   host_check_interval != 4 && host_check_interval != 8,
               "CUDA host_check_every_k currently supports K=4 or K=8.");
+  TI_ERROR_IF(policy == SparseSolveExecutionPolicy::bounded_convergent &&
+                  host_check_interval != 1 && host_check_interval != 2 &&
+                  host_check_interval != 4 && host_check_interval != 8 &&
+                  host_check_interval != 16,
+              "CUDA bounded_convergent chunk limit must be one of "
+              "1, 2, 4, 8, or 16.");
+  TI_ERROR_IF(policy == SparseSolveExecutionPolicy::device_convergent &&
+                  host_check_interval != 1 && host_check_interval != 2 &&
+                  host_check_interval != 4 && host_check_interval != 8 &&
+                  host_check_interval != 16,
+              "CUDA device_convergent portable fallback chunk limit must "
+              "be one of 1, 2, 4, 8, or 16.");
+  TI_ERROR_IF(require_native_device_convergent &&
+                  policy != SparseSolveExecutionPolicy::device_convergent,
+              "Strict native execution requires device_convergent policy.");
   execution_policy_ = policy;
   host_check_interval_ = host_check_interval;
+  require_native_device_convergent_ = require_native_device_convergent;
 }
 
 void CUCG::validate_controls() const {
@@ -653,6 +720,80 @@ std::string CUCG::native_solver_chunk_unavailable_reason() const {
 #endif
 }
 
+bool CUCG::native_solver_conditional_eligible() const {
+  return native_solver_conditional_unavailable_reason() == "none";
+}
+
+std::string CUCG::native_solver_conditional_unavailable_reason() const {
+#if defined(TI_WITH_CUDA)
+  if (get_environ_config("TI_CUDA_SOLVER_CONDITIONAL_GRAPH", 1) == 0) {
+    return "cuda_conditional_graph_disabled";
+  }
+  if (!program_) {
+    return "program_unavailable";
+  }
+  if (program_->compile_config().debug) {
+    return "debug_mode_enabled";
+  }
+  if ((!cuda_csr_operator_ && !cuda_bsr_operator_) ||
+      (has_preconditioner() && !preconditioner_ && !block_preconditioner_)) {
+    return "provider_not_capture_composable";
+  }
+  const bool stream_binding =
+      cuda_csr_operator_
+          ? cuda_csr_operator_->supports_spmv_stream_binding()
+          : cuda_bsr_operator_->supports_spmv_stream_binding();
+  if (!stream_binding) {
+    return "spmv_stream_binding_unavailable";
+  }
+  auto &driver = CUDADriver::get_instance();
+  const int driver_api_version =
+      driver.get_version_major() * 1000 + driver.get_version_minor() * 10;
+  if (driver_api_version < 12080) {
+    return "cuda_driver_before_12_8";
+  }
+  if (!driver.stream_begin_capture_to_graph.available() ||
+      !driver.stream_end_capture.available() || !driver.graph_create.available() ||
+      !driver.graph_conditional_handle_create.available() ||
+      !driver.graph_add_node.available() ||
+      !driver.graph_instantiate_with_flags.available() ||
+      !driver.graph_launch.available() || !driver.graph_destroy.available() ||
+      !driver.graph_exec_destroy.available()) {
+    return "cuda_conditional_graph_symbols_unavailable";
+  }
+  if (!cuda::driver_cg_conditional_setter_compiled()) {
+    return "cuda_conditional_setter_not_compiled";
+  }
+  auto &cublas = CUBLASDriver::get_instance();
+  if (!cublas.cubSetWorkspace.available()) {
+    return "cublas_user_workspace_symbol_unavailable";
+  }
+  if (!workspace_cublas_ || workspace_cublas_bytes_ == 0) {
+    return "cublas_user_workspace_unavailable";
+  }
+  return "none";
+#else
+  return "cuda_backend_unavailable";
+#endif
+}
+
+bool CUCG::bind_cublas_stream_workspace(CUstream stream) {
+#if defined(TI_WITH_CUDA)
+  auto &cublas = CUBLASDriver::get_instance();
+  if (cublas.cubSetStream.call(handle_, stream) != CUBLAS_STATUS_SUCCESS) {
+    return false;
+  }
+  if (workspace_cublas_ && cublas.cubSetWorkspace.available()) {
+    return cublas.cubSetWorkspace.call(handle_, workspace_cublas_,
+                                       workspace_cublas_bytes_) ==
+           CUBLAS_STATUS_SUCCESS;
+  }
+  return workspace_cublas_ == nullptr;
+#else
+  return false;
+#endif
+}
+
 void CUCG::issue_native_solver_iteration(
     Program *program,
     CUstream stream,
@@ -713,7 +854,7 @@ bool CUCG::try_submit_solver_chunk(
     cuda::CudaCGScalarState *state) {
 #if defined(TI_WITH_CUDA)
   if (!native_solver_chunk_eligible() || chunk_iterations <= 0 ||
-      chunk_iterations > 8) {
+      chunk_iterations > 16) {
     return false;
   }
   if (!solver_chunk_replay_state_) {
@@ -798,16 +939,19 @@ bool CUCG::try_submit_solver_chunk(
   }
 
   auto &driver = CUDADriver::get_instance();
-  auto &cublas = CUBLASDriver::get_instance();
   const CUstream capture_stream = replay.ensure_capture_stream();
   driver.stream_synchronize(capture_stream);
-  cublas.cubSetStream(handle_, capture_stream);
+  if (!bind_cublas_stream_workspace(capture_stream)) {
+    replay.disabled = true;
+    replay.unavailable_reason = "cublas_capture_workspace_bind_failed";
+    return false;
+  }
   CUgraph graph = nullptr;
   auto capture_lock = CUDAContext::get_instance().get_graph_capture_lock_guard();
   const auto begin_error = driver.stream_begin_capture.call(
       capture_stream, CU_STREAM_CAPTURE_MODE_RELAXED);
   if (begin_error != CUDA_SUCCESS) {
-    cublas.cubSetStream(handle_, solver_stream_);
+    (void)bind_cublas_stream_workspace(solver_stream_);
     replay.disabled = true;
     replay.unavailable_reason = "stream_capture_begin_failed";
     return false;
@@ -822,12 +966,12 @@ bool CUCG::try_submit_solver_chunk(
     if (graph != nullptr) {
       driver.graph_destroy.call(graph);
     }
-    cublas.cubSetStream(handle_, solver_stream_);
+    (void)bind_cublas_stream_workspace(solver_stream_);
     throw;
   }
   const auto end_error =
       driver.stream_end_capture.call(capture_stream, &graph);
-  cublas.cubSetStream(handle_, solver_stream_);
+  (void)bind_cublas_stream_workspace(solver_stream_);
   if (end_error != CUDA_SUCCESS || graph == nullptr) {
     if (graph != nullptr) {
       driver.graph_destroy.call(graph);
@@ -855,6 +999,242 @@ bool CUCG::try_submit_solver_chunk(
       program->acquire_ndarray_external_lease(key.solution));
   ++solver_chunk_builds_;
   replay.unavailable_reason = "none";
+  driver.graph_launch(entry.executable, nullptr);
+  return true;
+#else
+  return false;
+#endif
+}
+
+bool CUCG::try_submit_conditional_solver(
+    Program *program,
+    const Ndarray &x,
+    const OperatorPinnedAction &operator_generation,
+    const OperatorPinnedAction &preconditioner_generation,
+    float *d_x,
+    float *d_ax,
+    float *d_r,
+    float *d_p,
+    float *d_z,
+    cuda::CudaCGScalarState *state) {
+#if defined(TI_WITH_CUDA)
+  if (!native_solver_conditional_eligible() || max_iters_ <= 0) {
+    return false;
+  }
+  if (!solver_conditional_replay_state_) {
+    solver_conditional_replay_state_ =
+        std::make_unique<CudaSolverConditionalReplayState>();
+  }
+  auto &replay = *solver_conditional_replay_state_;
+  if (replay.disabled) {
+    return false;
+  }
+
+  const auto operator_stamp = operator_generation.resource_stamp();
+  const auto preconditioner_stamp =
+      preconditioner_generation
+          ? preconditioner_generation.resource_stamp()
+          : OperatorResourceStamp{};
+  CudaSolverChunkReplayKey key;
+  key.solution = x.runtime_resource_handle();
+  key.program_generation = operator_stamp.program_generation;
+  key.schema_revision = operator_stamp.schema_revision;
+  key.topology_revision = operator_stamp.topology_revision;
+  key.binding_revision = operator_stamp.binding_revision;
+  key.preconditioner_schema_revision = preconditioner_stamp.schema_revision;
+  key.preconditioner_topology_revision =
+      preconditioner_stamp.topology_revision;
+  key.preconditioner_binding_revision =
+      preconditioner_stamp.binding_revision;
+  key.x = reinterpret_cast<std::uintptr_t>(d_x);
+  key.ax = reinterpret_cast<std::uintptr_t>(d_ax);
+  key.residual = reinterpret_cast<std::uintptr_t>(d_r);
+  key.direction = reinterpret_cast<std::uintptr_t>(d_p);
+  key.preconditioned_residual = reinterpret_cast<std::uintptr_t>(d_z);
+  key.scalars = reinterpret_cast<std::uintptr_t>(state);
+  key.provider = reinterpret_cast<std::uintptr_t>(
+      cuda_csr_operator_ ? static_cast<void *>(cuda_csr_operator_)
+                         : static_cast<void *>(cuda_bsr_operator_));
+  key.preconditioner = reinterpret_cast<std::uintptr_t>(
+      preconditioner_ ? static_cast<void *>(preconditioner_)
+                      : static_cast<void *>(block_preconditioner_));
+  key.rows = A_.num_rows();
+  key.iterations = max_iters_;
+
+  auto &entry = replay.entry;
+  auto &driver = CUDADriver::get_instance();
+  if (entry.executable != nullptr && entry.key_valid && entry.key == key) {
+    if (entry.operator_numeric_revision != operator_stamp.numeric_revision ||
+        entry.preconditioner_numeric_revision !=
+            preconditioner_stamp.numeric_revision) {
+      entry.operator_numeric_revision = operator_stamp.numeric_revision;
+      entry.preconditioner_numeric_revision =
+          preconditioner_stamp.numeric_revision;
+      ++solver_chunk_rebinds_;
+    }
+    driver.graph_launch(entry.executable, nullptr);
+    ++solver_chunk_reuses_;
+    ++solver_chunk_replays_;
+    replay.unavailable_reason = "none";
+    return true;
+  }
+
+  if (entry.executable != nullptr) {
+    if (entry.key_valid && entry.key.solution != key.solution) {
+      ++solver_chunk_rebinds_;
+    }
+    driver.stream_synchronize(nullptr);
+    entry.reset();
+    replay.conditional_handle = 0;
+    ++solver_chunk_invalidations_;
+  }
+
+  // Warm provider descriptors and resolve the device setter before capture.
+  // Neither operation is safe to initialize for the first time while a
+  // stream capture is active.
+  if (cuda_csr_operator_) {
+    cuda_csr_operator_->spmv(reinterpret_cast<std::uintptr_t>(d_p),
+                             reinterpret_cast<std::uintptr_t>(d_ax), nullptr);
+  } else {
+    cuda_bsr_operator_->spmv(reinterpret_cast<std::uintptr_t>(d_p),
+                             reinterpret_cast<std::uintptr_t>(d_ax), nullptr);
+  }
+  try {
+    cuda::driver_cg_prepare_conditional_setter();
+  } catch (...) {
+    replay.disabled = true;
+    replay.unavailable_reason = "cuda_conditional_setter_load_failed";
+    return false;
+  }
+
+  CUDAContext::get_instance().make_current();
+  void *current_context = nullptr;
+  if (driver.context_get_current.call(&current_context) != CUDA_SUCCESS ||
+      current_context == nullptr) {
+    replay.disabled = true;
+    replay.unavailable_reason = "cuda_context_unavailable";
+    return false;
+  }
+
+  CUgraph graph = nullptr;
+  if (driver.graph_create.call(&graph, 0) != CUDA_SUCCESS ||
+      graph == nullptr) {
+    replay.disabled = true;
+    replay.unavailable_reason = "conditional_graph_create_failed";
+    return false;
+  }
+  std::uint64_t conditional_handle = 0;
+  constexpr unsigned int kAssignDefaultValue = 1;
+  const auto handle_error = driver.graph_conditional_handle_create.call(
+      &conditional_handle, graph, current_context, 1, kAssignDefaultValue);
+  if (handle_error != CUDA_SUCCESS || conditional_handle == 0) {
+    driver.graph_destroy.call(graph);
+    replay.disabled = true;
+    replay.unavailable_reason = "conditional_handle_create_failed";
+    return false;
+  }
+
+  TaichiCudaGraphNodeParams node_params{};
+  constexpr std::uint32_t kConditionalNodeType = 13;
+  constexpr std::uint32_t kWhileConditionalType = 1;
+  node_params.type = kConditionalNodeType;
+  node_params.parameters.conditional.handle = conditional_handle;
+  node_params.parameters.conditional.type = kWhileConditionalType;
+  node_params.parameters.conditional.size = 1;
+  node_params.parameters.conditional.ph_graph_out = nullptr;
+  node_params.parameters.conditional.context = current_context;
+  void *conditional_node = nullptr;
+  const auto add_error = driver.graph_add_node.call(
+      &conditional_node, graph, nullptr, 0, &node_params);
+  if (add_error != CUDA_SUCCESS || conditional_node == nullptr ||
+      node_params.parameters.conditional.ph_graph_out == nullptr ||
+      node_params.parameters.conditional.ph_graph_out[0] == nullptr) {
+    driver.graph_destroy.call(graph);
+    replay.disabled = true;
+    replay.unavailable_reason = "conditional_node_create_failed";
+    return false;
+  }
+
+  const CUstream capture_stream = replay.ensure_capture_stream();
+  driver.stream_synchronize(capture_stream);
+  if (!bind_cublas_stream_workspace(capture_stream)) {
+    driver.graph_destroy.call(graph);
+    replay.disabled = true;
+    replay.unavailable_reason = "cublas_capture_workspace_bind_failed";
+    return false;
+  }
+  CUgraph capture_result = nullptr;
+  auto capture_lock = CUDAContext::get_instance().get_graph_capture_lock_guard();
+  const auto begin_error = driver.stream_begin_capture_to_graph.call(
+      capture_stream,
+      node_params.parameters.conditional.ph_graph_out[0], nullptr, nullptr, 0,
+      CU_STREAM_CAPTURE_MODE_RELAXED);
+  if (begin_error != CUDA_SUCCESS) {
+    (void)bind_cublas_stream_workspace(solver_stream_);
+    driver.graph_destroy.call(graph);
+    replay.disabled = true;
+    replay.unavailable_reason = "conditional_body_capture_begin_failed";
+    return false;
+  }
+  try {
+    issue_native_solver_iteration(program, capture_stream, d_x, d_ax, d_r,
+                                  d_p, d_z, state);
+    cuda::driver_cg_set_conditional(state, conditional_handle, max_iters_,
+                                    capture_stream);
+  } catch (...) {
+    (void)driver.stream_end_capture.call(capture_stream, &capture_result);
+    (void)bind_cublas_stream_workspace(solver_stream_);
+    driver.graph_destroy.call(graph);
+    replay.disabled = true;
+    replay.unavailable_reason = "conditional_body_capture_failed";
+    return false;
+  }
+  const auto end_error =
+      driver.stream_end_capture.call(capture_stream, &capture_result);
+  (void)bind_cublas_stream_workspace(solver_stream_);
+  if (end_error != CUDA_SUCCESS) {
+    driver.graph_destroy.call(graph);
+    replay.disabled = true;
+    replay.unavailable_reason = "conditional_body_capture_end_failed";
+    return false;
+  }
+
+  CUgraphExec executable = nullptr;
+  if (get_environ_config("TI_CUDA_SOLVER_CONDITIONAL_GRAPH_DEBUG", 0) != 0 &&
+      driver.graph_debug_dot_print.available()) {
+    (void)driver.graph_debug_dot_print.call(
+        graph, "opt_doc/cuda_conditional_graph.dot", 0x1);
+  }
+  std::array<char, 4096> instantiate_log{};
+  void *instantiate_error_node = nullptr;
+  const auto instantiate_error = driver.graph_instantiate_log.available()
+                                     ? driver.graph_instantiate_log.call(
+                                           &executable, graph,
+                                           &instantiate_error_node,
+                                           instantiate_log.data(),
+                                           instantiate_log.size())
+                                     : driver.graph_instantiate_with_flags.call(
+                                           &executable, graph, 0);
+  driver.graph_destroy.call(graph);
+  if (instantiate_error != CUDA_SUCCESS || executable == nullptr) {
+    replay.disabled = true;
+    replay.unavailable_reason = fmt::format(
+        "conditional_graph_instantiate_failed_cuda_error_{}_{}",
+        instantiate_error, instantiate_log.data());
+    return false;
+  }
+
+  entry.executable = executable;
+  entry.key = key;
+  entry.key_valid = true;
+  entry.operator_numeric_revision = operator_stamp.numeric_revision;
+  entry.preconditioner_numeric_revision =
+      preconditioner_stamp.numeric_revision;
+  entry.solution_lease.emplace(
+      program->acquire_ndarray_external_lease(key.solution));
+  replay.conditional_handle = conditional_handle;
+  replay.unavailable_reason = "none";
+  ++solver_chunk_builds_;
   driver.graph_launch(entry.executable, nullptr);
   return true;
 #else
@@ -914,10 +1294,14 @@ CUCG::~CUCG() {
 void CUCG::ensure_workspace(Program *program, int size) {
 #if defined(TI_WITH_CUDA)
   const bool needs_scalars =
-      execution_policy_ == SparseSolveExecutionPolicy::host_check_every_k;
+      execution_policy_ == SparseSolveExecutionPolicy::host_check_every_k ||
+      execution_policy_ == SparseSolveExecutionPolicy::bounded_convergent ||
+      execution_policy_ == SparseSolveExecutionPolicy::device_convergent;
   if (workspace_size_ == size && workspace_ax_ && workspace_r_ &&
       workspace_p_ && (!has_preconditioner() || workspace_z_) &&
-      (!needs_scalars || workspace_scalars_)) {
+      (!needs_scalars || workspace_scalars_) &&
+      (!needs_scalars || workspace_cublas_ ||
+       !CUBLASDriver::get_instance().cubSetWorkspace.available())) {
     workspace_reuses_++;
     return;
   }
@@ -953,6 +1337,12 @@ void CUCG::ensure_workspace(Program *program, int size) {
       if (needs_scalars) {
         CUDADriver::get_instance().malloc(
             &workspace_scalars_, sizeof(cuda::CudaCGScalarState));
+        if (CUBLASDriver::get_instance().cubSetWorkspace.available()) {
+          constexpr std::size_t kCublasWorkspaceBytes = 4 * 1024 * 1024;
+          CUDADriver::get_instance().malloc(&workspace_cublas_,
+                                            kCublasWorkspaceBytes);
+          workspace_cublas_bytes_ = kCublasWorkspaceBytes;
+        }
       }
     } catch (...) {
       release_workspace();
@@ -975,6 +1365,12 @@ void CUCG::ensure_workspace(Program *program, int size) {
   if (needs_scalars) {
     CUDADriver::get_instance().malloc(
         &workspace_scalars_, sizeof(cuda::CudaCGScalarState));
+    if (CUBLASDriver::get_instance().cubSetWorkspace.available()) {
+      constexpr std::size_t kCublasWorkspaceBytes = 4 * 1024 * 1024;
+      CUDADriver::get_instance().malloc(&workspace_cublas_,
+                                        kCublasWorkspaceBytes);
+      workspace_cublas_bytes_ = kCublasWorkspaceBytes;
+    }
   }
   workspace_size_ = size;
   workspace_builds_++;
@@ -984,6 +1380,10 @@ void CUCG::ensure_workspace(Program *program, int size) {
 void CUCG::release_workspace() {
 #if defined(TI_WITH_CUDA)
   solver_chunk_replay_state_.reset();
+  solver_conditional_replay_state_.reset();
+  if (handle_) {
+    CUBLASDriver::get_instance().cubSetStream(handle_, solver_stream_);
+  }
   if (workspace_ax_ndarray_ && program_)
     program_->delete_ndarray(workspace_ax_ndarray_);
   else if (workspace_ax_)
@@ -1002,6 +1402,8 @@ void CUCG::release_workspace() {
     CUDADriver::get_instance().mem_free(workspace_z_);
   if (workspace_scalars_)
     CUDADriver::get_instance().mem_free(workspace_scalars_);
+  if (workspace_cublas_)
+    CUDADriver::get_instance().mem_free(workspace_cublas_);
   workspace_ax_ndarray_ = nullptr;
   workspace_r_ndarray_ = nullptr;
   workspace_p_ndarray_ = nullptr;
@@ -1011,6 +1413,8 @@ void CUCG::release_workspace() {
   workspace_p_ = nullptr;
   workspace_z_ = nullptr;
   workspace_scalars_ = nullptr;
+  workspace_cublas_ = nullptr;
+  workspace_cublas_bytes_ = 0;
   workspace_size_ = 0;
 #endif
 }
@@ -1049,10 +1453,14 @@ void CUCG::solve_device_scalar(
   auto *d_r = workspace_r_;
   auto *d_p = workspace_p_;
   auto *d_z = workspace_z_;
-  auto read_state = [&]() {
+  auto read_state = [&](int observation_boundary) {
     driver.memcpy_device_to_host(&host_state, state, sizeof(host_state));
     host_scalar_readbacks_++;
     host_synchronizations_++;
+    convergence_observations_++;
+    last_convergence_observation_boundaries_.push_back(
+        observation_boundary >= 0 ? observation_boundary
+                                  : host_state.completed_iterations);
     device_to_host_bytes_ += sizeof(host_state);
   };
 
@@ -1073,7 +1481,7 @@ void CUCG::solve_device_scalar(
   }
   cuda::driver_cg_initialize(state, solver_stream_);
   device_scalar_operations_++;
-  read_state();
+  read_state(0);
 
   if (host_state.active != 0 && max_iters_ > 0) {
     if (has_preconditioner()) {
@@ -1091,8 +1499,68 @@ void CUCG::solve_device_scalar(
   }
 
   int issued_iterations = 0;
-  while (host_state.active != 0 && issued_iterations < max_iters_) {
+  bool conditional_submitted = false;
+  if (execution_policy_ == SparseSolveExecutionPolicy::device_convergent &&
+      host_state.active != 0 && max_iters_ > 0) {
+    last_native_conditional_fallback_reason_ =
+        native_solver_conditional_unavailable_reason();
+    if (last_native_conditional_fallback_reason_ == "none") {
+      conditional_submitted = try_submit_conditional_solver(
+          prog, x, operator_generation, preconditioner_generation,
+          reinterpret_cast<float *>(d_x), d_ax, d_r, d_p, d_z, state);
+      if (!conditional_submitted) {
+        last_native_conditional_fallback_reason_ =
+            solver_conditional_replay_state_
+                ? solver_conditional_replay_state_->unavailable_reason
+                : "conditional_graph_not_built";
+      }
+    }
+    TI_ERROR_IF(require_native_device_convergent_ && !conditional_submitted,
+                "CUDA native device-convergent solve was required but the "
+                "conditional Graph path is unavailable: {}.",
+                last_native_conditional_fallback_reason_);
+    if (conditional_submitted) {
+      ++solver_chunk_submissions_;
+      read_state(-1);
+      issued_iterations = host_state.completed_iterations;
+      executed_iterations_ += static_cast<std::uint64_t>(issued_iterations);
+      operator_apply_calls_ += static_cast<std::uint64_t>(issued_iterations);
+      device_scalar_operations_ += static_cast<std::uint64_t>(
+          issued_iterations * (has_preconditioner() ? 6 : 5));
+      if (has_preconditioner()) {
+        preconditioner_apply_calls_ +=
+            static_cast<std::uint64_t>(issued_iterations);
+        if (preconditioner_) {
+          preconditioner_->record_replayed_apply_calls(issued_iterations);
+        } else if (block_preconditioner_) {
+          block_preconditioner_->record_replayed_apply_calls(
+              issued_iterations);
+        }
+      }
+      last_native_conditional_used_ = true;
+      last_native_conditional_fallback_reason_ = "none";
+    }
+  } else if (execution_policy_ ==
+             SparseSolveExecutionPolicy::device_convergent) {
+    last_native_conditional_fallback_reason_ =
+        host_state.active == 0 ? "initial_state_already_stopped"
+                               : "zero_iteration_budget";
+  }
+
+  std::uint64_t chunk_ordinal = 0;
+  while (!conditional_submitted && host_state.active != 0 &&
+         issued_iterations < max_iters_) {
     const int chunk_iterations =
+        execution_policy_ == SparseSolveExecutionPolicy::bounded_convergent ||
+                execution_policy_ ==
+                    SparseSolveExecutionPolicy::device_convergent
+            ? (bounded_preferred_chunk_size_ > 0
+                   ? std::min(bounded_preferred_chunk_size_,
+                              max_iters_ - issued_iterations)
+                   : bounded_chunk_iterations(chunk_ordinal,
+                                              host_check_interval_,
+                                              max_iters_ - issued_iterations))
+            :
         std::min(host_check_interval_, max_iters_ - issued_iterations);
     const bool submitted = try_submit_solver_chunk(
         prog, x, operator_generation, preconditioner_generation,
@@ -1127,6 +1595,8 @@ void CUCG::solve_device_scalar(
       }
     }
     issued_iterations += chunk_iterations;
+    ++chunk_ordinal;
+    ++solver_chunk_submissions_;
     executed_iterations_ += static_cast<std::uint64_t>(chunk_iterations);
     operator_apply_calls_ += static_cast<std::uint64_t>(chunk_iterations);
     device_scalar_operations_ += static_cast<std::uint64_t>(
@@ -1135,7 +1605,7 @@ void CUCG::solve_device_scalar(
       preconditioner_apply_calls_ +=
           static_cast<std::uint64_t>(chunk_iterations);
     }
-    read_state();
+    read_state(issued_iterations);
     if (verbose_) {
       fmt::print("chunk: {}, completed: {}, rr: {}\n",
                  solver_chunk_direct_submissions_,
@@ -1156,6 +1626,20 @@ void CUCG::solve_device_scalar(
   effective_tolerance_ = host_state.effective_tolerance;
   status_ = static_cast<SparseSolveStatus>(host_state.status);
   total_iterations_ += static_cast<std::uint64_t>(iterations_);
+  last_executed_iterations_ = issued_iterations;
+  if (execution_policy_ == SparseSolveExecutionPolicy::bounded_convergent ||
+      (execution_policy_ == SparseSolveExecutionPolicy::device_convergent &&
+       !conditional_submitted)) {
+    if (iterations_ <= 1) {
+      bounded_preferred_chunk_size_ = 1;
+    } else if (iterations_ <= 4) {
+      bounded_preferred_chunk_size_ = std::min(2, host_check_interval_);
+    } else if (iterations_ <= 8) {
+      bounded_preferred_chunk_size_ = std::min(4, host_check_interval_);
+    } else {
+      bounded_preferred_chunk_size_ = std::min(8, host_check_interval_);
+    }
+  }
 #else
   TI_NOT_IMPLEMENTED;
 #endif
@@ -1164,6 +1648,10 @@ void CUCG::solve_device_scalar(
 void CUCG::solve(Program *prog, const Ndarray &x, const Ndarray &b) {
 #if defined(TI_WITH_CUDA)
   std::lock_guard<std::mutex> lock(solve_mutex_);
+  // CUDA contexts are current per host thread. SolvePlan may be called from a
+  // worker thread after construction/warmup on another thread, so establish
+  // the primary context before any driver, cuBLAS, or cuSPARSE operation.
+  CUDAContext::get_instance().make_current();
   TI_ERROR_IF(
       (compiled_kernel_operator_ || compiled_graph_operator_) &&
           (prog != program_ || x.owning_program() != program_ ||
@@ -1192,6 +1680,10 @@ void CUCG::solve(Program *prog, const Ndarray &x, const Ndarray &b) {
   relative_reference_norm_ = 0.0;
   effective_tolerance_ =
       static_cast<double>(absolute_tolerance_);
+  last_executed_iterations_ = 0;
+  last_convergence_observation_boundaries_.clear();
+  last_native_conditional_used_ = false;
+  last_native_conditional_fallback_reason_ = "not_requested";
 
   size_t dX = prog->get_ndarray_data_ptr_as_int(&x);
   size_t db = prog->get_ndarray_data_ptr_as_int(&b);
@@ -1199,7 +1691,9 @@ void CUCG::solve(Program *prog, const Ndarray &x, const Ndarray &b) {
 
   ensure_workspace(prog, m);
   if (execution_policy_ ==
-      SparseSolveExecutionPolicy::host_check_every_k) {
+      SparseSolveExecutionPolicy::host_check_every_k ||
+      execution_policy_ == SparseSolveExecutionPolicy::bounded_convergent ||
+      execution_policy_ == SparseSolveExecutionPolicy::device_convergent) {
     solve_device_scalar(prog, x, b, operator_generation,
                         preconditioner_generation);
     return;
@@ -1336,6 +1830,7 @@ void CUCG::solve(Program *prog, const Ndarray &x, const Ndarray &b) {
   }
   residual_norm_ = std::sqrt(std::max(r1, 0.0f));
   total_iterations_ += static_cast<std::uint64_t>(iterations_);
+  last_executed_iterations_ = iterations_;
   if (breakdown || !std::isfinite(r1) ||
       !std::isfinite(initial_residual_norm_) ||
       !std::isfinite(residual_norm_)) {
@@ -1352,6 +1847,10 @@ void CUCG::solve(Program *prog, const Ndarray &x, const Ndarray &b) {
 SparseSolvePlanRuntimeStatistics CUCG::debug_runtime_statistics() const {
   std::lock_guard<std::mutex> lock(solve_mutex_);
   const auto operator_stats = A_.debug_runtime_statistics();
+  const bool chunked_execution =
+      execution_policy_ == SparseSolveExecutionPolicy::host_check_every_k ||
+      execution_policy_ == SparseSolveExecutionPolicy::bounded_convergent ||
+      execution_policy_ == SparseSolveExecutionPolicy::device_convergent;
   SparseSolvePlanRuntimeStatistics result;
   result.backend_family = "cuda";
   if (compiled_kernel_operator_ || compiled_graph_operator_) {
@@ -1396,7 +1895,7 @@ SparseSolvePlanRuntimeStatistics CUCG::debug_runtime_statistics() const {
   result.total_iterations = total_iterations_;
   result.logical_iterations = total_iterations_;
   result.executed_iterations =
-      execution_policy_ == SparseSolveExecutionPolicy::host_check_every_k
+      chunked_execution
           ? executed_iterations_
           : total_iterations_;
   result.wasted_iterations =
@@ -1422,17 +1921,65 @@ SparseSolvePlanRuntimeStatistics CUCG::debug_runtime_statistics() const {
   result.solver_chunk_replays = solver_chunk_replays_;
   result.solver_chunk_rebinds = solver_chunk_rebinds_;
   result.solver_chunk_invalidations = solver_chunk_invalidations_;
+  result.solver_chunk_submissions = solver_chunk_submissions_;
+  result.convergence_observations = convergence_observations_;
+  result.last_logical_iterations = iterations_;
+  result.last_executed_iterations = last_executed_iterations_;
+  result.last_convergence_observation_boundaries =
+      last_convergence_observation_boundaries_;
+  if (solver_chunk_replay_state_) {
+    result.solver_replay_executable_count =
+        static_cast<std::uint64_t>(std::count_if(
+            solver_chunk_replay_state_->entries.begin(),
+            solver_chunk_replay_state_->entries.end(),
+            [](const auto &entry) { return entry.executable != nullptr; }));
+  }
+  if (solver_conditional_replay_state_ &&
+      solver_conditional_replay_state_->entry.executable != nullptr) {
+    ++result.solver_replay_executable_count;
+  }
+  if (execution_policy_ == SparseSolveExecutionPolicy::bounded_convergent) {
+    result.solver_execution_policy = "host_check_every_k";
+    result.bounded_chunk_limit = host_check_interval_;
+    result.bounded_preferred_chunk_size = bounded_preferred_chunk_size_;
+    result.bounded_control_path = "cuda_graph_chunked_host_check";
+    result.bounded_chunk_schedule =
+        "first_solve:1,1,2,4,8,16;later:history_adaptive";
+  } else if (execution_policy_ ==
+             SparseSolveExecutionPolicy::device_convergent) {
+    result.bounded_chunk_limit = host_check_interval_;
+    if (last_native_conditional_used_) {
+      result.solver_execution_policy = "device_convergent";
+      result.bounded_preferred_chunk_size = 1;
+      result.bounded_control_path = "cuda_conditional_graph";
+      result.bounded_chunk_schedule = "device_while_exact";
+    } else {
+      result.solver_execution_policy = "host_check_every_k";
+      result.bounded_preferred_chunk_size = bounded_preferred_chunk_size_;
+      result.bounded_control_path =
+          "cuda_graph_chunked_host_check_fallback";
+      result.bounded_chunk_schedule =
+          "first_solve:1,1,2,4,8,16;later:history_adaptive";
+    }
+  }
   result.solver_graph_enabled = solver_chunk_builds_ > 0;
-  result.solver_replay_unavailable_reason =
-      execution_policy_ == SparseSolveExecutionPolicy::host_check_every_k
-          ? (result.solver_graph_enabled
-                 ? "none"
-                 : (solver_chunk_replay_state_
-                        ? solver_chunk_replay_state_->unavailable_reason
-                        : (native_solver_chunk_eligible()
-                               ? "not_built"
-                               : native_solver_chunk_unavailable_reason())))
-          : "not_requested";
+  if (execution_policy_ == SparseSolveExecutionPolicy::device_convergent) {
+    result.solver_replay_unavailable_reason =
+        last_native_conditional_used_
+            ? "none"
+            : last_native_conditional_fallback_reason_;
+  } else {
+    result.solver_replay_unavailable_reason =
+        chunked_execution
+            ? (result.solver_graph_enabled
+                   ? "none"
+                   : (solver_chunk_replay_state_
+                          ? solver_chunk_replay_state_->unavailable_reason
+                          : (native_solver_chunk_eligible()
+                                 ? "not_built"
+                                 : native_solver_chunk_unavailable_reason())))
+            : "not_requested";
+  }
   result.persistent_vector_count =
       workspace_ax_ != nullptr && workspace_r_ != nullptr &&
               workspace_p_ != nullptr &&
@@ -1447,8 +1994,7 @@ SparseSolvePlanRuntimeStatistics CUCG::debug_runtime_statistics() const {
   result.cublas_handle_count = handle_ != nullptr ? 1 : 0;
   result.cublas_stream_bound = cublas_stream_bound_;
   result.cublas_device_pointer_mode = cublas_device_pointer_mode_;
-  result.solver_scalar_location =
-      execution_policy_ == SparseSolveExecutionPolicy::host_check_every_k
+  result.solver_scalar_location = chunked_execution
           ? "device"
           : "host";
   result.solver_stream_policy = result.solver_graph_enabled
@@ -1457,6 +2003,7 @@ SparseSolvePlanRuntimeStatistics CUCG::debug_runtime_statistics() const {
   result.persistent_scalar_count = workspace_scalars_ ? 23 : 0;
   result.persistent_scalar_reserved_bytes =
       workspace_scalars_ ? sizeof(cuda::CudaCGScalarState) : 0;
+  result.solver_library_workspace_reserved_bytes = workspace_cublas_bytes_;
   result.device_to_device_bytes = device_to_device_bytes_;
   result.device_to_host_bytes = device_to_host_bytes_;
   result.host_to_device_bytes = host_to_device_bytes_;
@@ -2604,6 +3151,8 @@ SparseSolvePlanRuntimeStatistics CpuSparseCGPlan::debug_runtime_statistics()
   result.logical_iterations = total_iterations_;
   result.executed_iterations = total_iterations_;
   result.wasted_iterations = 0;
+  result.last_logical_iterations = iterations_;
+  result.last_executed_iterations = iterations_;
   result.workspace_builds = workspace_builds_;
   result.workspace_reuses = workspace_reuses_;
   result.operator_apply_calls = operator_apply_calls_;
@@ -2985,9 +3534,16 @@ void VulkanCGIterationPlan::configure_execution_policy(
   TI_ERROR_IF(policy == SparseSolveExecutionPolicy::host_check_every_k &&
                   host_check_interval != 4 && host_check_interval != 8,
               "Vulkan host_check_every_k currently supports K=4 or K=8.");
+  TI_ERROR_IF(policy == SparseSolveExecutionPolicy::bounded_convergent &&
+                  host_check_interval != 1 && host_check_interval != 2 &&
+                  host_check_interval != 4 && host_check_interval != 8 &&
+                  host_check_interval != 16,
+              "Vulkan bounded_convergent chunk limit must be one of "
+              "1, 2, 4, 8, or 16.");
   execution_policy_ = policy;
   host_check_interval_ =
-      policy == SparseSolveExecutionPolicy::host_check_every_k
+      policy == SparseSolveExecutionPolicy::host_check_every_k ||
+              policy == SparseSolveExecutionPolicy::bounded_convergent
           ? host_check_interval
           : fixed_iterations_;
 }
@@ -3087,6 +3643,8 @@ void VulkanCGIterationPlan::solve(Program *program,
   residual_norm_ = 0.0;
   relative_reference_norm_ = 0.0;
   effective_tolerance_ = static_cast<double>(absolute_tolerance_);
+  last_executed_iterations_ = 0;
+  last_convergence_observation_boundaries_.clear();
 
   auto *mutable_x = const_cast<Ndarray *>(&x);
   auto *mutable_b = const_cast<Ndarray *>(&b);
@@ -3102,10 +3660,34 @@ void VulkanCGIterationPlan::solve(Program *program,
   bool initial_terminal = false;
   std::uint64_t solve_host_readbacks = 0;
   std::uint64_t solve_host_synchronizations = 0;
+  std::uint64_t solve_host_readback_batches = 0;
   std::uint64_t solve_device_to_host_bytes = 0;
   const bool host_check_every_k =
       adaptive_ &&
-      execution_policy_ == SparseSolveExecutionPolicy::host_check_every_k;
+      (
+      execution_policy_ == SparseSolveExecutionPolicy::host_check_every_k ||
+       execution_policy_ == SparseSolveExecutionPolicy::bounded_convergent);
+  const bool batched_control_readback =
+      get_environ_config("TI_VULKAN_SOLVER_BATCHED_READBACK", 1) != 0;
+  auto read_host_batch = [&](const Ndarray *const *sources,
+                             void *const *destinations,
+                             const std::size_t *sizes,
+                             std::size_t count) {
+    if (batched_control_readback) {
+      program->copy_ndarrays_to_host(sources, destinations, sizes, count);
+      ++solve_host_readback_batches;
+      ++solve_host_synchronizations;
+      return;
+    }
+    program->synchronize();
+    ++solve_host_synchronizations;
+    for (std::size_t i = 0; i < count; ++i) {
+      program->copy_ndarray_to_host(const_cast<Ndarray *>(sources[i]),
+                                    destinations[i], sizes[i]);
+      ++solve_host_readback_batches;
+      ++solve_host_synchronizations;
+    }
+  };
   if (adaptive_) {
     program->vulkan_sparse_dot(mutable_b, mutable_b, rhs_squared_, n);
     program->vulkan_sparse_convergence(
@@ -3114,14 +3696,14 @@ void VulkanCGIterationPlan::solve(Program *program,
     if (host_check_every_k) {
       int32_t initial_status_host = 0;
       int32_t initial_completed_host = 0;
-      program->synchronize();
-      program->copy_ndarray_to_host(status_scalar_, &initial_status_host,
-                                    sizeof(initial_status_host));
-      program->copy_ndarray_to_host(completed_iterations_scalar_,
-                                    &initial_completed_host,
-                                    sizeof(initial_completed_host));
+      const Ndarray *sources[]{status_scalar_, completed_iterations_scalar_};
+      void *destinations[]{&initial_status_host, &initial_completed_host};
+      const std::size_t sizes[]{sizeof(initial_status_host),
+                                sizeof(initial_completed_host)};
+      read_host_batch(sources, destinations, sizes, std::size(sources));
       solve_host_readbacks += 2;
-      solve_host_synchronizations += 1;
+      ++convergence_observations_;
+      last_convergence_observation_boundaries_.push_back(0);
       solve_device_to_host_bytes += 2 * sizeof(int32_t);
       initial_terminal = initial_status_host != 0;
     }
@@ -3198,8 +3780,16 @@ void VulkanCGIterationPlan::solve(Program *program,
   while (!terminal && executed_this_solve < fixed_iterations_) {
     const int chunk_iterations =
         host_check_every_k
-            ? std::min(host_check_interval_,
-                       fixed_iterations_ - executed_this_solve)
+            ? (execution_policy_ ==
+                       SparseSolveExecutionPolicy::bounded_convergent
+                   ? (bounded_preferred_chunk_size_ > 0
+                          ? std::min(bounded_preferred_chunk_size_,
+                                     fixed_iterations_ - executed_this_solve)
+                          : bounded_chunk_iterations(
+                                chunk_slot_index, host_check_interval_,
+                                fixed_iterations_ - executed_this_solve))
+                   : std::min(host_check_interval_,
+                              fixed_iterations_ - executed_this_solve))
             : (native_chunk_requested
                    ? std::min(8, fixed_iterations_ - executed_this_solve)
                    : fixed_iterations_ - executed_this_solve);
@@ -3336,6 +3926,7 @@ void VulkanCGIterationPlan::solve(Program *program,
       }
     }
     executed_this_solve += chunk_iterations;
+    ++solver_chunk_submissions_;
     if (has_preconditioner()) {
       preconditioner_applies_this_solve +=
           static_cast<std::uint64_t>(chunk_iterations);
@@ -3344,14 +3935,14 @@ void VulkanCGIterationPlan::solve(Program *program,
     if (host_check_every_k) {
       int32_t chunk_status_host = 0;
       int32_t chunk_completed_host = 0;
-      program->synchronize();
-      program->copy_ndarray_to_host(status_scalar_, &chunk_status_host,
-                                    sizeof(chunk_status_host));
-      program->copy_ndarray_to_host(completed_iterations_scalar_,
-                                    &chunk_completed_host,
-                                    sizeof(chunk_completed_host));
+      const Ndarray *sources[]{status_scalar_, completed_iterations_scalar_};
+      void *destinations[]{&chunk_status_host, &chunk_completed_host};
+      const std::size_t sizes[]{sizeof(chunk_status_host),
+                                sizeof(chunk_completed_host)};
+      read_host_batch(sources, destinations, sizes, std::size(sources));
       solve_host_readbacks += 2;
-      solve_host_synchronizations += 1;
+      ++convergence_observations_;
+      last_convergence_observation_boundaries_.push_back(executed_this_solve);
       solve_device_to_host_bytes += 2 * sizeof(int32_t);
       terminal = chunk_status_host != 0;
     }
@@ -3363,25 +3954,22 @@ void VulkanCGIterationPlan::solve(Program *program,
   int32_t status_host = 0;
   int32_t completed_iterations_host = fixed_iterations_;
   float rhs_squared_host = 0.0f;
-  program->synchronize();
-  program->copy_ndarray_to_host(initial_rr_, &initial_rr_host,
-                                sizeof(initial_rr_host));
-  program->copy_ndarray_to_host(residual_norm_scalar_, &residual_norm_host,
-                                sizeof(residual_norm_host));
-  program->copy_ndarray_to_host(status_scalar_, &status_host,
-                                sizeof(status_host));
-  if (adaptive_) {
-    program->copy_ndarray_to_host(completed_iterations_scalar_,
-                                  &completed_iterations_host,
-                                  sizeof(completed_iterations_host));
-    if (relative_tolerance_ > 0.0f) {
-      program->copy_ndarray_to_host(rhs_squared_, &rhs_squared_host,
-                                    sizeof(rhs_squared_host));
-    }
-  }
+  const Ndarray *final_sources[]{initial_rr_, residual_norm_scalar_,
+                                 status_scalar_,
+                                 completed_iterations_scalar_, rhs_squared_};
+  void *final_destinations[]{&initial_rr_host, &residual_norm_host,
+                             &status_host, &completed_iterations_host,
+                             &rhs_squared_host};
+  const std::size_t final_sizes[]{sizeof(initial_rr_host),
+                                  sizeof(residual_norm_host),
+                                  sizeof(status_host),
+                                  sizeof(completed_iterations_host),
+                                  sizeof(rhs_squared_host)};
+  const std::size_t final_count =
+      adaptive_ ? (relative_tolerance_ > 0.0f ? 5 : 4) : 3;
+  read_host_batch(final_sources, final_destinations, final_sizes, final_count);
   solve_host_readbacks +=
       adaptive_ ? (relative_tolerance_ > 0.0f ? 5 : 4) : 3;
-  solve_host_synchronizations += 1;
   solve_device_to_host_bytes +=
       2 * sizeof(float32) +
       (adaptive_ ? (relative_tolerance_ > 0.0f ? sizeof(float32) : 0) +
@@ -3414,6 +4002,18 @@ void VulkanCGIterationPlan::solve(Program *program,
                 finite_residuals;
   total_iterations_ += static_cast<std::uint64_t>(iterations_);
   executed_iterations_ += static_cast<std::uint64_t>(executed_this_solve);
+  last_executed_iterations_ = executed_this_solve;
+  if (execution_policy_ == SparseSolveExecutionPolicy::bounded_convergent) {
+    if (iterations_ <= 1) {
+      bounded_preferred_chunk_size_ = 1;
+    } else if (iterations_ <= 4) {
+      bounded_preferred_chunk_size_ = std::min(2, host_check_interval_);
+    } else if (iterations_ <= 8) {
+      bounded_preferred_chunk_size_ = std::min(4, host_check_interval_);
+    } else {
+      bounded_preferred_chunk_size_ = std::min(8, host_check_interval_);
+    }
+  }
   operator_apply_calls_ +=
       static_cast<std::uint64_t>(executed_this_solve + 1);
   if (has_preconditioner()) {
@@ -3428,6 +4028,7 @@ void VulkanCGIterationPlan::solve(Program *program,
   device_to_device_bytes_ +=
       2 * static_cast<std::uint64_t>(n) * sizeof(float32) +
       (adaptive_ ? 3 : 2) * sizeof(uint32_t);
+  host_readback_batches_ += solve_host_readback_batches;
   device_to_host_bytes_ += solve_device_to_host_bytes;
 #else
   TI_NOT_IMPLEMENTED;
@@ -3511,6 +4112,10 @@ VulkanCGIterationPlan::debug_runtime_statistics() const {
   result.requested_solver_execution_policy =
       adaptive_ ? sparse_solve_execution_policy_name(execution_policy_)
                 : "fixed_budget";
+  result.host_readback_batches = host_readback_batches_;
+  result.control_readback_strategy =
+      get_environ_config("TI_VULKAN_SOLVER_BATCHED_READBACK", 1) != 0
+          ? "batched_rhi_readback" : "per_scalar_rhi_readback";
   result.solver_execution_policy =
       adaptive_ ? sparse_solve_execution_policy_name(execution_policy_)
                 : "fixed_budget";
@@ -3522,13 +4127,39 @@ VulkanCGIterationPlan::debug_runtime_statistics() const {
   result.solver_chunk_replays = solver_chunk_replays_;
   result.solver_chunk_rebinds = solver_chunk_rebinds_;
   result.solver_chunk_invalidations = solver_chunk_invalidations_;
+  result.solver_chunk_submissions = solver_chunk_submissions_;
+  result.convergence_observations = convergence_observations_;
+  result.last_logical_iterations = iterations_;
+  result.last_executed_iterations = last_executed_iterations_;
+  result.last_convergence_observation_boundaries =
+      last_convergence_observation_boundaries_;
+  if (solver_chunk_replay_state_) {
+    result.solver_replay_executable_count =
+        static_cast<std::uint64_t>(std::count_if(
+            solver_chunk_replay_state_->slots.begin(),
+            solver_chunk_replay_state_->slots.end(), [](const auto &slot) {
+              return slot && slot->cache.entry.cmdlist != nullptr;
+            }));
+  }
+  if (adaptive_ &&
+      execution_policy_ == SparseSolveExecutionPolicy::bounded_convergent) {
+    result.solver_execution_policy = "host_check_every_k";
+    result.bounded_chunk_limit = host_check_interval_;
+    result.bounded_preferred_chunk_size = bounded_preferred_chunk_size_;
+    result.bounded_control_path = "vulkan_command_chunked_host_check";
+    result.bounded_chunk_schedule =
+        "first_solve:1,1,2,4,8,16;later:history_adaptive";
+  }
   result.solver_graph_enabled = solver_chunk_builds_ > 0;
   result.solver_replay_unavailable_reason =
       result.solver_graph_enabled
           ? "none"
           : ((adaptive_ &&
+              (
               execution_policy_ ==
-                  SparseSolveExecutionPolicy::host_check_every_k)
+                  SparseSolveExecutionPolicy::host_check_every_k ||
+               execution_policy_ ==
+                   SparseSolveExecutionPolicy::bounded_convergent))
                  ? (solver_chunk_replay_state_
                         ? solver_chunk_replay_state_->unavailable_reason
                         : (((csr_matrix_ != nullptr || bsr_matrix_ != nullptr) &&

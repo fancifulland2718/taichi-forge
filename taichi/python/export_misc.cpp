@@ -23,6 +23,7 @@
 #include "taichi/util/offline_cache.h"
 #if defined(TI_WITH_CUDA)
 #include "taichi/rhi/cuda/cuda_driver.h"
+#include "taichi/rhi/cuda/primitives/solver_ptx.h"
 #endif
 
 #include "taichi/platform/amdgpu/detect_amdgpu.h"
@@ -162,8 +163,7 @@ void export_misc(py::module &m) {
     d["used_bytes"] = s.used_bytes;
     d["available_bytes"] = s.available_bytes;
     d["alignment_waste_bytes"] = s.alignment_waste_bytes;
-    d["unreclaimed_released_bytes"] =
-        s.unreclaimed_released_bytes;
+    d["unreclaimed_released_bytes"] = s.unreclaimed_released_bytes;
     d["wasted_bytes"] = s.wasted_bytes;
     d["slab_chunks"] = s.slab_chunks;
     d["large_chunks"] = s.large_chunks;
@@ -195,6 +195,71 @@ void export_misc(py::module &m) {
   m.def("get_python_package_dir", get_python_package_dir);
   m.def("set_python_package_dir", set_python_package_dir);
   m.def("cuda_version", get_cuda_version_string);
+  m.def("cuda_driver_api_version", []() -> py::object {
+#if defined(TI_WITH_CUDA)
+    auto &driver = taichi::lang::CUDADriver::get_instance_without_context();
+    if (!driver.detected()) {
+      return py::none();
+    }
+    return py::int_(driver.get_version_major() * 1000 +
+                    driver.get_version_minor() * 10);
+#else
+    return py::none();
+#endif
+  });
+  m.def("cuda_conditional_graph_capabilities", []() {
+    py::dict result;
+#if defined(TI_WITH_CUDA)
+    auto &driver = taichi::lang::CUDADriver::get_instance_without_context();
+    const bool driver_loaded = driver.detected();
+    const int driver_api_version = driver_loaded
+                                       ? driver.get_version_major() * 1000 +
+                                             driver.get_version_minor() * 10
+                                       : 0;
+    result["driver_loaded"] = driver_loaded;
+    result["driver_api_version"] =
+        driver_loaded ? py::cast(driver_api_version) : py::none();
+    result["minimum_driver_api_version"] = 12080;
+    result["driver_version_eligible"] =
+        driver_loaded && driver_api_version >= 12080;
+    const bool symbols_loaded =
+        driver_loaded && driver.stream_begin_capture_to_graph.available() &&
+        driver.stream_end_capture.available() &&
+        driver.graph_create.available() &&
+        driver.graph_conditional_handle_create.available() &&
+        driver.graph_add_node.available() &&
+        driver.graph_instantiate_with_flags.available() &&
+        driver.graph_launch.available() && driver.graph_destroy.available() &&
+        driver.graph_exec_destroy.available();
+    const bool setter_compiled =
+        taichi::lang::cuda::driver_cg_conditional_setter_compiled();
+    auto &cublas = taichi::lang::CUBLASDriver::get_instance();
+    const bool cublas_loaded =
+        cublas.is_loaded() ? true : cublas.load_cublas();
+    const bool cublas_workspace_symbol_loaded =
+        cublas_loaded && cublas.cubSetWorkspace.available();
+    result["conditional_graph_symbols_loaded"] = symbols_loaded;
+    result["device_setter_lowering_compiled"] = setter_compiled;
+    result["runtime_path_compiled"] = true;
+    result["cublas_workspace_symbol_loaded"] =
+        cublas_workspace_symbol_loaded;
+    result["fully_available"] = driver_loaded &&
+                                  driver_api_version >= 12080 &&
+                                  symbols_loaded && setter_compiled &&
+                                  cublas_workspace_symbol_loaded;
+#else
+    result["driver_loaded"] = false;
+    result["driver_api_version"] = py::none();
+    result["minimum_driver_api_version"] = 12080;
+    result["driver_version_eligible"] = false;
+    result["conditional_graph_symbols_loaded"] = false;
+    result["device_setter_lowering_compiled"] = false;
+    result["runtime_path_compiled"] = false;
+    result["cublas_workspace_symbol_loaded"] = false;
+    result["fully_available"] = false;
+#endif
+    return result;
+  });
   m.def("test_cpp_exception", [] {
     try {
       throw std::exception();

@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
+
 #if defined(TI_WITH_CUDA_TOOLKIT_HEADERS)
 
 #include <cublas_v2.h>
@@ -618,3 +621,35 @@ struct cublasContext;
 typedef struct cublasContext *cublasHandle_t;
 
 #endif
+
+// Stable ABI shims for CUDA conditional graph nodes. They intentionally use
+// only fixed-width and opaque types so driver-only builds do not require a
+// CUDA toolkit header. CUDA 12.8 defines CUgraphNodeParams as 256 bytes with
+// a 232-byte parameter union.
+struct TaichiCudaConditionalNodeParams {
+  std::uint64_t handle;
+  std::uint32_t type;
+  std::uint32_t size;
+  CUgraph *ph_graph_out;
+  void *context;
+};
+
+struct TaichiCudaGraphNodeParams {
+  std::uint32_t type;
+  std::int32_t reserved0[3];
+  union {
+    std::int64_t reserved1[29];
+    TaichiCudaConditionalNodeParams conditional;
+  } parameters;
+  std::int64_t reserved2;
+};
+
+static_assert(sizeof(TaichiCudaConditionalNodeParams) == 32);
+static_assert(offsetof(TaichiCudaConditionalNodeParams, handle) == 0);
+static_assert(offsetof(TaichiCudaConditionalNodeParams, type) == 8);
+static_assert(offsetof(TaichiCudaConditionalNodeParams, size) == 12);
+static_assert(offsetof(TaichiCudaConditionalNodeParams, ph_graph_out) == 16);
+static_assert(offsetof(TaichiCudaConditionalNodeParams, context) == 24);
+static_assert(sizeof(TaichiCudaGraphNodeParams) == 256);
+static_assert(offsetof(TaichiCudaGraphNodeParams, parameters) == 16);
+static_assert(offsetof(TaichiCudaGraphNodeParams, reserved2) == 248);

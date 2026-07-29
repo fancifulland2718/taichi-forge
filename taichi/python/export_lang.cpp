@@ -4903,6 +4903,11 @@ void export_lang(py::module &m) {
         identity["requested_solver_execution_policy"] =
             stats.requested_solver_execution_policy;
         identity["host_check_interval"] = stats.host_check_interval;
+        identity["bounded_chunk_limit"] = stats.bounded_chunk_limit;
+        identity["bounded_preferred_chunk_size"] =
+            stats.bounded_preferred_chunk_size;
+        identity["bounded_control_path"] = stats.bounded_control_path;
+        identity["bounded_chunk_schedule"] = stats.bounded_chunk_schedule;
         identity["solver_graph_enabled"] =
             stats.solver_graph_enabled;
         identity["solver_replay_unavailable_reason"] =
@@ -4911,6 +4916,8 @@ void export_lang(py::module &m) {
             stats.solver_scalar_location;
         identity["solver_stream_policy"] =
             stats.solver_stream_policy;
+        identity["control_readback_strategy"] =
+            stats.control_readback_strategy;
         identity["preconditioning_side"] = stats.preconditioning_side;
         identity["preconditioner_action_provider"] =
             stats.preconditioner_action_provider;
@@ -4962,6 +4969,8 @@ void export_lang(py::module &m) {
             stats.device_scalar_operations;
         operations["host_scalar_readbacks"] =
             stats.host_scalar_readbacks;
+        operations["host_readback_batches"] =
+            stats.host_readback_batches;
         operations["host_synchronizations"] =
             stats.host_synchronizations;
         operations["logical_iterations"] =
@@ -4982,6 +4991,12 @@ void export_lang(py::module &m) {
             stats.solver_chunk_rebinds;
         operations["solver_chunk_invalidations"] =
             stats.solver_chunk_invalidations;
+        operations["solver_chunk_submissions"] = stats.solver_chunk_submissions;
+        operations["convergence_observations"] = stats.convergence_observations;
+        operations["last_logical_iterations"] = stats.last_logical_iterations;
+        operations["last_executed_iterations"] = stats.last_executed_iterations;
+        operations["last_convergence_observation_boundaries"] =
+            stats.last_convergence_observation_boundaries;
         operations["restart_cycles"] = stats.restart_cycles;
         operations["happy_breakdowns"] = stats.happy_breakdowns;
         operations["restart"] = stats.restart;
@@ -5061,6 +5076,8 @@ void export_lang(py::module &m) {
             stats.persistent_scalar_count;
         resources["persistent_scalar_reserved_bytes"] =
             stats.persistent_scalar_reserved_bytes;
+        resources["solver_library_workspace_reserved_bytes"] =
+            stats.solver_library_workspace_reserved_bytes;
         resources["basis_vector_count"] =
             stats.basis_vector_count;
         resources["basis_reserved_bytes"] =
@@ -5069,6 +5086,9 @@ void export_lang(py::module &m) {
             stats.preconditioned_basis_vector_count;
         resources["preconditioned_basis_reserved_bytes"] =
             stats.preconditioned_basis_reserved_bytes;
+        resources["solver_replay_executable_count"] =
+            stats.solver_replay_executable_count;
+        resources["solver_replay_opaque_bytes"] = py::none();
         resources["cublas_handle_count"] = stats.cublas_handle_count;
         resources["cublas_stream_bound"] =
             stats.cublas_stream_bound;
@@ -5170,7 +5190,8 @@ void export_lang(py::module &m) {
                                       : "preconditioner_inverse";
         resources["excluded"] =
             external_inverse_operator
-                ? "target_inverse_operators_input_output_and_program_shared_cache"
+                ? "target_inverse_operators_input_output_and_program_shared_"
+                  "cache"
                 : "operator_input_output_and_program_shared_cache";
 
         py::dict transfers;
@@ -6650,7 +6671,8 @@ void export_lang(py::module &m) {
       .def("solve", &CUCG::solve)
       .def(
           "_configure_execution_policy",
-          [](CUCG &cg, const std::string &policy, int check_interval) {
+          [](CUCG &cg, const std::string &policy, int check_interval,
+             bool require_native) {
             SparseSolveExecutionPolicy native_policy;
             if (policy == "host_each_iteration") {
               native_policy =
@@ -6658,13 +6680,19 @@ void export_lang(py::module &m) {
             } else if (policy == "host_check_every_k") {
               native_policy =
                   SparseSolveExecutionPolicy::host_check_every_k;
+            } else if (policy == "bounded_convergent") {
+              native_policy = SparseSolveExecutionPolicy::bounded_convergent;
+            } else if (policy == "device_convergent") {
+              native_policy = SparseSolveExecutionPolicy::device_convergent;
             } else {
               TI_ERROR("Unsupported CUDA CG execution policy '{}'.",
                        policy);
             }
-            cg.configure_execution_policy(native_policy, check_interval);
+            cg.configure_execution_policy(native_policy, check_interval,
+                                          require_native);
           },
-          py::arg("policy"), py::arg("check_interval"))
+          py::arg("policy"), py::arg("check_interval"),
+          py::arg("require_native") = false)
       .def("is_success", &CUCG::is_success)
       .def("get_status", &CUCG::get_status)
       .def("get_iterations", &CUCG::get_iterations)
@@ -6845,6 +6873,8 @@ void export_lang(py::module &m) {
             if (policy == "host_check_every_k") {
               native_policy =
                   SparseSolveExecutionPolicy::host_check_every_k;
+            } else if (policy == "bounded_convergent") {
+              native_policy = SparseSolveExecutionPolicy::bounded_convergent;
             } else if (policy == "fixed_budget_masked") {
               native_policy =
                   SparseSolveExecutionPolicy::fixed_budget_masked;

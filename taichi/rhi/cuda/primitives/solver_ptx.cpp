@@ -250,6 +250,44 @@ DIRECTION_MASKED:
 }
 )ptx";
 
+const char kCudaCGConditionalPtx[] = R"ptx(
+.version 6.0
+.target sm_50
+.address_size 64
+
+.extern .func cudaGraphSetConditional(
+    .param .b64 handle_param,
+    .param .b32 value_param
+);
+
+.visible .entry cg_set_conditional(
+    .param .u64 state_param,
+    .param .u64 handle_param,
+    .param .u32 max_iterations_param
+)
+{
+    .reg .pred %p<4>;
+    .reg .b32 %r<5>;
+    .reg .b64 %rd<3>;
+    .param .b64 call_handle;
+    .param .b32 call_value;
+
+    ld.param.u64 %rd1, [state_param];
+    ld.param.u64 %rd2, [handle_param];
+    ld.param.u32 %r1, [max_iterations_param];
+    ld.global.u32 %r2, [%rd1+80];
+    ld.global.u32 %r3, [%rd1+84];
+    setp.ne.u32 %p1, %r3, 0;
+    setp.lt.u32 %p2, %r2, %r1;
+    and.pred %p3, %p1, %p2;
+    selp.u32 %r4, 1, 0, %p3;
+    st.param.b64 [call_handle], %rd2;
+    st.param.b32 [call_value], %r4;
+    call.uni cudaGraphSetConditional, (call_handle, call_value);
+    ret;
+}
+)ptx";
+
 std::once_flag module_once;
 void *module{nullptr};
 void *initialize_func{nullptr};
@@ -257,6 +295,9 @@ void *validate_rho_func{nullptr};
 void *prepare_alpha_func{nullptr};
 void *finish_iteration_func{nullptr};
 void *prepare_direction_func{nullptr};
+std::once_flag conditional_module_once;
+void *conditional_module{nullptr};
+void *set_conditional_func{nullptr};
 
 void load_module_once() {
   auto &context = CUDAContext::get_instance();
@@ -272,6 +313,16 @@ void load_module_once() {
                              "cg_prepare_direction");
 }
 
+void load_conditional_module_once() {
+  auto &context = CUDAContext::get_instance();
+  auto context_guard = context.get_guard();
+  auto &driver = CUDADriver::get_instance();
+  driver.module_load_data_ex(&conditional_module, kCudaCGConditionalPtx, 0,
+                             nullptr, nullptr);
+  driver.module_get_function(&set_conditional_func, conditional_module,
+                             "cg_set_conditional");
+}
+
 void launch_scalar(void *function,
                    const char *name,
                    CudaCGScalarState *state,
@@ -285,10 +336,22 @@ void ensure_module() {
   std::call_once(module_once, load_module_once);
 }
 
+void ensure_conditional_module() {
+  std::call_once(conditional_module_once, load_conditional_module_once);
+}
+
 }  // namespace
 
 bool driver_cg_scalar_available() {
   return CUDADriver::get_instance_without_context().detected();
+}
+
+bool driver_cg_conditional_setter_compiled() {
+  return true;
+}
+
+void driver_cg_prepare_conditional_setter() {
+  ensure_conditional_module();
 }
 
 void driver_cg_initialize(CudaCGScalarState *state, void *stream) {
@@ -316,6 +379,19 @@ void driver_cg_prepare_direction(CudaCGScalarState *state, void *stream) {
   ensure_module();
   launch_scalar(prepare_direction_func, "cuda_cg_prepare_direction", state,
                 stream);
+}
+
+void driver_cg_set_conditional(CudaCGScalarState *state,
+                               std::uint64_t conditional_handle,
+                               int max_iterations,
+                               void *stream) {
+  ensure_conditional_module();
+  void *state_arg = state;
+  void *handle_arg = &conditional_handle;
+  void *max_iterations_arg = &max_iterations;
+  CUDAContext::get_instance().launch(
+      set_conditional_func, "cuda_cg_set_conditional",
+      {&state_arg, handle_arg, max_iterations_arg}, {}, 1, 1, 0, stream);
 }
 
 }  // namespace taichi::lang::cuda

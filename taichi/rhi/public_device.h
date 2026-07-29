@@ -443,6 +443,18 @@ class RHI_DLL_EXPORT CommandList {
                              uint32_t y = 1,
                              uint32_t z = 1) noexcept = 0;
 
+  /**
+   * Enqueues a compute operation whose {X, Y, Z} workgroup counts are read
+   * from three consecutive uint32 values in `indirect`.
+   * - `indirect.offset` must be aligned to 4 bytes.
+   * - The backing allocation must have at least 12 bytes available from the
+   *   offset and be created with `AllocUsage::Indirect`.
+   * - Backends without indirect-dispatch support return `not_supported`.
+   */
+  virtual RhiResult dispatch_indirect(DevicePtr indirect) noexcept {
+    return RhiResult::not_supported;
+  }
+
   struct ComputeSize {
     uint32_t x{0};
     uint32_t y{0};
@@ -566,6 +578,7 @@ enum class AllocUsage : int {
   Vertex = 4,
   Index = 8,
   Upload = 16,
+  Indirect = 32,
 };
 
 MAKE_ENUM_FLAGS(AllocUsage)

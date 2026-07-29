@@ -395,6 +395,16 @@ bool CUBLASDriver::load_cublas() {
   name.set_names(#name, #symbol_name);
 #include "taichi/rhi/cuda/cublas_functions.inc.h"
 #undef PER_CUBLAS_FUNCTION
+  auto *set_workspace =
+      loader_->load_function_optional("cublasSetWorkspace_v2");
+  const char *set_workspace_symbol = "cublasSetWorkspace_v2";
+  if (!set_workspace) {
+    set_workspace = loader_->load_function_optional("cublasSetWorkspace");
+    set_workspace_symbol = "cublasSetWorkspace";
+  }
+  cubSetWorkspace.set(set_workspace);
+  cubSetWorkspace.set_lock(&lock_);
+  cubSetWorkspace.set_names("cubSetWorkspace", set_workspace_symbol);
   return cublas_loaded_;
 }
 

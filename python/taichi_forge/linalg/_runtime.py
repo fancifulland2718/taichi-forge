@@ -1706,7 +1706,9 @@ def _validate_solve_controls(dtype, max_iterations, atol, rtol):
     return max_iterations, atol, rtol
 
 
-def _solver_execution_capabilities(program, provider_kind, *, batched):
+def _solver_execution_capabilities(
+    program, provider_kind, *, batched, method=None, dtype=None
+):
     arch = program.config().arch
     cpu_arches = (_ti_core.Arch.x64, _ti_core.Arch.arm64)
     is_cpu = arch in cpu_arches
@@ -1714,7 +1716,23 @@ def _solver_execution_capabilities(program, provider_kind, *, batched):
     is_vulkan = arch == _ti_core.Arch.vulkan
     if is_cuda:
         conditional_primitive = "cuda_conditional_graph"
-        unavailable_reason = "cuda_conditional_graph_runtime_path_not_compiled"
+        cuda_conditional = dict(
+            _ti_core.cuda_conditional_graph_capabilities()
+        )
+        if not cuda_conditional["driver_version_eligible"]:
+            unavailable_reason = "cuda_driver_api_version_below_12_8"
+        elif not cuda_conditional["conditional_graph_symbols_loaded"]:
+            unavailable_reason = "cuda_conditional_graph_symbols_not_loaded"
+        elif not cuda_conditional["device_setter_lowering_compiled"]:
+            unavailable_reason = "cuda_conditional_setter_lowering_not_compiled"
+        elif not cuda_conditional["runtime_path_compiled"]:
+            unavailable_reason = (
+                "cuda_conditional_graph_runtime_path_not_compiled"
+            )
+        elif not cuda_conditional["cublas_workspace_symbol_loaded"]:
+            unavailable_reason = "cublas_user_workspace_symbol_not_loaded"
+        else:
+            unavailable_reason = "none"
         prerequisites = (
             "conditional graph driver functions in the CUDA dynamic table",
             "device-side conditional-handle setter lowering",
@@ -1746,26 +1764,86 @@ def _solver_execution_capabilities(program, provider_kind, *, batched):
         unavailable_reason = "device_convergent_is_gpu_only"
         prerequisites = ()
 
+    bounded_qualified = (
+        not batched
+        and provider_kind == "stored"
+        and method in ("cg", "pcg")
+        and dtype == f32
+        and (is_cpu or is_cuda or is_vulkan)
+    )
+    if is_cpu:
+        bounded_primitive = "native_cpu_solver_loop"
+    elif is_cuda:
+        bounded_primitive = "cuda_graph_chunked_host_check"
+    elif is_vulkan:
+        bounded_primitive = "vulkan_command_chunked_host_check"
+    else:
+        bounded_primitive = "none"
+
     policies = {
         "host_each_iteration": is_cpu or (batched and (is_cuda or is_vulkan)),
         "host_check_every_k": is_cuda or is_vulkan,
         "fixed_budget_masked": is_vulkan or (
             batched and is_cuda
         ),
-        "device_convergent": False,
+        "bounded_convergent": bounded_qualified,
+        "device_convergent": (
+            bounded_qualified
+            and is_cuda
+            and cuda_conditional["fully_available"]
+        ),
     }
+    native_upgrade_available = (
+        bounded_qualified
+        and is_cuda
+        and cuda_conditional["fully_available"]
+    )
+    device_unavailable_reason = (
+        unavailable_reason
+        if bounded_qualified
+        else "solver_contract_not_qualified_for_device_convergent"
+    )
     return {
         "backend": _ti_core.arch_name(arch),
         "provider_kind": provider_kind,
         "execution_policies": policies,
+        "bounded_convergent": {
+            "supported": bounded_qualified,
+            "primitive": bounded_primitive,
+            "qualified_methods": ("cg", "pcg"),
+            "qualified_provider_kinds": ("stored",),
+            "qualified_dtypes": ("f32",),
+            "chunk_schedule": (1, 1, 2, 4, 8, 16),
+            "host_observation_scope": (
+                "none_inside_python"
+                if is_cpu
+                else "chunk_boundaries_only"
+            ),
+            "native_upgrade_available": native_upgrade_available,
+            "native_upgrade_primitive": conditional_primitive,
+            "native_upgrade_unavailable_reason": unavailable_reason,
+        },
         "device_convergent": {
-            "supported": False,
+            "supported": policies["device_convergent"],
             "primitive": conditional_primitive,
-            "runtime_path_compiled": False,
-            "provider_qualified": False,
-            "unsupported_reason": unavailable_reason,
+            "rhi_primitive_compiled": is_vulkan,
+            "runtime_path_compiled": (
+                cuda_conditional["runtime_path_compiled"]
+                if is_cuda
+                else False
+            ),
+            "provider_qualified": bounded_qualified and is_cuda,
+            "unsupported_reason": (
+                "none"
+                if policies["device_convergent"]
+                else device_unavailable_reason
+            ),
             "prerequisites": prerequisites,
         },
+        "cuda_conditional_graph": (
+            cuda_conditional if is_cuda else None
+        ),
+        "bounded_mode_selection": True,
         "automatic_policy_change": False,
         "explicit_request_fallback": False,
     }
@@ -2251,6 +2329,7 @@ class SolvePlan:
         rtol=0.0,
         execution_policy=None,
         check_interval=None,
+        bounded_mode="auto",
         restart=None,
     ):
         if not isinstance(operator, LinearOperator):
@@ -2303,6 +2382,18 @@ class SolvePlan:
             )
         self.restart = restart
         self._program = _current_program()
+        if not isinstance(bounded_mode, str):
+            raise TaichiRuntimeError("bounded_mode must be a string")
+        self.bounded_mode = bounded_mode.casefold()
+        if self.bounded_mode not in (
+            "auto",
+            "portable",
+            "native_required",
+        ):
+            raise TaichiRuntimeError(
+                "bounded_mode must be 'auto', 'portable', or "
+                "'native_required'"
+            )
         self.execution_policy, self.check_interval = (
             self._normalize_execution_policy(
                 execution_policy, check_interval
@@ -2344,28 +2435,79 @@ class SolvePlan:
         if not isinstance(policy, str):
             raise TaichiRuntimeError("execution_policy must be a string")
         policy = policy.casefold()
+        self.requested_execution_policy = policy
+        self._native_execution_policy = policy
+        self._require_native_device_convergent = False
+        if policy != "bounded_convergent" and self.bounded_mode != "auto":
+            raise TaichiRuntimeError(
+                "bounded_mode is configurable only with "
+                "execution_policy='bounded_convergent'"
+            )
+        if policy == "bounded_convergent":
+            capabilities = _solver_execution_capabilities(
+                self._program,
+                self.operator._provider_kind,
+                batched=False,
+                method=self.method,
+                dtype=self.operator.dtype,
+            )
+            bounded = capabilities["bounded_convergent"]
+            if not bounded["supported"]:
+                raise TaichiRuntimeError(
+                    "SolvePlan execution_policy='bounded_convergent' is "
+                    "not qualified for this method/provider/dtype; no "
+                    "fallback was performed"
+                )
+            if (
+                self.bounded_mode == "native_required"
+                and not bounded["native_upgrade_available"]
+            ):
+                raise TaichiRuntimeError(
+                    "SolvePlan bounded_mode='native_required' is "
+                    "unsupported; no fallback was performed: "
+                    f"{bounded['native_upgrade_unavailable_reason']}"
+                )
+            if (
+                arch == _ti_core.Arch.cuda
+                and self.bounded_mode != "portable"
+                and bounded["native_upgrade_available"]
+            ):
+                self._native_execution_policy = "device_convergent"
+                self._require_native_device_convergent = (
+                    self.bounded_mode == "native_required"
+                )
         if policy == "device_convergent":
             capability = _solver_execution_capabilities(
                 self._program,
                 self.operator._provider_kind,
                 batched=False,
+                method=self.method,
+                dtype=self.operator.dtype,
             )["device_convergent"]
-            raise TaichiRuntimeError(
-                "SolvePlan execution_policy='device_convergent' is "
-                "unsupported; no fallback was performed: "
-                f"{capability['unsupported_reason']}"
-            )
-        if arch in cpu_arches:
-            if policy != "host_each_iteration":
+            if not capability["supported"]:
                 raise TaichiRuntimeError(
-                    "CPU SolvePlan supports host_each_iteration only"
+                    "SolvePlan execution_policy='device_convergent' is "
+                    "unsupported; no fallback was performed: "
+                    f"{capability['unsupported_reason']}"
+                )
+            self._require_native_device_convergent = True
+        if arch in cpu_arches:
+            if policy not in ("host_each_iteration", "bounded_convergent"):
+                raise TaichiRuntimeError(
+                    "CPU SolvePlan supports host_each_iteration or "
+                    "bounded_convergent"
                 )
             expected_interval = 1
         elif arch == _ti_core.Arch.cuda:
             supported = (
                 ("host_check_every_k",)
                 if self.method in ("gmres", "fgmres")
-                else ("host_each_iteration", "host_check_every_k")
+                else (
+                    "host_each_iteration",
+                    "host_check_every_k",
+                    "bounded_convergent",
+                    "device_convergent",
+                )
             )
             if policy not in supported:
                 raise TaichiRuntimeError(
@@ -2377,12 +2519,20 @@ class SolvePlan:
             expected_interval = (
                 self.restart
                 if self.method in ("gmres", "fgmres")
-                else (4 if policy == "host_check_every_k" else 1)
+                else (
+                    16
+                    if policy in (
+                        "bounded_convergent",
+                        "device_convergent",
+                    )
+                    else (4 if policy == "host_check_every_k" else 1)
+                )
             )
         elif arch == _ti_core.Arch.vulkan:
             if policy not in (
                 "fixed_budget_masked",
                 "host_check_every_k",
+                "bounded_convergent",
             ):
                 raise TaichiRuntimeError(
                     "Vulkan SolvePlan supports fixed_budget_masked or "
@@ -2393,9 +2543,13 @@ class SolvePlan:
                 if self.method == "gmres"
                 and policy == "host_check_every_k"
                 else (
-                    4
-                    if policy == "host_check_every_k"
-                    else self.max_iterations
+                    16
+                    if policy == "bounded_convergent"
+                    else (
+                        4
+                        if policy == "host_check_every_k"
+                        else self.max_iterations
+                    )
                 )
             )
         else:
@@ -2412,9 +2566,17 @@ class SolvePlan:
             ) from exc
         if check_interval <= 0:
             raise TaichiRuntimeError("check_interval must be a positive integer")
-        if policy != "host_check_every_k" and check_interval != expected_interval:
+        if policy not in (
+            "host_check_every_k",
+            "bounded_convergent",
+            "device_convergent",
+        ) and (
+            check_interval != expected_interval
+        ):
             raise TaichiRuntimeError(
-                "check_interval is configurable only for host_check_every_k"
+                "check_interval is configurable only for "
+                "host_check_every_k, bounded_convergent, or "
+                "device_convergent"
             )
         if (
             self.method in ("gmres", "fgmres")
@@ -2433,16 +2595,36 @@ class SolvePlan:
             raise TaichiRuntimeError(
                 "host_check_every_k currently supports K=4 or K=8"
             )
+        if policy in (
+            "bounded_convergent",
+            "device_convergent",
+        ) and check_interval not in (
+            1,
+            2,
+            4,
+            8,
+            16,
+        ):
+            raise TaichiRuntimeError(
+                "bounded/device convergent check_interval is the portable "
+                "fallback chunk limit "
+                "and must be one of 1, 2, 4, 8, or 16"
+            )
         return policy, check_interval
 
     def _configure_cuda_solver(self, solver):
         solver._configure_execution_policy(
-            self.execution_policy, self.check_interval
+            self._native_execution_policy,
+            self.check_interval,
+            self._require_native_device_convergent,
         )
         return solver
 
     def _configure_vulkan_solver(self, solver):
-        if self.execution_policy == "host_check_every_k":
+        if self.execution_policy in (
+            "host_check_every_k",
+            "bounded_convergent",
+        ):
             solver._configure_execution_policy(
                 self.execution_policy, self.check_interval
             )
@@ -3294,10 +3476,68 @@ class SolvePlan:
             raise TaichiRuntimeError("SolvePlan cannot be used after ti.reset()")
         self.operator._ensure_valid()
         result = dict(self._solver._debug_runtime_stats())
+        identity = result["identity"]
+        identity["requested_solver_execution_policy"] = (
+            self.requested_execution_policy
+        )
+        identity["bounded_mode"] = self.bounded_mode
+        if self.execution_policy == "bounded_convergent":
+            native_used = (
+                identity["solver_execution_policy"]
+                == "device_convergent"
+            )
+            identity["bounded_native_upgrade_used"] = native_used
+            bounded = self.execution_capabilities()["bounded_convergent"]
+            if native_used:
+                native_reason = "none"
+            elif self.bounded_mode == "portable":
+                native_reason = "portable_mode_selected"
+            elif bounded["native_upgrade_available"]:
+                native_reason = identity[
+                    "solver_replay_unavailable_reason"
+                ]
+            else:
+                native_reason = bounded[
+                    "native_upgrade_unavailable_reason"
+                ]
+            identity["bounded_native_upgrade_unavailable_reason"] = (
+                native_reason
+            )
+            identity["bounded_internal_execution_policy"] = (
+                self._native_execution_policy
+            )
+            if self._program.config().arch in (
+                _ti_core.Arch.x64,
+                _ti_core.Arch.arm64,
+            ):
+                identity["solver_execution_policy"] = (
+                    "host_each_iteration"
+                )
+                identity["bounded_chunk_limit"] = 1
+                identity["bounded_control_path"] = "native_cpu_solver_loop"
+                identity["bounded_chunk_schedule"] = "every_iteration"
+        else:
+            identity["bounded_native_upgrade_used"] = False
+            identity["bounded_native_upgrade_unavailable_reason"] = (
+                "not_requested"
+            )
+            identity["bounded_internal_execution_policy"] = (
+                self._native_execution_policy
+            )
         if isinstance(self.preconditioner, PreconditionerPlan):
             result["preconditioner_lifecycle"] = (
                 self.preconditioner.statistics()
             )
+        result["default_solution_binding"] = {
+            "enabled": False,
+            "workspace_allocated": False,
+            "workspace_builds": 0,
+            "workspace_reuses": 0,
+            "result_copies": 0,
+            "return_ownership": "independent_result",
+            "disabled_reason": "independent_result_requires_allocation",
+            "fast_path": "pass_explicit_out",
+        }
         result["vector_io"] = self._vector_io.statistics()
         result["execution_capabilities"] = self.execution_capabilities()
         return result
@@ -3311,6 +3551,8 @@ class SolvePlan:
             self._program,
             self.operator._provider_kind,
             batched=False,
+            method=self.method,
+            dtype=self.operator.dtype,
         )
         result["vector_io"] = _vector_io_capabilities()
         return result

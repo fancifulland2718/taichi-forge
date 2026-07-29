@@ -1280,6 +1280,24 @@ RhiResult VulkanCommandList::dispatch(uint32_t x,
   return RhiResult::success;
 }
 
+RhiResult VulkanCommandList::dispatch_indirect(DevicePtr indirect) noexcept {
+  constexpr size_t kDispatchIndirectCommandSize = 3 * sizeof(uint32_t);
+  if ((indirect.offset & (sizeof(uint32_t) - 1)) != 0) {
+    return RhiResult::invalid_usage;
+  }
+  const size_t buffer_size = ti_device_->get_vkbuffer_size(indirect);
+  if (indirect.offset > buffer_size ||
+      kDispatchIndirectCommandSize > buffer_size - indirect.offset) {
+    return RhiResult::invalid_usage;
+  }
+
+  auto indirect_buffer = ti_device_->get_vkbuffer(indirect);
+  vkCmdDispatchIndirect(buffer_->buffer, indirect_buffer->buffer,
+                        indirect.offset);
+  buffer_->refs.push_back(indirect_buffer);
+  return RhiResult::success;
+}
+
 vkapi::IVkCommandBuffer VulkanCommandList::vk_command_buffer() {
   return buffer_;
 }
@@ -1988,6 +2006,9 @@ RhiResult VulkanDevice::allocate_memory(const AllocParams &params,
   }
   if (int(params.usage & AllocUsage::Index)) {
     buffer_info.usage |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+  }
+  if (int(params.usage & AllocUsage::Indirect)) {
+    buffer_info.usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
   }
 
   uint32_t queue_family_indices[] = {compute_queue_family_index_,
