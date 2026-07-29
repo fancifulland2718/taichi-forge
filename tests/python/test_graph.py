@@ -1082,7 +1082,9 @@ def test_repeated_sequential_keeps_cuda_expanded_runtime_by_default():
     _run_repeated_inc_graph(graph)
 
 
-def _build_bounded_step_graph(*, max_iterations, chunk_size=4):
+def _build_bounded_step_graph(
+    *, max_iterations, chunk_size=4, cuda_native_mode="auto"
+):
     @ti.kernel
     def step(
         state: ti.types.ndarray(dtype=ti.i32, ndim=0),
@@ -1120,6 +1122,7 @@ def _build_bounded_step_graph(*, max_iterations, chunk_size=4):
         max_iterations=max_iterations,
         chunk_size=chunk_size,
         masked_execution=True,
+        cuda_native_mode=cuda_native_mode,
         name="adaptive_step",
     )
     return builder.compile()
@@ -1162,6 +1165,13 @@ def test_bounded_graph_loop_reports_exact_stop_and_backend_overshoot():
         assert report.executed_iterations == 5
         assert report.overshoot_iterations == 0
         assert report.chunk_sizes == (1, 1, 1, 1, 1)
+    elif report.lowering == "cuda_conditional_graph":
+        assert ti.lang.impl.current_cfg().arch == ti.cuda
+        assert report.executed_iterations == 5
+        assert report.overshoot_iterations == 0
+        assert report.chunk_sizes == (5,)
+        assert report.observation_boundaries == (0, 5)
+        assert report.native_upgrade_reason == "selected"
     else:
         assert report.lowering == "portable_chunk_replay"
         assert report.executed_iterations == 8
@@ -1169,7 +1179,9 @@ def test_bounded_graph_loop_reports_exact_stop_and_backend_overshoot():
         assert report.chunk_sizes == (4, 4)
         assert report.observation_boundaries == (0, 4, 8)
 
-    assert graph._ir_debug_info["analysis"]["bounded_loop_regions"] == 1
+    ir = graph._ir_debug_info
+    assert ir["analysis"]["bounded_loop_regions"] == 1
+    assert ir["root"]["children"][0]["cuda_native_mode"] == "auto"
     with pytest.raises(
         TaichiRuntimeError, match="does not support bounded loops"
     ):
@@ -1197,13 +1209,72 @@ def test_bounded_graph_loop_honors_initial_stop_and_iteration_cap():
     assert report.logical_iterations == 6
     assert report.executed_iterations == 6
     assert report.overshoot_iterations == 0
-    assert report.chunk_sizes == (
-        (1, 1, 1, 1, 1, 1)
-        if ti.lang.impl.current_cfg().arch == ti.cpu
-        else (4, 2)
-    )
+    if ti.lang.impl.current_cfg().arch == ti.cpu:
+        assert report.chunk_sizes == (1, 1, 1, 1, 1, 1)
+    elif report.lowering == "cuda_conditional_graph":
+        assert report.chunk_sizes == (6,)
+        assert report.observation_boundaries == (0, 6)
+    else:
+        assert report.chunk_sizes == (4, 2)
     assert capped["state"].to_numpy()[()] == 6
     assert capped["predicate"].to_numpy()[()] == 1
+
+
+@test_utils.test(arch=ti.cuda)
+def test_bounded_graph_loop_forced_portable_keeps_chunk_trace():
+    graph = _build_bounded_step_graph(
+        max_iterations=20, cuda_native_mode="portable"
+    )
+    args = _bounded_step_args(target=5)
+    graph.run(args)
+
+    report = graph.bounded_loop_stats()[0]
+    assert report.lowering == "portable_chunk_replay"
+    assert report.logical_iterations == 5
+    assert report.executed_iterations == 8
+    assert report.overshoot_iterations == 3
+    assert report.observation_boundaries == (0, 4, 8)
+    assert report.native_upgrade_reason == "forced_portable"
+
+
+@test_utils.test(arch=ti.cuda)
+def test_bounded_graph_loop_native_rebind_and_replay_diagnostics():
+    capabilities = dict(ti_core.cuda_conditional_graph_capabilities())
+    if not (
+        capabilities["driver_version_eligible"]
+        and capabilities["conditional_graph_symbols_loaded"]
+        and capabilities["general_device_setter_lowering_compiled"]
+    ):
+        pytest.skip("general CUDA conditional Graph is unavailable")
+
+    graph = _build_bounded_step_graph(
+        max_iterations=20, cuda_native_mode="native_required"
+    )
+    graph._graph_stats
+    first = _bounded_step_args(target=5)
+    second = _bounded_step_args(target=7)
+
+    graph.run(first)
+    first_report = graph.bounded_loop_stats()[0]
+    assert first_report.lowering == "cuda_conditional_graph"
+    assert first_report.logical_iterations == 5
+    assert first_report.executed_iterations == 5
+    assert first_report.observation_boundaries == (0, 5)
+
+    graph.run(second)
+    second_report = graph.bounded_loop_stats()[0]
+    assert second_report.logical_iterations == 7
+    assert second_report.executed_iterations == 7
+    second["state"].fill(0)
+    second["predicate"].fill(1)
+    second["counter"].fill(0)
+    graph.run(second)
+
+    native_stats = graph._graph_stats[0]
+    assert native_stats["captures"] == 1
+    assert native_stats["patched_replays"] >= 1
+    assert native_stats["exact_replays"] >= 1
+    assert native_stats["last_path"] == "cuda_exact_replay"
 
 
 @test_utils.test(arch=ti.cuda)
