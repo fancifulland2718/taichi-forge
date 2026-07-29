@@ -11,7 +11,11 @@ from taichi_forge.lang.exception import TaichiCompilationError, TaichiRuntimeErr
 import taichi_forge as ti
 from taichi_forge._lib import core as ti_core
 from taichi_forge.lang import impl
-from taichi_forge.graph._graph import _GraphTemporaryArena, gen_cpp_kernel
+from taichi_forge.graph._graph import (
+    _GraphTemporaryArena,
+    _new_runtime_graph_builder,
+    gen_cpp_kernel,
+)
 from taichi_forge.graph._ir import (
     DispatchNode,
     GraphAccess,
@@ -1477,7 +1481,9 @@ def test_graph_observation_rejects_unsupported_values_and_runtime_shape():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_compiler_metadata_enables_safe_elementwise_graph_candidates():
+def test_compiler_metadata_enables_safe_elementwise_graph_candidates(monkeypatch):
+    monkeypatch.setenv("TI_GRAPH_TWO_MAP_COMPOSER", "1")
+
     @ti.kernel
     def first_map(
         source: ti.types.ndarray(dtype=ti.i32, ndim=1),
@@ -1554,6 +1560,24 @@ def test_compiler_metadata_enables_safe_elementwise_graph_candidates():
     )
     ti.sync()
     np.testing.assert_array_equal(output.to_numpy(), source_np * 2 + 3)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_two_map_composer_auto_gate_preserves_vulkan_latency(monkeypatch):
+    class ProbeBuilder:
+        def __init__(self):
+            self.enabled = False
+
+        def _enable_two_map_composer(self):
+            self.enabled = True
+
+    monkeypatch.delenv("TI_GRAPH_TWO_MAP_COMPOSER", raising=False)
+    monkeypatch.setattr(ti_core, "GraphBuilder", ProbeBuilder)
+    builder = _new_runtime_graph_builder()
+    expected = impl.current_cfg().arch != ti_core.Arch.vulkan
+    assert builder.enabled == expected
+
+
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])

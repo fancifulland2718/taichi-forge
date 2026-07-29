@@ -52,7 +52,13 @@ ArgKind = _ti_core.ArgKind
 
 def _new_runtime_graph_builder():
     builder = _ti_core.GraphBuilder()
-    if os.environ.get("TI_GRAPH_TWO_MAP_COMPOSER", "1") != "0":
+    composer_setting = os.environ.get("TI_GRAPH_TWO_MAP_COMPOSER")
+    composer_enabled = (
+        composer_setting != "0"
+        if composer_setting is not None
+        else impl.current_cfg().arch != _ti_core.Arch.vulkan
+    )
+    if composer_enabled:
         builder._enable_two_map_composer()
     return builder
 
