@@ -1890,6 +1890,7 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
     result.ordinary_fallbacks = source.fallbacks;
     result.records = source.recorded;
     result.replays = source.replayed;
+    result.patched_replays = source.patched;
     result.structural_fallbacks = source.structural_fallbacks;
     result.replay_slot_saturation_fallbacks =
         source.slot_saturation_fallbacks;
@@ -1910,6 +1911,10 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
         break;
       case gfx::GraphReplayLastPath::replay:
         result.last_path = CompiledGraphExecutionPath::vulkan_replay;
+        break;
+      case gfx::GraphReplayLastPath::patched_replay:
+        result.last_path =
+            CompiledGraphExecutionPath::vulkan_patched_replay;
         break;
       case gfx::GraphReplayLastPath::none:
         break;

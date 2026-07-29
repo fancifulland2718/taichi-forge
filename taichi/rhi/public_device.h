@@ -217,6 +217,13 @@ class RHI_DLL_EXPORT ShaderResourceSet {
       const std::vector<DeviceAllocation> &allocs) {
     RHI_NOT_IMPLEMENTED
   }
+
+  // Optional backend hook for a graph-owned stable resource-set handle.
+  // patch_existing requires the owning replay completion to be ready.
+  virtual RhiResult prepare_for_replay(bool patch_existing) {
+    (void)patch_existing;
+    return RhiResult::not_supported;
+  }
 };
 
 // A set of states / resources for rasterization

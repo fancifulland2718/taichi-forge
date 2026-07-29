@@ -166,10 +166,16 @@ _BACKEND_GRAPH_PATHS = frozenset(
         "cuda_patched_replay",
         "vulkan_record",
         "vulkan_replay",
+        "vulkan_patched_replay",
     )
 )
 _BACKEND_REPLAY_PATHS = frozenset(
-    ("cuda_exact_replay", "cuda_patched_replay", "vulkan_replay")
+    (
+        "cuda_exact_replay",
+        "cuda_patched_replay",
+        "vulkan_replay",
+        "vulkan_patched_replay",
+    )
 )
 
 

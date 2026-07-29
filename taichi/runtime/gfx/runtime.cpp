@@ -267,6 +267,17 @@ void push_graph_allocation_key(std::vector<uint64_t> &key,
   key.push_back(bytes);
 }
 
+void push_graph_allocation_structure_key(std::vector<uint64_t> &key,
+                                         DeviceAllocation alloc,
+                                         uint64_t ordinal,
+                                         uint64_t offset,
+                                         uint64_t bytes) {
+  key.push_back(reinterpret_cast<uint64_t>(alloc.device));
+  key.push_back(ordinal);
+  key.push_back(offset);
+  key.push_back(bytes);
+}
+
 }  // namespace
 
 uint64_t get_graph_replay_slot_saturation_fallbacks() {
@@ -1733,25 +1744,43 @@ bool GfxRuntime::GraphReplayExecutable::refresh_prepared_cache(
 }
 
 GfxRuntime::GraphReplayExecutable::Slot *
-GfxRuntime::GraphReplayExecutable::acquire_ready_slot() {
+GfxRuntime::GraphReplayExecutable::acquire_ready_slot(
+    const std::vector<uint64_t> &key,
+    const std::vector<uint64_t> &structure_key) {
   if (slots.empty()) {
     slots.resize(kReplaySlots);
   }
 
-  Slot *slot = nullptr;
-  size_t slot_index = next_slot;
-  for (size_t i = 0; i < slots.size(); ++i) {
-    const size_t candidate = (next_slot + i) % slots.size();
-    auto &candidate_slot = slots[candidate];
-    if (!candidate_slot.completion || candidate_slot.completion->is_ready()) {
-      slot = &candidate_slot;
-      slot_index = candidate;
-      break;
+  auto ready = [](const Slot &slot) {
+    return !slot.completion || slot.completion->is_ready();
+  };
+  auto select = [&](int preference) -> std::optional<size_t> {
+    for (size_t i = 0; i < slots.size(); ++i) {
+      const size_t candidate = (next_slot + i) % slots.size();
+      const auto &slot = slots[candidate];
+      if (!ready(slot)) {
+        continue;
+      }
+      const bool matches =
+          preference == 0
+              ? slot.recorded && slot.key == key
+              : preference == 1
+                    ? slot.recorded && slot.structure_key == structure_key
+                    : preference == 2 ? !slot.recorded : true;
+      if (matches) {
+        return candidate;
+      }
     }
-  }
-  if (slot != nullptr) {
-    next_slot = (slot_index + 1) % slots.size();
-    return slot;
+    return std::nullopt;
+  };
+
+  // Prefer exact replay, then descriptor-only patch, then an unused slot.
+  // Re-recording a structurally unrelated ready slot is the last resort.
+  for (int preference = 0; preference != 4; ++preference) {
+    if (auto candidate = select(preference)) {
+      next_slot = (*candidate + 1) % slots.size();
+      return &slots[*candidate];
+    }
   }
 
   graph_replay_slot_saturation_fallbacks.fetch_add(
@@ -1784,6 +1813,7 @@ void GfxRuntime::GraphReplayState::reset() {
   attempts = 0;
   recorded = 0;
   replayed = 0;
+  patched = 0;
   fallbacks = 0;
   structural_fallbacks = 0;
   runtime_mode_fallbacks = 0;
@@ -1850,6 +1880,7 @@ GraphReplayStats GfxRuntime::debug_graph_replay_stats(
       state.attempts,
       state.recorded,
       state.replayed,
+      state.patched,
       state.fallbacks,
       state.structural_fallbacks,
       state.runtime_mode_fallbacks,
@@ -1904,7 +1935,18 @@ bool GfxRuntime::try_launch_graph(
                          hashing::Hasher<std::vector<int>>>;
 
   std::vector<uint64_t> key;
+  std::vector<uint64_t> structure_key;
   key.reserve(dispatches.size() * 16);
+  structure_key.reserve(dispatches.size() * 12);
+  std::unordered_map<DeviceAllocationId, uint64_t> allocation_ordinals;
+  auto push_runtime_structure = [&](DeviceAllocation allocation,
+                                    uint64_t offset, uint64_t bytes) {
+    auto [it, inserted] = allocation_ordinals.try_emplace(
+        allocation.alloc_id, allocation_ordinals.size() + 1);
+    (void)inserted;
+    push_graph_allocation_structure_key(structure_key, allocation,
+                                        it->second, offset, bytes);
+  };
   std::vector<PreparedDispatch> prepared;
   prepared.reserve(dispatches.size());
   size_t total_tasks = 0;
@@ -1945,19 +1987,32 @@ bool GfxRuntime::try_launch_graph(
     key.push_back(dispatch.handle.get_launch_id());
     key.push_back(ti_kernel->get_args_buffer_size());
     key.push_back(ti_kernel->num_pipelines());
+    structure_key.push_back(dispatch.handle.get_launch_id());
+    structure_key.push_back(ti_kernel->get_args_buffer_size());
+    structure_key.push_back(ti_kernel->num_pipelines());
 
     for (const auto &array_arg : ti_kernel->runtime_array_args()) {
       const auto alloc_type =
           dispatch.host_ctx->device_allocation_type[array_arg.indices];
+      const auto runtime_size =
+          dispatch.host_ctx->array_runtime_sizes.find(array_arg.indices);
+      structure_key.push_back(
+          runtime_size == dispatch.host_ctx->array_runtime_sizes.end()
+              ? 0
+              : runtime_size->second);
       if (alloc_type == LaunchContextBuilder::DevAllocType::kDenseStorage) {
         const auto &binding =
             dispatch.host_ctx->get_resolved_dense_storage(array_arg.indices);
         ndarrays_in_use_.insert(binding.allocation.alloc_id);
         key.push_back(0xA004u);
+        structure_key.push_back(0xA004u);
         push_graph_allocation_key(key, binding.allocation,
                                   binding.byte_offset, binding.byte_size);
+        push_runtime_structure(binding.allocation, binding.byte_offset,
+                               binding.byte_size);
         key.push_back(binding.runtime_signature);
         key.push_back(0xA003u);
+        structure_key.push_back(0xA003u);
       } else if (alloc_type == LaunchContextBuilder::DevAllocType::kNdarray) {
         auto data_it =
             dispatch.host_ctx->array_ptrs.find(array_arg.data_ptr_indices);
@@ -1969,7 +2024,9 @@ bool GfxRuntime::try_launch_graph(
             *static_cast<DeviceAllocation *>(data_it->second);
         ndarrays_in_use_.insert(devalloc.alloc_id);
         key.push_back(0xA001u);
+        structure_key.push_back(0xA001u);
         push_graph_allocation_key(key, devalloc);
+        push_runtime_structure(devalloc, 0, 0);
 
         auto grad_it =
             dispatch.host_ctx->array_ptrs.find(array_arg.grad_ptr_indices);
@@ -1979,9 +2036,12 @@ bool GfxRuntime::try_launch_graph(
               *static_cast<DeviceAllocation *>(grad_it->second);
           ndarrays_in_use_.insert(grad_alloc.alloc_id);
           key.push_back(0xA002u);
+          structure_key.push_back(0xA002u);
           push_graph_allocation_key(key, grad_alloc);
+          push_runtime_structure(grad_alloc, 0, 0);
         } else {
           key.push_back(0xA003u);
+          structure_key.push_back(0xA003u);
         }
       } else {
         return reject();
@@ -1999,6 +2059,8 @@ bool GfxRuntime::try_launch_graph(
       }
       key.push_back(0xB000u);
       key.push_back(static_cast<uint64_t>(task_index));
+      structure_key.push_back(0xB000u);
+      structure_key.push_back(static_cast<uint64_t>(task_index));
       for (const auto &bind : ti_kernel->buffer_binding_plan(task_index)) {
         if (bind.binding < 0) {
           continue;
@@ -2014,6 +2076,11 @@ bool GfxRuntime::try_launch_graph(
             push_graph_allocation_key(key, bind.static_alloc
                                                ? *bind.static_alloc
                                                : kDeviceNullAllocation);
+            structure_key.push_back(0xB101u);
+            structure_key.push_back(static_cast<uint64_t>(bind.binding));
+            push_graph_allocation_key(
+                structure_key, bind.static_alloc ? *bind.static_alloc
+                                                 : kDeviceNullAllocation);
             break;
           case CompiledTaichiKernel::BufferBindingKind::StaticLookupRw: {
             if (bind.buffer.type == BufferType::ListGen) {
@@ -2024,6 +2091,10 @@ bool GfxRuntime::try_launch_graph(
             key.push_back(static_cast<uint64_t>(bind.binding));
             push_graph_allocation_key(key,
                                       alloc ? *alloc : kDeviceNullAllocation);
+            structure_key.push_back(0xB102u);
+            structure_key.push_back(static_cast<uint64_t>(bind.binding));
+            push_graph_allocation_key(
+                structure_key, alloc ? *alloc : kDeviceNullAllocation);
             break;
           }
           case CompiledTaichiKernel::BufferBindingKind::ArgPack:
@@ -2043,7 +2114,7 @@ bool GfxRuntime::try_launch_graph(
   executable.refresh_prepared_cache(key, prepared);
 
   GfxRuntime::GraphReplayExecutable::Slot *slot =
-      executable.acquire_ready_slot();
+      executable.acquire_ready_slot(key, structure_key);
   if (slot == nullptr) {
     if (state.diagnostics_enabled) {
       ++state.slot_saturation_fallbacks;
@@ -2088,6 +2159,83 @@ bool GfxRuntime::try_launch_graph(
 
   flush_if_pending();
 
+  if (slot->resource_sets.size() < total_tasks) {
+    const size_t old_size = slot->resource_sets.size();
+    slot->resource_sets.resize(total_tasks);
+    for (size_t i = old_size; i < total_tasks; ++i) {
+      slot->resource_sets[i] = device_->create_resource_set_unique();
+    }
+  }
+
+  auto update_task_bindings = [&](PreparedDispatch &pd, int task_index,
+                                  ShaderResourceSet *bindings,
+                                  bool patch_existing) {
+    for (const auto &bind : pd.kernel->buffer_binding_plan(task_index)) {
+      if (bind.binding < 0) {
+        continue;
+      }
+      switch (bind.kind) {
+        case CompiledTaichiKernel::BufferBindingKind::Skip:
+          break;
+        case CompiledTaichiKernel::BufferBindingKind::StaticRw:
+          bindings->rw_buffer(bind.binding,
+                              bind.static_alloc ? *bind.static_alloc
+                                                : kDeviceNullAllocation);
+          break;
+        case CompiledTaichiKernel::BufferBindingKind::StaticLookupRw: {
+          DeviceAllocation *alloc = pd.kernel->get_buffer_bind(bind.buffer);
+          bindings->rw_buffer(bind.binding,
+                              alloc ? *alloc : kDeviceNullAllocation);
+          break;
+        }
+        case CompiledTaichiKernel::BufferBindingKind::ExtArrRw:
+          if (pd.host_ctx->device_allocation_type[bind.buffer.root_id] ==
+              LaunchContextBuilder::DevAllocType::kDenseStorage) {
+            const auto &binding =
+                pd.host_ctx->get_resolved_dense_storage(bind.buffer.root_id);
+            if (binding.byte_size == 0) {
+              bindings->rw_buffer(bind.binding, binding.allocation);
+            } else {
+              bindings->rw_buffer(bind.binding, binding.device_ptr(),
+                                  binding.byte_size);
+            }
+          } else {
+            bindings->rw_buffer(bind.binding,
+                                pd.any_arrays->at(bind.buffer.root_id));
+          }
+          break;
+        case CompiledTaichiKernel::BufferBindingKind::Args:
+          bindings->buffer(bind.binding,
+                           pd.args_buffer ? *pd.args_buffer
+                                          : kDeviceNullAllocation);
+          break;
+        case CompiledTaichiKernel::BufferBindingKind::ArgPack:
+        case CompiledTaichiKernel::BufferBindingKind::RetsRw:
+        case CompiledTaichiKernel::BufferBindingKind::ChunkedRwArray:
+          TI_NOT_IMPLEMENTED;
+      }
+    }
+    return bindings->prepare_for_replay(patch_existing) ==
+           RhiResult::success;
+  };
+
+  auto patch_all_task_bindings = [&]() {
+    size_t resource_set_index = 0;
+    for (auto &pd : prepared) {
+      const auto &task_attribs = pd.kernel->ti_kernel_attribs().tasks_attribs;
+      for (int task_index = 0; task_index < task_attribs.size();
+           ++task_index) {
+        if (!update_task_bindings(
+                pd, task_index,
+                slot->resource_sets[resource_set_index++].get(),
+                /*patch_existing=*/true)) {
+          return false;
+        }
+      }
+    }
+    return true;
+  };
+
   if (slot->recorded && slot->cmdlist && slot->key == key) {
     slot->completion =
         device_->get_compute_stream()->submit(slot->cmdlist.get());
@@ -2101,18 +2249,29 @@ bool GfxRuntime::try_launch_graph(
     return true;
   }
 
+  const bool structural_patch_enabled =
+      get_environ_config("TI_VULKAN_GRAPH_STRUCTURAL_PATCH", 1) != 0;
+  if (structural_patch_enabled && slot->recorded && slot->cmdlist &&
+      slot->structure_key == structure_key && patch_all_task_bindings()) {
+    slot->key = key;
+    slot->completion =
+        device_->get_compute_stream()->submit(slot->cmdlist.get());
+    if (state.diagnostics_enabled) {
+      ++state.replayed;
+      ++state.patched;
+    }
+    if (statistics != nullptr) {
+      statistics->record_graph_replay();
+    }
+    state.last_path = GraphReplayLastPath::patched_replay;
+    return true;
+  }
+
   auto [recorded_cmdlist, cmd_res] =
       device_->get_compute_stream()->new_command_list_unique();
   TI_ASSERT_INFO(cmd_res == RhiResult::success,
                  "Failed to allocate Vulkan graph command list");
   auto *cmdlist = recorded_cmdlist.get();
-  if (slot->resource_sets.size() < total_tasks) {
-    const size_t old_size = slot->resource_sets.size();
-    slot->resource_sets.resize(total_tasks);
-    for (size_t i = old_size; i < total_tasks; ++i) {
-      slot->resource_sets[i] = device_->create_resource_set_unique();
-    }
-  }
 
   struct BufferAccess {
     DeviceAllocation allocation{kDeviceNullAllocation};
@@ -2142,15 +2301,12 @@ bool GfxRuntime::try_launch_graph(
     }
   };
   auto insert_all_pending = [&](bool exit_boundary) {
-    if (pending_global_read || pending_global_write) {
+    if (pending_global_read || pending_global_write ||
+        !pending_accesses.empty()) {
+      // A topology-stable memory barrier remains valid when a ready replay
+      // slot patches runtime descriptors to same-structure allocations.
       cmdlist->memory_barrier();
       count_barrier(exit_boundary);
-    } else {
-      for (const auto &[id, access] : pending_accesses) {
-        (void)id;
-        cmdlist->buffer_barrier(access.allocation);
-        count_barrier(exit_boundary);
-      }
     }
     pending_global_read = false;
     pending_global_write = false;
@@ -2221,6 +2377,7 @@ bool GfxRuntime::try_launch_graph(
             }
           }
         }
+        bool dependency_hazard = false;
         for (const auto &[id, current] : current_accesses) {
           auto previous = pending_accesses.find(id);
           if (previous == pending_accesses.end()) {
@@ -2230,16 +2387,18 @@ bool GfxRuntime::try_launch_graph(
               (previous->second.write &&
                (current.read || current.write)) ||
               (previous->second.read && current.write);
-          if (!hazard) {
-            if (state.diagnostics_enabled && previous->second.read &&
-                current.read) {
-              ++state.rar_elisions;
-            }
-            continue;
+          dependency_hazard = dependency_hazard || hazard;
+          if (!hazard && state.diagnostics_enabled &&
+              previous->second.read && current.read) {
+            ++state.rar_elisions;
           }
-          cmdlist->buffer_barrier(previous->second.allocation);
+        }
+        if (dependency_hazard) {
+          cmdlist->memory_barrier();
           count_barrier(/*exit_boundary=*/false);
-          pending_accesses.erase(previous);
+          pending_global_read = false;
+          pending_global_write = false;
+          pending_accesses.clear();
         }
       };
   auto merge_pending_access = [&](const BufferAccess &access) {
@@ -2311,51 +2470,10 @@ bool GfxRuntime::try_launch_graph(
 
       ShaderResourceSet *bindings =
           slot->resource_sets[resource_set_index++].get();
-      for (const auto &bind : pd.kernel->buffer_binding_plan(task_index)) {
-        if (bind.binding < 0) {
-          continue;
-        }
-        switch (bind.kind) {
-          case CompiledTaichiKernel::BufferBindingKind::Skip:
-            break;
-          case CompiledTaichiKernel::BufferBindingKind::StaticRw:
-            bindings->rw_buffer(bind.binding,
-                                bind.static_alloc ? *bind.static_alloc
-                                                  : kDeviceNullAllocation);
-            break;
-          case CompiledTaichiKernel::BufferBindingKind::StaticLookupRw: {
-            DeviceAllocation *alloc = pd.kernel->get_buffer_bind(bind.buffer);
-            bindings->rw_buffer(bind.binding,
-                                alloc ? *alloc : kDeviceNullAllocation);
-            break;
-          }
-          case CompiledTaichiKernel::BufferBindingKind::ExtArrRw:
-            if (pd.host_ctx->device_allocation_type[bind.buffer.root_id] ==
-                LaunchContextBuilder::DevAllocType::kDenseStorage) {
-              const auto &binding =
-                  pd.host_ctx->get_resolved_dense_storage(bind.buffer.root_id);
-              if (binding.byte_size == 0) {
-                bindings->rw_buffer(bind.binding, binding.allocation);
-              } else {
-                bindings->rw_buffer(bind.binding, binding.device_ptr(),
-                                    binding.byte_size);
-              }
-            } else {
-              bindings->rw_buffer(bind.binding,
-                                  pd.any_arrays->at(bind.buffer.root_id));
-            }
-            break;
-          case CompiledTaichiKernel::BufferBindingKind::Args:
-            bindings->buffer(bind.binding,
-                             pd.args_buffer ? *pd.args_buffer
-                                            : kDeviceNullAllocation);
-            break;
-          case CompiledTaichiKernel::BufferBindingKind::ArgPack:
-          case CompiledTaichiKernel::BufferBindingKind::RetsRw:
-          case CompiledTaichiKernel::BufferBindingKind::ChunkedRwArray:
-            TI_NOT_IMPLEMENTED;
-        }
-      }
+      TI_ERROR_IF(
+          !update_task_bindings(pd, task_index, bindings,
+                                /*patch_existing=*/false),
+          "Vulkan graph replay descriptor preparation failed");
 
       cmdlist->bind_pipeline(pd.kernel->get_pipeline(task_index));
       RhiResult status = cmdlist->bind_shader_resources(bindings);
@@ -2395,6 +2513,7 @@ bool GfxRuntime::try_launch_graph(
   insert_all_pending(/*exit_boundary=*/true);
 
   slot->key = std::move(key);
+  slot->structure_key = std::move(structure_key);
   slot->cmdlist = std::move(recorded_cmdlist);
   slot->recorded = true;
   slot->completion = device_->get_compute_stream()->submit(slot->cmdlist.get());

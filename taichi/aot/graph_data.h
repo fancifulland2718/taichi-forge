@@ -287,6 +287,7 @@ enum class CompiledGraphExecutionPath : uint8_t {
   cuda_patched_replay,
   vulkan_record,
   vulkan_replay,
+  vulkan_patched_replay,
 };
 
 enum class CompiledGraphFallbackReason : uint8_t {

@@ -3509,6 +3509,8 @@ void export_lang(py::module &m) {
               return "vulkan_record";
             case aot::CompiledGraphExecutionPath::vulkan_replay:
               return "vulkan_replay";
+            case aot::CompiledGraphExecutionPath::vulkan_patched_replay:
+              return "vulkan_patched_replay";
             case aot::CompiledGraphExecutionPath::none:
               return "none";
           }
