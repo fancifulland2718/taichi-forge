@@ -1056,6 +1056,17 @@ def test_repeated_sequential_keeps_cpu_expanded_runtime_and_aot_graph():
     assert debug["nodes"] == [{"kind": "cgraph", "dispatch_count": 4}]
     assert graph._instance_debug_info == {"kind": "single_cgraph"}
     assert graph._compiled_graph is not None
+    ir = graph._ir_debug_info
+    assert ir["metadata_version"] == 1
+    assert ir["analysis_only"]
+    assert ir["analysis"]["node_count"] == 6
+    assert ir["analysis"]["dispatch_nodes"] == 4
+    assert ir["analysis"]["sequential_regions"] == 2
+    assert ir["analysis"]["opaque_nodes"] == 4
+    assert ir["analysis"]["runtime_bindings"] == 4
+    assert ir["root"]["kind"] == "sequential_region"
+    assert ir["root"]["children"][0]["kind"] == "sequential_region"
+    assert len(ir["root"]["children"][0]["children"]) == 4
     _run_repeated_inc_graph(graph)
 
 
