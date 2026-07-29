@@ -7,6 +7,7 @@ description without changing the stable public execution-report contract.
 
 from dataclasses import dataclass
 from enum import Enum
+from math import gcd
 from typing import Optional, Tuple
 
 
@@ -53,6 +54,8 @@ class TemporaryRequirement:
     alignment: int = 1
 
     def __post_init__(self):
+        if not self.name:
+            raise ValueError("Graph temporary name must not be empty")
         if self.bytes < 0:
             raise ValueError("Graph temporary bytes must be non-negative")
         if self.alignment <= 0:
@@ -75,6 +78,8 @@ class DispatchNode:
     iteration_domain: Optional[str] = None
     synchronization: bool = False
     opaque: bool = True
+    elementwise: bool = False
+    side_effects: Tuple[str, ...] = ()
 
     @property
     def kind(self):
@@ -246,6 +251,232 @@ class GraphIRAnalysis:
         return self.__dict__.copy()
 
 
+@dataclass(frozen=True)
+class ElementwiseFusionPlan:
+    candidate_groups: Tuple[Tuple[str, ...], ...]
+    eligible_dispatches: int
+    blocked_dispatches: int
+    blocker_counts: Tuple[Tuple[str, int], ...]
+    applied_groups: int = 0
+    lowering_available: bool = False
+
+    def to_dict(self):
+        return {
+            "candidate_groups": len(self.candidate_groups),
+            "candidate_dispatches": sum(
+                len(group) for group in self.candidate_groups
+            ),
+            "eligible_dispatches": self.eligible_dispatches,
+            "blocked_dispatches": self.blocked_dispatches,
+            "blockers": dict(self.blocker_counts),
+            "applied_groups": self.applied_groups,
+            "lowering_available": self.lowering_available,
+            "decision": (
+                "cross_kernel_ir_composer_unavailable"
+                if self.candidate_groups
+                else "no_safe_candidates"
+            ),
+        }
+
+
+@dataclass(frozen=True)
+class TemporaryMemoryPlan:
+    declared_bytes: int
+    logical_bytes: int
+    planned_peak_bytes: int
+    reused_bytes: int
+    alignment_padding_bytes: int
+    slot_count: int
+    conflicting_requirements: int
+    opaque_bytes: int
+    materialized: bool = False
+
+    def to_dict(self):
+        return self.__dict__.copy()
+
+
+def _fusion_blocker(node):
+    if not isinstance(node, DispatchNode):
+        return "not_dispatch"
+    if node.opaque:
+        return "opaque_dispatch"
+    if node.synchronization:
+        return "synchronization_boundary"
+    if not node.elementwise:
+        return "not_elementwise"
+    if node.iteration_domain is None:
+        return "missing_iteration_domain"
+    if node.side_effects:
+        return "side_effect"
+    for effect in node.effects:
+        if effect.access == GraphAccess.ATOMIC:
+            return "atomic_effect"
+        if effect.access == GraphAccess.OPAQUE:
+            return "opaque_effect"
+    return None
+
+
+def analyze_elementwise_fusion(root):
+    """Find safe pointwise fusion groups without pretending to lower them."""
+
+    groups = []
+    blockers = {}
+    eligible_dispatches = 0
+    blocked_dispatches = 0
+
+    def add_blocker(reason):
+        blockers[reason] = blockers.get(reason, 0) + 1
+
+    def scan(region):
+        nonlocal eligible_dispatches
+        nonlocal blocked_dispatches
+        pending = []
+        domain = None
+
+        def flush():
+            nonlocal pending
+            nonlocal domain
+            if len(pending) >= 2:
+                groups.append(tuple(node.name for node in pending))
+            pending = []
+            domain = None
+
+        for node in region.children:
+            if isinstance(node, DispatchNode):
+                blocker = _fusion_blocker(node)
+                if blocker is not None:
+                    blocked_dispatches += 1
+                    add_blocker(blocker)
+                    flush()
+                else:
+                    eligible_dispatches += 1
+                    if pending and node.iteration_domain != domain:
+                        add_blocker("iteration_domain_mismatch")
+                        flush()
+                    if not pending:
+                        domain = node.iteration_domain
+                    pending.append(node)
+            else:
+                flush()
+            for child in node.children:
+                if isinstance(child, SequentialRegion):
+                    scan(child)
+        flush()
+
+    if isinstance(root, SequentialRegion):
+        scan(root)
+    return ElementwiseFusionPlan(
+        candidate_groups=tuple(groups),
+        eligible_dispatches=eligible_dispatches,
+        blocked_dispatches=blocked_dispatches,
+        blocker_counts=tuple(sorted(blockers.items())),
+    )
+
+
+def plan_temporary_memory(root):
+    """Plan reusable abstract slots from declared temporary live intervals."""
+
+    declarations = {}
+    declared_bytes = 0
+    position = 0
+
+    def visit(node):
+        nonlocal declared_bytes
+        nonlocal position
+        current_position = position
+        position += 1
+        for requirement in node.temporaries:
+            declared_bytes += requirement.bytes
+            entry = declarations.get(requirement.name)
+            if entry is None:
+                declarations[requirement.name] = {
+                    "first": current_position,
+                    "last": current_position,
+                    "bytes": requirement.bytes,
+                    "alignment": requirement.alignment,
+                    "conflict": False,
+                }
+            else:
+                entry["last"] = current_position
+                if (
+                    entry["bytes"] != requirement.bytes
+                    or entry["alignment"] != requirement.alignment
+                ):
+                    entry["conflict"] = True
+                    entry["bytes"] = max(entry["bytes"], requirement.bytes)
+                    entry["alignment"] = (
+                        entry["alignment"]
+                        * requirement.alignment
+                        // gcd(entry["alignment"], requirement.alignment)
+                    )
+        for child in node.children:
+            visit(child)
+
+    visit(root)
+    logical_bytes = sum(entry["bytes"] for entry in declarations.values())
+    opaque_entries = [
+        entry for entry in declarations.values() if entry["conflict"]
+    ]
+    opaque_bytes = sum(entry["bytes"] for entry in opaque_entries)
+    intervals = sorted(
+        (
+            entry["first"],
+            entry["last"],
+            entry["bytes"],
+            entry["alignment"],
+        )
+        for entry in declarations.values()
+        if not entry["conflict"]
+    )
+    slots = []
+    for first, last, byte_count, alignment in intervals:
+        available = [
+            slot for slot in slots if slot["last"] < first
+        ]
+        if available:
+            slot = min(
+                available,
+                key=lambda value: (
+                    max(value["bytes"], byte_count),
+                    value["alignment"],
+                ),
+            )
+            slot["last"] = last
+            slot["bytes"] = max(slot["bytes"], byte_count)
+            slot["alignment"] = (
+                slot["alignment"]
+                * alignment
+                // gcd(slot["alignment"], alignment)
+            )
+        else:
+            slots.append(
+                {
+                    "last": last,
+                    "bytes": byte_count,
+                    "alignment": alignment,
+                }
+            )
+
+    peak_bytes = 0
+    slot_payload_bytes = 0
+    for slot in slots:
+        alignment = slot["alignment"]
+        peak_bytes = (peak_bytes + alignment - 1) // alignment * alignment
+        peak_bytes += slot["bytes"]
+        slot_payload_bytes += slot["bytes"]
+    planned_logical_bytes = logical_bytes - opaque_bytes
+    return TemporaryMemoryPlan(
+        declared_bytes=declared_bytes,
+        logical_bytes=logical_bytes,
+        planned_peak_bytes=peak_bytes,
+        reused_bytes=max(0, planned_logical_bytes - slot_payload_bytes),
+        alignment_padding_bytes=peak_bytes - slot_payload_bytes,
+        slot_count=len(slots),
+        conflicting_requirements=len(opaque_entries),
+        opaque_bytes=opaque_bytes,
+    )
+
+
 def analyze_graph_ir(root):
     counters = {
         "node_count": 0,
@@ -320,6 +551,9 @@ def graph_ir_to_dict(node):
                 "cuda_native_mode": node.cuda_native_mode,
             }
         )
+    if isinstance(node, DispatchNode):
+        result["elementwise"] = node.elementwise
+        result["side_effects"] = node.side_effects
     if isinstance(node, ObservationNode):
         result["batch"] = node.batch
     return result

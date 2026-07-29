@@ -32,8 +32,10 @@ from taichi_forge.graph._ir import (
     ResourceEffect,
     RuntimeBinding,
     SequentialRegion,
+    analyze_elementwise_fusion,
     analyze_graph_ir,
     graph_ir_to_dict,
+    plan_temporary_memory,
 )
 from taichi_forge.graph._submission import (
     SubmissionPacer,
@@ -98,6 +100,10 @@ class GraphMemoryReport:
     persistent_observation_bytes: int
     persistent_bytes: int
     transient_temporary_bytes: int
+    planned_temporary_bytes: int
+    temporary_reuse_bytes: int
+    opaque_temporary_bytes: int
+    temporary_plan_materialized: bool
     opaque_driver_bytes: Optional[int]
 
 
@@ -248,7 +254,7 @@ def _execution_report(
     instance_kind,
     backend_stats,
     observation_staging_bytes=0,
-    transient_temporary_bytes=0,
+    temporary_memory_plan=None,
 ):
     segments = []
     stats_cursor = 0
@@ -394,13 +400,30 @@ def _execution_report(
     persistent_argument_bytes = sum(
         segment.persistent_argument_bytes for segment in cgraph_segments
     )
+    temporary_memory_plan = temporary_memory_plan or {}
+    temporary_plan_materialized = bool(
+        temporary_memory_plan.get("materialized", False)
+    )
+    planned_temporary_bytes = int(
+        temporary_memory_plan.get("planned_peak_bytes", 0)
+    )
     memory = GraphMemoryReport(
         persistent_argument_bytes=persistent_argument_bytes,
         persistent_observation_bytes=int(observation_staging_bytes),
         persistent_bytes=(
             persistent_argument_bytes + int(observation_staging_bytes)
         ),
-        transient_temporary_bytes=int(transient_temporary_bytes),
+        transient_temporary_bytes=(
+            planned_temporary_bytes if temporary_plan_materialized else 0
+        ),
+        planned_temporary_bytes=planned_temporary_bytes,
+        temporary_reuse_bytes=int(
+            temporary_memory_plan.get("reused_bytes", 0)
+        ),
+        opaque_temporary_bytes=int(
+            temporary_memory_plan.get("opaque_bytes", 0)
+        ),
+        temporary_plan_materialized=temporary_plan_materialized,
         opaque_driver_bytes=None,
     )
     return GraphExecutionReport(
@@ -1305,6 +1328,12 @@ class _GraphSpec:
         self.pre_optimization_ir_analysis = analyze_graph_ir(
             self.pre_optimization_ir_root
         )
+        self.fusion_plan = analyze_elementwise_fusion(
+            self.pre_optimization_ir_root
+        )
+        self.temporary_memory_plan = plan_temporary_memory(
+            self.pre_optimization_ir_root
+        )
         self.nodes, self.optimization = _lower_mixed_backend_regions(
             source_nodes
         )
@@ -1412,6 +1441,8 @@ class _GraphSpec:
                 self.pre_optimization_ir_root
             ),
             "optimization": dict(self.optimization),
+            "fusion_plan": self.fusion_plan.to_dict(),
+            "temporary_memory_plan": self.temporary_memory_plan.to_dict(),
         }
 
     @property
@@ -1446,6 +1477,7 @@ class _GraphSpec:
             "dependency_info": tuple(
                 sorted(self.snode_tree_dependency_info)
             ),
+            "temporary_memory_plan": self.temporary_memory_plan.to_dict(),
         }
 
 
@@ -2293,6 +2325,9 @@ class Graph:
                 instance_kind,
                 backend_stats,
                 observation_staging_bytes=observation_staging_bytes,
+                temporary_memory_plan=self._execution_definition[
+                    "temporary_memory_plan"
+                ],
             )
 
     @property
