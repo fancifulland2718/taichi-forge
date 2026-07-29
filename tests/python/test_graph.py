@@ -1435,6 +1435,96 @@ def test_vulkan_cgraph_replay_slot_saturation_telemetry_is_monotonic():
     )
 
 
+@pytest.mark.parametrize("hazard_planner", [False, True])
+@test_utils.test(arch=ti.vulkan)
+def test_vulkan_cgraph_hazard_planner_preserves_dependency_chains(
+    monkeypatch, hazard_planner
+):
+    monkeypatch.setenv(
+        "TI_VULKAN_GRAPH_HAZARD_PLANNER",
+        "1" if hazard_planner else "0",
+    )
+
+    @ti.kernel
+    def read_a_to_b(
+        a: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        b: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in a:
+            b[i] = a[i] + 1
+
+    @ti.kernel
+    def read_a_to_c(
+        a: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        c: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in a:
+            c[i] = a[i] * 2
+
+    @ti.kernel
+    def fill(
+        values: ti.types.ndarray(dtype=ti.i32, ndim=1), value: ti.i32
+    ):
+        for i in values:
+            values[i] = value
+
+    @ti.kernel
+    def copy_twice(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        destination: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in source:
+            destination[i] = source[i] * 2
+
+    @ti.kernel
+    def combine(
+        a: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        c: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in a:
+            output[i] = a[i] + c[i]
+
+    arg_a = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "a", ti.i32, ndim=1)
+    arg_b = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "b", ti.i32, ndim=1)
+    arg_c = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "c", ti.i32, ndim=1)
+    arg_output = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    value = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "value", ti.i32)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(read_a_to_b, arg_a, arg_b)
+    builder.dispatch(read_a_to_c, arg_a, arg_c)
+    builder.dispatch(fill, arg_a, value)
+    builder.dispatch(fill, arg_b, value)
+    builder.dispatch(copy_twice, arg_b, arg_c)
+    builder.dispatch(combine, arg_a, arg_c, arg_output)
+    graph = builder.compile()
+
+    arrays = {
+        name: ti.ndarray(ti.i32, shape=256)
+        for name in ("a", "b", "c", "output")
+    }
+    arrays["a"].fill(3)
+    graph.execution_stats()
+    graph.run({**arrays, "value": 7})
+
+    np.testing.assert_array_equal(
+        arrays["output"].to_numpy(), np.full(256, 21, dtype=np.int32)
+    )
+    stats = graph._graph_stats[0]
+    assert stats["effect_reads"] > 0
+    assert stats["effect_writes"] > 0
+    assert stats["dependency_barriers"] > 0
+    assert stats["exit_barriers"] > 0
+    if hazard_planner:
+        assert stats["barrier_deferrals"] > 0
+        assert stats["rar_elisions"] > 0
+    else:
+        assert stats["barrier_deferrals"] == 0
+        assert stats["rar_elisions"] == 0
+
+
 @pytest.mark.parametrize("dt", [ti.i32, ti.i64, ti.u32, ti.u64])
 @test_utils.test(arch=supported_archs_cgraph, exclude=[(ti.vulkan, "Darwin")])
 def test_arg_int(dt):
