@@ -1,8 +1,8 @@
 # 显示帧提交
 
 > DisplayFrame 与直接显示提交首次公开于 `0.4.1`；device-image staging 在
-> `0.4.24` 扩展，`0.5.0` 增加 runtime 并发加固。版本归属见
-> [版本更新说明](release_notes.zh.md)。
+> `0.4.24` 扩展，`0.5.0` 增加 runtime 并发加固，`0.5.1` 增加自动
+> CUDA-Vulkan shared storage。版本归属见[版本更新说明](release_notes.zh.md)。
 
 Forge 保留普通 `canvas.set_image(...)` 兼容路径，同时为已经产出最终图像的引擎提供更窄的
 display-ready 提交路径。普通 field、ndarray、NumPy 或 texture 图像仍优先使用
@@ -31,22 +31,30 @@ display-ready frame。
 
 ## Display stats
 
-`Window.get_display_stats()` 暴露显示提交计数。该字典用于引擎侧 profiling，包含 accepted、
-submitted、dropped、reused 和最近一次提交状态等信息。
+`Window.get_display_stats()` 暴露引擎侧 profiling 使用的显示提交计数，包括 accepted、
+submitted、dropped、reused、window/offscreen submission 与最近状态。
+`zero_copy_render_submissions` 统计真正消费 CUDA-Vulkan shared allocation 的 graphics
+submission，`last_render_zero_copy` 报告最近一次 render submission path。
 
 使用 `Window.reset_display_stats()` 可以重置统计窗口。
 
 ## 性能模型
 
 - 当调用方已经持有 display-ready 表示时，`DisplayFrame` 避免反复走通用输入识别和 repack。
-- 普通 CUDA/Vulkan Taichi field 和 ndarray 图像会先在 device 侧 pack 成 RGBA8，
-  再提交显示，避免旧路径中每帧 device-to-host staging 往返。
+- 普通 CUDA Taichi field 与 ndarray 图像在 device identity 和 external
+  memory/semaphore capability 合格时，会直接 pack 到 Vulkan-exportable shared
+  allocation。Vulkan-native 图像保持 direct device path，其它组合保留既有 staging。
 - C-contiguous host `uint8` RGBA NumPy 图像会直接走 host RGBA8 提交路径。float
   NumPy 图像仍需要在 host 侧转换为 RGBA8。
 - packed `u32` device frame 在可用时可走 Vulkan storage-buffer 显示路径。
   当 producer 已经直接写 packed RGBA8 时，这是固定开销最低的路径，但它不是普通
   `set_image()` 输入的替代 API。
-- CUDA source 在 producer 没有提供更严格 external memory/semaphore 所有权协议时，仍可能需要 CUDA-to-Vulkan staging。
+- Shared CUDA-Vulkan path 会自动建立：Vulkan 持有 exportable buffer，CUDA 导入同一
+  allocation，并通过 external semaphore 交换所有权。初次 handoff 后，正常 Vulkan
+  render submission 同时把 buffer 释放给下一次 CUDA write，steady state 不增加第二次
+  graphics submission。
+- capability 或 physical-device identity 检查失败时，同一个 `set_image()` 调用使用既有
+  staging path；应用无需增加平台特化分支。
 - 可见窗口 present 受平台 WSI/swapchain 合同限制。测量 display sink 原始吞吐时，hidden/offscreen 提交更合适。
 
 ## 异步仿真与显示提交

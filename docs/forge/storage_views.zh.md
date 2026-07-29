@@ -121,6 +121,14 @@ capture 仍限于 compact mapping；affine Graph operand 通过已记录的 ordi
 `operator.statistics()["vector_io"]` 区分资格与实际执行路径。telemetry 会报告 direct
 field/view submission、经过资格验证的 operand metadata build/reuse，以及最近一次 contiguous 或 affine execution mode。
 
+## 受管外部 storage
+
+`ti.interop.from_dlpack()` 可从合格的 DLPack producer 创建 `ExternalDenseView`。它与内部 dense view 使用相同 descriptor 和 kernel ABI，同时增加受管 external owner、capsule deleter、retirement state 与可选 synchronization-domain identity。CPU storage 只在 CPU 后端接受；CUDA/CUDA-managed storage 只在 CUDA 后端接受。Vulkan 与跨设备导入会明确失败，因为 DLPack 本身不提供所需 Vulkan allocation/semaphore 合同。
+
+External import 当前要求 compact AOS storage。它可直接绑定 ordinary kernel，也可作为 Graph runtime argument。CUDA Graph capture 仍只接受 compact Program-owned storage，因此 external view 在 CUDA 上使用 ordinary zero-copy fallback；CPU ordinary dispatch 与 Vulkan replay 保持相同 owner/range 检查。一般 affine external view 仍不支持。
+
+DLPack API、既有 adapter 兼容策略、CUDA-Vulkan 显示共享与实测固定开销见 [Dense Storage 零拷贝与互操作](zero_copy_interop.zh.md)。
+
 ## 生命周期与失败行为
 
 view 会保持 Python source 存活；runtime 仍会在每次 submission 时重新验证带 generation
@@ -136,8 +144,9 @@ pointer。
 - view 不是 owning tensor，也不会改变 source 原有的 indexing API；
 - `copy=False` 语义是严格的：不支持的 storage 会失败，而不是复制；
 - zero-copy 不等于不需要同步，consumer 仍须遵守 Taichi kernel 与 stream 的正常顺序；
-- 外部框架 ownership、DLPack，以及负 stride、broadcast、overlap 或任意 element stride
-  等一般 affine mapping 需要额外生命周期与同步合同，不能从本 API 推导得到。
+- 外部框架 storage 必须通过 `ti.interop.from_dlpack()` 等受管 provider 进入；
+  `ndarray_view()` 本身不会推断 external ownership。负 stride、broadcast、overlap 与
+  任意 external affine mapping 仍不属于可执行合同。
 
 ## 何时使用
 

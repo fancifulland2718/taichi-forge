@@ -40,6 +40,18 @@ strides, overlap, axis permutation, integer indexing, or external ownership.
 See [Experimental zero-copy dense storage views](storage_views.en.md) for the
 layout matrix, lifetime behavior, Graph paths, and examples.
 
+### `ti.interop.from_dlpack(source, *, element_shape=(), access="readwrite", copy=False)`
+
+Imports a qualified DLPack producer as a managed, strict zero-copy `ExternalDenseView`. CPU and CUDA-host storage are accepted by a CPU runtime; CUDA and CUDA-managed storage are accepted by a CUDA runtime. Vulkan, cross-device import, noncompact external affine layout, `copy=True`, and unsupported access modes raise instead of materializing a copy.
+
+The returned view can be used as a compatible ndarray kernel argument and supports `close()` plus the context-manager protocol. It keeps the DLPack capsule owner alive through in-flight work and remains safe to close after runtime reset.
+
+### `ti.interop.capabilities()`
+
+Returns the active backend, accepted DLPack device classes, layout/access modes, strict copy-fallback policy, and schema version. The current schema version is `1`.
+
+Historical NumPy, PyTorch, and Paddle kernel-argument signatures remain supported. The explicit interop API is strict; historical adapters preserve their established fallback behavior. See [Zero-copy dense storage and interoperability](zero_copy_interop.en.md) for the support matrix and synchronization contract.
+
 ### `ti.compile_kernels(kernels)`
 
 Location: `taichi_forge.lang.misc`; exported as `ti.compile_kernels`.
@@ -1033,8 +1045,8 @@ Location: `taichi_forge.ui.display_frame`; exported as `ti.ui.DisplayFrame`.
 A display-ready frame object for the GGUI `set_image` submission path. Use it
 when the caller already owns a displayable representation and wants to skip
 generic input detection and repacking. For ordinary images, `canvas.set_image`
-remains the preferred API and uses optimized CUDA/Vulkan device-side staging
-for Taichi field and ndarray inputs.
+remains the preferred API and selects qualified CUDA-Vulkan shared storage
+or optimized device-side staging for Taichi field and ndarray inputs.
 
 Constructors:
 
@@ -1061,14 +1073,17 @@ was dropped by the window frame policy.
 Notes:
 
 - `canvas.set_image(frame)` forwards to `canvas.submit_frame(frame)`.
-- Ordinary `canvas.set_image(...)` inputs remain supported. CUDA/Vulkan Taichi
-  field and ndarray inputs are packed to RGBA8 on the device before display
-  submission, avoiding a per-frame device-to-host staging round trip.
+- Ordinary `canvas.set_image(...)` inputs remain supported. CUDA Taichi field
+  and ndarray images are packed directly into a Vulkan-exportable shared buffer
+  when device identity and external memory/semaphore capabilities qualify.
+  Other CUDA/Vulkan inputs retain the established device staging path; neither
+  path requires a per-frame device-to-host round trip.
 - Contiguous host `uint8` RGBA NumPy inputs are submitted directly through the
   host RGBA8 path. Use `DisplayFrame.from_packed_u32_ndarray(...)` only when
   the producer already writes packed RGBA8 into a 2D `ti.u32` ndarray.
-- Strict cross-device zero-copy is not guaranteed by this API. The concrete
-  path depends on source backend, display backend, and resource ownership.
+- CUDA-Vulkan sharing is automatic and fail-closed. If qualification fails,
+  `set_image()` preserves the same result contract through the established
+  staging path. `window.get_display_stats()` reports the path that submitted.
 
 ### Display Statistics
 
@@ -1080,8 +1095,8 @@ Location: `taichi_forge.ui.window.Window`.
 | `window.get_display_stats()` | Return display submission statistics for `set_image` / `show`. |
 | `window.reset_display_stats()` | Reset display submission statistics. |
 
-Use these APIs to measure accepted, submitted, dropped, and reused frames in an
-engine loop.
+Use these APIs to measure accepted, submitted, dropped, and reused frames, plus
+`zero_copy_render_submissions` and `last_render_zero_copy`, in an engine loop.
 
 See also [Display frame submission](display_frame.en.md).
 

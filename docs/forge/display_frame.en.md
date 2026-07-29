@@ -1,8 +1,9 @@
 # Display Frame Submission
 
 > DisplayFrame and direct display submission first shipped in `0.4.1`;
-> device-image staging was expanded in `0.4.24`, and `0.5.0` adds runtime
-> concurrency hardening. See [release notes](release_notes.en.md).
+> device-image staging was expanded in `0.4.24`, `0.5.0` added runtime
+> concurrency hardening, and `0.5.1` adds automatic CUDA-Vulkan shared storage.
+> See [release notes](release_notes.en.md).
 
 Forge keeps ordinary `canvas.set_image(...)` compatibility while adding a
 narrower display-ready path for engines that already produce final images.
@@ -34,10 +35,11 @@ display-ready frame.
 
 ## Display Statistics
 
-`Window.get_display_stats()` exposes display submission counters. The exact
-dictionary shape is intentionally simple and intended for engine-side profiling:
-accepted frames, submitted frames, dropped frames, reused frames, and the latest
-submission state.
+`Window.get_display_stats()` exposes display submission counters for engine-side
+profiling: accepted, submitted, dropped, and reused frames; window/offscreen
+submission counts; and the latest state. `zero_copy_render_submissions` counts
+actual graphics submissions that consumed a CUDA-Vulkan shared allocation, and
+`last_render_zero_copy` reports the latest render submission path.
 
 Use `Window.reset_display_stats()` before a profiling window.
 
@@ -45,17 +47,22 @@ Use `Window.reset_display_stats()` before a profiling window.
 
 - `DisplayFrame` avoids repeated generic input detection and repacking when the
   caller already owns a display-ready representation.
-- Ordinary CUDA/Vulkan Taichi field and ndarray images are packed to RGBA8 on
-  the device before display submission. This avoids the older per-frame
-  device-to-host staging round trip for the common `canvas.set_image(image)`
-  path.
+- Ordinary CUDA Taichi field and ndarray images are packed directly into a
+  Vulkan-exportable shared allocation when device identity and external
+  memory/semaphore capabilities qualify. Vulkan-native images keep their
+  direct device path. Other combinations retain the established staging path.
 - Contiguous host `uint8` RGBA NumPy images are submitted directly through the
   host RGBA8 path. Float NumPy images still need host-side conversion to RGBA8.
 - Packed `u32` device frames can use a Vulkan storage-buffer display path when
   available. This is the lowest-overhead path when the producer already writes
   packed RGBA8, but it is not intended to replace normal `set_image()` inputs.
-- CUDA sources may still require CUDA-to-Vulkan staging unless a stricter
-  external memory/semaphore ownership protocol is provided by the producer.
+- The shared CUDA-Vulkan path is automatic: Vulkan owns the exportable buffer,
+  CUDA imports it, and external semaphores transfer ownership. After the first
+  handoff, the normal Vulkan render submission also releases the buffer for the
+  next CUDA write, so steady state does not add a second graphics submission.
+- If capability or physical-device identity checks fail, the same `set_image()`
+  call uses the established staging path. Applications do not need a platform-
+  specific branch.
 - Visible window presentation is bounded by the platform WSI/swapchain
   contract. Offscreen or hidden submission is the better path for measuring
   raw display-sink throughput.

@@ -132,6 +132,14 @@ metadata, and `operator.statistics()["vector_io"]` to distinguish eligibility
 from the path that executed. The telemetry reports direct field/view
 submissions, qualified operand metadata builds/reuses, and the last contiguous or affine execution mode.
 
+## Managed external storage
+
+`ti.interop.from_dlpack()` creates an `ExternalDenseView` over a qualified DLPack producer. It uses the same descriptor and kernel ABI as an internal dense view, but adds a managed external owner, capsule deleter, retirement state, and optional synchronization-domain identity. CPU storage is accepted on CPU; CUDA and CUDA-managed storage are accepted on CUDA. Vulkan and cross-device imports fail closed because DLPack alone does not provide the required Vulkan allocation and semaphore contract.
+
+External imports currently require compact AOS storage. They bind directly to ordinary kernels and can be used as Graph runtime arguments. CUDA Graph capture remains limited to compact Program-owned storage, so an external view uses ordinary zero-copy fallback on CUDA; CPU ordinary dispatch and Vulkan replay retain the same owner and range checks. General affine external views remain unsupported.
+
+See [Zero-copy dense storage and interoperability](zero_copy_interop.en.md) for the DLPack API, legacy adapter policy, CUDA-Vulkan display sharing, and measured overhead.
+
 ## Lifetime and failure behavior
 
 The view keeps its Python source alive, while the runtime validates the
@@ -151,10 +159,10 @@ Keep these boundaries in mind:
   copying.
 - Zero-copy does not mean synchronization-free. Consumers must still obey
   normal Taichi kernel and stream ordering.
-- External framework ownership, DLPack, and general affine mappings such as
-  negative strides, broadcast, overlap, or arbitrary element strides require
-  additional lifetime and synchronization contracts and are not implied by
-  this API.
+- External framework storage must enter through a managed provider such as
+  `ti.interop.from_dlpack()`; `ndarray_view()` itself does not infer external
+  ownership. Negative strides, broadcast, overlap, and arbitrary external
+  affine mappings remain outside the executable contract.
 
 ## Choosing this API
 

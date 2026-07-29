@@ -91,6 +91,8 @@ English public docs are grouped by use case:
 
 ### Data structures and display
 
+- [Zero-copy dense storage and interoperability](docs/forge/zero_copy_interop.en.md)
+- [Dense storage views](docs/forge/storage_views.en.md)
 - [Choosing a sparse layout](docs/forge/sparse_layout_selection.en.md)
 - [Vulkan sparse SNode](docs/forge/sparse_snode_on_vulkan.en.md)
 - [Hash SNode](docs/forge/hash_snode.en.md)
@@ -98,7 +100,7 @@ English public docs are grouped by use case:
 
 ### Physics and linear algebra
 
-- [Experimental LinearOperator and SolvePlan](docs/forge/linear_operator.en.md)
+- [LinearOperator and SolvePlan](docs/forge/linear_operator.en.md)
 - [Sparse runtime and linear algebra: API, backend matrix, and lifecycle](docs/forge/sparse_runtime_and_linear_algebra.en.md)
 - [Choosing sparse operators and solvers for physics workloads](docs/forge/physics_sparse_solver_selection.en.md)
 - [Linear solvers](docs/lang/articles/math/linear_solver.md)

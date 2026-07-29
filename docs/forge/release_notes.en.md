@@ -59,14 +59,35 @@ the `0.5.0` artifacts:
   broadcast, overlapping, permuted, sparse, and externally owned layouts fail
   before enqueue. Stale owners are rejected and GPU submissions retain the
   runtime resource through completion.
+- Added `ti.interop.from_dlpack()` and `ExternalDenseView` for strict managed
+  zero-copy import. CPU/CUDA-host producers bind on CPU; CUDA/CUDA-managed
+  producers bind on CUDA. The runtime owns the capsule deleter, validates the
+  byte range and owner generation before every submission, defers retirement
+  through in-flight work, and makes `close()` safe after runtime reset. Vulkan,
+  cross-device import, unsupported layouts, and copy fallback fail explicitly.
+- Managed external submissions now use synchronization-domain access epochs.
+  An ordinary launch or Graph submission acquires each distinct domain once
+  and releases it in reverse order after enqueue or failure. Historical NumPy,
+  PyTorch, and Paddle argument signatures remain compatible; synchronous CPU
+  NumPy retains its low-overhead direct ABI and established incompatible-layout
+  fallback.
+- GGUI `canvas.set_image()` now automatically packs qualified CUDA field and
+  ndarray images into Vulkan-owned exportable storage imported by CUDA.
+  External semaphores provide a bounded CUDA-produce/Vulkan-consume cycle, and
+  steady state uses the normal render submission without a host round trip or
+  same-frame cross-device copy. Capability/device mismatch falls back to the
+  established staging path. `Window.get_display_stats()` reports actual
+  zero-copy render submissions. On the qualified Windows 2048 x 2048 workload,
+  the complete warm frame loop improved by 6.2% with byte-identical output.
 - JIT Graph `ArgKind.NDARRAY` runtime arguments now consume the common runtime
   storage protocol for Ndarrays, dense fields, and explicit
   `DenseNdarrayView` objects. Compact Program-owned Ndarray and SNode payload
   bindings are eligible for CUDA capture, exact replay, and compatible
   allocation patching; owner generation and byte ranges are revalidated before
   replay. Positive affine views execute through CUDA ordinary fallback and
-  Vulkan command record/replay with the same result contract. AOT borrowed
-  storage, external-owner capture, and ArgPack nesting remain unsupported.
+  Vulkan command record/replay with the same result contract. Managed external
+  owners use ordinary/replay access epochs rather than CUDA capture. AOT
+  borrowed storage and ArgPack nesting remain unsupported.
 - `ti.linalg.LinearOperator.apply()` and single-system `SolvePlan.solve()` accept
   supported 1D/2D/3D root-dense scalar, Vector, and Matrix fields. Overwrite
   `LinearOperator.apply()` directly binds canonical compact full fields for

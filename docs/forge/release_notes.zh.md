@@ -53,12 +53,28 @@
   storage。负 stride、broadcast、overlap、permutation、sparse 与 external-owned layout
   会在 enqueue 前失败。stale owner 会被拒绝，GPU submission 会把 runtime resource 保留
   到执行完成。
+- 新增 `ti.interop.from_dlpack()` 与 `ExternalDenseView`，提供严格、受管的 zero-copy
+  import。CPU/CUDA-host producer 可在 CPU 绑定；CUDA/CUDA-managed producer 可在 CUDA
+  绑定。runtime 持有 capsule deleter，每次 submission 前验证 byte range 与 owner
+  generation，让 in-flight work 完成后再 retire，并保证 runtime reset 后 `close()` 安全。
+  Vulkan、跨设备 import、不支持的 layout 与 copy fallback 会明确失败。
+- 受管 external submission 使用 synchronization-domain access epoch。普通 launch 或
+  Graph submission 对每个不同 domain 只 acquire 一次，并在 enqueue 完成或异常时逆序
+  release。既有 NumPy、PyTorch、Paddle 参数签名保持兼容；同步 CPU NumPy 保留低开销
+  direct ABI 与既有 incompatible-layout fallback。
+- GGUI `canvas.set_image()` 会自动把合格的 CUDA field/ndarray 图像 pack 到 Vulkan-owned
+  exportable storage，再由 CUDA 导入同一 allocation。External semaphore 构成有界的
+  CUDA-produce/Vulkan-consume cycle；steady state 复用正常 render submission，不经过
+  host，也不执行同帧 cross-device copy。capability/device 不匹配时自动使用既有 staging。
+  `Window.get_display_stats()` 可报告实际 zero-copy render submission。资格验证后的
+  Windows 2048 x 2048 workload 中，完整 warm frame loop 提升 6.2%，输出逐字节一致。
 - JIT Graph 的 `ArgKind.NDARRAY` runtime 参数现在通过通用 runtime-storage 协议消费
   Ndarray、dense field 与显式 `DenseNdarrayView`。compact Program-owned Ndarray 与
   SNode payload binding 可使用 CUDA capture、exact replay 和兼容 allocation patch；
   replay 前会重新验证 owner generation 与 byte range。positive affine view 在 CUDA
   使用 ordinary fallback，在 Vulkan 使用 command record/replay，并保持相同结果合同。
-  AOT borrowed storage、external-owner capture 与 ArgPack 嵌套仍不支持。
+  受管 external owner 使用 ordinary/replay access epoch，而不进入 CUDA capture。AOT
+  borrowed storage 与 ArgPack 嵌套仍不支持。
 - `ti.linalg.LinearOperator.apply()` 与单系统 `SolvePlan.solve()` 接受受支持的
   1D/2D/3D root-dense scalar、Vector 和 Matrix field。overwrite
   `LinearOperator.apply()` 可在 CPU/CUDA/Vulkan 的 compiled-kernel 与

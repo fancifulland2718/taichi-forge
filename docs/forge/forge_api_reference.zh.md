@@ -35,6 +35,18 @@ permutation、integer indexing 与 external ownership。
 完整 layout matrix、生命周期、Graph 路径与示例见
 [实验性 Dense Storage 零拷贝视图](storage_views.zh.md)。
 
+### `ti.interop.from_dlpack(source, *, element_shape=(), access="readwrite", copy=False)`
+
+把合格的 DLPack producer 导入为受管、严格 zero-copy 的 `ExternalDenseView`。CPU runtime 接受 CPU/CUDA-host storage；CUDA runtime 接受 CUDA/CUDA-managed storage。Vulkan、跨设备导入、noncompact external affine layout、`copy=True` 与不支持的 access mode 会明确失败，不会 materialize copy。
+
+返回 view 可作为兼容 ndarray kernel argument，支持 `close()` 与 context-manager 协议。它会让 DLPack capsule owner 在 in-flight work 完成前保持存活，runtime reset 后调用 `close()` 仍然安全。
+
+### `ti.interop.capabilities()`
+
+返回当前 backend、接受的 DLPack device class、layout/access mode、严格 copy-fallback policy 与 schema version。当前 schema version 为 `1`。
+
+既有 NumPy、PyTorch、Paddle kernel 参数签名保持支持。显式 interop API 是严格合同；历史 adapter 保留已有 fallback 行为。完整支持矩阵与同步合同见 [Dense Storage 零拷贝与互操作](zero_copy_interop.zh.md)。
+
 ### `ti.compile_kernels(kernels)`
 
 位置：`taichi_forge.lang.misc`，导出为 `ti.compile_kernels`。
@@ -899,8 +911,8 @@ graph.run({})
 
 GGUI `set_image` 提交链路使用的 display-ready frame 对象。当调用方已经持有可显示
 表示，并希望跳过通用输入识别和 repack 时使用。普通图像仍优先使用
-`canvas.set_image`；Taichi field 和 ndarray 输入在 CUDA/Vulkan 后端会走优化过的
-device-side staging 路径。
+`canvas.set_image`；Taichi field 与 ndarray 输入会自动选择合格的 CUDA-Vulkan
+shared storage 或经过优化的 device-side staging 路径。
 
 构造函数：
 
@@ -926,14 +938,16 @@ canvas.submit_frame(frame)
 说明：
 
 - `canvas.set_image(frame)` 会转发到 `canvas.submit_frame(frame)`。
-- 普通 `canvas.set_image(...)` 输入仍然保留。CUDA/Vulkan Taichi field 和 ndarray
-  输入会先在 device 侧 pack 成 RGBA8 再提交显示，避免每帧 device-to-host staging
-  往返。
+- 普通 `canvas.set_image(...)` 输入仍然保留。CUDA Taichi field/ndarray 图像在
+  device identity 与 external memory/semaphore capability 合格时，会直接 pack 到
+  Vulkan-exportable shared buffer。其它 CUDA/Vulkan 输入保留既有 device staging；
+  两种路径都不需要逐帧 device-to-host 往返。
 - C-contiguous host `uint8` RGBA NumPy 输入会直接走 host RGBA8 提交路径。只有当
   producer 已经把 packed RGBA8 写入 2D `ti.u32` ndarray 时，才需要直接使用
   `DisplayFrame.from_packed_u32_ndarray(...)`。
-- 这个 API 不承诺严格跨设备 zero-copy。实际路径取决于 source backend、display
-  backend 和资源所有权。
+- CUDA-Vulkan sharing 会自动资格验证并 fail closed。资格验证失败时，`set_image()`
+  通过既有 staging path 保持相同结果合同；`window.get_display_stats()` 可报告实际
+  提交路径。
 
 ### Display Statistics
 
@@ -945,7 +959,7 @@ canvas.submit_frame(frame)
 | `window.get_display_stats()` | 返回 `set_image` / `show` 的显示提交统计。 |
 | `window.reset_display_stats()` | 重置显示提交统计。 |
 
-引擎循环可以用这些 API 统计 accepted、submitted、dropped、reused 等帧状态。
+引擎循环可以用这些 API 统计 accepted、submitted、dropped、reused，以及 `zero_copy_render_submissions` 和 `last_render_zero_copy`。
 
 参考：[显示帧提交](display_frame.zh.md)。
 
