@@ -1,5 +1,18 @@
+from dataclasses import dataclass
+
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.graph._ir import NativeCallNode
+
+
+@dataclass(frozen=True)
+class GraphTemporaryBuffer:
+    """One named byte slice in a Graph-owned runtime allocation."""
+
+    storage: object
+    offset: int
+    bytes: int
+    alignment: int
+    slot: int
 
 
 class NativeGraphBackendRecorder:
@@ -16,6 +29,13 @@ class NativeGraphBackendRecorder:
     @property
     def dispatches(self):
         return ()
+
+    def bind_graph_temporaries(self, temporaries):
+        """Return a recorder bound to one arena slot, or None to fail closed.
+
+        Existing recorders do not consume scratch and therefore need no bind.
+        """
+        return self if not temporaries else None
 
 
 class DispatchNativeGraphRecorder(NativeGraphBackendRecorder):
@@ -50,6 +70,12 @@ class NativeGraphExecutable:
 
     def run(self, runtime_args=None):
         raise NotImplementedError
+
+    def run_with_graph_temporaries(self, temporaries, runtime_args=None):
+        """Run once with named slices owned by the enclosing Graph."""
+        if runtime_args is None:
+            return self.run()
+        return self.run(runtime_args)
 
     @property
     def debug_info(self):

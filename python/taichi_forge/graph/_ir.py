@@ -284,6 +284,15 @@ class ElementwiseFusionPlan:
 
 
 @dataclass(frozen=True)
+class TemporaryAllocation:
+    name: str
+    offset: int
+    bytes: int
+    alignment: int
+    slot: int
+
+
+@dataclass(frozen=True)
 class TemporaryMemoryPlan:
     declared_bytes: int
     logical_bytes: int
@@ -294,9 +303,20 @@ class TemporaryMemoryPlan:
     conflicting_requirements: int
     opaque_bytes: int
     materialized: bool = False
+    allocations: Tuple[TemporaryAllocation, ...] = ()
 
     def to_dict(self):
-        return self.__dict__.copy()
+        return {
+            "declared_bytes": self.declared_bytes,
+            "logical_bytes": self.logical_bytes,
+            "planned_peak_bytes": self.planned_peak_bytes,
+            "reused_bytes": self.reused_bytes,
+            "alignment_padding_bytes": self.alignment_padding_bytes,
+            "slot_count": self.slot_count,
+            "conflicting_requirements": self.conflicting_requirements,
+            "opaque_bytes": self.opaque_bytes,
+            "materialized": self.materialized,
+        }
 
 
 def _fusion_blocker(node):
@@ -433,23 +453,27 @@ def plan_temporary_memory(root):
         (
             entry["first"],
             entry["last"],
+            name,
             entry["bytes"],
             entry["alignment"],
         )
-        for entry in declarations.values()
+        for name, entry in declarations.items()
         if not entry["conflict"]
     )
     slots = []
-    for first, last, byte_count, alignment in intervals:
+    allocation_slots = {}
+    for first, last, name, byte_count, alignment in intervals:
         available = [
-            slot for slot in slots if slot["last"] < first
+            (index, slot)
+            for index, slot in enumerate(slots)
+            if slot["last"] < first
         ]
         if available:
-            slot = min(
+            slot_index, slot = min(
                 available,
                 key=lambda value: (
-                    max(value["bytes"], byte_count),
-                    value["alignment"],
+                    max(value[1]["bytes"], byte_count),
+                    value[1]["alignment"],
                 ),
             )
             slot["last"] = last
@@ -460,6 +484,7 @@ def plan_temporary_memory(root):
                 // gcd(slot["alignment"], alignment)
             )
         else:
+            slot_index = len(slots)
             slots.append(
                 {
                     "last": last,
@@ -467,12 +492,15 @@ def plan_temporary_memory(root):
                     "alignment": alignment,
                 }
             )
+        allocation_slots[name] = slot_index
 
     peak_bytes = 0
     slot_payload_bytes = 0
+    slot_offsets = []
     for slot in slots:
         alignment = slot["alignment"]
         peak_bytes = (peak_bytes + alignment - 1) // alignment * alignment
+        slot_offsets.append(peak_bytes)
         peak_bytes += slot["bytes"]
         slot_payload_bytes += slot["bytes"]
     planned_logical_bytes = logical_bytes - opaque_bytes
@@ -485,6 +513,17 @@ def plan_temporary_memory(root):
         slot_count=len(slots),
         conflicting_requirements=len(opaque_entries),
         opaque_bytes=opaque_bytes,
+        allocations=tuple(
+            TemporaryAllocation(
+                name=name,
+                offset=slot_offsets[allocation_slots[name]],
+                bytes=entry["bytes"],
+                alignment=entry["alignment"],
+                slot=allocation_slots[name],
+            )
+            for name, entry in sorted(declarations.items())
+            if not entry["conflict"]
+        ),
     )
 
 

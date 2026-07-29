@@ -9,7 +9,7 @@ import numpy as np
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.aot.utils import produce_injected_args_for_graph
 from taichi_forge.lang import enums, impl, kernel_impl
-from taichi_forge.lang._ndarray import Ndarray
+from taichi_forge.lang._ndarray import Ndarray, ScalarNdarray
 from taichi_forge.lang._storage_view import DenseNdarrayView, ndarray_view
 from taichi_forge.lang._texture import Texture
 from taichi_forge.lang.exception import TaichiCompilationError, TaichiRuntimeError
@@ -19,8 +19,10 @@ from taichi_forge.lang.matrix import Matrix, MatrixField, MatrixType
 from taichi_forge.types._argument_descriptor import (
     describe_element_type,
 )
+from taichi_forge.types.primitive_types import i32
 from taichi_forge.types.texture_type import FORMAT2TY_CH, TY_CH2FORMAT
 from taichi_forge.graph._native import (
+    GraphTemporaryBuffer,
     NativeGraphBackendRecorder,
     compile_native_graph_node,
 )
@@ -51,6 +53,126 @@ def _new_runtime_graph_builder():
     if os.environ.get("TI_GRAPH_TWO_MAP_COMPOSER", "1") != "0":
         builder._enable_two_map_composer()
     return builder
+
+
+def _align_up(value, alignment):
+    return (value + alignment - 1) // alignment * alignment
+
+
+class _GraphTemporaryArenaLease:
+    def __init__(self, arena, slot):
+        self._arena = arena
+        self._slot = slot
+        self.bindings = slot["bindings"]
+
+    def attach(self, completion):
+        if self._slot is None:
+            return
+        self._slot["completion"] = (
+            completion if completion.has_backend_work else None
+        )
+        self._slot = None
+
+    def cancel(self):
+        if self._slot is not None:
+            self._slot["completion"] = None
+            self._slot = None
+
+
+class _GraphTemporaryArena:
+    """Runtime-owned byte arenas with a bounded async submission ring."""
+
+    _BASE_ALIGNMENT = 16
+    _WORD_BYTES = 4
+
+    def __init__(self, plan, capacity=None):
+        self.plan = plan
+        self.capacity = int(
+            capacity
+            if capacity is not None
+            else os.environ.get("TI_GRAPH_TEMPORARY_ARENA_SLOTS", "4")
+        )
+        if self.capacity < 1 or self.capacity > 64:
+            raise TaichiRuntimeError(
+                "TI_GRAPH_TEMPORARY_ARENA_SLOTS must be between 1 and 64"
+            )
+        self._slots = []
+        self._allocations = 0
+        self._reuses = 0
+        self._waits = 0
+        self._storage_bytes = _align_up(
+            plan.planned_peak_bytes, self._WORD_BYTES
+        )
+        self._available = bool(plan.allocations) and not (
+            plan.conflicting_requirements
+            or any(
+                allocation.alignment > self._BASE_ALIGNMENT
+                for allocation in plan.allocations
+            )
+        )
+
+    def _new_slot(self):
+        storage = (
+            None
+            if self._storage_bytes == 0
+            else ScalarNdarray(
+                i32, (self._storage_bytes // self._WORD_BYTES,)
+            )
+        )
+        bindings = {
+            allocation.name: GraphTemporaryBuffer(
+                storage=storage,
+                offset=allocation.offset,
+                bytes=allocation.bytes,
+                alignment=allocation.alignment,
+                slot=allocation.slot,
+            )
+            for allocation in self.plan.allocations
+        }
+        slot = {"storage": storage, "bindings": bindings, "completion": None}
+        self._slots.append(slot)
+        self._allocations += 1
+        return slot
+
+    def _reclaim(self):
+        for slot in self._slots:
+            completion = slot["completion"]
+            if completion is not None and completion.done():
+                slot["completion"] = None
+
+    def acquire(self):
+        if not self.plan.allocations:
+            return None
+        if not self._available:
+            raise TaichiRuntimeError(
+                "Graph temporary requirements conflict or exceed the portable "
+                "16-byte arena alignment contract"
+            )
+        self._reclaim()
+        for slot in self._slots:
+            if slot["completion"] is None:
+                self._reuses += 1
+                return _GraphTemporaryArenaLease(self, slot)
+        if len(self._slots) < self.capacity:
+            return _GraphTemporaryArenaLease(self, self._new_slot())
+        slot = self._slots[0]
+        slot["completion"].wait()
+        slot["completion"] = None
+        self._waits += 1
+        self._reuses += 1
+        return _GraphTemporaryArenaLease(self, slot)
+
+    @property
+    def stats(self):
+        return {
+            "materialized": bool(self._slots),
+            "capacity": self.capacity if self.plan.allocations else 0,
+            "slots": len(self._slots),
+            "reserved_bytes": len(self._slots) * self._storage_bytes,
+            "allocations": self._allocations,
+            "reuses": self._reuses,
+            "waits": self._waits,
+        }
 
 
 @dataclass(frozen=True)
@@ -105,12 +227,18 @@ class GraphMemoryReport:
 
     persistent_argument_bytes: int
     persistent_observation_bytes: int
+    persistent_temporary_bytes: int
     persistent_bytes: int
     transient_temporary_bytes: int
     planned_temporary_bytes: int
     temporary_reuse_bytes: int
     opaque_temporary_bytes: int
     temporary_plan_materialized: bool
+    temporary_arena_capacity: int
+    temporary_arena_slots: int
+    temporary_arena_allocations: int
+    temporary_arena_reuses: int
+    temporary_arena_waits: int
     opaque_driver_bytes: Optional[int]
 
 
@@ -262,6 +390,7 @@ def _execution_report(
     backend_stats,
     observation_staging_bytes=0,
     temporary_memory_plan=None,
+    temporary_arena_stats=None,
 ):
     segments = []
     stats_cursor = 0
@@ -409,17 +538,24 @@ def _execution_report(
         segment.persistent_argument_bytes for segment in cgraph_segments
     )
     temporary_memory_plan = temporary_memory_plan or {}
+    temporary_arena_stats = temporary_arena_stats or {}
     temporary_plan_materialized = bool(
-        temporary_memory_plan.get("materialized", False)
+        temporary_arena_stats.get("materialized", False)
     )
     planned_temporary_bytes = int(
         temporary_memory_plan.get("planned_peak_bytes", 0)
     )
+    persistent_temporary_bytes = int(
+        temporary_arena_stats.get("reserved_bytes", 0)
+    )
     memory = GraphMemoryReport(
         persistent_argument_bytes=persistent_argument_bytes,
         persistent_observation_bytes=int(observation_staging_bytes),
+        persistent_temporary_bytes=persistent_temporary_bytes,
         persistent_bytes=(
-            persistent_argument_bytes + int(observation_staging_bytes)
+            persistent_argument_bytes
+            + int(observation_staging_bytes)
+            + persistent_temporary_bytes
         ),
         transient_temporary_bytes=(
             planned_temporary_bytes if temporary_plan_materialized else 0
@@ -432,10 +568,15 @@ def _execution_report(
             temporary_memory_plan.get("opaque_bytes", 0)
         ),
         temporary_plan_materialized=temporary_plan_materialized,
+        temporary_arena_capacity=int(temporary_arena_stats.get("capacity", 0)),
+        temporary_arena_slots=int(temporary_arena_stats.get("slots", 0)),
+        temporary_arena_allocations=int(temporary_arena_stats.get("allocations", 0)),
+        temporary_arena_reuses=int(temporary_arena_stats.get("reuses", 0)),
+        temporary_arena_waits=int(temporary_arena_stats.get("waits", 0)),
         opaque_driver_bytes=None,
     )
     return GraphExecutionReport(
-        schema_version=2,
+        schema_version=3,
         arch=arch,
         lifecycle_state=lifecycle_state,
         node_count=len(segments),
@@ -470,16 +611,16 @@ def _execution_report(
 
 class _NativeReplayExecutable:
     def __init__(self, nodes):
-        self._executables = tuple(node.executable for node in nodes)
+        self._nodes = tuple(nodes)
 
     def prewarm(self):
-        for executable in self._executables:
-            executable.prewarm()
+        for node in self._nodes:
+            node.executable.prewarm()
         return self
 
-    def run(self, context):
-        for executable in self._executables:
-            executable.run()
+    def run(self, context, temporaries=None):
+        for node in self._nodes:
+            node.run(context, temporaries)
 
 
 class _CGraphJITExecutable:
@@ -490,7 +631,7 @@ class _CGraphJITExecutable:
     def prewarm(self):
         return self
 
-    def run(self, context):
+    def run(self, context, temporaries=None):
         self.compiled_graph.jit_run_cached(
             context.compile_config(), context.flattened_args(), self._jit_cache
         )
@@ -704,7 +845,7 @@ class _CompiledCGraphNode:
         )
         self._jit_cache = _ti_core.CompiledGraphJITCache()
 
-    def run(self, context):
+    def run(self, context, temporaries=None):
         self.compiled_graph.jit_run_cached(
             context.compile_config(),
             context.flattened_args(self.runtime_arg_names),
@@ -753,6 +894,10 @@ class _CompiledNativeGraphNode:
             )
         self.runtime_arg_names = frozenset(binding.name for binding in schema)
         self.needs_runtime_args = bool(self.runtime_arg_names)
+        self.temporary_names = frozenset(
+            requirement.name
+            for requirement in executable.temporary_requirements
+        )
         self.backend_recorder = executable.backend_recorder
         if self.backend_recorder is not None and not isinstance(
             self.backend_recorder, NativeGraphBackendRecorder
@@ -777,11 +922,24 @@ class _CompiledNativeGraphNode:
                     "Native Graph recorder arguments must match runtime_arg_schema"
                 )
 
-    def run(self, context):
-        if self.needs_runtime_args:
-            self.executable.run(context.runtime_args())
-        else:
-            self.executable.run()
+    def run(self, context, temporaries=None):
+        runtime_args = (
+            context.runtime_args() if self.needs_runtime_args else None
+        )
+        if not self.temporary_names:
+            if runtime_args is None:
+                return self.executable.run()
+            return self.executable.run(runtime_args)
+        if temporaries is None or not self.temporary_names.issubset(temporaries):
+            raise TaichiRuntimeError(
+                "Native Graph temporary requirements were not materialized"
+            )
+        bindings = {
+            name: temporaries[name] for name in self.temporary_names
+        }
+        return self.executable.run_with_graph_temporaries(
+            bindings, runtime_args
+        )
 
     @property
     def debug_info(self):
@@ -1021,7 +1179,7 @@ class _CompiledBoundedLoopGraphNode:
     def _select_chunk(self, remaining):
         return max(size for size in self._chunks if size <= remaining)
 
-    def run(self, context):
+    def run(self, context, temporaries=None):
         runtime_args = context.runtime_args()
         predicate_object = runtime_args[self.predicate]
         counter_object = (
@@ -1253,6 +1411,10 @@ def _recordable_backend_dispatches(node, backend):
             return None
         return node.recording_dispatches
     if not isinstance(node, _CompiledNativeGraphNode):
+        return None
+    # Concrete arena slots are selected per invocation. Keep scratch-consuming
+    # recorders on their executable path until they can bind that slot.
+    if node.temporary_names:
         return None
     recorder = node.backend_recorder
     if recorder is None or not recorder.supports_backend(backend):
@@ -1527,7 +1689,7 @@ class _GraphExecutable:
             _GraphRunContext() if self.spec.needs_runtime_args else None
         )
 
-    def run(self, args):
+    def run(self, args, temporaries=None):
         # Graph.run() holds a per-Graph lock, so this context can safely reuse
         # flattened runtime arguments and resource signatures across invocations.
         context = self._context
@@ -1535,7 +1697,7 @@ class _GraphExecutable:
             context.begin(args)
         try:
             for node in self.spec.nodes:
-                node.run(context)
+                node.run(context, temporaries)
         finally:
             if context is not None:
                 context.end()
@@ -1549,6 +1711,8 @@ class _GraphInstance:
         self._native_nodes = None
         self._backend_executable = None
         self._run_context = None
+        self._temporary_arena = _GraphTemporaryArena(spec.temporary_memory_plan)
+        self._temporary_bindings = None
 
         if len(spec.nodes) == 1 and isinstance(spec.nodes[0], _CompiledCGraphNode):
             node = spec.nodes[0]
@@ -1584,7 +1748,20 @@ class _GraphInstance:
         self._run_impl = run_impl.__func__
 
     def run(self, args):
-        self._run_impl(self, args)
+        self._run_impl(self, args, self._temporary_bindings)
+
+    def bind_temporary_buffers(self, bindings):
+        self._temporary_bindings = bindings
+
+    def clear_temporary_buffers(self):
+        self._temporary_bindings = None
+
+    def acquire_temporary_lease(self):
+        return self._temporary_arena.acquire()
+
+    @property
+    def temporary_arena_stats(self):
+        return self._temporary_arena.stats
 
     def _maybe_install_native_replay(self):
         arch = impl.current_cfg().arch
@@ -1629,24 +1806,24 @@ class _GraphInstance:
                 node.executable.prewarm()
         return self
 
-    def _run_backend(self, args):
+    def _run_backend(self, args, temporaries=None):
         if self._backend_executable is None:
-            return self._run_general(args)
+            return self._run_general(args, temporaries)
         context = self._run_context
         if context is not None:
             context.begin(args)
         try:
-            self._backend_executable.run(context)
+            self._backend_executable.run(context, temporaries)
         finally:
             if context is not None:
                 context.end()
 
-    def _run_native_only(self, args):
+    def _run_native_only(self, args, temporaries=None):
         for node in self._native_nodes:
-            node.run(None)
+            node.run(None, temporaries)
 
-    def _run_general(self, args):
-        self._executable.run(args)
+    def _run_general(self, args, temporaries=None):
+        self._executable.run(args, temporaries)
 
     @property
     def debug_info(self):
@@ -2240,12 +2417,20 @@ class Graph:
             # increment before the first native call: otherwise two independent
             # Graphs can both snapshot zero, overwrite the count with one, and
             # drive it negative when their paired finally blocks run.
+            temporary_lease = self._instance.acquire_temporary_lease()
+            temporary_bindings = (
+                temporary_lease.bindings if temporary_lease is not None else None
+            )
             runtime._active_graph_submissions = submission_state + 1
+            self._instance.bind_temporary_buffers(temporary_bindings)
             try:
                 runtime.prog._record_runtime_graph_submission()
                 self._run_impl(args)
             finally:
+                self._instance.clear_temporary_buffers()
                 runtime._active_graph_submissions -= 1
+                if temporary_lease is not None:
+                    temporary_lease.cancel()
 
     def submit(
         self,
@@ -2279,6 +2464,7 @@ class Graph:
             lane=lane,
             on_saturation=on_saturation,
         )
+        temporary_lease = None
         try:
             with self._lifecycle_lock:
                 self._check_runtime_valid()
@@ -2309,7 +2495,12 @@ class Graph:
                 # Publish the AD exclusion count before transaction creation:
                 # the pybind call may release the GIL while waiting for another
                 # runtime submission reader/writer boundary.
+                temporary_lease = self._instance.acquire_temporary_lease()
+                temporary_bindings = (
+                    temporary_lease.bindings if temporary_lease is not None else None
+                )
                 runtime._active_graph_submissions = submission_state + 1
+                self._instance.bind_temporary_buffers(temporary_bindings)
                 try:
                     transaction = (
                         runtime.prog._begin_runtime_submission_transaction()
@@ -2322,7 +2513,11 @@ class Graph:
                     if self._contains_native_nodes_value:
                         transaction._mark_submission()
                     completion = transaction._finish()
+                    if temporary_lease is not None:
+                        temporary_lease.attach(completion)
+                        temporary_lease = None
                 finally:
+                    self._instance.clear_temporary_buffers()
                     runtime._active_graph_submissions -= 1
 
                 if (
@@ -2331,6 +2526,8 @@ class Graph:
                 ):
                     runtime.retain_runtime_submission_owner(completion, self)
         except BaseException:
+            if temporary_lease is not None:
+                temporary_lease.cancel()
             if admission is not None:
                 admission._cancel()
             raise
@@ -2458,6 +2655,10 @@ class Graph:
                 lifecycle_state = "ready"
                 instance_kind = self._instance.debug_info["kind"]
                 backend_stats = self._instance.debug_graph_stats
+            temporary_arena_stats = (
+                self._instance.temporary_arena_stats
+                if lifecycle_state == "ready" else {}
+            )
             observation_staging_bytes = 0
             if lifecycle_state == "ready" and self._contains_bounded_loops_value:
                 observation_staging_bytes = int(
@@ -2474,6 +2675,7 @@ class Graph:
                 temporary_memory_plan=self._execution_definition[
                     "temporary_memory_plan"
                 ],
+                temporary_arena_stats=temporary_arena_stats,
             )
 
     @property

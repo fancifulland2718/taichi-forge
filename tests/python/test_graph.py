@@ -11,7 +11,7 @@ from taichi_forge.lang.exception import TaichiCompilationError, TaichiRuntimeErr
 import taichi_forge as ti
 from taichi_forge._lib import core as ti_core
 from taichi_forge.lang import impl
-from taichi_forge.graph._graph import gen_cpp_kernel
+from taichi_forge.graph._graph import _GraphTemporaryArena, gen_cpp_kernel
 from taichi_forge.graph._ir import (
     DispatchNode,
     GraphAccess,
@@ -1210,6 +1210,19 @@ class _TemporaryExecutable(_OpaqueExecutable):
         super().__init__(tracker)
         self._temporary = temporary
 
+    def run_with_graph_temporaries(self, temporaries, runtime_args=None):
+        binding = temporaries[self._temporary.name]
+        self._tracker.setdefault("buffers", []).append(
+            (
+                id(binding.storage),
+                binding.offset,
+                binding.bytes,
+                binding.alignment,
+                binding.slot,
+            )
+        )
+        return super().run()
+
     @property
     def temporary_requirements(self):
         return (self._temporary,)
@@ -1224,8 +1237,8 @@ class _TemporaryNode(NativeGraphNode):
         return _TemporaryExecutable(self._tracker, self._temporary)
 
 
-@test_utils.test(arch=ti.cpu)
-def test_graph_reports_planned_but_unmaterialized_temporary_reuse():
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_graph_materializes_and_reuses_temporary_arena():
     tracker = {"runs": 0}
     builder = ti.graph.GraphBuilder()
     builder.append_native(
@@ -1237,18 +1250,92 @@ def test_graph_reports_planned_but_unmaterialized_temporary_reuse():
     graph = builder.compile()
     graph.run({})
     assert tracker["runs"] == 2
+    first_storage, first_offset, first_bytes, first_alignment, first_slot = (
+        tracker["buffers"][0]
+    )
+    second_storage, second_offset, second_bytes, second_alignment, second_slot = (
+        tracker["buffers"][1]
+    )
+    assert first_storage == second_storage
+    assert first_offset == second_offset == 0
+    assert first_slot == second_slot == 0
+    assert (first_bytes, first_alignment) == (64, 16)
+    assert (second_bytes, second_alignment) == (32, 8)
 
     plan = graph._ir_debug_info["temporary_memory_plan"]
     assert plan["planned_peak_bytes"] == 64
     assert plan["reused_bytes"] == 32
     assert not plan["materialized"]
     memory = graph.execution_stats().memory
-    assert memory.transient_temporary_bytes == 0
+    assert memory.transient_temporary_bytes == 64
     assert memory.planned_temporary_bytes == 64
     assert memory.temporary_reuse_bytes == 32
     assert memory.opaque_temporary_bytes == 0
-    assert not memory.temporary_plan_materialized
+    assert memory.temporary_plan_materialized
+    assert memory.persistent_temporary_bytes == 64
+    assert memory.temporary_arena_capacity == 4
+    assert memory.temporary_arena_slots == 1
+    assert memory.temporary_arena_allocations == 1
+    assert memory.temporary_arena_reuses == 0
+    assert memory.temporary_arena_waits == 0
     assert memory.opaque_driver_bytes is None
+
+    graph.run({})
+    assert tracker["runs"] == 4
+    assert tracker["buffers"][2:] == tracker["buffers"][:2]
+    memory = graph.execution_stats().memory
+    assert memory.temporary_arena_allocations == 1
+    assert memory.temporary_arena_reuses == 1
+
+
+class _PendingGraphCompletion:
+    has_backend_work = True
+
+    def __init__(self):
+        self.is_done = False
+        self.waits = 0
+
+    def done(self):
+        return self.is_done
+
+    def wait(self):
+        self.waits += 1
+        self.is_done = True
+
+
+@test_utils.test(arch=ti.cpu)
+def test_graph_temporary_arena_bounds_async_inflight_slots():
+    plan = plan_temporary_memory(
+        SequentialRegion(
+            (
+                DispatchNode(
+                    "scratch",
+                    temporaries=(TemporaryRequirement("scratch", 64, 16),),
+                ),
+            )
+        )
+    )
+    arena = _GraphTemporaryArena(plan, capacity=2)
+    first = arena.acquire()
+    first_completion = _PendingGraphCompletion()
+    first.attach(first_completion)
+    second = arena.acquire()
+    second_completion = _PendingGraphCompletion()
+    second.attach(second_completion)
+
+    third = arena.acquire()
+    assert first_completion.waits == 1
+    assert second_completion.waits == 0
+    third.cancel()
+    assert arena.stats == {
+        "materialized": True,
+        "capacity": 2,
+        "slots": 2,
+        "reserved_bytes": 128,
+        "allocations": 2,
+        "reuses": 1,
+        "waits": 1,
+    }
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
