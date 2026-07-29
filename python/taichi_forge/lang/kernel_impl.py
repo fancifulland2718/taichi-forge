@@ -1170,6 +1170,29 @@ class Kernel:
             else:
                 element_dim = needed.dtype.ndim
                 array_shape = v.shape[element_dim:] if is_soa else v.shape[:-element_dim]
+            needs_grad_pointer = (
+                _allocate_all_external_grad
+                and getattr(v, "requires_grad", False)
+            ) or indices in _explicit_external_grad_args
+            if not needs_grad_pointer and getattr(v, "grad", None) is None:
+                from taichi_forge.interop._dlpack import (  # pylint: disable=C0415
+                    _legacy_external_view,
+                )
+
+                element_shape = ()
+                if isinstance(needed.dtype, MatrixType):
+                    element_shape = tuple(needed.dtype.get_shape())
+                external_view = _legacy_external_view(
+                    v,
+                    element_shape=element_shape,
+                    layout="soa" if is_soa else "aos",
+                )
+                if external_view is not None:
+                    tmps.append(external_view)
+                    launch_ctx.set_arg_runtime_storage(
+                        indices, external_view.runtime_argument
+                    )
+                    return
             if isinstance(v, np.ndarray):
                 if v.flags.c_contiguous:
                     launch_ctx.set_arg_external_array_with_shape(indices, int(v.ctypes.data), v.nbytes, array_shape, 0)

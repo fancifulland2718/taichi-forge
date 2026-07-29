@@ -1,12 +1,17 @@
 #include "taichi/python/export_storage_view.h"
 
+#include <cstring>
+#include <limits>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "taichi/ir/snode.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/program.h"
 #include "taichi/program/storage_view.h"
+#include "taichi/python/external_storage_bindings.h"
 
 namespace taichi {
 namespace {
@@ -355,6 +360,8 @@ void export_storage_view(py::module &m) {
       py::arg("require_writable") = false,
       py::arg("accept_external_owner") = false,
       py::arg("allow_materialization") = false);
+
+  export_external_storage_bindings(m);
 }
 
 }  // namespace taichi

@@ -1406,6 +1406,8 @@ void export_lang(py::module &m) {
            &Program::debug_dense_field_staging_stats)
       .def("_debug_dense_storage_binding_stats",
            &Program::debug_dense_storage_binding_stats)
+      .def("_debug_external_dense_storage_stats",
+           &Program::debug_external_dense_storage_stats)
       .def(
           "create_texture",
           [&](Program *program, BufferFormat fmt, const std::vector<int> &shape)
