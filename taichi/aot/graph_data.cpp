@@ -848,6 +848,9 @@ struct CompiledGraphCudaState {
       std::vector<std::vector<uint8_t>> host_buffers) {
     collect_ready_deferred_resources();
     if (deferred_resources.size() >= kMaxDeferredReplayBatches) {
+      if (diagnostics_enabled) {
+        ++stats.deferred_replay_waits;
+      }
       recycle_front_deferred_resources();
     }
     if (reusable_events.empty()) {
@@ -858,6 +861,10 @@ struct CompiledGraphCudaState {
       reusable_events.pop_back();
       deferred_resources.emplace_back(std::move(event), std::move(leases),
                                       std::move(host_buffers));
+    }
+    if (diagnostics_enabled) {
+      stats.peak_deferred_replay_batches = std::max<std::uint64_t>(
+          stats.peak_deferred_replay_batches, deferred_resources.size());
     }
   }
 
@@ -1485,12 +1492,26 @@ bool try_run_cuda_bounded_graph(
     control.iteration = ~std::uint32_t{0};
     control.max_iterations = static_cast<std::uint32_t>(max_iterations);
     control.continue_while_nonzero = continue_while_nonzero ? 1u : 0u;
-    driver.memcpy_host_to_device(state->conditional_control, &control,
-                                 sizeof(control));
+    std::vector<std::vector<uint8_t>> host_buffers(1);
+    host_buffers.front().resize(sizeof(control));
+    std::memcpy(host_buffers.front().data(), &control, sizeof(control));
+    driver.memcpy_host_to_device_async(state->conditional_control,
+                                       host_buffers.front().data(),
+                                       sizeof(control), nullptr);
+    if (state->diagnostics_enabled) {
+      ++state->stats.asynchronous_control_updates;
+    }
+    return host_buffers;
   };
   auto launch = [&](CompiledGraphExecutionPath path) {
-    update_control();
-    driver.graph_launch(state->graph_exec.get(), nullptr);
+    auto host_buffers = update_control();
+    try {
+      driver.graph_launch(state->graph_exec.get(), nullptr);
+    } catch (...) {
+      state->defer_replay_resources({}, std::move(host_buffers));
+      throw;
+    }
+    state->defer_replay_resources({}, std::move(host_buffers));
     state->stats.last_path = path;
     state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
   };
@@ -1866,15 +1887,31 @@ bool try_run_cuda_conditional_graph(
     control.continue_while_nonzero =
         default_branch < 0 ? ~std::uint32_t{0}
                            : static_cast<std::uint32_t>(default_branch);
-    driver.memcpy_host_to_device(state->conditional_control, &control,
-                                 sizeof(control));
+    std::vector<std::vector<uint8_t>> host_buffers(1);
+    host_buffers.front().resize(sizeof(control));
+    std::memcpy(host_buffers.front().data(), &control, sizeof(control));
+    driver.memcpy_host_to_device_async(state->conditional_control,
+                                       host_buffers.front().data(),
+                                       sizeof(control), nullptr);
+    if (state->diagnostics_enabled) {
+      ++state->stats.asynchronous_control_updates;
+    }
+    return host_buffers;
   };
   auto launch = [&](CompiledGraphExecutionPath path,
                     bool control_changed = true) {
     if (control_changed) {
-      update_control();
+      auto host_buffers = update_control();
+      try {
+        driver.graph_launch(state->graph_exec.get(), nullptr);
+      } catch (...) {
+        state->defer_replay_resources({}, std::move(host_buffers));
+        throw;
+      }
+      state->defer_replay_resources({}, std::move(host_buffers));
+    } else {
+      driver.graph_launch(state->graph_exec.get(), nullptr);
     }
-    driver.graph_launch(state->graph_exec.get(), nullptr);
     state->stats.last_path = path;
     state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
   };

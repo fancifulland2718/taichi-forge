@@ -437,6 +437,9 @@ class GraphExecutionCounters:
     replay_slot_saturation_fallbacks: int
     capture_exceptions: int
     zero_arg_captures: int
+    asynchronous_control_updates: int
+    deferred_replay_waits: int
+    peak_deferred_replay_batches: int
 
 
 @dataclass(frozen=True)
@@ -598,6 +601,9 @@ _COUNTER_FIELDS = (
     "replay_slot_saturation_fallbacks",
     "capture_exceptions",
     "zero_arg_captures",
+    "asynchronous_control_updates",
+    "deferred_replay_waits",
+    "peak_deferred_replay_batches",
 )
 _BACKEND_GRAPH_PATHS = frozenset(
     (
@@ -657,6 +663,75 @@ def _backend_name(arch):
     if arch in ("x64", "arm64"):
         return "cpu"
     return arch
+
+
+def structured_control_capabilities():
+    """Return the qualified structured-control lowering for this runtime.
+
+    The report separates an RHI primitive from a complete Graph runtime path.
+    In particular, Vulkan exposes indirect compute dispatch at the RHI layer,
+    but Forge does not claim device-controlled while/if/switch execution until
+    predicate production, visibility, zero-dispatch, replay, and terminal
+    observation are qualified together.
+    """
+    arch = impl.current_cfg().arch
+    backend = _backend_name(_ti_core.arch_name(arch))
+    cuda = None
+    native = False
+    primitive = "none"
+    rhi_primitive_compiled = False
+    runtime_path_compiled = False
+    if arch == _ti_core.Arch.cuda:
+        cuda = dict(_ti_core.cuda_conditional_graph_capabilities())
+        native = bool(
+            cuda["driver_version_eligible"]
+            and cuda["conditional_graph_symbols_loaded"]
+            and cuda.get("general_device_setter_lowering_compiled", False)
+        )
+        primitive = "cuda_conditional_graph"
+        rhi_primitive_compiled = bool(
+            cuda.get("general_device_setter_lowering_compiled", False)
+        )
+        runtime_path_compiled = native
+        if not cuda["driver_version_eligible"]:
+            reason = "cuda_driver_api_version_below_12_8"
+        elif not cuda["conditional_graph_symbols_loaded"]:
+            reason = "cuda_conditional_graph_symbols_not_loaded"
+        elif not cuda.get("general_device_setter_lowering_compiled", False):
+            reason = "cuda_conditional_setter_lowering_not_compiled"
+        else:
+            reason = "none"
+    elif arch == _ti_core.Arch.vulkan:
+        primitive = "vulkan_dispatch_indirect"
+        rhi_primitive_compiled = True
+        reason = "vulkan_structured_indirect_runtime_not_compiled"
+    else:
+        reason = "device_control_is_gpu_only"
+    portable_while = (
+        "cpu_exact_host_loop"
+        if backend == "cpu"
+        else "portable_exact_or_masked_replay"
+    )
+    return {
+        "schema_version": 1,
+        "backend": backend,
+        "portable": {
+            "while": portable_while,
+            "if": "host_selected_exact_branch",
+            "switch": "host_selected_exact_branch",
+        },
+        "device_control": {
+            "while": native,
+            "if": native,
+            "switch": native,
+            "structured_submit": native,
+            "primitive": primitive,
+            "rhi_primitive_compiled": rhi_primitive_compiled,
+            "runtime_path_compiled": runtime_path_compiled,
+            "unsupported_reason": reason,
+        },
+        "cuda_conditional_graph": cuda,
+    }
 
 
 def _execution_report(
@@ -4711,6 +4786,7 @@ __all__ = [
     "GraphExecutionReport",
     "GraphWhileReport",
     "GraphBranchReport",
+    "structured_control_capabilities",
     "Arg",
     "ArgKind",
 ]

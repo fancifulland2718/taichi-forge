@@ -3631,6 +3631,11 @@ void export_lang(py::module &m) {
             stats.replay_slot_saturation_fallbacks;
         result["capture_exceptions"] = stats.capture_exceptions;
         result["zero_arg_captures"] = stats.zero_arg_captures;
+        result["asynchronous_control_updates"] =
+            stats.asynchronous_control_updates;
+        result["deferred_replay_waits"] = stats.deferred_replay_waits;
+        result["peak_deferred_replay_batches"] =
+            stats.peak_deferred_replay_batches;
         result["zero_arg_eligible"] = stats.zero_arg_eligible;
         result["known_persistent_argument_bytes"] =
             stats.known_persistent_argument_bytes;

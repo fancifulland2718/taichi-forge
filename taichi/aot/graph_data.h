@@ -340,6 +340,9 @@ struct CompiledGraphStats {
   uint64_t replay_slot_saturation_fallbacks{0};
   uint64_t capture_exceptions{0};
   uint64_t zero_arg_captures{0};
+  uint64_t asynchronous_control_updates{0};
+  uint64_t deferred_replay_waits{0};
+  uint64_t peak_deferred_replay_batches{0};
   uint64_t known_persistent_argument_bytes{0};
   uint64_t last_driver_error{0};
   uint32_t retry_backoff_remaining{0};

@@ -2350,6 +2350,41 @@ def _structured_while_args(*, target, active=True, breakdown=False):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
+    capabilities = ti.graph.structured_control_capabilities()
+    device = capabilities["device_control"]
+    arch = ti.lang.impl.current_cfg().arch
+    assert capabilities["schema_version"] == 1
+    assert set(("while", "if", "switch")) <= capabilities["portable"].keys()
+    if arch == ti.cuda:
+        expected = bool(
+            capabilities["cuda_conditional_graph"]["driver_version_eligible"]
+            and capabilities["cuda_conditional_graph"][
+                "conditional_graph_symbols_loaded"
+            ]
+            and capabilities["cuda_conditional_graph"][
+                "general_device_setter_lowering_compiled"
+            ]
+        )
+        assert device["primitive"] == "cuda_conditional_graph"
+        assert device["runtime_path_compiled"] == expected
+        assert device["structured_submit"] == expected
+    elif arch == ti.vulkan:
+        assert device["primitive"] == "vulkan_dispatch_indirect"
+        assert device["rhi_primitive_compiled"]
+        assert not device["runtime_path_compiled"]
+        assert not device["structured_submit"]
+        assert device["unsupported_reason"] == (
+            "vulkan_structured_indirect_runtime_not_compiled"
+        )
+    else:
+        assert capabilities["backend"] == "cpu"
+        assert not device["rhi_primitive_compiled"]
+        assert not device["runtime_path_compiled"]
+        assert device["unsupported_reason"] == "device_control_is_gpu_only"
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_structured_graph_while_reports_exact_stop_and_backend_overshoot():
     graph = _build_structured_while_graph(max_iterations=20)
     args = _structured_while_args(target=5)
@@ -2672,6 +2707,9 @@ def test_structured_graph_while_native_rebind_and_replay_diagnostics():
     assert native_stats["patched_replays"] >= 1
     assert native_stats["exact_replays"] >= 1
     assert native_stats["last_path"] == "cuda_exact_replay"
+    assert native_stats["asynchronous_control_updates"] == 3
+    assert 1 <= native_stats["peak_deferred_replay_batches"] <= 2
+    assert native_stats["deferred_replay_waits"] >= 0
 
 
 @test_utils.test(arch=ti.cuda)
