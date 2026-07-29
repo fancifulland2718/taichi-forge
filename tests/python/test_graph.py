@@ -1263,9 +1263,9 @@ def test_compiler_metadata_enables_safe_elementwise_graph_candidates():
 
     @ti.kernel
     def second_map(
-        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
-        temporary: ti.types.ndarray(dtype=ti.i32, ndim=1),
         output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        temporary: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
     ):
         for i in source:
             output[i] = temporary[i] + 3
@@ -1282,7 +1282,7 @@ def test_compiler_metadata_enables_safe_elementwise_graph_candidates():
     builder = ti.graph.GraphBuilder()
     builder.dispatch(first_map, sym_source, sym_temporary)
     builder.dispatch(
-        second_map, sym_source, sym_temporary, sym_output
+        second_map, sym_output, sym_temporary, sym_source
     )
     graph = builder.compile()
 
@@ -1290,8 +1290,20 @@ def test_compiler_metadata_enables_safe_elementwise_graph_candidates():
     plan = ir["fusion_plan"]
     assert plan["candidate_groups"] == 1
     assert plan["candidate_dispatches"] == 2
+    assert plan["applied_groups"] == 1
+    assert plan["lowering_available"]
+    assert plan["decision"] == "applied"
     assert plan["eligible_dispatches"] == 2
     assert plan["blocked_dispatches"] == 0
+    assert graph._debug_info["nodes"] == [
+        {
+            "kind": "cgraph",
+            "dispatch_count": 2,
+            "physical_dispatch_count": 1,
+            "composed_two_map_groups": 1,
+        }
+    ]
+    assert graph._compiled_graph._composer_stats["physical_dispatches"] == 2
     dispatches = ir["pre_optimization_root"]["children"][0]["children"]
     assert len(dispatches) == 2
     assert all(not dispatch["opaque"] for dispatch in dispatches)
@@ -1357,6 +1369,12 @@ def test_compiler_metadata_fails_closed_for_atomic_and_stencil_access():
     assert plan["eligible_dispatches"] == 0
     assert plan["blocked_dispatches"] == 2
     assert plan["blockers"] == {"opaque_dispatch": 2}
+    assert plan["applied_groups"] == 0
+    assert plan["lowering_available"]
+    assert plan["decision"] == "no_safe_candidates"
+    assert graph._debug_info["nodes"] == [
+        {"kind": "cgraph", "dispatch_count": 2}
+    ]
     dispatches = ir["pre_optimization_root"]["children"][0]["children"]
     assert all(dispatch["opaque"] for dispatch in dispatches)
 
@@ -2319,7 +2337,10 @@ def test_vulkan_cgraph_structural_shape_change_records_again():
 
 
 @test_utils.test(arch=ti.vulkan)
-def test_vulkan_cgraph_alias_topology_change_records_again():
+def test_vulkan_cgraph_alias_topology_change_records_again(monkeypatch):
+    # This test owns Vulkan multi-dispatch recording, not kernel composition.
+    monkeypatch.setenv("TI_GRAPH_TWO_MAP_COMPOSER", "0")
+
     @ti.kernel
     def copy_increment(
         source: ti.types.ndarray(dtype=ti.i32, ndim=1),
@@ -2436,6 +2457,7 @@ def test_vulkan_cgraph_hazard_planner_preserves_dependency_chains(
         "TI_VULKAN_GRAPH_HAZARD_PLANNER",
         "1" if hazard_planner else "0",
     )
+    monkeypatch.setenv("TI_GRAPH_TWO_MAP_COMPOSER", "0")
 
     @ti.kernel
     def read_a_to_b(

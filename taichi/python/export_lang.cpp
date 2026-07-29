@@ -3362,6 +3362,8 @@ void export_lang(py::module &m) {
       .def(py::init<>())
       .def("dispatch", &GraphBuilder::dispatch)
       .def("compile", &GraphBuilder::compile)
+      .def("_enable_two_map_composer",
+           &GraphBuilder::enable_two_map_composer)
       .def("create_sequential", &GraphBuilder::new_sequential_node,
            py::return_value_policy::reference)
       .def("seq", &GraphBuilder::seq, py::return_value_policy::reference);
@@ -3648,10 +3650,11 @@ void export_lang(py::module &m) {
           "_dispatch_metadata",
           [](const aot::CompiledGraph &graph) {
             py::list result;
-            for (const auto &dispatch : graph.dispatches) {
-              const auto &metadata = dispatch.graph_metadata;
+            auto append = [&](const std::string &kernel_name,
+                              const std::vector<aot::Arg> &args,
+                              const GraphKernelMetadata &metadata) {
               py::dict item;
-              item["kernel_name"] = dispatch.kernel_name;
+              item["kernel_name"] = kernel_name;
               item["version"] = metadata.version;
               item["available"] = metadata.available;
               item["opaque"] = metadata.opaque;
@@ -3659,7 +3662,6 @@ void export_lang(py::module &m) {
               item["synchronization"] = metadata.synchronization;
               item["blocker"] = metadata.blocker;
               item["side_effects"] = metadata.side_effects;
-
               py::dict domain;
               domain["kind"] = metadata.iteration_domain.kind;
               domain["arg_id"] = metadata.iteration_domain.arg_id;
@@ -3667,7 +3669,6 @@ void export_lang(py::module &m) {
               domain["begin"] = metadata.iteration_domain.begin;
               domain["end"] = metadata.iteration_domain.end;
               item["iteration_domain"] = std::move(domain);
-
               py::list effects;
               for (const auto &effect : metadata.effects) {
                 py::dict encoded;
@@ -3680,9 +3681,8 @@ void export_lang(py::module &m) {
                 effects.append(std::move(encoded));
               }
               item["effects"] = std::move(effects);
-
               py::list symbolic_args;
-              for (const auto &arg : dispatch.symbolic_args) {
+              for (const auto &arg : args) {
                 py::dict encoded;
                 encoded["name"] = arg.name;
                 encoded["tag"] = static_cast<int>(arg.tag);
@@ -3690,7 +3690,47 @@ void export_lang(py::module &m) {
               }
               item["symbolic_args"] = std::move(symbolic_args);
               result.append(std::move(item));
+            };
+            for (const auto &dispatch : graph.dispatches) {
+              if (dispatch.source_dispatches.empty()) {
+                append(dispatch.kernel_name, dispatch.symbolic_args,
+                       dispatch.graph_metadata);
+                continue;
+              }
+              for (const auto &source : dispatch.source_dispatches) {
+                append(source.kernel_name, source.symbolic_args,
+                       source.graph_metadata);
+              }
             }
+            return result;
+          })
+      .def_property_readonly(
+          "_composer_stats",
+          [](const aot::CompiledGraph &graph) {
+            py::dict result;
+            std::uint32_t source_dispatches = 0;
+            std::uint32_t applied_groups = 0;
+            std::uint64_t compiled_tasks = 0;
+            bool tasks_known = true;
+            for (const auto &dispatch : graph.dispatches) {
+              const auto source_count = static_cast<std::uint32_t>(
+                  std::max<std::size_t>(1,
+                      dispatch.source_dispatches.size()));
+              source_dispatches += source_count;
+              applied_groups += source_count > 1 ? 1 : 0;
+              if (dispatch.compiled_task_count ==
+                  std::numeric_limits<std::uint32_t>::max()) {
+                tasks_known = false;
+              } else {
+                compiled_tasks += dispatch.compiled_task_count;
+              }
+            }
+            result["source_dispatches"] = source_dispatches;
+            result["physical_dispatches"] = graph.dispatches.size();
+            result["applied_groups"] = applied_groups;
+            result["compiled_tasks"] =
+                tasks_known ? py::cast(compiled_tasks) : py::none();
+            result["lowering_available"] = true;
             return result;
           })
       .def_property_readonly(

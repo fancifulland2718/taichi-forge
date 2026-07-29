@@ -272,7 +272,11 @@ class ElementwiseFusionPlan:
             "applied_groups": self.applied_groups,
             "lowering_available": self.lowering_available,
             "decision": (
-                "cross_kernel_ir_composer_unavailable"
+                "applied"
+                if self.applied_groups
+                else "qualified_not_applied"
+                if self.candidate_groups and self.lowering_available
+                else "cross_kernel_ir_composer_unavailable"
                 if self.candidate_groups
                 else "no_safe_candidates"
             ),
@@ -316,7 +320,9 @@ def _fusion_blocker(node):
     return None
 
 
-def analyze_elementwise_fusion(root):
+def analyze_elementwise_fusion(
+    root, *, applied_groups=0, lowering_available=False
+):
     """Find safe pointwise fusion groups without pretending to lower them."""
 
     groups = []
@@ -373,6 +379,8 @@ def analyze_elementwise_fusion(root):
         eligible_dispatches=eligible_dispatches,
         blocked_dispatches=blocked_dispatches,
         blocker_counts=tuple(sorted(blockers.items())),
+        applied_groups=int(applied_groups),
+        lowering_available=bool(lowering_available),
     )
 
 

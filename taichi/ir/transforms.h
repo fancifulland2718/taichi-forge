@@ -226,7 +226,8 @@ void compile_to_offloads(IRNode *ir,
                          AutodiffMode autodiff_mode,
                          bool ad_use_stack,
                          bool start_from_ast,
-                         GraphKernelMetadata *graph_metadata = nullptr);
+                         GraphKernelMetadata *graph_metadata = nullptr,
+                         bool stop_before_offload = false);
 
 void offload_to_executable(IRNode *ir,
                            const CompileConfig &config,

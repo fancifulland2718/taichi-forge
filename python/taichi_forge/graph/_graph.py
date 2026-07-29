@@ -46,6 +46,13 @@ from taichi_forge.graph._submission import (
 ArgKind = _ti_core.ArgKind
 
 
+def _new_runtime_graph_builder():
+    builder = _ti_core.GraphBuilder()
+    if os.environ.get("TI_GRAPH_TWO_MAP_COMPOSER", "1") != "0":
+        builder._enable_two_map_composer()
+    return builder
+
+
 @dataclass(frozen=True)
 class GraphExecutionCounters:
     """Detailed backend counters captured after diagnostics are enabled."""
@@ -308,7 +315,8 @@ def _execution_report(
         known_dispatches = int(stats.get("known_compiled_dispatches", 0))
         tasks = (
             int(stats.get("known_compiled_tasks", 0))
-            if known_dispatches == node["dispatch_count"]
+            if known_dispatches
+            == node.get("physical_dispatch_count", node["dispatch_count"])
             else None
         )
         backend = stats.get("backend", "none")
@@ -652,6 +660,18 @@ class _CompiledCGraphNode:
     ):
         self.compiled_graph = compiled_graph
         self.dispatch_count = dispatch_count
+        composer_stats = dict(
+            getattr(compiled_graph, "_composer_stats", {})
+        )
+        self.physical_dispatch_count = int(
+            composer_stats.get("physical_dispatches", dispatch_count)
+        )
+        self.composer_applied_groups = int(
+            composer_stats.get("applied_groups", 0)
+        )
+        self.composer_lowering_available = bool(
+            composer_stats.get("lowering_available", False)
+        )
         self.runtime_arg_names = frozenset(runtime_arg_names)
         self.recording_dispatches = tuple(
             (kernel, tuple(args)) for kernel, args in recording_dispatches
@@ -701,6 +721,10 @@ class _CompiledCGraphNode:
     @property
     def debug_info(self):
         info = {"kind": self.region_kind, "dispatch_count": self.dispatch_count}
+        if self.physical_dispatch_count != self.dispatch_count:
+            info["physical_dispatch_count"] = self.physical_dispatch_count
+        if self.composer_applied_groups:
+            info["composed_two_map_groups"] = self.composer_applied_groups
         if self.source_native_count:
             info["lowered_native_count"] = self.source_native_count
         return info
@@ -944,7 +968,7 @@ class _CompiledBoundedLoopGraphNode:
         self._chunks = {}
         chunk = 1
         while chunk <= self.chunk_limit and chunk <= self.max_iterations:
-            builder = _ti_core.GraphBuilder()
+            builder = _new_runtime_graph_builder()
             ir_nodes = []
             for _ in range(chunk):
                 body._dispatch_to(builder)
@@ -1270,7 +1294,7 @@ def _lower_mixed_backend_regions(nodes):
             cursor = end
             continue
 
-        builder = _ti_core.GraphBuilder()
+        builder = _new_runtime_graph_builder()
         recording_dispatches = []
         runtime_arg_names = set()
         ir_children = []
@@ -1328,14 +1352,24 @@ class _GraphSpec:
         self.pre_optimization_ir_analysis = analyze_graph_ir(
             self.pre_optimization_ir_root
         )
-        self.fusion_plan = analyze_elementwise_fusion(
-            self.pre_optimization_ir_root
-        )
         self.temporary_memory_plan = plan_temporary_memory(
             self.pre_optimization_ir_root
         )
         self.nodes, self.optimization = _lower_mixed_backend_regions(
             source_nodes
+        )
+        applied_groups = sum(
+            getattr(node, "composer_applied_groups", 0)
+            for node in self.nodes
+        )
+        lowering_available = any(
+            getattr(node, "composer_lowering_available", False)
+            for node in self.nodes
+        )
+        self.fusion_plan = analyze_elementwise_fusion(
+            self.pre_optimization_ir_root,
+            applied_groups=applied_groups,
+            lowering_available=lowering_available,
         )
         self._aot_graph_builder = aot_graph_builder
         self._aot_compiled_graph = aot_compiled_graph
@@ -1459,6 +1493,11 @@ class _GraphSpec:
                         else "native"
                     ),
                     "dispatch_count": getattr(node, "dispatch_count", 0),
+                    "physical_dispatch_count": getattr(
+                        node,
+                        "physical_dispatch_count",
+                        getattr(node, "dispatch_count", 0),
+                    ),
                     "runtime_arg_count": len(node.runtime_arg_names),
                     "region_kind": getattr(node, "region_kind", "opaque"),
                     "source_native_count": getattr(
@@ -1945,7 +1984,7 @@ class GraphBuilder:
     def __init__(self):
         self._aot_graph_plan = _AOTGraphBuilderPlan()
         self._aot_plan_cursor = 0
-        self._runtime_graph_builder = _ti_core.GraphBuilder()
+        self._runtime_graph_builder = _new_runtime_graph_builder()
         self._dispatch_count = 0
         self._runtime_graph_arg_names = set()
         self._runtime_graph_dispatches = []
@@ -2013,7 +2052,7 @@ class GraphBuilder:
                 recording_dispatches=self._runtime_graph_dispatches,
             )
         )
-        self._runtime_graph_builder = _ti_core.GraphBuilder()
+        self._runtime_graph_builder = _new_runtime_graph_builder()
         self._dispatch_count = 0
         self._runtime_graph_arg_names = set()
         self._runtime_graph_dispatches = []

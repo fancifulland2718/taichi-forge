@@ -23,7 +23,8 @@ void compile_to_offloads(IRNode *ir,
                          AutodiffMode autodiff_mode,
                          bool ad_use_stack,
                          bool start_from_ast,
-                         GraphKernelMetadata *graph_metadata) {
+                         GraphKernelMetadata *graph_metadata,
+                         bool stop_before_offload) {
   TI_AUTO_PROF;
   TI_COMPILE_PROFILER("cpp.ir.compile_to_offloads");
 
@@ -220,6 +221,9 @@ void compile_to_offloads(IRNode *ir,
 
   if (graph_metadata != nullptr) {
     *graph_metadata = analyze_graph_kernel_metadata(ir, kernel);
+  }
+  if (stop_before_offload) {
+    return;
   }
 
   {

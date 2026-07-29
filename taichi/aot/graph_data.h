@@ -221,6 +221,12 @@ class TI_DLL_EXPORT Kernel : public CallableBase {
   virtual void launch(LaunchContextBuilder &ctx) = 0;
 };
 
+struct GraphSourceDispatchMetadata {
+  std::string kernel_name;
+  std::vector<Arg> symbolic_args;
+  GraphKernelMetadata graph_metadata;
+};
+
 struct CompiledDispatch {
   std::string kernel_name;
   std::vector<Arg> symbolic_args;
@@ -231,6 +237,11 @@ struct CompiledDispatch {
   // SNodeTree identities.
   std::vector<SNodeTreeDependency> snode_tree_dependencies;
   GraphKernelMetadata graph_metadata;
+  // JIT-only lineage lets diagnostics retain the two logical source maps
+  // after one physical dispatch replaces them. AOT serialization is unchanged.
+  std::vector<GraphSourceDispatchMetadata> source_dispatches;
+  std::uint32_t compiled_task_count{
+      std::numeric_limits<std::uint32_t>::max()};
 
   TI_IO_DEF(kernel_name, symbolic_args);
 };
@@ -482,6 +493,9 @@ struct TI_DLL_EXPORT CompiledGraph {
   std::vector<CompiledDispatch> dispatches;
   std::unordered_map<std::string, aot::Arg> args;
   std::vector<SNodeTreeDependency> snode_tree_dependencies;
+  // JIT-only ownership for synthetic kernels created by Graph composition.
+  // Shared ownership preserves CompiledGraph's existing copy contract.
+  std::vector<std::shared_ptr<taichi::lang::Kernel>> owned_jit_kernels;
 
   CompiledGraph() = default;
   explicit CompiledGraph(std::vector<CompiledDispatch> compiled_dispatches);
