@@ -107,6 +107,83 @@ The CPU path preserves graph semantics and concurrency safety but does not
 pretend to offer CUDA-style device graph launch. CUDA and Vulkan optimizations
 are backend implementation details below the same public API.
 
+## Structured control
+
+`GraphBuilder.while_loop()`, `if_then_else()`, and `switch()` add
+backend-neutral structured regions without introducing a solver-specific
+Graph API. Each region is built from fixed `Sequential` definitions. Runtime
+values may change between replays, but the argument schema, resource identity,
+shape, dtype, and dispatch topology remain fixed.
+
+A bounded iterative program uses a condition region and a body region:
+
+```python
+condition = builder.create_sequential()
+condition.dispatch(
+    evaluate_stop,
+    residual_sq,
+    initial_norm_sq,
+    user_stop,
+    predicate,
+    status,
+    atol,
+    rtol,
+)
+
+body = builder.create_sequential()
+body.append_native(operator.graph_action(direction, product))
+body.dispatch(update_iteration, direction, product, counter, status)
+
+builder.while_loop(
+    condition,
+    body,
+    predicate=predicate,
+    status=status,
+    control_inputs=(residual_sq, initial_norm_sq, user_stop, atol, rtol),
+    carried_state=(direction, product),
+    counter=counter,
+    max_iterations=128,
+    lowering_mode="auto",
+    name="iterative_program",
+)
+```
+
+The condition kernel may combine any number of DSL-computed criteria, such as
+absolute and relative tolerance, user cancellation, active work, or numerical
+breakdown. It writes a one-element integer `predicate` ndarray; nonzero means
+continue. An optional, distinct one-element integer `status` ndarray records
+why execution stopped. Graph transports and reports that value but does not
+assign solver meanings to status codes. The optional `counter` is the exact
+logical iteration count. `max_iterations` is always a host-defined safety
+bound and does not need to be encoded in a solver-specific condition.
+
+`if_then_else()` selects one fixed branch from a predicate computed by its
+condition region. `switch()` selects a zero-based fixed branch, or an optional
+default, from a selector computed by its condition region. Branch schemas are
+compiled before execution; Python callbacks cannot run inside a region.
+
+Current lowering is explicit:
+
+| Backend | Structured `while` | `if` / `switch` |
+| --- | --- | --- |
+| CPU | Exact `cpu_host_loop`; condition and body use cached compiled dispatch plans | Exact portable host control |
+| CUDA | `auto` uses a native CUDA conditional Graph when the Driver API is at least 12.8 and the required symbols/lowering are available; otherwise exact portable replay | Exact portable host control |
+| Vulkan | Exact portable replay by default; optional masked chunk replay may reduce observations while reporting logical and executed iterations separately | Exact portable host control |
+
+`lowering_mode="portable"` forces the portable route.
+`lowering_mode="native_required"` requires the qualified CUDA conditional
+route and fails before execution when unavailable. Recordable provider actions
+may enter a structured body only when their provider declares it safe; opaque
+or unsupported providers fail closed.
+
+`Graph.control_flow_stats()` returns one immutable `GraphWhileReport` or
+`GraphBranchReport` per structured region for the latest `run()`. While reports
+include the selected lowering, logical and executed iterations, observation
+boundaries, predicate/counter/status traces, terminal status, transfer bytes,
+and native-upgrade reason. Structured regions currently use synchronous
+`Graph.run()`; `Graph.submit()` rejects them rather than hiding host-observed
+portable control behind an asynchronous ticket.
+
 ## Opt-in completion tickets
 
 `Graph.run(args)` retains its established hot path and return contract.
@@ -322,6 +399,18 @@ and tail latency, and record GPU memory before and after long replay and churn
 samples. Check results against ordinary dispatch rather than judging only
 throughput.
 
+`benchmarks/graph_structured_control_bench.py` measures preparation, first run,
+steady wall time, control observations, and (where the backend profiler can see
+the launches) device kernel time separately. On a local Windows RTX 5090
+regression run with 262,144 f32 values and 16 iterations, CUDA native
+conditional control had a 452.8 us steady median versus 1,406.7 us for forced
+portable replay, a 67.8% reduction (3.11x). Control observations decreased from
+17 batches / 204 bytes to 2 batches / 24 bytes. First conditional capture was
+20.4 ms and remains preparation cost. The same uninstrumented probe measured
+6,513.6 us on CPU host control and 4,375.4 us on Vulkan portable control; these
+backend numbers describe the tested execution boundaries, not cross-device
+performance promises.
+
 Current Dense Field multi-block throughput, compile scaling, cache, RSS/VRAM,
 and the Graph/AD guard microbenchmark are reported in
 [Dense Field Graph](dense_field_graph.en.md). They are local regression evidence,
@@ -344,8 +433,12 @@ result APIs.
 
 The focused validation set includes:
 
-- `tests/python/test_graph.py` for public contracts, lifetime, replay, and
-  diagnostics;
+- `tests/python/test_graph.py` for public contracts, lifetime, replay,
+  structured control, and diagnostics;
+- `tests/python/test_graph_iterative_qualification.py` for f32 PCG and
+  nonsymmetric BiCGSTAB over the generic structured/provider contracts;
+- `benchmarks/graph_structured_control_bench.py` for structured-control
+  preparation, steady wall time, observation traffic, and kernel timing;
 - `tests/python/test_graph_dense_field.py` for static Field binding, SNodeTree
   generation/lifetime, zero-argument replay, mixed segments, and concurrency;
 - `tests/python/test_graph_dense_field_numerics.py` for integer exactness,

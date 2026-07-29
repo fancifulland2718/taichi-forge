@@ -722,6 +722,26 @@ graph.run({"slot": 3})
 - `kernel` 通常是 decorated primal kernel；也可传入显式 `kernel.grad` 来构造手工管理的
   gradient Graph，但必须在 `ti.ad.Tape()` / `ti.ad.FwdMode()` 之外运行。
 
+### 结构化控制
+
+| API | 合同 |
+| --- | --- |
+| `GraphBuilder.while_loop(condition, body, *, predicate, max_iterations, control_inputs=(), carried_state=(), counter=None, status=None, chunk_size=None, masked_execution=False, lowering_mode="auto", name="while")` | 追加 fixed-schema 有界循环。`condition` 与 `body` 必须是非空 `Sequential`；`predicate`、可选 `counter` 和可选且独立的 `status` 都是单元素 device ndarray。 |
+| `GraphBuilder.if_then_else(condition, then_region, *, predicate, control_inputs=(), else_region=None, name="if")` | 追加固定双分支，只执行被选中的 branch。 |
+| `GraphBuilder.switch(condition, branches, *, selector, control_inputs=(), default_region=None, name="switch")` | 追加零基固定 branch table，可指定 default。 |
+| `Graph.control_flow_stats()` | 返回最近一次同步 run 的 immutable `GraphWhileReport` / `GraphBranchReport`。 |
+
+condition region 在普通 Taichi kernel 中组合多个 device 值；结构化控制不会调用 Python
+callback。Graph 将 `status` 视为用户定义整数，并与 continue predicate 独立报告。即使
+condition 已检查迭代预算，仍必须提供 `max_iterations`。
+
+CPU 在 cached dispatch plan 上使用精确 host control。满足资格的 CUDA `while` 在
+`lowering_mode="auto"` 下使用原生 conditional Graph，否则使用精确 portable replay。
+Vulkan 当前使用 portable exact 或显式 masked-chunk replay。CUDA 原生条件控制要求 Driver
+API 12.8 或更高版本，并具备所需 conditional symbol/lowering。`portable` 强制 fallback；
+`native_required` 在无法选择 CUDA 原生控制时失败。`if` 与 `switch` 当前在三个后端都使用
+portable host control。包含结构化控制的 Graph 使用 `run()`，并明确拒绝 `submit()`。
+
 ### `GraphBuilder.compile()`、`Graph.run(args)` 与 `Graph.submit(args)`
 
 `compile()` 冻结调用时的 dispatch/sequential 定义并返回 runtime-bound `Graph`。
@@ -985,6 +1005,7 @@ operator API 另见[LinearOperator 与 SolvePlan](linear_operator.zh.md)。
 | `ti.linalg.OperatorTraits(...)` / `.spd()` | 不通过 sampling 或 inference，显式声明数学性质。 | CG/PCG 要求可信的 self-adjoint 与 positive-definite trait；MINRES 要求可信 self-adjoint，并拒绝声明为 singular 的 operator。 |
 | `ti.linalg.LinearOperator.from_sparse_matrix(A, traits=...)` | 把 fixed CSR/BSR 绑定为 runtime-owned linear map。 | CPU `f32/f64`；CUDA/Vulkan `f32`；不复制、不 fallback。 |
 | `LinearOperator.from_kernel(..., adjoint=...)` / `.from_graph(..., adjoint=...)` | 绑定精确 f32 ndarray kernel ABI 或按 role 分类的 compiled Graph；整数 size 是方阵简写，tuple 表示 `(range, domain)`。 | CPU、CUDA、Vulkan；显式 adjoint；topology/numeric/workspace 为 operator-owned snapshot。 |
+| `operator.graph_action(input_arg, output_arg, *, adjoint=False)` | 把一次 compiled-kernel operator apply 录入 Graph root 或结构化 `Sequential` body。 | CPU/CUDA/Vulkan f32；provider snapshot 为 zero-copy fixed binding；numeric generation 更新后必须重建 Graph；不支持的 provider kind 明确失败。 |
 | `ti.linalg.FieldLinearOperator(matvec_kernel)` | 包装 `MatrixFreeCG` 与 `MatrixFreeBICGSTAB` 使用的 callback-only `(x, y)` field ABI。 | field-shaped legacy 合同；不提供 provider capability、resource generation、storage view、composition 或 SolvePlan 适配。 |
 | `ti.linalg.vector_view(field, indices=None)` | 把 canonical root-dense scalar/Vector/Matrix field 声明为 runtime-bound scalar-flat vector；可选显式 indexed subset/permutation。 | 1D/2D/3D、`f32/f64`，并服从 operator/provider/backend 的 dtype 支持；indices 为非空、范围内、唯一的一维 `i32` ndarray/dense field，并在构造时验证和冻结；sparse SNode 与 noncanonical layout 明确失败。 |
 | `ti.linalg.vector_io_capabilities()` / storage-view metadata | 查询版本化 storage、layout、execution mode、zero-copy 资格与 indexed topology 合同。 | compiled kernel 在 CPU/CUDA/Vulkan 上直接绑定 compact 与一维 scalar affine runtime storage。compiled Graph 直接绑定 compact storage，并通过 backend-qualified dispatch 保持 affine zero-copy 执行。native CSR/BSR 在 CPU/CUDA 上接受 compact direct storage；Vulkan dense field 与 solve boundary 使用可复用 device staging。 |

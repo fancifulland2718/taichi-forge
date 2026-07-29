@@ -87,6 +87,75 @@ identity、layout、shape、dtype、element shape、SNodeTree generation 与 own
 CPU 路径保持 graph 语义和并发安全，但不伪装成 CUDA 式 device graph launch。CUDA 与
 Vulkan 优化都是同一公开 API 之下的后端实现细节。
 
+## 结构化控制
+
+`GraphBuilder.while_loop()`、`if_then_else()` 与 `switch()` 提供 backend-neutral
+结构化 region，不引入 solver-specific Graph API。每个 region 由固定的 `Sequential`
+定义组成。runtime 数值可在 replay 之间变化，但参数 schema、资源身份、shape、dtype
+与 dispatch topology 必须保持固定。
+
+有界迭代程序由 condition region 与 body region 构成：
+
+```python
+condition = builder.create_sequential()
+condition.dispatch(
+    evaluate_stop,
+    residual_sq,
+    initial_norm_sq,
+    user_stop,
+    predicate,
+    status,
+    atol,
+    rtol,
+)
+
+body = builder.create_sequential()
+body.append_native(operator.graph_action(direction, product))
+body.dispatch(update_iteration, direction, product, counter, status)
+
+builder.while_loop(
+    condition,
+    body,
+    predicate=predicate,
+    status=status,
+    control_inputs=(residual_sq, initial_norm_sq, user_stop, atol, rtol),
+    carried_state=(direction, product),
+    counter=counter,
+    max_iterations=128,
+    lowering_mode="auto",
+    name="iterative_program",
+)
+```
+
+condition kernel 可组合任意数量的 DSL 计算条件，例如绝对/相对容差、用户取消、active
+work 与数值 breakdown。它写入只包含一个整数的 `predicate` ndarray；非零表示继续。
+可选且必须独立的单元素整数 `status` ndarray 记录停止原因。Graph 只传递和报告该值，
+不会为状态码指定 solver 语义。可选 `counter` 是精确逻辑迭代数。`max_iterations`
+始终是 host 定义的安全上限，不必再次编码进 solver-specific condition。
+
+`if_then_else()` 根据 condition region 计算的 predicate 选择一个固定分支。
+`switch()` 根据 condition region 计算的零基 selector 选择固定分支或可选 default。
+全部 branch schema 在执行前编译；region 内不会调用 Python callback。
+
+当前 lowering 明确如下：
+
+| 后端 | 结构化 `while` | `if` / `switch` |
+| --- | --- | --- |
+| CPU | 精确 `cpu_host_loop`；condition/body 使用 cached compiled dispatch plan | 精确 portable host control |
+| CUDA | Driver API 不低于 12.8 且具备所需 symbol/lowering 时，`auto` 使用原生 CUDA conditional Graph；否则使用精确 portable replay | 精确 portable host control |
+| Vulkan | 默认使用精确 portable replay；可选 masked chunk replay 可减少观测，并分别报告逻辑/实际执行迭代 | 精确 portable host control |
+
+`lowering_mode="portable"` 强制 portable 路径。
+`lowering_mode="native_required"` 要求已资格化的 CUDA conditional 路径，不可用时会在
+执行前失败。recordable provider action 只有在 provider 声明适合结构化 body 时才能进入
+region；opaque 或不支持的 provider 会明确失败。
+
+`Graph.control_flow_stats()` 为最近一次 `run()` 的每个结构化 region 返回 immutable
+`GraphWhileReport` 或 `GraphBranchReport`。while report 包含实际 lowering、逻辑/执行
+迭代、观测边界、predicate/counter/status 轨迹、终止状态、传输字节与 native upgrade
+原因。结构化 region 当前使用同步 `Graph.run()`；`Graph.submit()` 会明确拒绝，而不会把
+host-observed portable control 隐藏在异步 ticket 后面。
+
 ## 按需完成票据
 
 `Graph.run(args)` 保持既有热路径与返回合同。需要显式异步 ownership 的应用可以改用
@@ -254,6 +323,15 @@ Graph 最适合 dispatch 拓扑与资源结构能在大量 replay 中保持稳�
 median 与 tail latency，并记录长时间 replay/churn 前后的 GPU memory。必须与 ordinary
 dispatch 校验结果，不能只看吞吐。
 
+`benchmarks/graph_structured_control_bench.py` 分别测量 preparation、first run、
+steady wall time、control observation，以及 backend profiler 可见时的 device kernel time。
+本地 Windows RTX 5090 回归中，262,144 个 f32 数值、16 轮迭代的 CUDA native
+conditional control steady median 为 452.8 us，forced portable replay 为 1,406.7 us，
+缩短 67.8%（3.11x）；control observation 从 17 batch / 204 bytes 降为
+2 batch / 24 bytes。首次 conditional capture 为 20.4 ms，单独计入 preparation。相同
+无插桩 probe 的 CPU host control 为 6,513.6 us，Vulkan portable control 为
+4,375.4 us；这些后端数字只描述本次测试的执行边界，不构成跨设备性能承诺。
+
 当前 Dense Field multi-block 吞吐、编译扩展、cache、RSS/VRAM 与 Graph/AD guard
 微基准统一记录在 [Dense Field Graph](dense_field_graph.zh.md)。这些只作为本机回归证据，
 不构成跨设备性能承诺；relative trial range 超过 5% 时保持“仅观察”。
@@ -271,7 +349,11 @@ Primitive 所有权与结果 API 见 [Native algorithms](native_algorithms.zh.md
 
 专项验证包括：
 
-- `tests/python/test_graph.py`：公开合同、生命周期、replay 与诊断；
+- `tests/python/test_graph.py`：公开合同、生命周期、replay、结构化控制与诊断；
+- `tests/python/test_graph_iterative_qualification.py`：在通用结构化/provider 合同上验证
+  f32 PCG 与非对称 BiCGSTAB；
+- `benchmarks/graph_structured_control_bench.py`：结构化控制 preparation、steady wall
+  time、observation traffic 与 kernel timing；
 - `tests/python/test_graph_dense_field.py`：static Field binding、SNodeTree
   generation/lifetime、零参数 replay、mixed segment 与并发；
 - `tests/python/test_graph_dense_field_numerics.py`：integer exact、f32/f64

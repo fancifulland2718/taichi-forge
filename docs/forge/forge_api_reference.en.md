@@ -820,6 +820,30 @@ Contract:
   object is also accepted for a manually managed gradient Graph; run that
   Graph outside `ti.ad.Tape()` / `ti.ad.FwdMode()`.
 
+### Structured control
+
+| API | Contract |
+| --- | --- |
+| `GraphBuilder.while_loop(condition, body, *, predicate, max_iterations, control_inputs=(), carried_state=(), counter=None, status=None, chunk_size=None, masked_execution=False, lowering_mode="auto", name="while")` | Append a fixed-schema bounded loop. `condition` and `body` are nonempty `Sequential` values. `predicate`, optional `counter`, and optional distinct `status` are one-element device ndarrays. |
+| `GraphBuilder.if_then_else(condition, then_region, *, predicate, control_inputs=(), else_region=None, name="if")` | Append a fixed two-way branch. Only the selected branch executes. |
+| `GraphBuilder.switch(condition, branches, *, selector, control_inputs=(), default_region=None, name="switch")` | Append a zero-based fixed branch table with an optional default. |
+| `Graph.control_flow_stats()` | Return immutable `GraphWhileReport` / `GraphBranchReport` values for the latest synchronous run. |
+
+Condition regions combine multiple device values in ordinary Taichi kernels;
+structured control does not invoke Python callbacks. Graph treats `status` as
+a user-defined integer and reports it independently from the continue
+predicate. `max_iterations` is mandatory even when the condition also checks
+an iteration budget.
+
+CPU uses exact host control over cached dispatch plans. Eligible CUDA `while`
+regions use a native conditional Graph in `lowering_mode="auto"`; otherwise
+they use exact portable replay. Vulkan currently uses portable exact or
+explicit masked-chunk replay. CUDA native conditional control requires Driver
+API 12.8 or newer and the qualified conditional symbols/lowering. `portable`
+forces fallback; `native_required` fails when native CUDA control cannot be
+selected. `if` and `switch` currently use portable host control on all three
+backends. Structured-control Graphs use `run()` and reject `submit()`.
+
 ### `GraphBuilder.compile()`, `Graph.run(args)`, and `Graph.submit(args)`
 
 `compile()` freezes the dispatch/sequential definition at the call and returns
@@ -1123,6 +1147,7 @@ The runtime-bound operator API is documented separately in
 | `ti.linalg.OperatorTraits(...)` / `.spd()` | Declare mathematical properties without sampling or inference. | CG/PCG require trusted self-adjoint and positive-definite traits; MINRES requires trusted self-adjointness and rejects a declared-singular operator. |
 | `ti.linalg.LinearOperator.from_sparse_matrix(A, traits=...)` | Bind fixed CSR/BSR as a runtime-owned linear map. | CPU `f32/f64`; CUDA/Vulkan `f32`; no copy or fallback. |
 | `LinearOperator.from_kernel(..., adjoint=...)` / `.from_graph(..., adjoint=...)` | Bind an exact f32 ndarray kernel ABI or role-qualified compiled Graph; an integer size is square shorthand and a tuple is `(range, domain)`. | CPU, CUDA, Vulkan; explicit adjoint; operator-owned topology/numeric/workspace snapshots. |
+| `operator.graph_action(input_arg, output_arg, *, adjoint=False)` | Record one compiled-kernel operator apply into a Graph root or structured `Sequential` body. | CPU/CUDA/Vulkan f32; provider snapshots are fixed zero-copy bindings; numeric-generation updates require rebuilding the Graph. Unsupported provider kinds fail explicitly. |
 | `ti.linalg.FieldLinearOperator(matvec_kernel)` | Wrap the callback-only `(x, y)` field ABI used by `MatrixFreeCG` and `MatrixFreeBICGSTAB`. | Field-shaped legacy contract; no provider capability, resource-generation, storage-view, composition, or SolvePlan adaptation. |
 | `ti.linalg.vector_view(field, indices=None)` | Declare a canonical root-dense scalar/Vector/Matrix field as a runtime-bound scalar-flat vector, optionally with an explicit indexed subset or permutation. | 1D/2D/3D, `f32/f64` subject to operator/provider/backend dtype support; indices are a nonempty, in-range, unique one-dimensional `i32` ndarray/dense field validated and frozen at construction. Sparse SNodes and noncanonical layouts fail explicitly. |
 | `ti.linalg.vector_io_capabilities()` / storage-view metadata | Inspect the versioned storage, layout, execution mode, zero-copy eligibility, and indexed-topology contract. | Compiled kernels directly bind compact and rank-one scalar affine runtime storage on CPU/CUDA/Vulkan. Compiled Graphs directly bind compact storage and preserve zero-copy affine execution through backend-qualified dispatch. Native CSR/BSR accepts compact direct storage on CPU/CUDA; Vulkan dense fields and solve boundaries use reusable device staging. |

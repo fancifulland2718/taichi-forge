@@ -243,6 +243,47 @@ every output entry and must not depend on an SNode tree. Construction compiles
 one specialization and copies topology/numeric inputs into operator-owned
 snapshots.
 
+## Recordable Graph action
+
+A compiled-kernel provider can expose its apply operation as a recordable
+Graph action:
+
+```python
+input_arg = ti.graph.Arg(
+    ti.graph.ArgKind.NDARRAY, "input", ti.f32, ndim=1
+)
+output_arg = ti.graph.Arg(
+    ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1
+)
+
+builder = ti.graph.GraphBuilder()
+builder.append_native(operator.graph_action(input_arg, output_arg))
+graph = builder.compile()
+graph.run({"input": x, "output": y})
+```
+
+`operator.graph_action()` is an f32, zero-copy recording boundary. It may be
+appended at the Graph root or to a `Sequential` body used by structured
+`while`, `if`, or `switch` control. The provider-owned topology and numeric
+snapshots become fixed bindings of the compiled Graph; they are not copied a
+second time and do not appear in `Graph.run()` arguments. The surrounding
+Graph can record the provider dispatch together with adjacent kernels, so an
+iterative body does not call Python once per operator application.
+
+The symbolic input/output arguments use the one-dimensional scalar vector ABI.
+At runtime they accept a matching scalar ndarray or a dense storage object that
+the Graph runtime can scalar-linearize without copying. Input and output must
+be proven disjoint. `adjoint=True` requires an explicitly registered adjoint
+action. Updating the operator numeric generation makes an already compiled
+Graph stale; rebuild the Graph so every replay uses one immutable provider
+generation.
+
+This recordable contract currently applies to compiled-kernel providers.
+Stored sparse, compiled-Graph, composed, and unsupported providers fail
+explicitly instead of materializing an operator or inserting a hidden apply
+fallback. The provider recording protocol itself is not a public custom-native
+callback API.
+
 ## Compiled Graph provider
 
 `LinearOperator.from_graph()` binds a compiled Graph whose dynamic vector

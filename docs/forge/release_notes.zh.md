@@ -75,6 +75,18 @@
   使用 ordinary fallback，在 Vulkan 使用 command record/replay，并保持相同结果合同。
   受管 external owner 使用 ordinary/replay access epoch，而不进入 CUDA capture。AOT
   borrowed storage 与 ArgPack 嵌套仍不支持。
+- 新增 fixed-schema 结构化 Graph 控制：`GraphBuilder.while_loop()`、
+  `if_then_else()` 与 `switch()`。condition kernel 可组合 tolerance、用户取消、active
+  状态与 breakdown，不调用 Python callback。continue predicate 与用户定义 terminal
+  status 保持独立；`Graph.control_flow_stats()` 报告 lowering、逻辑/执行迭代、状态轨迹、
+  观测流量与 fallback 原因。满足资格的 CUDA `while` 自动使用原生 conditional Graph；
+  CPU/Vulkan 保留明确的精确 portable 路径。结构化控制使用同步执行，并从
+  `Graph.submit()` 明确失败。
+- 新增 `LinearOperator.graph_action()`，可把 compiled-kernel f32 provider 直接录入
+  Graph root 或结构化 body。provider-owned topology/numeric generation 保持 zero-copy
+  fixed binding，input/output dense storage 使用通用 runtime 协议；numeric generation
+  失效后必须重建 Graph。通用控制与 provider 合同通过 preconditioned CG 和非对称
+  BiCGSTAB 程序完成资格验证，不增加 solver-specific Graph API。
 - `ti.linalg.LinearOperator.apply()` 与单系统 `SolvePlan.solve()` 接受受支持的
   1D/2D/3D root-dense scalar、Vector 和 Matrix field。overwrite
   `LinearOperator.apply()` 可在 CPU/CUDA/Vulkan 的 compiled-kernel 与

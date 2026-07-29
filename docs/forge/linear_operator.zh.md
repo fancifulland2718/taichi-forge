@@ -163,7 +163,7 @@ x = result.solution
 ```
 
 mutable Eigen CSR/CSC matrix 继续由已有的 `SparseCG`、`SparseMINRES`、
-`SparseBiCGSTAB` 与 `SparseSolver` API 支持。实验性 stored provider 只接受 fixed
+`SparseBiCGSTAB` 与 `SparseSolver` API 支持。stored provider 只接受 fixed
 CSR/BSR，从而让 topology、numeric generation 和 provider ownership 具有统一合同。
 
 ## 已编译 kernel provider
@@ -213,6 +213,40 @@ extent；两侧共同需要的尺寸必须存放在显式 topology resource 中�
 参数都是 scalar ndarray；topology 与 numeric 可以有各自的 scalar dtype，vector 必须是
 f32。kernel 必须覆盖写入每个 output entry，且不能依赖 SNode tree。构造时编译一个
 specialization，并把 topology/numeric 输入复制到 operator-owned snapshot。
+
+## 可录制 Graph action
+
+compiled-kernel provider 可把 apply 操作公开为 recordable Graph action：
+
+```python
+input_arg = ti.graph.Arg(
+    ti.graph.ArgKind.NDARRAY, "input", ti.f32, ndim=1
+)
+output_arg = ti.graph.Arg(
+    ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1
+)
+
+builder = ti.graph.GraphBuilder()
+builder.append_native(operator.graph_action(input_arg, output_arg))
+graph = builder.compile()
+graph.run({"input": x, "output": y})
+```
+
+`operator.graph_action()` 是 f32 zero-copy recording 边界。它既可追加到 Graph root，
+也可追加到结构化 `while`、`if` 或 `switch` 使用的 `Sequential` body。provider-owned
+topology/numeric snapshot 成为 compiled Graph 的 fixed binding；不会再复制一份，也不会
+出现在 `Graph.run()` 参数中。外层 Graph 可把 provider dispatch 与相邻 kernel 一起录制，
+因此迭代 body 不会为每次 operator apply 回到 Python。
+
+symbolic input/output 使用一维 scalar vector ABI。runtime 可传入匹配的 scalar ndarray，
+或 Graph runtime 能无复制 scalar-linearize 的 dense storage。input/output 必须能证明互不
+alias。`adjoint=True` 要求显式登记 adjoint action。更新 operator numeric generation
+会使已经编译的 Graph stale；必须重建 Graph，确保每次 replay 只使用一个 immutable
+provider generation。
+
+当前 recordable 合同适用于 compiled-kernel provider。stored sparse、compiled-Graph、
+composed 与其它不支持的 provider 会明确失败，不会 materialize operator 或插入隐藏的
+apply fallback。provider recording 协议本身不是公开的自定义 native callback API。
 
 ## 已编译 Graph provider
 

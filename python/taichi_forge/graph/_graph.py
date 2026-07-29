@@ -3824,6 +3824,7 @@ class Graph:
             return self._instance.debug_graph_stats
 
     def control_flow_stats(self):
+        """Return immutable reports for the latest structured-control run."""
         with self._lifecycle_lock:
             self._check_runtime_valid()
             return tuple(

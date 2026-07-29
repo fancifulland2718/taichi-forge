@@ -88,6 +88,22 @@ the `0.5.0` artifacts:
   Vulkan command record/replay with the same result contract. Managed external
   owners use ordinary/replay access epochs rather than CUDA capture. AOT
   borrowed storage and ArgPack nesting remain unsupported.
+- Added fixed-schema structured Graph control with `GraphBuilder.while_loop()`,
+  `if_then_else()`, and `switch()`. Condition kernels can combine tolerance,
+  cancellation, activity, and breakdown values without a Python callback.
+  Continue predicates and user-defined terminal status are independent;
+  `Graph.control_flow_stats()` reports lowering, logical/executed iterations,
+  status traces, observation traffic, and fallback reasons. Qualified CUDA
+  `while` regions automatically use a native conditional Graph; CPU and Vulkan
+  retain explicit exact portable paths. Structured control is synchronous and
+  fails explicitly from `Graph.submit()`.
+- Added `LinearOperator.graph_action()` for recording compiled-kernel f32
+  providers directly into Graph roots and structured bodies. Provider-owned
+  topology/numeric generations remain zero-copy fixed bindings, input/output
+  dense storage uses the common runtime protocol, and stale numeric generations
+  require rebuilding the Graph. The generic control and provider contracts are
+  qualified with preconditioned CG and nonsymmetric BiCGSTAB programs without
+  adding solver-specific Graph APIs.
 - `ti.linalg.LinearOperator.apply()` and single-system `SolvePlan.solve()` accept
   supported 1D/2D/3D root-dense scalar, Vector, and Matrix fields. Overwrite
   `LinearOperator.apply()` directly binds canonical compact full fields for
