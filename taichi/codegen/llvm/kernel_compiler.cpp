@@ -15,7 +15,8 @@ KernelCompiler::KernelCompiler(Config config) : config_(std::move(config)) {
 
 KernelCompiler::IRNodePtr KernelCompiler::compile(
     const CompileConfig &compile_config,
-    const Kernel &kernel_def) const {
+    const Kernel &kernel_def,
+    GraphKernelMetadata *graph_metadata) const {
   auto ir = [&]() {
     TI_COMPILE_PROFILER("cpp.compile.llvm.clone_ir");
     return irpass::analysis::clone(kernel_def.ir.get());
@@ -30,7 +31,8 @@ KernelCompiler::IRNodePtr KernelCompiler::compile(
                                 /*verbose=*/verbose,
                                 /*autodiff_mode=*/kernel_def.autodiff_mode,
                                 /*ad_use_stack=*/true,
-                                /*start_from_ast=*/kernel_def.ir_is_ast());
+                                /*start_from_ast=*/kernel_def.ir_is_ast(),
+                                graph_metadata);
   }
   return ir;
 }

@@ -17,6 +17,7 @@ class CompiledKernelData : public lang::CompiledKernelData {
     std::vector<Callable::Ret> rets;
     LLVMCompiledKernel compiled_data;
     std::vector<int> used_snode_tree_ids;
+    GraphKernelMetadata graph_metadata;
 
     const StructType *ret_type = nullptr;
     size_t ret_size{0};
@@ -28,6 +29,7 @@ class CompiledKernelData : public lang::CompiledKernelData {
               rets,
               compiled_data,
               used_snode_tree_ids,
+              graph_metadata,
               ret_type,
               ret_size,
               args_type,
@@ -40,6 +42,7 @@ class CompiledKernelData : public lang::CompiledKernelData {
           rets(o.rets),
           compiled_data(o.compiled_data.clone()),
           used_snode_tree_ids(o.used_snode_tree_ids),
+          graph_metadata(o.graph_metadata),
           ret_type(o.ret_type),
           ret_size(o.ret_size),
           args_type(o.args_type),
@@ -56,6 +59,12 @@ class CompiledKernelData : public lang::CompiledKernelData {
   std::unique_ptr<lang::CompiledKernelData> clone() const override;
   std::vector<int> snode_tree_ids() const override;
   std::size_t task_count() const override;
+  const GraphKernelMetadata &graph_metadata() const override {
+    return data_.graph_metadata;
+  }
+  void set_graph_metadata(GraphKernelMetadata metadata) override {
+    data_.graph_metadata = std::move(metadata);
+  }
 
   Err check() const override;
 

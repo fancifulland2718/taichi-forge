@@ -3645,6 +3645,55 @@ void export_lang(py::module &m) {
 
   py::class_<aot::CompiledGraph>(m, "CompiledGraph")
       .def_property_readonly(
+          "_dispatch_metadata",
+          [](const aot::CompiledGraph &graph) {
+            py::list result;
+            for (const auto &dispatch : graph.dispatches) {
+              const auto &metadata = dispatch.graph_metadata;
+              py::dict item;
+              item["kernel_name"] = dispatch.kernel_name;
+              item["version"] = metadata.version;
+              item["available"] = metadata.available;
+              item["opaque"] = metadata.opaque;
+              item["elementwise"] = metadata.elementwise;
+              item["synchronization"] = metadata.synchronization;
+              item["blocker"] = metadata.blocker;
+              item["side_effects"] = metadata.side_effects;
+
+              py::dict domain;
+              domain["kind"] = metadata.iteration_domain.kind;
+              domain["arg_id"] = metadata.iteration_domain.arg_id;
+              domain["axis"] = metadata.iteration_domain.axis;
+              domain["begin"] = metadata.iteration_domain.begin;
+              domain["end"] = metadata.iteration_domain.end;
+              item["iteration_domain"] = std::move(domain);
+
+              py::list effects;
+              for (const auto &effect : metadata.effects) {
+                py::dict encoded;
+                encoded["resource_kind"] = effect.resource_kind;
+                encoded["arg_id"] = effect.arg_id;
+                encoded["snode_tree_id"] = effect.snode_tree_id;
+                encoded["snode_id"] = effect.snode_id;
+                encoded["is_grad"] = effect.is_grad;
+                encoded["access"] = effect.access;
+                effects.append(std::move(encoded));
+              }
+              item["effects"] = std::move(effects);
+
+              py::list symbolic_args;
+              for (const auto &arg : dispatch.symbolic_args) {
+                py::dict encoded;
+                encoded["name"] = arg.name;
+                encoded["tag"] = static_cast<int>(arg.tag);
+                symbolic_args.append(std::move(encoded));
+              }
+              item["symbolic_args"] = std::move(symbolic_args);
+              result.append(std::move(item));
+            }
+            return result;
+          })
+      .def_property_readonly(
           "_snode_tree_dependencies",
           [](const aot::CompiledGraph &graph) {
             py::list dependencies;

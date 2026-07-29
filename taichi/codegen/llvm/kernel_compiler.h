@@ -16,7 +16,8 @@ class KernelCompiler : public lang::KernelCompiler {
   explicit KernelCompiler(Config config);
 
   IRNodePtr compile(const CompileConfig &compile_config,
-                    const Kernel &kernel_def) const override;
+                    const Kernel &kernel_def,
+                    GraphKernelMetadata *graph_metadata) const override;
 
   CKDPtr compile(const CompileConfig &compile_config,
                  const DeviceCapabilityConfig &device_caps,

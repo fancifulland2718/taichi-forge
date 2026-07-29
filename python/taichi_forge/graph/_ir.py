@@ -358,9 +358,12 @@ def analyze_elementwise_fusion(root):
                     pending.append(node)
             else:
                 flush()
-            for child in node.children:
-                if isinstance(child, SequentialRegion):
-                    scan(child)
+            if isinstance(node, SequentialRegion):
+                scan(node)
+            else:
+                for child in node.children:
+                    if isinstance(child, SequentialRegion):
+                        scan(child)
         flush()
 
     if isinstance(root, SequentialRegion):

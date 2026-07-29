@@ -14,7 +14,8 @@ KernelCompiler::KernelCompiler(Config config) : config_(std::move(config)) {
 
 KernelCompiler::IRNodePtr KernelCompiler::compile(
     const CompileConfig &compile_config,
-    const Kernel &kernel_def) const {
+    const Kernel &kernel_def,
+    GraphKernelMetadata *graph_metadata) const {
   auto ir = [&]() {
     TI_COMPILE_PROFILER("cpp.compile.spirv.clone_ir");
     return irpass::analysis::clone(kernel_def.ir.get());
@@ -26,7 +27,10 @@ KernelCompiler::IRNodePtr KernelCompiler::compile(
                                   /*ad_use_stack=*/false,
                                   compile_config.print_ir,
                                   /*lower_global_access=*/true,
-                                  /*make_thread_local=*/false);
+                                  /*make_thread_local=*/false,
+                                  /*make_block_local=*/false,
+                                  /*start_from_ast=*/kernel_def.ir_is_ast(),
+                                  graph_metadata);
   }
   return ir;
 }

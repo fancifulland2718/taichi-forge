@@ -15,7 +15,8 @@ class KernelCompiler {
 
   // AST -> CHI IR
   virtual IRNodePtr compile(const CompileConfig &compile_config,
-                            const Kernel &kernel_def) const = 0;
+                            const Kernel &kernel_def,
+                            GraphKernelMetadata *graph_metadata) const = 0;
 
   // CHI IR -> CompiledKernelData
   virtual CKDPtr compile(const CompileConfig &compile_config,

@@ -426,14 +426,16 @@ std::unique_ptr<CompiledKernelData> KernelCompilationManager::compile_kernel(
     const Kernel &kernel_def) const {
   TI_COMPILE_PROFILER("cpp.compile.kernel");
   auto &compiler = *config_.kernel_compiler;
+  GraphKernelMetadata graph_metadata;
   auto ir = [&]() {
     TI_COMPILE_PROFILER("cpp.compile.ir_pipeline");
-    return compiler.compile(compile_config, kernel_def);
+    return compiler.compile(compile_config, kernel_def, &graph_metadata);
   }();
   auto ckd = [&]() {
     TI_COMPILE_PROFILER("cpp.compile.backend_codegen");
     return compiler.compile(compile_config, caps, kernel_def, *ir);
   }();
+  ckd->set_graph_metadata(std::move(graph_metadata));
   {
     TI_COMPILE_PROFILER("cpp.compile.ckd_check");
     TI_ASSERT(ckd->check() == CompiledKernelData::Err::kNoError);

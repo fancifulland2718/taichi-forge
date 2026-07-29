@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <vector>
 
+#include "taichi/analysis/graph_kernel_metadata.h"
 #include "taichi/rhi/arch.h"
 
 namespace taichi::lang {
@@ -116,6 +117,9 @@ class CompiledKernelData {
   // Number of backend tasks generated for this kernel. Graph diagnostics use
   // this metadata after compilation; it does not trigger compilation itself.
   virtual std::size_t task_count() const = 0;
+
+  virtual const GraphKernelMetadata &graph_metadata() const = 0;
+  virtual void set_graph_metadata(GraphKernelMetadata metadata) = 0;
 
   virtual Err debug_print(std::ostream &os) const {
     return dump(os);

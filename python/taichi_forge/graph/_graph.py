@@ -1803,6 +1803,111 @@ def _dispatch_ir_node(kernel_cpp, args):
     )
 
 
+def _metadata_symbolic_arg(record, arg_id):
+    try:
+        path = tuple(int(index) for index in arg_id)
+        symbolic_args = tuple(record["symbolic_args"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not path or path[0] < 0 or path[0] >= len(symbolic_args):
+        return None
+    name = symbolic_args[path[0]].get("name")
+    return str(name) if name else None
+
+
+def _metadata_iteration_domain(record):
+    domain = record.get("iteration_domain", {})
+    kind = domain.get("kind")
+    if kind == "constant_range":
+        return f"range:{int(domain['begin'])}:{int(domain['end'])}"
+    if kind in ("external_tensor", "scalar_argument"):
+        name = _metadata_symbolic_arg(record, domain.get("arg_id", ()))
+        if name is None:
+            return None
+        if kind == "external_tensor":
+            axis = int(domain.get("axis", -1))
+            return f"external_tensor:{name}:axis:{axis}"
+        return f"scalar_argument:{name}"
+    return None
+
+
+def _metadata_resource_effect(effect, record):
+    kind = effect.get("resource_kind")
+    if kind == "argument":
+        resource = _metadata_symbolic_arg(
+            record, effect.get("arg_id", ())
+        )
+        if resource is None:
+            return None
+        runtime_bound = True
+    elif kind == "snode":
+        tree_id = int(effect.get("snode_tree_id", -1))
+        snode_id = int(effect.get("snode_id", -1))
+        if tree_id < 0 or snode_id < 0:
+            return None
+        grad = ":grad" if bool(effect.get("is_grad", False)) else ""
+        resource = f"snode:{tree_id}:{snode_id}{grad}"
+        runtime_bound = False
+    else:
+        return None
+    try:
+        access = GraphAccess(str(effect["access"]))
+    except (KeyError, ValueError):
+        return None
+    return ResourceEffect(resource, access, runtime_bound=runtime_bound)
+
+
+def _compiled_dispatch_ir_nodes(compiled_graph, fallback_nodes):
+    fallback_nodes = tuple(fallback_nodes)
+    records = getattr(compiled_graph, "_dispatch_metadata", None)
+    if records is None or len(records) != len(fallback_nodes):
+        return fallback_nodes
+    result = []
+    for record, fallback in zip(records, fallback_nodes):
+        side_effects = tuple(
+            str(item) for item in record.get("side_effects", ())
+        )
+        iteration_domain = _metadata_iteration_domain(record)
+        effects = tuple(
+            _metadata_resource_effect(effect, record)
+            for effect in record.get("effects", ())
+        )
+        proven = (
+            bool(record.get("available", False))
+            and not bool(record.get("opaque", True))
+            and iteration_domain is not None
+            and all(effect is not None for effect in effects)
+        )
+        if not proven:
+            result.append(
+                DispatchNode(
+                    name=fallback.name,
+                    effects=fallback.effects,
+                    bindings=fallback.bindings,
+                    synchronization=bool(
+                        record.get("synchronization", False)
+                    ),
+                    opaque=True,
+                    elementwise=False,
+                    side_effects=side_effects,
+                )
+            )
+            continue
+        result.append(
+            DispatchNode(
+                name=fallback.name,
+                effects=effects,
+                bindings=fallback.bindings,
+                iteration_domain=iteration_domain,
+                synchronization=bool(record.get("synchronization", False)),
+                opaque=False,
+                elementwise=bool(record.get("elementwise", False)),
+                side_effects=side_effects,
+            )
+        )
+    return tuple(result)
+
+
 class _AOTSequentialSnapshot:
     def __init__(self, dispatches):
         self._dispatches = tuple(
@@ -1895,14 +2000,16 @@ class GraphBuilder:
             )
         )
         self._aot_plan_cursor = self._aot_graph_plan.item_count
+        compiled_graph = self._runtime_graph_builder.compile()
+        ir_nodes = _compiled_dispatch_ir_nodes(
+            compiled_graph, self._pending_ir_nodes
+        )
         self._nodes.append(
             _CompiledCGraphNode(
-                self._runtime_graph_builder.compile(),
+                compiled_graph,
                 self._dispatch_count,
                 self._runtime_graph_arg_names,
-                SequentialRegion(
-                    tuple(self._pending_ir_nodes), name="cgraph"
-                ),
+                SequentialRegion(ir_nodes, name="cgraph"),
                 recording_dispatches=self._runtime_graph_dispatches,
             )
         )

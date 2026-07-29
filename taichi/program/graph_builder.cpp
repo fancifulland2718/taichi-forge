@@ -13,6 +13,7 @@ void Dispatch::compile(
   const auto &compiled = kernel_->program->compile_kernel(
       kernel_->program->compile_config(),
       kernel_->program->get_device_caps(), *kernel_);
+  dispatch.graph_metadata = compiled.graph_metadata();
   dispatch.snode_tree_dependencies =
       kernel_->program->snapshot_snode_tree_dependencies(
           compiled.snode_tree_ids());

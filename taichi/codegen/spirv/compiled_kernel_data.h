@@ -18,7 +18,11 @@ class CompiledKernelData : public lang::CompiledKernelData {
       TaichiKernelAttributes kernel_attribs;
       std::size_t num_snode_trees{0};
       std::vector<int> used_snode_tree_ids;
-      TI_IO_DEF(kernel_attribs, num_snode_trees, used_snode_tree_ids);
+      GraphKernelMetadata graph_metadata;
+      TI_IO_DEF(kernel_attribs,
+                num_snode_trees,
+                used_snode_tree_ids,
+                graph_metadata);
     } metadata;
     // source code
     struct Source {
@@ -34,6 +38,12 @@ class CompiledKernelData : public lang::CompiledKernelData {
   std::unique_ptr<lang::CompiledKernelData> clone() const override;
   std::vector<int> snode_tree_ids() const override;
   std::size_t task_count() const override;
+  const GraphKernelMetadata &graph_metadata() const override {
+    return data_.metadata.graph_metadata;
+  }
+  void set_graph_metadata(GraphKernelMetadata metadata) override {
+    data_.metadata.graph_metadata = std::move(metadata);
+  }
 
   const InternalData &get_internal_data() const {
     return data_;

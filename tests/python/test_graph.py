@@ -1252,6 +1252,116 @@ def test_graph_reports_planned_but_unmaterialized_temporary_reuse():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_compiler_metadata_enables_safe_elementwise_graph_candidates():
+    @ti.kernel
+    def first_map(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        temporary: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in source:
+            temporary[i] = source[i] * 2
+
+    @ti.kernel
+    def second_map(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        temporary: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in source:
+            output[i] = temporary[i] + 3
+
+    sym_source = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "source", ti.i32, ndim=1
+    )
+    sym_temporary = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "temporary", ti.i32, ndim=1
+    )
+    sym_output = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(first_map, sym_source, sym_temporary)
+    builder.dispatch(
+        second_map, sym_source, sym_temporary, sym_output
+    )
+    graph = builder.compile()
+
+    ir = graph._ir_debug_info
+    plan = ir["fusion_plan"]
+    assert plan["candidate_groups"] == 1
+    assert plan["candidate_dispatches"] == 2
+    assert plan["eligible_dispatches"] == 2
+    assert plan["blocked_dispatches"] == 0
+    dispatches = ir["pre_optimization_root"]["children"][0]["children"]
+    assert len(dispatches) == 2
+    assert all(not dispatch["opaque"] for dispatch in dispatches)
+    assert all(dispatch["elementwise"] for dispatch in dispatches)
+    assert (
+        dispatches[0]["iteration_domain"]
+        == dispatches[1]["iteration_domain"]
+        == "external_tensor:source:axis:0"
+    )
+
+    n = 257
+    source_np = np.arange(n, dtype=np.int32)
+    source = ti.ndarray(ti.i32, shape=n)
+    temporary = ti.ndarray(ti.i32, shape=n)
+    output = ti.ndarray(ti.i32, shape=n)
+    source.from_numpy(source_np)
+    graph.run(
+        {
+            "source": source,
+            "temporary": temporary,
+            "output": output,
+        }
+    )
+    ti.sync()
+    np.testing.assert_array_equal(output.to_numpy(), source_np * 2 + 3)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_compiler_metadata_fails_closed_for_atomic_and_stencil_access():
+    @ti.kernel
+    def atomic_reduce(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        total: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        for i in source:
+            ti.atomic_add(total[None], source[i])
+
+    @ti.kernel
+    def stencil(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in source:
+            output[i] = source[(i + 1) % source.shape[0]]
+
+    sym_source = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "source", ti.i32, ndim=1
+    )
+    sym_total = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "total", ti.i32, ndim=0
+    )
+    sym_output = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(atomic_reduce, sym_source, sym_total)
+    builder.dispatch(stencil, sym_source, sym_output)
+    graph = builder.compile()
+
+    ir = graph._ir_debug_info
+    plan = ir["fusion_plan"]
+    assert plan["candidate_groups"] == 0
+    assert plan["eligible_dispatches"] == 0
+    assert plan["blocked_dispatches"] == 2
+    assert plan["blockers"] == {"opaque_dispatch": 2}
+    dispatches = ir["pre_optimization_root"]["children"][0]["children"]
+    assert all(dispatch["opaque"] for dispatch in dispatches)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_mixed_recordable_native_node_lowers_to_one_backend_region():
     @ti.kernel
     def add_one(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):

@@ -1,4 +1,5 @@
 ﻿#include "taichi/ir/ir.h"
+#include "taichi/analysis/graph_kernel_metadata.h"
 #include "taichi/system/profiler.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/ir/analysis.h"
@@ -21,7 +22,8 @@ void compile_to_offloads(IRNode *ir,
                          bool verbose,
                          AutodiffMode autodiff_mode,
                          bool ad_use_stack,
-                         bool start_from_ast) {
+                         bool start_from_ast,
+                         GraphKernelMetadata *graph_metadata) {
   TI_AUTO_PROF;
   TI_COMPILE_PROFILER("cpp.ir.compile_to_offloads");
 
@@ -214,6 +216,10 @@ void compile_to_offloads(IRNode *ir,
     irpass::analysis::verify(ir);
   } else {
     print("Simplified II (skipped: IR unchanged since Simplified I)");
+  }
+
+  if (graph_metadata != nullptr) {
+    *graph_metadata = analyze_graph_kernel_metadata(ir, kernel);
   }
 
   {
@@ -448,12 +454,13 @@ void compile_to_executable(IRNode *ir,
                            bool lower_global_access,
                            bool make_thread_local,
                            bool make_block_local,
-                           bool start_from_ast) {
+                           bool start_from_ast,
+                           GraphKernelMetadata *graph_metadata) {
   TI_AUTO_PROF;
   TI_COMPILE_PROFILER("cpp.ir.compile_to_executable");
 
   compile_to_offloads(ir, config, kernel, verbose, autodiff_mode, ad_use_stack,
-                      start_from_ast);
+                      start_from_ast, graph_metadata);
 
   offload_to_executable(
       ir, config, kernel, verbose,

@@ -22,6 +22,7 @@
 namespace taichi::lang {
 
 class ScratchPads;
+struct GraphKernelMetadata;
 
 class Function;
 
@@ -224,7 +225,8 @@ void compile_to_offloads(IRNode *ir,
                          bool verbose,
                          AutodiffMode autodiff_mode,
                          bool ad_use_stack,
-                         bool start_from_ast);
+                         bool start_from_ast,
+                         GraphKernelMetadata *graph_metadata = nullptr);
 
 void offload_to_executable(IRNode *ir,
                            const CompileConfig &config,
@@ -245,7 +247,8 @@ void compile_to_executable(IRNode *ir,
                            bool lower_global_access = true,
                            bool make_thread_local = false,
                            bool make_block_local = false,
-                           bool start_from_ast = true);
+                           bool start_from_ast = true,
+                           GraphKernelMetadata *graph_metadata = nullptr);
 // Compile a function with some basic optimizations
 void compile_function(IRNode *ir,
                       const CompileConfig &config,

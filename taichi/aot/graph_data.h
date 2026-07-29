@@ -9,6 +9,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include "taichi/analysis/graph_kernel_metadata.h"
 #include "taichi/ir/type.h"
 #include "taichi/ir/type_factory.h"
 #include "taichi/program/callable.h"
@@ -229,6 +230,7 @@ struct CompiledDispatch {
   // loaded module fields have a module-owned lifecycle rather than Program
   // SNodeTree identities.
   std::vector<SNodeTreeDependency> snode_tree_dependencies;
+  GraphKernelMetadata graph_metadata;
 
   TI_IO_DEF(kernel_name, symbolic_args);
 };
