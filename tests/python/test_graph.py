@@ -1146,6 +1146,10 @@ def test_bounded_graph_loop_reports_exact_stop_and_backend_overshoot():
     assert report.logical_iterations == 5
     assert report.final_counter == 5
     assert args["state"].to_numpy()[()] == 5
+    assert report.counter_values[-1] == 5
+    assert report.observation_batches == len(report.observation_boundaries)
+    assert report.observation_scalar_count == 2 * report.observation_batches
+    assert report.device_to_host_bytes == 8 * report.observation_batches
     assert args["predicate"].to_numpy()[()] == 0
     assert report.observation_boundaries[0] == 0
     assert report.observation_boundaries[-1] == report.executed_iterations
@@ -1182,6 +1186,10 @@ def test_bounded_graph_loop_honors_initial_stop_and_iteration_cap():
     assert stopped.logical_iterations == 0
     assert stopped.executed_iterations == 0
     assert stopped.observation_boundaries == (0,)
+    assert stopped.counter_values == (0,)
+    assert stopped.observation_batches == 1
+    assert stopped.observation_scalar_count == 2
+    assert stopped.device_to_host_bytes == 8
 
     capped = _bounded_step_args(target=100)
     graph.run(capped)
