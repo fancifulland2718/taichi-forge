@@ -163,54 +163,88 @@ class SequentialRegion:
         return None
 
 
+def _validate_control_name(value, role):
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{role} must be a non-empty resource name")
+
+
+def _validate_unique_control_names(values, role):
+    values = tuple(values)
+    for value in values:
+        _validate_control_name(value, role)
+    if len(values) != len(set(values)):
+        raise ValueError(f"{role} must not contain duplicate resources")
+    return values
+
+
 @dataclass(frozen=True)
-class BoundedLoopRegion:
+class WhileRegion:
     predicate: str
     max_iterations: int
+    condition: SequentialRegion
     body: SequentialRegion
+    control_inputs: Tuple[str, ...] = ()
+    carried_state: Tuple[str, ...] = ()
     counter: Optional[str] = None
-    predicate_convention: str = "continue_while_nonzero"
-    initial_observation: bool = True
-    terminal_observation: bool = True
+    chunk_size: int = 1
     masked_execution: bool = False
-    cuda_native_mode: str = "auto"
-    name: str = "bounded_loop"
+    lowering_mode: str = "auto"
+    name: str = "while"
     synchronization: bool = True
     opaque: bool = False
 
     def __post_init__(self):
-        if not self.predicate:
-            raise ValueError("BoundedLoopRegion requires a predicate")
+        _validate_control_name(self.predicate, "While predicate")
         if self.max_iterations < 0:
+            raise ValueError("While max_iterations must be non-negative")
+        if not isinstance(self.condition, SequentialRegion):
+            raise ValueError("While condition must be a SequentialRegion")
+        if not isinstance(self.body, SequentialRegion):
+            raise ValueError("While body must be a SequentialRegion")
+        object.__setattr__(
+            self,
+            "control_inputs",
+            _validate_unique_control_names(self.control_inputs, "While control_inputs"),
+        )
+        object.__setattr__(
+            self,
+            "carried_state",
+            _validate_unique_control_names(self.carried_state, "While carried_state"),
+        )
+        if self.predicate in self.control_inputs:
             raise ValueError(
-                "BoundedLoopRegion max_iterations must be non-negative"
+                "While predicate is an output and cannot be a control input"
             )
-        if self.predicate_convention not in (
-            "continue_while_nonzero",
-            "stop_when_nonzero",
-        ):
-            raise ValueError("Unsupported bounded-loop predicate convention")
-        if self.cuda_native_mode not in (
+        if self.counter is not None:
+            _validate_control_name(self.counter, "While counter")
+        if self.chunk_size <= 0:
+            raise ValueError("While chunk_size must be positive")
+        if self.lowering_mode not in (
             "auto",
             "portable",
             "native_required",
         ):
-            raise ValueError("Unsupported bounded-loop CUDA native mode")
+            raise ValueError("Unsupported while lowering mode")
 
     @property
     def kind(self):
-        return "bounded_loop_region"
+        return "while_region"
 
     @property
     def children(self):
-        return (self.body,)
+        return (self.condition, self.body)
 
     @property
     def effects(self):
         return (
-            ResourceEffect(self.predicate, GraphAccess.READ),
+            ResourceEffect(self.predicate, GraphAccess.READ_WRITE),
+            *(ResourceEffect(name, GraphAccess.READ) for name in self.control_inputs),
             *(
-                (ResourceEffect(self.counter, GraphAccess.WRITE),)
+                ResourceEffect(name, GraphAccess.READ_WRITE)
+                for name in self.carried_state
+            ),
+            *(
+                (ResourceEffect(self.counter, GraphAccess.READ_WRITE),)
                 if self.counter is not None
                 else ()
             ),
@@ -226,7 +260,135 @@ class BoundedLoopRegion:
 
     @property
     def iteration_domain(self):
-        return f"bounded:{self.max_iterations}"
+        return f"while:{self.max_iterations}"
+
+
+@dataclass(frozen=True)
+class IfRegion:
+    predicate: str
+    condition: SequentialRegion
+    then_region: SequentialRegion
+    else_region: Optional[SequentialRegion] = None
+    control_inputs: Tuple[str, ...] = ()
+    name: str = "if"
+    synchronization: bool = True
+    opaque: bool = False
+
+    def __post_init__(self):
+        _validate_control_name(self.predicate, "If predicate")
+        for region, role in (
+            (self.condition, "If condition"),
+            (self.then_region, "If then_region"),
+        ):
+            if not isinstance(region, SequentialRegion):
+                raise ValueError(f"{role} must be a SequentialRegion")
+        if self.else_region is not None and not isinstance(
+            self.else_region, SequentialRegion
+        ):
+            raise ValueError("If else_region must be a SequentialRegion")
+        object.__setattr__(
+            self,
+            "control_inputs",
+            _validate_unique_control_names(self.control_inputs, "If control_inputs"),
+        )
+        if self.predicate in self.control_inputs:
+            raise ValueError("If predicate is an output and cannot be a control input")
+
+    @property
+    def kind(self):
+        return "if_region"
+
+    @property
+    def children(self):
+        regions = (self.condition, self.then_region)
+        return regions if self.else_region is None else (*regions, self.else_region)
+
+    @property
+    def effects(self):
+        return (
+            ResourceEffect(self.predicate, GraphAccess.READ_WRITE),
+            *(ResourceEffect(name, GraphAccess.READ) for name in self.control_inputs),
+        )
+
+    @property
+    def bindings(self):
+        return ()
+
+    @property
+    def temporaries(self):
+        return ()
+
+    @property
+    def iteration_domain(self):
+        return None
+
+
+@dataclass(frozen=True)
+class SwitchRegion:
+    selector: str
+    condition: SequentialRegion
+    branches: Tuple[SequentialRegion, ...]
+    default_region: Optional[SequentialRegion] = None
+    control_inputs: Tuple[str, ...] = ()
+    name: str = "switch"
+    synchronization: bool = True
+    opaque: bool = False
+
+    def __post_init__(self):
+        _validate_control_name(self.selector, "Switch selector")
+        if not isinstance(self.condition, SequentialRegion):
+            raise ValueError("Switch condition must be a SequentialRegion")
+        branches = tuple(self.branches)
+        if not branches:
+            raise ValueError("Switch requires at least one branch")
+        if not all(isinstance(branch, SequentialRegion) for branch in branches):
+            raise ValueError("Switch branches must contain SequentialRegion values")
+        object.__setattr__(self, "branches", branches)
+        if self.default_region is not None and not isinstance(
+            self.default_region, SequentialRegion
+        ):
+            raise ValueError("Switch default_region must be a SequentialRegion")
+        object.__setattr__(
+            self,
+            "control_inputs",
+            _validate_unique_control_names(
+                self.control_inputs, "Switch control_inputs"
+            ),
+        )
+        if self.selector in self.control_inputs:
+            raise ValueError(
+                "Switch selector is an output and cannot be a control input"
+            )
+
+    @property
+    def kind(self):
+        return "switch_region"
+
+    @property
+    def children(self):
+        regions = (self.condition, *self.branches)
+        return (
+            regions if self.default_region is None else (*regions, self.default_region)
+        )
+
+    @property
+    def effects(self):
+        return (
+            ResourceEffect(self.selector, GraphAccess.READ_WRITE),
+            *(ResourceEffect(name, GraphAccess.READ) for name in self.control_inputs),
+        )
+
+    @property
+    def bindings(self):
+        return ()
+
+    @property
+    def temporaries(self):
+        return ()
+
+    @property
+    def iteration_domain(self):
+        return None
 
 
 @dataclass(frozen=True)
@@ -235,7 +397,9 @@ class GraphIRAnalysis:
     dispatch_nodes: int
     native_call_nodes: int
     sequential_regions: int
-    bounded_loop_regions: int
+    while_regions: int
+    if_regions: int
+    switch_regions: int
     observation_nodes: int
     effect_reads: int
     effect_writes: int
@@ -260,9 +424,7 @@ class ElementwiseFusionPlan:
     def to_dict(self):
         return {
             "candidate_groups": len(self.candidate_groups),
-            "candidate_dispatches": sum(
-                len(group) for group in self.candidate_groups
-            ),
+            "candidate_dispatches": sum(len(group) for group in self.candidate_groups),
             "eligible_dispatches": self.eligible_dispatches,
             "blocked_dispatches": self.blocked_dispatches,
             "blockers": dict(self.blocker_counts),
@@ -271,11 +433,15 @@ class ElementwiseFusionPlan:
             "decision": (
                 "applied"
                 if self.applied_groups
-                else "qualified_not_applied"
-                if self.candidate_groups and self.lowering_available
-                else "cross_kernel_ir_composer_unavailable"
-                if self.candidate_groups
-                else "no_safe_candidates"
+                else (
+                    "qualified_not_applied"
+                    if self.candidate_groups and self.lowering_available
+                    else (
+                        "cross_kernel_ir_composer_unavailable"
+                        if self.candidate_groups
+                        else "no_safe_candidates"
+                    )
+                )
             ),
         }
 
@@ -337,9 +503,7 @@ def _fusion_blocker(node):
     return None
 
 
-def analyze_elementwise_fusion(
-    root, *, applied_groups=0, lowering_available=False
-):
+def analyze_elementwise_fusion(root, *, applied_groups=0, lowering_available=False):
     """Find safe pointwise fusion groups without pretending to lower them."""
 
     groups = []
@@ -442,9 +606,7 @@ def plan_temporary_memory(root):
 
     visit(root)
     logical_bytes = sum(entry["bytes"] for entry in declarations.values())
-    opaque_entries = [
-        entry for entry in declarations.values() if entry["conflict"]
-    ]
+    opaque_entries = [entry for entry in declarations.values() if entry["conflict"]]
     opaque_bytes = sum(entry["bytes"] for entry in opaque_entries)
     intervals = sorted(
         (
@@ -461,9 +623,7 @@ def plan_temporary_memory(root):
     allocation_slots = {}
     for first, last, name, byte_count, alignment in intervals:
         available = [
-            (index, slot)
-            for index, slot in enumerate(slots)
-            if slot["last"] < first
+            (index, slot) for index, slot in enumerate(slots) if slot["last"] < first
         ]
         if available:
             slot_index, slot = min(
@@ -476,9 +636,7 @@ def plan_temporary_memory(root):
             slot["last"] = last
             slot["bytes"] = max(slot["bytes"], byte_count)
             slot["alignment"] = (
-                slot["alignment"]
-                * alignment
-                // gcd(slot["alignment"], alignment)
+                slot["alignment"] * alignment // gcd(slot["alignment"], alignment)
             )
         else:
             slot_index = len(slots)
@@ -530,7 +688,9 @@ def analyze_graph_ir(root):
         "dispatch_nodes": 0,
         "native_call_nodes": 0,
         "sequential_regions": 0,
-        "bounded_loop_regions": 0,
+        "while_regions": 0,
+        "if_regions": 0,
+        "switch_regions": 0,
         "observation_nodes": 0,
         "effect_reads": 0,
         "effect_writes": 0,
@@ -546,7 +706,9 @@ def analyze_graph_ir(root):
             "dispatch": "dispatch_nodes",
             "native_call": "native_call_nodes",
             "sequential_region": "sequential_regions",
-            "bounded_loop_region": "bounded_loop_regions",
+            "while_region": "while_regions",
+            "if_region": "if_regions",
+            "switch_region": "switch_regions",
             "observation": "observation_nodes",
         }[node.kind]
         counters[counter_name] += 1
@@ -577,25 +739,40 @@ def graph_ir_to_dict(node):
         "name": node.name,
         "effects": tuple(effect.to_dict() for effect in node.effects),
         "bindings": tuple(binding.to_dict() for binding in node.bindings),
-        "temporaries": tuple(
-            requirement.to_dict() for requirement in node.temporaries
-        ),
+        "temporaries": tuple(requirement.to_dict() for requirement in node.temporaries),
         "iteration_domain": node.iteration_domain,
         "synchronization": node.synchronization,
         "opaque": node.opaque,
         "children": tuple(graph_ir_to_dict(child) for child in node.children),
     }
-    if isinstance(node, BoundedLoopRegion):
+    if isinstance(node, WhileRegion):
         result.update(
             {
                 "predicate": node.predicate,
                 "counter": node.counter,
                 "max_iterations": node.max_iterations,
-                "predicate_convention": node.predicate_convention,
-                "initial_observation": node.initial_observation,
-                "terminal_observation": node.terminal_observation,
+                "control_inputs": node.control_inputs,
+                "carried_state": node.carried_state,
+                "chunk_size": node.chunk_size,
                 "masked_execution": node.masked_execution,
-                "cuda_native_mode": node.cuda_native_mode,
+                "lowering_mode": node.lowering_mode,
+            }
+        )
+    if isinstance(node, IfRegion):
+        result.update(
+            {
+                "predicate": node.predicate,
+                "control_inputs": node.control_inputs,
+                "has_else": node.else_region is not None,
+            }
+        )
+    if isinstance(node, SwitchRegion):
+        result.update(
+            {
+                "selector": node.selector,
+                "control_inputs": node.control_inputs,
+                "branch_count": len(node.branches),
+                "has_default": node.default_region is not None,
             }
         )
     if isinstance(node, DispatchNode):

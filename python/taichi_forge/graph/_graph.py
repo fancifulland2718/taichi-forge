@@ -28,14 +28,16 @@ from taichi_forge.graph._native import (
     compile_native_graph_node,
 )
 from taichi_forge.graph._ir import (
-    BoundedLoopRegion,
     DispatchNode,
+    IfRegion,
     GraphAccess,
     NativeCallNode,
     ObservationNode,
     ResourceEffect,
     RuntimeBinding,
     SequentialRegion,
+    SwitchRegion,
+    WhileRegion,
     analyze_elementwise_fusion,
     analyze_graph_ir,
     graph_ir_to_dict,
@@ -76,9 +78,7 @@ class _GraphTemporaryArenaLease:
     def attach(self, completion):
         if self._slot is None:
             return
-        self._slot["completion"] = (
-            completion if completion.has_backend_work else None
-        )
+        self._slot["completion"] = completion if completion.has_backend_work else None
         self._slot = None
 
     def cancel(self):
@@ -108,9 +108,7 @@ class _GraphTemporaryArena:
         self._allocations = 0
         self._reuses = 0
         self._waits = 0
-        self._storage_bytes = _align_up(
-            plan.planned_peak_bytes, self._WORD_BYTES
-        )
+        self._storage_bytes = _align_up(plan.planned_peak_bytes, self._WORD_BYTES)
         self._available = bool(plan.allocations) and not (
             plan.conflicting_requirements
             or any(
@@ -123,9 +121,7 @@ class _GraphTemporaryArena:
         storage = (
             None
             if self._storage_bytes == 0
-            else ScalarNdarray(
-                i32, (self._storage_bytes // self._WORD_BYTES,)
-            )
+            else ScalarNdarray(i32, (self._storage_bytes // self._WORD_BYTES,))
         )
         bindings = {
             allocation.name: GraphTemporaryBuffer(
@@ -212,9 +208,7 @@ class _GraphObservationState:
                 raise TaichiRuntimeError(
                     "Cannot attach a completion to a released observation slot"
                 )
-            self._completion = (
-                completion if completion.has_backend_work else None
-            )
+            self._completion = completion if completion.has_backend_work else None
         return self
 
     def _wait_locked(self):
@@ -231,9 +225,7 @@ class _GraphObservationState:
             if self._result is not None:
                 return _copy_observation_result(self._result)
             if self._released:
-                raise TaichiRuntimeError(
-                    "Graph observation snapshot was discarded"
-                )
+                raise TaichiRuntimeError("Graph observation snapshot was discarded")
             self._wait_locked()
             result = self._arena._read_slot(self._slot)
             self._result = result
@@ -363,9 +355,7 @@ class _GraphObservationArena:
                 if slot is not None:
                     if not allocated:
                         self._reuses += 1
-                    state = _GraphObservationState(
-                        self, slot, self._next_sequence
-                    )
+                    state = _GraphObservationState(self, slot, self._next_sequence)
                     self._next_sequence += 1
                     slot["state"] = state
                     return _GraphObservationArenaLease(state)
@@ -417,9 +407,7 @@ class _GraphObservationArena:
                 "materialized": bool(self._slots),
                 "capacity": self.capacity if self.nodes else 0,
                 "slots": len(self._slots),
-                "reserved_bytes": sum(
-                    slot["payload_bytes"] for slot in self._slots
-                ),
+                "reserved_bytes": sum(slot["payload_bytes"] for slot in self._slots),
                 "allocations": self._allocations,
                 "reuses": self._reuses,
                 "waits": self._waits,
@@ -536,8 +524,8 @@ class GraphExecutionReport:
 
 
 @dataclass(frozen=True)
-class GraphBoundedLoopReport:
-    """Last execution of one general bounded Graph loop."""
+class GraphWhileReport:
+    """Last execution of one structured Graph while region."""
 
     name: str
     backend: str
@@ -564,6 +552,28 @@ class GraphBoundedLoopReport:
     direct_observation_batches: int
     staging_fallback_batches: int
     packed_observation_bytes: int
+    condition_dispatch_count: int
+    body_dispatch_count: int
+    control_inputs: Tuple[str, ...]
+    carried_state: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class GraphBranchReport:
+    """Last execution of one structured Graph if/switch region."""
+
+    name: str
+    backend: str
+    kind: str
+    lowering: str
+    selector_resource: str
+    selector_value: int
+    selected_branch: str
+    observation_scalar_count: int
+    device_to_host_bytes: int
+    condition_dispatch_count: int
+    branch_dispatch_count: int
+    control_inputs: Tuple[str, ...]
 
 
 _COUNTER_FIELDS = (
@@ -662,11 +672,15 @@ def _execution_report(
             path = (
                 "unavailable"
                 if lifecycle_state != "ready"
-                else "asynchronous_snapshot"
-                if kind == "observation"
-                else "native_replay"
-                if instance_kind in ("cuda_native_replay", "cpu_native_replay")
-                else "native_dispatch"
+                else (
+                    "asynchronous_snapshot"
+                    if kind == "observation"
+                    else (
+                        "native_replay"
+                        if instance_kind in ("cuda_native_replay", "cpu_native_replay")
+                        else "native_dispatch"
+                    )
+                )
             )
             segments.append(
                 GraphExecutionSegmentReport(
@@ -724,9 +738,8 @@ def _execution_report(
         if lifecycle_state != "ready":
             fallback_reason = lifecycle_state
         gpu_backend = backend in ("cuda", "vulkan")
-        counters_complete = (
-            not gpu_backend
-            or bool(stats.get("diagnostics_counters_complete", True))
+        counters_complete = not gpu_backend or bool(
+            stats.get("diagnostics_counters_complete", True)
         )
         segments.append(
             GraphExecutionSegmentReport(
@@ -744,25 +757,18 @@ def _execution_report(
                 fallback_reason=fallback_reason,
                 backend_graph_path=path in _BACKEND_GRAPH_PATHS,
                 backend_replay_path=path in _BACKEND_REPLAY_PATHS,
-                zero_arg_eligible=bool(
-                    stats.get("zero_arg_eligible", False)
-                ),
+                zero_arg_eligible=bool(stats.get("zero_arg_eligible", False)),
                 persistent_argument_bytes=int(
                     stats.get("known_persistent_argument_bytes", 0)
                 ),
                 last_driver_error=int(stats.get("last_driver_error", 0)),
-                retry_backoff_remaining=int(
-                    stats.get("retry_backoff_remaining", 0)
-                ),
+                retry_backoff_remaining=int(stats.get("retry_backoff_remaining", 0)),
                 consecutive_transient_failures=int(
                     stats.get("consecutive_transient_failures", 0)
                 ),
                 counters_complete=counters_complete,
                 counters=GraphExecutionCounters(
-                    **{
-                        name: int(stats.get(name, 0))
-                        for name in _COUNTER_FIELDS
-                    }
+                    **{name: int(stats.get(name, 0)) for name in _COUNTER_FIELDS}
                 ),
             )
         )
@@ -779,9 +785,7 @@ def _execution_report(
     execution_path = (
         lifecycle_state
         if lifecycle_state != "ready"
-        else (next(iter(paths)) if len(paths) == 1 else "mixed")
-        if paths
-        else "not_run"
+        else (next(iter(paths)) if len(paths) == 1 else "mixed") if paths else "not_run"
     )
     reasons = {
         segment.fallback_reason
@@ -789,11 +793,7 @@ def _execution_report(
         if segment.fallback_reason != "none"
     }
     fallback_reason = (
-        "none"
-        if not reasons
-        else next(iter(reasons))
-        if len(reasons) == 1
-        else "mixed"
+        "none" if not reasons else next(iter(reasons)) if len(reasons) == 1 else "mixed"
     )
     dependency_info = definition["dependency_info"]
     persistent_argument_bytes = sum(
@@ -802,15 +802,9 @@ def _execution_report(
     temporary_memory_plan = temporary_memory_plan or {}
     temporary_arena_stats = temporary_arena_stats or {}
     observation_arena_stats = observation_arena_stats or {}
-    temporary_plan_materialized = bool(
-        temporary_arena_stats.get("materialized", False)
-    )
-    planned_temporary_bytes = int(
-        temporary_memory_plan.get("planned_peak_bytes", 0)
-    )
-    persistent_temporary_bytes = int(
-        temporary_arena_stats.get("reserved_bytes", 0)
-    )
+    temporary_plan_materialized = bool(temporary_arena_stats.get("materialized", False))
+    planned_temporary_bytes = int(temporary_memory_plan.get("planned_peak_bytes", 0))
+    persistent_temporary_bytes = int(temporary_arena_stats.get("reserved_bytes", 0))
     persistent_observation_bytes = int(observation_staging_bytes) + int(
         observation_arena_stats.get("reserved_bytes", 0)
     )
@@ -827,21 +821,15 @@ def _execution_report(
             planned_temporary_bytes if temporary_plan_materialized else 0
         ),
         planned_temporary_bytes=planned_temporary_bytes,
-        temporary_reuse_bytes=int(
-            temporary_memory_plan.get("reused_bytes", 0)
-        ),
-        opaque_temporary_bytes=int(
-            temporary_memory_plan.get("opaque_bytes", 0)
-        ),
+        temporary_reuse_bytes=int(temporary_memory_plan.get("reused_bytes", 0)),
+        opaque_temporary_bytes=int(temporary_memory_plan.get("opaque_bytes", 0)),
         temporary_plan_materialized=temporary_plan_materialized,
         temporary_arena_capacity=int(temporary_arena_stats.get("capacity", 0)),
         temporary_arena_slots=int(temporary_arena_stats.get("slots", 0)),
         temporary_arena_allocations=int(temporary_arena_stats.get("allocations", 0)),
         temporary_arena_reuses=int(temporary_arena_stats.get("reuses", 0)),
         temporary_arena_waits=int(temporary_arena_stats.get("waits", 0)),
-        observation_arena_capacity=int(
-            observation_arena_stats.get("capacity", 0)
-        ),
+        observation_arena_capacity=int(observation_arena_stats.get("capacity", 0)),
         observation_arena_slots=int(observation_arena_stats.get("slots", 0)),
         observation_arena_allocations=int(
             observation_arena_stats.get("allocations", 0)
@@ -883,9 +871,7 @@ def _execution_report(
             segment.last_path in ("ordinary", "ordinary_fallback")
             for segment in cgraph_segments
         ),
-        counters_complete=all(
-            segment.counters_complete for segment in segments
-        ),
+        counters_complete=all(segment.counters_complete for segment in segments),
         segments=tuple(segments),
         memory=memory,
     )
@@ -959,9 +945,7 @@ class _GraphRunContext:
     def flattened_args(self, arg_names=None):
         if self._flattened_args is None:
             self._flattened_args = self._flatten_runtime_args(self._args)
-        if arg_names is not None and not arg_names.issubset(
-            self._flattened_args
-        ):
+        if arg_names is not None and not arg_names.issubset(self._flattened_args):
             raise TaichiRuntimeError(
                 "CGraph segment requested undeclared runtime arguments"
             )
@@ -996,9 +980,7 @@ class _GraphRunContext:
                     raise TaichiRuntimeError(
                         "Cannot submit an Ndarray to Graph.run() after its Taichi runtime has been reset"
                     )
-                signature.append(
-                    (k, "ndarray", v._runtime_allocation_identity)
-                )
+                signature.append((k, "ndarray", v._runtime_allocation_identity))
             elif isinstance(v, (DenseNdarrayView, ScalarField, MatrixField)):
                 signature.append((k, "dense_storage", id(v)))
             elif isinstance(v, Texture):
@@ -1030,9 +1012,7 @@ class _GraphRunContext:
                     if runtime_storage_backend:
                         flattened[k] = (
                             v.arr,
-                            v._runtime_storage_argument(
-                                ndarray_consumer, ndarray_mode
-                            ),
+                            v._runtime_storage_argument(ndarray_consumer, ndarray_mode),
                         )
                     else:
                         flattened[k] = v.arr
@@ -1042,11 +1022,7 @@ class _GraphRunContext:
                             "Dense storage Graph runtime arguments are supported "
                             "on CPU, CUDA, and Vulkan"
                         )
-                    view = (
-                        v
-                        if isinstance(v, DenseNdarrayView)
-                        else ndarray_view(v)
-                    )
+                    view = v if isinstance(v, DenseNdarrayView) else ndarray_view(v)
                     try:
                         runtime_argument = view._runtime_storage_argument(
                             ndarray_consumer, ndarray_mode
@@ -1083,15 +1059,11 @@ class _CompiledCGraphNode:
     ):
         self.compiled_graph = compiled_graph
         self.dispatch_count = dispatch_count
-        composer_stats = dict(
-            getattr(compiled_graph, "_composer_stats", {})
-        )
+        composer_stats = dict(getattr(compiled_graph, "_composer_stats", {}))
         self.physical_dispatch_count = int(
             composer_stats.get("physical_dispatches", dispatch_count)
         )
-        self.composer_applied_groups = int(
-            composer_stats.get("applied_groups", 0)
-        )
+        self.composer_applied_groups = int(composer_stats.get("applied_groups", 0))
         self.composer_lowering_available = bool(
             composer_stats.get("lowering_available", False)
         )
@@ -1109,9 +1081,7 @@ class _CompiledCGraphNode:
             ),
             name="cgraph",
         )
-        dependency_info = getattr(
-            compiled_graph, "_snode_tree_dependency_info", None
-        )
+        dependency_info = getattr(compiled_graph, "_snode_tree_dependency_info", None)
         if dependency_info is None:
             dependency_info = (
                 (*dependency, 0)
@@ -1177,8 +1147,7 @@ class _CompiledNativeGraphNode:
         self.runtime_arg_names = frozenset(binding.name for binding in schema)
         self.needs_runtime_args = bool(self.runtime_arg_names)
         self.temporary_names = frozenset(
-            requirement.name
-            for requirement in executable.temporary_requirements
+            requirement.name for requirement in executable.temporary_requirements
         )
         self.backend_recorder = executable.backend_recorder
         if self.backend_recorder is not None and not isinstance(
@@ -1205,9 +1174,7 @@ class _CompiledNativeGraphNode:
                 )
 
     def run(self, context, temporaries=None):
-        runtime_args = (
-            context.runtime_args() if self.needs_runtime_args else None
-        )
+        runtime_args = context.runtime_args() if self.needs_runtime_args else None
         if not self.temporary_names:
             if runtime_args is None:
                 return self.executable.run()
@@ -1216,12 +1183,8 @@ class _CompiledNativeGraphNode:
             raise TaichiRuntimeError(
                 "Native Graph temporary requirements were not materialized"
             )
-        bindings = {
-            name: temporaries[name] for name in self.temporary_names
-        }
-        return self.executable.run_with_graph_temporaries(
-            bindings, runtime_args
-        )
+        bindings = {name: temporaries[name] for name in self.temporary_names}
+        return self.executable.run_with_graph_temporaries(bindings, runtime_args)
 
     @property
     def debug_info(self):
@@ -1263,9 +1226,7 @@ class _CompiledObservationGraphNode:
             )
         values = tuple(values)
         if not values:
-            raise TaichiRuntimeError(
-                "Graph observation requires at least one value"
-            )
+            raise TaichiRuntimeError("Graph observation requires at least one value")
         groups = {}
         entries = []
         for value in values:
@@ -1284,9 +1245,7 @@ class _CompiledObservationGraphNode:
                 )
             dtype = value.dtype()
             key = str(dtype)
-            group = groups.setdefault(
-                key, {"dtype": dtype, "names": []}
-            )
+            group = groups.setdefault(key, {"dtype": dtype, "names": []})
             index = len(group["names"])
             group["names"].append(value.name)
             entries.append((value.name, key, index, dtype))
@@ -1302,8 +1261,7 @@ class _CompiledObservationGraphNode:
         )
         self._entries = tuple(entries)
         self._kernels = {
-            key: _observation_pack_kernel(dtype)
-            for key, dtype, _ in self._groups
+            key: _observation_pack_kernel(dtype) for key, dtype, _ in self._groups
         }
         self._active_buffers = None
         self.runtime_arg_names = frozenset(names)
@@ -1312,12 +1270,9 @@ class _CompiledObservationGraphNode:
         self.ir_node = ObservationNode(
             name=name,
             effects=tuple(
-                ResourceEffect(arg_name, GraphAccess.READ)
-                for arg_name in names
+                ResourceEffect(arg_name, GraphAccess.READ) for arg_name in names
             ),
-            bindings=tuple(
-                RuntimeBinding(arg_name, "ndarray") for arg_name in names
-            ),
+            bindings=tuple(RuntimeBinding(arg_name, "ndarray") for arg_name in names),
             batch=name,
             synchronization=False,
             opaque=False,
@@ -1339,9 +1294,7 @@ class _CompiledObservationGraphNode:
 
     def run(self, context, temporaries=None):
         if self._active_buffers is None:
-            raise TaichiRuntimeError(
-                "Graph observation snapshot slot was not bound"
-            )
+            raise TaichiRuntimeError("Graph observation snapshot slot was not bound")
         runtime_args = context.runtime_args()
         for arg_name, key, index, dtype in self._entries:
             value = runtime_args[arg_name]
@@ -1354,17 +1307,14 @@ class _CompiledObservationGraphNode:
                     f"Graph observation {arg_name} requires a scalar ndarray "
                     f"with dtype {dtype}"
                 )
-            self._kernels[key](
-                value, self._active_buffers[key], index
-            )
+            self._kernels[key](value, self._active_buffers[key], index)
 
     def decode_snapshot(self, hosts):
         result = {}
         for key, _, names in self._groups:
             values = hosts[key].reshape(-1)
             result.update(
-                (name, values[index].item())
-                for index, name in enumerate(names)
+                (name, values[index].item()) for index, name in enumerate(names)
             )
         return result
 
@@ -1379,11 +1329,9 @@ class _CompiledObservationGraphNode:
         }
 
 
-def _bounded_scalar_values(values, names, *, use_transfer_planner):
+def _control_scalar_values(values, names, *, use_transfer_planner):
     if len(values) != len(names):
-        raise TaichiRuntimeError(
-            "Bounded Graph loop observation names do not match values"
-        )
+        raise TaichiRuntimeError("Structured Graph control names do not match values")
     sources = []
     hosts = []
     for value, name in zip(values, names):
@@ -1391,14 +1339,12 @@ def _bounded_scalar_values(values, names, *, use_transfer_planner):
         dtype = getattr(value, "dtype", None)
         if ndarray is None or dtype is None:
             raise TaichiRuntimeError(
-                f"Bounded Graph loop {name} must be a device ndarray scalar"
+                f"Structured Graph control {name} must be a device ndarray scalar"
             )
-        host = np.empty(
-            shape=ndarray.total_shape(), dtype=to_numpy_type(dtype)
-        )
+        host = np.empty(shape=ndarray.total_shape(), dtype=to_numpy_type(dtype))
         if host.size != 1:
             raise TaichiRuntimeError(
-                f"Bounded Graph loop {name} must contain exactly one scalar"
+                f"Structured Graph control {name} must contain exactly one scalar"
             )
         sources.append(ndarray)
         hosts.append(host)
@@ -1413,198 +1359,213 @@ def _bounded_scalar_values(values, names, *, use_transfer_planner):
     )
 
 
-def _bounded_predicate_continues(value, convention):
-    if convention == "continue_while_nonzero":
-        return value != 0
-    return value == 0
-
-
-def _bounded_chunk_limit(arch, requested, masked_execution):
+def _structured_chunk_limit(arch, requested, masked_execution):
     cpu_arches = (_ti_core.Arch.x64, _ti_core.Arch.arm64)
     if arch in cpu_arches or not masked_execution:
         return 1
     configured = (
         requested
         if requested is not None
-        else os.environ.get("TI_GRAPH_BOUNDED_CHUNK_SIZE", "4")
+        else os.environ.get("TI_GRAPH_WHILE_CHUNK_SIZE", "4")
     )
     if isinstance(configured, bool) or not isinstance(
         configured, (int, np.integer, str)
     ):
-        raise TaichiRuntimeError(
-            "Bounded Graph loop chunk_size must be an integer"
-        )
+        raise TaichiRuntimeError("Graph while chunk_size must be an integer")
     try:
         configured = int(configured)
     except ValueError as error:
-        raise TaichiRuntimeError(
-            "Bounded Graph loop chunk_size must be an integer"
-        ) from error
+        raise TaichiRuntimeError("Graph while chunk_size must be an integer") from error
     if configured <= 0:
-        raise TaichiRuntimeError(
-            "Bounded Graph loop chunk_size must be positive"
-        )
+        raise TaichiRuntimeError("Graph while chunk_size must be positive")
     return min(configured, 64)
 
 
-def _cuda_bounded_upgrade_status(arch, mode):
+def _cuda_while_upgrade_status(arch, mode):
     if mode not in ("auto", "portable", "native_required"):
         raise TaichiRuntimeError(
-            "Bounded Graph loop cuda_native_mode must be auto, portable, "
-            "or native_required"
+            "Graph while lowering_mode must be auto, portable, or " "native_required"
         )
     if mode == "portable":
         return False, "forced_portable"
     if arch != _ti_core.Arch.cuda:
         if mode == "native_required":
-            raise TaichiRuntimeError(
-                "Bounded Graph loop native_required mode needs CUDA"
-            )
+            raise TaichiRuntimeError("Graph while native_required mode needs CUDA")
         return False, "not_cuda"
     capabilities = dict(_ti_core.cuda_conditional_graph_capabilities())
     if not capabilities["driver_version_eligible"]:
         reason = "cuda_driver_api_version_below_12_8"
     elif not capabilities["conditional_graph_symbols_loaded"]:
         reason = "cuda_conditional_graph_symbols_not_loaded"
-    elif not capabilities.get(
-        "general_device_setter_lowering_compiled", False
-    ):
+    elif not capabilities.get("general_device_setter_lowering_compiled", False):
         reason = "cuda_conditional_setter_lowering_not_compiled"
     else:
         return True, "eligible"
     if mode == "native_required":
         raise TaichiRuntimeError(
-            f"Bounded Graph loop native CUDA lowering unavailable: {reason}"
+            f"Graph while native CUDA lowering unavailable: {reason}"
         )
     return False, reason
 
 
-class _CompiledBoundedLoopGraphNode:
+def _compile_sequential_runtime_node(sequences, *, repetitions=1, name):
+    sequences = tuple(sequences)
+    if not sequences or any(
+        not isinstance(sequence, Sequential) for sequence in sequences
+    ):
+        raise TaichiRuntimeError("Structured Graph regions require Sequential values")
+    builder = _new_runtime_graph_builder()
+    ir_nodes = []
+    dispatch_count = 0
+    runtime_arg_names = set()
+    recording_dispatches = []
+    for _ in range(repetitions):
+        for sequence in sequences:
+            sequence._dispatch_to(builder)
+            ir_nodes.extend(sequence._ir_nodes)
+            dispatch_count += sequence._dispatch_count
+            runtime_arg_names.update(sequence._runtime_arg_names)
+            recording_dispatches.extend(sequence._dispatches)
+    return _CompiledCGraphNode(
+        builder.compile(),
+        dispatch_count,
+        runtime_arg_names,
+        SequentialRegion(tuple(ir_nodes), name=name),
+        recording_dispatches=recording_dispatches,
+    )
+
+
+def _control_transfer_uses_planner(arch):
+    return (
+        arch == _ti_core.Arch.vulkan
+        and os.environ.get("TI_GRAPH_OBSERVATION_TRANSFER_PLANNER", "1") != "0"
+    )
+
+
+def _structured_host_lowering(arch):
+    if arch in (_ti_core.Arch.x64, _ti_core.Arch.arm64):
+        return "cpu_host_control"
+    return "portable_host_control"
+
+
+class _CompiledWhileGraphNode:
     needs_runtime_args = True
-    snode_tree_dependencies = frozenset()
-    snode_tree_dependency_info = frozenset()
+    source_native_count = 0
+    region_kind = "structured_while"
 
     def __init__(
         self,
+        condition,
         body,
         *,
         predicate,
+        control_inputs,
+        carried_state,
         max_iterations,
         counter,
-        predicate_convention,
         chunk_size,
         masked_execution,
-        cuda_native_mode,
-        initial_observation,
-        terminal_observation,
+        lowering_mode,
         name,
     ):
-        if not isinstance(body, Sequential) or body._dispatch_count == 0:
+        if not isinstance(condition, Sequential) or condition._dispatch_count == 0:
             raise TaichiRuntimeError(
-                "Bounded Graph loop body must be a non-empty Sequential"
+                "Graph while condition must be a non-empty Sequential"
             )
+        if not isinstance(body, Sequential) or body._dispatch_count == 0:
+            raise TaichiRuntimeError("Graph while body must be a non-empty Sequential")
         if isinstance(max_iterations, bool) or not isinstance(
             max_iterations, (int, np.integer)
         ):
-            raise TaichiRuntimeError(
-                "Bounded Graph loop max_iterations must be an integer"
-            )
+            raise TaichiRuntimeError("Graph while max_iterations must be an integer")
         if max_iterations < 0:
-            raise TaichiRuntimeError(
-                "Bounded Graph loop max_iterations must be non-negative"
-            )
-        if predicate_convention not in (
-            "continue_while_nonzero",
-            "stop_when_nonzero",
-        ):
-            raise TaichiRuntimeError(
-                "Unsupported bounded Graph predicate convention"
-            )
-        if not terminal_observation:
-            raise TaichiRuntimeError(
-                "Portable bounded Graph loops require terminal_observation"
-            )
+            raise TaichiRuntimeError("Graph while max_iterations must be non-negative")
         self.name = name
         self.predicate = predicate
+        self.control_inputs = tuple(control_inputs)
+        self.carried_state = tuple(carried_state)
         self.counter = counter
         self.max_iterations = int(max_iterations)
-        self.predicate_convention = predicate_convention
-        self.initial_observation = bool(initial_observation)
-        self.terminal_observation = bool(terminal_observation)
         self.masked_execution = bool(masked_execution)
-        self.cuda_native_mode = cuda_native_mode
+        self.lowering_mode = lowering_mode
+        self.condition_dispatch_count = condition._dispatch_count
         self.body_dispatch_count = body._dispatch_count
-        self.dispatch_count = body._dispatch_count
-        self.runtime_arg_names = frozenset(body._runtime_arg_names)
-        for control_name in (predicate, counter):
-            if (
-                control_name is not None
-                and control_name not in self.runtime_arg_names
-            ):
-                raise TaichiRuntimeError(
-                    f"Bounded Graph loop control argument {control_name} "
-                    "must be declared by its body"
-                )
+        self.dispatch_count = self.condition_dispatch_count + self.body_dispatch_count
+        self.runtime_arg_names = frozenset(
+            condition._runtime_arg_names | body._runtime_arg_names
+        )
+        required_condition = {predicate, *self.control_inputs}
+        missing_condition = sorted(
+            required_condition.difference(condition._runtime_arg_names)
+        )
+        if missing_condition:
+            raise TaichiRuntimeError(
+                "Graph while condition does not declare control resources: "
+                + ", ".join(missing_condition)
+            )
+        required_body = set(self.carried_state)
+        if counter is not None:
+            required_body.add(counter)
+        missing_body = sorted(required_body.difference(body._runtime_arg_names))
+        if missing_body:
+            raise TaichiRuntimeError(
+                "Graph while body does not declare carried resources: "
+                + ", ".join(missing_body)
+            )
 
         arch = impl.current_cfg().arch
         self.chunk_limit = min(
             self.max_iterations or 1,
-            _bounded_chunk_limit(arch, chunk_size, self.masked_execution),
+            _structured_chunk_limit(arch, chunk_size, self.masked_execution),
         )
         if self.chunk_limit > 1 and self.counter is None:
             raise TaichiRuntimeError(
-                "Masked bounded Graph loops with chunk_size > 1 require a "
-                "device counter to report the exact stop position"
+                "Chunked Graph while regions require a device counter"
             )
+        self._condition = _compile_sequential_runtime_node(
+            (condition,), name=f"{name}_condition"
+        )
         self._chunks = {}
         chunk = 1
         while chunk <= self.chunk_limit and chunk <= self.max_iterations:
-            builder = _new_runtime_graph_builder()
-            ir_nodes = []
-            for _ in range(chunk):
-                body._dispatch_to(builder)
-                ir_nodes.extend(body._ir_nodes)
-            compiled = _CompiledCGraphNode(
-                builder.compile(),
-                body._dispatch_count * chunk,
-                body._runtime_arg_names,
-                SequentialRegion(
-                    tuple(ir_nodes), name=f"{name}_chunk_{chunk}"
-                ),
+            self._chunks[chunk] = _compile_sequential_runtime_node(
+                (body, condition),
+                repetitions=chunk,
+                name=f"{name}_body_condition_{chunk}",
             )
-            self._chunks[chunk] = compiled
             chunk *= 2
+        dependency_nodes = (self._condition, *self._chunks.values())
         self.snode_tree_dependencies = frozenset().union(
-            *(node.snode_tree_dependencies for node in self._chunks.values())
+            *(node.snode_tree_dependencies for node in dependency_nodes)
         )
         self.snode_tree_dependency_info = frozenset().union(
-            *(
-                node.snode_tree_dependency_info
-                for node in self._chunks.values()
-            )
+            *(node.snode_tree_dependency_info for node in dependency_nodes)
         )
-        self.ir_node = BoundedLoopRegion(
+        self.ir_node = WhileRegion(
             predicate=predicate,
             max_iterations=self.max_iterations,
+            condition=SequentialRegion(
+                tuple(condition._ir_nodes), name=f"{name}_condition"
+            ),
             body=SequentialRegion(tuple(body._ir_nodes), name=f"{name}_body"),
+            control_inputs=self.control_inputs,
+            carried_state=self.carried_state,
             counter=counter,
-            predicate_convention=predicate_convention,
-            initial_observation=initial_observation,
-            terminal_observation=terminal_observation,
-            masked_execution=masked_execution,
-            cuda_native_mode=cuda_native_mode,
+            chunk_size=self.chunk_limit,
+            masked_execution=self.masked_execution,
+            lowering_mode=lowering_mode,
             name=name,
         )
         self._last_report = None
         self._native_jit_cache = _ti_core.CompiledGraphJITCache()
         self._native_upgrade_eligible, self._native_upgrade_reason = (
-            _cuda_bounded_upgrade_status(arch, cuda_native_mode)
+            _cuda_while_upgrade_status(arch, lowering_mode)
         )
         if self._native_upgrade_eligible and self.counter is None:
-            if cuda_native_mode == "native_required":
+            if lowering_mode == "native_required":
                 raise TaichiRuntimeError(
-                    "Bounded Graph loop native CUDA lowering requires an "
-                    "exact iteration counter"
+                    "Native CUDA Graph while lowering requires an exact "
+                    "iteration counter"
                 )
             self._native_upgrade_eligible = False
             self._native_upgrade_reason = "exact_counter_required"
@@ -1628,13 +1589,7 @@ class _CompiledBoundedLoopGraphNode:
         device_to_host_bytes = 0
         program = impl.get_runtime().prog
         arch = impl.current_cfg().arch
-        use_transfer_planner = (
-            arch == _ti_core.Arch.vulkan
-            and os.environ.get(
-                "TI_GRAPH_OBSERVATION_TRANSFER_PLANNER", "1"
-            )
-            != "0"
-        )
+        use_transfer_planner = _control_transfer_uses_planner(arch)
         transfer_before = program._graph_observation_staging_stats()
 
         def observe_control(boundary):
@@ -1646,7 +1601,7 @@ class _CompiledBoundedLoopGraphNode:
             if counter_object is not None:
                 values.append(counter_object)
                 names.append(self.counter)
-            observed, byte_count = _bounded_scalar_values(
+            observed, byte_count = _control_scalar_values(
                 values,
                 names,
                 use_transfer_planner=use_transfer_planner,
@@ -1660,118 +1615,86 @@ class _CompiledBoundedLoopGraphNode:
                 counter_values.append(observed[1])
             return observed[0]
 
-        if self.initial_observation:
-            predicate_value = observe_control(0)
-            initial_counter = (
-                counter_values[-1] if counter_object is not None else None
-            )
-            active = _bounded_predicate_continues(
-                predicate_value, self.predicate_convention
-            )
-        else:
-            if counter_object is not None:
-                observed, byte_count = _bounded_scalar_values(
-                    [counter_object],
-                    [self.counter],
-                    use_transfer_planner=use_transfer_planner,
-                )
-                observation_batches += 1
-                observation_scalar_count += 1
-                device_to_host_bytes += byte_count
-                initial_counter = observed[0]
-            else:
-                initial_counter = None
-            active = True
-
+        self._condition.run(context)
+        predicate_value = observe_control(0)
+        initial_counter = counter_values[-1] if counter_object is not None else None
+        active = predicate_value != 0
         native_selected = False
         native_reason = self._native_upgrade_reason
-        if (
-            active
-            and self.max_iterations > 0
-            and self._native_upgrade_eligible
-        ):
+        if active and self.max_iterations > 0 and self._native_upgrade_eligible:
             predicate_ndarray = getattr(predicate_object, "arr", None)
             if predicate_ndarray is None:
                 native_reason = "predicate_ndarray_required"
             else:
-                native_selected = self._chunks[1].compiled_graph.jit_run_bounded_cuda_cached(
+                native_selected = self._chunks[
+                    1
+                ].compiled_graph.jit_run_bounded_cuda_cached(
                     context.compile_config(),
                     context.flattened_args(self.runtime_arg_names),
                     self._native_jit_cache,
                     predicate_ndarray,
                     self.max_iterations,
-                    self.predicate_convention == "continue_while_nonzero",
+                    True,
                 )
                 native_reason = (
-                    "selected"
-                    if native_selected
-                    else "conditional_capture_fallback"
+                    "selected" if native_selected else "conditional_capture_fallback"
                 )
-            if not native_selected and self.cuda_native_mode == "native_required":
+            if not native_selected and self.lowering_mode == "native_required":
                 raise TaichiRuntimeError(
-                    "Bounded Graph loop native CUDA lowering failed: "
-                    f"{native_reason}"
+                    "Graph while native CUDA lowering failed: " f"{native_reason}"
                 )
         if native_selected:
             predicate_value = observe_control(-1)
             logical_native = counter_values[-1] - initial_counter
             if logical_native < 0 or logical_native > self.max_iterations:
                 raise TaichiRuntimeError(
-                    "Bounded Graph loop native counter left its iteration "
-                    "budget"
+                    "Graph while counter left its iteration budget"
                 )
-            active = _bounded_predicate_continues(
-                predicate_value, self.predicate_convention
-            )
+            active = predicate_value != 0
             executed = self.max_iterations if active else logical_native
             observations[-1] = executed
             if executed:
                 chunks.append(executed)
 
-        while (
-            not native_selected
-            and active
-            and executed < self.max_iterations
-        ):
+        while not native_selected and active and executed < self.max_iterations:
             chunk = self._select_chunk(self.max_iterations - executed)
             self._chunks[chunk].run(context)
             executed += chunk
             chunks.append(chunk)
             predicate_value = observe_control(executed)
-            active = _bounded_predicate_continues(
-                predicate_value, self.predicate_convention
-            )
+            active = predicate_value != 0
 
         if not observations or observations[-1] != executed:
             observe_control(executed)
-        final_counter = (
-            counter_values[-1] if counter_object is not None else None
-        )
+        final_counter = counter_values[-1] if counter_object is not None else None
         if final_counter is not None:
             logical = final_counter - initial_counter
             if logical < 0 or logical > executed:
                 raise TaichiRuntimeError(
-                    "Bounded Graph loop counter must increase by no more "
-                    "than the executed iteration count"
+                    "Graph while counter must increase by no more than the "
+                    "executed iteration count"
                 )
         else:
             logical = executed
-        cpu_arches = (_ti_core.Arch.x64, _ti_core.Arch.arm64)
         lowering = (
             "cuda_conditional_graph"
             if native_selected
-            else "cpu_host_loop"
-            if arch in cpu_arches
-            else "portable_chunk_replay"
-            if self.chunk_limit > 1
-            else "portable_exact_replay"
+            else (
+                "cpu_host_loop"
+                if arch in (_ti_core.Arch.x64, _ti_core.Arch.arm64)
+                else (
+                    "portable_chunk_replay"
+                    if self.chunk_limit > 1
+                    else "portable_exact_replay"
+                )
+            )
         )
         transfer_after = program._graph_observation_staging_stats()
 
         def transfer_delta(name):
             return int(transfer_after[name]) - int(transfer_before[name])
 
-        self._last_report = GraphBoundedLoopReport(
+        self._last_report = GraphWhileReport(
             name=self.name,
             backend=_backend_name(_ti_core.arch_name(arch)),
             lowering=lowering,
@@ -1801,21 +1724,29 @@ class _CompiledBoundedLoopGraphNode:
             ),
             staging_fallback_batches=transfer_delta("fallback_batches"),
             packed_observation_bytes=transfer_delta("packed_payload_bytes"),
+            condition_dispatch_count=self.condition_dispatch_count,
+            body_dispatch_count=self.body_dispatch_count,
+            control_inputs=self.control_inputs,
+            carried_state=self.carried_state,
         )
 
     def invalidate_runtime(self):
         self._native_jit_cache.clear_runtime_state()
+        self._condition.invalidate_runtime()
         for node in self._chunks.values():
             node.invalidate_runtime()
 
     @property
     def debug_graph_stats(self):
-        chunk_stats = tuple(
-            node.debug_graph_stats for node in self._chunks.values()
-        )
+        chunk_stats = tuple(node.debug_graph_stats for node in self._chunks.values())
+        condition_stats = (self._condition.debug_graph_stats,)
         if not self._native_upgrade_eligible:
-            return chunk_stats
-        return (self._native_jit_cache._debug_graph_stats(), *chunk_stats)
+            return (*condition_stats, *chunk_stats)
+        return (
+            self._native_jit_cache._debug_graph_stats(),
+            *condition_stats,
+            *chunk_stats,
+        )
 
     @property
     def last_report(self):
@@ -1824,14 +1755,343 @@ class _CompiledBoundedLoopGraphNode:
     @property
     def debug_info(self):
         return {
-            "kind": "bounded_loop",
+            "kind": "structured_while",
             "name": self.name,
+            "condition_dispatch_count": self.condition_dispatch_count,
             "body_dispatch_count": self.body_dispatch_count,
             "max_iterations": self.max_iterations,
             "chunk_limit": self.chunk_limit,
+            "control_input_count": len(self.control_inputs),
+            "carried_state_count": len(self.carried_state),
             "masked_execution": self.masked_execution,
-            "cuda_native_mode": self.cuda_native_mode,
+            "lowering_mode": self.lowering_mode,
             "native_upgrade_eligible": self._native_upgrade_eligible,
+        }
+
+
+class _CompiledIfGraphNode:
+    needs_runtime_args = True
+    source_native_count = 0
+    region_kind = "structured_if"
+
+    def __init__(
+        self,
+        condition,
+        then_region,
+        else_region,
+        *,
+        predicate,
+        control_inputs,
+        name,
+    ):
+        if not isinstance(condition, Sequential) or condition._dispatch_count == 0:
+            raise TaichiRuntimeError(
+                "Graph if condition must be a non-empty Sequential"
+            )
+        if not isinstance(then_region, Sequential) or then_region._dispatch_count == 0:
+            raise TaichiRuntimeError(
+                "Graph if then_region must be a non-empty Sequential"
+            )
+        if else_region is not None and (
+            not isinstance(else_region, Sequential) or else_region._dispatch_count == 0
+        ):
+            raise TaichiRuntimeError(
+                "Graph if else_region must be a non-empty Sequential"
+            )
+        self.name = name
+        self.predicate = predicate
+        self.control_inputs = tuple(control_inputs)
+        required = {predicate, *self.control_inputs}
+        missing = sorted(required.difference(condition._runtime_arg_names))
+        if missing:
+            raise TaichiRuntimeError(
+                "Graph if condition does not declare control resources: "
+                + ", ".join(missing)
+            )
+        self._condition = _compile_sequential_runtime_node(
+            (condition,), name=f"{name}_condition"
+        )
+        self._then = _compile_sequential_runtime_node(
+            (then_region,), name=f"{name}_then"
+        )
+        self._else = (
+            None
+            if else_region is None
+            else _compile_sequential_runtime_node((else_region,), name=f"{name}_else")
+        )
+        nodes = tuple(
+            node for node in (self._condition, self._then, self._else) if node
+        )
+        self.runtime_arg_names = frozenset().union(
+            *(node.runtime_arg_names for node in nodes)
+        )
+        self.snode_tree_dependencies = frozenset().union(
+            *(node.snode_tree_dependencies for node in nodes)
+        )
+        self.snode_tree_dependency_info = frozenset().union(
+            *(node.snode_tree_dependency_info for node in nodes)
+        )
+        self.condition_dispatch_count = condition._dispatch_count
+        self.then_dispatch_count = then_region._dispatch_count
+        self.else_dispatch_count = (
+            0 if else_region is None else else_region._dispatch_count
+        )
+        self.dispatch_count = (
+            self.condition_dispatch_count
+            + self.then_dispatch_count
+            + self.else_dispatch_count
+        )
+        self.ir_node = IfRegion(
+            predicate=predicate,
+            condition=SequentialRegion(
+                tuple(condition._ir_nodes), name=f"{name}_condition"
+            ),
+            then_region=SequentialRegion(
+                tuple(then_region._ir_nodes), name=f"{name}_then"
+            ),
+            else_region=(
+                None
+                if else_region is None
+                else SequentialRegion(tuple(else_region._ir_nodes), name=f"{name}_else")
+            ),
+            control_inputs=self.control_inputs,
+            name=name,
+        )
+        self._last_report = None
+
+    def run(self, context, temporaries=None):
+        self._condition.run(context)
+        runtime_args = context.runtime_args()
+        arch = impl.current_cfg().arch
+        observed, byte_count = _control_scalar_values(
+            [runtime_args[self.predicate]],
+            [self.predicate],
+            use_transfer_planner=_control_transfer_uses_planner(arch),
+        )
+        predicate_value = observed[0]
+        if predicate_value != 0:
+            selected = "then"
+            selected_dispatches = self.then_dispatch_count
+            self._then.run(context)
+        elif self._else is not None:
+            selected = "else"
+            selected_dispatches = self.else_dispatch_count
+            self._else.run(context)
+        else:
+            selected = "none"
+            selected_dispatches = 0
+        self._last_report = GraphBranchReport(
+            name=self.name,
+            backend=_backend_name(_ti_core.arch_name(arch)),
+            kind="if",
+            lowering=_structured_host_lowering(arch),
+            selector_resource=self.predicate,
+            selector_value=predicate_value,
+            selected_branch=selected,
+            observation_scalar_count=1,
+            device_to_host_bytes=byte_count,
+            condition_dispatch_count=self.condition_dispatch_count,
+            branch_dispatch_count=selected_dispatches,
+            control_inputs=self.control_inputs,
+        )
+
+    def invalidate_runtime(self):
+        self._condition.invalidate_runtime()
+        self._then.invalidate_runtime()
+        if self._else is not None:
+            self._else.invalidate_runtime()
+
+    @property
+    def debug_graph_stats(self):
+        nodes = tuple(
+            node for node in (self._condition, self._then, self._else) if node
+        )
+        return tuple(node.debug_graph_stats for node in nodes)
+
+    @property
+    def last_report(self):
+        return self._last_report
+
+    @property
+    def debug_info(self):
+        return {
+            "kind": "structured_if",
+            "name": self.name,
+            "condition_dispatch_count": self.condition_dispatch_count,
+            "then_dispatch_count": self.then_dispatch_count,
+            "else_dispatch_count": self.else_dispatch_count,
+            "control_input_count": len(self.control_inputs),
+            "lowering": _structured_host_lowering(impl.current_cfg().arch),
+        }
+
+
+class _CompiledSwitchGraphNode:
+    needs_runtime_args = True
+    source_native_count = 0
+    region_kind = "structured_switch"
+
+    def __init__(
+        self,
+        condition,
+        branches,
+        default_region,
+        *,
+        selector,
+        control_inputs,
+        name,
+    ):
+        if not isinstance(condition, Sequential) or condition._dispatch_count == 0:
+            raise TaichiRuntimeError(
+                "Graph switch condition must be a non-empty Sequential"
+            )
+        branches = tuple(branches)
+        if not branches or any(
+            not isinstance(branch, Sequential) or branch._dispatch_count == 0
+            for branch in branches
+        ):
+            raise TaichiRuntimeError(
+                "Graph switch requires non-empty Sequential branches"
+            )
+        if default_region is not None and (
+            not isinstance(default_region, Sequential)
+            or default_region._dispatch_count == 0
+        ):
+            raise TaichiRuntimeError(
+                "Graph switch default_region must be a non-empty Sequential"
+            )
+        self.name = name
+        self.selector = selector
+        self.control_inputs = tuple(control_inputs)
+        required = {selector, *self.control_inputs}
+        missing = sorted(required.difference(condition._runtime_arg_names))
+        if missing:
+            raise TaichiRuntimeError(
+                "Graph switch condition does not declare control resources: "
+                + ", ".join(missing)
+            )
+        self._condition = _compile_sequential_runtime_node(
+            (condition,), name=f"{name}_condition"
+        )
+        self._branches = tuple(
+            _compile_sequential_runtime_node((branch,), name=f"{name}_case_{index}")
+            for index, branch in enumerate(branches)
+        )
+        self._default = (
+            None
+            if default_region is None
+            else _compile_sequential_runtime_node(
+                (default_region,), name=f"{name}_default"
+            )
+        )
+        nodes = (self._condition, *self._branches)
+        if self._default is not None:
+            nodes = (*nodes, self._default)
+        self.runtime_arg_names = frozenset().union(
+            *(node.runtime_arg_names for node in nodes)
+        )
+        self.snode_tree_dependencies = frozenset().union(
+            *(node.snode_tree_dependencies for node in nodes)
+        )
+        self.snode_tree_dependency_info = frozenset().union(
+            *(node.snode_tree_dependency_info for node in nodes)
+        )
+        self.condition_dispatch_count = condition._dispatch_count
+        self.branch_dispatch_counts = tuple(
+            branch._dispatch_count for branch in branches
+        )
+        self.default_dispatch_count = (
+            0 if default_region is None else default_region._dispatch_count
+        )
+        self.dispatch_count = (
+            self.condition_dispatch_count
+            + sum(self.branch_dispatch_counts)
+            + self.default_dispatch_count
+        )
+        self.ir_node = SwitchRegion(
+            selector=selector,
+            condition=SequentialRegion(
+                tuple(condition._ir_nodes), name=f"{name}_condition"
+            ),
+            branches=tuple(
+                SequentialRegion(tuple(branch._ir_nodes), name=f"{name}_case_{index}")
+                for index, branch in enumerate(branches)
+            ),
+            default_region=(
+                None
+                if default_region is None
+                else SequentialRegion(
+                    tuple(default_region._ir_nodes), name=f"{name}_default"
+                )
+            ),
+            control_inputs=self.control_inputs,
+            name=name,
+        )
+        self._last_report = None
+
+    def run(self, context, temporaries=None):
+        self._condition.run(context)
+        runtime_args = context.runtime_args()
+        arch = impl.current_cfg().arch
+        observed, byte_count = _control_scalar_values(
+            [runtime_args[self.selector]],
+            [self.selector],
+            use_transfer_planner=_control_transfer_uses_planner(arch),
+        )
+        selector_value = int(observed[0])
+        if 0 <= selector_value < len(self._branches):
+            selected = f"case_{selector_value}"
+            selected_dispatches = self.branch_dispatch_counts[selector_value]
+            self._branches[selector_value].run(context)
+        elif self._default is not None:
+            selected = "default"
+            selected_dispatches = self.default_dispatch_count
+            self._default.run(context)
+        else:
+            selected = "none"
+            selected_dispatches = 0
+        self._last_report = GraphBranchReport(
+            name=self.name,
+            backend=_backend_name(_ti_core.arch_name(arch)),
+            kind="switch",
+            lowering=_structured_host_lowering(arch),
+            selector_resource=self.selector,
+            selector_value=selector_value,
+            selected_branch=selected,
+            observation_scalar_count=1,
+            device_to_host_bytes=byte_count,
+            condition_dispatch_count=self.condition_dispatch_count,
+            branch_dispatch_count=selected_dispatches,
+            control_inputs=self.control_inputs,
+        )
+
+    def invalidate_runtime(self):
+        self._condition.invalidate_runtime()
+        for branch in self._branches:
+            branch.invalidate_runtime()
+        if self._default is not None:
+            self._default.invalidate_runtime()
+
+    @property
+    def debug_graph_stats(self):
+        nodes = (self._condition, *self._branches)
+        if self._default is not None:
+            nodes = (*nodes, self._default)
+        return tuple(node.debug_graph_stats for node in nodes)
+
+    @property
+    def last_report(self):
+        return self._last_report
+
+    @property
+    def debug_info(self):
+        return {
+            "kind": "structured_switch",
+            "name": self.name,
+            "condition_dispatch_count": self.condition_dispatch_count,
+            "branch_dispatch_counts": self.branch_dispatch_counts,
+            "default_dispatch_count": self.default_dispatch_count,
+            "control_input_count": len(self.control_inputs),
+            "lowering": _structured_host_lowering(impl.current_cfg().arch),
         }
 
 
@@ -1878,9 +2138,7 @@ def _lower_mixed_backend_regions(nodes):
             region.append((nodes[end], dispatches))
             end += 1
 
-        has_cgraph = any(
-            isinstance(node, _CompiledCGraphNode) for node, _ in region
-        )
+        has_cgraph = any(isinstance(node, _CompiledCGraphNode) for node, _ in region)
         has_native = any(
             isinstance(node, _CompiledNativeGraphNode) for node, _ in region
         )
@@ -1912,9 +2170,7 @@ def _lower_mixed_backend_regions(nodes):
                 builder.compile(),
                 len(recording_dispatches),
                 runtime_arg_names,
-                SequentialRegion(
-                    tuple(ir_children), name="mixed_backend_region"
-                ),
+                SequentialRegion(tuple(ir_children), name="mixed_backend_region"),
                 recording_dispatches=recording_dispatches,
                 lifetime_leases=lifetime_leases,
                 source_native_count=region_native_count,
@@ -1925,9 +2181,7 @@ def _lower_mixed_backend_regions(nodes):
         lowered_native_count += region_native_count
         cursor = end
 
-    total_native_count = sum(
-        getattr(node, "source_native_count", 0) for node in nodes
-    )
+    total_native_count = sum(getattr(node, "source_native_count", 0) for node in nodes)
     return tuple(lowered), {
         "backend": backend,
         "input_segments": len(nodes),
@@ -1950,16 +2204,12 @@ class _GraphSpec:
         self.temporary_memory_plan = plan_temporary_memory(
             self.pre_optimization_ir_root
         )
-        self.nodes, self.optimization = _lower_mixed_backend_regions(
-            source_nodes
-        )
+        self.nodes, self.optimization = _lower_mixed_backend_regions(source_nodes)
         applied_groups = sum(
-            getattr(node, "composer_applied_groups", 0)
-            for node in self.nodes
+            getattr(node, "composer_applied_groups", 0) for node in self.nodes
         )
         lowering_available = any(
-            getattr(node, "composer_lowering_available", False)
-            for node in self.nodes
+            getattr(node, "composer_lowering_available", False) for node in self.nodes
         )
         self.fusion_plan = analyze_elementwise_fusion(
             self.pre_optimization_ir_root,
@@ -1969,19 +2219,23 @@ class _GraphSpec:
         self._aot_graph_builder = aot_graph_builder
         self._aot_compiled_graph = aot_compiled_graph
         self.needs_runtime_args = any(n.needs_runtime_args for n in self.nodes)
-        self.dispatch_count = sum(
-            getattr(n, "dispatch_count", 0) for n in self.nodes
-        )
+        self.dispatch_count = sum(getattr(n, "dispatch_count", 0) for n in self.nodes)
         self.native_count = sum(
             getattr(n, "source_native_count", 0) for n in self.nodes
         )
-        self.bounded_loop_count = sum(
-            isinstance(n, _CompiledBoundedLoopGraphNode)
+        self.structured_control_count = sum(
+            isinstance(
+                n,
+                (
+                    _CompiledWhileGraphNode,
+                    _CompiledIfGraphNode,
+                    _CompiledSwitchGraphNode,
+                ),
+            )
             for n in self.nodes
         )
         self.observation_count = sum(
-            isinstance(n, _CompiledObservationGraphNode)
-            for n in self.nodes
+            isinstance(n, _CompiledObservationGraphNode) for n in self.nodes
         )
         self.runtime_arg_names = frozenset().union(
             *(n.runtime_arg_names for n in self.nodes)
@@ -2033,7 +2287,7 @@ class _GraphSpec:
         return (impl.runtime_generation(), impl.current_cfg().arch, id(runtime.prog))
 
     def compiled_graph(self):
-        if self.native_count or self.bounded_loop_count or self.observation_count:
+        if self.native_count or self.structured_control_count or self.observation_count:
             raise TaichiRuntimeError(
                 "Graphs containing native, observation, or structured-control nodes cannot "
                 "be serialized as AOT CGraph yet"
@@ -2051,6 +2305,7 @@ class _GraphSpec:
             "dispatch_count": self.dispatch_count,
             "native_count": self.native_count,
             "observation_count": self.observation_count,
+            "structured_control_count": self.structured_control_count,
             "repeat_count": self.repeat_count,
             "nodes": [n.debug_info for n in self.nodes],
             "optimization": dict(self.optimization),
@@ -2063,17 +2318,11 @@ class _GraphSpec:
     def ir_debug_info(self):
         return {
             "metadata_version": 1,
-            "analysis_only": not bool(
-                self.optimization["mixed_backend_regions"]
-            ),
+            "analysis_only": not bool(self.optimization["mixed_backend_regions"]),
             "analysis": self.ir_analysis.to_dict(),
             "root": graph_ir_to_dict(self.ir_root),
-            "pre_optimization_analysis": (
-                self.pre_optimization_ir_analysis.to_dict()
-            ),
-            "pre_optimization_root": graph_ir_to_dict(
-                self.pre_optimization_ir_root
-            ),
+            "pre_optimization_analysis": (self.pre_optimization_ir_analysis.to_dict()),
+            "pre_optimization_root": graph_ir_to_dict(self.pre_optimization_ir_root),
             "optimization": dict(self.optimization),
             "fusion_plan": self.fusion_plan.to_dict(),
             "temporary_memory_plan": self.temporary_memory_plan.to_dict(),
@@ -2088,11 +2337,25 @@ class _GraphSpec:
                     "kind": (
                         "cgraph"
                         if isinstance(node, _CompiledCGraphNode)
-                        else "bounded_loop"
-                        if isinstance(node, _CompiledBoundedLoopGraphNode)
-                        else "observation"
-                        if isinstance(node, _CompiledObservationGraphNode)
-                        else "native"
+                        else (
+                            "while"
+                            if isinstance(node, _CompiledWhileGraphNode)
+                            else (
+                                "if"
+                                if isinstance(node, _CompiledIfGraphNode)
+                                else (
+                                    "switch"
+                                    if isinstance(node, _CompiledSwitchGraphNode)
+                                    else (
+                                        "observation"
+                                        if isinstance(
+                                            node, _CompiledObservationGraphNode
+                                        )
+                                        else "native"
+                                    )
+                                )
+                            )
+                        )
                     ),
                     "dispatch_count": getattr(node, "dispatch_count", 0),
                     "physical_dispatch_count": getattr(
@@ -2102,12 +2365,8 @@ class _GraphSpec:
                     ),
                     "runtime_arg_count": len(node.runtime_arg_names),
                     "region_kind": getattr(node, "region_kind", "opaque"),
-                    "source_native_count": getattr(
-                        node, "source_native_count", 0
-                    ),
-                    "dependency_info": tuple(
-                        sorted(node.snode_tree_dependency_info)
-                    ),
+                    "source_native_count": getattr(node, "source_native_count", 0),
+                    "dependency_info": tuple(sorted(node.snode_tree_dependency_info)),
                 }
             )
         return {
@@ -2115,10 +2374,9 @@ class _GraphSpec:
             "dispatch_count": self.dispatch_count,
             "native_count": self.native_count,
             "observation_count": self.observation_count,
+            "structured_control_count": self.structured_control_count,
             "runtime_arg_count": len(self.runtime_arg_names),
-            "dependency_info": tuple(
-                sorted(self.snode_tree_dependency_info)
-            ),
+            "dependency_info": tuple(sorted(self.snode_tree_dependency_info)),
             "temporary_memory_plan": self.temporary_memory_plan.to_dict(),
         }
 
@@ -2126,9 +2384,7 @@ class _GraphSpec:
 class _GraphExecutable:
     def __init__(self, spec):
         self.spec = spec
-        self._context = (
-            _GraphRunContext() if self.spec.needs_runtime_args else None
-        )
+        self._context = _GraphRunContext() if self.spec.needs_runtime_args else None
 
     def run(self, args, temporaries=None):
         # Graph.run() holds a per-Graph lock, so this context can safely reuse
@@ -2166,9 +2422,7 @@ class _GraphInstance:
             if spec.needs_runtime_args:
                 self._run_context = _GraphRunContext()
             kind = (
-                "mixed_backend_region"
-                if node.source_native_count
-                else "single_cgraph"
+                "mixed_backend_region" if node.source_native_count else "single_cgraph"
             )
             self._install_backend_executable(
                 _CGraphJITExecutable(node.compiled_graph), kind
@@ -2232,13 +2486,14 @@ class _GraphInstance:
         if arch not in (_ti_core.Arch.cuda, _ti_core.Arch.x64, _ti_core.Arch.arm64):
             return
         if not all(
-            isinstance(node, _CompiledNativeGraphNode)
-            for node in self.spec.nodes
+            isinstance(node, _CompiledNativeGraphNode) for node in self.spec.nodes
         ):
             return
         if self.spec.needs_runtime_args:
             return
-        kind = "cuda_native_replay" if arch == _ti_core.Arch.cuda else "cpu_native_replay"
+        kind = (
+            "cuda_native_replay" if arch == _ti_core.Arch.cuda else "cpu_native_replay"
+        )
         self._install_backend_executable(
             _NativeReplayExecutable(self.spec.nodes),
             kind,
@@ -2252,9 +2507,7 @@ class _GraphInstance:
 
     def invalidate_runtime(self):
         if self._backend_executable is not None:
-            invalidate = getattr(
-                self._backend_executable, "invalidate_runtime", None
-            )
+            invalidate = getattr(self._backend_executable, "invalidate_runtime", None)
             if invalidate is not None:
                 invalidate()
 
@@ -2301,7 +2554,14 @@ class _GraphInstance:
         for node in self.spec.nodes:
             if isinstance(node, _CompiledCGraphNode):
                 result.append(node.debug_graph_stats)
-            elif isinstance(node, _CompiledBoundedLoopGraphNode):
+            elif isinstance(
+                node,
+                (
+                    _CompiledWhileGraphNode,
+                    _CompiledIfGraphNode,
+                    _CompiledSwitchGraphNode,
+                ),
+            ):
                 result.extend(node.debug_graph_stats)
         return result
 
@@ -2313,9 +2573,7 @@ class _AOTGraphBuilderPlan:
 
     def dispatch(self, kernel_cpp, args):
         runtime_arg_names = frozenset(_runtime_arg_names(args))
-        self._items.append(
-            ("dispatch", kernel_cpp, args, runtime_arg_names)
-        )
+        self._items.append(("dispatch", kernel_cpp, args, runtime_arg_names))
         self._runtime_arg_names.update(runtime_arg_names)
 
     @property
@@ -2333,12 +2591,8 @@ class _AOTGraphBuilderPlan:
 
     def runtime_arg_names_since(self, cursor):
         if cursor < 0 or cursor > len(self._items):
-            raise TaichiRuntimeError(
-                f"Invalid AOT graph plan cursor {cursor}"
-            )
-        return frozenset().union(
-            *(item[3] for item in self._items[cursor:])
-        )
+            raise TaichiRuntimeError(f"Invalid AOT graph plan cursor {cursor}")
+        return frozenset().union(*(item[3] for item in self._items[cursor:]))
 
     def append(self, node):
         # Freeze each append at the point where the runtime builder consumes it.
@@ -2514,9 +2768,7 @@ def _metadata_iteration_domain(record):
 def _metadata_resource_effect(effect, record):
     kind = effect.get("resource_kind")
     if kind == "argument":
-        resource = _metadata_symbolic_arg(
-            record, effect.get("arg_id", ())
-        )
+        resource = _metadata_symbolic_arg(record, effect.get("arg_id", ()))
         if resource is None:
             return None
         runtime_bound = True
@@ -2544,9 +2796,7 @@ def _compiled_dispatch_ir_nodes(compiled_graph, fallback_nodes):
         return fallback_nodes
     result = []
     for record, fallback in zip(records, fallback_nodes):
-        side_effects = tuple(
-            str(item) for item in record.get("side_effects", ())
-        )
+        side_effects = tuple(str(item) for item in record.get("side_effects", ()))
         iteration_domain = _metadata_iteration_domain(record)
         effects = tuple(
             _metadata_resource_effect(effect, record)
@@ -2564,9 +2814,7 @@ def _compiled_dispatch_ir_nodes(compiled_graph, fallback_nodes):
                     name=fallback.name,
                     effects=fallback.effects,
                     bindings=fallback.bindings,
-                    synchronization=bool(
-                        record.get("synchronization", False)
-                    ),
+                    synchronization=bool(record.get("synchronization", False)),
                     opaque=True,
                     elementwise=False,
                     side_effects=side_effects,
@@ -2607,9 +2855,7 @@ class Sequential:
         self._runtime_arg_names = set()
 
     def dispatch(self, kernel_fn, *args, template_args=None):
-        kernel_cpp = gen_cpp_kernel(
-            kernel_fn, args, template_args=template_args
-        )
+        kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
         unzipped_args = flatten_args(args)
         self._dispatches.append((kernel_cpp, unzipped_args))
         self._ir_nodes.append(_dispatch_ir_node(kernel_cpp, unzipped_args))
@@ -2634,18 +2880,14 @@ class GraphBuilder:
         self._observation_names = set()
 
     def dispatch(self, kernel_fn, *args, template_args=None):
-        kernel_cpp = gen_cpp_kernel(
-            kernel_fn, args, template_args=template_args
-        )
+        kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
         unzipped_args = flatten_args(args)
         self._record_dispatch(kernel_cpp, unzipped_args)
 
     def _record_dispatch(self, kernel_cpp, unzipped_args):
         self._aot_graph_plan.dispatch(kernel_cpp, unzipped_args)
         self._ensure_runtime_graph_builder().dispatch(kernel_cpp, unzipped_args)
-        self._runtime_graph_dispatches.append(
-            (kernel_cpp, tuple(unzipped_args))
-        )
+        self._runtime_graph_dispatches.append((kernel_cpp, tuple(unzipped_args)))
         self._runtime_graph_arg_names.update(_runtime_arg_names(unzipped_args))
         self._pending_ir_nodes.append(_dispatch_ir_node(kernel_cpp, unzipped_args))
         self._dispatch_count += 1
@@ -2676,15 +2918,11 @@ class GraphBuilder:
         # adapters can bypass ``_record_dispatch()``, but names from an older
         # segment must not leak across a native node boundary.
         self._runtime_graph_arg_names.update(
-            self._aot_graph_plan.runtime_arg_names_since(
-                self._aot_plan_cursor
-            )
+            self._aot_graph_plan.runtime_arg_names_since(self._aot_plan_cursor)
         )
         self._aot_plan_cursor = self._aot_graph_plan.item_count
         compiled_graph = self._runtime_graph_builder.compile()
-        ir_nodes = _compiled_dispatch_ir_nodes(
-            compiled_graph, self._pending_ir_nodes
-        )
+        ir_nodes = _compiled_dispatch_ir_nodes(compiled_graph, self._pending_ir_nodes)
         self._nodes.append(
             _CompiledCGraphNode(
                 compiled_graph,
@@ -2708,49 +2946,116 @@ class GraphBuilder:
         self._nodes.append(_CompiledNativeGraphNode(executable))
         return self
 
-    def bounded_loop(
+    @staticmethod
+    def _control_name(value, role):
+        name = value if isinstance(value, str) else getattr(value, "name", None)
+        if not isinstance(name, str) or not name:
+            raise TaichiRuntimeError(
+                f"Graph {role} must be a symbolic argument or resource name"
+            )
+        return name
+
+    @classmethod
+    def _control_names(cls, values, role):
+        names = tuple(cls._control_name(value, role) for value in values)
+        if len(names) != len(set(names)):
+            raise TaichiRuntimeError(
+                f"Graph {role} must not contain duplicate resources"
+            )
+        return names
+
+    def while_loop(
         self,
+        condition,
         body,
         *,
         predicate,
         max_iterations,
+        control_inputs=(),
+        carried_state=(),
         counter=None,
-        predicate_convention="continue_while_nonzero",
         chunk_size=None,
         masked_execution=False,
-        cuda_native_mode="auto",
-        initial_observation=True,
-        terminal_observation=True,
-        name="bounded_loop",
+        lowering_mode="auto",
+        name="while",
     ):
-        """Append a capped predicate-controlled region.
+        """Append a structured, capped while region.
 
-        ``counter`` is required for chunk replay and CUDA native selection.
-        It must advance exactly once for each active body iteration.
-        ``cuda_native_mode`` may be ``auto``, ``portable``, or
-        ``native_required``; only performance lowering changes.
+        ``condition`` computes ``predicate`` from any number of declared
+        ``control_inputs``. Nonzero means continue. ``body`` updates the fixed
+        ``carried_state`` and optional exact iteration ``counter``. Backend
+        lowering is selected automatically unless ``lowering_mode`` requests
+        a portable or required-native path.
         """
         self._flush_graph_builder()
-        predicate_name = (
-            predicate if isinstance(predicate, str) else predicate.name
-        )
+        predicate_name = self._control_name(predicate, "while predicate")
         counter_name = (
-            counter
-            if counter is None or isinstance(counter, str)
-            else counter.name
+            None if counter is None else self._control_name(counter, "while counter")
         )
         self._nodes.append(
-            _CompiledBoundedLoopGraphNode(
+            _CompiledWhileGraphNode(
+                condition,
                 body,
                 predicate=predicate_name,
+                control_inputs=self._control_names(
+                    control_inputs, "while control_inputs"
+                ),
+                carried_state=self._control_names(carried_state, "while carried_state"),
                 max_iterations=max_iterations,
                 counter=counter_name,
-                predicate_convention=predicate_convention,
                 chunk_size=chunk_size,
                 masked_execution=masked_execution,
-                cuda_native_mode=cuda_native_mode,
-                initial_observation=initial_observation,
-                terminal_observation=terminal_observation,
+                lowering_mode=lowering_mode,
+                name=name,
+            )
+        )
+        return self
+
+    def if_then_else(
+        self,
+        condition,
+        then_region,
+        *,
+        predicate,
+        control_inputs=(),
+        else_region=None,
+        name="if",
+    ):
+        """Append a structured conditional region."""
+        self._flush_graph_builder()
+        self._nodes.append(
+            _CompiledIfGraphNode(
+                condition,
+                then_region,
+                else_region,
+                predicate=self._control_name(predicate, "if predicate"),
+                control_inputs=self._control_names(control_inputs, "if control_inputs"),
+                name=name,
+            )
+        )
+        return self
+
+    def switch(
+        self,
+        condition,
+        branches,
+        *,
+        selector,
+        control_inputs=(),
+        default_region=None,
+        name="switch",
+    ):
+        """Append a zero-based structured switch region."""
+        self._flush_graph_builder()
+        self._nodes.append(
+            _CompiledSwitchGraphNode(
+                condition,
+                tuple(branches),
+                default_region,
+                selector=self._control_name(selector, "switch selector"),
+                control_inputs=self._control_names(
+                    control_inputs, "switch control_inputs"
+                ),
                 name=name,
             )
         )
@@ -2869,7 +3174,9 @@ class Graph:
             node = _CompiledCGraphNode(compiled_graph, 0, ())
             self._spec = _GraphSpec([node], aot_compiled_graph=compiled_graph)
         self._contains_native_nodes_value = self._spec.native_count > 0
-        self._contains_bounded_loops_value = self._spec.bounded_loop_count > 0
+        self._contains_structured_control_value = (
+            self._spec.structured_control_count > 0
+        )
         self._contains_observations_value = self._spec.observation_count > 0
         self._last_observations = {}
         self._submission_lane = _new_submission_lane("graph")
@@ -2922,9 +3229,7 @@ class Graph:
             try:
                 observation_lease = self._instance.acquire_observation_lease()
                 temporary_bindings = (
-                    temporary_lease.bindings
-                    if temporary_lease is not None
-                    else None
+                    temporary_lease.bindings if temporary_lease is not None else None
                 )
                 runtime._active_graph_submissions = submission_state + 1
                 try:
@@ -2964,10 +3269,10 @@ class Graph:
         ``run()``. A shared ``SubmissionPacer`` can bound backend backlog and
         fairly arbitrate complete host submissions before they enqueue work.
         """
-        if self._contains_bounded_loops_value:
+        if self._contains_structured_control_value:
             raise TaichiRuntimeError(
-                "Graph.submit() does not support bounded loops because their "
-                "predicate observations are synchronous"
+                "Graph.submit() does not support portable structured control "
+                "because condition observations are synchronous"
             )
         runtime = impl.pytaichi
         with self._lifecycle_lock:
@@ -3026,9 +3331,7 @@ class Graph:
                         if observation_lease is not None
                         else None
                     )
-                    transaction = (
-                        runtime.prog._begin_runtime_submission_transaction()
-                    )
+                    transaction = runtime.prog._begin_runtime_submission_transaction()
                     runtime.prog._record_runtime_graph_submission()
                     self._run_impl(args)
                     # CGraph/kernel paths publish work themselves. Native plans
@@ -3048,10 +3351,7 @@ class Graph:
                     self._instance.clear_temporary_buffers()
                     runtime._active_graph_submissions -= 1
 
-                if (
-                    self._contains_native_nodes_value
-                    and completion.has_backend_work
-                ):
+                if self._contains_native_nodes_value and completion.has_backend_work:
                     runtime.retain_runtime_submission_owner(completion, self)
         except BaseException:
             if observation_lease is not None:
@@ -3093,9 +3393,7 @@ class Graph:
         if self._stale_snode_tree_dependencies:
             dependencies = ", ".join(
                 f"id={tree_id} generation={generation}"
-                for tree_id, generation in sorted(
-                    self._stale_snode_tree_dependencies
-                )
+                for tree_id, generation in sorted(self._stale_snode_tree_dependencies)
             )
             raise TaichiRuntimeError(
                 "This graph references a destroyed SNodeTree "
@@ -3161,13 +3459,20 @@ class Graph:
             self._check_runtime_valid()
             return self._instance.debug_graph_stats
 
-    def bounded_loop_stats(self):
+    def control_flow_stats(self):
         with self._lifecycle_lock:
             self._check_runtime_valid()
             return tuple(
                 node.last_report
                 for node in self._spec.nodes
-                if isinstance(node, _CompiledBoundedLoopGraphNode)
+                if isinstance(
+                    node,
+                    (
+                        _CompiledWhileGraphNode,
+                        _CompiledIfGraphNode,
+                        _CompiledSwitchGraphNode,
+                    ),
+                )
             )
 
     def latest_observations(self):
@@ -3198,20 +3503,23 @@ class Graph:
                 backend_stats = self._instance.debug_graph_stats
             temporary_arena_stats = (
                 self._instance.temporary_arena_stats
-                if lifecycle_state == "ready" else {}
+                if lifecycle_state == "ready"
+                else {}
             )
             observation_arena_stats = (
                 self._instance.observation_arena_stats
-                if lifecycle_state == "ready" else {}
+                if lifecycle_state == "ready"
+                else {}
             )
             observation_staging_bytes = 0
             if lifecycle_state == "ready" and (
-                self._contains_bounded_loops_value
+                self._contains_structured_control_value
                 or self._contains_observations_value
             ):
                 observation_staging_bytes = int(
-                    impl.get_runtime()
-                    .prog._graph_observation_staging_stats()["persistent_bytes"]
+                    impl.get_runtime().prog._graph_observation_staging_stats()[
+                        "persistent_bytes"
+                    ]
                 )
             return _execution_report(
                 self._execution_definition,
@@ -3307,7 +3615,9 @@ def _check_args(kwargs: Dict[str, Any], allowed_kwargs: List[str]):
             )
         if k == "tag":
             if not isinstance(v, ArgKind):
-                raise TaichiRuntimeError(f"tag must be a ArgKind variant, but found {type(v)}.")
+                raise TaichiRuntimeError(
+                    f"tag must be a ArgKind variant, but found {type(v)}."
+                )
         if k == "name":
             if not isinstance(v, str):
                 raise TaichiRuntimeError(f"name must be a string, but found {type(v)}.")
@@ -3324,10 +3634,10 @@ def _make_arg_scalar(kwargs: Dict[str, Any]):
     dtype = kwargs["dtype"]
     descriptor = describe_element_type(dtype)
     if descriptor.category != "scalar":
-        raise TaichiRuntimeError(f"Tag ArgKind.SCALAR must specify a scalar type, but found {type(dtype)}.")
-    return _ti_core.Arg(
-        ArgKind.SCALAR, name, descriptor.logical_type, 0, []
-    )
+        raise TaichiRuntimeError(
+            f"Tag ArgKind.SCALAR must specify a scalar type, but found {type(dtype)}."
+        )
+    return _ti_core.Arg(ArgKind.SCALAR, name, descriptor.logical_type, 0, [])
 
 
 def _make_arg_ndarray(kwargs: Dict[str, Any]):
@@ -3357,9 +3667,7 @@ def _make_arg_ndarray(kwargs: Dict[str, Any]):
             "Graph StructNdarray arguments are not supported by the current "
             "serialized Graph schema."
         )
-    return _ti_core.Arg(
-        ArgKind.NDARRAY, name, descriptor.logical_type, ndim, []
-    )
+    return _ti_core.Arg(ArgKind.NDARRAY, name, descriptor.logical_type, ndim, [])
 
 
 def _make_arg_matrix(kwargs: Dict[str, Any]):
@@ -3373,10 +3681,10 @@ def _make_arg_matrix(kwargs: Dict[str, Any]):
     dtype = kwargs["dtype"]
     descriptor = describe_element_type(dtype)
     if not isinstance(dtype, MatrixType) or descriptor.category != "tensor":
-        raise TaichiRuntimeError(f"Tag ArgKind.MATRIX must specify matrix type, but got {dtype}.")
-    return _ti_core.Arg(
-        ArgKind.MATRIX, f"{name}", descriptor.logical_type, 0, []
-    )
+        raise TaichiRuntimeError(
+            f"Tag ArgKind.MATRIX must specify matrix type, but got {dtype}."
+        )
+    return _ti_core.Arg(ArgKind.MATRIX, f"{name}", descriptor.logical_type, 0, [])
 
 
 def _make_arg_texture(kwargs: Dict[str, Any]):
@@ -3403,9 +3711,13 @@ def _make_arg_rwtexture(kwargs: Dict[str, Any]):
     ndim = kwargs["ndim"]
     fmt = kwargs["fmt"]
     if fmt == enums.Format.unknown:
-        raise TaichiRuntimeError(f"Tag ArgKind.RWTEXTURE must specify a valid color format, but found {fmt}.")
+        raise TaichiRuntimeError(
+            f"Tag ArgKind.RWTEXTURE must specify a valid color format, but found {fmt}."
+        )
     channel_format, num_channels = FORMAT2TY_CH[fmt]
-    return _ti_core.Arg(ArgKind.RWTEXTURE, name, channel_format, num_channels, [2] * ndim)
+    return _ti_core.Arg(
+        ArgKind.RWTEXTURE, name, channel_format, num_channels, [2] * ndim
+    )
 
 
 def _make_arg(kwargs: Dict[str, Any]):
@@ -3454,7 +3766,8 @@ __all__ = [
     "GraphExecutionCounters",
     "GraphExecutionSegmentReport",
     "GraphExecutionReport",
-    "GraphBoundedLoopReport",
+    "GraphWhileReport",
+    "GraphBranchReport",
     "Arg",
     "ArgKind",
 ]

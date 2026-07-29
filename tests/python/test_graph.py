@@ -20,10 +20,15 @@ from taichi_forge.graph._ir import (
     DispatchNode,
     GraphAccess,
     ResourceEffect,
+    IfRegion,
     RuntimeBinding,
     SequentialRegion,
+    SwitchRegion,
     TemporaryRequirement,
+    WhileRegion,
     analyze_elementwise_fusion,
+    analyze_graph_ir,
+    graph_ir_to_dict,
     plan_temporary_memory,
 )
 from taichi_forge.graph._native import (
@@ -33,7 +38,9 @@ from taichi_forge.graph._native import (
 )
 from tests import test_utils
 
-supported_floating_types = [ti.f32] if platform.system() == "Darwin" else [ti.f32, ti.f64]
+supported_floating_types = (
+    [ti.f32] if platform.system() == "Darwin" else [ti.f32, ti.f64]
+)
 
 supported_archs_cgraph = [ti.vulkan, ti.opengl]
 
@@ -81,9 +88,7 @@ def test_matrix_arg_uses_canonical_tensor_shape():
 
 
 def test_rank_three_ndarray_tensor_descriptor_rejected_early():
-    tensor_type = ti_core.get_type_factory_instance().get_tensor_type(
-        [2, 3, 4], ti.f32
-    )
+    tensor_type = ti_core.get_type_factory_instance().get_tensor_type([2, 3, 4], ti.f32)
     with pytest.raises(ValueError, match="rank 1.*rank 2"):
         ti.types.ndarray(dtype=tensor_type, ndim=1)
     with pytest.raises(TaichiRuntimeError, match="rank 1.*rank 2"):
@@ -107,8 +112,7 @@ def test_legacy_matrix_symbolic_arg_adapter_is_bounded():
     from taichi_forge.graph._graph import flatten_args
 
     entries = [
-        ti.graph.Arg(ti.graph.ArgKind.SCALAR, f"entry_{i}", ti.f32)
-        for i in range(4)
+        ti.graph.Arg(ti.graph.ArgKind.SCALAR, f"entry_{i}", ti.f32) for i in range(4)
     ]
     assert flatten_args(([entries[:2], entries[2:]],)) == entries
     with pytest.raises(
@@ -145,12 +149,8 @@ def test_ndarray_tensor_descriptor_runtime_binding():
         vectors[0] = ti.Vector([1.0, 2.0, 3.0])
         matrices[0] = ti.Matrix([[1, 2], [3, 4]])
 
-    vector_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "vectors", vector_type, ndim=1
-    )
-    matrix_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "matrices", matrix_type, ndim=1
-    )
+    vector_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "vectors", vector_type, ndim=1)
+    matrix_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "matrices", matrix_type, ndim=1)
     builder = ti.graph.GraphBuilder()
     builder.dispatch(fill, vector_arg, matrix_arg)
     graph = builder.compile()
@@ -175,12 +175,8 @@ def test_matrix_runtime_shape_is_not_flattened_by_element_count():
     def consume(value: matrix_type, out: ti.types.ndarray(ti.i32, ndim=1)):
         out[0] = value[0, 0]
 
-    value_arg = ti.graph.Arg(
-        ti.graph.ArgKind.MATRIX, "value", matrix_type
-    )
-    out_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=1
-    )
+    value_arg = ti.graph.Arg(ti.graph.ArgKind.MATRIX, "value", matrix_type)
+    out_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=1)
     builder = ti.graph.GraphBuilder()
     builder.dispatch(consume, value_arg, out_arg)
     graph = builder.compile()
@@ -205,12 +201,8 @@ def test_graph_matrix_injection_cache_uses_structural_key():
     def consume(value: vector_type, factor: ti.template()):
         pass
 
-    first_arg = ti.graph.Arg(
-        ti.graph.ArgKind.MATRIX, "value", vector_type
-    )
-    second_arg = ti.graph.Arg(
-        ti.graph.ArgKind.MATRIX, "other_name", vector_type
-    )
+    first_arg = ti.graph.Arg(ti.graph.ArgKind.MATRIX, "value", vector_type)
+    second_arg = ti.graph.Arg(ti.graph.ArgKind.MATRIX, "other_name", vector_type)
     first = produce_injected_args_for_graph(
         consume._primal, (first_arg,), template_args={"factor": 1}
     )
@@ -231,9 +223,7 @@ def test_graph_rwtexture_descriptor_mismatch_rejected_before_compile():
 
     @ti.kernel
     def write(
-        tex: ti.types.rw_texture(
-            num_dimensions=2, fmt=ti.Format.r32f, lod=0
-        ),
+        tex: ti.types.rw_texture(num_dimensions=2, fmt=ti.Format.r32f, lod=0),
     ):
         pass
 
@@ -288,7 +278,9 @@ def test_ndarray_1dim_scalar():
         arr[0] = 0
 
     debug_arr = ti.ndarray(ti.i32, shape=5)
-    sym_debug_arr = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "debug_arr", ti.types.vector(1, ti.f32), ndim=1)
+    sym_debug_arr = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "debug_arr", ti.types.vector(1, ti.f32), ndim=1
+    )
 
     g_builder = ti.graph.GraphBuilder()
     g_builder.dispatch(ti_test_debug, sym_debug_arr)
@@ -340,7 +332,9 @@ def test_arg_mismatched_ndim():
 
     sym_pos = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pos", ti.f32, ndim=2)
     g_init = ti.graph.GraphBuilder()
-    with pytest.raises(TaichiCompilationError, match="doesn't match kernel's annotated ndim"):
+    with pytest.raises(
+        TaichiCompilationError, match="doesn't match kernel's annotated ndim"
+    ):
         g_init.dispatch(test, sym_pos)
 
 
@@ -398,7 +392,9 @@ def test_arg_mismatched_scalar_dtype():
     sym_pos = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pos", ti.f32, 1)
     sym_val = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "val", ti.i32)
     g_init = ti.graph.GraphBuilder()
-    with pytest.raises(TaichiCompilationError, match="doesn't match kernel's annotated dtype"):
+    with pytest.raises(
+        TaichiCompilationError, match="doesn't match kernel's annotated dtype"
+    ):
         g_init.dispatch(test, sym_pos, sym_val)
 
 
@@ -413,7 +409,9 @@ def test_arg_mismatched_ndarray_dtype():
 
     sym_pos = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pos", ti.i32, 1)
     g_init = ti.graph.GraphBuilder()
-    with pytest.raises(TaichiCompilationError, match="doesn't match kernel's annotated dtype"):
+    with pytest.raises(
+        TaichiCompilationError, match="doesn't match kernel's annotated dtype"
+    ):
         g_init.dispatch(test, sym_pos)
 
 
@@ -438,7 +436,9 @@ def test_ndarray_dtype_mismatch_runtime():
 
 def build_graph_vector(N, dtype):
     @ti.kernel
-    def vector_sum(mat: ti.types.vector(N, dtype), res: ti.types.ndarray(dtype=dtype, ndim=1)):
+    def vector_sum(
+        mat: ti.types.vector(N, dtype), res: ti.types.ndarray(dtype=dtype, ndim=1)
+    ):
         res[0] = mat.sum() + mat[2]
 
     sym_A = ti.graph.Arg(ti.graph.ArgKind.MATRIX, "mat", ti.types.vector(N, dtype))
@@ -451,7 +451,9 @@ def build_graph_vector(N, dtype):
 
 def build_graph_matrix(N, dtype):
     @ti.kernel
-    def matrix_sum(mat: ti.types.matrix(N, 2, dtype), res: ti.types.ndarray(dtype=dtype, ndim=1)):
+    def matrix_sum(
+        mat: ti.types.matrix(N, 2, dtype), res: ti.types.ndarray(dtype=dtype, ndim=1)
+    ):
         res[0] = mat.sum()
 
     sym_A = ti.graph.Arg(ti.graph.ArgKind.MATRIX, "mat", ti.types.matrix(N, 2, dtype))
@@ -463,7 +465,9 @@ def build_graph_matrix(N, dtype):
 
 
 @pytest.mark.sm70
-@pytest.mark.parametrize("dt", [ti.u8, ti.u16, ti.u32, ti.u64, ti.i8, ti.i16, ti.i32, ti.i64])
+@pytest.mark.parametrize(
+    "dt", [ti.u8, ti.u16, ti.u32, ti.u64, ti.i8, ti.i16, ti.i32, ti.i64]
+)
 @test_utils.test(arch=supported_archs_cgraph)
 def test_matrix_int(dt):
     if ti.lang.impl.current_cfg().arch == ti.opengl and dt not in [ti.u32, ti.i32]:
@@ -501,7 +505,9 @@ def test_matrix_float16():
 
 
 @pytest.mark.sm70
-@pytest.mark.parametrize("dt", [ti.u8, ti.u16, ti.u32, ti.u64, ti.i8, ti.i16, ti.i32, ti.i64])
+@pytest.mark.parametrize(
+    "dt", [ti.u8, ti.u16, ti.u32, ti.u64, ti.i8, ti.i16, ti.i32, ti.i64]
+)
 @test_utils.test(arch=supported_archs_cgraph)
 def test_vector_int(dt):
     if ti.lang.impl.current_cfg().arch == ti.opengl and dt not in [ti.u32, ti.i32]:
@@ -648,9 +654,7 @@ def test_graph_submit_returns_one_public_completion_ticket():
     def second(dst: ti.types.ndarray(dtype=ti.i32, ndim=1)):
         dst[0] += 22
 
-    dst_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "dst", ti.i32, ndim=1
-    )
+    dst_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.i32, ndim=1)
     builder = ti.graph.GraphBuilder()
     builder.dispatch(first, dst_arg)
     builder.dispatch(second, dst_arg)
@@ -681,12 +685,8 @@ def test_graph_submit_returns_one_public_completion_ticket():
     assert ticket.wait() is None
     assert result.to_numpy()[0] == 42
 
-    pacer = ti.graph.SubmissionPacer(
-        2, max_in_flight_per_lane=1, max_queued=4
-    )
-    paced = graph.submit(
-        {"dst": result}, pacer=pacer, lane="simulation"
-    )
+    pacer = ti.graph.SubmissionPacer(2, max_in_flight_per_lane=1, max_queued=4)
+    paced = graph.submit({"dst": result}, pacer=pacer, lane="simulation")
     assert paced.wait() is None
     pacing = pacer.statistics()
     assert pacing["admission_calls"] == 1
@@ -918,9 +918,7 @@ def test_compiled_graph_freezes_aot_plan(mutation):
     def increment(value: ti.types.ndarray(dtype=ti.i32, ndim=0)):
         value[None] += 1
 
-    sym_value = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "value", ti.i32, ndim=0
-    )
+    sym_value = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "value", ti.i32, ndim=0)
     builder = ti.graph.GraphBuilder()
     sequential = None
     if mutation == "builder":
@@ -952,9 +950,7 @@ def test_reused_sequential_append_freezes_each_version():
     def increment(value: ti.types.ndarray(dtype=ti.i32, ndim=0)):
         value[None] += 1
 
-    sym_value = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "value", ti.i32, ndim=0
-    )
+    sym_value = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "value", ti.i32, ndim=0)
     builder = ti.graph.GraphBuilder()
     sequential = builder.create_sequential()
     sequential.dispatch(increment, sym_value)
@@ -988,9 +984,7 @@ def test_aot_jit_graph_pins_ndarray_runtime_arg_until_sync():
         for i in values:
             ti.atomic_add(sink[None], values[i])
 
-    sym_values = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
-    )
+    sym_values = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1)
     builder = ti.graph.GraphBuilder()
     builder.dispatch(consume, sym_values)
     graph = builder.compile()
@@ -1075,6 +1069,70 @@ def test_elementwise_fusion_analysis_requires_explicit_safe_metadata():
     assert opaque["candidate_groups"] == 0
     assert opaque["blockers"] == {"opaque_dispatch": 1}
     assert opaque["decision"] == "no_safe_candidates"
+
+
+def test_structured_control_ir_validates_and_serializes_fixed_schema():
+    condition = SequentialRegion((DispatchNode("condition"),), name="condition")
+    body = SequentialRegion((DispatchNode("body"),), name="body")
+    while_region = WhileRegion(
+        predicate="continue_flag",
+        max_iterations=32,
+        condition=condition,
+        body=body,
+        control_inputs=("residual", "status", "active_count"),
+        carried_state=("solution", "residual"),
+        counter="iteration",
+        chunk_size=4,
+        masked_execution=True,
+    )
+    if_region = IfRegion(
+        predicate="restart_flag",
+        condition=condition,
+        then_region=body,
+        else_region=body,
+        control_inputs=("status",),
+    )
+    switch_region = SwitchRegion(
+        selector="phase",
+        condition=condition,
+        branches=(body, body),
+        default_region=body,
+        control_inputs=("status",),
+    )
+    root = SequentialRegion((while_region, if_region, switch_region))
+    analysis = analyze_graph_ir(root)
+    assert analysis.while_regions == 1
+    assert analysis.if_regions == 1
+    assert analysis.switch_regions == 1
+    serialized = graph_ir_to_dict(root)
+    serialized_while = serialized["children"][0]
+    assert serialized_while["control_inputs"] == (
+        "residual",
+        "status",
+        "active_count",
+    )
+    assert serialized_while["carried_state"] == (
+        "solution",
+        "residual",
+    )
+    assert serialized["children"][1]["has_else"]
+    assert serialized["children"][2]["branch_count"] == 2
+
+    with pytest.raises(ValueError, match="duplicate resources"):
+        WhileRegion(
+            predicate="continue_flag",
+            max_iterations=1,
+            condition=condition,
+            body=body,
+            control_inputs=("status", "status"),
+        )
+    with pytest.raises(ValueError, match="cannot be a control input"):
+        IfRegion(
+            predicate="predicate",
+            condition=condition,
+            then_region=body,
+            control_inputs=("predicate",),
+        )
 
 
 def test_temporary_memory_plan_reuses_only_nonoverlapping_intervals():
@@ -1254,9 +1312,9 @@ def test_graph_materializes_and_reuses_temporary_arena():
     graph = builder.compile()
     graph.run({})
     assert tracker["runs"] == 2
-    first_storage, first_offset, first_bytes, first_alignment, first_slot = (
-        tracker["buffers"][0]
-    )
+    first_storage, first_offset, first_bytes, first_alignment, first_slot = tracker[
+        "buffers"
+    ][0]
     second_storage, second_offset, second_bytes, second_alignment, second_slot = (
         tracker["buffers"][1]
     )
@@ -1351,12 +1409,8 @@ def _build_observation_graph():
         state[None] += 1
         residual[None] *= 0.5
 
-    arg_state = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "state", ti.i32, ndim=0
-    )
-    arg_residual = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "residual", ti.f32, ndim=0
-    )
+    arg_state = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "state", ti.i32, ndim=0)
+    arg_residual = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "residual", ti.f32, ndim=0)
     builder = ti.graph.GraphBuilder()
     builder.dispatch(advance, arg_state, arg_residual)
     builder.observe(arg_state, arg_residual, name="tail")
@@ -1397,9 +1451,7 @@ def test_graph_observation_defers_readback_and_reports_memory(monkeypatch):
     state.fill(10)
     residual.fill(4.0)
     graph.run({"state": state, "residual": residual})
-    assert graph.latest_observations() == {
-        "tail": {"state": 11, "residual": 2.0}
-    }
+    assert graph.latest_observations() == {"tail": {"state": 11, "residual": 2.0}}
     memory = graph.execution_stats().memory
     assert memory.observation_arena_allocations == 1
     assert memory.observation_arena_reuses == 1
@@ -1430,9 +1482,7 @@ def test_graph_observation_ring_preserves_unconsumed_snapshots(monkeypatch):
         residual.fill(8.0)
         states.append(state)
         residuals.append(residual)
-        tickets.append(
-            graph.submit({"state": state, "residual": residual})
-        )
+        tickets.append(graph.submit({"state": state, "residual": residual}))
 
     memory = graph.execution_stats().memory
     assert memory.observation_arena_slots == 2
@@ -1454,12 +1504,8 @@ def test_graph_observation_ring_preserves_unconsumed_snapshots(monkeypatch):
 @test_utils.test(arch=ti.cpu)
 def test_graph_observation_rejects_unsupported_values_and_runtime_shape():
     scalar = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "scalar", ti.i32)
-    vector = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "vector", ti.i32, ndim=1
-    )
-    value = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "value", ti.i32, ndim=0
-    )
+    vector = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "vector", ti.i32, ndim=1)
+    value = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "value", ti.i32, ndim=0)
 
     with pytest.raises(TaichiRuntimeError, match="symbolic ndarray"):
         ti.graph.GraphBuilder().observe(scalar)
@@ -1501,20 +1547,12 @@ def test_compiler_metadata_enables_safe_elementwise_graph_candidates(monkeypatch
         for i in source:
             output[i] = temporary[i] + 3
 
-    sym_source = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "source", ti.i32, ndim=1
-    )
-    sym_temporary = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "temporary", ti.i32, ndim=1
-    )
-    sym_output = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
-    )
+    sym_source = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "source", ti.i32, ndim=1)
+    sym_temporary = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "temporary", ti.i32, ndim=1)
+    sym_output = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1)
     builder = ti.graph.GraphBuilder()
     builder.dispatch(first_map, sym_source, sym_temporary)
-    builder.dispatch(
-        second_map, sym_output, sym_temporary, sym_source
-    )
+    builder.dispatch(second_map, sym_output, sym_temporary, sym_source)
     graph = builder.compile()
 
     ir = graph._ir_debug_info
@@ -1578,8 +1616,6 @@ def test_two_map_composer_auto_gate_preserves_vulkan_latency(monkeypatch):
     assert builder.enabled == expected
 
 
-
-
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_compiler_metadata_fails_closed_for_atomic_and_stencil_access():
     @ti.kernel
@@ -1598,15 +1634,9 @@ def test_compiler_metadata_fails_closed_for_atomic_and_stencil_access():
         for i in source:
             output[i] = source[(i + 1) % source.shape[0]]
 
-    sym_source = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "source", ti.i32, ndim=1
-    )
-    sym_total = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "total", ti.i32, ndim=0
-    )
-    sym_output = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
-    )
+    sym_source = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "source", ti.i32, ndim=1)
+    sym_total = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "total", ti.i32, ndim=0)
+    sym_output = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1)
     builder = ti.graph.GraphBuilder()
     builder.dispatch(atomic_reduce, sym_source, sym_total)
     builder.dispatch(stencil, sym_source, sym_output)
@@ -1621,9 +1651,7 @@ def test_compiler_metadata_fails_closed_for_atomic_and_stencil_access():
     assert plan["applied_groups"] == 0
     assert plan["lowering_available"]
     assert plan["decision"] == "no_safe_candidates"
-    assert graph._debug_info["nodes"] == [
-        {"kind": "cgraph", "dispatch_count": 2}
-    ]
+    assert graph._debug_info["nodes"] == [{"kind": "cgraph", "dispatch_count": 2}]
     dispatches = ir["pre_optimization_root"]["children"][0]["children"]
     assert all(dispatch["opaque"] for dispatch in dispatches)
 
@@ -1645,16 +1673,12 @@ def test_mixed_recordable_native_node_lowers_to_one_backend_region():
         for i in values:
             values[i] += 3
 
-    sym_values = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
-    )
+    sym_values = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1)
     tracker = {"fallback_runs": 0}
     lease = object()
     builder = ti.graph.GraphBuilder()
     builder.dispatch(add_one, sym_values)
-    builder.append_native(
-        _RecordedDispatchNode(add_two, (sym_values,), tracker, lease)
-    )
+    builder.append_native(_RecordedDispatchNode(add_two, (sym_values,), tracker, lease))
     builder.dispatch(add_three, sym_values)
     graph = builder.compile()
 
@@ -1696,9 +1720,7 @@ def test_mixed_recordable_native_node_lowers_to_one_backend_region():
     graph.run({"values": values})
     graph.run({"values": values})
     ti.sync()
-    np.testing.assert_array_equal(
-        values.to_numpy(), np.full(128, 12, dtype=np.int32)
-    )
+    np.testing.assert_array_equal(values.to_numpy(), np.full(128, 12, dtype=np.int32))
     assert tracker["fallback_runs"] == 0
     report = graph.execution_stats()
     assert report.node_count == 1
@@ -1718,9 +1740,7 @@ def test_mixed_opaque_native_node_remains_an_explicit_segment():
         for i in values:
             values[i] += 1
 
-    sym_values = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
-    )
+    sym_values = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1)
     tracker = {"runs": 0}
     builder = ti.graph.GraphBuilder()
     builder.dispatch(add_one, sym_values)
@@ -1741,9 +1761,7 @@ def test_mixed_opaque_native_node_remains_an_explicit_segment():
     values.fill(0)
     graph.run({"values": values})
     assert tracker["runs"] == 1
-    np.testing.assert_array_equal(
-        values.to_numpy(), np.full(16, 2, dtype=np.int32)
-    )
+    np.testing.assert_array_equal(values.to_numpy(), np.full(16, 2, dtype=np.int32))
 
 
 @test_utils.test(arch=ti.cpu)
@@ -1836,70 +1854,96 @@ def test_repeated_sequential_keeps_cuda_expanded_runtime_by_default():
     _run_repeated_inc_graph(graph)
 
 
-def _build_bounded_step_graph(
-    *, max_iterations, chunk_size=4, cuda_native_mode="auto"
+def _build_structured_while_graph(
+    *, max_iterations, chunk_size=4, lowering_mode="auto"
 ):
+    @ti.kernel
+    def evaluate_condition(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        enabled: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        breakdown: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        target: ti.i32,
+    ):
+        predicate[None] = int(
+            enabled[None] != 0 and breakdown[None] == 0 and state[None] < target
+        )
+
     @ti.kernel
     def step(
         state: ti.types.ndarray(dtype=ti.i32, ndim=0),
         predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
         counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
-        target: ti.i32,
     ):
         if predicate[None] != 0:
             state[None] += 1
             counter[None] += 1
-            if state[None] >= target:
-                predicate[None] = 0
 
-    arg_state = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "state", ti.i32, ndim=0
-    )
-    arg_predicate = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "predicate", ti.i32, ndim=0
-    )
-    arg_counter = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "counter", ti.i32, ndim=0
-    )
-    arg_target = ti.graph.Arg(
-        ti.graph.ArgKind.SCALAR, "target", ti.i32
-    )
+    arg_state = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "state", ti.i32, ndim=0)
+    arg_predicate = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "predicate", ti.i32, ndim=0)
+    arg_counter = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "counter", ti.i32, ndim=0)
+    arg_enabled = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "enabled", ti.i32, ndim=0)
+    arg_breakdown = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "breakdown", ti.i32, ndim=0)
+    arg_target = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "target", ti.i32)
     builder = ti.graph.GraphBuilder()
-    body = builder.create_sequential()
-    body.dispatch(
-        step, arg_state, arg_predicate, arg_counter, arg_target
+    condition = builder.create_sequential()
+    condition.dispatch(
+        evaluate_condition,
+        arg_state,
+        arg_predicate,
+        arg_enabled,
+        arg_breakdown,
+        arg_target,
     )
-    builder.bounded_loop(
+    body = builder.create_sequential()
+    body.dispatch(step, arg_state, arg_predicate, arg_counter)
+    builder.while_loop(
+        condition,
         body,
         predicate=arg_predicate,
+        control_inputs=(
+            arg_state,
+            arg_enabled,
+            arg_breakdown,
+            arg_target,
+        ),
+        carried_state=(arg_state,),
         counter=arg_counter,
         max_iterations=max_iterations,
         chunk_size=chunk_size,
         masked_execution=True,
-        cuda_native_mode=cuda_native_mode,
+        lowering_mode=lowering_mode,
         name="adaptive_step",
     )
     return builder.compile()
 
 
-def _bounded_step_args(*, target, active=True):
+def _structured_while_args(*, target, active=True, breakdown=False):
     arrays = {
         name: ti.ndarray(ti.i32, shape=())
-        for name in ("state", "predicate", "counter")
+        for name in (
+            "state",
+            "predicate",
+            "counter",
+            "enabled",
+            "breakdown",
+        )
     }
     arrays["state"].fill(0)
-    arrays["predicate"].fill(int(active))
+    arrays["predicate"].fill(0)
     arrays["counter"].fill(0)
+    arrays["enabled"].fill(int(active))
+    arrays["breakdown"].fill(int(breakdown))
     return {**arrays, "target": target}
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_bounded_graph_loop_reports_exact_stop_and_backend_overshoot():
-    graph = _build_bounded_step_graph(max_iterations=20)
-    args = _bounded_step_args(target=5)
+def test_structured_graph_while_reports_exact_stop_and_backend_overshoot():
+    graph = _build_structured_while_graph(max_iterations=20)
+    args = _structured_while_args(target=5)
     graph.run(args)
 
-    report = graph.bounded_loop_stats()[0]
+    report = graph.control_flow_stats()[0]
     assert report.logical_iterations == 5
     assert report.final_counter == 5
     assert args["state"].to_numpy()[()] == 5
@@ -1932,9 +1976,7 @@ def test_bounded_graph_loop_reports_exact_stop_and_backend_overshoot():
     assert args["predicate"].to_numpy()[()] == 0
     assert report.observation_boundaries[0] == 0
     assert report.observation_boundaries[-1] == report.executed_iterations
-    assert len(report.predicate_values) == len(
-        report.observation_boundaries
-    )
+    assert len(report.predicate_values) == len(report.observation_boundaries)
 
     if ti.lang.impl.current_cfg().arch == ti.cpu:
         assert report.lowering == "cpu_host_loop"
@@ -1956,21 +1998,21 @@ def test_bounded_graph_loop_reports_exact_stop_and_backend_overshoot():
         assert report.observation_boundaries == (0, 4, 8)
 
     ir = graph._ir_debug_info
-    assert ir["analysis"]["bounded_loop_regions"] == 1
-    assert ir["root"]["children"][0]["cuda_native_mode"] == "auto"
+    assert ir["analysis"]["while_regions"] == 1
+    assert ir["root"]["children"][0]["lowering_mode"] == "auto"
     with pytest.raises(
-        TaichiRuntimeError, match="does not support bounded loops"
+        TaichiRuntimeError, match="does not support portable structured control"
     ):
         graph.submit(args)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_bounded_graph_loop_transfer_planner_has_strict_fallback(monkeypatch):
+def test_structured_graph_while_transfer_planner_has_strict_fallback(monkeypatch):
     monkeypatch.setenv("TI_GRAPH_OBSERVATION_TRANSFER_PLANNER", "0")
-    graph = _build_bounded_step_graph(max_iterations=20)
-    args = _bounded_step_args(target=5)
+    graph = _build_structured_while_graph(max_iterations=20)
+    args = _structured_while_args(target=5)
     graph.run(args)
-    report = graph.bounded_loop_stats()[0]
+    report = graph.control_flow_stats()[0]
     assert report.logical_iterations == 5
     assert report.packed_observation_batches == 0
     assert report.direct_observation_batches == report.observation_batches
@@ -1981,45 +2023,47 @@ def test_bounded_graph_loop_transfer_planner_has_strict_fallback(monkeypatch):
 
 
 @test_utils.test(arch=ti.vulkan)
-def test_bounded_graph_loop_reuses_or_disables_persistent_observation_staging(
+def test_structured_graph_while_reuses_or_disables_persistent_observation_staging(
     monkeypatch,
 ):
-    graph = _build_bounded_step_graph(max_iterations=20)
-    first = _bounded_step_args(target=5)
+    graph = _build_structured_while_graph(max_iterations=20)
+    first = _structured_while_args(target=5)
     graph.run(first)
-    first_report = graph.bounded_loop_stats()[0]
+    first_report = graph.control_flow_stats()[0]
     assert first_report.staging_allocations == 1
     assert first_report.packed_observation_batches == first_report.observation_batches
 
-    second = _bounded_step_args(target=5)
+    second = _structured_while_args(target=5)
     graph.run(second)
-    second_report = graph.bounded_loop_stats()[0]
+    second_report = graph.control_flow_stats()[0]
     assert second_report.staging_allocations == 0
     assert second_report.staging_reuses == second_report.observation_batches
     assert second_report.packed_observation_batches == second_report.observation_batches
     assert (
-        second_report.persistent_staging_bytes
-        == first_report.persistent_staging_bytes
+        second_report.persistent_staging_bytes == first_report.persistent_staging_bytes
     )
 
     monkeypatch.setenv("TI_GRAPH_PERSISTENT_OBSERVATION_STAGING", "0")
-    disabled = _bounded_step_args(target=5)
+    disabled = _structured_while_args(target=5)
     graph.run(disabled)
-    disabled_report = graph.bounded_loop_stats()[0]
+    disabled_report = graph.control_flow_stats()[0]
     assert disabled_report.packed_observation_batches == 0
     assert disabled_report.staging_reuses == 0
-    assert disabled_report.direct_observation_batches == disabled_report.observation_batches
+    assert (
+        disabled_report.direct_observation_batches
+        == disabled_report.observation_batches
+    )
     assert disabled_report.logical_iterations == 5
     assert disabled["state"].to_numpy()[()] == 5
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_bounded_graph_loop_honors_initial_stop_and_iteration_cap():
-    graph = _build_bounded_step_graph(max_iterations=6)
+def test_structured_graph_while_honors_initial_stop_and_iteration_cap():
+    graph = _build_structured_while_graph(max_iterations=6)
 
-    inactive = _bounded_step_args(target=100, active=False)
+    inactive = _structured_while_args(target=100, active=False)
     graph.run(inactive)
-    stopped = graph.bounded_loop_stats()[0]
+    stopped = graph.control_flow_stats()[0]
     assert stopped.logical_iterations == 0
     assert stopped.executed_iterations == 0
     assert stopped.observation_boundaries == (0,)
@@ -2028,9 +2072,9 @@ def test_bounded_graph_loop_honors_initial_stop_and_iteration_cap():
     assert stopped.observation_scalar_count == 2
     assert stopped.device_to_host_bytes == 8
 
-    capped = _bounded_step_args(target=100)
+    capped = _structured_while_args(target=100)
     graph.run(capped)
-    report = graph.bounded_loop_stats()[0]
+    report = graph.control_flow_stats()[0]
     assert report.logical_iterations == 6
     assert report.executed_iterations == 6
     assert report.overshoot_iterations == 0
@@ -2046,14 +2090,12 @@ def test_bounded_graph_loop_honors_initial_stop_and_iteration_cap():
 
 
 @test_utils.test(arch=ti.cuda)
-def test_bounded_graph_loop_forced_portable_keeps_chunk_trace():
-    graph = _build_bounded_step_graph(
-        max_iterations=20, cuda_native_mode="portable"
-    )
-    args = _bounded_step_args(target=5)
+def test_structured_graph_while_forced_portable_keeps_chunk_trace():
+    graph = _build_structured_while_graph(max_iterations=20, lowering_mode="portable")
+    args = _structured_while_args(target=5)
     graph.run(args)
 
-    report = graph.bounded_loop_stats()[0]
+    report = graph.control_flow_stats()[0]
     assert report.lowering == "portable_chunk_replay"
     assert report.logical_iterations == 5
     assert report.executed_iterations == 8
@@ -2063,7 +2105,7 @@ def test_bounded_graph_loop_forced_portable_keeps_chunk_trace():
 
 
 @test_utils.test(arch=ti.cuda)
-def test_bounded_graph_loop_native_rebind_and_replay_diagnostics():
+def test_structured_graph_while_native_rebind_and_replay_diagnostics():
     capabilities = dict(ti_core.cuda_conditional_graph_capabilities())
     if not (
         capabilities["driver_version_eligible"]
@@ -2072,22 +2114,22 @@ def test_bounded_graph_loop_native_rebind_and_replay_diagnostics():
     ):
         pytest.skip("general CUDA conditional Graph is unavailable")
 
-    graph = _build_bounded_step_graph(
-        max_iterations=20, cuda_native_mode="native_required"
+    graph = _build_structured_while_graph(
+        max_iterations=20, lowering_mode="native_required"
     )
     graph._graph_stats
-    first = _bounded_step_args(target=5)
-    second = _bounded_step_args(target=7)
+    first = _structured_while_args(target=5)
+    second = _structured_while_args(target=7)
 
     graph.run(first)
-    first_report = graph.bounded_loop_stats()[0]
+    first_report = graph.control_flow_stats()[0]
     assert first_report.lowering == "cuda_conditional_graph"
     assert first_report.logical_iterations == 5
     assert first_report.executed_iterations == 5
     assert first_report.observation_boundaries == (0, 5)
 
     graph.run(second)
-    second_report = graph.bounded_loop_stats()[0]
+    second_report = graph.control_flow_stats()[0]
     assert second_report.logical_iterations == 7
     assert second_report.executed_iterations == 7
     second["state"].fill(0)
@@ -2100,6 +2142,122 @@ def test_bounded_graph_loop_native_rebind_and_replay_diagnostics():
     assert native_stats["patched_replays"] >= 1
     assert native_stats["exact_replays"] >= 1
     assert native_stats["last_path"] == "cuda_exact_replay"
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_structured_if_uses_multiple_control_inputs():
+    @ti.kernel
+    def evaluate_condition(
+        left: ti.i32,
+        right: ti.i32,
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        predicate[None] = int(left < right)
+
+    @ti.kernel
+    def write_then(out: ti.types.ndarray(dtype=ti.i32, ndim=0)):
+        out[None] = 7
+
+    @ti.kernel
+    def write_else(out: ti.types.ndarray(dtype=ti.i32, ndim=0)):
+        out[None] = -3
+
+    arg_left = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "left", ti.i32)
+    arg_right = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "right", ti.i32)
+    arg_predicate = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "predicate", ti.i32, ndim=0)
+    arg_out = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=0)
+    builder = ti.graph.GraphBuilder()
+    condition = builder.create_sequential()
+    condition.dispatch(evaluate_condition, arg_left, arg_right, arg_predicate)
+    then_region = builder.create_sequential()
+    then_region.dispatch(write_then, arg_out)
+    else_region = builder.create_sequential()
+    else_region.dispatch(write_else, arg_out)
+    builder.if_then_else(
+        condition,
+        then_region,
+        predicate=arg_predicate,
+        control_inputs=(arg_left, arg_right),
+        else_region=else_region,
+        name="ordered_branch",
+    )
+    graph = builder.compile()
+
+    predicate = ti.ndarray(ti.i32, shape=())
+    out = ti.ndarray(ti.i32, shape=())
+    graph.run({"left": 2, "right": 5, "predicate": predicate, "out": out})
+    assert out.to_numpy()[()] == 7
+    report = graph.control_flow_stats()[0]
+    assert report.kind == "if"
+    assert report.selected_branch == "then"
+    assert report.control_inputs == ("left", "right")
+
+    graph.run({"left": 8, "right": 5, "predicate": predicate, "out": out})
+    assert out.to_numpy()[()] == -3
+    assert graph.control_flow_stats()[0].selected_branch == "else"
+    ir = graph._ir_debug_info
+    assert ir["analysis"]["if_regions"] == 1
+    assert ir["root"]["children"][0]["has_else"]
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_structured_switch_selects_case_and_default():
+    @ti.kernel
+    def evaluate_selector(
+        choice: ti.i32,
+        selector: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        selector[None] = choice
+
+    @ti.kernel
+    def write_case_zero(out: ti.types.ndarray(dtype=ti.i32, ndim=0)):
+        out[None] = 10
+
+    @ti.kernel
+    def write_case_one(out: ti.types.ndarray(dtype=ti.i32, ndim=0)):
+        out[None] = 20
+
+    @ti.kernel
+    def write_default(out: ti.types.ndarray(dtype=ti.i32, ndim=0)):
+        out[None] = 99
+
+    arg_choice = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "choice", ti.i32)
+    arg_selector = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "selector", ti.i32, ndim=0)
+    arg_out = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=0)
+    builder = ti.graph.GraphBuilder()
+    condition = builder.create_sequential()
+    condition.dispatch(evaluate_selector, arg_choice, arg_selector)
+    case_zero = builder.create_sequential()
+    case_zero.dispatch(write_case_zero, arg_out)
+    case_one = builder.create_sequential()
+    case_one.dispatch(write_case_one, arg_out)
+    default = builder.create_sequential()
+    default.dispatch(write_default, arg_out)
+    builder.switch(
+        condition,
+        (case_zero, case_one),
+        selector=arg_selector,
+        control_inputs=(arg_choice,),
+        default_region=default,
+        name="choice_switch",
+    )
+    graph = builder.compile()
+
+    selector = ti.ndarray(ti.i32, shape=())
+    out = ti.ndarray(ti.i32, shape=())
+    for choice, expected, selected in (
+        (0, 10, "case_0"),
+        (1, 20, "case_1"),
+        (5, 99, "default"),
+    ):
+        graph.run({"choice": choice, "selector": selector, "out": out})
+        assert out.to_numpy()[()] == expected
+        report = graph.control_flow_stats()[0]
+        assert report.kind == "switch"
+        assert report.selected_branch == selected
+    ir = graph._ir_debug_info
+    assert ir["analysis"]["switch_regions"] == 1
+    assert ir["root"]["children"][0]["branch_count"] == 2
 
 
 @test_utils.test(arch=ti.cuda)
@@ -2192,16 +2350,10 @@ def test_cuda_cgraph_patches_scalar_matrix_and_ndarray_arguments():
     sym_offset = ti.graph.Arg(
         ti.graph.ArgKind.MATRIX, "offset", ti.types.vector(2, ti.i32)
     )
-    sym_source = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "source", ti.i32, ndim=1
-    )
-    sym_output = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
-    )
+    sym_source = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "source", ti.i32, ndim=1)
+    sym_output = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1)
     builder = ti.graph.GraphBuilder()
-    builder.dispatch(
-        transform, sym_scale, sym_offset, sym_source, sym_output
-    )
+    builder.dispatch(transform, sym_scale, sym_offset, sym_source, sym_output)
     graph = builder.compile()
 
     source_a_np = np.arange(n, dtype=np.int32)
@@ -2253,9 +2405,7 @@ def test_cuda_cgraph_recaptures_when_ndarray_structure_changes():
             output[i] = value + i
 
     sym_value = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "value", ti.i32)
-    sym_output = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
-    )
+    sym_output = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1)
     builder = ti.graph.GraphBuilder()
     builder.dispatch(fill, sym_value, sym_output)
     graph = builder.compile()
@@ -2266,12 +2416,8 @@ def test_cuda_cgraph_recaptures_when_ndarray_structure_changes():
     graph.run({"value": 5, "output": large})
     graph.run({"value": 7, "output": small})
 
-    np.testing.assert_array_equal(
-        small.to_numpy(), np.arange(17, dtype=np.int32) + 7
-    )
-    np.testing.assert_array_equal(
-        large.to_numpy(), np.arange(37, dtype=np.int32) + 5
-    )
+    np.testing.assert_array_equal(small.to_numpy(), np.arange(17, dtype=np.int32) + 7)
+    np.testing.assert_array_equal(large.to_numpy(), np.arange(37, dtype=np.int32) + 5)
 
 
 @test_utils.test(arch=ti.cuda)
@@ -2346,15 +2492,11 @@ def test_vulkan_cgraph_replay_identity_survives_cache_churn():
     graph_count = 64
 
     @ti.kernel
-    def add_bias(
-        values: ti.types.ndarray(dtype=ti.i32, ndim=1), bias: ti.i32
-    ):
+    def add_bias(values: ti.types.ndarray(dtype=ti.i32, ndim=1), bias: ti.i32):
         for i in values:
             values[i] += bias
 
-    sym_values = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
-    )
+    sym_values = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1)
     sym_bias = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "bias", ti.i32)
     values = ti.ndarray(ti.i32, shape=256)
     values.fill(0)
@@ -2387,9 +2529,7 @@ def test_vulkan_cgraph_clear_retires_in_flight_slots_and_reregisters():
         for i in values:
             values[i] += 1
 
-    sym_values = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
-    )
+    sym_values = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1)
     builder = ti.graph.GraphBuilder()
     builder.dispatch(increment, sym_values)
     builder.dispatch(increment, sym_values)
@@ -2422,9 +2562,7 @@ def test_vulkan_cgraph_replay_slot_saturation_telemetry_is_monotonic():
         for i in values:
             values[i] += 1
 
-    sym_values = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
-    )
+    sym_values = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1)
     builder = ti.graph.GraphBuilder()
     builder.dispatch(increment, sym_values)
     builder.dispatch(increment, sym_values)
@@ -2447,9 +2585,7 @@ def test_vulkan_cgraph_replay_slot_saturation_telemetry_is_monotonic():
     assert stats[0]["backend"] == "vulkan"
     assert stats[0]["attempts"] == launch_count
     assert (
-        stats[0]["records"]
-        + stats[0]["replays"]
-        + stats[0]["ordinary_fallbacks"]
+        stats[0]["records"] + stats[0]["replays"] + stats[0]["ordinary_fallbacks"]
         == launch_count
     )
     assert stats[0]["records"] > 0
@@ -2469,15 +2605,11 @@ def test_vulkan_cgraph_replay_slot_saturation_telemetry_is_monotonic():
 @test_utils.test(arch=ti.vulkan)
 def test_vulkan_cgraph_patches_same_structure_ndarray_bindings():
     @ti.kernel
-    def add_bias(
-        values: ti.types.ndarray(dtype=ti.i32, ndim=1), bias: ti.i32
-    ):
+    def add_bias(values: ti.types.ndarray(dtype=ti.i32, ndim=1), bias: ti.i32):
         for i in values:
             values[i] += bias
 
-    sym_values = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
-    )
+    sym_values = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1)
     sym_bias = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "bias", ti.i32)
     builder = ti.graph.GraphBuilder()
     builder.dispatch(add_bias, sym_values, sym_bias)
@@ -2501,10 +2633,7 @@ def test_vulkan_cgraph_patches_same_structure_ndarray_bindings():
     ti.sync()
     patched_stats = graph._graph_stats[0]
     patch_supported = patched_stats["last_path"] == "vulkan_patched_replay"
-    assert (
-        patched_stats["known_persistent_argument_bytes"]
-        == first_persistent_bytes
-    )
+    assert patched_stats["known_persistent_argument_bytes"] == first_persistent_bytes
     if patch_supported:
         assert patched_stats["records"] == 1
         assert patched_stats["patched_replays"] == 1
@@ -2522,12 +2651,8 @@ def test_vulkan_cgraph_patches_same_structure_ndarray_bindings():
     assert replay_stats["patched_replays"] == (1 if patch_supported else 0)
     assert replay_stats["replays"] == (2 if patch_supported else 1)
     assert replay_stats["last_path"] == "vulkan_replay"
-    np.testing.assert_array_equal(
-        first.to_numpy(), np.full(256, 5, dtype=np.int32)
-    )
-    np.testing.assert_array_equal(
-        second.to_numpy(), np.full(256, 24, dtype=np.int32)
-    )
+    np.testing.assert_array_equal(first.to_numpy(), np.full(256, 5, dtype=np.int32))
+    np.testing.assert_array_equal(second.to_numpy(), np.full(256, 24, dtype=np.int32))
 
 
 @test_utils.test(arch=ti.vulkan)
@@ -2537,9 +2662,7 @@ def test_vulkan_cgraph_structural_shape_change_records_again():
         for i in values:
             values[i] += 1
 
-    sym_values = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
-    )
+    sym_values = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1)
     builder = ti.graph.GraphBuilder()
     builder.dispatch(add_one, sym_values)
     builder.dispatch(add_one, sym_values)
@@ -2566,20 +2689,11 @@ def test_vulkan_cgraph_structural_shape_change_records_again():
     graph.run({"values": replacement})
     ti.sync()
     replacement_stats = graph._graph_stats[0]
-    patch_supported = (
-        replacement_stats["last_path"] == "vulkan_patched_replay"
-    )
+    patch_supported = replacement_stats["last_path"] == "vulkan_patched_replay"
     assert replacement_stats["records"] == (2 if patch_supported else 3)
-    assert (
-        replacement_stats["known_persistent_argument_bytes"]
-        == persistent_bytes
-    )
-    np.testing.assert_array_equal(
-        small.to_numpy(), np.full(64, 2, dtype=np.int32)
-    )
-    np.testing.assert_array_equal(
-        large.to_numpy(), np.full(128, 12, dtype=np.int32)
-    )
+    assert replacement_stats["known_persistent_argument_bytes"] == persistent_bytes
+    np.testing.assert_array_equal(small.to_numpy(), np.full(64, 2, dtype=np.int32))
+    np.testing.assert_array_equal(large.to_numpy(), np.full(128, 12, dtype=np.int32))
     np.testing.assert_array_equal(
         replacement.to_numpy(), np.full(64, 22, dtype=np.int32)
     )
@@ -2598,9 +2712,7 @@ def test_vulkan_cgraph_alias_topology_change_records_again(monkeypatch):
         for i in source:
             destination[i] = source[i] + 1
 
-    sym_source = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "source", ti.i32, ndim=1
-    )
+    sym_source = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "source", ti.i32, ndim=1)
     sym_destination = ti.graph.Arg(
         ti.graph.ArgKind.NDARRAY, "destination", ti.i32, ndim=1
     )
@@ -2639,17 +2751,10 @@ def test_vulkan_cgraph_alias_topology_change_records_again(monkeypatch):
     )
     ti.sync()
     replacement_stats = graph._graph_stats[0]
-    patch_supported = (
-        replacement_stats["last_path"] == "vulkan_patched_replay"
-    )
+    patch_supported = replacement_stats["last_path"] == "vulkan_patched_replay"
     assert replacement_stats["records"] == (2 if patch_supported else 3)
-    assert (
-        replacement_stats["known_persistent_argument_bytes"]
-        == persistent_bytes
-    )
-    np.testing.assert_array_equal(
-        aliased.to_numpy(), np.full(64, 5, dtype=np.int32)
-    )
+    assert replacement_stats["known_persistent_argument_bytes"] == persistent_bytes
+    np.testing.assert_array_equal(aliased.to_numpy(), np.full(64, 5, dtype=np.int32))
     np.testing.assert_array_equal(
         destination.to_numpy(), np.full(64, 8, dtype=np.int32)
     )
@@ -2667,9 +2772,7 @@ def test_vulkan_cgraph_structural_patch_can_be_disabled(monkeypatch):
         for i in values:
             values[i] += 1
 
-    sym_values = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
-    )
+    sym_values = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1)
     builder = ti.graph.GraphBuilder()
     builder.dispatch(add_one, sym_values)
     builder.dispatch(add_one, sym_values)
@@ -2689,12 +2792,8 @@ def test_vulkan_cgraph_structural_patch_can_be_disabled(monkeypatch):
     assert stats["patched_replays"] == 0
     assert stats["replays"] == 0
     assert stats["last_path"] == "vulkan_record"
-    np.testing.assert_array_equal(
-        first.to_numpy(), np.full(64, 2, dtype=np.int32)
-    )
-    np.testing.assert_array_equal(
-        second.to_numpy(), np.full(64, 12, dtype=np.int32)
-    )
+    np.testing.assert_array_equal(first.to_numpy(), np.full(64, 2, dtype=np.int32))
+    np.testing.assert_array_equal(second.to_numpy(), np.full(64, 12, dtype=np.int32))
 
 
 @pytest.mark.parametrize("hazard_planner", [False, True])
@@ -2725,9 +2824,7 @@ def test_vulkan_cgraph_hazard_planner_preserves_dependency_chains(
             c[i] = a[i] * 2
 
     @ti.kernel
-    def fill(
-        values: ti.types.ndarray(dtype=ti.i32, ndim=1), value: ti.i32
-    ):
+    def fill(values: ti.types.ndarray(dtype=ti.i32, ndim=1), value: ti.i32):
         for i in values:
             values[i] = value
 
@@ -2751,9 +2848,7 @@ def test_vulkan_cgraph_hazard_planner_preserves_dependency_chains(
     arg_a = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "a", ti.i32, ndim=1)
     arg_b = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "b", ti.i32, ndim=1)
     arg_c = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "c", ti.i32, ndim=1)
-    arg_output = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
-    )
+    arg_output = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1)
     value = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "value", ti.i32)
     builder = ti.graph.GraphBuilder()
     builder.dispatch(read_a_to_b, arg_a, arg_b)
@@ -2764,10 +2859,7 @@ def test_vulkan_cgraph_hazard_planner_preserves_dependency_chains(
     builder.dispatch(combine, arg_a, arg_c, arg_output)
     graph = builder.compile()
 
-    arrays = {
-        name: ti.ndarray(ti.i32, shape=256)
-        for name in ("a", "b", "c", "output")
-    }
+    arrays = {name: ti.ndarray(ti.i32, shape=256) for name in ("a", "b", "c", "output")}
     arrays["a"].fill(3)
     graph.execution_stats()
     graph.run({**arrays, "value": 7})
@@ -2829,7 +2921,9 @@ def test_texture():
     res = (256, 256)
 
     @ti.kernel
-    def make_texture(tex: ti.types.rw_texture(num_dimensions=2, fmt=ti.Format.r32f, lod=0)):
+    def make_texture(
+        tex: ti.types.rw_texture(num_dimensions=2, fmt=ti.Format.r32f, lod=0),
+    ):
         for i, j in ti.ndrange(128, 128):
             tex.store(ti.Vector([i, j]), ti.Vector([0.1, 0.0, 0.0, 0.0]))
 
@@ -2841,7 +2935,9 @@ def test_texture():
     ):
         for i, j in pixels:
             uv = ti.Vector([i / res[0], j / res[1]])
-            warp_uv = uv + ti.Vector([ti.cos(t + uv.x * 5.0), ti.sin(t + uv.y * 5.0)]) * 0.1
+            warp_uv = (
+                uv + ti.Vector([ti.cos(t + uv.x * 5.0), ti.sin(t + uv.y * 5.0)]) * 0.1
+            )
             c = ti.math.vec4(0.0)
             if uv.x > 0.5:
                 c = tex.sample_lod(warp_uv, 0.0)
@@ -2850,7 +2946,9 @@ def test_texture():
             pixels[i, j] = [c.r, c.r, c.r, 1.0]
 
     _t = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "t", ti.f32)
-    _pixels_arr = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pixels_arr", ti.math.vec4, ndim=2)
+    _pixels_arr = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "pixels_arr", ti.math.vec4, ndim=2
+    )
 
     _rw_tex = ti.graph.Arg(
         ti.graph.ArgKind.RWTEXTURE,
@@ -2884,9 +2982,7 @@ def test_texture():
 def test_graph_texture_registry_lifetime_after_runtime_arg_gc():
     @ti.kernel
     def write(
-        tex: ti.types.rw_texture(
-            num_dimensions=2, fmt=ti.Format.r32f, lod=0
-        ),
+        tex: ti.types.rw_texture(num_dimensions=2, fmt=ti.Format.r32f, lod=0),
     ):
         tex.store(ti.Vector([0, 0]), ti.Vector([9.0, 0.0, 0.0, 0.0]))
 
