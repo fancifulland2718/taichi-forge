@@ -74,6 +74,12 @@ struct GraphReplayStats {
   uint64_t runtime_mode_fallbacks{0};
   uint64_t slot_saturation_fallbacks{0};
   uint64_t known_persistent_argument_bytes{0};
+  uint64_t effect_reads{0};
+  uint64_t effect_writes{0};
+  uint64_t dependency_barriers{0};
+  uint64_t exit_barriers{0};
+  uint64_t barrier_deferrals{0};
+  uint64_t rar_elisions{0};
   GraphReplayLastPath last_path{GraphReplayLastPath::none};
   GraphReplayFallbackReason last_fallback_reason{
       GraphReplayFallbackReason::none};
@@ -332,6 +338,12 @@ class TI_DLL_EXPORT GfxRuntime {
     uint64_t structural_fallbacks{0};
     uint64_t runtime_mode_fallbacks{0};
     uint64_t slot_saturation_fallbacks{0};
+    uint64_t effect_reads{0};
+    uint64_t effect_writes{0};
+    uint64_t dependency_barriers{0};
+    uint64_t exit_barriers{0};
+    uint64_t barrier_deferrals{0};
+    uint64_t rar_elisions{0};
     GraphReplayLastPath last_path{GraphReplayLastPath::none};
     GraphReplayFallbackReason last_fallback_reason{
         GraphReplayFallbackReason::none};

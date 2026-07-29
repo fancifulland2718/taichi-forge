@@ -1584,6 +1584,12 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
         source.slot_saturation_fallbacks;
     result.known_persistent_argument_bytes =
         source.known_persistent_argument_bytes;
+    result.effect_reads = source.effect_reads;
+    result.effect_writes = source.effect_writes;
+    result.dependency_barriers = source.dependency_barriers;
+    result.exit_barriers = source.exit_barriers;
+    result.barrier_deferrals = source.barrier_deferrals;
+    result.rar_elisions = source.rar_elisions;
     switch (source.last_path) {
       case gfx::GraphReplayLastPath::fallback:
         result.last_path = CompiledGraphExecutionPath::ordinary_fallback;

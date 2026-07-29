@@ -3524,6 +3524,12 @@ void export_lang(py::module &m) {
         result["last_driver_error"] = stats.last_driver_error;
         result["retry_backoff_remaining"] =
             stats.retry_backoff_remaining;
+        result["effect_reads"] = stats.effect_reads;
+        result["effect_writes"] = stats.effect_writes;
+        result["dependency_barriers"] = stats.dependency_barriers;
+        result["exit_barriers"] = stats.exit_barriers;
+        result["barrier_deferrals"] = stats.barrier_deferrals;
+        result["rar_elisions"] = stats.rar_elisions;
         result["consecutive_transient_failures"] =
             stats.consecutive_transient_failures;
         result["diagnostics_previously_enabled"] =

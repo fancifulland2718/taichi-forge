@@ -1,6 +1,7 @@
 #include "taichi/runtime/gfx/runtime.h"
 #include "taichi/program/program.h"
 #include "taichi/common/filesystem.hpp"
+#include "taichi/util/environ_config.h"
 
 // FIXME: (penguinliong) Special offer for `run_codegen`. Find a new home for it
 // in the future.
@@ -1787,6 +1788,12 @@ void GfxRuntime::GraphReplayState::reset() {
   structural_fallbacks = 0;
   runtime_mode_fallbacks = 0;
   slot_saturation_fallbacks = 0;
+  effect_reads = 0;
+  effect_writes = 0;
+  dependency_barriers = 0;
+  exit_barriers = 0;
+  barrier_deferrals = 0;
+  rar_elisions = 0;
   last_path = GraphReplayLastPath::none;
   last_fallback_reason = GraphReplayFallbackReason::none;
   diagnostics_enabled = false;
@@ -1848,6 +1855,12 @@ GraphReplayStats GfxRuntime::debug_graph_replay_stats(
       state.runtime_mode_fallbacks,
       state.slot_saturation_fallbacks,
       state.executable.known_persistent_argument_bytes(),
+      state.effect_reads,
+      state.effect_writes,
+      state.dependency_barriers,
+      state.exit_barriers,
+      state.barrier_deferrals,
+      state.rar_elisions,
       state.last_path,
       state.last_fallback_reason,
   };
@@ -2101,30 +2114,144 @@ bool GfxRuntime::try_launch_graph(
     }
   }
 
-  bool pending_global_barrier = false;
-  std::vector<DeviceAllocation> pending_barrier_buffers;
-  std::unordered_set<DeviceAllocationId> pending_barrier_ids;
-  auto add_barrier = [&](DeviceAllocation alloc) {
-    if (alloc == kDeviceNullAllocation || pending_global_barrier) {
+  struct BufferAccess {
+    DeviceAllocation allocation{kDeviceNullAllocation};
+    bool read{false};
+    bool write{false};
+  };
+  using BufferAccessMap =
+      std::unordered_map<DeviceAllocationId, BufferAccess>;
+
+  // Disabled until the A/B qualification gate has covered real dependency
+  // chains and independent branches. The legacy path preserves eager
+  // placement and write-only dependency tracking while this is zero.
+  const bool hazard_planner_enabled =
+      get_environ_config("TI_VULKAN_GRAPH_HAZARD_PLANNER", 0) != 0;
+  BufferAccessMap pending_accesses;
+  bool pending_global_read = false;
+  bool pending_global_write = false;
+
+  auto count_barrier = [&](bool exit_boundary) {
+    if (!state.diagnostics_enabled) {
       return;
     }
-    if (pending_barrier_ids.insert(alloc.alloc_id).second) {
-      pending_barrier_buffers.push_back(alloc);
+    if (exit_boundary) {
+      ++state.exit_barriers;
+    } else {
+      ++state.dependency_barriers;
     }
   };
-  auto insert_barriers = [&]() {
-    if (pending_global_barrier) {
+  auto insert_all_pending = [&](bool exit_boundary) {
+    if (pending_global_read || pending_global_write) {
       cmdlist->memory_barrier();
-      pending_global_barrier = false;
-      pending_barrier_buffers.clear();
-      pending_barrier_ids.clear();
+      count_barrier(exit_boundary);
+    } else {
+      for (const auto &[id, access] : pending_accesses) {
+        (void)id;
+        cmdlist->buffer_barrier(access.allocation);
+        count_barrier(exit_boundary);
+      }
+    }
+    pending_global_read = false;
+    pending_global_write = false;
+    pending_accesses.clear();
+  };
+  auto insert_task_dependencies =
+      [&](const BufferAccessMap &current_accesses,
+          bool current_global_read,
+          bool current_global_write) {
+        if (!hazard_planner_enabled) {
+          insert_all_pending(/*exit_boundary=*/false);
+          return;
+        }
+
+        const bool current_has_access =
+            current_global_read || current_global_write ||
+            !current_accesses.empty();
+        if ((pending_global_read || pending_global_write) &&
+            current_has_access) {
+          const bool only_reads =
+              pending_global_read && !pending_global_write &&
+              !current_global_write &&
+              std::all_of(current_accesses.begin(), current_accesses.end(),
+                          [](const auto &item) {
+                            return item.second.read && !item.second.write;
+                          });
+          if (only_reads) {
+            if (state.diagnostics_enabled) {
+              ++state.rar_elisions;
+            }
+          } else {
+            cmdlist->memory_barrier();
+            count_barrier(/*exit_boundary=*/false);
+            pending_global_read = false;
+            pending_global_write = false;
+            pending_accesses.clear();
+            return;
+          }
+        }
+
+        if ((current_global_read || current_global_write) &&
+            !pending_accesses.empty()) {
+          const bool only_reads =
+              current_global_read && !current_global_write &&
+              std::all_of(pending_accesses.begin(), pending_accesses.end(),
+                          [](const auto &item) {
+                            return item.second.read && !item.second.write;
+                          });
+          if (only_reads) {
+            if (state.diagnostics_enabled) {
+              ++state.rar_elisions;
+            }
+          } else {
+            cmdlist->memory_barrier();
+            count_barrier(/*exit_boundary=*/false);
+            pending_global_read = false;
+            pending_global_write = false;
+            pending_accesses.clear();
+            return;
+          }
+        }
+
+        if (state.diagnostics_enabled) {
+          for (const auto &[id, access] : pending_accesses) {
+            (void)access;
+            if (current_accesses.find(id) == current_accesses.end()) {
+              ++state.barrier_deferrals;
+            }
+          }
+        }
+        for (const auto &[id, current] : current_accesses) {
+          auto previous = pending_accesses.find(id);
+          if (previous == pending_accesses.end()) {
+            continue;
+          }
+          const bool hazard =
+              (previous->second.write &&
+               (current.read || current.write)) ||
+              (previous->second.read && current.write);
+          if (!hazard) {
+            if (state.diagnostics_enabled && previous->second.read &&
+                current.read) {
+              ++state.rar_elisions;
+            }
+            continue;
+          }
+          cmdlist->buffer_barrier(previous->second.allocation);
+          count_barrier(/*exit_boundary=*/false);
+          pending_accesses.erase(previous);
+        }
+      };
+  auto merge_pending_access = [&](const BufferAccess &access) {
+    if (access.allocation == kDeviceNullAllocation) {
       return;
     }
-    for (DeviceAllocation alloc : pending_barrier_buffers) {
-      cmdlist->buffer_barrier(alloc);
+    auto [it, inserted] =
+        pending_accesses.try_emplace(access.allocation.alloc_id, access);
+    if (!inserted) {
+      it->second.read = it->second.read || access.read;
+      it->second.write = it->second.write || access.write;
     }
-    pending_barrier_buffers.clear();
-    pending_barrier_ids.clear();
   };
 
   size_t resource_set_index = 0;
@@ -2132,7 +2259,55 @@ bool GfxRuntime::try_launch_graph(
     const auto &task_attribs = pd.kernel->ti_kernel_attribs().tasks_attribs;
     for (int task_index = 0; task_index < task_attribs.size(); ++task_index) {
       const auto &attribs = task_attribs[task_index];
-      insert_barriers();
+      BufferAccessMap current_accesses;
+      bool current_global_read = false;
+      bool current_global_write = false;
+      for (const auto &bind : attribs.buffer_binds) {
+        const bool may_read =
+            (bind.access & TaskAttributes::BufferBind::kAccessRead) != 0;
+        const bool may_write = bind.may_write();
+        if (!may_read && !may_write) {
+          continue;
+        }
+        if (bind.buffer.type == BufferType::Args ||
+            bind.buffer.type == BufferType::ArgPack) {
+          continue;
+        }
+        if (state.diagnostics_enabled) {
+          state.effect_reads += may_read ? 1 : 0;
+          state.effect_writes += may_write ? 1 : 0;
+        }
+        if (bind.buffer.type == BufferType::Rets ||
+            bind.buffer.type == BufferType::NodeAllocatorPool) {
+          current_global_read = current_global_read || may_read;
+          current_global_write = current_global_write || may_write;
+          continue;
+        }
+        DeviceAllocation allocation = kDeviceNullAllocation;
+        if (bind.buffer.type == BufferType::ExtArr) {
+          allocation = pd.any_arrays->at(bind.buffer.root_id);
+        } else {
+          DeviceAllocation *resolved =
+              pd.kernel->get_buffer_bind(bind.buffer);
+          if (resolved != nullptr) {
+            allocation = *resolved;
+          }
+        }
+        if (allocation == kDeviceNullAllocation) {
+          current_global_read = current_global_read || may_read;
+          current_global_write = current_global_write || may_write;
+          continue;
+        }
+        auto [it, inserted] = current_accesses.try_emplace(
+            allocation.alloc_id,
+            BufferAccess{allocation, may_read, may_write});
+        if (!inserted) {
+          it->second.read = it->second.read || may_read;
+          it->second.write = it->second.write || may_write;
+        }
+      }
+      insert_task_dependencies(current_accesses, current_global_read,
+                               current_global_write);
 
       ShaderResourceSet *bindings =
           slot->resource_sets[resource_set_index++].get();
@@ -2195,33 +2370,29 @@ bool GfxRuntime::try_launch_graph(
       TI_ERROR_IF(status != RhiResult::success,
                   "Vulkan graph dispatch error: RhiResult({})", status);
 
-      for (const auto &bind : attribs.buffer_binds) {
-        if (!bind.may_write()) {
-          continue;
+      if (hazard_planner_enabled) {
+        for (const auto &[id, access] : current_accesses) {
+          (void)id;
+          merge_pending_access(access);
         }
-        switch (bind.buffer.type) {
-          case BufferType::Args:
-          case BufferType::ArgPack:
-            break;
-          case BufferType::ExtArr:
-            add_barrier(pd.any_arrays->at(bind.buffer.root_id));
-            break;
-          case BufferType::Rets:
-          case BufferType::NodeAllocatorPool:
-            pending_global_barrier = true;
-            break;
-          default: {
-            DeviceAllocation *alloc = pd.kernel->get_buffer_bind(bind.buffer);
-            if (alloc != nullptr) {
-              add_barrier(*alloc);
-            }
-            break;
+        pending_global_read =
+            pending_global_read || current_global_read;
+        pending_global_write =
+            pending_global_write || current_global_write;
+      } else {
+        for (const auto &[id, access] : current_accesses) {
+          (void)id;
+          if (access.write) {
+            merge_pending_access(
+                BufferAccess{access.allocation, false, true});
           }
         }
+        pending_global_write =
+            pending_global_write || current_global_write;
       }
     }
   }
-  insert_barriers();
+  insert_all_pending(/*exit_boundary=*/true);
 
   slot->key = std::move(key);
   slot->cmdlist = std::move(recorded_cmdlist);

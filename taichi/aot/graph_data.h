@@ -329,6 +329,12 @@ struct CompiledGraphStats {
   uint64_t known_persistent_argument_bytes{0};
   uint64_t last_driver_error{0};
   uint32_t retry_backoff_remaining{0};
+  uint64_t effect_reads{0};
+  uint64_t effect_writes{0};
+  uint64_t dependency_barriers{0};
+  uint64_t exit_barriers{0};
+  uint64_t barrier_deferrals{0};
+  uint64_t rar_elisions{0};
   uint32_t consecutive_transient_failures{0};
   bool zero_arg_eligible{false};
 };
