@@ -287,6 +287,7 @@ enum class CompiledGraphExecutionPath : uint8_t {
   cuda_patched_replay,
   vulkan_record,
   vulkan_replay,
+  vulkan_patched_replay,
 };
 
 enum class CompiledGraphFallbackReason : uint8_t {
@@ -329,6 +330,12 @@ struct CompiledGraphStats {
   uint64_t known_persistent_argument_bytes{0};
   uint64_t last_driver_error{0};
   uint32_t retry_backoff_remaining{0};
+  uint64_t effect_reads{0};
+  uint64_t effect_writes{0};
+  uint64_t dependency_barriers{0};
+  uint64_t exit_barriers{0};
+  uint64_t barrier_deferrals{0};
+  uint64_t rar_elisions{0};
   uint32_t consecutive_transient_failures{0};
   bool zero_arg_eligible{false};
 };
@@ -489,6 +496,13 @@ struct TI_DLL_EXPORT CompiledGraph {
   void jit_run_cached(const CompileConfig &compile_config,
                       const std::unordered_map<std::string, IValue> &args,
                       CompiledGraphJITCache &cache) const;
+  bool jit_run_bounded_cuda_cached(
+      const CompileConfig &compile_config,
+      const std::unordered_map<std::string, IValue> &args,
+      CompiledGraphJITCache &cache,
+      Ndarray *predicate,
+      int max_iterations,
+      bool continue_while_nonzero) const;
 
   TI_IO_DEF(dispatches);
 

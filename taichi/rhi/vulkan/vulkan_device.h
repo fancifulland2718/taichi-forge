@@ -271,6 +271,7 @@ class VulkanResourceSet : public ShaderResourceSet {
       const std::vector<DeviceAllocation> &allocs) final;
 
   rhi_impl::RhiReturn<vkapi::IVkDescriptorSet> finalize();
+  RhiResult prepare_for_replay(bool patch_existing) final;
 
   vkapi::IVkDescriptorSetLayout get_layout() {
     return layout_;
@@ -281,6 +282,9 @@ class VulkanResourceSet : public ShaderResourceSet {
   }
 
  private:
+  rhi_impl::RhiReturn<vkapi::IVkDescriptorSet> finalize_impl(
+      bool replay_dedicated,
+      bool patch_existing);
   void set_binding(uint32_t binding, Binding new_binding);
 
   std::map<uint32_t, Binding> bindings_;
@@ -734,6 +738,7 @@ struct VulkanCapabilities {
   bool present{false};
   bool dynamic_rendering{false};
   bool present_mode_fifo_latest_ready{false};
+  bool descriptor_update_after_bind{false};
 };
 
 class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {

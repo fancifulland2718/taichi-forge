@@ -10,6 +10,7 @@
 #include "taichi/rhi/vulkan/vulkan_loader.h"
 #include "taichi/rhi/vulkan/vulkan_device.h"
 #include "taichi/common/utils.h"
+#include "taichi/util/environ_config.h"
 
 namespace taichi::lang {
 namespace vulkan {
@@ -646,6 +647,8 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       enabled_extensions.push_back(ext.extensionName);
     } else if (name == VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME) {
       enabled_extensions.push_back(ext.extensionName);
+    } else if (name == VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME) {
+      enabled_extensions.push_back(ext.extensionName);
     } else if (name == VK_KHR_PRESENT_MODE_FIFO_LATEST_READY_EXTENSION_NAME ||
                name == VK_EXT_PRESENT_MODE_FIFO_LATEST_READY_EXTENSION_NAME) {
       // Some Windows drivers advertise both the original EXT extension and
@@ -772,6 +775,9 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
   VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamic_rendering_feature{};
   dynamic_rendering_feature.sType =
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR;
+  VkPhysicalDeviceDescriptorIndexingFeatures descriptor_indexing_feature{};
+  descriptor_indexing_feature.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
   VkPhysicalDevicePresentModeFifoLatestReadyFeaturesKHR
       present_mode_fifo_latest_ready_feature{};
   present_mode_fifo_latest_ready_feature.sType =
@@ -924,6 +930,34 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       pNextEnd = &dynamic_rendering_feature.pNext;
     }
     */
+
+    // Graph replay can patch the buffer descriptors referenced by an
+    // executable command buffer only when both descriptor classes used by
+    // compute launches support update-after-bind. Enable exactly those two
+    // optional features; unsupported devices retain the record-on-change path.
+    if (get_environ_config("TI_VULKAN_GRAPH_STRUCTURAL_PATCH", 1) != 0 &&
+        (CHECK_VERSION(1, 2) ||
+         CHECK_EXTENSION(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME))) {
+      features2.pNext = &descriptor_indexing_feature;
+      vkGetPhysicalDeviceFeatures2KHR(physical_device_, &features2);
+      const bool supports_graph_descriptor_patch =
+          descriptor_indexing_feature
+              .descriptorBindingUniformBufferUpdateAfterBind &&
+          descriptor_indexing_feature
+              .descriptorBindingStorageBufferUpdateAfterBind;
+      descriptor_indexing_feature = {};
+      descriptor_indexing_feature.sType =
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
+      if (supports_graph_descriptor_patch) {
+        descriptor_indexing_feature
+            .descriptorBindingUniformBufferUpdateAfterBind = true;
+        descriptor_indexing_feature
+            .descriptorBindingStorageBufferUpdateAfterBind = true;
+        ti_device_->vk_caps().descriptor_update_after_bind = true;
+        *pNextEnd = &descriptor_indexing_feature;
+        pNextEnd = &descriptor_indexing_feature.pNext;
+      }
+    }
 
     // FIFO_LATEST_READY present mode
     if (CHECK_EXTENSION(VK_KHR_PRESENT_MODE_FIFO_LATEST_READY_EXTENSION_NAME) ||

@@ -315,4 +315,78 @@ RhiResult Device::readback_data(
   return RhiResult::success;
 }
 
+RhiResult Device::readback_data_packed(
+    DevicePtr *device_ptr,
+    void **data,
+    size_t *size,
+    int num_alloc,
+    DevicePtr staging,
+    size_t staging_size,
+    const std::vector<StreamSemaphore> &wait_sema) noexcept {
+  if (!device_ptr || !data || !size || num_alloc < 0 ||
+      staging.device != this || staging.offset != 0) {
+    return RhiResult::invalid_usage;
+  }
+  if (num_alloc == 0) {
+    return RhiResult::success;
+  }
+
+  constexpr size_t kCopyAlignment = 4;
+  std::vector<size_t> offsets;
+  offsets.reserve(num_alloc);
+  size_t packed_size = 0;
+  for (int i = 0; i < num_alloc; ++i) {
+    if (device_ptr[i].device != this || !data[i]) {
+      return RhiResult::invalid_usage;
+    }
+    if (device_ptr[i].offset % kCopyAlignment != 0 ||
+        size[i] % kCopyAlignment != 0) {
+      return RhiResult::not_supported;
+    }
+    if (packed_size >
+        std::numeric_limits<size_t>::max() - (kCopyAlignment - 1)) {
+      return RhiResult::invalid_usage;
+    }
+    packed_size =
+        (packed_size + kCopyAlignment - 1) & ~(kCopyAlignment - 1);
+    offsets.push_back(packed_size);
+    if (size[i] > std::numeric_limits<size_t>::max() - packed_size) {
+      return RhiResult::invalid_usage;
+    }
+    packed_size += size[i];
+  }
+  if (packed_size > staging_size) {
+    return RhiResult::invalid_usage;
+  }
+
+  Stream *stream = this->get_compute_stream();
+  auto [cmdlist, res] = stream->new_command_list_unique();
+  if (res != RhiResult::success) {
+    return res;
+  }
+  for (int i = 0; i < num_alloc; ++i) {
+    if (size[i] == 0) {
+      continue;
+    }
+    DevicePtr destination = staging;
+    destination.offset += offsets[i];
+    cmdlist->buffer_copy(destination, device_ptr[i], size[i]);
+  }
+  stream->submit_synced(cmdlist.get(), wait_sema);
+
+  void *mapped = nullptr;
+  res = this->map_range(staging, packed_size, &mapped);
+  if (res != RhiResult::success) {
+    return res;
+  }
+  for (int i = 0; i < num_alloc; ++i) {
+    if (size[i] != 0) {
+      std::memcpy(data[i], static_cast<uint8_t *>(mapped) + offsets[i],
+                  size[i]);
+    }
+  }
+  this->unmap(staging);
+  return RhiResult::success;
+}
+
 }  // namespace taichi::lang

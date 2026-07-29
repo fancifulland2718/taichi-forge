@@ -217,6 +217,13 @@ class RHI_DLL_EXPORT ShaderResourceSet {
       const std::vector<DeviceAllocation> &allocs) {
     RHI_NOT_IMPLEMENTED
   }
+
+  // Optional backend hook for a graph-owned stable resource-set handle.
+  // patch_existing requires the owning replay completion to be ready.
+  virtual RhiResult prepare_for_replay(bool patch_existing) {
+    (void)patch_existing;
+    return RhiResult::not_supported;
+  }
 };
 
 // A set of states / resources for rasterization
@@ -828,6 +835,25 @@ class RHI_DLL_EXPORT Device {
       void **data,
       size_t *size,
       int num_alloc = 1,
+      const std::vector<StreamSemaphore> &wait_sema = {}) noexcept;
+
+  /**
+   * Read several device ranges through one caller-owned host-readable staging
+   * allocation. The copy is synchronous, but the staging allocation may be
+   * retained and reused by a higher-level transfer plan.
+   *
+   * This conservative first contract accepts only four-byte aligned source
+   * offsets and sizes, matching the portable buffer-copy requirements used by
+   * Graph scalar observations. Other requests return `not_supported` so the
+   * caller can use readback_data() without changing semantics.
+   */
+  RhiResult readback_data_packed(
+      DevicePtr *device_ptr,
+      void **data,
+      size_t *size,
+      int num_alloc,
+      DevicePtr staging,
+      size_t staging_size,
       const std::vector<StreamSemaphore> &wait_sema = {}) noexcept;
 
   // Each thraed will acquire its own stream

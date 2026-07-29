@@ -794,6 +794,21 @@ ShaderResourceSet &VulkanResourceSet::rw_buffer_array(
 }
 
 RhiReturn<vkapi::IVkDescriptorSet> VulkanResourceSet::finalize() {
+  return finalize_impl(/*replay_dedicated=*/false,
+                       /*patch_existing=*/false);
+}
+
+RhiResult VulkanResourceSet::prepare_for_replay(bool patch_existing) {
+  if (patch_existing &&
+      !device_->vk_caps().descriptor_update_after_bind) {
+    return RhiResult::not_supported;
+  }
+  return finalize_impl(/*replay_dedicated=*/true, patch_existing).result;
+}
+
+RhiReturn<vkapi::IVkDescriptorSet> VulkanResourceSet::finalize_impl(
+    bool replay_dedicated,
+    bool patch_existing) {
   if (!dirty_ && set_) {
     // If nothing changed directly return the set
     return {RhiResult::success, set_};
@@ -804,7 +819,7 @@ RhiReturn<vkapi::IVkDescriptorSet> VulkanResourceSet::finalize() {
     return {RhiResult::invalid_usage, nullptr};
   }
 
-  if (device_->descriptor_set_cache_enabled()) {
+  if (!replay_dedicated && device_->descriptor_set_cache_enabled()) {
     if (auto cached_set = device_->find_cached_desc_set(*this)) {
       set_ = cached_set;
       layout_ = set_->ref_layout;
@@ -816,17 +831,22 @@ RhiReturn<vkapi::IVkDescriptorSet> VulkanResourceSet::finalize() {
   vkapi::IVkDescriptorSetLayout new_layout =
       device_->get_desc_set_layout(*this);
   if (new_layout != layout_) {
-    // Layout changed, reset `set`
+    if (patch_existing) {
+      return {RhiResult::invalid_usage, nullptr};
+    }
+    // Layout changed, reset `set`.
     set_ = nullptr;
     layout_ = new_layout;
+  }
+  if (patch_existing && !set_) {
+    return {RhiResult::invalid_usage, nullptr};
   }
 
   if (set_) {
     std::lock_guard<std::mutex> descriptor_set_lock(set_->mutex);
-    // A command buffer keeps this pin until it is either discarded or retired
-    // after its submission fence. Updating the set in place before then would
-    // change descriptors referenced by recorded or pending GPU work.
-    if (set_->recording_use_count != 0) {
+    // Normal resource sets remain immutable while command buffers own them.
+    // A replay-dedicated set may be patched only after its slot fence is ready.
+    if (!patch_existing && set_->recording_use_count != 0) {
       set_ = nullptr;
     }
   }
@@ -854,10 +874,11 @@ RhiReturn<vkapi::IVkDescriptorSet> VulkanResourceSet::finalize() {
     // A cache hit in another resource set may bind this descriptor between the
     // earlier availability check and this update lock. Retry with a replacement
     // instead of rewriting the newly recorded set.
-    if (set_->recording_use_count != 0) {
+    if (!patch_existing && set_->recording_use_count != 0) {
       descriptor_set_lock.unlock();
       set_ = nullptr;
-      return finalize();
+      return finalize_impl(replay_dedicated,
+                           /*patch_existing=*/false);
     }
     set_->ref_binding_objs.clear();
 
@@ -939,7 +960,7 @@ RhiReturn<vkapi::IVkDescriptorSet> VulkanResourceSet::finalize() {
   }
 
   dirty_ = false;
-  if (device_->descriptor_set_cache_enabled()) {
+  if (!replay_dedicated && device_->descriptor_set_cache_enabled()) {
     device_->cache_desc_set(*this, set_);
   }
 
@@ -3234,17 +3255,38 @@ vkapi::IVkDescriptorSetLayout VulkanDevice::get_desc_set_layout(
   }
 
   std::vector<VkDescriptorSetLayoutBinding> bindings;
+  std::vector<VkDescriptorBindingFlags> binding_flags;
+  bool has_update_after_bind_binding = false;
   for (const auto &pair : set.get_bindings()) {
     bindings.push_back(VkDescriptorSetLayoutBinding{
         /*binding=*/pair.first, pair.second.type, /*descriptorCount=*/1,
         VK_SHADER_STAGE_ALL,
         /*pImmutableSamplers=*/nullptr});
+    const bool is_patchable_buffer =
+        pair.second.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
+        pair.second.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    const auto flags =
+        vk_caps().descriptor_update_after_bind && is_patchable_buffer
+            ? VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
+            : VkDescriptorBindingFlags{0};
+    binding_flags.push_back(flags);
+    has_update_after_bind_binding |= flags != 0;
   }
+
+  VkDescriptorSetLayoutBindingFlagsCreateInfo binding_flags_info{};
+  binding_flags_info.sType =
+      VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+  binding_flags_info.bindingCount = binding_flags.size();
+  binding_flags_info.pBindingFlags = binding_flags.data();
 
   VkDescriptorSetLayoutCreateInfo create_info{};
   create_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-  create_info.pNext = nullptr;
-  create_info.flags = 0;
+  create_info.pNext =
+      has_update_after_bind_binding ? &binding_flags_info : nullptr;
+  create_info.flags =
+      has_update_after_bind_binding
+          ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT
+          : VkDescriptorSetLayoutCreateFlags{0};
   create_info.bindingCount = bindings.size();
   create_info.pBindings = bindings.data();
 
@@ -3470,6 +3512,9 @@ RhiResult VulkanDevice::new_descriptor_pool_locked() {
   VkDescriptorPoolCreateInfo pool_info = {};
   pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
   pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+  if (vk_caps().descriptor_update_after_bind) {
+    pool_info.flags |= VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+  }
   pool_info.maxSets = 64;
   pool_info.poolSizeCount = pool_sizes.size();
   pool_info.pPoolSizes = pool_sizes.data();

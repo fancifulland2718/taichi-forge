@@ -1455,6 +1455,96 @@ void export_lang(py::module &m) {
              py::gil_scoped_release release;
              program->copy_ndarray_to_host(src, info.ptr, bytes);
            })
+      .def("copy_ndarrays_to_host",
+           [](Program *program, const std::vector<Ndarray *> &srcs,
+              const py::sequence &dsts) {
+             TI_ERROR_IF(
+                 srcs.size() != static_cast<std::size_t>(py::len(dsts)),
+                 "copy_ndarrays_to_host received {} sources and {} "
+                 "destinations.",
+                 srcs.size(), py::len(dsts));
+             std::vector<const Ndarray *> const_srcs(srcs.begin(), srcs.end());
+             std::vector<py::buffer_info> infos;
+             std::vector<void *> host_ptrs;
+             std::vector<std::size_t> bytes;
+             infos.reserve(srcs.size());
+             host_ptrs.reserve(srcs.size());
+             bytes.reserve(srcs.size());
+             for (std::size_t i = 0; i < srcs.size(); ++i) {
+               py::buffer dst =
+                   py::reinterpret_borrow<py::buffer>(dsts[py::int_(i)]);
+               infos.push_back(dst.request());
+               const py::buffer_info &info = infos.back();
+               TI_ERROR_IF(
+                   info.readonly,
+                   "copy_ndarrays_to_host received a read-only buffer at "
+                   "index {}.",
+                   i);
+               TI_ERROR_IF(
+                   info.size < 0 || info.itemsize < 0,
+                   "copy_ndarrays_to_host received an invalid buffer at "
+                   "index {}.",
+                   i);
+               host_ptrs.push_back(info.ptr);
+               bytes.push_back(static_cast<std::size_t>(info.size) *
+                               static_cast<std::size_t>(info.itemsize));
+             }
+             py::gil_scoped_release release;
+             program->copy_ndarrays_to_host(
+                 const_srcs.data(), host_ptrs.data(), bytes.data(),
+                 const_srcs.size());
+           })
+      .def("copy_graph_observations_to_host",
+           [](Program *program, const std::vector<Ndarray *> &srcs,
+              const py::sequence &dsts) {
+             TI_ERROR_IF(
+                 srcs.size() != static_cast<std::size_t>(py::len(dsts)),
+                 "copy_graph_observations_to_host received {} sources and {} "
+                 "destinations.",
+                 srcs.size(), py::len(dsts));
+             std::vector<const Ndarray *> const_srcs(srcs.begin(), srcs.end());
+             std::vector<py::buffer_info> infos;
+             std::vector<void *> host_ptrs;
+             std::vector<std::size_t> bytes;
+             infos.reserve(srcs.size());
+             host_ptrs.reserve(srcs.size());
+             bytes.reserve(srcs.size());
+             for (std::size_t i = 0; i < srcs.size(); ++i) {
+               py::buffer dst =
+                   py::reinterpret_borrow<py::buffer>(dsts[py::int_(i)]);
+               infos.push_back(dst.request());
+               const py::buffer_info &info = infos.back();
+               TI_ERROR_IF(
+                   info.readonly,
+                   "copy_graph_observations_to_host received a read-only "
+                   "buffer at index {}.",
+                   i);
+               TI_ERROR_IF(
+                   info.size < 0 || info.itemsize < 0,
+                   "copy_graph_observations_to_host received an invalid "
+                   "buffer at index {}.",
+                   i);
+               host_ptrs.push_back(info.ptr);
+               bytes.push_back(static_cast<std::size_t>(info.size) *
+                               static_cast<std::size_t>(info.itemsize));
+             }
+             py::gil_scoped_release release;
+             program->copy_graph_observations_to_host(
+                 const_srcs.data(), host_ptrs.data(), bytes.data(),
+                 const_srcs.size());
+           })
+      .def("_graph_observation_staging_stats", [](Program *program) {
+        const auto stats = program->graph_observation_staging_statistics();
+        py::dict result;
+        result["persistent_bytes"] = stats.persistent_bytes;
+        result["allocations"] = stats.allocations;
+        result["reuses"] = stats.reuses;
+        result["packed_batches"] = stats.packed_batches;
+        result["direct_batches"] = stats.direct_batches;
+        result["fallback_batches"] = stats.fallback_batches;
+        result["packed_payload_bytes"] = stats.packed_payload_bytes;
+        return result;
+      })
       .def("cuda_device_transform_available",
            &Program::cuda_device_transform_available)
       .def("cuda_toolkit_transform_available",
@@ -3279,7 +3369,10 @@ void export_lang(py::module &m) {
   auto jit_run_graph = [](aot::CompiledGraph *self,
                           const CompileConfig &compile_config,
                           const py::dict &pyargs,
-                          aot::CompiledGraphJITCache *cache) {
+                          aot::CompiledGraphJITCache *cache,
+                          Ndarray *bounded_predicate = nullptr,
+                          int bounded_max_iterations = 0,
+                          bool continue_while_nonzero = true) -> bool {
         std::unordered_map<std::string, aot::IValue> args;
         auto insert_scalar_arg = [&args](std::string arg_name,
                                          DataType expected_dtype,
@@ -3423,11 +3516,18 @@ void export_lang(py::module &m) {
         // serialized by Python. The cache owns the C++ transaction boundary;
         // Python objects passed in pyargs remain alive for this call.
         py::gil_scoped_release release;
+        if (bounded_predicate != nullptr) {
+          TI_ASSERT(cache != nullptr);
+          return self->jit_run_bounded_cuda_cached(
+              compile_config, args, *cache, bounded_predicate,
+              bounded_max_iterations, continue_while_nonzero);
+        }
         if (cache) {
           self->jit_run_cached(compile_config, args, *cache);
         } else {
           self->jit_run(compile_config, args);
         }
+        return true;
       };
 
   py::class_<aot::CompiledGraphJITCache>(m, "CompiledGraphJITCache")
@@ -3462,6 +3562,8 @@ void export_lang(py::module &m) {
               return "vulkan_record";
             case aot::CompiledGraphExecutionPath::vulkan_replay:
               return "vulkan_replay";
+            case aot::CompiledGraphExecutionPath::vulkan_patched_replay:
+              return "vulkan_patched_replay";
             case aot::CompiledGraphExecutionPath::none:
               return "none";
           }
@@ -3526,6 +3628,12 @@ void export_lang(py::module &m) {
         result["last_driver_error"] = stats.last_driver_error;
         result["retry_backoff_remaining"] =
             stats.retry_backoff_remaining;
+        result["effect_reads"] = stats.effect_reads;
+        result["effect_writes"] = stats.effect_writes;
+        result["dependency_barriers"] = stats.dependency_barriers;
+        result["exit_barriers"] = stats.exit_barriers;
+        result["barrier_deferrals"] = stats.barrier_deferrals;
+        result["rar_elisions"] = stats.rar_elisions;
         result["consecutive_transient_failures"] =
             stats.consecutive_transient_failures;
         result["diagnostics_previously_enabled"] =
@@ -3569,7 +3677,22 @@ void export_lang(py::module &m) {
                            const py::dict &pyargs,
                            aot::CompiledGraphJITCache &cache) {
              jit_run_graph(self, compile_config, pyargs, &cache);
-           });
+           })
+      .def("jit_run_bounded_cuda_cached",
+           [jit_run_graph](aot::CompiledGraph *self,
+                           const CompileConfig &compile_config,
+                           const py::dict &pyargs,
+                           aot::CompiledGraphJITCache &cache,
+                           Ndarray &predicate, int max_iterations,
+                           bool continue_while_nonzero) {
+             return jit_run_graph(
+                 self, compile_config, pyargs, &cache, &predicate,
+                 max_iterations, continue_while_nonzero);
+           },
+           py::arg("compile_config"), py::arg("args"),
+           py::arg("cache"), py::arg("predicate"),
+           py::arg("max_iterations"),
+           py::arg("continue_while_nonzero"));
 
   py::class_<Kernel>(m, "Kernel")
       .def("no_activate",

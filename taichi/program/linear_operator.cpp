@@ -3551,6 +3551,8 @@ OperatorBackendExecutionPath graph_action_backend_path(
       return OperatorBackendExecutionPath::vulkan_record;
     case aot::CompiledGraphExecutionPath::vulkan_replay:
       return OperatorBackendExecutionPath::vulkan_replay;
+    case aot::CompiledGraphExecutionPath::vulkan_patched_replay:
+      return OperatorBackendExecutionPath::vulkan_replay;
     case aot::CompiledGraphExecutionPath::none:
       return OperatorBackendExecutionPath::unavailable;
   }
