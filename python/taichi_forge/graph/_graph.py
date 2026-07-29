@@ -91,6 +91,17 @@ class GraphExecutionSegmentReport:
 
 
 @dataclass(frozen=True)
+class GraphMemoryReport:
+    """Known Graph-owned memory; driver-internal memory remains unknown."""
+
+    persistent_argument_bytes: int
+    persistent_observation_bytes: int
+    persistent_bytes: int
+    transient_temporary_bytes: int
+    opaque_driver_bytes: Optional[int]
+
+
+@dataclass(frozen=True)
 class GraphExecutionReport:
     """Stable, immutable snapshot returned by Graph.execution_stats().
 
@@ -119,6 +130,7 @@ class GraphExecutionReport:
     ordinary_fallback_segments: int
     counters_complete: bool
     segments: Tuple[GraphExecutionSegmentReport, ...]
+    memory: GraphMemoryReport
 
 
 @dataclass(frozen=True)
@@ -143,6 +155,13 @@ class GraphBoundedLoopReport:
     final_counter: Optional[int]
     native_upgrade_eligible: bool
     native_upgrade_reason: str
+    persistent_staging_bytes: int
+    staging_allocations: int
+    staging_reuses: int
+    packed_observation_batches: int
+    direct_observation_batches: int
+    staging_fallback_batches: int
+    packed_observation_bytes: int
 
 
 _COUNTER_FIELDS = (
@@ -223,7 +242,13 @@ def _backend_name(arch):
 
 
 def _execution_report(
-    definition, arch, lifecycle_state, instance_kind, backend_stats
+    definition,
+    arch,
+    lifecycle_state,
+    instance_kind,
+    backend_stats,
+    observation_staging_bytes=0,
+    transient_temporary_bytes=0,
 ):
     segments = []
     stats_cursor = 0
@@ -366,8 +391,20 @@ def _execution_report(
         else "mixed"
     )
     dependency_info = definition["dependency_info"]
+    persistent_argument_bytes = sum(
+        segment.persistent_argument_bytes for segment in cgraph_segments
+    )
+    memory = GraphMemoryReport(
+        persistent_argument_bytes=persistent_argument_bytes,
+        persistent_observation_bytes=int(observation_staging_bytes),
+        persistent_bytes=(
+            persistent_argument_bytes + int(observation_staging_bytes)
+        ),
+        transient_temporary_bytes=int(transient_temporary_bytes),
+        opaque_driver_bytes=None,
+    )
     return GraphExecutionReport(
-        schema_version=1,
+        schema_version=2,
         arch=arch,
         lifecycle_state=lifecycle_state,
         node_count=len(segments),
@@ -396,6 +433,7 @@ def _execution_report(
             segment.counters_complete for segment in segments
         ),
         segments=tuple(segments),
+        memory=memory,
     )
 
 
@@ -703,7 +741,7 @@ class _CompiledNativeGraphNode:
         return self.executable.debug_info
 
 
-def _bounded_scalar_values(values, names):
+def _bounded_scalar_values(values, names, *, use_transfer_planner):
     if len(values) != len(names):
         raise TaichiRuntimeError(
             "Bounded Graph loop observation names do not match values"
@@ -726,7 +764,11 @@ def _bounded_scalar_values(values, names):
             )
         sources.append(ndarray)
         hosts.append(host)
-    impl.get_runtime().prog.copy_ndarrays_to_host(sources, hosts)
+    program = impl.get_runtime().prog
+    if use_transfer_planner:
+        program.copy_graph_observations_to_host(sources, hosts)
+    else:
+        program.copy_ndarrays_to_host(sources, hosts)
     return (
         tuple(int(host.reshape(-1)[0]) for host in hosts),
         sum(host.nbytes for host in hosts),
@@ -946,6 +988,16 @@ class _CompiledBoundedLoopGraphNode:
         observation_batches = 0
         observation_scalar_count = 0
         device_to_host_bytes = 0
+        program = impl.get_runtime().prog
+        arch = impl.current_cfg().arch
+        use_transfer_planner = (
+            arch == _ti_core.Arch.vulkan
+            and os.environ.get(
+                "TI_GRAPH_OBSERVATION_TRANSFER_PLANNER", "1"
+            )
+            != "0"
+        )
+        transfer_before = program._graph_observation_staging_stats()
 
         def observe_control(boundary):
             nonlocal observation_batches
@@ -956,7 +1008,11 @@ class _CompiledBoundedLoopGraphNode:
             if counter_object is not None:
                 values.append(counter_object)
                 names.append(self.counter)
-            observed, byte_count = _bounded_scalar_values(values, names)
+            observed, byte_count = _bounded_scalar_values(
+                values,
+                names,
+                use_transfer_planner=use_transfer_planner,
+            )
             observation_batches += 1
             observation_scalar_count += len(observed)
             device_to_host_bytes += byte_count
@@ -977,7 +1033,9 @@ class _CompiledBoundedLoopGraphNode:
         else:
             if counter_object is not None:
                 observed, byte_count = _bounded_scalar_values(
-                    [counter_object], [self.counter]
+                    [counter_object],
+                    [self.counter],
+                    use_transfer_planner=use_transfer_planner,
                 )
                 observation_batches += 1
                 observation_scalar_count += 1
@@ -1060,7 +1118,6 @@ class _CompiledBoundedLoopGraphNode:
                 )
         else:
             logical = executed
-        arch = impl.current_cfg().arch
         cpu_arches = (_ti_core.Arch.x64, _ti_core.Arch.arm64)
         lowering = (
             "cuda_conditional_graph"
@@ -1071,6 +1128,11 @@ class _CompiledBoundedLoopGraphNode:
             if self.chunk_limit > 1
             else "portable_exact_replay"
         )
+        transfer_after = program._graph_observation_staging_stats()
+
+        def transfer_delta(name):
+            return int(transfer_after[name]) - int(transfer_before[name])
+
         self._last_report = GraphBoundedLoopReport(
             name=self.name,
             backend=_backend_name(_ti_core.arch_name(arch)),
@@ -1090,6 +1152,17 @@ class _CompiledBoundedLoopGraphNode:
             final_counter=final_counter,
             native_upgrade_eligible=self._native_upgrade_eligible,
             native_upgrade_reason=native_reason,
+            persistent_staging_bytes=int(transfer_after["persistent_bytes"]),
+            staging_allocations=transfer_delta("allocations"),
+            staging_reuses=transfer_delta("reuses"),
+            packed_observation_batches=transfer_delta("packed_batches"),
+            direct_observation_batches=(
+                transfer_delta("direct_batches")
+                if use_transfer_planner
+                else observation_batches
+            ),
+            staging_fallback_batches=transfer_delta("fallback_batches"),
+            packed_observation_bytes=transfer_delta("packed_payload_bytes"),
         )
 
     def invalidate_runtime(self):
@@ -2207,12 +2280,19 @@ class Graph:
                 lifecycle_state = "ready"
                 instance_kind = self._instance.debug_info["kind"]
                 backend_stats = self._instance.debug_graph_stats
+            observation_staging_bytes = 0
+            if lifecycle_state == "ready" and self._contains_bounded_loops_value:
+                observation_staging_bytes = int(
+                    impl.get_runtime()
+                    .prog._graph_observation_staging_stats()["persistent_bytes"]
+                )
             return _execution_report(
                 self._execution_definition,
                 self._execution_arch,
                 lifecycle_state,
                 instance_kind,
                 backend_stats,
+                observation_staging_bytes=observation_staging_bytes,
             )
 
     @property

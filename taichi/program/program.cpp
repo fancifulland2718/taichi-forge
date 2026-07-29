@@ -17,6 +17,7 @@
 #include "taichi/math/arithmetic.h"
 #include "taichi/rhi/common/host_memory_pool.h"
 #include "taichi/rhi/interop/external_sync.h"
+#include "taichi/util/environ_config.h"
 #ifdef TI_WITH_LLVM
 #include "taichi/rhi/cpu/cpu_device.h"
 #endif
@@ -7669,6 +7670,12 @@ void Program::finalize() {
         runtime_resource_submission_mutex_);
     close_dense_field_staging_resource();
   });
+  best_effort("close Graph observation staging", [&] {
+    std::lock_guard<std::recursive_mutex> submission_lock(
+        runtime_resource_submission_mutex_);
+    graph_observation_staging_.readback.reset();
+    graph_observation_staging_.capacity = 0;
+  });
   if (arch_uses_llvm(compile_config().arch) ||
       compile_config().arch == Arch::vulkan) {
     best_effort("finalize backend runtime",
@@ -8322,6 +8329,149 @@ void Program::copy_ndarrays_to_host(const Ndarray *const *srcs,
       static_cast<int>(device_ptrs.size()));
   TI_ERROR_IF(res != RhiResult::success,
               "copy_ndarrays_to_host failed: {}", res);
+}
+
+void Program::copy_graph_observations_to_host(
+    const Ndarray *const *srcs,
+    void *const *dsts,
+    const std::size_t *bytes,
+    std::size_t count) {
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  TI_ERROR_IF(count > 0 && (!srcs || !dsts || !bytes),
+              "copy_graph_observations_to_host received a null pointer table.");
+  if (count == 0) {
+    return;
+  }
+  TI_ERROR_IF(count > static_cast<std::size_t>(std::numeric_limits<int>::max()),
+              "copy_graph_observations_to_host count {} exceeds the RHI limit.",
+              count);
+  auto leases = acquire_ndarray_leases(srcs, count);
+  std::size_t total_bytes = 0;
+  bool portable_packed_layout = true;
+  for (std::size_t i = 0; i < count; ++i) {
+    TI_ERROR_IF(!srcs[i] || !dsts[i],
+                "copy_graph_observations_to_host received a null pointer at "
+                "index {}.",
+                i);
+    const std::size_t expected_bytes =
+        srcs[i]->get_nelement() * srcs[i]->get_element_size();
+    TI_ERROR_IF(bytes[i] != expected_bytes,
+                "copy_graph_observations_to_host expected {} bytes at index "
+                "{}, but received {}.",
+                expected_bytes, i, bytes[i]);
+    TI_ERROR_IF(bytes[i] > std::numeric_limits<std::size_t>::max() -
+                               total_bytes,
+                "copy_graph_observations_to_host byte count overflow.");
+    total_bytes += bytes[i];
+    portable_packed_layout &= bytes[i] % 4 == 0;
+  }
+  if (total_bytes == 0) {
+    return;
+  }
+  ScopedRuntimeTransferStatistics transfer_statistics(
+      this, RuntimeTransferKind::kDeviceToHost, total_bytes);
+
+  if (arch_is_cpu(compile_config().arch)) {
+    graph_observation_staging_.direct_batches += 1;
+    for (std::size_t i = 0; i < count; ++i) {
+      if (bytes[i] == 0) {
+        continue;
+      }
+      auto *src_ptr = reinterpret_cast<const uint8_t *>(
+          program_impl_->get_device_alloc_info_ptr(srcs[i]->ndarray_alloc_));
+      TI_ERROR_IF(!src_ptr,
+                  "CPU Graph observation received a null data pointer.");
+      std::memcpy(dsts[i], src_ptr, bytes[i]);
+    }
+    return;
+  }
+
+  if (compile_config().arch == Arch::vulkan) {
+    (void)flush_if_pending();
+  }
+  auto *device = program_impl_->get_compute_device();
+  std::vector<DevicePtr> device_ptrs;
+  std::vector<void *> host_ptrs;
+  std::vector<std::size_t> copy_sizes;
+  device_ptrs.reserve(count);
+  host_ptrs.reserve(count);
+  copy_sizes.reserve(count);
+  for (std::size_t i = 0; i < count; ++i) {
+    if (bytes[i] == 0) {
+      continue;
+    }
+    device_ptrs.push_back(srcs[i]->ndarray_alloc_.get_ptr(0));
+    host_ptrs.push_back(dsts[i]);
+    copy_sizes.push_back(bytes[i]);
+  }
+
+  constexpr std::size_t kMaxPersistentObservationBytes = 4096;
+  const bool persistent_staging_enabled =
+      compile_config().arch == Arch::vulkan && portable_packed_layout &&
+      total_bytes <= kMaxPersistentObservationBytes &&
+      get_environ_config("TI_GRAPH_PERSISTENT_OBSERVATION_STAGING", 1) != 0;
+  if (persistent_staging_enabled) {
+    bool reused = graph_observation_staging_.readback != nullptr &&
+                  graph_observation_staging_.capacity >= total_bytes;
+    if (!reused) {
+      std::size_t capacity = 64;
+      while (capacity < total_bytes) {
+        capacity *= 2;
+      }
+      auto [allocation, result] = device->allocate_memory_unique(
+          {capacity, /*host_write=*/false, /*host_read=*/true,
+           /*export_sharing=*/false, AllocUsage::None});
+      if (result == RhiResult::success) {
+        graph_observation_staging_.readback = std::move(allocation);
+        graph_observation_staging_.capacity = capacity;
+        graph_observation_staging_.allocations += 1;
+      } else {
+        graph_observation_staging_.fallback_batches += 1;
+      }
+    }
+    if (graph_observation_staging_.readback != nullptr &&
+        graph_observation_staging_.capacity >= total_bytes) {
+      if (reused) {
+        graph_observation_staging_.reuses += 1;
+      }
+      const RhiResult result = device->readback_data_packed(
+          device_ptrs.data(), host_ptrs.data(), copy_sizes.data(),
+          static_cast<int>(device_ptrs.size()),
+          graph_observation_staging_.readback->get_ptr(0),
+          graph_observation_staging_.capacity);
+      if (result == RhiResult::success) {
+        graph_observation_staging_.packed_batches += 1;
+        graph_observation_staging_.packed_payload_bytes += total_bytes;
+        return;
+      }
+      graph_observation_staging_.fallback_batches += 1;
+    }
+  } else {
+    graph_observation_staging_.direct_batches += 1;
+  }
+
+  const RhiResult result = device->readback_data(
+      device_ptrs.data(), host_ptrs.data(), copy_sizes.data(),
+      static_cast<int>(device_ptrs.size()));
+  TI_ERROR_IF(result != RhiResult::success,
+              "copy_graph_observations_to_host failed: {}", result);
+}
+
+GraphObservationStagingStatistics
+Program::graph_observation_staging_statistics() {
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  GraphObservationStagingStatistics result;
+  result.persistent_bytes = graph_observation_staging_.capacity;
+  result.allocations = graph_observation_staging_.allocations;
+  result.reuses = graph_observation_staging_.reuses;
+  result.packed_batches = graph_observation_staging_.packed_batches;
+  result.direct_batches = graph_observation_staging_.direct_batches;
+  result.fallback_batches = graph_observation_staging_.fallback_batches;
+  result.packed_payload_bytes =
+      graph_observation_staging_.packed_payload_bytes;
+  return result;
 }
 
 bool Program::cuda_device_transform_available() const {

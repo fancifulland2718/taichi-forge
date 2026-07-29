@@ -1492,6 +1492,57 @@ void export_lang(py::module &m) {
                  const_srcs.data(), host_ptrs.data(), bytes.data(),
                  const_srcs.size());
            })
+      .def("copy_graph_observations_to_host",
+           [](Program *program, const std::vector<Ndarray *> &srcs,
+              const py::sequence &dsts) {
+             TI_ERROR_IF(
+                 srcs.size() != static_cast<std::size_t>(py::len(dsts)),
+                 "copy_graph_observations_to_host received {} sources and {} "
+                 "destinations.",
+                 srcs.size(), py::len(dsts));
+             std::vector<const Ndarray *> const_srcs(srcs.begin(), srcs.end());
+             std::vector<py::buffer_info> infos;
+             std::vector<void *> host_ptrs;
+             std::vector<std::size_t> bytes;
+             infos.reserve(srcs.size());
+             host_ptrs.reserve(srcs.size());
+             bytes.reserve(srcs.size());
+             for (std::size_t i = 0; i < srcs.size(); ++i) {
+               py::buffer dst =
+                   py::reinterpret_borrow<py::buffer>(dsts[py::int_(i)]);
+               infos.push_back(dst.request());
+               const py::buffer_info &info = infos.back();
+               TI_ERROR_IF(
+                   info.readonly,
+                   "copy_graph_observations_to_host received a read-only "
+                   "buffer at index {}.",
+                   i);
+               TI_ERROR_IF(
+                   info.size < 0 || info.itemsize < 0,
+                   "copy_graph_observations_to_host received an invalid "
+                   "buffer at index {}.",
+                   i);
+               host_ptrs.push_back(info.ptr);
+               bytes.push_back(static_cast<std::size_t>(info.size) *
+                               static_cast<std::size_t>(info.itemsize));
+             }
+             py::gil_scoped_release release;
+             program->copy_graph_observations_to_host(
+                 const_srcs.data(), host_ptrs.data(), bytes.data(),
+                 const_srcs.size());
+           })
+      .def("_graph_observation_staging_stats", [](Program *program) {
+        const auto stats = program->graph_observation_staging_statistics();
+        py::dict result;
+        result["persistent_bytes"] = stats.persistent_bytes;
+        result["allocations"] = stats.allocations;
+        result["reuses"] = stats.reuses;
+        result["packed_batches"] = stats.packed_batches;
+        result["direct_batches"] = stats.direct_batches;
+        result["fallback_batches"] = stats.fallback_batches;
+        result["packed_payload_bytes"] = stats.packed_payload_bytes;
+        return result;
+      })
       .def("cuda_device_transform_available",
            &Program::cuda_device_transform_available)
       .def("cuda_toolkit_transform_available",

@@ -837,6 +837,25 @@ class RHI_DLL_EXPORT Device {
       int num_alloc = 1,
       const std::vector<StreamSemaphore> &wait_sema = {}) noexcept;
 
+  /**
+   * Read several device ranges through one caller-owned host-readable staging
+   * allocation. The copy is synchronous, but the staging allocation may be
+   * retained and reused by a higher-level transfer plan.
+   *
+   * This conservative first contract accepts only four-byte aligned source
+   * offsets and sizes, matching the portable buffer-copy requirements used by
+   * Graph scalar observations. Other requests return `not_supported` so the
+   * caller can use readback_data() without changing semantics.
+   */
+  RhiResult readback_data_packed(
+      DevicePtr *device_ptr,
+      void **data,
+      size_t *size,
+      int num_alloc,
+      DevicePtr staging,
+      size_t staging_size,
+      const std::vector<StreamSemaphore> &wait_sema = {}) noexcept;
+
   // Each thraed will acquire its own stream
   virtual Stream *get_compute_stream() = 0;
 

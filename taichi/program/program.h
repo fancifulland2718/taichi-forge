@@ -59,6 +59,16 @@ struct CudaSparseAssemblyDispatchInfo {
   bool workspace_growth_synchronized{false};
 };
 
+struct GraphObservationStagingStatistics {
+  std::uint64_t persistent_bytes{0};
+  std::uint64_t allocations{0};
+  std::uint64_t reuses{0};
+  std::uint64_t packed_batches{0};
+  std::uint64_t direct_batches{0};
+  std::uint64_t fallback_batches{0};
+  std::uint64_t packed_payload_bytes{0};
+};
+
 class Program;
 class ExternalSynchronizationDomain;
 namespace storage {
@@ -704,7 +714,11 @@ class TI_DLL_EXPORT Program {
                              void *const *dsts,
                              const std::size_t *bytes,
                              std::size_t count);
-
+  void copy_graph_observations_to_host(const Ndarray *const *srcs,
+                                       void *const *dsts,
+                                       const std::size_t *bytes,
+                                       std::size_t count);
+  GraphObservationStagingStatistics graph_observation_staging_statistics();
 
   bool cuda_device_transform_available() const;
 
@@ -3399,6 +3413,16 @@ class TI_DLL_EXPORT Program {
   DenseFieldStagingHandle dense_field_staging_handle_;
   DenseFieldStagingLease dense_field_staging_lease_;
   bool dense_field_staging_open_{true};
+  struct GraphObservationStagingState {
+    DeviceAllocationUnique readback;
+    std::size_t capacity{0};
+    std::uint64_t allocations{0};
+    std::uint64_t reuses{0};
+    std::uint64_t packed_batches{0};
+    std::uint64_t direct_batches{0};
+    std::uint64_t fallback_batches{0};
+    std::uint64_t packed_payload_bytes{0};
+  } graph_observation_staging_;
   std::atomic<std::uint64_t> dense_storage_direct_submissions_{0};
   std::atomic<std::uint64_t> dense_storage_resolved_bindings_{0};
   std::atomic<std::uint64_t> dense_storage_resolved_bytes_{0};
