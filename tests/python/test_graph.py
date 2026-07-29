@@ -1641,6 +1641,234 @@ def test_vulkan_cgraph_replay_slot_saturation_telemetry_is_monotonic():
     )
 
 
+@test_utils.test(arch=ti.vulkan)
+def test_vulkan_cgraph_patches_same_structure_ndarray_bindings():
+    @ti.kernel
+    def add_bias(
+        values: ti.types.ndarray(dtype=ti.i32, ndim=1), bias: ti.i32
+    ):
+        for i in values:
+            values[i] += bias
+
+    sym_values = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
+    )
+    sym_bias = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "bias", ti.i32)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(add_bias, sym_values, sym_bias)
+    builder.dispatch(add_bias, sym_values, sym_bias)
+    graph = builder.compile()
+    first = ti.ndarray(ti.i32, shape=256)
+    second = ti.ndarray(ti.i32, shape=256)
+    first.fill(1)
+    second.fill(10)
+
+    graph.execution_stats()
+    graph.run({"values": first, "bias": 2})
+    ti.sync()
+    first_stats = graph._graph_stats[0]
+    assert first_stats["records"] == 1
+    assert first_stats["last_path"] == "vulkan_record"
+    first_persistent_bytes = first_stats["known_persistent_argument_bytes"]
+    assert first_persistent_bytes > 0
+
+    graph.run({"values": second, "bias": 3})
+    ti.sync()
+    patched_stats = graph._graph_stats[0]
+    patch_supported = patched_stats["last_path"] == "vulkan_patched_replay"
+    assert (
+        patched_stats["known_persistent_argument_bytes"]
+        == first_persistent_bytes
+    )
+    if patch_supported:
+        assert patched_stats["records"] == 1
+        assert patched_stats["patched_replays"] == 1
+        assert patched_stats["replays"] == 1
+    else:
+        assert patched_stats["records"] == 2
+        assert patched_stats["patched_replays"] == 0
+        assert patched_stats["replays"] == 0
+        assert patched_stats["last_path"] == "vulkan_record"
+
+    graph.run({"values": second, "bias": 4})
+    ti.sync()
+    replay_stats = graph._graph_stats[0]
+    assert replay_stats["records"] == (1 if patch_supported else 2)
+    assert replay_stats["patched_replays"] == (1 if patch_supported else 0)
+    assert replay_stats["replays"] == (2 if patch_supported else 1)
+    assert replay_stats["last_path"] == "vulkan_replay"
+    np.testing.assert_array_equal(
+        first.to_numpy(), np.full(256, 5, dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        second.to_numpy(), np.full(256, 24, dtype=np.int32)
+    )
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_vulkan_cgraph_structural_shape_change_records_again():
+    @ti.kernel
+    def add_one(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in values:
+            values[i] += 1
+
+    sym_values = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(add_one, sym_values)
+    builder.dispatch(add_one, sym_values)
+    graph = builder.compile()
+    small = ti.ndarray(ti.i32, shape=64)
+    large = ti.ndarray(ti.i32, shape=128)
+    replacement = ti.ndarray(ti.i32, shape=64)
+    small.fill(0)
+    large.fill(10)
+    replacement.fill(20)
+
+    graph.execution_stats()
+    graph.run({"values": small})
+    ti.sync()
+    assert graph._graph_stats[0]["records"] == 1
+
+    graph.run({"values": large})
+    ti.sync()
+    recapture_stats = graph._graph_stats[0]
+    assert recapture_stats["records"] == 2
+    assert recapture_stats["last_path"] == "vulkan_record"
+    persistent_bytes = recapture_stats["known_persistent_argument_bytes"]
+
+    graph.run({"values": replacement})
+    ti.sync()
+    replacement_stats = graph._graph_stats[0]
+    patch_supported = (
+        replacement_stats["last_path"] == "vulkan_patched_replay"
+    )
+    assert replacement_stats["records"] == (2 if patch_supported else 3)
+    assert (
+        replacement_stats["known_persistent_argument_bytes"]
+        == persistent_bytes
+    )
+    np.testing.assert_array_equal(
+        small.to_numpy(), np.full(64, 2, dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        large.to_numpy(), np.full(128, 12, dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        replacement.to_numpy(), np.full(64, 22, dtype=np.int32)
+    )
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_vulkan_cgraph_alias_topology_change_records_again():
+    @ti.kernel
+    def copy_increment(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        destination: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in source:
+            destination[i] = source[i] + 1
+
+    sym_source = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "source", ti.i32, ndim=1
+    )
+    sym_destination = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "destination", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(copy_increment, sym_source, sym_destination)
+    builder.dispatch(copy_increment, sym_source, sym_destination)
+    graph = builder.compile()
+    aliased = ti.ndarray(ti.i32, shape=64)
+    source = ti.ndarray(ti.i32, shape=64)
+    destination = ti.ndarray(ti.i32, shape=64)
+    replacement_source = ti.ndarray(ti.i32, shape=64)
+    replacement_destination = ti.ndarray(ti.i32, shape=64)
+    aliased.fill(3)
+    source.fill(7)
+    destination.fill(0)
+    replacement_source.fill(11)
+    replacement_destination.fill(0)
+
+    graph.execution_stats()
+    graph.run({"source": aliased, "destination": aliased})
+    ti.sync()
+    assert graph._graph_stats[0]["records"] == 1
+
+    graph.run({"source": source, "destination": destination})
+    ti.sync()
+    distinct_stats = graph._graph_stats[0]
+    assert distinct_stats["records"] == 2
+    assert distinct_stats["last_path"] == "vulkan_record"
+    persistent_bytes = distinct_stats["known_persistent_argument_bytes"]
+
+    graph.run(
+        {
+            "source": replacement_source,
+            "destination": replacement_destination,
+        }
+    )
+    ti.sync()
+    replacement_stats = graph._graph_stats[0]
+    patch_supported = (
+        replacement_stats["last_path"] == "vulkan_patched_replay"
+    )
+    assert replacement_stats["records"] == (2 if patch_supported else 3)
+    assert (
+        replacement_stats["known_persistent_argument_bytes"]
+        == persistent_bytes
+    )
+    np.testing.assert_array_equal(
+        aliased.to_numpy(), np.full(64, 5, dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        destination.to_numpy(), np.full(64, 8, dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        replacement_destination.to_numpy(), np.full(64, 12, dtype=np.int32)
+    )
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_vulkan_cgraph_structural_patch_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("TI_VULKAN_GRAPH_STRUCTURAL_PATCH", "0")
+
+    @ti.kernel
+    def add_one(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in values:
+            values[i] += 1
+
+    sym_values = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(add_one, sym_values)
+    builder.dispatch(add_one, sym_values)
+    graph = builder.compile()
+    first = ti.ndarray(ti.i32, shape=64)
+    second = ti.ndarray(ti.i32, shape=64)
+    first.fill(0)
+    second.fill(10)
+
+    graph.execution_stats()
+    graph.run({"values": first})
+    ti.sync()
+    graph.run({"values": second})
+    ti.sync()
+    stats = graph._graph_stats[0]
+    assert stats["records"] == 2
+    assert stats["patched_replays"] == 0
+    assert stats["replays"] == 0
+    assert stats["last_path"] == "vulkan_record"
+    np.testing.assert_array_equal(
+        first.to_numpy(), np.full(64, 2, dtype=np.int32)
+    )
+    np.testing.assert_array_equal(
+        second.to_numpy(), np.full(64, 12, dtype=np.int32)
+    )
+
+
 @pytest.mark.parametrize("hazard_planner", [False, True])
 @test_utils.test(arch=ti.vulkan)
 def test_vulkan_cgraph_hazard_planner_preserves_dependency_chains(
