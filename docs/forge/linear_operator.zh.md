@@ -619,14 +619,18 @@ plan = ti.linalg.experimental.SolvePlan(
   `bounded_mode="auto"` 会在资格满足时选用 device 侧精确终止的 CUDA conditional
   Graph；原生路径不可用时改用带 host check 的可复用 Graph chunk。显式
   `"host_each_iteration"` 仍作为关闭自动路径的选项。
-- 其它 CUDA CG/PCG provider 以及 CUDA MINRES/BiCGSTAB 默认使用
-  `"host_each_iteration"`，并支持 `"host_check_every_k"`，其中 `check_interval` 可为
-  4 或 8。分块策略把 recurrence scalar 保留在 device 上，每个 chunk 只读取一次
-  terminal snapshot。CUDA GMRES/FGMRES 默认使用 `"host_check_every_k"`，并要求
-  `check_interval == restart`。
-- Vulkan 默认使用 `"fixed_budget_masked"`，还支持
-  `"host_check_every_k"`。CG/PCG/MINRES/BiCGSTAB 接受 interval 4 或 8；
-  GMRES/FGMRES 要求 `check_interval == restart`。两种策略均支持 `atol`、`rtol`
+- 具备原生 replay 资格的 CUDA fixed stored f32 MINRES/BiCGSTAB 默认使用
+  `"host_check_every_k"`，且 `check_interval=4`。其它 CUDA CG/PCG 与
+  MINRES/BiCGSTAB provider 默认使用 `"host_each_iteration"`；两种策略都可显式
+  选择，K 可设为 4 或 8。分块执行把 recurrence scalar 保留在 device 上，每个
+  chunk 只读取一次 terminal snapshot。
+- CUDA GMRES/FGMRES 默认使用 `"host_check_every_k"`，并要求
+  `check_interval == restart`。stored identity-preconditioned GMRES 会录制可复用的
+  restart-cycle Graph；FGMRES 与其它不可录制的 provider 组合保持 direct submission。
+- 具备原生 replay 资格的 Vulkan fixed stored f32 CG/PCG/MINRES/BiCGSTAB 默认使用
+  K=4 的 `"host_check_every_k"`；stored identity-preconditioned GMRES 使用同一默认
+  策略，并要求 `check_interval == restart`。其它 Vulkan provider（包括 FGMRES）
+  默认使用 `"fixed_budget_masked"`。两种策略仍可显式选择，并支持 `atol`、`rtol`
   及其组合后的 effective tolerance。
 
 对于 fixed stored f32 CSR/BSR，CUDA 的 `host_check_every_k` 以及 Vulkan 的
@@ -672,6 +676,10 @@ tail。Vulkan fixed-budget execution 可以执行完整的 `max_iterations`，�
 
 `plan.execution_capabilities()` 返回执行策略矩阵、条件执行不可用时的结构化原因，
 以及当前选定的 `default_execution_policy`。
+`automatic_solver_replay` 对象报告是否已选择 replay、operator 与 preconditioner
+组合是否满足资格，以及具体 backend primitive（`cuda_conditional_graph_or_chunk_replay`、
+`cuda_graph_chunk_replay` 或 `vulkan_command_replay`）。solve 完成后的 statistics
+仍是实际 replay 或 direct-submission 路径的权威记录。
 直接使用 `"device_convergent"` 仅适用于 CUDA 上的单系统 stored f32 CSR/BSR CG/PCG，
 并要求 driver、conditional-Graph 入口、device setter、provider capture 与 cuBLAS
 workspace 均满足资格。显式直接请求不可用时会失败，不做 fallback。

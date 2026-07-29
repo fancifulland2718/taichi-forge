@@ -631,6 +631,7 @@ def test_solver_conditional_execution_capabilities_are_explicit():
     batched_capabilities = batched.execution_capabilities()
     assert not single_capabilities["explicit_request_fallback"]
     assert not batched_capabilities["automatic_policy_change"]
+    assert not batched_capabilities["automatic_solver_replay"]["selected"]
     assert not batched_capabilities["explicit_request_fallback"]
 
     batched_conditional = batched_capabilities["device_convergent"]
@@ -645,6 +646,10 @@ def test_solver_conditional_execution_capabilities_are_explicit():
         assert single_capabilities["automatic_policy_change"]
         assert single_capabilities["default_execution_policy"] == (
             "bounded_convergent"
+        )
+        assert single_capabilities["automatic_solver_replay"]["selected"]
+        assert single_capabilities["automatic_solver_replay"]["primitive"] == (
+            "cuda_conditional_graph_or_chunk_replay"
         )
         assert single.execution_policy == "bounded_convergent"
         assert conditional["primitive"] == "cuda_conditional_graph"
@@ -664,10 +669,15 @@ def test_solver_conditional_execution_capabilities_are_explicit():
             assert not conditional["supported"]
             assert conditional["unsupported_reason"] != "none"
     elif arch == ti.vulkan:
-        assert not single_capabilities["automatic_policy_change"]
+        assert single_capabilities["automatic_policy_change"]
         assert single_capabilities["default_execution_policy"] == (
-            "fixed_budget_masked"
+            "host_check_every_k"
         )
+        assert single_capabilities["automatic_solver_replay"]["selected"]
+        assert single_capabilities["automatic_solver_replay"]["primitive"] == (
+            "vulkan_command_replay"
+        )
+        assert single.execution_policy == "host_check_every_k"
         assert not conditional["supported"]
         assert conditional["rhi_primitive_compiled"]
         assert not conditional["runtime_path_compiled"]
@@ -678,6 +688,7 @@ def test_solver_conditional_execution_capabilities_are_explicit():
         )
     else:
         assert not single_capabilities["automatic_policy_change"]
+        assert not single_capabilities["automatic_solver_replay"]["selected"]
         assert single_capabilities["default_execution_policy"] == (
             "host_each_iteration"
         )

@@ -1707,7 +1707,13 @@ def _validate_solve_controls(dtype, max_iterations, atol, rtol):
 
 
 def _solver_execution_capabilities(
-    program, provider_kind, *, batched, method=None, dtype=None
+    program,
+    provider_kind,
+    *,
+    batched,
+    method=None,
+    dtype=None,
+    preconditioner_replay_qualified=True,
 ):
     arch = program.config().arch
     cpu_arches = (_ti_core.Arch.x64, _ti_core.Arch.arm64)
@@ -1798,6 +1804,14 @@ def _solver_execution_capabilities(
         and is_cuda
         and cuda_conditional["fully_available"]
     )
+    native_replay_qualified = (
+        not batched
+        and provider_kind == "stored"
+        and preconditioner_replay_qualified
+        and dtype == f32
+        and method in ("cg", "pcg", "minres", "bicgstab", "gmres")
+        and (is_cuda or is_vulkan)
+    )
     if batched:
         default_execution_policy = (
             "host_each_iteration"
@@ -1806,7 +1820,11 @@ def _solver_execution_capabilities(
         )
     elif is_cuda and bounded_qualified:
         default_execution_policy = "bounded_convergent"
-    elif is_cuda and method in ("gmres", "fgmres"):
+    elif is_cuda and (
+        native_replay_qualified or method in ("gmres", "fgmres")
+    ):
+        default_execution_policy = "host_check_every_k"
+    elif is_vulkan and native_replay_qualified:
         default_execution_policy = "host_check_every_k"
     elif is_vulkan:
         default_execution_policy = "fixed_budget_masked"
@@ -1861,8 +1879,37 @@ def _solver_execution_capabilities(
         "default_execution_policy": default_execution_policy,
         "automatic_policy_change": (
             not batched
-            and default_execution_policy == "bounded_convergent"
+            and (
+                default_execution_policy == "bounded_convergent"
+                or native_replay_qualified
+            )
         ),
+        "automatic_solver_replay": {
+            "selected": (
+                not batched
+                and (
+                    default_execution_policy == "bounded_convergent"
+                    or native_replay_qualified
+                )
+            ),
+            "qualified": native_replay_qualified or (
+                bounded_qualified and is_cuda
+            ),
+            "preconditioner_qualified": preconditioner_replay_qualified,
+            "primitive": (
+                "cuda_conditional_graph_or_chunk_replay"
+                if is_cuda and bounded_qualified
+                else (
+                    "cuda_graph_chunk_replay"
+                    if is_cuda and native_replay_qualified
+                    else (
+                        "vulkan_command_replay"
+                        if is_vulkan and native_replay_qualified
+                        else "none"
+                    )
+                )
+            ),
+        },
         "explicit_request_fallback": False,
     }
 
@@ -2377,6 +2424,13 @@ class SolvePlan:
         self.atol = atol
         self.rtol = rtol
         self.preconditioner = preconditioner
+        self._preconditioner_replay_qualified = (
+            preconditioner is None
+            or (
+                method in ("pcg", "minres")
+                and isinstance(preconditioner, str)
+            )
+        )
         if method in ("gmres", "fgmres"):
             if restart is None:
                 restart = 16
@@ -2438,17 +2492,25 @@ class SolvePlan:
         self.operator = None
         self._program = None
 
+    def _execution_policy_capabilities(self):
+        return _solver_execution_capabilities(
+            self._program,
+            self.operator._provider_kind,
+            batched=False,
+            method=self.method,
+            dtype=self.operator.dtype,
+            preconditioner_replay_qualified=(
+                self._preconditioner_replay_qualified
+            ),
+        )
+
     def _normalize_execution_policy(self, policy, check_interval):
         arch = self._program.config().arch
         cpu_arches = (_ti_core.Arch.x64, _ti_core.Arch.arm64)
         if policy is None:
-            policy = _solver_execution_capabilities(
-                self._program,
-                self.operator._provider_kind,
-                batched=False,
-                method=self.method,
-                dtype=self.operator.dtype,
-            )["default_execution_policy"]
+            policy = self._execution_policy_capabilities()[
+                "default_execution_policy"
+            ]
         if not isinstance(policy, str):
             raise TaichiRuntimeError("execution_policy must be a string")
         policy = policy.casefold()
@@ -2461,13 +2523,7 @@ class SolvePlan:
                 "execution_policy='bounded_convergent'"
             )
         if policy == "bounded_convergent":
-            capabilities = _solver_execution_capabilities(
-                self._program,
-                self.operator._provider_kind,
-                batched=False,
-                method=self.method,
-                dtype=self.operator.dtype,
-            )
+            capabilities = self._execution_policy_capabilities()
             bounded = capabilities["bounded_convergent"]
             if not bounded["supported"]:
                 raise TaichiRuntimeError(
@@ -2494,13 +2550,9 @@ class SolvePlan:
                     self.bounded_mode == "native_required"
                 )
         if policy == "device_convergent":
-            capability = _solver_execution_capabilities(
-                self._program,
-                self.operator._provider_kind,
-                batched=False,
-                method=self.method,
-                dtype=self.operator.dtype,
-            )["device_convergent"]
+            capability = self._execution_policy_capabilities()[
+                "device_convergent"
+            ]
             if not capability["supported"]:
                 raise TaichiRuntimeError(
                     "SolvePlan execution_policy='device_convergent' is "
@@ -2630,11 +2682,13 @@ class SolvePlan:
         return policy, check_interval
 
     def _configure_cuda_solver(self, solver):
-        solver._configure_execution_policy(
+        arguments = (
             self._native_execution_policy,
             self.check_interval,
-            self._require_native_device_convergent,
         )
+        if self.method in ("cg", "pcg"):
+            arguments += (self._require_native_device_convergent,)
+        solver._configure_execution_policy(*arguments)
         return solver
 
     def _configure_vulkan_solver(self, solver):
@@ -3564,13 +3618,7 @@ class SolvePlan:
         if self.operator is None or self._solver is None:
             raise TaichiRuntimeError("SolvePlan cannot be used after ti.reset()")
         self.operator._ensure_valid()
-        result = _solver_execution_capabilities(
-            self._program,
-            self.operator._provider_kind,
-            batched=False,
-            method=self.method,
-            dtype=self.operator.dtype,
-        )
+        result = self._execution_policy_capabilities()
         result["vector_io"] = _vector_io_capabilities()
         return result
 

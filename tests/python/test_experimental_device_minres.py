@@ -85,9 +85,11 @@ def test_device_minres_stored_identity_replay_and_terminal_contracts():
         max_iterations=20,
         atol=1e-6,
         rtol=1e-6,
-        execution_policy="host_check_every_k",
-        check_interval=4,
     )
+    capabilities = plan.execution_capabilities()
+    assert capabilities["default_execution_policy"] == "host_check_every_k"
+    assert capabilities["automatic_policy_change"]
+    assert capabilities["automatic_solver_replay"]["selected"]
 
     first = plan.solve(rhs, out=output)
     output.fill(0)
@@ -436,7 +438,7 @@ def test_device_minres_compiled_kernel_graph_and_fixed_linear_plan():
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
-def test_device_minres_vulkan_default_is_fixed_budget_masked():
+def test_device_minres_vulkan_default_uses_command_replay_chunks():
     dense = np.asarray([[2.0, 3.0], [3.0, 2.0]], dtype=np.float32)
     operator = _indefinite_operator(_fixed_csr(dense))
     exact = np.asarray([1.25, -0.75], dtype=np.float32)
@@ -447,10 +449,11 @@ def test_device_minres_vulkan_default_is_fixed_budget_masked():
     assert result.converged
     stats = result_plan.statistics()
     assert stats["identity"]["solver_execution_policy"] == (
-        "fixed_budget_masked"
+        "host_check_every_k"
     )
-    assert stats["identity"]["host_check_interval"] == 16
-    assert stats["operations"]["host_scalar_readbacks"] == 1
-    assert stats["operations"]["host_synchronizations"] == 1
-    assert stats["operations"]["executed_iterations"] == 16
-    assert stats["operations"]["logical_iterations"] < 16
+    assert stats["identity"]["host_check_interval"] == 4
+    assert stats["identity"]["solver_graph_enabled"]
+    assert stats["operations"]["host_scalar_readbacks"] == 2
+    assert stats["operations"]["host_synchronizations"] == 2
+    assert stats["operations"]["executed_iterations"] == 4
+    assert stats["operations"]["logical_iterations"] <= 4

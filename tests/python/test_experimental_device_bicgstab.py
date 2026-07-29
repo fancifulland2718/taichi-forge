@@ -94,9 +94,11 @@ def test_device_bicgstab_stored_replay_counts_and_terminal_contracts():
         max_iterations=24,
         atol=1e-6,
         rtol=1e-6,
-        execution_policy="host_check_every_k",
-        check_interval=4,
     )
+    capabilities = plan.execution_capabilities()
+    assert capabilities["default_execution_policy"] == "host_check_every_k"
+    assert capabilities["automatic_policy_change"]
+    assert capabilities["automatic_solver_replay"]["selected"]
 
     first = plan.solve(rhs, out=output)
     output.fill(0)

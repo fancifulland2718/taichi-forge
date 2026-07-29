@@ -703,15 +703,21 @@ plan = ti.linalg.experimental.SolvePlan(
   an exact device-side CUDA conditional Graph; an unavailable native path
   falls back to reusable Graph chunks with host checks. Explicit
   `"host_each_iteration"` remains available as an opt-out.
-- Other CUDA CG/PCG providers and CUDA MINRES/BiCGSTAB default to
-  `"host_each_iteration"`; they also support `"host_check_every_k"` with
-  `check_interval=4` or `8`. That policy keeps recurrence scalars on the
-  device and reads one terminal snapshot per chunk. CUDA GMRES/FGMRES default
-  to `"host_check_every_k"` and require `check_interval == restart`.
-- Vulkan defaults to `"fixed_budget_masked"` and also supports
-  `"host_check_every_k"`. CG/PCG/MINRES/BiCGSTAB accept intervals 4 or 8;
-  GMRES/FGMRES require `check_interval == restart`. Both policies support `atol`,
-  `rtol`, and their combined effective tolerance.
+- Replay-qualified CUDA fixed stored f32 MINRES/BiCGSTAB defaults to
+  `"host_check_every_k"` with `check_interval=4`. Other CUDA CG/PCG and
+  MINRES/BiCGSTAB providers default to `"host_each_iteration"`; both policies
+  remain explicit opt-in or opt-out choices, and K may be 4 or 8. Chunked
+  execution keeps recurrence scalars on the device and reads one terminal
+  snapshot per chunk.
+- CUDA GMRES/FGMRES defaults to `"host_check_every_k"` and requires
+  `check_interval == restart`. Stored identity-preconditioned GMRES records a
+  reusable restart-cycle Graph; FGMRES and other non-recordable provider
+  combinations preserve direct submission.
+- Replay-qualified Vulkan fixed stored f32 CG/PCG/MINRES/BiCGSTAB defaults to
+  `"host_check_every_k"` with K=4; stored identity-preconditioned GMRES uses
+  the same default with `check_interval == restart`. Other Vulkan providers,
+  including FGMRES, default to `"fixed_budget_masked"`. Both policies remain
+  available and support `atol`, `rtol`, and their combined effective tolerance.
 
 For fixed stored f32 CSR/BSR, CUDA `host_check_every_k` and Vulkan
 `host_check_every_k`/`fixed_budget_masked` record supported CG/PCG/MINRES and
@@ -766,8 +772,14 @@ plan construction; they do not silently fall back.
 
 `plan.execution_capabilities()` reports the policy matrix and a structured
 reason for unavailable conditional execution, together with the selected
-`default_execution_policy`. Direct `"device_convergent"` execution is qualified
-only for single-system stored f32 CSR/BSR CG/PCG on CUDA when the driver,
+`default_execution_policy`.
+The `automatic_solver_replay` object reports whether replay was selected,
+whether the operator and preconditioner combination is qualified, and the
+backend primitive (`cuda_conditional_graph_or_chunk_replay`,
+`cuda_graph_chunk_replay`, or `vulkan_command_replay`). Post-solve statistics
+remain authoritative for the actual replay or direct-submission path.
+Direct `"device_convergent"` execution is qualified only for single-system
+stored f32 CSR/BSR CG/PCG on CUDA when the driver,
 conditional-Graph entry points, device setter, provider capture, and cuBLAS
 workspace requirements are all satisfied. An explicit direct request fails
 without fallback. The default `"bounded_convergent"` policy instead attempts
