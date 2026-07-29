@@ -20,7 +20,10 @@ from taichi_forge.types._argument_descriptor import (
     describe_element_type,
 )
 from taichi_forge.types.texture_type import FORMAT2TY_CH, TY_CH2FORMAT
-from taichi_forge.graph._native import compile_native_graph_node
+from taichi_forge.graph._native import (
+    NativeGraphBackendRecorder,
+    compile_native_graph_node,
+)
 from taichi_forge.graph._ir import (
     BoundedLoopRegion,
     DispatchNode,
@@ -581,10 +584,20 @@ class _CompiledCGraphNode:
         dispatch_count,
         runtime_arg_names=(),
         ir_node=None,
+        recording_dispatches=(),
+        lifetime_leases=(),
+        source_native_count=0,
+        region_kind="cgraph",
     ):
         self.compiled_graph = compiled_graph
         self.dispatch_count = dispatch_count
         self.runtime_arg_names = frozenset(runtime_arg_names)
+        self.recording_dispatches = tuple(
+            (kernel, tuple(args)) for kernel, args in recording_dispatches
+        )
+        self.lifetime_leases = tuple(lifetime_leases)
+        self.source_native_count = int(source_native_count)
+        self.region_kind = region_kind
         self.ir_node = ir_node or SequentialRegion(
             tuple(
                 DispatchNode(name=f"dispatch_{index}")
@@ -626,23 +639,64 @@ class _CompiledCGraphNode:
 
     @property
     def debug_info(self):
-        return {"kind": "cgraph", "dispatch_count": self.dispatch_count}
+        info = {"kind": self.region_kind, "dispatch_count": self.dispatch_count}
+        if self.source_native_count:
+            info["lowered_native_count"] = self.source_native_count
+        return info
 
 
 class _CompiledNativeGraphNode:
-    needs_runtime_args = False
-    runtime_arg_names = frozenset()
     snode_tree_dependencies = frozenset()
     snode_tree_dependency_info = frozenset()
+    dispatch_count = 0
+    source_native_count = 1
+    region_kind = "native"
 
     def __init__(self, executable):
         self.executable = executable
         self.ir_node = getattr(
             executable, "graph_ir_node", NativeCallNode(type(executable).__name__)
         )
+        schema = tuple(executable.runtime_arg_schema)
+        if not all(isinstance(binding, RuntimeBinding) for binding in schema):
+            raise TaichiRuntimeError(
+                "Native Graph runtime_arg_schema must contain RuntimeBinding values"
+            )
+        if any(not binding.required for binding in schema):
+            raise TaichiRuntimeError(
+                "Optional native Graph runtime arguments are not supported"
+            )
+        self.runtime_arg_names = frozenset(binding.name for binding in schema)
+        self.needs_runtime_args = bool(self.runtime_arg_names)
+        self.backend_recorder = executable.backend_recorder
+        if self.backend_recorder is not None and not isinstance(
+            self.backend_recorder, NativeGraphBackendRecorder
+        ):
+            raise TaichiRuntimeError(
+                "Native Graph backend_recorder must implement "
+                "NativeGraphBackendRecorder"
+            )
+        self.lifetime_leases = (
+            executable,
+            *tuple(executable.lifetime_leases),
+        )
+        if self.backend_recorder is not None:
+            recorder_names = frozenset().union(
+                *(
+                    _runtime_arg_names(args)
+                    for _, args in self.backend_recorder.dispatches
+                )
+            )
+            if recorder_names != self.runtime_arg_names:
+                raise TaichiRuntimeError(
+                    "Native Graph recorder arguments must match runtime_arg_schema"
+                )
 
     def run(self, context):
-        self.executable.run()
+        if self.needs_runtime_args:
+            self.executable.run(context.runtime_args())
+        else:
+            self.executable.run()
 
     @property
     def debug_info(self):
@@ -1070,9 +1124,117 @@ class _CompiledBoundedLoopGraphNode:
         }
 
 
+def _recordable_backend_dispatches(node, backend):
+    if isinstance(node, _CompiledCGraphNode):
+        if (
+            node.dispatch_count == 0
+            or len(node.recording_dispatches) != node.dispatch_count
+        ):
+            return None
+        return node.recording_dispatches
+    if not isinstance(node, _CompiledNativeGraphNode):
+        return None
+    recorder = node.backend_recorder
+    if recorder is None or not recorder.supports_backend(backend):
+        return None
+    dispatches = tuple(recorder.dispatches)
+    return dispatches or None
+
+
+def _lower_mixed_backend_regions(nodes):
+    backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
+    nodes = tuple(nodes)
+    lowered = []
+    mixed_region_count = 0
+    lowered_native_count = 0
+    cursor = 0
+    while cursor < len(nodes):
+        if _recordable_backend_dispatches(nodes[cursor], backend) is None:
+            lowered.append(nodes[cursor])
+            cursor += 1
+            continue
+
+        end = cursor
+        region = []
+        while end < len(nodes):
+            dispatches = _recordable_backend_dispatches(nodes[end], backend)
+            if dispatches is None:
+                break
+            region.append((nodes[end], dispatches))
+            end += 1
+
+        has_cgraph = any(
+            isinstance(node, _CompiledCGraphNode) for node, _ in region
+        )
+        has_native = any(
+            isinstance(node, _CompiledNativeGraphNode) for node, _ in region
+        )
+        if len(region) < 2 or not (has_cgraph and has_native):
+            lowered.extend(node for node, _ in region)
+            cursor = end
+            continue
+
+        builder = _ti_core.GraphBuilder()
+        recording_dispatches = []
+        runtime_arg_names = set()
+        ir_children = []
+        lifetime_leases = []
+        region_native_count = 0
+        for node, dispatches in region:
+            for kernel, args in dispatches:
+                builder.dispatch(kernel, args)
+                recording_dispatches.append((kernel, tuple(args)))
+            runtime_arg_names.update(node.runtime_arg_names)
+            if isinstance(node.ir_node, SequentialRegion):
+                ir_children.extend(node.ir_node.children)
+            else:
+                ir_children.append(node.ir_node)
+            lifetime_leases.extend(getattr(node, "lifetime_leases", ()))
+            region_native_count += getattr(node, "source_native_count", 0)
+
+        lowered.append(
+            _CompiledCGraphNode(
+                builder.compile(),
+                len(recording_dispatches),
+                runtime_arg_names,
+                SequentialRegion(
+                    tuple(ir_children), name="mixed_backend_region"
+                ),
+                recording_dispatches=recording_dispatches,
+                lifetime_leases=lifetime_leases,
+                source_native_count=region_native_count,
+                region_kind="mixed_cgraph_native",
+            )
+        )
+        mixed_region_count += 1
+        lowered_native_count += region_native_count
+        cursor = end
+
+    total_native_count = sum(
+        getattr(node, "source_native_count", 0) for node in nodes
+    )
+    return tuple(lowered), {
+        "backend": backend,
+        "input_segments": len(nodes),
+        "output_segments": len(lowered),
+        "mixed_backend_regions": mixed_region_count,
+        "lowered_native_nodes": lowered_native_count,
+        "opaque_native_nodes": total_native_count - lowered_native_count,
+    }
+
+
 class _GraphSpec:
     def __init__(self, nodes, aot_graph_builder=None, aot_compiled_graph=None):
-        self.nodes = tuple(nodes)
+        source_nodes = tuple(nodes)
+        self.pre_optimization_ir_root = SequentialRegion(
+            tuple(node.ir_node for node in source_nodes), name="graph"
+        )
+        self.pre_optimization_ir_analysis = analyze_graph_ir(
+            self.pre_optimization_ir_root
+        )
+        self.nodes, self.optimization = _lower_mixed_backend_regions(
+            source_nodes
+        )
         self._aot_graph_builder = aot_graph_builder
         self._aot_compiled_graph = aot_compiled_graph
         self.needs_runtime_args = any(n.needs_runtime_args for n in self.nodes)
@@ -1080,7 +1242,7 @@ class _GraphSpec:
             getattr(n, "dispatch_count", 0) for n in self.nodes
         )
         self.native_count = sum(
-            isinstance(n, _CompiledNativeGraphNode) for n in self.nodes
+            getattr(n, "source_native_count", 0) for n in self.nodes
         )
         self.bounded_loop_count = sum(
             isinstance(n, _CompiledBoundedLoopGraphNode)
@@ -1155,6 +1317,7 @@ class _GraphSpec:
             "native_count": self.native_count,
             "repeat_count": self.repeat_count,
             "nodes": [n.debug_info for n in self.nodes],
+            "optimization": dict(self.optimization),
         }
         if hasattr(self._aot_graph_builder, "item_count"):
             info["aot_item_count"] = self._aot_graph_builder.item_count
@@ -1164,9 +1327,18 @@ class _GraphSpec:
     def ir_debug_info(self):
         return {
             "metadata_version": 1,
-            "analysis_only": True,
+            "analysis_only": not bool(
+                self.optimization["mixed_backend_regions"]
+            ),
             "analysis": self.ir_analysis.to_dict(),
             "root": graph_ir_to_dict(self.ir_root),
+            "pre_optimization_analysis": (
+                self.pre_optimization_ir_analysis.to_dict()
+            ),
+            "pre_optimization_root": graph_ir_to_dict(
+                self.pre_optimization_ir_root
+            ),
+            "optimization": dict(self.optimization),
         }
 
     @property
@@ -1184,6 +1356,10 @@ class _GraphSpec:
                     ),
                     "dispatch_count": getattr(node, "dispatch_count", 0),
                     "runtime_arg_count": len(node.runtime_arg_names),
+                    "region_kind": getattr(node, "region_kind", "opaque"),
+                    "source_native_count": getattr(
+                        node, "source_native_count", 0
+                    ),
                     "dependency_info": tuple(
                         sorted(node.snode_tree_dependency_info)
                     ),
@@ -1234,8 +1410,13 @@ class _GraphInstance:
             node = spec.nodes[0]
             if spec.needs_runtime_args:
                 self._run_context = _GraphRunContext()
+            kind = (
+                "mixed_backend_region"
+                if node.source_native_count
+                else "single_cgraph"
+            )
             self._install_backend_executable(
-                _CGraphJITExecutable(node.compiled_graph), "single_cgraph"
+                _CGraphJITExecutable(node.compiled_graph), kind
             )
         elif not spec.needs_runtime_args:
             self._native_nodes = spec.nodes
@@ -1265,7 +1446,10 @@ class _GraphInstance:
         arch = impl.current_cfg().arch
         if arch not in (_ti_core.Arch.cuda, _ti_core.Arch.x64, _ti_core.Arch.arm64):
             return
-        if self.spec.native_count != len(self.spec.nodes):
+        if not all(
+            isinstance(node, _CompiledNativeGraphNode)
+            for node in self.spec.nodes
+        ):
             return
         if self.spec.needs_runtime_args:
             return
@@ -1554,6 +1738,7 @@ class GraphBuilder:
         self._runtime_graph_builder = _ti_core.GraphBuilder()
         self._dispatch_count = 0
         self._runtime_graph_arg_names = set()
+        self._runtime_graph_dispatches = []
         self._nodes = []
         self._pending_ir_nodes = []
 
@@ -1567,6 +1752,9 @@ class GraphBuilder:
     def _record_dispatch(self, kernel_cpp, unzipped_args):
         self._aot_graph_plan.dispatch(kernel_cpp, unzipped_args)
         self._ensure_runtime_graph_builder().dispatch(kernel_cpp, unzipped_args)
+        self._runtime_graph_dispatches.append(
+            (kernel_cpp, tuple(unzipped_args))
+        )
         self._runtime_graph_arg_names.update(_runtime_arg_names(unzipped_args))
         self._pending_ir_nodes.append(_dispatch_ir_node(kernel_cpp, unzipped_args))
         self._dispatch_count += 1
@@ -1579,6 +1767,9 @@ class GraphBuilder:
         assert isinstance(node, Sequential)
         self._aot_graph_plan.append(node)
         node._dispatch_to(self._runtime_graph_builder)
+        self._runtime_graph_dispatches.extend(
+            (kernel, tuple(args)) for kernel, args in node._dispatches
+        )
         self._runtime_graph_arg_names.update(node._runtime_arg_names)
         self._dispatch_count += node._dispatch_count
         self._pending_ir_nodes.extend(node._ir_nodes)
@@ -1607,11 +1798,13 @@ class GraphBuilder:
                 SequentialRegion(
                     tuple(self._pending_ir_nodes), name="cgraph"
                 ),
+                recording_dispatches=self._runtime_graph_dispatches,
             )
         )
         self._runtime_graph_builder = _ti_core.GraphBuilder()
         self._dispatch_count = 0
         self._runtime_graph_arg_names = set()
+        self._runtime_graph_dispatches = []
         self._pending_ir_nodes = []
 
     def _append_native(self, node, *, prewarm=False):

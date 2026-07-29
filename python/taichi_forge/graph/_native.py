@@ -2,6 +2,41 @@ from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.graph._ir import NativeCallNode
 
 
+class NativeGraphBackendRecorder:
+    """Optional lowering contract for a native node.
+
+    A recorder must describe only dispatches whose semantics are identical to
+    ``NativeGraphExecutable.run()``. Compatible recorders can be concatenated
+    with adjacent CGraph dispatches into one backend-owned CGraph region.
+    """
+
+    def supports_backend(self, backend):
+        return False
+
+    @property
+    def dispatches(self):
+        return ()
+
+
+class DispatchNativeGraphRecorder(NativeGraphBackendRecorder):
+    """Recorder backed by precompiled Taichi dispatches."""
+
+    def __init__(self, dispatches, *, backends=("cpu", "cuda", "vulkan")):
+        self._dispatches = tuple(
+            (kernel, tuple(args)) for kernel, args in dispatches
+        )
+        if not self._dispatches:
+            raise ValueError("Native Graph recorder requires a dispatch")
+        self._backends = frozenset(backends)
+
+    def supports_backend(self, backend):
+        return backend in self._backends
+
+    @property
+    def dispatches(self):
+        return self._dispatches
+
+
 class NativeGraphExecutable:
     """Compiled native graph node.
 
@@ -13,7 +48,7 @@ class NativeGraphExecutable:
     def prewarm(self):
         return self
 
-    def run(self):
+    def run(self, runtime_args=None):
         raise NotImplementedError
 
     @property
@@ -30,6 +65,10 @@ class NativeGraphExecutable:
 
     @property
     def temporary_requirements(self):
+        return ()
+
+    @property
+    def lifetime_leases(self):
         return ()
 
     @property
