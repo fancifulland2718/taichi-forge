@@ -186,6 +186,7 @@ class WhileRegion:
     control_inputs: Tuple[str, ...] = ()
     carried_state: Tuple[str, ...] = ()
     counter: Optional[str] = None
+    status: Optional[str] = None
     chunk_size: int = 1
     masked_execution: bool = False
     lowering_mode: str = "auto"
@@ -217,6 +218,19 @@ class WhileRegion:
             )
         if self.counter is not None:
             _validate_control_name(self.counter, "While counter")
+        if self.status is not None:
+            _validate_control_name(self.status, "While status")
+            reserved = {
+                self.predicate,
+                *self.control_inputs,
+                *self.carried_state,
+            }
+            if self.counter is not None:
+                reserved.add(self.counter)
+            if self.status in reserved:
+                raise ValueError(
+                    "While status must be a distinct control resource"
+                )
         if self.chunk_size <= 0:
             raise ValueError("While chunk_size must be positive")
         if self.lowering_mode not in (
@@ -246,6 +260,11 @@ class WhileRegion:
             *(
                 (ResourceEffect(self.counter, GraphAccess.READ_WRITE),)
                 if self.counter is not None
+                else ()
+            ),
+            *(
+                (ResourceEffect(self.status, GraphAccess.READ_WRITE),)
+                if self.status is not None
                 else ()
             ),
         )
@@ -750,6 +769,7 @@ def graph_ir_to_dict(node):
             {
                 "predicate": node.predicate,
                 "counter": node.counter,
+                "status": node.status,
                 "max_iterations": node.max_iterations,
                 "control_inputs": node.control_inputs,
                 "carried_state": node.carried_state,

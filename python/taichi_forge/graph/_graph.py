@@ -538,12 +538,16 @@ class GraphWhileReport:
     observation_boundaries: Tuple[int, ...]
     predicate_values: Tuple[int, ...]
     counter_values: Tuple[int, ...]
+    status_resource: Optional[str]
+    status_values: Tuple[int, ...]
     chunk_sizes: Tuple[int, ...]
     observation_batches: int
     observation_scalar_count: int
     device_to_host_bytes: int
     initial_counter: Optional[int]
     final_counter: Optional[int]
+    initial_status: Optional[int]
+    final_status: Optional[int]
     native_upgrade_eligible: bool
     native_upgrade_reason: str
     persistent_staging_bytes: int
@@ -1547,6 +1551,7 @@ class _CompiledWhileGraphNode:
         carried_state,
         max_iterations,
         counter,
+        status,
         chunk_size,
         masked_execution,
         lowering_mode,
@@ -1569,6 +1574,7 @@ class _CompiledWhileGraphNode:
         self.control_inputs = tuple(control_inputs)
         self.carried_state = tuple(carried_state)
         self.counter = counter
+        self.status = status
         self.max_iterations = int(max_iterations)
         self.masked_execution = bool(masked_execution)
         self.lowering_mode = lowering_mode
@@ -1576,6 +1582,8 @@ class _CompiledWhileGraphNode:
         self.body_dispatch_count = body._dispatch_count
         self.dispatch_count = self.condition_dispatch_count + self.body_dispatch_count
         required_condition = {predicate, *self.control_inputs}
+        if status is not None:
+            required_condition.add(status)
         missing_condition = sorted(
             required_condition.difference(condition._runtime_arg_names)
         )
@@ -1648,6 +1656,7 @@ class _CompiledWhileGraphNode:
             control_inputs=self.control_inputs,
             carried_state=self.carried_state,
             counter=counter,
+            status=status,
             chunk_size=self.chunk_limit,
             masked_execution=self.masked_execution,
             lowering_mode=lowering_mode,
@@ -1676,9 +1685,13 @@ class _CompiledWhileGraphNode:
         counter_object = (
             runtime_args[self.counter] if self.counter is not None else None
         )
+        status_object = (
+            runtime_args[self.status] if self.status is not None else None
+        )
         observations = []
         predicate_values = []
         counter_values = []
+        status_values = []
         chunks = []
         executed = 0
         observation_batches = 0
@@ -1698,6 +1711,9 @@ class _CompiledWhileGraphNode:
             if counter_object is not None:
                 values.append(counter_object)
                 names.append(self.counter)
+            if status_object is not None:
+                values.append(status_object)
+                names.append(self.status)
             observed, byte_count = _control_scalar_values(
                 values,
                 names,
@@ -1708,13 +1724,18 @@ class _CompiledWhileGraphNode:
             device_to_host_bytes += byte_count
             observations.append(boundary)
             predicate_values.append(observed[0])
+            next_index = 1
             if counter_object is not None:
-                counter_values.append(observed[1])
+                counter_values.append(observed[next_index])
+                next_index += 1
+            if status_object is not None:
+                status_values.append(observed[next_index])
             return observed[0]
 
         self._condition.run(context)
         predicate_value = observe_control(0)
         initial_counter = counter_values[-1] if counter_object is not None else None
+        initial_status = status_values[-1] if status_object is not None else None
         active = predicate_value != 0
         native_selected = False
         native_reason = self._native_upgrade_reason
@@ -1764,6 +1785,7 @@ class _CompiledWhileGraphNode:
         if not observations or observations[-1] != executed:
             observe_control(executed)
         final_counter = counter_values[-1] if counter_object is not None else None
+        final_status = status_values[-1] if status_object is not None else None
         if final_counter is not None:
             logical = final_counter - initial_counter
             if logical < 0 or logical > executed:
@@ -1802,12 +1824,16 @@ class _CompiledWhileGraphNode:
             observation_boundaries=tuple(observations),
             predicate_values=tuple(predicate_values),
             counter_values=tuple(counter_values),
+            status_resource=self.status,
+            status_values=tuple(status_values),
             chunk_sizes=tuple(chunks),
             observation_batches=observation_batches,
             observation_scalar_count=observation_scalar_count,
             device_to_host_bytes=device_to_host_bytes,
             initial_counter=initial_counter,
             final_counter=final_counter,
+            initial_status=initial_status,
+            final_status=final_status,
             native_upgrade_eligible=self._native_upgrade_eligible,
             native_upgrade_reason=native_reason,
             persistent_staging_bytes=int(transfer_after["persistent_bytes"]),
@@ -1860,6 +1886,7 @@ class _CompiledWhileGraphNode:
             "chunk_limit": self.chunk_limit,
             "control_input_count": len(self.control_inputs),
             "carried_state_count": len(self.carried_state),
+            "has_status": self.status is not None,
             "masked_execution": self.masked_execution,
             "lowering_mode": self.lowering_mode,
             "native_upgrade_eligible": self._native_upgrade_eligible,
@@ -3303,6 +3330,7 @@ class GraphBuilder:
         control_inputs=(),
         carried_state=(),
         counter=None,
+        status=None,
         chunk_size=None,
         masked_execution=False,
         lowering_mode="auto",
@@ -3312,7 +3340,9 @@ class GraphBuilder:
 
         ``condition`` computes ``predicate`` from any number of declared
         ``control_inputs``. Nonzero means continue. ``body`` updates the fixed
-        ``carried_state`` and optional exact iteration ``counter``. Backend
+        ``carried_state`` and optional exact iteration ``counter``. An optional
+        user-defined ``status`` resource records why iteration terminated; it
+        is observed with the predicate but never interpreted by Graph. Backend
         lowering is selected automatically unless ``lowering_mode`` requests
         a portable or required-native path.
         """
@@ -3320,6 +3350,9 @@ class GraphBuilder:
         predicate_name = self._control_name(predicate, "while predicate")
         counter_name = (
             None if counter is None else self._control_name(counter, "while counter")
+        )
+        status_name = (
+            None if status is None else self._control_name(status, "while status")
         )
         self._nodes.append(
             _CompiledWhileGraphNode(
@@ -3332,6 +3365,7 @@ class GraphBuilder:
                 carried_state=self._control_names(carried_state, "while carried_state"),
                 max_iterations=max_iterations,
                 counter=counter_name,
+                status=status_name,
                 chunk_size=chunk_size,
                 masked_execution=masked_execution,
                 lowering_mode=lowering_mode,

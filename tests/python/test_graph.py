@@ -1079,9 +1079,10 @@ def test_structured_control_ir_validates_and_serializes_fixed_schema():
         max_iterations=32,
         condition=condition,
         body=body,
-        control_inputs=("residual", "status", "active_count"),
+        control_inputs=("residual", "tolerance", "active_count"),
         carried_state=("solution", "residual"),
         counter="iteration",
+        status="terminal_status",
         chunk_size=4,
         masked_execution=True,
     )
@@ -1108,9 +1109,10 @@ def test_structured_control_ir_validates_and_serializes_fixed_schema():
     serialized_while = serialized["children"][0]
     assert serialized_while["control_inputs"] == (
         "residual",
-        "status",
+        "tolerance",
         "active_count",
     )
+    assert serialized_while["status"] == "terminal_status"
     assert serialized_while["carried_state"] == (
         "solution",
         "residual",
@@ -1125,6 +1127,14 @@ def test_structured_control_ir_validates_and_serializes_fixed_schema():
             condition=condition,
             body=body,
             control_inputs=("status", "status"),
+        )
+    with pytest.raises(ValueError, match="distinct control resource"):
+        WhileRegion(
+            predicate="continue_flag",
+            max_iterations=1,
+            condition=condition,
+            body=body,
+            status="continue_flag",
         )
     with pytest.raises(ValueError, match="cannot be a control input"):
         IfRegion(
@@ -2124,6 +2134,124 @@ def test_structured_graph_while_reports_exact_stop_and_backend_overshoot():
         TaichiRuntimeError, match="does not support portable structured control"
     ):
         graph.submit(args)
+
+
+def _build_structured_status_graph(*, max_iterations=8):
+    @ti.kernel
+    def evaluate_condition(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        status: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        user_stop: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        breakdown: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        target: ti.i32,
+    ):
+        if status[None] == 0:
+            if breakdown[None] != 0:
+                status[None] = 2
+            elif user_stop[None] != 0:
+                status[None] = 3
+            elif state[None] >= target:
+                status[None] = 1
+        predicate[None] = int(status[None] == 0)
+
+    @ti.kernel
+    def step(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        if predicate[None] != 0:
+            state[None] += 1
+            counter[None] += 1
+
+    scalar = lambda name: ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=0
+    )
+    arg_state = scalar("state")
+    arg_predicate = scalar("predicate")
+    arg_counter = scalar("counter")
+    arg_status = scalar("status")
+    arg_user_stop = scalar("user_stop")
+    arg_breakdown = scalar("breakdown")
+    arg_target = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "target", ti.i32)
+    builder = ti.graph.GraphBuilder()
+    condition = builder.create_sequential()
+    condition.dispatch(
+        evaluate_condition,
+        arg_state,
+        arg_predicate,
+        arg_status,
+        arg_user_stop,
+        arg_breakdown,
+        arg_target,
+    )
+    body = builder.create_sequential()
+    body.dispatch(step, arg_state, arg_predicate, arg_counter)
+    builder.while_loop(
+        condition,
+        body,
+        predicate=arg_predicate,
+        status=arg_status,
+        control_inputs=(arg_state, arg_user_stop, arg_breakdown, arg_target),
+        carried_state=(arg_state,),
+        counter=arg_counter,
+        max_iterations=max_iterations,
+        chunk_size=4,
+        masked_execution=True,
+        name="status_iteration",
+    )
+    return builder.compile()
+
+
+def _structured_status_args(*, user_stop=False, breakdown=False):
+    args = {
+        name: ti.ndarray(ti.i32, shape=())
+        for name in (
+            "state",
+            "predicate",
+            "counter",
+            "status",
+            "user_stop",
+            "breakdown",
+        )
+    }
+    for value in args.values():
+        value.fill(0)
+    args["user_stop"].fill(int(user_stop))
+    args["breakdown"].fill(int(breakdown))
+    return args
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_structured_graph_while_reports_user_defined_terminal_status():
+    graph = _build_structured_status_graph()
+
+    converged = _structured_status_args()
+    graph.run({**converged, "target": 3})
+    report = graph.control_flow_stats()[0]
+    assert report.status_resource == "status"
+    assert report.initial_status == 0
+    assert report.final_status == 1
+    assert report.status_values[0] == 0
+    assert report.status_values[-1] == 1
+    assert report.logical_iterations == 3
+    assert report.observation_scalar_count == 3 * report.observation_batches
+    assert report.device_to_host_bytes == 12 * report.observation_batches
+
+    stopped = _structured_status_args(user_stop=True)
+    graph.run({**stopped, "target": 3})
+    report = graph.control_flow_stats()[0]
+    assert report.logical_iterations == 0
+    assert report.initial_status == 3
+    assert report.final_status == 3
+
+    failed = _structured_status_args(breakdown=True)
+    graph.run({**failed, "target": 3})
+    report = graph.control_flow_stats()[0]
+    assert report.logical_iterations == 0
+    assert report.initial_status == 2
+    assert report.final_status == 2
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
