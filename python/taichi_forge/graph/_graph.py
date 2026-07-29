@@ -1,6 +1,7 @@
 import os
 import threading
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1073,6 +1074,7 @@ class _CompiledCGraphNode:
         source_native_count=0,
         region_kind="cgraph",
         fixed_runtime_args=None,
+        temporary_actions=(),
     ):
         self.compiled_graph = compiled_graph
         self.dispatch_count = dispatch_count
@@ -1088,12 +1090,27 @@ class _CompiledCGraphNode:
         self.fixed_runtime_args = dict(
             {} if fixed_runtime_args is None else fixed_runtime_args
         )
+        self.temporary_actions = tuple(temporary_actions)
+        self.temporary_runtime_arg_names = frozenset().union(
+            *(
+                frozenset(action.temporary_bindings)
+                for action in self.temporary_actions
+            )
+        )
         if not self.fixed_runtime_args.keys() <= self.recording_runtime_arg_names:
             raise TaichiRuntimeError(
                 "CGraph fixed bindings must be declared runtime arguments"
             )
+        if not self.temporary_runtime_arg_names <= self.recording_runtime_arg_names:
+            raise TaichiRuntimeError(
+                "CGraph temporary bindings must be declared runtime arguments"
+            )
+        if self.fixed_runtime_args.keys() & self.temporary_runtime_arg_names:
+            raise TaichiRuntimeError(
+                "CGraph fixed and temporary bindings must be disjoint"
+            )
         self.runtime_arg_names = self.recording_runtime_arg_names.difference(
-            self.fixed_runtime_args
+            (*self.fixed_runtime_args, *self.temporary_runtime_arg_names)
         )
         self.recording_dispatches = tuple(
             (kernel, tuple(args)) for kernel, args in recording_dispatches
@@ -1173,7 +1190,7 @@ class _CompiledNativeGraphNode:
             raise TaichiRuntimeError(
                 "Optional native Graph runtime arguments are not supported"
             )
-        self.runtime_arg_names = frozenset(binding.name for binding in schema)
+        public_runtime_arg_names = frozenset(binding.name for binding in schema)
         self.temporary_names = frozenset(
             requirement.name for requirement in executable.temporary_requirements
         )
@@ -1189,15 +1206,57 @@ class _CompiledNativeGraphNode:
             if self.recordable_action is None
             else dict(self.recordable_action.fixed_bindings)
         )
-        overlap = self.runtime_arg_names & self.fixed_runtime_args.keys()
+        temporary_binding_map = (
+            {}
+            if self.recordable_action is None
+            else dict(self.recordable_action.temporary_bindings)
+        )
+        if any(
+            not isinstance(symbol, str)
+            or not symbol
+            or not isinstance(requirement, str)
+            or not requirement
+            for symbol, requirement in temporary_binding_map.items()
+        ):
+            raise TaichiRuntimeError(
+                "Recordable action temporary bindings must map nonempty "
+                "symbol names to nonempty requirement names"
+            )
+        if (
+            self.recordable_action is not None
+            and set(temporary_binding_map.values()) != self.temporary_names
+        ):
+            raise TaichiRuntimeError(
+                "Recordable action temporary bindings must cover exactly its "
+                "Graph temporary requirements"
+            )
+        self.temporary_binding_map = temporary_binding_map
+        self.temporary_runtime_arg_names = frozenset(temporary_binding_map)
+        self.temporary_actions = (
+            () if not temporary_binding_map else (self.recordable_action,)
+        )
+        overlap = public_runtime_arg_names & self.fixed_runtime_args.keys()
         if overlap:
             raise TaichiRuntimeError(
                 "Recordable action fixed bindings overlap public runtime "
                 "arguments: " + ", ".join(sorted(overlap))
             )
-        self.recording_runtime_arg_names = frozenset(
-            (*self.runtime_arg_names, *self.fixed_runtime_args.keys())
+        private_overlap = self.temporary_runtime_arg_names & (
+            public_runtime_arg_names | self.fixed_runtime_args.keys()
         )
+        if private_overlap:
+            raise TaichiRuntimeError(
+                "Recordable action temporary symbols overlap public or fixed "
+                "arguments: " + ", ".join(sorted(private_overlap))
+            )
+        self.recording_runtime_arg_names = frozenset(
+            (
+                *public_runtime_arg_names,
+                *self.fixed_runtime_args.keys(),
+                *self.temporary_runtime_arg_names,
+            )
+        )
+        self.runtime_arg_names = public_runtime_arg_names
         self.needs_runtime_args = bool(self.recording_runtime_arg_names)
         self.lifetime_leases = (
             executable,
@@ -1487,6 +1546,7 @@ def _compile_sequential_runtime_node(
     fixed_runtime_args = {}
     lifetime_leases = []
     source_native_count = 0
+    temporary_actions = []
     for _ in range(repetitions):
         for sequence, sequence_region_kind in zip(sequences, region_kinds):
             recording_dispatches.extend(
@@ -1510,6 +1570,7 @@ def _compile_sequential_runtime_node(
                 fixed_runtime_args[binding_name] = value
             lifetime_leases.extend(sequence._lifetime_leases)
             source_native_count += sequence._source_native_count
+            temporary_actions.extend(sequence._temporary_actions)
     return _CompiledCGraphNode(
         builder.compile(),
         dispatch_count,
@@ -1520,6 +1581,7 @@ def _compile_sequential_runtime_node(
         source_native_count=source_native_count,
         region_kind=region_kind,
         fixed_runtime_args=fixed_runtime_args,
+        temporary_actions=_deduplicate_temporary_actions(temporary_actions),
     )
 
 
@@ -1627,12 +1689,19 @@ class _CompiledWhileGraphNode:
             )
             chunk *= 2
         dependency_nodes = (self._condition, *self._chunks.values())
+        self.temporary_actions = _merge_temporary_actions(dependency_nodes)
+        self.temporary_runtime_arg_names = frozenset().union(
+            *(
+                node.temporary_runtime_arg_names
+                for node in dependency_nodes
+            )
+        )
         self.fixed_runtime_args = _merge_fixed_runtime_args(dependency_nodes)
         self.recording_runtime_arg_names = frozenset().union(
             *(node.recording_runtime_arg_names for node in dependency_nodes)
         )
         self.runtime_arg_names = self.recording_runtime_arg_names.difference(
-            self.fixed_runtime_args
+            (*self.fixed_runtime_args, *self.temporary_runtime_arg_names)
         )
         self.lifetime_leases = tuple(
             (*condition._lifetime_leases, *body._lifetime_leases)
@@ -1987,12 +2056,16 @@ class _CompiledIfGraphNode:
         nodes = tuple(
             node for node in (self._condition, self._then, self._else) if node
         )
+        self.temporary_actions = _merge_temporary_actions(nodes)
+        self.temporary_runtime_arg_names = frozenset().union(
+            *(node.temporary_runtime_arg_names for node in nodes)
+        )
         self.fixed_runtime_args = _merge_fixed_runtime_args(nodes)
         self.recording_runtime_arg_names = frozenset().union(
             *(node.recording_runtime_arg_names for node in nodes)
         )
         self.runtime_arg_names = self.recording_runtime_arg_names.difference(
-            self.fixed_runtime_args
+            (*self.fixed_runtime_args, *self.temporary_runtime_arg_names)
         )
         sequences = tuple(
             region
@@ -2174,12 +2247,16 @@ class _CompiledSwitchGraphNode:
         nodes = (self._condition, *self._branches)
         if self._default is not None:
             nodes = (*nodes, self._default)
+        self.temporary_actions = _merge_temporary_actions(nodes)
+        self.temporary_runtime_arg_names = frozenset().union(
+            *(node.temporary_runtime_arg_names for node in nodes)
+        )
         self.fixed_runtime_args = _merge_fixed_runtime_args(nodes)
         self.recording_runtime_arg_names = frozenset().union(
             *(node.recording_runtime_arg_names for node in nodes)
         )
         self.runtime_arg_names = self.recording_runtime_arg_names.difference(
-            self.fixed_runtime_args
+            (*self.fixed_runtime_args, *self.temporary_runtime_arg_names)
         )
         sequences = (condition, *branches)
         if default_region is not None:
@@ -2306,10 +2383,6 @@ def _recordable_backend_dispatches(node, backend):
         return node.recording_dispatches
     if not isinstance(node, _CompiledNativeGraphNode):
         return None
-    # Concrete arena slots are selected per invocation. Keep scratch-consuming
-    # recorders on their executable path until they can bind that slot.
-    if node.temporary_names:
-        return None
     recorder = node.recordable_action
     if recorder is None or not recorder.supports_backend(backend):
         return None
@@ -2334,6 +2407,26 @@ def _merge_fixed_runtime_args(nodes):
                     )
             merged[name] = value
     return merged
+
+
+def _deduplicate_temporary_actions(actions):
+    merged = []
+    seen = set()
+    for action in actions:
+        identity = id(action)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        merged.append(action)
+    return tuple(merged)
+
+
+def _merge_temporary_actions(nodes):
+    return _deduplicate_temporary_actions(
+        action
+        for node in nodes
+        for action in getattr(node, "temporary_actions", ())
+    )
 
 
 def _lower_mixed_backend_regions(nodes):
@@ -2374,6 +2467,7 @@ def _lower_mixed_backend_regions(nodes):
         ir_children = []
         lifetime_leases = []
         region_native_count = 0
+        temporary_actions = []
         for node, dispatches in region:
             for kernel, args in dispatches:
                 builder.dispatch(kernel, args)
@@ -2390,6 +2484,7 @@ def _lower_mixed_backend_regions(nodes):
             else:
                 ir_children.append(node.ir_node)
             lifetime_leases.extend(getattr(node, "lifetime_leases", ()))
+            temporary_actions.extend(getattr(node, "temporary_actions", ()))
             region_native_count += getattr(node, "source_native_count", 0)
 
         lowered.append(
@@ -2412,6 +2507,9 @@ def _lower_mixed_backend_regions(nodes):
                     "mixed_cgraph_native" if has_cgraph else "recordable_provider"
                 ),
                 fixed_runtime_args=fixed_runtime_args,
+                temporary_actions=_deduplicate_temporary_actions(
+                    temporary_actions
+                ),
             )
         )
         mixed_region_count += 1
@@ -2474,6 +2572,14 @@ class _GraphSpec:
         self.observation_count = sum(
             isinstance(n, _CompiledObservationGraphNode) for n in self.nodes
         )
+        self.temporary_actions = _merge_temporary_actions(self.nodes)
+        self._temporary_binding_cache = {}
+        self.temporary_runtime_arg_names = frozenset().union(
+            *(
+                frozenset(action.temporary_bindings)
+                for action in self.temporary_actions
+            )
+        )
         self.fixed_runtime_args = _merge_fixed_runtime_args(self.nodes)
         lifetime_leases = []
         seen_lifetime_leases = set()
@@ -2495,7 +2601,7 @@ class _GraphSpec:
             )
         )
         self.runtime_arg_names = all_runtime_arg_names.difference(
-            self.fixed_runtime_args
+            (*self.fixed_runtime_args, *self.temporary_runtime_arg_names)
         )
         self.snode_tree_dependencies = frozenset().union(
             *(n.snode_tree_dependencies for n in self.nodes)
@@ -2535,7 +2641,7 @@ class _GraphSpec:
             if validate is not None:
                 validate()
 
-    def bind_runtime_args(self, args):
+    def bind_runtime_args(self, args, temporaries=None):
         bound = args
         owners = {}
         for lease in self.lifetime_leases:
@@ -2564,7 +2670,88 @@ class _GraphSpec:
                     )
                 bound[name] = value
                 owners[name] = lease
+        temporary_args = self.bind_temporary_args(temporaries)
+        if temporary_args:
+            if bound is args:
+                bound = dict(args)
+            for name, value in temporary_args.items():
+                if name in bound:
+                    raise TaichiRuntimeError(
+                        "Graph temporary binding collides with runtime argument "
+                        f"{name!r}"
+                    )
+                bound[name] = value
         return bound
+
+    def bind_temporary_args(self, temporaries):
+        if not self.temporary_actions:
+            return {}
+        if temporaries is None:
+            raise TaichiRuntimeError(
+                "Recordable Graph temporaries were not materialized"
+            )
+        cache_key = tuple(
+            sorted(
+                (
+                    name,
+                    id(binding.storage),
+                    binding.offset,
+                    binding.bytes,
+                    binding.alignment,
+                    binding.slot,
+                )
+                for name, binding in temporaries.items()
+            )
+        )
+        cached = self._temporary_binding_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        resolved = {}
+        owners = {}
+        for action in self.temporary_actions:
+            declarations = dict(action.temporary_bindings)
+            required = set(declarations.values())
+            missing = sorted(required.difference(temporaries))
+            if missing:
+                raise TaichiRuntimeError(
+                    "Recordable action temporary requirements were not "
+                    "materialized: " + ", ".join(missing)
+                )
+            provided = action.bind_graph_temporaries(
+                {name: temporaries[name] for name in required}
+            )
+            if provided is None:
+                raise TaichiRuntimeError(
+                    "Recordable action rejected the active Graph temporary slot"
+                )
+            if not isinstance(provided, Mapping):
+                raise TaichiRuntimeError(
+                    "Recordable action temporary bindings must be a mapping"
+                )
+            provided = dict(provided)
+            if provided.keys() != declarations.keys():
+                raise TaichiRuntimeError(
+                    "Recordable action returned unexpected temporary symbols"
+                )
+            for name, value in provided.items():
+                if value is None:
+                    raise TaichiRuntimeError(
+                        f"Recordable action returned no storage for {name!r}"
+                    )
+                previous = owners.get(name)
+                if previous is not None and resolved[name] is not value:
+                    raise TaichiRuntimeError(
+                        "Recordable actions produced conflicting temporary "
+                        f"binding {name!r}"
+                    )
+                resolved[name] = value
+                owners[name] = action
+        if resolved.keys() != self.temporary_runtime_arg_names:
+            raise TaichiRuntimeError(
+                "Recordable action temporary binding coverage changed"
+            )
+        self._temporary_binding_cache[cache_key] = resolved
+        return resolved
 
     def validate_runtime_args(self, args, entrypoint="Graph.run"):
         if not isinstance(args, dict):
@@ -2595,6 +2782,7 @@ class _GraphSpec:
         return _GraphInstance(self, key)
 
     def invalidate_runtime(self):
+        self._temporary_binding_cache.clear()
         for node in self.nodes:
             invalidate = getattr(node, "invalidate_runtime", None)
             if invalidate is not None:
@@ -2711,7 +2899,7 @@ class _GraphExecutable:
         context = self._context
         if context is not None:
             context.begin(
-                self.spec.bind_runtime_args(args),
+                self.spec.bind_runtime_args(args, temporaries),
                 self.spec.fixed_runtime_args,
             )
         try:
@@ -2725,7 +2913,7 @@ class _GraphExecutable:
         context = self._context
         if context is not None:
             context.begin(
-                self.spec.bind_runtime_args(args),
+                self.spec.bind_runtime_args(args, temporaries),
                 self.spec.fixed_runtime_args,
             )
         try:
@@ -2875,7 +3063,7 @@ class _GraphInstance:
         context = self._run_context
         if context is not None:
             context.begin(
-                self.spec.bind_runtime_args(args),
+                self.spec.bind_runtime_args(args, temporaries),
                 self.spec.fixed_runtime_args,
             )
         try:
@@ -3207,6 +3395,7 @@ class Sequential:
         self._fixed_runtime_args = {}
         self._lifetime_leases = []
         self._source_native_count = 0
+        self._temporary_actions = []
 
     def dispatch(self, kernel_fn, *args, template_args=None):
         kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
@@ -3231,11 +3420,6 @@ class Sequential:
             raise TaichiRuntimeError(
                 "Structured Graph Sequential.append_native requires a "
                 "recordable provider action"
-            )
-        if compiled.temporary_names:
-            raise TaichiRuntimeError(
-                "Recordable actions with Graph temporary requirements cannot "
-                "be embedded in a Sequential region"
             )
         backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
         if not action.supports_backend(backend):
@@ -3265,6 +3449,7 @@ class Sequential:
         self._runtime_arg_names.update(compiled.runtime_arg_names)
         self._recording_runtime_arg_names.update(compiled.recording_runtime_arg_names)
         self._lifetime_leases.extend(compiled.lifetime_leases)
+        self._temporary_actions.extend(compiled.temporary_actions)
         self._source_native_count += compiled.source_native_count
         self._dispatch_count += len(dispatches)
         return self

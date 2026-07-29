@@ -1053,6 +1053,13 @@ Parameters:
 | `node` | A Forge-defined native node, such as a `PrimitiveSequence`, `DeviceCheckResult`, or `DeviceMetricResult`. |
 | `prewarm` | Compile/warm the native node before storing it in the graph. |
 
+Recordable native nodes can participate in mixed dispatch regions and
+structured control. A provider can declare private workspace requirements;
+Graph assigns bounded per-invocation arena storage and keeps those bindings out
+of the public runtime argument dictionary. Concurrent tickets use independent
+arena slots. Providers that cannot record their action, cannot bind the active
+slot, or do not qualify the current backend fail before submission.
+
 Limits:
 
 - Only Forge-defined DSL native nodes are supported. Arbitrary user native

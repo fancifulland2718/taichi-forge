@@ -176,6 +176,15 @@ route and fails before execution when unavailable. Recordable provider actions
 may enter a structured body only when their provider declares it safe; opaque
 or unsupported providers fail closed.
 
+Recordable providers may also declare private symbolic scratch bindings backed
+by Graph temporary requirements. The Graph memory plan materializes one bounded
+arena slot per in-flight invocation, resolves the private symbols before
+submission, and keeps them out of `Graph.run()` / `Graph.submit()` arguments.
+Bindings are reused for repeated execution of the same arena slot and rebound
+when another asynchronous slot is selected. Providers must declare exact byte
+and alignment requirements, return the complete declared symbol mapping, and
+reject incompatible storage before backend work is submitted.
+
 `Graph.control_flow_stats()` returns one immutable `GraphWhileReport` or
 `GraphBranchReport` per structured region for the latest `run()`. While reports
 include the selected lowering, logical and executed iterations, observation

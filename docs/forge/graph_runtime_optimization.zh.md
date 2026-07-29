@@ -150,6 +150,12 @@ work 与数值 breakdown。它写入只包含一个整数的 `predicate` ndarray
 执行前失败。recordable provider action 只有在 provider 声明适合结构化 body 时才能进入
 region；opaque 或不支持的 provider 会明确失败。
 
+recordable provider 还可声明由 Graph temporary requirement 支撑的私有符号 scratch。
+Graph memory plan 为每个正在执行的 invocation 分配一个有界 arena slot，在提交前解析
+私有符号，并且不把它们暴露为 `Graph.run()` / `Graph.submit()` 参数。同一个 arena slot
+重复执行时复用绑定；异步执行选择其他 slot 时重新绑定。provider 必须准确声明字节数和
+对齐，返回完整的符号映射，并在 backend 工作提交前拒绝不兼容的 storage。
+
 `Graph.control_flow_stats()` 为最近一次 `run()` 的每个结构化 region 返回 immutable
 `GraphWhileReport` 或 `GraphBranchReport`。while report 包含实际 lowering、逻辑/执行
 迭代、观测边界、predicate/counter/status 轨迹、终止状态、传输字节与 native upgrade

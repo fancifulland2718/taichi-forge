@@ -918,6 +918,11 @@ graph.run({})
 | `node` | Forge-defined native node，例如 `PrimitiveSequence`、`DeviceCheckResult` 或 `DeviceMetricResult`。 |
 | `prewarm` | 在存入 graph 前编译 / 预热 native node。 |
 
+recordable native node 可进入 mixed dispatch region 和结构化控制。provider 可声明私有
+workspace requirement；Graph 为每个 invocation 分配有界 arena storage，并且不把这些
+绑定暴露到公开 runtime 参数字典。并发 ticket 使用独立 arena slot。不能记录 action、
+不能绑定当前 slot 或尚未资格化当前 backend 的 provider 会在提交前明确失败。
+
 局限：
 
 - 只支持 Forge-defined DSL native node。任意用户 native callback capture 不是公开 API。

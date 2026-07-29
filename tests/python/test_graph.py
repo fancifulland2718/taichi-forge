@@ -1336,6 +1336,120 @@ class _TemporaryNode(NativeGraphNode):
         return _TemporaryExecutable(self._tracker, self._temporary)
 
 
+class _ArenaDispatchAction(DispatchGraphAction):
+    def __init__(self, dispatches, temporary_symbol, requirement, tracker):
+        super().__init__(dispatches, conditional_body_safe=True)
+        self._temporary_symbol = temporary_symbol
+        self._requirement = requirement
+        self._tracker = tracker
+
+    @property
+    def temporary_bindings(self):
+        return {self._temporary_symbol: self._requirement.name}
+
+    def bind_graph_temporaries(self, temporaries):
+        binding = temporaries[self._requirement.name]
+        if binding.offset != 0 or binding.bytes != self._requirement.bytes:
+            return None
+        self._tracker["temporary_binds"] += 1
+        return {self._temporary_symbol: binding.storage}
+
+
+class _ArenaDispatchExecutable(NativeGraphExecutable):
+    def __init__(
+        self,
+        dispatches,
+        source_name,
+        output_name,
+        temporary_symbol,
+        requirement,
+        tracker,
+    ):
+        self._action = _ArenaDispatchAction(
+            dispatches, temporary_symbol, requirement, tracker
+        )
+        self._source_name = source_name
+        self._output_name = output_name
+        self._requirement = requirement
+        self._tracker = tracker
+
+    def run(self, runtime_args):
+        self._tracker["fallback_runs"] += 1
+        raise AssertionError("temporary recordable action was not lowered")
+
+    @property
+    def runtime_arg_schema(self):
+        return (
+            RuntimeBinding(self._source_name, "ndarray"),
+            RuntimeBinding(self._output_name, "ndarray"),
+        )
+
+    @property
+    def resource_effects(self):
+        return (
+            ResourceEffect(self._source_name, GraphAccess.READ),
+            ResourceEffect(self._output_name, GraphAccess.WRITE),
+        )
+
+    @property
+    def temporary_requirements(self):
+        return (self._requirement,)
+
+    @property
+    def recordable_action(self):
+        return self._action
+
+
+class _ArenaDispatchNode(NativeGraphNode):
+    def __init__(self, dispatches, source, output, scratch, requirement, tracker):
+        self._dispatches = dispatches
+        self._source = source
+        self._output = output
+        self._scratch = scratch
+        self._requirement = requirement
+        self._tracker = tracker
+
+    def compile(self):
+        return _ArenaDispatchExecutable(
+            self._dispatches,
+            self._source.name,
+            self._output.name,
+            self._scratch.name,
+            self._requirement,
+            self._tracker,
+        )
+
+
+def _temporary_recordable_node(size, tracker, source, output):
+    @ti.kernel
+    def stage(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        scratch: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for index in range(size):
+            scratch[index] = source[index] * 2
+
+    @ti.kernel
+    def finish(
+        scratch: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for index in range(size):
+            output[index] = scratch[index] + 1
+
+    scratch = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "__provider_scratch", ti.i32, ndim=1
+    )
+    requirement = TemporaryRequirement("provider_scratch", size * 4, 16)
+    dispatches = (
+        (gen_cpp_kernel(stage, (source, scratch)), (source, scratch)),
+        (gen_cpp_kernel(finish, (scratch, output)), (scratch, output)),
+    )
+    return _ArenaDispatchNode(
+        dispatches, source, output, scratch, requirement, tracker
+    )
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_graph_materializes_and_reuses_temporary_arena():
     tracker = {"runs": 0}
@@ -1385,6 +1499,162 @@ def test_graph_materializes_and_reuses_temporary_arena():
     memory = graph.execution_stats().memory
     assert memory.temporary_arena_allocations == 1
     assert memory.temporary_arena_reuses == 1
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_recordable_provider_binds_graph_temporary_arena_without_public_scratch():
+    size = 256
+    tracker = {"temporary_binds": 0, "fallback_runs": 0}
+    source_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "source", ti.i32, ndim=1
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(
+        _temporary_recordable_node(
+            size, tracker, source_arg, output_arg
+        )
+    )
+    graph = builder.compile()
+
+    source = ti.ndarray(ti.i32, shape=size)
+    output = ti.ndarray(ti.i32, shape=size)
+    values = np.arange(size, dtype=np.int32)
+    source.from_numpy(values)
+    graph.run({"source": source, "output": output})
+    np.testing.assert_array_equal(output.to_numpy(), values * 2 + 1)
+    assert tracker["fallback_runs"] == 0
+    assert tracker["temporary_binds"] >= 1
+    initial_binds = tracker["temporary_binds"]
+    graph.run({"source": source, "output": output})
+    assert tracker["temporary_binds"] == initial_binds
+    with pytest.raises(TaichiRuntimeError, match="Unexpected graph runtime"):
+        graph.run(
+            {
+                "source": source,
+                "output": output,
+                "__provider_scratch": ti.ndarray(ti.i32, shape=size),
+            }
+        )
+    memory = graph.execution_stats().memory
+    assert memory.planned_temporary_bytes == size * 4
+    assert memory.persistent_temporary_bytes == size * 4
+
+    second_source = ti.ndarray(ti.i32, shape=size)
+    second_output = ti.ndarray(ti.i32, shape=size)
+    second_values = values + 17
+    second_source.from_numpy(second_values)
+    first_ticket = graph.submit({"source": source, "output": output})
+    second_ticket = graph.submit(
+        {"source": second_source, "output": second_output}
+    )
+    first_ticket.wait()
+    second_ticket.wait()
+    np.testing.assert_array_equal(output.to_numpy(), values * 2 + 1)
+    np.testing.assert_array_equal(
+        second_output.to_numpy(), second_values * 2 + 1
+    )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_recordable_provider_temporary_embeds_in_structured_while():
+    size = 64
+    tracker = {"temporary_binds": 0, "fallback_runs": 0}
+
+    @ti.kernel
+    def evaluate(
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        target: ti.i32,
+    ):
+        predicate[None] = int(counter[None] < target)
+
+    @ti.kernel
+    def advance(
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        if predicate[None] != 0:
+            for index in range(size):
+                source[index] = output[index]
+            counter[None] += 1
+
+    source_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "source", ti.i32, ndim=1
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    predicate_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "predicate", ti.i32, ndim=0
+    )
+    counter_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "counter", ti.i32, ndim=0
+    )
+    target_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "target", ti.i32)
+    builder = ti.graph.GraphBuilder()
+    condition = builder.create_sequential()
+    condition.dispatch(evaluate, predicate_arg, counter_arg, target_arg)
+    body = builder.create_sequential()
+    body.append_native(
+        _temporary_recordable_node(
+            size, tracker, source_arg, output_arg
+        )
+    )
+    body.dispatch(
+        advance,
+        output_arg,
+        source_arg,
+        predicate_arg,
+        counter_arg,
+    )
+    arch = ti.lang.impl.current_cfg().arch
+    builder.while_loop(
+        condition,
+        body,
+        predicate=predicate_arg,
+        control_inputs=(counter_arg, target_arg),
+        carried_state=(source_arg, output_arg),
+        counter=counter_arg,
+        max_iterations=8,
+        lowering_mode=("native_required" if arch == ti.cuda else "auto"),
+        name="temporary_provider_iteration",
+    )
+    builder.observe(counter_arg, name="terminal")
+    graph = builder.compile()
+
+    source = ti.ndarray(ti.i32, shape=size)
+    output = ti.ndarray(ti.i32, shape=size)
+    predicate = ti.ndarray(ti.i32, shape=())
+    counter = ti.ndarray(ti.i32, shape=())
+    values = np.arange(size, dtype=np.int32)
+    source.from_numpy(values)
+    output.fill(0)
+    predicate.fill(0)
+    counter.fill(0)
+    args = {
+        "source": source,
+        "output": output,
+        "predicate": predicate,
+        "counter": counter,
+        "target": 3,
+    }
+    if arch == ti.cuda:
+        assert graph.submit(args).observations() == {
+            "terminal": {"counter": 3}
+        }
+    else:
+        graph.run(args)
+        assert graph.latest_observations() == {"terminal": {"counter": 3}}
+        assert graph.control_flow_stats()[0].logical_iterations == 3
+    np.testing.assert_array_equal(source.to_numpy(), values * 8 + 7)
+    assert tracker["fallback_runs"] == 0
+    assert tracker["temporary_binds"] >= 1
+    assert graph.execution_stats().memory.planned_temporary_bytes == size * 4
 
 
 class _PendingGraphCompletion:

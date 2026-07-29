@@ -132,9 +132,19 @@ class RecordableGraphAction:
     def fixed_bindings(self):
         return MappingProxyType({})
 
+    @property
+    def temporary_bindings(self):
+        """Map private symbolic argument names to temporary requirement names."""
+        return MappingProxyType({})
+
     def bind_graph_temporaries(self, temporaries):
-        """Return an action bound to one arena slot, or None to fail closed."""
-        return self if not temporaries else None
+        """Resolve one arena slot into private fixed runtime bindings.
+
+        Providers with nonempty ``temporary_bindings`` must override this and
+        return a mapping whose keys exactly match the declared private symbols.
+        Returning ``None`` fails closed before backend submission.
+        """
+        return MappingProxyType({}) if not temporaries else None
 
 
 class DispatchGraphAction(RecordableGraphAction):
