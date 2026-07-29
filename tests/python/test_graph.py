@@ -12,7 +12,16 @@ import taichi_forge as ti
 from taichi_forge._lib import core as ti_core
 from taichi_forge.lang import impl
 from taichi_forge.graph._graph import gen_cpp_kernel
-from taichi_forge.graph._ir import GraphAccess, ResourceEffect, RuntimeBinding
+from taichi_forge.graph._ir import (
+    DispatchNode,
+    GraphAccess,
+    ResourceEffect,
+    RuntimeBinding,
+    SequentialRegion,
+    TemporaryRequirement,
+    analyze_elementwise_fusion,
+    plan_temporary_memory,
+)
 from taichi_forge.graph._native import (
     DispatchNativeGraphRecorder,
     NativeGraphExecutable,
@@ -999,6 +1008,136 @@ def test_aot_jit_graph_pins_ndarray_runtime_arg_until_sync():
     assert sink[None] == 48
 
 
+def test_elementwise_fusion_analysis_requires_explicit_safe_metadata():
+    safe_effects = (
+        ResourceEffect("source", GraphAccess.READ),
+        ResourceEffect("destination", GraphAccess.WRITE),
+    )
+    root = SequentialRegion(
+        (
+            DispatchNode(
+                "map_a",
+                effects=safe_effects,
+                iteration_domain="range:n",
+                opaque=False,
+                elementwise=True,
+            ),
+            DispatchNode(
+                "map_b",
+                effects=safe_effects,
+                iteration_domain="range:n",
+                opaque=False,
+                elementwise=True,
+            ),
+            DispatchNode(
+                "atomic_map",
+                effects=(ResourceEffect("sum", GraphAccess.ATOMIC),),
+                iteration_domain="range:n",
+                opaque=False,
+                elementwise=True,
+            ),
+            DispatchNode(
+                "other_domain",
+                effects=safe_effects,
+                iteration_domain="range:m",
+                opaque=False,
+                elementwise=True,
+            ),
+            DispatchNode(
+                "random_map",
+                effects=safe_effects,
+                iteration_domain="range:m",
+                opaque=False,
+                elementwise=True,
+                side_effects=("random",),
+            ),
+        )
+    )
+    plan = analyze_elementwise_fusion(root).to_dict()
+    assert plan == {
+        "candidate_groups": 1,
+        "candidate_dispatches": 2,
+        "eligible_dispatches": 3,
+        "blocked_dispatches": 2,
+        "blockers": {"atomic_effect": 1, "side_effect": 1},
+        "applied_groups": 0,
+        "lowering_available": False,
+        "decision": "cross_kernel_ir_composer_unavailable",
+    }
+
+    opaque = analyze_elementwise_fusion(
+        SequentialRegion((DispatchNode("ordinary"),))
+    ).to_dict()
+    assert opaque["candidate_groups"] == 0
+    assert opaque["blockers"] == {"opaque_dispatch": 1}
+    assert opaque["decision"] == "no_safe_candidates"
+
+
+def test_temporary_memory_plan_reuses_only_nonoverlapping_intervals():
+    sequential = SequentialRegion(
+        (
+            DispatchNode(
+                "first",
+                temporaries=(TemporaryRequirement("a", 64, 16),),
+            ),
+            DispatchNode(
+                "second",
+                temporaries=(TemporaryRequirement("b", 32, 8),),
+            ),
+        )
+    )
+    plan = plan_temporary_memory(sequential).to_dict()
+    assert plan == {
+        "declared_bytes": 96,
+        "logical_bytes": 96,
+        "planned_peak_bytes": 64,
+        "reused_bytes": 32,
+        "alignment_padding_bytes": 0,
+        "slot_count": 1,
+        "conflicting_requirements": 0,
+        "opaque_bytes": 0,
+        "materialized": False,
+    }
+
+    overlapping = SequentialRegion(
+        (
+            DispatchNode(
+                "begin_a",
+                temporaries=(TemporaryRequirement("a", 64, 16),),
+            ),
+            DispatchNode(
+                "use_b",
+                temporaries=(TemporaryRequirement("b", 32, 8),),
+            ),
+            DispatchNode(
+                "end_a",
+                temporaries=(TemporaryRequirement("a", 64, 16),),
+            ),
+        )
+    )
+    overlap_plan = plan_temporary_memory(overlapping).to_dict()
+    assert overlap_plan["planned_peak_bytes"] == 96
+    assert overlap_plan["reused_bytes"] == 0
+    assert overlap_plan["slot_count"] == 2
+
+    conflicting = SequentialRegion(
+        (
+            DispatchNode(
+                "small",
+                temporaries=(TemporaryRequirement("same", 64, 16),),
+            ),
+            DispatchNode(
+                "large",
+                temporaries=(TemporaryRequirement("same", 128, 16),),
+            ),
+        )
+    )
+    conflict_plan = plan_temporary_memory(conflicting).to_dict()
+    assert conflict_plan["conflicting_requirements"] == 1
+    assert conflict_plan["opaque_bytes"] == 128
+    assert conflict_plan["planned_peak_bytes"] == 0
+
+
 class _RecordedDispatchExecutable(NativeGraphExecutable):
     def __init__(self, kernel, args, tracker, lease):
         self._recorder = DispatchNativeGraphRecorder(((kernel, args),))
@@ -1064,6 +1203,52 @@ class _OpaqueNode(NativeGraphNode):
 
     def compile(self):
         return _OpaqueExecutable(self._tracker)
+
+
+class _TemporaryExecutable(_OpaqueExecutable):
+    def __init__(self, tracker, temporary):
+        super().__init__(tracker)
+        self._temporary = temporary
+
+    @property
+    def temporary_requirements(self):
+        return (self._temporary,)
+
+
+class _TemporaryNode(NativeGraphNode):
+    def __init__(self, tracker, temporary):
+        self._tracker = tracker
+        self._temporary = temporary
+
+    def compile(self):
+        return _TemporaryExecutable(self._tracker, self._temporary)
+
+
+@test_utils.test(arch=ti.cpu)
+def test_graph_reports_planned_but_unmaterialized_temporary_reuse():
+    tracker = {"runs": 0}
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(
+        _TemporaryNode(tracker, TemporaryRequirement("first", 64, 16))
+    )
+    builder.append_native(
+        _TemporaryNode(tracker, TemporaryRequirement("second", 32, 8))
+    )
+    graph = builder.compile()
+    graph.run({})
+    assert tracker["runs"] == 2
+
+    plan = graph._ir_debug_info["temporary_memory_plan"]
+    assert plan["planned_peak_bytes"] == 64
+    assert plan["reused_bytes"] == 32
+    assert not plan["materialized"]
+    memory = graph.execution_stats().memory
+    assert memory.transient_temporary_bytes == 0
+    assert memory.planned_temporary_bytes == 64
+    assert memory.temporary_reuse_bytes == 32
+    assert memory.opaque_temporary_bytes == 0
+    assert not memory.temporary_plan_materialized
+    assert memory.opaque_driver_bytes is None
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
