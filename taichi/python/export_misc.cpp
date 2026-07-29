@@ -23,6 +23,7 @@
 #include "taichi/util/offline_cache.h"
 #if defined(TI_WITH_CUDA)
 #include "taichi/rhi/cuda/cuda_driver.h"
+#include "taichi/rhi/cuda/primitives/graph_ptx.h"
 #include "taichi/rhi/cuda/primitives/solver_ptx.h"
 #endif
 
@@ -233,6 +234,8 @@ void export_misc(py::module &m) {
         driver.graph_exec_destroy.available();
     const bool setter_compiled =
         taichi::lang::cuda::driver_cg_conditional_setter_compiled();
+    const bool graph_setter_compiled =
+        taichi::lang::cuda::driver_graph_conditional_setter_compiled();
     auto &cublas = taichi::lang::CUBLASDriver::get_instance();
     const bool cublas_loaded =
         cublas.is_loaded() ? true : cublas.load_cublas();
@@ -240,6 +243,8 @@ void export_misc(py::module &m) {
         cublas_loaded && cublas.cubSetWorkspace.available();
     result["conditional_graph_symbols_loaded"] = symbols_loaded;
     result["device_setter_lowering_compiled"] = setter_compiled;
+    result["general_device_setter_lowering_compiled"] =
+        graph_setter_compiled;
     result["runtime_path_compiled"] = true;
     result["cublas_workspace_symbol_loaded"] =
         cublas_workspace_symbol_loaded;
@@ -254,6 +259,7 @@ void export_misc(py::module &m) {
     result["driver_version_eligible"] = false;
     result["conditional_graph_symbols_loaded"] = false;
     result["device_setter_lowering_compiled"] = false;
+    result["general_device_setter_lowering_compiled"] = false;
     result["runtime_path_compiled"] = false;
     result["cublas_workspace_symbol_loaded"] = false;
     result["fully_available"] = false;

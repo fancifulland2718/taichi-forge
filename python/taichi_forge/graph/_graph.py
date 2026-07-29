@@ -703,7 +703,9 @@ def _cuda_bounded_upgrade_status(arch):
         return False, "cuda_driver_api_version_below_12_8"
     if not capabilities["conditional_graph_symbols_loaded"]:
         return False, "cuda_conditional_graph_symbols_not_loaded"
-    if not capabilities["device_setter_lowering_compiled"]:
+    if not capabilities.get(
+        "general_device_setter_lowering_compiled", False
+    ):
         return False, "cuda_conditional_setter_lowering_not_compiled"
     # The existing setter/body path is solver-owned. Report device capability
     # without selecting it until a general CGraph body recorder is present.
