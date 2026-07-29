@@ -11,6 +11,13 @@ from taichi_forge.lang.exception import TaichiCompilationError, TaichiRuntimeErr
 import taichi_forge as ti
 from taichi_forge._lib import core as ti_core
 from taichi_forge.lang import impl
+from taichi_forge.graph._graph import gen_cpp_kernel
+from taichi_forge.graph._ir import GraphAccess, ResourceEffect, RuntimeBinding
+from taichi_forge.graph._native import (
+    DispatchNativeGraphRecorder,
+    NativeGraphExecutable,
+    NativeGraphNode,
+)
 from tests import test_utils
 
 supported_floating_types = [ti.f32] if platform.system() == "Darwin" else [ti.f32, ti.f64]
@@ -990,6 +997,191 @@ def test_aot_jit_graph_pins_ndarray_runtime_arg_until_sync():
     gc.collect()
     ti.sync()
     assert sink[None] == 48
+
+
+class _RecordedDispatchExecutable(NativeGraphExecutable):
+    def __init__(self, kernel, args, tracker, lease):
+        self._recorder = DispatchNativeGraphRecorder(((kernel, args),))
+        self._tracker = tracker
+        self._lease = lease
+
+    def run(self, runtime_args):
+        self._tracker["fallback_runs"] += 1
+        raise AssertionError("recordable native node was not lowered")
+
+    @property
+    def runtime_arg_schema(self):
+        return (RuntimeBinding("values", "ndarray"),)
+
+    @property
+    def resource_effects(self):
+        return (ResourceEffect("values", GraphAccess.READ_WRITE),)
+
+    @property
+    def lifetime_leases(self):
+        return (self._lease,)
+
+    @property
+    def backend_recorder(self):
+        return self._recorder
+
+    @property
+    def debug_info(self):
+        return {"kind": "recorded_dispatch"}
+
+
+class _RecordedDispatchNode(NativeGraphNode):
+    def __init__(self, kernel, args, tracker, lease):
+        self._kernel = kernel
+        self._args = tuple(args)
+        self._tracker = tracker
+        self._lease = lease
+
+    def compile(self):
+        return _RecordedDispatchExecutable(
+            gen_cpp_kernel(self._kernel, self._args),
+            self._args,
+            self._tracker,
+            self._lease,
+        )
+
+
+class _OpaqueExecutable(NativeGraphExecutable):
+    def __init__(self, tracker):
+        self._tracker = tracker
+
+    def run(self):
+        self._tracker["runs"] += 1
+
+    @property
+    def debug_info(self):
+        return {"kind": "opaque_test"}
+
+
+class _OpaqueNode(NativeGraphNode):
+    def __init__(self, tracker):
+        self._tracker = tracker
+
+    def compile(self):
+        return _OpaqueExecutable(self._tracker)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_mixed_recordable_native_node_lowers_to_one_backend_region():
+    @ti.kernel
+    def add_one(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in values:
+            values[i] += 1
+
+    @ti.kernel
+    def add_two(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in values:
+            values[i] += 2
+
+    @ti.kernel
+    def add_three(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in values:
+            values[i] += 3
+
+    sym_values = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
+    )
+    tracker = {"fallback_runs": 0}
+    lease = object()
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(add_one, sym_values)
+    builder.append_native(
+        _RecordedDispatchNode(add_two, (sym_values,), tracker, lease)
+    )
+    builder.dispatch(add_three, sym_values)
+    graph = builder.compile()
+
+    assert graph._instance_debug_info == {"kind": "mixed_backend_region"}
+    debug = graph._debug_info
+    assert debug["node_count"] == 1
+    assert debug["dispatch_count"] == 3
+    assert debug["native_count"] == 1
+    assert debug["nodes"] == [
+        {
+            "kind": "mixed_cgraph_native",
+            "dispatch_count": 3,
+            "lowered_native_count": 1,
+        }
+    ]
+    backend = (
+        "cpu"
+        if ti.lang.impl.current_cfg().arch == ti.cpu
+        else ti_core.arch_name(ti.lang.impl.current_cfg().arch)
+    )
+    assert debug["optimization"] == {
+        "backend": backend,
+        "input_segments": 3,
+        "output_segments": 1,
+        "mixed_backend_regions": 1,
+        "lowered_native_nodes": 1,
+        "opaque_native_nodes": 0,
+    }
+    ir = graph._ir_debug_info
+    assert not ir["analysis_only"]
+    assert ir["optimization"]["mixed_backend_regions"] == 1
+    assert len(ir["pre_optimization_root"]["children"]) == 3
+    assert len(ir["root"]["children"]) == 1
+    assert ir["root"]["children"][0]["name"] == "mixed_backend_region"
+
+    values = ti.ndarray(ti.i32, shape=128)
+    values.fill(0)
+    graph.execution_stats()
+    graph.run({"values": values})
+    graph.run({"values": values})
+    ti.sync()
+    np.testing.assert_array_equal(
+        values.to_numpy(), np.full(128, 12, dtype=np.int32)
+    )
+    assert tracker["fallback_runs"] == 0
+    report = graph.execution_stats()
+    assert report.node_count == 1
+    assert report.cgraph_segment_count == 1
+    assert report.native_node_count == 1
+    assert report.dispatch_count == 3
+    if ti.lang.impl.current_cfg().arch in (ti.cuda, ti.vulkan):
+        assert report.backend_graph_segments == 1
+    with pytest.raises(TaichiRuntimeError, match="cannot be serialized"):
+        _ = graph._compiled_graph
+
+
+@test_utils.test(arch=ti.cpu)
+def test_mixed_opaque_native_node_remains_an_explicit_segment():
+    @ti.kernel
+    def add_one(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in values:
+            values[i] += 1
+
+    sym_values = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
+    )
+    tracker = {"runs": 0}
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(add_one, sym_values)
+    builder.append_native(_OpaqueNode(tracker))
+    builder.dispatch(add_one, sym_values)
+    graph = builder.compile()
+
+    assert graph._instance_debug_info == {"kind": "dispatch_loop"}
+    assert graph._debug_info["optimization"] == {
+        "backend": "cpu",
+        "input_segments": 3,
+        "output_segments": 3,
+        "mixed_backend_regions": 0,
+        "lowered_native_nodes": 0,
+        "opaque_native_nodes": 1,
+    }
+    values = ti.ndarray(ti.i32, shape=16)
+    values.fill(0)
+    graph.run({"values": values})
+    assert tracker["runs"] == 1
+    np.testing.assert_array_equal(
+        values.to_numpy(), np.full(16, 2, dtype=np.int32)
+    )
 
 
 @test_utils.test(arch=ti.cpu)
