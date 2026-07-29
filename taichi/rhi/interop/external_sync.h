@@ -12,6 +12,7 @@ namespace taichi::lang {
 enum class ExternalExecutionApi : std::uint8_t {
   kCuda,
   kVulkan,
+  kHost,
 };
 
 struct RHI_DLL_EXPORT ExternalStreamDomain {
@@ -25,6 +26,10 @@ struct RHI_DLL_EXPORT ExternalStreamDomain {
                                    void *native_stream = nullptr) noexcept {
     return {ExternalExecutionApi::kCuda, owner_domain, stream_identity,
             native_stream};
+  }
+
+  static ExternalStreamDomain host(std::uint64_t owner_domain) noexcept {
+    return {ExternalExecutionApi::kHost, owner_domain, 1, nullptr};
   }
 
   bool valid() const noexcept {

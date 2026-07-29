@@ -61,6 +61,8 @@ struct CudaSparseAssemblyDispatchInfo {
 
 class Program;
 class ExternalSynchronizationDomain;
+class ExternalAccessEpoch;
+struct ExternalStreamDomain;
 namespace storage {
 class DenseStorageDescriptor;
 class RuntimeStorageArgument;
@@ -126,6 +128,7 @@ class TI_DLL_EXPORT Program {
     RuntimeResourceGraphScope(RuntimeResourceGraphScope &&other) noexcept;
     RuntimeResourceGraphScope &operator=(RuntimeResourceGraphScope &&) = delete;
     ~RuntimeResourceGraphScope();
+    void finish_external_access_epoch();
 
    private:
     friend class Program;
@@ -134,6 +137,8 @@ class TI_DLL_EXPORT Program {
     Program *program_{nullptr};
     Program *previous_program_{nullptr};
     std::unique_lock<std::recursive_mutex> lock_;
+    RuntimeResourceGraphScope *previous_scope_{nullptr};
+    std::unique_ptr<ExternalAccessEpoch> external_access_epoch_;
   };
 
   // Shared for ordinary submissions, exclusive for completion recording and
@@ -3237,12 +3242,18 @@ class TI_DLL_EXPORT Program {
         ExternalDenseStorageHandle handle) const noexcept;
     bool empty() const noexcept;
     void add(ExternalDenseStorageLease lease);
+    const std::vector<std::shared_ptr<ExternalSynchronizationDomain>> &
+    synchronization_domains() const noexcept;
+    void track_synchronization_domain(
+        const std::shared_ptr<ExternalSynchronizationDomain> &domain);
 
     std::array<std::optional<ExternalDenseStorageLease>,
                kInlineExternalDenseStorageLaunchLeases>
         inline_leases_;
     std::size_t inline_count_{0};
     std::vector<ExternalDenseStorageLease> overflow_leases_;
+    std::vector<std::shared_ptr<ExternalSynchronizationDomain>>
+        synchronization_domains_;
   };
 
   using ExternalDenseStorageInflightLeaseMap =
@@ -3323,6 +3334,9 @@ class TI_DLL_EXPORT Program {
   void pin_external_dense_storage_launch_leases(
       ExternalDenseStorageLaunchLeases &leases);
   void release_completed_external_dense_storage_leases();
+  void begin_external_access_epoch(
+      ExternalAccessEpoch &epoch,
+      const ExternalDenseStorageLaunchLeases &leases);
   void close_external_dense_storage_resources();
   static std::uint64_t external_dense_storage_lease_key(
       ExternalDenseStorageHandle handle);

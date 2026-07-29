@@ -1767,6 +1767,9 @@ void CompiledGraph::jit_run(
         compile_config, prog->get_device_caps(), *dispatch.ti_kernel);
     prog->launch_kernel(compiled_kernel_data, launch_ctx);
   }
+  if (resource_guard) {
+    resource_guard->finish_external_access_epoch();
+  }
 } catch (const BackendRuntimeError &error) {
   Program *program = jit_graph_program(*this);
   if (program != nullptr) {
@@ -1856,6 +1859,9 @@ void CompiledGraph::jit_run_cached(
                            &program->runtime_statistics())) {
       program->mark_runtime_submission(
           RuntimeSubmissionKind::kGraphBackendSubmission);
+      if (resource_guard) {
+        resource_guard->finish_external_access_epoch();
+      }
       return;
     }
     if (program != nullptr) {
@@ -1872,6 +1878,9 @@ void CompiledGraph::jit_run_cached(
       TI_ASSERT(program != nullptr);
       program->mark_runtime_submission(
           RuntimeSubmissionKind::kGraphBackendSubmission);
+      if (resource_guard) {
+        resource_guard->finish_external_access_epoch();
+      }
       return;
     }
     if (program != nullptr) {
@@ -1917,6 +1926,9 @@ void CompiledGraph::jit_run_cached(
     }
 #endif
     prog->launch_kernel(*compiled_kernel_data, launch_ctx);
+  }
+  if (resource_guard) {
+    resource_guard->finish_external_access_epoch();
   }
 } catch (const BackendRuntimeError &error) {
   Program *program = jit_graph_program(*this);

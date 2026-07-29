@@ -26,13 +26,25 @@ class TestSynchronizationDomain final : public ExternalSynchronizationDomain {
   }
 
   void acquire_for_consumer(const ExternalStreamDomain &) override {
+    acquires_.fetch_add(1, std::memory_order_relaxed);
   }
 
   void release_from_consumer(const ExternalStreamDomain &) override {
+    releases_.fetch_add(1, std::memory_order_relaxed);
+  }
+
+  int acquires() const noexcept {
+    return acquires_.load(std::memory_order_relaxed);
+  }
+
+  int releases() const noexcept {
+    return releases_.load(std::memory_order_relaxed);
   }
 
  private:
   std::uint64_t identity_{0};
+  std::atomic<int> acquires_{0};
+  std::atomic<int> releases_{0};
 };
 
 storage::DenseStorageBuildResult build_external_f32(
@@ -152,6 +164,15 @@ TEST(ExternalDenseStorageTest, RuntimeArgumentRequiresMatchingSyncDomain) {
         EXPECT_TRUE(bindings[0].capabilities.zero_copy_qualified);
       });
 
+  EXPECT_EQ(sync->acquires(), 1);
+  EXPECT_EQ(sync->releases(), 1);
+  EXPECT_THROW(
+      program.with_resolved_runtime_storage_arguments(
+          {&argument, &argument},
+          [](const auto *, std::size_t) { throw std::runtime_error("stop"); }),
+      std::runtime_error);
+  EXPECT_EQ(sync->acquires(), 2);
+  EXPECT_EQ(sync->releases(), 2);
   storage::RuntimeStorageArgument mismatched(*built.descriptor, requirement,
                                              sync->identity() + 1);
   EXPECT_ANY_THROW(program.with_resolved_runtime_storage_arguments(
@@ -191,8 +212,9 @@ TEST(ExternalDenseStorageTest, GraphScopeRetainsReplayableExternalOwner) {
   Program program(Arch::x64);
   auto *backing = program.create_ndarray(PrimitiveType::f32, {8},
                                          ExternalArrayLayout::kNull, false);
+  auto sync = std::make_shared<TestSynchronizationDomain>(101);
   const auto owner = program.register_external_dense_storage(
-      backing->get_device_allocation(), 8 * sizeof(float));
+      backing->get_device_allocation(), 8 * sizeof(float), {}, sync);
   auto built = build_external_f32(owner, {8}, {sizeof(float)});
   ASSERT_TRUE(built);
 
@@ -204,7 +226,9 @@ TEST(ExternalDenseStorageTest, GraphScopeRetainsReplayableExternalOwner) {
   requirement.dense.require_unique_mapping = true;
   requirement.dense.require_writable = true;
   requirement.dense.accept_external_owner = true;
-  storage::RuntimeStorageArgument argument(*built.descriptor, requirement);
+  requirement.require_external_sync = true;
+  storage::RuntimeStorageArgument argument(*built.descriptor, requirement,
+                                           sync->identity());
   ASSERT_TRUE(argument.qualification().capabilities.replayable);
 
   const storage::RuntimeStorageArgument *arguments[] = {&argument};
@@ -215,11 +239,14 @@ TEST(ExternalDenseStorageTest, GraphScopeRetainsReplayableExternalOwner) {
   {
     auto graph_scope = program.acquire_runtime_resource_graph_scope();
     program.retain_runtime_storage_for_graph_submission(arguments, 1);
+    EXPECT_EQ(sync->acquires(), 1);
+    EXPECT_EQ(sync->releases(), 0);
     retire = std::async(std::launch::async,
                         [&] { program.retire_external_dense_storage(owner); });
     EXPECT_EQ(retire.wait_for(std::chrono::milliseconds(25)),
               std::future_status::timeout);
   }
+  EXPECT_EQ(sync->releases(), 1);
   EXPECT_EQ(retire.wait_for(std::chrono::seconds(2)),
             std::future_status::ready);
   retire.get();

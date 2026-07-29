@@ -17,6 +17,7 @@
 #include "taichi/math/arithmetic.h"
 #include "taichi/rhi/common/host_memory_pool.h"
 #include "taichi/rhi/interop/external_sync.h"
+#include "taichi/rhi/interop/external_access_epoch.h"
 #ifdef TI_WITH_LLVM
 #include "taichi/rhi/cpu/cpu_device.h"
 #endif
@@ -96,6 +97,7 @@ namespace {
 
 thread_local Program *active_snode_tree_lifecycle_program = nullptr;
 thread_local Program *active_runtime_resource_graph_program = nullptr;
+thread_local Program::RuntimeResourceGraphScope *active_runtime_resource_graph_scope = nullptr;
 
 class RuntimeProgramSyncStatisticsScope {
  public:
@@ -192,26 +194,47 @@ Program::acquire_snode_tree_lifecycle_read_guard() {
 Program::RuntimeResourceGraphScope::RuntimeResourceGraphScope(Program *program)
     : program_(program),
       previous_program_(active_runtime_resource_graph_program),
-      lock_(program->runtime_resource_submission_mutex_, std::defer_lock) {
+      lock_(program->runtime_resource_submission_mutex_, std::defer_lock),
+      previous_scope_(active_runtime_resource_graph_scope) {
   program_->ensure_runtime_submission_allowed("Graph resource submission");
   lock_.lock();
   TI_ASSERT(previous_program_ == nullptr || previous_program_ == program_);
   active_runtime_resource_graph_program = program_;
+  active_runtime_resource_graph_scope = this;
 }
 
 Program::RuntimeResourceGraphScope::RuntimeResourceGraphScope(
     RuntimeResourceGraphScope &&other) noexcept
     : program_(std::exchange(other.program_, nullptr)),
       previous_program_(std::exchange(other.previous_program_, nullptr)),
-      lock_(std::move(other.lock_)) {
+      lock_(std::move(other.lock_)),
+      previous_scope_(std::exchange(other.previous_scope_, nullptr)),
+      external_access_epoch_(std::move(other.external_access_epoch_)) {
+  if (active_runtime_resource_graph_scope == &other) {
+    active_runtime_resource_graph_scope = this;
+  }
 }
 
 Program::RuntimeResourceGraphScope::~RuntimeResourceGraphScope() {
   if (program_ == nullptr) {
     return;
   }
+  try {
+    finish_external_access_epoch();
+  } catch (...) {
+    TI_WARN("External Graph access epoch release failed during unwinding");
+  }
   TI_ASSERT(active_runtime_resource_graph_program == program_);
+  TI_ASSERT(active_runtime_resource_graph_scope == this);
+  active_runtime_resource_graph_scope = previous_scope_;
   active_runtime_resource_graph_program = previous_program_;
+}
+
+void Program::RuntimeResourceGraphScope::finish_external_access_epoch() {
+  if (external_access_epoch_) {
+    external_access_epoch_->release();
+    external_access_epoch_.reset();
+  }
 }
 
 Program::RuntimeSubmissionWriteScope::RuntimeSubmissionWriteScope(
@@ -5202,6 +5225,8 @@ void Program::launch_kernel_impl(
     }
   }
 
+  ExternalAccessEpoch external_access_epoch;
+  begin_external_access_epoch(external_access_epoch, external_dense_storage_leases);
   bool pin_attempted = false;
   auto pin_after_submission = [&] {
     if (!retain_resources_until_sync || pin_attempted) {
@@ -5248,6 +5273,7 @@ void Program::launch_kernel_impl(
 
   try {
     launch();
+    external_access_epoch.release();
   } catch (...) {
     const std::exception_ptr launch_error = std::current_exception();
     if (retain_resources_until_sync && !pin_attempted) {
@@ -5257,6 +5283,10 @@ void Program::launch_kernel_impl(
         // pin_after_submission synchronized before reporting its own failure;
         // preserve the backend exception that initiated this recovery path.
       }
+    }
+    try {
+      external_access_epoch.release();
+    } catch (...) {
     }
     std::rethrow_exception(launch_error);
   }
@@ -5658,6 +5688,28 @@ void Program::ExternalDenseStorageLaunchLeases::add(
   }
   overflow_leases_.push_back(std::move(lease));
 }
+const std::vector<std::shared_ptr<ExternalSynchronizationDomain>> &
+Program::ExternalDenseStorageLaunchLeases::synchronization_domains()
+    const noexcept {
+  return synchronization_domains_;
+}
+
+void Program::ExternalDenseStorageLaunchLeases::track_synchronization_domain(
+    const std::shared_ptr<ExternalSynchronizationDomain> &domain) {
+  if (!domain) {
+    return;
+  }
+  for (const auto &existing : synchronization_domains_) {
+    if (existing->identity() != domain->identity()) {
+      continue;
+    }
+    TI_ERROR_IF(existing.get() != domain.get(),
+                "External synchronization domain identity collision");
+    return;
+  }
+  synchronization_domains_.push_back(domain);
+}
+
 
 std::uint64_t Program::argpack_lease_key(ArgPackResourceHandle handle) {
   return (static_cast<std::uint64_t>(handle.generation) << 32u) |
@@ -5919,6 +5971,7 @@ void Program::retain_runtime_storage_for_graph_submission(
     std::size_t count) {
   TI_ERROR_IF(active_runtime_resource_graph_program != this,
               "Runtime storage retention requires an active Graph scope");
+  TI_ASSERT(active_runtime_resource_graph_scope != nullptr);
   NdarrayLaunchLeases ndarray_leases;
   ExternalDenseStorageLaunchLeases external_leases;
   for (std::size_t i = 0; i < count; ++i) {
@@ -5935,6 +5988,15 @@ void Program::retain_runtime_storage_for_graph_submission(
     }
     resolve_dense_storage_descriptor(argument->descriptor(), ndarray_leases,
                                      external_leases, argument);
+  }
+  if (!external_leases.synchronization_domains().empty()) {
+    TI_ERROR_IF(
+        active_runtime_resource_graph_scope->external_access_epoch_,
+        "Graph external access epoch was already acquired");
+    auto epoch = std::make_unique<ExternalAccessEpoch>();
+    begin_external_access_epoch(*epoch, external_leases);
+    active_runtime_resource_graph_scope->external_access_epoch_ =
+        std::move(epoch);
   }
   if (arch_is_gpu(compile_config().arch)) {
     if (!ndarray_leases.empty()) {
@@ -6344,6 +6406,8 @@ storage::ResolvedDenseBinding Program::resolve_dense_storage_descriptor(
                   "External dense storage synchronization domain is stale or "
                   "mismatched");
     }
+    external_leases.track_synchronization_domain(
+        resource->synchronization_domain);
     TI_ERROR_IF(binding.byte_offset > resource->allocation_bytes ||
                     binding.byte_size >
                         resource->allocation_bytes - binding.byte_offset,
@@ -6411,8 +6475,11 @@ void Program::with_resolved_dense_storage_bindings(
   // may enqueue backend work, but must not retain a binding after returning.
   // GPU owner leases are pinned before this transaction unlocks and are then
   // released by RuntimeCompletion or synchronize/finalize.
+  ExternalAccessEpoch external_access_epoch;
+  begin_external_access_epoch(external_access_epoch, external_leases);
   try {
     callback(bindings.data(), bindings.size());
+    external_access_epoch.release();
     if (arch_is_gpu(compile_config().arch)) {
       if (!ndarray_leases.empty()) {
         pin_ndarray_launch_leases(ndarray_leases);
@@ -6423,6 +6490,10 @@ void Program::with_resolved_dense_storage_bindings(
     }
   } catch (...) {
     const std::exception_ptr submission_error = std::current_exception();
+    try {
+      external_access_epoch.release();
+    } catch (...) {
+    }
     if (arch_is_gpu(compile_config().arch)) {
       try {
         program_impl_->synchronize();
@@ -6458,8 +6529,11 @@ void Program::with_resolved_runtime_storage_arguments(
         argument->descriptor(), ndarray_leases, external_leases, argument));
   }
   dense_storage_direct_submissions_.fetch_add(1, std::memory_order_relaxed);
+  ExternalAccessEpoch external_access_epoch;
+  begin_external_access_epoch(external_access_epoch, external_leases);
   try {
     callback(bindings.data(), bindings.size());
+    external_access_epoch.release();
     if (arch_is_gpu(compile_config().arch)) {
       if (!ndarray_leases.empty()) {
         pin_ndarray_launch_leases(ndarray_leases);
@@ -6470,6 +6544,10 @@ void Program::with_resolved_runtime_storage_arguments(
     }
   } catch (...) {
     const std::exception_ptr submission_error = std::current_exception();
+    try {
+      external_access_epoch.release();
+    } catch (...) {
+    }
     if (arch_is_gpu(compile_config().arch)) {
       try {
         program_impl_->synchronize();
@@ -6612,6 +6690,25 @@ void Program::pin_external_dense_storage_launch_leases(
   for (auto &lease : leases.overflow_leases_) {
     pin_lease(lease);
   }
+}
+
+void Program::begin_external_access_epoch(
+    ExternalAccessEpoch &epoch,
+    const ExternalDenseStorageLaunchLeases &leases) {
+  const auto &domains = leases.synchronization_domains();
+  if (domains.empty()) {
+    return;
+  }
+  ExternalStreamDomain stream;
+  if (arch_is_cpu(compile_config().arch)) {
+    stream = ExternalStreamDomain::host(runtime_program_generation());
+  } else if (compile_config().arch == Arch::cuda) {
+    stream = ExternalStreamDomain::cuda(runtime_program_generation(), 1);
+  } else {
+    TI_ERROR("External synchronization is unsupported on backend {}",
+             arch_name(compile_config().arch));
+  }
+  epoch = ExternalAccessEpoch(domains, stream);
 }
 
 void Program::release_completed_argpack_leases() {
