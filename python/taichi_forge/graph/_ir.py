@@ -171,6 +171,7 @@ class BoundedLoopRegion:
     initial_observation: bool = True
     terminal_observation: bool = True
     masked_execution: bool = False
+    cuda_native_mode: str = "auto"
     name: str = "bounded_loop"
     synchronization: bool = True
     opaque: bool = False
@@ -187,6 +188,12 @@ class BoundedLoopRegion:
             "stop_when_nonzero",
         ):
             raise ValueError("Unsupported bounded-loop predicate convention")
+        if self.cuda_native_mode not in (
+            "auto",
+            "portable",
+            "native_required",
+        ):
+            raise ValueError("Unsupported bounded-loop CUDA native mode")
 
     @property
     def kind(self):
@@ -310,6 +317,7 @@ def graph_ir_to_dict(node):
                 "initial_observation": node.initial_observation,
                 "terminal_observation": node.terminal_observation,
                 "masked_execution": node.masked_execution,
+                "cuda_native_mode": node.cuda_native_mode,
             }
         )
     if isinstance(node, ObservationNode):

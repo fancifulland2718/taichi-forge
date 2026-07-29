@@ -495,6 +495,13 @@ struct TI_DLL_EXPORT CompiledGraph {
   void jit_run_cached(const CompileConfig &compile_config,
                       const std::unordered_map<std::string, IValue> &args,
                       CompiledGraphJITCache &cache) const;
+  bool jit_run_bounded_cuda_cached(
+      const CompileConfig &compile_config,
+      const std::unordered_map<std::string, IValue> &args,
+      CompiledGraphJITCache &cache,
+      Ndarray *predicate,
+      int max_iterations,
+      bool continue_while_nonzero) const;
 
   TI_IO_DEF(dispatches);
 

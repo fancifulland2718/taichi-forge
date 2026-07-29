@@ -3316,7 +3316,10 @@ void export_lang(py::module &m) {
   auto jit_run_graph = [](aot::CompiledGraph *self,
                           const CompileConfig &compile_config,
                           const py::dict &pyargs,
-                          aot::CompiledGraphJITCache *cache) {
+                          aot::CompiledGraphJITCache *cache,
+                          Ndarray *bounded_predicate = nullptr,
+                          int bounded_max_iterations = 0,
+                          bool continue_while_nonzero = true) -> bool {
         std::unordered_map<std::string, aot::IValue> args;
         auto insert_scalar_arg = [&args](std::string arg_name,
                                          DataType expected_dtype,
@@ -3460,11 +3463,18 @@ void export_lang(py::module &m) {
         // serialized by Python. The cache owns the C++ transaction boundary;
         // Python objects passed in pyargs remain alive for this call.
         py::gil_scoped_release release;
+        if (bounded_predicate != nullptr) {
+          TI_ASSERT(cache != nullptr);
+          return self->jit_run_bounded_cuda_cached(
+              compile_config, args, *cache, bounded_predicate,
+              bounded_max_iterations, continue_while_nonzero);
+        }
         if (cache) {
           self->jit_run_cached(compile_config, args, *cache);
         } else {
           self->jit_run(compile_config, args);
         }
+        return true;
       };
 
   py::class_<aot::CompiledGraphJITCache>(m, "CompiledGraphJITCache")
@@ -3612,7 +3622,22 @@ void export_lang(py::module &m) {
                            const py::dict &pyargs,
                            aot::CompiledGraphJITCache &cache) {
              jit_run_graph(self, compile_config, pyargs, &cache);
-           });
+           })
+      .def("jit_run_bounded_cuda_cached",
+           [jit_run_graph](aot::CompiledGraph *self,
+                           const CompileConfig &compile_config,
+                           const py::dict &pyargs,
+                           aot::CompiledGraphJITCache &cache,
+                           Ndarray &predicate, int max_iterations,
+                           bool continue_while_nonzero) {
+             return jit_run_graph(
+                 self, compile_config, pyargs, &cache, &predicate,
+                 max_iterations, continue_while_nonzero);
+           },
+           py::arg("compile_config"), py::arg("args"),
+           py::arg("cache"), py::arg("predicate"),
+           py::arg("max_iterations"),
+           py::arg("continue_while_nonzero"));
 
   py::class_<Kernel>(m, "Kernel")
       .def("no_activate",

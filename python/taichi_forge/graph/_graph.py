@@ -686,8 +686,20 @@ def _bounded_chunk_limit(arch, requested, masked_execution):
     configured = (
         requested
         if requested is not None
-        else int(os.environ.get("TI_GRAPH_BOUNDED_CHUNK_SIZE", "4"))
+        else os.environ.get("TI_GRAPH_BOUNDED_CHUNK_SIZE", "4")
     )
+    if isinstance(configured, bool) or not isinstance(
+        configured, (int, np.integer, str)
+    ):
+        raise TaichiRuntimeError(
+            "Bounded Graph loop chunk_size must be an integer"
+        )
+    try:
+        configured = int(configured)
+    except ValueError as error:
+        raise TaichiRuntimeError(
+            "Bounded Graph loop chunk_size must be an integer"
+        ) from error
     if configured <= 0:
         raise TaichiRuntimeError(
             "Bounded Graph loop chunk_size must be positive"
@@ -695,21 +707,36 @@ def _bounded_chunk_limit(arch, requested, masked_execution):
     return min(configured, 64)
 
 
-def _cuda_bounded_upgrade_status(arch):
+def _cuda_bounded_upgrade_status(arch, mode):
+    if mode not in ("auto", "portable", "native_required"):
+        raise TaichiRuntimeError(
+            "Bounded Graph loop cuda_native_mode must be auto, portable, "
+            "or native_required"
+        )
+    if mode == "portable":
+        return False, "forced_portable"
     if arch != _ti_core.Arch.cuda:
+        if mode == "native_required":
+            raise TaichiRuntimeError(
+                "Bounded Graph loop native_required mode needs CUDA"
+            )
         return False, "not_cuda"
     capabilities = dict(_ti_core.cuda_conditional_graph_capabilities())
     if not capabilities["driver_version_eligible"]:
-        return False, "cuda_driver_api_version_below_12_8"
-    if not capabilities["conditional_graph_symbols_loaded"]:
-        return False, "cuda_conditional_graph_symbols_not_loaded"
-    if not capabilities.get(
+        reason = "cuda_driver_api_version_below_12_8"
+    elif not capabilities["conditional_graph_symbols_loaded"]:
+        reason = "cuda_conditional_graph_symbols_not_loaded"
+    elif not capabilities.get(
         "general_device_setter_lowering_compiled", False
     ):
-        return False, "cuda_conditional_setter_lowering_not_compiled"
-    # The existing setter/body path is solver-owned. Report device capability
-    # without selecting it until a general CGraph body recorder is present.
-    return True, "general_conditional_body_not_compiled"
+        reason = "cuda_conditional_setter_lowering_not_compiled"
+    else:
+        return True, "eligible"
+    if mode == "native_required":
+        raise TaichiRuntimeError(
+            f"Bounded Graph loop native CUDA lowering unavailable: {reason}"
+        )
+    return False, reason
 
 
 class _CompiledBoundedLoopGraphNode:
@@ -727,6 +754,7 @@ class _CompiledBoundedLoopGraphNode:
         predicate_convention,
         chunk_size,
         masked_execution,
+        cuda_native_mode,
         initial_observation,
         terminal_observation,
         name,
@@ -735,9 +763,22 @@ class _CompiledBoundedLoopGraphNode:
             raise TaichiRuntimeError(
                 "Bounded Graph loop body must be a non-empty Sequential"
             )
+        if isinstance(max_iterations, bool) or not isinstance(
+            max_iterations, (int, np.integer)
+        ):
+            raise TaichiRuntimeError(
+                "Bounded Graph loop max_iterations must be an integer"
+            )
         if max_iterations < 0:
             raise TaichiRuntimeError(
                 "Bounded Graph loop max_iterations must be non-negative"
+            )
+        if predicate_convention not in (
+            "continue_while_nonzero",
+            "stop_when_nonzero",
+        ):
+            raise TaichiRuntimeError(
+                "Unsupported bounded Graph predicate convention"
             )
         if not terminal_observation:
             raise TaichiRuntimeError(
@@ -751,6 +792,7 @@ class _CompiledBoundedLoopGraphNode:
         self.initial_observation = bool(initial_observation)
         self.terminal_observation = bool(terminal_observation)
         self.masked_execution = bool(masked_execution)
+        self.cuda_native_mode = cuda_native_mode
         self.body_dispatch_count = body._dispatch_count
         self.dispatch_count = body._dispatch_count
         self.runtime_arg_names = frozenset(body._runtime_arg_names)
@@ -810,12 +852,22 @@ class _CompiledBoundedLoopGraphNode:
             initial_observation=initial_observation,
             terminal_observation=terminal_observation,
             masked_execution=masked_execution,
+            cuda_native_mode=cuda_native_mode,
             name=name,
         )
         self._last_report = None
+        self._native_jit_cache = _ti_core.CompiledGraphJITCache()
         self._native_upgrade_eligible, self._native_upgrade_reason = (
-            _cuda_bounded_upgrade_status(arch)
+            _cuda_bounded_upgrade_status(arch, cuda_native_mode)
         )
+        if self._native_upgrade_eligible and self.counter is None:
+            if cuda_native_mode == "native_required":
+                raise TaichiRuntimeError(
+                    "Bounded Graph loop native CUDA lowering requires an "
+                    "exact iteration counter"
+                )
+            self._native_upgrade_eligible = False
+            self._native_upgrade_reason = "exact_counter_required"
 
     def _select_chunk(self, remaining):
         return max(size for size in self._chunks if size <= remaining)
@@ -875,7 +927,56 @@ class _CompiledBoundedLoopGraphNode:
                 initial_counter = None
             active = True
 
-        while active and executed < self.max_iterations:
+        native_selected = False
+        native_reason = self._native_upgrade_reason
+        if (
+            active
+            and self.max_iterations > 0
+            and self._native_upgrade_eligible
+        ):
+            predicate_ndarray = getattr(predicate_object, "arr", None)
+            if predicate_ndarray is None:
+                native_reason = "predicate_ndarray_required"
+            else:
+                native_selected = self._chunks[1].compiled_graph.jit_run_bounded_cuda_cached(
+                    context.compile_config(),
+                    context.flattened_args(self.runtime_arg_names),
+                    self._native_jit_cache,
+                    predicate_ndarray,
+                    self.max_iterations,
+                    self.predicate_convention == "continue_while_nonzero",
+                )
+                native_reason = (
+                    "selected"
+                    if native_selected
+                    else "conditional_capture_fallback"
+                )
+            if not native_selected and self.cuda_native_mode == "native_required":
+                raise TaichiRuntimeError(
+                    "Bounded Graph loop native CUDA lowering failed: "
+                    f"{native_reason}"
+                )
+        if native_selected:
+            predicate_value = observe_control(-1)
+            logical_native = counter_values[-1] - initial_counter
+            if logical_native < 0 or logical_native > self.max_iterations:
+                raise TaichiRuntimeError(
+                    "Bounded Graph loop native counter left its iteration "
+                    "budget"
+                )
+            active = _bounded_predicate_continues(
+                predicate_value, self.predicate_convention
+            )
+            executed = self.max_iterations if active else logical_native
+            observations[-1] = executed
+            if executed:
+                chunks.append(executed)
+
+        while (
+            not native_selected
+            and active
+            and executed < self.max_iterations
+        ):
             chunk = self._select_chunk(self.max_iterations - executed)
             self._chunks[chunk].run(context)
             executed += chunk
@@ -902,7 +1003,9 @@ class _CompiledBoundedLoopGraphNode:
         arch = impl.current_cfg().arch
         cpu_arches = (_ti_core.Arch.x64, _ti_core.Arch.arm64)
         lowering = (
-            "cpu_host_loop"
+            "cuda_conditional_graph"
+            if native_selected
+            else "cpu_host_loop"
             if arch in cpu_arches
             else "portable_chunk_replay"
             if self.chunk_limit > 1
@@ -926,18 +1029,22 @@ class _CompiledBoundedLoopGraphNode:
             initial_counter=initial_counter,
             final_counter=final_counter,
             native_upgrade_eligible=self._native_upgrade_eligible,
-            native_upgrade_reason=self._native_upgrade_reason,
+            native_upgrade_reason=native_reason,
         )
 
     def invalidate_runtime(self):
+        self._native_jit_cache.clear_runtime_state()
         for node in self._chunks.values():
             node.invalidate_runtime()
 
     @property
     def debug_graph_stats(self):
-        return tuple(
+        chunk_stats = tuple(
             node.debug_graph_stats for node in self._chunks.values()
         )
+        if not self._native_upgrade_eligible:
+            return chunk_stats
+        return (self._native_jit_cache._debug_graph_stats(), *chunk_stats)
 
     @property
     def last_report(self):
@@ -952,6 +1059,8 @@ class _CompiledBoundedLoopGraphNode:
             "max_iterations": self.max_iterations,
             "chunk_limit": self.chunk_limit,
             "masked_execution": self.masked_execution,
+            "cuda_native_mode": self.cuda_native_mode,
+            "native_upgrade_eligible": self._native_upgrade_eligible,
         }
 
 
@@ -1517,10 +1626,18 @@ class GraphBuilder:
         predicate_convention="continue_while_nonzero",
         chunk_size=None,
         masked_execution=False,
+        cuda_native_mode="auto",
         initial_observation=True,
         terminal_observation=True,
         name="bounded_loop",
     ):
+        """Append a capped predicate-controlled region.
+
+        ``counter`` is required for chunk replay and CUDA native selection.
+        It must advance exactly once for each active body iteration.
+        ``cuda_native_mode`` may be ``auto``, ``portable``, or
+        ``native_required``; only performance lowering changes.
+        """
         self._flush_graph_builder()
         predicate_name = (
             predicate if isinstance(predicate, str) else predicate.name
@@ -1539,6 +1656,7 @@ class GraphBuilder:
                 predicate_convention=predicate_convention,
                 chunk_size=chunk_size,
                 masked_execution=masked_execution,
+                cuda_native_mode=cuda_native_mode,
                 initial_observation=initial_observation,
                 terminal_observation=terminal_observation,
                 name=name,
