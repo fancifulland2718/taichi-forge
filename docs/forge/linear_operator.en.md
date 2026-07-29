@@ -35,6 +35,20 @@ All operators, plans, providers, ndarrays, and field views belong to one runtime
 generation. They become invalid after `ti.reset()` and cannot be rebound to a
 later `ti.init()` session.
 
+### Precision boundary
+
+Compiled-kernel and compiled-Graph matrix-free providers currently use an
+exact `ti.f32` vector ABI on CPU, CUDA, and Vulkan. Consequently, GPU
+matrix-free solver execution through these providers is qualified for
+`ti.f32` only. `ti.f64` support for this ABI is outside the current release
+boundary.
+
+The runtime does not silently downcast `ti.f64` vectors, materialize a
+matrix-free provider, or substitute a different provider or backend.
+Unsupported dtype/provider/backend combinations fail explicitly. Stored
+operators and dense fields may still use `ti.f64` where the corresponding
+provider, solver, and backend rows in the support tables below allow it.
+
 ## Dense fields and VectorView
 
 A supported dense field may be passed directly as `input`, `out`, or `addend`

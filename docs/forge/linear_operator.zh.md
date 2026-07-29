@@ -28,6 +28,18 @@ scalar Taichi ndarray、受支持的 dense field、显式 `DenseNdarrayView` 或
 operator、plan、provider、ndarray、field view 都属于同一 runtime generation。执行
 `ti.reset()` 后它们全部失效，也不能重新绑定到后续 `ti.init()` session。
 
+### 精度边界
+
+compiled-kernel 与 compiled-Graph matrix-free provider 当前在 CPU、CUDA、Vulkan
+上均使用精确的 `ti.f32` vector ABI。因此，经由这些 provider 执行的 GPU
+matrix-free 求解路径目前只对 `ti.f32` 完成资格支持；该 ABI 的 `ti.f64` 支持不属于
+当前版本范围。
+
+runtime 不会静默地把 `ti.f64` vector 降为 `ti.f32`，不会 materialize
+matrix-free provider，也不会替换为其它 provider 或 backend。不受支持的
+dtype/provider/backend 组合会明确失败。stored operator 与 dense field 仍可在下文
+支持表所列的 provider、solver 和 backend 组合中使用 `ti.f64`。
+
 ## Dense field 与 VectorView
 
 受支持的 dense field 可以直接作为 `LinearOperator.apply()` 的 `input`、`out` 或
