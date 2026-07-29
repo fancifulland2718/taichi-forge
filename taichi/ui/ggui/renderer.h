@@ -57,6 +57,7 @@ class TI_DLL_EXPORT Renderer {
   void wait_for_in_flight_frames();
   bool can_accept_frame();
   bool has_render_work() const;
+  bool last_frame_used_shared_cuda_vulkan() const noexcept;
   void discard_pending_frame();
 
   void set_background_color(const glm::vec3 &color);
@@ -66,6 +67,9 @@ class TI_DLL_EXPORT Renderer {
   void set_image(const DisplayFrameInfo &info);
 
   void set_image(taichi::lang::Texture *tex);
+
+  std::shared_ptr<SharedCudaVulkanImage>
+  acquire_shared_cuda_vulkan_image(int width, int height);
 
   void triangles(const TrianglesInfo &info);
 
@@ -136,6 +140,7 @@ class TI_DLL_EXPORT Renderer {
   std::deque<InFlightFrame> in_flight_frames_;
   std::vector<std::unique_ptr<SetImage>> reusable_set_images_;
   SetImage *pending_set_image_{nullptr};
+  bool last_frame_used_shared_cuda_vulkan_{false};
   std::vector<taichi::lang::RuntimeResourceHandle>
       pending_runtime_resource_handles_;
   std::vector<SharedNdarrayResourceLease>

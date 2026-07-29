@@ -52,6 +52,12 @@ class RHI_DLL_EXPORT ExternalSynchronizationDomain {
   virtual ~ExternalSynchronizationDomain() = default;
 
   virtual std::uint64_t identity() const noexcept = 0;
+  // Opt in only when retirement of the registered owner cannot destroy the
+  // backing allocation before the active consumer stream/fence completes.
+  // Such domains do not need Program's conservative until-sync lease pin.
+  virtual bool retirement_waits_for_consumer() const noexcept {
+    return false;
+  }
   virtual void acquire_for_consumer(const ExternalStreamDomain &stream) = 0;
   virtual void release_from_consumer(const ExternalStreamDomain &stream) = 0;
 };

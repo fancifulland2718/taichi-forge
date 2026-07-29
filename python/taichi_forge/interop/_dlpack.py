@@ -13,7 +13,7 @@ _DLCUDA_MANAGED = 13
 
 
 class ExternalDenseView(DenseNdarrayView):
-    """Non-owning dense storage imported from an external provider."""
+    """Managed zero-copy dense storage imported from an external provider."""
 
     __slots__ = ()
 
@@ -123,12 +123,12 @@ def _from_dlpack(source, *, element_shape=(), layout="aos", access="readwrite"):
             "DLPack storage cannot form an executable dense view: "
             f"{description.failure_reason}"
         )
-    return ExternalDenseView(native, description)
     if not description.properties["ndarray_abi_compatible"]:
         native.close()
         raise BufferError(
             "DLPack kernel bindings currently require compact AOS storage"
         )
+    return ExternalDenseView(native, description)
 
 
 def from_dlpack(
@@ -165,6 +165,16 @@ def _legacy_external_view(source, *, element_shape=(), layout="aos"):
         source, "__dlpack_device__"
     ):
         return None
+    # Historical CPU external arrays are consumed synchronously. Their direct
+    # ABI path is already zero-copy and avoids per-call owner registration;
+    # explicit from_dlpack() remains available when managed reuse is desired.
+    try:
+        device_type, _ = _normalize_dlpack_device(source)
+    except (BufferError, TypeError, ValueError, RuntimeError):
+        return None
+    if impl.current_cfg().arch in (_ti_core.Arch.x64, _ti_core.Arch.arm64):
+        if device_type in (_DLCPU, _DLCUDA_HOST):
+            return None
     try:
         return _from_dlpack(
             source,

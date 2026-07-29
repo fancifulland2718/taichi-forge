@@ -168,6 +168,8 @@ bool Window::draw_frame(bool blocking_acquire) {
   if (!renderer_->draw_frame(gui_.get(), blocking_acquire)) {
     return false;
   }
+  record_display_render_submission(
+      renderer_->last_frame_used_shared_cuda_vulkan());
   drawn_frame_ = true;
   return true;
 }

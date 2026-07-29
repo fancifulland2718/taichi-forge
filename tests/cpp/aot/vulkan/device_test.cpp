@@ -815,8 +815,10 @@ TEST(VulkanCudaInteropTest,
   consumer->buffer_copy(destination.get_ptr(), shared_allocation.get_ptr(),
                         kBytes);
   auto completion =
-      adapter->acquire_vulkan_from_cuda(*vulkan_stream, consumer.get());
+      adapter->cycle_vulkan_to_cuda(*vulkan_stream, consumer.get());
   ASSERT_TRUE(completion);
+  EXPECT_EQ(adapter->access_state(),
+            VulkanCudaExternalAllocation::AccessState::kAwaitingCudaAcquire);
   ASSERT_TRUE(completion->wait());
 
   std::array<uint32_t, kElementCount> output{};

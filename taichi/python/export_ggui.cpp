@@ -21,6 +21,7 @@ namespace py = pybind11;
 #include "taichi/rhi/vulkan/vulkan_loader.h"
 #include "taichi/rhi/arch.h"
 #include "taichi/program/field_info.h"
+#include "taichi/program/storage_view.h"
 #include "taichi/ui/common/gui_base.h"
 #include "taichi/program/ndarray.h"
 #include <memory>
@@ -468,6 +469,16 @@ struct PyCanvas {
     canvas->set_image(texture);
   }
 
+  vulkan::SharedCudaVulkanImage *acquire_shared_cuda_vulkan_image(
+      int width,
+      int height) {
+    auto *ggui_canvas = dynamic_cast<vulkan::Canvas *>(canvas);
+    if (ggui_canvas == nullptr) {
+      return nullptr;
+    }
+    return ggui_canvas->acquire_shared_cuda_vulkan_image(width, height).get();
+  }
+
   void scene(PyScene &scene) {
     canvas->scene(scene.scene);
   }
@@ -645,6 +656,7 @@ struct PyWindow {
     ret["offscreen_submitted_frames"] = stats.offscreen_submitted_frames;
     ret["dropped_frames"] = stats.dropped_frames;
     ret["reused_frames"] = stats.reused_frames;
+    ret["zero_copy_render_submissions"] = stats.zero_copy_render_submissions;
     ret["display_mode"] = headless_display_ ? "offscreen" : "window";
     ret["headless"] = headless_display_;
     ret["last_accepted"] = stats.last_accepted;
@@ -653,6 +665,7 @@ struct PyWindow {
     ret["last_offscreen_submitted"] = stats.last_offscreen_submitted;
     ret["last_dropped"] = stats.last_dropped;
     ret["last_reused"] = stats.last_reused;
+    ret["last_render_zero_copy"] = stats.last_render_zero_copy;
     return ret;
   }
 
@@ -758,11 +771,25 @@ void export_ggui(py::module &m) {
       .def("destroy", &PyWindow::destroy)
       .def("GUI", &PyWindow::gui);
 
+  py::class_<vulkan::SharedCudaVulkanImage,
+             std::shared_ptr<vulkan::SharedCudaVulkanImage>>(
+      m, "_SharedCudaVulkanImage")
+      .def_property_readonly(
+          "description", &vulkan::SharedCudaVulkanImage::description,
+          py::return_value_policy::reference_internal)
+      .def_property_readonly("identity",
+                             &vulkan::SharedCudaVulkanImage::identity)
+      .def_property_readonly("width", &vulkan::SharedCudaVulkanImage::width)
+      .def_property_readonly("height", &vulkan::SharedCudaVulkanImage::height);
+
   py::class_<PyCanvas>(m, "PyCanvas")
       .def("set_background_color", &PyCanvas::set_background_color)
       .def("set_image", &PyCanvas::set_image)
       .def("set_image_host_rgba8", &PyCanvas::set_image_host_rgba8)
       .def("set_image_texture", &PyCanvas::set_image_texture)
+      .def("_acquire_shared_cuda_vulkan_image",
+           &PyCanvas::acquire_shared_cuda_vulkan_image,
+           py::return_value_policy::reference)
       .def("triangles", &PyCanvas::triangles)
       .def("lines", &PyCanvas::lines)
       .def("circles", &PyCanvas::circles)

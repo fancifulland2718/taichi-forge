@@ -243,6 +243,16 @@ def test_to_rgba8_packed_ndarray_taichi_image():
     np.testing.assert_array_equal(packed.to_numpy(), _pack_rgba8_numpy_reference(vector_np))
     assert to_rgba8_packed_ndarray(vector) is packed
 
+    destination = ti.ndarray(ti.u32, shape=vector_np.shape[:2])
+    assert to_rgba8_packed_ndarray(vector, destination=destination) is destination
+    np.testing.assert_array_equal(
+        destination.to_numpy(), _pack_rgba8_numpy_reference(vector_np)
+    )
+    with pytest.raises(ValueError, match="destination shape"):
+        to_rgba8_packed_ndarray(
+            vector, destination=ti.ndarray(ti.u32, shape=(1, 1))
+        )
+
     scalar_np = np.array([[0, 127], [255, 3]], dtype=np.uint8)
     scalar = ti.ndarray(ti.u8, shape=scalar_np.shape)
     scalar.from_numpy(scalar_np)
@@ -989,6 +999,58 @@ def test_reset_clears_all_staging_cache_generations():
     assert not image_packed_ndarray_cache
     assert not normals_field_cache
 
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=[ti.cuda])
+def test_set_image_cuda_vulkan_shared_dense_view():
+    width, height = 32, 48
+    window = ti.ui.Window("test", (width, height), show_window=False)
+    canvas = window.get_canvas()
+    image = ti.Vector.field(4, ti.f32, shape=(width, height))
+
+    @ti.kernel
+    def fill():
+        for i, j in image:
+            image[i, j] = ti.Vector(
+                [i / 31.0, j / 47.0, 0.25, 1.0]
+            )
+
+    fill()
+    assert canvas.set_image(image) is True
+    if not canvas._shared_cuda_vulkan_views:
+        window.destroy()
+        pytest.skip("CUDA-Vulkan external sharing is unavailable")
+
+    rendered = window.get_image_buffer_as_numpy()
+    stats = window.get_display_stats()
+    assert stats["zero_copy_render_submissions"] == 1
+    assert stats["last_render_zero_copy"] is True
+    expected = np.empty((width, height, 4), dtype=np.float32)
+    expected[..., 0] = np.arange(width, dtype=np.float32)[:, None] / 31.0
+    expected[..., 1] = np.arange(height, dtype=np.float32)[None, :] / 47.0
+    expected[..., 2] = 0.25
+    expected[..., 3] = 1.0
+    np.testing.assert_allclose(rendered, expected, atol=1.0 / 255.0 + 1e-5)
+    window.destroy()
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=[ti.cuda])
+def test_cuda_vulkan_shared_image_owner_is_safe_across_reset():
+    window = ti.ui.Window("test", (32, 32), show_window=False)
+    canvas = window.get_canvas()
+    image = ti.Vector.field(4, ti.f32, shape=(32, 32))
+
+    assert canvas.set_image(image) is True
+    if not canvas._shared_cuda_vulkan_views:
+        window.destroy()
+        pytest.skip("CUDA-Vulkan external sharing is unavailable")
+
+    window.get_image_buffer_as_numpy()
+    assert window.get_display_stats()["last_render_zero_copy"] is True
+
+    ti.reset()
+    window.destroy()
 
 @pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])

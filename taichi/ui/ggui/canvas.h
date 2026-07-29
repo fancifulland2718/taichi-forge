@@ -48,6 +48,9 @@ class TI_DLL_EXPORT Canvas final : public CanvasBase {
 
   void set_image(taichi::lang::Texture *tex) override;
 
+  std::shared_ptr<SharedCudaVulkanImage>
+  acquire_shared_cuda_vulkan_image(int width, int height);
+
   void triangles(const TrianglesInfo &info) override;
 
   void circles(const CirclesInfo &info) override;

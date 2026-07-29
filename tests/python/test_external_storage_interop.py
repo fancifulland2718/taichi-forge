@@ -52,7 +52,7 @@ def test_dlpack_view_binds_numpy_storage_without_copy():
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
-def test_historical_numpy_kernel_argument_uses_managed_storage_internally():
+def test_historical_numpy_kernel_argument_keeps_direct_cpu_binding():
     @ti.kernel
     def increment(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):
         for i in values:
@@ -71,15 +71,10 @@ def test_historical_numpy_kernel_argument_uses_managed_storage_internally():
     )
     resources_after = program._debug_external_dense_storage_stats()
     bindings_after = program._debug_dense_storage_binding_stats()
-    assert resources_after["created_total"] == (
-        resources_before["created_total"] + 1
-    )
-    assert resources_after["released_total"] == (
-        resources_before["released_total"] + 1
-    )
-    assert resources_after["live"] == resources_before["live"]
-    assert bindings_after["external_bindings"] == (
-        bindings_before["external_bindings"] + 1
+    assert resources_after == resources_before
+    assert (
+        bindings_after["external_bindings"]
+        == bindings_before["external_bindings"]
     )
     assert bindings_after["temporary_allocations"] == 0
     assert bindings_after["temporary_bytes"] == 0
@@ -103,12 +98,17 @@ def test_historical_fortran_numpy_argument_keeps_copy_fallback():
     ).astype(np.int32)
     np.testing.assert_array_equal(values, expected)
     resources_after = program._debug_external_dense_storage_stats()
-    assert resources_after["created_total"] == (
-        resources_before["created_total"] + 1
-    )
-    assert resources_after["released_total"] == (
-        resources_before["released_total"] + 1
-    )
+    assert resources_after == resources_before
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_dlpack_view_close_is_safe_after_runtime_reset():
+    values = np.arange(4, dtype=np.float32)
+    view = ti.interop.from_dlpack(values)
+
+    ti.reset()
+    view.close()
+    assert view.closed
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)

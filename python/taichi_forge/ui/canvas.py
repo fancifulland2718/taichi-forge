@@ -2,6 +2,7 @@ import numpy as np
 
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl
+from taichi_forge.lang._storage_view import DenseNdarrayView, StorageDescription
 from taichi_forge.lang._texture import Texture
 from .scene import SceneV2
 from .display_frame import DisplayFrame
@@ -30,6 +31,7 @@ class Canvas:
         self.canvas = canvas  # reference to a PyCanvas
         self.window = window
         self._set_image_info_cache = {}
+        self._shared_cuda_vulkan_views = {}
 
     def _get_set_image_info(self, staging_img):
         if hasattr(staging_img, "ctypes"):
@@ -53,6 +55,32 @@ class Canvas:
             info = get_field_info(staging_img)
             self._set_image_info_cache[key] = info
         return info
+
+    def _acquire_shared_cuda_vulkan_view(self, width, height):
+        acquire = getattr(
+            self.canvas, "_acquire_shared_cuda_vulkan_image", None
+        )
+        if acquire is None:
+            return None
+        native = acquire(int(width), int(height))
+        if native is None:
+            return None
+        key = (int(native.identity), int(native.width), int(native.height))
+        view = self._shared_cuda_vulkan_views.get(key)
+        if view is None:
+            description = StorageDescription(native.description)
+            if not description.supported:
+                raise RuntimeError(
+                    "shared display storage could not form a dense view: "
+                    f"{description.failure_reason}"
+                )
+            view = DenseNdarrayView(native, description)
+            self._shared_cuda_vulkan_views[key] = view
+            if len(self._shared_cuda_vulkan_views) > 16:
+                oldest = next(iter(self._shared_cuda_vulkan_views))
+                if oldest != key:
+                    self._shared_cuda_vulkan_views.pop(oldest, None)
+        return view
 
     def _record_display_frame_accepted(self, width, height):
         if self.window is None:
@@ -109,6 +137,19 @@ class Canvas:
             return True
         else:
             if prog_arch in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan):
+                if prog_arch == _ti_core.Arch.cuda and hasattr(img, "shape"):
+                    shared_view = self._acquire_shared_cuda_vulkan_view(
+                        img.shape[0], img.shape[1]
+                    )
+                    if shared_view is not None:
+                        packed_img = to_rgba8_packed_ndarray(
+                            img, destination=shared_view
+                        )
+                        if packed_img is not None:
+                            self._record_display_frame_accepted(
+                                packed_img.shape[0], packed_img.shape[1]
+                            )
+                            return True
                 packed_img = to_rgba8_packed_ndarray(img)
                 if packed_img is not None:
                     self.canvas.set_image(self._get_set_image_info(packed_img))

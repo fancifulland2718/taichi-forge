@@ -75,6 +75,17 @@ void Renderer::set_image(const DisplayFrameInfo &info) {
   s->update_data(info);
 }
 
+std::shared_ptr<SharedCudaVulkanImage>
+Renderer::acquire_shared_cuda_vulkan_image(int width, int height) {
+  SetImage *set_image = pending_set_image_;
+  if (!set_image) {
+    set_image = get_set_image_renderable();
+    render_queue_.push_back(set_image);
+    pending_set_image_ = set_image;
+  }
+  return set_image->acquire_shared_cuda_vulkan_image(width, height);
+}
+
 void Renderer::set_image(Texture *tex) {
   retain_texture(tex);
   SetImage *s = pending_set_image_;
@@ -293,6 +304,10 @@ bool Renderer::has_render_work() const {
   return !render_queue_.empty();
 }
 
+bool Renderer::last_frame_used_shared_cuda_vulkan() const noexcept {
+  return last_frame_used_shared_cuda_vulkan_;
+}
+
 void Renderer::discard_pending_frame() {
   recycle_renderable_list(renderables_);
   render_queue_.clear();
@@ -464,6 +479,7 @@ void Renderer::wait_for_in_flight_frames() {
 }
 
 bool Renderer::draw_frame(GuiBase *gui_base, bool blocking_acquire) {
+  last_frame_used_shared_cuda_vulkan_ = false;
   SurfaceImage surface_image;
   if (blocking_acquire) {
     surface_image = swap_chain_.surface().acquire_surface_image();
@@ -564,7 +580,21 @@ bool Renderer::draw_frame(GuiBase *gui_base, bool blocking_acquire) {
     wait_semaphores.push_back(semaphore);
   }
 
-  render_complete_semaphore_ = stream->submit(cmd_list.get(), wait_semaphores);
+  const bool use_shared_cuda_vulkan =
+      pending_set_image_ &&
+      pending_set_image_->has_pending_shared_cuda_vulkan_image();
+  if (use_shared_cuda_vulkan) {
+    auto *vulkan_stream = dynamic_cast<VulkanStream *>(stream);
+    TI_ERROR_IF(vulkan_stream == nullptr,
+                "Shared CUDA-Vulkan frame requires a Vulkan stream");
+    render_complete_semaphore_ =
+        pending_set_image_->submit_shared_cuda_vulkan_frame(
+            *vulkan_stream, cmd_list.get(), wait_semaphores);
+  } else {
+    render_complete_semaphore_ =
+        stream->submit(cmd_list.get(), wait_semaphores);
+  }
+  last_frame_used_shared_cuda_vulkan_ = use_shared_cuda_vulkan;
   render_surface_image_ = surface_image;
 
   render_queue_.clear();

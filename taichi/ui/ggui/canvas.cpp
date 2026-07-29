@@ -27,6 +27,11 @@ void Canvas::set_image(Texture *tex) {
   renderer_->set_image(tex);
 }
 
+std::shared_ptr<SharedCudaVulkanImage>
+Canvas::acquire_shared_cuda_vulkan_image(int width, int height) {
+  return renderer_->acquire_shared_cuda_vulkan_image(width, height);
+}
+
 void Canvas::triangles(const TrianglesInfo &info) {
   renderer_->triangles(info);
 }

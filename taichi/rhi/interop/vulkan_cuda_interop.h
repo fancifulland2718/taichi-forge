@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 #include "taichi/rhi/device.h"
 #include "taichi/rhi/interop/external_sync.h"
@@ -44,6 +45,9 @@ class RHI_DLL_EXPORT VulkanCudaExternalAllocation final
       const VulkanCudaExternalAllocation &) = delete;
 
   std::uint64_t identity() const noexcept override;
+  bool retirement_waits_for_consumer() const noexcept override {
+    return true;
+  }
   DeviceAllocation cuda_allocation() const noexcept;
   std::size_t allocation_size() const noexcept;
   AccessState access_state() const noexcept;
@@ -64,6 +68,14 @@ class RHI_DLL_EXPORT VulkanCudaExternalAllocation final
   // The returned completion token covers the wait and consumer command list.
   StreamSemaphore acquire_vulkan_from_cuda(vulkan::VulkanStream &stream,
                                            CommandList *cmdlist);
+
+  // Submit one Vulkan consumer and hand the allocation directly back to CUDA
+  // when that submission completes. This folds the Vulkan acquire and next
+  // CUDA release into one steady-state frame submission.
+  StreamSemaphore cycle_vulkan_to_cuda(
+      vulkan::VulkanStream &stream,
+      CommandList *cmdlist,
+      const std::vector<StreamSemaphore> &additional_waits = {});
 
   // Idempotent. Close waits only for the last participating CUDA stream or
   // Vulkan fence when an epoch is still in flight; it never waits device-wide.

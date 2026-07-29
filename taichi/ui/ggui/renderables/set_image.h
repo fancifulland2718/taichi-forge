@@ -12,6 +12,7 @@
 #include <array>
 #include <optional>
 #include <set>
+#include <memory>
 #include "taichi/ui/utils/utils.h"
 #include "taichi/ui/ggui/vertex.h"
 
@@ -22,9 +23,47 @@
 #include "taichi/ui/common/canvas_base.h"
 #include "taichi/rhi/device.h"
 
+namespace taichi::lang {
+namespace storage {
+struct DenseStorageBuildResult;
+}  // namespace storage
+namespace vulkan {
+class VulkanStream;
+}  // namespace vulkan
+}  // namespace taichi::lang
+
 namespace taichi::ui {
 
 namespace vulkan {
+
+class SharedCudaVulkanImage final {
+ public:
+  static std::shared_ptr<SharedCudaVulkanImage> create(
+      AppContext *app_context,
+      int width,
+      int height);
+
+  ~SharedCudaVulkanImage();
+  SharedCudaVulkanImage(const SharedCudaVulkanImage &) = delete;
+  SharedCudaVulkanImage &operator=(const SharedCudaVulkanImage &) = delete;
+
+  const taichi::lang::storage::DenseStorageBuildResult &description() const;
+  std::uint64_t identity() const noexcept;
+  taichi::lang::DevicePtr vulkan_ptr() const noexcept;
+  int width() const noexcept;
+  int height() const noexcept;
+  bool ready_for_vulkan_submit() const noexcept;
+  void prepare_cuda_write();
+  taichi::lang::StreamSemaphore submit_vulkan_frame(
+      taichi::lang::vulkan::VulkanStream &stream,
+      taichi::lang::CommandList *command_list,
+      const std::vector<taichi::lang::StreamSemaphore> &additional_waits);
+
+ private:
+  class Impl;
+  explicit SharedCudaVulkanImage(std::unique_ptr<Impl> impl);
+  std::unique_ptr<Impl> impl_;
+};
 
 class SetImage;
 void erase_direct_set_image_state(const SetImage *set_image);
@@ -72,6 +111,17 @@ class SetImage final : public Renderable {
 
   void update_data(taichi::lang::Texture *tex);
 
+  std::shared_ptr<SharedCudaVulkanImage> acquire_shared_cuda_vulkan_image(
+      int width,
+      int height);
+
+  bool has_pending_shared_cuda_vulkan_image() const noexcept;
+
+  taichi::lang::StreamSemaphore submit_shared_cuda_vulkan_frame(
+      taichi::lang::vulkan::VulkanStream &stream,
+      taichi::lang::CommandList *command_list,
+      const std::vector<taichi::lang::StreamSemaphore> &additional_waits);
+
  private:
   int width_{0};
   int height_{0};
@@ -83,6 +133,9 @@ class SetImage final : public Renderable {
   bool upload_staging_export_sharing_{false};
   taichi::lang::DevicePtr pending_upload_buffer_{taichi::lang::kDeviceNullPtr};
   bool pending_upload_{false};
+  std::shared_ptr<SharedCudaVulkanImage> shared_cuda_vulkan_image_;
+  bool shared_cuda_vulkan_disabled_{false};
+  bool pending_shared_cuda_vulkan_{false};
 
   taichi::lang::BufferFormat format_;
 

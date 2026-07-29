@@ -127,6 +127,13 @@ void WindowBase::record_display_frame_submitted() {
   }
 }
 
+void WindowBase::record_display_render_submission(bool zero_copy) {
+  if (zero_copy) {
+    ++display_stats_.zero_copy_render_submissions;
+  }
+  display_stats_.last_render_zero_copy = zero_copy;
+}
+
 void WindowBase::record_display_frame_dropped() {
   clear_display_last_flags();
   ++display_stats_.dropped_frames;
@@ -162,6 +169,9 @@ DisplayStats WindowBase::get_display_stats() const {
   }
   if (stats.reused_frames == 0) {
     stats.last_reused = false;
+  }
+  if (stats.zero_copy_render_submissions == 0) {
+    stats.last_render_zero_copy = false;
   }
   return stats;
 }

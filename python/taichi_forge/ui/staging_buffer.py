@@ -539,7 +539,7 @@ def _cached_ndarray_matches(cached, shape):
     return cached is not None and getattr(cached, "arr", None) is not None and cached.shape == shape
 
 
-def to_rgba8_packed_ndarray(image):
+def to_rgba8_packed_ndarray(image, destination=None):
     """Pack a Taichi image into a device-side u32 RGBA8 ndarray.
 
     This is the fast GGUI staging path for device images. It keeps conversion on
@@ -558,10 +558,17 @@ def to_rgba8_packed_ndarray(image):
         return None
 
     packed_shape = (image.shape[0], image.shape[1])
-    cached = image_packed_ndarray_cache.get(image)
-    if not _cached_ndarray_matches(cached, packed_shape):
-        cached = ndarray(dtype=u32, shape=packed_shape)
-        image_packed_ndarray_cache[image] = cached
+    if destination is not None:
+        if tuple(destination.shape) != packed_shape:
+            raise ValueError(
+                "RGBA8 destination shape does not match the source image"
+            )
+        cached = destination
+    else:
+        cached = image_packed_ndarray_cache.get(image)
+        if not _cached_ndarray_matches(cached, packed_shape):
+            cached = ndarray(dtype=u32, shape=packed_shape)
+            image_packed_ndarray_cache[image] = cached
 
     is_ti_ndarray = hasattr(image, "to_numpy") and not hasattr(image, "snode")
     if is_ti_ndarray:

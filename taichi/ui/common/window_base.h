@@ -32,12 +32,14 @@ struct DisplayStats {
   uint64_t offscreen_submitted_frames{0};
   uint64_t dropped_frames{0};
   uint64_t reused_frames{0};
+  uint64_t zero_copy_render_submissions{0};
   bool last_accepted{false};
   bool last_submitted{false};
   bool last_window_submitted{false};
   bool last_offscreen_submitted{false};
   bool last_dropped{false};
   bool last_reused{false};
+  bool last_render_zero_copy{false};
 };
 
 class WindowBase {
@@ -112,6 +114,8 @@ class WindowBase {
   void set_callbacks();
 
   void record_display_frame_submitted();
+
+  void record_display_render_submission(bool zero_copy);
 
   void record_display_frame_reused();
 

@@ -148,6 +148,8 @@ class PythonExternalDenseStorage final {
       std::int32_t device_id,
       std::uint64_t allocation_bytes)
       : program_(program),
+        program_lifetime_(program != nullptr ? program->weak_lifetime_token()
+                                             : std::weak_ptr<void>{}),
         owner_(std::move(owner)),
         description_(std::move(description)),
         provider_(std::move(provider)),
@@ -187,7 +189,7 @@ class PythonExternalDenseStorage final {
     if (closed_) {
       return;
     }
-    if (program_ != nullptr &&
+    if (program_ != nullptr && !program_lifetime_.expired() &&
         program_->validate_external_dense_storage_owner(owner_)) {
       program_->retire_external_dense_storage(owner_);
     }
@@ -203,6 +205,7 @@ class PythonExternalDenseStorage final {
   }
 
   lang::Program *program_{nullptr};
+  std::weak_ptr<void> program_lifetime_;
   lang::storage::StorageOwnerRef owner_;
   lang::storage::DenseStorageBuildResult description_;
   std::string provider_;

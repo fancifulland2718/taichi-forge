@@ -6678,6 +6678,10 @@ void Program::pin_external_dense_storage_launch_leases(
     if (!lease) {
       return;
     }
+    const auto &domain = lease.get()->synchronization_domain;
+    if (domain && domain->retirement_waits_for_consumer()) {
+      return;
+    }
     const auto key = external_dense_storage_lease_key(lease.handle());
     if (external_dense_storage_inflight_leases_.find(key) ==
         external_dense_storage_inflight_leases_.end()) {
@@ -20180,6 +20184,7 @@ std::pair<const StructType *, size_t> Program::get_struct_type_with_data_layout(
 }
 
 Program::~Program() {
+  lifetime_token_.reset();
   finalize();
 }
 

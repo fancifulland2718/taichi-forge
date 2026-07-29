@@ -679,6 +679,9 @@ class TI_DLL_EXPORT Program {
       const storage::StorageOwnerRef &owner) noexcept;
   std::unordered_map<std::string, std::uint64_t>
   debug_external_dense_storage_stats() const;
+  std::weak_ptr<void> weak_lifetime_token() const noexcept {
+    return lifetime_token_;
+  }
 
   using DenseStorageBindingCallback = std::function<void(
       const storage::ResolvedDenseBinding *, std::size_t)>;
@@ -3381,6 +3384,7 @@ class TI_DLL_EXPORT Program {
   std::unordered_map<FunctionKey, Function *> function_map_;
 
   std::unique_ptr<ProgramImpl> program_impl_;
+  std::shared_ptr<void> lifetime_token_{std::make_shared<int>(0)};
   const std::uint64_t runtime_completion_domain_;
   std::shared_ptr<RuntimeFaultDomain> runtime_fault_domain_;
   RuntimeTraceRecorder runtime_trace_;

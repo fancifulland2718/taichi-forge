@@ -715,6 +715,26 @@ class VulkanCudaExternalAllocation::Impl {
     return completion;
   }
 
+  StreamSemaphore cycle_vulkan_to_cuda(
+      VulkanStream &stream,
+      CommandList *cmdlist,
+      const std::vector<StreamSemaphore> &additional_waits) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    require_open();
+    TI_ERROR_IF(state_ != AccessState::kAwaitingVulkanAcquire,
+                "Vulkan frame cycle does not follow a CUDA release");
+    bind_vulkan_stream(stream);
+    std::vector<StreamSemaphore> waits = additional_waits;
+    waits.push_back(cuda_to_vulkan_.stream);
+    auto completion = stream.submit_with_semaphores(
+        cmdlist, waits, {vulkan_to_cuda_.stream});
+    TI_ERROR_IF(!completion, "Vulkan frame cycle submission failed");
+    last_vulkan_completion_ = completion;
+    active_cuda_stream_ = {};
+    state_ = AccessState::kAwaitingCudaAcquire;
+    return completion;
+  }
+
   bool closed() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     return state_ == AccessState::kClosed;
@@ -861,6 +881,13 @@ StreamSemaphore VulkanCudaExternalAllocation::acquire_vulkan_from_cuda(
   return impl_->acquire_vulkan_from_cuda(stream, cmdlist);
 }
 
+StreamSemaphore VulkanCudaExternalAllocation::cycle_vulkan_to_cuda(
+    VulkanStream &stream,
+    CommandList *cmdlist,
+    const std::vector<StreamSemaphore> &additional_waits) {
+  return impl_->cycle_vulkan_to_cuda(stream, cmdlist, additional_waits);
+}
+
 void VulkanCudaExternalAllocation::close() {
   impl_->close();
 }
@@ -971,6 +998,13 @@ void VulkanCudaExternalAllocation::release_from_consumer(
 StreamSemaphore VulkanCudaExternalAllocation::acquire_vulkan_from_cuda(
     vulkan::VulkanStream &,
     CommandList *) {
+  TI_NOT_IMPLEMENTED;
+  return nullptr;
+}
+StreamSemaphore VulkanCudaExternalAllocation::cycle_vulkan_to_cuda(
+    vulkan::VulkanStream &,
+    CommandList *,
+    const std::vector<StreamSemaphore> &) {
   TI_NOT_IMPLEMENTED;
   return nullptr;
 }

@@ -1,10 +1,15 @@
 #include "set_image.h"
 
 #include "taichi/program/program.h"
+#include "taichi/program/storage_view.h"
 #include "taichi/program/texture.h"
+#ifdef TI_WITH_CUDA
+#include "taichi/rhi/cuda/cuda_device.h"
+#endif
 #include "taichi/rhi/interop/vulkan_cuda_interop.h"
 #include "taichi/ui/utils/utils.h"
 
+#include <limits>
 #include <unordered_map>
 
 using taichi::lang::Program;
@@ -17,6 +22,235 @@ using namespace taichi::lang;
 using namespace taichi::lang::vulkan;
 
 static_assert(sizeof(SetImage::DirectUniformBufferObject) == 48);
+
+class SharedCudaVulkanImage::Impl {
+ public:
+  struct Lifetime {
+    Lifetime(DeviceAllocationUnique allocation,
+             std::shared_ptr<VulkanCudaExternalAllocation> interop)
+        : vulkan_allocation(std::move(allocation)),
+          interop(std::move(interop)) {
+    }
+
+    void close() {
+      if (interop && !interop->closed()) {
+        interop->close();
+      }
+      vulkan_allocation.reset();
+    }
+
+    DeviceAllocationUnique vulkan_allocation;
+    std::shared_ptr<VulkanCudaExternalAllocation> interop;
+  };
+
+  Impl(AppContext *app_context, int width, int height)
+      : app_context_(app_context), width_(width), height_(height) {
+    TI_ERROR_IF(app_context_ == nullptr || app_context_->prog() == nullptr,
+                "CUDA-Vulkan display sharing requires an active Program");
+    TI_ERROR_IF(width_ <= 0 || height_ <= 0,
+                "CUDA-Vulkan display dimensions must be positive");
+#if defined(TI_WITH_CUDA)
+    program_ = app_context_->prog();
+    program_lifetime_ = program_->weak_lifetime_token();
+    auto *vulkan_device =
+        dynamic_cast<VulkanDevice *>(&app_context_->device());
+    auto *cuda_device =
+        dynamic_cast<taichi::lang::cuda::CudaDevice *>(
+            program_->get_compute_device());
+    TI_ERROR_IF(vulkan_device == nullptr || cuda_device == nullptr,
+                "CUDA-Vulkan display sharing requires both devices");
+    TI_ERROR_IF(!vulkan_device->vk_caps().external_memory ||
+                    !vulkan_device->vk_caps().external_semaphore,
+                "CUDA-Vulkan display sharing is unavailable on this device");
+    const std::uint64_t pixel_count =
+        static_cast<std::uint64_t>(width_) *
+        static_cast<std::uint64_t>(height_);
+    TI_ERROR_IF(pixel_count >
+                    (std::numeric_limits<std::uint64_t>::max)() /
+                        sizeof(std::uint32_t),
+                "CUDA-Vulkan display allocation size overflow");
+    requested_bytes_ = pixel_count * sizeof(std::uint32_t);
+    auto [allocation, result] = vulkan_device->allocate_memory_unique(
+        {requested_bytes_, false, false, true,
+         AllocUsage::Upload | AllocUsage::Storage});
+    TI_ERROR_IF(result != RhiResult::success || !allocation,
+                "Unable to allocate shared CUDA-Vulkan display storage");
+    auto interop = VulkanCudaExternalAllocation::create(
+        vulkan_device, cuda_device, *allocation);
+    lifetime_ = std::make_shared<Lifetime>(std::move(allocation), interop);
+    try {
+      owner_ = program_->register_external_dense_storage(
+          interop->cuda_allocation(), requested_bytes_,
+          [lifetime = lifetime_] { lifetime->close(); }, interop);
+    } catch (...) {
+      lifetime_->close();
+      throw;
+    }
+
+    storage::DenseStorageLayoutSpec layout;
+    layout.scalar_type = PrimitiveType::u32;
+    layout.index_shape = {width_, height_};
+    layout.index_strides_bytes = {
+        static_cast<std::int64_t>(height_) *
+            static_cast<std::int64_t>(sizeof(std::uint32_t)),
+        static_cast<std::int64_t>(sizeof(std::uint32_t))};
+    layout.access = storage::StorageAccess::kReadWrite;
+    description_ = storage::build_dense_storage_descriptor(
+        owner_, storage::StorageSourceKind::kExternalDense, layout);
+    if (!description_) {
+      program_->retire_external_dense_storage(owner_);
+      owner_ = {};
+      throw std::runtime_error(
+          std::string("Unable to describe shared display storage: ") +
+          storage::to_string(description_.reason));
+    }
+#else
+    TI_ERROR("CUDA-Vulkan display sharing requires CUDA support");
+#endif
+  }
+
+  ~Impl() {
+    close_noexcept();
+  }
+
+  const storage::DenseStorageBuildResult &description() const {
+    return description_;
+  }
+
+  std::uint64_t identity() const noexcept {
+    return lifetime_ && lifetime_->interop ? lifetime_->interop->identity()
+                                           : 0;
+  }
+
+  DevicePtr vulkan_ptr() const noexcept {
+    return lifetime_ && lifetime_->vulkan_allocation
+               ? lifetime_->vulkan_allocation->get_ptr()
+               : kDeviceNullPtr;
+  }
+
+  int width() const noexcept {
+    return width_;
+  }
+
+  int height() const noexcept {
+    return height_;
+  }
+
+  bool ready_for_vulkan_submit() const noexcept {
+    return lifetime_ && lifetime_->interop &&
+           lifetime_->interop->access_state() ==
+               VulkanCudaExternalAllocation::AccessState::
+                   kAwaitingVulkanAcquire;
+  }
+
+  void prepare_cuda_write() {
+    TI_ERROR_IF(!lifetime_ || !lifetime_->interop,
+                "Shared display storage is closed");
+    const auto state = lifetime_->interop->access_state();
+    if (state ==
+        VulkanCudaExternalAllocation::AccessState::kAwaitingCudaAcquire) {
+      return;
+    }
+    TI_ERROR_IF(state !=
+                    VulkanCudaExternalAllocation::AccessState::kVulkanOwned,
+                "Shared display storage is not available for CUDA");
+    auto *stream = dynamic_cast<VulkanStream *>(
+        app_context_->device().get_graphics_stream());
+    TI_ERROR_IF(stream == nullptr,
+                "Shared display storage requires a Vulkan graphics stream");
+    auto [command_list, result] = stream->new_command_list_unique();
+    TI_ERROR_IF(result != RhiResult::success || !command_list,
+                "Unable to allocate the initial display handoff command");
+    lifetime_->interop->release_vulkan_to_cuda(*stream, command_list.get());
+  }
+
+  StreamSemaphore submit_vulkan_frame(
+      VulkanStream &stream,
+      CommandList *command_list,
+      const std::vector<StreamSemaphore> &additional_waits) {
+    TI_ERROR_IF(!ready_for_vulkan_submit(),
+                "Shared display storage has no completed CUDA producer");
+    return lifetime_->interop->cycle_vulkan_to_cuda(
+        stream, command_list, additional_waits);
+  }
+
+ private:
+  void close_noexcept() noexcept {
+    try {
+      if (program_ != nullptr && !program_lifetime_.expired() &&
+          owner_.valid() &&
+          program_->validate_external_dense_storage_owner(owner_)) {
+        program_->retire_external_dense_storage(owner_);
+      } else if (lifetime_) {
+        lifetime_->close();
+      }
+    } catch (...) {
+    }
+    owner_ = {};
+    lifetime_.reset();
+  }
+
+  AppContext *app_context_{nullptr};
+  Program *program_{nullptr};
+  std::weak_ptr<void> program_lifetime_;
+  int width_{0};
+  int height_{0};
+  std::uint64_t requested_bytes_{0};
+  storage::StorageOwnerRef owner_;
+  storage::DenseStorageBuildResult description_;
+  std::shared_ptr<Lifetime> lifetime_;
+};
+
+std::shared_ptr<SharedCudaVulkanImage> SharedCudaVulkanImage::create(
+    AppContext *app_context,
+    int width,
+    int height) {
+  return std::shared_ptr<SharedCudaVulkanImage>(
+      new SharedCudaVulkanImage(
+          std::make_unique<Impl>(app_context, width, height)));
+}
+
+SharedCudaVulkanImage::SharedCudaVulkanImage(std::unique_ptr<Impl> impl)
+    : impl_(std::move(impl)) {
+}
+
+SharedCudaVulkanImage::~SharedCudaVulkanImage() = default;
+
+const storage::DenseStorageBuildResult &
+SharedCudaVulkanImage::description() const {
+  return impl_->description();
+}
+
+std::uint64_t SharedCudaVulkanImage::identity() const noexcept {
+  return impl_->identity();
+}
+
+DevicePtr SharedCudaVulkanImage::vulkan_ptr() const noexcept {
+  return impl_->vulkan_ptr();
+}
+
+int SharedCudaVulkanImage::width() const noexcept {
+  return impl_->width();
+}
+
+int SharedCudaVulkanImage::height() const noexcept {
+  return impl_->height();
+}
+
+bool SharedCudaVulkanImage::ready_for_vulkan_submit() const noexcept {
+  return impl_->ready_for_vulkan_submit();
+}
+
+void SharedCudaVulkanImage::prepare_cuda_write() {
+  impl_->prepare_cuda_write();
+}
+
+StreamSemaphore SharedCudaVulkanImage::submit_vulkan_frame(
+    VulkanStream &stream,
+    CommandList *command_list,
+    const std::vector<StreamSemaphore> &additional_waits) {
+  return impl_->submit_vulkan_frame(stream, command_list, additional_waits);
+}
 
 namespace {
 
@@ -123,7 +357,59 @@ void SetImage::use_texture_pipeline() {
   }
 }
 
+std::shared_ptr<SharedCudaVulkanImage>
+SetImage::acquire_shared_cuda_vulkan_image(int width, int height) {
+  if (shared_cuda_vulkan_disabled_ || app_context_->prog() == nullptr ||
+      app_context_->config.ti_arch != Arch::cuda ||
+      app_context_->config.ggui_arch != Arch::vulkan) {
+    return nullptr;
+  }
+  try {
+    if (!shared_cuda_vulkan_image_ ||
+        shared_cuda_vulkan_image_->width() != width ||
+        shared_cuda_vulkan_image_->height() != height) {
+      shared_cuda_vulkan_image_ =
+          SharedCudaVulkanImage::create(app_context_, width, height);
+    }
+    shared_cuda_vulkan_image_->prepare_cuda_write();
+  } catch (const std::exception &error) {
+    shared_cuda_vulkan_image_.reset();
+    shared_cuda_vulkan_disabled_ = true;
+    TI_WARN("CUDA-Vulkan shared display path is unavailable; using the "
+            "compatible staging path: {}",
+            error.what());
+    return nullptr;
+  }
+
+  width_ = width;
+  height_ = height;
+  format_ = BufferFormat::rgba8;
+  reset_upload_staging();
+  update_direct_buffer_ubo();
+  get_direct_state(this).display_buffer =
+      shared_cuda_vulkan_image_->vulkan_ptr();
+  use_direct_buffer_pipeline();
+  pending_shared_cuda_vulkan_ = true;
+  return shared_cuda_vulkan_image_;
+}
+
+bool SetImage::has_pending_shared_cuda_vulkan_image() const noexcept {
+  return pending_shared_cuda_vulkan_ && shared_cuda_vulkan_image_ &&
+         shared_cuda_vulkan_image_->ready_for_vulkan_submit();
+}
+
+StreamSemaphore SetImage::submit_shared_cuda_vulkan_frame(
+    VulkanStream &stream,
+    CommandList *command_list,
+    const std::vector<StreamSemaphore> &additional_waits) {
+  TI_ERROR_IF(!has_pending_shared_cuda_vulkan_image(),
+              "set_image has no shared CUDA-Vulkan frame to submit");
+  return shared_cuda_vulkan_image_->submit_vulkan_frame(
+      stream, command_list, additional_waits);
+}
+
 void SetImage::update_data(const SetImageInfo &info) {
+  pending_shared_cuda_vulkan_ = false;
   // We might not have a current program if GGUI is used in external apps to
   // load AOT modules
   Program *prog = app_context_->prog();
@@ -224,6 +510,7 @@ void SetImage::update_data(const SetImageInfo &info) {
 }
 
 void SetImage::update_data(const DisplayFrameInfo &info) {
+  pending_shared_cuda_vulkan_ = false;
   TI_ASSERT_INFO(info.host_rgba8 != nullptr,
                  "display frame host RGBA8 pointer must not be null");
   TI_ASSERT_INFO(info.width > 0 && info.height > 0,
@@ -244,6 +531,7 @@ void SetImage::update_data(const DisplayFrameInfo &info) {
 }
 
 void SetImage::update_data(Texture *tex) {
+  pending_shared_cuda_vulkan_ = false;
   Program *prog = app_context_->prog();
   use_texture_pipeline();
   reset_upload_staging();
