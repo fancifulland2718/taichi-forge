@@ -99,9 +99,7 @@ def test_cpu_fgmres_cyclic_actions_z_basis_and_reuse(dtype):
     )
 
     tolerance = 3e-5 if dtype == ti.f32 else 1e-11
-    exact = np.asarray(
-        [1.0, -0.5, 2.0, 0.25, -1.0, 0.75], dtype=np_dtype
-    )
+    exact = np.asarray([1.0, -0.5, 2.0, 0.25, -1.0, 0.75], dtype=np_dtype)
     plan = ti.linalg.experimental.SolvePlan(
         operator,
         method="fgmres",
@@ -155,9 +153,7 @@ def test_cpu_fgmres_cyclic_actions_z_basis_and_reuse(dtype):
 def test_fgmres_behavior_boundaries_fail_closed():
     operator = _operator(np.eye(3, dtype=np.float32) * 2.0, ti.f32)
     action = _operator(np.eye(3, dtype=np.float32) * 0.5, ti.f32)
-    fixed = ti.linalg.experimental.PreconditionerPlan(
-        operator, action
-    ).setup()
+    fixed = ti.linalg.experimental.PreconditionerPlan(operator, action).setup()
     with pytest.raises(RuntimeError, match="variable_linear"):
         ti.linalg.experimental.SolvePlan(
             operator,
@@ -233,9 +229,10 @@ def test_device_fgmres_compiled_action_table_and_z_basis(provider):
         for row in range(active_size):
             total = 0.0
             for column in range(active_size):
-                total += numeric_data[row * active_size + column] * input[
-                    topology_data[column]
-                ]
+                total += (
+                    numeric_data[row * active_size + column]
+                    * input[topology_data[column]]
+                )
             output[row] = total
 
     def compiled(values):
@@ -298,17 +295,20 @@ def test_device_fgmres_compiled_action_table_and_z_basis(provider):
         max_iterations=24,
         atol=1e-5,
         rtol=1e-5,
-        execution_policy=(
-            "host_check_every_k"
-            if ti.lang.impl.current_cfg().arch == ti.cuda
-            else "fixed_budget_masked"
-        ),
-        check_interval=(
-            8
-            if ti.lang.impl.current_cfg().arch == ti.cuda
-            else None
-        ),
     )
+    capabilities = plan.execution_capabilities()
+    batching = capabilities["automatic_solver_batching"]
+    assert capabilities["default_execution_policy"] == "host_check_every_k"
+    assert capabilities["automatic_policy_change"]
+    assert batching["selected"] and batching["qualified"]
+    assert batching["default_check_interval"] == "restart"
+    expected_provider_execution = (
+        "compiled_kernel_direct_apply"
+        if provider == "kernel"
+        else "compiled_graph_plan_per_apply"
+    )
+    assert batching["provider_execution"] == expected_provider_execution
+    assert not capabilities["automatic_solver_replay"]["selected"]
     result = plan.solve(_vector(dense @ exact, ti.f32))
     assert result.converged, (
         result.residual_norm,
@@ -323,6 +323,23 @@ def test_device_fgmres_compiled_action_table_and_z_basis(provider):
     identity = stats["identity"]
     operations = stats["operations"]
     resources = stats["resources"]
+    expected_execution_kind = (
+        "direct" if provider == "kernel" else "compiled_graph"
+    )
+    assert identity["operator_execution_kind"] == expected_execution_kind
+    if provider == "graph":
+        assert operations["operator_compiled_graph_submissions"] > 0
+        if ti.lang.impl.current_cfg().arch == ti.cuda:
+            assert operations["operator_backend_replays"] > 0
+        else:
+            assert operations["operator_backend_replays"] == 0
+            assert identity["operator_backend_execution_path"] == (
+                "ordinary_graph_fallback"
+            )
+            assert operations["operator_ordinary_fallbacks"] > 0
+    assert identity["solver_execution_policy"] == "host_check_every_k"
+    assert identity["host_check_interval"] == 8
+
     assert identity["method"] == "fgmres"
     assert identity["preconditioner_behavior"] == "variable_linear"
     assert identity["preconditioner_action_count"] == 3

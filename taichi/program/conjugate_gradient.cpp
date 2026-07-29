@@ -2562,6 +2562,13 @@ make_solver_flexible_right_preconditioner_plan(
   return plan;
 }
 
+void append_solver_operator_plan_statistics(
+    const OperatorPlan &plan,
+    bool preconditioner,
+    SparseSolvePlanRuntimeStatistics &statistics) {
+  append_operator_plan_statistics(plan, preconditioner, statistics);
+}
+
 void append_solver_preconditioner_plan_statistics(
     const PreconditionerPlan &plan,
     SparseSolvePlanRuntimeStatistics &statistics) {

@@ -1238,6 +1238,7 @@ DeviceBiCGSTAB::debug_runtime_statistics() const {
   result.device_to_device_bytes = device_to_device_bytes_;
   result.device_to_host_bytes = device_to_host_bytes_;
   result.host_to_device_bytes = host_to_device_bytes_;
+  append_solver_operator_plan_statistics(*operator_plan_, false, result);
   return result;
 }
 

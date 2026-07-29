@@ -259,6 +259,7 @@ def _direct_scalar_storage_description(value, role, cache):
         return public, description, storage_kind, alias_owner_key
     return None
 
+
 def _require_compatible_vector_view(value, role, size, dtype, cache):
     view = cache.view(value, role)
     if view is None:
@@ -547,15 +548,13 @@ class LinearOperator:
                 retained=(kernel, topology),
             )
         if legacy_square and adjoint is None:
-            core = (
-                program._create_compiled_kernel_linear_operator_with_numeric_data(
-                    kernel_cpp,
-                    range_extent,
-                    topology_version,
-                    numeric_version,
-                    topology.arr,
-                    numeric.arr,
-                )
+            core = program._create_compiled_kernel_linear_operator_with_numeric_data(
+                kernel_cpp,
+                range_extent,
+                topology_version,
+                numeric_version,
+                topology.arr,
+                numeric.arr,
             )
             handle = _ti_core._make_linear_operator(
                 program, core, *traits._native_values()
@@ -641,9 +640,7 @@ class LinearOperator:
             topology, "topology", require_nonempty=True
         )
         numeric_arrays = _normalized_resource_mapping(numeric, "numeric")
-        workspace_arrays = _normalized_resource_mapping(
-            workspace, "workspace"
-        )
+        workspace_arrays = _normalized_resource_mapping(workspace, "workspace")
         traits = OperatorTraits() if traits is None else traits
         if not isinstance(traits, OperatorTraits):
             raise TypeError("traits must be OperatorTraits")
@@ -965,21 +962,16 @@ class LinearOperator:
                 == output_operand.view._exact_view_key
             )
             addend_operand = _prepare_vector_input(
-                (
-                    addend_view if addend_view is not None else addend
-                ),
+                (addend_view if addend_view is not None else addend),
                 "LinearOperator addend",
                 self.shape[0],
                 self.dtype,
                 self._vector_io,
                 "apply_output" if shares_output else "apply_addend",
             )
-            if (
-                _vector_operands_overlap(addend_operand, output_operand)
-                and not _vector_operands_exact(
-                    addend_operand, output_operand
-                )
-            ):
+            if _vector_operands_overlap(
+                addend_operand, output_operand
+            ) and not _vector_operands_exact(addend_operand, output_operand):
                 raise TaichiRuntimeError(
                     "LinearOperator addend and output overlap without being "
                     "the same vector view"
@@ -1003,11 +995,7 @@ class LinearOperator:
             self._handle._apply_generalized(
                 self._program,
                 input_operand.array.arr,
-                (
-                    None
-                    if addend_operand is None
-                    else addend_operand.array.arr
-                ),
+                (None if addend_operand is None else addend_operand.array.arr),
                 output_operand.array.arr,
                 alpha,
                 beta,
@@ -1033,9 +1021,7 @@ class LinearOperator:
             raise TaichiRuntimeError("operator scale must be finite") from exc
         if not math.isfinite(scale):
             raise TaichiRuntimeError("operator scale must be finite")
-        handle = _ti_core._make_scaled_operator(
-            scale, self._handle
-        )
+        handle = _ti_core._make_scaled_operator(scale, self._handle)
         return self._from_handle(
             handle, provider_kind="composition", retained=(self,)
         )
@@ -1051,9 +1037,7 @@ class LinearOperator:
             return NotImplemented
         self._ensure_valid()
         other._ensure_valid()
-        handle = _ti_core._make_sum_operator(
-            self._handle, other._handle
-        )
+        handle = _ti_core._make_sum_operator(self._handle, other._handle)
         return self._from_handle(
             handle, provider_kind="composition", retained=(self, other)
         )
@@ -1064,9 +1048,7 @@ class LinearOperator:
             raise TypeError("inner must be LinearOperator")
         self._ensure_valid()
         inner._ensure_valid()
-        handle = _ti_core._make_composed_operator(
-            self._handle, inner._handle
-        )
+        handle = _ti_core._make_composed_operator(self._handle, inner._handle)
         return self._from_handle(
             handle, provider_kind="composition", retained=(self, inner)
         )
@@ -1097,7 +1079,10 @@ class LinearOperator:
                 )
             self._source.update_values(values)
             return
-        if expected_topology_version is None or expected_numeric_version is None:
+        if (
+            expected_topology_version is None
+            or expected_numeric_version is None
+        ):
             raise TaichiRuntimeError(
                 "compiled operator updates require expected_topology_version "
                 "and expected_numeric_version"
@@ -1175,9 +1160,7 @@ def identity(size, dtype=f32):
     size = _require_positive_size(size)
     if dtype not in (f32, f64):
         raise TaichiRuntimeError("identity dtype must be ti.f32 or ti.f64")
-    handle = _ti_core._make_identity_operator(
-        _current_program(), dtype, size
-    )
+    handle = _ti_core._make_identity_operator(_current_program(), dtype, size)
     return LinearOperator._from_handle(
         handle, provider_kind="composition", retained=()
     )
@@ -1197,7 +1180,9 @@ def aslinearoperator(value, *, traits=None):
 def block_diagonal(blocks: Sequence[LinearOperator]):
     """Creates a CPU block-diagonal operator from one or more blocks."""
     blocks = tuple(blocks)
-    if not blocks or any(not isinstance(block, LinearOperator) for block in blocks):
+    if not blocks or any(
+        not isinstance(block, LinearOperator) for block in blocks
+    ):
         raise TaichiRuntimeError(
             "block_diagonal expects one or more LinearOperator blocks"
         )
@@ -1628,9 +1613,7 @@ def summarize_operator_qualifications(reports):
                 "reports must contain OperatorQualificationReport values"
             )
         record = report.to_dict()
-        checks = {
-            check["name"]: check["status"] for check in record["checks"]
-        }
+        checks = {check["name"]: check["status"] for check in record["checks"]}
         row = {
             "backend": record["environment"]["backend"],
             "provider": record["operator"]["provider"],
@@ -1641,7 +1624,8 @@ def summarize_operator_qualifications(reports):
             "passed": bool(record["passed"]),
             "checks": checks,
             "unsupported_checks": sorted(
-                name for name, status in checks.items()
+                name
+                for name, status in checks.items()
                 if status == "unsupported"
             ),
         }
@@ -1722,15 +1706,15 @@ def _solver_execution_capabilities(
     is_vulkan = arch == _ti_core.Arch.vulkan
     if is_cuda:
         conditional_primitive = "cuda_conditional_graph"
-        cuda_conditional = dict(
-            _ti_core.cuda_conditional_graph_capabilities()
-        )
+        cuda_conditional = dict(_ti_core.cuda_conditional_graph_capabilities())
         if not cuda_conditional["driver_version_eligible"]:
             unavailable_reason = "cuda_driver_api_version_below_12_8"
         elif not cuda_conditional["conditional_graph_symbols_loaded"]:
             unavailable_reason = "cuda_conditional_graph_symbols_not_loaded"
         elif not cuda_conditional["device_setter_lowering_compiled"]:
-            unavailable_reason = "cuda_conditional_setter_lowering_not_compiled"
+            unavailable_reason = (
+                "cuda_conditional_setter_lowering_not_compiled"
+            )
         elif not cuda_conditional["runtime_path_compiled"]:
             unavailable_reason = (
                 "cuda_conditional_graph_runtime_path_not_compiled"
@@ -1759,7 +1743,9 @@ def _solver_execution_capabilities(
                 "vulkan_compiled_graph_indirect_dispatch_not_qualified"
             )
         else:
-            unavailable_reason = "vulkan_provider_indirect_dispatch_unsupported"
+            unavailable_reason = (
+                "vulkan_provider_indirect_dispatch_unsupported"
+            )
         prerequisites = (
             "backend-neutral indirect compute-dispatch command contract",
             "indirect buffer visibility and zero-dispatch validation",
@@ -1787,11 +1773,13 @@ def _solver_execution_capabilities(
         bounded_primitive = "none"
 
     policies = {
-        "host_each_iteration": is_cpu or (batched and (is_cuda or is_vulkan)),
-        "host_check_every_k": is_cuda or is_vulkan,
-        "fixed_budget_masked": is_vulkan or (
-            batched and is_cuda
+        "host_each_iteration": (
+            is_cpu
+            or (is_cuda and method not in ("gmres", "fgmres"))
+            or (batched and is_vulkan)
         ),
+        "host_check_every_k": is_cuda or is_vulkan,
+        "fixed_budget_masked": is_vulkan or (batched and is_cuda),
         "bounded_convergent": bounded_qualified,
         "device_convergent": (
             bounded_qualified
@@ -1800,9 +1788,7 @@ def _solver_execution_capabilities(
         ),
     }
     native_upgrade_available = (
-        bounded_qualified
-        and is_cuda
-        and cuda_conditional["fully_available"]
+        bounded_qualified and is_cuda and cuda_conditional["fully_available"]
     )
     native_replay_qualified = (
         not batched
@@ -1812,19 +1798,34 @@ def _solver_execution_capabilities(
         and method in ("cg", "pcg", "minres", "bicgstab", "gmres")
         and (is_cuda or is_vulkan)
     )
+    matrix_free_provider = provider_kind in ("kernel", "graph")
+    matrix_free_batching_qualified = (
+        not batched
+        and matrix_free_provider
+        and dtype == f32
+        and (is_cuda or is_vulkan)
+        and not (is_cuda and method == "bicgstab" and provider_kind == "graph")
+        and (
+            method in ("minres", "bicgstab", "gmres", "fgmres")
+            or (method == "cg" and provider_kind in ("kernel", "graph"))
+            or (method == "pcg" and provider_kind == "kernel")
+        )
+    )
     if batched:
         default_execution_policy = (
-            "host_each_iteration"
-            if is_cpu
-            else "host_check_every_k"
+            "host_each_iteration" if is_cpu else "host_check_every_k"
         )
     elif is_cuda and bounded_qualified:
         default_execution_policy = "bounded_convergent"
     elif is_cuda and (
-        native_replay_qualified or method in ("gmres", "fgmres")
+        native_replay_qualified
+        or matrix_free_batching_qualified
+        or method in ("gmres", "fgmres")
     ):
         default_execution_policy = "host_check_every_k"
-    elif is_vulkan and native_replay_qualified:
+    elif is_vulkan and (
+        native_replay_qualified or matrix_free_batching_qualified
+    ):
         default_execution_policy = "host_check_every_k"
     elif is_vulkan:
         default_execution_policy = "fixed_budget_masked"
@@ -1847,9 +1848,7 @@ def _solver_execution_capabilities(
             "qualified_dtypes": ("f32",),
             "chunk_schedule": (1, 1, 2, 4, 8, 16),
             "host_observation_scope": (
-                "none_inside_python"
-                if is_cpu
-                else "chunk_boundaries_only"
+                "none_inside_python" if is_cpu else "chunk_boundaries_only"
             ),
             "native_upgrade_available": native_upgrade_available,
             "native_upgrade_primitive": conditional_primitive,
@@ -1860,9 +1859,7 @@ def _solver_execution_capabilities(
             "primitive": conditional_primitive,
             "rhi_primitive_compiled": is_vulkan,
             "runtime_path_compiled": (
-                cuda_conditional["runtime_path_compiled"]
-                if is_cuda
-                else False
+                cuda_conditional["runtime_path_compiled"] if is_cuda else False
             ),
             "provider_qualified": bounded_qualified and is_cuda,
             "unsupported_reason": (
@@ -1872,9 +1869,7 @@ def _solver_execution_capabilities(
             ),
             "prerequisites": prerequisites,
         },
-        "cuda_conditional_graph": (
-            cuda_conditional if is_cuda else None
-        ),
+        "cuda_conditional_graph": (cuda_conditional if is_cuda else None),
         "bounded_mode_selection": True,
         "default_execution_policy": default_execution_policy,
         "automatic_policy_change": (
@@ -1882,8 +1877,54 @@ def _solver_execution_capabilities(
             and (
                 default_execution_policy == "bounded_convergent"
                 or native_replay_qualified
+                or matrix_free_batching_qualified
             )
         ),
+        "automatic_solver_batching": {
+            "selected": (
+                matrix_free_batching_qualified
+                and default_execution_policy == "host_check_every_k"
+            ),
+            "qualified": matrix_free_batching_qualified,
+            "unavailable_reason": (
+                "none"
+                if matrix_free_batching_qualified
+                else (
+                    "cuda_bicgstab_graph_k4_not_stably_beneficial"
+                    if is_cuda
+                    and method == "bicgstab"
+                    and provider_kind == "graph"
+                    else "matrix_free_solver_batching_not_qualified"
+                )
+            ),
+            "qualified_provider_kinds": ("kernel", "graph"),
+            "primitive": (
+                "cuda_direct_chunk_host_check"
+                if is_cuda and matrix_free_batching_qualified
+                else (
+                    "vulkan_direct_chunk_host_check"
+                    if is_vulkan and matrix_free_batching_qualified
+                    else "none"
+                )
+            ),
+            "default_check_interval": (
+                "restart"
+                if method in ("gmres", "fgmres")
+                and matrix_free_batching_qualified
+                else (4 if matrix_free_batching_qualified else None)
+            ),
+            "solver_replay_required": False,
+            "provider_execution": (
+                "compiled_graph_plan_per_apply"
+                if provider_kind == "graph" and matrix_free_batching_qualified
+                else (
+                    "compiled_kernel_direct_apply"
+                    if provider_kind == "kernel"
+                    and matrix_free_batching_qualified
+                    else "none"
+                )
+            ),
+        },
         "automatic_solver_replay": {
             "selected": (
                 not batched
@@ -1892,9 +1933,8 @@ def _solver_execution_capabilities(
                     or native_replay_qualified
                 )
             ),
-            "qualified": native_replay_qualified or (
-                bounded_qualified and is_cuda
-            ),
+            "qualified": native_replay_qualified
+            or (bounded_qualified and is_cuda),
             "preconditioner_qualified": preconditioner_replay_qualified,
             "primitive": (
                 "cuda_conditional_graph_or_chunk_replay"
@@ -1965,7 +2005,9 @@ class PreconditionerSession:
         """Applies the pinned approximate-inverse action synchronously."""
         self._ensure_valid()
         if isinstance(iteration, bool):
-            raise TaichiRuntimeError("iteration must be a non-negative integer")
+            raise TaichiRuntimeError(
+                "iteration must be a non-negative integer"
+            )
         try:
             iteration = _operator.index(iteration)
         except TypeError as exc:
@@ -1973,7 +2015,9 @@ class PreconditionerSession:
                 "iteration must be a non-negative integer"
             ) from exc
         if iteration < 0:
-            raise TaichiRuntimeError("iteration must be a non-negative integer")
+            raise TaichiRuntimeError(
+                "iteration must be a non-negative integer"
+            )
         action_index = (
             iteration % len(self._natives)
             if self._plan.behavior == "variable_linear"
@@ -2217,8 +2261,7 @@ class PreconditionerPlan:
                 item["is_setup"] for item in action_metadata
             )
             result["built_from_operator_stamps"] = tuple(
-                item["built_from_operator_stamp"]
-                for item in action_metadata
+                item["built_from_operator_stamp"] for item in action_metadata
             )
             result["accepted_target_stamps"] = tuple(
                 item["accepted_target_stamp"] for item in action_metadata
@@ -2246,9 +2289,7 @@ class PreconditionerPlan:
                 provider_kind=action._provider_kind,
                 retained=(self.target, action),
             )
-            for consumer_handle, action in zip(
-                consumer_handles, self.actions
-            )
+            for consumer_handle, action in zip(consumer_handles, self.actions)
         )
         self._consumer_action = self._consumer_actions[0]
         return self
@@ -2283,9 +2324,7 @@ class PreconditionerPlan:
         try:
             if self.behavior == "variable_linear":
                 for handle, reuse_action in zip(self._handles, reuse):
-                    handle._validate_update(
-                        self._program, reuse_action
-                    )
+                    handle._validate_update(self._program, reuse_action)
             for handle, reuse_action in zip(self._handles, reuse):
                 handle._update(self._program, reuse_action)
         except Exception:
@@ -2297,24 +2336,19 @@ class PreconditionerPlan:
     def pin(self):
         """Pins the complete approved target/action-table snapshot."""
         self._ensure_valid()
-        natives = tuple(
-            handle._pin(self._program) for handle in self._handles
-        )
+        natives = tuple(handle._pin(self._program) for handle in self._handles)
         return PreconditionerSession(
             self, natives if self.behavior == "variable_linear" else natives[0]
         )
 
     def apply(self, residual, out=None, *, iteration=0):
         """Pins the approved snapshot and applies its selected action once."""
-        return self.pin().apply(
-            residual, out=out, iteration=iteration
-        )
+        return self.pin().apply(residual, out=out, iteration=iteration)
 
     def statistics(self):
         self._ensure_valid()
         action_statistics = tuple(
-            dict(handle._debug_runtime_stats())
-            for handle in self._handles
+            dict(handle._debug_runtime_stats()) for handle in self._handles
         )
         if self.behavior == "fixed_linear":
             result = dict(action_statistics[0])
@@ -2358,12 +2392,8 @@ class PreconditionerPlan:
         result["selection"] = self.selection
         result["period"] = len(self.actions)
         result["schedule_update_calls"] = self._schedule_update_calls
-        result["schedule_update_successes"] = (
-            self._schedule_update_successes
-        )
-        result["schedule_update_failures"] = (
-            self._schedule_update_failures
-        )
+        result["schedule_update_successes"] = self._schedule_update_successes
+        result["schedule_update_failures"] = self._schedule_update_failures
         return result
 
 
@@ -2414,7 +2444,9 @@ class SolvePlan:
                 "'bicgstab', 'gmres', or 'fgmres'"
             )
         if operator.shape[0] != operator.shape[1]:
-            raise TaichiRuntimeError("Krylov SolvePlan requires a square operator")
+            raise TaichiRuntimeError(
+                "Krylov SolvePlan requires a square operator"
+            )
         max_iterations, atol, rtol = _validate_solve_controls(
             operator.dtype, max_iterations, atol, rtol
         )
@@ -2424,12 +2456,8 @@ class SolvePlan:
         self.atol = atol
         self.rtol = rtol
         self.preconditioner = preconditioner
-        self._preconditioner_replay_qualified = (
-            preconditioner is None
-            or (
-                method in ("pcg", "minres")
-                and isinstance(preconditioner, str)
-            )
+        self._preconditioner_replay_qualified = preconditioner is None or (
+            method in ("pcg", "minres") and isinstance(preconditioner, str)
         )
         if method in ("gmres", "fgmres"):
             if restart is None:
@@ -2467,9 +2495,7 @@ class SolvePlan:
                 "'native_required'"
             )
         self.execution_policy, self.check_interval = (
-            self._normalize_execution_policy(
-                execution_policy, check_interval
-            )
+            self._normalize_execution_policy(execution_policy, check_interval)
         )
         self._native_preconditioner = None
         self._vector_io = _VectorIOCache(
@@ -2590,7 +2616,8 @@ class SolvePlan:
                 if self.method in ("gmres", "fgmres")
                 else (
                     16
-                    if policy in (
+                    if policy
+                    in (
                         "bounded_convergent",
                         "device_convergent",
                     )
@@ -2609,7 +2636,7 @@ class SolvePlan:
                 )
             expected_interval = (
                 self.restart
-                if self.method == "gmres"
+                if self.method in ("gmres", "fgmres")
                 and policy == "host_check_every_k"
                 else (
                     16
@@ -2626,7 +2653,9 @@ class SolvePlan:
         if check_interval is None:
             check_interval = expected_interval
         if isinstance(check_interval, bool):
-            raise TaichiRuntimeError("check_interval must be a positive integer")
+            raise TaichiRuntimeError(
+                "check_interval must be a positive integer"
+            )
         try:
             check_interval = _operator.index(check_interval)
         except TypeError as exc:
@@ -2634,14 +2663,14 @@ class SolvePlan:
                 "check_interval must be a positive integer"
             ) from exc
         if check_interval <= 0:
-            raise TaichiRuntimeError("check_interval must be a positive integer")
+            raise TaichiRuntimeError(
+                "check_interval must be a positive integer"
+            )
         if policy not in (
             "host_check_every_k",
             "bounded_convergent",
             "device_convergent",
-        ) and (
-            check_interval != expected_interval
-        ):
+        ) and (check_interval != expected_interval):
             raise TaichiRuntimeError(
                 "check_interval is configurable only for "
                 "host_check_every_k, bounded_convergent, or "
@@ -2850,9 +2879,7 @@ class SolvePlan:
                 arguments = [self._program, self.operator._handle]
                 if kind == "stored":
                     arguments.append(core)
-                arguments.extend(
-                    [self.max_iterations, self.atol, self.rtol]
-                )
+                arguments.extend([self.max_iterations, self.atol, self.rtol])
                 return configure(factory(*arguments))
 
             if isinstance(
@@ -2944,12 +2971,8 @@ class SolvePlan:
                     "FGMRES requires behavior='variable_linear'; use GMRES "
                     "for fixed-linear right preconditioning"
                 )
-            preconditioner_actions = (
-                self.preconditioner._consumer_actions
-            )
-            if len(preconditioner_actions) != len(
-                self.preconditioner.actions
-            ):
+            preconditioner_actions = self.preconditioner._consumer_actions
+            if len(preconditioner_actions) != len(self.preconditioner.actions):
                 raise TaichiRuntimeError(
                     "variable_linear PreconditionerPlan must be setup before "
                     "constructing FGMRES"
@@ -3141,13 +3164,17 @@ class SolvePlan:
                         "operator actions"
                     )
                 factory = (
-                    _ti_core._make_float_cpu_preconditioned_experimental_bicgstab_solver
-                    if self.operator.dtype == f32
-                    else _ti_core._make_double_cpu_preconditioned_experimental_bicgstab_solver
-                ) if preconditioner_action is not None else (
-                    _ti_core._make_float_cpu_experimental_bicgstab_solver
-                    if self.operator.dtype == f32
-                    else _ti_core._make_double_cpu_experimental_bicgstab_solver
+                    (
+                        _ti_core._make_float_cpu_preconditioned_experimental_bicgstab_solver
+                        if self.operator.dtype == f32
+                        else _ti_core._make_double_cpu_preconditioned_experimental_bicgstab_solver
+                    )
+                    if preconditioner_action is not None
+                    else (
+                        _ti_core._make_float_cpu_experimental_bicgstab_solver
+                        if self.operator.dtype == f32
+                        else _ti_core._make_double_cpu_experimental_bicgstab_solver
+                    )
                 )
                 arguments = [self._program, self.operator._handle]
                 if preconditioner_action is not None:
@@ -3284,9 +3311,7 @@ class SolvePlan:
                 preconditioner_action = self.preconditioner
             self._require_fixed_linear_preconditioner(preconditioner_action)
             if arch in cpu_arches:
-                factory = (
-                    _ti_core._make_cpu_experimental_pcg_solver
-                )
+                factory = _ti_core._make_cpu_experimental_pcg_solver
                 return factory(
                     self._program,
                     self.operator._handle,
@@ -3304,9 +3329,7 @@ class SolvePlan:
                     "A and M providers"
                 )
             if arch == _ti_core.Arch.cuda:
-                factory = (
-                    _ti_core._make_cuda_experimental_pcg_solver
-                )
+                factory = _ti_core._make_cuda_experimental_pcg_solver
                 return self._configure_cuda_solver(
                     factory(
                         self._program,
@@ -3438,10 +3461,14 @@ class SolvePlan:
     def solve(self, rhs, *, initial_guess=None, out=None):
         """Solves one RHS with persistent plan-owned workspace."""
         if self.operator is None or self._solver is None:
-            raise TaichiRuntimeError("SolvePlan cannot be used after ti.reset()")
+            raise TaichiRuntimeError(
+                "SolvePlan cannot be used after ti.reset()"
+            )
         self.operator._ensure_valid()
         if self._program is not _current_program():
-            raise TaichiRuntimeError("SolvePlan cannot be used after ti.reset()")
+            raise TaichiRuntimeError(
+                "SolvePlan cannot be used after ti.reset()"
+            )
         size = self.operator.shape[0]
         rhs_operand = _prepare_vector_input(
             rhs,
@@ -3476,11 +3503,7 @@ class SolvePlan:
                 == output_operand.view._exact_view_key
             )
             initial_operand = _prepare_vector_input(
-                (
-                    initial_view
-                    if initial_view is not None
-                    else initial_guess
-                ),
+                (initial_view if initial_view is not None else initial_guess),
                 "SolvePlan initial_guess",
                 size,
                 self.operator.dtype,
@@ -3491,19 +3514,14 @@ class SolvePlan:
                 raise TaichiRuntimeError(
                     "SolvePlan RHS and initial_guess may not alias"
                 )
-            if (
-                _vector_operands_overlap(initial_operand, output_operand)
-                and not _vector_operands_exact(
-                    initial_operand, output_operand
-                )
-            ):
+            if _vector_operands_overlap(
+                initial_operand, output_operand
+            ) and not _vector_operands_exact(initial_operand, output_operand):
                 raise TaichiRuntimeError(
                     "SolvePlan initial_guess and output overlap without "
                     "being the same vector view"
                 )
-            if not _vector_operands_exact(
-                initial_operand, output_operand
-            ):
+            if not _vector_operands_exact(initial_operand, output_operand):
                 output_operand.array.copy_from(initial_operand.array)
         if self._native_preconditioner is not None:
             preconditioner_stats = dict(
@@ -3544,7 +3562,9 @@ class SolvePlan:
     def statistics(self):
         """Returns backend-neutral plan resource and operation telemetry."""
         if self.operator is None or self._solver is None:
-            raise TaichiRuntimeError("SolvePlan cannot be used after ti.reset()")
+            raise TaichiRuntimeError(
+                "SolvePlan cannot be used after ti.reset()"
+            )
         self.operator._ensure_valid()
         result = dict(self._solver._debug_runtime_stats())
         identity = result["identity"]
@@ -3554,8 +3574,7 @@ class SolvePlan:
         identity["bounded_mode"] = self.bounded_mode
         if self.execution_policy == "bounded_convergent":
             native_used = (
-                identity["solver_execution_policy"]
-                == "device_convergent"
+                identity["solver_execution_policy"] == "device_convergent"
             )
             identity["bounded_native_upgrade_used"] = native_used
             bounded = self.execution_capabilities()["bounded_convergent"]
@@ -3564,13 +3583,9 @@ class SolvePlan:
             elif self.bounded_mode == "portable":
                 native_reason = "portable_mode_selected"
             elif bounded["native_upgrade_available"]:
-                native_reason = identity[
-                    "solver_replay_unavailable_reason"
-                ]
+                native_reason = identity["solver_replay_unavailable_reason"]
             else:
-                native_reason = bounded[
-                    "native_upgrade_unavailable_reason"
-                ]
+                native_reason = bounded["native_upgrade_unavailable_reason"]
             identity["bounded_native_upgrade_unavailable_reason"] = (
                 native_reason
             )
@@ -3581,9 +3596,7 @@ class SolvePlan:
                 _ti_core.Arch.x64,
                 _ti_core.Arch.arm64,
             ):
-                identity["solver_execution_policy"] = (
-                    "host_each_iteration"
-                )
+                identity["solver_execution_policy"] = "host_each_iteration"
                 identity["bounded_chunk_limit"] = 1
                 identity["bounded_control_path"] = "native_cpu_solver_loop"
                 identity["bounded_chunk_schedule"] = "every_iteration"
@@ -3616,7 +3629,9 @@ class SolvePlan:
     def execution_capabilities(self):
         """Returns qualified execution policies and explicit failure reasons."""
         if self.operator is None or self._solver is None:
-            raise TaichiRuntimeError("SolvePlan cannot be used after ti.reset()")
+            raise TaichiRuntimeError(
+                "SolvePlan cannot be used after ti.reset()"
+            )
         self.operator._ensure_valid()
         result = self._execution_policy_capabilities()
         result["vector_io"] = _vector_io_capabilities()

@@ -96,7 +96,9 @@ def test_device_minres_stored_identity_replay_and_terminal_contracts():
     second = plan.solve(rhs, out=output)
     assert first.converged and second.converged
     np.testing.assert_allclose(output.to_numpy(), exact, rtol=3e-5, atol=3e-5)
-    measured_residual = np.linalg.norm(dense @ output.to_numpy() - dense @ exact)
+    measured_residual = np.linalg.norm(
+        dense @ output.to_numpy() - dense @ exact
+    )
     assert second.residual_norm == pytest.approx(
         measured_residual, rel=8e-2, abs=1e-6
     )
@@ -151,9 +153,7 @@ def test_device_minres_stored_identity_replay_and_terminal_contracts():
     scalar_dense = np.eye(3, dtype=np.float32) * np.float32(2.0)
     scalar_operator = ti.linalg.LinearOperator.from_sparse_matrix(
         _fixed_csr(scalar_dense),
-        traits=ti.linalg.OperatorTraits(
-            self_adjoint=True, singular=False
-        ),
+        traits=ti.linalg.OperatorTraits(self_adjoint=True, singular=False),
     )
     happy = ti.linalg.experimental.SolvePlan(
         scalar_operator,
@@ -192,7 +192,9 @@ def test_device_minres_positive_negative_spectrum_and_conditioning(
     ).solve(_vector(rhs_host))
     assert result.converged
     solution = result.solution.to_numpy()
-    true_residual = np.linalg.norm(dense.astype(np.float64) @ solution - rhs_host)
+    true_residual = np.linalg.norm(
+        dense.astype(np.float64) @ solution - rhs_host
+    )
     assert result.residual_norm == pytest.approx(
         true_residual, rel=1e-2, abs=3e-6
     )
@@ -243,7 +245,9 @@ def test_device_minres_builtin_jacobi_and_block_jacobi():
     assert refreshed_stats["operations"]["solver_chunk_builds"] == 1
     assert refreshed_stats["operations"]["solver_chunk_rebinds"] >= 1
     assert refreshed_stats["operations"]["solver_chunk_invalidations"] == 0
-    assert refreshed_stats["operations"]["preconditioner_update_successes"] == 1
+    assert (
+        refreshed_stats["operations"]["preconditioner_update_successes"] == 1
+    )
 
     identity = np.eye(2, dtype=np.float32)
     diagonal = np.eye(2, dtype=np.float32) * np.float32(2.0)
@@ -293,12 +297,14 @@ def test_device_minres_compiled_kernel_graph_and_fixed_linear_plan():
         x: ti.types.ndarray(dtype=ti.f32, ndim=1),
         y: ti.types.ndarray(dtype=ti.f32, ndim=1),
     ):
-        y[0] = numeric_data[0] * x[topology_data[0]] + numeric_data[1] * x[
-            topology_data[1]
-        ]
-        y[1] = numeric_data[2] * x[topology_data[0]] + numeric_data[3] * x[
-            topology_data[1]
-        ]
+        y[0] = (
+            numeric_data[0] * x[topology_data[0]]
+            + numeric_data[1] * x[topology_data[1]]
+        )
+        y[1] = (
+            numeric_data[2] * x[topology_data[0]]
+            + numeric_data[3] * x[topology_data[1]]
+        )
 
     traits = ti.linalg.OperatorTraits(
         self_adjoint=True, positive_definite=False, singular=False
@@ -313,9 +319,26 @@ def test_device_minres_compiled_kernel_graph_and_fixed_linear_plan():
         method="minres",
         max_iterations=8,
         atol=1e-6,
-        execution_policy="host_check_every_k",
-        check_interval=4,
     )
+    kernel_capabilities = kernel_plan.execution_capabilities()
+    kernel_batching = kernel_capabilities["automatic_solver_batching"]
+    assert kernel_capabilities["default_execution_policy"] == (
+        "host_check_every_k"
+    )
+    assert kernel_capabilities["automatic_policy_change"]
+    assert kernel_batching["selected"] and kernel_batching["qualified"]
+    assert kernel_batching["default_check_interval"] == 4
+    assert kernel_batching["solver_replay_required"] is False
+    assert kernel_batching["provider_execution"] == (
+        "compiled_kernel_direct_apply"
+    )
+    expected_batching_primitive = (
+        "cuda_direct_chunk_host_check"
+        if ti.lang.impl.current_cfg().arch == ti.cuda
+        else "vulkan_direct_chunk_host_check"
+    )
+    assert kernel_batching["primitive"] == expected_batching_primitive
+    assert not kernel_capabilities["automatic_solver_replay"]["selected"]
     kernel_result = kernel_plan.solve(rhs)
     assert kernel_result.converged
     np.testing.assert_allclose(
@@ -362,15 +385,34 @@ def test_device_minres_compiled_kernel_graph_and_fixed_linear_plan():
         method="minres",
         max_iterations=8,
         atol=1e-6,
-        execution_policy="host_check_every_k",
-        check_interval=4,
     )
+    graph_capabilities = graph_plan.execution_capabilities()
+    graph_batching = graph_capabilities["automatic_solver_batching"]
+    assert graph_batching["selected"] and graph_batching["qualified"]
+    assert graph_batching["provider_execution"] == (
+        "compiled_graph_plan_per_apply"
+    )
+    assert not graph_capabilities["automatic_solver_replay"]["selected"]
     graph_result = graph_plan.solve(rhs)
     assert graph_result.converged
     np.testing.assert_allclose(
         graph_result.solution.to_numpy(), exact, rtol=4e-5, atol=4e-5
     )
     assert graph_operator.execution_kind == "compiled_graph"
+    graph_stats = graph_plan.statistics()
+    assert graph_stats["identity"]["operator_execution_kind"] == (
+        "compiled_graph"
+    )
+    assert graph_stats["operations"]["operator_compiled_graph_submissions"] > 0
+    if ti.lang.impl.current_cfg().arch == ti.cuda:
+        assert graph_stats["operations"]["operator_backend_replays"] > 0
+    else:
+        assert graph_stats["operations"]["operator_backend_replays"] == 0
+        assert (
+            graph_stats["identity"]["operator_backend_execution_path"]
+            == "ordinary_graph_fallback"
+        )
+        assert graph_stats["operations"]["operator_ordinary_fallbacks"] > 0
 
     inverse_numeric = _vector([0.5, 0.5])
 
@@ -417,7 +459,10 @@ def test_device_minres_compiled_kernel_graph_and_fixed_linear_plan():
     )
     assert preconditioned_stats["resources"]["external_preconditioner"]
     assert preconditioned_stats["operations"]["preconditioner_apply_calls"] > 0
-    assert preconditioned_stats["operations"]["preconditioner_generation_pins"] > 0
+    assert (
+        preconditioned_stats["operations"]["preconditioner_generation_pins"]
+        > 0
+    )
 
     untrusted = ti.linalg.LinearOperator.from_kernel(
         inverse_diagonal,

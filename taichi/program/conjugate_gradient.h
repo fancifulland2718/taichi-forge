@@ -793,6 +793,10 @@ make_solver_flexible_right_preconditioner_plan(
     OperatorPlan &target_plan,
     LinearOperatorHandle &preconditioner,
     std::string method);
+void append_solver_operator_plan_statistics(
+    const OperatorPlan &plan,
+    bool preconditioner,
+    SparseSolvePlanRuntimeStatistics &statistics);
 void append_solver_preconditioner_plan_statistics(
     const PreconditionerPlan &plan,
     SparseSolvePlanRuntimeStatistics &statistics);

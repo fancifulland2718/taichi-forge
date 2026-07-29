@@ -704,20 +704,28 @@ plan = ti.linalg.experimental.SolvePlan(
   falls back to reusable Graph chunks with host checks. Explicit
   `"host_each_iteration"` remains available as an opt-out.
 - Replay-qualified CUDA fixed stored f32 MINRES/BiCGSTAB defaults to
-  `"host_check_every_k"` with `check_interval=4`. Other CUDA CG/PCG and
-  MINRES/BiCGSTAB providers default to `"host_each_iteration"`; both policies
-  remain explicit opt-in or opt-out choices, and K may be 4 or 8. Chunked
+  `"host_check_every_k"` with `check_interval=4`.
+- Qualified square matrix-free Kernel/Graph plans on CUDA also select
+  `"host_check_every_k"` automatically: CG, Kernel-PCG, MINRES, and BiCGSTAB
+  use K=4, while GMRES/FGMRES use `check_interval == restart`. Chunked
   execution keeps recurrence scalars on the device and reads one terminal
-  snapshot per chunk.
+  snapshot per chunk. K=8 remains available for the non-GMRES methods, and
+  explicit `"host_each_iteration"` remains available where supported. CUDA
+  BiCGSTAB with a compiled Graph provider retains `"host_each_iteration"` by
+  default because short converging solves did not show a stable K=4 benefit;
+  callers can still opt in.
 - CUDA GMRES/FGMRES defaults to `"host_check_every_k"` and requires
   `check_interval == restart`. Stored identity-preconditioned GMRES records a
   reusable restart-cycle Graph; FGMRES and other non-recordable provider
   combinations preserve direct submission.
 - Replay-qualified Vulkan fixed stored f32 CG/PCG/MINRES/BiCGSTAB defaults to
   `"host_check_every_k"` with K=4; stored identity-preconditioned GMRES uses
-  the same default with `check_interval == restart`. Other Vulkan providers,
-  including FGMRES, default to `"fixed_budget_masked"`. Both policies remain
-  available and support `atol`, `rtol`, and their combined effective tolerance.
+  the same default with `check_interval == restart`. Qualified square
+  matrix-free Kernel/Graph plans use the same automatic K=4 or restart-sized
+  host checks, including FGMRES. Explicit `"fixed_budget_masked"` remains
+  available for workloads that intentionally consume the full iteration
+  budget. Both policies support `atol`, `rtol`, and their combined effective
+  tolerance.
 
 For fixed stored f32 CSR/BSR, CUDA `host_check_every_k` and Vulkan
 `host_check_every_k`/`fixed_budget_masked` record supported CG/PCG/MINRES and
@@ -743,15 +751,26 @@ executable while its topology, workspace, and output binding remain stable.
 FGMRES action tables use direct native submission on both GPU backends. No
 identity-GMRES replay path is silently reused for a variable action schedule.
 
-Compiled-kernel and compiled Graph A/M providers continue to use direct chunk
-submission. They are not staged through the host or replaced with another
-provider to obtain replay. If the runtime cannot record safely, it preserves
-the same numerical path and reports the reason. `statistics()` exposes this
-boundary through `solver_chunk_builds`, `solver_chunk_replays`,
+Compiled-kernel and compiled Graph A/M providers use direct outer solver-chunk
+submission. This outer recurrence boundary is independent of provider
+execution: each compiled Graph apply uses its provider-owned compiled Graph
+plan, while a compiled-kernel apply uses an ordinary compiled kernel launch.
+Replay-qualified multi-dispatch Graphs record and replay on CUDA/Vulkan;
+ineligible plans preserve ordinary execution and report the backend path. In
+particular, single-dispatch Vulkan Graphs intentionally use the ordinary path
+because recording them adds no useful consolidation. The solver does not nest
+either provider inside another captured Graph. Providers are not staged
+through the host or replaced to obtain replay.
+
+`statistics()` exposes the outer boundary through `solver_chunk_builds`,
+`solver_chunk_replays`,
 `solver_chunk_direct_submissions`, `solver_chunk_rebinds`,
 `solver_chunk_invalidations`, `solver_graph_enabled`, and
-`solver_replay_unavailable_reason`. Build cost belongs to cold execution, so
-qualification should report first-solve and warm-solve timing separately.
+`solver_replay_unavailable_reason`. It independently reports provider execution
+through `operator_execution_kind`, `operator_compiled_graph_submissions`,
+`operator_backend_captures`, and `operator_backend_replays`. Build cost belongs
+to cold execution, so qualification should report first-solve and warm-solve
+timing separately.
 
 A chunk or GMRES-family restart cycle always completes before its terminal state is
 inspected. The reported
@@ -773,9 +792,13 @@ plan construction; they do not silently fall back.
 `plan.execution_capabilities()` reports the policy matrix and a structured
 reason for unavailable conditional execution, together with the selected
 `default_execution_policy`.
-The `automatic_solver_replay` object reports whether replay was selected,
-whether the operator and preconditioner combination is qualified, and the
-backend primitive (`cuda_conditional_graph_or_chunk_replay`,
+The `automatic_solver_batching` object reports matrix-free Kernel/Graph
+host-check selection, the default interval, the direct-chunk backend primitive,
+and whether provider execution uses a compiled Graph plan or compiled-kernel
+launch. Batching does not require or claim outer solver replay.
+The separate `automatic_solver_replay` object reports whether outer recurrence
+replay was selected, whether the operator and preconditioner combination is
+qualified, and the backend primitive (`cuda_conditional_graph_or_chunk_replay`,
 `cuda_graph_chunk_replay`, or `vulkan_command_replay`). Post-solve statistics
 remain authoritative for the actual replay or direct-submission path.
 Direct `"device_convergent"` execution is qualified only for single-system

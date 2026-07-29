@@ -620,18 +620,23 @@ plan = ti.linalg.experimental.SolvePlan(
   Graph；原生路径不可用时改用带 host check 的可复用 Graph chunk。显式
   `"host_each_iteration"` 仍作为关闭自动路径的选项。
 - 具备原生 replay 资格的 CUDA fixed stored f32 MINRES/BiCGSTAB 默认使用
-  `"host_check_every_k"`，且 `check_interval=4`。其它 CUDA CG/PCG 与
-  MINRES/BiCGSTAB provider 默认使用 `"host_each_iteration"`；两种策略都可显式
-  选择，K 可设为 4 或 8。分块执行把 recurrence scalar 保留在 device 上，每个
-  chunk 只读取一次 terminal snapshot。
+  `"host_check_every_k"`，且 `check_interval=4`。
+- CUDA 上满足资格的方形 matrix-free Kernel/Graph plan 也会自动选择
+  `"host_check_every_k"`：CG、Kernel-PCG、MINRES 与 BiCGSTAB 使用 K=4，
+  GMRES/FGMRES 使用 `check_interval == restart`。分块执行把 recurrence scalar
+  保留在 device 上，每个 chunk 只读取一次 terminal snapshot。非 GMRES 方法仍可
+  显式选择 K=8；在支持的组合上也可显式使用 `"host_each_iteration"`。CUDA
+  BiCGSTAB 的 compiled Graph provider 默认保留 `"host_each_iteration"`，因为短程收敛
+  workload 上 K=4 没有表现出稳定收益；调用方仍可显式 opt in。
 - CUDA GMRES/FGMRES 默认使用 `"host_check_every_k"`，并要求
   `check_interval == restart`。stored identity-preconditioned GMRES 会录制可复用的
   restart-cycle Graph；FGMRES 与其它不可录制的 provider 组合保持 direct submission。
 - 具备原生 replay 资格的 Vulkan fixed stored f32 CG/PCG/MINRES/BiCGSTAB 默认使用
   K=4 的 `"host_check_every_k"`；stored identity-preconditioned GMRES 使用同一默认
-  策略，并要求 `check_interval == restart`。其它 Vulkan provider（包括 FGMRES）
-  默认使用 `"fixed_budget_masked"`。两种策略仍可显式选择，并支持 `atol`、`rtol`
-  及其组合后的 effective tolerance。
+  策略，并要求 `check_interval == restart`。满足资格的方形 matrix-free Kernel/Graph
+  plan 同样自动使用 K=4 或 restart 大小的 host check，包括 FGMRES。对于明确需要
+  消耗完整迭代预算的 workload，仍可显式选择 `"fixed_budget_masked"`。两种策略均
+  支持 `atol`、`rtol` 及其组合后的 effective tolerance。
 
 对于 fixed stored f32 CSR/BSR，CUDA 的 `host_check_every_k` 以及 Vulkan 的
 `host_check_every_k`/`fixed_budget_masked` 会把受支持的 CG/PCG/MINRES 与
@@ -653,13 +658,21 @@ workspace 与 output binding 保持稳定，persistent plan 就会复用同一 e
 FGMRES action table 在两个 GPU backend 上都使用 direct native submission；系统不会为
 variable action schedule 静默复用 identity-GMRES replay 路径。
 
-compiled-kernel 与 compiled Graph A/M provider 仍按 direct chunk submission 执行；它们不会
-为取得 replay 而进行 host staging 或更换 provider。runtime 无法安全录制时也会保持相同数值
-路径并报告不可用原因。`statistics()` 通过 `solver_chunk_builds`、
+compiled-kernel 与 compiled Graph A/M provider 的外层 solver chunk 均按 direct
+submission 执行。这个外层 recurrence 边界与 provider 自身的执行方式相互独立：
+compiled Graph apply 使用 provider 持有的 compiled Graph plan，compiled-kernel apply
+使用普通 compiled kernel launch。满足 replay 资格的多 dispatch Graph 会在 CUDA/Vulkan
+上 record/replay；不满足资格的 plan 保留普通执行并报告 backend path。Vulkan 单 dispatch
+Graph 会有意保留普通路径，因为为其录制不会带来有效的提交合并。solver 不会再把任一
+provider 嵌套捕获进另一层 Graph，也不会通过 host staging 或替换 provider 获取 replay。
+
+`statistics()` 通过 `solver_chunk_builds`、
 `solver_chunk_replays`、`solver_chunk_direct_submissions`、`solver_chunk_rebinds`、
 `solver_chunk_invalidations`、`solver_graph_enabled` 和
-`solver_replay_unavailable_reason` 暴露这一边界。构建开销属于 cold execution，性能资格应分别
-记录 first solve 与 warm solve。
+`solver_replay_unavailable_reason` 暴露外层边界；同时通过 `operator_execution_kind`、
+`operator_compiled_graph_submissions`、`operator_backend_captures` 与
+`operator_backend_replays` 独立报告 provider 执行。构建开销属于 cold execution，性能资格
+应分别记录 first solve 与 warm solve。
 
 host 检查状态前，一个 chunk 或 GMRES-family restart cycle 总会完整执行。
 `SolveResult.iterations` 表示逻辑上的
@@ -676,7 +689,11 @@ tail。Vulkan fixed-budget execution 可以执行完整的 `max_iterations`，�
 
 `plan.execution_capabilities()` 返回执行策略矩阵、条件执行不可用时的结构化原因，
 以及当前选定的 `default_execution_policy`。
-`automatic_solver_replay` 对象报告是否已选择 replay、operator 与 preconditioner
+`automatic_solver_batching` 对象报告 matrix-free Kernel/Graph host-check 是否自动选中、
+默认 interval、direct-chunk backend primitive，以及 provider 执行使用 compiled Graph
+plan 还是 compiled-kernel launch。batching 不要求、也不宣称启用外层 solver replay。
+独立的 `automatic_solver_replay` 对象报告外层 recurrence replay 是否已选择、operator 与
+preconditioner
 组合是否满足资格，以及具体 backend primitive（`cuda_conditional_graph_or_chunk_replay`、
 `cuda_graph_chunk_replay` 或 `vulkan_command_replay`）。solve 完成后的 statistics
 仍是实际 replay 或 direct-submission 路径的权威记录。

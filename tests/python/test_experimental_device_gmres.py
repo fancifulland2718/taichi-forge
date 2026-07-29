@@ -30,9 +30,9 @@ def _fixed_csr(matrix):
     offsets.from_numpy(np.asarray(row_offsets, dtype=np.int32))
     columns.from_numpy(np.asarray(column_indices, dtype=np.int32))
     numeric.from_numpy(np.asarray(values, dtype=np.float32))
-    return ti.linalg.SparsePattern.csr(
-        rows, cols, offsets, columns
-    ).matrix(numeric)
+    return ti.linalg.SparsePattern.csr(rows, cols, offsets, columns).matrix(
+        numeric
+    )
 
 
 def _fixed_bsr(block_size, row_offsets, column_indices, blocks):
@@ -180,9 +180,7 @@ def test_device_gmres_fixed_bsr_identity():
         ],
         dtype=np.float32,
     )
-    dense = np.block(
-        [[blocks[0], blocks[1]], [blocks[2], blocks[3]]]
-    )
+    dense = np.block([[blocks[0], blocks[1]], [blocks[2], blocks[3]]])
     matrix = _fixed_bsr(2, [0, 2, 4], [0, 1, 0, 1], blocks)
     operator = ti.linalg.LinearOperator.from_sparse_matrix(
         matrix,
@@ -260,7 +258,9 @@ def test_device_gmres_happy_breakdown_and_restarted_true_residual():
     operations = restarted_plan.statistics()["operations"]
     assert operations["restart_cycles"] >= 2
     assert operations["executed_iterations"] % 8 == 0
-    assert operations["logical_iterations"] <= operations["executed_iterations"]
+    assert (
+        operations["logical_iterations"] <= operations["executed_iterations"]
+    )
 
 
 @pytest.mark.parametrize("provider", ["kernel", "graph"])
@@ -289,9 +289,10 @@ def test_device_gmres_compiled_a_m_right_preconditioner(provider):
         for row in range(active_size):
             total = 0.0
             for column in range(active_size):
-                total += numeric_data[row * active_size + column] * input[
-                    topology_data[column]
-                ]
+                total += (
+                    numeric_data[row * active_size + column]
+                    * input[topology_data[column]]
+                )
             output[row] = total
 
     def compiled(values, traits):
@@ -337,9 +338,7 @@ def test_device_gmres_compiled_a_m_right_preconditioner(provider):
             traits=traits,
         )
 
-    operator = compiled(
-        dense, ti.linalg.OperatorTraits(singular=False)
-    )
+    operator = compiled(dense, ti.linalg.OperatorTraits(singular=False))
     action = compiled(
         right_inverse,
         ti.linalg.OperatorTraits(self_adjoint=False, singular=False),
@@ -357,15 +356,44 @@ def test_device_gmres_compiled_a_m_right_preconditioner(provider):
         max_iterations=16,
         atol=1e-6,
         rtol=1e-6,
-        execution_policy="host_check_every_k",
-        check_interval=8,
     )
+    capabilities = plan.execution_capabilities()
+    batching = capabilities["automatic_solver_batching"]
+    assert capabilities["default_execution_policy"] == "host_check_every_k"
+    assert capabilities["automatic_policy_change"]
+    assert batching["selected"] and batching["qualified"]
+    assert batching["default_check_interval"] == "restart"
+    expected_provider_execution = (
+        "compiled_kernel_direct_apply"
+        if provider == "kernel"
+        else "compiled_graph_plan_per_apply"
+    )
+    assert batching["provider_execution"] == expected_provider_execution
+    assert not capabilities["automatic_solver_replay"]["selected"]
     result = plan.solve(_vector(rhs_host))
     assert result.converged
     np.testing.assert_allclose(
         result.solution.to_numpy(), exact, rtol=5e-5, atol=5e-5
     )
     stats = plan.statistics()
+    expected_execution_kind = (
+        "direct" if provider == "kernel" else "compiled_graph"
+    )
+    assert stats["identity"]["operator_execution_kind"] == (
+        expected_execution_kind
+    )
+    if provider == "graph":
+        assert stats["operations"]["operator_compiled_graph_submissions"] > 0
+        if ti.lang.impl.current_cfg().arch == ti.cuda:
+            assert stats["operations"]["operator_backend_replays"] > 0
+        else:
+            assert stats["operations"]["operator_backend_replays"] == 0
+            assert (
+                stats["identity"]["operator_backend_execution_path"]
+                == "ordinary_graph_fallback"
+            )
+            assert stats["operations"]["operator_ordinary_fallbacks"] > 0
+
     assert stats["identity"]["preconditioning_side"] == "right"
     assert stats["identity"]["preconditioner_method"] == "linear_operator"
     assert not stats["identity"]["solver_graph_enabled"]

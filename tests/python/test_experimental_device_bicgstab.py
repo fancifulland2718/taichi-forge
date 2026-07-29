@@ -225,9 +225,10 @@ def test_device_bicgstab_compiled_a_m_right_preconditioner(provider):
         for row in range(active_size):
             total = 0.0
             for column in range(active_size):
-                total += numeric_data[row * active_size + column] * x[
-                    topology_data[column]
-                ]
+                total += (
+                    numeric_data[row * active_size + column]
+                    * x[topology_data[column]]
+                )
             y[row] = total
 
     def compiled(values, traits):
@@ -273,9 +274,7 @@ def test_device_bicgstab_compiled_a_m_right_preconditioner(provider):
             traits=traits,
         )
 
-    operator = compiled(
-        dense, ti.linalg.OperatorTraits(singular=False)
-    )
+    operator = compiled(dense, ti.linalg.OperatorTraits(singular=False))
     action = compiled(
         right_inverse,
         ti.linalg.OperatorTraits(self_adjoint=False, singular=False),
@@ -292,15 +291,61 @@ def test_device_bicgstab_compiled_a_m_right_preconditioner(provider):
         max_iterations=20,
         atol=1e-6,
         rtol=1e-6,
-        execution_policy="host_check_every_k",
-        check_interval=4,
     )
+    capabilities = plan.execution_capabilities()
+    batching = capabilities["automatic_solver_batching"]
+    cuda_graph = (
+        ti.lang.impl.current_cfg().arch == ti.cuda and provider == "graph"
+    )
+    assert capabilities["default_execution_policy"] == (
+        "host_each_iteration" if cuda_graph else "host_check_every_k"
+    )
+    assert capabilities["automatic_policy_change"] is (not cuda_graph)
+    assert batching["selected"] is (not cuda_graph)
+    assert batching["qualified"] is (not cuda_graph)
+    assert batching["unavailable_reason"] == (
+        "cuda_bicgstab_graph_k4_not_stably_beneficial"
+        if cuda_graph
+        else "none"
+    )
+    assert capabilities["execution_policies"]["host_each_iteration"] is (
+        ti.lang.impl.current_cfg().arch == ti.cuda
+    )
+    expected_provider_execution = (
+        "none"
+        if cuda_graph
+        else (
+            "compiled_kernel_direct_apply"
+            if provider == "kernel"
+            else "compiled_graph_plan_per_apply"
+        )
+    )
+    assert batching["provider_execution"] == expected_provider_execution
+    assert not capabilities["automatic_solver_replay"]["selected"]
     result = plan.solve(_vector(rhs_host))
     assert result.converged
     np.testing.assert_allclose(
         result.solution.to_numpy(), exact, rtol=5e-5, atol=5e-5
     )
     stats = plan.statistics()
+    expected_execution_kind = (
+        "direct" if provider == "kernel" else "compiled_graph"
+    )
+    assert stats["identity"]["operator_execution_kind"] == (
+        expected_execution_kind
+    )
+    if provider == "graph":
+        assert stats["operations"]["operator_compiled_graph_submissions"] > 0
+        if ti.lang.impl.current_cfg().arch == ti.cuda:
+            assert stats["operations"]["operator_backend_replays"] > 0
+        else:
+            assert stats["operations"]["operator_backend_replays"] == 0
+            assert (
+                stats["identity"]["operator_backend_execution_path"]
+                == "ordinary_graph_fallback"
+            )
+            assert stats["operations"]["operator_ordinary_fallbacks"] > 0
+
     assert stats["identity"]["preconditioning_side"] == "right"
     assert stats["identity"]["preconditioner_method"] == "linear_operator"
     assert not stats["identity"]["solver_graph_enabled"]
