@@ -1345,6 +1345,28 @@ def test_bounded_graph_loop_reports_exact_stop_and_backend_overshoot():
     assert report.observation_batches == len(report.observation_boundaries)
     assert report.observation_scalar_count == 2 * report.observation_batches
     assert report.device_to_host_bytes == 8 * report.observation_batches
+    assert report.staging_fallback_batches == 0
+    if ti.lang.impl.current_cfg().arch == ti.vulkan:
+        assert report.persistent_staging_bytes >= 8
+        assert report.staging_allocations == 1
+        assert report.staging_reuses == report.observation_batches - 1
+        assert report.packed_observation_batches == report.observation_batches
+        assert report.direct_observation_batches == 0
+        assert report.packed_observation_bytes == report.device_to_host_bytes
+    else:
+        assert report.persistent_staging_bytes == 0
+        assert report.staging_allocations == 0
+        assert report.staging_reuses == 0
+        assert report.packed_observation_batches == 0
+        assert report.direct_observation_batches == report.observation_batches
+        assert report.packed_observation_bytes == 0
+    memory = graph.execution_stats().memory
+    assert memory.persistent_observation_bytes == report.persistent_staging_bytes
+    assert memory.persistent_bytes == (
+        memory.persistent_argument_bytes + memory.persistent_observation_bytes
+    )
+    assert memory.transient_temporary_bytes == 0
+    assert memory.opaque_driver_bytes is None
     assert args["predicate"].to_numpy()[()] == 0
     assert report.observation_boundaries[0] == 0
     assert report.observation_boundaries[-1] == report.executed_iterations
@@ -1378,6 +1400,55 @@ def test_bounded_graph_loop_reports_exact_stop_and_backend_overshoot():
         TaichiRuntimeError, match="does not support bounded loops"
     ):
         graph.submit(args)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_bounded_graph_loop_transfer_planner_has_strict_fallback(monkeypatch):
+    monkeypatch.setenv("TI_GRAPH_OBSERVATION_TRANSFER_PLANNER", "0")
+    graph = _build_bounded_step_graph(max_iterations=20)
+    args = _bounded_step_args(target=5)
+    graph.run(args)
+    report = graph.bounded_loop_stats()[0]
+    assert report.logical_iterations == 5
+    assert report.packed_observation_batches == 0
+    assert report.direct_observation_batches == report.observation_batches
+    assert report.staging_allocations == 0
+    assert report.staging_reuses == 0
+    assert report.staging_fallback_batches == 0
+    assert args["state"].to_numpy()[()] == 5
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_bounded_graph_loop_reuses_or_disables_persistent_observation_staging(
+    monkeypatch,
+):
+    graph = _build_bounded_step_graph(max_iterations=20)
+    first = _bounded_step_args(target=5)
+    graph.run(first)
+    first_report = graph.bounded_loop_stats()[0]
+    assert first_report.staging_allocations == 1
+    assert first_report.packed_observation_batches == first_report.observation_batches
+
+    second = _bounded_step_args(target=5)
+    graph.run(second)
+    second_report = graph.bounded_loop_stats()[0]
+    assert second_report.staging_allocations == 0
+    assert second_report.staging_reuses == second_report.observation_batches
+    assert second_report.packed_observation_batches == second_report.observation_batches
+    assert (
+        second_report.persistent_staging_bytes
+        == first_report.persistent_staging_bytes
+    )
+
+    monkeypatch.setenv("TI_GRAPH_PERSISTENT_OBSERVATION_STAGING", "0")
+    disabled = _bounded_step_args(target=5)
+    graph.run(disabled)
+    disabled_report = graph.bounded_loop_stats()[0]
+    assert disabled_report.packed_observation_batches == 0
+    assert disabled_report.staging_reuses == 0
+    assert disabled_report.direct_observation_batches == disabled_report.observation_batches
+    assert disabled_report.logical_iterations == 5
+    assert disabled["state"].to_numpy()[()] == 5
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
