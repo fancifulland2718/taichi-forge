@@ -180,9 +180,18 @@ or unsupported providers fail closed.
 `GraphBranchReport` per structured region for the latest `run()`. While reports
 include the selected lowering, logical and executed iterations, observation
 boundaries, predicate/counter/status traces, terminal status, transfer bytes,
-and native-upgrade reason. Structured regions currently use synchronous
-`Graph.run()`; `Graph.submit()` rejects them rather than hiding host-observed
-portable control behind an asynchronous ticket.
+and native-upgrade reason. Portable structured regions use synchronous
+`Graph.run()` and are rejected by `Graph.submit()` rather than being hidden
+behind an asynchronous ticket. A CUDA `while_loop` declared with
+`lowering_mode='native_required'` may use `Graph.submit()` when conditional
+Graph lowering is available. An ordered device setter evaluates the initial
+predicate before the bounded conditional child, so masked and unmasked bodies
+share the same no-readback contract. The initial condition, bounded loop, and
+any explicit terminal `GraphBuilder.observe()` snapshot are enqueued without a
+host predicate readback. `Graph.control_flow_stats()` remains a synchronous
+diagnostic; after asynchronous structured submission, read terminal state from
+`ticket.observations()` or call `Graph.run()` to obtain a new control-flow
+report.
 
 ## Opt-in completion tickets
 

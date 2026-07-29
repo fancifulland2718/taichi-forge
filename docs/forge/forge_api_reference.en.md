@@ -842,7 +842,12 @@ explicit masked-chunk replay. CUDA native conditional control requires Driver
 API 12.8 or newer and the qualified conditional symbols/lowering. `portable`
 forces fallback; `native_required` fails when native CUDA control cannot be
 selected. `if` and `switch` currently use portable host control on all three
-backends. Structured-control Graphs use `run()` and reject `submit()`.
+backends. Portable structured-control Graphs use `run()` and reject `submit()`.
+A CUDA `while_loop` with `lowering_mode='native_required'` supports `submit()`
+when conditional Graph lowering is available. An ordered device setter checks
+the initial predicate, including for unmasked bodies. Its ticket can expose
+explicit terminal `GraphBuilder.observe()` snapshots; synchronous
+`control_flow_stats()` are unavailable until a later `run()`.
 
 ### `GraphBuilder.compile()`, `Graph.run(args)`, and `Graph.submit(args)`
 
@@ -855,7 +860,7 @@ the same execution path and returns a completion ticket.
 | --- | --- |
 | `GraphBuilder.compile()` | Later changes to the builder or original `Sequential` do not modify the compiled graph. |
 | `Graph.run(args)` | `args` must be a dictionary with exactly the declared keys; missing or extra keys raise `TaichiRuntimeError`. |
-| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait')` | Uses the same exact argument, lifecycle, concurrency, and AD contract as `run()`, returns a `SubmissionTicket`, and can opt into shared admission pacing. |
+| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait')` | Uses the same exact argument, lifecycle, concurrency, and AD contract as `run()`, returns a `SubmissionTicket`, and can opt into shared admission pacing. Structured submission is limited to CUDA `native_required` while regions with available conditional Graph lowering; portable control fails explicitly. |
 | `Graph._prewarm()` | Warm the current runtime's backend plan; this internal/advanced entry point does not change the argument contract. |
 
 Concurrent host calls on one graph queue at the complete-invocation boundary;

@@ -70,6 +70,8 @@ PER_CUDA_FUNCTION(graph_conditional_handle_create,
 PER_CUDA_FUNCTION(graph_add_node, cuGraphAddNode, void **, CUgraph,
                   const void *, std::size_t,
                   const TaichiCudaGraphNodeParams *);
+PER_CUDA_FUNCTION(graph_get_nodes, cuGraphGetNodes, CUgraph, void **,
+                  std::size_t *);
 PER_CUDA_FUNCTION(graph_instantiate_log, cuGraphInstantiate_v2, CUgraphExec *,
                   CUgraph, void **, char *, std::size_t);
 PER_CUDA_FUNCTION(graph_instantiate_with_flags, cuGraphInstantiateWithFlags, CUgraphExec *, CUgraph, unsigned long long);

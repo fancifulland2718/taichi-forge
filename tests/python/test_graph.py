@@ -1985,7 +1985,12 @@ def test_repeated_sequential_keeps_cuda_expanded_runtime_by_default():
 
 
 def _build_structured_while_graph(
-    *, max_iterations, chunk_size=4, lowering_mode="auto"
+    observe=False,
+    *,
+    max_iterations,
+    chunk_size=4,
+    lowering_mode="auto",
+    masked_execution=True,
 ):
     @ti.kernel
     def evaluate_condition(
@@ -2041,10 +2046,17 @@ def _build_structured_while_graph(
         counter=arg_counter,
         max_iterations=max_iterations,
         chunk_size=chunk_size,
-        masked_execution=True,
+        masked_execution=masked_execution,
         lowering_mode=lowering_mode,
         name="adaptive_step",
     )
+    if observe:
+        builder.observe(
+            arg_state,
+            arg_predicate,
+            arg_counter,
+            name="terminal",
+        )
     return builder.compile()
 
 
@@ -2131,7 +2143,7 @@ def test_structured_graph_while_reports_exact_stop_and_backend_overshoot():
     assert ir["analysis"]["while_regions"] == 1
     assert ir["root"]["children"][0]["lowering_mode"] == "auto"
     with pytest.raises(
-        TaichiRuntimeError, match="does not support portable structured control"
+        TaichiRuntimeError, match="supports structured control only"
     ):
         graph.submit(args)
 
@@ -2390,6 +2402,62 @@ def test_structured_graph_while_native_rebind_and_replay_diagnostics():
     assert native_stats["patched_replays"] >= 1
     assert native_stats["exact_replays"] >= 1
     assert native_stats["last_path"] == "cuda_exact_replay"
+
+
+@test_utils.test(arch=ti.cuda)
+def test_structured_graph_native_while_submit_defers_terminal_observation():
+    capabilities = dict(ti_core.cuda_conditional_graph_capabilities())
+    if not (
+        capabilities["driver_version_eligible"]
+        and capabilities["conditional_graph_symbols_loaded"]
+        and capabilities["general_device_setter_lowering_compiled"]
+    ):
+        pytest.skip("general CUDA conditional Graph is unavailable")
+
+    graph = _build_structured_while_graph(
+        observe=True,
+        max_iterations=20,
+        lowering_mode="native_required",
+    )
+    inactive = _structured_while_args(target=7, active=False)
+    inactive_ticket = graph.submit(inactive)
+    assert inactive_ticket.observations() == {
+        "terminal": {"state": 0, "predicate": 0, "counter": 0}
+    }
+
+    args = _structured_while_args(target=7)
+    ticket = graph.submit(args)
+
+    with pytest.raises(TaichiRuntimeError, match="unavailable after asynchronous"):
+        graph.control_flow_stats()
+    assert ticket.observations() == {
+        "terminal": {"state": 7, "predicate": 0, "counter": 7}
+    }
+    assert args["state"].to_numpy()[()] == 7
+
+    args["state"].fill(0)
+    args["predicate"].fill(0)
+    args["counter"].fill(0)
+    args["target"] = 3
+    graph.run(args)
+    report = graph.control_flow_stats()[0]
+    assert report.lowering == "cuda_conditional_graph"
+    assert report.logical_iterations == 3
+
+    unmasked = _build_structured_while_graph(
+        observe=True,
+        max_iterations=20,
+        lowering_mode="native_required",
+        masked_execution=False,
+    )
+    unmasked_inactive = _structured_while_args(target=3, active=False)
+    assert unmasked.submit(unmasked_inactive).observations() == {
+        "terminal": {"state": 0, "predicate": 0, "counter": 0}
+    }
+    unmasked_active = _structured_while_args(target=3)
+    assert unmasked.submit(unmasked_active).observations() == {
+        "terminal": {"state": 3, "predicate": 0, "counter": 3}
+    }
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])

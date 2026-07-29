@@ -229,6 +229,7 @@ void export_misc(py::module &m) {
         driver.graph_create.available() &&
         driver.graph_conditional_handle_create.available() &&
         driver.graph_add_node.available() &&
+        driver.graph_get_nodes.available() &&
         driver.graph_instantiate_with_flags.available() &&
         driver.graph_launch.available() && driver.graph_destroy.available() &&
         driver.graph_exec_destroy.available();

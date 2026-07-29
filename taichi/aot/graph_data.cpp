@@ -1445,6 +1445,7 @@ bool try_run_cuda_bounded_graph(
       driver.graph_create.available() &&
       driver.graph_conditional_handle_create.available() &&
       driver.graph_add_node.available() &&
+      driver.graph_get_nodes.available() &&
       driver.graph_instantiate_with_flags.available() &&
       driver.graph_launch.available() && driver.graph_destroy.available() &&
       driver.graph_exec_destroy.available();
@@ -1471,6 +1472,10 @@ bool try_run_cuda_bounded_graph(
     cuda::CudaGraphConditionalControl control;
     control.predicate = reinterpret_cast<std::uintptr_t>(
         predicate_device->get_alloc_info(predicate_allocation).ptr);
+    // The parent-graph setter increments before checking the iteration cap.
+    // Wrapping UINT32_MAX to zero makes it the launch-time predicate check;
+    // setters captured at the end of the body then advance iterations 1..N.
+    control.iteration = ~std::uint32_t{0};
     control.max_iterations = static_cast<std::uint32_t>(max_iterations);
     control.continue_while_nonzero = continue_while_nonzero ? 1u : 0u;
     driver.memcpy_host_to_device(state->conditional_control, &control,
@@ -1615,12 +1620,60 @@ bool try_run_cuda_bounded_graph(
   constexpr unsigned int kAssignDefaultValue = 1;
   std::uint64_t conditional_handle = 0;
   const auto handle_error = driver.graph_conditional_handle_create.call(
-      &conditional_handle, parent_graph.get(), current_context, 1,
+      &conditional_handle, parent_graph.get(), current_context, 0,
       kAssignDefaultValue);
   if (handle_error != CUDA_SUCCESS || conditional_handle == 0) {
     return handle_cuda_graph_driver_failure(
         *state, handle_error, "conditional handle create");
   }
+  driver.stream_synchronize(capture_stream);
+  {
+    auto capture_lock =
+        CUDAContext::get_instance().get_graph_capture_lock_guard();
+    const auto begin_error = driver.stream_begin_capture_to_graph.call(
+        capture_stream, parent_graph.get(), nullptr, nullptr, 0,
+        CU_STREAM_CAPTURE_MODE_RELAXED);
+    if (begin_error != CUDA_SUCCESS) {
+      return handle_cuda_graph_driver_failure(
+          *state, begin_error, "conditional setter capture begin");
+    }
+    CudaStreamCaptureGuard capture_guard(capture_stream);
+    try {
+      cuda::driver_graph_set_conditional(
+          state->conditional_control, conditional_handle, capture_stream);
+    } catch (...) {
+      if (state->diagnostics_enabled) {
+        ++state->stats.capture_exceptions;
+      }
+      capture_guard.abort();
+      state->retire();
+      throw;
+    }
+    CUgraph captured_parent = nullptr;
+    const auto end_error = capture_guard.end(&captured_parent);
+    if (end_error != CUDA_SUCCESS || captured_parent == nullptr) {
+      return handle_cuda_graph_driver_failure(
+          *state, end_error, "conditional setter capture end");
+    }
+  }
+
+  std::size_t parent_node_count = 0;
+  const auto count_error = driver.graph_get_nodes.call(
+      parent_graph.get(), nullptr, &parent_node_count);
+  if (count_error != CUDA_SUCCESS || parent_node_count != 1) {
+    return handle_cuda_graph_driver_failure(
+        *state, count_error, "conditional setter node query");
+  }
+  void *setter_node = nullptr;
+  std::size_t setter_node_count = 1;
+  const auto nodes_error = driver.graph_get_nodes.call(
+      parent_graph.get(), &setter_node, &setter_node_count);
+  if (nodes_error != CUDA_SUCCESS || setter_node_count != 1 ||
+      setter_node == nullptr) {
+    return handle_cuda_graph_driver_failure(
+        *state, nodes_error, "conditional setter node fetch");
+  }
+
   TaichiCudaGraphNodeParams node_params{};
   constexpr std::uint32_t kConditionalNodeType = 13;
   constexpr std::uint32_t kWhileConditionalType = 1;
@@ -1632,7 +1685,7 @@ bool try_run_cuda_bounded_graph(
   node_params.parameters.conditional.context = current_context;
   void *conditional_node = nullptr;
   const auto add_error = driver.graph_add_node.call(
-      &conditional_node, parent_graph.get(), nullptr, 0, &node_params);
+      &conditional_node, parent_graph.get(), &setter_node, 1, &node_params);
   if (add_error != CUDA_SUCCESS || conditional_node == nullptr ||
       node_params.parameters.conditional.ph_graph_out == nullptr ||
       node_params.parameters.conditional.ph_graph_out[0] == nullptr) {
@@ -1640,7 +1693,6 @@ bool try_run_cuda_bounded_graph(
         *state, add_error, "conditional node create");
   }
 
-  driver.stream_synchronize(capture_stream);
   auto capture_lock = CUDAContext::get_instance().get_graph_capture_lock_guard();
   const auto begin_error = driver.stream_begin_capture_to_graph.call(
       capture_stream, node_params.parameters.conditional.ph_graph_out[0],

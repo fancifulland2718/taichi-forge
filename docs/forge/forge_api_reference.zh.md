@@ -740,7 +740,11 @@ CPU 在 cached dispatch plan 上使用精确 host control。满足资格的 CUDA
 Vulkan 当前使用 portable exact 或显式 masked-chunk replay。CUDA 原生条件控制要求 Driver
 API 12.8 或更高版本，并具备所需 conditional symbol/lowering。`portable` 强制 fallback；
 `native_required` 在无法选择 CUDA 原生控制时失败。`if` 与 `switch` 当前在三个后端都使用
-portable host control。包含结构化控制的 Graph 使用 `run()`，并明确拒绝 `submit()`。
+portable host control。portable 结构化 Graph 使用 `run()` 并明确拒绝 `submit()`；当
+conditional Graph lowering 可用时，声明 `lowering_mode='native_required'` 的 CUDA
+`while_loop` 支持 `submit()`。有序 device setter 会判断初始 predicate，并支持
+unmasked body。其 ticket 可返回显式 `GraphBuilder.observe()` 终态；再次
+同步 `run()` 之前不能读取 `control_flow_stats()`。
 
 ### `GraphBuilder.compile()`、`Graph.run(args)` 与 `Graph.submit(args)`
 
@@ -752,7 +756,7 @@ portable host control。包含结构化控制的 Graph 使用 `run()`，并明�
 | --- | --- |
 | `GraphBuilder.compile()` | 后续修改 builder 或原 `Sequential` 不改变已编译 graph。 |
 | `Graph.run(args)` | `args` 必须是字典，key 与声明参数完全一致；missing/extra key 会抛 `TaichiRuntimeError`。 |
-| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait')` | 与 `run()` 使用相同的精确参数、生命周期、并发和 AD 合同，并返回 `SubmissionTicket`；可选择加入共享准入节奏。 |
+| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait')` | 与 `run()` 使用相同的精确参数、生命周期、并发和 AD 合同，并返回 `SubmissionTicket`；可选择加入共享准入节奏。结构化提交仅限 conditional Graph lowering 可用的 CUDA `native_required` while region；portable 控制会明确失败。 |
 | `Graph._prewarm()` | 预热当前 runtime 的 backend plan；这是内部/高级入口，不改变 graph 参数合同。 |
 
 同一个 graph 的并发 host 调用以完整 invocation 为单位排队；不同 graph 不共享该锁。

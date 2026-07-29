@@ -153,8 +153,15 @@ region；opaque 或不支持的 provider 会明确失败。
 `Graph.control_flow_stats()` 为最近一次 `run()` 的每个结构化 region 返回 immutable
 `GraphWhileReport` 或 `GraphBranchReport`。while report 包含实际 lowering、逻辑/执行
 迭代、观测边界、predicate/counter/status 轨迹、终止状态、传输字节与 native upgrade
-原因。结构化 region 当前使用同步 `Graph.run()`；`Graph.submit()` 会明确拒绝，而不会把
-host-observed portable control 隐藏在异步 ticket 后面。
+原因。portable 结构化 region 使用同步 `Graph.run()`；`Graph.submit()` 会明确拒绝，
+不会把 host-observed 控制隐藏在异步 ticket 后面。在 CUDA conditional Graph lowering
+可用时，声明 `lowering_mode='native_required'` 的 `while_loop` 可以使用
+`Graph.submit()`。有序 device setter 会在 bounded conditional child 前判断初始
+predicate，因此 masked 与 unmasked body 使用相同的无回读合同。初始 condition、
+有界 device loop 以及显式终态
+`GraphBuilder.observe()` snapshot 会连续入队，不读取 host predicate。
+`Graph.control_flow_stats()` 仍是同步诊断；异步结构化提交后应通过
+`ticket.observations()` 读取终态，或再次调用 `Graph.run()` 取得新的控制流报告。
 
 ## 按需完成票据
 

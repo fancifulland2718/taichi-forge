@@ -1679,6 +1679,43 @@ class _CompiledWhileGraphNode:
     def _select_chunk(self, remaining):
         return max(size for size in self._chunks if size <= remaining)
 
+    @property
+    def supports_native_submission(self):
+        return (
+            self.lowering_mode == "native_required"
+            and self._native_upgrade_eligible
+            and self.counter is not None
+        )
+
+    def run_for_submission(self, context, temporaries=None):
+        if not self.supports_native_submission:
+            raise TaichiRuntimeError(
+                "Graph while submission requires native_required CUDA lowering"
+            )
+        self._last_report = None
+        self._condition.run(context)
+        if self.max_iterations == 0:
+            return
+        predicate_object = context.runtime_args()[self.predicate]
+        predicate_ndarray = getattr(predicate_object, "arr", None)
+        if predicate_ndarray is None:
+            raise TaichiRuntimeError(
+                "Native CUDA Graph while submission requires an ndarray predicate"
+            )
+        submitted = self._chunks[1].compiled_graph.jit_run_bounded_cuda_cached(
+            context.compile_config(),
+            context.flattened_args(self.recording_runtime_arg_names),
+            self._native_jit_cache,
+            predicate_ndarray,
+            self.max_iterations,
+            True,
+        )
+        if not submitted:
+            raise TaichiRuntimeError(
+                "Native CUDA Graph while submission became unavailable; "
+                "synchronous fallback is disabled"
+            )
+
     def run(self, context, temporaries=None):
         runtime_args = context.runtime_args()
         predicate_object = runtime_args[self.predicate]
@@ -2472,6 +2509,26 @@ class _GraphSpec:
         )
         self.ir_analysis = analyze_graph_ir(self.ir_root)
 
+    @property
+    def supports_native_structured_submission(self):
+        structured_nodes = [
+            node
+            for node in self.nodes
+            if isinstance(
+                node,
+                (
+                    _CompiledWhileGraphNode,
+                    _CompiledIfGraphNode,
+                    _CompiledSwitchGraphNode,
+                ),
+            )
+        ]
+        return bool(structured_nodes) and all(
+            isinstance(node, _CompiledWhileGraphNode)
+            and node.supports_native_submission
+            for node in structured_nodes
+        )
+
     def validate_lifetime_leases(self):
         for lease in self.lifetime_leases:
             validate = getattr(lease, "validate_graph_lifetime", None)
@@ -2664,6 +2721,23 @@ class _GraphExecutable:
             if context is not None:
                 context.end()
 
+    def run_for_submission(self, args, temporaries=None):
+        context = self._context
+        if context is not None:
+            context.begin(
+                self.spec.bind_runtime_args(args),
+                self.spec.fixed_runtime_args,
+            )
+        try:
+            for node in self.spec.nodes:
+                if isinstance(node, _CompiledWhileGraphNode):
+                    node.run_for_submission(context, temporaries)
+                else:
+                    node.run(context, temporaries)
+        finally:
+            if context is not None:
+                context.end()
+
 
 class _GraphInstance:
     def __init__(self, spec, key):
@@ -2715,6 +2789,13 @@ class _GraphInstance:
 
     def run(self, args):
         self._run_impl(self, args, self._temporary_bindings)
+
+    def run_for_submission(self, args):
+        if not self.spec.supports_native_structured_submission:
+            return self.run(args)
+        if self._executable is None:
+            self._executable = _GraphExecutable(self.spec)
+        self._executable.run_for_submission(args, self._temporary_bindings)
 
     def bind_temporary_buffers(self, bindings):
         self._temporary_bindings = bindings
@@ -3542,6 +3623,7 @@ class Graph:
         )
         self._contains_observations_value = self._spec.observation_count > 0
         self._last_observations = {}
+        self._latest_control_flow_was_async = False
         self._submission_lane = _new_submission_lane("graph")
         self._execution_definition = self._spec.execution_definition
         self._execution_arch = _ti_core.arch_name(impl.current_cfg().arch)
@@ -3604,6 +3686,7 @@ class Graph:
                     )
                     runtime.prog._record_runtime_graph_submission()
                     self._run_impl(args)
+                    self._latest_control_flow_was_async = False
                     if observation_lease is not None:
                         self._last_observations = observation_lease.materialize()
                 finally:
@@ -3632,10 +3715,13 @@ class Graph:
         ``run()``. A shared ``SubmissionPacer`` can bound backend backlog and
         fairly arbitrate complete host submissions before they enqueue work.
         """
-        if self._contains_structured_control_value:
+        if (
+            self._contains_structured_control_value
+            and not self._spec.supports_native_structured_submission
+        ):
             raise TaichiRuntimeError(
-                "Graph.submit() does not support portable structured control "
-                "because condition observations are synchronous"
+                "Graph.submit() supports structured control only when every "
+                "region has native_required asynchronous backend lowering"
             )
         runtime = impl.pytaichi
         with self._lifecycle_lock:
@@ -3696,7 +3782,11 @@ class Graph:
                     )
                     transaction = runtime.prog._begin_runtime_submission_transaction()
                     runtime.prog._record_runtime_graph_submission()
-                    self._run_impl(args)
+                    if self._contains_structured_control_value:
+                        self._instance.run_for_submission(args)
+                        self._latest_control_flow_was_async = True
+                    else:
+                        self._run_impl(args)
                     # CGraph/kernel paths publish work themselves. Native plans
                     # use Program methods outside that launch path, so publish
                     # once for the whole native portion without changing run().
@@ -3827,6 +3917,13 @@ class Graph:
         """Return immutable reports for the latest structured-control run."""
         with self._lifecycle_lock:
             self._check_runtime_valid()
+            if self._latest_control_flow_was_async:
+                raise TaichiRuntimeError(
+                    "Control-flow reports are unavailable after asynchronous "
+                    "structured submission. Use SubmissionTicket.observations() "
+                    "for explicit terminal state, or Graph.run() for a "
+                    "synchronous control-flow report."
+                )
             return tuple(
                 node.last_report
                 for node in self._spec.nodes
