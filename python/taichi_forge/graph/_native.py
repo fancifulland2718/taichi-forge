@@ -1,4 +1,5 @@
 from taichi_forge.lang.exception import TaichiRuntimeError
+from taichi_forge.graph._ir import NativeCallNode
 
 
 class NativeGraphExecutable:
@@ -18,6 +19,38 @@ class NativeGraphExecutable:
     @property
     def debug_info(self):
         return {}
+
+    @property
+    def runtime_arg_schema(self):
+        return ()
+
+    @property
+    def resource_effects(self):
+        return ()
+
+    @property
+    def temporary_requirements(self):
+        return ()
+
+    @property
+    def backend_recorder(self):
+        return None
+
+    @property
+    def graph_ir_node(self):
+        info = self.debug_info
+        name = (
+            info.get("kind", type(self).__name__)
+            if isinstance(info, dict)
+            else type(self).__name__
+        )
+        return NativeCallNode(
+            name=name,
+            effects=tuple(self.resource_effects),
+            bindings=tuple(self.runtime_arg_schema),
+            temporaries=tuple(self.temporary_requirements),
+            opaque=self.backend_recorder is None,
+        )
 
 
 class NativeGraphNode:

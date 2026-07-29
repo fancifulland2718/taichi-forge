@@ -17,6 +17,16 @@ from taichi_forge.types._argument_descriptor import (
 )
 from taichi_forge.types.texture_type import FORMAT2TY_CH, TY_CH2FORMAT
 from taichi_forge.graph._native import compile_native_graph_node
+from taichi_forge.graph._ir import (
+    DispatchNode,
+    GraphAccess,
+    NativeCallNode,
+    ResourceEffect,
+    RuntimeBinding,
+    SequentialRegion,
+    analyze_graph_ir,
+    graph_ir_to_dict,
+)
 from taichi_forge.graph._submission import (
     SubmissionPacer,
     _new_submission_lane,
@@ -530,10 +540,23 @@ class _GraphRunContext:
 class _CompiledCGraphNode:
     needs_runtime_args = True
 
-    def __init__(self, compiled_graph, dispatch_count, runtime_arg_names=()):
+    def __init__(
+        self,
+        compiled_graph,
+        dispatch_count,
+        runtime_arg_names=(),
+        ir_node=None,
+    ):
         self.compiled_graph = compiled_graph
         self.dispatch_count = dispatch_count
         self.runtime_arg_names = frozenset(runtime_arg_names)
+        self.ir_node = ir_node or SequentialRegion(
+            tuple(
+                DispatchNode(name=f"dispatch_{index}")
+                for index in range(dispatch_count)
+            ),
+            name="cgraph",
+        )
         dependency_info = getattr(
             compiled_graph, "_snode_tree_dependency_info", None
         )
@@ -579,6 +602,9 @@ class _CompiledNativeGraphNode:
 
     def __init__(self, executable):
         self.executable = executable
+        self.ir_node = getattr(
+            executable, "graph_ir_node", NativeCallNode(type(executable).__name__)
+        )
 
     def run(self, context):
         self.executable.run()
@@ -610,6 +636,10 @@ class _GraphSpec:
             *(n.snode_tree_dependency_info for n in self.nodes)
         )
         self.repeat_count = 0
+        self.ir_root = SequentialRegion(
+            tuple(node.ir_node for node in self.nodes), name="graph"
+        )
+        self.ir_analysis = analyze_graph_ir(self.ir_root)
 
     def validate_runtime_args(self, args, entrypoint="Graph.run"):
         if not isinstance(args, dict):
@@ -668,6 +698,15 @@ class _GraphSpec:
         if hasattr(self._aot_graph_builder, "item_count"):
             info["aot_item_count"] = self._aot_graph_builder.item_count
         return info
+
+    @property
+    def ir_debug_info(self):
+        return {
+            "metadata_version": 1,
+            "analysis_only": True,
+            "analysis": self.ir_analysis.to_dict(),
+            "root": graph_ir_to_dict(self.ir_root),
+        }
 
     @property
     def execution_definition(self):
@@ -975,6 +1014,41 @@ def _runtime_arg_names(args):
     return {arg.name for arg in args}
 
 
+def _dispatch_ir_name(kernel_cpp):
+    for attribute in ("name", "get_name"):
+        value = getattr(kernel_cpp, attribute, None)
+        if value is None:
+            continue
+        if callable(value):
+            value = value()
+        if value:
+            return str(value)
+    return type(kernel_cpp).__name__
+
+
+def _dispatch_ir_node(kernel_cpp, args):
+    effects = []
+    bindings = []
+    for arg in args:
+        tag = getattr(arg, "tag", None)
+        kind = str(tag)
+        access = (
+            GraphAccess.READ
+            if tag in (ArgKind.SCALAR, ArgKind.MATRIX, ArgKind.TEXTURE)
+            else GraphAccess.READ_WRITE
+        )
+        effects.append(ResourceEffect(arg.name, access))
+        bindings.append(RuntimeBinding(arg.name, kind))
+    # Until backend kernel access metadata is attached to this JIT record,
+    # ndarray writes remain conservative and the node is not rewriteable.
+    return DispatchNode(
+        name=_dispatch_ir_name(kernel_cpp),
+        effects=tuple(effects),
+        bindings=tuple(bindings),
+        opaque=True,
+    )
+
+
 class _AOTSequentialSnapshot:
     def __init__(self, dispatches):
         self._dispatches = tuple(
@@ -990,6 +1064,7 @@ class Sequential:
     def __init__(self):
         self._dispatch_count = 0
         self._dispatches = []
+        self._ir_nodes = []
         self._runtime_arg_names = set()
 
     def dispatch(self, kernel_fn, *args, template_args=None):
@@ -998,6 +1073,7 @@ class Sequential:
         )
         unzipped_args = flatten_args(args)
         self._dispatches.append((kernel_cpp, unzipped_args))
+        self._ir_nodes.append(_dispatch_ir_node(kernel_cpp, unzipped_args))
         self._runtime_arg_names.update(_runtime_arg_names(unzipped_args))
         self._dispatch_count += 1
 
@@ -1014,6 +1090,7 @@ class GraphBuilder:
         self._dispatch_count = 0
         self._runtime_graph_arg_names = set()
         self._nodes = []
+        self._pending_ir_nodes = []
 
     def dispatch(self, kernel_fn, *args, template_args=None):
         kernel_cpp = gen_cpp_kernel(
@@ -1026,6 +1103,7 @@ class GraphBuilder:
         self._aot_graph_plan.dispatch(kernel_cpp, unzipped_args)
         self._ensure_runtime_graph_builder().dispatch(kernel_cpp, unzipped_args)
         self._runtime_graph_arg_names.update(_runtime_arg_names(unzipped_args))
+        self._pending_ir_nodes.append(_dispatch_ir_node(kernel_cpp, unzipped_args))
         self._dispatch_count += 1
 
     def create_sequential(self):
@@ -1038,6 +1116,7 @@ class GraphBuilder:
         node._dispatch_to(self._runtime_graph_builder)
         self._runtime_graph_arg_names.update(node._runtime_arg_names)
         self._dispatch_count += node._dispatch_count
+        self._pending_ir_nodes.extend(node._ir_nodes)
 
     def _ensure_runtime_graph_builder(self):
         return self._runtime_graph_builder
@@ -1060,11 +1139,15 @@ class GraphBuilder:
                 self._runtime_graph_builder.compile(),
                 self._dispatch_count,
                 self._runtime_graph_arg_names,
+                SequentialRegion(
+                    tuple(self._pending_ir_nodes), name="cgraph"
+                ),
             )
         )
         self._runtime_graph_builder = _ti_core.GraphBuilder()
         self._dispatch_count = 0
         self._runtime_graph_arg_names = set()
+        self._pending_ir_nodes = []
 
     def _append_native(self, node, *, prewarm=False):
         self._flush_graph_builder()
@@ -1085,6 +1168,7 @@ class GraphBuilder:
                     self._ensure_runtime_graph_builder().compile(),
                     0,
                     (),
+                    SequentialRegion((), name="cgraph"),
                 )
             )
         return Graph(
@@ -1363,6 +1447,12 @@ class Graph:
         with self._lifecycle_lock:
             self._check_runtime_valid()
             return self._spec.debug_info
+
+    @property
+    def _ir_debug_info(self):
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            return self._spec.ir_debug_info
 
     @property
     def _instance_debug_info(self):
