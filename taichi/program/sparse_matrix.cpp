@@ -172,6 +172,7 @@ struct CompiledKernelLinearOperator::ResourceGeneration {
   const CompiledKernelData *compiled_kernel{nullptr};
   std::shared_ptr<TopologyState> topology;
   Ndarray *numeric_data{nullptr};
+  OperatorResourceStamp stamp;
   std::size_t input_arg_index{0};
   std::size_t output_arg_index{0};
   std::unique_ptr<LaunchContextBuilder> launch_context;
@@ -511,6 +512,7 @@ CompiledKernelLinearOperator::~CompiledKernelLinearOperator() {
       resource_generations_->retire_current();
       resource_generations_.reset();
     }
+    current_resource_generation_.reset();
     topology_state_.reset();
   } catch (...) {
   }
@@ -543,6 +545,8 @@ void CompiledKernelLinearOperator::publish_resource_generation(
       topology_version_,
       numeric_version,
       binding_revision};
+  generation->stamp = stamp;
+  current_resource_generation_ = generation;
   auto apply_calls = generation_apply_calls_;
   auto action = OperatorAction(
       descriptor, capabilities, "forge_compiled_taichi_kernel",
@@ -566,6 +570,18 @@ CompiledKernelLinearOperator::pin_operator_generation() const {
 OperatorResourceStamp
 CompiledKernelLinearOperator::current_operator_resource_stamp() const {
   return pin_operator_generation().resource_stamp();
+}
+
+std::shared_ptr<LinearOperatorRecordableKernel>
+CompiledKernelLinearOperator::recordable_kernel() const {
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  TI_ERROR_IF(!current_resource_generation_,
+              "Compiled-kernel operator has no published generation.");
+  return std::make_shared<LinearOperatorRecordableKernel>(
+      program_, kernel_, rows_,
+      current_resource_generation_->topology->data,
+      current_resource_generation_->numeric_data,
+      current_resource_generation_->stamp, current_resource_generation_);
 }
 
 OperatorBinding CompiledKernelLinearOperator::make_operator_binding() {

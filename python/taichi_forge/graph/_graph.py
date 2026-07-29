@@ -24,7 +24,8 @@ from taichi_forge.types.primitive_types import i32
 from taichi_forge.types.texture_type import FORMAT2TY_CH, TY_CH2FORMAT
 from taichi_forge.graph._native import (
     GraphTemporaryBuffer,
-    NativeGraphBackendRecorder,
+    ProviderOwnedNdarrayBinding,
+    RecordableGraphAction,
     compile_native_graph_node,
 )
 from taichi_forge.graph._ir import (
@@ -922,8 +923,19 @@ class _GraphRunContext:
         self._last_arg_signature = None
         self._last_flattened = None
 
-    def begin(self, args):
-        self._args = args
+    def begin(self, args, fixed_args=None):
+        if fixed_args:
+            overlap = fixed_args.keys() & args.keys()
+            if overlap:
+                raise TaichiRuntimeError(
+                    "Graph runtime arguments collide with provider-owned "
+                    "fixed bindings: " + ", ".join(sorted(overlap))
+                )
+            merged = dict(fixed_args)
+            merged.update(args)
+            self._args = merged
+        else:
+            self._args = args
         self._flattened_args = None
 
     def end(self):
@@ -975,7 +987,7 @@ class _GraphRunContext:
             ndarray_consumer = "graph_replay"
             ndarray_mode = "replay"
         for k, v in args.items():
-            if isinstance(v, Ndarray):
+            if isinstance(v, (Ndarray, ProviderOwnedNdarrayBinding)):
                 if v.arr is None:
                     raise TaichiRuntimeError(
                         "Cannot submit an Ndarray to Graph.run() after its Taichi runtime has been reset"
@@ -1008,7 +1020,7 @@ class _GraphRunContext:
         else:
             flattened = {}
             for k, v in args.items():
-                if isinstance(v, Ndarray):
+                if isinstance(v, (Ndarray, ProviderOwnedNdarrayBinding)):
                     if runtime_storage_backend:
                         flattened[k] = (
                             v.arr,
@@ -1056,6 +1068,7 @@ class _CompiledCGraphNode:
         lifetime_leases=(),
         source_native_count=0,
         region_kind="cgraph",
+        fixed_runtime_args=None,
     ):
         self.compiled_graph = compiled_graph
         self.dispatch_count = dispatch_count
@@ -1067,7 +1080,17 @@ class _CompiledCGraphNode:
         self.composer_lowering_available = bool(
             composer_stats.get("lowering_available", False)
         )
-        self.runtime_arg_names = frozenset(runtime_arg_names)
+        self.recording_runtime_arg_names = frozenset(runtime_arg_names)
+        self.fixed_runtime_args = dict(
+            {} if fixed_runtime_args is None else fixed_runtime_args
+        )
+        if not self.fixed_runtime_args.keys() <= self.recording_runtime_arg_names:
+            raise TaichiRuntimeError(
+                "CGraph fixed bindings must be declared runtime arguments"
+            )
+        self.runtime_arg_names = self.recording_runtime_arg_names.difference(
+            self.fixed_runtime_args
+        )
         self.recording_dispatches = tuple(
             (kernel, tuple(args)) for kernel, args in recording_dispatches
         )
@@ -1100,7 +1123,7 @@ class _CompiledCGraphNode:
     def run(self, context, temporaries=None):
         self.compiled_graph.jit_run_cached(
             context.compile_config(),
-            context.flattened_args(self.runtime_arg_names),
+            context.flattened_args(self.recording_runtime_arg_names),
             self._jit_cache,
         )
 
@@ -1133,48 +1156,67 @@ class _CompiledNativeGraphNode:
     def __init__(self, executable):
         self.executable = executable
         self.ir_node = getattr(
-            executable, "graph_ir_node", NativeCallNode(type(executable).__name__)
+            executable,
+            "graph_ir_node",
+            NativeCallNode(type(executable).__name__),
         )
         schema = tuple(executable.runtime_arg_schema)
         if not all(isinstance(binding, RuntimeBinding) for binding in schema):
             raise TaichiRuntimeError(
-                "Native Graph runtime_arg_schema must contain RuntimeBinding values"
+                "Native Graph runtime_arg_schema must contain " "RuntimeBinding values"
             )
         if any(not binding.required for binding in schema):
             raise TaichiRuntimeError(
                 "Optional native Graph runtime arguments are not supported"
             )
         self.runtime_arg_names = frozenset(binding.name for binding in schema)
-        self.needs_runtime_args = bool(self.runtime_arg_names)
         self.temporary_names = frozenset(
             requirement.name for requirement in executable.temporary_requirements
         )
-        self.backend_recorder = executable.backend_recorder
-        if self.backend_recorder is not None and not isinstance(
-            self.backend_recorder, NativeGraphBackendRecorder
+        self.recordable_action = executable.recordable_action
+        if self.recordable_action is not None and not isinstance(
+            self.recordable_action, RecordableGraphAction
         ):
             raise TaichiRuntimeError(
-                "Native Graph backend_recorder must implement "
-                "NativeGraphBackendRecorder"
+                "Native Graph recordable_action must implement " "RecordableGraphAction"
             )
+        self.fixed_runtime_args = (
+            {}
+            if self.recordable_action is None
+            else dict(self.recordable_action.fixed_bindings)
+        )
+        overlap = self.runtime_arg_names & self.fixed_runtime_args.keys()
+        if overlap:
+            raise TaichiRuntimeError(
+                "Recordable action fixed bindings overlap public runtime "
+                "arguments: " + ", ".join(sorted(overlap))
+            )
+        self.recording_runtime_arg_names = frozenset(
+            (*self.runtime_arg_names, *self.fixed_runtime_args.keys())
+        )
+        self.needs_runtime_args = bool(self.recording_runtime_arg_names)
         self.lifetime_leases = (
             executable,
             *tuple(executable.lifetime_leases),
         )
-        if self.backend_recorder is not None:
+        if self.recordable_action is not None:
             recorder_names = frozenset().union(
                 *(
                     _runtime_arg_names(args)
-                    for _, args in self.backend_recorder.dispatches
+                    for _, args in self.recordable_action.dispatches
                 )
             )
-            if recorder_names != self.runtime_arg_names:
+            if recorder_names != self.recording_runtime_arg_names:
                 raise TaichiRuntimeError(
-                    "Native Graph recorder arguments must match runtime_arg_schema"
+                    "Recordable action dispatch arguments must match its "
+                    "public and fixed bindings"
                 )
 
     def run(self, context, temporaries=None):
-        runtime_args = context.runtime_args() if self.needs_runtime_args else None
+        runtime_args = None
+        if self.needs_runtime_args:
+            all_args = context.runtime_args()
+            runtime_args = {name: all_args[name] for name in self.runtime_arg_names}
         if not self.temporary_names:
             if runtime_args is None:
                 return self.executable.run()
@@ -1188,7 +1230,11 @@ class _CompiledNativeGraphNode:
 
     @property
     def debug_info(self):
-        return self.executable.debug_info
+        info = dict(self.executable.debug_info)
+        if self.recordable_action is not None:
+            info["recordable_action"] = self.recordable_action.capabilities.to_dict()
+            info["fixed_binding_count"] = len(self.fixed_runtime_args)
+        return info
 
 
 _OBSERVATION_PACK_KERNELS = {}
@@ -1408,30 +1454,68 @@ def _cuda_while_upgrade_status(arch, mode):
     return False, reason
 
 
-def _compile_sequential_runtime_node(sequences, *, repetitions=1, name):
+def _compile_sequential_runtime_node(
+    sequences,
+    *,
+    repetitions=1,
+    name,
+    region_kind="sequential",
+    region_kinds=None,
+):
     sequences = tuple(sequences)
     if not sequences or any(
         not isinstance(sequence, Sequential) for sequence in sequences
     ):
         raise TaichiRuntimeError("Structured Graph regions require Sequential values")
+    if region_kinds is None:
+        region_kinds = (region_kind,) * len(sequences)
+    else:
+        region_kinds = tuple(region_kinds)
+        if len(region_kinds) != len(sequences):
+            raise TaichiRuntimeError(
+                "Structured Graph region kinds must match its Sequential values"
+            )
     builder = _new_runtime_graph_builder()
     ir_nodes = []
     dispatch_count = 0
     runtime_arg_names = set()
     recording_dispatches = []
+    fixed_runtime_args = {}
+    lifetime_leases = []
+    source_native_count = 0
     for _ in range(repetitions):
-        for sequence in sequences:
-            sequence._dispatch_to(builder)
+        for sequence, sequence_region_kind in zip(sequences, region_kinds):
+            recording_dispatches.extend(
+                sequence._dispatch_to(builder, region_kind=sequence_region_kind)
+            )
             ir_nodes.extend(sequence._ir_nodes)
             dispatch_count += sequence._dispatch_count
-            runtime_arg_names.update(sequence._runtime_arg_names)
-            recording_dispatches.extend(sequence._dispatches)
+            runtime_arg_names.update(sequence._recording_runtime_arg_names)
+            for binding_name, value in sequence._fixed_runtime_args.items():
+                existing = fixed_runtime_args.get(binding_name)
+                if existing is not None and existing is not value:
+                    if not (
+                        isinstance(existing, (int, float))
+                        and isinstance(value, (int, float))
+                        and existing == value
+                    ):
+                        raise TaichiRuntimeError(
+                            "Structured Graph regions provide conflicting "
+                            f"fixed binding {binding_name!r}"
+                        )
+                fixed_runtime_args[binding_name] = value
+            lifetime_leases.extend(sequence._lifetime_leases)
+            source_native_count += sequence._source_native_count
     return _CompiledCGraphNode(
         builder.compile(),
         dispatch_count,
         runtime_arg_names,
         SequentialRegion(tuple(ir_nodes), name=name),
         recording_dispatches=recording_dispatches,
+        lifetime_leases=lifetime_leases,
+        source_native_count=source_native_count,
+        region_kind=region_kind,
+        fixed_runtime_args=fixed_runtime_args,
     )
 
 
@@ -1491,9 +1575,6 @@ class _CompiledWhileGraphNode:
         self.condition_dispatch_count = condition._dispatch_count
         self.body_dispatch_count = body._dispatch_count
         self.dispatch_count = self.condition_dispatch_count + self.body_dispatch_count
-        self.runtime_arg_names = frozenset(
-            condition._runtime_arg_names | body._runtime_arg_names
-        )
         required_condition = {predicate, *self.control_inputs}
         missing_condition = sorted(
             required_condition.difference(condition._runtime_arg_names)
@@ -1523,7 +1604,9 @@ class _CompiledWhileGraphNode:
                 "Chunked Graph while regions require a device counter"
             )
         self._condition = _compile_sequential_runtime_node(
-            (condition,), name=f"{name}_condition"
+            (condition,),
+            name=f"{name}_condition",
+            region_kind="while_condition",
         )
         self._chunks = {}
         chunk = 1
@@ -1532,9 +1615,23 @@ class _CompiledWhileGraphNode:
                 (body, condition),
                 repetitions=chunk,
                 name=f"{name}_body_condition_{chunk}",
+                region_kinds=("while_body", "while_condition"),
             )
             chunk *= 2
         dependency_nodes = (self._condition, *self._chunks.values())
+        self.fixed_runtime_args = _merge_fixed_runtime_args(dependency_nodes)
+        self.recording_runtime_arg_names = frozenset().union(
+            *(node.recording_runtime_arg_names for node in dependency_nodes)
+        )
+        self.runtime_arg_names = self.recording_runtime_arg_names.difference(
+            self.fixed_runtime_args
+        )
+        self.lifetime_leases = tuple(
+            (*condition._lifetime_leases, *body._lifetime_leases)
+        )
+        self.source_native_count = (
+            condition._source_native_count + body._source_native_count
+        )
         self.snode_tree_dependencies = frozenset().union(
             *(node.snode_tree_dependencies for node in dependency_nodes)
         )
@@ -1630,7 +1727,7 @@ class _CompiledWhileGraphNode:
                     1
                 ].compiled_graph.jit_run_bounded_cuda_cached(
                     context.compile_config(),
-                    context.flattened_args(self.runtime_arg_names),
+                    context.flattened_args(self.recording_runtime_arg_names),
                     self._native_jit_cache,
                     predicate_ndarray,
                     self.max_iterations,
@@ -1809,21 +1906,40 @@ class _CompiledIfGraphNode:
                 + ", ".join(missing)
             )
         self._condition = _compile_sequential_runtime_node(
-            (condition,), name=f"{name}_condition"
+            (condition,),
+            name=f"{name}_condition",
+            region_kind="if_condition",
         )
         self._then = _compile_sequential_runtime_node(
-            (then_region,), name=f"{name}_then"
+            (then_region,), name=f"{name}_then", region_kind="if_branch"
         )
         self._else = (
             None
             if else_region is None
-            else _compile_sequential_runtime_node((else_region,), name=f"{name}_else")
+            else _compile_sequential_runtime_node(
+                (else_region,), name=f"{name}_else", region_kind="if_branch"
+            )
         )
         nodes = tuple(
             node for node in (self._condition, self._then, self._else) if node
         )
-        self.runtime_arg_names = frozenset().union(
-            *(node.runtime_arg_names for node in nodes)
+        self.fixed_runtime_args = _merge_fixed_runtime_args(nodes)
+        self.recording_runtime_arg_names = frozenset().union(
+            *(node.recording_runtime_arg_names for node in nodes)
+        )
+        self.runtime_arg_names = self.recording_runtime_arg_names.difference(
+            self.fixed_runtime_args
+        )
+        sequences = tuple(
+            region
+            for region in (condition, then_region, else_region)
+            if region is not None
+        )
+        self.lifetime_leases = tuple(
+            lease for region in sequences for lease in region._lifetime_leases
+        )
+        self.source_native_count = sum(
+            region._source_native_count for region in sequences
         )
         self.snode_tree_dependencies = frozenset().union(
             *(node.snode_tree_dependencies for node in nodes)
@@ -1970,24 +2086,45 @@ class _CompiledSwitchGraphNode:
                 + ", ".join(missing)
             )
         self._condition = _compile_sequential_runtime_node(
-            (condition,), name=f"{name}_condition"
+            (condition,),
+            name=f"{name}_condition",
+            region_kind="switch_condition",
         )
         self._branches = tuple(
-            _compile_sequential_runtime_node((branch,), name=f"{name}_case_{index}")
+            _compile_sequential_runtime_node(
+                (branch,),
+                name=f"{name}_case_{index}",
+                region_kind="switch_branch",
+            )
             for index, branch in enumerate(branches)
         )
         self._default = (
             None
             if default_region is None
             else _compile_sequential_runtime_node(
-                (default_region,), name=f"{name}_default"
+                (default_region,),
+                name=f"{name}_default",
+                region_kind="switch_branch",
             )
         )
         nodes = (self._condition, *self._branches)
         if self._default is not None:
             nodes = (*nodes, self._default)
-        self.runtime_arg_names = frozenset().union(
-            *(node.runtime_arg_names for node in nodes)
+        self.fixed_runtime_args = _merge_fixed_runtime_args(nodes)
+        self.recording_runtime_arg_names = frozenset().union(
+            *(node.recording_runtime_arg_names for node in nodes)
+        )
+        self.runtime_arg_names = self.recording_runtime_arg_names.difference(
+            self.fixed_runtime_args
+        )
+        sequences = (condition, *branches)
+        if default_region is not None:
+            sequences = (*sequences, default_region)
+        self.lifetime_leases = tuple(
+            lease for region in sequences for lease in region._lifetime_leases
+        )
+        self.source_native_count = sum(
+            region._source_native_count for region in sequences
         )
         self.snode_tree_dependencies = frozenset().union(
             *(node.snode_tree_dependencies for node in nodes)
@@ -2109,11 +2246,30 @@ def _recordable_backend_dispatches(node, backend):
     # recorders on their executable path until they can bind that slot.
     if node.temporary_names:
         return None
-    recorder = node.backend_recorder
+    recorder = node.recordable_action
     if recorder is None or not recorder.supports_backend(backend):
         return None
     dispatches = tuple(recorder.dispatches)
     return dispatches or None
+
+
+def _merge_fixed_runtime_args(nodes):
+    merged = {}
+    for node in nodes:
+        for name, value in getattr(node, "fixed_runtime_args", {}).items():
+            existing = merged.get(name)
+            if existing is not None and existing is not value:
+                if not (
+                    isinstance(existing, (int, float))
+                    and isinstance(value, (int, float))
+                    and existing == value
+                ):
+                    raise TaichiRuntimeError(
+                        "Recordable actions provide conflicting fixed binding "
+                        f"{name!r}"
+                    )
+            merged[name] = value
+    return merged
 
 
 def _lower_mixed_backend_regions(nodes):
@@ -2142,7 +2298,7 @@ def _lower_mixed_backend_regions(nodes):
         has_native = any(
             isinstance(node, _CompiledNativeGraphNode) for node, _ in region
         )
-        if len(region) < 2 or not (has_cgraph and has_native):
+        if not has_native:
             lowered.extend(node for node, _ in region)
             cursor = end
             continue
@@ -2150,6 +2306,7 @@ def _lower_mixed_backend_regions(nodes):
         builder = _new_runtime_graph_builder()
         recording_dispatches = []
         runtime_arg_names = set()
+        fixed_runtime_args = _merge_fixed_runtime_args(node for node, _ in region)
         ir_children = []
         lifetime_leases = []
         region_native_count = 0
@@ -2157,7 +2314,13 @@ def _lower_mixed_backend_regions(nodes):
             for kernel, args in dispatches:
                 builder.dispatch(kernel, args)
                 recording_dispatches.append((kernel, tuple(args)))
-            runtime_arg_names.update(node.runtime_arg_names)
+            runtime_arg_names.update(
+                getattr(
+                    node,
+                    "recording_runtime_arg_names",
+                    node.runtime_arg_names,
+                )
+            )
             if isinstance(node.ir_node, SequentialRegion):
                 ir_children.extend(node.ir_node.children)
             else:
@@ -2170,11 +2333,21 @@ def _lower_mixed_backend_regions(nodes):
                 builder.compile(),
                 len(recording_dispatches),
                 runtime_arg_names,
-                SequentialRegion(tuple(ir_children), name="mixed_backend_region"),
+                SequentialRegion(
+                    tuple(ir_children),
+                    name=(
+                        "mixed_backend_region"
+                        if has_cgraph
+                        else "recordable_provider_region"
+                    ),
+                ),
                 recording_dispatches=recording_dispatches,
                 lifetime_leases=lifetime_leases,
                 source_native_count=region_native_count,
-                region_kind="mixed_cgraph_native",
+                region_kind=(
+                    "mixed_cgraph_native" if has_cgraph else "recordable_provider"
+                ),
+                fixed_runtime_args=fixed_runtime_args,
             )
         )
         mixed_region_count += 1
@@ -2237,8 +2410,28 @@ class _GraphSpec:
         self.observation_count = sum(
             isinstance(n, _CompiledObservationGraphNode) for n in self.nodes
         )
-        self.runtime_arg_names = frozenset().union(
-            *(n.runtime_arg_names for n in self.nodes)
+        self.fixed_runtime_args = _merge_fixed_runtime_args(self.nodes)
+        lifetime_leases = []
+        seen_lifetime_leases = set()
+        for node in self.nodes:
+            for lease in getattr(node, "lifetime_leases", ()):
+                identity = id(lease)
+                if identity not in seen_lifetime_leases:
+                    seen_lifetime_leases.add(identity)
+                    lifetime_leases.append(lease)
+        self.lifetime_leases = tuple(lifetime_leases)
+        all_runtime_arg_names = frozenset().union(
+            *(
+                getattr(
+                    node,
+                    "recording_runtime_arg_names",
+                    node.runtime_arg_names,
+                )
+                for node in self.nodes
+            )
+        )
+        self.runtime_arg_names = all_runtime_arg_names.difference(
+            self.fixed_runtime_args
         )
         self.snode_tree_dependencies = frozenset().union(
             *(n.snode_tree_dependencies for n in self.nodes)
@@ -2252,12 +2445,53 @@ class _GraphSpec:
         )
         self.ir_analysis = analyze_graph_ir(self.ir_root)
 
+    def validate_lifetime_leases(self):
+        for lease in self.lifetime_leases:
+            validate = getattr(lease, "validate_graph_lifetime", None)
+            if validate is not None:
+                validate()
+
+    def bind_runtime_args(self, args):
+        bound = args
+        owners = {}
+        for lease in self.lifetime_leases:
+            bind = getattr(lease, "bind_graph_arguments", None)
+            if bind is None:
+                continue
+            replacements = bind(args)
+            if not replacements:
+                continue
+            if not isinstance(replacements, dict):
+                raise TaichiRuntimeError(
+                    "Graph provider argument bindings must be a dict"
+                )
+            if bound is args:
+                bound = dict(args)
+            for name, value in replacements.items():
+                if name not in self.runtime_arg_names:
+                    raise TaichiRuntimeError(
+                        f"Graph provider attempted to bind unknown argument {name!r}"
+                    )
+                previous = owners.get(name)
+                if previous is not None and bound[name] is not value:
+                    raise TaichiRuntimeError(
+                        "Graph providers produced conflicting argument "
+                        f"bindings for {name!r}"
+                    )
+                bound[name] = value
+                owners[name] = lease
+        return bound
+
     def validate_runtime_args(self, args, entrypoint="Graph.run"):
         if not isinstance(args, dict):
             raise TaichiRuntimeError(
                 f"{entrypoint}() expects a dict of runtime arguments, got {type(args)}"
             )
         if args.keys() == self.runtime_arg_names:
+            for lease in self.lifetime_leases:
+                validate = getattr(lease, "validate_graph_bindings", None)
+                if validate is not None:
+                    validate(args)
             return
 
         missing = sorted(self.runtime_arg_names.difference(args.keys()))
@@ -2376,6 +2610,7 @@ class _GraphSpec:
             "observation_count": self.observation_count,
             "structured_control_count": self.structured_control_count,
             "runtime_arg_count": len(self.runtime_arg_names),
+            "fixed_runtime_arg_count": len(self.fixed_runtime_args),
             "dependency_info": tuple(sorted(self.snode_tree_dependency_info)),
             "temporary_memory_plan": self.temporary_memory_plan.to_dict(),
         }
@@ -2391,7 +2626,10 @@ class _GraphExecutable:
         # flattened runtime arguments and resource signatures across invocations.
         context = self._context
         if context is not None:
-            context.begin(args)
+            context.begin(
+                self.spec.bind_runtime_args(args),
+                self.spec.fixed_runtime_args,
+            )
         try:
             for node in self.spec.nodes:
                 node.run(context, temporaries)
@@ -2528,7 +2766,10 @@ class _GraphInstance:
             return self._run_general(args, temporaries)
         context = self._run_context
         if context is not None:
-            context.begin(args)
+            context.begin(
+                self.spec.bind_runtime_args(args),
+                self.spec.fixed_runtime_args,
+            )
         try:
             self._backend_executable.run(context, temporaries)
         finally:
@@ -2851,20 +3092,99 @@ class Sequential:
     def __init__(self):
         self._dispatch_count = 0
         self._dispatches = []
+        self._items = []
         self._ir_nodes = []
         self._runtime_arg_names = set()
+        self._recording_runtime_arg_names = set()
+        self._fixed_runtime_args = {}
+        self._lifetime_leases = []
+        self._source_native_count = 0
 
     def dispatch(self, kernel_fn, *args, template_args=None):
         kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
         unzipped_args = flatten_args(args)
+        ir_node = _dispatch_ir_node(kernel_cpp, unzipped_args)
         self._dispatches.append((kernel_cpp, unzipped_args))
-        self._ir_nodes.append(_dispatch_ir_node(kernel_cpp, unzipped_args))
-        self._runtime_arg_names.update(_runtime_arg_names(unzipped_args))
+        self._items.append(("dispatch", kernel_cpp, unzipped_args))
+        self._ir_nodes.append(ir_node)
+        names = _runtime_arg_names(unzipped_args)
+        self._runtime_arg_names.update(names)
+        self._recording_runtime_arg_names.update(names)
         self._dispatch_count += 1
+        return self
 
-    def _dispatch_to(self, builder):
-        for kernel_cpp, args in self._dispatches:
-            builder.dispatch(kernel_cpp, args)
+    def append_native(self, node, *, prewarm=False):
+        executable = compile_native_graph_node(node)
+        if prewarm:
+            executable.prewarm()
+        compiled = _CompiledNativeGraphNode(executable)
+        action = compiled.recordable_action
+        if action is None:
+            raise TaichiRuntimeError(
+                "Structured Graph Sequential.append_native requires a "
+                "recordable provider action"
+            )
+        if compiled.temporary_names:
+            raise TaichiRuntimeError(
+                "Recordable actions with Graph temporary requirements cannot "
+                "be embedded in a Sequential region"
+            )
+        backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
+        if not action.supports_backend(backend):
+            raise TaichiRuntimeError(
+                f"Recordable action does not support the active {backend} backend"
+            )
+        dispatches = tuple(action.dispatches)
+        if not dispatches:
+            raise TaichiRuntimeError(
+                "Recordable action must provide at least one dispatch"
+            )
+        for name, value in compiled.fixed_runtime_args.items():
+            existing = self._fixed_runtime_args.get(name)
+            if existing is not None and existing is not value:
+                if not (
+                    isinstance(existing, (int, float))
+                    and isinstance(value, (int, float))
+                    and existing == value
+                ):
+                    raise TaichiRuntimeError(
+                        "Sequential recordable actions provide conflicting "
+                        f"fixed binding {name!r}"
+                    )
+            self._fixed_runtime_args[name] = value
+        self._items.append(("native", compiled))
+        self._ir_nodes.append(compiled.ir_node)
+        self._runtime_arg_names.update(compiled.runtime_arg_names)
+        self._recording_runtime_arg_names.update(compiled.recording_runtime_arg_names)
+        self._lifetime_leases.extend(compiled.lifetime_leases)
+        self._source_native_count += compiled.source_native_count
+        self._dispatch_count += len(dispatches)
+        return self
+
+    def _dispatch_to(self, builder, *, region_kind="sequential"):
+        backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
+        recording_dispatches = []
+        for item in self._items:
+            if item[0] == "dispatch":
+                _, kernel_cpp, args = item
+                dispatches = ((kernel_cpp, tuple(args)),)
+            else:
+                _, node = item
+                action = node.recordable_action
+                if not action.supports_backend(backend):
+                    raise TaichiRuntimeError(
+                        f"Recordable action does not support the active {backend} backend"
+                    )
+                if not action.supports_region(region_kind):
+                    raise TaichiRuntimeError(
+                        "Recordable action is not qualified for Graph region "
+                        f"{region_kind!r}"
+                    )
+                dispatches = tuple(action.dispatches)
+            for kernel_cpp, args in dispatches:
+                builder.dispatch(kernel_cpp, args)
+                recording_dispatches.append((kernel_cpp, tuple(args)))
+        return tuple(recording_dispatches)
 
 
 class GraphBuilder:
@@ -2898,6 +3218,14 @@ class GraphBuilder:
     def append(self, node):
         # TODO: support appending dispatch node as well.
         assert isinstance(node, Sequential)
+        if node._source_native_count:
+            self._flush_graph_builder()
+            self._nodes.append(
+                _compile_sequential_runtime_node(
+                    (node,), name="sequential", region_kind="sequential"
+                )
+            )
+            return self
         self._aot_graph_plan.append(node)
         node._dispatch_to(self._runtime_graph_builder)
         self._runtime_graph_dispatches.extend(
@@ -2906,6 +3234,7 @@ class GraphBuilder:
         self._runtime_graph_arg_names.update(node._runtime_arg_names)
         self._dispatch_count += node._dispatch_count
         self._pending_ir_nodes.extend(node._ir_nodes)
+        return self
 
     def _ensure_runtime_graph_builder(self):
         return self._runtime_graph_builder
@@ -3390,6 +3719,7 @@ class Graph:
                 "This graph was compiled before ti.reset() or a runtime "
                 "reinitialization. Please rebuild the graph after ti.init()."
             )
+        self._spec.validate_lifetime_leases()
         if self._stale_snode_tree_dependencies:
             dependencies = ", ".join(
                 f"id={tree_id} generation={generation}"

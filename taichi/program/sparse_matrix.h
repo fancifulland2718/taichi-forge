@@ -32,6 +32,7 @@ class LaunchContextBuilder;
 class OperatorBinding;
 class OperatorPinnedAction;
 class OperatorResourceGenerationPublisher;
+class LinearOperatorRecordableKernel;
 enum class OperatorExecutionKind : std::uint8_t;
 struct OperatorResourceStamp;
 namespace aot {
@@ -370,6 +371,7 @@ class CompiledKernelLinearOperator final : public SparseMatrix {
   OperatorBinding make_operator_binding();
   OperatorPinnedAction pin_operator_generation() const;
   OperatorResourceStamp current_operator_resource_stamp() const;
+  std::shared_ptr<LinearOperatorRecordableKernel> recordable_kernel() const;
 
   Program *owning_program() const {
     return program_;
@@ -398,6 +400,7 @@ class CompiledKernelLinearOperator final : public SparseMatrix {
   Kernel *kernel_{nullptr};
   const CompiledKernelData *compiled_kernel_{nullptr};
   std::shared_ptr<TopologyState> topology_state_;
+  std::shared_ptr<ResourceGeneration> current_resource_generation_;
   std::unique_ptr<OperatorResourceGenerationPublisher>
       resource_generations_;
   DataType numeric_data_type_{PrimitiveType::unknown};

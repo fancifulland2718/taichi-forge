@@ -152,6 +152,34 @@ struct OperatorResourceStamp {
   std::uint64_t binding_revision{1};
 };
 
+class LinearOperatorRecordableKernel {
+ public:
+  LinearOperatorRecordableKernel(
+      Program *program,
+      Kernel *kernel,
+      std::int32_t active_size,
+      Ndarray *topology,
+      Ndarray *numeric,
+      OperatorResourceStamp stamp,
+      std::shared_ptr<void> generation_owner);
+
+  Program *program() const;
+  Kernel *kernel() const;
+  std::int32_t active_size() const;
+  Ndarray *topology() const;
+  Ndarray *numeric() const;
+  OperatorResourceStamp resource_stamp() const;
+
+ private:
+  Program *program_{nullptr};
+  Kernel *kernel_{nullptr};
+  std::int32_t active_size_{0};
+  Ndarray *topology_{nullptr};
+  Ndarray *numeric_{nullptr};
+  OperatorResourceStamp stamp_;
+  std::shared_ptr<void> generation_owner_;
+};
+
 enum class OperatorResourceDependency : std::uint32_t {
   program = 1u << 0,
   schema = 1u << 1,
@@ -526,11 +554,14 @@ class LinearOperatorHandle {
       const NumericUpdateArguments &,
       std::uint64_t,
       std::uint64_t)>;
+  using RecordableKernelFn = std::function<
+      std::shared_ptr<LinearOperatorRecordableKernel>(OperatorApplyMode)>;
 
   LinearOperatorHandle(Program *program,
-                                   OperatorBinding binding,
-                                   std::shared_ptr<void> provider_owner = {},
-                                   NumericUpdateFn numeric_update = {});
+                       OperatorBinding binding,
+                       std::shared_ptr<void> provider_owner = {},
+                       NumericUpdateFn numeric_update = {},
+                       RecordableKernelFn recordable_kernel = {});
   LinearOperatorHandle(
       const LinearOperatorHandle &) = delete;
   LinearOperatorHandle &operator=(
@@ -567,11 +598,15 @@ class LinearOperatorHandle {
                       std::uint64_t expected_topology_version,
                       std::uint64_t expected_numeric_version);
   bool supports_numeric_update() const;
+  std::shared_ptr<LinearOperatorRecordableKernel> recordable_kernel(
+      OperatorApplyMode mode);
+  bool supports_recordable_kernel() const;
 
  private:
   Program *program_{nullptr};
   std::shared_ptr<void> provider_owner_;
   NumericUpdateFn numeric_update_;
+  RecordableKernelFn recordable_kernel_;
   OperatorBinding binding_;
   std::unique_ptr<OperatorPlan> plan_;
 };

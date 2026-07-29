@@ -2204,14 +2204,61 @@ OperatorBinding make_vulkan_program_graph_operator_binding(
       OperatorExecutionKind::compiled_graph);
 }
 
+LinearOperatorRecordableKernel::LinearOperatorRecordableKernel(
+    Program *program,
+    Kernel *kernel,
+    std::int32_t active_size,
+    Ndarray *topology,
+    Ndarray *numeric,
+    OperatorResourceStamp stamp,
+    std::shared_ptr<void> generation_owner)
+    : program_(program),
+      kernel_(kernel),
+      active_size_(active_size),
+      topology_(topology),
+      numeric_(numeric),
+      stamp_(stamp),
+      generation_owner_(std::move(generation_owner)) {
+  TI_ERROR_IF(!program_ || !kernel_ || active_size_ <= 0 || !topology_ ||
+                  !generation_owner_,
+              "Recordable LinearOperator kernels require a live Program, "
+              "kernel, positive active size, topology, and generation.");
+}
+
+Program *LinearOperatorRecordableKernel::program() const {
+  return program_;
+}
+
+Kernel *LinearOperatorRecordableKernel::kernel() const {
+  return kernel_;
+}
+
+std::int32_t LinearOperatorRecordableKernel::active_size() const {
+  return active_size_;
+}
+
+Ndarray *LinearOperatorRecordableKernel::topology() const {
+  return topology_;
+}
+
+Ndarray *LinearOperatorRecordableKernel::numeric() const {
+  return numeric_;
+}
+
+OperatorResourceStamp LinearOperatorRecordableKernel::resource_stamp() const {
+  return stamp_;
+}
+
 LinearOperatorHandle::LinearOperatorHandle(
     Program *program,
     OperatorBinding binding,
     std::shared_ptr<void> provider_owner,
-    NumericUpdateFn numeric_update)
+    NumericUpdateFn numeric_update,
+    RecordableKernelFn recordable_kernel)
     : program_(program),
       provider_owner_(std::move(provider_owner)),
       numeric_update_(std::move(numeric_update)),
+      recordable_kernel_(std::move(recordable_kernel)),
       binding_(std::move(binding)),
       plan_(std::make_unique<OperatorPlan>(program_, binding_)) {
   TI_ERROR_IF(!program_,
@@ -2376,6 +2423,17 @@ void LinearOperatorHandle::update_numeric(
 
 bool LinearOperatorHandle::supports_numeric_update() const {
   return static_cast<bool>(numeric_update_);
+}
+
+std::shared_ptr<LinearOperatorRecordableKernel>
+LinearOperatorHandle::recordable_kernel(OperatorApplyMode mode) {
+  TI_ERROR_IF(!recordable_kernel_,
+              "LinearOperator provider does not expose a recordable kernel.");
+  return recordable_kernel_(mode);
+}
+
+bool LinearOperatorHandle::supports_recordable_kernel() const {
+  return static_cast<bool>(recordable_kernel_);
 }
 
 LinearOperatorSession::LinearOperatorSession(
@@ -2981,17 +3039,18 @@ struct CompiledKernelActionGeneration {
       Ndarray *numeric_data,
       std::size_t input_arg_index,
       std::size_t output_arg_index)
-      : program(program), numeric_data(numeric_data) {
+      : program(program),
+        topology(std::move(topology)),
+        numeric_data(numeric_data) {
     forward = std::make_unique<CompiledKernelActionLaunch>(
         program, forward_kernel, forward_compiled,
-        static_cast<int>(descriptor.range.scalar_extent), topology,
+        static_cast<int>(descriptor.range.scalar_extent), this->topology,
         numeric_data, input_arg_index, output_arg_index);
     if (adjoint_kernel) {
       adjoint = std::make_unique<CompiledKernelActionLaunch>(
           program, adjoint_kernel, adjoint_compiled,
-          static_cast<int>(descriptor.domain.scalar_extent),
-          std::move(topology), numeric_data, input_arg_index,
-          output_arg_index);
+          static_cast<int>(descriptor.domain.scalar_extent), this->topology,
+          numeric_data, input_arg_index, output_arg_index);
     }
   }
 
@@ -3017,7 +3076,9 @@ struct CompiledKernelActionGeneration {
   }
 
   Program *program{nullptr};
+  std::shared_ptr<CompiledKernelActionTopology> topology;
   Ndarray *numeric_data{nullptr};
+  OperatorResourceStamp stamp;
   std::unique_ptr<CompiledKernelActionLaunch> forward;
   std::unique_ptr<CompiledKernelActionLaunch> adjoint;
 };
@@ -3139,6 +3200,25 @@ class CompiledKernelActionProvider {
         [this] { return generations_->acquire(); });
   }
 
+  std::shared_ptr<LinearOperatorRecordableKernel> recordable_kernel(
+      OperatorApplyMode mode) {
+    std::lock_guard<std::mutex> lock(update_mutex_);
+    TI_ERROR_IF(!current_generation_,
+                "Compiled-kernel action has no published generation.");
+    Kernel *kernel = mode == OperatorApplyMode::forward ? forward_kernel_
+                                                        : adjoint_kernel_;
+    TI_ERROR_IF(!kernel,
+                "Compiled-kernel action has no explicit adjoint provider.");
+    const auto extent = mode == OperatorApplyMode::forward
+                            ? descriptor_.range.scalar_extent
+                            : descriptor_.domain.scalar_extent;
+    return std::make_shared<LinearOperatorRecordableKernel>(
+        program_, kernel, static_cast<std::int32_t>(extent),
+        current_generation_->topology->data,
+        current_generation_->numeric_data, current_generation_->stamp,
+        current_generation_);
+  }
+
   void update_numeric(
       Program *program,
       const LinearOperatorHandle::NumericUpdateArguments
@@ -3254,6 +3334,8 @@ class CompiledKernelActionProvider {
         reinterpret_cast<std::uintptr_t>(program_),
         program_->runtime_program_generation(), 1, topology_version_,
         numeric_version, binding_revision};
+    generation->stamp = stamp;
+    current_generation_ = generation;
     const auto capabilities = make_capabilities();
     auto action = OperatorAction(
         descriptor_, capabilities, "forge_compiled_kernel_action",
@@ -3273,6 +3355,7 @@ class CompiledKernelActionProvider {
   const CompiledKernelData *adjoint_compiled_{nullptr};
   OperatorDescriptor descriptor_;
   std::shared_ptr<CompiledKernelActionTopology> topology_;
+  std::shared_ptr<CompiledKernelActionGeneration> current_generation_;
   std::unique_ptr<OperatorResourceGenerationPublisher> generations_;
   DataType numeric_type_{PrimitiveType::unknown};
   std::vector<int> numeric_shape_;
@@ -3321,8 +3404,13 @@ make_compiled_kernel_operator_handle(
                                expected_numeric_version);
     };
   }
+  LinearOperatorHandle::RecordableKernelFn recordable =
+      [provider](OperatorApplyMode mode) {
+        return provider->recordable_kernel(mode);
+      };
   return std::make_unique<LinearOperatorHandle>(
-      program, std::move(binding), provider, std::move(update));
+      program, std::move(binding), provider, std::move(update),
+      std::move(recordable));
 }
 
 namespace {
@@ -3969,8 +4057,19 @@ make_linear_operator_handle(
   auto binding = make_program_sparse_operator_binding(program, matrix)
                      .with_mathematical_traits(
                          std::move(mathematical_traits));
+  LinearOperatorHandle::RecordableKernelFn recordable;
+  if (auto *compiled =
+          dynamic_cast<CompiledKernelLinearOperator *>(&matrix)) {
+    recordable = [compiled](OperatorApplyMode mode) {
+      TI_ERROR_IF(mode != OperatorApplyMode::forward,
+                  "Square compiled-kernel operators do not expose an "
+                  "implicit adjoint recordable action.");
+      return compiled->recordable_kernel();
+    };
+  }
   return std::make_unique<LinearOperatorHandle>(
-      program, std::move(binding));
+      program, std::move(binding), std::shared_ptr<void>{},
+      LinearOperatorHandle::NumericUpdateFn{}, std::move(recordable));
 }
 
 std::unique_ptr<LinearOperatorHandle>

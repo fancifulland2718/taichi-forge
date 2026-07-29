@@ -5577,6 +5577,28 @@ void export_lang(py::module &m) {
              return result;
            });
 
+  py::class_<LinearOperatorRecordableKernel,
+             std::shared_ptr<LinearOperatorRecordableKernel>>(
+      m, "LinearOperatorRecordableKernel")
+      .def_property_readonly(
+          "_kernel", &LinearOperatorRecordableKernel::kernel,
+          py::return_value_policy::reference_internal)
+      .def_property_readonly(
+          "_topology", &LinearOperatorRecordableKernel::topology,
+          py::return_value_policy::reference_internal)
+      .def_property_readonly(
+          "_numeric", &LinearOperatorRecordableKernel::numeric,
+          py::return_value_policy::reference_internal)
+      .def_property_readonly(
+          "active_size", &LinearOperatorRecordableKernel::active_size)
+      .def("_resource_stamp", [](const LinearOperatorRecordableKernel &record) {
+        const auto stamp = record.resource_stamp();
+        return py::make_tuple(
+            stamp.program_identity, stamp.program_generation,
+            stamp.schema_revision, stamp.topology_revision,
+            stamp.numeric_revision, stamp.binding_revision);
+      });
+
   py::class_<LinearOperatorHandle>(
       m, "LinearOperatorHandle")
       .def("_apply", &LinearOperatorHandle::apply,
@@ -5623,6 +5645,23 @@ void export_lang(py::module &m) {
           py::arg("expected_numeric_version"))
       .def("_supports_numeric_update",
            &LinearOperatorHandle::supports_numeric_update)
+      .def("_supports_recordable_kernel",
+           &LinearOperatorHandle::supports_recordable_kernel)
+      .def(
+          "_recordable_kernel",
+          [](LinearOperatorHandle &handle, bool adjoint) {
+            return handle.recordable_kernel(
+                adjoint ? OperatorApplyMode::adjoint
+                        : OperatorApplyMode::forward);
+          },
+          py::arg("adjoint") = false)
+      .def("_resource_stamp", [](const LinearOperatorHandle &handle) {
+        const auto stamp = handle.resource_stamp();
+        return py::make_tuple(
+            stamp.program_identity, stamp.program_generation,
+            stamp.schema_revision, stamp.topology_revision,
+            stamp.numeric_revision, stamp.binding_revision);
+      })
       .def("_begin_session",
            &LinearOperatorHandle::begin_session,
            py::keep_alive<0, 1>())

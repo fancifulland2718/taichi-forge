@@ -19,6 +19,17 @@ from typing import Mapping, Optional, Sequence
 import numpy as np
 
 from taichi_forge._lib import core as _ti_core
+from taichi_forge.graph._ir import (
+    GraphAccess,
+    ResourceEffect,
+    RuntimeBinding,
+)
+from taichi_forge.graph._native import (
+    DispatchGraphAction,
+    NativeGraphExecutable,
+    NativeGraphNode,
+    ProviderOwnedNdarrayBinding,
+)
 from taichi_forge.lang._ndarray import ScalarNdarray
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang.impl import get_runtime
@@ -26,6 +37,7 @@ from taichi_forge.lang._storage_view import (
     DenseNdarrayView,
     _flatten_storage_to_scalar_vector,
     analyze_storage_alias,
+    describe_storage,
 )
 from taichi_forge.linalg._vector_io import (
     VectorView,
@@ -34,7 +46,7 @@ from taichi_forge.linalg._vector_io import (
     vector_view,
 )
 from taichi_forge.linalg.sparse_matrix import SparseMatrix
-from taichi_forge.types import f32, f64
+from taichi_forge.types import f32, f64, i32
 
 
 @dataclass(frozen=True)
@@ -1137,6 +1149,28 @@ class LinearOperator:
             "numeric update is not defined for composed operators"
         )
 
+    def graph_action(self, input, output, *, adjoint=False):
+        """Return a recordable f32 Graph action for this operator apply.
+
+        ``input`` and ``output`` are symbolic one-dimensional ndarray Graph
+        arguments. The resulting provider action may be appended directly to
+        a :class:`ti.graph.GraphBuilder` or embedded in a structured
+        ``Sequential`` region. Provider topology/numeric snapshots remain
+        owned by the operator; no second device allocation or copy is made.
+        A numeric generation update invalidates already compiled Graphs and
+        requires rebuilding them.
+        """
+        self._ensure_valid()
+        if not isinstance(adjoint, bool):
+            raise TypeError("adjoint must be bool")
+        if self.dtype != f32:
+            raise TaichiRuntimeError("LinearOperator Graph actions currently require f32")
+        if not self._handle._supports_recordable_kernel():
+            raise TaichiRuntimeError("LinearOperator provider does not expose a recordable " "kernel action")
+        if adjoint and not self.capabilities.adjoint_apply:
+            raise TaichiRuntimeError("LinearOperator provider does not expose an adjoint action")
+        return _LinearOperatorGraphNode(self, input, output, adjoint)
+
     def statistics(self):
         """Returns native execution counters for this operator plan."""
         self._ensure_valid()
@@ -1148,6 +1182,171 @@ class LinearOperator:
         """Returns supported operand storage and conversion modes."""
         self._ensure_valid()
         return _readonly_copy(_vector_io_capabilities())
+
+
+class _LinearOperatorGraphExecutable(NativeGraphExecutable):
+    def __init__(self, operator, input_arg, output_arg, adjoint):
+        from taichi_forge.graph._graph import Arg, ArgKind
+
+        for value, role in ((input_arg, "input"), (output_arg, "output")):
+            if (
+                getattr(value, "tag", None) != ArgKind.NDARRAY
+                or value.dtype() != f32
+                or int(value.field_dim) != 1
+                or tuple(value.element_shape) != ()
+            ):
+                raise TaichiRuntimeError(f"LinearOperator Graph {role} must be a symbolic scalar " "f32 1-D ndarray")
+        if input_arg.name == output_arg.name:
+            raise TaichiRuntimeError("LinearOperator Graph input and output must use distinct " "symbolic resources")
+        self._operator = operator
+        self._input_name = input_arg.name
+        self._output_name = output_arg.name
+        self._adjoint = adjoint
+        self._record = operator._handle._recordable_kernel(adjoint)
+        self._expected_stamp = tuple(self._record._resource_stamp())
+        prefix = f"__linear_operator_{id(self._record):x}"
+        active_name = f"{prefix}_active_size"
+        topology_name = f"{prefix}_topology"
+        numeric_name = f"{prefix}_numeric"
+        topology = self._record._topology
+        fixed = {
+            active_name: int(self._record.active_size),
+            topology_name: ProviderOwnedNdarrayBinding(topology, self._record),
+        }
+        symbols = [
+            Arg(ArgKind.SCALAR, active_name, i32),
+            Arg(
+                ArgKind.NDARRAY,
+                topology_name,
+                topology.element_data_type(),
+                ndim=len(tuple(topology.shape)),
+            ),
+        ]
+        numeric = self._record._numeric
+        if numeric is not None:
+            fixed[numeric_name] = ProviderOwnedNdarrayBinding(numeric, self._record)
+            symbols.append(
+                Arg(
+                    ArgKind.NDARRAY,
+                    numeric_name,
+                    numeric.element_data_type(),
+                    ndim=len(tuple(numeric.shape)),
+                )
+            )
+        symbols.extend((input_arg, output_arg))
+        self._action = DispatchGraphAction(
+            ((self._record._kernel, tuple(symbols)),),
+            backends=("cpu", "cuda", "vulkan"),
+            conditional_body_safe=True,
+            fixed_bindings=fixed,
+            update_policy="rebuild",
+            synchronization_domain="runtime_ordered",
+        )
+        self._runtime_arg_schema = (
+            RuntimeBinding(self._input_name, "dense_vector"),
+            RuntimeBinding(self._output_name, "dense_vector"),
+        )
+        self._resource_effects = (
+            ResourceEffect(self._input_name, GraphAccess.READ),
+            ResourceEffect(self._output_name, GraphAccess.WRITE),
+        )
+        self._fallback_operator = operator.adjoint() if adjoint else operator
+        self._graph_binding_views = {}
+
+    def run(self, runtime_args):
+        self._fallback_operator.apply(
+            runtime_args[self._input_name],
+            out=runtime_args[self._output_name],
+        )
+
+    @property
+    def runtime_arg_schema(self):
+        return self._runtime_arg_schema
+
+    @property
+    def resource_effects(self):
+        return self._resource_effects
+
+    @property
+    def recordable_action(self):
+        return self._action
+
+    @property
+    def debug_info(self):
+        return {
+            "kind": "linear_operator_apply",
+            "provider": self._operator.provider,
+            "adjoint": self._adjoint,
+            "update_policy": "rebuild",
+        }
+
+    def validate_graph_lifetime(self):
+        self._operator._ensure_valid()
+        current = tuple(self._operator._handle._resource_stamp())
+        if current != self._expected_stamp:
+            raise TaichiRuntimeError("LinearOperator provider generation changed; rebuild the Graph")
+
+    def bind_graph_arguments(self, runtime_args):
+        replacements = {}
+        for name in (self._input_name, self._output_name):
+            value = runtime_args[name]
+            if isinstance(value, ScalarNdarray):
+                continue
+            description = _flatten_storage_to_scalar_vector(describe_storage(value))
+            descriptor = description.descriptor
+            if descriptor is None:
+                continue
+            fingerprint = int(descriptor.fingerprint)
+            cached = self._graph_binding_views.get(name)
+            if cached is None or cached[0] != fingerprint:
+                cached = (
+                    fingerprint,
+                    DenseNdarrayView(value, description),
+                )
+                self._graph_binding_views[name] = cached
+            replacements[name] = cached[1]
+        return replacements
+
+    def validate_graph_bindings(self, runtime_args):
+        expected = (
+            (self._input_name, self._operator.shape[0 if self._adjoint else 1]),
+            (self._output_name, self._operator.shape[1 if self._adjoint else 0]),
+        )
+        descriptions = []
+        for name, extent in expected:
+            value = runtime_args[name]
+            description = _flatten_storage_to_scalar_vector(describe_storage(value))
+            descriptor = description.descriptor
+            if (
+                descriptor is None
+                or descriptor.scalar_type != f32
+                or tuple(descriptor.index_shape) != (int(extent),)
+                or tuple(descriptor.element_shape)
+            ):
+                raise TaichiRuntimeError(
+                    f"LinearOperator Graph argument {name!r} must expose "
+                    f"exactly {extent} scalar f32 values without staging"
+                )
+            descriptions.append(description)
+        alias = analyze_storage_alias(*descriptions)
+        if alias != "kProvenDisjoint":
+            raise TaichiRuntimeError("LinearOperator Graph input and output must be proven " f"disjoint ({alias})")
+
+
+class _LinearOperatorGraphNode(NativeGraphNode):
+    def __init__(self, operator, input_arg, output_arg, adjoint):
+        self._operator = operator
+        self._input_arg = input_arg
+        self._output_arg = output_arg
+        self._adjoint = adjoint
+
+    def compile(self):
+        return _LinearOperatorGraphExecutable(
+            self._operator,
+            self._input_arg,
+            self._output_arg,
+            self._adjoint,
+        )
 
 
 def vector_io_capabilities():

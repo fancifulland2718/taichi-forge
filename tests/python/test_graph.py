@@ -32,7 +32,7 @@ from taichi_forge.graph._ir import (
     plan_temporary_memory,
 )
 from taichi_forge.graph._native import (
-    DispatchNativeGraphRecorder,
+    DispatchGraphAction,
     NativeGraphExecutable,
     NativeGraphNode,
 )
@@ -1201,10 +1201,22 @@ def test_temporary_memory_plan_reuses_only_nonoverlapping_intervals():
 
 
 class _RecordedDispatchExecutable(NativeGraphExecutable):
-    def __init__(self, kernel, args, tracker, lease):
-        self._recorder = DispatchNativeGraphRecorder(((kernel, args),))
+    def __init__(self, kernel, args, tracker, lease, fixed_bindings=None):
+        self._action = DispatchGraphAction(
+            ((kernel, args),), fixed_bindings=fixed_bindings
+        )
         self._tracker = tracker
         self._lease = lease
+        fixed_names = frozenset((fixed_bindings or {}).keys())
+        runtime_names = tuple(
+            dict.fromkeys(arg.name for arg in args if arg.name not in fixed_names)
+        )
+        self._runtime_arg_schema = tuple(
+            RuntimeBinding(name, "ndarray") for name in runtime_names
+        )
+        self._resource_effects = tuple(
+            ResourceEffect(name, GraphAccess.READ_WRITE) for name in runtime_names
+        )
 
     def run(self, runtime_args):
         self._tracker["fallback_runs"] += 1
@@ -1212,19 +1224,19 @@ class _RecordedDispatchExecutable(NativeGraphExecutable):
 
     @property
     def runtime_arg_schema(self):
-        return (RuntimeBinding("values", "ndarray"),)
+        return self._runtime_arg_schema
 
     @property
     def resource_effects(self):
-        return (ResourceEffect("values", GraphAccess.READ_WRITE),)
+        return self._resource_effects
 
     @property
     def lifetime_leases(self):
         return (self._lease,)
 
     @property
-    def backend_recorder(self):
-        return self._recorder
+    def recordable_action(self):
+        return self._action
 
     @property
     def debug_info(self):
@@ -1232,11 +1244,12 @@ class _RecordedDispatchExecutable(NativeGraphExecutable):
 
 
 class _RecordedDispatchNode(NativeGraphNode):
-    def __init__(self, kernel, args, tracker, lease):
+    def __init__(self, kernel, args, tracker, lease, fixed_bindings=None):
         self._kernel = kernel
         self._args = tuple(args)
         self._tracker = tracker
         self._lease = lease
+        self._fixed_bindings = fixed_bindings
 
     def compile(self):
         return _RecordedDispatchExecutable(
@@ -1244,7 +1257,21 @@ class _RecordedDispatchNode(NativeGraphNode):
             self._args,
             self._tracker,
             self._lease,
+            self._fixed_bindings,
         )
+
+
+class _ValidatingLease:
+    def __init__(self):
+        self.valid = True
+        self.validations = 0
+
+    def validate_graph_lifetime(self):
+        self.validations += 1
+        if not self.valid:
+            raise TaichiRuntimeError(
+                "recordable provider generation changed; rebuild the Graph"
+            )
 
 
 class _OpaqueExecutable(NativeGraphExecutable):
@@ -1664,9 +1691,12 @@ def test_mixed_recordable_native_node_lowers_to_one_backend_region():
             values[i] += 1
 
     @ti.kernel
-    def add_two(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+    def add_fixed(
+        values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        offset: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
         for i in values:
-            values[i] += 2
+            values[i] += offset[None]
 
     @ti.kernel
     def add_three(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):
@@ -1674,11 +1704,27 @@ def test_mixed_recordable_native_node_lowers_to_one_backend_region():
             values[i] += 3
 
     sym_values = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1)
+    sym_offset = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY,
+        "__recordable_test_offset",
+        ti.i32,
+        ndim=0,
+    )
+    fixed_offset = ti.ndarray(ti.i32, shape=())
+    fixed_offset.fill(2)
     tracker = {"fallback_runs": 0}
     lease = object()
     builder = ti.graph.GraphBuilder()
     builder.dispatch(add_one, sym_values)
-    builder.append_native(_RecordedDispatchNode(add_two, (sym_values,), tracker, lease))
+    builder.append_native(
+        _RecordedDispatchNode(
+            add_fixed,
+            (sym_values, sym_offset),
+            tracker,
+            lease,
+            fixed_bindings={sym_offset.name: fixed_offset},
+        )
+    )
     builder.dispatch(add_three, sym_values)
     graph = builder.compile()
 
@@ -1731,6 +1777,80 @@ def test_mixed_recordable_native_node_lowers_to_one_backend_region():
         assert report.backend_graph_segments == 1
     with pytest.raises(TaichiRuntimeError, match="cannot be serialized"):
         _ = graph._compiled_graph
+
+
+@test_utils.test(arch=ti.cpu)
+def test_recordable_provider_runs_inside_structured_while_and_fails_stale():
+    @ti.kernel
+    def evaluate_condition(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        target: ti.i32,
+    ):
+        predicate[None] = int(state[None] < target)
+
+    @ti.kernel
+    def provider_step(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        if predicate[None] != 0:
+            state[None] += 1
+            counter[None] += 1
+
+    arg_state = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "state", ti.i32, ndim=0)
+    arg_predicate = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "predicate", ti.i32, ndim=0)
+    arg_counter = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "counter", ti.i32, ndim=0)
+    arg_target = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "target", ti.i32)
+    tracker = {"fallback_runs": 0}
+    lease = _ValidatingLease()
+    builder = ti.graph.GraphBuilder()
+    condition = builder.create_sequential()
+    condition.dispatch(evaluate_condition, arg_state, arg_predicate, arg_target)
+    body = builder.create_sequential()
+    body.append_native(
+        _RecordedDispatchNode(
+            provider_step,
+            (arg_state, arg_predicate, arg_counter),
+            tracker,
+            lease,
+        )
+    )
+    builder.while_loop(
+        condition,
+        body,
+        predicate=arg_predicate,
+        control_inputs=(arg_state, arg_target),
+        carried_state=(arg_state,),
+        counter=arg_counter,
+        max_iterations=8,
+        name="provider_iteration",
+    )
+    graph = builder.compile()
+    state = ti.ndarray(ti.i32, shape=())
+    predicate = ti.ndarray(ti.i32, shape=())
+    counter = ti.ndarray(ti.i32, shape=())
+    state.fill(0)
+    predicate.fill(0)
+    counter.fill(0)
+    args = {
+        "state": state,
+        "predicate": predicate,
+        "counter": counter,
+        "target": 4,
+    }
+    graph.run(args)
+    assert state.to_numpy()[()] == 4
+    assert counter.to_numpy()[()] == 4
+    assert tracker["fallback_runs"] == 0
+    assert lease.validations == 1
+    assert graph._debug_info["native_count"] == 1
+
+    lease.valid = False
+    with pytest.raises(TaichiRuntimeError, match="generation changed"):
+        graph.run(args)
+    assert state.to_numpy()[()] == 4
 
 
 @test_utils.test(arch=ti.cpu)
