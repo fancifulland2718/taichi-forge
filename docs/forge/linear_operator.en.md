@@ -696,12 +696,18 @@ plan = ti.linalg.experimental.SolvePlan(
 )
 ```
 
-- CPU supports `"host_each_iteration"` only.
-- CUDA defaults to `"host_each_iteration"` for CG/PCG/MINRES/BiCGSTAB and
-  also supports `"host_check_every_k"` with `check_interval=4` or `8`.
-  The chunked policy keeps recurrence scalars on the device and reads one
-  terminal snapshot per chunk. CUDA GMRES/FGMRES instead default to
-  `"host_check_every_k"` and require `check_interval == restart`.
+- CPU defaults to `"host_each_iteration"`. Stored f32 CG/PCG also accepts
+  explicit `"bounded_convergent"`, which preserves the same native loop.
+- CUDA fixed stored f32 CSR/BSR CG/PCG defaults to
+  `"bounded_convergent"`. In `bounded_mode="auto"`, a qualified runtime uses
+  an exact device-side CUDA conditional Graph; an unavailable native path
+  falls back to reusable Graph chunks with host checks. Explicit
+  `"host_each_iteration"` remains available as an opt-out.
+- Other CUDA CG/PCG providers and CUDA MINRES/BiCGSTAB default to
+  `"host_each_iteration"`; they also support `"host_check_every_k"` with
+  `check_interval=4` or `8`. That policy keeps recurrence scalars on the
+  device and reads one terminal snapshot per chunk. CUDA GMRES/FGMRES default
+  to `"host_check_every_k"` and require `check_interval == restart`.
 - Vulkan defaults to `"fixed_budget_masked"` and also supports
   `"host_check_every_k"`. CG/PCG/MINRES/BiCGSTAB accept intervals 4 or 8;
   GMRES/FGMRES require `check_interval == restart`. Both policies support `atol`,
@@ -719,6 +725,14 @@ does not re-record an identity-preconditioned GMRES sequence; supported
 preconditioner refreshes retain the existing CG/PCG/MINRES sequence.
 Replacing the output ndarray, changing topology or schema, or recreating the
 runtime invalidates and safely rebuilds it.
+
+For qualified CUDA stored CG/PCG, the conditional Graph owns the complete
+recurrence loop and evaluates convergence on the device after every logical
+iteration. A solve retains one initial and one terminal state observation but
+does not perform an iteration-by-iteration host scalar reduction or implicit
+synchronization. The Graph terminates at the exact logical iteration, so this
+path has no masked tail work, and a persistent plan replays the cached
+executable while its topology, workspace, and output binding remain stable.
 
 FGMRES action tables use direct native submission on both GPU backends. No
 identity-GMRES replay path is silently reused for a variable action schedule.
@@ -751,10 +765,15 @@ count, driver, and backend. Unsupported policies and intervals fail during
 plan construction; they do not silently fall back.
 
 `plan.execution_capabilities()` reports the policy matrix and a structured
-reason for unavailable conditional execution. `"device_convergent"` is not a
-supported policy on the current CPU, CUDA, or Vulkan solver paths. An explicit
-request fails without changing to host checks or fixed-budget execution, and
-backend availability never changes a plan's default policy automatically.
+reason for unavailable conditional execution, together with the selected
+`default_execution_policy`. Direct `"device_convergent"` execution is qualified
+only for single-system stored f32 CSR/BSR CG/PCG on CUDA when the driver,
+conditional-Graph entry points, device setter, provider capture, and cuBLAS
+workspace requirements are all satisfied. An explicit direct request fails
+without fallback. The default `"bounded_convergent"` policy instead attempts
+that native path automatically and uses its documented chunked fallback when
+necessary. Compiled-kernel, compiled Graph, batched, CPU, and Vulkan providers
+do not claim CUDA conditional-Graph execution.
 
 ## Independent batched CG and PCG
 

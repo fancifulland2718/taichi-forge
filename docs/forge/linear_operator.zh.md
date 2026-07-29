@@ -613,11 +613,17 @@ plan = ti.linalg.experimental.SolvePlan(
 )
 ```
 
-- CPU 只支持 `"host_each_iteration"`。
-- CUDA 对 CG/PCG/MINRES/BiCGSTAB 默认使用 `"host_each_iteration"`，还支持
-  `"host_check_every_k"`，其中 `check_interval` 可为 4 或 8。分块策略把 recurrence
-  scalar 保留在 device 上，每个 chunk 只读取一次 terminal snapshot。CUDA GMRES/FGMRES
-  默认使用 `"host_check_every_k"`，并要求 `check_interval == restart`。
+- CPU 默认使用 `"host_each_iteration"`；stored f32 CG/PCG 也接受显式
+  `"bounded_convergent"`，其内部仍保持同一原生循环。
+- CUDA fixed stored f32 CSR/BSR CG/PCG 默认使用 `"bounded_convergent"`。
+  `bounded_mode="auto"` 会在资格满足时选用 device 侧精确终止的 CUDA conditional
+  Graph；原生路径不可用时改用带 host check 的可复用 Graph chunk。显式
+  `"host_each_iteration"` 仍作为关闭自动路径的选项。
+- 其它 CUDA CG/PCG provider 以及 CUDA MINRES/BiCGSTAB 默认使用
+  `"host_each_iteration"`，并支持 `"host_check_every_k"`，其中 `check_interval` 可为
+  4 或 8。分块策略把 recurrence scalar 保留在 device 上，每个 chunk 只读取一次
+  terminal snapshot。CUDA GMRES/FGMRES 默认使用 `"host_check_every_k"`，并要求
+  `check_interval == restart`。
 - Vulkan 默认使用 `"fixed_budget_masked"`，还支持
   `"host_check_every_k"`。CG/PCG/MINRES/BiCGSTAB 接受 interval 4 或 8；
   GMRES/FGMRES 要求 `check_interval == restart`。两种策略均支持 `atol`、`rtol`
@@ -633,6 +639,12 @@ topology、workspace 与 output binding 的后续执行直接 replay。仅更新
 不会重录 identity-preconditioned GMRES 序列；受支持的 preconditioner refresh 会保留
 现有 CG/PCG/MINRES 序列。更换 output ndarray、改变 topology/schema 或重建 runtime
 会使旧序列失效并安全重建。
+
+对于资格满足的 CUDA stored CG/PCG，conditional Graph 持有完整 recurrence loop，
+并在每个逻辑 iteration 后于 device 侧判断收敛。每次 solve 仍保留一次初始状态和一次
+terminal state 观察，但迭代内部不再执行逐轮 host scalar reduction 或隐式同步。
+Graph 在精确的逻辑 iteration 上终止，因此不会产生 masked tail work；只要 topology、
+workspace 与 output binding 保持稳定，persistent plan 就会复用同一 executable。
 
 FGMRES action table 在两个 GPU backend 上都使用 direct native submission；系统不会为
 variable action schedule 静默复用 identity-GMRES replay 路径。
@@ -658,10 +670,14 @@ tail。Vulkan fixed-budget execution 可以执行完整的 `max_iterations`，�
 较快选择取决于 vector size、operator 成本、iteration count、driver 与 backend。
 不受支持的 policy 或 interval 会在 plan 构造时失败，不会静默 fallback。
 
-`plan.execution_capabilities()` 返回执行策略矩阵，以及条件执行不可用时的结构化原因。
-当前 CPU、CUDA 和 Vulkan solver 路径均不支持 `"device_convergent"`。显式请求会直接
-失败，不会切换为 host check 或 fixed-budget execution；backend 能力也不会自动改变 plan
-的默认策略。
+`plan.execution_capabilities()` 返回执行策略矩阵、条件执行不可用时的结构化原因，
+以及当前选定的 `default_execution_policy`。
+直接使用 `"device_convergent"` 仅适用于 CUDA 上的单系统 stored f32 CSR/BSR CG/PCG，
+并要求 driver、conditional-Graph 入口、device setter、provider capture 与 cuBLAS
+workspace 均满足资格。显式直接请求不可用时会失败，不做 fallback。
+默认的 `"bounded_convergent"` 会自动尝试该原生路径，并在必要时使用文档规定的
+Graph chunk fallback。compiled-kernel、compiled Graph、batched、CPU 与 Vulkan
+provider 均不宣称支持 CUDA conditional-Graph execution。
 
 ## 独立批量 CG 与 PCG
 

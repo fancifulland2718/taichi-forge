@@ -1798,6 +1798,20 @@ def _solver_execution_capabilities(
         and is_cuda
         and cuda_conditional["fully_available"]
     )
+    if batched:
+        default_execution_policy = (
+            "host_each_iteration"
+            if is_cpu
+            else "host_check_every_k"
+        )
+    elif is_cuda and bounded_qualified:
+        default_execution_policy = "bounded_convergent"
+    elif is_cuda and method in ("gmres", "fgmres"):
+        default_execution_policy = "host_check_every_k"
+    elif is_vulkan:
+        default_execution_policy = "fixed_budget_masked"
+    else:
+        default_execution_policy = "host_each_iteration"
     device_unavailable_reason = (
         unavailable_reason
         if bounded_qualified
@@ -1844,7 +1858,11 @@ def _solver_execution_capabilities(
             cuda_conditional if is_cuda else None
         ),
         "bounded_mode_selection": True,
-        "automatic_policy_change": False,
+        "default_execution_policy": default_execution_policy,
+        "automatic_policy_change": (
+            not batched
+            and default_execution_policy == "bounded_convergent"
+        ),
         "explicit_request_fallback": False,
     }
 
@@ -2424,14 +2442,13 @@ class SolvePlan:
         arch = self._program.config().arch
         cpu_arches = (_ti_core.Arch.x64, _ti_core.Arch.arm64)
         if policy is None:
-            if self.method in ("gmres", "fgmres") and (
-                arch == _ti_core.Arch.cuda
-            ):
-                policy = "host_check_every_k"
-            elif arch == _ti_core.Arch.vulkan:
-                policy = "fixed_budget_masked"
-            else:
-                policy = "host_each_iteration"
+            policy = _solver_execution_capabilities(
+                self._program,
+                self.operator._provider_kind,
+                batched=False,
+                method=self.method,
+                dtype=self.operator.dtype,
+            )["default_execution_policy"]
         if not isinstance(policy, str):
             raise TaichiRuntimeError("execution_policy must be a string")
         policy = policy.casefold()

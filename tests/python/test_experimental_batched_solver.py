@@ -629,9 +629,9 @@ def test_solver_conditional_execution_capabilities_are_explicit():
     arch = impl.current_cfg().arch
     single_capabilities = single.execution_capabilities()
     batched_capabilities = batched.execution_capabilities()
-    for capabilities in (single_capabilities, batched_capabilities):
-        assert not capabilities["automatic_policy_change"]
-        assert not capabilities["explicit_request_fallback"]
+    assert not single_capabilities["explicit_request_fallback"]
+    assert not batched_capabilities["automatic_policy_change"]
+    assert not batched_capabilities["explicit_request_fallback"]
 
     batched_conditional = batched_capabilities["device_convergent"]
     assert not batched_conditional["supported"]
@@ -642,6 +642,11 @@ def test_solver_conditional_execution_capabilities_are_explicit():
 
     conditional = single_capabilities["device_convergent"]
     if arch == ti.cuda:
+        assert single_capabilities["automatic_policy_change"]
+        assert single_capabilities["default_execution_policy"] == (
+            "bounded_convergent"
+        )
+        assert single.execution_policy == "bounded_convergent"
         assert conditional["primitive"] == "cuda_conditional_graph"
         cuda_conditional = single_capabilities[
             "cuda_conditional_graph"
@@ -659,6 +664,10 @@ def test_solver_conditional_execution_capabilities_are_explicit():
             assert not conditional["supported"]
             assert conditional["unsupported_reason"] != "none"
     elif arch == ti.vulkan:
+        assert not single_capabilities["automatic_policy_change"]
+        assert single_capabilities["default_execution_policy"] == (
+            "fixed_budget_masked"
+        )
         assert not conditional["supported"]
         assert conditional["rhi_primitive_compiled"]
         assert not conditional["runtime_path_compiled"]
@@ -668,6 +677,10 @@ def test_solver_conditional_execution_capabilities_are_explicit():
             "vulkan_stored_solver_indirect_dispatch_path_not_compiled"
         )
     else:
+        assert not single_capabilities["automatic_policy_change"]
+        assert single_capabilities["default_execution_policy"] == (
+            "host_each_iteration"
+        )
         assert not conditional["supported"]
         assert not conditional["rhi_primitive_compiled"]
         assert not conditional["runtime_path_compiled"]
@@ -686,6 +699,18 @@ def test_solver_conditional_execution_capabilities_are_explicit():
         == batched.execution_capabilities()
     )
     if conditional["supported"]:
+        automatic_result = single.solve(
+            _vector(np.arange(1, 9, dtype=np.float32))
+        )
+        assert automatic_result.converged
+        automatic_stats = single.statistics()
+        assert automatic_stats["identity"][
+            "requested_solver_execution_policy"
+        ] == "bounded_convergent"
+        assert automatic_stats["identity"]["bounded_native_upgrade_used"]
+        assert automatic_stats["identity"]["bounded_control_path"] == (
+            "cuda_conditional_graph"
+        )
         direct_conditional = experimental.SolvePlan(
             operator,
             max_iterations=4,

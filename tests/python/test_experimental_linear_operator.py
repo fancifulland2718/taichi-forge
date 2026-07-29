@@ -495,14 +495,15 @@ def test_cuda_conditional_graph_runtime_disable_fallback(monkeypatch):
         method="cg",
         max_iterations=64,
         atol=1e-5,
-        execution_policy="bounded_convergent",
-        bounded_mode="auto",
     )
     fallback_result = fallback.solve(rhs)
     assert fallback_result.converged
     fallback_stats = fallback.statistics()
     fallback_identity = fallback_stats["identity"]
     fallback_operations = fallback_stats["operations"]
+    assert fallback_identity["requested_solver_execution_policy"] == (
+        "bounded_convergent"
+    )
     assert not fallback_identity["bounded_native_upgrade_used"]
     assert fallback_identity["bounded_control_path"] == (
         "cuda_graph_chunked_host_check_fallback"

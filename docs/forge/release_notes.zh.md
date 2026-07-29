@@ -191,6 +191,12 @@ domain decomposition、contact、KKT 或 nonlinear outer-solver policy。不受�
   generation，不在 iteration 热路径执行 Python callback。variable-linear table 在发布
   update 前会 preflight 全部 action，并且只由 FGMRES 消费。10k numeric-generation churn
   验证 retired generation 有界释放；nonlinear behavior 仍明确不受支持。
+- 增加单系统 fixed stored f32 CSR/BSR CG/PCG 的精确 CUDA conditional-Graph 执行。
+  driver 与 identity、Jacobi 或 block-Jacobi provider 的 capture 资格满足时，默认的
+  `bounded_convergent` policy 会自动选用该路径。每次 solve 只保留初始和 terminal state
+  两次观察，不再逐轮执行 host scalar synchronization，并在精确的逻辑 iteration 上终止，
+  不产生 masked tail work。资格不满足的 runtime 通过文档规定的 Graph chunk fallback
+  保持相同数值合同；显式 `host_each_iteration` 仍可选用。
 - 增加 CPU、CUDA 与 Vulkan 上的同构独立批量 f32 CG/PCG。每个连续系统拥有独立
   tolerance、status、iteration 与 residual state；fixed stored 和 compiled-kernel A/M
   provider 已完成资格验证。CUDA/Vulkan plan 会复用 plan-owned Taichi Graph 执行稳定的
@@ -198,7 +204,8 @@ domain decomposition、contact、KKT 或 nonlinear outer-solver policy。不受�
   Graph binding，每个 workspace clone 拥有独立 replay plan。CUDA/Vulkan fixed-budget plan
   还提供 `submit()`、
   `SolveSubmission` 与显式 workspace clone，用于有界并发执行。执行策略 capability 与
-  unsupported reason 可查询；当前未启用 device-convergent 条件执行。plan 统计报告每个
+  unsupported reason 可查询；batched plan 仍不支持 device-convergent 条件执行，单系统
+  路径则按上述资格启用。plan 统计报告每个
   clone 的逻辑 workspace payload 与排除项；host 异步 completion 不代表设备并行保证。
 - 增加面向 `SolvePlan`/`BatchedSolvePlan` 的 provider-neutral solver qualification。
   版本化 detached report 覆盖 solution/真实残差、terminal state、A/M 身份、policy、

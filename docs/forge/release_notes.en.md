@@ -236,6 +236,14 @@ host staging or provider replacement.
   action before publishing an update and are consumed only by FGMRES. A 10k
   numeric-generation churn contract verifies bounded retirement; nonlinear
   behavior remains explicitly unsupported.
+- Added exact CUDA conditional-Graph execution for single-system fixed stored
+  f32 CSR/BSR CG/PCG. Eligible drivers and capture-composable identity,
+  Jacobi, or block-Jacobi providers use it automatically through the default
+  `bounded_convergent` policy. Each solve retains only its initial and terminal
+  state observations, avoids per-iteration host scalar synchronization, and
+  stops at the exact logical iteration without masked tail work. Unqualified
+  runtimes preserve the same numerical contract through the documented Graph
+  chunk fallback; explicit `host_each_iteration` remains available.
 - Added homogeneous independent batched f32 CG/PCG on CPU, CUDA, and Vulkan.
   Each contiguous system has independent tolerance, status, iteration, and
   residual state; fixed stored and compiled-kernel A/M providers are
@@ -245,7 +253,8 @@ host staging or provider replacement.
   replay plans. CUDA/Vulkan fixed-budget plans also provide `submit()`,
   `SolveSubmission`, and explicit workspace cloning for bounded concurrent
   execution. Execution-policy capabilities and unsupported reasons are
-  queryable; conditional device-convergent execution is not enabled. Plan
+  queryable; batched conditional device-convergent execution remains
+  unsupported. Plan
   telemetry reports the logical workspace payload and exclusions for every
   clone; host-asynchronous completion is not a device-parallel guarantee.
 - Added provider-neutral solve qualification for `SolvePlan` and
