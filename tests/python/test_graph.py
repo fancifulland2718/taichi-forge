@@ -1082,6 +1082,122 @@ def test_repeated_sequential_keeps_cuda_expanded_runtime_by_default():
     _run_repeated_inc_graph(graph)
 
 
+def _build_bounded_step_graph(*, max_iterations, chunk_size=4):
+    @ti.kernel
+    def step(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        target: ti.i32,
+    ):
+        if predicate[None] != 0:
+            state[None] += 1
+            counter[None] += 1
+            if state[None] >= target:
+                predicate[None] = 0
+
+    arg_state = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "state", ti.i32, ndim=0
+    )
+    arg_predicate = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "predicate", ti.i32, ndim=0
+    )
+    arg_counter = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "counter", ti.i32, ndim=0
+    )
+    arg_target = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "target", ti.i32
+    )
+    builder = ti.graph.GraphBuilder()
+    body = builder.create_sequential()
+    body.dispatch(
+        step, arg_state, arg_predicate, arg_counter, arg_target
+    )
+    builder.bounded_loop(
+        body,
+        predicate=arg_predicate,
+        counter=arg_counter,
+        max_iterations=max_iterations,
+        chunk_size=chunk_size,
+        masked_execution=True,
+        name="adaptive_step",
+    )
+    return builder.compile()
+
+
+def _bounded_step_args(*, target, active=True):
+    arrays = {
+        name: ti.ndarray(ti.i32, shape=())
+        for name in ("state", "predicate", "counter")
+    }
+    arrays["state"].fill(0)
+    arrays["predicate"].fill(int(active))
+    arrays["counter"].fill(0)
+    return {**arrays, "target": target}
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_bounded_graph_loop_reports_exact_stop_and_backend_overshoot():
+    graph = _build_bounded_step_graph(max_iterations=20)
+    args = _bounded_step_args(target=5)
+    graph.run(args)
+
+    report = graph.bounded_loop_stats()[0]
+    assert report.logical_iterations == 5
+    assert report.final_counter == 5
+    assert args["state"].to_numpy()[()] == 5
+    assert args["predicate"].to_numpy()[()] == 0
+    assert report.observation_boundaries[0] == 0
+    assert report.observation_boundaries[-1] == report.executed_iterations
+    assert len(report.predicate_values) == len(
+        report.observation_boundaries
+    )
+
+    if ti.lang.impl.current_cfg().arch == ti.cpu:
+        assert report.lowering == "cpu_host_loop"
+        assert report.executed_iterations == 5
+        assert report.overshoot_iterations == 0
+        assert report.chunk_sizes == (1, 1, 1, 1, 1)
+    else:
+        assert report.lowering == "portable_chunk_replay"
+        assert report.executed_iterations == 8
+        assert report.overshoot_iterations == 3
+        assert report.chunk_sizes == (4, 4)
+        assert report.observation_boundaries == (0, 4, 8)
+
+    assert graph._ir_debug_info["analysis"]["bounded_loop_regions"] == 1
+    with pytest.raises(
+        TaichiRuntimeError, match="does not support bounded loops"
+    ):
+        graph.submit(args)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_bounded_graph_loop_honors_initial_stop_and_iteration_cap():
+    graph = _build_bounded_step_graph(max_iterations=6)
+
+    inactive = _bounded_step_args(target=100, active=False)
+    graph.run(inactive)
+    stopped = graph.bounded_loop_stats()[0]
+    assert stopped.logical_iterations == 0
+    assert stopped.executed_iterations == 0
+    assert stopped.observation_boundaries == (0,)
+
+    capped = _bounded_step_args(target=100)
+    graph.run(capped)
+    report = graph.bounded_loop_stats()[0]
+    assert report.logical_iterations == 6
+    assert report.executed_iterations == 6
+    assert report.overshoot_iterations == 0
+    assert report.chunk_sizes == (
+        (1, 1, 1, 1, 1, 1)
+        if ti.lang.impl.current_cfg().arch == ti.cpu
+        else (4, 2)
+    )
+    assert capped["state"].to_numpy()[()] == 6
+    assert capped["predicate"].to_numpy()[()] == 1
+
+
 @test_utils.test(arch=ti.cuda)
 def test_cuda_cgraph_cache_survives_reset_then_delete():
     graph = _build_repeated_inc_graph()
