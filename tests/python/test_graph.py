@@ -1338,6 +1338,144 @@ def test_graph_temporary_arena_bounds_async_inflight_slots():
     }
 
 
+def _build_observation_graph():
+    @ti.kernel
+    def advance(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        residual: ti.types.ndarray(dtype=ti.f32, ndim=0),
+    ):
+        state[None] += 1
+        residual[None] *= 0.5
+
+    arg_state = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "state", ti.i32, ndim=0
+    )
+    arg_residual = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "residual", ti.f32, ndim=0
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(advance, arg_state, arg_residual)
+    builder.observe(arg_state, arg_residual, name="tail")
+    return builder.compile()
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_graph_observation_defers_readback_and_reports_memory(monkeypatch):
+    monkeypatch.setenv("TI_GRAPH_OBSERVATION_SLOTS", "2")
+    graph = _build_observation_graph()
+    state = ti.ndarray(ti.i32, shape=())
+    residual = ti.ndarray(ti.f32, shape=())
+    state.fill(4)
+    residual.fill(8.0)
+
+    ticket = graph.submit({"state": state, "residual": residual})
+    report = graph.execution_stats()
+    memory = report.memory
+    assert report.observation_node_count == 1
+    assert report.segments[-1].kind == "observation"
+    assert report.segments[-1].last_path == "asynchronous_snapshot"
+    assert memory.observation_arena_capacity == 2
+    assert memory.observation_arena_slots == 1
+    assert memory.observation_arena_allocations == 1
+    assert memory.observation_arena_reuses == 0
+    assert memory.observation_materializations == 0
+    assert memory.observation_host_readback_bytes == 0
+    assert memory.persistent_observation_bytes == 8
+
+    observed = ticket.observations()
+    assert observed == {"tail": {"state": 5, "residual": 4.0}}
+    assert ticket.observations() == observed
+    memory = graph.execution_stats().memory
+    assert memory.observation_materializations == 1
+    assert memory.observation_host_readback_bytes == 8
+    assert memory.persistent_observation_bytes >= 8
+
+    state.fill(10)
+    residual.fill(4.0)
+    graph.run({"state": state, "residual": residual})
+    assert graph.latest_observations() == {
+        "tail": {"state": 11, "residual": 2.0}
+    }
+    memory = graph.execution_stats().memory
+    assert memory.observation_arena_allocations == 1
+    assert memory.observation_arena_reuses == 1
+    assert memory.observation_materializations == 2
+    assert memory.observation_host_readback_bytes == 16
+
+    ir = graph._ir_debug_info
+    assert ir["analysis"]["observation_nodes"] == 1
+    observation = ir["root"]["children"][-1]
+    assert observation["kind"] == "observation"
+    assert not observation["synchronization"]
+    assert not observation["opaque"]
+    with pytest.raises(TaichiRuntimeError, match="serialized as AOT"):
+        graph._compiled_graph
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_graph_observation_ring_preserves_unconsumed_snapshots(monkeypatch):
+    monkeypatch.setenv("TI_GRAPH_OBSERVATION_SLOTS", "2")
+    graph = _build_observation_graph()
+    states = []
+    residuals = []
+    tickets = []
+    for state_value in (0, 10, 20):
+        state = ti.ndarray(ti.i32, shape=())
+        residual = ti.ndarray(ti.f32, shape=())
+        state.fill(state_value)
+        residual.fill(8.0)
+        states.append(state)
+        residuals.append(residual)
+        tickets.append(
+            graph.submit({"state": state, "residual": residual})
+        )
+
+    memory = graph.execution_stats().memory
+    assert memory.observation_arena_slots == 2
+    assert memory.observation_arena_allocations == 2
+    assert memory.observation_arena_reuses == 1
+    assert memory.observation_materializations == 1
+    assert memory.observation_host_readback_bytes == 8
+
+    expected_states = (1, 11, 21)
+    for ticket, expected_state in zip(tickets, expected_states):
+        assert ticket.observations() == {
+            "tail": {"state": expected_state, "residual": 4.0}
+        }
+    memory = graph.execution_stats().memory
+    assert memory.observation_materializations == 3
+    assert memory.observation_host_readback_bytes == 24
+
+
+@test_utils.test(arch=ti.cpu)
+def test_graph_observation_rejects_unsupported_values_and_runtime_shape():
+    scalar = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "scalar", ti.i32)
+    vector = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "vector", ti.i32, ndim=1
+    )
+    value = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "value", ti.i32, ndim=0
+    )
+
+    with pytest.raises(TaichiRuntimeError, match="symbolic ndarray"):
+        ti.graph.GraphBuilder().observe(scalar)
+    with pytest.raises(TaichiRuntimeError, match="scalar ndarrays"):
+        ti.graph.GraphBuilder().observe(vector)
+    with pytest.raises(TaichiRuntimeError, match="at least one value"):
+        ti.graph.GraphBuilder().observe()
+    with pytest.raises(TaichiRuntimeError, match="unique argument names"):
+        ti.graph.GraphBuilder().observe(value, value)
+
+    builder = ti.graph.GraphBuilder()
+    builder.observe(value, name="tail")
+    with pytest.raises(TaichiRuntimeError, match="already defined"):
+        builder.observe(value, name="tail")
+    graph = builder.compile()
+    wrong_shape = ti.ndarray(ti.i32, shape=1)
+    with pytest.raises(TaichiRuntimeError, match="scalar ndarray"):
+        graph.run({"value": wrong_shape})
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_compiler_metadata_enables_safe_elementwise_graph_candidates():
     @ti.kernel

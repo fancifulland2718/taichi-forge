@@ -19,6 +19,7 @@ from taichi_forge.lang.matrix import Matrix, MatrixField, MatrixType
 from taichi_forge.types._argument_descriptor import (
     describe_element_type,
 )
+from taichi_forge.types import ndarray_type
 from taichi_forge.types.primitive_types import i32
 from taichi_forge.types.texture_type import FORMAT2TY_CH, TY_CH2FORMAT
 from taichi_forge.graph._native import (
@@ -31,6 +32,7 @@ from taichi_forge.graph._ir import (
     DispatchNode,
     GraphAccess,
     NativeCallNode,
+    ObservationNode,
     ResourceEffect,
     RuntimeBinding,
     SequentialRegion,
@@ -175,6 +177,251 @@ class _GraphTemporaryArena:
         }
 
 
+def _copy_observation_result(result):
+    return {batch: dict(values) for batch, values in result.items()}
+
+
+class _GraphObservationState:
+    def __init__(self, arena, slot, sequence):
+        self._arena = arena
+        self._slot = slot
+        self._sequence = sequence
+        self._completion = None
+        self._result = None
+        self._discarded = False
+        self._released = False
+        self._lock = threading.Lock()
+
+    @property
+    def sequence(self):
+        return self._sequence
+
+    @property
+    def bindings(self):
+        return self._slot["bindings"]
+
+    def attach(self, completion):
+        with self._lock:
+            if self._released:
+                raise TaichiRuntimeError(
+                    "Cannot attach a completion to a released observation slot"
+                )
+            self._completion = (
+                completion if completion.has_backend_work else None
+            )
+        return self
+
+    def _wait_locked(self):
+        completion = self._completion
+        if completion is None:
+            return
+        if not completion.done():
+            self._arena._record_wait()
+            completion.wait()
+
+    def materialize(self):
+        release = False
+        with self._lock:
+            if self._result is not None:
+                return _copy_observation_result(self._result)
+            if self._released:
+                raise TaichiRuntimeError(
+                    "Graph observation snapshot was discarded"
+                )
+            self._wait_locked()
+            result = self._arena._read_slot(self._slot)
+            self._result = result
+            self._released = True
+            release = True
+        if release:
+            self._arena._release(self._slot, self)
+        return _copy_observation_result(result)
+
+    def discard(self):
+        release = False
+        with self._lock:
+            if self._released:
+                return
+            completion = self._completion
+            if completion is None or completion.done():
+                self._released = True
+                release = True
+            else:
+                self._discarded = True
+        if release:
+            self._arena._release(self._slot, self)
+
+    def make_reusable(self):
+        release = False
+        with self._lock:
+            if self._released:
+                return
+            self._wait_locked()
+            if not self._discarded:
+                self._result = self._arena._read_slot(self._slot)
+            self._released = True
+            release = True
+        if release:
+            self._arena._release(self._slot, self)
+
+
+class _GraphObservationArenaLease:
+    def __init__(self, state):
+        self._state = state
+        self.bindings = state.bindings
+
+    def attach(self, completion):
+        if self._state is None:
+            return None
+        state = self._state.attach(completion)
+        self._state = None
+        return state
+
+    def materialize(self):
+        if self._state is None:
+            return {}
+        state = self._state
+        self._state = None
+        return state.materialize()
+
+    def cancel(self):
+        if self._state is not None:
+            self._state.discard()
+            self._state = None
+
+
+class _GraphObservationArena:
+    """Bounded device snapshot slots with deferred packed host readback."""
+
+    def __init__(self, nodes, capacity=None):
+        self.nodes = tuple(nodes)
+        if not self.nodes:
+            self.capacity = 0
+            self._slots = []
+            self._next_sequence = 1
+            self._allocations = 0
+            self._reuses = 0
+            self._waits = 0
+            self._materializations = 0
+            self._host_readback_bytes = 0
+            self._lock = threading.Lock()
+            return
+        configured = (
+            capacity
+            if capacity is not None
+            else os.environ.get("TI_GRAPH_OBSERVATION_SLOTS", "4")
+        )
+        self.capacity = int(configured)
+        if self.capacity < 1 or self.capacity > 64:
+            raise TaichiRuntimeError(
+                "TI_GRAPH_OBSERVATION_SLOTS must be between 1 and 64"
+            )
+        self._slots = []
+        self._next_sequence = 1
+        self._allocations = 0
+        self._reuses = 0
+        self._waits = 0
+        self._materializations = 0
+        self._host_readback_bytes = 0
+        self._lock = threading.Lock()
+
+    def _new_slot(self):
+        bindings = {}
+        payload_bytes = 0
+        for node in self.nodes:
+            node_bindings, node_bytes = node.allocate_snapshot_buffers()
+            bindings[node.name] = node_bindings
+            payload_bytes += node_bytes
+        slot = {
+            "bindings": bindings,
+            "payload_bytes": payload_bytes,
+            "state": None,
+        }
+        self._slots.append(slot)
+        self._allocations += 1
+        return slot
+
+    def acquire(self):
+        if not self.nodes:
+            return None
+        while True:
+            with self._lock:
+                allocated = False
+                slot = next(
+                    (item for item in self._slots if item["state"] is None),
+                    None,
+                )
+                if slot is None and len(self._slots) < self.capacity:
+                    slot = self._new_slot()
+                    allocated = True
+                if slot is not None:
+                    if not allocated:
+                        self._reuses += 1
+                    state = _GraphObservationState(
+                        self, slot, self._next_sequence
+                    )
+                    self._next_sequence += 1
+                    slot["state"] = state
+                    return _GraphObservationArenaLease(state)
+                oldest = min(
+                    (item["state"] for item in self._slots),
+                    key=lambda state: state.sequence,
+                )
+            oldest.make_reusable()
+
+    def _read_slot(self, slot):
+        sources = []
+        hosts = []
+        host_groups = {}
+        for node in self.nodes:
+            node_hosts = {}
+            for key, storage in slot["bindings"][node.name].items():
+                host = np.empty(
+                    shape=storage.arr.total_shape(),
+                    dtype=to_numpy_type(storage.dtype),
+                )
+                sources.append(storage.arr)
+                hosts.append(host)
+                node_hosts[key] = host
+            host_groups[node.name] = node_hosts
+        impl.get_runtime().prog.copy_graph_observations_to_host(sources, hosts)
+        result = {
+            node.name: node.decode_snapshot(host_groups[node.name])
+            for node in self.nodes
+        }
+        byte_count = sum(host.nbytes for host in hosts)
+        with self._lock:
+            self._materializations += 1
+            self._host_readback_bytes += byte_count
+        return result
+
+    def _record_wait(self):
+        with self._lock:
+            self._waits += 1
+
+    def _release(self, slot, state):
+        with self._lock:
+            if slot["state"] is state:
+                slot["state"] = None
+
+    @property
+    def stats(self):
+        with self._lock:
+            return {
+                "materialized": bool(self._slots),
+                "capacity": self.capacity if self.nodes else 0,
+                "slots": len(self._slots),
+                "reserved_bytes": sum(
+                    slot["payload_bytes"] for slot in self._slots
+                ),
+                "allocations": self._allocations,
+                "reuses": self._reuses,
+                "waits": self._waits,
+                "materializations": self._materializations,
+                "host_readback_bytes": self._host_readback_bytes,
+            }
+
+
 @dataclass(frozen=True)
 class GraphExecutionCounters:
     """Detailed backend counters captured after diagnostics are enabled."""
@@ -239,6 +486,13 @@ class GraphMemoryReport:
     temporary_arena_allocations: int
     temporary_arena_reuses: int
     temporary_arena_waits: int
+    observation_arena_capacity: int
+    observation_arena_slots: int
+    observation_arena_allocations: int
+    observation_arena_reuses: int
+    observation_arena_waits: int
+    observation_materializations: int
+    observation_host_readback_bytes: int
     opaque_driver_bytes: Optional[int]
 
 
@@ -259,6 +513,7 @@ class GraphExecutionReport:
     node_count: int
     cgraph_segment_count: int
     native_node_count: int
+    observation_node_count: int
     dispatch_count: int
     compiled_task_count: Optional[int]
     runtime_arg_count: int
@@ -391,6 +646,7 @@ def _execution_report(
     observation_staging_bytes=0,
     temporary_memory_plan=None,
     temporary_arena_stats=None,
+    observation_arena_stats=None,
 ):
     segments = []
     stats_cursor = 0
@@ -400,19 +656,19 @@ def _execution_report(
             path = (
                 "unavailable"
                 if lifecycle_state != "ready"
-                else (
-                    "native_replay"
-                    if instance_kind in ("cuda_native_replay", "cpu_native_replay")
-                    else "native_dispatch"
-                )
+                else "asynchronous_snapshot"
+                if kind == "observation"
+                else "native_replay"
+                if instance_kind in ("cuda_native_replay", "cpu_native_replay")
+                else "native_dispatch"
             )
             segments.append(
                 GraphExecutionSegmentReport(
                     node_index=index,
                     kind=kind,
-                    dispatch_count=0,
+                    dispatch_count=node["dispatch_count"],
                     compiled_task_count=None,
-                    runtime_arg_count=0,
+                    runtime_arg_count=node["runtime_arg_count"],
                     static_dependency_count=0,
                     static_layout_fingerprint=_combine_layout_fingerprints(()),
                     backend=_backend_name(arch),
@@ -539,6 +795,7 @@ def _execution_report(
     )
     temporary_memory_plan = temporary_memory_plan or {}
     temporary_arena_stats = temporary_arena_stats or {}
+    observation_arena_stats = observation_arena_stats or {}
     temporary_plan_materialized = bool(
         temporary_arena_stats.get("materialized", False)
     )
@@ -548,13 +805,16 @@ def _execution_report(
     persistent_temporary_bytes = int(
         temporary_arena_stats.get("reserved_bytes", 0)
     )
+    persistent_observation_bytes = int(observation_staging_bytes) + int(
+        observation_arena_stats.get("reserved_bytes", 0)
+    )
     memory = GraphMemoryReport(
         persistent_argument_bytes=persistent_argument_bytes,
-        persistent_observation_bytes=int(observation_staging_bytes),
+        persistent_observation_bytes=persistent_observation_bytes,
         persistent_temporary_bytes=persistent_temporary_bytes,
         persistent_bytes=(
             persistent_argument_bytes
-            + int(observation_staging_bytes)
+            + persistent_observation_bytes
             + persistent_temporary_bytes
         ),
         transient_temporary_bytes=(
@@ -573,15 +833,31 @@ def _execution_report(
         temporary_arena_allocations=int(temporary_arena_stats.get("allocations", 0)),
         temporary_arena_reuses=int(temporary_arena_stats.get("reuses", 0)),
         temporary_arena_waits=int(temporary_arena_stats.get("waits", 0)),
+        observation_arena_capacity=int(
+            observation_arena_stats.get("capacity", 0)
+        ),
+        observation_arena_slots=int(observation_arena_stats.get("slots", 0)),
+        observation_arena_allocations=int(
+            observation_arena_stats.get("allocations", 0)
+        ),
+        observation_arena_reuses=int(observation_arena_stats.get("reuses", 0)),
+        observation_arena_waits=int(observation_arena_stats.get("waits", 0)),
+        observation_materializations=int(
+            observation_arena_stats.get("materializations", 0)
+        ),
+        observation_host_readback_bytes=int(
+            observation_arena_stats.get("host_readback_bytes", 0)
+        ),
         opaque_driver_bytes=None,
     )
     return GraphExecutionReport(
-        schema_version=3,
+        schema_version=4,
         arch=arch,
         lifecycle_state=lifecycle_state,
         node_count=len(segments),
         cgraph_segment_count=len(cgraph_segments),
         native_node_count=definition["native_count"],
+        observation_node_count=definition.get("observation_count", 0),
         dispatch_count=definition["dispatch_count"],
         compiled_task_count=compiled_task_count,
         runtime_arg_count=definition["runtime_arg_count"],
@@ -944,6 +1220,157 @@ class _CompiledNativeGraphNode:
     @property
     def debug_info(self):
         return self.executable.debug_info
+
+
+_OBSERVATION_PACK_KERNELS = {}
+
+
+def _observation_pack_kernel(dtype):
+    key = str(dtype)
+    kernel = _OBSERVATION_PACK_KERNELS.get(key)
+    if kernel is not None:
+        return kernel
+
+    @kernel_impl.kernel
+    def pack_scalar_snapshot(
+        source: ndarray_type.ndarray(dtype=dtype, ndim=0),
+        destination: ndarray_type.ndarray(dtype=dtype, ndim=1),
+        index: i32,
+    ):
+        destination[index] = source[None]
+
+    _OBSERVATION_PACK_KERNELS[key] = pack_scalar_snapshot
+    return pack_scalar_snapshot
+
+
+class _CompiledObservationGraphNode:
+    needs_runtime_args = True
+    snode_tree_dependencies = frozenset()
+    snode_tree_dependency_info = frozenset()
+    source_native_count = 0
+    region_kind = "observation"
+
+    def __init__(self, values, name):
+        if not isinstance(name, str) or not name:
+            raise TaichiRuntimeError(
+                "Graph observation name must be a non-empty string"
+            )
+        values = tuple(values)
+        if not values:
+            raise TaichiRuntimeError(
+                "Graph observation requires at least one value"
+            )
+        groups = {}
+        entries = []
+        for value in values:
+            if getattr(value, "tag", None) != ArgKind.NDARRAY:
+                raise TaichiRuntimeError(
+                    "Graph observation values must be symbolic ndarray arguments"
+                )
+            descriptor = describe_element_type(value.dtype())
+            if (
+                value.field_dim != 0
+                or value.element_shape
+                or descriptor.category != "scalar"
+            ):
+                raise TaichiRuntimeError(
+                    "Graph observation values must be scalar ndarrays with ndim=0"
+                )
+            dtype = value.dtype()
+            key = str(dtype)
+            group = groups.setdefault(
+                key, {"dtype": dtype, "names": []}
+            )
+            index = len(group["names"])
+            group["names"].append(value.name)
+            entries.append((value.name, key, index, dtype))
+        names = tuple(entry[0] for entry in entries)
+        if len(set(names)) != len(names):
+            raise TaichiRuntimeError(
+                "Graph observation values must have unique argument names"
+            )
+        self.name = name
+        self._groups = tuple(
+            (key, group["dtype"], tuple(group["names"]))
+            for key, group in groups.items()
+        )
+        self._entries = tuple(entries)
+        self._kernels = {
+            key: _observation_pack_kernel(dtype)
+            for key, dtype, _ in self._groups
+        }
+        self._active_buffers = None
+        self.runtime_arg_names = frozenset(names)
+        self.dispatch_count = len(entries)
+        self.physical_dispatch_count = self.dispatch_count
+        self.ir_node = ObservationNode(
+            name=name,
+            effects=tuple(
+                ResourceEffect(arg_name, GraphAccess.READ)
+                for arg_name in names
+            ),
+            bindings=tuple(
+                RuntimeBinding(arg_name, "ndarray") for arg_name in names
+            ),
+            batch=name,
+            synchronization=False,
+            opaque=False,
+        )
+
+    def allocate_snapshot_buffers(self):
+        buffers = {}
+        byte_count = 0
+        for key, dtype, names in self._groups:
+            buffers[key] = ScalarNdarray(dtype, (len(names),))
+            byte_count += np.dtype(to_numpy_type(dtype)).itemsize * len(names)
+        return buffers, byte_count
+
+    def bind_snapshot_buffers(self, buffers):
+        self._active_buffers = buffers
+
+    def clear_snapshot_buffers(self):
+        self._active_buffers = None
+
+    def run(self, context, temporaries=None):
+        if self._active_buffers is None:
+            raise TaichiRuntimeError(
+                "Graph observation snapshot slot was not bound"
+            )
+        runtime_args = context.runtime_args()
+        for arg_name, key, index, dtype in self._entries:
+            value = runtime_args[arg_name]
+            if (
+                not isinstance(value, Ndarray)
+                or value.shape != ()
+                or str(value.dtype) != str(dtype)
+            ):
+                raise TaichiRuntimeError(
+                    f"Graph observation {arg_name} requires a scalar ndarray "
+                    f"with dtype {dtype}"
+                )
+            self._kernels[key](
+                value, self._active_buffers[key], index
+            )
+
+    def decode_snapshot(self, hosts):
+        result = {}
+        for key, _, names in self._groups:
+            values = hosts[key].reshape(-1)
+            result.update(
+                (name, values[index].item())
+                for index, name in enumerate(names)
+            )
+        return result
+
+    @property
+    def debug_info(self):
+        return {
+            "kind": "observation",
+            "name": self.name,
+            "value_count": len(self._entries),
+            "packed_group_count": len(self._groups),
+            "asynchronous": True,
+        }
 
 
 def _bounded_scalar_values(values, names, *, use_transfer_planner):
@@ -1546,6 +1973,10 @@ class _GraphSpec:
             isinstance(n, _CompiledBoundedLoopGraphNode)
             for n in self.nodes
         )
+        self.observation_count = sum(
+            isinstance(n, _CompiledObservationGraphNode)
+            for n in self.nodes
+        )
         self.runtime_arg_names = frozenset().union(
             *(n.runtime_arg_names for n in self.nodes)
         )
@@ -1596,9 +2027,9 @@ class _GraphSpec:
         return (impl.runtime_generation(), impl.current_cfg().arch, id(runtime.prog))
 
     def compiled_graph(self):
-        if self.native_count or self.bounded_loop_count:
+        if self.native_count or self.bounded_loop_count or self.observation_count:
             raise TaichiRuntimeError(
-                "Graphs containing native or structured-control nodes cannot "
+                "Graphs containing native, observation, or structured-control nodes cannot "
                 "be serialized as AOT CGraph yet"
             )
         if self._aot_compiled_graph is None:
@@ -1613,6 +2044,7 @@ class _GraphSpec:
             "node_count": len(self.nodes),
             "dispatch_count": self.dispatch_count,
             "native_count": self.native_count,
+            "observation_count": self.observation_count,
             "repeat_count": self.repeat_count,
             "nodes": [n.debug_info for n in self.nodes],
             "optimization": dict(self.optimization),
@@ -1652,6 +2084,8 @@ class _GraphSpec:
                         if isinstance(node, _CompiledCGraphNode)
                         else "bounded_loop"
                         if isinstance(node, _CompiledBoundedLoopGraphNode)
+                        else "observation"
+                        if isinstance(node, _CompiledObservationGraphNode)
                         else "native"
                     ),
                     "dispatch_count": getattr(node, "dispatch_count", 0),
@@ -1674,6 +2108,7 @@ class _GraphSpec:
             "nodes": tuple(nodes),
             "dispatch_count": self.dispatch_count,
             "native_count": self.native_count,
+            "observation_count": self.observation_count,
             "runtime_arg_count": len(self.runtime_arg_names),
             "dependency_info": tuple(
                 sorted(self.snode_tree_dependency_info)
@@ -1713,6 +2148,12 @@ class _GraphInstance:
         self._run_context = None
         self._temporary_arena = _GraphTemporaryArena(spec.temporary_memory_plan)
         self._temporary_bindings = None
+        self._observation_nodes = tuple(
+            node
+            for node in spec.nodes
+            if isinstance(node, _CompiledObservationGraphNode)
+        )
+        self._observation_arena = _GraphObservationArena(self._observation_nodes)
 
         if len(spec.nodes) == 1 and isinstance(spec.nodes[0], _CompiledCGraphNode):
             node = spec.nodes[0]
@@ -1762,6 +2203,23 @@ class _GraphInstance:
     @property
     def temporary_arena_stats(self):
         return self._temporary_arena.stats
+
+    def acquire_observation_lease(self):
+        return self._observation_arena.acquire()
+
+    def bind_observation_buffers(self, bindings):
+        if bindings is None:
+            return
+        for node in self._observation_nodes:
+            node.bind_snapshot_buffers(bindings[node.name])
+
+    def clear_observation_buffers(self):
+        for node in self._observation_nodes:
+            node.clear_snapshot_buffers()
+
+    @property
+    def observation_arena_stats(self):
+        return self._observation_arena.stats
 
     def _maybe_install_native_replay(self):
         arch = impl.current_cfg().arch
@@ -2167,6 +2625,7 @@ class GraphBuilder:
         self._runtime_graph_dispatches = []
         self._nodes = []
         self._pending_ir_nodes = []
+        self._observation_names = set()
 
     def dispatch(self, kernel_fn, *args, template_args=None):
         kernel_cpp = gen_cpp_kernel(
@@ -2291,6 +2750,23 @@ class GraphBuilder:
         )
         return self
 
+    def observe(self, *values, name="observation"):
+        """Append a deferred packed snapshot of scalar ndarray arguments.
+
+        ``Graph.submit()`` captures values on device and returns before host
+        readback. Consume the immutable snapshot through
+        ``SubmissionTicket.observations()``.
+        """
+        if name in self._observation_names:
+            raise TaichiRuntimeError(
+                f"Graph observation name {name!r} is already defined"
+            )
+        node = _CompiledObservationGraphNode(values, name)
+        self._flush_graph_builder()
+        self._nodes.append(node)
+        self._observation_names.add(name)
+        return self
+
     def append_native(self, node, *, prewarm=False):
         return self._append_native(node, prewarm=prewarm)
 
@@ -2321,11 +2797,12 @@ class SubmissionTicket:
     the ticket without waiting.
     """
 
-    __slots__ = ("_admission", "_completion", "_runtime")
+    __slots__ = ("_admission", "_completion", "_observation", "_runtime")
 
-    def __init__(self, completion, runtime, admission=None):
+    def __init__(self, completion, runtime, admission=None, observation=None):
         self._admission = admission
         self._completion = completion
+        self._observation = observation
         self._runtime = runtime
 
     def done(self):
@@ -2344,6 +2821,13 @@ class SubmissionTicket:
             self._admission._completion_wait(self._completion)
         self._runtime.release_runtime_submission_owner(self._completion)
 
+    def observations(self):
+        """Wait if needed, then materialize this submission's snapshot."""
+        if self._observation is None:
+            return {}
+        self.wait()
+        return self._observation.materialize()
+
     @property
     def backend(self):
         return self._completion.backend
@@ -2355,6 +2839,14 @@ class SubmissionTicket:
     @property
     def _has_backend_work(self):
         return self._completion.has_backend_work
+
+    def __del__(self):
+        observation = getattr(self, "_observation", None)
+        if observation is not None:
+            try:
+                observation.discard()
+            except Exception:
+                pass
 
 
 class Graph:
@@ -2372,6 +2864,8 @@ class Graph:
             self._spec = _GraphSpec([node], aot_compiled_graph=compiled_graph)
         self._contains_native_nodes_value = self._spec.native_count > 0
         self._contains_bounded_loops_value = self._spec.bounded_loop_count > 0
+        self._contains_observations_value = self._spec.observation_count > 0
+        self._last_observations = {}
         self._submission_lane = _new_submission_lane("graph")
         self._execution_definition = self._spec.execution_definition
         self._execution_arch = _ti_core.arch_name(impl.current_cfg().arch)
@@ -2418,17 +2912,33 @@ class Graph:
             # Graphs can both snapshot zero, overwrite the count with one, and
             # drive it negative when their paired finally blocks run.
             temporary_lease = self._instance.acquire_temporary_lease()
-            temporary_bindings = (
-                temporary_lease.bindings if temporary_lease is not None else None
-            )
-            runtime._active_graph_submissions = submission_state + 1
-            self._instance.bind_temporary_buffers(temporary_bindings)
+            observation_lease = None
             try:
-                runtime.prog._record_runtime_graph_submission()
-                self._run_impl(args)
+                observation_lease = self._instance.acquire_observation_lease()
+                temporary_bindings = (
+                    temporary_lease.bindings
+                    if temporary_lease is not None
+                    else None
+                )
+                runtime._active_graph_submissions = submission_state + 1
+                try:
+                    self._instance.bind_temporary_buffers(temporary_bindings)
+                    self._instance.bind_observation_buffers(
+                        observation_lease.bindings
+                        if observation_lease is not None
+                        else None
+                    )
+                    runtime.prog._record_runtime_graph_submission()
+                    self._run_impl(args)
+                    if observation_lease is not None:
+                        self._last_observations = observation_lease.materialize()
+                finally:
+                    self._instance.clear_observation_buffers()
+                    self._instance.clear_temporary_buffers()
+                    runtime._active_graph_submissions -= 1
             finally:
-                self._instance.clear_temporary_buffers()
-                runtime._active_graph_submissions -= 1
+                if observation_lease is not None:
+                    observation_lease.cancel()
                 if temporary_lease is not None:
                     temporary_lease.cancel()
 
@@ -2465,6 +2975,8 @@ class Graph:
             on_saturation=on_saturation,
         )
         temporary_lease = None
+        observation_lease = None
+        observation_state = None
         try:
             with self._lifecycle_lock:
                 self._check_runtime_valid()
@@ -2496,12 +3008,18 @@ class Graph:
                 # the pybind call may release the GIL while waiting for another
                 # runtime submission reader/writer boundary.
                 temporary_lease = self._instance.acquire_temporary_lease()
+                observation_lease = self._instance.acquire_observation_lease()
                 temporary_bindings = (
                     temporary_lease.bindings if temporary_lease is not None else None
                 )
                 runtime._active_graph_submissions = submission_state + 1
-                self._instance.bind_temporary_buffers(temporary_bindings)
                 try:
+                    self._instance.bind_temporary_buffers(temporary_bindings)
+                    self._instance.bind_observation_buffers(
+                        observation_lease.bindings
+                        if observation_lease is not None
+                        else None
+                    )
                     transaction = (
                         runtime.prog._begin_runtime_submission_transaction()
                     )
@@ -2516,7 +3034,11 @@ class Graph:
                     if temporary_lease is not None:
                         temporary_lease.attach(completion)
                         temporary_lease = None
+                    if observation_lease is not None:
+                        observation_state = observation_lease.attach(completion)
+                        observation_lease = None
                 finally:
+                    self._instance.clear_observation_buffers()
                     self._instance.clear_temporary_buffers()
                     runtime._active_graph_submissions -= 1
 
@@ -2526,6 +3048,8 @@ class Graph:
                 ):
                     runtime.retain_runtime_submission_owner(completion, self)
         except BaseException:
+            if observation_lease is not None:
+                observation_lease.cancel()
             if temporary_lease is not None:
                 temporary_lease.cancel()
             if admission is not None:
@@ -2533,7 +3057,12 @@ class Graph:
             raise
         if admission is not None:
             admission._attach(completion)
-        return SubmissionTicket(completion, runtime, admission)
+        return SubmissionTicket(
+            completion,
+            runtime,
+            admission,
+            observation=observation_state,
+        )
 
     def _instance_for_current_runtime(self):
         key = self._spec.instance_key()
@@ -2635,6 +3164,12 @@ class Graph:
                 if isinstance(node, _CompiledBoundedLoopGraphNode)
             )
 
+    def latest_observations(self):
+        """Return the most recent synchronous ``run()`` snapshot."""
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            return _copy_observation_result(self._last_observations)
+
     def execution_stats(self):
         """Return an immutable execution-path and static-Field report.
 
@@ -2659,8 +3194,15 @@ class Graph:
                 self._instance.temporary_arena_stats
                 if lifecycle_state == "ready" else {}
             )
+            observation_arena_stats = (
+                self._instance.observation_arena_stats
+                if lifecycle_state == "ready" else {}
+            )
             observation_staging_bytes = 0
-            if lifecycle_state == "ready" and self._contains_bounded_loops_value:
+            if lifecycle_state == "ready" and (
+                self._contains_bounded_loops_value
+                or self._contains_observations_value
+            ):
                 observation_staging_bytes = int(
                     impl.get_runtime()
                     .prog._graph_observation_staging_stats()["persistent_bytes"]
@@ -2676,6 +3218,7 @@ class Graph:
                     "temporary_memory_plan"
                 ],
                 temporary_arena_stats=temporary_arena_stats,
+                observation_arena_stats=observation_arena_stats,
             )
 
     @property

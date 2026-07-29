@@ -113,6 +113,7 @@ class NativeCallNode:
 class ObservationNode:
     name: str
     effects: Tuple[ResourceEffect, ...]
+    bindings: Tuple[RuntimeBinding, ...] = ()
     batch: str = "default"
     synchronization: bool = True
     opaque: bool = False
@@ -123,10 +124,6 @@ class ObservationNode:
 
     @property
     def children(self):
-        return ()
-
-    @property
-    def bindings(self):
         return ()
 
     @property
