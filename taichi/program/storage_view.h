@@ -201,12 +201,6 @@ struct ResolvedDenseBinding {
   }
 };
 
-struct DenseStorageBuildResult;
-TI_DLL_EXPORT DenseStorageBuildResult
-build_dense_storage_descriptor(StorageOwnerRef owner,
-                               StorageSourceKind source_kind,
-                               const DenseStorageLayoutSpec &layout);
-
 class TI_DLL_EXPORT DenseStorageDescriptor {
  public:
   const StorageOwnerRef &owner() const noexcept {
@@ -250,10 +244,7 @@ class TI_DLL_EXPORT DenseStorageDescriptor {
 
  private:
   friend struct DenseStorageBuildResult;
-  friend DenseStorageBuildResult build_dense_storage_descriptor(
-      StorageOwnerRef owner,
-      StorageSourceKind source_kind,
-      const DenseStorageLayoutSpec &layout);
+  friend struct DenseStorageDescriptorAccess;
 
   DenseStorageDescriptor(
       StorageOwnerRef owner,

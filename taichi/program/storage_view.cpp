@@ -532,6 +532,28 @@ std::vector<std::int64_t> DenseStorageDescriptor::element_strides_bytes()
           strides_bytes_.begin() + index_rank_ + element_rank_};
 }
 
+// Keep private construction behind a non-exported helper so the public builder
+// has a single platform-qualified declaration in the header.
+struct DenseStorageDescriptorAccess {
+  static DenseStorageDescriptor make(
+      StorageOwnerRef owner,
+      StorageSourceKind source_kind,
+      DataType scalar_type,
+      StorageAccess access,
+      std::uint8_t index_rank,
+      std::uint8_t element_rank,
+      std::array<std::int64_t, kMaxDenseStorageRank> extents,
+      std::array<std::int64_t, kMaxDenseStorageRank> strides_bytes,
+      std::int64_t byte_offset,
+      DenseStorageProperties properties,
+      std::uint64_t fingerprint) {
+    return DenseStorageDescriptor(std::move(owner), source_kind, scalar_type,
+                                  access, index_rank, element_rank, extents,
+                                  strides_bytes, byte_offset, properties,
+                                  fingerprint);
+  }
+};
+
 DenseStorageBuildResult build_dense_storage_descriptor(
     StorageOwnerRef owner,
     StorageSourceKind source_kind,
@@ -762,7 +784,7 @@ DenseStorageBuildResult build_dense_storage_descriptor(
   const std::uint64_t fingerprint = descriptor_fingerprint(
       owner, source_kind, layout.scalar_type, layout.access, index_rank,
       element_rank, extents, strides, layout.byte_offset);
-  result.descriptor = DenseStorageDescriptor(
+  result.descriptor = DenseStorageDescriptorAccess::make(
       std::move(owner), source_kind, layout.scalar_type, layout.access,
       static_cast<std::uint8_t>(index_rank),
       static_cast<std::uint8_t>(element_rank), extents, strides,

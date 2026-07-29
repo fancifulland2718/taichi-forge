@@ -491,7 +491,9 @@ MakeMeshBlockLocal::MakeMeshBlockLocal(OffloadedStmt *offload,
     }
     bool has_accumulate = {false};
     for (auto [snode, total_flags] : ptr->second) {
-      has_accumulate |= (total_flags & AccessFlag::accumulate);
+      has_accumulate =
+          has_accumulate ||
+          (total_flags & AccessFlag::accumulate) != static_cast<AccessFlag>(0);
     }
     return has_accumulate;
   };
