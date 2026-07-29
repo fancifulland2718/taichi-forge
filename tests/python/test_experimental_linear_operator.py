@@ -195,12 +195,15 @@ def test_experimental_kernel_traits_numeric_update_and_cg():
         assert not batching["selected"] and not batching["qualified"]
     elif impl.current_cfg().arch == ti.cuda:
         assert capabilities["default_execution_policy"] == (
-            "bounded_convergent"
+            "host_check_every_k"
         )
         assert capabilities["bounded_convergent"]["supported"]
         assert capabilities["device_convergent"]["provider_qualified"]
-        assert not batching["selected"] and batching["qualified"]
-        assert capabilities["automatic_solver_replay"]["selected"]
+        assert not capabilities["device_convergent"][
+            "automatic_selection_qualified"
+        ]
+        assert batching["selected"] and batching["qualified"]
+        assert not capabilities["automatic_solver_replay"]["selected"]
     else:
         assert capabilities["default_execution_policy"] == (
             "host_check_every_k"
@@ -210,18 +213,36 @@ def test_experimental_kernel_traits_numeric_update_and_cg():
     result = plan.solve(rhs)
     if impl.current_cfg().arch == ti.cuda:
         stats = plan.statistics()
+        assert stats["identity"]["solver_execution_policy"] == (
+            "host_check_every_k"
+        )
+        assert stats["operations"]["solver_chunk_direct_submissions"] > 0
         if capabilities["device_convergent"]["supported"]:
-            assert stats["identity"]["solver_execution_policy"] == (
+            assert capabilities["device_convergent"]["qualification_scope"] == (
+                "explicit_only"
+            )
+            assert capabilities["device_convergent"][
+                "automatic_selection_unavailable_reason"
+            ] == "compiled_kernel_graph_krylov_not_latency_qualified"
+            device_plan = experimental.SolvePlan(
+                operator,
+                max_iterations=16,
+                execution_policy="device_convergent",
+            )
+            device_result = device_plan.solve(rhs)
+            device_stats = device_plan.statistics()
+            assert device_result.converged
+            assert device_stats["identity"]["solver_execution_policy"] == (
                 "device_convergent"
             )
-            assert stats["identity"]["solver_control_path"] == (
+            assert device_stats["identity"]["solver_control_path"] == (
                 "generic_structured_graph"
             )
-            assert stats["operations"]["host_scalar_readbacks"] == 1
-        else:
-            assert stats["identity"]["solver_execution_policy"] == (
-                "bounded_convergent"
+            assert device_stats["operations"]["host_scalar_readbacks"] == 1
+            device_initial = device_plan.solve(
+                rhs, initial_guess=_vector(exact)
             )
+            assert device_initial.converged and device_initial.iterations == 0
     elif impl.current_cfg().arch == ti.vulkan:
         stats = plan.statistics()
         assert stats["identity"]["solver_execution_policy"] == (
@@ -234,8 +255,11 @@ def test_experimental_kernel_traits_numeric_update_and_cg():
     assert exact_initial.converged and exact_initial.iterations == 0
 
     if impl.current_cfg().arch == ti.cuda:
+        zero_budget_options = {}
+        if capabilities["device_convergent"]["supported"]:
+            zero_budget_options["execution_policy"] = "device_convergent"
         zero_budget = experimental.SolvePlan(
-            operator, max_iterations=0, atol=1e-12
+            operator, max_iterations=0, atol=1e-12, **zero_budget_options
         ).solve(rhs)
         assert zero_budget.reached_max_iterations
         assert zero_budget.iterations == 0
@@ -770,11 +794,14 @@ def test_experimental_fixed_linear_operator_pcg():
     batching = capabilities["automatic_solver_batching"]
     if impl.current_cfg().arch == ti.cuda:
         assert capabilities["default_execution_policy"] == (
-            "bounded_convergent"
+            "host_check_every_k"
         )
         assert capabilities["bounded_convergent"]["supported"]
-        assert not batching["selected"] and batching["qualified"]
-        assert capabilities["automatic_solver_replay"]["selected"]
+        assert not capabilities["device_convergent"][
+            "automatic_selection_qualified"
+        ]
+        assert batching["selected"] and batching["qualified"]
+        assert not capabilities["automatic_solver_replay"]["selected"]
     elif impl.current_cfg().arch == ti.vulkan:
         assert capabilities["default_execution_policy"] == (
             "host_check_every_k"
@@ -795,21 +822,31 @@ def test_experimental_fixed_linear_operator_pcg():
     assert stats["operations"]["preconditioner_update_noops"] == 2
     assert stats["resources"]["external_preconditioner"]
     if impl.current_cfg().arch == ti.cuda:
+        assert (
+            stats["identity"]["solver_execution_policy"]
+            == "host_check_every_k"
+        )
         if capabilities["device_convergent"]["supported"]:
+            device_plan = experimental.SolvePlan(
+                operator,
+                method="pcg",
+                preconditioner=preconditioner,
+                max_iterations=8,
+                atol=1e-5,
+                execution_policy="device_convergent",
+            )
+            device_result = device_plan.solve(rhs)
+            device_stats = device_plan.statistics()
+            assert device_result.converged
             assert (
-                stats["identity"]["solver_execution_policy"]
+                device_stats["identity"]["solver_execution_policy"]
                 == "device_convergent"
             )
-            assert stats["identity"]["solver_control_path"] == (
+            assert device_stats["identity"]["solver_control_path"] == (
                 "generic_structured_graph"
             )
-            assert stats["operations"]["host_scalar_readbacks"] == 2
-            assert stats["operations"]["wasted_iterations"] == 0
-        else:
-            assert (
-                stats["identity"]["solver_execution_policy"]
-                == "bounded_convergent"
-            )
+            assert device_stats["operations"]["host_scalar_readbacks"] == 1
+            assert device_stats["operations"]["wasted_iterations"] == 0
     elif impl.current_cfg().arch == ti.vulkan:
         assert (
             stats["identity"]["solver_execution_policy"]
@@ -820,10 +857,7 @@ def test_experimental_fixed_linear_operator_pcg():
         assert stats["operations"]["wasted_iterations"] == 6
         assert stats["operations"]["executed_iterations"] == 8
         assert stats["operations"]["logical_iterations"] == 2
-    if (
-        impl.current_cfg().arch == ti.cuda
-        and not capabilities["device_convergent"]["supported"]
-    ):
+    if impl.current_cfg().arch == ti.cuda:
         assert stats["resources"]["cublas_device_pointer_mode"]
     if impl.current_cfg().arch == ti.vulkan:
         assert (

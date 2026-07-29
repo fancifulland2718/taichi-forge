@@ -1991,6 +1991,9 @@ def _solver_execution_capabilities(
     native_upgrade_available = (
         bounded_qualified and is_cuda and cuda_conditional["fully_available"]
     )
+    native_upgrade_automatic = (
+        native_upgrade_available and provider_kind == "stored"
+    )
     native_replay_qualified = (
         not batched
         and provider_kind == "stored"
@@ -2016,7 +2019,7 @@ def _solver_execution_capabilities(
         default_execution_policy = (
             "host_each_iteration" if is_cpu else "host_check_every_k"
         )
-    elif is_cuda and bounded_qualified:
+    elif is_cuda and bounded_qualified and provider_kind == "stored":
         default_execution_policy = "bounded_convergent"
     elif is_cuda and (
         native_replay_qualified
@@ -2052,6 +2055,7 @@ def _solver_execution_capabilities(
                 "none_inside_python" if is_cpu else "chunk_boundaries_only"
             ),
             "native_upgrade_available": native_upgrade_available,
+            "native_upgrade_automatic": native_upgrade_automatic,
             "native_upgrade_primitive": conditional_primitive,
             "native_upgrade_unavailable_reason": unavailable_reason,
         },
@@ -2063,6 +2067,26 @@ def _solver_execution_capabilities(
                 cuda_conditional["runtime_path_compiled"] if is_cuda else False
             ),
             "provider_qualified": bounded_qualified and is_cuda,
+            "automatic_selection_qualified": native_upgrade_automatic,
+            "qualification_scope": (
+                "automatic"
+                if native_upgrade_automatic
+                else (
+                    "explicit_only"
+                    if policies["device_convergent"]
+                    else "unsupported"
+                )
+            ),
+            "automatic_selection_unavailable_reason": (
+                "none"
+                if native_upgrade_automatic
+                else (
+                    "compiled_kernel_graph_krylov_not_latency_qualified"
+                    if policies["device_convergent"]
+                    and provider_kind == "kernel"
+                    else device_unavailable_reason
+                )
+            ),
             "unsupported_reason": (
                 "none"
                 if policies["device_convergent"]
@@ -2789,6 +2813,10 @@ class SolvePlan:
             if (
                 arch == _ti_core.Arch.cuda
                 and self.bounded_mode != "portable"
+                and (
+                    self.operator._provider_kind == "stored"
+                    or self.bounded_mode == "native_required"
+                )
                 and bounded["native_upgrade_available"]
             ):
                 self._native_execution_policy = "device_convergent"
