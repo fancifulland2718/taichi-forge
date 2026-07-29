@@ -95,7 +95,7 @@ def test_linear_operator_graph_action_reuses_provider_generation_and_dense_stora
     )
 
 
-@test_utils.test(arch=ti.cpu, offline_cache=False)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_linear_operator_graph_action_embeds_in_multi_condition_while():
     operator = _diagonal_operator([1.0, 1.0, 1.0, 1.0])
 

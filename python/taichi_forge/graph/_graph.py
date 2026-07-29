@@ -1733,11 +1733,16 @@ class _CompiledWhileGraphNode:
         self.runtime_arg_names = self.recording_runtime_arg_names.difference(
             (*self.fixed_runtime_args, *self.temporary_runtime_arg_names)
         )
-        self.lifetime_leases = tuple(
-            (*condition._lifetime_leases, *body._lifetime_leases)
+        active_sequences = (
+            (condition,) if self.max_iterations == 0 else (condition, body)
         )
-        self.source_native_count = (
-            condition._source_native_count + body._source_native_count
+        self.lifetime_leases = tuple(
+            lease
+            for sequence in active_sequences
+            for lease in sequence._lifetime_leases
+        )
+        self.source_native_count = sum(
+            sequence._source_native_count for sequence in active_sequences
         )
         self.snode_tree_dependencies = frozenset().union(
             *(node.snode_tree_dependencies for node in dependency_nodes)

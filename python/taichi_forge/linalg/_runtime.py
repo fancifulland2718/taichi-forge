@@ -1955,9 +1955,11 @@ def _solver_execution_capabilities(
         unavailable_reason = "device_convergent_is_gpu_only"
         prerequisites = ()
 
+    bounded_provider_qualified = provider_kind in ("stored", "kernel")
     bounded_qualified = (
         not batched
-        and provider_kind == "stored"
+        and bounded_provider_qualified
+        and preconditioner_replay_qualified
         and method in ("cg", "pcg")
         and dtype == f32
         and (is_cpu or is_cuda or is_vulkan)
@@ -2043,7 +2045,7 @@ def _solver_execution_capabilities(
             "supported": bounded_qualified,
             "primitive": bounded_primitive,
             "qualified_methods": ("cg", "pcg"),
-            "qualified_provider_kinds": ("stored",),
+            "qualified_provider_kinds": ("stored", "kernel"),
             "qualified_dtypes": ("f32",),
             "chunk_schedule": (1, 1, 2, 4, 8, 16),
             "host_observation_scope": (
@@ -2658,6 +2660,23 @@ class SolvePlan:
         self._preconditioner_replay_qualified = preconditioner is None or (
             method in ("pcg", "minres") and isinstance(preconditioner, str)
         )
+        if method == "pcg" and isinstance(preconditioner, LinearOperator):
+            self._preconditioner_replay_qualified = bool(
+                preconditioner.dtype == f32
+                and preconditioner._provider_kind == "kernel"
+                and preconditioner._handle._supports_recordable_kernel()
+            )
+        elif method == "pcg" and isinstance(
+            preconditioner, PreconditionerPlan
+        ):
+            action = preconditioner._consumer_action
+            self._preconditioner_replay_qualified = bool(
+                preconditioner.behavior == "fixed_linear"
+                and action is not None
+                and action.dtype == f32
+                and action._provider_kind == "kernel"
+                and action._handle._supports_recordable_kernel()
+            )
         if method in ("gmres", "fgmres"):
             if restart is None:
                 restart = 16
@@ -2706,12 +2725,14 @@ class SolvePlan:
             )
         )
         self._solver = self._build_solver()
+        self._uses_graph_krylov = hasattr(self._solver, "solve_arrays")
         get_runtime().register_runtime_object(self)
 
     def _invalidate_runtime(self):
         # Solver plans own backend workspaces and must release them before the
         # Program allocator/backend teardown.
         self._solver = None
+        self._uses_graph_krylov = False
         self._native_preconditioner = None
         self._vector_io = None
         self.operator = None
@@ -3434,6 +3455,21 @@ class SolvePlan:
                     self.rtol,
                 )
             if arch == _ti_core.Arch.cuda:
+                if (
+                    kind == "kernel"
+                    and self._native_execution_policy == "device_convergent"
+                ):
+                    from taichi_forge.linalg._graph_krylov import (
+                        GraphKrylovSolver,
+                    )
+
+                    return GraphKrylovSolver(
+                        self.operator,
+                        None,
+                        max_iterations=self.max_iterations,
+                        absolute_tolerance=self.atol,
+                        relative_tolerance=self.rtol,
+                    )
                 if kind == "kernel":
                     factory = _ti_core._make_cuda_compiled_kernel_cg_solver
                 elif kind == "graph":
@@ -3509,6 +3545,31 @@ class SolvePlan:
                 preconditioner_scope = None
                 preconditioner_action = self.preconditioner
             self._require_fixed_linear_preconditioner(preconditioner_action)
+            if (
+                arch == _ti_core.Arch.cuda
+                and kind == "kernel"
+                and preconditioner_action._provider_kind == "kernel"
+                and self._native_execution_policy == "device_convergent"
+            ):
+                if not (
+                    self.operator._handle._supports_recordable_kernel()
+                    and preconditioner_action._handle._supports_recordable_kernel()
+                ):
+                    raise TaichiRuntimeError(
+                        "CUDA device-convergent PCG requires recordable "
+                        "compiled-kernel A and M providers"
+                    )
+                from taichi_forge.linalg._graph_krylov import (
+                    GraphKrylovSolver,
+                )
+
+                return GraphKrylovSolver(
+                    self.operator,
+                    preconditioner_action,
+                    max_iterations=self.max_iterations,
+                    absolute_tolerance=self.atol,
+                    relative_tolerance=self.rtol,
+                )
             if arch in cpu_arches:
                 factory = _ti_core._make_cpu_experimental_pcg_solver
                 return factory(
@@ -3734,7 +3795,9 @@ class SolvePlan:
             self.preconditioner._require_target(self.operator)
             preconditioner_scope = self.preconditioner.pin()
         cpu_arches = (_ti_core.Arch.x64, _ti_core.Arch.arm64)
-        if (
+        if self._uses_graph_krylov:
+            self._solver.solve_arrays(output_operand.array, rhs_operand.array)
+        elif (
             self.method in ("bicgstab", "gmres", "fgmres", "minres")
             and self._program.config().arch in cpu_arches
         ):
