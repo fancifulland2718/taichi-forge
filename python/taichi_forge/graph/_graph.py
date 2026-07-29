@@ -14,6 +14,7 @@ from taichi_forge.lang._storage_view import DenseNdarrayView, ndarray_view
 from taichi_forge.lang._texture import Texture
 from taichi_forge.lang.exception import TaichiCompilationError, TaichiRuntimeError
 from taichi_forge.lang.field import ScalarField
+from taichi_forge.lang.util import to_numpy_type
 from taichi_forge.lang.matrix import Matrix, MatrixField, MatrixType
 from taichi_forge.types._argument_descriptor import (
     describe_element_type,
@@ -130,8 +131,11 @@ class GraphBoundedLoopReport:
     overshoot_iterations: int
     observation_boundaries: Tuple[int, ...]
     predicate_values: Tuple[int, ...]
+    counter_values: Tuple[int, ...]
     chunk_sizes: Tuple[int, ...]
     observation_batches: int
+    observation_scalar_count: int
+    device_to_host_bytes: int
     initial_counter: Optional[int]
     final_counter: Optional[int]
     native_upgrade_eligible: bool
@@ -639,18 +643,34 @@ class _CompiledNativeGraphNode:
         return self.executable.debug_info
 
 
-def _bounded_scalar_value(value, name):
-    to_numpy = getattr(value, "to_numpy", None)
-    if to_numpy is None:
+def _bounded_scalar_values(values, names):
+    if len(values) != len(names):
         raise TaichiRuntimeError(
-            f"Bounded Graph loop {name} must be a device scalar with to_numpy()"
+            "Bounded Graph loop observation names do not match values"
         )
-    host = np.asarray(to_numpy())
-    if host.size != 1:
-        raise TaichiRuntimeError(
-            f"Bounded Graph loop {name} must contain exactly one scalar"
+    sources = []
+    hosts = []
+    for value, name in zip(values, names):
+        ndarray = getattr(value, "arr", None)
+        dtype = getattr(value, "dtype", None)
+        if ndarray is None or dtype is None:
+            raise TaichiRuntimeError(
+                f"Bounded Graph loop {name} must be a device ndarray scalar"
+            )
+        host = np.empty(
+            shape=ndarray.total_shape(), dtype=to_numpy_type(dtype)
         )
-    return int(host.reshape(-1)[0])
+        if host.size != 1:
+            raise TaichiRuntimeError(
+                f"Bounded Graph loop {name} must contain exactly one scalar"
+            )
+        sources.append(ndarray)
+        hosts.append(host)
+    impl.get_runtime().prog.copy_ndarrays_to_host(sources, hosts)
+    return (
+        tuple(int(host.reshape(-1)[0]) for host in hosts),
+        sum(host.nbytes for host in hosts),
+    )
 
 
 def _bounded_predicate_continues(value, convention):
@@ -804,26 +824,53 @@ class _CompiledBoundedLoopGraphNode:
         counter_object = (
             runtime_args[self.counter] if self.counter is not None else None
         )
-        initial_counter = (
-            _bounded_scalar_value(counter_object, self.counter)
-            if counter_object is not None
-            else None
-        )
         observations = []
         predicate_values = []
+        counter_values = []
         chunks = []
         executed = 0
+        observation_batches = 0
+        observation_scalar_count = 0
+        device_to_host_bytes = 0
+
+        def observe_control(boundary):
+            nonlocal observation_batches
+            nonlocal observation_scalar_count
+            nonlocal device_to_host_bytes
+            values = [predicate_object]
+            names = [self.predicate]
+            if counter_object is not None:
+                values.append(counter_object)
+                names.append(self.counter)
+            observed, byte_count = _bounded_scalar_values(values, names)
+            observation_batches += 1
+            observation_scalar_count += len(observed)
+            device_to_host_bytes += byte_count
+            observations.append(boundary)
+            predicate_values.append(observed[0])
+            if counter_object is not None:
+                counter_values.append(observed[1])
+            return observed[0]
 
         if self.initial_observation:
-            predicate_value = _bounded_scalar_value(
-                predicate_object, self.predicate
+            predicate_value = observe_control(0)
+            initial_counter = (
+                counter_values[-1] if counter_object is not None else None
             )
-            observations.append(0)
-            predicate_values.append(predicate_value)
             active = _bounded_predicate_continues(
                 predicate_value, self.predicate_convention
             )
         else:
+            if counter_object is not None:
+                observed, byte_count = _bounded_scalar_values(
+                    [counter_object], [self.counter]
+                )
+                observation_batches += 1
+                observation_scalar_count += 1
+                device_to_host_bytes += byte_count
+                initial_counter = observed[0]
+            else:
+                initial_counter = None
             active = True
 
         while active and executed < self.max_iterations:
@@ -831,19 +878,15 @@ class _CompiledBoundedLoopGraphNode:
             self._chunks[chunk].run(context)
             executed += chunk
             chunks.append(chunk)
-            predicate_value = _bounded_scalar_value(
-                predicate_object, self.predicate
-            )
-            observations.append(executed)
-            predicate_values.append(predicate_value)
+            predicate_value = observe_control(executed)
             active = _bounded_predicate_continues(
                 predicate_value, self.predicate_convention
             )
 
+        if not observations or observations[-1] != executed:
+            observe_control(executed)
         final_counter = (
-            _bounded_scalar_value(counter_object, self.counter)
-            if counter_object is not None
-            else None
+            counter_values[-1] if counter_object is not None else None
         )
         if final_counter is not None:
             logical = final_counter - initial_counter
@@ -873,8 +916,11 @@ class _CompiledBoundedLoopGraphNode:
             overshoot_iterations=executed - logical,
             observation_boundaries=tuple(observations),
             predicate_values=tuple(predicate_values),
+            counter_values=tuple(counter_values),
             chunk_sizes=tuple(chunks),
-            observation_batches=len(observations) + (2 if counter_object is not None else 0),
+            observation_batches=observation_batches,
+            observation_scalar_count=observation_scalar_count,
+            device_to_host_bytes=device_to_host_bytes,
             initial_counter=initial_counter,
             final_counter=final_counter,
             native_upgrade_eligible=self._native_upgrade_eligible,
