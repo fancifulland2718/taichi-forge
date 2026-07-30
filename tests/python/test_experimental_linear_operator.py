@@ -272,6 +272,11 @@ def test_experimental_kernel_traits_numeric_update_and_cg():
             assert device_stats["identity"]["solver_control_path"] == (
                 "generic_structured_graph"
             )
+            assert device_stats["identity"]["reduction_strategy"] == (
+                "block_shared_two_stage"
+            )
+            assert device_stats["resources"]["reduction_partial_count"] == 1
+            assert device_stats["resources"]["reduction_workspace_bytes"] == 8
             assert device_stats["operations"]["host_scalar_readbacks"] == 1
             device_initial = device_plan.solve(
                 rhs, initial_guess=_vector(exact)

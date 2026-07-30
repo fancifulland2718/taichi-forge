@@ -49,6 +49,21 @@ class GraphKrylovSolver:
             name: ti.ndarray(ti.f32, shape=self._size)
             for name in ("ax", "r", "z", "p", "ap")
         }
+        self._reduction_block_dim = 256
+        self._reduction_items_per_thread = 4
+        reduction_threads = (
+            self._size + self._reduction_items_per_thread - 1
+        ) // self._reduction_items_per_thread
+        self._reduction_partial_count = (
+            reduction_threads + self._reduction_block_dim - 1
+        ) // self._reduction_block_dim
+        self._reduction_worker_count = (
+            self._reduction_partial_count * self._reduction_block_dim
+        )
+        self._reduction_partials = {
+            name: ti.ndarray(ti.f32, shape=self._reduction_partial_count)
+            for name in ("partial0", "partial1")
+        }
         self._scalars = {
             name: ti.ndarray(ti.f32, shape=())
             for name in (
@@ -84,12 +99,54 @@ class GraphKrylovSolver:
         atol = self._atol
         rtol = self._rtol
         max_iterations = self._max_iterations
+        reduction_block_dim = self._reduction_block_dim
+        reduction_items_per_thread = self._reduction_items_per_thread
+        reduction_partial_count = self._reduction_partial_count
+        reduction_worker_count = self._reduction_worker_count
 
         @ti.kernel
-        def initialize(
+        def initialize_blocks(
             b: ti.types.ndarray(dtype=ti.f32, ndim=1),
             ax: ti.types.ndarray(dtype=ti.f32, ndim=1),
             r: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            residual_partial: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            rhs_partial: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        ):
+            ti.loop_config(block_dim=reduction_block_dim)
+            for worker in range(reduction_worker_count):
+                lane = worker % reduction_block_dim
+                residual_pad = ti.simt.block.SharedArray(
+                    (reduction_block_dim,), ti.f32
+                )
+                rhs_pad = ti.simt.block.SharedArray(
+                    (reduction_block_dim,), ti.f32
+                )
+                residual_sum = 0.0
+                rhs_sum = 0.0
+                for item in ti.static(range(reduction_items_per_thread)):
+                    index = worker * reduction_items_per_thread + item
+                    if index < size:
+                        value = b[index] - ax[index]
+                        r[index] = value
+                        residual_sum += value * value
+                        rhs_sum += b[index] * b[index]
+                residual_pad[lane] = residual_sum
+                rhs_pad[lane] = rhs_sum
+                ti.simt.block.sync()
+                for stride in ti.static([128, 64, 32, 16, 8, 4, 2, 1]):
+                    if lane < stride:
+                        residual_pad[lane] += residual_pad[lane + stride]
+                        rhs_pad[lane] += rhs_pad[lane + stride]
+                    ti.simt.block.sync()
+                if lane == 0:
+                    block = worker // reduction_block_dim
+                    residual_partial[block] = residual_pad[0]
+                    rhs_partial[block] = rhs_pad[0]
+
+        @ti.kernel
+        def finalize_initialize(
+            residual_partial: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            rhs_partial: ti.types.ndarray(dtype=ti.f32, ndim=1),
             initial_residual_sq: ti.types.ndarray(dtype=ti.f32, ndim=0),
             residual_sq: ti.types.ndarray(dtype=ti.f32, ndim=0),
             norm_b_sq: ti.types.ndarray(dtype=ti.f32, ndim=0),
@@ -103,12 +160,11 @@ class GraphKrylovSolver:
             predicate[None] = 0
             status[None] = _RUNNING
             counter[None] = 0
-            for index in range(size):
-                value = b[index] - ax[index]
-                r[index] = value
-                ti.atomic_add(initial_residual_sq[None], value * value)
-                ti.atomic_add(residual_sq[None], value * value)
-                ti.atomic_add(norm_b_sq[None], b[index] * b[index])
+            for block in range(reduction_partial_count):
+                value = residual_partial[block]
+                ti.atomic_add(initial_residual_sq[None], value)
+                ti.atomic_add(residual_sq[None], value)
+                ti.atomic_add(norm_b_sq[None], rhs_partial[block])
 
         @ti.kernel
         def seed_cg(
@@ -153,14 +209,39 @@ class GraphKrylovSolver:
             predicate[None] = int(status[None] == _RUNNING)
 
         @ti.kernel
-        def reduce_pap(
+        def reduce_pap_blocks(
             p: ti.types.ndarray(dtype=ti.f32, ndim=1),
             ap: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            partial: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        ):
+            ti.loop_config(block_dim=reduction_block_dim)
+            for worker in range(reduction_worker_count):
+                lane = worker % reduction_block_dim
+                pad = ti.simt.block.SharedArray(
+                    (reduction_block_dim,), ti.f32
+                )
+                value = 0.0
+                for item in ti.static(range(reduction_items_per_thread)):
+                    index = worker * reduction_items_per_thread + item
+                    if index < size:
+                        value += p[index] * ap[index]
+                pad[lane] = value
+                ti.simt.block.sync()
+                for stride in ti.static([128, 64, 32, 16, 8, 4, 2, 1]):
+                    if lane < stride:
+                        pad[lane] += pad[lane + stride]
+                    ti.simt.block.sync()
+                if lane == 0:
+                    partial[worker // reduction_block_dim] = pad[0]
+
+        @ti.kernel
+        def finalize_pap(
+            partial: ti.types.ndarray(dtype=ti.f32, ndim=1),
             pap: ti.types.ndarray(dtype=ti.f32, ndim=0),
         ):
             pap[None] = 0.0
-            for index in range(size):
-                ti.atomic_add(pap[None], p[index] * ap[index])
+            for block in range(reduction_partial_count):
+                ti.atomic_add(pap[None], partial[block])
 
         @ti.kernel
         def prepare_alpha(
@@ -199,32 +280,92 @@ class GraphKrylovSolver:
                     r[index] -= alpha[None] * ap[index]
 
         @ti.kernel
-        def reduce_next_cg(
+        def reduce_next_cg_blocks(
             r: ti.types.ndarray(dtype=ti.f32, ndim=1),
             z: ti.types.ndarray(dtype=ti.f32, ndim=1),
-            residual_sq: ti.types.ndarray(dtype=ti.f32, ndim=0),
-            rz_new: ti.types.ndarray(dtype=ti.f32, ndim=0),
+            residual_partial: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            rz_partial: ti.types.ndarray(dtype=ti.f32, ndim=1),
         ):
-            residual_sq[None] = 0.0
-            rz_new[None] = 0.0
-            for index in range(size):
-                value = r[index]
-                z[index] = value
-                ti.atomic_add(residual_sq[None], value * value)
-                ti.atomic_add(rz_new[None], value * value)
+            ti.loop_config(block_dim=reduction_block_dim)
+            for worker in range(reduction_worker_count):
+                lane = worker % reduction_block_dim
+                residual_pad = ti.simt.block.SharedArray(
+                    (reduction_block_dim,), ti.f32
+                )
+                rz_pad = ti.simt.block.SharedArray(
+                    (reduction_block_dim,), ti.f32
+                )
+                residual_sum = 0.0
+                rz_sum = 0.0
+                for item in ti.static(range(reduction_items_per_thread)):
+                    index = worker * reduction_items_per_thread + item
+                    if index < size:
+                        value = r[index]
+                        z[index] = value
+                        residual_sum += value * value
+                        rz_sum += value * value
+                residual_pad[lane] = residual_sum
+                rz_pad[lane] = rz_sum
+                ti.simt.block.sync()
+                for stride in ti.static([128, 64, 32, 16, 8, 4, 2, 1]):
+                    if lane < stride:
+                        residual_pad[lane] += residual_pad[lane + stride]
+                        rz_pad[lane] += rz_pad[lane + stride]
+                    ti.simt.block.sync()
+                if lane == 0:
+                    block = worker // reduction_block_dim
+                    residual_partial[block] = residual_pad[0]
+                    rz_partial[block] = rz_pad[0]
 
         @ti.kernel
-        def reduce_next_pcg(
+        def reduce_next_pcg_blocks(
             r: ti.types.ndarray(dtype=ti.f32, ndim=1),
             z: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            residual_partial: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            rz_partial: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        ):
+            ti.loop_config(block_dim=reduction_block_dim)
+            for worker in range(reduction_worker_count):
+                lane = worker % reduction_block_dim
+                residual_pad = ti.simt.block.SharedArray(
+                    (reduction_block_dim,), ti.f32
+                )
+                rz_pad = ti.simt.block.SharedArray(
+                    (reduction_block_dim,), ti.f32
+                )
+                residual_sum = 0.0
+                rz_sum = 0.0
+                for item in ti.static(range(reduction_items_per_thread)):
+                    index = worker * reduction_items_per_thread + item
+                    if index < size:
+                        value = r[index]
+                        residual_sum += value * value
+                        rz_sum += value * z[index]
+                residual_pad[lane] = residual_sum
+                rz_pad[lane] = rz_sum
+                ti.simt.block.sync()
+                for stride in ti.static([128, 64, 32, 16, 8, 4, 2, 1]):
+                    if lane < stride:
+                        residual_pad[lane] += residual_pad[lane + stride]
+                        rz_pad[lane] += rz_pad[lane + stride]
+                    ti.simt.block.sync()
+                if lane == 0:
+                    block = worker // reduction_block_dim
+                    residual_partial[block] = residual_pad[0]
+                    rz_partial[block] = rz_pad[0]
+
+        @ti.kernel
+        def finalize_next(
+            residual_partial: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            rz_partial: ti.types.ndarray(dtype=ti.f32, ndim=1),
             residual_sq: ti.types.ndarray(dtype=ti.f32, ndim=0),
             rz_new: ti.types.ndarray(dtype=ti.f32, ndim=0),
         ):
             residual_sq[None] = 0.0
             rz_new[None] = 0.0
-            for index in range(size):
-                ti.atomic_add(residual_sq[None], r[index] * r[index])
-                ti.atomic_add(rz_new[None], r[index] * z[index])
+            for block in range(reduction_partial_count):
+                ti.atomic_add(residual_sq[None], residual_partial[block])
+                ti.atomic_add(rz_new[None], rz_partial[block])
 
         @ti.kernel
         def prepare_beta(
@@ -278,6 +419,9 @@ class GraphKrylovSolver:
             terminal[4] = norm_b_sq[None]
 
         vectors = {name: _array_arg(name) for name in ("b", "x", *self._vectors)}
+        partials = {
+            name: _array_arg(name) for name in self._reduction_partials
+        }
         scalars = {
             name: _scalar_array_arg(name, ti.f32) for name in self._scalars
         }
@@ -291,10 +435,17 @@ class GraphKrylovSolver:
             self._operator.graph_action(vectors["x"], vectors["ax"])
         )
         builder.dispatch(
-            initialize,
+            initialize_blocks,
             vectors["b"],
             vectors["ax"],
             vectors["r"],
+            partials["partial0"],
+            partials["partial1"],
+        )
+        builder.dispatch(
+            finalize_initialize,
+            partials["partial0"],
+            partials["partial1"],
             scalars["initial_residual_sq"],
             scalars["residual_sq"],
             scalars["norm_b_sq"],
@@ -335,7 +486,17 @@ class GraphKrylovSolver:
         body.append_native(
             self._operator.graph_action(vectors["p"], vectors["ap"])
         )
-        body.dispatch(reduce_pap, vectors["p"], vectors["ap"], scalars["pap"])
+        body.dispatch(
+            reduce_pap_blocks,
+            vectors["p"],
+            vectors["ap"],
+            partials["partial0"],
+        )
+        body.dispatch(
+            finalize_pap,
+            partials["partial0"],
+            scalars["pap"],
+        )
         body.dispatch(
             prepare_alpha,
             scalars["rz_old"],
@@ -354,9 +515,16 @@ class GraphKrylovSolver:
         )
         if self._preconditioner is None:
             body.dispatch(
-                reduce_next_cg,
+                reduce_next_cg_blocks,
                 vectors["r"],
                 vectors["z"],
+                partials["partial0"],
+                partials["partial1"],
+            )
+            body.dispatch(
+                finalize_next,
+                partials["partial0"],
+                partials["partial1"],
                 scalars["residual_sq"],
                 scalars["rz_new"],
             )
@@ -365,9 +533,16 @@ class GraphKrylovSolver:
                 self._preconditioner.graph_action(vectors["r"], vectors["z"])
             )
             body.dispatch(
-                reduce_next_pcg,
+                reduce_next_pcg_blocks,
                 vectors["r"],
                 vectors["z"],
+                partials["partial0"],
+                partials["partial1"],
+            )
+            body.dispatch(
+                finalize_next,
+                partials["partial0"],
+                partials["partial1"],
                 scalars["residual_sq"],
                 scalars["rz_new"],
             )
@@ -420,15 +595,18 @@ class GraphKrylovSolver:
             terminal,
         )
         self._kernels = (
-            initialize,
+            initialize_blocks,
+            finalize_initialize,
             seed_cg,
             seed_pcg,
             evaluate_condition,
-            reduce_pap,
+            reduce_pap_blocks,
+            finalize_pap,
             prepare_alpha,
             update_solution_residual,
-            reduce_next_cg,
-            reduce_next_pcg,
+            reduce_next_cg_blocks,
+            reduce_next_pcg_blocks,
+            finalize_next,
             prepare_beta,
             update_direction,
             write_terminal,
@@ -455,7 +633,13 @@ class GraphKrylovSolver:
         }
 
     def solve_arrays(self, x, b):
-        arguments = {"x": x, "b": b, **self._vectors, **self._scalars}
+        arguments = {
+            "x": x,
+            "b": b,
+            **self._vectors,
+            **self._reduction_partials,
+            **self._scalars,
+        }
         arguments.update(
             {
                 "predicate": self._predicate,
@@ -518,7 +702,12 @@ class GraphKrylovSolver:
 
     def _debug_runtime_stats(self):
         iterations = int(self._last_result["iterations"])
-        workspace_bytes = (5 * self._size + 5 + 8) * 4 + 3 * 4
+        reduction_workspace_bytes = self._reduction_partial_count * 2 * 4
+        workspace_bytes = (
+            (5 * self._size + 5 + 8) * 4
+            + 3 * 4
+            + reduction_workspace_bytes
+        )
         identity = {
             "schema_version": 1,
             "backend_family": "cuda",
@@ -542,6 +731,7 @@ class GraphKrylovSolver:
             "solver_graph_enabled": True,
             "solver_replay_unavailable_reason": "none",
             "provider_recordable": True,
+            "reduction_strategy": "block_shared_two_stage",
         }
         if self._preconditioner is not None:
             identity.update(
@@ -555,6 +745,10 @@ class GraphKrylovSolver:
             "persistent_scalar_reserved_bytes": (5 + 8 + 3) * 4,
             "graph_owned_workspace": True,
             "external_preconditioner": self._preconditioner is not None,
+            "reduction_partial_count": self._reduction_partial_count,
+            "reduction_block_dim": self._reduction_block_dim,
+            "reduction_items_per_thread": self._reduction_items_per_thread,
+            "reduction_workspace_bytes": reduction_workspace_bytes,
         }
         operations = {
             "solve_calls": self._solve_calls,
