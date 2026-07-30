@@ -120,7 +120,7 @@ def _build_graph(
     return builder.compile()
 
 
-def _arguments(*, size, regions, logical_iterations):
+def _arguments(*, size, regions, active_regions, logical_iterations):
     args = {
         "values": ti.ndarray(ti.f32, shape=size),
         "state": ti.ndarray(ti.i32, shape=()),
@@ -128,14 +128,15 @@ def _arguments(*, size, regions, logical_iterations):
     for index in range(regions):
         args[f"predicate_{index}"] = ti.ndarray(ti.i32, shape=())
         args[f"counter_{index}"] = ti.ndarray(ti.i32, shape=())
-        args[f"target_{index}"] = (index + 1) * logical_iterations
+        args[f"target_{index}"] = min(index + 1, active_regions) * logical_iterations
     return args
 
 
-def _measure(graph, args, *, mode, warmups, repeats):
+def _measure(graph, args, *, mode, warmups, repeats, telemetry):
     for _ in range(warmups):
         if mode == "submit":
-            graph.submit(args).wait()
+            ticket = graph.submit(args, telemetry=telemetry)
+            ticket.telemetry() if telemetry else ticket.wait()
         else:
             graph.run(args)
     ti.sync()
@@ -147,16 +148,24 @@ def _measure(graph, args, *, mode, warmups, repeats):
     call_us = []
     total_us = []
     wait_us = []
+    telemetry_us = []
+    instrumented_total_us = []
+    last_telemetry = None
     for _ in range(repeats):
         start = time.perf_counter_ns()
         if mode == "submit":
-            ticket = graph.submit(args)
+            ticket = graph.submit(args, telemetry=telemetry)
             submitted = time.perf_counter_ns()
             ticket.wait()
+            completed = time.perf_counter_ns()
+            if telemetry:
+                last_telemetry = ticket.telemetry()
             finished = time.perf_counter_ns()
             call_us.append((submitted - start) / 1.0e3)
-            wait_us.append((finished - submitted) / 1.0e3)
-            total_us.append((finished - start) / 1.0e3)
+            wait_us.append((completed - submitted) / 1.0e3)
+            total_us.append((completed - start) / 1.0e3)
+            telemetry_us.append((finished - completed) / 1.0e3)
+            instrumented_total_us.append((finished - start) / 1.0e3)
         else:
             graph.run(args)
             finished = time.perf_counter_ns()
@@ -164,14 +173,50 @@ def _measure(graph, args, *, mode, warmups, repeats):
             call_us.append(elapsed)
             wait_us.append(0.0)
             total_us.append(elapsed)
+            telemetry_us.append(0.0)
+            instrumented_total_us.append(elapsed)
     ti.sync()
     after = ti.runtime.stats()
     queue_after = ti.lang.impl.get_runtime().prog._debug_vulkan_queue_submission_stats()
+    memory = graph.execution_stats().memory
     return {
         "mode": mode,
         "host_call_us": _summary(call_us),
         "completion_wait_us": _summary(wait_us),
         "end_to_end_us": _summary(total_us),
+        "telemetry_materialize_us": _summary(telemetry_us),
+        "instrumented_end_to_end_us": _summary(instrumented_total_us),
+        "last_telemetry": (
+            None
+            if last_telemetry is None
+            else {
+                "device_snapshot_bytes": last_telemetry.device_snapshot_bytes,
+                "host_readback_bytes": last_telemetry.host_readback_bytes,
+                "logical_iterations": [
+                    region.logical_iterations for region in last_telemetry.regions
+                ],
+                "masked_iterations": [
+                    region.masked_iterations for region in last_telemetry.regions
+                ],
+                "coarse_skipped_chunks": [
+                    region.coarse_skipped_chunk_count
+                    for region in last_telemetry.regions
+                ],
+                "queue_submit_calls": (
+                    last_telemetry.queue.queue_submit_calls
+                    if last_telemetry.queue.available
+                    else None
+                ),
+                "gpu_timestamp_status": (last_telemetry.gpu_timestamp_status),
+            }
+        ),
+        "graph_memory": {
+            "persistent_bytes": memory.persistent_bytes,
+            "persistent_argument_bytes": memory.persistent_argument_bytes,
+            "persistent_observation_bytes": memory.persistent_observation_bytes,
+            "persistent_telemetry_bytes": memory.persistent_telemetry_bytes,
+            "opaque_driver_bytes": memory.opaque_driver_bytes,
+        },
         "runtime_delta": {
             "graph_submissions": (
                 after.submission.graph_submissions - before.submission.graph_submissions
@@ -230,6 +275,7 @@ def main():
     parser.add_argument("--strategy", default="auto")
     parser.add_argument("--size", type=int, default=4096)
     parser.add_argument("--regions", type=int, default=16)
+    parser.add_argument("--active-regions", type=int)
     parser.add_argument("--budget", type=int, default=512)
     parser.add_argument("--chunk-size", type=int, default=64)
     parser.add_argument(
@@ -240,7 +286,13 @@ def main():
     parser.add_argument("--logical-iterations", type=int, default=12)
     parser.add_argument("--warmups", type=int, default=5)
     parser.add_argument("--repeats", type=int, default=30)
+    parser.add_argument("--telemetry", action="store_true")
     args = parser.parse_args()
+    active_regions = (
+        args.regions if args.active_regions is None else args.active_regions
+    )
+    if active_regions < 0 or active_regions > args.regions:
+        parser.error("--active-regions must be between zero and --regions")
 
     if args.strategy:
         os.environ["TI_GRAPH_VULKAN_STRUCTURED_STRATEGY"] = args.strategy
@@ -266,6 +318,7 @@ def main():
     runtime_args = _arguments(
         size=args.size,
         regions=args.regions,
+        active_regions=active_regions,
         logical_iterations=args.logical_iterations,
     )
     result = _measure(
@@ -274,17 +327,18 @@ def main():
         mode=args.mode,
         warmups=args.warmups,
         repeats=args.repeats,
+        telemetry=args.telemetry,
     )
 
-    expected_state = args.regions * args.logical_iterations
+    expected_state = active_regions * args.logical_iterations
     assert runtime_args["state"].to_numpy()[()] == expected_state
     np.testing.assert_array_equal(
         runtime_args["values"].to_numpy(),
         np.full(args.size, expected_state, dtype=np.float32),
     )
     for index in range(args.regions):
-        assert (
-            runtime_args[f"counter_{index}"].to_numpy()[()] == args.logical_iterations
+        assert runtime_args[f"counter_{index}"].to_numpy()[()] == (
+            args.logical_iterations if index < active_regions else 0
         )
 
     print(
@@ -294,12 +348,14 @@ def main():
                 "strategy": args.strategy,
                 "size": args.size,
                 "regions": args.regions,
+                "active_regions": active_regions,
                 "budget": args.budget,
                 "chunk_size": args.chunk_size,
                 "first_chunk_strategy": args.first_chunk_strategy,
                 "logical_iterations": args.logical_iterations,
                 "warmups": args.warmups,
                 "repeats": args.repeats,
+                "telemetry": args.telemetry,
                 "build_ms": build_ms,
                 "capabilities": capabilities["device_control"],
                 "result": result,
