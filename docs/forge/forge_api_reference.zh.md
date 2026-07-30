@@ -1026,7 +1026,7 @@ canvas.submit_frame(frame)
 
 参考：[显示帧提交](display_frame.zh.md)。
 
-### GGUI 字体缩放
+### GGUI 响应式面板与字体
 
 位置：`taichi_forge.ui.imgui.Gui`，由 `window.get_gui()` 返回。
 
@@ -1035,24 +1035,49 @@ canvas.submit_frame(frame)
 | `gui.set_font_scale(scale)` | 使用固定的正数字体倍率，并停止自动跟随窗口高度。 |
 | `gui.set_font_scale_from_window_height(reference_height, reference_scale=1.0)` | 根据窗口逻辑高度连续计算字体倍率。 |
 | `gui.get_font_scale()` | 返回为当前帧准备的有效字体倍率。 |
+| `gui.set_font_size(size)` | 使用以逻辑像素计量的固定字体大小。 |
+| `gui.set_font_size_from_window_height(reference_height, reference_size=16, minimum_size=12, maximum_size=24)` | 根据窗口逻辑高度连续计算有上下限、保持可读的字体大小。 |
+| `gui.get_font_size()` | 返回有效的逻辑像素字体大小。 |
+| `gui.sub_window(name, x, y, width, height=None)` | 创建固定宽度、随可见内容自动调整高度的面板；传入数值高度时保留原有固定尺寸行为。 |
+| `gui.collapsible_section(name, default_open=True)` | 在当前面板中创建可独立展开、收缩的分区。 |
 
 高度跟随模式会在每个 GGUI frame boundary 应用
 `reference_scale * logical_height / reference_height`。这里使用 ImGui 报告的
 逻辑显示高度，而不是 framebuffer 像素高度，因此 HiDPI 像素密度不会被重复乘入。
 窗口最小化导致逻辑高度为 0 时，会保留上一个有效倍率。
+逻辑字体大小模式使用相同的线性计算，再限制到
+`[minimum_size, maximum_size]`；默认在参考高度使用 16 像素，并保持在
+12 至 24 逻辑像素的可读区间。倍率由字体图集内默认字体的真实基准大小推导，
+不会假定特定字体一定是 13 像素。
 
 ```python
 window = ti.ui.Window("simulation", (1280, 720))
 gui = window.get_gui()
-gui.set_font_scale_from_window_height(
+gui.set_font_size_from_window_height(
     reference_height=720,
-    reference_scale=1.0,
+    reference_size=16,
 )
+
+with gui.sub_window("Controls", 0.02, 0.02, 0.3) as panel:
+    with panel.collapsible_section("Solver") as section:
+        if section:
+            section.text("PCG")
+            iterations = section.slider_int(
+                "Iterations", iterations, 1, 100
+            )
+    with panel.collapsible_section(
+        "Rendering", default_open=False
+    ) as section:
+        if section:
+            section.checkbox("Enabled", True)
 ```
 
-两个参数都必须是大于 0 的有限数。该策略只改变字体渲染，不缩放 ImGui padding、
-widget geometry 或 font atlas。Vulkan 与 Metal 使用同一策略计算，不发生 GPU 回读，
-也不会逐帧重建 atlas。
+所有字体大小和倍率参数都必须是大于 0 的有限值，并满足
+`minimum_size <= reference_size <= maximum_size`。自动高度面板每帧使用
+Dear ImGui 的内容测量结果；任意数量的分区展开、收缩后，面板高度会在下一个
+UI frame boundary 随可见内容变化，应用层无需计算高度。每个展开分区还拥有独立的
+widget ID scope。字体策略只改变渲染，不重建 font atlas；Vulkan 与 Metal 共用
+相同的计算和面板行为，不发生 GPU 回读，也不增加 GPU submission。
 
 ## `taichi_forge.linalg` 稀疏线性代数
 

@@ -9,6 +9,21 @@ namespace taichi::ui {
 
 namespace vulkan {
 
+namespace {
+
+float default_font_size(const ImGuiIO &io) {
+  if (io.FontDefault != nullptr) {
+    return io.FontDefault->FontSize * io.FontDefault->Scale;
+  }
+  if (io.Fonts != nullptr && io.Fonts->Fonts.Size > 0 &&
+      io.Fonts->Fonts[0] != nullptr) {
+    return io.Fonts->Fonts[0]->FontSize * io.Fonts->Fonts[0]->Scale;
+  }
+  return 13.0f;
+}
+
+}  // namespace
+
 PFN_vkVoidFunction load_vk_function_for_gui(const char *name, void *userData) {
   auto result = VulkanLoader::instance().load_function(name);
 
@@ -124,7 +139,12 @@ void Gui::prepare_for_next_frame() {
     io.DisplaySize = ImVec2((float)w, (float)h);
   }
   ImGuiIO &io = ImGui::GetIO();
-  io.FontGlobalScale = update_font_scale(io.DisplaySize.y);
+  io.FontGlobalScale =
+      update_font_scale(io.DisplaySize.y, default_font_size(io));
+  if (io.DisplaySize.x > 0.0f && io.DisplaySize.y > 0.0f) {
+    widthBeforeDPIScale = static_cast<int>(io.DisplaySize.x);
+    heightBeforeDPIScale = static_cast<int>(io.DisplaySize.y);
+  }
   ImGui::NewFrame();
   frame_started_ = true;
   is_empty_ = true;
@@ -157,6 +177,39 @@ void Gui::begin(const std::string &name,
   ImGui::SetNextWindowPos(ImVec2(abs_x(x), abs_y(y)), ImGuiCond_Once);
   ImGui::SetNextWindowSize(ImVec2(abs_x(width), abs_y(height)), ImGuiCond_Once);
   ImGui::Begin(name.c_str());
+}
+void Gui::begin_auto(const std::string &name, float x, float y, float width) {
+  mark_used();
+  if (!initialized()) {
+    return;
+  }
+  const float fixed_width = abs_x(width);
+  ImGui::SetNextWindowPos(ImVec2(abs_x(x), abs_y(y)), ImGuiCond_Once);
+  ImGui::SetNextWindowSizeConstraints(ImVec2(fixed_width, 0.0f),
+                                      ImVec2(fixed_width, FLT_MAX));
+  ImGui::Begin(name.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize);
+}
+bool Gui::begin_collapsible_section(const std::string &name,
+                                    bool default_open) {
+  mark_used();
+  if (!initialized()) {
+    return default_open;
+  }
+  const ImGuiTreeNodeFlags flags =
+      default_open ? ImGuiTreeNodeFlags_DefaultOpen : ImGuiTreeNodeFlags_None;
+  const bool expanded = ImGui::CollapsingHeader(name.c_str(), flags);
+  if (expanded) {
+    ImGui::PushID(name.c_str());
+    ImGui::Indent();
+  }
+  return expanded;
+}
+void Gui::end_collapsible_section() {
+  if (!initialized()) {
+    return;
+  }
+  ImGui::Unindent();
+  ImGui::PopID();
 }
 void Gui::end() {
   if (!initialized()) {

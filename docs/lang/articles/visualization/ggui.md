@@ -450,6 +450,30 @@ with gui.sub_window("Sub Window", x=10, y=10, width=300, height=100):
     color = gui.color_edit_3("name2", color)
 ```
 
+For a responsive control panel, omit `height`. Its height then follows the
+currently visible widgets. Multiple `collapsible_section()` blocks can expand
+and contract independently, and `set_font_size_from_window_height()` keeps text
+within readable logical-pixel bounds as the window height changes:
+
+```python
+gui.set_font_size_from_window_height(
+    reference_height=720,
+    reference_size=16,
+    minimum_size=12,
+    maximum_size=24,
+)
+
+with gui.sub_window("Controls", x=0.02, y=0.02, width=0.3) as panel:
+    with panel.collapsible_section("Solver") as section:
+        if section:
+            section.text("PCG")
+    with panel.collapsible_section("Rendering", default_open=False) as section:
+        if section:
+            section.text("Display")
+```
+
+Supplying a numeric `height` retains the fixed-size behavior.
+
 ## Show a window
 
 Call `show()` to show a window.

@@ -71,8 +71,30 @@ struct PyGui {
   float get_font_scale() const {
     return gui->get_font_scale();
   }
+  void set_font_size(float size) {
+    gui->set_font_size(size);
+  }
+  void set_font_size_from_window_height(float reference_height,
+                                        float reference_size,
+                                        float minimum_size,
+                                        float maximum_size) {
+    gui->set_font_size_from_window_height(reference_height, reference_size,
+                                          minimum_size, maximum_size);
+  }
+  float get_font_size() const {
+    return gui->get_font_size();
+  }
   void begin(std::string name, float x, float y, float width, float height) {
     gui->begin(name, x, y, width, height);
+  }
+  void begin_auto(std::string name, float x, float y, float width) {
+    gui->begin_auto(name, x, y, width);
+  }
+  bool begin_collapsible_section(std::string name, bool default_open) {
+    return gui->begin_collapsible_section(name, default_open);
+  }
+  void end_collapsible_section() {
+    gui->end_collapsible_section();
   }
   void end() {
     gui->end();
@@ -812,7 +834,17 @@ void export_ggui(py::module &m) {
            &PyGui::set_font_scale_from_window_height,
            py::arg("reference_height"), py::arg("reference_scale") = 1.0f)
       .def("get_font_scale", &PyGui::get_font_scale)
+      .def("set_font_size", &PyGui::set_font_size)
+      .def("set_font_size_from_window_height",
+           &PyGui::set_font_size_from_window_height,
+           py::arg("reference_height"), py::arg("reference_size") = 16.0f,
+           py::arg("minimum_size") = 12.0f, py::arg("maximum_size") = 24.0f)
+      .def("get_font_size", &PyGui::get_font_size)
       .def("begin", &PyGui::begin)
+      .def("begin_auto", &PyGui::begin_auto)
+      .def("begin_collapsible_section", &PyGui::begin_collapsible_section,
+           py::arg("name"), py::arg("default_open") = true)
+      .def("end_collapsible_section", &PyGui::end_collapsible_section)
       .def("end", &PyGui::end)
       .def("text", &PyGui::text)
       .def("text_colored", &PyGui::text_colored)

@@ -76,6 +76,9 @@
   `Gui.set_font_scale_from_window_height()` 提供固定字体倍率和连续逻辑高度跟随。
   Vulkan 与 Metal 共用同一线性策略；每个 frame boundary 直接使用既有逻辑显示高度，
   不发生 GPU 回读，也不重建 font atlas。
+- GGUI 同时开放带上下限的逻辑像素字体大小、自动高度 subwindow 和可独立折叠的分区。
+  响应式控制面板会刚好容纳当前可见文字与 widget，并在分区切换时自动展开或收缩，
+  不需要应用层计算高度，也不增加 GPU submission。
 - JIT Graph 的 `ArgKind.NDARRAY` runtime 参数现在通过通用 runtime-storage 协议消费
   Ndarray、dense field 与显式 `DenseNdarrayView`。compact Program-owned Ndarray 与
   SNode payload binding 可使用 CUDA capture、exact replay 和兼容 allocation patch；

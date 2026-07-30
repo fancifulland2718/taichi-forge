@@ -1180,7 +1180,7 @@ Use these APIs to measure accepted, submitted, dropped, and reused frames, plus
 
 See also [Display frame submission](display_frame.en.md).
 
-### GGUI Font Scaling
+### Responsive GGUI Panels and Fonts
 
 Location: `taichi_forge.ui.imgui.Gui`, returned by `window.get_gui()`.
 
@@ -1189,26 +1189,54 @@ Location: `taichi_forge.ui.imgui.Gui`, returned by `window.get_gui()`.
 | `gui.set_font_scale(scale)` | Use a fixed positive font scale and disable automatic height tracking. |
 | `gui.set_font_scale_from_window_height(reference_height, reference_scale=1.0)` | Continuously derive the font scale from the window's logical height. |
 | `gui.get_font_scale()` | Return the effective font scale prepared for the current frame. |
+| `gui.set_font_size(size)` | Use a fixed font size measured in logical pixels. |
+| `gui.set_font_size_from_window_height(reference_height, reference_size=16, minimum_size=12, maximum_size=24)` | Continuously derive a bounded, readable logical-pixel font size. |
+| `gui.get_font_size()` | Return the effective logical-pixel font size. |
+| `gui.sub_window(name, x, y, width, height=None)` | Create a fixed-width panel whose height follows its visible contents. A numeric height preserves fixed-size behavior. |
+| `gui.collapsible_section(name, default_open=True)` | Create an independently expandable section inside the current panel. |
 
 Height tracking applies
 `reference_scale * logical_height / reference_height` at each GGUI frame
 boundary. It uses the logical display height reported by ImGui, not the
 framebuffer pixel height, so HiDPI pixel density does not multiply the scale a
 second time. A minimized zero-height window keeps the last valid scale.
+The logical-size variant applies the same linear policy and clamps it to
+`[minimum_size, maximum_size]`. Its defaults produce 16-pixel text at the
+reference height while retaining a readable 12-to-24-pixel range. It derives
+the scale from the actual default font size rather than assuming a particular
+font atlas.
 
 ```python
 window = ti.ui.Window("simulation", (1280, 720))
 gui = window.get_gui()
-gui.set_font_scale_from_window_height(
+gui.set_font_size_from_window_height(
     reference_height=720,
-    reference_scale=1.0,
+    reference_size=16,
 )
+
+with gui.sub_window("Controls", 0.02, 0.02, 0.3) as panel:
+    with panel.collapsible_section("Solver") as section:
+        if section:
+            section.text("PCG")
+            iterations = section.slider_int(
+                "Iterations", iterations, 1, 100
+            )
+    with panel.collapsible_section(
+        "Rendering", default_open=False
+    ) as section:
+        if section:
+            section.checkbox("Enabled", True)
 ```
 
-Both arguments must be finite and greater than zero. The policy changes font
-rendering only; it does not rescale ImGui padding, widget geometry, or the font
-atlas. Vulkan and Metal use the same policy calculation, with no GPU readback
-or per-frame atlas rebuild.
+All size and scale arguments must be finite and greater than zero, and
+`minimum_size <= reference_size <= maximum_size`. An auto-height panel uses
+Dear ImGui's content measurement every frame, so expanding or collapsing any
+number of sections grows or shrinks the panel at the next UI frame boundary
+without application-side height calculations. Each open section also gets an
+independent widget-ID scope. Font policy changes rendering only; it does not
+rebuild the font atlas.
+Vulkan and Metal share the calculation and panel behavior, with no GPU readback
+or extra GPU submission.
 
 ## `taichi_forge.linalg` Sparse Linear Algebra
 

@@ -89,6 +89,10 @@ the `0.5.0` artifacts:
   `Gui.set_font_scale_from_window_height()`. Vulkan and Metal share the same
   linear policy. It uses the existing logical display size at the frame
   boundary, performs no GPU readback, and does not rebuild the font atlas.
+- GGUI also exposes bounded logical-pixel font sizing, auto-height subwindows,
+  and independently collapsible sections. Responsive control panels now fit
+  their visible text and widgets and grow or shrink as sections are toggled,
+  without application-side height calculations or extra GPU submission.
 - JIT Graph `ArgKind.NDARRAY` runtime arguments now consume the common runtime
   storage protocol for Ndarrays, dense fields, and explicit
   `DenseNdarrayView` objects. Compact Program-owned Ndarray and SNode payload

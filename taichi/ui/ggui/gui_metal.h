@@ -28,6 +28,13 @@ class TI_DLL_EXPORT GuiMetal final : public GuiBase {
              float y,
              float width,
              float height) override;
+  void begin_auto(const std::string &name,
+                  float x,
+                  float y,
+                  float width) override;
+  bool begin_collapsible_section(const std::string &name,
+                                 bool default_open) override;
+  void end_collapsible_section() override;
   void end() override;
   void text(const std::string &text) override;
   void text(const std::string &text, glm::vec3 color) override;

@@ -1409,6 +1409,75 @@ def test_imgui_font_scale_from_logical_height():
 
 @pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
 @test_utils.test(arch=supported_archs)
+def test_imgui_responsive_font_size_and_sections():
+    window = ti.ui.Window("test", (480, 240), show_window=False)
+    gui = window.get_gui()
+
+    gui.set_font_size_from_window_height(
+        480,
+        reference_size=20,
+        minimum_size=12,
+        maximum_size=24,
+    )
+
+    for _ in range(3):
+        with gui.sub_window("Controls", 0.02, 0.02, 0.45) as panel:
+            with panel.collapsible_section("Solver") as section:
+                assert section is panel
+                section.text("PCG")
+                section.slider_int("Iterations", 20, 1, 100)
+            with panel.collapsible_section("Rendering") as section:
+                assert section is panel
+                section.checkbox("Enabled", True)
+                section.slider_int("Iterations", 4, 1, 8)
+            with panel.collapsible_section(
+                "Advanced", default_open=False
+            ) as section:
+                assert section is None
+        assert window.show()
+        assert gui.get_font_size() == pytest.approx(12.0)
+
+    gui.set_font_size(18)
+    assert gui.get_font_size() == pytest.approx(18.0)
+    assert window.show()
+    assert gui.get_font_size() == pytest.approx(18.0)
+
+    for invalid in (0.0, -1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="finite and greater than zero"):
+            gui.set_font_size(invalid)
+        with pytest.raises(ValueError, match="finite and greater than zero"):
+            gui.set_font_size_from_window_height(invalid)
+        with pytest.raises(ValueError, match="finite and greater than zero"):
+            gui.set_font_size_from_window_height(480, invalid)
+        with pytest.raises(ValueError, match="finite and greater than zero"):
+            gui.set_font_size_from_window_height(
+                480, minimum_size=invalid
+            )
+        with pytest.raises(ValueError, match="finite and greater than zero"):
+            gui.set_font_size_from_window_height(
+                480, maximum_size=invalid
+            )
+
+    with pytest.raises(ValueError, match="must be between"):
+        gui.set_font_size_from_window_height(
+            480,
+            reference_size=16,
+            minimum_size=20,
+            maximum_size=24,
+        )
+    with pytest.raises(ValueError, match="must be between"):
+        gui.set_font_size_from_window_height(
+            480,
+            reference_size=16,
+            minimum_size=12,
+            maximum_size=14,
+        )
+
+    window.destroy()
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=supported_archs)
 def test_imgui_empty_frame_after_widget_frame():
     w, h = 320, 240
     image = np.zeros((w, h, 3), dtype=np.float32)
