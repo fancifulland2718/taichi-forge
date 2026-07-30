@@ -293,6 +293,43 @@ class RHI_DLL_EXPORT Pipeline{public : virtual ~Pipeline(){}};
 
 using UPipeline = std::unique_ptr<Pipeline>;
 
+// Buffer synchronization is expressed in backend-neutral execution and access
+// domains. Backends that do not expose fine-grained barriers may conservatively
+// fall back to buffer_barrier(); Vulkan uses this contract to distinguish
+// shader data dependencies from command-processor reads such as indirect
+// dispatch arguments.
+enum class BufferBarrierStage : uint32_t {
+  None = 0,
+  Transfer = 1,
+  Compute = 2,
+  IndirectCommand = 4,
+  ConditionalCommand = 8,
+  Host = 16,
+};
+
+MAKE_ENUM_FLAGS(BufferBarrierStage)
+
+enum class BufferBarrierAccess : uint32_t {
+  None = 0,
+  TransferRead = 1,
+  TransferWrite = 2,
+  ShaderRead = 4,
+  ShaderWrite = 8,
+  IndirectCommandRead = 16,
+  ConditionalCommandRead = 32,
+  HostRead = 64,
+  HostWrite = 128,
+};
+
+MAKE_ENUM_FLAGS(BufferBarrierAccess)
+
+struct BufferTransition {
+  BufferBarrierStage source_stage{BufferBarrierStage::None};
+  BufferBarrierAccess source_access{BufferBarrierAccess::None};
+  BufferBarrierStage destination_stage{BufferBarrierStage::None};
+  BufferBarrierAccess destination_access{BufferBarrierAccess::None};
+};
+
 enum class ImageDimension {
 #define PER_IMAGE_DIMENSION(x) x,
 #include "taichi/inc/rhi_constants.inc.h"
@@ -385,6 +422,18 @@ class RHI_DLL_EXPORT CommandList {
    *                  Size is clamped to the underlying buffer size.
    */
   virtual void buffer_barrier(DevicePtr ptr, size_t size) noexcept = 0;
+
+  /**
+   * Insert a buffer barrier with explicit producer/consumer domains.
+   * Backends without a fine-grained implementation conservatively use the
+   * legacy full buffer barrier.
+   */
+  virtual void buffer_transition(DevicePtr ptr,
+                                 size_t size,
+                                 const BufferTransition &transition) noexcept {
+    (void)transition;
+    buffer_barrier(ptr, size);
+  }
 
   /**
    * Insert a memory barrier into the command list.

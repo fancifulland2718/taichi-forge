@@ -1153,7 +1153,85 @@ RhiResult VulkanCommandList::bind_raster_resources(
   return RhiResult::success;
 }
 
+namespace {
+
+VkPipelineStageFlags buffer_barrier_stage_to_vk(
+    BufferBarrierStage stages) noexcept {
+  VkPipelineStageFlags result = 0;
+  if (int(stages & BufferBarrierStage::Transfer)) {
+    result |= VK_PIPELINE_STAGE_TRANSFER_BIT;
+  }
+  if (int(stages & BufferBarrierStage::Compute)) {
+    result |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+  }
+  if (int(stages & BufferBarrierStage::IndirectCommand)) {
+    result |= VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
+  }
+  if (int(stages & BufferBarrierStage::ConditionalCommand)) {
+    result |= VK_PIPELINE_STAGE_CONDITIONAL_RENDERING_BIT_EXT;
+  }
+  if (int(stages & BufferBarrierStage::Host)) {
+    result |= VK_PIPELINE_STAGE_HOST_BIT;
+  }
+  return result;
+}
+
+VkAccessFlags buffer_barrier_access_to_vk(
+    BufferBarrierAccess accesses) noexcept {
+  VkAccessFlags result = 0;
+  if (int(accesses & BufferBarrierAccess::TransferRead)) {
+    result |= VK_ACCESS_TRANSFER_READ_BIT;
+  }
+  if (int(accesses & BufferBarrierAccess::TransferWrite)) {
+    result |= VK_ACCESS_TRANSFER_WRITE_BIT;
+  }
+  if (int(accesses & BufferBarrierAccess::ShaderRead)) {
+    result |= VK_ACCESS_SHADER_READ_BIT;
+  }
+  if (int(accesses & BufferBarrierAccess::ShaderWrite)) {
+    result |= VK_ACCESS_SHADER_WRITE_BIT;
+  }
+  if (int(accesses & BufferBarrierAccess::IndirectCommandRead)) {
+    result |= VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+  }
+  if (int(accesses & BufferBarrierAccess::ConditionalCommandRead)) {
+    result |= VK_ACCESS_CONDITIONAL_RENDERING_READ_BIT_EXT;
+  }
+  if (int(accesses & BufferBarrierAccess::HostRead)) {
+    result |= VK_ACCESS_HOST_READ_BIT;
+  }
+  if (int(accesses & BufferBarrierAccess::HostWrite)) {
+    result |= VK_ACCESS_HOST_WRITE_BIT;
+  }
+  return result;
+}
+
+}  // namespace
+
 void VulkanCommandList::buffer_barrier(DevicePtr ptr, size_t size) noexcept {
+  const BufferTransition transition{
+      BufferBarrierStage::Transfer | BufferBarrierStage::Compute,
+      BufferBarrierAccess::TransferRead |
+          BufferBarrierAccess::TransferWrite |
+          BufferBarrierAccess::ShaderRead |
+          BufferBarrierAccess::ShaderWrite,
+      BufferBarrierStage::Transfer | BufferBarrierStage::Compute,
+      BufferBarrierAccess::TransferRead |
+          BufferBarrierAccess::TransferWrite |
+          BufferBarrierAccess::ShaderRead |
+          BufferBarrierAccess::ShaderWrite,
+  };
+  buffer_transition(ptr, size, transition);
+}
+
+void VulkanCommandList::buffer_transition(
+    DevicePtr ptr,
+    size_t size,
+    const BufferTransition &transition) noexcept {
+  if (ptr.device != ti_device_ || ptr.alloc_id == 0) {
+    RHI_LOG_ERROR("Buffer transition requires a live allocation on this device");
+    return;
+  }
   auto buffer = ti_device_->get_vkbuffer(ptr);
   size_t buffer_size = ti_device_->get_vkbuffer_size(ptr);
 
@@ -1175,19 +1253,22 @@ void VulkanCommandList::buffer_barrier(DevicePtr ptr, size_t size) noexcept {
   barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
   barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
   barrier.srcAccessMask =
-      (VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT |
-       VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+      buffer_barrier_access_to_vk(transition.source_access);
   barrier.dstAccessMask =
-      (VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT |
-       VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+      buffer_barrier_access_to_vk(transition.destination_access);
+
+  const VkPipelineStageFlags source_stage =
+      buffer_barrier_stage_to_vk(transition.source_stage);
+  const VkPipelineStageFlags destination_stage =
+      buffer_barrier_stage_to_vk(transition.destination_stage);
+  if (source_stage == 0 || destination_stage == 0) {
+    RHI_LOG_ERROR("Buffer transition stages must not be empty");
+    return;
+  }
 
   vkCmdPipelineBarrier(
-      buffer_->buffer,
-      /*srcStageMask=*/
-      VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-      /*dstStageMask=*/VK_PIPELINE_STAGE_TRANSFER_BIT |
-          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-      /*srcStageMask=*/0, /*memoryBarrierCount=*/0, nullptr,
+      buffer_->buffer, source_stage, destination_stage,
+      /*dependencyFlags=*/0, /*memoryBarrierCount=*/0, nullptr,
       /*bufferMemoryBarrierCount=*/1,
       /*pBufferMemoryBarriers=*/&barrier,
       /*imageMemoryBarrierCount=*/0,
