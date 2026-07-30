@@ -429,6 +429,7 @@ class GraphIRAnalysis:
     while_regions: int
     if_regions: int
     switch_regions: int
+    max_structured_depth: int
     observation_nodes: int
     effect_reads: int
     effect_writes: int
@@ -720,6 +721,7 @@ def analyze_graph_ir(root):
         "while_regions": 0,
         "if_regions": 0,
         "switch_regions": 0,
+        "max_structured_depth": 0,
         "observation_nodes": 0,
         "effect_reads": 0,
         "effect_writes": 0,
@@ -729,8 +731,13 @@ def analyze_graph_ir(root):
         "temporary_bytes": 0,
     }
 
-    def visit(node):
+    def visit(node, structured_depth=0):
         counters["node_count"] += 1
+        if node.kind in ("while_region", "if_region", "switch_region"):
+            structured_depth += 1
+            counters["max_structured_depth"] = max(
+                counters["max_structured_depth"], structured_depth
+            )
         counter_name = {
             "dispatch": "dispatch_nodes",
             "native_call": "native_call_nodes",
@@ -756,13 +763,15 @@ def analyze_graph_ir(root):
                 counters["effect_writes"] += 1
                 counters["effect_atomics"] += 1
         for child in node.children:
-            visit(child)
+            visit(child, structured_depth)
 
     visit(root)
     return GraphIRAnalysis(**counters)
 
 
-def graph_ir_to_dict(node):
+def graph_ir_to_dict(node, _structured_depth=0):
+    if node.kind in ("while_region", "if_region", "switch_region"):
+        _structured_depth += 1
     result = {
         "kind": node.kind,
         "name": node.name,
@@ -772,8 +781,12 @@ def graph_ir_to_dict(node):
         "iteration_domain": node.iteration_domain,
         "synchronization": node.synchronization,
         "opaque": node.opaque,
-        "children": tuple(graph_ir_to_dict(child) for child in node.children),
+        "children": tuple(
+            graph_ir_to_dict(child, _structured_depth) for child in node.children
+        ),
     }
+    if node.kind in ("while_region", "if_region", "switch_region"):
+        result["structured_depth"] = _structured_depth
     if isinstance(node, WhileRegion):
         result.update(
             {

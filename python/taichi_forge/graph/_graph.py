@@ -3,8 +3,8 @@ import threading
 import time
 import warnings
 from collections.abc import Mapping
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass, replace
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -1032,6 +1032,11 @@ class GraphWhileReport:
     logical_body_dispatch_count: int = 0
     zero_dispatch_count: int = 0
     control_arena_bytes: int = 0
+    region_path: str = ""
+    structured_depth: int = 1
+    nested_region_path: str = ""
+    nested_logical_iterations: Tuple[int, ...] = ()
+    nested_encoded_iterations: Tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1050,6 +1055,148 @@ class GraphBranchReport:
     condition_dispatch_count: int
     branch_dispatch_count: int
     control_inputs: Tuple[str, ...]
+    region_path: str = ""
+    structured_depth: int = 1
+
+
+@dataclass(frozen=True)
+class GraphControlFlowInvocation:
+    """One dynamically addressed structured-control invocation."""
+
+    sequence: int
+    definition_path: str
+    invocation_path: str
+    parent_iteration: Optional[int]
+    report: Union[GraphWhileReport, GraphBranchReport]
+
+
+@dataclass(frozen=True)
+class GraphControlFlowTrace:
+    """Immutable opt-in trace returned by ``Graph.run(trace=True)``."""
+
+    schema_version: int
+    invocations: Tuple[GraphControlFlowInvocation, ...]
+
+
+class _ControlFlowTraceFrame:
+    __slots__ = (
+        "definition_path",
+        "entry_index",
+        "invocation_path",
+        "node",
+        "parent_iteration",
+        "role_invocations",
+        "iteration",
+    )
+
+    def __init__(
+        self,
+        node,
+        *,
+        definition_path,
+        invocation_path,
+        parent_iteration,
+        entry_index,
+    ):
+        self.node = node
+        self.definition_path = definition_path
+        self.invocation_path = invocation_path
+        self.parent_iteration = parent_iteration
+        self.entry_index = entry_index
+        self.iteration = None
+        self.role_invocations = {}
+
+
+class _ControlFlowTraceRecorder:
+    """Run-local host trace; no instance is created for default Graph.run()."""
+
+    schema_version = 1
+
+    def __init__(self):
+        self._frames = []
+        self._entries = []
+
+    @staticmethod
+    def _relative_definition_path(parent, node):
+        prefix = f"{parent.definition_path}/"
+        if node.region_path.startswith(prefix):
+            return node.region_path[len(prefix) :]
+        return node.region_path
+
+    def begin(self, node):
+        definition_path = node.region_path
+        parent_iteration = None
+        if not self._frames:
+            invocation_path = definition_path
+        else:
+            parent = self._frames[-1]
+            relative = self._relative_definition_path(parent, node)
+            role, separator, remainder = relative.partition("/")
+            if isinstance(parent.node, _CompiledWhileGraphNode):
+                if role == "body" and parent.iteration is not None:
+                    parent_iteration = parent.iteration
+                    prefix = f"{parent.invocation_path}[{parent.iteration}]/body"
+                    invocation_path = (
+                        f"{prefix}/{remainder}" if separator else prefix
+                    )
+                elif role == "condition":
+                    call_index = parent.role_invocations.get(relative, 0)
+                    parent.role_invocations[relative] = call_index + 1
+                    prefix = f"{parent.invocation_path}/condition[{call_index}]"
+                    invocation_path = (
+                        f"{prefix}/{remainder}" if separator else prefix
+                    )
+                else:
+                    invocation_path = f"{parent.invocation_path}/{relative}"
+            else:
+                invocation_path = f"{parent.invocation_path}/{relative}"
+        entry_index = len(self._entries)
+        self._entries.append(None)
+        frame = _ControlFlowTraceFrame(
+            node,
+            definition_path=definition_path,
+            invocation_path=invocation_path,
+            parent_iteration=parent_iteration,
+            entry_index=entry_index,
+        )
+        self._frames.append(frame)
+        return frame
+
+    def set_iteration(self, node, iteration):
+        if not self._frames or self._frames[-1].node is not node:
+            raise TaichiRuntimeError(
+                "Graph control-flow trace iteration frame is inconsistent"
+            )
+        self._frames[-1].iteration = iteration
+
+    def end(self, frame, report):
+        if not self._frames or self._frames[-1] is not frame:
+            raise TaichiRuntimeError("Graph control-flow trace frame is inconsistent")
+        self._frames.pop()
+        if report is None:
+            raise TaichiRuntimeError(
+                "Graph control-flow trace invocation did not produce a report"
+            )
+        dynamic_report = replace(report, region_path=frame.invocation_path)
+        self._entries[frame.entry_index] = GraphControlFlowInvocation(
+            sequence=frame.entry_index,
+            definition_path=frame.definition_path,
+            invocation_path=frame.invocation_path,
+            parent_iteration=frame.parent_iteration,
+            report=dynamic_report,
+        )
+
+    def abort(self, frame):
+        if self._frames and self._frames[-1] is frame:
+            self._frames.pop()
+
+    def finish(self):
+        if self._frames or any(entry is None for entry in self._entries):
+            raise TaichiRuntimeError("Graph control-flow trace is incomplete")
+        return GraphControlFlowTrace(
+            schema_version=self.schema_version,
+            invocations=tuple(self._entries),
+        )
 
 
 @dataclass(frozen=True)
@@ -1179,6 +1326,14 @@ def _empty_backend_stats():
     return stats
 
 
+def _flatten_backend_stats(stats):
+    for value in stats:
+        if isinstance(value, Mapping):
+            yield value
+        elif isinstance(value, (tuple, list)):
+            yield from _flatten_backend_stats(value)
+
+
 def _backend_name(arch):
     if arch in ("x64", "arm64"):
         return "cpu"
@@ -1240,6 +1395,11 @@ def structured_control_capabilities():
     )
     compound_single_preparation = False
     structured_barrier_policy = "unavailable"
+    nested_native_compiled = hasattr(
+        _ti_core.CompiledGraph,
+        "jit_run_bounded_vulkan_nested_cached",
+    )
+    nested_native = False
     if arch == _ti_core.Arch.cuda:
         cuda = dict(_ti_core.cuda_conditional_graph_capabilities())
         setter_compiled = bool(
@@ -1337,6 +1497,11 @@ def structured_control_capabilities():
             if native
             else "unavailable"
         )
+        nested_native = bool(
+            native
+            and conditional_rendering_available
+            and nested_native_compiled
+        )
         reason = (
             "vulkan_if_switch_runtime_not_compiled"
             if vulkan_runtime_mode_qualified
@@ -1354,11 +1519,46 @@ def structured_control_capabilities():
             "while": portable_while,
             "if": "host_selected_exact_branch",
             "switch": "host_selected_exact_branch",
+            "nested_structured_control": True,
+            "max_structured_depth": 2,
+            "nested_lowering": "portable_parent_with_qualified_native_leaf_upgrade",
         },
+        "nested_structured_control": True,
+        "max_structured_depth": 2,
+        "nested_native_lowering": nested_native,
         "device_control": {
             "while": native,
             "if": branch_native,
             "switch": branch_native,
+            "nested_structured_control": True,
+            "max_structured_depth": 2,
+            "nested_exact_portable": True,
+            "nested_native_lowering": nested_native,
+            "nested_native_lowering_compiled": nested_native_compiled,
+            "nested_native_kinds": (
+                ("while_while",) if nested_native else ()
+            ),
+            "nested_native_outer_iteration_limit": (
+                64 if nested_native else 0
+            ),
+            "nested_native_inner_iteration_limit": (
+                64 if nested_native else 0
+            ),
+            "nested_native_max_encoded_actions": (
+                4096 if nested_native else 0
+            ),
+            "nested_native_stop_telemetry": nested_native,
+            "nested_trace_uses_portable_execution": True,
+            "nested_leaf_native_upgrade": native,
+            "nested_leaf_native_kinds": (
+                ("while", "if", "switch")
+                if arch == _ti_core.Arch.cuda and native
+                else (("while",) if arch == _ti_core.Arch.vulkan and native else ())
+            ),
+            "native_max_structured_depth": (
+                2 if nested_native else (1 if native else 0)
+            ),
+            "nested_async_submit": False,
             "structured_submit": structured_submit,
             "structured_submit_reason": structured_submit_reason,
             "parallel_indirect_dispatch": parallel_indirect_dispatch,
@@ -1445,6 +1645,7 @@ def _execution_report(
     observation_arena_stats=None,
     telemetry_arena_stats=None,
 ):
+    flat_backend_stats = tuple(_flatten_backend_stats(backend_stats))
     segments = []
     stats_cursor = 0
     for index, node in enumerate(definition["nodes"]):
@@ -1457,9 +1658,14 @@ def _execution_report(
                     "asynchronous_snapshot"
                     if kind == "observation"
                     else (
-                        "native_replay"
-                        if instance_kind in ("cuda_native_replay", "cpu_native_replay")
-                        else "native_dispatch"
+                        "portable_host_control"
+                        if kind == "structured_sequence"
+                        else (
+                            "native_replay"
+                            if instance_kind
+                            in ("cuda_native_replay", "cpu_native_replay")
+                            else "native_dispatch"
+                        )
                     )
                 )
             )
@@ -1577,8 +1783,15 @@ def _execution_report(
         "none" if not reasons else next(iter(reasons)) if len(reasons) == 1 else "mixed"
     )
     dependency_info = definition["dependency_info"]
+    # Structured nodes own condition/body JIT caches and, on qualified
+    # backends, an additional native replay cache. They are intentionally not
+    # expanded into public CGraph segments, but their stable argument,
+    # control-arena, and observation allocations are still Graph-owned
+    # persistent memory. Count every leaf cache once instead of restricting
+    # memory accounting to top-level CGraph segments.
     persistent_argument_bytes = sum(
-        segment.persistent_argument_bytes for segment in cgraph_segments
+        int(stats.get("known_persistent_argument_bytes", 0))
+        for stats in flat_backend_stats
     )
     temporary_memory_plan = temporary_memory_plan or {}
     temporary_arena_stats = temporary_arena_stats or {}
@@ -1717,8 +1930,9 @@ class _GraphRunContext:
         self._compile_config = None
         self._last_arg_signature = None
         self._last_flattened = None
+        self._trace_recorder = None
 
-    def begin(self, args, fixed_args=None):
+    def begin(self, args, fixed_args=None, trace_recorder=None):
         if fixed_args:
             overlap = fixed_args.keys() & args.keys()
             if overlap:
@@ -1732,6 +1946,7 @@ class _GraphRunContext:
         else:
             self._args = args
         self._flattened_args = None
+        self._trace_recorder = trace_recorder
 
     def end(self):
         # Runtime resource completion is owned by the native Program registry.
@@ -1740,6 +1955,29 @@ class _GraphRunContext:
         # The generation-qualified flattened fast cache remains reusable.
         self._args = None
         self._flattened_args = None
+        self._trace_recorder = None
+
+    def begin_control_trace(self, node):
+        recorder = self._trace_recorder
+        if recorder is None:
+            return None
+        return recorder.begin(node)
+
+    def set_control_trace_iteration(self, node, iteration):
+        recorder = self._trace_recorder
+        if recorder is not None:
+            recorder.set_iteration(node, iteration)
+
+    def end_control_trace(self, frame, report):
+        if frame is not None:
+            self._trace_recorder.end(frame, report)
+
+    def abort_control_trace(self, frame):
+        if frame is not None:
+            self._trace_recorder.abort(frame)
+
+    def control_trace_enabled(self):
+        return self._trace_recorder is not None
 
     def runtime_args(self):
         return self._args
@@ -2400,7 +2638,7 @@ def _cuda_branch_upgrade_status(arch, mode, kind):
     return False, reason
 
 
-def _compile_sequential_runtime_node(
+def _compile_plain_sequential_runtime_node(
     sequences,
     *,
     repetitions=1,
@@ -2468,6 +2706,229 @@ def _compile_sequential_runtime_node(
     )
 
 
+def _is_structured_control_node(node):
+    return isinstance(
+        node,
+        (
+            _CompiledWhileGraphNode,
+            _CompiledIfGraphNode,
+            _CompiledSwitchGraphNode,
+        ),
+    )
+
+
+def _sequence_structured_nodes(sequence):
+    return tuple(
+        item[1] for item in sequence._items if item[0] == "structured"
+    )
+
+
+class _CompiledSequentialRegionNode:
+    """Ordered host-level sequence used when a region contains control nodes.
+
+    Plain action runs remain coalesced into CGraph segments. Structured
+    children stay explicit, so an empty action prefix/suffix never creates a
+    meaningless CGraph.
+    """
+
+    needs_runtime_args = True
+    region_kind = "nested_sequential"
+
+    def __init__(
+        self,
+        nodes,
+        *,
+        name,
+        ir_node,
+        definition_sequences=(),
+    ):
+        self.nodes = tuple(nodes)
+        if not self.nodes:
+            raise TaichiRuntimeError(
+                "Structured Graph sequence must contain at least one action"
+            )
+        self.name = name
+        self.ir_node = ir_node
+        self.definition_children = tuple(
+            _sequence_structured_nodes(sequence)
+            for sequence in definition_sequences
+        )
+        self.dispatch_count = sum(
+            getattr(node, "dispatch_count", 0) for node in self.nodes
+        )
+        self.physical_dispatch_count = sum(
+            getattr(
+                node,
+                "physical_dispatch_count",
+                getattr(node, "dispatch_count", 0),
+            )
+            for node in self.nodes
+        )
+        self.source_native_count = sum(
+            getattr(node, "source_native_count", 0) for node in self.nodes
+        )
+        self.composer_applied_groups = sum(
+            getattr(node, "composer_applied_groups", 0) for node in self.nodes
+        )
+        self.composer_lowering_available = any(
+            getattr(node, "composer_lowering_available", False)
+            for node in self.nodes
+        )
+        self.temporary_actions = _merge_temporary_actions(self.nodes)
+        self.temporary_runtime_arg_names = frozenset().union(
+            *(
+                getattr(node, "temporary_runtime_arg_names", frozenset())
+                for node in self.nodes
+            )
+        )
+        self.fixed_runtime_args = _merge_fixed_runtime_args(self.nodes)
+        self.recording_runtime_arg_names = frozenset().union(
+            *(
+                getattr(
+                    node,
+                    "recording_runtime_arg_names",
+                    node.runtime_arg_names,
+                )
+                for node in self.nodes
+            )
+        )
+        self.runtime_arg_names = self.recording_runtime_arg_names.difference(
+            (*self.fixed_runtime_args, *self.temporary_runtime_arg_names)
+        )
+        self.lifetime_leases = tuple(
+            lease
+            for node in self.nodes
+            for lease in getattr(node, "lifetime_leases", ())
+        )
+        self.snode_tree_dependencies = frozenset().union(
+            *(node.snode_tree_dependencies for node in self.nodes)
+        )
+        self.snode_tree_dependency_info = frozenset().union(
+            *(node.snode_tree_dependency_info for node in self.nodes)
+        )
+
+    @property
+    def control_nodes(self):
+        result = []
+        seen = set()
+        for node in self.nodes:
+            candidates = (
+                (node,)
+                if _is_structured_control_node(node)
+                else getattr(node, "control_nodes", ())
+            )
+            for candidate in candidates:
+                identity = id(candidate)
+                if identity not in seen:
+                    seen.add(identity)
+                    result.append(candidate)
+        return tuple(result)
+
+    def run(self, context, temporaries=None):
+        for node in self.nodes:
+            node.run(context, temporaries)
+
+    def materialize_pending_report(self):
+        for node in self.control_nodes:
+            materialize = getattr(node, "materialize_pending_report", None)
+            if materialize is not None:
+                materialize()
+
+    def invalidate_runtime(self):
+        seen = set()
+        for node in self.nodes:
+            identity = id(node)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            invalidate = getattr(node, "invalidate_runtime", None)
+            if invalidate is not None:
+                invalidate()
+
+    @property
+    def debug_graph_stats(self):
+        return tuple(node.debug_graph_stats for node in self.nodes)
+
+    @property
+    def debug_info(self):
+        return {
+            "kind": self.region_kind,
+            "name": self.name,
+            "dispatch_count": self.dispatch_count,
+            "segment_count": len(self.nodes),
+            "structured_control_count": len(self.control_nodes),
+        }
+
+
+def _compile_sequential_runtime_node(
+    sequences,
+    *,
+    repetitions=1,
+    name,
+    region_kind="sequential",
+    region_kinds=None,
+):
+    sequences = tuple(sequences)
+    if not sequences or any(
+        not isinstance(sequence, Sequential) for sequence in sequences
+    ):
+        raise TaichiRuntimeError("Structured Graph regions require Sequential values")
+    if region_kinds is None:
+        region_kinds = (region_kind,) * len(sequences)
+    else:
+        region_kinds = tuple(region_kinds)
+        if len(region_kinds) != len(sequences):
+            raise TaichiRuntimeError(
+                "Structured Graph region kinds must match its Sequential values"
+            )
+    if not any(sequence._structured_depth for sequence in sequences):
+        return _compile_plain_sequential_runtime_node(
+            sequences,
+            repetitions=repetitions,
+            name=name,
+            region_kind=region_kind,
+            region_kinds=region_kinds,
+        )
+
+    nodes = []
+    ir_nodes = []
+    segment_index = 0
+
+    def flush_plain(sequence, item_pairs, sequence_region_kind):
+        nonlocal segment_index
+        if not item_pairs:
+            return
+        view = sequence._plain_view(item_pairs)
+        nodes.append(
+            _compile_plain_sequential_runtime_node(
+                (view,),
+                name=f"{name}_actions_{segment_index}",
+                region_kind=sequence_region_kind,
+            )
+        )
+        segment_index += 1
+
+    for _ in range(repetitions):
+        for sequence, sequence_region_kind in zip(sequences, region_kinds):
+            pending = []
+            for item, ir_node in zip(sequence._items, sequence._ir_nodes):
+                ir_nodes.append(ir_node)
+                if item[0] != "structured":
+                    pending.append((item, ir_node))
+                    continue
+                flush_plain(sequence, pending, sequence_region_kind)
+                pending = []
+                nodes.append(item[1])
+            flush_plain(sequence, pending, sequence_region_kind)
+
+    return _CompiledSequentialRegionNode(
+        nodes,
+        name=name,
+        ir_node=SequentialRegion(tuple(ir_nodes), name=name),
+        definition_sequences=sequences,
+    )
+
+
 def _control_transfer_uses_planner(arch):
     return (
         arch == _ti_core.Arch.vulkan
@@ -2479,6 +2940,221 @@ def _structured_host_lowering(arch):
     if arch in (_ti_core.Arch.x64, _ti_core.Arch.arm64):
         return "cpu_host_control"
     return "portable_host_control"
+
+
+def _graph_control_name(value, role):
+    name = value if isinstance(value, str) else getattr(value, "name", None)
+    if not isinstance(name, str) or not name:
+        raise TaichiRuntimeError(
+            f"Graph {role} must be a symbolic argument or resource name"
+        )
+    return name
+
+
+def _graph_control_names(values, role):
+    names = tuple(_graph_control_name(value, role) for value in values)
+    if len(names) != len(set(names)):
+        raise TaichiRuntimeError(
+            f"Graph {role} must not contain duplicate resources"
+        )
+    return names
+
+
+def _prepare_structured_definition(kind, name, lowering_mode, definition_regions):
+    sequences = tuple(sequence for _, sequence in definition_regions if sequence)
+    child_depth = max(
+        (sequence._structured_depth for sequence in sequences),
+        default=0,
+    )
+    structured_depth = 1 + child_depth
+    if structured_depth > 2:
+        raise TaichiRuntimeError(
+            f"Graph {kind} {name!r} exceeds the maximum structured-control "
+            "depth of 2"
+        )
+    nested = child_depth != 0
+    if nested and lowering_mode == "native_required":
+        raise TaichiRuntimeError(
+            f"Graph {kind} {name!r} contains nested structured control, "
+            "but nested native_required lowering is unavailable"
+        )
+    if nested:
+        for sequence in sequences:
+            for node in _sequence_structured_nodes(sequence):
+                node._mark_nested_portable()
+    return structured_depth, nested
+
+
+def _set_control_region_path(node, path, depth):
+    if depth > 2:
+        raise TaichiRuntimeError(
+            "Graph structured-control definition exceeds the maximum depth of 2"
+        )
+    node.region_path = path
+    node.control_depth = depth
+    if depth > 1:
+        node._mark_nested_portable()
+    for role, children in node._definition_children:
+        name_counts = {}
+        for child in children:
+            occurrence = name_counts.get(child.name, 0)
+            name_counts[child.name] = occurrence + 1
+            suffix = "" if occurrence == 0 else f"[{occurrence}]"
+            _set_control_region_path(
+                child,
+                f"{path}/{role}/{child.name}{suffix}",
+                depth + 1,
+            )
+
+
+def _compile_vulkan_nested_while_runtime_node(
+    condition,
+    body,
+    *,
+    outer_name,
+    outer_predicate,
+    outer_counter,
+    outer_status,
+    outer_max_iterations,
+):
+    """Build the strict depth-2 Vulkan while -> while replay program.
+
+    The returned CGraph contains one copy of every static dispatch. Native
+    Vulkan lowering owns bounded command encoding; Python never expands the
+    outer x inner Cartesian product.
+    """
+
+    def unavailable(reason):
+        return None, None, None, reason
+
+    if impl.current_cfg().arch != _ti_core.Arch.vulkan:
+        return unavailable("backend_is_not_vulkan")
+    if not hasattr(
+        _ti_core.CompiledGraph,
+        "jit_run_bounded_vulkan_nested_cached",
+    ):
+        return unavailable("nested_runtime_binding_unavailable")
+    config = impl.current_cfg()
+    if config.kernel_profiler:
+        return unavailable("kernel_profiler_enabled")
+    if config.vulkan_dispatch_cache:
+        return unavailable("vulkan_dispatch_cache_enabled")
+    if outer_counter is None:
+        return unavailable("outer_counter_required")
+    if outer_max_iterations <= 0 or outer_max_iterations > 64:
+        return unavailable("outer_iteration_budget_out_of_range")
+    if not impl.get_runtime().prog._vulkan_conditional_rendering_available():
+        return unavailable("vulkan_conditional_rendering_unavailable")
+
+    condition_pairs = tuple(zip(condition._items, condition._ir_nodes))
+    body_pairs = tuple(zip(body._items, body._ir_nodes))
+    if any(item[0] not in ("dispatch", "native") for item, _ in condition_pairs):
+        return unavailable("outer_condition_must_be_plain")
+    structured_indices = tuple(
+        index
+        for index, (item, _) in enumerate(body_pairs)
+        if item[0] == "structured"
+    )
+    if len(structured_indices) != 1:
+        return unavailable("exactly_one_inner_region_required")
+    inner_index = structured_indices[0]
+    inner = body_pairs[inner_index][0][1]
+    if not isinstance(inner, _CompiledWhileGraphNode):
+        return unavailable("inner_region_must_be_while")
+    if inner._has_nested_control:
+        return unavailable("inner_region_must_be_leaf")
+    if inner.counter is None:
+        return unavailable("inner_counter_required")
+    if inner.max_iterations <= 0 or inner.max_iterations > 64:
+        return unavailable("inner_iteration_budget_out_of_range")
+    if inner.compound_chunk_limit <= 0 or inner.compound_chunk_limit > 64:
+        return unavailable("inner_chunk_size_out_of_range")
+    if not inner._native_upgrade_eligible:
+        return unavailable(f"inner_native_unavailable:{inner._native_upgrade_reason}")
+
+    outer_controls = {outer_predicate, outer_counter}
+    inner_controls = {inner.predicate, inner.counter}
+    if outer_status is not None:
+        outer_controls.add(outer_status)
+    if inner.status is not None:
+        inner_controls.add(inner.status)
+    if outer_controls & inner_controls:
+        return unavailable("outer_and_inner_control_resources_must_be_independent")
+
+    prefix_pairs = body_pairs[:inner_index]
+    suffix_pairs = body_pairs[inner_index + 1 :]
+    for pairs, role in (
+        (prefix_pairs, "outer_prefix"),
+        (suffix_pairs, "outer_suffix"),
+    ):
+        if any(item[0] not in ("dispatch", "native") for item, _ in pairs):
+            return unavailable(f"{role}_must_be_plain")
+
+    inner_regions = dict(inner._definition_regions)
+    inner_condition = inner_regions["condition"]
+    inner_body = inner_regions["body"]
+    for sequence, role in (
+        (inner_condition, "inner_condition"),
+        (inner_body, "inner_body"),
+    ):
+        if any(item[0] not in ("dispatch", "native") for item in sequence._items):
+            return unavailable(f"{role}_must_be_plain")
+
+    prefix = body._plain_view(prefix_pairs)
+    suffix = body._plain_view(suffix_pairs)
+    outer_condition_count = condition._dispatch_count
+    inner_condition_begin = outer_condition_count + prefix._dispatch_count
+    inner_body_begin = inner_condition_begin + inner_condition._dispatch_count
+    outer_suffix_begin = (
+        inner_body_begin
+        + inner_body._dispatch_count
+        + inner_condition._dispatch_count
+    )
+    flattened_dispatch_count = (
+        outer_suffix_begin
+        + suffix._dispatch_count
+        + condition._dispatch_count
+    )
+    encoded_action_count = outer_condition_count + outer_max_iterations * (
+        prefix._dispatch_count
+        + inner_condition._dispatch_count
+        + inner.max_iterations
+        * (inner_body._dispatch_count + inner_condition._dispatch_count)
+        + suffix._dispatch_count
+        + condition._dispatch_count
+    )
+    if flattened_dispatch_count <= 0 or encoded_action_count > 4096:
+        return unavailable("encoded_action_budget_exceeded")
+
+    compiled = _compile_plain_sequential_runtime_node(
+        (
+            condition,
+            prefix,
+            inner_condition,
+            inner_body,
+            inner_condition,
+            suffix,
+            condition,
+        ),
+        name=f"{outer_name}_vulkan_nested",
+        region_kind="while_nested",
+        region_kinds=(
+            "while_condition",
+            "while_body",
+            "while_condition",
+            "while_body",
+            "while_condition",
+            "while_body",
+            "while_condition",
+        ),
+    )
+    boundaries = (
+        outer_condition_count,
+        inner_condition_begin,
+        inner_body_begin,
+        outer_suffix_begin,
+    )
+    return compiled, inner, boundaries, "eligible"
 
 
 class _CompiledWhileGraphNode:
@@ -2524,6 +3200,26 @@ class _CompiledWhileGraphNode:
         self.max_iterations = int(max_iterations)
         self.masked_execution = bool(masked_execution)
         self.lowering_mode = lowering_mode
+        self.region_path = name
+        self.control_depth = 1
+        self._nested_subregion = False
+        self._definition_regions = (
+            ("condition", condition),
+            ("body", body),
+        )
+        self._definition_children = tuple(
+            (role, _sequence_structured_nodes(region))
+            for role, region in self._definition_regions
+        )
+        self.structured_depth, self._has_nested_control = (
+            _prepare_structured_definition(
+                "while",
+                name,
+                lowering_mode,
+                self._definition_regions,
+            )
+        )
+        self._portable_exact_nested = self._has_nested_control
         (
             self.vulkan_first_chunk_strategy,
             self._vulkan_first_chunk_strategy_code,
@@ -2553,20 +3249,31 @@ class _CompiledWhileGraphNode:
             )
 
         arch = impl.current_cfg().arch
-        self._native_submission_eligible = arch == _ti_core.Arch.cuda or (
-            arch == _ti_core.Arch.vulkan
-            and not impl.current_cfg().kernel_profiler
-            and not impl.current_cfg().vulkan_dispatch_cache
-            and self.max_iterations <= 512
+        self._native_submission_eligible = not self._has_nested_control and (
+            arch == _ti_core.Arch.cuda
+            or (
+                arch == _ti_core.Arch.vulkan
+                and not impl.current_cfg().kernel_profiler
+                and not impl.current_cfg().vulkan_dispatch_cache
+                and self.max_iterations <= 512
+            )
         )
         requested_compound_chunk_limit = _structured_chunk_limit(arch, chunk_size, True)
-        self.chunk_limit = min(
-            self.max_iterations or 1,
-            _structured_chunk_limit(arch, chunk_size, self.masked_execution),
+        self.chunk_limit = (
+            1
+            if self._has_nested_control
+            else min(
+                self.max_iterations or 1,
+                _structured_chunk_limit(arch, chunk_size, self.masked_execution),
+            )
         )
-        self.compound_chunk_limit = min(
-            self.max_iterations or 1,
-            64 if chunk_size is None else requested_compound_chunk_limit,
+        self.compound_chunk_limit = (
+            1
+            if self._has_nested_control
+            else min(
+                self.max_iterations or 1,
+                64 if chunk_size is None else requested_compound_chunk_limit,
+            )
         )
         self.compound_chunk_count = (
             0
@@ -2623,9 +3330,30 @@ class _CompiledWhileGraphNode:
                     "while_condition",
                 ),
             )
-            if arch == _ti_core.Arch.vulkan
+            if arch == _ti_core.Arch.vulkan and not self._has_nested_control
             else None
         )
+        self._vulkan_nested = None
+        self._vulkan_nested_inner = None
+        self._vulkan_nested_boundaries = None
+        self._vulkan_nested_reason = "not_nested"
+        if self._has_nested_control and lowering_mode != "portable":
+            (
+                self._vulkan_nested,
+                self._vulkan_nested_inner,
+                self._vulkan_nested_boundaries,
+                self._vulkan_nested_reason,
+            ) = _compile_vulkan_nested_while_runtime_node(
+                condition,
+                body,
+                outer_name=name,
+                outer_predicate=predicate,
+                outer_counter=counter,
+                outer_status=status,
+                outer_max_iterations=self.max_iterations,
+            )
+        elif self._has_nested_control:
+            self._vulkan_nested_reason = "outer_portable_lowering_requested"
         dependency_nodes = (
             self._condition,
             *self._chunks.values(),
@@ -2634,6 +3362,7 @@ class _CompiledWhileGraphNode:
                 if self._vulkan_structured is not None
                 else ()
             ),
+            *((self._vulkan_nested,) if self._vulkan_nested is not None else ()),
         )
         self.temporary_actions = _merge_temporary_actions(dependency_nodes)
         self.temporary_runtime_arg_names = frozenset().union(
@@ -2687,6 +3416,9 @@ class _CompiledWhileGraphNode:
         self._native_upgrade_eligible, self._native_upgrade_reason = (
             _while_upgrade_status(arch, lowering_mode)
         )
+        if self._has_nested_control:
+            self._native_upgrade_eligible = False
+            self._native_upgrade_reason = "nested_structured_portable_exact"
         if self._native_upgrade_eligible and self.counter is None:
             if lowering_mode == "native_required":
                 raise TaichiRuntimeError(
@@ -2696,7 +3428,23 @@ class _CompiledWhileGraphNode:
             self._native_upgrade_reason = "exact_counter_required"
 
     def _select_chunk(self, remaining):
+        if self._portable_exact_nested:
+            return 1
         return max(size for size in self._chunks if size <= remaining)
+
+    def _mark_nested_portable(self):
+        if self.lowering_mode == "native_required":
+            raise TaichiRuntimeError(
+                f"Graph while {self.name!r} is nested at {self.region_path!r}, "
+                "but nested native_required lowering is unavailable"
+            )
+        # The enclosing control node remains an exact, host-observed parent,
+        # but a depth-2 leaf can reuse its already-qualified flat CUDA/Vulkan
+        # replay. Disabling the leaf replay turns outer x inner into one host
+        # synchronization per logical inner iteration, defeating the purpose
+        # of hierarchical control. This is a leaf upgrade, not native depth-2
+        # submission: the complete Graph still rejects submit().
+        self._nested_subregion = True
 
     @property
     def supports_native_submission(self):
@@ -2799,6 +3547,294 @@ class _CompiledWhileGraphNode:
                 "synchronous fallback is disabled"
             )
 
+    def _run_vulkan_nested_structured(
+        self,
+        context,
+        runtime_args,
+        transfer_before,
+    ):
+        if (
+            impl.current_cfg().arch != _ti_core.Arch.vulkan
+            or self._vulkan_nested is None
+            or self._vulkan_nested_inner is None
+            or self._vulkan_nested_boundaries is None
+            or context.control_trace_enabled()
+        ):
+            return False
+        native_run = getattr(
+            self._vulkan_nested.compiled_graph,
+            "jit_run_bounded_vulkan_nested_cached",
+            None,
+        )
+        if native_run is None:
+            return False
+
+        inner = self._vulkan_nested_inner
+
+        def control_ndarray(name):
+            if name is None:
+                return None
+            return getattr(runtime_args[name], "arr", None)
+
+        outer_predicate = control_ndarray(self.predicate)
+        outer_counter = control_ndarray(self.counter)
+        outer_status = control_ndarray(self.status)
+        inner_predicate = control_ndarray(inner.predicate)
+        inner_counter = control_ndarray(inner.counter)
+        inner_status = control_ndarray(inner.status)
+        if any(
+            value is None
+            for value in (
+                outer_predicate,
+                outer_counter,
+                inner_predicate,
+                inner_counter,
+            )
+        ):
+            return False
+        if self.status is not None and outer_status is None:
+            return False
+        if inner.status is not None and inner_status is None:
+            return False
+
+        (
+            outer_condition_count,
+            inner_condition_begin,
+            inner_body_begin,
+            outer_suffix_begin,
+        ) = self._vulkan_nested_boundaries
+        result = dict(
+            native_run(
+                context.compile_config(),
+                context.flattened_args(
+                    self._vulkan_nested.recording_runtime_arg_names
+                ),
+                self._native_jit_cache,
+                outer_predicate,
+                outer_counter,
+                inner_predicate,
+                inner_counter,
+                outer_condition_count,
+                inner_condition_begin,
+                inner_body_begin,
+                outer_suffix_begin,
+                self.max_iterations,
+                inner.max_iterations,
+                inner.compound_chunk_limit,
+                outer_status,
+                inner_status,
+            )
+        )
+        if not result.get("submitted", False):
+            return False
+
+        outer_logical = int(result["outer_logical_iterations"])
+        outer_encoded = int(result["outer_encoded_iterations"])
+        outer_initial_counter = int(result["outer_initial_counter"])
+        outer_final_counter = int(result["outer_final_counter"])
+        if (
+            outer_logical < 0
+            or outer_logical > outer_encoded
+            or outer_encoded > self.max_iterations
+            or outer_final_counter - outer_initial_counter != outer_logical
+        ):
+            raise TaichiRuntimeError(
+                "Vulkan nested Graph while returned invalid outer iteration counts"
+            )
+
+        inner_logical = tuple(
+            int(value) for value in result["inner_logical_iterations"]
+        )
+        inner_encoded = tuple(
+            int(value)
+            for value in result.get(
+                "inner_encoded_iterations",
+                (inner.max_iterations,) * len(inner_logical),
+            )
+        )
+        inner_initial_counters = tuple(
+            int(value) for value in result["inner_initial_counters"]
+        )
+        inner_final_counters = tuple(
+            int(value) for value in result["inner_final_counters"]
+        )
+        inner_final_predicates = tuple(
+            int(value) for value in result["inner_final_predicates"]
+        )
+        expected_inner_count = outer_logical
+        inner_vectors = (
+            inner_logical,
+            inner_encoded,
+            inner_initial_counters,
+            inner_final_counters,
+            inner_final_predicates,
+        )
+        if any(len(values) != expected_inner_count for values in inner_vectors):
+            raise TaichiRuntimeError(
+                "Vulkan nested Graph while returned incomplete inner telemetry"
+            )
+        if any(
+            logical < 0
+            or logical > encoded
+            or encoded > inner.max_iterations
+            or final_counter - initial_counter != logical
+            for logical, encoded, initial_counter, final_counter in zip(
+                inner_logical,
+                inner_encoded,
+                inner_initial_counters,
+                inner_final_counters,
+            )
+        ):
+            raise TaichiRuntimeError(
+                "Vulkan nested Graph while returned invalid inner iteration counts"
+            )
+
+        inner_initial_statuses = tuple(
+            int(value) for value in result.get("inner_initial_statuses", ())
+        )
+        inner_final_statuses = tuple(
+            int(value) for value in result.get("inner_final_statuses", ())
+        )
+        if inner.status is not None and (
+            len(inner_initial_statuses) != expected_inner_count
+            or len(inner_final_statuses) != expected_inner_count
+        ):
+            raise TaichiRuntimeError(
+                "Vulkan nested Graph while returned incomplete inner status telemetry"
+            )
+
+        observation_bytes = int(result["observation_bytes"])
+        control_bytes = int(result["control_bytes"])
+        indirect_dispatches = int(result["indirect_dispatches"])
+        controller_dispatches = int(result["controller_dispatches"])
+        controller_invocations = int(result["controller_invocations"])
+        zero_dispatches = int(result["zero_dispatches"])
+        if expected_inner_count:
+            last = expected_inner_count - 1
+            last_encoded = inner_encoded[last]
+            last_initial_status = (
+                inner_initial_statuses[last] if inner.status is not None else None
+            )
+            last_final_status = (
+                inner_final_statuses[last] if inner.status is not None else None
+            )
+            inner._last_report = GraphWhileReport(
+                name=inner.name,
+                region_path=inner.region_path,
+                structured_depth=inner.control_depth,
+                backend="vulkan",
+                lowering="vulkan_nested_compact_indirect",
+                max_iterations=inner.max_iterations,
+                logical_iterations=inner_logical[last],
+                executed_iterations=last_encoded,
+                overshoot_iterations=last_encoded - inner_logical[last],
+                observation_boundaries=(0, last_encoded),
+                predicate_values=(inner_final_predicates[last],),
+                counter_values=(
+                    inner_initial_counters[last],
+                    inner_final_counters[last],
+                ),
+                status_resource=inner.status,
+                status_values=(
+                    (last_initial_status, last_final_status)
+                    if inner.status is not None
+                    else ()
+                ),
+                chunk_sizes=((last_encoded,) if last_encoded else ()),
+                observation_batches=1,
+                observation_scalar_count=(4 if inner.status is not None else 3),
+                device_to_host_bytes=0,
+                initial_counter=inner_initial_counters[last],
+                final_counter=inner_final_counters[last],
+                initial_status=last_initial_status,
+                final_status=last_final_status,
+                native_upgrade_eligible=True,
+                native_upgrade_reason="selected_nested_tree",
+                persistent_staging_bytes=0,
+                staging_allocations=0,
+                staging_reuses=0,
+                packed_observation_batches=1,
+                direct_observation_batches=0,
+                staging_fallback_batches=0,
+                packed_observation_bytes=0,
+                condition_dispatch_count=inner.condition_dispatch_count,
+                body_dispatch_count=inner.body_dispatch_count,
+                control_inputs=inner.control_inputs,
+                carried_state=inner.carried_state,
+                logical_body_dispatch_count=(
+                    inner_logical[last] * inner.body_dispatch_count
+                ),
+                control_arena_bytes=control_bytes,
+            )
+
+        outer_initial_status = (
+            int(result["outer_initial_status"]) if self.status is not None else None
+        )
+        outer_final_status = (
+            int(result["outer_final_status"]) if self.status is not None else None
+        )
+        outer_initial_predicate = int(result["outer_initial_predicate"])
+        outer_final_predicate = int(result["outer_final_predicate"])
+        transfer_after = impl.get_runtime().prog._graph_observation_staging_stats()
+
+        def transfer_delta(name):
+            return int(transfer_after[name]) - int(transfer_before[name])
+
+        self._last_report = GraphWhileReport(
+            name=self.name,
+            region_path=self.region_path,
+            structured_depth=self.control_depth,
+            backend="vulkan",
+            lowering="vulkan_nested_conditional_compact_indirect",
+            max_iterations=self.max_iterations,
+            logical_iterations=outer_logical,
+            executed_iterations=outer_encoded,
+            overshoot_iterations=outer_encoded - outer_logical,
+            observation_boundaries=(0, outer_encoded),
+            predicate_values=(outer_initial_predicate, outer_final_predicate),
+            counter_values=(outer_initial_counter, outer_final_counter),
+            status_resource=self.status,
+            status_values=(
+                (outer_initial_status, outer_final_status)
+                if self.status is not None
+                else ()
+            ),
+            chunk_sizes=((outer_encoded,) if outer_encoded else ()),
+            observation_batches=1,
+            observation_scalar_count=(
+                4
+                + len(inner_logical) * (5 if inner.status is not None else 3)
+            ),
+            device_to_host_bytes=observation_bytes,
+            initial_counter=outer_initial_counter,
+            final_counter=outer_final_counter,
+            initial_status=outer_initial_status,
+            final_status=outer_final_status,
+            native_upgrade_eligible=True,
+            native_upgrade_reason="selected_nested_tree",
+            persistent_staging_bytes=0,
+            staging_allocations=transfer_delta("allocations"),
+            staging_reuses=transfer_delta("reuses"),
+            packed_observation_batches=1,
+            direct_observation_batches=0,
+            staging_fallback_batches=0,
+            packed_observation_bytes=observation_bytes,
+            condition_dispatch_count=self.condition_dispatch_count,
+            body_dispatch_count=self.body_dispatch_count,
+            control_inputs=self.control_inputs,
+            carried_state=self.carried_state,
+            indirect_dispatch_count=indirect_dispatches,
+            controller_dispatch_count=controller_dispatches,
+            controller_invocation_count=controller_invocations,
+            logical_body_dispatch_count=outer_logical * self.body_dispatch_count,
+            zero_dispatch_count=zero_dispatches,
+            control_arena_bytes=control_bytes,
+            nested_region_path=inner.region_path,
+            nested_logical_iterations=inner_logical,
+            nested_encoded_iterations=inner_encoded,
+        )
+        return True
+
     def _run_vulkan_structured(self, context, runtime_args, transfer_before):
         if (
             impl.current_cfg().arch != _ti_core.Arch.vulkan
@@ -2849,17 +3885,27 @@ class _CompiledWhileGraphNode:
                 )
             )
 
-        chunk_limit = self._vulkan_chunk_limits.get(strategy_code)
+        requested_chunk_limit = min(
+            self.max_iterations,
+            (
+                self.compound_chunk_limit
+                if self._nested_subregion
+                else self.max_iterations
+            ),
+        )
+        chunk_limit = self._vulkan_chunk_limits.get(
+            (strategy_code, requested_chunk_limit)
+        )
         first_result = None
         if chunk_limit is None:
             first_result = run_chunk(
-                self.max_iterations,
+                requested_chunk_limit,
                 execute_initial_dispatches=True,
             )
             if first_result["submitted"]:
-                chunk_limit = self.max_iterations
-            elif strategy_code in (0, 1) and self.max_iterations > 1:
-                chunk_limit = min(self.max_iterations, 64)
+                chunk_limit = requested_chunk_limit
+            elif strategy_code in (0, 1) and requested_chunk_limit > 1:
+                chunk_limit = min(requested_chunk_limit, 64)
                 while chunk_limit >= 1:
                     first_result = run_chunk(
                         chunk_limit,
@@ -2875,7 +3921,9 @@ class _CompiledWhileGraphNode:
                         "became unavailable"
                     )
                 return False
-            self._vulkan_chunk_limits[strategy_code] = chunk_limit
+            self._vulkan_chunk_limits[
+                (strategy_code, requested_chunk_limit)
+            ] = chunk_limit
 
         results = []
         remaining = self.max_iterations
@@ -2964,6 +4012,8 @@ class _CompiledWhileGraphNode:
 
         self._last_report = GraphWhileReport(
             name=self.name,
+            region_path=self.region_path,
+            structured_depth=self.control_depth,
             backend="vulkan",
             lowering=(
                 f"vulkan_chunked_{strategy}" if chunked else f"vulkan_{strategy}"
@@ -3026,6 +4076,15 @@ class _CompiledWhileGraphNode:
         return True
 
     def run(self, context, temporaries=None):
+        trace_frame = context.begin_control_trace(self)
+        try:
+            self._run(context, temporaries)
+            context.end_control_trace(trace_frame, self._last_report)
+        except BaseException:
+            context.abort_control_trace(trace_frame)
+            raise
+
+    def _run(self, context, temporaries=None):
         runtime_args = context.runtime_args()
         predicate_object = runtime_args[self.predicate]
         counter_object = (
@@ -3045,6 +4104,19 @@ class _CompiledWhileGraphNode:
         arch = impl.current_cfg().arch
         use_transfer_planner = _control_transfer_uses_planner(arch)
         transfer_before = program._graph_observation_staging_stats()
+        vulkan_nested_attempted = (
+            arch == _ti_core.Arch.vulkan
+            and self._vulkan_nested is not None
+            and self._vulkan_nested_inner is not None
+            and self._vulkan_nested_boundaries is not None
+            and not context.control_trace_enabled()
+        )
+        if self._run_vulkan_nested_structured(
+            context,
+            runtime_args,
+            transfer_before,
+        ):
+            return
         vulkan_native_attempted = (
             arch == _ti_core.Arch.vulkan
             and self._native_upgrade_eligible
@@ -3090,9 +4162,13 @@ class _CompiledWhileGraphNode:
         active = predicate_value != 0
         native_selected = False
         native_reason = (
-            "vulkan_structured_runtime_fallback"
-            if vulkan_native_attempted
-            else self._native_upgrade_reason
+            "vulkan_nested_runtime_fallback"
+            if vulkan_nested_attempted
+            else (
+                "vulkan_structured_runtime_fallback"
+                if vulkan_native_attempted
+                else self._native_upgrade_reason
+            )
         )
         if (
             arch == _ti_core.Arch.cuda
@@ -3136,6 +4212,7 @@ class _CompiledWhileGraphNode:
 
         while not native_selected and active and executed < self.max_iterations:
             chunk = self._select_chunk(self.max_iterations - executed)
+            context.set_control_trace_iteration(self, executed)
             self._chunks[chunk].run(context)
             executed += chunk
             chunks.append(chunk)
@@ -3175,6 +4252,8 @@ class _CompiledWhileGraphNode:
 
         self._last_report = GraphWhileReport(
             name=self.name,
+            region_path=self.region_path,
+            structured_depth=self.control_depth,
             backend=_backend_name(_ti_core.arch_name(arch)),
             lowering=lowering,
             max_iterations=self.max_iterations,
@@ -3220,11 +4299,19 @@ class _CompiledWhileGraphNode:
             node.invalidate_runtime()
         if self._vulkan_structured is not None:
             self._vulkan_structured.invalidate_runtime()
+        if self._vulkan_nested is not None:
+            self._vulkan_nested.invalidate_runtime()
 
     @property
     def debug_graph_stats(self):
         chunk_stats = tuple(node.debug_graph_stats for node in self._chunks.values())
         condition_stats = (self._condition.debug_graph_stats,)
+        if self._vulkan_nested is not None:
+            return (
+                self._native_jit_cache._debug_graph_stats(),
+                *condition_stats,
+                *chunk_stats,
+            )
         if not self._native_upgrade_eligible:
             return (*condition_stats, *chunk_stats)
         if self._vulkan_structured is not None:
@@ -3248,6 +4335,16 @@ class _CompiledWhileGraphNode:
         return {
             "kind": "structured_while",
             "name": self.name,
+            "region_path": self.region_path,
+            "structured_depth": self.control_depth,
+            "max_nested_depth": self.structured_depth,
+            "nested_portable_exact": self._portable_exact_nested,
+            "nested_subregion": self._nested_subregion,
+            "nested_leaf_native_upgrade_eligible": (
+                self._nested_subregion and self._native_upgrade_eligible
+            ),
+            "nested_native_upgrade_eligible": self._vulkan_nested is not None,
+            "nested_native_upgrade_reason": self._vulkan_nested_reason,
             "condition_dispatch_count": self.condition_dispatch_count,
             "body_dispatch_count": self.body_dispatch_count,
             "max_iterations": self.max_iterations,
@@ -3298,6 +4395,30 @@ class _CompiledIfGraphNode:
         self.predicate = predicate
         self.control_inputs = tuple(control_inputs)
         self.lowering_mode = lowering_mode
+        self.region_path = name
+        self.control_depth = 1
+        self._nested_subregion = False
+        self._definition_regions = tuple(
+            (role, region)
+            for role, region in (
+                ("condition", condition),
+                ("then", then_region),
+                ("else", else_region),
+            )
+            if region is not None
+        )
+        self._definition_children = tuple(
+            (role, _sequence_structured_nodes(region))
+            for role, region in self._definition_regions
+        )
+        self.structured_depth, self._has_nested_control = (
+            _prepare_structured_definition(
+                "if",
+                name,
+                lowering_mode,
+                self._definition_regions,
+            )
+        )
         required = {predicate, *self.control_inputs}
         missing = sorted(required.difference(condition._runtime_arg_names))
         if missing:
@@ -3323,11 +4444,15 @@ class _CompiledIfGraphNode:
         branch_sequences = (
             (then_region,) if else_region is None else (then_region, else_region)
         )
-        self._native_branches = _compile_sequential_runtime_node(
-            branch_sequences,
-            name=f"{name}_native_branches",
-            region_kind="if_branch",
-            region_kinds=("if_branch",) * len(branch_sequences),
+        self._native_branches = (
+            None
+            if self._has_nested_control
+            else _compile_sequential_runtime_node(
+                branch_sequences,
+                name=f"{name}_native_branches",
+                region_kind="if_branch",
+                region_kinds=("if_branch",) * len(branch_sequences),
+            )
         )
         self._native_branch_dispatch_counts = tuple(
             region._dispatch_count for region in branch_sequences
@@ -3336,6 +4461,9 @@ class _CompiledIfGraphNode:
         self._native_upgrade_eligible, self._native_upgrade_reason = (
             _cuda_branch_upgrade_status(arch, lowering_mode, "if")
         )
+        if self._has_nested_control:
+            self._native_upgrade_eligible = False
+            self._native_upgrade_reason = "nested_structured_portable_exact"
         self._native_jit_cache = _ti_core.CompiledGraphJITCache()
         nodes = tuple(
             node for node in (self._condition, self._then, self._else) if node
@@ -3402,6 +4530,8 @@ class _CompiledIfGraphNode:
         return self.lowering_mode == "native_required" and self._native_upgrade_eligible
 
     def _run_native_branch(self, context):
+        if self._native_branches is None:
+            return False
         predicate_object = context.runtime_args()[self.predicate]
         predicate_ndarray = getattr(predicate_object, "arr", None)
         if predicate_ndarray is None:
@@ -3415,6 +4545,14 @@ class _CompiledIfGraphNode:
             0,
             -1,
         )
+
+    def _mark_nested_portable(self):
+        if self.lowering_mode == "native_required":
+            raise TaichiRuntimeError(
+                f"Graph if {self.name!r} is nested at {self.region_path!r}, "
+                "but nested native_required lowering is unavailable"
+            )
+        self._nested_subregion = True
 
     def run_for_submission(self, context, temporaries=None):
         if not self.supports_native_submission:
@@ -3431,6 +4569,17 @@ class _CompiledIfGraphNode:
             )
 
     def run(self, context, temporaries=None):
+        trace_frame = context.begin_control_trace(self)
+        try:
+            self._run(context, temporaries)
+            if trace_frame is not None and self._last_report is None:
+                self.materialize_pending_report()
+            context.end_control_trace(trace_frame, self._last_report)
+        except BaseException:
+            context.abort_control_trace(trace_frame)
+            raise
+
+    def _run(self, context, temporaries=None):
         self._condition.run(context)
         runtime_args = context.runtime_args()
         arch = impl.current_cfg().arch
@@ -3471,6 +4620,8 @@ class _CompiledIfGraphNode:
             selected_dispatches = 0
         self._last_report = GraphBranchReport(
             name=self.name,
+            region_path=self.region_path,
+            structured_depth=self.control_depth,
             backend=_backend_name(_ti_core.arch_name(arch)),
             kind="if",
             lowering=(
@@ -3509,6 +4660,8 @@ class _CompiledIfGraphNode:
             selected_dispatches = 0
         self._last_report = GraphBranchReport(
             name=self.name,
+            region_path=self.region_path,
+            structured_depth=self.control_depth,
             backend=_backend_name(_ti_core.arch_name(arch)),
             kind="if",
             lowering="cuda_conditional_graph",
@@ -3550,6 +4703,15 @@ class _CompiledIfGraphNode:
         return {
             "kind": "structured_if",
             "name": self.name,
+            "region_path": self.region_path,
+            "structured_depth": self.control_depth,
+            "max_nested_depth": self.structured_depth,
+            "nested_portable_exact": self._has_nested_control
+            or (self.control_depth > 1 and not self._native_upgrade_eligible),
+            "nested_subregion": self._nested_subregion,
+            "nested_leaf_native_upgrade_eligible": (
+                self._nested_subregion and self._native_upgrade_eligible
+            ),
             "condition_dispatch_count": self.condition_dispatch_count,
             "then_dispatch_count": self.then_dispatch_count,
             "else_dispatch_count": self.else_dispatch_count,
@@ -3598,6 +4760,28 @@ class _CompiledSwitchGraphNode:
         self.selector = selector
         self.control_inputs = tuple(control_inputs)
         self.lowering_mode = lowering_mode
+        self.region_path = name
+        self.control_depth = 1
+        self._nested_subregion = False
+        definition_regions = [("condition", condition)]
+        definition_regions.extend(
+            (f"case_{index}", branch) for index, branch in enumerate(branches)
+        )
+        if default_region is not None:
+            definition_regions.append(("default", default_region))
+        self._definition_regions = tuple(definition_regions)
+        self._definition_children = tuple(
+            (role, _sequence_structured_nodes(region))
+            for role, region in self._definition_regions
+        )
+        self.structured_depth, self._has_nested_control = (
+            _prepare_structured_definition(
+                "switch",
+                name,
+                lowering_mode,
+                self._definition_regions,
+            )
+        )
         required = {selector, *self.control_inputs}
         missing = sorted(required.difference(condition._runtime_arg_names))
         if missing:
@@ -3630,11 +4814,15 @@ class _CompiledSwitchGraphNode:
         branch_sequences = branches
         if default_region is not None:
             branch_sequences = (*branch_sequences, default_region)
-        self._native_branches = _compile_sequential_runtime_node(
-            branch_sequences,
-            name=f"{name}_native_branches",
-            region_kind="switch_branch",
-            region_kinds=("switch_branch",) * len(branch_sequences),
+        self._native_branches = (
+            None
+            if self._has_nested_control
+            else _compile_sequential_runtime_node(
+                branch_sequences,
+                name=f"{name}_native_branches",
+                region_kind="switch_branch",
+                region_kinds=("switch_branch",) * len(branch_sequences),
+            )
         )
         self._native_branch_dispatch_counts = tuple(
             region._dispatch_count for region in branch_sequences
@@ -3644,6 +4832,9 @@ class _CompiledSwitchGraphNode:
         self._native_upgrade_eligible, self._native_upgrade_reason = (
             _cuda_branch_upgrade_status(arch, lowering_mode, "switch")
         )
+        if self._has_nested_control:
+            self._native_upgrade_eligible = False
+            self._native_upgrade_reason = "nested_structured_portable_exact"
         self._native_jit_cache = _ti_core.CompiledGraphJITCache()
         nodes = (self._condition, *self._branches)
         if self._default is not None:
@@ -3713,6 +4904,8 @@ class _CompiledSwitchGraphNode:
         return self.lowering_mode == "native_required" and self._native_upgrade_eligible
 
     def _run_native_branch(self, context):
+        if self._native_branches is None:
+            return False
         selector_object = context.runtime_args()[self.selector]
         selector_ndarray = getattr(selector_object, "arr", None)
         if selector_ndarray is None:
@@ -3726,6 +4919,14 @@ class _CompiledSwitchGraphNode:
             2,
             self._native_default_branch,
         )
+
+    def _mark_nested_portable(self):
+        if self.lowering_mode == "native_required":
+            raise TaichiRuntimeError(
+                f"Graph switch {self.name!r} is nested at {self.region_path!r}, "
+                "but nested native_required lowering is unavailable"
+            )
+        self._nested_subregion = True
 
     def run_for_submission(self, context, temporaries=None):
         if not self.supports_native_submission:
@@ -3742,6 +4943,17 @@ class _CompiledSwitchGraphNode:
             )
 
     def run(self, context, temporaries=None):
+        trace_frame = context.begin_control_trace(self)
+        try:
+            self._run(context, temporaries)
+            if trace_frame is not None and self._last_report is None:
+                self.materialize_pending_report()
+            context.end_control_trace(trace_frame, self._last_report)
+        except BaseException:
+            context.abort_control_trace(trace_frame)
+            raise
+
+    def _run(self, context, temporaries=None):
         self._condition.run(context)
         runtime_args = context.runtime_args()
         arch = impl.current_cfg().arch
@@ -3782,6 +4994,8 @@ class _CompiledSwitchGraphNode:
             selected_dispatches = 0
         self._last_report = GraphBranchReport(
             name=self.name,
+            region_path=self.region_path,
+            structured_depth=self.control_depth,
             backend=_backend_name(_ti_core.arch_name(arch)),
             kind="switch",
             lowering=(
@@ -3820,6 +5034,8 @@ class _CompiledSwitchGraphNode:
             selected_dispatches = 0
         self._last_report = GraphBranchReport(
             name=self.name,
+            region_path=self.region_path,
+            structured_depth=self.control_depth,
             backend=_backend_name(_ti_core.arch_name(arch)),
             kind="switch",
             lowering="cuda_conditional_graph",
@@ -3862,6 +5078,15 @@ class _CompiledSwitchGraphNode:
         return {
             "kind": "structured_switch",
             "name": self.name,
+            "region_path": self.region_path,
+            "structured_depth": self.control_depth,
+            "max_nested_depth": self.structured_depth,
+            "nested_portable_exact": self._has_nested_control
+            or (self.control_depth > 1 and not self._native_upgrade_eligible),
+            "nested_subregion": self._nested_subregion,
+            "nested_leaf_native_upgrade_eligible": (
+                self._nested_subregion and self._native_upgrade_eligible
+            ),
             "condition_dispatch_count": self.condition_dispatch_count,
             "branch_dispatch_counts": self.branch_dispatch_counts,
             "default_dispatch_count": self.default_dispatch_count,
@@ -3869,6 +5094,93 @@ class _CompiledSwitchGraphNode:
             "lowering_mode": self.lowering_mode,
             "native_upgrade_eligible": self._native_upgrade_eligible,
         }
+
+
+def _structured_root_call_sites(node):
+    if _is_structured_control_node(node):
+        yield node
+        return
+    if isinstance(node, _CompiledSequentialRegionNode):
+        for child in node.nodes:
+            yield from _structured_root_call_sites(child)
+
+
+def _prepare_structured_definition_tree(nodes):
+    """Validate a tree-shaped, single-owner structured definition.
+
+    Compiled control nodes contain mutable reports, paths, and backend caches.
+    Sharing one node across call sites or Graph objects would therefore bypass
+    the per-Graph lifecycle lock. Structured definitions are intentionally
+    single-consumer until compiled nodes can be cloned with independent state.
+    """
+
+    result = []
+    seen_paths = {}
+    active = set()
+    root_name_counts = {}
+
+    def visit(node, path, depth):
+        identity = id(node)
+        if identity in active:
+            raise TaichiRuntimeError(
+                f"Graph structured-control definition contains a cycle at {path!r}"
+            )
+        previous_path = seen_paths.get(identity)
+        if previous_path is not None:
+            raise TaichiRuntimeError(
+                "Graph structured-control node is reused at multiple call "
+                f"sites: {previous_path!r} and {path!r}. Build a fresh "
+                "structured node for each call site."
+            )
+        if getattr(node, "_graph_owner_token", None) is not None:
+            raise TaichiRuntimeError(
+                f"Graph structured-control node at {path!r} already belongs "
+                "to a compiled Graph. Rebuild the structured definition "
+                "before compiling another Graph."
+            )
+        if depth > 2:
+            raise TaichiRuntimeError(
+                "Graph structured-control definition exceeds the maximum depth of 2"
+            )
+        seen_paths[identity] = path
+        result.append((node, path, depth))
+        active.add(identity)
+        try:
+            for role, children in node._definition_children:
+                name_counts = {}
+                for child in children:
+                    occurrence = name_counts.get(child.name, 0)
+                    name_counts[child.name] = occurrence + 1
+                    suffix = "" if occurrence == 0 else f"[{occurrence}]"
+                    visit(
+                        child,
+                        f"{path}/{role}/{child.name}{suffix}",
+                        depth + 1,
+                    )
+        finally:
+            active.remove(identity)
+
+    for source_node in nodes:
+        roots = tuple(_structured_root_call_sites(source_node))
+        for root in roots:
+            occurrence = root_name_counts.get(root.name, 0)
+            root_name_counts[root.name] = occurrence + 1
+            suffix = "" if occurrence == 0 else f"[{occurrence}]"
+            visit(root, f"{root.name}{suffix}", 1)
+
+    for node, path, depth in result:
+        node.region_path = path
+        node.control_depth = depth
+        if depth > 1:
+            node._mark_nested_portable()
+    return tuple(node for node, _, _ in result)
+
+
+def _reset_control_flow_reports(control_nodes):
+    for node in control_nodes:
+        node._last_report = None
+        if hasattr(node, "_pending_report"):
+            node._pending_report = None
 
 
 def _recordable_backend_dispatches(node, backend):
@@ -4021,9 +5333,50 @@ def _lower_mixed_backend_regions(nodes):
     }
 
 
+def _structured_control_resource_names(node):
+    if isinstance(node, _CompiledWhileGraphNode):
+        return frozenset(
+            name
+            for name in (node.predicate, node.counter, node.status)
+            if name is not None
+        )
+    if isinstance(node, _CompiledIfGraphNode):
+        return frozenset((node.predicate,))
+    if isinstance(node, _CompiledSwitchGraphNode):
+        return frozenset((node.selector,))
+    return frozenset()
+
+
+def _nested_control_resource_pairs(control_nodes):
+    pairs = []
+    for parent in control_nodes:
+        parent_names = _structured_control_resource_names(parent)
+        for _, children in parent._definition_children:
+            for child in children:
+                child_names = _structured_control_resource_names(child)
+                overlap = parent_names & child_names
+                if overlap:
+                    raise TaichiRuntimeError(
+                        "Nested Graph control resources must be independent; "
+                        f"{parent.region_path!r} and {child.region_path!r} "
+                        "share " + ", ".join(sorted(overlap))
+                    )
+                pairs.append(
+                    (
+                        parent.region_path,
+                        parent_names,
+                        child.region_path,
+                        child_names,
+                    )
+                )
+    return tuple(pairs)
+
+
 class _GraphSpec:
     def __init__(self, nodes, aot_graph_builder=None, aot_compiled_graph=None):
         source_nodes = tuple(nodes)
+        structured_control_nodes = _prepare_structured_definition_tree(source_nodes)
+        structured_owner_token = object()
         self.pre_optimization_ir_root = SequentialRegion(
             tuple(node.ir_node for node in source_nodes), name="graph"
         )
@@ -4052,19 +5405,18 @@ class _GraphSpec:
         self.native_count = sum(
             getattr(n, "source_native_count", 0) for n in self.nodes
         )
-        self.structured_control_count = sum(
-            isinstance(
-                n,
-                (
-                    _CompiledWhileGraphNode,
-                    _CompiledIfGraphNode,
-                    _CompiledSwitchGraphNode,
-                ),
-            )
-            for n in self.nodes
+        self.structured_control_nodes = structured_control_nodes
+        self.nested_control_resource_pairs = _nested_control_resource_pairs(
+            self.structured_control_nodes
         )
+        self.structured_control_count = len(self.structured_control_nodes)
         self.structured_while_count = sum(
-            isinstance(n, _CompiledWhileGraphNode) for n in self.nodes
+            isinstance(n, _CompiledWhileGraphNode)
+            for n in self.structured_control_nodes
+        )
+        self.max_structured_depth = max(
+            (node.control_depth for node in self.structured_control_nodes),
+            default=0,
         )
         self.observation_count = sum(
             isinstance(n, _CompiledObservationGraphNode) for n in self.nodes
@@ -4108,21 +5460,12 @@ class _GraphSpec:
             tuple(node.ir_node for node in self.nodes), name="graph"
         )
         self.ir_analysis = analyze_graph_ir(self.ir_root)
+        for node in self.structured_control_nodes:
+            node._graph_owner_token = structured_owner_token
 
     @property
     def supports_native_structured_submission(self):
-        structured_nodes = [
-            node
-            for node in self.nodes
-            if isinstance(
-                node,
-                (
-                    _CompiledWhileGraphNode,
-                    _CompiledIfGraphNode,
-                    _CompiledSwitchGraphNode,
-                ),
-            )
-        ]
+        structured_nodes = self.structured_control_nodes
         return bool(structured_nodes) and all(
             node.supports_native_submission for node in structured_nodes
         )
@@ -4251,6 +5594,7 @@ class _GraphSpec:
                 f"{entrypoint}() expects a dict of runtime arguments, got {type(args)}"
             )
         if args.keys() == self.runtime_arg_names:
+            self._validate_nested_control_aliases(args)
             for lease in self.lifetime_leases:
                 validate = getattr(lease, "validate_graph_bindings", None)
                 if validate is not None:
@@ -4267,6 +5611,24 @@ class _GraphSpec:
                 f"Unexpected graph runtime arguments: {', '.join(unexpected)}"
             )
         raise TaichiRuntimeError("; ".join(details))
+
+    def _validate_nested_control_aliases(self, args):
+        for parent_path, parent_names, child_path, child_names in (
+            self.nested_control_resource_pairs
+        ):
+            parent_resources = {
+                id(getattr(args[name], "arr", args[name]))
+                for name in parent_names
+            }
+            child_resources = {
+                id(getattr(args[name], "arr", args[name]))
+                for name in child_names
+            }
+            if parent_resources & child_resources:
+                raise TaichiRuntimeError(
+                    "Nested Graph control resources must not alias at "
+                    f"runtime: {parent_path!r} and {child_path!r}"
+                )
 
     def instantiate(self, key=None):
         if key is None:
@@ -4304,6 +5666,7 @@ class _GraphSpec:
             "native_count": self.native_count,
             "observation_count": self.observation_count,
             "structured_control_count": self.structured_control_count,
+            "max_structured_depth": self.max_structured_depth,
             "repeat_count": self.repeat_count,
             "nodes": [n.debug_info for n in self.nodes],
             "optimization": dict(self.optimization),
@@ -4336,6 +5699,9 @@ class _GraphSpec:
                         "cgraph"
                         if isinstance(node, _CompiledCGraphNode)
                         else (
+                            "structured_sequence"
+                            if isinstance(node, _CompiledSequentialRegionNode)
+                            else (
                             "while"
                             if isinstance(node, _CompiledWhileGraphNode)
                             else (
@@ -4352,7 +5718,7 @@ class _GraphSpec:
                                         else "native"
                                     )
                                 )
-                            )
+                            ))
                         )
                     ),
                     "dispatch_count": getattr(node, "dispatch_count", 0),
@@ -4373,6 +5739,7 @@ class _GraphSpec:
             "native_count": self.native_count,
             "observation_count": self.observation_count,
             "structured_control_count": self.structured_control_count,
+            "max_structured_depth": self.max_structured_depth,
             "runtime_arg_count": len(self.runtime_arg_names),
             "fixed_runtime_arg_count": len(self.fixed_runtime_args),
             "dependency_info": tuple(sorted(self.snode_tree_dependency_info)),
@@ -4385,14 +5752,16 @@ class _GraphExecutable:
         self.spec = spec
         self._context = _GraphRunContext() if self.spec.needs_runtime_args else None
 
-    def run(self, args, temporaries=None):
+    def run(self, args, temporaries=None, trace_recorder=None):
         # Graph.run() holds a per-Graph lock, so this context can safely reuse
         # flattened runtime arguments and resource signatures across invocations.
+        _reset_control_flow_reports(self.spec.structured_control_nodes)
         context = self._context
         if context is not None:
             context.begin(
                 self.spec.bind_runtime_args(args, temporaries),
                 self.spec.fixed_runtime_args,
+                trace_recorder,
             )
         try:
             for node in self.spec.nodes:
@@ -4492,6 +5861,18 @@ class _GraphInstance:
 
     def run(self, args):
         self._run_impl(self, args, self._temporary_bindings)
+
+    def run_traced(self, args, trace_recorder):
+        if not self.spec.structured_control_nodes:
+            self.run(args)
+            return
+        if self._executable is None:
+            self._executable = _GraphExecutable(self.spec)
+        self._executable.run(
+            args,
+            self._temporary_bindings,
+            trace_recorder,
+        )
 
     def run_for_submission(self, args, telemetry=None):
         if not self.spec.supports_native_structured_submission:
@@ -4621,6 +6002,8 @@ class _GraphInstance:
                     _CompiledSwitchGraphNode,
                 ),
             ):
+                result.extend(node.debug_graph_stats)
+            elif isinstance(node, _CompiledSequentialRegionNode):
                 result.extend(node.debug_graph_stats)
         return result
 
@@ -4959,6 +6342,7 @@ class Sequential:
         self._source_native_count = 0
         self._temporary_actions = []
         self._has_indirect_dispatch = False
+        self._structured_depth = 0
 
     def dispatch(self, kernel_fn, *args, template_args=None):
         kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
@@ -5044,6 +6428,174 @@ class Sequential:
         self._dispatch_count += len(dispatches)
         return self
 
+    def _plain_view(self, item_pairs):
+        view = Sequential()
+        for item, ir_node in item_pairs:
+            kind = item[0]
+            if kind == "structured":
+                raise TaichiRuntimeError(
+                    "Internal Graph plain sequence view cannot contain "
+                    "structured control"
+                )
+            view._items.append(item)
+            view._ir_nodes.append(ir_node)
+            if kind == "dispatch":
+                _, kernel_cpp, args = item
+                view._dispatches.append((kernel_cpp, args))
+                names = _runtime_arg_names(args)
+                view._runtime_arg_names.update(names)
+                view._recording_runtime_arg_names.update(names)
+                view._dispatch_count += 1
+            elif kind == "indirect":
+                _, _, args, dispatch_packet = item
+                names = _runtime_arg_names(args)
+                names.add(dispatch_packet.name)
+                view._runtime_arg_names.update(names)
+                view._recording_runtime_arg_names.update(names)
+                view._dispatch_count += 1
+                view._has_indirect_dispatch = True
+            else:
+                _, compiled = item
+                view._fixed_runtime_args.update(compiled.fixed_runtime_args)
+                view._runtime_arg_names.update(compiled.runtime_arg_names)
+                view._recording_runtime_arg_names.update(
+                    compiled.recording_runtime_arg_names
+                )
+                view._lifetime_leases.extend(compiled.lifetime_leases)
+                view._temporary_actions.extend(compiled.temporary_actions)
+                view._source_native_count += compiled.source_native_count
+                view._dispatch_count += len(compiled.recordable_action.dispatches)
+        return view
+
+    def _append_structured(self, node):
+        if not _is_structured_control_node(node):
+            raise TaichiRuntimeError(
+                "Sequential structured action must be while, if, or switch"
+            )
+        for binding_name, value in node.fixed_runtime_args.items():
+            existing = self._fixed_runtime_args.get(binding_name)
+            if existing is not None and existing is not value:
+                if not (
+                    isinstance(existing, (int, float))
+                    and isinstance(value, (int, float))
+                    and existing == value
+                ):
+                    raise TaichiRuntimeError(
+                        "Sequential structured actions provide conflicting "
+                        f"fixed binding {binding_name!r}"
+                    )
+            self._fixed_runtime_args[binding_name] = value
+        self._items.append(("structured", node))
+        self._ir_nodes.append(node.ir_node)
+        self._runtime_arg_names.update(node.runtime_arg_names)
+        self._recording_runtime_arg_names.update(node.recording_runtime_arg_names)
+        self._lifetime_leases.extend(node.lifetime_leases)
+        self._temporary_actions.extend(node.temporary_actions)
+        self._source_native_count += node.source_native_count
+        self._dispatch_count += node.dispatch_count
+        self._structured_depth = max(self._structured_depth, node.structured_depth)
+        return self
+
+    def while_loop(
+        self,
+        condition,
+        body,
+        *,
+        predicate,
+        max_iterations,
+        control_inputs=(),
+        carried_state=(),
+        counter=None,
+        status=None,
+        chunk_size=None,
+        vulkan_first_chunk_strategy="auto",
+        masked_execution=False,
+        lowering_mode="auto",
+        name="while",
+    ):
+        """Append a depth-bounded structured while child to this region."""
+        return self._append_structured(
+            _CompiledWhileGraphNode(
+                condition,
+                body,
+                predicate=_graph_control_name(predicate, "while predicate"),
+                control_inputs=_graph_control_names(
+                    control_inputs, "while control_inputs"
+                ),
+                carried_state=_graph_control_names(
+                    carried_state, "while carried_state"
+                ),
+                max_iterations=max_iterations,
+                counter=(
+                    None
+                    if counter is None
+                    else _graph_control_name(counter, "while counter")
+                ),
+                status=(
+                    None
+                    if status is None
+                    else _graph_control_name(status, "while status")
+                ),
+                chunk_size=chunk_size,
+                vulkan_first_chunk_strategy=vulkan_first_chunk_strategy,
+                masked_execution=masked_execution,
+                lowering_mode=lowering_mode,
+                name=name,
+            )
+        )
+
+    def if_then_else(
+        self,
+        condition,
+        then_region,
+        *,
+        predicate,
+        control_inputs=(),
+        else_region=None,
+        lowering_mode="auto",
+        name="if",
+    ):
+        """Append a depth-bounded structured conditional child."""
+        return self._append_structured(
+            _CompiledIfGraphNode(
+                condition,
+                then_region,
+                else_region,
+                predicate=_graph_control_name(predicate, "if predicate"),
+                control_inputs=_graph_control_names(
+                    control_inputs, "if control_inputs"
+                ),
+                lowering_mode=lowering_mode,
+                name=name,
+            )
+        )
+
+    def switch(
+        self,
+        condition,
+        branches,
+        *,
+        selector,
+        control_inputs=(),
+        default_region=None,
+        lowering_mode="auto",
+        name="switch",
+    ):
+        """Append a depth-bounded zero-based structured switch child."""
+        return self._append_structured(
+            _CompiledSwitchGraphNode(
+                condition,
+                tuple(branches),
+                default_region,
+                selector=_graph_control_name(selector, "switch selector"),
+                control_inputs=_graph_control_names(
+                    control_inputs, "switch control_inputs"
+                ),
+                lowering_mode=lowering_mode,
+                name=name,
+            )
+        )
+
     def _dispatch_to(self, builder, *, region_kind="sequential"):
         backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
         recording_dispatches = []
@@ -5055,7 +6607,7 @@ class Sequential:
                 _, kernel_cpp, args, dispatch_packet = item
                 builder.dispatch_indirect(kernel_cpp, args, dispatch_packet)
                 continue
-            else:
+            elif item[0] == "native":
                 _, node = item
                 action = node.recordable_action
                 if not action.supports_backend(backend):
@@ -5068,6 +6620,11 @@ class Sequential:
                         f"{region_kind!r}"
                     )
                 dispatches = tuple(action.dispatches)
+            else:
+                raise TaichiRuntimeError(
+                    "Nested structured control cannot be flattened into a "
+                    "single CGraph segment"
+                )
             for kernel_cpp, args in dispatches:
                 builder.dispatch(kernel_cpp, args)
                 recording_dispatches.append((kernel_cpp, tuple(args)))
@@ -5131,7 +6688,7 @@ class GraphBuilder:
     def append(self, node):
         # TODO: support appending dispatch node as well.
         assert isinstance(node, Sequential)
-        if node._source_native_count:
+        if node._source_native_count or node._structured_depth:
             self._flush_graph_builder()
             self._nodes.append(
                 _compile_sequential_runtime_node(
@@ -5190,21 +6747,11 @@ class GraphBuilder:
 
     @staticmethod
     def _control_name(value, role):
-        name = value if isinstance(value, str) else getattr(value, "name", None)
-        if not isinstance(name, str) or not name:
-            raise TaichiRuntimeError(
-                f"Graph {role} must be a symbolic argument or resource name"
-            )
-        return name
+        return _graph_control_name(value, role)
 
     @classmethod
     def _control_names(cls, values, role):
-        names = tuple(cls._control_name(value, role) for value in values)
-        if len(names) != len(set(names)):
-            raise TaichiRuntimeError(
-                f"Graph {role} must not contain duplicate resources"
-            )
-        return names
+        return _graph_control_names(values, role)
 
     def while_loop(
         self,
@@ -5475,7 +7022,18 @@ class Graph:
         self._run_impl = self._instance.run_impl
         impl.get_runtime().register_runtime_object(self)
 
-    def run(self, args):
+    def run(self, args, *, trace=False):
+        """Run synchronously, optionally returning every control invocation.
+
+        ``trace=False`` preserves the allocation-free default for dynamic path
+        snapshots. ``trace=True`` returns an immutable
+        :class:`GraphControlFlowTrace`; reports in
+        :meth:`control_flow_stats` remain one last invocation per static
+        definition.
+        """
+        if not isinstance(trace, bool):
+            raise TaichiRuntimeError("Graph.run() trace must be a bool")
+        trace_recorder = _ControlFlowTraceRecorder() if trace else None
         # A graph invocation is one host-side transaction, including mixed
         # CGraph/native sequences. The lock is per Graph and does not wait for
         # GPU completion, so independent graphs remain independently submitable.
@@ -5527,7 +7085,10 @@ class Graph:
                         else None
                     )
                     runtime.prog._record_runtime_graph_submission()
-                    self._run_impl(args)
+                    if trace_recorder is None:
+                        self._run_impl(args)
+                    else:
+                        self._instance.run_traced(args, trace_recorder)
                     self._latest_control_flow_was_async = False
                     if observation_lease is not None:
                         self._last_observations = observation_lease.materialize()
@@ -5540,6 +7101,9 @@ class Graph:
                     observation_lease.cancel()
                 if temporary_lease is not None:
                     temporary_lease.cancel()
+        if trace_recorder is not None:
+            return trace_recorder.finish()
+        return None
 
     def submit(
         self,
@@ -5793,7 +7357,11 @@ class Graph:
             return self._instance.debug_graph_stats
 
     def control_flow_stats(self):
-        """Return immutable reports for the latest structured-control run."""
+        """Return the last invocation of each definition in the latest run.
+
+        Repeated nested definitions overwrite their prior report. Use
+        ``Graph.run(..., trace=True)`` to retain every invocation.
+        """
         with self._lifecycle_lock:
             self._check_runtime_valid()
             if self._latest_control_flow_was_async:
@@ -5803,21 +7371,15 @@ class Graph:
                     "for explicit terminal state, or Graph.run() for a "
                     "synchronous control-flow report."
                 )
-            for node in self._spec.nodes:
+            control_nodes = self._spec.structured_control_nodes
+            for node in control_nodes:
                 materialize = getattr(node, "materialize_pending_report", None)
                 if materialize is not None:
                     materialize()
             return tuple(
                 node.last_report
-                for node in self._spec.nodes
-                if isinstance(
-                    node,
-                    (
-                        _CompiledWhileGraphNode,
-                        _CompiledIfGraphNode,
-                        _CompiledSwitchGraphNode,
-                    ),
-                )
+                for node in control_nodes
+                if node.last_report is not None
             )
 
     def latest_observations(self):
@@ -6119,6 +7681,8 @@ __all__ = [
     "GraphExecutionReport",
     "GraphWhileReport",
     "GraphBranchReport",
+    "GraphControlFlowInvocation",
+    "GraphControlFlowTrace",
     "GraphSubmissionRegionTelemetry",
     "GraphSubmissionQueueTelemetry",
     "GraphSubmissionTelemetry",

@@ -2555,6 +2555,21 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
                 "compound_structured_submit",
                 "compound_single_preparation",
                 "structured_barrier_policy",
+                "nested_structured_control",
+                "max_structured_depth",
+                "nested_exact_portable",
+                "nested_native_lowering",
+                "nested_native_lowering_compiled",
+                "nested_native_kinds",
+                "nested_native_outer_iteration_limit",
+                "nested_native_inner_iteration_limit",
+                "nested_native_max_encoded_actions",
+                "nested_native_stop_telemetry",
+                "nested_trace_uses_portable_execution",
+                "nested_leaf_native_upgrade",
+                "nested_leaf_native_kinds",
+                "native_max_structured_depth",
+                "nested_async_submit",
                 "compound_max_chunks_per_region",
                 "compound_max_iterations_per_region",
                 "compound_terminal_observation",
@@ -2577,6 +2592,45 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
     )
     assert not device["per_iteration_host_observation"]
     assert not device["conditional_rendering_qualified"]
+    assert capabilities["nested_structured_control"]
+    assert capabilities["max_structured_depth"] == 2
+    assert device["nested_structured_control"]
+    assert device["max_structured_depth"] == 2
+    assert device["nested_exact_portable"]
+    expected_nested_native = bool(
+        arch == ti.vulkan
+        and device["runtime_path_qualified"]
+        and device["conditional_rendering_available"]
+        and device["nested_native_lowering_compiled"]
+    )
+    assert capabilities["nested_native_lowering"] == expected_nested_native
+    assert device["nested_native_lowering"] == expected_nested_native
+    assert device["nested_native_kinds"] == (
+        ("while_while",) if expected_nested_native else ()
+    )
+    assert device["nested_native_outer_iteration_limit"] == (
+        64 if expected_nested_native else 0
+    )
+    assert device["nested_native_inner_iteration_limit"] == (
+        64 if expected_nested_native else 0
+    )
+    assert device["nested_native_max_encoded_actions"] == (
+        4096 if expected_nested_native else 0
+    )
+    assert (
+        device["nested_native_stop_telemetry"]
+        == expected_nested_native
+    )
+    assert device["nested_trace_uses_portable_execution"]
+    assert device["nested_leaf_native_upgrade"] == bool(
+        device["runtime_path_qualified"]
+    )
+    assert not device["nested_async_submit"]
+    assert device["native_max_structured_depth"] == (
+        2
+        if expected_nested_native
+        else int(bool(device["runtime_path_qualified"]))
+    )
     if arch != ti.vulkan:
         assert not device["compound_single_preparation"]
         assert device["structured_barrier_policy"] == "unavailable"
@@ -2605,6 +2659,9 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         assert device["device_controlled_masking"] == expected
         assert device["stops_command_issue_after_exit"] == expected
         assert device["exact_dynamic_termination"] == expected
+        assert device["nested_leaf_native_kinds"] == (
+            ("while", "if", "switch") if expected else ()
+        )
     elif arch == ti.vulkan:
         assert device["primitive"] == "vulkan_dispatch_indirect"
         assert device["rhi_primitive_compiled"]
@@ -2649,6 +2706,7 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         assert device["device_controlled_masking"]
         assert not device["stops_command_issue_after_exit"]
         assert not device["exact_dynamic_termination"]
+        assert device["nested_leaf_native_kinds"] == ("while",)
         assert device["skip_strategy"] in (
             "auto_compact_with_coarse_conditional_tail",
             "compact_indirect",
@@ -2692,6 +2750,8 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         assert not device["rhi_primitive_qualified"]
         assert not device["runtime_path_compiled"]
         assert not device["runtime_path_qualified"]
+        assert not device["nested_leaf_native_upgrade"]
+        assert device["nested_leaf_native_kinds"] == ()
         assert not device["compound_per_region_chunk_size"]
         assert device["compound_chunk_size_limit"] == 0
         assert device["compound_first_chunk_strategies"] == ()
@@ -2700,6 +2760,849 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         assert device["submission_ticket_queue_telemetry"] == "unavailable"
         assert device["submission_ticket_gpu_timestamps"] == "unavailable"
         assert device["unsupported_reason"] == "device_control_is_gpu_only"
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_nested_structured_while_is_exact_and_reports_stable_paths():
+    @ti.kernel
+    def evaluate_outer(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        target: ti.i32,
+    ):
+        predicate[None] = int(state[None] < target)
+
+    @ti.kernel
+    def evaluate_inner(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        outer_state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        target: ti.i32,
+    ):
+        predicate[None] = int(state[None] < target + outer_state[None])
+
+    @ti.kernel
+    def reset_inner(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        state[None] = 0
+        counter[None] = 0
+
+    @ti.kernel
+    def inner_step(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        total: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        if predicate[None] != 0:
+            state[None] += 1
+            total[None] += 1
+            counter[None] += 1
+
+    @ti.kernel
+    def outer_step(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        if predicate[None] != 0:
+            state[None] += 1
+            counter[None] += 1
+
+    scalar = lambda name: ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=0
+    )
+    outer_state = scalar("outer_state")
+    outer_predicate = scalar("outer_predicate")
+    outer_counter = scalar("outer_counter")
+    inner_state = scalar("inner_state")
+    inner_predicate = scalar("inner_predicate")
+    inner_counter = scalar("inner_counter")
+    inner_total = scalar("inner_total")
+    outer_target = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "outer_target", ti.i32
+    )
+    inner_target = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "inner_target", ti.i32
+    )
+
+    builder = ti.graph.GraphBuilder()
+    outer_condition = builder.create_sequential()
+    outer_condition.dispatch(
+        evaluate_outer, outer_state, outer_predicate, outer_target
+    )
+    inner_condition = builder.create_sequential()
+    inner_condition.dispatch(
+        evaluate_inner,
+        inner_state,
+        inner_predicate,
+        outer_state,
+        inner_target,
+    )
+    inner_body = builder.create_sequential()
+    inner_body.dispatch(
+        inner_step,
+        inner_state,
+        inner_total,
+        inner_predicate,
+        inner_counter,
+    )
+    outer_body = builder.create_sequential()
+    outer_body.dispatch(reset_inner, inner_state, inner_counter)
+    outer_body.while_loop(
+        inner_condition,
+        inner_body,
+        predicate=inner_predicate,
+        control_inputs=(inner_state, outer_state, inner_target),
+        carried_state=(inner_state, inner_total),
+        counter=inner_counter,
+        max_iterations=5,
+        chunk_size=4,
+        masked_execution=True,
+        name="inner_pcg",
+    )
+    outer_body.dispatch(
+        outer_step, outer_state, outer_predicate, outer_counter
+    )
+    builder.while_loop(
+        outer_condition,
+        outer_body,
+        predicate=outer_predicate,
+        control_inputs=(outer_state, outer_target),
+        carried_state=(
+            outer_state,
+            inner_state,
+            inner_counter,
+            inner_total,
+        ),
+        counter=outer_counter,
+        max_iterations=5,
+        chunk_size=4,
+        masked_execution=True,
+        name="outer_newton",
+    )
+    graph = builder.compile()
+
+    args = {
+        name: ti.ndarray(ti.i32, shape=())
+        for name in (
+            "outer_state",
+            "outer_predicate",
+            "outer_counter",
+            "inner_state",
+            "inner_predicate",
+            "inner_counter",
+            "inner_total",
+        )
+    }
+    for value in args.values():
+        value.fill(0)
+    trace = graph.run(
+        {**args, "outer_target": 3, "inner_target": 2},
+        trace=True,
+    )
+
+    reports = graph.control_flow_stats()
+    assert tuple(report.region_path for report in reports) == (
+        "outer_newton",
+        "outer_newton/body/inner_pcg",
+    )
+    outer_report, inner_report = reports
+    assert outer_report.name == "outer_newton"
+    assert outer_report.structured_depth == 1
+    expected_outer_lowering = (
+        "cpu_host_loop"
+        if ti.lang.impl.current_cfg().arch == ti.cpu
+        else "portable_exact_replay"
+    )
+    assert outer_report.lowering == expected_outer_lowering
+    assert outer_report.logical_iterations == 3
+    assert outer_report.executed_iterations == 3
+    assert outer_report.overshoot_iterations == 0
+    assert outer_report.observation_boundaries == (0, 1, 2, 3)
+    assert inner_report.name == "inner_pcg"
+    assert inner_report.structured_depth == 2
+    expected_inner_lowering = {
+        ti.cpu: "cpu_host_loop",
+        ti.cuda: "cuda_conditional_graph",
+        ti.vulkan: "vulkan_chunked_compact_indirect",
+    }[ti.lang.impl.current_cfg().arch]
+    assert inner_report.lowering == expected_inner_lowering
+    assert inner_report.logical_iterations == 4
+    assert inner_report.executed_iterations == 4
+    assert inner_report.overshoot_iterations == 0
+    assert inner_report.final_counter == 4
+    assert args["outer_state"].to_numpy()[()] == 3
+    assert args["inner_state"].to_numpy()[()] == 4
+    assert args["inner_total"].to_numpy()[()] == 9
+
+    assert trace.schema_version == 1
+    assert tuple(
+        invocation.invocation_path for invocation in trace.invocations
+    ) == (
+        "outer_newton",
+        "outer_newton[0]/body/inner_pcg",
+        "outer_newton[1]/body/inner_pcg",
+        "outer_newton[2]/body/inner_pcg",
+    )
+    assert tuple(
+        invocation.parent_iteration for invocation in trace.invocations
+    ) == (None, 0, 1, 2)
+    assert tuple(
+        getattr(invocation.report, "logical_iterations", None)
+        for invocation in trace.invocations
+    ) == (3, 2, 3, 4)
+    assert tuple(
+        invocation.report.region_path for invocation in trace.invocations
+    ) == tuple(
+        invocation.invocation_path for invocation in trace.invocations
+    )
+    assert tuple(
+        invocation.definition_path for invocation in trace.invocations
+    ) == (
+        "outer_newton",
+        "outer_newton/body/inner_pcg",
+        "outer_newton/body/inner_pcg",
+        "outer_newton/body/inner_pcg",
+    )
+
+    nested_native = (
+        ti.lang.impl.current_cfg().arch == ti.vulkan
+        and ti.graph.structured_control_capabilities()[
+            "nested_native_lowering"
+        ]
+    )
+    if nested_native:
+        for value in args.values():
+            value.fill(0)
+        assert (
+            graph.run(
+                {**args, "outer_target": 3, "inner_target": 2},
+            )
+            is None
+        )
+        outer_native, inner_native = graph.control_flow_stats()
+        assert (
+            outer_native.lowering
+            == "vulkan_nested_conditional_compact_indirect"
+        )
+        assert outer_native.logical_iterations == 3
+        assert outer_native.executed_iterations == 5
+        assert outer_native.nested_region_path == (
+            "outer_newton/body/inner_pcg"
+        )
+        assert outer_native.nested_logical_iterations == (2, 3, 4)
+        assert outer_native.nested_encoded_iterations == (5, 5, 5)
+        assert inner_native.lowering == "vulkan_nested_compact_indirect"
+        assert inner_native.logical_iterations == 4
+        assert inner_native.executed_iterations == 5
+        assert args["outer_state"].to_numpy()[()] == 3
+        assert args["inner_state"].to_numpy()[()] == 4
+        assert args["inner_total"].to_numpy()[()] == 9
+        memory = graph.execution_stats().memory
+        assert outer_native.control_arena_bytes > 0
+        assert memory.persistent_argument_bytes >= (
+            outer_native.control_arena_bytes + outer_native.device_to_host_bytes
+        )
+        assert memory.persistent_bytes >= memory.persistent_argument_bytes
+
+    debug = graph._debug_info
+    assert debug["structured_control_count"] == 2
+    assert debug["max_structured_depth"] == 2
+    if nested_native:
+        outer_debug = debug["nodes"][0]
+        assert outer_debug["nested_native_upgrade_eligible"]
+        assert outer_debug["nested_native_upgrade_reason"] == "eligible"
+    ir = graph._ir_debug_info
+    assert ir["analysis"]["while_regions"] == 2
+    assert ir["analysis"]["max_structured_depth"] == 2
+    assert ir["root"]["children"][0]["structured_depth"] == 1
+    assert (
+        ir["root"]["children"][0]["children"][1]["children"][1][
+            "structured_depth"
+        ]
+        == 2
+    )
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_nested_structured_while_respects_explicit_portable_outer_lowering():
+    @ti.kernel
+    def evaluate(
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        limit: ti.i32,
+    ):
+        predicate[None] = int(counter[None] < limit)
+
+    @ti.kernel
+    def step(
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        if predicate[None] != 0:
+            counter[None] += 1
+
+    def scalar(name):
+        return ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=0
+        )
+
+    outer_predicate = scalar("outer_predicate")
+    outer_counter = scalar("outer_counter")
+    inner_predicate = scalar("inner_predicate")
+    inner_counter = scalar("inner_counter")
+    outer_limit = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "outer_limit", ti.i32
+    )
+    inner_limit = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "inner_limit", ti.i32
+    )
+
+    builder = ti.graph.GraphBuilder()
+    outer_condition = builder.create_sequential()
+    outer_condition.dispatch(
+        evaluate, outer_counter, outer_predicate, outer_limit
+    )
+    inner_condition = builder.create_sequential()
+    inner_condition.dispatch(
+        evaluate, inner_counter, inner_predicate, inner_limit
+    )
+    inner_body = builder.create_sequential()
+    inner_body.dispatch(step, inner_predicate, inner_counter)
+    outer_body = builder.create_sequential()
+    outer_body.while_loop(
+        inner_condition,
+        inner_body,
+        predicate=inner_predicate,
+        counter=inner_counter,
+        max_iterations=4,
+        chunk_size=4,
+        name="inner",
+    )
+    outer_body.dispatch(step, outer_predicate, outer_counter)
+    builder.while_loop(
+        outer_condition,
+        outer_body,
+        predicate=outer_predicate,
+        counter=outer_counter,
+        max_iterations=4,
+        lowering_mode="portable",
+        name="outer",
+    )
+    graph = builder.compile()
+
+    outer_debug = graph._debug_info["nodes"][0]
+    assert not outer_debug["nested_native_upgrade_eligible"]
+    assert (
+        outer_debug["nested_native_upgrade_reason"]
+        == "outer_portable_lowering_requested"
+    )
+
+    args = {
+        name: ti.ndarray(ti.i32, shape=())
+        for name in (
+            "outer_predicate",
+            "outer_counter",
+            "inner_predicate",
+            "inner_counter",
+        )
+    }
+    for value in args.values():
+        value.fill(0)
+    graph.run({**args, "outer_limit": 2, "inner_limit": 1})
+    outer_report, inner_report = graph.control_flow_stats()
+    assert outer_report.lowering == "portable_exact_replay"
+    assert outer_report.logical_iterations == 2
+    assert inner_report.logical_iterations == 0
+
+
+@test_utils.test(arch=ti.cpu)
+def test_nested_structured_if_reports_selected_branch_and_clears_stale_report():
+    @ti.kernel
+    def evaluate_outer(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        target: ti.i32,
+    ):
+        predicate[None] = int(state[None] < target)
+
+    @ti.kernel
+    def evaluate_parity(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        predicate[None] = int(state[None] % 2 == 0)
+
+    @ti.kernel
+    def increment(value: ti.types.ndarray(dtype=ti.i32, ndim=0)):
+        value[None] += 1
+
+    @ti.kernel
+    def outer_step(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        if predicate[None] != 0:
+            state[None] += 1
+            counter[None] += 1
+
+    scalar = lambda name: ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=0
+    )
+    state = scalar("state")
+    outer_predicate = scalar("outer_predicate")
+    outer_counter = scalar("outer_counter")
+    branch_predicate = scalar("branch_predicate")
+    even_count = scalar("even_count")
+    odd_count = scalar("odd_count")
+    target = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "target", ti.i32)
+
+    builder = ti.graph.GraphBuilder()
+    outer_condition = builder.create_sequential()
+    outer_condition.dispatch(evaluate_outer, state, outer_predicate, target)
+    branch_condition = builder.create_sequential()
+    branch_condition.dispatch(evaluate_parity, state, branch_predicate)
+    even_branch = builder.create_sequential()
+    even_branch.dispatch(increment, even_count)
+    odd_branch = builder.create_sequential()
+    odd_branch.dispatch(increment, odd_count)
+    outer_body = builder.create_sequential()
+    outer_body.if_then_else(
+        branch_condition,
+        even_branch,
+        predicate=branch_predicate,
+        control_inputs=(state,),
+        else_region=odd_branch,
+        name="parity",
+    )
+    outer_body.dispatch(outer_step, state, outer_predicate, outer_counter)
+    builder.while_loop(
+        outer_condition,
+        outer_body,
+        predicate=outer_predicate,
+        control_inputs=(state, target),
+        carried_state=(state, even_count, odd_count),
+        counter=outer_counter,
+        max_iterations=5,
+        name="outer",
+    )
+    graph = builder.compile()
+
+    args = {
+        name: ti.ndarray(ti.i32, shape=())
+        for name in (
+            "state",
+            "outer_predicate",
+            "outer_counter",
+            "branch_predicate",
+            "even_count",
+            "odd_count",
+        )
+    }
+    for value in args.values():
+        value.fill(0)
+    trace = graph.run({**args, "target": 3}, trace=True)
+    reports = graph.control_flow_stats()
+    assert tuple(report.region_path for report in reports) == (
+        "outer",
+        "outer/body/parity",
+    )
+    assert reports[1].kind == "if"
+    assert reports[1].structured_depth == 2
+    assert reports[1].selected_branch == "then"
+    assert args["even_count"].to_numpy()[()] == 2
+    assert args["odd_count"].to_numpy()[()] == 1
+    assert tuple(
+        invocation.invocation_path for invocation in trace.invocations
+    ) == (
+        "outer",
+        "outer[0]/body/parity",
+        "outer[1]/body/parity",
+        "outer[2]/body/parity",
+    )
+    assert tuple(
+        invocation.report.selected_branch for invocation in trace.invocations[1:]
+    ) == ("then", "else", "then")
+
+    for value in args.values():
+        value.fill(0)
+    zero_trace = graph.run({**args, "target": 0}, trace=True)
+    reports = graph.control_flow_stats()
+    assert len(reports) == 1
+    assert reports[0].region_path == "outer"
+    assert reports[0].logical_iterations == 0
+    assert tuple(
+        invocation.invocation_path for invocation in zero_trace.invocations
+    ) == ("outer",)
+
+    for value in args.values():
+        value.fill(0)
+    assert graph.run({**args, "target": 1}) is None
+    reports = graph.control_flow_stats()
+    assert tuple(report.region_path for report in reports) == (
+        "outer",
+        "outer/body/parity",
+    )
+
+
+@test_utils.test(arch=ti.cpu)
+def test_nested_structured_switch_trace_records_each_selected_branch():
+    @ti.kernel
+    def evaluate_outer(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        target: ti.i32,
+    ):
+        predicate[None] = int(state[None] < target)
+
+    @ti.kernel
+    def evaluate_selector(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        selector: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        selector[None] = state[None] % 3
+
+    @ti.kernel
+    def increment(value: ti.types.ndarray(dtype=ti.i32, ndim=0)):
+        value[None] += 1
+
+    @ti.kernel
+    def outer_step(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        if predicate[None] != 0:
+            state[None] += 1
+            counter[None] += 1
+
+    scalar = lambda name: ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=0
+    )
+    state = scalar("state")
+    predicate = scalar("predicate")
+    counter = scalar("counter")
+    selector = scalar("selector")
+    count_0 = scalar("count_0")
+    count_1 = scalar("count_1")
+    count_default = scalar("count_default")
+    target = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "target", ti.i32)
+
+    builder = ti.graph.GraphBuilder()
+    outer_condition = builder.create_sequential()
+    outer_condition.dispatch(evaluate_outer, state, predicate, target)
+    switch_condition = builder.create_sequential()
+    switch_condition.dispatch(evaluate_selector, state, selector)
+    branch_0 = builder.create_sequential()
+    branch_0.dispatch(increment, count_0)
+    branch_1 = builder.create_sequential()
+    branch_1.dispatch(increment, count_1)
+    default_branch = builder.create_sequential()
+    default_branch.dispatch(increment, count_default)
+    outer_body = builder.create_sequential()
+    outer_body.switch(
+        switch_condition,
+        (branch_0, branch_1),
+        selector=selector,
+        control_inputs=(state,),
+        default_region=default_branch,
+        name="choice",
+    )
+    outer_body.dispatch(outer_step, state, predicate, counter)
+    builder.while_loop(
+        outer_condition,
+        outer_body,
+        predicate=predicate,
+        control_inputs=(state, target),
+        carried_state=(state, count_0, count_1, count_default),
+        counter=counter,
+        max_iterations=4,
+        name="outer",
+    )
+    graph = builder.compile()
+
+    args = {
+        name: ti.ndarray(ti.i32, shape=())
+        for name in (
+            "state",
+            "predicate",
+            "counter",
+            "selector",
+            "count_0",
+            "count_1",
+            "count_default",
+        )
+    }
+    for value in args.values():
+        value.fill(0)
+    trace = graph.run({**args, "target": 3}, trace=True)
+
+    assert tuple(
+        invocation.invocation_path for invocation in trace.invocations
+    ) == (
+        "outer",
+        "outer[0]/body/choice",
+        "outer[1]/body/choice",
+        "outer[2]/body/choice",
+    )
+    assert tuple(
+        invocation.report.selected_branch for invocation in trace.invocations[1:]
+    ) == ("case_0", "case_1", "default")
+    assert tuple(
+        args[name].to_numpy()[()]
+        for name in ("count_0", "count_1", "count_default")
+    ) == (1, 1, 1)
+    assert graph.control_flow_stats()[1].selected_branch == "default"
+
+
+@test_utils.test(arch=ti.cpu)
+def test_nested_structured_control_rejects_depth_three_and_native_required():
+    @ti.kernel
+    def set_true(predicate: ti.types.ndarray(dtype=ti.i32, ndim=0)):
+        predicate[None] = 1
+
+    @ti.kernel
+    def increment(value: ti.types.ndarray(dtype=ti.i32, ndim=0)):
+        value[None] += 1
+
+    scalar = lambda name: ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=0
+    )
+    predicate_0 = scalar("predicate_0")
+    predicate_1 = scalar("predicate_1")
+    predicate_2 = scalar("predicate_2")
+    state = scalar("state")
+    builder = ti.graph.GraphBuilder()
+
+    leaf_condition = builder.create_sequential()
+    leaf_condition.dispatch(set_true, predicate_2)
+    leaf_then = builder.create_sequential()
+    leaf_then.dispatch(increment, state)
+    middle_then = builder.create_sequential()
+    middle_then.if_then_else(
+        leaf_condition,
+        leaf_then,
+        predicate=predicate_2,
+        name="leaf",
+    )
+    middle_condition = builder.create_sequential()
+    middle_condition.dispatch(set_true, predicate_1)
+    outer_then = builder.create_sequential()
+    outer_then.if_then_else(
+        middle_condition,
+        middle_then,
+        predicate=predicate_1,
+        name="middle",
+    )
+    root_condition = builder.create_sequential()
+    root_condition.dispatch(set_true, predicate_0)
+
+    with pytest.raises(TaichiRuntimeError, match="maximum structured-control depth of 2"):
+        builder.if_then_else(
+            root_condition,
+            outer_then,
+            predicate=predicate_0,
+            name="root_depth_three",
+        )
+
+    native_builder = ti.graph.GraphBuilder()
+    with pytest.raises(
+        TaichiRuntimeError,
+        match="nested native_required lowering is unavailable",
+    ):
+        native_builder.if_then_else(
+            root_condition,
+            middle_then,
+            predicate=predicate_0,
+            lowering_mode="native_required",
+            name="root_native",
+        )
+
+
+@test_utils.test(arch=ti.cpu)
+def test_nested_structured_control_rejects_control_resource_aliases():
+    @ti.kernel
+    def stop(predicate: ti.types.ndarray(dtype=ti.i32, ndim=0)):
+        predicate[None] = 0
+
+    @ti.kernel
+    def step(counter: ti.types.ndarray(dtype=ti.i32, ndim=0)):
+        counter[None] += 1
+
+    def scalar(name):
+        return ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=0
+        )
+
+    def build(
+        outer_predicate,
+        outer_counter,
+        inner_predicate,
+        inner_counter,
+    ):
+        builder = ti.graph.GraphBuilder()
+        outer_condition = builder.create_sequential()
+        outer_condition.dispatch(stop, outer_predicate)
+        inner_condition = builder.create_sequential()
+        inner_condition.dispatch(stop, inner_predicate)
+        inner_body = builder.create_sequential()
+        inner_body.dispatch(step, inner_counter)
+        outer_body = builder.create_sequential()
+        outer_body.while_loop(
+            inner_condition,
+            inner_body,
+            predicate=inner_predicate,
+            counter=inner_counter,
+            max_iterations=2,
+            name="inner",
+        )
+        outer_body.dispatch(step, outer_counter)
+        builder.while_loop(
+            outer_condition,
+            outer_body,
+            predicate=outer_predicate,
+            counter=outer_counter,
+            max_iterations=2,
+            name="outer",
+        )
+        return builder
+
+    outer_predicate = scalar("outer_predicate")
+    outer_counter = scalar("outer_counter")
+    inner_counter = scalar("inner_counter")
+    with pytest.raises(
+        ti.TaichiRuntimeError,
+        match="control resources must be independent",
+    ):
+        build(
+            outer_predicate,
+            outer_counter,
+            outer_predicate,
+            inner_counter,
+        ).compile()
+
+    inner_predicate = scalar("inner_predicate")
+    graph = build(
+        outer_predicate,
+        outer_counter,
+        inner_predicate,
+        inner_counter,
+    ).compile()
+    shared_predicate = ti.ndarray(ti.i32, shape=())
+    with pytest.raises(
+        ti.TaichiRuntimeError,
+        match="control resources must not alias",
+    ):
+        graph.run(
+            {
+                "outer_predicate": shared_predicate,
+                "outer_counter": ti.ndarray(ti.i32, shape=()),
+                "inner_predicate": shared_predicate,
+                "inner_counter": ti.ndarray(ti.i32, shape=()),
+            }
+        )
+
+
+@test_utils.test(arch=ti.cpu)
+def test_structured_control_definition_requires_tree_shaped_single_ownership():
+    @ti.kernel
+    def set_true(predicate: ti.types.ndarray(dtype=ti.i32, ndim=0)):
+        predicate[None] = 1
+
+    @ti.kernel
+    def increment(value: ti.types.ndarray(dtype=ti.i32, ndim=0)):
+        value[None] += 1
+
+    scalar = lambda name: ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=0
+    )
+    predicate = scalar("predicate")
+    value = scalar("value")
+
+    definition_builder = ti.graph.GraphBuilder()
+    condition = definition_builder.create_sequential()
+    condition.dispatch(set_true, predicate)
+    then_region = definition_builder.create_sequential()
+    then_region.dispatch(increment, value)
+    shared = definition_builder.create_sequential()
+    shared.if_then_else(
+        condition,
+        then_region,
+        predicate=predicate,
+        name="shared_if",
+    )
+
+    duplicate_builder = ti.graph.GraphBuilder()
+    duplicate_builder.append(shared)
+    duplicate_builder.append(shared)
+    with pytest.raises(
+        TaichiRuntimeError,
+        match="reused at multiple call sites",
+    ):
+        duplicate_builder.compile()
+
+    first_builder = ti.graph.GraphBuilder()
+    first_builder.append(shared)
+    first_graph = first_builder.compile()
+    first_path = first_graph._spec.structured_control_nodes[0].region_path
+    assert first_path == "shared_if"
+
+    second_builder = ti.graph.GraphBuilder()
+    second_builder.append(shared)
+    with pytest.raises(
+        TaichiRuntimeError,
+        match="already belongs to a compiled Graph",
+    ):
+        second_builder.compile()
+    assert first_graph._spec.structured_control_nodes[0].region_path == first_path
+
+    with pytest.raises(
+        TaichiRuntimeError,
+        match="already belongs to a compiled Graph",
+    ):
+        first_builder.compile()
+
+    runtime_args = {
+        "predicate": ti.ndarray(ti.i32, shape=()),
+        "value": ti.ndarray(ti.i32, shape=()),
+    }
+    for argument in runtime_args.values():
+        argument.fill(0)
+    trace = first_graph.run(runtime_args, trace=True)
+    assert tuple(
+        invocation.invocation_path for invocation in trace.invocations
+    ) == ("shared_if",)
+    assert runtime_args["value"].to_numpy()[()] == 1
+
+    alias_definition_builder = ti.graph.GraphBuilder()
+    alias_condition = alias_definition_builder.create_sequential()
+    alias_condition.dispatch(set_true, predicate)
+    alias_then = alias_definition_builder.create_sequential()
+    alias_then.dispatch(increment, value)
+    aliased_child = alias_definition_builder.create_sequential()
+    aliased_child.if_then_else(
+        alias_condition,
+        alias_then,
+        predicate=predicate,
+        name="aliased_child",
+    )
+    outer_builder = ti.graph.GraphBuilder()
+    outer_builder.if_then_else(
+        alias_condition,
+        aliased_child,
+        predicate=predicate,
+        else_region=aliased_child,
+        name="outer",
+    )
+    with pytest.raises(
+        TaichiRuntimeError,
+        match="reused at multiple call sites",
+    ):
+        outer_builder.compile()
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
