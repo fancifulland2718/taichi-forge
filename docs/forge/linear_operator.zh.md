@@ -564,8 +564,8 @@ Python iteration callback、自动 restart 选择、block GMRES 或领域 outer-
 - MINRES-QLP、singular minimum-norm/minimum-length 保证或自动 nullspace 处理；
 - GPU `f64` GMRES-family 执行、GPU operator composition 或通用 GPU
   `alpha/beta/addend` apply；
-- variable-action CUDA Graph/Vulkan command replay、single-system 异步 solve
-  submission 或 device-convergent 条件终止；
+- variable-action CUDA Graph/Vulkan command replay 或 single-system 异步 solve
+  submission；以及下文两个已资格化 CUDA 范围之外的 device-convergent 执行；
 - dynamic-topology solve plan、ragged batch 或透明 host fallback；
 - 内建 IC/ILU/AMG、multigrid hierarchy 构建、Schur/field split、domain
   decomposition、离散、contact/KKT policy 或 nonlinear outer iteration。
@@ -677,9 +677,11 @@ plan = ti.linalg.experimental.SolvePlan(
 - CUDA compiled-kernel f32 CG/PCG 在 conditional Graph 可用时，可显式请求
   `execution_policy="device_convergent"`。通用结构化 Graph 会录制 A action；PCG 还会录制
   fixed-linear compiled-kernel M action，在 device 上保持 recurrence control，并且每次 solve
-  只读取一个 terminal packet。该组合完成 correctness 资格，但标记为
-  `qualification_scope="explicit_only"`；自动默认仍采用满足 latency 资格的 K=4
-  `"host_check_every_k"` 路径。
+  只读取一个 terminal packet。vector update 保持并行 range kernel；dot product 使用由
+  plan 持有 fixed partial buffer 的两级 shared-block reduction。该组合完成 correctness
+  资格，但标记为 `qualification_scope="explicit_only"`；自动默认仍采用 K=4
+  `"host_check_every_k"`，因为 Graph 构造/capture 与 first execution 的成本需要由多次
+  warm solve 摊薄。
 - CUDA GMRES/FGMRES 默认使用 `"host_check_every_k"`，并要求
   `check_interval == restart`。stored identity-preconditioned GMRES 会录制可复用的
   restart-cycle Graph；FGMRES 与其它不可录制的 provider 组合保持 direct submission。
@@ -739,6 +741,13 @@ tail。Vulkan fixed-budget execution 可以执行完整的 `max_iterations`，�
 较快选择取决于 vector size、operator 成本、iteration count、driver 与 backend。
 不受支持的 policy 或 interval 会在 plan 构造时失败，不会静默 fallback。
 
+可使用 `benchmarks/linear_operator_graph_krylov_bench.py` 对完整的 f32
+compiled-kernel CG 边界做资格检查。该脚本分别报告 plan construction、first solve、warm
+同步 solve completion、terminal observation、真实 residual、最大 solution error、逻辑/执行
+迭代、host observation 与 kernel-profiler 可见性；通过 `--policies` 选择一个或多个策略。
+CUDA/Vulkan 测量应在目标 GPU 空闲时执行。profiler 无法观察 captured Graph 内部时，
+kernel 时间会明确报告为不可用，不做推测。
+
 `plan.execution_capabilities()` 返回执行策略矩阵、条件执行不可用时的结构化原因，
 以及当前选定的 `default_execution_policy`。
 `automatic_solver_batching` 对象报告 matrix-free Kernel/Graph host-check 是否自动选中、
@@ -753,7 +762,10 @@ preconditioner
 CSR/BSR CG/PCG 在 driver、conditional-Graph 入口、device setter、provider capture 与
 cuBLAS workspace 均满足资格时，可通过 `"bounded_convergent"` 自动选择；否则使用文档
 规定的 chunk fallback。单系统 compiled-kernel f32 CG/PCG 在 A/M action 可录制时，可显式
-请求通用结构化 Graph 路径，但不会自动选中。`device_convergent.qualification_scope` 与
+请求通用结构化 Graph 路径，但不会自动选中。stored 路径要求 solver-specific
+conditional setter 与 cuBLAS user-workspace 支持；
+compiled-kernel 路径改为要求 general Graph conditional setter，不依赖 cuBLAS workspace
+symbol。`device_convergent.qualification_scope` 与
 `automatic_selection_qualified` 会公开该区别。显式请求不可用时失败，不做 fallback。
 compiled-Graph、batched、CPU 与 Vulkan provider 不宣称支持 device-convergent execution。
 

@@ -93,9 +93,13 @@
   而不把它公开为 runtime 参数。
 - 新增 compiled-kernel f32 CG/PCG 的显式 CUDA `device_convergent` 执行。该路径通过通用
   结构化 Graph 和可录制 A/M action 完成，每次 solve 只读取一个 terminal packet，并在
-  provider 不可用或 stale 时明确失败。它以 `explicit_only` 完成 correctness 资格；自动
-  compiled-kernel plan 保留满足 latency 资格的 K=4 `host_check_every_k`。stored f32
-  CSR/BSR CG/PCG 继续保留自动 conditional-Graph upgrade。
+  provider 不可用或 stale 时明确失败。并行 vector update 与持久两级 shared-block
+  reduction 让 recurrence work 留在 device 上，迭代内部不做 host observation；plan 会报告
+  reduction geometry 与 fixed scratch bytes。它以 `explicit_only` 完成 correctness 资格；
+  自动 compiled-kernel plan 保留 K=4 `host_check_every_k`，使 construction/first-execution
+  摊销仍由 workload 显式决定。stored f32 CSR/BSR CG/PCG 继续保留自动
+  conditional-Graph upgrade。新增 `linear_operator_graph_krylov_bench.py`，按 policy 报告
+  build、first、warm、profiler、terminal 与真实 residual 证据。
 - `ti.linalg.LinearOperator.apply()` 与单系统 `SolvePlan.solve()` 接受受支持的
   1D/2D/3D root-dense scalar、Vector 和 Matrix field。overwrite
   `LinearOperator.apply()` 可在 CPU/CUDA/Vulkan 的 compiled-kernel 与

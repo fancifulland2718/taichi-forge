@@ -643,8 +643,9 @@ The `0.5.1` numerical-tooling contract intentionally does not provide:
   nullspace handling;
 - GPU `f64` GMRES-family execution, GPU operator composition, or generalized
   GPU `alpha/beta/addend` apply;
-- variable-action CUDA Graph/Vulkan command replay, single-system asynchronous
-  solve submission, or device-convergent conditional termination;
+- variable-action CUDA Graph/Vulkan command replay or single-system
+  asynchronous solve submission; device-convergent execution outside the two
+  qualified CUDA scopes documented below;
 - dynamic-topology solve plans, ragged batches, or transparent host fallback;
   and
 - built-in IC/ILU/AMG, multigrid hierarchy construction, Schur/field splitting,
@@ -773,10 +774,13 @@ plan = ti.linalg.experimental.SolvePlan(
   `execution_policy="device_convergent"` when conditional Graph support is
   available. The generic structured Graph records the A action and, for PCG,
   the fixed-linear compiled-kernel M action, keeps recurrence control on the
-  device, and reads one terminal packet per solve. This combination is
-  correctness-qualified but marked `qualification_scope="explicit_only"`;
-  its automatic default remains the latency-qualified K=4
-  `"host_check_every_k"` path.
+  device, and reads one terminal packet per solve. Vector updates remain
+  parallel range kernels; dot products use persistent two-stage shared-block
+  reductions whose fixed partial buffers are owned by the plan. This
+  combination is correctness-qualified but marked
+  `qualification_scope="explicit_only"`; its automatic default remains the
+  K=4 `"host_check_every_k"` path because Graph construction/capture and first
+  execution must be amortized by repeated warm solves.
 - CUDA GMRES/FGMRES defaults to `"host_check_every_k"` and requires
   `check_interval == restart`. Stored identity-preconditioned GMRES records a
   reusable restart-cycle Graph; FGMRES and other non-recordable provider
@@ -852,6 +856,15 @@ observation interval. The faster choice depends on vector size, operator cost, i
 count, driver, and backend. Unsupported policies and intervals fail during
 plan construction; they do not silently fall back.
 
+Use `benchmarks/linear_operator_graph_krylov_bench.py` to qualify the complete
+f32 compiled-kernel CG boundary. It reports plan construction, first solve,
+warm synchronous solve completion, terminal observation, true residual,
+maximum solution error, logical/executed iterations, host observations, and
+kernel-profiler visibility. Select one or more policies with `--policies`;
+CUDA or Vulkan runs should be performed on an otherwise idle device. Kernel
+time is reported as unavailable rather than inferred when a backend profiler
+cannot see inside a captured Graph.
+
 `plan.execution_capabilities()` reports the policy matrix and a structured
 reason for unavailable conditional execution, together with the selected
 `default_execution_policy`.
@@ -871,7 +884,10 @@ entry points, device setter, provider capture, and cuBLAS workspace
 requirements are satisfied; otherwise the documented chunk fallback is used.
 A single-system compiled-kernel f32 CG/PCG plan may request the generic
 structured-Graph path explicitly when its A/M actions are recordable, but is
-not selected automatically. `device_convergent.qualification_scope` and
+not selected automatically. The stored path requires its solver-specific
+conditional setter and cuBLAS user-workspace support. The compiled-kernel path
+instead requires the general Graph conditional setter and does not require the
+cuBLAS workspace symbol. `device_convergent.qualification_scope` and
 `automatic_selection_qualified` expose this distinction. Explicit requests
 fail without fallback. Compiled-Graph, batched, CPU, and Vulkan providers do not
 claim device-convergent execution.

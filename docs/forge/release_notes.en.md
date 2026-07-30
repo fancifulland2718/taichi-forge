@@ -113,10 +113,15 @@ the `0.5.0` artifacts:
 - Added explicit CUDA `device_convergent` execution for compiled-kernel f32
   CG/PCG through the generic structured Graph and recordable A/M actions. It
   reads one terminal packet per solve and fails closed on unavailable or stale
-  providers. This path is correctness-qualified as `explicit_only`; automatic
-  compiled-kernel plans retain the latency-qualified K=4
-  `host_check_every_k` policy. Stored f32 CSR/BSR CG/PCG retains its automatic
-  conditional-Graph upgrade.
+  providers. Parallel vector updates and persistent two-stage shared-block
+  reductions keep recurrence work on the device without per-iteration host
+  observation. The plan reports its reduction geometry and fixed scratch
+  bytes. This path is correctness-qualified as `explicit_only`; automatic
+  compiled-kernel plans retain K=4 `host_check_every_k` so construction and
+  first-execution amortization remains an explicit workload decision. Stored
+  f32 CSR/BSR CG/PCG retains its automatic conditional-Graph upgrade. The new
+  `linear_operator_graph_krylov_bench.py` reports build, first, warm, profiler,
+  terminal, and true-residual evidence per policy.
 - `ti.linalg.LinearOperator.apply()` and single-system `SolvePlan.solve()` accept
   supported 1D/2D/3D root-dense scalar, Vector, and Matrix fields. Overwrite
   `LinearOperator.apply()` directly binds canonical compact full fields for
