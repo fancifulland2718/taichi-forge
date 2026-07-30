@@ -249,10 +249,16 @@ void export_misc(py::module &m) {
     result["runtime_path_compiled"] = true;
     result["cublas_workspace_symbol_loaded"] =
         cublas_workspace_symbol_loaded;
-    result["fully_available"] = driver_loaded &&
-                                  driver_api_version >= 12080 &&
-                                  symbols_loaded && setter_compiled &&
-                                  cublas_workspace_symbol_loaded;
+    const bool base_available = driver_loaded &&
+                                driver_api_version >= 12080 && symbols_loaded;
+    result["stored_solver_device_control_available"] =
+        base_available && setter_compiled && cublas_workspace_symbol_loaded;
+    result["general_graph_device_control_available"] =
+        base_available && graph_setter_compiled;
+    // Kept as the stored-solver compatibility aggregate. Generic Graph
+    // consumers must use general_graph_device_control_available instead.
+    result["fully_available"] =
+        result["stored_solver_device_control_available"];
 #else
     result["driver_loaded"] = false;
     result["driver_api_version"] = py::none();
@@ -263,6 +269,8 @@ void export_misc(py::module &m) {
     result["general_device_setter_lowering_compiled"] = false;
     result["runtime_path_compiled"] = false;
     result["cublas_workspace_symbol_loaded"] = false;
+    result["stored_solver_device_control_available"] = false;
+    result["general_graph_device_control_available"] = false;
     result["fully_available"] = false;
 #endif
     return result;

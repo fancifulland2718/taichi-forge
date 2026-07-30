@@ -48,6 +48,40 @@ def _fixed_csr(dense):
     ).matrix(numeric)
 
 
+def test_cuda_device_convergent_capabilities_are_provider_specific():
+    from taichi_forge.linalg._runtime import _cuda_device_convergent_status
+
+    capability = {
+        "driver_version_eligible": True,
+        "conditional_graph_symbols_loaded": True,
+        "device_setter_lowering_compiled": True,
+        "general_device_setter_lowering_compiled": True,
+        "runtime_path_compiled": True,
+        "cublas_workspace_symbol_loaded": False,
+    }
+
+    stored_available, stored_reason, stored_prerequisites = (
+        _cuda_device_convergent_status(capability, "stored")
+    )
+    assert not stored_available
+    assert stored_reason == "cublas_user_workspace_symbol_not_loaded"
+    assert "cuBLAS user-workspace support" in stored_prerequisites
+
+    kernel_available, kernel_reason, kernel_prerequisites = (
+        _cuda_device_convergent_status(capability, "kernel")
+    )
+    assert kernel_available
+    assert kernel_reason == "none"
+    assert all("cuBLAS" not in item for item in kernel_prerequisites)
+
+    capability["general_device_setter_lowering_compiled"] = False
+    kernel_available, kernel_reason, _ = _cuda_device_convergent_status(
+        capability, "kernel"
+    )
+    assert not kernel_available
+    assert kernel_reason == "cuda_conditional_setter_lowering_not_compiled"
+
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_experimental_identity_composition_and_apply():
     experimental = ti.linalg.experimental

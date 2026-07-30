@@ -1889,6 +1889,44 @@ def _validate_solve_controls(dtype, max_iterations, atol, rtol):
     return max_iterations, atol, rtol
 
 
+def _cuda_device_convergent_status(cuda_conditional, provider_kind):
+    if not cuda_conditional["driver_version_eligible"]:
+        reason = "cuda_driver_api_version_below_12_8"
+    elif not cuda_conditional["conditional_graph_symbols_loaded"]:
+        reason = "cuda_conditional_graph_symbols_not_loaded"
+    elif not cuda_conditional["runtime_path_compiled"]:
+        reason = "cuda_conditional_graph_runtime_path_not_compiled"
+    elif provider_kind == "stored" and not cuda_conditional[
+        "device_setter_lowering_compiled"
+    ]:
+        reason = "cuda_conditional_setter_lowering_not_compiled"
+    elif provider_kind != "stored" and not cuda_conditional.get(
+        "general_device_setter_lowering_compiled", False
+    ):
+        reason = "cuda_conditional_setter_lowering_not_compiled"
+    elif provider_kind == "stored" and not cuda_conditional[
+        "cublas_workspace_symbol_loaded"
+    ]:
+        reason = "cublas_user_workspace_symbol_not_loaded"
+    else:
+        reason = "none"
+
+    if provider_kind == "stored":
+        prerequisites = (
+            "conditional graph driver functions in the CUDA dynamic table",
+            "stored-solver conditional-handle setter lowering",
+            "cuBLAS user-workspace support",
+            "stored provider capture/body/update qualification",
+        )
+    else:
+        prerequisites = (
+            "conditional graph driver functions in the CUDA dynamic table",
+            "general Graph conditional-handle setter lowering",
+            "recordable provider body/update qualification",
+        )
+    return reason == "none", reason, prerequisites
+
+
 def _solver_execution_capabilities(
     program,
     provider_kind,
@@ -1906,26 +1944,13 @@ def _solver_execution_capabilities(
     if is_cuda:
         conditional_primitive = "cuda_conditional_graph"
         cuda_conditional = dict(_ti_core.cuda_conditional_graph_capabilities())
-        if not cuda_conditional["driver_version_eligible"]:
-            unavailable_reason = "cuda_driver_api_version_below_12_8"
-        elif not cuda_conditional["conditional_graph_symbols_loaded"]:
-            unavailable_reason = "cuda_conditional_graph_symbols_not_loaded"
-        elif not cuda_conditional["device_setter_lowering_compiled"]:
-            unavailable_reason = (
-                "cuda_conditional_setter_lowering_not_compiled"
-            )
-        elif not cuda_conditional["runtime_path_compiled"]:
-            unavailable_reason = (
-                "cuda_conditional_graph_runtime_path_not_compiled"
-            )
-        elif not cuda_conditional["cublas_workspace_symbol_loaded"]:
-            unavailable_reason = "cublas_user_workspace_symbol_not_loaded"
-        else:
-            unavailable_reason = "none"
-        prerequisites = (
-            "conditional graph driver functions in the CUDA dynamic table",
-            "device-side conditional-handle setter lowering",
-            "provider capture/body/update qualification",
+        (
+            cuda_device_convergent_available,
+            unavailable_reason,
+            prerequisites,
+        ) = _cuda_device_convergent_status(
+            cuda_conditional,
+            provider_kind,
         )
     elif is_vulkan:
         conditional_primitive = "vulkan_dispatch_indirect"
@@ -1985,11 +2010,11 @@ def _solver_execution_capabilities(
         "device_convergent": (
             bounded_qualified
             and is_cuda
-            and cuda_conditional["fully_available"]
+            and cuda_device_convergent_available
         ),
     }
     native_upgrade_available = (
-        bounded_qualified and is_cuda and cuda_conditional["fully_available"]
+        bounded_qualified and is_cuda and cuda_device_convergent_available
     )
     native_upgrade_automatic = (
         native_upgrade_available and provider_kind == "stored"
