@@ -1,4 +1,5 @@
 import gc
+import sys
 
 import numpy as np
 import pytest
@@ -126,7 +127,80 @@ def test_dlpack_capabilities_require_initialized_runtime():
     # particular optional GPU backend.
     capabilities = ti.interop.capabilities()
     assert capabilities["schema_version"] == 1
+    assert capabilities["interop_schema_version"] == 2
     assert capabilities["provider"] == "dlpack"
     assert capabilities["zero_copy"]
     assert capabilities["copy_fallback"] is False
     assert capabilities["devices"] == ("cpu", "cuda_host")
+    assert capabilities["providers"]["dlpack"]["schema_version"] == 1
+    vulkan_cuda = capabilities["providers"]["vulkan_cuda"]
+    assert vulkan_cuda["provider"] == "vulkan_cuda"
+    assert vulkan_cuda["available"] is False
+    assert vulkan_cuda["copy_fallback"] is False
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_from_external_uses_unified_managed_view():
+    values = np.arange(8, dtype=np.float32)
+    view = ti.interop.from_external(values, provider="dlpack")
+    assert isinstance(view, ti.interop.ExternalDenseView)
+    assert view.provider == "dlpack"
+    view.close()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_vulkan_cuda_import_fails_closed_on_cpu():
+    with pytest.raises(
+        BufferError, match="requires arch=ti.cuda"
+    ):
+        ti.interop.import_vulkan_cuda_allocation(
+            1,
+            allocation_bytes=256,
+            device_uuid=bytes(range(16)),
+            allow_unsynchronized=True,
+        )
+    with pytest.raises(BufferError, match="requires arch=ti.cuda"):
+        ti.interop.current_cuda_device_uuid()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_generic_external_allocation_import_routes_to_provider():
+    with pytest.raises(BufferError, match="requires arch=ti.cuda"):
+        ti.interop.import_external_allocation(
+            "vulkan_cuda",
+            1,
+            allocation_bytes=np.int64(256),
+            device_uuid=bytes(range(16)),
+            allow_unsynchronized=True,
+        )
+    with pytest.raises(ValueError, match="unsupported external allocation"):
+        ti.interop.import_external_allocation(
+            "unknown",
+            1,
+            allocation_bytes=256,
+            device_uuid=bytes(range(16)),
+            allow_unsynchronized=True,
+        )
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_vulkan_cuda_import_rejects_unsafe_handle_sets_before_handoff():
+    with pytest.raises(ValueError, match="distinct OS handles"):
+        ti.interop.import_external_allocation(
+            "vulkan_cuda",
+            7,
+            allocation_bytes=256,
+            device_uuid=bytes(range(16)),
+            ready_for_cuda_handle=7,
+            ready_for_vulkan_handle=9,
+        )
+    unavailable = "opaque_fd" if sys.platform == "win32" else "opaque_win32"
+    with pytest.raises(ValueError, match="unavailable on this platform"):
+        ti.interop.import_external_allocation(
+            "vulkan_cuda",
+            7,
+            allocation_bytes=256,
+            device_uuid=bytes(range(16)),
+            handle_type=unavailable,
+            allow_unsynchronized=True,
+        )

@@ -4,6 +4,7 @@ set(INTEROP_RHI interop_rhi)
 ti_add_native_library(${INTEROP_RHI})
 target_sources(${INTEROP_RHI}
   PRIVATE
+    cuda_external_interop.cpp
     vulkan_cpu_interop.cpp
     vulkan_cuda_interop.cpp
   )

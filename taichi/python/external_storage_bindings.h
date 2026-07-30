@@ -1,7 +1,10 @@
 #pragma once
 
+#include <array>
+#include <cstring>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -12,7 +15,9 @@
 #include "taichi/python/dlpack_compat.h"
 #include "taichi/python/export.h"
 #include "taichi/rhi/arch.h"
+#include "taichi/rhi/interop/cuda_external_interop.h"
 #if defined(TI_WITH_CUDA)
+#include "taichi/rhi/cuda/cuda_device.h"
 #include "taichi/rhi/llvm/llvm_device.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
 #endif
@@ -298,6 +303,317 @@ std::vector<std::int64_t> compact_element_strides(
   return result;
 }
 
+class PythonVulkanCudaExternalAllocation final {
+ public:
+  PythonVulkanCudaExternalAllocation(
+      lang::Program *program,
+      lang::storage::StorageOwnerRef base_owner,
+      const std::shared_ptr<lang::CudaExternalAllocation> &allocation)
+      : program_(program),
+        program_lifetime_(program != nullptr ? program->weak_lifetime_token()
+                                             : std::weak_ptr<void>{}),
+        base_owner_(std::move(base_owner)),
+        allocation_(allocation),
+        allocation_bytes_(allocation->allocation_size()),
+        device_uuid_(allocation->device_uuid()),
+        device_id_(allocation->device_ordinal()),
+        synchronized_(allocation->synchronized()) {
+  }
+
+  PythonVulkanCudaExternalAllocation(
+      const PythonVulkanCudaExternalAllocation &) = delete;
+  PythonVulkanCudaExternalAllocation &operator=(
+      const PythonVulkanCudaExternalAllocation &) = delete;
+
+  ~PythonVulkanCudaExternalAllocation() {
+    close_noexcept();
+  }
+
+  std::uint64_t allocation_bytes() const noexcept {
+    return allocation_bytes_;
+  }
+  const std::array<std::uint8_t, 16> &device_uuid() const noexcept {
+    return device_uuid_;
+  }
+  std::int32_t device_id() const noexcept {
+    return device_id_;
+  }
+  bool synchronized() const noexcept {
+    return synchronized_;
+  }
+  bool closed() const noexcept {
+    return closed_ || allocation_.expired();
+  }
+
+  std::shared_ptr<PythonExternalDenseStorage> view(
+      lang::DataType scalar_type,
+      const std::vector<std::int64_t> &index_shape,
+      const std::vector<std::int64_t> &element_shape,
+      std::int64_t byte_offset,
+      const std::string &access) {
+    using lang::storage::DenseStorageLayoutSpec;
+    using lang::storage::StorageSourceKind;
+
+    if (closed()) {
+      throw py::buffer_error("external Vulkan-CUDA allocation is closed");
+    }
+    if (program_ == nullptr || program_lifetime_.expired()) {
+      throw py::buffer_error(
+          "external Vulkan-CUDA allocation belongs to a retired runtime");
+    }
+    if (access != "readwrite") {
+      throw py::value_error(
+          "external Vulkan-CUDA views currently require access='readwrite'");
+    }
+    if (byte_offset < 0) {
+      throw py::value_error("external view byte offset must be non-negative");
+    }
+    if (index_shape.size() + element_shape.size() >
+        lang::storage::kMaxDenseStorageRank) {
+      throw py::buffer_error("external view rank exceeds the storage limit");
+    }
+    if (element_shape.size() > 2) {
+      throw py::buffer_error(
+          "external views support scalar, vector, or matrix elements");
+    }
+
+    std::vector<std::int64_t> full_shape = index_shape;
+    full_shape.insert(full_shape.end(), element_shape.begin(),
+                      element_shape.end());
+    for (const std::int64_t extent : full_shape) {
+      if (extent < 0) {
+        throw py::value_error("external view shape contains a negative extent");
+      }
+    }
+    const std::uint64_t scalar_bytes = lang::data_type_size(scalar_type);
+    if (scalar_bytes == 0) {
+      throw py::buffer_error("external view dtype has zero byte width");
+    }
+    if (static_cast<std::uint64_t>(byte_offset) % scalar_bytes != 0) {
+      throw py::value_error(
+          "external view byte offset is not aligned to its dtype");
+    }
+
+    const auto scalar_strides = compact_element_strides(full_shape);
+    std::vector<std::int64_t> byte_strides;
+    byte_strides.reserve(scalar_strides.size());
+    for (const std::int64_t stride : scalar_strides) {
+      if (stride > (std::numeric_limits<std::int64_t>::max)() /
+                       static_cast<std::int64_t>(scalar_bytes)) {
+        throw py::buffer_error("external view byte stride overflow");
+      }
+      byte_strides.push_back(stride * static_cast<std::int64_t>(scalar_bytes));
+    }
+
+    bool empty = false;
+    std::uint64_t scalar_count = 1;
+    for (const std::int64_t extent : full_shape) {
+      if (extent == 0) {
+        empty = true;
+        scalar_count = 0;
+        break;
+      }
+      if (scalar_count > (std::numeric_limits<std::uint64_t>::max)() /
+                             static_cast<std::uint64_t>(extent)) {
+        throw py::buffer_error("external view element count overflow");
+      }
+      scalar_count *= static_cast<std::uint64_t>(extent);
+    }
+    if (!empty && scalar_count > ((std::numeric_limits<std::uint64_t>::max)() -
+                                  static_cast<std::uint64_t>(byte_offset)) /
+                                     scalar_bytes) {
+      throw py::buffer_error("external view reachable byte range overflow");
+    }
+    const std::uint64_t reachable_end =
+        static_cast<std::uint64_t>(byte_offset) + scalar_count * scalar_bytes;
+    if (static_cast<std::uint64_t>(byte_offset) > allocation_bytes_ ||
+        reachable_end > allocation_bytes_) {
+      throw py::buffer_error(
+          "external view byte range exceeds its imported allocation");
+    }
+
+    auto allocation = allocation_.lock();
+    if (!allocation) {
+      throw py::buffer_error("external Vulkan-CUDA allocation is closed");
+    }
+    std::shared_ptr<lang::ExternalSynchronizationDomain> synchronization_domain;
+    if (allocation->synchronized()) {
+      synchronization_domain = allocation;
+    }
+    auto release = [lifetime = allocation]() mutable { lifetime.reset(); };
+
+    lang::storage::StorageOwnerRef owner;
+    try {
+      owner = program_->register_external_dense_storage(
+          allocation->cuda_allocation(), allocation_bytes_, std::move(release),
+          std::move(synchronization_domain));
+    } catch (...) {
+      throw;
+    }
+
+    DenseStorageLayoutSpec spec;
+    spec.scalar_type = scalar_type;
+    spec.index_shape = index_shape;
+    spec.index_strides_bytes.assign(byte_strides.begin(),
+                                    byte_strides.begin() + index_shape.size());
+    spec.element_shape = element_shape;
+    spec.element_strides_bytes.assign(byte_strides.begin() + index_shape.size(),
+                                      byte_strides.end());
+    spec.byte_offset = byte_offset;
+    spec.access = lang::storage::StorageAccess::kReadWrite;
+
+    auto description = lang::storage::build_dense_storage_descriptor(
+        owner, StorageSourceKind::kExternalDense, spec);
+    if (!description) {
+      try {
+        program_->retire_external_dense_storage(owner);
+      } catch (...) {
+      }
+      throw py::buffer_error(
+          std::string("external Vulkan-CUDA allocation cannot form a dense "
+                      "view: ") +
+          lang::storage::to_string(description.reason));
+    }
+    return std::make_shared<PythonExternalDenseStorage>(
+        program_, owner, std::move(description), "vulkan_cuda",
+        static_cast<std::int32_t>(
+            python::dlpack_abi::DeviceType::kCuda),
+        device_id_, allocation_bytes_);
+  }
+
+  void close() {
+    if (closed_) {
+      return;
+    }
+    if (program_ != nullptr && !program_lifetime_.expired() &&
+        program_->validate_external_dense_storage_owner(base_owner_)) {
+      program_->retire_external_dense_storage(base_owner_);
+    }
+    closed_ = true;
+  }
+
+ private:
+  void close_noexcept() noexcept {
+    try {
+      close();
+    } catch (...) {
+    }
+  }
+
+  lang::Program *program_{nullptr};
+  std::weak_ptr<void> program_lifetime_;
+  lang::storage::StorageOwnerRef base_owner_;
+  std::weak_ptr<lang::CudaExternalAllocation> allocation_;
+  std::uint64_t allocation_bytes_{0};
+  std::array<std::uint8_t, 16> device_uuid_{};
+  std::int32_t device_id_{0};
+  bool synchronized_{false};
+  bool closed_{false};
+};
+
+lang::ExternalOpaqueHandleType parse_external_handle_type(
+    const std::string &handle_type) {
+  if (handle_type == "opaque_win32") {
+    return lang::ExternalOpaqueHandleType::kOpaqueWin32;
+  }
+  if (handle_type == "opaque_fd") {
+    return lang::ExternalOpaqueHandleType::kOpaqueFd;
+  }
+  throw py::value_error("handle_type must be 'opaque_win32' or 'opaque_fd'");
+}
+
+std::array<std::uint8_t, 16> parse_external_device_uuid(
+    const py::bytes &value) {
+  const std::string bytes = value;
+  if (bytes.size() != 16) {
+    throw py::value_error("device_uuid must contain exactly 16 bytes");
+  }
+  std::array<std::uint8_t, 16> result{};
+  std::memcpy(result.data(), bytes.data(), result.size());
+  return result;
+}
+
+std::shared_ptr<PythonVulkanCudaExternalAllocation>
+import_vulkan_cuda_allocation(lang::Program &program,
+                              std::uintptr_t memory_handle,
+                              std::uint64_t allocation_bytes,
+                              const py::bytes &device_uuid,
+                              const py::object &ready_for_cuda_handle,
+                              const py::object &ready_for_vulkan_handle,
+                              const std::string &handle_type,
+                              bool dedicated,
+                              bool allow_unsynchronized) {
+#if defined(TI_WITH_CUDA)
+  if (program.compile_config().arch != Arch::cuda) {
+    throw py::buffer_error(
+        "external Vulkan-CUDA allocation requires arch=ti.cuda");
+  }
+  if (allocation_bytes == 0 ||
+      allocation_bytes > static_cast<std::uint64_t>(
+                             (std::numeric_limits<std::size_t>::max)())) {
+    throw py::value_error("allocation_bytes must fit a positive native size");
+  }
+  const bool has_ready_for_cuda = !ready_for_cuda_handle.is_none();
+  const bool has_ready_for_vulkan = !ready_for_vulkan_handle.is_none();
+  if (has_ready_for_cuda != has_ready_for_vulkan) {
+    throw py::value_error(
+        "ready_for_cuda_handle and ready_for_vulkan_handle must be supplied "
+        "together");
+  }
+  if (!has_ready_for_cuda && !allow_unsynchronized) {
+    throw py::value_error(
+        "unsynchronized external import requires "
+        "allow_unsynchronized=True");
+  }
+
+  const auto native_handle_type = parse_external_handle_type(handle_type);
+  lang::CudaExternalMemoryImport memory;
+  memory.handle = {native_handle_type, memory_handle};
+  memory.allocation_size = static_cast<std::size_t>(allocation_bytes);
+  memory.dedicated = dedicated;
+  memory.device_uuid = parse_external_device_uuid(device_uuid);
+
+  std::optional<lang::CudaExternalSemaphorePairImport> semaphores;
+  if (has_ready_for_cuda) {
+    semaphores = lang::CudaExternalSemaphorePairImport{
+        {native_handle_type, ready_for_cuda_handle.cast<std::uintptr_t>()},
+        {native_handle_type, ready_for_vulkan_handle.cast<std::uintptr_t>()}};
+  }
+
+  auto *cuda_device =
+      dynamic_cast<lang::cuda::CudaDevice *>(program.get_compute_device());
+  if (cuda_device == nullptr) {
+    throw py::buffer_error("active runtime has no CUDA compute device");
+  }
+  auto allocation = lang::CudaExternalAllocation::create(
+      cuda_device, std::move(memory), std::move(semaphores));
+  auto base_lifetime = allocation;
+  lang::storage::StorageOwnerRef base_owner;
+  try {
+    base_owner = program.register_external_dense_storage(
+        allocation->cuda_allocation(), allocation_bytes,
+        [base_lifetime]() mutable { base_lifetime.reset(); });
+  } catch (...) {
+    allocation->close();
+    throw;
+  }
+  return std::make_shared<PythonVulkanCudaExternalAllocation>(
+      &program, base_owner, allocation);
+#else
+  (void)program;
+  (void)memory_handle;
+  (void)allocation_bytes;
+  (void)device_uuid;
+  (void)ready_for_cuda_handle;
+  (void)ready_for_vulkan_handle;
+  (void)handle_type;
+  (void)dedicated;
+  (void)allow_unsynchronized;
+  throw py::buffer_error(
+      "external Vulkan-CUDA allocation requires CUDA support");
+#endif
+}
+
 std::shared_ptr<PythonExternalDenseStorage> import_dlpack_capsule(
     lang::Program &program,
     py::capsule capsule,
@@ -516,12 +832,61 @@ void export_external_storage_bindings(py::module &m) {
                              &PythonExternalDenseStorage::closed)
       .def("close", &PythonExternalDenseStorage::close);
 
+  py::class_<PythonVulkanCudaExternalAllocation,
+             std::shared_ptr<PythonVulkanCudaExternalAllocation>>(
+      m, "_VulkanCudaExternalAllocation")
+      .def_property_readonly(
+          "allocation_bytes",
+          &PythonVulkanCudaExternalAllocation::allocation_bytes)
+      .def_property_readonly(
+          "device_uuid",
+          [](const PythonVulkanCudaExternalAllocation &allocation) {
+            const auto &uuid = allocation.device_uuid();
+            return py::bytes(reinterpret_cast<const char *>(uuid.data()),
+                             uuid.size());
+          })
+      .def_property_readonly("device_id",
+                             &PythonVulkanCudaExternalAllocation::device_id)
+      .def_property_readonly("synchronized",
+                             &PythonVulkanCudaExternalAllocation::synchronized)
+      .def_property_readonly("closed",
+                             &PythonVulkanCudaExternalAllocation::closed)
+      .def("_view", &PythonVulkanCudaExternalAllocation::view,
+           py::arg("scalar_type"), py::arg("shape"),
+           py::arg("element_shape") = std::vector<std::int64_t>{},
+           py::arg("offset_bytes") = 0, py::arg("access") = "readwrite")
+      .def("close", &PythonVulkanCudaExternalAllocation::close);
+
+  m.def("_import_dlpack_capsule", &import_dlpack_capsule, py::arg("program"),
+        py::arg("capsule"),
+        py::arg("element_shape") = std::vector<std::int64_t>{},
+        py::arg("layout") = "aos", py::arg("access") = "readwrite",
+        py::keep_alive<0, 1>());
+
+  m.def("_import_vulkan_cuda_allocation", &import_vulkan_cuda_allocation,
+        py::arg("program"), py::arg("memory_handle"),
+        py::arg("allocation_bytes"), py::arg("device_uuid"),
+        py::arg("ready_for_cuda_handle") = py::none(),
+        py::arg("ready_for_vulkan_handle") = py::none(),
+#if defined(_WIN32) || defined(_WIN64) || defined(WIN32) || defined(_MSC_VER)
+        py::arg("handle_type") = "opaque_win32",
+#else
+        py::arg("handle_type") = "opaque_fd",
+#endif
+        py::arg("dedicated") = true, py::arg("allow_unsynchronized") = false,
+        py::keep_alive<0, 1>());
+
   m.def(
-      "_import_dlpack_capsule", &import_dlpack_capsule,
-      py::arg("program"), py::arg("capsule"),
-      py::arg("element_shape") = std::vector<std::int64_t>{},
-      py::arg("layout") = "aos", py::arg("access") = "readwrite",
-      py::keep_alive<0, 1>());
+      "_current_cuda_external_device_uuid",
+      [](Program &program) {
+        if (program.compile_config().arch != Arch::cuda) {
+          throw py::buffer_error("CUDA device UUID requires arch=ti.cuda");
+        }
+        const auto uuid = lang::current_cuda_external_device_uuid();
+        return py::bytes(reinterpret_cast<const char *>(uuid.data()),
+                         uuid.size());
+      },
+      py::arg("program"));
 }
 
 }  // namespace

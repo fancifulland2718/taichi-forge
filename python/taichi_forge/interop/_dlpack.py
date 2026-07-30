@@ -156,8 +156,44 @@ def from_dlpack(
     return view
 
 
-def _legacy_external_view(source, *, element_shape=(), layout="aos"):
-    """Best-effort adapter used behind the historical external-array API."""
+def from_external(
+    source,
+    *,
+    provider=None,
+    element_shape=(),
+    access="readwrite",
+    copy=False,
+):
+    """Adapt a qualified external tensor through the unified storage protocol.
+
+    DLPack is the current provider protocol. The separate name keeps room for
+    additional managed providers while ``from_dlpack()`` remains source
+    compatible.
+    """
+
+    if provider not in (None, "dlpack"):
+        raise ValueError(
+            "from_external() currently supports provider='dlpack'; "
+            "use import_external_allocation() for raw external allocations"
+        )
+    if isinstance(source, ExternalDenseView):
+        if source.closed:
+            raise RuntimeError("external dense view is already closed")
+        if element_shape or access != "readwrite" or copy is not False:
+            raise ValueError(
+                "an existing ExternalDenseView cannot be reinterpreted"
+            )
+        return source
+    return from_dlpack(
+        source,
+        element_shape=element_shape,
+        access=access,
+        copy=copy,
+    )
+
+
+def _adapt_external_array(source, *, element_shape=(), layout="aos"):
+    """Best-effort adapter behind historical NumPy/Torch/Paddle signatures."""
 
     if layout != "aos":
         return None
@@ -184,6 +220,10 @@ def _legacy_external_view(source, *, element_shape=(), layout="aos"):
         )
     except (BufferError, TypeError, ValueError, RuntimeError):
         return None
+
+
+# Internal compatibility alias for extensions that imported the old helper.
+_legacy_external_view = _adapt_external_array
 
 
 def capabilities():

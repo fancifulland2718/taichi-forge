@@ -252,6 +252,52 @@ TEST(ExternalDenseStorageTest, GraphScopeRetainsReplayableExternalOwner) {
   retire.get();
   program.delete_ndarray(backing);
 }
+
+TEST(ExternalDenseStorageTest, GraphScopeAcquiresSharedDomainOnlyOnce) {
+  Program program(Arch::x64);
+  auto *backing = program.create_ndarray(PrimitiveType::f32, {16},
+                                         ExternalArrayLayout::kNull, false);
+  auto sync = std::make_shared<TestSynchronizationDomain>(102);
+  const auto first_owner = program.register_external_dense_storage(
+      backing->get_device_allocation(), 16 * sizeof(float), {}, sync);
+  const auto second_owner = program.register_external_dense_storage(
+      backing->get_device_allocation(), 16 * sizeof(float), {}, sync);
+  auto first = build_external_f32(first_owner, {8}, {sizeof(float)});
+  auto second =
+      build_external_f32(second_owner, {8}, {sizeof(float)}, 8 * sizeof(float));
+  ASSERT_TRUE(first);
+  ASSERT_TRUE(second);
+
+  storage::RuntimeStorageRequirement requirement;
+  requirement.backend = Arch::x64;
+  requirement.consumer = storage::RuntimeStorageConsumer::kGraphReplay;
+  requirement.mode = storage::RuntimeStorageMode::kReplay;
+  requirement.dense.require_ndarray_abi = true;
+  requirement.dense.require_unique_mapping = true;
+  requirement.dense.require_writable = true;
+  requirement.dense.accept_external_owner = true;
+  requirement.require_external_sync = true;
+  storage::RuntimeStorageArgument first_argument(*first.descriptor, requirement,
+                                                 sync->identity());
+  storage::RuntimeStorageArgument second_argument(
+      *second.descriptor, requirement, sync->identity());
+
+  {
+    auto graph_scope = program.acquire_runtime_resource_graph_scope();
+    const storage::RuntimeStorageArgument *arguments[] = {&first_argument,
+                                                          &second_argument};
+    program.retain_runtime_storage_for_graph_submission(arguments, 2);
+    EXPECT_EQ(sync->acquires(), 1);
+    EXPECT_EQ(sync->releases(), 0);
+  }
+  EXPECT_EQ(sync->acquires(), 1);
+  EXPECT_EQ(sync->releases(), 1);
+
+  program.retire_external_dense_storage(first_owner);
+  program.retire_external_dense_storage(second_owner);
+  program.delete_ndarray(backing);
+}
+
 TEST(ExternalDenseStorageTest, RetireWaitsForSubmissionTransaction) {
   std::atomic<int> releases{0};
   Program program(Arch::x64);

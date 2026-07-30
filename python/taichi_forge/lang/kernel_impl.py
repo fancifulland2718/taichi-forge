@@ -1176,13 +1176,13 @@ class Kernel:
             ) or indices in _explicit_external_grad_args
             if not needs_grad_pointer and getattr(v, "grad", None) is None:
                 from taichi_forge.interop._dlpack import (  # pylint: disable=C0415
-                    _legacy_external_view,
+                    _adapt_external_array,
                 )
 
                 element_shape = ()
                 if isinstance(needed.dtype, MatrixType):
                     element_shape = tuple(needed.dtype.get_shape())
-                external_view = _legacy_external_view(
+                external_view = _adapt_external_array(
                     v,
                     element_shape=element_shape,
                     layout="soa" if is_soa else "aos",

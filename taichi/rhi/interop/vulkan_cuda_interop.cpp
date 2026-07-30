@@ -1,4 +1,5 @@
 #include "taichi/rhi/interop/vulkan_cuda_interop.h"
+#include "taichi/rhi/interop/cuda_external_interop.h"
 
 #if TI_WITH_VULKAN && TI_WITH_CUDA
 #include "taichi/rhi/cuda/cuda_device.h"
@@ -8,8 +9,8 @@
 #endif  // TI_WITH_VULKAN && TI_WITH_CUDA
 
 #include <array>
-#include <atomic>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <mutex>
 #include <tuple>
@@ -70,12 +71,35 @@ void destroy_imported_vulkan_memory(ImportedVulkanMemory &entry) {
     defined(_MSC_VER)
 class ScopedExternalHandle {
  public:
+  ScopedExternalHandle() = default;
   explicit ScopedExternalHandle(HANDLE handle) : handle_(handle) {
+  }
+  ScopedExternalHandle(ScopedExternalHandle &&other) noexcept
+      : handle_(other.handle_) {
+    other.handle_ = nullptr;
+  }
+  ScopedExternalHandle &operator=(ScopedExternalHandle &&other) noexcept {
+    if (this != &other) {
+      if (handle_ != nullptr) {
+        CloseHandle(handle_);
+      }
+      handle_ = other.handle_;
+      other.handle_ = nullptr;
+    }
+    return *this;
   }
   ~ScopedExternalHandle() {
     if (handle_ != nullptr) {
       CloseHandle(handle_);
     }
+  }
+  ScopedExternalHandle(const ScopedExternalHandle &) = delete;
+  ScopedExternalHandle &operator=(const ScopedExternalHandle &) = delete;
+
+  ExternalOpaqueHandle release() noexcept {
+    const auto value = reinterpret_cast<std::uintptr_t>(handle_);
+    handle_ = nullptr;
+    return {ExternalOpaqueHandleType::kOpaqueWin32, value};
   }
 
  private:
@@ -84,15 +108,38 @@ class ScopedExternalHandle {
 #else
 class ScopedExternalHandle {
  public:
+  ScopedExternalHandle() = default;
   explicit ScopedExternalHandle(int fd) : fd_(fd) {
+  }
+  ScopedExternalHandle(ScopedExternalHandle &&other) noexcept : fd_(other.fd_) {
+    other.fd_ = -1;
+  }
+  ScopedExternalHandle &operator=(ScopedExternalHandle &&other) noexcept {
+    if (this != &other) {
+      if (fd_ >= 0) {
+        close(fd_);
+      }
+      fd_ = other.fd_;
+      other.fd_ = -1;
+    }
+    return *this;
   }
   ~ScopedExternalHandle() {
     if (fd_ >= 0) {
       close(fd_);
     }
   }
+  ScopedExternalHandle(const ScopedExternalHandle &) = delete;
+  ScopedExternalHandle &operator=(const ScopedExternalHandle &) = delete;
+
   void release_to_cuda() {
     fd_ = -1;
+  }
+  ExternalOpaqueHandle release() noexcept {
+    const int fd = fd_;
+    fd_ = -1;
+    return {ExternalOpaqueHandleType::kOpaqueFd,
+            static_cast<std::uintptr_t>(fd)};
   }
 
  private:
@@ -271,26 +318,6 @@ int get_device_semaphore_handle(VkSemaphore semaphore, VkDevice device) {
 }
 #endif
 
-#if defined(_WIN32) || defined(_WIN64) || defined(WIN32) || defined(_MSC_VER)
-CUexternalSemaphore import_vk_semaphore_from_handle(HANDLE handle) {
-  CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC desc{};
-  desc.type = CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_WIN32;
-  desc.handle.win32.handle = handle;
-  CUexternalSemaphore semaphore = nullptr;
-  CUDADriver::get_instance().import_external_semaphore(&semaphore, &desc);
-  return semaphore;
-}
-#else
-CUexternalSemaphore import_vk_semaphore_from_handle(int fd) {
-  CUDA_EXTERNAL_SEMAPHORE_HANDLE_DESC desc{};
-  desc.type = CU_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD;
-  desc.handle.fd = fd;
-  CUexternalSemaphore semaphore = nullptr;
-  CUDADriver::get_instance().import_external_semaphore(&semaphore, &desc);
-  return semaphore;
-}
-#endif
-
 VkExternalMemoryHandleTypeFlagBits external_memory_handle_type() {
 #if defined(_WIN32) || defined(_WIN64) || defined(WIN32) || defined(_MSC_VER)
   return VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
@@ -328,16 +355,11 @@ void get_vulkan_device_uuid(VulkanDevice *device,
   std::memcpy(uuid.data(), id_properties.deviceUUID, uuid.size());
 }
 
-void validate_vulkan_cuda_device_identity(VulkanDevice *vulkan_device) {
-  std::array<unsigned char, VK_UUID_SIZE> vulkan_uuid{};
+std::array<std::uint8_t, VK_UUID_SIZE> vulkan_device_uuid(
+    VulkanDevice *vulkan_device) {
+  std::array<std::uint8_t, VK_UUID_SIZE> vulkan_uuid{};
   get_vulkan_device_uuid(vulkan_device, vulkan_uuid);
-  CUuuid cuda_uuid{};
-  auto &cuda_context = CUDAContext::get_instance();
-  CUDADriver::get_instance().device_get_uuid(&cuda_uuid,
-                                             cuda_context.get_device());
-  TI_ERROR_IF(
-      std::memcmp(vulkan_uuid.data(), cuda_uuid.bytes, vulkan_uuid.size()) != 0,
-      "Vulkan and CUDA devices have different UUIDs");
+  return vulkan_uuid;
 }
 
 void validate_external_interop_capabilities(VulkanDevice *device) {
@@ -401,30 +423,24 @@ void validate_external_interop_capabilities(VulkanDevice *device) {
               "Vulkan semaphore handle type is not exportable");
 }
 
-struct ImportedExternalSemaphore {
+struct ExportedExternalSemaphore {
   vkapi::IVkSemaphore vulkan;
   StreamSemaphore stream;
-  CUexternalSemaphore cuda{nullptr};
+  ScopedExternalHandle handle;
 };
 
-ImportedExternalSemaphore create_external_semaphore(VulkanDevice *device) {
+ExportedExternalSemaphore create_external_semaphore(VulkanDevice *device) {
   VkExportSemaphoreCreateInfo export_info{};
   export_info.sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO;
   export_info.handleTypes = external_semaphore_handle_type();
   auto vulkan_semaphore =
       vkapi::create_semaphore(device->vk_device(), 0, &export_info);
-  auto handle = get_device_semaphore_handle(vulkan_semaphore->semaphore,
-                                            device->vk_device());
-  ScopedExternalHandle handle_guard(handle);
-  auto cuda_semaphore = import_vk_semaphore_from_handle(handle);
-#if !defined(_WIN32) && !defined(_WIN64) && !defined(WIN32) && \
-    !defined(_MSC_VER)
-  handle_guard.release_to_cuda();
-#endif
+  ScopedExternalHandle handle(get_device_semaphore_handle(
+      vulkan_semaphore->semaphore, device->vk_device()));
   auto stream_semaphore = std::make_shared<VulkanStreamSemaphoreObject>(
       device->backend_fault_reporter(), vulkan_semaphore);
   return {std::move(vulkan_semaphore), std::move(stream_semaphore),
-          cuda_semaphore};
+          std::move(handle)};
 }
 
 #if defined(_WIN32) || defined(_WIN64) || defined(WIN32) || \
@@ -598,12 +614,7 @@ class VulkanCudaExternalAllocation::Impl {
     TI_ERROR_IF(vulkan_allocation == kDeviceNullAllocation ||
                     vulkan_allocation.device != vulkan_device_,
                 "Vulkan-CUDA interop received an invalid Vulkan allocation");
-    static std::atomic<std::uint64_t> next_identity{1};
-    identity_ = next_identity.fetch_add(1, std::memory_order_relaxed);
-    TI_ERROR_IF(identity_ == 0, "External synchronization domain exhausted");
-
     validate_external_interop_capabilities(vulkan_device_);
-    validate_vulkan_cuda_device_identity(vulkan_device_);
     auto [memory, offset, size] =
         vulkan_device_->get_vkmemory_offset_size(vulkan_allocation);
     TI_ERROR_IF(size == 0, "Cannot import an empty Vulkan allocation");
@@ -611,16 +622,25 @@ class VulkanCudaExternalAllocation::Impl {
                 "Vulkan-CUDA sharing requires a dedicated Vulkan allocation");
     allocation_size_ = size;
 
-    auto context_guard = CUDAContext::get_instance().get_guard();
     try {
-      imported_memory_ = get_cuda_memory_pointer(
-          memory, size, 0, size, vulkan_device_->vk_device(), true);
-      cuda_allocation_ = cuda_device_->import_memory(
-          imported_memory_.mapped_buffer, allocation_size_);
       vulkan_to_cuda_ = create_external_semaphore(vulkan_device_);
       cuda_to_vulkan_ = create_external_semaphore(vulkan_device_);
+
+      ScopedExternalHandle memory_handle(
+          get_device_mem_handle(memory, vulkan_device_->vk_device()));
+      CudaExternalMemoryImport memory_import;
+      memory_import.allocation_size = allocation_size_;
+      memory_import.dedicated = true;
+      memory_import.device_uuid = vulkan_device_uuid(vulkan_device_);
+      memory_import.handle = memory_handle.release();
+      CudaExternalSemaphorePairImport semaphore_import{
+          vulkan_to_cuda_.handle.release(),
+          cuda_to_vulkan_.handle.release(),
+      };
+      cuda_import_ = CudaExternalAllocation::create(
+          cuda_device_, std::move(memory_import), std::move(semaphore_import));
     } catch (...) {
-      destroy_resources();
+      destroy_resources_noexcept();
       throw;
     }
   }
@@ -637,12 +657,13 @@ class VulkanCudaExternalAllocation::Impl {
   }
 
   std::uint64_t identity() const noexcept {
-    return identity_;
+    return cuda_import_ != nullptr ? cuda_import_->identity() : 0;
   }
 
   DeviceAllocation cuda_allocation() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    return cuda_allocation_;
+    return cuda_import_ != nullptr ? cuda_import_->cuda_allocation()
+                                   : kDeviceNullAllocation;
   }
 
   std::size_t allocation_size() const noexcept {
@@ -710,11 +731,7 @@ class VulkanCudaExternalAllocation::Impl {
     validate_cuda_stream(stream);
     TI_ERROR_IF(state_ != AccessState::kAwaitingCudaAcquire,
                 "CUDA acquire does not follow a Vulkan release");
-    CUDA_EXTERNAL_SEMAPHORE_WAIT_PARAMS params{};
-    auto context_guard = CUDAContext::get_instance().get_guard();
-    CUDADriver::get_instance().wait_external_semaphore_async(
-        &vulkan_to_cuda_.cuda, &params, 1,
-        static_cast<CUstream>(stream.native_stream));
+    cuda_import_->acquire_for_consumer(stream);
     active_cuda_stream_ = stream;
     state_ = AccessState::kCudaOwned;
   }
@@ -727,11 +744,7 @@ class VulkanCudaExternalAllocation::Impl {
                 "CUDA release does not follow a CUDA acquire");
     TI_ERROR_IF(!active_cuda_stream_.same_stream(stream),
                 "CUDA acquire and release must use the same stream domain");
-    CUDA_EXTERNAL_SEMAPHORE_SIGNAL_PARAMS params{};
-    auto context_guard = CUDAContext::get_instance().get_guard();
-    CUDADriver::get_instance().signal_external_semaphore_async(
-        &cuda_to_vulkan_.cuda, &params, 1,
-        static_cast<CUstream>(stream.native_stream));
+    cuda_import_->release_from_consumer(stream);
     state_ = AccessState::kAwaitingVulkanAcquire;
   }
 
@@ -781,20 +794,29 @@ class VulkanCudaExternalAllocation::Impl {
       return;
     }
 
+    std::exception_ptr failure;
+    const auto attempt = [&failure](auto &&action) {
+      try {
+        action();
+      } catch (...) {
+        if (!failure) {
+          failure = std::current_exception();
+        }
+      }
+    };
     if ((state_ == AccessState::kAwaitingCudaAcquire ||
          state_ == AccessState::kVulkanOwned) &&
         last_vulkan_completion_) {
-      TI_ERROR_IF(!last_vulkan_completion_->wait(),
-                  "Failed to wait for the last Vulkan interop submission");
+      attempt([this] {
+        TI_ERROR_IF(!last_vulkan_completion_->wait(),
+                    "Failed to wait for the last Vulkan interop submission");
+      });
     }
-    if (state_ == AccessState::kCudaOwned ||
-        state_ == AccessState::kAwaitingVulkanAcquire) {
-      auto context_guard = CUDAContext::get_instance().get_guard();
-      CUDADriver::get_instance().stream_synchronize(
-          static_cast<CUstream>(active_cuda_stream_.native_stream));
-    }
-    destroy_resources();
+    attempt([this] { destroy_resources(); });
     state_ = AccessState::kClosed;
+    if (failure) {
+      std::rethrow_exception(failure);
+    }
   }
 
  private:
@@ -818,39 +840,50 @@ class VulkanCudaExternalAllocation::Impl {
   }
 
   void destroy_resources() {
-    auto context_guard = CUDAContext::get_instance().get_guard();
-    if (cuda_allocation_ != kDeviceNullAllocation && cuda_device_ != nullptr) {
-      cuda_device_->dealloc_memory(cuda_allocation_);
-      cuda_allocation_ = kDeviceNullAllocation;
-    }
-    if (vulkan_to_cuda_.cuda != nullptr) {
-      CUDADriver::get_instance().external_semaphore_destroy(
-          vulkan_to_cuda_.cuda);
-      vulkan_to_cuda_.cuda = nullptr;
-    }
-    if (cuda_to_vulkan_.cuda != nullptr) {
-      CUDADriver::get_instance().external_semaphore_destroy(
-          cuda_to_vulkan_.cuda);
-      cuda_to_vulkan_.cuda = nullptr;
-    }
-    vulkan_to_cuda_.stream.reset();
-    cuda_to_vulkan_.stream.reset();
-    vulkan_to_cuda_.vulkan.reset();
-    cuda_to_vulkan_.vulkan.reset();
-    destroy_imported_vulkan_memory(imported_memory_);
+    std::exception_ptr failure;
+    const auto attempt = [&failure](auto &&action) {
+      try {
+        action();
+      } catch (...) {
+        if (!failure) {
+          failure = std::current_exception();
+        }
+      }
+    };
+    attempt([this] {
+      if (cuda_import_ != nullptr) {
+        cuda_import_->close();
+      }
+    });
+    cuda_import_.reset();
+    attempt([this] { vulkan_to_cuda_.stream.reset(); });
+    attempt([this] { cuda_to_vulkan_.stream.reset(); });
+    attempt([this] { vulkan_to_cuda_.vulkan.reset(); });
+    attempt([this] { cuda_to_vulkan_.vulkan.reset(); });
     last_vulkan_completion_.reset();
+    if (failure) {
+      std::rethrow_exception(failure);
+    }
+  }
+
+  void destroy_resources_noexcept() noexcept {
+    try {
+      destroy_resources();
+    } catch (const std::exception &error) {
+      TI_WARN("Vulkan-CUDA interop cleanup failed: {}", error.what());
+    } catch (...) {
+      TI_WARN("Vulkan-CUDA interop cleanup failed");
+    }
   }
 
   mutable std::mutex mutex_;
   VulkanDevice *vulkan_device_{nullptr};
   CudaDevice *cuda_device_{nullptr};
   VulkanStream *bound_vulkan_stream_{nullptr};
-  std::uint64_t identity_{0};
   std::size_t allocation_size_{0};
-  DeviceAllocation cuda_allocation_{kDeviceNullAllocation};
-  ImportedVulkanMemory imported_memory_;
-  ImportedExternalSemaphore vulkan_to_cuda_;
-  ImportedExternalSemaphore cuda_to_vulkan_;
+  std::shared_ptr<CudaExternalAllocation> cuda_import_;
+  ExportedExternalSemaphore vulkan_to_cuda_;
+  ExportedExternalSemaphore cuda_to_vulkan_;
   ExternalStreamDomain active_cuda_stream_;
   StreamSemaphore last_vulkan_completion_;
   AccessState state_{AccessState::kVulkanOwned};
