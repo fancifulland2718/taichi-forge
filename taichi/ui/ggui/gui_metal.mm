@@ -37,6 +37,7 @@ void GuiMetal::init_render_resources(void *rpd) {
 }
 
 void GuiMetal::prepare_for_next_frame() {
+  ImGui::SetCurrentContext(imgui_context_);
   end_frame();
   if (app_context_->config.show_window) {
     ImGui_ImplGlfw_NewFrame();
@@ -48,6 +49,8 @@ void GuiMetal::prepare_for_next_frame() {
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)w, (float)h);
   }
+  ImGuiIO &io = ImGui::GetIO();
+  io.FontGlobalScale = update_font_scale(io.DisplaySize.y);
   ImGui::NewFrame();
   frame_started_ = true;
   is_empty_ = true;
@@ -130,6 +133,7 @@ GuiMetal::~GuiMetal() {
 bool GuiMetal::has_widgets() const { return !is_empty_; }
 
 void GuiMetal::end_frame() {
+  ImGui::SetCurrentContext(imgui_context_);
   if (!frame_started_) {
     return;
   }

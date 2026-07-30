@@ -12,6 +12,42 @@ class Gui:
     def __init__(self, gui) -> None:
         self.gui = gui
 
+    def set_font_scale(self, scale):
+        """Use a fixed global font scale for subsequent GGUI frames.
+
+        This disables automatic scaling by window height. The new scale takes
+        effect at the next frame boundary.
+
+        Args:
+            scale (float): A finite scale greater than zero.
+        """
+        self.gui.set_font_scale(scale)
+
+    def set_font_scale_from_window_height(
+        self, reference_height, reference_scale=1.0
+    ):
+        """Continuously scale fonts from the window's logical height.
+
+        For each subsequent GGUI frame, the effective scale is
+        ``reference_scale * logical_height / reference_height``. Logical
+        height excludes the framebuffer pixel multiplier on HiDPI displays.
+        A minimized zero-height window keeps its last valid scale.
+
+        Args:
+            reference_height (float): Logical window height at which
+                ``reference_scale`` is used. Must be finite and greater than
+                zero.
+            reference_scale (float): Font scale at ``reference_height``.
+                Must be finite and greater than zero.
+        """
+        self.gui.set_font_scale_from_window_height(
+            reference_height, reference_scale
+        )
+
+    def get_font_scale(self):
+        """Return the effective font scale prepared for the current frame."""
+        return self.gui.get_font_scale()
+
     @contextmanager
     def sub_window(self, name, x, y, width, height):
         """Creating a context manager for subwindow.

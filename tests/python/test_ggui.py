@@ -1380,6 +1380,35 @@ def test_imgui():
 
 @pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
 @test_utils.test(arch=supported_archs)
+def test_imgui_font_scale_from_logical_height():
+    window = ti.ui.Window("test", (320, 240), show_window=False)
+    gui = window.get_gui()
+
+    gui.set_font_scale_from_window_height(480, reference_scale=1.5)
+
+    with gui.sub_window("Panel", 0.05, 0.05, 0.5, 0.25) as panel:
+        panel.text("scaled")
+    assert window.show()
+    assert gui.get_font_scale() == pytest.approx(0.75)
+
+    gui.set_font_scale(1.25)
+    assert gui.get_font_scale() == pytest.approx(1.25)
+    assert window.show()
+    assert gui.get_font_scale() == pytest.approx(1.25)
+
+    for invalid in (0.0, -1.0, float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="finite and greater than zero"):
+            gui.set_font_scale(invalid)
+        with pytest.raises(ValueError, match="finite and greater than zero"):
+            gui.set_font_scale_from_window_height(invalid)
+        with pytest.raises(ValueError, match="finite and greater than zero"):
+            gui.set_font_scale_from_window_height(480, invalid)
+
+    window.destroy()
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=supported_archs)
 def test_imgui_empty_frame_after_widget_frame():
     w, h = 320, 240
     image = np.zeros((w, h, 3), dtype=np.float32)

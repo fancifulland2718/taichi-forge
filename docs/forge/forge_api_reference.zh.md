@@ -1026,6 +1026,34 @@ canvas.submit_frame(frame)
 
 参考：[显示帧提交](display_frame.zh.md)。
 
+### GGUI 字体缩放
+
+位置：`taichi_forge.ui.imgui.Gui`，由 `window.get_gui()` 返回。
+
+| API | 用途 |
+| --- | --- |
+| `gui.set_font_scale(scale)` | 使用固定的正数字体倍率，并停止自动跟随窗口高度。 |
+| `gui.set_font_scale_from_window_height(reference_height, reference_scale=1.0)` | 根据窗口逻辑高度连续计算字体倍率。 |
+| `gui.get_font_scale()` | 返回为当前帧准备的有效字体倍率。 |
+
+高度跟随模式会在每个 GGUI frame boundary 应用
+`reference_scale * logical_height / reference_height`。这里使用 ImGui 报告的
+逻辑显示高度，而不是 framebuffer 像素高度，因此 HiDPI 像素密度不会被重复乘入。
+窗口最小化导致逻辑高度为 0 时，会保留上一个有效倍率。
+
+```python
+window = ti.ui.Window("simulation", (1280, 720))
+gui = window.get_gui()
+gui.set_font_scale_from_window_height(
+    reference_height=720,
+    reference_scale=1.0,
+)
+```
+
+两个参数都必须是大于 0 的有限数。该策略只改变字体渲染，不缩放 ImGui padding、
+widget geometry 或 font atlas。Vulkan 与 Metal 使用同一策略计算，不发生 GPU 回读，
+也不会逐帧重建 atlas。
+
 ## `taichi_forge.linalg` 稀疏线性代数
 
 该模块提供 fixed CSR/BSR pattern、value-only update、scale-aware iterative convergence、

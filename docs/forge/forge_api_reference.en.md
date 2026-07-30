@@ -1180,6 +1180,36 @@ Use these APIs to measure accepted, submitted, dropped, and reused frames, plus
 
 See also [Display frame submission](display_frame.en.md).
 
+### GGUI Font Scaling
+
+Location: `taichi_forge.ui.imgui.Gui`, returned by `window.get_gui()`.
+
+| API | Purpose |
+| --- | --- |
+| `gui.set_font_scale(scale)` | Use a fixed positive font scale and disable automatic height tracking. |
+| `gui.set_font_scale_from_window_height(reference_height, reference_scale=1.0)` | Continuously derive the font scale from the window's logical height. |
+| `gui.get_font_scale()` | Return the effective font scale prepared for the current frame. |
+
+Height tracking applies
+`reference_scale * logical_height / reference_height` at each GGUI frame
+boundary. It uses the logical display height reported by ImGui, not the
+framebuffer pixel height, so HiDPI pixel density does not multiply the scale a
+second time. A minimized zero-height window keeps the last valid scale.
+
+```python
+window = ti.ui.Window("simulation", (1280, 720))
+gui = window.get_gui()
+gui.set_font_scale_from_window_height(
+    reference_height=720,
+    reference_scale=1.0,
+)
+```
+
+Both arguments must be finite and greater than zero. The policy changes font
+rendering only; it does not rescale ImGui padding, widget geometry, or the font
+atlas. Vulkan and Metal use the same policy calculation, with no GPU readback
+or per-frame atlas rebuild.
+
 ## `taichi_forge.linalg` Sparse Linear Algebra
 
 The module provides fixed CSR/BSR patterns, value-only updates, scale-aware

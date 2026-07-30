@@ -61,6 +61,16 @@ py::array_t<float> mat4_to_nparray(glm::mat4 mat) {
 
 struct PyGui {
   GuiBase *gui;  // not owned
+  void set_font_scale(float scale) {
+    gui->set_font_scale(scale);
+  }
+  void set_font_scale_from_window_height(float reference_height,
+                                         float reference_scale) {
+    gui->set_font_scale_from_window_height(reference_height, reference_scale);
+  }
+  float get_font_scale() const {
+    return gui->get_font_scale();
+  }
   void begin(std::string name, float x, float y, float width, float height) {
     gui->begin(name, x, y, width, height);
   }
@@ -797,6 +807,11 @@ void export_ggui(py::module &m) {
       .def("scene_v2", &PyCanvas::scene_v2);
 
   py::class_<PyGui>(m, "PyGui")
+      .def("set_font_scale", &PyGui::set_font_scale)
+      .def("set_font_scale_from_window_height",
+           &PyGui::set_font_scale_from_window_height,
+           py::arg("reference_height"), py::arg("reference_scale") = 1.0f)
+      .def("get_font_scale", &PyGui::get_font_scale)
       .def("begin", &PyGui::begin)
       .def("end", &PyGui::end)
       .def("text", &PyGui::text)

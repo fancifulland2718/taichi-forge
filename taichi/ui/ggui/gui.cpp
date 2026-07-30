@@ -103,6 +103,7 @@ void Gui::create_descriptor_pool() {
 }
 
 void Gui::prepare_for_next_frame() {
+  ImGui::SetCurrentContext(imgui_context_);
   end_frame();
   if (render_pass_ == VK_NULL_HANDLE) {
     return;
@@ -122,6 +123,8 @@ void Gui::prepare_for_next_frame() {
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)w, (float)h);
   }
+  ImGuiIO &io = ImGui::GetIO();
+  io.FontGlobalScale = update_font_scale(io.DisplaySize.y);
   ImGui::NewFrame();
   frame_started_ = true;
   is_empty_ = true;
@@ -270,6 +273,7 @@ bool Gui::has_widgets() const {
 }
 
 void Gui::end_frame() {
+  ImGui::SetCurrentContext(imgui_context_);
   if (!frame_started_) {
     return;
   }
