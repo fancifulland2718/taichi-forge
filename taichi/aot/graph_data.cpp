@@ -2360,7 +2360,11 @@ bool try_run_vulkan_graph(const CompiledGraph &graph,
                           const gfx::GfxRuntime::GraphStructuredControl
                               *structured_control = nullptr,
                           gfx::GfxRuntime::GraphStructuredResult
-                              *structured_result = nullptr) {
+                              *structured_result = nullptr,
+                          const gfx::GfxRuntime::GraphNestedStructuredControl
+                              *nested_control = nullptr,
+                          gfx::GfxRuntime::GraphNestedStructuredResult
+                              *nested_result = nullptr) {
   if (compile_config.debug) {
     auto &stats = cache.vulkan_inline_stats;
     stats.backend = CompiledGraphBackend::vulkan;
@@ -2392,7 +2396,7 @@ bool try_run_vulkan_graph(const CompiledGraph &graph,
   }
   return prepared.runtime->try_launch_graph(
       prepared.dispatches, prepared.replay_key, statistics,
-      structured_control, structured_result);
+      structured_control, structured_result, nested_control, nested_result);
 }
 
 }  // namespace
@@ -3206,6 +3210,225 @@ bool CompiledGraph::jit_submit_bounded_vulkan_compound_cached(
 #else
   return false;
 #endif
+} catch (const BackendRuntimeError &error) {
+  Program *program = jit_graph_program(*this);
+  if (program != nullptr) {
+    program->record_runtime_submission_failure();
+    program->report_backend_runtime_error(error);
+  }
+  throw;
+} catch (...) {
+  Program *program = jit_graph_program(*this);
+  if (program != nullptr) {
+    program->record_runtime_submission_failure();
+  }
+  throw;
+}
+
+CompiledGraphNestedStructuredResult
+CompiledGraph::jit_run_bounded_vulkan_nested_cached(
+    const CompileConfig &compile_config,
+    const std::unordered_map<std::string, IValue> &args,
+    CompiledGraphJITCache &cache,
+    Ndarray *outer_predicate,
+    Ndarray *outer_counter,
+    Ndarray *outer_status,
+    Ndarray *inner_predicate,
+    Ndarray *inner_counter,
+    Ndarray *inner_status,
+    std::size_t outer_condition_dispatch_count,
+    std::size_t inner_condition_dispatch_begin,
+    std::size_t inner_body_dispatch_begin,
+    std::size_t outer_suffix_dispatch_begin,
+    int outer_max_iterations,
+    int inner_max_iterations,
+    int inner_chunk_size) const try {
+  CompiledGraphNestedStructuredResult result;
+#if defined(TI_WITH_VULKAN)
+  constexpr int kNestedMaximumOuterIterations = 64;
+  constexpr int kNestedMaximumChunkIterations = 64;
+  if (compile_config.arch != Arch::vulkan || outer_predicate == nullptr ||
+      outer_counter == nullptr || inner_predicate == nullptr ||
+      inner_counter == nullptr || outer_max_iterations <= 0 ||
+      outer_max_iterations > kNestedMaximumOuterIterations ||
+      inner_max_iterations <= 0 || inner_chunk_size <= 0 ||
+      inner_max_iterations > kNestedMaximumChunkIterations ||
+      inner_chunk_size > kNestedMaximumChunkIterations ||
+      inner_chunk_size > inner_max_iterations ||
+      outer_condition_dispatch_count == 0 ||
+      outer_condition_dispatch_count > inner_condition_dispatch_begin ||
+      inner_condition_dispatch_begin >= inner_body_dispatch_begin ||
+      inner_body_dispatch_begin >= outer_suffix_dispatch_begin ||
+      outer_suffix_dispatch_begin >= dispatches.size()) {
+    return result;
+  }
+  Program *program = jit_graph_program(*this);
+  if (program == nullptr) {
+    return result;
+  }
+  const auto valid_control = [&](const Ndarray *control) {
+    return control != nullptr && control->get_nelement() == 1 &&
+           control->get_element_data_type() == PrimitiveType::i32 &&
+           control->owning_program() == program;
+  };
+  if (!valid_control(outer_predicate) || !valid_control(outer_counter) ||
+      !valid_control(inner_predicate) || !valid_control(inner_counter) ||
+      (outer_status != nullptr && !valid_control(outer_status)) ||
+      (inner_status != nullptr && !valid_control(inner_status))) {
+    return result;
+  }
+  std::array<DevicePtr, 6> control_ptrs{
+      outer_predicate->get_device_allocation().get_ptr(),
+      outer_counter->get_device_allocation().get_ptr(),
+      outer_status != nullptr
+          ? outer_status->get_device_allocation().get_ptr()
+          : kDeviceNullPtr,
+      inner_predicate->get_device_allocation().get_ptr(),
+      inner_counter->get_device_allocation().get_ptr(),
+      inner_status != nullptr
+          ? inner_status->get_device_allocation().get_ptr()
+          : kDeviceNullPtr};
+  const std::array<bool, 6> control_ptr_active{
+      true, true, outer_status != nullptr, true, true,
+      inner_status != nullptr};
+  for (std::size_t i = 0; i < control_ptrs.size(); ++i) {
+    if (!control_ptr_active[i]) {
+      continue;
+    }
+    for (std::size_t j = i + 1; j < control_ptrs.size(); ++j) {
+      if (control_ptr_active[j] &&
+          control_ptrs[i].alloc_id == control_ptrs[j].alloc_id &&
+          control_ptrs[i].offset == control_ptrs[j].offset) {
+        return result;
+      }
+    }
+  }
+
+  program->ensure_runtime_submission_allowed(
+      "nested bounded Vulkan Graph launch");
+  auto tree_lifecycle_guard =
+      program->acquire_snode_tree_lifecycle_read_guard();
+  auto resource_views = graph_runtime_resource_views(args, program);
+  resource_views.ndarrays.add(outer_predicate);
+  resource_views.ndarrays.add(outer_counter);
+  resource_views.ndarrays.add(inner_predicate);
+  resource_views.ndarrays.add(inner_counter);
+  if (outer_status != nullptr) {
+    resource_views.ndarrays.add(outer_status);
+  }
+  if (inner_status != nullptr) {
+    resource_views.ndarrays.add(inner_status);
+  }
+  std::optional<Program::RuntimeResourceGraphScope> resource_guard;
+  if (!resource_views.empty()) {
+    resource_guard.emplace(program->acquire_runtime_resource_graph_scope());
+    if (!resource_views.ndarrays.empty()) {
+      program->retain_ndarrays_for_external_submission(
+          resource_views.ndarrays.data(), resource_views.ndarrays.size());
+    }
+    if (!resource_views.runtime_storage.empty()) {
+      program->retain_runtime_storage_for_graph_submission(
+          resource_views.runtime_storage.data(),
+          resource_views.runtime_storage.size());
+    }
+    if (!resource_views.textures.empty()) {
+      program->retain_textures_for_external_submission(
+          resource_views.textures.data(), resource_views.textures.size());
+    }
+  }
+  auto completion_scope = program->acquire_runtime_submission_scope();
+  std::lock_guard<std::mutex> lock(cache.run_mutex);
+  if (cache.validated_snode_tree_program != program ||
+      cache.validated_snode_tree_epoch != tree_lifecycle_guard.epoch()) {
+    try {
+      program->validate_snode_tree_dependencies(snode_tree_dependencies);
+    } catch (...) {
+      cache.vulkan_graph_state.reset();
+      cache.vulkan_inline_stats = {};
+      cache.kernels.clear();
+      cache.runtime_arg_plans.clear();
+      cache.validated_snode_tree_program = nullptr;
+      cache.validated_snode_tree_epoch = 0;
+      throw;
+    }
+    cache.validated_snode_tree_program = program;
+    cache.validated_snode_tree_epoch = tree_lifecycle_guard.epoch();
+  }
+
+  gfx::GfxRuntime::GraphNestedStructuredControl control;
+  control.outer_predicate =
+      outer_predicate->get_device_allocation().get_ptr();
+  control.outer_counter = outer_counter->get_device_allocation().get_ptr();
+  control.inner_predicate =
+      inner_predicate->get_device_allocation().get_ptr();
+  control.inner_counter = inner_counter->get_device_allocation().get_ptr();
+  control.outer_has_status = outer_status != nullptr;
+  control.inner_has_status = inner_status != nullptr;
+  if (outer_status != nullptr) {
+    control.outer_status = outer_status->get_device_allocation().get_ptr();
+  }
+  if (inner_status != nullptr) {
+    control.inner_status = inner_status->get_device_allocation().get_ptr();
+  }
+  control.outer_condition_dispatch_count =
+      outer_condition_dispatch_count;
+  control.inner_condition_dispatch_begin =
+      inner_condition_dispatch_begin;
+  control.inner_body_dispatch_begin = inner_body_dispatch_begin;
+  control.outer_suffix_dispatch_begin = outer_suffix_dispatch_begin;
+  control.outer_max_iterations =
+      static_cast<std::uint32_t>(outer_max_iterations);
+  control.inner_max_iterations =
+      static_cast<std::uint32_t>(inner_max_iterations);
+  control.inner_chunk_size =
+      static_cast<std::uint32_t>(inner_chunk_size);
+
+  gfx::GfxRuntime::GraphNestedStructuredResult gfx_result;
+  if (!try_run_vulkan_graph(
+          *this, compile_config, args, cache,
+          &program->runtime_statistics(), nullptr, nullptr, &control,
+          &gfx_result)) {
+    return result;
+  }
+  program->mark_runtime_submission(
+      RuntimeSubmissionKind::kGraphBackendSubmission);
+  if (resource_guard) {
+    resource_guard->finish_external_access_epoch();
+  }
+  result.submitted = gfx_result.submitted;
+  result.outer_logical_iterations =
+      gfx_result.outer_logical_iterations;
+  result.outer_encoded_iterations =
+      gfx_result.outer_encoded_iterations;
+  result.outer_initial_predicate =
+      gfx_result.outer_initial_predicate;
+  result.outer_final_predicate = gfx_result.outer_final_predicate;
+  result.outer_initial_counter = gfx_result.outer_initial_counter;
+  result.outer_final_counter = gfx_result.outer_final_counter;
+  result.outer_initial_status = gfx_result.outer_initial_status;
+  result.outer_final_status = gfx_result.outer_final_status;
+  result.inner_logical_iterations =
+      std::move(gfx_result.inner_logical_iterations);
+  result.inner_encoded_iterations =
+      std::move(gfx_result.inner_encoded_iterations);
+  result.inner_initial_counters =
+      std::move(gfx_result.inner_initial_counters);
+  result.inner_final_counters =
+      std::move(gfx_result.inner_final_counters);
+  result.inner_final_predicates =
+      std::move(gfx_result.inner_final_predicates);
+  result.inner_initial_statuses =
+      std::move(gfx_result.inner_initial_statuses);
+  result.inner_final_statuses =
+      std::move(gfx_result.inner_final_statuses);
+  result.indirect_dispatches = gfx_result.indirect_dispatches;
+  result.controller_dispatches = gfx_result.controller_dispatches;
+  result.controller_invocations = gfx_result.controller_invocations;
+  result.zero_dispatches = gfx_result.zero_dispatches;
+  result.control_bytes = gfx_result.control_bytes;
+  result.observation_bytes = gfx_result.observation_bytes;
+#endif
+  return result;
 } catch (const BackendRuntimeError &error) {
   Program *program = jit_graph_program(*this);
   if (program != nullptr) {

@@ -44,6 +44,9 @@ constexpr std::size_t kStructuredMaximumPackets = 64;
 constexpr std::size_t kStructuredMaximumEncodedActions = 4096;
 constexpr std::size_t kStructuredChainedMaximumDispatches = 256;
 constexpr std::size_t kStructuredChainedMaximumControlBytes = 64 * 1024;
+constexpr std::size_t kNestedStructuredHeaderWords = 8;
+constexpr std::size_t kNestedStructuredTraceWords = 6;
+constexpr std::size_t kNestedStructuredMaximumOuterIterations = 64;
 
 std::vector<uint32_t> make_compact_controller_spirv(
     const DeviceCapabilityConfig &caps,
@@ -169,6 +172,175 @@ std::vector<uint32_t> make_structured_terminal_spirv(
       initial_status_ptr,
       builder.select(builder.eq(logical_count, zero), final_status,
                      initial_status));
+  builder.make_inst(spv::OpReturn);
+  builder.make_inst(spv::OpFunctionEnd);
+
+  std::vector<spirv::Value> interfaces;
+  if (caps.get(DeviceCapability::spirv_version) > 0x10300) {
+    interfaces = {predicate, counter, status, control};
+  }
+  builder.commit_kernel_function(function, "main", std::move(interfaces),
+                                 {1, 1, 1});
+  return builder.finalize();
+}
+
+std::vector<uint32_t> make_nested_outer_snapshot_spirv(
+    const DeviceCapabilityConfig &caps,
+    std::size_t header_word_offset,
+    bool has_status,
+    bool terminal) {
+  spirv::IRBuilder builder(Arch::vulkan, &caps);
+  builder.init_header();
+  const auto u32 = builder.u32_type();
+  const auto predicate = builder.buffer_argument(u32, 0, 0, "predicate");
+  const auto counter = builder.buffer_argument(u32, 0, 1, "counter");
+  const auto status = builder.buffer_argument(u32, 0, 2, "status");
+  const auto control = builder.buffer_argument(u32, 0, 3, "control");
+  const auto function = builder.new_function();
+  builder.start_function(function);
+
+  const auto zero = builder.uint_immediate_number(u32, 0);
+  const auto base = header_word_offset + (terminal ? 5 : 2);
+  const auto load_scalar = [&](spirv::Value buffer) {
+    return builder.load_variable(
+        builder.struct_array_access(u32, buffer, zero), u32);
+  };
+  builder.store_variable(
+      builder.struct_array_access(
+          u32, control, builder.uint_immediate_number(u32, base)),
+      load_scalar(predicate));
+  builder.store_variable(
+      builder.struct_array_access(
+          u32, control, builder.uint_immediate_number(u32, base + 1)),
+      load_scalar(counter));
+  builder.store_variable(
+      builder.struct_array_access(
+          u32, control, builder.uint_immediate_number(u32, base + 2)),
+      has_status ? load_scalar(status) : zero);
+  builder.make_inst(spv::OpReturn);
+  builder.make_inst(spv::OpFunctionEnd);
+
+  std::vector<spirv::Value> interfaces;
+  if (caps.get(DeviceCapability::spirv_version) > 0x10300) {
+    interfaces = {predicate, counter, status, control};
+  }
+  builder.commit_kernel_function(function, "main", std::move(interfaces),
+                                 {1, 1, 1});
+  return builder.finalize();
+}
+
+std::vector<uint32_t> make_nested_inner_initial_spirv(
+    const DeviceCapabilityConfig &caps,
+    std::size_t header_word_offset,
+    std::size_t trace_word_offset,
+    bool has_status) {
+  spirv::IRBuilder builder(Arch::vulkan, &caps);
+  builder.init_header();
+  const auto u32 = builder.u32_type();
+  const auto counter = builder.buffer_argument(u32, 0, 0, "counter");
+  const auto status = builder.buffer_argument(u32, 0, 1, "status");
+  const auto control = builder.buffer_argument(u32, 0, 2, "control");
+  const auto function = builder.new_function();
+  builder.start_function(function);
+
+  const auto zero = builder.uint_immediate_number(u32, 0);
+  const auto one = builder.uint_immediate_number(u32, 1);
+  const auto logical_ptr = builder.struct_array_access(
+      u32, control,
+      builder.uint_immediate_number(u32, header_word_offset));
+  const auto logical = builder.load_variable(logical_ptr, u32);
+  builder.store_variable(
+      builder.struct_array_access(
+          u32, control,
+          builder.uint_immediate_number(u32, header_word_offset + 1)),
+      logical);
+  builder.store_variable(logical_ptr, builder.add(logical, one));
+  const auto row = builder.add(
+      builder.uint_immediate_number(u32, trace_word_offset),
+      builder.mul(logical, builder.uint_immediate_number(
+                               u32, kNestedStructuredTraceWords)));
+  const auto counter_value = builder.load_variable(
+      builder.struct_array_access(u32, counter, zero), u32);
+  builder.store_variable(
+      builder.struct_array_access(
+          u32, control,
+          builder.add(row, builder.uint_immediate_number(u32, 1))),
+      counter_value);
+  const auto status_value =
+      has_status
+          ? builder.load_variable(
+                builder.struct_array_access(u32, status, zero), u32)
+          : zero;
+  builder.store_variable(
+      builder.struct_array_access(
+          u32, control,
+          builder.add(row, builder.uint_immediate_number(u32, 4))),
+      status_value);
+  builder.make_inst(spv::OpReturn);
+  builder.make_inst(spv::OpFunctionEnd);
+
+  std::vector<spirv::Value> interfaces;
+  if (caps.get(DeviceCapability::spirv_version) > 0x10300) {
+    interfaces = {counter, status, control};
+  }
+  builder.commit_kernel_function(function, "main", std::move(interfaces),
+                                 {1, 1, 1});
+  return builder.finalize();
+}
+
+std::vector<uint32_t> make_nested_inner_terminal_spirv(
+    const DeviceCapabilityConfig &caps,
+    std::size_t inner_observation_word_offset,
+    std::size_t header_word_offset,
+    std::size_t trace_word_offset,
+    bool has_status) {
+  spirv::IRBuilder builder(Arch::vulkan, &caps);
+  builder.init_header();
+  const auto u32 = builder.u32_type();
+  const auto predicate = builder.buffer_argument(u32, 0, 0, "predicate");
+  const auto counter = builder.buffer_argument(u32, 0, 1, "counter");
+  const auto status = builder.buffer_argument(u32, 0, 2, "status");
+  const auto control = builder.buffer_argument(u32, 0, 3, "control");
+  const auto function = builder.new_function();
+  builder.start_function(function);
+
+  const auto zero = builder.uint_immediate_number(u32, 0);
+  const auto row_index = builder.load_variable(
+      builder.struct_array_access(
+          u32, control,
+          builder.uint_immediate_number(u32, header_word_offset + 1)),
+      u32);
+  const auto row = builder.add(
+      builder.uint_immediate_number(u32, trace_word_offset),
+      builder.mul(row_index, builder.uint_immediate_number(
+                                   u32, kNestedStructuredTraceWords)));
+  const auto inner_logical = builder.load_variable(
+      builder.struct_array_access(
+          u32, control,
+          builder.uint_immediate_number(
+              u32, inner_observation_word_offset)),
+      u32);
+  builder.store_variable(builder.struct_array_access(u32, control, row),
+                         inner_logical);
+  const auto load_scalar = [&](spirv::Value buffer) {
+    return builder.load_variable(
+        builder.struct_array_access(u32, buffer, zero), u32);
+  };
+  builder.store_variable(
+      builder.struct_array_access(
+          u32, control,
+          builder.add(row, builder.uint_immediate_number(u32, 2))),
+      load_scalar(counter));
+  builder.store_variable(
+      builder.struct_array_access(
+          u32, control,
+          builder.add(row, builder.uint_immediate_number(u32, 3))),
+      load_scalar(predicate));
+  builder.store_variable(
+      builder.struct_array_access(
+          u32, control,
+          builder.add(row, builder.uint_immediate_number(u32, 5))),
+      has_status ? load_scalar(status) : zero);
   builder.make_inst(spv::OpReturn);
   builder.make_inst(spv::OpFunctionEnd);
 
@@ -2280,7 +2452,9 @@ bool GfxRuntime::try_launch_graph(
     uint64_t replay_key,
     RuntimeStatistics *statistics,
     const GraphStructuredControl *structured_control,
-    GraphStructuredResult *structured_result) {
+    GraphStructuredResult *structured_result,
+    const GraphNestedStructuredControl *nested_control,
+    GraphNestedStructuredResult *nested_result) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   collect_ready_graph_replays();
   TI_ASSERT(replay_key != 0);
@@ -2295,7 +2469,31 @@ bool GfxRuntime::try_launch_graph(
   if (structured_result != nullptr) {
     *structured_result = {};
   }
+  if (nested_result != nullptr) {
+    *nested_result = {};
+  }
   if (structured_control == nullptr && structured_result != nullptr) {
+    state.last_path = GraphReplayLastPath::fallback;
+    state.last_fallback_reason =
+        GraphReplayFallbackReason::structural_unsupported;
+    return false;
+  }
+  if (nested_control == nullptr && nested_result != nullptr) {
+    state.last_path = GraphReplayLastPath::fallback;
+    state.last_fallback_reason =
+        GraphReplayFallbackReason::structural_unsupported;
+    return false;
+  }
+  // Nested structured replay is synchronous-only. Reject an observation-less
+  // request before any queue submission instead of letting the encoder assume
+  // that terminal observation storage exists.
+  if (nested_control != nullptr && nested_result == nullptr) {
+    state.last_path = GraphReplayLastPath::fallback;
+    state.last_fallback_reason =
+        GraphReplayFallbackReason::structural_unsupported;
+    return false;
+  }
+  if (structured_control != nullptr && nested_control != nullptr) {
     state.last_path = GraphReplayLastPath::fallback;
     state.last_fallback_reason =
         GraphReplayFallbackReason::structural_unsupported;
@@ -2337,6 +2535,9 @@ bool GfxRuntime::try_launch_graph(
   std::vector<PreparedDispatch> prepared;
   prepared.reserve(dispatches.size());
   size_t total_tasks = 0;
+  std::vector<std::size_t> dispatch_task_offsets;
+  dispatch_task_offsets.reserve(dispatches.size() + 1);
+  dispatch_task_offsets.push_back(0);
   bool has_indirect_dispatch = false;
   GraphStructuredStrategy structured_strategy =
       GraphStructuredStrategy::automatic;
@@ -2411,6 +2612,118 @@ bool GfxRuntime::try_launch_graph(
                            structured_control->status.alloc_id},
           structured_control->status.offset, sizeof(std::uint32_t));
     }
+  } else if (nested_control != nullptr) {
+    const auto valid_scalar = [&](DevicePtr ptr) {
+      return ptr.device == device_ && ptr.alloc_id != 0 &&
+             ptr.offset % alignof(std::uint32_t) == 0;
+    };
+    const std::array<DevicePtr, 6> control_ptrs{
+        nested_control->outer_predicate,
+        nested_control->outer_counter,
+        nested_control->outer_status,
+        nested_control->inner_predicate,
+        nested_control->inner_counter,
+        nested_control->inner_status};
+    const std::array<bool, 6> control_ptr_active{
+        true, true, nested_control->outer_has_status, true, true,
+        nested_control->inner_has_status};
+    bool controls_alias = false;
+    for (std::size_t i = 0; i < control_ptrs.size(); ++i) {
+      if (!control_ptr_active[i]) {
+        continue;
+      }
+      for (std::size_t j = i + 1; j < control_ptrs.size(); ++j) {
+        if (control_ptr_active[j] &&
+            control_ptrs[i].alloc_id == control_ptrs[j].alloc_id &&
+            control_ptrs[i].offset == control_ptrs[j].offset) {
+          controls_alias = true;
+          break;
+        }
+      }
+      if (controls_alias) {
+        break;
+      }
+    }
+    if (!device_->supports_conditional_commands() ||
+        !valid_scalar(nested_control->outer_predicate) ||
+        !valid_scalar(nested_control->outer_counter) ||
+        !valid_scalar(nested_control->inner_predicate) ||
+        !valid_scalar(nested_control->inner_counter) ||
+        (nested_control->outer_has_status &&
+         !valid_scalar(nested_control->outer_status)) ||
+        (nested_control->inner_has_status &&
+         !valid_scalar(nested_control->inner_status)) ||
+        controls_alias ||
+        nested_control->outer_condition_dispatch_count == 0 ||
+        nested_control->outer_condition_dispatch_count >
+            nested_control->inner_condition_dispatch_begin ||
+        nested_control->inner_condition_dispatch_begin >=
+            nested_control->inner_body_dispatch_begin ||
+        nested_control->inner_body_dispatch_begin >=
+            nested_control->outer_suffix_dispatch_begin ||
+        nested_control->outer_suffix_dispatch_begin >= dispatches.size() ||
+        nested_control->outer_max_iterations == 0 ||
+        nested_control->outer_max_iterations >
+            kNestedStructuredMaximumOuterIterations ||
+        nested_control->inner_max_iterations == 0 ||
+        nested_control->inner_max_iterations > 64 ||
+        nested_control->inner_chunk_size == 0 ||
+        nested_control->inner_chunk_size >
+            nested_control->inner_max_iterations ||
+        nested_control->inner_chunk_size > 64) {
+      return reject();
+    }
+    key.insert(
+        key.end(),
+        {0xC100u,
+         nested_control->outer_condition_dispatch_count,
+         nested_control->inner_condition_dispatch_begin,
+         nested_control->inner_body_dispatch_begin,
+         nested_control->outer_suffix_dispatch_begin,
+         nested_control->outer_max_iterations,
+         nested_control->inner_max_iterations,
+         nested_control->inner_chunk_size,
+         nested_control->outer_has_status ? 1u : 0u,
+         nested_control->inner_has_status ? 1u : 0u,
+         nested_control->outer_predicate.alloc_id,
+         nested_control->outer_predicate.offset,
+         nested_control->outer_counter.alloc_id,
+         nested_control->outer_counter.offset,
+         nested_control->outer_status.alloc_id,
+         nested_control->outer_status.offset,
+         nested_control->inner_predicate.alloc_id,
+         nested_control->inner_predicate.offset,
+         nested_control->inner_counter.alloc_id,
+         nested_control->inner_counter.offset,
+         nested_control->inner_status.alloc_id,
+         nested_control->inner_status.offset});
+    structure_key.insert(
+        structure_key.end(),
+        {0xC100u,
+         nested_control->outer_condition_dispatch_count,
+         nested_control->inner_condition_dispatch_begin,
+         nested_control->inner_body_dispatch_begin,
+         nested_control->outer_suffix_dispatch_begin,
+         nested_control->outer_max_iterations,
+         nested_control->inner_max_iterations,
+         nested_control->inner_chunk_size,
+         nested_control->outer_has_status ? 1u : 0u,
+         nested_control->inner_has_status ? 1u : 0u});
+    const auto push_control_structure = [&](DevicePtr ptr) {
+      push_runtime_structure(
+          DeviceAllocation{ptr.device, ptr.alloc_id}, ptr.offset,
+          sizeof(std::uint32_t));
+    };
+    push_control_structure(nested_control->outer_predicate);
+    push_control_structure(nested_control->outer_counter);
+    if (nested_control->outer_has_status) {
+      push_control_structure(nested_control->outer_status);
+    }
+    push_control_structure(nested_control->inner_predicate);
+    push_control_structure(nested_control->inner_counter);
+    if (nested_control->inner_has_status) {
+      push_control_structure(nested_control->inner_status);
+    }
   }
 
   for (const GraphDispatch &dispatch : dispatches) {
@@ -2434,7 +2747,7 @@ bool GfxRuntime::try_launch_graph(
     const bool is_indirect =
         dispatch.indirect_dispatch != kDeviceNullPtr;
     if (is_indirect) {
-      if (structured_control != nullptr ||
+      if (structured_control != nullptr || nested_control != nullptr ||
           dispatch.indirect_dispatch.device != device_ ||
           dispatch.indirect_dispatch.alloc_id == 0 ||
           dispatch.indirect_dispatch.offset %
@@ -2630,10 +2943,15 @@ bool GfxRuntime::try_launch_graph(
       }
     }
     total_tasks += task_attribs.size();
+    dispatch_task_offsets.push_back(total_tasks);
     prepared.push_back(std::move(prepared_dispatch));
   }
   std::size_t structured_initial_tasks = 0;
   std::vector<uint32_t> structured_group_counts;
+  std::size_t nested_outer_condition_task_end = 0;
+  std::size_t nested_inner_condition_task_begin = 0;
+  std::size_t nested_inner_body_task_begin = 0;
+  std::size_t nested_outer_suffix_task_begin = 0;
   if (structured_control != nullptr) {
     for (std::size_t i = 0;
          i < structured_control->initial_dispatch_count; ++i) {
@@ -2712,6 +3030,89 @@ bool GfxRuntime::try_launch_graph(
         {0xC001u, static_cast<std::uint32_t>(structured_strategy),
          static_cast<std::uint32_t>(
              structured_control->execute_initial_dispatches)});
+  } else if (nested_control != nullptr) {
+    nested_outer_condition_task_end =
+        dispatch_task_offsets[nested_control
+                                  ->outer_condition_dispatch_count];
+    nested_inner_condition_task_begin =
+        dispatch_task_offsets[nested_control
+                                  ->inner_condition_dispatch_begin];
+    nested_inner_body_task_begin =
+        dispatch_task_offsets[nested_control
+                                  ->inner_body_dispatch_begin];
+    nested_outer_suffix_task_begin =
+        dispatch_task_offsets[nested_control
+                                  ->outer_suffix_dispatch_begin];
+    if (nested_outer_condition_task_end == 0 ||
+        nested_outer_condition_task_end >
+            nested_inner_condition_task_begin ||
+        nested_inner_condition_task_begin >=
+            nested_inner_body_task_begin ||
+        nested_inner_body_task_begin >=
+            nested_outer_suffix_task_begin ||
+        nested_outer_suffix_task_begin >= total_tasks) {
+      return reject();
+    }
+    for (std::size_t i = nested_inner_body_task_begin;
+         i < nested_outer_suffix_task_begin; ++i) {
+      const auto dispatch_index = static_cast<std::size_t>(
+          std::upper_bound(dispatch_task_offsets.begin(),
+                           dispatch_task_offsets.end(), i) -
+          dispatch_task_offsets.begin() - 1);
+      const auto task_index =
+          static_cast<int>(i - dispatch_task_offsets[dispatch_index]);
+      const auto &attribs =
+          prepared[dispatch_index]
+              .kernel->ti_kernel_attribs()
+              .tasks_attribs[task_index];
+      if (attribs.advisory_num_threads_per_group <= 0) {
+        return reject();
+      }
+      const int group_x =
+          (attribs.advisory_total_num_threads +
+           attribs.advisory_num_threads_per_group - 1) /
+          attribs.advisory_num_threads_per_group;
+      if (group_x < 0) {
+        return reject();
+      }
+      structured_group_counts.push_back(
+          static_cast<std::uint32_t>(group_x));
+    }
+    if (structured_group_counts.empty() ||
+        structured_group_counts.size() > kStructuredMaximumPackets) {
+      return reject();
+    }
+    const std::uint64_t prefix_tasks =
+        nested_inner_condition_task_begin -
+        nested_outer_condition_task_end;
+    const std::uint64_t inner_initial_tasks =
+        nested_inner_body_task_begin -
+        nested_inner_condition_task_begin;
+    const std::uint64_t inner_payload_tasks =
+        nested_outer_suffix_task_begin -
+        nested_inner_body_task_begin;
+    const std::uint64_t suffix_tasks =
+        total_tasks - nested_outer_suffix_task_begin;
+    const std::uint64_t per_outer_actions =
+        1 + prefix_tasks + 1 + inner_initial_tasks +
+        static_cast<std::uint64_t>(
+            nested_control->inner_max_iterations) *
+            (inner_payload_tasks + 1) +
+        1 + suffix_tasks;
+    const std::uint64_t encoded_actions =
+        nested_outer_condition_task_end + 2 +
+        static_cast<std::uint64_t>(
+            nested_control->outer_max_iterations) *
+            per_outer_actions;
+    if (encoded_actions > kStructuredMaximumEncodedActions) {
+      return reject();
+    }
+    structured_strategy = GraphStructuredStrategy::compact;
+    key.insert(key.end(),
+               {0xC101u, static_cast<std::uint64_t>(encoded_actions)});
+    structure_key.insert(
+        structure_key.end(),
+        {0xC101u, static_cast<std::uint64_t>(encoded_actions)});
   }
   if (total_tasks <= 1 && !has_indirect_dispatch) {
     return reject(GraphReplayFallbackReason::insufficient_tasks);
@@ -2722,7 +3123,8 @@ bool GfxRuntime::try_launch_graph(
   GfxRuntime::GraphReplayExecutable::Slot *slot =
       executable.acquire_ready_slot(
           key, structure_key,
-          structured_control != nullptr && structured_result == nullptr);
+          (structured_control != nullptr && structured_result == nullptr) ||
+              (nested_control != nullptr && nested_result == nullptr));
   if (slot == nullptr) {
     if (state.diagnostics_enabled) {
       ++state.slot_saturation_fallbacks;
@@ -2844,46 +3246,84 @@ bool GfxRuntime::try_launch_graph(
     return true;
   };
 
-  const std::size_t structured_observation_word_offset =
-      structured_group_counts.empty()
-          ? 0
-          : structured_strategy == GraphStructuredStrategy::conditional
-                ? structured_control->max_iterations
-                : structured_strategy == GraphStructuredStrategy::chained
-                ? static_cast<std::size_t>(
-                      structured_control->max_iterations) *
-                      (structured_group_counts.size() + 1) *
-                      kStructuredPacketWords
-                : structured_group_counts.size() * kStructuredPacketWords;
-  const std::size_t structured_control_bytes =
-      structured_group_counts.empty()
-          ? 0
-          : (structured_observation_word_offset +
-             kStructuredObservationWords +
-             (structured_strategy == GraphStructuredStrategy::chained
-                  ? kStructuredChainedSinkWords
-                  : structured_strategy ==
-                            GraphStructuredStrategy::conditional
-                        ? 1
-                        : structured_strategy ==
-                                  GraphStructuredStrategy::coarse_conditional
-                              ? 1
-                        : 0)) *
-                sizeof(std::uint32_t);
+  const bool nested_structured = nested_control != nullptr;
+  std::size_t structured_observation_word_offset = 0;
+  std::size_t nested_header_word_offset = 0;
+  std::size_t nested_trace_word_offset = 0;
+  std::size_t structured_control_bytes = 0;
+  if (!structured_group_counts.empty()) {
+    if (nested_structured) {
+      structured_observation_word_offset =
+          structured_group_counts.size() * kStructuredPacketWords;
+      nested_header_word_offset =
+          structured_observation_word_offset +
+          kStructuredObservationWords;
+      nested_trace_word_offset =
+          nested_header_word_offset + kNestedStructuredHeaderWords;
+      structured_control_bytes =
+          (nested_trace_word_offset +
+           static_cast<std::size_t>(
+               nested_control->outer_max_iterations) *
+               kNestedStructuredTraceWords) *
+          sizeof(std::uint32_t);
+    } else {
+      structured_observation_word_offset =
+          structured_strategy == GraphStructuredStrategy::conditional
+              ? structured_control->max_iterations
+              : structured_strategy == GraphStructuredStrategy::chained
+                    ? static_cast<std::size_t>(
+                          structured_control->max_iterations) *
+                          (structured_group_counts.size() + 1) *
+                          kStructuredPacketWords
+                    : structured_group_counts.size() *
+                          kStructuredPacketWords;
+      structured_control_bytes =
+          (structured_observation_word_offset +
+           kStructuredObservationWords +
+           (structured_strategy == GraphStructuredStrategy::chained
+                ? kStructuredChainedSinkWords
+                : structured_strategy ==
+                          GraphStructuredStrategy::conditional
+                      ? 1
+                      : structured_strategy ==
+                                GraphStructuredStrategy::coarse_conditional
+                            ? 1
+                            : 0)) *
+          sizeof(std::uint32_t);
+    }
+  }
+  if (structured_control_bytes >
+      kStructuredChainedMaximumControlBytes) {
+    return reject();
+  }
   const bool structured_terminal_observation =
-      structured_control != nullptr && structured_result != nullptr;
+      (structured_control != nullptr && structured_result != nullptr) ||
+      (nested_control != nullptr && nested_result != nullptr);
   const std::size_t structured_observation_bytes =
-      structured_terminal_observation
-          ? kStructuredObservationWords * sizeof(std::uint32_t)
-          : 0;
-  if (structured_control != nullptr) {
+      !structured_terminal_observation
+          ? 0
+          : nested_structured
+                ? (kNestedStructuredHeaderWords +
+                   static_cast<std::size_t>(
+                       nested_control->outer_max_iterations) *
+                       kNestedStructuredTraceWords) *
+                      sizeof(std::uint32_t)
+                : kStructuredObservationWords * sizeof(std::uint32_t);
+  if (structured_control != nullptr || nested_control != nullptr) {
+    const bool inner_has_status =
+        nested_structured ? nested_control->inner_has_status
+                          : structured_control->has_status;
+    const bool outer_has_status =
+        nested_structured && nested_control->outer_has_status;
     const bool rebuild_control =
         !slot->structured_control_buffer ||
         slot->structured_control_bytes != structured_control_bytes ||
         slot->structured_observation_bytes !=
             structured_observation_bytes ||
         slot->structured_group_counts != structured_group_counts ||
-        slot->structured_has_status != structured_control->has_status ||
+        slot->structured_has_status != inner_has_status ||
+        slot->structured_nested != nested_structured ||
+        slot->structured_outer_has_status != outer_has_status ||
         slot->structured_strategy != structured_strategy;
     if (rebuild_control) {
       auto [control_buffer, control_result] =
@@ -2891,7 +3331,10 @@ bool GfxRuntime::try_launch_graph(
               {structured_control_bytes,
                /*host_write=*/false, /*host_read=*/false,
                /*export_sharing=*/false,
-               structured_strategy == GraphStructuredStrategy::conditional
+               nested_structured
+                   ? AllocUsage::Storage | AllocUsage::Indirect |
+                         AllocUsage::Conditional
+               : structured_strategy == GraphStructuredStrategy::conditional
                    ? AllocUsage::Storage | AllocUsage::Conditional
                    : structured_strategy ==
                              GraphStructuredStrategy::coarse_conditional
@@ -2920,38 +3363,55 @@ bool GfxRuntime::try_launch_graph(
       slot->structured_observation_bytes =
           structured_observation_bytes;
       slot->structured_group_counts = structured_group_counts;
-      slot->structured_has_status = structured_control->has_status;
+      slot->structured_has_status = inner_has_status;
+      slot->structured_nested = nested_structured;
+      slot->structured_outer_has_status = outer_has_status;
       slot->structured_strategy = structured_strategy;
       slot->structured_controller_pipeline = create_structured_pipeline(
           device_,
-          structured_strategy == GraphStructuredStrategy::conditional
+          !nested_structured &&
+                  structured_strategy ==
+                      GraphStructuredStrategy::conditional
               ? make_conditional_controller_spirv(
                     device_->get_caps(),
                     structured_control->max_iterations,
-                    structured_control->has_status)
-              : structured_strategy == GraphStructuredStrategy::chained
+                    inner_has_status)
+              : !nested_structured &&
+                        structured_strategy ==
+                            GraphStructuredStrategy::chained
               ? make_chained_controller_spirv(
                     device_->get_caps(), structured_group_counts,
                     structured_control->max_iterations,
-                    structured_control->has_status)
+                    inner_has_status)
               : make_compact_controller_spirv(
                     device_->get_caps(), structured_group_counts,
-                    structured_control->has_status),
-          structured_strategy == GraphStructuredStrategy::conditional
+                    inner_has_status),
+          !nested_structured &&
+                  structured_strategy ==
+                      GraphStructuredStrategy::conditional
               ? "vulkan_conditional_controller"
-              : structured_strategy == GraphStructuredStrategy::chained
+              : !nested_structured &&
+                        structured_strategy ==
+                            GraphStructuredStrategy::chained
               ? "vulkan_chained_controller"
-              : "vulkan_compact_controller");
-      if (structured_strategy ==
-          GraphStructuredStrategy::coarse_conditional) {
+              : nested_structured ? "vulkan_nested_compact_controller"
+                                  : "vulkan_compact_controller");
+      if (nested_structured ||
+          structured_strategy ==
+              GraphStructuredStrategy::coarse_conditional) {
+        const std::uint32_t stable_predicate_index =
+            nested_structured
+                ? static_cast<std::uint32_t>(
+                      structured_observation_word_offset + 1)
+                : static_cast<std::uint32_t>(
+                      structured_observation_word_offset +
+                      kStructuredObservationWords);
         slot->structured_gate_pipeline = create_structured_pipeline(
             device_,
             make_coarse_conditional_gate_spirv(
-                device_->get_caps(),
-                static_cast<std::uint32_t>(
-                    structured_observation_word_offset +
-                    kStructuredObservationWords)),
-            "vulkan_coarse_conditional_gate");
+                device_->get_caps(), stable_predicate_index),
+            nested_structured ? "vulkan_nested_outer_gate"
+                              : "vulkan_coarse_conditional_gate");
         slot->structured_gate_resources =
             device_->create_resource_set_unique();
       } else {
@@ -2960,12 +3420,12 @@ bool GfxRuntime::try_launch_graph(
       }
       slot->structured_controller_resources =
           device_->create_resource_set_unique();
-      if (structured_terminal_observation) {
+      if (!nested_structured && structured_terminal_observation) {
         slot->structured_terminal_pipeline = create_structured_pipeline(
             device_,
             make_structured_terminal_spirv(
                 device_->get_caps(), structured_observation_word_offset,
-                structured_control->has_status),
+                inner_has_status),
             "vulkan_structured_terminal");
         slot->structured_terminal_resources =
             device_->create_resource_set_unique();
@@ -2973,14 +3433,137 @@ bool GfxRuntime::try_launch_graph(
         slot->structured_terminal_pipeline.reset();
         slot->structured_terminal_resources.reset();
       }
+      if (nested_structured) {
+        slot->nested_outer_initial_pipeline = create_structured_pipeline(
+            device_,
+            make_nested_outer_snapshot_spirv(
+                device_->get_caps(), nested_header_word_offset,
+                outer_has_status, /*terminal=*/false),
+            "vulkan_nested_outer_initial");
+        slot->nested_inner_initial_pipeline = create_structured_pipeline(
+            device_,
+            make_nested_inner_initial_spirv(
+                device_->get_caps(), nested_header_word_offset,
+                nested_trace_word_offset, inner_has_status),
+            "vulkan_nested_inner_initial");
+        slot->nested_inner_terminal_pipeline = create_structured_pipeline(
+            device_,
+            make_nested_inner_terminal_spirv(
+                device_->get_caps(),
+                structured_observation_word_offset,
+                nested_header_word_offset, nested_trace_word_offset,
+                inner_has_status),
+            "vulkan_nested_inner_terminal");
+        slot->nested_outer_terminal_pipeline =
+            create_structured_pipeline(
+                device_,
+                make_nested_outer_snapshot_spirv(
+                    device_->get_caps(), nested_header_word_offset,
+                    outer_has_status, /*terminal=*/true),
+                "vulkan_nested_outer_terminal");
+        slot->nested_outer_initial_resources =
+            device_->create_resource_set_unique();
+        slot->nested_inner_initial_resources =
+            device_->create_resource_set_unique();
+        slot->nested_inner_terminal_resources =
+            device_->create_resource_set_unique();
+        slot->nested_outer_terminal_resources =
+            device_->create_resource_set_unique();
+      } else {
+        slot->nested_outer_initial_pipeline.reset();
+        slot->nested_inner_initial_pipeline.reset();
+        slot->nested_inner_terminal_pipeline.reset();
+        slot->nested_outer_terminal_pipeline.reset();
+        slot->nested_outer_initial_resources.reset();
+        slot->nested_inner_initial_resources.reset();
+        slot->nested_inner_terminal_resources.reset();
+        slot->nested_outer_terminal_resources.reset();
+      }
       slot->recorded = false;
       slot->cmdlist.reset();
     }
   }
 
   auto update_structured_bindings = [&](bool patch_existing) {
-    if (structured_control == nullptr) {
+    if (structured_control == nullptr && nested_control == nullptr) {
       return true;
+    }
+    if (nested_control != nullptr) {
+      auto *controller = slot->structured_controller_resources.get();
+      auto *outer_gate = slot->structured_gate_resources.get();
+      auto *outer_initial =
+          slot->nested_outer_initial_resources.get();
+      auto *inner_initial =
+          slot->nested_inner_initial_resources.get();
+      auto *inner_terminal =
+          slot->nested_inner_terminal_resources.get();
+      auto *outer_terminal =
+          slot->nested_outer_terminal_resources.get();
+      if (controller == nullptr || outer_gate == nullptr ||
+          outer_initial == nullptr ||
+          inner_initial == nullptr || inner_terminal == nullptr ||
+          outer_terminal == nullptr ||
+          !slot->structured_control_buffer) {
+        return false;
+      }
+      const DevicePtr outer_status =
+          nested_control->outer_has_status
+              ? nested_control->outer_status
+              : nested_control->outer_counter;
+      const DevicePtr inner_status =
+          nested_control->inner_has_status
+              ? nested_control->inner_status
+              : nested_control->inner_counter;
+      controller->rw_buffer(0, nested_control->inner_predicate,
+                            sizeof(std::uint32_t));
+      controller->rw_buffer(1, *slot->structured_control_buffer);
+      controller->rw_buffer(2, inner_status,
+                            sizeof(std::uint32_t));
+      outer_gate->rw_buffer(0, nested_control->outer_predicate,
+                            sizeof(std::uint32_t));
+      outer_gate->rw_buffer(1, *slot->structured_control_buffer);
+      outer_initial->rw_buffer(0, nested_control->outer_predicate,
+                               sizeof(std::uint32_t));
+      outer_initial->rw_buffer(1, nested_control->outer_counter,
+                               sizeof(std::uint32_t));
+      outer_initial->rw_buffer(2, outer_status,
+                               sizeof(std::uint32_t));
+      outer_initial->rw_buffer(3,
+                               *slot->structured_control_buffer);
+      inner_initial->rw_buffer(0, nested_control->inner_counter,
+                               sizeof(std::uint32_t));
+      inner_initial->rw_buffer(1, inner_status,
+                               sizeof(std::uint32_t));
+      inner_initial->rw_buffer(2,
+                               *slot->structured_control_buffer);
+      inner_terminal->rw_buffer(0, nested_control->inner_predicate,
+                                sizeof(std::uint32_t));
+      inner_terminal->rw_buffer(1, nested_control->inner_counter,
+                                sizeof(std::uint32_t));
+      inner_terminal->rw_buffer(2, inner_status,
+                                sizeof(std::uint32_t));
+      inner_terminal->rw_buffer(3,
+                                *slot->structured_control_buffer);
+      outer_terminal->rw_buffer(0, nested_control->outer_predicate,
+                                sizeof(std::uint32_t));
+      outer_terminal->rw_buffer(1, nested_control->outer_counter,
+                                sizeof(std::uint32_t));
+      outer_terminal->rw_buffer(2, outer_status,
+                                sizeof(std::uint32_t));
+      outer_terminal->rw_buffer(3,
+                                *slot->structured_control_buffer);
+      return controller->prepare_for_replay(patch_existing) ==
+                 RhiResult::success &&
+             outer_gate->prepare_for_replay(patch_existing) ==
+                 RhiResult::success &&
+             outer_initial->prepare_for_replay(patch_existing) ==
+                 RhiResult::success &&
+             inner_initial->prepare_for_replay(patch_existing) ==
+                 RhiResult::success &&
+             inner_terminal->prepare_for_replay(patch_existing) ==
+                 RhiResult::success &&
+             outer_terminal->prepare_for_replay(patch_existing) ==
+                 RhiResult::success;
     }
     auto *controller = slot->structured_controller_resources.get();
     auto *gate = slot->structured_gate_resources.get();
@@ -3031,7 +3614,8 @@ bool GfxRuntime::try_launch_graph(
   };
 
   auto finish_structured_submission = [&]() {
-    if (structured_control == nullptr || structured_result == nullptr) {
+    if ((structured_control == nullptr || structured_result == nullptr) &&
+        (nested_control == nullptr || nested_result == nullptr)) {
       return true;
     }
     if (!slot->completion || !slot->completion->wait()) {
@@ -3041,6 +3625,98 @@ bool GfxRuntime::try_launch_graph(
     if (device_->map(*slot->structured_observation_buffer, &mapped) !=
         RhiResult::success) {
       return false;
+    }
+    if (nested_control != nullptr && nested_result != nullptr) {
+      std::vector<std::uint32_t> words(
+          structured_observation_bytes / sizeof(std::uint32_t));
+      std::memcpy(words.data(), mapped, structured_observation_bytes);
+      device_->unmap(*slot->structured_observation_buffer);
+      if (words.size() < kNestedStructuredHeaderWords) {
+        return false;
+      }
+      nested_result->submitted = true;
+      nested_result->outer_logical_iterations =
+          std::min(words[0], nested_control->outer_max_iterations);
+      nested_result->outer_encoded_iterations =
+          nested_control->outer_max_iterations;
+      nested_result->outer_initial_predicate =
+          static_cast<std::int32_t>(words[2]);
+      nested_result->outer_initial_counter =
+          static_cast<std::int32_t>(words[3]);
+      nested_result->outer_initial_status =
+          static_cast<std::int32_t>(words[4]);
+      nested_result->outer_final_predicate =
+          static_cast<std::int32_t>(words[5]);
+      nested_result->outer_final_counter =
+          static_cast<std::int32_t>(words[6]);
+      nested_result->outer_final_status =
+          static_cast<std::int32_t>(words[7]);
+      const std::uint32_t logical_outer =
+          nested_result->outer_logical_iterations;
+      nested_result->inner_logical_iterations.reserve(logical_outer);
+      nested_result->inner_encoded_iterations.assign(
+          logical_outer, nested_control->inner_max_iterations);
+      nested_result->inner_initial_counters.reserve(logical_outer);
+      nested_result->inner_final_counters.reserve(logical_outer);
+      nested_result->inner_final_predicates.reserve(logical_outer);
+      nested_result->inner_initial_statuses.reserve(logical_outer);
+      nested_result->inner_final_statuses.reserve(logical_outer);
+      std::uint64_t active_payload_dispatches = 0;
+      for (std::uint32_t i = 0; i < logical_outer; ++i) {
+        const std::size_t row =
+            kNestedStructuredHeaderWords +
+            static_cast<std::size_t>(i) *
+                kNestedStructuredTraceWords;
+        if (row + kNestedStructuredTraceWords > words.size()) {
+          return false;
+        }
+        const std::uint32_t inner_logical =
+            std::min(words[row],
+                     nested_control->inner_max_iterations);
+        nested_result->inner_logical_iterations.push_back(
+            inner_logical);
+        nested_result->inner_initial_counters.push_back(
+            static_cast<std::int32_t>(words[row + 1]));
+        nested_result->inner_final_counters.push_back(
+            static_cast<std::int32_t>(words[row + 2]));
+        nested_result->inner_final_predicates.push_back(
+            static_cast<std::int32_t>(words[row + 3]));
+        nested_result->inner_initial_statuses.push_back(
+            static_cast<std::int32_t>(words[row + 4]));
+        nested_result->inner_final_statuses.push_back(
+            static_cast<std::int32_t>(words[row + 5]));
+        active_payload_dispatches +=
+            static_cast<std::uint64_t>(inner_logical) *
+            structured_group_counts.size();
+      }
+      const std::uint64_t encoded_inner_dispatches =
+          static_cast<std::uint64_t>(
+              nested_control->outer_max_iterations) *
+          nested_control->inner_max_iterations *
+          structured_group_counts.size();
+      nested_result->controller_dispatches =
+          static_cast<std::uint32_t>(
+              static_cast<std::uint64_t>(
+                  nested_control->outer_max_iterations) *
+              (nested_control->inner_max_iterations + 1));
+      nested_result->controller_invocations =
+          static_cast<std::uint32_t>(
+              static_cast<std::uint64_t>(
+                  nested_control->outer_max_iterations) +
+              static_cast<std::uint64_t>(logical_outer) *
+                  nested_control->inner_max_iterations);
+      nested_result->indirect_dispatches =
+          static_cast<std::uint32_t>(encoded_inner_dispatches);
+      nested_result->zero_dispatches =
+          static_cast<std::uint32_t>(
+              encoded_inner_dispatches -
+              active_payload_dispatches);
+      nested_result->control_bytes =
+          static_cast<std::uint32_t>(structured_control_bytes);
+      nested_result->observation_bytes =
+          static_cast<std::uint32_t>(
+              structured_observation_bytes);
+      return true;
     }
     std::array<std::uint32_t, kStructuredObservationWords> words{};
     std::memcpy(words.data(), mapped, sizeof(words));
@@ -3143,7 +3819,7 @@ bool GfxRuntime::try_launch_graph(
                  "Failed to allocate Vulkan graph command list");
   auto *cmdlist = recorded_cmdlist.get();
 
-  if (structured_control != nullptr) {
+  if (structured_control != nullptr || nested_control != nullptr) {
     struct StructuredBufferAccess {
       DeviceAllocation allocation{kDeviceNullAllocation};
       bool read{false};
@@ -3363,6 +4039,245 @@ bool GfxRuntime::try_launch_graph(
         count_structured_barrier(/*exit_boundary=*/false);
       }
     };
+
+    if (nested_structured) {
+      auto dispatch_nested_controller =
+          [&](Pipeline *pipeline, ShaderResourceSet *resources,
+              const char *role) {
+            flush_structured_pending(/*exit_boundary=*/false);
+            cmdlist->bind_pipeline(pipeline);
+            RhiResult status =
+                cmdlist->bind_shader_resources(resources);
+            TI_ERROR_IF(
+                status != RhiResult::success,
+                "Vulkan nested structured {} resource binding "
+                "failed: RhiResult({})",
+                role, status);
+            status = cmdlist->dispatch(1);
+            TI_ERROR_IF(
+                status != RhiResult::success,
+                "Vulkan nested structured {} dispatch failed: "
+                "RhiResult({})",
+                role, status);
+            cmdlist->memory_barrier();
+            count_structured_barrier(/*exit_boundary=*/false);
+          };
+      const std::size_t inner_control_bytes =
+          (structured_observation_word_offset +
+           kStructuredObservationWords) *
+          sizeof(std::uint32_t);
+      const std::size_t structured_packet_bytes =
+          structured_observation_word_offset *
+          sizeof(std::uint32_t);
+      const DevicePtr outer_stable_predicate =
+          slot->structured_control_buffer->get_ptr(
+              (structured_observation_word_offset + 1) *
+              sizeof(std::uint32_t));
+      cmdlist->buffer_fill(slot->structured_control_buffer->get_ptr(),
+                           structured_control_bytes, 0);
+      cmdlist->buffer_transition(
+          slot->structured_control_buffer->get_ptr(),
+          structured_control_bytes,
+          {BufferBarrierStage::Transfer,
+           BufferBarrierAccess::TransferWrite,
+           BufferBarrierStage::Compute |
+               BufferBarrierStage::IndirectCommand,
+           BufferBarrierAccess::ShaderRead |
+               BufferBarrierAccess::ShaderWrite |
+               BufferBarrierAccess::IndirectCommandRead});
+
+      for (std::size_t i = 0;
+           i < nested_outer_condition_task_end; ++i) {
+        dispatch_task(structured_tasks[i], nullptr);
+      }
+      dispatch_nested_controller(
+          slot->nested_outer_initial_pipeline.get(),
+          slot->nested_outer_initial_resources.get(), "outer initial");
+
+      for (std::uint32_t outer_iteration = 0;
+           outer_iteration <
+           nested_control->outer_max_iterations;
+           ++outer_iteration) {
+        flush_structured_pending(/*exit_boundary=*/false);
+        cmdlist->buffer_transition(
+            slot->structured_control_buffer->get_ptr(),
+            inner_control_bytes,
+            {BufferBarrierStage::Compute |
+                 BufferBarrierStage::IndirectCommand |
+                 BufferBarrierStage::ConditionalCommand,
+             BufferBarrierAccess::ShaderRead |
+                 BufferBarrierAccess::ShaderWrite |
+                 BufferBarrierAccess::IndirectCommandRead |
+                 BufferBarrierAccess::ConditionalCommandRead,
+             BufferBarrierStage::Transfer,
+             BufferBarrierAccess::TransferWrite});
+        cmdlist->buffer_fill(
+            slot->structured_control_buffer->get_ptr(),
+            inner_control_bytes, 0);
+        cmdlist->buffer_transition(
+            slot->structured_control_buffer->get_ptr(),
+            inner_control_bytes,
+            {BufferBarrierStage::Transfer,
+             BufferBarrierAccess::TransferWrite,
+             BufferBarrierStage::Compute |
+                 BufferBarrierStage::IndirectCommand,
+             BufferBarrierAccess::ShaderRead |
+                 BufferBarrierAccess::ShaderWrite |
+                 BufferBarrierAccess::IndirectCommandRead});
+        dispatch_nested_controller(
+            slot->structured_gate_pipeline.get(),
+            slot->structured_gate_resources.get(), "outer gate");
+        cmdlist->buffer_transition(
+            outer_stable_predicate,
+            sizeof(std::uint32_t),
+            {BufferBarrierStage::Compute,
+             BufferBarrierAccess::ShaderWrite,
+             BufferBarrierStage::ConditionalCommand,
+             BufferBarrierAccess::ConditionalCommandRead});
+        RhiResult status = cmdlist->begin_conditional(
+            outer_stable_predicate);
+        TI_ERROR_IF(
+            status != RhiResult::success,
+            "Vulkan nested outer conditional begin failed: "
+            "RhiResult({})",
+            status);
+
+        for (std::size_t i = nested_outer_condition_task_end;
+             i < nested_inner_condition_task_begin; ++i) {
+          dispatch_task(structured_tasks[i], nullptr);
+        }
+        dispatch_nested_controller(
+            slot->nested_inner_initial_pipeline.get(),
+            slot->nested_inner_initial_resources.get(),
+            "inner initial");
+        for (std::size_t i =
+                 nested_inner_condition_task_begin;
+             i < nested_inner_body_task_begin; ++i) {
+          dispatch_task(structured_tasks[i], nullptr);
+        }
+
+        for (std::uint32_t inner_iteration = 0;
+             inner_iteration <
+             nested_control->inner_max_iterations;
+             ++inner_iteration) {
+          flush_structured_pending(/*exit_boundary=*/false);
+          cmdlist->buffer_transition(
+              nested_control->inner_predicate,
+              sizeof(std::uint32_t),
+              {BufferBarrierStage::Compute,
+               BufferBarrierAccess::ShaderWrite,
+               BufferBarrierStage::Compute,
+               BufferBarrierAccess::ShaderRead});
+          cmdlist->bind_pipeline(
+              slot->structured_controller_pipeline.get());
+          status = cmdlist->bind_shader_resources(
+              slot->structured_controller_resources.get());
+          TI_ERROR_IF(
+              status != RhiResult::success,
+              "Vulkan nested inner controller resource binding "
+              "failed: RhiResult({})",
+              status);
+          status = cmdlist->dispatch(1);
+          TI_ERROR_IF(
+              status != RhiResult::success,
+              "Vulkan nested inner controller dispatch failed: "
+              "RhiResult({})",
+              status);
+          cmdlist->memory_barrier();
+          count_structured_barrier(/*exit_boundary=*/false);
+          cmdlist->buffer_transition(
+              slot->structured_control_buffer->get_ptr(),
+              structured_packet_bytes,
+              {BufferBarrierStage::Compute,
+               BufferBarrierAccess::ShaderWrite,
+               BufferBarrierStage::IndirectCommand,
+               BufferBarrierAccess::IndirectCommandRead});
+          for (std::size_t i =
+                   nested_inner_body_task_begin;
+               i < nested_outer_suffix_task_begin; ++i) {
+            const std::size_t packet =
+                i - nested_inner_body_task_begin;
+            const DevicePtr indirect =
+                slot->structured_control_buffer->get_ptr(
+                    packet * kStructuredPacketWords *
+                    sizeof(std::uint32_t));
+            dispatch_task(structured_tasks[i], &indirect);
+          }
+          cmdlist->buffer_transition(
+              slot->structured_control_buffer->get_ptr(),
+              structured_packet_bytes,
+              {BufferBarrierStage::IndirectCommand,
+               BufferBarrierAccess::IndirectCommandRead,
+               BufferBarrierStage::Compute,
+               BufferBarrierAccess::ShaderRead |
+                   BufferBarrierAccess::ShaderWrite});
+        }
+
+        dispatch_nested_controller(
+            slot->nested_inner_terminal_pipeline.get(),
+            slot->nested_inner_terminal_resources.get(),
+            "inner terminal");
+        for (std::size_t i =
+                 nested_outer_suffix_task_begin;
+             i < structured_tasks.size(); ++i) {
+          dispatch_task(structured_tasks[i], nullptr);
+        }
+        flush_structured_pending(/*exit_boundary=*/false);
+        status = cmdlist->end_conditional();
+        TI_ERROR_IF(
+            status != RhiResult::success,
+            "Vulkan nested outer conditional end failed: "
+            "RhiResult({})",
+            status);
+      }
+
+      dispatch_nested_controller(
+          slot->nested_outer_terminal_pipeline.get(),
+          slot->nested_outer_terminal_resources.get(),
+          "outer terminal");
+      const std::size_t observation_offset =
+          nested_header_word_offset * sizeof(std::uint32_t);
+      cmdlist->buffer_transition(
+          slot->structured_control_buffer->get_ptr(
+              observation_offset),
+          structured_observation_bytes,
+          {BufferBarrierStage::Compute,
+           BufferBarrierAccess::ShaderWrite,
+           BufferBarrierStage::Transfer,
+           BufferBarrierAccess::TransferRead});
+      cmdlist->buffer_copy(
+          slot->structured_observation_buffer->get_ptr(),
+          slot->structured_control_buffer->get_ptr(
+              observation_offset),
+          structured_observation_bytes);
+      cmdlist->buffer_transition(
+          slot->structured_observation_buffer->get_ptr(),
+          structured_observation_bytes,
+          {BufferBarrierStage::Transfer,
+           BufferBarrierAccess::TransferWrite,
+           BufferBarrierStage::Host,
+           BufferBarrierAccess::HostRead});
+      flush_structured_pending(/*exit_boundary=*/true);
+
+      slot->key = std::move(key);
+      slot->structure_key = std::move(structure_key);
+      slot->cmdlist = std::move(recorded_cmdlist);
+      slot->recorded = true;
+      slot->completion =
+          device_->get_compute_stream()->submit(
+              slot->cmdlist.get());
+      if (state.diagnostics_enabled) {
+        ++state.recorded;
+      }
+      if (statistics != nullptr) {
+        statistics->record_graph_capture();
+        if (is_recapture) {
+          statistics->record_graph_recapture();
+        }
+      }
+      state.last_path = GraphReplayLastPath::record;
+      return finish_structured_submission();
+    }
 
     if (structured_strategy == GraphStructuredStrategy::chained) {
       cmdlist->buffer_fill(

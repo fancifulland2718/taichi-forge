@@ -390,6 +390,31 @@ struct CompiledGraphStructuredResult {
   std::uint32_t observation_bytes{0};
 };
 
+struct CompiledGraphNestedStructuredResult {
+  bool submitted{false};
+  std::uint32_t outer_logical_iterations{0};
+  std::uint32_t outer_encoded_iterations{0};
+  std::int32_t outer_initial_predicate{0};
+  std::int32_t outer_final_predicate{0};
+  std::int32_t outer_initial_counter{0};
+  std::int32_t outer_final_counter{0};
+  std::int32_t outer_initial_status{0};
+  std::int32_t outer_final_status{0};
+  std::vector<std::uint32_t> inner_logical_iterations;
+  std::vector<std::uint32_t> inner_encoded_iterations;
+  std::vector<std::int32_t> inner_initial_counters;
+  std::vector<std::int32_t> inner_final_counters;
+  std::vector<std::int32_t> inner_final_predicates;
+  std::vector<std::int32_t> inner_initial_statuses;
+  std::vector<std::int32_t> inner_final_statuses;
+  std::uint32_t indirect_dispatches{0};
+  std::uint32_t controller_dispatches{0};
+  std::uint32_t controller_invocations{0};
+  std::uint32_t zero_dispatches{0};
+  std::uint32_t control_bytes{0};
+  std::uint32_t observation_bytes{0};
+};
+
 // A transient capture error must not permanently disable an otherwise valid
 // graph. Retry periodically with bounded exponential backoff; structural
 // incompatibility remains disabled because repeating it cannot recover.
@@ -567,6 +592,24 @@ struct TI_DLL_EXPORT CompiledGraph {
       std::size_t initial_dispatch_count,
       const std::vector<int> &chunk_iterations,
       const std::vector<std::uint32_t> &strategies) const;
+  CompiledGraphNestedStructuredResult
+  jit_run_bounded_vulkan_nested_cached(
+      const CompileConfig &compile_config,
+      const std::unordered_map<std::string, IValue> &args,
+      CompiledGraphJITCache &cache,
+      Ndarray *outer_predicate,
+      Ndarray *outer_counter,
+      Ndarray *outer_status,
+      Ndarray *inner_predicate,
+      Ndarray *inner_counter,
+      Ndarray *inner_status,
+      std::size_t outer_condition_dispatch_count,
+      std::size_t inner_condition_dispatch_begin,
+      std::size_t inner_body_dispatch_begin,
+      std::size_t outer_suffix_dispatch_begin,
+      int outer_max_iterations,
+      int inner_max_iterations,
+      int inner_chunk_size) const;
   bool jit_run_conditional_cuda_cached(
       const CompileConfig &compile_config,
       const std::unordered_map<std::string, IValue> &args,

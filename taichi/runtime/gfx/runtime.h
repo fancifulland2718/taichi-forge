@@ -321,6 +321,61 @@ class TI_DLL_EXPORT GfxRuntime {
     std::uint32_t observation_bytes{0};
   };
 
+  // Strict depth-2 while -> while replay descriptor. Dispatch boundaries are
+  // cumulative indices in one flattened CompiledGraph:
+  //
+  //   [outer condition)
+  //   [outer prefix)
+  //   [inner initial condition)
+  //   [inner body + condition)
+  //   [outer suffix + next outer condition)
+  //
+  // The Vulkan implementation prepares every static dispatch once, records
+  // one bounded command buffer, gates each outer iteration with conditional
+  // rendering, and masks the inner loop with compact indirect dispatch.
+  struct GraphNestedStructuredControl {
+    DevicePtr outer_predicate{kDeviceNullPtr};
+    DevicePtr outer_counter{kDeviceNullPtr};
+    DevicePtr outer_status{kDeviceNullPtr};
+    DevicePtr inner_predicate{kDeviceNullPtr};
+    DevicePtr inner_counter{kDeviceNullPtr};
+    DevicePtr inner_status{kDeviceNullPtr};
+    std::size_t outer_condition_dispatch_count{0};
+    std::size_t inner_condition_dispatch_begin{0};
+    std::size_t inner_body_dispatch_begin{0};
+    std::size_t outer_suffix_dispatch_begin{0};
+    std::uint32_t outer_max_iterations{0};
+    std::uint32_t inner_max_iterations{0};
+    std::uint32_t inner_chunk_size{0};
+    bool outer_has_status{false};
+    bool inner_has_status{false};
+  };
+
+  struct GraphNestedStructuredResult {
+    bool submitted{false};
+    std::uint32_t outer_logical_iterations{0};
+    std::uint32_t outer_encoded_iterations{0};
+    std::int32_t outer_initial_predicate{0};
+    std::int32_t outer_final_predicate{0};
+    std::int32_t outer_initial_counter{0};
+    std::int32_t outer_final_counter{0};
+    std::int32_t outer_initial_status{0};
+    std::int32_t outer_final_status{0};
+    std::vector<std::uint32_t> inner_logical_iterations;
+    std::vector<std::uint32_t> inner_encoded_iterations;
+    std::vector<std::int32_t> inner_initial_counters;
+    std::vector<std::int32_t> inner_final_counters;
+    std::vector<std::int32_t> inner_final_predicates;
+    std::vector<std::int32_t> inner_initial_statuses;
+    std::vector<std::int32_t> inner_final_statuses;
+    std::uint32_t indirect_dispatches{0};
+    std::uint32_t controller_dispatches{0};
+    std::uint32_t controller_invocations{0};
+    std::uint32_t zero_dispatches{0};
+    std::uint32_t control_bytes{0};
+    std::uint32_t observation_bytes{0};
+  };
+
   struct GraphReplayExecutable {
     using AllocationMap =
         std::unordered_map<std::vector<int>,
@@ -350,11 +405,21 @@ class TI_DLL_EXPORT GfxRuntime {
       std::unique_ptr<ShaderResourceSet> structured_controller_resources;
       std::unique_ptr<ShaderResourceSet> structured_gate_resources;
       std::unique_ptr<ShaderResourceSet> structured_terminal_resources;
+      std::unique_ptr<ShaderResourceSet> nested_outer_initial_resources;
+      std::unique_ptr<ShaderResourceSet> nested_inner_initial_resources;
+      std::unique_ptr<ShaderResourceSet> nested_inner_terminal_resources;
+      std::unique_ptr<ShaderResourceSet> nested_outer_terminal_resources;
       std::unique_ptr<Pipeline> structured_controller_pipeline;
       std::unique_ptr<Pipeline> structured_gate_pipeline;
       std::unique_ptr<Pipeline> structured_terminal_pipeline;
+      std::unique_ptr<Pipeline> nested_outer_initial_pipeline;
+      std::unique_ptr<Pipeline> nested_inner_initial_pipeline;
+      std::unique_ptr<Pipeline> nested_inner_terminal_pipeline;
+      std::unique_ptr<Pipeline> nested_outer_terminal_pipeline;
       std::vector<uint32_t> structured_group_counts;
       bool structured_has_status{false};
+      bool structured_nested{false};
+      bool structured_outer_has_status{false};
       GraphStructuredStrategy structured_strategy{
           GraphStructuredStrategy::automatic};
       std::unique_ptr<CommandList> cmdlist;
@@ -416,7 +481,10 @@ class TI_DLL_EXPORT GfxRuntime {
                         RuntimeStatistics *statistics,
                         const GraphStructuredControl *structured_control =
                             nullptr,
-                        GraphStructuredResult *structured_result = nullptr);
+                        GraphStructuredResult *structured_result = nullptr,
+                        const GraphNestedStructuredControl *nested_control =
+                            nullptr,
+                        GraphNestedStructuredResult *nested_result = nullptr);
   std::unique_ptr<GraphReplayRegistration> register_graph_replay(
       uint64_t replay_token);
   bool owns_graph_replay_registration(

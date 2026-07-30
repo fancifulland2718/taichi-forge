@@ -3403,6 +3403,23 @@ void export_lang(py::module &m) {
            py::return_value_policy::reference)
       .def("seq", &GraphBuilder::seq, py::return_value_policy::reference);
 
+  struct VulkanNestedGraphRequest {
+    Ndarray *outer_predicate{nullptr};
+    Ndarray *outer_counter{nullptr};
+    Ndarray *outer_status{nullptr};
+    Ndarray *inner_predicate{nullptr};
+    Ndarray *inner_counter{nullptr};
+    Ndarray *inner_status{nullptr};
+    std::size_t outer_condition_dispatch_count{0};
+    std::size_t inner_condition_dispatch_begin{0};
+    std::size_t inner_body_dispatch_begin{0};
+    std::size_t outer_suffix_dispatch_begin{0};
+    int outer_max_iterations{0};
+    int inner_max_iterations{0};
+    int inner_chunk_size{0};
+    aot::CompiledGraphNestedStructuredResult *result{nullptr};
+  };
+
   auto jit_run_graph = [](aot::CompiledGraph *self,
                           const CompileConfig &compile_config,
                           const py::dict &pyargs,
@@ -3423,10 +3440,12 @@ void export_lang(py::module &m) {
                           aot::CompiledGraphStructuredResult
                               *vulkan_result = nullptr,
                           bool vulkan_wait_for_result = true,
-                          const std::vector<int>
-                              *vulkan_chunk_iterations = nullptr,
-                          const std::vector<std::uint32_t>
-                              *vulkan_chunk_strategies = nullptr) -> bool {
+                           const std::vector<int>
+                               *vulkan_chunk_iterations = nullptr,
+                           const std::vector<std::uint32_t>
+                               *vulkan_chunk_strategies = nullptr,
+                           const VulkanNestedGraphRequest
+                               *vulkan_nested = nullptr) -> bool {
         std::unordered_map<std::string, aot::IValue> args;
         auto insert_scalar_arg = [&args](std::string arg_name,
                                          DataType expected_dtype,
@@ -3570,6 +3589,27 @@ void export_lang(py::module &m) {
         // serialized by Python. The cache owns the C++ transaction boundary;
         // Python objects passed in pyargs remain alive for this call.
         py::gil_scoped_release release;
+        if (vulkan_nested != nullptr) {
+          TI_ASSERT(cache != nullptr);
+          TI_ASSERT(vulkan_nested->result != nullptr);
+          *vulkan_nested->result =
+              self->jit_run_bounded_vulkan_nested_cached(
+                  compile_config, args, *cache,
+                  vulkan_nested->outer_predicate,
+                  vulkan_nested->outer_counter,
+                  vulkan_nested->outer_status,
+                  vulkan_nested->inner_predicate,
+                  vulkan_nested->inner_counter,
+                  vulkan_nested->inner_status,
+                  vulkan_nested->outer_condition_dispatch_count,
+                  vulkan_nested->inner_condition_dispatch_begin,
+                  vulkan_nested->inner_body_dispatch_begin,
+                  vulkan_nested->outer_suffix_dispatch_begin,
+                  vulkan_nested->outer_max_iterations,
+                  vulkan_nested->inner_max_iterations,
+                  vulkan_nested->inner_chunk_size);
+          return vulkan_nested->result->submitted;
+        }
         if (vulkan_chunk_iterations != nullptr) {
           TI_ASSERT(cache != nullptr);
           TI_ASSERT(vulkan_chunk_strategies != nullptr);
@@ -3987,6 +4027,104 @@ void export_lang(py::module &m) {
            py::arg("initial_dispatch_count"),
            py::arg("chunk_iterations"), py::arg("status"),
            py::arg("strategies"))
+      .def(
+          "jit_run_bounded_vulkan_nested_cached",
+          [jit_run_graph](
+              aot::CompiledGraph *self,
+              const CompileConfig &compile_config,
+              const py::dict &pyargs,
+              aot::CompiledGraphJITCache &cache,
+              Ndarray &outer_predicate, Ndarray &outer_counter,
+              Ndarray &inner_predicate, Ndarray &inner_counter,
+              std::size_t outer_condition_dispatch_count,
+              std::size_t inner_condition_dispatch_begin,
+              std::size_t inner_body_dispatch_begin,
+              std::size_t outer_suffix_dispatch_begin,
+              int outer_max_iterations, int inner_max_iterations,
+              int inner_chunk_size, Ndarray *outer_status,
+              Ndarray *inner_status) {
+            aot::CompiledGraphNestedStructuredResult result;
+            VulkanNestedGraphRequest request;
+            request.outer_predicate = &outer_predicate;
+            request.outer_counter = &outer_counter;
+            request.outer_status = outer_status;
+            request.inner_predicate = &inner_predicate;
+            request.inner_counter = &inner_counter;
+            request.inner_status = inner_status;
+            request.outer_condition_dispatch_count =
+                outer_condition_dispatch_count;
+            request.inner_condition_dispatch_begin =
+                inner_condition_dispatch_begin;
+            request.inner_body_dispatch_begin =
+                inner_body_dispatch_begin;
+            request.outer_suffix_dispatch_begin =
+                outer_suffix_dispatch_begin;
+            request.outer_max_iterations = outer_max_iterations;
+            request.inner_max_iterations = inner_max_iterations;
+            request.inner_chunk_size = inner_chunk_size;
+            request.result = &result;
+            jit_run_graph(
+                self, compile_config, pyargs, &cache, nullptr, 0,
+                true, nullptr, nullptr, -1, -1, nullptr, nullptr,
+                nullptr, 0, true, 0, nullptr, true, nullptr,
+                nullptr, &request);
+            py::dict encoded;
+            encoded["submitted"] = result.submitted;
+            encoded["outer_logical_iterations"] =
+                result.outer_logical_iterations;
+            encoded["outer_encoded_iterations"] =
+                result.outer_encoded_iterations;
+            encoded["outer_initial_predicate"] =
+                result.outer_initial_predicate;
+            encoded["outer_final_predicate"] =
+                result.outer_final_predicate;
+            encoded["outer_initial_counter"] =
+                result.outer_initial_counter;
+            encoded["outer_final_counter"] =
+                result.outer_final_counter;
+            encoded["outer_initial_status"] =
+                result.outer_initial_status;
+            encoded["outer_final_status"] =
+                result.outer_final_status;
+            encoded["inner_logical_iterations"] =
+                result.inner_logical_iterations;
+            encoded["inner_encoded_iterations"] =
+                result.inner_encoded_iterations;
+            encoded["inner_initial_counters"] =
+                result.inner_initial_counters;
+            encoded["inner_final_counters"] =
+                result.inner_final_counters;
+            encoded["inner_final_predicates"] =
+                result.inner_final_predicates;
+            encoded["inner_initial_statuses"] =
+                result.inner_initial_statuses;
+            encoded["inner_final_statuses"] =
+                result.inner_final_statuses;
+            encoded["indirect_dispatches"] =
+                result.indirect_dispatches;
+            encoded["controller_dispatches"] =
+                result.controller_dispatches;
+            encoded["controller_invocations"] =
+                result.controller_invocations;
+            encoded["zero_dispatches"] = result.zero_dispatches;
+            encoded["control_bytes"] = result.control_bytes;
+            encoded["observation_bytes"] =
+                result.observation_bytes;
+            return encoded;
+          },
+          py::arg("compile_config"), py::arg("args"),
+          py::arg("cache"), py::arg("outer_predicate"),
+          py::arg("outer_counter"), py::arg("inner_predicate"),
+          py::arg("inner_counter"),
+          py::arg("outer_condition_dispatch_count"),
+          py::arg("inner_condition_dispatch_begin"),
+          py::arg("inner_body_dispatch_begin"),
+          py::arg("outer_suffix_dispatch_begin"),
+          py::arg("outer_max_iterations"),
+          py::arg("inner_max_iterations"),
+          py::arg("inner_chunk_size"),
+          py::arg("outer_status") = nullptr,
+          py::arg("inner_status") = nullptr)
       .def("jit_run_conditional_cuda_cached",
            [jit_run_graph](aot::CompiledGraph *self,
                            const CompileConfig &compile_config,
