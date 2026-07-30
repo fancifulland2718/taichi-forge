@@ -1303,6 +1303,12 @@ RhiResult VulkanCommandList::dispatch(uint32_t x,
 
 RhiResult VulkanCommandList::dispatch_indirect(DevicePtr indirect) noexcept {
   constexpr size_t kDispatchIndirectCommandSize = 3 * sizeof(uint32_t);
+  if (indirect.device != ti_device_ || indirect.alloc_id == 0) {
+    return RhiResult::invalid_usage;
+  }
+  if (!int(ti_device_->allocation_usage(indirect) & AllocUsage::Indirect)) {
+    return RhiResult::invalid_usage;
+  }
   if ((indirect.offset & (sizeof(uint32_t) - 1)) != 0) {
     return RhiResult::invalid_usage;
   }
@@ -2006,6 +2012,7 @@ RhiResult VulkanDevice::allocate_memory(const AllocParams &params,
   AllocationInternal &alloc = allocations_.acquire();
   alloc.generation =
       allocation_generation_counter_.fetch_add(1, std::memory_order_relaxed);
+  alloc.usage = params.usage;
 
   RHI_ASSERT(params.size > 0);
 
@@ -2978,12 +2985,14 @@ vkapi::IVkSampler VulkanDevice::get_default_sampler() {
 DeviceAllocation VulkanDevice::import_vkbuffer(vkapi::IVkBuffer buffer,
                                                size_t size,
                                                VkDeviceMemory memory,
-                                               VkDeviceSize offset) {
+                                               VkDeviceSize offset,
+                                               AllocUsage usage) {
   AllocationInternal &alloc_int = allocations_.acquire();
   alloc_int.generation =
       allocation_generation_counter_.fetch_add(1, std::memory_order_relaxed);
 
   alloc_int.external = true;
+  alloc_int.usage = usage;
   alloc_int.buffer = buffer;
   alloc_int.mapped = nullptr;
   if (get_caps().get(DeviceCapability::spirv_has_physical_storage_buffer)) {

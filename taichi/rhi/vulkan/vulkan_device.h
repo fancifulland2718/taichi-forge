@@ -874,6 +874,10 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
     return get_alloc_internal(handle).generation;
   }
 
+  AllocUsage allocation_usage(DeviceAllocation handle) const {
+    return get_alloc_internal(handle).usage;
+  }
+
   void set_interop_cleanup_callbacks(
       InteropAllocationReleaseCallback allocation_release,
       InteropDeviceReleaseCallback device_release) {
@@ -892,7 +896,8 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   DeviceAllocation import_vkbuffer(vkapi::IVkBuffer buffer,
                                    size_t size,
                                    VkDeviceMemory memory,
-                                   VkDeviceSize offset);
+                                   VkDeviceSize offset,
+                                   AllocUsage usage = AllocUsage::Storage);
 
   DeviceAllocation import_vk_image(vkapi::IVkImage image,
                                    vkapi::IVkImageView view,
@@ -1072,6 +1077,7 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
     VkDeviceSize mapped_size{VK_WHOLE_SIZE};
     bool host_read{false};
     bool host_write{false};
+    AllocUsage usage{AllocUsage::None};
     // Is the allocation external (imported) or not (VMA)
     bool external{false};
     uint64_t generation{0};

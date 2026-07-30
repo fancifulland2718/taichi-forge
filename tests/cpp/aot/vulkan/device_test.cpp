@@ -278,6 +278,60 @@ TEST(VulkanDeviceTest, BoundsInFlightCommandBuffers) {
   EXPECT_EQ(stream->debug_in_flight_command_buffer_count(), 0u);
 }
 
+TEST(VulkanDeviceTest, IndirectDispatchRejectsInvalidAllocations) {
+  if (!vulkan::is_vulkan_api_available()) {
+    GTEST_SKIP();
+  }
+
+  vulkan::VulkanDeviceCreator::Params params;
+  params.api_version = std::nullopt;
+  auto creator = std::make_unique<vulkan::VulkanDeviceCreator>(params);
+  auto *device = static_cast<vulkan::VulkanDevice *>(creator->device());
+  auto *stream = device->get_compute_stream();
+  auto [cmdlist, command_result] = stream->new_command_list_unique();
+  ASSERT_EQ(command_result, RhiResult::success);
+  ASSERT_NE(cmdlist, nullptr);
+
+  Device::AllocParams storage_params;
+  storage_params.size = 3 * sizeof(uint32_t);
+  storage_params.usage = AllocUsage::Storage;
+  auto [storage, storage_result] =
+      device->allocate_memory_unique(storage_params);
+  ASSERT_EQ(storage_result, RhiResult::success);
+  ASSERT_NE(storage, nullptr);
+
+  EXPECT_EQ(cmdlist->dispatch_indirect(storage->get_ptr()),
+            RhiResult::invalid_usage);
+  EXPECT_EQ(cmdlist->dispatch_indirect(kDeviceNullPtr),
+            RhiResult::invalid_usage);
+
+  Device::AllocParams indirect_params;
+  indirect_params.size = 4 * sizeof(uint32_t);
+  indirect_params.usage = AllocUsage::Storage | AllocUsage::Indirect;
+  auto [indirect, indirect_result] =
+      device->allocate_memory_unique(indirect_params);
+  ASSERT_EQ(indirect_result, RhiResult::success);
+  ASSERT_NE(indirect, nullptr);
+
+  EXPECT_EQ(cmdlist->dispatch_indirect(indirect->get_ptr(2)),
+            RhiResult::invalid_usage);
+  EXPECT_EQ(cmdlist->dispatch_indirect(indirect->get_ptr(8)),
+            RhiResult::invalid_usage);
+
+  vulkan::VulkanDeviceCreator::Params other_params;
+  other_params.api_version = std::nullopt;
+  auto other_creator =
+      std::make_unique<vulkan::VulkanDeviceCreator>(other_params);
+  auto *other_device =
+      static_cast<vulkan::VulkanDevice *>(other_creator->device());
+  auto [foreign, foreign_result] =
+      other_device->allocate_memory_unique(indirect_params);
+  ASSERT_EQ(foreign_result, RhiResult::success);
+  ASSERT_NE(foreign, nullptr);
+  EXPECT_EQ(cmdlist->dispatch_indirect(foreign->get_ptr()),
+            RhiResult::invalid_usage);
+}
+
 TEST(VulkanDeviceTest, ConcurrentDescriptorAndRenderPassCreation) {
   if (!vulkan::is_vulkan_api_available()) {
     return;
