@@ -3103,11 +3103,21 @@ bool GfxRuntime::try_launch_graph(
   auto *cmdlist = recorded_cmdlist.get();
 
   if (structured_control != nullptr) {
+    struct StructuredBufferAccess {
+      DeviceAllocation allocation{kDeviceNullAllocation};
+      bool read{false};
+      bool write{false};
+    };
+    using StructuredBufferAccessMap =
+        std::unordered_map<DeviceAllocationId, StructuredBufferAccess>;
     struct StructuredTask {
       PreparedDispatch *dispatch{nullptr};
       int task_index{0};
       ShaderResourceSet *resources{nullptr};
       std::uint32_t group_x{0};
+      StructuredBufferAccessMap accesses;
+      bool global_read{false};
+      bool global_write{false};
     };
     std::vector<StructuredTask> structured_tasks;
     structured_tasks.reserve(total_tasks);
@@ -3128,17 +3138,169 @@ bool GfxRuntime::try_launch_graph(
             (attribs.advisory_total_num_threads +
              attribs.advisory_num_threads_per_group - 1) /
             attribs.advisory_num_threads_per_group;
-        structured_tasks.push_back(
-            {&pd, task_index, resources,
-             static_cast<std::uint32_t>(group_x)});
+        StructuredTask task;
+        task.dispatch = &pd;
+        task.task_index = task_index;
+        task.resources = resources;
+        task.group_x = static_cast<std::uint32_t>(group_x);
+        for (const auto &bind : attribs.buffer_binds) {
+          const bool may_read =
+              (bind.access &
+               TaskAttributes::BufferBind::kAccessRead) != 0;
+          const bool may_write = bind.may_write();
+          if (!may_read && !may_write) {
+            continue;
+          }
+          if (bind.buffer.type == BufferType::Args ||
+              bind.buffer.type == BufferType::ArgPack) {
+            continue;
+          }
+          if (state.diagnostics_enabled) {
+            state.effect_reads += may_read ? 1 : 0;
+            state.effect_writes += may_write ? 1 : 0;
+          }
+          if (bind.buffer.type == BufferType::Rets ||
+              bind.buffer.type == BufferType::NodeAllocatorPool) {
+            task.global_read = task.global_read || may_read;
+            task.global_write = task.global_write || may_write;
+            continue;
+          }
+          DeviceAllocation allocation = kDeviceNullAllocation;
+          if (bind.buffer.type == BufferType::ExtArr) {
+            allocation = pd.any_arrays->at(bind.buffer.root_id);
+          } else {
+            DeviceAllocation *resolved =
+                pd.kernel->get_buffer_bind(bind.buffer);
+            if (resolved != nullptr) {
+              allocation = *resolved;
+            }
+          }
+          if (allocation == kDeviceNullAllocation) {
+            task.global_read = task.global_read || may_read;
+            task.global_write = task.global_write || may_write;
+            continue;
+          }
+          auto [it, inserted] = task.accesses.try_emplace(
+              allocation.alloc_id,
+              StructuredBufferAccess{allocation, may_read, may_write});
+          if (!inserted) {
+            it->second.read = it->second.read || may_read;
+            it->second.write = it->second.write || may_write;
+          }
+        }
+        structured_tasks.push_back(std::move(task));
       }
     }
     TI_ERROR_IF(
         !update_structured_bindings(/*patch_existing=*/false),
         "Vulkan structured control descriptor preparation failed");
 
+    const bool structured_hazard_planner_enabled =
+        get_environ_config("TI_VULKAN_STRUCTURED_HAZARD_PLANNER", 1) != 0;
+    StructuredBufferAccessMap pending_accesses;
+    bool pending_global_read = false;
+    bool pending_global_write = false;
+    auto count_structured_barrier = [&](bool exit_boundary) {
+      if (!state.diagnostics_enabled) {
+        return;
+      }
+      if (exit_boundary) {
+        ++state.exit_barriers;
+      } else {
+        ++state.dependency_barriers;
+      }
+    };
+    auto flush_structured_pending = [&](bool exit_boundary) {
+      if (pending_global_read || pending_global_write ||
+          !pending_accesses.empty()) {
+        cmdlist->memory_barrier();
+        count_structured_barrier(exit_boundary);
+      }
+      pending_global_read = false;
+      pending_global_write = false;
+      pending_accesses.clear();
+    };
+    auto prepare_structured_task = [&](const StructuredTask &task) {
+      if (!structured_hazard_planner_enabled) {
+        return;
+      }
+      bool hazard = false;
+      const bool current_has_access =
+          task.global_read || task.global_write || !task.accesses.empty();
+      if ((pending_global_read || pending_global_write) &&
+          current_has_access) {
+        const bool only_reads =
+            pending_global_read && !pending_global_write &&
+            !task.global_write &&
+            std::all_of(task.accesses.begin(), task.accesses.end(),
+                        [](const auto &item) {
+                          return item.second.read &&
+                                 !item.second.write;
+                        });
+        hazard = !only_reads;
+        if (only_reads && state.diagnostics_enabled) {
+          ++state.rar_elisions;
+        }
+      }
+      if ((task.global_read || task.global_write) &&
+          !pending_accesses.empty()) {
+        const bool pending_only_reads =
+            std::all_of(pending_accesses.begin(),
+                        pending_accesses.end(), [](const auto &item) {
+                          return item.second.read &&
+                                 !item.second.write;
+                        });
+        const bool only_reads =
+            task.global_read && !task.global_write &&
+            pending_only_reads;
+        hazard = hazard || !only_reads;
+        if (only_reads && state.diagnostics_enabled) {
+          ++state.rar_elisions;
+        }
+      }
+      for (const auto &[id, current] : task.accesses) {
+        auto previous = pending_accesses.find(id);
+        if (previous == pending_accesses.end()) {
+          continue;
+        }
+        const bool current_hazard =
+            (previous->second.write &&
+             (current.read || current.write)) ||
+            (previous->second.read && current.write);
+        hazard = hazard || current_hazard;
+        if (!current_hazard && state.diagnostics_enabled &&
+            previous->second.read && current.read) {
+          ++state.rar_elisions;
+        }
+      }
+      if (hazard) {
+        flush_structured_pending(/*exit_boundary=*/false);
+      } else if (state.diagnostics_enabled) {
+        for (const auto &[id, access] : pending_accesses) {
+          (void)access;
+          if (task.accesses.find(id) == task.accesses.end()) {
+            ++state.barrier_deferrals;
+          }
+        }
+      }
+    };
+    auto merge_structured_task = [&](const StructuredTask &task) {
+      if (!structured_hazard_planner_enabled) {
+        return;
+      }
+      for (const auto &[id, access] : task.accesses) {
+        auto [it, inserted] = pending_accesses.try_emplace(id, access);
+        if (!inserted) {
+          it->second.read = it->second.read || access.read;
+          it->second.write = it->second.write || access.write;
+        }
+      }
+      pending_global_read = pending_global_read || task.global_read;
+      pending_global_write = pending_global_write || task.global_write;
+    };
     auto dispatch_task = [&](const StructuredTask &task,
                              const DevicePtr *indirect) {
+      prepare_structured_task(task);
       cmdlist->bind_pipeline(
           task.dispatch->kernel->get_pipeline(task.task_index));
       RhiResult status =
@@ -3153,7 +3315,12 @@ bool GfxRuntime::try_launch_graph(
       TI_ERROR_IF(status != RhiResult::success,
                   "Vulkan structured Graph dispatch error: RhiResult({})",
                   status);
-      cmdlist->memory_barrier();
+      if (structured_hazard_planner_enabled) {
+        merge_structured_task(task);
+      } else {
+        cmdlist->memory_barrier();
+        count_structured_barrier(/*exit_boundary=*/false);
+      }
     };
 
     if (structured_strategy == GraphStructuredStrategy::chained) {
@@ -3200,6 +3367,7 @@ bool GfxRuntime::try_launch_graph(
         dispatch_task(structured_tasks[i], nullptr);
       }
     }
+    flush_structured_pending(/*exit_boundary=*/false);
 
     bool coarse_conditional_open = false;
     if (structured_strategy ==
@@ -3243,6 +3411,7 @@ bool GfxRuntime::try_launch_graph(
 
     for (std::uint32_t iteration = 0;
          iteration < structured_control->max_iterations; ++iteration) {
+      flush_structured_pending(/*exit_boundary=*/false);
       cmdlist->buffer_transition(
           structured_control->predicate, sizeof(std::uint32_t),
           {BufferBarrierStage::Compute,
@@ -3347,7 +3516,7 @@ bool GfxRuntime::try_launch_graph(
     }
 
     if (structured_terminal_observation) {
-      cmdlist->memory_barrier();
+      flush_structured_pending(/*exit_boundary=*/false);
       cmdlist->bind_pipeline(slot->structured_terminal_pipeline.get());
       RhiResult terminal_status = cmdlist->bind_shader_resources(
           slot->structured_terminal_resources.get());
@@ -3382,6 +3551,7 @@ bool GfxRuntime::try_launch_graph(
            BufferBarrierStage::Host,
            BufferBarrierAccess::HostRead});
     }
+    flush_structured_pending(/*exit_boundary=*/true);
 
     slot->key = std::move(key);
     slot->structure_key = std::move(structure_key);

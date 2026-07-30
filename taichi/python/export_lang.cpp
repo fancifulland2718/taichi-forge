@@ -31,6 +31,7 @@
 #include "taichi/python/export.h"
 #include "taichi/math/svd.h"
 #include "taichi/system/timeline.h"
+#include "taichi/util/environ_config.h"
 #include "taichi/codegen/spirv/spv_stats.h"
 #include "taichi/python/snode_registry.h"
 #include "taichi/program/sparse_matrix.h"
@@ -3421,7 +3422,11 @@ void export_lang(py::module &m) {
                           std::uint32_t vulkan_strategy = 0,
                           aot::CompiledGraphStructuredResult
                               *vulkan_result = nullptr,
-                          bool vulkan_wait_for_result = true) -> bool {
+                          bool vulkan_wait_for_result = true,
+                          const std::vector<int>
+                              *vulkan_chunk_iterations = nullptr,
+                          const std::vector<std::uint32_t>
+                              *vulkan_chunk_strategies = nullptr) -> bool {
         std::unordered_map<std::string, aot::IValue> args;
         auto insert_scalar_arg = [&args](std::string arg_name,
                                          DataType expected_dtype,
@@ -3565,6 +3570,15 @@ void export_lang(py::module &m) {
         // serialized by Python. The cache owns the C++ transaction boundary;
         // Python objects passed in pyargs remain alive for this call.
         py::gil_scoped_release release;
+        if (vulkan_chunk_iterations != nullptr) {
+          TI_ASSERT(cache != nullptr);
+          TI_ASSERT(vulkan_chunk_strategies != nullptr);
+          return self->jit_submit_bounded_vulkan_compound_cached(
+              compile_config, args, *cache, vulkan_predicate,
+              vulkan_counter, vulkan_status,
+              vulkan_initial_dispatch_count,
+              *vulkan_chunk_iterations, *vulkan_chunk_strategies);
+        }
         if (bounded_predicate != nullptr) {
           TI_ASSERT(cache != nullptr);
           return self->jit_run_bounded_cuda_cached(
@@ -3937,23 +3951,36 @@ void export_lang(py::module &m) {
                      chunk_iterations.size() != strategies.size(),
                  "Vulkan structured compound submission requires one "
                  "strategy for every non-empty chunk");
-             bool execute_initial_dispatches = true;
-             for (std::size_t chunk = 0;
-                  chunk < chunk_iterations.size(); ++chunk) {
-               TI_ERROR_IF(
-                   chunk_iterations[chunk] <= 0,
-                   "Vulkan structured compound chunk sizes must be positive");
-               if (!jit_run_graph(
-                       self, compile_config, pyargs, &cache, nullptr,
-                       chunk_iterations[chunk], true, nullptr, nullptr, -1,
-                       -1, &predicate, &counter, status,
-                       initial_dispatch_count, execute_initial_dispatches,
-                       strategies[chunk], nullptr, false)) {
-                 return false;
+             if (get_environ_config(
+                     "TI_VULKAN_COMPOUND_SINGLE_PREPARATION", 1) == 0) {
+               bool execute_initial_dispatches = true;
+               for (std::size_t chunk = 0;
+                    chunk < chunk_iterations.size(); ++chunk) {
+                 TI_ERROR_IF(
+                     chunk_iterations[chunk] <= 0,
+                     "Vulkan structured compound chunk sizes must be "
+                     "positive");
+                 if (!jit_run_graph(
+                         self, compile_config, pyargs, &cache, nullptr,
+                         chunk_iterations[chunk], true, nullptr, nullptr,
+                         -1, -1, &predicate, &counter, status,
+                         initial_dispatch_count,
+                         execute_initial_dispatches, strategies[chunk],
+                         nullptr, false)) {
+                   return false;
+                 }
+                 execute_initial_dispatches = false;
                }
-               execute_initial_dispatches = false;
+               return true;
              }
-             return true;
+             return jit_run_graph(
+                 self, compile_config, pyargs, &cache, nullptr, 0, true,
+                 nullptr, nullptr, -1, -1, &predicate, &counter, status,
+                 initial_dispatch_count,
+                 /*vulkan_execute_initial_dispatches=*/true,
+                 /*vulkan_strategy=*/0, nullptr,
+                 /*vulkan_wait_for_result=*/false, &chunk_iterations,
+                 &strategies);
            },
            py::arg("compile_config"), py::arg("args"), py::arg("cache"),
            py::arg("predicate"), py::arg("counter"),

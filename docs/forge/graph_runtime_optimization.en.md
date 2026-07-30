@@ -264,6 +264,24 @@ list that is flushed before the batch; steady-state execution therefore has
 one transaction batch plus one completion-fence submission. All command
 buffers in a batch conservatively share the batch fence for retirement.
 
+Compound replay prepares the Graph argument bindings, kernel handles, SNode
+dependencies, resource retention, and submission guards once per region, then
+launches all of that region's chunks from the prepared state. It does not
+re-enter the complete JIT-launch preparation path for every chunk. For
+qualification and rollback, setting
+`TI_VULKAN_COMPOUND_SINGLE_PREPARATION=0` restores the legacy per-chunk
+preparation path without changing the Graph.
+
+Within each recorded structured command buffer, Forge derives allocation-level
+read/write effects from task buffer bindings. It emits memory barriers for
+read-after-write, write-after-read, and write-after-write dependencies, and
+flushes pending effects at controller and command-buffer boundaries. Independent
+tasks and read-after-read pairs no longer receive an eager barrier. Unknown
+global effects remain conservative. The reported capability fields are
+`compound_single_preparation` and `structured_barrier_policy`; setting
+`TI_VULKAN_STRUCTURED_HAZARD_PLANNER=0` restores eager per-task barriers for
+qualification.
+
 The GFX host API mutex is held for the complete transaction, preventing an
 unrelated producer from being absorbed into the batch. The fixed eight-slot
 replay ring provides bounded inter-invocation backpressure. A
@@ -532,6 +550,18 @@ boundary. Across thirty invocations, native queue-submit calls decreased from
 588 to 62 (89.5%). Compound execution still pre-encodes bounded tail command
 buffers, so these results demonstrate lower host-control and queue-submit
 overhead rather than CUDA-style exact dynamic termination.
+
+The same local Vulkan device was also tested with an eight-chunk,
+four-independent-action controller microbenchmark that stopped at logical
+iteration 257 of 512 encoded slots. Across 25 warmed samples, single
+preparation plus effect-planned barriers reduced median host submit time from
+2,168.1 us to 1,359.7 us (37.3%) and submit-plus-wait time from 8,421.1 us to
+5,057.8 us (39.9%). A second independent 25-sample trial measured reductions
+of 32.2% and 37.4%, respectively. Recorded dependency barriers decreased from
+2,561 to 1,017 (60.3%). Known persistent Graph memory stayed at 88 bytes in
+both modes; driver-internal Vulkan memory remained unavailable. Use
+`--independent-actions 3`, `--compound-preparation`, and `--barrier-policy` on
+the benchmark to reproduce the A/B boundary.
 
 Current Dense Field multi-block throughput, compile scaling, cache, RSS/VRAM,
 and the Graph/AD guard microbenchmark are reported in

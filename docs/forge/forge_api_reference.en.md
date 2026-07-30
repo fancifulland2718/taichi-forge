@@ -908,6 +908,16 @@ materialization may flush a preceding command list before the compound batch;
 steady execution uses one transaction batch plus the completion-fence
 submission. Vulkan `if` and `switch` remain portable-only.
 
+Qualified Vulkan compound replay prepares bindings, dependencies, retained
+resources, and submission guards once per region. Its structured command
+buffers use allocation-level effects to place RAW/WAR/WAW barriers and retain
+conservative controller/global boundaries. The capability keys
+`compound_single_preparation` and `structured_barrier_policy` describe these
+active policies. The environment switches
+`TI_VULKAN_COMPOUND_SINGLE_PREPARATION=0` and
+`TI_VULKAN_STRUCTURED_HAZARD_PLANNER=0` are qualification fallbacks to the
+legacy per-chunk preparation and eager per-task barrier paths.
+
 `portable` forces the portable route; `native_required` fails closed when the
 selected backend cannot honor its native contract. Portable structured-control
 Graphs use `run()` and reject `submit()`. Qualified CUDA

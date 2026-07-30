@@ -217,6 +217,20 @@ runtime 把 transaction 内记录的 command buffer 合并到一次 Vulkan queue
 completion-fence submission。一个 batch 内的全部 command buffer 保守地共享 batch fence
 并据此退役。
 
+compound replay 现在按 region 只准备一次 Graph 参数绑定、kernel handle、SNode 依赖、
+资源保留与 submission guard，再从已准备状态依次启动该 region 的全部 chunk，不再为
+每个 chunk 重入完整 JIT launch 准备路径。资格验证或回退时可设置
+`TI_VULKAN_COMPOUND_SINGLE_PREPARATION=0`，在不改变 Graph 的情况下恢复旧的逐 chunk
+准备路径。
+
+在每个已录制的 structured command buffer 内，Forge 会从 task buffer binding 推导
+allocation 级 read/write effect，仅为 read-after-write、write-after-read 与
+write-after-write 依赖插入 memory barrier，并在 controller 与 command-buffer 边界
+flush pending effect。互相独立的 task 与 read-after-read 不再获得 eager barrier；未知
+global effect 仍按保守方式处理。能力字段为 `compound_single_preparation` 与
+`structured_barrier_policy`；资格验证时可设置
+`TI_VULKAN_STRUCTURED_HAZARD_PLANNER=0` 恢复逐 task eager barrier。
+
 完整 transaction 期间 GFX host API mutex 持续持有，避免无关 producer 被吸收到同一
 batch。固定八槽 replay ring 提供有界 invocation 间 backpressure。`SubmissionPacer` 可以
 调节完整 invocation 和 lane，但两者都不能抢占 GPU 工作或提供优先级。大型 compound
@@ -421,6 +435,16 @@ timestamp。
 提前 70.7%。30 次 invocation 的原生 queue-submit call 从 588 次降至 62 次，减少
 89.5%。compound 执行仍会预编码有界 tail command buffer，因此这些结果证明的是 host
 control 与 queue-submit 固定开销下降，而不是 CUDA 式 exact dynamic termination。
+
+同一台本地 Vulkan 设备还测试了八 chunk、四个独立 action 的 controller 微基准：
+512 个 encoded slot 在第 257 次 logical iteration 停止。25 次预热后样本中，单次准备
+与 effect-planned barrier 组合把 host submit median 从 2,168.1 us 降至
+1,359.7 us（缩短 37.3%），submit 加 wait 从 8,421.1 us 降至 5,057.8 us
+（缩短 39.9%）；第二组独立的 25 次样本分别缩短 32.2% 与 37.4%。已录制
+dependency barrier 从 2,561 降至 1,017（减少 60.3%）。两种模式的 Graph
+已知持久内存都为 88 bytes；Vulkan driver 内部显存仍不可观测。
+可用 benchmark 的 `--independent-actions 3`、`--compound-preparation` 与
+`--barrier-policy` 重现该 A/B 边界。
 
 当前 Dense Field multi-block 吞吐、编译扩展、cache、RSS/VRAM 与 Graph/AD guard
 微基准统一记录在 [Dense Field Graph](dense_field_graph.zh.md)。这些只作为本机回归证据，

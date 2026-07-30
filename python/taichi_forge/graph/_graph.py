@@ -1238,6 +1238,8 @@ def structured_control_capabilities():
     parallel_indirect_dispatch_reason = (
         "native_vulkan_graph_replay_unavailable"
     )
+    compound_single_preparation = False
+    structured_barrier_policy = "unavailable"
     if arch == _ti_core.Arch.cuda:
         cuda = dict(_ti_core.cuda_conditional_graph_capabilities())
         setter_compiled = bool(
@@ -1329,6 +1331,12 @@ def structured_control_capabilities():
             if native
             else "vulkan_runtime_mode_disables_graph_replay"
         )
+        compound_single_preparation = native
+        structured_barrier_policy = (
+            "effect_planned_with_controller_boundaries"
+            if native
+            else "unavailable"
+        )
         reason = (
             "vulkan_if_switch_runtime_not_compiled"
             if vulkan_runtime_mode_qualified
@@ -1357,6 +1365,8 @@ def structured_control_capabilities():
             "parallel_indirect_dispatch_reason": (
                 parallel_indirect_dispatch_reason
             ),
+            "compound_single_preparation": compound_single_preparation,
+            "structured_barrier_policy": structured_barrier_policy,
             "compound_structured_submit": compound_structured_submit,
             "compound_max_chunks_per_region": (compound_max_chunks_per_region),
             "compound_max_iterations_per_region": (compound_max_iterations_per_region),

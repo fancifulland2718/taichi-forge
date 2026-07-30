@@ -2553,6 +2553,8 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
                 "chained_max_encoded_dispatches",
                 "structured_submit_reason",
                 "compound_structured_submit",
+                "compound_single_preparation",
+                "structured_barrier_policy",
                 "compound_max_chunks_per_region",
                 "compound_max_iterations_per_region",
                 "compound_terminal_observation",
@@ -2575,6 +2577,9 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
     )
     assert not device["per_iteration_host_observation"]
     assert not device["conditional_rendering_qualified"]
+    if arch != ti.vulkan:
+        assert not device["compound_single_preparation"]
+        assert device["structured_barrier_policy"] == "unavailable"
     if arch == ti.cuda:
         expected = bool(
             capabilities["cuda_conditional_graph"]["driver_version_eligible"]
@@ -2612,6 +2617,11 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         assert device["structured_submit"]
         assert device["structured_submit_reason"] == "none"
         assert device["compound_structured_submit"]
+        assert device["compound_single_preparation"]
+        assert (
+            device["structured_barrier_policy"]
+            == "effect_planned_with_controller_boundaries"
+        )
         assert device["compound_max_chunks_per_region"] == 8
         assert device["compound_max_iterations_per_region"] == 512
         assert device["compound_terminal_observation"] == "submission_ticket"
@@ -3500,6 +3510,117 @@ def test_structured_graph_vulkan_compound_submit_preserves_region_dependencies()
         75,
         35,
     )
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_structured_graph_vulkan_hazard_planner_reduces_independent_barriers(
+    monkeypatch,
+):
+    @ti.kernel
+    def evaluate_condition(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        predicate[None] = int(state[None] < 4)
+
+    @ti.kernel
+    def step_a(
+        value: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        if predicate[None] != 0:
+            value[None] += 1
+
+    @ti.kernel
+    def step_b(
+        value: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        if predicate[None] != 0:
+            value[None] += 2
+
+    @ti.kernel
+    def step_c(
+        value_a: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        value_b: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        value: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        if predicate[None] != 0:
+            value[None] = value_a[None] + value_b[None]
+
+    @ti.kernel
+    def advance(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        if predicate[None] != 0:
+            state[None] += 1
+            counter[None] += 1
+
+    scalar = lambda name: ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=0
+    )
+    state = scalar("state")
+    predicate = scalar("predicate")
+    counter = scalar("counter")
+    value_a = scalar("value_a")
+    value_b = scalar("value_b")
+    value_c = scalar("value_c")
+
+    def build_and_run(enabled):
+        monkeypatch.setenv(
+            "TI_VULKAN_STRUCTURED_HAZARD_PLANNER",
+            "1" if enabled else "0",
+        )
+        builder = ti.graph.GraphBuilder()
+        condition = builder.create_sequential()
+        condition.dispatch(evaluate_condition, state, predicate)
+        body = builder.create_sequential()
+        body.dispatch(step_a, value_a, predicate)
+        body.dispatch(step_b, value_b, predicate)
+        body.dispatch(step_c, value_a, value_b, value_c, predicate)
+        body.dispatch(advance, state, predicate, counter)
+        builder.while_loop(
+            condition,
+            body,
+            predicate=predicate,
+            control_inputs=(state,),
+            carried_state=(state, value_a, value_b, value_c),
+            counter=counter,
+            max_iterations=8,
+            chunk_size=8,
+            lowering_mode="native_required",
+        )
+        graph = builder.compile()
+        args = {
+            name: ti.ndarray(ti.i32, shape=())
+            for name in (
+                "state",
+                "predicate",
+                "counter",
+                "value_a",
+                "value_b",
+                "value_c",
+            )
+        }
+        for value in args.values():
+            value.fill(0)
+        graph._graph_stats
+        graph.run(args)
+        assert args["state"].to_numpy()[()] == 4
+        assert args["counter"].to_numpy()[()] == 4
+        assert args["value_a"].to_numpy()[()] == 4
+        assert args["value_b"].to_numpy()[()] == 8
+        assert args["value_c"].to_numpy()[()] == 12
+        return graph._graph_stats[0]
+
+    eager = build_and_run(False)
+    planned = build_and_run(True)
+    assert planned["dependency_barriers"] < eager["dependency_barriers"]
+    assert planned["barrier_deferrals"] > 0
+    assert planned["rar_elisions"] > 0
 
 
 @test_utils.test(arch=ti.vulkan)

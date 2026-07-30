@@ -557,6 +557,16 @@ struct TI_DLL_EXPORT CompiledGraph {
       bool execute_initial_dispatches,
       std::uint32_t strategy,
       bool wait_for_result = true) const;
+  bool jit_submit_bounded_vulkan_compound_cached(
+      const CompileConfig &compile_config,
+      const std::unordered_map<std::string, IValue> &args,
+      CompiledGraphJITCache &cache,
+      Ndarray *predicate,
+      Ndarray *counter,
+      Ndarray *status,
+      std::size_t initial_dispatch_count,
+      const std::vector<int> &chunk_iterations,
+      const std::vector<std::uint32_t> &strategies) const;
   bool jit_run_conditional_cuda_cached(
       const CompileConfig &compile_config,
       const std::unordered_map<std::string, IValue> &args,

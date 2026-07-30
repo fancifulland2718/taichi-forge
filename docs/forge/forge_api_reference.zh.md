@@ -796,6 +796,14 @@ Forge 在一个 runtime transaction 中按程序顺序入队，合并它们的 V
 list；稳态执行使用一次 transaction batch 加一次 completion-fence submission。Vulkan
 `if` 与 `switch` 仍只支持 portable 路径。
 
+满足资格的 Vulkan compound replay 按 region 只准备一次 binding、依赖、资源保留与
+submission guard。其 structured command buffer 根据 allocation 级 effect 插入
+RAW/WAR/WAW barrier，并保留保守的 controller/global 边界。能力字段
+`compound_single_preparation` 与 `structured_barrier_policy` 会报告当前策略。
+`TI_VULKAN_COMPOUND_SINGLE_PREPARATION=0` 和
+`TI_VULKAN_STRUCTURED_HAZARD_PLANNER=0` 是资格验证用的回退开关，可恢复旧的逐 chunk
+准备与逐 task eager barrier 路径。
+
 `portable` 强制 portable 路径；`native_required` 在当前 backend 无法履行原生合同时
 fail closed。portable 结构化 Graph 使用 `run()` 并明确拒绝 `submit()`。满足资格的 CUDA
 `native_required` while/if/switch 与 Vulkan `native_required` while 支持 `submit()`。

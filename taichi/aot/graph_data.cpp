@@ -2285,6 +2285,73 @@ DevicePtr resolve_vulkan_indirect_dispatch_packet(
   return packet->get_device_allocation().get_ptr();
 }
 
+struct PreparedVulkanGraphLaunch {
+  std::vector<std::unique_ptr<LaunchContextBuilder>> launch_contexts;
+  std::vector<gfx::GfxRuntime::GraphDispatch> dispatches;
+  gfx::GfxRuntime *runtime{nullptr};
+  std::uint64_t replay_key{0};
+};
+
+bool prepare_vulkan_graph_launch(
+    const CompiledGraph &graph,
+    const CompileConfig &compile_config,
+    const std::unordered_map<std::string, IValue> &args,
+    CompiledGraphJITCache &cache,
+    PreparedVulkanGraphLaunch &prepared) {
+  if (cache.kernels.size() != graph.dispatches.size()) {
+    cache.kernels.assign(graph.dispatches.size(), {});
+  }
+  prepared.launch_contexts.reserve(graph.dispatches.size());
+  prepared.dispatches.reserve(graph.dispatches.size());
+
+  gfx::KernelLauncher *gfx_launcher = nullptr;
+  for (std::size_t i = 0; i < graph.dispatches.size(); ++i) {
+    const auto &dispatch = graph.dispatches[i];
+    TI_ASSERT(dispatch.ti_kernel);
+    auto *prog = dispatch.ti_kernel->program;
+    auto *launcher = dynamic_cast<gfx::KernelLauncher *>(
+        &prog->get_kernel_launcher());
+    if (launcher == nullptr) {
+      return false;
+    }
+    if (gfx_launcher == nullptr) {
+      gfx_launcher = launcher;
+    } else if (gfx_launcher != launcher) {
+      return false;
+    }
+
+    const CompiledKernelData *compiled_kernel_data =
+        get_or_compile_cached_kernel(dispatch, compile_config, cache.kernels[i],
+                                     /*cache_compiled_kernel_data=*/false);
+    auto handle = launcher->get_or_register_kernel(*compiled_kernel_data);
+    prepared.launch_contexts.push_back(
+        std::make_unique<LaunchContextBuilder>(dispatch.ti_kernel));
+    graph.init_runtime_context(dispatch.symbolic_args, args,
+                               *prepared.launch_contexts.back());
+    prog->resolve_ndarray_launch_context_under_guard(
+        *prepared.launch_contexts.back());
+    prog->resolve_runtime_storage_launch_context_under_guard(
+        *prepared.launch_contexts.back());
+    prog->resolve_texture_launch_context_under_guard(
+        *prepared.launch_contexts.back());
+    DevicePtr indirect_dispatch = kDeviceNullPtr;
+    if (dispatch.indirect_dispatch_arg.has_value()) {
+      indirect_dispatch = resolve_vulkan_indirect_dispatch_packet(
+          dispatch, args, prog);
+    }
+    prepared.dispatches.push_back(
+        {handle, prepared.launch_contexts.back().get(), indirect_dispatch});
+  }
+
+  if (gfx_launcher == nullptr) {
+    return false;
+  }
+  prepared.runtime = gfx_launcher->runtime();
+  auto *state = get_vulkan_graph_state(cache, prepared.runtime);
+  prepared.replay_key = state->registration->replay_key();
+  return true;
+}
+
 bool try_run_vulkan_graph(const CompiledGraph &graph,
                           const CompileConfig &compile_config,
                           const std::unordered_map<std::string, IValue> &args,
@@ -2318,61 +2385,14 @@ bool try_run_vulkan_graph(const CompiledGraph &graph,
     }
     return false;
   }
-  if (cache.kernels.size() != graph.dispatches.size()) {
-    cache.kernels.assign(graph.dispatches.size(), {});
-  }
-
-  std::vector<std::unique_ptr<LaunchContextBuilder>> launch_contexts;
-  std::vector<gfx::GfxRuntime::GraphDispatch> gfx_dispatches;
-  launch_contexts.reserve(graph.dispatches.size());
-  gfx_dispatches.reserve(graph.dispatches.size());
-
-  gfx::KernelLauncher *gfx_launcher = nullptr;
-  for (std::size_t i = 0; i < graph.dispatches.size(); ++i) {
-    const auto &dispatch = graph.dispatches[i];
-    TI_ASSERT(dispatch.ti_kernel);
-    auto *prog = dispatch.ti_kernel->program;
-    auto *launcher = dynamic_cast<gfx::KernelLauncher *>(
-        &prog->get_kernel_launcher());
-    if (launcher == nullptr) {
-      return false;
-    }
-    if (gfx_launcher == nullptr) {
-      gfx_launcher = launcher;
-    } else if (gfx_launcher != launcher) {
-      return false;
-    }
-
-    const CompiledKernelData *compiled_kernel_data =
-        get_or_compile_cached_kernel(dispatch, compile_config, cache.kernels[i],
-                                     /*cache_compiled_kernel_data=*/false);
-    auto handle = launcher->get_or_register_kernel(*compiled_kernel_data);
-    launch_contexts.push_back(
-        std::make_unique<LaunchContextBuilder>(dispatch.ti_kernel));
-    graph.init_runtime_context(dispatch.symbolic_args, args,
-                               *launch_contexts.back());
-    prog->resolve_ndarray_launch_context_under_guard(*launch_contexts.back());
-    prog->resolve_runtime_storage_launch_context_under_guard(
-        *launch_contexts.back());
-    prog->resolve_texture_launch_context_under_guard(*launch_contexts.back());
-    DevicePtr indirect_dispatch = kDeviceNullPtr;
-    if (dispatch.indirect_dispatch_arg.has_value()) {
-      indirect_dispatch = resolve_vulkan_indirect_dispatch_packet(
-          dispatch, args, prog);
-    }
-    gfx_dispatches.push_back(
-        {handle, launch_contexts.back().get(), indirect_dispatch});
-  }
-
-  if (gfx_launcher == nullptr) {
+  PreparedVulkanGraphLaunch prepared;
+  if (!prepare_vulkan_graph_launch(
+          graph, compile_config, args, cache, prepared)) {
     return false;
   }
-  auto *runtime = gfx_launcher->runtime();
-  auto *state = get_vulkan_graph_state(cache, runtime);
-  return runtime->try_launch_graph(gfx_dispatches,
-                                   state->registration->replay_key(),
-                                   statistics, structured_control,
-                                   structured_result);
+  return prepared.runtime->try_launch_graph(
+      prepared.dispatches, prepared.replay_key, statistics,
+      structured_control, structured_result);
 }
 
 }  // namespace
@@ -3039,6 +3059,153 @@ CompiledGraph::jit_run_bounded_vulkan_cached(
   result.observation_bytes = gfx_result.observation_bytes;
 #endif
   return result;
+} catch (const BackendRuntimeError &error) {
+  Program *program = jit_graph_program(*this);
+  if (program != nullptr) {
+    program->record_runtime_submission_failure();
+    program->report_backend_runtime_error(error);
+  }
+  throw;
+} catch (...) {
+  Program *program = jit_graph_program(*this);
+  if (program != nullptr) {
+    program->record_runtime_submission_failure();
+  }
+  throw;
+}
+
+bool CompiledGraph::jit_submit_bounded_vulkan_compound_cached(
+    const CompileConfig &compile_config,
+    const std::unordered_map<std::string, IValue> &args,
+    CompiledGraphJITCache &cache,
+    Ndarray *predicate,
+    Ndarray *counter,
+    Ndarray *status,
+    std::size_t initial_dispatch_count,
+    const std::vector<int> &chunk_iterations,
+    const std::vector<std::uint32_t> &strategies) const try {
+#if defined(TI_WITH_VULKAN)
+  if (compile_config.arch != Arch::vulkan || predicate == nullptr ||
+      counter == nullptr || chunk_iterations.empty() ||
+      chunk_iterations.size() != strategies.size() ||
+      chunk_iterations.size() > 8 || initial_dispatch_count == 0 ||
+      initial_dispatch_count >= dispatches.size()) {
+    return false;
+  }
+  Program *program = jit_graph_program(*this);
+  if (program == nullptr) {
+    return false;
+  }
+  const auto valid_control = [&](const Ndarray *control) {
+    return control != nullptr && control->get_nelement() == 1 &&
+           control->get_element_data_type() == PrimitiveType::i32 &&
+           control->owning_program() == program;
+  };
+  if (!valid_control(predicate) || !valid_control(counter) ||
+      (status != nullptr && !valid_control(status))) {
+    return false;
+  }
+  for (std::size_t chunk = 0; chunk < chunk_iterations.size(); ++chunk) {
+    if (chunk_iterations[chunk] <= 0 ||
+        static_cast<std::uint64_t>(chunk_iterations[chunk]) >
+            std::numeric_limits<std::uint32_t>::max() ||
+        strategies[chunk] >
+            static_cast<std::uint32_t>(
+                gfx::GfxRuntime::GraphStructuredStrategy::
+                    coarse_conditional)) {
+      return false;
+    }
+  }
+
+  program->ensure_runtime_submission_allowed(
+      "compound bounded Vulkan Graph submission");
+  auto tree_lifecycle_guard =
+      program->acquire_snode_tree_lifecycle_read_guard();
+  auto resource_views = graph_runtime_resource_views(args, program);
+  resource_views.ndarrays.add(predicate);
+  resource_views.ndarrays.add(counter);
+  if (status != nullptr) {
+    resource_views.ndarrays.add(status);
+  }
+  std::optional<Program::RuntimeResourceGraphScope> resource_guard;
+  if (!resource_views.empty()) {
+    resource_guard.emplace(program->acquire_runtime_resource_graph_scope());
+    if (!resource_views.ndarrays.empty()) {
+      program->retain_ndarrays_for_external_submission(
+          resource_views.ndarrays.data(), resource_views.ndarrays.size());
+    }
+    if (!resource_views.runtime_storage.empty()) {
+      program->retain_runtime_storage_for_graph_submission(
+          resource_views.runtime_storage.data(),
+          resource_views.runtime_storage.size());
+    }
+    if (!resource_views.textures.empty()) {
+      program->retain_textures_for_external_submission(
+          resource_views.textures.data(), resource_views.textures.size());
+    }
+  }
+  auto completion_scope = program->acquire_runtime_submission_scope();
+  std::lock_guard<std::mutex> lock(cache.run_mutex);
+  if (cache.validated_snode_tree_program != program ||
+      cache.validated_snode_tree_epoch != tree_lifecycle_guard.epoch()) {
+    try {
+      program->validate_snode_tree_dependencies(snode_tree_dependencies);
+    } catch (...) {
+      cache.vulkan_graph_state.reset();
+      cache.vulkan_inline_stats = {};
+      cache.kernels.clear();
+      cache.runtime_arg_plans.clear();
+      cache.validated_snode_tree_program = nullptr;
+      cache.validated_snode_tree_epoch = 0;
+      throw;
+    }
+    cache.validated_snode_tree_program = program;
+    cache.validated_snode_tree_epoch = tree_lifecycle_guard.epoch();
+  }
+  if (compile_config.debug ||
+      (dispatches.size() <= 1 && !has_indirect_dispatches())) {
+    return false;
+  }
+
+  PreparedVulkanGraphLaunch prepared;
+  if (!prepare_vulkan_graph_launch(
+          *this, compile_config, args, cache, prepared)) {
+    return false;
+  }
+
+  bool execute_initial_dispatches = true;
+  for (std::size_t chunk = 0; chunk < chunk_iterations.size(); ++chunk) {
+    gfx::GfxRuntime::GraphStructuredControl control;
+    control.predicate = predicate->get_device_allocation().get_ptr();
+    control.counter = counter->get_device_allocation().get_ptr();
+    control.initial_dispatch_count = initial_dispatch_count;
+    control.max_iterations =
+        static_cast<std::uint32_t>(chunk_iterations[chunk]);
+    control.has_status = status != nullptr;
+    control.execute_initial_dispatches = execute_initial_dispatches;
+    control.strategy =
+        static_cast<gfx::GfxRuntime::GraphStructuredStrategy>(
+            strategies[chunk]);
+    if (status != nullptr) {
+      control.status = status->get_device_allocation().get_ptr();
+    }
+    if (!prepared.runtime->try_launch_graph(
+            prepared.dispatches, prepared.replay_key,
+            &program->runtime_statistics(), &control,
+            /*structured_result=*/nullptr)) {
+      return false;
+    }
+    execute_initial_dispatches = false;
+  }
+  program->mark_runtime_submission(
+      RuntimeSubmissionKind::kGraphBackendSubmission);
+  if (resource_guard) {
+    resource_guard->finish_external_access_epoch();
+  }
+  return true;
+#else
+  return false;
+#endif
 } catch (const BackendRuntimeError &error) {
   Program *program = jit_graph_program(*this);
   if (program != nullptr) {
