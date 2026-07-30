@@ -220,6 +220,11 @@ branches remain portable. Ordered CUDA setters and Vulkan predicate gates
 consume control state without a per-region host readback. After asynchronous
 structured submission, read terminal state from `ticket.observations()`;
 synchronous control-flow reports remain unavailable for that submission.
+For per-invocation diagnosis, `submit(telemetry=True)` records entry/exit
+control scalars around every while region and `ticket.telemetry()` reports
+logical stop positions, encoded and masked iteration slots, skipped coarse
+chunks, the queue-counter window, and host enqueue time. The default path does
+not allocate telemetry storage or enqueue these snapshot kernels.
 
 ### Vulkan compound structured transactions
 
@@ -232,6 +237,13 @@ copy used by synchronous control-flow reports; an explicit
 `GraphBuilder.observe()` snapshot still executes once at the transaction end.
 This is a generic Graph contract: solver, line-search, contact, and other
 meanings remain in user kernels and recordable providers.
+
+Ticket telemetry uses two packed i32 device snapshots per while region and one
+post-completion host readback. Queue counters are currently a non-exact
+device-wide transaction-window delta, because a concurrent external
+graphics/interop producer can change them. GPU timestamps are reported as
+unavailable instead of being inferred while timestamp instrumentation would
+invalidate the qualified compound replay path.
 
 Each region honors its explicit `chunk_size` for compound submission. The
 default first chunk uses compact per-iteration indirect masking. A region may

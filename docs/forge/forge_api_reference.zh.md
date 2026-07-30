@@ -730,7 +730,7 @@ graph.run({"slot": 3})
 | `GraphBuilder.if_then_else(condition, then_region, *, predicate, control_inputs=(), else_region=None, lowering_mode="auto", name="if")` | 追加固定双分支，只执行被选中的 branch。 |
 | `GraphBuilder.switch(condition, branches, *, selector, control_inputs=(), default_region=None, lowering_mode="auto", name="switch")` | 追加零基固定 branch table，可指定 default。 |
 | `Graph.control_flow_stats()` | 返回最近一次 run 的 immutable `GraphWhileReport` / `GraphBranchReport`。原生 CUDA branch report 延迟物化，因此请求该报告是显式同步点。 |
-| `ti.graph.structured_control_capabilities()` | 返回当前 backend 的 schema-v4 portable 与 device-control 合同，分别报告 structured/compound submit 资格、Vulkan 有界 chunk/replay 上限、终态观测策略、tail strategy、queue-submit 合并与 exact dynamic termination 支持。 |
+| `ti.graph.structured_control_capabilities()` | 返回当前 backend 的 schema-v4 portable 与 device-control 合同，分别报告 structured/compound submit 资格、Vulkan 有界 chunk/replay 上限、终态观测与 ticket 遥测策略、tail strategy、queue-submit 合并与 exact dynamic termination 支持。 |
 
 condition region 在普通 Taichi kernel 中组合多个 device 值；结构化控制不会调用 Python
 callback。Graph 将 `status` 视为用户定义整数，并与 continue predicate 独立报告。即使
@@ -767,6 +767,14 @@ fail closed。portable 结构化 Graph 使用 `run()` 并明确拒绝 `submit()`
 ticket 可返回显式 `GraphBuilder.observe()` 终态；该次异步 submission 不提供同步
 `control_flow_stats()`。
 
+显式 `submit(telemetry=True)` 会额外在 device 上记录每个 while region 的进入
+counter/status 与终态 counter/predicate/status。`ticket.telemetry()` 仅在完成后读取
+一次 packed snapshot，
+并报告真实停止轮次、encoded/masked 工作、active/skipped chunk、host enqueue 时间与
+queue counter 窗口。由于外部 graphics/interop producer 可能在同一窗口提交，device-wide
+queue delta 会标为 non-exact。compound replay 无法在不改变已资格化路径的前提下插入
+GPU timestamp 时，会明确报告 `unavailable`。
+
 ### `GraphBuilder.compile()`、`Graph.run(args)` 与 `Graph.submit(args)`
 
 `compile()` 冻结调用时的 dispatch/sequential 定义并返回 runtime-bound `Graph`。
@@ -777,7 +785,8 @@ ticket 可返回显式 `GraphBuilder.observe()` 终态；该次异步 submission
 | --- | --- |
 | `GraphBuilder.compile()` | 后续修改 builder 或原 `Sequential` 不改变已编译 graph。 |
 | `Graph.run(args)` | `args` 必须是字典，key 与声明参数完全一致；missing/extra key 会抛 `TaichiRuntimeError`。 |
-| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait')` | 与 `run()` 使用相同的精确参数、生命周期、并发和 AD 合同，返回一个 `SubmissionTicket`，并可选择加入共享准入节奏。结构化提交接受满足资格的 CUDA `native_required` while/if/switch，以及满足资格的 Vulkan `native_required` while；后者可在一个 compound transaction 中包含多个有序 region。portable 控制与不支持的原生组合会明确失败。 |
+| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait', telemetry=False)` | 与 `run()` 使用相同的精确参数、生命周期、并发和 AD 合同，返回一个 `SubmissionTicket`，并可选择加入共享准入节奏。`telemetry=True` 为每个 while 增加 device snapshot；默认不增加 snapshot kernel 或 buffer。结构化提交接受满足资格的 CUDA `native_required` while/if/switch，以及满足资格的 Vulkan `native_required` while；后者可在一个 compound transaction 中包含多个有序 region。portable 控制与不支持的原生组合会明确失败。 |
+| `SubmissionTicket.telemetry()` | 必要时等待，并在请求遥测时返回 immutable `GraphSubmissionTelemetry`；否则返回 `None`。region 报告包含 terminal counter 与停止位置。nullable GPU duration 不会从 host wall time 推测。 |
 | `Graph._prewarm()` | 预热当前 runtime 的 backend plan；这是内部/高级入口，不改变 graph 参数合同。 |
 
 同一个 graph 的并发 host 调用以完整 invocation 为单位排队；不同 graph 不共享该锁。

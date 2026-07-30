@@ -182,6 +182,10 @@ fire-and-continue 合同：selector 回读和 report 构造延迟到请求 `cont
 也可使用 `Graph.submit()`；Vulkan branch 仍是 portable。CUDA 有序 setter 与 Vulkan
 predicate gate 都无需逐 region host 回读即可消费控制状态。异步结构化提交后应通过
 `ticket.observations()` 读取终态；该次 submission 不提供同步控制流报告。
+逐 invocation 诊断可使用 `submit(telemetry=True)`，它在每个 while region 前后记录
+控制 scalar；`ticket.telemetry()` 会报告 logical 停止位置、encoded/masked iteration
+slot、跳过的 coarse chunk、queue-counter 窗口与 host enqueue 时间。默认路径不分配
+遥测 storage，也不入队这些 snapshot kernel。
 
 ### Vulkan compound 结构化事务
 
@@ -191,6 +195,12 @@ predicate gate 都无需逐 region host 回读即可消费控制状态。异步�
 不会录制同步控制流报告专用的逐 chunk terminal shader 与 host-observation copy；显式
 `GraphBuilder.observe()` snapshot 仍只在 transaction 末尾执行一次。该能力是通用 Graph
 合同，solver、line search、contact 等语义仍由用户 kernel 与 recordable provider 定义。
+
+ticket 遥测对每个 while region 使用两组 packed i32 device snapshot，并在完成后统一
+host readback 一次。当前 queue counter 是 non-exact device-wide transaction-window
+delta，因为并发的外部 graphics/interop producer 可能改变计数。若 timestamp
+instrumentation 会使已资格化 compound replay 失效，GPU timestamp 会明确报告
+unavailable，而不会从 wall time 推测。
 
 每个 region 的显式 `chunk_size` 都会用于 compound submission。默认首 chunk 使用
 compact per-iteration indirect masking；当 region 本身可能 inactive 时，也可选择

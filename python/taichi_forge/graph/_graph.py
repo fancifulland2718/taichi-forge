@@ -1,5 +1,6 @@
 import os
 import threading
+import time
 import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -418,6 +419,458 @@ class _GraphObservationArena:
             }
 
 
+@kernel_impl.kernel
+def _pack_structured_submission_telemetry(
+    predicate: ndarray_type.ndarray(dtype=i32, ndim=0),
+    counter: ndarray_type.ndarray(dtype=i32, ndim=0),
+    status: ndarray_type.ndarray(dtype=i32, ndim=0),
+    destination: ndarray_type.ndarray(dtype=i32, ndim=1),
+    offset: i32,
+):
+    destination[offset] = predicate[None]
+    destination[offset + 1] = counter[None]
+    destination[offset + 2] = status[None]
+
+
+def _queue_submission_snapshot():
+    if impl.current_cfg().arch != _ti_core.Arch.vulkan:
+        return None
+    result = impl.get_runtime().prog._debug_vulkan_queue_submission_stats()
+    if not result.get("supported", False):
+        return None
+    return {
+        name: int(result[name])
+        for name in (
+            "queue_submit_calls",
+            "submitted_command_buffers",
+            "batched_queue_submit_calls",
+            "batched_command_buffers",
+        )
+    }
+
+
+def _queue_submission_delta(before, after):
+    if before is None or after is None:
+        return GraphSubmissionQueueTelemetry(
+            available=False,
+            scope="unavailable",
+            exact=False,
+            queue_submit_calls=0,
+            submitted_command_buffers=0,
+            batched_queue_submit_calls=0,
+            batched_command_buffers=0,
+        )
+    return GraphSubmissionQueueTelemetry(
+        available=True,
+        scope="vulkan_device_transaction_window",
+        # These counters are device-wide. The Graph transaction serializes the
+        # runtime compute stream, but external graphics/interop producers may
+        # still submit in the same host window, so do not overclaim attribution.
+        exact=False,
+        **{name: max(0, int(after[name]) - int(before[name])) for name in before},
+    )
+
+
+def _structured_submission_metadata(node):
+    arch = impl.current_cfg().arch
+    backend = _backend_name(_ti_core.arch_name(arch))
+    if arch == _ti_core.Arch.vulkan:
+        chunk_sizes = tuple(
+            min(node.compound_chunk_limit, node.max_iterations - offset)
+            for offset in range(0, node.max_iterations, node.compound_chunk_limit)
+        )
+        strategy_codes = (
+            _vulkan_compound_strategy_codes(
+                len(chunk_sizes), node.vulkan_first_chunk_strategy
+            )
+            if chunk_sizes
+            else ()
+        )
+        strategy_names = {
+            1: "compact",
+            2: "chained",
+            3: "conditional",
+            4: "coarse_conditional",
+        }
+        chunk_strategies = tuple(strategy_names[int(code)] for code in strategy_codes)
+        lowering = "vulkan_compound_masked"
+    elif arch == _ti_core.Arch.cuda:
+        chunk_sizes = (node.max_iterations,) if node.max_iterations else ()
+        chunk_strategies = ("cuda_conditional_graph",) if node.max_iterations else ()
+        lowering = "cuda_conditional_graph"
+    else:
+        chunk_sizes = (node.max_iterations,) if node.max_iterations else ()
+        chunk_strategies = ("portable",) if node.max_iterations else ()
+        lowering = "portable"
+    return {
+        "name": node.name,
+        "backend": backend,
+        "lowering": lowering,
+        "max_iterations": node.max_iterations,
+        "chunk_sizes": chunk_sizes,
+        "chunk_strategies": chunk_strategies,
+        "has_status": node.status is not None,
+    }
+
+
+class _GraphStructuredTelemetryState:
+    def __init__(self, arena, slot, sequence):
+        self._arena = arena
+        self._slot = slot
+        self._sequence = sequence
+        self._completion = None
+        self._queue = None
+        self._host_submit_ns = 0
+        self._result = None
+        self._discarded = False
+        self._released = False
+        self._lock = threading.Lock()
+
+    @property
+    def sequence(self):
+        return self._sequence
+
+    @property
+    def recorder(self):
+        return self._slot["recorder"]
+
+    def attach(self, completion, queue, host_submit_ns):
+        with self._lock:
+            if self._released:
+                raise TaichiRuntimeError(
+                    "Cannot attach a completion to a released Graph telemetry slot"
+                )
+            self._completion = completion if completion.has_backend_work else None
+            self._queue = queue
+            self._host_submit_ns = int(host_submit_ns)
+            self._slot["completion_sequence"] = int(completion.sequence)
+        return self
+
+    def _wait_locked(self):
+        completion = self._completion
+        if completion is None:
+            return
+        if not completion.done():
+            self._arena._record_wait()
+            completion.wait()
+
+    def materialize(self):
+        release = False
+        with self._lock:
+            if self._result is not None:
+                return self._result
+            if self._released:
+                raise TaichiRuntimeError("Graph submission telemetry was discarded")
+            self._wait_locked()
+            result = self._arena._read_slot(
+                self._slot,
+                self._queue,
+                self._host_submit_ns,
+            )
+            self._result = result
+            self._released = True
+            release = True
+        if release:
+            self._arena._release(self._slot, self)
+        return result
+
+    def discard(self):
+        release = False
+        with self._lock:
+            if self._released:
+                return
+            completion = self._completion
+            if completion is None or completion.done():
+                self._released = True
+                release = True
+            else:
+                self._discarded = True
+        if release:
+            self._arena._release(self._slot, self)
+
+    def make_reusable(self):
+        release = False
+        with self._lock:
+            if self._released:
+                return
+            self._wait_locked()
+            if not self._discarded:
+                self._result = self._arena._read_slot(
+                    self._slot,
+                    self._queue,
+                    self._host_submit_ns,
+                )
+            self._released = True
+            release = True
+        if release:
+            self._arena._release(self._slot, self)
+
+
+class _GraphStructuredTelemetryRecorder:
+    _VALUES_PER_PHASE = 3
+    _VALUES_PER_REGION = 6
+
+    def __init__(self, nodes, storage):
+        self._nodes = tuple(nodes)
+        self._storage = storage
+        self._metadata = [None] * len(self._nodes)
+        self._host_started_ns = [0] * len(self._nodes)
+        self._host_enqueue_ns = [0] * len(self._nodes)
+
+    @property
+    def metadata(self):
+        return tuple(self._metadata)
+
+    @property
+    def host_enqueue_ns(self):
+        return tuple(self._host_enqueue_ns)
+
+    def reset(self):
+        self._metadata[:] = [None] * len(self._nodes)
+        self._host_started_ns[:] = [0] * len(self._nodes)
+        self._host_enqueue_ns[:] = [0] * len(self._nodes)
+
+    @staticmethod
+    def _control_value(context, name, role):
+        value = context.runtime_args()[name]
+        if (
+            not isinstance(value, Ndarray)
+            or value.shape != ()
+            or str(value.dtype) != str(i32)
+        ):
+            raise TaichiRuntimeError(
+                "Graph submission telemetry requires scalar i32 ndarray "
+                f"{role} resources"
+            )
+        return value
+
+    def _capture(self, index, node, context, phase):
+        predicate = self._control_value(context, node.predicate, "predicate")
+        counter = self._control_value(context, node.counter, "counter")
+        status = (
+            self._control_value(context, node.status, "status")
+            if node.status is not None
+            else counter
+        )
+        offset = index * self._VALUES_PER_REGION + phase * self._VALUES_PER_PHASE
+        _pack_structured_submission_telemetry(
+            predicate, counter, status, self._storage, offset
+        )
+
+    def begin_region(self, index, node, context):
+        self._host_started_ns[index] = time.perf_counter_ns()
+        self._metadata[index] = _structured_submission_metadata(node)
+        self._capture(index, node, context, 0)
+
+    def end_region(self, index, node, context):
+        self._capture(index, node, context, 1)
+        self._host_enqueue_ns[index] = (
+            time.perf_counter_ns() - self._host_started_ns[index]
+        )
+
+
+class _GraphStructuredTelemetryLease:
+    def __init__(self, state):
+        self._state = state
+        self.recorder = state.recorder
+
+    def attach(self, completion, queue, host_submit_ns):
+        if self._state is None:
+            return None
+        state = self._state.attach(completion, queue, host_submit_ns)
+        self._state = None
+        return state
+
+    def cancel(self):
+        if self._state is not None:
+            self._state.discard()
+            self._state = None
+
+
+class _GraphStructuredTelemetryArena:
+    """Bounded opt-in device snapshots for asynchronous while submissions."""
+
+    def __init__(self, nodes, capacity=None):
+        self.nodes = tuple(nodes)
+        self.capacity = int(
+            capacity
+            if capacity is not None
+            else os.environ.get("TI_GRAPH_TELEMETRY_SLOTS", "4")
+        )
+        if self.capacity < 1 or self.capacity > 64:
+            raise TaichiRuntimeError(
+                "TI_GRAPH_TELEMETRY_SLOTS must be between 1 and 64"
+            )
+        self._slots = []
+        self._next_sequence = 1
+        self._allocations = 0
+        self._reuses = 0
+        self._waits = 0
+        self._materializations = 0
+        self._host_readback_bytes = 0
+        self._lock = threading.Lock()
+
+    def _new_slot(self):
+        value_count = (
+            len(self.nodes) * _GraphStructuredTelemetryRecorder._VALUES_PER_REGION
+        )
+        storage = ScalarNdarray(i32, (value_count,))
+        slot = {
+            "storage": storage,
+            "recorder": _GraphStructuredTelemetryRecorder(self.nodes, storage),
+            "state": None,
+            "completion_sequence": 0,
+        }
+        self._slots.append(slot)
+        self._allocations += 1
+        return slot
+
+    def acquire(self):
+        if not self.nodes:
+            return None
+        while True:
+            with self._lock:
+                allocated = False
+                slot = next(
+                    (item for item in self._slots if item["state"] is None),
+                    None,
+                )
+                if slot is None and len(self._slots) < self.capacity:
+                    slot = self._new_slot()
+                    allocated = True
+                if slot is not None:
+                    if not allocated:
+                        self._reuses += 1
+                    slot["recorder"].reset()
+                    state = _GraphStructuredTelemetryState(
+                        self, slot, self._next_sequence
+                    )
+                    self._next_sequence += 1
+                    slot["state"] = state
+                    return _GraphStructuredTelemetryLease(state)
+                oldest = min(
+                    (item["state"] for item in self._slots),
+                    key=lambda state: state.sequence,
+                )
+            oldest.make_reusable()
+
+    def _read_slot(self, slot, queue, host_submit_ns):
+        storage = slot["storage"]
+        host = np.empty(
+            shape=storage.arr.total_shape(),
+            dtype=to_numpy_type(storage.dtype),
+        )
+        impl.get_runtime().prog.copy_graph_observations_to_host([storage.arr], [host])
+        values = host.reshape(-1)
+        recorder = slot["recorder"]
+        regions = []
+        for index, metadata in enumerate(recorder.metadata):
+            if metadata is None:
+                raise TaichiRuntimeError(
+                    "Graph submission telemetry region was not recorded"
+                )
+            offset = index * _GraphStructuredTelemetryRecorder._VALUES_PER_REGION
+            initial_predicate, initial_counter, initial_status = (
+                int(value) for value in values[offset : offset + 3]
+            )
+            final_predicate, final_counter, final_status = (
+                int(value) for value in values[offset + 3 : offset + 6]
+            )
+            del initial_predicate
+            logical = final_counter - initial_counter
+            max_iterations = int(metadata["max_iterations"])
+            if logical < 0 or logical > max_iterations:
+                raise TaichiRuntimeError(
+                    "Graph submission telemetry observed an iteration counter "
+                    "outside the region budget"
+                )
+            chunk_sizes = tuple(int(value) for value in metadata["chunk_sizes"])
+            chunk_strategies = tuple(metadata["chunk_strategies"])
+            if metadata["lowering"] == "cuda_conditional_graph":
+                chunk_sizes = (logical,) if logical else ()
+                chunk_strategies = ("cuda_conditional_graph",) if logical else ()
+            offset_iterations = 0
+            active_chunks = 0
+            skipped_chunks = 0
+            for chunk_size, strategy in zip(chunk_sizes, chunk_strategies):
+                if logical > offset_iterations:
+                    active_chunks += 1
+                elif strategy == "coarse_conditional":
+                    skipped_chunks += 1
+                offset_iterations += chunk_size
+            regions.append(
+                GraphSubmissionRegionTelemetry(
+                    name=metadata["name"],
+                    backend=metadata["backend"],
+                    lowering=metadata["lowering"],
+                    max_iterations=max_iterations,
+                    logical_iterations=logical,
+                    encoded_iterations=sum(chunk_sizes),
+                    masked_iterations=sum(chunk_sizes) - logical,
+                    chunk_sizes=chunk_sizes,
+                    chunk_strategies=chunk_strategies,
+                    active_chunk_count=active_chunks,
+                    coarse_skipped_chunk_count=skipped_chunks,
+                    initial_counter=initial_counter,
+                    final_counter=final_counter,
+                    terminal_predicate=final_predicate,
+                    initial_status=(initial_status if metadata["has_status"] else None),
+                    final_status=(final_status if metadata["has_status"] else None),
+                    host_enqueue_ns=int(recorder.host_enqueue_ns[index]),
+                    gpu_duration_ns=None,
+                    gpu_timestamp_status="unavailable",
+                )
+            )
+        with self._lock:
+            self._materializations += 1
+            self._host_readback_bytes += int(host.nbytes)
+        backend = (
+            regions[0].backend
+            if regions
+            else _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
+        )
+        return GraphSubmissionTelemetry(
+            schema_version=1,
+            backend=backend,
+            sequence=int(slot["completion_sequence"]),
+            regions=tuple(regions),
+            queue=queue,
+            host_submit_ns=int(host_submit_ns),
+            device_snapshot_bytes=int(host.nbytes),
+            host_readback_bytes=int(host.nbytes),
+            gpu_timestamp_status="unavailable",
+        )
+
+    def _record_wait(self):
+        with self._lock:
+            self._waits += 1
+
+    def _release(self, slot, state):
+        with self._lock:
+            if slot["state"] is state:
+                slot["state"] = None
+
+    @property
+    def stats(self):
+        with self._lock:
+            storage_bytes = (
+                len(self.nodes)
+                * _GraphStructuredTelemetryRecorder._VALUES_PER_REGION
+                * np.dtype(np.int32).itemsize
+            )
+            return {
+                "materialized": bool(self._slots),
+                "capacity": self.capacity if self.nodes else 0,
+                "slots": len(self._slots),
+                "reserved_bytes": len(self._slots) * storage_bytes,
+                "allocations": self._allocations,
+                "reuses": self._reuses,
+                "waits": self._waits,
+                "materializations": self._materializations,
+                "host_readback_bytes": self._host_readback_bytes,
+            }
+
+
 @dataclass(frozen=True)
 class GraphExecutionCounters:
     """Detailed backend counters captured after diagnostics are enabled."""
@@ -492,6 +945,14 @@ class GraphMemoryReport:
     observation_arena_waits: int
     observation_materializations: int
     observation_host_readback_bytes: int
+    persistent_telemetry_bytes: int
+    telemetry_arena_capacity: int
+    telemetry_arena_slots: int
+    telemetry_arena_allocations: int
+    telemetry_arena_reuses: int
+    telemetry_arena_waits: int
+    telemetry_materializations: int
+    telemetry_host_readback_bytes: int
     opaque_driver_bytes: Optional[int]
 
 
@@ -589,6 +1050,59 @@ class GraphBranchReport:
     condition_dispatch_count: int
     branch_dispatch_count: int
     control_inputs: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class GraphSubmissionRegionTelemetry:
+    """One structured while region from an opt-in asynchronous submission."""
+
+    name: str
+    backend: str
+    lowering: str
+    max_iterations: int
+    logical_iterations: int
+    encoded_iterations: int
+    masked_iterations: int
+    chunk_sizes: Tuple[int, ...]
+    chunk_strategies: Tuple[str, ...]
+    active_chunk_count: int
+    coarse_skipped_chunk_count: int
+    initial_counter: int
+    final_counter: int
+    terminal_predicate: int
+    initial_status: Optional[int]
+    final_status: Optional[int]
+    host_enqueue_ns: int
+    gpu_duration_ns: Optional[int]
+    gpu_timestamp_status: str
+
+
+@dataclass(frozen=True)
+class GraphSubmissionQueueTelemetry:
+    """Queue counters attributed to the host transaction window."""
+
+    available: bool
+    scope: str
+    exact: bool
+    queue_submit_calls: int
+    submitted_command_buffers: int
+    batched_queue_submit_calls: int
+    batched_command_buffers: int
+
+
+@dataclass(frozen=True)
+class GraphSubmissionTelemetry:
+    """Immutable ticket-level structured submission telemetry."""
+
+    schema_version: int
+    backend: str
+    sequence: int
+    regions: Tuple[GraphSubmissionRegionTelemetry, ...]
+    queue: GraphSubmissionQueueTelemetry
+    host_submit_ns: int
+    device_snapshot_bytes: int
+    host_readback_bytes: int
+    gpu_timestamp_status: str
 
 
 _COUNTER_FIELDS = (
@@ -711,6 +1225,9 @@ def structured_control_capabilities():
     compound_chunk_size_limit = 0
     compound_first_chunk_strategies = ()
     compound_default_first_chunk_strategy = "unavailable"
+    submission_ticket_region_telemetry = False
+    submission_ticket_queue_telemetry = "unavailable"
+    submission_ticket_gpu_timestamps = "unavailable"
     conditional_rendering_available = False
     conditional_rendering_qualified = False
     coarse_conditional_available = False
@@ -736,6 +1253,7 @@ def structured_control_capabilities():
         structured_submit = native
         compound_structured_submit = native
         compound_terminal_observation = "submission_ticket" if native else "unavailable"
+        submission_ticket_region_telemetry = native
         structured_submit_reason = (
             "none" if native else "cuda_conditional_graph_unavailable"
         )
@@ -783,6 +1301,10 @@ def structured_control_capabilities():
         compound_max_chunks_per_region = 8
         compound_max_iterations_per_region = 512
         compound_terminal_observation = "submission_ticket" if native else "unavailable"
+        submission_ticket_region_telemetry = native
+        submission_ticket_queue_telemetry = (
+            "device_transaction_window" if native else "unavailable"
+        )
         queue_submit_coalescing = native
         compound_per_region_chunk_size = native
         compound_chunk_size_limit = 64
@@ -834,6 +1356,9 @@ def structured_control_capabilities():
             "compound_default_first_chunk_strategy": (
                 compound_default_first_chunk_strategy
             ),
+            "submission_ticket_region_telemetry": (submission_ticket_region_telemetry),
+            "submission_ticket_queue_telemetry": (submission_ticket_queue_telemetry),
+            "submission_ticket_gpu_timestamps": (submission_ticket_gpu_timestamps),
             "logical_termination_exact": native,
             "device_controlled_masking": native,
             "per_iteration_host_observation": False,
@@ -894,6 +1419,7 @@ def _execution_report(
     temporary_memory_plan=None,
     temporary_arena_stats=None,
     observation_arena_stats=None,
+    telemetry_arena_stats=None,
 ):
     segments = []
     stats_cursor = 0
@@ -1033,12 +1559,14 @@ def _execution_report(
     temporary_memory_plan = temporary_memory_plan or {}
     temporary_arena_stats = temporary_arena_stats or {}
     observation_arena_stats = observation_arena_stats or {}
+    telemetry_arena_stats = telemetry_arena_stats or {}
     temporary_plan_materialized = bool(temporary_arena_stats.get("materialized", False))
     planned_temporary_bytes = int(temporary_memory_plan.get("planned_peak_bytes", 0))
     persistent_temporary_bytes = int(temporary_arena_stats.get("reserved_bytes", 0))
     persistent_observation_bytes = int(observation_staging_bytes) + int(
         observation_arena_stats.get("reserved_bytes", 0)
     )
+    persistent_telemetry_bytes = int(telemetry_arena_stats.get("reserved_bytes", 0))
     memory = GraphMemoryReport(
         persistent_argument_bytes=persistent_argument_bytes,
         persistent_observation_bytes=persistent_observation_bytes,
@@ -1047,6 +1575,7 @@ def _execution_report(
             persistent_argument_bytes
             + persistent_observation_bytes
             + persistent_temporary_bytes
+            + persistent_telemetry_bytes
         ),
         transient_temporary_bytes=(
             planned_temporary_bytes if temporary_plan_materialized else 0
@@ -1072,6 +1601,18 @@ def _execution_report(
         ),
         observation_host_readback_bytes=int(
             observation_arena_stats.get("host_readback_bytes", 0)
+        ),
+        persistent_telemetry_bytes=persistent_telemetry_bytes,
+        telemetry_arena_capacity=int(telemetry_arena_stats.get("capacity", 0)),
+        telemetry_arena_slots=int(telemetry_arena_stats.get("slots", 0)),
+        telemetry_arena_allocations=int(telemetry_arena_stats.get("allocations", 0)),
+        telemetry_arena_reuses=int(telemetry_arena_stats.get("reuses", 0)),
+        telemetry_arena_waits=int(telemetry_arena_stats.get("waits", 0)),
+        telemetry_materializations=int(
+            telemetry_arena_stats.get("materializations", 0)
+        ),
+        telemetry_host_readback_bytes=int(
+            telemetry_arena_stats.get("host_readback_bytes", 0)
         ),
         opaque_driver_bytes=None,
     )
@@ -1752,9 +2293,7 @@ def _vulkan_first_chunk_strategy(value):
 
 def _vulkan_compound_strategy_codes(chunk_count, first_chunk_strategy):
     requested = _vulkan_structured_strategy()
-    first_name, first_requested = _vulkan_first_chunk_strategy(
-        first_chunk_strategy
-    )
+    first_name, first_requested = _vulkan_first_chunk_strategy(first_chunk_strategy)
     if requested != 0 and first_name == "auto":
         return (requested,) * chunk_count
     conditional_available = bool(
@@ -1990,9 +2529,13 @@ class _CompiledWhileGraphNode:
             )
 
         arch = impl.current_cfg().arch
-        requested_compound_chunk_limit = _structured_chunk_limit(
-            arch, chunk_size, True
+        self._native_submission_eligible = arch == _ti_core.Arch.cuda or (
+            arch == _ti_core.Arch.vulkan
+            and not impl.current_cfg().kernel_profiler
+            and not impl.current_cfg().vulkan_dispatch_cache
+            and self.max_iterations <= 512
         )
+        requested_compound_chunk_limit = _structured_chunk_limit(arch, chunk_size, True)
         self.chunk_limit = min(
             self.max_iterations or 1,
             _structured_chunk_limit(arch, chunk_size, self.masked_execution),
@@ -2004,14 +2547,13 @@ class _CompiledWhileGraphNode:
         self.compound_chunk_count = (
             0
             if self.max_iterations == 0
-            else (
-                self.max_iterations + self.compound_chunk_limit - 1
-            )
+            else (self.max_iterations + self.compound_chunk_limit - 1)
             // self.compound_chunk_limit
         )
         if (
             arch == _ti_core.Arch.vulkan
             and lowering_mode == "native_required"
+            and self._native_submission_eligible
             and self.compound_chunk_count > 8
         ):
             raise TaichiRuntimeError(
@@ -2118,12 +2660,6 @@ class _CompiledWhileGraphNode:
         self._last_report = None
         self._native_jit_cache = _ti_core.CompiledGraphJITCache()
         self._vulkan_chunk_limits = {}
-        self._native_submission_eligible = arch == _ti_core.Arch.cuda or (
-            arch == _ti_core.Arch.vulkan
-            and not impl.current_cfg().kernel_profiler
-            and not impl.current_cfg().vulkan_dispatch_cache
-            and self.max_iterations <= 512
-        )
         self._native_upgrade_eligible, self._native_upgrade_reason = (
             _while_upgrade_status(arch, lowering_mode)
         )
@@ -3503,6 +4039,9 @@ class _GraphSpec:
             )
             for n in self.nodes
         )
+        self.structured_while_count = sum(
+            isinstance(n, _CompiledWhileGraphNode) for n in self.nodes
+        )
         self.observation_count = sum(
             isinstance(n, _CompiledObservationGraphNode) for n in self.nodes
         )
@@ -3838,7 +4377,7 @@ class _GraphExecutable:
             if context is not None:
                 context.end()
 
-    def run_for_submission(self, args, temporaries=None):
+    def run_for_submission(self, args, temporaries=None, telemetry=None):
         context = self._context
         if context is not None:
             context.begin(
@@ -3846,6 +4385,7 @@ class _GraphExecutable:
                 self.spec.fixed_runtime_args,
             )
         try:
+            telemetry_region = 0
             for node in self.spec.nodes:
                 if isinstance(
                     node,
@@ -3855,7 +4395,16 @@ class _GraphExecutable:
                         _CompiledSwitchGraphNode,
                     ),
                 ):
+                    if telemetry is not None and isinstance(
+                        node, _CompiledWhileGraphNode
+                    ):
+                        telemetry.begin_region(telemetry_region, node, context)
                     node.run_for_submission(context, temporaries)
+                    if telemetry is not None and isinstance(
+                        node, _CompiledWhileGraphNode
+                    ):
+                        telemetry.end_region(telemetry_region, node, context)
+                        telemetry_region += 1
                 else:
                     node.run(context, temporaries)
         finally:
@@ -3879,6 +4428,12 @@ class _GraphInstance:
             if isinstance(node, _CompiledObservationGraphNode)
         )
         self._observation_arena = _GraphObservationArena(self._observation_nodes)
+        self._structured_telemetry_nodes = tuple(
+            node for node in spec.nodes if isinstance(node, _CompiledWhileGraphNode)
+        )
+        self._structured_telemetry_arena = _GraphStructuredTelemetryArena(
+            self._structured_telemetry_nodes
+        )
 
         if len(spec.nodes) == 1 and isinstance(spec.nodes[0], _CompiledCGraphNode):
             node = spec.nodes[0]
@@ -3914,12 +4469,12 @@ class _GraphInstance:
     def run(self, args):
         self._run_impl(self, args, self._temporary_bindings)
 
-    def run_for_submission(self, args):
+    def run_for_submission(self, args, telemetry=None):
         if not self.spec.supports_native_structured_submission:
             return self.run(args)
         if self._executable is None:
             self._executable = _GraphExecutable(self.spec)
-        self._executable.run_for_submission(args, self._temporary_bindings)
+        self._executable.run_for_submission(args, self._temporary_bindings, telemetry)
 
     def bind_temporary_buffers(self, bindings):
         self._temporary_bindings = bindings
@@ -3946,6 +4501,13 @@ class _GraphInstance:
     def clear_observation_buffers(self):
         for node in self._observation_nodes:
             node.clear_snapshot_buffers()
+
+    def acquire_structured_telemetry_lease(self):
+        return self._structured_telemetry_arena.acquire()
+
+    @property
+    def structured_telemetry_arena_stats(self):
+        return self._structured_telemetry_arena.stats
 
     @property
     def observation_arena_stats(self):
@@ -4682,13 +5244,27 @@ class SubmissionTicket:
     the ticket without waiting.
     """
 
-    __slots__ = ("_admission", "_completion", "_observation", "_runtime")
+    __slots__ = (
+        "_admission",
+        "_completion",
+        "_observation",
+        "_runtime",
+        "_telemetry",
+    )
 
-    def __init__(self, completion, runtime, admission=None, observation=None):
+    def __init__(
+        self,
+        completion,
+        runtime,
+        admission=None,
+        observation=None,
+        telemetry=None,
+    ):
         self._admission = admission
         self._completion = completion
         self._observation = observation
         self._runtime = runtime
+        self._telemetry = telemetry
 
     def done(self):
         if self._admission is None:
@@ -4713,6 +5289,13 @@ class SubmissionTicket:
         self.wait()
         return self._observation.materialize()
 
+    def telemetry(self):
+        """Wait if needed, then return opt-in per-submission telemetry."""
+        if self._telemetry is None:
+            return None
+        self.wait()
+        return self._telemetry.materialize()
+
     @property
     def backend(self):
         return self._completion.backend
@@ -4730,6 +5313,12 @@ class SubmissionTicket:
         if observation is not None:
             try:
                 observation.discard()
+            except Exception:
+                pass
+        telemetry = getattr(self, "_telemetry", None)
+        if telemetry is not None:
+            try:
+                telemetry.discard()
             except Exception:
                 pass
 
@@ -4751,6 +5340,7 @@ class Graph:
         self._contains_structured_control_value = (
             self._spec.structured_control_count > 0
         )
+        self._contains_structured_while_value = self._spec.structured_while_count > 0
         self._contains_observations_value = self._spec.observation_count > 0
         self._last_observations = {}
         self._latest_control_flow_was_async = False
@@ -4836,6 +5426,7 @@ class Graph:
         pacer=None,
         lane=None,
         on_saturation="wait",
+        telemetry=False,
     ):
         """Submit one Graph invocation and return a ``SubmissionTicket``.
 
@@ -4844,7 +5435,15 @@ class Graph:
         concurrency, and automatic-differentiation rules are identical to
         ``run()``. A shared ``SubmissionPacer`` can bound backend backlog and
         fairly arbitrate complete host submissions before they enqueue work.
+        ``telemetry=True`` adds device snapshots around each structured while
+        region and exposes them through ``SubmissionTicket.telemetry()``.
         """
+        if not isinstance(telemetry, bool):
+            raise TaichiRuntimeError("Graph.submit() telemetry must be a bool")
+        if telemetry and not self._contains_structured_while_value:
+            raise TaichiRuntimeError(
+                "Graph.submit() telemetry currently requires a structured while"
+            )
         if (
             self._contains_structured_control_value
             and not self._spec.supports_native_structured_submission
@@ -4867,6 +5466,8 @@ class Graph:
         temporary_lease = None
         observation_lease = None
         observation_state = None
+        telemetry_lease = None
+        telemetry_state = None
         try:
             with self._lifecycle_lock:
                 self._check_runtime_valid()
@@ -4899,6 +5500,11 @@ class Graph:
                 # runtime submission reader/writer boundary.
                 temporary_lease = self._instance.acquire_temporary_lease()
                 observation_lease = self._instance.acquire_observation_lease()
+                telemetry_lease = (
+                    self._instance.acquire_structured_telemetry_lease()
+                    if telemetry
+                    else None
+                )
                 temporary_bindings = (
                     temporary_lease.bindings if temporary_lease is not None else None
                 )
@@ -4910,10 +5516,19 @@ class Graph:
                         if observation_lease is not None
                         else None
                     )
+                    queue_before = _queue_submission_snapshot() if telemetry else None
+                    host_submit_start_ns = time.perf_counter_ns()
                     transaction = runtime.prog._begin_runtime_submission_transaction()
                     runtime.prog._record_runtime_graph_submission()
                     if self._contains_structured_control_value:
-                        self._instance.run_for_submission(args)
+                        self._instance.run_for_submission(
+                            args,
+                            (
+                                telemetry_lease.recorder
+                                if telemetry_lease is not None
+                                else None
+                            ),
+                        )
                         self._latest_control_flow_was_async = True
                     else:
                         self._run_impl(args)
@@ -4923,12 +5538,21 @@ class Graph:
                     if self._contains_native_nodes_value:
                         transaction._mark_submission()
                     completion = transaction._finish()
+                    host_submit_ns = time.perf_counter_ns() - host_submit_start_ns
+                    queue_after = _queue_submission_snapshot() if telemetry else None
                     if temporary_lease is not None:
                         temporary_lease.attach(completion)
                         temporary_lease = None
                     if observation_lease is not None:
                         observation_state = observation_lease.attach(completion)
                         observation_lease = None
+                    if telemetry_lease is not None:
+                        telemetry_state = telemetry_lease.attach(
+                            completion,
+                            _queue_submission_delta(queue_before, queue_after),
+                            host_submit_ns,
+                        )
+                        telemetry_lease = None
                 finally:
                     self._instance.clear_observation_buffers()
                     self._instance.clear_temporary_buffers()
@@ -4939,6 +5563,8 @@ class Graph:
         except BaseException:
             if observation_lease is not None:
                 observation_lease.cancel()
+            if telemetry_lease is not None:
+                telemetry_lease.cancel()
             if temporary_lease is not None:
                 temporary_lease.cancel()
             if admission is not None:
@@ -4951,6 +5577,7 @@ class Graph:
             runtime,
             admission,
             observation=observation_state,
+            telemetry=telemetry_state,
         )
 
     def _instance_for_current_runtime(self):
@@ -5107,6 +5734,11 @@ class Graph:
                 if lifecycle_state == "ready"
                 else {}
             )
+            telemetry_arena_stats = (
+                self._instance.structured_telemetry_arena_stats
+                if lifecycle_state == "ready"
+                else {}
+            )
             observation_staging_bytes = 0
             if lifecycle_state == "ready" and (
                 self._contains_structured_control_value
@@ -5129,6 +5761,7 @@ class Graph:
                 ],
                 temporary_arena_stats=temporary_arena_stats,
                 observation_arena_stats=observation_arena_stats,
+                telemetry_arena_stats=telemetry_arena_stats,
             )
 
     @property
@@ -5364,6 +5997,9 @@ __all__ = [
     "GraphExecutionReport",
     "GraphWhileReport",
     "GraphBranchReport",
+    "GraphSubmissionRegionTelemetry",
+    "GraphSubmissionQueueTelemetry",
+    "GraphSubmissionTelemetry",
     "structured_control_capabilities",
     "Arg",
     "ArgKind",

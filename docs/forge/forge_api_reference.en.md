@@ -828,7 +828,7 @@ Contract:
 | `GraphBuilder.if_then_else(condition, then_region, *, predicate, control_inputs=(), else_region=None, lowering_mode="auto", name="if")` | Append a fixed two-way branch. Only the selected branch executes. |
 | `GraphBuilder.switch(condition, branches, *, selector, control_inputs=(), default_region=None, lowering_mode="auto", name="switch")` | Append a zero-based fixed branch table with an optional default. |
 | `Graph.control_flow_stats()` | Return immutable `GraphWhileReport` / `GraphBranchReport` values for the latest run. Native CUDA branch reports are materialized lazily, so requesting them is an explicit synchronization point. |
-| `ti.graph.structured_control_capabilities()` | Return the schema-v4 portable and device-control contract for the active backend. The result reports structured-submit and compound-submit qualification, bounded Vulkan chunk/replay limits, terminal-observation policy, tail strategy, queue-submit coalescing, and exact-dynamic-termination support separately. |
+| `ti.graph.structured_control_capabilities()` | Return the schema-v4 portable and device-control contract for the active backend. The result reports structured-submit and compound-submit qualification, bounded Vulkan chunk/replay limits, terminal-observation and ticket-telemetry policy, tail strategy, queue-submit coalescing, and exact-dynamic-termination support separately. |
 
 Condition regions combine multiple device values in ordinary Taichi kernels;
 structured control does not invoke Python callbacks. Graph treats `status` as
@@ -876,6 +876,16 @@ readback. A ticket can expose explicit terminal `GraphBuilder.observe()`
 snapshots; synchronous `control_flow_stats()` are unavailable for that
 asynchronous submission.
 
+Opt-in `submit(telemetry=True)` additionally records each while region's entry
+counter/status and terminal counter/predicate/status on device.
+`ticket.telemetry()` reads
+the packed snapshots only after completion and reports the actual stop
+iteration, encoded/masked work, active/skipped chunks, host enqueue time, and
+queue-counter window. Device-wide queue deltas are marked non-exact because
+external graphics/interop producers can submit in the same window. GPU
+timestamps are explicitly `unavailable` while compound replay cannot
+instrument them without changing the qualified path.
+
 ### `GraphBuilder.compile()`, `Graph.run(args)`, and `Graph.submit(args)`
 
 `compile()` freezes the dispatch/sequential definition at the call and returns
@@ -887,7 +897,8 @@ the same execution path and returns a completion ticket.
 | --- | --- |
 | `GraphBuilder.compile()` | Later changes to the builder or original `Sequential` do not modify the compiled graph. |
 | `Graph.run(args)` | `args` must be a dictionary with exactly the declared keys; missing or extra keys raise `TaichiRuntimeError`. |
-| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait')` | Uses the same exact argument, lifecycle, concurrency, and AD contract as `run()`, returns one `SubmissionTicket`, and can opt into shared admission pacing. Structured submission accepts qualified CUDA `native_required` while/if/switch regions and qualified Vulkan `native_required` while regions, including multiple ordered regions in one compound transaction. Portable control and unsupported native combinations fail explicitly. |
+| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait', telemetry=False)` | Uses the same exact argument, lifecycle, concurrency, and AD contract as `run()`, returns one `SubmissionTicket`, and can opt into shared admission pacing. `telemetry=True` adds per-while device snapshots; the default adds no snapshot kernels or buffers. Structured submission accepts qualified CUDA `native_required` while/if/switch regions and qualified Vulkan `native_required` while regions, including multiple ordered regions in one compound transaction. Portable control and unsupported native combinations fail explicitly. |
+| `SubmissionTicket.telemetry()` | Wait if needed and return an immutable `GraphSubmissionTelemetry` when telemetry was requested; otherwise return `None`. Region reports include terminal counters and stop positions. Nullable GPU duration fields are never inferred from host wall time. |
 | `Graph._prewarm()` | Warm the current runtime's backend plan; this internal/advanced entry point does not change the argument contract. |
 
 Concurrent host calls on one graph queue at the complete-invocation boundary;

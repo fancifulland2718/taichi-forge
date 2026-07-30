@@ -2563,6 +2563,9 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
                 "compound_chunk_size_limit",
                 "compound_first_chunk_strategies",
                 "compound_default_first_chunk_strategy",
+                "submission_ticket_region_telemetry",
+                "submission_ticket_queue_telemetry",
+                "submission_ticket_gpu_timestamps",
                 "coarse_conditional_available",
                 "coarse_conditional_qualified",
                 "max_control_bytes_per_slot",
@@ -2616,6 +2619,11 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         assert device["compound_per_region_chunk_size"]
         assert device["compound_chunk_size_limit"] == 64
         assert device["compound_default_first_chunk_strategy"] == "compact"
+        assert device["submission_ticket_region_telemetry"]
+        assert (
+            device["submission_ticket_queue_telemetry"] == "device_transaction_window"
+        )
+        assert device["submission_ticket_gpu_timestamps"] == "unavailable"
         assert device["compound_first_chunk_strategies"] == (
             "compact",
             *(
@@ -2678,6 +2686,9 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         assert device["compound_chunk_size_limit"] == 0
         assert device["compound_first_chunk_strategies"] == ()
         assert device["compound_default_first_chunk_strategy"] == "unavailable"
+        assert not device["submission_ticket_region_telemetry"]
+        assert device["submission_ticket_queue_telemetry"] == "unavailable"
+        assert device["submission_ticket_gpu_timestamps"] == "unavailable"
         assert device["unsupported_reason"] == "device_control_is_gpu_only"
 
 
@@ -3104,7 +3115,9 @@ def test_structured_graph_while_vulkan_strategy_selection_and_override(
 
     monkeypatch.setenv("TI_GRAPH_VULKAN_STRUCTURED_STRATEGY", "auto")
     large = _build_structured_while_graph(
-        max_iterations=128, lowering_mode="native_required"
+        max_iterations=128,
+        chunk_size=64,
+        lowering_mode="native_required",
     )
     large_args = _structured_while_args(target=5)
     large.run(large_args)
@@ -3335,9 +3348,7 @@ def test_structured_graph_vulkan_compound_first_chunk_gate_is_per_region():
         lowering_mode="native_required",
     )
     assert (
-        graph._ir_debug_info["root"]["children"][0][
-            "vulkan_first_chunk_strategy"
-        ]
+        graph._ir_debug_info["root"]["children"][0]["vulkan_first_chunk_strategy"]
         == "coarse_conditional"
     )
     args = _structured_while_args(target=13, active=False)
@@ -3358,6 +3369,99 @@ def test_structured_graph_vulkan_compound_chunk_budget_fails_at_compile():
             chunk_size=16,
             lowering_mode="native_required",
         )
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_structured_graph_vulkan_ticket_reports_opt_in_region_telemetry():
+    capabilities = ti.graph.structured_control_capabilities()["device_control"]
+    if not capabilities["compound_structured_submit"]:
+        pytest.skip(capabilities["structured_submit_reason"])
+
+    graph = _build_structured_while_graph(
+        max_iterations=64,
+        chunk_size=16,
+        lowering_mode="native_required",
+    )
+    args = _structured_while_args(target=13)
+    default_ticket = graph.submit(args)
+    default_ticket.wait()
+    assert default_ticket.telemetry() is None
+    assert not graph._instance.structured_telemetry_arena_stats["materialized"]
+
+    args["state"].fill(0)
+    args["predicate"].fill(0)
+    args["counter"].fill(0)
+    ticket = graph.submit(args, telemetry=True)
+    report = ticket.telemetry()
+    assert report.schema_version == 1
+    assert report.backend == "vulkan"
+    assert report.sequence == ticket.sequence
+    assert report.device_snapshot_bytes == 24
+    assert report.host_readback_bytes == 24
+    assert report.host_submit_ns > 0
+    assert report.gpu_timestamp_status == "unavailable"
+    assert report.queue.available
+    assert report.queue.scope == "vulkan_device_transaction_window"
+    assert not report.queue.exact
+    assert report.queue.queue_submit_calls >= 2
+    assert report.queue.batched_queue_submit_calls >= 1
+
+    assert len(report.regions) == 1
+    region = report.regions[0]
+    assert region.name == "adaptive_step"
+    assert region.logical_iterations == 13
+    assert region.initial_counter == 0
+    assert region.final_counter == 13
+    assert region.terminal_predicate == 0
+    assert region.encoded_iterations == 64
+    assert region.masked_iterations == 51
+    assert region.chunk_sizes == (16, 16, 16, 16)
+    assert region.chunk_strategies[0] == "compact"
+    assert region.active_chunk_count == 1
+    assert region.coarse_skipped_chunk_count in (0, 3)
+    assert region.host_enqueue_ns > 0
+    assert region.gpu_duration_ns is None
+    assert region.gpu_timestamp_status == "unavailable"
+    memory = graph.execution_stats().memory
+    assert memory.persistent_telemetry_bytes == 24
+    assert memory.telemetry_arena_slots == 1
+    assert memory.telemetry_materializations == 1
+    assert memory.telemetry_host_readback_bytes == 24
+
+
+@test_utils.test(arch=ti.cuda)
+def test_structured_graph_cuda_ticket_reports_opt_in_region_telemetry():
+    capabilities = ti.graph.structured_control_capabilities()["device_control"]
+    if not capabilities["compound_structured_submit"]:
+        pytest.skip(capabilities["structured_submit_reason"])
+
+    graph = _build_structured_while_graph(
+        max_iterations=64,
+        chunk_size=16,
+        lowering_mode="native_required",
+    )
+    ticket = graph.submit(
+        _structured_while_args(target=13),
+        telemetry=True,
+    )
+    report = ticket.telemetry()
+    assert report.backend == "cuda"
+    assert report.sequence == ticket.sequence
+    assert not report.queue.available
+    assert report.gpu_timestamp_status == "unavailable"
+    assert len(report.regions) == 1
+    region = report.regions[0]
+    assert region.logical_iterations == 13
+    assert region.initial_counter == 0
+    assert region.final_counter == 13
+    assert region.terminal_predicate == 0
+    assert region.encoded_iterations == 13
+    assert region.masked_iterations == 0
+    assert region.chunk_sizes == (13,)
+    assert region.chunk_strategies == ("cuda_conditional_graph",)
+    assert region.active_chunk_count == 1
+    assert region.coarse_skipped_chunk_count == 0
+    assert graph.execution_stats().memory.persistent_telemetry_bytes == 24
 
 
 @test_utils.test(arch=ti.vulkan)
@@ -3382,6 +3486,20 @@ def test_structured_graph_vulkan_compound_submit_preserves_region_dependencies()
     assert args["state"].to_numpy()[()] == 110
     assert args["counter_a"].to_numpy()[()] == 75
     assert args["counter_b"].to_numpy()[()] == 35
+
+    telemetry_ticket = graph.submit(
+        _two_stage_structured_while_args(target_a=75, target_b=110),
+        telemetry=True,
+    )
+    telemetry = telemetry_ticket.telemetry()
+    assert tuple(region.name for region in telemetry.regions) == (
+        "stage_a",
+        "stage_b",
+    )
+    assert tuple(region.logical_iterations for region in telemetry.regions) == (
+        75,
+        35,
+    )
 
 
 @test_utils.test(arch=ti.vulkan)
