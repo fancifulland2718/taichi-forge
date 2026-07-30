@@ -3618,13 +3618,43 @@ bool GfxRuntime::try_launch_graph(
         (nested_control == nullptr || nested_result == nullptr)) {
       return true;
     }
-    if (!slot->completion || !slot->completion->wait()) {
-      return false;
+    // Reaching this point means submit() has already transferred ownership of
+    // the command list to the queue. Any subsequent observation failure is
+    // therefore not a capability miss: falling back would execute the same
+    // side-effecting Graph a second time.
+    if (structured_result != nullptr) {
+      structured_result->submitted = true;
+    }
+    if (nested_result != nullptr) {
+      nested_result->submitted = true;
+    }
+    const auto fail_committed_observation =
+        [](const char *detail) -> void {
+      throw TaichiRuntimeError(fmt::format(
+          "Vulkan structured Graph submission committed, but terminal "
+          "observation {}. Portable fallback is disabled after queue "
+          "submission.",
+          detail));
+    };
+    if (!slot->completion) {
+      fail_committed_observation("did not receive a completion semaphore");
+    }
+    if (!slot->completion->wait()) {
+      fail_committed_observation("completion wait failed");
+    }
+    // Internal deterministic fault injection for the no-double-execution
+    // regression. It is intentionally checked only after completion, so the
+    // device-side side effects are observable by the test.
+    if (get_environ_config(
+            "TI_INTERNAL_TEST_VULKAN_GRAPH_FAIL_POST_SUBMIT_OBSERVATION",
+            0) != 0) {
+      fail_committed_observation("was rejected by fault injection");
     }
     void *mapped = nullptr;
-    if (device_->map(*slot->structured_observation_buffer, &mapped) !=
-        RhiResult::success) {
-      return false;
+    const RhiResult map_result =
+        device_->map(*slot->structured_observation_buffer, &mapped);
+    if (map_result != RhiResult::success) {
+      fail_committed_observation("mapping failed");
     }
     if (nested_control != nullptr && nested_result != nullptr) {
       std::vector<std::uint32_t> words(
@@ -3632,9 +3662,8 @@ bool GfxRuntime::try_launch_graph(
       std::memcpy(words.data(), mapped, structured_observation_bytes);
       device_->unmap(*slot->structured_observation_buffer);
       if (words.size() < kNestedStructuredHeaderWords) {
-        return false;
+        fail_committed_observation("contained a truncated nested header");
       }
-      nested_result->submitted = true;
       nested_result->outer_logical_iterations =
           std::min(words[0], nested_control->outer_max_iterations);
       nested_result->outer_encoded_iterations =
@@ -3668,7 +3697,7 @@ bool GfxRuntime::try_launch_graph(
             static_cast<std::size_t>(i) *
                 kNestedStructuredTraceWords;
         if (row + kNestedStructuredTraceWords > words.size()) {
-          return false;
+          fail_committed_observation("contained a truncated nested trace");
         }
         const std::uint32_t inner_logical =
             std::min(words[row],
@@ -3721,7 +3750,6 @@ bool GfxRuntime::try_launch_graph(
     std::array<std::uint32_t, kStructuredObservationWords> words{};
     std::memcpy(words.data(), mapped, sizeof(words));
     device_->unmap(*slot->structured_observation_buffer);
-    structured_result->submitted = true;
     structured_result->strategy = structured_strategy;
     structured_result->logical_iterations = words[0];
     structured_result->predicate =

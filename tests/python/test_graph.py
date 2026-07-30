@@ -1,5 +1,6 @@
 import platform
 import gc
+import os
 import threading
 import time
 import weakref
@@ -3008,6 +3009,33 @@ def test_nested_structured_while_is_exact_and_reports_stable_paths():
         )
         assert memory.persistent_bytes >= memory.persistent_argument_bytes
 
+        # Once the queue accepts a side-effecting structured submission,
+        # terminal-observation failures must never be reclassified as native
+        # capability misses. Keep the predicate true at the encoded bound so
+        # a mistaken portable fallback would advance outer_state from 5 to 10.
+        for value in args.values():
+            value.fill(0)
+        fault_name = (
+            "TI_INTERNAL_TEST_VULKAN_GRAPH_FAIL_POST_SUBMIT_OBSERVATION"
+        )
+        previous_fault = os.environ.get(fault_name)
+        os.environ[fault_name] = "1"
+        try:
+            with pytest.raises(
+                ti_core.TaichiRuntimeError,
+                match="submission committed.*Portable fallback is disabled",
+            ):
+                graph.run(
+                    {**args, "outer_target": 10, "inner_target": 2},
+                )
+        finally:
+            if previous_fault is None:
+                os.environ.pop(fault_name, None)
+            else:
+                os.environ[fault_name] = previous_fault
+        assert args["outer_state"].to_numpy()[()] == 5
+        assert args["outer_counter"].to_numpy()[()] == 5
+
     debug = graph._debug_info
     assert debug["structured_control_count"] == 2
     assert debug["max_structured_depth"] == 2
@@ -3860,6 +3888,29 @@ def test_structured_graph_while_terminal_observation_is_replay_owned(
     assert disabled_report.direct_observation_batches == 0
     assert disabled_report.logical_iterations == 5
     assert disabled["state"].to_numpy()[()] == 5
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_structured_graph_post_submit_observation_failure_is_fail_closed(
+    monkeypatch,
+):
+    graph = _build_structured_while_graph(max_iterations=4)
+    args = _structured_while_args(target=100)
+    fault_name = (
+        "TI_INTERNAL_TEST_VULKAN_GRAPH_FAIL_POST_SUBMIT_OBSERVATION"
+    )
+    with monkeypatch.context() as fault:
+        fault.setenv(fault_name, "1")
+        with pytest.raises(
+            ti_core.TaichiRuntimeError,
+            match="submission committed.*Portable fallback is disabled",
+        ):
+            graph.run(args)
+
+    # The committed native replay executes exactly once. A portable fallback
+    # would observe a still-true predicate and advance both values to eight.
+    assert args["state"].to_numpy()[()] == 4
+    assert args["counter"].to_numpy()[()] == 4
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
