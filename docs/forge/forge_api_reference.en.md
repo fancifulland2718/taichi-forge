@@ -828,7 +828,7 @@ Contract:
 | `GraphBuilder.if_then_else(condition, then_region, *, predicate, control_inputs=(), else_region=None, lowering_mode="auto", name="if")` | Append a fixed two-way branch. Only the selected branch executes. |
 | `GraphBuilder.switch(condition, branches, *, selector, control_inputs=(), default_region=None, lowering_mode="auto", name="switch")` | Append a zero-based fixed branch table with an optional default. |
 | `Graph.control_flow_stats()` | Return immutable `GraphWhileReport` / `GraphBranchReport` values for the latest run. Native CUDA branch reports are materialized lazily, so requesting them is an explicit synchronization point. |
-| `ti.graph.structured_control_capabilities()` | Return schema-v1 portable and device-control qualification for the active backend. It separates an available RHI primitive from a complete structured runtime path; Vulkan indirect dispatch is reported without claiming device-controlled structured submission. |
+| `ti.graph.structured_control_capabilities()` | Return the schema-v4 portable and device-control contract for the active backend. The result reports structured-submit and compound-submit qualification, bounded Vulkan chunk/replay limits, terminal-observation policy, tail strategy, queue-submit coalescing, and exact-dynamic-termination support separately. |
 
 Condition regions combine multiple device values in ordinary Taichi kernels;
 structured control does not invoke Python callbacks. Graph treats `status` as
@@ -838,15 +838,37 @@ an iteration budget.
 
 CPU uses exact host control over cached dispatch plans. Eligible CUDA `while`
 regions use a native conditional Graph in `lowering_mode="auto"`; otherwise
-they use exact portable replay. Vulkan currently uses portable exact or
-explicit masked-chunk replay. CUDA native conditional control requires Driver
-API 12.8 or newer and the qualified conditional symbols/lowering. `portable`
-forces fallback; `native_required` fails when native CUDA control cannot be
-selected. Eligible CUDA `if` and `switch` regions use native IF/SWITCH nodes;
-CPU and Vulkan retain exact portable host control. Portable structured-control
-Graphs use `run()` and reject `submit()`. CUDA `native_required` while, if, and
-switch regions support `submit()` when conditional Graph lowering is available.
-An ordered device setter reads the predicate or selector without host control
+they use exact portable replay. CUDA native conditional control requires
+Driver API 12.8 or newer and the qualified conditional symbols/lowering.
+
+Vulkan provides two distinct `while` routes. `portable` retains exact
+host-observed replay. A qualified `native_required` region uses bounded
+device-controlled masking with 64-iteration chunks, at most eight replay
+chunks, and therefore a maximum budget of 512 iterations per region. The
+automatic strategy records the first chunk with compact per-iteration masking.
+When `VK_EXT_conditional_rendering` is qualified, each later chunk first copies
+its entry predicate to a stable conditional word and wraps the whole chunk in
+one conditional command. A loop that terminates inside an active chunk still
+masks its remaining iterations; a later inactive chunk skips its shader
+dispatches at the conditional-command level. This preserves exact logical
+results but does not provide exact dynamic command termination: commands for
+the active chunk are already encoded.
+
+One Vulkan `Graph.submit()` may contain multiple qualified
+`native_required` `while` regions. Forge enqueues them in program order inside
+one runtime transaction, batches their Vulkan queue submissions, and publishes
+one final `SubmissionTicket` observation boundary. The fixed eight-slot replay
+ring remains the inter-invocation backpressure boundary. First-use resource
+materialization may flush a preceding command list before the compound batch;
+steady execution uses one transaction batch plus the completion-fence
+submission. Vulkan `if` and `switch` remain portable-only.
+
+`portable` forces the portable route; `native_required` fails closed when the
+selected backend cannot honor its native contract. Portable structured-control
+Graphs use `run()` and reject `submit()`. Qualified CUDA
+`native_required` while/if/switch regions and qualified Vulkan
+`native_required` while regions support `submit()`. An ordered device setter
+or Vulkan predicate gate consumes control state without a per-region host
 readback. A ticket can expose explicit terminal `GraphBuilder.observe()`
 snapshots; synchronous `control_flow_stats()` are unavailable for that
 asynchronous submission.
@@ -862,7 +884,7 @@ the same execution path and returns a completion ticket.
 | --- | --- |
 | `GraphBuilder.compile()` | Later changes to the builder or original `Sequential` do not modify the compiled graph. |
 | `Graph.run(args)` | `args` must be a dictionary with exactly the declared keys; missing or extra keys raise `TaichiRuntimeError`. |
-| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait')` | Uses the same exact argument, lifecycle, concurrency, and AD contract as `run()`, returns a `SubmissionTicket`, and can opt into shared admission pacing. Structured submission is limited to CUDA `native_required` while/if/switch regions with available conditional Graph lowering; portable control fails explicitly. |
+| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait')` | Uses the same exact argument, lifecycle, concurrency, and AD contract as `run()`, returns one `SubmissionTicket`, and can opt into shared admission pacing. Structured submission accepts qualified CUDA `native_required` while/if/switch regions and qualified Vulkan `native_required` while regions, including multiple ordered regions in one compound transaction. Portable control and unsupported native combinations fail explicitly. |
 | `Graph._prewarm()` | Warm the current runtime's backend plan; this internal/advanced entry point does not change the argument contract. |
 
 Concurrent host calls on one graph queue at the complete-invocation boundary;

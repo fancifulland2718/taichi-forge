@@ -143,18 +143,20 @@ work 与数值 breakdown。它写入只包含一个整数的 `predicate` ndarray
 | --- | --- | --- |
 | CPU | 精确 `cpu_host_loop`；condition/body 使用 cached compiled dispatch plan | 精确 portable host control |
 | CUDA | Driver API 不低于 12.8 且具备所需 symbol/lowering 时，`auto` 使用原生 CUDA conditional Graph；否则使用精确 portable replay | 资格满足时，`auto` 使用单个原生 CUDA IF/SWITCH node；否则使用精确 portable host control |
-| Vulkan | 默认使用精确 portable replay；可选 masked chunk replay 可减少观测，并分别报告逻辑/实际执行迭代 | 精确 portable host control |
+| Vulkan | 精确 portable replay，或满足资格的 `native_required` 有界 masking；每个 chunk 64 轮，每个 region 最多八个 chunk/512 轮 | 精确 portable host control |
 
-`ti.graph.structured_control_capabilities()` 返回当前 backend 的 portable lowering 与
-device-control 资格。报告会刻意区分 RHI primitive 和完整的结构化 runtime 路径：Vulkan
-RHI 已具备 indirect compute dispatch，但在 predicate 生成、可见性、zero-dispatch、replay
-与终态观测形成统一的已资格化 runtime 合同之前，不宣称支持 device-controlled `while`、
-`if` 或 `switch`。
+`ti.graph.structured_control_capabilities()` 返回当前 backend 的 schema-v4 portable
+lowering 与 device-control 资格。报告分别描述 primitive 可用性、完整 runtime 资格、
+compound submission、终态观测、tail strategy、queue-submit 合并与 exact dynamic
+termination。Vulkan 声明有界 `while` 执行，但不据此声明原生 `if`/`switch`，也不宣称
+能够精确终止已经编码的 active command chunk。
 
 `lowering_mode="portable"` 强制 portable 路径。
-`lowering_mode="native_required"` 要求已资格化的 CUDA conditional 路径，不可用时会在
-执行前失败。recordable provider action 只有在 provider 声明适合结构化 body 时才能进入
-region；opaque 或不支持的 provider 会明确失败。
+`lowering_mode="native_required"` 要求当前 backend 的已资格化原生路径，不可用时会在
+执行前失败。CUDA 对应 conditional Graph control；Vulkan 对应最大 512 轮、64 轮 chunk、
+runtime replay mode 已启用且未使用不兼容 profiler/dispatch-cache 配置的有界 `while`。
+recordable provider action 只有在 provider 声明适合结构化 body 时才能进入 region；
+opaque 或不支持的 provider 会明确失败。
 
 recordable provider 还可声明由 Graph temporary requirement 支撑的私有符号 scratch。
 Graph memory plan 为每个正在执行的 invocation 分配一个有界 arena slot，在提交前解析
@@ -175,10 +177,38 @@ fire-and-continue 合同：selector 回读和 report 构造延迟到请求 `cont
 原因。portable 结构化 region 使用同步 `Graph.run()`；`Graph.submit()` 会明确拒绝，
 不会把 host-observed 控制隐藏在异步 ticket 后面。在 CUDA conditional Graph lowering
 可用时，声明 `lowering_mode='native_required'` 的 `while_loop`、`if_then_else` 与
-`switch` 都可使用 `Graph.submit()`。有序 device setter 会在 conditional child 前读取
-predicate 或 selector，因此 condition、选定 branch/有界 device loop 以及显式终态
-`GraphBuilder.observe()` snapshot 会连续入队，不做 host 控制回读。异步结构化提交后应
-通过 `ticket.observations()` 读取终态；该次 submission 不提供同步控制流报告。
+`switch` 都可使用 `Graph.submit()`。满足资格的 Vulkan `native_required` `while_loop`
+也可使用 `Graph.submit()`；Vulkan branch 仍是 portable。CUDA 有序 setter 与 Vulkan
+predicate gate 都无需逐 region host 回读即可消费控制状态。异步结构化提交后应通过
+`ticket.observations()` 读取终态；该次 submission 不提供同步控制流报告。
+
+### Vulkan compound 结构化事务
+
+一次 Vulkan submission transaction 可以包含多个有序的 bounded `while` region。runtime
+预先入队每个满足资格的 replay chunk，按 Graph 程序顺序保留 region 依赖，并只发布一个
+最终 `SubmissionTicket`；region 之间不会读取 terminal predicate。submit-only replay
+不会录制同步控制流报告专用的逐 chunk terminal shader 与 host-observation copy；显式
+`GraphBuilder.observe()` snapshot 仍只在 transaction 末尾执行一次。该能力是通用 Graph
+合同，solver、line search、contact 等语义仍由用户 kernel 与 recordable provider 定义。
+
+第一个 chunk 使用 compact per-iteration indirect masking。当
+`VK_EXT_conditional_rendering` 资格满足时，一个小型 gate shader 会把后续每个 chunk
+入口处的 predicate 复制到稳定 control storage，并以一个 conditional command 包围整个
+chunk。在 active chunk 内终止仍会留下 masked tail；之后的 inactive chunk 会跳过其 shader
+dispatch。该策略减少已提交的 shader 工作，但不宣称 device-generated command 或 exact
+command-stream termination。
+
+runtime 把 transaction 内记录的 command buffer 合并到一次 Vulkan queue submission，
+同时保留每个 command buffer 的 wait/signal semaphore。随后用一个空 fence submission
+建立公开 completion ticket。首次物化 observation/replay 资源时，compound batch 前可能
+先清空已有 command list；稳态执行因此是一次 transaction batch 加一次
+completion-fence submission。一个 batch 内的全部 command buffer 保守地共享 batch fence
+并据此退役。
+
+完整 transaction 期间 GFX host API mutex 持续持有，避免无关 producer 被吸收到同一
+batch。固定八槽 replay ring 提供有界 invocation 间 backpressure。`SubmissionPacer` 可以
+调节完整 invocation 和 lane，但两者都不能抢占 GPU 工作或提供优先级。大型 compound
+submission 应保留明确迭代预算；与延迟敏感工作共享设备时，应在应用层使用 pacing。
 
 conditional-control metadata 会在有序 default stream 上异步上传，并保留到对应 replay
 完成。runtime 最多保留两个 deferred replay batch；第三次快速提交会等待最早 batch，而不是
@@ -302,11 +332,12 @@ ready 前，command buffer、descriptor 与 completion semaphore 继续由旧 st
 后续 launch 或同步会回收已完成 state，不增加退役等待。runtime shutdown 会在 device
 teardown 前关闭 registration。
 
-Replay 有意采用固定 8 个在途 slot 的 ring。所有 slot 忙时，本次调用不等待，直接使用
-ordinary dispatch。本地有界扩容实验消除了少量饱和 fallback，却没有形成可重复的中位
-吞吐收益。1024-graph churn 样本在 16-slot 上限下让 driver 报告的 Vulkan memory 增加约
-2.55 GiB，即使 host RSS 和精确结果仍稳定。driver 可能在 host graph state 退役后继续
-保留 command、descriptor 与 semaphore pool。
+Replay 有意采用固定 8 个在途 slot 的 ring。普通 `Graph.run()` replay 在全部 slot 忙时
+可以使用 ordinary dispatch。异步结构化提交则会在下一个完整 replay slot 边界等待，不会
+先提交半个 invocation 再 fallback。本地有界扩容实验消除了少量饱和 fallback，却没有形成
+可重复的中位吞吐收益。1024-graph churn 样本在 16-slot 上限下让 driver 报告的 Vulkan
+memory 增加约 2.55 GiB，即使 host RSS 和精确结果仍稳定。driver 可能在 host graph state
+退役后继续保留 command、descriptor 与 semaphore pool。
 
 因此 Forge 不把 slot 容量暴露为 DSL 选项，也不按 graph 弹性增长。重新评估时必须同时
 运行 `tests/python/vulkan_graph_slot_bench.py` 与 graph retirement stress；只消除
@@ -361,6 +392,23 @@ conditional control steady median 为 464.8 us，forced portable replay 为 1,43
 2 batch / 24 bytes。首次 conditional capture 为 20.4 ms，单独计入 preparation。相同
 无插桩 probe 的 CPU host control 为 6,513.6 us，Vulkan portable control 为
 4,375.4 us；这些后端数字只描述本次测试的执行边界，不构成跨设备性能承诺。
+
+`benchmarks/graph_compound_structured_bench.py` 测量完整有序 multi-region
+transaction，并分别报告 host enqueue、completion wait、end-to-end、runtime wait 与
+Vulkan 原生 queue-submission 计数。在同类 Windows 设备上，预热后的 16-region workload
+包含 4,096 个 f32 数值、每 region 512 轮预算并在第 12 轮逻辑终止；自动 coarse tail 的
+end-to-end median 为 55.15 ms，全 chunk compact masking 为 60.96 ms，缩短 9.5%。
+completion wait 从 44.58 ms 降至 38.25 ms，缩短 14.2%；host enqueue 基本不变
+（16.53 ms 对 16.46 ms）。30 次测量形成 30 个 transaction queue batch；专项
+72-command 回归也要求结构化 transaction 恰好形成一个 batch。这些结果是完整 transaction
+wall time 与 queue telemetry；Vulkan profiler trace 不可用时不会从 wall time 推测 shader
+timestamp。
+
+在相同 workload 与 build 上，同步结构化 `run()` median 为 56.39 ms；compound
+`submit()` 为 55.15 ms，端到端缩短 2.2%，并在 16.53 ms 返回 host control，比同步边界
+提前 70.7%。30 次 invocation 的原生 queue-submit call 从 588 次降至 62 次，减少
+89.5%。compound 执行仍会预编码有界 tail command buffer，因此这些结果证明的是 host
+control 与 queue-submit 固定开销下降，而不是 CUDA 式 exact dynamic termination。
 
 当前 Dense Field multi-block 吞吐、编译扩展、cache、RSS/VRAM 与 Graph/AD guard
 微基准统一记录在 [Dense Field Graph](dense_field_graph.zh.md)。这些只作为本机回归证据，

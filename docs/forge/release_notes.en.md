@@ -97,10 +97,20 @@ the `0.5.0` artifacts:
   `while`, `if`, and `switch` regions automatically use native conditional
   Graph nodes; `native_required` regions also support asynchronous
   `Graph.submit()` without a host control readback. Conditional metadata upload
-  is asynchronous and retains at most two deferred replay batches. CPU and
-  Vulkan retain explicit exact portable paths, and
-  `structured_control_capabilities()` separates Vulkan's RHI indirect-dispatch
-  primitive from an unavailable full structured runtime path.
+  is asynchronous and retains at most two deferred replay batches. CPU retains
+  exact portable control. Vulkan supports both exact portable control and
+  qualified bounded `native_required` `while` regions with 64-iteration
+  chunks, an eight-chunk/512-iteration limit, and compound asynchronous
+  submission of multiple ordered regions through one terminal ticket.
+  Automatic Vulkan lowering combines compact masking in the active chunk with
+  coarse conditional-rendering gates for later chunks. Runtime transactions
+  coalesce their command buffers into one queue batch while preserving
+  semaphore order and bounded replay-slot retirement. Vulkan `if`/`switch` and
+  exact dynamic command termination remain unsupported and are reported
+  independently by `structured_control_capabilities()`. On a warmed Windows
+  16-region, 512-budget early-termination workload, the automatic coarse tail
+  reduced complete transaction median by 9.5% versus compact masking for every
+  chunk, with identical terminal results.
 - Added `LinearOperator.graph_action()` for recording compiled-kernel f32
   providers directly into Graph roots and structured bodies. Provider-owned
   topology/numeric generations remain zero-copy fixed bindings, input/output

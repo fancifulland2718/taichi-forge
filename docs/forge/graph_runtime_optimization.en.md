@@ -168,21 +168,24 @@ Current lowering is explicit:
 | --- | --- | --- |
 | CPU | Exact `cpu_host_loop`; condition and body use cached compiled dispatch plans | Exact portable host control |
 | CUDA | `auto` uses a native CUDA conditional Graph when the Driver API is at least 12.8 and the required symbols/lowering are available; otherwise exact portable replay | `auto` uses one native CUDA IF/SWITCH node when qualified; otherwise exact portable host control |
-| Vulkan | Exact portable replay by default; optional masked chunk replay may reduce observations while reporting logical and executed iterations separately | Exact portable host control |
+| Vulkan | Exact portable replay, or qualified `native_required` bounded masking with 64-iteration chunks and an eight-chunk/512-iteration region limit | Exact portable host control |
 
 `ti.graph.structured_control_capabilities()` returns the active backend's
-portable lowering and device-control qualification. The report intentionally
-separates an RHI primitive from a complete structured runtime path: Vulkan has
-indirect compute dispatch in its RHI, but does not claim device-controlled
-`while`, `if`, or `switch` until predicate production, visibility,
-zero-dispatch behavior, replay, and terminal observation are qualified as one
-runtime contract.
+schema-v4 portable lowering and device-control qualification. The report
+separates primitive availability, complete runtime qualification, compound
+submission, terminal observation, tail strategy, queue-submit coalescing, and
+exact dynamic termination. Vulkan qualifies bounded `while` execution without
+claiming native `if`/`switch` or exact termination of an already encoded
+command chunk.
 
 `lowering_mode="portable"` forces the portable route.
-`lowering_mode="native_required"` requires the qualified CUDA conditional
-route and fails before execution when unavailable. Recordable provider actions
-may enter a structured body only when their provider declares it safe; opaque
-or unsupported providers fail closed.
+`lowering_mode="native_required"` requires the qualified backend route and
+fails before execution when unavailable. On CUDA this means conditional Graph
+control. On Vulkan it means a bounded `while` with at most 512 iterations,
+64-iteration chunks, runtime replay mode enabled, and no unsupported profiler
+or dispatch-cache configuration. Recordable provider actions may enter a
+structured body only when their provider declares it safe; opaque or
+unsupported providers fail closed.
 
 Recordable providers may also declare private symbolic scratch bindings backed
 by Graph temporary requirements. The Graph memory plan materializes one bounded
@@ -210,13 +213,48 @@ and native-upgrade reason. Portable structured regions use synchronous
 `Graph.run()` and are rejected by `Graph.submit()` rather than being hidden
 behind an asynchronous ticket. CUDA `while_loop`, `if_then_else`, and `switch`
 regions declared with `lowering_mode='native_required'` may use `Graph.submit()`
-when conditional Graph lowering is available. An ordered device setter reads
-the predicate or selector before the conditional child, so the condition,
-selected branch or bounded loop, and any explicit terminal
-`GraphBuilder.observe()` snapshot are enqueued without a host control readback.
-After asynchronous structured submission, read terminal state from
-`ticket.observations()`; synchronous control-flow reports remain unavailable
-for that submission.
+when conditional Graph lowering is available. Qualified Vulkan
+`native_required` `while_loop` regions may also use `Graph.submit()`; Vulkan
+branches remain portable. Ordered CUDA setters and Vulkan predicate gates
+consume control state without a per-region host readback. After asynchronous
+structured submission, read terminal state from `ticket.observations()`;
+synchronous control-flow reports remain unavailable for that submission.
+
+### Vulkan compound structured transactions
+
+A single Vulkan submission transaction may contain multiple ordered bounded
+`while` regions. The runtime pre-enqueues every qualified replay chunk, keeps
+region dependencies in Graph program order, and publishes one final
+`SubmissionTicket`. It does not read a terminal predicate between regions.
+Submit-only replay omits the per-chunk terminal shader and host-observation
+copy used by synchronous control-flow reports; an explicit
+`GraphBuilder.observe()` snapshot still executes once at the transaction end.
+This is a generic Graph contract: solver, line-search, contact, and other
+meanings remain in user kernels and recordable providers.
+
+The first chunk uses compact per-iteration indirect masking. When
+`VK_EXT_conditional_rendering` is qualified, a small gate shader copies the
+entry predicate into stable control storage for every later chunk, and one
+conditional command surrounds that whole chunk. Termination within the active
+chunk still leaves a masked tail, while later inactive chunks skip their shader
+dispatches. This reduces the submitted shader workload without claiming
+device-generated commands or exact command-stream termination.
+
+The runtime batches command buffers recorded inside the transaction into one
+Vulkan queue submission while preserving each command buffer's wait and signal
+semaphores. A final empty fence submission establishes the public completion
+ticket. First-use observation or replay allocation may leave an earlier command
+list that is flushed before the batch; steady-state execution therefore has
+one transaction batch plus one completion-fence submission. All command
+buffers in a batch conservatively share the batch fence for retirement.
+
+The GFX host API mutex is held for the complete transaction, preventing an
+unrelated producer from being absorbed into the batch. The fixed eight-slot
+replay ring provides bounded inter-invocation backpressure. A
+`SubmissionPacer` can regulate complete invocations and lanes, but neither
+mechanism preempts GPU work or assigns priorities. Large compound submissions
+should keep explicit iteration budgets and use application-level pacing when
+they share a device with latency-sensitive work.
 
 Conditional-control metadata is uploaded asynchronously on the ordered default
 stream and retained until the associated replay completes. The runtime keeps at
@@ -376,13 +414,16 @@ in-flight slot is ready. Later launches or synchronization collect completed
 state without adding a retirement wait. Runtime shutdown closes registration
 before device teardown.
 
-Replay deliberately uses a fixed ring of eight in-flight slots. When all slots
-are busy, the current invocation takes ordinary dispatch without waiting.
-Local bounded-growth experiments removed rare saturation fallbacks but did not
-produce repeatable median throughput gains. A 1024-graph churn sample with a
-16-slot cap increased driver-reported Vulkan memory by about 2.55 GiB even
-though host RSS and exact results remained stable. Driver-retained command,
-descriptor, and semaphore pools can outlive host graph state.
+Replay deliberately uses a fixed ring of eight in-flight slots. Ordinary
+`Graph.run()` replay may take ordinary dispatch when all slots are busy.
+Asynchronous structured submission instead waits at the next complete replay
+slot boundary before enqueueing that region; it never submits a partial
+invocation and then falls back. Local bounded-growth experiments removed rare
+saturation fallbacks but did not produce repeatable median throughput gains.
+A 1024-graph churn sample with a 16-slot cap increased driver-reported Vulkan
+memory by about 2.55 GiB even though host RSS and exact results remained
+stable. Driver-retained command, descriptor, and semaphore pools can outlive
+host graph state.
 
 Forge therefore does not expose slot capacity as a DSL option or grow it per
 graph. Re-evaluate this policy with both
@@ -453,6 +494,28 @@ portable replay, a 67.6% reduction (3.09x). Control observations decreased from
 6,513.6 us on CPU host control and 4,375.4 us on Vulkan portable control; these
 backend numbers describe the tested execution boundaries, not cross-device
 performance promises.
+
+`benchmarks/graph_compound_structured_bench.py` measures a complete ordered
+multi-region transaction and reports host enqueue, completion wait, end-to-end
+time, runtime waits, and native Vulkan queue-submission counts. On the same
+class of Windows device, a warmed 16-region workload with 4,096 f32 values,
+a 512-iteration budget per region, and logical termination at iteration 12
+measured 55.15 ms median end-to-end with the automatic coarse tail versus
+60.96 ms with compact masking for every chunk, a 9.5% reduction. Completion
+wait decreased by 14.2% (38.25 ms versus 44.58 ms), while host enqueue remained
+effectively unchanged (16.53 ms versus 16.46 ms). Thirty measured invocations
+formed thirty transaction queue batches; the focused 72-command regression
+also requires exactly one batch for the structured transaction. These are
+whole-transaction wall-time and queue-telemetry results. No shader timestamp
+is inferred when a Vulkan profiler trace is unavailable.
+
+Against synchronous structured `run()` on the same workload and build,
+compound `submit()` reduced median end-to-end time from 56.39 ms to 55.15 ms
+(2.2%) and returned host control at 16.53 ms, 70.7% before the synchronous
+boundary. Across thirty invocations, native queue-submit calls decreased from
+588 to 62 (89.5%). Compound execution still pre-encodes bounded tail command
+buffers, so these results demonstrate lower host-control and queue-submit
+overhead rather than CUDA-style exact dynamic termination.
 
 Current Dense Field multi-block throughput, compile scaling, cache, RSS/VRAM,
 and the Graph/AD guard microbenchmark are reported in

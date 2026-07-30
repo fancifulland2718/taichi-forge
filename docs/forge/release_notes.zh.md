@@ -82,8 +82,16 @@
   观测流量与 fallback 原因。满足资格的 CUDA `while`、`if` 与 `switch` 使用原生
   conditional node；`native_required` region 可通过 `Graph.submit()` 异步提交，且不做
   host 控制回读。conditional metadata 异步上传，并最多保留两个 deferred replay batch。
-  CPU/Vulkan 保留明确的精确 portable 路径；`structured_control_capabilities()` 会把
-  Vulkan 的 RHI indirect-dispatch primitive 与尚未形成的完整结构化 runtime 路径分开报告。
+  CPU 保留精确 portable 控制。Vulkan 同时支持精确 portable 控制与满足资格的有界
+  `native_required` `while`：每个 chunk 64 轮、每个 region 最多八个 chunk/512 轮，并可把
+  多个有序 region 作为 compound asynchronous submission 通过一个 terminal ticket 提交。
+  Vulkan 自动 lowering 在 active chunk 内使用 compact masking，并用 coarse conditional
+  rendering gate 跳过后续 chunk。runtime transaction 把其中的 command buffer 合并为一次
+  queue batch，同时保持 semaphore 顺序和有界 replay-slot 退役。Vulkan `if`/`switch` 与
+  exact dynamic command termination 仍不支持，并由
+  `structured_control_capabilities()` 独立报告。在预热后的 Windows 16-region、
+  512-budget early-termination workload 中，自动 coarse tail 相对全 chunk compact
+  masking 将完整 transaction median 缩短 9.5%，terminal 结果一致。
 - 新增 `LinearOperator.graph_action()`，可把 compiled-kernel f32 provider 直接录入
   Graph root 或结构化 body。provider-owned topology/numeric generation 保持 zero-copy
   fixed binding，input/output dense storage 使用通用 runtime 协议；numeric generation
