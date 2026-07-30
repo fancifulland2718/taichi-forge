@@ -28,6 +28,12 @@ You can call `ti.sync()`, which is similar to CUDA's `cudaStreamSynchronize()`, 
 
 `__syncthreads()` is a block-level synchronization barrier, and Taichi provides a synonymous API `ti.simt.block.sync()`, which for now supports CUDA and Vulkan backends only. However, all block-level APIs are still experimental, and you should use this API only when it relates to SIMT operation synchronization and `SharedArray` reads and writes.
 
+Declare `ti.simt.block.SharedArray` inside a parallel Taichi range-for loop so
+that its allocation has an unambiguous thread-block owner. The declaration may
+also be in an inlined `@ti.func` called from that loop. Kernel-root
+declarations and declarations in a serialized range-for are rejected at
+compile time; Taichi does not silently move them to global temporary memory.
+
 ## Data structures
 
 ### How do I declare a field with a **dynamic length**?

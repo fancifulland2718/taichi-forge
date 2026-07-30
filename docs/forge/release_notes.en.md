@@ -114,6 +114,13 @@ the `0.5.0` artifacts:
   no intermediate render target or copy. Responsive font policy now composes
   with per-window user zoom and edge-local Ctrl+wheel, Ctrl++/-, and Ctrl+0
   shortcuts without rebuilding the font atlas.
+- `ti.simt.block.SharedArray` now has a fail-closed block-ownership contract.
+  Declarations inside a parallel Taichi range-for, including declarations in
+  an inlined `@ti.func`, retain the existing one-task fast path. Kernel-root
+  and serialized-loop declarations are rejected consistently by JIT, AOT, and
+  Graph compilation before offload separation can promote their storage to a
+  kernel-global temporary. CUDA and Vulkan carry runtime regression coverage;
+  other GPU backends are not newly qualified by this change.
 - JIT Graph `ArgKind.NDARRAY` runtime arguments now consume the common runtime
   storage protocol for Ndarrays, dense fields, and explicit
   `DenseNdarrayView` objects. Compact Program-owned Ndarray and SNode payload

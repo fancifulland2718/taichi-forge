@@ -96,6 +96,11 @@
   framebuffer 布局快照；不增加中间 render target 或 copy。响应式字体策略现在可
   叠加 per-window 用户缩放，并在 edge region 内支持 Ctrl+wheel、Ctrl++/- 与
   Ctrl+0，过程中不重建 font atlas。
+- `ti.simt.block.SharedArray` 现在使用 fail-closed 的 block ownership 合同。在并行
+  Taichi range-for 内声明（包括从循环内调用的内联 `@ti.func`）仍走既有单 task
+  快速路径；kernel root 与 serialized loop 内的声明会在 offload 拆分将其错误提升为
+  kernel-global temporary 之前，由 JIT、AOT 与 Graph 编译一致拒绝。CUDA 与 Vulkan
+  有 runtime 回归覆盖；本次更新不据此新增其他 GPU 后端的资格声明。
 - JIT Graph 的 `ArgKind.NDARRAY` runtime 参数现在通过通用 runtime-storage 协议消费
   Ndarray、dense field 与显式 `DenseNdarrayView`。compact Program-owned Ndarray 与
   SNode payload binding 可使用 CUDA capture、exact replay 和兼容 allocation patch；
