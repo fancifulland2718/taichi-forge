@@ -68,6 +68,11 @@ void compile_to_offloads(IRNode *ir,
   }
 
   {
+    TI_COMPILE_PROFILER("cpp.ir.validate_shared_array_scope");
+    irpass::validate_shared_array_scope(ir);
+  }
+
+  {
     TI_COMPILE_PROFILER("cpp.ir.eliminate_immutable_local_vars");
     irpass::eliminate_immutable_local_vars(ir);
   }

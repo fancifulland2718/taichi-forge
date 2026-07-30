@@ -182,3 +182,95 @@ def test_shared_array_matrix():
             print(shared[x])
 
     foo()
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan])
+def test_shared_array_rejects_serial_scope():
+    @ti.kernel
+    def invalid(out: ti.types.ndarray()):
+        shared = ti.simt.block.SharedArray((1,), ti.i32)
+        for i in range(out.shape[0]):
+            shared[0] = i
+            ti.simt.block.sync()
+            out[i] = shared[0]
+
+    out = ti.ndarray(ti.i32, shape=8)
+    with pytest.raises(
+        ti.TaichiCompilationError,
+        match="SharedArray must be declared inside a parallel Taichi range-for loop",
+    ):
+        invalid(out)
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan])
+def test_shared_array_rejects_serialized_range():
+    @ti.kernel
+    def invalid():
+        ti.loop_config(serialize=True)
+        for i in range(8):
+            shared = ti.simt.block.SharedArray((1,), ti.i32)
+            shared[0] = i
+
+    with pytest.raises(
+        ti.TaichiCompilationError,
+        match="SharedArray must be declared inside a parallel Taichi range-for loop",
+    ):
+        invalid()
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan])
+def test_shared_array_in_inlined_function_keeps_range_scope():
+    block_dim = 32
+    size = block_dim * 4
+
+    @ti.func
+    def exchange_block_value(i):
+        shared = ti.simt.block.SharedArray((1,), ti.i32)
+        lane = i % block_dim
+        if lane == 0:
+            shared[0] = i // block_dim
+        ti.simt.block.sync()
+        return shared[0]
+
+    @ti.kernel
+    def valid(out: ti.types.ndarray()):
+        ti.loop_config(block_dim=block_dim)
+        for i in range(size):
+            out[i] = exchange_block_value(i)
+
+    out = ti.ndarray(ti.i32, shape=size)
+    valid(out)
+    expected = np.repeat(np.arange(size // block_dim, dtype=np.int32), block_dim)
+    assert np.array_equal(out.to_numpy(), expected)
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan])
+def test_shared_array_scope_rejected_by_aot_and_graph():
+    @ti.kernel
+    def invalid_aot():
+        shared = ti.simt.block.SharedArray((1,), ti.i32)
+        for i in range(8):
+            shared[0] = i
+            ti.simt.block.sync()
+
+    module = ti.aot.Module()
+    with pytest.raises(
+        SyntaxError,
+        match="SharedArray must be declared inside a parallel Taichi range-for loop",
+    ):
+        module.add_kernel(invalid_aot)
+
+    @ti.kernel
+    def invalid_graph():
+        shared = ti.simt.block.SharedArray((1,), ti.i32)
+        for i in range(8):
+            shared[0] = i
+            ti.simt.block.sync()
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(invalid_graph)
+    with pytest.raises(
+        SyntaxError,
+        match="SharedArray must be declared inside a parallel Taichi range-for loop",
+    ):
+        builder.compile()

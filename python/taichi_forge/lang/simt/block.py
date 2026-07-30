@@ -64,6 +64,13 @@ def global_thread_idx():
 
 
 class SharedArray:
+    """Block-local shared memory for a parallel Taichi range-for loop.
+
+    Construct the array inside the range-for body. Its shape is fixed at
+    compile time, and every GPU thread block receives a distinct allocation.
+    A SharedArray cannot escape to serial code or another offloaded loop.
+    """
+
     _is_taichi_class = True
 
     def __init__(self, shape, dtype):

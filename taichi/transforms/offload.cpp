@@ -13,6 +13,41 @@ namespace taichi::lang {
 
 namespace irpass {
 namespace {
+constexpr char kSharedArrayScopeError[] =
+    "ti.simt.block.SharedArray must be declared inside a parallel Taichi "
+    "range-for loop. Move the SharedArray declaration into the loop body so "
+    "that each thread block owns a distinct shared-memory allocation.";
+
+class ValidateSharedArrayScope : public BasicStmtVisitor {
+ private:
+  using BasicStmtVisitor::visit;
+
+  static bool is_inside_parallel_range_for(const AllocaStmt *stmt) {
+    for (auto block = stmt->parent; block != nullptr;
+         block = block->parent_block()) {
+      auto parent_stmt = block->parent_stmt();
+      if (auto range_for = parent_stmt ? parent_stmt->cast<RangeForStmt>()
+                                       : nullptr;
+          range_for && !range_for->strictly_serialized) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+ public:
+  void visit(AllocaStmt *stmt) override {
+    if (stmt->is_shared && !is_inside_parallel_range_for(stmt)) {
+      ErrorEmitter(TaichiSyntaxError(), stmt, kSharedArrayScopeError);
+    }
+  }
+
+  static void run(IRNode *root) {
+    ValidateSharedArrayScope pass;
+    root->accept(&pass);
+  }
+};
+
 bool demotable_axis_load(Stmt *stmt) {
   // Stmt involving simple arithmetic of ExternalTensorShapeAlongAxisStmt
   // shouldn't be saved in global tmp, just clone them to each shader
@@ -329,6 +364,16 @@ class StmtToOffloaded : public BasicStmtVisitor {
     current_offloaded_ = nullptr;
   }
 
+  void visit(AllocaStmt *stmt) override {
+    TI_ASSERT(current_offloaded_);
+    stmt_to_offloaded_[stmt] = current_offloaded_;
+    if (stmt->is_shared &&
+        current_offloaded_->as<OffloadedStmt>()->task_type !=
+            OffloadedStmt::TaskType::range_for) {
+      ErrorEmitter(TaichiSyntaxError(), stmt, kSharedArrayScopeError);
+    }
+  }
+
   void visit(Stmt *stmt) override {
     if (current_offloaded_ != nullptr) {
       // inside a offloaded stmt, record its belonging offloaded_stmt
@@ -435,6 +480,14 @@ class IdentifyValuesUsedInOtherOffloads : public BasicStmtVisitor {
     if (stmt->is<ConstStmt>())
       return;
     auto top_level_ptr = SquashPtrOffset::run(stmt);
+    if (auto alloca = top_level_ptr->cast<AllocaStmt>();
+        alloca && alloca->is_shared) {
+      // Shared memory has per-thread-block ownership and must never be
+      // promoted to the kernel-global temporary buffer. StmtToOffloaded
+      // rejects ordinary scope violations first; this guard keeps future
+      // offload rewrites from silently changing the memory space.
+      ErrorEmitter(TaichiSyntaxError(), alloca, kSharedArrayScopeError);
+    }
     // We don't support storing a pointer for now.
     if (top_level_ptr->is<GlobalPtrStmt>() || stmt->is<ExternalPtrStmt>() ||
         (stmt->is<ArgLoadStmt>() && (stmt->as<ArgLoadStmt>()->is_ptr ||
@@ -808,6 +861,11 @@ class AssociateContinueScope : public BasicStmtVisitor {
 };
 
 }  // namespace
+
+void validate_shared_array_scope(IRNode *root) {
+  ValidateSharedArrayScope::run(root);
+}
+
 void associate_continue_scope(IRNode *root, const CompileConfig &config) {
   AssociateContinueScope::run(root);
   type_check(root, config);
