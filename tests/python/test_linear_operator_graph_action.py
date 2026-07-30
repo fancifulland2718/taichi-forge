@@ -29,12 +29,60 @@ def _diagonal_operator(values):
     )
 
 
-def _operator_graph(operator):
+def _operator_graph(operator, *, adjoint=False):
     input_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "input", ti.f32, ndim=1)
     output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1)
     builder = ti.graph.GraphBuilder()
-    builder.append_native(operator.graph_action(input_arg, output_arg))
+    builder.append_native(
+        operator.graph_action(input_arg, output_arg, adjoint=adjoint)
+    )
     return builder.compile()
+
+
+def _rectangular_operator(values):
+    values = np.asarray(values, dtype=np.float32).reshape(2, 3)
+    topology = ti.ndarray(ti.i32, shape=values.size)
+    numeric = ti.ndarray(ti.f32, shape=values.size)
+    topology.from_numpy(np.arange(values.size, dtype=np.int32))
+    numeric.from_numpy(values.reshape(-1))
+
+    @ti.kernel
+    def apply_rectangular(
+        active_size: ti.i32,
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        numeric_data: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for row in range(active_size):
+            value = 0.0
+            for column in ti.static(range(3)):
+                offset = topology_data[row * 3 + column]
+                value += numeric_data[offset] * x[column]
+            y[row] = value
+
+    @ti.kernel
+    def apply_adjoint(
+        active_size: ti.i32,
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        numeric_data: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for column in range(active_size):
+            value = 0.0
+            for row in ti.static(range(2)):
+                offset = topology_data[row * 3 + column]
+                value += numeric_data[offset] * x[row]
+            y[column] = value
+
+    return ti.linalg.LinearOperator.from_kernel(
+        apply_rectangular,
+        (2, 3),
+        topology,
+        adjoint=apply_adjoint,
+        numeric=numeric,
+    )
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
@@ -92,6 +140,60 @@ def test_linear_operator_graph_action_reuses_provider_generation_and_dense_stora
     np.testing.assert_allclose(
         output_array.to_numpy(),
         values * np.asarray([4.0, 6.0, 10.0, 14.0], dtype=np.float32),
+    )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_linear_operator_graph_action_records_rectangular_adjoint_for_dense_storage():
+    matrix = np.asarray(
+        [[2.0, -1.0, 0.5], [3.0, 4.0, -2.0]], dtype=np.float32
+    )
+    operator = _rectangular_operator(matrix)
+    assert operator.shape == (2, 3)
+    assert operator.capabilities.adjoint_apply
+
+    forward = _operator_graph(operator)
+    adjoint = _operator_graph(operator, adjoint=True)
+
+    forward_input = ti.ndarray(ti.f32, shape=3)
+    forward_output = ti.ndarray(ti.f32, shape=2)
+    forward_values = np.asarray([0.5, -2.0, 1.5], dtype=np.float32)
+    forward_input.from_numpy(forward_values)
+    forward.run({"input": forward_input, "output": forward_output})
+    np.testing.assert_allclose(
+        forward_output.to_numpy(), matrix @ forward_values
+    )
+
+    adjoint_input = ti.field(ti.f32, shape=(1, 2))
+    adjoint_output = ti.field(ti.f32, shape=(3, 1))
+    adjoint_values = np.asarray([1.25, -0.75], dtype=np.float32)
+    adjoint_input.from_numpy(adjoint_values.reshape(1, 2))
+    adjoint.run({"input": adjoint_input, "output": adjoint_output})
+    np.testing.assert_allclose(
+        adjoint_output.to_numpy().reshape(-1), matrix.T @ adjoint_values
+    )
+
+    updated = ti.ndarray(ti.f32, shape=matrix.size)
+    updated.from_numpy((2.0 * matrix).reshape(-1))
+    operator.update_numeric(
+        updated,
+        expected_topology_version=1,
+        expected_numeric_version=1,
+    )
+    for graph, input_value, output_value in (
+        (forward, forward_input, forward_output),
+        (adjoint, adjoint_input, adjoint_output),
+    ):
+        with pytest.raises(ti.TaichiRuntimeError, match="generation changed"):
+            graph.run({"input": input_value, "output": output_value})
+
+    rebuilt_adjoint = _operator_graph(operator, adjoint=True)
+    rebuilt_adjoint.run(
+        {"input": adjoint_input, "output": adjoint_output}
+    )
+    np.testing.assert_allclose(
+        adjoint_output.to_numpy().reshape(-1),
+        2.0 * matrix.T @ adjoint_values,
     )
 
 
