@@ -39,8 +39,11 @@ std::atomic<uint64_t> graph_replay_slot_saturation_fallbacks{0};
 
 constexpr std::size_t kStructuredPacketWords = 3;
 constexpr std::size_t kStructuredObservationWords = 5;
+constexpr std::size_t kStructuredChainedSinkWords = 3;
 constexpr std::size_t kStructuredMaximumPackets = 64;
 constexpr std::size_t kStructuredMaximumEncodedActions = 4096;
+constexpr std::size_t kStructuredChainedMaximumDispatches = 256;
+constexpr std::size_t kStructuredChainedMaximumControlBytes = 64 * 1024;
 
 std::vector<uint32_t> make_compact_controller_spirv(
     const DeviceCapabilityConfig &caps,
@@ -118,7 +121,7 @@ std::vector<uint32_t> make_compact_controller_spirv(
 
 std::vector<uint32_t> make_structured_terminal_spirv(
     const DeviceCapabilityConfig &caps,
-    std::size_t packet_count,
+    std::size_t observation_word_offset,
     bool has_status) {
   spirv::IRBuilder builder(Arch::vulkan, &caps);
   builder.init_header();
@@ -131,7 +134,7 @@ std::vector<uint32_t> make_structured_terminal_spirv(
   builder.start_function(function);
 
   const auto zero = builder.uint_immediate_number(u32, 0);
-  const auto observation_base = packet_count * kStructuredPacketWords;
+  const auto observation_base = observation_word_offset;
   const auto load_scalar = [&](spirv::Value buffer) {
     return builder.load_variable(
         builder.struct_array_access(u32, buffer, zero), u32);
@@ -172,6 +175,110 @@ std::vector<uint32_t> make_structured_terminal_spirv(
   std::vector<spirv::Value> interfaces;
   if (caps.get(DeviceCapability::spirv_version) > 0x10300) {
     interfaces = {predicate, counter, status, control};
+  }
+  builder.commit_kernel_function(function, "main", std::move(interfaces),
+                                 {1, 1, 1});
+  return builder.finalize();
+}
+
+std::vector<uint32_t> make_chained_controller_spirv(
+    const DeviceCapabilityConfig &caps,
+    const std::vector<uint32_t> &group_counts,
+    std::uint32_t max_iterations,
+    bool has_status) {
+  spirv::IRBuilder builder(Arch::vulkan, &caps);
+  builder.init_header();
+  const auto u32 = builder.u32_type();
+  const auto predicate = builder.buffer_argument(u32, 0, 0, "predicate");
+  const auto control = builder.buffer_argument(u32, 0, 1, "control");
+  const auto status = builder.buffer_argument(u32, 0, 2, "status");
+  const auto function = builder.new_function();
+  builder.start_function(function);
+
+  const auto zero = builder.uint_immediate_number(u32, 0);
+  const auto one = builder.uint_immediate_number(u32, 1);
+  const auto segment_words = builder.uint_immediate_number(
+      u32, (group_counts.size() + 1) * kStructuredPacketWords);
+  const auto observation_base = builder.uint_immediate_number(
+      u32, max_iterations * (group_counts.size() + 1) *
+               kStructuredPacketWords);
+  const auto logical_count_ptr =
+      builder.struct_array_access(u32, control, observation_base);
+  const auto logical_count = builder.load_variable(logical_count_ptr, u32);
+  const auto predicate_value = builder.load_variable(
+      builder.struct_array_access(u32, predicate, zero), u32);
+  const auto active = builder.ne(predicate_value, zero);
+  const auto active_increment = builder.select(active, one, zero);
+
+  if (has_status) {
+    const auto initial_status_ptr = builder.struct_array_access(
+        u32, control,
+        builder.add(observation_base,
+                    builder.uint_immediate_number(u32, 4)));
+    const auto initial_status =
+        builder.load_variable(initial_status_ptr, u32);
+    const auto status_value = builder.load_variable(
+        builder.struct_array_access(u32, status, zero), u32);
+    builder.store_variable(
+        initial_status_ptr,
+        builder.select(builder.eq(logical_count, zero), status_value,
+                       initial_status));
+  }
+  builder.store_variable(logical_count_ptr,
+                         builder.add(logical_count, active_increment));
+
+  const auto segment_base = builder.mul(logical_count, segment_words);
+  for (std::size_t i = 0; i < group_counts.size(); ++i) {
+    const auto packet_base = builder.add(
+        segment_base,
+        builder.uint_immediate_number(
+            u32, (i + 1) * kStructuredPacketWords));
+    const auto group_count =
+        builder.uint_immediate_number(u32, group_counts[i]);
+    builder.store_variable(
+        builder.struct_array_access(u32, control, packet_base),
+        builder.select(active, group_count, zero));
+    builder.store_variable(
+        builder.struct_array_access(
+            u32, control,
+            builder.add(packet_base, builder.uint_immediate_number(u32, 1))),
+        one);
+    builder.store_variable(
+        builder.struct_array_access(
+            u32, control,
+            builder.add(packet_base, builder.uint_immediate_number(u32, 2))),
+        one);
+  }
+
+  const auto next_iteration = builder.add(logical_count, one);
+  const auto next_segment = builder.mul(next_iteration, segment_words);
+  const auto has_next = builder.lt(
+      next_iteration, builder.uint_immediate_number(u32, max_iterations));
+  const auto next_enabled =
+      builder.select(active, builder.select(has_next, one, zero), zero);
+  const auto sink_packet = builder.add(
+      observation_base,
+      builder.uint_immediate_number(u32, kStructuredObservationWords));
+  const auto next_packet =
+      builder.select(has_next, next_segment, sink_packet);
+  builder.store_variable(
+      builder.struct_array_access(u32, control, next_packet), next_enabled);
+  builder.store_variable(
+      builder.struct_array_access(
+          u32, control,
+          builder.add(next_packet, builder.uint_immediate_number(u32, 1))),
+      one);
+  builder.store_variable(
+      builder.struct_array_access(
+          u32, control,
+          builder.add(next_packet, builder.uint_immediate_number(u32, 2))),
+      one);
+
+  builder.make_inst(spv::OpReturn);
+  builder.make_inst(spv::OpFunctionEnd);
+  std::vector<spirv::Value> interfaces;
+  if (caps.get(DeviceCapability::spirv_version) > 0x10300) {
+    interfaces = {predicate, control, status};
   }
   builder.commit_kernel_function(function, "main", std::move(interfaces),
                                  {1, 1, 1});
@@ -2121,6 +2228,8 @@ bool GfxRuntime::try_launch_graph(
   std::vector<PreparedDispatch> prepared;
   prepared.reserve(dispatches.size());
   size_t total_tasks = 0;
+  GraphStructuredStrategy structured_strategy =
+      GraphStructuredStrategy::automatic;
 
   auto reject = [&](GraphReplayFallbackReason reason =
                         GraphReplayFallbackReason::structural_unsupported) {
@@ -2141,12 +2250,17 @@ bool GfxRuntime::try_launch_graph(
       return ptr.device == device_ && ptr.alloc_id != 0 &&
              ptr.offset % alignof(std::uint32_t) == 0;
     };
+    const bool valid_strategy =
+        structured_control->strategy == GraphStructuredStrategy::automatic ||
+        structured_control->strategy == GraphStructuredStrategy::compact ||
+        structured_control->strategy == GraphStructuredStrategy::chained;
     if (!valid_scalar(structured_control->predicate) ||
         !valid_scalar(structured_control->counter) ||
         (structured_control->has_status &&
          !valid_scalar(structured_control->status)) ||
         structured_control->initial_dispatch_count == 0 ||
-        structured_control->initial_dispatch_count >= dispatches.size()) {
+        structured_control->initial_dispatch_count >= dispatches.size() ||
+        !valid_strategy) {
       return reject();
     }
     key.insert(key.end(),
@@ -2154,6 +2268,7 @@ bool GfxRuntime::try_launch_graph(
                 structured_control->initial_dispatch_count,
                 structured_control->max_iterations,
                 structured_control->has_status ? 1u : 0u,
+                static_cast<std::uint32_t>(structured_control->strategy),
                 structured_control->predicate.alloc_id,
                 structured_control->predicate.offset,
                 structured_control->counter.alloc_id,
@@ -2164,7 +2279,8 @@ bool GfxRuntime::try_launch_graph(
         structure_key.end(),
         {0xC000u, structured_control->initial_dispatch_count,
          structured_control->max_iterations,
-         structured_control->has_status ? 1u : 0u});
+         structured_control->has_status ? 1u : 0u,
+         static_cast<std::uint32_t>(structured_control->strategy)});
     push_runtime_structure(
         DeviceAllocation{structured_control->predicate.device,
                          structured_control->predicate.alloc_id},
@@ -2353,10 +2469,38 @@ bool GfxRuntime::try_launch_graph(
         (structured_group_counts.size() + 1);
     if (structured_initial_tasks == 0 ||
         structured_group_counts.empty() ||
-        structured_group_counts.size() > kStructuredMaximumPackets ||
-        encoded_actions > kStructuredMaximumEncodedActions) {
+        structured_group_counts.size() > kStructuredMaximumPackets) {
       return reject();
     }
+    const std::size_t chained_control_bytes =
+        (static_cast<std::size_t>(structured_control->max_iterations) *
+             (structured_group_counts.size() + 1) *
+             kStructuredPacketWords +
+         kStructuredObservationWords + kStructuredChainedSinkWords) *
+        sizeof(std::uint32_t);
+    const bool chained_eligible =
+        structured_control->max_iterations > 0 &&
+        encoded_actions <= kStructuredChainedMaximumDispatches &&
+        chained_control_bytes <= kStructuredChainedMaximumControlBytes;
+    structured_strategy = structured_control->strategy;
+    if (structured_strategy == GraphStructuredStrategy::automatic) {
+      // Chained dispatch remains an explicit qualification path until a
+      // device-specific performance table proves that eliminating controller
+      // invocations offsets its extra indirect commands and control arena.
+      structured_strategy = GraphStructuredStrategy::compact;
+    }
+    if ((structured_strategy == GraphStructuredStrategy::chained &&
+         !chained_eligible) ||
+        (structured_strategy == GraphStructuredStrategy::compact &&
+         encoded_actions > kStructuredMaximumEncodedActions)) {
+      return reject();
+    }
+    key.insert(key.end(),
+               {0xC001u,
+                static_cast<std::uint32_t>(structured_strategy)});
+    structure_key.insert(
+        structure_key.end(),
+        {0xC001u, static_cast<std::uint32_t>(structured_strategy)});
   }
   if (total_tasks <= 1) {
     return reject(GraphReplayFallbackReason::insufficient_tasks);
@@ -2487,11 +2631,23 @@ bool GfxRuntime::try_launch_graph(
     return true;
   };
 
+  const std::size_t structured_observation_word_offset =
+      structured_group_counts.empty()
+          ? 0
+          : structured_strategy == GraphStructuredStrategy::chained
+                ? static_cast<std::size_t>(
+                      structured_control->max_iterations) *
+                      (structured_group_counts.size() + 1) *
+                      kStructuredPacketWords
+                : structured_group_counts.size() * kStructuredPacketWords;
   const std::size_t structured_control_bytes =
       structured_group_counts.empty()
           ? 0
-          : (structured_group_counts.size() * kStructuredPacketWords +
-             kStructuredObservationWords) *
+          : (structured_observation_word_offset +
+             kStructuredObservationWords +
+             (structured_strategy == GraphStructuredStrategy::chained
+                  ? kStructuredChainedSinkWords
+                  : 0)) *
                 sizeof(std::uint32_t);
   const std::size_t structured_observation_bytes =
       structured_control == nullptr
@@ -2502,7 +2658,8 @@ bool GfxRuntime::try_launch_graph(
         !slot->structured_control_buffer ||
         slot->structured_control_bytes != structured_control_bytes ||
         slot->structured_group_counts != structured_group_counts ||
-        slot->structured_has_status != structured_control->has_status;
+        slot->structured_has_status != structured_control->has_status ||
+        slot->structured_strategy != structured_strategy;
     if (rebuild_control) {
       auto [control_buffer, control_result] =
           device_->allocate_memory_unique(
@@ -2530,16 +2687,24 @@ bool GfxRuntime::try_launch_graph(
           structured_observation_bytes;
       slot->structured_group_counts = structured_group_counts;
       slot->structured_has_status = structured_control->has_status;
+      slot->structured_strategy = structured_strategy;
       slot->structured_controller_pipeline = create_structured_pipeline(
           device_,
-          make_compact_controller_spirv(device_->get_caps(),
-                                        structured_group_counts,
-                                        structured_control->has_status),
-          "vulkan_compact_controller");
+          structured_strategy == GraphStructuredStrategy::chained
+              ? make_chained_controller_spirv(
+                    device_->get_caps(), structured_group_counts,
+                    structured_control->max_iterations,
+                    structured_control->has_status)
+              : make_compact_controller_spirv(
+                    device_->get_caps(), structured_group_counts,
+                    structured_control->has_status),
+          structured_strategy == GraphStructuredStrategy::chained
+              ? "vulkan_chained_controller"
+              : "vulkan_compact_controller");
       slot->structured_terminal_pipeline = create_structured_pipeline(
           device_,
           make_structured_terminal_spirv(
-              device_->get_caps(), structured_group_counts.size(),
+              device_->get_caps(), structured_observation_word_offset,
               structured_control->has_status),
           "vulkan_structured_terminal");
       slot->structured_controller_resources =
@@ -2601,6 +2766,7 @@ bool GfxRuntime::try_launch_graph(
     std::memcpy(words.data(), mapped, sizeof(words));
     device_->unmap(*slot->structured_observation_buffer);
     structured_result->submitted = true;
+    structured_result->strategy = structured_strategy;
     structured_result->logical_iterations = words[0];
     structured_result->predicate =
         static_cast<std::int32_t>(words[1]);
@@ -2611,11 +2777,35 @@ bool GfxRuntime::try_launch_graph(
         static_cast<std::int32_t>(words[4]);
     structured_result->encoded_iterations =
         structured_control->max_iterations;
-    structured_result->indirect_dispatches =
-        structured_control->max_iterations *
-        static_cast<std::uint32_t>(structured_group_counts.size());
     structured_result->controller_dispatches =
         structured_control->max_iterations;
+    const std::uint32_t payload_dispatches =
+        structured_control->max_iterations *
+        static_cast<std::uint32_t>(structured_group_counts.size());
+    const std::uint32_t bounded_logical =
+        std::min(words[0], structured_control->max_iterations);
+    const std::uint32_t active_payload_dispatches =
+        bounded_logical *
+        static_cast<std::uint32_t>(structured_group_counts.size());
+    if (structured_strategy == GraphStructuredStrategy::chained) {
+      structured_result->controller_invocations = std::min(
+          structured_control->max_iterations,
+          bounded_logical +
+              (bounded_logical < structured_control->max_iterations ? 1u
+                                                                     : 0u));
+      structured_result->indirect_dispatches =
+          payload_dispatches + structured_control->max_iterations;
+      structured_result->zero_dispatches =
+          structured_result->indirect_dispatches -
+          active_payload_dispatches -
+          structured_result->controller_invocations;
+    } else {
+      structured_result->controller_invocations =
+          structured_control->max_iterations;
+      structured_result->indirect_dispatches = payload_dispatches;
+      structured_result->zero_dispatches =
+          payload_dispatches - active_payload_dispatches;
+    }
     structured_result->control_bytes =
         static_cast<std::uint32_t>(structured_control_bytes);
     structured_result->observation_bytes =
@@ -2715,11 +2905,40 @@ bool GfxRuntime::try_launch_graph(
       cmdlist->memory_barrier();
     };
 
-    cmdlist->buffer_fill(slot->structured_control_buffer->get_ptr(),
-                         structured_control_bytes, 0);
+    if (structured_strategy == GraphStructuredStrategy::chained) {
+      cmdlist->buffer_fill(
+          slot->structured_control_buffer->get_ptr(
+              kStructuredPacketWords * sizeof(std::uint32_t)),
+          structured_control_bytes -
+              kStructuredPacketWords * sizeof(std::uint32_t),
+          0);
+      cmdlist->buffer_fill(slot->structured_control_buffer->get_ptr(),
+                           kStructuredPacketWords * sizeof(std::uint32_t),
+                           1);
+    } else {
+      cmdlist->buffer_fill(slot->structured_control_buffer->get_ptr(),
+                           structured_control_bytes, 0);
+    }
+    const std::size_t structured_packet_bytes =
+        structured_observation_word_offset * sizeof(std::uint32_t);
     cmdlist->buffer_transition(
         slot->structured_control_buffer->get_ptr(),
-        structured_control_bytes,
+        structured_packet_bytes,
+        {BufferBarrierStage::Transfer,
+         BufferBarrierAccess::TransferWrite,
+         structured_strategy == GraphStructuredStrategy::chained
+             ? BufferBarrierStage::IndirectCommand |
+                   BufferBarrierStage::Compute
+             : BufferBarrierStage::Compute,
+         structured_strategy == GraphStructuredStrategy::chained
+             ? BufferBarrierAccess::IndirectCommandRead |
+                   BufferBarrierAccess::ShaderRead |
+                   BufferBarrierAccess::ShaderWrite
+             : BufferBarrierAccess::ShaderRead |
+                   BufferBarrierAccess::ShaderWrite});
+    cmdlist->buffer_transition(
+        slot->structured_control_buffer->get_ptr(structured_packet_bytes),
+        structured_control_bytes - structured_packet_bytes,
         {BufferBarrierStage::Transfer,
          BufferBarrierAccess::TransferWrite,
          BufferBarrierStage::Compute,
@@ -2742,17 +2961,26 @@ bool GfxRuntime::try_launch_graph(
       RhiResult status = cmdlist->bind_shader_resources(
           slot->structured_controller_resources.get());
       TI_ERROR_IF(status != RhiResult::success,
-                  "Vulkan compact controller resource binding error: "
+                  "Vulkan structured controller resource binding error: "
                   "RhiResult({})",
                   status);
-      status = cmdlist->dispatch(1);
+      if (structured_strategy == GraphStructuredStrategy::chained) {
+        const std::size_t segment_words =
+            (structured_group_counts.size() + 1) *
+            kStructuredPacketWords;
+        const DevicePtr controller_packet =
+            slot->structured_control_buffer->get_ptr(
+                iteration * segment_words * sizeof(std::uint32_t));
+        status = cmdlist->dispatch_indirect(controller_packet);
+      } else {
+        status = cmdlist->dispatch(1);
+      }
       TI_ERROR_IF(status != RhiResult::success,
-                  "Vulkan compact controller dispatch error: RhiResult({})",
+                  "Vulkan structured controller dispatch error: RhiResult({})",
                   status);
       cmdlist->buffer_transition(
           slot->structured_control_buffer->get_ptr(),
-          structured_group_counts.size() * kStructuredPacketWords *
-              sizeof(std::uint32_t),
+          structured_packet_bytes,
           {BufferBarrierStage::Compute,
            BufferBarrierAccess::ShaderWrite,
            BufferBarrierStage::IndirectCommand,
@@ -2760,23 +2988,35 @@ bool GfxRuntime::try_launch_graph(
 
       for (std::size_t packet = 0;
            packet < structured_group_counts.size(); ++packet) {
+        const std::size_t packet_word_offset =
+            structured_strategy == GraphStructuredStrategy::chained
+                ? (static_cast<std::size_t>(iteration) *
+                       (structured_group_counts.size() + 1) +
+                   1 + packet) *
+                      kStructuredPacketWords
+                : packet * kStructuredPacketWords;
         const DevicePtr indirect =
             slot->structured_control_buffer->get_ptr(
-                packet * kStructuredPacketWords *
-                sizeof(std::uint32_t));
+                packet_word_offset * sizeof(std::uint32_t));
         dispatch_task(
             structured_tasks[structured_initial_tasks + packet],
             &indirect);
       }
       cmdlist->buffer_transition(
           slot->structured_control_buffer->get_ptr(),
-          structured_group_counts.size() * kStructuredPacketWords *
-              sizeof(std::uint32_t),
+          structured_packet_bytes,
           {BufferBarrierStage::IndirectCommand,
            BufferBarrierAccess::IndirectCommandRead,
-           BufferBarrierStage::Compute,
-           BufferBarrierAccess::ShaderRead |
-               BufferBarrierAccess::ShaderWrite});
+           structured_strategy == GraphStructuredStrategy::chained
+               ? BufferBarrierStage::IndirectCommand |
+                     BufferBarrierStage::Compute
+               : BufferBarrierStage::Compute,
+           structured_strategy == GraphStructuredStrategy::chained
+               ? BufferBarrierAccess::IndirectCommandRead |
+                     BufferBarrierAccess::ShaderRead |
+                     BufferBarrierAccess::ShaderWrite
+               : BufferBarrierAccess::ShaderRead |
+                     BufferBarrierAccess::ShaderWrite});
     }
 
     cmdlist->memory_barrier();
@@ -2793,8 +3033,7 @@ bool GfxRuntime::try_launch_graph(
                 terminal_status);
 
     const std::size_t observation_offset =
-        structured_group_counts.size() * kStructuredPacketWords *
-        sizeof(std::uint32_t);
+        structured_observation_word_offset * sizeof(std::uint32_t);
     cmdlist->buffer_transition(
         slot->structured_control_buffer->get_ptr(observation_offset),
         structured_observation_bytes,

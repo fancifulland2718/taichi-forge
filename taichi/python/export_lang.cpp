@@ -3383,6 +3383,7 @@ void export_lang(py::module &m) {
                           Ndarray *vulkan_counter = nullptr,
                           Ndarray *vulkan_status = nullptr,
                           std::size_t vulkan_initial_dispatch_count = 0,
+                          std::uint32_t vulkan_strategy = 0,
                           aot::CompiledGraphStructuredResult
                               *vulkan_result = nullptr) -> bool {
         std::unordered_map<std::string, aot::IValue> args;
@@ -3548,7 +3549,8 @@ void export_lang(py::module &m) {
           *vulkan_result = self->jit_run_bounded_vulkan_cached(
               compile_config, args, *cache, vulkan_predicate,
               vulkan_counter, vulkan_status,
-              vulkan_initial_dispatch_count, bounded_max_iterations);
+              vulkan_initial_dispatch_count, bounded_max_iterations,
+              vulkan_strategy);
           return vulkan_result->submitted;
         }
         if (cache) {
@@ -3821,15 +3823,17 @@ void export_lang(py::module &m) {
                            aot::CompiledGraphJITCache &cache,
                            Ndarray &predicate, Ndarray &counter,
                            std::size_t initial_dispatch_count,
-                           int max_iterations, Ndarray *status) {
+                           int max_iterations, Ndarray *status,
+                           std::uint32_t strategy) {
              aot::CompiledGraphStructuredResult result;
              jit_run_graph(
                  self, compile_config, pyargs, &cache, nullptr,
                  max_iterations, true, nullptr, nullptr, -1, -1,
                  &predicate, &counter, status,
-                 initial_dispatch_count, &result);
+                 initial_dispatch_count, strategy, &result);
              py::dict encoded;
              encoded["submitted"] = result.submitted;
+             encoded["strategy"] = result.strategy;
              encoded["logical_iterations"] = result.logical_iterations;
              encoded["predicate"] = result.predicate;
              encoded["counter"] = result.counter;
@@ -3840,6 +3844,9 @@ void export_lang(py::module &m) {
                  result.indirect_dispatches;
              encoded["controller_dispatches"] =
                  result.controller_dispatches;
+             encoded["controller_invocations"] =
+                 result.controller_invocations;
+             encoded["zero_dispatches"] = result.zero_dispatches;
              encoded["control_bytes"] = result.control_bytes;
              encoded["observation_bytes"] = result.observation_bytes;
              return encoded;
@@ -3847,7 +3854,8 @@ void export_lang(py::module &m) {
            py::arg("compile_config"), py::arg("args"), py::arg("cache"),
            py::arg("predicate"), py::arg("counter"),
            py::arg("initial_dispatch_count"),
-           py::arg("max_iterations"), py::arg("status") = nullptr)
+           py::arg("max_iterations"), py::arg("status") = nullptr,
+           py::arg("strategy") = 0)
       .def("jit_run_conditional_cuda_cached",
            [jit_run_graph](aot::CompiledGraph *self,
                            const CompileConfig &compile_config,

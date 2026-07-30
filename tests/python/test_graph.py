@@ -2395,6 +2395,13 @@ def _structured_while_args(*, target, active=True, breakdown=False):
     return {**arrays, "target": target}
 
 
+def _is_vulkan_structured_report(report):
+    return report.lowering in (
+        "vulkan_chained_indirect",
+        "vulkan_compact_indirect",
+    )
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
     capabilities = ti.graph.structured_control_capabilities()
@@ -2415,6 +2422,11 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
             "conditional_rendering_available",
             "conditional_rendering_qualified",
             "max_encoded_dispatches",
+            "available_strategies",
+            "qualified_strategies",
+            "chained_runtime_qualified",
+            "chained_max_encoded_dispatches",
+            "max_control_bytes_per_slot",
         )
     ) <= device.keys()
     assert not device["per_iteration_host_observation"]
@@ -2457,8 +2469,16 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         assert device["device_controlled_masking"]
         assert not device["stops_command_issue_after_exit"]
         assert not device["exact_dynamic_termination"]
-        assert device["skip_strategy"] == "compact_indirect"
+        assert device["skip_strategy"] == "auto_compact_with_chained_opt_in"
         assert device["max_encoded_dispatches"] == 4096
+        assert device["available_strategies"] == (
+            "chained_indirect",
+            "compact_indirect",
+        )
+        assert device["qualified_strategies"] == ("compact_indirect",)
+        assert not device["chained_runtime_qualified"]
+        assert device["chained_max_encoded_dispatches"] == 256
+        assert device["max_control_bytes_per_slot"] == 64 * 1024
         assert device["unsupported_reason"] == ("vulkan_if_switch_runtime_not_compiled")
     else:
         assert capabilities["backend"] == "cpu"
@@ -2482,7 +2502,7 @@ def test_structured_graph_while_reports_exact_stop_and_backend_overshoot():
     assert report.counter_values[-1] == 5
     assert report.observation_batches == len(report.observation_boundaries)
     assert report.staging_fallback_batches == 0
-    if report.lowering == "vulkan_compact_indirect":
+    if _is_vulkan_structured_report(report):
         assert report.observation_scalar_count == 5
         assert report.device_to_host_bytes == 20
         assert report.persistent_staging_bytes == 0
@@ -2523,13 +2543,20 @@ def test_structured_graph_while_reports_exact_stop_and_backend_overshoot():
         assert report.chunk_sizes == (5,)
         assert report.observation_boundaries == (0, 5)
         assert report.native_upgrade_reason == "selected"
-    elif report.lowering == "vulkan_compact_indirect":
+    elif _is_vulkan_structured_report(report):
         assert ti.lang.impl.current_cfg().arch == ti.vulkan
+        assert report.lowering == "vulkan_compact_indirect"
         assert report.executed_iterations == 20
         assert report.overshoot_iterations == 15
         assert report.chunk_sizes == (20,)
         assert report.observation_boundaries == (20,)
         assert report.native_upgrade_reason == "selected"
+        assert report.indirect_dispatch_count == 40
+        assert report.controller_dispatch_count == 20
+        assert report.controller_invocation_count == 20
+        assert report.logical_body_dispatch_count == 5
+        assert report.zero_dispatch_count == 30
+        assert 0 < report.control_arena_bytes <= 64 * 1024
     else:
         assert report.lowering == "portable_chunk_replay"
         assert report.executed_iterations == 8
@@ -2646,7 +2673,7 @@ def test_structured_graph_while_reports_user_defined_terminal_status():
     assert report.status_values[0] == 0
     assert report.status_values[-1] == 1
     assert report.logical_iterations == 3
-    if report.lowering == "vulkan_compact_indirect":
+    if _is_vulkan_structured_report(report):
         assert report.observation_scalar_count == 5
         assert report.device_to_host_bytes == 20
     else:
@@ -2676,7 +2703,7 @@ def test_structured_graph_while_transfer_planner_has_strict_fallback(monkeypatch
     graph.run(args)
     report = graph.control_flow_stats()[0]
     assert report.logical_iterations == 5
-    if report.lowering == "vulkan_compact_indirect":
+    if _is_vulkan_structured_report(report):
         assert report.packed_observation_batches == 1
         assert report.direct_observation_batches == 0
     else:
@@ -2689,7 +2716,7 @@ def test_structured_graph_while_transfer_planner_has_strict_fallback(monkeypatch
 
 
 @test_utils.test(arch=ti.vulkan)
-def test_structured_graph_while_compact_terminal_observation_is_replay_owned(
+def test_structured_graph_while_terminal_observation_is_replay_owned(
     monkeypatch,
 ):
     graph = _build_structured_while_graph(max_iterations=20)
@@ -2733,12 +2760,13 @@ def test_structured_graph_while_honors_initial_stop_and_iteration_cap():
     assert stopped.logical_iterations == 0
     assert stopped.counter_values == (0,)
     assert stopped.observation_batches == 1
-    if stopped.lowering == "vulkan_compact_indirect":
+    if _is_vulkan_structured_report(stopped):
         assert stopped.executed_iterations == 6
         assert stopped.overshoot_iterations == 6
         assert stopped.observation_boundaries == (6,)
         assert stopped.observation_scalar_count == 5
         assert stopped.device_to_host_bytes == 20
+        assert stopped.controller_invocation_count == stopped.max_iterations
     else:
         assert stopped.executed_iterations == 0
         assert stopped.observation_boundaries == (0,)
@@ -2756,7 +2784,7 @@ def test_structured_graph_while_honors_initial_stop_and_iteration_cap():
     elif report.lowering == "cuda_conditional_graph":
         assert report.chunk_sizes == (6,)
         assert report.observation_boundaries == (0, 6)
-    elif report.lowering == "vulkan_compact_indirect":
+    elif _is_vulkan_structured_report(report):
         assert report.chunk_sizes == (6,)
         assert report.observation_boundaries == (6,)
     else:
@@ -2824,7 +2852,52 @@ def test_structured_graph_while_native_rebind_and_replay_diagnostics():
 
 
 @test_utils.test(arch=ti.vulkan)
-def test_structured_graph_while_vulkan_compact_rebind_and_replay_diagnostics():
+def test_structured_graph_while_vulkan_strategy_selection_and_override(
+    monkeypatch,
+):
+    small = _build_structured_while_graph(
+        max_iterations=20, lowering_mode="native_required"
+    )
+    compact_args = _structured_while_args(target=5)
+    small.run(compact_args)
+    compact = small.control_flow_stats()[0]
+    assert compact.lowering == "vulkan_compact_indirect"
+    assert compact.logical_iterations == 5
+    assert compact.controller_invocation_count == compact.max_iterations
+    assert compact_args["state"].to_numpy()[()] == 5
+
+    monkeypatch.setenv("TI_GRAPH_VULKAN_STRUCTURED_STRATEGY", "chained")
+    chained_args = _structured_while_args(target=5)
+    small.run(chained_args)
+    chained = small.control_flow_stats()[0]
+    assert chained.lowering == "vulkan_chained_indirect"
+    assert chained.logical_iterations == compact.logical_iterations
+    assert chained.controller_invocation_count == 6
+    assert chained.controller_dispatch_count == 20
+    assert compact.indirect_dispatch_count < chained.indirect_dispatch_count
+    assert compact.control_arena_bytes < chained.control_arena_bytes
+    assert chained_args["state"].to_numpy()[()] == 5
+
+    monkeypatch.setenv("TI_GRAPH_VULKAN_STRUCTURED_STRATEGY", "auto")
+    large = _build_structured_while_graph(
+        max_iterations=128, lowering_mode="native_required"
+    )
+    large_args = _structured_while_args(target=5)
+    large.run(large_args)
+    selected = large.control_flow_stats()[0]
+    assert selected.lowering == "vulkan_compact_indirect"
+    assert selected.logical_iterations == 5
+
+    monkeypatch.setenv("TI_GRAPH_VULKAN_STRUCTURED_STRATEGY", "chained")
+    rejected = _structured_while_args(target=5)
+    with pytest.raises(
+        TaichiRuntimeError, match="structured lowering became unavailable"
+    ):
+        large.run(rejected)
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_structured_graph_while_vulkan_rebind_and_replay_diagnostics():
     graph = _build_structured_while_graph(
         max_iterations=20, lowering_mode="native_required"
     )

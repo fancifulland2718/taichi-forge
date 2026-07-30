@@ -284,6 +284,12 @@ class TI_DLL_EXPORT GfxRuntime {
     LaunchContextBuilder *host_ctx{nullptr};
   };
 
+  enum class GraphStructuredStrategy : std::uint32_t {
+    automatic = 0,
+    compact = 1,
+    chained = 2,
+  };
+
   struct GraphStructuredControl {
     DevicePtr predicate{kDeviceNullPtr};
     DevicePtr counter{kDeviceNullPtr};
@@ -291,10 +297,12 @@ class TI_DLL_EXPORT GfxRuntime {
     std::size_t initial_dispatch_count{0};
     std::uint32_t max_iterations{0};
     bool has_status{false};
+    GraphStructuredStrategy strategy{GraphStructuredStrategy::automatic};
   };
 
   struct GraphStructuredResult {
     bool submitted{false};
+    GraphStructuredStrategy strategy{GraphStructuredStrategy::automatic};
     std::uint32_t logical_iterations{0};
     std::int32_t predicate{0};
     std::int32_t counter{0};
@@ -303,6 +311,8 @@ class TI_DLL_EXPORT GfxRuntime {
     std::uint32_t encoded_iterations{0};
     std::uint32_t indirect_dispatches{0};
     std::uint32_t controller_dispatches{0};
+    std::uint32_t controller_invocations{0};
+    std::uint32_t zero_dispatches{0};
     std::uint32_t control_bytes{0};
     std::uint32_t observation_bytes{0};
   };
@@ -338,6 +348,8 @@ class TI_DLL_EXPORT GfxRuntime {
       std::unique_ptr<Pipeline> structured_terminal_pipeline;
       std::vector<uint32_t> structured_group_counts;
       bool structured_has_status{false};
+      GraphStructuredStrategy structured_strategy{
+          GraphStructuredStrategy::automatic};
       std::unique_ptr<CommandList> cmdlist;
       StreamSemaphore completion;
       std::vector<uint64_t> key;

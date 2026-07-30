@@ -565,6 +565,12 @@ class GraphWhileReport:
     body_dispatch_count: int
     control_inputs: Tuple[str, ...]
     carried_state: Tuple[str, ...]
+    indirect_dispatch_count: int = 0
+    controller_dispatch_count: int = 0
+    controller_invocation_count: int = 0
+    logical_body_dispatch_count: int = 0
+    zero_dispatch_count: int = 0
+    control_arena_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -669,10 +675,11 @@ def structured_control_capabilities():
     """Return the qualified structured-control lowering for this runtime.
 
     Schema v2 separates compilation, backend qualification, and a complete
-    Graph runtime path. Vulkan bounded while regions use compact indirect
-    masking after predicate production and terminal observation have been
-    qualified together. Branch regions and asynchronous structured submission
-    remain separate capabilities.
+    Graph runtime path. Vulkan bounded while regions expose chained and
+    compact indirect masking. Automatic lowering selects only the qualified
+    compact path; chained remains available for explicit device qualification.
+    Branch regions and asynchronous structured submission remain separate
+    capabilities.
     """
     arch = impl.current_cfg().arch
     backend = _backend_name(_ti_core.arch_name(arch))
@@ -724,7 +731,7 @@ def structured_control_capabilities():
         rhi_primitive_qualified = True
         runtime_path_compiled = True
         runtime_path_qualified = True
-        skip_strategy = "compact_indirect"
+        skip_strategy = "auto_compact_with_chained_opt_in"
         max_encoded_dispatches = 4096
         reason = "vulkan_if_switch_runtime_not_compiled"
     else:
@@ -761,6 +768,23 @@ def structured_control_capabilities():
             "conditional_rendering_available": False,
             "conditional_rendering_qualified": False,
             "max_encoded_dispatches": max_encoded_dispatches,
+            "available_strategies": (
+                ("chained_indirect", "compact_indirect")
+                if arch == _ti_core.Arch.vulkan
+                else ()
+            ),
+            "qualified_strategies": (
+                ("compact_indirect",)
+                if arch == _ti_core.Arch.vulkan
+                else ()
+            ),
+            "chained_runtime_qualified": False,
+            "chained_max_encoded_dispatches": (
+                256 if arch == _ti_core.Arch.vulkan else 0
+            ),
+            "max_control_bytes_per_slot": (
+                64 * 1024 if arch == _ti_core.Arch.vulkan else 0
+            ),
             "unsupported_reason": reason,
         },
         "cuda_conditional_graph": cuda,
@@ -1598,6 +1622,19 @@ def _structured_chunk_limit(arch, requested, masked_execution):
     return min(configured, 64)
 
 
+def _vulkan_structured_strategy():
+    strategy = os.environ.get(
+        "TI_GRAPH_VULKAN_STRUCTURED_STRATEGY", "auto"
+    ).strip().lower()
+    strategies = {"auto": 0, "compact": 1, "chained": 2}
+    if strategy not in strategies:
+        raise TaichiRuntimeError(
+            "TI_GRAPH_VULKAN_STRUCTURED_STRATEGY must be auto, compact, "
+            "or chained"
+        )
+    return strategies[strategy]
+
+
 def _while_upgrade_status(arch, mode):
     if mode not in ("auto", "portable", "native_required"):
         raise TaichiRuntimeError(
@@ -1830,10 +1867,10 @@ class _CompiledWhileGraphNode:
                 region_kinds=("while_body", "while_condition"),
             )
             chunk *= 2
-        self._vulkan_compact = (
+        self._vulkan_structured = (
             _compile_sequential_runtime_node(
                 (condition, body, condition),
-                name=f"{name}_vulkan_compact",
+                name=f"{name}_vulkan_structured",
                 region_kinds=(
                     "while_condition",
                     "while_body",
@@ -1846,7 +1883,11 @@ class _CompiledWhileGraphNode:
         dependency_nodes = (
             self._condition,
             *self._chunks.values(),
-            *((self._vulkan_compact,) if self._vulkan_compact is not None else ()),
+            *(
+                (self._vulkan_structured,)
+                if self._vulkan_structured is not None
+                else ()
+            ),
         )
         self.temporary_actions = _merge_temporary_actions(dependency_nodes)
         self.temporary_runtime_arg_names = frozenset().union(
@@ -1952,11 +1993,11 @@ class _CompiledWhileGraphNode:
                 "synchronous fallback is disabled"
             )
 
-    def _run_vulkan_compact(self, context, runtime_args, transfer_before):
+    def _run_vulkan_structured(self, context, runtime_args, transfer_before):
         if (
             impl.current_cfg().arch != _ti_core.Arch.vulkan
             or not self._native_upgrade_eligible
-            or self._vulkan_compact is None
+            or self._vulkan_structured is None
         ):
             return False
         predicate_object = runtime_args[self.predicate]
@@ -1984,10 +2025,10 @@ class _CompiledWhileGraphNode:
             return False
 
         result = dict(
-            self._vulkan_compact.compiled_graph.jit_run_bounded_vulkan_cached(
+            self._vulkan_structured.compiled_graph.jit_run_bounded_vulkan_cached(
                 context.compile_config(),
                 context.flattened_args(
-                    self._vulkan_compact.recording_runtime_arg_names
+                    self._vulkan_structured.recording_runtime_arg_names
                 ),
                 self._native_jit_cache,
                 predicate_ndarray,
@@ -1995,16 +2036,23 @@ class _CompiledWhileGraphNode:
                 self.condition_dispatch_count,
                 self.max_iterations,
                 status_ndarray,
+                _vulkan_structured_strategy(),
             )
         )
         if not result["submitted"]:
             if self.lowering_mode == "native_required":
                 raise TaichiRuntimeError(
-                    "Graph while native Vulkan compact-indirect lowering "
+                    "Graph while native Vulkan structured lowering "
                     "became unavailable"
                 )
             return False
 
+        strategy_names = {1: "compact", 2: "chained"}
+        strategy = strategy_names.get(int(result["strategy"]))
+        if strategy is None:
+            raise TaichiRuntimeError(
+                "Vulkan Graph while runtime returned an invalid control strategy"
+            )
         logical = int(result["logical_iterations"])
         encoded = int(result["encoded_iterations"])
         if logical < 0 or logical > encoded:
@@ -2028,7 +2076,7 @@ class _CompiledWhileGraphNode:
         self._last_report = GraphWhileReport(
             name=self.name,
             backend="vulkan",
-            lowering="vulkan_compact_indirect",
+            lowering=f"vulkan_{strategy}_indirect",
             max_iterations=self.max_iterations,
             logical_iterations=logical,
             executed_iterations=encoded,
@@ -2064,6 +2112,12 @@ class _CompiledWhileGraphNode:
             body_dispatch_count=self.body_dispatch_count,
             control_inputs=self.control_inputs,
             carried_state=self.carried_state,
+            indirect_dispatch_count=int(result["indirect_dispatches"]),
+            controller_dispatch_count=int(result["controller_dispatches"]),
+            controller_invocation_count=int(result["controller_invocations"]),
+            logical_body_dispatch_count=logical * self.body_dispatch_count,
+            zero_dispatch_count=int(result["zero_dispatches"]),
+            control_arena_bytes=int(result["control_bytes"]),
         )
         return True
 
@@ -2092,9 +2146,9 @@ class _CompiledWhileGraphNode:
         vulkan_native_attempted = (
             arch == _ti_core.Arch.vulkan
             and self._native_upgrade_eligible
-            and self._vulkan_compact is not None
+            and self._vulkan_structured is not None
         )
-        if self._run_vulkan_compact(context, runtime_args, transfer_before):
+        if self._run_vulkan_structured(context, runtime_args, transfer_before):
             return
 
         def observe_control(boundary):
@@ -2134,7 +2188,7 @@ class _CompiledWhileGraphNode:
         active = predicate_value != 0
         native_selected = False
         native_reason = (
-            "compact_indirect_runtime_fallback"
+            "vulkan_structured_runtime_fallback"
             if vulkan_native_attempted
             else self._native_upgrade_reason
         )
@@ -2262,8 +2316,8 @@ class _CompiledWhileGraphNode:
         self._condition.invalidate_runtime()
         for node in self._chunks.values():
             node.invalidate_runtime()
-        if self._vulkan_compact is not None:
-            self._vulkan_compact.invalidate_runtime()
+        if self._vulkan_structured is not None:
+            self._vulkan_structured.invalidate_runtime()
 
     @property
     def debug_graph_stats(self):
@@ -2271,7 +2325,7 @@ class _CompiledWhileGraphNode:
         condition_stats = (self._condition.debug_graph_stats,)
         if not self._native_upgrade_eligible:
             return (*condition_stats, *chunk_stats)
-        if self._vulkan_compact is not None:
+        if self._vulkan_structured is not None:
             return (
                 self._native_jit_cache._debug_graph_stats(),
                 *condition_stats,

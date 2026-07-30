@@ -371,6 +371,7 @@ struct CompiledGraphDebugSnapshot {
 
 struct CompiledGraphStructuredResult {
   bool submitted{false};
+  std::uint32_t strategy{0};
   std::uint32_t logical_iterations{0};
   std::int32_t predicate{0};
   std::int32_t counter{0};
@@ -379,6 +380,8 @@ struct CompiledGraphStructuredResult {
   std::uint32_t encoded_iterations{0};
   std::uint32_t indirect_dispatches{0};
   std::uint32_t controller_dispatches{0};
+  std::uint32_t controller_invocations{0};
+  std::uint32_t zero_dispatches{0};
   std::uint32_t control_bytes{0};
   std::uint32_t observation_bytes{0};
 };
@@ -544,7 +547,8 @@ struct TI_DLL_EXPORT CompiledGraph {
       Ndarray *counter,
       Ndarray *status,
       std::size_t initial_dispatch_count,
-      int max_iterations) const;
+      int max_iterations,
+      std::uint32_t strategy) const;
   bool jit_run_conditional_cuda_cached(
       const CompileConfig &compile_config,
       const std::unordered_map<std::string, IValue> &args,

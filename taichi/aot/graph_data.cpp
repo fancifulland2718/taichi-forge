@@ -2859,13 +2859,16 @@ CompiledGraph::jit_run_bounded_vulkan_cached(
     Ndarray *counter,
     Ndarray *status,
     std::size_t initial_dispatch_count,
-    int max_iterations) const try {
+    int max_iterations,
+    std::uint32_t strategy) const try {
   CompiledGraphStructuredResult result;
 #if defined(TI_WITH_VULKAN)
   if (compile_config.arch != Arch::vulkan || predicate == nullptr ||
       counter == nullptr || max_iterations < 0 ||
       initial_dispatch_count == 0 ||
-      initial_dispatch_count >= dispatches.size()) {
+      initial_dispatch_count >= dispatches.size() ||
+      strategy > static_cast<std::uint32_t>(
+                     gfx::GfxRuntime::GraphStructuredStrategy::chained)) {
     return result;
   }
   Program *program = jit_graph_program(*this);
@@ -2936,6 +2939,8 @@ CompiledGraph::jit_run_bounded_vulkan_cached(
   control.initial_dispatch_count = initial_dispatch_count;
   control.max_iterations = static_cast<std::uint32_t>(max_iterations);
   control.has_status = status != nullptr;
+  control.strategy =
+      static_cast<gfx::GfxRuntime::GraphStructuredStrategy>(strategy);
   if (status != nullptr) {
     control.status = status->get_device_allocation().get_ptr();
   }
@@ -2951,6 +2956,7 @@ CompiledGraph::jit_run_bounded_vulkan_cached(
     resource_guard->finish_external_access_epoch();
   }
   result.submitted = gfx_result.submitted;
+  result.strategy = static_cast<std::uint32_t>(gfx_result.strategy);
   result.logical_iterations = gfx_result.logical_iterations;
   result.predicate = gfx_result.predicate;
   result.counter = gfx_result.counter;
@@ -2959,6 +2965,8 @@ CompiledGraph::jit_run_bounded_vulkan_cached(
   result.encoded_iterations = gfx_result.encoded_iterations;
   result.indirect_dispatches = gfx_result.indirect_dispatches;
   result.controller_dispatches = gfx_result.controller_dispatches;
+  result.controller_invocations = gfx_result.controller_invocations;
+  result.zero_dispatches = gfx_result.zero_dispatches;
   result.control_bytes = gfx_result.control_bytes;
   result.observation_bytes = gfx_result.observation_bytes;
 #endif
