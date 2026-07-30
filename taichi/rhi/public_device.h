@@ -511,6 +511,21 @@ class RHI_DLL_EXPORT CommandList {
     return RhiResult::not_supported;
   }
 
+  /**
+   * Begins a conditional command region controlled by one uint32 predicate.
+   * Compute dispatches inside the region execute when the predicate is
+   * non-zero, or zero when `inverted` is true. Backends without conditional
+   * command support return `not_supported`.
+   */
+  virtual RhiResult begin_conditional(DevicePtr predicate,
+                                      bool inverted = false) noexcept {
+    return RhiResult::not_supported;
+  }
+
+  virtual RhiResult end_conditional() noexcept {
+    return RhiResult::not_supported;
+  }
+
   struct ComputeSize {
     uint32_t x{0};
     uint32_t y{0};
@@ -635,6 +650,7 @@ enum class AllocUsage : int {
   Index = 8,
   Upload = 16,
   Indirect = 32,
+  Conditional = 64,
 };
 
 MAKE_ENUM_FLAGS(AllocUsage)
@@ -766,6 +782,10 @@ class RHI_DLL_EXPORT Device {
   virtual uint32_t get_max_storage_buffer_descriptors_per_binding()
       const noexcept {
     return UINT32_MAX;
+  }
+
+  virtual bool supports_conditional_commands() const noexcept {
+    return false;
   }
 
   /**

@@ -2399,6 +2399,7 @@ def _is_vulkan_structured_report(report):
     return report.lowering in (
         "vulkan_chained_indirect",
         "vulkan_compact_indirect",
+        "vulkan_conditional",
     )
 
 
@@ -2430,7 +2431,6 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         )
     ) <= device.keys()
     assert not device["per_iteration_host_observation"]
-    assert not device["conditional_rendering_available"]
     assert not device["conditional_rendering_qualified"]
     if arch == ti.cuda:
         expected = bool(
@@ -2474,6 +2474,11 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         assert device["available_strategies"] == (
             "chained_indirect",
             "compact_indirect",
+            *(
+                ("conditional",)
+                if device["conditional_rendering_available"]
+                else ()
+            ),
         )
         assert device["qualified_strategies"] == ("compact_indirect",)
         assert not device["chained_runtime_qualified"]
@@ -2482,6 +2487,7 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         assert device["unsupported_reason"] == ("vulkan_if_switch_runtime_not_compiled")
     else:
         assert capabilities["backend"] == "cpu"
+        assert not device["conditional_rendering_available"]
         assert not device["rhi_primitive_compiled"]
         assert not device["rhi_primitive_qualified"]
         assert not device["runtime_path_compiled"]
@@ -2877,6 +2883,20 @@ def test_structured_graph_while_vulkan_strategy_selection_and_override(
     assert compact.indirect_dispatch_count < chained.indirect_dispatch_count
     assert compact.control_arena_bytes < chained.control_arena_bytes
     assert chained_args["state"].to_numpy()[()] == 5
+
+    capabilities = ti.graph.structured_control_capabilities()["device_control"]
+    if capabilities["conditional_rendering_available"]:
+        monkeypatch.setenv(
+            "TI_GRAPH_VULKAN_STRUCTURED_STRATEGY", "conditional"
+        )
+        conditional_args = _structured_while_args(target=5)
+        small.run(conditional_args)
+        conditional = small.control_flow_stats()[0]
+        assert conditional.lowering == "vulkan_conditional"
+        assert conditional.logical_iterations == compact.logical_iterations
+        assert conditional.indirect_dispatch_count == 0
+        assert conditional.controller_invocation_count == conditional.max_iterations
+        assert conditional_args["state"].to_numpy()[()] == 5
 
     monkeypatch.setenv("TI_GRAPH_VULKAN_STRUCTURED_STRATEGY", "auto")
     large = _build_structured_while_graph(

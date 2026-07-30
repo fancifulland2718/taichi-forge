@@ -696,6 +696,8 @@ def structured_control_capabilities():
     stops_command_issue_after_exit = False
     exact_dynamic_termination = False
     max_encoded_dispatches = 0
+    conditional_rendering_available = False
+    conditional_rendering_qualified = False
     if arch == _ti_core.Arch.cuda:
         cuda = dict(_ti_core.cuda_conditional_graph_capabilities())
         setter_compiled = bool(
@@ -725,6 +727,9 @@ def structured_control_capabilities():
         else:
             reason = "none"
     elif arch == _ti_core.Arch.vulkan:
+        conditional_rendering_available = bool(
+            impl.get_runtime().prog._vulkan_conditional_rendering_available()
+        )
         native = True
         primitive = "vulkan_dispatch_indirect"
         rhi_primitive_compiled = True
@@ -765,11 +770,19 @@ def structured_control_capabilities():
             "rhi_primitive_qualified": rhi_primitive_qualified,
             "runtime_path_compiled": runtime_path_compiled,
             "runtime_path_qualified": runtime_path_qualified,
-            "conditional_rendering_available": False,
-            "conditional_rendering_qualified": False,
+            "conditional_rendering_available": conditional_rendering_available,
+            "conditional_rendering_qualified": conditional_rendering_qualified,
             "max_encoded_dispatches": max_encoded_dispatches,
             "available_strategies": (
-                ("chained_indirect", "compact_indirect")
+                (
+                    "chained_indirect",
+                    "compact_indirect",
+                    *(
+                        ("conditional",)
+                        if conditional_rendering_available
+                        else ()
+                    ),
+                )
                 if arch == _ti_core.Arch.vulkan
                 else ()
             ),
@@ -1626,11 +1639,11 @@ def _vulkan_structured_strategy():
     strategy = os.environ.get(
         "TI_GRAPH_VULKAN_STRUCTURED_STRATEGY", "auto"
     ).strip().lower()
-    strategies = {"auto": 0, "compact": 1, "chained": 2}
+    strategies = {"auto": 0, "compact": 1, "chained": 2, "conditional": 3}
     if strategy not in strategies:
         raise TaichiRuntimeError(
             "TI_GRAPH_VULKAN_STRUCTURED_STRATEGY must be auto, compact, "
-            "or chained"
+            "chained, or conditional"
         )
     return strategies[strategy]
 
@@ -2047,7 +2060,11 @@ class _CompiledWhileGraphNode:
                 )
             return False
 
-        strategy_names = {1: "compact", 2: "chained"}
+        strategy_names = {
+            1: "compact_indirect",
+            2: "chained_indirect",
+            3: "conditional",
+        }
         strategy = strategy_names.get(int(result["strategy"]))
         if strategy is None:
             raise TaichiRuntimeError(
@@ -2076,7 +2093,7 @@ class _CompiledWhileGraphNode:
         self._last_report = GraphWhileReport(
             name=self.name,
             backend="vulkan",
-            lowering=f"vulkan_{strategy}_indirect",
+            lowering=f"vulkan_{strategy}",
             max_iterations=self.max_iterations,
             logical_iterations=logical,
             executed_iterations=encoded,

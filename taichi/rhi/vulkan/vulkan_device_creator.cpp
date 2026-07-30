@@ -647,6 +647,8 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       enabled_extensions.push_back(ext.extensionName);
     } else if (name == VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME) {
       enabled_extensions.push_back(ext.extensionName);
+    } else if (name == VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME) {
+      enabled_extensions.push_back(ext.extensionName);
     } else if (name == VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME) {
       enabled_extensions.push_back(ext.extensionName);
     } else if (name == VK_KHR_PRESENT_MODE_FIFO_LATEST_READY_EXTENSION_NAME ||
@@ -775,6 +777,10 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
   VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamic_rendering_feature{};
   dynamic_rendering_feature.sType =
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR;
+  VkPhysicalDeviceConditionalRenderingFeaturesEXT
+      conditional_rendering_feature{};
+  conditional_rendering_feature.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONDITIONAL_RENDERING_FEATURES_EXT;
   VkPhysicalDeviceDescriptorIndexingFeatures descriptor_indexing_feature{};
   descriptor_indexing_feature.sType =
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
@@ -930,6 +936,22 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       pNextEnd = &dynamic_rendering_feature.pNext;
     }
     */
+
+    if (CHECK_EXTENSION(VK_EXT_CONDITIONAL_RENDERING_EXTENSION_NAME)) {
+      features2.pNext = &conditional_rendering_feature;
+      vkGetPhysicalDeviceFeatures2KHR(physical_device_, &features2);
+      const bool supports_conditional_rendering =
+          conditional_rendering_feature.conditionalRendering;
+      conditional_rendering_feature = {};
+      conditional_rendering_feature.sType =
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CONDITIONAL_RENDERING_FEATURES_EXT;
+      if (supports_conditional_rendering) {
+        conditional_rendering_feature.conditionalRendering = VK_TRUE;
+        ti_device_->vk_caps().conditional_rendering = true;
+        *pNextEnd = &conditional_rendering_feature;
+        pNextEnd = &conditional_rendering_feature.pNext;
+      }
+    }
 
     // Graph replay can patch the buffer descriptors referenced by an
     // executable command buffer only when both descriptor classes used by

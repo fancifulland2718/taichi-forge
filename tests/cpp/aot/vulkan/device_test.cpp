@@ -389,6 +389,57 @@ TEST(VulkanDeviceTest, IndirectDispatchRejectsInvalidAllocations) {
             RhiResult::invalid_usage);
 }
 
+TEST(VulkanDeviceTest, ConditionalCommandsValidateUsageAndNesting) {
+  if (!vulkan::is_vulkan_api_available()) {
+    GTEST_SKIP();
+  }
+
+  vulkan::VulkanDeviceCreator::Params params;
+  params.api_version = std::nullopt;
+  auto creator = std::make_unique<vulkan::VulkanDeviceCreator>(params);
+  auto *device = static_cast<vulkan::VulkanDevice *>(creator->device());
+  if (!device->supports_conditional_commands()) {
+    GTEST_SKIP();
+  }
+  auto *stream = device->get_compute_stream();
+  auto [cmdlist, command_result] = stream->new_command_list_unique();
+  ASSERT_EQ(command_result, RhiResult::success);
+  ASSERT_NE(cmdlist, nullptr);
+
+  Device::AllocParams storage_params;
+  storage_params.size = sizeof(uint32_t);
+  storage_params.usage = AllocUsage::Storage;
+  auto [storage, storage_result] =
+      device->allocate_memory_unique(storage_params);
+  ASSERT_EQ(storage_result, RhiResult::success);
+  ASSERT_NE(storage, nullptr);
+  EXPECT_EQ(cmdlist->begin_conditional(storage->get_ptr()),
+            RhiResult::invalid_usage);
+  EXPECT_EQ(cmdlist->begin_conditional(kDeviceNullPtr),
+            RhiResult::invalid_usage);
+
+  Device::AllocParams predicate_params;
+  predicate_params.size = 2 * sizeof(uint32_t);
+  predicate_params.usage =
+      AllocUsage::Storage | AllocUsage::Conditional;
+  auto [predicate, predicate_result] =
+      device->allocate_memory_unique(predicate_params);
+  ASSERT_EQ(predicate_result, RhiResult::success);
+  ASSERT_NE(predicate, nullptr);
+  EXPECT_EQ(cmdlist->begin_conditional(predicate->get_ptr(2)),
+            RhiResult::invalid_usage);
+  EXPECT_EQ(cmdlist->begin_conditional(
+                predicate->get_ptr(device->get_vkbuffer_size(*predicate))),
+            RhiResult::invalid_usage);
+
+  EXPECT_EQ(cmdlist->begin_conditional(predicate->get_ptr()),
+            RhiResult::success);
+  EXPECT_EQ(cmdlist->begin_conditional(predicate->get_ptr()),
+            RhiResult::invalid_usage);
+  EXPECT_EQ(cmdlist->end_conditional(), RhiResult::success);
+  EXPECT_EQ(cmdlist->end_conditional(), RhiResult::invalid_usage);
+}
+
 TEST(VulkanDeviceTest, DeviceWrittenIndirectDispatchReplaysWithoutStalePacket) {
   if (!vulkan::is_vulkan_api_available()) {
     GTEST_SKIP();

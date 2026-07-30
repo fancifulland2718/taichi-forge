@@ -470,6 +470,9 @@ class VulkanCommandList : public CommandList {
   void push_constants(const void *data, uint32_t size) noexcept;
   RhiResult dispatch(uint32_t x, uint32_t y = 1, uint32_t z = 1) noexcept final;
   RhiResult dispatch_indirect(DevicePtr indirect) noexcept final;
+  RhiResult begin_conditional(DevicePtr predicate,
+                              bool inverted = false) noexcept final;
+  RhiResult end_conditional() noexcept final;
   void begin_renderpass(int x0,
                         int y0,
                         int x1,
@@ -538,6 +541,7 @@ class VulkanCommandList : public CommandList {
   VkDevice device_;
   vkapi::IVkCommandBuffer buffer_;
   VulkanPipeline *current_pipeline_{nullptr};
+  bool conditional_active_{false};
 
   struct ProfilerScope {
     std::string kernel_name;
@@ -742,6 +746,7 @@ struct VulkanCapabilities {
   bool dynamic_rendering{false};
   bool present_mode_fifo_latest_ready{false};
   bool descriptor_update_after_bind{false};
+  bool conditional_rendering{false};
 };
 
 class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
@@ -934,6 +939,9 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
       const noexcept override {
     auto v = vk_caps_.max_per_stage_descriptor_storage_buffers;
     return v == 0u ? UINT32_MAX : v;
+  }
+  bool supports_conditional_commands() const noexcept override {
+    return vk_caps_.conditional_rendering;
   }
 
   void set_descriptor_set_cache_enabled(bool enabled) {

@@ -288,6 +288,7 @@ class TI_DLL_EXPORT GfxRuntime {
     automatic = 0,
     compact = 1,
     chained = 2,
+    conditional = 3,
   };
 
   struct GraphStructuredControl {

@@ -1406,6 +1406,54 @@ RhiResult VulkanCommandList::dispatch_indirect(DevicePtr indirect) noexcept {
   return RhiResult::success;
 }
 
+RhiResult VulkanCommandList::begin_conditional(DevicePtr predicate,
+                                               bool inverted) noexcept {
+  constexpr size_t kConditionalPredicateSize = sizeof(uint32_t);
+  if (!ti_device_->vk_caps().conditional_rendering) {
+    return RhiResult::not_supported;
+  }
+  if (conditional_active_ || predicate.device != ti_device_ ||
+      predicate.alloc_id == 0) {
+    return RhiResult::invalid_usage;
+  }
+  if (!int(ti_device_->allocation_usage(predicate) &
+           AllocUsage::Conditional)) {
+    return RhiResult::invalid_usage;
+  }
+  if ((predicate.offset & (alignof(uint32_t) - 1)) != 0) {
+    return RhiResult::invalid_usage;
+  }
+  const size_t buffer_size = ti_device_->get_vkbuffer_size(predicate);
+  if (predicate.offset > buffer_size ||
+      kConditionalPredicateSize > buffer_size - predicate.offset) {
+    return RhiResult::invalid_usage;
+  }
+
+  auto predicate_buffer = ti_device_->get_vkbuffer(predicate);
+  VkConditionalRenderingBeginInfoEXT info{};
+  info.sType = VK_STRUCTURE_TYPE_CONDITIONAL_RENDERING_BEGIN_INFO_EXT;
+  info.buffer = predicate_buffer->buffer;
+  info.offset = predicate.offset;
+  info.flags =
+      inverted ? VK_CONDITIONAL_RENDERING_INVERTED_BIT_EXT : 0;
+  vkCmdBeginConditionalRenderingEXT(buffer_->buffer, &info);
+  buffer_->refs.push_back(predicate_buffer);
+  conditional_active_ = true;
+  return RhiResult::success;
+}
+
+RhiResult VulkanCommandList::end_conditional() noexcept {
+  if (!ti_device_->vk_caps().conditional_rendering) {
+    return RhiResult::not_supported;
+  }
+  if (!conditional_active_) {
+    return RhiResult::invalid_usage;
+  }
+  vkCmdEndConditionalRenderingEXT(buffer_->buffer);
+  conditional_active_ = false;
+  return RhiResult::success;
+}
+
 vkapi::IVkCommandBuffer VulkanCommandList::vk_command_buffer() {
   return buffer_;
 }
@@ -1836,6 +1884,7 @@ vkapi::IVkRenderPass VulkanCommandList::current_renderpass() {
 
 vkapi::IVkCommandBuffer VulkanCommandList::finalize() {
   if (!finalized_) {
+    TI_ASSERT(!conditional_active_);
     vkEndCommandBuffer(buffer_->buffer);
     finalized_ = true;
   }
@@ -2118,6 +2167,9 @@ RhiResult VulkanDevice::allocate_memory(const AllocParams &params,
   }
   if (int(params.usage & AllocUsage::Indirect)) {
     buffer_info.usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+  }
+  if (int(params.usage & AllocUsage::Conditional)) {
+    buffer_info.usage |= VK_BUFFER_USAGE_CONDITIONAL_RENDERING_BIT_EXT;
   }
 
   uint32_t queue_family_indices[] = {compute_queue_family_index_,

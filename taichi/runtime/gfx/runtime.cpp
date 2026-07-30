@@ -285,6 +285,66 @@ std::vector<uint32_t> make_chained_controller_spirv(
   return builder.finalize();
 }
 
+std::vector<uint32_t> make_conditional_controller_spirv(
+    const DeviceCapabilityConfig &caps,
+    std::uint32_t max_iterations,
+    bool has_status) {
+  spirv::IRBuilder builder(Arch::vulkan, &caps);
+  builder.init_header();
+  const auto u32 = builder.u32_type();
+  const auto predicate = builder.buffer_argument(u32, 0, 0, "predicate");
+  const auto control = builder.buffer_argument(u32, 0, 1, "control");
+  const auto status = builder.buffer_argument(u32, 0, 2, "status");
+  const auto function = builder.new_function();
+  builder.start_function(function);
+
+  const auto zero = builder.uint_immediate_number(u32, 0);
+  const auto one = builder.uint_immediate_number(u32, 1);
+  const auto observation_base =
+      builder.uint_immediate_number(u32, max_iterations);
+  const auto logical_count_ptr =
+      builder.struct_array_access(u32, control, observation_base);
+  const auto logical_count = builder.load_variable(logical_count_ptr, u32);
+  const auto predicate_value = builder.load_variable(
+      builder.struct_array_access(u32, predicate, zero), u32);
+  const auto active = builder.ne(predicate_value, zero);
+  const auto sink_index = builder.uint_immediate_number(
+      u32, max_iterations + kStructuredObservationWords);
+  const auto stable_index =
+      builder.select(active, logical_count, sink_index);
+  builder.store_variable(
+      builder.struct_array_access(u32, control, stable_index),
+      predicate_value);
+
+  if (has_status) {
+    const auto initial_status_ptr = builder.struct_array_access(
+        u32, control,
+        builder.add(observation_base,
+                    builder.uint_immediate_number(u32, 4)));
+    const auto initial_status =
+        builder.load_variable(initial_status_ptr, u32);
+    const auto status_value = builder.load_variable(
+        builder.struct_array_access(u32, status, zero), u32);
+    builder.store_variable(
+        initial_status_ptr,
+        builder.select(builder.eq(logical_count, zero), status_value,
+                       initial_status));
+  }
+  builder.store_variable(
+      logical_count_ptr,
+      builder.add(logical_count, builder.select(active, one, zero)));
+
+  builder.make_inst(spv::OpReturn);
+  builder.make_inst(spv::OpFunctionEnd);
+  std::vector<spirv::Value> interfaces;
+  if (caps.get(DeviceCapability::spirv_version) > 0x10300) {
+    interfaces = {predicate, control, status};
+  }
+  builder.commit_kernel_function(function, "main", std::move(interfaces),
+                                 {1, 1, 1});
+  return builder.finalize();
+}
+
 std::unique_ptr<Pipeline> create_structured_pipeline(
     Device *device,
     const std::vector<uint32_t> &spirv,
@@ -2253,7 +2313,9 @@ bool GfxRuntime::try_launch_graph(
     const bool valid_strategy =
         structured_control->strategy == GraphStructuredStrategy::automatic ||
         structured_control->strategy == GraphStructuredStrategy::compact ||
-        structured_control->strategy == GraphStructuredStrategy::chained;
+        structured_control->strategy == GraphStructuredStrategy::chained ||
+        structured_control->strategy ==
+            GraphStructuredStrategy::conditional;
     if (!valid_scalar(structured_control->predicate) ||
         !valid_scalar(structured_control->counter) ||
         (structured_control->has_status &&
@@ -2482,6 +2544,10 @@ bool GfxRuntime::try_launch_graph(
         structured_control->max_iterations > 0 &&
         encoded_actions <= kStructuredChainedMaximumDispatches &&
         chained_control_bytes <= kStructuredChainedMaximumControlBytes;
+    const bool conditional_eligible =
+        structured_control->max_iterations > 0 &&
+        encoded_actions <= kStructuredMaximumEncodedActions &&
+        device_->supports_conditional_commands();
     structured_strategy = structured_control->strategy;
     if (structured_strategy == GraphStructuredStrategy::automatic) {
       // Chained dispatch remains an explicit qualification path until a
@@ -2491,6 +2557,8 @@ bool GfxRuntime::try_launch_graph(
     }
     if ((structured_strategy == GraphStructuredStrategy::chained &&
          !chained_eligible) ||
+        (structured_strategy == GraphStructuredStrategy::conditional &&
+         !conditional_eligible) ||
         (structured_strategy == GraphStructuredStrategy::compact &&
          encoded_actions > kStructuredMaximumEncodedActions)) {
       return reject();
@@ -2634,7 +2702,9 @@ bool GfxRuntime::try_launch_graph(
   const std::size_t structured_observation_word_offset =
       structured_group_counts.empty()
           ? 0
-          : structured_strategy == GraphStructuredStrategy::chained
+          : structured_strategy == GraphStructuredStrategy::conditional
+                ? structured_control->max_iterations
+                : structured_strategy == GraphStructuredStrategy::chained
                 ? static_cast<std::size_t>(
                       structured_control->max_iterations) *
                       (structured_group_counts.size() + 1) *
@@ -2647,7 +2717,10 @@ bool GfxRuntime::try_launch_graph(
              kStructuredObservationWords +
              (structured_strategy == GraphStructuredStrategy::chained
                   ? kStructuredChainedSinkWords
-                  : 0)) *
+                  : structured_strategy ==
+                            GraphStructuredStrategy::conditional
+                        ? 1
+                        : 0)) *
                 sizeof(std::uint32_t);
   const std::size_t structured_observation_bytes =
       structured_control == nullptr
@@ -2666,7 +2739,9 @@ bool GfxRuntime::try_launch_graph(
               {structured_control_bytes,
                /*host_write=*/false, /*host_read=*/false,
                /*export_sharing=*/false,
-               AllocUsage::Storage | AllocUsage::Indirect});
+               structured_strategy == GraphStructuredStrategy::conditional
+                   ? AllocUsage::Storage | AllocUsage::Conditional
+                   : AllocUsage::Storage | AllocUsage::Indirect});
       if (control_result != RhiResult::success || !control_buffer) {
         return reject();
       }
@@ -2690,7 +2765,12 @@ bool GfxRuntime::try_launch_graph(
       slot->structured_strategy = structured_strategy;
       slot->structured_controller_pipeline = create_structured_pipeline(
           device_,
-          structured_strategy == GraphStructuredStrategy::chained
+          structured_strategy == GraphStructuredStrategy::conditional
+              ? make_conditional_controller_spirv(
+                    device_->get_caps(),
+                    structured_control->max_iterations,
+                    structured_control->has_status)
+              : structured_strategy == GraphStructuredStrategy::chained
               ? make_chained_controller_spirv(
                     device_->get_caps(), structured_group_counts,
                     structured_control->max_iterations,
@@ -2698,7 +2778,9 @@ bool GfxRuntime::try_launch_graph(
               : make_compact_controller_spirv(
                     device_->get_caps(), structured_group_counts,
                     structured_control->has_status),
-          structured_strategy == GraphStructuredStrategy::chained
+          structured_strategy == GraphStructuredStrategy::conditional
+              ? "vulkan_conditional_controller"
+              : structured_strategy == GraphStructuredStrategy::chained
               ? "vulkan_chained_controller"
               : "vulkan_compact_controller");
       slot->structured_terminal_pipeline = create_structured_pipeline(
@@ -2787,7 +2869,12 @@ bool GfxRuntime::try_launch_graph(
     const std::uint32_t active_payload_dispatches =
         bounded_logical *
         static_cast<std::uint32_t>(structured_group_counts.size());
-    if (structured_strategy == GraphStructuredStrategy::chained) {
+    if (structured_strategy == GraphStructuredStrategy::conditional) {
+      structured_result->controller_invocations =
+          structured_control->max_iterations;
+      structured_result->indirect_dispatches = 0;
+      structured_result->zero_dispatches = 0;
+    } else if (structured_strategy == GraphStructuredStrategy::chained) {
       structured_result->controller_invocations = std::min(
           structured_control->max_iterations,
           bounded_logical +
@@ -2978,45 +3065,71 @@ bool GfxRuntime::try_launch_graph(
       TI_ERROR_IF(status != RhiResult::success,
                   "Vulkan structured controller dispatch error: RhiResult({})",
                   status);
-      cmdlist->buffer_transition(
-          slot->structured_control_buffer->get_ptr(),
-          structured_packet_bytes,
-          {BufferBarrierStage::Compute,
-           BufferBarrierAccess::ShaderWrite,
-           BufferBarrierStage::IndirectCommand,
-           BufferBarrierAccess::IndirectCommandRead});
-
-      for (std::size_t packet = 0;
-           packet < structured_group_counts.size(); ++packet) {
-        const std::size_t packet_word_offset =
-            structured_strategy == GraphStructuredStrategy::chained
-                ? (static_cast<std::size_t>(iteration) *
-                       (structured_group_counts.size() + 1) +
-                   1 + packet) *
-                      kStructuredPacketWords
-                : packet * kStructuredPacketWords;
-        const DevicePtr indirect =
+      if (structured_strategy == GraphStructuredStrategy::conditional) {
+        const DevicePtr stable_predicate =
             slot->structured_control_buffer->get_ptr(
-                packet_word_offset * sizeof(std::uint32_t));
-        dispatch_task(
-            structured_tasks[structured_initial_tasks + packet],
-            &indirect);
+                iteration * sizeof(std::uint32_t));
+        cmdlist->buffer_transition(
+            stable_predicate, sizeof(std::uint32_t),
+            {BufferBarrierStage::Compute,
+             BufferBarrierAccess::ShaderWrite,
+             BufferBarrierStage::ConditionalCommand,
+             BufferBarrierAccess::ConditionalCommandRead});
+        status = cmdlist->begin_conditional(stable_predicate);
+        TI_ERROR_IF(status != RhiResult::success,
+                    "Vulkan conditional compute begin failed: RhiResult({})",
+                    status);
+        for (std::size_t packet = 0;
+             packet < structured_group_counts.size(); ++packet) {
+          dispatch_task(
+              structured_tasks[structured_initial_tasks + packet],
+              nullptr);
+        }
+        status = cmdlist->end_conditional();
+        TI_ERROR_IF(status != RhiResult::success,
+                    "Vulkan conditional compute end failed: RhiResult({})",
+                    status);
+      } else {
+        cmdlist->buffer_transition(
+            slot->structured_control_buffer->get_ptr(),
+            structured_packet_bytes,
+            {BufferBarrierStage::Compute,
+             BufferBarrierAccess::ShaderWrite,
+             BufferBarrierStage::IndirectCommand,
+             BufferBarrierAccess::IndirectCommandRead});
+
+        for (std::size_t packet = 0;
+             packet < structured_group_counts.size(); ++packet) {
+          const std::size_t packet_word_offset =
+              structured_strategy == GraphStructuredStrategy::chained
+                  ? (static_cast<std::size_t>(iteration) *
+                         (structured_group_counts.size() + 1) +
+                     1 + packet) *
+                        kStructuredPacketWords
+                  : packet * kStructuredPacketWords;
+          const DevicePtr indirect =
+              slot->structured_control_buffer->get_ptr(
+                  packet_word_offset * sizeof(std::uint32_t));
+          dispatch_task(
+              structured_tasks[structured_initial_tasks + packet],
+              &indirect);
+        }
+        cmdlist->buffer_transition(
+            slot->structured_control_buffer->get_ptr(),
+            structured_packet_bytes,
+            {BufferBarrierStage::IndirectCommand,
+             BufferBarrierAccess::IndirectCommandRead,
+             structured_strategy == GraphStructuredStrategy::chained
+                 ? BufferBarrierStage::IndirectCommand |
+                       BufferBarrierStage::Compute
+                 : BufferBarrierStage::Compute,
+             structured_strategy == GraphStructuredStrategy::chained
+                 ? BufferBarrierAccess::IndirectCommandRead |
+                       BufferBarrierAccess::ShaderRead |
+                       BufferBarrierAccess::ShaderWrite
+                 : BufferBarrierAccess::ShaderRead |
+                       BufferBarrierAccess::ShaderWrite});
       }
-      cmdlist->buffer_transition(
-          slot->structured_control_buffer->get_ptr(),
-          structured_packet_bytes,
-          {BufferBarrierStage::IndirectCommand,
-           BufferBarrierAccess::IndirectCommandRead,
-           structured_strategy == GraphStructuredStrategy::chained
-               ? BufferBarrierStage::IndirectCommand |
-                     BufferBarrierStage::Compute
-               : BufferBarrierStage::Compute,
-           structured_strategy == GraphStructuredStrategy::chained
-               ? BufferBarrierAccess::IndirectCommandRead |
-                     BufferBarrierAccess::ShaderRead |
-                     BufferBarrierAccess::ShaderWrite
-               : BufferBarrierAccess::ShaderRead |
-                     BufferBarrierAccess::ShaderWrite});
     }
 
     cmdlist->memory_barrier();

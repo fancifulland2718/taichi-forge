@@ -700,6 +700,10 @@ void export_lang(py::module &m) {
              return ret;
            })
       .def("synchronize", &Program::synchronize)
+      .def("_vulkan_conditional_rendering_available", [](Program &program) {
+        Device *device = program.get_graphics_device();
+        return device != nullptr && device->supports_conditional_commands();
+      })
       .def("_runtime_has_fatal_fault", &Program::runtime_has_fatal_fault)
       .def("_debug_inject_runtime_fault",
            &Program::debug_inject_runtime_fault)

@@ -2868,7 +2868,7 @@ CompiledGraph::jit_run_bounded_vulkan_cached(
       initial_dispatch_count == 0 ||
       initial_dispatch_count >= dispatches.size() ||
       strategy > static_cast<std::uint32_t>(
-                     gfx::GfxRuntime::GraphStructuredStrategy::chained)) {
+                     gfx::GfxRuntime::GraphStructuredStrategy::conditional)) {
     return result;
   }
   Program *program = jit_graph_program(*this);
