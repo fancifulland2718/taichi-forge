@@ -68,7 +68,7 @@ void Lines::update_data(const LinesInfo &info) {
   ubo.num_vertices = lines_count_ * 2;
   ubo.is_indexed = indexed_ ? 1 : 0;
   ubo.aspect_ratio =
-      float(app_context_->config.width) / float(app_context_->config.height);
+      float(app_context_->render_width()) / float(app_context_->render_height());
 
   void *mapped{nullptr};
   RHI_VERIFY(app_context_->device().map(uniform_buffer_renderable_->get_ptr(0),

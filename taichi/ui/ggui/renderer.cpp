@@ -16,7 +16,8 @@ using namespace taichi::lang::metal;
 
 void Renderer::init(Program *prog,
                     TaichiWindow *window,
-                    const AppConfig &config) {
+                    const AppConfig &config,
+                    WindowLayoutState *window_layout) {
   switch (config.ggui_arch) {
     case Arch::vulkan:
       app_context_.init_with_vulkan(prog, window, config);
@@ -27,6 +28,7 @@ void Renderer::init(Program *prog,
     default:
       throw std::runtime_error("Incorrect arch for GGUI");
   }
+  app_context_.set_window_layout(window_layout);
 
   swap_chain_.init(&app_context_);
 
@@ -188,11 +190,11 @@ void Renderer::update_scene_data(SceneBase *scene) {
 
     SceneBase::UBOScene ubo;
     ubo.scene = scene->current_scene_data_;
-    ubo.window_width = app_context_.config.width;
-    ubo.window_height = app_context_.config.height;
+    ubo.window_width = app_context_.render_width();
+    ubo.window_height = app_context_.render_height();
     ubo.tan_half_fov = tanf(glm::radians(scene->camera_.fov) / 2);
     ubo.aspect_ratio =
-        float(app_context_.config.width) / float(app_context_.config.height);
+        float(app_context_.render_width()) / float(app_context_.render_height());
 
     void *mapped{nullptr};
     RHI_VERIFY(app_context_.device().map(scene_ubo_->get_ptr(0), &mapped));
@@ -205,7 +207,8 @@ void Renderer::scene_v2(SceneBase *scene) {
   if (scene->point_lights_.size() == 0) {
     TI_WARN("warning, there are no light sources in the scene.\n");
   }
-  float aspect_ratio = swap_chain_.width() / (float)swap_chain_.height();
+  float aspect_ratio =
+      app_context_.render_width() / (float)app_context_.render_height();
   scene->update_ubo(aspect_ratio);
   update_scene_data(scene);
 
@@ -223,7 +226,8 @@ void Renderer::scene(SceneBase *scene) {
   if (scene->point_lights_.size() == 0) {
     TI_WARN("warning, there are no light sources in the scene.\n");
   }
-  float aspect_ratio = swap_chain_.width() / (float)swap_chain_.height();
+  float aspect_ratio =
+      app_context_.render_width() / (float)app_context_.render_height();
   scene->update_ubo(aspect_ratio);
   update_scene_data(scene);
 
@@ -521,8 +525,15 @@ bool Renderer::draw_frame(GuiBase *gui_base, bool blocking_acquire) {
       &color_clear, &clear_colors, &depth_image,
       /*depth_clear=*/true);
 
-  for (auto renderable : render_queue_) {
-    renderable->record_this_frame_commands(cmd_list.get());
+  const auto &render_viewport =
+      app_context_.window_layout().framebuffer_render_viewport;
+  if (render_viewport.width() > 0 && render_viewport.height() > 0) {
+    cmd_list->set_raster_viewport_and_scissor(
+        render_viewport.x0, render_viewport.y0, render_viewport.x1,
+        render_viewport.y1);
+    for (auto renderable : render_queue_) {
+      renderable->record_this_frame_commands(cmd_list.get());
+    }
   }
 
   if (app_context_.config.ggui_arch == Arch::vulkan) {

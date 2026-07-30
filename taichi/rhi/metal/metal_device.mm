@@ -566,11 +566,8 @@ void MetalCommandList::begin_renderpass(int x0, int y0, int x1, int y1,
     rendertarget_height = col_attach_mtl.height;
   }
 
-  // Flip framebuffer Y
-  current_viewport_.x = x0;
-  current_viewport_.y = rendertarget_height - y0;
-  current_viewport_.width = x1 - x0;
-  current_viewport_.height = y0 - y1;
+  render_target_height_ = rendertarget_height;
+  set_raster_viewport_and_scissor(x0, y0, x1, y1);
 }
 
 void MetalCommandList::end_renderpass() {
@@ -579,6 +576,20 @@ void MetalCommandList::end_renderpass() {
   current_renderpass_details_.color_attachments.clear();
   clear_colors_.clear();
   is_renderpass_active_ = false;
+}
+
+void MetalCommandList::set_raster_viewport_and_scissor(int x0,
+                                                        int y0,
+                                                        int x1,
+                                                        int y1) {
+  RHI_ASSERT(x0 >= 0 && y0 >= 0 && x1 > x0 && y1 > y0);
+  // Metal's viewport is flipped to preserve GGUI's top-left framebuffer
+  // coordinates while the scissor remains an ordinary top-left pixel rect.
+  current_viewport_.x = x0;
+  current_viewport_.y = render_target_height_ - y0;
+  current_viewport_.width = x1 - x0;
+  current_viewport_.height = y0 - y1;
+  current_scissor_ = {x0, y0, x1 - x0, y1 - y0};
 }
 
 void MetalCommandList::bind_mtl_shader_resources(
@@ -695,6 +706,11 @@ MTLRenderCommandEncoder_id MetalCommandList::pre_draw_setup() {
                                  (double)current_viewport_.y,
                                  (double)current_viewport_.width,
                                  (double)current_viewport_.height, 0.0, 1.0}];
+  [rce setScissorRect:(MTLScissorRect){
+                          (NSUInteger)current_scissor_.x,
+                          (NSUInteger)current_scissor_.y,
+                          (NSUInteger)current_scissor_.width,
+                          (NSUInteger)current_scissor_.height}];
 
   [rce setTriangleFillMode:fillmode2mtl(raster_params->polygon_mode)];
   MTLCullMode cull_mode = MTLCullModeNone;

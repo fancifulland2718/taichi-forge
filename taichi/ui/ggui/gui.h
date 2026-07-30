@@ -23,7 +23,10 @@ namespace vulkan {
 
 class TI_DLL_EXPORT Gui final : public GuiBase {
  public:
-  Gui(AppContext *app_context, SwapChain *swap_chain, TaichiWindow *window);
+  Gui(AppContext *app_context,
+      SwapChain *swap_chain,
+      TaichiWindow *window,
+      WindowLayoutState *window_layout);
   ~Gui() override;
 
   void init_render_resources(VkRenderPass render_pass);
@@ -41,6 +44,8 @@ class TI_DLL_EXPORT Gui final : public GuiBase {
   bool begin_collapsible_section(const std::string &name,
                                  bool default_open) override;
   void end_collapsible_section() override;
+  bool begin_edge_region(const std::string &name, WindowEdge edge) override;
+  void end_edge_region(WindowEdge edge) override;
   void end() override;
   void text(const std::string &text) override;
   void text(const std::string &text, glm::vec3 color) override;
@@ -61,6 +66,8 @@ class TI_DLL_EXPORT Gui final : public GuiBase {
 
   void prepare_for_next_frame() override;
   bool has_widgets() const override;
+  bool wants_capture_mouse() const override;
+  bool wants_capture_keyboard() const override;
   void end_frame() override;
 
   VkRenderPass render_pass() {
@@ -74,6 +81,7 @@ class TI_DLL_EXPORT Gui final : public GuiBase {
   bool frame_started_{false};
   AppContext *app_context_{nullptr};
   SwapChain *swap_chain_{nullptr};
+  WindowLayoutState *window_layout_{nullptr};
   ImGuiContext *imgui_context_{nullptr};
   int widthBeforeDPIScale{0};
   int heightBeforeDPIScale{0};

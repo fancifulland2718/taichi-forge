@@ -228,6 +228,19 @@ class Camera:
         self.last_time = time.perf_counter_ns()
 
         movement_speed *= time_elapsed * 60.0
+        render_input_available = getattr(
+            window, "is_render_input_available", lambda: True
+        )()
+        cursor_getter = getattr(
+            window, "get_render_cursor_pos", window.get_cursor_pos
+        )
+        curr_mouse_x, curr_mouse_y = cursor_getter()
+        if not render_input_available:
+            # Keep the next render-region delta continuous while a sidebar
+            # owns the pointer, and do not let UI-focused keys move the camera.
+            self.last_mouse_x, self.last_mouse_y = curr_mouse_x, curr_mouse_y
+            return
+
         if window.is_pressed("w"):
             position_change += front * movement_speed
         if window.is_pressed("s"):
@@ -241,8 +254,6 @@ class Camera:
         if window.is_pressed("q"):
             position_change -= up * movement_speed
         self.position(*(self.curr_position + position_change))
-
-        curr_mouse_x, curr_mouse_y = window.get_cursor_pos()
 
         if (hold_key is None) or window.is_pressed(hold_key):
             if (self.last_mouse_x is None) or (self.last_mouse_y is None):

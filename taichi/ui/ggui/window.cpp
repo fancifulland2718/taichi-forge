@@ -1,6 +1,7 @@
 #include "taichi/ui/ggui/window.h"
 #include "taichi/program/callable.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <thread>
@@ -37,17 +38,18 @@ void Window::init(Program *prog, const AppConfig &config) {
   }
 
   renderer_ = std::make_unique<Renderer>();
-  renderer_->init(prog, glfw_window_, config);
+  renderer_->init(prog, glfw_window_, config, &window_layout_);
   canvas_ = std::make_unique<Canvas>(renderer_.get());
   switch (config.ggui_arch) {
     case Arch::vulkan:
       gui_ = std::make_unique<Gui>(&renderer_->app_context(),
-                                   &renderer_->swap_chain(), glfw_window_);
+                                   &renderer_->swap_chain(), glfw_window_,
+                                   &window_layout_);
       break;
 #ifdef TI_WITH_METAL
     case Arch::metal:
-      gui_ =
-          std::make_unique<GuiMetal>(&renderer_->app_context(), glfw_window_);
+      gui_ = std::make_unique<GuiMetal>(
+          &renderer_->app_context(), glfw_window_, &window_layout_);
       break;
 #endif
     default:
@@ -157,6 +159,13 @@ void Window::resize() {
   renderer_->app_context().config.height = height;
 
   renderer_->swap_chain().resize(width, height);
+
+  int logical_width = width;
+  int logical_height = height;
+  glfwGetWindowSize(glfw_window_, &logical_width, &logical_height);
+  window_layout_.update_dimensions(
+      static_cast<float>(std::max(0, logical_width)),
+      static_cast<float>(std::max(0, logical_height)), width, height);
 
   // config_.width and config_.height are used for computing relative mouse
   // positions, so they need to be updated once the window is resized.

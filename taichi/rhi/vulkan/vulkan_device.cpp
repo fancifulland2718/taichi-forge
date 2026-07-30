@@ -1035,19 +1035,7 @@ void VulkanCommandList::bind_pipeline(Pipeline *p) noexcept {
     vkCmdBindPipeline(buffer_->buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                       vk_pipeline->pipeline);
 
-    VkViewport viewport{};
-    viewport.width = viewport_width_;
-    viewport.height = viewport_height_;
-    viewport.x = 0;
-    viewport.y = 0;
-    viewport.minDepth = 0.0;
-    viewport.maxDepth = 1.0;
-
-    VkRect2D scissor{/*offset*/ {0, 0},
-                     /*extent*/ {viewport_width_, viewport_height_}};
-
-    vkCmdSetViewport(buffer_->buffer, 0, 1, &viewport);
-    vkCmdSetScissor(buffer_->buffer, 0, 1, &scissor);
+    apply_raster_viewport_and_scissor();
     vkCmdSetLineWidth(buffer_->buffer, 1.0f);
     buffer_->refs.push_back(vk_pipeline);
   } else {
@@ -1477,6 +1465,8 @@ void VulkanCommandList::begin_renderpass(int x0,
 
   viewport_width_ = render_area.extent.width;
   viewport_height_ = render_area.extent.height;
+  viewport_x_ = render_area.offset.x;
+  viewport_y_ = render_area.offset.y;
 
   // Dynamic rendering codepath
   if (ti_device_->vk_caps().dynamic_rendering) {
@@ -2761,6 +2751,34 @@ VulkanRuntimeTelemetrySnapshot VulkanDevice::runtime_telemetry_snapshot()
           compute.sampled_wait_ns + graphics.sampled_wait_ns,
       },
   };
+}
+
+void VulkanCommandList::set_raster_viewport_and_scissor(int x0,
+                                                         int y0,
+                                                         int x1,
+                                                         int y1) {
+  RHI_ASSERT(x0 >= 0 && y0 >= 0 && x1 > x0 && y1 > y0);
+  viewport_x_ = x0;
+  viewport_y_ = y0;
+  viewport_width_ = static_cast<uint32_t>(x1 - x0);
+  viewport_height_ = static_cast<uint32_t>(y1 - y0);
+  if (current_pipeline_ != nullptr && current_pipeline_->is_graphics()) {
+    apply_raster_viewport_and_scissor();
+  }
+}
+
+void VulkanCommandList::apply_raster_viewport_and_scissor() {
+  VkViewport viewport{};
+  viewport.x = static_cast<float>(viewport_x_);
+  viewport.y = static_cast<float>(viewport_y_);
+  viewport.width = static_cast<float>(viewport_width_);
+  viewport.height = static_cast<float>(viewport_height_);
+  viewport.minDepth = 0.0f;
+  viewport.maxDepth = 1.0f;
+  VkRect2D scissor{/*offset=*/{viewport_x_, viewport_y_},
+                   /*extent=*/{viewport_width_, viewport_height_}};
+  vkCmdSetViewport(buffer_->buffer, 0, 1, &viewport);
+  vkCmdSetScissor(buffer_->buffer, 0, 1, &scissor);
 }
 
 VulkanQueueSubmissionSnapshot

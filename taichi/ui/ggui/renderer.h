@@ -49,7 +49,10 @@ namespace vulkan {
 
 class TI_DLL_EXPORT Renderer {
  public:
-  void init(lang::Program *prog, TaichiWindow *window, const AppConfig &config);
+  void init(lang::Program *prog,
+            TaichiWindow *window,
+            const AppConfig &config,
+            WindowLayoutState *window_layout);
   ~Renderer();
 
   void prepare_for_next_frame();

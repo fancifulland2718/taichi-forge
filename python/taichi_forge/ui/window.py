@@ -17,6 +17,7 @@ from .canvas import Canvas
 from .scene import SceneV2
 from .constants import PRESS, RELEASE
 from .imgui import Gui
+from .layout import EdgeRegion, WindowLayout
 from .utils import check_ggui_availability
 
 
@@ -54,6 +55,7 @@ class Window:
             package_path,
             ti_arch,
         )
+        self._layout = WindowLayout(self)
         _active_windows.add(self)
 
     @property
@@ -161,9 +163,55 @@ class Window:
         """Returns a IMGUI handle. See :class`~taichi_forge.ui.ui.Gui`"""
         return Gui(self.window.GUI())
 
+    def configure_layout(
+        self,
+        *,
+        top=None,
+        bottom=None,
+        left=None,
+        right=None,
+        minimum_render_size=(1, 1),
+    ):
+        """Configure optional Window-owned edge regions.
+
+        Each argument is an :class:`EdgeRegion`, a compatible ``dict``, or
+        ``None`` to disable that edge. The central render viewport is the
+        remaining rectangle after top/bottom and left/right regions.
+        """
+
+        for edge, config in (
+            ("top", top),
+            ("bottom", bottom),
+            ("left", left),
+            ("right", right),
+        ):
+            self._layout.configure_region(edge, config)
+        self._layout.set_minimum_render_size(*minimum_render_size)
+        return self._layout
+
+    def get_layout(self):
+        """Return this Window's persistent root-layout facade."""
+
+        return self._layout
+
     def get_cursor_pos(self):
         """Get current cursor position, in the range `[0, 1] x [0, 1]`."""
         return self.window.get_cursor_pos()
+
+    def get_render_cursor_pos(self, clamp=False):
+        """Return cursor coordinates normalized to the render viewport."""
+
+        return self.window.get_render_cursor_pos(clamp)
+
+    def is_cursor_in_render_viewport(self):
+        """Return whether the cursor lies inside the central render viewport."""
+
+        return self.window.is_cursor_in_render_viewport()
+
+    def is_render_input_available(self):
+        """Return whether render interaction is not captured by edge UI."""
+
+        return self.window.is_render_input_available()
 
     def show(self):
         """Display this window."""

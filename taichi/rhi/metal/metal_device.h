@@ -361,6 +361,10 @@ class MetalCommandList final : public CommandList {
                         DeviceAllocation *depth_attachment,
                         bool depth_clear) override;
   void end_renderpass() override;
+  void set_raster_viewport_and_scissor(int x0,
+                                       int y0,
+                                       int x1,
+                                       int y1) override;
   void draw(uint32_t num_verticies, uint32_t start_vertex = 0) override;
   void draw_instance(uint32_t num_verticies,
                      uint32_t num_instances,
@@ -422,6 +426,8 @@ class MetalCommandList final : public CommandList {
   std::unique_ptr<MetalRasterResources> current_raster_resources_{nullptr};
   MetalRenderPassTargetDetails current_renderpass_details_;
   ViewportBounds current_viewport_;
+  ViewportBounds current_scissor_;
+  int render_target_height_{0};
   std::vector<std::array<float, 4>> clear_colors_;
   std::vector<MTLTexture_id> render_targets_;
   MTLTexture_id depth_target_;

@@ -90,6 +90,26 @@ class Gui:
         """Return the effective logical-pixel font size."""
         return self.gui.get_font_size()
 
+    def set_font_zoom(self, zoom):
+        """Set user zoom on top of fixed or responsive font sizing."""
+        self.gui.set_font_zoom(zoom)
+
+    def adjust_font_zoom(self, delta):
+        """Adjust user zoom, clamped to the shortcut range from 0.5 to 3."""
+        self.gui.adjust_font_zoom(delta)
+
+    def reset_font_zoom(self):
+        """Reset user font zoom to 1."""
+        self.gui.reset_font_zoom()
+
+    def get_font_zoom(self):
+        """Return user zoom independently of responsive font sizing."""
+        return self.gui.get_font_zoom()
+
+    def enable_font_shortcuts(self, enabled=True):
+        """Enable Ctrl+wheel, Ctrl++/-, and Ctrl+0 over edge regions."""
+        self.gui.set_font_shortcuts_enabled(enabled)
+
     @contextmanager
     def sub_window(self, name, x, y, width, height=None):
         """Creating a context manager for subwindow.
@@ -163,6 +183,19 @@ class Gui:
         finally:
             if expanded:
                 self.gui.end_collapsible_section()
+
+    @contextmanager
+    def edge_region(self, edge, name=None):
+        """Open a Window-configured top/bottom/left/right root region."""
+
+        if name is None:
+            name = str(edge).capitalize()
+        opened = self.gui.begin_edge_region(name, edge)
+        try:
+            yield self if opened else None
+        finally:
+            if opened:
+                self.gui.end_edge_region(edge)
 
     def end(self):
         """End the description of the current subwindow."""

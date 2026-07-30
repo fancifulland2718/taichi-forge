@@ -577,6 +577,15 @@ class RHI_DLL_EXPORT CommandList {
   virtual void end_renderpass() {
     RHI_NOT_IMPLEMENTED
   }
+  // Coordinates use the render target's top-left origin. The raster viewport
+  // and scissor are updated together so draws cannot escape a reserved UI
+  // region.
+  virtual void set_raster_viewport_and_scissor(int x0,
+                                               int y0,
+                                               int x1,
+                                               int y1) {
+    RHI_NOT_IMPLEMENTED
+  }
   virtual void draw(uint32_t num_verticies, uint32_t start_vertex = 0) {
     RHI_NOT_IMPLEMENTED
   }

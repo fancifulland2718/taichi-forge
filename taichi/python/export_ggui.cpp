@@ -84,6 +84,21 @@ struct PyGui {
   float get_font_size() const {
     return gui->get_font_size();
   }
+  void set_font_zoom(float zoom) {
+    gui->set_font_zoom(zoom);
+  }
+  void adjust_font_zoom(float delta) {
+    gui->adjust_font_zoom(delta);
+  }
+  void reset_font_zoom() {
+    gui->reset_font_zoom();
+  }
+  float get_font_zoom() const {
+    return gui->get_font_zoom();
+  }
+  void set_font_shortcuts_enabled(bool enabled) {
+    gui->set_font_shortcuts_enabled(enabled);
+  }
   void begin(std::string name, float x, float y, float width, float height) {
     gui->begin(name, x, y, width, height);
   }
@@ -95,6 +110,12 @@ struct PyGui {
   }
   void end_collapsible_section() {
     gui->end_collapsible_section();
+  }
+  bool begin_edge_region(std::string name, std::string edge) {
+    return gui->begin_edge_region(name, parse_window_edge(edge));
+  }
+  void end_edge_region(std::string edge) {
+    gui->end_edge_region(parse_window_edge(edge));
   }
   void end() {
     gui->end();
@@ -619,6 +640,103 @@ struct PyWindow {
     return pybind11::make_tuple(w, h);
   }
 
+  void configure_edge_region(std::string edge,
+                             bool enabled,
+                             float size,
+                             float minimum_size,
+                             float maximum_fraction,
+                             bool resizable,
+                             bool collapsible,
+                             bool collapsed) {
+    if (!enabled) {
+      window->disable_edge_region(parse_window_edge(edge));
+      return;
+    }
+    WindowEdgeRegionConfig config;
+    config.enabled = true;
+    config.size = size;
+    config.minimum_size = minimum_size;
+    config.maximum_fraction = maximum_fraction;
+    config.resizable = resizable;
+    config.collapsible = collapsible;
+    config.collapsed = collapsed;
+    window->configure_edge_region(parse_window_edge(edge), config);
+  }
+
+  void disable_edge_region(std::string edge) {
+    window->disable_edge_region(parse_window_edge(edge));
+  }
+
+  void set_edge_region_collapsed(std::string edge, bool collapsed) {
+    window->set_edge_region_collapsed(parse_window_edge(edge), collapsed);
+  }
+
+  void toggle_edge_region(std::string edge) {
+    window->toggle_edge_region(parse_window_edge(edge));
+  }
+
+  void set_minimum_render_size(float width, float height) {
+    window->set_minimum_render_size(width, height);
+  }
+
+  py::dict get_window_layout() const {
+    const auto &snapshot = window->get_window_layout();
+    const auto rect_to_dict = [](const WindowRect &rect) {
+      py::dict result;
+      result["x"] = rect.x0;
+      result["y"] = rect.y0;
+      result["width"] = rect.width();
+      result["height"] = rect.height();
+      return result;
+    };
+    const auto framebuffer_rect_to_dict =
+        [](const WindowFramebufferRect &rect) {
+          py::dict result;
+          result["x"] = rect.x0;
+          result["y"] = rect.y0;
+          result["width"] = rect.width();
+          result["height"] = rect.height();
+          return result;
+        };
+
+    py::dict logical_regions;
+    py::dict framebuffer_regions;
+    for (const WindowEdge edge :
+         {WindowEdge::top, WindowEdge::bottom, WindowEdge::left,
+          WindowEdge::right}) {
+      const auto index = window_edge_index(edge);
+      logical_regions[window_edge_name(edge)] =
+          rect_to_dict(snapshot.edge_regions[index]);
+      framebuffer_regions[window_edge_name(edge)] =
+          framebuffer_rect_to_dict(snapshot.framebuffer_edge_regions[index]);
+    }
+
+    py::dict result;
+    result["logical_size"] =
+        py::make_tuple(snapshot.logical_width, snapshot.logical_height);
+    result["framebuffer_size"] = py::make_tuple(
+        snapshot.framebuffer_width, snapshot.framebuffer_height);
+    result["regions"] = logical_regions;
+    result["framebuffer_regions"] = framebuffer_regions;
+    result["render_viewport"] = rect_to_dict(snapshot.render_viewport);
+    result["framebuffer_render_viewport"] =
+        framebuffer_rect_to_dict(snapshot.framebuffer_render_viewport);
+    return result;
+  }
+
+  py::tuple get_render_cursor_pos(bool clamp) {
+    const auto [x, y] = window->get_render_cursor_pos(clamp);
+    return py::make_tuple(x, y);
+  }
+
+  bool is_cursor_in_render_viewport() {
+    return window->is_cursor_in_render_viewport();
+  }
+
+  bool is_render_input_available() {
+    return window->is_render_input_available();
+  }
+
   void write_image(const std::string &filename) {
     window->write_image(filename);
   }
@@ -785,12 +903,30 @@ void export_ggui(py::module &m) {
       .def("get_display_stats", &PyWindow::get_display_stats)
       .def("reset_display_stats", &PyWindow::reset_display_stats)
       .def("get_window_shape", &PyWindow::get_window_shape)
+      .def("configure_edge_region", &PyWindow::configure_edge_region,
+           py::arg("edge"), py::arg("enabled") = true,
+           py::arg("size") = 240.0f, py::arg("minimum_size") = 120.0f,
+           py::arg("maximum_fraction") = 0.5f,
+           py::arg("resizable") = true, py::arg("collapsible") = true,
+           py::arg("collapsed") = false)
+      .def("disable_edge_region", &PyWindow::disable_edge_region)
+      .def("set_edge_region_collapsed",
+           &PyWindow::set_edge_region_collapsed)
+      .def("toggle_edge_region", &PyWindow::toggle_edge_region)
+      .def("set_minimum_render_size", &PyWindow::set_minimum_render_size)
+      .def("get_window_layout", &PyWindow::get_window_layout)
       .def("write_image", &PyWindow::write_image)
       .def("copy_depth_buffer_to_ndarray",
            &PyWindow::copy_depth_buffer_to_ndarray)
       .def("get_image_buffer_as_numpy", &PyWindow::get_image_buffer)
       .def("is_pressed", &PyWindow::is_pressed)
       .def("get_cursor_pos", &PyWindow::py_get_cursor_pos)
+      .def("get_render_cursor_pos", &PyWindow::get_render_cursor_pos,
+           py::arg("clamp") = false)
+      .def("is_cursor_in_render_viewport",
+           &PyWindow::is_cursor_in_render_viewport)
+      .def("is_render_input_available",
+           &PyWindow::is_render_input_available)
       .def("is_running", &PyWindow::is_running)
       .def("set_is_running", &PyWindow::set_is_running)
       .def("poll_events", &PyWindow::poll_events)
@@ -840,11 +976,19 @@ void export_ggui(py::module &m) {
            py::arg("reference_height"), py::arg("reference_size") = 16.0f,
            py::arg("minimum_size") = 12.0f, py::arg("maximum_size") = 24.0f)
       .def("get_font_size", &PyGui::get_font_size)
+      .def("set_font_zoom", &PyGui::set_font_zoom)
+      .def("adjust_font_zoom", &PyGui::adjust_font_zoom)
+      .def("reset_font_zoom", &PyGui::reset_font_zoom)
+      .def("get_font_zoom", &PyGui::get_font_zoom)
+      .def("set_font_shortcuts_enabled",
+           &PyGui::set_font_shortcuts_enabled)
       .def("begin", &PyGui::begin)
       .def("begin_auto", &PyGui::begin_auto)
       .def("begin_collapsible_section", &PyGui::begin_collapsible_section,
            py::arg("name"), py::arg("default_open") = true)
       .def("end_collapsible_section", &PyGui::end_collapsible_section)
+      .def("begin_edge_region", &PyGui::begin_edge_region)
+      .def("end_edge_region", &PyGui::end_edge_region)
       .def("end", &PyGui::end)
       .def("text", &PyGui::text)
       .def("text_colored", &PyGui::text_colored)

@@ -17,8 +17,8 @@ void Circles::update_data(const CirclesInfo &info) {
   ubo.use_per_vertex_color = (int)info.renderable_info.has_per_vertex_color;
   ubo.use_per_vertex_radius = (int)info.renderable_info.has_per_vertex_radius;
   ubo.radius = info.radius;
-  ubo.window_width = app_context_->config.width;
-  ubo.window_height = app_context_->config.height;
+  ubo.window_width = app_context_->render_width();
+  ubo.window_height = app_context_->render_height();
 
   void *mapped{nullptr};
   RHI_VERIFY(app_context_->device().map(uniform_buffer_renderable_->get_ptr(0),

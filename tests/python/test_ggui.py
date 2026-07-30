@@ -1437,6 +1437,18 @@ def test_imgui_responsive_font_size_and_sections():
         assert window.show()
         assert gui.get_font_size() == pytest.approx(12.0)
 
+    gui.set_font_zoom(1.5)
+    assert gui.get_font_zoom() == pytest.approx(1.5)
+    assert gui.get_font_size() == pytest.approx(18.0)
+    assert window.show()
+    assert gui.get_font_size() == pytest.approx(18.0)
+    gui.adjust_font_zoom(-0.25)
+    assert gui.get_font_zoom() == pytest.approx(1.25)
+    assert gui.get_font_size() == pytest.approx(15.0)
+    gui.reset_font_zoom()
+    gui.enable_font_shortcuts(False)
+    assert gui.get_font_zoom() == pytest.approx(1.0)
+
     gui.set_font_size(18)
     assert gui.get_font_size() == pytest.approx(18.0)
     assert window.show()
@@ -1457,6 +1469,11 @@ def test_imgui_responsive_font_size_and_sections():
             gui.set_font_size_from_window_height(
                 480, maximum_size=invalid
             )
+        with pytest.raises(ValueError, match="finite and greater than zero"):
+            gui.set_font_zoom(invalid)
+
+    with pytest.raises(ValueError, match="delta must be finite"):
+        gui.adjust_font_zoom(float("nan"))
 
     with pytest.raises(ValueError, match="must be between"):
         gui.set_font_size_from_window_height(
@@ -1473,6 +1490,79 @@ def test_imgui_responsive_font_size_and_sections():
             maximum_size=14,
         )
 
+    window.destroy()
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=supported_archs)
+def test_window_four_edge_layout_api_and_regions():
+    window = ti.ui.Window("test", (1000, 700), show_window=False)
+    layout = window.configure_layout(
+        top=ti.ui.EdgeRegion(size=60, minimum_size=30),
+        bottom=ti.ui.EdgeRegion(size=40, minimum_size=20),
+        left=ti.ui.EdgeRegion(size=180, minimum_size=120),
+        right=ti.ui.EdgeRegion(size=220, minimum_size=140),
+        minimum_render_size=(320, 240),
+    )
+
+    state = layout.state
+    assert state["logical_size"] == pytest.approx((1000, 700))
+    assert state["framebuffer_size"] == (1000, 700)
+    assert state["render_viewport"] == pytest.approx(
+        {"x": 180, "y": 60, "width": 600, "height": 600}
+    )
+
+    for edge in ("top", "bottom", "left", "right"):
+        with layout.region(edge) as panel:
+            assert panel is not None
+            panel.text(edge)
+    assert window.show()
+
+    layout.set_collapsed("right")
+    assert layout.state["render_viewport"]["width"] == pytest.approx(820)
+    with layout.region("right") as panel:
+        assert panel is None
+    for edge in ("top", "bottom", "left"):
+        with layout.region(edge) as panel:
+            assert panel is not None
+            panel.text(edge)
+    assert window.show()
+
+    layout.toggle("right")
+    assert layout.state["render_viewport"]["width"] == pytest.approx(600)
+    layout.disable("bottom")
+    assert layout.state["render_viewport"]["height"] == pytest.approx(640)
+
+    with pytest.raises(ValueError, match="top.*bottom.*left.*right"):
+        layout.configure_region("center", ti.ui.EdgeRegion())
+    with pytest.raises(ValueError, match="maximum_fraction"):
+        layout.configure_region(
+            "left", ti.ui.EdgeRegion(maximum_fraction=1.1)
+        )
+    window.destroy()
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=supported_archs)
+def test_window_edge_layout_clips_render_viewport():
+    width, height = 160, 120
+    image = np.zeros((width, height, 3), dtype=np.float32)
+    image[..., 0] = 1.0
+    window = ti.ui.Window("test", (width, height), show_window=False)
+    window.configure_layout(
+        top=ti.ui.EdgeRegion(size=10, minimum_size=10),
+        bottom=ti.ui.EdgeRegion(size=15, minimum_size=15),
+        left=ti.ui.EdgeRegion(size=30, minimum_size=30),
+        right=ti.ui.EdgeRegion(size=20, minimum_size=20),
+    )
+    canvas = window.get_canvas()
+    canvas.set_background_color((0.0, 0.0, 0.0))
+    canvas.set_image(image)
+
+    pixels = window.get_image_buffer_as_numpy()
+    np.testing.assert_allclose(pixels[80, 60, :3], (1.0, 0.0, 0.0), atol=0.02)
+    for x, y in ((5, 60), (150, 60), (80, 5), (80, 115)):
+        np.testing.assert_allclose(pixels[x, y, :3], (0.0, 0.0, 0.0), atol=0.02)
     window.destroy()
 
 

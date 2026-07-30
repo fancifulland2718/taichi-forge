@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "taichi/ui/common/window_layout.h"
 #include "taichi/ui/utils/utils.h"
 
 namespace taichi::ui {
@@ -14,8 +15,9 @@ class GuiBase {
   void set_font_scale(float scale) {
     validate_positive(scale, "scale");
     font_scale_mode_ = FontScaleMode::fixed_scale;
-    font_scale_ = scale;
-    font_size_ = base_font_size_ * font_scale_;
+    unzoomed_font_scale_ = scale;
+    unzoomed_font_size_ = base_font_size_ * unzoomed_font_scale_;
+    apply_font_zoom();
   }
 
   void set_font_scale_from_window_height(float reference_height,
@@ -35,8 +37,9 @@ class GuiBase {
   void set_font_size(float size) {
     validate_positive(size, "size");
     font_scale_mode_ = FontScaleMode::fixed_size;
-    font_size_ = size;
-    font_scale_ = font_size_ / base_font_size_;
+    unzoomed_font_size_ = size;
+    unzoomed_font_scale_ = unzoomed_font_size_ / base_font_size_;
+    apply_font_zoom();
   }
 
   void set_font_size_from_window_height(float reference_height,
@@ -63,6 +66,35 @@ class GuiBase {
     return font_size_;
   }
 
+  void set_font_zoom(float zoom) {
+    validate_positive(zoom, "zoom");
+    font_zoom_ = zoom;
+    apply_font_zoom();
+  }
+
+  void adjust_font_zoom(float delta) {
+    if (!std::isfinite(delta)) {
+      throw std::invalid_argument("delta must be finite");
+    }
+    set_font_zoom(std::clamp(font_zoom_ + delta, 0.5f, 3.0f));
+  }
+
+  void reset_font_zoom() {
+    set_font_zoom(1.0f);
+  }
+
+  float get_font_zoom() const {
+    return font_zoom_;
+  }
+
+  void set_font_shortcuts_enabled(bool enabled) {
+    font_shortcuts_enabled_ = enabled;
+  }
+
+  bool font_shortcuts_enabled() const {
+    return font_shortcuts_enabled_;
+  }
+
   virtual void begin(const std::string &name,
                      float x,
                      float y,
@@ -75,6 +107,9 @@ class GuiBase {
   virtual bool begin_collapsible_section(const std::string &name,
                                          bool default_open) = 0;
   virtual void end_collapsible_section() = 0;
+  virtual bool begin_edge_region(const std::string &name,
+                                 WindowEdge edge) = 0;
+  virtual void end_edge_region(WindowEdge edge) = 0;
   virtual void end() = 0;
   virtual void text(const std::string &text) = 0;
   virtual void text(const std::string &text, glm::vec3 color) = 0;
@@ -92,6 +127,8 @@ class GuiBase {
   virtual bool button(const std::string &text) = 0;
   virtual void prepare_for_next_frame() = 0;
   virtual bool has_widgets() const = 0;
+  virtual bool wants_capture_mouse() const = 0;
+  virtual bool wants_capture_keyboard() const = 0;
   virtual void end_frame() = 0;
   virtual ~GuiBase() = default;
 
@@ -106,21 +143,23 @@ class GuiBase {
         const float scale =
             reference_scale_ * logical_height / reference_height_;
         if (std::isfinite(scale) && scale > 0.0f) {
-          font_scale_ = scale;
+          unzoomed_font_scale_ = scale;
         }
       } else if (font_scale_mode_ == FontScaleMode::window_height_size) {
         const float size = reference_size_ * logical_height / reference_height_;
         if (std::isfinite(size) && size > 0.0f) {
-          font_size_ = std::clamp(size, minimum_size_, maximum_size_);
+          unzoomed_font_size_ =
+              std::clamp(size, minimum_size_, maximum_size_);
         }
       }
     }
     if (font_scale_mode_ == FontScaleMode::fixed_scale ||
         font_scale_mode_ == FontScaleMode::window_height_scale) {
-      font_size_ = base_font_size_ * font_scale_;
+      unzoomed_font_size_ = base_font_size_ * unzoomed_font_scale_;
     } else {
-      font_scale_ = font_size_ / base_font_size_;
+      unzoomed_font_scale_ = unzoomed_font_size_ / base_font_size_;
     }
+    apply_font_zoom();
     return font_scale_;
   }
 
@@ -139,9 +178,17 @@ class GuiBase {
     }
   }
 
+  void apply_font_zoom() {
+    font_scale_ = unzoomed_font_scale_ * font_zoom_;
+    font_size_ = unzoomed_font_size_ * font_zoom_;
+  }
+
   FontScaleMode font_scale_mode_{FontScaleMode::fixed_scale};
   float font_scale_{1.0f};
   float font_size_{13.0f};
+  float unzoomed_font_scale_{1.0f};
+  float unzoomed_font_size_{13.0f};
+  float font_zoom_{1.0f};
   float base_font_size_{13.0f};
   float reference_height_{1.0f};
   float reference_scale_{1.0f};
@@ -149,6 +196,7 @@ class GuiBase {
   float minimum_size_{12.0f};
   float maximum_size_{24.0f};
   float last_logical_height_{0.0f};
+  bool font_shortcuts_enabled_{true};
 };
 
 }  // namespace taichi::ui

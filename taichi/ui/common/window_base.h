@@ -14,6 +14,7 @@
 #include "taichi/ui/common/canvas_base.h"
 #include "taichi/ui/common/event.h"
 #include "taichi/ui/common/gui_base.h"
+#include "taichi/ui/common/window_layout.h"
 #include "taichi/ui/common/app_config.h"
 #include "taichi/program/ndarray.h"
 
@@ -51,6 +52,25 @@ class WindowBase {
   void set_is_running(bool value);
 
   std::pair<float, float> get_cursor_pos();
+
+  std::pair<float, float> get_render_cursor_pos(bool clamp = false);
+
+  bool is_cursor_in_render_viewport();
+
+  bool is_render_input_available();
+
+  void configure_edge_region(WindowEdge edge,
+                             const WindowEdgeRegionConfig &config);
+
+  void disable_edge_region(WindowEdge edge);
+
+  void set_edge_region_collapsed(WindowEdge edge, bool collapsed);
+
+  void toggle_edge_region(WindowEdge edge);
+
+  void set_minimum_render_size(float width, float height);
+
+  const WindowLayoutSnapshot &get_window_layout() const noexcept;
 
   void poll_events();
 
@@ -95,6 +115,7 @@ class WindowBase {
   AppConfig config_;
   GLFWwindow *glfw_window_{nullptr};
   InputHandler input_handler_;
+  WindowLayoutState window_layout_;
 
   // used for FPS counting
   double last_record_time_{0.0};

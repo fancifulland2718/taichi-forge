@@ -484,6 +484,10 @@ class VulkanCommandList : public CommandList {
                         DeviceAllocation *depth_attachment,
                         bool depth_clear) override;
   void end_renderpass() override;
+  void set_raster_viewport_and_scissor(int x0,
+                                       int y0,
+                                       int x1,
+                                       int y1) override;
   void draw(uint32_t num_verticies, uint32_t start_vertex = 0) override;
   void draw_instance(uint32_t num_verticies,
                      uint32_t num_instances,
@@ -535,6 +539,8 @@ class VulkanCommandList : public CommandList {
   std::vector<VulkanProfilerSampler> take_completed_profiler_samplers();
 
  private:
+  void apply_raster_viewport_and_scissor();
+
   bool finalized_{false};
   VulkanDevice *ti_device_;
   VulkanStream *stream_;
@@ -559,6 +565,7 @@ class VulkanCommandList : public CommandList {
   VulkanRenderPassDesc current_renderpass_desc_;
   vkapi::IVkRenderPass current_renderpass_{VK_NULL_HANDLE};
   vkapi::IVkFramebuffer current_framebuffer_{VK_NULL_HANDLE};
+  int32_t viewport_x_{0}, viewport_y_{0};
   uint32_t viewport_width_{0}, viewport_height_{0};
 };
 

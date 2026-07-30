@@ -1,6 +1,7 @@
 #include "gui.h"
 #include "taichi/ui/ggui/swap_chain.h"
 #include "taichi/ui/ggui/app_context.h"
+#include "taichi/ui/ggui/edge_layout_imgui.h"
 
 using namespace taichi::lang::vulkan;
 using namespace taichi::lang;
@@ -22,6 +23,23 @@ float default_font_size(const ImGuiIO &io) {
   return 13.0f;
 }
 
+bool pointer_over_edge_region(const ImGuiIO &io,
+                              const WindowLayoutState *layout) {
+  if (layout == nullptr) {
+    return false;
+  }
+  for (std::size_t i = 0; i < kWindowEdgeCount; ++i) {
+    const auto edge = static_cast<WindowEdge>(i);
+    const auto &config = layout->region(edge);
+    if (config.enabled && !config.collapsed &&
+        layout->snapshot().edge_regions[i].contains(io.MousePos.x,
+                                                    io.MousePos.y)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 PFN_vkVoidFunction load_vk_function_for_gui(const char *name, void *userData) {
@@ -30,9 +48,13 @@ PFN_vkVoidFunction load_vk_function_for_gui(const char *name, void *userData) {
   return result;
 }
 
-Gui::Gui(AppContext *app_context, SwapChain *swap_chain, TaichiWindow *window) {
+Gui::Gui(AppContext *app_context,
+         SwapChain *swap_chain,
+         TaichiWindow *window,
+         WindowLayoutState *window_layout) {
   app_context_ = app_context;
   swap_chain_ = swap_chain;
+  window_layout_ = window_layout;
 
   create_descriptor_pool();
 
@@ -141,11 +163,40 @@ void Gui::prepare_for_next_frame() {
   ImGuiIO &io = ImGui::GetIO();
   io.FontGlobalScale =
       update_font_scale(io.DisplaySize.y, default_font_size(io));
+  if (window_layout_ != nullptr) {
+    window_layout_->apply_pending_updates();
+    const int framebuffer_width =
+        swap_chain_ != nullptr ? static_cast<int>(swap_chain_->width())
+                               : app_context_->config.width;
+    const int framebuffer_height =
+        swap_chain_ != nullptr ? static_cast<int>(swap_chain_->height())
+                               : app_context_->config.height;
+    window_layout_->update_dimensions(io.DisplaySize.x, io.DisplaySize.y,
+                                      framebuffer_width,
+                                      framebuffer_height);
+  }
   if (io.DisplaySize.x > 0.0f && io.DisplaySize.y > 0.0f) {
     widthBeforeDPIScale = static_cast<int>(io.DisplaySize.x);
     heightBeforeDPIScale = static_cast<int>(io.DisplaySize.y);
   }
   ImGui::NewFrame();
+  const bool pointer_over_edge = pointer_over_edge_region(io, window_layout_);
+  if (font_shortcuts_enabled() && io.KeyCtrl) {
+    if (pointer_over_edge && io.MouseWheel != 0.0f) {
+      adjust_font_zoom(io.MouseWheel * 0.1f);
+    }
+    if (pointer_over_edge || io.WantCaptureKeyboard) {
+      if (ImGui::IsKeyPressed(ImGuiKey_Equal)) {
+        adjust_font_zoom(0.1f);
+      }
+      if (ImGui::IsKeyPressed(ImGuiKey_Minus)) {
+        adjust_font_zoom(-0.1f);
+      }
+      if (ImGui::IsKeyPressed(ImGuiKey_0)) {
+        reset_font_zoom();
+      }
+    }
+  }
   frame_started_ = true;
   is_empty_ = true;
 }
@@ -210,6 +261,21 @@ void Gui::end_collapsible_section() {
   }
   ImGui::Unindent();
   ImGui::PopID();
+}
+bool Gui::begin_edge_region(const std::string &name, WindowEdge edge) {
+  mark_used();
+  if (!initialized()) {
+    return window_layout_ != nullptr &&
+           window_layout_->region(edge).enabled &&
+           !window_layout_->region(edge).collapsed;
+  }
+  return taichi::ui::vulkan::begin_edge_region(window_layout_, name, edge);
+}
+void Gui::end_edge_region(WindowEdge edge) {
+  if (!initialized()) {
+    return;
+  }
+  taichi::ui::vulkan::end_edge_region(window_layout_, edge);
 }
 void Gui::end() {
   if (!initialized()) {
@@ -323,6 +389,16 @@ Gui::~Gui() {
 
 bool Gui::has_widgets() const {
   return !is_empty_;
+}
+
+bool Gui::wants_capture_mouse() const {
+  ImGui::SetCurrentContext(imgui_context_);
+  return ImGui::GetIO().WantCaptureMouse;
+}
+
+bool Gui::wants_capture_keyboard() const {
+  ImGui::SetCurrentContext(imgui_context_);
+  return ImGui::GetIO().WantCaptureKeyboard;
 }
 
 void Gui::end_frame() {

@@ -8,6 +8,7 @@
 #include "taichi/rhi/metal/metal_device.h"
 #endif
 #include "taichi/ui/ggui/swap_chain.h"
+#include "taichi/ui/common/window_layout.h"
 #ifdef ANDROID
 #include <android/native_window.h>
 #endif
@@ -42,6 +43,10 @@ class TI_DLL_EXPORT AppContext {
   taichi::lang::GraphicsDevice &device();
   const taichi::lang::GraphicsDevice &device() const;
   bool requires_export_sharing() const;
+  void set_window_layout(WindowLayoutState *layout) noexcept;
+  const WindowLayoutSnapshot &window_layout() const noexcept;
+  int render_width() const noexcept;
+  int render_height() const noexcept;
 
   AppConfig config;
 
@@ -94,6 +99,8 @@ class TI_DLL_EXPORT AppContext {
   TaichiWindow *taichi_window_{nullptr};
 
   lang::Program *prog_{nullptr};
+  WindowLayoutState *window_layout_{nullptr};
+  mutable WindowLayoutSnapshot fallback_layout_;
 };
 
 }  // namespace vulkan

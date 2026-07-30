@@ -4,6 +4,7 @@
 #include "taichi/program/program.h"
 #include "taichi/ui/ggui/vertex.h"
 
+#include <algorithm>
 #include <string_view>
 
 namespace taichi::ui {
@@ -162,6 +163,29 @@ bool AppContext::requires_export_sharing() const {
   // true leads to crashes
   // TODO: investigate this, and think of a more universal solution.
   return config.ti_arch == Arch::cuda;
+}
+
+void AppContext::set_window_layout(WindowLayoutState *layout) noexcept {
+  window_layout_ = layout;
+}
+
+const WindowLayoutSnapshot &AppContext::window_layout() const noexcept {
+  if (window_layout_ != nullptr) {
+    return window_layout_->snapshot();
+  }
+  fallback_layout_.framebuffer_width = config.width;
+  fallback_layout_.framebuffer_height = config.height;
+  fallback_layout_.framebuffer_render_viewport = {
+      0, 0, config.width, config.height};
+  return fallback_layout_;
+}
+
+int AppContext::render_width() const noexcept {
+  return std::max(1, window_layout().framebuffer_render_viewport.width());
+}
+
+int AppContext::render_height() const noexcept {
+  return std::max(1, window_layout().framebuffer_render_viewport.height());
 }
 
 Pipeline *AppContext::get_raster_pipeline(const RasterPipelineConfig &config) {

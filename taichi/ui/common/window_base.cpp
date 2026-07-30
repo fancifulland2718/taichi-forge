@@ -10,6 +10,10 @@ namespace taichi::ui {
 
 WindowBase::WindowBase(AppConfig config) : config_(config) {
   display_stats_ = {};
+  window_layout_.update_dimensions(
+      static_cast<float>(std::max(0, config_.width)),
+      static_cast<float>(std::max(0, config_.height)),
+      std::max(0, config_.width), std::max(0, config_.height));
   if (config_.show_window) {
     glfw_window_ = create_glfw_window_(config_.name, config_.width,
                                        config_.height, config_.window_pos_x,
@@ -211,6 +215,52 @@ std::pair<float, float> WindowBase::get_cursor_pos() {
   float y = 1.0 - input_handler_.last_y();
 
   return std::make_pair(x, y);
+}
+
+std::pair<float, float> WindowBase::get_render_cursor_pos(bool clamp) {
+  const auto [x, y] = get_cursor_pos();
+  return window_layout_.render_cursor_position(x, y, clamp);
+}
+
+bool WindowBase::is_cursor_in_render_viewport() {
+  const auto [x, y] = get_cursor_pos();
+  return window_layout_.cursor_in_render_viewport(x, y);
+}
+
+bool WindowBase::is_render_input_available() {
+  if (!is_cursor_in_render_viewport()) {
+    return false;
+  }
+  auto *window_gui = gui();
+  return window_gui == nullptr ||
+         (!window_gui->wants_capture_mouse() &&
+          !window_gui->wants_capture_keyboard());
+}
+
+void WindowBase::configure_edge_region(
+    WindowEdge edge,
+    const WindowEdgeRegionConfig &config) {
+  window_layout_.configure_region(edge, config);
+}
+
+void WindowBase::disable_edge_region(WindowEdge edge) {
+  window_layout_.disable_region(edge);
+}
+
+void WindowBase::set_edge_region_collapsed(WindowEdge edge, bool collapsed) {
+  window_layout_.set_region_collapsed(edge, collapsed);
+}
+
+void WindowBase::toggle_edge_region(WindowEdge edge) {
+  window_layout_.toggle_region(edge);
+}
+
+void WindowBase::set_minimum_render_size(float width, float height) {
+  window_layout_.set_minimum_render_size(width, height);
+}
+
+const WindowLayoutSnapshot &WindowBase::get_window_layout() const noexcept {
+  return window_layout_.snapshot();
 }
 
 void WindowBase::poll_events() {

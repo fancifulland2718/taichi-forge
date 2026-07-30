@@ -1,5 +1,6 @@
 #include "gui_metal.h"
 #include "taichi/ui/ggui/app_context.h"
+#include "taichi/ui/ggui/edge_layout_imgui.h"
 #include "taichi/ui/ggui/swap_chain.h"
 #include <imgui_impl_metal.h>
 
@@ -23,10 +24,30 @@ float default_font_size(const ImGuiIO &io) {
   return 13.0f;
 }
 
+bool pointer_over_edge_region(const ImGuiIO &io,
+                              const WindowLayoutState *layout) {
+  if (layout == nullptr) {
+    return false;
+  }
+  for (std::size_t i = 0; i < kWindowEdgeCount; ++i) {
+    const auto edge = static_cast<WindowEdge>(i);
+    const auto &config = layout->region(edge);
+    if (config.enabled && !config.collapsed &&
+        layout->snapshot().edge_regions[i].contains(io.MousePos.x,
+                                                    io.MousePos.y)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 } // namespace
 
-GuiMetal::GuiMetal(AppContext *app_context, TaichiWindow *window) {
+GuiMetal::GuiMetal(AppContext *app_context,
+                   TaichiWindow *window,
+                   WindowLayoutState *window_layout) {
   app_context_ = app_context;
+  window_layout_ = window_layout;
 
   IMGUI_CHECKVERSION();
   imgui_context_ = ImGui::CreateContext();
@@ -67,11 +88,34 @@ void GuiMetal::prepare_for_next_frame() {
   ImGuiIO &io = ImGui::GetIO();
   io.FontGlobalScale =
       update_font_scale(io.DisplaySize.y, default_font_size(io));
+  if (window_layout_ != nullptr) {
+    window_layout_->apply_pending_updates();
+    window_layout_->update_dimensions(
+        io.DisplaySize.x, io.DisplaySize.y, app_context_->config.width,
+        app_context_->config.height);
+  }
   if (io.DisplaySize.x > 0.0f && io.DisplaySize.y > 0.0f) {
     widthBeforeDPIScale = static_cast<int>(io.DisplaySize.x);
     heightBeforeDPIScale = static_cast<int>(io.DisplaySize.y);
   }
   ImGui::NewFrame();
+  const bool pointer_over_edge = pointer_over_edge_region(io, window_layout_);
+  if (font_shortcuts_enabled() && io.KeyCtrl) {
+    if (pointer_over_edge && io.MouseWheel != 0.0f) {
+      adjust_font_zoom(io.MouseWheel * 0.1f);
+    }
+    if (pointer_over_edge || io.WantCaptureKeyboard) {
+      if (ImGui::IsKeyPressed(ImGuiKey_Equal)) {
+        adjust_font_zoom(0.1f);
+      }
+      if (ImGui::IsKeyPressed(ImGuiKey_Minus)) {
+        adjust_font_zoom(-0.1f);
+      }
+      if (ImGui::IsKeyPressed(ImGuiKey_0)) {
+        reset_font_zoom();
+      }
+    }
+  }
   frame_started_ = true;
   is_empty_ = true;
 }
@@ -109,6 +153,13 @@ bool GuiMetal::begin_collapsible_section(const std::string &name,
 void GuiMetal::end_collapsible_section() {
   ImGui::Unindent();
   ImGui::PopID();
+}
+bool GuiMetal::begin_edge_region(const std::string &name, WindowEdge edge) {
+  is_empty_ = false;
+  return taichi::ui::vulkan::begin_edge_region(window_layout_, name, edge);
+}
+void GuiMetal::end_edge_region(WindowEdge edge) {
+  taichi::ui::vulkan::end_edge_region(window_layout_, edge);
 }
 void GuiMetal::end() { ImGui::End(); }
 void GuiMetal::text(const std::string &text) {
@@ -175,6 +226,16 @@ GuiMetal::~GuiMetal() {
 }
 
 bool GuiMetal::has_widgets() const { return !is_empty_; }
+
+bool GuiMetal::wants_capture_mouse() const {
+  ImGui::SetCurrentContext(imgui_context_);
+  return ImGui::GetIO().WantCaptureMouse;
+}
+
+bool GuiMetal::wants_capture_keyboard() const {
+  ImGui::SetCurrentContext(imgui_context_);
+  return ImGui::GetIO().WantCaptureKeyboard;
+}
 
 void GuiMetal::end_frame() {
   ImGui::SetCurrentContext(imgui_context_);
