@@ -737,19 +737,27 @@ def structured_control_capabilities():
         conditional_rendering_available = bool(
             impl.get_runtime().prog._vulkan_conditional_rendering_available()
         )
-        native = True
+        vulkan_runtime_mode_qualified = bool(
+            not impl.current_cfg().kernel_profiler
+            and not impl.current_cfg().vulkan_dispatch_cache
+        )
+        native = vulkan_runtime_mode_qualified
         primitive = "vulkan_dispatch_indirect"
         rhi_primitive_compiled = True
         rhi_primitive_qualified = True
         runtime_path_compiled = True
-        runtime_path_qualified = True
+        runtime_path_qualified = vulkan_runtime_mode_qualified
         skip_strategy = "auto_compact_with_chained_opt_in"
         max_encoded_dispatches = 4096
-        chunked_runtime_qualified = True
+        chunked_runtime_qualified = vulkan_runtime_mode_qualified
         chunk_iteration_limit = 64
         replay_slot_count = 8
         structured_submit_reason = "synchronous_chunk_observation_required"
-        reason = "vulkan_if_switch_runtime_not_compiled"
+        reason = (
+            "vulkan_if_switch_runtime_not_compiled"
+            if vulkan_runtime_mode_qualified
+            else "vulkan_runtime_mode_disables_graph_replay"
+        )
     else:
         reason = "device_control_is_gpu_only"
     portable_while = (
@@ -803,7 +811,7 @@ def structured_control_capabilities():
             ),
             "qualified_strategies": (
                 ("compact_indirect",)
-                if arch == _ti_core.Arch.vulkan
+                if arch == _ti_core.Arch.vulkan and native
                 else ()
             ),
             "chained_runtime_qualified": False,

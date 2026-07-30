@@ -103,6 +103,31 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
         "native_bulk_copy_or_compiled_graph_replay"
     )
 
+    device_capability = plan.execution_capabilities()["device_convergent"]
+    if device_capability["supported"]:
+        device_plan = ti.linalg.experimental.SolvePlan(
+            operator,
+            method="cg",
+            max_iterations=8,
+            atol=1e-6,
+            execution_policy="device_convergent",
+        )
+        device_result = device_plan.solve(source, out=solution)
+        assert device_result.converged
+        np.testing.assert_allclose(solution.to_numpy(), values, rtol=1e-6)
+        device_stats = device_plan.statistics()
+        assert device_stats["identity"]["solver_control_path"] == (
+            "generic_structured_graph"
+        )
+        assert device_stats["identity"]["backend_family"] == (
+            "vulkan" if impl.current_cfg().arch == ti.vulkan else "cuda"
+        )
+        if impl.current_cfg().arch == ti.vulkan:
+            control = device_plan._solver._graph.control_flow_stats()[0]
+            assert control.lowering == "vulkan_compact_indirect"
+            assert control.logical_iterations == 1
+            assert control.executed_iterations == 8
+
     volume_values = np.arange(8, dtype=np.float32).reshape(2, 2, 2)
     volume_source = ti.field(ti.f32, shape=(2, 2, 2))
     volume_output = ti.field(ti.f32, shape=(2, 2, 2))
@@ -111,6 +136,38 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
         volume_source, out=volume_output
     )
     np.testing.assert_array_equal(volume_output.to_numpy(), volume_values)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_dense_scalar_field_bicgstab_keeps_vector_values_device_resident():
+    values = np.asarray(
+        [[1.0, -2.0, 3.0], [0.5, 4.0, -1.0]], dtype=np.float32
+    )
+    rhs = ti.field(ti.f32, shape=values.shape)
+    solution = ti.field(ti.f32, shape=values.shape)
+    rhs.from_numpy(values)
+    operator = ti.linalg.aslinearoperator(
+        _fixed_csr(np.eye(values.size, dtype=np.float32))
+    )
+    plan = ti.linalg.experimental.SolvePlan(
+        operator,
+        method="bicgstab",
+        max_iterations=8,
+        atol=1e-6,
+    )
+
+    result = plan.solve(rhs, out=solution)
+    assert result.converged
+    assert result.solution is solution
+    np.testing.assert_allclose(solution.to_numpy(), values, rtol=1e-6)
+    vector_stats = plan.statistics()["vector_io"]
+    assert vector_stats["packed_logical_bytes"] == values.nbytes
+    assert vector_stats["unpacked_logical_bytes"] == values.nbytes
+    assert vector_stats["pack_calls"] == 1
+    assert vector_stats["unpack_calls"] == 1
+    assert ti.linalg.vector_io_capabilities()["dense_field"][
+        "value_host_transfer"
+    ] is False
 
 
 def _fixed_csr(dense):

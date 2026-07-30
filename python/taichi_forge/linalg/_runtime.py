@@ -1935,12 +1935,18 @@ def _solver_execution_capabilities(
     method=None,
     dtype=None,
     preconditioner_replay_qualified=True,
+    provider_recordable=False,
 ):
     arch = program.config().arch
     cpu_arches = (_ti_core.Arch.x64, _ti_core.Arch.arm64)
     is_cpu = arch in cpu_arches
     is_cuda = arch == _ti_core.Arch.cuda
     is_vulkan = arch == _ti_core.Arch.vulkan
+    vulkan_structured_runtime_mode = bool(
+        is_vulkan
+        and not program.config().kernel_profiler
+        and not program.config().vulkan_dispatch_cache
+    )
     if is_cuda:
         conditional_primitive = "cuda_conditional_graph"
         cuda_conditional = dict(_ti_core.cuda_conditional_graph_capabilities())
@@ -1952,15 +1958,25 @@ def _solver_execution_capabilities(
             cuda_conditional,
             provider_kind,
         )
+        if (
+            unavailable_reason == "none"
+            and provider_kind == "kernel"
+            and not provider_recordable
+        ):
+            unavailable_reason = "compiled_kernel_action_not_recordable"
     elif is_vulkan:
         conditional_primitive = "vulkan_dispatch_indirect"
-        if provider_kind == "stored":
-            unavailable_reason = (
-                "vulkan_stored_solver_indirect_dispatch_path_not_compiled"
-            )
+        if not vulkan_structured_runtime_mode:
+            unavailable_reason = "vulkan_runtime_mode_disables_graph_replay"
+        elif provider_kind == "kernel" and provider_recordable:
+            unavailable_reason = "none"
         elif provider_kind == "kernel":
             unavailable_reason = (
-                "vulkan_compiled_kernel_indirect_dispatch_not_qualified"
+                "vulkan_compiled_kernel_action_not_recordable"
+            )
+        elif provider_kind == "stored":
+            unavailable_reason = (
+                "vulkan_stored_solver_indirect_dispatch_path_not_compiled"
             )
         elif provider_kind == "graph":
             unavailable_reason = (
@@ -1971,9 +1987,9 @@ def _solver_execution_capabilities(
                 "vulkan_provider_indirect_dispatch_unsupported"
             )
         prerequisites = (
-            "backend-neutral indirect compute-dispatch command contract",
-            "indirect buffer visibility and zero-dispatch validation",
-            "provider record/replay and numeric-rebind qualification",
+            "qualified Vulkan structured Graph runtime",
+            "recordable compiled-kernel provider action",
+            "fixed f32 dense vector and workspace bindings",
         )
     else:
         conditional_primitive = "none"
@@ -2009,15 +2025,45 @@ def _solver_execution_capabilities(
         "bounded_convergent": bounded_qualified,
         "device_convergent": (
             bounded_qualified
-            and is_cuda
-            and cuda_device_convergent_available
+            and (
+                (
+                    is_cuda
+                    and cuda_device_convergent_available
+                    and (
+                        provider_kind == "stored" or provider_recordable
+                    )
+                )
+                or (
+                    is_vulkan
+                    and vulkan_structured_runtime_mode
+                    and provider_kind == "kernel"
+                    and provider_recordable
+                )
+            )
         ),
     }
     native_upgrade_available = (
-        bounded_qualified and is_cuda and cuda_device_convergent_available
+        bounded_qualified
+        and (
+            (
+                is_cuda
+                and cuda_device_convergent_available
+                and (provider_kind == "stored" or provider_recordable)
+            )
+            or (
+                is_vulkan
+                and vulkan_structured_runtime_mode
+                and provider_kind == "kernel"
+                and provider_recordable
+            )
+        )
     )
     native_upgrade_automatic = (
-        native_upgrade_available and provider_kind == "stored"
+        native_upgrade_available
+        and (
+            provider_kind == "stored"
+            or (is_vulkan and provider_kind == "kernel")
+        )
     )
     native_replay_qualified = (
         not batched
@@ -2052,6 +2098,12 @@ def _solver_execution_capabilities(
         or method in ("gmres", "fgmres")
     ):
         default_execution_policy = "host_check_every_k"
+    elif (
+        is_vulkan
+        and policies["device_convergent"]
+        and provider_kind == "kernel"
+    ):
+        default_execution_policy = "device_convergent"
     elif is_vulkan and (
         native_replay_qualified or matrix_free_batching_qualified
     ):
@@ -2089,9 +2141,28 @@ def _solver_execution_capabilities(
             "primitive": conditional_primitive,
             "rhi_primitive_compiled": is_vulkan,
             "runtime_path_compiled": (
-                cuda_conditional["runtime_path_compiled"] if is_cuda else False
+                cuda_conditional["runtime_path_compiled"]
+                if is_cuda
+                else is_vulkan
             ),
-            "provider_qualified": bounded_qualified and is_cuda,
+            "provider_qualified": (
+                bounded_qualified
+                and (
+                    (
+                        is_cuda
+                        and (
+                            provider_kind == "stored"
+                            or provider_recordable
+                        )
+                    )
+                    or (
+                        is_vulkan
+                        and vulkan_structured_runtime_mode
+                        and provider_kind == "kernel"
+                        and provider_recordable
+                    )
+                )
+            ),
             "automatic_selection_qualified": native_upgrade_automatic,
             "qualification_scope": (
                 "automatic"
@@ -2126,6 +2197,7 @@ def _solver_execution_capabilities(
             not batched
             and (
                 default_execution_policy == "bounded_convergent"
+                or default_execution_policy == "device_convergent"
                 or native_replay_qualified
                 or matrix_free_batching_qualified
             )
@@ -2180,11 +2252,13 @@ def _solver_execution_capabilities(
                 not batched
                 and (
                     default_execution_policy == "bounded_convergent"
+                    or default_execution_policy == "device_convergent"
                     or native_replay_qualified
                 )
             ),
             "qualified": native_replay_qualified
-            or (bounded_qualified and is_cuda),
+            or (bounded_qualified and is_cuda)
+            or policies["device_convergent"],
             "preconditioner_qualified": preconditioner_replay_qualified,
             "primitive": (
                 "cuda_conditional_graph_or_chunk_replay"
@@ -2193,9 +2267,13 @@ def _solver_execution_capabilities(
                     "cuda_graph_chunk_replay"
                     if is_cuda and native_replay_qualified
                     else (
-                        "vulkan_command_replay"
-                        if is_vulkan and native_replay_qualified
-                        else "none"
+                        "vulkan_structured_graph"
+                        if is_vulkan and policies["device_convergent"]
+                        else (
+                            "vulkan_command_replay"
+                            if is_vulkan and native_replay_qualified
+                            else "none"
+                        )
                     )
                 )
             ),
@@ -2797,6 +2875,10 @@ class SolvePlan:
             preconditioner_replay_qualified=(
                 self._preconditioner_replay_qualified
             ),
+            provider_recordable=bool(
+                self.operator._provider_kind == "kernel"
+                and self.operator._handle._supports_recordable_kernel()
+            ),
         )
 
     def _normalize_execution_policy(self, policy, check_interval):
@@ -2836,10 +2918,13 @@ class SolvePlan:
                     f"{bounded['native_upgrade_unavailable_reason']}"
                 )
             if (
-                arch == _ti_core.Arch.cuda
+                arch in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan)
                 and self.bounded_mode != "portable"
                 and (
-                    self.operator._provider_kind == "stored"
+                    (
+                        arch == _ti_core.Arch.cuda
+                        and self.operator._provider_kind == "stored"
+                    )
                     or self.bounded_mode == "native_required"
                 )
                 and bounded["native_upgrade_available"]
@@ -2902,10 +2987,12 @@ class SolvePlan:
                 "fixed_budget_masked",
                 "host_check_every_k",
                 "bounded_convergent",
+                "device_convergent",
             ):
                 raise TaichiRuntimeError(
                     "Vulkan SolvePlan supports fixed_budget_masked or "
-                    "host_check_every_k"
+                    "host_check_every_k, bounded_convergent, or "
+                    "device_convergent"
                 )
             expected_interval = (
                 self.restart
@@ -2913,7 +3000,7 @@ class SolvePlan:
                 and policy == "host_check_every_k"
                 else (
                     16
-                    if policy == "bounded_convergent"
+                    if policy in ("bounded_convergent", "device_convergent")
                     else (
                         4
                         if policy == "host_check_every_k"
@@ -3558,6 +3645,21 @@ class SolvePlan:
                     )
                 )
             if arch == _ti_core.Arch.vulkan:
+                if (
+                    kind == "kernel"
+                    and self._native_execution_policy == "device_convergent"
+                ):
+                    from taichi_forge.linalg._graph_krylov import (
+                        GraphKrylovSolver,
+                    )
+
+                    return GraphKrylovSolver(
+                        self.operator,
+                        None,
+                        max_iterations=self.max_iterations,
+                        absolute_tolerance=self.atol,
+                        relative_tolerance=self.rtol,
+                    )
                 if kind == "kernel":
                     factory = (
                         _ti_core._make_vulkan_compiled_kernel_cg_convergence_plan
@@ -3599,7 +3701,7 @@ class SolvePlan:
                 preconditioner_action = self.preconditioner
             self._require_fixed_linear_preconditioner(preconditioner_action)
             if (
-                arch == _ti_core.Arch.cuda
+                arch in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan)
                 and kind == "kernel"
                 and preconditioner_action._provider_kind == "kernel"
                 and self._native_execution_policy == "device_convergent"
@@ -3609,7 +3711,7 @@ class SolvePlan:
                     and preconditioner_action._handle._supports_recordable_kernel()
                 ):
                     raise TaichiRuntimeError(
-                        "CUDA device-convergent PCG requires recordable "
+                        "GPU device-convergent PCG requires recordable "
                         "compiled-kernel A and M providers"
                     )
                 from taichi_forge.linalg._graph_krylov import (

@@ -240,10 +240,17 @@ def test_experimental_kernel_traits_numeric_update_and_cg():
         assert not capabilities["automatic_solver_replay"]["selected"]
     else:
         assert capabilities["default_execution_policy"] == (
-            "host_check_every_k"
+            "device_convergent"
         )
-        assert batching["selected"] and batching["qualified"]
-        assert not capabilities["automatic_solver_replay"]["selected"]
+        assert not batching["selected"] and batching["qualified"]
+        assert capabilities["automatic_solver_replay"]["selected"]
+        assert capabilities["automatic_solver_replay"]["qualified"]
+        assert capabilities["automatic_solver_replay"]["primitive"] == (
+            "vulkan_structured_graph"
+        )
+        assert capabilities["device_convergent"][
+            "automatic_selection_qualified"
+        ]
     result = plan.solve(rhs)
     if impl.current_cfg().arch == ti.cuda:
         stats = plan.statistics()
@@ -285,9 +292,13 @@ def test_experimental_kernel_traits_numeric_update_and_cg():
     elif impl.current_cfg().arch == ti.vulkan:
         stats = plan.statistics()
         assert stats["identity"]["solver_execution_policy"] == (
-            "host_check_every_k"
+            "device_convergent"
         )
-        assert stats["operations"]["solver_chunk_direct_submissions"] > 0
+        assert stats["identity"]["solver_control_path"] == (
+            "generic_structured_graph"
+        )
+        assert stats["identity"]["backend_family"] == "vulkan"
+        assert stats["operations"]["host_scalar_readbacks"] == 1
     assert result.converged
     np.testing.assert_allclose(result.solution.to_numpy(), exact, rtol=2e-4)
     exact_initial = plan.solve(rhs, initial_guess=_vector(exact))
@@ -312,6 +323,64 @@ def test_experimental_kernel_traits_numeric_update_and_cg():
     np.testing.assert_allclose(
         operator.apply(_vector(np.ones(size))).to_numpy(), updated.to_numpy()
     )
+
+
+@test_utils.test(
+    arch=ti.vulkan,
+    kernel_profiler=True,
+    offline_cache=False,
+)
+def test_vulkan_graph_krylov_falls_back_when_runtime_mode_disables_replay():
+    size = 4
+    topology = ti.ndarray(ti.i32, shape=size)
+    topology.from_numpy(np.arange(size, dtype=np.int32))
+
+    @ti.kernel
+    def identity(
+        active_size: ti.i32,
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(active_size):
+            y[index] = x[topology_data[index]]
+
+    operator = ti.linalg.LinearOperator.from_kernel(
+        identity,
+        size,
+        topology,
+        traits=ti.linalg.OperatorTraits.spd(),
+    )
+    plan = ti.linalg.experimental.SolvePlan(
+        operator,
+        method="cg",
+        max_iterations=8,
+        atol=1e-6,
+    )
+    capabilities = plan.execution_capabilities()
+    assert capabilities["default_execution_policy"] == "host_check_every_k"
+    assert not capabilities["device_convergent"]["supported"]
+    assert capabilities["device_convergent"]["unsupported_reason"] == (
+        "vulkan_runtime_mode_disables_graph_replay"
+    )
+    graph_capabilities = ti.graph.structured_control_capabilities()[
+        "device_control"
+    ]
+    assert graph_capabilities["rhi_primitive_qualified"]
+    assert not graph_capabilities["runtime_path_qualified"]
+    assert graph_capabilities["qualified_strategies"] == ()
+    assert plan.solve(_vector(np.ones(size, dtype=np.float32))).converged
+    with pytest.raises(
+        RuntimeError,
+        match="vulkan_runtime_mode_disables_graph_replay",
+    ):
+        ti.linalg.experimental.SolvePlan(
+            operator,
+            method="cg",
+            max_iterations=8,
+            atol=1e-6,
+            execution_policy="device_convergent",
+        )
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
@@ -843,10 +912,13 @@ def test_experimental_fixed_linear_operator_pcg():
         assert not capabilities["automatic_solver_replay"]["selected"]
     elif impl.current_cfg().arch == ti.vulkan:
         assert capabilities["default_execution_policy"] == (
-            "host_check_every_k"
+            "device_convergent"
         )
-        assert batching["selected"] and batching["qualified"]
-        assert not capabilities["automatic_solver_replay"]["selected"]
+        assert not batching["selected"] and batching["qualified"]
+        assert capabilities["automatic_solver_replay"]["selected"]
+        assert capabilities["device_convergent"][
+            "automatic_selection_qualified"
+        ]
     else:
         assert not batching["selected"] and not batching["qualified"]
 
@@ -889,21 +961,25 @@ def test_experimental_fixed_linear_operator_pcg():
     elif impl.current_cfg().arch == ti.vulkan:
         assert (
             stats["identity"]["solver_execution_policy"]
-            == "host_check_every_k"
+            == "device_convergent"
         )
-        assert stats["operations"]["solver_chunk_direct_submissions"] > 0
-        assert stats["operations"]["host_scalar_reductions"] == 0
-        assert stats["operations"]["wasted_iterations"] == 6
-        assert stats["operations"]["executed_iterations"] == 8
+        assert stats["identity"]["solver_control_path"] == (
+            "generic_structured_graph"
+        )
+        assert stats["operations"]["host_scalar_readbacks"] == 2
+        assert stats["operations"]["wasted_iterations"] == 14
+        assert stats["operations"]["executed_iterations"] == 16
         assert stats["operations"]["logical_iterations"] == 2
+        assert stats["operations"]["last_executed_iterations"] == 8
+        assert stats["operations"]["last_logical_iterations"] == 1
     if impl.current_cfg().arch == ti.cuda:
         assert stats["resources"]["cublas_device_pointer_mode"]
     if impl.current_cfg().arch == ti.vulkan:
         assert (
             stats["identity"]["solver_execution_policy"]
-            == "host_check_every_k"
+            == "device_convergent"
         )
-        assert stats["operations"]["solver_chunk_direct_submissions"] == 2
+        assert stats["operations"]["solver_chunk_submissions"] == 2
 
     operator.update_numeric(
         _vector(2.0 * diagonal.to_numpy()),

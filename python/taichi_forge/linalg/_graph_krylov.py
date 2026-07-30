@@ -7,6 +7,8 @@ import time
 import numpy as np
 
 import taichi_forge as ti
+from taichi_forge._lib import core as _ti_core
+from taichi_forge.lang import impl
 
 
 _RUNNING = 0
@@ -27,7 +29,7 @@ def _scalar_array_arg(name, dtype):
 
 
 class GraphKrylovSolver:
-    """Persistent CUDA Graph CG/PCG adapter for recordable f32 providers."""
+    """Persistent GPU Graph CG/PCG adapter for recordable f32 providers."""
 
     def __init__(
         self,
@@ -45,6 +47,13 @@ class GraphKrylovSolver:
         self._atol = float(absolute_tolerance)
         self._rtol = float(relative_tolerance)
         self._method = "pcg" if preconditioner is not None else "cg"
+        arch = impl.current_cfg().arch
+        if arch == _ti_core.Arch.cuda:
+            self._backend_family = "cuda"
+        elif arch == _ti_core.Arch.vulkan:
+            self._backend_family = "vulkan"
+        else:
+            raise RuntimeError("GraphKrylovSolver requires CUDA or Vulkan")
         self._vectors = {
             name: ti.ndarray(ti.f32, shape=self._size)
             for name in ("ax", "r", "z", "p", "ap")
@@ -87,6 +96,10 @@ class GraphKrylovSolver:
         self._last_result = self._not_run_result()
         self._solve_calls = 0
         self._logical_iterations = 0
+        self._executed_iterations = 0
+        self._solver_chunk_submissions = 0
+        self._structured_control_observation_batches = 0
+        self._last_control_report = None
         self._operator_apply_calls = 0
         self._preconditioner_apply_calls = 0
         self._host_synchronizations = 0
@@ -655,6 +668,8 @@ class GraphKrylovSolver:
         }
         started = time.perf_counter()
         self._graph.run(arguments)
+        reports = self._graph.control_flow_stats()
+        self._last_control_report = reports[0] if reports else None
         terminal = np.asarray(self._terminal.to_numpy(), dtype=np.float32)
         self._last_elapsed_seconds = time.perf_counter() - started
         self._host_synchronizations += 1
@@ -693,6 +708,31 @@ class GraphKrylovSolver:
         }
         self._solve_calls += 1
         self._logical_iterations += iterations
+        executed_iterations = (
+            int(self._last_control_report.executed_iterations)
+            if self._last_control_report is not None
+            else iterations
+        )
+        if (
+            self._last_control_report is not None
+            and int(self._last_control_report.logical_iterations) != iterations
+        ):
+            raise RuntimeError(
+                "structured Graph iteration report disagrees with solver terminal"
+            )
+        self._executed_iterations += executed_iterations
+        if self._last_control_report is not None:
+            observation_batches = int(
+                self._last_control_report.observation_batches
+            )
+            self._structured_control_observation_batches += observation_batches
+            self._solver_chunk_submissions += (
+                observation_batches
+                if self._backend_family == "vulkan"
+                else 1
+            )
+        else:
+            self._solver_chunk_submissions += 1
         self._operator_apply_calls += 1 + iterations
         if self._preconditioner is not None:
             self._preconditioner_apply_calls += 1 + iterations
@@ -710,7 +750,7 @@ class GraphKrylovSolver:
         )
         identity = {
             "schema_version": 1,
-            "backend_family": "cuda",
+            "backend_family": self._backend_family,
             "method": self._method,
             "dtype": "f32",
             "rows": self._size,
@@ -753,20 +793,36 @@ class GraphKrylovSolver:
         operations = {
             "solve_calls": self._solve_calls,
             "logical_iterations": self._logical_iterations,
-            "executed_iterations": self._logical_iterations,
-            "wasted_iterations": 0,
+            "executed_iterations": self._executed_iterations,
+            "wasted_iterations": (
+                self._executed_iterations - self._logical_iterations
+            ),
             "last_logical_iterations": iterations,
-            "last_executed_iterations": iterations,
+            "last_executed_iterations": (
+                int(self._last_control_report.executed_iterations)
+                if self._last_control_report is not None
+                else iterations
+            ),
             "operator_apply_calls": self._operator_apply_calls,
             "preconditioner_apply_calls": self._preconditioner_apply_calls,
             "preconditioner_update_noops": (
                 self._solve_calls if self._preconditioner is not None else 0
             ),
-            "solver_chunk_submissions": self._solve_calls,
+            "solver_chunk_submissions": self._solver_chunk_submissions,
             "host_synchronizations": self._host_synchronizations,
             "host_scalar_readbacks": self._host_scalar_readbacks,
+            "structured_control_observation_batches": (
+                self._structured_control_observation_batches
+            ),
             "last_convergence_observation_boundaries": (
-                [] if self._solve_calls == 0 else [iterations]
+                []
+                if self._last_control_report is None
+                else list(self._last_control_report.observation_boundaries)
+            ),
+            "last_structured_control_lowering": (
+                "none"
+                if self._last_control_report is None
+                else self._last_control_report.lowering
             ),
             "last_elapsed_seconds": self._last_elapsed_seconds,
         }
