@@ -9,14 +9,14 @@
 
 namespace fs = std::filesystem;
 
-#include "llvm/ADT/Triple.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/MC/TargetRegistry.h"
-#include "llvm/Support/Host.h"
 #include "llvm/ExecutionEngine/Orc/JITTargetMachineBuilder.h"
+#include "llvm/TargetParser/Host.h"
+#include "llvm/TargetParser/Triple.h"
 
 #include "taichi/rhi/arch.h"
 #include "taichi/runtime/llvm/llvm_context.h"
@@ -57,7 +57,7 @@ static std::unique_ptr<llvm::TargetMachine> get_host_target_machine() {
   std::unique_ptr<llvm::TargetMachine> target_machine(
       target->createTargetMachine(triple.str(), mcpu.str(), "", options,
                                   llvm::Reloc::PIC_, llvm::CodeModel::Small,
-                                  llvm::CodeGenOpt::Aggressive));
+                                  llvm::CodeGenOptLevel::Aggressive));
   return target_machine;
 }
 
@@ -178,7 +178,6 @@ TEST_P(LlvmOfflineCacheTest, ReadWrite) {
     EXPECT_EQ(task0.name, kTaskName);
 
     ASSERT_NE(kcache.compiled_data.module, nullptr);
-    kcache.compiled_data.module->dump();
     auto jit_module =
         executor_->create_jit_module(std::move(kcache.compiled_data.module));
     using FuncType = int (*)(int, int);

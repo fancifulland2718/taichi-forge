@@ -28,6 +28,22 @@ class FakeCompiledKernelData : public CompiledKernelData {
     return std::make_unique<FakeCompiledKernelData>(*this);
   }
 
+  std::vector<int> snode_tree_ids() const override {
+    return {};
+  }
+
+  std::size_t task_count() const override {
+    return 0;
+  }
+
+  const GraphKernelMetadata &graph_metadata() const override {
+    return graph_metadata_;
+  }
+
+  void set_graph_metadata(GraphKernelMetadata metadata) override {
+    graph_metadata_ = std::move(metadata);
+  }
+
  protected:
   Err load_impl(const CompiledKernelDataFile &file) override {
     if (file.arch() != kFakeArch) {
@@ -63,6 +79,9 @@ class FakeCompiledKernelData : public CompiledKernelData {
     } metadata;
     std::string so_bin;
   } compiled_data_;
+
+ private:
+  GraphKernelMetadata graph_metadata_;
 };
 }  // namespace
 
