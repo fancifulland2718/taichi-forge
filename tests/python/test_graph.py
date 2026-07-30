@@ -2759,6 +2759,68 @@ def test_structured_graph_while_native_rebind_and_replay_diagnostics():
 
 
 @test_utils.test(arch=ti.cuda)
+def test_structured_graph_native_async_replay_is_bounded_across_drop_and_reset():
+    capabilities = dict(ti_core.cuda_conditional_graph_capabilities())
+    if not (
+        capabilities["driver_version_eligible"]
+        and capabilities["conditional_graph_symbols_loaded"]
+        and capabilities["general_device_setter_lowering_compiled"]
+    ):
+        pytest.skip("general CUDA conditional Graph is unavailable")
+
+    graph = _build_structured_while_graph(
+        observe=True,
+        max_iterations=20,
+        lowering_mode="native_required",
+    )
+    graph._graph_stats
+    retained = []
+    all_arguments = []
+    for submission in range(64):
+        target = 1 + submission % 7
+        arguments = _structured_while_args(target=target)
+        all_arguments.append(arguments)
+        ticket = graph.submit(arguments)
+        if submission % 8 == 0:
+            retained.append((ticket, target))
+        else:
+            del ticket
+
+    gc.collect()
+    for ticket, target in retained:
+        assert ticket.observations() == {
+            "terminal": {
+                "state": target,
+                "predicate": 0,
+                "counter": target,
+            }
+        }
+    ti.sync()
+    assert not impl.pytaichi._runtime_submission_owners
+
+    native_stats = graph._graph_stats[0]
+    assert native_stats["asynchronous_control_updates"] == 64
+    assert 1 <= native_stats["peak_deferred_replay_batches"] <= 2
+    assert native_stats["deferred_replay_waits"] >= 0
+
+    live_arguments = _structured_while_args(target=20)
+    live_ticket = graph.submit(live_arguments)
+    del live_ticket
+    gc.collect()
+    runtime = impl.pytaichi
+    ti.reset()
+
+    assert not runtime._runtime_submission_owners
+    assert graph._spec is None
+    report = graph.execution_stats()
+    assert report.lifecycle_state == "runtime_invalid"
+    del all_arguments
+    del live_arguments
+    del graph
+    gc.collect()
+
+
+@test_utils.test(arch=ti.cuda)
 def test_structured_graph_native_while_submit_defers_terminal_observation():
     capabilities = dict(ti_core.cuda_conditional_graph_capabilities())
     if not (
