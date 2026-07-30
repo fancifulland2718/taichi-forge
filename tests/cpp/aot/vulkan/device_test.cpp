@@ -58,6 +58,63 @@ std::vector<uint32_t> make_spirv_header(
   return builder.finalize();
 }
 
+std::vector<uint32_t> make_indirect_packet_writer(
+    const DeviceCapabilityConfig &caps) {
+  spirv::IRBuilder builder(Arch::vulkan, &caps);
+  builder.init_header();
+  const auto u32 = builder.u32_type();
+  const auto source = builder.buffer_argument(u32, 0, 0, "source");
+  const auto control = builder.buffer_argument(u32, 0, 1, "control");
+  const auto function = builder.new_function();
+  builder.start_function(function);
+
+  const auto zero = builder.uint_immediate_number(u32, 0);
+  const auto one = builder.uint_immediate_number(u32, 1);
+  const auto two = builder.uint_immediate_number(u32, 2);
+  const auto group_count =
+      builder.load_variable(builder.struct_array_access(u32, source, zero), u32);
+  builder.store_variable(builder.struct_array_access(u32, control, zero),
+                         group_count);
+  builder.store_variable(builder.struct_array_access(u32, control, one), one);
+  builder.store_variable(builder.struct_array_access(u32, control, two), one);
+  builder.make_inst(spv::OpReturn);
+  builder.make_inst(spv::OpFunctionEnd);
+
+  std::vector<spirv::Value> interfaces;
+  if (caps.get(DeviceCapability::spirv_version) > 0x10300) {
+    interfaces = {source, control};
+  }
+  builder.commit_kernel_function(function, "main", std::move(interfaces),
+                                 {1, 1, 1});
+  return builder.finalize();
+}
+
+std::vector<uint32_t> make_indirect_target(
+    const DeviceCapabilityConfig &caps) {
+  spirv::IRBuilder builder(Arch::vulkan, &caps);
+  builder.init_header();
+  const auto u32 = builder.u32_type();
+  const auto output = builder.buffer_argument(u32, 0, 0, "output");
+  const auto function = builder.new_function();
+  builder.start_function(function);
+
+  const auto global_index = builder.get_global_invocation_id(0);
+  const auto value =
+      builder.add(global_index, builder.uint_immediate_number(u32, 1));
+  builder.store_variable(
+      builder.struct_array_access(u32, output, global_index), value);
+  builder.make_inst(spv::OpReturn);
+  builder.make_inst(spv::OpFunctionEnd);
+
+  std::vector<spirv::Value> interfaces;
+  if (caps.get(DeviceCapability::spirv_version) > 0x10300) {
+    interfaces = {output};
+  }
+  builder.commit_kernel_function(function, "main", std::move(interfaces),
+                                 {1, 1, 1});
+  return builder.finalize();
+}
+
 #if defined(TI_WITH_CUDA)
 class CudaInteropStream {
  public:
@@ -330,6 +387,127 @@ TEST(VulkanDeviceTest, IndirectDispatchRejectsInvalidAllocations) {
   ASSERT_NE(foreign, nullptr);
   EXPECT_EQ(cmdlist->dispatch_indirect(foreign->get_ptr()),
             RhiResult::invalid_usage);
+}
+
+TEST(VulkanDeviceTest, DeviceWrittenIndirectDispatchReplaysWithoutStalePacket) {
+  if (!vulkan::is_vulkan_api_available()) {
+    GTEST_SKIP();
+  }
+
+  vulkan::VulkanDeviceCreator::Params params;
+  params.api_version = std::nullopt;
+  auto creator = std::make_unique<vulkan::VulkanDeviceCreator>(params);
+  auto *device = static_cast<vulkan::VulkanDevice *>(creator->device());
+  auto *stream = device->get_compute_stream();
+
+  const auto writer_spirv = make_indirect_packet_writer(device->get_caps());
+  const auto target_spirv = make_indirect_target(device->get_caps());
+  const PipelineSourceDesc writer_source{
+      PipelineSourceType::spirv_binary, writer_spirv.data(),
+      writer_spirv.size() * sizeof(uint32_t), PipelineStageType::compute};
+  const PipelineSourceDesc target_source{
+      PipelineSourceType::spirv_binary, target_spirv.data(),
+      target_spirv.size() * sizeof(uint32_t), PipelineStageType::compute};
+  auto [writer_pipeline, writer_result] =
+      device->create_pipeline_unique(writer_source, "indirect_packet_writer");
+  ASSERT_EQ(writer_result, RhiResult::success);
+  ASSERT_NE(writer_pipeline, nullptr);
+  auto [target_pipeline, target_result] =
+      device->create_pipeline_unique(target_source, "indirect_target");
+  ASSERT_EQ(target_result, RhiResult::success);
+  ASSERT_NE(target_pipeline, nullptr);
+
+  Device::AllocParams source_params;
+  source_params.size = sizeof(uint32_t);
+  source_params.usage = AllocUsage::Storage;
+  auto [source, source_result] =
+      device->allocate_memory_unique(source_params);
+  ASSERT_EQ(source_result, RhiResult::success);
+  ASSERT_NE(source, nullptr);
+
+  Device::AllocParams control_params;
+  control_params.size = 3 * sizeof(uint32_t);
+  control_params.usage = AllocUsage::Storage | AllocUsage::Indirect;
+  auto [control, control_result] =
+      device->allocate_memory_unique(control_params);
+  ASSERT_EQ(control_result, RhiResult::success);
+  ASSERT_NE(control, nullptr);
+
+  constexpr uint32_t kOutputCount = 4;
+  Device::AllocParams output_params;
+  output_params.size = kOutputCount * sizeof(uint32_t);
+  output_params.usage = AllocUsage::Storage;
+  auto [output, output_result] =
+      device->allocate_memory_unique(output_params);
+  ASSERT_EQ(output_result, RhiResult::success);
+  ASSERT_NE(output, nullptr);
+
+  auto writer_resources = device->create_resource_set_unique();
+  writer_resources->rw_buffer(0, *source);
+  writer_resources->rw_buffer(1, *control);
+  auto target_resources = device->create_resource_set_unique();
+  target_resources->rw_buffer(0, *output);
+
+  auto [cmdlist, command_result] = stream->new_command_list_unique();
+  ASSERT_EQ(command_result, RhiResult::success);
+  ASSERT_NE(cmdlist, nullptr);
+
+  cmdlist->buffer_fill(output->get_ptr(), output_params.size, 0);
+  cmdlist->buffer_transition(
+      output->get_ptr(), output_params.size,
+      {BufferBarrierStage::Transfer, BufferBarrierAccess::TransferWrite,
+       BufferBarrierStage::Compute, BufferBarrierAccess::ShaderWrite});
+  cmdlist->buffer_transition(
+      source->get_ptr(), source_params.size,
+      {BufferBarrierStage::Transfer, BufferBarrierAccess::TransferWrite,
+       BufferBarrierStage::Compute, BufferBarrierAccess::ShaderRead});
+  cmdlist->bind_pipeline(writer_pipeline.get());
+  ASSERT_EQ(cmdlist->bind_shader_resources(writer_resources.get()),
+            RhiResult::success);
+  ASSERT_EQ(cmdlist->dispatch(1), RhiResult::success);
+  cmdlist->buffer_transition(
+      control->get_ptr(), control_params.size,
+      {BufferBarrierStage::Compute, BufferBarrierAccess::ShaderWrite,
+       BufferBarrierStage::IndirectCommand,
+       BufferBarrierAccess::IndirectCommandRead});
+  cmdlist->bind_pipeline(target_pipeline.get());
+  ASSERT_EQ(cmdlist->bind_shader_resources(target_resources.get()),
+            RhiResult::success);
+  ASSERT_EQ(cmdlist->dispatch_indirect(control->get_ptr()),
+            RhiResult::success);
+  cmdlist->buffer_transition(
+      output->get_ptr(), output_params.size,
+      {BufferBarrierStage::Compute, BufferBarrierAccess::ShaderWrite,
+       BufferBarrierStage::Transfer, BufferBarrierAccess::TransferRead});
+
+  const auto replay = [&](uint32_t group_count) {
+    std::array<uint32_t, 4> values{};
+    DevicePtr source_ptr = source->get_ptr();
+    const void *source_data = &group_count;
+    size_t source_size = sizeof(group_count);
+    const auto upload_result =
+        device->upload_data(&source_ptr, &source_data, &source_size);
+    EXPECT_EQ(upload_result, RhiResult::success);
+    if (upload_result != RhiResult::success) {
+      return values;
+    }
+    auto completion = stream->submit_synced(cmdlist.get());
+    EXPECT_NE(completion, nullptr);
+    if (!completion) {
+      return values;
+    }
+
+    DevicePtr output_ptr = output->get_ptr();
+    void *output_data = values.data();
+    size_t output_size = sizeof(values);
+    EXPECT_EQ(device->readback_data(&output_ptr, &output_data, &output_size),
+              RhiResult::success);
+    return values;
+  };
+
+  EXPECT_EQ(replay(0), (std::array<uint32_t, kOutputCount>{0, 0, 0, 0}));
+  EXPECT_EQ(replay(kOutputCount),
+            (std::array<uint32_t, kOutputCount>{1, 2, 3, 4}));
 }
 
 TEST(VulkanDeviceTest, ConcurrentDescriptorAndRenderPassCreation) {
