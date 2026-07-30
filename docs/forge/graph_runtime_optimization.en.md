@@ -161,6 +161,12 @@ bound and does not need to be encoded in a solver-specific condition.
 condition region. `switch()` selects a zero-based fixed branch, or an optional
 default, from a selector computed by its condition region. Branch schemas are
 compiled before execution; Python callbacks cannot run inside a region.
+The same `while_loop()`, `if_then_else()`, and `switch()` builders are
+available on `Sequential`, so a root structured region may contain one more
+structured level. Definitions form a single-owner tree. The maximum structured
+depth is two. Deeper definitions, cycles, reuse at multiple call sites, and
+`native_required` nested definitions fail before execution during region
+construction or Graph compilation.
 
 Current lowering is explicit:
 
@@ -169,6 +175,12 @@ Current lowering is explicit:
 | CPU | Exact `cpu_host_loop`; condition and body use cached compiled dispatch plans | Exact portable host control |
 | CUDA | `auto` uses a native CUDA conditional Graph when the Driver API is at least 12.8 and the required symbols/lowering are available; otherwise exact portable replay | `auto` uses one native CUDA IF/SWITCH node when qualified; otherwise exact portable host control |
 | Vulkan | Exact portable replay, or qualified `native_required` bounded masking with positive per-region chunk sizes capped at 64 and an eight-chunk/512-iteration region limit | Exact portable host control |
+
+At depth two, CPU executes both levels with exact host control. The parent uses
+exact portable control. A qualified `auto` leaf may retain its existing flat
+native route: CUDA `while`/`if`/`switch`, or Vulkan `while`. This is a
+portable-parent/native-leaf composition, not a general nested native Graph
+claim.
 
 `ti.graph.structured_control_capabilities()` returns the active backend's
 schema-v4 portable lowering and device-control qualification. The report
@@ -188,6 +200,29 @@ selects 64 for compound submission. Recordable provider actions may enter a
 structured body only when their provider declares it safe; opaque or
 unsupported providers fail closed.
 
+Vulkan has one additional qualified depth-two shape: with tracing disabled and
+the outer mode set to `auto`, an outer `while` whose body contains exactly one
+leaf inner `while` can execute as one synchronous bounded replay. Both loops
+require counters. Their predicate, counter, and optional status controls must
+be mutually distinct one-element i32 device ndarrays owned by the same
+Program. Conditional rendering, nested runtime binding, and ordinary Vulkan
+replay must be available, while the kernel profiler and Vulkan dispatch cache
+must be disabled. The outer and inner bounds are each from 1 through 64; the
+inner chunk is positive and no larger than 64 or its budget; and the complete
+encoded program contains at most 4096 actions. The outer prefix/suffix and both
+loop condition/body sequences must contain only ordinary dispatches or
+qualified recordable actions. Any other nested shape takes exact
+portable-parent control; an eligible leaf `while` may still use the flat
+Vulkan route described above. Vulkan still does not provide native
+`if`/`switch` or exact dynamic command-stream termination.
+
+Native structured routes distinguish a pre-submit qualification miss from a
+post-submit observation failure. The former may select the documented exact
+portable route. Once the queue has accepted a side-effecting submission,
+completion, terminal-observation mapping, or trace decoding failures raise
+immediately and never trigger portable fallback, so a Graph body is not
+executed twice.
+
 Recordable providers may also declare private symbolic scratch bindings backed
 by Graph temporary requirements. The Graph memory plan materializes one bounded
 arena slot per in-flight invocation, resolves the private symbols before
@@ -204,13 +239,23 @@ fail explicitly. Structured regions inline the same provider dispatches only
 when the provider has qualified the corresponding condition/body/branch role.
 
 `Graph.control_flow_stats()` returns one immutable `GraphWhileReport` or
-`GraphBranchReport` per structured region for the latest `run()`. Native CUDA
+`GraphBranchReport` per static structured definition for the latest `run()`;
+repeated nested calls retain only that definition's latest invocation. Native CUDA
 IF/SWITCH execution keeps `Graph.run()` fire-and-continue: selector readback and
 report construction are deferred until `control_flow_stats()` is requested, so
 that diagnostic call is the explicit synchronization point. While reports
 include the selected lowering, logical and executed iterations, observation
 boundaries, predicate/counter/status traces, terminal status, transfer bytes,
-and native-upgrade reason. Portable structured regions use synchronous
+and native-upgrade reason. The strict Vulkan outer while report additionally exposes
+`region_path`, `structured_depth`, `nested_region_path`,
+`nested_logical_iterations`, and `nested_encoded_iterations`.
+`Graph.run(args, trace=True)` synchronously returns an ordered
+`GraphControlFlowTrace` containing every nested invocation, including its
+sequence, definition path, invocation path, parent iteration, and report.
+Tracing bypasses strict Vulkan nested replay and uses the exact portable-parent
+path so that every invocation remains observable.
+
+Portable structured regions use synchronous
 `Graph.run()` and are rejected by `Graph.submit()` rather than being hidden
 behind an asynchronous ticket. CUDA `while_loop`, `if_then_else`, and `switch`
 regions declared with `lowering_mode='native_required'` may use `Graph.submit()`
@@ -220,6 +265,8 @@ branches remain portable. Ordered CUDA setters and Vulkan predicate gates
 consume control state without a per-region host readback. After asynchronous
 structured submission, read terminal state from `ticket.observations()`;
 synchronous control-flow reports remain unavailable for that submission.
+Graphs containing nested structured control do not support asynchronous
+`Graph.submit()` on any backend.
 For per-invocation diagnosis, `submit(telemetry=True)` records entry/exit
 control scalars around every while region and `ticket.telemetry()` reports
 logical stop positions, encoded and masked iteration slots, skipped coarse
@@ -382,7 +429,10 @@ and workspace, generation, and unpaced-submission exclusions. Graph
 `execution_stats()` exposes `persistent_argument_bytes` and
 `replay_slot_saturation_fallbacks`, but backend-driver command buffers,
 descriptor pools, and allocator reservation still require backend profiling
-and process-memory measurement.
+and process-memory measurement. The persistent-argument total includes
+condition/body caches and qualified control/observation arenas owned by
+structured nodes even though those internal caches are not expanded into
+public CGraph segments.
 
 Start with one invocation in flight. Increase the limit to two only when an
 Nsight or equivalent trace demonstrates useful overlap between host enqueue or

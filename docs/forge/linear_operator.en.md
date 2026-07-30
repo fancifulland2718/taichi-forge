@@ -245,8 +245,8 @@ snapshots.
 
 ## Recordable Graph action
 
-A compiled-kernel provider can expose its apply operation as a recordable
-Graph action:
+A compiled-kernel provider or a qualified compiled-Graph provider can expose
+its apply operation as a recordable Graph action:
 
 ```python
 input_arg = ti.graph.Arg(
@@ -264,11 +264,13 @@ graph.run({"input": x, "output": y})
 
 `operator.graph_action()` is an f32, zero-copy recording boundary. It may be
 appended at the Graph root or to a `Sequential` body used by structured
-`while`, `if`, or `switch` control. The provider-owned topology and numeric
-snapshots become fixed bindings of the compiled Graph; they are not copied a
-second time and do not appear in `Graph.run()` arguments. The surrounding
-Graph can record the provider dispatch together with adjacent kernels, so an
-iterative body does not call Python once per operator application.
+`while`, `if`, or `switch` control. Provider-owned topology, numeric, and
+workspace snapshots become fixed bindings of the compiled Graph; they are not
+copied a second time and do not appear in `Graph.run()` arguments. Explicit
+root-dense Field state remains bound to its original storage. The surrounding
+Graph can record every provider dispatch in order together with adjacent
+kernels, so an iterative body does not call Python once per operator
+application.
 
 The symbolic input/output arguments use the one-dimensional scalar vector ABI.
 At runtime they accept a matching scalar ndarray or a dense storage object that
@@ -278,11 +280,21 @@ action. Updating the operator numeric generation makes an already compiled
 Graph stale; rebuild the Graph so every replay uses one immutable provider
 generation.
 
-This recordable contract currently applies to compiled-kernel providers.
-Stored sparse, compiled-Graph, composed, and unsupported providers fail
-explicitly instead of materializing an operator or inserting a hidden apply
-fallback. The provider recording protocol itself is not a public custom-native
-callback API.
+This recordable contract applies to compiled-kernel providers and to
+direct-dispatch compiled-Graph providers. Both the generic rectangular or
+explicit-adjoint form and the legacy square forward-only form preserve the
+compiled Graph's ordered multi-dispatch sequence. `adjoint=True` records the
+explicit adjoint Graph; the legacy square form does not infer one. A
+compiled-Graph provider containing indirect dispatch, stored sparse,
+composed, and other unsupported providers fail explicitly instead of
+materializing an operator or inserting a hidden apply fallback. The provider
+recording protocol itself is not a public custom-native callback API.
+
+Recording one action does not by itself guarantee a speedup. The main use is
+composing multiple operator actions and adjacent kernels into a larger Graph
+region so that fixed submission costs can be amortized. Applications should
+measure the complete composed workload rather than assume that wrapping one
+apply is faster.
 
 ## Compiled Graph provider
 
@@ -298,21 +310,51 @@ operator = ti.linalg.LinearOperator.from_graph(
     topology={"row_offsets": row_offsets, "columns": columns},
     numeric={"values": values},
     workspace={"temporary": temporary},
+    # Supply one live root-dense representative for every dependent
+    # SNodeTree. Keys are labels, not per-Field access declarations.
+    state={"coefficients": coefficients},
     traits=ti.linalg.OperatorTraits.spd(),
 )
 ```
 
 The provider is f32. `size` may be an integer square shorthand or `(range,
 domain)`, and `adjoint=adjoint_graph` may register an independent adjoint Graph
-with the same resource-role schema. It requires at least one topology ndarray
-and rejects SNode-dependent dispatches. Topology, numeric data, and workspace
-are copied into operator-owned resources. CPU lowers the Graph to an explicit
-sequence; CUDA and Vulkan use the compiled-Graph execution contract. Backend
-capture/replay may use an ordinary Graph fallback when the documented Graph
-runtime rules require it, without changing the mathematical provider. Vulkan
-Graph replay requires at least two dispatches. A one-dispatch Graph still
-executes correctly, while `operator.statistics()` reports
-`ordinary_graph_fallback`.
+with the same resource-role schema. It requires at least one topology ndarray.
+Topology, numeric data, and workspace are copied into operator-owned
+resources.
+
+`state=` is the explicit exception to that snapshot policy. For every distinct
+SNodeTree in the forward Graph's dependency set, the mapping must provide at
+least one representative live root-dense scalar, Vector, or Matrix Field from
+that tree. If an adjoint Graph is supplied, it must expose the same SNodeTree
+dependency set and is validated against the same declaration. Forge retains
+the tree's storage identity and binds it in place without a device copy, so
+its contents may be updated between applications while the layout and
+SNodeTree generation remain fixed. The mapping keys are nonempty diagnostic
+labels; Field anchors and components are not matched individually. Dependency
+comparison includes tree id, generation, and layout fingerprint, while
+lifetime ownership and outer resource effects remain tree-granular. Multiple
+representatives from the same tree do not add semantics.
+
+Every dependent tree must be purely dense. A tree containing any sparse or
+dynamic descendant is rejected conservatively even when the provider Graph
+only accesses a dense sibling. Noncanonical Field storage or a missing or
+extra dependency tree also fails during construction.
+
+CPU lowers the Graph to an explicit sequence; CUDA and Vulkan use the
+compiled-Graph execution contract. Backend capture/replay may use an ordinary
+Graph fallback when the documented Graph runtime rules require it, without
+changing the mathematical provider. Vulkan Graph replay requires at least two
+dispatches. A one-dispatch Graph still executes correctly, while
+`operator.statistics()` reports `ordinary_graph_fallback`.
+
+Both generic and legacy compiled-Graph providers can export their ordered
+forward dispatches through `graph_action()`. The generic form also exports an
+explicitly registered adjoint Graph. Updating a numeric generation makes an
+already compiled outer Graph stale and requires rebuilding it. Destroying or
+replacing a declared state SNodeTree, using the action after `ti.reset()`, or
+otherwise changing the owning runtime also fails closed; reusing a numeric
+tree id does not revive the old action.
 
 ## Mathematical traits
 

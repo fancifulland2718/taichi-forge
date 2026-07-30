@@ -869,8 +869,9 @@ before selecting this path.
 | `GraphBuilder.while_loop(condition, body, *, predicate, max_iterations, control_inputs=(), carried_state=(), counter=None, status=None, chunk_size=None, vulkan_first_chunk_strategy="auto", masked_execution=False, lowering_mode="auto", name="while")` | Append a fixed-schema bounded loop. `condition` and `body` are nonempty `Sequential` values. `predicate`, optional `counter`, and optional distinct `status` are one-element device ndarrays. |
 | `GraphBuilder.if_then_else(condition, then_region, *, predicate, control_inputs=(), else_region=None, lowering_mode="auto", name="if")` | Append a fixed two-way branch. Only the selected branch executes. |
 | `GraphBuilder.switch(condition, branches, *, selector, control_inputs=(), default_region=None, lowering_mode="auto", name="switch")` | Append a zero-based fixed branch table with an optional default. |
-| `Graph.control_flow_stats()` | Return immutable `GraphWhileReport` / `GraphBranchReport` values for the latest run. Native CUDA branch reports are materialized lazily, so requesting them is an explicit synchronization point. |
-| `ti.graph.structured_control_capabilities()` | Return the schema-v4 portable and device-control contract for the active backend. The result reports structured-submit and compound-submit qualification, bounded Vulkan chunk/replay limits, terminal-observation and ticket-telemetry policy, tail strategy, queue-submit coalescing, and exact-dynamic-termination support separately. |
+| `Sequential.while_loop(...)`, `.if_then_else(...)`, `.switch(...)` | Append one structured child to a condition, body, or branch `Sequential`. Definitions form a single-owner tree. The public structured-control depth limit is two; deeper definitions, cycles, or reuse at multiple call sites fail before execution during region construction or Graph compilation. |
+| `Graph.control_flow_stats()` | Return immutable `GraphWhileReport` / `GraphBranchReport` values for the latest run. Repeated nested calls retain only the latest invocation of each static definition. Reports include `region_path` and `structured_depth`; a qualified Vulkan nested-while outer report additionally exposes `nested_region_path`, `nested_logical_iterations`, and `nested_encoded_iterations`. Native CUDA branch reports are materialized lazily, so requesting them is an explicit synchronization point. |
+| `ti.graph.structured_control_capabilities()` | Return the schema-v4 portable and device-control contract for the active backend. The result reports the depth-two portable contract and native-leaf/nested-Vulkan qualification separately from structured submit, bounded chunk/replay limits, terminal observation, queue-submit coalescing, and exact dynamic termination. |
 
 Condition regions combine multiple device values in ordinary Taichi kernels;
 structured control does not invoke Python callbacks. Graph treats `status` as
@@ -882,6 +883,15 @@ CPU uses exact host control over cached dispatch plans. Eligible CUDA `while`
 regions use a native conditional Graph in `lowering_mode="auto"`; otherwise
 they use exact portable replay. CUDA native conditional control requires
 Driver API 12.8 or newer and the qualified conditional symbols/lowering.
+
+The same `while`/`if`/`switch` APIs are available on `Sequential`, allowing any
+of those region kinds to contain one more structured level. Depth-two
+semantics are exact. CPU executes the complete tree with exact host control.
+At depth two, the parent uses exact portable control. A qualified `auto` leaf
+may retain its existing flat native route: CUDA `while`/`if`/`switch`, or
+Vulkan `while`. This is a leaf optimization, not a native depth-two submission. Nested
+definitions reject `lowering_mode="native_required"`, and every depth-two
+Graph currently rejects asynchronous `submit()`.
 
 Vulkan provides two distinct `while` routes. `portable` retains exact
 host-observed replay. A qualified `native_required` region uses bounded
@@ -898,6 +908,24 @@ terminates inside an active chunk still masks its remaining iterations; a later
 inactive chunk skips its shader dispatches at the conditional-command level.
 This preserves exact logical results but does not provide exact dynamic command
 termination: commands for the active chunk are already encoded.
+
+One strict depth-two Vulkan `while`-containing-`while` shape can run as a
+single synchronous bounded replay during ordinary `Graph.run()` when tracing
+is disabled and the outer mode is `auto`. The outer body must contain exactly
+one leaf inner `while`, with only ordinary dispatches or qualified recordable
+actions in the outer condition, optional body prefix/suffix, and inner
+condition/body. Both loops require counters. Their predicate, counter, and
+optional status controls must be mutually distinct one-element `i32` device
+ndarrays owned by the same Program. `VK_EXT_conditional_rendering`, nested
+runtime binding, and ordinary Vulkan replay mode must be qualified; the kernel
+profiler and Vulkan dispatch cache must be disabled. The outer and inner
+budgets must each be from 1 through 64, the inner chunk size must be positive
+and no larger than 64 or its budget, and the complete encoded program must
+contain at most 4096 actions. Shapes outside this strict qualification use
+exact portable-parent control; an eligible leaf `while` may still use the flat
+Vulkan route described above. This optimization still does not make Vulkan
+`if`/`switch` native and does not provide exact dynamic command-stream
+termination.
 
 One Vulkan `Graph.submit()` may contain multiple qualified
 `native_required` `while` regions. Forge enqueues them in program order inside
@@ -926,7 +954,8 @@ Graphs use `run()` and reject `submit()`. Qualified CUDA
 or Vulkan predicate gate consumes control state without a per-region host
 readback. A ticket can expose explicit terminal `GraphBuilder.observe()`
 snapshots; synchronous `control_flow_stats()` are unavailable for that
-asynchronous submission.
+asynchronous submission. Depth-two structured Graphs do not support
+asynchronous submission, including the strict Vulkan single-replay shape.
 
 Opt-in `submit(telemetry=True)` additionally records each while region's entry
 counter/status and terminal counter/predicate/status on device.
@@ -938,7 +967,7 @@ external graphics/interop producers can submit in the same window. GPU
 timestamps are explicitly `unavailable` while compound replay cannot
 instrument them without changing the qualified path.
 
-### `GraphBuilder.compile()`, `Graph.run(args)`, and `Graph.submit(args)`
+### `GraphBuilder.compile()`, `Graph.run(args, *, trace=False)`, and `Graph.submit(args)`
 
 `compile()` freezes the dispatch/sequential definition at the call and returns
 a runtime-bound `Graph`. `run(args)` submits one complete graph invocation and
@@ -948,7 +977,8 @@ the same execution path and returns a completion ticket.
 | API | Contract |
 | --- | --- |
 | `GraphBuilder.compile()` | Later changes to the builder or original `Sequential` do not modify the compiled graph. |
-| `Graph.run(args)` | `args` must be a dictionary with exactly the declared keys; missing or extra keys raise `TaichiRuntimeError`. |
+| `Graph.run(args, *, trace=False)` | `args` must be a dictionary with exactly the declared keys; missing or extra keys raise `TaichiRuntimeError`. The default returns `None` and does not allocate a dynamic control-flow trace. |
+| `Graph.run(args, *, trace=True)` | Run synchronously and return an immutable `GraphControlFlowTrace`. Its ordered invocations contain a `sequence`, static `definition_path`, dynamic `invocation_path`, optional `parent_iteration`, and the invocation's while/branch report. Unlike `control_flow_stats()`, it preserves every repeated nested invocation. Tracing bypasses strict Vulkan nested replay and uses exact portable-parent execution so each invocation is observable. |
 | `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait', telemetry=False)` | Uses the same exact argument, lifecycle, concurrency, and AD contract as `run()`, returns one `SubmissionTicket`, and can opt into shared admission pacing. `telemetry=True` adds per-while device snapshots; the default adds no snapshot kernels or buffers. Structured submission accepts qualified CUDA `native_required` while/if/switch regions and qualified Vulkan `native_required` while regions, including multiple ordered regions in one compound transaction. Portable control and unsupported native combinations fail explicitly. |
 | `SubmissionTicket.telemetry()` | Wait if needed and return an immutable `GraphSubmissionTelemetry` when telemetry was requested; otherwise return `None`. Region reports include terminal counters and stop positions. Nullable GPU duration fields are never inferred from host wall time. |
 | `Graph._prewarm()` | Warm the current runtime's backend plan; this internal/advanced entry point does not change the argument contract. |
@@ -1356,8 +1386,8 @@ The runtime-bound operator API is documented separately in
 | `ti.linalg.SparseSolver` | Direct LLT/LDLT/LU factorization and solve. | CPU mutable Eigen providers and documented CUDA scalar-CSR route; no Vulkan. |
 | `ti.linalg.OperatorTraits(...)` / `.spd()` | Declare mathematical properties without sampling or inference. | CG/PCG require trusted self-adjoint and positive-definite traits; MINRES requires trusted self-adjointness and rejects a declared-singular operator. |
 | `ti.linalg.LinearOperator.from_sparse_matrix(A, traits=...)` | Bind fixed CSR/BSR as a runtime-owned linear map. | CPU `f32/f64`; CUDA/Vulkan `f32`; no copy or fallback. |
-| `LinearOperator.from_kernel(..., adjoint=...)` / `.from_graph(..., adjoint=...)` | Bind an exact f32 ndarray kernel ABI or role-qualified compiled Graph; an integer size is square shorthand and a tuple is `(range, domain)`. | CPU, CUDA, Vulkan; explicit adjoint; operator-owned topology/numeric/workspace snapshots. |
-| `operator.graph_action(input_arg, output_arg, *, adjoint=False)` | Record one compiled-kernel operator apply into a Graph root or structured `Sequential` body. | CPU/CUDA/Vulkan f32; provider snapshots are fixed zero-copy bindings; numeric-generation updates require rebuilding the Graph. Unsupported provider kinds fail explicitly. |
+| `LinearOperator.from_kernel(..., adjoint=...)` / `.from_graph(..., adjoint=..., state=...)` | Bind an exact f32 ndarray kernel ABI or role-qualified compiled Graph; an integer size is square shorthand and a tuple is `(range, domain)`. | CPU, CUDA, Vulkan; explicit adjoint; operator-owned topology/numeric/workspace snapshots. For each distinct dependent pure-dense SNodeTree, `state` supplies at least one representative root-dense scalar/Vector/Matrix Field and retains that tree zero-copy. Missing/extra trees, any sparse/dynamic node in a dependent tree, destroyed storage, or cross-runtime state fails closed. Keys are diagnostic labels; matching is tree-granular. |
+| `operator.graph_action(input_arg, output_arg, *, adjoint=False)` | Record one compiled-kernel or direct-dispatch compiled-Graph operator apply into a Graph root or structured `Sequential` body. | CPU/CUDA/Vulkan f32. Generic and legacy compiled Graphs preserve ordered multi-dispatch forward actions; the generic form records an explicitly registered adjoint. Provider snapshots are fixed bindings; declared SNodeTree state continues to use its existing storage without another outer-Graph copy. Numeric/SNode/runtime generation changes make a compiled outer Graph stale. A single recorded action does not guarantee a speedup; the intended benefit is multi-action composition. |
 | `ti.linalg.FieldLinearOperator(matvec_kernel)` | Wrap the callback-only `(x, y)` field ABI used by `MatrixFreeCG` and `MatrixFreeBICGSTAB`. | Field-shaped legacy contract; no provider capability, resource-generation, storage-view, composition, or SolvePlan adaptation. |
 | `ti.linalg.vector_view(field, indices=None)` | Declare a canonical root-dense scalar/Vector/Matrix field as a runtime-bound scalar-flat vector, optionally with an explicit indexed subset or permutation. | 1D/2D/3D, `f32/f64` subject to operator/provider/backend dtype support; indices are a nonempty, in-range, unique one-dimensional `i32` ndarray/dense field validated and frozen at construction. Sparse SNodes and noncanonical layouts fail explicitly. |
 | `ti.linalg.vector_io_capabilities()` / storage-view metadata | Inspect the versioned storage, layout, execution mode, zero-copy eligibility, and indexed-topology contract. | Compiled kernels directly bind compact and rank-one scalar affine runtime storage on CPU/CUDA/Vulkan. Compiled Graphs directly bind compact storage and preserve zero-copy affine execution through backend-qualified dispatch. Native CSR/BSR accepts compact direct storage on CPU/CUDA; Vulkan dense fields and solve boundaries use reusable device staging. |

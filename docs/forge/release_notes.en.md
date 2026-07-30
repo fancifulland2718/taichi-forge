@@ -140,7 +140,13 @@ the `0.5.0` artifacts:
   Graph nodes; `native_required` regions also support asynchronous
   `Graph.submit()` without a host control readback. Conditional metadata upload
   is asynchronous and retains at most two deferred replay batches. CPU retains
-  exact portable control. Vulkan supports both exact portable control and
+  exact portable control. `Sequential` now exposes the same structured
+  builders for one nested level, with a maximum structured depth of two. CPU
+  executes both levels exactly. At depth two, the parent uses exact portable
+  control; a qualified `auto` leaf may retain its flat native route: CUDA
+  `while`/`if`/`switch`, or Vulkan `while`. This is a leaf optimization, not a
+  native depth-two submission. Nested `native_required` definitions fail
+  closed. Vulkan supports both exact portable control and
   qualified bounded `native_required` `while` regions with a per-region
   `chunk_size` capped at 64, an eight-chunk/512-iteration limit, and compound
   asynchronous submission of multiple ordered regions through one terminal
@@ -153,12 +159,20 @@ the `0.5.0` artifacts:
   reports the actual stop iteration, encoded/masked work, active/skipped
   chunks, enqueue time, and a qualified queue-counter window after ticket
   completion. The default submission path allocates no telemetry buffers or
-  snapshot kernels. Vulkan `if`/`switch`, exact dynamic command termination,
-  and nested structured control remain unsupported and are reported
-  independently by `structured_control_capabilities()`. On a warmed Windows
-  16-region, 512-budget early-termination workload, the automatic coarse tail
-  reduced complete transaction median by 9.5% versus compact masking for every
-  chunk, with identical terminal results.
+  snapshot kernels. A qualified Vulkan while-to-while definition can encode
+  both levels as one bounded replay when conditional rendering is available,
+  both bounds are at most 64, the complete program contains at most 4096
+  encoded actions, and the regions use independent one-element i32 controls.
+  Other nested shapes use exact portable-parent control; an eligible leaf
+  `while` may still retain the flat Vulkan route above.
+  `Graph.run(trace=True)` uses portable-parent exact execution and returns every nested invocation;
+  `GraphWhileReport` includes nested paths and logical/encoded stop positions.
+  Asynchronous submission of nested structured Graphs remains unsupported.
+  Vulkan structured replay may fall back only before queue submission; a
+  completion or terminal-observation failure after submission raises instead
+  of executing the side-effecting body again.
+  Vulkan `if`/`switch` and exact dynamic command termination remain unsupported
+  and are reported independently by `structured_control_capabilities()`.
 - Added `LinearOperator.graph_action()` for recording compiled-kernel f32
   providers directly into Graph roots and structured bodies. Provider-owned
   topology/numeric generations remain zero-copy fixed bindings, input/output
@@ -168,6 +182,17 @@ the `0.5.0` artifacts:
   adding solver-specific Graph APIs. Consecutive CGraph/provider regions fuse
   into one backend region, and providers may bind private per-invocation Graph
   temporaries without exposing them as runtime arguments.
+  `LinearOperator.from_graph(..., state=...)` additionally accepts one
+  representative live root-dense scalar, Vector, or Matrix Field for each
+  distinct dependent pure-dense SNodeTree and retains that tree's existing
+  storage without a copy. Matching is tree-granular; keys and Field components
+  are not access-level capabilities. Generic compiled-Graph operators
+  preserve ordered multi-dispatch forward and explicit-adjoint actions; the
+  legacy square form records its forward action but does not infer an adjoint.
+  Missing or extra dependency trees, any sparse/dynamic descendant in a
+  dependent tree, indirect dispatch, and stale numeric, SNode, or runtime
+  generations fail closed. Recording one action alone does not promise
+  a speedup; the intended gain is composition with surrounding Graph actions.
 - Added explicit CUDA `device_convergent` execution for compiled-kernel f32
   CG/PCG through the generic structured Graph and recordable A/M actions. It
   reads one terminal packet per solve and fails closed on unavailable or stale

@@ -216,7 +216,8 @@ specialization，并把 topology/numeric 输入复制到 operator-owned snapshot
 
 ## 可录制 Graph action
 
-compiled-kernel provider 可把 apply 操作公开为 recordable Graph action：
+compiled-kernel provider 或满足资格的 compiled-Graph provider 可把 apply 操作公开为
+recordable Graph action：
 
 ```python
 input_arg = ti.graph.Arg(
@@ -234,9 +235,10 @@ graph.run({"input": x, "output": y})
 
 `operator.graph_action()` 是 f32 zero-copy recording 边界。它既可追加到 Graph root，
 也可追加到结构化 `while`、`if` 或 `switch` 使用的 `Sequential` body。provider-owned
-topology/numeric snapshot 成为 compiled Graph 的 fixed binding；不会再复制一份，也不会
-出现在 `Graph.run()` 参数中。外层 Graph 可把 provider dispatch 与相邻 kernel 一起录制，
-因此迭代 body 不会为每次 operator apply 回到 Python。
+topology、numeric 与 workspace snapshot 成为 compiled Graph 的 fixed binding；不会再
+复制一份，也不会出现在 `Graph.run()` 参数中。显式声明的 root-dense Field state
+继续绑定原 storage。外层 Graph 可保持原顺序录制 provider 的每个 dispatch，并与相邻
+kernel 组合，因此迭代 body 不会为每次 operator apply 回到 Python。
 
 symbolic input/output 使用一维 scalar vector ABI。runtime 可传入匹配的 scalar ndarray，
 或 Graph runtime 能无复制 scalar-linearize 的 dense storage。input/output 必须能证明互不
@@ -244,9 +246,17 @@ alias。`adjoint=True` 要求显式登记 adjoint action。更新 operator numer
 会使已经编译的 Graph stale；必须重建 Graph，确保每次 replay 只使用一个 immutable
 provider generation。
 
-当前 recordable 合同适用于 compiled-kernel provider。stored sparse、compiled-Graph、
-composed 与其它不支持的 provider 会明确失败，不会 materialize operator 或插入隐藏的
-apply fallback。provider recording 协议本身不是公开的自定义 native callback API。
+当前 recordable 合同适用于 compiled-kernel provider 与只含 direct dispatch 的
+compiled-Graph provider。通用的矩形/显式 adjoint 形式和 legacy 方阵 forward-only
+形式都会保持 compiled Graph 原有的有序 multi-dispatch sequence。`adjoint=True`
+录制显式 adjoint Graph；legacy 方阵形式不会推断 adjoint。含 indirect dispatch 的
+compiled-Graph、stored sparse、composed 与其它不支持的 provider 会明确失败，不会
+materialize operator 或插入隐藏的 apply fallback。provider recording 协议本身不是
+公开的自定义 native callback API。
+
+只录制一个 action 并不保证性能提升。它的主要价值是把多个 operator action 与相邻
+kernel 组合为更大的 Graph region，以摊销固定提交成本。应用应测量完整组合 workload，
+不能假设包装一次 apply 必然更快。
 
 ## 已编译 Graph provider
 
@@ -261,19 +271,42 @@ operator = ti.linalg.LinearOperator.from_graph(
     topology={"row_offsets": row_offsets, "columns": columns},
     numeric={"values": values},
     workspace={"temporary": temporary},
+    # 为每个 dependent SNodeTree 提供一个 live root-dense 代表 Field；
+    # key 只是标签，不声明逐 Field 或逐 component 的访问能力。
+    state={"coefficients": coefficients},
     traits=ti.linalg.OperatorTraits.spd(),
 )
 ```
 
 该 provider 是 f32 operator；`size` 可为整数方阵简写或 `(range, domain)`，并可通过
 `adjoint=adjoint_graph` 登记具有相同 resource role schema 的独立伴随 Graph。它至少需要
-一个 topology ndarray，并拒绝依赖 SNode 的 dispatch。topology、numeric data 与
-workspace 会复制到 operator-owned resource。
+一个 topology ndarray。topology、numeric data 与 workspace 会复制到 operator-owned
+resource。
+
+`state=` 是 snapshot 策略的显式例外。forward Graph 依赖集合中的每个 distinct
+SNodeTree 都必须由该 mapping 中至少一个来自该 tree 的 live root-dense scalar、
+Vector 或 Matrix Field 代表。若提供 adjoint Graph，它必须具有相同的 SNodeTree
+依赖集合，并使用同一声明完成验证。Forge 保留 tree 的 storage identity 并直接绑定，
+不发生 device copy；只要 layout 与 SNodeTree generation 不变，其内容可以在多次 apply
+之间原位更新。mapping key 只是非空诊断标签，不单独匹配 Field anchor 或 component；
+dependency 比较包含 tree id、generation 与 layout fingerprint，lifetime ownership
+和外层 resource effect 仍以 tree 为粒度。同一 tree 的多个代表项不增加语义。
+
+每个 dependent tree 必须整体为 pure-dense。tree 只要包含任一 sparse/dynamic
+descendant 就会保守拒绝，即使 provider Graph 只访问其中的 dense sibling。
+noncanonical Field storage、依赖 tree 漏报或多报也会在构造时明确失败。
+
 CPU 把 Graph lowering 成 explicit sequence；CUDA/Vulkan 使用 compiled-Graph execution
 合同。当已记录的 Graph runtime 规则要求时，backend capture/replay 可以使用 ordinary
 Graph fallback，但不会改变数学 provider。Vulkan Graph replay 要求至少两个 dispatch；
 单 dispatch Graph 仍正确执行，但 `operator.statistics()` 会将路径报告为
 `ordinary_graph_fallback`。
+
+通用和 legacy compiled-Graph provider 都可通过 `graph_action()` 导出保持顺序的 forward
+dispatch；通用形式还可导出显式登记的 adjoint Graph。更新 numeric generation 会使已经
+编译的外层 Graph stale，必须重建。销毁或替换已声明 state 的 SNodeTree、在 `ti.reset()`
+后继续使用 action，或改变 owning runtime 都会 fail closed；复用相同数值 tree id 不会
+恢复旧 action。
 
 ## 数学 trait
 

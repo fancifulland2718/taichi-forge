@@ -765,8 +765,9 @@ storage 和 AOT Graph packet 会明确失败。CPU/CUDA 也会失败关闭，不
 | `GraphBuilder.while_loop(condition, body, *, predicate, max_iterations, control_inputs=(), carried_state=(), counter=None, status=None, chunk_size=None, vulkan_first_chunk_strategy="auto", masked_execution=False, lowering_mode="auto", name="while")` | 追加 fixed-schema 有界循环。`condition` 与 `body` 必须是非空 `Sequential`；`predicate`、可选 `counter` 和可选且独立的 `status` 都是单元素 device ndarray。 |
 | `GraphBuilder.if_then_else(condition, then_region, *, predicate, control_inputs=(), else_region=None, lowering_mode="auto", name="if")` | 追加固定双分支，只执行被选中的 branch。 |
 | `GraphBuilder.switch(condition, branches, *, selector, control_inputs=(), default_region=None, lowering_mode="auto", name="switch")` | 追加零基固定 branch table，可指定 default。 |
-| `Graph.control_flow_stats()` | 返回最近一次 run 的 immutable `GraphWhileReport` / `GraphBranchReport`。原生 CUDA branch report 延迟物化，因此请求该报告是显式同步点。 |
-| `ti.graph.structured_control_capabilities()` | 返回当前 backend 的 schema-v4 portable 与 device-control 合同，分别报告 structured/compound submit 资格、Vulkan 有界 chunk/replay 上限、终态观测与 ticket 遥测策略、tail strategy、queue-submit 合并与 exact dynamic termination 支持。 |
+| `Sequential.while_loop(...)`、`.if_then_else(...)`、`.switch(...)` | 向 condition、body 或 branch `Sequential` 追加一个结构化 child。定义必须形成 single-owner tree。公开结构化控制的最大深度为 2；更深定义、cycle 或跨多个 call site 复用都会在执行前的 region 构造或 Graph 编译阶段失败。 |
+| `Graph.control_flow_stats()` | 返回最近一次 run 的 immutable `GraphWhileReport` / `GraphBranchReport`。重复 nested 调用时，每个静态 definition 只保留最近一次 invocation。报告包含 `region_path` 与 `structured_depth`；满足资格的 Vulkan nested-while outer report 还会提供 `nested_region_path`、`nested_logical_iterations` 与 `nested_encoded_iterations`。原生 CUDA branch report 延迟物化，因此请求该报告是显式同步点。 |
+| `ti.graph.structured_control_capabilities()` | 返回当前 backend 的 schema-v4 portable 与 device-control 合同，分别报告 depth=2 portable 合同、native leaf/nested Vulkan 资格、structured submit、有界 chunk/replay、终态观测、queue-submit 合并与 exact dynamic termination。 |
 
 condition region 在普通 Taichi kernel 中组合多个 device 值；结构化控制不会调用 Python
 callback。Graph 将 `status` 视为用户定义整数，并与 continue predicate 独立报告。即使
@@ -776,6 +777,13 @@ CPU 在 cached dispatch plan 上使用精确 host control。满足资格的 CUDA
 `lowering_mode="auto"` 下使用原生 conditional Graph，否则使用精确 portable replay。
 CUDA 原生条件控制要求 Driver API 12.8 或更高版本，并具备所需 conditional
 symbol/lowering。
+
+`Sequential` 提供相同的 `while`/`if`/`switch` API，因此任一 region kind 都可再包含
+一层结构化控制。depth=2 语义保持精确：CPU 对完整 tree 使用精确 host control；parent
+使用 exact portable control，满足资格的 `auto` leaf 可保留已有 flat native route：
+CUDA `while`/`if`/`switch` 或 Vulkan `while`。这只是 leaf 优化，不是原生 depth=2 submission。
+nested definition 会拒绝 `lowering_mode="native_required"`，且所有 depth=2 Graph 当前
+都不支持异步 `submit()`。
 
 Vulkan 提供两种不同的 `while` 路径。`portable` 保留由 host 观测的精确 replay。满足资格
 的 `native_required` region 使用有界 device-controlled masking：每个 region 最多八个
@@ -788,6 +796,20 @@ fail closed。`auto` 下，资格满足时后续 chunk 由一个 conditional com
 active chunk 内收敛后，剩余轮次仍由 mask 关闭；之后的 inactive chunk 则在
 conditional-command 层跳过 shader dispatch。该路径保持精确逻辑结果，但不提供 exact
 dynamic command termination，因为 active chunk 的命令已经编码。
+
+一种严格的 depth=2 Vulkan `while` 包含 `while` 形态可在 trace 关闭且 outer mode 为
+`auto` 时，通过普通 `Graph.run()` 使用单次同步有界 replay。outer body 必须恰好包含
+一个 leaf inner `while`；outer condition、可选 body prefix/suffix 和 inner
+condition/body 只能包含普通 dispatch 或已满足资格的 recordable action。两层都必须
+提供 counter；两层的 predicate、counter 与可选 status control 必须全部互不别名，
+并且是同一 Program 所有的单元素 `i32` device ndarray。
+`VK_EXT_conditional_rendering`、nested runtime binding 和普通 Vulkan replay mode 必须
+满足资格，kernel profiler 与 Vulkan dispatch cache 必须关闭。outer/inner budget 都
+必须在 1 到 64 之间；inner chunk size 必须为正且不得超过 64 或 inner budget；完整程序
+最多编码 4096 个 action。不满足该严格资格的形态使用 exact portable-parent control；
+满足资格的 leaf `while` 仍可使用上述 flat Vulkan route。
+该优化仍不提供原生 Vulkan `if`/`switch`，也不提供 exact dynamic command-stream
+termination。
 
 一次 Vulkan `Graph.submit()` 可以包含多个满足资格的 `native_required` `while` region。
 Forge 在一个 runtime transaction 中按程序顺序入队，合并它们的 Vulkan queue submission，
@@ -809,7 +831,8 @@ fail closed。portable 结构化 Graph 使用 `run()` 并明确拒绝 `submit()`
 `native_required` while/if/switch 与 Vulkan `native_required` while 支持 `submit()`。
 有序 device setter 或 Vulkan predicate gate 无需逐 region host 回读即可消费控制状态。
 ticket 可返回显式 `GraphBuilder.observe()` 终态；该次异步 submission 不提供同步
-`control_flow_stats()`。
+`control_flow_stats()`。depth=2 结构化 Graph 不支持异步 submission，严格 Vulkan 单
+replay 形态也不例外。
 
 显式 `submit(telemetry=True)` 会额外在 device 上记录每个 while region 的进入
 counter/status 与终态 counter/predicate/status。`ticket.telemetry()` 仅在完成后读取
@@ -819,7 +842,7 @@ queue counter 窗口。由于外部 graphics/interop producer 可能在同一窗
 queue delta 会标为 non-exact。compound replay 无法在不改变已资格化路径的前提下插入
 GPU timestamp 时，会明确报告 `unavailable`。
 
-### `GraphBuilder.compile()`、`Graph.run(args)` 与 `Graph.submit(args)`
+### `GraphBuilder.compile()`、`Graph.run(args, *, trace=False)` 与 `Graph.submit(args)`
 
 `compile()` 冻结调用时的 dispatch/sequential 定义并返回 runtime-bound `Graph`。
 `run(args)` 提交一次完整 graph invocation，并保持既有的提交后继续执行返回合同；
@@ -828,7 +851,8 @@ GPU timestamp 时，会明确报告 `unavailable`。
 | API | 合同 |
 | --- | --- |
 | `GraphBuilder.compile()` | 后续修改 builder 或原 `Sequential` 不改变已编译 graph。 |
-| `Graph.run(args)` | `args` 必须是字典，key 与声明参数完全一致；missing/extra key 会抛 `TaichiRuntimeError`。 |
+| `Graph.run(args, *, trace=False)` | `args` 必须是字典，key 与声明参数完全一致；missing/extra key 会抛 `TaichiRuntimeError`。默认返回 `None`，也不分配 dynamic control-flow trace。 |
+| `Graph.run(args, *, trace=True)` | 同步运行并返回 immutable `GraphControlFlowTrace`。其中有序 invocation 包含 `sequence`、静态 `definition_path`、动态 `invocation_path`、可选 `parent_iteration` 和本次调用的 while/branch report。与 `control_flow_stats()` 不同，它会保留每一次重复 nested invocation。trace 会绕过严格 Vulkan nested replay，改用精确 portable-parent 执行，使每次 invocation 都可观测。 |
 | `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait', telemetry=False)` | 与 `run()` 使用相同的精确参数、生命周期、并发和 AD 合同，返回一个 `SubmissionTicket`，并可选择加入共享准入节奏。`telemetry=True` 为每个 while 增加 device snapshot；默认不增加 snapshot kernel 或 buffer。结构化提交接受满足资格的 CUDA `native_required` while/if/switch，以及满足资格的 Vulkan `native_required` while；后者可在一个 compound transaction 中包含多个有序 region。portable 控制与不支持的原生组合会明确失败。 |
 | `SubmissionTicket.telemetry()` | 必要时等待，并在请求遥测时返回 immutable `GraphSubmissionTelemetry`；否则返回 `None`。region 报告包含 terminal counter 与停止位置。nullable GPU duration 不会从 host wall time 推测。 |
 | `Graph._prewarm()` | 预热当前 runtime 的 backend plan；这是内部/高级入口，不改变 graph 参数合同。 |
@@ -1185,8 +1209,8 @@ operator API 另见[LinearOperator 与 SolvePlan](linear_operator.zh.md)。
 | `ti.linalg.SparseSolver` | 直接 LLT/LDLT/LU 分解和求解。 | CPU mutable Eigen provider 与文档列出的 CUDA scalar-CSR 路径；Vulkan 不支持。 |
 | `ti.linalg.OperatorTraits(...)` / `.spd()` | 不通过 sampling 或 inference，显式声明数学性质。 | CG/PCG 要求可信的 self-adjoint 与 positive-definite trait；MINRES 要求可信 self-adjoint，并拒绝声明为 singular 的 operator。 |
 | `ti.linalg.LinearOperator.from_sparse_matrix(A, traits=...)` | 把 fixed CSR/BSR 绑定为 runtime-owned linear map。 | CPU `f32/f64`；CUDA/Vulkan `f32`；不复制、不 fallback。 |
-| `LinearOperator.from_kernel(..., adjoint=...)` / `.from_graph(..., adjoint=...)` | 绑定精确 f32 ndarray kernel ABI 或按 role 分类的 compiled Graph；整数 size 是方阵简写，tuple 表示 `(range, domain)`。 | CPU、CUDA、Vulkan；显式 adjoint；topology/numeric/workspace 为 operator-owned snapshot。 |
-| `operator.graph_action(input_arg, output_arg, *, adjoint=False)` | 把一次 compiled-kernel operator apply 录入 Graph root 或结构化 `Sequential` body。 | CPU/CUDA/Vulkan f32；provider snapshot 为 zero-copy fixed binding；numeric generation 更新后必须重建 Graph；不支持的 provider kind 明确失败。 |
+| `LinearOperator.from_kernel(..., adjoint=...)` / `.from_graph(..., adjoint=..., state=...)` | 绑定精确 f32 ndarray kernel ABI 或按 role 分类的 compiled Graph；整数 size 是方阵简写，tuple 表示 `(range, domain)`。 | CPU、CUDA、Vulkan；显式 adjoint；topology/numeric/workspace 为 operator-owned snapshot。`state` 为每个 distinct dependent pure-dense SNodeTree 至少提供一个代表性的 root-dense scalar/Vector/Matrix Field，并 zero-copy 保留该 tree。依赖 tree 漏报或多报、dependent tree 含任一 sparse/dynamic node、storage 已销毁或跨 runtime 都会 fail closed；key 只是诊断标签，匹配粒度是 tree。 |
+| `operator.graph_action(input_arg, output_arg, *, adjoint=False)` | 把一次 compiled-kernel 或只含 direct dispatch 的 compiled-Graph operator apply 录入 Graph root 或结构化 `Sequential` body。 | CPU/CUDA/Vulkan f32。通用和 legacy compiled Graph 都保持有序 multi-dispatch forward action；通用形式可录制显式登记的 adjoint。provider snapshot 是 fixed binding；已声明的 SNodeTree state 继续使用原 storage，外层 Graph 不再复制。numeric/SNode/runtime generation 改变会使已编译外层 Graph stale。单个 action 不保证性能提升，预期收益来自 multi-action composition。 |
 | `ti.linalg.FieldLinearOperator(matvec_kernel)` | 包装 `MatrixFreeCG` 与 `MatrixFreeBICGSTAB` 使用的 callback-only `(x, y)` field ABI。 | field-shaped legacy 合同；不提供 provider capability、resource generation、storage view、composition 或 SolvePlan 适配。 |
 | `ti.linalg.vector_view(field, indices=None)` | 把 canonical root-dense scalar/Vector/Matrix field 声明为 runtime-bound scalar-flat vector；可选显式 indexed subset/permutation。 | 1D/2D/3D、`f32/f64`，并服从 operator/provider/backend 的 dtype 支持；indices 为非空、范围内、唯一的一维 `i32` ndarray/dense field，并在构造时验证和冻结；sparse SNode 与 noncanonical layout 明确失败。 |
 | `ti.linalg.vector_io_capabilities()` / storage-view metadata | 查询版本化 storage、layout、execution mode、zero-copy 资格与 indexed topology 合同。 | compiled kernel 在 CPU/CUDA/Vulkan 上直接绑定 compact 与一维 scalar affine runtime storage。compiled Graph 直接绑定 compact storage，并通过 backend-qualified dispatch 保持 affine zero-copy 执行。native CSR/BSR 在 CPU/CUDA 上接受 compact direct storage；Vulkan dense field 与 solve boundary 使用可复用 device staging。 |

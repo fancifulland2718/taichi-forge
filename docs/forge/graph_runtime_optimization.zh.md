@@ -136,6 +136,10 @@ work 与数值 breakdown。它写入只包含一个整数的 `predicate` ndarray
 `if_then_else()` 根据 condition region 计算的 predicate 选择一个固定分支。
 `switch()` 根据 condition region 计算的零基 selector 选择固定分支或可选 default。
 全部 branch schema 在执行前编译；region 内不会调用 Python callback。
+`Sequential` 也提供相同的 `while_loop()`、`if_then_else()` 与 `switch()` builder，
+因此 root structured region 内还可包含一级 structured control。最大结构化深度为 2；
+定义必须形成 single-owner tree；更深定义、cycle、跨多个 call site 复用以及 nested
+`native_required` 定义都会在执行前的 region 构造或 Graph 编译阶段明确失败。
 
 当前 lowering 明确如下：
 
@@ -144,6 +148,11 @@ work 与数值 breakdown。它写入只包含一个整数的 `predicate` ndarray
 | CPU | 精确 `cpu_host_loop`；condition/body 使用 cached compiled dispatch plan | 精确 portable host control |
 | CUDA | Driver API 不低于 12.8 且具备所需 symbol/lowering 时，`auto` 使用原生 CUDA conditional Graph；否则使用精确 portable replay | 资格满足时，`auto` 使用单个原生 CUDA IF/SWITCH node；否则使用精确 portable host control |
 | Vulkan | 精确 portable replay，或满足资格的 `native_required` 有界 masking；每个 region 的正数 chunk size 封顶为 64，每个 region 最多八个 chunk/512 轮 | 精确 portable host control |
+
+在 depth=2 时，CPU 以精确 host control 执行两层。parent 使用 exact portable
+control；满足资格的 `auto` leaf 可保留已有 flat native route：CUDA
+`while`/`if`/`switch` 或 Vulkan `while`。这是 portable-parent/native-leaf
+组合，不代表支持任意 nested native Graph。
 
 `ti.graph.structured_control_capabilities()` 返回当前 backend 的 schema-v4 portable
 lowering 与 device-control 资格。报告分别描述 primitive 可用性、完整 runtime 资格、
@@ -159,6 +168,23 @@ queue-submit 合并与 exact dynamic termination。Vulkan 声明有界 `while` �
 provider action 只有在 provider 声明适合结构化 body 时才能进入 region；opaque 或
 不支持的 provider 会明确失败。
 
+Vulkan 另有一种满足资格的 depth=2 结构：trace 关闭且 outer mode 为 `auto` 时，
+outer `while` 的 body 恰好包含一个 leaf inner `while`，可以执行为一次同步 bounded
+replay。两层都必须提供 counter；两层的 predicate、counter 与可选 status control
+必须全部互不别名，并且是同一 Program 所有的单元素 i32 device ndarray。conditional
+rendering、nested runtime binding 与普通 Vulkan replay 必须可用，kernel profiler 与
+Vulkan dispatch cache 必须关闭。outer/inner 上限都必须位于 1 到 64，inner chunk
+必须为正且不得超过 64 或 inner budget，完整程序最多编码 4096 个 action。outer
+prefix/suffix 以及两层 condition/body sequence 只能包含普通 dispatch 或满足资格的
+recordable action。其他 nested 结构使用 exact portable-parent control；满足资格的
+leaf `while` 仍可使用上述 flat Vulkan route。Vulkan 仍不支持原生 `if`/`switch` 或
+exact dynamic command-stream termination。
+
+原生 structured route 会严格区分提交前资格不满足与提交后观测失败：前者可以选择文档
+规定的 exact portable route；queue 一旦接受有副作用的 submission，completion、
+终态观测映射或 trace decode 失败会立即报错，绝不触发 portable fallback，因此不会把
+Graph body 执行两次。
+
 recordable provider 还可声明由 Graph temporary requirement 支撑的私有符号 scratch。
 Graph memory plan 为每个正在执行的 invocation 分配一个有界 arena slot，在提交前解析
 私有符号，并且不把它们暴露为 `Graph.run()` / `Graph.submit()` 参数。同一个 arena slot
@@ -170,18 +196,28 @@ lowering 为一个 backend region。fixed binding 与私有 temporary binding �
 冲突会明确失败。结构化 region 只有在 provider 对相应 condition/body/branch role 完成
 资格声明后，才会 inline 同一组 provider dispatch。
 
-`Graph.control_flow_stats()` 为最近一次 `run()` 的每个结构化 region 返回 immutable
-`GraphWhileReport` 或 `GraphBranchReport`。原生 CUDA IF/SWITCH 保持 `Graph.run()` 的
+`Graph.control_flow_stats()` 为最近一次 `run()` 的每个静态 structured definition
+返回 immutable `GraphWhileReport` 或 `GraphBranchReport`；重复 nested 调用只保留该
+definition 的最近一次 invocation。原生 CUDA IF/SWITCH 保持 `Graph.run()` 的
 fire-and-continue 合同：selector 回读和 report 构造延迟到请求 `control_flow_stats()` 时，
 因此该诊断调用是显式同步点。while report 包含实际 lowering、逻辑/执行
 迭代、观测边界、predicate/counter/status 轨迹、终止状态、传输字节与 native upgrade
-原因。portable 结构化 region 使用同步 `Graph.run()`；`Graph.submit()` 会明确拒绝，
+原因。严格 Vulkan outer while report 还提供 `region_path`、`structured_depth`、
+`nested_region_path`、`nested_logical_iterations` 与
+`nested_encoded_iterations`。`Graph.run(args, trace=True)` 会同步返回有序
+`GraphControlFlowTrace`，保留每次 nested invocation 的 sequence、definition path、
+invocation path、parent iteration 与 report。trace 会绕过严格 Vulkan nested replay，
+使用精确 portable-parent 路径，使每次 invocation 都可观测。
+
+portable 结构化 region 使用同步 `Graph.run()`；`Graph.submit()` 会明确拒绝，
 不会把 host-observed 控制隐藏在异步 ticket 后面。在 CUDA conditional Graph lowering
 可用时，声明 `lowering_mode='native_required'` 的 `while_loop`、`if_then_else` 与
 `switch` 都可使用 `Graph.submit()`。满足资格的 Vulkan `native_required` `while_loop`
 也可使用 `Graph.submit()`；Vulkan branch 仍是 portable。CUDA 有序 setter 与 Vulkan
 predicate gate 都无需逐 region host 回读即可消费控制状态。异步结构化提交后应通过
 `ticket.observations()` 读取终态；该次 submission 不提供同步控制流报告。
+包含 nested structured control 的 Graph 在所有 backend 上都不支持异步
+`Graph.submit()`。
 逐 invocation 诊断可使用 `submit(telemetry=True)`，它在每个 while region 前后记录
 控制 scalar；`ticket.telemetry()` 会报告 logical 停止位置、encoded/masked iteration
 slot、跳过的 coarse chunk、queue-counter 窗口与 host enqueue 时间。默认路径不分配
@@ -302,8 +338,10 @@ allocation、native workspace、replay command state 和 completion 对象；与
 Pacer 采用 invocation-count admission，不进行显存或预计 GPU 时间加权。其 schema v2
 `statistics()["contract"]` 明确报告 admission unit、无 device-concurrency 保证、不可抢占以及
 未覆盖的 workspace/generation/unpaced submission。Graph 的 `execution_stats()` 可用于观察
-`persistent_argument_bytes` 和 `replay_slot_saturation_fallbacks`，但 driver 内部 command buffer、
-descriptor pool 与 allocator reservation 仍需通过后端 profiler 和进程显存测量评估。
+`persistent_argument_bytes` 和 `replay_slot_saturation_fallbacks`。该持久参数总量也包含
+structured node 拥有的 condition/body cache，以及满足资格的 control/observation arena；
+这些内部 cache 不会展开成公开 CGraph segment。driver 内部 command buffer、descriptor
+pool 与 allocator reservation 仍需通过后端 profiler 和进程显存测量评估。
 
 推荐从一个在途 invocation 开始配置。只有 Nsight 或等价 trace 证明宿主 enqueue/wait 能与
 有效 GPU 工作重叠，且峰值显存、p95/p99 尾延迟与 replay saturation 均满足预算时，才提高到

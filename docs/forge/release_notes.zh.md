@@ -115,7 +115,12 @@
   观测流量与 fallback 原因。满足资格的 CUDA `while`、`if` 与 `switch` 使用原生
   conditional node；`native_required` region 可通过 `Graph.submit()` 异步提交，且不做
   host 控制回读。conditional metadata 异步上传，并最多保留两个 deferred replay batch。
-  CPU 保留精确 portable 控制。Vulkan 同时支持精确 portable 控制与满足资格的有界
+  CPU 保留精确 portable 控制。`Sequential` 现在也公开相同的 structured builder，
+  允许再嵌套一级，最大 structured depth 为 2。CPU 精确执行两层。在 depth=2 时 parent
+  使用 exact portable control；满足资格的 `auto` leaf 可保留 flat native route：
+  CUDA `while`/`if`/`switch` 或 Vulkan `while`。这只是 leaf 优化，不是原生 depth=2
+  submission。nested `native_required` 定义会明确失败。Vulkan 同时支持精确 portable
+  控制与满足资格的有界
   `native_required` `while`：`chunk_size` 按 region 生效并封顶为 64，每个 region 最多
   八个 chunk/512 轮；多个有序 region 可作为 compound asynchronous submission 通过一个
   terminal ticket 提交。每个 region 可以选择 compact 或 coarse-gated 首 chunk；
@@ -125,17 +130,31 @@
   `submit(telemetry=True)` 会记录逐 region 的进入与终态 snapshot，并在 ticket 完成后报告
   真实停止轮次、encoded/masked 工作、active/skipped chunk、enqueue 时间和经过说明的
   queue-counter 窗口；默认提交路径不分配 telemetry buffer，也不增加 snapshot kernel。
-  Vulkan `if`/`switch`、exact dynamic command termination 与 nested structured control
-  仍不支持，并由 `structured_control_capabilities()` 独立报告。在预热后的 Windows
-  16-region、512-budget early-termination workload 中，自动 coarse tail 相对全 chunk
-  compact masking 将完整 transaction median 缩短 9.5%，terminal 结果一致。
+  满足资格的 Vulkan while-to-while 定义可在 conditional rendering 可用、两层上限
+  各自不超过 64、完整程序最多编码 4096 个 action，且两层使用独立单元素 i32 control 时，
+  把两层编码为一次 bounded replay；其他 nested 结构使用 exact portable-parent
+  control，满足资格的 leaf `while` 仍可保留上述 flat Vulkan route。
+  `Graph.run(trace=True)` 使用 portable-parent exact 执行并返回每次 nested invocation；
+  `GraphWhileReport` 提供 nested path 与 logical/encoded stop position。nested
+  structured Graph 仍不支持异步提交。Vulkan structured replay 只能在 queue submission
+  之前 fallback；提交后的 completion 或终态观测失败会直接报错，不会再次执行有副作用的
+  body。Vulkan `if`/`switch` 与 exact dynamic command termination 仍不支持，并由
+  `structured_control_capabilities()` 独立报告。
 - 新增 `LinearOperator.graph_action()`，可把 compiled-kernel f32 provider 直接录入
   Graph root 或结构化 body。provider-owned topology/numeric generation 保持 zero-copy
   fixed binding，input/output dense storage 使用通用 runtime 协议；numeric generation
   失效后必须重建 Graph。通用控制与 provider 合同通过 preconditioned CG 和非对称
   BiCGSTAB 程序完成资格验证，不增加 solver-specific Graph API。连续 CGraph/provider
   region 会融合为一个 backend region；provider 可绑定 invocation-private Graph temporary，
-  而不把它公开为 runtime 参数。
+  而不把它公开为 runtime 参数。`LinearOperator.from_graph(..., state=...)` 还可为每个
+  distinct dependent pure-dense SNodeTree 接收一个代表性的 live root-dense scalar、
+  Vector 或 Matrix Field，并无复制保留该 tree 的原 storage。匹配粒度是 tree；key 和
+  Field component 不是访问级 capability。generic compiled-Graph operator 保留有序 multi-dispatch
+  forward 与显式 adjoint action；legacy square 形式可录制 forward action，但不会推导
+  adjoint。依赖 tree 漏报或多报、dependent tree 含任一 sparse/dynamic descendant、
+  indirect dispatch，以及 stale numeric、SNode 或 runtime generation 都会明确失败。
+  单独录制一个 action 不保证提速；预期收益来自与周围 Graph
+  action 的组合。
 - 新增 compiled-kernel f32 CG/PCG 的显式 CUDA `device_convergent` 执行。该路径通过通用
   结构化 Graph 和可录制 A/M action 完成，每次 solve 只读取一个 terminal packet，并在
   provider 不可用或 stale 时明确失败。并行 vector update 与持久两级 shared-block
