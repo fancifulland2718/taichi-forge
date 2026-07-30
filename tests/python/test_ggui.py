@@ -1036,6 +1036,35 @@ def test_set_image_cuda_vulkan_shared_dense_view():
 
 @pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
 @test_utils.test(arch=[ti.cuda])
+def test_set_image_cuda_vulkan_shared_dense_view_supersedes_pending_frame():
+    width, height = 32, 48
+    window = ti.ui.Window("test", (width, height), show_window=False)
+    canvas = window.get_canvas()
+    image = ti.Vector.field(4, ti.f32, shape=(width, height))
+
+    for frame in range(8):
+        image.fill([frame / 7.0, 0.25, 0.5, 1.0])
+        assert canvas.set_image(image) is True
+        if not canvas._shared_cuda_vulkan_views:
+            window.destroy()
+            pytest.skip("CUDA-Vulkan external sharing is unavailable")
+
+    assert len(canvas._shared_cuda_vulkan_views) == 1
+    rendered = window.get_image_buffer_as_numpy()
+    stats = window.get_display_stats()
+    assert stats["zero_copy_render_submissions"] == 1
+    assert stats["last_render_zero_copy"] is True
+    expected = np.empty((width, height, 4), dtype=np.float32)
+    expected[..., 0] = 1.0
+    expected[..., 1] = 0.25
+    expected[..., 2] = 0.5
+    expected[..., 3] = 1.0
+    np.testing.assert_allclose(rendered, expected, atol=1.0 / 255.0 + 1e-5)
+    window.destroy()
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=[ti.cuda])
 def test_cuda_vulkan_shared_image_owner_is_safe_across_reset():
     window = ti.ui.Window("test", (32, 32), show_window=False)
     canvas = window.get_canvas()

@@ -146,22 +146,25 @@ class SharedCudaVulkanImage::Impl {
   void prepare_cuda_write() {
     TI_ERROR_IF(!lifetime_ || !lifetime_->interop,
                 "Shared display storage is closed");
-    const auto state = lifetime_->interop->access_state();
-    if (state ==
+    if (lifetime_->interop->access_state() ==
         VulkanCudaExternalAllocation::AccessState::kAwaitingCudaAcquire) {
       return;
     }
-    TI_ERROR_IF(state !=
-                    VulkanCudaExternalAllocation::AccessState::kVulkanOwned,
-                "Shared display storage is not available for CUDA");
     auto *stream = dynamic_cast<VulkanStream *>(
         app_context_->device().get_graphics_stream());
     TI_ERROR_IF(stream == nullptr,
                 "Shared display storage requires a Vulkan graphics stream");
     auto [command_list, result] = stream->new_command_list_unique();
     TI_ERROR_IF(result != RhiResult::success || !command_list,
-                "Unable to allocate the initial display handoff command");
-    lifetime_->interop->release_vulkan_to_cuda(*stream, command_list.get());
+                "Unable to allocate the display handoff command");
+    const auto prepare_result = lifetime_->interop->prepare_cuda_access(
+        *stream, command_list.get());
+    if (prepare_result ==
+        VulkanCudaExternalAllocation::PrepareCudaAccessResult::
+            kRearmedAfterCudaRelease) {
+      TI_TRACE("Rearmed superseded CUDA-Vulkan display frame {}",
+               lifetime_->interop->identity());
+    }
   }
 
   StreamSemaphore submit_vulkan_frame(

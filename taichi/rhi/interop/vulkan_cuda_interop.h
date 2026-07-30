@@ -34,6 +34,12 @@ class RHI_DLL_EXPORT VulkanCudaExternalAllocation final
     kClosed,
   };
 
+  enum class PrepareCudaAccessResult : std::uint8_t {
+    kAlreadyReleased,
+    kReleasedFromVulkan,
+    kRearmedAfterCudaRelease,
+  };
+
   static std::shared_ptr<VulkanCudaExternalAllocation> create(
       vulkan::VulkanDevice *vulkan_device,
       cuda::CudaDevice *cuda_device,
@@ -52,6 +58,14 @@ class RHI_DLL_EXPORT VulkanCudaExternalAllocation final
   std::size_t allocation_size() const noexcept;
   AccessState access_state() const noexcept;
   bool closed() const noexcept;
+
+  // Make the allocation available to the next CUDA access epoch. A CUDA
+  // producer that was never consumed by Vulkan is superseded through an empty
+  // Vulkan wait/signal cycle, without a host or device-wide wait. The state
+  // check and transition are serialized with every other ownership change.
+  PrepareCudaAccessResult prepare_cuda_access(
+      vulkan::VulkanStream &stream,
+      CommandList *cmdlist);
 
   // Submit Vulkan work that produces the shared allocation and signals CUDA.
   // No host/device wait is introduced.

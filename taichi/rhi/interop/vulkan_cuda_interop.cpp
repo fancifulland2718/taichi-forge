@@ -654,6 +654,41 @@ class VulkanCudaExternalAllocation::Impl {
     return state_;
   }
 
+  PrepareCudaAccessResult prepare_cuda_access(VulkanStream &stream,
+                                              CommandList *cmdlist) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    require_open();
+    if (state_ == AccessState::kAwaitingCudaAcquire) {
+      return PrepareCudaAccessResult::kAlreadyReleased;
+    }
+    TI_ERROR_IF(
+        state_ != AccessState::kVulkanOwned &&
+            state_ != AccessState::kAwaitingVulkanAcquire,
+        "Vulkan-CUDA allocation cannot prepare CUDA access from state {}",
+        static_cast<int>(state_));
+    TI_ERROR_IF(cmdlist == nullptr,
+                "Vulkan-CUDA allocation received a null handoff command");
+    bind_vulkan_stream(stream);
+
+    const bool rearm_discarded_cuda_producer =
+        state_ == AccessState::kAwaitingVulkanAcquire;
+    StreamSemaphore completion;
+    if (rearm_discarded_cuda_producer) {
+      completion = stream.submit_with_semaphores(
+          cmdlist, {cuda_to_vulkan_.stream}, {vulkan_to_cuda_.stream});
+    } else {
+      completion = stream.submit_with_semaphores(
+          cmdlist, {}, {vulkan_to_cuda_.stream});
+    }
+    TI_ERROR_IF(!completion, "Vulkan-to-CUDA handoff submission failed");
+    last_vulkan_completion_ = completion;
+    active_cuda_stream_ = {};
+    state_ = AccessState::kAwaitingCudaAcquire;
+    return rearm_discarded_cuda_producer
+               ? PrepareCudaAccessResult::kRearmedAfterCudaRelease
+               : PrepareCudaAccessResult::kReleasedFromVulkan;
+  }
+
   StreamSemaphore release_vulkan_to_cuda(VulkanStream &stream,
                                          CommandList *cmdlist) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -855,6 +890,13 @@ VulkanCudaExternalAllocation::access_state() const noexcept {
   return impl_->access_state();
 }
 
+VulkanCudaExternalAllocation::PrepareCudaAccessResult
+VulkanCudaExternalAllocation::prepare_cuda_access(
+    VulkanStream &stream,
+    CommandList *cmdlist) {
+  return impl_->prepare_cuda_access(stream, cmdlist);
+}
+
 bool VulkanCudaExternalAllocation::closed() const noexcept {
   return impl_->closed();
 }
@@ -977,6 +1019,12 @@ std::size_t VulkanCudaExternalAllocation::allocation_size() const noexcept {
 VulkanCudaExternalAllocation::AccessState
 VulkanCudaExternalAllocation::access_state() const noexcept {
   return AccessState::kClosed;
+}
+VulkanCudaExternalAllocation::PrepareCudaAccessResult
+VulkanCudaExternalAllocation::prepare_cuda_access(vulkan::VulkanStream &,
+                                                  CommandList *) {
+  TI_NOT_IMPLEMENTED;
+  return PrepareCudaAccessResult::kAlreadyReleased;
 }
 bool VulkanCudaExternalAllocation::closed() const noexcept {
   return true;
