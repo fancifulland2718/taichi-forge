@@ -41,9 +41,31 @@ permutation、integer indexing 与 external ownership。
 
 返回 view 可作为兼容 ndarray kernel argument，支持 `close()` 与 context-manager 协议。它会让 DLPack capsule owner 在 in-flight work 完成前保持存活，runtime reset 后调用 `close()` 仍然安全。
 
+### `ti.interop.from_external(source, *, provider=None, element_shape=(), access="readwrite", copy=False)`
+
+Provider-neutral managed-tensor 入口。当前 `provider=None` 与
+`provider="dlpack"` 都委托给和 `from_dlpack()` 相同的严格实现。传入已有且仍打开的
+`ExternalDenseView` 会返回原 view；不允许同时要求 reinterpretation。
+
+### `ti.interop.import_external_allocation(provider, memory_handle, **options)`
+
+通过合格 provider 导入 raw external allocation。当前 `"vulkan_cuda"` provider 要求
+`arch=ti.cuda`、Vulkan 导出的 dedicated buffer allocation、byte size、16-byte
+physical-device UUID，以及一对 binary-semaphore handle。Windows 接受
+`opaque_win32`，Linux 接受 `opaque_fd`。可以通过 `allow_unsynchronized=True`
+显式选择 caller-synchronized import；不存在 copy fallback。
+
+返回的 `VulkanCudaExternalAllocation` 通过
+`allocation.view(dtype=..., shape=..., element_shape=(), offset_bytes=0)` 创建
+compact AOS typed-offset view。多个 view 共享一次 Graph access epoch。
+`import_vulkan_cuda_allocation()` 保留为 provider-specific 兼容名称；
+`current_cuda_device_uuid()` 返回当前 CUDA device 的 16-byte UUID。
+
 ### `ti.interop.capabilities()`
 
-返回当前 backend、接受的 DLPack device class、layout/access mode、严格 copy-fallback policy 与 schema version。当前 schema version 为 `1`。
+保留 schema-v1 顶层 DLPack 字段，同时新增 `interop_schema_version=2` 和
+`providers` map。各 provider record 会报告 availability、可接受的 handle/layout、
+synchronization mode、Graph access epoch 与严格 copy-fallback policy。
 
 既有 NumPy、PyTorch、Paddle kernel 参数签名保持支持。显式 interop API 是严格合同；历史 adapter 保留已有 fallback 行为。完整支持矩阵与同步合同见 [Dense Storage 零拷贝与互操作](zero_copy_interop.zh.md)。
 

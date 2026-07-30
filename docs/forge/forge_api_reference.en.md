@@ -46,9 +46,35 @@ Imports a qualified DLPack producer as a managed, strict zero-copy `ExternalDens
 
 The returned view can be used as a compatible ndarray kernel argument and supports `close()` plus the context-manager protocol. It keeps the DLPack capsule owner alive through in-flight work and remains safe to close after runtime reset.
 
+### `ti.interop.from_external(source, *, provider=None, element_shape=(), access="readwrite", copy=False)`
+
+Provider-neutral managed-tensor entry point. `provider=None` and
+`provider="dlpack"` currently delegate to the same strict implementation as
+`from_dlpack()`. Passing an existing open `ExternalDenseView` returns that
+view; reinterpretation options are rejected.
+
+### `ti.interop.import_external_allocation(provider, memory_handle, **options)`
+
+Imports a raw external allocation through a qualified provider. The current
+`"vulkan_cuda"` provider requires `arch=ti.cuda`, a dedicated
+Vulkan-exported buffer allocation, its byte size and 16-byte physical-device
+UUID, plus paired binary-semaphore handles. `opaque_win32` is accepted on
+Windows and `opaque_fd` on Linux. `allow_unsynchronized=True` permits an
+explicit caller-synchronized import. No copy fallback is provided.
+
+The returned `VulkanCudaExternalAllocation` creates compact AOS typed-offset
+views with
+`allocation.view(dtype=..., shape=..., element_shape=(), offset_bytes=0)`.
+Views share one Graph access epoch. `import_vulkan_cuda_allocation()` remains
+as the provider-specific compatibility spelling, and
+`current_cuda_device_uuid()` returns the active CUDA device's 16-byte UUID.
+
 ### `ti.interop.capabilities()`
 
-Returns the active backend, accepted DLPack device classes, layout/access modes, strict copy-fallback policy, and schema version. The current schema version is `1`.
+Preserves the schema-v1 top-level DLPack fields and adds
+`interop_schema_version=2` plus a `providers` map. Provider records report
+availability, accepted handles/layouts, synchronization modes, Graph access
+epochs, and strict copy-fallback policy.
 
 Historical NumPy, PyTorch, and Paddle kernel-argument signatures remain supported. The explicit interop API is strict; historical adapters preserve their established fallback behavior. See [Zero-copy dense storage and interoperability](zero_copy_interop.en.md) for the support matrix and synchronization contract.
 

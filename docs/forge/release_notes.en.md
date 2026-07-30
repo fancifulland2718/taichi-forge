@@ -71,6 +71,20 @@ the `0.5.0` artifacts:
   PyTorch, and Paddle argument signatures remain compatible; synchronous CPU
   NumPy retains its low-overhead direct ABI and established incompatible-layout
   fallback.
+- Added provider-neutral `ti.interop.from_external()` and
+  `import_external_allocation()`. The existing `from_dlpack()` spelling remains
+  compatible and enters the same managed owner/view protocol. The initial raw
+  provider imports dedicated Vulkan-exported memory and paired binary
+  semaphores into CUDA, exposes multiple compact typed-offset views, groups
+  them into one Graph access epoch, and fails closed on device, handle,
+  layout, lifetime, or synchronization mismatch. The provider-specific
+  `import_vulkan_cuda_allocation()` spelling remains available.
+- The public Vulkan-CUDA provider and GGUI shared-display path now use one
+  checked raw-handle import core. Compared with the previous internal importer,
+  GPU resource topology and measured per-process GPU-memory peaks are
+  unchanged, Windows concurrent display timing shows no regression, and
+  invalid/duplicate handles plus partial construction or cleanup failures are
+  handled without a global CUDA submission lock.
 - GGUI `canvas.set_image()` now automatically packs qualified CUDA field and
   ndarray images into Vulkan-owned exportable storage imported by CUDA.
   External semaphores provide a bounded CUDA-produce/Vulkan-consume cycle, and

@@ -62,6 +62,17 @@
   Graph submission 对每个不同 domain 只 acquire 一次，并在 enqueue 完成或异常时逆序
   release。既有 NumPy、PyTorch、Paddle 参数签名保持兼容；同步 CPU NumPy 保留低开销
   direct ABI 与既有 incompatible-layout fallback。
+- 新增 provider-neutral `ti.interop.from_external()` 与
+  `import_external_allocation()`。既有 `from_dlpack()` 名称保持兼容，并进入同一套
+  managed owner/view 协议。首个 raw provider 把 Vulkan 导出的 dedicated memory 与
+  paired binary semaphore 导入 CUDA，开放多个 compact typed-offset view，并把它们
+  合并为一次 Graph access epoch；device、handle、layout、lifetime 或 synchronization
+  不匹配都会 fail closed。provider-specific `import_vulkan_cuda_allocation()` 名称继续
+  保留。
+- 公开 Vulkan-CUDA provider 与 GGUI shared-display path 现在共用同一个 checked
+  raw-handle import core。与旧内部 importer 相比，GPU resource topology 和实测
+  per-process GPU-memory 峰值不变，Windows 并发显示 timing 无回退；非法/重复 handle
+  及部分构造或 cleanup 失败均可安全处理，且无需全局 CUDA submission lock。
 - GGUI `canvas.set_image()` 会自动把合格的 CUDA field/ndarray 图像 pack 到 Vulkan-owned
   exportable storage，再由 CUDA 导入同一 allocation。External semaphore 构成有界的
   CUDA-produce/Vulkan-consume cycle；steady state 复用正常 render submission，不经过
