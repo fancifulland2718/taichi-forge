@@ -345,6 +345,37 @@ std::vector<uint32_t> make_conditional_controller_spirv(
   return builder.finalize();
 }
 
+std::vector<uint32_t> make_coarse_conditional_gate_spirv(
+    const DeviceCapabilityConfig &caps,
+    std::uint32_t stable_predicate_index) {
+  spirv::IRBuilder builder(Arch::vulkan, &caps);
+  builder.init_header();
+  const auto u32 = builder.u32_type();
+  const auto predicate = builder.buffer_argument(u32, 0, 0, "predicate");
+  const auto control = builder.buffer_argument(u32, 0, 1, "control");
+  const auto function = builder.new_function();
+  builder.start_function(function);
+
+  const auto zero = builder.uint_immediate_number(u32, 0);
+  const auto predicate_value = builder.load_variable(
+      builder.struct_array_access(u32, predicate, zero), u32);
+  builder.store_variable(
+      builder.struct_array_access(
+          u32, control,
+          builder.uint_immediate_number(u32, stable_predicate_index)),
+      predicate_value);
+  builder.make_inst(spv::OpReturn);
+  builder.make_inst(spv::OpFunctionEnd);
+
+  std::vector<spirv::Value> interfaces;
+  if (caps.get(DeviceCapability::spirv_version) > 0x10300) {
+    interfaces = {predicate, control};
+  }
+  builder.commit_kernel_function(function, "main", std::move(interfaces),
+                                 {1, 1, 1});
+  return builder.finalize();
+}
+
 std::unique_ptr<Pipeline> create_structured_pipeline(
     Device *device,
     const std::vector<uint32_t> &spirv,
@@ -2071,7 +2102,8 @@ bool GfxRuntime::GraphReplayExecutable::refresh_prepared_cache(
 GfxRuntime::GraphReplayExecutable::Slot *
 GfxRuntime::GraphReplayExecutable::acquire_ready_slot(
     const std::vector<uint64_t> &key,
-    const std::vector<uint64_t> &structure_key) {
+    const std::vector<uint64_t> &structure_key,
+    bool wait_on_saturation) {
   if (slots.empty()) {
     slots.resize(kReplaySlots);
   }
@@ -2105,6 +2137,23 @@ GfxRuntime::GraphReplayExecutable::acquire_ready_slot(
     if (auto candidate = select(preference)) {
       next_slot = (*candidate + 1) % slots.size();
       return &slots[*candidate];
+    }
+  }
+
+  if (wait_on_saturation) {
+    // A compound structured submission can consume all fixed replay slots.
+    // Waiting at the allocation boundary prevents a later invocation from
+    // publishing a prefix of its chunks and then failing halfway through.
+    // Queue execution does not require host_api_mutex_, so the oldest
+    // round-robin slot can make progress while this host call is blocked.
+    auto &oldest = slots[next_slot];
+    if (oldest.completion && oldest.completion->wait()) {
+      for (int preference = 0; preference != 4; ++preference) {
+        if (auto candidate = select(preference)) {
+          next_slot = (*candidate + 1) % slots.size();
+          return &slots[*candidate];
+        }
+      }
     }
   }
 
@@ -2246,7 +2295,7 @@ bool GfxRuntime::try_launch_graph(
   if (structured_result != nullptr) {
     *structured_result = {};
   }
-  if ((structured_control == nullptr) != (structured_result == nullptr)) {
+  if (structured_control == nullptr && structured_result != nullptr) {
     state.last_path = GraphReplayLastPath::fallback;
     state.last_fallback_reason =
         GraphReplayFallbackReason::structural_unsupported;
@@ -2315,7 +2364,9 @@ bool GfxRuntime::try_launch_graph(
         structured_control->strategy == GraphStructuredStrategy::compact ||
         structured_control->strategy == GraphStructuredStrategy::chained ||
         structured_control->strategy ==
-            GraphStructuredStrategy::conditional;
+            GraphStructuredStrategy::conditional ||
+        structured_control->strategy ==
+            GraphStructuredStrategy::coarse_conditional;
     if (!valid_scalar(structured_control->predicate) ||
         !valid_scalar(structured_control->counter) ||
         (structured_control->has_status &&
@@ -2330,6 +2381,7 @@ bool GfxRuntime::try_launch_graph(
                 structured_control->initial_dispatch_count,
                 structured_control->max_iterations,
                 structured_control->has_status ? 1u : 0u,
+                structured_result != nullptr ? 1u : 0u,
                 static_cast<std::uint32_t>(structured_control->strategy),
                 structured_control->predicate.alloc_id,
                 structured_control->predicate.offset,
@@ -2342,6 +2394,7 @@ bool GfxRuntime::try_launch_graph(
         {0xC000u, structured_control->initial_dispatch_count,
          structured_control->max_iterations,
          structured_control->has_status ? 1u : 0u,
+         structured_result != nullptr ? 1u : 0u,
          static_cast<std::uint32_t>(structured_control->strategy)});
     push_runtime_structure(
         DeviceAllocation{structured_control->predicate.device,
@@ -2548,6 +2601,10 @@ bool GfxRuntime::try_launch_graph(
         structured_control->max_iterations > 0 &&
         encoded_actions <= kStructuredMaximumEncodedActions &&
         device_->supports_conditional_commands();
+    const bool coarse_conditional_eligible =
+        structured_control->max_iterations > 0 &&
+        encoded_actions <= kStructuredMaximumEncodedActions &&
+        device_->supports_conditional_commands();
     structured_strategy = structured_control->strategy;
     if (structured_strategy == GraphStructuredStrategy::automatic) {
       // Chained dispatch remains an explicit qualification path until a
@@ -2559,6 +2616,9 @@ bool GfxRuntime::try_launch_graph(
          !chained_eligible) ||
         (structured_strategy == GraphStructuredStrategy::conditional &&
          !conditional_eligible) ||
+        (structured_strategy ==
+             GraphStructuredStrategy::coarse_conditional &&
+         !coarse_conditional_eligible) ||
         (structured_strategy == GraphStructuredStrategy::compact &&
          encoded_actions > kStructuredMaximumEncodedActions)) {
       return reject();
@@ -2581,7 +2641,9 @@ bool GfxRuntime::try_launch_graph(
   executable.refresh_prepared_cache(key, prepared);
 
   GfxRuntime::GraphReplayExecutable::Slot *slot =
-      executable.acquire_ready_slot(key, structure_key);
+      executable.acquire_ready_slot(
+          key, structure_key,
+          structured_control != nullptr && structured_result == nullptr);
   if (slot == nullptr) {
     if (state.diagnostics_enabled) {
       ++state.slot_saturation_fallbacks;
@@ -2724,16 +2786,23 @@ bool GfxRuntime::try_launch_graph(
                   : structured_strategy ==
                             GraphStructuredStrategy::conditional
                         ? 1
+                        : structured_strategy ==
+                                  GraphStructuredStrategy::coarse_conditional
+                              ? 1
                         : 0)) *
                 sizeof(std::uint32_t);
+  const bool structured_terminal_observation =
+      structured_control != nullptr && structured_result != nullptr;
   const std::size_t structured_observation_bytes =
-      structured_control == nullptr
-          ? 0
-          : kStructuredObservationWords * sizeof(std::uint32_t);
+      structured_terminal_observation
+          ? kStructuredObservationWords * sizeof(std::uint32_t)
+          : 0;
   if (structured_control != nullptr) {
     const bool rebuild_control =
         !slot->structured_control_buffer ||
         slot->structured_control_bytes != structured_control_bytes ||
+        slot->structured_observation_bytes !=
+            structured_observation_bytes ||
         slot->structured_group_counts != structured_group_counts ||
         slot->structured_has_status != structured_control->has_status ||
         slot->structured_strategy != structured_strategy;
@@ -2745,18 +2814,25 @@ bool GfxRuntime::try_launch_graph(
                /*export_sharing=*/false,
                structured_strategy == GraphStructuredStrategy::conditional
                    ? AllocUsage::Storage | AllocUsage::Conditional
-                   : AllocUsage::Storage | AllocUsage::Indirect});
+                   : structured_strategy ==
+                             GraphStructuredStrategy::coarse_conditional
+                         ? AllocUsage::Storage | AllocUsage::Indirect |
+                               AllocUsage::Conditional
+                         : AllocUsage::Storage | AllocUsage::Indirect});
       if (control_result != RhiResult::success || !control_buffer) {
         return reject();
       }
-      auto [observation_buffer, observation_result] =
-          device_->allocate_memory_unique(
-              {structured_observation_bytes,
-               /*host_write=*/false, /*host_read=*/true,
-               /*export_sharing=*/false, AllocUsage::None});
-      if (observation_result != RhiResult::success ||
-          !observation_buffer) {
-        return reject();
+      std::unique_ptr<DeviceAllocationGuard> observation_buffer;
+      if (structured_terminal_observation) {
+        auto [allocated, observation_result] =
+            device_->allocate_memory_unique(
+                {structured_observation_bytes,
+                 /*host_write=*/false, /*host_read=*/true,
+                 /*export_sharing=*/false, AllocUsage::None});
+        if (observation_result != RhiResult::success || !allocated) {
+          return reject();
+        }
+        observation_buffer = std::move(allocated);
       }
       slot->structured_control_buffer = std::move(control_buffer);
       slot->structured_observation_buffer =
@@ -2787,16 +2863,37 @@ bool GfxRuntime::try_launch_graph(
               : structured_strategy == GraphStructuredStrategy::chained
               ? "vulkan_chained_controller"
               : "vulkan_compact_controller");
-      slot->structured_terminal_pipeline = create_structured_pipeline(
-          device_,
-          make_structured_terminal_spirv(
-              device_->get_caps(), structured_observation_word_offset,
-              structured_control->has_status),
-          "vulkan_structured_terminal");
+      if (structured_strategy ==
+          GraphStructuredStrategy::coarse_conditional) {
+        slot->structured_gate_pipeline = create_structured_pipeline(
+            device_,
+            make_coarse_conditional_gate_spirv(
+                device_->get_caps(),
+                static_cast<std::uint32_t>(
+                    structured_observation_word_offset +
+                    kStructuredObservationWords)),
+            "vulkan_coarse_conditional_gate");
+        slot->structured_gate_resources =
+            device_->create_resource_set_unique();
+      } else {
+        slot->structured_gate_pipeline.reset();
+        slot->structured_gate_resources.reset();
+      }
       slot->structured_controller_resources =
           device_->create_resource_set_unique();
-      slot->structured_terminal_resources =
-          device_->create_resource_set_unique();
+      if (structured_terminal_observation) {
+        slot->structured_terminal_pipeline = create_structured_pipeline(
+            device_,
+            make_structured_terminal_spirv(
+                device_->get_caps(), structured_observation_word_offset,
+                structured_control->has_status),
+            "vulkan_structured_terminal");
+        slot->structured_terminal_resources =
+            device_->create_resource_set_unique();
+      } else {
+        slot->structured_terminal_pipeline.reset();
+        slot->structured_terminal_resources.reset();
+      }
       slot->recorded = false;
       slot->cmdlist.reset();
     }
@@ -2807,8 +2904,10 @@ bool GfxRuntime::try_launch_graph(
       return true;
     }
     auto *controller = slot->structured_controller_resources.get();
+    auto *gate = slot->structured_gate_resources.get();
     auto *terminal = slot->structured_terminal_resources.get();
-    if (controller == nullptr || terminal == nullptr ||
+    if (controller == nullptr ||
+        (structured_terminal_observation && terminal == nullptr) ||
         !slot->structured_control_buffer) {
       return false;
     }
@@ -2820,24 +2919,40 @@ bool GfxRuntime::try_launch_graph(
         structured_control->has_status ? structured_control->status
                                        : structured_control->counter,
         sizeof(std::uint32_t));
-    terminal->rw_buffer(0, structured_control->predicate,
+    if (structured_terminal_observation) {
+      terminal->rw_buffer(0, structured_control->predicate,
+                          sizeof(std::uint32_t));
+      terminal->rw_buffer(1, structured_control->counter,
+                          sizeof(std::uint32_t));
+      terminal->rw_buffer(
+          2,
+          structured_control->has_status ? structured_control->status
+                                         : structured_control->counter,
+          sizeof(std::uint32_t));
+      terminal->rw_buffer(3, *slot->structured_control_buffer);
+    }
+    bool gate_ready = true;
+    if (structured_strategy ==
+        GraphStructuredStrategy::coarse_conditional) {
+      gate_ready = gate != nullptr;
+      if (gate_ready) {
+        gate->rw_buffer(0, structured_control->predicate,
                         sizeof(std::uint32_t));
-    terminal->rw_buffer(1, structured_control->counter,
-                        sizeof(std::uint32_t));
-    terminal->rw_buffer(
-        2,
-        structured_control->has_status ? structured_control->status
-                                       : structured_control->counter,
-        sizeof(std::uint32_t));
-    terminal->rw_buffer(3, *slot->structured_control_buffer);
-    return controller->prepare_for_replay(patch_existing) ==
+        gate->rw_buffer(1, *slot->structured_control_buffer);
+        gate_ready = gate->prepare_for_replay(patch_existing) ==
+                     RhiResult::success;
+      }
+    }
+    return gate_ready &&
+           controller->prepare_for_replay(patch_existing) ==
                RhiResult::success &&
-           terminal->prepare_for_replay(patch_existing) ==
-               RhiResult::success;
+           (!structured_terminal_observation ||
+            terminal->prepare_for_replay(patch_existing) ==
+                RhiResult::success);
   };
 
   auto finish_structured_submission = [&]() {
-    if (structured_control == nullptr) {
+    if (structured_control == nullptr || structured_result == nullptr) {
       return true;
     }
     if (!slot->completion || !slot->completion->wait()) {
@@ -2878,6 +2993,13 @@ bool GfxRuntime::try_launch_graph(
           structured_control->max_iterations;
       structured_result->indirect_dispatches = 0;
       structured_result->zero_dispatches = 0;
+    } else if (structured_strategy ==
+               GraphStructuredStrategy::coarse_conditional) {
+      structured_result->controller_invocations =
+          bounded_logical == 0 ? 0 : structured_control->max_iterations;
+      structured_result->indirect_dispatches = payload_dispatches;
+      structured_result->zero_dispatches =
+          payload_dispatches - active_payload_dispatches;
     } else if (structured_strategy == GraphStructuredStrategy::chained) {
       structured_result->controller_invocations = std::min(
           structured_control->max_iterations,
@@ -3041,6 +3163,46 @@ bool GfxRuntime::try_launch_graph(
       }
     }
 
+    bool coarse_conditional_open = false;
+    if (structured_strategy ==
+        GraphStructuredStrategy::coarse_conditional) {
+      cmdlist->buffer_transition(
+          structured_control->predicate, sizeof(std::uint32_t),
+          {BufferBarrierStage::Compute,
+           BufferBarrierAccess::ShaderWrite,
+           BufferBarrierStage::Compute,
+           BufferBarrierAccess::ShaderRead});
+      cmdlist->bind_pipeline(slot->structured_gate_pipeline.get());
+      RhiResult status = cmdlist->bind_shader_resources(
+          slot->structured_gate_resources.get());
+      TI_ERROR_IF(status != RhiResult::success,
+                  "Vulkan structured coarse gate resource binding error: "
+                  "RhiResult({})",
+                  status);
+      status = cmdlist->dispatch(1);
+      TI_ERROR_IF(status != RhiResult::success,
+                  "Vulkan structured coarse gate dispatch error: "
+                  "RhiResult({})",
+                  status);
+      const DevicePtr stable_predicate =
+          slot->structured_control_buffer->get_ptr(
+              (structured_observation_word_offset +
+               kStructuredObservationWords) *
+              sizeof(std::uint32_t));
+      cmdlist->buffer_transition(
+          stable_predicate, sizeof(std::uint32_t),
+          {BufferBarrierStage::Compute,
+           BufferBarrierAccess::ShaderWrite,
+           BufferBarrierStage::ConditionalCommand,
+           BufferBarrierAccess::ConditionalCommandRead});
+      status = cmdlist->begin_conditional(stable_predicate);
+      TI_ERROR_IF(status != RhiResult::success,
+                  "Vulkan structured coarse conditional begin failed: "
+                  "RhiResult({})",
+                  status);
+      coarse_conditional_open = true;
+    }
+
     for (std::uint32_t iteration = 0;
          iteration < structured_control->max_iterations; ++iteration) {
       cmdlist->buffer_transition(
@@ -3138,39 +3300,50 @@ bool GfxRuntime::try_launch_graph(
       }
     }
 
-    cmdlist->memory_barrier();
-    cmdlist->bind_pipeline(slot->structured_terminal_pipeline.get());
-    RhiResult terminal_status = cmdlist->bind_shader_resources(
-        slot->structured_terminal_resources.get());
-    TI_ERROR_IF(terminal_status != RhiResult::success,
-                "Vulkan structured terminal resource binding error: "
-                "RhiResult({})",
-                terminal_status);
-    terminal_status = cmdlist->dispatch(1);
-    TI_ERROR_IF(terminal_status != RhiResult::success,
-                "Vulkan structured terminal dispatch error: RhiResult({})",
-                terminal_status);
+    if (coarse_conditional_open) {
+      const RhiResult status = cmdlist->end_conditional();
+      TI_ERROR_IF(status != RhiResult::success,
+                  "Vulkan structured coarse conditional end failed: "
+                  "RhiResult({})",
+                  status);
+    }
 
-    const std::size_t observation_offset =
-        structured_observation_word_offset * sizeof(std::uint32_t);
-    cmdlist->buffer_transition(
-        slot->structured_control_buffer->get_ptr(observation_offset),
-        structured_observation_bytes,
-        {BufferBarrierStage::Compute,
-         BufferBarrierAccess::ShaderWrite,
-         BufferBarrierStage::Transfer,
-         BufferBarrierAccess::TransferRead});
-    cmdlist->buffer_copy(
-        slot->structured_observation_buffer->get_ptr(),
-        slot->structured_control_buffer->get_ptr(observation_offset),
-        structured_observation_bytes);
-    cmdlist->buffer_transition(
-        slot->structured_observation_buffer->get_ptr(),
-        structured_observation_bytes,
-        {BufferBarrierStage::Transfer,
-         BufferBarrierAccess::TransferWrite,
-         BufferBarrierStage::Host,
-         BufferBarrierAccess::HostRead});
+    if (structured_terminal_observation) {
+      cmdlist->memory_barrier();
+      cmdlist->bind_pipeline(slot->structured_terminal_pipeline.get());
+      RhiResult terminal_status = cmdlist->bind_shader_resources(
+          slot->structured_terminal_resources.get());
+      TI_ERROR_IF(terminal_status != RhiResult::success,
+                  "Vulkan structured terminal resource binding error: "
+                  "RhiResult({})",
+                  terminal_status);
+      terminal_status = cmdlist->dispatch(1);
+      TI_ERROR_IF(terminal_status != RhiResult::success,
+                  "Vulkan structured terminal dispatch error: "
+                  "RhiResult({})",
+                  terminal_status);
+
+      const std::size_t observation_offset =
+          structured_observation_word_offset * sizeof(std::uint32_t);
+      cmdlist->buffer_transition(
+          slot->structured_control_buffer->get_ptr(observation_offset),
+          structured_observation_bytes,
+          {BufferBarrierStage::Compute,
+           BufferBarrierAccess::ShaderWrite,
+           BufferBarrierStage::Transfer,
+           BufferBarrierAccess::TransferRead});
+      cmdlist->buffer_copy(
+          slot->structured_observation_buffer->get_ptr(),
+          slot->structured_control_buffer->get_ptr(observation_offset),
+          structured_observation_bytes);
+      cmdlist->buffer_transition(
+          slot->structured_observation_buffer->get_ptr(),
+          structured_observation_bytes,
+          {BufferBarrierStage::Transfer,
+           BufferBarrierAccess::TransferWrite,
+           BufferBarrierStage::Host,
+           BufferBarrierAccess::HostRead});
+    }
 
     slot->key = std::move(key);
     slot->structure_key = std::move(structure_key);
@@ -3562,6 +3735,35 @@ StreamSemaphore GfxRuntime::flush_if_pending() {
     return nullptr;
   }
   return flush();
+}
+
+void GfxRuntime::begin_submission_batch() {
+  // RuntimeSubmissionTransaction is thread-affine. Holding the recursive host
+  // API lock across its calls prevents an unrelated producer from being
+  // accidentally absorbed into this stream batch.
+  host_api_mutex_.lock();
+  try {
+    flush_if_pending();
+    device_->get_compute_stream()->begin_submission_batch();
+  } catch (...) {
+    host_api_mutex_.unlock();
+    throw;
+  }
+}
+
+StreamSemaphore GfxRuntime::end_submission_batch() {
+  try {
+    if (current_cmdlist_) {
+      flush();
+    }
+    StreamSemaphore completion =
+        device_->get_compute_stream()->end_submission_batch();
+    host_api_mutex_.unlock();
+    return completion;
+  } catch (...) {
+    host_api_mutex_.unlock();
+    throw;
+  }
 }
 
 Device *GfxRuntime::get_ti_device() const {

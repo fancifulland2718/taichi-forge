@@ -1491,9 +1491,7 @@ def _temporary_recordable_node(size, tracker, source, output):
         (gen_cpp_kernel(stage, (source, scratch)), (source, scratch)),
         (gen_cpp_kernel(finish, (scratch, output)), (scratch, output)),
     )
-    return _ArenaDispatchNode(
-        dispatches, source, output, scratch, requirement, tracker
-    )
+    return _ArenaDispatchNode(dispatches, source, output, scratch, requirement, tracker)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
@@ -1551,17 +1549,11 @@ def test_graph_materializes_and_reuses_temporary_arena():
 def test_recordable_provider_binds_graph_temporary_arena_without_public_scratch():
     size = 256
     tracker = {"temporary_binds": 0, "fallback_runs": 0}
-    source_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "source", ti.i32, ndim=1
-    )
-    output_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
-    )
+    source_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "source", ti.i32, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1)
     builder = ti.graph.GraphBuilder()
     builder.append_native(
-        _temporary_recordable_node(
-            size, tracker, source_arg, output_arg
-        )
+        _temporary_recordable_node(size, tracker, source_arg, output_arg)
     )
     graph = builder.compile()
 
@@ -1593,15 +1585,11 @@ def test_recordable_provider_binds_graph_temporary_arena_without_public_scratch(
     second_values = values + 17
     second_source.from_numpy(second_values)
     first_ticket = graph.submit({"source": source, "output": output})
-    second_ticket = graph.submit(
-        {"source": second_source, "output": second_output}
-    )
+    second_ticket = graph.submit({"source": second_source, "output": second_output})
     first_ticket.wait()
     second_ticket.wait()
     np.testing.assert_array_equal(output.to_numpy(), values * 2 + 1)
-    np.testing.assert_array_equal(
-        second_output.to_numpy(), second_values * 2 + 1
-    )
+    np.testing.assert_array_equal(second_output.to_numpy(), second_values * 2 + 1)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
@@ -1629,27 +1617,17 @@ def test_recordable_provider_temporary_embeds_in_structured_while():
                 source[index] = output[index]
             counter[None] += 1
 
-    source_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "source", ti.i32, ndim=1
-    )
-    output_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
-    )
-    predicate_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "predicate", ti.i32, ndim=0
-    )
-    counter_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "counter", ti.i32, ndim=0
-    )
+    source_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "source", ti.i32, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1)
+    predicate_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "predicate", ti.i32, ndim=0)
+    counter_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "counter", ti.i32, ndim=0)
     target_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "target", ti.i32)
     builder = ti.graph.GraphBuilder()
     condition = builder.create_sequential()
     condition.dispatch(evaluate, predicate_arg, counter_arg, target_arg)
     body = builder.create_sequential()
     body.append_native(
-        _temporary_recordable_node(
-            size, tracker, source_arg, output_arg
-        )
+        _temporary_recordable_node(size, tracker, source_arg, output_arg)
     )
     body.dispatch(
         advance,
@@ -1690,9 +1668,7 @@ def test_recordable_provider_temporary_embeds_in_structured_while():
         "target": 3,
     }
     if arch == ti.cuda:
-        assert graph.submit(args).observations() == {
-            "terminal": {"counter": 3}
-        }
+        assert graph.submit(args).observations() == {"terminal": {"counter": 3}}
     else:
         graph.run(args)
         assert graph.latest_observations() == {"terminal": {"counter": 3}}
@@ -2395,11 +2371,153 @@ def _structured_while_args(*, target, active=True, breakdown=False):
     return {**arrays, "target": target}
 
 
+def _build_two_stage_structured_while_graph(*, max_iterations):
+    @ti.kernel
+    def evaluate_condition(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        target: ti.i32,
+    ):
+        predicate[None] = int(state[None] < target)
+
+    @ti.kernel
+    def step(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        if predicate[None] != 0:
+            state[None] += 1
+            counter[None] += 1
+
+    scalar = lambda name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=0)
+    state = scalar("state")
+    predicate_a = scalar("predicate_a")
+    counter_a = scalar("counter_a")
+    predicate_b = scalar("predicate_b")
+    counter_b = scalar("counter_b")
+    target_a = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "target_a", ti.i32)
+    target_b = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "target_b", ti.i32)
+
+    builder = ti.graph.GraphBuilder()
+    for suffix, predicate, counter, target in (
+        ("a", predicate_a, counter_a, target_a),
+        ("b", predicate_b, counter_b, target_b),
+    ):
+        condition = builder.create_sequential()
+        condition.dispatch(evaluate_condition, state, predicate, target)
+        body = builder.create_sequential()
+        body.dispatch(step, state, predicate, counter)
+        builder.while_loop(
+            condition,
+            body,
+            predicate=predicate,
+            control_inputs=(state, target),
+            carried_state=(state,),
+            counter=counter,
+            max_iterations=max_iterations,
+            chunk_size=64,
+            lowering_mode="native_required",
+            name=f"stage_{suffix}",
+        )
+    builder.observe(
+        state,
+        predicate_a,
+        counter_a,
+        predicate_b,
+        counter_b,
+        name="terminal",
+    )
+    return builder.compile()
+
+
+def _two_stage_structured_while_args(*, target_a, target_b):
+    arrays = {
+        name: ti.ndarray(ti.i32, shape=())
+        for name in (
+            "state",
+            "predicate_a",
+            "counter_a",
+            "predicate_b",
+            "counter_b",
+        )
+    }
+    for value in arrays.values():
+        value.fill(0)
+    return {**arrays, "target_a": target_a, "target_b": target_b}
+
+
+def _build_many_stage_structured_while_graph(*, max_iterations, stage_count):
+    @ti.kernel
+    def evaluate_condition(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        target: ti.i32,
+    ):
+        predicate[None] = int(state[None] < target)
+
+    @ti.kernel
+    def step(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        if predicate[None] != 0:
+            state[None] += 1
+            counter[None] += 1
+
+    scalar = lambda name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=0)
+    state = scalar("state")
+    predicates = tuple(scalar(f"predicate_{index}") for index in range(stage_count))
+    counters = tuple(scalar(f"counter_{index}") for index in range(stage_count))
+    targets = tuple(
+        ti.graph.Arg(ti.graph.ArgKind.SCALAR, f"target_{index}", ti.i32)
+        for index in range(stage_count)
+    )
+    builder = ti.graph.GraphBuilder()
+    for index, (predicate, counter, target) in enumerate(
+        zip(predicates, counters, targets)
+    ):
+        condition = builder.create_sequential()
+        condition.dispatch(evaluate_condition, state, predicate, target)
+        body = builder.create_sequential()
+        body.dispatch(step, state, predicate, counter)
+        builder.while_loop(
+            condition,
+            body,
+            predicate=predicate,
+            control_inputs=(state, target),
+            carried_state=(state,),
+            counter=counter,
+            max_iterations=max_iterations,
+            chunk_size=64,
+            lowering_mode="native_required",
+            name=f"stage_{index}",
+        )
+    builder.observe(state, *counters, name="terminal")
+    return builder.compile()
+
+
+def _many_stage_structured_while_args(*, stage_count, step):
+    args = {"state": ti.ndarray(ti.i32, shape=())}
+    args["state"].fill(0)
+    for index in range(stage_count):
+        predicate = ti.ndarray(ti.i32, shape=())
+        counter = ti.ndarray(ti.i32, shape=())
+        predicate.fill(0)
+        counter.fill(0)
+        args[f"predicate_{index}"] = predicate
+        args[f"counter_{index}"] = counter
+        args[f"target_{index}"] = (index + 1) * step
+    return args
+
+
 def _is_vulkan_structured_report(report):
     return report.lowering in (
         "vulkan_chained_indirect",
         "vulkan_compact_indirect",
         "vulkan_conditional",
+        "vulkan_coarse_conditional",
     )
 
 
@@ -2408,32 +2526,44 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
     capabilities = ti.graph.structured_control_capabilities()
     device = capabilities["device_control"]
     arch = ti.lang.impl.current_cfg().arch
-    assert capabilities["schema_version"] == 3
+    assert capabilities["schema_version"] == 4
     assert set(("while", "if", "switch")) <= capabilities["portable"].keys()
-    assert set(
-        (
-            "logical_termination_exact",
-            "device_controlled_masking",
-            "per_iteration_host_observation",
-            "stops_command_issue_after_exit",
-            "exact_dynamic_termination",
-            "skip_strategy",
-            "rhi_primitive_qualified",
-            "runtime_path_qualified",
-            "conditional_rendering_available",
-            "conditional_rendering_qualified",
-            "max_encoded_dispatches",
-            "chunked_runtime_qualified",
-            "chunk_iteration_limit",
-            "replay_slot_count",
-            "available_strategies",
-            "qualified_strategies",
-            "chained_runtime_qualified",
-            "chained_max_encoded_dispatches",
-            "structured_submit_reason",
-            "max_control_bytes_per_slot",
+    assert (
+        set(
+            (
+                "logical_termination_exact",
+                "device_controlled_masking",
+                "per_iteration_host_observation",
+                "stops_command_issue_after_exit",
+                "exact_dynamic_termination",
+                "skip_strategy",
+                "rhi_primitive_qualified",
+                "runtime_path_qualified",
+                "conditional_rendering_available",
+                "conditional_rendering_qualified",
+                "max_encoded_dispatches",
+                "chunked_runtime_qualified",
+                "chunk_iteration_limit",
+                "replay_slot_count",
+                "available_strategies",
+                "qualified_strategies",
+                "chained_runtime_qualified",
+                "chained_max_encoded_dispatches",
+                "structured_submit_reason",
+                "compound_structured_submit",
+                "compound_max_chunks_per_region",
+                "compound_max_iterations_per_region",
+                "compound_terminal_observation",
+                "queue_submit_coalescing",
+                "queue_submit_policy",
+                "compound_tail_strategy",
+                "coarse_conditional_available",
+                "coarse_conditional_qualified",
+                "max_control_bytes_per_slot",
+            )
         )
-    ) <= device.keys()
+        <= device.keys()
+    )
     assert not device["per_iteration_host_observation"]
     assert not device["conditional_rendering_qualified"]
     if arch == ti.cuda:
@@ -2470,15 +2600,28 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         assert device["while"]
         assert not device["if"]
         assert not device["switch"]
-        assert not device["structured_submit"]
-        assert device["structured_submit_reason"] == (
-            "synchronous_chunk_observation_required"
+        assert device["structured_submit"]
+        assert device["structured_submit_reason"] == "none"
+        assert device["compound_structured_submit"]
+        assert device["compound_max_chunks_per_region"] == 8
+        assert device["compound_max_iterations_per_region"] == 512
+        assert device["compound_terminal_observation"] == "submission_ticket"
+        assert device["queue_submit_coalescing"]
+        assert device["queue_submit_policy"] == (
+            "transaction_batch_plus_completion_fence"
         )
         assert device["logical_termination_exact"]
         assert device["device_controlled_masking"]
         assert not device["stops_command_issue_after_exit"]
         assert not device["exact_dynamic_termination"]
-        assert device["skip_strategy"] == "auto_compact_with_chained_opt_in"
+        assert device["skip_strategy"] in (
+            "auto_compact_with_coarse_conditional_tail",
+            "compact_indirect",
+        )
+        assert device["compound_tail_strategy"] in (
+            "coarse_conditional",
+            "compact_indirect",
+        )
         assert device["max_encoded_dispatches"] == 4096
         assert device["chunked_runtime_qualified"]
         assert device["chunk_iteration_limit"] == 64
@@ -2486,13 +2629,21 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         assert device["available_strategies"] == (
             "chained_indirect",
             "compact_indirect",
+            *(("conditional",) if device["conditional_rendering_available"] else ()),
             *(
-                ("conditional",)
-                if device["conditional_rendering_available"]
+                ("coarse_conditional",)
+                if device["coarse_conditional_available"]
                 else ()
             ),
         )
-        assert device["qualified_strategies"] == ("compact_indirect",)
+        assert device["qualified_strategies"] == (
+            "compact_indirect",
+            *(
+                ("coarse_conditional",)
+                if device["coarse_conditional_qualified"]
+                else ()
+            ),
+        )
         assert not device["chained_runtime_qualified"]
         assert device["chained_max_encoded_dispatches"] == 256
         assert device["max_control_bytes_per_slot"] == 64 * 1024
@@ -2587,9 +2738,7 @@ def test_structured_graph_while_reports_exact_stop_and_backend_overshoot():
     ir = graph._ir_debug_info
     assert ir["analysis"]["while_regions"] == 1
     assert ir["root"]["children"][0]["lowering_mode"] == "auto"
-    with pytest.raises(
-        TaichiRuntimeError, match="supports structured control only"
-    ):
+    with pytest.raises(TaichiRuntimeError, match="supports structured control only"):
         graph.submit(args)
 
 
@@ -2622,9 +2771,7 @@ def _build_structured_status_graph(*, max_iterations=8):
             state[None] += 1
             counter[None] += 1
 
-    scalar = lambda name: ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=0
-    )
+    scalar = lambda name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=0)
     arg_state = scalar("state")
     arg_predicate = scalar("predicate")
     arg_counter = scalar("counter")
@@ -2860,13 +3007,19 @@ def test_structured_graph_while_native_rebind_and_replay_diagnostics():
     second["predicate"].fill(1)
     second["counter"].fill(0)
     graph.run(second)
+    # Bounded argument/replay slots may require a second compatible patch
+    # turn before the unchanged binding becomes an exact replay.
+    second["state"].fill(0)
+    second["predicate"].fill(1)
+    second["counter"].fill(0)
+    graph.run(second)
 
     native_stats = graph._graph_stats[0]
     assert native_stats["captures"] == 1
     assert native_stats["patched_replays"] >= 1
     assert native_stats["exact_replays"] >= 1
     assert native_stats["last_path"] == "cuda_exact_replay"
-    assert native_stats["asynchronous_control_updates"] == 3
+    assert native_stats["asynchronous_control_updates"] == 4
     assert 1 <= native_stats["peak_deferred_replay_batches"] <= 2
     assert native_stats["deferred_replay_waits"] >= 0
 
@@ -2900,9 +3053,7 @@ def test_structured_graph_while_vulkan_strategy_selection_and_override(
 
     capabilities = ti.graph.structured_control_capabilities()["device_control"]
     if capabilities["conditional_rendering_available"]:
-        monkeypatch.setenv(
-            "TI_GRAPH_VULKAN_STRUCTURED_STRATEGY", "conditional"
-        )
+        monkeypatch.setenv("TI_GRAPH_VULKAN_STRUCTURED_STRATEGY", "conditional")
         conditional_args = _structured_while_args(target=5)
         small.run(conditional_args)
         conditional = small.control_flow_stats()[0]
@@ -2911,6 +3062,24 @@ def test_structured_graph_while_vulkan_strategy_selection_and_override(
         assert conditional.indirect_dispatch_count == 0
         assert conditional.controller_invocation_count == conditional.max_iterations
         assert conditional_args["state"].to_numpy()[()] == 5
+
+        monkeypatch.setenv("TI_GRAPH_VULKAN_STRUCTURED_STRATEGY", "coarse_conditional")
+        coarse_args = _structured_while_args(target=5)
+        small.run(coarse_args)
+        coarse = small.control_flow_stats()[0]
+        assert coarse.lowering == "vulkan_coarse_conditional"
+        assert coarse.logical_iterations == compact.logical_iterations
+        assert coarse.indirect_dispatch_count == compact.indirect_dispatch_count
+        assert coarse.controller_invocation_count == coarse.max_iterations
+        assert coarse_args["state"].to_numpy()[()] == 5
+
+        coarse_inactive = _structured_while_args(target=5, active=False)
+        small.run(coarse_inactive)
+        inactive_report = small.control_flow_stats()[0]
+        assert inactive_report.lowering == "vulkan_coarse_conditional"
+        assert inactive_report.logical_iterations == 0
+        assert inactive_report.controller_invocation_count == 0
+        assert coarse_inactive["state"].to_numpy()[()] == 0
 
     monkeypatch.setenv("TI_GRAPH_VULKAN_STRUCTURED_STRATEGY", "auto")
     large = _build_structured_while_graph(
@@ -2952,9 +3121,7 @@ def test_structured_graph_while_vulkan_large_budget_uses_bounded_chunks():
             state[None] += 1
             counter[None] += 1
 
-    scalar = lambda name: ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=0
-    )
+    scalar = lambda name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=0)
     arg_state = scalar("state")
     arg_predicate = scalar("predicate")
     arg_counter = scalar("counter")
@@ -3061,6 +3228,139 @@ def test_structured_graph_while_vulkan_rebind_and_replay_diagnostics():
     assert native_stats["patched_replays"] >= 1
     assert native_stats["replays"] >= 2
     assert native_stats["last_path"] == "vulkan_replay"
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_structured_graph_vulkan_submit_defers_wide_terminal_observation():
+    capabilities = ti.graph.structured_control_capabilities()["device_control"]
+    if not capabilities["structured_submit"]:
+        pytest.skip(capabilities["structured_submit_reason"])
+
+    graph = _build_structured_while_graph(
+        observe=True,
+        max_iterations=512,
+        chunk_size=64,
+        lowering_mode="native_required",
+    )
+    graph._graph_stats
+    first = _structured_while_args(target=197)
+    second = _structured_while_args(target=131)
+
+    first_ticket = graph.submit(first)
+    # A second invocation must apply bounded replay-slot backpressure before
+    # it can reuse the first invocation's eight chunk slots.
+    second_ticket = graph.submit(second)
+
+    with pytest.raises(TaichiRuntimeError, match="unavailable after asynchronous"):
+        graph.control_flow_stats()
+    assert first_ticket.observations() == {
+        "terminal": {"state": 197, "predicate": 0, "counter": 197}
+    }
+    assert second_ticket.observations() == {
+        "terminal": {"state": 131, "predicate": 0, "counter": 131}
+    }
+    stats = graph._graph_stats[0]
+    assert stats["replay_slot_saturation_fallbacks"] == 0
+    assert stats["records"] == 8
+    assert stats["replays"] >= 8
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_structured_graph_vulkan_compound_submit_preserves_region_dependencies():
+    capabilities = ti.graph.structured_control_capabilities()["device_control"]
+    if not capabilities["compound_structured_submit"]:
+        pytest.skip(capabilities["structured_submit_reason"])
+
+    graph = _build_two_stage_structured_while_graph(max_iterations=128)
+    args = _two_stage_structured_while_args(target_a=75, target_b=110)
+    ticket = graph.submit(args)
+
+    assert ticket.observations() == {
+        "terminal": {
+            "state": 110,
+            "predicate_a": 0,
+            "counter_a": 75,
+            "predicate_b": 0,
+            "counter_b": 35,
+        }
+    }
+    assert args["state"].to_numpy()[()] == 110
+    assert args["counter_a"].to_numpy()[()] == 75
+    assert args["counter_b"].to_numpy()[()] == 35
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_structured_graph_vulkan_compound_submit_crosses_stream_backlog_bound():
+    capabilities = ti.graph.structured_control_capabilities()["device_control"]
+    if not capabilities["compound_structured_submit"]:
+        pytest.skip(capabilities["structured_submit_reason"])
+
+    stage_count = 9
+    step = 10
+    graph = _build_many_stage_structured_while_graph(
+        max_iterations=512,
+        stage_count=stage_count,
+    )
+    args = _many_stage_structured_while_args(
+        stage_count=stage_count,
+        step=step,
+    )
+    # Materialize observation/replay resources before measuring the steady
+    # transaction. First use may legitimately flush those setup commands
+    # immediately before the batch begins.
+    graph.submit(args).wait()
+    ti.sync()
+    before = ti.runtime.stats().synchronization.backend_waits
+    queue_before = impl.get_runtime().prog._debug_vulkan_queue_submission_stats()
+    ticket = graph.submit(args)
+    after_submit = ti.runtime.stats().synchronization.backend_waits
+    queue_after = impl.get_runtime().prog._debug_vulkan_queue_submission_stats()
+    if before is not None and after_submit is not None:
+        # The transaction no longer reaches the 64-submit stream backlog
+        # boundary. One unrelated bounded replay/resource wait remains
+        # permissible and is accounted separately.
+        assert after_submit - before <= 1
+    assert queue_after["queue_submit_calls"] - queue_before["queue_submit_calls"] == 2
+    assert (
+        queue_after["batched_queue_submit_calls"]
+        - queue_before["batched_queue_submit_calls"]
+        == 1
+    )
+    assert (
+        queue_after["batched_command_buffers"] - queue_before["batched_command_buffers"]
+        >= stage_count * 8
+    )
+
+    expected = {"state": stage_count * step}
+    expected.update({f"counter_{index}": step for index in range(stage_count)})
+    assert ticket.observations() == {"terminal": expected}
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_structured_graph_vulkan_compound_drop_and_reset_retires_batch():
+    capabilities = ti.graph.structured_control_capabilities()["device_control"]
+    if not capabilities["compound_structured_submit"]:
+        pytest.skip(capabilities["structured_submit_reason"])
+
+    graph = _build_structured_while_graph(
+        observe=True,
+        max_iterations=512,
+        chunk_size=64,
+        lowering_mode="native_required",
+    )
+    args = _structured_while_args(target=512)
+    ticket = graph.submit(args)
+    del ticket
+    gc.collect()
+    runtime = impl.pytaichi
+    ti.reset()
+
+    assert not runtime._runtime_submission_owners
+    assert graph._spec is None
+    assert graph.execution_stats().lifecycle_state == "runtime_invalid"
+    del args
+    del graph
+    gc.collect()
 
 
 @test_utils.test(arch=ti.cuda)
@@ -3242,9 +3542,7 @@ def test_structured_if_uses_multiple_control_inputs():
         ticket = graph.submit(
             {"left": -4, "right": 1, "predicate": predicate, "out": out}
         )
-        assert ticket.observations() == {
-            "terminal": {"predicate": 1, "out": 7}
-        }
+        assert ticket.observations() == {"terminal": {"predicate": 1, "out": 7}}
         with pytest.raises(TaichiRuntimeError, match="unavailable after asynchronous"):
             graph.control_flow_stats()
     ir = graph._ir_debug_info
@@ -3315,9 +3613,7 @@ def test_structured_switch_selects_case_and_default():
             assert report.lowering == "cuda_conditional_graph"
     if arch == ti.cuda:
         ticket = graph.submit({"choice": -8, "selector": selector, "out": out})
-        assert ticket.observations() == {
-            "terminal": {"selector": -8, "out": 99}
-        }
+        assert ticket.observations() == {"terminal": {"selector": -8, "out": 99}}
         with pytest.raises(TaichiRuntimeError, match="unavailable after asynchronous"):
             graph.control_flow_stats()
     ir = graph._ir_debug_info
@@ -3346,13 +3642,9 @@ def test_cuda_native_if_and_switch_skip_missing_branches():
     def increment(output: ti.types.ndarray(dtype=ti.i32, ndim=0)):
         output[None] += 1
 
-    control_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "control", ti.i32, ndim=0
-    )
+    control_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "control", ti.i32, ndim=0)
     value_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "value", ti.i32)
-    output_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=0
-    )
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=0)
 
     if_builder = ti.graph.GraphBuilder()
     if_condition = if_builder.create_sequential()

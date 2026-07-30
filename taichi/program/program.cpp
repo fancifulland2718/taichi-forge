@@ -257,9 +257,20 @@ Program::RuntimeSubmissionTransaction::RuntimeSubmissionTransaction(
   program_->runtime_completion_tracking_enabled_.store(
       true, std::memory_order_release);
   submission_scope_.emplace(program_->acquire_runtime_submission_scope());
+  program_->program_impl_->begin_runtime_submission_batch();
+  submission_batch_open_ = true;
 }
 
 Program::RuntimeSubmissionTransaction::~RuntimeSubmissionTransaction() {
+  if (program_ != nullptr && submission_batch_open_) {
+    // Preserve already-recorded work on exception paths. A backend failure is
+    // reported by the next explicit completion/synchronize boundary.
+    try {
+      program_->program_impl_->end_runtime_submission_batch();
+    } catch (...) {
+    }
+    submission_batch_open_ = false;
+  }
   // Exception paths may have submitted an earlier segment. Closing the reader
   // is sufficient: legacy synchronize/next completion retains responsibility
   // for any resources already pinned by that segment.
@@ -277,6 +288,10 @@ void Program::RuntimeSubmissionTransaction::mark_submission() noexcept {
 
 RuntimeCompletion Program::RuntimeSubmissionTransaction::finish() {
   TI_ERROR_IF(finished_, "Runtime submission transaction already finished");
+  if (submission_batch_open_) {
+    submission_batch_open_ = false;
+    program_->program_impl_->end_runtime_submission_batch();
+  }
   // record_runtime_completion() takes the writer boundary. Never attempt it
   // while this transaction still owns the corresponding reader.
   submission_scope_.reset();

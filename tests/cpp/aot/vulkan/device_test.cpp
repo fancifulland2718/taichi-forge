@@ -335,6 +335,53 @@ TEST(VulkanDeviceTest, BoundsInFlightCommandBuffers) {
   EXPECT_EQ(stream->debug_in_flight_command_buffer_count(), 0u);
 }
 
+TEST(VulkanDeviceTest, SubmissionBatchPublishesOrderedCommandBuffersOnce) {
+  if (!vulkan::is_vulkan_api_available()) {
+    return;
+  }
+
+  vulkan::VulkanDeviceCreator::Params params;
+  params.api_version = std::nullopt;
+  auto creator = std::make_unique<vulkan::VulkanDeviceCreator>(params);
+  auto *device = static_cast<vulkan::VulkanDevice *>(creator->device());
+  auto *stream =
+      static_cast<vulkan::VulkanStream *>(device->get_compute_stream());
+
+  constexpr int kCommandCount = 96;
+  std::vector<StreamSemaphore> completions;
+  completions.reserve(kCommandCount);
+  const auto before = device->queue_submission_snapshot();
+  stream->begin_submission_batch();
+  for (int command_index = 0; command_index < kCommandCount;
+       ++command_index) {
+    auto [cmdlist, result] = stream->new_command_list_unique();
+    ASSERT_EQ(result, RhiResult::success);
+    ASSERT_NE(cmdlist, nullptr);
+    auto completion = stream->submit(cmdlist.get());
+    ASSERT_TRUE(completion);
+    EXPECT_FALSE(completion->is_ready());
+    completions.push_back(std::move(completion));
+  }
+  auto batch_completion = stream->end_submission_batch();
+  ASSERT_TRUE(batch_completion);
+  ASSERT_TRUE(batch_completion->wait());
+  for (const auto &completion : completions) {
+    EXPECT_TRUE(completion->is_ready());
+  }
+  const auto after = device->queue_submission_snapshot();
+  EXPECT_EQ(after.queue_submit_calls - before.queue_submit_calls, 1u);
+  EXPECT_EQ(after.submitted_command_buffers -
+                before.submitted_command_buffers,
+            static_cast<std::uint64_t>(kCommandCount));
+  EXPECT_EQ(after.batched_queue_submit_calls -
+                before.batched_queue_submit_calls,
+            1u);
+  EXPECT_EQ(after.batched_command_buffers -
+                before.batched_command_buffers,
+            static_cast<std::uint64_t>(kCommandCount));
+  EXPECT_EQ(stream->debug_in_flight_command_buffer_count(), 0u);
+}
+
 TEST(VulkanDeviceTest, IndirectDispatchRejectsInvalidAllocations) {
   if (!vulkan::is_vulkan_api_available()) {
     GTEST_SKIP();

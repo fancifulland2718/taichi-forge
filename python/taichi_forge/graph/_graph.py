@@ -674,12 +674,14 @@ def _backend_name(arch):
 def structured_control_capabilities():
     """Return the qualified structured-control lowering for this runtime.
 
-    Schema v3 separates compilation, backend qualification, a complete
-    Graph runtime path. Vulkan bounded while regions expose chained and
-    compact indirect masking plus bounded synchronous chunk replay. Automatic
-    lowering selects only the qualified compact path; chained and conditional
-    regions remain explicit device-qualification strategies. Branch regions
-    and asynchronous structured submission remain separate capabilities.
+    Schema v4 separates compilation, backend qualification, and the complete
+    Graph runtime path. Vulkan bounded while regions expose chained and compact
+    indirect masking plus bounded asynchronous chunk replay. Automatic
+    lowering uses compact masking for the first chunk and, when qualified,
+    coarse conditional rendering for later chunks. Vulkan native-required
+    while sequences support one asynchronous compound transaction with
+    bounded pre-enqueued chunks; branch regions and exact dynamic termination
+    remain separate capabilities.
     """
     arch = impl.current_cfg().arch
     backend = _backend_name(_ti_core.arch_name(arch))
@@ -700,8 +702,17 @@ def structured_control_capabilities():
     chunk_iteration_limit = 0
     replay_slot_count = 0
     structured_submit_reason = "native_structured_submission_unavailable"
+    compound_structured_submit = False
+    compound_max_chunks_per_region = 0
+    compound_max_iterations_per_region = 0
+    compound_terminal_observation = "unavailable"
+    queue_submit_coalescing = False
     conditional_rendering_available = False
     conditional_rendering_qualified = False
+    coarse_conditional_available = False
+    coarse_conditional_qualified = False
+    compound_tail_strategy = "none"
+    queue_submit_policy = "backend_default"
     if arch == _ti_core.Arch.cuda:
         cuda = dict(_ti_core.cuda_conditional_graph_capabilities())
         setter_compiled = bool(
@@ -719,6 +730,8 @@ def structured_control_capabilities():
         runtime_path_qualified = native
         branch_native = native
         structured_submit = native
+        compound_structured_submit = native
+        compound_terminal_observation = "submission_ticket" if native else "unavailable"
         structured_submit_reason = (
             "none" if native else "cuda_conditional_graph_unavailable"
         )
@@ -737,6 +750,7 @@ def structured_control_capabilities():
         conditional_rendering_available = bool(
             impl.get_runtime().prog._vulkan_conditional_rendering_available()
         )
+        coarse_conditional_available = conditional_rendering_available
         vulkan_runtime_mode_qualified = bool(
             not impl.current_cfg().kernel_profiler
             and not impl.current_cfg().vulkan_dispatch_cache
@@ -747,12 +761,31 @@ def structured_control_capabilities():
         rhi_primitive_qualified = True
         runtime_path_compiled = True
         runtime_path_qualified = vulkan_runtime_mode_qualified
-        skip_strategy = "auto_compact_with_chained_opt_in"
+        coarse_conditional_qualified = bool(native and coarse_conditional_available)
+        skip_strategy = (
+            "auto_compact_with_coarse_conditional_tail"
+            if coarse_conditional_qualified
+            else "compact_indirect"
+        )
+        compound_tail_strategy = (
+            "coarse_conditional" if coarse_conditional_qualified else "compact_indirect"
+        )
         max_encoded_dispatches = 4096
         chunked_runtime_qualified = vulkan_runtime_mode_qualified
         chunk_iteration_limit = 64
         replay_slot_count = 8
-        structured_submit_reason = "synchronous_chunk_observation_required"
+        structured_submit = native
+        compound_structured_submit = native
+        compound_max_chunks_per_region = 8
+        compound_max_iterations_per_region = 512
+        compound_terminal_observation = "submission_ticket" if native else "unavailable"
+        queue_submit_coalescing = native
+        queue_submit_policy = (
+            "transaction_batch_plus_completion_fence" if native else "backend_default"
+        )
+        structured_submit_reason = (
+            "none" if native else "vulkan_runtime_mode_disables_graph_replay"
+        )
         reason = (
             "vulkan_if_switch_runtime_not_compiled"
             if vulkan_runtime_mode_qualified
@@ -761,12 +794,10 @@ def structured_control_capabilities():
     else:
         reason = "device_control_is_gpu_only"
     portable_while = (
-        "cpu_exact_host_loop"
-        if backend == "cpu"
-        else "portable_exact_or_masked_replay"
+        "cpu_exact_host_loop" if backend == "cpu" else "portable_exact_or_masked_replay"
     )
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "backend": backend,
         "portable": {
             "while": portable_while,
@@ -779,6 +810,13 @@ def structured_control_capabilities():
             "switch": branch_native,
             "structured_submit": structured_submit,
             "structured_submit_reason": structured_submit_reason,
+            "compound_structured_submit": compound_structured_submit,
+            "compound_max_chunks_per_region": (compound_max_chunks_per_region),
+            "compound_max_iterations_per_region": (compound_max_iterations_per_region),
+            "compound_terminal_observation": (compound_terminal_observation),
+            "queue_submit_coalescing": queue_submit_coalescing,
+            "queue_submit_policy": queue_submit_policy,
+            "compound_tail_strategy": compound_tail_strategy,
             "logical_termination_exact": native,
             "device_controlled_masking": native,
             "per_iteration_host_observation": False,
@@ -792,6 +830,8 @@ def structured_control_capabilities():
             "runtime_path_qualified": runtime_path_qualified,
             "conditional_rendering_available": conditional_rendering_available,
             "conditional_rendering_qualified": conditional_rendering_qualified,
+            "coarse_conditional_available": coarse_conditional_available,
+            "coarse_conditional_qualified": coarse_conditional_qualified,
             "max_encoded_dispatches": max_encoded_dispatches,
             "chunked_runtime_qualified": chunked_runtime_qualified,
             "chunk_iteration_limit": chunk_iteration_limit,
@@ -800,17 +840,17 @@ def structured_control_capabilities():
                 (
                     "chained_indirect",
                     "compact_indirect",
-                    *(
-                        ("conditional",)
-                        if conditional_rendering_available
-                        else ()
-                    ),
+                    *(("conditional",) if conditional_rendering_available else ()),
+                    *(("coarse_conditional",) if coarse_conditional_available else ()),
                 )
                 if arch == _ti_core.Arch.vulkan
                 else ()
             ),
             "qualified_strategies": (
-                ("compact_indirect",)
+                (
+                    "compact_indirect",
+                    *(("coarse_conditional",) if coarse_conditional_qualified else ()),
+                )
                 if arch == _ti_core.Arch.vulkan and native
                 else ()
             ),
@@ -1260,10 +1300,7 @@ class _CompiledCGraphNode:
         )
         self.temporary_actions = tuple(temporary_actions)
         self.temporary_runtime_arg_names = frozenset().union(
-            *(
-                frozenset(action.temporary_bindings)
-                for action in self.temporary_actions
-            )
+            *(frozenset(action.temporary_bindings) for action in self.temporary_actions)
         )
         if not self.fixed_runtime_args.keys() <= self.recording_runtime_arg_names:
             raise TaichiRuntimeError(
@@ -1659,16 +1696,40 @@ def _structured_chunk_limit(arch, requested, masked_execution):
 
 
 def _vulkan_structured_strategy():
-    strategy = os.environ.get(
-        "TI_GRAPH_VULKAN_STRUCTURED_STRATEGY", "auto"
-    ).strip().lower()
-    strategies = {"auto": 0, "compact": 1, "chained": 2, "conditional": 3}
+    strategy = (
+        os.environ.get("TI_GRAPH_VULKAN_STRUCTURED_STRATEGY", "auto").strip().lower()
+    )
+    strategies = {
+        "auto": 0,
+        "compact": 1,
+        "chained": 2,
+        "conditional": 3,
+        "coarse_conditional": 4,
+    }
     if strategy not in strategies:
         raise TaichiRuntimeError(
             "TI_GRAPH_VULKAN_STRUCTURED_STRATEGY must be auto, compact, "
-            "chained, or conditional"
+            "chained, conditional, or coarse_conditional"
         )
     return strategies[strategy]
+
+
+def _vulkan_compound_strategy_codes(chunk_count):
+    requested = _vulkan_structured_strategy()
+    if requested != 0:
+        return (requested,) * chunk_count
+    if chunk_count <= 1:
+        return (1,) * chunk_count
+    conditional_available = bool(
+        impl.get_runtime().prog._vulkan_conditional_rendering_available()
+    )
+    if not conditional_available:
+        return (1,) * chunk_count
+    # The first chunk is likely active and uses the lowest fixed-cost compact
+    # path. Later chunks add one coarse predicate gate so a converged region
+    # skips its complete encoded tail without invoking per-iteration
+    # controllers or payload kernels.
+    return (1,) + (4,) * (chunk_count - 1)
 
 
 def _while_upgrade_status(arch, mode):
@@ -1705,16 +1766,13 @@ def _while_upgrade_status(arch, mode):
 def _cuda_branch_upgrade_status(arch, mode, kind):
     if mode not in ("auto", "portable", "native_required"):
         raise TaichiRuntimeError(
-            f"Graph {kind} lowering_mode must be auto, portable, or "
-            "native_required"
+            f"Graph {kind} lowering_mode must be auto, portable, or " "native_required"
         )
     if mode == "portable":
         return False, "forced_portable"
     if arch != _ti_core.Arch.cuda:
         if mode == "native_required":
-            raise TaichiRuntimeError(
-                f"Graph {kind} native_required mode needs CUDA"
-            )
+            raise TaichiRuntimeError(f"Graph {kind} native_required mode needs CUDA")
         return False, "not_cuda"
     capabilities = dict(_ti_core.cuda_conditional_graph_capabilities())
     if not capabilities["driver_version_eligible"]:
@@ -1927,10 +1985,7 @@ class _CompiledWhileGraphNode:
         )
         self.temporary_actions = _merge_temporary_actions(dependency_nodes)
         self.temporary_runtime_arg_names = frozenset().union(
-            *(
-                node.temporary_runtime_arg_names
-                for node in dependency_nodes
-            )
+            *(node.temporary_runtime_arg_names for node in dependency_nodes)
         )
         self.fixed_runtime_args = _merge_fixed_runtime_args(dependency_nodes)
         self.recording_runtime_arg_names = frozenset().union(
@@ -1975,15 +2030,19 @@ class _CompiledWhileGraphNode:
         self._last_report = None
         self._native_jit_cache = _ti_core.CompiledGraphJITCache()
         self._vulkan_chunk_limits = {}
-        self._native_submission_eligible = arch == _ti_core.Arch.cuda
+        self._native_submission_eligible = arch == _ti_core.Arch.cuda or (
+            arch == _ti_core.Arch.vulkan
+            and not impl.current_cfg().kernel_profiler
+            and not impl.current_cfg().vulkan_dispatch_cache
+            and self.max_iterations <= 512
+        )
         self._native_upgrade_eligible, self._native_upgrade_reason = (
             _while_upgrade_status(arch, lowering_mode)
         )
         if self._native_upgrade_eligible and self.counter is None:
             if lowering_mode == "native_required":
                 raise TaichiRuntimeError(
-                    "Native Graph while lowering requires an exact "
-                    "iteration counter"
+                    "Native Graph while lowering requires an exact " "iteration counter"
                 )
             self._native_upgrade_eligible = False
             self._native_upgrade_reason = "exact_counter_required"
@@ -2007,6 +2066,66 @@ class _CompiledWhileGraphNode:
                 "native_required backend lowering"
             )
         self._last_report = None
+        if impl.current_cfg().arch == _ti_core.Arch.vulkan:
+            if self.max_iterations == 0:
+                self._condition.run(context)
+                return
+            runtime_args = context.runtime_args()
+            predicate_object = runtime_args[self.predicate]
+            counter_object = runtime_args[self.counter]
+            status_object = (
+                runtime_args[self.status] if self.status is not None else None
+            )
+            predicate_ndarray = getattr(predicate_object, "arr", None)
+            counter_ndarray = getattr(counter_object, "arr", None)
+            status_ndarray = (
+                getattr(status_object, "arr", None)
+                if status_object is not None
+                else None
+            )
+            if predicate_ndarray is None or counter_ndarray is None:
+                raise TaichiRuntimeError(
+                    "Native Vulkan Graph while submission requires ndarray "
+                    "predicate and counter resources"
+                )
+            if status_object is not None and status_ndarray is None:
+                raise TaichiRuntimeError(
+                    "Native Vulkan Graph while submission requires an "
+                    "ndarray status resource"
+                )
+
+            chunk_limit = min(self.max_iterations, 64)
+            chunk_count = (self.max_iterations + chunk_limit - 1) // chunk_limit
+            if chunk_count > 8:
+                raise TaichiRuntimeError(
+                    "Native Vulkan Graph while submission exceeds the fixed "
+                    "eight-slot compound chunk budget"
+                )
+            flattened_args = context.flattened_args(
+                self._vulkan_structured.recording_runtime_arg_names
+            )
+            chunk_iterations = tuple(
+                min(chunk_limit, self.max_iterations - offset)
+                for offset in range(0, self.max_iterations, chunk_limit)
+            )
+            submitted = self._vulkan_structured.compiled_graph.jit_submit_bounded_vulkan_compound_cached(
+                context.compile_config(),
+                flattened_args,
+                self._native_jit_cache,
+                predicate_ndarray,
+                counter_ndarray,
+                self.condition_dispatch_count,
+                chunk_iterations,
+                status_ndarray,
+                _vulkan_compound_strategy_codes(chunk_count),
+            )
+            if not submitted:
+                raise TaichiRuntimeError(
+                    "Native Vulkan Graph while compound submission "
+                    "became unavailable; synchronous fallback is disabled"
+                )
+            return
+
         self._condition.run(context)
         if self.max_iterations == 0:
             return
@@ -2039,9 +2158,7 @@ class _CompiledWhileGraphNode:
             return False
         predicate_object = runtime_args[self.predicate]
         counter_object = runtime_args[self.counter]
-        status_object = (
-            runtime_args[self.status] if self.status is not None else None
-        )
+        status_object = runtime_args[self.status] if self.status is not None else None
         predicate_ndarray = getattr(predicate_object, "arr", None)
         counter_ndarray = getattr(counter_object, "arr", None)
         status_ndarray = (
@@ -2143,11 +2260,7 @@ class _CompiledWhileGraphNode:
                     "Vulkan Graph while runtime returned an invalid chunk result"
                 )
             remaining -= encoded_chunk
-            if (
-                remaining == 0
-                or int(result["predicate"]) == 0
-                or encoded_chunk == 0
-            ):
+            if remaining == 0 or int(result["predicate"]) == 0 or encoded_chunk == 0:
                 break
             execute_initial_dispatches = False
 
@@ -2155,6 +2268,7 @@ class _CompiledWhileGraphNode:
             1: "compact_indirect",
             2: "chained_indirect",
             3: "conditional",
+            4: "coarse_conditional",
         }
         strategies = {int(result["strategy"]) for result in results}
         if len(strategies) != 1:
@@ -2176,16 +2290,12 @@ class _CompiledWhileGraphNode:
             )
         final_predicate = int(results[-1]["predicate"])
         final_counter = int(results[-1]["counter"])
-        final_status = (
-            int(results[-1]["status"]) if status_object is not None else None
-        )
+        final_status = int(results[-1]["status"]) if status_object is not None else None
         initial_status = (
             int(results[0]["initial_status"]) if status_object is not None else None
         )
         initial_counter = final_counter - logical
-        observation_bytes = sum(
-            int(result["observation_bytes"]) for result in results
-        )
+        observation_bytes = sum(int(result["observation_bytes"]) for result in results)
         chunk_sizes = tuple(
             int(result["encoded_iterations"])
             for result in results
@@ -2206,9 +2316,7 @@ class _CompiledWhileGraphNode:
             name=self.name,
             backend="vulkan",
             lowering=(
-                f"vulkan_chunked_{strategy}"
-                if chunked
-                else f"vulkan_{strategy}"
+                f"vulkan_chunked_{strategy}" if chunked else f"vulkan_{strategy}"
             ),
             max_iterations=self.max_iterations,
             logical_iterations=logical,
@@ -2263,9 +2371,7 @@ class _CompiledWhileGraphNode:
             zero_dispatch_count=sum(
                 int(result["zero_dispatches"]) for result in results
             ),
-            control_arena_bytes=max(
-                int(result["control_bytes"]) for result in results
-            ),
+            control_arena_bytes=max(int(result["control_bytes"]) for result in results),
         )
         return True
 
@@ -2275,9 +2381,7 @@ class _CompiledWhileGraphNode:
         counter_object = (
             runtime_args[self.counter] if self.counter is not None else None
         )
-        status_object = (
-            runtime_args[self.status] if self.status is not None else None
-        )
+        status_object = runtime_args[self.status] if self.status is not None else None
         observations = []
         predicate_values = []
         counter_values = []
@@ -2564,9 +2668,7 @@ class _CompiledIfGraphNode:
             )
         )
         branch_sequences = (
-            (then_region,)
-            if else_region is None
-            else (then_region, else_region)
+            (then_region,) if else_region is None else (then_region, else_region)
         )
         self._native_branches = _compile_sequential_runtime_node(
             branch_sequences,
@@ -2644,10 +2746,7 @@ class _CompiledIfGraphNode:
 
     @property
     def supports_native_submission(self):
-        return (
-            self.lowering_mode == "native_required"
-            and self._native_upgrade_eligible
-        )
+        return self.lowering_mode == "native_required" and self._native_upgrade_eligible
 
     def _run_native_branch(self, context):
         predicate_object = context.runtime_args()[self.predicate]
@@ -2656,9 +2755,7 @@ class _CompiledIfGraphNode:
             return False
         return self._native_branches.compiled_graph.jit_run_conditional_cuda_cached(
             context.compile_config(),
-            context.flattened_args(
-                self._native_branches.recording_runtime_arg_names
-            ),
+            context.flattened_args(self._native_branches.recording_runtime_arg_names),
             self._native_jit_cache,
             predicate_ndarray,
             self._native_branch_dispatch_counts,
@@ -2889,9 +2986,7 @@ class _CompiledSwitchGraphNode:
         self._native_branch_dispatch_counts = tuple(
             region._dispatch_count for region in branch_sequences
         )
-        self._native_default_branch = (
-            -1 if default_region is None else len(branches)
-        )
+        self._native_default_branch = -1 if default_region is None else len(branches)
         arch = impl.current_cfg().arch
         self._native_upgrade_eligible, self._native_upgrade_reason = (
             _cuda_branch_upgrade_status(arch, lowering_mode, "switch")
@@ -2962,10 +3057,7 @@ class _CompiledSwitchGraphNode:
 
     @property
     def supports_native_submission(self):
-        return (
-            self.lowering_mode == "native_required"
-            and self._native_upgrade_eligible
-        )
+        return self.lowering_mode == "native_required" and self._native_upgrade_eligible
 
     def _run_native_branch(self, context):
         selector_object = context.runtime_args()[self.selector]
@@ -2974,9 +3066,7 @@ class _CompiledSwitchGraphNode:
             return False
         return self._native_branches.compiled_graph.jit_run_conditional_cuda_cached(
             context.compile_config(),
-            context.flattened_args(
-                self._native_branches.recording_runtime_arg_names
-            ),
+            context.flattened_args(self._native_branches.recording_runtime_arg_names),
             self._native_jit_cache,
             selector_ndarray,
             self._native_branch_dispatch_counts,
@@ -3178,9 +3268,7 @@ def _deduplicate_temporary_actions(actions):
 
 def _merge_temporary_actions(nodes):
     return _deduplicate_temporary_actions(
-        action
-        for node in nodes
-        for action in getattr(node, "temporary_actions", ())
+        action for node in nodes for action in getattr(node, "temporary_actions", ())
     )
 
 
@@ -3262,9 +3350,7 @@ def _lower_mixed_backend_regions(nodes):
                     "mixed_cgraph_native" if has_cgraph else "recordable_provider"
                 ),
                 fixed_runtime_args=fixed_runtime_args,
-                temporary_actions=_deduplicate_temporary_actions(
-                    temporary_actions
-                ),
+                temporary_actions=_deduplicate_temporary_actions(temporary_actions),
             )
         )
         mixed_region_count += 1
@@ -3330,10 +3416,7 @@ class _GraphSpec:
         self.temporary_actions = _merge_temporary_actions(self.nodes)
         self._temporary_binding_cache = {}
         self.temporary_runtime_arg_names = frozenset().union(
-            *(
-                frozenset(action.temporary_bindings)
-                for action in self.temporary_actions
-            )
+            *(frozenset(action.temporary_bindings) for action in self.temporary_actions)
         )
         self.fixed_runtime_args = _merge_fixed_runtime_args(self.nodes)
         lifetime_leases = []
@@ -3385,8 +3468,7 @@ class _GraphSpec:
             )
         ]
         return bool(structured_nodes) and all(
-            node.supports_native_submission
-            for node in structured_nodes
+            node.supports_native_submission for node in structured_nodes
         )
 
     def validate_lifetime_leases(self):

@@ -2861,7 +2861,8 @@ CompiledGraph::jit_run_bounded_vulkan_cached(
     std::size_t initial_dispatch_count,
     int max_iterations,
     bool execute_initial_dispatches,
-    std::uint32_t strategy) const try {
+    std::uint32_t strategy,
+    bool wait_for_result) const try {
   CompiledGraphStructuredResult result;
 #if defined(TI_WITH_VULKAN)
   if (compile_config.arch != Arch::vulkan || predicate == nullptr ||
@@ -2869,7 +2870,8 @@ CompiledGraph::jit_run_bounded_vulkan_cached(
       initial_dispatch_count == 0 ||
       initial_dispatch_count >= dispatches.size() ||
       strategy > static_cast<std::uint32_t>(
-                     gfx::GfxRuntime::GraphStructuredStrategy::conditional)) {
+                     gfx::GfxRuntime::GraphStructuredStrategy::
+                         coarse_conditional)) {
     return result;
   }
   Program *program = jit_graph_program(*this);
@@ -2949,7 +2951,7 @@ CompiledGraph::jit_run_bounded_vulkan_cached(
   gfx::GfxRuntime::GraphStructuredResult gfx_result;
   if (!try_run_vulkan_graph(*this, compile_config, args, cache,
                             &program->runtime_statistics(), &control,
-                            &gfx_result)) {
+                            wait_for_result ? &gfx_result : nullptr)) {
     return result;
   }
   program->mark_runtime_submission(
@@ -2957,7 +2959,10 @@ CompiledGraph::jit_run_bounded_vulkan_cached(
   if (resource_guard) {
     resource_guard->finish_external_access_epoch();
   }
-  result.submitted = gfx_result.submitted;
+  result.submitted = wait_for_result ? gfx_result.submitted : true;
+  if (!wait_for_result) {
+    return result;
+  }
   result.strategy = static_cast<std::uint32_t>(gfx_result.strategy);
   result.logical_iterations = gfx_result.logical_iterations;
   result.predicate = gfx_result.predicate;

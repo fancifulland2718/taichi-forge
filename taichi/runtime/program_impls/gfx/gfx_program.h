@@ -33,6 +33,14 @@ class GfxProgramImpl : public ProgramImpl {
     return runtime_->flush();
   }
 
+  void begin_runtime_submission_batch() override {
+    runtime_->begin_submission_batch();
+  }
+
+  StreamSemaphore end_runtime_submission_batch() override {
+    return runtime_->end_submission_batch();
+  }
+
   StreamSemaphore flush_if_pending() {
     if (!runtime_) {
       return nullptr;

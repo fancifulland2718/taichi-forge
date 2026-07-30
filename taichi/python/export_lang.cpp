@@ -55,6 +55,9 @@
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
 #endif
+#if defined(TI_WITH_VULKAN)
+#include "taichi/rhi/vulkan/vulkan_device.h"
+#endif
 
 namespace taichi {
 bool test_threading();
@@ -703,6 +706,31 @@ void export_lang(py::module &m) {
       .def("_vulkan_conditional_rendering_available", [](Program &program) {
         Device *device = program.get_graphics_device();
         return device != nullptr && device->supports_conditional_commands();
+      })
+      .def("_debug_vulkan_queue_submission_stats", [](Program &program) {
+        py::dict result;
+#if defined(TI_WITH_VULKAN)
+        auto *device = dynamic_cast<vulkan::VulkanDevice *>(
+            program.get_graphics_device());
+        if (device != nullptr) {
+          const auto snapshot = device->queue_submission_snapshot();
+          result["supported"] = true;
+          result["queue_submit_calls"] = snapshot.queue_submit_calls;
+          result["submitted_command_buffers"] =
+              snapshot.submitted_command_buffers;
+          result["batched_queue_submit_calls"] =
+              snapshot.batched_queue_submit_calls;
+          result["batched_command_buffers"] =
+              snapshot.batched_command_buffers;
+          return result;
+        }
+#endif
+        result["supported"] = false;
+        result["queue_submit_calls"] = 0;
+        result["submitted_command_buffers"] = 0;
+        result["batched_queue_submit_calls"] = 0;
+        result["batched_command_buffers"] = 0;
+        return result;
       })
       .def("_runtime_has_fatal_fault", &Program::runtime_has_fatal_fault)
       .def("_debug_inject_runtime_fault",
@@ -3390,7 +3418,8 @@ void export_lang(py::module &m) {
                           bool vulkan_execute_initial_dispatches = true,
                           std::uint32_t vulkan_strategy = 0,
                           aot::CompiledGraphStructuredResult
-                              *vulkan_result = nullptr) -> bool {
+                              *vulkan_result = nullptr,
+                          bool vulkan_wait_for_result = true) -> bool {
         std::unordered_map<std::string, aot::IValue> args;
         auto insert_scalar_arg = [&args](std::string arg_name,
                                          DataType expected_dtype,
@@ -3550,14 +3579,16 @@ void export_lang(py::module &m) {
         if (vulkan_predicate != nullptr) {
           TI_ASSERT(cache != nullptr);
           TI_ASSERT(vulkan_counter != nullptr);
-          TI_ASSERT(vulkan_result != nullptr);
-          *vulkan_result = self->jit_run_bounded_vulkan_cached(
+          auto result = self->jit_run_bounded_vulkan_cached(
               compile_config, args, *cache, vulkan_predicate,
               vulkan_counter, vulkan_status,
               vulkan_initial_dispatch_count, bounded_max_iterations,
               vulkan_execute_initial_dispatches,
-              vulkan_strategy);
-          return vulkan_result->submitted;
+              vulkan_strategy, vulkan_wait_for_result);
+          if (vulkan_result != nullptr) {
+            *vulkan_result = result;
+          }
+          return result.submitted;
         }
         if (cache) {
           self->jit_run_cached(compile_config, args, *cache);
@@ -3865,6 +3896,68 @@ void export_lang(py::module &m) {
            py::arg("max_iterations"), py::arg("status") = nullptr,
            py::arg("execute_initial_dispatches") = true,
            py::arg("strategy") = 0)
+      .def("jit_submit_bounded_vulkan_cached",
+           [jit_run_graph](aot::CompiledGraph *self,
+                           const CompileConfig &compile_config,
+                           const py::dict &pyargs,
+                           aot::CompiledGraphJITCache &cache,
+                           Ndarray &predicate, Ndarray &counter,
+                           std::size_t initial_dispatch_count,
+                           int max_iterations, Ndarray *status,
+                           bool execute_initial_dispatches,
+                           std::uint32_t strategy) {
+             return jit_run_graph(
+                 self, compile_config, pyargs, &cache, nullptr,
+                 max_iterations, true, nullptr, nullptr, -1, -1,
+                 &predicate, &counter, status,
+                 initial_dispatch_count, execute_initial_dispatches,
+                 strategy, nullptr, false);
+           },
+           py::arg("compile_config"), py::arg("args"), py::arg("cache"),
+           py::arg("predicate"), py::arg("counter"),
+           py::arg("initial_dispatch_count"),
+           py::arg("max_iterations"), py::arg("status") = nullptr,
+           py::arg("execute_initial_dispatches") = true,
+           py::arg("strategy") = 0)
+      .def("jit_submit_bounded_vulkan_compound_cached",
+           [jit_run_graph](
+               aot::CompiledGraph *self,
+               const CompileConfig &compile_config,
+               const py::dict &pyargs,
+               aot::CompiledGraphJITCache &cache,
+               Ndarray &predicate, Ndarray &counter,
+               std::size_t initial_dispatch_count,
+               const std::vector<int> &chunk_iterations,
+               Ndarray *status,
+               const std::vector<std::uint32_t> &strategies) {
+             TI_ERROR_IF(
+                 chunk_iterations.empty() ||
+                     chunk_iterations.size() != strategies.size(),
+                 "Vulkan structured compound submission requires one "
+                 "strategy for every non-empty chunk");
+             bool execute_initial_dispatches = true;
+             for (std::size_t chunk = 0;
+                  chunk < chunk_iterations.size(); ++chunk) {
+               TI_ERROR_IF(
+                   chunk_iterations[chunk] <= 0,
+                   "Vulkan structured compound chunk sizes must be positive");
+               if (!jit_run_graph(
+                       self, compile_config, pyargs, &cache, nullptr,
+                       chunk_iterations[chunk], true, nullptr, nullptr, -1,
+                       -1, &predicate, &counter, status,
+                       initial_dispatch_count, execute_initial_dispatches,
+                       strategies[chunk], nullptr, false)) {
+                 return false;
+               }
+               execute_initial_dispatches = false;
+             }
+             return true;
+           },
+           py::arg("compile_config"), py::arg("args"), py::arg("cache"),
+           py::arg("predicate"), py::arg("counter"),
+           py::arg("initial_dispatch_count"),
+           py::arg("chunk_iterations"), py::arg("status"),
+           py::arg("strategies"))
       .def("jit_run_conditional_cuda_cached",
            [jit_run_graph](aot::CompiledGraph *self,
                            const CompileConfig &compile_config,

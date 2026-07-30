@@ -685,6 +685,13 @@ struct VulkanRuntimeTelemetrySnapshot {
   VulkanQueueLockTelemetry::Snapshot queue_lock;
 };
 
+struct VulkanQueueSubmissionSnapshot {
+  std::uint64_t queue_submit_calls{0};
+  std::uint64_t submitted_command_buffers{0};
+  std::uint64_t batched_queue_submit_calls{0};
+  std::uint64_t batched_command_buffers{0};
+};
+
 class VulkanStream : public Stream {
  public:
   VulkanStream(VulkanDevice &device,
@@ -708,6 +715,9 @@ class VulkanStream : public Stream {
       CommandList *cmdlist,
       const std::vector<StreamSemaphore> &wait_semaphores = {}) override;
 
+  void begin_submission_batch() override;
+  StreamSemaphore end_submission_batch() override;
+
   void command_sync() override;
 
   std::size_t debug_in_flight_command_buffer_count();
@@ -715,8 +725,17 @@ class VulkanStream : public Stream {
  private:
   struct TrackedCmdbuf {
     vkapi::IVkFence fence;
-    vkapi::IVkCommandBuffer buf;
+    std::vector<vkapi::IVkCommandBuffer> buffers;
     std::vector<vkapi::IDeviceObj> submit_refs;
+  };
+
+  struct PendingBatchSubmission {
+    vkapi::IVkCommandBuffer buffer;
+    std::vector<VkSemaphore> wait_semaphores;
+    std::vector<VkPipelineStageFlags> wait_stages;
+    std::vector<VkSemaphore> signal_semaphores;
+    std::vector<vkapi::IDeviceObj> submit_refs;
+    std::vector<VulkanProfilerSampler> profiler_samplers;
   };
 
   void retire_completed_cmdbuffers();
@@ -730,6 +749,10 @@ class VulkanStream : public Stream {
   vkapi::IVkCommandPool command_pool_;
   std::mutex submission_mutex_;
   std::vector<TrackedCmdbuf> submitted_cmdbuffers_;
+  std::size_t submission_batch_depth_{0};
+  vkapi::IVkFence submission_batch_fence_;
+  std::vector<PendingBatchSubmission> pending_batch_submissions_;
+  StreamSemaphore submission_batch_completion_;
 };
 
 struct VulkanCapabilities {
@@ -825,6 +848,7 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   std::pair<size_t, size_t> debug_stream_cache_counts();
 
   VulkanRuntimeTelemetrySnapshot runtime_telemetry_snapshot() const noexcept;
+  VulkanQueueSubmissionSnapshot queue_submission_snapshot() const noexcept;
 
   BackendWaitTelemetry *backend_wait_telemetry() noexcept {
     return &backend_wait_telemetry_;
@@ -1069,6 +1093,10 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   std::mutex graphics_queue_mutex_;
   VulkanQueueLockTelemetry graphics_queue_lock_telemetry_;
   BackendWaitTelemetry backend_wait_telemetry_;
+  std::atomic<std::uint64_t> queue_submit_calls_{0};
+  std::atomic<std::uint64_t> submitted_command_buffers_{0};
+  std::atomic<std::uint64_t> batched_queue_submit_calls_{0};
+  std::atomic<std::uint64_t> batched_command_buffers_{0};
 
   struct ThreadLocalStreams;
   std::shared_ptr<ThreadLocalStreams> compute_streams_{nullptr};

@@ -289,6 +289,7 @@ class TI_DLL_EXPORT GfxRuntime {
     compact = 1,
     chained = 2,
     conditional = 3,
+    coarse_conditional = 4,
   };
 
   struct GraphStructuredControl {
@@ -345,8 +346,10 @@ class TI_DLL_EXPORT GfxRuntime {
       std::size_t structured_control_bytes{0};
       std::size_t structured_observation_bytes{0};
       std::unique_ptr<ShaderResourceSet> structured_controller_resources;
+      std::unique_ptr<ShaderResourceSet> structured_gate_resources;
       std::unique_ptr<ShaderResourceSet> structured_terminal_resources;
       std::unique_ptr<Pipeline> structured_controller_pipeline;
+      std::unique_ptr<Pipeline> structured_gate_pipeline;
       std::unique_ptr<Pipeline> structured_terminal_pipeline;
       std::vector<uint32_t> structured_group_counts;
       bool structured_has_status{false};
@@ -374,7 +377,8 @@ class TI_DLL_EXPORT GfxRuntime {
     bool refresh_prepared_cache(const std::vector<uint64_t> &key,
                                 std::vector<PreparedDispatch> &prepared);
     Slot *acquire_ready_slot(const std::vector<uint64_t> &key,
-                             const std::vector<uint64_t> &structure_key);
+                             const std::vector<uint64_t> &structure_key,
+                             bool wait_on_saturation);
     bool ready_for_retirement() const;
     uint64_t known_persistent_argument_bytes() const;
     void reset();
@@ -430,6 +434,8 @@ class TI_DLL_EXPORT GfxRuntime {
 
   StreamSemaphore flush();
   StreamSemaphore flush_if_pending();
+  void begin_submission_batch();
+  StreamSemaphore end_submission_batch();
   bool has_pending_command_list() const {
     std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
     return current_cmdlist_ != nullptr;

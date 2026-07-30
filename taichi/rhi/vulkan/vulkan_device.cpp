@@ -2763,6 +2763,16 @@ VulkanRuntimeTelemetrySnapshot VulkanDevice::runtime_telemetry_snapshot()
   };
 }
 
+VulkanQueueSubmissionSnapshot
+VulkanDevice::queue_submission_snapshot() const noexcept {
+  return {
+      queue_submit_calls_.load(std::memory_order_relaxed),
+      submitted_command_buffers_.load(std::memory_order_relaxed),
+      batched_queue_submit_calls_.load(std::memory_order_relaxed),
+      batched_command_buffers_.load(std::memory_order_relaxed),
+  };
+}
+
 bool VulkanStreamSemaphoreObject::is_ready() const {
   if (!fence_ref) {
     return false;
@@ -2937,6 +2947,25 @@ StreamSemaphore VulkanStream::submit_with_semaphores(
       static_cast<uint32_t>(vk_signal_semaphores.size());
   submit_info.pSignalSemaphores = vk_signal_semaphores.data();
 
+  if (submission_batch_depth_ != 0) {
+    if (!submission_batch_fence_) {
+      submission_batch_fence_ = vkapi::create_fence(buffer->device, 0);
+    }
+    auto completion = std::make_shared<VulkanStreamSemaphoreObject>(
+        device_.backend_fault_reporter(), semaphore,
+        submission_batch_fence_, device_.backend_wait_telemetry());
+    pending_batch_submissions_.push_back(
+        PendingBatchSubmission{
+            buffer,
+            std::move(vk_wait_semaphores),
+            std::move(vk_wait_stages),
+            std::move(vk_signal_semaphores),
+            std::move(submit_refs),
+            std::move(profiler_samplers)});
+    submission_batch_completion_ = completion;
+    return completion;
+  }
+
   auto fence = vkapi::create_fence(buffer->device, 0);
 
   // Resource tracking, check previously submitted commands
@@ -2954,8 +2983,11 @@ StreamSemaphore VulkanStream::submit_with_semaphores(
         static_cast<std::int64_t>(submit_result), "vkQueueSubmit",
         "Vulkan queue submission failed");
   }
+  device_.queue_submit_calls_.fetch_add(1, std::memory_order_relaxed);
+  device_.submitted_command_buffers_.fetch_add(
+      1, std::memory_order_relaxed);
   submitted_cmdbuffers_.push_back(
-      TrackedCmdbuf{fence, buffer, std::move(submit_refs)});
+      TrackedCmdbuf{fence, {buffer}, std::move(submit_refs)});
   for (auto &sampler : profiler_samplers) {
     sampler.fence = fence;
   }
@@ -2963,6 +2995,94 @@ StreamSemaphore VulkanStream::submit_with_semaphores(
   return std::make_shared<VulkanStreamSemaphoreObject>(
       device_.backend_fault_reporter(), semaphore, fence,
       device_.backend_wait_telemetry());
+}
+
+void VulkanStream::begin_submission_batch() {
+  device_.throw_if_backend_submission_disallowed(
+      "Vulkan submission batch begin");
+  std::lock_guard<std::mutex> submission_lock(submission_mutex_);
+  if (submission_batch_depth_++ == 0) {
+    TI_ASSERT(pending_batch_submissions_.empty());
+    submission_batch_fence_.reset();
+    submission_batch_completion_.reset();
+  }
+}
+
+StreamSemaphore VulkanStream::end_submission_batch() {
+  device_.throw_if_backend_submission_disallowed(
+      "Vulkan submission batch end");
+  std::lock_guard<std::mutex> submission_lock(submission_mutex_);
+  TI_ERROR_IF(submission_batch_depth_ == 0,
+              "Vulkan submission batch is not active");
+  if (--submission_batch_depth_ != 0) {
+    return nullptr;
+  }
+  if (pending_batch_submissions_.empty()) {
+    submission_batch_fence_.reset();
+    return std::exchange(submission_batch_completion_, nullptr);
+  }
+
+  std::vector<VkSubmitInfo> submit_infos(
+      pending_batch_submissions_.size());
+  for (std::size_t i = 0; i < pending_batch_submissions_.size(); ++i) {
+    auto &pending = pending_batch_submissions_[i];
+    auto &info = submit_infos[i];
+    info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    info.commandBufferCount = 1;
+    info.pCommandBuffers = &pending.buffer->buffer;
+    info.waitSemaphoreCount =
+        static_cast<std::uint32_t>(pending.wait_semaphores.size());
+    info.pWaitSemaphores = pending.wait_semaphores.data();
+    info.pWaitDstStageMask = pending.wait_stages.data();
+    info.signalSemaphoreCount =
+        static_cast<std::uint32_t>(pending.signal_semaphores.size());
+    info.pSignalSemaphores = pending.signal_semaphores.data();
+  }
+
+  retire_completed_cmdbuffers();
+  apply_in_flight_backpressure();
+  VkResult submit_result = VK_SUCCESS;
+  {
+    auto queue_lock = device_.acquire_queue_lock(queue_);
+    submit_result = vkQueueSubmit(
+        queue_, static_cast<std::uint32_t>(submit_infos.size()),
+        submit_infos.data(), submission_batch_fence_->fence);
+  }
+  if (submit_result != VK_SUCCESS) {
+    pending_batch_submissions_.clear();
+    submission_batch_fence_.reset();
+    submission_batch_completion_.reset();
+    device_.raise_backend_error(
+        static_cast<std::int64_t>(submit_result), "vkQueueSubmit",
+        "Vulkan batched queue submission failed");
+  }
+  device_.queue_submit_calls_.fetch_add(1, std::memory_order_relaxed);
+  device_.submitted_command_buffers_.fetch_add(
+      pending_batch_submissions_.size(), std::memory_order_relaxed);
+  device_.batched_queue_submit_calls_.fetch_add(
+      1, std::memory_order_relaxed);
+  device_.batched_command_buffers_.fetch_add(
+      pending_batch_submissions_.size(), std::memory_order_relaxed);
+
+  TrackedCmdbuf tracked;
+  tracked.fence = submission_batch_fence_;
+  tracked.buffers.reserve(pending_batch_submissions_.size());
+  for (auto &pending : pending_batch_submissions_) {
+    tracked.buffers.push_back(std::move(pending.buffer));
+    tracked.submit_refs.insert(
+        tracked.submit_refs.end(),
+        std::make_move_iterator(pending.submit_refs.begin()),
+        std::make_move_iterator(pending.submit_refs.end()));
+    for (auto &sampler : pending.profiler_samplers) {
+      sampler.fence = submission_batch_fence_;
+    }
+    device_.profiler_add_samplers(
+        std::move(pending.profiler_samplers));
+  }
+  submitted_cmdbuffers_.push_back(std::move(tracked));
+  pending_batch_submissions_.clear();
+  submission_batch_fence_.reset();
+  return std::exchange(submission_batch_completion_, nullptr);
 }
 
 StreamSemaphore VulkanStream::submit_synced(
@@ -2978,6 +3098,9 @@ void VulkanStream::command_sync() {
   std::vector<vkapi::IVkFence> fences;
   {
     std::lock_guard<std::mutex> submission_lock(submission_mutex_);
+    TI_ERROR_IF(submission_batch_depth_ != 0,
+                "Cannot synchronize a Vulkan stream inside an active "
+                "submission batch");
     fences.reserve(submitted_cmdbuffers_.size());
     for (const auto &tracked : submitted_cmdbuffers_) {
       fences.push_back(tracked.fence);
@@ -3007,7 +3130,11 @@ void VulkanStream::command_sync() {
 std::size_t VulkanStream::debug_in_flight_command_buffer_count() {
   std::lock_guard<std::mutex> submission_lock(submission_mutex_);
   retire_completed_cmdbuffers();
-  return submitted_cmdbuffers_.size();
+  std::size_t count = 0;
+  for (const auto &submission : submitted_cmdbuffers_) {
+    count += submission.buffers.size();
+  }
+  return count;
 }
 
 std::unique_ptr<Pipeline> VulkanDevice::create_raster_pipeline(

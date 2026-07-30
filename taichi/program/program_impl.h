@@ -84,6 +84,13 @@ class ProgramImpl {
     return nullptr;
   }
 
+  virtual void begin_runtime_submission_batch() {
+  }
+
+  virtual StreamSemaphore end_runtime_submission_batch() {
+    return nullptr;
+  }
+
   /**
    * Make a AotModulerBuilder.
    */

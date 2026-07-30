@@ -194,6 +194,7 @@ class TI_DLL_EXPORT Program {
 
     Program *program_{nullptr};
     std::optional<RuntimeSubmissionScope> submission_scope_;
+    bool submission_batch_open_{false};
     bool finished_{false};
   };
 
