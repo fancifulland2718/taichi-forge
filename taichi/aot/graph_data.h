@@ -548,6 +548,7 @@ struct TI_DLL_EXPORT CompiledGraph {
       Ndarray *status,
       std::size_t initial_dispatch_count,
       int max_iterations,
+      bool execute_initial_dispatches,
       std::uint32_t strategy) const;
   bool jit_run_conditional_cuda_cached(
       const CompileConfig &compile_config,

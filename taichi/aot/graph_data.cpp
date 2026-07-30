@@ -2860,6 +2860,7 @@ CompiledGraph::jit_run_bounded_vulkan_cached(
     Ndarray *status,
     std::size_t initial_dispatch_count,
     int max_iterations,
+    bool execute_initial_dispatches,
     std::uint32_t strategy) const try {
   CompiledGraphStructuredResult result;
 #if defined(TI_WITH_VULKAN)
@@ -2939,6 +2940,7 @@ CompiledGraph::jit_run_bounded_vulkan_cached(
   control.initial_dispatch_count = initial_dispatch_count;
   control.max_iterations = static_cast<std::uint32_t>(max_iterations);
   control.has_status = status != nullptr;
+  control.execute_initial_dispatches = execute_initial_dispatches;
   control.strategy =
       static_cast<gfx::GfxRuntime::GraphStructuredStrategy>(strategy);
   if (status != nullptr) {

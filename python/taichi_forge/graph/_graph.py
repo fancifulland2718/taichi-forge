@@ -674,12 +674,12 @@ def _backend_name(arch):
 def structured_control_capabilities():
     """Return the qualified structured-control lowering for this runtime.
 
-    Schema v2 separates compilation, backend qualification, and a complete
+    Schema v3 separates compilation, backend qualification, a complete
     Graph runtime path. Vulkan bounded while regions expose chained and
-    compact indirect masking. Automatic lowering selects only the qualified
-    compact path; chained remains available for explicit device qualification.
-    Branch regions and asynchronous structured submission remain separate
-    capabilities.
+    compact indirect masking plus bounded synchronous chunk replay. Automatic
+    lowering selects only the qualified compact path; chained and conditional
+    regions remain explicit device-qualification strategies. Branch regions
+    and asynchronous structured submission remain separate capabilities.
     """
     arch = impl.current_cfg().arch
     backend = _backend_name(_ti_core.arch_name(arch))
@@ -696,6 +696,10 @@ def structured_control_capabilities():
     stops_command_issue_after_exit = False
     exact_dynamic_termination = False
     max_encoded_dispatches = 0
+    chunked_runtime_qualified = False
+    chunk_iteration_limit = 0
+    replay_slot_count = 0
+    structured_submit_reason = "native_structured_submission_unavailable"
     conditional_rendering_available = False
     conditional_rendering_qualified = False
     if arch == _ti_core.Arch.cuda:
@@ -715,6 +719,9 @@ def structured_control_capabilities():
         runtime_path_qualified = native
         branch_native = native
         structured_submit = native
+        structured_submit_reason = (
+            "none" if native else "cuda_conditional_graph_unavailable"
+        )
         skip_strategy = "cuda_conditional_graph" if native else "none"
         stops_command_issue_after_exit = native
         exact_dynamic_termination = native
@@ -738,6 +745,10 @@ def structured_control_capabilities():
         runtime_path_qualified = True
         skip_strategy = "auto_compact_with_chained_opt_in"
         max_encoded_dispatches = 4096
+        chunked_runtime_qualified = True
+        chunk_iteration_limit = 64
+        replay_slot_count = 8
+        structured_submit_reason = "synchronous_chunk_observation_required"
         reason = "vulkan_if_switch_runtime_not_compiled"
     else:
         reason = "device_control_is_gpu_only"
@@ -747,7 +758,7 @@ def structured_control_capabilities():
         else "portable_exact_or_masked_replay"
     )
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "backend": backend,
         "portable": {
             "while": portable_while,
@@ -759,6 +770,7 @@ def structured_control_capabilities():
             "if": branch_native,
             "switch": branch_native,
             "structured_submit": structured_submit,
+            "structured_submit_reason": structured_submit_reason,
             "logical_termination_exact": native,
             "device_controlled_masking": native,
             "per_iteration_host_observation": False,
@@ -773,6 +785,9 @@ def structured_control_capabilities():
             "conditional_rendering_available": conditional_rendering_available,
             "conditional_rendering_qualified": conditional_rendering_qualified,
             "max_encoded_dispatches": max_encoded_dispatches,
+            "chunked_runtime_qualified": chunked_runtime_qualified,
+            "chunk_iteration_limit": chunk_iteration_limit,
+            "replay_slot_count": replay_slot_count,
             "available_strategies": (
                 (
                     "chained_indirect",
@@ -1951,6 +1966,7 @@ class _CompiledWhileGraphNode:
         )
         self._last_report = None
         self._native_jit_cache = _ti_core.CompiledGraphJITCache()
+        self._vulkan_chunk_limits = {}
         self._native_submission_eligible = arch == _ti_core.Arch.cuda
         self._native_upgrade_eligible, self._native_upgrade_reason = (
             _while_upgrade_status(arch, lowering_mode)
@@ -2037,54 +2053,142 @@ class _CompiledWhileGraphNode:
                 )
             return False
 
-        result = dict(
-            self._vulkan_structured.compiled_graph.jit_run_bounded_vulkan_cached(
-                context.compile_config(),
-                context.flattened_args(
-                    self._vulkan_structured.recording_runtime_arg_names
-                ),
-                self._native_jit_cache,
-                predicate_ndarray,
-                counter_ndarray,
-                self.condition_dispatch_count,
-                self.max_iterations,
-                status_ndarray,
-                _vulkan_structured_strategy(),
-            )
+        flattened_args = context.flattened_args(
+            self._vulkan_structured.recording_runtime_arg_names
         )
-        if not result["submitted"]:
-            if self.lowering_mode == "native_required":
-                raise TaichiRuntimeError(
-                    "Graph while native Vulkan structured lowering "
-                    "became unavailable"
+        strategy_code = _vulkan_structured_strategy()
+
+        def run_chunk(iterations, *, execute_initial_dispatches):
+            return dict(
+                self._vulkan_structured.compiled_graph.jit_run_bounded_vulkan_cached(
+                    context.compile_config(),
+                    flattened_args,
+                    self._native_jit_cache,
+                    predicate_ndarray,
+                    counter_ndarray,
+                    self.condition_dispatch_count,
+                    iterations,
+                    status_ndarray,
+                    execute_initial_dispatches,
+                    strategy_code,
                 )
-            return False
+            )
+
+        chunk_limit = self._vulkan_chunk_limits.get(strategy_code)
+        first_result = None
+        if chunk_limit is None:
+            first_result = run_chunk(
+                self.max_iterations,
+                execute_initial_dispatches=True,
+            )
+            if first_result["submitted"]:
+                chunk_limit = self.max_iterations
+            elif strategy_code in (0, 1) and self.max_iterations > 1:
+                chunk_limit = min(self.max_iterations, 64)
+                while chunk_limit >= 1:
+                    first_result = run_chunk(
+                        chunk_limit,
+                        execute_initial_dispatches=True,
+                    )
+                    if first_result["submitted"]:
+                        break
+                    chunk_limit //= 2
+            if not first_result["submitted"]:
+                if self.lowering_mode == "native_required":
+                    raise TaichiRuntimeError(
+                        "Graph while native Vulkan structured lowering "
+                        "became unavailable"
+                    )
+                return False
+            self._vulkan_chunk_limits[strategy_code] = chunk_limit
+
+        results = []
+        remaining = self.max_iterations
+        execute_initial_dispatches = True
+        while True:
+            iterations = min(remaining, chunk_limit)
+            result = (
+                first_result
+                if first_result is not None and not results
+                else run_chunk(
+                    iterations,
+                    execute_initial_dispatches=execute_initial_dispatches,
+                )
+            )
+            first_result = None
+            if not result["submitted"]:
+                if self.lowering_mode == "native_required":
+                    raise TaichiRuntimeError(
+                        "Graph while native Vulkan structured lowering "
+                        "became unavailable during chunk replay"
+                    )
+                return False
+            results.append(result)
+            encoded_chunk = int(result["encoded_iterations"])
+            logical_chunk = int(result["logical_iterations"])
+            if (
+                encoded_chunk != iterations
+                or logical_chunk < 0
+                or logical_chunk > encoded_chunk
+            ):
+                raise TaichiRuntimeError(
+                    "Vulkan Graph while runtime returned an invalid chunk result"
+                )
+            remaining -= encoded_chunk
+            if (
+                remaining == 0
+                or int(result["predicate"]) == 0
+                or encoded_chunk == 0
+            ):
+                break
+            execute_initial_dispatches = False
 
         strategy_names = {
             1: "compact_indirect",
             2: "chained_indirect",
             3: "conditional",
         }
-        strategy = strategy_names.get(int(result["strategy"]))
+        strategies = {int(result["strategy"]) for result in results}
+        if len(strategies) != 1:
+            raise TaichiRuntimeError(
+                "Vulkan Graph while changed control strategy during chunk replay"
+            )
+        strategy = strategy_names.get(strategies.pop())
         if strategy is None:
             raise TaichiRuntimeError(
                 "Vulkan Graph while runtime returned an invalid control strategy"
             )
-        logical = int(result["logical_iterations"])
-        encoded = int(result["encoded_iterations"])
-        if logical < 0 or logical > encoded:
+
+        logical = sum(int(result["logical_iterations"]) for result in results)
+        encoded = sum(int(result["encoded_iterations"]) for result in results)
+        if logical < 0 or logical > encoded or encoded > self.max_iterations:
             raise TaichiRuntimeError(
                 "Vulkan Graph while runtime returned an invalid logical "
                 "iteration count"
             )
-        final_predicate = int(result["predicate"])
-        final_counter = int(result["counter"])
-        final_status = int(result["status"]) if status_object is not None else None
+        final_predicate = int(results[-1]["predicate"])
+        final_counter = int(results[-1]["counter"])
+        final_status = (
+            int(results[-1]["status"]) if status_object is not None else None
+        )
         initial_status = (
-            int(result["initial_status"]) if status_object is not None else None
+            int(results[0]["initial_status"]) if status_object is not None else None
         )
         initial_counter = final_counter - logical
-        observation_bytes = int(result["observation_bytes"])
+        observation_bytes = sum(
+            int(result["observation_bytes"]) for result in results
+        )
+        chunk_sizes = tuple(
+            int(result["encoded_iterations"])
+            for result in results
+            if int(result["encoded_iterations"]) != 0
+        )
+        boundaries = []
+        boundary = 0
+        for chunk in chunk_sizes:
+            boundary += chunk
+            boundaries.append(boundary)
+        chunked = chunk_limit < self.max_iterations
         transfer_after = impl.get_runtime().prog._graph_observation_staging_stats()
 
         def transfer_delta(name):
@@ -2093,35 +2197,44 @@ class _CompiledWhileGraphNode:
         self._last_report = GraphWhileReport(
             name=self.name,
             backend="vulkan",
-            lowering=f"vulkan_{strategy}",
+            lowering=(
+                f"vulkan_chunked_{strategy}"
+                if chunked
+                else f"vulkan_{strategy}"
+            ),
             max_iterations=self.max_iterations,
             logical_iterations=logical,
             executed_iterations=encoded,
             overshoot_iterations=encoded - logical,
-            observation_boundaries=(encoded,),
-            predicate_values=(final_predicate,),
-            counter_values=(final_counter,),
+            observation_boundaries=tuple(boundaries),
+            predicate_values=tuple(int(result["predicate"]) for result in results),
+            counter_values=tuple(int(result["counter"]) for result in results),
             status_resource=self.status,
             status_values=(
-                (initial_status, final_status) if final_status is not None else ()
+                (
+                    initial_status,
+                    *(int(result["status"]) for result in results),
+                )
+                if final_status is not None
+                else ()
             ),
-            chunk_sizes=((encoded,) if encoded else ()),
-            observation_batches=1,
-            observation_scalar_count=5,
+            chunk_sizes=chunk_sizes,
+            observation_batches=len(results),
+            observation_scalar_count=5 * len(results),
             device_to_host_bytes=observation_bytes,
             initial_counter=initial_counter,
             final_counter=final_counter,
             initial_status=initial_status,
             final_status=final_status,
             native_upgrade_eligible=True,
-            native_upgrade_reason="selected",
-            # The terminal buffer belongs to the backend replay slot and is
+            native_upgrade_reason=("selected_chunked" if chunked else "selected"),
+            # Terminal buffers belong to the backend replay slots and are
             # included in backend persistent bytes, not in the Program's
             # portable observation-staging arena.
             persistent_staging_bytes=0,
             staging_allocations=0,
             staging_reuses=0,
-            packed_observation_batches=1,
+            packed_observation_batches=len(results),
             direct_observation_batches=0,
             staging_fallback_batches=0,
             packed_observation_bytes=observation_bytes,
@@ -2129,12 +2242,22 @@ class _CompiledWhileGraphNode:
             body_dispatch_count=self.body_dispatch_count,
             control_inputs=self.control_inputs,
             carried_state=self.carried_state,
-            indirect_dispatch_count=int(result["indirect_dispatches"]),
-            controller_dispatch_count=int(result["controller_dispatches"]),
-            controller_invocation_count=int(result["controller_invocations"]),
+            indirect_dispatch_count=sum(
+                int(result["indirect_dispatches"]) for result in results
+            ),
+            controller_dispatch_count=sum(
+                int(result["controller_dispatches"]) for result in results
+            ),
+            controller_invocation_count=sum(
+                int(result["controller_invocations"]) for result in results
+            ),
             logical_body_dispatch_count=logical * self.body_dispatch_count,
-            zero_dispatch_count=int(result["zero_dispatches"]),
-            control_arena_bytes=int(result["control_bytes"]),
+            zero_dispatch_count=sum(
+                int(result["zero_dispatches"]) for result in results
+            ),
+            control_arena_bytes=max(
+                int(result["control_bytes"]) for result in results
+            ),
         )
         return True
 

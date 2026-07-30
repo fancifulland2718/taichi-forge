@@ -2565,10 +2565,14 @@ bool GfxRuntime::try_launch_graph(
     }
     key.insert(key.end(),
                {0xC001u,
-                static_cast<std::uint32_t>(structured_strategy)});
+                static_cast<std::uint32_t>(structured_strategy),
+                static_cast<std::uint32_t>(
+                    structured_control->execute_initial_dispatches)});
     structure_key.insert(
         structure_key.end(),
-        {0xC001u, static_cast<std::uint32_t>(structured_strategy)});
+        {0xC001u, static_cast<std::uint32_t>(structured_strategy),
+         static_cast<std::uint32_t>(
+             structured_control->execute_initial_dispatches)});
   }
   if (total_tasks <= 1) {
     return reject(GraphReplayFallbackReason::insufficient_tasks);
@@ -3031,8 +3035,10 @@ bool GfxRuntime::try_launch_graph(
          BufferBarrierStage::Compute,
          BufferBarrierAccess::ShaderRead |
              BufferBarrierAccess::ShaderWrite});
-    for (std::size_t i = 0; i < structured_initial_tasks; ++i) {
-      dispatch_task(structured_tasks[i], nullptr);
+    if (structured_control->execute_initial_dispatches) {
+      for (std::size_t i = 0; i < structured_initial_tasks; ++i) {
+        dispatch_task(structured_tasks[i], nullptr);
+      }
     }
 
     for (std::uint32_t iteration = 0;

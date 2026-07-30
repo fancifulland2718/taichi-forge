@@ -3387,6 +3387,7 @@ void export_lang(py::module &m) {
                           Ndarray *vulkan_counter = nullptr,
                           Ndarray *vulkan_status = nullptr,
                           std::size_t vulkan_initial_dispatch_count = 0,
+                          bool vulkan_execute_initial_dispatches = true,
                           std::uint32_t vulkan_strategy = 0,
                           aot::CompiledGraphStructuredResult
                               *vulkan_result = nullptr) -> bool {
@@ -3554,6 +3555,7 @@ void export_lang(py::module &m) {
               compile_config, args, *cache, vulkan_predicate,
               vulkan_counter, vulkan_status,
               vulkan_initial_dispatch_count, bounded_max_iterations,
+              vulkan_execute_initial_dispatches,
               vulkan_strategy);
           return vulkan_result->submitted;
         }
@@ -3828,13 +3830,15 @@ void export_lang(py::module &m) {
                            Ndarray &predicate, Ndarray &counter,
                            std::size_t initial_dispatch_count,
                            int max_iterations, Ndarray *status,
+                           bool execute_initial_dispatches,
                            std::uint32_t strategy) {
              aot::CompiledGraphStructuredResult result;
              jit_run_graph(
                  self, compile_config, pyargs, &cache, nullptr,
                  max_iterations, true, nullptr, nullptr, -1, -1,
                  &predicate, &counter, status,
-                 initial_dispatch_count, strategy, &result);
+                 initial_dispatch_count, execute_initial_dispatches,
+                 strategy, &result);
              py::dict encoded;
              encoded["submitted"] = result.submitted;
              encoded["strategy"] = result.strategy;
@@ -3859,6 +3863,7 @@ void export_lang(py::module &m) {
            py::arg("predicate"), py::arg("counter"),
            py::arg("initial_dispatch_count"),
            py::arg("max_iterations"), py::arg("status") = nullptr,
+           py::arg("execute_initial_dispatches") = true,
            py::arg("strategy") = 0)
       .def("jit_run_conditional_cuda_cached",
            [jit_run_graph](aot::CompiledGraph *self,

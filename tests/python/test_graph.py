@@ -2408,7 +2408,7 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
     capabilities = ti.graph.structured_control_capabilities()
     device = capabilities["device_control"]
     arch = ti.lang.impl.current_cfg().arch
-    assert capabilities["schema_version"] == 2
+    assert capabilities["schema_version"] == 3
     assert set(("while", "if", "switch")) <= capabilities["portable"].keys()
     assert set(
         (
@@ -2423,10 +2423,14 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
             "conditional_rendering_available",
             "conditional_rendering_qualified",
             "max_encoded_dispatches",
+            "chunked_runtime_qualified",
+            "chunk_iteration_limit",
+            "replay_slot_count",
             "available_strategies",
             "qualified_strategies",
             "chained_runtime_qualified",
             "chained_max_encoded_dispatches",
+            "structured_submit_reason",
             "max_control_bytes_per_slot",
         )
     ) <= device.keys()
@@ -2451,6 +2455,8 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         assert device["rhi_primitive_qualified"] == expected
         assert device["runtime_path_qualified"] == expected
         assert device["structured_submit"] == expected
+        assert not device["chunked_runtime_qualified"]
+        assert device["chunk_iteration_limit"] == 0
         assert device["logical_termination_exact"] == expected
         assert device["device_controlled_masking"] == expected
         assert device["stops_command_issue_after_exit"] == expected
@@ -2465,12 +2471,18 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         assert not device["if"]
         assert not device["switch"]
         assert not device["structured_submit"]
+        assert device["structured_submit_reason"] == (
+            "synchronous_chunk_observation_required"
+        )
         assert device["logical_termination_exact"]
         assert device["device_controlled_masking"]
         assert not device["stops_command_issue_after_exit"]
         assert not device["exact_dynamic_termination"]
         assert device["skip_strategy"] == "auto_compact_with_chained_opt_in"
         assert device["max_encoded_dispatches"] == 4096
+        assert device["chunked_runtime_qualified"]
+        assert device["chunk_iteration_limit"] == 64
+        assert device["replay_slot_count"] == 8
         assert device["available_strategies"] == (
             "chained_indirect",
             "compact_indirect",
@@ -2488,6 +2500,8 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
     else:
         assert capabilities["backend"] == "cpu"
         assert not device["conditional_rendering_available"]
+        assert not device["chunked_runtime_qualified"]
+        assert device["chunk_iteration_limit"] == 0
         assert not device["rhi_primitive_compiled"]
         assert not device["rhi_primitive_qualified"]
         assert not device["runtime_path_compiled"]
@@ -2914,6 +2928,103 @@ def test_structured_graph_while_vulkan_strategy_selection_and_override(
         TaichiRuntimeError, match="structured lowering became unavailable"
     ):
         large.run(rejected)
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_structured_graph_while_vulkan_large_budget_uses_bounded_chunks():
+    @ti.kernel
+    def evaluate_condition(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        condition_evaluations: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        target: ti.i32,
+    ):
+        condition_evaluations[None] += 1
+        predicate[None] = int(state[None] < target)
+
+    @ti.kernel
+    def step(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        if predicate[None] != 0:
+            state[None] += 1
+            counter[None] += 1
+
+    scalar = lambda name: ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=0
+    )
+    arg_state = scalar("state")
+    arg_predicate = scalar("predicate")
+    arg_counter = scalar("counter")
+    arg_condition_evaluations = scalar("condition_evaluations")
+    arg_target = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "target", ti.i32)
+    builder = ti.graph.GraphBuilder()
+    condition = builder.create_sequential()
+    condition.dispatch(
+        evaluate_condition,
+        arg_state,
+        arg_predicate,
+        arg_condition_evaluations,
+        arg_target,
+    )
+    body = builder.create_sequential()
+    body.dispatch(step, arg_state, arg_predicate, arg_counter)
+    builder.while_loop(
+        condition,
+        body,
+        predicate=arg_predicate,
+        control_inputs=(arg_state, arg_condition_evaluations, arg_target),
+        carried_state=(arg_state,),
+        counter=arg_counter,
+        max_iterations=4096,
+        masked_execution=True,
+        lowering_mode="native_required",
+        name="large_budget",
+    )
+    graph = builder.compile()
+    args = {
+        name: ti.ndarray(ti.i32, shape=())
+        for name in ("state", "predicate", "counter", "condition_evaluations")
+    }
+    for value in args.values():
+        value.fill(0)
+    args["target"] = 130
+
+    graph.run(args)
+    report = graph.control_flow_stats()[0]
+    assert report.lowering == "vulkan_chunked_compact_indirect"
+    assert report.logical_iterations == 130
+    assert report.executed_iterations == 192
+    assert report.chunk_sizes == (64, 64, 64)
+    assert report.observation_boundaries == (64, 128, 192)
+    assert report.observation_batches == 3
+    assert report.device_to_host_bytes == 60
+    assert args["state"].to_numpy()[()] == 130
+    assert args["counter"].to_numpy()[()] == 130
+    # One initial evaluation plus one evaluation after every logical body.
+    # Chunk boundaries must not re-run the initial condition.
+    assert args["condition_evaluations"].to_numpy()[()] == 131
+
+    first_stats = graph._graph_stats[0]
+    persistent_bytes = first_stats["known_persistent_argument_bytes"]
+    assert persistent_bytes > 0
+    for name in ("state", "predicate", "counter", "condition_evaluations"):
+        args[name].fill(0)
+    graph.run(args)
+    replay_stats = graph._graph_stats[0]
+    assert replay_stats["known_persistent_argument_bytes"] == persistent_bytes
+    assert replay_stats["replay_slot_saturation_fallbacks"] == 0
+    assert args["condition_evaluations"].to_numpy()[()] == 131
+
+    submission_owners = len(impl.pytaichi._runtime_submission_owners)
+    with pytest.raises(
+        TaichiRuntimeError,
+        match="supports structured control only",
+    ):
+        graph.submit(args)
+    assert len(impl.pytaichi._runtime_submission_owners) == submission_owners
 
 
 @test_utils.test(arch=ti.vulkan)

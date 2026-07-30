@@ -298,6 +298,7 @@ class TI_DLL_EXPORT GfxRuntime {
     std::size_t initial_dispatch_count{0};
     std::uint32_t max_iterations{0};
     bool has_status{false};
+    bool execute_initial_dispatches{true};
     GraphStructuredStrategy strategy{GraphStructuredStrategy::automatic};
   };
 
