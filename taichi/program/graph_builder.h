@@ -26,8 +26,13 @@ class Node {
 
 class Dispatch : public Node {
  public:
-  explicit Dispatch(Kernel *kernel, const std::vector<aot::Arg> &args)
-      : kernel_(kernel), symbolic_args_(args) {
+  explicit Dispatch(
+      Kernel *kernel,
+      const std::vector<aot::Arg> &args,
+      std::optional<aot::Arg> indirect_dispatch_arg = std::nullopt)
+      : kernel_(kernel),
+        symbolic_args_(args),
+        indirect_dispatch_arg_(std::move(indirect_dispatch_arg)) {
   }
 
   void compile(
@@ -43,10 +48,15 @@ class Dispatch : public Node {
     return symbolic_args_;
   }
 
+  bool is_indirect() const {
+    return indirect_dispatch_arg_.has_value();
+  }
+
  private:
   mutable bool serialized_{false};
   Kernel *kernel_{nullptr};
   std::vector<aot::Arg> symbolic_args_;
+  std::optional<aot::Arg> indirect_dispatch_arg_;
 };
 
 class Sequential : public Node {
@@ -57,6 +67,10 @@ class Sequential : public Node {
   void append(Node *node);
 
   void dispatch(Kernel *kernel, const std::vector<aot::Arg> &args);
+
+  void dispatch_indirect(Kernel *kernel,
+                         const std::vector<aot::Arg> &args,
+                         const aot::Arg &dispatch_packet);
 
   void compile(
       std::vector<aot::CompiledDispatch> &compiled_dispatches) override;
@@ -76,9 +90,17 @@ class GraphBuilder {
 
   Node *new_dispatch_node(Kernel *kernel, const std::vector<aot::Arg> &args);
 
+  Node *new_indirect_dispatch_node(Kernel *kernel,
+                                   const std::vector<aot::Arg> &args,
+                                   const aot::Arg &dispatch_packet);
+
   Sequential *new_sequential_node();
 
   void dispatch(Kernel *kernel, const std::vector<aot::Arg> &args);
+
+  void dispatch_indirect(Kernel *kernel,
+                         const std::vector<aot::Arg> &args,
+                         const aot::Arg &dispatch_packet);
 
   Sequential *seq() const;
 
@@ -97,6 +119,8 @@ class GraphBuilder {
       const aot::CompiledDispatch &second_compiled);
 
  private:
+  void register_arg(const aot::Arg &arg);
+
   std::unique_ptr<Sequential> seq_{nullptr};
   std::unordered_map<std::string, aot::Arg> all_args_;
   std::vector<std::unique_ptr<Node>> all_nodes_;

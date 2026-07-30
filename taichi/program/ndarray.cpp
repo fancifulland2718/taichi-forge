@@ -58,8 +58,12 @@ Ndarray::Ndarray(Program *prog,
         "Ndarray index might be out of int32 boundary but int64 indexing is "
         "not supported yet.");
   }
-  ndarray_alloc_ = prog->allocate_memory_on_device(nelement_ * element_size_,
-                                                   prog->result_buffer);
+  AllocUsage usage = AllocUsage::Storage;
+  if (prog->compile_config().arch == Arch::vulkan) {
+    usage = usage | AllocUsage::Indirect;
+  }
+  ndarray_alloc_ = prog->allocate_memory_on_device(
+      nelement_ * element_size_, prog->result_buffer, usage);
 }
 
 Ndarray::Ndarray(DeviceAllocation &devalloc,

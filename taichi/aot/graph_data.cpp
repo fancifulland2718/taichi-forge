@@ -455,6 +455,13 @@ CompiledGraph::CompiledGraph(
           collect_snode_tree_dependencies(dispatches)) {
 }
 
+bool CompiledGraph::has_indirect_dispatches() const {
+  return std::any_of(
+      dispatches.begin(), dispatches.end(), [](const auto &dispatch) {
+        return dispatch.indirect_dispatch_arg.has_value();
+      });
+}
+
 #if defined(TI_WITH_CUDA)
 namespace {
 
@@ -2243,6 +2250,41 @@ CompiledGraphVulkanState *get_vulkan_graph_state(
   return cache.vulkan_graph_state.get();
 }
 
+DevicePtr resolve_vulkan_indirect_dispatch_packet(
+    const CompiledDispatch &dispatch,
+    const std::unordered_map<std::string, IValue> &args,
+    Program *program) {
+  TI_ASSERT(dispatch.indirect_dispatch_arg.has_value());
+  const auto &symbolic = *dispatch.indirect_dispatch_arg;
+  const auto found = args.find(symbolic.name);
+  TI_ERROR_IF(found == args.end(),
+              "Missing runtime value for indirect dispatch packet {}",
+              symbolic.name);
+  const IValue &value = found->second;
+  TI_ERROR_IF(value.tag != ArgKind::kNdarray || value.val == 0,
+              "Graph indirect dispatch packet {} must be backed by a Taichi "
+              "u32 ndarray; field and external storage views are not "
+              "supported",
+              symbolic.name);
+  auto *packet = reinterpret_cast<Ndarray *>(value.val);
+  TI_ERROR_IF(packet == nullptr,
+              "Graph received a null indirect dispatch packet {}",
+              symbolic.name);
+  TI_ERROR_IF(packet->owning_program() != program,
+              "Graph indirect dispatch packet {} belongs to a different "
+              "Taichi runtime",
+              symbolic.name);
+  TI_ERROR_IF(
+      packet->shape.size() != 1 || packet->get_nelement() < 3 ||
+          !packet->get_element_shape().empty() ||
+          !packet->get_element_data_type()->is_primitive(
+              PrimitiveTypeID::u32),
+      "Graph indirect dispatch packet {} must contain at least three scalar "
+      "u32 values",
+      symbolic.name);
+  return packet->get_device_allocation().get_ptr();
+}
+
 bool try_run_vulkan_graph(const CompiledGraph &graph,
                           const CompileConfig &compile_config,
                           const std::unordered_map<std::string, IValue> &args,
@@ -2263,7 +2305,8 @@ bool try_run_vulkan_graph(const CompiledGraph &graph,
     }
     return false;
   }
-  if (graph.dispatches.size() <= 1) {
+  if (graph.dispatches.size() <= 1 &&
+      !graph.has_indirect_dispatches()) {
     auto &stats = cache.vulkan_inline_stats;
     stats.backend = CompiledGraphBackend::vulkan;
     stats.last_path = CompiledGraphExecutionPath::ordinary_fallback;
@@ -2312,7 +2355,13 @@ bool try_run_vulkan_graph(const CompiledGraph &graph,
     prog->resolve_runtime_storage_launch_context_under_guard(
         *launch_contexts.back());
     prog->resolve_texture_launch_context_under_guard(*launch_contexts.back());
-    gfx_dispatches.push_back({handle, launch_contexts.back().get()});
+    DevicePtr indirect_dispatch = kDeviceNullPtr;
+    if (dispatch.indirect_dispatch_arg.has_value()) {
+      indirect_dispatch = resolve_vulkan_indirect_dispatch_packet(
+          dispatch, args, prog);
+    }
+    gfx_dispatches.push_back(
+        {handle, launch_contexts.back().get(), indirect_dispatch});
   }
 
   if (gfx_launcher == nullptr) {
@@ -2539,6 +2588,9 @@ void CompiledGraph::run(
 void CompiledGraph::jit_run(
     const CompileConfig &compile_config,
     const std::unordered_map<std::string, IValue> &args) const try {
+  TI_ERROR_IF(has_indirect_dispatches(),
+              "Graph indirect dispatch requires the cached Vulkan JIT "
+              "execution path");
   Program *program = jit_graph_program(*this);
   if (program != nullptr) {
     program->ensure_runtime_submission_allowed("Graph launch");
@@ -2611,6 +2663,11 @@ void CompiledGraph::jit_run_cached(
     const CompileConfig &compile_config,
     const std::unordered_map<std::string, IValue> &args,
     CompiledGraphJITCache &cache) const try {
+  const bool has_indirect_dispatch = has_indirect_dispatches();
+  TI_ERROR_IF(has_indirect_dispatch &&
+                  compile_config.arch != Arch::vulkan,
+              "Graph indirect dispatch is currently supported only by the "
+              "Vulkan backend");
   Program *program = jit_graph_program(*this);
   if (program != nullptr) {
     program->ensure_runtime_submission_allowed("cached Graph launch");
@@ -2705,6 +2762,10 @@ void CompiledGraph::jit_run_cached(
       }
       return;
     }
+    TI_ERROR_IF(
+        has_indirect_dispatch,
+        "Graph indirect dispatch requires native Vulkan Graph replay, but "
+        "the active runtime mode or graph structure is unsupported");
     if (program != nullptr) {
       program->runtime_statistics().record_graph_ordinary_fallback();
     }

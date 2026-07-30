@@ -2337,6 +2337,7 @@ bool GfxRuntime::try_launch_graph(
   std::vector<PreparedDispatch> prepared;
   prepared.reserve(dispatches.size());
   size_t total_tasks = 0;
+  bool has_indirect_dispatch = false;
   GraphStructuredStrategy structured_strategy =
       GraphStructuredStrategy::automatic;
 
@@ -2429,6 +2430,40 @@ bool GfxRuntime::try_launch_graph(
     PreparedDispatch prepared_dispatch;
     prepared_dispatch.kernel = ti_kernel;
     prepared_dispatch.host_ctx = dispatch.host_ctx;
+    prepared_dispatch.indirect_dispatch = dispatch.indirect_dispatch;
+    const bool is_indirect =
+        dispatch.indirect_dispatch != kDeviceNullPtr;
+    if (is_indirect) {
+      if (structured_control != nullptr ||
+          dispatch.indirect_dispatch.device != device_ ||
+          dispatch.indirect_dispatch.alloc_id == 0 ||
+          dispatch.indirect_dispatch.offset %
+                  alignof(std::uint32_t) !=
+              0) {
+        return reject();
+      }
+      has_indirect_dispatch = true;
+      DeviceAllocation packet_allocation{
+          dispatch.indirect_dispatch.device,
+          dispatch.indirect_dispatch.alloc_id};
+      ndarrays_in_use_.insert(packet_allocation.alloc_id);
+      key.push_back(0xD000u);
+      push_graph_allocation_key(
+          key, packet_allocation,
+          dispatch.indirect_dispatch.offset,
+          3 * sizeof(std::uint32_t));
+      // vkCmdDispatchIndirect bakes the buffer handle and offset into the
+      // recorded command, so allocation changes require re-recording rather
+      // than descriptor-only structural patching.
+      structure_key.push_back(0xD000u);
+      push_graph_allocation_key(
+          structure_key, packet_allocation,
+          dispatch.indirect_dispatch.offset,
+          3 * sizeof(std::uint32_t));
+    } else {
+      key.push_back(0xD001u);
+      structure_key.push_back(0xD001u);
+    }
 
     key.push_back(dispatch.handle.get_launch_id());
     key.push_back(ti_kernel->get_args_buffer_size());
@@ -2495,6 +2530,9 @@ bool GfxRuntime::try_launch_graph(
     }
 
     const auto &task_attribs = ti_kernel->ti_kernel_attribs().tasks_attribs;
+    if (is_indirect && task_attribs.size() != 1) {
+      return reject();
+    }
     for (int task_index = 0; task_index < task_attribs.size(); ++task_index) {
       const auto &attribs = task_attribs[task_index];
       if (!attribs.texture_binds.empty() ||
@@ -2634,7 +2672,7 @@ bool GfxRuntime::try_launch_graph(
          static_cast<std::uint32_t>(
              structured_control->execute_initial_dispatches)});
   }
-  if (total_tasks <= 1) {
+  if (total_tasks <= 1 && !has_indirect_dispatch) {
     return reject(GraphReplayFallbackReason::insufficient_tasks);
   }
 
@@ -3575,7 +3613,27 @@ bool GfxRuntime::try_launch_graph(
       const int group_x = (attribs.advisory_total_num_threads +
                            attribs.advisory_num_threads_per_group - 1) /
                           attribs.advisory_num_threads_per_group;
-      status = cmdlist->dispatch(group_x);
+      if (pd.indirect_dispatch == kDeviceNullPtr) {
+        status = cmdlist->dispatch(group_x);
+      } else {
+        insert_all_pending(/*exit_boundary=*/false);
+        cmdlist->buffer_transition(
+            pd.indirect_dispatch, 3 * sizeof(std::uint32_t),
+            {BufferBarrierStage::Transfer |
+                 BufferBarrierStage::Compute,
+             BufferBarrierAccess::TransferWrite |
+                 BufferBarrierAccess::ShaderWrite,
+             BufferBarrierStage::IndirectCommand,
+             BufferBarrierAccess::IndirectCommandRead});
+        status = cmdlist->dispatch_indirect(pd.indirect_dispatch);
+        cmdlist->buffer_transition(
+            pd.indirect_dispatch, 3 * sizeof(std::uint32_t),
+            {BufferBarrierStage::IndirectCommand,
+             BufferBarrierAccess::IndirectCommandRead,
+             BufferBarrierStage::Compute,
+             BufferBarrierAccess::ShaderRead |
+                 BufferBarrierAccess::ShaderWrite});
+      }
       TI_ERROR_IF(status != RhiResult::success,
                   "Vulkan graph dispatch error: RhiResult({})", status);
 

@@ -282,6 +282,7 @@ class TI_DLL_EXPORT GfxRuntime {
   struct GraphDispatch {
     KernelHandle handle;
     LaunchContextBuilder *host_ctx{nullptr};
+    DevicePtr indirect_dispatch{kDeviceNullPtr};
   };
 
   enum class GraphStructuredStrategy : std::uint32_t {
@@ -331,6 +332,7 @@ class TI_DLL_EXPORT GfxRuntime {
       LaunchContextBuilder *host_ctx{nullptr};
       DeviceAllocation *args_buffer{nullptr};
       const AllocationMap *any_arrays{nullptr};
+      DevicePtr indirect_dispatch{kDeviceNullPtr};
     };
 
     struct CachedPreparedDispatch {

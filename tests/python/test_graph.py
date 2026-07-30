@@ -4735,3 +4735,161 @@ def test_texture_struct_for():
 
     graph.run({"tex": tex, "arr": arr})
     assert arr.to_numpy().sum() == 128 * 128
+
+
+@test_utils.test(
+    arch=[ti.vulkan],
+    debug=False,
+    kernel_profiler=False,
+    vulkan_dispatch_cache=False,
+)
+def test_vulkan_graph_device_indirect_dispatch():
+    block_dim = 32
+    capacity = 256
+
+    @ti.kernel
+    def prepare(
+        enabled: ti.i32,
+        count: ti.i32,
+        packet: ti.types.ndarray(),
+    ):
+        packet[0] = 0
+        if enabled != 0:
+            packet[0] = ti.cast((count + block_dim - 1) // block_dim, ti.u32)
+        packet[1] = 1
+        packet[2] = 1
+
+    @ti.kernel
+    def consume(count: ti.i32, out: ti.types.ndarray()):
+        ti.loop_config(block_dim=block_dim)
+        for i in range(capacity):
+            if i < count:
+                out[i] = i + 7
+
+    enabled_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "enabled", ti.i32)
+    count_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
+    packet_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "packet", ti.u32, ndim=1
+    )
+    out_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(prepare, enabled_arg, count_arg, packet_arg)
+    builder.dispatch_indirect(
+        consume,
+        count_arg,
+        out_arg,
+        dispatch_packet=packet_arg,
+    )
+    graph = builder.compile()
+    packet = ti.ndarray(ti.u32, shape=3)
+    replacement_packet = ti.ndarray(ti.u32, shape=3)
+    out = ti.ndarray(ti.i32, shape=capacity)
+    capabilities = ti.graph.structured_control_capabilities()["device_control"]
+    assert capabilities["parallel_indirect_dispatch"]
+    assert capabilities["parallel_indirect_dispatch_reason"] == "none"
+
+    out.fill(-1)
+    graph.run(
+        {"enabled": 0, "count": 65, "packet": packet, "out": out}
+    )
+    assert np.all(out.to_numpy() == -1)
+
+    out.fill(-1)
+    graph.run(
+        {
+            "enabled": 1,
+            "count": 65,
+            "packet": replacement_packet,
+            "out": out,
+        }
+    )
+    expected = np.full(capacity, -1, dtype=np.int32)
+    expected[:65] = np.arange(65, dtype=np.int32) + 7
+    assert np.array_equal(out.to_numpy(), expected)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda])
+def test_graph_indirect_dispatch_fails_closed_without_vulkan():
+    @ti.kernel
+    def consume(out: ti.types.ndarray()):
+        for i in range(8):
+            out[i] += 1
+
+    packet_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "packet", ti.u32, ndim=1
+    )
+    out_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch_indirect(
+        consume,
+        out_arg,
+        dispatch_packet=packet_arg,
+    )
+    graph = builder.compile()
+    packet = ti.ndarray(ti.u32, shape=3)
+    out = ti.ndarray(ti.i32, shape=8)
+
+    with pytest.raises(
+        RuntimeError,
+        match="supported only by the Vulkan backend",
+    ):
+        graph.run({"packet": packet, "out": out})
+
+
+@test_utils.test(
+    arch=[ti.vulkan],
+    debug=False,
+    kernel_profiler=False,
+    vulkan_dispatch_cache=False,
+)
+def test_graph_indirect_dispatch_validates_packet_and_aot_boundary():
+    @ti.kernel
+    def consume(out: ti.types.ndarray()):
+        for i in range(8):
+            out[i] += 1
+
+    out_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=1
+    )
+    invalid_packet_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "invalid_packet", ti.i32, ndim=1
+    )
+    invalid_builder = ti.graph.GraphBuilder()
+    with pytest.raises(
+        RuntimeError,
+        match="one-dimensional scalar u32 ndarray",
+    ):
+        invalid_builder.dispatch_indirect(
+            consume,
+            out_arg,
+            dispatch_packet=invalid_packet_arg,
+        )
+
+    packet_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "packet", ti.u32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch_indirect(
+        consume,
+        out_arg,
+        dispatch_packet=packet_arg,
+    )
+    graph = builder.compile()
+    out = ti.ndarray(ti.i32, shape=8)
+    short_packet = ti.ndarray(ti.u32, shape=2)
+    with pytest.raises(
+        RuntimeError,
+        match="at least three scalar u32 values",
+    ):
+        graph.run({"packet": short_packet, "out": out})
+
+    module = ti.aot.Module()
+    with pytest.raises(
+        RuntimeError,
+        match="indirect dispatch.*JIT-only",
+    ):
+        module.add_graph("indirect", graph)

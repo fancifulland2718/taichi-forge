@@ -3388,11 +3388,13 @@ void export_lang(py::module &m) {
   py::class_<Sequential, Node>(m, "Sequential")
       .def(py::init<GraphBuilder *>())
       .def("append", &Sequential::append)
-      .def("dispatch", &Sequential::dispatch);
+      .def("dispatch", &Sequential::dispatch)
+      .def("dispatch_indirect", &Sequential::dispatch_indirect);
 
   py::class_<GraphBuilder>(m, "GraphBuilder")
       .def(py::init<>())
       .def("dispatch", &GraphBuilder::dispatch)
+      .def("dispatch_indirect", &GraphBuilder::dispatch_indirect)
       .def("compile", &GraphBuilder::compile)
       .def("_enable_two_map_composer",
            &GraphBuilder::enable_two_map_composer)

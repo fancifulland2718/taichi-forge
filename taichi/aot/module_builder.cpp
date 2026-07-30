@@ -52,6 +52,8 @@ void AotModuleBuilder::dump_graph(std::string output_dir) const {
 
 void AotModuleBuilder::add_graph(const std::string &name,
                                  const aot::CompiledGraph &graph) {
+  TI_ERROR_IF(graph.has_indirect_dispatches(),
+              "AOT Graph {} contains JIT-only indirect dispatches", name);
   if (graphs_.count(name) != 0) {
     TI_ERROR("Graph {} already exists", name);
   }

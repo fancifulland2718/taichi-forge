@@ -846,6 +846,22 @@ Contract:
   object is also accepted for a manually managed gradient Graph; run that
   Graph outside `ti.ad.Tape()` / `ti.ad.FwdMode()`.
 
+### `GraphBuilder.dispatch_indirect(kernel, *args, dispatch_packet, template_args=None)`
+
+`Sequential.dispatch_indirect()` provides the same API. `dispatch_packet` is
+a one-dimensional scalar `u32` Graph ndarray argument. Its first three values
+are the device-written `{group_x, group_y, group_z}` command for the target
+kernel. The target must compile to exactly one offloaded task.
+
+The current native path is Vulkan Graph replay. It records
+`vkCmdDispatchIndirect` without host readback, supports zero-group skipping,
+and re-records safely when the packet allocation changes. The packet must be
+an owning Taichi ndarray with at least three values; Field, external-storage,
+and AOT Graph packets fail explicitly. CPU and CUDA also fail closed instead
+of substituting a fixed dispatch. Query
+`structured_control_capabilities()["device_control"]["parallel_indirect_dispatch"]`
+before selecting this path.
+
 ### Structured control
 
 | API | Contract |

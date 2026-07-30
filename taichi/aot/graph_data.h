@@ -5,6 +5,7 @@
 #include <memory>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -242,6 +243,9 @@ struct CompiledDispatch {
   std::vector<GraphSourceDispatchMetadata> source_dispatches;
   std::uint32_t compiled_task_count{
       std::numeric_limits<std::uint32_t>::max()};
+  // JIT-only Vulkan dispatch packet. It is intentionally excluded from
+  // TI_IO_DEF until the AOT module ABI can represent indirect dispatch.
+  std::optional<Arg> indirect_dispatch_arg;
 
   TI_IO_DEF(kernel_name, symbolic_args);
 };
@@ -525,6 +529,8 @@ struct TI_DLL_EXPORT CompiledGraph {
   CompiledGraph &operator=(const CompiledGraph &) = default;
   CompiledGraph(CompiledGraph &&) = default;
   CompiledGraph &operator=(CompiledGraph &&) = default;
+
+  bool has_indirect_dispatches() const;
 
   void run(const std::unordered_map<std::string, IValue> &args) const;
   void jit_run(const CompileConfig &compile_config,

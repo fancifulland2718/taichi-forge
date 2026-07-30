@@ -1234,6 +1234,10 @@ def structured_control_capabilities():
     coarse_conditional_qualified = False
     compound_tail_strategy = "none"
     queue_submit_policy = "backend_default"
+    parallel_indirect_dispatch = False
+    parallel_indirect_dispatch_reason = (
+        "native_vulkan_graph_replay_unavailable"
+    )
     if arch == _ti_core.Arch.cuda:
         cuda = dict(_ti_core.cuda_conditional_graph_capabilities())
         setter_compiled = bool(
@@ -1319,6 +1323,12 @@ def structured_control_capabilities():
         structured_submit_reason = (
             "none" if native else "vulkan_runtime_mode_disables_graph_replay"
         )
+        parallel_indirect_dispatch = native
+        parallel_indirect_dispatch_reason = (
+            "none"
+            if native
+            else "vulkan_runtime_mode_disables_graph_replay"
+        )
         reason = (
             "vulkan_if_switch_runtime_not_compiled"
             if vulkan_runtime_mode_qualified
@@ -1343,6 +1353,10 @@ def structured_control_capabilities():
             "switch": branch_native,
             "structured_submit": structured_submit,
             "structured_submit_reason": structured_submit_reason,
+            "parallel_indirect_dispatch": parallel_indirect_dispatch,
+            "parallel_indirect_dispatch_reason": (
+                parallel_indirect_dispatch_reason
+            ),
             "compound_structured_submit": compound_structured_submit,
             "compound_max_chunks_per_region": (compound_max_chunks_per_region),
             "compound_max_iterations_per_region": (compound_max_iterations_per_region),
@@ -4605,11 +4619,28 @@ class _AOTGraphBuilderPlan:
     def __init__(self):
         self._items = []
         self._runtime_arg_names = set()
+        self._has_indirect_dispatch = False
 
     def dispatch(self, kernel_cpp, args):
         runtime_arg_names = frozenset(_runtime_arg_names(args))
         self._items.append(("dispatch", kernel_cpp, args, runtime_arg_names))
         self._runtime_arg_names.update(runtime_arg_names)
+
+    def dispatch_indirect(self, kernel_cpp, args, dispatch_packet):
+        runtime_arg_names = frozenset(
+            (*_runtime_arg_names(args), dispatch_packet.name)
+        )
+        self._items.append(
+            (
+                "indirect",
+                kernel_cpp,
+                args,
+                dispatch_packet,
+                runtime_arg_names,
+            )
+        )
+        self._runtime_arg_names.update(runtime_arg_names)
+        self._has_indirect_dispatch = True
 
     @property
     def runtime_arg_names(self):
@@ -4627,7 +4658,7 @@ class _AOTGraphBuilderPlan:
     def runtime_arg_names_since(self, cursor):
         if cursor < 0 or cursor > len(self._items):
             raise TaichiRuntimeError(f"Invalid AOT graph plan cursor {cursor}")
-        return frozenset().union(*(item[3] for item in self._items[cursor:]))
+        return frozenset().union(*(item[-1] for item in self._items[cursor:]))
 
     def append(self, node):
         # Freeze each append at the point where the runtime builder consumes it.
@@ -4643,6 +4674,9 @@ class _AOTGraphBuilderPlan:
             )
         )
         self._runtime_arg_names.update(runtime_arg_names)
+        self._has_indirect_dispatch = (
+            self._has_indirect_dispatch or node._has_indirect_dispatch
+        )
 
     def snapshot(self):
         items = []
@@ -4654,6 +4688,17 @@ class _AOTGraphBuilderPlan:
                         "dispatch",
                         kernel_cpp,
                         tuple(args),
+                        runtime_arg_names,
+                    )
+                )
+            elif item[0] == "indirect":
+                _, kernel_cpp, args, dispatch_packet, runtime_arg_names = item
+                items.append(
+                    (
+                        "indirect",
+                        kernel_cpp,
+                        tuple(args),
+                        dispatch_packet,
                         runtime_arg_names,
                     )
                 )
@@ -4673,9 +4718,15 @@ class _AOTGraphBuilderPlan:
         snapshot = _AOTGraphBuilderPlan()
         snapshot._items = tuple(items)
         snapshot._runtime_arg_names = set(self._runtime_arg_names)
+        snapshot._has_indirect_dispatch = self._has_indirect_dispatch
         return snapshot
 
     def compile(self):
+        if self._has_indirect_dispatch:
+            raise TaichiRuntimeError(
+                "Graph indirect dispatch is currently JIT-only and cannot "
+                "be added to an AOT module"
+            )
         builder = _ti_core.GraphBuilder()
         for item in self._items:
             if item[0] == "dispatch":
@@ -4749,7 +4800,7 @@ def _dispatch_ir_name(kernel_cpp):
     return type(kernel_cpp).__name__
 
 
-def _dispatch_ir_node(kernel_cpp, args):
+def _dispatch_ir_node(kernel_cpp, args, *, dispatch_packet=None):
     effects = []
     bindings = []
     for arg in args:
@@ -4762,6 +4813,9 @@ def _dispatch_ir_node(kernel_cpp, args):
         )
         effects.append(ResourceEffect(arg.name, access))
         bindings.append(RuntimeBinding(arg.name, kind))
+    if dispatch_packet is not None:
+        effects.append(ResourceEffect(dispatch_packet.name, GraphAccess.READ))
+        bindings.append(RuntimeBinding(dispatch_packet.name, "indirect_dispatch"))
     # Until backend kernel access metadata is attached to this JIT record,
     # ndarray writes remain conservative and the node is not rewriteable.
     return DispatchNode(
@@ -4894,6 +4948,7 @@ class Sequential:
         self._lifetime_leases = []
         self._source_native_count = 0
         self._temporary_actions = []
+        self._has_indirect_dispatch = False
 
     def dispatch(self, kernel_fn, *args, template_args=None):
         kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
@@ -4906,6 +4961,33 @@ class Sequential:
         self._runtime_arg_names.update(names)
         self._recording_runtime_arg_names.update(names)
         self._dispatch_count += 1
+        return self
+
+    def dispatch_indirect(
+        self,
+        kernel_fn,
+        *args,
+        dispatch_packet,
+        template_args=None,
+    ):
+        kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
+        unzipped_args = flatten_args(args)
+        self._items.append(
+            ("indirect", kernel_cpp, unzipped_args, dispatch_packet)
+        )
+        self._ir_nodes.append(
+            _dispatch_ir_node(
+                kernel_cpp,
+                unzipped_args,
+                dispatch_packet=dispatch_packet,
+            )
+        )
+        names = _runtime_arg_names(unzipped_args)
+        names.add(dispatch_packet.name)
+        self._runtime_arg_names.update(names)
+        self._recording_runtime_arg_names.update(names)
+        self._dispatch_count += 1
+        self._has_indirect_dispatch = True
         return self
 
     def append_native(self, node, *, prewarm=False):
@@ -4959,6 +5041,10 @@ class Sequential:
             if item[0] == "dispatch":
                 _, kernel_cpp, args = item
                 dispatches = ((kernel_cpp, tuple(args)),)
+            elif item[0] == "indirect":
+                _, kernel_cpp, args, dispatch_packet = item
+                builder.dispatch_indirect(kernel_cpp, args, dispatch_packet)
+                continue
             else:
                 _, node = item
                 action = node.recordable_action
@@ -4994,6 +5080,32 @@ class GraphBuilder:
         kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
         unzipped_args = flatten_args(args)
         self._record_dispatch(kernel_cpp, unzipped_args)
+
+    def dispatch_indirect(
+        self,
+        kernel_fn,
+        *args,
+        dispatch_packet,
+        template_args=None,
+    ):
+        kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
+        unzipped_args = flatten_args(args)
+        self._aot_graph_plan.dispatch_indirect(
+            kernel_cpp, unzipped_args, dispatch_packet
+        )
+        self._ensure_runtime_graph_builder().dispatch_indirect(
+            kernel_cpp, unzipped_args, dispatch_packet
+        )
+        self._runtime_graph_arg_names.update(_runtime_arg_names(unzipped_args))
+        self._runtime_graph_arg_names.add(dispatch_packet.name)
+        self._pending_ir_nodes.append(
+            _dispatch_ir_node(
+                kernel_cpp,
+                unzipped_args,
+                dispatch_packet=dispatch_packet,
+            )
+        )
+        self._dispatch_count += 1
 
     def _record_dispatch(self, kernel_cpp, unzipped_args):
         self._aot_graph_plan.dispatch(kernel_cpp, unzipped_args)

@@ -744,6 +744,20 @@ graph.run({"slot": 3})
 - `kernel` 通常是 decorated primal kernel；也可传入显式 `kernel.grad` 来构造手工管理的
   gradient Graph，但必须在 `ti.ad.Tape()` / `ti.ad.FwdMode()` 之外运行。
 
+### `GraphBuilder.dispatch_indirect(kernel, *args, dispatch_packet, template_args=None)`
+
+`Sequential.dispatch_indirect()` 提供相同 API。`dispatch_packet` 必须是
+一维 scalar `u32` Graph ndarray 参数；前三个值是设备端写入的
+`{group_x, group_y, group_z}`，直接控制目标 kernel 的 workgroup 数。目标 kernel
+必须恰好编译为一个 offloaded task。
+
+当前原生路径是 Vulkan Graph replay：它不经 host readback 记录
+`vkCmdDispatchIndirect`，支持用零 group 跳过执行，并在 packet allocation 改变时
+安全重录。packet 必须是至少含三个值的 owning Taichi ndarray；Field、external
+storage 和 AOT Graph packet 会明确失败。CPU/CUDA 也会失败关闭，不会偷偷替换成
+固定 dispatch。选择此路径前可查询
+`structured_control_capabilities()["device_control"]["parallel_indirect_dispatch"]`。
+
 ### 结构化控制
 
 | API | 合同 |

@@ -8,6 +8,7 @@ aot::CompiledDispatch Dispatch::compile_dispatch() const {
   aot::CompiledDispatch dispatch;
   dispatch.kernel_name = kernel_->get_name();
   dispatch.symbolic_args = symbolic_args_;
+  dispatch.indirect_dispatch_arg = indirect_dispatch_arg_;
   dispatch.ti_kernel = kernel_;
   dispatch.compiled_kernel = nullptr;
   const auto &compiled = kernel_->program->compile_kernel(
@@ -17,6 +18,12 @@ aot::CompiledDispatch Dispatch::compile_dispatch() const {
   dispatch.compiled_task_count = static_cast<std::uint32_t>(
       std::min<std::size_t>(compiled.task_count(),
                             std::numeric_limits<std::uint32_t>::max()));
+  TI_ERROR_IF(
+      indirect_dispatch_arg_.has_value() &&
+          dispatch.compiled_task_count != 1,
+      "Graph indirect dispatch kernel {} must compile to exactly one task, "
+      "but compiled to {} tasks",
+      dispatch.kernel_name, dispatch.compiled_task_count);
   dispatch.source_dispatches.push_back(
       {dispatch.kernel_name, dispatch.symbolic_args, dispatch.graph_metadata});
   dispatch.snode_tree_dependencies =
@@ -50,6 +57,11 @@ void Sequential::compile(
       continue;
     }
     auto compiled = dispatch->compile_dispatch();
+    if (dispatch->is_indirect()) {
+      flush_pending();
+      compiled_dispatches.push_back(std::move(compiled));
+      continue;
+    }
     if (pending_dispatch != nullptr) {
       if (owning_graph_->two_map_composer_enabled()) {
         auto composed = owning_graph_->try_compose_two_maps(
@@ -78,6 +90,14 @@ void Sequential::dispatch(Kernel *kernel, const std::vector<aot::Arg> &args) {
   sequence_.push_back(n);
 }
 
+void Sequential::dispatch_indirect(Kernel *kernel,
+                                   const std::vector<aot::Arg> &args,
+                                   const aot::Arg &dispatch_packet) {
+  Node *n = owning_graph_->new_indirect_dispatch_node(
+      kernel, args, dispatch_packet);
+  sequence_.push_back(n);
+}
+
 GraphBuilder::GraphBuilder() {
   seq_ = std::make_unique<Sequential>(this);
 }
@@ -87,15 +107,39 @@ GraphBuilder::~GraphBuilder() = default;
 Node *GraphBuilder::new_dispatch_node(Kernel *kernel,
                                       const std::vector<aot::Arg> &args) {
   for (const auto &arg : args) {
-    if (all_args_.find(arg.name) != all_args_.end()) {
-      TI_ERROR_IF(all_args_[arg.name] != arg,
-                  "An arg with name {} already exists!", arg.name);
-    } else {
-      all_args_[arg.name] = arg;
-    }
+    register_arg(arg);
   }
   all_nodes_.push_back(std::make_unique<Dispatch>(kernel, args));
   return all_nodes_.back().get();
+}
+
+Node *GraphBuilder::new_indirect_dispatch_node(
+    Kernel *kernel,
+    const std::vector<aot::Arg> &args,
+    const aot::Arg &dispatch_packet) {
+  TI_ERROR_IF(dispatch_packet.tag != aot::ArgKind::kNdarray ||
+                  dispatch_packet.dtype_id != PrimitiveTypeID::u32 ||
+                  dispatch_packet.field_dim != 1 ||
+                  !dispatch_packet.element_shape.empty(),
+              "Graph indirect dispatch packet {} must be a one-dimensional "
+              "scalar u32 ndarray",
+              dispatch_packet.name);
+  for (const auto &arg : args) {
+    register_arg(arg);
+  }
+  register_arg(dispatch_packet);
+  all_nodes_.push_back(
+      std::make_unique<Dispatch>(kernel, args, dispatch_packet));
+  return all_nodes_.back().get();
+}
+
+void GraphBuilder::register_arg(const aot::Arg &arg) {
+  if (all_args_.find(arg.name) != all_args_.end()) {
+    TI_ERROR_IF(all_args_[arg.name] != arg,
+                "An arg with name {} already exists!", arg.name);
+  } else {
+    all_args_[arg.name] = arg;
+  }
 }
 
 Sequential *GraphBuilder::new_sequential_node() {
@@ -119,6 +163,13 @@ Sequential *GraphBuilder::seq() const {
 
 void GraphBuilder::dispatch(Kernel *kernel, const std::vector<aot::Arg> &args) {
   seq()->dispatch(kernel, args);
+}
+
+void GraphBuilder::dispatch_indirect(
+    Kernel *kernel,
+    const std::vector<aot::Arg> &args,
+    const aot::Arg &dispatch_packet) {
+  seq()->dispatch_indirect(kernel, args, dispatch_packet);
 }
 
 std::optional<aot::CompiledDispatch> GraphBuilder::try_compose_two_maps(
