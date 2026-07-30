@@ -34,13 +34,13 @@ Forge 主要以 vanilla Taichi 1.7.4 的公开 API 作为兼容参考。Forge �
 
 ## 版本历史
 
-当前源码版本是 `0.5.1`；`0.4.25` 是最后一个公开的 `0.4.x` 基线。由于 PyPI
+当前源码版本是 `0.6.0`；`0.4.25` 是最后一个公开的 `0.4.x` 基线。由于 PyPI
 项目容量有限，部分不再重要的旧发行文件已经移除。因此，完整版本索引使用长期稳定的
 Git 源码边界，不把当前 PyPI 文件列表误当成全部历史。
 
 | 版本 | 用户可见范围 |
 | --- | --- |
-| [0.5.1](docs/forge/release_notes.zh.md#051) | 稀疏 runtime/assembly 与 fixed storage；覆盖 variable-linear FGMRES 的 provider-neutral LinearOperator Krylov 工具；qualification 与 pacing；driver-only CUDA primitive；cache、allocator 与生命周期加固。 |
+| [0.6.0](docs/forge/release_notes.zh.md#060) | 结构化 Graph 控制与遥测；稀疏 runtime/assembly 与 provider-neutral Krylov 工具；driver-only CUDA primitive；CUDA-Vulkan 显示共享；cache、allocator 与生命周期加固。 |
 | [0.5.0](docs/forge/release_notes.zh.md#050) | `0.4.25` 之后的异步 backend/runtime 安全与有界可观测性；CUDA/Vulkan Graph replay 与生命周期加固；Dense Field Graph、严格参数/AD 合同和 block 级异构环境。 |
 | [0.4.25](docs/forge/release_notes.zh.md#0425) | GGUI 事件泵与空 ImGui frame 生命周期修复。 |
 | [0.4.24](docs/forge/release_notes.zh.md#0424) | device-side GGUI 图像 packing 与渲染 cadence 改进。 |

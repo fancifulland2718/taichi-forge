@@ -1,7 +1,7 @@
 # Taichi Forge Release Notes
 
 This is the canonical version index for Taichi Forge user-visible changes.
-The declared package version is `0.5.1`. Version `0.5.0` remains the previous
+The declared package version is `0.6.0`. Version `0.5.0` remains the previous
 published runtime source boundary, and `0.4.25` is the final public `0.4.x`
 baseline.
 
@@ -15,7 +15,7 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
-| [0.5.1](#051) | current declared source release; publication artifacts may be pending | current `master` | sparse runtime/linear algebra, driver-only CUDA primitives, bounded host-memory/lifetimes, and completed runtime contracts |
+| [0.6.0](#060) | current declared source release; publication artifacts may be pending | current `master` | structured Graph control/telemetry, sparse runtime/linear algebra, driver-only CUDA primitives, display interoperability, and bounded runtime lifetimes |
 | [0.1.0](#010) | historical source release; artifact may be removed | `91ad177685` | scikit-build-core migration and Forge distribution rebrand |
 | [0.1.1](#011) | historical source release; artifact may be removed | `c771969781` | `taichi_forge` import rename and install-layout fixes |
 | [0.1.2](#012) | historical source release; artifact may be removed | `fe5844390b` | import fixes and CUDA build option |
@@ -39,9 +39,9 @@ grouped under the behavior they shipped.
 | [0.4.25](#0425) | retained on PyPI; final public 0.4.x baseline | `7dad067ca` | GGUI event-pump and ImGui lifecycle fixes |
 | [0.5.0](#050) | published runtime source boundary | `95626e8036` | async runtime safety, Graph replay/lifetime work, Dense Field Graph |
 
-## 0.5.1
+## 0.6.0
 
-Version `0.5.1` consolidates the changes after the published `0.5.0` runtime
+Version `0.6.0` consolidates the changes after the published `0.5.0` runtime
 source boundary. It does not retroactively change the behavior attributed to
 the `0.5.0` artifacts:
 
@@ -79,6 +79,16 @@ the `0.5.0` artifacts:
   established staging path. `Window.get_display_stats()` reports actual
   zero-copy render submissions. On the qualified Windows 2048 x 2048 workload,
   the complete warm frame loop improved by 6.2% with byte-identical output.
+- Concurrent CUDA production and Vulkan presentation now rearm superseded
+  shared-display frames before reuse. This closes the intermittent
+  `Shared display storage is not available for CUDA` failure without adding
+  the global CUDA submission lock that reduced the affected engine workload by
+  4.5%-8.8%.
+- GGUI exposes fixed font scaling and continuous logical-height tracking through
+  `Gui.set_font_scale()` and
+  `Gui.set_font_scale_from_window_height()`. Vulkan and Metal share the same
+  linear policy. It uses the existing logical display size at the frame
+  boundary, performs no GPU readback, and does not rebuild the font atlas.
 - JIT Graph `ArgKind.NDARRAY` runtime arguments now consume the common runtime
   storage protocol for Ndarrays, dense fields, and explicit
   `DenseNdarrayView` objects. Compact Program-owned Ndarray and SNode payload
@@ -99,14 +109,20 @@ the `0.5.0` artifacts:
   `Graph.submit()` without a host control readback. Conditional metadata upload
   is asynchronous and retains at most two deferred replay batches. CPU retains
   exact portable control. Vulkan supports both exact portable control and
-  qualified bounded `native_required` `while` regions with 64-iteration
-  chunks, an eight-chunk/512-iteration limit, and compound asynchronous
-  submission of multiple ordered regions through one terminal ticket.
-  Automatic Vulkan lowering combines compact masking in the active chunk with
+  qualified bounded `native_required` `while` regions with a per-region
+  `chunk_size` capped at 64, an eight-chunk/512-iteration limit, and compound
+  asynchronous submission of multiple ordered regions through one terminal
+  ticket. Each region may select compact or coarse-gated first-chunk execution;
+  automatic Vulkan lowering combines compact masking in the active chunk with
   coarse conditional-rendering gates for later chunks. Runtime transactions
   coalesce their command buffers into one queue batch while preserving
-  semaphore order and bounded replay-slot retirement. Vulkan `if`/`switch` and
-  exact dynamic command termination remain unsupported and are reported
+  semaphore order and bounded replay-slot retirement. Opt-in
+  `submit(telemetry=True)` records per-region entry and terminal snapshots and
+  reports the actual stop iteration, encoded/masked work, active/skipped
+  chunks, enqueue time, and a qualified queue-counter window after ticket
+  completion. The default submission path allocates no telemetry buffers or
+  snapshot kernels. Vulkan `if`/`switch`, exact dynamic command termination,
+  and nested structured control remain unsupported and are reported
   independently by `structured_control_capabilities()`. On a warmed Windows
   16-region, 512-budget early-termination workload, the automatic coarse tail
   reduced complete transaction median by 9.5% versus compact masking for every
@@ -169,7 +185,7 @@ the `0.5.0` artifacts:
 
 ### Numerical tooling support boundary
 
-The `0.5.1` `LinearOperator` tooling supports fixed-topology, runtime-owned
+The `0.6.0` `LinearOperator` tooling supports fixed-topology, runtime-owned
 operators and qualified CPU/CUDA/Vulkan Krylov execution. The documented
 provider matrix covers CG/PCG, MINRES, BiCGSTAB, restarted GMRES, and FGMRES
 with a finite cyclic variable-linear action table. Solver plans expose true

@@ -2,7 +2,7 @@
 
 > DisplayFrame and direct display submission first shipped in `0.4.1`;
 > device-image staging was expanded in `0.4.24`, `0.5.0` added runtime
-> concurrency hardening, and `0.5.1` adds automatic CUDA-Vulkan shared storage.
+> concurrency hardening, and `0.6.0` adds automatic CUDA-Vulkan shared storage.
 > See [release notes](release_notes.en.md).
 
 Forge keeps ordinary `canvas.set_image(...)` compatibility while adding a

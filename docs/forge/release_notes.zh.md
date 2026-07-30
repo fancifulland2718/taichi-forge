@@ -1,6 +1,6 @@
 # Taichi Forge 版本更新说明
 
-本文是 Taichi Forge 用户可见更新的唯一版本索引。当前声明的包版本是 `0.5.1`。
+本文是 Taichi Forge 用户可见更新的唯一版本索引。当前声明的包版本是 `0.6.0`。
 `0.5.0` 保留为上一个已发布 runtime 源码边界，`0.4.25` 是最后一个公开的
 `0.4.x` 基线。
 
@@ -12,7 +12,7 @@
 
 | 版本 | 历史状态 | 源码边界 | 主要范围 |
 | --- | --- | --- | --- |
-| [0.5.1](#051) | 当前声明的源码版本；发行文件可能仍待发布 | 当前 `master` | 稀疏 runtime/线性代数、driver-only CUDA primitive、宿主内存/生命周期有界化与 runtime 合同补全 |
+| [0.6.0](#060) | 当前声明的源码版本；发行文件可能仍待发布 | 当前 `master` | 结构化 Graph 控制/遥测、稀疏 runtime/线性代数、driver-only CUDA primitive、显示互操作与 runtime 生命周期有界化 |
 | [0.1.0](#010) | 历史源码版本；发行文件可能已移除 | `91ad177685` | scikit-build-core 迁移与 Forge 发行包重命名 |
 | [0.1.1](#011) | 历史源码版本；发行文件可能已移除 | `c771969781` | `taichi_forge` import 重命名与安装布局修复 |
 | [0.1.2](#012) | 历史源码版本；发行文件可能已移除 | `fe5844390b` | import 修复与 CUDA 构建选项 |
@@ -36,9 +36,9 @@
 | [0.4.25](#0425) | PyPI 当前保留；最后一个公开 0.4.x 基线 | `7dad067ca` | GGUI 事件泵与 ImGui 生命周期修复 |
 | [0.5.0](#050) | 已发布 runtime 源码边界 | `95626e8036` | 异步 runtime 安全、Graph replay/lifetime、Dense Field Graph |
 
-## 0.5.1
+## 0.6.0
 
-`0.5.1` 汇总已发布 `0.5.0` runtime 源码边界之后的更新，不会追溯改写
+`0.6.0` 汇总已发布 `0.5.0` runtime 源码边界之后的更新，不会追溯改写
 `0.5.0` 发行产物的行为归属：
 
 - Offline-cache metadata lock 改为由打开文件句柄持有的操作系统 advisory lock。进程
@@ -68,6 +68,14 @@
   host，也不执行同帧 cross-device copy。capability/device 不匹配时自动使用既有 staging。
   `Window.get_display_stats()` 可报告实际 zero-copy render submission。资格验证后的
   Windows 2048 x 2048 workload 中，完整 warm frame loop 提升 6.2%，输出逐字节一致。
+- 并发 CUDA production 与 Vulkan presentation 在复用 superseded shared-display frame
+  前会重新完成 rearm，关闭间歇性的
+  `Shared display storage is not available for CUDA` 失败，同时不引入会令相关引擎
+  workload 损失 4.5%-8.8% 的全局 CUDA submission lock。
+- GGUI 通过 `Gui.set_font_scale()` 与
+  `Gui.set_font_scale_from_window_height()` 提供固定字体倍率和连续逻辑高度跟随。
+  Vulkan 与 Metal 共用同一线性策略；每个 frame boundary 直接使用既有逻辑显示高度，
+  不发生 GPU 回读，也不重建 font atlas。
 - JIT Graph 的 `ArgKind.NDARRAY` runtime 参数现在通过通用 runtime-storage 协议消费
   Ndarray、dense field 与显式 `DenseNdarrayView`。compact Program-owned Ndarray 与
   SNode payload binding 可使用 CUDA capture、exact replay 和兼容 allocation patch；
@@ -83,15 +91,19 @@
   conditional node；`native_required` region 可通过 `Graph.submit()` 异步提交，且不做
   host 控制回读。conditional metadata 异步上传，并最多保留两个 deferred replay batch。
   CPU 保留精确 portable 控制。Vulkan 同时支持精确 portable 控制与满足资格的有界
-  `native_required` `while`：每个 chunk 64 轮、每个 region 最多八个 chunk/512 轮，并可把
-  多个有序 region 作为 compound asynchronous submission 通过一个 terminal ticket 提交。
+  `native_required` `while`：`chunk_size` 按 region 生效并封顶为 64，每个 region 最多
+  八个 chunk/512 轮；多个有序 region 可作为 compound asynchronous submission 通过一个
+  terminal ticket 提交。每个 region 可以选择 compact 或 coarse-gated 首 chunk；
   Vulkan 自动 lowering 在 active chunk 内使用 compact masking，并用 coarse conditional
   rendering gate 跳过后续 chunk。runtime transaction 把其中的 command buffer 合并为一次
-  queue batch，同时保持 semaphore 顺序和有界 replay-slot 退役。Vulkan `if`/`switch` 与
-  exact dynamic command termination 仍不支持，并由
-  `structured_control_capabilities()` 独立报告。在预热后的 Windows 16-region、
-  512-budget early-termination workload 中，自动 coarse tail 相对全 chunk compact
-  masking 将完整 transaction median 缩短 9.5%，terminal 结果一致。
+  queue batch，同时保持 semaphore 顺序和有界 replay-slot 退役。显式
+  `submit(telemetry=True)` 会记录逐 region 的进入与终态 snapshot，并在 ticket 完成后报告
+  真实停止轮次、encoded/masked 工作、active/skipped chunk、enqueue 时间和经过说明的
+  queue-counter 窗口；默认提交路径不分配 telemetry buffer，也不增加 snapshot kernel。
+  Vulkan `if`/`switch`、exact dynamic command termination 与 nested structured control
+  仍不支持，并由 `structured_control_capabilities()` 独立报告。在预热后的 Windows
+  16-region、512-budget early-termination workload 中，自动 coarse tail 相对全 chunk
+  compact masking 将完整 transaction median 缩短 9.5%，terminal 结果一致。
 - 新增 `LinearOperator.graph_action()`，可把 compiled-kernel f32 provider 直接录入
   Graph root 或结构化 body。provider-owned topology/numeric generation 保持 zero-copy
   fixed binding，input/output dense storage 使用通用 runtime 协议；numeric generation
@@ -139,7 +151,7 @@
 
 ### 数值工具支持边界
 
-`0.5.1` 的 `LinearOperator` 工具支持 fixed-topology、runtime-owned operator，以及
+`0.6.0` 的 `LinearOperator` 工具支持 fixed-topology、runtime-owned operator，以及
 经过资格验证的 CPU/CUDA/Vulkan Krylov 执行。文档 provider 矩阵覆盖 CG/PCG、
 MINRES、BiCGSTAB、restarted GMRES，以及使用有限 cyclic variable-linear action table
 的 FGMRES。solver plan 提供真实 residual 终止、immutable generation 所有权、持久

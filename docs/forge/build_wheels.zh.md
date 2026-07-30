@@ -1,6 +1,6 @@
 # 构建 Forge wheel
 
-> 当前源码合同：`0.5.1`。runtime/shim 拆包从 `0.4.23` 开始公开；版本归属见
+> 当前源码合同：`0.6.0`。runtime/shim 拆包从 `0.4.23` 开始公开；版本归属见
 > [版本更新说明](release_notes.zh.md)。
 
 本文对齐 `.github/workflows/publish_runtime_pypi.yml` 和

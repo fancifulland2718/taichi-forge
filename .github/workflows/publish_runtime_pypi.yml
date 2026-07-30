@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version (e.g. 0.5.1 or 0.5.1rc1); leave empty to use version.txt"
+        description: "Version (e.g. 0.6.0 or 0.6.0rc1); leave empty to use version.txt"
         required: false
         default: ""
       publish:

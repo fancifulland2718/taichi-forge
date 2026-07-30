@@ -45,7 +45,7 @@ independent from upstream Taichi version numbers.
 
 ## Release History
 
-The current source release is `0.5.1`; `0.4.25` is the final public
+The current source release is `0.6.0`; `0.4.25` is the final public
 `0.4.x` baseline. PyPI storage is limited, so some nonessential older
 distribution files have been removed. The complete version index therefore
 uses durable Git source boundaries instead of treating the current PyPI file
@@ -53,7 +53,7 @@ list as the whole history.
 
 | Release | User-visible scope |
 | --- | --- |
-| [0.5.1](docs/forge/release_notes.en.md#051) | Sparse runtime/assembly and fixed storage; provider-neutral LinearOperator Krylov tooling through variable-linear FGMRES; qualification and pacing; driver-only CUDA primitives; cache, allocator, and lifecycle hardening. |
+| [0.6.0](docs/forge/release_notes.en.md#060) | Structured Graph control and telemetry; sparse runtime/assembly and provider-neutral Krylov tooling; driver-only CUDA primitives; CUDA-Vulkan display sharing; cache, allocator, and lifecycle hardening. |
 | [0.5.0](docs/forge/release_notes.en.md#050) | Post-`0.4.25` async backend/runtime safety and bounded observability; CUDA/Vulkan Graph replay and lifetime hardening; Dense Field Graph, strict argument/AD contracts, and block-level heterogeneous environments. |
 | [0.4.25](docs/forge/release_notes.en.md#0425) | GGUI event-pump and empty-ImGui-frame lifecycle fixes. |
 | [0.4.24](docs/forge/release_notes.en.md#0424) | Device-side GGUI image packing and render-cadence improvements. |
