@@ -32,19 +32,11 @@ constexpr std::size_t taichi_result_buffer_runtime_query_id = 31;
 
 constexpr int taichi_listgen_max_element_size = 1024;
 
-// By default, CUDA could allocate up to 48KB static shared arrays.
-// It requires dynamic shared memory to allocate a larger array.
-// Therefore, when one shared array request for size greater than 48KB,
-// we switch it to dynamic allocation.
-// In current version, only one dynamic instance is allowed.
-// TODO: remove the limit.
-constexpr std::size_t cuda_dynamic_shared_array_threshold_bytes = 49152;
-// Keep large CUDA SharedArray behavior portable across compute capability 7.x
-// and newer devices. Some architectures expose a larger opt-in capacity, but
-// kernels must not silently become device-specific by consuming it.
-constexpr std::size_t cuda_portable_dynamic_shared_array_limit_bytes =
-    64 * 1024;
-constexpr int cuda_dynamic_shared_array_min_compute_capability = 70;
+// Forge deliberately stays within CUDA's default per-block shared-memory
+// capacity. Opt-in dynamic shared memory is not enabled because larger
+// allocations have produced CUDA illegal-memory-access failures across
+// ordinary launches, Graph replay, and repeated runtime initialization.
+constexpr std::size_t cuda_shared_array_limit_bytes = 48 * 1024;
 
 // use for auto mesh_local to determine shared-mem size per block (in bytes)
 // TODO: get this at runtime

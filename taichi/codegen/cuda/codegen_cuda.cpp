@@ -184,37 +184,24 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
       size_t shared_array_bytes =
           tensor_type->get_num_elements() *
           data_type_size(tensor_type->get_element_type());
-      if (shared_array_bytes > cuda_dynamic_shared_array_threshold_bytes) {
-        TI_ERROR_IF(
-            shared_array_bytes >
-                cuda_portable_dynamic_shared_array_limit_bytes,
-            "CUDA SharedArray requests {} bytes, exceeding the portable "
-            "64 KiB per-block limit.",
-            shared_array_bytes);
-        if (dynamic_shared_array_bytes > 0) {
-          /* Current version only allows one dynamic shared array allocation,
-           * otherwise the results could be wrong.
-           * However, we should be able to collect multiple user allocations
-           * and transparently apply a proper offset.
-           *
-           * TODO: remove the limits.
-           */
-          TI_ERROR(
-              "Only one single large shared array instance is allowed in "
-              "current version.")
-        }
-        // Clear tensor shape for dynamic shared memory.
-        tensor_type->set_shape(std::vector<int>({0}));
-        dynamic_shared_array_bytes += shared_array_bytes;
-      }
-
-      auto type = tlctx->get_data_type(tensor_type);
+      TI_ERROR_IF(
+          shared_array_bytes > cuda_shared_array_limit_bytes,
+          "CUDA SharedArray requests {} bytes, exceeding the supported 48 KiB "
+          "per-block limit. CUDA opt-in dynamic shared memory is disabled "
+          "because larger allocations can trigger "
+          "CUDA_ERROR_ILLEGAL_ADDRESS (IMA), including during Graph replay.",
+          shared_array_bytes);
+      // Keep the interned TensorType immutable. The former dynamic-shared
+      // lowering changed its shape to {0} in place, corrupting later kernels
+      // that reused the same type after compilation or ti.reset().
+      auto *shared_array_type = tlctx->get_data_type(tensor_type);
       auto base = new llvm::GlobalVariable(
-          *module, type, false, llvm::GlobalValue::ExternalLinkage, nullptr,
+          *module, shared_array_type, false,
+          llvm::GlobalValue::ExternalLinkage, nullptr,
           fmt::format("shared_array_{}", stmt->id), nullptr,
           llvm::GlobalVariable::NotThreadLocal, 3 /*addrspace=shared*/);
       base->setAlignment(llvm::MaybeAlign(8));
-      auto ptr_type = llvm::PointerType::get(type, 0);
+      auto ptr_type = llvm::PointerType::get(shared_array_type, 0);
       llvm_val[stmt] = builder->CreatePointerCast(base, ptr_type);
     } else {
       TaskCodeGenLLVM::visit(stmt);

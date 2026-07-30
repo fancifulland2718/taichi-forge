@@ -1,6 +1,4 @@
 #include <memory>
-#include <mutex>
-#include <unordered_map>
 
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/DynamicLibrary.h"
@@ -40,50 +38,27 @@ namespace taichi::lang {
 class JITModuleCUDA : public JITModule {
  private:
   friend class JITSessionCUDA;
-  struct FunctionEntry {
-    void *handle{nullptr};
-    std::size_t prepared_dynamic_shared_bytes{0};
-  };
-
   void *module_;
-  std::mutex functions_mutex_;
-  std::unordered_map<std::string, FunctionEntry> functions_;
-
-  void *lookup_function_with_dynamic_shared_memory(
-      const std::string &name,
-      std::size_t dynamic_shared_mem_bytes) {
-    std::lock_guard<std::mutex> lock(functions_mutex_);
-    auto &entry = functions_[name];
-    if (entry.handle == nullptr) {
-      // TODO: figure out why using the guard leads to wrong tests results
-      // auto context_guard = CUDAContext::get_instance().get_guard();
-      CUDAContext::get_instance().make_current();
-      auto t = Time::get_time();
-      auto err =
-          CUDADriver::get_instance().module_get_function.call_with_warning(
-              &entry.handle, module_, name.c_str());
-      if (err) {
-        TI_ERROR("Cannot look up function {}", name);
-      }
-      t = Time::get_time() - t;
-      TI_TRACE("CUDA module_get_function {} costs {} ms", name, t * 1000);
-      TI_ASSERT(entry.handle != nullptr);
-    }
-    if (dynamic_shared_mem_bytes >
-        entry.prepared_dynamic_shared_bytes) {
-      CUDAContext::get_instance().prepare_dynamic_shared_memory(
-          entry.handle, dynamic_shared_mem_bytes);
-      entry.prepared_dynamic_shared_bytes = dynamic_shared_mem_bytes;
-    }
-    return entry.handle;
-  }
 
  public:
   explicit JITModuleCUDA(void *module) : module_(module) {
   }
 
   void *lookup_function(const std::string &name) override {
-    return lookup_function_with_dynamic_shared_memory(name, 0);
+    // TODO: figure out why using the guard leads to wrong tests results
+    // auto context_guard = CUDAContext::get_instance().get_guard();
+    CUDAContext::get_instance().make_current();
+    void *func = nullptr;
+    auto t = Time::get_time();
+    auto err = CUDADriver::get_instance().module_get_function.call_with_warning(
+        &func, module_, name.c_str());
+    if (err) {
+      TI_ERROR("Cannot look up function {}", name);
+    }
+    t = Time::get_time() - t;
+    TI_TRACE("CUDA module_get_function {} costs {} ms", name, t * 1000);
+    TI_ASSERT(func != nullptr);
+    return func;
   }
 
   void call(const std::string &name,
@@ -109,12 +84,10 @@ class JITModuleCUDA : public JITModule {
                           const std::vector<void *> &arg_pointers,
                           const std::vector<int> &arg_sizes,
                           void *stream) {
-    auto func = lookup_function_with_dynamic_shared_memory(
-        name, dynamic_shared_mem_bytes);
+    auto func = lookup_function(name);
     CUDAContext::get_instance().launch(func, name, arg_pointers, arg_sizes,
                                        grid_dim, block_dim,
-                                       dynamic_shared_mem_bytes, stream,
-                                       /*dynamic_shared_memory_prepared=*/true);
+                                       dynamic_shared_mem_bytes, stream);
   }
 
   bool direct_dispatch() const override {
@@ -131,7 +104,6 @@ class JITSessionCUDA : public JITSession {
                  llvm::DataLayout data_layout)
       : JITSession(tlctx, config), data_layout(data_layout) {
   }
-
   JITModule *add_module(std::unique_ptr<llvm::Module> M, int max_reg) override;
 
   bool remove_module(JITModule *module) override;
