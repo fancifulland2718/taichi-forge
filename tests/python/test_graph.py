@@ -252,6 +252,52 @@ def test_graph_rwtexture_descriptor_mismatch_rejected_before_compile():
         produce_injected_args_for_graph(write._primal, (bad_ndim,))
 
 
+@test_utils.test(arch=ti.vulkan)
+def test_graph_texture_descriptor_access_is_covariant():
+    from taichi_forge.aot.utils import produce_injected_args_for_graph
+
+    @ti.kernel
+    def read(tex: ti.types.texture(num_dimensions=2)):
+        pass
+
+    @ti.kernel
+    def write(
+        tex: ti.types.rw_texture(num_dimensions=2, fmt=ti.Format.r32f, lod=0),
+    ):
+        pass
+
+    read_write_texture = ti.graph.Arg(
+        ti.graph.ArgKind.RWTEXTURE,
+        "tex",
+        ndim=2,
+        fmt=ti.Format.r32f,
+    )
+    produce_injected_args_for_graph(read._primal, (read_write_texture,))
+
+    read_only_texture = ti.graph.Arg(
+        ti.graph.ArgKind.TEXTURE,
+        "tex",
+        ndim=2,
+    )
+    with pytest.raises(
+        TaichiCompilationError,
+        match="RWTexture descriptor mismatch",
+    ):
+        produce_injected_args_for_graph(write._primal, (read_only_texture,))
+
+    wrong_dimension = ti.graph.Arg(
+        ti.graph.ArgKind.RWTEXTURE,
+        "tex",
+        ndim=3,
+        fmt=ti.Format.r32f,
+    )
+    with pytest.raises(
+        TaichiCompilationError,
+        match="Texture descriptor mismatch",
+    ):
+        produce_injected_args_for_graph(read._primal, (wrong_dimension,))
+
+
 @test_utils.test(arch=supported_archs_cgraph)
 def test_ndarray_int():
     n = 4

@@ -105,7 +105,10 @@ def _produce_injected_arg(arg, symbolic_arg=None, has_symbolic_arg=False):
         if has_symbolic_arg:
             expected = describe_annotation(anno)
             actual = describe_symbolic_arg(symbolic_arg)
-            if actual.kind != "texture" or actual.ndim != expected.ndim:
+            if (
+                actual.kind not in ("texture", "rw_texture")
+                or actual.ndim != expected.ndim
+            ):
                 raise TaichiCompilationError(
                     f"Texture descriptor mismatch for argument {arg.name}: "
                     f"expected ndim={expected.ndim}, got {actual.kind} "
