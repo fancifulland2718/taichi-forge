@@ -13,6 +13,7 @@
 
 #include "Eigen/Dense"
 #include "Eigen/SparseLU"
+#include "taichi/analysis/gather_snode_tree_dependencies.h"
 #include "taichi/aot/graph_data.h"
 #include "taichi/ir/type_factory.h"
 #include "taichi/program/kernel.h"
@@ -721,6 +722,28 @@ CompiledKernelLinearOperator::debug_runtime_statistics() const {
   return result;
 }
 
+struct CompiledGraphLinearOperator::RecordGeneration {
+  RecordGeneration(Program *program,
+                   std::vector<OwnedNdarrayArgument> numeric_arguments)
+      : program(program),
+        numeric_arguments(std::move(numeric_arguments)) {
+  }
+
+  ~RecordGeneration() {
+    if (!program) {
+      return;
+    }
+    for (auto &argument : numeric_arguments) {
+      if (argument.value) {
+        program->delete_ndarray(argument.value);
+      }
+    }
+  }
+
+  Program *program{nullptr};
+  std::vector<OwnedNdarrayArgument> numeric_arguments;
+};
+
 CompiledGraphLinearOperator::CompiledGraphLinearOperator(
     Program *program,
     const aot::CompiledGraph &graph,
@@ -730,7 +753,8 @@ CompiledGraphLinearOperator::CompiledGraphLinearOperator(
     FixedI32Arguments fixed_i32_arguments,
     NdarrayArguments topology_arguments,
     NdarrayArguments numeric_arguments,
-    NdarrayArguments workspace_arguments)
+    NdarrayArguments workspace_arguments,
+    std::vector<SNodeTreeDependency> state_dependencies)
     : SparseMatrix(size, size, PrimitiveType::f32) {
   TI_ERROR_IF(!program || size <= 0 || topology_version == 0 ||
                   numeric_version == 0,
@@ -745,16 +769,43 @@ CompiledGraphLinearOperator::CompiledGraphLinearOperator(
   TI_ERROR_IF(graph.dispatches.empty(),
               "Compiled-graph linear operators require at least one "
               "kernel dispatch.");
-  TI_ERROR_IF(!graph.snode_tree_dependencies.empty(),
-              "Compiled-graph linear operators must not depend on any "
-              "SNodeTree; use explicit ndarray arguments.");
+  auto normalized_state = state_dependencies;
+  auto graph_state = graph.snode_tree_dependencies;
+  auto normalize_dependencies = [](auto *dependencies) {
+    std::sort(dependencies->begin(), dependencies->end());
+    dependencies->erase(
+        std::unique(dependencies->begin(), dependencies->end()),
+        dependencies->end());
+  };
+  normalize_dependencies(&normalized_state);
+  normalize_dependencies(&graph_state);
+  const bool state_matches =
+      normalized_state.size() == graph_state.size() &&
+      std::equal(
+          normalized_state.begin(), normalized_state.end(),
+          graph_state.begin(),
+          [](const SNodeTreeDependency &declared,
+             const SNodeTreeDependency &compiled) {
+            return declared.tree_id == compiled.tree_id &&
+                   declared.generation == compiled.generation &&
+                   declared.layout_fingerprint ==
+                       compiled.layout_fingerprint;
+          });
+  TI_ERROR_IF(
+      !state_matches,
+      "Compiled-graph linear operator SNode dependencies must exactly match "
+      "the explicitly declared root-dense fixed Field state.");
+  TI_ERROR_IF(
+      irpass::analysis::has_non_dense_snode_tree_dependency(
+          *program, graph.snode_tree_dependencies),
+      "Compiled-graph linear operator fixed Field state requires purely "
+      "dense SNodeTrees; a dependent tree contains sparse or dynamic "
+      "SNodes.");
   for (const auto &dispatch : graph.dispatches) {
     TI_ERROR_IF(!dispatch.ti_kernel || dispatch.ti_kernel->program != program ||
-                    dispatch.ti_kernel->arch != arch ||
-                    !dispatch.snode_tree_dependencies.empty(),
+                    dispatch.ti_kernel->arch != arch,
                 "Compiled-graph linear operator dispatches must be JIT "
-                "kernels owned by the same Program/backend with no SNodeTree "
-                "dependencies.");
+                "kernels owned by the same Program/backend.");
   }
   TI_ERROR_IF(topology_arguments.empty(),
               "Compiled-graph linear operators require at least one explicit "
@@ -856,6 +907,7 @@ CompiledGraphLinearOperator::CompiledGraphLinearOperator(
   auto owned_graph = std::make_unique<aot::CompiledGraph>(graph);
   auto owned_cache = std::make_unique<aot::CompiledGraphJITCache>();
   std::vector<OwnedNdarrayArgument> owned_arguments;
+  std::vector<OwnedNdarrayArgument> numeric_owned_arguments;
   auto snapshot_arguments = [&](const NdarrayArguments &arguments,
                                 NdarrayRole role,
                                 std::uint64_t *reserved_bytes) {
@@ -865,7 +917,10 @@ CompiledGraphLinearOperator::CompiledGraphLinearOperator(
           false);
       try {
         program->copy_ndarray_fast(owned, const_cast<Ndarray *>(source));
-        owned_arguments.push_back({name, owned, role});
+        auto &destination = role == NdarrayRole::numeric
+                                ? numeric_owned_arguments
+                                : owned_arguments;
+        destination.push_back({name, owned, role});
       } catch (...) {
         program->delete_ndarray(owned);
         throw;
@@ -878,6 +933,7 @@ CompiledGraphLinearOperator::CompiledGraphLinearOperator(
   std::uint64_t topology_bytes = 0;
   std::uint64_t numeric_bytes = 0;
   std::uint64_t workspace_bytes = 0;
+  std::shared_ptr<RecordGeneration> numeric_generation;
   try {
     snapshot_arguments(topology_arguments, NdarrayRole::topology,
                        &topology_bytes);
@@ -885,8 +941,13 @@ CompiledGraphLinearOperator::CompiledGraphLinearOperator(
                        &numeric_bytes);
     snapshot_arguments(workspace_arguments, NdarrayRole::workspace,
                        &workspace_bytes);
+    numeric_generation = std::make_shared<RecordGeneration>(
+        program, std::move(numeric_owned_arguments));
   } catch (...) {
     for (auto &argument : owned_arguments) {
+      program->delete_ndarray(argument.value);
+    }
+    for (auto &argument : numeric_owned_arguments) {
       program->delete_ndarray(argument.value);
     }
     throw;
@@ -897,11 +958,17 @@ CompiledGraphLinearOperator::CompiledGraphLinearOperator(
   cache_ = std::move(owned_cache);
   fixed_i32_arguments_ = std::move(fixed_i32_arguments);
   owned_ndarray_arguments_ = std::move(owned_arguments);
+  current_record_generation_ = std::move(numeric_generation);
   topology_reserved_bytes_ = topology_bytes;
   numeric_reserved_bytes_ = numeric_bytes;
   workspace_reserved_bytes_ = workspace_bytes;
   topology_version_ = topology_version;
   numeric_version_ = numeric_version;
+  std::sort(state_dependencies.begin(), state_dependencies.end());
+  state_dependencies.erase(
+      std::unique(state_dependencies.begin(), state_dependencies.end()),
+      state_dependencies.end());
+  state_dependencies_ = std::move(state_dependencies);
   record_pattern_build();
   record_spmv_plan_build();
   for (std::size_t i = 0; i < workspace_arguments.size(); ++i) {
@@ -917,6 +984,7 @@ CompiledGraphLinearOperator::~CompiledGraphLinearOperator() {
     cache_.reset();
   }
   graph_.reset();
+  current_record_generation_.reset();
   if (program_) {
     for (auto &argument : owned_ndarray_arguments_) {
       if (argument.value) {
@@ -1010,6 +1078,13 @@ void CompiledGraphLinearOperator::apply_with_execution(
     arguments.emplace(name, aot::IValue::create(value));
   }
   for (const auto &argument : owned_ndarray_arguments_) {
+    arguments.emplace(argument.name, aot::IValue::create(*argument.value));
+  }
+  TI_ERROR_IF(!current_record_generation_,
+              "Compiled-graph linear operator has no published numeric "
+              "generation.");
+  for (const auto &argument :
+       current_record_generation_->numeric_arguments) {
     arguments.emplace(argument.name, aot::IValue::create(*argument.value));
   }
   record_spmv_call();
@@ -1173,19 +1248,17 @@ void CompiledGraphLinearOperator::update_numeric_arguments(
   TI_ERROR_IF(numeric_version_ == std::numeric_limits<std::uint64_t>::max(),
               "Compiled-graph numeric version overflow.");
 
-  const std::size_t numeric_count = static_cast<std::size_t>(std::count_if(
-      owned_ndarray_arguments_.begin(), owned_ndarray_arguments_.end(),
-      [](const OwnedNdarrayArgument &argument) {
-        return argument.role == NdarrayRole::numeric;
-      }));
+  TI_ERROR_IF(!current_record_generation_,
+              "Compiled-graph linear operator numeric generation is "
+              "unavailable.");
+  const auto &current_numeric =
+      current_record_generation_->numeric_arguments;
+  const std::size_t numeric_count = current_numeric.size();
   TI_ERROR_IF(numeric_count == 0 || numeric_arguments.size() != numeric_count,
               "Compiled-graph numeric update requires the complete numeric "
               "role set of {} arguments; received {}.",
               numeric_count, numeric_arguments.size());
-  for (const auto &argument : owned_ndarray_arguments_) {
-    if (argument.role != NdarrayRole::numeric) {
-      continue;
-    }
+  for (const auto &argument : current_numeric) {
     const auto found = numeric_arguments.find(argument.name);
     TI_ERROR_IF(found == numeric_arguments.end(),
                 "Compiled-graph numeric update is missing role '{}'.",
@@ -1208,11 +1281,9 @@ void CompiledGraphLinearOperator::update_numeric_arguments(
 
   std::vector<OwnedNdarrayArgument> replacements;
   replacements.reserve(numeric_count);
+  std::shared_ptr<RecordGeneration> next_generation;
   try {
-    for (const auto &argument : owned_ndarray_arguments_) {
-      if (argument.role != NdarrayRole::numeric) {
-        continue;
-      }
+    for (const auto &argument : current_numeric) {
       const Ndarray *source = numeric_arguments.at(argument.name);
       Ndarray *replacement = program_->create_ndarray(
           source->get_element_data_type(), source->shape, source->layout,
@@ -1227,6 +1298,8 @@ void CompiledGraphLinearOperator::update_numeric_arguments(
         throw;
       }
     }
+    next_generation = std::make_shared<RecordGeneration>(
+        program_, std::move(replacements));
   } catch (...) {
     for (auto &replacement : replacements) {
       program_->delete_ndarray(replacement.value);
@@ -1234,32 +1307,49 @@ void CompiledGraphLinearOperator::update_numeric_arguments(
     throw;
   }
 
-  std::vector<Ndarray *> retired;
-  retired.reserve(numeric_count);
   cache_->clear_runtime_state();
-  std::size_t replacement_index = 0;
-  for (auto &argument : owned_ndarray_arguments_) {
-    if (argument.role != NdarrayRole::numeric) {
-      continue;
-    }
-    TI_ASSERT(replacement_index < replacements.size());
-    auto &replacement = replacements[replacement_index++];
-    TI_ASSERT(replacement.name == argument.name &&
-              replacement.value != nullptr);
-    retired.push_back(argument.value);
-    argument.value = replacement.value;
-    replacement.value = nullptr;
-  }
-  TI_ASSERT(replacement_index == replacements.size());
+  current_record_generation_ = std::move(next_generation);
   numeric_version_++;
   numeric_update_peak_temporary_bytes_ =
       std::max(numeric_update_peak_temporary_bytes_, numeric_reserved_bytes_);
   record_numeric_update(numeric_reserved_bytes_);
   record_spmv_plan_build();
   record_transfer_bytes(0, 0, numeric_reserved_bytes_);
-  for (Ndarray *argument : retired) {
-    program_->delete_ndarray(argument);
+}
+
+std::shared_ptr<LinearOperatorRecordableKernel>
+CompiledGraphLinearOperator::recordable_kernel() const {
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  TI_ERROR_IF(!graph_ || !current_record_generation_,
+              "Compiled-graph linear operator has no published recordable "
+              "generation.");
+  TI_ERROR_IF(
+      graph_->has_indirect_dispatches(),
+      "Compiled-graph linear operators with indirect dispatch cannot be "
+      "inlined into an outer Graph yet; rebuild the provider with direct "
+      "dispatches.");
+  LinearOperatorRecordableKernel::FixedNdarrayArguments fixed_ndarrays;
+  fixed_ndarrays.reserve(
+      owned_ndarray_arguments_.size() +
+      current_record_generation_->numeric_arguments.size());
+  for (const auto &argument : owned_ndarray_arguments_) {
+    fixed_ndarrays.emplace_back(argument.name, argument.value);
   }
+  for (const auto &argument :
+       current_record_generation_->numeric_arguments) {
+    fixed_ndarrays.emplace_back(argument.name, argument.value);
+  }
+  const OperatorResourceStamp stamp{
+      reinterpret_cast<std::uintptr_t>(program_),
+      program_->runtime_program_generation(),
+      1,
+      topology_version_,
+      numeric_version_,
+      matrix_id()};
+  return std::make_shared<LinearOperatorRecordableKernel>(
+      program_, graph_.get(), fixed_i32_arguments_,
+      std::move(fixed_ndarrays), state_dependencies_, stamp,
+      current_record_generation_);
 }
 
 SparseMatrixRuntimeStatistics

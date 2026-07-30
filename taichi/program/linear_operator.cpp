@@ -8,6 +8,7 @@
 #include <mutex>
 #include <utility>
 
+#include "taichi/analysis/gather_snode_tree_dependencies.h"
 #include "taichi/aot/graph_data.h"
 #include "taichi/common/core.h"
 #include "taichi/ir/type_factory.h"
@@ -2225,12 +2226,42 @@ LinearOperatorRecordableKernel::LinearOperatorRecordableKernel(
               "kernel, positive active size, topology, and generation.");
 }
 
+LinearOperatorRecordableKernel::LinearOperatorRecordableKernel(
+    Program *program,
+    const aot::CompiledGraph *graph,
+    FixedI32Arguments fixed_i32,
+    FixedNdarrayArguments fixed_ndarrays,
+    std::vector<SNodeTreeDependency> state_dependencies,
+    OperatorResourceStamp stamp,
+    std::shared_ptr<void> generation_owner)
+    : program_(program),
+      graph_(graph),
+      fixed_i32_(std::move(fixed_i32)),
+      fixed_ndarrays_(std::move(fixed_ndarrays)),
+      state_dependencies_(std::move(state_dependencies)),
+      stamp_(stamp),
+      generation_owner_(std::move(generation_owner)) {
+  TI_ERROR_IF(!program_ || !graph_ || graph_->dispatches.empty() ||
+                  !generation_owner_,
+              "Recordable LinearOperator Graph actions require a live "
+              "Program, non-empty Graph, and immutable generation.");
+  for (const auto &dispatch : graph_->dispatches) {
+    TI_ERROR_IF(!dispatch.ti_kernel,
+                "Recordable LinearOperator Graph actions require JIT "
+                "dispatch kernels.");
+  }
+}
+
 Program *LinearOperatorRecordableKernel::program() const {
   return program_;
 }
 
 Kernel *LinearOperatorRecordableKernel::kernel() const {
   return kernel_;
+}
+
+const aot::CompiledGraph *LinearOperatorRecordableKernel::graph() const {
+  return graph_;
 }
 
 std::int32_t LinearOperatorRecordableKernel::active_size() const {
@@ -2243,6 +2274,21 @@ Ndarray *LinearOperatorRecordableKernel::topology() const {
 
 Ndarray *LinearOperatorRecordableKernel::numeric() const {
   return numeric_;
+}
+
+const LinearOperatorRecordableKernel::FixedI32Arguments &
+LinearOperatorRecordableKernel::fixed_i32() const {
+  return fixed_i32_;
+}
+
+const LinearOperatorRecordableKernel::FixedNdarrayArguments &
+LinearOperatorRecordableKernel::fixed_ndarrays() const {
+  return fixed_ndarrays_;
+}
+
+const std::vector<SNodeTreeDependency> &
+LinearOperatorRecordableKernel::state_dependencies() const {
+  return state_dependencies_;
 }
 
 OperatorResourceStamp LinearOperatorRecordableKernel::resource_stamp() const {
@@ -3480,22 +3526,51 @@ void validate_compiled_graph_action(
     const GraphFixedI32Arguments &fixed_i32,
     const GraphNdarrayArguments &topology,
     const GraphNdarrayArguments &numeric,
-    const GraphNdarrayArguments &workspace) {
+    const GraphNdarrayArguments &workspace,
+    const std::vector<SNodeTreeDependency> &state_dependencies) {
   const Arch arch = program->compile_config().arch;
   TI_ERROR_IF(graph.dispatches.empty(),
               "Compiled-Graph action {} requires at least one dispatch.",
               role);
-  TI_ERROR_IF(!graph.snode_tree_dependencies.empty(),
-              "Compiled-Graph action {} must not depend on an SNodeTree.",
-              role);
+  auto normalized_state = state_dependencies;
+  auto graph_state = graph.snode_tree_dependencies;
+  auto normalize_dependencies = [](auto *dependencies) {
+    std::sort(dependencies->begin(), dependencies->end());
+    dependencies->erase(
+        std::unique(dependencies->begin(), dependencies->end()),
+        dependencies->end());
+  };
+  normalize_dependencies(&normalized_state);
+  normalize_dependencies(&graph_state);
+  const bool state_matches =
+      normalized_state.size() == graph_state.size() &&
+      std::equal(
+          normalized_state.begin(), normalized_state.end(),
+          graph_state.begin(),
+          [](const SNodeTreeDependency &declared,
+             const SNodeTreeDependency &compiled) {
+            return declared.tree_id == compiled.tree_id &&
+                   declared.generation == compiled.generation &&
+                   declared.layout_fingerprint ==
+                       compiled.layout_fingerprint;
+          });
+  TI_ERROR_IF(
+      !state_matches,
+      "Compiled-Graph action {} SNode dependencies must exactly match "
+      "the explicitly declared root-dense fixed Field state.",
+      role);
+  TI_ERROR_IF(
+      irpass::analysis::has_non_dense_snode_tree_dependency(
+          *program, graph.snode_tree_dependencies),
+      "Compiled-Graph action {} fixed Field state requires purely dense "
+      "SNodeTrees; a dependent tree contains sparse or dynamic SNodes.",
+      role);
   for (const auto &dispatch : graph.dispatches) {
     TI_ERROR_IF(!dispatch.ti_kernel ||
                     dispatch.ti_kernel->program != program ||
-                    dispatch.ti_kernel->arch != arch ||
-                    !dispatch.snode_tree_dependencies.empty(),
+                    dispatch.ti_kernel->arch != arch,
                 "Compiled-Graph action {} dispatches must be JIT kernels "
-                "owned by the same Program/backend without SNodeTree "
-                "dependencies.",
+                "owned by the same Program/backend.",
                 role);
   }
 
@@ -3723,6 +3798,7 @@ struct GraphActionGeneration {
   Program *program{nullptr};
   std::shared_ptr<GraphActionDefinition> definition;
   std::vector<GraphActionOwnedResource> numeric_ndarrays;
+  OperatorResourceStamp stamp;
 };
 
 class CompiledGraphActionProvider {
@@ -3737,7 +3813,8 @@ class CompiledGraphActionProvider {
       GraphFixedI32Arguments fixed_i32,
       GraphNdarrayArguments topology,
       GraphNdarrayArguments numeric,
-      GraphNdarrayArguments workspace)
+      GraphNdarrayArguments workspace,
+      std::vector<SNodeTreeDependency> state_dependencies)
       : program_(program),
         descriptor_(std::move(descriptor)),
         topology_version_(topology_version),
@@ -3761,14 +3838,21 @@ class CompiledGraphActionProvider {
                 "got {}. No fallback was performed.",
                 arch_name(arch));
     validate_compiled_graph_action(program_, forward_graph, "forward",
-                                   fixed_i32, topology, numeric, workspace);
+                                   fixed_i32, topology, numeric, workspace,
+                                   state_dependencies);
     if (adjoint_graph) {
       validate_compiled_graph_action(program_, *adjoint_graph, "adjoint",
-                                     fixed_i32, topology, numeric, workspace);
+                                     fixed_i32, topology, numeric, workspace,
+                                     state_dependencies);
     }
     definition_ = std::make_shared<GraphActionDefinition>(
         program_, forward_graph, adjoint_graph);
     definition_->fixed_i32 = std::move(fixed_i32);
+    std::sort(state_dependencies.begin(), state_dependencies.end());
+    state_dependencies.erase(
+        std::unique(state_dependencies.begin(), state_dependencies.end()),
+        state_dependencies.end());
+    state_dependencies_ = std::move(state_dependencies);
     has_adjoint_ = adjoint_graph != nullptr;
     execution_state_ = std::make_shared<GraphActionExecutionState>(
         arch_is_cpu(arch) ? OperatorExecutionKind::explicit_sequence
@@ -3839,6 +3923,32 @@ class CompiledGraphActionProvider {
 
   bool has_numeric_resources() const {
     return !definition_->numeric_specs.empty();
+  }
+
+  std::shared_ptr<LinearOperatorRecordableKernel> recordable_kernel(
+      OperatorApplyMode mode) {
+    std::lock_guard<std::mutex> lock(update_mutex_);
+    TI_ERROR_IF(!current_generation_,
+                "Compiled-Graph action has no published generation.");
+    auto &graph = definition_->graph(mode);
+    TI_ERROR_IF(
+        graph.has_indirect_dispatches(),
+        "Compiled-Graph actions with indirect dispatch cannot be inlined "
+        "into an outer Graph yet; rebuild the provider with direct "
+        "dispatches.");
+    LinearOperatorRecordableKernel::FixedNdarrayArguments fixed_ndarrays;
+    fixed_ndarrays.reserve(definition_->fixed_ndarrays.size() +
+                           current_generation_->numeric_ndarrays.size());
+    for (const auto &resource : definition_->fixed_ndarrays) {
+      fixed_ndarrays.emplace_back(resource.name, resource.value);
+    }
+    for (const auto &resource : current_generation_->numeric_ndarrays) {
+      fixed_ndarrays.emplace_back(resource.name, resource.value);
+    }
+    return std::make_shared<LinearOperatorRecordableKernel>(
+        program_, &graph, definition_->fixed_i32, std::move(fixed_ndarrays),
+        state_dependencies_, current_generation_->stamp,
+        current_generation_);
   }
 
   void update_numeric(
@@ -3974,19 +4084,31 @@ class CompiledGraphActionProvider {
   void publish(std::vector<GraphActionOwnedResource> numeric_resources,
                std::uint64_t numeric_version,
                std::uint64_t binding_revision) {
-    auto generation = std::make_shared<GraphActionGeneration>(
-        program_, definition_, std::move(numeric_resources));
+    std::shared_ptr<GraphActionGeneration> generation;
+    try {
+      generation = std::make_shared<GraphActionGeneration>(
+          program_, definition_, std::move(numeric_resources));
+    } catch (...) {
+      for (auto &resource : numeric_resources) {
+        if (resource.value) {
+          program_->delete_ndarray(resource.value);
+        }
+      }
+      throw;
+    }
     const OperatorResourceStamp stamp{
         reinterpret_cast<std::uintptr_t>(program_),
         program_->runtime_program_generation(), 1, topology_version_,
         numeric_version, binding_revision};
+    generation->stamp = stamp;
+    current_generation_ = generation;
     const auto capabilities = make_capabilities();
     auto state = execution_state_;
     TI_ASSERT(state != nullptr);
     auto action = OperatorAction(
         descriptor_, capabilities, "forge_compiled_graph_action",
         [stamp] { return stamp; },
-        [generation = std::move(generation), state](
+        [generation, state](
             OperatorApplyMode mode, const OperatorVectorView &input,
             const OperatorVectorView &output) {
           generation->apply(mode, input, output, state);
@@ -3999,6 +4121,8 @@ class CompiledGraphActionProvider {
   std::shared_ptr<GraphActionDefinition> definition_;
   std::unique_ptr<OperatorResourceGenerationPublisher> generations_;
   std::shared_ptr<GraphActionExecutionState> execution_state_;
+  std::shared_ptr<GraphActionGeneration> current_generation_;
+  std::vector<SNodeTreeDependency> state_dependencies_;
   bool has_adjoint_{false};
   std::uint64_t topology_version_{0};
   std::uint64_t numeric_version_{0};
@@ -4021,6 +4145,7 @@ make_compiled_graph_operator_handle(
     GraphNdarrayArguments topology_arguments,
     GraphNdarrayArguments numeric_arguments,
     GraphNdarrayArguments workspace_arguments,
+    std::vector<SNodeTreeDependency> state_dependencies,
     OperatorMathematicalTraits mathematical_traits) {
   const OperatorDescriptor descriptor{
       OperatorSpaceDesc{PrimitiveType::f32, domain_extent},
@@ -4029,7 +4154,7 @@ make_compiled_graph_operator_handle(
       program, forward_graph, adjoint_graph, descriptor, topology_version,
       numeric_version, std::move(fixed_i32_arguments),
       std::move(topology_arguments), std::move(numeric_arguments),
-      std::move(workspace_arguments));
+      std::move(workspace_arguments), std::move(state_dependencies));
   auto binding = provider->binding().with_mathematical_traits(
       std::move(mathematical_traits));
   LinearOperatorHandle::NumericUpdateFn update;
@@ -4045,8 +4170,13 @@ make_compiled_graph_operator_handle(
                                expected_numeric_version);
     };
   }
+  LinearOperatorHandle::RecordableKernelFn recordable =
+      [provider](OperatorApplyMode mode) {
+        return provider->recordable_kernel(mode);
+      };
   return std::make_unique<LinearOperatorHandle>(
-      program, std::move(binding), provider, std::move(update));
+      program, std::move(binding), provider, std::move(update),
+      std::move(recordable));
 }
 
 std::unique_ptr<LinearOperatorHandle>
@@ -4065,6 +4195,14 @@ make_linear_operator_handle(
                   "Square compiled-kernel operators do not expose an "
                   "implicit adjoint recordable action.");
       return compiled->recordable_kernel();
+    };
+  } else if (auto *compiled_graph =
+                 dynamic_cast<CompiledGraphLinearOperator *>(&matrix)) {
+    recordable = [compiled_graph](OperatorApplyMode mode) {
+      TI_ERROR_IF(mode != OperatorApplyMode::forward,
+                  "Square compiled-Graph operators do not expose an "
+                  "implicit adjoint recordable action.");
+      return compiled_graph->recordable_kernel();
     };
   }
   return std::make_unique<LinearOperatorHandle>(

@@ -7,6 +7,7 @@
 #include "taichi/ir/statements.h"
 #include "taichi/ir/visitors.h"
 #include "taichi/program/kernel.h"
+#include "taichi/program/program.h"
 
 namespace taichi::lang {
 namespace irpass::analysis {
@@ -87,6 +88,16 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
   std::unordered_set<int> tree_ids_;
 };
 
+bool tree_contains_non_dense_snode(const SNode &node) {
+  if (!node.is_path_all_dense) {
+    return true;
+  }
+  return std::any_of(
+      node.ch.begin(), node.ch.end(), [](const std::unique_ptr<SNode> &child) {
+        return tree_contains_non_dense_snode(*child);
+      });
+}
+
 }  // namespace
 
 std::vector<int> gather_snode_tree_dependencies(const Kernel &kernel) {
@@ -98,6 +109,18 @@ std::vector<int> gather_snode_tree_dependencies(IRNode &ir) {
   SNodeTreeDependencyCollector collector;
   ir.accept(&collector);
   return collector.result();
+}
+
+bool has_non_dense_snode_tree_dependency(
+    Program &program,
+    const std::vector<SNodeTreeDependency> &dependencies) {
+  for (const auto &dependency : dependencies) {
+    const SNode *root = program.get_snode_root(dependency.tree_id);
+    if (root != nullptr && tree_contains_non_dense_snode(*root)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 }  // namespace irpass::analysis

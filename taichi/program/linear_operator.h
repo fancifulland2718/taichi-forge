@@ -13,6 +13,7 @@
 
 #include "taichi/ir/type.h"
 #include "taichi/program/runtime_completion.h"
+#include "taichi/struct/snode_tree.h"
 
 namespace taichi::lang {
 
@@ -154,6 +155,11 @@ struct OperatorResourceStamp {
 
 class LinearOperatorRecordableKernel {
  public:
+  using FixedI32Arguments =
+      std::unordered_map<std::string, std::int32_t>;
+  using FixedNdarrayArguments =
+      std::vector<std::pair<std::string, Ndarray *>>;
+
   LinearOperatorRecordableKernel(
       Program *program,
       Kernel *kernel,
@@ -162,20 +168,36 @@ class LinearOperatorRecordableKernel {
       Ndarray *numeric,
       OperatorResourceStamp stamp,
       std::shared_ptr<void> generation_owner);
+  LinearOperatorRecordableKernel(
+      Program *program,
+      const aot::CompiledGraph *graph,
+      FixedI32Arguments fixed_i32,
+      FixedNdarrayArguments fixed_ndarrays,
+      std::vector<SNodeTreeDependency> state_dependencies,
+      OperatorResourceStamp stamp,
+      std::shared_ptr<void> generation_owner);
 
   Program *program() const;
   Kernel *kernel() const;
+  const aot::CompiledGraph *graph() const;
   std::int32_t active_size() const;
   Ndarray *topology() const;
   Ndarray *numeric() const;
+  const FixedI32Arguments &fixed_i32() const;
+  const FixedNdarrayArguments &fixed_ndarrays() const;
+  const std::vector<SNodeTreeDependency> &state_dependencies() const;
   OperatorResourceStamp resource_stamp() const;
 
  private:
   Program *program_{nullptr};
   Kernel *kernel_{nullptr};
+  const aot::CompiledGraph *graph_{nullptr};
   std::int32_t active_size_{0};
   Ndarray *topology_{nullptr};
   Ndarray *numeric_{nullptr};
+  FixedI32Arguments fixed_i32_;
+  FixedNdarrayArguments fixed_ndarrays_;
+  std::vector<SNodeTreeDependency> state_dependencies_;
   OperatorResourceStamp stamp_;
   std::shared_ptr<void> generation_owner_;
 };
@@ -903,6 +925,7 @@ make_compiled_graph_operator_handle(
     std::unordered_map<std::string, const Ndarray *> topology_arguments,
     std::unordered_map<std::string, const Ndarray *> numeric_arguments,
     std::unordered_map<std::string, const Ndarray *> workspace_arguments,
+    std::vector<SNodeTreeDependency> state_dependencies,
     OperatorMathematicalTraits mathematical_traits);
 std::unique_ptr<LinearOperatorHandle>
 make_identity_operator_handle(Program *program,

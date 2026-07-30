@@ -1,4 +1,5 @@
 import atexit
+import gc
 import json
 import numbers
 import os
@@ -854,6 +855,13 @@ class PyTaichi:
         if has_submission_owners:
             self.clear_runtime_submission_owners()
         self.invalidate_runtime_objects()
+        # Structured Graph definitions and locally defined kernels can form
+        # Python reference cycles. Collect unreachable cycles while the
+        # Program and backend device still exist, so pybind kernel/graph
+        # wrappers never perform their final native release after finalize().
+        # Live user objects remain untouched and are reset through
+        # ``old_kernels`` below.
+        gc.collect()
         if self.prog:
             self.prog.finalize()
             self.prog = None

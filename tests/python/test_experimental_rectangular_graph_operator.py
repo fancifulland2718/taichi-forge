@@ -138,10 +138,48 @@ def test_rectangular_graph_explicit_adjoint_update_and_qualification():
         atol=2e-5,
     )
 
+    def compile_outer(adjoint=False):
+        outer_input = ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY, "outer_input", ti.f32, ndim=1
+        )
+        outer_output = ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY, "outer_output", ti.f32, ndim=1
+        )
+        outer_builder = ti.graph.GraphBuilder()
+        outer_builder.append_native(
+            operator.graph_action(
+                outer_input, outer_output, adjoint=adjoint
+            )
+        )
+        return outer_builder.compile()
+
+    forward_outer = compile_outer()
+    adjoint_outer = compile_outer(adjoint=True)
+    forward_input = _array(np.float32, domain)
+    forward_output = _array(np.float32, np.zeros(rows, np.float32))
+    forward_outer.run(
+        {"outer_input": forward_input, "outer_output": forward_output}
+    )
+    np.testing.assert_allclose(
+        forward_output.to_numpy(), matrix @ domain, rtol=2e-5, atol=2e-5
+    )
+    adjoint_input = _array(np.float32, range_values)
+    adjoint_output = _array(np.float32, np.zeros(columns, np.float32))
+    adjoint_outer.run(
+        {"outer_input": adjoint_input, "outer_output": adjoint_output}
+    )
+    np.testing.assert_allclose(
+        adjoint_output.to_numpy(),
+        matrix.T @ range_values,
+        rtol=2e-5,
+        atol=2e-5,
+    )
+    ti.sync()
+
     report = ti.linalg.qualify_operator(
         operator, reference=matrix, samples=2, warmup=0, repetitions=1
     )
-    assert report.passed
+    assert report.passed, report.to_json()
 
     updated_matrix = 2.0 * matrix
     operator.update_numeric(
@@ -149,6 +187,19 @@ def test_rectangular_graph_explicit_adjoint_update_and_qualification():
         expected_topology_version=1,
         expected_numeric_version=1,
     )
+    for stale_graph, stale_input, stale_output in (
+        (forward_outer, forward_input, forward_output),
+        (adjoint_outer, adjoint_input, adjoint_output),
+    ):
+        with pytest.raises(
+            ti.TaichiRuntimeError, match="generation changed"
+        ):
+            stale_graph.run(
+                {
+                    "outer_input": stale_input,
+                    "outer_output": stale_output,
+                }
+            )
     np.testing.assert_allclose(
         operator.apply(_array(np.float32, domain)).to_numpy(),
         updated_matrix @ domain,

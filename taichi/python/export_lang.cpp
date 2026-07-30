@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <type_traits>
+#include <unordered_set>
 #include <utility>
 #include "taichi/ir/snode.h"
 
@@ -1237,7 +1238,8 @@ void export_lang(py::module &m) {
               std::uint64_t topology_version,
               std::uint64_t numeric_version, const py::dict &fixed_i32_args,
               const py::dict &topology_args, const py::dict &numeric_args,
-              const py::dict &workspace_args) -> std::unique_ptr<SparseMatrix> {
+              const py::dict &workspace_args,
+              const py::dict &state_args) -> std::unique_ptr<SparseMatrix> {
              CompiledGraphLinearOperator::FixedI32Arguments fixed_i32;
              for (const auto &item : fixed_i32_args) {
                fixed_i32.emplace(py::cast<std::string>(item.first),
@@ -1251,13 +1253,45 @@ void export_lang(py::module &m) {
                }
                return result;
              };
+             std::vector<SNodeTreeDependency> state_dependencies;
+             state_dependencies.reserve(state_args.size());
+             for (const auto &item : state_args) {
+               const auto name = py::cast<std::string>(item.first);
+               TI_ERROR_IF(name.empty(),
+                           "Compiled-Graph fixed Field state names must be "
+                           "non-empty.");
+               const auto &descriptor =
+                   py::cast<const storage::DenseStorageDescriptor &>(
+                       item.second);
+               const auto source_kind = descriptor.source_kind();
+               const auto &owner = descriptor.owner();
+               TI_ERROR_IF(
+                   (source_kind !=
+                        storage::StorageSourceKind::kDenseScalarField &&
+                    source_kind !=
+                        storage::StorageSourceKind::kDensePackedField) ||
+                       owner.kind !=
+                           storage::StorageOwnerKind::kSNodePayload ||
+                       storage::validate_storage_owner(*program, descriptor) !=
+                           storage::StorageFailureReason::kNone,
+                   "Compiled-Graph fixed Field state '{}' must be a live "
+                   "root-dense scalar, vector, or matrix Field owned by the "
+                   "same Program.",
+                   name);
+               state_dependencies.push_back(owner.tree);
+             }
              return std::make_unique<CompiledGraphLinearOperator>(
                  program, graph, size, topology_version, numeric_version,
                  std::move(fixed_i32), parse_ndarrays(topology_args),
                  parse_ndarrays(numeric_args),
-                 parse_ndarrays(workspace_args));
+                 parse_ndarrays(workspace_args),
+                 std::move(state_dependencies));
            },
-           py::keep_alive<0, 1>())
+           py::keep_alive<0, 1>(), py::arg("graph"), py::arg("size"),
+           py::arg("topology_version"), py::arg("numeric_version"),
+           py::arg("fixed_i32_args"), py::arg("topology_args"),
+           py::arg("numeric_args"), py::arg("workspace_args"),
+           py::arg("state_args") = py::dict())
       .def("_create_csr_matrix_from_pattern",
            [](Program *program, std::shared_ptr<SparseCsrPattern> pattern,
               const Ndarray &values) -> std::unique_ptr<SparseMatrix> {
@@ -5949,6 +5983,90 @@ void export_lang(py::module &m) {
           "_numeric", &LinearOperatorRecordableKernel::numeric,
           py::return_value_policy::reference_internal)
       .def_property_readonly(
+          "_graph_dispatches",
+          [](const LinearOperatorRecordableKernel &record) {
+            py::list result;
+            const auto *graph = record.graph();
+            if (!graph) {
+              return result;
+            }
+            for (const auto &dispatch : graph->dispatches) {
+              result.append(py::make_tuple(
+                  py::cast(dispatch.ti_kernel,
+                           py::return_value_policy::reference),
+                  dispatch.symbolic_args));
+            }
+            return result;
+          })
+      .def_property_readonly(
+          "_fixed_i32",
+          [](const LinearOperatorRecordableKernel &record) {
+            py::dict result;
+            for (const auto &[name, value] : record.fixed_i32()) {
+              result[py::str(name)] = value;
+            }
+            return result;
+          })
+      .def_property_readonly(
+          "_fixed_ndarrays",
+          [](const LinearOperatorRecordableKernel &record) {
+            py::dict result;
+            for (const auto &[name, value] : record.fixed_ndarrays()) {
+              result[py::str(name)] =
+                  py::cast(value, py::return_value_policy::reference);
+            }
+            return result;
+          })
+      .def_property_readonly(
+          "_state_dependencies",
+          [](const LinearOperatorRecordableKernel &record) {
+            py::list result;
+            for (const auto &dependency : record.state_dependencies()) {
+              result.append(py::make_tuple(
+                  dependency.tree_id, dependency.generation,
+                  dependency.layout_fingerprint));
+            }
+            return result;
+          })
+      .def_property_readonly(
+          "_recordable_stats",
+          [](const LinearOperatorRecordableKernel &record) {
+            py::dict result;
+            std::unordered_set<const Ndarray *> unique_fixed;
+            if (record.topology()) {
+              unique_fixed.insert(record.topology());
+            }
+            if (record.numeric()) {
+              unique_fixed.insert(record.numeric());
+            }
+            for (const auto &[name, value] : record.fixed_ndarrays()) {
+              (void)name;
+              if (value) {
+                unique_fixed.insert(value);
+              }
+            }
+            std::uint64_t fixed_snapshot_bytes = 0;
+            for (const auto *value : unique_fixed) {
+              fixed_snapshot_bytes +=
+                  value->get_nelement() * value->get_element_size();
+            }
+            result["dispatch_count"] =
+                record.graph() ? record.graph()->dispatches.size() : 1;
+            result["fixed_ndarray_count"] =
+                record.fixed_ndarrays().size() +
+                (record.topology() ? 1 : 0) +
+                (record.numeric() ? 1 : 0);
+            result["provider_fixed_snapshot_reserved_bytes"] =
+                fixed_snapshot_bytes;
+            result["outer_graph_resource_snapshot_copies"] = 0;
+            result["outer_graph_resource_snapshot_reserved_bytes"] = 0;
+            result["state_tree_count"] =
+                record.state_dependencies().size();
+            result["state_snapshot_copies"] = 0;
+            result["state_snapshot_reserved_bytes"] = 0;
+            return result;
+          })
+      .def_property_readonly(
           "active_size", &LinearOperatorRecordableKernel::active_size)
       .def("_resource_stamp", [](const LinearOperatorRecordableKernel &record) {
         const auto stamp = record.resource_stamp();
@@ -6210,7 +6328,8 @@ void export_lang(py::module &m) {
          std::size_t domain_extent, std::uint64_t topology_version,
          std::uint64_t numeric_version, const py::dict &fixed_i32_args,
          const py::dict &topology_args, const py::dict &numeric_args,
-         const py::dict &workspace_args, int self_adjoint,
+         const py::dict &workspace_args, const py::dict &state_args,
+         int self_adjoint,
          int positive_definite, int positive_semidefinite, int singular) {
         const aot::CompiledGraph *adjoint = nullptr;
         if (!adjoint_graph.is_none()) {
@@ -6229,11 +6348,34 @@ void export_lang(py::module &m) {
           }
           return result;
         };
+        std::vector<SNodeTreeDependency> state_dependencies;
+        state_dependencies.reserve(state_args.size());
+        for (const auto &item : state_args) {
+          const auto name = py::cast<std::string>(item.first);
+          TI_ERROR_IF(name.empty(),
+                      "Compiled-Graph fixed Field state names must be "
+                      "non-empty.");
+          const auto &descriptor =
+              py::cast<const storage::DenseStorageDescriptor &>(item.second);
+          const auto source_kind = descriptor.source_kind();
+          const auto &owner = descriptor.owner();
+          TI_ERROR_IF(
+              (source_kind != storage::StorageSourceKind::kDenseScalarField &&
+               source_kind != storage::StorageSourceKind::kDensePackedField) ||
+                  owner.kind != storage::StorageOwnerKind::kSNodePayload ||
+                  storage::validate_storage_owner(*program, descriptor) !=
+                      storage::StorageFailureReason::kNone,
+              "Compiled-Graph fixed Field state '{}' must be a live "
+              "root-dense scalar, vector, or matrix Field owned by the same "
+              "Program.",
+              name);
+          state_dependencies.push_back(owner.tree);
+        }
         return make_compiled_graph_operator_handle(
             program, forward_graph, adjoint, range_extent, domain_extent,
             topology_version, numeric_version, std::move(fixed_i32),
             parse_ndarrays(topology_args), parse_ndarrays(numeric_args),
-            parse_ndarrays(workspace_args),
+            parse_ndarrays(workspace_args), std::move(state_dependencies),
             make_asserted_operator_traits(
                 self_adjoint, positive_definite, positive_semidefinite,
                 singular));
@@ -6244,6 +6386,7 @@ void export_lang(py::module &m) {
       py::arg("topology_version"), py::arg("numeric_version"),
       py::arg("fixed_i32_arguments"), py::arg("topology_arguments"),
       py::arg("numeric_arguments"), py::arg("workspace_arguments"),
+      py::arg("state_arguments") = py::dict(),
       py::arg("self_adjoint") = -1,
       py::arg("positive_definite") = -1,
       py::arg("positive_semidefinite") = -1,

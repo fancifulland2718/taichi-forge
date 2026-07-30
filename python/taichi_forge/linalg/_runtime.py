@@ -21,6 +21,7 @@ import numpy as np
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.graph._ir import (
     GraphAccess,
+    NativeCallNode,
     ResourceEffect,
     RuntimeBinding,
 )
@@ -32,7 +33,9 @@ from taichi_forge.graph._native import (
 )
 from taichi_forge.lang._ndarray import ScalarNdarray
 from taichi_forge.lang.exception import TaichiRuntimeError
+from taichi_forge.lang.field import ScalarField
 from taichi_forge.lang.impl import get_runtime
+from taichi_forge.lang.matrix import MatrixField
 from taichi_forge.lang._storage_view import (
     DenseNdarrayView,
     _flatten_storage_to_scalar_vector,
@@ -376,6 +379,35 @@ def _normalized_resource_mapping(values, role, require_nonempty=False):
     return result
 
 
+def _normalized_fixed_field_state(values):
+    values = {} if values is None else values
+    if not isinstance(values, Mapping):
+        raise TaichiRuntimeError("state must be a mapping")
+    descriptors = {}
+    retained = {}
+    for name, value in values.items():
+        if not isinstance(name, str) or not name:
+            raise TaichiRuntimeError(
+                "state names must be non-empty strings"
+            )
+        if not isinstance(value, (ScalarField, MatrixField)):
+            raise TaichiRuntimeError(
+                "state entries must be root-dense scalar, vector, or "
+                f"matrix Fields; state[{name!r}] is "
+                f"{type(value).__name__}"
+            )
+        description = describe_storage(value)
+        if description.descriptor is None:
+            raise TaichiRuntimeError(
+                "state entries must be live root-dense scalar, vector, or "
+                f"matrix Fields; state[{name!r}] is unavailable: "
+                f"{description.failure_reason}"
+            )
+        descriptors[name] = description.descriptor
+        retained[name] = value
+    return descriptors, retained
+
+
 def _readonly_copy(value):
     if isinstance(value, Mapping):
         return MappingProxyType(
@@ -608,6 +640,7 @@ class LinearOperator:
         topology,
         numeric=None,
         workspace=None,
+        state=None,
         topology_version=1,
         numeric_version=1,
         traits=None,
@@ -618,7 +651,12 @@ class LinearOperator:
         Every other argument is assigned exactly one fixed, topology, numeric,
         or workspace role. ``size`` may be an integer square shorthand or a
         ``(range, domain)`` shape. An explicit adjoint Graph must expose the
-        same fixed resource schema. SNode-dependent Graphs are rejected.
+        same fixed resource schema. SNode-dependent Graphs are accepted only
+        when every distinct dependent SNodeTree is represented in ``state`` by
+        a live root-dense scalar, vector, or matrix Field and the complete tree
+        is purely dense. State keys are diagnostic labels; dependency matching
+        and lifetime ownership are tree-granular. State storage is referenced
+        in place and is never snapshotted.
         """
         shape, legacy_square = _normalize_operator_shape(size)
         range_extent, domain_extent = shape
@@ -653,6 +691,7 @@ class LinearOperator:
         )
         numeric_arrays = _normalized_resource_mapping(numeric, "numeric")
         workspace_arrays = _normalized_resource_mapping(workspace, "workspace")
+        state_descriptors, state_fields = _normalized_fixed_field_state(state)
         traits = OperatorTraits() if traits is None else traits
         if not isinstance(traits, OperatorTraits):
             raise TypeError("traits must be OperatorTraits")
@@ -691,6 +730,7 @@ class LinearOperator:
                 topology_native,
                 numeric_native,
                 workspace_native,
+                state_descriptors,
             )
             handle = _ti_core._make_linear_operator(
                 program, core, *traits._native_values()
@@ -705,6 +745,7 @@ class LinearOperator:
                     tuple(topology_arrays.values()),
                     tuple(numeric_arrays.values()),
                     tuple(workspace_arrays.values()),
+                    tuple(state_fields.values()),
                 ),
             )
         handle = _ti_core._make_compiled_graph_operator(
@@ -719,6 +760,7 @@ class LinearOperator:
             topology_native,
             numeric_native,
             workspace_native,
+            state_descriptors,
             *traits._native_values(),
         )
         return cls._from_handle(
@@ -731,6 +773,7 @@ class LinearOperator:
                 tuple(topology_arrays.values()),
                 tuple(numeric_arrays.values()),
                 tuple(workspace_arrays.values()),
+                tuple(state_fields.values()),
             ),
         )
 
@@ -1205,37 +1248,82 @@ class _LinearOperatorGraphExecutable(NativeGraphExecutable):
         self._record = operator._handle._recordable_kernel(adjoint)
         self._expected_stamp = tuple(self._record._resource_stamp())
         prefix = f"__linear_operator_{id(self._record):x}"
-        active_name = f"{prefix}_active_size"
-        topology_name = f"{prefix}_topology"
-        numeric_name = f"{prefix}_numeric"
-        topology = self._record._topology
-        fixed = {
-            active_name: int(self._record.active_size),
-            topology_name: ProviderOwnedNdarrayBinding(topology, self._record),
-        }
-        symbols = [
-            Arg(ArgKind.SCALAR, active_name, i32),
-            Arg(
-                ArgKind.NDARRAY,
-                topology_name,
-                topology.element_data_type(),
-                ndim=len(tuple(topology.shape)),
-            ),
-        ]
-        numeric = self._record._numeric
-        if numeric is not None:
-            fixed[numeric_name] = ProviderOwnedNdarrayBinding(numeric, self._record)
-            symbols.append(
+        graph_dispatches = tuple(self._record._graph_dispatches)
+        self._opaque_graph_ir = bool(graph_dispatches)
+        fixed = {}
+        if graph_dispatches:
+            remapped = {
+                "input": input_arg,
+                "output": output_arg,
+            }
+            for name, value in dict(self._record._fixed_i32).items():
+                private_name = f"{prefix}_{name}"
+                fixed[private_name] = int(value)
+                remapped[name] = Arg(
+                    ArgKind.SCALAR, private_name, i32
+                )
+            for name, value in dict(
+                self._record._fixed_ndarrays
+            ).items():
+                private_name = f"{prefix}_{name}"
+                fixed[private_name] = ProviderOwnedNdarrayBinding(
+                    value, self._record
+                )
+                remapped[name] = Arg(
+                    ArgKind.NDARRAY,
+                    private_name,
+                    value.element_data_type(),
+                    ndim=len(tuple(value.shape)),
+                )
+            dispatches = []
+            for kernel, original_symbols in graph_dispatches:
+                symbols = []
+                for original in original_symbols:
+                    symbol = remapped.get(original.name)
+                    if symbol is None:
+                        raise TaichiRuntimeError(
+                            "LinearOperator recordable Graph dispatch "
+                            f"references undeclared argument {original.name!r}"
+                        )
+                    symbols.append(symbol)
+                dispatches.append((kernel, tuple(symbols)))
+        else:
+            active_name = f"{prefix}_active_size"
+            topology_name = f"{prefix}_topology"
+            numeric_name = f"{prefix}_numeric"
+            topology = self._record._topology
+            fixed = {
+                active_name: int(self._record.active_size),
+                topology_name: ProviderOwnedNdarrayBinding(
+                    topology, self._record
+                ),
+            }
+            symbols = [
+                Arg(ArgKind.SCALAR, active_name, i32),
                 Arg(
                     ArgKind.NDARRAY,
-                    numeric_name,
-                    numeric.element_data_type(),
-                    ndim=len(tuple(numeric.shape)),
+                    topology_name,
+                    topology.element_data_type(),
+                    ndim=len(tuple(topology.shape)),
                 )
-            )
-        symbols.extend((input_arg, output_arg))
+            ]
+            numeric = self._record._numeric
+            if numeric is not None:
+                fixed[numeric_name] = ProviderOwnedNdarrayBinding(
+                    numeric, self._record
+                )
+                symbols.append(
+                    Arg(
+                        ArgKind.NDARRAY,
+                        numeric_name,
+                        numeric.element_data_type(),
+                        ndim=len(tuple(numeric.shape)),
+                    )
+                )
+            symbols.extend((input_arg, output_arg))
+            dispatches = ((self._record._kernel, tuple(symbols)),)
         self._action = DispatchGraphAction(
-            ((self._record._kernel, tuple(symbols)),),
+            dispatches,
             backends=("cpu", "cuda", "vulkan"),
             conditional_body_safe=True,
             fixed_bindings=fixed,
@@ -1246,9 +1334,18 @@ class _LinearOperatorGraphExecutable(NativeGraphExecutable):
             RuntimeBinding(self._input_name, "dense_vector"),
             RuntimeBinding(self._output_name, "dense_vector"),
         )
+        state_effects = tuple(
+            ResourceEffect(
+                f"__linear_operator_state_{tree_id}_{generation}",
+                GraphAccess.READ_WRITE,
+                runtime_bound=False,
+            )
+            for tree_id, generation, _ in self._record._state_dependencies
+        )
         self._resource_effects = (
             ResourceEffect(self._input_name, GraphAccess.READ),
             ResourceEffect(self._output_name, GraphAccess.WRITE),
+            *state_effects,
         )
         self._fallback_operator = operator.adjoint() if adjoint else operator
         self._graph_binding_views = {}
@@ -1272,12 +1369,30 @@ class _LinearOperatorGraphExecutable(NativeGraphExecutable):
         return self._action
 
     @property
+    def graph_ir_node(self):
+        if not self._opaque_graph_ir:
+            return super().graph_ir_node
+        # A generic provider Graph can mutate fixed workspace or fixed
+        # resources between physical dispatches. Keep the definition-time
+        # native call opaque until per-dispatch metadata has been carried
+        # through this provider boundary; recording into the outer CGraph is
+        # still enabled.
+        return NativeCallNode(
+            name="linear_operator_apply",
+            effects=self._resource_effects,
+            bindings=self._runtime_arg_schema,
+            opaque=True,
+        )
+
+    @property
     def debug_info(self):
         return {
             "kind": "linear_operator_apply",
             "provider": self._operator.provider,
             "adjoint": self._adjoint,
             "update_policy": "rebuild",
+            "graph_ir_opaque": self._opaque_graph_ir,
+            "recordable": dict(self._record._recordable_stats),
         }
 
     def validate_graph_lifetime(self):

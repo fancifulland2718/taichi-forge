@@ -441,7 +441,8 @@ class CompiledGraphLinearOperator final : public SparseMatrix {
       FixedI32Arguments fixed_i32_arguments,
       NdarrayArguments topology_arguments,
       NdarrayArguments numeric_arguments,
-      NdarrayArguments workspace_arguments);
+      NdarrayArguments workspace_arguments,
+      std::vector<SNodeTreeDependency> state_dependencies);
   ~CompiledGraphLinearOperator() override;
 
   void nd_spmv(Program *program,
@@ -454,6 +455,7 @@ class CompiledGraphLinearOperator final : public SparseMatrix {
       NdarrayArguments numeric_arguments,
       std::uint64_t expected_topology_version,
       std::uint64_t expected_numeric_version);
+  std::shared_ptr<LinearOperatorRecordableKernel> recordable_kernel() const;
   SparseMatrixRuntimeStatistics debug_runtime_statistics() const override;
 
   Program *owning_program() const {
@@ -478,6 +480,7 @@ class CompiledGraphLinearOperator final : public SparseMatrix {
     Ndarray *value{nullptr};
     NdarrayRole role{NdarrayRole::topology};
   };
+  struct RecordGeneration;
 
   void apply_with_execution(Program *program,
                             const OperatorVectorView &input,
@@ -490,6 +493,8 @@ class CompiledGraphLinearOperator final : public SparseMatrix {
   std::unique_ptr<aot::CompiledGraphJITCache> cache_;
   FixedI32Arguments fixed_i32_arguments_;
   std::vector<OwnedNdarrayArgument> owned_ndarray_arguments_;
+  std::shared_ptr<RecordGeneration> current_record_generation_;
+  std::vector<SNodeTreeDependency> state_dependencies_;
   std::uint64_t topology_reserved_bytes_{0};
   std::uint64_t numeric_reserved_bytes_{0};
   std::uint64_t workspace_reserved_bytes_{0};
