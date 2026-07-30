@@ -143,20 +143,21 @@ work 与数值 breakdown。它写入只包含一个整数的 `predicate` ndarray
 | --- | --- | --- |
 | CPU | 精确 `cpu_host_loop`；condition/body 使用 cached compiled dispatch plan | 精确 portable host control |
 | CUDA | Driver API 不低于 12.8 且具备所需 symbol/lowering 时，`auto` 使用原生 CUDA conditional Graph；否则使用精确 portable replay | 资格满足时，`auto` 使用单个原生 CUDA IF/SWITCH node；否则使用精确 portable host control |
-| Vulkan | 精确 portable replay，或满足资格的 `native_required` 有界 masking；每个 chunk 64 轮，每个 region 最多八个 chunk/512 轮 | 精确 portable host control |
+| Vulkan | 精确 portable replay，或满足资格的 `native_required` 有界 masking；每个 region 的正数 chunk size 封顶为 64，每个 region 最多八个 chunk/512 轮 | 精确 portable host control |
 
 `ti.graph.structured_control_capabilities()` 返回当前 backend 的 schema-v4 portable
 lowering 与 device-control 资格。报告分别描述 primitive 可用性、完整 runtime 资格、
-compound submission、终态观测、tail strategy、queue-submit 合并与 exact dynamic
-termination。Vulkan 声明有界 `while` 执行，但不据此声明原生 `if`/`switch`，也不宣称
-能够精确终止已经编码的 active command chunk。
+compound submission、终态观测、per-region chunk 与首 gate 策略、tail strategy、
+queue-submit 合并与 exact dynamic termination。Vulkan 声明有界 `while` 执行，但不
+据此声明原生 `if`/`switch`，也不宣称能够精确终止已经编码的 active command chunk。
 
 `lowering_mode="portable"` 强制 portable 路径。
 `lowering_mode="native_required"` 要求当前 backend 的已资格化原生路径，不可用时会在
-执行前失败。CUDA 对应 conditional Graph control；Vulkan 对应最大 512 轮、64 轮 chunk、
-runtime replay mode 已启用且未使用不兼容 profiler/dispatch-cache 配置的有界 `while`。
-recordable provider action 只有在 provider 声明适合结构化 body 时才能进入 region；
-opaque 或不支持的 provider 会明确失败。
+执行前失败。CUDA 对应 conditional Graph control；Vulkan 对应最大 512 轮、最多八个
+正数且封顶为 64 轮的 chunk、runtime replay mode 已启用且未使用不兼容 profiler/dispatch-cache
+配置的有界 `while`。compound submission 省略 `chunk_size` 时使用 64。recordable
+provider action 只有在 provider 声明适合结构化 body 时才能进入 region；opaque 或
+不支持的 provider 会明确失败。
 
 recordable provider 还可声明由 Graph temporary requirement 支撑的私有符号 scratch。
 Graph memory plan 为每个正在执行的 invocation 分配一个有界 arena slot，在提交前解析
@@ -191,12 +192,13 @@ predicate gate 都无需逐 region host 回读即可消费控制状态。异步�
 `GraphBuilder.observe()` snapshot 仍只在 transaction 末尾执行一次。该能力是通用 Graph
 合同，solver、line search、contact 等语义仍由用户 kernel 与 recordable provider 定义。
 
-第一个 chunk 使用 compact per-iteration indirect masking。当
-`VK_EXT_conditional_rendering` 资格满足时，一个小型 gate shader 会把后续每个 chunk
-入口处的 predicate 复制到稳定 control storage，并以一个 conditional command 包围整个
-chunk。在 active chunk 内终止仍会留下 masked tail；之后的 inactive chunk 会跳过其 shader
-dispatch。该策略减少已提交的 shader 工作，但不宣称 device-generated command 或 exact
-command-stream termination。
+每个 region 的显式 `chunk_size` 都会用于 compound submission。默认首 chunk 使用
+compact per-iteration indirect masking；当 region 本身可能 inactive 时，也可选择
+`coarse_conditional`，该选项会在 conditional rendering 未资格化时 fail closed。
+`auto` 下，一个小型 gate shader会把后续每个 chunk 入口处的 predicate 复制到稳定
+control storage，并以一个 conditional command 包围整个 chunk。在 active chunk 内终止
+仍会留下 masked tail；之后的 inactive chunk 会跳过其 shader dispatch。该策略减少已提交
+的 shader 工作，但不宣称 device-generated command 或 exact command-stream termination。
 
 runtime 把 transaction 内记录的 command buffer 合并到一次 Vulkan queue submission，
 同时保留每个 command buffer 的 wait/signal semaphore。随后用一个空 fence submission

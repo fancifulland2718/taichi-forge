@@ -824,7 +824,7 @@ Contract:
 
 | API | Contract |
 | --- | --- |
-| `GraphBuilder.while_loop(condition, body, *, predicate, max_iterations, control_inputs=(), carried_state=(), counter=None, status=None, chunk_size=None, masked_execution=False, lowering_mode="auto", name="while")` | Append a fixed-schema bounded loop. `condition` and `body` are nonempty `Sequential` values. `predicate`, optional `counter`, and optional distinct `status` are one-element device ndarrays. |
+| `GraphBuilder.while_loop(condition, body, *, predicate, max_iterations, control_inputs=(), carried_state=(), counter=None, status=None, chunk_size=None, vulkan_first_chunk_strategy="auto", masked_execution=False, lowering_mode="auto", name="while")` | Append a fixed-schema bounded loop. `condition` and `body` are nonempty `Sequential` values. `predicate`, optional `counter`, and optional distinct `status` are one-element device ndarrays. |
 | `GraphBuilder.if_then_else(condition, then_region, *, predicate, control_inputs=(), else_region=None, lowering_mode="auto", name="if")` | Append a fixed two-way branch. Only the selected branch executes. |
 | `GraphBuilder.switch(condition, branches, *, selector, control_inputs=(), default_region=None, lowering_mode="auto", name="switch")` | Append a zero-based fixed branch table with an optional default. |
 | `Graph.control_flow_stats()` | Return immutable `GraphWhileReport` / `GraphBranchReport` values for the latest run. Native CUDA branch reports are materialized lazily, so requesting them is an explicit synchronization point. |
@@ -843,16 +843,19 @@ Driver API 12.8 or newer and the qualified conditional symbols/lowering.
 
 Vulkan provides two distinct `while` routes. `portable` retains exact
 host-observed replay. A qualified `native_required` region uses bounded
-device-controlled masking with 64-iteration chunks, at most eight replay
-chunks, and therefore a maximum budget of 512 iterations per region. The
-automatic strategy records the first chunk with compact per-iteration masking.
-When `VK_EXT_conditional_rendering` is qualified, each later chunk first copies
-its entry predicate to a stable conditional word and wraps the whole chunk in
-one conditional command. A loop that terminates inside an active chunk still
-masks its remaining iterations; a later inactive chunk skips its shader
-dispatches at the conditional-command level. This preserves exact logical
-results but does not provide exact dynamic command termination: commands for
-the active chunk are already encoded.
+device-controlled masking with at most eight replay chunks and a maximum budget
+of 512 iterations per region. An explicit positive `chunk_size` is honored per
+region and capped at 64; omitting it selects 64 for the compound route. A
+combination that needs more than eight chunks fails during Graph construction.
+The automatic first-chunk strategy uses compact per-iteration masking. A region
+may explicitly request `compact` or `coarse_conditional` through
+`vulkan_first_chunk_strategy`; the latter fails closed unless
+`VK_EXT_conditional_rendering` is qualified. Under `auto`, each later chunk
+uses one conditional command when the extension is qualified. A loop that
+terminates inside an active chunk still masks its remaining iterations; a later
+inactive chunk skips its shader dispatches at the conditional-command level.
+This preserves exact logical results but does not provide exact dynamic command
+termination: commands for the active chunk are already encoded.
 
 One Vulkan `Graph.submit()` may contain multiple qualified
 `native_required` `while` regions. Forge enqueues them in program order inside

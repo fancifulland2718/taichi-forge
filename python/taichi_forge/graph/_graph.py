@@ -707,6 +707,10 @@ def structured_control_capabilities():
     compound_max_iterations_per_region = 0
     compound_terminal_observation = "unavailable"
     queue_submit_coalescing = False
+    compound_per_region_chunk_size = False
+    compound_chunk_size_limit = 0
+    compound_first_chunk_strategies = ()
+    compound_default_first_chunk_strategy = "unavailable"
     conditional_rendering_available = False
     conditional_rendering_qualified = False
     coarse_conditional_available = False
@@ -780,6 +784,13 @@ def structured_control_capabilities():
         compound_max_iterations_per_region = 512
         compound_terminal_observation = "submission_ticket" if native else "unavailable"
         queue_submit_coalescing = native
+        compound_per_region_chunk_size = native
+        compound_chunk_size_limit = 64
+        compound_first_chunk_strategies = (
+            "compact",
+            *(("coarse_conditional",) if coarse_conditional_qualified else ()),
+        )
+        compound_default_first_chunk_strategy = "compact"
         queue_submit_policy = (
             "transaction_batch_plus_completion_fence" if native else "backend_default"
         )
@@ -817,6 +828,12 @@ def structured_control_capabilities():
             "queue_submit_coalescing": queue_submit_coalescing,
             "queue_submit_policy": queue_submit_policy,
             "compound_tail_strategy": compound_tail_strategy,
+            "compound_per_region_chunk_size": compound_per_region_chunk_size,
+            "compound_chunk_size_limit": compound_chunk_size_limit,
+            "compound_first_chunk_strategies": compound_first_chunk_strategies,
+            "compound_default_first_chunk_strategy": (
+                compound_default_first_chunk_strategy
+            ),
             "logical_termination_exact": native,
             "device_controlled_masking": native,
             "per_iteration_host_observation": False,
@@ -1714,22 +1731,52 @@ def _vulkan_structured_strategy():
     return strategies[strategy]
 
 
-def _vulkan_compound_strategy_codes(chunk_count):
+def _vulkan_first_chunk_strategy(value):
+    if not isinstance(value, str):
+        raise TaichiRuntimeError(
+            "Graph while vulkan_first_chunk_strategy must be a string"
+        )
+    normalized = value.strip().lower()
+    strategies = {
+        "auto": 0,
+        "compact": 1,
+        "coarse_conditional": 4,
+    }
+    if normalized not in strategies:
+        raise TaichiRuntimeError(
+            "Graph while vulkan_first_chunk_strategy must be auto, compact, "
+            "or coarse_conditional"
+        )
+    return normalized, strategies[normalized]
+
+
+def _vulkan_compound_strategy_codes(chunk_count, first_chunk_strategy):
     requested = _vulkan_structured_strategy()
-    if requested != 0:
+    first_name, first_requested = _vulkan_first_chunk_strategy(
+        first_chunk_strategy
+    )
+    if requested != 0 and first_name == "auto":
         return (requested,) * chunk_count
-    if chunk_count <= 1:
-        return (1,) * chunk_count
     conditional_available = bool(
         impl.get_runtime().prog._vulkan_conditional_rendering_available()
     )
+    if first_requested == 4 and not conditional_available:
+        raise TaichiRuntimeError(
+            "Graph while requested a coarse-conditional first Vulkan chunk, "
+            "but VK_EXT_conditional_rendering is unavailable"
+        )
+    first = first_requested or 1
+    if chunk_count <= 1:
+        return (first,)
+    if requested != 0:
+        return (first, *((requested,) * (chunk_count - 1)))
     if not conditional_available:
-        return (1,) * chunk_count
+        return (first, *((1,) * (chunk_count - 1)))
     # The first chunk is likely active and uses the lowest fixed-cost compact
     # path. Later chunks add one coarse predicate gate so a converged region
     # skips its complete encoded tail without invoking per-iteration
     # controllers or payload kernels.
-    return (1,) + (4,) * (chunk_count - 1)
+    return (first,) + (4,) * (chunk_count - 1)
 
 
 def _while_upgrade_status(arch, mode):
@@ -1888,6 +1935,7 @@ class _CompiledWhileGraphNode:
         counter,
         status,
         chunk_size,
+        vulkan_first_chunk_strategy,
         masked_execution,
         lowering_mode,
         name,
@@ -1913,6 +1961,10 @@ class _CompiledWhileGraphNode:
         self.max_iterations = int(max_iterations)
         self.masked_execution = bool(masked_execution)
         self.lowering_mode = lowering_mode
+        (
+            self.vulkan_first_chunk_strategy,
+            self._vulkan_first_chunk_strategy_code,
+        ) = _vulkan_first_chunk_strategy(vulkan_first_chunk_strategy)
         self.condition_dispatch_count = condition._dispatch_count
         self.body_dispatch_count = body._dispatch_count
         self.dispatch_count = self.condition_dispatch_count + self.body_dispatch_count
@@ -1938,10 +1990,44 @@ class _CompiledWhileGraphNode:
             )
 
         arch = impl.current_cfg().arch
+        requested_compound_chunk_limit = _structured_chunk_limit(
+            arch, chunk_size, True
+        )
         self.chunk_limit = min(
             self.max_iterations or 1,
             _structured_chunk_limit(arch, chunk_size, self.masked_execution),
         )
+        self.compound_chunk_limit = min(
+            self.max_iterations or 1,
+            64 if chunk_size is None else requested_compound_chunk_limit,
+        )
+        self.compound_chunk_count = (
+            0
+            if self.max_iterations == 0
+            else (
+                self.max_iterations + self.compound_chunk_limit - 1
+            )
+            // self.compound_chunk_limit
+        )
+        if (
+            arch == _ti_core.Arch.vulkan
+            and lowering_mode == "native_required"
+            and self.compound_chunk_count > 8
+        ):
+            raise TaichiRuntimeError(
+                "Native Vulkan Graph while compound submission requires at "
+                "most eight chunks; increase chunk_size or reduce "
+                "max_iterations"
+            )
+        if (
+            arch == _ti_core.Arch.vulkan
+            and self._vulkan_first_chunk_strategy_code == 4
+            and not impl.get_runtime().prog._vulkan_conditional_rendering_available()
+        ):
+            raise TaichiRuntimeError(
+                "Graph while requested a coarse-conditional first Vulkan "
+                "chunk, but VK_EXT_conditional_rendering is unavailable"
+            )
         if self.chunk_limit > 1 and self.counter is None:
             raise TaichiRuntimeError(
                 "Chunked Graph while regions require a device counter"
@@ -2023,6 +2109,8 @@ class _CompiledWhileGraphNode:
             counter=counter,
             status=status,
             chunk_size=self.chunk_limit,
+            compound_chunk_size=self.compound_chunk_limit,
+            vulkan_first_chunk_strategy=self.vulkan_first_chunk_strategy,
             masked_execution=self.masked_execution,
             lowering_mode=lowering_mode,
             name=name,
@@ -2094,8 +2182,8 @@ class _CompiledWhileGraphNode:
                     "ndarray status resource"
                 )
 
-            chunk_limit = min(self.max_iterations, 64)
-            chunk_count = (self.max_iterations + chunk_limit - 1) // chunk_limit
+            chunk_limit = self.compound_chunk_limit
+            chunk_count = self.compound_chunk_count
             if chunk_count > 8:
                 raise TaichiRuntimeError(
                     "Native Vulkan Graph while submission exceeds the fixed "
@@ -2117,7 +2205,9 @@ class _CompiledWhileGraphNode:
                 self.condition_dispatch_count,
                 chunk_iterations,
                 status_ndarray,
-                _vulkan_compound_strategy_codes(chunk_count),
+                _vulkan_compound_strategy_codes(
+                    chunk_count, self.vulkan_first_chunk_strategy
+                ),
             )
             if not submitted:
                 raise TaichiRuntimeError(
@@ -2602,6 +2692,9 @@ class _CompiledWhileGraphNode:
             "body_dispatch_count": self.body_dispatch_count,
             "max_iterations": self.max_iterations,
             "chunk_limit": self.chunk_limit,
+            "compound_chunk_limit": self.compound_chunk_limit,
+            "compound_chunk_count": self.compound_chunk_count,
+            "vulkan_first_chunk_strategy": self.vulkan_first_chunk_strategy,
             "control_input_count": len(self.control_inputs),
             "carried_state_count": len(self.carried_state),
             "has_status": self.status is not None,
@@ -4441,6 +4534,7 @@ class GraphBuilder:
         counter=None,
         status=None,
         chunk_size=None,
+        vulkan_first_chunk_strategy="auto",
         masked_execution=False,
         lowering_mode="auto",
         name="while",
@@ -4453,7 +4547,10 @@ class GraphBuilder:
         user-defined ``status`` resource records why iteration terminated; it
         is observed with the predicate but never interpreted by Graph. Backend
         lowering is selected automatically unless ``lowering_mode`` requests
-        a portable or required-native path.
+        a portable or required-native path. Vulkan compound submission honors
+        an explicit per-region ``chunk_size`` and can select ``compact`` or
+        ``coarse_conditional`` for its first chunk through
+        ``vulkan_first_chunk_strategy``.
         """
         self._flush_graph_builder()
         predicate_name = self._control_name(predicate, "while predicate")
@@ -4476,6 +4573,7 @@ class GraphBuilder:
                 counter=counter_name,
                 status=status_name,
                 chunk_size=chunk_size,
+                vulkan_first_chunk_strategy=vulkan_first_chunk_strategy,
                 masked_execution=masked_execution,
                 lowering_mode=lowering_mode,
                 name=name,

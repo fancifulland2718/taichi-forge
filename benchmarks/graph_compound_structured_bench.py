@@ -34,7 +34,15 @@ def _summary(values):
     }
 
 
-def _build_graph(*, size, regions, budget, lowering_mode):
+def _build_graph(
+    *,
+    size,
+    regions,
+    budget,
+    chunk_size,
+    vulkan_first_chunk_strategy,
+    lowering_mode,
+):
     @ti.kernel
     def initialize_state(
         values: ti.types.ndarray(dtype=ti.f32, ndim=1),
@@ -103,7 +111,8 @@ def _build_graph(*, size, regions, budget, lowering_mode):
             carried_state=(values, state),
             counter=counter,
             max_iterations=budget,
-            chunk_size=64,
+            chunk_size=chunk_size,
+            vulkan_first_chunk_strategy=vulkan_first_chunk_strategy,
             lowering_mode=lowering_mode,
             name=f"stage_{index}",
         )
@@ -222,6 +231,12 @@ def main():
     parser.add_argument("--size", type=int, default=4096)
     parser.add_argument("--regions", type=int, default=16)
     parser.add_argument("--budget", type=int, default=512)
+    parser.add_argument("--chunk-size", type=int, default=64)
+    parser.add_argument(
+        "--first-chunk-strategy",
+        choices=("auto", "compact", "coarse_conditional"),
+        default="auto",
+    )
     parser.add_argument("--logical-iterations", type=int, default=12)
     parser.add_argument("--warmups", type=int, default=5)
     parser.add_argument("--repeats", type=int, default=30)
@@ -243,6 +258,8 @@ def main():
         size=args.size,
         regions=args.regions,
         budget=args.budget,
+        chunk_size=args.chunk_size,
+        vulkan_first_chunk_strategy=args.first_chunk_strategy,
         lowering_mode=lowering_mode,
     )
     build_ms = (time.perf_counter_ns() - build_start) / 1.0e6
@@ -278,6 +295,8 @@ def main():
                 "size": args.size,
                 "regions": args.regions,
                 "budget": args.budget,
+                "chunk_size": args.chunk_size,
+                "first_chunk_strategy": args.first_chunk_strategy,
                 "logical_iterations": args.logical_iterations,
                 "warmups": args.warmups,
                 "repeats": args.repeats,

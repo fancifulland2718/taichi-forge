@@ -188,6 +188,8 @@ class WhileRegion:
     counter: Optional[str] = None
     status: Optional[str] = None
     chunk_size: int = 1
+    compound_chunk_size: int = 1
+    vulkan_first_chunk_strategy: str = "auto"
     masked_execution: bool = False
     lowering_mode: str = "auto"
     name: str = "while"
@@ -233,6 +235,14 @@ class WhileRegion:
                 )
         if self.chunk_size <= 0:
             raise ValueError("While chunk_size must be positive")
+        if self.compound_chunk_size <= 0:
+            raise ValueError("While compound_chunk_size must be positive")
+        if self.vulkan_first_chunk_strategy not in (
+            "auto",
+            "compact",
+            "coarse_conditional",
+        ):
+            raise ValueError("Unsupported Vulkan first-chunk strategy")
         if self.lowering_mode not in (
             "auto",
             "portable",
@@ -774,6 +784,8 @@ def graph_ir_to_dict(node):
                 "control_inputs": node.control_inputs,
                 "carried_state": node.carried_state,
                 "chunk_size": node.chunk_size,
+                "compound_chunk_size": node.compound_chunk_size,
+                "vulkan_first_chunk_strategy": node.vulkan_first_chunk_strategy,
                 "masked_execution": node.masked_execution,
                 "lowering_mode": node.lowering_mode,
             }

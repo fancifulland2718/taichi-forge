@@ -2281,6 +2281,7 @@ def _build_structured_while_graph(
     *,
     max_iterations,
     chunk_size=4,
+    vulkan_first_chunk_strategy="auto",
     lowering_mode="auto",
     masked_execution=True,
 ):
@@ -2338,6 +2339,7 @@ def _build_structured_while_graph(
         counter=arg_counter,
         max_iterations=max_iterations,
         chunk_size=chunk_size,
+        vulkan_first_chunk_strategy=vulkan_first_chunk_strategy,
         masked_execution=masked_execution,
         lowering_mode=lowering_mode,
         name="adaptive_step",
@@ -2557,6 +2559,10 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
                 "queue_submit_coalescing",
                 "queue_submit_policy",
                 "compound_tail_strategy",
+                "compound_per_region_chunk_size",
+                "compound_chunk_size_limit",
+                "compound_first_chunk_strategies",
+                "compound_default_first_chunk_strategy",
                 "coarse_conditional_available",
                 "coarse_conditional_qualified",
                 "max_control_bytes_per_slot",
@@ -2607,6 +2613,17 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         assert device["compound_max_iterations_per_region"] == 512
         assert device["compound_terminal_observation"] == "submission_ticket"
         assert device["queue_submit_coalescing"]
+        assert device["compound_per_region_chunk_size"]
+        assert device["compound_chunk_size_limit"] == 64
+        assert device["compound_default_first_chunk_strategy"] == "compact"
+        assert device["compound_first_chunk_strategies"] == (
+            "compact",
+            *(
+                ("coarse_conditional",)
+                if device["coarse_conditional_qualified"]
+                else ()
+            ),
+        )
         assert device["queue_submit_policy"] == (
             "transaction_batch_plus_completion_fence"
         )
@@ -2657,6 +2674,10 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         assert not device["rhi_primitive_qualified"]
         assert not device["runtime_path_compiled"]
         assert not device["runtime_path_qualified"]
+        assert not device["compound_per_region_chunk_size"]
+        assert device["compound_chunk_size_limit"] == 0
+        assert device["compound_first_chunk_strategies"] == ()
+        assert device["compound_default_first_chunk_strategy"] == "unavailable"
         assert device["unsupported_reason"] == "device_control_is_gpu_only"
 
 
@@ -3263,6 +3284,80 @@ def test_structured_graph_vulkan_submit_defers_wide_terminal_observation():
     assert stats["replay_slot_saturation_fallbacks"] == 0
     assert stats["records"] == 8
     assert stats["replays"] >= 8
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_structured_graph_vulkan_compound_honors_region_chunk_size():
+    capabilities = ti.graph.structured_control_capabilities()["device_control"]
+    if not capabilities["compound_structured_submit"]:
+        pytest.skip(capabilities["structured_submit_reason"])
+
+    graph = _build_structured_while_graph(
+        observe=True,
+        max_iterations=64,
+        chunk_size=16,
+        lowering_mode="native_required",
+    )
+    node = graph._debug_info["nodes"][0]
+    assert node["compound_chunk_limit"] == 16
+    assert node["compound_chunk_count"] == 4
+    assert node["vulkan_first_chunk_strategy"] == "auto"
+    graph._graph_stats
+
+    args = _structured_while_args(target=13)
+    ticket = graph.submit(args)
+    assert ticket.observations() == {
+        "terminal": {"state": 13, "predicate": 0, "counter": 13}
+    }
+    stats = graph._graph_stats[0]
+    assert stats["records"] == 4
+    args["state"].fill(0)
+    args["predicate"].fill(0)
+    args["counter"].fill(0)
+    assert graph.submit(args).observations()["terminal"]["counter"] == 13
+    stats = graph._graph_stats[0]
+    assert stats["replays"] >= 4
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_structured_graph_vulkan_compound_first_chunk_gate_is_per_region():
+    capabilities = ti.graph.structured_control_capabilities()["device_control"]
+    if not capabilities["compound_structured_submit"]:
+        pytest.skip(capabilities["structured_submit_reason"])
+    if "coarse_conditional" not in capabilities["compound_first_chunk_strategies"]:
+        pytest.skip("coarse conditional first-chunk control is unavailable")
+
+    graph = _build_structured_while_graph(
+        observe=True,
+        max_iterations=64,
+        chunk_size=16,
+        vulkan_first_chunk_strategy="coarse_conditional",
+        lowering_mode="native_required",
+    )
+    assert (
+        graph._ir_debug_info["root"]["children"][0][
+            "vulkan_first_chunk_strategy"
+        ]
+        == "coarse_conditional"
+    )
+    args = _structured_while_args(target=13, active=False)
+    assert graph.submit(args).observations() == {
+        "terminal": {"state": 0, "predicate": 0, "counter": 0}
+    }
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_structured_graph_vulkan_compound_chunk_budget_fails_at_compile():
+    capabilities = ti.graph.structured_control_capabilities()["device_control"]
+    if not capabilities["compound_structured_submit"]:
+        pytest.skip(capabilities["structured_submit_reason"])
+
+    with pytest.raises(TaichiRuntimeError, match="at most eight chunks"):
+        _build_structured_while_graph(
+            max_iterations=192,
+            chunk_size=16,
+            lowering_mode="native_required",
+        )
 
 
 @test_utils.test(arch=ti.vulkan)

@@ -726,7 +726,7 @@ graph.run({"slot": 3})
 
 | API | 合同 |
 | --- | --- |
-| `GraphBuilder.while_loop(condition, body, *, predicate, max_iterations, control_inputs=(), carried_state=(), counter=None, status=None, chunk_size=None, masked_execution=False, lowering_mode="auto", name="while")` | 追加 fixed-schema 有界循环。`condition` 与 `body` 必须是非空 `Sequential`；`predicate`、可选 `counter` 和可选且独立的 `status` 都是单元素 device ndarray。 |
+| `GraphBuilder.while_loop(condition, body, *, predicate, max_iterations, control_inputs=(), carried_state=(), counter=None, status=None, chunk_size=None, vulkan_first_chunk_strategy="auto", masked_execution=False, lowering_mode="auto", name="while")` | 追加 fixed-schema 有界循环。`condition` 与 `body` 必须是非空 `Sequential`；`predicate`、可选 `counter` 和可选且独立的 `status` 都是单元素 device ndarray。 |
 | `GraphBuilder.if_then_else(condition, then_region, *, predicate, control_inputs=(), else_region=None, lowering_mode="auto", name="if")` | 追加固定双分支，只执行被选中的 branch。 |
 | `GraphBuilder.switch(condition, branches, *, selector, control_inputs=(), default_region=None, lowering_mode="auto", name="switch")` | 追加零基固定 branch table，可指定 default。 |
 | `Graph.control_flow_stats()` | 返回最近一次 run 的 immutable `GraphWhileReport` / `GraphBranchReport`。原生 CUDA branch report 延迟物化，因此请求该报告是显式同步点。 |
@@ -742,13 +742,16 @@ CUDA 原生条件控制要求 Driver API 12.8 或更高版本，并具备所需 
 symbol/lowering。
 
 Vulkan 提供两种不同的 `while` 路径。`portable` 保留由 host 观测的精确 replay。满足资格
-的 `native_required` region 使用有界 device-controlled masking：每个 chunk 最多 64 轮，
-每个 region 最多八个 replay chunk，因此最大预算为 512 轮。自动策略用 compact
-per-iteration masking 记录第一个 chunk；当 `VK_EXT_conditional_rendering` 资格满足时，
-后续每个 chunk 先把入口 predicate 复制到稳定 conditional word，再用一个 conditional
-command 包围整个 chunk。在 active chunk 内收敛后，剩余轮次仍由 mask 关闭；之后的
-inactive chunk 则在 conditional-command 层跳过 shader dispatch。该路径保持精确逻辑
-结果，但不提供 exact dynamic command termination，因为 active chunk 的命令已经编码。
+的 `native_required` region 使用有界 device-controlled masking：每个 region 最多八个
+replay chunk，最大预算为 512 轮。显式正数 `chunk_size` 会按 region 生效，并封顶为
+64；省略时 compound 路径使用 64。若组合需要超过八个 chunk，Graph 构造阶段会
+明确失败。首 chunk 自动策略使用 compact per-iteration masking；也可通过
+`vulkan_first_chunk_strategy` 为单个 region 显式选择 `compact` 或
+`coarse_conditional`，后者仅在 `VK_EXT_conditional_rendering` 资格满足时可用并会
+fail closed。`auto` 下，资格满足时后续 chunk 由一个 conditional command 包围。在
+active chunk 内收敛后，剩余轮次仍由 mask 关闭；之后的 inactive chunk 则在
+conditional-command 层跳过 shader dispatch。该路径保持精确逻辑结果，但不提供 exact
+dynamic command termination，因为 active chunk 的命令已经编码。
 
 一次 Vulkan `Graph.submit()` 可以包含多个满足资格的 `native_required` `while` region。
 Forge 在一个 runtime transaction 中按程序顺序入队，合并它们的 Vulkan queue submission，

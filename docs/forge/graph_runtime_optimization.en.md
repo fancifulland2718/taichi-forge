@@ -168,22 +168,23 @@ Current lowering is explicit:
 | --- | --- | --- |
 | CPU | Exact `cpu_host_loop`; condition and body use cached compiled dispatch plans | Exact portable host control |
 | CUDA | `auto` uses a native CUDA conditional Graph when the Driver API is at least 12.8 and the required symbols/lowering are available; otherwise exact portable replay | `auto` uses one native CUDA IF/SWITCH node when qualified; otherwise exact portable host control |
-| Vulkan | Exact portable replay, or qualified `native_required` bounded masking with 64-iteration chunks and an eight-chunk/512-iteration region limit | Exact portable host control |
+| Vulkan | Exact portable replay, or qualified `native_required` bounded masking with positive per-region chunk sizes capped at 64 and an eight-chunk/512-iteration region limit | Exact portable host control |
 
 `ti.graph.structured_control_capabilities()` returns the active backend's
 schema-v4 portable lowering and device-control qualification. The report
 separates primitive availability, complete runtime qualification, compound
-submission, terminal observation, tail strategy, queue-submit coalescing, and
-exact dynamic termination. Vulkan qualifies bounded `while` execution without
-claiming native `if`/`switch` or exact termination of an already encoded
-command chunk.
+submission, terminal observation, per-region chunk and first-gate policy, tail
+strategy, queue-submit coalescing, and exact dynamic termination. Vulkan
+qualifies bounded `while` execution without claiming native `if`/`switch` or
+exact termination of an already encoded command chunk.
 
 `lowering_mode="portable"` forces the portable route.
 `lowering_mode="native_required"` requires the qualified backend route and
 fails before execution when unavailable. On CUDA this means conditional Graph
 control. On Vulkan it means a bounded `while` with at most 512 iterations,
-64-iteration chunks, runtime replay mode enabled, and no unsupported profiler
-or dispatch-cache configuration. Recordable provider actions may enter a
+at most eight positive-size chunks capped at 64 iterations, runtime replay mode enabled, and no
+unsupported profiler or dispatch-cache configuration. An omitted `chunk_size`
+selects 64 for compound submission. Recordable provider actions may enter a
 structured body only when their provider declares it safe; opaque or
 unsupported providers fail closed.
 
@@ -232,13 +233,16 @@ copy used by synchronous control-flow reports; an explicit
 This is a generic Graph contract: solver, line-search, contact, and other
 meanings remain in user kernels and recordable providers.
 
-The first chunk uses compact per-iteration indirect masking. When
-`VK_EXT_conditional_rendering` is qualified, a small gate shader copies the
-entry predicate into stable control storage for every later chunk, and one
-conditional command surrounds that whole chunk. Termination within the active
-chunk still leaves a masked tail, while later inactive chunks skip their shader
-dispatches. This reduces the submitted shader workload without claiming
-device-generated commands or exact command-stream termination.
+Each region honors its explicit `chunk_size` for compound submission. The
+default first chunk uses compact per-iteration indirect masking. A region may
+instead select `coarse_conditional` for the first chunk; this is useful when the
+region itself may be inactive and fails closed unless conditional rendering is
+qualified. Under `auto`, a small gate shader copies the entry predicate into
+stable control storage for every later chunk and one conditional command
+surrounds that whole chunk. Termination within the active chunk still leaves a
+masked tail, while later inactive chunks skip their shader dispatches. This
+reduces the submitted shader workload without claiming device-generated
+commands or exact command-stream termination.
 
 The runtime batches command buffers recorded inside the transaction into one
 Vulkan queue submission while preserving each command buffer's wait and signal
