@@ -6,6 +6,7 @@
 // FIXME: (penguinliong) Special offer for `run_codegen`. Find a new home for it
 // in the future.
 #include "taichi/codegen/spirv/spirv_codegen.h"
+#include "taichi/codegen/spirv/spirv_ir_builder.h"
 
 #include <algorithm>
 #include <array>
@@ -35,6 +36,163 @@ namespace gfx {
 namespace {
 
 std::atomic<uint64_t> graph_replay_slot_saturation_fallbacks{0};
+
+constexpr std::size_t kStructuredPacketWords = 3;
+constexpr std::size_t kStructuredObservationWords = 5;
+constexpr std::size_t kStructuredMaximumPackets = 64;
+constexpr std::size_t kStructuredMaximumEncodedActions = 4096;
+
+std::vector<uint32_t> make_compact_controller_spirv(
+    const DeviceCapabilityConfig &caps,
+    const std::vector<uint32_t> &group_counts,
+    bool has_status) {
+  spirv::IRBuilder builder(Arch::vulkan, &caps);
+  builder.init_header();
+  const auto u32 = builder.u32_type();
+  const auto predicate = builder.buffer_argument(u32, 0, 0, "predicate");
+  const auto control = builder.buffer_argument(u32, 0, 1, "control");
+  const auto status = builder.buffer_argument(u32, 0, 2, "status");
+  const auto function = builder.new_function();
+  builder.start_function(function);
+
+  const auto zero = builder.uint_immediate_number(u32, 0);
+  const auto one = builder.uint_immediate_number(u32, 1);
+  const auto predicate_value = builder.load_variable(
+      builder.struct_array_access(u32, predicate, zero), u32);
+  const auto active = builder.ne(predicate_value, zero);
+  const auto active_increment = builder.select(active, one, zero);
+  const auto observation_base = builder.uint_immediate_number(
+      u32, group_counts.size() * kStructuredPacketWords);
+  const auto logical_count_ptr =
+      builder.struct_array_access(u32, control, observation_base);
+  const auto logical_count = builder.load_variable(logical_count_ptr, u32);
+  if (has_status) {
+    const auto initial_status_ptr = builder.struct_array_access(
+        u32, control,
+        builder.uint_immediate_number(
+            u32, group_counts.size() * kStructuredPacketWords + 4));
+    const auto initial_status =
+        builder.load_variable(initial_status_ptr, u32);
+    const auto status_value = builder.load_variable(
+        builder.struct_array_access(u32, status, zero), u32);
+    builder.store_variable(
+        initial_status_ptr,
+        builder.select(builder.eq(logical_count, zero), status_value,
+                       initial_status));
+  }
+  builder.store_variable(logical_count_ptr,
+                         builder.add(logical_count, active_increment));
+
+  for (std::size_t i = 0; i < group_counts.size(); ++i) {
+    const auto packet_base = builder.uint_immediate_number(
+        u32, i * kStructuredPacketWords);
+    const auto group_count =
+        builder.uint_immediate_number(u32, group_counts[i]);
+    builder.store_variable(
+        builder.struct_array_access(u32, control, packet_base),
+        builder.select(active, group_count, zero));
+    builder.store_variable(
+        builder.struct_array_access(
+            u32, control,
+            builder.uint_immediate_number(
+                u32, i * kStructuredPacketWords + 1)),
+        one);
+    builder.store_variable(
+        builder.struct_array_access(
+            u32, control,
+            builder.uint_immediate_number(
+                u32, i * kStructuredPacketWords + 2)),
+        one);
+  }
+
+  builder.make_inst(spv::OpReturn);
+  builder.make_inst(spv::OpFunctionEnd);
+  std::vector<spirv::Value> interfaces;
+  if (caps.get(DeviceCapability::spirv_version) > 0x10300) {
+    interfaces = {predicate, control, status};
+  }
+  builder.commit_kernel_function(function, "main", std::move(interfaces),
+                                 {1, 1, 1});
+  return builder.finalize();
+}
+
+std::vector<uint32_t> make_structured_terminal_spirv(
+    const DeviceCapabilityConfig &caps,
+    std::size_t packet_count,
+    bool has_status) {
+  spirv::IRBuilder builder(Arch::vulkan, &caps);
+  builder.init_header();
+  const auto u32 = builder.u32_type();
+  const auto predicate = builder.buffer_argument(u32, 0, 0, "predicate");
+  const auto counter = builder.buffer_argument(u32, 0, 1, "counter");
+  const auto status = builder.buffer_argument(u32, 0, 2, "status");
+  const auto control = builder.buffer_argument(u32, 0, 3, "control");
+  const auto function = builder.new_function();
+  builder.start_function(function);
+
+  const auto zero = builder.uint_immediate_number(u32, 0);
+  const auto observation_base = packet_count * kStructuredPacketWords;
+  const auto load_scalar = [&](spirv::Value buffer) {
+    return builder.load_variable(
+        builder.struct_array_access(u32, buffer, zero), u32);
+  };
+  builder.store_variable(
+      builder.struct_array_access(
+          u32, control,
+          builder.uint_immediate_number(u32, observation_base + 1)),
+      load_scalar(predicate));
+  builder.store_variable(
+      builder.struct_array_access(
+          u32, control,
+          builder.uint_immediate_number(u32, observation_base + 2)),
+      load_scalar(counter));
+  builder.store_variable(
+      builder.struct_array_access(
+          u32, control,
+          builder.uint_immediate_number(u32, observation_base + 3)),
+      has_status ? load_scalar(status) : zero);
+  const auto logical_count = builder.load_variable(
+      builder.struct_array_access(
+          u32, control,
+          builder.uint_immediate_number(u32, observation_base)),
+      u32);
+  const auto initial_status_ptr = builder.struct_array_access(
+      u32, control,
+      builder.uint_immediate_number(u32, observation_base + 4));
+  const auto initial_status =
+      builder.load_variable(initial_status_ptr, u32);
+  const auto final_status = has_status ? load_scalar(status) : zero;
+  builder.store_variable(
+      initial_status_ptr,
+      builder.select(builder.eq(logical_count, zero), final_status,
+                     initial_status));
+  builder.make_inst(spv::OpReturn);
+  builder.make_inst(spv::OpFunctionEnd);
+
+  std::vector<spirv::Value> interfaces;
+  if (caps.get(DeviceCapability::spirv_version) > 0x10300) {
+    interfaces = {predicate, counter, status, control};
+  }
+  builder.commit_kernel_function(function, "main", std::move(interfaces),
+                                 {1, 1, 1});
+  return builder.finalize();
+}
+
+std::unique_ptr<Pipeline> create_structured_pipeline(
+    Device *device,
+    const std::vector<uint32_t> &spirv,
+    const char *name) {
+  PipelineSourceDesc source{PipelineSourceType::spirv_binary, spirv.data(),
+                            spirv.size() * sizeof(uint32_t),
+                            PipelineStageType::compute};
+  auto [pipeline, result] =
+      device->create_pipeline_unique(source, name);
+  TI_ERROR_IF(result != RhiResult::success || !pipeline,
+              "Failed to create Vulkan structured control pipeline '{}': "
+              "RhiResult({})",
+              name, result);
+  return std::move(pipeline);
+}
 
 class HostDeviceContextBlitter {
  public:
@@ -1804,6 +1962,8 @@ GfxRuntime::GraphReplayExecutable::known_persistent_argument_bytes() const {
     for (size_t size : slot.args_buffer_sizes) {
       bytes += size;
     }
+    bytes += slot.structured_control_bytes;
+    bytes += slot.structured_observation_bytes;
   }
   return bytes;
 }
@@ -1902,7 +2062,9 @@ GraphReplayStats GfxRuntime::debug_graph_replay_stats(
 bool GfxRuntime::try_launch_graph(
     const std::vector<GraphDispatch> &dispatches,
     uint64_t replay_key,
-    RuntimeStatistics *statistics) {
+    RuntimeStatistics *statistics,
+    const GraphStructuredControl *structured_control,
+    GraphStructuredResult *structured_result) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   collect_ready_graph_replays();
   TI_ASSERT(replay_key != 0);
@@ -1914,6 +2076,15 @@ bool GfxRuntime::try_launch_graph(
   }
   state.last_path = GraphReplayLastPath::none;
   state.last_fallback_reason = GraphReplayFallbackReason::none;
+  if (structured_result != nullptr) {
+    *structured_result = {};
+  }
+  if ((structured_control == nullptr) != (structured_result == nullptr)) {
+    state.last_path = GraphReplayLastPath::fallback;
+    state.last_fallback_reason =
+        GraphReplayFallbackReason::structural_unsupported;
+    return false;
+  }
   if (dispatches.empty() || profiler_ || dispatch_cache_) {
     if (state.diagnostics_enabled) {
       ++state.fallbacks;
@@ -1965,6 +2136,50 @@ bool GfxRuntime::try_launch_graph(
   };
 
   executable.bind_device(device_);
+  if (structured_control != nullptr) {
+    const auto valid_scalar = [&](DevicePtr ptr) {
+      return ptr.device == device_ && ptr.alloc_id != 0 &&
+             ptr.offset % alignof(std::uint32_t) == 0;
+    };
+    if (!valid_scalar(structured_control->predicate) ||
+        !valid_scalar(structured_control->counter) ||
+        (structured_control->has_status &&
+         !valid_scalar(structured_control->status)) ||
+        structured_control->initial_dispatch_count == 0 ||
+        structured_control->initial_dispatch_count >= dispatches.size()) {
+      return reject();
+    }
+    key.insert(key.end(),
+               {0xC000u,
+                structured_control->initial_dispatch_count,
+                structured_control->max_iterations,
+                structured_control->has_status ? 1u : 0u,
+                structured_control->predicate.alloc_id,
+                structured_control->predicate.offset,
+                structured_control->counter.alloc_id,
+                structured_control->counter.offset,
+                structured_control->status.alloc_id,
+                structured_control->status.offset});
+    structure_key.insert(
+        structure_key.end(),
+        {0xC000u, structured_control->initial_dispatch_count,
+         structured_control->max_iterations,
+         structured_control->has_status ? 1u : 0u});
+    push_runtime_structure(
+        DeviceAllocation{structured_control->predicate.device,
+                         structured_control->predicate.alloc_id},
+        structured_control->predicate.offset, sizeof(std::uint32_t));
+    push_runtime_structure(
+        DeviceAllocation{structured_control->counter.device,
+                         structured_control->counter.alloc_id},
+        structured_control->counter.offset, sizeof(std::uint32_t));
+    if (structured_control->has_status) {
+      push_runtime_structure(
+          DeviceAllocation{structured_control->status.device,
+                           structured_control->status.alloc_id},
+          structured_control->status.offset, sizeof(std::uint32_t));
+    }
+  }
 
   for (const GraphDispatch &dispatch : dispatches) {
     if (dispatch.host_ctx == nullptr) {
@@ -2107,6 +2322,42 @@ bool GfxRuntime::try_launch_graph(
     total_tasks += task_attribs.size();
     prepared.push_back(std::move(prepared_dispatch));
   }
+  std::size_t structured_initial_tasks = 0;
+  std::vector<uint32_t> structured_group_counts;
+  if (structured_control != nullptr) {
+    for (std::size_t i = 0;
+         i < structured_control->initial_dispatch_count; ++i) {
+      structured_initial_tasks +=
+          prepared[i].kernel->ti_kernel_attribs().tasks_attribs.size();
+    }
+    for (std::size_t i = structured_control->initial_dispatch_count;
+         i < prepared.size(); ++i) {
+      for (const auto &attribs :
+           prepared[i].kernel->ti_kernel_attribs().tasks_attribs) {
+        if (attribs.advisory_num_threads_per_group <= 0) {
+          return reject();
+        }
+        const int group_x =
+            (attribs.advisory_total_num_threads +
+             attribs.advisory_num_threads_per_group - 1) /
+            attribs.advisory_num_threads_per_group;
+        if (group_x < 0) {
+          return reject();
+        }
+        structured_group_counts.push_back(
+            static_cast<std::uint32_t>(group_x));
+      }
+    }
+    const std::size_t encoded_actions =
+        static_cast<std::size_t>(structured_control->max_iterations) *
+        (structured_group_counts.size() + 1);
+    if (structured_initial_tasks == 0 ||
+        structured_group_counts.empty() ||
+        structured_group_counts.size() > kStructuredMaximumPackets ||
+        encoded_actions > kStructuredMaximumEncodedActions) {
+      return reject();
+    }
+  }
   if (total_tasks <= 1) {
     return reject(GraphReplayFallbackReason::insufficient_tasks);
   }
@@ -2236,6 +2487,142 @@ bool GfxRuntime::try_launch_graph(
     return true;
   };
 
+  const std::size_t structured_control_bytes =
+      structured_group_counts.empty()
+          ? 0
+          : (structured_group_counts.size() * kStructuredPacketWords +
+             kStructuredObservationWords) *
+                sizeof(std::uint32_t);
+  const std::size_t structured_observation_bytes =
+      structured_control == nullptr
+          ? 0
+          : kStructuredObservationWords * sizeof(std::uint32_t);
+  if (structured_control != nullptr) {
+    const bool rebuild_control =
+        !slot->structured_control_buffer ||
+        slot->structured_control_bytes != structured_control_bytes ||
+        slot->structured_group_counts != structured_group_counts ||
+        slot->structured_has_status != structured_control->has_status;
+    if (rebuild_control) {
+      auto [control_buffer, control_result] =
+          device_->allocate_memory_unique(
+              {structured_control_bytes,
+               /*host_write=*/false, /*host_read=*/false,
+               /*export_sharing=*/false,
+               AllocUsage::Storage | AllocUsage::Indirect});
+      if (control_result != RhiResult::success || !control_buffer) {
+        return reject();
+      }
+      auto [observation_buffer, observation_result] =
+          device_->allocate_memory_unique(
+              {structured_observation_bytes,
+               /*host_write=*/false, /*host_read=*/true,
+               /*export_sharing=*/false, AllocUsage::None});
+      if (observation_result != RhiResult::success ||
+          !observation_buffer) {
+        return reject();
+      }
+      slot->structured_control_buffer = std::move(control_buffer);
+      slot->structured_observation_buffer =
+          std::move(observation_buffer);
+      slot->structured_control_bytes = structured_control_bytes;
+      slot->structured_observation_bytes =
+          structured_observation_bytes;
+      slot->structured_group_counts = structured_group_counts;
+      slot->structured_has_status = structured_control->has_status;
+      slot->structured_controller_pipeline = create_structured_pipeline(
+          device_,
+          make_compact_controller_spirv(device_->get_caps(),
+                                        structured_group_counts,
+                                        structured_control->has_status),
+          "vulkan_compact_controller");
+      slot->structured_terminal_pipeline = create_structured_pipeline(
+          device_,
+          make_structured_terminal_spirv(
+              device_->get_caps(), structured_group_counts.size(),
+              structured_control->has_status),
+          "vulkan_structured_terminal");
+      slot->structured_controller_resources =
+          device_->create_resource_set_unique();
+      slot->structured_terminal_resources =
+          device_->create_resource_set_unique();
+      slot->recorded = false;
+      slot->cmdlist.reset();
+    }
+  }
+
+  auto update_structured_bindings = [&](bool patch_existing) {
+    if (structured_control == nullptr) {
+      return true;
+    }
+    auto *controller = slot->structured_controller_resources.get();
+    auto *terminal = slot->structured_terminal_resources.get();
+    if (controller == nullptr || terminal == nullptr ||
+        !slot->structured_control_buffer) {
+      return false;
+    }
+    controller->rw_buffer(0, structured_control->predicate,
+                          sizeof(std::uint32_t));
+    controller->rw_buffer(1, *slot->structured_control_buffer);
+    controller->rw_buffer(
+        2,
+        structured_control->has_status ? structured_control->status
+                                       : structured_control->counter,
+        sizeof(std::uint32_t));
+    terminal->rw_buffer(0, structured_control->predicate,
+                        sizeof(std::uint32_t));
+    terminal->rw_buffer(1, structured_control->counter,
+                        sizeof(std::uint32_t));
+    terminal->rw_buffer(
+        2,
+        structured_control->has_status ? structured_control->status
+                                       : structured_control->counter,
+        sizeof(std::uint32_t));
+    terminal->rw_buffer(3, *slot->structured_control_buffer);
+    return controller->prepare_for_replay(patch_existing) ==
+               RhiResult::success &&
+           terminal->prepare_for_replay(patch_existing) ==
+               RhiResult::success;
+  };
+
+  auto finish_structured_submission = [&]() {
+    if (structured_control == nullptr) {
+      return true;
+    }
+    if (!slot->completion || !slot->completion->wait()) {
+      return false;
+    }
+    void *mapped = nullptr;
+    if (device_->map(*slot->structured_observation_buffer, &mapped) !=
+        RhiResult::success) {
+      return false;
+    }
+    std::array<std::uint32_t, kStructuredObservationWords> words{};
+    std::memcpy(words.data(), mapped, sizeof(words));
+    device_->unmap(*slot->structured_observation_buffer);
+    structured_result->submitted = true;
+    structured_result->logical_iterations = words[0];
+    structured_result->predicate =
+        static_cast<std::int32_t>(words[1]);
+    structured_result->counter =
+        static_cast<std::int32_t>(words[2]);
+    structured_result->status = static_cast<std::int32_t>(words[3]);
+    structured_result->initial_status =
+        static_cast<std::int32_t>(words[4]);
+    structured_result->encoded_iterations =
+        structured_control->max_iterations;
+    structured_result->indirect_dispatches =
+        structured_control->max_iterations *
+        static_cast<std::uint32_t>(structured_group_counts.size());
+    structured_result->controller_dispatches =
+        structured_control->max_iterations;
+    structured_result->control_bytes =
+        static_cast<std::uint32_t>(structured_control_bytes);
+    structured_result->observation_bytes =
+        static_cast<std::uint32_t>(structured_observation_bytes);
+    return true;
+  };
+
   if (slot->recorded && slot->cmdlist && slot->key == key) {
     slot->completion =
         device_->get_compute_stream()->submit(slot->cmdlist.get());
@@ -2246,13 +2633,14 @@ bool GfxRuntime::try_launch_graph(
       statistics->record_graph_replay();
     }
     state.last_path = GraphReplayLastPath::replay;
-    return true;
+    return finish_structured_submission();
   }
 
   const bool structural_patch_enabled =
       get_environ_config("TI_VULKAN_GRAPH_STRUCTURAL_PATCH", 1) != 0;
   if (structural_patch_enabled && slot->recorded && slot->cmdlist &&
-      slot->structure_key == structure_key && patch_all_task_bindings()) {
+      slot->structure_key == structure_key && patch_all_task_bindings() &&
+      update_structured_bindings(/*patch_existing=*/true)) {
     slot->key = key;
     slot->completion =
         device_->get_compute_stream()->submit(slot->cmdlist.get());
@@ -2264,7 +2652,7 @@ bool GfxRuntime::try_launch_graph(
       statistics->record_graph_replay();
     }
     state.last_path = GraphReplayLastPath::patched_replay;
-    return true;
+    return finish_structured_submission();
   }
 
   auto [recorded_cmdlist, cmd_res] =
@@ -2272,6 +2660,178 @@ bool GfxRuntime::try_launch_graph(
   TI_ASSERT_INFO(cmd_res == RhiResult::success,
                  "Failed to allocate Vulkan graph command list");
   auto *cmdlist = recorded_cmdlist.get();
+
+  if (structured_control != nullptr) {
+    struct StructuredTask {
+      PreparedDispatch *dispatch{nullptr};
+      int task_index{0};
+      ShaderResourceSet *resources{nullptr};
+      std::uint32_t group_x{0};
+    };
+    std::vector<StructuredTask> structured_tasks;
+    structured_tasks.reserve(total_tasks);
+    std::size_t resource_set_index = 0;
+    for (auto &pd : prepared) {
+      const auto &task_attribs =
+          pd.kernel->ti_kernel_attribs().tasks_attribs;
+      for (int task_index = 0; task_index < task_attribs.size();
+           ++task_index) {
+        auto *resources =
+            slot->resource_sets[resource_set_index++].get();
+        TI_ERROR_IF(
+            !update_task_bindings(pd, task_index, resources,
+                                  /*patch_existing=*/false),
+            "Vulkan structured Graph descriptor preparation failed");
+        const auto &attribs = task_attribs[task_index];
+        const int group_x =
+            (attribs.advisory_total_num_threads +
+             attribs.advisory_num_threads_per_group - 1) /
+            attribs.advisory_num_threads_per_group;
+        structured_tasks.push_back(
+            {&pd, task_index, resources,
+             static_cast<std::uint32_t>(group_x)});
+      }
+    }
+    TI_ERROR_IF(
+        !update_structured_bindings(/*patch_existing=*/false),
+        "Vulkan structured control descriptor preparation failed");
+
+    auto dispatch_task = [&](const StructuredTask &task,
+                             const DevicePtr *indirect) {
+      cmdlist->bind_pipeline(
+          task.dispatch->kernel->get_pipeline(task.task_index));
+      RhiResult status =
+          cmdlist->bind_shader_resources(task.resources);
+      TI_ERROR_IF(status != RhiResult::success,
+                  "Vulkan structured Graph resource binding error: "
+                  "RhiResult({})",
+                  status);
+      status = indirect == nullptr
+                   ? cmdlist->dispatch(task.group_x)
+                   : cmdlist->dispatch_indirect(*indirect);
+      TI_ERROR_IF(status != RhiResult::success,
+                  "Vulkan structured Graph dispatch error: RhiResult({})",
+                  status);
+      cmdlist->memory_barrier();
+    };
+
+    cmdlist->buffer_fill(slot->structured_control_buffer->get_ptr(),
+                         structured_control_bytes, 0);
+    cmdlist->buffer_transition(
+        slot->structured_control_buffer->get_ptr(),
+        structured_control_bytes,
+        {BufferBarrierStage::Transfer,
+         BufferBarrierAccess::TransferWrite,
+         BufferBarrierStage::Compute,
+         BufferBarrierAccess::ShaderRead |
+             BufferBarrierAccess::ShaderWrite});
+    for (std::size_t i = 0; i < structured_initial_tasks; ++i) {
+      dispatch_task(structured_tasks[i], nullptr);
+    }
+
+    for (std::uint32_t iteration = 0;
+         iteration < structured_control->max_iterations; ++iteration) {
+      cmdlist->buffer_transition(
+          structured_control->predicate, sizeof(std::uint32_t),
+          {BufferBarrierStage::Compute,
+           BufferBarrierAccess::ShaderWrite,
+           BufferBarrierStage::Compute,
+           BufferBarrierAccess::ShaderRead});
+      cmdlist->bind_pipeline(
+          slot->structured_controller_pipeline.get());
+      RhiResult status = cmdlist->bind_shader_resources(
+          slot->structured_controller_resources.get());
+      TI_ERROR_IF(status != RhiResult::success,
+                  "Vulkan compact controller resource binding error: "
+                  "RhiResult({})",
+                  status);
+      status = cmdlist->dispatch(1);
+      TI_ERROR_IF(status != RhiResult::success,
+                  "Vulkan compact controller dispatch error: RhiResult({})",
+                  status);
+      cmdlist->buffer_transition(
+          slot->structured_control_buffer->get_ptr(),
+          structured_group_counts.size() * kStructuredPacketWords *
+              sizeof(std::uint32_t),
+          {BufferBarrierStage::Compute,
+           BufferBarrierAccess::ShaderWrite,
+           BufferBarrierStage::IndirectCommand,
+           BufferBarrierAccess::IndirectCommandRead});
+
+      for (std::size_t packet = 0;
+           packet < structured_group_counts.size(); ++packet) {
+        const DevicePtr indirect =
+            slot->structured_control_buffer->get_ptr(
+                packet * kStructuredPacketWords *
+                sizeof(std::uint32_t));
+        dispatch_task(
+            structured_tasks[structured_initial_tasks + packet],
+            &indirect);
+      }
+      cmdlist->buffer_transition(
+          slot->structured_control_buffer->get_ptr(),
+          structured_group_counts.size() * kStructuredPacketWords *
+              sizeof(std::uint32_t),
+          {BufferBarrierStage::IndirectCommand,
+           BufferBarrierAccess::IndirectCommandRead,
+           BufferBarrierStage::Compute,
+           BufferBarrierAccess::ShaderRead |
+               BufferBarrierAccess::ShaderWrite});
+    }
+
+    cmdlist->memory_barrier();
+    cmdlist->bind_pipeline(slot->structured_terminal_pipeline.get());
+    RhiResult terminal_status = cmdlist->bind_shader_resources(
+        slot->structured_terminal_resources.get());
+    TI_ERROR_IF(terminal_status != RhiResult::success,
+                "Vulkan structured terminal resource binding error: "
+                "RhiResult({})",
+                terminal_status);
+    terminal_status = cmdlist->dispatch(1);
+    TI_ERROR_IF(terminal_status != RhiResult::success,
+                "Vulkan structured terminal dispatch error: RhiResult({})",
+                terminal_status);
+
+    const std::size_t observation_offset =
+        structured_group_counts.size() * kStructuredPacketWords *
+        sizeof(std::uint32_t);
+    cmdlist->buffer_transition(
+        slot->structured_control_buffer->get_ptr(observation_offset),
+        structured_observation_bytes,
+        {BufferBarrierStage::Compute,
+         BufferBarrierAccess::ShaderWrite,
+         BufferBarrierStage::Transfer,
+         BufferBarrierAccess::TransferRead});
+    cmdlist->buffer_copy(
+        slot->structured_observation_buffer->get_ptr(),
+        slot->structured_control_buffer->get_ptr(observation_offset),
+        structured_observation_bytes);
+    cmdlist->buffer_transition(
+        slot->structured_observation_buffer->get_ptr(),
+        structured_observation_bytes,
+        {BufferBarrierStage::Transfer,
+         BufferBarrierAccess::TransferWrite,
+         BufferBarrierStage::Host,
+         BufferBarrierAccess::HostRead});
+
+    slot->key = std::move(key);
+    slot->structure_key = std::move(structure_key);
+    slot->cmdlist = std::move(recorded_cmdlist);
+    slot->recorded = true;
+    slot->completion =
+        device_->get_compute_stream()->submit(slot->cmdlist.get());
+    if (state.diagnostics_enabled) {
+      ++state.recorded;
+    }
+    if (statistics != nullptr) {
+      statistics->record_graph_capture();
+      if (is_recapture) {
+        statistics->record_graph_recapture();
+      }
+    }
+    state.last_path = GraphReplayLastPath::record;
+    return finish_structured_submission();
+  }
 
   struct BufferAccess {
     DeviceAllocation allocation{kDeviceNullAllocation};

@@ -24,6 +24,7 @@ endif()
 target_include_directories(gfx_runtime
   PRIVATE
     ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/external/SPIRV-Headers/include
     ${PROJECT_SOURCE_DIR}/external/SPIRV-Tools/include
     ${PROJECT_SOURCE_DIR}/external/eigen
     ${PROJECT_SOURCE_DIR}/external/FP16/include

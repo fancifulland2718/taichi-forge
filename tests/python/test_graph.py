@@ -2447,16 +2447,19 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         assert device["primitive"] == "vulkan_dispatch_indirect"
         assert device["rhi_primitive_compiled"]
         assert device["rhi_primitive_qualified"]
-        assert not device["runtime_path_compiled"]
-        assert not device["runtime_path_qualified"]
+        assert device["runtime_path_compiled"]
+        assert device["runtime_path_qualified"]
+        assert device["while"]
+        assert not device["if"]
+        assert not device["switch"]
         assert not device["structured_submit"]
-        assert not device["logical_termination_exact"]
-        assert not device["device_controlled_masking"]
+        assert device["logical_termination_exact"]
+        assert device["device_controlled_masking"]
         assert not device["stops_command_issue_after_exit"]
         assert not device["exact_dynamic_termination"]
-        assert device["unsupported_reason"] == (
-            "vulkan_structured_indirect_runtime_not_compiled"
-        )
+        assert device["skip_strategy"] == "compact_indirect"
+        assert device["max_encoded_dispatches"] == 4096
+        assert device["unsupported_reason"] == ("vulkan_if_switch_runtime_not_compiled")
     else:
         assert capabilities["backend"] == "cpu"
         assert not device["rhi_primitive_compiled"]
@@ -2478,17 +2481,19 @@ def test_structured_graph_while_reports_exact_stop_and_backend_overshoot():
     assert args["state"].to_numpy()[()] == 5
     assert report.counter_values[-1] == 5
     assert report.observation_batches == len(report.observation_boundaries)
-    assert report.observation_scalar_count == 2 * report.observation_batches
-    assert report.device_to_host_bytes == 8 * report.observation_batches
     assert report.staging_fallback_batches == 0
-    if ti.lang.impl.current_cfg().arch == ti.vulkan:
-        assert report.persistent_staging_bytes >= 8
-        assert report.staging_allocations == 1
-        assert report.staging_reuses == report.observation_batches - 1
-        assert report.packed_observation_batches == report.observation_batches
+    if report.lowering == "vulkan_compact_indirect":
+        assert report.observation_scalar_count == 5
+        assert report.device_to_host_bytes == 20
+        assert report.persistent_staging_bytes == 0
+        assert report.staging_allocations == 0
+        assert report.staging_reuses == 0
+        assert report.packed_observation_batches == 1
         assert report.direct_observation_batches == 0
         assert report.packed_observation_bytes == report.device_to_host_bytes
     else:
+        assert report.observation_scalar_count == 2 * report.observation_batches
+        assert report.device_to_host_bytes == 8 * report.observation_batches
         assert report.persistent_staging_bytes == 0
         assert report.staging_allocations == 0
         assert report.staging_reuses == 0
@@ -2503,7 +2508,6 @@ def test_structured_graph_while_reports_exact_stop_and_backend_overshoot():
     assert memory.transient_temporary_bytes == 0
     assert memory.opaque_driver_bytes is None
     assert args["predicate"].to_numpy()[()] == 0
-    assert report.observation_boundaries[0] == 0
     assert report.observation_boundaries[-1] == report.executed_iterations
     assert len(report.predicate_values) == len(report.observation_boundaries)
 
@@ -2518,6 +2522,13 @@ def test_structured_graph_while_reports_exact_stop_and_backend_overshoot():
         assert report.overshoot_iterations == 0
         assert report.chunk_sizes == (5,)
         assert report.observation_boundaries == (0, 5)
+        assert report.native_upgrade_reason == "selected"
+    elif report.lowering == "vulkan_compact_indirect":
+        assert ti.lang.impl.current_cfg().arch == ti.vulkan
+        assert report.executed_iterations == 20
+        assert report.overshoot_iterations == 15
+        assert report.chunk_sizes == (20,)
+        assert report.observation_boundaries == (20,)
         assert report.native_upgrade_reason == "selected"
     else:
         assert report.lowering == "portable_chunk_replay"
@@ -2635,8 +2646,12 @@ def test_structured_graph_while_reports_user_defined_terminal_status():
     assert report.status_values[0] == 0
     assert report.status_values[-1] == 1
     assert report.logical_iterations == 3
-    assert report.observation_scalar_count == 3 * report.observation_batches
-    assert report.device_to_host_bytes == 12 * report.observation_batches
+    if report.lowering == "vulkan_compact_indirect":
+        assert report.observation_scalar_count == 5
+        assert report.device_to_host_bytes == 20
+    else:
+        assert report.observation_scalar_count == 3 * report.observation_batches
+        assert report.device_to_host_bytes == 12 * report.observation_batches
 
     stopped = _structured_status_args(user_stop=True)
     graph.run({**stopped, "target": 3})
@@ -2661,8 +2676,12 @@ def test_structured_graph_while_transfer_planner_has_strict_fallback(monkeypatch
     graph.run(args)
     report = graph.control_flow_stats()[0]
     assert report.logical_iterations == 5
-    assert report.packed_observation_batches == 0
-    assert report.direct_observation_batches == report.observation_batches
+    if report.lowering == "vulkan_compact_indirect":
+        assert report.packed_observation_batches == 1
+        assert report.direct_observation_batches == 0
+    else:
+        assert report.packed_observation_batches == 0
+        assert report.direct_observation_batches == report.observation_batches
     assert report.staging_allocations == 0
     assert report.staging_reuses == 0
     assert report.staging_fallback_batches == 0
@@ -2670,22 +2689,24 @@ def test_structured_graph_while_transfer_planner_has_strict_fallback(monkeypatch
 
 
 @test_utils.test(arch=ti.vulkan)
-def test_structured_graph_while_reuses_or_disables_persistent_observation_staging(
+def test_structured_graph_while_compact_terminal_observation_is_replay_owned(
     monkeypatch,
 ):
     graph = _build_structured_while_graph(max_iterations=20)
     first = _structured_while_args(target=5)
     graph.run(first)
     first_report = graph.control_flow_stats()[0]
-    assert first_report.staging_allocations == 1
-    assert first_report.packed_observation_batches == first_report.observation_batches
+    assert first_report.lowering == "vulkan_compact_indirect"
+    assert first_report.staging_allocations == 0
+    assert first_report.packed_observation_batches == 1
+    assert first_report.device_to_host_bytes == 20
 
     second = _structured_while_args(target=5)
     graph.run(second)
     second_report = graph.control_flow_stats()[0]
     assert second_report.staging_allocations == 0
-    assert second_report.staging_reuses == second_report.observation_batches
-    assert second_report.packed_observation_batches == second_report.observation_batches
+    assert second_report.staging_reuses == 0
+    assert second_report.packed_observation_batches == 1
     assert (
         second_report.persistent_staging_bytes == first_report.persistent_staging_bytes
     )
@@ -2694,12 +2715,10 @@ def test_structured_graph_while_reuses_or_disables_persistent_observation_stagin
     disabled = _structured_while_args(target=5)
     graph.run(disabled)
     disabled_report = graph.control_flow_stats()[0]
-    assert disabled_report.packed_observation_batches == 0
+    assert disabled_report.lowering == "vulkan_compact_indirect"
+    assert disabled_report.packed_observation_batches == 1
     assert disabled_report.staging_reuses == 0
-    assert (
-        disabled_report.direct_observation_batches
-        == disabled_report.observation_batches
-    )
+    assert disabled_report.direct_observation_batches == 0
     assert disabled_report.logical_iterations == 5
     assert disabled["state"].to_numpy()[()] == 5
 
@@ -2712,12 +2731,19 @@ def test_structured_graph_while_honors_initial_stop_and_iteration_cap():
     graph.run(inactive)
     stopped = graph.control_flow_stats()[0]
     assert stopped.logical_iterations == 0
-    assert stopped.executed_iterations == 0
-    assert stopped.observation_boundaries == (0,)
     assert stopped.counter_values == (0,)
     assert stopped.observation_batches == 1
-    assert stopped.observation_scalar_count == 2
-    assert stopped.device_to_host_bytes == 8
+    if stopped.lowering == "vulkan_compact_indirect":
+        assert stopped.executed_iterations == 6
+        assert stopped.overshoot_iterations == 6
+        assert stopped.observation_boundaries == (6,)
+        assert stopped.observation_scalar_count == 5
+        assert stopped.device_to_host_bytes == 20
+    else:
+        assert stopped.executed_iterations == 0
+        assert stopped.observation_boundaries == (0,)
+        assert stopped.observation_scalar_count == 2
+        assert stopped.device_to_host_bytes == 8
 
     capped = _structured_while_args(target=100)
     graph.run(capped)
@@ -2730,6 +2756,9 @@ def test_structured_graph_while_honors_initial_stop_and_iteration_cap():
     elif report.lowering == "cuda_conditional_graph":
         assert report.chunk_sizes == (6,)
         assert report.observation_boundaries == (0, 6)
+    elif report.lowering == "vulkan_compact_indirect":
+        assert report.chunk_sizes == (6,)
+        assert report.observation_boundaries == (6,)
     else:
         assert report.chunk_sizes == (4, 2)
     assert capped["state"].to_numpy()[()] == 6
@@ -2792,6 +2821,42 @@ def test_structured_graph_while_native_rebind_and_replay_diagnostics():
     assert native_stats["asynchronous_control_updates"] == 3
     assert 1 <= native_stats["peak_deferred_replay_batches"] <= 2
     assert native_stats["deferred_replay_waits"] >= 0
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_structured_graph_while_vulkan_compact_rebind_and_replay_diagnostics():
+    graph = _build_structured_while_graph(
+        max_iterations=20, lowering_mode="native_required"
+    )
+    graph._graph_stats
+    first = _structured_while_args(target=5)
+    second = _structured_while_args(target=7)
+
+    graph.run(first)
+    first_report = graph.control_flow_stats()[0]
+    assert first_report.lowering == "vulkan_compact_indirect"
+    assert first_report.logical_iterations == 5
+    assert first_report.executed_iterations == 20
+    assert first["state"].to_numpy()[()] == 5
+
+    graph.run(second)
+    second_report = graph.control_flow_stats()[0]
+    assert second_report.logical_iterations == 7
+    assert second["state"].to_numpy()[()] == 7
+
+    second["state"].fill(0)
+    second["predicate"].fill(0)
+    second["counter"].fill(0)
+    graph.run(second)
+    replay_report = graph.control_flow_stats()[0]
+    assert replay_report.logical_iterations == 7
+    assert second["state"].to_numpy()[()] == 7
+
+    native_stats = graph._graph_stats[0]
+    assert native_stats["records"] == 1
+    assert native_stats["patched_replays"] >= 1
+    assert native_stats["replays"] >= 2
+    assert native_stats["last_path"] == "vulkan_replay"
 
 
 @test_utils.test(arch=ti.cuda)

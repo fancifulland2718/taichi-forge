@@ -6,7 +6,6 @@
 #include <spirv/unified1/spirv.hpp>
 #include "taichi/util/lang_util.h"
 #include "taichi/ir/type.h"
-#include "taichi/util/testing.h"
 #include "taichi/codegen/spirv/snode_struct_compiler.h"
 #include "taichi/rhi/device.h"
 #include "taichi/ir/statements.h"

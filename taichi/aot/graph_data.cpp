@@ -2247,7 +2247,11 @@ bool try_run_vulkan_graph(const CompiledGraph &graph,
                           const CompileConfig &compile_config,
                           const std::unordered_map<std::string, IValue> &args,
                           CompiledGraphJITCache &cache,
-                          RuntimeStatistics *statistics) {
+                          RuntimeStatistics *statistics,
+                          const gfx::GfxRuntime::GraphStructuredControl
+                              *structured_control = nullptr,
+                          gfx::GfxRuntime::GraphStructuredResult
+                              *structured_result = nullptr) {
   if (compile_config.debug) {
     auto &stats = cache.vulkan_inline_stats;
     stats.backend = CompiledGraphBackend::vulkan;
@@ -2316,8 +2320,10 @@ bool try_run_vulkan_graph(const CompiledGraph &graph,
   }
   auto *runtime = gfx_launcher->runtime();
   auto *state = get_vulkan_graph_state(cache, runtime);
-  return runtime->try_launch_graph(
-      gfx_dispatches, state->registration->replay_key(), statistics);
+  return runtime->try_launch_graph(gfx_dispatches,
+                                   state->registration->replay_key(),
+                                   statistics, structured_control,
+                                   structured_result);
 }
 
 }  // namespace
@@ -2829,6 +2835,134 @@ bool CompiledGraph::jit_run_bounded_cuda_cached(
 #else
   return false;
 #endif
+} catch (const BackendRuntimeError &error) {
+  Program *program = jit_graph_program(*this);
+  if (program != nullptr) {
+    program->record_runtime_submission_failure();
+    program->report_backend_runtime_error(error);
+  }
+  throw;
+} catch (...) {
+  Program *program = jit_graph_program(*this);
+  if (program != nullptr) {
+    program->record_runtime_submission_failure();
+  }
+  throw;
+}
+
+CompiledGraphStructuredResult
+CompiledGraph::jit_run_bounded_vulkan_cached(
+    const CompileConfig &compile_config,
+    const std::unordered_map<std::string, IValue> &args,
+    CompiledGraphJITCache &cache,
+    Ndarray *predicate,
+    Ndarray *counter,
+    Ndarray *status,
+    std::size_t initial_dispatch_count,
+    int max_iterations) const try {
+  CompiledGraphStructuredResult result;
+#if defined(TI_WITH_VULKAN)
+  if (compile_config.arch != Arch::vulkan || predicate == nullptr ||
+      counter == nullptr || max_iterations < 0 ||
+      initial_dispatch_count == 0 ||
+      initial_dispatch_count >= dispatches.size()) {
+    return result;
+  }
+  Program *program = jit_graph_program(*this);
+  if (program == nullptr) {
+    return result;
+  }
+  const auto valid_control = [&](const Ndarray *control) {
+    return control != nullptr && control->get_nelement() == 1 &&
+           control->get_element_data_type() == PrimitiveType::i32 &&
+           control->owning_program() == program;
+  };
+  if (!valid_control(predicate) || !valid_control(counter) ||
+      (status != nullptr && !valid_control(status)) ||
+      static_cast<std::uint64_t>(max_iterations) >
+          std::numeric_limits<std::uint32_t>::max()) {
+    return result;
+  }
+
+  program->ensure_runtime_submission_allowed(
+      "bounded Vulkan Graph launch");
+  auto tree_lifecycle_guard =
+      program->acquire_snode_tree_lifecycle_read_guard();
+  auto resource_views = graph_runtime_resource_views(args, program);
+  resource_views.ndarrays.add(predicate);
+  resource_views.ndarrays.add(counter);
+  if (status != nullptr) {
+    resource_views.ndarrays.add(status);
+  }
+  std::optional<Program::RuntimeResourceGraphScope> resource_guard;
+  if (!resource_views.empty()) {
+    resource_guard.emplace(program->acquire_runtime_resource_graph_scope());
+    if (!resource_views.ndarrays.empty()) {
+      program->retain_ndarrays_for_external_submission(
+          resource_views.ndarrays.data(), resource_views.ndarrays.size());
+    }
+    if (!resource_views.runtime_storage.empty()) {
+      program->retain_runtime_storage_for_graph_submission(
+          resource_views.runtime_storage.data(),
+          resource_views.runtime_storage.size());
+    }
+    if (!resource_views.textures.empty()) {
+      program->retain_textures_for_external_submission(
+          resource_views.textures.data(), resource_views.textures.size());
+    }
+  }
+  auto completion_scope = program->acquire_runtime_submission_scope();
+  std::lock_guard<std::mutex> lock(cache.run_mutex);
+  if (cache.validated_snode_tree_program != program ||
+      cache.validated_snode_tree_epoch != tree_lifecycle_guard.epoch()) {
+    try {
+      program->validate_snode_tree_dependencies(snode_tree_dependencies);
+    } catch (...) {
+      cache.vulkan_graph_state.reset();
+      cache.vulkan_inline_stats = {};
+      cache.kernels.clear();
+      cache.runtime_arg_plans.clear();
+      cache.validated_snode_tree_program = nullptr;
+      cache.validated_snode_tree_epoch = 0;
+      throw;
+    }
+    cache.validated_snode_tree_program = program;
+    cache.validated_snode_tree_epoch = tree_lifecycle_guard.epoch();
+  }
+
+  gfx::GfxRuntime::GraphStructuredControl control;
+  control.predicate = predicate->get_device_allocation().get_ptr();
+  control.counter = counter->get_device_allocation().get_ptr();
+  control.initial_dispatch_count = initial_dispatch_count;
+  control.max_iterations = static_cast<std::uint32_t>(max_iterations);
+  control.has_status = status != nullptr;
+  if (status != nullptr) {
+    control.status = status->get_device_allocation().get_ptr();
+  }
+  gfx::GfxRuntime::GraphStructuredResult gfx_result;
+  if (!try_run_vulkan_graph(*this, compile_config, args, cache,
+                            &program->runtime_statistics(), &control,
+                            &gfx_result)) {
+    return result;
+  }
+  program->mark_runtime_submission(
+      RuntimeSubmissionKind::kGraphBackendSubmission);
+  if (resource_guard) {
+    resource_guard->finish_external_access_epoch();
+  }
+  result.submitted = gfx_result.submitted;
+  result.logical_iterations = gfx_result.logical_iterations;
+  result.predicate = gfx_result.predicate;
+  result.counter = gfx_result.counter;
+  result.status = gfx_result.status;
+  result.initial_status = gfx_result.initial_status;
+  result.encoded_iterations = gfx_result.encoded_iterations;
+  result.indirect_dispatches = gfx_result.indirect_dispatches;
+  result.controller_dispatches = gfx_result.controller_dispatches;
+  result.control_bytes = gfx_result.control_bytes;
+  result.observation_bytes = gfx_result.observation_bytes;
+#endif
+  return result;
 } catch (const BackendRuntimeError &error) {
   Program *program = jit_graph_program(*this);
   if (program != nullptr) {

@@ -3378,7 +3378,13 @@ void export_lang(py::module &m) {
                           Ndarray *conditional_selector = nullptr,
                           const std::vector<int> *branch_dispatch_counts = nullptr,
                           int conditional_type = -1,
-                          int default_branch = -1) -> bool {
+                          int default_branch = -1,
+                          Ndarray *vulkan_predicate = nullptr,
+                          Ndarray *vulkan_counter = nullptr,
+                          Ndarray *vulkan_status = nullptr,
+                          std::size_t vulkan_initial_dispatch_count = 0,
+                          aot::CompiledGraphStructuredResult
+                              *vulkan_result = nullptr) -> bool {
         std::unordered_map<std::string, aot::IValue> args;
         auto insert_scalar_arg = [&args](std::string arg_name,
                                          DataType expected_dtype,
@@ -3534,6 +3540,16 @@ void export_lang(py::module &m) {
           return self->jit_run_conditional_cuda_cached(
               compile_config, args, *cache, conditional_selector,
               *branch_dispatch_counts, conditional_type, default_branch);
+        }
+        if (vulkan_predicate != nullptr) {
+          TI_ASSERT(cache != nullptr);
+          TI_ASSERT(vulkan_counter != nullptr);
+          TI_ASSERT(vulkan_result != nullptr);
+          *vulkan_result = self->jit_run_bounded_vulkan_cached(
+              compile_config, args, *cache, vulkan_predicate,
+              vulkan_counter, vulkan_status,
+              vulkan_initial_dispatch_count, bounded_max_iterations);
+          return vulkan_result->submitted;
         }
         if (cache) {
           self->jit_run_cached(compile_config, args, *cache);
@@ -3798,6 +3814,40 @@ void export_lang(py::module &m) {
            py::arg("cache"), py::arg("predicate"),
            py::arg("max_iterations"),
            py::arg("continue_while_nonzero"))
+      .def("jit_run_bounded_vulkan_cached",
+           [jit_run_graph](aot::CompiledGraph *self,
+                           const CompileConfig &compile_config,
+                           const py::dict &pyargs,
+                           aot::CompiledGraphJITCache &cache,
+                           Ndarray &predicate, Ndarray &counter,
+                           std::size_t initial_dispatch_count,
+                           int max_iterations, Ndarray *status) {
+             aot::CompiledGraphStructuredResult result;
+             jit_run_graph(
+                 self, compile_config, pyargs, &cache, nullptr,
+                 max_iterations, true, nullptr, nullptr, -1, -1,
+                 &predicate, &counter, status,
+                 initial_dispatch_count, &result);
+             py::dict encoded;
+             encoded["submitted"] = result.submitted;
+             encoded["logical_iterations"] = result.logical_iterations;
+             encoded["predicate"] = result.predicate;
+             encoded["counter"] = result.counter;
+             encoded["status"] = result.status;
+             encoded["initial_status"] = result.initial_status;
+             encoded["encoded_iterations"] = result.encoded_iterations;
+             encoded["indirect_dispatches"] =
+                 result.indirect_dispatches;
+             encoded["controller_dispatches"] =
+                 result.controller_dispatches;
+             encoded["control_bytes"] = result.control_bytes;
+             encoded["observation_bytes"] = result.observation_bytes;
+             return encoded;
+           },
+           py::arg("compile_config"), py::arg("args"), py::arg("cache"),
+           py::arg("predicate"), py::arg("counter"),
+           py::arg("initial_dispatch_count"),
+           py::arg("max_iterations"), py::arg("status") = nullptr)
       .def("jit_run_conditional_cuda_cached",
            [jit_run_graph](aot::CompiledGraph *self,
                            const CompileConfig &compile_config,

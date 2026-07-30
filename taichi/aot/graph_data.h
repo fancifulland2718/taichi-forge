@@ -369,6 +369,20 @@ struct CompiledGraphDebugSnapshot {
   bool diagnostics_counters_complete{true};
 };
 
+struct CompiledGraphStructuredResult {
+  bool submitted{false};
+  std::uint32_t logical_iterations{0};
+  std::int32_t predicate{0};
+  std::int32_t counter{0};
+  std::int32_t status{0};
+  std::int32_t initial_status{0};
+  std::uint32_t encoded_iterations{0};
+  std::uint32_t indirect_dispatches{0};
+  std::uint32_t controller_dispatches{0};
+  std::uint32_t control_bytes{0};
+  std::uint32_t observation_bytes{0};
+};
+
 // A transient capture error must not permanently disable an otherwise valid
 // graph. Retry periodically with bounded exponential backoff; structural
 // incompatibility remains disabled because repeating it cannot recover.
@@ -522,6 +536,15 @@ struct TI_DLL_EXPORT CompiledGraph {
       Ndarray *predicate,
       int max_iterations,
       bool continue_while_nonzero) const;
+  CompiledGraphStructuredResult jit_run_bounded_vulkan_cached(
+      const CompileConfig &compile_config,
+      const std::unordered_map<std::string, IValue> &args,
+      CompiledGraphJITCache &cache,
+      Ndarray *predicate,
+      Ndarray *counter,
+      Ndarray *status,
+      std::size_t initial_dispatch_count,
+      int max_iterations) const;
   bool jit_run_conditional_cuda_cached(
       const CompileConfig &compile_config,
       const std::unordered_map<std::string, IValue> &args,

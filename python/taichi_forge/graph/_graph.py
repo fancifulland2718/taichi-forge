@@ -669,15 +669,17 @@ def structured_control_capabilities():
     """Return the qualified structured-control lowering for this runtime.
 
     Schema v2 separates compilation, backend qualification, and a complete
-    Graph runtime path.  Vulkan's device-written indirect dispatch contract is
-    qualified independently, but Forge does not claim device-controlled
-    while/if/switch execution until predicate production, replay ownership,
-    masking, and terminal observation are qualified together.
+    Graph runtime path. Vulkan bounded while regions use compact indirect
+    masking after predicate production and terminal observation have been
+    qualified together. Branch regions and asynchronous structured submission
+    remain separate capabilities.
     """
     arch = impl.current_cfg().arch
     backend = _backend_name(_ti_core.arch_name(arch))
     cuda = None
     native = False
+    branch_native = False
+    structured_submit = False
     primitive = "none"
     rhi_primitive_compiled = False
     rhi_primitive_qualified = False
@@ -686,6 +688,7 @@ def structured_control_capabilities():
     skip_strategy = "none"
     stops_command_issue_after_exit = False
     exact_dynamic_termination = False
+    max_encoded_dispatches = 0
     if arch == _ti_core.Arch.cuda:
         cuda = dict(_ti_core.cuda_conditional_graph_capabilities())
         setter_compiled = bool(
@@ -701,6 +704,8 @@ def structured_control_capabilities():
         rhi_primitive_qualified = native
         runtime_path_compiled = setter_compiled
         runtime_path_qualified = native
+        branch_native = native
+        structured_submit = native
         skip_strategy = "cuda_conditional_graph" if native else "none"
         stops_command_issue_after_exit = native
         exact_dynamic_termination = native
@@ -713,10 +718,15 @@ def structured_control_capabilities():
         else:
             reason = "none"
     elif arch == _ti_core.Arch.vulkan:
+        native = True
         primitive = "vulkan_dispatch_indirect"
         rhi_primitive_compiled = True
         rhi_primitive_qualified = True
-        reason = "vulkan_structured_indirect_runtime_not_compiled"
+        runtime_path_compiled = True
+        runtime_path_qualified = True
+        skip_strategy = "compact_indirect"
+        max_encoded_dispatches = 4096
+        reason = "vulkan_if_switch_runtime_not_compiled"
     else:
         reason = "device_control_is_gpu_only"
     portable_while = (
@@ -734,9 +744,9 @@ def structured_control_capabilities():
         },
         "device_control": {
             "while": native,
-            "if": native,
-            "switch": native,
-            "structured_submit": native,
+            "if": branch_native,
+            "switch": branch_native,
+            "structured_submit": structured_submit,
             "logical_termination_exact": native,
             "device_controlled_masking": native,
             "per_iteration_host_observation": False,
@@ -750,7 +760,7 @@ def structured_control_capabilities():
             "runtime_path_qualified": runtime_path_qualified,
             "conditional_rendering_available": False,
             "conditional_rendering_qualified": False,
-            "max_encoded_dispatches": 0,
+            "max_encoded_dispatches": max_encoded_dispatches,
             "unsupported_reason": reason,
         },
         "cuda_conditional_graph": cuda,
@@ -1588,17 +1598,21 @@ def _structured_chunk_limit(arch, requested, masked_execution):
     return min(configured, 64)
 
 
-def _cuda_while_upgrade_status(arch, mode):
+def _while_upgrade_status(arch, mode):
     if mode not in ("auto", "portable", "native_required"):
         raise TaichiRuntimeError(
             "Graph while lowering_mode must be auto, portable, or " "native_required"
         )
     if mode == "portable":
         return False, "forced_portable"
+    if arch == _ti_core.Arch.vulkan:
+        return True, "eligible"
     if arch != _ti_core.Arch.cuda:
         if mode == "native_required":
-            raise TaichiRuntimeError("Graph while native_required mode needs CUDA")
-        return False, "not_cuda"
+            raise TaichiRuntimeError(
+                "Graph while native_required mode needs CUDA or Vulkan"
+            )
+        return False, "not_gpu_structured_runtime"
     capabilities = dict(_ti_core.cuda_conditional_graph_capabilities())
     if not capabilities["driver_version_eligible"]:
         reason = "cuda_driver_api_version_below_12_8"
@@ -1816,7 +1830,24 @@ class _CompiledWhileGraphNode:
                 region_kinds=("while_body", "while_condition"),
             )
             chunk *= 2
-        dependency_nodes = (self._condition, *self._chunks.values())
+        self._vulkan_compact = (
+            _compile_sequential_runtime_node(
+                (condition, body, condition),
+                name=f"{name}_vulkan_compact",
+                region_kinds=(
+                    "while_condition",
+                    "while_body",
+                    "while_condition",
+                ),
+            )
+            if arch == _ti_core.Arch.vulkan
+            else None
+        )
+        dependency_nodes = (
+            self._condition,
+            *self._chunks.values(),
+            *((self._vulkan_compact,) if self._vulkan_compact is not None else ()),
+        )
         self.temporary_actions = _merge_temporary_actions(dependency_nodes)
         self.temporary_runtime_arg_names = frozenset().union(
             *(
@@ -1866,13 +1897,14 @@ class _CompiledWhileGraphNode:
         )
         self._last_report = None
         self._native_jit_cache = _ti_core.CompiledGraphJITCache()
+        self._native_submission_eligible = arch == _ti_core.Arch.cuda
         self._native_upgrade_eligible, self._native_upgrade_reason = (
-            _cuda_while_upgrade_status(arch, lowering_mode)
+            _while_upgrade_status(arch, lowering_mode)
         )
         if self._native_upgrade_eligible and self.counter is None:
             if lowering_mode == "native_required":
                 raise TaichiRuntimeError(
-                    "Native CUDA Graph while lowering requires an exact "
+                    "Native Graph while lowering requires an exact "
                     "iteration counter"
                 )
             self._native_upgrade_eligible = False
@@ -1887,12 +1919,14 @@ class _CompiledWhileGraphNode:
             self.lowering_mode == "native_required"
             and self._native_upgrade_eligible
             and self.counter is not None
+            and self._native_submission_eligible
         )
 
     def run_for_submission(self, context, temporaries=None):
         if not self.supports_native_submission:
             raise TaichiRuntimeError(
-                "Graph while submission requires native_required CUDA lowering"
+                "Graph while submission requires a submission-capable "
+                "native_required backend lowering"
             )
         self._last_report = None
         self._condition.run(context)
@@ -1918,6 +1952,121 @@ class _CompiledWhileGraphNode:
                 "synchronous fallback is disabled"
             )
 
+    def _run_vulkan_compact(self, context, runtime_args, transfer_before):
+        if (
+            impl.current_cfg().arch != _ti_core.Arch.vulkan
+            or not self._native_upgrade_eligible
+            or self._vulkan_compact is None
+        ):
+            return False
+        predicate_object = runtime_args[self.predicate]
+        counter_object = runtime_args[self.counter]
+        status_object = (
+            runtime_args[self.status] if self.status is not None else None
+        )
+        predicate_ndarray = getattr(predicate_object, "arr", None)
+        counter_ndarray = getattr(counter_object, "arr", None)
+        status_ndarray = (
+            getattr(status_object, "arr", None) if status_object is not None else None
+        )
+        unavailable = None
+        if predicate_ndarray is None:
+            unavailable = "predicate_ndarray_required"
+        elif counter_ndarray is None:
+            unavailable = "counter_ndarray_required"
+        elif status_object is not None and status_ndarray is None:
+            unavailable = "status_ndarray_required"
+        if unavailable is not None:
+            if self.lowering_mode == "native_required":
+                raise TaichiRuntimeError(
+                    "Graph while native Vulkan lowering failed: " f"{unavailable}"
+                )
+            return False
+
+        result = dict(
+            self._vulkan_compact.compiled_graph.jit_run_bounded_vulkan_cached(
+                context.compile_config(),
+                context.flattened_args(
+                    self._vulkan_compact.recording_runtime_arg_names
+                ),
+                self._native_jit_cache,
+                predicate_ndarray,
+                counter_ndarray,
+                self.condition_dispatch_count,
+                self.max_iterations,
+                status_ndarray,
+            )
+        )
+        if not result["submitted"]:
+            if self.lowering_mode == "native_required":
+                raise TaichiRuntimeError(
+                    "Graph while native Vulkan compact-indirect lowering "
+                    "became unavailable"
+                )
+            return False
+
+        logical = int(result["logical_iterations"])
+        encoded = int(result["encoded_iterations"])
+        if logical < 0 or logical > encoded:
+            raise TaichiRuntimeError(
+                "Vulkan Graph while runtime returned an invalid logical "
+                "iteration count"
+            )
+        final_predicate = int(result["predicate"])
+        final_counter = int(result["counter"])
+        final_status = int(result["status"]) if status_object is not None else None
+        initial_status = (
+            int(result["initial_status"]) if status_object is not None else None
+        )
+        initial_counter = final_counter - logical
+        observation_bytes = int(result["observation_bytes"])
+        transfer_after = impl.get_runtime().prog._graph_observation_staging_stats()
+
+        def transfer_delta(name):
+            return int(transfer_after[name]) - int(transfer_before[name])
+
+        self._last_report = GraphWhileReport(
+            name=self.name,
+            backend="vulkan",
+            lowering="vulkan_compact_indirect",
+            max_iterations=self.max_iterations,
+            logical_iterations=logical,
+            executed_iterations=encoded,
+            overshoot_iterations=encoded - logical,
+            observation_boundaries=(encoded,),
+            predicate_values=(final_predicate,),
+            counter_values=(final_counter,),
+            status_resource=self.status,
+            status_values=(
+                (initial_status, final_status) if final_status is not None else ()
+            ),
+            chunk_sizes=((encoded,) if encoded else ()),
+            observation_batches=1,
+            observation_scalar_count=5,
+            device_to_host_bytes=observation_bytes,
+            initial_counter=initial_counter,
+            final_counter=final_counter,
+            initial_status=initial_status,
+            final_status=final_status,
+            native_upgrade_eligible=True,
+            native_upgrade_reason="selected",
+            # The terminal buffer belongs to the backend replay slot and is
+            # included in backend persistent bytes, not in the Program's
+            # portable observation-staging arena.
+            persistent_staging_bytes=0,
+            staging_allocations=0,
+            staging_reuses=0,
+            packed_observation_batches=1,
+            direct_observation_batches=0,
+            staging_fallback_batches=0,
+            packed_observation_bytes=observation_bytes,
+            condition_dispatch_count=self.condition_dispatch_count,
+            body_dispatch_count=self.body_dispatch_count,
+            control_inputs=self.control_inputs,
+            carried_state=self.carried_state,
+        )
+        return True
+
     def run(self, context, temporaries=None):
         runtime_args = context.runtime_args()
         predicate_object = runtime_args[self.predicate]
@@ -1940,6 +2089,13 @@ class _CompiledWhileGraphNode:
         arch = impl.current_cfg().arch
         use_transfer_planner = _control_transfer_uses_planner(arch)
         transfer_before = program._graph_observation_staging_stats()
+        vulkan_native_attempted = (
+            arch == _ti_core.Arch.vulkan
+            and self._native_upgrade_eligible
+            and self._vulkan_compact is not None
+        )
+        if self._run_vulkan_compact(context, runtime_args, transfer_before):
+            return
 
         def observe_control(boundary):
             nonlocal observation_batches
@@ -1977,8 +2133,17 @@ class _CompiledWhileGraphNode:
         initial_status = status_values[-1] if status_object is not None else None
         active = predicate_value != 0
         native_selected = False
-        native_reason = self._native_upgrade_reason
-        if active and self.max_iterations > 0 and self._native_upgrade_eligible:
+        native_reason = (
+            "compact_indirect_runtime_fallback"
+            if vulkan_native_attempted
+            else self._native_upgrade_reason
+        )
+        if (
+            arch == _ti_core.Arch.cuda
+            and active
+            and self.max_iterations > 0
+            and self._native_upgrade_eligible
+        ):
             predicate_ndarray = getattr(predicate_object, "arr", None)
             if predicate_ndarray is None:
                 native_reason = "predicate_ndarray_required"
@@ -2097,6 +2262,8 @@ class _CompiledWhileGraphNode:
         self._condition.invalidate_runtime()
         for node in self._chunks.values():
             node.invalidate_runtime()
+        if self._vulkan_compact is not None:
+            self._vulkan_compact.invalidate_runtime()
 
     @property
     def debug_graph_stats(self):
@@ -2104,6 +2271,12 @@ class _CompiledWhileGraphNode:
         condition_stats = (self._condition.debug_graph_stats,)
         if not self._native_upgrade_eligible:
             return (*condition_stats, *chunk_stats)
+        if self._vulkan_compact is not None:
+            return (
+                self._native_jit_cache._debug_graph_stats(),
+                *condition_stats,
+                *chunk_stats,
+            )
         return (
             self._native_jit_cache._debug_graph_stats(),
             *condition_stats,

@@ -284,6 +284,29 @@ class TI_DLL_EXPORT GfxRuntime {
     LaunchContextBuilder *host_ctx{nullptr};
   };
 
+  struct GraphStructuredControl {
+    DevicePtr predicate{kDeviceNullPtr};
+    DevicePtr counter{kDeviceNullPtr};
+    DevicePtr status{kDeviceNullPtr};
+    std::size_t initial_dispatch_count{0};
+    std::uint32_t max_iterations{0};
+    bool has_status{false};
+  };
+
+  struct GraphStructuredResult {
+    bool submitted{false};
+    std::uint32_t logical_iterations{0};
+    std::int32_t predicate{0};
+    std::int32_t counter{0};
+    std::int32_t status{0};
+    std::int32_t initial_status{0};
+    std::uint32_t encoded_iterations{0};
+    std::uint32_t indirect_dispatches{0};
+    std::uint32_t controller_dispatches{0};
+    std::uint32_t control_bytes{0};
+    std::uint32_t observation_bytes{0};
+  };
+
   struct GraphReplayExecutable {
     using AllocationMap =
         std::unordered_map<std::vector<int>,
@@ -305,6 +328,16 @@ class TI_DLL_EXPORT GfxRuntime {
       std::vector<std::unique_ptr<DeviceAllocationGuard>> args_buffers;
       std::vector<size_t> args_buffer_sizes;
       std::vector<std::unique_ptr<ShaderResourceSet>> resource_sets;
+      std::unique_ptr<DeviceAllocationGuard> structured_control_buffer;
+      std::unique_ptr<DeviceAllocationGuard> structured_observation_buffer;
+      std::size_t structured_control_bytes{0};
+      std::size_t structured_observation_bytes{0};
+      std::unique_ptr<ShaderResourceSet> structured_controller_resources;
+      std::unique_ptr<ShaderResourceSet> structured_terminal_resources;
+      std::unique_ptr<Pipeline> structured_controller_pipeline;
+      std::unique_ptr<Pipeline> structured_terminal_pipeline;
+      std::vector<uint32_t> structured_group_counts;
+      bool structured_has_status{false};
       std::unique_ptr<CommandList> cmdlist;
       StreamSemaphore completion;
       std::vector<uint64_t> key;
@@ -360,7 +393,10 @@ class TI_DLL_EXPORT GfxRuntime {
 
   bool try_launch_graph(const std::vector<GraphDispatch> &dispatches,
                         uint64_t replay_key,
-                        RuntimeStatistics *statistics);
+                        RuntimeStatistics *statistics,
+                        const GraphStructuredControl *structured_control =
+                            nullptr,
+                        GraphStructuredResult *structured_result = nullptr);
   std::unique_ptr<GraphReplayRegistration> register_graph_replay(
       uint64_t replay_token);
   bool owns_graph_replay_registration(
