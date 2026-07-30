@@ -163,11 +163,7 @@ class GraphKrylovSolver:
                 ti.atomic_add(pap[None], p[index] * ap[index])
 
         @ti.kernel
-        def update_solution_residual(
-            x: ti.types.ndarray(dtype=ti.f32, ndim=1),
-            r: ti.types.ndarray(dtype=ti.f32, ndim=1),
-            p: ti.types.ndarray(dtype=ti.f32, ndim=1),
-            ap: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        def prepare_alpha(
             rz_old: ti.types.ndarray(dtype=ti.f32, ndim=0),
             pap: ti.types.ndarray(dtype=ti.f32, ndim=0),
             alpha: ti.types.ndarray(dtype=ti.f32, ndim=0),
@@ -187,8 +183,18 @@ class GraphKrylovSolver:
                     status[None] = _BREAKDOWN
                 else:
                     alpha[None] = numerator / denominator
-            if status[None] == _RUNNING:
-                for index in range(size):
+
+        @ti.kernel
+        def update_solution_residual(
+            x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            r: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            p: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            ap: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            alpha: ti.types.ndarray(dtype=ti.f32, ndim=0),
+            status: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        ):
+            for index in range(size):
+                if status[None] == _RUNNING:
                     x[index] += alpha[None] * p[index]
                     r[index] -= alpha[None] * ap[index]
 
@@ -221,9 +227,7 @@ class GraphKrylovSolver:
                 ti.atomic_add(rz_new[None], r[index] * z[index])
 
         @ti.kernel
-        def finish_iteration(
-            z: ti.types.ndarray(dtype=ti.f32, ndim=1),
-            p: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        def prepare_beta(
             rz_old: ti.types.ndarray(dtype=ti.f32, ndim=0),
             rz_new: ti.types.ndarray(dtype=ti.f32, ndim=0),
             beta: ti.types.ndarray(dtype=ti.f32, ndim=0),
@@ -246,8 +250,16 @@ class GraphKrylovSolver:
                     beta[None] = current / previous
                     rz_old[None] = current
                     counter[None] += 1
-            if status[None] == _RUNNING:
-                for index in range(size):
+
+        @ti.kernel
+        def update_direction(
+            z: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            p: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            beta: ti.types.ndarray(dtype=ti.f32, ndim=0),
+            status: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        ):
+            for index in range(size):
+                if status[None] == _RUNNING:
                     p[index] = z[index] + beta[None] * p[index]
 
         @ti.kernel
@@ -325,13 +337,18 @@ class GraphKrylovSolver:
         )
         body.dispatch(reduce_pap, vectors["p"], vectors["ap"], scalars["pap"])
         body.dispatch(
+            prepare_alpha,
+            scalars["rz_old"],
+            scalars["pap"],
+            scalars["alpha"],
+            status,
+        )
+        body.dispatch(
             update_solution_residual,
             vectors["x"],
             vectors["r"],
             vectors["p"],
             vectors["ap"],
-            scalars["rz_old"],
-            scalars["pap"],
             scalars["alpha"],
             status,
         )
@@ -355,14 +372,19 @@ class GraphKrylovSolver:
                 scalars["rz_new"],
             )
         body.dispatch(
-            finish_iteration,
-            vectors["z"],
-            vectors["p"],
+            prepare_beta,
             scalars["rz_old"],
             scalars["rz_new"],
             scalars["beta"],
             status,
             counter,
+        )
+        body.dispatch(
+            update_direction,
+            vectors["z"],
+            vectors["p"],
+            scalars["beta"],
+            status,
         )
         builder.while_loop(
             condition,
@@ -403,10 +425,12 @@ class GraphKrylovSolver:
             seed_pcg,
             evaluate_condition,
             reduce_pap,
+            prepare_alpha,
             update_solution_residual,
             reduce_next_cg,
             reduce_next_pcg,
-            finish_iteration,
+            prepare_beta,
+            update_direction,
             write_terminal,
         )
         graph = builder.compile()
