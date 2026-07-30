@@ -668,11 +668,11 @@ def _backend_name(arch):
 def structured_control_capabilities():
     """Return the qualified structured-control lowering for this runtime.
 
-    The report separates an RHI primitive from a complete Graph runtime path.
-    In particular, Vulkan exposes indirect compute dispatch at the RHI layer,
-    but Forge does not claim device-controlled while/if/switch execution until
-    predicate production, visibility, zero-dispatch, replay, and terminal
-    observation are qualified together.
+    Schema v2 separates compilation, backend qualification, and a complete
+    Graph runtime path.  Vulkan's device-written indirect dispatch contract is
+    qualified independently, but Forge does not claim device-controlled
+    while/if/switch execution until predicate production, replay ownership,
+    masking, and terminal observation are qualified together.
     """
     arch = impl.current_cfg().arch
     backend = _backend_name(_ti_core.arch_name(arch))
@@ -680,30 +680,42 @@ def structured_control_capabilities():
     native = False
     primitive = "none"
     rhi_primitive_compiled = False
+    rhi_primitive_qualified = False
     runtime_path_compiled = False
+    runtime_path_qualified = False
+    skip_strategy = "none"
+    stops_command_issue_after_exit = False
+    exact_dynamic_termination = False
     if arch == _ti_core.Arch.cuda:
         cuda = dict(_ti_core.cuda_conditional_graph_capabilities())
+        setter_compiled = bool(
+            cuda.get("general_device_setter_lowering_compiled", False)
+        )
         native = bool(
             cuda["driver_version_eligible"]
             and cuda["conditional_graph_symbols_loaded"]
-            and cuda.get("general_device_setter_lowering_compiled", False)
+            and setter_compiled
         )
         primitive = "cuda_conditional_graph"
-        rhi_primitive_compiled = bool(
-            cuda.get("general_device_setter_lowering_compiled", False)
-        )
-        runtime_path_compiled = native
+        rhi_primitive_compiled = setter_compiled
+        rhi_primitive_qualified = native
+        runtime_path_compiled = setter_compiled
+        runtime_path_qualified = native
+        skip_strategy = "cuda_conditional_graph" if native else "none"
+        stops_command_issue_after_exit = native
+        exact_dynamic_termination = native
         if not cuda["driver_version_eligible"]:
             reason = "cuda_driver_api_version_below_12_8"
         elif not cuda["conditional_graph_symbols_loaded"]:
             reason = "cuda_conditional_graph_symbols_not_loaded"
-        elif not cuda.get("general_device_setter_lowering_compiled", False):
+        elif not setter_compiled:
             reason = "cuda_conditional_setter_lowering_not_compiled"
         else:
             reason = "none"
     elif arch == _ti_core.Arch.vulkan:
         primitive = "vulkan_dispatch_indirect"
         rhi_primitive_compiled = True
+        rhi_primitive_qualified = True
         reason = "vulkan_structured_indirect_runtime_not_compiled"
     else:
         reason = "device_control_is_gpu_only"
@@ -713,7 +725,7 @@ def structured_control_capabilities():
         else "portable_exact_or_masked_replay"
     )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "backend": backend,
         "portable": {
             "while": portable_while,
@@ -725,9 +737,20 @@ def structured_control_capabilities():
             "if": native,
             "switch": native,
             "structured_submit": native,
+            "logical_termination_exact": native,
+            "device_controlled_masking": native,
+            "per_iteration_host_observation": False,
+            "stops_command_issue_after_exit": stops_command_issue_after_exit,
+            "exact_dynamic_termination": exact_dynamic_termination,
             "primitive": primitive,
+            "skip_strategy": skip_strategy,
             "rhi_primitive_compiled": rhi_primitive_compiled,
+            "rhi_primitive_qualified": rhi_primitive_qualified,
             "runtime_path_compiled": runtime_path_compiled,
+            "runtime_path_qualified": runtime_path_qualified,
+            "conditional_rendering_available": False,
+            "conditional_rendering_qualified": False,
+            "max_encoded_dispatches": 0,
             "unsupported_reason": reason,
         },
         "cuda_conditional_graph": cuda,

@@ -2400,8 +2400,26 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
     capabilities = ti.graph.structured_control_capabilities()
     device = capabilities["device_control"]
     arch = ti.lang.impl.current_cfg().arch
-    assert capabilities["schema_version"] == 1
+    assert capabilities["schema_version"] == 2
     assert set(("while", "if", "switch")) <= capabilities["portable"].keys()
+    assert set(
+        (
+            "logical_termination_exact",
+            "device_controlled_masking",
+            "per_iteration_host_observation",
+            "stops_command_issue_after_exit",
+            "exact_dynamic_termination",
+            "skip_strategy",
+            "rhi_primitive_qualified",
+            "runtime_path_qualified",
+            "conditional_rendering_available",
+            "conditional_rendering_qualified",
+            "max_encoded_dispatches",
+        )
+    ) <= device.keys()
+    assert not device["per_iteration_host_observation"]
+    assert not device["conditional_rendering_available"]
+    assert not device["conditional_rendering_qualified"]
     if arch == ti.cuda:
         expected = bool(
             capabilities["cuda_conditional_graph"]["driver_version_eligible"]
@@ -2413,20 +2431,38 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
             ]
         )
         assert device["primitive"] == "cuda_conditional_graph"
-        assert device["runtime_path_compiled"] == expected
+        assert device["runtime_path_compiled"] == bool(
+            capabilities["cuda_conditional_graph"][
+                "general_device_setter_lowering_compiled"
+            ]
+        )
+        assert device["rhi_primitive_qualified"] == expected
+        assert device["runtime_path_qualified"] == expected
         assert device["structured_submit"] == expected
+        assert device["logical_termination_exact"] == expected
+        assert device["device_controlled_masking"] == expected
+        assert device["stops_command_issue_after_exit"] == expected
+        assert device["exact_dynamic_termination"] == expected
     elif arch == ti.vulkan:
         assert device["primitive"] == "vulkan_dispatch_indirect"
         assert device["rhi_primitive_compiled"]
+        assert device["rhi_primitive_qualified"]
         assert not device["runtime_path_compiled"]
+        assert not device["runtime_path_qualified"]
         assert not device["structured_submit"]
+        assert not device["logical_termination_exact"]
+        assert not device["device_controlled_masking"]
+        assert not device["stops_command_issue_after_exit"]
+        assert not device["exact_dynamic_termination"]
         assert device["unsupported_reason"] == (
             "vulkan_structured_indirect_runtime_not_compiled"
         )
     else:
         assert capabilities["backend"] == "cpu"
         assert not device["rhi_primitive_compiled"]
+        assert not device["rhi_primitive_qualified"]
         assert not device["runtime_path_compiled"]
+        assert not device["runtime_path_qualified"]
         assert device["unsupported_reason"] == "device_control_is_gpu_only"
 
 
