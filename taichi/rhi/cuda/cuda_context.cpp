@@ -7,6 +7,7 @@
 #include "taichi/system/threading.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
 #include "taichi/rhi/cuda/cuda_profiler.h"
+#include "taichi/inc/constants.h"
 #include "taichi/util/offline_cache.h"
 
 namespace taichi::lang {
@@ -122,7 +123,8 @@ void CUDAContext::launch(void *func,
                          unsigned grid_dim,
                          unsigned block_dim,
                          std::size_t dynamic_shared_mem_bytes,
-                         void *stream) {
+                         void *stream,
+                         bool dynamic_shared_memory_prepared) {
   // Direct CUDA primitives enter here without a KernelLauncher transaction.
   // Recursive ownership is intentional when a regular or captured Taichi
   // kernel already owns the wider submission transaction.
@@ -131,6 +133,11 @@ void CUDAContext::launch(void *func,
   // a constant folding kernel may happen during a kernel launch
   // then profiler->start and profiler->stop mismatch.
   // TODO: should we keep the handle?
+
+  if (dynamic_shared_mem_bytes > 0 &&
+      !dynamic_shared_memory_prepared) {
+    prepare_dynamic_shared_memory(func, dynamic_shared_mem_bytes);
+  }
 
   KernelProfilerBase::TaskHandle task_handle;
   // Kernel launch
@@ -141,7 +148,8 @@ void CUDAContext::launch(void *func,
     bool valid =
         offline_cache::try_demangle_name(task_name, primal_task_name, key);
     profiler_cuda->trace(task_handle, valid ? primal_task_name : task_name,
-                         func, grid_dim, block_dim, 0);
+                         func, grid_dim, block_dim,
+                         dynamic_shared_mem_bytes);
   }
 
   auto context_guard = CUDAContext::get_instance().get_guard();
@@ -161,17 +169,6 @@ void CUDAContext::launch(void *func,
 
   if (grid_dim > 0) {
     auto lock = get_lock_guard();
-    if (dynamic_shared_mem_bytes > 0) {
-      if (dynamic_shared_mem_bytes > max_shared_memory_bytes_) {
-        TI_ERROR(
-            "Requested dynamic shared memory size of {} bytes, but the device "
-            "supports max capacity of {} bytes.",
-            dynamic_shared_mem_bytes, max_shared_memory_bytes_);
-      }
-      driver_.kernel_set_attribute(
-          func, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-          dynamic_shared_mem_bytes);
-    }
     driver_.launch_kernel(func, grid_dim, 1, 1, block_dim, 1, 1,
                           dynamic_shared_mem_bytes, stream,
                           arg_pointers.data(), nullptr);
@@ -182,6 +179,49 @@ void CUDAContext::launch(void *func,
   if (debug_) {
     driver_.stream_synchronize(stream);
   }
+}
+
+void CUDAContext::prepare_dynamic_shared_memory(
+    void *func,
+    std::size_t dynamic_shared_mem_bytes) {
+  if (dynamic_shared_mem_bytes == 0) {
+    return;
+  }
+  TI_ERROR_IF(
+      dynamic_shared_mem_bytes >
+          cuda_portable_dynamic_shared_array_limit_bytes,
+      "Requested {} bytes of CUDA dynamic shared memory, exceeding the "
+      "portable 64 KiB per-block limit.",
+      dynamic_shared_mem_bytes);
+  TI_ERROR_IF(
+      device_compute_capability_ <
+          cuda_dynamic_shared_array_min_compute_capability,
+      "CUDA dynamic shared memory above 48 KiB requires compute capability "
+      "7.0 or newer, but the active device is {}.{}.",
+      device_compute_capability_ / 10, device_compute_capability_ % 10);
+  TI_ERROR_IF(
+      dynamic_shared_mem_bytes >
+          static_cast<std::size_t>(max_shared_memory_bytes_),
+      "Requested {} bytes of CUDA dynamic shared memory, but the active "
+      "device reports an opt-in capacity of {} bytes.",
+      dynamic_shared_mem_bytes, max_shared_memory_bytes_);
+
+  auto context_guard = get_guard();
+  auto lock = get_lock_guard();
+  int static_shared_mem_bytes = 0;
+  driver_.kernel_get_attribute(
+      &static_shared_mem_bytes, CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES, func);
+  TI_ERROR_IF(
+      static_shared_mem_bytes < 0 ||
+          static_cast<std::size_t>(static_shared_mem_bytes) +
+                  dynamic_shared_mem_bytes >
+              cuda_portable_dynamic_shared_array_limit_bytes,
+      "CUDA kernel requires {} bytes of static and {} bytes of dynamic "
+      "shared memory, exceeding the portable 64 KiB per-block limit.",
+      static_shared_mem_bytes, dynamic_shared_mem_bytes);
+  driver_.kernel_set_attribute(
+      func, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+      dynamic_shared_mem_bytes);
 }
 
 CUDAContext::~CUDAContext() {

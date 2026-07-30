@@ -17,6 +17,7 @@
 #include "taichi/ir/analysis.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/codegen/codegen_utils.h"
+#include "taichi/inc/constants.h"
 
 namespace taichi::lang {
 
@@ -184,6 +185,12 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
           tensor_type->get_num_elements() *
           data_type_size(tensor_type->get_element_type());
       if (shared_array_bytes > cuda_dynamic_shared_array_threshold_bytes) {
+        TI_ERROR_IF(
+            shared_array_bytes >
+                cuda_portable_dynamic_shared_array_limit_bytes,
+            "CUDA SharedArray requests {} bytes, exceeding the portable "
+            "64 KiB per-block limit.",
+            shared_array_bytes);
         if (dynamic_shared_array_bytes > 0) {
           /* Current version only allows one dynamic shared array allocation,
            * otherwise the results could be wrong.

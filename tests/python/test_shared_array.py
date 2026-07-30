@@ -8,9 +8,8 @@ from tests import test_utils
 
 @test_utils.test(arch=[ti.cuda])
 def test_large_shared_array():
-    # Skip the GPUs prior to Ampere which doesn't have large dynamical shared memory.
-    if ti.lang.impl.get_cuda_compute_capability() < 86:
-        pytest.skip("Skip the GPUs prior to Ampere")
+    if ti.lang.impl.get_cuda_compute_capability() < 70:
+        pytest.skip("Large dynamic shared memory requires compute capability 7.0")
 
     block_dim = 128
     nBlocks = 64
@@ -56,6 +55,92 @@ def test_large_shared_array():
     calc(v_arr, d_arr, reference)
     calc_shared_array(v_arr, d_arr, a_arr)
     assert np.allclose(reference, a_arr)
+
+
+@pytest.mark.parametrize("shared_bytes", [49156, 65536])
+@test_utils.test(arch=[ti.cuda])
+def test_portable_dynamic_shared_array_boundaries(shared_bytes):
+    if ti.lang.impl.get_cuda_compute_capability() < 70:
+        pytest.skip("Large dynamic shared memory requires compute capability 7.0")
+
+    block_dim = 64
+    num_blocks = 4
+    size = block_dim * num_blocks
+    num_elements = shared_bytes // 4
+
+    @ti.kernel
+    def touch_last_element(out: ti.types.ndarray()):
+        ti.loop_config(block_dim=block_dim)
+        for i in range(size):
+            shared = ti.simt.block.SharedArray((num_elements,), ti.i32)
+            lane = i % block_dim
+            if lane == 0:
+                shared[num_elements - 1] = i // block_dim + 17
+            ti.simt.block.sync()
+            out[i] = shared[num_elements - 1]
+
+    out = ti.ndarray(ti.i32, shape=size)
+    touch_last_element(out)
+    expected = np.repeat(
+        np.arange(17, 17 + num_blocks, dtype=np.int32), block_dim
+    )
+    assert np.array_equal(out.to_numpy(), expected)
+
+
+@test_utils.test(arch=[ti.cuda])
+def test_portable_dynamic_shared_array_graph_replay():
+    if ti.lang.impl.get_cuda_compute_capability() < 70:
+        pytest.skip("Large dynamic shared memory requires compute capability 7.0")
+
+    block_dim = 64
+    num_blocks = 4
+    size = block_dim * num_blocks
+    num_elements = 65536 // 4
+
+    @ti.kernel
+    def touch_last_element(out: ti.types.ndarray()):
+        ti.loop_config(block_dim=block_dim)
+        for i in range(size):
+            shared = ti.simt.block.SharedArray((num_elements,), ti.i32)
+            lane = i % block_dim
+            if lane == 0:
+                shared[num_elements - 1] = i // block_dim + 23
+            ti.simt.block.sync()
+            out[i] = shared[num_elements - 1]
+
+    out_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=1)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(touch_last_element, out_arg)
+    graph = builder.compile()
+    out = ti.ndarray(ti.i32, shape=size)
+
+    for offset in (0, 11):
+        out.fill(offset)
+        graph.run({"out": out})
+        expected = np.repeat(
+            np.arange(23, 23 + num_blocks, dtype=np.int32), block_dim
+        )
+        assert np.array_equal(out.to_numpy(), expected)
+
+
+@test_utils.test(arch=[ti.cuda])
+def test_shared_array_rejects_more_than_portable_cuda_limit():
+    @ti.kernel
+    def too_large(out: ti.types.ndarray()):
+        ti.loop_config(block_dim=64)
+        for i in range(64):
+            shared = ti.simt.block.SharedArray((65536 // 4 + 1,), ti.i32)
+            if i == 0:
+                shared[65536 // 4] = i
+            ti.simt.block.sync()
+            out[i] = shared[65536 // 4]
+
+    out = ti.ndarray(ti.i32, shape=64)
+    with pytest.raises(
+        RuntimeError,
+        match="exceeding the portable 64 KiB per-block limit",
+    ):
+        too_large(out)
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan, ti.amdgpu])

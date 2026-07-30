@@ -39,6 +39,12 @@ constexpr int taichi_listgen_max_element_size = 1024;
 // In current version, only one dynamic instance is allowed.
 // TODO: remove the limit.
 constexpr std::size_t cuda_dynamic_shared_array_threshold_bytes = 49152;
+// Keep large CUDA SharedArray behavior portable across compute capability 7.x
+// and newer devices. Some architectures expose a larger opt-in capacity, but
+// kernels must not silently become device-specific by consuming it.
+constexpr std::size_t cuda_portable_dynamic_shared_array_limit_bytes =
+    64 * 1024;
+constexpr int cuda_dynamic_shared_array_min_compute_capability = 70;
 
 // use for auto mesh_local to determine shared-mem size per block (in bytes)
 // TODO: get this at runtime

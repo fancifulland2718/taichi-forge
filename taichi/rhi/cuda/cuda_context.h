@@ -63,7 +63,12 @@ class CUDAContext {
               unsigned grid_dim,
               unsigned block_dim,
               std::size_t dynamic_shared_mem_bytes,
-              void *stream = nullptr);
+              void *stream = nullptr,
+              bool dynamic_shared_memory_prepared = false);
+
+  void prepare_dynamic_shared_memory(
+      void *func,
+      std::size_t dynamic_shared_mem_bytes);
 
   void set_profiler(KernelProfilerBase *profiler) {
     profiler_ = profiler;

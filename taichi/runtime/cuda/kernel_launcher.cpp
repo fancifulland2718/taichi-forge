@@ -324,7 +324,8 @@ void KernelLauncher::capture_cuda_graph_launch(
     TI_TRACE("Capturing kernel {}<<<{}, {}>>>", task.name, task.grid_dim,
              task.block_dim);
     cuda_jit_module->launch_with_stream(
-        task.name, task.grid_dim, task.block_dim, 0,
+        task.name, task.grid_dim, task.block_dim,
+        task.dynamic_shared_array_bytes,
         {const_cast<RuntimeContext *>(&packet.context)}, {}, stream);
   }
 }
@@ -520,7 +521,8 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
     }
     TI_TRACE("Launching kernel {}<<<{}, {}>>>", task.name, task.grid_dim,
              task.block_dim);
-    cuda_module->launch(task.name, task.grid_dim, task.block_dim, 0,
+    cuda_module->launch(task.name, task.grid_dim, task.block_dim,
+                        task.dynamic_shared_array_bytes,
                         {&ctx.get_context()}, {});
     mark_sparse_list_task_launched(task);
     if (task.may_mutate_sparse_topology) {
