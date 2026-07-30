@@ -107,6 +107,13 @@ the `0.5.0` artifacts:
   and independently collapsible sections. Responsive control panels now fit
   their visible text and widgets and grow or shrink as sections are toggled,
   without application-side height calculations or extra GPU submission.
+- GGUI Window now provides independently optional top, bottom, left, and right
+  root regions around a central render viewport. Region resize/collapse,
+  Vulkan/Metal viewport and scissor, scene aspect, viewport-local input, and
+  fullscreen images share one logical/framebuffer layout snapshot. This adds
+  no intermediate render target or copy. Responsive font policy now composes
+  with per-window user zoom and edge-local Ctrl+wheel, Ctrl++/-, and Ctrl+0
+  shortcuts without rebuilding the font atlas.
 - JIT Graph `ArgKind.NDARRAY` runtime arguments now consume the common runtime
   storage protocol for Ndarrays, dense fields, and explicit
   `DenseNdarrayView` objects. Compact Program-owned Ndarray and SNode payload

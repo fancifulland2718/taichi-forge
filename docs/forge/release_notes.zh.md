@@ -90,6 +90,12 @@
 - GGUI 同时开放带上下限的逻辑像素字体大小、自动高度 subwindow 和可独立折叠的分区。
   响应式控制面板会刚好容纳当前可见文字与 widget，并在分区切换时自动展开或收缩，
   不需要应用层计算高度，也不增加 GPU submission。
+- GGUI Window 新增可按用户选择独立启用的 top、bottom、left、right 根区域，围绕
+  中央 render viewport 布局。region resize/collapse、Vulkan/Metal viewport 与
+  scissor、scene aspect、viewport-local input 和全屏 image 共用同一份 logical/
+  framebuffer 布局快照；不增加中间 render target 或 copy。响应式字体策略现在可
+  叠加 per-window 用户缩放，并在 edge region 内支持 Ctrl+wheel、Ctrl++/- 与
+  Ctrl+0，过程中不重建 font atlas。
 - JIT Graph 的 `ArgKind.NDARRAY` runtime 参数现在通过通用 runtime-storage 协议消费
   Ndarray、dense field 与显式 `DenseNdarrayView`。compact Program-owned Ndarray 与
   SNode payload binding 可使用 CUDA capture、exact replay 和兼容 allocation patch；

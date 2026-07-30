@@ -1048,6 +1048,41 @@ canvas.submit_frame(frame)
 
 参考：[显示帧提交](display_frame.zh.md)。
 
+### Window 四边根布局
+
+位置：`taichi_forge.ui.window.Window`。
+
+`window.configure_layout()` 可以在中央 render viewport 周围按用户选择启用 top、
+bottom、left、right 任意组合；尺寸使用逻辑像素：
+
+```python
+layout = window.configure_layout(
+    top=ti.ui.EdgeRegion(size=44, resizable=False),
+    bottom=ti.ui.EdgeRegion(size=28, minimum_size=20),
+    left=ti.ui.EdgeRegion(size=260, minimum_size=160),
+    right=ti.ui.EdgeRegion(size=320, minimum_size=180),
+    minimum_render_size=(320, 240),
+)
+
+with layout.region("top") as bar:
+    bar.text("Simulation")
+with layout.region("left") as panel:
+    panel.text("Scene")
+with layout.region("right") as panel:
+    panel.text("Solver")
+```
+
+传入 `None` 会停用对应边。每条启用的边都可独立调整和折叠：拖动内侧分隔线改变
+尺寸，双击折叠，点击窗口边缘的小 handle 恢复。`layout.set_collapsed()`、
+`toggle()` 与 `disable()` 可单独修改一条边；`layout.state` 同时报告 logical 与
+framebuffer 矩形。
+
+中央矩形会统一驱动 Vulkan/Metal viewport 与 scissor、camera aspect、scene/circle/
+line 尺寸以及全屏 image。swapchain、完整窗口 clear、截图和 depth-buffer shape
+保持不变，因此不增加中间 render target 或像素 copy。render 交互应使用
+`window.get_render_cursor_pos()`、`is_cursor_in_render_viewport()` 与
+`is_render_input_available()`；原有 `get_cursor_pos()` 继续保持完整窗口语义。
+
 ### GGUI 响应式面板与字体
 
 位置：`taichi_forge.ui.imgui.Gui`，由 `window.get_gui()` 返回。
@@ -1060,6 +1095,9 @@ canvas.submit_frame(frame)
 | `gui.set_font_size(size)` | 使用以逻辑像素计量的固定字体大小。 |
 | `gui.set_font_size_from_window_height(reference_height, reference_size=16, minimum_size=12, maximum_size=24)` | 根据窗口逻辑高度连续计算有上下限、保持可读的字体大小。 |
 | `gui.get_font_size()` | 返回有效的逻辑像素字体大小。 |
+| `gui.set_font_zoom(zoom)` / `gui.get_font_zoom()` | 在固定或响应式基础策略上设置/读取用户缩放。 |
+| `gui.adjust_font_zoom(delta)` / `gui.reset_font_zoom()` | 调整用户缩放，或在不删除基础策略的前提下恢复到 1。 |
+| `gui.enable_font_shortcuts(enabled=True)` | 开启或关闭 edge-region 字体快捷键。 |
 | `gui.sub_window(name, x, y, width, height=None)` | 创建固定宽度、随可见内容自动调整高度的面板；传入数值高度时保留原有固定尺寸行为。 |
 | `gui.collapsible_section(name, default_open=True)` | 在当前面板中创建可独立展开、收缩的分区。 |
 
@@ -1070,7 +1108,10 @@ canvas.submit_frame(frame)
 逻辑字体大小模式使用相同的线性计算，再限制到
 `[minimum_size, maximum_size]`；默认在参考高度使用 16 像素，并保持在
 12 至 24 逻辑像素的可读区间。倍率由字体图集内默认字体的真实基准大小推导，
-不会假定特定字体一定是 13 像素。
+不会假定特定字体一定是 13 像素。用户缩放会乘在任一种基础策略上。cursor 位于
+edge region 时，`Ctrl+wheel` 和 `Ctrl++/-` 以 0.1 步长调整，`Ctrl+0` 恢复；
+render viewport 内的 wheel 不会被消费，以免影响 camera。快捷调整限制在
+0.5 至 3.0。
 
 ```python
 window = ti.ui.Window("simulation", (1280, 720))

@@ -1206,6 +1206,44 @@ Use these APIs to measure accepted, submitted, dropped, and reused frames, plus
 
 See also [Display frame submission](display_frame.en.md).
 
+### Window Edge Layout
+
+Location: `taichi_forge.ui.window.Window`.
+
+`window.configure_layout()` reserves any combination of top, bottom, left, and
+right logical-pixel regions around one central render viewport:
+
+```python
+layout = window.configure_layout(
+    top=ti.ui.EdgeRegion(size=44, resizable=False),
+    bottom=ti.ui.EdgeRegion(size=28, minimum_size=20),
+    left=ti.ui.EdgeRegion(size=260, minimum_size=160),
+    right=ti.ui.EdgeRegion(size=320, minimum_size=180),
+    minimum_render_size=(320, 240),
+)
+
+with layout.region("top") as bar:
+    bar.text("Simulation")
+with layout.region("left") as panel:
+    panel.text("Scene")
+with layout.region("right") as panel:
+    panel.text("Solver")
+```
+
+`None` disables an edge. Each enabled edge is independently resizable and
+collapsible: drag its inner boundary, double-click it to collapse, or click
+the small edge handle to restore it. `layout.set_collapsed()`, `toggle()`, and
+`disable()` modify one edge, while `layout.state` reports logical and
+framebuffer rectangles.
+
+The central rectangle drives the Vulkan/Metal viewport and scissor, camera
+aspect, scene/circle/line dimensions, and fullscreen images. The swapchain,
+clear, screenshot, and depth-buffer shape stay full-window, so no intermediate
+render target or pixel copy is added. Viewport-local interaction uses
+`window.get_render_cursor_pos()`, `is_cursor_in_render_viewport()`, and
+`is_render_input_available()`; existing `get_cursor_pos()` remains
+full-window for compatibility.
+
 ### Responsive GGUI Panels and Fonts
 
 Location: `taichi_forge.ui.imgui.Gui`, returned by `window.get_gui()`.
@@ -1218,6 +1256,9 @@ Location: `taichi_forge.ui.imgui.Gui`, returned by `window.get_gui()`.
 | `gui.set_font_size(size)` | Use a fixed font size measured in logical pixels. |
 | `gui.set_font_size_from_window_height(reference_height, reference_size=16, minimum_size=12, maximum_size=24)` | Continuously derive a bounded, readable logical-pixel font size. |
 | `gui.get_font_size()` | Return the effective logical-pixel font size. |
+| `gui.set_font_zoom(zoom)` / `gui.get_font_zoom()` | Set or inspect user zoom layered over fixed or responsive sizing. |
+| `gui.adjust_font_zoom(delta)` / `gui.reset_font_zoom()` | Change user zoom or restore it to 1 without discarding the base policy. |
+| `gui.enable_font_shortcuts(enabled=True)` | Enable or disable edge-region font shortcuts. |
 | `gui.sub_window(name, x, y, width, height=None)` | Create a fixed-width panel whose height follows its visible contents. A numeric height preserves fixed-size behavior. |
 | `gui.collapsible_section(name, default_open=True)` | Create an independently expandable section inside the current panel. |
 
@@ -1230,7 +1271,10 @@ The logical-size variant applies the same linear policy and clamps it to
 `[minimum_size, maximum_size]`. Its defaults produce 16-pixel text at the
 reference height while retaining a readable 12-to-24-pixel range. It derives
 the scale from the actual default font size rather than assuming a particular
-font atlas.
+font atlas. User zoom multiplies either base policy. While the pointer is over
+an edge region, `Ctrl+wheel` and `Ctrl++/-` adjust it in 0.1 steps, and
+`Ctrl+0` resets it; render-viewport wheel input remains available to camera
+controls. Shortcut adjustment is clamped to 0.5--3.0.
 
 ```python
 window = ti.ui.Window("simulation", (1280, 720))
