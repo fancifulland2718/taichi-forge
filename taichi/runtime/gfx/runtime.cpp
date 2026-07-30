@@ -2501,6 +2501,20 @@ bool GfxRuntime::try_launch_graph(
             data_it->second == nullptr) {
           return reject();
         }
+        const int arg_offset =
+            dispatch.host_ctx->args_type->get_element_offset(
+                array_arg.indices);
+        const auto resource_ref = std::find_if(
+            dispatch.host_ctx->ndarray_ptrs.begin(),
+            dispatch.host_ctx->ndarray_ptrs.end(),
+            [arg_offset](const auto &ref) {
+              return ref.arg_offset == arg_offset;
+            });
+        const bool has_registered_resource =
+            resource_ref != dispatch.host_ctx->ndarray_ptrs.end();
+        if (has_registered_resource && !resource_ref->data_handle) {
+          return reject();
+        }
         DeviceAllocation devalloc =
             *static_cast<DeviceAllocation *>(data_it->second);
         ndarrays_in_use_.insert(devalloc.alloc_id);
@@ -2508,11 +2522,28 @@ bool GfxRuntime::try_launch_graph(
         structure_key.push_back(0xA001u);
         push_graph_allocation_key(key, devalloc);
         push_runtime_structure(devalloc, 0, 0);
+        // DeviceAllocationId may be reused after an Ndarray is retired.
+        // Keep the generation-qualified runtime-resource identity in the
+        // exact replay key so an ABA allocation cannot replay descriptors
+        // recorded for the previous high-level resource. The structural key
+        // deliberately omits this identity, allowing descriptor patching.
+        if (has_registered_resource) {
+          key.insert(
+              key.end(),
+              {0xA005u, resource_ref->data_handle.domain,
+               static_cast<std::uint64_t>(resource_ref->data_handle.kind),
+               static_cast<std::uint64_t>(resource_ref->data_handle.index),
+               static_cast<std::uint64_t>(
+                   resource_ref->data_handle.generation)});
+        }
 
         auto grad_it =
             dispatch.host_ctx->array_ptrs.find(array_arg.grad_ptr_indices);
         if (grad_it != dispatch.host_ctx->array_ptrs.end() &&
             grad_it->second != nullptr) {
+          if (has_registered_resource && !resource_ref->grad_handle) {
+            return reject();
+          }
           DeviceAllocation grad_alloc =
               *static_cast<DeviceAllocation *>(grad_it->second);
           ndarrays_in_use_.insert(grad_alloc.alloc_id);
@@ -2520,6 +2551,16 @@ bool GfxRuntime::try_launch_graph(
           structure_key.push_back(0xA002u);
           push_graph_allocation_key(key, grad_alloc);
           push_runtime_structure(grad_alloc, 0, 0);
+          if (has_registered_resource) {
+            key.insert(
+                key.end(),
+                {0xA006u, resource_ref->grad_handle.domain,
+                 static_cast<std::uint64_t>(resource_ref->grad_handle.kind),
+                 static_cast<std::uint64_t>(
+                     resource_ref->grad_handle.index),
+                 static_cast<std::uint64_t>(
+                     resource_ref->grad_handle.generation)});
+          }
         } else {
           key.push_back(0xA003u);
           structure_key.push_back(0xA003u);
