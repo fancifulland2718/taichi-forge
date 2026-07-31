@@ -153,8 +153,9 @@ class PythonExternalDenseStorage final {
       std::int32_t device_id,
       std::uint64_t allocation_bytes)
       : program_(program),
-        program_lifetime_(program != nullptr ? program->weak_lifetime_token()
-                                             : std::weak_ptr<void>{}),
+        program_lifetime_(
+            program != nullptr ? program->weak_resource_lifetime_token()
+                               : std::weak_ptr<lang::ProgramLifetimeToken>{}),
         owner_(std::move(owner)),
         description_(std::move(description)),
         provider_(std::move(provider)),
@@ -194,10 +195,8 @@ class PythonExternalDenseStorage final {
     if (closed_) {
       return;
     }
-    if (program_ != nullptr && !program_lifetime_.expired() &&
-        program_->validate_external_dense_storage_owner(owner_)) {
-      program_->retire_external_dense_storage(owner_);
-    }
+    lang::Program::retire_external_dense_storage_if_alive(
+        program_, program_lifetime_, owner_);
     closed_ = true;
   }
 
@@ -210,7 +209,7 @@ class PythonExternalDenseStorage final {
   }
 
   lang::Program *program_{nullptr};
-  std::weak_ptr<void> program_lifetime_;
+  std::weak_ptr<lang::ProgramLifetimeToken> program_lifetime_;
   lang::storage::StorageOwnerRef owner_;
   lang::storage::DenseStorageBuildResult description_;
   std::string provider_;
@@ -310,8 +309,9 @@ class PythonVulkanCudaExternalAllocation final {
       lang::storage::StorageOwnerRef base_owner,
       const std::shared_ptr<lang::CudaExternalAllocation> &allocation)
       : program_(program),
-        program_lifetime_(program != nullptr ? program->weak_lifetime_token()
-                                             : std::weak_ptr<void>{}),
+        program_lifetime_(
+            program != nullptr ? program->weak_resource_lifetime_token()
+                               : std::weak_ptr<lang::ProgramLifetimeToken>{}),
         base_owner_(std::move(base_owner)),
         allocation_(allocation),
         allocation_bytes_(allocation->allocation_size()),
@@ -444,11 +444,16 @@ class PythonVulkanCudaExternalAllocation final {
 
     lang::storage::StorageOwnerRef owner;
     try {
-      owner = program_->register_external_dense_storage(
-          allocation->cuda_allocation(), allocation_bytes_, std::move(release),
+      owner = lang::Program::register_external_dense_storage_if_alive(
+          program_, program_lifetime_, allocation->cuda_allocation(),
+          allocation_bytes_, std::move(release),
           std::move(synchronization_domain));
     } catch (...) {
       throw;
+    }
+    if (!owner.valid()) {
+      throw py::buffer_error(
+          "external Vulkan-CUDA allocation belongs to a retired runtime");
     }
 
     DenseStorageLayoutSpec spec;
@@ -465,10 +470,8 @@ class PythonVulkanCudaExternalAllocation final {
     auto description = lang::storage::build_dense_storage_descriptor(
         owner, StorageSourceKind::kExternalDense, spec);
     if (!description) {
-      try {
-        program_->retire_external_dense_storage(owner);
-      } catch (...) {
-      }
+      lang::Program::retire_external_dense_storage_if_alive(
+          program_, program_lifetime_, owner);
       throw py::buffer_error(
           std::string("external Vulkan-CUDA allocation cannot form a dense "
                       "view: ") +
@@ -485,10 +488,8 @@ class PythonVulkanCudaExternalAllocation final {
     if (closed_) {
       return;
     }
-    if (program_ != nullptr && !program_lifetime_.expired() &&
-        program_->validate_external_dense_storage_owner(base_owner_)) {
-      program_->retire_external_dense_storage(base_owner_);
-    }
+    lang::Program::retire_external_dense_storage_if_alive(
+        program_, program_lifetime_, base_owner_);
     closed_ = true;
   }
 
@@ -501,7 +502,7 @@ class PythonVulkanCudaExternalAllocation final {
   }
 
   lang::Program *program_{nullptr};
-  std::weak_ptr<void> program_lifetime_;
+  std::weak_ptr<lang::ProgramLifetimeToken> program_lifetime_;
   lang::storage::StorageOwnerRef base_owner_;
   std::weak_ptr<lang::CudaExternalAllocation> allocation_;
   std::uint64_t allocation_bytes_{0};

@@ -93,16 +93,18 @@ namespace taichi::lang {
 
 struct CompiledKernelLinearOperator::TopologyState {
   TopologyState(Program *program, Ndarray *data)
-      : program(program), data(data) {
+      : program(program),
+        program_lifetime(program ? program->weak_resource_lifetime_token()
+                                 : std::weak_ptr<ProgramLifetimeToken>{}),
+        data(data) {
   }
 
   ~TopologyState() {
-    if (program && data) {
-      program->delete_ndarray(data);
-    }
+    Program::delete_ndarray_if_alive(program, program_lifetime, data);
   }
 
   Program *program{nullptr};
+  std::weak_ptr<ProgramLifetimeToken> program_lifetime;
   Ndarray *data{nullptr};
 };
 
@@ -117,6 +119,8 @@ struct CompiledKernelLinearOperator::ResourceGeneration {
       std::size_t input_arg_index,
       std::size_t output_arg_index)
       : program(program),
+        program_lifetime(program ? program->weak_resource_lifetime_token()
+                                 : std::weak_ptr<ProgramLifetimeToken>{}),
         compiled_kernel(compiled_kernel),
         topology(std::move(topology)),
         numeric_data(numeric_data),
@@ -131,9 +135,7 @@ struct CompiledKernelLinearOperator::ResourceGeneration {
   }
 
   ~ResourceGeneration() {
-    if (program && numeric_data) {
-      program->delete_ndarray(numeric_data);
-    }
+    Program::delete_ndarray_if_alive(program, program_lifetime, numeric_data);
   }
 
   void apply(OperatorApplyMode mode,
@@ -170,6 +172,7 @@ struct CompiledKernelLinearOperator::ResourceGeneration {
   }
 
   Program *program{nullptr};
+  std::weak_ptr<ProgramLifetimeToken> program_lifetime;
   const CompiledKernelData *compiled_kernel{nullptr};
   std::shared_ptr<TopologyState> topology;
   Ndarray *numeric_data{nullptr};
@@ -726,21 +729,20 @@ struct CompiledGraphLinearOperator::RecordGeneration {
   RecordGeneration(Program *program,
                    std::vector<OwnedNdarrayArgument> numeric_arguments)
       : program(program),
+        program_lifetime(program ? program->weak_resource_lifetime_token()
+                                 : std::weak_ptr<ProgramLifetimeToken>{}),
         numeric_arguments(std::move(numeric_arguments)) {
   }
 
   ~RecordGeneration() {
-    if (!program) {
-      return;
-    }
     for (auto &argument : numeric_arguments) {
-      if (argument.value) {
-        program->delete_ndarray(argument.value);
-      }
+      Program::delete_ndarray_if_alive(program, program_lifetime,
+                                       argument.value);
     }
   }
 
   Program *program{nullptr};
+  std::weak_ptr<ProgramLifetimeToken> program_lifetime;
   std::vector<OwnedNdarrayArgument> numeric_arguments;
 };
 
@@ -954,6 +956,7 @@ CompiledGraphLinearOperator::CompiledGraphLinearOperator(
   }
 
   program_ = program;
+  program_lifetime_ = program->weak_resource_lifetime_token();
   graph_ = std::move(owned_graph);
   cache_ = std::move(owned_cache);
   fixed_i32_arguments_ = std::move(fixed_i32_arguments);
@@ -985,12 +988,9 @@ CompiledGraphLinearOperator::~CompiledGraphLinearOperator() {
   }
   graph_.reset();
   current_record_generation_.reset();
-  if (program_) {
-    for (auto &argument : owned_ndarray_arguments_) {
-      if (argument.value) {
-        program_->delete_ndarray(argument.value);
-      }
-    }
+  for (auto &argument : owned_ndarray_arguments_) {
+    Program::delete_ndarray_if_alive(program_, program_lifetime_,
+                                     argument.value);
   }
 }
 

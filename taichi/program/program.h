@@ -70,6 +70,7 @@ struct GraphObservationStagingStatistics {
 };
 
 class Program;
+class ProgramLifetimeToken;
 class ExternalSynchronizationDomain;
 class ExternalAccessEpoch;
 struct ExternalStreamDomain;
@@ -693,6 +694,29 @@ class TI_DLL_EXPORT Program {
   std::weak_ptr<void> weak_lifetime_token() const noexcept {
     return lifetime_token_;
   }
+  // Delayed resource owners use the typed token and helpers below to
+  // serialize reclamation against Program destruction. Once invalidated, the
+  // Program registries own final teardown and late callers become no-ops.
+  std::weak_ptr<ProgramLifetimeToken> weak_resource_lifetime_token()
+      const noexcept {
+    return lifetime_token_;
+  }
+  static void delete_ndarray_if_alive(
+      Program *program,
+      const std::weak_ptr<ProgramLifetimeToken> &lifetime,
+      Ndarray *ndarray) noexcept;
+  static storage::StorageOwnerRef register_external_dense_storage_if_alive(
+      Program *program,
+      const std::weak_ptr<ProgramLifetimeToken> &lifetime,
+      DeviceAllocation allocation,
+      std::uint64_t allocation_bytes,
+      ExternalDenseStorageRelease release = {},
+      std::shared_ptr<ExternalSynchronizationDomain> synchronization_domain =
+          {});
+  static bool retire_external_dense_storage_if_alive(
+      Program *program,
+      const std::weak_ptr<ProgramLifetimeToken> &lifetime,
+      const storage::StorageOwnerRef &owner) noexcept;
 
   using DenseStorageBindingCallback = std::function<void(
       const storage::ResolvedDenseBinding *, std::size_t)>;
@@ -3399,7 +3423,7 @@ class TI_DLL_EXPORT Program {
   std::unordered_map<FunctionKey, Function *> function_map_;
 
   std::unique_ptr<ProgramImpl> program_impl_;
-  std::shared_ptr<void> lifetime_token_{std::make_shared<int>(0)};
+  std::shared_ptr<ProgramLifetimeToken> lifetime_token_;
   const std::uint64_t runtime_completion_domain_;
   std::shared_ptr<RuntimeFaultDomain> runtime_fault_domain_;
   RuntimeTraceRecorder runtime_trace_;

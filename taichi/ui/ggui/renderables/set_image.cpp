@@ -51,7 +51,7 @@ class SharedCudaVulkanImage::Impl {
                 "CUDA-Vulkan display dimensions must be positive");
 #if defined(TI_WITH_CUDA)
     program_ = app_context_->prog();
-    program_lifetime_ = program_->weak_lifetime_token();
+    program_lifetime_ = program_->weak_resource_lifetime_token();
     auto *vulkan_device =
         dynamic_cast<VulkanDevice *>(&app_context_->device());
     auto *cuda_device =
@@ -180,11 +180,10 @@ class SharedCudaVulkanImage::Impl {
  private:
   void close_noexcept() noexcept {
     try {
-      if (program_ != nullptr && !program_lifetime_.expired() &&
-          owner_.valid() &&
-          program_->validate_external_dense_storage_owner(owner_)) {
-        program_->retire_external_dense_storage(owner_);
-      } else if (lifetime_) {
+      const bool retired =
+          Program::retire_external_dense_storage_if_alive(
+              program_, program_lifetime_, owner_);
+      if (!retired && lifetime_) {
         lifetime_->close();
       }
     } catch (...) {
@@ -195,7 +194,7 @@ class SharedCudaVulkanImage::Impl {
 
   AppContext *app_context_{nullptr};
   Program *program_{nullptr};
-  std::weak_ptr<void> program_lifetime_;
+  std::weak_ptr<ProgramLifetimeToken> program_lifetime_;
   int width_{0};
   int height_{0};
   std::uint64_t requested_bytes_{0};

@@ -88,6 +88,17 @@
 
 namespace taichi::lang {
 
+class ProgramLifetimeToken {
+ public:
+  explicit ProgramLifetimeToken(Program *program) : program_(program) {
+  }
+
+ private:
+  friend class Program;
+  std::mutex mutex_;
+  Program *program_{nullptr};
+};
+
 Program *&runtime_completion_detail::active_runtime_submission_program()
     noexcept {
   static thread_local Program *active_program = nullptr;
@@ -4608,6 +4619,7 @@ std::size_t Program::get_dense_field_stride(SNode *snode,
 
 Program::Program(Arch desired_arch)
     : snode_rw_accessors_bank_(this),
+      lifetime_token_(std::make_shared<ProgramLifetimeToken>(this)),
       runtime_completion_domain_(allocate_runtime_resource_domain()),
       runtime_fault_domain_(std::make_shared<RuntimeFaultDomain>(
           desired_arch, runtime_completion_domain_)),
@@ -8034,6 +8046,73 @@ void Program::delete_ndarray(Ndarray *ndarray) {
   const auto result = ndarray_resources_.retire(handle);
   TI_ASSERT(result == NdarrayResourceRegistry::Result::kSuccess ||
             result == NdarrayResourceRegistry::Result::kInvalidHandle);
+}
+
+void Program::delete_ndarray_if_alive(
+    Program *program,
+    const std::weak_ptr<ProgramLifetimeToken> &lifetime,
+    Ndarray *ndarray) noexcept {
+  if (!program || !ndarray) {
+    return;
+  }
+  auto token = lifetime.lock();
+  if (!token) {
+    return;
+  }
+  try {
+    std::lock_guard<std::mutex> lock(token->mutex_);
+    if (token->program_ == program) {
+      program->delete_ndarray(ndarray);
+    }
+  } catch (...) {
+  }
+}
+
+storage::StorageOwnerRef Program::register_external_dense_storage_if_alive(
+    Program *program,
+    const std::weak_ptr<ProgramLifetimeToken> &lifetime,
+    DeviceAllocation allocation,
+    std::uint64_t allocation_bytes,
+    ExternalDenseStorageRelease release,
+    std::shared_ptr<ExternalSynchronizationDomain> synchronization_domain) {
+  if (!program) {
+    return {};
+  }
+  auto token = lifetime.lock();
+  if (!token) {
+    return {};
+  }
+  std::lock_guard<std::mutex> lock(token->mutex_);
+  if (token->program_ != program) {
+    return {};
+  }
+  return program->register_external_dense_storage(
+      allocation, allocation_bytes, std::move(release),
+      std::move(synchronization_domain));
+}
+
+bool Program::retire_external_dense_storage_if_alive(
+    Program *program,
+    const std::weak_ptr<ProgramLifetimeToken> &lifetime,
+    const storage::StorageOwnerRef &owner) noexcept {
+  if (!program || !owner.valid()) {
+    return false;
+  }
+  auto token = lifetime.lock();
+  if (!token) {
+    return false;
+  }
+  try {
+    std::lock_guard<std::mutex> lock(token->mutex_);
+    if (token->program_ != program ||
+        !program->validate_external_dense_storage_owner(owner)) {
+      return false;
+    }
+    program->retire_external_dense_storage(owner);
+    return true;
+  } catch (...) {
+    return false;
+  }
 }
 
 void Program::delete_argpack(ArgPack *argpack) {
@@ -20349,6 +20428,10 @@ std::pair<const StructType *, size_t> Program::get_struct_type_with_data_layout(
 }
 
 Program::~Program() {
+  if (lifetime_token_) {
+    std::lock_guard<std::mutex> lock(lifetime_token_->mutex_);
+    lifetime_token_->program_ = nullptr;
+  }
   lifetime_token_.reset();
   finalize();
 }

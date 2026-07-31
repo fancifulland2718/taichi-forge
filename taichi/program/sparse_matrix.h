@@ -21,6 +21,7 @@
 namespace taichi::lang {
 
 class SparseMatrix;
+class ProgramLifetimeToken;
 struct OperatorVectorView;
 std::uint64_t allocate_sparse_matrix_id();
 
@@ -489,6 +490,7 @@ class CompiledGraphLinearOperator final : public SparseMatrix {
                             aot::CompiledGraphJITCache *cache);
 
   Program *program_{nullptr};
+  std::weak_ptr<ProgramLifetimeToken> program_lifetime_;
   std::unique_ptr<aot::CompiledGraph> graph_;
   std::unique_ptr<aot::CompiledGraphJITCache> cache_;
   FixedI32Arguments fixed_i32_arguments_;

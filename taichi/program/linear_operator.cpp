@@ -2993,15 +2993,17 @@ class ActionNdarrayOwner {
 
 struct CompiledKernelActionTopology {
   CompiledKernelActionTopology(Program *program, Ndarray *data)
-      : program(program), data(data) {
+      : program(program),
+        program_lifetime(program ? program->weak_resource_lifetime_token()
+                                 : std::weak_ptr<ProgramLifetimeToken>{}),
+        data(data) {
   }
   ~CompiledKernelActionTopology() {
-    if (program && data) {
-      program->delete_ndarray(data);
-    }
+    Program::delete_ndarray_if_alive(program, program_lifetime, data);
   }
 
   Program *program{nullptr};
+  std::weak_ptr<ProgramLifetimeToken> program_lifetime;
   Ndarray *data{nullptr};
 };
 
@@ -3086,6 +3088,8 @@ struct CompiledKernelActionGeneration {
       std::size_t input_arg_index,
       std::size_t output_arg_index)
       : program(program),
+        program_lifetime(program ? program->weak_resource_lifetime_token()
+                                 : std::weak_ptr<ProgramLifetimeToken>{}),
         topology(std::move(topology)),
         numeric_data(numeric_data) {
     forward = std::make_unique<CompiledKernelActionLaunch>(
@@ -3104,9 +3108,7 @@ struct CompiledKernelActionGeneration {
     // Launch contexts only borrow the numeric ndarray. Destroy them first.
     adjoint.reset();
     forward.reset();
-    if (program && numeric_data) {
-      program->delete_ndarray(numeric_data);
-    }
+    Program::delete_ndarray_if_alive(program, program_lifetime, numeric_data);
   }
 
   void apply(OperatorApplyMode mode,
@@ -3122,6 +3124,7 @@ struct CompiledKernelActionGeneration {
   }
 
   Program *program{nullptr};
+  std::weak_ptr<ProgramLifetimeToken> program_lifetime;
   std::shared_ptr<CompiledKernelActionTopology> topology;
   Ndarray *numeric_data{nullptr};
   OperatorResourceStamp stamp;
@@ -3483,6 +3486,8 @@ struct GraphActionDefinition {
                         const aot::CompiledGraph &forward_graph,
                         const aot::CompiledGraph *adjoint_graph)
       : program(program),
+        program_lifetime(program ? program->weak_resource_lifetime_token()
+                                 : std::weak_ptr<ProgramLifetimeToken>{}),
         forward(std::make_unique<aot::CompiledGraph>(forward_graph)) {
     if (adjoint_graph) {
       adjoint = std::make_unique<aot::CompiledGraph>(*adjoint_graph);
@@ -3492,12 +3497,9 @@ struct GraphActionDefinition {
   ~GraphActionDefinition() {
     adjoint.reset();
     forward.reset();
-    if (program) {
-      for (auto &resource : fixed_ndarrays) {
-        if (resource.value) {
-          program->delete_ndarray(resource.value);
-        }
-      }
+    for (auto &resource : fixed_ndarrays) {
+      Program::delete_ndarray_if_alive(program, program_lifetime,
+                                       resource.value);
     }
   }
 
@@ -3511,6 +3513,7 @@ struct GraphActionDefinition {
   }
 
   Program *program{nullptr};
+  std::weak_ptr<ProgramLifetimeToken> program_lifetime;
   std::unique_ptr<aot::CompiledGraph> forward;
   std::unique_ptr<aot::CompiledGraph> adjoint;
   GraphFixedI32Arguments fixed_i32;
@@ -3728,17 +3731,16 @@ struct GraphActionGeneration {
       std::shared_ptr<GraphActionDefinition> definition,
       std::vector<GraphActionOwnedResource> numeric_ndarrays)
       : program(program),
+        program_lifetime(program ? program->weak_resource_lifetime_token()
+                                 : std::weak_ptr<ProgramLifetimeToken>{}),
         definition(std::move(definition)),
         numeric_ndarrays(std::move(numeric_ndarrays)) {
   }
 
   ~GraphActionGeneration() {
-    if (program) {
-      for (auto &resource : numeric_ndarrays) {
-        if (resource.value) {
-          program->delete_ndarray(resource.value);
-        }
-      }
+    for (auto &resource : numeric_ndarrays) {
+      Program::delete_ndarray_if_alive(program, program_lifetime,
+                                       resource.value);
     }
   }
 
@@ -3796,6 +3798,7 @@ struct GraphActionGeneration {
   }
 
   Program *program{nullptr};
+  std::weak_ptr<ProgramLifetimeToken> program_lifetime;
   std::shared_ptr<GraphActionDefinition> definition;
   std::vector<GraphActionOwnedResource> numeric_ndarrays;
   OperatorResourceStamp stamp;

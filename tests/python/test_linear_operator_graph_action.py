@@ -1,3 +1,5 @@
+import gc
+
 import numpy as np
 import pytest
 
@@ -652,6 +654,24 @@ def test_compiled_graph_fixed_state_rejects_sparse_sibling_in_dense_tree(
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_compiled_kernel_action_generation_can_release_after_reset():
+    operator = _diagonal_operator([1.0, 2.0, 3.0, 4.0])
+    input_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "input", ti.f32, ndim=1
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1
+    )
+    action = operator.graph_action(input_arg, output_arg)
+    escaped_executable = action.compile()
+    escaped_record = escaped_executable._record
+
+    ti.reset()
+    del action, escaped_executable, escaped_record
+    gc.collect()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_compiled_graph_action_fails_closed_after_reset():
     size = 4
     topology = ti.ndarray(ti.i32, shape=size)
@@ -684,8 +704,11 @@ def test_compiled_graph_action_fails_closed_after_reset():
         (size, size),
         topology={"topology": topology},
     )
+    action = operator.graph_action(input_arg, output_arg)
+    escaped_executable = action.compile()
+    escaped_record = escaped_executable._record
     outer_builder = ti.graph.GraphBuilder()
-    outer_builder.append_native(operator.graph_action(input_arg, output_arg))
+    outer_builder.append_native(action)
     graph = outer_builder.compile()
     input_array = ti.ndarray(ti.f32, shape=size)
     output_array = ti.ndarray(ti.f32, shape=size)
@@ -697,3 +720,10 @@ def test_compiled_graph_action_fails_closed_after_reset():
         ti.TaichiRuntimeError, match="compiled before ti.reset"
     ):
         graph.run({"input": input_array, "output": output_array})
+
+    # A native action may be compiled before it is appended to an outer Graph.
+    # Its provider generation can therefore outlive runtime invalidation. Late
+    # release must defer to Program teardown instead of dereferencing the old
+    # Program pointer.
+    del graph, action, escaped_executable, escaped_record
+    gc.collect()
