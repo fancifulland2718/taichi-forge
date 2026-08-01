@@ -185,8 +185,9 @@ void EigenSparseSolver<EigenSolver, EigenMatrix>::require_same_pattern(
   std::size_t ordinal = 0;
   for (int outer = 0; outer < matrix.outerSize(); ++outer) {
     for (typename EigenMatrix::InnerIterator it(matrix, outer); it; ++it) {
+      const auto &analyzed_index = analyzed_pattern_[ordinal];
       TI_ERROR_IF(
-          analyzed_pattern_[ordinal] != std::make_pair(it.row(), it.col()),
+          analyzed_index.first != it.row() || analyzed_index.second != it.col(),
           "SparseSolver factorize() requires the same sparse pattern that "
           "was passed to analyze_pattern(); an index changed.");
       ++ordinal;
