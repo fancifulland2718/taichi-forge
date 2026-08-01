@@ -582,6 +582,36 @@ def test_shim_discovers_auditwheel_cudart_separate_from_manifest(
     assert os.environ["TI_CUDA_CUB_SORT_BUNDLED_CUDART_MAJOR"] == "13"
 
 
+def test_shim_retains_explicit_linux_runtime_handle(monkeypatch, tmp_path):
+    runtime = tmp_path / "libtaichi_runtime.so"
+    runtime.write_bytes(b"")
+    handle = object()
+    calls = []
+
+    monkeypatch.setattr(runtime_utils, "get_os_name", lambda: "linux")
+    monkeypatch.setattr(
+        runtime_utils, "_native_runtime_dirs", lambda: [str(tmp_path)]
+    )
+    monkeypatch.setattr(runtime_utils, "_native_runtime_loaded", False)
+    monkeypatch.setattr(runtime_utils, "_native_library_handles", [])
+    monkeypatch.setattr(
+        runtime_utils.ctypes,
+        "CDLL",
+        lambda path, mode: calls.append((path, mode)) or handle,
+    )
+
+    runtime_utils._prepare_native_runtime()
+
+    assert runtime_utils._native_runtime_loaded
+    assert runtime_utils._native_library_handles == [handle]
+    assert calls == [
+        (
+            str(runtime),
+            getattr(os, "RTLD_GLOBAL", 0) | getattr(os, "RTLD_NOW", 2),
+        )
+    ]
+
+
 def test_shim_rejects_conflicting_runtime_manifests(monkeypatch, tmp_path):
     first = tmp_path / "first"
     second = tmp_path / "second"

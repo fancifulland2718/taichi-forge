@@ -23,8 +23,14 @@ def in_docker():
 
 
 _dll_dir_handles = []
+_native_library_handles = []
 _native_runtime_loaded = False
 _CUDA_RUNTIME_MAJOR_MANIFEST = "cuda_runtime_major.txt"
+
+
+def _native_load_trace(message):
+    if os.environ.get("TI_NATIVE_RUNTIME_LOAD_TRACE", "") == "1":
+        print(f"[taichi-forge native loader] {message}", file=sys.stderr, flush=True)
 
 
 def _dedupe_existing_dirs(paths):
@@ -204,8 +210,11 @@ def _preload_cuda_runtime_for_native_runtime():
     if not candidate:
         return
     try:
-        ctypes.CDLL(candidate, mode=flags)
+        _native_load_trace(f"preloading CUDA runtime: {candidate}")
+        _native_library_handles.append(ctypes.CDLL(candidate, mode=flags))
+        _native_load_trace("CUDA runtime preload passed")
     except OSError:
+        _native_load_trace("CUDA runtime preload was unavailable")
         return
 
 
@@ -215,6 +224,7 @@ def _prepare_native_runtime():
         return
 
     runtime_dirs = _native_runtime_dirs()
+    _native_load_trace(f"runtime search directories: {runtime_dirs}")
     _prepare_bundled_cuda_runtime(runtime_dirs)
     _preload_cuda_runtime_for_native_runtime()
     if get_os_name() == "win":
@@ -227,12 +237,23 @@ def _prepare_native_runtime():
         for lib_path in _native_runtime_library_candidates(path):
             if not os.path.exists(lib_path):
                 continue
+            _native_load_trace(f"loading native runtime: {lib_path}")
             if get_os_name() == "win":
-                ctypes.WinDLL(lib_path)  # pylint: disable=no-member
+                handle = ctypes.WinDLL(lib_path)  # pylint: disable=no-member
             else:
-                ctypes.CDLL(lib_path, mode=getattr(os, "RTLD_GLOBAL", 0))
+                flags = getattr(os, "RTLD_GLOBAL", 0) | getattr(
+                    os, "RTLD_NOW", 2
+                )
+                handle = ctypes.CDLL(lib_path, mode=flags)
+            # Linux shim modules intentionally have no DT_NEEDED edge to the
+            # split runtime. Keep the explicit loader reference alive for the
+            # complete Python process lifetime so native function pointers and
+            # C++ type metadata cannot outlive their defining shared object.
+            _native_library_handles.append(handle)
             _native_runtime_loaded = True
+            _native_load_trace("native runtime load passed")
             return
+    _native_load_trace("no native runtime candidate was found")
 
 
 def get_os_name():
@@ -260,7 +281,9 @@ def import_ti_python_core():
         pyddir = os.path.dirname(os.path.realpath(__file__))
         os.environ["PATH"] += os.pathsep + pyddir
     try:
+        _native_load_trace("importing pybind shim")
         from taichi_forge._lib.core import taichi_python as core  # pylint: disable=C0415
+        _native_load_trace("pybind shim import passed")
     except Exception as e:
         if isinstance(e, ImportError):
             print(
