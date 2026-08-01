@@ -5972,7 +5972,7 @@ Program::TextureResourceLease Program::acquire_texture_external_lease(
               "Cannot retain a stale or retired Texture");
   auto lease = found->second.lease.clone();
   TI_ERROR_IF(!lease, "Cannot clone the Texture external lease");
-  return std::move(lease);
+  return lease;
 }
 
 void Program::retain_ndarrays_for_external_submission(
@@ -19001,7 +19001,6 @@ std::size_t Program::cpu_gather_add_dense_field(SNode *src,
   if (n == 0) {
     return 0;
   }
-  const std::size_t value_size = primitive_value_type_size(value_type);
   std::size_t src_stride = 0;
   std::size_t dst_stride = 0;
   const auto *src_ptr = map_cpu_dense_field(

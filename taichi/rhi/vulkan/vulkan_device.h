@@ -666,9 +666,9 @@ class VulkanStreamSemaphoreObject : public StreamSemaphoreObject {
       vkapi::IVkSemaphore sema,
       vkapi::IVkFence fence = nullptr,
       BackendWaitTelemetry *wait_telemetry = nullptr)
-      : fault_reporter_(std::move(fault_reporter)),
-        vkapi_ref(sema),
+      : vkapi_ref(sema),
         fence_ref(fence),
+        fault_reporter_(std::move(fault_reporter)),
         wait_telemetry_(wait_telemetry) {
   }
   ~VulkanStreamSemaphoreObject() override {
