@@ -348,18 +348,18 @@ void export_storage_view(py::module &m) {
         return storage_qualification_dict(
             qualify_dense_storage(descriptor, requirement));
       },
-      py::arg("descriptor"), py::arg("scalar_type") = py::none(),
-      py::arg("min_index_rank") = 0,
-      py::arg("max_index_rank") = kMaxDenseStorageRank,
-      py::arg("max_element_rank") = kMaxDenseStorageRank,
-      py::arg("require_ndarray_abi") = false,
-      py::arg("accept_compact_subrange") = true,
-      py::arg("accept_single_record_stride") = false,
-      py::arg("accept_general_affine") = false,
-      py::arg("require_unique_mapping") = false,
-      py::arg("require_writable") = false,
-      py::arg("accept_external_owner") = false,
-      py::arg("allow_materialization") = false);
+      // The public Python facade always supplies a complete
+      // StorageRequirement. Keep this private binding explicit instead of
+      // constructing twelve py::arg_v default objects during module import;
+      // the latter is both unused and fragile in the split Linux shim.
+      py::arg("descriptor"), py::arg("scalar_type"),
+      py::arg("min_index_rank"), py::arg("max_index_rank"),
+      py::arg("max_element_rank"), py::arg("require_ndarray_abi"),
+      py::arg("accept_compact_subrange"),
+      py::arg("accept_single_record_stride"),
+      py::arg("accept_general_affine"), py::arg("require_unique_mapping"),
+      py::arg("require_writable"), py::arg("accept_external_owner"),
+      py::arg("allow_materialization"));
 
   export_external_storage_bindings(m);
 }
