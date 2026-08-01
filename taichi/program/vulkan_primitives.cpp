@@ -7597,33 +7597,6 @@ void profiled_buffer_copy(CommandList *cmdlist,
   }
 }
 
-void dispatch_unary(CommandList *cmdlist,
-                    Device *device,
-                    Pipeline *pipeline,
-                    DeviceAllocation in,
-                    DeviceAllocation out,
-                    size_t bytes,
-                    uint32_t groups,
-                    const char *scope_name,
-                    VulkanSortCpuProfileSample *profile = nullptr,
-                    size_t in_offset = 0,
-                    size_t out_offset = 0) {
-  std::unique_ptr<ShaderResourceSet> bindings;
-  if (profile) {
-    double start = profile_time_us();
-    bindings = device->create_resource_set_unique();
-    profile->resource_set_calls++;
-    profile->resource_set_create_calls++;
-    profile->resource_set_us += profile_time_us() - start;
-  } else {
-    bindings = device->create_resource_set_unique();
-  }
-  profiled_rw_buffer(bindings.get(), 0, in.get_ptr(in_offset), bytes, profile);
-  profiled_rw_buffer(bindings.get(), 1, out.get_ptr(out_offset), bytes, profile);
-  dispatch_pipeline(cmdlist, pipeline, bindings.get(), groups, 1, 1,
-                    scope_name, profile);
-}
-
 std::vector<size_t> scan_level_lengths(size_t n) {
   std::vector<size_t> levels;
   while (n > 0) {
