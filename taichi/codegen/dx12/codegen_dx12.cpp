@@ -156,7 +156,7 @@ class TaskCodeGenLLVMDX12 : public TaskCodeGenLLVM {
     if (compile_config.kernel_profiler && arch_is_cpu(compile_config.arch)) {
       call(
           builder.get(), "LLVMRuntime_profiler_start",
-          {get_runtime(), builder->CreateGlobalStringPtr(offloaded_task_name)});
+          {get_runtime(), create_global_string(offloaded_task_name)});
     }
     if (stmt->task_type == Type::serial) {
       stmt->body->accept(this);

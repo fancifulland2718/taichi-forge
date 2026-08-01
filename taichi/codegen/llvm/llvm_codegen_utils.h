@@ -20,6 +20,7 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/IR/Verifier.h"
+#include "llvm/Config/llvm-config.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
@@ -84,6 +85,25 @@ class LLVMModuleBuilder {
   llvm::Value *create_entry_block_alloca(DataType dt) {
     auto type = tlctx->get_data_type(dt);
     return create_entry_block_alloca(type);
+  }
+
+  llvm::Value *create_global_string(llvm::StringRef value,
+                                    const llvm::Twine &name = "") {
+#if LLVM_VERSION_MAJOR >= 20
+    return builder->CreateGlobalString(value, name);
+#else
+    return builder->CreateGlobalStringPtr(value, name);
+#endif
+  }
+
+  llvm::Function *get_intrinsic_declaration(
+      llvm::Intrinsic::ID id,
+      llvm::ArrayRef<llvm::Type *> types = {}) {
+#if LLVM_VERSION_MAJOR >= 20
+    return llvm::Intrinsic::getOrInsertDeclaration(module.get(), id, types);
+#else
+    return llvm::Intrinsic::getDeclaration(module.get(), id, types);
+#endif
   }
 
   llvm::Type *get_runtime_type(const std::string &name) {

@@ -375,7 +375,9 @@ std::size_t cub_grouped_reduce_cached_bytes_impl(void *owner);
 
 namespace {
 
-#if defined(TI_WITH_CUDA_TOOLKIT) && defined(TI_CUDA_CUB_SORT_DYNAMIC_CUDART)
+#if defined(TI_WITH_CUDA_TOOLKIT)
+
+#if defined(TI_CUDA_CUB_SORT_DYNAMIC_CUDART)
 
 std::unique_ptr<taichi::DynamicLoader> cudart_loader;
 std::once_flag cudart_load_once;
@@ -466,6 +468,8 @@ const std::string &cudart_error() {
   static const std::string empty;
   return empty;
 }
+
+#endif
 
 #endif
 

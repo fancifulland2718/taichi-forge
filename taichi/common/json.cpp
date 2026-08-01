@@ -361,7 +361,7 @@ JsonValue parse(const std::string &json_lit) {
 bool try_parse(const std::string &json_lit, JsonValue &out) {
   try {
     out = parse(json_lit);
-  } catch (JsonException e) {
+  } catch (const JsonException &) {
     // log::error("failed to parse json: ", e.what());
     return true;
   }

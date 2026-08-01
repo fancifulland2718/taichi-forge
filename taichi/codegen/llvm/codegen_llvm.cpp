@@ -607,7 +607,7 @@ void TaskCodeGenLLVM::create_elementwise_cast(
   auto from_ty = stmt->operand->ret_type->cast<TensorType>();
   TI_ASSERT_INFO(from_ty,
                  "Cannot perform elementwise ops on non-tensor type {}",
-                 from_ty->to_string());
+                 stmt->operand->ret_type->to_string());
   llvm::Value *vec = llvm::UndefValue::get(llvm::VectorType::get(
       to_ty, from_ty->get_num_elements(), /*scalable=*/false));
   for (int i = 0; i < from_ty->get_num_elements(); ++i) {
@@ -776,8 +776,8 @@ void TaskCodeGenLLVM::visit(UnaryOpStmt *stmt) {
           llvm_val[stmt->operand], tlctx->get_data_type(stmt->cast_type));
     }
   } else if (op == UnaryOpType::rsqrt) {
-    llvm::Function *sqrt_fn = llvm::Intrinsic::getDeclaration(
-        module.get(), llvm::Intrinsic::sqrt, input->getType());
+    llvm::Function *sqrt_fn =
+        get_intrinsic_declaration(llvm::Intrinsic::sqrt, input->getType());
     auto intermediate = builder->CreateCall(sqrt_fn, input, "sqrt");
     llvm_val[stmt] = builder->CreateFDiv(
         tlctx->get_constant(stmt->ret_type, 1.0), intermediate);
@@ -835,7 +835,7 @@ void TaskCodeGenLLVM::visit(BinaryOpStmt *stmt) {
       llvm_val[stmt] =
           call("debug_add_" + stmt->ret_type->to_string(), get_arg(0),
                llvm_val[stmt->lhs], llvm_val[stmt->rhs],
-               builder->CreateGlobalStringPtr(stmt->get_tb()));
+               create_global_string(stmt->get_tb()));
 #endif
     } else {
       llvm_val[stmt] =
@@ -850,7 +850,7 @@ void TaskCodeGenLLVM::visit(BinaryOpStmt *stmt) {
       llvm_val[stmt] =
           call("debug_sub_" + stmt->ret_type->to_string(), get_arg(0),
                llvm_val[stmt->lhs], llvm_val[stmt->rhs],
-               builder->CreateGlobalStringPtr(stmt->get_tb()));
+               create_global_string(stmt->get_tb()));
 #endif
     } else {
       llvm_val[stmt] =
@@ -865,7 +865,7 @@ void TaskCodeGenLLVM::visit(BinaryOpStmt *stmt) {
       llvm_val[stmt] =
           call("debug_mul_" + stmt->ret_type->to_string(), get_arg(0),
                llvm_val[stmt->lhs], llvm_val[stmt->rhs],
-               builder->CreateGlobalStringPtr(stmt->get_tb()));
+               create_global_string(stmt->get_tb()));
 #endif
     } else {
       llvm_val[stmt] =
@@ -912,7 +912,7 @@ void TaskCodeGenLLVM::visit(BinaryOpStmt *stmt) {
       llvm_val[stmt] =
           call("debug_shl_" + stmt->ret_type->to_string(), get_arg(0),
                llvm_val[stmt->lhs], llvm_val[stmt->rhs],
-               builder->CreateGlobalStringPtr(stmt->get_tb()));
+               create_global_string(stmt->get_tb()));
     } else {
       llvm_val[stmt] =
           builder->CreateShl(llvm_val[stmt->lhs], llvm_val[stmt->rhs]);
@@ -1175,7 +1175,7 @@ llvm::Value *TaskCodeGenLLVM::create_print(std::string tag,
   std::vector<llvm::Value *> args;
   std::string format = data_type_format(dt);
   auto runtime_printf = call("LLVMRuntime_get_host_printf", get_runtime());
-  args.push_back(builder->CreateGlobalStringPtr(
+  args.push_back(create_global_string(
       ("[llvm codegen debug] " + tag + " = " + format + "\n").c_str(),
       "format_string"));
   if (dt->is_primitive(PrimitiveTypeID::f32))
@@ -1270,14 +1270,14 @@ void TaskCodeGenLLVM::visit(PrintStmt *stmt) {
       }
     } else {
       auto arg_str = std::get<std::string>(content);
-      auto value = builder->CreateGlobalStringPtr(arg_str, "content_string");
+      auto value = create_global_string(arg_str, "content_string");
       args.push_back(value);
       formats += "%s";
     }
   }
   auto runtime_printf = call("LLVMRuntime_get_host_printf", get_runtime());
   args.insert(args.begin(),
-              builder->CreateGlobalStringPtr(formats.c_str(), "format_string"));
+              create_global_string(formats.c_str(), "format_string"));
   auto func_type_func = get_runtime_function("get_func_type_host_printf");
   llvm_val[stmt] =
       call(runtime_printf, func_type_func->getFunctionType(), std::move(args));
@@ -1626,7 +1626,7 @@ void TaskCodeGenLLVM::visit(AssertStmt *stmt) {
   auto *assertion_succeeded =
       builder->CreateIsNotNull(llvm_val[stmt->cond]);
   args.emplace_back(assertion_succeeded);
-  args.emplace_back(builder->CreateGlobalStringPtr(stmt->text));
+  args.emplace_back(create_global_string(stmt->text));
 
   for (int i = 0; i < stmt->args.size(); i++) {
     auto arg = stmt->args[i];
@@ -3317,7 +3317,7 @@ void TaskCodeGenLLVM::set_struct_to_buffer(
     const Type *current_type,
     int &current_element,
     std::vector<llvm::Value *> &current_index) {
-  if (auto primitive_type = current_type->cast<PrimitiveType>()) {
+  if (current_type->is<PrimitiveType>()) {
     TI_ERROR_IF(current_element >= elements.size() ||
                     (Type *)elements[current_element]->ret_type != current_type,
                 "Real-function argument flatten mismatch at {}: expected {}, "
@@ -3329,7 +3329,7 @@ void TaskCodeGenLLVM::set_struct_to_buffer(
     auto *gep = builder->CreateGEP(buffer_type, buffer, current_index);
     builder->CreateStore(llvm_val[elements[current_element]], gep);
     current_element++;
-  } else if (auto pointer_type = current_type->cast<PointerType>()) {
+  } else if (current_type->is<PointerType>()) {
     TI_ERROR_IF(current_element >= elements.size() ||
                     (Type *)elements[current_element]->ret_type != current_type,
                 "Real-function argument flatten mismatch at {}: expected {}, "

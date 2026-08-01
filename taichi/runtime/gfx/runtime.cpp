@@ -2509,7 +2509,6 @@ bool GfxRuntime::try_launch_graph(
     return false;
   }
 
-  using AllocationMap = GraphReplayExecutable::AllocationMap;
   using PreparedDispatch = GraphReplayExecutable::PreparedDispatch;
   using SizeMap = std::unordered_map<std::vector<int>,
                                      size_t,
@@ -5512,7 +5511,7 @@ GfxRuntime::get_struct_type_with_data_layout_impl(
         member_align = element_size;
         member_size = tensor_type->get_num_elements() * element_size;
       }
-    } else if (auto pointer_type = member.type->cast<PointerType>()) {
+    } else if (member.type->is<PointerType>()) {
       if (has_buffer_ptr) {
         member_size = sizeof(uint64_t);
         member_align = member_size;

@@ -52,6 +52,13 @@ def test_scalar_ndarray(dtype, shape):
     _test_scalar_ndarray(dtype, shape)
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_scalar_ndarray_f16_host_access():
+    x = ti.ndarray(ti.f16, shape=(1,))
+    x[0] = 1.5
+    assert x[0] == test_utils.approx(1.5)
+
+
 def _test_vector_ndarray(n, dtype, shape):
     x = ti.Vector.ndarray(n, dtype, shape)
 

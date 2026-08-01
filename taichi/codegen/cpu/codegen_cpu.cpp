@@ -181,7 +181,7 @@ class TaskCodeGenCPU : public TaskCodeGenLLVM {
     auto offloaded_task_name = init_offloaded_task_function(stmt);
     if (compile_config.kernel_profiler && arch_is_cpu(compile_config.arch)) {
       call("LLVMRuntime_profiler_start", get_runtime(),
-           builder->CreateGlobalStringPtr(offloaded_task_name));
+           create_global_string(offloaded_task_name));
     }
     emit_cpu_debug_fault_guard();
     if (stmt->task_type == Type::serial) {

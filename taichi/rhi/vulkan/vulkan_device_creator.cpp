@@ -454,7 +454,7 @@ void VulkanDeviceCreator::pick_physical_device(VkSurfaceKHR test_surface) {
     VkPhysicalDeviceProperties properties{};
     vkGetPhysicalDeviceProperties(devices[i], &properties);
 
-    char msg_buf[128];
+    char msg_buf[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE + 128];
     RHI_DEBUG_SNPRINTF(msg_buf, sizeof(msg_buf), "Found Vulkan Device %d (%s)",
                        i, properties.deviceName);
     RHI_LOG_DEBUG(msg_buf);
@@ -526,7 +526,7 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
   vkGetPhysicalDeviceProperties(physical_device_, &physical_device_properties);
 
   {
-    char msg_buf[256];
+    char msg_buf[VK_MAX_PHYSICAL_DEVICE_NAME_SIZE + 128];
     RHI_DEBUG_SNPRINTF(
         msg_buf, sizeof(msg_buf),
         "Vulkan Device \"%s\" supports Vulkan %d version %d.%d.%d",

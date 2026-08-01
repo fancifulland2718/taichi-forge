@@ -2048,8 +2048,6 @@ class TaskCodegen : public IRVisitor {
                                           bool do_activate,
                                           spirv::Value *chunk_idx_out =
                                               nullptr) {
-    const auto &snode_descs = compiled_structs_[root_id].snode_descriptors;
-    const auto &desc = snode_descs.at(sn->id);
     // 路线 B B-1/B-4：通过 SpirvAllocatorContract 间接读 pointer SNode 的池
     // 元数据。SNodeDescriptor 不再存 pointer_* 字段（B-4 已删除），contract
     // 是 pool/watermark/freelist/ambient 的唯一来源。
@@ -2540,8 +2538,6 @@ class TaskCodegen : public IRVisitor {
                           int root_id,
                           const SNode *sn,
                           spirv::Value index_u32) {
-    const auto &snode_descs = compiled_structs_[root_id].snode_descriptors;
-    const auto &desc = snode_descs.at(sn->id);
     // 路线 B B-1：见 pointer_lookup_or_activate 同名注释。
     const auto &contract =
         compiled_structs_[root_id].pointer_contracts.at(sn->id);
@@ -4306,14 +4302,10 @@ class TaskCodegen : public IRVisitor {
         TI_ERROR("Unsupported operation: {}", stmt->func_name);
       }
 
-      spv::GroupOperation group_op;
-
-      if (reduction_ops.find(stmt->func_name) != reduction_ops.end()) {
-        group_op = spv::GroupOperationReduce;
-      } else if (inclusive_scan_ops.find(stmt->func_name) !=
-                 inclusive_scan_ops.end()) {
-        group_op = spv::GroupOperationInclusiveScan;
-      }
+      const spv::GroupOperation group_op =
+          reduction_ops.find(stmt->func_name) != reduction_ops.end()
+              ? spv::GroupOperationReduce
+              : spv::GroupOperationInclusiveScan;
 
       val = ir_->make_value(
           spv_op, stype,

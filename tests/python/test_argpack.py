@@ -27,6 +27,18 @@ def test_argpack_basic():
     assert foo(pack2) == test_utils.approx(2 + 2.1, rel=1e-3)
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_argpack_f16_value():
+    pack_type = ti.types.argpack(value=ti.f16)
+    pack = pack_type(value=1.5)
+
+    @ti.kernel
+    def read_value(arg: pack_type) -> ti.f32:
+        return arg.value
+
+    assert read_value(pack) == test_utils.approx(1.5)
+
+
 @test_utils.test()
 def test_argpack_with_struct():
     struct_type = ti.types.struct(a=ti.i32, c=ti.f32)

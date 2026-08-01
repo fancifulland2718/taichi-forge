@@ -128,7 +128,7 @@ class BasicBlockSimplify : public IRVisitor {
                          else if (auto atomic = s->cast<AtomicOpStmt>())
                            return irpass::analysis::maybe_same_address(
                                atomic->dest, stmt->src);
-                         else if (auto func_call = s->cast<FuncCallStmt>())
+                         else if (s->is<FuncCallStmt>())
                            return true;
                          else
                            return false;

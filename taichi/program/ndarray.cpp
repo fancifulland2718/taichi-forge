@@ -192,7 +192,7 @@ TypedConstant Ndarray::read(const std::vector<int> &I) const {
 void Ndarray::write(const std::vector<int> &I, TypedConstant val) const {
   if (get_element_data_type()->is_primitive(PrimitiveTypeID::f16)) {
     uint16_t float16 = fp16_ieee_from_fp32_value(val.val_f32);
-    std::memcpy(&val.value_bits, &float16, 4);
+    val.value_bits = float16;
   }
 
   size_t index = flatten_index(total_shape_, I);

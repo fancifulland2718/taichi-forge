@@ -184,8 +184,9 @@ std::string CompiledKernelData::get_err_msg(Err err) {
     case Err::kCompiledKernelDataBroken:
       return "The CompiledKernelData is broken";
     case Err::kUnknown:
-      return "Unkown error";
+      return "Unknown error";
   }
+  return "Unknown error";
 }
 
 std::unique_ptr<CompiledKernelData> CompiledKernelData::create(Arch arch,

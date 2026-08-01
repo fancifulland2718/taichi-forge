@@ -80,7 +80,7 @@ void ArgPack::write(const std::vector<int> &I, TypedConstant val) const {
   size_t size = data_type_size(element_dt);
   if (element_dt->is_primitive(PrimitiveTypeID::f16)) {
     uint16_t float16 = fp16_ieee_from_fp32_value(val.val_f32);
-    std::memcpy(&val.value_bits, &float16, 4);
+    val.value_bits = float16;
   }
 
   taichi::lang::Device::AllocParams alloc_params;

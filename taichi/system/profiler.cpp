@@ -244,7 +244,7 @@ void ProfilerRecords::print(ProfilerRecordNode *node, int depth) {
   };
 
   float64 total_time = node->total_time;
-  fmt::color level_color;
+  fmt::color level_color = fmt::color::magenta;
   if (depth == 0)
     level_color = fmt::color::red;
   else if (depth == 1)
@@ -253,8 +253,6 @@ void ProfilerRecords::print(ProfilerRecordNode *node, int depth) {
     level_color = fmt::color::yellow;
   else if (depth == 3)
     level_color = fmt::color::light_blue;
-  else if (depth >= 4)
-    level_color = fmt::color::magenta;
   if (depth == 0) {
     // Root node only
     make_indent(0);

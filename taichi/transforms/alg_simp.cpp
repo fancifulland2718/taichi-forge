@@ -113,7 +113,7 @@ class AlgSimp : public BasicStmtVisitor {
 
   Stmt *get_log2rhs(BinaryOpStmt *stmt) {
     auto rhs = stmt->rhs;
-    if (auto const_rhs = stmt->rhs->cast<ConstStmt>()) {
+    if (stmt->rhs->is<ConstStmt>()) {
       int log2rhs =
           bit::log2int((uint64)rhs->as<ConstStmt>()->val.val_as_int64());
       auto new_rhs =
@@ -592,7 +592,7 @@ class AlgSimp : public BasicStmtVisitor {
   static bool alg_is_optimizable(Stmt *stmt) {
     if (!stmt)
       return false;
-    if (auto const_stmt = stmt->cast<ConstStmt>()) {
+    if (stmt->is<ConstStmt>()) {
       return true;
     } else if (auto matrix_stmt = stmt->cast<MatrixInitStmt>()) {
       for (auto &val : matrix_stmt->values) {
