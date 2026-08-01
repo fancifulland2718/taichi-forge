@@ -870,7 +870,7 @@ before selecting this path.
 | `GraphBuilder.if_then_else(condition, then_region, *, predicate, control_inputs=(), else_region=None, lowering_mode="auto", name="if")` | Append a fixed two-way branch. Only the selected branch executes. |
 | `GraphBuilder.switch(condition, branches, *, selector, control_inputs=(), default_region=None, lowering_mode="auto", name="switch")` | Append a zero-based fixed branch table with an optional default. |
 | `Sequential.while_loop(...)`, `.if_then_else(...)`, `.switch(...)` | Append one structured child to a condition, body, or branch `Sequential`. Definitions form a single-owner tree. The public structured-control depth limit is two; deeper definitions, cycles, or reuse at multiple call sites fail before execution during region construction or Graph compilation. |
-| `Graph.control_flow_stats()` | Return immutable `GraphWhileReport` / `GraphBranchReport` values for the latest run. Repeated nested calls retain only the latest invocation of each static definition. Reports include `region_path` and `structured_depth`; a qualified Vulkan nested-while outer report additionally exposes `nested_region_path`, `nested_logical_iterations`, and `nested_encoded_iterations`. Native CUDA branch reports are materialized lazily, so requesting them is an explicit synchronization point. |
+| `Graph.control_flow_stats()` | Return immutable `GraphWhileReport` / `GraphBranchReport` values for the latest run. Repeated nested calls retain only the latest invocation of each static definition. Reports include `region_path`, `structured_depth`, and encoded/masked work counts; a qualified Vulkan nested-while outer report additionally exposes `nested_region_path`, `nested_logical_iterations`, and `nested_encoded_iterations`. Native CUDA branch reports are materialized lazily, so requesting them is an explicit synchronization point. |
 | `ti.graph.structured_control_capabilities()` | Return the schema-v4 portable and device-control contract for the active backend. The result reports the depth-two portable contract and native-leaf/nested-Vulkan qualification separately from structured submit, bounded chunk/replay limits, terminal observation, queue-submit coalescing, and exact dynamic termination. |
 
 Condition regions combine multiple device values in ordinary Taichi kernels;
@@ -879,10 +879,18 @@ a user-defined integer and reports it independently from the continue
 predicate. `max_iterations` is mandatory even when the condition also checks
 an iteration budget.
 
-CPU uses exact host control over cached dispatch plans. Eligible CUDA `while`
-regions use a native conditional Graph in `lowering_mode="auto"`; otherwise
-they use exact portable replay. CUDA native conditional control requires
-Driver API 12.8 or newer and the qualified conditional symbols/lowering.
+CPU uses exact host control over cached dispatch plans. Eligible CUDA
+`while`/`if`/`switch` regions select one device-control route when they are
+compiled. Driver API 12.8 or newer uses native conditional Graph nodes. Older
+drivers with ordinary CUDA Graph capture use Forge's bounded masked Graph:
+the selector is latched on device, all work is submitted once, and a private
+entry gate prevents inactive Taichi tasks from reaching payload side effects.
+This route performs no per-iteration host readback and preserves exact logical
+results, but it still issues the encoded task nodes through the CUDA Graph and
+therefore does not claim exact dynamic command termination. It accepts at most
+4096 encoded dispatches. The capability report distinguishes
+`cuda_conditional_graph` from `cuda_masked_bounded_graph` and reports whether
+command issue actually stops after exit.
 
 The same `while`/`if`/`switch` APIs are available on `Sequential`, allowing any
 of those region kinds to contain one more structured level. Depth-two

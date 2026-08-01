@@ -148,7 +148,7 @@ work 与数值 breakdown。它写入只包含一个整数的 `predicate` ndarray
 | 后端 | 结构化 `while` | `if` / `switch` |
 | --- | --- | --- |
 | CPU | 精确 `cpu_host_loop`；condition/body 使用 cached compiled dispatch plan | 精确 portable host control |
-| CUDA | Driver API 不低于 12.8 且具备所需 symbol/lowering 时，`auto` 使用原生 CUDA conditional Graph；否则使用精确 portable replay | 资格满足时，`auto` 使用单个原生 CUDA IF/SWITCH node；否则使用精确 portable host control |
+| CUDA | Driver API 不低于 12.8 且具备所需 symbol/lowering 时，`auto` 使用原生 CUDA conditional Graph；较旧驱动在普通 CUDA Graph capture 可用时使用 Forge 内部的 bounded masked Graph；两者都不可用时使用精确 portable replay | 12.8 路径使用原生 CUDA IF/SWITCH node；较旧驱动使用同一内部 device-latch + task-entry gate 合同；否则使用精确 portable host control |
 | Vulkan | 精确 portable replay，或满足资格的 `native_required` 有界 masking；每个 region 的正数 chunk size 封顶为 64，每个 region 最多八个 chunk/512 轮 | 精确 portable host control |
 
 在 depth=2 时，CPU 以精确 host control 执行两层。parent 使用 exact portable
@@ -161,10 +161,16 @@ lowering 与 device-control 资格。报告分别描述 primitive 可用性、�
 compound submission、终态观测、per-region chunk 与首 gate 策略、tail strategy、
 queue-submit 合并与 exact dynamic termination。Vulkan 声明有界 `while` 执行，但不
 据此声明原生 `if`/`switch`，也不宣称能够精确终止已经编码的 active command chunk。
+CUDA 报告会明确区分 `cuda_conditional_graph` 与
+`cuda_masked_bounded_graph`：后者单次提交最多编码 4096 个 dispatch，在 device 上
+latch 控制值并使非 active task 在 payload side effect 前返回，不做逐轮 host readback；
+但所有已编码 task node 仍会进入 Graph command issue，因此
+`stops_command_issue_after_exit` 与 `exact_dynamic_termination` 为 false。
 
 `lowering_mode="portable"` 强制 portable 路径。
 `lowering_mode="native_required"` 要求当前 backend 的已资格化原生路径，不可用时会在
-执行前失败。CUDA 对应 conditional Graph control；Vulkan 对应最大 512 轮、最多八个
+执行前失败。CUDA 对应 exact conditional Graph 或内部 bounded-masked device control；
+Vulkan 对应最大 512 轮、最多八个
 正数且封顶为 64 轮的 chunk、runtime replay mode 已启用且未使用不兼容 profiler/dispatch-cache
 配置的有界 `while`。compound submission 省略 `chunk_size` 时使用 64。recordable
 provider action 只有在 provider 声明适合结构化 body 时才能进入 region；opaque 或
@@ -203,7 +209,7 @@ lowering 为一个 backend region。fixed binding 与私有 temporary binding �
 definition 的最近一次 invocation。原生 CUDA IF/SWITCH 保持 `Graph.run()` 的
 fire-and-continue 合同：selector 回读和 report 构造延迟到请求 `control_flow_stats()` 时，
 因此该诊断调用是显式同步点。while report 包含实际 lowering、逻辑/执行
-迭代、观测边界、predicate/counter/status 轨迹、终止状态、传输字节与 native upgrade
+迭代、encoded/masked 迭代槽、观测边界、predicate/counter/status 轨迹、终止状态、传输字节与 native upgrade
 原因。严格 Vulkan outer while report 还提供 `region_path`、`structured_depth`、
 `nested_region_path`、`nested_logical_iterations` 与
 `nested_encoded_iterations`。`Graph.run(args, trace=True)` 会同步返回有序
@@ -212,8 +218,8 @@ invocation path、parent iteration 与 report。trace 会绕过严格 Vulkan nes
 使用精确 portable-parent 路径，使每次 invocation 都可观测。
 
 portable 结构化 region 使用同步 `Graph.run()`；`Graph.submit()` 会明确拒绝，
-不会把 host-observed 控制隐藏在异步 ticket 后面。在 CUDA conditional Graph lowering
-可用时，声明 `lowering_mode='native_required'` 的 `while_loop`、`if_then_else` 与
+不会把 host-observed 控制隐藏在异步 ticket 后面。在 CUDA exact conditional 或内部
+bounded-masked lowering 可用时，声明 `lowering_mode='native_required'` 的 `while_loop`、`if_then_else` 与
 `switch` 都可使用 `Graph.submit()`。满足资格的 Vulkan `native_required` `while_loop`
 也可使用 `Graph.submit()`；Vulkan branch 仍是 portable。CUDA 有序 setter 与 Vulkan
 predicate gate 都无需逐 region host 回读即可消费控制状态。异步结构化提交后应通过

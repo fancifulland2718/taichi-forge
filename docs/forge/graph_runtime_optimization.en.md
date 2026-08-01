@@ -177,7 +177,7 @@ Current lowering is explicit:
 | Backend | Structured `while` | `if` / `switch` |
 | --- | --- | --- |
 | CPU | Exact `cpu_host_loop`; condition and body use cached compiled dispatch plans | Exact portable host control |
-| CUDA | `auto` uses a native CUDA conditional Graph when the Driver API is at least 12.8 and the required symbols/lowering are available; otherwise exact portable replay | `auto` uses one native CUDA IF/SWITCH node when qualified; otherwise exact portable host control |
+| CUDA | `auto` uses a native CUDA conditional Graph on qualified Driver API 12.8+ runtimes; older drivers use Forge's bounded masked Graph when ordinary CUDA Graph capture is available; otherwise exact portable replay | Qualified 12.8+ runtimes use native CUDA IF/SWITCH nodes; older drivers use the same internal device latch and task-entry gate contract; otherwise exact portable host control |
 | Vulkan | Exact portable replay, or qualified `native_required` bounded masking with positive per-region chunk sizes capped at 64 and an eight-chunk/512-iteration region limit | Exact portable host control |
 
 At depth two, CPU executes both levels with exact host control. The parent uses
@@ -193,11 +193,18 @@ submission, terminal observation, per-region chunk and first-gate policy, tail
 strategy, queue-submit coalescing, and exact dynamic termination. Vulkan
 qualifies bounded `while` execution without claiming native `if`/`switch` or
 exact termination of an already encoded command chunk.
+CUDA similarly distinguishes `cuda_conditional_graph` from
+`cuda_masked_bounded_graph`. The latter encodes at most 4096 dispatches in one
+submission, latches control on device, and returns inactive Taichi tasks before
+payload side effects. It has no per-iteration host readback, but all encoded
+task nodes still reach command issue, so `stops_command_issue_after_exit` and
+`exact_dynamic_termination` are false.
 
 `lowering_mode="portable"` forces the portable route.
 `lowering_mode="native_required"` requires the qualified backend route and
-fails before execution when unavailable. On CUDA this means conditional Graph
-control. On Vulkan it means a bounded `while` with at most 512 iterations,
+fails before execution when unavailable. On CUDA this means either exact
+conditional Graph control or internal bounded-masked device control. On
+Vulkan it means a bounded `while` with at most 512 iterations,
 at most eight positive-size chunks capped at 64 iterations, runtime replay mode enabled, and no
 unsupported profiler or dispatch-cache configuration. An omitted `chunk_size`
 selects 64 for compound submission. Recordable provider actions may enter a
@@ -248,8 +255,9 @@ repeated nested calls retain only that definition's latest invocation. Native CU
 IF/SWITCH execution keeps `Graph.run()` fire-and-continue: selector readback and
 report construction are deferred until `control_flow_stats()` is requested, so
 that diagnostic call is the explicit synchronization point. While reports
-include the selected lowering, logical and executed iterations, observation
-boundaries, predicate/counter/status traces, terminal status, transfer bytes,
+include the selected lowering, logical and executed iterations, encoded and
+masked iteration slots, observation boundaries, predicate/counter/status
+traces, terminal status, transfer bytes,
 and native-upgrade reason. The strict Vulkan outer while report additionally exposes
 `region_path`, `structured_depth`, `nested_region_path`,
 `nested_logical_iterations`, and `nested_encoded_iterations`.
@@ -263,7 +271,8 @@ Portable structured regions use synchronous
 `Graph.run()` and are rejected by `Graph.submit()` rather than being hidden
 behind an asynchronous ticket. CUDA `while_loop`, `if_then_else`, and `switch`
 regions declared with `lowering_mode='native_required'` may use `Graph.submit()`
-when conditional Graph lowering is available. Qualified Vulkan
+when either exact conditional Graph lowering or the bounded masked CUDA Graph
+route is available. Qualified Vulkan
 `native_required` `while_loop` regions may also use `Graph.submit()`; Vulkan
 branches remain portable. Ordered CUDA setters and Vulkan predicate gates
 consume control state without a per-region host readback. After asynchronous

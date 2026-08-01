@@ -766,17 +766,21 @@ storage 和 AOT Graph packet 会明确失败。CPU/CUDA 也会失败关闭，不
 | `GraphBuilder.if_then_else(condition, then_region, *, predicate, control_inputs=(), else_region=None, lowering_mode="auto", name="if")` | 追加固定双分支，只执行被选中的 branch。 |
 | `GraphBuilder.switch(condition, branches, *, selector, control_inputs=(), default_region=None, lowering_mode="auto", name="switch")` | 追加零基固定 branch table，可指定 default。 |
 | `Sequential.while_loop(...)`、`.if_then_else(...)`、`.switch(...)` | 向 condition、body 或 branch `Sequential` 追加一个结构化 child。定义必须形成 single-owner tree。公开结构化控制的最大深度为 2；更深定义、cycle 或跨多个 call site 复用都会在执行前的 region 构造或 Graph 编译阶段失败。 |
-| `Graph.control_flow_stats()` | 返回最近一次 run 的 immutable `GraphWhileReport` / `GraphBranchReport`。重复 nested 调用时，每个静态 definition 只保留最近一次 invocation。报告包含 `region_path` 与 `structured_depth`；满足资格的 Vulkan nested-while outer report 还会提供 `nested_region_path`、`nested_logical_iterations` 与 `nested_encoded_iterations`。原生 CUDA branch report 延迟物化，因此请求该报告是显式同步点。 |
+| `Graph.control_flow_stats()` | 返回最近一次 run 的 immutable `GraphWhileReport` / `GraphBranchReport`。重复 nested 调用时，每个静态 definition 只保留最近一次 invocation。报告包含 `region_path`、`structured_depth` 与 encoded/masked 工作量；满足资格的 Vulkan nested-while outer report 还会提供 `nested_region_path`、`nested_logical_iterations` 与 `nested_encoded_iterations`。原生 CUDA branch report 延迟物化，因此请求该报告是显式同步点。 |
 | `ti.graph.structured_control_capabilities()` | 返回当前 backend 的 schema-v4 portable 与 device-control 合同，分别报告 depth=2 portable 合同、native leaf/nested Vulkan 资格、structured submit、有界 chunk/replay、终态观测、queue-submit 合并与 exact dynamic termination。 |
 
 condition region 在普通 Taichi kernel 中组合多个 device 值；结构化控制不会调用 Python
 callback。Graph 将 `status` 视为用户定义整数，并与 continue predicate 独立报告。即使
 condition 已检查迭代预算，仍必须提供 `max_iterations`。
 
-CPU 在 cached dispatch plan 上使用精确 host control。满足资格的 CUDA `while` 在
-`lowering_mode="auto"` 下使用原生 conditional Graph，否则使用精确 portable replay。
-CUDA 原生条件控制要求 Driver API 12.8 或更高版本，并具备所需 conditional
-symbol/lowering。
+CPU 在 cached dispatch plan 上使用精确 host control。满足资格的 CUDA
+`while`/`if`/`switch` 在编译时选择一条 device-control 路径：Driver API 12.8 或更高版本
+使用原生 conditional Graph；较旧驱动在普通 CUDA Graph capture 可用时使用 Forge 内部
+bounded masked Graph。后者在 device 上 latch selector，一次提交全部有界工作，并使非
+active Taichi task 在 payload side effect 前返回；不做逐轮 host readback，但仍会 issue
+已编码 task node，因此不声明 exact dynamic command termination。单个结构化区域最多编码
+4096 个 dispatch。capability report 会明确区分 `cuda_conditional_graph` 与
+`cuda_masked_bounded_graph`。
 
 `Sequential` 提供相同的 `while`/`if`/`switch` API，因此任一 region kind 都可再包含
 一层结构化控制。depth=2 语义保持精确：CPU 对完整 tree 使用精确 host control；parent
