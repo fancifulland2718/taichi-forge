@@ -307,6 +307,7 @@ jobs:
       - name: Validate installed runtime and shim wheels
         env:
           TI_EXPECTED_COMMIT_HASH: ${{ github.sha }}
+          TI_NATIVE_RUNTIME_LOAD_TRACE: "1"
         run: |
           set -euo pipefail
           python scripts/validate_shim_wheel.py \
@@ -314,9 +315,10 @@ jobs:
           python -m pip install --force-reinstall --only-binary=:all: runtime-wheel/*.whl wheelhouse/*.whl
           python -m pip check
           cd /tmp
-          python -I "$GITHUB_WORKSPACE/scripts/validate_installed_runtime.py"
+          python -I -u -X faulthandler "$GITHUB_WORKSPACE/scripts/validate_installed_runtime.py"
 
       - name: Upload artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: wheel-linux-py${{ matrix.python }}
@@ -477,6 +479,7 @@ jobs:
       - name: Validate installed runtime and shim wheels
         env:
           TI_EXPECTED_COMMIT_HASH: ${{ github.sha }}
+          TI_NATIVE_RUNTIME_LOAD_TRACE: "1"
         shell: pwsh
         run: |
           python scripts/validate_shim_wheel.py `
@@ -487,12 +490,13 @@ jobs:
           python -m pip check
           Push-Location $env:TEMP
           try {
-            python -I "$env:GITHUB_WORKSPACE\scripts\validate_installed_runtime.py"
+            python -I -u -X faulthandler "$env:GITHUB_WORKSPACE\scripts\validate_installed_runtime.py"
           } finally {
             Pop-Location
           }
 
       - name: Upload artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: wheel-windows-py${{ matrix.python }}

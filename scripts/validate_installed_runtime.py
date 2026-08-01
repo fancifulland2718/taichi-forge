@@ -1,17 +1,33 @@
 #!/usr/bin/env python3
 """Validate an installed taichi-forge runtime/shim wheel pair."""
 
+import faulthandler
+import importlib
 import os
 import platform
 import re
+import sys
 import tempfile
 from importlib import metadata
 from importlib.util import find_spec
 from pathlib import Path
 
-import numpy as np
 
-import taichi_forge as ti
+faulthandler.enable(all_threads=True)
+
+
+def _checkpoint(stage: str) -> None:
+    print(f"[installed-runtime] {stage}", file=sys.stderr, flush=True)
+
+
+_checkpoint("import numpy: start")
+np = importlib.import_module("numpy")
+
+_checkpoint("import numpy: passed")
+
+_checkpoint("import taichi_forge: start")
+ti = importlib.import_module("taichi_forge")
+_checkpoint("import taichi_forge: passed")
 
 
 def _validate_distribution_versions() -> str:
@@ -148,11 +164,14 @@ def _validate_packaged_cuda_runtime() -> tuple[Path | None, int | None]:
 
 def _validate_cpu_native_ad() -> None:
     n = 8
+    _checkpoint("cpu native AD: init")
     ti.init(arch=ti.cpu)
+    _checkpoint("cpu native AD: allocate")
     x = ti.ndarray(ti.f32, shape=n, needs_grad=True)
     y = ti.ndarray(ti.f32, shape=n, needs_grad=True)
     loss = ti.field(ti.f32, shape=(), needs_grad=True)
     x.from_numpy(np.arange(n, dtype=np.float32))
+    _checkpoint("cpu native AD: input upload passed")
 
     @ti.kernel
     def sum_output(values: ti.types.ndarray(dtype=ti.f32, ndim=1)):
@@ -165,8 +184,11 @@ def _validate_cpu_native_ad() -> None:
         )
         sum_output(y)
 
+    _checkpoint("cpu native AD: forward and backward passed")
     np.testing.assert_allclose(x.grad.to_numpy(), np.full(n, 2.5, np.float32))
+    _checkpoint("cpu native AD: gradient readback passed")
     ti.reset()
+    _checkpoint("cpu native AD: reset passed")
 
 
 def _validate_cpu_field_roundtrips() -> None:
@@ -176,6 +198,8 @@ def _validate_cpu_field_roundtrips() -> None:
         prefix="taichi-forge-wheel-cache-"
     ) as cache_dir:
         for threads, offline_cache in ((1, False), (0, True)):
+            mode = f"threads={threads or 'default'}, offline_cache={offline_cache}"
+            _checkpoint(f"cpu field roundtrip ({mode}): init")
             init_options = {
                 "arch": ti.cpu,
                 "offline_cache": offline_cache,
@@ -184,6 +208,7 @@ def _validate_cpu_field_roundtrips() -> None:
             if threads:
                 init_options["cpu_max_num_threads"] = threads
             ti.init(**init_options)
+            _checkpoint(f"cpu field roundtrip ({mode}): init passed")
 
             scalar32 = ti.field(ti.f32, shape=())
             scalar64 = ti.field(ti.f64, shape=())
@@ -220,28 +245,37 @@ def _validate_cpu_field_roundtrips() -> None:
                     ti.atomic_add(atomic64[None], values64[i])
 
             store_fields()
+            _checkpoint(f"cpu field roundtrip ({mode}): kernel store passed")
             expected32 = np.arange(7, dtype=np.float32) * 0.5 - 1.0
             expected64 = np.arange(7, dtype=np.float64) * 0.25 - 0.5
             np.testing.assert_array_equal(values32.to_numpy(), expected32)
+            _checkpoint(f"cpu field roundtrip ({mode}): f32 readback passed")
             np.testing.assert_array_equal(values64.to_numpy(), expected64)
+            _checkpoint(f"cpu field roundtrip ({mode}): f64 readback passed")
             assert scalar32[None] == np.float32(3.25)
             assert scalar64[None] == np.float64(7.5)
             assert one32[0] == np.float32(-2.0)
+            _checkpoint(f"cpu field roundtrip ({mode}): scalar access passed")
             expected_return = (
                 7.5 + 3.25 - 2.0 + expected32.sum() + expected64.sum()
             )
             np.testing.assert_allclose(
                 read_fields(), expected_return, rtol=0, atol=1e-12
             )
+            _checkpoint(f"cpu field roundtrip ({mode}): kernel read passed")
 
             replacement32 = np.linspace(-3.0, 3.0, 7, dtype=np.float32)
             replacement64 = np.linspace(-1.5, 1.5, 7, dtype=np.float64)
             values32.from_numpy(replacement32)
+            _checkpoint(f"cpu field roundtrip ({mode}): f32 upload passed")
             values64.from_numpy(replacement64)
+            _checkpoint(f"cpu field roundtrip ({mode}): f64 upload passed")
             np.testing.assert_array_equal(values32.to_numpy(), replacement32)
             np.testing.assert_array_equal(values64.to_numpy(), replacement64)
+            _checkpoint(f"cpu field roundtrip ({mode}): replacement readback passed")
 
             reduce_f64()
+            _checkpoint(f"cpu field roundtrip ({mode}): f64 reductions passed")
             expected_sum = replacement64.sum(dtype=np.float64)
             np.testing.assert_allclose(
                 serial64[None], expected_sum, rtol=0, atol=1e-12
@@ -250,14 +284,21 @@ def _validate_cpu_field_roundtrips() -> None:
                 atomic64[None], expected_sum, rtol=0, atol=1e-12
             )
             ti.reset()
+            _checkpoint(f"cpu field roundtrip ({mode}): reset passed")
 
 
 def main() -> None:
+    _checkpoint("distribution versions: start")
     version = _validate_distribution_versions()
+    _checkpoint(f"distribution versions: passed ({version})")
     commit = _validate_build_identity()
+    _checkpoint(f"native build identity: passed ({commit})")
     cudart, cudart_major = _validate_packaged_cuda_runtime()
+    _checkpoint("packaged CUDA runtime: passed")
     _validate_cpu_field_roundtrips()
+    _checkpoint("cpu field roundtrips: passed")
     _validate_cpu_native_ad()
+    _checkpoint("cpu native AD: passed")
     if cudart is None:
         dependency = "driver-only; bundled CUDART=none"
     else:
