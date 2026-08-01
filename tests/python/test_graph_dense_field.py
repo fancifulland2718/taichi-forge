@@ -190,8 +190,9 @@ def test_vulkan_dense_field_multi_tree_graph_records_and_replays():
     }
     assert graph.execution_stats().execution_path == "not_run"
 
-    # Populate all eight fixed replay slots, synchronize so slot zero is
-    # reusable, then prove the ninth launch replays its recorded command list.
+    # Exercise the bounded replay ring, then synchronize and prove that the
+    # next launch reuses a recorded command list. Short command lists may
+    # complete early enough to reuse a slot before all eight are materialized.
     for _ in range(8):
         graph.run({})
     ti.sync()
@@ -201,8 +202,9 @@ def test_vulkan_dense_field_multi_tree_graph_records_and_replays():
     stats = graph._graph_stats[0]
     assert stats["backend"] == "vulkan"
     assert stats["attempts"] == 9
-    assert stats["records"] == 8
-    assert stats["replays"] == 1
+    assert 1 <= stats["records"] <= 8
+    assert stats["replays"] >= 1
+    assert stats["records"] + stats["replays"] == 9
     assert stats["ordinary_fallbacks"] == 0
     assert stats["last_path"] == "vulkan_replay"
     assert stats["last_fallback_reason"] == "none"
@@ -244,7 +246,7 @@ def test_dense_field_graph_execution_report_explains_backend_path():
 
     initial = graph.execution_stats()
     assert isinstance(initial, ti.graph.GraphExecutionReport)
-    assert initial.schema_version == 1
+    assert initial.schema_version == 4
     assert initial.lifecycle_state == "ready"
     assert initial.node_count == 1
     assert initial.cgraph_segment_count == 1
@@ -289,8 +291,9 @@ def test_dense_field_graph_execution_report_explains_backend_path():
         assert report.backend_graph_segments == 1
         assert report.backend_replay_segments == 1
         assert report.ordinary_fallback_segments == 0
-        assert segment.counters.records == 8
-        assert segment.counters.replays == 1
+        assert 1 <= segment.counters.records <= 8
+        assert segment.counters.replays >= 1
+        assert segment.counters.records + segment.counters.replays == run_count
     else:
         assert report.execution_path == "ordinary"
         assert report.backend_graph_segments == 0

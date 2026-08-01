@@ -38,6 +38,7 @@ def test_graph_run_serializes_the_complete_dispatch_loop():
     """Two callers must not interleave nodes inside one Graph.run()."""
 
     from taichi_forge.graph._graph import Graph, _GraphSpec
+    from taichi_forge.graph._ir import DispatchNode
 
     trace = []
     trace_lock = threading.Lock()
@@ -52,8 +53,9 @@ def test_graph_run_serializes_the_complete_dispatch_loop():
 
         def __init__(self, index):
             self.index = index
+            self.ir_node = DispatchNode(name=f"recording_{index}")
 
-        def run(self, context):
+        def run(self, context, temporaries=None):
             nonlocal first_node_calls
             thread_id = threading.get_ident()
             with trace_lock:
@@ -90,6 +92,7 @@ def test_graph_invalidation_waits_for_an_active_invocation():
     """Invalidation must not clear an instance while its run is active."""
 
     from taichi_forge.graph._graph import Graph, _GraphSpec
+    from taichi_forge.graph._ir import DispatchNode
     from taichi_forge.lang.exception import TaichiRuntimeError
 
     entered = threading.Event()
@@ -102,8 +105,9 @@ def test_graph_invalidation_waits_for_an_active_invocation():
         runtime_arg_names = frozenset()
         snode_tree_dependencies = frozenset()
         snode_tree_dependency_info = frozenset()
+        ir_node = DispatchNode(name="blocking")
 
-        def run(self, context):
+        def run(self, context, temporaries=None):
             entered.set()
             if not release.wait(timeout=5):
                 raise RuntimeError("test did not release the active graph run")
