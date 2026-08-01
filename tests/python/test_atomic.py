@@ -47,6 +47,17 @@ def test_atomic_add_global_f32():
     run_atomic_add_global_case(ti.f32, 4.2, valproc=lambda x: test_utils.approx(x, rel=1e-5))
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], require=ti.extension.data64)
+def test_atomic_add_global_f64():
+    # A binary-exact increment isolates f64 atomic lowering from rounding-order
+    # differences between serial CPU and parallel CUDA execution.
+    run_atomic_add_global_case(
+        ti.f64,
+        0.25,
+        valproc=lambda x: test_utils.approx(x, rel=0.0, abs=1e-12),
+    )
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda])
 def test_atomic_min_max_uint():
     x = ti.field(ti.u64, shape=100)

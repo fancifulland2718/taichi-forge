@@ -87,3 +87,52 @@ def test_transpose_no_loop():
 
     run()
     # As long as it passes compilation we are good
+
+
+_SVD_3D_EDGE_CASES = (
+    np.eye(3, dtype=np.float32),
+    np.array(
+        [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+        dtype=np.float32,
+    ),
+    np.diag(np.array([0.25, 1.5, 3.0], dtype=np.float32)),
+    np.array(
+        [[1.0, 0.75, -0.25], [0.0, 1.0, 0.5], [0.0, 0.0, 1.0]],
+        dtype=np.float32,
+    ),
+    np.diag(np.array([0.2, 0.2, 0.2], dtype=np.float32)),
+    np.diag(np.array([-1.0, 1.5, 0.75], dtype=np.float32)),
+    np.diag(np.array([1.0e-5, 1.0, 2.0], dtype=np.float32)),
+    np.diag(np.array([1.0, 1.0, 2.0], dtype=np.float32)),
+    np.array(
+        [[1.0, 2.0e-5, 0.0], [-1.0e-5, 1.00002, 0.0], [0.0, 0.0, 2.0]],
+        dtype=np.float32,
+    ),
+)
+
+
+@pytest.mark.parametrize("matrix", _SVD_3D_EDGE_CASES)
+@test_utils.test(default_fp=ti.f32, fast_math=False)
+def test_svd_3d_primal_edge_cases(matrix):
+    source = ti.Matrix.field(3, 3, dtype=ti.f32, shape=())
+    u = ti.Matrix.field(3, 3, dtype=ti.f32, shape=())
+    sigma = ti.Matrix.field(3, 3, dtype=ti.f32, shape=())
+    v = ti.Matrix.field(3, 3, dtype=ti.f32, shape=())
+
+    @ti.kernel
+    def run():
+        u[None], sigma[None], v[None] = ti.svd(source[None], ti.f32)
+
+    source[None] = matrix
+    run()
+    u_np = u.to_numpy()
+    sigma_np = sigma.to_numpy()
+    v_np = v.to_numpy()
+    reconstructed = u_np @ sigma_np @ v_np.T
+
+    assert np.isfinite(u_np).all()
+    assert np.isfinite(sigma_np).all()
+    assert np.isfinite(v_np).all()
+    np.testing.assert_allclose(u_np.T @ u_np, np.eye(3), rtol=2e-4, atol=2e-4)
+    np.testing.assert_allclose(v_np.T @ v_np, np.eye(3), rtol=2e-4, atol=2e-4)
+    np.testing.assert_allclose(reconstructed, matrix, rtol=2e-4, atol=2e-4)
