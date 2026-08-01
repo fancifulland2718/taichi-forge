@@ -271,12 +271,27 @@ def get_os_name():
     assert False, f"Unknown platform name {name}"
 
 
+def _python_core_dlopen_flags():
+    flags = getattr(os, "RTLD_NOW", 2)
+    if not _native_runtime_loaded:
+        flags |= getattr(os, "RTLD_DEEPBIND", 8)
+    return flags
+
+
 def import_ti_python_core():
     _prepare_native_runtime()
+    old_flags = None
     if get_os_name() != "win":
         # pylint: disable=E1101
         old_flags = sys.getdlopenflags()
-        sys.setdlopenflags(2 | 8)  # RTLD_NOW | RTLD_DEEPBIND
+        dlopen_flags = _python_core_dlopen_flags()
+        _native_load_trace(f"pybind shim dlopen flags: {dlopen_flags}")
+        # A split runtime already provides the process-wide C++ symbol domain
+        # through RTLD_GLOBAL. RTLD_DEEPBIND would instead prefer duplicate
+        # weak/inline definitions from the shim and can split C++ singleton
+        # and type state across the two DSOs. Keep DEEPBIND only for the
+        # historical monolithic import path.
+        sys.setdlopenflags(dlopen_flags)
     else:
         pyddir = os.path.dirname(os.path.realpath(__file__))
         os.environ["PATH"] += os.pathsep + pyddir
@@ -295,9 +310,9 @@ def import_ti_python_core():
                 # pylint: disable=E1101
                 e.msg += "\nConsider installing Microsoft Visual C++ Redistributable: https://aka.ms/vs/16/release/vc_redist.x64.exe"
         raise e from None
-
-    if get_os_name() != "win":
-        sys.setdlopenflags(old_flags)  # pylint: disable=E1101
+    finally:
+        if old_flags is not None:
+            sys.setdlopenflags(old_flags)  # pylint: disable=E1101
     lib_dir = _runtime_bitcode_dir()
     core.set_lib_dir(locale_encode(lib_dir))
     return core

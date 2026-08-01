@@ -612,6 +612,22 @@ def test_shim_retains_explicit_linux_runtime_handle(monkeypatch, tmp_path):
     ]
 
 
+def test_split_runtime_dlopen_flags_omit_deepbind(monkeypatch):
+    monkeypatch.setattr(runtime_utils, "_native_runtime_loaded", True)
+
+    assert runtime_utils._python_core_dlopen_flags() == getattr(
+        os, "RTLD_NOW", 2
+    )
+
+
+def test_monolithic_dlopen_flags_keep_deepbind(monkeypatch):
+    monkeypatch.setattr(runtime_utils, "_native_runtime_loaded", False)
+
+    assert runtime_utils._python_core_dlopen_flags() == (
+        getattr(os, "RTLD_NOW", 2) | getattr(os, "RTLD_DEEPBIND", 8)
+    )
+
+
 def test_shim_rejects_conflicting_runtime_manifests(monkeypatch, tmp_path):
     first = tmp_path / "first"
     second = tmp_path / "second"
