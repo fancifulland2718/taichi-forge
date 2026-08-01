@@ -137,6 +137,14 @@ class CompiledKernelData {
     return kernel_launch_handle_;
   }
 
+  void set_graph_masked_handle(const KernelLaunchHandle &handle) const {
+    graph_masked_launch_handle_ = handle;
+  }
+
+  const std::optional<KernelLaunchHandle> &get_graph_masked_handle() const {
+    return graph_masked_launch_handle_;
+  }
+
   static std::unique_ptr<CompiledKernelData> load(std::istream &is, Err *p_err);
 
   static std::string get_err_msg(Err err);
@@ -153,6 +161,10 @@ class CompiledKernelData {
   static std::unique_ptr<CompiledKernelData> create(Arch arch, Err &err);
 
   mutable std::optional<KernelLaunchHandle> kernel_launch_handle_;
+  // Internal CUDA Graph masking uses a separately compiled entry-gated
+  // variant. Its handle belongs to the same compiled-kernel lifetime and must
+  // not be cached by a reusable raw object address.
+  mutable std::optional<KernelLaunchHandle> graph_masked_launch_handle_;
 };
 
 }  // namespace taichi::lang

@@ -6,8 +6,66 @@
 #include <cstdint>
 #include <unordered_map>
 
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Verifier.h"
+
 namespace taichi::lang {
 namespace cuda {
+
+namespace {
+
+void add_cuda_graph_execution_gate(LLVMCompiledKernel &compiled) {
+  TI_ASSERT(compiled.module != nullptr);
+  auto &module = *compiled.module;
+  auto &llvm_context = module.getContext();
+  auto *pointer_type = llvm::PointerType::get(llvm_context, 0);
+  auto *i8_type = llvm::Type::getInt8Ty(llvm_context);
+  auto *i32_type = llvm::Type::getInt32Ty(llvm_context);
+  auto *i64_type = llvm::Type::getInt64Ty(llvm_context);
+
+  for (const auto &task : compiled.tasks) {
+    auto *function = module.getFunction(task.name);
+    TI_ASSERT(function != nullptr && !function->empty());
+    TI_ASSERT(function->getReturnType()->isVoidTy());
+    TI_ASSERT(function->arg_size() == 1);
+    auto *original_entry = &function->getEntryBlock();
+    auto *gate_entry = llvm::BasicBlock::Create(
+        llvm_context, "graph_execution_gate", function, original_entry);
+    auto *masked_exit = llvm::BasicBlock::Create(
+        llvm_context, "graph_execution_masked_exit", function, original_entry);
+    llvm::IRBuilder<> builder(gate_entry);
+    // RuntimeContext::arg_buffer is its first member. The private gated launch
+    // allocation stores GraphExecutionGateBinding immediately before that
+    // pointer, so the variant can inline the test without adding a runtime
+    // bitcode symbol or changing RuntimeContext's split-wheel ABI.
+    auto *arg_buffer = builder.CreateAlignedLoad(
+        pointer_type, function->getArg(0), llvm::Align(8), "graph_args");
+    auto *binding = builder.CreateInBoundsGEP(
+        i8_type, arg_buffer,
+        llvm::ConstantInt::getSigned(
+            i64_type,
+            -static_cast<std::int64_t>(sizeof(GraphExecutionGateBinding))),
+        "graph_gate_binding");
+    auto *gate_bits = builder.CreateAlignedLoad(
+        i64_type, binding, llvm::Align(8), "graph_gate_address");
+    auto *expected_address = builder.CreateInBoundsGEP(
+        i8_type, binding,
+        llvm::ConstantInt::get(i64_type,
+                               offsetof(GraphExecutionGateBinding, expected)));
+    auto *expected = builder.CreateAlignedLoad(
+        i32_type, expected_address, llvm::Align(4), "graph_gate_expected");
+    auto *gate = builder.CreateIntToPtr(gate_bits, pointer_type);
+    auto *value = builder.CreateAlignedLoad(i32_type, gate, llvm::Align(4),
+                                            "graph_gate_value");
+    auto *execute = builder.CreateICmpEQ(value, expected);
+    builder.CreateCondBr(execute, original_entry, masked_exit);
+    builder.SetInsertPoint(masked_exit);
+    builder.CreateRetVoid();
+  }
+  TI_ASSERT(!llvm::verifyModule(module, &llvm::errs()));
+}
+
+}  // namespace
 
 bool KernelLauncher::on_cuda_device(void *ptr) {
   unsigned int attr_val = 0;
@@ -251,6 +309,8 @@ bool KernelLauncher::prepare_cuda_graph_launch(Handle handle,
   }
   packet.handle = handle;
   packet.arg_buffer_size = ctx.arg_buffer_size;
+  packet.arg_buffer_prefix_size = 0;
+  packet.device_arg_buffer_size = packet.arg_buffer_size;
   packet.context = context;
   if (packet.arg_buffer_size == 0) {
     // A Field-only graph has no runtime argument storage. The RuntimeContext
@@ -266,6 +326,43 @@ bool KernelLauncher::prepare_cuda_graph_launch(Handle handle,
       packet.device_arg_buffer, packet.context.arg_buffer,
       packet.arg_buffer_size, stream);
   packet.context.arg_buffer = static_cast<char *>(packet.device_arg_buffer);
+  return true;
+}
+
+bool KernelLauncher::prepare_cuda_graph_gated_launch(Handle handle,
+                                                     LaunchContextBuilder &ctx,
+                                                     GraphLaunchPacket &packet,
+                                                     void *gate,
+                                                     std::uint32_t expected,
+                                                     void *stream) {
+  if (gate == nullptr || expected == 0) {
+    return false;
+  }
+  RuntimeContext context;
+  if (!prepare_cuda_graph_context(handle, ctx, context)) {
+    return false;
+  }
+
+  GraphExecutionGateBinding binding;
+  binding.gate = reinterpret_cast<std::uintptr_t>(gate);
+  binding.expected = expected;
+  packet.handle = handle;
+  packet.arg_buffer_size = ctx.arg_buffer_size;
+  packet.arg_buffer_prefix_size = sizeof(binding);
+  packet.device_arg_buffer_size =
+      packet.arg_buffer_prefix_size + packet.arg_buffer_size;
+  packet.context = context;
+  CUDADriver::get_instance().malloc_async(
+      &packet.device_arg_buffer, packet.device_arg_buffer_size, stream);
+  CUDADriver::get_instance().memcpy_host_to_device_async(
+      packet.device_arg_buffer, &binding, sizeof(binding), stream);
+  auto *device_args = static_cast<char *>(packet.device_arg_buffer) +
+                      packet.arg_buffer_prefix_size;
+  if (packet.arg_buffer_size > 0) {
+    CUDADriver::get_instance().memcpy_host_to_device_async(
+        device_args, packet.context.arg_buffer, packet.arg_buffer_size, stream);
+  }
+  packet.context.arg_buffer = device_args;
   return true;
 }
 
@@ -287,11 +384,16 @@ bool KernelLauncher::update_cuda_graph_launch(
   }
 
   if (packet.arg_buffer_size == 0) {
-    if (packet.device_arg_buffer != nullptr ||
-        packet.context.arg_buffer != nullptr) {
+    if (packet.arg_buffer_prefix_size == 0) {
+      if (packet.device_arg_buffer != nullptr ||
+          packet.context.arg_buffer != nullptr) {
+        return false;
+      }
+    } else if (packet.device_arg_buffer == nullptr ||
+               packet.context.arg_buffer == nullptr ||
+               packet.device_arg_buffer_size != packet.arg_buffer_prefix_size) {
       return false;
     }
-    context.arg_buffer = nullptr;
     host_arg_buffer.clear();
     return true;
   }
@@ -302,9 +404,10 @@ bool KernelLauncher::update_cuda_graph_launch(
   host_arg_buffer.resize(packet.arg_buffer_size);
   std::memcpy(host_arg_buffer.data(), context.arg_buffer,
               packet.arg_buffer_size);
+  auto *device_args = static_cast<char *>(packet.device_arg_buffer) +
+                      packet.arg_buffer_prefix_size;
   CUDADriver::get_instance().memcpy_host_to_device_async(
-      packet.device_arg_buffer, host_arg_buffer.data(),
-      packet.arg_buffer_size, stream);
+      device_args, host_arg_buffer.data(), packet.arg_buffer_size, stream);
   return true;
 }
 
@@ -584,6 +687,33 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
     compiled.set_handle(handle);
   }
   return *compiled.get_handle();
+}
+
+KernelLauncher::Handle KernelLauncher::register_llvm_kernel_graph_gated(
+    const LLVM::CompiledKernelData &compiled) {
+  TI_ASSERT(compiled.arch() == Arch::cuda);
+  std::unique_lock<std::shared_mutex> lock(registration_mutex());
+  if (compiled.get_graph_masked_handle()) {
+    return *compiled.get_graph_masked_handle();
+  }
+
+  auto handle = make_handle();
+  auto ctx = std::make_shared<Context>();
+  auto *executor = get_runtime_executor();
+  auto data = compiled.get_internal_data().compiled_data.clone();
+  add_cuda_graph_execution_gate(data);
+  auto parameters = compiled.get_internal_data().args;
+  auto *jit_module = executor->create_jit_module(std::move(data.module));
+
+  ctx->jit_module = jit_module;
+  ctx->snode_tree_ids = compiled.snode_tree_ids();
+  ctx->parameters = std::move(parameters);
+  ctx->offloaded_tasks = std::move(data.tasks);
+  const bool inserted =
+      contexts_.emplace(handle.get_launch_id(), std::move(ctx)).second;
+  TI_ASSERT(inserted);
+  compiled.set_graph_masked_handle(handle);
+  return handle;
 }
 
 void KernelLauncher::retire_snode_tree(int tree_id) {

@@ -3713,6 +3713,12 @@ OperatorBackendExecutionPath graph_action_backend_path(
       return OperatorBackendExecutionPath::cuda_exact_replay;
     case aot::CompiledGraphExecutionPath::cuda_patched_replay:
       return OperatorBackendExecutionPath::cuda_patched_replay;
+    case aot::CompiledGraphExecutionPath::cuda_masked_capture:
+      return OperatorBackendExecutionPath::cuda_capture;
+    case aot::CompiledGraphExecutionPath::cuda_masked_replay:
+      return OperatorBackendExecutionPath::cuda_exact_replay;
+    case aot::CompiledGraphExecutionPath::cuda_masked_patched_replay:
+      return OperatorBackendExecutionPath::cuda_patched_replay;
     case aot::CompiledGraphExecutionPath::vulkan_record:
       return OperatorBackendExecutionPath::vulkan_record;
     case aot::CompiledGraphExecutionPath::vulkan_replay:

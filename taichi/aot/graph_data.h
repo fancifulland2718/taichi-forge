@@ -302,6 +302,9 @@ enum class CompiledGraphExecutionPath : uint8_t {
   cuda_capture,
   cuda_exact_replay,
   cuda_patched_replay,
+  cuda_masked_capture,
+  cuda_masked_replay,
+  cuda_masked_patched_replay,
   vulkan_record,
   vulkan_replay,
   vulkan_patched_replay,
@@ -335,6 +338,9 @@ struct CompiledGraphStats {
   uint64_t captures{0};
   uint64_t exact_replays{0};
   uint64_t patched_replays{0};
+  uint64_t masked_captures{0};
+  uint64_t masked_replays{0};
+  uint64_t masked_patched_replays{0};
   uint64_t recaptures{0};
   uint64_t records{0};
   uint64_t replays{0};
@@ -570,6 +576,13 @@ struct TI_DLL_EXPORT CompiledGraph {
       Ndarray *predicate,
       int max_iterations,
       bool continue_while_nonzero) const;
+  bool jit_run_bounded_cuda_masked_cached(
+      const CompileConfig &compile_config,
+      const std::unordered_map<std::string, IValue> &args,
+      CompiledGraphJITCache &cache,
+      Ndarray *predicate,
+      int max_iterations,
+      bool continue_while_nonzero) const;
   CompiledGraphStructuredResult jit_run_bounded_vulkan_cached(
       const CompileConfig &compile_config,
       const std::unordered_map<std::string, IValue> &args,
@@ -611,6 +624,14 @@ struct TI_DLL_EXPORT CompiledGraph {
       int inner_max_iterations,
       int inner_chunk_size) const;
   bool jit_run_conditional_cuda_cached(
+      const CompileConfig &compile_config,
+      const std::unordered_map<std::string, IValue> &args,
+      CompiledGraphJITCache &cache,
+      Ndarray *selector,
+      const std::vector<int> &branch_dispatch_counts,
+      int conditional_type,
+      int default_branch) const;
+  bool jit_run_conditional_cuda_masked_cached(
       const CompileConfig &compile_config,
       const std::unordered_map<std::string, IValue> &args,
       CompiledGraphJITCache &cache,

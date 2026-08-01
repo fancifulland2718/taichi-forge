@@ -3479,7 +3479,8 @@ void export_lang(py::module &m) {
                            const std::vector<std::uint32_t>
                                *vulkan_chunk_strategies = nullptr,
                            const VulkanNestedGraphRequest
-                               *vulkan_nested = nullptr) -> bool {
+                               *vulkan_nested = nullptr,
+                           bool cuda_masked_control = false) -> bool {
         std::unordered_map<std::string, aot::IValue> args;
         auto insert_scalar_arg = [&args](std::string arg_name,
                                          DataType expected_dtype,
@@ -3655,16 +3656,26 @@ void export_lang(py::module &m) {
         }
         if (bounded_predicate != nullptr) {
           TI_ASSERT(cache != nullptr);
-          return self->jit_run_bounded_cuda_cached(
-              compile_config, args, *cache, bounded_predicate,
-              bounded_max_iterations, continue_while_nonzero);
+          return cuda_masked_control
+                     ? self->jit_run_bounded_cuda_masked_cached(
+                           compile_config, args, *cache, bounded_predicate,
+                           bounded_max_iterations, continue_while_nonzero)
+                     : self->jit_run_bounded_cuda_cached(
+                           compile_config, args, *cache, bounded_predicate,
+                           bounded_max_iterations, continue_while_nonzero);
         }
         if (conditional_selector != nullptr) {
           TI_ASSERT(cache != nullptr);
           TI_ASSERT(branch_dispatch_counts != nullptr);
-          return self->jit_run_conditional_cuda_cached(
-              compile_config, args, *cache, conditional_selector,
-              *branch_dispatch_counts, conditional_type, default_branch);
+          return cuda_masked_control
+                     ? self->jit_run_conditional_cuda_masked_cached(
+                           compile_config, args, *cache,
+                           conditional_selector, *branch_dispatch_counts,
+                           conditional_type, default_branch)
+                     : self->jit_run_conditional_cuda_cached(
+                           compile_config, args, *cache,
+                           conditional_selector, *branch_dispatch_counts,
+                           conditional_type, default_branch);
         }
         if (vulkan_predicate != nullptr) {
           TI_ASSERT(cache != nullptr);
@@ -3716,6 +3727,12 @@ void export_lang(py::module &m) {
               return "cuda_exact_replay";
             case aot::CompiledGraphExecutionPath::cuda_patched_replay:
               return "cuda_patched_replay";
+            case aot::CompiledGraphExecutionPath::cuda_masked_capture:
+              return "cuda_masked_capture";
+            case aot::CompiledGraphExecutionPath::cuda_masked_replay:
+              return "cuda_masked_replay";
+            case aot::CompiledGraphExecutionPath::cuda_masked_patched_replay:
+              return "cuda_masked_patched_replay";
             case aot::CompiledGraphExecutionPath::vulkan_record:
               return "vulkan_record";
             case aot::CompiledGraphExecutionPath::vulkan_replay:
@@ -3765,6 +3782,9 @@ void export_lang(py::module &m) {
         result["captures"] = stats.captures;
         result["exact_replays"] = stats.exact_replays;
         result["patched_replays"] = stats.patched_replays;
+        result["masked_captures"] = stats.masked_captures;
+        result["masked_replays"] = stats.masked_replays;
+        result["masked_patched_replays"] = stats.masked_patched_replays;
         result["recaptures"] = stats.recaptures;
         result["records"] = stats.records;
         result["replays"] = stats.replays;
@@ -3938,6 +3958,24 @@ void export_lang(py::module &m) {
              return jit_run_graph(
                  self, compile_config, pyargs, &cache, &predicate,
                  max_iterations, continue_while_nonzero);
+           },
+           py::arg("compile_config"), py::arg("args"),
+           py::arg("cache"), py::arg("predicate"),
+           py::arg("max_iterations"),
+           py::arg("continue_while_nonzero"))
+      .def("jit_run_bounded_cuda_masked_cached",
+           [jit_run_graph](aot::CompiledGraph *self,
+                           const CompileConfig &compile_config,
+                           const py::dict &pyargs,
+                           aot::CompiledGraphJITCache &cache,
+                           Ndarray &predicate, int max_iterations,
+                           bool continue_while_nonzero) {
+             return jit_run_graph(
+                 self, compile_config, pyargs, &cache, &predicate,
+                 max_iterations, continue_while_nonzero, nullptr, nullptr,
+                 -1, -1, nullptr, nullptr, nullptr, 0, true, 0, nullptr,
+                 true, nullptr, nullptr, nullptr,
+                 /*cuda_masked_control=*/true);
            },
            py::arg("compile_config"), py::arg("args"),
            py::arg("cache"), py::arg("predicate"),
@@ -4171,6 +4209,24 @@ void export_lang(py::module &m) {
                  self, compile_config, pyargs, &cache, nullptr, 0, true,
                  &selector, &branch_dispatch_counts, conditional_type,
                  default_branch);
+           },
+           py::arg("compile_config"), py::arg("args"), py::arg("cache"),
+           py::arg("selector"), py::arg("branch_dispatch_counts"),
+           py::arg("conditional_type"), py::arg("default_branch") = -1)
+      .def("jit_run_conditional_cuda_masked_cached",
+           [jit_run_graph](aot::CompiledGraph *self,
+                           const CompileConfig &compile_config,
+                           const py::dict &pyargs,
+                           aot::CompiledGraphJITCache &cache,
+                           Ndarray &selector,
+                           const std::vector<int> &branch_dispatch_counts,
+                           int conditional_type, int default_branch) {
+             return jit_run_graph(
+                 self, compile_config, pyargs, &cache, nullptr, 0, true,
+                 &selector, &branch_dispatch_counts, conditional_type,
+                 default_branch, nullptr, nullptr, nullptr, 0, true, 0,
+                 nullptr, true, nullptr, nullptr, nullptr,
+                 /*cuda_masked_control=*/true);
            },
            py::arg("compile_config"), py::arg("args"), py::arg("cache"),
            py::arg("selector"), py::arg("branch_dispatch_counts"),

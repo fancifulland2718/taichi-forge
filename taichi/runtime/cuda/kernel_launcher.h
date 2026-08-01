@@ -43,11 +43,19 @@ class KernelLauncher : public LLVM::KernelLauncher {
     RuntimeContext context;
     void *device_arg_buffer{nullptr};
     std::size_t arg_buffer_size{0};
+    std::size_t device_arg_buffer_size{0};
+    std::size_t arg_buffer_prefix_size{0};
   };
 
   void launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx) override;
   Handle register_llvm_kernel(
       const LLVM::CompiledKernelData &compiled) override;
+  // Register a private variant whose offloaded task entries uniformly test a
+  // device gate before executing. The source kernel and ordinary registration
+  // remain untouched, so only internal masked CUDA Graph replay pays the
+  // branch cost.
+  Handle register_llvm_kernel_graph_gated(
+      const LLVM::CompiledKernelData &compiled);
   void retire_snode_tree(int tree_id) override;
   std::size_t debug_registered_kernel_count() override;
   void debug_reset_sparse_listgen_statistics() override;
@@ -57,6 +65,12 @@ class KernelLauncher : public LLVM::KernelLauncher {
                                  LaunchContextBuilder &ctx,
                                  GraphLaunchPacket &packet,
                                  void *stream);
+  bool prepare_cuda_graph_gated_launch(Handle handle,
+                                       LaunchContextBuilder &ctx,
+                                       GraphLaunchPacket &packet,
+                                       void *gate,
+                                       std::uint32_t expected,
+                                       void *stream);
   bool update_cuda_graph_launch(const GraphLaunchPacket &packet,
                                 LaunchContextBuilder &ctx,
                                 std::vector<uint8_t> &host_arg_buffer,

@@ -237,6 +237,14 @@ void export_misc(py::module &m) {
         taichi::lang::cuda::driver_cg_conditional_setter_compiled();
     const bool graph_setter_compiled =
         taichi::lang::cuda::driver_graph_conditional_setter_compiled();
+    const bool ordinary_graph_symbols_loaded =
+        driver_loaded && driver.stream_begin_capture.available() &&
+        driver.stream_end_capture.available() &&
+        driver.graph_instantiate_with_flags.available() &&
+        driver.graph_launch.available() && driver.graph_destroy.available() &&
+        driver.graph_exec_destroy.available();
+    const bool masked_latch_compiled =
+        taichi::lang::cuda::driver_graph_mask_latch_compiled();
     auto &cublas = taichi::lang::CUBLASDriver::get_instance();
     const bool cublas_loaded =
         cublas.is_loaded() ? true : cublas.load_cublas();
@@ -246,6 +254,8 @@ void export_misc(py::module &m) {
     result["device_setter_lowering_compiled"] = setter_compiled;
     result["general_device_setter_lowering_compiled"] =
         graph_setter_compiled;
+    result["ordinary_graph_symbols_loaded"] = ordinary_graph_symbols_loaded;
+    result["internal_masked_latch_compiled"] = masked_latch_compiled;
     result["runtime_path_compiled"] = true;
     result["cublas_workspace_symbol_loaded"] =
         cublas_workspace_symbol_loaded;
@@ -253,8 +263,15 @@ void export_misc(py::module &m) {
                                 driver_api_version >= 12080 && symbols_loaded;
     result["stored_solver_device_control_available"] =
         base_available && setter_compiled && cublas_workspace_symbol_loaded;
-    result["general_graph_device_control_available"] =
+    const bool exact_graph_control_available =
         base_available && graph_setter_compiled;
+    const bool internal_masked_graph_available =
+        ordinary_graph_symbols_loaded && masked_latch_compiled;
+    result["general_graph_exact_control_available"] =
+        exact_graph_control_available;
+    result["internal_masked_graph_available"] = internal_masked_graph_available;
+    result["general_graph_device_control_available"] =
+        exact_graph_control_available || internal_masked_graph_available;
     // Kept as the stored-solver compatibility aggregate. Generic Graph
     // consumers must use general_graph_device_control_available instead.
     result["fully_available"] =
@@ -267,10 +284,14 @@ void export_misc(py::module &m) {
     result["conditional_graph_symbols_loaded"] = false;
     result["device_setter_lowering_compiled"] = false;
     result["general_device_setter_lowering_compiled"] = false;
+    result["ordinary_graph_symbols_loaded"] = false;
+    result["internal_masked_latch_compiled"] = false;
     result["runtime_path_compiled"] = false;
     result["cublas_workspace_symbol_loaded"] = false;
     result["stored_solver_device_control_available"] = false;
     result["general_graph_device_control_available"] = false;
+    result["general_graph_exact_control_available"] = false;
+    result["internal_masked_graph_available"] = false;
     result["fully_available"] = false;
 #endif
     return result;

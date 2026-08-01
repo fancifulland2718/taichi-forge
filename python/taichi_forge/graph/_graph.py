@@ -496,8 +496,8 @@ def _structured_submission_metadata(node):
         lowering = "vulkan_compound_masked"
     elif arch == _ti_core.Arch.cuda:
         chunk_sizes = (node.max_iterations,) if node.max_iterations else ()
-        chunk_strategies = ("cuda_conditional_graph",) if node.max_iterations else ()
-        lowering = "cuda_conditional_graph"
+        lowering = node._cuda_control_lowering
+        chunk_strategies = (lowering,) if node.max_iterations else ()
     else:
         chunk_sizes = (node.max_iterations,) if node.max_iterations else ()
         chunk_strategies = ("portable",) if node.max_iterations else ()
@@ -881,6 +881,9 @@ class GraphExecutionCounters:
     captures: int
     exact_replays: int
     patched_replays: int
+    masked_captures: int
+    masked_replays: int
+    masked_patched_replays: int
     recaptures: int
     records: int
     replays: int
@@ -1037,6 +1040,8 @@ class GraphWhileReport:
     nested_region_path: str = ""
     nested_logical_iterations: Tuple[int, ...] = ()
     nested_encoded_iterations: Tuple[int, ...] = ()
+    encoded_iterations: int = 0
+    masked_iterations: int = 0
 
 
 @dataclass(frozen=True)
@@ -1057,6 +1062,8 @@ class GraphBranchReport:
     control_inputs: Tuple[str, ...]
     region_path: str = ""
     structured_depth: int = 1
+    encoded_dispatch_count: int = 0
+    masked_dispatch_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -1259,6 +1266,9 @@ _COUNTER_FIELDS = (
     "captures",
     "exact_replays",
     "patched_replays",
+    "masked_captures",
+    "masked_replays",
+    "masked_patched_replays",
     "recaptures",
     "records",
     "replays",
@@ -1277,6 +1287,9 @@ _BACKEND_GRAPH_PATHS = frozenset(
         "cuda_capture",
         "cuda_exact_replay",
         "cuda_patched_replay",
+        "cuda_masked_capture",
+        "cuda_masked_replay",
+        "cuda_masked_patched_replay",
         "vulkan_record",
         "vulkan_replay",
         "vulkan_patched_replay",
@@ -1286,6 +1299,8 @@ _BACKEND_REPLAY_PATHS = frozenset(
     (
         "cuda_exact_replay",
         "cuda_patched_replay",
+        "cuda_masked_replay",
+        "cuda_masked_patched_replay",
         "vulkan_replay",
         "vulkan_patched_replay",
     )
@@ -1338,6 +1353,30 @@ def _backend_name(arch):
     if arch in ("x64", "arm64"):
         return "cpu"
     return arch
+
+
+def _cuda_structured_control_lowering(capabilities=None):
+    """Select one stable CUDA control route for a compiled Graph node."""
+    if capabilities is None:
+        capabilities = dict(_ti_core.cuda_conditional_graph_capabilities())
+    exact = bool(
+        capabilities.get(
+            "general_graph_exact_control_available",
+            capabilities.get("driver_version_eligible", False)
+            and capabilities.get("conditional_graph_symbols_loaded", False)
+            and capabilities.get(
+                "general_device_setter_lowering_compiled", False
+            ),
+        )
+    )
+    masked = bool(capabilities.get("internal_masked_graph_available", False))
+    if os.environ.get("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "0") == "1" and masked:
+        return "cuda_masked_bounded_graph"
+    if exact:
+        return "cuda_conditional_graph"
+    if masked:
+        return "cuda_masked_bounded_graph"
+    return None
 
 
 def structured_control_capabilities():
@@ -1402,18 +1441,29 @@ def structured_control_capabilities():
     nested_native = False
     if arch == _ti_core.Arch.cuda:
         cuda = dict(_ti_core.cuda_conditional_graph_capabilities())
-        setter_compiled = bool(
+        exact_compiled = bool(
             cuda.get("general_device_setter_lowering_compiled", False)
         )
-        native = bool(
-            cuda["driver_version_eligible"]
-            and cuda["conditional_graph_symbols_loaded"]
-            and setter_compiled
+        masked_compiled = bool(cuda.get("internal_masked_latch_compiled", False))
+        exact_native = bool(
+            cuda.get(
+                "general_graph_exact_control_available",
+                cuda.get("driver_version_eligible", False)
+                and cuda.get("conditional_graph_symbols_loaded", False)
+                and exact_compiled,
+            )
         )
-        primitive = "cuda_conditional_graph"
-        rhi_primitive_compiled = setter_compiled
+        masked_native = bool(cuda.get("internal_masked_graph_available", False))
+        native = exact_native or masked_native
+        primitive = (
+            _cuda_structured_control_lowering(cuda) or "none"
+            if native
+            else "none"
+        )
+        using_exact = primitive == "cuda_conditional_graph"
+        rhi_primitive_compiled = exact_compiled or masked_compiled
         rhi_primitive_qualified = native
-        runtime_path_compiled = setter_compiled
+        runtime_path_compiled = rhi_primitive_compiled
         runtime_path_qualified = native
         branch_native = native
         structured_submit = native
@@ -1421,19 +1471,20 @@ def structured_control_capabilities():
         compound_terminal_observation = "submission_ticket" if native else "unavailable"
         submission_ticket_region_telemetry = native
         structured_submit_reason = (
-            "none" if native else "cuda_conditional_graph_unavailable"
+            "none" if native else "cuda_device_control_unavailable"
         )
-        skip_strategy = "cuda_conditional_graph" if native else "none"
-        stops_command_issue_after_exit = native
-        exact_dynamic_termination = native
-        if not cuda["driver_version_eligible"]:
-            reason = "cuda_driver_api_version_below_12_8"
-        elif not cuda["conditional_graph_symbols_loaded"]:
-            reason = "cuda_conditional_graph_symbols_not_loaded"
-        elif not setter_compiled:
-            reason = "cuda_conditional_setter_lowering_not_compiled"
-        else:
+        skip_strategy = primitive
+        stops_command_issue_after_exit = using_exact
+        exact_dynamic_termination = using_exact
+        max_encoded_dispatches = 4096 if primitive == "cuda_masked_bounded_graph" else 0
+        if native:
             reason = "none"
+        elif not exact_compiled and not masked_compiled:
+            reason = "cuda_device_control_lowering_not_compiled"
+        elif not cuda.get("ordinary_graph_symbols_loaded", False):
+            reason = "cuda_graph_capture_symbols_not_loaded"
+        else:
+            reason = "cuda_device_control_unavailable"
     elif arch == _ti_core.Arch.vulkan:
         conditional_rendering_available = bool(
             impl.get_runtime().prog._vulkan_conditional_rendering_available()
@@ -1588,6 +1639,14 @@ def structured_control_capabilities():
             "per_iteration_host_observation": False,
             "stops_command_issue_after_exit": stops_command_issue_after_exit,
             "exact_dynamic_termination": exact_dynamic_termination,
+            "exact_conditional_graph": (
+                arch == _ti_core.Arch.cuda
+                and primitive == "cuda_conditional_graph"
+            ),
+            "bounded_masked_graph": (
+                arch == _ti_core.Arch.cuda
+                and primitive == "cuda_masked_bounded_graph"
+            ),
             "primitive": primitive,
             "skip_strategy": skip_strategy,
             "rhi_primitive_compiled": rhi_primitive_compiled,
@@ -2596,14 +2655,17 @@ def _while_upgrade_status(arch, mode):
             )
         return False, "not_gpu_structured_runtime"
     capabilities = dict(_ti_core.cuda_conditional_graph_capabilities())
-    if not capabilities["driver_version_eligible"]:
-        reason = "cuda_driver_api_version_below_12_8"
-    elif not capabilities["conditional_graph_symbols_loaded"]:
-        reason = "cuda_conditional_graph_symbols_not_loaded"
-    elif not capabilities.get("general_device_setter_lowering_compiled", False):
-        reason = "cuda_conditional_setter_lowering_not_compiled"
+    lowering = _cuda_structured_control_lowering(capabilities)
+    if lowering is not None:
+        return True, (
+            "eligible"
+            if lowering == "cuda_conditional_graph"
+            else "eligible_masked_bounded"
+        )
+    if not capabilities.get("ordinary_graph_symbols_loaded", False):
+        reason = "cuda_graph_capture_symbols_not_loaded"
     else:
-        return True, "eligible"
+        reason = "cuda_device_control_lowering_unavailable"
     if mode == "native_required":
         raise TaichiRuntimeError(
             f"Graph while native CUDA lowering unavailable: {reason}"
@@ -2623,14 +2685,17 @@ def _cuda_branch_upgrade_status(arch, mode, kind):
             raise TaichiRuntimeError(f"Graph {kind} native_required mode needs CUDA")
         return False, "not_cuda"
     capabilities = dict(_ti_core.cuda_conditional_graph_capabilities())
-    if not capabilities["driver_version_eligible"]:
-        reason = "cuda_driver_api_version_below_12_8"
-    elif not capabilities["conditional_graph_symbols_loaded"]:
-        reason = "cuda_conditional_graph_symbols_not_loaded"
-    elif not capabilities.get("general_device_setter_lowering_compiled", False):
-        reason = "cuda_conditional_setter_lowering_not_compiled"
+    lowering = _cuda_structured_control_lowering(capabilities)
+    if lowering is not None:
+        return True, (
+            "eligible"
+            if lowering == "cuda_conditional_graph"
+            else "eligible_masked_bounded"
+        )
+    if not capabilities.get("ordinary_graph_symbols_loaded", False):
+        reason = "cuda_graph_capture_symbols_not_loaded"
     else:
-        return True, "eligible"
+        reason = "cuda_device_control_lowering_unavailable"
     if mode == "native_required":
         raise TaichiRuntimeError(
             f"Graph {kind} native CUDA lowering unavailable: {reason}"
@@ -3416,6 +3481,11 @@ class _CompiledWhileGraphNode:
         self._native_upgrade_eligible, self._native_upgrade_reason = (
             _while_upgrade_status(arch, lowering_mode)
         )
+        self._cuda_control_lowering = (
+            _cuda_structured_control_lowering()
+            if arch == _ti_core.Arch.cuda
+            else None
+        )
         if self._has_nested_control:
             self._native_upgrade_eligible = False
             self._native_upgrade_reason = "nested_structured_portable_exact"
@@ -3533,7 +3603,12 @@ class _CompiledWhileGraphNode:
             raise TaichiRuntimeError(
                 "Native CUDA Graph while submission requires an ndarray predicate"
             )
-        submitted = self._chunks[1].compiled_graph.jit_run_bounded_cuda_cached(
+        native_run = (
+            self._chunks[1].compiled_graph.jit_run_bounded_cuda_masked_cached
+            if self._cuda_control_lowering == "cuda_masked_bounded_graph"
+            else self._chunks[1].compiled_graph.jit_run_bounded_cuda_cached
+        )
+        submitted = native_run(
             context.compile_config(),
             context.flattened_args(self.recording_runtime_arg_names),
             self._native_jit_cache,
@@ -3765,6 +3840,8 @@ class _CompiledWhileGraphNode:
                     inner_logical[last] * inner.body_dispatch_count
                 ),
                 control_arena_bytes=control_bytes,
+                encoded_iterations=last_encoded,
+                masked_iterations=last_encoded - inner_logical[last],
             )
 
         outer_initial_status = (
@@ -3832,6 +3909,8 @@ class _CompiledWhileGraphNode:
             nested_region_path=inner.region_path,
             nested_logical_iterations=inner_logical,
             nested_encoded_iterations=inner_encoded,
+            encoded_iterations=outer_encoded,
+            masked_iterations=outer_encoded - outer_logical,
         )
         return True
 
@@ -4072,6 +4151,8 @@ class _CompiledWhileGraphNode:
                 int(result["zero_dispatches"]) for result in results
             ),
             control_arena_bytes=max(int(result["control_bytes"]) for result in results),
+            encoded_iterations=encoded,
+            masked_iterations=encoded - logical,
         )
         return True
 
@@ -4097,6 +4178,8 @@ class _CompiledWhileGraphNode:
         status_values = []
         chunks = []
         executed = 0
+        encoded_iterations = 0
+        masked_iterations = 0
         observation_batches = 0
         observation_scalar_count = 0
         device_to_host_bytes = 0
@@ -4180,9 +4263,15 @@ class _CompiledWhileGraphNode:
             if predicate_ndarray is None:
                 native_reason = "predicate_ndarray_required"
             else:
-                native_selected = self._chunks[
-                    1
-                ].compiled_graph.jit_run_bounded_cuda_cached(
+                native_run = (
+                    self._chunks[
+                        1
+                    ].compiled_graph.jit_run_bounded_cuda_masked_cached
+                    if self._cuda_control_lowering
+                    == "cuda_masked_bounded_graph"
+                    else self._chunks[1].compiled_graph.jit_run_bounded_cuda_cached
+                )
+                native_selected = native_run(
                     context.compile_config(),
                     context.flattened_args(self.recording_runtime_arg_names),
                     self._native_jit_cache,
@@ -4191,7 +4280,9 @@ class _CompiledWhileGraphNode:
                     True,
                 )
                 native_reason = (
-                    "selected" if native_selected else "conditional_capture_fallback"
+                    f"selected_{self._cuda_control_lowering}"
+                    if native_selected
+                    else "conditional_capture_fallback"
                 )
             if not native_selected and self.lowering_mode == "native_required":
                 raise TaichiRuntimeError(
@@ -4205,10 +4296,16 @@ class _CompiledWhileGraphNode:
                     "Graph while counter left its iteration budget"
                 )
             active = predicate_value != 0
-            executed = self.max_iterations if active else logical_native
+            if self._cuda_control_lowering == "cuda_masked_bounded_graph":
+                executed = logical_native
+                encoded_iterations = self.max_iterations
+                masked_iterations = self.max_iterations - logical_native
+            else:
+                executed = self.max_iterations if active else logical_native
+                encoded_iterations = executed
             observations[-1] = executed
-            if executed:
-                chunks.append(executed)
+            if encoded_iterations:
+                chunks.append(encoded_iterations)
 
         while not native_selected and active and executed < self.max_iterations:
             chunk = self._select_chunk(self.max_iterations - executed)
@@ -4233,7 +4330,7 @@ class _CompiledWhileGraphNode:
         else:
             logical = executed
         lowering = (
-            "cuda_conditional_graph"
+            self._cuda_control_lowering
             if native_selected
             else (
                 "cpu_host_loop"
@@ -4290,6 +4387,23 @@ class _CompiledWhileGraphNode:
             body_dispatch_count=self.body_dispatch_count,
             control_inputs=self.control_inputs,
             carried_state=self.carried_state,
+            controller_dispatch_count=(
+                self.max_iterations
+                if native_selected
+                and self._cuda_control_lowering == "cuda_masked_bounded_graph"
+                else 0
+            ),
+            controller_invocation_count=(
+                self.max_iterations
+                if native_selected
+                and self._cuda_control_lowering == "cuda_masked_bounded_graph"
+                else 0
+            ),
+            logical_body_dispatch_count=logical * self.body_dispatch_count,
+            encoded_iterations=(
+                encoded_iterations if native_selected else executed
+            ),
+            masked_iterations=masked_iterations,
         )
 
     def invalidate_runtime(self):
@@ -4461,6 +4575,11 @@ class _CompiledIfGraphNode:
         self._native_upgrade_eligible, self._native_upgrade_reason = (
             _cuda_branch_upgrade_status(arch, lowering_mode, "if")
         )
+        self._cuda_control_lowering = (
+            _cuda_structured_control_lowering()
+            if arch == _ti_core.Arch.cuda
+            else None
+        )
         if self._has_nested_control:
             self._native_upgrade_eligible = False
             self._native_upgrade_reason = "nested_structured_portable_exact"
@@ -4536,7 +4655,12 @@ class _CompiledIfGraphNode:
         predicate_ndarray = getattr(predicate_object, "arr", None)
         if predicate_ndarray is None:
             return False
-        return self._native_branches.compiled_graph.jit_run_conditional_cuda_cached(
+        native_run = (
+            self._native_branches.compiled_graph.jit_run_conditional_cuda_masked_cached
+            if self._cuda_control_lowering == "cuda_masked_bounded_graph"
+            else self._native_branches.compiled_graph.jit_run_conditional_cuda_cached
+        )
+        return native_run(
             context.compile_config(),
             context.flattened_args(self._native_branches.recording_runtime_arg_names),
             self._native_jit_cache,
@@ -4596,7 +4720,11 @@ class _CompiledIfGraphNode:
                 )
         if native_selected:
             self._last_report = None
-            self._pending_report = (runtime_args[self.predicate], arch)
+            self._pending_report = (
+                runtime_args[self.predicate],
+                arch,
+                self._cuda_control_lowering,
+            )
             return
         self._pending_report = None
         observed, byte_count = _control_scalar_values(
@@ -4642,7 +4770,7 @@ class _CompiledIfGraphNode:
     def materialize_pending_report(self):
         if self._pending_report is None:
             return
-        predicate_object, arch = self._pending_report
+        predicate_object, arch, lowering = self._pending_report
         observed, byte_count = _control_scalar_values(
             [predicate_object],
             [self.predicate],
@@ -4664,7 +4792,7 @@ class _CompiledIfGraphNode:
             structured_depth=self.control_depth,
             backend=_backend_name(_ti_core.arch_name(arch)),
             kind="if",
-            lowering="cuda_conditional_graph",
+            lowering=lowering,
             selector_resource=self.predicate,
             selector_value=predicate_value,
             selected_branch=selected,
@@ -4673,6 +4801,16 @@ class _CompiledIfGraphNode:
             condition_dispatch_count=self.condition_dispatch_count,
             branch_dispatch_count=selected_dispatches,
             control_inputs=self.control_inputs,
+            encoded_dispatch_count=(
+                sum(self._native_branch_dispatch_counts)
+                if lowering == "cuda_masked_bounded_graph"
+                else selected_dispatches
+            ),
+            masked_dispatch_count=(
+                sum(self._native_branch_dispatch_counts) - selected_dispatches
+                if lowering == "cuda_masked_bounded_graph"
+                else 0
+            ),
         )
         self._pending_report = None
 
@@ -4832,6 +4970,11 @@ class _CompiledSwitchGraphNode:
         self._native_upgrade_eligible, self._native_upgrade_reason = (
             _cuda_branch_upgrade_status(arch, lowering_mode, "switch")
         )
+        self._cuda_control_lowering = (
+            _cuda_structured_control_lowering()
+            if arch == _ti_core.Arch.cuda
+            else None
+        )
         if self._has_nested_control:
             self._native_upgrade_eligible = False
             self._native_upgrade_reason = "nested_structured_portable_exact"
@@ -4910,7 +5053,12 @@ class _CompiledSwitchGraphNode:
         selector_ndarray = getattr(selector_object, "arr", None)
         if selector_ndarray is None:
             return False
-        return self._native_branches.compiled_graph.jit_run_conditional_cuda_cached(
+        native_run = (
+            self._native_branches.compiled_graph.jit_run_conditional_cuda_masked_cached
+            if self._cuda_control_lowering == "cuda_masked_bounded_graph"
+            else self._native_branches.compiled_graph.jit_run_conditional_cuda_cached
+        )
+        return native_run(
             context.compile_config(),
             context.flattened_args(self._native_branches.recording_runtime_arg_names),
             self._native_jit_cache,
@@ -4970,7 +5118,11 @@ class _CompiledSwitchGraphNode:
                 )
         if native_selected:
             self._last_report = None
-            self._pending_report = (runtime_args[self.selector], arch)
+            self._pending_report = (
+                runtime_args[self.selector],
+                arch,
+                self._cuda_control_lowering,
+            )
             return
         self._pending_report = None
         observed, byte_count = _control_scalar_values(
@@ -5016,7 +5168,7 @@ class _CompiledSwitchGraphNode:
     def materialize_pending_report(self):
         if self._pending_report is None:
             return
-        selector_object, arch = self._pending_report
+        selector_object, arch, lowering = self._pending_report
         observed, byte_count = _control_scalar_values(
             [selector_object],
             [self.selector],
@@ -5038,7 +5190,7 @@ class _CompiledSwitchGraphNode:
             structured_depth=self.control_depth,
             backend=_backend_name(_ti_core.arch_name(arch)),
             kind="switch",
-            lowering="cuda_conditional_graph",
+            lowering=lowering,
             selector_resource=self.selector,
             selector_value=selector_value,
             selected_branch=selected,
@@ -5047,6 +5199,16 @@ class _CompiledSwitchGraphNode:
             condition_dispatch_count=self.condition_dispatch_count,
             branch_dispatch_count=selected_dispatches,
             control_inputs=self.control_inputs,
+            encoded_dispatch_count=(
+                sum(self._native_branch_dispatch_counts)
+                if lowering == "cuda_masked_bounded_graph"
+                else selected_dispatches
+            ),
+            masked_dispatch_count=(
+                sum(self._native_branch_dispatch_counts) - selected_dispatches
+                if lowering == "cuda_masked_bounded_graph"
+                else 0
+            ),
         )
         self._pending_report = None
 
