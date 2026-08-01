@@ -846,7 +846,17 @@ if(TI_WITH_PYTHON)
         if (NOT ANDROID)
             # Excluding Android
             # Android defaults to static linking with libc++, no tinkering needed.
-            target_link_options(${CORE_WITH_PYBIND_LIBRARY_NAME} PUBLIC -static-libgcc -static-libstdc++)
+            # The split runtime and pybind shim exchange C++ objects, RTTI,
+            # inline singletons, and exception state. libtaichi_runtime.so
+            # uses the platform libstdc++/libgcc_s, so statically linking a
+            # second copy into the shim creates two incompatible C++ runtime
+            # domains in one process and can corrupt pybind initialization.
+            # Let the C++ linker driver add the same shared dependencies used
+            # by libtaichi_runtime.so. Both libraries remain manylinux-policy
+            # dependencies and are not copied into either wheel.
+            if (NOT TI_WITH_SPLIT_PYTHON_RUNTIME)
+                target_link_options(${CORE_WITH_PYBIND_LIBRARY_NAME} PUBLIC -static-libgcc -static-libstdc++)
+            endif()
         endif()
     endif()
 

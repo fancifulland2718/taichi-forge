@@ -86,6 +86,7 @@ def _write_shim_wheel(
     duplicate_runtime: bool = False,
     missing_dependency: str | None = None,
     llvm_abi_sentinel: bool = False,
+    static_cpp_runtime: bool = False,
 ) -> None:
     dist_info = f"taichi_forge-{version}.dist-info"
     extension = "taichi_python.pyd" if platform == "windows" else "taichi_python.so"
@@ -118,6 +119,8 @@ def _write_shim_wheel(
         )
         zf.writestr(f"{dist_info}/RECORD", "")
         extension_payload = b"shim"
+        if platform != "windows" and not static_cpp_runtime:
+            extension_payload += b"\0libstdc++.so.6\0libgcc_s.so.1\0"
         if llvm_abi_sentinel:
             extension_payload += b"\0_ZN4llvm24DisableABIBreakingChecksE\0"
         zf.writestr(f"taichi_forge/_lib/core/{extension}", extension_payload)
@@ -528,6 +531,22 @@ def test_manylinux_shim_rejects_llvm_abi_link_sentinel(tmp_path):
     )
 
     with pytest.raises(RuntimeError, match="LLVM ABI link sentinels"):
+        validate_shim_wheel.validate_shim_wheel(wheel, "manylinux")
+
+
+def test_manylinux_shim_rejects_private_static_cpp_runtime(tmp_path):
+    wheel = (
+        tmp_path
+        / "taichi_forge-0.4.3-cp310-cp310-manylinux_2_35_x86_64.whl"
+    )
+    _write_shim_wheel(
+        wheel,
+        platform="manylinux",
+        version="0.4.3",
+        static_cpp_runtime=True,
+    )
+
+    with pytest.raises(RuntimeError, match=r"share the C\+\+ runtime"):
         validate_shim_wheel.validate_shim_wheel(wheel, "manylinux")
 
 

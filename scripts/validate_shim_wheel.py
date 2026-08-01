@@ -19,6 +19,10 @@ LINUX_LLVM_ABI_SENTINELS = (
     b"_ZN4llvm23EnableABIBreakingChecksE",
     b"_ZN4llvm24DisableABIBreakingChecksE",
 )
+LINUX_SHARED_CPP_RUNTIME_LIBRARIES = (
+    b"libstdc++.so.6",
+    b"libgcc_s.so.1",
+)
 CUDA_VARIANT = re.compile(r"(?:^|[+_.-])(?:cu|cuda)\d+", re.IGNORECASE)
 
 
@@ -110,6 +114,17 @@ def validate_shim_wheel(wheel: Path, expected_platform: str) -> str:
             )
         if platform == "manylinux":
             extension = zf.read(extensions[0])
+            missing_cpp_runtime_libraries = [
+                library.decode("ascii")
+                for library in LINUX_SHARED_CPP_RUNTIME_LIBRARIES
+                if library not in extension
+            ]
+            if missing_cpp_runtime_libraries:
+                raise RuntimeError(
+                    "Linux split shim must share the C++ runtime used by "
+                    "libtaichi_runtime.so; missing dynamic dependency "
+                    f"markers: {missing_cpp_runtime_libraries}"
+                )
             abi_sentinels = [
                 symbol.decode("ascii")
                 for symbol in LINUX_LLVM_ABI_SENTINELS
