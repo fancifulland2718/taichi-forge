@@ -636,3 +636,37 @@ def test_field_with_dynamic_index():
         print(tmp0)
 
     collide()
+
+
+@test_utils.test(require=ti.extension.data64)
+def test_native_dense_host_copy_respects_mixed_root_alignment():
+    scalar32 = ti.field(ti.f32, shape=())
+    scalar64 = ti.field(ti.f64, shape=())
+    one32 = ti.field(ti.f32, shape=1)
+    values32 = ti.field(ti.f32, shape=7)
+    values64 = ti.field(ti.f64, shape=7)
+
+    @ti.kernel
+    def store():
+        scalar32[None] = 3.25
+        scalar64[None] = 7.5
+        one32[0] = -2.0
+        for i in range(7):
+            values32[i] = ti.cast(i, ti.f32) * 0.5 - 1.0
+            values64[i] = ti.cast(i, ti.f64) * 0.25 - 0.5
+
+    store()
+    expected32 = np.arange(7, dtype=np.float32) * 0.5 - 1.0
+    expected64 = np.arange(7, dtype=np.float64) * 0.25 - 0.5
+    np.testing.assert_array_equal(values32.to_numpy(), expected32)
+    np.testing.assert_array_equal(values64.to_numpy(), expected64)
+    assert scalar32[None] == np.float32(3.25)
+    assert scalar64[None] == np.float64(7.5)
+    assert one32[0] == np.float32(-2.0)
+
+    replacement32 = np.linspace(-3.0, 3.0, 7, dtype=np.float32)
+    replacement64 = np.linspace(-1.5, 1.5, 7, dtype=np.float64)
+    values32.from_numpy(replacement32)
+    values64.from_numpy(replacement64)
+    np.testing.assert_array_equal(values32.to_numpy(), replacement32)
+    np.testing.assert_array_equal(values64.to_numpy(), replacement64)

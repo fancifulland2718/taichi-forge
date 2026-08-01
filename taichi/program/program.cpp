@@ -4449,16 +4449,19 @@ std::size_t root_child_offset(SNode *root_child) {
     throw std::runtime_error(kNativeDenseSimpleLayoutMessage);
   }
   SNode *root = root_child->parent;
-  std::size_t offset = 0;
   const int child_id = root->child_id(root_child);
   for (int i = 0; i < child_id; ++i) {
     SNode *child = root->ch[i].get();
     if (!native_dense_linear_root_child_supported(child)) {
       throw std::runtime_error(kNativeDenseSimpleLayoutMessage);
     }
-    offset += child->cell_size_bytes * child->num_cells_per_container;
   }
-  return offset;
+  // The struct compiler may insert alignment padding between root children,
+  // especially when 32-bit and 64-bit fields share a tree.  Summing the
+  // preceding payload sizes therefore points before the real child storage.
+  // The compiled SNode layout is the single source of truth for both kernel
+  // addressing and native bulk operations.
+  return root_child->offset_bytes_in_parent_cell;
 }
 
 uint8_t *map_cpu_dense_field(Program *program,
