@@ -4,6 +4,7 @@
 import os
 import platform
 import re
+import tempfile
 from importlib import metadata
 from importlib.util import find_spec
 from pathlib import Path
@@ -23,6 +24,23 @@ def _validate_distribution_versions() -> str:
             f"taichi-forge-runtime={runtime_version}"
         )
     return shim_version
+
+
+def _validate_build_identity() -> str:
+    commit = ti._lib.core.get_commit_hash()
+    if not commit or not re.fullmatch(r"[0-9a-fA-F]{7,40}", commit):
+        raise RuntimeError(f"invalid native runtime commit identity: {commit!r}")
+
+    expected = os.environ.get("TI_EXPECTED_COMMIT_HASH", "").strip()
+    if expected and not (
+        commit.lower().startswith(expected.lower())
+        or expected.lower().startswith(commit.lower())
+    ):
+        raise RuntimeError(
+            "installed native runtime commit mismatch: "
+            f"expected={expected}, actual={commit}"
+        )
+    return commit
 
 
 def _runtime_package_dirs() -> list[Path]:
@@ -151,15 +169,103 @@ def _validate_cpu_native_ad() -> None:
     ti.reset()
 
 
+def _validate_cpu_field_roundtrips() -> None:
+    """Exercise field addressing and readback through an installed wheel."""
+
+    with tempfile.TemporaryDirectory(
+        prefix="taichi-forge-wheel-cache-"
+    ) as cache_dir:
+        for threads, offline_cache in ((1, False), (0, True)):
+            init_options = {
+                "arch": ti.cpu,
+                "offline_cache": offline_cache,
+                "offline_cache_file_path": cache_dir,
+            }
+            if threads:
+                init_options["cpu_max_num_threads"] = threads
+            ti.init(**init_options)
+
+            scalar32 = ti.field(ti.f32, shape=())
+            scalar64 = ti.field(ti.f64, shape=())
+            one32 = ti.field(ti.f32, shape=1)
+            values32 = ti.field(ti.f32, shape=7)
+            values64 = ti.field(ti.f64, shape=7)
+            serial64 = ti.field(ti.f64, shape=())
+            atomic64 = ti.field(ti.f64, shape=())
+
+            @ti.kernel
+            def store_fields():
+                scalar32[None] = 3.25
+                scalar64[None] = 7.5
+                one32[0] = -2.0
+                for i in range(7):
+                    values32[i] = ti.cast(i, ti.f32) * 0.5 - 1.0
+                    values64[i] = ti.cast(i, ti.f64) * 0.25 - 0.5
+
+            @ti.kernel
+            def read_fields() -> ti.f64:
+                result = scalar64[None] + ti.cast(scalar32[None], ti.f64)
+                for i in range(7):
+                    result += ti.cast(values32[i], ti.f64) + values64[i]
+                return result + ti.cast(one32[0], ti.f64)
+
+            @ti.kernel
+            def reduce_f64():
+                serial64[None] = 0.0
+                atomic64[None] = 0.0
+                ti.loop_config(serialize=True)
+                for i in range(7):
+                    serial64[None] += values64[i]
+                for i in range(7):
+                    ti.atomic_add(atomic64[None], values64[i])
+
+            store_fields()
+            expected32 = np.arange(7, dtype=np.float32) * 0.5 - 1.0
+            expected64 = np.arange(7, dtype=np.float64) * 0.25 - 0.5
+            np.testing.assert_array_equal(values32.to_numpy(), expected32)
+            np.testing.assert_array_equal(values64.to_numpy(), expected64)
+            assert scalar32[None] == np.float32(3.25)
+            assert scalar64[None] == np.float64(7.5)
+            assert one32[0] == np.float32(-2.0)
+            expected_return = (
+                7.5 + 3.25 - 2.0 + expected32.sum() + expected64.sum()
+            )
+            np.testing.assert_allclose(
+                read_fields(), expected_return, rtol=0, atol=1e-12
+            )
+
+            replacement32 = np.linspace(-3.0, 3.0, 7, dtype=np.float32)
+            replacement64 = np.linspace(-1.5, 1.5, 7, dtype=np.float64)
+            values32.from_numpy(replacement32)
+            values64.from_numpy(replacement64)
+            np.testing.assert_array_equal(values32.to_numpy(), replacement32)
+            np.testing.assert_array_equal(values64.to_numpy(), replacement64)
+
+            reduce_f64()
+            expected_sum = replacement64.sum(dtype=np.float64)
+            np.testing.assert_allclose(
+                serial64[None], expected_sum, rtol=0, atol=1e-12
+            )
+            np.testing.assert_allclose(
+                atomic64[None], expected_sum, rtol=0, atol=1e-12
+            )
+            ti.reset()
+
+
 def main() -> None:
     version = _validate_distribution_versions()
+    commit = _validate_build_identity()
     cudart, cudart_major = _validate_packaged_cuda_runtime()
+    _validate_cpu_field_roundtrips()
     _validate_cpu_native_ad()
     if cudart is None:
         dependency = "driver-only; bundled CUDART=none"
     else:
         dependency = f"legacy bundled CUDART major {cudart_major}: {cudart}"
-    print(f"installed runtime validation passed for {version}; {dependency}")
+    print(
+        "installed runtime validation passed for "
+        f"{version} ({commit[:12]}); field/f64 roundtrips passed; {dependency}"
+    )
 
 
 if __name__ == "__main__":

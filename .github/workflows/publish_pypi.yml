@@ -305,6 +305,8 @@ jobs:
           PY
 
       - name: Validate installed runtime and shim wheels
+        env:
+          TI_EXPECTED_COMMIT_HASH: ${{ github.sha }}
         run: |
           set -euo pipefail
           python scripts/validate_shim_wheel.py \
@@ -473,6 +475,8 @@ jobs:
           python -I -m build --wheel --no-isolation
 
       - name: Validate installed runtime and shim wheels
+        env:
+          TI_EXPECTED_COMMIT_HASH: ${{ github.sha }}
         shell: pwsh
         run: |
           python scripts/validate_shim_wheel.py `
