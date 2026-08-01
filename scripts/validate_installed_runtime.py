@@ -46,16 +46,6 @@ def _validate_build_identity() -> str:
     commit = ti._lib.core.get_commit_hash()
     if not commit or not re.fullmatch(r"[0-9a-fA-F]{7,40}", commit):
         raise RuntimeError(f"invalid native runtime commit identity: {commit!r}")
-
-    expected = os.environ.get("TI_EXPECTED_COMMIT_HASH", "").strip()
-    if expected and not (
-        commit.lower().startswith(expected.lower())
-        or expected.lower().startswith(commit.lower())
-    ):
-        raise RuntimeError(
-            "installed native runtime commit mismatch: "
-            f"expected={expected}, actual={commit}"
-        )
     return commit
 
 

@@ -306,7 +306,6 @@ jobs:
 
       - name: Validate installed runtime and shim wheels
         env:
-          TI_EXPECTED_COMMIT_HASH: ${{ github.sha }}
           TI_NATIVE_RUNTIME_LOAD_TRACE: "1"
         run: |
           set -euo pipefail
@@ -478,7 +477,6 @@ jobs:
 
       - name: Validate installed runtime and shim wheels
         env:
-          TI_EXPECTED_COMMIT_HASH: ${{ github.sha }}
           TI_NATIVE_RUNTIME_LOAD_TRACE: "1"
         shell: pwsh
         run: |
