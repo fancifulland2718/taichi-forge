@@ -8,7 +8,7 @@ sidebar_position: 1
 
 ### Why does my `pip` complain `package not found` when installing Taichi?
 
-You may have a Python interpreter with an unsupported version. Currently, Taichi only supports Python 3.7/3.8/3.9/3.10 (64-bit) . For more information about installation-specific issues, please check [Installation Troubleshooting](./install.md).
+You may have a Python interpreter with an unsupported version. Taichi Forge 0.6.0 publishes 64-bit wheels for Python 3.10 through 3.14. For more information about installation-specific issues, see [Installation Troubleshooting](./install.md).
 
 ## Parallel programming
 
@@ -33,6 +33,9 @@ that its allocation has an unambiguous thread-block owner. The declaration may
 also be in an inlined `@ti.func` called from that loop. Kernel-root
 declarations and declarations in a serialized range-for are rejected at
 compile time; Taichi does not silently move them to global temporary memory.
+On CUDA, total static `SharedArray` storage is limited to 48 KiB per block.
+Larger requests fail explicitly; Forge does not enable opt-in dynamic shared
+memory.
 
 ## Data structures
 

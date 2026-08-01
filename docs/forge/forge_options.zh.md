@@ -1,6 +1,6 @@
 # Taichi Forge — 编译 / 运行时 / 架构 / 现代化选项一览
 
-> 适用于 **Taichi Forge 0.5.x** 发布线。除非特别说明，本文列出的选项均为**可选启用**；未显式启用的功能尽量保留 upstream Taichi 1.7.4 行为。
+> 适用于 **Taichi Forge 0.6.0**。除非特别说明，本文列出的选项均为**可选启用**；未显式启用的功能尽量保留 upstream Taichi 1.7.4 行为。
 > 各选项首次公开版本见[版本更新说明](release_notes.zh.md)；本文描述当前合同，
 > 不会把历史选项重新归类为 `0.5.0` 更新。
 
@@ -125,7 +125,7 @@ Forge 默认从已物化的 SNode 树推导 CUDA sparse SNode pool，并在同�
 
 | 名称 | 当前实现合同 | 生产建议 |
 |---|---|---|
-| `external_optimization_level` | 原始 SPIR-V optimizer 等级，默认 `3`，进入 offline-cache key；`compile_tier="fast"` 会覆盖为 level `0`。 | 应用保持使用 `compile_tier`；GeoPhys 或其它引擎不要暴露该字段。 |
+| `external_optimization_level` | 原始 SPIR-V optimizer 等级，默认 `3`，进入 offline-cache key；`compile_tier="fast"` 会覆盖为 level `0`。 | 应用保持使用 `compile_tier`；不要通过应用或引擎配置暴露该字段。 |
 | `spirv_disabled_passes` | 默认 `[]`；会改变 SPIR-V，并使用排序后的独立 cache key。当前内部 pass ID 区分大小写，例如 `LoopUnroll`，但该词表不是稳定公开 API。 | 在命名与跨 driver 验证完成前保持空列表。 |
 | `spirv_skip_loop_unroll` | 默认 `False`；会改变 optimizer chain 与 SPIR-V，但当前没有进入 offline-cache key。 | 保持 `False`；不要暴露，也不要用于生产/offline-cache workload。 |
 | `spirv_adaptive_opt`、`spirv_adaptive_opt_threshold` | 默认 `False` / `64`，有独立 cache key，但会按 task 形态改变 optimizer chain。 | 仅供验证和 benchmark，等待 driver matrix 收敛。 |
@@ -161,7 +161,7 @@ Forge 默认从已物化的 SNode 树推导 CUDA sparse SNode pool，并在同�
 
 ## 5. SNode 覆盖度扩展
 
-| SNode 类型 | vanilla 1.7.4 Vulkan | Taichi Forge 0.5.x Vulkan |
+| SNode 类型 | vanilla 1.7.4 Vulkan | Taichi Forge 0.6.0 Vulkan |
 |---|---|---|
 | `dense` | ✅ | ✅ |
 | `bitmasked` | ❌ | ✅ |
@@ -177,7 +177,7 @@ Vulkan 稀疏 SNode 用法与语义见 [sparse_snode_on_vulkan.zh.md](sparse_sno
 
 Forge 同步至现代工具链；下表对比 vanilla 1.7.4。
 
-| 组件 | vanilla 1.7.4 | Forge 0.5.x |
+| 组件 | vanilla 1.7.4 | Forge 0.6.0 |
 |---|---|---|
 | LLVM | 15 | **20.1.7** |
 | Python | 3.7 – 3.12 | **3.10 – 3.14** |

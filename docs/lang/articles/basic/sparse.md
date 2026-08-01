@@ -396,8 +396,8 @@ Grid usage:  0.010000
 
 ## Further reading
 
-Please read the SIGGRAPH Asia 2019 [paper](https://yuanming.taichi_forge.graphics/publication/2019-taichi/taichi-lang.pdf) or watch the associated
-[introduction video](https://www.youtube.com/watch?v=wKw8LMF3Djo) with [slides](https://yuanming.taichi_forge.graphics/publication/2019-taichi/taichi-lang-slides.pdf)
+Please read the SIGGRAPH Asia 2019 [paper](https://yuanming.taichi.graphics/publication/2019-taichi/taichi-lang.pdf) or watch the associated
+[introduction video](https://www.youtube.com/watch?v=wKw8LMF3Djo) with [slides](https://yuanming.taichi.graphics/publication/2019-taichi/taichi-lang-slides.pdf)
 for more details on computation of spatially sparse data structures.
 
 [Taichi elements](https://github.com/taichi-dev/taichi_elements) implement a high-performance MLS-MPM solver on Taichi sparse grids.

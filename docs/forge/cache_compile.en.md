@@ -1,7 +1,8 @@
 # Compile and Cache Guide
 
-> Compile/cache controls began in `0.1.3`, expanded in `0.2.4` and `0.4.1`,
-> and are not `0.5.0` introductions. See [release notes](release_notes.en.md).
+> This page describes the current Taichi Forge `0.6.0` contract. Compile/cache
+> controls began in `0.1.3` and expanded in `0.2.4` and `0.4.1`; see
+> [release notes](release_notes.en.md) for version attribution.
 
 Forge separates safe frontend reuse from backend-specific compiled artifacts.
 The goal is to reduce repeated compile overhead without changing runtime

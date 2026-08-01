@@ -1,6 +1,6 @@
 # Hash SNode — User Guide
 
-> `hash` SNode first shipped in **Taichi Forge 0.3.13**. This guide describes the current 0.5.x contract: an experimental, fixed-capacity sparse SNode available on the CPU, CUDA, and Vulkan backends. It is enabled by default and emits an experimental-feature warning on first use.
+> `hash` SNode first shipped in **Taichi Forge 0.3.13**. This guide describes the current 0.6.0 contract: an experimental, fixed-capacity sparse SNode available on the CPU, CUDA, and Vulkan backends. It is enabled by default and emits an experimental-feature warning on first use.
 
 ---
 

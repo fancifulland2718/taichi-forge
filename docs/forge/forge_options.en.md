@@ -1,6 +1,6 @@
 # Taichi Forge — Compile, Runtime, Architecture & Modernization Options
 
-> Applies to the **Taichi Forge 0.5.x** release line. Every option listed here is **opt-in** unless explicitly noted; defaults preserve upstream Taichi 1.7.4 behaviour wherever a feature is not intentionally enabled by Forge.
+> Applies to **Taichi Forge 0.6.0**. Every option listed here is **opt-in** unless explicitly noted; defaults preserve upstream Taichi 1.7.4 behaviour wherever a feature is not intentionally enabled by Forge.
 > Option introduction versions are indexed in [release notes](release_notes.en.md);
 > this current-contract page does not reclassify older options as `0.5.0` work.
 
@@ -128,7 +128,7 @@ production configuration:
 
 | Name | Current implementation contract | Production guidance |
 |---|---|---|
-| `external_optimization_level` | Raw SPIR-V optimizer level, default `3`; serialized in the offline-cache key. `compile_tier="fast"` overrides it to level `0`. | Keep application code on `compile_tier`; do not expose this field through GeoPhys or another engine. |
+| `external_optimization_level` | Raw SPIR-V optimizer level, default `3`; serialized in the offline-cache key. `compile_tier="fast"` overrides it to level `0`. | Keep application code on `compile_tier`; do not expose this field through application or engine configuration. |
 | `spirv_disabled_passes` | Default `[]`; changes emitted SPIR-V and uses a sorted, cache-isolated list. Current internal pass IDs are case-sensitive (for example `LoopUnroll`), but that vocabulary is not a stable public API. | Keep empty until naming and cross-driver validation are finalized. |
 | `spirv_skip_loop_unroll` | Default `False`; changes the optimizer chain and emitted SPIR-V, but is currently not represented in the offline-cache key. | Keep `False`; do not expose or use it with production/offline-cache workloads. |
 | `spirv_adaptive_opt`, `spirv_adaptive_opt_threshold` | Default `False` / `64`; cache-key isolated, but changes the optimizer chain by task shape. | Validation and benchmarking only until the driver matrix converges. |
@@ -164,7 +164,7 @@ Release wheel builds enable all three flags.
 
 ## 5. SNode coverage extensions
 
-| SNode type | vanilla 1.7.4 Vulkan | Taichi Forge 0.5.x Vulkan |
+| SNode type | vanilla 1.7.4 Vulkan | Taichi Forge 0.6.0 Vulkan |
 |---|---|---|
 | `dense` | ✅ | ✅ |
 | `bitmasked` | ❌ | ✅ |
@@ -180,7 +180,7 @@ Full Vulkan sparse usage and semantics: [sparse_snode_on_vulkan.en.md](sparse_sn
 
 Forge ships against modern toolchains; the table below summarises the versions vs. vanilla 1.7.4.
 
-| Component | vanilla 1.7.4 | Forge 0.5.x |
+| Component | vanilla 1.7.4 | Forge 0.6.0 |
 |---|---|---|
 | LLVM | 15 | **20.1.7** |
 | Python | 3.7 – 3.12 | **3.10 – 3.14** |

@@ -44,7 +44,7 @@ and other code-generating options are included in Forge offline-cache identity.
 Changing them should compile or load a separate artifact rather than reuse an
 incompatible one.
 
-On current Unreleased Forge sources, `debug=True` enables bounds checks only
+In Taichi Forge 0.6.0, `debug=True` enables bounds checks only
 when `check_out_of_bound` was not explicitly selected. Passing
 `check_out_of_bound=False`, or setting `TI_CHECK_OUT_OF_BOUND=0`, isolates the
 bounds-check cost while retaining the other debug behavior. This is a targeted
@@ -69,8 +69,8 @@ performance is unchanged:
   language semantics, but different instruction selection and floating-point
   reassociation opportunities can change rounding and tolerance requirements.
 
-On one local GeoPhys `stack_cube` CPU cold run, disabling advanced optimization
-reduced end-to-end startup from about 77 seconds to 19 seconds; the largest
+On one local fixed-topology stacked-cube CPU cold run, disabling advanced
+optimization reduced end-to-end startup from about 77 seconds to 19 seconds; the largest
 kernel fell from roughly 43.5 seconds to 3.0 seconds. This is a diagnostic data
 point for one machine and source revision, not a cross-platform performance
 claim. The production decision still requires warm runtime, result, and AD

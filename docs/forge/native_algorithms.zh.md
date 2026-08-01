@@ -7,8 +7,8 @@
 按模块整理的 Forge-only API 符号清单见 [Forge API 参考](forge_api_reference.zh.md)。
 
 核心 native 算法族首次发布于 Forge 0.4.0；Graph native replay 与 device-side 检查分别
-在 0.4.1 和 0.4.23 进入公开版本。本文说明当前 0.5.x 的可移植性与安全合同；只有
-[发行说明](release_notes.zh.md#050)明确列出的变化才属于 0.5.0 新增。
+在 0.4.1 和 0.4.23 进入公开版本。本文说明当前 0.6.0 的可移植性与安全合同；各项
+能力的首次公开版本见[发行说明](release_notes.zh.md)。
 
 ## 公开入口
 
@@ -56,7 +56,7 @@
 
 ## 机器可读 capability 合同
 
-Forge 0.5.0 为当前每个 primitive family 公开不可变的 schema-v1 描述：
+Forge 0.6.0 为当前每个 primitive family 公开不可变的 schema-v1 描述：
 
 ```python
 contract = ti.algorithms.primitive_capability("experimental_reduce")
@@ -129,7 +129,7 @@ runtime 依赖。下面是 Windows 开发机（RTX 5090、driver 610.62、Python
 compute process。CUB 只来自不发布的 CUDA 13.2 reference build，正确性另由 NumPy
 oracle 验证。
 
-| Primitive | driver-only median | CUB reference median | 相对吞吐 | 规划门槛 | driver workspace |
+| Primitive | driver-only median | CUB reference median | 相对吞吐 | 资格参考线 | driver workspace |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | scan | 0.0272 ms | 0.0190 ms | 69.8% | 90% | 4 KiB |
 | reduce-sum | 0.0228 ms | 0.0193 ms | 84.6% | 90% | 4 KiB |
@@ -137,12 +137,10 @@ oracle 验证。
 | stable compact | 0.0279 ms | 0.0228 ms | 81.8% | 80% | 4.00 MiB |
 | stable i32 key/value sort | 0.4883 ms | 0.1491 ms | 30.5% | 80% | 28.06 MiB |
 
-histogram 和 compact 达到本轮门槛；scan、reduce 和 sort 没有。标准 wheel 仍选择正确、
-异步且 driver-only 的 Forge provider，因为 CUB 不能成为发行依赖，而 host round-trip
-也不是物理引擎热路径的合理默认值。这不是与 CUB 等速的声明。继续逼近 scan/sort
-需要 one-sweep 或设备特化算法，会扩大 PTX、状态机和旧驱动验证面，因此本轮按停止规则
-收口为后续独立机会，不为边缘百分比继续堆叠路径。上述数字只用于说明当前取舍，不是
-跨设备、跨驱动性能保证。
+按表中的资格参考线，histogram 和 compact 达到参考值，scan、reduce 和 sort 没有。标准
+wheel 仍选择正确、异步且 driver-only 的 Forge provider，因为 CUB 不属于发行依赖，host
+round-trip 也不适合作为 GPU 热路径默认值。这不是与 CUB 等速的声明：尤其 stable sort
+仍有明显性能差距。上述数字用于说明当前实现边界，不是跨设备、跨驱动性能保证。
 
 ## 数据合同
 
@@ -174,11 +172,11 @@ ti.algorithms.experimental_run_length_encode(
 `experimental_unique()` 选择每个连续相等 run 的第一个 value；
 `experimental_unique_by_key()` 同时选择每个 key run 的第一个 payload。这些 API
 都不会隐式排序或构造 hash table。已排序输入会得到全局 sorted unique；任意输入
-保持 consecutive run 顺序。首版不实现 global first-occurrence unique。
+保持 consecutive run 顺序。当前合同不实现 global first-occurrence unique。
 unique-by-key 接受 StructNdarray raw payload；dense MatrixField payload 当前要求
 输入输出同形且元素为 `ti.i32`。
 
-首版 key 支持 `i32/u32/i64/u64`。`size=None` 使用完整固定容量；integer
+当前 RLE/Unique 合同的 key 支持 `i32/u32/i64/u64`。`size=None` 使用完整固定容量；integer
 `size` 只处理 active prefix，`size=0` 是支持的逻辑空输入表示。count 与 length
 均为 i32，所以容量上限为 `2^31-1`。input/output storage 不可 alias；只有
 device-side count 以下的输出有效。
@@ -204,7 +202,7 @@ Windows 开发机（Ryzen 9 9950X、RTX 5090 driver 610.62）上，1,048,576 个
 
 compile/warmup 不计时，workspace 已复用，测量前没有其他 Python/GPU compute
 process。这是开发证据，不是跨驱动性能保证。CUDA Graph 差异约 38 microseconds，
-记录为通用 native-node replay 开销；F6.2 不为此增加 RLE 专用优化。
+记录为通用 native-node replay 开销；当前实现不为此增加 RLE 专用路径。
 
 ## 可复用 Segmented Reduce 与 Scan
 
@@ -233,7 +231,7 @@ host 校验 topology，再上传 offset 与规范化 ID；若输入来自 Taichi
 在 direct call 或 `PrimitiveSequence` Graph replay 中复用 layout 时保持
 device-resident。
 
-首版支持 `i32/u32/i64/u64/f32/f64` 的 scalar 1D plain ndarray 与 root-dense
+当前 segmented 合同支持 `i32/u32/i64/u64/f32/f64` 的 scalar 1D plain ndarray 与 root-dense
 field。values 长度必须等于 layout capacity；reduce output 恰有每 segment 一个值，
 scan output 长度等于 capacity，且只有 active prefix 有定义。空 segment reduce 为零；
 scan 可以 exact in-place 或 disjoint。MatrixField、StructNdarray 与 sparse SNode

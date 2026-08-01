@@ -2,7 +2,8 @@
 
 > First available in `0.5.0`; see [release notes](release_notes.en.md).
 
-Dense Field Graph is a Taichi Forge `0.5.x` capability for compiling and
+Dense Field Graph first shipped in Taichi Forge `0.5.0`; this page describes
+the current `0.6.0` contract for compiling and
 replaying kernels that either close over or receive dense `ti.field`, vector
 fields, and matrix fields as runtime arguments. Static Field bindings and
 runtime dense-storage bindings use the same public `ti.graph.GraphBuilder` API
@@ -192,20 +193,22 @@ specialization because its root bindings may differ. Forge does not merge
 arbitrary owners by pointer or cache-key tricks; a safe transparent merge would
 require a runtime Field-binding ABI.
 
-### 0.5.0 release boundary
+### Current 0.6.0 boundary
 
-Taichi Forge 0.5.0 supports the block model above through the existing public
-Graph API: an engine may own and schedule independently compiled Graphs with
-different stable solver, layout, shape, or feature signatures, while each block
-batches homogeneous environments. Domain randomization stays inside a block
-when it preserves that signature; a signature-changing environment belongs in
-another precompiled block.
+Taichi Forge 0.6.0 keeps the block model above: applications may own and
+schedule independently compiled Graphs with different stable solver, layout,
+shape, or feature signatures, while each block batches homogeneous
+environments. Domain randomization stays inside a block when it preserves that
+signature; a signature-changing environment belongs in another precompiled
+Graph.
 
-The 0.5.0 compatibility promise does not include a unified heterogeneous
-orchestration DSL, an automatic cross-block scheduler, dynamic Field rebinding,
-or a cross-device dependency planner. Those facilities require an engine/runtime
-contract of their own and can be added after 0.5.0 without changing the static
-Field-binding and Graph replay contracts documented here.
+Version 0.6.0 also permits an `ArgKind.NDARRAY` slot to bind different but
+compatible runtime dense Fields between invocations. That path revalidates the
+Program, SNodeTree generation, layout fingerprint, and byte range without
+copying the payload. Closed-over and `template_args` Fields remain static
+bindings. Version 0.6.0 does not provide a unified heterogeneous orchestration
+DSL, an automatic cross-block scheduler, structure-changing Field hot rebinding,
+or a cross-device dependency planner.
 
 Persistent offline cache and deliberate prewarming can reduce repeated compile
 cost without weakening identity or lifetime checks.

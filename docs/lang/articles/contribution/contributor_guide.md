@@ -4,6 +4,13 @@ sidebar_position: 1
 
 # Contribution Guidelines
 
+> **Taichi Forge note:** this guide was inherited from the upstream Taichi
+> contributor documentation, so some historical issue and workflow links still
+> point upstream. For Forge release/API work, use the
+> [Taichi Forge repository](https://github.com/fancifulland2718/taichi-forge),
+> its current `.github/workflows`, and the public contracts under
+> [`docs/forge`](../../../forge/).
+
 Thank you for your interest in contributing to Taichi. Taichi was born as an academic research project. Though we are working hard to improve its code quality, Taichi has a long way to go to become a mature, large-scale engineering project. This is also why we decided to open source Taichi from the very beginning: We rely on our community to help Taichi evolve and thrive. From document updates, bug fix, to feature implementation, wherever you spot an issue, you are very welcome to file a PR (pull request) with us!:-)
 
 Centered around the common process of taking on an issue, testing, and making a corresponding PR, this document provides guidelines, tips, and major considerations for Taichi's contributors. We highly recommend that you spend some time familiarizing yourself with this contribution guide before contributing to Taichi.
@@ -97,7 +104,7 @@ As part of the effort to increase visibility of the community and to improve dev
 - Documentation source files are hosted under [docs/](https://github.com/taichi-dev/taichi/blob/master/docs/).
 - We use GitHub Flavored Markdown (GFM) and [Docusaurus](https://docusaurus.io/) to build our documentation site. For information on the supported Markdown syntax, see the  [Documentation Writing Guide](./doc_writing.md).
 - When it comes to writing, we adhere to the [Google Developer Documentation Style Guide](https://developers.google.com/style/).
-- For instructions on setting up a local server and previewing your updated documentation in real-time, see the [Local Development](https://github.com/taichi-dev/docs.taichi_forge.graphics#local-development).
+- The old standalone `docs.taichi.graphics` preview repository is not part of this checkout. Validate relative links and Markdown structure in this repository before submitting documentation changes.
 
 ## Add test cases for your local changes
 

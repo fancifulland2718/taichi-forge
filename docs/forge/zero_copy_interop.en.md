@@ -1,5 +1,8 @@
 # Zero-Copy Dense Storage and Interoperability
 
+> The unified runtime-storage and managed-interop contract first shipped in
+> Taichi Forge `0.6.0`; this page describes the current contract.
+
 Taichi Forge uses one runtime-storage protocol to describe existing dense memory without introducing another tensor type. The protocol separates five concerns:
 
 1. **storage ownership**: Program-owned Ndarray or dense Field storage, or a managed external owner;

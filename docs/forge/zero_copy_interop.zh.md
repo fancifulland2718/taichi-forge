@@ -1,5 +1,8 @@
 # Dense Storage 零拷贝与互操作
 
+> 统一 runtime-storage 与 managed interop 合同首次公开于 Taichi Forge `0.6.0`；
+> 本文说明当前合同。
+
 Taichi Forge 通过统一 runtime-storage 协议描述已有 dense memory，而不新增另一种 Tensor。该协议把五类问题分开处理：
 
 1. **storage ownership**：Program-owned Ndarray、dense Field，或受管的外部 owner；

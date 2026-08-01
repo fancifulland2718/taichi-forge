@@ -1,14 +1,15 @@
 # Linux Revalidation Status
 
-This is the remaining Linux release-validation matrix after the R8 runtime
+This is the remaining Linux release-validation matrix after the Taichi Forge 0.6.0 runtime
 hardening work. It is deliberately a test plan, not a claim that these paths
 have passed on Linux. Run it on a clean x86_64 Linux runner with the intended
 release dependencies and record the GPU, driver, Vulkan loader, window system,
 and CUDA Toolkit only when running the isolated reference workflow.
 
-This matrix is a release gate for the 0.5.x runtime changes. Historical
-features that already shipped in 0.4.25 or earlier are listed here only when a
-0.5.x implementation or packaging change requires renewed Linux evidence.
+This matrix is a release gate for the 0.6.0 runtime changes. Historical
+features that already shipped in 0.5.0 or earlier are listed here only when a
+0.6.0 implementation or packaging change requires renewed Linux evidence;
+their inclusion must not be read as a 0.6.0 introduction.
 
 ## Release blockers
 
@@ -58,9 +59,9 @@ The optional CUDA 13.2 CUB/CUDART reference workflow remains non-publishing and
 must not alter the standard wheel. It can provide differential results, but the
 release does not create CUDA-versioned package families.
 
-### Native primitive runtime, workspaces, and performance closeout
+### Native primitive runtime, workspaces, and performance qualification
 
-All N9 checks below remain pending on Linux. Use a fresh process per backend;
+All checks below remain pending on Linux. Use a fresh process per backend;
 run GPU stress for 30--60 seconds when the validation/sanitizer environment
 allows it:
 
@@ -154,7 +155,7 @@ target separation, capture/recapture/reset, and 1/2/4-submitter telemetry.
 
 ### Runtime first-fault and teardown
 
-F3 first-fault behavior has Windows CPU/CUDA/Vulkan and GGUI evidence, but its
+Runtime first-fault behavior has Windows CPU/CUDA/Vulkan and GGUI evidence, but its
 Linux release evidence remains pending. Do not infer Linux teardown safety
 from the Windows result.
 
@@ -181,7 +182,7 @@ from the Windows result.
 
 ### Runtime observability and bounded trace
 
-F4 runtime statistics and trace have Windows CPU/CUDA/Vulkan functional
+Runtime statistics and trace have Windows CPU/CUDA/Vulkan functional
 evidence. Their Linux release evidence remains pending:
 
 - Build `taichi_runtime_foundation_tests` and the Python extension with GCC
@@ -214,7 +215,7 @@ evidence. Their Linux release evidence remains pending:
 
 ### Native primitive capability and AD contract
 
-F6.1 has Windows CPU/CUDA/Vulkan provider-resolution and numerical AD evidence.
+Native primitive capability and AD have Windows CPU/CUDA/Vulkan provider-resolution and numerical evidence.
 Linux release evidence remains pending; the static catalog itself contains no
 Win32/NT-handle path.
 
@@ -222,8 +223,8 @@ Win32/NT-handle path.
   `tests/python/test_primitive_capabilities.py`,
   `tests/python/test_native_primitive_autodiff.py`, and
   `tests/python/test_primitive_plan.py` on CPU, CUDA, and Vulkan.
-- Before `ti.init()`, verify the 13 F6.1 baseline descriptors, the three
-  F6.2 RLE/Unique descriptors, and the two F6.3 segmented descriptors; verify
+- Before `ti.init()`, verify the 13 baseline descriptors, the three
+  RLE/Unique descriptors, and the two segmented descriptors; verify
   frozen schema-v1 dataclasses, aliases,
   role-specific operand contracts, and exact method-set
   parity. After each backend init, compare every
@@ -241,17 +242,17 @@ Win32/NT-handle path.
   hot replay.
 - Re-run the established primitive baseline rather than creating a new
   micro-optimization campaign. Record steady median/p95 and workspace peak;
-  investigate only a repeatable regression above 2%. F6.1 makes no speedup
+  investigate only a repeatable regression above 2%. This capability/AD contract makes no speedup
   claim.
 
 ### Consecutive RLE/Unique
 
-F6.2 reuses existing compact providers and adds Python/Taichi-kernel code only,
+Consecutive RLE/Unique reuses existing compact providers and adds Python/Taichi-kernel code only,
 so it does not require a new native runtime wheel. Linux release evidence is
 still required:
 
 - Run `tests/python/test_rle_unique.py` on CPU, CUDA, and Vulkan with paired
-  0.5.x shim/runtime wheels. Cover ndarray, dense field, all integer key dtypes,
+  0.6.0 shim/runtime wheels. Cover ndarray, dense field, all integer key dtypes,
   StructNdarray payload, logical empty `size=0`, single item, non-power-of-two
   capacity, active-prefix reuse, validation-before-write, AD rejection, and
   PrimitiveSequence Graph replay.
@@ -268,17 +269,17 @@ still required:
   12 bytes/item for RLE, then add the installed compact provider's temporary
   storage. Do not extrapolate the Windows RTX 5090 speedups to Linux.
 - Recheck CPU-only, CUDA-disabled, Vulkan-disabled, GCC, and Clang builds. No
-  F6.2 source file contains Win32/NT-handle logic or a new CUDA library/header
+  related source file contains Win32/NT-handle logic or a new CUDA library/header
   dependency.
 
 ### Reusable segmented reduce/scan
 
-F6.3 adds Python/Taichi-kernel composition over existing grouped-reduce,
+Segmented primitives add Python/Taichi-kernel composition over existing grouped-reduce,
 transform, and scan providers. It does not change the native runtime ABI and
 does not require republishing `taichi-forge-runtime`. All Linux evidence below
 is pending:
 
-- Run `tests/python/test_segmented_primitives.py` with paired 0.5.x
+- Run `tests/python/test_segmented_primitives.py` with paired 0.6.0
   shim/runtime wheels on CPU, CUDA, and Vulkan. Cover offsets and
   nondecreasing-ID construction, empty/missing segments, padded inactive tail,
   ndarray/field storage, all public scalar dtypes, inclusive/exclusive and
@@ -299,7 +300,7 @@ is pending:
   `workspace.last_scan_method`. Validate the policy on Linux rather than
   extrapolating Windows CUDA/Vulkan thresholds or speedups.
 - Recheck CPU-only, CUDA-disabled, Vulkan-disabled, GCC, Clang, ASan/UBSan, and
-  CPU TSAN builds. F6.3 adds no Win32/NT-handle code, CUDA Toolkit header,
+  CPU TSAN builds. This implementation adds no Win32/NT-handle code, CUDA Toolkit header,
   versioned CUDA library, or new platform branch.
 
 ### Dense Field Graph matrix

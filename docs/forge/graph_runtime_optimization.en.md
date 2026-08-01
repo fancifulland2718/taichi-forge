@@ -9,9 +9,10 @@ The static-Field feature contract is maintained separately in
 [Dense Field Graph](dense_field_graph.en.md).
 
 The base Graph modernization and native-node replay model first shipped in
-Forge 0.4.1. The stricter lifetime, backend replay, diagnostics, and Dense
-Field Graph contracts described here are the current 0.5.x contract; they do
-not reclassify the whole Graph API as a 0.5.0 addition.
+Forge 0.4.1. This page describes the current 0.6.0 lifetime, backend replay,
+structured-control, diagnostics, and Dense Field Graph contracts. See the
+[release notes](release_notes.en.md) for the introduction version of each
+capability.
 
 ## Scope and invariants
 
@@ -86,10 +87,13 @@ only AOT items added since the previous segment flush.
 
 Dense scalar, vector, and matrix Fields are supported as definition-time
 bindings. Their contents may change; identity, layout, shape, dtype, element
-shape, SNodeTree generation, and owning runtime may not be hot-rebound. Sparse
-topologies remain outside this contract. Heterogeneous engines should group
-homogeneous environments inside stable blocks and use explicit snapshot
-ownership between asynchronous simulation and rendering.
+shape, SNodeTree generation, and owning runtime may not be hot-rebound in that
+form. Bind a compatible Field to an `ArgKind.NDARRAY` runtime slot when its
+identity must change between invocations; every submission revalidates the
+storage descriptor and generation. Sparse topologies remain outside this dense
+storage contract. Heterogeneous applications should group homogeneous
+environments inside stable blocks and use explicit snapshot ownership between
+asynchronous simulation and rendering.
 
 The complete support matrix, lifecycle transaction, multi-environment layout,
 AD boundary, performance evidence, and Linux status are maintained in
@@ -624,9 +628,11 @@ observational.
 Graphs may contain native nodes produced by Forge's own DSL/native algorithm
 layer. Arbitrary user native callbacks are not supported. AOT serialization
 through `ti.aot.Module.add_graph()` accepts ordinary kernel CGraphs only, not
-graphs containing Forge native nodes. One graph is not promised to mix
-backends. Numeric-check result nodes replay device work; reading a result
-remains explicit.
+graphs containing Forge native nodes. Ordinary CGraphs and recordable providers
+may fuse into one backend region on the same active backend; every node must
+still match the runtime/backend where it was compiled, so this is not
+cross-device execution. Numeric-check result nodes replay device work; reading
+a result remains explicit.
 
 See [Native algorithms](native_algorithms.en.md) for primitive ownership and
 result APIs.

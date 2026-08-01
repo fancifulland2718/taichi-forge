@@ -6,13 +6,13 @@ sidebar_position: 2
 
 ## Target audience
 
-Developers who are interested in the compiler, computer graphics, or high-performance computing, and would like to contribute new features or bug fixes to the [Taichi programming language](https://github.com/taichi-dev/taichi).
+Developers who are interested in the compiler, computer graphics, or high-performance computing, and would like to contribute new features or bug fixes to [Taichi Forge](https://github.com/fancifulland2718/taichi-forge).
 
 :::danger IMPORTANT
 
-This installation guide is *NOT* intended for end users who only wish to do simulation or high performance numerical computation. We recommend that end users install Taichi via `pip install taichi`. There is no need for you to build Taichi from source.
+This installation guide is *NOT* intended for end users who only wish to do simulation or high performance numerical computation. End users should install Forge with `python -m pip install -U taichi-forge`; there is no need to build it from source.
 
-See the [Get Started](https://docs.taichi-lang.org/) for more information on quickly setting up Taichi for end users.
+See [Hello, World!](../get-started/hello_world.md) for the current package and import names.
 
 :::
 
@@ -108,23 +108,25 @@ For Windows developers, if none of the VS 2026 editions are installed, `build.py
 
 #### Install pre-built LLVM binaries
 
-`build.py` will automatically download and set up a suitable version of
-pre-built stock LLVM 19.1.x binaries. Taichi no longer maintains any
+`build.py` prefers pre-built stock LLVM 20.1.x binaries and may accept LLVM
+19.1.x as a development fallback where the build configuration allows it.
+Release-equivalent Taichi Forge 0.6.0 shim/runtime builds require LLVM 20.x;
+the fallback is not release qualification. Taichi no longer maintains any
 custom LLVM source patches — the only customizations are the CMake
 configuration flags used when building LLVM (`LLVM_ENABLE_RTTI=ON`,
 `LLVM_TARGETS_TO_BUILD="X86;NVPTX;AMDGPU"`, plus the `DirectX`
 experimental target on Windows).
 
-If you already have a compatible LLVM 19 install on your machine, set
+If you already have a compatible LLVM 20 install on your machine, set
 `LLVM_DIR` to point at `<prefix>/lib/cmake/llvm` and the downloader will
 be skipped.
 
 #### Alternatively, build LLVM from source
 
 <details>
-<summary><font color="#006284">Build LLVM 19.1.7 from source</font></summary>
+<summary><font color="#006284">Build LLVM 20.1.7 from source</font></summary>
 
-We provide instructions here if you need to build LLVM 19.1.7 from source.
+We provide instructions here if you need to build LLVM 20.1.7 from source.
 
 ````mdx-code-block
 <Tabs
@@ -137,7 +139,7 @@ We provide instructions here if you need to build LLVM 19.1.7 from source.
 <TabItem value="linux">
 
 ```shell
-git clone --depth 1 --branch llvmorg-19.1.7 https://github.com/llvm/llvm-project.git
+git clone --depth 1 --branch llvmorg-20.1.7 https://github.com/llvm/llvm-project.git
 
 cd llvm-project/llvm
 
@@ -162,7 +164,7 @@ ninja -j 8
 ninja install
 
 # Check your LLVM installation
-installed/bin/llvm-config --version  # You should get 19.1.7
+installed/bin/llvm-config --version  # You should get 20.1.7
 ```
 
 </TabItem>
@@ -170,7 +172,7 @@ installed/bin/llvm-config --version  # You should get 19.1.7
 <TabItem value="windows">
 
 ```shell
-# LLVM 19.1.7 + MSVC 2026 (Visual Studio 18.x)
+# LLVM 20.1.7 + MSVC 2026 (Visual Studio 18.x)
 
 cmake .. -G Ninja ^
   -DCMAKE_BUILD_TYPE=Release ^
@@ -340,9 +342,9 @@ On Windows, Vulkan SDK requires elevated privileges to install (the installer wo
 <TabItem value="linux">
 
   ```shell
-  git clone --recursive https://github.com/taichi-dev/taichi
+  git clone --recursive https://github.com/fancifulland2718/taichi-forge
 
-  cd taichi
+  cd taichi-forge
 
   # Customize with your own needs
   export TAICHI_CMAKE_ARGS="-DTI_WITH_VULKAN:BOOL=ON -DTI_WITH_CUDA:BOOL=ON"
@@ -364,9 +366,9 @@ On Windows, Vulkan SDK requires elevated privileges to install (the installer wo
 <TabItem value="windows">
 
   ```shell
-  git clone --recursive https://github.com/taichi-dev/taichi
+  git clone --recursive https://github.com/fancifulland2718/taichi-forge
 
-  cd taichi
+  cd taichi-forge
 
   # Customize with your own needs
   $env:TAICHI_CMAKE_ARGS += " -DTI_WITH_VULKAN:BOOL=ON -DTI_WITH_CUDA:BOOL=ON"
@@ -469,7 +471,7 @@ A typical cache dir will contain sub folders below:
 | ---------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | bootstrap        | Contains Python packages used by `build.py` itself            | [bootstrap.py](https://github.com/taichi-dev/taichi/blob/master/.github/workflows/scripts/ti_build/bootstrap.py) |
 | deps             | Downloaded external dependencies, before extract/install      | [dep.py](https://github.com/taichi-dev/taichi/blob/master/.github/workflows/scripts/ti_build/dep.py)             |
-| llvm15           | Managed pre-built LLVM binaries                               | [llvm.py](https://github.com/taichi-dev/taichi/blob/master/.github/workflows/scripts/ti_build/llvm.py)           |
+| `llvm20-*` / `llvm19-*` | Managed LLVM binaries; LLVM 20 is the release-equivalent path | [`llvm.py`](../../../../.github/workflows/scripts/ti_build/llvm.py)                                      |
 | mambaforge       | Managed conda environment dedicated to build / develop Taichi | [python.py](https://github.com/taichi-dev/taichi/blob/master/.github/workflows/scripts/ti_build/python.py)       |
 | sccache          | Compile cache                                                 | [sccache.py](https://github.com/taichi-dev/taichi/blob/master/.github/workflows/scripts/ti_build/sccache.py)     |
 | vulkan-1.x.xxx.x | Vulkan SDK location                                           | [vulkan.py](https://github.com/taichi-dev/taichi/blob/master/.github/workflows/scripts/ti_build/vulkan.py)       |
@@ -590,4 +592,4 @@ Run the following commands to enter development shell:
 
 - See [Installation Troubleshooting](../faqs/install.md) for issues that may share with the end-user installation.
 
-- If you encounter any issue that is not covered here, feel free to report it by [opening an issue on GitHub](https://github.com/taichi-dev/taichi/issues/new?labels=potential+bug&template=bug_report.md) and including the details. We are always there to help!
+- If you encounter an issue that is not covered here, report it in the [Taichi Forge issue tracker](https://github.com/fancifulland2718/taichi-forge/issues) with the relevant diagnostics.

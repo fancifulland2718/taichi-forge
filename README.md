@@ -53,7 +53,7 @@ list as the whole history.
 
 | Release | User-visible scope |
 | --- | --- |
-| [0.6.0](docs/forge/release_notes.en.md#060) | Structured Graph control and telemetry; sparse runtime/assembly and provider-neutral Krylov tooling; driver-only CUDA primitives; CUDA-Vulkan display sharing; cache, allocator, and lifecycle hardening. |
+| [0.6.0](docs/forge/release_notes.en.md#060) | Structured Graph control/telemetry and Vulkan indirect dispatch; runtime-bound linear operators, sparse runtime, and Krylov tooling; driver-only CUDA primitives; managed dense/external interoperability and CUDA-Vulkan display sharing; edge layouts/font scaling; correctness and lifecycle hardening. |
 | [0.5.0](docs/forge/release_notes.en.md#050) | Post-`0.4.25` async backend/runtime safety and bounded observability; CUDA/Vulkan Graph replay and lifetime hardening; Dense Field Graph, strict argument/AD contracts, and block-level heterogeneous environments. |
 | [0.4.25](docs/forge/release_notes.en.md#0425) | GGUI event-pump and empty-ImGui-frame lifecycle fixes. |
 | [0.4.24](docs/forge/release_notes.en.md#0424) | Device-side GGUI image packing and render-cadence improvements. |

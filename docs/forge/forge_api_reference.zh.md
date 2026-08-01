@@ -1,10 +1,10 @@
 # Taichi Forge API 参考
 
-> 适用于 **Taichi Forge 0.5.x** 发布线。本文只列 Forge-only 的公开 API 入口。
+> 适用于 **Taichi Forge 0.6.0**。本文只列 Forge-only 的公开 API 入口。
 > 加在 Taichi 兼容 API 里的新选项，例如 `ti.init(...)` 关键字参数和
 > `@ti.kernel(...)` 关键字选项，仍统一放在 [Forge 选项](forge_options.zh.md)。
-> API 首次公开版本统一见[版本更新说明](release_notes.zh.md)；本文适用于 `0.5.x`
-> 并不表示所有列出的符号都在 `0.5.0` 才新增。
+> API 首次公开版本统一见[版本更新说明](release_notes.zh.md)；当前页描述 0.6.0
+> 合同，并不表示所有列出的符号都在该版本才新增。
 
 Taichi Forge 保留 vanilla Taichi 的 DSL 模型，同时增加了编译控制、native
 device primitive、graph replay、显示帧提交、稀疏布局实验能力和诊断 API。
@@ -102,7 +102,7 @@ ti.compile_kernels([
 
 ### 扩展的 `ti.ad.FwdMode` field seed
 
-当前未发布的 Forge 源码允许把一个 dense `ScalarField`、`VectorField` 或
+Taichi Forge 0.6.0 允许把一个 dense `ScalarField`、`VectorField` 或
 `MatrixField` 作为 `param` 参数组；该 field 必须具有 dual storage。`seed` 可以是：
 
 - shape 为 `param.shape + element_shape` 的 array；scalar、vector、matrix field 的
@@ -452,7 +452,7 @@ run 顺序；因此已排序输入自然得到全局 sorted unique key。`unique
 run 的第一个 payload。unique-by-key 接受 StructNdarray raw payload；dense
 MatrixField payload 当前要求输入输出同形且元素为 `ti.i32`。
 
-首版 key 只支持 `i32/u32/i64/u64`。`size` 是可选 Python integer，选择固定容量
+当前 RLE/Unique 合同的 key 支持 `i32/u32/i64/u64`。`size` 是可选 Python integer，选择固定容量
 storage 的 active prefix `[0, size)`；默认使用完整输入容量。`size=0` 表示逻辑
 空输入，因为 Taichi dense array 本身不能具有物理 shape 0。输出容量仍必须至少等于
 物理输入容量。
@@ -505,7 +505,7 @@ scalar 1D plain ndarray，或 root-dense field；元素可为
 `i32/u32/i64/u64/f32/f64`。Reduce output 必须恰有每 segment 一个元素，并与输入
 disjoint；scan output 必须恰为 `capacity`，可 exact in-place 或 disjoint。
 只有 `num_items` 以下的 scan prefix 有定义；padded tail 只是容量 storage，不是额外
-segment。首版不支持 matrix field、StructNdarray view/raw payload 与 sparse SNode，
+segment。当前合同不支持 matrix field、StructNdarray view/raw payload 与 sparse SNode，
 也只实现 `op="sum"`。
 
 Reduce 的 `method="auto"` 在可用时让 ndarray 走 grouped provider，dense field
@@ -781,8 +781,10 @@ symbol/lowering。
 `Sequential` 提供相同的 `while`/`if`/`switch` API，因此任一 region kind 都可再包含
 一层结构化控制。depth=2 语义保持精确：CPU 对完整 tree 使用精确 host control；parent
 使用 exact portable control，满足资格的 `auto` leaf 可保留已有 flat native route：
-CUDA `while`/`if`/`switch` 或 Vulkan `while`。这只是 leaf 优化，不是原生 depth=2 submission。
-nested definition 会拒绝 `lowering_mode="native_required"`，且所有 depth=2 Graph 当前
+CUDA `while`/`if`/`switch` 或 Vulkan `while`。这是默认的 portable-parent/native-leaf
+路径，不代表通用的原生 depth=2 合同；满足严格资格的 Vulkan `while` 包含 `while`
+定义还可升级到下述单次同步 bounded replay。nested definition 会拒绝显式
+`lowering_mode="native_required"`，且所有 depth=2 Graph 当前
 都不支持异步 `submit()`。
 
 Vulkan 提供两种不同的 `while` 路径。`portable` 保留由 host 观测的精确 replay。满足资格

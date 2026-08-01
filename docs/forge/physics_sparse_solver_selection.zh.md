@@ -1,6 +1,6 @@
 # Taichi Forge 物理稀疏算子与求解器选择指南
 
-> 适用于 Taichi Forge **0.5.x** 发布线。
+> 适用于 Taichi Forge **0.6.0**。
 
 [English version](physics_sparse_solver_selection.en.md)
 

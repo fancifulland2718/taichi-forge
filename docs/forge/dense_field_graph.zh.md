@@ -2,7 +2,7 @@
 
 > 首次公开于 `0.5.0`；版本归属见[版本更新说明](release_notes.zh.md)。
 
-Dense Field Graph 是 Taichi Forge `0.5.x` 的能力，用于编译和 replay 闭包引用或通过
+Dense Field Graph 首次公开于 Taichi Forge `0.5.0`，本文描述当前 `0.6.0` 合同，用于编译和 replay 闭包引用或通过
 runtime 参数接收 dense `ti.field`、vector Field 与 matrix Field 的 kernel。静态 Field
 binding 与 runtime dense-storage binding 使用同一套公开 `ti.graph.GraphBuilder` API，
 且都不复制 Field payload。
@@ -94,7 +94,7 @@ pointer、bitmasked、dynamic、hash、activation-list 等稀疏拓扑不属于�
 
 ## Binding 与生命周期
 
-闭包引用或通过 	emplate_args 绑定的 Field payload 可变，但 binding 是静态的：
+闭包引用或通过 `template_args` 绑定的 Field payload 可变，但 binding 是静态的：
 
 | 不同 run 之间可变 | 必须重建 Graph |
 | --- | --- |
@@ -172,16 +172,17 @@ heterogeneous engine
 Forge 不通过 pointer 或 cache-key 技巧合并任意 owner；安全的透明合并需要新的 runtime
 Field-binding ABI。
 
-### 0.5.0 发布边界
+### 当前 0.6.0 边界
 
-Taichi Forge 0.5.0 通过现有公开 Graph API 支持上述 block 模型：引擎可以持有和调度
-多张独立编译的 Graph，各自使用稳定但不同的 solver、layout、shape 或 feature
-signature；每个 block 内批处理同构环境。若域随机化不改变 signature，则继续留在
-block 内；改变 signature 的环境应进入另一个已预编译 block。
+Taichi Forge 0.6.0 继续支持上述 block 模型：应用可以持有和调度多张独立编译的 Graph，
+各自使用稳定但不同的 solver、layout、shape 或 feature signature，并在每个 block 内批处理
+同构环境。若域随机化不改变 signature，则继续留在 block 内；改变 signature 的环境应进入
+另一张已预编译 Graph。
 
-0.5.0 的兼容承诺不包含统一异构编排 DSL、自动跨 block 调度器、动态 Field 重绑定或
-跨设备依赖规划器。这些能力需要独立的引擎/runtime 合同，可以在 0.5.0 之后增加，
-而不改变本文的静态 Field binding 与 Graph replay 合同。
+0.6.0 同时允许 `ArgKind.NDARRAY` slot 在 invocation 之间绑定不同但兼容的 runtime dense
+Field；该路径会重新验证 Program、SNodeTree generation、layout fingerprint 与 byte range，
+不复制 payload。闭包或 `template_args` Field 仍是静态 binding。0.6.0 不提供统一异构编排
+DSL、自动跨 block 调度器、结构变化的 Field 热重绑定或跨设备依赖规划器。
 
 持久 offline cache 与有计划的 prewarm 可以减少重复编译成本，同时不削弱 identity 或
 lifetime 校验。

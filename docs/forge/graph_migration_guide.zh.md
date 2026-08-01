@@ -2,6 +2,8 @@
 
 > 基础 Graph modernization 与 native replay 模型首次公开于 `0.4.1`；Dense Field
 > Graph、replay 生命周期加固、诊断和更严格的并发/AD 合同属于 `0.5.0`。
+> `0.6.0` 增加结构化控制、异步 ticket/pacing、runtime dense-storage binding、
+> recordable operator action 与 Vulkan device-written indirect dispatch。
 > 版本归属见[版本更新说明](release_notes.zh.md)。
 
 本文说明 Forge graph 相比 vanilla Taichi 1.7.4 的公开行为与兼容边界。后端架构、性能、
@@ -29,21 +31,31 @@ Forge 保留用户熟悉的 graph builder 表面：
 
 ## Forge 增加的能力
 
-Forge 在公开 API 之下增加 backend-owned execution planning，用于支持更快的 replay 路径
-和 DSL-defined native algorithm replay，不要求用户学习新的 graph API。
+Forge 保留 graph-builder 模型，并增加显式 Forge extension 与 backend-owned execution
+planning，用于结构化控制、异步提交、device-driven dispatch 和 DSL-defined native replay。
 
 用户可见的新增能力包括：
 
 - `GraphBuilder.dispatch()` 与 `Sequential.dispatch()` 可通过 keyword-only
   `template_args=` 正式绑定 data-oriented `self`、Field 等构图期参数；
 - scalar、matrix、ndarray、texture 与 RW texture 的 runtime 参数路径；
+- 兼容 dense Field、`DenseNdarrayView` 与受管 external storage 的 runtime-storage binding；
+- `GraphBuilder.while_loop()`、`if_then_else()`、`switch()` 与最大 depth=2 的
+  structured `Sequential`；
+- `GraphBuilder.dispatch_indirect()` / `Sequential.dispatch_indirect()` 的 Vulkan
+  device-written 单 task 路径；CPU/CUDA 当前明确失败；
+- `Graph.submit()`、`SubmissionTicket`、opt-in region telemetry 与共享
+  `SubmissionPacer`；
 - 优化 replay 路径不支持时稳定回退到 ordinary dispatch；
 - 公开 `Graph.execution_stats()` execution/fallback/resource report；
+- `Graph.control_flow_stats()` 与 `Graph.run(trace=True)` 的停止位置/分支报告；
 - 可显式 dispatch `kernel.grad`，在自动 AD context 外手工管理 gradient Graph；
 - algorithm 层生成的 Forge-defined primitive sequence 可内部 native replay；
 - `GraphBuilder.append_native(node, prewarm=False)` 可追加
   `PrimitiveSequence`、`DeviceCheckResult`、`DeviceMetricResult` 等
-  Forge DSL-defined node。
+  Forge DSL-defined node；
+- `LinearOperator.graph_action()` 等合格 recordable provider action 可进入 Graph root 或
+  structured body，并与相邻 ordinary CGraph 合并为 same-backend region。
 
 ## 定义与生命周期合同
 
@@ -54,8 +66,10 @@ Forge 在公开 API 之下增加 backend-owned execution planning，用于支持
 - 同一个 `Graph` 的一次调用是完整 host invocation；不同 graph 仍可独立提交，该保护
   不等待 GPU 完成，也不增加默认 `ti.sync()`；
 - `ti.reset()` 会使旧 runtime 的 graph 失效，reset 后应重建 builder 与 graph；
-- dense Field 是 definition-time binding；内容可变，但替换 identity/layout 或销毁其带
-  generation 的 SNodeTree 后必须重建 Graph。复用相同数值 tree id 不会恢复旧 Graph；
+- 闭包或 `template_args` dense Field 是 definition-time binding；内容可变，但替换
+  identity/layout 或销毁其带 generation 的 SNodeTree 后必须重建 Graph。需要在 run 之间
+  替换兼容 dense Field 时，使用 `ArgKind.NDARRAY` runtime slot；复用相同数值 tree id
+  不会恢复旧静态 binding；
 - 结构相同的 runtime resource 可使用后端 replay；结构变化可触发 recapture 或 fallback，
   两条路径都保持 binding 与执行语义；
 - runtime graph 安全不能替代应用对共享仿真/渲染数据使用 snapshot、slot 或
@@ -105,7 +119,8 @@ Native graph 支持有意保持窄边界：
 - 不支持：任意用户 native callback 直接放入 graph；
 - 不支持：包含 Forge native node 的 graph 做 AOT 序列化；
   `ti.aot.Module.add_graph()` 只接受普通 kernel CGraph；
-- 不承诺：同一个 graph 内跨 backend 执行；
+- same-backend ordinary CGraph 与 recordable provider 可以融合；所有 node 必须匹配 active
+  runtime/backend，不支持借此跨设备执行；
 - 数值检查 result node 只 replay device-side native 工作，读取结果仍须显式调用
   `to_int()`、`to_bool()`、`ok()` 或 `to_float()`。
 

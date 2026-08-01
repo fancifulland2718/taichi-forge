@@ -31,15 +31,15 @@ sidebar_position: 2
   i.e.,
 
   ```
-  ERROR: Could not find a version that satisfies the requirement taichi (from versions: none)
-  ERROR: No matching distribution found for taichi
+  ERROR: Could not find a version that satisfies the requirement taichi-forge (from versions: none)
+  ERROR: No matching distribution found for taichi-forge
   ```
 
-  - Make sure you're using Python version 3.9/3.10:
+  - Make sure you're using a supported 64-bit Python version, currently 3.10--3.14:
 
     ```bash
     python3 -c "import sys;print(sys.version[:sys.version.find('.', 2)])"
-    # 3.9, or 3.10
+    # 3.10 through 3.14
     ```
 
   - Make sure your Python executable is 64-bit:
@@ -50,24 +50,6 @@ sidebar_position: 2
     ```
 
 ## CUDA issues
-
-- If Taichi crashes with the following errors:
-
-  ```
-  [Taichi] mode=release
-  [Taichi] version 0.6.0, supported archs: [cpu, cuda, opengl], commit 14094f25, python 3.8.2
-  [W 05/14/20 10:46:49.549] [cuda_driver.h:call_with_warning@60] CUDA Error CUDA_ERROR_INVALID_DEVICE: invalid device ordinal while calling mem_advise (cuMemAdvise)
-  [E 05/14/20 10:46:49.911] Received signal 7 (Bus error)
-  ```
-
-  This might be because that your NVIDIA GPU is pre-Pascal, and it
-  has limited support for [Unified
-  Memory](https://www.nextplatform.com/2019/01/24/unified-memory-the-final-piece-of-the-gpu-programming-puzzle/).
-
-  - **Possible solution**: add `export TI_USE_UNIFIED_MEMORY=0` to
-    your `~/.bashrc`. This disables unified memory usage in the CUDA
-    backend.
-
 
 - If Taichi exits with message "Out of CUDA pre-allocated memory", e.g.,
 
@@ -97,16 +79,15 @@ sidebar_position: 2
   Consider using ti.init(device_memory_fraction=0.9) or ti.init(device_memory_GB=4) to allocate more GPU memory` failed.
   ```
 
-  This usually happens when you are using sparse data structures that need dynamic GPU memory allocation.
-  On platforms without CUDA unified memory support (e.g., Windows),
-  Taichi only pre-allocates 1 GB of GPU memory for dynamically allocated data structures.
-  To fix this, simply pre-allocate more GPU memory:
-
-    1. Set `ti.init(..., device_memory_fraction=0.9)` to allocate 90% of GPU memory. Replace "90%" with any other fraction depending on your hardware.
-    2. Set `ti.init(..., device_memory_GB=4)` to allocate 4 GB GPU memory. Feel free to use any number bigger than 1.
-    3. Setting environment variables `TI_DEVICE_MEMORY_FRACTION=0.9` and `TI_DEVICE_MEMORY_GB=4` would also work.
-
-  Note that on Linux, Taichi automatically grows the memory pool using CUDA unified memory mechanisms.
+  Current Forge releases derive the default CUDA sparse pool from the
+  materialized SNode tree. This error therefore normally means that an
+  explicitly selected fixed budget is too small, or that the active sparse
+  topology exceeds its declared bound. Increase
+  `cuda_sparse_pool_size_GB`, use an appropriate positive
+  `device_memory_fraction`, or reduce the declared sparse capacity. Do not use
+  `device_memory_GB` as a silent cap for the default auto-sized path. See
+  [Forge options](../../../forge/forge_options.en.md#26-cuda-sparse-memory-pool)
+  for the current precedence and memory contract.
 
 - If you find other CUDA problems:
 
@@ -129,9 +110,9 @@ sidebar_position: 2
 
   ... (many lines, omitted)
 
-  /lib/python3.8/site-packages/taichi/core/../lib/taichi_python.so: _glfwPlatformCreateWindow
-  /lib/python3.8/site-packages/taichi/core/../lib/taichi_python.so: glfwCreateWindow
-  /lib/python3.8/site-packages/taichi/core/../lib/taichi_python.so: taichi::lang::opengl::initialize_opengl(bool)
+  /path/to/site-packages/taichi_forge/_lib/core/taichi_python.so: _glfwPlatformCreateWindow
+  /path/to/site-packages/taichi_forge/_lib/core/taichi_python.so: glfwCreateWindow
+  /path/to/site-packages/taichi_forge/_lib/core/taichi_python.so: taichi::lang::opengl::initialize_opengl(bool)
 
   ... (many lines, omitted)
   ```
@@ -139,22 +120,25 @@ sidebar_position: 2
   it is likely because you are running Taichi on a (virtual) machine
   with an old OpenGL API. Taichi requires OpenGL 4.3+ to work.
 
-  - **Possible solution**: add `export TI_ENABLE_OPENGL=0` to your
-    `~/.bashrc` even if you initialize Taichi with other backends
-    than OpenGL. This disables the OpenGL backend detection to avoid
-    incompatibilities.
+  - **Possible solution**: select a supported non-OpenGL backend explicitly,
+    for example `ti.init(arch=ti.cpu)` or a qualified Vulkan backend, and do
+    not create an OpenGL window in a headless process. Forge does not document
+    the historical `TI_ENABLE_OPENGL` environment switch as a current runtime
+    contract.
 
 ## Installation interrupted
-During the installation, the downloading process is interrupted because of `HTTPSConnection` error. You can try installing Taichi from a mirror source.
+If installation is interrupted by an `HTTPSConnection` error, retry with a
+larger timeout. If you use a PyPI-compatible mirror, verify that it carries
+both the `taichi-forge` shim and the exact matching `taichi-forge-runtime`
+version.
 
 ```
-pip install taichi -i https://pypi.douban.com/simple
+python -m pip install -U taichi-forge --retries 10 --timeout 60
 ```
 
 ## Other issues
 
-- If none of those above address your problem, please report this by
-  [opening an
-  issue](https://github.com/taichi-dev/taichi/issues/new?labels=potential+bug&template=bug_report.md)
-  on GitHub. This would help us improve user experiences and
-  compatibility, many thanks!
+- If none of the above addresses your problem, report it in the
+  [Taichi Forge issue tracker](https://github.com/fancifulland2718/taichi-forge/issues)
+  with `ti diagnose`, the loaded package path, backend, driver, and wheel
+  versions.

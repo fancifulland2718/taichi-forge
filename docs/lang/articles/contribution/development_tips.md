@@ -14,8 +14,9 @@ which explains the whole compilation process step by step.
 
 ## C++ and Python standards
 
-The C++ part of the Taichi compiler is written in C++17, and the Python part in 3.7+.
-You can assume that C++17 and Python 3.7 features are always available.
+The C++ part of the Taichi compiler is written in C++17, and the supported
+Forge wheel line starts at Python 3.10. You can assume that C++17 and Python
+3.10 features are available.
 
 ## Efficient code navigation across Python/C++
 

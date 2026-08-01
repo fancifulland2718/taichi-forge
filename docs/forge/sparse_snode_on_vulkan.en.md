@@ -1,6 +1,6 @@
 # Sparse SNode on Vulkan — User Guide
 
-> Vulkan sparse SNode support was introduced across historical Forge 0.3.0–0.3.2 releases, matured through 0.3.12, and added experimental `hash` in 0.3.13. This guide describes the current 0.5.x contract; it does not treat those capabilities as 0.5.0 additions. Some historical wheel artifacts may no longer be retained on PyPI because of project storage limits.
+> Vulkan sparse SNode support was introduced across historical Forge 0.3.0–0.3.2 releases, matured through 0.3.12, and added experimental `hash` in 0.3.13. This guide describes the current 0.6.0 contract; it does not treat those capabilities as 0.6.0 additions. Some historical wheel artifacts may no longer be retained on PyPI because of project storage limits.
 
 ---
 
@@ -59,7 +59,7 @@ Optional build-time switches (default ON; touch only when bisecting a regression
 
 > **Two historical semantic deviations from the LLVM cpu/cuda backend, both now fixed:**
 > 1. ✅ Fixed (0.3.1): inactive sparse-cell reads return the dtype's zero value.
-> 2. ✅ Fixed (0.3.2, 2026-05-02): 3D pointer **full activation** device-lost is resolved by the C-9 deterministic-slot codegen path; details under "Bug 2" below.
+> 2. ✅ Fixed (0.3.2, 2026-05-02): 3D pointer **full activation** device-lost is resolved by the deterministic-slot codegen path; details under "Bug 2" below.
 
 ### ✅ Fixed bug 1 (0.3.1, 2026-04-30): inactive sparse-cell reads return zero
 
@@ -80,7 +80,7 @@ LLVM cpu / cuda guarantees that reading an inactive sparse cell returns the dtyp
 
 **Historical symptom**: the write kernel completed (`atomic_add` counter was correct) but the next dispatch hit `RHI Error: (-4) vkQueueSubmit failed` / on Windows the process aborted with code `0xC0000409`.
 
-**0.3.2 fix (C-9 deterministic-slot codegen)**: after observing that the default `pool_capacity == total_num_cells_from_root` (i.e. always equals the number of outer cells), pointer activation no longer needs an atomic allocator — every outer cell gets a statically assigned unique pool slot `new_slot = idx_u32 + 1 ∈ [1, capacity]`. The SPIR-V emission collapses to a single `OpAtomicCompareExchange(slot, 0, new_slot)`, replacing the previous four-instruction chain (`CAS-marker + atomicIAdd(watermark) + atomicStore + structured spin-loop`). All threads racing on the same outer cell compute the same `new_slot`, so the spin-loop disappears entirely along with the warp-lockstep deadlock.
+**0.3.2 fix (deterministic-slot codegen)**: after observing that the default `pool_capacity == total_num_cells_from_root` (i.e. always equals the number of outer cells), pointer activation no longer needs an atomic allocator — every outer cell gets a statically assigned unique pool slot `new_slot = idx_u32 + 1 ∈ [1, capacity]`. The SPIR-V emission collapses to a single `OpAtomicCompareExchange(slot, 0, new_slot)`, replacing the previous four-instruction chain (`CAS-marker + atomicIAdd(watermark) + atomicStore + structured spin-loop`). All threads racing on the same outer cell compute the same `new_slot`, so the spin-loop disappears entirely along with the warp-lockstep deadlock.
 
 Acceptance test: [tests/p4/g10p1_user_repro.py](../../tests/p4/g10p1_user_repro.py) (5 consecutive runs Vulkan rc=0, cpu/cuda/vulkan sums equivalent within ±1e-5 single-precision tolerance).
 
@@ -277,7 +277,7 @@ Full API, supported topologies, tuning knobs, and migration notes: [hash_snode.e
 - The frontend extension gate is opt-in via `ti.init(arch=ti.vulkan, vulkan_quant_experimental=True)` or the env var `TI_VULKAN_QUANT=1` (see [forge_options.en.md](forge_options.en.md) §3). Default is OFF and behaves identically to vanilla 1.7.4 (the quant codegen entry points raise `TI_ERROR` immediately).
 - Supported with the gate ON:
   - **`quant_array`**: `QuantInt` / `QuantFixed` member **read + write (including multi-threaded concurrent `ti.atomic_add` via a SPIR-V `OpAtomicCompareExchange` spin RMW)**, byte-equivalent to the cpu / cuda backends.
-  - **`bit_struct` / `BitpackedFields(max_num_bits=32 or 64)`**: multi-field same-word RMW write (the `optimize_bit_struct_stores` IR pass coalesces per-field stores into a single `BitStructStoreStmt` under the default `quant_opt_atomic_demotion=ON`; the residual `is_atomic == true` path uses the same CAS-loop), byte-equivalent to cpu / cuda. The MPM-style 11/11/10 quant_fixed packed-position baseline [tests/p4/g9_quant_baseline.py](https://github.com/taichi-dev/taichi/blob/master/tests/p4/g9_quant_baseline.py) reports `max_err = 9.77e-4 ≤ bound 1.95e-3` on all three backends; the concurrent-atomic-add race baseline [tests/p4/g9_quant_atomic_race.py](https://github.com/taichi-dev/taichi/blob/master/tests/p4/g9_quant_atomic_race.py) (N=1024, K=64-way same-word contention) reports `max_err = 3.94e-3 ≤ bound 1.57e-2` on all three.
+  - **`bit_struct` / `BitpackedFields(max_num_bits=32 or 64)`**: multi-field same-word RMW write (the `optimize_bit_struct_stores` IR pass coalesces per-field stores into a single `BitStructStoreStmt` under the default `quant_opt_atomic_demotion=ON`; the residual `is_atomic == true` path uses the same CAS-loop), byte-equivalent to cpu / cuda. The MPM-style 11/11/10 quant_fixed packed-position baseline [tests/p4/g9_quant_baseline.py](../../tests/p4/g9_quant_baseline.py) reports `max_err = 9.77e-4 ≤ bound 1.95e-3` on all three backends; the concurrent-atomic-add race baseline [tests/p4/g9_quant_atomic_race.py](../../tests/p4/g9_quant_atomic_race.py) (N=1024, K=64-way same-word contention) reports `max_err = 3.94e-3 ≤ bound 1.57e-2` on all three.
   - **Atomic add** `ti.atomic_add(quant_field, delta)`: only `AtomicOpType::add` is implemented; physical_type must be i32 or i64 (matches the LLVM `quant_type_atomic` constraint). The SSA return value is the input `delta` (not the old field) — almost no user code consumes the return value of an `atomic_add` on a quant member, so the dequant round-trip is skipped.
 - **Not yet supported**:
   - **`QuantFloat` shared-exponent** (`ti.types.quant.float(...)` + `BitpackedFields(shared_exponent=True)`): `TI_NOT_IMPLEMENTED` at the visitor entry. **Explicitly deferred**: this fork has no shared-exponent demo driving it (the original requirement is quant_fixed) and the float bit-manipulation path carries non-trivial cross-driver rounding/denormal risk. Production workloads that need it should keep using the LLVM cpu / cuda backend.
@@ -289,7 +289,7 @@ Workarounds when the gate is OFF or when an unsupported codegen site is hit:
 - Use `ti.f16` (half precision) as a poor man's quantization.
 - Pack manually with bit operations on `ti.u32` fields.
 
-Regression baselines: [tests/p4/g9_quant_baseline.py](https://github.com/taichi-dev/taichi/blob/master/tests/p4/g9_quant_baseline.py) (`bit_struct` MPM-style 11/11/10 packing), [tests/p4/g9_quant_array_baseline.py](https://github.com/taichi-dev/taichi/blob/master/tests/p4/g9_quant_array_baseline.py) (`quant_array` 8-bit single field), and [tests/p4/g9_quant_atomic_race.py](https://github.com/taichi-dev/taichi/blob/master/tests/p4/g9_quant_atomic_race.py) (`atomic_add` multi-thread same-word contention).
+Regression baselines: [tests/p4/g9_quant_baseline.py](../../tests/p4/g9_quant_baseline.py) (`bit_struct` MPM-style 11/11/10 packing), [tests/p4/g9_quant_array_baseline.py](../../tests/p4/g9_quant_array_baseline.py) (`quant_array` 8-bit single field), and [tests/p4/g9_quant_atomic_race.py](../../tests/p4/g9_quant_atomic_race.py) (`atomic_add` multi-thread same-word contention).
 
 ---
 

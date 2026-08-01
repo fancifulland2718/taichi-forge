@@ -13,15 +13,18 @@ Additionally, Taichi also has an ahead-of-time (AOT) system for exporting code t
 
 ## Prerequisites
 
-- Python: 3.9/3.10 (64-bit)
-- OS: Windows, OS X, and Linux (64-bit)
+- Python: 3.10--3.14 (64-bit)
+- Published wheel platforms: Windows x86_64 and Ubuntu 22.04 x86_64. Other
+  operating systems require a source build and are outside the 0.6.0
+  release-wheel qualification matrix.
 
 ## Installation
 
-Taichi is available as a PyPI package:
+Taichi Forge is available as a split shim/runtime PyPI package. Install the
+shim; pip resolves the matching runtime wheel automatically:
 
 ```bash
-pip install taichi
+python -m pip install -U taichi-forge
 ```
 
 ## Hello, world!
@@ -263,16 +266,13 @@ To access the complete list of Taichi examples, run `ti example`. Here are some 
 
 ## Supported systems and backends
 
-The table below provides an overview of the operating systems supported by Taichi and the corresponding backends that are compatible with these platforms:
-
-| **platform** |      **CPU**       |      **CUDA**      |     **OpenGL**     |     **Metal**      |    **Vulkan**    |
-| :----------: | :----------------: | :----------------: | :----------------: | :----------------: | :----------------: |
-|   Windows    | :heavy_check_mark: | :heavy_check_mark: | :heavy_check_mark: |        N/A         | :heavy_check_mark: |
-|    Linux     | :heavy_check_mark: | :heavy_check_mark: | :heavy_check_mark: |        N/A         | :heavy_check_mark: |
-|    macOS     | :heavy_check_mark: |        N/A         |        N/A         | :heavy_check_mark: | :heavy_check_mark: |
-
-- :heavy_check_mark:: supported;
-- N/A: not available
+Taichi Forge 0.6.0 publishes split shim/runtime wheels for Windows x86_64 and
+Ubuntu 22.04 x86_64 with Python 3.10 through 3.14. CPU, CUDA, and Vulkan are the
+first-class backend targets. Release builds also include OpenGL, but a specific
+device/backend combination must still pass runtime capability detection.
+macOS/Metal and other source-built combinations are not claims of the public
+0.6.0 wheel matrix. See [Building Forge wheels](../../../forge/build_wheels.en.md)
+and the backend-specific topic guides for exact qualification boundaries.
 
 You are now prepared to begin writing your own Taichi programs. The following documents provide more information about how to utilize Taichi in some of its typical application scenarios:
 

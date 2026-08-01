@@ -1,12 +1,12 @@
 # Taichi Forge API Reference
 
-> Applies to the **Taichi Forge 0.5.x** release line. This page lists Forge-only public API
+> Applies to **Taichi Forge 0.6.0**. This page lists Forge-only public API
 > entry points. New options added to Taichi-compatible APIs, such as
 > `ti.init(...)` keywords and `@ti.kernel(...)` keyword options, stay in
 > [Forge options](forge_options.en.md).
 > API introduction versions are indexed separately in
-> [release notes](release_notes.en.md); applying this page to `0.5.x` does not
-> imply that every listed symbol was introduced in `0.5.0`.
+> [release notes](release_notes.en.md). This page describes the 0.6.0 contract;
+> it does not imply that every listed symbol was introduced in that release.
 
 Taichi Forge keeps the vanilla Taichi DSL model, but adds APIs for compile
 control, native device primitives, graph replay, display submission, sparse
@@ -113,7 +113,7 @@ Alias: `ti.parallel_compile(kernels)`.
 
 ### Extended `ti.ad.FwdMode` field seeds
 
-Current Unreleased Forge sources accept one dense `ScalarField`, `VectorField`,
+Taichi Forge 0.6.0 accepts one dense `ScalarField`, `VectorField`,
 or `MatrixField` as the `param` group. The field must have dual storage. `seed`
 may be either:
 
@@ -518,7 +518,7 @@ in each run. StructNdarray raw payloads are accepted by unique-by-key. Dense
 MatrixField payloads currently require matching input/output shapes and
 `ti.i32` elements.
 
-Only integer keys (`i32/u32/i64/u64`) are supported in the first release.
+The current RLE/Unique contract supports integer keys (`i32/u32/i64/u64`).
 `size` is an optional Python integer selecting the active prefix
 `[0, size)` of fixed-capacity storage. It defaults to the full input capacity;
 `size=0` represents a logical empty input even though Taichi dense arrays
@@ -579,7 +579,7 @@ segment and must be disjoint from input. Scan output has exactly `capacity`
 elements and may be exactly in-place or disjoint. Only the scan prefix below
 `num_items` is defined; the padded tail is capacity storage, not another
 segment. Matrix fields, StructNdarray views/raw payloads, and sparse SNodes are
-not supported in the first release. Only `op="sum"` is implemented.
+not supported by the current contract. Only `op="sum"` is implemented.
 
 Reduce `method="auto"` uses the grouped ndarray provider where possible and
 the stable segment-local `serial` method for dense fields. Integer results are
@@ -889,8 +889,11 @@ of those region kinds to contain one more structured level. Depth-two
 semantics are exact. CPU executes the complete tree with exact host control.
 At depth two, the parent uses exact portable control. A qualified `auto` leaf
 may retain its existing flat native route: CUDA `while`/`if`/`switch`, or
-Vulkan `while`. This is a leaf optimization, not a native depth-two submission. Nested
-definitions reject `lowering_mode="native_required"`, and every depth-two
+Vulkan `while`. This is the default portable-parent/native-leaf route, not a
+general native depth-two contract. A strictly qualified Vulkan
+while-containing-while definition may additionally upgrade to the single
+synchronous bounded replay described below. Nested definitions reject an
+explicit `lowering_mode="native_required"`, and every depth-two
 Graph currently rejects asynchronous `submit()`.
 
 Vulkan provides two distinct `while` routes. `portable` retains exact

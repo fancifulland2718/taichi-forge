@@ -40,7 +40,7 @@ Git 源码边界，不把当前 PyPI 文件列表误当成全部历史。
 
 | 版本 | 用户可见范围 |
 | --- | --- |
-| [0.6.0](docs/forge/release_notes.zh.md#060) | 结构化 Graph 控制与遥测；稀疏 runtime/assembly 与 provider-neutral Krylov 工具；driver-only CUDA primitive；CUDA-Vulkan 显示共享；cache、allocator 与生命周期加固。 |
+| [0.6.0](docs/forge/release_notes.zh.md#060) | 结构化 Graph 控制/遥测与 Vulkan indirect dispatch；runtime-bound linear operator、稀疏 runtime 与 Krylov 工具；driver-only CUDA primitive；受管 dense/external 互操作与 CUDA-Vulkan 显示共享；边缘布局/字体缩放；正确性与生命周期加固。 |
 | [0.5.0](docs/forge/release_notes.zh.md#050) | `0.4.25` 之后的异步 backend/runtime 安全与有界可观测性；CUDA/Vulkan Graph replay 与生命周期加固；Dense Field Graph、严格参数/AD 合同和 block 级异构环境。 |
 | [0.4.25](docs/forge/release_notes.zh.md#0425) | GGUI 事件泵与空 ImGui frame 生命周期修复。 |
 | [0.4.24](docs/forge/release_notes.zh.md#0424) | device-side GGUI 图像 packing 与渲染 cadence 改进。 |
@@ -77,9 +77,20 @@ native algorithms、最初的 Graph modernization、DisplayFrame 和 compile pro
 
 ### 数据结构与显示
 
+- [Zero-copy dense storage 与互操作](docs/forge/zero_copy_interop.zh.md)
+- [Dense storage view](docs/forge/storage_views.zh.md)
+- [稀疏布局选择](docs/forge/sparse_layout_selection.zh.md)
 - [Vulkan 稀疏 SNode](docs/forge/sparse_snode_on_vulkan.zh.md)
 - [Hash SNode](docs/forge/hash_snode.zh.md)
 - [显示帧提交](docs/forge/display_frame.zh.md)
+
+### 物理与线性代数
+
+- [LinearOperator 与 SolvePlan](docs/forge/linear_operator.zh.md)
+- [稀疏 runtime 与线性代数：API、后端矩阵与生命周期](docs/forge/sparse_runtime_and_linear_algebra.zh.md)
+- [面向物理工作负载的稀疏 operator 与 solver 选择](docs/forge/physics_sparse_solver_selection.zh.md)
+- [线性求解器](docs/lang/articles/math/linear_solver.md)
+- [稀疏矩阵与固定 pattern](docs/lang/articles/math/sparse_matrix.md)
 
 ### 编译、打包与平台
 

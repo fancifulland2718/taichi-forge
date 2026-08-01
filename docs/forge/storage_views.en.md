@@ -1,5 +1,8 @@
 # Experimental Zero-Copy Dense Storage Views
 
+> This API first shipped in Taichi Forge `0.6.0`; this page describes the
+> current contract.
+
 Taichi Forge can expose qualified runtime-owned dense storage through the
 existing `ti.types.ndarray(...)` kernel ABI without allocating a second
 buffer. The API is explicit and experimental:

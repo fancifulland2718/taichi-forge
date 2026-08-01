@@ -1,6 +1,6 @@
 # Choosing a Sparse Layout in Taichi Forge
 
-> Applies to the Taichi Forge **0.5.x** release line.
+> Applies to **Taichi Forge 0.6.0**.
 
 [中文版本](sparse_layout_selection.zh.md)
 
@@ -161,7 +161,7 @@ replay performance for that path.
 
 ## Feature status
 
-| Path | Status in Forge 0.5.x |
+| Path | Status in Forge 0.6.0 |
 |---|---|
 | Dense, pointer, bitmasked, dynamic SNode | Available |
 | Hash SNode | Experimental; default enabled with a first-use warning |

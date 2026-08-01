@@ -1,11 +1,11 @@
 # Linux 复测状态
 
-本文是 R8 runtime 加固后仍需在 Linux 上完成的 release 验证矩阵。它是测试计划，**不**表示这些
+本文是 Taichi Forge 0.6.0 runtime 加固后仍需在 Linux 上完成的 release 验证矩阵。它是测试计划，**不**表示这些
 路径已经在 Linux 通过。请在干净的 x86_64 Linux runner 上，以目标发布依赖运行，并记录 GPU、
 driver、Vulkan loader、窗口系统；只有运行隔离的 reference workflow 时才记录 CUDA Toolkit。
 
-该矩阵是 0.5.x runtime 更新的发布门槛。已经在 0.4.25 或更早版本公开的功能，只有在
-0.5.x 实现或打包发生变化、需要重新取得 Linux 证据时才会列入，不应被理解为 0.5.0 新增。
+该矩阵是 0.6.0 runtime 更新的发布门槛。已经在 0.5.0 或更早版本公开的功能，只有在
+0.6.0 实现或打包发生变化、需要重新取得 Linux 证据时才会列入，不应被理解为 0.6.0 新增。
 
 ## Release 阻断项
 
@@ -46,9 +46,9 @@ auditwheel 处理后的上传候选执行以下检查：
 可选 CUDA 13.2 CUB/CUDART reference workflow 仍然不发布，只用于差分证据，且不能改变标准
 wheel；发行不建立 CUDA 版本化包系列。
 
-### Native primitive runtime、workspace 与性能收口
+### Native primitive runtime、workspace 与性能资格
 
-以下 N9 验证在 Linux 上仍全部待执行。每个后端使用 fresh process；GPU 后端的 30--60 秒
+以下验证在 Linux 上仍全部待执行。每个后端使用 fresh process；GPU 后端的 30--60 秒
 stress 应在 validation/sanitizer 环境允许的最长时间运行：
 
 ```bash
@@ -122,7 +122,7 @@ target fallback 的较新设备。验证数值结果、offline-cache target 隔�
 
 ### Runtime first-fault 与 teardown
 
-F3 first-fault 行为已经取得 Windows CPU/CUDA/Vulkan 与 GGUI 证据，但 Linux release
+Runtime first-fault 行为已经取得 Windows CPU/CUDA/Vulkan 与 GGUI 证据，但 Linux release
 证据仍待复测。不得从 Windows 结果推断 Linux teardown 已安全。
 
 - 分别用 GCC/Clang 构建 `taichi_runtime_foundation_tests` 与 Python extension，并覆盖
@@ -143,7 +143,7 @@ F3 first-fault 行为已经取得 Windows CPU/CUDA/Vulkan 与 GGUI 证据，但 
 
 ### Runtime 可观测性与有界 trace
 
-F4 runtime statistics/trace 已取得 Windows CPU/CUDA/Vulkan 功能证据，但 Linux
+Runtime statistics/trace 已取得 Windows CPU/CUDA/Vulkan 功能证据，但 Linux
 发行证据仍待复测：
 
 - 分别以 GCC/Clang 构建 `taichi_runtime_foundation_tests` 与 Python extension，
@@ -171,15 +171,15 @@ F4 runtime statistics/trace 已取得 Windows CPU/CUDA/Vulkan 功能证据，但
 
 ### Native primitive capability 与 AD 合同
 
-F6.1 已取得 Windows CPU/CUDA/Vulkan 的 provider 解析和数值 AD 证据；Linux release
+Native primitive capability 与 AD 已取得 Windows CPU/CUDA/Vulkan 的 provider 解析和数值证据；Linux release
 证据仍待复测。静态 catalog 本身不含 Win32/NT-handle 路径。
 
 - 构建并安装配对的 Linux runtime/shim wheel，随后在 CPU、CUDA、Vulkan 上运行
   `tests/python/test_primitive_capabilities.py`、
   `tests/python/test_native_primitive_autodiff.py` 与
   `tests/python/test_primitive_plan.py`；
-- 在 `ti.init()` 前校验 F6.1 的 13 个 baseline descriptor、F6.2 的 3 个
-  RLE/Unique descriptor 与 F6.3 的 2 个 segmented descriptor；同时校验
+- 在 `ti.init()` 前校验 13 个 baseline descriptor、3 个 RLE/Unique descriptor
+  与 2 个 segmented descriptor；同时校验
   frozen schema-v1 dataclass、alias、逐 operand 合同与
   method set 精确一致；每个后端 init 后，把所有
   `ResolvedPrimitiveMethod.provider_probes` 与已安装 Program 逐项比较。缺失的可选
@@ -192,14 +192,14 @@ F6.1 已取得 Windows CPU/CUDA/Vulkan 的 provider 解析和数值 AD 证据；
   provider 解析是 opt-in，不得给普通 primitive 热 replay 增加 probe、allocation、
   synchronization 或 driver call；
 - 复用既有 primitive baseline，不另开微小优化实验。记录 steady median/p95 与
-  workspace peak；只有可重复超过 2% 的回退才进入诊断。F6.1 不声称带来加速。
+  workspace peak；只有可重复超过 2% 的回退才进入诊断。该 capability/AD 合同不声称带来加速。
 
 ### Consecutive RLE/Unique
 
-F6.2 只复用既有 compact provider，并增加 Python/Taichi-kernel 代码，不要求重新
+Consecutive RLE/Unique 只复用既有 compact provider，并增加 Python/Taichi-kernel 代码，不要求重新
 发布 native runtime wheel。Linux release 仍需以下证据：
 
-- 用配对的 0.5.x shim/runtime wheel 在 CPU、CUDA、Vulkan 上运行
+- 用配对的 0.6.0 shim/runtime wheel 在 CPU、CUDA、Vulkan 上运行
   `tests/python/test_rle_unique.py`，覆盖 ndarray、dense field、全部整数 key dtype、
   StructNdarray payload、逻辑空 `size=0`、单元素、非幂次容量、active-prefix 复用、
   写入前校验、AD 拒绝和 PrimitiveSequence Graph replay；
@@ -212,16 +212,16 @@ F6.2 只复用既有 compact provider，并增加 Python/Taichi-kernel 代码，
   Graph、host-round-trip median/p95 与 `workspace_bytes_peak`。确认 Unique 最低
   scratch 4 bytes/item、RLE 12 bytes/item，再加已安装 compact provider 临时空间；
   不得把 Windows RTX 5090 的 speedup 外推到 Linux；
-- 复查 CPU-only、CUDA-disabled、Vulkan-disabled、GCC 与 Clang build。F6.2 源码
+- 复查 CPU-only、CUDA-disabled、Vulkan-disabled、GCC 与 Clang build。相关源码
   不含 Win32/NT-handle 路径，也没有新增 CUDA library/header 依赖。
 
 ### 可复用 segmented reduce/scan
 
-F6.3 只在 Python/Taichi-kernel 层组合既有 grouped-reduce、transform 与 scan
+Segmented primitive 只在 Python/Taichi-kernel 层组合既有 grouped-reduce、transform 与 scan
 provider，不改变 native runtime ABI，也不要求重新发布
 `taichi-forge-runtime`。以下 Linux 证据全部待复测：
 
-- 用配对的 0.5.x shim/runtime wheel 在 CPU、CUDA、Vulkan 上运行
+- 用配对的 0.6.0 shim/runtime wheel 在 CPU、CUDA、Vulkan 上运行
   `tests/python/test_segmented_primitives.py`，覆盖 offsets/nondecreasing-ID
   构造、空/缺失 segment、padded inactive tail、ndarray/field、全部公开 scalar
   dtype、inclusive/exclusive 与 in-place scan、写入前校验、AD 边界、Graph replay
@@ -238,7 +238,7 @@ provider，不改变 native runtime ABI，也不要求重新发布
   `workspace_bytes_peak` 和 `workspace.last_scan_method`。必须在 Linux
   验证策略，不能外推 Windows CUDA/Vulkan 阈值或 speedup；
 - 复查 CPU-only、CUDA-disabled、Vulkan-disabled、GCC、Clang、ASan/UBSan 与
-  CPU TSAN build。F6.3 不新增 Win32/NT-handle 代码、CUDA Toolkit header、
+  CPU TSAN build。该实现不新增 Win32/NT-handle 代码、CUDA Toolkit header、
   versioned CUDA library 或新平台分支。
 
 ### Dense Field Graph 矩阵

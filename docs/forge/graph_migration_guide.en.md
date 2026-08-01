@@ -4,6 +4,9 @@
 > Dense Field Graph, replay lifetime hardening, diagnostics, and stricter
 > concurrency/AD contracts are `0.5.0` work. See
 > [release notes](release_notes.en.md).
+> Version `0.6.0` adds structured control, asynchronous tickets and pacing,
+> runtime dense-storage binding, recordable operator actions, and Vulkan
+> device-written indirect dispatch.
 
 This document describes the public behavior and compatibility boundary of Forge
 graph support relative to vanilla Taichi 1.7.4. Backend architecture,
@@ -31,9 +34,9 @@ existing public model.
 
 ## What Forge adds
 
-Forge adds backend-owned execution planning below the public API. This supports
-faster replay paths and DSL-defined native algorithm replay without requiring a
-new graph API.
+Forge keeps the graph-builder model and adds explicit Forge extensions plus
+backend-owned execution planning for structured control, asynchronous
+submission, device-driven dispatch, and DSL-defined native replay.
 
 The user-visible additions are:
 
@@ -42,16 +45,30 @@ The user-visible additions are:
   Field, or another definition-time argument;
 - runtime argument handling for scalar, matrix, ndarray, texture, and RW
   texture paths;
+- runtime-storage binding for compatible dense Fields, `DenseNdarrayView`, and
+  managed external storage;
+- `GraphBuilder.while_loop()`, `if_then_else()`, `switch()`, and structured
+  `Sequential` composition to depth two;
+- Vulkan device-written single-task execution through
+  `GraphBuilder.dispatch_indirect()` / `Sequential.dispatch_indirect()`; CPU
+  and CUDA currently fail explicitly;
+- `Graph.submit()`, `SubmissionTicket`, opt-in region telemetry, and shared
+  `SubmissionPacer` admission control;
 - stable ordinary-dispatch fallback when an optimized replay path is not
   supported;
 - public `Graph.execution_stats()` execution/fallback/resource reports;
+- stop-position and branch reports through `Graph.control_flow_stats()` and
+  `Graph.run(trace=True)`;
 - explicit `kernel.grad` dispatch for manually managed gradient Graphs outside
   automatic-AD contexts;
 - internal native replay for Forge-defined primitive sequences produced by the
   algorithm layer;
 - `GraphBuilder.append_native(node, prewarm=False)` for Forge DSL-defined
   nodes such as `PrimitiveSequence`, `DeviceCheckResult`, and
-  `DeviceMetricResult`.
+  `DeviceMetricResult`;
+- qualified recordable provider actions such as `LinearOperator.graph_action()`
+  in a Graph root or structured body, with adjacent ordinary CGraphs eligible
+  for same-backend region fusion.
 
 ## Definition and lifetime contracts
 
@@ -66,9 +83,11 @@ The user-visible additions are:
   completion or add a default `ti.sync()`.
 - `ti.reset()` invalidates graphs from the old runtime. Rebuild the builder
   and graph after reset.
-- Dense Fields are definition-time bindings. Their contents may change, but
-  replacing identity/layout or destroying their generation-qualified SNodeTree
-  requires rebuilding the Graph. Numeric tree-id reuse does not revive it.
+- Closed-over or `template_args` dense Fields are definition-time bindings.
+  Their contents may change, but replacing identity/layout or destroying their
+  generation-qualified SNodeTree requires rebuilding the Graph. Use an
+  `ArgKind.NDARRAY` runtime slot to replace compatible dense Fields between
+  runs. Numeric tree-id reuse does not revive a static binding.
 - Same-structure runtime resources may use backend replay; structural changes
   may recapture or fall back. Both paths preserve binding and execution
   semantics.
@@ -127,7 +146,9 @@ Native graph support is intentionally narrow:
 - Not supported: arbitrary user native callbacks inside graph.
 - Not supported: AOT serialization for graphs containing Forge native nodes;
   `ti.aot.Module.add_graph()` accepts ordinary kernel CGraphs only.
-- Not promised: cross-backend execution inside one graph.
+- Same-backend ordinary CGraphs and recordable providers may fuse. Every node
+  must match the active runtime/backend; this does not provide cross-device
+  execution.
 - Numeric-check result nodes replay only device-side native work. Result reads
   remain explicit through `to_int()`, `to_bool()`, `ok()`, or
   `to_float()`.

@@ -1,6 +1,6 @@
 # Sparse SNode on Vulkan — 使用指南
 
-> Vulkan sparse SNode 支持在历史 Forge 0.3.0–0.3.2 版本中逐步引入，在 0.3.12 前后完善，并于 0.3.13 加入实验性 `hash`。本文说明当前 0.5.x 合同，不表示这些能力都是 0.5.0 新增。受 PyPI 项目容量限制，部分历史 wheel 可能已不再保留。
+> Vulkan sparse SNode 支持在历史 Forge 0.3.0–0.3.2 版本中逐步引入，在 0.3.12 前后完善，并于 0.3.13 加入实验性 `hash`。本文说明当前 0.6.0 合同，不表示这些能力都是 0.6.0 新增。受 PyPI 项目容量限制，部分历史 wheel 可能已不再保留。
 
 ---
 
@@ -59,7 +59,7 @@ fill()
 
 > **历史上 Vulkan 稀疏 SNode 曾在两条语义合同上偏离 LLVM cpu/cuda 后端，目前两条均已修复：**
 > 1. ✅ 已修复（0.3.1）：inactive 稀疏 cell 读返回 dtype 零值。
-> 2. ✅ 已修复（0.3.2，2026-05-02）：3D pointer **全激活**触发 device-lost 已通过 C-9 deterministic-slot codegen 路径解决；详情见下方 Bug 2。
+> 2. ✅ 已修复（0.3.2，2026-05-02）：3D pointer **全激活**触发 device-lost 已通过 deterministic-slot codegen 路径解决；详情见下方 Bug 2。
 
 ### ✅ 已修复 Bug 1（0.3.1，2026-04-30）：inactive 稀疏 cell 读返回 0
 
@@ -80,7 +80,7 @@ LLVM cpu/cuda 后端：读取 inactive 稀疏 cell **保证返回该 dtype 的�
 
 **历史症状**：写入 kernel 完成（`atomic_add` 计数正确）但下一个 dispatch 触发 `RHI Error: (-4) vkQueueSubmit failed` / Windows 下进程 abort code `0xC0000409`。
 
-**0.3.2 修复（C-9 deterministic-slot codegen）**：观察到默认 `pool_capacity == total_num_cells_from_root`（与 outer cell 数完全相等）后，pointer activation 不再需要原子分配——为每个 outer cell 静态指派一个唯一池槽 `new_slot = idx_u32 + 1 ∈ [1, capacity]`。SPIR-V 端单条 `OpAtomicCompareExchange(slot, 0, new_slot)` 替换原 `CAS-marker + atomicIAdd(watermark) + atomicStore + 结构化 spin-loop` 四指令链；所有线程对同一 outer cell 计算同一 `new_slot`，无 spin、无 watermark 竞争，**warp-lockstep 死锁路径从根上消失**。
+**0.3.2 修复（deterministic-slot codegen）**：观察到默认 `pool_capacity == total_num_cells_from_root`（与 outer cell 数完全相等）后，pointer activation 不再需要原子分配——为每个 outer cell 静态指派一个唯一池槽 `new_slot = idx_u32 + 1 ∈ [1, capacity]`。SPIR-V 端单条 `OpAtomicCompareExchange(slot, 0, new_slot)` 替换原 `CAS-marker + atomicIAdd(watermark) + atomicStore + 结构化 spin-loop` 四指令链；所有线程对同一 outer cell 计算同一 `new_slot`，无 spin、无 watermark 竞争，**warp-lockstep 死锁路径从根上消失**。
 
 验收脚本：[tests/p4/g10p1_user_repro.py](../../tests/p4/g10p1_user_repro.py)（5 次连跑 Vulkan rc=0、cpu/cuda/vulkan sum 三后端 ±1e-5 等价）。
 
@@ -275,7 +275,7 @@ ti.root.hash(ti.ij, (4096, 4096), expected_active=8192).place(x)
 - 前端 extension 闸门需主动启用：`ti.init(arch=ti.vulkan, vulkan_quant_experimental=True)` 或 env var `TI_VULKAN_QUANT=1`（详见 [forge_options.zh.md](forge_options.zh.md) §3）。默认 OFF，行为与 vanilla 1.7.4 完全一致（quant 路径在 codegen 入口直接 `TI_ERROR`）。
 - 闸门 ON 后已支持的能力：
   - **`quant_array`**：`QuantInt` / `QuantFixed` 子字段的**读 + 写（含多线程并发 `ti.atomic_add` 经 SPIR-V `OpAtomicCompareExchange` 自旋 RMW）**，与 cpu / cuda 后端**字节等价**；
-  - **`bit_struct` / `BitpackedFields(max_num_bits=32 或 64)`**：多字段同字 RMW 写（IR pass `optimize_bit_struct_stores` 在 `quant_opt_atomic_demotion=ON` 默认下合并为单条 `BitStructStoreStmt`；`is_atomic == true` 残留路径用 CAS-loop 真原子写），与 cpu / cuda 后端**字节等价**。MPM 风格 11/11/10 quant_fixed 粒子位置打包基线 [tests/p4/g9_quant_baseline.py](https://github.com/taichi-dev/taichi/blob/master/tests/p4/g9_quant_baseline.py) 三后端 max_err 全为 9.77e-4 ≤ bound 1.95e-3；并发原子加 race 基线 [tests/p4/g9_quant_atomic_race.py](https://github.com/taichi-dev/taichi/blob/master/tests/p4/g9_quant_atomic_race.py) N=1024、K=64 路并发同字争用，三后端 max_err 全为 3.94e-3 ≤ bound 1.57e-2。
+  - **`bit_struct` / `BitpackedFields(max_num_bits=32 或 64)`**：多字段同字 RMW 写（IR pass `optimize_bit_struct_stores` 在 `quant_opt_atomic_demotion=ON` 默认下合并为单条 `BitStructStoreStmt`；`is_atomic == true` 残留路径用 CAS-loop 真原子写），与 cpu / cuda 后端**字节等价**。MPM 风格 11/11/10 quant_fixed 粒子位置打包基线 [tests/p4/g9_quant_baseline.py](../../tests/p4/g9_quant_baseline.py) 三后端 max_err 全为 9.77e-4 ≤ bound 1.95e-3；并发原子加 race 基线 [tests/p4/g9_quant_atomic_race.py](../../tests/p4/g9_quant_atomic_race.py) N=1024、K=64 路并发同字争用，三后端 max_err 全为 3.94e-3 ≤ bound 1.57e-2。
   - **原子加** `ti.atomic_add(quant_field, delta)`：仅 `AtomicOpType::add`，physical_type 须为 i32 或 i64（与 LLVM `quant_type_atomic` 限制对齐）。返回值为输入 `delta`（非旧值）——quant 字段上的 `atomic_add` 用户代码极少消费返回值，省去 dequant 旁路代价。
 - **尚未支持**：
   - **`QuantFloat` 共享指数**（`ti.types.quant.float(...)` + `BitpackedFields(shared_exponent=True)`）：visitor 入口处 `TI_NOT_IMPLEMENTED`。**显式暂缓**：本 fork 本身未需求 shared-exponent（原始诉求是 quant_fixed），且该路径 float 位操作跨驱动微妙差异风险高。生产负载如需使用，请继续走 LLVM cpu / cuda 后端。
@@ -287,7 +287,7 @@ ti.root.hash(ti.ij, (4096, 4096), expected_active=8192).place(x)
 - 用 `ti.f16` 半精度作为简易量化；
 - 在 `ti.u32` 字段上手工位运算打包。
 
-回归基线脚本：[tests/p4/g9_quant_baseline.py](https://github.com/taichi-dev/taichi/blob/master/tests/p4/g9_quant_baseline.py)（`bit_struct` MPM 风格 11/11/10 打包）、[tests/p4/g9_quant_array_baseline.py](https://github.com/taichi-dev/taichi/blob/master/tests/p4/g9_quant_array_baseline.py)（`quant_array` 8-bit 单字段）、[tests/p4/g9_quant_atomic_race.py](https://github.com/taichi-dev/taichi/blob/master/tests/p4/g9_quant_atomic_race.py)（atomic_add 多线程同字争用）。
+回归基线脚本：[tests/p4/g9_quant_baseline.py](../../tests/p4/g9_quant_baseline.py)（`bit_struct` MPM 风格 11/11/10 打包）、[tests/p4/g9_quant_array_baseline.py](../../tests/p4/g9_quant_array_baseline.py)（`quant_array` 8-bit 单字段）、[tests/p4/g9_quant_atomic_race.py](../../tests/p4/g9_quant_atomic_race.py)（atomic_add 多线程同字争用）。
 
 ---
 

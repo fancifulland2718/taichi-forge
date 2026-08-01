@@ -12,7 +12,7 @@
 
 | 版本 | 历史状态 | 源码边界 | 主要范围 |
 | --- | --- | --- | --- |
-| [0.6.0](#060) | 当前声明的源码版本；发行文件可能仍待发布 | 当前 `master` | 结构化 Graph 控制/遥测、稀疏 runtime/线性代数、driver-only CUDA primitive、显示互操作与 runtime 生命周期有界化 |
+| [0.6.0](#060) | 当前声明的源码版本；发行文件可能仍待发布 | 当前 `master` | 结构化 Graph 控制/遥测与 Vulkan indirect dispatch、稀疏 runtime/线性代数、driver-only CUDA primitive、受管互操作/显示与 runtime 生命周期有界化 |
 | [0.1.0](#010) | 历史源码版本；发行文件可能已移除 | `91ad177685` | scikit-build-core 迁移与 Forge 发行包重命名 |
 | [0.1.1](#011) | 历史源码版本；发行文件可能已移除 | `c771969781` | `taichi_forge` import 重命名与安装布局修复 |
 | [0.1.2](#012) | 历史源码版本；发行文件可能已移除 | `fe5844390b` | import 修复与 CUDA 构建选项 |
@@ -40,6 +40,29 @@
 
 `0.6.0` 汇总已发布 `0.5.0` runtime 源码边界之后的更新，不会追溯改写
 `0.5.0` 发行产物的行为归属：
+
+### 从 0.5.0 升级概览
+
+| 范围 | 0.6.0 相对 0.5.0 的主要变化 |
+| --- | --- |
+| Graph 与执行 | fixed-schema `while`/`if`/`switch`、最大 depth=2 的结构化组合、CUDA conditional Graph、Vulkan bounded/compound/nested while、Vulkan device-written indirect dispatch，以及 stop position、region、queue 与资源遥测。 |
+| 线性代数与稀疏 runtime | 公开 runtime-bound `LinearOperator`、实验性 `SolvePlan`/batch plan、fixed sparse pattern/value update，以及经文档矩阵限定的 CG/PCG、MINRES、BiCGSTAB、GMRES、FGMRES CPU/CUDA/Vulkan provider。 |
+| 数据、互操作与显示 | dense storage/view 统一合同、受管 DLPack/external allocation、CUDA-Vulkan shared display、边缘根区域、连续字体缩放和可折叠自动高度面板。 |
+| Native primitive 与打包 | CUDA 标准 wheel 改用 Forge 自有 driver-only primitive provider；Program-owned workspace、诊断、稳定 radix/compact/scan 改进，以及 runtime/shim build identity 门禁。 |
+| 正确性与生命周期 | `SharedArray` block ownership、Tensor/AD/SVD 与 dense-field 对齐修复、crash-safe offline-cache lock，以及 allocator、specialization、trace、SNode/reset 资源的有界生命周期。 |
+
+升级现有 0.5.0 应用时，重点检查：
+
+- 本地或离线安装应使用同一次构建产生、版本与 native commit 相符的 runtime/shim wheel；
+- CUDA primitive 代码应使用 `method="auto"`，不要依赖只存在于不发布 reference build 的
+  `cuda_cub*` provider；
+- `ti.simt.block.SharedArray` 必须在 parallel range-for 的 block 作用域内声明；CUDA 单 block
+  总量上限为 48 KiB，超出时明确失败，不会自动启用 dynamic shared memory；
+- 结构化 Graph 与 `dispatch_indirect()` 应先查询 capability。Vulkan indirect dispatch 当前是
+  单 offloaded-task 能力；CPU/CUDA 不会静默模拟该路径；
+- `ti.reset()` 后应重建 Graph、storage view、external owner 与 solver plan，不能复用旧 generation；
+- 旧 `from_dlpack()` 与 provider-specific Vulkan-CUDA import 名称保持兼容；新代码可使用统一的
+  `from_external()` / `import_external_allocation()` 入口。
 
 - Offline-cache metadata lock 改为由打开文件句柄持有的操作系统 advisory lock。进程
   终止会自动释放所有权，因此持久 `.lock` 文件不再导致反复的 load/dump 警告，也不再
@@ -100,7 +123,9 @@
   Taichi range-for 内声明（包括从循环内调用的内联 `@ti.func`）仍走既有单 task
   快速路径；kernel root 与 serialized loop 内的声明会在 offload 拆分将其错误提升为
   kernel-global temporary 之前，由 JIT、AOT 与 Graph 编译一致拒绝。CUDA 与 Vulkan
-  有 runtime 回归覆盖；本次更新不据此新增其他 GPU 后端的资格声明。
+  有 runtime 回归覆盖；本次更新不据此新增其他 GPU 后端的资格声明。CUDA 的静态
+  `SharedArray` 单 block 总量限制为 48 KiB；更大的请求会给出明确错误，Forge 不启用
+  opt-in dynamic shared memory。
 - JIT Graph 的 `ArgKind.NDARRAY` runtime 参数现在通过通用 runtime-storage 协议消费
   Ndarray、dense field 与显式 `DenseNdarrayView`。compact Program-owned Ndarray 与
   SNode payload binding 可使用 CUDA capture、exact replay 和兼容 allocation patch；
@@ -108,6 +133,11 @@
   使用 ordinary fallback，在 Vulkan 使用 command record/replay，并保持相同结果合同。
   受管 external owner 使用 ordinary/replay access epoch，而不进入 CUDA capture。AOT
   borrowed storage 与 ArgPack 嵌套仍不支持。
+- 新增 `GraphBuilder.dispatch_indirect()` 与 `Sequential.dispatch_indirect()`。Vulkan Graph
+  replay 可从 device-written 三元素 u32 packet 直接执行 `vkCmdDispatchIndirect`，零 group
+  可跳过 payload，packet allocation 变化时会安全重录。目标 kernel 必须只产生一个
+  offloaded task；packet 当前必须是 owning Taichi ndarray。Field、external storage、AOT
+  packet 以及 CPU/CUDA 执行会明确失败，不会伪装为固定大小或 exact indirect dispatch。
 - 新增 fixed-schema 结构化 Graph 控制：`GraphBuilder.while_loop()`、
   `if_then_else()` 与 `switch()`。condition kernel 可组合 tolerance、用户取消、active
   状态与 breakdown，不调用 Python callback。continue predicate 与用户定义 terminal
@@ -118,8 +148,10 @@
   CPU 保留精确 portable 控制。`Sequential` 现在也公开相同的 structured builder，
   允许再嵌套一级，最大 structured depth 为 2。CPU 精确执行两层。在 depth=2 时 parent
   使用 exact portable control；满足资格的 `auto` leaf 可保留 flat native route：
-  CUDA `while`/`if`/`switch` 或 Vulkan `while`。这只是 leaf 优化，不是原生 depth=2
-  submission。nested `native_required` 定义会明确失败。Vulkan 同时支持精确 portable
+  CUDA `while`/`if`/`switch` 或 Vulkan `while`。这是默认的 portable-parent/native-leaf
+  路径，不代表通用的原生 depth=2 合同；满足严格资格的 Vulkan while-to-while
+  `auto` 定义还可升级为下述单次 bounded replay。nested `native_required` 定义会明确失败。
+  Vulkan 同时支持精确 portable
   控制与满足资格的有界
   `native_required` `while`：`chunk_size` 按 region 生效并封顶为 64，每个 region 最多
   八个 chunk/512 轮；多个有序 region 可作为 compound asynchronous submission 通过一个
@@ -333,10 +365,11 @@ domain decomposition、contact、KKT 或 nonlinear outer-solver policy。不受�
   要求 submission 已静止。
 - 将 CUDA scan 改为 1024-item tiled hierarchy，将 compact 的 flag normalize 与局部 rank
   融合并只扫描 tile count；stable sort 从 1-bit pass 改为分层 4-bit LSD radix。Windows
-  百万元素正确性、两 host submitter stress 与 idle-guarded reference 对照已完成；histogram
-  与 compact 达到本轮门槛，scan/reduce/sort 的剩余 CUB 差距明确保留为后续结构性机会，
-  不继续以设备特化分支追逐边缘收益。
-- 后续标准 runtime wheel 改用 `driver-only` dependency class 门禁，同时继续兼容已经发布的
+  百万元素正确性、两 host submitter stress 与 idle-guarded reference 对照已完成。相对测量中
+  histogram 与 compact 最接近列出的 CUB reference；scan、reduce 与 stable sort 仍明显落后。
+  标准 wheel 选择正确、异步、driver-only 的 Forge provider，但不声明与 CUB 性能相同；具体
+  数字与测试条件见 [Native 算法](native_algorithms.zh.md)。
+- 0.6.0 标准 runtime wheel 改用 `driver-only` dependency class 门禁，同时继续兼容已经发布的
   0.5.0 包内 CUDART wheel 的 loader、repair 与验证。项目仍按操作系统各发布一个 runtime
   wheel，不按 CUDA 版本分叉。
 - CPU native dense-field 路径现在直接使用编译后 SNode layout 中的 root-child offset，
@@ -371,10 +404,10 @@ domain decomposition、contact、KKT 或 nonlinear outer-solver policy。不受�
   配置边界见 [Forge API 参考](forge_api_reference.zh.md#内存增长与所有权边界)和
   [Forge 选项](forge_options.zh.md)。
 
-### TODO 合同补全与明确支持边界
+### 正确性、能力与明确支持边界
 
-- 本轮补全的是 CPU、CUDA、Vulkan 共享前端、IR、AD、AOT、runtime 与 RHI 中已经具有明确
-  正确性、安全性或生产价值的遗留项，不是机械删除所有 `TODO` 注释。完整 tile/block/warp/
+- 0.6.0 补全 CPU、CUDA、Vulkan 共享前端、IR、AD、AOT、runtime 与 RHI 中具有明确
+  正确性、安全性或生产价值的合同。完整 tile/block/warp/
   subgroup DSL、异构多设备 runtime、稀疏专项和其它后端的新能力仍在当前范围之外；相关入口
   必须明确返回 unsupported/fail-fast，不能用空实现或静默降级伪装成功。
 - 补齐 lifecycle/capability/observability 的基础合同：field/AD 枚举只返回 active

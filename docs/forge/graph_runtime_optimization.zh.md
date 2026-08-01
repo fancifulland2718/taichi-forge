@@ -6,9 +6,9 @@
 [Forge API 参考](forge_api_reference.zh.md)。
 静态 Field 功能合同单独维护在 [Dense Field Graph](dense_field_graph.zh.md)。
 
-Graph 基础现代化与 native node replay 模型首次发布于 Forge 0.4.1。本文所述的生命周期、
-后端 replay、诊断与 Dense Field Graph 加固属于当前 0.5.x 合同；这不表示整个 Graph API
-都是 0.5.0 才新增。
+Graph 基础现代化与 native node replay 模型首次发布于 Forge 0.4.1。本文描述当前
+0.6.0 的生命周期、后端 replay、结构化控制、诊断与 Dense Field Graph 合同；各能力的
+首次公开版本见[版本更新说明](release_notes.zh.md)。
 
 ## 范围与不变量
 
@@ -68,10 +68,12 @@ segment flush 后新增的 AOT items。
 
 ## Dense Field 生命周期与异构 block
 
-dense scalar、vector 与 matrix Field 可作为 definition-time binding。内容可变，但
+dense scalar、vector 与 matrix Field 可作为 definition-time binding。此时内容可变，但
 identity、layout、shape、dtype、element shape、SNodeTree generation 与 owning runtime
-不可热替换；稀疏拓扑不属于本合同。异构引擎应在稳定 block 内组织同构 environment，
-并在异步仿真与渲染之间使用明确的 snapshot ownership。
+不可热替换。需要在 invocation 之间替换兼容 Field 时，应把它绑定到 `ArgKind.NDARRAY`
+runtime slot；每次提交会重新验证 storage descriptor 和 generation。稀疏拓扑不属于该
+dense-storage 合同。异构应用应在稳定 block 内组织同构 environment，并在异步仿真与渲染
+之间使用明确的 snapshot ownership。
 
 完整支持矩阵、生命周期事务、多环境布局、AD 边界、性能证据与 Linux 状态统一维护在
 [Dense Field Graph](dense_field_graph.zh.md)。
@@ -492,8 +494,9 @@ dependency barrier 从 2,561 降至 1,017（减少 60.3%）。两种模式的 Gr
 
 Graph 可以包含由 Forge 自有 DSL/native algorithm 层生成的 native node，但不支持任意
 用户 native callback。`ti.aot.Module.add_graph()` 只接受普通 kernel CGraph，不序列化
-包含 Forge native node 的 graph；也不承诺一个 graph 混合多个后端。数值检查 result node
-只 replay device 工作，读取结果仍须显式进行。
+包含 Forge native node 的 graph。ordinary CGraph 与 recordable provider 可以在同一 active
+backend 上融合为一个 backend region；所有 node 仍必须匹配编译时的 runtime/backend，不能
+借此跨设备执行。数值检查 result node 只 replay device 工作，读取结果仍须显式进行。
 
 Primitive 所有权与结果 API 见 [Native algorithms](native_algorithms.zh.md)。
 

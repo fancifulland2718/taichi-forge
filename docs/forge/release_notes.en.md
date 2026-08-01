@@ -15,7 +15,7 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
-| [0.6.0](#060) | current declared source release; publication artifacts may be pending | current `master` | structured Graph control/telemetry, sparse runtime/linear algebra, driver-only CUDA primitives, display interoperability, and bounded runtime lifetimes |
+| [0.6.0](#060) | current declared source release; publication artifacts may be pending | current `master` | structured Graph control/telemetry and Vulkan indirect dispatch, sparse runtime/linear algebra, driver-only CUDA primitives, managed interoperability/display, and bounded runtime lifetimes |
 | [0.1.0](#010) | historical source release; artifact may be removed | `91ad177685` | scikit-build-core migration and Forge distribution rebrand |
 | [0.1.1](#011) | historical source release; artifact may be removed | `c771969781` | `taichi_forge` import rename and install-layout fixes |
 | [0.1.2](#012) | historical source release; artifact may be removed | `fe5844390b` | import fixes and CUDA build option |
@@ -44,6 +44,34 @@ grouped under the behavior they shipped.
 Version `0.6.0` consolidates the changes after the published `0.5.0` runtime
 source boundary. It does not retroactively change the behavior attributed to
 the `0.5.0` artifacts:
+
+### Upgrade overview from 0.5.0
+
+| Area | Main change in 0.6.0 relative to 0.5.0 |
+| --- | --- |
+| Graph and execution | Fixed-schema `while`/`if`/`switch`, structured composition to depth two, CUDA conditional Graphs, Vulkan bounded/compound/nested while execution, Vulkan device-written indirect dispatch, and stop-position, region, queue, and resource telemetry. |
+| Linear algebra and sparse runtime | Public runtime-bound `LinearOperator`, experimental `SolvePlan` and batch plans, fixed sparse pattern/value updates, and documented provider matrices for CG/PCG, MINRES, BiCGSTAB, GMRES, and FGMRES on CPU/CUDA/Vulkan. |
+| Data, interoperability, and display | A common dense-storage/view contract, managed DLPack and external allocations, CUDA-Vulkan shared display, window edge regions, continuous font scaling, and collapsible auto-height panels. |
+| Native primitives and packaging | Forge-owned driver-only CUDA primitive providers in standard wheels, Program-owned workspaces and diagnostics, stable radix/compact/scan improvements, and runtime/shim build-identity gates. |
+| Correctness and lifetimes | `SharedArray` block ownership, Tensor/AD/SVD and dense-field alignment fixes, crash-safe offline-cache locks, and bounded allocator, specialization, trace, SNode, and reset lifetimes. |
+
+When upgrading an existing 0.5.0 application, check the following:
+
+- Local or offline installations must use runtime and shim wheels produced by
+  the same build with matching version and native commit identities.
+- CUDA primitive code should select `method="auto"` rather than depend on a
+  `cuda_cub*` provider that exists only in the non-publishing reference build.
+- Declare `ti.simt.block.SharedArray` inside a parallel range-for block scope.
+  CUDA permits at most 48 KiB of static shared storage per block; larger
+  requests fail explicitly instead of enabling dynamic shared memory.
+- Query capabilities before selecting structured Graph or
+  `dispatch_indirect()` paths. Vulkan indirect dispatch currently requires one
+  offloaded task; CPU and CUDA do not silently emulate it.
+- Rebuild Graphs, storage views, external owners, and solver plans after
+  `ti.reset()` instead of reusing an old generation.
+- Existing `from_dlpack()` and provider-specific Vulkan-CUDA import spellings
+  remain compatible. New code may use the common `from_external()` and
+  `import_external_allocation()` entry points.
 
 - Offline-cache metadata locks now use operating-system advisory locks held by
   an open file handle. Process termination releases ownership automatically, so
@@ -120,7 +148,9 @@ the `0.5.0` artifacts:
   and serialized-loop declarations are rejected consistently by JIT, AOT, and
   Graph compilation before offload separation can promote their storage to a
   kernel-global temporary. CUDA and Vulkan carry runtime regression coverage;
-  other GPU backends are not newly qualified by this change.
+  other GPU backends are not newly qualified by this change. CUDA limits total
+  static `SharedArray` storage to 48 KiB per block. Larger requests report an
+  explicit error; Forge does not enable opt-in dynamic shared memory.
 - JIT Graph `ArgKind.NDARRAY` runtime arguments now consume the common runtime
   storage protocol for Ndarrays, dense fields, and explicit
   `DenseNdarrayView` objects. Compact Program-owned Ndarray and SNode payload
@@ -130,6 +160,15 @@ the `0.5.0` artifacts:
   Vulkan command record/replay with the same result contract. Managed external
   owners use ordinary/replay access epochs rather than CUDA capture. AOT
   borrowed storage and ArgPack nesting remain unsupported.
+- Added `GraphBuilder.dispatch_indirect()` and
+  `Sequential.dispatch_indirect()`. Vulkan Graph replay executes
+  `vkCmdDispatchIndirect` directly from a device-written three-element u32
+  packet, supports zero-group payload skipping, and safely re-records after a
+  packet-allocation change. The target kernel must produce exactly one
+  offloaded task, and the packet must currently be an owning Taichi ndarray.
+  Field, external-storage, and AOT packets plus CPU/CUDA execution fail
+  explicitly instead of pretending to provide fixed-size or exact indirect
+  dispatch.
 - Added fixed-schema structured Graph control with `GraphBuilder.while_loop()`,
   `if_then_else()`, and `switch()`. Condition kernels can combine tolerance,
   cancellation, activity, and breakdown values without a Python callback.
@@ -144,9 +183,11 @@ the `0.5.0` artifacts:
   builders for one nested level, with a maximum structured depth of two. CPU
   executes both levels exactly. At depth two, the parent uses exact portable
   control; a qualified `auto` leaf may retain its flat native route: CUDA
-  `while`/`if`/`switch`, or Vulkan `while`. This is a leaf optimization, not a
-  native depth-two submission. Nested `native_required` definitions fail
-  closed. Vulkan supports both exact portable control and
+  `while`/`if`/`switch`, or Vulkan `while`. This is the default
+  portable-parent/native-leaf route, not a general native depth-two contract;
+  a strictly qualified Vulkan while-to-while `auto` definition may additionally
+  upgrade to the single bounded replay described below. Nested
+  `native_required` definitions fail closed. Vulkan supports both exact portable control and
   qualified bounded `native_required` `while` regions with a per-region
   `chunk_size` capped at 64, an eight-chunk/512-iteration limit, and compound
   asynchronous submission of multiple ordered regions through one terminal
@@ -425,11 +466,13 @@ host staging or provider replacement.
   normalization with local ranks so only tile counts are scanned, and replaced
   one-bit stable sort passes with hierarchical 4-bit LSD radix passes. Windows
   million-item correctness, two-host-submitter stress, and idle-guarded
-  reference comparisons are complete. Histogram and compact meet this
-  iteration's gates; the remaining scan/reduce/sort gap to CUB is recorded as a
-  future structural opportunity instead of adding device-specific branches for
-  marginal tuning.
-- Changed future standard runtime-wheel validation to the `driver-only`
+  reference comparisons are complete. In the relative measurements, histogram
+  and compact are closest to the listed CUB reference; scan, reduce, and stable
+  sort remain materially slower. Standard wheels select the correct,
+  asynchronous, driver-only Forge provider but do not claim CUB performance
+  parity. See [Native algorithms](native_algorithms.en.md) for the measurements
+  and test conditions.
+- Changed the 0.6.0 standard runtime-wheel validation to the `driver-only`
   dependency class while retaining loader, repair, and validation compatibility
   for already-published 0.5.0 bundled-CUDART wheels. The project still publishes
   one runtime wheel per operating system, not per CUDA version.
@@ -475,12 +518,12 @@ host staging or provider replacement.
   resources. See [Forge API reference](forge_api_reference.en.md#memory-growth-and-ownership-boundaries)
   and [Forge options](forge_options.en.md) for diagnostics and controls.
 
-### TODO contract completion and explicit support boundaries
+### Correctness, capability, and explicit support boundaries
 
-- This work completes legacy items with defined correctness, safety, or
+- Version 0.6.0 completes contracts with defined correctness, safety, or
   production value in the shared CPU/CUDA/Vulkan frontend, IR, AD, AOT,
-  runtime, and RHI. It is not a mechanical deletion of every `TODO` comment.
-  A full tile/block/warp/subgroup DSL, heterogeneous multi-device runtime,
+  runtime, and RHI. A full tile/block/warp/subgroup DSL, heterogeneous
+  multi-device runtime,
   sparse-specific work, and new capabilities for other backends remain outside
   this scope. Their entry points must report unsupported/fail fast rather than
   pretend success through an empty implementation or silent fallback.

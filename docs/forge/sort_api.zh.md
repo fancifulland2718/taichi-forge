@@ -1,6 +1,6 @@
 # 并行排序 API
 
-Forge native sort dispatcher 首次发布于 0.4.0。本文说明当前 0.5.x API 与后端选择
+Forge native sort dispatcher 首次发布于 0.4.0。本文说明当前 0.6.0 API 与后端选择
 合同；兼容入口 `parallel_sort()` 早于 Forge 即已存在。
 
 Taichi Forge 保留与标准 Taichi 兼容的入口：

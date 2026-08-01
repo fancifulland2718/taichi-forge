@@ -10,8 +10,9 @@ For a module-oriented list of all Forge-only API symbols, see
 
 The core native algorithm family first shipped in Forge 0.4.0, with Graph
 native replay and device-side checks following in 0.4.1 and 0.4.23. This page
-documents the current 0.5.x portability and safety contract; only the changes
-identified in the [release notes](release_notes.en.md#050) are new to 0.5.0.
+documents the current 0.6.0 portability and safety contract. See the
+[release notes](release_notes.en.md) for the introduction version of each
+capability.
 
 ## Public Entry Points
 
@@ -62,7 +63,7 @@ should not be used as portability promises across all backends.
 
 ## Machine-readable capability contract
 
-Forge 0.5.0 exposes immutable schema-v1 descriptors for every current primitive
+Forge 0.6.0 exposes immutable schema-v1 descriptors for every current primitive
 family:
 
 ```python
@@ -149,7 +150,7 @@ sample before synchronization. The idle guard found no other Python or GPU
 compute process. CUB came only from the non-publishing CUDA 13.2 reference
 build; correctness was checked separately against NumPy oracles.
 
-| Primitive | driver-only median | CUB reference median | Relative throughput | Roadmap gate | Driver workspace |
+| Primitive | driver-only median | CUB reference median | Relative throughput | Qualification reference | Driver workspace |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | scan | 0.0272 ms | 0.0190 ms | 69.8% | 90% | 4 KiB |
 | reduce-sum | 0.0228 ms | 0.0193 ms | 84.6% | 90% | 4 KiB |
@@ -157,15 +158,13 @@ build; correctness was checked separately against NumPy oracles.
 | stable compact | 0.0279 ms | 0.0228 ms | 81.8% | 80% | 4.00 MiB |
 | stable i32 key/value sort | 0.4883 ms | 0.1491 ms | 30.5% | 80% | 28.06 MiB |
 
-Histogram and compact meet this iteration's gates; scan, reduce, and sort do
-not. Standard wheels still select the correct, asynchronous, driver-only Forge
-provider because CUB cannot be a release dependency and a host round trip is
-not a reasonable physics-engine hot-path default. This is not a claim of CUB
-parity. Closing the remaining scan/sort gap requires one-sweep or
-device-specialized algorithms, which would expand PTX, state-machine, and
-older-driver validation cost. This iteration therefore stops at the structural
-improvement boundary and records further work separately. These numbers
-explain the tradeoff; they are not a cross-device or cross-driver guarantee.
+Against the qualification references in the table, histogram and compact meet
+the reference while scan, reduce, and sort do not. Standard wheels still select
+the correct, asynchronous, driver-only Forge provider because CUB is not a
+release dependency and a host round trip is not a suitable GPU hot-path
+default. This is not a claim of CUB parity; stable sort in particular retains a
+material performance gap. These numbers describe the current implementation
+boundary and are not a cross-device or cross-driver guarantee.
 
 ## Data Contracts
 
@@ -203,12 +202,12 @@ ti.algorithms.experimental_run_length_encode(
 run. `experimental_unique_by_key()` also selects the first payload in each
 key run. None of these APIs performs an implicit sort or hash-table build.
 Sorted input produces global sorted unique output; arbitrary input preserves
-consecutive run order. Global first-occurrence unique is not implemented in
-this release. Unique-by-key accepts StructNdarray raw payloads; dense
+consecutive run order. Global first-occurrence unique is not implemented by
+the current contract. Unique-by-key accepts StructNdarray raw payloads; dense
 MatrixField payloads currently require matching input/output shapes and
 `ti.i32` elements.
 
-The first release supports `i32/u32/i64/u64` keys. `size=None` consumes the
+The current RLE/Unique contract supports `i32/u32/i64/u64` keys. `size=None` consumes the
 full fixed capacity; an integer `size` consumes only that active prefix, and
 `size=0` is the supported logical-empty representation. Count and lengths
 are i32, so capacity is limited to `2^31-1`. Input and output storage must not
@@ -238,8 +237,8 @@ On the Windows development machine (Ryzen 9 9950X, RTX 5090 driver 610.62),
 Compilation/warmup was outside timing, workspaces were reused, and no other
 Python/GPU compute process was active. These are development measurements, not
 cross-driver guarantees. The CUDA Graph delta is about 38 microseconds and is
-recorded as general native-node replay overhead; F6.2 does not add an
-RLE-specific optimization for it.
+recorded as general native-node replay overhead; the current implementation
+does not add an RLE-specific path for it.
 
 ## Reusable Segmented Reduce and Scan
 
@@ -270,7 +269,7 @@ and uploads both offsets and normalized IDs. Passing a Taichi source therefore
 synchronizes once at construction. Reusing the layout in direct calls or
 `PrimitiveSequence` Graph replay remains device-resident.
 
-This first release supports scalar 1D plain ndarray and root-dense field
+The current segmented contract supports scalar 1D plain ndarray and root-dense field
 storage with `i32/u32/i64/u64/f32/f64`. Values have exactly layout capacity;
 reduce output has exactly one value per segment, while scan output has layout
 capacity and only its active prefix is defined. Empty segments reduce to zero.
