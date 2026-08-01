@@ -14,6 +14,7 @@ from taichi_forge._lib import core as ti_core
 from taichi_forge.lang import impl
 from taichi_forge.graph._graph import (
     _GraphTemporaryArena,
+    _cuda_structured_control_lowering,
     _new_runtime_graph_builder,
     gen_cpp_kernel,
 )
@@ -2524,6 +2525,26 @@ def _is_vulkan_structured_report(report):
     )
 
 
+def test_cuda_structured_control_route_prefers_exact_then_masked(monkeypatch):
+    base = {
+        "driver_version_eligible": True,
+        "conditional_graph_symbols_loaded": True,
+        "general_device_setter_lowering_compiled": True,
+        "general_graph_exact_control_available": True,
+        "internal_masked_graph_available": True,
+    }
+    assert _cuda_structured_control_lowering(base) == "cuda_conditional_graph"
+
+    monkeypatch.setenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "1")
+    assert _cuda_structured_control_lowering(base) == "cuda_masked_bounded_graph"
+
+    monkeypatch.delenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL")
+    base["general_graph_exact_control_available"] = False
+    assert _cuda_structured_control_lowering(base) == "cuda_masked_bounded_graph"
+    base["internal_masked_graph_available"] = False
+    assert _cuda_structured_control_lowering(base) is None
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
     capabilities = ti.graph.structured_control_capabilities()
@@ -2539,6 +2560,8 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
                 "per_iteration_host_observation",
                 "stops_command_issue_after_exit",
                 "exact_dynamic_termination",
+                "exact_conditional_graph",
+                "bounded_masked_graph",
                 "skip_strategy",
                 "rhi_primitive_qualified",
                 "runtime_path_qualified",
@@ -4020,6 +4043,50 @@ def test_structured_graph_while_native_rebind_and_replay_diagnostics():
     assert native_stats["deferred_replay_waits"] >= 0
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_masked_bounded_graph_stops_payload_without_host_polling(monkeypatch):
+    capabilities = dict(ti_core.cuda_conditional_graph_capabilities())
+    if not capabilities.get("internal_masked_graph_available", False):
+        pytest.skip("internal masked CUDA Graph control is unavailable")
+    monkeypatch.setenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "1")
+
+    graph = _build_structured_while_graph(
+        max_iterations=20, lowering_mode="native_required"
+    )
+    graph._graph_stats
+    args = _structured_while_args(target=5)
+    graph.run(args)
+
+    report = graph.control_flow_stats()[0]
+    assert report.lowering == "cuda_masked_bounded_graph"
+    assert report.logical_iterations == 5
+    assert report.executed_iterations == 5
+    assert report.overshoot_iterations == 0
+    assert report.encoded_iterations == 20
+    assert report.masked_iterations == 15
+    assert report.observation_boundaries == (0, 5)
+    assert report.controller_invocation_count == 20
+    assert report.device_to_host_bytes <= 24
+    assert args["state"].to_numpy()[()] == 5
+    assert args["counter"].to_numpy()[()] == 5
+
+    args["state"].fill(0)
+    args["predicate"].fill(1)
+    args["counter"].fill(0)
+    args["target"] = 7
+    graph.run(args)
+    replay = graph.control_flow_stats()[0]
+    assert replay.logical_iterations == 7
+    assert replay.masked_iterations == 13
+    native_stats = graph._graph_stats[0]
+    assert native_stats["masked_captures"] == 1
+    assert native_stats["last_path"] in (
+        "cuda_masked_replay",
+        "cuda_masked_patched_replay",
+    )
+    assert native_stats["known_persistent_argument_bytes"] >= 4
+
+
 @test_utils.test(arch=ti.vulkan)
 def test_structured_graph_while_vulkan_strategy_selection_and_override(
     monkeypatch,
@@ -4909,15 +4976,21 @@ def test_structured_switch_selects_case_and_default():
     assert ir["root"]["children"][0]["branch_count"] == 2
 
 
+@pytest.mark.parametrize(
+    "force_masked", (False, True), ids=("exact", "masked_bounded")
+)
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_cuda_native_if_and_switch_skip_missing_branches():
+def test_cuda_native_if_and_switch_skip_missing_branches(monkeypatch, force_masked):
     capabilities = dict(ti_core.cuda_conditional_graph_capabilities())
-    if not (
-        capabilities["driver_version_eligible"]
-        and capabilities["conditional_graph_symbols_loaded"]
-        and capabilities["general_device_setter_lowering_compiled"]
-    ):
-        pytest.skip("general CUDA conditional Graph is unavailable")
+    if force_masked:
+        if not capabilities.get("internal_masked_graph_available", False):
+            pytest.skip("internal masked CUDA Graph control is unavailable")
+        monkeypatch.setenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "1")
+        expected_lowering = "cuda_masked_bounded_graph"
+    else:
+        if not capabilities.get("general_graph_exact_control_available", False):
+            pytest.skip("general CUDA conditional Graph is unavailable")
+        expected_lowering = "cuda_conditional_graph"
 
     @ti.kernel
     def set_control(
@@ -4968,17 +5041,25 @@ def test_cuda_native_if_and_switch_skip_missing_branches():
     output = ti.ndarray(ti.i32, shape=())
     output.fill(5)
     args = {"value": 0, "control": control, "output": output}
-    assert if_graph.submit(args).observations() == {
-        "terminal": {"control": 0, "output": 5}
-    }
+    if_graph.run(args)
+    assert output.to_numpy()[()] == 5
+    if_report = if_graph.control_flow_stats()[0]
+    assert if_report.lowering == expected_lowering
+    assert if_report.selected_branch == "none"
+    assert if_report.encoded_dispatch_count == (1 if force_masked else 0)
+    assert if_report.masked_dispatch_count == (1 if force_masked else 0)
     args["value"] = 1
     assert if_graph.submit(args).observations() == {
         "terminal": {"control": 1, "output": 6}
     }
     args["value"] = 7
-    assert switch_graph.submit(args).observations() == {
-        "terminal": {"control": 7, "output": 6}
-    }
+    switch_graph.run(args)
+    assert output.to_numpy()[()] == 6
+    switch_report = switch_graph.control_flow_stats()[0]
+    assert switch_report.lowering == expected_lowering
+    assert switch_report.selected_branch == "none"
+    assert switch_report.encoded_dispatch_count == (1 if force_masked else 0)
+    assert switch_report.masked_dispatch_count == (1 if force_masked else 0)
     args["value"] = 0
     assert switch_graph.submit(args).observations() == {
         "terminal": {"control": 0, "output": 7}
