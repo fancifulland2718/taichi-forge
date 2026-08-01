@@ -433,6 +433,15 @@ host staging or provider replacement.
   dependency class while retaining loader, repair, and validation compatibility
   for already-published 0.5.0 bundled-CUDART wheels. The project still publishes
   one runtime wheel per operating system, not per CUDA version.
+- The CPU native dense-field path now uses the root-child offset from the
+  compiled SNode layout instead of deriving an address from preceding payload
+  sizes. Alignment padding between mixed f32/f64 root children can no longer
+  make `to_numpy()`, `from_numpy()`, or native field operations alias an
+  adjacent field. This adds no branch or copy to the normal kernel hot path.
+- Final runtime/shim wheel validation now checks the native commit identity and
+  exercises f32/f64 fields of shapes `()`, `1`, and `7`, host/kernel
+  round-trips, serial/atomic f64 reduction, offline-cache modes, and
+  single/default CPU thread configurations.
 - Completed the Windows driver-only/reference build and primitive correctness
   matrices. Linux wheel/import/dependency scans, compute-sanitizer, and execution
   on each claimed older NVIDIA driver remain required before lowering any
@@ -484,8 +493,12 @@ host staging or provider replacement.
   subgroup operations now report the operation, architecture, and support state
   at compile time instead of returning `None` from Python `pass` bodies.
 - The native Windows build and targeted CPU/CUDA/Vulkan matrices are complete;
-  GPU cases ran only while no other Python/GPU compute process was active.
-  Linux GCC/Clang, headless Vulkan validation, CUDA driver-only
+  GPU cases ran only while no other Python/GPU compute process was active. The
+  matrix also covers fixed-dimension 3x3 tuple/vector/outer-product/matrix
+  composition, first-order reverse AD through dynamic local Vector/Matrix
+  reads, and 3D SVD primal boundaries including rotation, inversion,
+  near-singular, and repeated-singular-value inputs. Linux GCC/Clang, headless
+  Vulkan validation, CUDA driver-only
   import/execution, and real Torch AD remain pre-release revalidation items in
   the [Linux checklist](linux_revalidation.en.md). Windows results are not
   presented as cross-platform proof.

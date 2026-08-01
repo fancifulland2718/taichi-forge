@@ -339,6 +339,13 @@ domain decomposition、contact、KKT 或 nonlinear outer-solver policy。不受�
 - 后续标准 runtime wheel 改用 `driver-only` dependency class 门禁，同时继续兼容已经发布的
   0.5.0 包内 CUDART wheel 的 loader、repair 与验证。项目仍按操作系统各发布一个 runtime
   wheel，不按 CUDA 版本分叉。
+- CPU native dense-field 路径现在直接使用编译后 SNode layout 中的 root-child offset，
+  不再通过前序 payload 大小推算地址。混合 f32/f64 root child 之间的 alignment padding
+  因此不会让 `to_numpy()`、`from_numpy()` 或 native field operation 错读相邻 field；
+  普通 kernel hot path 不增加分支或复制。
+- 最终 runtime/shim wheel 门禁现在校验 native commit identity，并覆盖 shape `()`、`1`、
+  `7` 的 f32/f64 field、host/kernel round-trip、serial/atomic f64 reduction、offline cache
+  与单线程/默认线程配置。
 - Windows driver-only/reference build 与 primitive 正确性矩阵已经完成。降低任何公开 driver
   下限之前，仍必须补齐 Linux wheel/import/依赖扫描、compute-sanitizer 和每个声明支持的旧
   NVIDIA driver 真机执行。
@@ -376,7 +383,9 @@ domain decomposition、contact、KKT 或 nonlinear outer-solver policy。不受�
   新 record，重复查询保持幂等；12 个尚未实现的 subgroup operation 在编译期报告操作名、
   arch 与支持状态，不再由 Python `pass` 返回 `None`。
 - Windows 原生构建和 CPU/CUDA/Vulkan 定向矩阵已经完成；GPU 用例只在没有其它 Python/GPU
-  compute process 时运行。Linux GCC/Clang、headless Vulkan validation、CUDA driver-only
+  compute process 时运行。矩阵也覆盖固定维 3x3 tuple/vector/outer-product/matrix 组合、
+  local Vector/Matrix 动态读取的一阶 reverse AD，以及 rotation、inversion、near-singular
+  和 repeated-singular-value 的 3D SVD primal 边界。Linux GCC/Clang、headless Vulkan validation、CUDA driver-only
   import/execution 与真实 Torch AD 仍属于发布前复测项，详见
   [Linux 复测清单](linux_revalidation.zh.md)，不会用 Windows 结果替代跨平台结论。
 - 强化 debug 执行与索引契约。CPU assertion 失败后会协作取消剩余 debug work，发布一致的
