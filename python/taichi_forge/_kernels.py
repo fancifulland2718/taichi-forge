@@ -1108,6 +1108,116 @@ def fill_i32_arange_ndarray(out: ndarray_type.ndarray(dtype=i32, ndim=1), N: i32
 
 
 @kernel
+def device_prefix_fill_tail_ndarray(
+    values: ndarray_type.ndarray(),
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    tail_value: template(),
+):
+    """Replace the inactive suffix without observing the extent on host."""
+
+    for i in values:
+        count = extent_state[0]
+        if i >= count:
+            values[i] = tail_value
+
+
+@kernel
+def device_prefix_copy_masked_ndarray(
+    source: ndarray_type.ndarray(),
+    destination: ndarray_type.ndarray(),
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    tail_value: template(),
+):
+    """Copy one valid prefix and initialize its inactive suffix."""
+
+    for i in destination:
+        count = extent_state[0]
+        if i < count:
+            destination[i] = source[i]
+        else:
+            destination[i] = tail_value
+
+
+@kernel
+def device_prefix_stage_flags_ndarray(
+    flags: ndarray_type.ndarray(dtype=i32, ndim=1),
+    staged_flags: ndarray_type.ndarray(dtype=i32, ndim=1),
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    output_extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+):
+    """Mask compact flags and reset the next extent in the same dispatch."""
+
+    for i in staged_flags:
+        count = extent_state[0]
+        if i == 0:
+            output_extent_state[1] = 0
+        staged_flags[i] = flags[i] if i < count else 0
+
+
+@kernel
+def device_prefix_mark_boundaries_ndarray(
+    keys: ndarray_type.ndarray(),
+    flags: ndarray_type.ndarray(dtype=i32, ndim=1),
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    output_extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+):
+    """Mark consecutive runs inside a device-owned valid prefix."""
+
+    for i in flags:
+        count = extent_state[0]
+        if i == 0:
+            output_extent_state[1] = 0
+        boundary = 0
+        if i < count:
+            boundary = i == 0
+            if i > 0:
+                boundary = keys[i] != keys[i - 1]
+        flags[i] = boundary
+
+
+@kernel
+def device_prefix_mark_boundaries_and_starts_ndarray(
+    keys: ndarray_type.ndarray(),
+    flags: ndarray_type.ndarray(dtype=i32, ndim=1),
+    starts: ndarray_type.ndarray(dtype=i32, ndim=1),
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    output_extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+):
+    """Mark runs and their source positions inside a valid prefix."""
+
+    for i in flags:
+        count = extent_state[0]
+        if i == 0:
+            output_extent_state[1] = 0
+        starts[i] = i
+        boundary = 0
+        if i < count:
+            boundary = i == 0
+            if i > 0:
+                boundary = keys[i] != keys[i - 1]
+        flags[i] = boundary
+
+
+@kernel
+def device_prefix_finalize_run_lengths_ndarray(
+    compacted_starts: ndarray_type.ndarray(dtype=i32, ndim=1),
+    run_lengths: ndarray_type.ndarray(dtype=i32, ndim=1),
+    input_extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    output_extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+):
+    """Finish RLE lengths without reading either count back to the host."""
+
+    for run in run_lengths:
+        item_count = input_extent_state[0]
+        run_count = output_extent_state[0]
+        if run < run_count:
+            end = item_count
+            if run + 1 < run_count:
+                end = compacted_starts[run + 1]
+            run_lengths[run] = end - compacted_starts[run]
+
+
+@kernel
 def rle_mark_boundaries_ndarray(
     keys: ndarray_type.ndarray(ndim=1),
     flags: ndarray_type.ndarray(dtype=i32, ndim=1),
