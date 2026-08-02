@@ -1714,7 +1714,10 @@ class Kernel:
         return self.launch_kernel(kernel_cpp, *args)
 
     def _task_launch_report(self, policy, *args, **kwargs):
-        from taichi_forge.lang.task_launch import TaskLaunchReport
+        from taichi_forge.lang.task_launch import (
+            TaskLaunchReport,
+            _task_launch_resource_reports,
+        )
 
         backend, kind = self._task_launch_backend_kind()
         if policy.mode == "auto":
@@ -1725,6 +1728,9 @@ class Kernel:
                 status="auto",
                 reason="compiler/backend default geometry",
                 tasks=tasks,
+                resources=_task_launch_resource_reports(
+                    tasks, policy, "auto", impl.current_cfg()
+                ),
             )
         if kind == "cpu":
             if policy.mode == "require":
@@ -1739,6 +1745,9 @@ class Kernel:
                 status="fallback_auto",
                 reason="CPU has no GPU block geometry; hint preserved auto scheduling",
                 tasks=tasks,
+                resources=_task_launch_resource_reports(
+                    tasks, policy, "fallback_auto", impl.current_cfg()
+                ),
             )
         if kind != "native":
             raise TaichiRuntimeError(
@@ -1751,16 +1760,20 @@ class Kernel:
         range_tasks = tuple(task for task in tasks if task.task_type == "range_for")
         selected = range_tasks[0].selected_block_size
         applied = selected == policy.block_dim
+        status = "applied" if applied else "hint_not_applied"
         return TaskLaunchReport(
             policy=policy,
             backend=backend,
-            status="applied" if applied else "hint_not_applied",
+            status=status,
             reason=(
                 "backend selected the requested block size"
                 if applied
                 else "an explicit source-level loop_config or backend constraint won"
             ),
             tasks=tasks,
+            resources=_task_launch_resource_reports(
+                tasks, policy, status, impl.current_cfg()
+            ),
         )
 
     def task_manifest(self, *args, **kwargs):
