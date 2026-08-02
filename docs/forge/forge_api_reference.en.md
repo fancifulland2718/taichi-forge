@@ -796,7 +796,7 @@ Python objects fail before compilation. Keys use the filesystem-safe
 __tmpl__ convention; signatures over 180 UTF-8 bytes use a deterministic
 SHA-256 key to avoid Windows path-length failures.
 
-## Graph APIs
+## Kernel and Graph APIs
 
 Dense Field-specific layouts, lifetime, concurrency, AD, and backend behavior
 are documented in [Dense Field Graph](dense_field_graph.en.md).
@@ -884,6 +884,54 @@ retain the original task name and append `tf.task=<task_id> label=<label>`.
 Labels are limited to 128 UTF-8 bytes and reject NUL or line breaks.
 Dispatch labels are currently JIT-only; `AOT Module.add_graph()` rejects a
 labeled Graph instead of silently removing its observability metadata.
+
+### Direct-kernel `TaskLaunchPolicy`
+
+`kernel.with_launch_policy(policy)` creates a reusable view of a direct JIT
+kernel without changing ordinary calls to that kernel. The first qualified
+CUDA/Vulkan slice controls the block size of exactly one top-level parallel
+range task:
+
+```python
+tuned = update.with_launch_policy(
+    ti.TaskLaunchPolicy.block(256, mode="require")
+)
+report = tuned.report(x, y)  # may compile; never enqueues work
+assert report.status == "applied"
+tuned(x, y)
+```
+
+`TaskLaunchPolicy.auto()` retains compiler/backend selection. A `hint` requests
+a block size but preserves an explicit source-level
+`ti.loop_config(block_dim=...)`; its report then uses
+`status="hint_not_applied"`. A `require` must resolve to the requested block or
+fails before device enqueue. `block_dim` accepts values from 1 through 1024
+that are powers of two or multiples of 32, matching Taichi's existing loop
+configuration contract; device and kernel resource limits may still reject a specialization.
+The report exposes the immutable policy, backend, status/reason, and the N0
+task manifests containing requested, selected, and actual geometry.
+
+This contract is deliberately narrower than a raw CUDA/Vulkan launch API. It
+does not expose grid truncation and currently supports only primal direct-JIT
+kernels with one safe parallel range task. Graph, AOT, automatic
+differentiation, multi-range kernels, struct/ndarray/mesh iteration, and
+user-visible serial side effects remain unsupported. If the policy actually
+changes the block size, kernels using `SharedArray`, block barriers, or other
+block-sensitive intrinsics fail closed. A source-owned block declaration that
+already equals a `require` remains valid because the policy does not change its
+geometry.
+
+On CPU, `hint` reports `fallback_auto` and uses the normal worker scheduler;
+`require` fails rather than inventing GPU geometry. A cold CUDA/Vulkan policy
+specialization must be prepared on the Python main thread. Call
+`tuned.report(...)` before launching it concurrently from worker threads.
+Validation is performed once without submission; warm calls reuse the normal
+launch path and allocate no telemetry buffer. Each distinct policy is a normal
+compiled specialization, participates in the runtime specialization budget
+and offline-cache identity, and must be prepared again after `ti.reset()`.
+Block tuning is backend- and workload-specific, so always compare against
+`auto` with end-of-work synchronization. The reproducible paired harness is
+`benchmarks/task_launch_policy_bench.py`.
 
 ### `GraphBuilder.dispatch_indirect(kernel, *args, dispatch_packet, template_args=None, label=None)`
 

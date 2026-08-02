@@ -45,7 +45,7 @@
 
 | 范围 | 0.6.0 相对 0.5.0 的主要变化 |
 | --- | --- |
-| Graph 与执行 | fixed-schema `while`/`if`/`switch`、最大 depth=2 的结构化组合、CUDA conditional Graph、Vulkan bounded/compound/nested while、Vulkan device-written indirect dispatch，以及 stop position、region、queue 与资源遥测。 |
+| Graph 与执行 | 只读 task manifest/label、受约束 direct-JIT block policy、fixed-schema `while`/`if`/`switch`、最大 depth=2 的结构化组合、CUDA conditional Graph、Vulkan bounded/compound/nested while、Vulkan device-written indirect dispatch，以及 stop position、region、queue 与资源遥测。 |
 | 线性代数与稀疏 runtime | 公开 runtime-bound `LinearOperator`、实验性 `SolvePlan`/batch plan、fixed sparse pattern/value update，以及经文档矩阵限定的 CG/PCG、MINRES、BiCGSTAB、GMRES、FGMRES CPU/CUDA/Vulkan provider。 |
 | 数据、互操作与显示 | dense storage/view 统一合同、受管 DLPack/external allocation、CUDA-Vulkan shared display、边缘根区域、连续字体缩放和可折叠自动高度面板。 |
 | Native primitive 与打包 | CUDA 标准 wheel 改用 Forge 自有 driver-only primitive provider；Program-owned workspace、诊断、稳定 radix/compact/scan 改进，以及 runtime/shim build identity 门禁。 |
@@ -60,6 +60,8 @@
   总量上限为 48 KiB，超出时明确失败，不会自动启用 dynamic shared memory；
 - 结构化 Graph 与 `dispatch_indirect()` 应先查询 capability。Vulkan indirect dispatch 当前是
   单 offloaded-task 能力；CPU/CUDA 不会静默模拟该路径；
+- `TaskLaunchPolicy` 是 per-backend 调优工具，不承诺跨后端提速。worker thread 调用前应在
+  Python 主线程用 `report()` 准备冷 GPU policy，并始终以 `auto` 作为性能对照；
 - `ti.reset()` 后应重建 Graph、storage view、external owner 与 solver plan，不能复用旧 generation；
 - 旧 `from_dlpack()` 与 provider-specific Vulkan-CUDA import 名称保持兼容；新代码可使用统一的
   `from_external()` / `import_external_allocation()` 入口。
@@ -126,6 +128,11 @@
   有 runtime 回归覆盖；本次更新不据此新增其他 GPU 后端的资格声明。CUDA 的静态
   `SharedArray` 单 block 总量限制为 48 KiB；更大的请求会给出明确错误，Forge 不启用
   opt-in dynamic shared memory。
+- 新增 `TaskLaunchPolicy`，用于受约束的 direct-JIT block 调优。CUDA/Vulkan 对单一安全
+  parallel range task 支持 `hint`/`require`，通过不可变 report 暴露最终 geometry，并在
+  enqueue 前拒绝不支持的 task shape 或 block-sensitive 改写。CPU hint 明确回退到 worker
+  scheduler，require 明确失败。policy 不覆盖 grid extent，作为独立 cache specialization，
+  首次只读验证后复用普通 warm launch 路径。
 - JIT Graph 的 `ArgKind.NDARRAY` runtime 参数现在通过通用 runtime-storage 协议消费
   Ndarray、dense field 与显式 `DenseNdarrayView`。compact Program-owned Ndarray 与
   SNode payload binding 可使用 CUDA capture、exact replay 和兼容 allocation patch；

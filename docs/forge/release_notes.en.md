@@ -49,7 +49,7 @@ the `0.5.0` artifacts:
 
 | Area | Main change in 0.6.0 relative to 0.5.0 |
 | --- | --- |
-| Graph and execution | Fixed-schema `while`/`if`/`switch`, structured composition to depth two, CUDA conditional Graphs, Vulkan bounded/compound/nested while execution, Vulkan device-written indirect dispatch, and stop-position, region, queue, and resource telemetry. |
+| Graph and execution | Read-only task manifests/labels, constrained direct-JIT block policies, fixed-schema `while`/`if`/`switch`, structured composition to depth two, CUDA conditional Graphs, Vulkan bounded/compound/nested while execution, Vulkan device-written indirect dispatch, and stop-position, region, queue, and resource telemetry. |
 | Linear algebra and sparse runtime | Public runtime-bound `LinearOperator`, experimental `SolvePlan` and batch plans, fixed sparse pattern/value updates, and documented provider matrices for CG/PCG, MINRES, BiCGSTAB, GMRES, and FGMRES on CPU/CUDA/Vulkan. |
 | Data, interoperability, and display | A common dense-storage/view contract, managed DLPack and external allocations, CUDA-Vulkan shared display, window edge regions, continuous font scaling, and collapsible auto-height panels. |
 | Native primitives and packaging | Forge-owned driver-only CUDA primitive providers in standard wheels, Program-owned workspaces and diagnostics, stable radix/compact/scan improvements, and runtime/shim build-identity gates. |
@@ -67,6 +67,9 @@ When upgrading an existing 0.5.0 application, check the following:
 - Query capabilities before selecting structured Graph or
   `dispatch_indirect()` paths. Vulkan indirect dispatch currently requires one
   offloaded task; CPU and CUDA do not silently emulate it.
+- Treat `TaskLaunchPolicy` as per-backend tuning, not a portable promise of
+  speedup. Prepare cold GPU policies with `report()` on the Python main thread
+  before worker-thread launches, and keep `auto` as the measurement baseline.
 - Rebuild Graphs, storage views, external owners, and solver plans after
   `ti.reset()` instead of reusing an old generation.
 - Existing `from_dlpack()` and provider-specific Vulkan-CUDA import spellings
@@ -151,6 +154,13 @@ When upgrading an existing 0.5.0 application, check the following:
   other GPU backends are not newly qualified by this change. CUDA limits total
   static `SharedArray` storage to 48 KiB per block. Larger requests report an
   explicit error; Forge does not enable opt-in dynamic shared memory.
+- Added `TaskLaunchPolicy` for constrained direct-JIT block tuning. CUDA and
+  Vulkan accept `hint`/`require` policies for a single safe parallel range
+  task, expose the resolved geometry through an immutable report, and reject
+  unsupported task shapes or block-sensitive rewrites before enqueue. CPU
+  hints explicitly fall back to its worker scheduler and requirements fail.
+  Policies never override grid extent, are cache-separated specializations,
+  and reuse the normal warm launch path after one read-only validation.
 - JIT Graph `ArgKind.NDARRAY` runtime arguments now consume the common runtime
   storage protocol for Ndarrays, dense fields, and explicit
   `DenseNdarrayView` objects. Compact Program-owned Ndarray and SNode payload

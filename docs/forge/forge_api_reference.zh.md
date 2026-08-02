@@ -704,7 +704,7 @@ array 会复用一个 artifact。SOA 或结构化 ndarray view、非连续 host 
 Python 对象会在编译前明确拒绝。key 使用文件系统安全的 __tmpl__ 约定；UTF-8 signature
 超过 180 bytes 时使用确定性 SHA-256 key，避免 Windows path length 失败。
 
-## Graph API
+## Kernel 与 Graph API
 
 Dense Field 专属 layout、生命周期、并发、AD 与后端行为见
 [Dense Field Graph](dense_field_graph.zh.md)。
@@ -772,6 +772,44 @@ NVTX 名称保留原 task name，并追加 `tf.task=<task_id> label=<label>`。�
 bytes，不能包含 NUL 或换行。
 dispatch label 当前仅用于 JIT；`AOT Module.add_graph()` 会明确拒绝带标签 Graph，不会静默
 移除可观测元数据。
+
+### Direct kernel 的 `TaskLaunchPolicy`
+
+`kernel.with_launch_policy(policy)` 为 direct JIT kernel 创建可复用视图，不改变该 kernel
+的普通调用。首个受支持切片可在 CUDA/Vulkan 上控制恰好一个顶层 parallel range task 的
+block 大小：
+
+```python
+tuned = update.with_launch_policy(
+    ti.TaskLaunchPolicy.block(256, mode="require")
+)
+report = tuned.report(x, y)  # 可能编译，但绝不提交工作
+assert report.status == "applied"
+tuned(x, y)
+```
+
+`TaskLaunchPolicy.auto()` 保留 compiler/backend 选择。`hint` 请求 block，但源码中的显式
+`ti.loop_config(block_dim=...)` 优先；此时 report 使用
+`status="hint_not_applied"`。`require` 必须解析为请求值，否则在 device enqueue 前失败。
+`block_dim` 接受 1 到 1024 中 2 的幂或 32 的倍数，与 Taichi 既有 loop configuration
+合同一致；device 或 kernel 资源限制仍可能拒绝 specialization。
+report 提供不可变 policy、backend、status/reason，以及包含 requested、selected、actual
+geometry 的 N0 task manifest。
+
+该合同有意窄于原始 CUDA/Vulkan launch API：不开放可能截断语义工作量的 grid，并且当前
+只支持恰含一个安全 parallel range task 的 primal direct-JIT kernel。Graph、AOT、自动微分、
+multi-range kernel、struct/ndarray/mesh iteration 与用户可见 serial side effect 尚不支持。
+如果 policy 实际改变 block，含 `SharedArray`、block barrier 或其他 block-sensitive intrinsic
+的 kernel 会 fail closed；源码本来就声明相同 block 的 `require` 不改变 geometry，因此仍然
+有效。
+
+CPU 的 `hint` 报告 `fallback_auto` 并使用正常 worker scheduler；`require` 会失败，不伪造
+GPU geometry。冷 CUDA/Vulkan policy specialization 必须在 Python 主线程准备；从 worker
+并发调用前先执行 `tuned.report(...)`。验证只发生一次且不提交工作；warm 调用复用普通
+launch 路径，不分配 telemetry buffer。每个不同 policy 都是普通 compiled specialization，
+计入 runtime specialization budget 和 offline-cache identity，并且在 `ti.reset()` 后需要重新
+准备。block 调优取决于 backend 和 workload，应始终用执行末端同步的 `auto` 对照测量。
+可复现的成对基准脚本是 `benchmarks/task_launch_policy_bench.py`。
 
 ### `GraphBuilder.dispatch_indirect(kernel, *args, dispatch_packet, template_args=None, label=None)`
 
