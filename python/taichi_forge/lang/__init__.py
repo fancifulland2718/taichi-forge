@@ -17,6 +17,7 @@ from taichi_forge.lang.source_builder import *
 from taichi_forge.lang.struct import *
 from taichi_forge.lang.argpack import *
 from taichi_forge.lang.task_manifest import *
+from taichi_forge.lang.task_launch import *
 
 __all__ = [
     s

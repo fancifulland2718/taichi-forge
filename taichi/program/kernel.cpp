@@ -4,8 +4,10 @@
 #include "taichi/codegen/codegen.h"
 #include "taichi/common/logging.h"
 #include "taichi/common/task.h"
+#include "taichi/inc/constants.h"
 #include "taichi/ir/statements.h"
 #include "taichi/program/program.h"
+#include "taichi/util/bit.h"
 
 #include <utility>
 
@@ -142,6 +144,45 @@ const std::optional<std::string> &Kernel::get_compile_tier_override() const {
   return compile_tier_override_;
 }
 
+void Kernel::set_task_launch_policy(const std::string &mode,
+                                    int block_dim,
+                                    bool injected_block_dim) {
+  TI_ERROR_IF(block_dim <= 0 || block_dim > taichi_max_gpu_block_dim,
+              "TaskLaunchPolicy block_dim must be in [1, {}], got {}",
+              taichi_max_gpu_block_dim, block_dim);
+  TI_ERROR_IF((block_dim % 32 != 0) && !bit::is_power_of_two(block_dim),
+              "TaskLaunchPolicy block_dim must be a power of two or a "
+              "multiple of 32, got {}",
+              block_dim);
+  TaskLaunchPolicy policy;
+  if (mode == "hint") {
+    policy.mode = TaskLaunchPolicyMode::hint;
+  } else if (mode == "require") {
+    policy.mode = TaskLaunchPolicyMode::require;
+  } else {
+    TI_ERROR("TaskLaunchPolicy mode must be 'hint' or 'require', got {}", mode);
+  }
+  policy.block_dim = block_dim;
+  policy.injected_block_dim = injected_block_dim;
+  task_launch_policy_ = policy;
+  invalidate_kernel_key_for_cache();
+}
+
+const std::optional<Kernel::TaskLaunchPolicy> &Kernel::get_task_launch_policy()
+    const {
+  return task_launch_policy_;
+}
+
+std::string Kernel::task_launch_policy_cache_key() const {
+  if (!task_launch_policy_.has_value()) {
+    return {};
+  }
+  const char mode =
+      task_launch_policy_->mode == TaskLaunchPolicyMode::require ? 'r' : 'h';
+  return fmt::format("{}:{}:{}", mode, task_launch_policy_->block_dim,
+                     task_launch_policy_->injected_block_dim ? 'i' : 's');
+}
+
 void Kernel::retire_definition() {
   ir.reset();
   context.reset();
@@ -161,6 +202,7 @@ void Kernel::retire_definition() {
   kernel_key_valid_ = false;
   offline_cache_body_.reset();
   compile_tier_override_.reset();
+  task_launch_policy_.reset();
   std::vector<int>().swap(snode_tree_dependencies_);
 }
 

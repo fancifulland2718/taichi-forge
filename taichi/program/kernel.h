@@ -19,6 +19,17 @@ class Program;
 
 class TI_DLL_EXPORT Kernel : public Callable {
  public:
+  enum class TaskLaunchPolicyMode {
+    hint,
+    require,
+  };
+
+  struct TaskLaunchPolicy {
+    TaskLaunchPolicyMode mode{TaskLaunchPolicyMode::hint};
+    int block_dim{0};
+    bool injected_block_dim{false};
+  };
+
   std::vector<SNode *> no_activate;
 
   bool is_accessor{false};
@@ -72,6 +83,17 @@ class TI_DLL_EXPORT Kernel : public Callable {
 
   const std::optional<std::string> &get_compile_tier_override() const;
 
+  // N1: immutable per-Kernel launch-policy metadata. Python materializes a
+  // distinct Kernel for every policy specialization, so this is configured
+  // before the first compilation and is never mutated on a warm launch.
+  void set_task_launch_policy(const std::string &mode,
+                              int block_dim,
+                              bool injected_block_dim);
+
+  const std::optional<TaskLaunchPolicy> &get_task_launch_policy() const;
+
+  std::string task_launch_policy_cache_key() const;
+
   const std::vector<int> &snode_tree_dependencies() const {
     return snode_tree_dependencies_;
   }
@@ -102,6 +124,7 @@ class TI_DLL_EXPORT Kernel : public Callable {
   mutable bool kernel_key_valid_{false};
   mutable std::optional<std::string> offline_cache_body_;
   std::optional<std::string> compile_tier_override_;
+  std::optional<TaskLaunchPolicy> task_launch_policy_;
   mutable std::vector<int> snode_tree_dependencies_;
 };
 

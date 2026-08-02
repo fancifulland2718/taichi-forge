@@ -1,5 +1,6 @@
 ﻿#include "taichi/ir/ir.h"
 #include "taichi/analysis/graph_kernel_metadata.h"
+#include "taichi/ir/frontend_ir.h"
 #include "taichi/system/profiler.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/ir/analysis.h"
@@ -11,10 +12,195 @@
 #include "taichi/program/kernel.h"
 #include "taichi/util/lang_util.h"
 
+#include <string>
+#include <vector>
 
 namespace taichi::lang {
 
 namespace irpass {
+
+namespace {
+
+struct TaskLaunchPolicyApplication {
+  bool active{false};
+  bool changed_block_dim{false};
+};
+
+TaskLaunchPolicyApplication apply_task_launch_policy(
+    IRNode *ir,
+    const CompileConfig &config,
+    const Kernel *kernel,
+    bool start_from_ast) {
+  const auto &policy = kernel->get_task_launch_policy();
+  if (!policy.has_value()) {
+    return {};
+  }
+
+  TI_ERROR_IF(!start_from_ast,
+              "TaskLaunchPolicy is supported only for direct JIT kernels");
+  TI_ERROR_IF(config.arch != Arch::cuda && config.arch != Arch::vulkan,
+              "TaskLaunchPolicy block control is unavailable on backend {}",
+              arch_name(config.arch));
+  TI_ERROR_IF(!ir->is<Block>(),
+              "TaskLaunchPolicy expected a frontend kernel block");
+
+  std::vector<FrontendForStmt *> parallel_loops;
+  for (const auto &stmt : ir->as<Block>()->statements) {
+    if (auto *loop = stmt->cast<FrontendForStmt>();
+        loop != nullptr && !loop->strictly_serialized) {
+      parallel_loops.push_back(loop);
+    }
+  }
+  TI_ERROR_IF(
+      parallel_loops.size() != 1,
+      "TaskLaunchPolicy requires exactly one top-level parallel range-for; "
+      "found {} parallel loops",
+      parallel_loops.size());
+
+  auto *loop = parallel_loops.front();
+  TI_ERROR_IF(
+      loop->snode != nullptr || loop->external_tensor || loop->mesh != nullptr,
+      "TaskLaunchPolicy currently supports only a range-for task; "
+      "struct-for, ndarray iteration, and mesh-for remain read-only");
+
+  TaskLaunchPolicyApplication result;
+  result.active = true;
+  if (loop->block_dim == policy->block_dim) {
+    result.changed_block_dim = policy->injected_block_dim;
+  } else if (policy->mode == Kernel::TaskLaunchPolicyMode::require) {
+    TI_ERROR("TaskLaunchPolicy require(block_dim={}) conflicts with the "
+             "kernel's explicit ti.loop_config(block_dim={})",
+             policy->block_dim, loop->block_dim);
+  }
+  // A hint never overrides an explicit source-level loop_config. This keeps
+  // SharedArray indexing and block-collective assumptions owned by the kernel.
+  return result;
+}
+
+class BlockSensitiveOperationFinder final : public BasicStmtVisitor {
+ public:
+  BlockSensitiveOperationFinder() {
+    allow_undefined_visitor = true;
+    invoke_default_visitor = true;
+  }
+
+  using BasicStmtVisitor::visit;
+
+  void visit(AllocaStmt *stmt) override {
+    if (stmt->is_shared && reason_.empty()) {
+      reason_ = "block-local SharedArray storage";
+    }
+  }
+
+  void visit(InternalFuncStmt *stmt) override {
+    const auto &name = stmt->func_name;
+    const bool sensitive =
+        name == "linear_thread_idx" || name == "grid_memfence" ||
+        name.rfind("block_barrier", 0) == 0 ||
+        name.rfind("workgroup", 0) == 0 ||
+        name.rfind("localInvocation", 0) == 0 ||
+        name.rfind("globalInvocation", 0) == 0 || name.rfind("cuda_", 0) == 0 ||
+        name.rfind("warp_", 0) == 0 || name.rfind("subgroup", 0) == 0;
+    if (sensitive && reason_.empty()) {
+      reason_ = "block-sensitive intrinsic " + name;
+    }
+  }
+
+  static std::string run(IRNode *ir) {
+    BlockSensitiveOperationFinder finder;
+    ir->accept(&finder);
+    return finder.reason_;
+  }
+
+ private:
+  std::string reason_;
+};
+
+class SerialPreambleSafetyChecker final : public BasicStmtVisitor {
+ public:
+  SerialPreambleSafetyChecker() {
+    allow_undefined_visitor = true;
+    invoke_default_visitor = true;
+  }
+
+  using BasicStmtVisitor::visit;
+
+  void visit(GlobalStoreStmt *stmt) override {
+    if (!stmt->dest->is<GlobalTemporaryStmt>()) {
+      safe_ = false;
+    }
+  }
+
+  void visit(Stmt *stmt) override {
+    if (stmt->has_global_side_effect()) {
+      safe_ = false;
+    }
+  }
+
+  static bool run(Block *body) {
+    SerialPreambleSafetyChecker checker;
+    body->accept(&checker);
+    return checker.safe_;
+  }
+
+ private:
+  bool safe_{true};
+};
+
+void validate_task_launch_policy_body(
+    IRNode *ir,
+    const TaskLaunchPolicyApplication &application) {
+  if (!application.changed_block_dim) {
+    return;
+  }
+  const std::string reason = BlockSensitiveOperationFinder::run(ir);
+  TI_ERROR_IF(
+      !reason.empty(),
+      "TaskLaunchPolicy cannot change block_dim for a kernel containing {}; "
+      "keep ti.loop_config(block_dim=...) in the kernel source instead",
+      reason);
+}
+
+void validate_task_launch_policy_offloads(
+    IRNode *ir,
+    const TaskLaunchPolicyApplication &application) {
+  if (!application.active) {
+    return;
+  }
+  TI_ERROR_IF(!ir->is<Block>(),
+              "TaskLaunchPolicy expected an offloaded kernel block");
+  std::vector<OffloadedStmt *> tasks;
+  for (const auto &stmt : ir->as<Block>()->statements) {
+    if (auto *task = stmt->cast<OffloadedStmt>(); task != nullptr) {
+      tasks.push_back(task);
+    }
+  }
+  std::string task_types;
+  std::size_t range_tasks = 0;
+  bool safe_task_shape = true;
+  for (const auto *task : tasks) {
+    if (!task_types.empty()) {
+      task_types += ",";
+    }
+    task_types +=
+        fmt::format("{}[{}]", OffloadedStmt::task_type_name(task->task_type),
+                    task->body->statements.size());
+    if (task->task_type == OffloadedStmt::TaskType::range_for) {
+      range_tasks += 1;
+    } else if (task->task_type != OffloadedStmt::TaskType::serial ||
+               !SerialPreambleSafetyChecker::run(task->body.get())) {
+      safe_task_shape = false;
+    }
+  }
+  TI_ERROR_IF(
+      range_tasks != 1 || !safe_task_shape,
+      "TaskLaunchPolicy requires one physical parallel range task plus only "
+      "compiler-generated serial bound setup; the compiled kernel produced "
+      "{} offloaded task(s): {}",
+      tasks.size(), task_types);
+}
+
+}  // namespace
 
 void compile_to_offloads(IRNode *ir,
                          const CompileConfig &config,
@@ -27,6 +213,9 @@ void compile_to_offloads(IRNode *ir,
                          bool stop_before_offload) {
   TI_AUTO_PROF;
   TI_COMPILE_PROFILER("cpp.ir.compile_to_offloads");
+
+  const auto task_launch_policy =
+      apply_task_launch_policy(ir, config, kernel, start_from_ast);
 
   auto print = make_pass_printer(verbose, config.print_ir_dbg_info,
                                  kernel->get_name(), ir);
@@ -66,6 +255,7 @@ void compile_to_offloads(IRNode *ir,
                                      Function::IRStage::OptimizedIR);
     irpass::analysis::gather_func_store_dests(ir);
   }
+  validate_task_launch_policy_body(ir, task_launch_policy);
 
   {
     TI_COMPILE_PROFILER("cpp.ir.validate_shared_array_scope");
@@ -214,9 +404,9 @@ void compile_to_offloads(IRNode *ir,
   if (dirty_since_simplify_i) {
     {
       TI_COMPILE_PROFILER("cpp.ir.full_simplify.II");
-      irpass::full_simplify(
-          ir, config,
-          {false, /*autodiff_enabled*/ false, kernel->get_name(), verbose});
+      irpass::full_simplify(ir, config,
+                            {false, /*autodiff_enabled*/ false,
+                             kernel->get_name(), verbose});
     }
     print("Simplified II");
     irpass::analysis::verify(ir);
@@ -235,6 +425,7 @@ void compile_to_offloads(IRNode *ir,
     TI_COMPILE_PROFILER("cpp.ir.offload");
     irpass::offload(ir, config);
   }
+  validate_task_launch_policy_offloads(ir, task_launch_policy);
   print("Offloaded");
   irpass::analysis::verify(ir);
   // NOTE: There was an additional CFG pass here, removed in
@@ -340,9 +531,9 @@ void offload_to_executable(IRNode *ir,
     print("Make mesh thread local");
     if (config.make_mesh_block_local && config.arch == Arch::cuda) {
       irpass::make_mesh_block_local(ir, config, {kernel->get_name()});
-      irpass::full_simplify(ir, config,
-                            {false, /*autodiff_enabled*/ false,
-                             kernel->get_name(), verbose});
+      irpass::full_simplify(
+          ir, config,
+          {false, /*autodiff_enabled*/ false, kernel->get_name(), verbose});
       print("Simplified X");
     }
   }

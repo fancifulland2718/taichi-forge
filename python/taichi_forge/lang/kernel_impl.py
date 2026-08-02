@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import textwrap
+import threading
 import time
 import typing
 import types
@@ -188,6 +189,23 @@ def _get_tree_and_ctx(
             is_real_function=is_real_function,
         )
     return tree, ctx
+
+
+def _has_explicit_loop_block_dim(tree):
+    """Whether the kernel source owns a ti.loop_config(block_dim=...) choice."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = None
+        if isinstance(node.func, ast.Attribute):
+            name = node.func.attr
+        elif isinstance(node.func, ast.Name):
+            name = node.func.id
+        if name == "loop_config" and any(
+            keyword.arg == "block_dim" for keyword in node.keywords
+        ):
+            return True
+    return False
 
 
 def _process_args(self, args, kwargs):
@@ -945,6 +963,7 @@ class Kernel:
     def reset(self):
         self.runtime = impl.get_runtime()
         self.compiled_kernels = {}
+        self._task_launch_policy_manifests = {}
         self._external_grad_accesses = {}
         self._materializing_external_grad_accesses = set()
 
@@ -1017,7 +1036,9 @@ class Kernel:
                     raise TaichiSyntaxError(f"Invalid type annotation (argument {i}) of Taichi kernel: {annotation}")
             self.arguments.append(KernelArgument(annotation, param.name, param.default))
 
-    def materialize(self, key=None, args=None, arg_features=None):
+    def materialize(
+        self, key=None, args=None, arg_features=None, task_launch_policy=None
+    ):
         if key is None:
             key = (self.func, 0, self.autodiff_mode)
         self.runtime.materialize()
@@ -1042,10 +1063,10 @@ class Kernel:
                     "arguments, call ti.reset(), or raise the positive limit "
                     "in ti.init()."
                 )
-            self._materialize_uncached(key, args, arg_features)
+            self._materialize_uncached(key, args, arg_features, task_launch_policy)
             self.runtime._compiled_specialization_count += 1
 
-    def _materialize_uncached(self, key, args, arg_features):
+    def _materialize_uncached(self, key, args, arg_features, task_launch_policy=None):
         kernel_name = f"{self.func.__name__}_c{self.kernel_counter}_{key[1]}"
         _logging.trace(f"Compiling kernel {kernel_name} in {self.autodiff_mode}...")
 
@@ -1059,9 +1080,12 @@ class Kernel:
         if self.autodiff_mode != AutodiffMode.NONE:
             KernelSimplicityASTChecker(self.func).visit(tree)
 
+        task_launch_policy_injected = False
+
         # Do not change the name of 'taichi_ast_generator'
         # The warning system needs this identifier to remove unnecessary messages
         def taichi_ast_generator(kernel_cxx):
+            nonlocal task_launch_policy_injected
             if self.runtime.inside_kernel:
                 raise TaichiSyntaxError(
                     "Kernels cannot call other kernels. I.e., nested kernels are not allowed. "
@@ -1076,7 +1100,19 @@ class Kernel:
             self.runtime.compiling_callable = kernel_cxx
             try:
                 ctx.ast_builder = kernel_cxx.ast_builder()
-                with python_compile_profile_event(f"python.kernel.ast_transform:{self.func.__name__}"):
+                if (
+                    task_launch_policy is not None
+                    and task_launch_policy.mode != "auto"
+                    and not _has_explicit_loop_block_dim(tree)
+                ):
+                    # Use the same frontend loop decorator as source-level
+                    # ti.loop_config. A late FrontendForStmt mutation can keep
+                    # constant range setup in an extra serial offload.
+                    ctx.ast_builder.block_dim(task_launch_policy.block_dim)
+                    task_launch_policy_injected = True
+                with python_compile_profile_event(
+                    f"python.kernel.ast_transform:{self.func.__name__}"
+                ):
                     transform_tree(tree, ctx)
                 if not ctx.is_real_function:
                     if self.return_type and ctx.returned != ReturnStatus.ReturnedValue:
@@ -1106,6 +1142,12 @@ class Kernel:
         # auto-segregated.
         if self.opt_level is not None:
             taichi_kernel.set_compile_tier_override(self.opt_level)
+        if task_launch_policy is not None and task_launch_policy.mode != "auto":
+            taichi_kernel.set_task_launch_policy(
+                task_launch_policy.mode,
+                task_launch_policy.block_dim,
+                task_launch_policy_injected,
+            )
         assert key not in self.compiled_kernels
         self.compiled_kernels[key] = taichi_kernel
 
@@ -1556,6 +1598,171 @@ class Kernel:
             self.materialize(key=key, args=args, arg_features=arg_features)
             return key
 
+    def _ensure_compiled_with_task_launch_policy(self, policy, *args):
+        with python_compile_profile_event(
+            f"python.kernel.ensure_compiled_with_task_launch_policy:{self.func.__name__}"
+        ):
+            instance_id, arg_features = self.mapper.lookup(args)
+            key = (
+                self.func,
+                instance_id,
+                self.autodiff_mode,
+                policy._specialization_key,
+            )
+            if (
+                key not in self._task_launch_policy_manifests
+                and threading.current_thread() is not threading.main_thread()
+            ):
+                raise TaichiRuntimeError(
+                    "A cold TaskLaunchPolicy specialization must be prepared "
+                    "on the Python main thread; call bound.report(*args) once "
+                    "before concurrent launches"
+                )
+            self.materialize(
+                key=key,
+                args=args,
+                arg_features=arg_features,
+                task_launch_policy=policy,
+            )
+            return key
+
+    def _validate_task_launch_policy_specialization(self, key, policy):
+        """Compile and validate a cold policy specialization without enqueueing it."""
+        from taichi_forge.lang.task_manifest import OffloadedTaskManifest
+
+        cached = self._task_launch_policy_manifests.get(key)
+        if cached is not None:
+            return cached
+        if threading.current_thread() is not threading.main_thread():
+            raise TaichiRuntimeError(
+                "A cold TaskLaunchPolicy specialization must be prepared "
+                "on the Python main thread; call bound.report(*args) once "
+                "before concurrent launches"
+            )
+
+        kernel_cpp = self.compiled_kernels[key]
+        raw = self.runtime.prog._kernel_task_manifest(kernel_cpp)
+        tasks = tuple(OffloadedTaskManifest._from_core(item) for item in raw)
+        range_tasks = tuple(task for task in tasks if task.task_type == "range_for")
+        if len(range_tasks) != 1:
+            raise TaichiRuntimeError(
+                "TaskLaunchPolicy specialization did not produce exactly one "
+                "parallel range task"
+            )
+        selected = range_tasks[0].selected_block_size
+        if selected is None:
+            raise TaichiRuntimeError(
+                "TaskLaunchPolicy backend did not expose a selected block size"
+            )
+        if policy.mode == "require" and selected != policy.block_dim:
+            raise TaichiRuntimeError(
+                f"TaskLaunchPolicy require(block_dim={policy.block_dim}) was not "
+                f"satisfied; backend selected {selected}"
+            )
+        self._task_launch_policy_manifests[key] = tasks
+        return tasks
+
+    @staticmethod
+    def _task_launch_backend_kind():
+        backend = _ti_core.arch_name(impl.current_cfg().arch)
+        if backend in ("cuda", "vulkan"):
+            return backend, "native"
+        if backend in ("x64", "arm64"):
+            return backend, "cpu"
+        return backend, "unsupported"
+
+    def with_launch_policy(self, policy):
+        """Bind an immutable TaskLaunchPolicy without changing normal calls."""
+
+        from taichi_forge.lang.task_launch import TaskLaunchPolicy
+
+        if not isinstance(policy, TaskLaunchPolicy):
+            raise TypeError("with_launch_policy expects a TaskLaunchPolicy")
+        return _TaskLaunchBinding(self, policy)
+
+    def _call_with_task_launch_policy(self, policy, *args, **kwargs):
+        backend, kind = self._task_launch_backend_kind()
+        if policy.mode == "auto" or (kind == "cpu" and policy.mode == "hint"):
+            return self(*args, **kwargs)
+        if kind == "cpu":
+            raise TaichiRuntimeError(
+                "TaskLaunchPolicy require is unavailable on CPU: the CPU runtime "
+                "uses a worker scheduler rather than a GPU block"
+            )
+        if kind != "native":
+            raise TaichiRuntimeError(
+                f"TaskLaunchPolicy is unavailable on backend {backend}"
+            )
+        if self.autodiff_mode != AutodiffMode.NONE:
+            raise TaichiRuntimeError(
+                "TaskLaunchPolicy supports primal direct JIT kernels only"
+            )
+        if (
+            self.runtime.target_tape is not None
+            or self.runtime.fwd_mode_manager is not None
+            or self.runtime.grad_replaced
+        ):
+            raise TaichiRuntimeError(
+                "TaskLaunchPolicy cannot be used inside an automatic "
+                "differentiation context"
+            )
+
+        args = _process_args(self, args, kwargs)
+        key = self._ensure_compiled_with_task_launch_policy(policy, *args)
+        self._validate_task_launch_policy_specialization(key, policy)
+        kernel_cpp = self.compiled_kernels[key]
+        return self.launch_kernel(kernel_cpp, *args)
+
+    def _task_launch_report(self, policy, *args, **kwargs):
+        from taichi_forge.lang.task_launch import TaskLaunchReport
+
+        backend, kind = self._task_launch_backend_kind()
+        if policy.mode == "auto":
+            tasks = self.task_manifest(*args, **kwargs)
+            return TaskLaunchReport(
+                policy=policy,
+                backend=backend,
+                status="auto",
+                reason="compiler/backend default geometry",
+                tasks=tasks,
+            )
+        if kind == "cpu":
+            if policy.mode == "require":
+                raise TaichiRuntimeError(
+                    "TaskLaunchPolicy require is unavailable on CPU: the CPU "
+                    "runtime uses a worker scheduler rather than a GPU block"
+                )
+            tasks = self.task_manifest(*args, **kwargs)
+            return TaskLaunchReport(
+                policy=policy,
+                backend=backend,
+                status="fallback_auto",
+                reason="CPU has no GPU block geometry; hint preserved auto scheduling",
+                tasks=tasks,
+            )
+        if kind != "native":
+            raise TaichiRuntimeError(
+                f"TaskLaunchPolicy is unavailable on backend {backend}"
+            )
+
+        processed = _process_args(self, args, kwargs)
+        key = self._ensure_compiled_with_task_launch_policy(policy, *processed)
+        tasks = self._validate_task_launch_policy_specialization(key, policy)
+        range_tasks = tuple(task for task in tasks if task.task_type == "range_for")
+        selected = range_tasks[0].selected_block_size
+        applied = selected == policy.block_dim
+        return TaskLaunchReport(
+            policy=policy,
+            backend=backend,
+            status="applied" if applied else "hint_not_applied",
+            reason=(
+                "backend selected the requested block size"
+                if applied
+                else "an explicit source-level loop_config or backend constraint won"
+            ),
+            tasks=tasks,
+        )
+
     def task_manifest(self, *args, **kwargs):
         """Return immutable metadata for this argument specialization.
 
@@ -1630,6 +1837,105 @@ class Kernel:
                 key, frozenset()
             ),
         )
+
+
+class _TaskLaunchBinding:
+    """A reusable policy-bound view of a direct JIT kernel."""
+
+    def __init__(self, kernel, policy, bound_args=()):
+        self._kernel = kernel
+        self.policy = policy
+        self._bound_args = tuple(bound_args)
+        self._fast_runtime = None
+        self._fast_key = None
+        self._fast_kernel_cpp = None
+        self._fallback_auto = policy.mode == "auto"
+        self.__name__ = kernel.func.__name__
+
+    def _refresh_fast_path(self, report=None):
+        if report is not None and report.status == "fallback_auto":
+            self._fallback_auto = True
+            self._fast_runtime = self._kernel.runtime
+            return
+        if self.policy.mode == "auto":
+            return
+        self._fast_runtime = self._kernel.runtime
+        if self._kernel.mapper._dynamic_arg_extractors:
+            return
+        key = (
+            self._kernel.func,
+            0,
+            self._kernel.autodiff_mode,
+            self.policy._specialization_key,
+        )
+        if key in self._kernel._task_launch_policy_manifests:
+            self._fast_runtime = self._kernel.runtime
+            self._fast_key = key
+            self._fast_kernel_cpp = self._kernel.compiled_kernels[key]
+
+    def __call__(self, *args, **kwargs):
+        try:
+            runtime = self._kernel.runtime
+            if self.policy.mode == "auto" or (
+                self._fallback_auto and self._fast_runtime is runtime
+            ):
+                return self._kernel(*self._bound_args, *args, **kwargs)
+            if (
+                self._fast_runtime is runtime
+                and runtime.target_tape is None
+                and runtime.fwd_mode_manager is None
+                and not runtime.grad_replaced
+            ):
+                processed = _process_args(
+                    self._kernel, (*self._bound_args, *args), kwargs
+                )
+                if (
+                    self._fast_kernel_cpp is not None
+                    and self._kernel.compiled_kernels.get(self._fast_key)
+                    is self._fast_kernel_cpp
+                ):
+                    return self._kernel.launch_kernel(
+                        self._fast_kernel_cpp, *processed
+                    )
+                key = self._kernel._ensure_compiled_with_task_launch_policy(
+                    self.policy, *processed
+                )
+                self._kernel._validate_task_launch_policy_specialization(
+                    key, self.policy
+                )
+                return self._kernel.launch_kernel(
+                    self._kernel.compiled_kernels[key], *processed
+                )
+            result = self._kernel._call_with_task_launch_policy(
+                self.policy, *self._bound_args, *args, **kwargs
+            )
+            if (
+                self.policy.mode == "hint"
+                and self._kernel._task_launch_backend_kind()[1] == "cpu"
+            ):
+                self._fallback_auto = True
+                self._fast_runtime = runtime
+            else:
+                self._refresh_fast_path()
+            return result
+        except (TaichiCompilationError, TaichiRuntimeError) as exc:
+            if impl.get_runtime().print_full_traceback:
+                raise
+            raise type(exc)("\n" + str(exc)) from None
+
+    def report(self, *args, **kwargs):
+        """Compile if needed and report resolution without submitting work."""
+
+        report = self._kernel._task_launch_report(
+            self.policy, *self._bound_args, *args, **kwargs
+        )
+        self._refresh_fast_path(report)
+        return report
+
+    def task_manifest(self, *args, **kwargs):
+        """Return the policy specialization's physical task manifest."""
+
+        return self.report(*args, **kwargs).tasks
 
 
 # For a Taichi class definition like below:
@@ -1711,6 +2017,7 @@ def _kernel_impl(_func, level_of_class_stackframe, verbose=False, opt_level=None
     wrapped._adjoint = adjoint
     if not is_classkernel:
         wrapped.task_manifest = primal.task_manifest
+        wrapped.with_launch_policy = primal.with_launch_policy
     return wrapped
 
 
@@ -1795,6 +2102,14 @@ class _BoundedDifferentiableMethod:
         return self._primal.task_manifest(
             self._kernel_owner, *args, **kwargs
         )
+
+    def with_launch_policy(self, policy):
+        from taichi_forge.lang.task_launch import TaskLaunchPolicy
+
+        if not isinstance(policy, TaskLaunchPolicy):
+            raise TypeError("with_launch_policy expects a TaskLaunchPolicy")
+        bound_args = () if self._is_staticmethod else (self._kernel_owner,)
+        return _TaskLaunchBinding(self._primal, policy, bound_args)
 
 
 def data_oriented(cls):

@@ -4350,6 +4350,7 @@ void export_lang(py::module &m) {
       .def("definition_retired", &Kernel::definition_retired)
       .def("set_compile_tier_override",
            &Kernel::set_compile_tier_override)
+      .def("set_task_launch_policy", &Kernel::set_task_launch_policy)
       .def("clear_compile_tier_override",
            &Kernel::clear_compile_tier_override)
       .def("get_compile_tier_override",
