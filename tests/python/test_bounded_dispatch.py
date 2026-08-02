@@ -8,6 +8,42 @@ from tests import test_utils
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_dynamic_work_capabilities_separate_launch_and_iteration_semantics():
+    capabilities = ti.graph.dynamic_work_capabilities()
+    bounded = capabilities["bounded_dispatch"]
+    iteration = capabilities["structured_iteration"]
+    observation = capabilities["observation"]
+    arch = ti.lang.impl.current_cfg().arch
+
+    assert capabilities["schema_version"] == 1
+    assert bounded["producer_owned_launch_state"]
+    assert bounded["no_host_readback"]
+    assert observation["completion_attached"]
+    assert observation["readback_mode"] == (
+        "completion_attached_pinned_copy"
+        if arch == ti.cuda
+        else "completion_attached_host_visible"
+    )
+    if arch == ti.vulkan:
+        assert bounded["execution_semantics"] == "exact_device_grid"
+        assert bounded["exact_physical_grid"]
+        assert bounded["producer_packet_consumed"]
+        assert bounded["default_preparation_dispatches"] == 1
+        assert not iteration["command_termination_exact"]
+    elif arch == ti.cuda:
+        assert bounded["execution_semantics"] == "masked_capacity"
+        assert bounded["masked_capacity"]
+        assert not bounded["producer_packet_consumed"]
+        assert bounded["default_preparation_dispatches"] == 0
+        assert iteration["command_termination_exact"] == (
+            iteration["execution_semantics"] == "exact_dynamic_termination"
+        )
+    else:
+        assert bounded["execution_semantics"] == "masked_capacity"
+        assert iteration["execution_semantics"] == "portable_host_control"
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_graph_host_known_bounded_dispatch_is_exact_and_clamped():
     capacity = 97
 
@@ -165,6 +201,120 @@ def test_graph_device_bounded_dispatch_routes_and_boundaries():
         else:
             assert snapshot.executed_count == capacity
         assert int(visited.to_numpy()[0]) == snapshot.executed_count
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_graph_device_prefix_sequence_publishes_bounded_launch_state():
+    capacity = 96
+    block_dim = 32
+
+    @ti.kernel
+    def consume(
+        values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        visited: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.loop_config(block_dim=block_dim)
+        for i in range(capacity):
+            ti.atomic_add(visited[0], 1)
+            if i < ti.device_extent_count(extent):
+                output[i] = values[i] * 3 + 1
+
+    values_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
+    )
+    input_extent_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "input_extent", ti.i32, ndim=1
+    )
+    flags_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "flags", ti.i32, ndim=1
+    )
+    compacted_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "compacted", ti.i32, ndim=1
+    )
+    compact_extent_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "compact_extent", ti.i32, ndim=1
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    visited_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "visited", ti.i32, ndim=1
+    )
+
+    input_extent = ti.DeviceExtent(capacity)
+    compact_extent = ti.DeviceExtent(capacity)
+    launch_state = compact_extent.dispatch_state(block_dim)
+    sequence = ti.algorithms.DevicePrefixSequence(capacity)
+    sequence.input(values_arg, input_extent_arg).compact(
+        flags_arg,
+        compacted_arg,
+        compact_extent_arg,
+        dispatch_state=launch_state,
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(sequence)
+    handle = builder.dispatch_bounded(
+        consume,
+        compacted_arg,
+        compact_extent_arg,
+        output_arg,
+        visited_arg,
+        extent=compact_extent_arg,
+        capacity=capacity,
+        block_dim=block_dim,
+        launch_state=launch_state,
+    )
+    graph = builder.compile()
+
+    values_host = np.arange(capacity, dtype=np.int32) + 2
+    flags_host = ((np.arange(capacity) % 4) != 1).astype(np.int32)
+    values = ti.ndarray(ti.i32, shape=capacity)
+    flags = ti.ndarray(ti.i32, shape=capacity)
+    compacted = ti.ndarray(ti.i32, shape=capacity)
+    output = ti.ndarray(ti.i32, shape=capacity)
+    visited = ti.ndarray(ti.i32, shape=1)
+    values.from_numpy(values_host)
+    flags.from_numpy(flags_host)
+
+    assert handle.capabilities.producer_owned_launch_state == (
+        ti.lang.impl.current_cfg().arch == ti.vulkan
+    )
+    assert handle.capabilities.preparation_dispatches == 0
+    assert handle.workspace_allocation_count == 0
+    assert handle.workspace_bytes == 0
+    assert graph._debug_info["nodes"][0]["kind"] == "device_prefix_sequence"
+    assert graph._debug_info["nodes"][0]["operation_count"] == 1
+
+    runtime_args = {
+        "values": values,
+        "input_extent": input_extent,
+        "flags": flags,
+        "compacted": compacted,
+        "compact_extent": compact_extent,
+        "output": output,
+        "visited": visited,
+    }
+    for requested in (0, 1, capacity // 3, capacity, capacity + 1):
+        input_extent.set(requested)
+        output.fill(-1)
+        visited.fill(0)
+        graph.run(runtime_args)
+        active = min(max(requested, 0), capacity)
+        expected_values = values_host[:active][flags_host[:active] != 0]
+        expected = np.full(capacity, -1, dtype=np.int32)
+        expected[: expected_values.size] = expected_values * 3 + 1
+        np.testing.assert_array_equal(output.to_numpy(), expected)
+        snapshot = handle.snapshot(compact_extent)
+        assert snapshot.useful_count == expected_values.size
+        if handle.capabilities.exact_grid:
+            assert int(visited.to_numpy()[0]) == min(
+                capacity,
+                ((expected_values.size + block_dim - 1) // block_dim) * block_dim,
+            )
+        else:
+            assert int(visited.to_numpy()[0]) == capacity
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

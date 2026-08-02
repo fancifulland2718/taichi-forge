@@ -1757,6 +1757,7 @@ def test_graph_observation_defers_readback_and_reports_memory(monkeypatch):
     state.fill(4)
     residual.fill(8.0)
 
+    staging_before = impl.get_runtime().prog._graph_observation_staging_stats()
     ticket = graph.submit({"state": state, "residual": residual})
     report = graph.execution_stats()
     memory = report.memory
@@ -1769,7 +1770,25 @@ def test_graph_observation_defers_readback_and_reports_memory(monkeypatch):
     assert memory.observation_arena_reuses == 0
     assert memory.observation_materializations == 0
     assert memory.observation_host_readback_bytes == 0
-    assert memory.persistent_observation_bytes == 8
+    arch = impl.current_cfg().arch
+    expected_readback_mode = (
+        "completion_attached_pinned_copy"
+        if arch == ti_core.Arch.cuda
+        else "completion_attached_host_visible"
+    )
+    assert memory.persistent_observation_bytes >= 8
+    assert memory.observation_completion_attached
+    assert memory.observation_readback_mode == expected_readback_mode
+    staging_after_submit = (
+        impl.get_runtime().prog._graph_observation_staging_stats()
+    )
+    expected_after_submit = staging_before["completion_attached_batches"] + (
+        1 if arch == ti_core.Arch.cuda else 0
+    )
+    assert (
+        staging_after_submit["completion_attached_batches"]
+        == expected_after_submit
+    )
 
     observed = ticket.observations()
     assert observed == {"tail": {"state": 5, "residual": 4.0}}
@@ -1778,6 +1797,19 @@ def test_graph_observation_defers_readback_and_reports_memory(monkeypatch):
     assert memory.observation_materializations == 1
     assert memory.observation_host_readback_bytes == 8
     assert memory.persistent_observation_bytes >= 8
+    staging_after_materialize = (
+        impl.get_runtime().prog._graph_observation_staging_stats()
+    )
+    assert (
+        staging_after_materialize["completion_attached_batches"]
+        == staging_before["completion_attached_batches"] + 1
+    )
+    assert (
+        staging_after_materialize["completion_attached_bytes"]
+        == staging_before["completion_attached_bytes"] + 8
+    )
+    for counter in ("packed_batches", "direct_batches", "fallback_batches"):
+        assert staging_after_materialize[counter] == staging_before[counter]
 
     state.fill(10)
     residual.fill(4.0)
@@ -1830,6 +1862,24 @@ def test_graph_observation_ring_preserves_unconsumed_snapshots(monkeypatch):
     memory = graph.execution_stats().memory
     assert memory.observation_materializations == 3
     assert memory.observation_host_readback_bytes == 24
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_graph_observation_supports_diagnostic_deferred_readback(monkeypatch):
+    monkeypatch.setenv("TI_GRAPH_COMPLETION_ATTACHED_OBSERVATION", "0")
+    graph = _build_observation_graph()
+    state = ti.ndarray(ti.i32, shape=())
+    residual = ti.ndarray(ti.f32, shape=())
+    state.fill(7)
+    residual.fill(2.0)
+
+    ticket = graph.submit({"state": state, "residual": residual})
+    assert graph.execution_stats().memory.observation_readback_mode == (
+        "deferred_device_copy"
+    )
+    assert ticket.observations() == {
+        "tail": {"state": 8, "residual": 1.0}
+    }
 
 
 @test_utils.test(arch=ti.cpu)
