@@ -1,3 +1,4 @@
+from dataclasses import FrozenInstanceError
 import threading
 
 import numpy as np
@@ -28,6 +29,57 @@ def test_task_launch_policy_value_validation():
         ti.TaskLaunchPolicy.block(2048)
     with pytest.raises(ValueError, match="power of two or a multiple of 32"):
         ti.TaskLaunchPolicy.block(48)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_task_launch_resource_report_is_read_only_and_no_submit():
+    values = ti.ndarray(ti.i32, shape=257)
+
+    @ti.kernel
+    def fill(out: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in range(257):
+            out[i] = i + 3
+
+    policy = ti.TaskLaunchPolicy.block(256)
+    launch = fill.with_launch_policy(policy)
+    program = impl.get_runtime().prog
+    report = launch.report(values)
+    before = program._runtime_statistics_snapshot()
+    assert launch.report(values) == report
+    after = program._runtime_statistics_snapshot()
+    assert after["submission"] == before["submission"]
+    assert after["transfer"] == before["transfer"]
+    assert after["memory"] == before["memory"]
+    assert len(report.resources) == len(report.tasks)
+
+    task = _range_task(report.tasks)
+    resource = next(item for item in report.resources if item.task_id == task.task_id)
+    assert resource.observation_kind == "compile_time_no_submit"
+    assert resource.selected_block_size == task.selected_block_size
+    assert resource.static_shared_bytes == task.static_shared_bytes
+    assert resource.dynamic_shared_bytes == task.dynamic_shared_bytes
+    assert resource.registers_per_thread is None
+    assert resource.local_memory_bytes_per_thread is None
+    with pytest.raises(FrozenInstanceError):
+        resource.static_shared_bytes = 1
+
+    if impl.current_cfg().arch == ti_core.Arch.x64:
+        assert report.status == "fallback_auto"
+        assert resource.max_threads_per_block is None
+        assert resource.representative_legal_block_sizes == ()
+        assert resource.rejected_candidates[0].block_dim == 256
+        assert "worker" in resource.rejected_candidates[0].reason
+    else:
+        assert report.status == "applied"
+        assert 256 in resource.representative_legal_block_sizes
+        assert resource.rejected_candidates == ()
+        if impl.current_cfg().arch == ti_core.Arch.cuda:
+            assert resource.max_threads_per_block == impl.current_cfg().max_block_dim
+            assert "materialized native function" in resource.registers_reason
+        else:
+            assert resource.max_threads_per_block is None
+            assert "not exposed" in resource.max_threads_reason
+            assert "driver owned" in resource.registers_reason
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
@@ -149,6 +201,10 @@ def test_task_launch_policy_preserves_source_block_and_rejects_unsafe_changes():
     hinted = explicit.with_launch_policy(ti.TaskLaunchPolicy.block(256))
     report = hinted.report(values)
     assert report.status == "hint_not_applied"
+    range_resource = next(
+        resource for resource in report.resources if resource.task_type == "range_for"
+    )
+    assert range_resource.rejected_candidates[0].block_dim == 256
     assert _range_task(report.tasks).actual_block_size == 64
     hinted(values)
     ti.sync()
