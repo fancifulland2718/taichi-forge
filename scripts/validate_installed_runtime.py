@@ -243,16 +243,19 @@ def _validate_cpu_dynamic_workload() -> None:
     builder = ti.graph.GraphBuilder()
     handle = builder.dispatch_bounded(
         consume_items,
-        graph_args.values,
-        graph_args.extent,
+        graph_args.current_values,
+        graph_args.current_extent,
         output_arg,
-        extent=graph_args.extent,
+        extent=graph_args.current_extent,
         capacity=capacity,
     )
     graph = builder.compile()
     output = ti.ndarray(ti.i32, shape=capacity)
-    runtime_args = worklist.runtime_arguments("wheel_worklist")
-    runtime_args["wheel_worklist_output"] = output
+    runtime_args = {
+        graph_args.current_values.name: worklist.values,
+        graph_args.current_extent.name: worklist.extent,
+        output_arg.name: output,
+    }
     graph.run(runtime_args)
 
     expected = (np.arange(capacity, dtype=np.int32) * 2 + 1) * 3
