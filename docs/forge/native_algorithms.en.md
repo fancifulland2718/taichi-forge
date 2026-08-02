@@ -145,12 +145,10 @@ floor still require execution on the target driver. See
 [Linux revalidation](linux_revalidation.en.md) for outstanding Linux and
 older-driver evidence.
 
-### Current CUDA performance evidence and boundary
+### CUDA 0.6.0 performance snapshot and current boundary
 
-The current source uses a 1,024-item tiled scan, fused tiled compact ranks,
-and a stable hierarchical 4-bit LSD radix sort. All execute through low-version
-PTX and the dynamically loaded CUDA Driver API, without a Toolkit runtime
-dependency. The table is one unified hot-path result from the Windows
+The table below is the 0.6.0 qualification snapshot, not a measurement of every
+later `master` optimization. It is one unified hot-path result from the Windows
 development host (RTX 5090, driver 610.62, Python 3.10.11) at 1,048,576 i32
 items. Each entry is the per-call median of 30 samples, with 20 submissions per
 sample before synchronization. The idle guard found no other Python or GPU
@@ -165,13 +163,20 @@ build; correctness was checked separately against NumPy oracles.
 | stable compact | 0.0279 ms | 0.0228 ms | 81.8% | 80% | 4.00 MiB |
 | stable i32 key/value sort | 0.4883 ms | 0.1491 ms | 30.5% | 80% | 28.06 MiB |
 
-Against the qualification references in the table, histogram and compact meet
-the reference while scan, reduce, and sort do not. Standard wheels still select
-the correct, asynchronous, driver-only Forge provider because CUB is not a
-release dependency and a host round trip is not a suitable GPU hot-path
-default. This is not a claim of CUB parity; stable sort in particular retains a
-material performance gap. These numbers describe the current implementation
-boundary and are not a cross-device or cross-driver guarantee.
+Against the qualification references in the table, histogram and compact met
+the reference while scan, reduce, and sort did not. Standard wheels still
+select the correct, asynchronous, driver-only Forge provider because CUB is not
+a release dependency and a host round trip is not a suitable GPU hot-path
+default. This is not a claim of CUB parity and is not a cross-device or
+cross-driver guarantee.
+
+Current 0.6.1 source retains the same 1,024-item tiled scan, fused tiled compact
+ranks, and stable hierarchical 4-bit LSD radix contract, but stops the radix
+histogram hierarchy as soon as its top level fits one scan tile. At the table's
+1,048,576-item size, that statically reduces a 32-bit sort from 16 to 8
+histogram-scan launches and from 8 to 0 histogram uniform-add launches, with no
+workspace growth. The snapshot timing above must not be relabeled as a 0.6.1
+result; paired 0.6.1 wheel qualification will provide the new end-to-end number.
 
 ## Data Contracts
 

@@ -40,6 +40,12 @@
 
 ## 待发布 {#unreleased}
 
+- CUDA driver-only stable radix sort 在当前 histogram level 已能由一个 1024-item scan
+  tile 完成时就终止 hierarchy。对于首层包含 1024 个 block 的 32-bit sort，每次排序会删除
+  8 次冗余 scan launch 和 8 次不执行有效 uniform-add 的 launch（device kernel launch 总数
+  `53 -> 37`），workspace 也不再保留未使用的 one-element parent。这是 launch/workspace
+  优化，不是新的 CUB 等速声明；native algorithms 文档中的 0.6.0 资格快照会保持历史标签，
+  直到成对的 0.6.1 wheel 完成复测。
 - 新增 Graph-independent 的固定容量 `DeviceWorklist`：它持有稳定 front/back storage、
   device-owned `DeviceExtent`、atomic append、stable selection 和确定性整数 key 冲突消解。
   无 overflow 时每个接受项只需要一次 slot-reservation atomic；append 顺序不保证，每次

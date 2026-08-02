@@ -126,15 +126,13 @@ PTX 是否可加载以及任何 driver 下限声明，仍必须在目标旧 driv
 [构建 Wheel](build_wheels.zh.md)，Linux 和旧 driver 的待补证据见
 [Linux 复测状态](linux_revalidation.zh.md)。
 
-### 当前 CUDA 性能证据与边界
+### CUDA 0.6.0 性能快照与当前边界
 
-当前源码使用 1024-item tiled scan、fused tiled compact rank，以及稳定的分层 4-bit
-LSD radix sort。它们都由低版本 PTX 和动态 CUDA Driver API 执行，不引入 Toolkit
-runtime 依赖。下面是 Windows 开发机（RTX 5090、driver 610.62、Python 3.10.11）上
-1,048,576 个 i32 item 的一次统一 hot-path 证据：每项 30 个 sample，每个 sample
-批量提交 20 次后同步并折算单次 median；测量前 idle guard 确认没有其它 Python 或 GPU
-compute process。CUB 只来自不发布的 CUDA 13.2 reference build，正确性另由 NumPy
-oracle 验证。
+下表是 0.6.0 资格快照，不代表之后每个 `master` 优化的测量结果。数据来自 Windows
+开发机（RTX 5090、driver 610.62、Python 3.10.11）上的 1,048,576 个 i32 item：每项
+30 个 sample，每个 sample 批量提交 20 次后同步并折算单次 median；测量前 idle guard
+确认没有其它 Python 或 GPU compute process。CUB 只来自不发布的 CUDA 13.2 reference
+build，正确性另由 NumPy oracle 验证。
 
 | Primitive | driver-only median | CUB reference median | 相对吞吐 | 资格参考线 | driver workspace |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -144,10 +142,16 @@ oracle 验证。
 | stable compact | 0.0279 ms | 0.0228 ms | 81.8% | 80% | 4.00 MiB |
 | stable i32 key/value sort | 0.4883 ms | 0.1491 ms | 30.5% | 80% | 28.06 MiB |
 
-按表中的资格参考线，histogram 和 compact 达到参考值，scan、reduce 和 sort 没有。标准
-wheel 仍选择正确、异步且 driver-only 的 Forge provider，因为 CUB 不属于发行依赖，host
-round-trip 也不适合作为 GPU 热路径默认值。这不是与 CUB 等速的声明：尤其 stable sort
-仍有明显性能差距。上述数字用于说明当前实现边界，不是跨设备、跨驱动性能保证。
+按表中的资格参考线，histogram 和 compact 当时达到参考值，scan、reduce 和 sort 没有。
+标准 wheel 仍选择正确、异步且 driver-only 的 Forge provider，因为 CUB 不属于发行依赖，
+host round-trip 也不适合作为 GPU 热路径默认值。这不是与 CUB 等速的声明，也不是跨设备、
+跨驱动性能保证。
+
+当前 0.6.1 源码保持相同的 1024-item tiled scan、fused tiled compact rank 和稳定分层
+4-bit LSD radix 合同，但在 radix histogram 顶层已经能由一个 scan tile 完成时立即终止
+hierarchy。在表中 1,048,576-item 的规模上，32-bit sort 的 histogram-scan launch 会从
+16 降为 8，histogram uniform-add launch 从 8 降为 0，workspace 不增长。上表 timing
+不能重新标成 0.6.1 结果；成对的 0.6.1 wheel 资格测试会给出新的端到端数字。
 
 ## 数据合同
 

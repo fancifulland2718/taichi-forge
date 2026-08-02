@@ -43,6 +43,14 @@ grouped under the behavior they shipped.
 
 ## Unreleased
 
+- CUDA driver-only stable radix sort now stops its histogram hierarchy when
+  the current level fits one 1,024-item scan tile. For a 32-bit sort whose
+  first histogram level has 1,024 blocks, this removes eight redundant scan
+  launches and eight no-op uniform-add launches per sort (`53 -> 37` total
+  device-kernel launches) and removes the unused one-element parent from the
+  workspace. This is a launch/workspace reduction, not a new CUB-parity claim;
+  the 0.6.0 qualification snapshot in the native algorithms guide remains
+  labeled as historical evidence until the paired 0.6.1 wheels are remeasured.
 - Added `DeviceWorklist`, a Graph-independent fixed-capacity front/back
   container with a device-owned `DeviceExtent`, atomic append, stable
   selection, and deterministic integer-key conflict resolution. Atomic append
