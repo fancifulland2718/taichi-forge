@@ -15,7 +15,25 @@ def test_dynamic_work_capabilities_separate_launch_and_iteration_semantics():
     observation = capabilities["observation"]
     arch = ti.lang.impl.current_cfg().arch
 
-    assert capabilities["schema_version"] == 1
+    assert capabilities["schema_version"] == 2
+    assert capabilities["count_contract"] == {
+        "owner": "DeviceExtent",
+        "state_words": 2,
+        "fixed_capacity": True,
+        "device_published_count": True,
+        "sticky_overflow": True,
+        "runtime_generation_qualified": True,
+        "replay_host_readback": False,
+    }
+    assert capabilities["worklist"]["available"]
+    assert capabilities["worklist"]["deterministic_keyed_claim"]
+    assert capabilities["worklist"]["capacity_mismatch_fail_closed"]
+    assert capabilities["worklist"]["atomic_append_order"] == "unspecified"
+    assert (
+        capabilities["worklist"]["physical_launch_semantics"]
+        == bounded["execution_semantics"]
+    )
+    assert observation["worklist_counters"]
     assert bounded["producer_owned_launch_state"]
     assert bounded["no_host_readback"]
     assert observation["completion_attached"]
