@@ -24,6 +24,7 @@ capability.
 | `ti.algorithms.parallel_sort(keys, values=None)` | Vanilla-compatible legacy sorter. |
 | `ti.algorithms.PrefixSumExecutor(n).run(values)` | Prefix sum / scan. |
 | `ti.algorithms.device_prefix(values, extent, ...)` | Compose fixed-capacity primitive inputs through a device-resident valid count. |
+| `ti.algorithms.DevicePrefixSequence(capacity)` | Record a fixed-topology valid-prefix pipeline as one Graph native node. |
 | `ti.algorithms.DevicePrefixWorkspace(max_items)` | Reuse staging and child primitive workspaces across a valid-prefix pipeline. |
 | `ti.algorithms.experimental_compact(values, flags, output, count, ...)` | Filter values by flags and write compacted output. |
 | `ti.algorithms.experimental_run_length_encode(keys, unique_keys, run_lengths, run_count, ...)` | Encode consecutive integer-key runs entirely on device. |
@@ -210,6 +211,16 @@ normal `method="auto"` selection and a `DevicePrefixWorkspace`, so no count
 readback, per-count allocation, or Graph rebuild is needed between operations.
 The underlying fixed-capacity provider may still process capacity-sized
 scratch. A workspace may be reused serially but not by concurrent submissions.
+
+For Graph execution, `DevicePrefixSequence` records the same prefix operations
+over symbolic ndarray arguments and is appended through
+`GraphBuilder.append_native()`. This keeps the full fixed-topology chain under
+one Graph submission without host count observation. When a compact result
+feeds Vulkan bounded dispatch, create `output_extent.dispatch_state(block_dim)`
+and pass it to both compact and `dispatch_bounded()`: the compact scatter then
+publishes the indirect packet with its count, removing one preparation
+dispatch. CPU/CUDA keep their documented masked-capacity route and do not
+consume this packet.
 
 On the current Windows qualification machine, a compact-to-scan chain with a
 10% active prefix was 1.05x faster on CPU, 1.32x on CUDA, and 1.90x on Vulkan

@@ -42,6 +42,20 @@ grouped under the behavior they shipped.
 
 ## Unreleased
 
+- Added `DeviceDispatchState` and `DevicePrefixSequence` for fixed-topology,
+  device-count-driven pipelines. Vulkan compact can now publish its bounded
+  dispatch packet with the output count and pass it to
+  `dispatch_bounded(launch_state=...)`, removing the consumer preparation
+  dispatch. CPU/CUDA preserve their honest masked-capacity route. The unified
+  `dynamic_work_capabilities()` report separates physical launch semantics,
+  structured iteration termination, and completion observation.
+- Graph terminal observations are completion-attached by default. Vulkan/CPU
+  use host-visible arena slots, while CUDA appends an asynchronous copy from
+  device-local snapshot storage to persistent pinned host memory before the
+  ticket completion. This avoids a second readback at
+  `ticket.observations()` and avoids the page migration of managed CUDA
+  storage. The previous deferred path remains available as a diagnostic
+  fallback.
 - Added `DevicePrefix` and `DevicePrefixWorkspace` to compose compact, scan,
   reduce, sort, consecutive unique/RLE, grouped reduce, and bucket building
   through a shared device-written `DeviceExtent`. The fixed-capacity provider

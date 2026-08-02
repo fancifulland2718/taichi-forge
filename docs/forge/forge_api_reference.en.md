@@ -505,6 +505,14 @@ and semantic constraints of the underlying primitive. A workspace is reusable
 but must not be used concurrently. `clear()` releases its Python-owned staging
 and child workspaces.
 
+`ti.algorithms.DevicePrefixSequence(capacity)` records the same operations as
+one fixed-topology native Graph node. Declare symbolic inputs with
+`sequence.input(values_arg, extent_arg)`, chain the returned prefix methods,
+then append the sequence with `builder.append_native(sequence)`. Counts remain
+on device across every recorded operation; runtime arguments still use the
+normal Graph ndarray names. A sequence becomes immutable after it is appended
+and compiled, and its workspace must not be shared by concurrent sequences.
+
 ### Primitive Algorithms
 
 These functions return a workspace when a workspace object is useful for replay
@@ -1018,6 +1026,16 @@ A current consumer may use the bounded count inside a fixed-capacity kernel;
 backend-specific exact-indirect or masked-capacity dispatch remains a separate
 capability and must not be inferred from this state object.
 
+`extent.dispatch_state(block_dim)` creates a 16-byte
+`DeviceDispatchState` for a producer and one bounded consumer. Passing it as
+`dispatch_state=` to `DevicePrefix.compact()` and as `launch_state=` to
+`GraphBuilder.dispatch_bounded()` lets the Vulkan compact scatter publish the
+count and indirect grid together. This removes the consumer-side packet
+preparation dispatch. CPU and CUDA retain their masked-capacity execution and
+do not consume the packet because those routes have no preparation dispatch to
+remove. The state, extent, capacity, and block dimension must match and stale
+runtime generations fail closed.
+
 ### Bounded and ordered segmented Graph dispatch
 
 `GraphBuilder.dispatch_bounded()` accepts exactly one dynamic-count source:
@@ -1060,6 +1078,10 @@ workspace accounting. `handle.snapshot(extent)` is an explicit synchronization
 and reports useful, executed, skipped, encoded, and overflow counts; the
 host-known handle reports the same data without synchronization.
 
+`ti.graph.dynamic_work_capabilities()` reports bounded launch, structured
+iteration termination, and ticket observation as separate axes; in particular,
+CUDA conditional termination is not reported as exact indirect grid launch.
+
 `GraphBuilder.dispatch_ordered_segments()` consumes an i32 offsets ndarray and
 the same `DeviceExtent`. It appends one reusable payload specialization per
 segment position, with an explicit global order between segments; it does not
@@ -1073,7 +1095,9 @@ snapshot reports invalid topology through `overflow` and per-segment
 These APIs are JIT Graph features. AOT export fails explicitly. Internal
 workspace is 12 bytes for one Vulkan bounded dispatch and 32 bytes for Vulkan
 ordered dispatch; CPU/CUDA bounded dispatch uses no workspace and ordered
-dispatch uses 20 bytes. Exact physical work reduction is not a universal
+dispatch uses 20 bytes. A producer-owned Vulkan launch state replaces the
+12-byte consumer packet with an external 16-byte state and reports zero
+handle-owned packet bytes. Exact physical work reduction is not a universal
 speedup: a light standalone Vulkan payload can cost more than a fixed Graph
 because packet preparation and ordering add a dispatch/dependency. Measure the
 complete workload against both fixed Graph and direct execution. The paired
@@ -1200,6 +1224,17 @@ readback. A ticket can expose explicit terminal `GraphBuilder.observe()`
 snapshots; synchronous `control_flow_stats()` are unavailable for that
 asynchronous submission. Depth-two structured Graphs do not support
 asynchronous submission, including the strict Vulkan single-replay shape.
+
+Terminal observations are attached to the submission completion by default.
+CPU and Vulkan use host-visible snapshot slots; CUDA keeps snapshots in
+device-local memory and appends an asynchronous copy into a persistent pinned
+host slot before recording the ticket completion. Calling
+`ticket.observations()` therefore waits only for that completion and then reads
+host memory; it does not enqueue a second device readback. Observation slots
+are bounded by `TI_GRAPH_OBSERVATION_SLOTS` (default 4). For diagnosis,
+`TI_GRAPH_COMPLETION_ATTACHED_OBSERVATION=0` restores deferred readback.
+`Graph.execution_stats().memory.observation_readback_mode` reports the active
+route.
 
 Opt-in `submit(telemetry=True)` additionally records each while region's entry
 counter/status and terminal counter/predicate/status on device.

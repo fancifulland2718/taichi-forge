@@ -39,6 +39,16 @@
 
 ## 待发布 {#unreleased}
 
+- 新增 `DeviceDispatchState` 与 `DevicePrefixSequence`，用于 fixed-topology、
+  device-count-driven pipeline。Vulkan compact 可把 bounded dispatch packet 与输出 count
+  一起发布，再交给 `dispatch_bounded(launch_state=...)`，从而删除 consumer preparation
+  dispatch；CPU/CUDA 保持如实报告的 masked-capacity route。统一的
+  `dynamic_work_capabilities()` 会分别报告物理 launch、structured iteration termination 与
+  completion observation。
+- Graph 终态 observation 默认附着到 completion。Vulkan/CPU 使用 host-visible arena slot；
+  CUDA 在 ticket completion 前把 device-local snapshot 异步拷贝到持久 pinned host memory。
+  `ticket.observations()` 不再触发第二次 readback，同时避免 managed CUDA storage 的页迁移。
+  旧 deferred 路径保留为诊断回退。
 - 新增 `DevicePrefix` 与 `DevicePrefixWorkspace`，通过共享、device 写入的
   `DeviceExtent` 组合 compact、scan、reduce、sort、consecutive unique/RLE、grouped
   reduce 与 bucket building。固定容量 provider 与可复用 workspace 合同保持可见；wrapper

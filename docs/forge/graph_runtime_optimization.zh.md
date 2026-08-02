@@ -500,6 +500,12 @@ dispatch 与依赖成本高于所节省的工作量。应基于 device-known/exa
 均正确且 runtime-owned memory 不增长；Vulkan bounded handle 持有一个稳定的 12-byte
 packet。
 
+当可记录的 `DevicePrefixSequence` 产生 `DeviceDispatchState` 时，可将该 state 传给
+`dispatch_bounded(..., launch_state=...)`。Vulkan 会在 producer 的末端 dispatch 中写入
+16-byte launch state 并直接消费，从而消除上述单独基准中的 consumer-side
+preparation dispatch 和 handle-owned 12-byte packet。CPU 和 CUDA 保持已资格化的
+masked-capacity launch 语义，并在 replay hot path 忽略该 packet。
+
 `benchmarks/graph_structured_control_bench.py` 分别测量 preparation、first run、
 steady wall time、control observation，以及 backend profiler 可见时的 device kernel time。
 本地 Windows RTX 5090 回归中，262,144 个 f32 数值、16 轮迭代的 CUDA native

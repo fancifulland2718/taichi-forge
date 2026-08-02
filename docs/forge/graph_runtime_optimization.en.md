@@ -634,6 +634,14 @@ fixed Graph solely because the active count is sparse. All three runs retained
 correct results and non-growing runtime-owned memory; the Vulkan bounded handle
 owned one stable 12-byte packet.
 
+When a recorded `DevicePrefixSequence` publishes a `DeviceDispatchState`, pass
+that state to `dispatch_bounded(..., launch_state=...)`. Vulkan then writes the
+16-byte launch state in the producer's terminal dispatch and consumes it
+directly, removing the consumer-side preparation dispatch and the handle-owned
+12-byte packet described by the standalone benchmark above. CPU and CUDA keep
+their qualified masked-capacity launch semantics and ignore the packet in the
+replay hot path.
+
 `benchmarks/graph_structured_control_bench.py` measures preparation, first run,
 steady wall time, control observations, and (where the backend profiler can see
 the launches) device kernel time separately. On a local Windows RTX 5090

@@ -438,6 +438,12 @@ primitive provider 与 workspace，并不宣称每个 provider 都只执行 acti
 dtype 与语义约束。workspace 可以复用但不可并发共享；`clear()` 释放它持有的 staging
 与 child workspace。
 
+`ti.algorithms.DevicePrefixSequence(capacity)` 可把同一组操作记录成一个 fixed-topology
+native Graph node。先用 `sequence.input(values_arg, extent_arg)` 声明 symbolic input，继续
+调用返回 prefix 的方法，最后通过 `builder.append_native(sequence)` 追加。每个已记录操作之间
+count 都留在 device；runtime 参数仍使用普通 Graph ndarray 名称。sequence 一旦追加并编译就
+不可修改，其 workspace 也不能由多个并发 sequence 共享。
+
 ### Primitive 算法
 
 这些函数在需要 replay 或复用 workspace 时会返回 workspace。重复调用时显式传入
@@ -884,6 +890,14 @@ replacement 后旧 binding 会 fail closed。
 fixed-capacity kernel 中使用有界 count；backend 的 exact-indirect 或 masked-capacity dispatch
 仍是独立 capability，不能从该 state 对象推断。
 
+`extent.dispatch_state(block_dim)` 会为 producer 与一个 bounded consumer 创建 16-byte
+`DeviceDispatchState`。把它同时传给 `DevicePrefix.compact(..., dispatch_state=...)` 和
+`GraphBuilder.dispatch_bounded(..., launch_state=...)` 后，Vulkan compact scatter 会在写入
+count 时一起发布 indirect grid，从而删除 consumer-side packet preparation dispatch。
+CPU/CUDA 仍使用 masked-capacity，不消费该 packet，因为这些路径本来就没有 preparation
+dispatch。state、extent、capacity 与 block dimension 必须匹配；runtime generation 过期会
+fail closed。
+
 ### 有界与有序分段 Graph dispatch
 
 `GraphBuilder.dispatch_bounded()` 必须且只能接收一种动态 count 来源：运行时由匹配
@@ -922,6 +936,10 @@ lowering 合同会如实区分后端：
 报告 useful、executed、skipped、encoded 与 overflow count；host-known handle 可无同步地
 报告相同信息。
 
+`ti.graph.dynamic_work_capabilities()` 会把 bounded launch、structured iteration termination
+与 ticket observation 分成三个独立维度；尤其不会把 CUDA conditional termination 报成
+exact indirect grid launch。
+
 `GraphBuilder.dispatch_ordered_segments()` 消费 i32 offsets ndarray 与同一
 `DeviceExtent`，按 segment position 追加同一个可复用 payload specialization，并在 segment
 之间建立显式全局顺序；它不会为每个 color 编译专用 kernel。builder 在 payload 最后注入
@@ -932,7 +950,8 @@ index。offset 会先钳制以保证执行安全；显式 snapshot 通过总 `ov
 
 这些接口只用于 JIT Graph，AOT export 会明确失败。单个 Vulkan bounded dispatch 的内部
 workspace 为 12 bytes，Vulkan ordered dispatch 为 32 bytes；CPU/CUDA bounded 不使用
-workspace，ordered 使用 20 bytes。exact 物理工作量减少不等于无条件提速：轻量、单独的
+workspace，ordered 使用 20 bytes。producer-owned Vulkan launch state 会用 external 16-byte
+state 替代 12-byte consumer packet，并报告 handle-owned packet 为 0 byte。exact 物理工作量减少不等于无条件提速：轻量、单独的
 Vulkan payload 可能因 packet preparation 与依赖成本而慢于 fixed Graph。应以完整 workload
 同时对比 fixed Graph 和 direct execution；成对基准脚本为
 `benchmarks/dynamic_workload_bench.py`。
@@ -1032,6 +1051,14 @@ fail closed。portable 结构化 Graph 使用 `run()` 并明确拒绝 `submit()`
 ticket 可返回显式 `GraphBuilder.observe()` 终态；该次异步 submission 不提供同步
 `control_flow_stats()`。depth=2 结构化 Graph 不支持异步 submission，严格 Vulkan 单
 replay 形态也不例外。
+
+终态 observation 默认附着在 submission completion 上。CPU/Vulkan 使用 host-visible
+snapshot slot；CUDA 保持 snapshot 为 device-local，并在记录 ticket completion 前追加一次
+到持久 pinned host slot 的异步拷贝。因此 `ticket.observations()` 只需等待该 completion 后读取
+host memory，不会再入队第二次 device readback。observation slot 数量受
+`TI_GRAPH_OBSERVATION_SLOTS` 限制（默认 4）。诊断时可设置
+`TI_GRAPH_COMPLETION_ATTACHED_OBSERVATION=0` 恢复 deferred readback；
+`Graph.execution_stats().memory.observation_readback_mode` 会报告实际 route。
 
 显式 `submit(telemetry=True)` 会额外在 device 上记录每个 while region 的进入
 counter/status 与终态 counter/predicate/status。`ticket.telemetry()` 仅在完成后读取

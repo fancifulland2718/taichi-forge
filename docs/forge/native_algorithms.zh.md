@@ -20,6 +20,7 @@
 | `ti.algorithms.parallel_sort(keys, values=None)` | vanilla 兼容的 legacy sorter。 |
 | `ti.algorithms.PrefixSumExecutor(n).run(values)` | Prefix sum / scan。 |
 | `ti.algorithms.device_prefix(values, extent, ...)` | 通过 device-resident 有效数量组合固定容量 primitive 输入。 |
+| `ti.algorithms.DevicePrefixSequence(capacity)` | 把 fixed-topology 有效前缀 pipeline 记录成一个 Graph native node。 |
 | `ti.algorithms.DevicePrefixWorkspace(max_items)` | 在有效前缀 pipeline 间复用 staging 与 child primitive workspace。 |
 | `ti.algorithms.experimental_compact(values, flags, output, count, ...)` | 按 flags 过滤并写入紧凑输出。 |
 | `ti.algorithms.experimental_run_length_encode(keys, unique_keys, run_lengths, run_count, ...)` | 完全在 device 上编码连续整数 key run。 |
@@ -178,6 +179,13 @@ prefix 有定义；准备 provider 时可以用 neutral value 或 sentinel 覆�
 `DevicePrefixWorkspace`，所以操作之间不需要 count readback、按 count 分配或重建 Graph。
 底层固定容量 provider 仍可能处理 capacity-sized scratch。workspace 可串行复用，但不可用于
 并发 submission。
+
+Graph 执行可用 `DevicePrefixSequence` 在 symbolic ndarray 参数上记录同一组 prefix 操作，
+再通过 `GraphBuilder.append_native()` 追加，使整个 fixed-topology chain 位于同一次 Graph
+submission 中且不观察 host count。compact 结果若接入 Vulkan bounded dispatch，可创建
+`output_extent.dispatch_state(block_dim)` 并同时传给 compact 与 `dispatch_bounded()`；compact
+scatter 会把 indirect packet 与 count 一起发布，删除一次 preparation dispatch。CPU/CUDA
+继续使用文档所述 masked-capacity route，不消费该 packet。
 
 在当前 Windows 资格机器上，10% active prefix 的 compact-to-scan chain 相对在两个操作间
 显式调用 `DeviceExtent.snapshot()` 的同一 chain，CPU、CUDA、Vulkan 分别快 1.05x、
