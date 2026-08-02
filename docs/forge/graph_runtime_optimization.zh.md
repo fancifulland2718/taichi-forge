@@ -86,6 +86,24 @@ dense-storage 合同。异构应用应在稳定 block 内组织同构 environmen
 | CUDA | CUDA Driver API capture 与 executable replay；binding 变化时 patch 或 recapture | capture/replay 与 direct submission 在 native host-submission 边界串行 | captured allocation 使用带 generation 的身份并持有到有序退役 |
 | Vulkan | runtime-owned command record 与 replay | 每次 host API 调用保护 GFX record 和 replay registry mutation | 单调 graph identity、延迟退役、固定 8-slot 在途 ring |
 
+## 不干预 launch 的 task 可观测性
+
+Forge 通过 `kernel.task_manifest(...)` 以及单 segment JIT CGraph 的
+`Graph.task_manifest()` 暴露最终 offloaded-task 形态。不可变报告区分 requested、selected 与
+actual grid/block geometry，报告 static/dynamic shared bytes，并提供 specialization-local 稳定
+`task_id`。这是观测接口，不是第二套 launch API，不能修改 grid/block geometry。
+
+Graph dispatch 可传入 `label=`，普通 kernel 调用可使用
+`ti.profiler.dispatch_label(...)`。标签属于 invocation，不属于可变 compiled-kernel state，因此
+并发调用者不会互相覆盖 sweep/color/phase identity。profiler 与可选 NVTX event name 会保留原
+task name，再追加 task identity 与 label。
+
+未加标签的热路径保留正常 backend replay，且不增加 device allocation、transfer 或
+synchronization。带标签 dispatch 为保持一个物理 dispatch 对应一个事件，会明确避开会隐藏单次
+事件的 CUDA/Vulkan native replay；应把标签用于 profiling window，而不是永久放在吞吐关键
+Graph 上。Vulkan device-indirect dispatch 没有正确的 fixed-dispatch fallback，因此仍保持
+native；其 manifest 将 actual geometry 标记为 invocation-specific。
+
 CPU 路径保持 graph 语义和并发安全，但不伪装成 CUDA 式 device graph launch。CUDA 与
 Vulkan 优化都是同一公开 API 之下的后端实现细节。
 
@@ -166,6 +184,11 @@ CUDA 报告会明确区分 `cuda_conditional_graph` 与
 latch 控制值并使非 active task 在 payload side effect 前返回，不做逐轮 host readback；
 但所有已编码 task node 仍会进入 Graph command issue，因此
 `stops_command_issue_after_exit` 与 `exact_dynamic_termination` 为 false。
+嵌套的 `cuda_conditional_graph` report 还提供
+`exact_control_unavailable_reason`、`masked_control_unavailable_reason`、
+`selected_general_graph_control` 与
+`selected_general_graph_control_unavailable_reason`。因此低于 12.8 的驱动可以如实报告
+exact control 不可用，同时选择满足资格的内部 masked route，而不会被误报为整体不可用。
 
 `lowering_mode="portable"` 强制 portable 路径。
 `lowering_mode="native_required"` 要求当前 backend 的已资格化原生路径，不可用时会在

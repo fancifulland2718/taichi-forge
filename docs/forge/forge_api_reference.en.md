@@ -801,10 +801,10 @@ SHA-256 key to avoid Windows path-length failures.
 Dense Field-specific layouts, lifetime, concurrency, AD, and backend behavior
 are documented in [Dense Field Graph](dense_field_graph.en.md).
 
-### `GraphBuilder.dispatch(kernel, *args, template_args=None)`
+### `GraphBuilder.dispatch(kernel, *args, template_args=None, label=None)`
 
-`Sequential.dispatch()` provides the same keyword-only `template_args`
-parameter. It binds a data-oriented `self`, a Field, or another
+`Sequential.dispatch()` provides the same keyword-only `template_args` and
+`label` parameters. `template_args` binds a data-oriented `self`, a Field, or another
 `ti.template()` parameter at graph definition/compile time. These objects do
 not become `Graph.run()` runtime arguments.
 
@@ -845,8 +845,47 @@ Contract:
 - `kernel` is normally a decorated primal kernel. An explicit `kernel.grad`
   object is also accepted for a manually managed gradient Graph; run that
   Graph outside `ti.ad.Tape()` / `ti.ad.FwdMode()`.
+- `label` is an optional invocation label (for example,
+  `"sweep=3/color=red"`). A label is kept on the Graph dispatch rather than
+  the shared compiled kernel. It prevents that dispatch from being composed
+  with another dispatch and selects a per-dispatch launch path so profiler
+  and NVTX events remain one-to-one. This is an explicit observability cost;
+  an unlabeled Graph retains its normal native replay path.
 
-### `GraphBuilder.dispatch_indirect(kernel, *args, dispatch_packet, template_args=None)`
+### Task manifests and dispatch labels
+
+`kernel.task_manifest(*args, **kwargs)` returns an immutable tuple with one
+`OffloadedTaskManifest` for every compiled backend task in the selected
+specialization. `Graph.task_manifest()` returns the corresponding
+`GraphTaskManifest` tuple for a Graph containing one JIT CGraph segment.
+Graphs with native, observation, or structured-control nodes reject this
+query until those node kinds share one serializable task list.
+
+Each manifest separates compiler-requested, backend-selected, and proven
+actual grid/block geometry. CPU leaves GPU-shaped selected/actual values
+unset and reports `actual_geometry_kind="cpu_runtime_scheduler"`. A Vulkan
+device-indirect dispatch reports its static selected capacity but leaves
+actual grid/block unset with `actual_geometry_kind="runtime_indirect"`, since
+the device packet determines each invocation without host readback. Static
+and dynamic shared-memory byte counts are reported separately.
+
+`task_id` is stable for the same specialization cache identity, task ordinal,
+task kind, compile configuration, device capabilities, and backend. It is not
+a cross-backend, cross-configuration, or cross-release identifier. Manifest
+objects are read-only observations: querying them may compile a cold
+specialization, but it does not launch work, allocate device telemetry, copy
+memory, synchronize, or override launch geometry.
+
+Use `label=` on `GraphBuilder.dispatch()` / `Sequential.dispatch()` when the
+same compiled kernel represents different sweeps, colors, or phases. For an
+ordinary direct call, `ti.profiler.dispatch_label("phase=...")` is a nestable,
+thread-local context manager. Labeled kernel-profiler and optional NVTX names
+retain the original task name and append `tf.task=<task_id> label=<label>`.
+Labels are limited to 128 UTF-8 bytes and reject NUL or line breaks.
+Dispatch labels are currently JIT-only; `AOT Module.add_graph()` rejects a
+labeled Graph instead of silently removing its observability metadata.
+
+### `GraphBuilder.dispatch_indirect(kernel, *args, dispatch_packet, template_args=None, label=None)`
 
 `Sequential.dispatch_indirect()` provides the same API. `dispatch_packet` is
 a one-dimensional scalar `u32` Graph ndarray argument. Its first three values

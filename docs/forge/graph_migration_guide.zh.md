@@ -19,7 +19,7 @@ Forge-only graph 与 native replay API 的精确签名见
 Forge 保留用户熟悉的 graph builder 表面：
 
 - `ti.graph.GraphBuilder`
-- `GraphBuilder.dispatch(kernel, *args, template_args=None)`
+- `GraphBuilder.dispatch(kernel, *args, template_args=None, label=None)`
 - `GraphBuilder.create_sequential()`
 - `GraphBuilder.append(sequential)`
 - `GraphBuilder.compile()`
@@ -38,6 +38,10 @@ planning，用于结构化控制、异步提交、device-driven dispatch 和 DSL
 
 - `GraphBuilder.dispatch()` 与 `Sequential.dispatch()` 可通过 keyword-only
   `template_args=` 正式绑定 data-oriented `self`、Field 等构图期参数；
+- 可选的逐 dispatch `label=` 与 thread-local `ti.profiler.dispatch_label()` scope 将稳定
+  task identity 关联到 profiler/NVTX event；
+- 只读 `kernel.task_manifest()` 与单 segment JIT `Graph.task_manifest()` report 可观测
+  requested/selected/actual geometry，但不增加 launch control；
 - scalar、matrix、ndarray、texture 与 RW texture 的 runtime 参数路径；
 - 兼容 dense Field、`DenseNdarrayView` 与受管 external storage 的 runtime-storage binding；
 - `GraphBuilder.while_loop()`、`if_then_else()`、`switch()` 与最大 depth=2 的

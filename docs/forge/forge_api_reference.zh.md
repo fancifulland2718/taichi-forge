@@ -709,9 +709,9 @@ Python 对象会在编译前明确拒绝。key 使用文件系统安全的 __tmp
 Dense Field 专属 layout、生命周期、并发、AD 与后端行为见
 [Dense Field Graph](dense_field_graph.zh.md)。
 
-### `GraphBuilder.dispatch(kernel, *args, template_args=None)`
+### `GraphBuilder.dispatch(kernel, *args, template_args=None, label=None)`
 
-`Sequential.dispatch()` 提供相同的 keyword-only `template_args` 参数。它在构图/编译期
+`Sequential.dispatch()` 提供相同的 keyword-only `template_args` 与 `label` 参数。`template_args` 在构图/编译期
 绑定 data-oriented `self`、Field 或其他 `ti.template()` 参数；这些对象不会成为
 `Graph.run()` 的 runtime 参数。
 
@@ -743,8 +743,37 @@ graph.run({"slot": 3})
 - Graph 只保留 compiled kernel，不为 `template_args` 额外保留 solver 强引用。
 - `kernel` 通常是 decorated primal kernel；也可传入显式 `kernel.grad` 来构造手工管理的
   gradient Graph，但必须在 `ti.ad.Tape()` / `ti.ad.FwdMode()` 之外运行。
+- `label` 是可选调用标签，例如 `"sweep=3/color=red"`。标签保存在 Graph dispatch 上，
+  不会写回共享 compiled kernel。带标签 dispatch 不参与 dispatch composition，并选择逐
+  dispatch launch 路径，使 profiler/NVTX 事件保持一一对应。这是显式启用的可观测成本；
+  未加标签的 Graph 仍使用正常 native replay。
 
-### `GraphBuilder.dispatch_indirect(kernel, *args, dispatch_packet, template_args=None)`
+### Task manifest 与 dispatch label
+
+`kernel.task_manifest(*args, **kwargs)` 返回不可变 tuple，每个已编译 backend task 对应一个
+`OffloadedTaskManifest`。只含单个 JIT CGraph segment 的 Graph 可通过
+`Graph.task_manifest()` 获得对应的 `GraphTaskManifest` tuple；含 native、observation 或
+structured-control node 的 Graph 尚无统一可序列化 task list，因此会明确拒绝查询。
+
+manifest 分开报告 compiler-requested、backend-selected 与可以证明的 actual grid/block
+geometry。CPU 不伪造 GPU grid，selected/actual 留空，并报告
+`actual_geometry_kind="cpu_runtime_scheduler"`。Vulkan device-indirect dispatch 报告静态
+selected capacity，但 actual grid/block 留空并标记 `"runtime_indirect"`，因为每次调用由
+device packet 决定且不做 host readback。静态与动态 shared-memory bytes 分开报告。
+
+`task_id` 在相同 specialization cache identity、task ordinal/kind、compile config、device
+capabilities 与 backend 下稳定；不承诺跨 backend、跨配置或跨版本稳定。manifest 只读：冷查询
+可能触发编译，但不会 launch、分配 device telemetry、复制内存、同步或覆盖 launch geometry。
+
+同一 compiled kernel 表示不同 sweep、color 或 phase 时，可在
+`GraphBuilder.dispatch()` / `Sequential.dispatch()` 使用 `label=`。普通直接调用可使用可嵌套、
+thread-local 的 `ti.profiler.dispatch_label("phase=...")`。带标签的 kernel-profiler 与可选
+NVTX 名称保留原 task name，并追加 `tf.task=<task_id> label=<label>`。标签最多 128 个 UTF-8
+bytes，不能包含 NUL 或换行。
+dispatch label 当前仅用于 JIT；`AOT Module.add_graph()` 会明确拒绝带标签 Graph，不会静默
+移除可观测元数据。
+
+### `GraphBuilder.dispatch_indirect(kernel, *args, dispatch_packet, template_args=None, label=None)`
 
 `Sequential.dispatch_indirect()` 提供相同 API。`dispatch_packet` 必须是
 一维 scalar `u32` Graph ndarray 参数；前三个值是设备端写入的

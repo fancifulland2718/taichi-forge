@@ -107,6 +107,29 @@ AD boundary, performance evidence, and Linux status are maintained in
 | CUDA | CUDA Driver API capture and executable replay, with patch or recapture when bindings change | Capture/replay and direct submission are serialized at the native host-submission boundary | Captured allocations are generation-qualified and retained until ordered retirement |
 | Vulkan | Runtime-owned command recording and replay | GFX recording and replay registry mutations are protected per host API call | Monotonic graph identity, deferred retirement, fixed eight-slot in-flight ring |
 
+## Task observability without launch control
+
+Forge exposes the final offloaded-task shape through
+`kernel.task_manifest(...)` and, for one-segment JIT CGraphs,
+`Graph.task_manifest()`. The immutable report distinguishes requested,
+selected, and actual grid/block geometry, reports static/dynamic shared bytes,
+and assigns a specialization-local stable `task_id`. This is an observation
+surface, not a second launch API: it cannot change grid/block geometry.
+
+Graph dispatches accept an optional `label=` and ordinary kernel calls can use
+`ti.profiler.dispatch_label(...)`. Labels are invocation state, never mutable
+compiled-kernel state, so concurrent callers cannot overwrite each other's
+sweep/color/phase identity. Profiler and optional NVTX event names keep the
+original task name and append the task identity and label.
+
+The unlabeled hot path keeps normal backend replay and adds no device
+allocation, transfer, or synchronization. A labeled dispatch deliberately
+remains one physical dispatch and does not use CUDA/Vulkan native replay where
+replay would hide individual events. Use labels for profiling windows rather
+than permanently on throughput-critical graphs. Vulkan device-indirect
+dispatch remains native because it has no correct fixed-dispatch fallback;
+its manifest marks actual geometry as invocation-specific.
+
 The CPU path preserves graph semantics and concurrency safety but does not
 pretend to offer CUDA-style device graph launch. CUDA and Vulkan optimizations
 are backend implementation details below the same public API.
@@ -199,6 +222,12 @@ submission, latches control on device, and returns inactive Taichi tasks before
 payload side effects. It has no per-iteration host readback, but all encoded
 task nodes still reach command issue, so `stops_command_issue_after_exit` and
 `exact_dynamic_termination` are false.
+The nested `cuda_conditional_graph` report exposes
+`exact_control_unavailable_reason`, `masked_control_unavailable_reason`,
+`selected_general_graph_control`, and
+`selected_general_graph_control_unavailable_reason`. A driver below 12.8 can
+therefore report exact control as unavailable while selecting the qualified
+internal masked route; it is not mislabeled as a complete control failure.
 
 `lowering_mode="portable"` forces the portable route.
 `lowering_mode="native_required"` requires the qualified backend route and

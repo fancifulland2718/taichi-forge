@@ -21,7 +21,7 @@ For exact signatures of Forge-only graph and native replay APIs, see
 Forge keeps the familiar graph-builder surface:
 
 - `ti.graph.GraphBuilder`
-- `GraphBuilder.dispatch(kernel, *args, template_args=None)`
+- `GraphBuilder.dispatch(kernel, *args, template_args=None, label=None)`
 - `GraphBuilder.create_sequential()`
 - `GraphBuilder.append(sequential)`
 - `GraphBuilder.compile()`
@@ -43,6 +43,12 @@ The user-visible additions are:
 - `GraphBuilder.dispatch()` and `Sequential.dispatch()` can use the
   keyword-only `template_args=` parameter to bind a data-oriented `self`, a
   Field, or another definition-time argument;
+- optional per-dispatch `label=` values and the thread-local
+  `ti.profiler.dispatch_label()` scope correlate stable task identities with
+  profiler/NVTX events;
+- read-only `kernel.task_manifest()` and one-segment JIT
+  `Graph.task_manifest()` reports expose requested/selected/actual geometry
+  without adding launch control;
 - runtime argument handling for scalar, matrix, ndarray, texture, and RW
   texture paths;
 - runtime-storage binding for compatible dense Fields, `DenseNdarrayView`, and
