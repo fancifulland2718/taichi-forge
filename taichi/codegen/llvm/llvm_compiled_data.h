@@ -28,6 +28,7 @@ class OffloadedTask {
   int grid_dim{0};
   int static_shared_array_bytes{0};
   int dynamic_shared_array_bytes{0};
+  bool one_to_one{false};
   int sparse_list_op{kSparseListOpNone};
   int sparse_list_snode_id{-1};
   int sparse_list_parent_snode_id{-1};
@@ -50,6 +51,7 @@ class OffloadedTask {
             grid_dim,
             static_shared_array_bytes,
             dynamic_shared_array_bytes,
+            one_to_one,
             sparse_list_op,
             sparse_list_snode_id,
             sparse_list_parent_snode_id,

@@ -40,6 +40,10 @@ struct OffloadedTaskManifest {
   std::string actual_geometry_kind;
   std::string actual_geometry_reason;
 
+  // Logical range-to-lane mapping. ``one_to_one`` proves that reducing a
+  // dispatch grid reduces the number of visited logical indices.
+  std::string range_mapping;
+
   std::uint64_t static_shared_bytes{0};
   std::uint64_t dynamic_shared_bytes{0};
 };

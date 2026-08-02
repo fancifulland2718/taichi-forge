@@ -277,6 +277,7 @@ class LowerAST : public IRVisitor {
           begin, end, std::move(stmt->body), stmt->is_bit_vectorized,
           stmt->num_cpu_threads, stmt->block_dim, stmt->strictly_serialized,
           /*range_hint=*/fmt::format("arg ({})", fmt::join(arg_id, ", ")));
+      new_for->one_to_one = stmt->one_to_one;
       VecStatement new_statements;
       Stmt *loop_index =
           new_statements.push_back<LoopIndexStmt>(new_for.get(), 0);
@@ -318,6 +319,7 @@ class LowerAST : public IRVisitor {
             begin_stmt, end_stmt, std::move(stmt->body),
             stmt->is_bit_vectorized, stmt->num_cpu_threads, stmt->block_dim,
             stmt->strictly_serialized);
+        new_for->one_to_one = stmt->one_to_one;
         new_for->body->insert(std::make_unique<LoopIndexStmt>(new_for.get(), 0),
                               0);
         new_for->body->local_var_to_stmt[stmt->loop_var_ids[0]] =

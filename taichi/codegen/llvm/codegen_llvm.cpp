@@ -2450,6 +2450,7 @@ void TaskCodeGenLLVM::annotate_current_task_metadata(OffloadedStmt *stmt) {
   current_task->requested_grid_dim = stmt->grid_dim;
   current_task->requested_block_dim = stmt->block_dim;
   current_task->static_shared_array_bytes = stmt->bls_size;
+  current_task->one_to_one = stmt->one_to_one;
   auto mutation = detect_sparse_topology_mutation(stmt);
   current_task->may_mutate_sparse_topology = mutation.may_mutate;
   current_task->sparse_mutation_snode_id = mutation.snode_id;

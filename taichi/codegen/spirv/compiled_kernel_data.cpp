@@ -79,6 +79,10 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
     item.actual_geometry_kind = "static_direct";
     item.actual_geometry_reason =
         "ordinary direct launch uses the backend-selected geometry";
+    item.range_mapping =
+        task.task_type == OffloadedTaskType::range_for
+            ? (task.one_to_one ? "one_to_one" : "grid_stride")
+            : "not_applicable";
     item.static_shared_bytes = static_cast<std::uint64_t>(
         std::max(task.static_shared_array_bytes, 0));
     result.push_back(std::move(item));

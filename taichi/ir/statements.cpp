@@ -270,6 +270,7 @@ std::unique_ptr<Stmt> RangeForStmt::clone() const {
       begin, end, body->clone(), is_bit_vectorized, num_cpu_threads, block_dim,
       strictly_serialized);
   new_stmt->reversed = reversed;
+  new_stmt->one_to_one = one_to_one;
   return new_stmt;
 }
 
@@ -423,6 +424,7 @@ std::unique_ptr<Stmt> OffloadedStmt::clone() const {
   new_stmt->end_value = end_value;
   new_stmt->grid_dim = grid_dim;
   new_stmt->block_dim = block_dim;
+  new_stmt->one_to_one = one_to_one;
   new_stmt->reversed = reversed;
   new_stmt->is_bit_vectorized = is_bit_vectorized;
   new_stmt->num_cpu_threads = num_cpu_threads;

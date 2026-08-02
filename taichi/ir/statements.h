@@ -1042,6 +1042,7 @@ class RangeForStmt : public Stmt {
   int num_cpu_threads;
   int block_dim;
   bool strictly_serialized;
+  bool one_to_one{false};
   std::string range_hint;
 
   RangeForStmt(Stmt *begin,
@@ -1069,7 +1070,8 @@ class RangeForStmt : public Stmt {
                      is_bit_vectorized,
                      num_cpu_threads,
                      block_dim,
-                     strictly_serialized);
+                     strictly_serialized,
+                     one_to_one);
   TI_DEFINE_ACCEPT
 };
 
@@ -1441,6 +1443,7 @@ class OffloadedStmt : public Stmt {
   int32 end_value{0};
   int grid_dim{1};
   int block_dim{1};
+  bool one_to_one{false};
   bool reversed{false};
   bool is_bit_vectorized{false};
   int num_cpu_threads{1};
@@ -1507,6 +1510,7 @@ class OffloadedStmt : public Stmt {
                      end_value,
                      grid_dim,
                      block_dim,
+                     one_to_one,
                      reversed,
                      num_cpu_threads,
                      index_offsets,

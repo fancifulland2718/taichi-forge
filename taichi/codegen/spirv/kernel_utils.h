@@ -150,6 +150,9 @@ struct TaskAttributes {
   // runtime config. This works because grid strided loop is supported.
   int advisory_total_num_threads{0};
   int advisory_num_threads_per_group{0};
+  // A range task normally grid-strides over its full logical domain. Exact
+  // indirect dispatch specializes it to at most one logical index per lane.
+  bool one_to_one{false};
 
   OffloadedTaskType task_type;
 
@@ -197,6 +200,7 @@ struct TaskAttributes {
             static_shared_array_bytes,
             advisory_total_num_threads,
             advisory_num_threads_per_group,
+            one_to_one,
             task_type,
             buffer_binds,
             texture_binds,

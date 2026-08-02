@@ -69,6 +69,12 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
     item.arch = arch_;
     item.task_index = static_cast<std::uint32_t>(index);
     item.task_type = task.task_type;
+    item.range_mapping =
+        task.task_type == OffloadedTaskType::range_for
+            ? (task.one_to_one ? "one_to_one"
+                               : (cpu_execution ? "cpu_scheduler"
+                                                : "grid_stride"))
+            : "not_applicable";
     item.requested_grid_size = positive_geometry(task.requested_grid_dim);
     item.requested_block_size = positive_geometry(task.requested_block_dim);
     if (cpu_execution) {

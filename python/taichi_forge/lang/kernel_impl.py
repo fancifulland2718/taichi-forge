@@ -1037,7 +1037,12 @@ class Kernel:
             self.arguments.append(KernelArgument(annotation, param.name, param.default))
 
     def materialize(
-        self, key=None, args=None, arg_features=None, task_launch_policy=None
+        self,
+        key=None,
+        args=None,
+        arg_features=None,
+        task_launch_policy=None,
+        range_one_to_one=False,
     ):
         if key is None:
             key = (self.func, 0, self.autodiff_mode)
@@ -1063,10 +1068,23 @@ class Kernel:
                     "arguments, call ti.reset(), or raise the positive limit "
                     "in ti.init()."
                 )
-            self._materialize_uncached(key, args, arg_features, task_launch_policy)
+            self._materialize_uncached(
+                key,
+                args,
+                arg_features,
+                task_launch_policy,
+                range_one_to_one,
+            )
             self.runtime._compiled_specialization_count += 1
 
-    def _materialize_uncached(self, key, args, arg_features, task_launch_policy=None):
+    def _materialize_uncached(
+        self,
+        key,
+        args,
+        arg_features,
+        task_launch_policy=None,
+        range_one_to_one=False,
+    ):
         kernel_name = f"{self.func.__name__}_c{self.kernel_counter}_{key[1]}"
         _logging.trace(f"Compiling kernel {kernel_name} in {self.autodiff_mode}...")
 
@@ -1100,6 +1118,8 @@ class Kernel:
             self.runtime.compiling_callable = kernel_cxx
             try:
                 ctx.ast_builder = kernel_cxx.ast_builder()
+                if range_one_to_one:
+                    ctx.ast_builder.one_to_one()
                 if (
                     task_launch_policy is not None
                     and task_launch_policy.mode != "auto"
@@ -1598,7 +1618,9 @@ class Kernel:
             self.materialize(key=key, args=args, arg_features=arg_features)
             return key
 
-    def _ensure_compiled_with_task_launch_policy(self, policy, *args):
+    def _ensure_compiled_with_task_launch_policy(
+        self, policy, *args, range_one_to_one=False
+    ):
         with python_compile_profile_event(
             f"python.kernel.ensure_compiled_with_task_launch_policy:{self.func.__name__}"
         ):
@@ -1608,6 +1630,7 @@ class Kernel:
                 instance_id,
                 self.autodiff_mode,
                 policy._specialization_key,
+                bool(range_one_to_one),
             )
             if (
                 key not in self._task_launch_policy_manifests
@@ -1623,6 +1646,7 @@ class Kernel:
                 args=args,
                 arg_features=arg_features,
                 task_launch_policy=policy,
+                range_one_to_one=range_one_to_one,
             )
             return key
 

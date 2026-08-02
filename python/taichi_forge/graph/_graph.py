@@ -1342,11 +1342,10 @@ class BoundedDispatchHandle:
             )
 
     def bind_graph_arguments(self, args):
-        value = args[self.extent_name]
-        normalized = self._validate_extent_value(value)
-        if normalized is value:
-            return {}
-        return {self.extent_name: normalized}
+        # _GraphRunContext flattens DeviceExtent directly to its stable state.
+        # Avoid cloning the argument dict on every replay.
+        self._validate_extent_value(args[self.extent_name])
+        return {}
 
     def _execution_counts(self, useful):
         if self._capabilities.exact_grid:
@@ -2639,6 +2638,8 @@ class _GraphRunContext:
         if not args:
             return self._empty_args
 
+        from taichi_forge.lang.device_extent import DeviceExtent
+
         signature = []
         dynamic_items = []
         arch = self.compile_config().arch
@@ -2655,7 +2656,12 @@ class _GraphRunContext:
             ndarray_consumer = "graph_replay"
             ndarray_mode = "replay"
         for k, v in args.items():
-            if isinstance(v, (Ndarray, ProviderOwnedNdarrayBinding)):
+            if isinstance(v, DeviceExtent):
+                v._validate_current()
+                signature.append(
+                    (k, "device_extent", v.binding.allocation_identity)
+                )
+            elif isinstance(v, (Ndarray, ProviderOwnedNdarrayBinding)):
                 if v.arr is None:
                     raise TaichiRuntimeError(
                         "Cannot submit an Ndarray to Graph.run() after its Taichi runtime has been reset"
@@ -2677,8 +2683,9 @@ class _GraphRunContext:
                 dynamic_items.append((k, v))
             else:
                 raise TaichiRuntimeError(
-                    "Only Python scalars, ti.Matrix, ti.Ndarray, canonical "
-                    "dense Field, and DenseNdarrayView are supported as "
+                    "Only Python scalars, ti.Matrix, ti.Ndarray, DeviceExtent, "
+                    "canonical dense Field, and DenseNdarrayView are supported "
+                    "as "
                     f"runtime arguments but got {type(v)}"
                 )
 
@@ -2688,7 +2695,18 @@ class _GraphRunContext:
         else:
             flattened = {}
             for k, v in args.items():
-                if isinstance(v, (Ndarray, ProviderOwnedNdarrayBinding)):
+                if isinstance(v, DeviceExtent):
+                    state = v.state
+                    if runtime_storage_backend:
+                        flattened[k] = (
+                            state.arr,
+                            state._runtime_storage_argument(
+                                ndarray_consumer, ndarray_mode
+                            ),
+                        )
+                    else:
+                        flattened[k] = state.arr
+                elif isinstance(v, (Ndarray, ProviderOwnedNdarrayBinding)):
                     if runtime_storage_backend:
                         flattened[k] = (
                             v.arr,
@@ -6905,7 +6923,12 @@ class _AOTGraphBuilderPlan:
 
 
 def gen_cpp_kernel(
-    kernel_fn, args, *, template_args=None, task_launch_policy=None
+    kernel_fn,
+    args,
+    *,
+    template_args=None,
+    task_launch_policy=None,
+    range_one_to_one=False,
 ):
     kernel = (
         kernel_fn
@@ -6921,11 +6944,19 @@ def gen_cpp_kernel(
     injected_args = produce_injected_args_for_graph(
         kernel, symbolic_args=args, template_args=template_args
     )
-    if task_launch_policy is None or task_launch_policy.mode == "auto":
+    if (task_launch_policy is None or task_launch_policy.mode == "auto") and not (
+        range_one_to_one
+    ):
         key = kernel.ensure_compiled(*injected_args)
     else:
+        if task_launch_policy is None:
+            from taichi_forge.lang.task_launch import TaskLaunchPolicy
+
+            task_launch_policy = TaskLaunchPolicy.auto()
         key = kernel._ensure_compiled_with_task_launch_policy(
-            task_launch_policy, *injected_args
+            task_launch_policy,
+            *injected_args,
+            range_one_to_one=range_one_to_one,
         )
         kernel._validate_task_launch_policy_specialization(
             key, task_launch_policy
@@ -6966,6 +6997,12 @@ def _bounded_kernel_geometry(kernel_cpp, backend, *, allow_range_setup=False):
             + ", ".join(str(item["task_type"]) for item in raw)
         )
     selected = range_tasks[0]["selected_block_size"]
+    if backend == "vulkan" and not allow_range_setup:
+        if range_tasks[0].get("range_mapping") != "one_to_one":
+            raise TaichiRuntimeError(
+                "Vulkan bounded dispatch payload did not compile with "
+                "one-to-one range mapping"
+            )
     if backend in ("cuda", "vulkan"):
         if selected is None or int(selected) <= 0:
             raise TaichiRuntimeError(
@@ -7629,6 +7666,7 @@ class GraphBuilder:
             args,
             template_args=template_args,
             task_launch_policy=policy,
+            range_one_to_one=backend == "vulkan" and count is None,
         )
         label = _normalize_dispatch_label(label)
 
@@ -7775,6 +7813,7 @@ class GraphBuilder:
             payload_args,
             template_args=template_args,
             task_launch_policy=policy,
+            range_one_to_one=backend == "vulkan",
         )
         selected_block = _bounded_kernel_geometry(payload_cpp, backend)
         payload_flattened = flatten_args(payload_args)

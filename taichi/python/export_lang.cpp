@@ -106,6 +106,7 @@ py::dict offloaded_task_manifest_to_python(
   set_optional("actual_block_size", task.actual_block_size);
   item["actual_geometry_kind"] = task.actual_geometry_kind;
   item["actual_geometry_reason"] = task.actual_geometry_reason;
+  item["range_mapping"] = task.range_mapping;
   item["static_shared_bytes"] = task.static_shared_bytes;
   item["dynamic_shared_bytes"] = task.dynamic_shared_bytes;
   return item;
@@ -638,6 +639,7 @@ void export_lang(py::module &m) {
       .def("parallelize", &ASTBuilder::parallelize)
       .def("strictly_serialize", &ASTBuilder::strictly_serialize)
       .def("block_dim", &ASTBuilder::block_dim)
+      .def("one_to_one", &ASTBuilder::one_to_one)
       .def("insert_snode_access_flag", &ASTBuilder::insert_snode_access_flag)
       .def("reset_snode_access_flag", &ASTBuilder::reset_snode_access_flag);
 

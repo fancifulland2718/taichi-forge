@@ -121,7 +121,8 @@ FrontendForStmt::FrontendForStmt(const FrontendForStmt &o)
       num_cpu_threads(o.num_cpu_threads),
       strictly_serialized(o.strictly_serialized),
       mem_access_opt(o.mem_access_opt),
-      block_dim(o.block_dim) {
+      block_dim(o.block_dim),
+      one_to_one(o.one_to_one) {
 }
 
 void FrontendForStmt::init_config(Arch arch, const ForLoopConfig &config) {
@@ -129,6 +130,7 @@ void FrontendForStmt::init_config(Arch arch, const ForLoopConfig &config) {
   strictly_serialized = config.strictly_serialized;
   mem_access_opt = config.mem_access_opt;
   block_dim = config.block_dim;
+  one_to_one = config.one_to_one;
   if (arch == Arch::cuda || arch == Arch::amdgpu) {
     num_cpu_threads = 1;
     TI_ASSERT(block_dim <= taichi_max_gpu_block_dim);

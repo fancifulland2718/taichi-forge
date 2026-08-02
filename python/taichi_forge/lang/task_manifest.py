@@ -30,6 +30,7 @@ class OffloadedTaskManifest:
     actual_block_size: Optional[int]
     actual_geometry_kind: str
     actual_geometry_reason: str
+    range_mapping: str
     static_shared_bytes: int
     dynamic_shared_bytes: int
 

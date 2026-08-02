@@ -4833,6 +4833,7 @@ class TaskCodegen : public IRVisitor {
   void generate_range_for_kernel(OffloadedStmt *stmt) {
     task_attribs_.name = task_name_;
     task_attribs_.task_type = OffloadedTaskType::range_for;
+    task_attribs_.one_to_one = stmt->one_to_one;
 
     task_attribs_.range_for_attribs = TaskAttributes::RangeForAttributes();
     auto &range_for_attribs = task_attribs_.range_for_attribs.value();
@@ -4962,7 +4963,8 @@ class TaskCodegen : public IRVisitor {
 
     // loop continue
     ir_->start_label(continue_label);
-    spirv::Value next_value = ir_->add(loop_var, total_invocs);
+    spirv::Value next_value =
+        stmt->one_to_one ? end_ : ir_->add(loop_var, total_invocs);
     loop_var.set_incoming(1, next_value, ir_->current_label());
     ir_->make_inst(spv::OpBranch, head_label);
 

@@ -23,6 +23,7 @@ struct ForLoopConfig {
   MemoryAccessOptions mem_access_opt;
   int block_dim{0};
   bool uniform{false};
+  bool one_to_one{false};
 };
 
 #define TI_DEFINE_CLONE_FOR_FRONTEND_IR                \
@@ -207,6 +208,7 @@ class FrontendForStmt : public Stmt {
   bool strictly_serialized;
   MemoryAccessOptions mem_access_opt;
   int block_dim;
+  bool one_to_one;
 
   FrontendForStmt(const ExprGroup &loop_vars,
                   SNode *snode,
@@ -1039,6 +1041,7 @@ class ASTBuilder {
       config.mem_access_opt.clear();
       config.block_dim = 0;
       config.strictly_serialized = false;
+      config.one_to_one = false;
     }
   };
 
@@ -1188,6 +1191,10 @@ class ASTBuilder {
       TI_ASSERT(bit::is_power_of_two(v));
     }
     for_loop_dec_.config.block_dim = v;
+  }
+
+  void one_to_one() {
+    for_loop_dec_.config.one_to_one = true;
   }
 
   void insert_snode_access_flag(SNodeAccessFlag v, const Expr &field) {
