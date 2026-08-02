@@ -1556,6 +1556,20 @@ class Kernel:
             self.materialize(key=key, args=args, arg_features=arg_features)
             return key
 
+    def task_manifest(self, *args, **kwargs):
+        """Return immutable metadata for this argument specialization.
+
+        The query may compile a cold specialization, but never launches it or
+        allocates device-side observation storage.
+        """
+        from taichi_forge.lang.task_manifest import OffloadedTaskManifest
+
+        args = _process_args(self, args, kwargs)
+        key = self.ensure_compiled(*args)
+        kernel_cpp = self.compiled_kernels[key]
+        raw = self.runtime.prog._kernel_task_manifest(kernel_cpp)
+        return tuple(OffloadedTaskManifest._from_core(item) for item in raw)
+
     # For small kernels (< 3us), the performance can be pretty sensitive to overhead in __call__
     # Thus this part needs to be fast. (i.e. < 3us on a 4 GHz x64 CPU)
     @_shell_pop_print
@@ -1695,6 +1709,8 @@ def _kernel_impl(_func, level_of_class_stackframe, verbose=False, opt_level=None
     wrapped._is_classkernel = is_classkernel
     wrapped._primal = primal
     wrapped._adjoint = adjoint
+    if not is_classkernel:
+        wrapped.task_manifest = primal.task_manifest
     return wrapped
 
 
@@ -1772,6 +1788,13 @@ class _BoundedDifferentiableMethod:
 
     def grad(self, *args, **kwargs):
         return self._adjoint(self._kernel_owner, *args, **kwargs)
+
+    def task_manifest(self, *args, **kwargs):
+        if self._is_staticmethod:
+            return self._primal.task_manifest(*args, **kwargs)
+        return self._primal.task_manifest(
+            self._kernel_owner, *args, **kwargs
+        )
 
 
 def data_oriented(cls):

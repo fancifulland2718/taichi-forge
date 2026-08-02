@@ -267,9 +267,42 @@ void export_misc(py::module &m) {
         base_available && graph_setter_compiled;
     const bool internal_masked_graph_available =
         ordinary_graph_symbols_loaded && masked_latch_compiled;
+    const char *exact_control_unavailable_reason =
+        !driver_loaded
+            ? "cuda_driver_not_loaded"
+            : (driver_api_version < 12080
+                   ? "cuda_driver_api_below_12080"
+                   : (!symbols_loaded
+                          ? "cuda_conditional_graph_symbols_not_loaded"
+                          : (!graph_setter_compiled
+                                 ? "cuda_exact_control_lowering_not_compiled"
+                                 : "none")));
+    const char *masked_control_unavailable_reason =
+        !driver_loaded
+            ? "cuda_driver_not_loaded"
+            : (!ordinary_graph_symbols_loaded
+                   ? "cuda_graph_capture_symbols_not_loaded"
+                   : (!masked_latch_compiled
+                          ? "cuda_masked_control_lowering_not_compiled"
+                          : "none"));
     result["general_graph_exact_control_available"] =
         exact_graph_control_available;
     result["internal_masked_graph_available"] = internal_masked_graph_available;
+    result["exact_control_unavailable_reason"] =
+        exact_control_unavailable_reason;
+    result["masked_control_unavailable_reason"] =
+        masked_control_unavailable_reason;
+    result["selected_general_graph_control"] =
+        exact_graph_control_available
+            ? "cuda_conditional_graph"
+            : (internal_masked_graph_available ? "cuda_masked_bounded_graph"
+                                               : "none");
+    result["selected_general_graph_control_unavailable_reason"] =
+        (exact_graph_control_available || internal_masked_graph_available)
+            ? "none"
+            : (std::string(masked_control_unavailable_reason) != "none"
+                   ? masked_control_unavailable_reason
+                   : exact_control_unavailable_reason);
     result["general_graph_device_control_available"] =
         exact_graph_control_available || internal_masked_graph_available;
     // Kept as the stored-solver compatibility aggregate. Generic Graph
@@ -292,6 +325,13 @@ void export_misc(py::module &m) {
     result["general_graph_device_control_available"] = false;
     result["general_graph_exact_control_available"] = false;
     result["internal_masked_graph_available"] = false;
+    result["exact_control_unavailable_reason"] =
+        "cuda_backend_not_compiled";
+    result["masked_control_unavailable_reason"] =
+        "cuda_backend_not_compiled";
+    result["selected_general_graph_control"] = "none";
+    result["selected_general_graph_control_unavailable_reason"] =
+        "cuda_backend_not_compiled";
     result["fully_available"] = false;
 #endif
     return result;

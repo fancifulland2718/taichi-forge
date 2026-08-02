@@ -1,6 +1,7 @@
 #include "taichi/runtime/cuda/kernel_launcher.h"
 #include "taichi/runtime/cuda/jit_cuda.h"
 #include "taichi/rhi/cuda/cuda_context.h"
+#include "taichi/system/profiler_annotation.h"
 
 #include <cstring>
 #include <cstdint>
@@ -308,6 +309,7 @@ bool KernelLauncher::prepare_cuda_graph_launch(Handle handle,
     return false;
   }
   packet.handle = handle;
+  packet.dispatch_label = ctx.dispatch_label();
   packet.arg_buffer_size = ctx.arg_buffer_size;
   packet.arg_buffer_prefix_size = 0;
   packet.device_arg_buffer_size = packet.arg_buffer_size;
@@ -347,6 +349,7 @@ bool KernelLauncher::prepare_cuda_graph_gated_launch(Handle handle,
   binding.gate = reinterpret_cast<std::uintptr_t>(gate);
   binding.expected = expected;
   packet.handle = handle;
+  packet.dispatch_label = ctx.dispatch_label();
   packet.arg_buffer_size = ctx.arg_buffer_size;
   packet.arg_buffer_prefix_size = sizeof(binding);
   packet.device_arg_buffer_size =
@@ -424,12 +427,21 @@ void KernelLauncher::capture_cuda_graph_launch(
   TI_ASSERT(cuda_jit_module != nullptr);
   const auto &offloaded_tasks = launcher_ctx->offloaded_tasks;
   for (auto task : offloaded_tasks) {
+    std::string trace_name;
+    std::unique_ptr<ScopedExternalProfilerAnnotation> annotation;
+    if (!packet.dispatch_label.empty()) {
+      trace_name = make_labeled_task_name(
+          task.name, task.task_id, packet.dispatch_label);
+      annotation = std::make_unique<ScopedExternalProfilerAnnotation>(
+          trace_name);
+    }
     TI_TRACE("Capturing kernel {}<<<{}, {}>>>", task.name, task.grid_dim,
              task.block_dim);
     cuda_jit_module->launch_with_stream(
         task.name, task.grid_dim, task.block_dim,
         task.dynamic_shared_array_bytes,
-        {const_cast<RuntimeContext *>(&packet.context)}, {}, stream);
+        {const_cast<RuntimeContext *>(&packet.context)}, {}, stream,
+        trace_name.empty() ? nullptr : &trace_name);
   }
 }
 
@@ -624,9 +636,21 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
     }
     TI_TRACE("Launching kernel {}<<<{}, {}>>>", task.name, task.grid_dim,
              task.block_dim);
-    cuda_module->launch(task.name, task.grid_dim, task.block_dim,
-                        task.dynamic_shared_array_bytes,
-                        {&ctx.get_context()}, {});
+    if (ctx.dispatch_label().empty()) {
+      cuda_module->launch(task.name, task.grid_dim, task.block_dim,
+                          task.dynamic_shared_array_bytes,
+                          {&ctx.get_context()}, {});
+    } else {
+      const auto trace_name = make_labeled_task_name(
+          task.name, task.task_id, ctx.dispatch_label());
+      ScopedExternalProfilerAnnotation annotation(trace_name);
+      auto *cuda_jit_module = dynamic_cast<JITModuleCUDA *>(cuda_module);
+      TI_ASSERT(cuda_jit_module != nullptr);
+      cuda_jit_module->launch_with_stream(
+          task.name, task.grid_dim, task.block_dim,
+          task.dynamic_shared_array_bytes, {&ctx.get_context()}, {}, nullptr,
+          &trace_name);
+    }
     mark_sparse_list_task_launched(task);
     if (task.may_mutate_sparse_topology) {
       invalidate_sparse_list_cache(task.sparse_mutation_snode_id);

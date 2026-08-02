@@ -6176,12 +6176,14 @@ class _AOTGraphBuilderPlan:
         self._runtime_arg_names = set()
         self._has_indirect_dispatch = False
 
-    def dispatch(self, kernel_cpp, args):
+    def dispatch(self, kernel_cpp, args, label=""):
         runtime_arg_names = frozenset(_runtime_arg_names(args))
-        self._items.append(("dispatch", kernel_cpp, args, runtime_arg_names))
+        self._items.append(
+            ("dispatch", kernel_cpp, args, label, runtime_arg_names)
+        )
         self._runtime_arg_names.update(runtime_arg_names)
 
-    def dispatch_indirect(self, kernel_cpp, args, dispatch_packet):
+    def dispatch_indirect(self, kernel_cpp, args, dispatch_packet, label=""):
         runtime_arg_names = frozenset(
             (*_runtime_arg_names(args), dispatch_packet.name)
         )
@@ -6191,6 +6193,7 @@ class _AOTGraphBuilderPlan:
                 kernel_cpp,
                 args,
                 dispatch_packet,
+                label,
                 runtime_arg_names,
             )
         )
@@ -6223,7 +6226,9 @@ class _AOTGraphBuilderPlan:
         self._items.append(
             (
                 "append",
-                _AOTSequentialSnapshot(node._dispatches),
+                _AOTSequentialSnapshot(
+                    node._dispatches, node._dispatch_labels
+                ),
                 1,
                 runtime_arg_names,
             )
@@ -6237,23 +6242,32 @@ class _AOTGraphBuilderPlan:
         items = []
         for item in self._items:
             if item[0] == "dispatch":
-                _, kernel_cpp, args, runtime_arg_names = item
+                _, kernel_cpp, args, label, runtime_arg_names = item
                 items.append(
                     (
                         "dispatch",
                         kernel_cpp,
                         tuple(args),
+                        label,
                         runtime_arg_names,
                     )
                 )
             elif item[0] == "indirect":
-                _, kernel_cpp, args, dispatch_packet, runtime_arg_names = item
+                (
+                    _,
+                    kernel_cpp,
+                    args,
+                    dispatch_packet,
+                    label,
+                    runtime_arg_names,
+                ) = item
                 items.append(
                     (
                         "indirect",
                         kernel_cpp,
                         tuple(args),
                         dispatch_packet,
+                        label,
                         runtime_arg_names,
                     )
                 )
@@ -6262,7 +6276,9 @@ class _AOTGraphBuilderPlan:
                 items.append(
                     (
                         "append",
-                        _AOTSequentialSnapshot(node._dispatches),
+                        _AOTSequentialSnapshot(
+                            node._dispatches, node._dispatch_labels
+                        ),
                         count,
                         runtime_arg_names,
                     )
@@ -6285,8 +6301,8 @@ class _AOTGraphBuilderPlan:
         builder = _ti_core.GraphBuilder()
         for item in self._items:
             if item[0] == "dispatch":
-                _, kernel_cpp, args, _ = item
-                builder.dispatch(kernel_cpp, args)
+                _, kernel_cpp, args, label, _ = item
+                builder.dispatch(kernel_cpp, args, label)
             elif item[0] == "append":
                 _, node, count, _ = item
                 seq = builder.create_sequential()
@@ -6343,6 +6359,14 @@ def _runtime_arg_names(args):
     return {arg.name for arg in args}
 
 
+def _normalize_dispatch_label(label):
+    if label is None:
+        return ""
+    if not isinstance(label, str):
+        raise TypeError("Graph dispatch label must be a string or None")
+    return label
+
+
 def _dispatch_ir_name(kernel_cpp):
     for attribute in ("name", "get_name"):
         value = getattr(kernel_cpp, attribute, None)
@@ -6355,7 +6379,9 @@ def _dispatch_ir_name(kernel_cpp):
     return type(kernel_cpp).__name__
 
 
-def _dispatch_ir_node(kernel_cpp, args, *, dispatch_packet=None):
+def _dispatch_ir_node(
+    kernel_cpp, args, *, dispatch_packet=None, dispatch_label=""
+):
     effects = []
     bindings = []
     for arg in args:
@@ -6374,7 +6400,7 @@ def _dispatch_ir_node(kernel_cpp, args, *, dispatch_packet=None):
     # Until backend kernel access metadata is attached to this JIT record,
     # ndarray writes remain conservative and the node is not rewriteable.
     return DispatchNode(
-        name=_dispatch_ir_name(kernel_cpp),
+        name=dispatch_label or _dispatch_ir_name(kernel_cpp),
         effects=tuple(effects),
         bindings=tuple(bindings),
         opaque=True,
@@ -6481,20 +6507,30 @@ def _compiled_dispatch_ir_nodes(compiled_graph, fallback_nodes):
 
 
 class _AOTSequentialSnapshot:
-    def __init__(self, dispatches):
+    def __init__(self, dispatches, dispatch_labels=()):
+        if dispatch_labels and len(dispatch_labels) != len(dispatches):
+            raise TaichiRuntimeError(
+                "Sequential dispatch labels do not match dispatches"
+            )
+        if not dispatch_labels:
+            dispatch_labels = ("",) * len(dispatches)
         self._dispatches = tuple(
             (kernel_cpp, tuple(args)) for kernel_cpp, args in dispatches
         )
+        self._dispatch_labels = tuple(dispatch_labels)
 
     def _dispatch_to(self, builder):
-        for kernel_cpp, args in self._dispatches:
-            builder.dispatch(kernel_cpp, args)
+        for (kernel_cpp, args), label in zip(
+            self._dispatches, self._dispatch_labels
+        ):
+            builder.dispatch(kernel_cpp, args, label)
 
 
 class Sequential:
     def __init__(self):
         self._dispatch_count = 0
         self._dispatches = []
+        self._dispatch_labels = []
         self._items = []
         self._ir_nodes = []
         self._runtime_arg_names = set()
@@ -6506,12 +6542,16 @@ class Sequential:
         self._has_indirect_dispatch = False
         self._structured_depth = 0
 
-    def dispatch(self, kernel_fn, *args, template_args=None):
+    def dispatch(self, kernel_fn, *args, template_args=None, label=None):
+        label = _normalize_dispatch_label(label)
         kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
         unzipped_args = flatten_args(args)
-        ir_node = _dispatch_ir_node(kernel_cpp, unzipped_args)
+        ir_node = _dispatch_ir_node(
+            kernel_cpp, unzipped_args, dispatch_label=label
+        )
         self._dispatches.append((kernel_cpp, unzipped_args))
-        self._items.append(("dispatch", kernel_cpp, unzipped_args))
+        self._dispatch_labels.append(label)
+        self._items.append(("dispatch", kernel_cpp, unzipped_args, label))
         self._ir_nodes.append(ir_node)
         names = _runtime_arg_names(unzipped_args)
         self._runtime_arg_names.update(names)
@@ -6525,17 +6565,26 @@ class Sequential:
         *args,
         dispatch_packet,
         template_args=None,
+        label=None,
     ):
+        label = _normalize_dispatch_label(label)
         kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
         unzipped_args = flatten_args(args)
         self._items.append(
-            ("indirect", kernel_cpp, unzipped_args, dispatch_packet)
+            (
+                "indirect",
+                kernel_cpp,
+                unzipped_args,
+                dispatch_packet,
+                label,
+            )
         )
         self._ir_nodes.append(
             _dispatch_ir_node(
                 kernel_cpp,
                 unzipped_args,
                 dispatch_packet=dispatch_packet,
+                dispatch_label=label,
             )
         )
         names = _runtime_arg_names(unzipped_args)
@@ -6602,14 +6651,15 @@ class Sequential:
             view._items.append(item)
             view._ir_nodes.append(ir_node)
             if kind == "dispatch":
-                _, kernel_cpp, args = item
+                _, kernel_cpp, args, label = item
                 view._dispatches.append((kernel_cpp, args))
+                view._dispatch_labels.append(label)
                 names = _runtime_arg_names(args)
                 view._runtime_arg_names.update(names)
                 view._recording_runtime_arg_names.update(names)
                 view._dispatch_count += 1
             elif kind == "indirect":
-                _, _, args, dispatch_packet = item
+                _, _, args, dispatch_packet, _ = item
                 names = _runtime_arg_names(args)
                 names.add(dispatch_packet.name)
                 view._runtime_arg_names.update(names)
@@ -6763,14 +6813,17 @@ class Sequential:
         recording_dispatches = []
         for item in self._items:
             if item[0] == "dispatch":
-                _, kernel_cpp, args = item
+                _, kernel_cpp, args, label = item
                 dispatches = ((kernel_cpp, tuple(args)),)
             elif item[0] == "indirect":
-                _, kernel_cpp, args, dispatch_packet = item
-                builder.dispatch_indirect(kernel_cpp, args, dispatch_packet)
+                _, kernel_cpp, args, dispatch_packet, label = item
+                builder.dispatch_indirect(
+                    kernel_cpp, args, dispatch_packet, label
+                )
                 continue
             elif item[0] == "native":
                 _, node = item
+                label = ""
                 action = node.recordable_action
                 if not action.supports_backend(backend):
                     raise TaichiRuntimeError(
@@ -6788,7 +6841,7 @@ class Sequential:
                     "single CGraph segment"
                 )
             for kernel_cpp, args in dispatches:
-                builder.dispatch(kernel_cpp, args)
+                builder.dispatch(kernel_cpp, args, label)
                 recording_dispatches.append((kernel_cpp, tuple(args)))
         return tuple(recording_dispatches)
 
@@ -6805,10 +6858,11 @@ class GraphBuilder:
         self._pending_ir_nodes = []
         self._observation_names = set()
 
-    def dispatch(self, kernel_fn, *args, template_args=None):
+    def dispatch(self, kernel_fn, *args, template_args=None, label=None):
+        label = _normalize_dispatch_label(label)
         kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
         unzipped_args = flatten_args(args)
-        self._record_dispatch(kernel_cpp, unzipped_args)
+        self._record_dispatch(kernel_cpp, unzipped_args, label)
 
     def dispatch_indirect(
         self,
@@ -6816,14 +6870,16 @@ class GraphBuilder:
         *args,
         dispatch_packet,
         template_args=None,
+        label=None,
     ):
+        label = _normalize_dispatch_label(label)
         kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
         unzipped_args = flatten_args(args)
         self._aot_graph_plan.dispatch_indirect(
-            kernel_cpp, unzipped_args, dispatch_packet
+            kernel_cpp, unzipped_args, dispatch_packet, label
         )
         self._ensure_runtime_graph_builder().dispatch_indirect(
-            kernel_cpp, unzipped_args, dispatch_packet
+            kernel_cpp, unzipped_args, dispatch_packet, label
         )
         self._runtime_graph_arg_names.update(_runtime_arg_names(unzipped_args))
         self._runtime_graph_arg_names.add(dispatch_packet.name)
@@ -6832,16 +6888,23 @@ class GraphBuilder:
                 kernel_cpp,
                 unzipped_args,
                 dispatch_packet=dispatch_packet,
+                dispatch_label=label,
             )
         )
         self._dispatch_count += 1
 
-    def _record_dispatch(self, kernel_cpp, unzipped_args):
-        self._aot_graph_plan.dispatch(kernel_cpp, unzipped_args)
-        self._ensure_runtime_graph_builder().dispatch(kernel_cpp, unzipped_args)
+    def _record_dispatch(self, kernel_cpp, unzipped_args, label=""):
+        self._aot_graph_plan.dispatch(kernel_cpp, unzipped_args, label)
+        self._ensure_runtime_graph_builder().dispatch(
+            kernel_cpp, unzipped_args, label
+        )
         self._runtime_graph_dispatches.append((kernel_cpp, tuple(unzipped_args)))
         self._runtime_graph_arg_names.update(_runtime_arg_names(unzipped_args))
-        self._pending_ir_nodes.append(_dispatch_ir_node(kernel_cpp, unzipped_args))
+        self._pending_ir_nodes.append(
+            _dispatch_ir_node(
+                kernel_cpp, unzipped_args, dispatch_label=label
+            )
+        )
         self._dispatch_count += 1
 
     def create_sequential(self):
@@ -7183,6 +7246,28 @@ class Graph:
         self._runtime_valid = True
         self._run_impl = self._instance.run_impl
         impl.get_runtime().register_runtime_object(self)
+
+    def task_manifest(self):
+        """Return immutable per-task metadata for this JIT CGraph.
+
+        This observation may compile a cold specialization, but it does not
+        launch the Graph or allocate device telemetry. Native actions and
+        structured-control regions do not yet have a single serializable
+        CGraph task list and therefore reject this query explicitly.
+        """
+        from taichi_forge.lang.task_manifest import GraphTaskManifest
+
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            nodes = self._spec.nodes
+            if len(nodes) != 1 or not isinstance(nodes[0], _CompiledCGraphNode):
+                raise TaichiRuntimeError(
+                    "Graph.task_manifest() currently requires one JIT CGraph "
+                    "segment without native, observation, or structured-control nodes"
+                )
+            compiled_graph = nodes[0].compiled_graph
+            raw = impl.get_runtime().prog._graph_task_manifest(compiled_graph)
+        return tuple(GraphTaskManifest._from_core(item) for item in raw)
 
     def run(self, args, *, trace=False):
         """Run synchronously, optionally returning every control invocation.

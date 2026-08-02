@@ -511,6 +511,7 @@ KernelCompilationManager::install_compiled_kernel_locked(
   // in_progress_keys_, but by contract only one thread owns any given
   // kernel_key at a time, so this must still be absent.
   TI_ASSERT(caching_kernels_.find(kernel_key) == caching_kernels_.end());
+  compiled->set_kernel_identity(kernel_key);
   KernelCacheData k;
   k.kernel_key = kernel_key;
   k.created_at = k.last_used_at = std::time(nullptr);

@@ -83,11 +83,12 @@ class JITModuleCUDA : public JITModule {
                           std::size_t dynamic_shared_mem_bytes,
                           const std::vector<void *> &arg_pointers,
                           const std::vector<int> &arg_sizes,
-                          void *stream) {
+                          void *stream,
+                          const std::string *profiler_name = nullptr) {
     auto func = lookup_function(name);
-    CUDAContext::get_instance().launch(func, name, arg_pointers, arg_sizes,
-                                       grid_dim, block_dim,
-                                       dynamic_shared_mem_bytes, stream);
+    CUDAContext::get_instance().launch(
+        func, profiler_name != nullptr ? *profiler_name : name, arg_pointers,
+        arg_sizes, grid_dim, block_dim, dynamic_shared_mem_bytes, stream);
   }
 
   bool direct_dispatch() const override {

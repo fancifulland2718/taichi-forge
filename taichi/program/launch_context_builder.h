@@ -155,6 +155,12 @@ class LaunchContextBuilder {
 
   RuntimeContext &get_context();
 
+  void append_dispatch_label(const std::string &label);
+
+  const std::string &dispatch_label() const noexcept {
+    return dispatch_label_;
+  }
+
  private:
   void set_array_shape_and_strides(
       const std::vector<int> &arg_id,
@@ -173,6 +179,7 @@ class LaunchContextBuilder {
   std::unique_ptr<char[]> arg_buffer_;
   std::unique_ptr<char[]> result_buffer_;
   const StructType *ret_type_;
+  std::string dispatch_label_;
 
  public:
   size_t arg_buffer_size{0};

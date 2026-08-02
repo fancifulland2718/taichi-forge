@@ -29,10 +29,12 @@ class Dispatch : public Node {
   explicit Dispatch(
       Kernel *kernel,
       const std::vector<aot::Arg> &args,
-      std::optional<aot::Arg> indirect_dispatch_arg = std::nullopt)
+      std::optional<aot::Arg> indirect_dispatch_arg = std::nullopt,
+      std::string dispatch_label = {})
       : kernel_(kernel),
         symbolic_args_(args),
-        indirect_dispatch_arg_(std::move(indirect_dispatch_arg)) {
+        indirect_dispatch_arg_(std::move(indirect_dispatch_arg)),
+        dispatch_label_(std::move(dispatch_label)) {
   }
 
   void compile(
@@ -52,11 +54,16 @@ class Dispatch : public Node {
     return indirect_dispatch_arg_.has_value();
   }
 
+  const std::string &dispatch_label() const {
+    return dispatch_label_;
+  }
+
  private:
   mutable bool serialized_{false};
   Kernel *kernel_{nullptr};
   std::vector<aot::Arg> symbolic_args_;
   std::optional<aot::Arg> indirect_dispatch_arg_;
+  std::string dispatch_label_;
 };
 
 class Sequential : public Node {
@@ -66,11 +73,14 @@ class Sequential : public Node {
 
   void append(Node *node);
 
-  void dispatch(Kernel *kernel, const std::vector<aot::Arg> &args);
+  void dispatch(Kernel *kernel,
+                const std::vector<aot::Arg> &args,
+                const std::string &dispatch_label = {});
 
   void dispatch_indirect(Kernel *kernel,
                          const std::vector<aot::Arg> &args,
-                         const aot::Arg &dispatch_packet);
+                         const aot::Arg &dispatch_packet,
+                         const std::string &dispatch_label = {});
 
   void compile(
       std::vector<aot::CompiledDispatch> &compiled_dispatches) override;
@@ -88,19 +98,25 @@ class GraphBuilder {
   // TODO: compile() can take in Arch argument
   std::unique_ptr<aot::CompiledGraph> compile();
 
-  Node *new_dispatch_node(Kernel *kernel, const std::vector<aot::Arg> &args);
+  Node *new_dispatch_node(Kernel *kernel,
+                          const std::vector<aot::Arg> &args,
+                          const std::string &dispatch_label = {});
 
   Node *new_indirect_dispatch_node(Kernel *kernel,
                                    const std::vector<aot::Arg> &args,
-                                   const aot::Arg &dispatch_packet);
+                                   const aot::Arg &dispatch_packet,
+                                   const std::string &dispatch_label = {});
 
   Sequential *new_sequential_node();
 
-  void dispatch(Kernel *kernel, const std::vector<aot::Arg> &args);
+  void dispatch(Kernel *kernel,
+                const std::vector<aot::Arg> &args,
+                const std::string &dispatch_label = {});
 
   void dispatch_indirect(Kernel *kernel,
                          const std::vector<aot::Arg> &args,
-                         const aot::Arg &dispatch_packet);
+                         const aot::Arg &dispatch_packet,
+                         const std::string &dispatch_label = {});
 
   Sequential *seq() const;
 

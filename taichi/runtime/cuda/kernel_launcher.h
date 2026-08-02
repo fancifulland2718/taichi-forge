@@ -45,6 +45,7 @@ class KernelLauncher : public LLVM::KernelLauncher {
     std::size_t arg_buffer_size{0};
     std::size_t device_arg_buffer_size{0};
     std::size_t arg_buffer_prefix_size{0};
+    std::string dispatch_label;
   };
 
   void launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx) override;

@@ -5,6 +5,7 @@
 #include "taichi/rhi/cuda/cuda_driver.h"
 #include "taichi/rhi/cuda/cuda_profiler.h"
 #include "taichi/system/timeline.h"
+#include "taichi/system/profiler_annotation.h"
 
 #include "taichi/rhi/amdgpu/amdgpu_profiler.h"
 
@@ -62,7 +63,9 @@ bool KernelProfileStatisticalResult::operator<(
 void KernelProfilerBase::profiler_start(KernelProfilerBase *profiler,
                                         const char *kernel_name) {
   TI_ASSERT(profiler);
-  profiler->start(std::string(kernel_name));
+  const auto *override_name = ScopedKernelProfilerName::current();
+  profiler->start(override_name != nullptr ? *override_name
+                                           : std::string(kernel_name));
 }
 
 void KernelProfilerBase::profiler_stop(KernelProfilerBase *profiler) {

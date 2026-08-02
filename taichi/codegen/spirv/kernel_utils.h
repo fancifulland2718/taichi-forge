@@ -140,6 +140,11 @@ struct TaskAttributes {
 
   std::string name;
   std::string source_path;
+  // Host-only stable identity, reconstructed after compile/cache load.
+  std::string task_id;
+  int requested_grid_dim{0};
+  int requested_block_dim{0};
+  int static_shared_array_bytes{0};
   // Total number of threads to launch (i.e. threads per grid). Note that this
   // is only advisory, because eventually this number is also determined by the
   // runtime config. This works because grid strided loop is supported.
@@ -187,6 +192,9 @@ struct TaskAttributes {
   std::string debug_string() const;
 
   TI_IO_DEF(name,
+            requested_grid_dim,
+            requested_block_dim,
+            static_shared_array_bytes,
             advisory_total_num_threads,
             advisory_num_threads_per_group,
             task_type,

@@ -2,11 +2,13 @@
 #include "taichi/program/graph_kernel_composer.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/program.h"
+#include "taichi/system/profiler_annotation.h"
 
 namespace taichi::lang {
 aot::CompiledDispatch Dispatch::compile_dispatch() const {
   aot::CompiledDispatch dispatch;
   dispatch.kernel_name = kernel_->get_name();
+  dispatch.dispatch_label = dispatch_label_;
   dispatch.symbolic_args = symbolic_args_;
   dispatch.indirect_dispatch_arg = indirect_dispatch_arg_;
   dispatch.ti_kernel = kernel_;
@@ -25,7 +27,8 @@ aot::CompiledDispatch Dispatch::compile_dispatch() const {
       "but compiled to {} tasks",
       dispatch.kernel_name, dispatch.compiled_task_count);
   dispatch.source_dispatches.push_back(
-      {dispatch.kernel_name, dispatch.symbolic_args, dispatch.graph_metadata});
+      {dispatch.kernel_name, dispatch.dispatch_label, dispatch.symbolic_args,
+       dispatch.graph_metadata});
   dispatch.snode_tree_dependencies =
       kernel_->program->snapshot_snode_tree_dependencies(
           compiled.snode_tree_ids());
@@ -85,16 +88,20 @@ void Sequential::append(Node *node) {
   sequence_.push_back(node);
 }
 
-void Sequential::dispatch(Kernel *kernel, const std::vector<aot::Arg> &args) {
-  Node *n = owning_graph_->new_dispatch_node(kernel, args);
+void Sequential::dispatch(Kernel *kernel,
+                          const std::vector<aot::Arg> &args,
+                          const std::string &dispatch_label) {
+  Node *n =
+      owning_graph_->new_dispatch_node(kernel, args, dispatch_label);
   sequence_.push_back(n);
 }
 
 void Sequential::dispatch_indirect(Kernel *kernel,
                                    const std::vector<aot::Arg> &args,
-                                   const aot::Arg &dispatch_packet) {
+                                   const aot::Arg &dispatch_packet,
+                                   const std::string &dispatch_label) {
   Node *n = owning_graph_->new_indirect_dispatch_node(
-      kernel, args, dispatch_packet);
+      kernel, args, dispatch_packet, dispatch_label);
   sequence_.push_back(n);
 }
 
@@ -105,18 +112,23 @@ GraphBuilder::GraphBuilder() {
 GraphBuilder::~GraphBuilder() = default;
 
 Node *GraphBuilder::new_dispatch_node(Kernel *kernel,
-                                      const std::vector<aot::Arg> &args) {
+                                      const std::vector<aot::Arg> &args,
+                                      const std::string &dispatch_label) {
+  validate_dispatch_label(dispatch_label);
   for (const auto &arg : args) {
     register_arg(arg);
   }
-  all_nodes_.push_back(std::make_unique<Dispatch>(kernel, args));
+  all_nodes_.push_back(
+      std::make_unique<Dispatch>(kernel, args, std::nullopt, dispatch_label));
   return all_nodes_.back().get();
 }
 
 Node *GraphBuilder::new_indirect_dispatch_node(
     Kernel *kernel,
     const std::vector<aot::Arg> &args,
-    const aot::Arg &dispatch_packet) {
+    const aot::Arg &dispatch_packet,
+    const std::string &dispatch_label) {
+  validate_dispatch_label(dispatch_label);
   TI_ERROR_IF(dispatch_packet.tag != aot::ArgKind::kNdarray ||
                   dispatch_packet.dtype_id != PrimitiveTypeID::u32 ||
                   dispatch_packet.field_dim != 1 ||
@@ -129,7 +141,8 @@ Node *GraphBuilder::new_indirect_dispatch_node(
   }
   register_arg(dispatch_packet);
   all_nodes_.push_back(
-      std::make_unique<Dispatch>(kernel, args, dispatch_packet));
+      std::make_unique<Dispatch>(kernel, args, dispatch_packet,
+                                 dispatch_label));
   return all_nodes_.back().get();
 }
 
@@ -161,15 +174,18 @@ Sequential *GraphBuilder::seq() const {
   return seq_.get();
 }
 
-void GraphBuilder::dispatch(Kernel *kernel, const std::vector<aot::Arg> &args) {
-  seq()->dispatch(kernel, args);
+void GraphBuilder::dispatch(Kernel *kernel,
+                            const std::vector<aot::Arg> &args,
+                            const std::string &dispatch_label) {
+  seq()->dispatch(kernel, args, dispatch_label);
 }
 
 void GraphBuilder::dispatch_indirect(
     Kernel *kernel,
     const std::vector<aot::Arg> &args,
-    const aot::Arg &dispatch_packet) {
-  seq()->dispatch_indirect(kernel, args, dispatch_packet);
+    const aot::Arg &dispatch_packet,
+    const std::string &dispatch_label) {
+  seq()->dispatch_indirect(kernel, args, dispatch_packet, dispatch_label);
 }
 
 std::optional<aot::CompiledDispatch> GraphBuilder::try_compose_two_maps(
@@ -177,6 +193,10 @@ std::optional<aot::CompiledDispatch> GraphBuilder::try_compose_two_maps(
     const aot::CompiledDispatch &first_compiled,
     const Dispatch &second,
     const aot::CompiledDispatch &second_compiled) {
+  if (!first.dispatch_label().empty() ||
+      !second.dispatch_label().empty()) {
+    return std::nullopt;
+  }
   auto composition = compose_graph_two_map_kernel(
       first.kernel()->program->compile_config(),
       {first.kernel(), &first.symbolic_args(), &first_compiled.graph_metadata},

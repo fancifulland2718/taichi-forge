@@ -38,6 +38,7 @@ class CompiledKernelData : public lang::CompiledKernelData {
   std::unique_ptr<lang::CompiledKernelData> clone() const override;
   std::vector<int> snode_tree_ids() const override;
   std::size_t task_count() const override;
+  std::vector<OffloadedTaskManifest> task_manifest() const override;
   const GraphKernelMetadata &graph_metadata() const override {
     return data_.metadata.graph_metadata;
   }
@@ -50,6 +51,7 @@ class CompiledKernelData : public lang::CompiledKernelData {
   }
 
  protected:
+  void refresh_task_identities() override;
   Err load_impl(const CompiledKernelDataFile &file) override;
   Err dump_impl(CompiledKernelDataFile &file) const override;
 

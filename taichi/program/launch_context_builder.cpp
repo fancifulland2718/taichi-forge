@@ -7,6 +7,7 @@
 #include <taichi/program/context.h>
 #undef TI_RUNTIME_HOST
 #include "taichi/system/profiler.h"
+#include "taichi/system/profiler_annotation.h"
 #include "fp16.h"
 
 namespace taichi::lang {
@@ -35,6 +36,20 @@ LaunchContextBuilder::LaunchContextBuilder(CallableBase *kernel)
   TI_COMPILE_PROFILER("launch_context_builder_ctor");
   ctx_->result_buffer = (uint64 *)result_buffer_.get();
   ctx_->arg_buffer = arg_buffer_.get();
+  if (const auto *label = current_dispatch_label()) {
+    dispatch_label_ = *label;
+  }
+}
+
+void LaunchContextBuilder::append_dispatch_label(const std::string &label) {
+  if (label.empty()) {
+    return;
+  }
+  validate_dispatch_label(label);
+  if (!dispatch_label_.empty()) {
+    dispatch_label_.push_back('/');
+  }
+  dispatch_label_ += label;
 }
 
 void LaunchContextBuilder::set_arg_float(const std::vector<int> &arg_id,

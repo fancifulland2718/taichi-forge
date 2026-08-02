@@ -105,7 +105,7 @@ std::unique_ptr<aot::CompiledGraph> LlvmAotModule::get_graph(
 
   std::vector<aot::CompiledDispatch> dispatches;
   for (auto &dispatch : it->second.dispatches) {
-    dispatches.push_back({dispatch.kernel_name, dispatch.symbolic_args,
+    dispatches.push_back({dispatch.kernel_name, {}, dispatch.symbolic_args,
                           get_kernel(dispatch.kernel_name)});
   }
 

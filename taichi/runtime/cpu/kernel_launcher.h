@@ -22,6 +22,7 @@ class KernelLauncher : public LLVM::KernelLauncher {
     JITModule *jit_module{nullptr};
     std::vector<int> snode_tree_ids;
     std::vector<TaskFunc> task_funcs;
+    std::vector<std::pair<std::string, std::string>> task_trace_metadata;
     std::vector<SparseTaskMetadata> sparse_task_metadata;
     std::vector<std::pair<std::vector<int>, Callable::Parameter>> parameters;
   };

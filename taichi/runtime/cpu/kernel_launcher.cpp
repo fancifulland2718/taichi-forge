@@ -1,6 +1,7 @@
 #include "taichi/runtime/cpu/kernel_launcher.h"
 #include "taichi/rhi/arch.h"
 #include "taichi/system/profiler.h"
+#include "taichi/system/profiler_annotation.h"
 
 namespace taichi::lang {
 namespace cpu {
@@ -87,9 +88,24 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   }
   {
     TI_COMPILE_PROFILER("cpu_launch_tasks");
+    const bool labeled = !ctx.dispatch_label().empty();
     if (!sparse_listgen_telemetry_enabled_) {
-      for (auto task : launcher_ctx->task_funcs) {
-        task(&ctx.get_context());
+      if (!labeled) {
+        for (auto task : launcher_ctx->task_funcs) {
+          task(&ctx.get_context());
+        }
+      } else {
+        TI_ASSERT(launcher_ctx->task_funcs.size() ==
+                  launcher_ctx->task_trace_metadata.size());
+        for (std::size_t i = 0; i < launcher_ctx->task_funcs.size(); ++i) {
+          const auto &[task_name, task_id] =
+              launcher_ctx->task_trace_metadata[i];
+          const auto trace_name = make_labeled_task_name(
+              task_name, task_id, ctx.dispatch_label());
+          ScopedKernelProfilerName profiler_name(trace_name);
+          ScopedExternalProfilerAnnotation annotation(trace_name);
+          launcher_ctx->task_funcs[i](&ctx.get_context());
+        }
       }
     } else {
       TI_ASSERT(launcher_ctx->task_funcs.size() ==
@@ -106,7 +122,19 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
           ++telemetry.requests;
           executor->begin_cpu_sparse_listgen_work();
         }
-        launcher_ctx->task_funcs[i](&ctx.get_context());
+        if (!labeled) {
+          launcher_ctx->task_funcs[i](&ctx.get_context());
+        } else {
+          TI_ASSERT(launcher_ctx->task_funcs.size() ==
+                    launcher_ctx->task_trace_metadata.size());
+          const auto &[task_name, task_id] =
+              launcher_ctx->task_trace_metadata[i];
+          const auto trace_name = make_labeled_task_name(
+              task_name, task_id, ctx.dispatch_label());
+          ScopedKernelProfilerName profiler_name(trace_name);
+          ScopedExternalProfilerAnnotation annotation(trace_name);
+          launcher_ctx->task_funcs[i](&ctx.get_context());
+        }
         if (is_listgen) {
           const auto work = executor->read_cpu_sparse_listgen_work();
           if (work.available) {
@@ -159,14 +187,17 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
     // Construct task_funcs
     using TaskFunc = int32 (*)(void *);
     std::vector<TaskFunc> task_funcs;
+    std::vector<std::pair<std::string, std::string>> task_trace_metadata;
     std::vector<Context::SparseTaskMetadata> sparse_task_metadata;
     task_funcs.reserve(data.tasks.size());
+    task_trace_metadata.reserve(data.tasks.size());
     sparse_task_metadata.reserve(data.tasks.size());
     for (auto &task : data.tasks) {
       auto *func_ptr = jit_module->lookup_function(task.name);
       TI_ASSERT_INFO(func_ptr, "Offloaded datum function {} not found",
                      task.name);
       task_funcs.push_back((TaskFunc)(func_ptr));
+      task_trace_metadata.emplace_back(task.name, task.task_id);
       sparse_task_metadata.push_back({task.sparse_list_op,
                                       task.sparse_list_snode_id,
                                       task.sparse_list_parent_snode_id});
@@ -177,6 +208,7 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
     ctx->snode_tree_ids = compiled.snode_tree_ids();
     ctx->parameters = std::move(parameters);
     ctx->task_funcs = std::move(task_funcs);
+    ctx->task_trace_metadata = std::move(task_trace_metadata);
     ctx->sparse_task_metadata = std::move(sparse_task_metadata);
     const bool was_inserted = contexts_.emplace(index, std::move(ctx)).second;
     TI_ASSERT(was_inserted);

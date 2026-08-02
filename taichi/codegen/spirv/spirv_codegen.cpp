@@ -371,6 +371,9 @@ class TaskCodegen : public IRVisitor {
     ir_->init_header();
     kernel_function_ = ir_->new_function();  // void main();
     ir_->debug_name(spv::OpName, kernel_function_, "main");
+    task_attribs_.requested_grid_dim = task_ir_->grid_dim;
+    task_attribs_.requested_block_dim = task_ir_->block_dim;
+    task_attribs_.static_shared_array_bytes = task_ir_->bls_size;
 
     if (task_ir_->task_type == OffloadedTaskType::serial) {
       generate_serial_kernel(task_ir_);
@@ -563,6 +566,14 @@ class TaskCodegen : public IRVisitor {
           ir_->get_primitive_type(tensor_type->get_element_type());
       spirv::SType arr_type = ir_->get_array_type(elem_type, elem_num);
       if (alloca->is_shared) {  // for shared memory / workgroup memory
+        constexpr int kSharedArrayAlignment = 8;
+        const int shared_array_bytes =
+            elem_num * data_type_size(tensor_type->get_element_type());
+        task_attribs_.static_shared_array_bytes =
+            (task_attribs_.static_shared_array_bytes +
+             kSharedArrayAlignment - 1) /
+            kSharedArrayAlignment * kSharedArrayAlignment;
+        task_attribs_.static_shared_array_bytes += shared_array_bytes;
         ptr_val = ir_->alloca_workgroup_array(arr_type);
         shared_array_binds_.push_back(ptr_val);
       } else {  // for function memory

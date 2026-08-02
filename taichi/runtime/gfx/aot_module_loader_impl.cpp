@@ -169,7 +169,7 @@ class AotModuleImpl : public aot::Module {
 
     std::vector<aot::CompiledDispatch> dispatches;
     for (auto &dispatch : it->second.dispatches) {
-      dispatches.push_back({dispatch.kernel_name, dispatch.symbolic_args,
+      dispatches.push_back({dispatch.kernel_name, {}, dispatch.symbolic_args,
                             get_kernel(dispatch.kernel_name)});
     }
     aot::CompiledGraph graph{dispatches};

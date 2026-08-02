@@ -2,6 +2,7 @@
 #include "taichi/program/program.h"
 #include "taichi/common/filesystem.hpp"
 #include "taichi/util/environ_config.h"
+#include "taichi/system/profiler_annotation.h"
 
 // FIXME: (penguinliong) Special offer for `run_codegen`. Find a new home for it
 // in the future.
@@ -2141,8 +2142,16 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
     TI_ERROR_IF(status != RhiResult::success,
                 "Resource binding error : RhiResult({})", status);
 
+    std::string trace_name;
+    std::optional<ScopedExternalProfilerAnnotation> annotation;
+    if (!host_ctx.dispatch_label().empty()) {
+      trace_name = make_labeled_task_name(
+          attribs.name, attribs.task_id, host_ctx.dispatch_label());
+      annotation.emplace(trace_name);
+    }
     if (profiler_) {
-      current_cmdlist_->begin_profiler_scope(attribs.name);
+      current_cmdlist_->begin_profiler_scope(
+          trace_name.empty() ? attribs.name : trace_name);
     }
 
     status = current_cmdlist_->dispatch(group_x);

@@ -49,7 +49,7 @@ class AotModuleImpl : public aot::Module {
     TI_ERROR_IF(graphs_.count(name) == 0, "Cannot find graph {}", name);
     std::vector<aot::CompiledDispatch> dispatches;
     for (auto &dispatch : graphs_[name].dispatches) {
-      dispatches.push_back({dispatch.kernel_name, dispatch.symbolic_args,
+      dispatches.push_back({dispatch.kernel_name, {}, dispatch.symbolic_args,
                             get_kernel(dispatch.kernel_name)});
     }
     aot::CompiledGraph graph{dispatches};

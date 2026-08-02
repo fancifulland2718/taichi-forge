@@ -224,12 +224,16 @@ class TI_DLL_EXPORT Kernel : public CallableBase {
 
 struct GraphSourceDispatchMetadata {
   std::string kernel_name;
+  std::string dispatch_label;
   std::vector<Arg> symbolic_args;
   GraphKernelMetadata graph_metadata;
 };
 
 struct CompiledDispatch {
   std::string kernel_name;
+  // JIT-only invocation metadata. AOT payloads remain source-compatible and
+  // simply load this as empty.
+  std::string dispatch_label;
   std::vector<Arg> symbolic_args;
   Kernel *compiled_kernel{nullptr};
   taichi::lang::Kernel *ti_kernel{nullptr};
@@ -562,6 +566,7 @@ struct TI_DLL_EXPORT CompiledGraph {
   CompiledGraph &operator=(CompiledGraph &&) = default;
 
   bool has_indirect_dispatches() const;
+  bool has_dispatch_labels() const;
 
   void run(const std::unordered_map<std::string, IValue> &args) const;
   void jit_run(const CompileConfig &compile_config,

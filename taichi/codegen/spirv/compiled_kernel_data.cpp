@@ -20,7 +20,9 @@ Arch CompiledKernelData::arch() const {
 }
 
 std::unique_ptr<lang::CompiledKernelData> CompiledKernelData::clone() const {
-  return std::make_unique<CompiledKernelData>(arch_, data_);
+  auto result = std::make_unique<CompiledKernelData>(arch_, data_);
+  result->set_kernel_identity(kernel_identity());
+  return result;
 }
 
 std::vector<int> CompiledKernelData::snode_tree_ids() const {
@@ -29,6 +31,59 @@ std::vector<int> CompiledKernelData::snode_tree_ids() const {
 
 std::size_t CompiledKernelData::task_count() const {
   return data_.metadata.kernel_attribs.tasks_attribs.size();
+}
+
+void CompiledKernelData::refresh_task_identities() {
+  auto &tasks = data_.metadata.kernel_attribs.tasks_attribs;
+  for (std::size_t index = 0; index < tasks.size(); ++index) {
+    tasks[index].task_id = make_task_identity(index, tasks[index].task_type);
+  }
+}
+
+namespace {
+
+std::optional<std::int64_t> positive_geometry(int value) {
+  if (value <= 0) {
+    return std::nullopt;
+  }
+  return static_cast<std::int64_t>(value);
+}
+
+}  // namespace
+
+std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
+  const auto &tasks = data_.metadata.kernel_attribs.tasks_attribs;
+  std::vector<OffloadedTaskManifest> result;
+  result.reserve(tasks.size());
+  for (std::size_t index = 0; index < tasks.size(); ++index) {
+    const auto &task = tasks[index];
+    OffloadedTaskManifest item;
+    item.task_id = task.task_id;
+    item.task_name = task.name;
+    item.arch = arch_;
+    item.task_index = static_cast<std::uint32_t>(index);
+    item.task_type = task.task_type;
+    item.requested_grid_size = positive_geometry(task.requested_grid_dim);
+    item.requested_block_size = positive_geometry(task.requested_block_dim);
+    item.selected_block_size =
+        positive_geometry(task.advisory_num_threads_per_group);
+    if (task.advisory_total_num_threads > 0 &&
+        task.advisory_num_threads_per_group > 0) {
+      item.selected_grid_size =
+          (static_cast<std::int64_t>(task.advisory_total_num_threads) +
+           task.advisory_num_threads_per_group - 1) /
+          task.advisory_num_threads_per_group;
+    }
+    item.actual_grid_size = item.selected_grid_size;
+    item.actual_block_size = item.selected_block_size;
+    item.actual_geometry_kind = "static_direct";
+    item.actual_geometry_reason =
+        "ordinary direct launch uses the backend-selected geometry";
+    item.static_shared_bytes = static_cast<std::uint64_t>(
+        std::max(task.static_shared_array_bytes, 0));
+    result.push_back(std::move(item));
+  }
+  return result;
 }
 
 CompiledKernelData::Err CompiledKernelData::load_impl(

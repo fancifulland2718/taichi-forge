@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "taichi/analysis/graph_kernel_metadata.h"
+#include "taichi/codegen/offloaded_task_manifest.h"
 #include "taichi/rhi/arch.h"
 
 namespace taichi::lang {
@@ -118,6 +119,23 @@ class CompiledKernelData {
   // this metadata after compilation; it does not trigger compilation itself.
   virtual std::size_t task_count() const = 0;
 
+  // Host-only task metadata. Calling this function must not register a
+  // backend launch handle, allocate device memory, or enqueue work.
+  virtual std::vector<OffloadedTaskManifest> task_manifest() const = 0;
+
+  // The compilation cache key is the stable specialization identity: it
+  // includes source/IR, compile configuration, device capabilities, and the
+  // active backend. It is host-only and intentionally excluded from .tic
+  // payloads; the cache manager restores it after either compile or load.
+  void set_kernel_identity(std::string identity) {
+    kernel_identity_ = std::move(identity);
+    refresh_task_identities();
+  }
+
+  const std::string &kernel_identity() const {
+    return kernel_identity_;
+  }
+
   virtual const GraphKernelMetadata &graph_metadata() const = 0;
   virtual void set_graph_metadata(GraphKernelMetadata metadata) = 0;
 
@@ -150,6 +168,11 @@ class CompiledKernelData {
   static std::string get_err_msg(Err err);
 
  protected:
+  std::string make_task_identity(std::size_t task_index,
+                                 OffloadedTaskType task_type) const;
+
+  virtual void refresh_task_identities() = 0;
+
   virtual Err load_impl(const CompiledKernelDataFile &file) = 0;
   virtual Err dump_impl(CompiledKernelDataFile &file) const = 0;
 
@@ -165,6 +188,7 @@ class CompiledKernelData {
   // variant. Its handle belongs to the same compiled-kernel lifetime and must
   // not be cached by a reusable raw object address.
   mutable std::optional<KernelLaunchHandle> graph_masked_launch_handle_;
+  std::string kernel_identity_;
 };
 
 }  // namespace taichi::lang

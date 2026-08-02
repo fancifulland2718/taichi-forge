@@ -5,6 +5,7 @@
 
 #include "llvm/IR/Module.h"
 #include "taichi/common/serialization.h"
+#include "taichi/ir/offloaded_task_type.h"
 
 namespace taichi::lang {
 
@@ -17,8 +18,15 @@ class OffloadedTask {
   static constexpr int kSparseMutationUnknown = -2;
 
   std::string name;
+  // Host-only. The compilation manager reconstructs it from the stable cache
+  // identity, so it must not become part of the offline-cache payload.
+  std::string task_id;
+  OffloadedTaskType task_type{OffloadedTaskType::serial};
+  int requested_block_dim{0};
+  int requested_grid_dim{0};
   int block_dim{0};
   int grid_dim{0};
+  int static_shared_array_bytes{0};
   int dynamic_shared_array_bytes{0};
   int sparse_list_op{kSparseListOpNone};
   int sparse_list_snode_id{-1};
@@ -35,8 +43,12 @@ class OffloadedTask {
         grid_dim(grid_dim),
         dynamic_shared_array_bytes(dynamic_shared_array_bytes) {};
   TI_IO_DEF(name,
+            task_type,
+            requested_block_dim,
+            requested_grid_dim,
             block_dim,
             grid_dim,
+            static_shared_array_bytes,
             dynamic_shared_array_bytes,
             sparse_list_op,
             sparse_list_snode_id,

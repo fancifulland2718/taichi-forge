@@ -2446,6 +2446,10 @@ std::string TaskCodeGenLLVM::init_offloaded_task_function(OffloadedStmt *stmt,
 
 void TaskCodeGenLLVM::annotate_current_task_metadata(OffloadedStmt *stmt) {
   TI_ASSERT(current_task != nullptr);
+  current_task->task_type = stmt->task_type;
+  current_task->requested_grid_dim = stmt->grid_dim;
+  current_task->requested_block_dim = stmt->block_dim;
+  current_task->static_shared_array_bytes = stmt->bls_size;
   auto mutation = detect_sparse_topology_mutation(stmt);
   current_task->may_mutate_sparse_topology = mutation.may_mutate;
   current_task->sparse_mutation_snode_id = mutation.snode_id;

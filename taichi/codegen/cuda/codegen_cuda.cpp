@@ -39,7 +39,7 @@ static bool is_half2(DataType dt) {
 class TaskCodeGenCUDA : public TaskCodeGenLLVM {
  public:
   using IRVisitor::visit;
-  size_t dynamic_shared_array_bytes{0};
+  size_t explicit_static_shared_array_bytes{0};
 
   explicit TaskCodeGenCUDA(int id,
                            const CompileConfig &config,
@@ -184,13 +184,22 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
       size_t shared_array_bytes =
           tensor_type->get_num_elements() *
           data_type_size(tensor_type->get_element_type());
+      constexpr size_t kSharedArrayAlignment = 8;
+      explicit_static_shared_array_bytes =
+          (explicit_static_shared_array_bytes + kSharedArrayAlignment - 1) /
+          kSharedArrayAlignment * kSharedArrayAlignment;
+      explicit_static_shared_array_bytes += shared_array_bytes;
+      const size_t task_shared_array_bytes =
+          explicit_static_shared_array_bytes +
+          (current_offload == nullptr ? 0 : current_offload->bls_size);
       TI_ERROR_IF(
-          shared_array_bytes > cuda_shared_array_limit_bytes,
-          "CUDA SharedArray requests {} bytes, exceeding the supported 48 KiB "
+          task_shared_array_bytes > cuda_shared_array_limit_bytes,
+          "CUDA task requests {} aggregate bytes of static shared memory, "
+          "exceeding the supported 48 KiB "
           "per-block limit. CUDA opt-in dynamic shared memory is disabled "
           "because larger allocations can trigger "
           "CUDA_ERROR_ILLEGAL_ADDRESS (IMA), including during Graph replay.",
-          shared_array_bytes);
+          task_shared_array_bytes);
       // Keep the interned TensorType immutable. The former dynamic-shared
       // lowering changed its shape to {0} in place, corrupting later kernels
       // that reused the same type after compilation or ti.reset().
@@ -661,6 +670,7 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
   }
 
   void visit(OffloadedStmt *stmt) override {
+    explicit_static_shared_array_bytes = 0;
     if (stmt->bls_size > 0)
       create_bls_buffer(stmt);
 #if defined(TI_WITH_CUDA)
@@ -736,8 +746,10 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
         current_task->grid_dim = chosen;
       }
       current_task->block_dim = stmt->block_dim;
-      current_task->dynamic_shared_array_bytes = dynamic_shared_array_bytes;
       annotate_current_task_metadata(stmt);
+      current_task->static_shared_array_bytes = static_cast<int>(
+          stmt->bls_size + explicit_static_shared_array_bytes);
+      current_task->dynamic_shared_array_bytes = 0;
       TI_ASSERT(current_task->grid_dim != 0);
       TI_ASSERT(current_task->block_dim != 0);
       offloaded_tasks.push_back(*current_task);

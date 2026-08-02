@@ -32,6 +32,7 @@
 #include "taichi/python/export.h"
 #include "taichi/math/svd.h"
 #include "taichi/system/timeline.h"
+#include "taichi/system/profiler_annotation.h"
 #include "taichi/util/environ_config.h"
 #include "taichi/codegen/spirv/spv_stats.h"
 #include "taichi/python/snode_registry.h"
@@ -81,6 +82,34 @@ void reset_fs_inner_stats();
 
 namespace taichi {
 namespace {
+
+py::dict offloaded_task_manifest_to_python(
+    const lang::OffloadedTaskManifest &task) {
+  py::dict item;
+  item["task_id"] = task.task_id;
+  item["task_name"] = task.task_name;
+  item["backend"] = arch_name(task.arch);
+  item["task_index"] = task.task_index;
+  item["task_type"] = lang::offloaded_task_type_name(task.task_type);
+  auto set_optional = [&](const char *name, const auto &value) {
+    if (value.has_value()) {
+      item[name] = *value;
+    } else {
+      item[name] = py::none();
+    }
+  };
+  set_optional("requested_grid_size", task.requested_grid_size);
+  set_optional("requested_block_size", task.requested_block_size);
+  set_optional("selected_grid_size", task.selected_grid_size);
+  set_optional("selected_block_size", task.selected_block_size);
+  set_optional("actual_grid_size", task.actual_grid_size);
+  set_optional("actual_block_size", task.actual_block_size);
+  item["actual_geometry_kind"] = task.actual_geometry_kind;
+  item["actual_geometry_reason"] = task.actual_geometry_reason;
+  item["static_shared_bytes"] = task.static_shared_bytes;
+  item["dynamic_shared_bytes"] = task.dynamic_shared_bytes;
+  return item;
+}
 
 // Record native primitive telemetry inside the existing pybind call. Keeping
 // this at the binding boundary covers cold calls, cached plan descriptors and
@@ -618,6 +647,9 @@ void export_lang(py::module &m) {
   py::class_<CompiledKernelData>(
       m, "CompiledKernelData");  // NOLINT(bugprone-unused-raii)
 
+  m.def("_push_dispatch_label", &push_dispatch_label);
+  m.def("_restore_dispatch_label", &restore_dispatch_label);
+
   // Internal F2 validation surface. The public API remains Graph.run() -> None
   // until CPU/CUDA/Vulkan Ticket semantics and reset/fault lifetime complete
   // the F2.3 acceptance gate.
@@ -671,6 +703,60 @@ void export_lang(py::module &m) {
            })
       .def("kernel_profiler_total_time",
            [](Program *program) { return program->profiler->get_total_time(); })
+      .def("_kernel_task_manifest",
+           [](Program &program, Kernel *kernel) {
+             TI_ERROR_IF(kernel == nullptr,
+                         "Task manifest query received a null kernel");
+             auto tree_guard =
+                 program.acquire_snode_tree_lifecycle_read_guard();
+             const auto &compiled = program.compile_kernel(
+                 program.compile_config(), program.get_device_caps(),
+                 *kernel);
+             py::list result;
+             for (const auto &task : compiled.task_manifest()) {
+               result.append(offloaded_task_manifest_to_python(task));
+             }
+             return result;
+           })
+      .def("_graph_task_manifest",
+           [](Program &program, const aot::CompiledGraph &graph) {
+             auto tree_guard =
+                 program.acquire_snode_tree_lifecycle_read_guard();
+             py::list result;
+             for (std::size_t dispatch_index = 0;
+                  dispatch_index < graph.dispatches.size();
+                  ++dispatch_index) {
+               const auto &dispatch = graph.dispatches[dispatch_index];
+               TI_ERROR_IF(
+                   dispatch.ti_kernel == nullptr,
+                   "Task manifests are unavailable for AOT-only Graph "
+                   "dispatch {} ({})",
+                   dispatch_index, dispatch.kernel_name);
+               const auto &compiled = program.compile_kernel(
+                   program.compile_config(), program.get_device_caps(),
+                   *dispatch.ti_kernel);
+               for (const auto &task : compiled.task_manifest()) {
+                 auto item = offloaded_task_manifest_to_python(task);
+                 item["dispatch_index"] = dispatch_index;
+                 item["kernel_name"] = dispatch.kernel_name;
+                 item["dispatch_label"] = dispatch.dispatch_label;
+                 item["indirect"] = dispatch.indirect_dispatch_arg.has_value();
+                 item["source_dispatch_count"] =
+                     std::max<std::size_t>(
+                         1, dispatch.source_dispatches.size());
+                 if (dispatch.indirect_dispatch_arg.has_value()) {
+                   item["actual_grid_size"] = py::none();
+                   item["actual_block_size"] = py::none();
+                   item["actual_geometry_kind"] = "runtime_indirect";
+                   item["actual_geometry_reason"] =
+                       "the device-owned dispatch packet determines geometry "
+                       "for each invocation without host readback";
+                 }
+                 result.append(std::move(item));
+               }
+             }
+             return result;
+           })
       .def("set_kernel_profiler_toolkit",
            [](Program *program, const std::string toolkit_name) {
              return program->profiler->set_profiler_toolkit(toolkit_name);
@@ -3423,13 +3509,19 @@ void export_lang(py::module &m) {
   py::class_<Sequential, Node>(m, "Sequential")
       .def(py::init<GraphBuilder *>())
       .def("append", &Sequential::append)
-      .def("dispatch", &Sequential::dispatch)
-      .def("dispatch_indirect", &Sequential::dispatch_indirect);
+      .def("dispatch", &Sequential::dispatch, py::arg("kernel"),
+           py::arg("args"), py::arg("label") = "")
+      .def("dispatch_indirect", &Sequential::dispatch_indirect,
+           py::arg("kernel"), py::arg("args"),
+           py::arg("dispatch_packet"), py::arg("label") = "");
 
   py::class_<GraphBuilder>(m, "GraphBuilder")
       .def(py::init<>())
-      .def("dispatch", &GraphBuilder::dispatch)
-      .def("dispatch_indirect", &GraphBuilder::dispatch_indirect)
+      .def("dispatch", &GraphBuilder::dispatch, py::arg("kernel"),
+           py::arg("args"), py::arg("label") = "")
+      .def("dispatch_indirect", &GraphBuilder::dispatch_indirect,
+           py::arg("kernel"), py::arg("args"),
+           py::arg("dispatch_packet"), py::arg("label") = "")
       .def("compile", &GraphBuilder::compile)
       .def("_enable_two_map_composer",
            &GraphBuilder::enable_two_map_composer)
@@ -3832,10 +3924,12 @@ void export_lang(py::module &m) {
           [](const aot::CompiledGraph &graph) {
             py::list result;
             auto append = [&](const std::string &kernel_name,
+                              const std::string &dispatch_label,
                               const std::vector<aot::Arg> &args,
                               const GraphKernelMetadata &metadata) {
               py::dict item;
               item["kernel_name"] = kernel_name;
+              item["dispatch_label"] = dispatch_label;
               item["version"] = metadata.version;
               item["available"] = metadata.available;
               item["opaque"] = metadata.opaque;
@@ -3874,12 +3968,14 @@ void export_lang(py::module &m) {
             };
             for (const auto &dispatch : graph.dispatches) {
               if (dispatch.source_dispatches.empty()) {
-                append(dispatch.kernel_name, dispatch.symbolic_args,
+                append(dispatch.kernel_name, dispatch.dispatch_label,
+                       dispatch.symbolic_args,
                        dispatch.graph_metadata);
                 continue;
               }
               for (const auto &source : dispatch.source_dispatches) {
-                append(source.kernel_name, source.symbolic_args,
+                append(source.kernel_name, source.dispatch_label,
+                       source.symbolic_args,
                        source.graph_metadata);
               }
             }
