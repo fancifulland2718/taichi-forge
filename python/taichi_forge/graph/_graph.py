@@ -2432,8 +2432,17 @@ def dynamic_work_capabilities():
         "completion_attached_"
     )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "backend": structured["backend"],
+        "count_contract": {
+            "owner": "DeviceExtent",
+            "state_words": 2,
+            "fixed_capacity": True,
+            "device_published_count": True,
+            "sticky_overflow": True,
+            "runtime_generation_qualified": True,
+            "replay_host_readback": False,
+        },
         "bounded_dispatch": {
             "available": bounded["available"],
             "route": bounded["route"],
@@ -2450,6 +2459,14 @@ def dynamic_work_capabilities():
             "default_preparation_dispatches": bounded[
                 "default_preparation_dispatches"
             ],
+            "accounting_fields": (
+                "useful_count",
+                "capacity",
+                "executed_count",
+                "skipped_count",
+                "encoded_lanes",
+                "overflow",
+            ),
         },
         "structured_iteration": {
             "available": control["runtime_path_qualified"],
@@ -2467,11 +2484,39 @@ def dynamic_work_capabilities():
             ),
             "max_encoded_dispatches": control["max_encoded_dispatches"],
         },
+        "worklist": {
+            "available": bounded["available"],
+            "fixed_capacity": True,
+            "front_back_storage": True,
+            "device_atomic_append": True,
+            "atomic_append_finalize_required": True,
+            "capacity_mismatch_fail_closed": True,
+            "atomic_append_order": "unspecified",
+            "concurrent_producer_contract": "single_writer_per_transition",
+            "stable_selection": True,
+            "deterministic_keyed_claim": True,
+            "claim_order": "key_priority_ordinal",
+            "claim_parallelism": "one_winner_scan_per_key",
+            "recordable_sequence": True,
+            "no_replay_allocation": True,
+            "no_replay_host_readback": True,
+            "performance_crossover": "workload_dependent",
+            "physical_launch_semantics": bounded["execution_semantics"],
+            "counter_fields": (
+                "generated",
+                "accepted",
+                "rejected",
+                "conflicts",
+                "winners",
+                "overflow",
+            ),
+        },
         "observation": {
             "submission_ticket": ticket_observation,
             "completion_attached": completion_attached,
             "readback_mode": observation_readback_mode,
             "per_iteration_host_observation": False,
+            "worklist_counters": ticket_observation,
             "fallback_reason": (
                 "none"
                 if completion_attached
