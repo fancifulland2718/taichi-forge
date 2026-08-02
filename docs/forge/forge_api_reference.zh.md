@@ -795,6 +795,12 @@ tuned(x, y)
 合同一致；device 或 kernel 资源限制仍可能拒绝 specialization。
 report 提供不可变 policy、backend、status/reason，以及包含 requested、selected、actual
 geometry 的 N0 task manifest。
+`report.resources` 为每个 task 增加不可变 `TaskLaunchResourceReport`，报告编译期
+shared-memory 用量、已公开 backend block 上限的值与来源、代表性的几何合法 block，以及
+请求候选未被采用时的结构化原因。这些 block 只是探测候选，不是调优推荐。CUDA 的
+register/local-memory 分配需要已 materialize 的 native function，SPIR-V register 分配由
+driver 拥有；无提交 report 会把这些字段保留为 `None` 并说明原因，而不会为了填数启动
+profiler 查询。
 
 该合同有意窄于原始 CUDA/Vulkan launch API：不开放可能截断语义工作量的 grid，并且当前
 只支持恰含一个安全 parallel range task 的 primal direct-JIT kernel。Graph、AOT、自动微分、
@@ -810,6 +816,46 @@ launch 路径，不分配 telemetry buffer。每个不同 policy 都是普通 co
 计入 runtime specialization budget 和 offline-cache identity，并且在 `ti.reset()` 后需要重新
 准备。block 调优取决于 backend 和 workload，应始终用执行末端同步的 `auto` 对照测量。
 可复现的成对基准脚本是 `benchmarks/task_launch_policy_bench.py`。
+
+### 使用 `DeviceExtent` 表达设备端有界工作量
+
+`ti.DeviceExtent(capacity)` 在一个稳定的两元素 `i32` device state 中保存有界 count 与
+sticky overflow。capacity、runtime generation 和 allocation identity 在 binding 生命周期内
+不可变，因此同一 state 可以传给普通 kernel、JIT Graph ndarray 参数，以及写入单元素
+count ndarray 的现有 Forge primitive：
+
+```python
+extent = ti.DeviceExtent(capacity)
+
+@ti.kernel
+def publish(requested: ti.i32, state: ti.types.ndarray()):
+    ti.device_extent_publish(state, capacity, requested)
+
+@ti.kernel
+def consume(state: ti.types.ndarray(), out: ti.types.ndarray()):
+    for i in range(capacity):
+        if i < ti.device_extent_count(state):
+            out[i] = i
+
+publish(requested_count, extent.state)
+consume(extent.state, output)
+```
+
+`device_extent_publish()` 是 Taichi scope 的 single-writer 操作：它写入
+`min(max(requested, 0), capacity)`，需要钳制时设置 overflow，且不做 host observation。
+`device_extent_overflowed()` 在 Taichi scope 读取状态；`extent.reset()` 在设备上清零两项。
+已有 producer 若直接写 element zero（包括把 `extent.count` 传给兼容 primitive），可调用
+`extent.normalize()`，它会排入一个小型 clamp/status kernel，不回读 host。热路径更应把
+`device_extent_publish()` 融入 producer，以免增加一次 launch。
+
+`extent.runtime_arguments("extent")` 为 Graph ndarray 参数返回零拷贝 runtime mapping。
+count 变化不改变 binding，因此无需重建 Graph 或重新分配 workspace。`snapshot()` 与
+`check()` 是显式 host observation 边界，后者在 overflow 时抛错。`ti.reset()` 或 owner
+replacement 后旧 binding 会 fail closed。
+
+`DeviceExtent` 本身不会改变 kernel grid，也不会自动跳过 command。当前 consumer 可在
+fixed-capacity kernel 中使用有界 count；backend 的 exact-indirect 或 masked-capacity dispatch
+仍是独立 capability，不能从该 state 对象推断。
 
 ### `GraphBuilder.dispatch_indirect(kernel, *args, dispatch_packet, template_args=None, label=None)`
 

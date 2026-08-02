@@ -15,7 +15,8 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
-| [0.6.0](#060) | current declared source release; publication artifacts may be pending | current `master` | structured Graph control/telemetry and Vulkan indirect dispatch, sparse runtime/linear algebra, driver-only CUDA primitives, managed interoperability/display, and bounded runtime lifetimes |
+| [Unreleased](#unreleased) | development after 0.6.0 | current `master` | device-resident bounded-workload ownership and richer no-submit launch reports |
+| [0.6.0](#060) | current declared source release; publication artifacts may be pending | `c223cb191` | structured Graph control/telemetry and Vulkan indirect dispatch, sparse runtime/linear algebra, driver-only CUDA primitives, managed interoperability/display, and bounded runtime lifetimes |
 | [0.1.0](#010) | historical source release; artifact may be removed | `91ad177685` | scikit-build-core migration and Forge distribution rebrand |
 | [0.1.1](#011) | historical source release; artifact may be removed | `c771969781` | `taichi_forge` import rename and install-layout fixes |
 | [0.1.2](#012) | historical source release; artifact may be removed | `fe5844390b` | import fixes and CUDA build option |
@@ -38,6 +39,21 @@ grouped under the behavior they shipped.
 | [0.4.24](#0424) | retained on PyPI | `f8dfb3e2a` | GGUI device-image staging and render cadence |
 | [0.4.25](#0425) | retained on PyPI; final public 0.4.x baseline | `7dad067ca` | GGUI event-pump and ImGui lifecycle fixes |
 | [0.5.0](#050) | published runtime source boundary | `95626e8036` | async runtime safety, Graph replay/lifetime work, Dense Field Graph |
+
+## Unreleased
+
+- Added `DeviceExtent`, a stable two-slot device state for bounded counts and
+  sticky overflow. Device-side publish clamps without host readback; the same
+  allocation can be shared by ordinary kernels, JIT Graph arguments, and
+  compatible count-producing primitives. Reset/normalize stay device-side,
+  explicit snapshot/check operations synchronize, and stale runtime
+  generations fail closed. This state contract does not itself claim exact
+  indirect dispatch or alter kernel grids.
+- `TaskLaunchReport.resources` now explains compile-time shared-memory use,
+  exposed backend block limits, representative legal block probes, and rejected
+  requested candidates. Register/local-memory fields remain explicitly
+  unavailable when a no-submit query cannot obtain them safely; no runtime
+  autotuning or profiler launch is introduced.
 
 ## 0.6.0
 

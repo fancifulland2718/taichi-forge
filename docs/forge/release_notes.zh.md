@@ -12,7 +12,8 @@
 
 | 版本 | 历史状态 | 源码边界 | 主要范围 |
 | --- | --- | --- | --- |
-| [0.6.0](#060) | 当前声明的源码版本；发行文件可能仍待发布 | 当前 `master` | 结构化 Graph 控制/遥测与 Vulkan indirect dispatch、稀疏 runtime/线性代数、driver-only CUDA primitive、受管互操作/显示与 runtime 生命周期有界化 |
+| [待发布](#unreleased) | 0.6.0 之后的开发版本 | 当前 `master` | 设备端有界工作量所有权与更完整的无提交 launch report |
+| [0.6.0](#060) | 当前声明的源码版本；发行文件可能仍待发布 | `c223cb191` | 结构化 Graph 控制/遥测与 Vulkan indirect dispatch、稀疏 runtime/线性代数、driver-only CUDA primitive、受管互操作/显示与 runtime 生命周期有界化 |
 | [0.1.0](#010) | 历史源码版本；发行文件可能已移除 | `91ad177685` | scikit-build-core 迁移与 Forge 发行包重命名 |
 | [0.1.1](#011) | 历史源码版本；发行文件可能已移除 | `c771969781` | `taichi_forge` import 重命名与安装布局修复 |
 | [0.1.2](#012) | 历史源码版本；发行文件可能已移除 | `fe5844390b` | import 修复与 CUDA 构建选项 |
@@ -35,6 +36,17 @@
 | [0.4.24](#0424) | PyPI 当前保留 | `f8dfb3e2a` | GGUI device-image staging 与渲染 cadence |
 | [0.4.25](#0425) | PyPI 当前保留；最后一个公开 0.4.x 基线 | `7dad067ca` | GGUI 事件泵与 ImGui 生命周期修复 |
 | [0.5.0](#050) | 已发布 runtime 源码边界 | `95626e8036` | 异步 runtime 安全、Graph replay/lifetime、Dense Field Graph |
+
+## 待发布 {#unreleased}
+
+- 新增 `DeviceExtent`：以稳定的两槽 device state 保存有界 count 与 sticky overflow。
+  device-side publish 无 host readback 地完成钳制；同一 allocation 可由普通 kernel、JIT Graph
+  参数和兼容的 count-producing primitive 共享。reset/normalize 保持 device-side，显式
+  snapshot/check 才同步，旧 runtime generation 会 fail closed。该状态合同本身不宣称
+  exact indirect dispatch，也不改变 kernel grid。
+- `TaskLaunchReport.resources` 现在说明编译期 shared-memory 用量、已公开 backend block
+  上限、代表性合法 block probe，以及请求候选被拒绝的原因。无提交查询不能安全取得
+  register/local-memory 时会明确保留为空；不会引入 runtime autotuning 或 profiler launch。
 
 ## 0.6.0
 

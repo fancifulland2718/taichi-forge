@@ -910,6 +910,14 @@ that are powers of two or multiples of 32, matching Taichi's existing loop
 configuration contract; device and kernel resource limits may still reject a specialization.
 The report exposes the immutable policy, backend, status/reason, and the N0
 task manifests containing requested, selected, and actual geometry.
+`report.resources` adds one immutable `TaskLaunchResourceReport` per task. It
+reports compile-time shared-memory use, the source and value of an exposed
+backend block limit, representative geometry-valid block sizes, and a
+structured reason when a requested candidate was not selected. These sizes
+are probes, not tuning recommendations. CUDA register/local-memory allocation
+requires a materialized native function, while SPIR-V register allocation is
+driver owned; the no-submit report leaves those fields as `None` and explains
+why instead of launching a profiler query.
 
 This contract is deliberately narrower than a raw CUDA/Vulkan launch API. It
 does not expose grid truncation and currently supports only primal direct-JIT
@@ -932,6 +940,51 @@ and offline-cache identity, and must be prepared again after `ti.reset()`.
 Block tuning is backend- and workload-specific, so always compare against
 `auto` with end-of-work synchronization. The reproducible paired harness is
 `benchmarks/task_launch_policy_bench.py`.
+
+### Device-resident bounded workloads with `DeviceExtent`
+
+`ti.DeviceExtent(capacity)` owns one stable two-element `i32` device state: a
+bounded count and sticky overflow status. The capacity, runtime generation,
+and allocation identity are immutable, so the same state can be passed to
+ordinary kernels, JIT Graph ndarray arguments, and existing Forge primitives
+that write a one-element count ndarray:
+
+```python
+extent = ti.DeviceExtent(capacity)
+
+@ti.kernel
+def publish(requested: ti.i32, state: ti.types.ndarray()):
+    ti.device_extent_publish(state, capacity, requested)
+
+@ti.kernel
+def consume(state: ti.types.ndarray(), out: ti.types.ndarray()):
+    for i in range(capacity):
+        if i < ti.device_extent_count(state):
+            out[i] = i
+
+publish(requested_count, extent.state)
+consume(extent.state, output)
+```
+
+`device_extent_publish()` is a single-writer Taichi-scope operation. It stores
+`min(max(requested, 0), capacity)` and sets overflow when clamping is needed,
+without host observation. `device_extent_overflowed()` reads the status in
+Taichi scope. `extent.reset()` clears both values on device. For an existing
+producer that writes element zero directly (including a compatible primitive
+called with `extent.count`), `extent.normalize()` enqueues one small clamp and
+status kernel without readback. Integrating `device_extent_publish()` into a
+producer avoids that extra launch and is preferred on hot paths.
+
+`extent.runtime_arguments("extent")` returns a zero-copy runtime mapping for a
+Graph ndarray argument. Count churn keeps the same binding and therefore does
+not require Graph reconstruction or workspace allocation. `snapshot()` and
+`check()` are explicit host observation boundaries; `check()` raises on
+overflow. Bindings fail closed after `ti.reset()` or owner replacement.
+
+`DeviceExtent` does not by itself change a kernel's grid or suppress a command.
+A current consumer may use the bounded count inside a fixed-capacity kernel;
+backend-specific exact-indirect or masked-capacity dispatch remains a separate
+capability and must not be inferred from this state object.
 
 ### `GraphBuilder.dispatch_indirect(kernel, *args, dispatch_packet, template_args=None, label=None)`
 
