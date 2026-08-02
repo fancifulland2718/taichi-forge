@@ -58,6 +58,15 @@ def test_task_manifest_is_stable_read_only_and_does_not_launch():
         first[0].selected_block_size = 1
 
     if impl.current_cfg().arch == ti_core.Arch.x64:
+        assert all(
+            task.range_mapping
+            == (
+                "cpu_scheduler"
+                if task.task_type == "range_for"
+                else "not_applicable"
+            )
+            for task in first
+        )
         assert all(task.selected_grid_size is None for task in first)
         assert all(task.selected_block_size is None for task in first)
         assert all(task.actual_grid_size is None for task in first)
@@ -70,6 +79,12 @@ def test_task_manifest_is_stable_read_only_and_does_not_launch():
     else:
         parallel = [task for task in first if task.task_type == "range_for"]
         assert parallel
+        assert parallel[0].range_mapping == "grid_stride"
+        assert all(
+            task.range_mapping == "not_applicable"
+            for task in first
+            if task.task_type != "range_for"
+        )
         assert parallel[0].requested_block_size == 64
         assert parallel[0].selected_grid_size > 0
         assert parallel[0].selected_block_size > 0

@@ -70,9 +70,11 @@ def test_graph_device_bounded_dispatch_routes_and_boundaries():
     def consume(
         state: ti.types.ndarray(dtype=ti.i32, ndim=1),
         output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        visited: ti.types.ndarray(dtype=ti.i32, ndim=1),
     ):
         ti.loop_config(block_dim=block_dim)
         for i in range(capacity):
+            ti.atomic_add(visited[0], 1)
             if i < ti.device_extent_count(state):
                 output[i] = i + 11
 
@@ -85,12 +87,16 @@ def test_graph_device_bounded_dispatch_routes_and_boundaries():
     output_arg = ti.graph.Arg(
         ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
     )
+    visited_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "visited", ti.i32, ndim=1
+    )
     builder = ti.graph.GraphBuilder()
     builder.dispatch(produce, requested_arg, extent_arg)
     handle = builder.dispatch_bounded(
         consume,
         extent_arg,
         output_arg,
+        visited_arg,
         extent=extent_arg,
         capacity=capacity,
         block_dim=block_dim,
@@ -98,6 +104,7 @@ def test_graph_device_bounded_dispatch_routes_and_boundaries():
     graph = builder.compile()
     extent = ti.DeviceExtent(capacity)
     output = ti.ndarray(ti.i32, shape=capacity)
+    visited = ti.ndarray(ti.i32, shape=1)
     capabilities = ti.graph.bounded_dispatch_capabilities()
     manifest = graph.task_manifest()
 
@@ -109,11 +116,15 @@ def test_graph_device_bounded_dispatch_routes_and_boundaries():
         assert handle.capabilities.zero_count_command_skip
         assert handle.workspace_bytes == 12
         assert sum(task.indirect for task in manifest) == 1
+        payload = next(task for task in manifest if "consume" in task.kernel_name)
+        assert payload.range_mapping == "one_to_one"
     else:
         assert not handle.capabilities.exact_grid
         assert handle.capabilities.route == "masked_capacity"
         assert handle.workspace_bytes == 0
         assert not any(task.indirect for task in manifest)
+        payload = next(task for task in manifest if "consume" in task.kernel_name)
+        assert payload.range_mapping in ("cpu_scheduler", "grid_stride")
 
     for requested, count, overflow in (
         (0, 0, False),
@@ -123,9 +134,15 @@ def test_graph_device_bounded_dispatch_routes_and_boundaries():
         (capacity + 1, capacity, True),
     ):
         output.fill(-1)
+        visited.fill(0)
         before = impl.get_runtime().prog._runtime_statistics_snapshot()
         graph.run(
-            {"requested": requested, "extent": extent, "output": output}
+            {
+                "requested": requested,
+                "extent": extent,
+                "output": output,
+                "visited": visited,
+            }
         )
         after_enqueue = impl.get_runtime().prog._runtime_statistics_snapshot()
         assert after_enqueue["transfer"] == before["transfer"]
@@ -147,6 +164,7 @@ def test_graph_device_bounded_dispatch_routes_and_boundaries():
             )
         else:
             assert snapshot.executed_count == capacity
+        assert int(visited.to_numpy()[0]) == snapshot.executed_count
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
