@@ -1,0 +1,401 @@
+import numpy as np
+import pytest
+
+import taichi_forge as ti
+from taichi_forge._lib import core as ti_core
+from taichi_forge.lang import impl
+from tests import test_utils
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_graph_host_known_bounded_dispatch_is_exact_and_clamped():
+    capacity = 97
+
+    @ti.kernel
+    def consume(count: ti.i32, output: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in range(count):
+            output[i] = i + 5
+
+    count_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    handle = builder.dispatch_bounded(
+        consume,
+        count_arg,
+        output_arg,
+        count=count_arg,
+        capacity=capacity,
+    )
+    graph = builder.compile()
+    output = ti.ndarray(ti.i32, shape=capacity)
+
+    assert handle.capabilities.route == "exact_host_range"
+    assert handle.capabilities.exact_grid
+    assert ti.graph.bounded_dispatch_capabilities()["host_known_route"] == (
+        "exact_host_range"
+    )
+    for requested, expected_count, overflow in (
+        (-1, 0, True),
+        (0, 0, False),
+        (1, 1, False),
+        (capacity, capacity, False),
+        (capacity + 7, capacity, True),
+    ):
+        output.fill(-1)
+        graph.run({"count": requested, "output": output})
+        expected = np.full(capacity, -1, dtype=np.int32)
+        expected[:expected_count] = np.arange(expected_count, dtype=np.int32) + 5
+        np.testing.assert_array_equal(output.to_numpy(), expected)
+        snapshot = handle.snapshot(requested)
+        assert snapshot.useful_count == expected_count
+        assert snapshot.executed_count == expected_count
+        assert snapshot.overflow == overflow
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_graph_device_bounded_dispatch_routes_and_boundaries():
+    capacity = 65
+    block_dim = 32
+
+    @ti.kernel
+    def produce(
+        requested: ti.i32,
+        state: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.device_extent_publish(state, capacity, requested)
+
+    @ti.kernel
+    def consume(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.loop_config(block_dim=block_dim)
+        for i in range(capacity):
+            if i < ti.device_extent_count(state):
+                output[i] = i + 11
+
+    requested_arg = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "requested", ti.i32
+    )
+    extent_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "extent", ti.i32, ndim=1
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(produce, requested_arg, extent_arg)
+    handle = builder.dispatch_bounded(
+        consume,
+        extent_arg,
+        output_arg,
+        extent=extent_arg,
+        capacity=capacity,
+        block_dim=block_dim,
+    )
+    graph = builder.compile()
+    extent = ti.DeviceExtent(capacity)
+    output = ti.ndarray(ti.i32, shape=capacity)
+    capabilities = ti.graph.bounded_dispatch_capabilities()
+    manifest = graph.task_manifest()
+
+    assert capabilities["available"]
+    assert capabilities["no_host_readback"]
+    assert handle.capabilities.route == capabilities["route"]
+    if ti.lang.impl.current_cfg().arch == ti.vulkan:
+        assert handle.capabilities.exact_grid
+        assert handle.capabilities.zero_count_command_skip
+        assert handle.workspace_bytes == 12
+        assert sum(task.indirect for task in manifest) == 1
+    else:
+        assert not handle.capabilities.exact_grid
+        assert handle.capabilities.route == "masked_capacity"
+        assert handle.workspace_bytes == 0
+        assert not any(task.indirect for task in manifest)
+
+    for requested, count, overflow in (
+        (0, 0, False),
+        (1, 1, False),
+        (capacity - 1, capacity - 1, False),
+        (capacity, capacity, False),
+        (capacity + 1, capacity, True),
+    ):
+        output.fill(-1)
+        before = impl.get_runtime().prog._runtime_statistics_snapshot()
+        graph.run(
+            {"requested": requested, "extent": extent, "output": output}
+        )
+        after_enqueue = impl.get_runtime().prog._runtime_statistics_snapshot()
+        assert after_enqueue["transfer"] == before["transfer"]
+        assert (
+            after_enqueue["synchronization"]["program_syncs"]
+            == before["synchronization"]["program_syncs"]
+        )
+        expected = np.full(capacity, -1, dtype=np.int32)
+        expected[:count] = np.arange(count, dtype=np.int32) + 11
+        np.testing.assert_array_equal(output.to_numpy(), expected)
+        snapshot = handle.snapshot(extent)
+        assert snapshot.useful_count == count
+        assert snapshot.capacity == capacity
+        assert snapshot.overflow == overflow
+        assert snapshot.skipped_count == snapshot.executed_count - count
+        if handle.capabilities.exact_grid:
+            assert snapshot.executed_count == min(
+                capacity, ((count + block_dim - 1) // block_dim) * block_dim
+            )
+        else:
+            assert snapshot.executed_count == capacity
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_graph_ordered_segmented_dispatch_reuses_payload_and_orders_ranges():
+    capacity = 24
+    block_dim = 32
+    offsets_host = np.array([0, 5, 5, 11, 17], dtype=np.int32)
+    segment_count = offsets_host.size - 1
+
+    @ti.kernel
+    def consume_segment(
+        offsets: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        segment_state: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.loop_config(block_dim=block_dim)
+        for local in range(capacity):
+            if local < ti.graph.segmented_dispatch_count(segment_state):
+                index = ti.graph.segmented_dispatch_begin(segment_state) + local
+                output[index] = ti.graph.segmented_dispatch_index(segment_state) + 1
+
+    offsets_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "offsets", ti.i32, ndim=1
+    )
+    extent_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "extent", ti.i32, ndim=1
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    handle = builder.dispatch_ordered_segments(
+        consume_segment,
+        offsets_arg,
+        extent_arg,
+        output_arg,
+        offsets=offsets_arg,
+        extent=extent_arg,
+        capacity=capacity,
+        segment_count=segment_count,
+        block_dim=block_dim,
+    )
+    graph = builder.compile()
+    manifest = graph.task_manifest()
+    offsets = ti.ndarray(ti.i32, shape=segment_count + 1)
+    extent = ti.DeviceExtent(capacity)
+    output = ti.ndarray(ti.i32, shape=capacity)
+    offsets.from_numpy(offsets_host)
+    extent.set(int(offsets_host[-1]))
+    output.fill(-1)
+
+    graph.run({"offsets": offsets, "extent": extent, "output": output})
+    expected = np.full(capacity, -1, dtype=np.int32)
+    for segment in range(segment_count):
+        expected[offsets_host[segment] : offsets_host[segment + 1]] = segment + 1
+    np.testing.assert_array_equal(output.to_numpy(), expected)
+    snapshot = handle.snapshot(extent, offsets)
+    assert snapshot.useful_count == int(offsets_host[-1])
+    assert not snapshot.overflow
+    assert len(snapshot.segments) == segment_count
+    assert snapshot.segments[1].useful_count == 0
+    if ti.lang.impl.current_cfg().arch == ti.vulkan:
+        assert handle.workspace_allocation_count == 2
+        assert handle.workspace_bytes == 32
+    else:
+        assert handle.workspace_allocation_count == 1
+        assert handle.workspace_bytes == 20
+    payload_tasks = [
+        task for task in manifest if "consume_segment" in task.kernel_name
+    ]
+    assert len(payload_tasks) == segment_count
+    assert len({task.kernel_name for task in payload_tasks}) == 1
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_graph_ordered_segmented_dispatch_clamps_invalid_offsets():
+    capacity = 16
+    segment_count = 3
+
+    @ti.kernel
+    def consume_segment(
+        offsets: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        segment_state: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for local in range(capacity):
+            if local < ti.graph.segmented_dispatch_count(segment_state):
+                index = ti.graph.segmented_dispatch_begin(segment_state) + local
+                output[index] += 1
+
+    offsets_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "offsets", ti.i32, ndim=1
+    )
+    extent_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "extent", ti.i32, ndim=1
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    handle = builder.dispatch_ordered_segments(
+        consume_segment,
+        offsets_arg,
+        extent_arg,
+        output_arg,
+        offsets=offsets_arg,
+        extent=extent_arg,
+        capacity=capacity,
+        segment_count=segment_count,
+    )
+    graph = builder.compile()
+    offsets = ti.ndarray(ti.i32, shape=segment_count + 1)
+    offsets.from_numpy(np.array([-3, 5, 4, 99], dtype=np.int32))
+    extent = ti.DeviceExtent(capacity)
+    extent.set(10)
+    output = ti.ndarray(ti.i32, shape=capacity + 2)
+    output.fill(0)
+
+    graph.run({"offsets": offsets, "extent": extent, "output": output})
+    snapshot = handle.snapshot(extent, offsets)
+    assert snapshot.overflow
+    assert any(segment.invalid_offsets for segment in snapshot.segments)
+    # Device clamping guarantees no writes outside the fixed capacity.
+    np.testing.assert_array_equal(output.to_numpy()[capacity:], np.zeros(2, np.int32))
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_graph_bounded_dispatch_validates_binding_and_aot_boundary():
+    capacity = 8
+
+    @ti.kernel
+    def consume(
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in range(capacity):
+            if i < ti.device_extent_count(extent):
+                output[i] += 1
+
+    extent_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "extent", ti.i32, ndim=1
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch_bounded(
+        consume,
+        extent_arg,
+        output_arg,
+        extent=extent_arg,
+        capacity=capacity,
+    )
+    graph = builder.compile()
+    output = ti.ndarray(ti.i32, shape=capacity)
+    raw_extent = ti.ndarray(ti.i32, shape=2)
+    with pytest.raises(RuntimeError, match="must be the DeviceExtent"):
+        graph.run({"extent": raw_extent, "output": output})
+
+    module = ti.aot.Module()
+    with pytest.raises(RuntimeError, match="JIT-only internal fixed bindings"):
+        module.add_graph("bounded", graph)
+
+    count_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
+
+    @ti.kernel
+    def wrong_host_range(
+        count: ti.i32, result: ti.types.ndarray(dtype=ti.i32, ndim=1)
+    ):
+        for i in range(capacity):
+            if i < count:
+                result[i] += 1
+
+    invalid_builder = ti.graph.GraphBuilder()
+    with pytest.raises(RuntimeError, match="sole range domain"):
+        invalid_builder.dispatch_bounded(
+            wrong_host_range,
+            count_arg,
+            output_arg,
+            count=count_arg,
+            capacity=capacity,
+        )
+
+
+@pytest.mark.run_in_serial
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_graph_bounded_dispatch_replay_memory_is_stable():
+    capacity = 128
+
+    @ti.kernel
+    def consume(
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in range(capacity):
+            if i < ti.device_extent_count(extent):
+                output[i] += 1
+
+    extent_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "extent", ti.i32, ndim=1
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    handle = builder.dispatch_bounded(
+        consume,
+        extent_arg,
+        output_arg,
+        extent=extent_arg,
+        capacity=capacity,
+    )
+    graph = builder.compile()
+    extent = ti.DeviceExtent(capacity)
+    output = ti.ndarray(ti.i32, shape=capacity)
+    extent.set(1)
+    graph.run({"extent": extent, "output": output})
+    ti.sync()
+    graph.execution_stats()
+    graph.run({"extent": extent, "output": output})
+    ti.sync()
+
+    graph_identity = graph._instance_debug_info
+    memory_before = impl.get_runtime().prog._runtime_statistics_snapshot()["memory"]
+    host_before = dict(ti_core.get_host_memory_pool_stats())
+    device_before = dict(ti_core.get_device_memory_pool_stats())
+    allocations = handle.workspace_allocation_count
+    for count in range(1000):
+        extent.set(count % (capacity + 1))
+        graph.run({"extent": extent, "output": output})
+    ti.sync()
+
+    assert graph._instance_debug_info == graph_identity
+    assert handle.workspace_allocation_count == allocations
+    memory_after = impl.get_runtime().prog._runtime_statistics_snapshot()["memory"]
+    assert memory_after["live_resources"] <= memory_before["live_resources"]
+    assert memory_after["retiring_resources"] <= memory_before["retiring_resources"]
+    for key in (
+        "host_requested_live_bytes",
+        "host_raw_bytes",
+        "device_requested_live_bytes",
+        "device_raw_bytes",
+        "device_cached_bytes",
+    ):
+        before_value = memory_before[key]
+        after_value = memory_after[key]
+        if before_value is not None and after_value is not None:
+            assert after_value <= before_value
+    assert dict(ti_core.get_host_memory_pool_stats()) == host_before
+    assert dict(ti_core.get_device_memory_pool_stats()) == device_before
