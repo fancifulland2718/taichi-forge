@@ -22,6 +22,9 @@
 | `ti.algorithms.device_prefix(values, extent, ...)` | 通过 device-resident 有效数量组合固定容量 primitive 输入。 |
 | `ti.algorithms.DevicePrefixSequence(capacity)` | 把 fixed-topology 有效前缀 pipeline 记录成一个 Graph native node。 |
 | `ti.algorithms.DevicePrefixWorkspace(max_items)` | 在有效前缀 pipeline 间复用 staging 与 child primitive workspace。 |
+| `ti.algorithms.DeviceWorklist(capacity, dtype)` | 为动态工作持有可复用 front/back storage、device extent 与 transition counters。 |
+| `ti.algorithms.device_worklist_append(...)` | 从 Taichi scope atomic append，不读取 host count。 |
+| `ti.algorithms.DeviceWorklistSequence(args)` | 把一次 worklist transition 记录为 Graph native action。 |
 | `ti.algorithms.experimental_compact(values, flags, output, count, ...)` | 按 flags 过滤并写入紧凑输出。 |
 | `ti.algorithms.experimental_run_length_encode(keys, unique_keys, run_lengths, run_count, ...)` | 完全在 device 上编码连续整数 key run。 |
 | `ti.algorithms.experimental_unique(values, output, count, ...)` | 选择每个连续相等 run 的首项。 |
@@ -191,6 +194,55 @@ scatter 会把 indirect packet 与 count 一起发布，删除一次 preparation
 显式调用 `DeviceExtent.snapshot()` 的同一 chain，CPU、CUDA、Vulkan 分别快 1.05x、
 1.32x、1.90x。这是消除同步的测量结果，不是跨设备吞吐保证。带执行末端同步的成对基准为
 `benchmarks/dynamic_workload_bench.py`。
+
+## Device-resident worklist
+
+`DeviceWorklist` 在有效前缀 primitive 之上增加生命周期和计数合同。它持有两份固定容量
+scalar ndarray、两个 `DeviceExtent`、可复用 primitive workspace 与六个 device counter。
+自定义 producer 可向 back storage append，并且不在 host 观察 count：
+
+```python
+worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)
+
+@ti.kernel
+def produce(values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            extent_state: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            generated: ti.types.ndarray(dtype=ti.i32, ndim=0),
+            overflow: ti.types.ndarray(dtype=ti.i32, ndim=0),
+            limit: ti.i32, requested: ti.i32):
+    for i in range(requested):
+        ti.algorithms.device_worklist_append(
+            values, extent_state, generated, overflow, limit, i
+        )
+
+worklist.prepare_next()
+produce(*worklist.append_arguments(), requested)
+worklist.commit_next()
+```
+
+无 overflow 时，每个 item 只执行一次 atomic slot reservation。atomic append 顺序不保证；
+一次 transition 只有一个 producer owner，多个独立 Graph submission 写同一 worklist 前必须
+显式排序。overflow 会把发布 count 钳制到 capacity，并同时保留在 `DeviceExtent` 与 worklist
+counter 中；伪造或误绑的 Graph capacity 会在写 value 前 fail closed。`select(flags)` 保持
+source order。`resolve_conflicts(keys, priorities=..., policy="min_priority")` 使用 stable
+native integer-key sort，再按 key、
+priority、ordinal、source index 选择一个 winner。该结果确定，但固定容量 sort 与 staging
+更适合 dense GPU workload，不应无条件替代小规模 host arbitration。winner reduction 会
+扫描每个 sorted key run；由一个或少数超长 run 主导的分布并行度更低，应单独做性能资格。
+
+Graph replay 使用 `worklist.graph_args(name)` 创建 symbolic 参数。可在 user producer 两侧追加
+独立的 `DeviceWorklistSequence(args).prepare_next()` / `.finalize_next()` node，也可记录一个
+`select()` 或 `resolve_conflicts()` node。Graph staging 在 submission 前分配，steady-state
+replay 不分配、也不读取 host count；首次执行仍可能编译 kernel 并准备 native provider
+workspace。`args.observe()` 把六个 counter 加到 completion-attached ticket observation；
+completion 后由 `args.decode_observation()` 生成 `DeviceWorklistStatistics`。
+`execution_report()` 是显式同步边界，可把这些 counter 与 `dispatch_bounded()` snapshot 合并。
+
+Vulkan 可把 `worklist.next_extent.dispatch_state(block_dim)` 同时传给 finalize/select/claim 与
+`dispatch_bounded(launch_state=...)`；producer 直接发布 exact indirect packet，consumer 不再
+增加 preparation dispatch。CPU/CUDA 使用同一 source-level 组合，但 bounded consumer 仍为
+masked capacity。应查询 `ti.graph.dynamic_work_capabilities()["worklist"]`，不能从通用 API
+反推 exact launch 行为。
 
 ## Consecutive RLE 与 Unique
 

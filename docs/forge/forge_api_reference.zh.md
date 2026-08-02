@@ -444,6 +444,60 @@ native Graph node。先用 `sequence.input(values_arg, extent_arg)` 声明 symbo
 count 都留在 device；runtime 参数仍使用普通 Graph ndarray 名称。sequence 一旦追加并编译就
 不可修改，其 workspace 也不能由多个并发 sequence 共享。
 
+### Device worklist
+
+#### `ti.algorithms.DeviceWorklist(capacity, dtype=ti.i32, *, workspace=None)`
+
+持有固定容量 front/back scalar storage、成对 `DeviceExtent`、六个 device counter 与可复用
+primitive workspace。value dtype 支持 `i32/u32/i64/u64/f32/f64`；capacity 必须是
+`[1, 2^31-1]` 内的 Python integer。对象绑定当前 runtime generation，`ti.reset()` 后使用会
+明确拒绝。
+
+direct atomic producer 的生命周期为：
+
+1. `prepare_next()` 在 device 上重置 back extent 与 counter；
+2. kernel 使用 `*worklist.append_arguments()` 调用 `device_worklist_append()`；
+3. `commit_next(dispatch_state=None)` 不同步地完成 count/counter 发布并交换 front/back。
+
+`device_worklist_append(values, extent_state, generated, overflow, capacity,
+value)` 是 `@ti.func`，返回已保留 slot；overflow 时返回 `-1`。无 overflow 路径每个 item
+只执行一次 reservation atomic。append 顺序不保证；需要顺序的 consumer 必须使用 stable
+`select()` 或 deterministic `resolve_conflicts()`。每次 transition 只有一个 producer owner；
+worklist 不会自动串行化写入它的独立 Graph submission。capacity scalar 必须等于 values 的
+物理容量；Graph binding 不匹配时会在任何 value write 前 fail closed，并设置 sticky overflow。
+
+`select(flags, *, method="auto", dispatch_state=None)` stable filter 当前 front 到 back 并
+commit。`resolve_conflicts(keys, *, priorities=None, ordinals=None, policy="first",
+method="auto", dispatch_state=None)` 接受 integer key，每个 key 选择一个 winner。policy 可为
+`first`、`claim`、`min_priority`、`max_priority`；priority policy 要求 i32 priority ndarray。
+tie 依次按 ordinal、source index 决定。返回的 `DeviceConflictResult` 暴露 device-owned keys、
+values、priorities、ordinals、extent 与 counter arrays。这些路径复用既有 CPU/CUDA/Vulkan
+compact 和 native stable-sort provider，不会静默回退到 host round trip。winner reduction
+为每个 sorted key run 分配一次 scan；少量特别长的 run 会降低并行度，性能资格应把它作为
+独立 workload shape 测量。
+
+`statistics()` 与 `snapshot()` 是显式同步 observation。`execution_report(dispatch=None,
+target="current")` 还会与 bounded-dispatch snapshot 合并，报告 useful、executed、skipped、
+encoded、overflow 与 exact-grid state。`memory_report()` 报告 front/back、extent、counter 和
+可复用 workspace bytes。
+
+#### `ti.algorithms.DeviceWorklistSequence(args, *, workspace=None)`
+
+在 `worklist.graph_args(name)` 返回的 symbolic bundle 上恰好记录一次 transition：
+`prepare_next()`、`finalize_next()`、`select()` 或 `resolve_conflicts()`，再通过
+`GraphBuilder.append_native()` 追加。staging 在 submission 前分配；编译后的 action replay
+steady-state 期间不分配，也不读取 host count；首次执行仍可能编译 kernel 并准备 native
+provider workspace。sequence 编译后不可修改，workspace 可串行复用但不可并发共享。
+
+runtime binding 使用 `worklist.runtime_arguments(name)`。atomic producer Graph 还需传
+`include_capacity=True`，因为 `append_arguments()` 包含 scalar capacity argument。
+`DeviceWorklistGraphArgs.observe(builder, name=...)` 把所有 counter 附加到 Graph terminal
+observation；ticket completion 后可由 `decode_observation(mapping)` 返回
+`DeviceWorklistStatistics`。把匹配的 producer-owned `DeviceDispatchState` 同时交给
+finalize/select/claim node 与 `dispatch_bounded(launch_state=...)`，可删除 Vulkan consumer-side
+preparation dispatch。CPU/CUDA 物理执行保持 masked capacity；实际 route 应查询
+`dynamic_work_capabilities()`。
+
 ### Primitive 算法
 
 这些函数在需要 replay 或复用 workspace 时会返回 workspace。重复调用时显式传入
@@ -936,9 +990,11 @@ lowering 合同会如实区分后端：
 报告 useful、executed、skipped、encoded 与 overflow count；host-known handle 可无同步地
 报告相同信息。
 
-`ti.graph.dynamic_work_capabilities()` 会把 bounded launch、structured iteration termination
-与 ticket observation 分成三个独立维度；尤其不会把 CUDA conditional termination 报成
-exact indirect grid launch。
+`ti.graph.dynamic_work_capabilities()` 返回 schema-v2 report，把 count owner、bounded
+launch、structured iteration termination、worklist 与 ticket observation 分成独立维度。
+worklist 部分报告 append ordering、single-writer ownership、stable/deterministic transform、
+replay allocation/readback policy、counter 与当前 physical launch route；尤其不会把 CUDA
+conditional termination 报成 exact indirect grid launch。
 
 `GraphBuilder.dispatch_ordered_segments()` 消费 i32 offsets ndarray 与同一
 `DeviceExtent`，按 segment position 追加同一个可复用 payload specialization，并在 segment

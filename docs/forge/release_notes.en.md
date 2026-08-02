@@ -1,9 +1,10 @@
 # Taichi Forge Release Notes
 
 This is the canonical version index for Taichi Forge user-visible changes.
-The declared package version is `0.6.0`. Version `0.5.0` remains the previous
-published runtime source boundary, and `0.4.25` is the final public `0.4.x`
-baseline.
+Version `0.6.0` is the latest published release. Current `master` targets
+`0.6.1`; package metadata remains at `0.6.0` until the paired shim/runtime
+release boundary is advanced. Version `0.5.0` remains the previous published
+runtime source boundary, and `0.4.25` is the final public `0.4.x` baseline.
 
 PyPI storage is limited, so some nonessential older distributions have been
 removed. Absence from the current PyPI release list does not mean that a
@@ -15,8 +16,8 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
-| [Unreleased](#unreleased) | development after 0.6.0 | current `master` | device-resident dynamic-workload composition, bounded Graph dispatch, and richer no-submit launch reports |
-| [0.6.0](#060) | current declared source release; publication artifacts may be pending | `c223cb191` | structured Graph control/telemetry and Vulkan indirect dispatch, sparse runtime/linear algebra, driver-only CUDA primitives, managed interoperability/display, and bounded runtime lifetimes |
+| [Unreleased](#unreleased) | 0.6.1 development | current `master` | device-resident dynamic worklists, bounded Graph dispatch, completion-attached telemetry, and richer no-submit launch reports |
+| [0.6.0](#060) | published release | `c223cb191` | structured Graph control/telemetry and Vulkan indirect dispatch, sparse runtime/linear algebra, driver-only CUDA primitives, managed interoperability/display, and bounded runtime lifetimes |
 | [0.1.0](#010) | historical source release; artifact may be removed | `91ad177685` | scikit-build-core migration and Forge distribution rebrand |
 | [0.1.1](#011) | historical source release; artifact may be removed | `c771969781` | `taichi_forge` import rename and install-layout fixes |
 | [0.1.2](#012) | historical source release; artifact may be removed | `fe5844390b` | import fixes and CUDA build option |
@@ -42,6 +43,24 @@ grouped under the behavior they shipped.
 
 ## Unreleased
 
+- Added `DeviceWorklist`, a Graph-independent fixed-capacity front/back
+  container with a device-owned `DeviceExtent`, atomic append, stable
+  selection, and deterministic integer-key conflict resolution. Atomic append
+  uses one slot-reservation atomic per accepted item in the overflow-free path;
+  append order is unspecified, one producer owns each transition, and
+  `commit_next()`/the recorded finalize node must publish counters and extent
+  before consumption. `DeviceWorklistSequence` records reset, finalize,
+  selection, or keyed claim as reusable native Graph actions. Graph arguments
+  can attach generated/accepted/rejected/conflict/winner/overflow counters to a
+  `SubmissionTicket` without steady-state replay host count readback or
+  allocation.
+  Vulkan consumes an exact producer-owned indirect launch packet; CPU/CUDA
+  continue to report masked-capacity execution. Deterministic keyed claim has
+  an intentional workload crossover: at 262,144 active items it measured
+  8.63x/9.05x over a full host round trip on CUDA/Vulkan, while a sparse 1,638
+  item claim was slower on all three backends. The qualification harness keeps
+  those cases separate and observed stable memory across 1,000 CPU and 3,000
+  CUDA/Vulkan replays.
 - Added `DeviceDispatchState` and `DevicePrefixSequence` for fixed-topology,
   device-count-driven pipelines. Vulkan compact can now publish its bounded
   dispatch packet with the output count and pass it to

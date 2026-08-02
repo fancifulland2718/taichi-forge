@@ -513,6 +513,74 @@ on device across every recorded operation; runtime arguments still use the
 normal Graph ndarray names. A sequence becomes immutable after it is appended
 and compiled, and its workspace must not be shared by concurrent sequences.
 
+### Device worklists
+
+#### `ti.algorithms.DeviceWorklist(capacity, dtype=ti.i32, *, workspace=None)`
+
+Owns fixed-capacity front/back scalar storage, paired `DeviceExtent` state, six
+device counters, and reusable primitive workspace. Supported value dtypes are
+`i32/u32/i64/u64/f32/f64`; capacity is a positive Python integer no greater
+than `2^31-1`. The object is tied to the active runtime generation and rejects
+use after `ti.reset()`.
+
+The direct atomic-producer lifecycle is:
+
+1. `prepare_next()` resets back extent and counters on device.
+2. A kernel calls `device_worklist_append()` using
+   `*worklist.append_arguments()`.
+3. `commit_next(dispatch_state=None)` finalizes count/counters and swaps front
+   and back without synchronizing.
+
+`device_worklist_append(values, extent_state, generated, overflow, capacity,
+value)` is a `@ti.func` and returns the reserved slot or `-1` on overflow. The
+overflow-free path performs one reservation atomic per item. The append order
+is unspecified, so consumers that require order must call stable `select()` or
+deterministic `resolve_conflicts()`. One producer owns each transition; the
+worklist does not serialize independent Graph submissions that write it. The
+capacity scalar must equal the physical values capacity; a mismatched Graph
+binding fails closed with sticky overflow before any value write.
+
+`select(flags, *, method="auto", dispatch_state=None)` stably filters the
+current front into the back and commits it. `resolve_conflicts(keys, *,
+priorities=None, ordinals=None, policy="first", method="auto",
+dispatch_state=None)` accepts integer keys and chooses one winner per key.
+Policies are `first`, `claim`, `min_priority`, and `max_priority`; priority
+policies require an i32 priority ndarray. Ties are resolved by ordinal, then
+source index. The returned `DeviceConflictResult` exposes device-owned keys,
+values, priorities, ordinals, extent, and counter arrays. These paths reuse
+the existing CPU/CUDA/Vulkan compact and native stable-sort providers and do
+not silently fall back to a host round trip. Winner reduction assigns one scan
+to each sorted key run; a few exceptionally long runs reduce parallelism and
+should be treated as a separate workload shape when benchmarking.
+
+`statistics()` and `snapshot()` are explicit synchronized observations.
+`execution_report(dispatch=None, target="current")` additionally joins the
+latest counters with a bounded-dispatch snapshot and reports useful, executed,
+skipped, encoded, overflow, and exact-grid state. `memory_report()` reports
+owned front/back, extent, counter, and reusable workspace bytes.
+
+#### `ti.algorithms.DeviceWorklistSequence(args, *, workspace=None)`
+
+Records exactly one transition over the symbolic bundle returned by
+`worklist.graph_args(name)`: `prepare_next()`, `finalize_next()`, `select()`,
+or `resolve_conflicts()`. Append the result with
+`GraphBuilder.append_native()`. Staging is allocated before submission and the
+compiled action neither allocates nor reads the count on host during
+steady-state replay. The first execution may still compile kernels and prepare
+native provider workspace.
+The sequence is immutable after compilation and its workspace is serially
+reusable, not concurrently shareable.
+
+Bind runtime values with `worklist.runtime_arguments(name)`. Atomic-producer
+graphs also pass `include_capacity=True` because `append_arguments()` includes
+a scalar capacity argument. `DeviceWorklistGraphArgs.observe(builder,
+name=...)` attaches all counters to terminal Graph observation;
+`decode_observation(mapping)` returns `DeviceWorklistStatistics` after ticket
+completion. Passing a matching producer-owned `DeviceDispatchState` to a
+finalize/select/claim node and to `dispatch_bounded(launch_state=...)` removes
+Vulkan's consumer-side preparation dispatch. CPU/CUDA keep masked-capacity
+physical execution; inspect `dynamic_work_capabilities()` for the active route.
+
 ### Primitive Algorithms
 
 These functions return a workspace when a workspace object is useful for replay
@@ -1078,9 +1146,13 @@ workspace accounting. `handle.snapshot(extent)` is an explicit synchronization
 and reports useful, executed, skipped, encoded, and overflow counts; the
 host-known handle reports the same data without synchronization.
 
-`ti.graph.dynamic_work_capabilities()` reports bounded launch, structured
-iteration termination, and ticket observation as separate axes; in particular,
-CUDA conditional termination is not reported as exact indirect grid launch.
+`ti.graph.dynamic_work_capabilities()` returns a schema-v2 report that keeps
+the count owner, bounded launch, structured iteration termination, worklist,
+and ticket observation as separate axes. The worklist section reports append
+ordering, single-writer ownership, stable/deterministic transforms, replay
+allocation/readback policy, counters, and the active physical launch route. In
+particular, CUDA conditional termination is not reported as exact indirect
+grid launch.
 
 `GraphBuilder.dispatch_ordered_segments()` consumes an i32 offsets ndarray and
 the same `DeviceExtent`. It appends one reusable payload specialization per

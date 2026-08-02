@@ -1,7 +1,8 @@
 # Taichi Forge 版本更新说明
 
-本文是 Taichi Forge 用户可见更新的唯一版本索引。当前声明的包版本是 `0.6.0`。
-`0.5.0` 保留为上一个已发布 runtime 源码边界，`0.4.25` 是最后一个公开的
+本文是 Taichi Forge 用户可见更新的唯一版本索引。`0.6.0` 已正式发布，当前
+`master` 面向 `0.6.1` 开发；在成对的 shim/runtime 发行边界推进前，包版本元数据仍保持
+`0.6.0`。`0.5.0` 保留为上一个已发布 runtime 源码边界，`0.4.25` 是最后一个公开的
 `0.4.x` 基线。
 
 由于 PyPI 项目容量有限，部分不再重要的旧发行文件已经移除。因此，当前 PyPI 列表中
@@ -12,8 +13,8 @@
 
 | 版本 | 历史状态 | 源码边界 | 主要范围 |
 | --- | --- | --- | --- |
-| [待发布](#unreleased) | 0.6.0 之后的开发版本 | 当前 `master` | 设备端动态工作量组合、有界 Graph dispatch 与更完整的无提交 launch report |
-| [0.6.0](#060) | 当前声明的源码版本；发行文件可能仍待发布 | `c223cb191` | 结构化 Graph 控制/遥测与 Vulkan indirect dispatch、稀疏 runtime/线性代数、driver-only CUDA primitive、受管互操作/显示与 runtime 生命周期有界化 |
+| [待发布](#unreleased) | 0.6.1 开发版本 | 当前 `master` | 设备端动态 worklist、有界 Graph dispatch、completion-attached telemetry 与更完整的无提交 launch report |
+| [0.6.0](#060) | 已正式发布 | `c223cb191` | 结构化 Graph 控制/遥测与 Vulkan indirect dispatch、稀疏 runtime/线性代数、driver-only CUDA primitive、受管互操作/显示与 runtime 生命周期有界化 |
 | [0.1.0](#010) | 历史源码版本；发行文件可能已移除 | `91ad177685` | scikit-build-core 迁移与 Forge 发行包重命名 |
 | [0.1.1](#011) | 历史源码版本；发行文件可能已移除 | `c771969781` | `taichi_forge` import 重命名与安装布局修复 |
 | [0.1.2](#012) | 历史源码版本；发行文件可能已移除 | `fe5844390b` | import 修复与 CUDA 构建选项 |
@@ -39,6 +40,19 @@
 
 ## 待发布 {#unreleased}
 
+- 新增 Graph-independent 的固定容量 `DeviceWorklist`：它持有稳定 front/back storage、
+  device-owned `DeviceExtent`、atomic append、stable selection 和确定性整数 key 冲突消解。
+  无 overflow 时每个接受项只需要一次 slot-reservation atomic；append 顺序不保证，每次
+  transition 只允许一个 producer owner，消费前必须由 `commit_next()` 或已记录 finalize node
+  发布 extent 与计数。`DeviceWorklistSequence` 可把 reset、finalize、selection 或 keyed claim
+  记录成可复用 Graph native action。Graph 参数可把 generated/accepted/rejected/conflict/
+  winner/overflow 计数附着到 `SubmissionTicket`，steady-state replay 不读取 host count、也不
+  重新分配；首次执行仍可能准备 native provider workspace。
+  Vulkan 消费 producer-owned exact indirect packet；CPU/CUDA 继续如实报告 masked-capacity。
+  确定性 keyed claim 存在明确 workload crossover：262,144 个 active item 时相对完整 host
+  round trip 在 CUDA/Vulkan 上分别为 8.63x/9.05x；稀疏 1,638 项在三后端上都更慢。
+  资格基准会分开报告这两类输入，并在 1,000 次 CPU、3,000 次 CUDA/Vulkan replay 中观察到
+  memory 稳定。
 - 新增 `DeviceDispatchState` 与 `DevicePrefixSequence`，用于 fixed-topology、
   device-count-driven pipeline。Vulkan compact 可把 bounded dispatch packet 与输出 count
   一起发布，再交给 `dispatch_bounded(launch_state=...)`，从而删除 consumer preparation

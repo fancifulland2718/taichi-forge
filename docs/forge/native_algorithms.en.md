@@ -26,6 +26,9 @@ capability.
 | `ti.algorithms.device_prefix(values, extent, ...)` | Compose fixed-capacity primitive inputs through a device-resident valid count. |
 | `ti.algorithms.DevicePrefixSequence(capacity)` | Record a fixed-topology valid-prefix pipeline as one Graph native node. |
 | `ti.algorithms.DevicePrefixWorkspace(max_items)` | Reuse staging and child primitive workspaces across a valid-prefix pipeline. |
+| `ti.algorithms.DeviceWorklist(capacity, dtype)` | Own reusable front/back storage, device extent, and transition counters for dynamic work. |
+| `ti.algorithms.device_worklist_append(...)` | Atomically append from Taichi scope without a host count readback. |
+| `ti.algorithms.DeviceWorklistSequence(args)` | Record one worklist transition as a Graph native action. |
 | `ti.algorithms.experimental_compact(values, flags, output, count, ...)` | Filter values by flags and write compacted output. |
 | `ti.algorithms.experimental_run_length_encode(keys, unique_keys, run_lengths, run_count, ...)` | Encode consecutive integer-key runs entirely on device. |
 | `ti.algorithms.experimental_unique(values, output, count, ...)` | Select the first item from every consecutive equal run. |
@@ -228,6 +231,66 @@ than the same chain with an explicit `DeviceExtent.snapshot()` between the two
 operations. These are synchronization-elimination measurements, not portable
 throughput guarantees. The paired, end-synchronized harness is
 `benchmarks/dynamic_workload_bench.py`.
+
+## Device-resident worklists
+
+`DeviceWorklist` adds lifecycle and accounting to the valid-prefix primitives.
+It owns two fixed-capacity scalar ndarrays, two `DeviceExtent` objects, reusable
+primitive workspace, and six device counters. A custom producer appends into
+the back storage and publishes it without observing the count on the host:
+
+```python
+worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)
+
+@ti.kernel
+def produce(values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            extent_state: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            generated: ti.types.ndarray(dtype=ti.i32, ndim=0),
+            overflow: ti.types.ndarray(dtype=ti.i32, ndim=0),
+            limit: ti.i32, requested: ti.i32):
+    for i in range(requested):
+        ti.algorithms.device_worklist_append(
+            values, extent_state, generated, overflow, limit, i
+        )
+
+worklist.prepare_next()
+produce(*worklist.append_arguments(), requested)
+worklist.commit_next()
+```
+
+The overflow-free path performs one atomic slot reservation per item. Atomic
+append order is unspecified. One producer owns a transition; independent
+Graph submissions must be ordered before they write the same worklist. An
+overflow clamps the published count to capacity and remains visible in both
+the `DeviceExtent` and worklist counters. A forged or mismatched Graph capacity
+binding fails closed before writing values. `select(flags)` preserves source
+order. `resolve_conflicts(keys, priorities=..., policy="min_priority")` uses a
+stable native integer-key sort and chooses one winner by key, priority,
+ordinal, then source index. It is deterministic, but its fixed-capacity sort
+and staging make it a dense GPU primitive rather than a universal replacement
+for small host-side arbitration. Winner reduction scans each sorted key run;
+a distribution dominated by one or a few very long runs has lower parallelism
+and should be benchmarked separately.
+
+For Graph replay, create symbolic arguments with `worklist.graph_args(name)`.
+Append separate `DeviceWorklistSequence(args).prepare_next()` and
+`.finalize_next()` nodes around a user producer, or record one `select()` or
+`resolve_conflicts()` node. Graph-owned staging is allocated before submission;
+steady-state replay neither allocates nor reads the count on the host. First
+execution may still compile kernels and prepare native provider workspace.
+`args.observe()` adds all six counters to completion-attached ticket
+observation, while
+`args.decode_observation()` materializes `DeviceWorklistStatistics` after
+completion. `execution_report()` is an explicit synchronized boundary that can
+join these counters with a `dispatch_bounded()` snapshot.
+
+Vulkan can pass `worklist.next_extent.dispatch_state(block_dim)` to both the
+finalize/select/claim operation and `dispatch_bounded(launch_state=...)`, so
+the producer publishes the exact indirect packet and the consumer adds no
+preparation dispatch. CPU and CUDA keep the same source-level composition but
+execute the bounded consumer as masked capacity. Query
+`ti.graph.dynamic_work_capabilities()["worklist"]` instead of inferring exact
+launch behavior from the common API.
 
 ## Consecutive RLE and Unique
 
