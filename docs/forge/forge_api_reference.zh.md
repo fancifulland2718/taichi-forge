@@ -1,10 +1,10 @@
 # Taichi Forge API 参考
 
-> 适用于 **Taichi Forge 0.6.0**。本文只列 Forge-only 的公开 API 入口。
+> 适用于 **Taichi Forge 0.6.0 之后的当前源码**。本文只列 Forge-only 的公开 API 入口。
 > 加在 Taichi 兼容 API 里的新选项，例如 `ti.init(...)` 关键字参数和
 > `@ti.kernel(...)` 关键字选项，仍统一放在 [Forge 选项](forge_options.zh.md)。
-> API 首次公开版本统一见[版本更新说明](release_notes.zh.md)；当前页描述 0.6.0
-> 合同，并不表示所有列出的符号都在该版本才新增。
+> API 首次公开版本统一见[版本更新说明](release_notes.zh.md)；本文包含待发布 API，
+> 已打包版本中是否存在某符号应以版本索引为准。
 
 Taichi Forge 保留 vanilla Taichi 的 DSL 模型，同时增加了编译控制、native
 device primitive、graph replay、显示帧提交、稀疏布局实验能力和诊断 API。
@@ -414,6 +414,30 @@ kernel fallback，scan 与 grouped-reduce 明确拒绝；离散/不可微 family
 - native numeric 输入支持常见 scalar integer / float 类型。
 - field helper fallback 的 dtype 覆盖更窄。
 
+### 设备端有效前缀组合
+
+#### `ti.algorithms.device_prefix(values, extent, *, workspace=None)`
+
+`DevicePrefix` 将固定容量的一维 scalar ndarray 与 `ti.DeviceExtent` 配对。它的
+`compact()`、`scan()`、`reduce()`、`sort()`、`unique()`、
+`run_length_encode()`、`grouped_reduce()` 和 `bucket_builder()` 可以把前一操作写在
+device 上的有效数量直接交给下一操作，不在 Python 中读取：
+
+```python
+workspace = ti.algorithms.DevicePrefixWorkspace(capacity)
+source = ti.algorithms.device_prefix(values, source_extent, workspace=workspace)
+active = source.compact(flags, compacted, compacted_extent)
+active.sort()
+active.scan(scanned)
+```
+
+数组的物理容量保持固定，只有 paired extent count 以下的元素具有语义；provider 可以用
+neutral value 或 sort sentinel 覆盖 inactive suffix。wrapper 复用已有 CPU/CUDA/Vulkan
+primitive provider 与 workspace，并不宣称每个 provider 都只执行 active count。
+支持的 scalar dtype 是 `i32/u32/i64/u64/f32/f64`；各操作仍遵守底层 primitive 更窄的
+dtype 与语义约束。workspace 可以复用但不可并发共享；`clear()` 释放它持有的 staging
+与 child workspace。
+
 ### Primitive 算法
 
 这些函数在需要 replay 或复用 workspace 时会返回 workspace。重复调用时显式传入
@@ -760,6 +784,9 @@ geometry。CPU 不伪造 GPU grid，selected/actual 留空，并报告
 `actual_geometry_kind="cpu_runtime_scheduler"`。Vulkan device-indirect dispatch 报告静态
 selected capacity，但 actual grid/block 留空并标记 `"runtime_indirect"`，因为每次调用由
 device packet 决定且不做 host readback。静态与动态 shared-memory bytes 分开报告。
+`range_mapping` 字段取 `cpu_scheduler`、`grid_stride`、`one_to_one` 或
+`not_applicable`。其中 `one_to_one` 是编译器保证：缩小 indirect grid 会同时减少该 task
+实际访问的逻辑 range index；普通 GPU range kernel 仍采用 grid-stride。
 
 `task_id` 在相同 specialization cache identity、task ordinal/kind、compile config、device
 capabilities 与 backend 下稳定；不承诺跨 backend、跨配置或跨版本稳定。manifest 只读：冷查询
@@ -856,6 +883,59 @@ replacement 后旧 binding 会 fail closed。
 `DeviceExtent` 本身不会改变 kernel grid，也不会自动跳过 command。当前 consumer 可在
 fixed-capacity kernel 中使用有界 count；backend 的 exact-indirect 或 masked-capacity dispatch
 仍是独立 capability，不能从该 state 对象推断。
+
+### 有界与有序分段 Graph dispatch
+
+`GraphBuilder.dispatch_bounded()` 必须且只能接收一种动态 count 来源：运行时由匹配
+`DeviceExtent` 支持的 symbolic `extent=`，或 host-known symbolic i32 `count=`。
+`capacity` 在构图时固定。payload 必须包含选定的 count 参数，并且编译器必须能证明它只有
+一个 scalar range task。device-known payload 的语义主体必须用
+`ti.device_extent_count(extent)` mask：
+
+```python
+handle = builder.dispatch_bounded(
+    consume,
+    extent_arg,
+    input_arg,
+    output_arg,
+    extent=extent_arg,
+    capacity=capacity,
+    block_dim=128,
+)
+graph = builder.compile()
+graph.run({"extent": extent, "input": values, "output": output})
+```
+
+lowering 合同会如实区分后端：
+
+- host-known count 在 enqueue 前钳制到 `[0, capacity]`，并在 CPU、CUDA、Vulkan 上使用
+  实际 scalar range，不涉及 device readback；
+- Vulkan device-known dispatch 在 device 上写入三个 u32 的 packet，并使用 exact
+  `dispatchIndirect` grid。其 payload specialization 采用 `one_to_one` range mapping，
+  因而缩小 grid 会真正减少访问的逻辑 index，count=0 会跳过 payload command；
+- CUDA 与 CPU 使用固定容量 Graph task 加 device-side semantic mask。capability 明确报告
+  `route="masked_capacity"`、`exact_grid=False` 且不支持零 command skip；本 API 不会把
+  CUDA conditional Graph 改名为 exact indirect dispatch。
+
+`ti.graph.bounded_dispatch_capabilities()` 可在构图前报告所选 route。返回的 handle 提供
+不可变 capability 与稳定 workspace accounting。`handle.snapshot(extent)` 是显式同步点，
+报告 useful、executed、skipped、encoded 与 overflow count；host-known handle 可无同步地
+报告相同信息。
+
+`GraphBuilder.dispatch_ordered_segments()` 消费 i32 offsets ndarray 与同一
+`DeviceExtent`，按 segment position 追加同一个可复用 payload specialization，并在 segment
+之间建立显式全局顺序；它不会为每个 color 编译专用 kernel。builder 在 payload 最后注入
+内部五元素 i32 state；Taichi scope 用
+`ti.graph.segmented_dispatch_begin/end/index/count()` 读取，并按 segment count mask local
+index。offset 会先钳制以保证执行安全；显式 snapshot 通过总 `overflow` 和逐 segment
+`invalid_offsets` 报告非法 topology。固定 segment count 必须在 `[1, 4096]`。
+
+这些接口只用于 JIT Graph，AOT export 会明确失败。单个 Vulkan bounded dispatch 的内部
+workspace 为 12 bytes，Vulkan ordered dispatch 为 32 bytes；CPU/CUDA bounded 不使用
+workspace，ordered 使用 20 bytes。exact 物理工作量减少不等于无条件提速：轻量、单独的
+Vulkan payload 可能因 packet preparation 与依赖成本而慢于 fixed Graph。应以完整 workload
+同时对比 fixed Graph 和 direct execution；成对基准脚本为
+`benchmarks/dynamic_workload_bench.py`。
 
 ### `GraphBuilder.dispatch_indirect(kernel, *args, dispatch_packet, template_args=None, label=None)`
 

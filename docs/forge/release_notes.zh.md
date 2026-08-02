@@ -12,7 +12,7 @@
 
 | 版本 | 历史状态 | 源码边界 | 主要范围 |
 | --- | --- | --- | --- |
-| [待发布](#unreleased) | 0.6.0 之后的开发版本 | 当前 `master` | 设备端有界工作量所有权与更完整的无提交 launch report |
+| [待发布](#unreleased) | 0.6.0 之后的开发版本 | 当前 `master` | 设备端动态工作量组合、有界 Graph dispatch 与更完整的无提交 launch report |
 | [0.6.0](#060) | 当前声明的源码版本；发行文件可能仍待发布 | `c223cb191` | 结构化 Graph 控制/遥测与 Vulkan indirect dispatch、稀疏 runtime/线性代数、driver-only CUDA primitive、受管互操作/显示与 runtime 生命周期有界化 |
 | [0.1.0](#010) | 历史源码版本；发行文件可能已移除 | `91ad177685` | scikit-build-core 迁移与 Forge 发行包重命名 |
 | [0.1.1](#011) | 历史源码版本；发行文件可能已移除 | `c771969781` | `taichi_forge` import 重命名与安装布局修复 |
@@ -39,6 +39,22 @@
 
 ## 待发布 {#unreleased}
 
+- 新增 `DevicePrefix` 与 `DevicePrefixWorkspace`，通过共享、device 写入的
+  `DeviceExtent` 组合 compact、scan、reduce、sort、consecutive unique/RLE、grouped
+  reduce 与 bucket building。固定容量 provider 与可复用 workspace 合同保持可见；wrapper
+  消除操作间的 count readback，但不宣称每个 primitive 都按 active count 执行。10% active
+  prefix 的 compact-to-scan 资格测试相对显式 host observation，在 CPU/CUDA/Vulkan 上分别为
+  1.05x/1.32x/1.90x。
+- 新增 `GraphBuilder.dispatch_bounded()`，支持 host-known exact range 与 device-known
+  bounded work；新增 `dispatch_ordered_segments()`，用同一个 payload specialization 执行
+  具有全局顺序的 offset range。Vulkan 使用 device-written indirect packet 与编译器证明的
+  one-to-one range mapping；CUDA/CPU 如实报告 fixed-capacity masked route。capability 与显式
+  snapshot 可观察 overflow、useful/executed/skipped/encoded work、非法 offset、workspace 与
+  zero-command 行为。Vulkan exact 工作量减少不被表述为无条件提速：轻量单独 payload 中，
+  preparation dispatch 的成本可能更高。
+- Task manifest 新增 `range_mapping`，取 `cpu_scheduler`、`grid_stride`、`one_to_one` 或
+  `not_applicable`。普通 GPU kernel 保持 grid-stride；内部 one-to-one specialization 只用于
+  合格的 Vulkan bounded dispatch，并计入 specialization/cache identity。
 - 新增 `DeviceExtent`：以稳定的两槽 device state 保存有界 count 与 sticky overflow。
   device-side publish 无 host readback 地完成钳制；同一 allocation 可由普通 kernel、JIT Graph
   参数和兼容的 count-producing primitive 共享。reset/normalize 保持 device-side，显式

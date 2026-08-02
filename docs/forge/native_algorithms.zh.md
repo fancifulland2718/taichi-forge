@@ -7,7 +7,8 @@
 按模块整理的 Forge-only API 符号清单见 [Forge API 参考](forge_api_reference.zh.md)。
 
 核心 native 算法族首次发布于 Forge 0.4.0；Graph native replay 与 device-side 检查分别
-在 0.4.1 和 0.4.23 进入公开版本。本文说明当前 0.6.0 的可移植性与安全合同；各项
+在 0.4.1 和 0.4.23 进入公开版本。本文说明当前源码（包括 0.6.0 之后待发布 API）的
+可移植性与安全合同；各项
 能力的首次公开版本见[发行说明](release_notes.zh.md)。
 
 ## 公开入口
@@ -18,6 +19,8 @@
 | `ti.algorithms.sort_by_key(keys, values, ...)` | 排序 keys 并同步移动 payload values。 |
 | `ti.algorithms.parallel_sort(keys, values=None)` | vanilla 兼容的 legacy sorter。 |
 | `ti.algorithms.PrefixSumExecutor(n).run(values)` | Prefix sum / scan。 |
+| `ti.algorithms.device_prefix(values, extent, ...)` | 通过 device-resident 有效数量组合固定容量 primitive 输入。 |
+| `ti.algorithms.DevicePrefixWorkspace(max_items)` | 在有效前缀 pipeline 间复用 staging 与 child primitive workspace。 |
 | `ti.algorithms.experimental_compact(values, flags, output, count, ...)` | 按 flags 过滤并写入紧凑输出。 |
 | `ti.algorithms.experimental_run_length_encode(keys, unique_keys, run_lengths, run_count, ...)` | 完全在 device 上编码连续整数 key run。 |
 | `ti.algorithms.experimental_unique(values, output, count, ...)` | 选择每个连续相等 run 的首项。 |
@@ -152,6 +155,34 @@ round-trip 也不适合作为 GPU 热路径默认值。这不是与 CUB 等速�
   CPU native scatter 会在写入前验证，并拒绝 duplicate；需要 duplicate target 时应使用
   `experimental_scatter_add()`。
 - duplicate target 的 floating scatter-add 可能受后端 atomic 顺序影响；只有数值合同允许时才应使用。
+
+## 设备端有效前缀 pipeline
+
+`DevicePrefix` 允许固定容量 primitive 共享一个 device 写入的 `DeviceExtent`，而不在 host
+观察 count：
+
+```python
+workspace = ti.algorithms.DevicePrefixWorkspace(capacity)
+prefix = ti.algorithms.device_prefix(values, extent, workspace=workspace)
+active = prefix.compact(flags, compacted, compacted_extent)
+active.sort()
+active.scan(scanned)
+```
+
+wrapper 当前可组合 stable compact、scan、reduce、stable sort、consecutive unique/RLE、
+grouped sum 与 bucket building。支持一维 scalar `i32/u32/i64/u64/f32/f64` storage，
+同时受各 primitive 更窄合同约束。结果 storage 保持固定物理容量，只有 paired extent 以下的
+prefix 有定义；准备 provider 时可以用 neutral value 或 sentinel 覆盖 inactive suffix。
+
+它是组合层，不是第二套算法 provider。它复用普通 `method="auto"` 选择与
+`DevicePrefixWorkspace`，所以操作之间不需要 count readback、按 count 分配或重建 Graph。
+底层固定容量 provider 仍可能处理 capacity-sized scratch。workspace 可串行复用，但不可用于
+并发 submission。
+
+在当前 Windows 资格机器上，10% active prefix 的 compact-to-scan chain 相对在两个操作间
+显式调用 `DeviceExtent.snapshot()` 的同一 chain，CPU、CUDA、Vulkan 分别快 1.05x、
+1.32x、1.90x。这是消除同步的测量结果，不是跨设备吞吐保证。带执行末端同步的成对基准为
+`benchmarks/dynamic_workload_bench.py`。
 
 ## Consecutive RLE 与 Unique
 

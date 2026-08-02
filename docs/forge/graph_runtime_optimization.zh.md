@@ -6,8 +6,9 @@
 [Forge API 参考](forge_api_reference.zh.md)。
 静态 Field 功能合同单独维护在 [Dense Field Graph](dense_field_graph.zh.md)。
 
-Graph 基础现代化与 native node replay 模型首次发布于 Forge 0.4.1。本文描述当前
-0.6.0 的生命周期、后端 replay、结构化控制、诊断与 Dense Field Graph 合同；各能力的
+Graph 基础现代化与 native node replay 模型首次发布于 Forge 0.4.1。本文描述当前源码
+（包括 0.6.0 之后待发布 API）的生命周期、后端 replay、结构化控制、诊断与 Dense Field
+Graph 合同；各能力的
 首次公开版本见[版本更新说明](release_notes.zh.md)。
 
 ## 范围与不变量
@@ -478,6 +479,26 @@ Graph 最适合 dispatch 拓扑与资源结构能在大量 replay 中保持稳�
 性能对比不应混入编译 warm-up。应先预热 kernel 与 graph，在相同同步边界下测量，报告
 median 与 tail latency，并记录长时间 replay/churn 前后的 GPU memory。必须与 ordinary
 dispatch 校验结果，不能只看吞吐。
+
+`benchmarks/dynamic_workload_bench.py` 将 device-count-driven payload 的 direct
+dispatch、fixed masked Graph 与 `dispatch_bounded()` 做成对比较。当前 Windows 资格机器上，
+1,048,576 个 f32 元素、每个 active 元素 16 个非平凡 payload 操作，并覆盖
+zero/10%/full count，得到下列 median ratio 范围。ratio 大于一表示 bounded Graph 比所列
+基线更快：
+
+| 后端 | direct / bounded | fixed Graph / bounded | device-known route |
+| --- | ---: | ---: | --- |
+| CPU | 1.04x-1.43x | 0.988x-0.990x | masked capacity |
+| CUDA | 7.01x-7.23x | 0.901x-0.975x | masked capacity |
+| Vulkan | 1.53x-1.66x | 0.822x-0.952x | exact indirect、one-to-one range |
+
+Graph route 显著降低了 direct submission 固定开销，但所有被测单 payload 场景中 fixed
+Graph 都快于 bounded dispatch。CPU/CUDA bounded 有意复用 fixed masked-capacity route，
+因此保持接近。Vulkan 确实只访问 packet 指定的逻辑 range，但该 workload 中 preparation
+dispatch 与依赖成本高于所节省的工作量。应基于 device-known/exact-work 合同或完整 chain
+实测收益选用 bounded dispatch，不能仅因 active count 稀疏就替换 fixed Graph。三后端结果
+均正确且 runtime-owned memory 不增长；Vulkan bounded handle 持有一个稳定的 12-byte
+packet。
 
 `benchmarks/graph_structured_control_bench.py` 分别测量 preparation、first run、
 steady wall time、control observation，以及 backend profiler 可见时的 device kernel time。

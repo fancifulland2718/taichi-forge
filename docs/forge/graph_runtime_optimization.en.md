@@ -9,8 +9,9 @@ The static-Field feature contract is maintained separately in
 [Dense Field Graph](dense_field_graph.en.md).
 
 The base Graph modernization and native-node replay model first shipped in
-Forge 0.4.1. This page describes the current 0.6.0 lifetime, backend replay,
-structured-control, diagnostics, and Dense Field Graph contracts. See the
+Forge 0.4.1. This page describes the current source lifetime, backend replay,
+structured-control, diagnostics, and Dense Field Graph contracts, including
+Unreleased APIs after 0.6.0. See the
 [release notes](release_notes.en.md) for the introduction version of each
 capability.
 
@@ -608,6 +609,30 @@ graphs first, synchronize at the same measurement boundaries, report median
 and tail latency, and record GPU memory before and after long replay and churn
 samples. Check results against ordinary dispatch rather than judging only
 throughput.
+
+`benchmarks/dynamic_workload_bench.py` compares a device-count-driven payload
+through direct dispatch, fixed masked Graph, and `dispatch_bounded()`. On the
+current Windows qualification machine, 1,048,576 f32 elements, 16 nontrivial
+payload operations per active element, and zero/10%/full counts produced the
+following median ratio ranges. A ratio above one means bounded Graph was
+faster than the named baseline:
+
+| Backend | direct / bounded | fixed Graph / bounded | Device-known route |
+| --- | ---: | ---: | --- |
+| CPU | 1.04x-1.43x | 0.988x-0.990x | masked capacity |
+| CUDA | 7.01x-7.23x | 0.901x-0.975x | masked capacity |
+| Vulkan | 1.53x-1.66x | 0.822x-0.952x | exact indirect, one-to-one range |
+
+The Graph routes substantially reduced direct submission overhead, but the
+fixed Graph was faster than bounded dispatch in every measured single-payload
+case. CPU/CUDA bounded execution intentionally shares the fixed masked
+capacity route and stays near it. Vulkan visits only the packet-sized logical
+range, but its preparation dispatch and dependency outweighed that saving for
+this workload. Use bounded dispatch for its device-known/exact-work contract
+or when complete-chain measurements justify it; do not substitute it for a
+fixed Graph solely because the active count is sparse. All three runs retained
+correct results and non-growing runtime-owned memory; the Vulkan bounded handle
+owned one stable 12-byte packet.
 
 `benchmarks/graph_structured_control_bench.py` measures preparation, first run,
 steady wall time, control observations, and (where the backend profiler can see

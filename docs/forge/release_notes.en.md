@@ -15,7 +15,7 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
-| [Unreleased](#unreleased) | development after 0.6.0 | current `master` | device-resident bounded-workload ownership and richer no-submit launch reports |
+| [Unreleased](#unreleased) | development after 0.6.0 | current `master` | device-resident dynamic-workload composition, bounded Graph dispatch, and richer no-submit launch reports |
 | [0.6.0](#060) | current declared source release; publication artifacts may be pending | `c223cb191` | structured Graph control/telemetry and Vulkan indirect dispatch, sparse runtime/linear algebra, driver-only CUDA primitives, managed interoperability/display, and bounded runtime lifetimes |
 | [0.1.0](#010) | historical source release; artifact may be removed | `91ad177685` | scikit-build-core migration and Forge distribution rebrand |
 | [0.1.1](#011) | historical source release; artifact may be removed | `c771969781` | `taichi_forge` import rename and install-layout fixes |
@@ -42,6 +42,27 @@ grouped under the behavior they shipped.
 
 ## Unreleased
 
+- Added `DevicePrefix` and `DevicePrefixWorkspace` to compose compact, scan,
+  reduce, sort, consecutive unique/RLE, grouped reduce, and bucket building
+  through a shared device-written `DeviceExtent`. The fixed-capacity provider
+  and reusable workspace contracts remain visible; the wrapper removes count
+  readback between operations without claiming active-count execution for every
+  primitive. A compact-to-scan qualification with a 10% active prefix measured
+  1.05x/1.32x/1.90x over explicit host observation on CPU/CUDA/Vulkan.
+- Added `GraphBuilder.dispatch_bounded()` for host-known exact ranges and
+  device-known bounded work, plus `dispatch_ordered_segments()` for globally
+  ordered offset ranges using one reusable payload specialization. Vulkan uses
+  device-written indirect packets and a compiler-proven one-to-one range
+  mapping; CUDA and CPU report their fixed-capacity masked route honestly.
+  Overflow, useful/executed/skipped/encoded work, invalid offsets, workspace,
+  and zero-command behavior are available through capability and explicit
+  snapshot objects. Exact Vulkan work reduction is not presented as an
+  unconditional speedup: the preparation dispatch can outweigh it for light
+  standalone payloads.
+- Task manifests now report `range_mapping` as `cpu_scheduler`, `grid_stride`,
+  `one_to_one`, or `not_applicable`. Ordinary GPU kernels remain grid-strided;
+  the internal one-to-one specialization is reserved for qualified Vulkan
+  bounded dispatch and participates in specialization/cache identity.
 - Added `DeviceExtent`, a stable two-slot device state for bounded counts and
   sticky overflow. Device-side publish clamps without host readback; the same
   allocation can be shared by ordinary kernels, JIT Graph arguments, and

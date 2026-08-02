@@ -1,12 +1,12 @@
 # Taichi Forge API Reference
 
-> Applies to **Taichi Forge 0.6.0**. This page lists Forge-only public API
+> Applies to the **current Taichi Forge source after 0.6.0**. This page lists Forge-only public API
 > entry points. New options added to Taichi-compatible APIs, such as
 > `ti.init(...)` keywords and `@ti.kernel(...)` keyword options, stay in
 > [Forge options](forge_options.en.md).
 > API introduction versions are indexed separately in
-> [release notes](release_notes.en.md). This page describes the 0.6.0 contract;
-> it does not imply that every listed symbol was introduced in that release.
+> [release notes](release_notes.en.md). This page includes Unreleased APIs; use
+> the release index to determine which symbols exist in a packaged version.
 
 Taichi Forge keeps the vanilla Taichi DSL model, but adds APIs for compile
 control, native device primitives, graph replay, display submission, sparse
@@ -477,6 +477,34 @@ Limits:
 - Native numeric inputs support common scalar integer and float types.
 - Fallback field helper support is narrower.
 
+### Device-resident valid-prefix composition
+
+#### `ti.algorithms.device_prefix(values, extent, *, workspace=None)`
+
+`DevicePrefix` pairs a fixed-capacity scalar 1D ndarray with a
+`ti.DeviceExtent`. Its `compact()`, `scan()`, `reduce()`, `sort()`, `unique()`,
+`run_length_encode()`, `grouped_reduce()`, and `bucket_builder()` methods pass
+the device-written valid count from one operation to the next without reading
+it in Python:
+
+```python
+workspace = ti.algorithms.DevicePrefixWorkspace(capacity)
+source = ti.algorithms.device_prefix(values, source_extent, workspace=workspace)
+active = source.compact(flags, compacted, compacted_extent)
+active.sort()
+active.scan(scanned)
+```
+
+The arrays retain their fixed physical capacity. Only entries below the paired
+extent count are semantically defined; providers may overwrite the inactive
+suffix with neutral values or sort sentinels. The wrapper reuses existing
+CPU/CUDA/Vulkan primitive providers and workspace objects and does not claim
+that every provider executes only the active count. Supported scalar dtypes
+are `i32/u32/i64/u64/f32/f64`; individual operations keep the narrower dtype
+and semantic constraints of the underlying primitive. A workspace is reusable
+but must not be used concurrently. `clear()` releases its Python-owned staging
+and child workspaces.
+
 ### Primitive Algorithms
 
 These functions return a workspace when a workspace object is useful for replay
@@ -867,7 +895,11 @@ unset and reports `actual_geometry_kind="cpu_runtime_scheduler"`. A Vulkan
 device-indirect dispatch reports its static selected capacity but leaves
 actual grid/block unset with `actual_geometry_kind="runtime_indirect"`, since
 the device packet determines each invocation without host readback. Static
-and dynamic shared-memory byte counts are reported separately.
+and dynamic shared-memory byte counts are reported separately. The
+`range_mapping` field is `cpu_scheduler`, `grid_stride`, `one_to_one`, or
+`not_applicable`. In particular, `one_to_one` is a compiler proof that reducing
+an indirect grid also reduces the logical range indices visited by the task;
+ordinary GPU range kernels remain grid-strided.
 
 `task_id` is stable for the same specialization cache identity, task ordinal,
 task kind, compile configuration, device capabilities, and backend. It is not
@@ -985,6 +1017,67 @@ overflow. Bindings fail closed after `ti.reset()` or owner replacement.
 A current consumer may use the bounded count inside a fixed-capacity kernel;
 backend-specific exact-indirect or masked-capacity dispatch remains a separate
 capability and must not be inferred from this state object.
+
+### Bounded and ordered segmented Graph dispatch
+
+`GraphBuilder.dispatch_bounded()` accepts exactly one dynamic-count source:
+a symbolic `extent=` backed at run time by the matching `DeviceExtent`, or a
+host-known symbolic i32 `count=`. `capacity` is fixed when the Graph is built.
+The payload must include the chosen count argument and have exactly one
+provable scalar range task. A device-known payload must mask its semantic body
+with `ti.device_extent_count(extent)`:
+
+```python
+handle = builder.dispatch_bounded(
+    consume,
+    extent_arg,
+    input_arg,
+    output_arg,
+    extent=extent_arg,
+    capacity=capacity,
+    block_dim=128,
+)
+graph = builder.compile()
+graph.run({"extent": extent, "input": values, "output": output})
+```
+
+The lowering contract is backend-honest:
+
+- A host-known count is clamped to `[0, capacity]` before enqueue and uses the
+  actual scalar range on CPU, CUDA, and Vulkan. No device readback is involved.
+- Vulkan device-known dispatch writes a three-u32 packet on device and uses an
+  exact `dispatchIndirect` grid. Its payload specialization uses `one_to_one`
+  range mapping, so a smaller grid really visits fewer logical indices and a
+  zero count skips the payload command.
+- CUDA and CPU use a fixed-capacity Graph task with a device-side semantic
+  mask. Capabilities report `route="masked_capacity"`, `exact_grid=False`, and
+  no zero-command skip; this API does not relabel CUDA conditional Graphs as
+  exact indirect dispatch.
+
+`ti.graph.bounded_dispatch_capabilities()` reports the selected route before a
+Graph is built. The returned handle exposes immutable capabilities and stable
+workspace accounting. `handle.snapshot(extent)` is an explicit synchronization
+and reports useful, executed, skipped, encoded, and overflow counts; the
+host-known handle reports the same data without synchronization.
+
+`GraphBuilder.dispatch_ordered_segments()` consumes an i32 offsets ndarray and
+the same `DeviceExtent`. It appends one reusable payload specialization per
+segment position, with an explicit global order between segments; it does not
+clone a kernel specialization per color. The builder injects an internal
+five-i32 state as the payload's final argument. Read it in Taichi scope with
+`ti.graph.segmented_dispatch_begin/end/index/count()` and mask local indices
+against the segment count. Offsets are clamped for safe execution; an explicit
+snapshot reports invalid topology through `overflow` and per-segment
+`invalid_offsets`. The segment count is fixed in `[1, 4096]`.
+
+These APIs are JIT Graph features. AOT export fails explicitly. Internal
+workspace is 12 bytes for one Vulkan bounded dispatch and 32 bytes for Vulkan
+ordered dispatch; CPU/CUDA bounded dispatch uses no workspace and ordered
+dispatch uses 20 bytes. Exact physical work reduction is not a universal
+speedup: a light standalone Vulkan payload can cost more than a fixed Graph
+because packet preparation and ordering add a dispatch/dependency. Measure the
+complete workload against both fixed Graph and direct execution. The paired
+harness is `benchmarks/dynamic_workload_bench.py`.
 
 ### `GraphBuilder.dispatch_indirect(kernel, *args, dispatch_packet, template_args=None, label=None)`
 

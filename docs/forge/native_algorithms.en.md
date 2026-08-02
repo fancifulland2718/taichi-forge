@@ -10,7 +10,8 @@ For a module-oriented list of all Forge-only API symbols, see
 
 The core native algorithm family first shipped in Forge 0.4.0, with Graph
 native replay and device-side checks following in 0.4.1 and 0.4.23. This page
-documents the current 0.6.0 portability and safety contract. See the
+documents the current source portability and safety contract, including
+Unreleased APIs after 0.6.0. See the
 [release notes](release_notes.en.md) for the introduction version of each
 capability.
 
@@ -22,6 +23,8 @@ capability.
 | `ti.algorithms.sort_by_key(keys, values, ...)` | Sort keys and permute payload values. |
 | `ti.algorithms.parallel_sort(keys, values=None)` | Vanilla-compatible legacy sorter. |
 | `ti.algorithms.PrefixSumExecutor(n).run(values)` | Prefix sum / scan. |
+| `ti.algorithms.device_prefix(values, extent, ...)` | Compose fixed-capacity primitive inputs through a device-resident valid count. |
+| `ti.algorithms.DevicePrefixWorkspace(max_items)` | Reuse staging and child primitive workspaces across a valid-prefix pipeline. |
 | `ti.algorithms.experimental_compact(values, flags, output, count, ...)` | Filter values by flags and write compacted output. |
 | `ti.algorithms.experimental_run_length_encode(keys, unique_keys, run_lengths, run_count, ...)` | Encode consecutive integer-key runs entirely on device. |
 | `ti.algorithms.experimental_unique(values, output, count, ...)` | Select the first item from every consecutive equal run. |
@@ -181,6 +184,39 @@ boundary and are not a cross-device or cross-driver guarantee.
   use `experimental_scatter_add()` when duplicate targets are intended.
 - Floating-point duplicate-target scatter-add can differ by backend atomic
   order. Use it only where that numerical contract is acceptable.
+
+## Device-resident valid-prefix pipelines
+
+`DevicePrefix` lets fixed-capacity primitives share one device-written
+`DeviceExtent` without observing the count on the host:
+
+```python
+workspace = ti.algorithms.DevicePrefixWorkspace(capacity)
+prefix = ti.algorithms.device_prefix(values, extent, workspace=workspace)
+active = prefix.compact(flags, compacted, compacted_extent)
+active.sort()
+active.scan(scanned)
+```
+
+The wrapper currently composes stable compact, scan, reduce, stable sort,
+consecutive unique/RLE, grouped sum, and bucket building. It supports scalar
+1D `i32/u32/i64/u64/f32/f64` storage, subject to each primitive's narrower
+contract. Result storage keeps its fixed physical capacity. Only the prefix
+below the paired extent is defined; preparing a provider may overwrite the
+inactive suffix with a neutral value or sentinel.
+
+This is a composition layer, not a second algorithm provider. It reuses the
+normal `method="auto"` selection and a `DevicePrefixWorkspace`, so no count
+readback, per-count allocation, or Graph rebuild is needed between operations.
+The underlying fixed-capacity provider may still process capacity-sized
+scratch. A workspace may be reused serially but not by concurrent submissions.
+
+On the current Windows qualification machine, a compact-to-scan chain with a
+10% active prefix was 1.05x faster on CPU, 1.32x on CUDA, and 1.90x on Vulkan
+than the same chain with an explicit `DeviceExtent.snapshot()` between the two
+operations. These are synchronization-elimination measurements, not portable
+throughput guarantees. The paired, end-synchronized harness is
+`benchmarks/dynamic_workload_bench.py`.
 
 ## Consecutive RLE and Unique
 
