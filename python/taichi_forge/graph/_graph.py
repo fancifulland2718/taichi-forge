@@ -1,3 +1,4 @@
+import itertools
 import os
 import threading
 import time
@@ -10,7 +11,7 @@ import numpy as np
 
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.aot.utils import produce_injected_args_for_graph
-from taichi_forge.lang import enums, impl, kernel_impl
+from taichi_forge.lang import enums, impl, kernel_impl, ops
 from taichi_forge.lang._ndarray import Ndarray, ScalarNdarray
 from taichi_forge.lang._storage_view import DenseNdarrayView, ndarray_view
 from taichi_forge.lang._texture import Texture
@@ -22,7 +23,8 @@ from taichi_forge.types._argument_descriptor import (
     describe_element_type,
 )
 from taichi_forge.types import ndarray_type
-from taichi_forge.types.primitive_types import i32
+from taichi_forge.types.annotations import template
+from taichi_forge.types.primitive_types import i32, u32
 from taichi_forge.types.texture_type import FORMAT2TY_CH, TY_CH2FORMAT
 from taichi_forge.graph._native import (
     GraphTemporaryBuffer,
@@ -53,6 +55,152 @@ from taichi_forge.graph._submission import (
 )
 
 ArgKind = _ti_core.ArgKind
+
+
+@kernel_impl.kernel
+def _prepare_bounded_dispatch_packet(
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    packet: ndarray_type.ndarray(dtype=u32, ndim=1),
+    capacity: i32,
+    block_dim: i32,
+):
+    # Keep the extent load inside the range task.  A scalar statement before
+    # the loop would introduce an unnecessary serial offload.
+    for _ in range(1):
+        raw_count = extent_state[0]
+        count = raw_count
+        if count < 0:
+            count = 0
+            extent_state[1] = 1
+        elif count > capacity:
+            count = capacity
+            extent_state[1] = 1
+        extent_state[0] = count
+        packet[0] = ops.cast((count + block_dim - 1) // block_dim, u32)
+        packet[1] = 1
+        packet[2] = 1
+
+
+@kernel_impl.func
+def _prepare_ordered_segment_state_body(
+    offsets: ndarray_type.ndarray(dtype=i32, ndim=1),
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    segment_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    segment_index: i32,
+    segment_count: i32,
+    capacity: i32,
+):
+    if segment_index == 0:
+        segment_state[4] = 0
+    raw_count = extent_state[0]
+    count = raw_count
+    if count < 0:
+        count = 0
+        extent_state[1] = 1
+    elif count > capacity:
+        count = capacity
+        extent_state[1] = 1
+    extent_state[0] = count
+
+    raw_begin = offsets[segment_index]
+    raw_end = offsets[segment_index + 1]
+    begin = raw_begin
+    end = raw_end
+    invalid = raw_begin < 0 or raw_end < raw_begin or raw_end > count
+    if segment_index == 0 and raw_begin != 0:
+        invalid = True
+    if segment_index + 1 == segment_count and raw_end != count:
+        invalid = True
+    if begin < 0:
+        begin = 0
+    if begin > count:
+        begin = count
+    if end < begin:
+        end = begin
+    if end > count:
+        end = count
+    if invalid:
+        segment_state[4] = 1
+
+    segment_state[0] = begin
+    segment_state[1] = end
+    segment_state[2] = segment_index
+    segment_state[3] = segment_count
+
+
+@kernel_impl.kernel
+def _prepare_ordered_segment_dispatch(
+    offsets: ndarray_type.ndarray(dtype=i32, ndim=1),
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    packet: ndarray_type.ndarray(dtype=u32, ndim=1),
+    segment_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    segment_index: i32,
+    segment_count: i32,
+    capacity: i32,
+    block_dim: i32,
+):
+    for _ in range(1):
+        _prepare_ordered_segment_state_body(
+            offsets,
+            extent_state,
+            segment_state,
+            segment_index,
+            segment_count,
+            capacity,
+        )
+        begin = segment_state[0]
+        end = segment_state[1]
+        packet[0] = ops.cast((end - begin + block_dim - 1) // block_dim, u32)
+        packet[1] = 1
+        packet[2] = 1
+
+
+@kernel_impl.kernel
+def _prepare_ordered_segment_state(
+    offsets: ndarray_type.ndarray(dtype=i32, ndim=1),
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    segment_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    segment_index: i32,
+    segment_count: i32,
+    capacity: i32,
+):
+    for _ in range(1):
+        _prepare_ordered_segment_state_body(
+            offsets,
+            extent_state,
+            segment_state,
+            segment_index,
+            segment_count,
+            capacity,
+        )
+
+
+@kernel_impl.func
+def segmented_dispatch_begin(state: template()):
+    """Return the current ordered segment's inclusive begin index."""
+
+    return state[0]
+
+
+@kernel_impl.func
+def segmented_dispatch_end(state: template()):
+    """Return the current ordered segment's exclusive end index."""
+
+    return state[1]
+
+
+@kernel_impl.func
+def segmented_dispatch_index(state: template()):
+    """Return the current ordered segment index."""
+
+    return state[2]
+
+
+@kernel_impl.func
+def segmented_dispatch_count(state: template()):
+    """Return the current ordered segment's bounded item count."""
+
+    return state[1] - state[0]
 
 
 def _new_runtime_graph_builder():
@@ -993,6 +1141,398 @@ class GraphExecutionReport:
 
 
 @dataclass(frozen=True)
+class BoundedDispatchCapabilities:
+    """Backend-honest lowering guarantees for one bounded dispatch."""
+
+    schema_version: int
+    backend: str
+    route: str
+    device_known_count: bool
+    no_host_readback: bool
+    exact_grid: bool
+    zero_count_command_skip: bool
+    ordered_segments: bool
+    global_segment_order: bool
+    capacity: int
+    block_dim: Optional[int]
+    reason: str
+
+
+@dataclass(frozen=True)
+class BoundedDispatchSnapshot:
+    """Explicit host observation of one bounded dispatch."""
+
+    capabilities: BoundedDispatchCapabilities
+    useful_count: int
+    capacity: int
+    executed_count: int
+    skipped_count: int
+    encoded_lanes: int
+    overflow: bool
+
+
+@dataclass(frozen=True)
+class OrderedSegmentDispatchSnapshot:
+    """One ordered segment from an opt-in dispatch observation."""
+
+    segment: int
+    begin: int
+    end: int
+    useful_count: int
+    executed_count: int
+    skipped_count: int
+    encoded_lanes: int
+    invalid_offsets: bool
+
+
+@dataclass(frozen=True)
+class OrderedSegmentedDispatchSnapshot:
+    """Explicit host observation of an ordered segmented dispatch."""
+
+    capabilities: BoundedDispatchCapabilities
+    useful_count: int
+    capacity: int
+    executed_count: int
+    skipped_count: int
+    encoded_lanes: int
+    overflow: bool
+    segments: Tuple[OrderedSegmentDispatchSnapshot, ...]
+
+
+_bounded_dispatch_ids = itertools.count(1)
+
+
+def _bounded_route(backend, ordered):
+    if backend == "vulkan":
+        return BoundedDispatchCapabilities(
+            schema_version=1,
+            backend=backend,
+            route="exact_indirect",
+            device_known_count=True,
+            no_host_readback=True,
+            exact_grid=True,
+            zero_count_command_skip=True,
+            ordered_segments=ordered,
+            global_segment_order=ordered,
+            capacity=0,
+            block_dim=None,
+            reason="Vulkan dispatchIndirect consumes a device-written grid packet",
+        )
+    if backend == "cuda":
+        reason = (
+            "CUDA uses a fixed-capacity Graph node and masks payload work from "
+            "the device extent; this is not exact indirect dispatch"
+        )
+    else:
+        reason = (
+            "CPU uses the cached fixed-capacity range task and masks payload "
+            "work from the extent"
+        )
+    return BoundedDispatchCapabilities(
+        schema_version=1,
+        backend=backend,
+        route="masked_capacity",
+        device_known_count=True,
+        no_host_readback=True,
+        exact_grid=False,
+        zero_count_command_skip=False,
+        ordered_segments=ordered,
+        global_segment_order=ordered,
+        capacity=0,
+        block_dim=None,
+        reason=reason,
+    )
+
+
+class BoundedDispatchHandle:
+    """Definition and opt-in observation handle returned by GraphBuilder."""
+
+    _SEGMENT_STATE_SIZE = 5
+
+    def __init__(
+        self,
+        *,
+        extent_name,
+        capacity,
+        block_dim,
+        backend,
+        ordered=False,
+        offsets_name=None,
+        segment_count=0,
+        packet=None,
+        segment_state=None,
+    ):
+        self.extent_name = extent_name
+        self.offsets_name = offsets_name
+        self.capacity = int(capacity)
+        self.block_dim = None if block_dim is None else int(block_dim)
+        self.segment_count = int(segment_count)
+        self._ordered = bool(ordered)
+        self._packet = packet
+        self._segment_state = segment_state
+        self._runtime_generation = int(impl.runtime_generation())
+        self._runtime_program = impl.get_runtime().prog
+        base = _bounded_route(backend, self._ordered)
+        self._capabilities = replace(
+            base, capacity=self.capacity, block_dim=self.block_dim
+        )
+
+    @property
+    def capabilities(self):
+        return self._capabilities
+
+    @property
+    def workspace_bytes(self):
+        return (0 if self._packet is None else 3 * 4) + (
+            0
+            if self._segment_state is None
+            else self._SEGMENT_STATE_SIZE * 4
+        )
+
+    @property
+    def workspace_allocation_count(self):
+        return int(self._packet is not None) + int(self._segment_state is not None)
+
+    def validate_graph_lifetime(self):
+        if (
+            impl.runtime_generation() != self._runtime_generation
+            or impl.get_runtime().prog is not self._runtime_program
+        ):
+            raise TaichiRuntimeError(
+                "Bounded dispatch belongs to a stale Taichi runtime"
+            )
+        for storage in (self._packet, self._segment_state):
+            if storage is not None and storage.arr is None:
+                raise TaichiRuntimeError(
+                    "Bounded dispatch internal storage is no longer available"
+                )
+
+    def _validate_extent_value(self, value):
+        from taichi_forge.lang.device_extent import DeviceExtent
+
+        if isinstance(value, DeviceExtent):
+            value._validate_current()
+            if value.capacity != self.capacity:
+                raise TaichiRuntimeError(
+                    "Bounded dispatch DeviceExtent capacity does not match "
+                    f"the compiled capacity {self.capacity}"
+                )
+            return value.state
+        raise TaichiRuntimeError(
+            "Bounded dispatch extent must be the DeviceExtent whose capacity "
+            "was used to compile this Graph"
+        )
+
+    def validate_graph_bindings(self, args):
+        self.validate_graph_lifetime()
+        self._validate_extent_value(args[self.extent_name])
+        if not self._ordered:
+            return
+        offsets = args[self.offsets_name]
+        if not isinstance(offsets, ScalarNdarray):
+            raise TaichiRuntimeError(
+                "Ordered segmented dispatch offsets must be a scalar i32 ndarray"
+            )
+        if offsets.dtype != i32 or tuple(offsets.shape) != (
+            self.segment_count + 1,
+        ):
+            raise TaichiRuntimeError(
+                "Ordered segmented dispatch offsets must contain "
+                f"{self.segment_count + 1} i32 values"
+            )
+
+    def bind_graph_arguments(self, args):
+        value = args[self.extent_name]
+        normalized = self._validate_extent_value(value)
+        if normalized is value:
+            return {}
+        return {self.extent_name: normalized}
+
+    def _execution_counts(self, useful):
+        if self._capabilities.exact_grid:
+            encoded = (
+                0
+                if useful == 0
+                else ((useful + self.block_dim - 1) // self.block_dim)
+                * self.block_dim
+            )
+            executed = min(self.capacity, encoded)
+        else:
+            encoded = self.capacity
+            executed = self.capacity
+        return executed, encoded
+
+    def snapshot(self, extent, offsets=None):
+        """Synchronize and materialize useful/executed/masked work."""
+
+        from taichi_forge.lang.device_extent import DeviceExtent
+
+        if not isinstance(extent, DeviceExtent):
+            raise TypeError("BoundedDispatchHandle.snapshot() expects DeviceExtent")
+        self._validate_extent_value(extent)
+        extent_snapshot = extent.snapshot()
+        if not self._ordered:
+            if offsets is not None:
+                raise TypeError("Non-segmented bounded dispatch has no offsets")
+            executed, encoded = self._execution_counts(extent_snapshot.count)
+            return BoundedDispatchSnapshot(
+                capabilities=self._capabilities,
+                useful_count=extent_snapshot.count,
+                capacity=self.capacity,
+                executed_count=executed,
+                skipped_count=max(0, executed - extent_snapshot.count),
+                encoded_lanes=encoded,
+                overflow=extent_snapshot.overflow,
+            )
+
+        if not isinstance(offsets, ScalarNdarray):
+            raise TypeError(
+                "Ordered segmented dispatch snapshot requires its offsets ndarray"
+            )
+        self.validate_graph_bindings(
+            {self.extent_name: extent, self.offsets_name: offsets}
+        )
+        values = offsets.to_numpy().astype(np.int64, copy=False)
+        active = extent_snapshot.count
+        segments = []
+        total_executed = 0
+        total_encoded = 0
+        invalid_any = False
+        for segment in range(self.segment_count):
+            raw_begin = int(values[segment])
+            raw_end = int(values[segment + 1])
+            invalid = raw_begin < 0 or raw_end < raw_begin or raw_end > active
+            if segment == 0 and raw_begin != 0:
+                invalid = True
+            if segment + 1 == self.segment_count and raw_end != active:
+                invalid = True
+            begin = min(max(raw_begin, 0), active)
+            end = min(max(raw_end, begin), active)
+            useful = end - begin
+            executed, encoded = self._execution_counts(useful)
+            segments.append(
+                OrderedSegmentDispatchSnapshot(
+                    segment=segment,
+                    begin=begin,
+                    end=end,
+                    useful_count=useful,
+                    executed_count=executed,
+                    skipped_count=max(0, executed - useful),
+                    encoded_lanes=encoded,
+                    invalid_offsets=invalid,
+                )
+            )
+            total_executed += executed
+            total_encoded += encoded
+            invalid_any = invalid_any or invalid
+        total_useful = sum(segment.useful_count for segment in segments)
+        return OrderedSegmentedDispatchSnapshot(
+            capabilities=self._capabilities,
+            useful_count=total_useful,
+            capacity=self.capacity,
+            executed_count=total_executed,
+            skipped_count=max(0, total_executed - total_useful),
+            encoded_lanes=total_encoded,
+            overflow=extent_snapshot.overflow or invalid_any,
+            segments=tuple(segments),
+        )
+
+
+class HostBoundedDispatchHandle:
+    """Host-known exact range binding with capacity clamping."""
+
+    def __init__(self, *, count_name, capacity, block_dim, backend):
+        self.count_name = count_name
+        self.capacity = int(capacity)
+        self.block_dim = None if block_dim is None else int(block_dim)
+        self._runtime_generation = int(impl.runtime_generation())
+        self._runtime_program = impl.get_runtime().prog
+        self._capabilities = BoundedDispatchCapabilities(
+            schema_version=1,
+            backend=backend,
+            route="exact_host_range",
+            device_known_count=False,
+            no_host_readback=True,
+            exact_grid=True,
+            zero_count_command_skip=False,
+            ordered_segments=False,
+            global_segment_order=False,
+            capacity=self.capacity,
+            block_dim=self.block_dim,
+            reason=(
+                "the compiler proved that the payload range is driven by the "
+                "host scalar count argument; the backend may retain scalar-range "
+                "setup work when the bounded count is zero"
+            ),
+        )
+
+    @property
+    def capabilities(self):
+        return self._capabilities
+
+    @property
+    def workspace_bytes(self):
+        return 0
+
+    @property
+    def workspace_allocation_count(self):
+        return 0
+
+    def validate_graph_lifetime(self):
+        if (
+            impl.runtime_generation() != self._runtime_generation
+            or impl.get_runtime().prog is not self._runtime_program
+        ):
+            raise TaichiRuntimeError(
+                "Host bounded dispatch belongs to a stale Taichi runtime"
+            )
+
+    @staticmethod
+    def _host_count(value):
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+            raise TaichiRuntimeError(
+                "host-known bounded dispatch count must be an integer"
+            )
+        value = int(value)
+        if not -0x80000000 <= value <= 0x7FFFFFFF:
+            raise TaichiRuntimeError(
+                "host-known bounded dispatch count must fit signed i32"
+            )
+        return value
+
+    def validate_graph_bindings(self, args):
+        self.validate_graph_lifetime()
+        self._host_count(args[self.count_name])
+
+    def bind_graph_arguments(self, args):
+        raw = self._host_count(args[self.count_name])
+        bounded = min(max(raw, 0), self.capacity)
+        if bounded == raw:
+            return {}
+        return {self.count_name: bounded}
+
+    def snapshot(self, count):
+        """Return a host-only report; no synchronization is required."""
+
+        raw = self._host_count(count)
+        useful = min(max(raw, 0), self.capacity)
+        encoded = useful
+        if self.block_dim is not None and useful:
+            encoded = (
+                (useful + self.block_dim - 1) // self.block_dim
+            ) * self.block_dim
+        return BoundedDispatchSnapshot(
+            capabilities=self._capabilities,
+            useful_count=useful,
+            capacity=self.capacity,
+            executed_count=useful,
+            skipped_count=0,
+            encoded_lanes=encoded,
+            overflow=raw != useful,
+        )
+
+
+@dataclass(frozen=True)
 class GraphWhileReport:
     """Last execution of one structured Graph while region."""
 
@@ -1377,6 +1917,42 @@ def _cuda_structured_control_lowering(capabilities=None):
     if masked:
         return "cuda_masked_bounded_graph"
     return None
+
+
+def bounded_dispatch_capabilities():
+    """Return the active backend's device-known bounded dispatch contract."""
+
+    backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
+    if backend not in ("cpu", "cuda", "vulkan"):
+        return {
+            "schema_version": 1,
+            "backend": backend,
+            "available": False,
+            "route": "unsupported",
+            "host_known_route": "unsupported",
+            "device_known_count": False,
+            "no_host_readback": False,
+            "exact_grid": False,
+            "zero_count_command_skip": False,
+            "ordered_segments": False,
+            "global_segment_order": False,
+            "reason": "backend is not qualified for bounded dispatch",
+        }
+    capabilities = _bounded_route(backend, True)
+    return {
+        "schema_version": capabilities.schema_version,
+        "backend": backend,
+        "available": True,
+        "route": capabilities.route,
+        "host_known_route": "exact_host_range",
+        "device_known_count": capabilities.device_known_count,
+        "no_host_readback": capabilities.no_host_readback,
+        "exact_grid": capabilities.exact_grid,
+        "zero_count_command_skip": capabilities.zero_count_command_skip,
+        "ordered_segments": capabilities.ordered_segments,
+        "global_segment_order": capabilities.global_segment_order,
+        "reason": capabilities.reason,
+    }
 
 
 def structured_control_capabilities():
@@ -6175,6 +6751,7 @@ class _AOTGraphBuilderPlan:
         self._items = []
         self._runtime_arg_names = set()
         self._has_indirect_dispatch = False
+        self._has_internal_fixed_bindings = False
 
     def dispatch(self, kernel_cpp, args, label=""):
         runtime_arg_names = frozenset(_runtime_arg_names(args))
@@ -6212,6 +6789,9 @@ class _AOTGraphBuilderPlan:
         those adapters without accepting genuinely unknown arguments.
         """
         return frozenset(self._runtime_arg_names)
+
+    def mark_internal_fixed_bindings(self):
+        self._has_internal_fixed_bindings = True
 
     def runtime_arg_names_since(self, cursor):
         if cursor < 0 or cursor > len(self._items):
@@ -6290,9 +6870,15 @@ class _AOTGraphBuilderPlan:
         snapshot._items = tuple(items)
         snapshot._runtime_arg_names = set(self._runtime_arg_names)
         snapshot._has_indirect_dispatch = self._has_indirect_dispatch
+        snapshot._has_internal_fixed_bindings = self._has_internal_fixed_bindings
         return snapshot
 
     def compile(self):
+        if self._has_internal_fixed_bindings:
+            raise TaichiRuntimeError(
+                "Graph bounded dispatch uses JIT-only internal fixed bindings "
+                "and cannot be added to an AOT module"
+            )
         if self._has_indirect_dispatch:
             raise TaichiRuntimeError(
                 "Graph indirect dispatch is currently JIT-only and cannot "
@@ -6318,7 +6904,9 @@ class _AOTGraphBuilderPlan:
         return len(self._items)
 
 
-def gen_cpp_kernel(kernel_fn, args, *, template_args=None):
+def gen_cpp_kernel(
+    kernel_fn, args, *, template_args=None, task_launch_policy=None
+):
     kernel = (
         kernel_fn
         if isinstance(kernel_fn, kernel_impl.Kernel)
@@ -6333,8 +6921,72 @@ def gen_cpp_kernel(kernel_fn, args, *, template_args=None):
     injected_args = produce_injected_args_for_graph(
         kernel, symbolic_args=args, template_args=template_args
     )
-    key = kernel.ensure_compiled(*injected_args)
+    if task_launch_policy is None or task_launch_policy.mode == "auto":
+        key = kernel.ensure_compiled(*injected_args)
+    else:
+        key = kernel._ensure_compiled_with_task_launch_policy(
+            task_launch_policy, *injected_args
+        )
+        kernel._validate_task_launch_policy_specialization(
+            key, task_launch_policy
+        )
     return kernel.compiled_kernels[key]
+
+
+def _require_bounded_symbolic_ndarray(value, role, dtype):
+    if getattr(value, "tag", None) != ArgKind.NDARRAY:
+        raise TaichiRuntimeError(
+            f"Graph bounded dispatch {role} must be a symbolic ndarray argument"
+        )
+    if value.dtype() != dtype or value.field_dim != 1 or value.element_shape:
+        raise TaichiRuntimeError(
+            f"Graph bounded dispatch {role} must be a one-dimensional scalar "
+            f"{dtype} ndarray argument"
+        )
+    return value
+
+
+def _bounded_kernel_geometry(kernel_cpp, backend, *, allow_range_setup=False):
+    raw = tuple(impl.get_runtime().prog._kernel_task_manifest(kernel_cpp))
+    range_tasks = tuple(
+        item for item in raw if item["task_type"] == "range_for"
+    )
+    setup_tasks = tuple(item for item in raw if item["task_type"] == "serial")
+    valid_setup = allow_range_setup and len(setup_tasks) == len(raw) - 1
+    if len(range_tasks) != 1 or not (len(raw) == 1 or valid_setup):
+        expected = (
+            "range task with only scalar-range setup offloads"
+            if allow_range_setup
+            else "range task without serial offloads"
+        )
+        raise TaichiRuntimeError(
+            "Graph bounded dispatch payload must compile to one parallel "
+            + expected
+            + "; got "
+            + ", ".join(str(item["task_type"]) for item in raw)
+        )
+    selected = range_tasks[0]["selected_block_size"]
+    if backend in ("cuda", "vulkan"):
+        if selected is None or int(selected) <= 0:
+            raise TaichiRuntimeError(
+                "Graph bounded dispatch backend did not expose a selected block size"
+            )
+        return int(selected)
+    return None
+
+
+def _verify_bounded_host_range(kernel_cpp, args, count_arg):
+    probe = _ti_core.GraphBuilder()
+    probe.dispatch(kernel_cpp, args, "")
+    compiled = probe.compile()
+    fallback = _dispatch_ir_node(kernel_cpp, args)
+    nodes = _compiled_dispatch_ir_nodes(compiled, (fallback,))
+    expected = f"scalar_argument:{count_arg.name}"
+    if len(nodes) != 1 or nodes[0].iteration_domain != expected:
+        raise TaichiRuntimeError(
+            "host-known bounded dispatch requires the payload's sole range "
+            f"domain to be the scalar argument {count_arg.name!r}"
+        )
 
 
 def flatten_args(args):
@@ -6857,6 +7509,8 @@ class GraphBuilder:
         self._nodes = []
         self._pending_ir_nodes = []
         self._observation_names = set()
+        self._runtime_graph_fixed_args = {}
+        self._runtime_graph_lifetime_leases = []
 
     def dispatch(self, kernel_fn, *args, template_args=None, label=None):
         label = _normalize_dispatch_label(label)
@@ -6875,6 +7529,13 @@ class GraphBuilder:
         label = _normalize_dispatch_label(label)
         kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
         unzipped_args = flatten_args(args)
+        self._record_indirect_dispatch(
+            kernel_cpp, unzipped_args, dispatch_packet, label
+        )
+
+    def _record_indirect_dispatch(
+        self, kernel_cpp, unzipped_args, dispatch_packet, label=""
+    ):
         self._aot_graph_plan.dispatch_indirect(
             kernel_cpp, unzipped_args, dispatch_packet, label
         )
@@ -6892,6 +7553,303 @@ class GraphBuilder:
             )
         )
         self._dispatch_count += 1
+
+    def _bind_internal_runtime_arg(self, symbolic, value):
+        name = symbolic.name
+        previous = self._runtime_graph_fixed_args.get(name)
+        if previous is not None and previous is not value and not (
+            isinstance(previous, (int, float))
+            and isinstance(value, (int, float))
+            and previous == value
+        ):
+            raise TaichiRuntimeError(
+                f"Graph internal fixed binding {name!r} is already defined"
+            )
+        self._runtime_graph_fixed_args[name] = value
+        self._runtime_graph_arg_names.add(name)
+        self._aot_graph_plan.mark_internal_fixed_bindings()
+
+    def _retain_runtime_graph_lease(self, lease):
+        if all(
+            existing is not lease
+            for existing in self._runtime_graph_lifetime_leases
+        ):
+            self._runtime_graph_lifetime_leases.append(lease)
+        self._aot_graph_plan.mark_internal_fixed_bindings()
+
+    @staticmethod
+    def _bounded_launch_policy(block_dim, block_mode, backend):
+        from taichi_forge.lang.task_launch import TaskLaunchPolicy
+
+        if block_mode not in ("hint", "require"):
+            raise ValueError("bounded dispatch block_mode must be hint or require")
+        if block_dim is None or backend == "cpu":
+            return TaskLaunchPolicy.auto()
+        return TaskLaunchPolicy.block(block_dim, mode=block_mode)
+
+    def dispatch_bounded(
+        self,
+        kernel_fn,
+        *args,
+        extent=None,
+        count=None,
+        capacity,
+        block_dim=None,
+        block_mode="require",
+        template_args=None,
+        label=None,
+    ):
+        """Append one device-count-driven bounded payload dispatch.
+
+        Pass either a device ``extent`` ndarray or a host scalar ``count``.
+        The device payload must mask its semantic body with
+        ``device_extent_count(extent)``. Vulkan additionally trims that grid
+        through ``dispatchIndirect``; CUDA and CPU report ``masked_capacity``.
+        A host count is accepted only when compiler metadata proves it is the
+        payload's sole range domain, and is clamped before launch.
+        """
+
+        if isinstance(capacity, bool) or not isinstance(capacity, int):
+            raise TypeError("bounded dispatch capacity must be an integer")
+        if capacity <= 0 or capacity > 0x7FFFFFFF:
+            raise ValueError("bounded dispatch capacity must be in [1, 2^31-1]")
+        if (extent is None) == (count is None):
+            raise ValueError(
+                "bounded dispatch requires exactly one of extent or count"
+            )
+        unzipped_args = flatten_args(args)
+        backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
+        if backend not in ("cpu", "cuda", "vulkan"):
+            raise TaichiRuntimeError(
+                f"bounded dispatch is unavailable on backend {backend}"
+            )
+        policy = self._bounded_launch_policy(block_dim, block_mode, backend)
+        kernel_cpp = gen_cpp_kernel(
+            kernel_fn,
+            args,
+            template_args=template_args,
+            task_launch_policy=policy,
+        )
+        label = _normalize_dispatch_label(label)
+
+        if count is not None:
+            if (
+                getattr(count, "tag", None) != ArgKind.SCALAR
+                or count.dtype() != i32
+            ):
+                raise TaichiRuntimeError(
+                    "host-known bounded dispatch count must be a symbolic i32 scalar"
+                )
+            if count.name not in _runtime_arg_names(unzipped_args):
+                raise TaichiRuntimeError(
+                    "bounded dispatch payload arguments must include the count argument"
+                )
+            selected_block = _bounded_kernel_geometry(
+                kernel_cpp, backend, allow_range_setup=True
+            )
+            _verify_bounded_host_range(kernel_cpp, unzipped_args, count)
+            self._record_dispatch(kernel_cpp, unzipped_args, label)
+            handle = HostBoundedDispatchHandle(
+                count_name=count.name,
+                capacity=capacity,
+                block_dim=selected_block,
+                backend=backend,
+            )
+            self._retain_runtime_graph_lease(handle)
+            return handle
+
+        selected_block = _bounded_kernel_geometry(kernel_cpp, backend)
+        extent = _require_bounded_symbolic_ndarray(extent, "extent", i32)
+        if extent.name not in _runtime_arg_names(unzipped_args):
+            raise TaichiRuntimeError(
+                "bounded dispatch payload arguments must include the extent argument"
+            )
+        packet = None
+        if backend == "vulkan":
+            unique = next(_bounded_dispatch_ids)
+            packet = ScalarNdarray(u32, (3,))
+            packet_arg = Arg(
+                ArgKind.NDARRAY,
+                f"__ti_bounded_packet_{unique}",
+                u32,
+                ndim=1,
+            )
+            capacity_arg = Arg(
+                ArgKind.SCALAR, f"__ti_bounded_capacity_{unique}", i32
+            )
+            block_arg = Arg(
+                ArgKind.SCALAR, f"__ti_bounded_block_{unique}", i32
+            )
+            prepare_args = (extent, packet_arg, capacity_arg, block_arg)
+            prepare_cpp = gen_cpp_kernel(
+                _prepare_bounded_dispatch_packet, prepare_args
+            )
+            self._record_dispatch(prepare_cpp, list(prepare_args))
+            self._record_indirect_dispatch(
+                kernel_cpp, unzipped_args, packet_arg, label
+            )
+            self._bind_internal_runtime_arg(packet_arg, packet)
+            self._bind_internal_runtime_arg(capacity_arg, capacity)
+            self._bind_internal_runtime_arg(block_arg, selected_block)
+        else:
+            self._record_dispatch(kernel_cpp, unzipped_args, label)
+
+        handle = BoundedDispatchHandle(
+            extent_name=extent.name,
+            capacity=capacity,
+            block_dim=selected_block,
+            backend=backend,
+            packet=packet,
+        )
+        self._retain_runtime_graph_lease(handle)
+        return handle
+
+    def dispatch_ordered_segments(
+        self,
+        kernel_fn,
+        *args,
+        offsets,
+        extent,
+        capacity,
+        segment_count,
+        block_dim=None,
+        block_mode="require",
+        template_args=None,
+        label=None,
+    ):
+        """Append globally ordered ranges using one reusable payload kernel.
+
+        ``segment_state`` is injected as the payload kernel's final ndarray
+        argument. Read it with ``segmented_dispatch_begin/end/index/count``
+        and mask local indices against ``segmented_dispatch_count``. No offset
+        or count is read back while the Graph executes.
+        """
+
+        if isinstance(capacity, bool) or not isinstance(capacity, int):
+            raise TypeError("ordered dispatch capacity must be an integer")
+        if capacity <= 0 or capacity > 0x7FFFFFFF:
+            raise ValueError("ordered dispatch capacity must be in [1, 2^31-1]")
+        if isinstance(segment_count, bool) or not isinstance(segment_count, int):
+            raise TypeError("ordered dispatch segment_count must be an integer")
+        if not 1 <= segment_count <= 4096:
+            raise ValueError("ordered dispatch segment_count must be in [1, 4096]")
+        offsets = _require_bounded_symbolic_ndarray(offsets, "offsets", i32)
+        extent = _require_bounded_symbolic_ndarray(extent, "extent", i32)
+        public_args = flatten_args(args)
+        public_names = _runtime_arg_names(public_args)
+        for symbolic, role in ((offsets, "offsets"), (extent, "extent")):
+            if symbolic.name not in public_names:
+                raise TaichiRuntimeError(
+                    f"ordered dispatch payload arguments must include {role}"
+                )
+        backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
+        if backend not in ("cpu", "cuda", "vulkan"):
+            raise TaichiRuntimeError(
+                f"ordered segmented dispatch is unavailable on backend {backend}"
+            )
+        unique = next(_bounded_dispatch_ids)
+        packet = ScalarNdarray(u32, (3,)) if backend == "vulkan" else None
+        segment_state = ScalarNdarray(i32, (BoundedDispatchHandle._SEGMENT_STATE_SIZE,))
+        state_arg = Arg(
+            ArgKind.NDARRAY, f"__ti_segment_state_{unique}", i32, ndim=1
+        )
+        capacity_arg = Arg(
+            ArgKind.SCALAR, f"__ti_segment_capacity_{unique}", i32
+        )
+        count_arg = Arg(
+            ArgKind.SCALAR, f"__ti_segment_count_{unique}", i32
+        )
+        packet_arg = None
+        block_arg = None
+        if backend == "vulkan":
+            packet_arg = Arg(
+                ArgKind.NDARRAY, f"__ti_segment_packet_{unique}", u32, ndim=1
+            )
+            block_arg = Arg(
+                ArgKind.SCALAR, f"__ti_segment_block_{unique}", i32
+            )
+        payload_args = (*args, state_arg)
+        policy = self._bounded_launch_policy(block_dim, block_mode, backend)
+        payload_cpp = gen_cpp_kernel(
+            kernel_fn,
+            payload_args,
+            template_args=template_args,
+            task_launch_policy=policy,
+        )
+        selected_block = _bounded_kernel_geometry(payload_cpp, backend)
+        payload_flattened = flatten_args(payload_args)
+        base_label = _normalize_dispatch_label(label)
+
+        self._bind_internal_runtime_arg(state_arg, segment_state)
+        self._bind_internal_runtime_arg(capacity_arg, capacity)
+        self._bind_internal_runtime_arg(count_arg, segment_count)
+        if backend == "vulkan":
+            self._bind_internal_runtime_arg(packet_arg, packet)
+            self._bind_internal_runtime_arg(block_arg, selected_block)
+        for segment in range(segment_count):
+            index_arg = Arg(
+                ArgKind.SCALAR,
+                f"__ti_segment_index_{unique}_{segment}",
+                i32,
+            )
+            if backend == "vulkan":
+                prepare_args = (
+                    offsets,
+                    extent,
+                    packet_arg,
+                    state_arg,
+                    index_arg,
+                    count_arg,
+                    capacity_arg,
+                    block_arg,
+                )
+                prepare_kernel = _prepare_ordered_segment_dispatch
+            else:
+                prepare_args = (
+                    offsets,
+                    extent,
+                    state_arg,
+                    index_arg,
+                    count_arg,
+                    capacity_arg,
+                )
+                prepare_kernel = _prepare_ordered_segment_state
+            prepare_cpp = gen_cpp_kernel(prepare_kernel, prepare_args)
+            prepare_label = (
+                f"{base_label}/prepare:{segment}" if base_label else ""
+            )
+            payload_label = (
+                f"{base_label}/segment:{segment}" if base_label else ""
+            )
+            self._record_dispatch(
+                prepare_cpp, list(prepare_args), prepare_label
+            )
+            if backend == "vulkan":
+                self._record_indirect_dispatch(
+                    payload_cpp,
+                    payload_flattened,
+                    packet_arg,
+                    payload_label,
+                )
+            else:
+                self._record_dispatch(
+                    payload_cpp, payload_flattened, payload_label
+                )
+            self._bind_internal_runtime_arg(index_arg, segment)
+
+        handle = BoundedDispatchHandle(
+            extent_name=extent.name,
+            offsets_name=offsets.name,
+            capacity=capacity,
+            block_dim=selected_block,
+            backend=backend,
+            ordered=True,
+            segment_count=segment_count,
+            packet=packet,
+            segment_state=segment_state,
+        )
+        self._retain_runtime_graph_lease(handle)
+        return handle
 
     def _record_dispatch(self, kernel_cpp, unzipped_args, label=""):
         self._aot_graph_plan.dispatch(kernel_cpp, unzipped_args, label)
@@ -6954,6 +7912,8 @@ class GraphBuilder:
                 self._runtime_graph_arg_names,
                 SequentialRegion(ir_nodes, name="cgraph"),
                 recording_dispatches=self._runtime_graph_dispatches,
+                fixed_runtime_args=self._runtime_graph_fixed_args,
+                lifetime_leases=self._runtime_graph_lifetime_leases,
             )
         )
         self._runtime_graph_builder = _new_runtime_graph_builder()
@@ -6961,6 +7921,8 @@ class GraphBuilder:
         self._runtime_graph_arg_names = set()
         self._runtime_graph_dispatches = []
         self._pending_ir_nodes = []
+        self._runtime_graph_fixed_args = {}
+        self._runtime_graph_lifetime_leases = []
 
     def _append_native(self, node, *, prewarm=False):
         self._flush_graph_builder()
@@ -7926,6 +8888,12 @@ __all__ = [
     "GraphExecutionCounters",
     "GraphExecutionSegmentReport",
     "GraphExecutionReport",
+    "BoundedDispatchCapabilities",
+    "BoundedDispatchHandle",
+    "HostBoundedDispatchHandle",
+    "BoundedDispatchSnapshot",
+    "OrderedSegmentDispatchSnapshot",
+    "OrderedSegmentedDispatchSnapshot",
     "GraphWhileReport",
     "GraphBranchReport",
     "GraphControlFlowInvocation",
@@ -7933,6 +8901,11 @@ __all__ = [
     "GraphSubmissionRegionTelemetry",
     "GraphSubmissionQueueTelemetry",
     "GraphSubmissionTelemetry",
+    "bounded_dispatch_capabilities",
+    "segmented_dispatch_begin",
+    "segmented_dispatch_end",
+    "segmented_dispatch_index",
+    "segmented_dispatch_count",
     "structured_control_capabilities",
     "Arg",
     "ArgKind",
