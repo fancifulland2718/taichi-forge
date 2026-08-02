@@ -8,6 +8,7 @@ observe the count on host.
 
 import math
 
+from taichi_forge._lib import core as _ti_core
 from taichi_forge._kernels import (
     device_prefix_copy_masked_ndarray,
     device_prefix_fill_tail_ndarray,
@@ -18,10 +19,13 @@ from taichi_forge._kernels import (
 )
 from taichi_forge.algorithms import _algorithms as _alg
 from taichi_forge.lang._ndarray import ScalarNdarray
-from taichi_forge.lang.device_extent import DeviceExtent
+from taichi_forge.lang import impl
+from taichi_forge.lang.device_extent import DeviceDispatchState, DeviceExtent
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang.impl import ndarray as ti_ndarray
 from taichi_forge.types.primitive_types import f32, f64, i32, i64, u32, u64
+from taichi_forge.graph._ir import GraphAccess, ResourceEffect, RuntimeBinding
+from taichi_forge.graph._native import NativeGraphExecutable, NativeGraphNode
 
 
 _PREFIX_DTYPES = (i32, u32, i64, u64, f32, f64)
@@ -239,7 +243,15 @@ class DevicePrefix:
     def capacity(self):
         return self.extent.capacity
 
-    def compact(self, flags, output, output_extent, *, method="auto"):
+    def compact(
+        self,
+        flags,
+        output,
+        output_extent,
+        *,
+        method="auto",
+        dispatch_state=None,
+    ):
         """Stable-compact this prefix and return the resulting prefix."""
 
         _require_scalar_array(flags, "flags", self.capacity)
@@ -247,18 +259,58 @@ class DevicePrefix:
             raise TypeError("DevicePrefix.compact() flags must use ti.i32")
         _require_scalar_array(output, "output", self.capacity, self.values.dtype)
         _require_output_extent(output_extent, self.capacity)
+        if dispatch_state is not None:
+            if not isinstance(dispatch_state, DeviceDispatchState):
+                raise TypeError(
+                    "DevicePrefix.compact() dispatch_state must be a "
+                    "DeviceDispatchState"
+                )
+            dispatch_state.validate_extent(output_extent, require_identity=True)
         staged = self.workspace._buffer("compact_flags", i32, self.capacity)
         device_prefix_stage_flags_ndarray(
             flags, staged, self.extent.state, output_extent.state
         )
-        _alg.experimental_compact(
-            self.values,
-            staged,
-            output,
-            output_extent.state,
-            method=method,
-            workspace=self.workspace._compact,
-        )
+        arch = impl.current_cfg().arch
+        if dispatch_state is not None and arch == _ti_core.Arch.vulkan:
+            if method not in ("auto", "vulkan_native"):
+                raise ValueError(
+                    "producer-owned Vulkan compact requires method='auto' or "
+                    "'vulkan_native'"
+                )
+            program = impl.get_runtime().prog
+            if not program.vulkan_compact_available() or not hasattr(
+                program, "vulkan_compact_ndarray_bounded"
+            ):
+                raise TaichiRuntimeError(
+                    "producer-owned Vulkan compact requires the bounded native "
+                    "compact provider"
+                )
+            value_type = _alg._raw_payload_value_type(
+                self.values,
+                _alg._COMPACT_VALUE_TYPE,
+                "DevicePrefix.compact()",
+            )
+            temp_bytes = program.vulkan_compact_ndarray_bounded(
+                self.values.arr,
+                staged.arr,
+                output.arr,
+                output_extent.state.arr,
+                value_type,
+                dispatch_state.packet.arr,
+                dispatch_state.block_dim,
+            )
+            self.workspace._compact._mark_native_compact_backend_active(
+                "vulkan_native", temp_bytes
+            )
+        else:
+            _alg.experimental_compact(
+                self.values,
+                staged,
+                output,
+                output_extent.state,
+                method=method,
+                workspace=self.workspace._compact,
+            )
         self.workspace._refresh_usage()
         return DevicePrefix(output, output_extent, workspace=self.workspace)
 
@@ -416,9 +468,7 @@ class DevicePrefix:
         staged_values = self.workspace._buffer(
             "group_values", self.values.dtype, self.capacity
         )
-        device_prefix_copy_masked_ndarray(
-            keys, staged_keys, self.extent.state, 0
-        )
+        device_prefix_copy_masked_ndarray(keys, staged_keys, self.extent.state, 0)
         device_prefix_copy_masked_ndarray(
             self.values, staged_values, self.extent.state, 0
         )
@@ -443,9 +493,7 @@ class DevicePrefix:
         staged_values = self.workspace._buffer(
             "bucket_values", self.values.dtype, self.capacity
         )
-        device_prefix_copy_masked_ndarray(
-            keys, staged_keys, self.extent.state, -1
-        )
+        device_prefix_copy_masked_ndarray(keys, staged_keys, self.extent.state, -1)
         device_prefix_copy_masked_ndarray(
             self.values, staged_values, self.extent.state, 0
         )
@@ -462,10 +510,427 @@ class DevicePrefix:
         return DevicePrefix(output, self.extent, workspace=self.workspace)
 
 
+def _device_prefix_symbolic_arg(value, role, *, dtype=None):
+    if getattr(value, "tag", None) != _ti_core.ArgKind.NDARRAY:
+        raise TypeError(f"DevicePrefixSequence {role} must be a Graph ndarray Arg")
+    if dtype is not None and value.dtype() != dtype:
+        raise TypeError(f"DevicePrefixSequence {role} must use {dtype}")
+    if getattr(value, "field_dim", None) != 1:
+        raise TypeError(f"DevicePrefixSequence {role} must be one-dimensional")
+    if getattr(value, "element_shape", ()):
+        raise TypeError(f"DevicePrefixSequence {role} must contain scalars")
+    return value
+
+
+class _RecordedDevicePrefix:
+    def __init__(self, sequence, token, values_arg, extent_arg):
+        self._sequence = sequence
+        self._token = token
+        self.values_arg = values_arg
+        self.extent_arg = extent_arg
+
+    @property
+    def capacity(self):
+        return self._sequence.capacity
+
+    def compact(
+        self,
+        flags,
+        output,
+        output_extent,
+        *,
+        method="auto",
+        dispatch_state=None,
+    ):
+        return self._sequence._compact(
+            self,
+            flags,
+            output,
+            output_extent,
+            method=method,
+            dispatch_state=dispatch_state,
+        )
+
+    def scan(self, output=None):
+        return self._sequence._scan(self, output)
+
+    def reduce(self, output, *, op="sum", method="auto"):
+        self._sequence._append(
+            "reduce", self._token, output, op=op, method=method
+        )
+        return output
+
+    def sort(
+        self,
+        payload=None,
+        *,
+        stable=True,
+        descending=False,
+        method="auto",
+        precision="exact",
+        nan_policy="last",
+    ):
+        self._sequence._append(
+            "sort",
+            self._token,
+            payload,
+            stable=stable,
+            descending=descending,
+            method=method,
+            precision=precision,
+            nan_policy=nan_policy,
+        )
+        return self
+
+    def unique(self, output, output_extent, *, method="auto"):
+        return self._sequence._derived(
+            "unique",
+            self,
+            output,
+            output_extent,
+            method=method,
+        )
+
+    def run_length_encode(
+        self, unique_keys, run_lengths, output_extent, *, method="auto"
+    ):
+        return self._sequence._derived(
+            "run_length_encode",
+            self,
+            unique_keys,
+            output_extent,
+            run_lengths=run_lengths,
+            method=method,
+        )
+
+    def grouped_reduce(self, keys, output, *, op="sum", method="auto"):
+        self._sequence._append(
+            "grouped_reduce",
+            self._token,
+            keys,
+            output,
+            op=op,
+            method=method,
+        )
+        return output
+
+    def bucket_builder(self, keys, offsets, output, *, method="auto"):
+        token = self._sequence._new_token(output, self.extent_arg)
+        self._sequence._append(
+            "bucket_builder",
+            self._token,
+            keys,
+            offsets,
+            output,
+            output_token=token._token,
+            method=method,
+        )
+        return token
+
+
+class DevicePrefixSequence:
+    """Record a device-prefix pipeline for one reusable Graph native node.
+
+    The sequence keeps all prefix extents on device and executes under the
+    enclosing ``Graph.submit()`` transaction.  It intentionally records a
+    fixed topology over symbolic ndarray arguments; counts and overflow state
+    remain dynamic across replays.
+    """
+
+    def __init__(self, capacity, *, workspace=None):
+        if isinstance(capacity, bool) or not isinstance(capacity, int):
+            raise TypeError("DevicePrefixSequence capacity must be an integer")
+        if capacity <= 0:
+            raise ValueError("DevicePrefixSequence capacity must be positive")
+        self.capacity = capacity
+        self.workspace = (
+            DevicePrefixWorkspace(capacity) if workspace is None else workspace
+        )
+        if not isinstance(self.workspace, DevicePrefixWorkspace):
+            raise TypeError(
+                "DevicePrefixSequence workspace must be DevicePrefixWorkspace"
+            )
+        self.workspace._check_capacity(capacity)
+        self._operations = []
+        self._arg_descriptors = {}
+        self._tokens = {}
+        self._next_token = 0
+        self._dispatch_states = []
+        self._compiled = False
+
+    @property
+    def operation_count(self):
+        return len(self._operations)
+
+    def _ensure_mutable(self):
+        if self._compiled:
+            raise TaichiRuntimeError(
+                "DevicePrefixSequence cannot change after Graph compilation"
+            )
+
+    def _register_arg(self, value, role, *, dtype=None):
+        value = _device_prefix_symbolic_arg(value, role, dtype=dtype)
+        descriptor = (
+            value.tag,
+            str(value.dtype()),
+            int(value.field_dim),
+            tuple(value.element_shape),
+        )
+        previous = self._arg_descriptors.get(value.name)
+        if previous is not None and previous != descriptor:
+            raise ValueError(
+                f"DevicePrefixSequence argument {value.name!r} changes descriptor"
+            )
+        self._arg_descriptors[value.name] = descriptor
+        return value
+
+    def _new_token(self, values_arg, extent_arg):
+        self._ensure_mutable()
+        values_arg = self._register_arg(values_arg, "values")
+        extent_arg = self._register_arg(extent_arg, "extent", dtype=i32)
+        token = self._next_token
+        self._next_token += 1
+        self._tokens[token] = (values_arg.name, extent_arg.name)
+        return _RecordedDevicePrefix(self, token, values_arg, extent_arg)
+
+    def input(self, values, extent):
+        """Declare one symbolic input prefix."""
+
+        return self._new_token(values, extent)
+
+    def _append(self, kind, *args, **kwargs):
+        self._ensure_mutable()
+        registered = []
+        for value in args:
+            if isinstance(value, int):
+                registered.append(value)
+            elif value is None:
+                registered.append(None)
+            else:
+                registered.append(self._register_arg(value, kind).name)
+        self._operations.append((kind, tuple(registered), dict(kwargs)))
+
+    def _compact(
+        self,
+        source,
+        flags,
+        output,
+        output_extent,
+        *,
+        method,
+        dispatch_state,
+    ):
+        flags = self._register_arg(flags, "compact flags", dtype=i32)
+        output = self._register_arg(output, "compact output")
+        output_extent = self._register_arg(
+            output_extent, "compact output extent", dtype=i32
+        )
+        if dispatch_state is not None:
+            if not isinstance(dispatch_state, DeviceDispatchState):
+                raise TypeError(
+                    "DevicePrefixSequence compact dispatch_state must be a "
+                    "DeviceDispatchState"
+                )
+            dispatch_state._validate_current()
+            if dispatch_state.capacity != self.capacity:
+                raise ValueError(
+                    "DevicePrefixSequence dispatch_state capacity mismatch"
+                )
+        effective_dispatch_state = (
+            dispatch_state
+            if impl.current_cfg().arch == _ti_core.Arch.vulkan
+            else None
+        )
+        if effective_dispatch_state is not None:
+            self._dispatch_states.append(effective_dispatch_state)
+        result = self._new_token(output, output_extent)
+        self._operations.append(
+            (
+                "compact",
+                (source._token, flags.name, output.name, output_extent.name),
+                {
+                    "method": method,
+                    "dispatch_state": effective_dispatch_state,
+                    "output_token": result._token,
+                },
+            )
+        )
+        return result
+
+    def _scan(self, source, output):
+        if output is None:
+            output = source.values_arg
+        output = self._register_arg(output, "scan output")
+        result = self._new_token(output, source.extent_arg)
+        self._operations.append(
+            ("scan", (source._token, output.name), {"output_token": result._token})
+        )
+        return result
+
+    def _derived(self, kind, source, output, output_extent, **kwargs):
+        output = self._register_arg(output, f"{kind} output")
+        output_extent = self._register_arg(
+            output_extent, f"{kind} output extent", dtype=i32
+        )
+        if "run_lengths" in kwargs:
+            run_lengths = self._register_arg(
+                kwargs.pop("run_lengths"), "run lengths", dtype=i32
+            )
+            extra = (run_lengths.name,)
+        else:
+            extra = ()
+        result = self._new_token(output, output_extent)
+        self._operations.append(
+            (
+                kind,
+                (source._token, output.name, *extra, output_extent.name),
+                {**kwargs, "output_token": result._token},
+            )
+        )
+        return result
+
+    def _as_graph_native_node(self):
+        self._ensure_mutable()
+        if not self._operations:
+            raise TaichiRuntimeError(
+                "DevicePrefixSequence requires at least one recorded operation"
+            )
+        self._compiled = True
+        return _DevicePrefixSequenceGraphNode(self)
+
+
+class _DevicePrefixSequenceGraphExecutable(NativeGraphExecutable):
+    def __init__(self, sequence):
+        self._capacity = sequence.capacity
+        self._workspace = sequence.workspace
+        self._operations = tuple(sequence._operations)
+        self._tokens = dict(sequence._tokens)
+        self._arg_names = tuple(sequence._arg_descriptors)
+        self._dispatch_states = tuple(dict.fromkeys(sequence._dispatch_states))
+
+    @property
+    def runtime_arg_schema(self):
+        return tuple(RuntimeBinding(name, "ndarray") for name in self._arg_names)
+
+    @property
+    def resource_effects(self):
+        return tuple(
+            ResourceEffect(name, GraphAccess.READ_WRITE) for name in self._arg_names
+        )
+
+    @property
+    def lifetime_leases(self):
+        return self._dispatch_states
+
+    def _prefix(self, runtime_args, token):
+        values_name, extent_name = self._tokens[token]
+        return DevicePrefix(
+            runtime_args[values_name],
+            runtime_args[extent_name],
+            workspace=self._workspace,
+        )
+
+    def run(self, runtime_args=None):
+        if runtime_args is None:
+            raise TaichiRuntimeError(
+                "DevicePrefixSequence requires Graph runtime arguments"
+            )
+        prefixes = {}
+
+        def prefix(token):
+            value = prefixes.get(token)
+            if value is None:
+                value = self._prefix(runtime_args, token)
+                prefixes[token] = value
+            return value
+
+        for kind, args, kwargs in self._operations:
+            options = dict(kwargs)
+            if kind == "compact":
+                source, flags, output, output_extent = args
+                output_token = options.pop("output_token")
+                result = prefix(source).compact(
+                    runtime_args[flags],
+                    runtime_args[output],
+                    runtime_args[output_extent],
+                    method=options["method"],
+                    dispatch_state=options["dispatch_state"],
+                )
+                prefixes[output_token] = result
+            elif kind == "scan":
+                source, output = args
+                output_token = options.pop("output_token")
+                prefixes[output_token] = prefix(source).scan(runtime_args[output])
+            elif kind == "reduce":
+                source, output = args
+                prefix(source).reduce(runtime_args[output], **options)
+            elif kind == "sort":
+                source, payload = args
+                prefix(source).sort(
+                    None if payload is None else runtime_args[payload], **options
+                )
+            elif kind == "unique":
+                source, output, output_extent = args
+                output_token = options.pop("output_token")
+                prefixes[output_token] = prefix(source).unique(
+                    runtime_args[output], runtime_args[output_extent], **options
+                )
+            elif kind == "run_length_encode":
+                source, output, run_lengths, output_extent = args
+                output_token = options.pop("output_token")
+                prefixes[output_token] = prefix(source).run_length_encode(
+                    runtime_args[output],
+                    runtime_args[run_lengths],
+                    runtime_args[output_extent],
+                    **options,
+                )
+            elif kind == "grouped_reduce":
+                source, keys, output = args
+                prefix(source).grouped_reduce(
+                    runtime_args[keys], runtime_args[output], **options
+                )
+            elif kind == "bucket_builder":
+                source, keys, offsets, output = args
+                output_token = options.pop("output_token")
+                prefixes[output_token] = prefix(source).bucket_builder(
+                    runtime_args[keys],
+                    runtime_args[offsets],
+                    runtime_args[output],
+                    **options,
+                )
+            else:
+                raise TaichiRuntimeError(
+                    f"Unsupported DevicePrefixSequence operation {kind!r}"
+                )
+
+    @property
+    def debug_info(self):
+        return {
+            "kind": "device_prefix_sequence",
+            "capacity": self._capacity,
+            "operation_count": len(self._operations),
+            "producer_owned_dispatch_states": len(self._dispatch_states),
+            "workspace_bytes_peak": self._workspace.workspace_bytes_peak,
+        }
+
+
+class _DevicePrefixSequenceGraphNode(NativeGraphNode):
+    def __init__(self, sequence):
+        self._sequence = sequence
+
+    def compile(self):
+        return _DevicePrefixSequenceGraphExecutable(self._sequence)
+
+
 def device_prefix(values, extent, *, workspace=None):
     """Pair fixed-capacity scalar ndarray storage with a ``DeviceExtent``."""
 
     return DevicePrefix(values, extent, workspace=workspace)
 
 
-__all__ = ["DevicePrefix", "DevicePrefixWorkspace", "device_prefix"]
+__all__ = [
+    "DevicePrefix",
+    "DevicePrefixSequence",
+    "DevicePrefixWorkspace",
+    "device_prefix",
+]

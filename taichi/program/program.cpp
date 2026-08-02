@@ -7806,6 +7806,20 @@ void Program::finalize() {
         runtime_resource_submission_mutex_);
     graph_observation_staging_.readback.reset();
     graph_observation_staging_.capacity = 0;
+#ifdef TI_WITH_CUDA
+    if (compile_config().arch == Arch::cuda &&
+        runtime_fault_domain_->backend_calls_safe()) {
+      auto context_guard = CUDAContext::get_instance().get_guard();
+      auto &driver = CUDADriver::get_instance();
+      for (const auto &entry : graph_observation_staging_.cuda_readbacks) {
+        if (entry.second.host_ptr) {
+          driver.mem_free_host(entry.second.host_ptr);
+        }
+      }
+    }
+#endif
+    graph_observation_staging_.cuda_readbacks.clear();
+    graph_observation_staging_.cuda_pinned_bytes = 0;
   });
   if (arch_uses_llvm(compile_config().arch) ||
       compile_config().arch == Arch::vulkan) {
@@ -7875,11 +7889,35 @@ std::vector<int64> Program::get_hash_snode_probe_stats() {
   return program_impl_->get_hash_snode_probe_stats(result_buffer);
 }
 
+DeviceAllocation Program::allocate_host_read_memory_on_device(
+    std::size_t alloc_size,
+    AllocUsage usage) {
+  if (arch_is_cpu(compile_config().arch)) {
+    return program_impl_->allocate_memory_on_device(alloc_size, result_buffer,
+                                                    usage);
+  }
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device,
+              "Host-readable Graph observation storage requires a compute "
+              "device.");
+  DeviceAllocation allocation;
+  const RhiResult result = device->allocate_memory(
+      {alloc_size, /*host_write=*/false, /*host_read=*/true,
+       /*export_sharing=*/false, usage},
+      &allocation);
+  TI_ERROR_IF(result != RhiResult::success,
+              "Unable to allocate host-readable Graph observation storage: "
+              "{}",
+              result);
+  return allocation;
+}
+
 Ndarray *Program::create_ndarray(const DataType type,
                                  const std::vector<int> &shape,
                                  ExternalArrayLayout layout,
                                  bool zero_fill,
-                                 const DebugInfo &dbg_info) {
+                                 const DebugInfo &dbg_info,
+                                 bool host_read) {
   std::lock_guard<std::recursive_mutex> submission_lock(
       runtime_resource_submission_mutex_);
   {
@@ -7888,7 +7926,8 @@ Ndarray *Program::create_ndarray(const DataType type,
                 "Cannot create Ndarray after Program finalize");
   }
 
-  auto arr = std::make_unique<Ndarray>(this, type, shape, layout, dbg_info);
+  auto arr =
+      std::make_unique<Ndarray>(this, type, shape, layout, dbg_info, host_read);
   Ndarray *view = arr.get();
   std::unique_lock<std::mutex> lock(ndarray_lifecycle_mutex_);
   auto [result, handle] =
@@ -8656,12 +8695,258 @@ void Program::copy_graph_observations_to_host(
               "copy_graph_observations_to_host failed: {}", result);
 }
 
+void Program::copy_host_readable_graph_observations_to_host(
+    const Ndarray *const *srcs,
+    void *const *dsts,
+    const std::size_t *bytes,
+    std::size_t count) {
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  TI_ERROR_IF(count > 0 && (!srcs || !dsts || !bytes),
+              "copy_host_readable_graph_observations_to_host received a null "
+              "pointer table.");
+  if (count == 0) {
+    return;
+  }
+  auto leases = acquire_ndarray_leases(srcs, count);
+  std::size_t total_bytes = 0;
+  for (std::size_t i = 0; i < count; ++i) {
+    TI_ERROR_IF(!srcs[i] || !dsts[i],
+                "Host-readable Graph observation received a null pointer at "
+                "index {}.",
+                i);
+    TI_ERROR_IF(!srcs[i]->is_host_readable(),
+                "Graph observation source {} is not completion-attached "
+                "host-readable storage.",
+                i);
+    const std::size_t expected_bytes =
+        srcs[i]->get_nelement() * srcs[i]->get_element_size();
+    TI_ERROR_IF(bytes[i] != expected_bytes,
+                "Host-readable Graph observation expected {} bytes at index "
+                "{}, but received {}.",
+                expected_bytes, i, bytes[i]);
+    TI_ERROR_IF(bytes[i] > std::numeric_limits<std::size_t>::max() -
+                               total_bytes,
+                "Host-readable Graph observation byte count overflow.");
+    total_bytes += bytes[i];
+  }
+
+  const Arch arch = compile_config().arch;
+  if (arch_is_cpu(arch) || arch == Arch::cuda) {
+    for (std::size_t i = 0; i < count; ++i) {
+      if (bytes[i] == 0) {
+        continue;
+      }
+      const auto *src_ptr = reinterpret_cast<const uint8_t *>(
+          program_impl_->get_device_alloc_info_ptr(srcs[i]->ndarray_alloc_));
+      TI_ERROR_IF(!src_ptr,
+                  "Host-readable Graph observation received a null data "
+                  "pointer at index {}.",
+                  i);
+      std::memcpy(dsts[i], src_ptr, bytes[i]);
+    }
+  } else if (arch == Arch::vulkan) {
+    Device *device = program_impl_->get_compute_device();
+    TI_ERROR_IF(!device,
+                "Host-readable Vulkan Graph observation requires a compute "
+                "device.");
+    for (std::size_t i = 0; i < count; ++i) {
+      if (bytes[i] == 0) {
+        continue;
+      }
+      void *mapped = nullptr;
+      const RhiResult result = device->map(srcs[i]->ndarray_alloc_, &mapped);
+      TI_ERROR_IF(result != RhiResult::success || !mapped,
+                  "Unable to map host-readable Graph observation {}: {}", i,
+                  result);
+      std::memcpy(dsts[i], mapped, bytes[i]);
+      device->unmap(srcs[i]->ndarray_alloc_);
+    }
+  } else {
+    TI_ERROR("Completion-attached Graph observation storage is unavailable on "
+             "architecture {}.",
+             arch_name(arch));
+  }
+  graph_observation_staging_.completion_attached_batches += 1;
+  graph_observation_staging_.completion_attached_bytes += total_bytes;
+}
+
+std::uint64_t Program::create_cuda_graph_observation_readback(
+    std::size_t bytes) {
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA Graph observation readback requires the CUDA backend.");
+  TI_ERROR_IF(finalized_,
+              "Cannot create CUDA Graph observation readback after Program "
+              "finalize.");
+  TI_ERROR_IF(bytes == 0,
+              "CUDA Graph observation readback capacity must be positive.");
+#ifdef TI_WITH_CUDA
+  const std::uint64_t handle =
+      graph_observation_staging_.next_cuda_readback_handle++;
+  TI_ERROR_IF(handle == 0,
+              "CUDA Graph observation readback handle overflow.");
+  void *host_ptr = nullptr;
+  {
+    auto context_guard = CUDAContext::get_instance().get_guard();
+    CUDADriver::get_instance().mem_host_alloc(&host_ptr, bytes, 0);
+  }
+  TI_ERROR_IF(!host_ptr,
+              "CUDA Graph observation pinned-host allocation returned null.");
+  try {
+    const bool inserted =
+        graph_observation_staging_.cuda_readbacks
+            .emplace(handle,
+                     GraphObservationStagingState::CudaPinnedReadback{
+                         host_ptr, bytes})
+            .second;
+    TI_ERROR_IF(!inserted,
+                "CUDA Graph observation readback handle collision.");
+  } catch (...) {
+    auto context_guard = CUDAContext::get_instance().get_guard();
+    CUDADriver::get_instance().mem_free_host(host_ptr);
+    throw;
+  }
+  graph_observation_staging_.cuda_pinned_bytes += bytes;
+  graph_observation_staging_.allocations += 1;
+  return handle;
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+void Program::destroy_cuda_graph_observation_readback(std::uint64_t handle) {
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  const auto found = graph_observation_staging_.cuda_readbacks.find(handle);
+  if (found == graph_observation_staging_.cuda_readbacks.end()) {
+    return;
+  }
+#ifdef TI_WITH_CUDA
+  if (found->second.host_ptr && runtime_fault_domain_->backend_calls_safe()) {
+    auto context_guard = CUDAContext::get_instance().get_guard();
+    CUDADriver::get_instance().mem_free_host(found->second.host_ptr);
+  }
+#endif
+  TI_ASSERT(graph_observation_staging_.cuda_pinned_bytes >=
+            found->second.capacity);
+  graph_observation_staging_.cuda_pinned_bytes -= found->second.capacity;
+  graph_observation_staging_.cuda_readbacks.erase(found);
+}
+
+void Program::enqueue_cuda_graph_observation_readback(
+    std::uint64_t handle,
+    const Ndarray *const *srcs,
+    const std::size_t *bytes,
+    std::size_t count) {
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA Graph observation readback requires the CUDA backend.");
+  TI_ERROR_IF(count > 0 && (!srcs || !bytes),
+              "CUDA Graph observation readback received a null pointer table.");
+  const auto found = graph_observation_staging_.cuda_readbacks.find(handle);
+  TI_ERROR_IF(found == graph_observation_staging_.cuda_readbacks.end(),
+              "CUDA Graph observation readback handle is stale.");
+  auto leases = acquire_ndarray_leases(srcs, count);
+  std::size_t total_bytes = 0;
+  for (std::size_t i = 0; i < count; ++i) {
+    TI_ERROR_IF(!srcs[i],
+                "CUDA Graph observation source {} is null.", i);
+    const std::size_t expected_bytes =
+        srcs[i]->get_nelement() * srcs[i]->get_element_size();
+    TI_ERROR_IF(bytes[i] != expected_bytes,
+                "CUDA Graph observation expected {} bytes at index {}, but "
+                "received {}.",
+                expected_bytes, i, bytes[i]);
+    TI_ERROR_IF(bytes[i] > std::numeric_limits<std::size_t>::max() -
+                               total_bytes,
+                "CUDA Graph observation byte count overflow.");
+    total_bytes += bytes[i];
+  }
+  TI_ERROR_IF(total_bytes > found->second.capacity,
+              "CUDA Graph observation payload {} exceeds pinned capacity {}.",
+              total_bytes, found->second.capacity);
+  ScopedRuntimeTransferStatistics transfer_statistics(
+      this, RuntimeTransferKind::kDeviceToHost, total_bytes);
+#ifdef TI_WITH_CUDA
+  auto submission_guard =
+      CUDAContext::get_instance().get_submission_lock_guard();
+  auto context_guard = CUDAContext::get_instance().get_guard();
+  auto &driver = CUDADriver::get_instance();
+  auto *host_ptr = static_cast<std::uint8_t *>(found->second.host_ptr);
+  std::size_t offset = 0;
+  for (std::size_t i = 0; i < count; ++i) {
+    if (bytes[i] == 0) {
+      continue;
+    }
+    auto *src_ptr =
+        program_impl_->get_device_alloc_info_ptr(srcs[i]->ndarray_alloc_);
+    TI_ERROR_IF(!src_ptr,
+                "CUDA Graph observation received a null device pointer at "
+                "index {}.",
+                i);
+    driver.memcpy_device_to_host_async(host_ptr + offset, src_ptr, bytes[i],
+                                       nullptr);
+    offset += bytes[i];
+  }
+  pin_ndarray_launch_leases(leases);
+  mark_runtime_submission_pending();
+  graph_observation_staging_.completion_attached_batches += 1;
+  graph_observation_staging_.completion_attached_bytes += total_bytes;
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+void Program::copy_cuda_graph_observation_readback_to_host(
+    std::uint64_t handle,
+    void *const *dsts,
+    const std::size_t *bytes,
+    std::size_t count) {
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA Graph observation readback requires the CUDA backend.");
+  TI_ERROR_IF(count > 0 && (!dsts || !bytes),
+              "CUDA Graph observation host copy received a null pointer "
+              "table.");
+  const auto found = graph_observation_staging_.cuda_readbacks.find(handle);
+  TI_ERROR_IF(found == graph_observation_staging_.cuda_readbacks.end(),
+              "CUDA Graph observation readback handle is stale.");
+  std::size_t total_bytes = 0;
+  for (std::size_t i = 0; i < count; ++i) {
+    TI_ERROR_IF(!dsts[i],
+                "CUDA Graph observation destination {} is null.", i);
+    TI_ERROR_IF(bytes[i] > std::numeric_limits<std::size_t>::max() -
+                               total_bytes,
+                "CUDA Graph observation host-copy byte count overflow.");
+    total_bytes += bytes[i];
+  }
+  TI_ERROR_IF(total_bytes > found->second.capacity,
+              "CUDA Graph observation host-copy payload {} exceeds pinned "
+              "capacity {}.",
+              total_bytes, found->second.capacity);
+  const auto *host_ptr =
+      static_cast<const std::uint8_t *>(found->second.host_ptr);
+  std::size_t offset = 0;
+  for (std::size_t i = 0; i < count; ++i) {
+    if (bytes[i] == 0) {
+      continue;
+    }
+    std::memcpy(dsts[i], host_ptr + offset, bytes[i]);
+    offset += bytes[i];
+  }
+}
+
 GraphObservationStagingStatistics
 Program::graph_observation_staging_statistics() {
   std::lock_guard<std::recursive_mutex> submission_lock(
       runtime_resource_submission_mutex_);
   GraphObservationStagingStatistics result;
-  result.persistent_bytes = graph_observation_staging_.capacity;
+  result.persistent_bytes = graph_observation_staging_.capacity +
+                            graph_observation_staging_.cuda_pinned_bytes;
   result.allocations = graph_observation_staging_.allocations;
   result.reuses = graph_observation_staging_.reuses;
   result.packed_batches = graph_observation_staging_.packed_batches;
@@ -8669,6 +8954,10 @@ Program::graph_observation_staging_statistics() {
   result.fallback_batches = graph_observation_staging_.fallback_batches;
   result.packed_payload_bytes =
       graph_observation_staging_.packed_payload_bytes;
+  result.completion_attached_batches =
+      graph_observation_staging_.completion_attached_batches;
+  result.completion_attached_bytes =
+      graph_observation_staging_.completion_attached_bytes;
   return result;
 }
 

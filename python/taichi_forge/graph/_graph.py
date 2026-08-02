@@ -334,12 +334,25 @@ def _copy_observation_result(result):
     return {batch: dict(values) for batch, values in result.items()}
 
 
+def _observation_readback_mode():
+    if os.environ.get("TI_GRAPH_COMPLETION_ATTACHED_OBSERVATION", "1") == "0":
+        return "deferred_device_copy"
+    arch = impl.current_cfg().arch
+    if arch == _ti_core.Arch.cuda:
+        return "completion_attached_pinned_copy"
+    if arch in (_ti_core.Arch.x64, _ti_core.Arch.arm64, _ti_core.Arch.vulkan):
+        return "completion_attached_host_visible"
+    return "deferred_device_copy"
+
+
 class _GraphObservationState:
     def __init__(self, arena, slot, sequence):
         self._arena = arena
         self._slot = slot
         self._sequence = sequence
         self._completion = None
+        self._attached = False
+        self._tail_readback_attached = False
         self._result = None
         self._discarded = False
         self._released = False
@@ -359,10 +372,33 @@ class _GraphObservationState:
                 raise TaichiRuntimeError(
                     "Cannot attach a completion to a released observation slot"
                 )
+            self._attached = True
             self._completion = completion if completion.has_backend_work else None
         return self
 
+    def enqueue_tail_readback(self):
+        with self._lock:
+            if self._released:
+                raise TaichiRuntimeError(
+                    "Cannot enqueue readback for a released observation slot"
+                )
+            if self._tail_readback_attached:
+                raise TaichiRuntimeError(
+                    "Graph observation readback was already enqueued"
+                )
+            if self._arena.readback_mode == "completion_attached_pinned_copy":
+                self._arena._enqueue_slot(self._slot)
+                self._tail_readback_attached = True
+
     def _wait_locked(self):
+        if not self._attached:
+            if impl.current_cfg().arch in (
+                _ti_core.Arch.cuda,
+                _ti_core.Arch.vulkan,
+            ):
+                self._arena._record_wait()
+                impl.get_runtime().sync()
+            return
         completion = self._completion
         if completion is None:
             return
@@ -378,7 +414,10 @@ class _GraphObservationState:
             if self._released:
                 raise TaichiRuntimeError("Graph observation snapshot was discarded")
             self._wait_locked()
-            result = self._arena._read_slot(self._slot)
+            result = self._arena._read_slot(
+                self._slot,
+                tail_readback_attached=self._tail_readback_attached,
+            )
             self._result = result
             self._released = True
             release = True
@@ -407,7 +446,10 @@ class _GraphObservationState:
                 return
             self._wait_locked()
             if not self._discarded:
-                self._result = self._arena._read_slot(self._slot)
+                self._result = self._arena._read_slot(
+                    self._slot,
+                    tail_readback_attached=self._tail_readback_attached,
+                )
             self._released = True
             release = True
         if release:
@@ -425,6 +467,10 @@ class _GraphObservationArenaLease:
         state = self._state.attach(completion)
         self._state = None
         return state
+
+    def enqueue_tail_readback(self):
+        if self._state is not None:
+            self._state.enqueue_tail_readback()
 
     def materialize(self):
         if self._state is None:
@@ -444,6 +490,7 @@ class _GraphObservationArena:
 
     def __init__(self, nodes, capacity=None):
         self.nodes = tuple(nodes)
+        self.readback_mode = _observation_readback_mode()
         if not self.nodes:
             self.capacity = 0
             self._slots = []
@@ -478,13 +525,24 @@ class _GraphObservationArena:
         bindings = {}
         payload_bytes = 0
         for node in self.nodes:
-            node_bindings, node_bytes = node.allocate_snapshot_buffers()
+            node_bindings, node_bytes = node.allocate_snapshot_buffers(
+                completion_attached=(
+                    self.readback_mode == "completion_attached_host_visible"
+                )
+            )
             bindings[node.name] = node_bindings
             payload_bytes += node_bytes
         slot = {
             "bindings": bindings,
             "payload_bytes": payload_bytes,
             "state": None,
+            "cuda_readback": (
+                impl.get_runtime().prog._create_cuda_graph_observation_readback(
+                    payload_bytes
+                )
+                if self.readback_mode == "completion_attached_pinned_copy"
+                else None
+            ),
         }
         self._slots.append(slot)
         self._allocations += 1
@@ -516,7 +574,14 @@ class _GraphObservationArena:
                 )
             oldest.make_reusable()
 
-    def _read_slot(self, slot):
+    def _slot_sources(self, slot):
+        return [
+            storage.arr
+            for node in self.nodes
+            for storage in slot["bindings"][node.name].values()
+        ]
+
+    def _slot_hosts(self, slot):
         sources = []
         hosts = []
         host_groups = {}
@@ -531,7 +596,27 @@ class _GraphObservationArena:
                 hosts.append(host)
                 node_hosts[key] = host
             host_groups[node.name] = node_hosts
-        impl.get_runtime().prog.copy_graph_observations_to_host(sources, hosts)
+        return sources, hosts, host_groups
+
+    def _enqueue_slot(self, slot):
+        impl.get_runtime().prog._enqueue_cuda_graph_observation_readback(
+            slot["cuda_readback"], self._slot_sources(slot)
+        )
+
+    def _read_slot(self, slot, *, tail_readback_attached=False):
+        sources, hosts, host_groups = self._slot_hosts(slot)
+        program = impl.get_runtime().prog
+        if self.readback_mode == "completion_attached_host_visible":
+            program._copy_host_readable_graph_observations_to_host(sources, hosts)
+        elif (
+            self.readback_mode == "completion_attached_pinned_copy"
+            and tail_readback_attached
+        ):
+            program._copy_cuda_graph_observation_readback_to_host(
+                slot["cuda_readback"], hosts
+            )
+        else:
+            program.copy_graph_observations_to_host(sources, hosts)
         result = {
             node.name: node.decode_snapshot(host_groups[node.name])
             for node in self.nodes
@@ -564,6 +649,7 @@ class _GraphObservationArena:
                 "waits": self._waits,
                 "materializations": self._materializations,
                 "host_readback_bytes": self._host_readback_bytes,
+                "readback_mode": self.readback_mode,
             }
 
 
@@ -1096,6 +1182,8 @@ class GraphMemoryReport:
     observation_arena_waits: int
     observation_materializations: int
     observation_host_readback_bytes: int
+    observation_readback_mode: str
+    observation_completion_attached: bool
     persistent_telemetry_bytes: int
     telemetry_arena_capacity: int
     telemetry_arena_slots: int
@@ -1150,9 +1238,14 @@ class BoundedDispatchCapabilities:
     device_known_count: bool
     no_host_readback: bool
     exact_grid: bool
+    execution_semantics: str
+    masked_capacity: bool
     zero_count_command_skip: bool
     ordered_segments: bool
     global_segment_order: bool
+    producer_owned_launch_state: bool
+    producer_owned_launch_state_supported: bool
+    preparation_dispatches: int
     capacity: int
     block_dim: Optional[int]
     reason: str
@@ -1205,15 +1298,20 @@ _bounded_dispatch_ids = itertools.count(1)
 def _bounded_route(backend, ordered):
     if backend == "vulkan":
         return BoundedDispatchCapabilities(
-            schema_version=1,
+            schema_version=2,
             backend=backend,
             route="exact_indirect",
             device_known_count=True,
             no_host_readback=True,
             exact_grid=True,
+            execution_semantics="exact_device_grid",
+            masked_capacity=False,
             zero_count_command_skip=True,
             ordered_segments=ordered,
             global_segment_order=ordered,
+            producer_owned_launch_state=False,
+            producer_owned_launch_state_supported=True,
+            preparation_dispatches=1,
             capacity=0,
             block_dim=None,
             reason="Vulkan dispatchIndirect consumes a device-written grid packet",
@@ -1229,15 +1327,20 @@ def _bounded_route(backend, ordered):
             "work from the extent"
         )
     return BoundedDispatchCapabilities(
-        schema_version=1,
+        schema_version=2,
         backend=backend,
         route="masked_capacity",
         device_known_count=True,
         no_host_readback=True,
         exact_grid=False,
+        execution_semantics="masked_capacity",
+        masked_capacity=True,
         zero_count_command_skip=False,
         ordered_segments=ordered,
         global_segment_order=ordered,
+        producer_owned_launch_state=False,
+        producer_owned_launch_state_supported=True,
+        preparation_dispatches=0,
         capacity=0,
         block_dim=None,
         reason=reason,
@@ -1261,6 +1364,7 @@ class BoundedDispatchHandle:
         segment_count=0,
         packet=None,
         segment_state=None,
+        launch_state=None,
     ):
         self.extent_name = extent_name
         self.offsets_name = offsets_name
@@ -1270,11 +1374,20 @@ class BoundedDispatchHandle:
         self._ordered = bool(ordered)
         self._packet = packet
         self._segment_state = segment_state
+        self._launch_state = launch_state
         self._runtime_generation = int(impl.runtime_generation())
         self._runtime_program = impl.get_runtime().prog
         base = _bounded_route(backend, self._ordered)
         self._capabilities = replace(
-            base, capacity=self.capacity, block_dim=self.block_dim
+            base,
+            capacity=self.capacity,
+            block_dim=self.block_dim,
+            producer_owned_launch_state=launch_state is not None,
+            preparation_dispatches=(
+                0
+                if launch_state is not None
+                else base.preparation_dispatches
+            ),
         )
 
     @property
@@ -1283,7 +1396,12 @@ class BoundedDispatchHandle:
 
     @property
     def workspace_bytes(self):
-        return (0 if self._packet is None else 3 * 4) + (
+        packet_bytes = (
+            0
+            if self._packet is None or self._launch_state is not None
+            else 3 * 4
+        )
+        return packet_bytes + (
             0
             if self._segment_state is None
             else self._SEGMENT_STATE_SIZE * 4
@@ -1291,9 +1409,12 @@ class BoundedDispatchHandle:
 
     @property
     def workspace_allocation_count(self):
-        return int(self._packet is not None) + int(self._segment_state is not None)
+        owns_packet = self._packet is not None and self._launch_state is None
+        return int(owns_packet) + int(self._segment_state is not None)
 
     def validate_graph_lifetime(self):
+        if self._launch_state is not None:
+            self._launch_state._validate_current()
         if (
             impl.runtime_generation() != self._runtime_generation
             or impl.get_runtime().prog is not self._runtime_program
@@ -1317,6 +1438,8 @@ class BoundedDispatchHandle:
                     "Bounded dispatch DeviceExtent capacity does not match "
                     f"the compiled capacity {self.capacity}"
                 )
+            if self._launch_state is not None:
+                self._launch_state.validate_extent(value, require_identity=True)
             return value.state
         raise TaichiRuntimeError(
             "Bounded dispatch extent must be the DeviceExtent whose capacity "
@@ -1447,15 +1570,20 @@ class HostBoundedDispatchHandle:
         self._runtime_generation = int(impl.runtime_generation())
         self._runtime_program = impl.get_runtime().prog
         self._capabilities = BoundedDispatchCapabilities(
-            schema_version=1,
+            schema_version=2,
             backend=backend,
             route="exact_host_range",
             device_known_count=False,
             no_host_readback=True,
             exact_grid=True,
+            execution_semantics="exact_host_range",
+            masked_capacity=False,
             zero_count_command_skip=False,
             ordered_segments=False,
             global_segment_order=False,
+            producer_owned_launch_state=False,
+            producer_owned_launch_state_supported=False,
+            preparation_dispatches=0,
             capacity=self.capacity,
             block_dim=self.block_dim,
             reason=(
@@ -1924,7 +2052,7 @@ def bounded_dispatch_capabilities():
     backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
     if backend not in ("cpu", "cuda", "vulkan"):
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "backend": backend,
             "available": False,
             "route": "unsupported",
@@ -1932,9 +2060,14 @@ def bounded_dispatch_capabilities():
             "device_known_count": False,
             "no_host_readback": False,
             "exact_grid": False,
+            "execution_semantics": "unsupported",
+            "masked_capacity": False,
             "zero_count_command_skip": False,
             "ordered_segments": False,
             "global_segment_order": False,
+            "producer_owned_launch_state_supported": False,
+            "producer_packet_consumed": False,
+            "default_preparation_dispatches": 0,
             "reason": "backend is not qualified for bounded dispatch",
         }
     capabilities = _bounded_route(backend, True)
@@ -1947,9 +2080,16 @@ def bounded_dispatch_capabilities():
         "device_known_count": capabilities.device_known_count,
         "no_host_readback": capabilities.no_host_readback,
         "exact_grid": capabilities.exact_grid,
+        "execution_semantics": capabilities.execution_semantics,
+        "masked_capacity": capabilities.masked_capacity,
         "zero_count_command_skip": capabilities.zero_count_command_skip,
         "ordered_segments": capabilities.ordered_segments,
         "global_segment_order": capabilities.global_segment_order,
+        "producer_owned_launch_state_supported": (
+            capabilities.producer_owned_launch_state_supported
+        ),
+        "producer_packet_consumed": backend == "vulkan",
+        "default_preparation_dispatches": capabilities.preparation_dispatches,
         "reason": capabilities.reason,
     }
 
@@ -2267,6 +2407,80 @@ def structured_control_capabilities():
     }
 
 
+def dynamic_work_capabilities():
+    """Return one backend-honest view of dynamic launch and iteration.
+
+    Device-count dispatch and structured iteration are deliberately separate
+    axes.  CUDA conditional Graph can stop an iterative command stream exactly
+    without providing CUDA indirect grid launch; conversely Vulkan can consume
+    an exact indirect grid while a bounded structured loop still encodes a
+    masked command budget.
+    """
+
+    bounded = bounded_dispatch_capabilities()
+    structured = structured_control_capabilities()
+    control = structured["device_control"]
+    if control["exact_dynamic_termination"]:
+        iteration_semantics = "exact_dynamic_termination"
+    elif control["runtime_path_qualified"]:
+        iteration_semantics = "bounded_masked_encoding"
+    else:
+        iteration_semantics = "portable_host_control"
+    ticket_observation = structured["backend"] in ("cpu", "cuda", "vulkan")
+    observation_readback_mode = _observation_readback_mode()
+    completion_attached = observation_readback_mode.startswith(
+        "completion_attached_"
+    )
+    return {
+        "schema_version": 1,
+        "backend": structured["backend"],
+        "bounded_dispatch": {
+            "available": bounded["available"],
+            "route": bounded["route"],
+            "execution_semantics": bounded["execution_semantics"],
+            "device_known_count": bounded["device_known_count"],
+            "no_host_readback": bounded["no_host_readback"],
+            "exact_physical_grid": bounded["exact_grid"],
+            "masked_capacity": bounded["masked_capacity"],
+            "zero_count_command_skip": bounded["zero_count_command_skip"],
+            "producer_owned_launch_state": bounded[
+                "producer_owned_launch_state_supported"
+            ],
+            "producer_packet_consumed": bounded["producer_packet_consumed"],
+            "default_preparation_dispatches": bounded[
+                "default_preparation_dispatches"
+            ],
+        },
+        "structured_iteration": {
+            "available": control["runtime_path_qualified"],
+            "route": control["primitive"],
+            "execution_semantics": iteration_semantics,
+            "logical_termination_exact": control["logical_termination_exact"],
+            "command_termination_exact": control["exact_dynamic_termination"],
+            "stops_command_issue_after_exit": control[
+                "stops_command_issue_after_exit"
+            ],
+            "bounded_masked_encoding": control["bounded_masked_graph"]
+            or (
+                structured["backend"] == "vulkan"
+                and control["runtime_path_qualified"]
+            ),
+            "max_encoded_dispatches": control["max_encoded_dispatches"],
+        },
+        "observation": {
+            "submission_ticket": ticket_observation,
+            "completion_attached": completion_attached,
+            "readback_mode": observation_readback_mode,
+            "per_iteration_host_observation": False,
+            "fallback_reason": (
+                "none"
+                if completion_attached
+                else "disabled_or_backend_unqualified"
+            ),
+        },
+    }
+
+
 def _execution_report(
     definition,
     arch,
@@ -2472,6 +2686,14 @@ def _execution_report(
         ),
         observation_host_readback_bytes=int(
             observation_arena_stats.get("host_readback_bytes", 0)
+        ),
+        observation_readback_mode=str(
+            observation_arena_stats.get("readback_mode", "unavailable")
+        ),
+        observation_completion_attached=(
+            str(observation_arena_stats.get("readback_mode", "")).startswith(
+                "completion_attached_"
+            )
         ),
         persistent_telemetry_bytes=persistent_telemetry_bytes,
         telemetry_arena_capacity=int(telemetry_arena_stats.get("capacity", 0)),
@@ -3065,11 +3287,16 @@ class _CompiledObservationGraphNode:
             opaque=False,
         )
 
-    def allocate_snapshot_buffers(self):
+    def allocate_snapshot_buffers(self, *, completion_attached=False):
         buffers = {}
         byte_count = 0
         for key, dtype, names in self._groups:
-            buffers[key] = ScalarNdarray(dtype, (len(names),))
+            if completion_attached:
+                buffers[key] = ScalarNdarray._graph_observation_storage(
+                    dtype, (len(names),)
+                )
+            else:
+                buffers[key] = ScalarNdarray(dtype, (len(names),))
             byte_count += np.dtype(to_numpy_type(dtype)).itemsize * len(names)
         return buffers, byte_count
 
@@ -7633,6 +7860,7 @@ class GraphBuilder:
         capacity,
         block_dim=None,
         block_mode="require",
+        launch_state=None,
         template_args=None,
         label=None,
     ):
@@ -7654,6 +7882,28 @@ class GraphBuilder:
             raise ValueError(
                 "bounded dispatch requires exactly one of extent or count"
             )
+        if launch_state is not None:
+            from taichi_forge.lang.device_extent import DeviceDispatchState
+
+            if count is not None:
+                raise ValueError(
+                    "producer-owned launch_state is valid only for device extents"
+                )
+            if not isinstance(launch_state, DeviceDispatchState):
+                raise TypeError(
+                    "bounded dispatch launch_state must be a DeviceDispatchState"
+                )
+            launch_state._validate_current()
+            if launch_state.capacity != capacity:
+                raise ValueError(
+                    "bounded dispatch launch_state capacity does not match capacity"
+                )
+            if block_dim is None:
+                block_dim = launch_state.block_dim
+            elif block_dim != launch_state.block_dim:
+                raise ValueError(
+                    "bounded dispatch block_dim must match launch_state.block_dim"
+                )
         unzipped_args = flatten_args(args)
         backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
         if backend not in ("cpu", "cuda", "vulkan"):
@@ -7697,6 +7947,16 @@ class GraphBuilder:
             return handle
 
         selected_block = _bounded_kernel_geometry(kernel_cpp, backend)
+        if (
+            launch_state is not None
+            and backend == "vulkan"
+            and selected_block != launch_state.block_dim
+        ):
+            raise TaichiRuntimeError(
+                "bounded dispatch selected block dimension does not match "
+                "the producer-owned launch state"
+            )
+        effective_launch_state = launch_state if backend == "vulkan" else None
         extent = _require_bounded_symbolic_ndarray(extent, "extent", i32)
         if extent.name not in _runtime_arg_names(unzipped_args):
             raise TaichiRuntimeError(
@@ -7705,30 +7965,35 @@ class GraphBuilder:
         packet = None
         if backend == "vulkan":
             unique = next(_bounded_dispatch_ids)
-            packet = ScalarNdarray(u32, (3,))
+            packet = (
+                effective_launch_state.packet
+                if effective_launch_state is not None
+                else ScalarNdarray(u32, (3,))
+            )
             packet_arg = Arg(
                 ArgKind.NDARRAY,
                 f"__ti_bounded_packet_{unique}",
                 u32,
                 ndim=1,
             )
-            capacity_arg = Arg(
-                ArgKind.SCALAR, f"__ti_bounded_capacity_{unique}", i32
-            )
-            block_arg = Arg(
-                ArgKind.SCALAR, f"__ti_bounded_block_{unique}", i32
-            )
-            prepare_args = (extent, packet_arg, capacity_arg, block_arg)
-            prepare_cpp = gen_cpp_kernel(
-                _prepare_bounded_dispatch_packet, prepare_args
-            )
-            self._record_dispatch(prepare_cpp, list(prepare_args))
+            if effective_launch_state is None:
+                capacity_arg = Arg(
+                    ArgKind.SCALAR, f"__ti_bounded_capacity_{unique}", i32
+                )
+                block_arg = Arg(
+                    ArgKind.SCALAR, f"__ti_bounded_block_{unique}", i32
+                )
+                prepare_args = (extent, packet_arg, capacity_arg, block_arg)
+                prepare_cpp = gen_cpp_kernel(
+                    _prepare_bounded_dispatch_packet, prepare_args
+                )
+                self._record_dispatch(prepare_cpp, list(prepare_args))
+                self._bind_internal_runtime_arg(capacity_arg, capacity)
+                self._bind_internal_runtime_arg(block_arg, selected_block)
             self._record_indirect_dispatch(
                 kernel_cpp, unzipped_args, packet_arg, label
             )
             self._bind_internal_runtime_arg(packet_arg, packet)
-            self._bind_internal_runtime_arg(capacity_arg, capacity)
-            self._bind_internal_runtime_arg(block_arg, selected_block)
         else:
             self._record_dispatch(kernel_cpp, unzipped_args, label)
 
@@ -7738,6 +8003,7 @@ class GraphBuilder:
             block_dim=selected_block,
             backend=backend,
             packet=packet,
+            launch_state=effective_launch_state,
         )
         self._retain_runtime_graph_lease(handle)
         return handle
@@ -8471,6 +8737,8 @@ class Graph:
                     # once for the whole native portion without changing run().
                     if self._contains_native_nodes_value:
                         transaction._mark_submission()
+                    if observation_lease is not None:
+                        observation_lease.enqueue_tail_readback()
                     completion = transaction._finish()
                     host_submit_ns = time.perf_counter_ns() - host_submit_start_ns
                     queue_after = _queue_submission_snapshot() if telemetry else None
@@ -8941,6 +9209,7 @@ __all__ = [
     "GraphSubmissionQueueTelemetry",
     "GraphSubmissionTelemetry",
     "bounded_dispatch_capabilities",
+    "dynamic_work_capabilities",
     "segmented_dispatch_begin",
     "segmented_dispatch_end",
     "segmented_dispatch_index",

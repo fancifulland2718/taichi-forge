@@ -22,12 +22,25 @@ layout(set = 0, binding = 4, std430) buffer Count {
   int data[];
 } count_buf;
 
+#ifdef DISPATCH_PACKET
+layout(set = 0, binding = 5, std430) buffer DispatchPacket {
+  uint data[];
+} dispatch_packet_buf;
+#endif
+
 void main() {
   uint word_idx = gl_GlobalInvocationID.x;
   uint n = flags_buf.data.length();
   uint value_words = values_buf.data.length();
   if (word_idx == 0u) {
-    count_buf.data[0] = n > 0u ? prefix_buf.data[n - 1u] : 0;
+    uint count = uint(n > 0u ? prefix_buf.data[n - 1u] : 0);
+    count_buf.data[0] = int(count);
+#ifdef DISPATCH_PACKET
+    uint block_dim = max(dispatch_packet_buf.data[3], 1u);
+    dispatch_packet_buf.data[0] = (count + block_dim - 1u) / block_dim;
+    dispatch_packet_buf.data[1] = 1u;
+    dispatch_packet_buf.data[2] = 1u;
+#endif
   }
   if (n == 0u || word_idx >= value_words) {
     return;

@@ -653,6 +653,21 @@ class ScalarNdarray(Ndarray):
         self.shape = tuple(self.arr.shape)
         self.element_type = dtype
 
+    @classmethod
+    def _graph_observation_storage(cls, dtype, arr_shape):
+        """Allocate tiny completion-attached storage for Graph snapshots."""
+
+        value = cls.__new__(cls)
+        Ndarray.__init__(value)
+        value.dtype = cook_dtype(dtype)
+        value.arr = impl.get_runtime().prog._create_graph_observation_ndarray(
+            value.dtype, arr_shape, layout=Layout.NULL
+        )
+        value._register_runtime_object()
+        value.shape = tuple(value.arr.shape)
+        value.element_type = dtype
+        return value
+
     @property
     def element_shape(self):
         return ()

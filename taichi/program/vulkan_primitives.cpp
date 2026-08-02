@@ -698,6 +698,9 @@ static const uint32_t kCompactI32FlagsSpv[] =
 static const uint32_t kCompactI32ScatterSpv[] =
 #include "taichi/program/vulkan_sort_shaders/compact_i32_scatter.comp.spv.h"
     ;
+static const uint32_t kCompactI32ScatterPacketSpv[] =
+#include "taichi/program/vulkan_sort_shaders/compact_i32_scatter_packet.comp.spv.h"
+    ;
 static const uint32_t kHistogramI32ClearSpv[] =
 #include "taichi/program/vulkan_sort_shaders/histogram_i32_clear.comp.spv.h"
     ;
@@ -3492,8 +3495,10 @@ struct VulkanCompactCache {
   VulkanScanCache scan;
   std::unique_ptr<Pipeline> compact_i32_flags;
   std::unique_ptr<Pipeline> compact_i32_scatter;
+  std::unique_ptr<Pipeline> compact_i32_scatter_packet;
   VulkanResourceSetReplayRing<2> flags_bindings;
   VulkanResourceSetReplayRing<5> scatter_bindings;
+  VulkanResourceSetReplayRing<6> scatter_packet_bindings;
   VulkanCommandReplayCache ndarray_fused_command_replay;
   VulkanCommandReplayCache dense_field_fused_command_replay;
   VulkanCommandReplayCache ndarray_flags_command_replay;
@@ -3504,6 +3509,7 @@ struct VulkanCompactCache {
   void reset_resource_sets() {
     flags_bindings.reset();
     scatter_bindings.reset();
+    scatter_packet_bindings.reset();
     ndarray_fused_command_replay.reset();
     dense_field_fused_command_replay.reset();
     ndarray_flags_command_replay.reset();
@@ -3529,6 +3535,7 @@ struct VulkanCompactCache {
   void reset_pipelines() {
     compact_i32_flags.reset();
     compact_i32_scatter.reset();
+    compact_i32_scatter_packet.reset();
     reset_resource_sets();
   }
 
@@ -3556,6 +3563,11 @@ struct VulkanCompactCache {
     if (!compact_i32_scatter) {
       compact_i32_scatter = create_pipeline(
           dev, kCompactI32ScatterSpv, "vulkan_compact_i32_scatter");
+    }
+    if (!compact_i32_scatter_packet) {
+      compact_i32_scatter_packet = create_pipeline(
+          dev, kCompactI32ScatterPacketSpv,
+          "vulkan_compact_i32_scatter_packet");
     }
   }
 
@@ -3638,6 +3650,33 @@ struct VulkanCompactCache {
             rw_buffer_request(prefix_alloc, 0, prefix_bytes),
             rw_buffer_request(output_alloc, output_offset, value_total_bytes),
             rw_buffer_request(count_alloc, count_offset, sizeof(int32_t))});
+  }
+
+  VulkanReplayResourceSet<6> bind_scatter_packet_resource_set(
+      Program *program,
+      DeviceAllocation values_alloc,
+      uint64_t values_offset,
+      size_t value_total_bytes,
+      DeviceAllocation flags_alloc,
+      uint64_t flags_offset,
+      size_t prefix_bytes,
+      DeviceAllocation prefix_alloc,
+      DeviceAllocation output_alloc,
+      uint64_t output_offset,
+      DeviceAllocation count_alloc,
+      uint64_t count_offset,
+      DeviceAllocation packet_alloc,
+      uint64_t packet_offset) {
+    return scatter_packet_bindings.bind(
+        program, device,
+        std::array<VulkanRwBufferBindingRequest, 6>{
+            rw_buffer_request(values_alloc, values_offset, value_total_bytes),
+            rw_buffer_request(flags_alloc, flags_offset, prefix_bytes),
+            rw_buffer_request(prefix_alloc, 0, prefix_bytes),
+            rw_buffer_request(output_alloc, output_offset, value_total_bytes),
+            rw_buffer_request(count_alloc, count_offset, sizeof(int32_t)),
+            rw_buffer_request(packet_alloc, packet_offset,
+                              4 * sizeof(uint32_t))});
   }
 };
 
@@ -13895,6 +13934,18 @@ std::size_t Program::vulkan_compact_ndarray(Ndarray *values,
                                             Ndarray *output,
                                             Ndarray *count,
                                             int value_type) {
+  return vulkan_compact_ndarray_bounded(values, flags, output, count,
+                                        value_type, nullptr, 0);
+}
+
+std::size_t Program::vulkan_compact_ndarray_bounded(
+    Ndarray *values,
+    Ndarray *flags,
+    Ndarray *output,
+    Ndarray *count,
+    int value_type,
+    Ndarray *dispatch_packet,
+    int block_dim) {
   auto native_ndarray_submission_guard =
       acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
@@ -13911,6 +13962,15 @@ std::size_t Program::vulkan_compact_ndarray(Ndarray *values,
               "Vulkan native compact output must have at least input length.");
   TI_ERROR_IF(count->get_nelement() < 1,
               "Vulkan native compact count must contain at least one item.");
+  TI_ERROR_IF(dispatch_packet != nullptr &&
+                  (dispatch_packet->shape.size() != 1 ||
+                   dispatch_packet->get_nelement() < 4 ||
+                   dispatch_packet->get_element_size() != sizeof(uint32_t)),
+              "Vulkan bounded compact dispatch packet must contain at least "
+              "four u32 words.");
+  TI_ERROR_IF(dispatch_packet != nullptr &&
+                  (block_dim <= 0 || block_dim > 1024),
+              "Vulkan bounded compact block dimension must be in [1, 1024].");
   const size_t expected_value_bytes =
       (value_type == 0 || value_type == 1 || value_type == 2)
           ? sizeof(uint32_t)
@@ -13954,9 +14014,13 @@ std::size_t Program::vulkan_compact_ndarray(Ndarray *values,
   DeviceAllocation flags_alloc = flags->ndarray_alloc_;
   DeviceAllocation output_alloc = output->ndarray_alloc_;
   DeviceAllocation count_alloc = count->ndarray_alloc_;
+  DeviceAllocation packet_alloc =
+      dispatch_packet ? dispatch_packet->ndarray_alloc_ : kDeviceNullAllocation;
   DeviceAllocation prefix_alloc = cache.prefix;
   Pipeline *flags_pipeline = cache.compact_i32_flags.get();
-  Pipeline *scatter_pipeline = cache.compact_i32_scatter.get();
+  Pipeline *scatter_pipeline =
+      dispatch_packet ? cache.compact_i32_scatter_packet.get()
+                      : cache.compact_i32_scatter.get();
   const bool profiler_scopes = profiler != nullptr;
   const uint32_t flag_groups =
       static_cast<uint32_t>((n + kBlockSize - 1) / kBlockSize);
@@ -13972,13 +14036,24 @@ std::size_t Program::vulkan_compact_ndarray(Ndarray *values,
           .bind_flags_resource_set(this, flags_alloc, 0, prefix_alloc,
                                    prefix_bytes)
           .bindings;
-  ShaderResourceSet *scatter_resource_set =
-      cache
-          .bind_scatter_resource_set(this, values_alloc, 0, value_total_bytes,
-                                     flags_alloc, 0, prefix_bytes,
-                                     prefix_alloc, output_alloc, 0,
-                                     count_alloc, 0)
-          .bindings;
+  ShaderResourceSet *scatter_resource_set = nullptr;
+  if (dispatch_packet) {
+    scatter_resource_set =
+        cache
+            .bind_scatter_packet_resource_set(
+                this, values_alloc, 0, value_total_bytes, flags_alloc, 0,
+                prefix_bytes, prefix_alloc, output_alloc, 0, count_alloc, 0,
+                packet_alloc, 0)
+            .bindings;
+  } else {
+    scatter_resource_set =
+        cache
+            .bind_scatter_resource_set(this, values_alloc, 0,
+                                       value_total_bytes, flags_alloc, 0,
+                                       prefix_bytes, prefix_alloc, output_alloc,
+                                       0, count_alloc, 0)
+            .bindings;
+  }
 
   if (use_fused_recording) {
     auto scan_plan = prepare_vulkan_i32_scan(this, cache.scan, prefix_alloc, n);
@@ -13987,8 +14062,8 @@ std::size_t Program::vulkan_compact_ndarray(Ndarray *values,
         [flags_alloc, prefix_alloc, prefix_bytes, flags_pipeline, flag_groups,
          values_alloc, output_alloc, count_alloc, scatter_pipeline, scan_plan,
          value_total_bytes, word_groups, flags_resource_set,
-         scatter_resource_set, profiler_scopes](Device *op_device,
-                                                CommandList *cmdlist) {
+         scatter_resource_set, packet_alloc,
+         profiler_scopes](Device *op_device, CommandList *cmdlist) {
           {
             ShaderResourceSet *bindings = flags_resource_set;
             dispatch_pipeline(cmdlist, flags_pipeline, bindings,
@@ -14008,6 +14083,9 @@ std::size_t Program::vulkan_compact_ndarray(Ndarray *values,
           }
           cmdlist->buffer_barrier(output_alloc);
           cmdlist->buffer_barrier(count_alloc);
+          if (packet_alloc != kDeviceNullAllocation) {
+            cmdlist->buffer_barrier(packet_alloc);
+          }
         };
     VulkanCommandReplayKey command_key = make_vulkan_compact_fused_command_key(
         false, value_type, values_alloc, 0, value_total_bytes, flags_alloc, 0,
@@ -14054,7 +14132,7 @@ std::size_t Program::vulkan_compact_ndarray(Ndarray *values,
   auto record_compact_scatter =
       [values_alloc, flags_alloc, prefix_alloc, output_alloc, count_alloc,
        prefix_bytes, value_total_bytes, scatter_pipeline, word_groups,
-       scatter_resource_set,
+       scatter_resource_set, packet_alloc,
        profiler_scopes](Device * /*op_device*/, CommandList *cmdlist) {
         ShaderResourceSet *bindings = scatter_resource_set;
         dispatch_pipeline(cmdlist, scatter_pipeline, bindings,
@@ -14063,6 +14141,9 @@ std::size_t Program::vulkan_compact_ndarray(Ndarray *values,
                                           : nullptr);
         cmdlist->buffer_barrier(output_alloc);
         cmdlist->buffer_barrier(count_alloc);
+        if (packet_alloc != kDeviceNullAllocation) {
+          cmdlist->buffer_barrier(packet_alloc);
+        }
       };
   VulkanCommandReplayKey scatter_command_key;
   scatter_command_key.push(71);
@@ -14077,6 +14158,10 @@ std::size_t Program::vulkan_compact_ndarray(Ndarray *values,
                                 value_total_bytes);
   push_vulkan_command_key_range(scatter_command_key, count_alloc, 0,
                                 sizeof(int32_t));
+  if (packet_alloc != kDeviceNullAllocation) {
+    push_vulkan_command_key_range(scatter_command_key, packet_alloc, 0,
+                                  4 * sizeof(uint32_t));
+  }
   scatter_command_key.push(word_groups);
   scatter_command_key.push_ptr(scatter_pipeline);
   scatter_command_key.push_ptr(scatter_resource_set);
@@ -19836,6 +19921,18 @@ std::size_t Program::vulkan_compact_ndarray(Ndarray *values,
                                             Ndarray *output,
                                             Ndarray *count,
                                             int value_type) {
+  return vulkan_compact_ndarray_bounded(values, flags, output, count,
+                                        value_type, nullptr, 0);
+}
+
+std::size_t Program::vulkan_compact_ndarray_bounded(
+    Ndarray *values,
+    Ndarray *flags,
+    Ndarray *output,
+    Ndarray *count,
+    int value_type,
+    Ndarray *dispatch_packet,
+    int block_dim) {
   auto native_ndarray_submission_guard =
       acquire_runtime_resource_submission_guard();
   TI_ERROR("Vulkan native compact requires TI_WITH_VULKAN=ON.");

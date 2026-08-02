@@ -27,7 +27,8 @@ Ndarray::Ndarray(Program *prog,
                  const DataType type,
                  const std::vector<int> &shape_,
                  ExternalArrayLayout layout_,
-                 const DebugInfo &dbg_info_)
+                 const DebugInfo &dbg_info_,
+                 bool host_read)
     : dtype(type),
       shape(shape_),
       layout(layout_),
@@ -37,7 +38,8 @@ Ndarray::Ndarray(Program *prog,
                                 1,
                                 std::multiplies<>())),
       element_size_(data_type_size(dtype)),
-      prog_(prog) {
+      prog_(prog),
+      host_readable_(host_read) {
   // Now that we have two shapes which may be concatenated differently
   // depending on layout, total_shape_ comes handy.
   total_shape_ = shape;
@@ -62,8 +64,13 @@ Ndarray::Ndarray(Program *prog,
   if (prog->compile_config().arch == Arch::vulkan) {
     usage = usage | AllocUsage::Indirect;
   }
-  ndarray_alloc_ = prog->allocate_memory_on_device(
-      nelement_ * element_size_, prog->result_buffer, usage);
+  if (host_read) {
+    ndarray_alloc_ = prog->allocate_host_read_memory_on_device(
+        nelement_ * element_size_, usage);
+  } else {
+    ndarray_alloc_ = prog->allocate_memory_on_device(
+        nelement_ * element_size_, prog->result_buffer, usage);
+  }
 }
 
 Ndarray::Ndarray(DeviceAllocation &devalloc,

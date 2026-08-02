@@ -1536,6 +1536,18 @@ void export_lang(py::module &m) {
           py::arg("layout") = ExternalArrayLayout::kNull,
           py::arg("zero_fill") = false, py::arg("dbg_info") = DebugInfo(),
           py::return_value_policy::reference)
+      .def(
+          "_create_graph_observation_ndarray",
+          [&](Program *program, const DataType &dt,
+              const std::vector<int> &shape,
+              ExternalArrayLayout layout) -> Ndarray * {
+            return program->create_ndarray(dt, shape, layout,
+                                           /*zero_fill=*/false, DebugInfo(),
+                                           /*host_read=*/true);
+          },
+          py::arg("dt"), py::arg("shape"),
+          py::arg("layout") = ExternalArrayLayout::kNull,
+          py::return_value_policy::reference)
       .def("delete_ndarray", &Program::delete_ndarray)
       .def(
           "create_argpack",
@@ -1688,6 +1700,101 @@ void export_lang(py::module &m) {
                  const_srcs.data(), host_ptrs.data(), bytes.data(),
                  const_srcs.size());
            })
+      .def("_copy_host_readable_graph_observations_to_host",
+           [](Program *program, const std::vector<Ndarray *> &srcs,
+              const py::sequence &dsts) {
+             TI_ERROR_IF(
+                 srcs.size() != static_cast<std::size_t>(py::len(dsts)),
+                 "Host-readable Graph observation received {} sources and {} "
+                 "destinations.",
+                 srcs.size(), py::len(dsts));
+             std::vector<const Ndarray *> const_srcs(srcs.begin(), srcs.end());
+             std::vector<py::buffer_info> infos;
+             std::vector<void *> host_ptrs;
+             std::vector<std::size_t> bytes;
+             infos.reserve(srcs.size());
+             host_ptrs.reserve(srcs.size());
+             bytes.reserve(srcs.size());
+             for (std::size_t i = 0; i < srcs.size(); ++i) {
+               py::buffer dst =
+                   py::reinterpret_borrow<py::buffer>(dsts[py::int_(i)]);
+               infos.push_back(dst.request());
+               const py::buffer_info &info = infos.back();
+               TI_ERROR_IF(
+                   info.readonly,
+                   "Host-readable Graph observation received a read-only "
+                   "buffer at index {}.",
+                   i);
+               TI_ERROR_IF(
+                   info.size < 0 || info.itemsize < 0,
+                   "Host-readable Graph observation received an invalid "
+                   "buffer at index {}.",
+                   i);
+               host_ptrs.push_back(info.ptr);
+               bytes.push_back(static_cast<std::size_t>(info.size) *
+                               static_cast<std::size_t>(info.itemsize));
+             }
+             py::gil_scoped_release release;
+             program->copy_host_readable_graph_observations_to_host(
+                 const_srcs.data(), host_ptrs.data(), bytes.data(),
+                 const_srcs.size());
+           })
+      .def("_create_cuda_graph_observation_readback",
+           &Program::create_cuda_graph_observation_readback,
+           py::arg("bytes"))
+      .def("_destroy_cuda_graph_observation_readback",
+           &Program::destroy_cuda_graph_observation_readback,
+           py::arg("handle"))
+      .def(
+          "_enqueue_cuda_graph_observation_readback",
+          [](Program *program, std::uint64_t handle,
+             const std::vector<Ndarray *> &srcs) {
+            std::vector<const Ndarray *> const_srcs(srcs.begin(), srcs.end());
+            std::vector<std::size_t> bytes;
+            bytes.reserve(srcs.size());
+            for (const Ndarray *src : srcs) {
+              TI_ERROR_IF(!src,
+                          "CUDA Graph observation received a null source.");
+              bytes.push_back(src->get_nelement() * src->get_element_size());
+            }
+            py::gil_scoped_release release;
+            program->enqueue_cuda_graph_observation_readback(
+                handle, const_srcs.data(), bytes.data(), const_srcs.size());
+          },
+          py::arg("handle"), py::arg("sources"))
+      .def(
+          "_copy_cuda_graph_observation_readback_to_host",
+          [](Program *program, std::uint64_t handle,
+             const py::sequence &dsts) {
+            std::vector<py::buffer_info> infos;
+            std::vector<void *> host_ptrs;
+            std::vector<std::size_t> bytes;
+            const std::size_t count = static_cast<std::size_t>(py::len(dsts));
+            infos.reserve(count);
+            host_ptrs.reserve(count);
+            bytes.reserve(count);
+            for (std::size_t i = 0; i < count; ++i) {
+              py::buffer dst =
+                  py::reinterpret_borrow<py::buffer>(dsts[py::int_(i)]);
+              infos.push_back(dst.request());
+              const py::buffer_info &info = infos.back();
+              TI_ERROR_IF(info.readonly,
+                          "CUDA Graph observation received a read-only "
+                          "destination at index {}.",
+                          i);
+              TI_ERROR_IF(info.size < 0 || info.itemsize < 0,
+                          "CUDA Graph observation received an invalid "
+                          "destination at index {}.",
+                          i);
+              host_ptrs.push_back(info.ptr);
+              bytes.push_back(static_cast<std::size_t>(info.size) *
+                              static_cast<std::size_t>(info.itemsize));
+            }
+            py::gil_scoped_release release;
+            program->copy_cuda_graph_observation_readback_to_host(
+                handle, host_ptrs.data(), bytes.data(), count);
+          },
+          py::arg("handle"), py::arg("destinations"))
       .def("_graph_observation_staging_stats", [](Program *program) {
         const auto stats = program->graph_observation_staging_statistics();
         py::dict result;
@@ -1698,6 +1805,10 @@ void export_lang(py::module &m) {
         result["direct_batches"] = stats.direct_batches;
         result["fallback_batches"] = stats.fallback_batches;
         result["packed_payload_bytes"] = stats.packed_payload_bytes;
+        result["completion_attached_batches"] =
+            stats.completion_attached_batches;
+        result["completion_attached_bytes"] =
+            stats.completion_attached_bytes;
         return result;
       })
       .def("cuda_device_transform_available",
@@ -2878,6 +2989,13 @@ void export_lang(py::module &m) {
       .def("vulkan_compact_ndarray", tracked_native_program_method(&Program::vulkan_compact_ndarray),
            py::arg("values"), py::arg("flags"), py::arg("output"),
            py::arg("count"), py::arg("value_type"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_compact_ndarray_bounded",
+           tracked_native_program_method(
+               &Program::vulkan_compact_ndarray_bounded),
+           py::arg("values"), py::arg("flags"), py::arg("output"),
+           py::arg("count"), py::arg("value_type"),
+           py::arg("dispatch_packet"), py::arg("block_dim"),
            py::call_guard<py::gil_scoped_release>())
       .def("vulkan_compact_dense_field", tracked_native_program_method(&Program::vulkan_compact_dense_field),
            py::arg("values"), py::arg("flags"), py::arg("output"),

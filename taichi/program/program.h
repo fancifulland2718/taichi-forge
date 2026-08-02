@@ -67,6 +67,8 @@ struct GraphObservationStagingStatistics {
   std::uint64_t direct_batches{0};
   std::uint64_t fallback_batches{0};
   std::uint64_t packed_payload_bytes{0};
+  std::uint64_t completion_attached_batches{0};
+  std::uint64_t completion_attached_bytes{0};
 };
 
 class Program;
@@ -619,6 +621,9 @@ class TI_DLL_EXPORT Program {
     return program_impl_->allocate_memory_on_device(alloc_size, result_buffer,
                                                    usage);
   }
+  DeviceAllocation allocate_host_read_memory_on_device(
+      std::size_t alloc_size,
+      AllocUsage usage);
   DeviceAllocation allocate_texture(const ImageParams &params) {
     return program_impl_->allocate_texture(params);
   }
@@ -628,7 +633,8 @@ class TI_DLL_EXPORT Program {
       const std::vector<int> &shape,
       ExternalArrayLayout layout = ExternalArrayLayout::kNull,
       bool zero_fill = false,
-      const DebugInfo &dbg_info = DebugInfo());
+      const DebugInfo &dbg_info = DebugInfo(),
+      bool host_read = false);
 
   ArgPack *create_argpack(const DataType dt);
 
@@ -751,6 +757,23 @@ class TI_DLL_EXPORT Program {
                                        void *const *dsts,
                                        const std::size_t *bytes,
                                        std::size_t count);
+  void copy_host_readable_graph_observations_to_host(
+      const Ndarray *const *srcs,
+      void *const *dsts,
+      const std::size_t *bytes,
+      std::size_t count);
+  std::uint64_t create_cuda_graph_observation_readback(std::size_t bytes);
+  void destroy_cuda_graph_observation_readback(std::uint64_t handle);
+  void enqueue_cuda_graph_observation_readback(
+      std::uint64_t handle,
+      const Ndarray *const *srcs,
+      const std::size_t *bytes,
+      std::size_t count);
+  void copy_cuda_graph_observation_readback_to_host(
+      std::uint64_t handle,
+      void *const *dsts,
+      const std::size_t *bytes,
+      std::size_t count);
   GraphObservationStagingStatistics graph_observation_staging_statistics();
 
   bool cuda_device_transform_available() const;
@@ -2251,6 +2274,14 @@ class TI_DLL_EXPORT Program {
                                      Ndarray *count,
                                      int value_type);
 
+  std::size_t vulkan_compact_ndarray_bounded(Ndarray *values,
+                                             Ndarray *flags,
+                                             Ndarray *output,
+                                             Ndarray *count,
+                                             int value_type,
+                                             Ndarray *dispatch_packet,
+                                             int block_dim);
+
   std::size_t vulkan_compact_dense_field(SNode *values,
                                          SNode *flags,
                                          SNode *output,
@@ -3465,6 +3496,15 @@ class TI_DLL_EXPORT Program {
     std::uint64_t direct_batches{0};
     std::uint64_t fallback_batches{0};
     std::uint64_t packed_payload_bytes{0};
+    std::uint64_t completion_attached_batches{0};
+    std::uint64_t completion_attached_bytes{0};
+    struct CudaPinnedReadback {
+      void *host_ptr{nullptr};
+      std::size_t capacity{0};
+    };
+    std::unordered_map<std::uint64_t, CudaPinnedReadback> cuda_readbacks;
+    std::uint64_t next_cuda_readback_handle{1};
+    std::size_t cuda_pinned_bytes{0};
   } graph_observation_staging_;
   std::atomic<std::uint64_t> dense_storage_direct_submissions_{0};
   std::atomic<std::uint64_t> dense_storage_resolved_bindings_{0};

@@ -24,7 +24,8 @@ class TI_DLL_EXPORT Ndarray {
                    const DataType type,
                    const std::vector<int> &shape,
                    ExternalArrayLayout layout = ExternalArrayLayout::kNull,
-                   const DebugInfo &dbg_info = DebugInfo());
+                   const DebugInfo &dbg_info = DebugInfo(),
+                   bool host_read = false);
 
   /* Constructs a Ndarray from an existing DeviceAllocation.
    * It doesn't handle the allocation and deallocation.
@@ -70,6 +71,9 @@ class TI_DLL_EXPORT Ndarray {
   }
   std::size_t get_element_size() const;
   std::size_t get_nelement() const;
+  bool is_host_readable() const noexcept {
+    return host_readable_;
+  }
   TypedConstant read(const std::vector<int> &I) const;
   void write(const std::vector<int> &I, TypedConstant val) const;
   int64 read_int(const std::vector<int> &i);
@@ -94,6 +98,7 @@ class TI_DLL_EXPORT Ndarray {
   std::vector<int> total_shape_;
 
   Program *prog_{nullptr};
+  bool host_readable_{false};
   // Immutable after registry publication. Context binding can copy this
   // generation-qualified identity without repeating the view-map lookup;
   // launch still validates it before dereferencing the allocation.
