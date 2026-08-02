@@ -32,6 +32,24 @@ constexpr std::uint32_t kRadixDigits = 1u << kRadixBitsPerPass;
 constexpr std::uint32_t kRadixItemsPerBlock = 1024;
 constexpr std::uint64_t kWorkspaceVariant = 0x4452565054580001ull;
 
+constexpr std::size_t radix_histogram_level_count(std::uint32_t count) {
+  std::size_t levels = 1;
+  while (count > kScanTileItems) {
+    count = (count + kScanTileItems - 1u) / kScanTileItems;
+    ++levels;
+  }
+  return levels;
+}
+
+static_assert(radix_histogram_level_count(1) == 1);
+static_assert(radix_histogram_level_count(kScanTileItems) == 1);
+static_assert(radix_histogram_level_count(kScanTileItems + 1) == 2);
+static_assert(radix_histogram_level_count(kScanTileItems *
+                                          kScanTileItems) == 2);
+static_assert(radix_histogram_level_count(kScanTileItems *
+                                              kScanTileItems +
+                                          1) == 3);
+
 struct KernelSet {
   void *module{nullptr};
   std::array<void *, 6> scan{};
@@ -1888,6 +1906,8 @@ std::size_t driver_stable_radix_sort_strided(
   std::array<std::uint32_t, 8> histogram_counts{};
   std::array<std::size_t, 8> histogram_offsets{};
   std::size_t histogram_level_count = 0;
+  const std::size_t expected_histogram_level_count =
+      radix_histogram_level_count(radix_block_count);
   std::uint32_t histogram_count = radix_block_count;
   for (;;) {
     TI_ASSERT(histogram_level_count < histogram_counts.size());
@@ -1901,12 +1921,17 @@ std::size_t driver_stable_radix_sort_strided(
         static_cast<std::size_t>(histogram_count) * kRadixDigits *
         sizeof(std::uint32_t));
     ++histogram_level_count;
-    if (histogram_count <= 1u) {
+    // One scan block already produces the complete prefix for a digit when
+    // the level fits in a tile.  Adding a one-element parent in that case
+    // launches a redundant scan followed by a uniform-add that cannot touch
+    // any tile other than zero.
+    if (histogram_count <= kScanTileItems) {
       break;
     }
     histogram_count =
         (histogram_count + kScanTileItems - 1u) / kScanTileItems;
   }
+  TI_ASSERT(histogram_level_count == expected_histogram_level_count);
   const std::size_t digit_bases_offset =
       reserve(kRadixDigits * sizeof(std::uint32_t));
   const std::size_t keys_output_offset = reserve(checked_bytes(key_size));
