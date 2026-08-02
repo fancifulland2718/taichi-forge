@@ -181,6 +181,91 @@ def _validate_cpu_native_ad() -> None:
     _checkpoint("cpu native AD: reset passed")
 
 
+def _validate_cpu_dynamic_workload() -> None:
+    """Exercise the 0.6.1 device-owned count and worklist contracts."""
+
+    capacity = 17
+    requested = capacity + 3
+    _checkpoint("cpu dynamic workload: init")
+    ti.init(arch=ti.cpu, offline_cache=False)
+
+    capabilities = ti.graph.dynamic_work_capabilities()
+    if capabilities.get("schema_version") != 2:
+        raise RuntimeError(
+            "installed runtime does not expose dynamic-work schema v2"
+        )
+    if not capabilities.get("worklist", {}).get("available", False):
+        raise RuntimeError("installed runtime does not expose DeviceWorklist")
+
+    @ti.kernel
+    def append_items(
+        values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        extent_state: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        generated: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        overflow: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        bound: ti.i32,
+        count: ti.i32,
+    ):
+        for i in range(count):
+            ti.algorithms.device_worklist_append(
+                values,
+                extent_state,
+                generated,
+                overflow,
+                bound,
+                i * 2 + 1,
+            )
+
+    @ti.kernel
+    def consume_items(
+        values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        extent_state: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in range(capacity):
+            if i < ti.device_extent_count(extent_state):
+                output[i] = values[i] * 3
+
+    worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)
+    worklist.prepare_next()
+    append_items(*worklist.append_arguments(), requested)
+    worklist.commit_next()
+    snapshot = worklist.snapshot()
+    if snapshot.extent.count != capacity or not snapshot.extent.overflow:
+        raise RuntimeError(
+            "DeviceWorklist did not clamp and report an overflowing producer"
+        )
+
+    graph_args = worklist.graph_args("wheel_worklist")
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "wheel_worklist_output", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    handle = builder.dispatch_bounded(
+        consume_items,
+        graph_args.values,
+        graph_args.extent,
+        output_arg,
+        extent=graph_args.extent,
+        capacity=capacity,
+    )
+    graph = builder.compile()
+    output = ti.ndarray(ti.i32, shape=capacity)
+    runtime_args = worklist.runtime_arguments("wheel_worklist")
+    runtime_args["wheel_worklist_output"] = output
+    graph.run(runtime_args)
+
+    expected = (np.arange(capacity, dtype=np.int32) * 2 + 1) * 3
+    np.testing.assert_array_equal(np.sort(output.to_numpy()), expected)
+    report = worklist.execution_report(handle)
+    if report.useful_count != capacity or report.executed_count != capacity:
+        raise RuntimeError(
+            "bounded DeviceWorklist consumer reported inconsistent execution"
+        )
+    ti.reset()
+    _checkpoint("cpu dynamic workload: passed")
+
+
 def _validate_cpu_field_roundtrips() -> None:
     """Exercise field addressing and readback through an installed wheel."""
 
@@ -289,6 +374,8 @@ def main() -> None:
     _checkpoint("cpu field roundtrips: passed")
     _validate_cpu_native_ad()
     _checkpoint("cpu native AD: passed")
+    _validate_cpu_dynamic_workload()
+    _checkpoint("cpu dynamic workload: passed")
     if cudart is None:
         dependency = "driver-only; bundled CUDART=none"
     else:
