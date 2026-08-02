@@ -2541,6 +2541,9 @@ def test_cuda_structured_control_route_prefers_exact_then_masked(monkeypatch):
     monkeypatch.delenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL")
     base["general_graph_exact_control_available"] = False
     assert _cuda_structured_control_lowering(base) == "cuda_masked_bounded_graph"
+    base["driver_version_eligible"] = False
+    base["conditional_graph_symbols_loaded"] = False
+    assert _cuda_structured_control_lowering(base) == "cuda_masked_bounded_graph"
     base["internal_masked_graph_available"] = False
     assert _cuda_structured_control_lowering(base) is None
 
@@ -2659,20 +2662,20 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         assert not device["compound_single_preparation"]
         assert device["structured_barrier_policy"] == "unavailable"
     if arch == ti.cuda:
-        expected = bool(
-            capabilities["cuda_conditional_graph"]["driver_version_eligible"]
-            and capabilities["cuda_conditional_graph"][
-                "conditional_graph_symbols_loaded"
-            ]
-            and capabilities["cuda_conditional_graph"][
-                "general_device_setter_lowering_compiled"
-            ]
+        cuda = capabilities["cuda_conditional_graph"]
+        expected_exact = bool(cuda["general_graph_exact_control_available"])
+        expected_masked = bool(cuda["internal_masked_graph_available"])
+        expected = expected_exact or expected_masked
+        expected_primitive = (
+            "cuda_conditional_graph"
+            if expected_exact
+            else ("cuda_masked_bounded_graph" if expected_masked else "none")
         )
-        assert device["primitive"] == "cuda_conditional_graph"
+        assert cuda["selected_general_graph_control"] == expected_primitive
+        assert device["primitive"] == expected_primitive
         assert device["runtime_path_compiled"] == bool(
-            capabilities["cuda_conditional_graph"][
-                "general_device_setter_lowering_compiled"
-            ]
+            cuda["general_device_setter_lowering_compiled"]
+            or cuda["internal_masked_latch_compiled"]
         )
         assert device["rhi_primitive_qualified"] == expected
         assert device["runtime_path_qualified"] == expected
@@ -2681,8 +2684,24 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         assert device["chunk_iteration_limit"] == 0
         assert device["logical_termination_exact"] == expected
         assert device["device_controlled_masking"] == expected
-        assert device["stops_command_issue_after_exit"] == expected
-        assert device["exact_dynamic_termination"] == expected
+        assert device["stops_command_issue_after_exit"] == expected_exact
+        assert device["exact_dynamic_termination"] == expected_exact
+        assert device["exact_conditional_graph"] == expected_exact
+        assert device["bounded_masked_graph"] == (
+            expected_masked and not expected_exact
+        )
+        assert device["max_encoded_dispatches"] == (
+            4096 if expected_masked and not expected_exact else 0
+        )
+        assert (
+            cuda["exact_control_unavailable_reason"] == "none"
+        ) == expected_exact
+        assert (
+            cuda["masked_control_unavailable_reason"] == "none"
+        ) == expected_masked
+        assert (
+            cuda["selected_general_graph_control_unavailable_reason"] == "none"
+        ) == expected
         assert device["nested_leaf_native_kinds"] == (
             ("while", "if", "switch") if expected else ()
         )
