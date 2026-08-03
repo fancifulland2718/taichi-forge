@@ -30,6 +30,7 @@ from taichi_forge.graph._ir import (
     WhileRegion,
     analyze_elementwise_fusion,
     analyze_graph_ir,
+    analyze_parallel_candidate,
     graph_ir_to_dict,
     plan_temporary_memory,
 )
@@ -1256,6 +1257,217 @@ def test_temporary_memory_plan_reuses_only_nonoverlapping_intervals():
     assert conflict_plan["conflicting_requirements"] == 1
     assert conflict_plan["opaque_bytes"] == 128
     assert conflict_plan["planned_peak_bytes"] == 0
+
+
+def test_parallel_candidate_analysis_is_fail_closed_and_memory_aware():
+    safe = analyze_parallel_candidate(
+        (
+            SequentialRegion(
+                (
+                    DispatchNode(
+                        "read_a",
+                        effects=(
+                            ResourceEffect(
+                                "static_a", GraphAccess.READ, runtime_bound=False
+                            ),
+                        ),
+                        temporaries=(TemporaryRequirement("branch_a", 64, 16),),
+                        opaque=False,
+                    ),
+                )
+            ),
+            SequentialRegion(
+                (
+                    DispatchNode(
+                        "write_b",
+                        effects=(
+                            ResourceEffect(
+                                "static_b", GraphAccess.WRITE, runtime_bound=False
+                            ),
+                        ),
+                        temporaries=(TemporaryRequirement("branch_b", 32, 8),),
+                        opaque=False,
+                    ),
+                )
+            ),
+        )
+    )
+    assert safe.decision == "safe"
+    assert safe.safe
+    assert safe.sequential_fallback_peak_bytes == 64
+    assert safe.parallel_peak_bytes == 96
+    assert safe.memory_overhead_vs_sequential == 32
+
+    runtime_alias = analyze_parallel_candidate(
+        (
+            SequentialRegion(
+                (
+                    DispatchNode(
+                        "write_a",
+                        effects=(ResourceEffect("a", GraphAccess.WRITE),),
+                        opaque=False,
+                    ),
+                )
+            ),
+            SequentialRegion(
+                (
+                    DispatchNode(
+                        "read_b",
+                        effects=(ResourceEffect("b", GraphAccess.READ),),
+                        opaque=False,
+                    ),
+                )
+            ),
+        )
+    )
+    assert runtime_alias.decision == "runtime_binding_required"
+    assert runtime_alias.safe is None
+    assert runtime_alias.unresolved_aliases[0].dependencies == ("raw",)
+
+    overlapping = analyze_parallel_candidate(
+        (
+            SequentialRegion(
+                (
+                    DispatchNode(
+                        "write_shared",
+                        effects=(ResourceEffect("shared", GraphAccess.WRITE),),
+                        opaque=False,
+                    ),
+                )
+            ),
+            SequentialRegion(
+                (
+                    DispatchNode(
+                        "atomic_shared",
+                        effects=(ResourceEffect("shared", GraphAccess.ATOMIC),),
+                        opaque=False,
+                    ),
+                )
+            ),
+        )
+    )
+    assert overlapping.decision == "rejected"
+    assert overlapping.conflicts[0].alias == "proven_overlap"
+    assert overlapping.conflicts[0].dependencies == ("atomic_overlap",)
+
+    opaque = analyze_parallel_candidate(
+        (
+            SequentialRegion((DispatchNode("opaque"),)),
+            SequentialRegion((DispatchNode("safe", opaque=False),)),
+        )
+    )
+    assert opaque.decision == "rejected"
+    assert "branch_0:opaque_node:opaque" in opaque.blockers
+
+    shared_temporary = analyze_parallel_candidate(
+        (
+            SequentialRegion(
+                (
+                    DispatchNode(
+                        "first",
+                        temporaries=(TemporaryRequirement("shared_temp", 16),),
+                        opaque=False,
+                    ),
+                )
+            ),
+            SequentialRegion(
+                (
+                    DispatchNode(
+                        "second",
+                        temporaries=(TemporaryRequirement("shared_temp", 16),),
+                        opaque=False,
+                    ),
+                )
+            ),
+        )
+    )
+    assert shared_temporary.decision == "rejected"
+    assert any(
+        blocker.startswith("temporary_shared_across_branches:shared_temp")
+        for blocker in shared_temporary.blockers
+    )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_parallel_candidate_report_proves_runtime_storage_aliases():
+    @ti.kernel
+    def write(values: ti.types.ndarray(dtype=ti.i32, ndim=1), value: ti.i32):
+        for i in values:
+            values[i] = value
+
+    a = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "a", ti.i32, ndim=1)
+    b = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "b", ti.i32, ndim=1)
+    value = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "value", ti.i32)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(write, a, value, label="write_a")
+    builder.dispatch(write, b, value, label="write_b")
+    graph = builder.compile()
+
+    static_report = graph._parallel_candidate_report(((0,), (1,)))
+    assert static_report.analysis_only
+    assert not static_report.execution_changed
+    assert static_report.decision == "runtime_binding_required"
+    assert static_report.safe is None
+
+    first = ti.ndarray(ti.i32, shape=16)
+    second = ti.ndarray(ti.i32, shape=16)
+    disjoint = graph._parallel_candidate_report(
+        ((0,), (1,)), {"a": first, "b": second, "value": 7}
+    )
+    assert disjoint.decision == "safe"
+    assert disjoint.safe
+    assert disjoint.runtime_binding_provided
+    assert disjoint.backend in ("cpu", "cuda", "vulkan")
+    assert disjoint.runtime_aliases[0].result == "kProvenDisjoint"
+    assert {fact.resource for fact in disjoint.storage} == {"a", "b"}
+    assert all(fact.owner_status == "kNone" for fact in disjoint.storage)
+
+    overlap = graph._parallel_candidate_report(
+        ((0,), (1,)), {"a": first, "b": first, "value": 7}
+    )
+    assert overlap.decision == "rejected"
+    assert not overlap.safe
+    assert overlap.runtime_aliases[0].result == "kProvenOverlap"
+    assert overlap.conflicts[0].dependencies == ("waw",)
+
+    left = ti.experimental.ndarray_view(first, slices=slice(0, 8))
+    right = ti.experimental.ndarray_view(first, slices=slice(8, 16))
+    sliced = graph._parallel_candidate_report(
+        ((0,), (1,)), {"a": left, "b": right, "value": 7}
+    )
+    assert sliced.decision == "safe"
+    assert sliced.runtime_aliases[0].result == "kProvenDisjoint"
+
+    overlapping_view = ti.experimental.ndarray_view(
+        first, slices=slice(4, 12)
+    )
+    sliced_overlap = graph._parallel_candidate_report(
+        ((0,), (1,)), {"a": left, "b": overlapping_view, "value": 7}
+    )
+    assert sliced_overlap.decision == "rejected"
+    assert sliced_overlap.runtime_aliases[0].result == "kProvenOverlap"
+
+    unknown = graph._parallel_candidate_report(
+        ((0,), (1,)),
+        {
+            "a": np.zeros(16, dtype=np.int32),
+            "b": np.zeros(16, dtype=np.int32),
+            "value": 7,
+        },
+    )
+    assert unknown.decision == "rejected"
+    assert not unknown.safe
+    assert unknown.runtime_aliases[0].result == "kUnknown"
+    assert all(not fact.supported for fact in unknown.storage)
+    assert any(
+        blocker.startswith("runtime_alias_not_proven:a:b")
+        for blocker in unknown.blockers
+    )
+
+    with pytest.raises(TaichiRuntimeError, match="same node twice"):
+        graph._parallel_candidate_report(((0,), (0,)))
+    with pytest.raises(TaichiRuntimeError, match="outside the Graph root"):
+        graph._parallel_candidate_report(((0,), (2,)))
 
 
 class _RecordedDispatchExecutable(NativeGraphExecutable):
