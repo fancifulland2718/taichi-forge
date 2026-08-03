@@ -2755,6 +2755,9 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         assert device["nested_leaf_native_kinds"] == (
             ("while", "if", "switch") if expected else ()
         )
+        assert device["submission_ticket_gpu_timestamps"] == (
+            "opt_in_whole_ticket" if expected else "unavailable"
+        )
     elif arch == ti.vulkan:
         assert device["primitive"] == "vulkan_dispatch_indirect"
         assert device["rhi_primitive_compiled"]
@@ -2783,7 +2786,10 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         assert (
             device["submission_ticket_queue_telemetry"] == "device_transaction_window"
         )
-        assert device["submission_ticket_gpu_timestamps"] == "unavailable"
+        assert (
+            device["submission_ticket_gpu_timestamps"]
+            == "opt_in_whole_ticket_runtime_probe"
+        )
         assert device["compound_first_chunk_strategies"] == (
             "compact",
             *(
@@ -4493,13 +4499,25 @@ def test_structured_graph_vulkan_ticket_reports_opt_in_region_telemetry():
     args["counter"].fill(0)
     ticket = graph.submit(args, telemetry=True)
     report = ticket.telemetry()
-    assert report.schema_version == 1
+    assert report.schema_version == 2
     assert report.backend == "vulkan"
     assert report.sequence == ticket.sequence
     assert report.device_snapshot_bytes == 24
     assert report.host_readback_bytes == 24
     assert report.host_submit_ns > 0
-    assert report.gpu_timestamp_status == "unavailable"
+    assert report.gpu_timestamp_scope == "whole_ticket"
+    assert report.gpu_measurement_path_changed
+    assert report.gpu_timestamp_status in ("instrumented_exact", "unsupported")
+    if report.gpu_timestamp_status == "instrumented_exact":
+        assert report.gpu_duration_ns is not None
+        assert report.gpu_duration_ns >= 0
+        assert report.gpu_timestamp_exact
+    else:
+        assert report.gpu_duration_ns is None
+        assert not report.gpu_timestamp_exact
+    assert report.gpu_queue_or_stream_id.startswith("vulkan:")
+    assert report.gpu_timestamp_resource_bytes == 0
+    assert not report.gpu_timestamp_resource_bytes_known
     assert report.queue.available
     assert report.queue.scope == "vulkan_device_transaction_window"
     assert not report.queue.exact
@@ -4548,7 +4566,15 @@ def test_structured_graph_cuda_ticket_reports_opt_in_region_telemetry():
     assert report.backend == "cuda"
     assert report.sequence == ticket.sequence
     assert not report.queue.available
-    assert report.gpu_timestamp_status == "unavailable"
+    assert report.gpu_timestamp_status == "instrumented_exact"
+    assert report.gpu_timestamp_scope == "whole_ticket"
+    assert report.gpu_duration_ns is not None
+    assert report.gpu_duration_ns >= 0
+    assert report.gpu_timestamp_exact
+    assert report.gpu_measurement_path_changed
+    assert report.gpu_queue_or_stream_id == "cuda:0"
+    assert report.gpu_timestamp_resource_bytes == 0
+    assert not report.gpu_timestamp_resource_bytes_known
     assert len(report.regions) == 1
     region = report.regions[0]
     assert region.logical_iterations == 13
@@ -4562,6 +4588,52 @@ def test_structured_graph_cuda_ticket_reports_opt_in_region_telemetry():
     assert region.active_chunk_count == 1
     assert region.coarse_skipped_chunk_count == 0
     assert graph.execution_stats().memory.persistent_telemetry_bytes == 24
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan])
+def test_structured_graph_gpu_timing_is_bounded_and_ticket_owned():
+    capabilities = ti.graph.structured_control_capabilities()["device_control"]
+    if not capabilities["compound_structured_submit"]:
+        pytest.skip(capabilities["structured_submit_reason"])
+
+    graph = _build_structured_while_graph(
+        max_iterations=32,
+        chunk_size=8,
+        lowering_mode="native_required",
+    )
+    ordinary = graph.submit(_structured_while_args(target=1))
+    ordinary.wait()
+    ordinary_timing = ordinary._completion._gpu_timing()
+    assert not ordinary_timing["available"]
+    assert ordinary_timing["status"] == "unavailable"
+    assert not ordinary_timing["measurement_path_changed"]
+
+    tickets = [
+        graph.submit(_structured_while_args(target=index + 1), telemetry=True)
+        for index in range(8)
+    ]
+    reports = [ticket.telemetry() for ticket in reversed(tickets)]
+    assert len({report.sequence for report in reports}) == 8
+    assert sorted(report.regions[0].logical_iterations for report in reports) == list(
+        range(1, 9)
+    )
+    for report in reports:
+        assert report.gpu_timestamp_scope == "whole_ticket"
+        assert report.gpu_measurement_path_changed
+        if report.backend == "cuda":
+            assert report.gpu_timestamp_status == "instrumented_exact"
+            assert report.gpu_timestamp_exact
+            assert report.gpu_duration_ns is not None
+        else:
+            assert report.gpu_timestamp_status in (
+                "instrumented_exact",
+                "unsupported",
+            )
+
+    arena = graph._instance.structured_telemetry_arena_stats
+    assert arena["slots"] <= arena["capacity"] == 4
+    assert arena["allocations"] == 4
+    assert arena["reuses"] >= 4
 
 
 @test_utils.test(arch=ti.vulkan)

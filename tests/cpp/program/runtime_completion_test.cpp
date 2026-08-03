@@ -69,6 +69,33 @@ class FatalBackendSemaphore final : public StreamSemaphoreObject {
   }
 };
 
+class FakeGpuTiming final : public StreamGpuTimingObject {
+ public:
+  explicit FakeGpuTiming(std::atomic<int> *released) : released_(released) {
+  }
+
+  ~FakeGpuTiming() override {
+    released_->fetch_add(1, std::memory_order_relaxed);
+  }
+
+  StreamGpuTimingSnapshot snapshot() const override {
+    ++queries;
+    StreamGpuTimingSnapshot result;
+    result.available = true;
+    result.duration_ns = 1234;
+    result.exact = true;
+    result.measurement_path_changed = true;
+    result.stream_id = 7;
+    result.status = "instrumented_exact";
+    return result;
+  }
+
+  mutable int queries{0};
+
+ private:
+  std::atomic<int> *released_;
+};
+
 TEST(RuntimeCompletion, CompletedTokenUsesNoBackendWork) {
   auto domain = std::make_shared<RuntimeFaultDomain>(Arch::x64, 11);
   auto completion =
@@ -105,6 +132,35 @@ TEST(RuntimeCompletion, WaitReleasesResourcesExactlyOnce) {
   const auto statistics = domain->statistics().snapshot();
   EXPECT_EQ(statistics.synchronization.completion_polls, 2u);
   EXPECT_EQ(statistics.synchronization.completion_waits, 2u);
+}
+
+TEST(RuntimeCompletion, GpuTimingIsTicketOwnedAndReadableAfterCompletion) {
+  auto semaphore = std::make_shared<FakeSemaphore>();
+  std::atomic<int> released{0};
+  auto timing = std::make_shared<FakeGpuTiming>(&released);
+  auto completion = RuntimeCompletion::from_stream_semaphore(
+      Arch::vulkan, 17, 10, semaphore, nullptr, timing);
+
+  auto pending = completion.gpu_timing_snapshot();
+  EXPECT_FALSE(pending.available);
+  EXPECT_EQ(pending.status, "pending");
+  EXPECT_EQ(timing->queries, 0);
+
+  semaphore->ready = true;
+  EXPECT_TRUE(completion.done());
+  auto completed = completion.gpu_timing_snapshot();
+  EXPECT_TRUE(completed.available);
+  EXPECT_EQ(completed.duration_ns, 1234u);
+  EXPECT_TRUE(completed.exact);
+  EXPECT_TRUE(completed.measurement_path_changed);
+  EXPECT_EQ(completed.stream_id, 7u);
+  EXPECT_EQ(completed.status, "instrumented_exact");
+  EXPECT_EQ(timing->queries, 1);
+
+  timing.reset();
+  EXPECT_EQ(released.load(std::memory_order_relaxed), 0);
+  completion = RuntimeCompletion{};
+  EXPECT_EQ(released.load(std::memory_order_relaxed), 1);
 }
 
 TEST(RuntimeCompletion, FirstBackendErrorIsSticky) {
