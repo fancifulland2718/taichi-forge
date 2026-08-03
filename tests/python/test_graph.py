@@ -4870,6 +4870,59 @@ def test_structured_graph_gpu_timing_is_bounded_and_ticket_owned():
     assert arena["reuses"] >= 4
 
 
+@test_utils.test(arch=[ti.cuda, ti.vulkan])
+def test_graph_ticket_reports_whole_gpu_timing_without_structured_regions():
+    @ti.kernel
+    def square(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        destination: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for i in source:
+            destination[i] = source[i] * source[i]
+
+    source_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "source", ti.f32, ndim=1
+    )
+    destination_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "destination", ti.f32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(square, source_arg, destination_arg, label="square")
+    graph = builder.compile()
+    source = ti.ndarray(ti.f32, shape=65536)
+    destination = ti.ndarray(ti.f32, shape=65536)
+    source.fill(3.0)
+    args = {"source": source, "destination": destination}
+
+    ordinary = graph.submit(args)
+    ordinary.wait()
+    assert ordinary.telemetry() is None
+    assert not graph._instance.structured_telemetry_arena_stats["materialized"]
+
+    report = graph.submit(args, telemetry=True).telemetry()
+    assert report.schema_version == 3
+    assert report.backend in ("cuda", "vulkan")
+    assert report.regions == ()
+    assert report.device_snapshot_bytes == 0
+    assert report.host_readback_bytes == 0
+    assert report.gpu_timestamp_scope == "whole_ticket"
+    assert report.gpu_measurement_path_changed
+    assert report.gpu_timestamp_status in ("instrumented_exact", "unsupported")
+    if report.gpu_timestamp_status == "instrumented_exact":
+        assert report.gpu_duration_ns is not None
+        assert report.gpu_duration_ns >= 0
+        assert report.gpu_timestamp_exact
+    else:
+        assert report.gpu_duration_ns is None
+        assert not report.gpu_timestamp_exact
+    arena = graph._instance.structured_telemetry_arena_stats
+    assert arena["materialized"]
+    assert arena["slots"] == 1
+    assert arena["reserved_bytes"] == 0
+    assert arena["host_readback_bytes"] == 0
+    assert np.allclose(destination.to_numpy(), 9.0)
+
+
 @test_utils.test(arch=ti.vulkan)
 def test_structured_graph_vulkan_compound_submit_preserves_region_dependencies():
     capabilities = ti.graph.structured_control_capabilities()["device_control"]
