@@ -774,7 +774,10 @@ class _GraphStructuredTelemetryState:
                 raise TaichiRuntimeError(
                     "Cannot attach a completion to a released Graph telemetry slot"
                 )
-            self._completion = completion if completion.has_backend_work else None
+            # Keep the completed token as well: short CUDA submissions may be
+            # retired by Program's opportunistic collection before Python
+            # attaches this slot, but the token still owns the timing sample.
+            self._completion = completion
             self._queue = queue
             self._host_submit_ns = int(host_submit_ns)
             self._slot["completion_sequence"] = int(completion.sequence)
@@ -800,6 +803,7 @@ class _GraphStructuredTelemetryState:
                 self._slot,
                 self._queue,
                 self._host_submit_ns,
+                self._completion,
             )
             self._result = result
             self._released = True
@@ -833,6 +837,7 @@ class _GraphStructuredTelemetryState:
                     self._slot,
                     self._queue,
                     self._host_submit_ns,
+                    self._completion,
                 )
             self._released = True
             release = True
@@ -988,7 +993,7 @@ class _GraphStructuredTelemetryArena:
                 )
             oldest.make_reusable()
 
-    def _read_slot(self, slot, queue, host_submit_ns):
+    def _read_slot(self, slot, queue, host_submit_ns, completion):
         storage = slot["storage"]
         host = np.empty(
             shape=storage.arr.total_shape(),
@@ -1063,8 +1068,23 @@ class _GraphStructuredTelemetryArena:
             if regions
             else _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
         )
+        gpu_timing = (
+            completion._gpu_timing()
+            if completion is not None
+            else {
+                "available": False,
+                "duration_ns": 0,
+                "exact": False,
+                "measurement_path_changed": False,
+                "stream_id": 0,
+                "driver_owned_bytes": 0,
+                "driver_owned_bytes_known": False,
+                "status": "unavailable",
+            }
+        )
+        gpu_available = bool(gpu_timing["available"])
         return GraphSubmissionTelemetry(
-            schema_version=1,
+            schema_version=2,
             backend=backend,
             sequence=int(slot["completion_sequence"]),
             regions=tuple(regions),
@@ -1072,7 +1092,20 @@ class _GraphStructuredTelemetryArena:
             host_submit_ns=int(host_submit_ns),
             device_snapshot_bytes=int(host.nbytes),
             host_readback_bytes=int(host.nbytes),
-            gpu_timestamp_status="unavailable",
+            gpu_duration_ns=(
+                int(gpu_timing["duration_ns"]) if gpu_available else None
+            ),
+            gpu_timestamp_scope="whole_ticket",
+            gpu_timestamp_exact=bool(gpu_timing["exact"]),
+            gpu_measurement_path_changed=bool(
+                gpu_timing["measurement_path_changed"]
+            ),
+            gpu_queue_or_stream_id=f"{backend}:{int(gpu_timing['stream_id'])}",
+            gpu_timestamp_resource_bytes=int(gpu_timing["driver_owned_bytes"]),
+            gpu_timestamp_resource_bytes_known=bool(
+                gpu_timing["driver_owned_bytes_known"]
+            ),
+            gpu_timestamp_status=str(gpu_timing["status"]),
         )
 
     def _record_wait(self):
@@ -1923,6 +1956,13 @@ class GraphSubmissionTelemetry:
     host_submit_ns: int
     device_snapshot_bytes: int
     host_readback_bytes: int
+    gpu_duration_ns: Optional[int]
+    gpu_timestamp_scope: str
+    gpu_timestamp_exact: bool
+    gpu_measurement_path_changed: bool
+    gpu_queue_or_stream_id: str
+    gpu_timestamp_resource_bytes: int
+    gpu_timestamp_resource_bytes_known: bool
     gpu_timestamp_status: str
 
 
@@ -2185,6 +2225,9 @@ def structured_control_capabilities():
         compound_structured_submit = native
         compound_terminal_observation = "submission_ticket" if native else "unavailable"
         submission_ticket_region_telemetry = native
+        submission_ticket_gpu_timestamps = (
+            "opt_in_whole_ticket" if native else "unavailable"
+        )
         structured_submit_reason = (
             "none" if native else "cuda_device_control_unavailable"
         )
@@ -2234,6 +2277,9 @@ def structured_control_capabilities():
         compound_max_iterations_per_region = 512
         compound_terminal_observation = "submission_ticket" if native else "unavailable"
         submission_ticket_region_telemetry = native
+        submission_ticket_gpu_timestamps = (
+            "opt_in_whole_ticket_runtime_probe" if native else "unavailable"
+        )
         submission_ticket_queue_telemetry = (
             "device_transaction_window" if native else "unavailable"
         )
@@ -8763,7 +8809,9 @@ class Graph:
                     )
                     queue_before = _queue_submission_snapshot() if telemetry else None
                     host_submit_start_ns = time.perf_counter_ns()
-                    transaction = runtime.prog._begin_runtime_submission_transaction()
+                    transaction = runtime.prog._begin_runtime_submission_transaction(
+                        telemetry
+                    )
                     runtime.prog._record_runtime_graph_submission()
                     if self._contains_structured_control_value:
                         self._instance.run_for_submission(

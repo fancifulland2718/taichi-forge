@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <assert.h>
+#include <cstdint>
 #include <memory>
 #include <limits>
 
@@ -684,6 +685,29 @@ class RHI_DLL_EXPORT StreamSemaphoreObject {
 
 using StreamSemaphore = std::shared_ptr<StreamSemaphoreObject>;
 
+// Opt-in, stream-ordered GPU timing owned by one submission ticket. Backends
+// keep their native event/query resources alive in this object until the
+// ticket releases it. The snapshot is intentionally unavailable until the
+// enclosing completion is ready; callers must never substitute host wall time.
+struct StreamGpuTimingSnapshot {
+  bool available{false};
+  std::uint64_t duration_ns{0};
+  bool exact{false};
+  bool measurement_path_changed{false};
+  std::uint64_t stream_id{0};
+  std::uint64_t driver_owned_bytes{0};
+  bool driver_owned_bytes_known{false};
+  std::string status{"unavailable"};
+};
+
+class RHI_DLL_EXPORT StreamGpuTimingObject {
+ public:
+  virtual ~StreamGpuTimingObject() = default;
+  virtual StreamGpuTimingSnapshot snapshot() const = 0;
+};
+
+using StreamGpuTiming = std::shared_ptr<StreamGpuTimingObject>;
+
 class RHI_DLL_EXPORT Stream {
  public:
   virtual ~Stream() {
@@ -722,6 +746,17 @@ class RHI_DLL_EXPORT Stream {
 
   virtual StreamSemaphore end_submission_batch() {
     return nullptr;
+  }
+
+  // Optional diagnostic timing scope. Implementations must enqueue both
+  // boundaries in stream order and retain independent native resources for
+  // every in-flight scope. The default keeps unsupported backends honest.
+  virtual StreamGpuTiming begin_gpu_timing() {
+    return nullptr;
+  }
+
+  virtual void end_gpu_timing(const StreamGpuTiming &timing) {
+    (void)timing;
   }
 
   virtual void command_sync() = 0;

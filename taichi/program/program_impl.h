@@ -91,6 +91,14 @@ class ProgramImpl {
     return nullptr;
   }
 
+  virtual StreamGpuTiming begin_runtime_gpu_timing() {
+    return nullptr;
+  }
+
+  virtual void end_runtime_gpu_timing(const StreamGpuTiming &timing) {
+    (void)timing;
+  }
+
   /**
    * Make a AotModulerBuilder.
    */

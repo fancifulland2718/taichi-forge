@@ -506,6 +506,8 @@ class TI_DLL_EXPORT GfxRuntime {
   StreamSemaphore flush_if_pending();
   void begin_submission_batch();
   StreamSemaphore end_submission_batch();
+  StreamGpuTiming begin_gpu_timing();
+  void end_gpu_timing(const StreamGpuTiming &timing);
   bool has_pending_command_list() const {
     std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
     return current_cmdlist_ != nullptr;

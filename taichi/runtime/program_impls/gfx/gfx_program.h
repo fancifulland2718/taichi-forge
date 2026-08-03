@@ -41,6 +41,14 @@ class GfxProgramImpl : public ProgramImpl {
     return runtime_->end_submission_batch();
   }
 
+  StreamGpuTiming begin_runtime_gpu_timing() override {
+    return runtime_->begin_gpu_timing();
+  }
+
+  void end_runtime_gpu_timing(const StreamGpuTiming &timing) override {
+    runtime_->end_gpu_timing(timing);
+  }
+
   StreamSemaphore flush_if_pending() {
     if (!runtime_) {
       return nullptr;

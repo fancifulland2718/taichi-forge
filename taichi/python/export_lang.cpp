@@ -669,7 +669,22 @@ void export_lang(py::module &m) {
       .def_property_readonly("has_backend_work",
                              &RuntimeCompletion::has_backend_work)
       .def_property_readonly("first_error",
-                             &RuntimeCompletion::first_error_message);
+                             &RuntimeCompletion::first_error_message)
+      .def("_gpu_timing", [](const RuntimeCompletion &value) {
+        const auto snapshot = value.gpu_timing_snapshot();
+        py::dict result;
+        result["available"] = snapshot.available;
+        result["duration_ns"] = snapshot.duration_ns;
+        result["exact"] = snapshot.exact;
+        result["measurement_path_changed"] =
+            snapshot.measurement_path_changed;
+        result["stream_id"] = snapshot.stream_id;
+        result["driver_owned_bytes"] = snapshot.driver_owned_bytes;
+        result["driver_owned_bytes_known"] =
+            snapshot.driver_owned_bytes_known;
+        result["status"] = snapshot.status;
+        return result;
+      });
 
   py::class_<Program::RuntimeSubmissionTransaction>(
       m, "_RuntimeSubmissionTransaction")
@@ -1067,7 +1082,8 @@ void export_lang(py::module &m) {
       })
       .def("_begin_runtime_submission_transaction",
            &Program::begin_runtime_submission_transaction,
-           py::call_guard<py::gil_scoped_release>())
+           py::call_guard<py::gil_scoped_release>(),
+           py::arg("gpu_timing") = false)
       .def("_debug_runtime_completion_stats",
            &Program::debug_runtime_completion_stats)
       .def("_debug_kernel_definition_count", [](const Program &program) {

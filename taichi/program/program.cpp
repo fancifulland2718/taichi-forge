@@ -260,7 +260,8 @@ Program::RuntimeSubmissionWriteScope::~RuntimeSubmissionWriteScope() {
 }
 
 Program::RuntimeSubmissionTransaction::RuntimeSubmissionTransaction(
-    Program *program)
+    Program *program,
+    bool gpu_timing)
     : program_(program) {
   TI_ASSERT(program_ != nullptr);
   // The outer scope must observe tracking enabled so nested kernel/CGraph
@@ -270,6 +271,23 @@ Program::RuntimeSubmissionTransaction::RuntimeSubmissionTransaction(
   submission_scope_.emplace(program_->acquire_runtime_submission_scope());
   program_->program_impl_->begin_runtime_submission_batch();
   submission_batch_open_ = true;
+  if (gpu_timing) {
+    try {
+      if (program_->compile_config().arch == Arch::cuda) {
+        gpu_timing_ = RuntimeCompletion::begin_cuda_gpu_timing(
+            nullptr, program_->runtime_fault_domain_);
+      } else {
+        gpu_timing_ = program_->program_impl_->begin_runtime_gpu_timing();
+      }
+    } catch (...) {
+      try {
+        program_->program_impl_->end_runtime_submission_batch();
+      } catch (...) {
+      }
+      submission_batch_open_ = false;
+      throw;
+    }
+  }
 }
 
 Program::RuntimeSubmissionTransaction::~RuntimeSubmissionTransaction() {
@@ -299,6 +317,14 @@ void Program::RuntimeSubmissionTransaction::mark_submission() noexcept {
 
 RuntimeCompletion Program::RuntimeSubmissionTransaction::finish() {
   TI_ERROR_IF(finished_, "Runtime submission transaction already finished");
+  if (gpu_timing_) {
+    if (program_->compile_config().arch == Arch::cuda) {
+      RuntimeCompletion::end_cuda_gpu_timing(
+          gpu_timing_, nullptr, program_->runtime_fault_domain_);
+    } else {
+      program_->program_impl_->end_runtime_gpu_timing(gpu_timing_);
+    }
+  }
   if (submission_batch_open_) {
     submission_batch_open_ = false;
     program_->program_impl_->end_runtime_submission_batch();
@@ -308,7 +334,7 @@ RuntimeCompletion Program::RuntimeSubmissionTransaction::finish() {
   submission_scope_.reset();
   finished_ = true;
   Program *program = std::exchange(program_, nullptr);
-  return program->record_runtime_completion();
+  return program->record_runtime_completion(std::move(gpu_timing_));
 }
 
 std::vector<SNodeTreeDependency> Program::snapshot_snode_tree_dependencies(
@@ -6982,7 +7008,8 @@ std::size_t Program::runtime_completion_resource_count(
   return count;
 }
 
-RuntimeCompletion Program::record_runtime_completion() {
+RuntimeCompletion Program::record_runtime_completion(
+    StreamGpuTiming gpu_timing) {
   ensure_runtime_submission_allowed("runtime completion recording");
   collect_ready_runtime_completions();
 
@@ -7037,13 +7064,14 @@ RuntimeCompletion Program::record_runtime_completion() {
         // Toolkit-versioned runtime dependency is introduced.
         result = RuntimeCompletion::from_cuda_stream(
             runtime_completion_domain_, sequence, nullptr,
-            runtime_fault_domain_);
+            runtime_fault_domain_, std::move(gpu_timing));
       } else if (compile_config().arch == Arch::vulkan) {
         // A work epoch exists, so flush() intentionally records a fence even
         // when the work came from a replay/native path outside current_cmdlist.
         result = RuntimeCompletion::from_stream_semaphore(
             Arch::vulkan, runtime_completion_domain_, sequence,
-            program_impl_->flush(), runtime_fault_domain_);
+            program_impl_->flush(), runtime_fault_domain_,
+            std::move(gpu_timing));
       } else {
         // F2's supported contract is CPU/CUDA/Vulkan. Other compiled backends
         // retain their legacy synchronous fallback without a fake token.
@@ -7134,12 +7162,12 @@ RuntimeCompletion Program::record_runtime_completion() {
 }
 
 std::unique_ptr<Program::RuntimeSubmissionTransaction>
-Program::begin_runtime_submission_transaction() {
+Program::begin_runtime_submission_transaction(bool gpu_timing) {
   ensure_runtime_submission_allowed("submission transaction");
   TI_ERROR_IF(finalized_,
               "Cannot begin a submission transaction after Program finalize");
   return std::unique_ptr<RuntimeSubmissionTransaction>(
-      new RuntimeSubmissionTransaction(this));
+      new RuntimeSubmissionTransaction(this, gpu_timing));
 }
 
 std::unordered_map<std::string, std::uint64_t>

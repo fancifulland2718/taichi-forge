@@ -43,12 +43,22 @@ class TI_DLL_EXPORT RuntimeCompletion {
       std::uint64_t program_domain,
       std::uint64_t sequence,
       StreamSemaphore semaphore,
-      std::shared_ptr<RuntimeFaultDomain> fault_domain = nullptr);
+      std::shared_ptr<RuntimeFaultDomain> fault_domain = nullptr,
+      StreamGpuTiming gpu_timing = nullptr);
   static RuntimeCompletion from_cuda_stream(std::uint64_t program_domain,
                                             std::uint64_t sequence,
                                             void *stream,
                                             std::shared_ptr<RuntimeFaultDomain>
-                                                fault_domain = nullptr);
+                                                fault_domain = nullptr,
+                                            StreamGpuTiming gpu_timing = nullptr);
+
+  static StreamGpuTiming begin_cuda_gpu_timing(
+      void *stream,
+      std::shared_ptr<RuntimeFaultDomain> fault_domain = nullptr);
+  static void end_cuda_gpu_timing(
+      const StreamGpuTiming &timing,
+      void *stream,
+      std::shared_ptr<RuntimeFaultDomain> fault_domain = nullptr);
 
   bool valid() const noexcept;
   bool done() const;
@@ -66,6 +76,7 @@ class TI_DLL_EXPORT RuntimeCompletion {
   bool has_backend_work() const noexcept;
   std::size_t retained_resource_count(std::uint32_t kind) const noexcept;
   std::string first_error_message() const;
+  StreamGpuTimingSnapshot gpu_timing_snapshot() const;
 
   // Internal Program hooks. Attaching is allowed exactly once while pending.
   void attach_resources(

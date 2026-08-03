@@ -4986,6 +4986,24 @@ StreamSemaphore GfxRuntime::end_submission_batch() {
   }
 }
 
+StreamGpuTiming GfxRuntime::begin_gpu_timing() {
+  // RuntimeSubmissionTransaction already owns host_api_mutex_ recursively
+  // across the submission batch. Flush any older command list before placing
+  // the diagnostic begin marker on the same compute stream.
+  flush_if_pending();
+  return device_->get_compute_stream()->begin_gpu_timing();
+}
+
+void GfxRuntime::end_gpu_timing(const StreamGpuTiming &timing) {
+  if (!timing) {
+    return;
+  }
+  // Keep every Graph command before the end marker. Vulkan's submission batch
+  // then publishes start, payload, and end command buffers with one queue call.
+  flush_if_pending();
+  device_->get_compute_stream()->end_gpu_timing(timing);
+}
+
 Device *GfxRuntime::get_ti_device() const {
   return device_;
 }

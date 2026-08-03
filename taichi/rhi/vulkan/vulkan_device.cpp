@@ -2548,6 +2548,19 @@ Stream *VulkanDevice::get_compute_stream() {
   return result;
 }
 
+uint32_t VulkanDevice::queue_timestamp_valid_bits(
+    uint32_t queue_family_index) const {
+  uint32_t count = 0;
+  vkGetPhysicalDeviceQueueFamilyProperties(physical_device_, &count, nullptr);
+  if (queue_family_index >= count) {
+    return 0;
+  }
+  std::vector<VkQueueFamilyProperties> properties(count);
+  vkGetPhysicalDeviceQueueFamilyProperties(physical_device_, &count,
+                                           properties.data());
+  return properties[queue_family_index].timestampValidBits;
+}
+
 void VulkanCommandList::begin_profiler_scope(const std::string &kernel_name) {
   auto pool = vkapi::create_query_pool(ti_device_->vk_device());
   vkCmdResetQueryPool(buffer_->buffer, pool->query_pool, 0, 2);
@@ -2569,6 +2582,19 @@ void VulkanCommandList::end_profiler_scope() {
   completed_profiler_samplers_.push_back(
       {std::move(scope.kernel_name), pool, nullptr});
   ++profiler_sampler_reservations_;
+}
+
+void VulkanCommandList::write_runtime_timestamp(
+    const vkapi::IVkQueryPool &query_pool,
+    std::uint32_t query,
+    VkPipelineStageFlagBits stage,
+    bool reset) {
+  TI_ERROR_IF(!query_pool, "Vulkan runtime timestamp query pool is null");
+  if (reset) {
+    vkCmdResetQueryPool(buffer_->buffer, query_pool->query_pool, 0, 2);
+  }
+  vkCmdWriteTimestamp(buffer_->buffer, stage, query_pool->query_pool, query);
+  buffer_->refs.push_back(query_pool);
 }
 
 std::vector<VulkanProfilerSampler>
@@ -4284,13 +4310,153 @@ void VulkanSurface::present_surface_image(
   }
 }
 
+namespace {
+
+std::atomic<std::uint64_t> next_vulkan_timing_stream_id{1};
+
+class VulkanStreamGpuTimingObject final : public StreamGpuTimingObject {
+ public:
+  VulkanStreamGpuTimingObject(VulkanDevice *device,
+                              std::uint32_t timestamp_valid_bits,
+                              double timestamp_period_ns,
+                              std::uint64_t stream_id)
+      : device_(device),
+        query_pool_(vkapi::create_query_pool(device->vk_device())),
+        timestamp_valid_bits_(timestamp_valid_bits),
+        timestamp_period_ns_(timestamp_period_ns),
+        stream_id_(stream_id) {
+    TI_ASSERT(device_ != nullptr);
+    TI_ASSERT(query_pool_ != nullptr);
+  }
+
+  const vkapi::IVkQueryPool &query_pool() const {
+    return query_pool_;
+  }
+
+  void mark_ended() noexcept {
+    ended_.store(true, std::memory_order_release);
+  }
+
+  StreamGpuTimingSnapshot snapshot() const override {
+    StreamGpuTimingSnapshot result;
+    result.measurement_path_changed = true;
+    result.stream_id = stream_id_;
+    if (!ended_.load(std::memory_order_acquire)) {
+      result.status = "not_ended";
+      return result;
+    }
+    if (timestamp_valid_bits_ == 0) {
+      result.status = "unsupported";
+      return result;
+    }
+
+    std::uint64_t timestamps[2]{};
+    const VkResult query_result = vkGetQueryPoolResults(
+        device_->vk_device(), query_pool_->query_pool, 0, 2,
+        sizeof(timestamps), timestamps, sizeof(std::uint64_t),
+        VK_QUERY_RESULT_64_BIT);
+    if (query_result == VK_NOT_READY) {
+      result.status = "not_ready";
+      return result;
+    }
+    if (query_result != VK_SUCCESS) {
+      device_->raise_backend_error(
+          static_cast<std::int64_t>(query_result), "vkGetQueryPoolResults",
+          "Failed to read ticket-owned Vulkan GPU timestamps");
+    }
+
+    const std::uint64_t mask =
+        timestamp_valid_bits_ >= 64
+            ? (std::numeric_limits<std::uint64_t>::max)()
+            : (std::uint64_t{1} << timestamp_valid_bits_) - 1;
+    const std::uint64_t start = timestamps[0] & mask;
+    const std::uint64_t end = timestamps[1] & mask;
+    const std::uint64_t ticks =
+        end >= start ? end - start : (mask - start) + end + 1;
+    const long double duration_ns =
+        static_cast<long double>(ticks) * timestamp_period_ns_;
+    if (duration_ns < 0.0L ||
+        duration_ns >
+            static_cast<long double>(
+                (std::numeric_limits<std::uint64_t>::max)())) {
+      result.status = "overflow";
+      return result;
+    }
+    result.available = true;
+    result.duration_ns = static_cast<std::uint64_t>(duration_ns + 0.5L);
+    result.exact = true;
+    result.status = "instrumented_exact";
+    // VkQueryPool storage is driver opaque. Never report a fabricated byte
+    // count in Forge-owned memory accounting.
+    result.driver_owned_bytes_known = false;
+    return result;
+  }
+
+ private:
+  VulkanDevice *device_{nullptr};
+  vkapi::IVkQueryPool query_pool_;
+  std::uint32_t timestamp_valid_bits_{0};
+  long double timestamp_period_ns_{0.0L};
+  std::uint64_t stream_id_{0};
+  std::atomic<bool> ended_{false};
+};
+
+}  // namespace
+
 VulkanStream::VulkanStream(VulkanDevice &device,
                            VkQueue queue,
                            uint32_t queue_family_index)
-    : device_(device), queue_(queue), queue_family_index_(queue_family_index) {
+    : device_(device),
+      queue_(queue),
+      queue_family_index_(queue_family_index),
+      stream_id_(next_vulkan_timing_stream_id.fetch_add(
+          1, std::memory_order_relaxed)) {
   command_pool_ = vkapi::create_command_pool(
       device_.vk_device(), VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
       queue_family_index);
+}
+
+StreamGpuTiming VulkanStream::begin_gpu_timing() {
+  TI_ERROR_IF(submission_batch_depth_ == 0,
+              "Vulkan GPU timing requires an active submission batch");
+  const std::uint32_t valid_bits =
+      device_.queue_timestamp_valid_bits(queue_family_index_);
+  if (valid_bits == 0) {
+    return nullptr;
+  }
+  auto timing = std::make_shared<VulkanStreamGpuTimingObject>(
+      &device_, valid_bits,
+      static_cast<double>(
+          device_.get_vk_physical_device_props().limits.timestampPeriod),
+      stream_id_);
+  auto [cmdlist, result] = new_command_list_unique();
+  TI_ERROR_IF(result != RhiResult::success,
+              "Unable to allocate Vulkan GPU timing begin command list");
+  static_cast<VulkanCommandList *>(cmdlist.get())
+      ->write_runtime_timestamp(timing->query_pool(), 0,
+                                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, true);
+  submit(cmdlist.get());
+  return timing;
+}
+
+void VulkanStream::end_gpu_timing(const StreamGpuTiming &timing) {
+  if (!timing) {
+    return;
+  }
+  TI_ERROR_IF(submission_batch_depth_ == 0,
+              "Vulkan GPU timing requires an active submission batch");
+  auto vulkan_timing =
+      std::dynamic_pointer_cast<VulkanStreamGpuTimingObject>(timing);
+  TI_ERROR_IF(!vulkan_timing,
+              "Vulkan stream received a timing object from another backend");
+  auto [cmdlist, result] = new_command_list_unique();
+  TI_ERROR_IF(result != RhiResult::success,
+              "Unable to allocate Vulkan GPU timing end command list");
+  static_cast<VulkanCommandList *>(cmdlist.get())
+      ->write_runtime_timestamp(vulkan_timing->query_pool(), 1,
+                                VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, false);
+  submit(cmdlist.get());
+  vulkan_timing->mark_ended();
 }
 
 VulkanStream::~VulkanStream() {

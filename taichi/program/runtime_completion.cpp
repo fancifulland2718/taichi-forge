@@ -2,7 +2,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <exception>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <utility>
@@ -54,6 +56,129 @@ class StreamSemaphoreCompletion final : public CompletionPrimitive {
 };
 
 #ifdef TI_WITH_CUDA
+class CudaStreamGpuTimingObject final : public StreamGpuTimingObject {
+ public:
+  CudaStreamGpuTimingObject(
+      void *stream,
+      std::weak_ptr<RuntimeFaultDomain> fault_domain)
+      : fault_domain_(std::move(fault_domain)) {
+    auto context_guard = CUDAContext::get_instance().get_guard();
+    auto &driver = CUDADriver::get_instance();
+    std::uint32_t result =
+        driver.event_create.call(&start_event_, CU_EVENT_DEFAULT);
+    if (result != CUDA_SUCCESS) {
+      throw BackendRuntimeError(
+          Arch::cuda, result, "event_create",
+          driver.event_create.get_error_message(result));
+    }
+    result = driver.event_create.call(&end_event_, CU_EVENT_DEFAULT);
+    if (result != CUDA_SUCCESS) {
+      driver.event_destroy.call_with_warning(start_event_);
+      start_event_ = nullptr;
+      throw BackendRuntimeError(
+          Arch::cuda, result, "event_create",
+          driver.event_create.get_error_message(result));
+    }
+    result = driver.event_record.call(start_event_, stream);
+    if (result != CUDA_SUCCESS) {
+      destroy_events(driver);
+      throw BackendRuntimeError(
+          Arch::cuda, result, "event_record",
+          driver.event_record.get_error_message(result));
+    }
+  }
+
+  ~CudaStreamGpuTimingObject() override {
+    if (start_event_ == nullptr && end_event_ == nullptr) {
+      return;
+    }
+    if (auto domain = fault_domain_.lock();
+        domain && !domain->backend_calls_safe()) {
+      start_event_ = nullptr;
+      end_event_ = nullptr;
+      return;
+    }
+    try {
+      auto context_guard = CUDAContext::get_instance().get_guard();
+      destroy_events(CUDADriver::get_instance());
+    } catch (...) {
+      start_event_ = nullptr;
+      end_event_ = nullptr;
+    }
+  }
+
+  void record_end(void *stream) {
+    TI_ERROR_IF(ended_.load(std::memory_order_acquire),
+                "CUDA GPU timing scope was already ended");
+    auto context_guard = CUDAContext::get_instance().get_guard();
+    auto &driver = CUDADriver::get_instance();
+    const std::uint32_t result = driver.event_record.call(end_event_, stream);
+    if (result != CUDA_SUCCESS) {
+      throw BackendRuntimeError(
+          Arch::cuda, result, "event_record",
+          driver.event_record.get_error_message(result));
+    }
+    ended_.store(true, std::memory_order_release);
+  }
+
+  StreamGpuTimingSnapshot snapshot() const override {
+    StreamGpuTimingSnapshot result;
+    result.measurement_path_changed = true;
+    // Taichi CUDA launches currently use the context's default stream.
+    result.stream_id = 0;
+    if (!ended_.load(std::memory_order_acquire)) {
+      result.status = "not_ended";
+      return result;
+    }
+    auto context_guard = CUDAContext::get_instance().get_guard();
+    auto &driver = CUDADriver::get_instance();
+    float elapsed_ms = 0.0f;
+    const std::uint32_t elapsed_result = driver.event_elapsed_time.call(
+        &elapsed_ms, start_event_, end_event_);
+    if (elapsed_result == CUDA_ERROR_NOT_READY) {
+      result.status = "not_ready";
+      return result;
+    }
+    if (elapsed_result != CUDA_SUCCESS) {
+      throw BackendRuntimeError(
+          Arch::cuda, elapsed_result, "event_elapsed_time",
+          driver.event_elapsed_time.get_error_message(elapsed_result));
+    }
+    const long double elapsed_ns =
+        static_cast<long double>(elapsed_ms) * 1000000.0L;
+    if (!std::isfinite(elapsed_ms) || elapsed_ns < 0.0L ||
+        elapsed_ns >
+            static_cast<long double>(
+                (std::numeric_limits<std::uint64_t>::max)())) {
+      result.status = "overflow";
+      return result;
+    }
+    result.available = true;
+    result.duration_ns = static_cast<std::uint64_t>(elapsed_ns + 0.5L);
+    result.exact = true;
+    result.status = "instrumented_exact";
+    result.driver_owned_bytes_known = false;
+    return result;
+  }
+
+ private:
+  void destroy_events(CUDADriver &driver) noexcept {
+    if (end_event_ != nullptr) {
+      driver.event_destroy.call_with_warning(end_event_);
+      end_event_ = nullptr;
+    }
+    if (start_event_ != nullptr) {
+      driver.event_destroy.call_with_warning(start_event_);
+      start_event_ = nullptr;
+    }
+  }
+
+  void *start_event_{nullptr};
+  void *end_event_{nullptr};
+  std::weak_ptr<RuntimeFaultDomain> fault_domain_;
+  std::atomic<bool> ended_{false};
+};
+
 class CudaEventCompletion final : public CompletionPrimitive {
  public:
   CudaEventCompletion(void *stream,
@@ -158,11 +283,13 @@ struct RuntimeCompletion::State {
 
   State(std::unique_ptr<CompletionPrimitive> primitive,
         std::shared_ptr<RuntimeFaultDomain> fault_domain,
-        std::uint64_t sequence)
+        std::uint64_t sequence,
+        StreamGpuTiming gpu_timing = nullptr)
       : status(CompletionStatus::pending),
         fault_domain(std::move(fault_domain)),
         sequence(sequence),
-        primitive(std::move(primitive)) {
+        primitive(std::move(primitive)),
+        gpu_timing(std::move(gpu_timing)) {
     TI_ASSERT(this->primitive != nullptr);
   }
 
@@ -320,6 +447,33 @@ struct RuntimeCompletion::State {
     return status.load(std::memory_order_acquire) == CompletionStatus::pending;
   }
 
+  StreamGpuTimingSnapshot timing_snapshot() const {
+    StreamGpuTiming timing;
+    CompletionStatus current;
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      current = status.load(std::memory_order_relaxed);
+      timing = gpu_timing;
+    }
+    if (!timing) {
+      return {};
+    }
+    if (current == CompletionStatus::pending) {
+      StreamGpuTimingSnapshot result;
+      result.status = "pending";
+      result.measurement_path_changed = true;
+      return result;
+    }
+    if (current == CompletionStatus::failed ||
+        current == CompletionStatus::invalidated) {
+      StreamGpuTimingSnapshot result;
+      result.status = "failed";
+      result.measurement_path_changed = true;
+      return result;
+    }
+    return timing->snapshot();
+  }
+
   void record_first_error_locked(std::exception_ptr error,
                                  CompletionStatus failure_status) {
     if (!first_error) {
@@ -353,6 +507,7 @@ struct RuntimeCompletion::State {
   std::shared_ptr<RuntimeFaultDomain> fault_domain;
   std::uint64_t sequence{0};
   std::unique_ptr<CompletionPrimitive> primitive;
+  StreamGpuTiming gpu_timing;
   std::shared_ptr<RuntimeCompletionResources> resources;
   std::exception_ptr first_error;
   std::string first_error_text;
@@ -386,7 +541,8 @@ RuntimeCompletion RuntimeCompletion::from_stream_semaphore(
     std::uint64_t program_domain,
     std::uint64_t sequence,
     StreamSemaphore semaphore,
-    std::shared_ptr<RuntimeFaultDomain> fault_domain) {
+    std::shared_ptr<RuntimeFaultDomain> fault_domain,
+    StreamGpuTiming gpu_timing) {
   if (!semaphore) {
     return completed(backend, program_domain, sequence,
                      std::move(fault_domain));
@@ -394,7 +550,7 @@ RuntimeCompletion RuntimeCompletion::from_stream_semaphore(
   auto primitive =
       std::make_unique<StreamSemaphoreCompletion>(std::move(semaphore));
   auto state = std::make_shared<State>(std::move(primitive), fault_domain,
-                                       sequence);
+                                       sequence, std::move(gpu_timing));
   return RuntimeCompletion(backend, program_domain, sequence,
                            std::move(state), std::move(fault_domain));
 }
@@ -403,13 +559,14 @@ RuntimeCompletion RuntimeCompletion::from_cuda_stream(
     std::uint64_t program_domain,
     std::uint64_t sequence,
     void *stream,
-    std::shared_ptr<RuntimeFaultDomain> fault_domain) {
+    std::shared_ptr<RuntimeFaultDomain> fault_domain,
+    StreamGpuTiming gpu_timing) {
 #ifdef TI_WITH_CUDA
   try {
     auto primitive =
         std::make_unique<CudaEventCompletion>(stream, fault_domain);
     auto state = std::make_shared<State>(std::move(primitive), fault_domain,
-                                         sequence);
+                                         sequence, std::move(gpu_timing));
     return RuntimeCompletion(
         Arch::cuda, program_domain, sequence, std::move(state),
         std::move(fault_domain));
@@ -425,6 +582,52 @@ RuntimeCompletion RuntimeCompletion::from_cuda_stream(
   (void)stream;
   (void)fault_domain;
   TI_ERROR("CUDA runtime completion requested without CUDA support");
+#endif
+}
+
+StreamGpuTiming RuntimeCompletion::begin_cuda_gpu_timing(
+    void *stream,
+    std::shared_ptr<RuntimeFaultDomain> fault_domain) {
+#ifdef TI_WITH_CUDA
+  try {
+    return std::make_shared<CudaStreamGpuTimingObject>(stream, fault_domain);
+  } catch (const BackendRuntimeError &error) {
+    if (fault_domain) {
+      fault_domain->report_backend_error(error, 0);
+    }
+    throw;
+  }
+#else
+  (void)stream;
+  (void)fault_domain;
+  return nullptr;
+#endif
+}
+
+void RuntimeCompletion::end_cuda_gpu_timing(
+    const StreamGpuTiming &timing,
+    void *stream,
+    std::shared_ptr<RuntimeFaultDomain> fault_domain) {
+#ifdef TI_WITH_CUDA
+  if (!timing) {
+    return;
+  }
+  auto cuda_timing =
+      std::dynamic_pointer_cast<CudaStreamGpuTimingObject>(timing);
+  TI_ERROR_IF(!cuda_timing,
+              "CUDA stream received a timing object from another backend");
+  try {
+    cuda_timing->record_end(stream);
+  } catch (const BackendRuntimeError &error) {
+    if (fault_domain) {
+      fault_domain->report_backend_error(error, 0);
+    }
+    throw;
+  }
+#else
+  (void)timing;
+  (void)stream;
+  (void)fault_domain;
 #endif
 }
 
@@ -474,6 +677,10 @@ std::size_t RuntimeCompletion::retained_resource_count(
 
 std::string RuntimeCompletion::first_error_message() const {
   return state_ ? state_->error_message() : std::string{};
+}
+
+StreamGpuTimingSnapshot RuntimeCompletion::gpu_timing_snapshot() const {
+  return state_ ? state_->timing_snapshot() : StreamGpuTimingSnapshot{};
 }
 
 void RuntimeCompletion::attach_resources(

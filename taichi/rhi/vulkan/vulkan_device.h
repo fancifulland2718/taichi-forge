@@ -538,6 +538,13 @@ class VulkanCommandList : public CommandList {
   void end_profiler_scope() override;
   std::vector<VulkanProfilerSampler> take_completed_profiler_samplers();
 
+  // Ticket-owned timing support. These markers do not enter the global
+  // kernel-profiler sampler queue and therefore remain replay/ticket local.
+  void write_runtime_timestamp(const vkapi::IVkQueryPool &query_pool,
+                               std::uint32_t query,
+                               VkPipelineStageFlagBits stage,
+                               bool reset);
+
  private:
   void apply_raster_viewport_and_scissor();
 
@@ -724,6 +731,8 @@ class VulkanStream : public Stream {
 
   void begin_submission_batch() override;
   StreamSemaphore end_submission_batch() override;
+  StreamGpuTiming begin_gpu_timing() override;
+  void end_gpu_timing(const StreamGpuTiming &timing) override;
 
   void command_sync() override;
 
@@ -751,6 +760,7 @@ class VulkanStream : public Stream {
   VulkanDevice &device_;
   VkQueue queue_;
   uint32_t queue_family_index_;
+  std::uint64_t stream_id_{0};
 
   // Command pools are per-thread
   vkapi::IVkCommandPool command_pool_;
@@ -893,6 +903,8 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   uint32_t graphics_queue_family_index() const {
     return graphics_queue_family_index_;
   }
+
+  uint32_t queue_timestamp_valid_bits(uint32_t queue_family_index) const;
 
   VkQueue graphics_queue() const {
     return graphics_queue_;
