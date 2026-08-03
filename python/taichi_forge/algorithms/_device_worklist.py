@@ -23,7 +23,11 @@ from taichi_forge.algorithms._device_prefix import (
     _sort_tail,
 )
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect, RuntimeBinding
-from taichi_forge.graph._native import NativeGraphExecutable, NativeGraphNode
+from taichi_forge.graph._native import (
+    DispatchGraphAction,
+    NativeGraphExecutable,
+    NativeGraphNode,
+)
 from taichi_forge.lang import impl, ops
 from taichi_forge.lang._ndarray import ScalarNdarray
 from taichi_forge.lang.device_extent import (
@@ -189,6 +193,56 @@ def _finalize_atomic_worklist_with_dispatch(
     overflow[None] = status
     device_dispatch_state_publish(extent_state, dispatch_packet, capacity, bounded)
     extent_state[1] = status
+
+
+@func
+def _cuda_graph_apply_bounded_group(group_control: template()):
+    if group_control[8] != 0:
+        nodes_address = ops.cast(group_control[2], u64) | (
+            ops.cast(group_control[3], u64) << 32
+        )
+        driver_status = impl.call_internal(
+            "cuda_graph_update_bounded_group",
+            nodes_address,
+            group_control[4],
+            group_control[5],
+            group_control[6],
+            with_runtime_context=False,
+        )
+        group_control[7] = ops.cast(driver_status, u32)
+
+
+@kernel
+def _finalize_atomic_worklist_with_cuda_group(
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    generated: ndarray_type.ndarray(dtype=i32, ndim=0),
+    accepted: ndarray_type.ndarray(dtype=i32, ndim=0),
+    rejected: ndarray_type.ndarray(dtype=i32, ndim=0),
+    conflicts: ndarray_type.ndarray(dtype=i32, ndim=0),
+    winners: ndarray_type.ndarray(dtype=i32, ndim=0),
+    overflow: ndarray_type.ndarray(dtype=i32, ndim=0),
+    dispatch_packet: ndarray_type.ndarray(dtype=u32, ndim=1),
+    group_control: ndarray_type.ndarray(dtype=u32, ndim=1),
+    capacity: i32,
+):
+    raw = generated[None]
+    bounded = ops.min(ops.max(raw, 0), capacity)
+    rejected_count = ops.max(0, raw - capacity)
+    accepted[None] = bounded
+    rejected[None] = rejected_count
+    conflicts[None] = 0
+    winners[None] = bounded
+    status = 1 if overflow[None] != 0 or rejected_count != 0 else 0
+    overflow[None] = status
+    device_dispatch_state_publish(extent_state, dispatch_packet, capacity, bounded)
+    extent_state[1] = status
+    if group_control[8] != 0 and group_control[9] != 0:
+        block_dim = ops.cast(group_control[9], i32)
+        group_control[5] = ops.cast(
+            (bounded + block_dim - 1) // block_dim, u32
+        )
+        group_control[6] = 1 if bounded != 0 else 0
+        _cuda_graph_apply_bounded_group(group_control)
 
 
 @kernel
@@ -509,7 +563,10 @@ def _reset_target(extent, stats):
 
 
 def _finalize_atomic_target(extent, stats, capacity, dispatch_state=None):
-    if dispatch_state is None or impl.current_cfg().arch != _ti_core.Arch.vulkan:
+    if dispatch_state is None or impl.current_cfg().arch not in (
+        _ti_core.Arch.cuda,
+        _ti_core.Arch.vulkan,
+    ):
         _finalize_atomic_worklist(extent.state, *_stats_tuple(stats), capacity)
         return
     dispatch_state.validate_extent(extent, require_identity=True)
@@ -1230,6 +1287,70 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
     @property
     def lifetime_leases(self):
         return self._leases
+
+    @property
+    def _cuda_bounded_fusion_state(self):
+        kind, _, options = self._operation
+        if kind != "finalize" or impl.current_cfg().arch != _ti_core.Arch.cuda:
+            return None
+        return options.get("dispatch_state")
+
+    def _cuda_bounded_fusion_action(
+        self,
+        group_control_arg,
+        group_control,
+        dispatch_packet_arg,
+        capacity_arg,
+    ):
+        kind, _, options = self._operation
+        dispatch_state = options.get("dispatch_state")
+        if (
+            kind != "finalize"
+            or dispatch_state is None
+            or impl.current_cfg().arch != _ti_core.Arch.cuda
+        ):
+            return None
+        dispatch_state._validate_current()
+        from taichi_forge.graph._graph import gen_cpp_kernel
+
+        if group_control is None:
+            symbolic_args = (
+                self._args.next_extent,
+                *self._args.stat_args,
+                dispatch_packet_arg,
+                capacity_arg,
+            )
+            kernel_cpp = gen_cpp_kernel(
+                _finalize_atomic_worklist_with_dispatch, symbolic_args
+            )
+            fixed_bindings = {
+                dispatch_packet_arg.name: dispatch_state.packet,
+                capacity_arg.name: self._args.capacity_value,
+            }
+        else:
+            symbolic_args = (
+                self._args.next_extent,
+                *self._args.stat_args,
+                dispatch_packet_arg,
+                group_control_arg,
+                capacity_arg,
+            )
+            kernel_cpp = gen_cpp_kernel(
+                _finalize_atomic_worklist_with_cuda_group, symbolic_args
+            )
+            fixed_bindings = {
+                dispatch_packet_arg.name: dispatch_state.packet,
+                group_control_arg.name: group_control,
+                capacity_arg.name: self._args.capacity_value,
+            }
+        action = DispatchGraphAction(
+            ((kernel_cpp, symbolic_args),),
+            backends=("cuda",),
+            conditional_body_safe=False,
+            fixed_bindings=fixed_bindings,
+            update_policy="immutable",
+        )
+        return action, dispatch_state
 
     def _stats(self, runtime_args):
         return {

@@ -311,6 +311,8 @@ class DevicePrefix:
                 method=method,
                 workspace=self.workspace._compact,
             )
+            if dispatch_state is not None and arch == _ti_core.Arch.cuda:
+                dispatch_state.refresh()
         self.workspace._refresh_usage()
         return DevicePrefix(output, output_extent, workspace=self.workspace)
 
@@ -738,7 +740,7 @@ class DevicePrefixSequence:
                 )
         effective_dispatch_state = (
             dispatch_state
-            if impl.current_cfg().arch == _ti_core.Arch.vulkan
+            if impl.current_cfg().arch in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan)
             else None
         )
         if effective_dispatch_state is not None:

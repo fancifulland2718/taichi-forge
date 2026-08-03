@@ -71,10 +71,10 @@ def device_dispatch_state_publish(
     """Publish a bounded extent and its portable launch packet together.
 
     The packet stores the three Vulkan-compatible indirect grid dimensions and
-    the immutable block dimension used to derive them.  CPU and CUDA consume
-    the same extent contract and ignore the grid packet, which keeps producer
-    code backend-neutral without claiming exact indirect launch on those
-    backends.
+    the immutable block dimension used to derive them. Vulkan consumes the
+    packet through ``dispatchIndirect``; qualified CUDA Graph exact dispatch
+    consumes the same grid through its internal device-side node updater.
+    CPU and masked CUDA routes retain the extent contract and ignore the grid.
     """
 
     bounded = device_extent_publish(extent_state, capacity, count)
@@ -188,9 +188,10 @@ class DeviceDispatchState:
 
     Producers publish both the bounded count and a four-word packet.  Words
     zero through two are directly consumable by Vulkan ``dispatchIndirect``;
-    word three stores the immutable block dimension.  CPU and CUDA retain the
-    same object and extent semantics while honestly using masked-capacity
-    execution.
+    word three stores the immutable block dimension. Qualified CUDA Graph
+    exact dispatch consumes word zero without host readback. CPU and masked
+    CUDA routes retain the same object and extent semantics without claiming
+    exact physical launch.
     """
 
     packet_words = _DISPATCH_PACKET_SIZE

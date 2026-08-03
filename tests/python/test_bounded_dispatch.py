@@ -232,12 +232,22 @@ def test_cuda_bounded_route_selection_is_fail_closed(monkeypatch):
         assert capabilities["zero_count_command_skip"]
         assert capabilities["range_mapping"] == "one_to_one"
         assert capabilities["fallback_reason"] == "none"
+        assert capabilities["producer_update_policy_requested"] == "auto"
+        assert capabilities["producer_update_policy"] == "per_node"
+        assert capabilities["grouped_updates_supported"]
+        assert capabilities["forge_producer_fusion_supported"]
+        assert not capabilities["producer_packet_consumed"]
     else:
         with pytest.raises(RuntimeError, match="device_update"):
             ti.graph.bounded_dispatch_capabilities()
 
     monkeypatch.setenv("TI_CUDA_BOUNDED_DISPATCH_MODE", "invalid")
     with pytest.raises(RuntimeError, match="TI_CUDA_BOUNDED_DISPATCH_MODE"):
+        ti.graph.bounded_dispatch_capabilities()
+
+    monkeypatch.setenv("TI_CUDA_BOUNDED_DISPATCH_MODE", "device_update")
+    monkeypatch.setenv("TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY", "invalid")
+    with pytest.raises(RuntimeError, match="TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY"):
         ti.graph.bounded_dispatch_capabilities()
 
 
@@ -250,10 +260,18 @@ def test_cuda_bounded_device_update_driver_probe():
         assert probe["device_update_ptx_linked"]
         assert probe["setup_probe_passed"], probe
         assert probe["zero_count_command_skip_qualified"]
+        assert probe["launch_update_persists"]
+        assert probe["external_update_persists"]
+        assert probe["partial_failure_capacity_safe"]
         assert probe["probe_sparse_visited"] == 7
         assert probe["probe_zero_visited"] == 7
         assert probe["probe_rebound_visited"] == 10
         assert probe["probe_baseline_visited"] == 74
+        assert probe["probe_persistent_sparse_visited"] == 14
+        assert probe["probe_persistent_disabled_visited"] == 0
+        assert probe["probe_external_update_visited"] == 5
+        assert probe["probe_external_reset_visited"] == 10
+        assert probe["probe_partial_failure_visited"] == 14
         assert probe["probe_reason"] == "none"
     else:
         assert not probe["setup_probe_passed"]
@@ -371,6 +389,126 @@ def test_cuda_exact_bounded_dispatch_replay_and_rebind(monkeypatch):
     report = graph.execution_stats()
     assert report.memory.persistent_argument_bytes >= 32
     assert report.memory.persistent_bounded_control_bytes == 32
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_producer_owned_launch_state_groups_bounded_consumers(monkeypatch):
+    probe = dict(ti_core.cuda_bounded_dispatch_probe())
+    if not probe["exact_device_grid_available"]:
+        pytest.skip(probe["unavailable_reason"])
+    monkeypatch.setenv("TI_CUDA_BOUNDED_DISPATCH_MODE", "device_update")
+    monkeypatch.setenv("TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY", "grouped")
+
+    capacity = 97
+    block_dim = 32
+
+    @ti.kernel
+    def publish(
+        requested: ti.i32,
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        packet: ti.types.ndarray(dtype=ti.u32, ndim=1),
+    ):
+        ti.device_dispatch_state_publish(extent, packet, capacity, requested)
+
+    @ti.kernel
+    def consume(
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        visited: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.loop_config(block_dim=block_dim)
+        for i in range(capacity):
+            ti.atomic_add(visited[0], 1)
+            if i < ti.device_extent_count(extent):
+                ti.atomic_add(visited[1], 1)
+
+    requested_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "requested", ti.i32)
+    extent_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "extent", ti.i32, ndim=1
+    )
+    packet_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "packet", ti.u32, ndim=1
+    )
+    first_visited_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "first_visited", ti.i32, ndim=1
+    )
+    second_visited_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "second_visited", ti.i32, ndim=1
+    )
+    extent = ti.DeviceExtent(capacity)
+    launch_state = extent.dispatch_state(block_dim)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(publish, requested_arg, extent_arg, packet_arg)
+    handles = (
+        builder.dispatch_bounded(
+            consume,
+            extent_arg,
+            first_visited_arg,
+            extent=extent_arg,
+            capacity=capacity,
+            block_dim=block_dim,
+            launch_state=launch_state,
+        ),
+        builder.dispatch_bounded(
+            consume,
+            extent_arg,
+            second_visited_arg,
+            extent=extent_arg,
+            capacity=capacity,
+            block_dim=block_dim,
+            launch_state=launch_state,
+        ),
+    )
+    graph = builder.compile()
+    first_visited = ti.ndarray(ti.i32, shape=2)
+    second_visited = ti.ndarray(ti.i32, shape=2)
+    args = {
+        "requested": 0,
+        "extent": extent,
+        "packet": launch_state.packet,
+        "first_visited": first_visited,
+        "second_visited": second_visited,
+    }
+    graph.execution_stats()
+
+    for requested in (1, 0, capacity, 33, capacity):
+        args["requested"] = requested
+        first_visited.fill(0)
+        second_visited.fill(0)
+        graph.run(args)
+        expected_grid_lanes = (
+            0
+            if requested == 0
+            else min(
+                capacity,
+                ((requested + block_dim - 1) // block_dim) * block_dim,
+            )
+        )
+        for visited in (first_visited, second_visited):
+            observed = visited.to_numpy()
+            segment = graph.execution_stats().segments[0]
+            assert int(observed[0]) == expected_grid_lanes, (
+                segment.last_path,
+                segment.fallback_reason,
+                segment.last_driver_error,
+                segment.bounded_update_groups,
+                segment.bounded_updater_dispatches,
+                segment.bounded_grouped_payloads,
+                segment.persistent_bounded_control_bytes,
+            )
+            assert int(observed[1]) == requested
+
+    assert all(
+        handle.capabilities.producer_owned_launch_state for handle in handles
+    )
+    assert all(handle.capabilities.preparation_dispatches == 1 for handle in handles)
+    report = graph.execution_stats()
+    segment = report.segments[0]
+    assert segment.last_driver_error == 0
+    assert segment.bounded_update_groups == 1
+    assert segment.bounded_updater_dispatches == 1
+    assert segment.bounded_grouped_payloads == 2
+    assert segment.bounded_producer_fused_groups == 0
+    assert report.memory.persistent_bounded_control_bytes == 56
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
@@ -741,6 +879,10 @@ def test_graph_device_prefix_sequence_publishes_bounded_launch_state():
 
     assert handle.capabilities.producer_owned_launch_state == (
         ti.lang.impl.current_cfg().arch == ti.vulkan
+        or (
+            ti.lang.impl.current_cfg().arch == ti.cuda
+            and handle.capabilities.exact_grid
+        )
     )
     assert handle.capabilities.preparation_dispatches == (
         1

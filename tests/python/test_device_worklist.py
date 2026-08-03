@@ -331,6 +331,134 @@ def test_device_worklist_atomic_finalize_feeds_bounded_dispatch_and_report():
         assert report.executed_count == capacity
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_worklist_finalize_fuses_bounded_group_update(monkeypatch):
+    probe = dict(ti_core.cuda_bounded_dispatch_probe())
+    if not probe["exact_device_grid_available"]:
+        pytest.skip(probe["unavailable_reason"])
+    monkeypatch.setenv("TI_CUDA_BOUNDED_DISPATCH_MODE", "device_update")
+    monkeypatch.setenv("TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY", "fused")
+    capacity = 65
+    block_dim = 32
+
+    @ti.kernel
+    def consume(
+        extent_state: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        visited: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.loop_config(block_dim=block_dim)
+        for i in range(capacity):
+            ti.atomic_add(visited[0], 1)
+            if i < ti.device_extent_count(extent_state):
+                ti.atomic_add(visited[1], 1)
+
+    worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)
+    args = worklist.graph_args("fused_frontier")
+    count_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
+    first_visited_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "first_visited", ti.i32, ndim=1
+    )
+    second_visited_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "second_visited", ti.i32, ndim=1
+    )
+    launch_state = worklist.next_extent.dispatch_state(block_dim)
+    reset = ti.algorithms.DeviceWorklistSequence(args).prepare_next()
+    finalize = ti.algorithms.DeviceWorklistSequence(args).finalize_next(
+        dispatch_state=launch_state
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(reset)
+    builder.dispatch(_append_range, *args.append_arguments(), count_arg)
+    builder.append_native(finalize)
+    handles = (
+        builder.dispatch_bounded(
+            consume,
+            args.next_extent,
+            first_visited_arg,
+            extent=args.next_extent,
+            capacity=capacity,
+            block_dim=block_dim,
+            launch_state=launch_state,
+        ),
+        builder.dispatch_bounded(
+            consume,
+            args.next_extent,
+            second_visited_arg,
+            extent=args.next_extent,
+            capacity=capacity,
+            block_dim=block_dim,
+            launch_state=launch_state,
+        ),
+    )
+    pending_fusion = builder._pending_cuda_fused_producer
+    assert pending_fusion is not None and pending_fusion[0] is launch_state
+    group_control = pending_fusion[2]
+    graph = builder.compile()
+    first_visited = ti.ndarray(ti.i32, shape=2)
+    second_visited = ti.ndarray(ti.i32, shape=2)
+    runtime_args = worklist.runtime_arguments(
+        "fused_frontier", include_capacity=True
+    )
+    runtime_args.update(
+        count=0,
+        first_visited=first_visited,
+        second_visited=second_visited,
+    )
+    graph.execution_stats()
+
+    for requested in (1, 0, capacity, 19, capacity + 7, capacity):
+        runtime_args["count"] = requested
+        first_visited.fill(0)
+        second_visited.fill(0)
+        graph.run(runtime_args)
+        useful = min(requested, capacity)
+        expected_lanes = (
+            0
+            if useful == 0
+            else min(
+                capacity,
+                ((useful + block_dim - 1) // block_dim) * block_dim,
+            )
+        )
+        for visited in (first_visited, second_visited):
+            observed = visited.to_numpy()
+            segment = next(
+                item
+                for item in graph.execution_stats().segments
+                if item.kind == "cgraph"
+            )
+            assert int(observed[0]) == expected_lanes, (
+                segment.last_path,
+                segment.fallback_reason,
+                segment.last_driver_error,
+                segment.bounded_update_groups,
+                segment.bounded_updater_dispatches,
+                segment.bounded_grouped_payloads,
+                segment.bounded_producer_fused_groups,
+            )
+            assert int(observed[1]) == useful
+        snapshot = worklist.next_extent.snapshot()
+        assert snapshot.count == useful
+        assert snapshot.overflow is (requested > capacity)
+        if requested == 1:
+            assert int(group_control.to_numpy()[8]) == 1
+            graph._spec.invalidate_runtime()
+            assert int(group_control.to_numpy()[8]) == 0
+
+    assert all(
+        handle.capabilities.producer_owned_launch_state for handle in handles
+    )
+    assert all(handle.capabilities.preparation_dispatches == 0 for handle in handles)
+    report = graph.execution_stats()
+    segment = next(item for item in report.segments if item.kind == "cgraph")
+    assert segment.last_driver_error == 0
+    assert segment.bounded_update_groups == 1
+    assert segment.bounded_updater_dispatches == 0
+    assert segment.bounded_grouped_payloads == 2
+    assert segment.bounded_producer_fused_groups == 1
+    assert segment.persistent_bounded_control_bytes == 56
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_device_worklist_graph_deterministic_claim_is_recordable():
     capacity = 24
