@@ -138,13 +138,20 @@ TEST(RuntimeCompletion, GpuTimingIsTicketOwnedAndReadableAfterCompletion) {
   auto semaphore = std::make_shared<FakeSemaphore>();
   std::atomic<int> released{0};
   auto timing = std::make_shared<FakeGpuTiming>(&released);
+  auto region_timing = std::make_shared<FakeGpuTiming>(&released);
   auto completion = RuntimeCompletion::from_stream_semaphore(
-      Arch::vulkan, 17, 10, semaphore, nullptr, timing);
+      Arch::vulkan, 17, 10, semaphore, nullptr, timing,
+      {{"outer/solve", region_timing}});
 
   auto pending = completion.gpu_timing_snapshot();
   EXPECT_FALSE(pending.available);
   EXPECT_EQ(pending.status, "pending");
   EXPECT_EQ(timing->queries, 0);
+  auto pending_regions = completion.gpu_region_timing_snapshots();
+  ASSERT_EQ(pending_regions.size(), 1u);
+  EXPECT_EQ(pending_regions[0].path_id, "outer/solve");
+  EXPECT_EQ(pending_regions[0].timing.status, "pending");
+  EXPECT_EQ(region_timing->queries, 0);
 
   semaphore->ready = true;
   EXPECT_TRUE(completion.done());
@@ -156,11 +163,18 @@ TEST(RuntimeCompletion, GpuTimingIsTicketOwnedAndReadableAfterCompletion) {
   EXPECT_EQ(completed.stream_id, 7u);
   EXPECT_EQ(completed.status, "instrumented_exact");
   EXPECT_EQ(timing->queries, 1);
+  auto completed_regions = completion.gpu_region_timing_snapshots();
+  ASSERT_EQ(completed_regions.size(), 1u);
+  EXPECT_EQ(completed_regions[0].path_id, "outer/solve");
+  EXPECT_TRUE(completed_regions[0].timing.available);
+  EXPECT_EQ(completed_regions[0].timing.duration_ns, 1234u);
+  EXPECT_EQ(region_timing->queries, 1);
 
   timing.reset();
+  region_timing.reset();
   EXPECT_EQ(released.load(std::memory_order_relaxed), 0);
   completion = RuntimeCompletion{};
-  EXPECT_EQ(released.load(std::memory_order_relaxed), 1);
+  EXPECT_EQ(released.load(std::memory_order_relaxed), 2);
 }
 
 TEST(RuntimeCompletion, FirstBackendErrorIsSticky) {

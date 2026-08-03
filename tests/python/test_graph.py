@@ -2756,7 +2756,7 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
             ("while", "if", "switch") if expected else ()
         )
         assert device["submission_ticket_gpu_timestamps"] == (
-            "opt_in_whole_ticket" if expected else "unavailable"
+            "opt_in_whole_ticket_and_region" if expected else "unavailable"
         )
     elif arch == ti.vulkan:
         assert device["primitive"] == "vulkan_dispatch_indirect"
@@ -2788,7 +2788,7 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
         )
         assert (
             device["submission_ticket_gpu_timestamps"]
-            == "opt_in_whole_ticket_runtime_probe"
+            == "opt_in_whole_ticket_and_region_runtime_probe"
         )
         assert device["compound_first_chunk_strategies"] == (
             "compact",
@@ -4499,7 +4499,7 @@ def test_structured_graph_vulkan_ticket_reports_opt_in_region_telemetry():
     args["counter"].fill(0)
     ticket = graph.submit(args, telemetry=True)
     report = ticket.telemetry()
-    assert report.schema_version == 2
+    assert report.schema_version == 3
     assert report.backend == "vulkan"
     assert report.sequence == ticket.sequence
     assert report.device_snapshot_bytes == 24
@@ -4527,6 +4527,7 @@ def test_structured_graph_vulkan_ticket_reports_opt_in_region_telemetry():
     assert len(report.regions) == 1
     region = report.regions[0]
     assert region.name == "adaptive_step"
+    assert region.path_id == "adaptive_step"
     assert region.logical_iterations == 13
     assert region.initial_counter == 0
     assert region.final_counter == 13
@@ -4538,8 +4539,16 @@ def test_structured_graph_vulkan_ticket_reports_opt_in_region_telemetry():
     assert region.active_chunk_count == 1
     assert region.coarse_skipped_chunk_count in (0, 3)
     assert region.host_enqueue_ns > 0
-    assert region.gpu_duration_ns is None
-    assert region.gpu_timestamp_status == "unavailable"
+    assert region.gpu_timestamp_status in ("instrumented_exact", "unsupported")
+    assert region.gpu_measurement_path_changed
+    assert region.gpu_queue_or_stream_id.startswith("vulkan:")
+    if region.gpu_timestamp_status == "instrumented_exact":
+        assert region.gpu_duration_ns is not None
+        assert region.gpu_duration_ns >= 0
+        assert region.gpu_timestamp_exact
+    else:
+        assert region.gpu_duration_ns is None
+        assert not region.gpu_timestamp_exact
     memory = graph.execution_stats().memory
     assert memory.persistent_telemetry_bytes == 24
     assert memory.telemetry_arena_slots == 1
@@ -4577,6 +4586,7 @@ def test_structured_graph_cuda_ticket_reports_opt_in_region_telemetry():
     assert not report.gpu_timestamp_resource_bytes_known
     assert len(report.regions) == 1
     region = report.regions[0]
+    assert region.path_id == "adaptive_step"
     assert region.logical_iterations == 13
     assert region.initial_counter == 0
     assert region.final_counter == 13
@@ -4587,6 +4597,12 @@ def test_structured_graph_cuda_ticket_reports_opt_in_region_telemetry():
     assert region.chunk_strategies == ("cuda_conditional_graph",)
     assert region.active_chunk_count == 1
     assert region.coarse_skipped_chunk_count == 0
+    assert region.gpu_timestamp_status == "instrumented_exact"
+    assert region.gpu_duration_ns is not None
+    assert region.gpu_duration_ns >= 0
+    assert region.gpu_timestamp_exact
+    assert region.gpu_measurement_path_changed
+    assert region.gpu_queue_or_stream_id == "cuda:0"
     assert graph.execution_stats().memory.persistent_telemetry_bytes == 24
 
 
@@ -4624,8 +4640,14 @@ def test_structured_graph_gpu_timing_is_bounded_and_ticket_owned():
             assert report.gpu_timestamp_status == "instrumented_exact"
             assert report.gpu_timestamp_exact
             assert report.gpu_duration_ns is not None
+            assert report.regions[0].gpu_timestamp_status == "instrumented_exact"
+            assert report.regions[0].gpu_duration_ns is not None
         else:
             assert report.gpu_timestamp_status in (
+                "instrumented_exact",
+                "unsupported",
+            )
+            assert report.regions[0].gpu_timestamp_status in (
                 "instrumented_exact",
                 "unsupported",
             )
