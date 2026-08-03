@@ -45,11 +45,11 @@ independent from upstream Taichi version numbers.
 
 ## Release History
 
-The current source release is `0.6.0`; `0.4.25` is the final public
-`0.4.x` baseline. PyPI storage is limited, so some nonessential older
-distribution files have been removed. The complete version index therefore
-uses durable Git source boundaries instead of treating the current PyPI file
-list as the whole history.
+The current published release is `0.6.0`, while `master` targets `0.6.1`;
+`0.4.25` is the final public `0.4.x` baseline. PyPI storage is limited, so some
+nonessential older distribution files have been removed. The complete version
+index therefore uses durable Git source boundaries instead of treating the
+current PyPI file list as the whole history.
 
 | Release | User-visible scope |
 | --- | --- |

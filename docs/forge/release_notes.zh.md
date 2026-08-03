@@ -13,8 +13,8 @@
 
 | 版本 | 历史状态 | 源码边界 | 主要范围 |
 | --- | --- | --- | --- |
-| [待发布](#unreleased) | 0.6.1 开发版本 | 当前 `master` | 设备端动态 worklist、有界 Graph dispatch、completion-attached telemetry 与更完整的无提交 launch report |
-| [0.6.0](#060) | 已正式发布 | `c223cb191` | 结构化 Graph 控制/遥测与 Vulkan indirect dispatch、稀疏 runtime/线性代数、driver-only CUDA primitive、受管互操作/显示与 runtime 生命周期有界化 |
+| [待发布](#unreleased) | 0.6.1 开发版本 | 当前 `master` | task launch manifest/policy、通用 bounded CUDA control、设备端动态 worklist、有界 Graph dispatch 与 completion-attached telemetry |
+| [0.6.0](#060) | 已正式发布 | `106ad65d25` | 结构化 Graph 控制/遥测与 Vulkan indirect dispatch、稀疏 runtime/线性代数、driver-only CUDA primitive、受管互操作/显示与 runtime 生命周期有界化 |
 | [0.1.0](#010) | 历史源码版本；发行文件可能已移除 | `91ad177685` | scikit-build-core 迁移与 Forge 发行包重命名 |
 | [0.1.1](#011) | 历史源码版本；发行文件可能已移除 | `c771969781` | `taichi_forge` import 重命名与安装布局修复 |
 | [0.1.2](#012) | 历史源码版本；发行文件可能已移除 | `fe5844390b` | import 修复与 CUDA 构建选项 |
@@ -40,6 +40,26 @@
 
 ## 待发布 {#unreleased}
 
+- CUDA structured control 新增 Forge 自有的 bounded masked Graph 路径，覆盖低于 12.8 的
+  driver。满足资格的 Driver API 12.8+ runtime 继续使用原生 conditional Graph node；较旧
+  runtime 在普通 CUDA Graph capture 可用时使用 device latch 与 task-entry gate，否则保留
+  exact portable control。capability 会明确区分 exact native、bounded masked 与 portable
+  执行，不把它们伪装成相同的物理 launch。本地已通过强制 masked route 资格测试；真实
+  12.8 以下 driver 仍属于 release candidate 验证项。
+- 新增只读 offloaded-task manifest 与 JIT dispatch label。manifest 在不发起 profiler probe
+  的前提下报告稳定 task identity、`cpu_scheduler`/`grid_stride`/`one_to_one`/
+  `not_applicable` range mapping、requested/selected/actual grid/block geometry 和静态
+  shared-memory 上下文。CPU 不填充 GPU geometry；runtime-indirect Vulkan workload 明确
+  报告 actual geometry 由 device 决定。label 在 profiler 与可选 NVTX 名称中保持同一个
+  task identity；manifest 查询不提交工作，且内存占用保持稳定。
+- 新增 `TaskLaunchPolicy`，用于受约束的 direct-JIT block 调优。CUDA/Vulkan 对单一安全
+  parallel range task 支持 `hint`/`require`，通过 immutable report 暴露最终 geometry 与
+  编译期资源约束，并在 enqueue 前拒绝不支持的 task shape 或 block-sensitive 改写。CPU
+  hint 明确保留 worker scheduler，require 明确失败。policy 不覆盖 grid extent，作为独立
+  cache specialization，并在只读验证后复用普通 warm launch 路径。无提交查询不能安全取得
+  register/local-memory 时会明确保留为空；不会引入 autotuning 或 profiler launch。worker
+  thread 使用前应在 Python 主线程通过 `report()` 准备冷 GPU policy，并保留 `auto` 作为性能
+  对照。
 - opt-in Graph submission telemetry 现在包含由 ticket 持有、immutable 的
   `GraphPipelineReport`，描述优化后的 execution root。每个 stage 会报告逻辑/物理
   dispatch 数、runtime 参数名、native-action 组成、声明的 temporary 字节，以及已有的
@@ -94,17 +114,11 @@
   snapshot 可观察 overflow、useful/executed/skipped/encoded work、非法 offset、workspace 与
   zero-command 行为。Vulkan exact 工作量减少不被表述为无条件提速：轻量单独 payload 中，
   preparation dispatch 的成本可能更高。
-- Task manifest 新增 `range_mapping`，取 `cpu_scheduler`、`grid_stride`、`one_to_one` 或
-  `not_applicable`。普通 GPU kernel 保持 grid-stride；内部 one-to-one specialization 只用于
-  合格的 Vulkan bounded dispatch，并计入 specialization/cache identity。
 - 新增 `DeviceExtent`：以稳定的两槽 device state 保存有界 count 与 sticky overflow。
   device-side publish 无 host readback 地完成钳制；同一 allocation 可由普通 kernel、JIT Graph
   参数和兼容的 count-producing primitive 共享。reset/normalize 保持 device-side，显式
   snapshot/check 才同步，旧 runtime generation 会 fail closed。该状态合同本身不宣称
   exact indirect dispatch，也不改变 kernel grid。
-- `TaskLaunchReport.resources` 现在说明编译期 shared-memory 用量、已公开 backend block
-  上限、代表性合法 block probe，以及请求候选被拒绝的原因。无提交查询不能安全取得
-  register/local-memory 时会明确保留为空；不会引入 runtime autotuning 或 profiler launch。
 
 ## 0.6.0
 
@@ -115,7 +129,7 @@
 
 | 范围 | 0.6.0 相对 0.5.0 的主要变化 |
 | --- | --- |
-| Graph 与执行 | 只读 task manifest/label、受约束 direct-JIT block policy、fixed-schema `while`/`if`/`switch`、最大 depth=2 的结构化组合、CUDA conditional Graph、Vulkan bounded/compound/nested while、Vulkan device-written indirect dispatch，以及 stop position、region、queue 与资源遥测。 |
+| Graph 与执行 | fixed-schema `while`/`if`/`switch`、最大 depth=2 的结构化组合、CUDA conditional Graph、Vulkan bounded/compound/nested while、Vulkan device-written indirect dispatch，以及 stop position、region 与 queue 遥测。 |
 | 线性代数与稀疏 runtime | 公开 runtime-bound `LinearOperator`、实验性 `SolvePlan`/batch plan、fixed sparse pattern/value update，以及经文档矩阵限定的 CG/PCG、MINRES、BiCGSTAB、GMRES、FGMRES CPU/CUDA/Vulkan provider。 |
 | 数据、互操作与显示 | dense storage/view 统一合同、受管 DLPack/external allocation、CUDA-Vulkan shared display、边缘根区域、连续字体缩放和可折叠自动高度面板。 |
 | Native primitive 与打包 | CUDA 标准 wheel 改用 Forge 自有 driver-only primitive provider；Program-owned workspace、诊断、稳定 radix/compact/scan 改进，以及 runtime/shim build identity 门禁。 |
@@ -123,15 +137,15 @@
 
 升级现有 0.5.0 应用时，重点检查：
 
-- 本地或离线安装应使用同一次构建产生、版本与 native commit 相符的 runtime/shim wheel；
+- 本地或离线安装应使用 distribution version 相同的 runtime/shim 组合。split-wheel workflow
+  显式选择兼容 runtime 时，两者源码 commit 可以不同；是否可用由最终 link、import、
+  dependency 与功能验证决定，而不是要求 commit 相等；
 - CUDA primitive 代码应使用 `method="auto"`，不要依赖只存在于不发布 reference build 的
   `cuda_cub*` provider；
 - `ti.simt.block.SharedArray` 必须在 parallel range-for 的 block 作用域内声明；CUDA 单 block
   总量上限为 48 KiB，超出时明确失败，不会自动启用 dynamic shared memory；
 - 结构化 Graph 与 `dispatch_indirect()` 应先查询 capability。Vulkan indirect dispatch 当前是
   单 offloaded-task 能力；CPU/CUDA 不会静默模拟该路径；
-- `TaskLaunchPolicy` 是 per-backend 调优工具，不承诺跨后端提速。worker thread 调用前应在
-  Python 主线程用 `report()` 准备冷 GPU policy，并始终以 `auto` 作为性能对照；
 - `ti.reset()` 后应重建 Graph、storage view、external owner 与 solver plan，不能复用旧 generation；
 - 旧 `from_dlpack()` 与 provider-specific Vulkan-CUDA import 名称保持兼容；新代码可使用统一的
   `from_external()` / `import_external_allocation()` 入口。
@@ -198,11 +212,6 @@
   有 runtime 回归覆盖；本次更新不据此新增其他 GPU 后端的资格声明。CUDA 的静态
   `SharedArray` 单 block 总量限制为 48 KiB；更大的请求会给出明确错误，Forge 不启用
   opt-in dynamic shared memory。
-- 新增 `TaskLaunchPolicy`，用于受约束的 direct-JIT block 调优。CUDA/Vulkan 对单一安全
-  parallel range task 支持 `hint`/`require`，通过不可变 report 暴露最终 geometry，并在
-  enqueue 前拒绝不支持的 task shape 或 block-sensitive 改写。CPU hint 明确回退到 worker
-  scheduler，require 明确失败。policy 不覆盖 grid extent，作为独立 cache specialization，
-  首次只读验证后复用普通 warm launch 路径。
 - JIT Graph 的 `ArgKind.NDARRAY` runtime 参数现在通过通用 runtime-storage 协议消费
   Ndarray、dense field 与显式 `DenseNdarrayView`。compact Program-owned Ndarray 与
   SNode payload binding 可使用 CUDA capture、exact replay 和兼容 allocation patch；
@@ -453,9 +462,9 @@ domain decomposition、contact、KKT 或 nonlinear outer-solver policy。不受�
   不再通过前序 payload 大小推算地址。混合 f32/f64 root child 之间的 alignment padding
   因此不会让 `to_numpy()`、`from_numpy()` 或 native field operation 错读相邻 field；
   普通 kernel hot path 不增加分支或复制。
-- 最终 runtime/shim wheel 门禁现在校验 native commit identity，并覆盖 shape `()`、`1`、
-  `7` 的 f32/f64 field、host/kernel round-trip、serial/atomic f64 reduction、offline cache
-  与单线程/默认线程配置。
+- 最终 runtime/shim wheel 门禁现在记录并校验 native runtime commit identity 的有效性，
+  但不要求它与 shim 源码 commit 相等；同时覆盖 shape `()`、`1`、`7` 的 f32/f64 field、
+  host/kernel round-trip、serial/atomic f64 reduction、offline cache 与单线程/默认线程配置。
 - Windows driver-only/reference build 与 primitive 正确性矩阵已经完成。降低任何公开 driver
   下限之前，仍必须补齐 Linux wheel/import/依赖扫描、compute-sanitizer 和每个声明支持的旧
   NVIDIA driver 真机执行。

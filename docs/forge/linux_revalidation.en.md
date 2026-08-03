@@ -1,15 +1,17 @@
-# Linux Revalidation Status
+# Linux 0.6.1 Release-Candidate Validation
 
-This is the remaining Linux release-validation matrix after the Taichi Forge 0.6.0 runtime
-hardening work. It is deliberately a test plan, not a claim that these paths
-have passed on Linux. Run it on a clean x86_64 Linux runner with the intended
-release dependencies and record the GPU, driver, Vulkan loader, window system,
-and CUDA Toolkit only when running the isolated reference workflow.
+This is the Linux release-candidate validation matrix for Taichi Forge 0.6.1.
+It carries forward checks that remain useful after the published 0.6.0 runtime
+hardening work and adds coverage for the current source candidate. It is a test
+plan, not a claim that every listed path has passed on Linux. Run it on a clean
+x86_64 Linux runner with the intended release dependencies and record the GPU,
+driver, Vulkan loader, window system, and CUDA Toolkit only for the isolated
+reference workflow.
 
-This matrix is a release gate for the 0.6.0 runtime changes. Historical
-features that already shipped in 0.5.0 or earlier are listed here only when a
-0.6.0 implementation or packaging change requires renewed Linux evidence;
-their inclusion must not be read as a 0.6.0 introduction.
+This matrix gates the 0.6.1 candidate; it is not a retroactive blocker for the
+already published 0.6.0 release. Historical features are listed only when the
+current candidate needs renewed Linux evidence, and their inclusion must not be
+read as a 0.6.1 introduction.
 
 ## Release blockers
 
@@ -252,7 +254,8 @@ so it does not require a new native runtime wheel. Linux release evidence is
 still required:
 
 - Run `tests/python/test_rle_unique.py` on CPU, CUDA, and Vulkan with paired
-  0.6.0 shim/runtime wheels. Cover ndarray, dense field, all integer key dtypes,
+  0.6.1 release-candidate shim/runtime wheels. Cover ndarray, dense field, all
+  integer key dtypes,
   StructNdarray payload, logical empty `size=0`, single item, non-power-of-two
   capacity, active-prefix reuse, validation-before-write, AD rejection, and
   PrimitiveSequence Graph replay.
@@ -279,8 +282,8 @@ transform, and scan providers. It does not change the native runtime ABI and
 does not require republishing `taichi-forge-runtime`. All Linux evidence below
 is pending:
 
-- Run `tests/python/test_segmented_primitives.py` with paired 0.6.0
-  shim/runtime wheels on CPU, CUDA, and Vulkan. Cover offsets and
+- Run `tests/python/test_segmented_primitives.py` with paired 0.6.1
+  release-candidate shim/runtime wheels on CPU, CUDA, and Vulkan. Cover offsets and
   nondecreasing-ID construction, empty/missing segments, padded inactive tail,
   ndarray/field storage, all public scalar dtypes, inclusive/exclusive and
   in-place scan, validation-before-write, AD boundaries, Graph replay, and

@@ -16,8 +16,8 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
-| [Unreleased](#unreleased) | 0.6.1 development | current `master` | device-resident dynamic worklists, bounded Graph dispatch, completion-attached telemetry, and richer no-submit launch reports |
-| [0.6.0](#060) | published release | `c223cb191` | structured Graph control/telemetry and Vulkan indirect dispatch, sparse runtime/linear algebra, driver-only CUDA primitives, managed interoperability/display, and bounded runtime lifetimes |
+| [Unreleased](#unreleased) | 0.6.1 development | current `master` | task launch manifests/policies, portable bounded CUDA control, device-resident dynamic worklists, bounded Graph dispatch, and completion-attached telemetry |
+| [0.6.0](#060) | published release | `106ad65d25` | structured Graph control/telemetry and Vulkan indirect dispatch, sparse runtime/linear algebra, driver-only CUDA primitives, managed interoperability/display, and bounded runtime lifetimes |
 | [0.1.0](#010) | historical source release; artifact may be removed | `91ad177685` | scikit-build-core migration and Forge distribution rebrand |
 | [0.1.1](#011) | historical source release; artifact may be removed | `c771969781` | `taichi_forge` import rename and install-layout fixes |
 | [0.1.2](#012) | historical source release; artifact may be removed | `fe5844390b` | import fixes and CUDA build option |
@@ -43,6 +43,34 @@ grouped under the behavior they shipped.
 
 ## Unreleased
 
+- CUDA structured control now has a Forge-owned bounded masked Graph route for
+  drivers older than 12.8. Qualified Driver API 12.8+ runtimes continue to use
+  native conditional Graph nodes; older runtimes use a device latch and
+  task-entry gates when ordinary CUDA Graph capture is available, and otherwise
+  retain exact portable control. Capabilities distinguish exact native,
+  bounded masked, and portable execution instead of presenting them as the same
+  physical launch. The forced masked route is qualified locally; a real
+  pre-12.8 driver remains part of release-candidate validation.
+- Added read-only offloaded-task manifests and JIT dispatch labels. A manifest
+  reports stable task identity, `cpu_scheduler`/`grid_stride`/`one_to_one`/
+  `not_applicable` range mapping, requested, selected, and actual grid/block
+  geometry, and static shared-memory context without launching a profiler
+  probe. CPU leaves GPU geometry absent, while runtime-indirect Vulkan work
+  explicitly reports that actual geometry is device owned. Labels preserve the
+  same task identity in profiler and optional NVTX names, and manifest queries
+  remain no-submit and allocation-stable.
+- Added `TaskLaunchPolicy` for constrained direct-JIT block tuning. CUDA and
+  Vulkan accept `hint`/`require` policies for a single safe parallel range
+  task, expose resolved geometry and compile-time resource constraints through
+  immutable reports, and reject unsupported task shapes or block-sensitive
+  rewrites before enqueue. CPU hints explicitly retain worker scheduling and
+  requirements fail. Policies do not override grid extent, are cache-separated
+  specializations, and reuse the normal warm launch path after read-only
+  validation. Register/local-memory values stay explicitly unavailable when a
+  no-submit query cannot obtain them safely; no autotuning or profiler launch is
+  introduced. Prepare a cold GPU policy with `report()` on the Python main
+  thread before worker-thread use, and retain `auto` as the performance
+  baseline.
 - Opt-in Graph submission telemetry now includes an immutable, ticket-owned
   `GraphPipelineReport` for the post-optimization execution root. Each stage
   reports its logical and physical dispatch counts, runtime argument names,
@@ -118,10 +146,6 @@ grouped under the behavior they shipped.
   snapshot objects. Exact Vulkan work reduction is not presented as an
   unconditional speedup: the preparation dispatch can outweigh it for light
   standalone payloads.
-- Task manifests now report `range_mapping` as `cpu_scheduler`, `grid_stride`,
-  `one_to_one`, or `not_applicable`. Ordinary GPU kernels remain grid-strided;
-  the internal one-to-one specialization is reserved for qualified Vulkan
-  bounded dispatch and participates in specialization/cache identity.
 - Added `DeviceExtent`, a stable two-slot device state for bounded counts and
   sticky overflow. Device-side publish clamps without host readback; the same
   allocation can be shared by ordinary kernels, JIT Graph arguments, and
@@ -129,11 +153,6 @@ grouped under the behavior they shipped.
   explicit snapshot/check operations synchronize, and stale runtime
   generations fail closed. This state contract does not itself claim exact
   indirect dispatch or alter kernel grids.
-- `TaskLaunchReport.resources` now explains compile-time shared-memory use,
-  exposed backend block limits, representative legal block probes, and rejected
-  requested candidates. Register/local-memory fields remain explicitly
-  unavailable when a no-submit query cannot obtain them safely; no runtime
-  autotuning or profiler launch is introduced.
 
 ## 0.6.0
 
@@ -145,7 +164,7 @@ the `0.5.0` artifacts:
 
 | Area | Main change in 0.6.0 relative to 0.5.0 |
 | --- | --- |
-| Graph and execution | Read-only task manifests/labels, constrained direct-JIT block policies, fixed-schema `while`/`if`/`switch`, structured composition to depth two, CUDA conditional Graphs, Vulkan bounded/compound/nested while execution, Vulkan device-written indirect dispatch, and stop-position, region, queue, and resource telemetry. |
+| Graph and execution | Fixed-schema `while`/`if`/`switch`, structured composition to depth two, CUDA conditional Graphs, Vulkan bounded/compound/nested while execution, Vulkan device-written indirect dispatch, and stop-position, region, and queue telemetry. |
 | Linear algebra and sparse runtime | Public runtime-bound `LinearOperator`, experimental `SolvePlan` and batch plans, fixed sparse pattern/value updates, and documented provider matrices for CG/PCG, MINRES, BiCGSTAB, GMRES, and FGMRES on CPU/CUDA/Vulkan. |
 | Data, interoperability, and display | A common dense-storage/view contract, managed DLPack and external allocations, CUDA-Vulkan shared display, window edge regions, continuous font scaling, and collapsible auto-height panels. |
 | Native primitives and packaging | Forge-owned driver-only CUDA primitive providers in standard wheels, Program-owned workspaces and diagnostics, stable radix/compact/scan improvements, and runtime/shim build-identity gates. |
@@ -153,8 +172,11 @@ the `0.5.0` artifacts:
 
 When upgrading an existing 0.5.0 application, check the following:
 
-- Local or offline installations must use runtime and shim wheels produced by
-  the same build with matching version and native commit identities.
+- Local or offline installations must use runtime/shim wheels with matching
+  distribution versions. Their source commits may differ when the split-wheel
+  workflow selects a compatible runtime explicitly; final link, import,
+  dependency, and functional validation—not commit equality—decide whether
+  that pair is usable.
 - CUDA primitive code should select `method="auto"` rather than depend on a
   `cuda_cub*` provider that exists only in the non-publishing reference build.
 - Declare `ti.simt.block.SharedArray` inside a parallel range-for block scope.
@@ -163,9 +185,6 @@ When upgrading an existing 0.5.0 application, check the following:
 - Query capabilities before selecting structured Graph or
   `dispatch_indirect()` paths. Vulkan indirect dispatch currently requires one
   offloaded task; CPU and CUDA do not silently emulate it.
-- Treat `TaskLaunchPolicy` as per-backend tuning, not a portable promise of
-  speedup. Prepare cold GPU policies with `report()` on the Python main thread
-  before worker-thread launches, and keep `auto` as the measurement baseline.
 - Rebuild Graphs, storage views, external owners, and solver plans after
   `ti.reset()` instead of reusing an old generation.
 - Existing `from_dlpack()` and provider-specific Vulkan-CUDA import spellings
@@ -250,13 +269,6 @@ When upgrading an existing 0.5.0 application, check the following:
   other GPU backends are not newly qualified by this change. CUDA limits total
   static `SharedArray` storage to 48 KiB per block. Larger requests report an
   explicit error; Forge does not enable opt-in dynamic shared memory.
-- Added `TaskLaunchPolicy` for constrained direct-JIT block tuning. CUDA and
-  Vulkan accept `hint`/`require` policies for a single safe parallel range
-  task, expose the resolved geometry through an immutable report, and reject
-  unsupported task shapes or block-sensitive rewrites before enqueue. CPU
-  hints explicitly fall back to its worker scheduler and requirements fail.
-  Policies never override grid extent, are cache-separated specializations,
-  and reuse the normal warm launch path after one read-only validation.
 - JIT Graph `ArgKind.NDARRAY` runtime arguments now consume the common runtime
   storage protocol for Ndarrays, dense fields, and explicit
   `DenseNdarrayView` objects. Compact Program-owned Ndarray and SNode payload
@@ -587,8 +599,9 @@ host staging or provider replacement.
   sizes. Alignment padding between mixed f32/f64 root children can no longer
   make `to_numpy()`, `from_numpy()`, or native field operations alias an
   adjacent field. This adds no branch or copy to the normal kernel hot path.
-- Final runtime/shim wheel validation now checks the native commit identity and
-  exercises f32/f64 fields of shapes `()`, `1`, and `7`, host/kernel
+- Final runtime/shim wheel validation now records and validates the native
+  runtime commit identity without requiring it to equal the shim source commit.
+  It also exercises f32/f64 fields of shapes `()`, `1`, and `7`, host/kernel
   round-trips, serial/atomic f64 reduction, offline-cache modes, and
   single/default CPU thread configurations.
 - Completed the Windows driver-only/reference build and primitive correctness

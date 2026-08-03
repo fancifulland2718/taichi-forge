@@ -1,11 +1,12 @@
-# Linux 复测状态
+# Linux 0.6.1 Release Candidate 验证
 
-本文是 Taichi Forge 0.6.0 runtime 加固后仍需在 Linux 上完成的 release 验证矩阵。它是测试计划，**不**表示这些
-路径已经在 Linux 通过。请在干净的 x86_64 Linux runner 上，以目标发布依赖运行，并记录 GPU、
-driver、Vulkan loader、窗口系统；只有运行隔离的 reference workflow 时才记录 CUDA Toolkit。
+本文是 Taichi Forge 0.6.1 release candidate 的 Linux 验证矩阵。它继承已发布 0.6.0 runtime
+加固后仍有价值的复测项，并覆盖当前源码候选。它是测试计划，**不**表示所有列出路径已经在
+Linux 通过。请在干净的 x86_64 Linux runner 上，以目标发布依赖运行，并记录 GPU、driver、
+Vulkan loader、窗口系统；只有运行隔离的 reference workflow 时才记录 CUDA Toolkit。
 
-该矩阵是 0.6.0 runtime 更新的发布门槛。已经在 0.5.0 或更早版本公开的功能，只有在
-0.6.0 实现或打包发生变化、需要重新取得 Linux 证据时才会列入，不应被理解为 0.6.0 新增。
+该矩阵用于阻断 0.6.1 candidate，不会追溯成为已经发布的 0.6.0 的门槛。历史功能只在当前
+candidate 需要重新取得 Linux 证据时列入，不应据此理解为 0.6.1 新增。
 
 ## Release 阻断项
 
@@ -199,7 +200,7 @@ Native primitive capability 与 AD 已取得 Windows CPU/CUDA/Vulkan 的 provide
 Consecutive RLE/Unique 只复用既有 compact provider，并增加 Python/Taichi-kernel 代码，不要求重新
 发布 native runtime wheel。Linux release 仍需以下证据：
 
-- 用配对的 0.6.0 shim/runtime wheel 在 CPU、CUDA、Vulkan 上运行
+- 用配对的 0.6.1 release-candidate shim/runtime wheel 在 CPU、CUDA、Vulkan 上运行
   `tests/python/test_rle_unique.py`，覆盖 ndarray、dense field、全部整数 key dtype、
   StructNdarray payload、逻辑空 `size=0`、单元素、非幂次容量、active-prefix 复用、
   写入前校验、AD 拒绝和 PrimitiveSequence Graph replay；
@@ -221,7 +222,7 @@ Segmented primitive 只在 Python/Taichi-kernel 层组合既有 grouped-reduce�
 provider，不改变 native runtime ABI，也不要求重新发布
 `taichi-forge-runtime`。以下 Linux 证据全部待复测：
 
-- 用配对的 0.6.0 shim/runtime wheel 在 CPU、CUDA、Vulkan 上运行
+- 用配对的 0.6.1 release-candidate shim/runtime wheel 在 CPU、CUDA、Vulkan 上运行
   `tests/python/test_segmented_primitives.py`，覆盖 offsets/nondecreasing-ID
   构造、空/缺失 segment、padded inactive tail、ndarray/field、全部公开 scalar
   dtype、inclusive/exclusive 与 in-place scan、写入前校验、AD 边界、Graph replay
