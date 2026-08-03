@@ -64,13 +64,12 @@ def test_dynamic_work_capabilities_separate_launch_and_iteration_semantics():
         assert bounded["default_preparation_dispatches"] == 0
         assert bounded["requested_route"] == "auto"
         assert bounded["minimum_driver_api_version"] == 12040
-        assert not bounded["setup_probe_passed"]
         assert bounded["fallback_reason"] in (
             "cuda_driver_api_below_12040",
             "cuda_device_update_symbols_unavailable",
             "cuda_device_update_lowering_not_compiled",
             "cuda_device_update_probe_not_run",
-            "cuda_bounded_runtime_path_not_compiled",
+            "auto_exact_route_pending_performance_qualification",
         )
         assert iteration["command_termination_exact"] == (
             iteration["execution_semantics"] == "exact_dynamic_termination"
@@ -110,8 +109,18 @@ def test_cuda_bounded_route_selection_is_fail_closed(monkeypatch):
     assert capabilities["fallback_reason"] == "forced_masked_capacity"
 
     monkeypatch.setenv("TI_CUDA_BOUNDED_DISPATCH_MODE", "device_update")
-    with pytest.raises(RuntimeError, match="device_update"):
-        ti.graph.bounded_dispatch_capabilities()
+    probe = dict(ti_core.cuda_bounded_dispatch_probe())
+    if probe["exact_device_grid_available"]:
+        capabilities = ti.graph.bounded_dispatch_capabilities()
+        assert capabilities["requested_route"] == "device_update"
+        assert capabilities["selected_route"] == "exact_device_grid_update"
+        assert capabilities["exact_physical_grid"]
+        assert capabilities["zero_count_command_skip"]
+        assert capabilities["range_mapping"] == "one_to_one"
+        assert capabilities["fallback_reason"] == "none"
+    else:
+        with pytest.raises(RuntimeError, match="device_update"):
+            ti.graph.bounded_dispatch_capabilities()
 
     monkeypatch.setenv("TI_CUDA_BOUNDED_DISPATCH_MODE", "invalid")
     with pytest.raises(RuntimeError, match="TI_CUDA_BOUNDED_DISPATCH_MODE"):
@@ -138,6 +147,115 @@ def test_cuda_bounded_device_update_driver_probe():
             "cuda_driver_api_below_12040",
             "cuda_device_update_symbols_unavailable",
         )
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_exact_bounded_dispatch_replay_and_rebind(monkeypatch):
+    probe = dict(ti_core.cuda_bounded_dispatch_probe())
+    if not probe["exact_device_grid_available"]:
+        pytest.skip(probe["unavailable_reason"])
+    monkeypatch.setenv("TI_CUDA_BOUNDED_DISPATCH_MODE", "device_update")
+
+    capacity = 97
+    block_dim = 32
+
+    @ti.kernel
+    def produce(
+        requested: ti.i32,
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.device_extent_publish(extent, capacity, requested)
+
+    @ti.kernel
+    def consume(
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        visited: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.loop_config(block_dim=block_dim)
+        for i in range(capacity):
+            ti.atomic_add(visited[0], 1)
+            if i < ti.device_extent_count(extent):
+                output[i] = i + 3
+
+    requested_arg = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "requested", ti.i32
+    )
+    extent_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "extent", ti.i32, ndim=1
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    visited_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "visited", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(produce, requested_arg, extent_arg)
+    handle = builder.dispatch_bounded(
+        consume,
+        extent_arg,
+        output_arg,
+        visited_arg,
+        extent=extent_arg,
+        capacity=capacity,
+        block_dim=block_dim,
+    )
+    graph = builder.compile()
+    output = ti.ndarray(ti.i32, shape=capacity)
+    visited = ti.ndarray(ti.i32, shape=1)
+    extents = (ti.DeviceExtent(capacity), ti.DeviceExtent(capacity))
+    graph.execution_stats()
+
+    def run_case(extent, requested, expected_count, overflow):
+        output.fill(-1)
+        visited.fill(0)
+        graph.run(
+            {
+                "requested": requested,
+                "extent": extent,
+                "output": output,
+                "visited": visited,
+            }
+        )
+        expected_visited = min(
+            capacity,
+            0
+            if expected_count == 0
+            else (
+                (expected_count + block_dim - 1) // block_dim
+            )
+            * block_dim,
+        )
+        expected = np.full(capacity, -1, dtype=np.int32)
+        expected[:expected_count] = np.arange(expected_count) + 3
+        np.testing.assert_array_equal(output.to_numpy(), expected)
+        assert int(visited.to_numpy()[0]) == expected_visited
+        snapshot = handle.snapshot(extent)
+        assert snapshot.useful_count == expected_count
+        assert snapshot.executed_count == expected_visited
+        assert snapshot.overflow == overflow
+        report = graph.execution_stats()
+        assert report.ordinary_fallback_segments == 0
+        assert report.segments[0].last_driver_error == 0
+        assert report.segments[0].last_path in (
+            "cuda_capture",
+            "cuda_exact_replay",
+            "cuda_patched_replay",
+        )
+
+    for requested, expected_count, overflow in (
+        (0, 0, False),
+        (1, 1, False),
+        (33, 33, False),
+        (capacity, capacity, False),
+        (capacity + 11, capacity, True),
+    ):
+        run_case(extents[0], requested, expected_count, overflow)
+    run_case(extents[1], 17, 17, False)
+
+    report = graph.execution_stats()
+    assert report.memory.persistent_argument_bytes >= 32
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
@@ -244,11 +362,15 @@ def test_graph_device_bounded_dispatch_routes_and_boundaries():
     assert capabilities["available"]
     assert capabilities["no_host_readback"]
     assert handle.capabilities.route == capabilities["route"]
-    if ti.lang.impl.current_cfg().arch == ti.vulkan:
+    if handle.capabilities.exact_grid:
         assert handle.capabilities.exact_grid
         assert handle.capabilities.zero_count_command_skip
-        assert handle.workspace_bytes == 12
-        assert sum(task.indirect for task in manifest) == 1
+        assert handle.workspace_bytes == (
+            12 if ti.lang.impl.current_cfg().arch == ti.vulkan else 0
+        )
+        assert sum(task.indirect for task in manifest) == (
+            1 if ti.lang.impl.current_cfg().arch == ti.vulkan else 0
+        )
         payload = next(task for task in manifest if "consume" in task.kernel_name)
         assert payload.range_mapping == "one_to_one"
     else:
@@ -297,7 +419,9 @@ def test_graph_device_bounded_dispatch_routes_and_boundaries():
             )
         else:
             assert snapshot.executed_count == capacity
-        assert int(visited.to_numpy()[0]) == snapshot.executed_count
+        assert int(visited.to_numpy()[0]) == snapshot.executed_count, (
+            graph.execution_stats().segments[0].last_driver_error
+        )
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

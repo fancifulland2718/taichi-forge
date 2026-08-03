@@ -30,10 +30,13 @@ class Dispatch : public Node {
       Kernel *kernel,
       const std::vector<aot::Arg> &args,
       std::optional<aot::Arg> indirect_dispatch_arg = std::nullopt,
+      std::optional<aot::CudaBoundedDispatchMetadata>
+          cuda_bounded_dispatch = std::nullopt,
       std::string dispatch_label = {})
       : kernel_(kernel),
         symbolic_args_(args),
         indirect_dispatch_arg_(std::move(indirect_dispatch_arg)),
+        cuda_bounded_dispatch_(std::move(cuda_bounded_dispatch)),
         dispatch_label_(std::move(dispatch_label)) {
   }
 
@@ -54,6 +57,10 @@ class Dispatch : public Node {
     return indirect_dispatch_arg_.has_value();
   }
 
+  bool is_cuda_bounded() const {
+    return cuda_bounded_dispatch_.has_value();
+  }
+
   const std::string &dispatch_label() const {
     return dispatch_label_;
   }
@@ -63,6 +70,7 @@ class Dispatch : public Node {
   Kernel *kernel_{nullptr};
   std::vector<aot::Arg> symbolic_args_;
   std::optional<aot::Arg> indirect_dispatch_arg_;
+  std::optional<aot::CudaBoundedDispatchMetadata> cuda_bounded_dispatch_;
   std::string dispatch_label_;
 };
 
@@ -81,6 +89,13 @@ class Sequential : public Node {
                          const std::vector<aot::Arg> &args,
                          const aot::Arg &dispatch_packet,
                          const std::string &dispatch_label = {});
+
+  void dispatch_cuda_bounded(Kernel *kernel,
+                             const std::vector<aot::Arg> &args,
+                             const aot::Arg &extent,
+                             std::uint32_t capacity,
+                             std::uint32_t block_dim,
+                             const std::string &dispatch_label = {});
 
   void compile(
       std::vector<aot::CompiledDispatch> &compiled_dispatches) override;
@@ -107,6 +122,14 @@ class GraphBuilder {
                                    const aot::Arg &dispatch_packet,
                                    const std::string &dispatch_label = {});
 
+  Node *new_cuda_bounded_dispatch_node(
+      Kernel *kernel,
+      const std::vector<aot::Arg> &args,
+      const aot::Arg &extent,
+      std::uint32_t capacity,
+      std::uint32_t block_dim,
+      const std::string &dispatch_label = {});
+
   Sequential *new_sequential_node();
 
   void dispatch(Kernel *kernel,
@@ -117,6 +140,13 @@ class GraphBuilder {
                          const std::vector<aot::Arg> &args,
                          const aot::Arg &dispatch_packet,
                          const std::string &dispatch_label = {});
+
+  void dispatch_cuda_bounded(Kernel *kernel,
+                             const std::vector<aot::Arg> &args,
+                             const aot::Arg &extent,
+                             std::uint32_t capacity,
+                             std::uint32_t block_dim,
+                             const std::string &dispatch_label = {});
 
   Sequential *seq() const;
 

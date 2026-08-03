@@ -78,6 +78,10 @@ class KernelLauncher : public LLVM::KernelLauncher {
                                 void *stream);
   void capture_cuda_graph_launch(const GraphLaunchPacket &packet,
                                  void *stream);
+  bool capture_cuda_graph_bounded_launch(const GraphLaunchPacket &packet,
+                                         void *stream,
+                                         void **device_node,
+                                         std::uint32_t *driver_error);
 
  private:
   bool prepare_cuda_graph_context(Handle handle,

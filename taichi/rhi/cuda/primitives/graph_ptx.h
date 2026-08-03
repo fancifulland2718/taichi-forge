@@ -35,6 +35,23 @@ static_assert(offsetof(CudaGraphBoundedControl, grid_x) == 8);
 static_assert(offsetof(CudaGraphBoundedControl, enabled) == 12);
 static_assert(offsetof(CudaGraphBoundedControl, status) == 16);
 
+struct CudaGraphBoundedExtentControl {
+  std::uintptr_t device_node{0};
+  std::uintptr_t extent{0};
+  std::uint32_t capacity{0};
+  std::uint32_t block_dim{0};
+  std::uint32_t driver_status{0};
+  std::uint32_t overflow{0};
+};
+
+static_assert(sizeof(CudaGraphBoundedExtentControl) == 32);
+static_assert(offsetof(CudaGraphBoundedExtentControl, device_node) == 0);
+static_assert(offsetof(CudaGraphBoundedExtentControl, extent) == 8);
+static_assert(offsetof(CudaGraphBoundedExtentControl, capacity) == 16);
+static_assert(offsetof(CudaGraphBoundedExtentControl, block_dim) == 20);
+static_assert(offsetof(CudaGraphBoundedExtentControl, driver_status) == 24);
+static_assert(offsetof(CudaGraphBoundedExtentControl, overflow) == 28);
+
 struct CudaGraphBoundedProbeResult {
   bool attempted{false};
   bool passed{false};
@@ -81,6 +98,8 @@ bool driver_graph_bounded_update_compiled();
 bool driver_graph_prepare_bounded_update(std::uint32_t *driver_error = nullptr);
 void driver_graph_update_bounded(CudaGraphBoundedControl *control,
                                  void *stream = nullptr);
+void driver_graph_update_bounded_extent(CudaGraphBoundedExtentControl *control,
+                                        void *stream = nullptr);
 void *driver_graph_bounded_probe_payload_function();
 CudaGraphBoundedProbeResult driver_graph_bounded_probe(bool run);
 

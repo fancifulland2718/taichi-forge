@@ -356,6 +356,10 @@ void export_misc(py::module &m) {
         taichi::lang::cuda::driver_graph_bounded_update_compiled();
     const auto probe =
         taichi::lang::cuda::driver_graph_bounded_probe(run_probe);
+    const bool runtime_path_compiled = true;
+    const bool exact_device_grid_available =
+        driver_version_eligible && required_symbols_loaded && update_compiled &&
+        probe.passed;
     result["driver_loaded"] = driver_loaded;
     result["driver_api_version"] =
         driver_loaded ? py::cast(driver_api_version) : py::none();
@@ -371,8 +375,8 @@ void export_misc(py::module &m) {
     result["setup_probe_attempted"] = probe.attempted;
     result["setup_probe_passed"] = probe.passed;
     result["zero_count_command_skip_qualified"] = probe.zero_count_skipped;
-    result["runtime_path_compiled"] = false;
-    result["exact_device_grid_available"] = false;
+    result["runtime_path_compiled"] = runtime_path_compiled;
+    result["exact_device_grid_available"] = exact_device_grid_available;
     result["probe_driver_error"] = probe.driver_error;
     result["probe_sparse_visited"] = probe.sparse_visited;
     result["probe_zero_visited"] = probe.zero_visited;
@@ -391,8 +395,6 @@ void export_misc(py::module &m) {
     } else if (!probe.passed) {
       unavailable_reason =
           probe.attempted ? probe.reason : "cuda_device_update_probe_not_run";
-    } else {
-      unavailable_reason = "cuda_bounded_runtime_path_not_compiled";
     }
     result["unavailable_reason"] = unavailable_reason;
 #else

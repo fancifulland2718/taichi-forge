@@ -494,8 +494,10 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
     auto epilogue = create_xlogue(stmt->tls_epilogue);
 
     auto [begin, end] = get_range_for_bounds(stmt);
-    call("gpu_parallel_range_for", get_arg(0), begin, end, tls_prologue, body,
-         epilogue, tlctx->get_constant(stmt->tls_size));
+    call(stmt->one_to_one ? "gpu_parallel_range_for_one_to_one"
+                          : "gpu_parallel_range_for",
+         get_arg(0), begin, end, tls_prologue, body, epilogue,
+         tlctx->get_constant(stmt->tls_size));
   }
 
   void create_offload_mesh_for(OffloadedStmt *stmt) override {

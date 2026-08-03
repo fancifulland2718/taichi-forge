@@ -229,6 +229,12 @@ struct GraphSourceDispatchMetadata {
   GraphKernelMetadata graph_metadata;
 };
 
+struct CudaBoundedDispatchMetadata {
+  Arg extent_arg;
+  std::uint32_t capacity{0};
+  std::uint32_t block_dim{0};
+};
+
 struct CompiledDispatch {
   std::string kernel_name;
   // JIT-only invocation metadata. AOT payloads remain source-compatible and
@@ -250,6 +256,10 @@ struct CompiledDispatch {
   // JIT-only Vulkan dispatch packet. It is intentionally excluded from
   // TI_IO_DEF until the AOT module ABI can represent indirect dispatch.
   std::optional<Arg> indirect_dispatch_arg;
+  // JIT-only CUDA device-count launch metadata. This remains separate from
+  // Vulkan indirect dispatch because its capture, replay, and capability
+  // contracts are backend-specific.
+  std::optional<CudaBoundedDispatchMetadata> cuda_bounded_dispatch;
 
   TI_IO_DEF(kernel_name, symbolic_args);
 };

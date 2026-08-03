@@ -807,6 +807,11 @@ struct CudaDeferredReplayResources {
   std::vector<std::vector<uint8_t>> host_arg_buffers;
 };
 
+struct CudaGraphBoundedDispatchControl {
+  cuda::CudaGraphBoundedExtentControl *device_control{nullptr};
+  cuda::CudaGraphBoundedExtentControl host_control;
+};
+
 }  // namespace
 
 struct CompiledGraphCudaState {
@@ -816,6 +821,7 @@ struct CompiledGraphCudaState {
       allocation_leases;
   std::unique_ptr<CudaGraphCaptureStream> capture_stream;
   std::vector<CudaGraphCapturePacket> packets;
+  std::vector<CudaGraphBoundedDispatchControl> bounded_dispatch_controls;
   CudaGraphExecHandle graph_exec;
   cuda::CudaGraphConditionalControl *conditional_control{nullptr};
   std::uint64_t conditional_handle{0};
@@ -903,6 +909,13 @@ struct CompiledGraphCudaState {
       CUDADriver::get_instance().mem_free(masked_gate);
       masked_gate = nullptr;
     }
+    for (auto &control : bounded_dispatch_controls) {
+      if (control.device_control != nullptr) {
+        CUDADriver::get_instance().mem_free(control.device_control);
+        control.device_control = nullptr;
+      }
+    }
+    bounded_dispatch_controls.clear();
     conditional_handle = 0;
     conditional_mode = false;
     masked_mode = false;
@@ -945,6 +958,8 @@ struct CompiledGraphCudaState {
     if (masked_gate != nullptr) {
       bytes += sizeof(std::uint32_t);
     }
+    bytes += bounded_dispatch_controls.size() *
+             sizeof(cuda::CudaGraphBoundedExtentControl);
     for (const auto &packet : packets) {
       bytes += packet.packet.device_arg_buffer_size;
     }
@@ -1134,6 +1149,164 @@ acquire_cuda_graph_allocation_leases(
   return leases;
 }
 
+std::optional<std::uintptr_t> cuda_graph_ndarray_address(
+    const std::vector<CudaGraphArgSignatureEntry> &signature,
+    const Arg &arg) {
+  const auto entry = std::find_if(
+      signature.begin(), signature.end(), [&](const auto &candidate) {
+        return candidate.name == arg.name && candidate.tag == ArgKind::kNdarray;
+      });
+  if (entry == signature.end() || entry->device == nullptr ||
+      entry->byte_size < 2 * sizeof(std::int32_t)) {
+    return std::nullopt;
+  }
+  auto *device = dynamic_cast<cuda::CudaDevice *>(entry->device);
+  if (device == nullptr) {
+    return std::nullopt;
+  }
+  void *base = device->get_memory_addr({entry->device, entry->alloc_id});
+  if (base == nullptr) {
+    return std::nullopt;
+  }
+  return reinterpret_cast<std::uintptr_t>(base) + entry->byte_offset;
+}
+
+bool initialize_cuda_bounded_dispatch_controls(
+    const CompiledGraph &graph,
+    CompiledGraphCudaState &state,
+    std::uint32_t *driver_error) {
+  TI_ASSERT(driver_error != nullptr);
+  *driver_error = CUDA_SUCCESS;
+  state.bounded_dispatch_controls.clear();
+  state.bounded_dispatch_controls.resize(graph.dispatches.size());
+  if (std::none_of(graph.dispatches.begin(), graph.dispatches.end(),
+                   [](const auto &dispatch) {
+                     return dispatch.cuda_bounded_dispatch.has_value();
+                   })) {
+    return true;
+  }
+  auto &driver = CUDADriver::get_instance();
+  if (!driver.launch_kernel_ex.available() || !driver.graph_upload.available()) {
+    *driver_error = CUDA_ERROR_NOT_SUPPORTED;
+    return false;
+  }
+  if (!cuda::driver_graph_prepare_bounded_update(driver_error)) {
+    return false;
+  }
+  for (std::size_t i = 0; i < graph.dispatches.size(); ++i) {
+    const auto &metadata = graph.dispatches[i].cuda_bounded_dispatch;
+    if (!metadata.has_value()) {
+      continue;
+    }
+    auto extent = cuda_graph_ndarray_address(state.signature,
+                                             metadata->extent_arg);
+    if (!extent.has_value()) {
+      *driver_error = CUDA_ERROR_NOT_SUPPORTED;
+      return false;
+    }
+    auto &control = state.bounded_dispatch_controls[i];
+    control.host_control.extent = *extent;
+    control.host_control.capacity = metadata->capacity;
+    control.host_control.block_dim = metadata->block_dim;
+    *driver_error = driver.malloc.call(
+        reinterpret_cast<void **>(&control.device_control),
+        sizeof(cuda::CudaGraphBoundedExtentControl));
+    if (*driver_error != CUDA_SUCCESS) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool patch_cuda_bounded_dispatch_controls(
+    const CompiledGraph &graph,
+    const std::vector<CudaGraphArgSignatureEntry> &signature,
+    CompiledGraphCudaState &state,
+    std::vector<std::vector<uint8_t>> &host_buffers) {
+  if (state.bounded_dispatch_controls.size() != graph.dispatches.size()) {
+    return false;
+  }
+  auto &driver = CUDADriver::get_instance();
+  for (std::size_t i = 0; i < graph.dispatches.size(); ++i) {
+    const auto &metadata = graph.dispatches[i].cuda_bounded_dispatch;
+    if (!metadata.has_value()) {
+      continue;
+    }
+    auto &control = state.bounded_dispatch_controls[i];
+    auto extent = cuda_graph_ndarray_address(signature, metadata->extent_arg);
+    if (!extent.has_value() || control.device_control == nullptr) {
+      return false;
+    }
+    if (control.host_control.extent == *extent) {
+      continue;
+    }
+    control.host_control.extent = *extent;
+    control.host_control.driver_status = 0;
+    control.host_control.overflow = 0;
+    host_buffers.emplace_back(sizeof(control.host_control));
+    std::memcpy(host_buffers.back().data(), &control.host_control,
+                sizeof(control.host_control));
+    driver.memcpy_host_to_device_async(
+        control.device_control, host_buffers.back().data(),
+        sizeof(control.host_control), nullptr);
+    if (state.diagnostics_enabled) {
+      ++state.stats.asynchronous_control_updates;
+    }
+  }
+  return true;
+}
+
+std::uint32_t capture_cuda_graph_packets(const CompiledGraph &graph,
+                                         CompiledGraphCudaState &state,
+                                         void *capture_stream) {
+  TI_ASSERT(state.packets.size() == graph.dispatches.size());
+  TI_ASSERT(state.bounded_dispatch_controls.size() ==
+            graph.dispatches.size());
+  for (std::size_t i = 0; i < graph.dispatches.size(); ++i) {
+    auto &packet = state.packets[i];
+    if (!graph.dispatches[i].cuda_bounded_dispatch.has_value()) {
+      packet.launcher->capture_cuda_graph_launch(packet.packet,
+                                                 capture_stream);
+      continue;
+    }
+    auto &control = state.bounded_dispatch_controls[i];
+    if (control.device_control == nullptr) {
+      return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    cuda::driver_graph_update_bounded_extent(control.device_control,
+                                             capture_stream);
+    void *device_node = nullptr;
+    std::uint32_t driver_error = CUDA_SUCCESS;
+    if (!packet.launcher->capture_cuda_graph_bounded_launch(
+            packet.packet, capture_stream, &device_node, &driver_error)) {
+      return driver_error == CUDA_SUCCESS ? CUDA_ERROR_NOT_SUPPORTED
+                                          : driver_error;
+    }
+    control.host_control.device_node =
+        reinterpret_cast<std::uintptr_t>(device_node);
+  }
+  return CUDA_SUCCESS;
+}
+
+std::uint32_t upload_cuda_bounded_dispatch_controls(
+    CompiledGraphCudaState &state) {
+  auto &driver = CUDADriver::get_instance();
+  for (const auto &control : state.bounded_dispatch_controls) {
+    if (control.device_control == nullptr) {
+      continue;
+    }
+    const auto error = driver.memcpy_host_to_device.call(
+        control.device_control,
+        const_cast<cuda::CudaGraphBoundedExtentControl *>(
+            &control.host_control),
+        sizeof(control.host_control));
+    if (error != CUDA_SUCCESS) {
+      return error;
+    }
+  }
+  return CUDA_SUCCESS;
+}
+
 bool patch_cuda_graph_arguments(
     const CompiledGraph &graph,
     const std::unordered_map<std::string, IValue> &args,
@@ -1304,7 +1477,9 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
                                state->signature, signature->entries);
   if (structurally_compatible) {
     std::vector<std::vector<uint8_t>> host_arg_buffers;
-    if (patch_cuda_graph_arguments(graph, args, *state, host_arg_buffers)) {
+    if (patch_cuda_graph_arguments(graph, args, *state, host_arg_buffers) &&
+        patch_cuda_bounded_dispatch_controls(
+            graph, signature->entries, *state, host_arg_buffers)) {
       std::vector<std::unique_ptr<cuda::CudaDevice::AllocationLease>>
           old_allocation_leases;
       if (state->allocations != signature->allocations) {
@@ -1395,6 +1570,13 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
     state->packets.push_back(std::move(capture_packet));
   }
 
+  std::uint32_t bounded_setup_error = CUDA_SUCCESS;
+  if (!initialize_cuda_bounded_dispatch_controls(
+          graph, *state, &bounded_setup_error)) {
+    return handle_cuda_graph_driver_failure(*state, bounded_setup_error,
+                                            "bounded control setup");
+  }
+
   state->stats.zero_arg_eligible =
       !state->packets.empty() &&
       std::all_of(state->packets.begin(), state->packets.end(),
@@ -1413,9 +1595,12 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
   }
   CudaStreamCaptureGuard capture_guard(capture_stream);
   try {
-    for (const auto &packet : state->packets) {
-      packet.launcher->capture_cuda_graph_launch(packet.packet,
-                                                 capture_stream);
+    const auto capture_error =
+        capture_cuda_graph_packets(graph, *state, capture_stream);
+    if (capture_error != CUDA_SUCCESS) {
+      capture_guard.abort();
+      return handle_cuda_graph_driver_failure(
+          *state, capture_error, "bounded payload capture");
     }
   } catch (...) {
     if (state->diagnostics_enabled) {
@@ -1430,12 +1615,30 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
     return handle_cuda_graph_driver_failure(*state, end_err,
                                             "stream end capture");
   }
+  const auto control_upload_error =
+      upload_cuda_bounded_dispatch_controls(*state);
+  if (control_upload_error != CUDA_SUCCESS) {
+    return handle_cuda_graph_driver_failure(
+        *state, control_upload_error, "bounded control upload");
+  }
   auto instantiate_err = driver.graph_instantiate_with_flags.call(
       state->graph_exec.put(), captured_graph.get(), 0);
   captured_graph.reset();
   if (instantiate_err != CUDA_SUCCESS || !state->graph_exec) {
     return handle_cuda_graph_driver_failure(*state, instantiate_err,
                                             "instantiate");
+  }
+  if (std::any_of(state->bounded_dispatch_controls.begin(),
+                  state->bounded_dispatch_controls.end(),
+                  [](const auto &control) {
+                    return control.device_control != nullptr;
+                  })) {
+    const auto upload_error =
+        driver.graph_upload.call(state->graph_exec.get(), nullptr);
+    if (upload_error != CUDA_SUCCESS) {
+      return handle_cuda_graph_driver_failure(*state, upload_error,
+                                              "bounded graph upload");
+    }
   }
   state->retry.record_success();
   state->has_captured_once = true;
@@ -2798,6 +3001,22 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
     cuda_graph_state->diagnostics_enabled = true;
     cuda_graph_state->stats.backend = CompiledGraphBackend::cuda;
     CompiledGraphStats result = cuda_graph_state->stats;
+    if (!cuda_graph_state->bounded_dispatch_controls.empty()) {
+      CUDADriver::get_instance().stream_synchronize(nullptr);
+      for (const auto &control :
+           cuda_graph_state->bounded_dispatch_controls) {
+        if (control.device_control == nullptr) {
+          continue;
+        }
+        cuda::CudaGraphBoundedExtentControl observed;
+        CUDADriver::get_instance().memcpy_device_to_host(
+            &observed, control.device_control, sizeof(observed));
+        if (observed.driver_status != CUDA_SUCCESS) {
+          result.last_driver_error = observed.driver_status;
+          break;
+        }
+      }
+    }
     if (!diagnostics_previously_enabled &&
         (result.last_path != CompiledGraphExecutionPath::none ||
          result.last_fallback_reason != CompiledGraphFallbackReason::none)) {

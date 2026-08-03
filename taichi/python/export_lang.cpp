@@ -3681,6 +3681,10 @@ void export_lang(py::module &m) {
       .def("dispatch_indirect", &GraphBuilder::dispatch_indirect,
            py::arg("kernel"), py::arg("args"),
            py::arg("dispatch_packet"), py::arg("label") = "")
+      .def("dispatch_cuda_bounded", &GraphBuilder::dispatch_cuda_bounded,
+           py::arg("kernel"), py::arg("args"), py::arg("extent"),
+           py::arg("capacity"), py::arg("block_dim"),
+           py::arg("label") = "")
       .def("compile", &GraphBuilder::compile)
       .def("_enable_two_map_composer",
            &GraphBuilder::enable_two_map_composer)

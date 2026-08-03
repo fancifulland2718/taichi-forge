@@ -445,6 +445,74 @@ void KernelLauncher::capture_cuda_graph_launch(
   }
 }
 
+bool KernelLauncher::capture_cuda_graph_bounded_launch(
+    const GraphLaunchPacket &packet,
+    void *stream,
+    void **device_node,
+    std::uint32_t *driver_error) {
+  if (device_node == nullptr || driver_error == nullptr) {
+    return false;
+  }
+  *device_node = nullptr;
+  *driver_error = CUDA_SUCCESS;
+  std::shared_lock<std::shared_mutex> launch_lock(registration_mutex());
+  auto iter = contexts_.find(packet.handle.get_launch_id());
+  if (iter == contexts_.end()) {
+    return false;
+  }
+  const auto &launcher_ctx = iter->second;
+  auto *cuda_jit_module =
+      dynamic_cast<JITModuleCUDA *>(launcher_ctx->jit_module);
+  if (cuda_jit_module == nullptr || launcher_ctx->offloaded_tasks.size() != 1) {
+    return false;
+  }
+  const auto &task = launcher_ctx->offloaded_tasks.front();
+  if (!task.one_to_one || task.grid_dim <= 0 || task.block_dim <= 0 ||
+      task.dynamic_shared_array_bytes < 0) {
+    return false;
+  }
+  void *function = cuda_jit_module->lookup_function(task.name);
+  if (function == nullptr) {
+    return false;
+  }
+
+  TaichiCudaLaunchAttribute attribute{};
+  attribute.id = TAICHI_CU_LAUNCH_ATTRIBUTE_DEVICE_UPDATABLE_KERNEL_NODE;
+  attribute.value.device_updatable_kernel_node.device_updatable = 1;
+  TaichiCudaLaunchConfig config{};
+  config.grid_dim_x = static_cast<std::uint32_t>(task.grid_dim);
+  config.grid_dim_y = 1;
+  config.grid_dim_z = 1;
+  config.block_dim_x = static_cast<std::uint32_t>(task.block_dim);
+  config.block_dim_y = 1;
+  config.block_dim_z = 1;
+  config.shared_mem_bytes =
+      static_cast<std::uint32_t>(task.dynamic_shared_array_bytes);
+  config.stream = stream;
+  config.attributes = &attribute;
+  config.num_attributes = 1;
+  void *kernel_args[] = {
+      const_cast<RuntimeContext *>(&packet.context),
+  };
+
+  std::string trace_name;
+  std::unique_ptr<ScopedExternalProfilerAnnotation> annotation;
+  if (!packet.dispatch_label.empty()) {
+    trace_name = make_labeled_task_name(task.name, task.task_id,
+                                        packet.dispatch_label);
+    annotation = std::make_unique<ScopedExternalProfilerAnnotation>(
+        trace_name);
+  }
+  *driver_error = CUDADriver::get_instance().launch_kernel_ex.call(
+      &config, function, kernel_args, nullptr);
+  if (*driver_error != CUDA_SUCCESS) {
+    return false;
+  }
+  *device_node =
+      attribute.value.device_updatable_kernel_node.device_node;
+  return *device_node != nullptr;
+}
+
 void KernelLauncher::launch_llvm_kernel(Handle handle,
                                         LaunchContextBuilder &ctx) {
   // Keep argument-buffer preparation, every offloaded task, and stream-ordered

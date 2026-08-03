@@ -1480,7 +1480,11 @@ def _bounded_route(backend, ordered):
     requested_route = _bounded_route_request(backend)
     if backend == "cuda":
         cuda_capabilities = dict(
-            _ti_core.cuda_bounded_dispatch_capabilities()
+            (
+                _ti_core.cuda_bounded_dispatch_probe()
+                if requested_route == "device_update"
+                else _ti_core.cuda_bounded_dispatch_capabilities()
+            )
         )
         driver_api_version = cuda_capabilities["driver_api_version"]
         driver_version_eligible = bool(
@@ -1496,9 +1500,42 @@ def _bounded_route(backend, ordered):
             cuda_capabilities["setup_probe_passed"]
         )
         if requested_route == "device_update":
-            raise TaichiRuntimeError(
-                "CUDA bounded device_update is unavailable: "
-                f"{cuda_capabilities['unavailable_reason']}"
+            if not cuda_capabilities["exact_device_grid_available"]:
+                raise TaichiRuntimeError(
+                    "CUDA bounded device_update is unavailable: "
+                    f"{cuda_capabilities['unavailable_reason']}"
+                )
+            return BoundedDispatchCapabilities(
+                schema_version=3,
+                backend=backend,
+                requested_route=requested_route,
+                route="exact_device_grid_update",
+                minimum_driver_api_version=12040,
+                driver_api_version=driver_api_version,
+                driver_version_eligible=driver_version_eligible,
+                required_symbols_loaded=required_symbols_loaded,
+                device_update_ptx_linked=device_update_ptx_linked,
+                setup_probe_passed=setup_probe_passed,
+                device_known_count=True,
+                no_host_readback=True,
+                exact_grid=True,
+                execution_semantics="exact_device_grid",
+                range_mapping="one_to_one",
+                masked_capacity=False,
+                zero_count_command_skip=True,
+                ordered_segments=False,
+                global_segment_order=False,
+                producer_owned_launch_state=False,
+                producer_owned_launch_state_supported=False,
+                preparation_dispatches=1,
+                baseline_capacity_grid=True,
+                capacity=0,
+                block_dim=None,
+                fallback_reason="none",
+                reason=(
+                    "CUDA Graph reads the device extent and updates an "
+                    "uploaded device-updatable kernel node before payload"
+                ),
             )
         reason = (
             "CUDA uses a fixed-capacity Graph node and masks payload work from "
@@ -1507,7 +1544,11 @@ def _bounded_route(backend, ordered):
         fallback_reason = (
             "forced_masked_capacity"
             if requested_route == "masked_capacity"
-            else cuda_capabilities["unavailable_reason"]
+            else (
+                "auto_exact_route_pending_performance_qualification"
+                if cuda_capabilities["exact_device_grid_available"]
+                else cuda_capabilities["unavailable_reason"]
+            )
         )
         range_mapping = "grid_stride"
         minimum_driver_api_version = 12040
@@ -8190,7 +8231,13 @@ def _require_bounded_symbolic_ndarray(value, role, dtype):
     return value
 
 
-def _bounded_kernel_geometry(kernel_cpp, backend, *, allow_range_setup=False):
+def _bounded_kernel_geometry(
+    kernel_cpp,
+    backend,
+    *,
+    allow_range_setup=False,
+    require_one_to_one=False,
+):
     raw = tuple(impl.get_runtime().prog._kernel_task_manifest(kernel_cpp))
     range_tasks = tuple(
         item for item in raw if item["task_type"] == "range_for"
@@ -8210,10 +8257,10 @@ def _bounded_kernel_geometry(kernel_cpp, backend, *, allow_range_setup=False):
             + ", ".join(str(item["task_type"]) for item in raw)
         )
     selected = range_tasks[0]["selected_block_size"]
-    if backend == "vulkan" and not allow_range_setup:
+    if require_one_to_one and not allow_range_setup:
         if range_tasks[0].get("range_mapping") != "one_to_one":
             raise TaichiRuntimeError(
-                "Vulkan bounded dispatch payload did not compile with "
+                f"{backend.upper()} bounded dispatch payload did not compile with "
                 "one-to-one range mapping"
             )
     if backend in ("cuda", "vulkan"):
@@ -8904,13 +8951,19 @@ class GraphBuilder:
             raise TaichiRuntimeError(
                 f"bounded dispatch is unavailable on backend {backend}"
             )
+        selected_route = (
+            None if count is not None else _bounded_route(backend, False)
+        )
+        exact_device_grid = bool(
+            selected_route is not None and selected_route.exact_grid
+        )
         policy = self._bounded_launch_policy(block_dim, block_mode, backend)
         kernel_cpp = gen_cpp_kernel(
             kernel_fn,
             args,
             template_args=template_args,
             task_launch_policy=policy,
-            range_one_to_one=backend == "vulkan" and count is None,
+            range_one_to_one=exact_device_grid,
         )
         label = _normalize_dispatch_label(label)
 
@@ -8940,7 +8993,11 @@ class GraphBuilder:
             self._retain_runtime_graph_lease(handle)
             return handle
 
-        selected_block = _bounded_kernel_geometry(kernel_cpp, backend)
+        selected_block = _bounded_kernel_geometry(
+            kernel_cpp,
+            backend,
+            require_one_to_one=exact_device_grid,
+        )
         if (
             launch_state is not None
             and backend == "vulkan"
@@ -8988,6 +9045,15 @@ class GraphBuilder:
                 kernel_cpp, unzipped_args, packet_arg, label
             )
             self._bind_internal_runtime_arg(packet_arg, packet)
+        elif backend == "cuda" and exact_device_grid:
+            self._record_cuda_bounded_dispatch(
+                kernel_cpp,
+                unzipped_args,
+                extent,
+                capacity,
+                selected_block,
+                label,
+            )
         else:
             self._record_dispatch(kernel_cpp, unzipped_args, label)
 
@@ -9044,6 +9110,12 @@ class GraphBuilder:
         if backend not in ("cpu", "cuda", "vulkan"):
             raise TaichiRuntimeError(
                 f"ordered segmented dispatch is unavailable on backend {backend}"
+            )
+        ordered_route = _bounded_route(backend, True)
+        if backend == "cuda" and ordered_route.exact_grid:
+            raise TaichiRuntimeError(
+                "CUDA exact device-grid update does not yet support ordered "
+                "segmented dispatch; select masked_capacity for this graph"
             )
         unique = next(_bounded_dispatch_ids)
         packet = ScalarNdarray(u32, (3,)) if backend == "vulkan" else None
@@ -9154,6 +9226,35 @@ class GraphBuilder:
         self._aot_graph_plan.dispatch(kernel_cpp, unzipped_args, label)
         self._ensure_runtime_graph_builder().dispatch(
             kernel_cpp, unzipped_args, label
+        )
+        self._runtime_graph_dispatches.append((kernel_cpp, tuple(unzipped_args)))
+        self._runtime_graph_arg_names.update(_runtime_arg_names(unzipped_args))
+        self._pending_ir_nodes.append(
+            _dispatch_ir_node(
+                kernel_cpp, unzipped_args, dispatch_label=label
+            )
+        )
+        self._dispatch_count += 1
+
+    def _record_cuda_bounded_dispatch(
+        self,
+        kernel_cpp,
+        unzipped_args,
+        extent,
+        capacity,
+        block_dim,
+        label="",
+    ):
+        # The public AOT graph schema stays backend-neutral. The exact CUDA
+        # node is a JIT-only specialization carried by the runtime builder.
+        self._aot_graph_plan.dispatch(kernel_cpp, unzipped_args, label)
+        self._ensure_runtime_graph_builder().dispatch_cuda_bounded(
+            kernel_cpp,
+            unzipped_args,
+            extent,
+            capacity,
+            block_dim,
+            label,
         )
         self._runtime_graph_dispatches.append((kernel_cpp, tuple(unzipped_args)))
         self._runtime_graph_arg_names.update(_runtime_arg_names(unzipped_args))

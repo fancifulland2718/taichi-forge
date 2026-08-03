@@ -228,6 +228,75 @@ DONE:
     ret;
 }
 
+.visible .entry graph_update_bounded_extent(
+    .param .u64 control_param
+)
+{
+    .reg .pred %p<9>;
+    .reg .b32 %r<16>;
+    .reg .b64 %rd<4>;
+    .param .b64 call_node;
+    .param .b32 call_enabled;
+    .param .align 4 .b8 call_grid[12];
+    .param .b32 call_result;
+
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %tid.x;
+    or.b32 %r3, %r1, %r2;
+    setp.ne.u32 %p1, %r3, 0;
+    @%p1 bra EXTENT_DONE;
+
+    ld.param.u64 %rd1, [control_param];
+    ld.global.u64 %rd2, [%rd1+0];
+    ld.global.u64 %rd3, [%rd1+8];
+    ld.global.u32 %r4, [%rd1+16];
+    ld.global.u32 %r5, [%rd1+20];
+    ld.global.s32 %r6, [%rd3];
+    setp.lt.s32 %p2, %r6, 0;
+    setp.gt.u32 %p3, %r6, %r4;
+    or.pred %p4, %p2, %p3;
+    @%p2 mov.u32 %r7, 0;
+    @!%p2 mov.u32 %r7, %r6;
+    @%p3 mov.u32 %r7, %r4;
+    mov.u32 %r15, 1;
+    @%p4 st.global.u32 [%rd1+28], %r15;
+    @%p4 st.global.u32 [%rd3+4], %r15;
+    st.global.u32 [%rd3], %r7;
+    mov.u32 %r12, 0;
+    st.global.u32 [%rd1+24], %r12;
+
+    setp.ne.u32 %p5, %r7, 0;
+    selp.u32 %r8, 1, 0, %p5;
+    add.u32 %r9, %r7, %r5;
+    sub.u32 %r9, %r9, 1;
+    div.u32 %r10, %r9, %r5;
+
+    st.param.b64 [call_node], %rd2;
+    st.param.b32 [call_enabled], %r8;
+    call.uni (call_result), cudaGraphKernelNodeSetEnabled,
+        (call_node, call_enabled);
+    ld.param.b32 %r11, [call_result];
+    setp.ne.u32 %p6, %r11, 0;
+    @%p6 st.global.u32 [%rd1+24], %r11;
+    @%p6 bra EXTENT_DONE;
+    setp.eq.u32 %p7, %r8, 0;
+    @%p7 bra EXTENT_DONE;
+
+    st.param.b64 [call_node], %rd2;
+    st.param.b32 [call_grid+0], %r10;
+    mov.u32 %r13, 1;
+    st.param.b32 [call_grid+4], %r13;
+    st.param.b32 [call_grid+8], %r13;
+    call.uni (call_result), cudaGraphKernelNodeSetGridDim,
+        (call_node, call_grid);
+    ld.param.b32 %r14, [call_result];
+    setp.ne.u32 %p8, %r14, 0;
+    @%p8 st.global.u32 [%rd1+24], %r14;
+
+EXTENT_DONE:
+    ret;
+}
+
 .visible .entry graph_bounded_probe_payload(
     .param .u64 visited_param
 )
@@ -253,6 +322,7 @@ void *latch_branch_func{nullptr};
 std::once_flag bounded_module_once;
 void *bounded_module{nullptr};
 void *bounded_update_func{nullptr};
+void *bounded_extent_update_func{nullptr};
 void *bounded_probe_payload_func{nullptr};
 std::uint32_t bounded_module_error{0};
 
@@ -306,6 +376,12 @@ void load_bounded_module_once() {
     return;
   }
   bounded_module_error = driver.module_get_function.call(
+      &bounded_extent_update_func, bounded_module,
+      "graph_update_bounded_extent");
+  if (bounded_module_error != CUDA_SUCCESS) {
+    return;
+  }
+  bounded_module_error = driver.module_get_function.call(
       &bounded_probe_payload_func, bounded_module,
       "graph_bounded_probe_payload");
 }
@@ -317,6 +393,7 @@ bool ensure_bounded_module(std::uint32_t *driver_error) {
   }
   return bounded_module_error == CUDA_SUCCESS && bounded_module != nullptr &&
          bounded_update_func != nullptr &&
+         bounded_extent_update_func != nullptr &&
          bounded_probe_payload_func != nullptr;
 }
 
@@ -401,6 +478,18 @@ void driver_graph_update_bounded(CudaGraphBoundedControl *control,
   void *control_arg = control;
   CUDAContext::get_instance().launch(bounded_update_func,
                                      "cuda_graph_update_bounded_node",
+                                     {&control_arg}, {}, 1, 1, 0, stream);
+}
+
+void driver_graph_update_bounded_extent(CudaGraphBoundedExtentControl *control,
+                                        void *stream) {
+  std::uint32_t driver_error = CUDA_SUCCESS;
+  TI_ERROR_IF(!ensure_bounded_module(&driver_error),
+              "CUDA bounded Graph updater PTX failed to load: {}",
+              get_cuda_error_message(driver_error));
+  void *control_arg = control;
+  CUDAContext::get_instance().launch(bounded_extent_update_func,
+                                     "cuda_graph_update_bounded_extent",
                                      {&control_arg}, {}, 1, 1, 0, stream);
 }
 
