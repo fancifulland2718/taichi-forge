@@ -52,17 +52,50 @@ static_assert(offsetof(CudaGraphBoundedExtentControl, block_dim) == 20);
 static_assert(offsetof(CudaGraphBoundedExtentControl, driver_status) == 24);
 static_assert(offsetof(CudaGraphBoundedExtentControl, overflow) == 28);
 
+// One control record can update every bounded payload that consumes the same
+// producer-owned launch state. ``dispatch_packet`` is nonzero for the generic
+// updater route. A Forge-owned fused producer writes ``grid_x``/``enabled``
+// directly and leaves ``dispatch_packet`` null.
+struct CudaGraphBoundedGroupControl {
+  std::uintptr_t dispatch_packet{0};
+  std::uintptr_t device_nodes{0};
+  std::uint32_t node_count{0};
+  std::uint32_t grid_x{0};
+  std::uint32_t enabled{0};
+  std::uint32_t driver_status{0};
+  std::uint32_t ready{0};
+  std::uint32_t block_dim{0};
+};
+
+static_assert(sizeof(CudaGraphBoundedGroupControl) == 40);
+static_assert(offsetof(CudaGraphBoundedGroupControl, dispatch_packet) == 0);
+static_assert(offsetof(CudaGraphBoundedGroupControl, device_nodes) == 8);
+static_assert(offsetof(CudaGraphBoundedGroupControl, node_count) == 16);
+static_assert(offsetof(CudaGraphBoundedGroupControl, grid_x) == 20);
+static_assert(offsetof(CudaGraphBoundedGroupControl, enabled) == 24);
+static_assert(offsetof(CudaGraphBoundedGroupControl, driver_status) == 28);
+static_assert(offsetof(CudaGraphBoundedGroupControl, ready) == 32);
+static_assert(offsetof(CudaGraphBoundedGroupControl, block_dim) == 36);
+
 struct CudaGraphBoundedProbeResult {
   bool attempted{false};
   bool passed{false};
   bool ptx_linked{false};
   bool graph_uploaded{false};
   bool zero_count_skipped{false};
+  bool launch_update_persists{false};
+  bool external_update_persists{false};
+  bool partial_failure_capacity_safe{false};
   std::uint32_t driver_error{0};
   std::uint32_t sparse_visited{0};
   std::uint32_t zero_visited{0};
   std::uint32_t rebound_visited{0};
   std::uint32_t baseline_visited{0};
+  std::uint32_t persistent_sparse_visited{0};
+  std::uint32_t persistent_disabled_visited{0};
+  std::uint32_t external_update_visited{0};
+  std::uint32_t external_reset_visited{0};
+  std::uint32_t partial_failure_visited{0};
   std::string reason{"not_attempted"};
 };
 
@@ -100,6 +133,8 @@ void driver_graph_update_bounded(CudaGraphBoundedControl *control,
                                  void *stream = nullptr);
 void driver_graph_update_bounded_extent(CudaGraphBoundedExtentControl *control,
                                         void *stream = nullptr);
+void driver_graph_update_bounded_group(CudaGraphBoundedGroupControl *control,
+                                       void *stream = nullptr);
 void *driver_graph_bounded_probe_payload_function();
 CudaGraphBoundedProbeResult driver_graph_bounded_probe(bool run);
 

@@ -359,6 +359,7 @@ void Operations::init_internals() {
   CUDA_MATCH_SYNC(all, i32);
   PLAIN_OP(cuda_active_mask, u32, false);
   PLAIN_OP(warp_barrier, i32_void, false, u32);
+  PLAIN_OP(cuda_graph_update_bounded_group, i32, false, u64, u32, u32, u32);
 
 #undef CUDA_MATCH_SYNC
 #undef CUDA_SHFL_SYNC

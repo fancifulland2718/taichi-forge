@@ -1956,6 +1956,77 @@ void block_memfence() {
 void grid_memfence() {
 }
 
+// CUDA 12.4 device-updatable Graph nodes expose device-callable setters. The
+// host uploads only handles belonging to this Graph executable, and Forge's
+// producer-owned control record supplies a capacity-clamped grid. Updating
+// every node on every launch is required because these attributes persist
+// across Graph launches rather than returning to their captured baseline.
+#if ARCH_cuda
+struct CudaGraphDim3 {
+  u32 x;
+  u32 y;
+  u32 z;
+};
+
+struct CudaGraphKernelNodeUpdate {
+  void *node;
+  u32 field;
+  union {
+    CudaGraphDim3 grid_dim;
+    struct {
+      const void *value;
+      u64 offset;
+      u64 size;
+    } parameter;
+    u32 enabled;
+  } data;
+};
+
+static_assert(sizeof(CudaGraphKernelNodeUpdate) == 40);
+static_assert(offsetof(CudaGraphKernelNodeUpdate, node) == 0);
+static_assert(offsetof(CudaGraphKernelNodeUpdate, field) == 8);
+static_assert(offsetof(CudaGraphKernelNodeUpdate, data) == 16);
+
+extern "C" i32 cudaGraphKernelNodeUpdatesApply(
+    const CudaGraphKernelNodeUpdate *updates,
+    u64 update_count);
+#endif
+
+i32 cuda_graph_update_bounded_group(u64 nodes_address,
+                                    u32 node_count,
+                                    u32 grid_x,
+                                    u32 enabled) {
+#if ARCH_cuda
+  auto *nodes = reinterpret_cast<u64 *>(nodes_address);
+  for (u32 index = 0; index < node_count; ++index) {
+    void *node = reinterpret_cast<void *>(nodes[index]);
+    CudaGraphKernelNodeUpdate updates[2]{};
+    updates[0].node = node;
+    updates[0].field = 3;  // cudaGraphKernelNodeFieldEnabled
+    updates[0].data.enabled = enabled != 0 ? 1 : 0;
+    u64 update_count = 1;
+    if (enabled != 0) {
+      updates[1].node = node;
+      updates[1].field = 1;  // cudaGraphKernelNodeFieldGridDim
+      updates[1].data.grid_dim = {grid_x, 1, 1};
+      update_count = 2;
+    }
+    const i32 status =
+        cudaGraphKernelNodeUpdatesApply(updates, update_count);
+    if (status != 0) {
+      return status;
+    }
+  }
+  return 0;
+#else
+  (void)nodes_address;
+  (void)node_count;
+  (void)grid_x;
+  (void)enabled;
+  return -1;
+#endif
+}
+
 // these trivial functions are needed by the DEFINE_REDUCTION macro
 i32 op_add_i32(i32 a, i32 b) {
   return a + b;

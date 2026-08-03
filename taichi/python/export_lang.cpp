@@ -3683,7 +3683,8 @@ void export_lang(py::module &m) {
            py::arg("dispatch_packet"), py::arg("label") = "")
       .def("dispatch_cuda_bounded", &GraphBuilder::dispatch_cuda_bounded,
            py::arg("kernel"), py::arg("args"), py::arg("extent"),
-           py::arg("capacity"), py::arg("block_dim"),
+           py::arg("launch_state"), py::arg("capacity"),
+           py::arg("block_dim"), py::arg("producer_fused") = false,
            py::arg("label") = "")
       .def("dispatch_cpu_bounded", &GraphBuilder::dispatch_cpu_bounded,
            py::arg("kernel"), py::arg("args"), py::arg("extent"),
@@ -4064,6 +4065,14 @@ void export_lang(py::module &m) {
             stats.known_persistent_argument_bytes;
         result["known_bounded_control_bytes"] =
             stats.known_bounded_control_bytes;
+        result["known_bounded_update_groups"] =
+            stats.known_bounded_update_groups;
+        result["known_bounded_updater_dispatches"] =
+            stats.known_bounded_updater_dispatches;
+        result["known_bounded_grouped_payloads"] =
+            stats.known_bounded_grouped_payloads;
+        result["known_bounded_producer_fused_groups"] =
+            stats.known_bounded_producer_fused_groups;
         result["known_compiled_tasks"] =
             snapshot.known_compiled_tasks;
         result["known_compiled_dispatches"] =

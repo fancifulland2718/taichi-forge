@@ -231,8 +231,10 @@ struct GraphSourceDispatchMetadata {
 
 struct CudaBoundedDispatchMetadata {
   Arg extent_arg;
+  std::optional<Arg> launch_state_arg;
   std::uint32_t capacity{0};
   std::uint32_t block_dim{0};
+  bool producer_fused{false};
 };
 
 struct CpuBoundedDispatchMetadata {
@@ -379,6 +381,10 @@ struct CompiledGraphStats {
   uint64_t peak_deferred_replay_batches{0};
   uint64_t known_persistent_argument_bytes{0};
   uint64_t known_bounded_control_bytes{0};
+  uint32_t known_bounded_update_groups{0};
+  uint32_t known_bounded_updater_dispatches{0};
+  uint32_t known_bounded_grouped_payloads{0};
+  uint32_t known_bounded_producer_fused_groups{0};
   uint64_t last_driver_error{0};
   uint32_t retry_backoff_remaining{0};
   uint64_t effect_reads{0};

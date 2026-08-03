@@ -122,11 +122,14 @@ void Sequential::dispatch_cuda_bounded(
     Kernel *kernel,
     const std::vector<aot::Arg> &args,
     const aot::Arg &extent,
+    const std::optional<aot::Arg> &launch_state,
     std::uint32_t capacity,
     std::uint32_t block_dim,
+    bool producer_fused,
     const std::string &dispatch_label) {
   Node *n = owning_graph_->new_cuda_bounded_dispatch_node(
-      kernel, args, extent, capacity, block_dim, dispatch_label);
+      kernel, args, extent, launch_state, capacity, block_dim, producer_fused,
+      dispatch_label);
   sequence_.push_back(n);
 }
 
@@ -186,8 +189,10 @@ Node *GraphBuilder::new_cuda_bounded_dispatch_node(
     Kernel *kernel,
     const std::vector<aot::Arg> &args,
     const aot::Arg &extent,
+    const std::optional<aot::Arg> &launch_state,
     std::uint32_t capacity,
     std::uint32_t block_dim,
+    bool producer_fused,
     const std::string &dispatch_label) {
   validate_dispatch_label(dispatch_label);
   TI_ERROR_IF(extent.tag != aot::ArgKind::kNdarray ||
@@ -205,7 +210,21 @@ Node *GraphBuilder::new_cuda_bounded_dispatch_node(
   for (const auto &arg : args) {
     register_arg(arg);
   }
-  aot::CudaBoundedDispatchMetadata metadata{extent, capacity, block_dim};
+  if (launch_state.has_value()) {
+    TI_ERROR_IF(launch_state->tag != aot::ArgKind::kNdarray ||
+                    launch_state->dtype_id != PrimitiveTypeID::u32 ||
+                    launch_state->field_dim != 1 ||
+                    !launch_state->element_shape.empty(),
+                "CUDA bounded Graph launch state {} must be a "
+                "one-dimensional scalar u32 ndarray",
+                launch_state->name);
+    register_arg(*launch_state);
+  } else {
+    TI_ERROR_IF(producer_fused,
+                "CUDA bounded Graph producer fusion requires launch state");
+  }
+  aot::CudaBoundedDispatchMetadata metadata{
+      extent, launch_state, capacity, block_dim, producer_fused};
   all_nodes_.push_back(std::make_unique<Dispatch>(
       kernel, args, std::nullopt, std::move(metadata), dispatch_label));
   return all_nodes_.back().get();
@@ -285,11 +304,13 @@ void GraphBuilder::dispatch_cuda_bounded(
     Kernel *kernel,
     const std::vector<aot::Arg> &args,
     const aot::Arg &extent,
+    const std::optional<aot::Arg> &launch_state,
     std::uint32_t capacity,
     std::uint32_t block_dim,
+    bool producer_fused,
     const std::string &dispatch_label) {
-  seq()->dispatch_cuda_bounded(kernel, args, extent, capacity, block_dim,
-                               dispatch_label);
+  seq()->dispatch_cuda_bounded(kernel, args, extent, launch_state, capacity,
+                               block_dim, producer_fused, dispatch_label);
 }
 
 void GraphBuilder::dispatch_cpu_bounded(

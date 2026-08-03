@@ -375,6 +375,10 @@ void export_misc(py::module &m) {
     result["setup_probe_attempted"] = probe.attempted;
     result["setup_probe_passed"] = probe.passed;
     result["zero_count_command_skip_qualified"] = probe.zero_count_skipped;
+    result["launch_update_persists"] = probe.launch_update_persists;
+    result["external_update_persists"] = probe.external_update_persists;
+    result["partial_failure_capacity_safe"] =
+        probe.partial_failure_capacity_safe;
     result["runtime_path_compiled"] = runtime_path_compiled;
     result["exact_device_grid_available"] = exact_device_grid_available;
     result["probe_driver_error"] = probe.driver_error;
@@ -382,6 +386,15 @@ void export_misc(py::module &m) {
     result["probe_zero_visited"] = probe.zero_visited;
     result["probe_rebound_visited"] = probe.rebound_visited;
     result["probe_baseline_visited"] = probe.baseline_visited;
+    result["probe_persistent_sparse_visited"] =
+        probe.persistent_sparse_visited;
+    result["probe_persistent_disabled_visited"] =
+        probe.persistent_disabled_visited;
+    result["probe_external_update_visited"] =
+        probe.external_update_visited;
+    result["probe_external_reset_visited"] = probe.external_reset_visited;
+    result["probe_partial_failure_visited"] =
+        probe.partial_failure_visited;
     result["probe_reason"] = probe.reason;
     std::string unavailable_reason = "none";
     if (!driver_loaded) {
@@ -411,6 +424,9 @@ void export_misc(py::module &m) {
     result["setup_probe_attempted"] = false;
     result["setup_probe_passed"] = false;
     result["zero_count_command_skip_qualified"] = false;
+    result["launch_update_persists"] = false;
+    result["external_update_persists"] = false;
+    result["partial_failure_capacity_safe"] = false;
     result["runtime_path_compiled"] = false;
     result["exact_device_grid_available"] = false;
     result["probe_driver_error"] = 0;
@@ -418,6 +434,11 @@ void export_misc(py::module &m) {
     result["probe_zero_visited"] = 0;
     result["probe_rebound_visited"] = 0;
     result["probe_baseline_visited"] = 0;
+    result["probe_persistent_sparse_visited"] = 0;
+    result["probe_persistent_disabled_visited"] = 0;
+    result["probe_external_update_visited"] = 0;
+    result["probe_external_reset_visited"] = 0;
+    result["probe_partial_failure_visited"] = 0;
     result["probe_reason"] = "cuda_backend_not_compiled";
     result["unavailable_reason"] = "cuda_backend_not_compiled";
 #endif
