@@ -1347,11 +1347,19 @@ class BoundedDispatchCapabilities:
 
     schema_version: int
     backend: str
+    requested_route: str
     route: str
+    minimum_driver_api_version: Optional[int]
+    driver_api_version: Optional[int]
+    driver_version_eligible: bool
+    required_symbols_loaded: bool
+    device_update_ptx_linked: bool
+    setup_probe_passed: bool
     device_known_count: bool
     no_host_readback: bool
     exact_grid: bool
     execution_semantics: str
+    range_mapping: str
     masked_capacity: bool
     zero_count_command_skip: bool
     ordered_segments: bool
@@ -1359,8 +1367,10 @@ class BoundedDispatchCapabilities:
     producer_owned_launch_state: bool
     producer_owned_launch_state_supported: bool
     preparation_dispatches: int
+    baseline_capacity_grid: bool
     capacity: int
     block_dim: Optional[int]
+    fallback_reason: str
     reason: str
 
 
@@ -1408,16 +1418,52 @@ class OrderedSegmentedDispatchSnapshot:
 _bounded_dispatch_ids = itertools.count(1)
 
 
+def _bounded_route_request(backend):
+    if backend == "cuda":
+        env_name = "TI_CUDA_BOUNDED_DISPATCH_MODE"
+        default = "auto"
+        aliases = {
+            "auto": "auto",
+            "device_update": "device_update",
+            "masked_capacity": "masked_capacity",
+        }
+    elif backend == "cpu":
+        env_name = "TI_CPU_BOUNDED_DISPATCH_MODE"
+        default = "auto"
+        aliases = {
+            "auto": "auto",
+            "exact_scheduler": "exact_scheduler",
+            "masked_capacity": "masked_capacity",
+        }
+    else:
+        return "not_applicable"
+    requested = os.environ.get(env_name, default).strip().lower()
+    if requested not in aliases:
+        choices = "|".join(aliases)
+        raise TaichiRuntimeError(
+            f"{env_name} must be one of {choices}, got {requested!r}"
+        )
+    return aliases[requested]
+
+
 def _bounded_route(backend, ordered):
     if backend == "vulkan":
         return BoundedDispatchCapabilities(
-            schema_version=2,
+            schema_version=3,
             backend=backend,
+            requested_route="not_applicable",
             route="exact_indirect",
+            minimum_driver_api_version=None,
+            driver_api_version=None,
+            driver_version_eligible=True,
+            required_symbols_loaded=True,
+            device_update_ptx_linked=False,
+            setup_probe_passed=True,
             device_known_count=True,
             no_host_readback=True,
             exact_grid=True,
             execution_semantics="exact_device_grid",
+            range_mapping="one_to_one",
             masked_capacity=False,
             zero_count_command_skip=True,
             ordered_segments=ordered,
@@ -1425,28 +1471,77 @@ def _bounded_route(backend, ordered):
             producer_owned_launch_state=False,
             producer_owned_launch_state_supported=True,
             preparation_dispatches=1,
+            baseline_capacity_grid=False,
             capacity=0,
             block_dim=None,
+            fallback_reason="none",
             reason="Vulkan dispatchIndirect consumes a device-written grid packet",
         )
+    requested_route = _bounded_route_request(backend)
     if backend == "cuda":
+        driver_api_version = _ti_core.cuda_driver_api_version()
+        driver_version_eligible = bool(
+            driver_api_version is not None and driver_api_version >= 12040
+        )
+        if requested_route == "device_update":
+            if not driver_version_eligible:
+                raise TaichiRuntimeError(
+                    "CUDA bounded device_update requires driver API 12.4 or newer"
+                )
+            raise TaichiRuntimeError(
+                "CUDA bounded device_update was requested, but the exact "
+                "device-update lowering has not passed runtime qualification"
+            )
         reason = (
             "CUDA uses a fixed-capacity Graph node and masks payload work from "
             "the device extent; this is not exact indirect dispatch"
         )
+        fallback_reason = (
+            "forced_masked_capacity"
+            if requested_route == "masked_capacity"
+            else (
+                "cuda_device_update_lowering_not_qualified"
+                if driver_version_eligible
+                else "cuda_driver_api_below_12040"
+            )
+        )
+        range_mapping = "grid_stride"
+        minimum_driver_api_version = 12040
     else:
+        driver_api_version = None
+        driver_version_eligible = True
+        if requested_route == "exact_scheduler":
+            raise TaichiRuntimeError(
+                "CPU bounded exact_scheduler was requested, but the exact "
+                "scheduler lowering has not passed runtime qualification"
+            )
         reason = (
             "CPU uses the cached fixed-capacity range task and masks payload "
             "work from the extent"
         )
+        fallback_reason = (
+            "forced_masked_capacity"
+            if requested_route == "masked_capacity"
+            else "cpu_exact_scheduler_lowering_not_qualified"
+        )
+        range_mapping = "cpu_scheduler"
+        minimum_driver_api_version = None
     return BoundedDispatchCapabilities(
-        schema_version=2,
+        schema_version=3,
         backend=backend,
+        requested_route=requested_route,
         route="masked_capacity",
+        minimum_driver_api_version=minimum_driver_api_version,
+        driver_api_version=driver_api_version,
+        driver_version_eligible=driver_version_eligible,
+        required_symbols_loaded=False,
+        device_update_ptx_linked=False,
+        setup_probe_passed=False,
         device_known_count=True,
         no_host_readback=True,
         exact_grid=False,
         execution_semantics="masked_capacity",
+        range_mapping=range_mapping,
         masked_capacity=True,
         zero_count_command_skip=False,
         ordered_segments=ordered,
@@ -1454,8 +1549,10 @@ def _bounded_route(backend, ordered):
         producer_owned_launch_state=False,
         producer_owned_launch_state_supported=True,
         preparation_dispatches=0,
+        baseline_capacity_grid=True,
         capacity=0,
         block_dim=None,
+        fallback_reason=fallback_reason,
         reason=reason,
     )
 
@@ -1683,13 +1780,27 @@ class HostBoundedDispatchHandle:
         self._runtime_generation = int(impl.runtime_generation())
         self._runtime_program = impl.get_runtime().prog
         self._capabilities = BoundedDispatchCapabilities(
-            schema_version=2,
+            schema_version=3,
             backend=backend,
+            requested_route="host_known",
             route="exact_host_range",
+            minimum_driver_api_version=None,
+            driver_api_version=(
+                _ti_core.cuda_driver_api_version()
+                if backend == "cuda"
+                else None
+            ),
+            driver_version_eligible=True,
+            required_symbols_loaded=True,
+            device_update_ptx_linked=False,
+            setup_probe_passed=True,
             device_known_count=False,
             no_host_readback=True,
             exact_grid=True,
             execution_semantics="exact_host_range",
+            range_mapping=(
+                "cpu_scheduler" if backend == "cpu" else "grid_stride"
+            ),
             masked_capacity=False,
             zero_count_command_skip=False,
             ordered_segments=False,
@@ -1697,8 +1808,10 @@ class HostBoundedDispatchHandle:
             producer_owned_launch_state=False,
             producer_owned_launch_state_supported=False,
             preparation_dispatches=0,
+            baseline_capacity_grid=False,
             capacity=self.capacity,
             block_dim=self.block_dim,
+            fallback_reason="none",
             reason=(
                 "the compiler proved that the payload range is driven by the "
                 "host scalar count argument; the backend may retain scalar-range "
@@ -2419,15 +2532,25 @@ def bounded_dispatch_capabilities():
     backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
     if backend not in ("cpu", "cuda", "vulkan"):
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "backend": backend,
             "available": False,
+            "requested_route": "not_applicable",
+            "selected_route": "unsupported",
             "route": "unsupported",
             "host_known_route": "unsupported",
+            "minimum_driver_api_version": None,
+            "driver_api_version": None,
+            "driver_version_eligible": False,
+            "required_symbols_loaded": False,
+            "device_update_ptx_linked": False,
+            "setup_probe_passed": False,
             "device_known_count": False,
             "no_host_readback": False,
             "exact_grid": False,
+            "exact_physical_grid": False,
             "execution_semantics": "unsupported",
+            "range_mapping": "unsupported",
             "masked_capacity": False,
             "zero_count_command_skip": False,
             "ordered_segments": False,
@@ -2435,6 +2558,9 @@ def bounded_dispatch_capabilities():
             "producer_owned_launch_state_supported": False,
             "producer_packet_consumed": False,
             "default_preparation_dispatches": 0,
+            "updater_dispatches": 0,
+            "baseline_capacity_grid": False,
+            "fallback_reason": "backend_not_qualified",
             "reason": "backend is not qualified for bounded dispatch",
         }
     capabilities = _bounded_route(backend, True)
@@ -2442,12 +2568,22 @@ def bounded_dispatch_capabilities():
         "schema_version": capabilities.schema_version,
         "backend": backend,
         "available": True,
+        "requested_route": capabilities.requested_route,
+        "selected_route": capabilities.route,
         "route": capabilities.route,
         "host_known_route": "exact_host_range",
+        "minimum_driver_api_version": capabilities.minimum_driver_api_version,
+        "driver_api_version": capabilities.driver_api_version,
+        "driver_version_eligible": capabilities.driver_version_eligible,
+        "required_symbols_loaded": capabilities.required_symbols_loaded,
+        "device_update_ptx_linked": capabilities.device_update_ptx_linked,
+        "setup_probe_passed": capabilities.setup_probe_passed,
         "device_known_count": capabilities.device_known_count,
         "no_host_readback": capabilities.no_host_readback,
         "exact_grid": capabilities.exact_grid,
+        "exact_physical_grid": capabilities.exact_grid,
         "execution_semantics": capabilities.execution_semantics,
+        "range_mapping": capabilities.range_mapping,
         "masked_capacity": capabilities.masked_capacity,
         "zero_count_command_skip": capabilities.zero_count_command_skip,
         "ordered_segments": capabilities.ordered_segments,
@@ -2457,6 +2593,9 @@ def bounded_dispatch_capabilities():
         ),
         "producer_packet_consumed": backend == "vulkan",
         "default_preparation_dispatches": capabilities.preparation_dispatches,
+        "updater_dispatches": capabilities.preparation_dispatches,
+        "baseline_capacity_grid": capabilities.baseline_capacity_grid,
+        "fallback_reason": capabilities.fallback_reason,
         "reason": capabilities.reason,
     }
 
@@ -2807,7 +2946,7 @@ def dynamic_work_capabilities():
         "completion_attached_"
     )
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "backend": structured["backend"],
         "count_contract": {
             "owner": "DeviceExtent",
@@ -2820,8 +2959,21 @@ def dynamic_work_capabilities():
         },
         "bounded_dispatch": {
             "available": bounded["available"],
+            "requested_route": bounded["requested_route"],
+            "selected_route": bounded["selected_route"],
             "route": bounded["route"],
+            "minimum_driver_api_version": bounded[
+                "minimum_driver_api_version"
+            ],
+            "driver_api_version": bounded["driver_api_version"],
+            "driver_version_eligible": bounded["driver_version_eligible"],
+            "required_symbols_loaded": bounded["required_symbols_loaded"],
+            "device_update_ptx_linked": bounded[
+                "device_update_ptx_linked"
+            ],
+            "setup_probe_passed": bounded["setup_probe_passed"],
             "execution_semantics": bounded["execution_semantics"],
+            "range_mapping": bounded["range_mapping"],
             "device_known_count": bounded["device_known_count"],
             "no_host_readback": bounded["no_host_readback"],
             "exact_physical_grid": bounded["exact_grid"],
@@ -2834,6 +2986,9 @@ def dynamic_work_capabilities():
             "default_preparation_dispatches": bounded[
                 "default_preparation_dispatches"
             ],
+            "updater_dispatches": bounded["updater_dispatches"],
+            "baseline_capacity_grid": bounded["baseline_capacity_grid"],
+            "fallback_reason": bounded["fallback_reason"],
             "accounting_fields": (
                 "useful_count",
                 "capacity",

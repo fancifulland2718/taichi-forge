@@ -8,6 +8,7 @@ producer and payload across direct, fixed-Graph, and bounded-Graph routes.
 
 import argparse
 import json
+import os
 import random
 import statistics
 import time
@@ -358,6 +359,16 @@ def main():
     parser.add_argument("--samples", type=int, default=9)
     parser.add_argument("--warmups", type=int, default=5)
     parser.add_argument("--seed", type=int, default=20260802)
+    parser.add_argument(
+        "--cuda-route",
+        choices=("auto", "device_update", "masked_capacity"),
+        default="auto",
+    )
+    parser.add_argument(
+        "--cpu-route",
+        choices=("auto", "exact_scheduler", "masked_capacity"),
+        default="auto",
+    )
     args = parser.parse_args()
     if not 0 <= args.sparse_percent <= 100:
         parser.error("--sparse-percent must be in [0, 100]")
@@ -372,11 +383,39 @@ def main():
     ) <= 0:
         parser.error("capacities, block size, rounds, and samples must be positive")
 
+    if args.arch == "cuda":
+        os.environ["TI_CUDA_BOUNDED_DISPATCH_MODE"] = args.cuda_route
+    elif args.arch == "cpu":
+        os.environ["TI_CPU_BOUNDED_DISPATCH_MODE"] = args.cpu_route
     arch = {"cpu": ti.cpu, "cuda": ti.cuda, "vulkan": ti.vulkan}[args.arch]
     ti.init(arch=arch, offline_cache=False)
+    requested_route = (
+        args.cuda_route
+        if args.arch == "cuda"
+        else args.cpu_route if args.arch == "cpu" else "not_applicable"
+    )
+    bounded_capabilities = ti.graph.bounded_dispatch_capabilities()
+    expected_selected = {
+        "device_update": "exact_device_grid_update",
+        "exact_scheduler": "exact_cpu_scheduler",
+        "masked_capacity": "masked_capacity",
+    }.get(requested_route)
+    route_identity_valid = requested_route in ("auto", "not_applicable") or (
+        bounded_capabilities["selected_route"] == expected_selected
+    )
+    if not route_identity_valid:
+        raise RuntimeError(
+            "bounded benchmark route mismatch: "
+            f"requested={requested_route}, "
+            f"selected={bounded_capabilities['selected_route']}"
+        )
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "arch": ti_core.arch_name(impl.current_cfg().arch),
+        "requested_route": requested_route,
+        "selected_route": bounded_capabilities["selected_route"],
+        "route_identity_valid": route_identity_valid,
+        "bounded_dispatch_capabilities": bounded_capabilities,
     }
     if args.suite in ("all", "prefix"):
         result["device_prefix"] = _prefix_benchmark(args)

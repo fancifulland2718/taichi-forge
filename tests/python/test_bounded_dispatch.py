@@ -15,7 +15,7 @@ def test_dynamic_work_capabilities_separate_launch_and_iteration_semantics():
     observation = capabilities["observation"]
     arch = ti.lang.impl.current_cfg().arch
 
-    assert capabilities["schema_version"] == 2
+    assert capabilities["schema_version"] == 3
     assert capabilities["count_contract"] == {
         "owner": "DeviceExtent",
         "state_words": 2,
@@ -36,6 +36,12 @@ def test_dynamic_work_capabilities_separate_launch_and_iteration_semantics():
     assert observation["worklist_counters"]
     assert bounded["producer_owned_launch_state"]
     assert bounded["no_host_readback"]
+    assert bounded["selected_route"] == bounded["route"]
+    assert bounded["range_mapping"] in (
+        "one_to_one",
+        "grid_stride",
+        "cpu_scheduler",
+    )
     assert observation["completion_attached"]
     assert observation["readback_mode"] == (
         "completion_attached_pinned_copy"
@@ -47,18 +53,66 @@ def test_dynamic_work_capabilities_separate_launch_and_iteration_semantics():
         assert bounded["exact_physical_grid"]
         assert bounded["producer_packet_consumed"]
         assert bounded["default_preparation_dispatches"] == 1
+        assert bounded["requested_route"] == "not_applicable"
+        assert bounded["setup_probe_passed"]
+        assert bounded["fallback_reason"] == "none"
         assert not iteration["command_termination_exact"]
     elif arch == ti.cuda:
         assert bounded["execution_semantics"] == "masked_capacity"
         assert bounded["masked_capacity"]
         assert not bounded["producer_packet_consumed"]
         assert bounded["default_preparation_dispatches"] == 0
+        assert bounded["requested_route"] == "auto"
+        assert bounded["minimum_driver_api_version"] == 12040
+        assert not bounded["setup_probe_passed"]
+        assert bounded["fallback_reason"] in (
+            "cuda_device_update_lowering_not_qualified",
+            "cuda_driver_api_below_12040",
+        )
         assert iteration["command_termination_exact"] == (
             iteration["execution_semantics"] == "exact_dynamic_termination"
         )
     else:
         assert bounded["execution_semantics"] == "masked_capacity"
+        assert bounded["requested_route"] == "auto"
+        assert bounded["fallback_reason"] == (
+            "cpu_exact_scheduler_lowering_not_qualified"
+        )
         assert iteration["execution_semantics"] == "portable_host_control"
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_cpu_bounded_route_selection_is_fail_closed(monkeypatch):
+    monkeypatch.setenv("TI_CPU_BOUNDED_DISPATCH_MODE", "masked_capacity")
+    capabilities = ti.graph.bounded_dispatch_capabilities()
+    assert capabilities["requested_route"] == "masked_capacity"
+    assert capabilities["selected_route"] == "masked_capacity"
+    assert capabilities["fallback_reason"] == "forced_masked_capacity"
+
+    monkeypatch.setenv("TI_CPU_BOUNDED_DISPATCH_MODE", "exact_scheduler")
+    with pytest.raises(RuntimeError, match="exact_scheduler"):
+        ti.graph.bounded_dispatch_capabilities()
+
+    monkeypatch.setenv("TI_CPU_BOUNDED_DISPATCH_MODE", "invalid")
+    with pytest.raises(RuntimeError, match="TI_CPU_BOUNDED_DISPATCH_MODE"):
+        ti.graph.bounded_dispatch_capabilities()
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_bounded_route_selection_is_fail_closed(monkeypatch):
+    monkeypatch.setenv("TI_CUDA_BOUNDED_DISPATCH_MODE", "masked_capacity")
+    capabilities = ti.graph.bounded_dispatch_capabilities()
+    assert capabilities["requested_route"] == "masked_capacity"
+    assert capabilities["selected_route"] == "masked_capacity"
+    assert capabilities["fallback_reason"] == "forced_masked_capacity"
+
+    monkeypatch.setenv("TI_CUDA_BOUNDED_DISPATCH_MODE", "device_update")
+    with pytest.raises(RuntimeError, match="device_update"):
+        ti.graph.bounded_dispatch_capabilities()
+
+    monkeypatch.setenv("TI_CUDA_BOUNDED_DISPATCH_MODE", "invalid")
+    with pytest.raises(RuntimeError, match="TI_CUDA_BOUNDED_DISPATCH_MODE"):
+        ti.graph.bounded_dispatch_capabilities()
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
