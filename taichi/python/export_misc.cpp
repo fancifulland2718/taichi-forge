@@ -246,21 +246,18 @@ void export_misc(py::module &m) {
     const bool masked_latch_compiled =
         taichi::lang::cuda::driver_graph_mask_latch_compiled();
     auto &cublas = taichi::lang::CUBLASDriver::get_instance();
-    const bool cublas_loaded =
-        cublas.is_loaded() ? true : cublas.load_cublas();
+    const bool cublas_loaded = cublas.is_loaded() ? true : cublas.load_cublas();
     const bool cublas_workspace_symbol_loaded =
         cublas_loaded && cublas.cubSetWorkspace.available();
     result["conditional_graph_symbols_loaded"] = symbols_loaded;
     result["device_setter_lowering_compiled"] = setter_compiled;
-    result["general_device_setter_lowering_compiled"] =
-        graph_setter_compiled;
+    result["general_device_setter_lowering_compiled"] = graph_setter_compiled;
     result["ordinary_graph_symbols_loaded"] = ordinary_graph_symbols_loaded;
     result["internal_masked_latch_compiled"] = masked_latch_compiled;
     result["runtime_path_compiled"] = true;
-    result["cublas_workspace_symbol_loaded"] =
-        cublas_workspace_symbol_loaded;
-    const bool base_available = driver_loaded &&
-                                driver_api_version >= 12080 && symbols_loaded;
+    result["cublas_workspace_symbol_loaded"] = cublas_workspace_symbol_loaded;
+    const bool base_available =
+        driver_loaded && driver_api_version >= 12080 && symbols_loaded;
     result["stored_solver_device_control_available"] =
         base_available && setter_compiled && cublas_workspace_symbol_loaded;
     const bool exact_graph_control_available =
@@ -335,6 +332,101 @@ void export_misc(py::module &m) {
     result["fully_available"] = false;
 #endif
     return result;
+  });
+  auto cuda_bounded_dispatch_capabilities = [](bool run_probe) {
+    py::dict result;
+#if defined(TI_WITH_CUDA)
+    auto &driver = taichi::lang::CUDADriver::get_instance_without_context();
+    const bool driver_loaded = driver.detected();
+    const int driver_api_version = driver_loaded
+                                       ? driver.get_version_major() * 1000 +
+                                             driver.get_version_minor() * 10
+                                       : 0;
+    const bool driver_version_eligible =
+        driver_loaded && driver_api_version >= 12040;
+    const bool required_symbols_loaded =
+        driver_loaded && driver.launch_kernel_ex.available() &&
+        driver.graph_upload.available() &&
+        driver.stream_begin_capture.available() &&
+        driver.stream_end_capture.available() &&
+        driver.graph_instantiate_with_flags.available() &&
+        driver.graph_launch.available() && driver.graph_destroy.available() &&
+        driver.graph_exec_destroy.available();
+    const bool update_compiled =
+        taichi::lang::cuda::driver_graph_bounded_update_compiled();
+    const auto probe =
+        taichi::lang::cuda::driver_graph_bounded_probe(run_probe);
+    result["driver_loaded"] = driver_loaded;
+    result["driver_api_version"] =
+        driver_loaded ? py::cast(driver_api_version) : py::none();
+    result["minimum_driver_api_version"] = 12040;
+    result["driver_version_eligible"] = driver_version_eligible;
+    result["launch_kernel_ex_loaded"] =
+        driver_loaded && driver.launch_kernel_ex.available();
+    result["graph_upload_loaded"] =
+        driver_loaded && driver.graph_upload.available();
+    result["required_symbols_loaded"] = required_symbols_loaded;
+    result["device_update_ptx_compiled"] = update_compiled;
+    result["device_update_ptx_linked"] = probe.ptx_linked;
+    result["setup_probe_attempted"] = probe.attempted;
+    result["setup_probe_passed"] = probe.passed;
+    result["zero_count_command_skip_qualified"] = probe.zero_count_skipped;
+    result["runtime_path_compiled"] = false;
+    result["exact_device_grid_available"] = false;
+    result["probe_driver_error"] = probe.driver_error;
+    result["probe_sparse_visited"] = probe.sparse_visited;
+    result["probe_zero_visited"] = probe.zero_visited;
+    result["probe_rebound_visited"] = probe.rebound_visited;
+    result["probe_baseline_visited"] = probe.baseline_visited;
+    result["probe_reason"] = probe.reason;
+    std::string unavailable_reason = "none";
+    if (!driver_loaded) {
+      unavailable_reason = "cuda_driver_not_loaded";
+    } else if (!driver_version_eligible) {
+      unavailable_reason = "cuda_driver_api_below_12040";
+    } else if (!required_symbols_loaded) {
+      unavailable_reason = "cuda_device_update_symbols_unavailable";
+    } else if (!update_compiled) {
+      unavailable_reason = "cuda_device_update_lowering_not_compiled";
+    } else if (!probe.passed) {
+      unavailable_reason =
+          probe.attempted ? probe.reason : "cuda_device_update_probe_not_run";
+    } else {
+      unavailable_reason = "cuda_bounded_runtime_path_not_compiled";
+    }
+    result["unavailable_reason"] = unavailable_reason;
+#else
+    (void)run_probe;
+    result["driver_loaded"] = false;
+    result["driver_api_version"] = py::none();
+    result["minimum_driver_api_version"] = 12040;
+    result["driver_version_eligible"] = false;
+    result["launch_kernel_ex_loaded"] = false;
+    result["graph_upload_loaded"] = false;
+    result["required_symbols_loaded"] = false;
+    result["device_update_ptx_compiled"] = false;
+    result["device_update_ptx_linked"] = false;
+    result["setup_probe_attempted"] = false;
+    result["setup_probe_passed"] = false;
+    result["zero_count_command_skip_qualified"] = false;
+    result["runtime_path_compiled"] = false;
+    result["exact_device_grid_available"] = false;
+    result["probe_driver_error"] = 0;
+    result["probe_sparse_visited"] = 0;
+    result["probe_zero_visited"] = 0;
+    result["probe_rebound_visited"] = 0;
+    result["probe_baseline_visited"] = 0;
+    result["probe_reason"] = "cuda_backend_not_compiled";
+    result["unavailable_reason"] = "cuda_backend_not_compiled";
+#endif
+    return result;
+  };
+  m.def("cuda_bounded_dispatch_capabilities",
+        [cuda_bounded_dispatch_capabilities]() {
+          return cuda_bounded_dispatch_capabilities(false);
+        });
+  m.def("cuda_bounded_dispatch_probe", [cuda_bounded_dispatch_capabilities]() {
+    return cuda_bounded_dispatch_capabilities(true);
   });
   m.def("test_cpp_exception", [] {
     try {

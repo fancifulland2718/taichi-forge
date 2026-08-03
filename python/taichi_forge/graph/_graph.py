@@ -1479,18 +1479,26 @@ def _bounded_route(backend, ordered):
         )
     requested_route = _bounded_route_request(backend)
     if backend == "cuda":
-        driver_api_version = _ti_core.cuda_driver_api_version()
+        cuda_capabilities = dict(
+            _ti_core.cuda_bounded_dispatch_capabilities()
+        )
+        driver_api_version = cuda_capabilities["driver_api_version"]
         driver_version_eligible = bool(
-            driver_api_version is not None and driver_api_version >= 12040
+            cuda_capabilities["driver_version_eligible"]
+        )
+        required_symbols_loaded = bool(
+            cuda_capabilities["required_symbols_loaded"]
+        )
+        device_update_ptx_linked = bool(
+            cuda_capabilities["device_update_ptx_linked"]
+        )
+        setup_probe_passed = bool(
+            cuda_capabilities["setup_probe_passed"]
         )
         if requested_route == "device_update":
-            if not driver_version_eligible:
-                raise TaichiRuntimeError(
-                    "CUDA bounded device_update requires driver API 12.4 or newer"
-                )
             raise TaichiRuntimeError(
-                "CUDA bounded device_update was requested, but the exact "
-                "device-update lowering has not passed runtime qualification"
+                "CUDA bounded device_update is unavailable: "
+                f"{cuda_capabilities['unavailable_reason']}"
             )
         reason = (
             "CUDA uses a fixed-capacity Graph node and masks payload work from "
@@ -1499,17 +1507,16 @@ def _bounded_route(backend, ordered):
         fallback_reason = (
             "forced_masked_capacity"
             if requested_route == "masked_capacity"
-            else (
-                "cuda_device_update_lowering_not_qualified"
-                if driver_version_eligible
-                else "cuda_driver_api_below_12040"
-            )
+            else cuda_capabilities["unavailable_reason"]
         )
         range_mapping = "grid_stride"
         minimum_driver_api_version = 12040
     else:
         driver_api_version = None
         driver_version_eligible = True
+        required_symbols_loaded = False
+        device_update_ptx_linked = False
+        setup_probe_passed = False
         if requested_route == "exact_scheduler":
             raise TaichiRuntimeError(
                 "CPU bounded exact_scheduler was requested, but the exact "
@@ -1534,9 +1541,9 @@ def _bounded_route(backend, ordered):
         minimum_driver_api_version=minimum_driver_api_version,
         driver_api_version=driver_api_version,
         driver_version_eligible=driver_version_eligible,
-        required_symbols_loaded=False,
-        device_update_ptx_linked=False,
-        setup_probe_passed=False,
+        required_symbols_loaded=required_symbols_loaded,
+        device_update_ptx_linked=device_update_ptx_linked,
+        setup_probe_passed=setup_probe_passed,
         device_known_count=True,
         no_host_readback=True,
         exact_grid=False,

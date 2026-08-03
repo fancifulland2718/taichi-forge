@@ -163,6 +163,83 @@ STORE_SELECTOR:
 }
 )ptx";
 
+const char kCudaGraphBoundedUpdatePtx[] = R"ptx(
+.version 6.0
+.target sm_50
+.address_size 64
+
+.extern .func (.param .b32 result) cudaGraphKernelNodeSetEnabled(
+    .param .b64 node,
+    .param .b32 enabled
+);
+
+.extern .func (.param .b32 result) cudaGraphKernelNodeSetGridDim(
+    .param .b64 node,
+    .param .align 4 .b8 grid_dim[12]
+);
+
+.visible .entry graph_update_bounded_node(
+    .param .u64 control_param
+)
+{
+    .reg .pred %p<5>;
+    .reg .b32 %r<9>;
+    .reg .b64 %rd<3>;
+    .param .b64 call_node;
+    .param .b32 call_enabled;
+    .param .align 4 .b8 call_grid[12];
+    .param .b32 call_result;
+
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %tid.x;
+    or.b32 %r3, %r1, %r2;
+    setp.ne.u32 %p1, %r3, 0;
+    @%p1 bra DONE;
+
+    ld.param.u64 %rd1, [control_param];
+    ld.global.u64 %rd2, [%rd1+0];
+    ld.global.u32 %r4, [%rd1+8];
+    ld.global.u32 %r5, [%rd1+12];
+    setp.ne.u32 %p2, %r5, 0;
+    selp.u32 %r6, 1, 0, %p2;
+
+    st.param.b64 [call_node], %rd2;
+    st.param.b32 [call_enabled], %r6;
+    call.uni (call_result), cudaGraphKernelNodeSetEnabled,
+        (call_node, call_enabled);
+    ld.param.b32 %r7, [call_result];
+    setp.ne.u32 %p3, %r7, 0;
+    @%p3 bra STORE_STATUS;
+    setp.eq.u32 %p4, %r6, 0;
+    @%p4 bra STORE_STATUS;
+
+    st.param.b64 [call_node], %rd2;
+    st.param.b32 [call_grid+0], %r4;
+    mov.u32 %r8, 1;
+    st.param.b32 [call_grid+4], %r8;
+    st.param.b32 [call_grid+8], %r8;
+    call.uni (call_result), cudaGraphKernelNodeSetGridDim,
+        (call_node, call_grid);
+    ld.param.b32 %r7, [call_result];
+
+STORE_STATUS:
+    st.global.u32 [%rd1+16], %r7;
+DONE:
+    ret;
+}
+
+.visible .entry graph_bounded_probe_payload(
+    .param .u64 visited_param
+)
+{
+    .reg .b32 %r<2>;
+    .reg .b64 %rd<2>;
+    ld.param.u64 %rd1, [visited_param];
+    atom.global.add.u32 %r1, [%rd1], 1;
+    ret;
+}
+)ptx";
+
 std::once_flag module_once;
 void *conditional_module{nullptr};
 void *set_conditional_func{nullptr};
@@ -172,6 +249,15 @@ std::once_flag mask_module_once;
 void *mask_module{nullptr};
 void *latch_while_func{nullptr};
 void *latch_branch_func{nullptr};
+
+std::once_flag bounded_module_once;
+void *bounded_module{nullptr};
+void *bounded_update_func{nullptr};
+void *bounded_probe_payload_func{nullptr};
+std::uint32_t bounded_module_error{0};
+
+std::mutex bounded_probe_mutex;
+CudaGraphBoundedProbeResult bounded_probe_result;
 
 void load_module_once() {
   auto &context = CUDAContext::get_instance();
@@ -205,6 +291,35 @@ void ensure_mask_module() {
   std::call_once(mask_module_once, load_mask_module_once);
 }
 
+void load_bounded_module_once() {
+  auto &context = CUDAContext::get_instance();
+  auto context_guard = context.get_guard();
+  auto &driver = CUDADriver::get_instance();
+  bounded_module_error = driver.module_load_data_ex.call(
+      &bounded_module, kCudaGraphBoundedUpdatePtx, 0, nullptr, nullptr);
+  if (bounded_module_error != CUDA_SUCCESS) {
+    return;
+  }
+  bounded_module_error = driver.module_get_function.call(
+      &bounded_update_func, bounded_module, "graph_update_bounded_node");
+  if (bounded_module_error != CUDA_SUCCESS) {
+    return;
+  }
+  bounded_module_error = driver.module_get_function.call(
+      &bounded_probe_payload_func, bounded_module,
+      "graph_bounded_probe_payload");
+}
+
+bool ensure_bounded_module(std::uint32_t *driver_error) {
+  std::call_once(bounded_module_once, load_bounded_module_once);
+  if (driver_error != nullptr) {
+    *driver_error = bounded_module_error;
+  }
+  return bounded_module_error == CUDA_SUCCESS && bounded_module != nullptr &&
+         bounded_update_func != nullptr &&
+         bounded_probe_payload_func != nullptr;
+}
+
 }  // namespace
 
 bool driver_graph_conditional_setter_compiled() {
@@ -215,10 +330,9 @@ void driver_graph_prepare_conditional_setter() {
   ensure_module();
 }
 
-void driver_graph_set_conditional(
-    CudaGraphConditionalControl *control,
-    std::uint64_t conditional_handle,
-    void *stream) {
+void driver_graph_set_conditional(CudaGraphConditionalControl *control,
+                                  std::uint64_t conditional_handle,
+                                  void *stream) {
   ensure_module();
   void *control_arg = control;
   void *handle_arg = &conditional_handle;
@@ -227,10 +341,9 @@ void driver_graph_set_conditional(
       {&control_arg, handle_arg}, {}, 1, 1, 0, stream);
 }
 
-void driver_graph_set_branch_conditional(
-    CudaGraphConditionalControl *control,
-    std::uint64_t conditional_handle,
-    void *stream) {
+void driver_graph_set_branch_conditional(CudaGraphConditionalControl *control,
+                                         std::uint64_t conditional_handle,
+                                         void *stream) {
   ensure_module();
   void *control_arg = control;
   void *handle_arg = &conditional_handle;
@@ -269,6 +382,265 @@ void driver_graph_latch_branch(void *selector,
       latch_branch_func, "cuda_graph_latch_branch",
       {&selector, &gate, &conditional_type, &branch_count, &default_branch}, {},
       1, 1, 0, stream);
+}
+
+bool driver_graph_bounded_update_compiled() {
+  return true;
+}
+
+bool driver_graph_prepare_bounded_update(std::uint32_t *driver_error) {
+  return ensure_bounded_module(driver_error);
+}
+
+void driver_graph_update_bounded(CudaGraphBoundedControl *control,
+                                 void *stream) {
+  std::uint32_t driver_error = CUDA_SUCCESS;
+  TI_ERROR_IF(!ensure_bounded_module(&driver_error),
+              "CUDA bounded Graph updater PTX failed to load: {}",
+              get_cuda_error_message(driver_error));
+  void *control_arg = control;
+  CUDAContext::get_instance().launch(bounded_update_func,
+                                     "cuda_graph_update_bounded_node",
+                                     {&control_arg}, {}, 1, 1, 0, stream);
+}
+
+void *driver_graph_bounded_probe_payload_function() {
+  std::uint32_t driver_error = CUDA_SUCCESS;
+  if (!ensure_bounded_module(&driver_error)) {
+    return nullptr;
+  }
+  return bounded_probe_payload_func;
+}
+
+CudaGraphBoundedProbeResult driver_graph_bounded_probe(bool run) {
+  std::lock_guard<std::mutex> lock(bounded_probe_mutex);
+  if (!run || bounded_probe_result.attempted) {
+    return bounded_probe_result;
+  }
+  auto &result = bounded_probe_result;
+  result.attempted = true;
+
+  auto &driver_without_context = CUDADriver::get_instance_without_context();
+  if (!driver_without_context.detected()) {
+    result.reason = "cuda_driver_not_loaded";
+    return result;
+  }
+  const int driver_api_version =
+      driver_without_context.get_version_major() * 1000 +
+      driver_without_context.get_version_minor() * 10;
+  if (driver_api_version < 12040) {
+    result.reason = "cuda_driver_api_below_12040";
+    return result;
+  }
+  if (!driver_without_context.launch_kernel_ex.available() ||
+      !driver_without_context.graph_upload.available() ||
+      !driver_without_context.stream_begin_capture.available() ||
+      !driver_without_context.stream_end_capture.available() ||
+      !driver_without_context.graph_instantiate_with_flags.available() ||
+      !driver_without_context.graph_launch.available() ||
+      !driver_without_context.graph_destroy.available() ||
+      !driver_without_context.graph_exec_destroy.available()) {
+    result.reason = "cuda_device_update_symbols_unavailable";
+    return result;
+  }
+
+  CUDAContext::get_instance().make_current();
+  auto &driver = CUDADriver::get_instance();
+  if (!ensure_bounded_module(&result.driver_error)) {
+    result.reason = "cuda_device_update_ptx_link_failed";
+    return result;
+  }
+  result.ptx_linked = true;
+
+  struct ProbeResources {
+    void *stream{nullptr};
+    void *control{nullptr};
+    void *visited{nullptr};
+    CUgraph graph{nullptr};
+    CUgraphExec graph_exec{nullptr};
+    bool capture_active{false};
+
+    ~ProbeResources() {
+      auto &driver = CUDADriver::get_instance();
+      if (capture_active && stream != nullptr) {
+        CUgraph aborted_graph = nullptr;
+        if (driver.stream_end_capture.call(stream, &aborted_graph) ==
+                CUDA_SUCCESS &&
+            aborted_graph != nullptr) {
+          driver.graph_destroy.call(aborted_graph);
+        }
+      }
+      if (stream != nullptr) {
+        driver.stream_synchronize.call(stream);
+      }
+      if (graph_exec != nullptr) {
+        driver.graph_exec_destroy.call(graph_exec);
+      }
+      if (graph != nullptr) {
+        driver.graph_destroy.call(graph);
+      }
+      if (visited != nullptr) {
+        driver.mem_free.call(visited);
+      }
+      if (control != nullptr) {
+        driver.mem_free.call(control);
+      }
+      if (stream != nullptr) {
+        driver.stream_destroy.call(stream);
+      }
+    }
+  } resources;
+
+  auto fail = [&](const char *reason, std::uint32_t error) {
+    result.reason = reason;
+    result.driver_error = error;
+    return result;
+  };
+
+  std::uint32_t error =
+      driver.stream_create.call(&resources.stream, CU_STREAM_NON_BLOCKING);
+  if (error != CUDA_SUCCESS) {
+    return fail("cuda_device_update_stream_create_failed", error);
+  }
+  error =
+      driver.malloc.call(&resources.control, sizeof(CudaGraphBoundedControl));
+  if (error != CUDA_SUCCESS) {
+    return fail("cuda_device_update_control_alloc_failed", error);
+  }
+  error = driver.malloc.call(&resources.visited, sizeof(std::uint32_t));
+  if (error != CUDA_SUCCESS) {
+    return fail("cuda_device_update_probe_alloc_failed", error);
+  }
+  error = driver.memsetd32.call(resources.visited, 0, 1);
+  if (error != CUDA_SUCCESS) {
+    return fail("cuda_device_update_probe_clear_failed", error);
+  }
+
+  CudaGraphBoundedControl host_control;
+  host_control.grid_x = 7;
+  host_control.enabled = 1;
+  host_control.status = 0xffffffffu;
+  error = driver.memcpy_host_to_device.call(resources.control, &host_control,
+                                            sizeof(host_control));
+  if (error != CUDA_SUCCESS) {
+    return fail("cuda_device_update_control_upload_failed", error);
+  }
+
+  error = driver.stream_begin_capture.call(resources.stream,
+                                           CU_STREAM_CAPTURE_MODE_RELAXED);
+  if (error != CUDA_SUCCESS) {
+    return fail("cuda_device_update_capture_begin_failed", error);
+  }
+  resources.capture_active = true;
+
+  void *control_arg = resources.control;
+  void *update_args[] = {&control_arg};
+  error = driver.launch_kernel.call(bounded_update_func, 1, 1, 1, 1, 1, 1, 0,
+                                    resources.stream, update_args, nullptr);
+  if (error != CUDA_SUCCESS) {
+    return fail("cuda_device_update_updater_capture_failed", error);
+  }
+
+  TaichiCudaLaunchAttribute attribute{};
+  attribute.id = TAICHI_CU_LAUNCH_ATTRIBUTE_DEVICE_UPDATABLE_KERNEL_NODE;
+  attribute.value.device_updatable_kernel_node.device_updatable = 1;
+  TaichiCudaLaunchConfig config{};
+  config.grid_dim_x = 64;
+  config.grid_dim_y = 1;
+  config.grid_dim_z = 1;
+  config.block_dim_x = 1;
+  config.block_dim_y = 1;
+  config.block_dim_z = 1;
+  config.stream = resources.stream;
+  config.attributes = &attribute;
+  config.num_attributes = 1;
+  void *visited_arg = resources.visited;
+  void *payload_args[] = {&visited_arg};
+  error = driver.launch_kernel_ex.call(&config, bounded_probe_payload_func,
+                                       payload_args, nullptr);
+  if (error != CUDA_SUCCESS) {
+    return fail("cuda_device_update_payload_capture_failed", error);
+  }
+  void *device_node = attribute.value.device_updatable_kernel_node.device_node;
+  if (device_node == nullptr) {
+    return fail("cuda_device_update_node_handle_missing",
+                CUDA_ERROR_NOT_SUPPORTED);
+  }
+
+  error = driver.stream_end_capture.call(resources.stream, &resources.graph);
+  resources.capture_active = false;
+  if (error != CUDA_SUCCESS || resources.graph == nullptr) {
+    return fail("cuda_device_update_capture_end_failed", error);
+  }
+  host_control.device_node = reinterpret_cast<std::uintptr_t>(device_node);
+  error = driver.memcpy_host_to_device.call(resources.control, &host_control,
+                                            sizeof(host_control));
+  if (error != CUDA_SUCCESS) {
+    return fail("cuda_device_update_handle_upload_failed", error);
+  }
+  error = driver.graph_instantiate_with_flags.call(&resources.graph_exec,
+                                                   resources.graph, 0);
+  if (error != CUDA_SUCCESS || resources.graph_exec == nullptr) {
+    return fail("cuda_device_update_instantiate_failed", error);
+  }
+  error = driver.graph_upload.call(resources.graph_exec, resources.stream);
+  if (error != CUDA_SUCCESS) {
+    return fail("cuda_device_update_graph_upload_failed", error);
+  }
+  result.graph_uploaded = true;
+
+  auto run_case = [&](std::uint32_t grid_x, bool enabled,
+                      std::uint32_t expected_visited,
+                      std::uint32_t *observed_visited) {
+    host_control.grid_x = grid_x;
+    host_control.enabled = enabled ? 1u : 0u;
+    host_control.status = 0xffffffffu;
+    std::uint32_t case_error = driver.memcpy_host_to_device.call(
+        resources.control, &host_control, sizeof(host_control));
+    if (case_error == CUDA_SUCCESS) {
+      case_error =
+          driver.graph_launch.call(resources.graph_exec, resources.stream);
+    }
+    if (case_error == CUDA_SUCCESS) {
+      case_error = driver.stream_synchronize.call(resources.stream);
+    }
+    if (case_error == CUDA_SUCCESS) {
+      case_error = driver.memcpy_device_to_host.call(
+          &host_control, resources.control, sizeof(host_control));
+    }
+    if (case_error == CUDA_SUCCESS) {
+      case_error = driver.memcpy_device_to_host.call(
+          observed_visited, resources.visited, sizeof(*observed_visited));
+    }
+    if (case_error != CUDA_SUCCESS) {
+      result.driver_error = case_error;
+      return false;
+    }
+    return host_control.status == CUDA_SUCCESS &&
+           *observed_visited == expected_visited;
+  };
+
+  if (!run_case(7, true, 7, &result.sparse_visited)) {
+    result.reason = "cuda_device_update_sparse_grid_mismatch";
+    return result;
+  }
+  if (!run_case(1, false, 7, &result.zero_visited)) {
+    result.reason = "cuda_device_update_zero_skip_mismatch";
+    return result;
+  }
+  result.zero_count_skipped = true;
+  if (!run_case(3, true, 10, &result.rebound_visited)) {
+    result.reason = "cuda_device_update_reenable_mismatch";
+    return result;
+  }
+  if (!run_case(64, true, 74, &result.baseline_visited)) {
+    result.reason = "cuda_device_update_baseline_grid_mismatch";
+    return result;
+  }
+  result.passed = true;
+  result.reason = "none";
+  result.driver_error = CUDA_SUCCESS;
+  return result;
 }
 
 }  // namespace taichi::lang::cuda

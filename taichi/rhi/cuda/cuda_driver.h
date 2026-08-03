@@ -149,10 +149,9 @@ class CUDADriverFunction {
     if (fault_reporter_slot_ == nullptr) {
       TI_ERROR("{}", get_error_message(err));
     }
-    BackendRuntimeError error(Arch::cuda, err, name_,
-                              get_error_message(err));
-    auto reporter = std::atomic_load_explicit(
-        fault_reporter_slot_, std::memory_order_acquire);
+    BackendRuntimeError error(Arch::cuda, err, name_, get_error_message(err));
+    auto reporter = std::atomic_load_explicit(fault_reporter_slot_,
+                                              std::memory_order_acquire);
     if (reporter) {
       reporter->report_backend_error(error, 0);
     }
@@ -195,6 +194,11 @@ class CUDADriver : protected CUDADriverBase {
   CUDADriverFunction<__VA_ARGS__> name;
 #include "taichi/rhi/cuda/cuda_driver_functions.inc.h"
 #undef PER_CUDA_FUNCTION
+
+#define PER_CUDA_OPTIONAL_FUNCTION(name, symbol_name, ...) \
+  CUDADriverFunction<__VA_ARGS__> name;
+#include "taichi/rhi/cuda/cuda_optional_driver_functions.inc.h"
+#undef PER_CUDA_OPTIONAL_FUNCTION
 
   void (*get_error_name)(uint32, const char **);
 
@@ -298,7 +302,6 @@ class CUSPARSEDriver : protected CUDADriverBase {
                      cusparseSpMVAlg_t,
                      void *>
       cpSpMVPreprocess;
-
 
   bool load_cusparse();
 

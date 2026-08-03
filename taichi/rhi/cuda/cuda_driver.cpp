@@ -193,12 +193,21 @@ CUDADriver::CUDADriver() {
 
 #define PER_CUDA_FUNCTION(name, symbol_name, ...) \
   name.set(loader_->load_function(#symbol_name)); \
-  name.set_lock(&lock_);                           \
-  name.set_lock_telemetry(&lock_telemetry_);       \
-  name.set_fault_reporter_slot(&fault_reporter_);  \
+  name.set_lock(&lock_);                          \
+  name.set_lock_telemetry(&lock_telemetry_);      \
+  name.set_fault_reporter_slot(&fault_reporter_); \
   name.set_names(#name, #symbol_name);
 #include "taichi/rhi/cuda/cuda_driver_functions.inc.h"
 #undef PER_CUDA_FUNCTION
+
+#define PER_CUDA_OPTIONAL_FUNCTION(name, symbol_name, ...) \
+  name.set(loader_->load_function_optional(#symbol_name)); \
+  name.set_lock(&lock_);                                   \
+  name.set_lock_telemetry(&lock_telemetry_);               \
+  name.set_fault_reporter_slot(&fault_reporter_);          \
+  name.set_names(#name, #symbol_name);
+#include "taichi/rhi/cuda/cuda_optional_driver_functions.inc.h"
+#undef PER_CUDA_OPTIONAL_FUNCTION
 
   // Only APIs that can block on device progress contribute backend wait time.
   // The timer starts after acquiring the driver host lock, keeping host-lock
@@ -293,15 +302,13 @@ bool CUSPARSEDriver::load_cusparse() {
   // New cuSPARSE matrix formats and operations are introduced independently
   // from the CUDA driver ABI. Probe them as optional capabilities so that an
   // older, otherwise fully usable cuSPARSE library still loads.
-  cp_get_property_.set(
-      loader_->load_function_optional("cusparseGetProperty"));
+  cp_get_property_.set(loader_->load_function_optional("cusparseGetProperty"));
   cp_get_property_.set_lock(&lock_);
   cp_get_property_.set_names("cp_get_property_", "cusparseGetProperty");
   cpSpMVPreprocess.set(
       loader_->load_function_optional("cusparseSpMV_preprocess"));
   cpSpMVPreprocess.set_lock(&lock_);
   cpSpMVPreprocess.set_names("cpSpMVPreprocess", "cusparseSpMV_preprocess");
-
 
   capabilities_ = {};
   if (cp_get_property_.available()) {
@@ -324,13 +331,11 @@ bool CUSPARSEDriver::load_cusparse() {
   cpCreateBsr.set_lock(&lock_);
   cpCreateBsr.set_names("cpCreateBsr", "cusparseCreateBsr");
   capabilities_.bsr_descriptor_available = cpCreateBsr.available();
-  capabilities_.spmv_preprocess_available =
-      cpSpMVPreprocess.available();
+  capabilities_.spmv_preprocess_available = cpSpMVPreprocess.available();
   const auto version_at_least = [&](int major, int minor, int patch) {
-    const auto actual = std::make_tuple(
-        capabilities_.library_version_major,
-        capabilities_.library_version_minor,
-        capabilities_.library_version_patch);
+    const auto actual = std::make_tuple(capabilities_.library_version_major,
+                                        capabilities_.library_version_minor,
+                                        capabilities_.library_version_patch);
     return actual >= std::make_tuple(major, minor, patch);
   };
   // Generic SpMV did not accept a BSR descriptor until CUDA Toolkit 13.0

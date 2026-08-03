@@ -484,10 +484,7 @@ typedef enum {
   CUSPARSE_INDEX_64I = 3   ///< 64-bit signed integer for matrix/vector indices
 } cusparseIndexType_t;
 
-typedef enum {
-  CUSPARSE_ORDER_COL = 1,
-  CUSPARSE_ORDER_ROW = 2
-} cusparseOrder_t;
+typedef enum { CUSPARSE_ORDER_COL = 1, CUSPARSE_ORDER_ROW = 2 } cusparseOrder_t;
 
 typedef enum {
   CUSPARSE_INDEX_BASE_ZERO = 0,
@@ -653,3 +650,57 @@ static_assert(offsetof(TaichiCudaConditionalNodeParams, context) == 24);
 static_assert(sizeof(TaichiCudaGraphNodeParams) == 256);
 static_assert(offsetof(TaichiCudaGraphNodeParams, parameters) == 16);
 static_assert(offsetof(TaichiCudaGraphNodeParams, reserved2) == 248);
+
+// Stable CUDA 12.4 extensible-launch ABI shims. Keeping these fixed-width and
+// opaque lets the ordinary runtime discover cuLaunchKernelEx dynamically
+// without taking a CUDA Toolkit dependency. CUDA 12.4 and later define the
+// launch attribute value as a 64-byte union and CUlaunchConfig as 56 bytes on
+// the supported 64-bit platforms.
+struct alignas(8) TaichiCudaDeviceUpdatableKernelNode {
+  std::int32_t device_updatable;
+  std::int32_t reserved;
+  void *device_node;
+};
+
+struct alignas(8) TaichiCudaLaunchAttributeValue {
+  union {
+    std::uint8_t pad[64];
+    TaichiCudaDeviceUpdatableKernelNode device_updatable_kernel_node;
+  };
+};
+
+struct alignas(8) TaichiCudaLaunchAttribute {
+  std::int32_t id;
+  std::int32_t reserved;
+  TaichiCudaLaunchAttributeValue value;
+};
+
+struct alignas(8) TaichiCudaLaunchConfig {
+  std::uint32_t grid_dim_x;
+  std::uint32_t grid_dim_y;
+  std::uint32_t grid_dim_z;
+  std::uint32_t block_dim_x;
+  std::uint32_t block_dim_y;
+  std::uint32_t block_dim_z;
+  std::uint32_t shared_mem_bytes;
+  std::uint32_t reserved;
+  void *stream;
+  TaichiCudaLaunchAttribute *attributes;
+  std::uint32_t num_attributes;
+  std::uint32_t reserved2;
+};
+
+constexpr std::int32_t TAICHI_CU_LAUNCH_ATTRIBUTE_DEVICE_UPDATABLE_KERNEL_NODE =
+    13;
+
+static_assert(sizeof(TaichiCudaLaunchAttributeValue) == 64);
+static_assert(sizeof(TaichiCudaDeviceUpdatableKernelNode) == 16);
+static_assert(offsetof(TaichiCudaDeviceUpdatableKernelNode, device_updatable) ==
+              0);
+static_assert(offsetof(TaichiCudaDeviceUpdatableKernelNode, device_node) == 8);
+static_assert(sizeof(TaichiCudaLaunchAttribute) == 72);
+static_assert(offsetof(TaichiCudaLaunchAttribute, value) == 8);
+static_assert(sizeof(TaichiCudaLaunchConfig) == 56);
+static_assert(offsetof(TaichiCudaLaunchConfig, stream) == 32);
+static_assert(offsetof(TaichiCudaLaunchConfig, attributes) == 40);
+static_assert(offsetof(TaichiCudaLaunchConfig, num_attributes) == 48);
