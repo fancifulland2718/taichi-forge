@@ -13,7 +13,13 @@ from taichi_forge._lib import core as _ti_core
 from taichi_forge.aot.utils import produce_injected_args_for_graph
 from taichi_forge.lang import enums, impl, kernel_impl, ops
 from taichi_forge.lang._ndarray import Ndarray, ScalarNdarray
-from taichi_forge.lang._storage_view import DenseNdarrayView, ndarray_view
+from taichi_forge.lang._storage_view import (
+    DenseNdarrayView,
+    analyze_storage_alias,
+    describe_storage,
+    ndarray_view,
+    validate_storage_owner,
+)
 from taichi_forge.lang._texture import Texture
 from taichi_forge.lang.exception import TaichiCompilationError, TaichiRuntimeError
 from taichi_forge.lang.field import ScalarField
@@ -38,6 +44,8 @@ from taichi_forge.graph._ir import (
     GraphAccess,
     NativeCallNode,
     ObservationNode,
+    ParallelBranchSummary,
+    ParallelEffectDependency,
     ResourceEffect,
     RuntimeBinding,
     SequentialRegion,
@@ -45,6 +53,7 @@ from taichi_forge.graph._ir import (
     WhileRegion,
     analyze_elementwise_fusion,
     analyze_graph_ir,
+    analyze_parallel_candidate,
     graph_ir_to_dict,
     plan_temporary_memory,
 )
@@ -1960,6 +1969,82 @@ class _ControlFlowTraceRecorder:
             schema_version=self.schema_version,
             invocations=tuple(self._entries),
         )
+
+
+@dataclass(frozen=True)
+class ParallelStorageFact:
+    resource: str
+    supported: bool
+    owner_status: str
+    failure_reason: str
+    source_kind: str
+    owner_kind: str
+    program_domain: Optional[int]
+    resource_identity: Optional[Tuple[object, ...]]
+    tree_identity: Optional[Tuple[object, ...]]
+    byte_offset: Optional[int]
+    byte_begin: Optional[int]
+    byte_end: Optional[int]
+    compact_contiguous: Optional[bool]
+    index_shape: Tuple[int, ...]
+    element_shape: Tuple[int, ...]
+    scalar_count: Optional[int]
+    record_stride: Optional[int]
+
+    def to_dict(self):
+        return self.__dict__.copy()
+
+
+@dataclass(frozen=True)
+class ParallelRuntimeAliasFact:
+    left_branch: int
+    right_branch: int
+    left_resource: str
+    right_resource: str
+    result: str
+    dependencies: Tuple[str, ...]
+
+    def to_dict(self):
+        return self.__dict__.copy()
+
+
+@dataclass(frozen=True)
+class ParallelCandidateReport:
+    """Read-only safety and memory report for a possible fork/join region."""
+
+    schema_version: int
+    analysis_only: bool
+    execution_changed: bool
+    selection_domain: str
+    branch_node_indices: Tuple[Tuple[int, ...], ...]
+    decision: str
+    safe: Optional[bool]
+    runtime_binding_provided: bool
+    runtime_generation: Optional[int]
+    backend: Optional[str]
+    branches: Tuple[ParallelBranchSummary, ...]
+    conflicts: Tuple[ParallelEffectDependency, ...]
+    unresolved_aliases: Tuple[ParallelEffectDependency, ...]
+    runtime_aliases: Tuple[ParallelRuntimeAliasFact, ...]
+    storage: Tuple[ParallelStorageFact, ...]
+    blockers: Tuple[str, ...]
+    sequential_fallback_peak_bytes: int
+    parallel_branch_temporary_bytes: int
+    parallel_peak_bytes: int
+    memory_overhead_vs_sequential: int
+    partial_output_bytes: int
+
+    def to_dict(self):
+        return {
+            **self.__dict__,
+            "branches": tuple(item.to_dict() for item in self.branches),
+            "conflicts": tuple(item.to_dict() for item in self.conflicts),
+            "unresolved_aliases": tuple(
+                item.to_dict() for item in self.unresolved_aliases
+            ),
+            "runtime_aliases": tuple(item.to_dict() for item in self.runtime_aliases),
+            "storage": tuple(item.to_dict() for item in self.storage),
+        }
 
 
 @dataclass(frozen=True)
@@ -6508,6 +6593,153 @@ def _nested_control_resource_pairs(control_nodes):
     return tuple(pairs)
 
 
+def _normalize_parallel_branch_indices(branches, child_count):
+    try:
+        normalized = tuple(tuple(branch) for branch in branches)
+    except TypeError as exc:
+        raise TaichiRuntimeError(
+            "parallel candidate branches must be an iterable of index iterables"
+        ) from exc
+    if not 2 <= len(normalized) <= 4:
+        raise TaichiRuntimeError(
+            "parallel candidate analysis requires between 2 and 4 branches"
+        )
+    flat = []
+    for branch_index, indices in enumerate(normalized):
+        if not indices:
+            raise TaichiRuntimeError(
+                f"parallel candidate branch {branch_index} must not be empty"
+            )
+        if not all(
+            isinstance(index, int) and not isinstance(index, bool)
+            for index in indices
+        ):
+            raise TaichiRuntimeError(
+                "parallel candidate node indices must be integers"
+            )
+        if tuple(sorted(indices)) != indices or tuple(
+            range(indices[0], indices[-1] + 1)
+        ) != indices:
+            raise TaichiRuntimeError(
+                f"parallel candidate branch {branch_index} must select one "
+                "ordered contiguous node range"
+            )
+        if indices[0] < 0 or indices[-1] >= child_count:
+            raise TaichiRuntimeError(
+                f"parallel candidate branch {branch_index} selects a node "
+                "outside the Graph root"
+            )
+        flat.extend(indices)
+    if len(flat) != len(set(flat)):
+        raise TaichiRuntimeError(
+            "parallel candidate branches must not select the same node twice"
+        )
+    if tuple(flat) != tuple(range(flat[0], flat[-1] + 1)):
+        raise TaichiRuntimeError(
+            "parallel candidate branches must form one ordered contiguous root range"
+        )
+    return normalized
+
+
+def _parallel_logical_root_children(root):
+    children = []
+    for child in root.children:
+        if isinstance(child, SequentialRegion):
+            children.extend(_parallel_logical_root_children(child))
+        else:
+            children.append(child)
+    return tuple(children)
+
+
+def _parallel_identity_tuple(value):
+    if value is None:
+        return None
+    result = []
+    for item in tuple(value):
+        if isinstance(item, (bool, int, str)):
+            result.append(item)
+        else:
+            result.append(str(item))
+    return tuple(result)
+
+
+def _parallel_storage_description(resource, value):
+    try:
+        description = describe_storage(value, access="readwrite")
+    except Exception as exc:
+        return (
+            ParallelStorageFact(
+                resource=resource,
+                supported=False,
+                owner_status="kUnknown",
+                failure_reason=f"{type(exc).__name__}:{exc}",
+                source_kind="",
+                owner_kind="",
+                program_domain=None,
+                resource_identity=None,
+                tree_identity=None,
+                byte_offset=None,
+                byte_begin=None,
+                byte_end=None,
+                compact_contiguous=None,
+                index_shape=(),
+                element_shape=(),
+                scalar_count=None,
+                record_stride=None,
+            ),
+            None,
+        )
+    descriptor = description.descriptor
+    if descriptor is None:
+        return (
+            ParallelStorageFact(
+                resource=resource,
+                supported=False,
+                owner_status=description.failure_reason,
+                failure_reason=description.failure_reason,
+                source_kind="",
+                owner_kind="",
+                program_domain=None,
+                resource_identity=None,
+                tree_identity=None,
+                byte_offset=None,
+                byte_begin=None,
+                byte_end=None,
+                compact_contiguous=None,
+                index_shape=(),
+                element_shape=(),
+                scalar_count=None,
+                record_stride=None,
+            ),
+            description,
+        )
+    try:
+        owner_status = validate_storage_owner(description)
+    except Exception as exc:
+        owner_status = f"{type(exc).__name__}:{exc}"
+    properties = description.properties
+    fact = ParallelStorageFact(
+        resource=resource,
+        supported=True,
+        owner_status=owner_status,
+        failure_reason="kNone",
+        source_kind=str(descriptor.source_kind),
+        owner_kind=str(descriptor.owner_kind),
+        program_domain=int(descriptor.program_domain),
+        resource_identity=_parallel_identity_tuple(descriptor.resource_identity),
+        tree_identity=_parallel_identity_tuple(descriptor.tree_identity),
+        byte_offset=int(descriptor.byte_offset),
+        byte_begin=int(properties.get("reachable_begin", descriptor.byte_offset)),
+        byte_end=int(properties.get("reachable_end", descriptor.byte_offset)),
+        compact_contiguous=bool(properties.get("compact_contiguous", False)),
+        index_shape=tuple(int(value) for value in descriptor.index_shape),
+        element_shape=tuple(int(value) for value in descriptor.element_shape),
+        scalar_count=int(properties.get("scalar_count", 0)),
+        record_stride=int(properties.get("record_stride", 0)),
+    )
+    return fact, description
+
+
 class _GraphSpec:
     def __init__(self, nodes, aot_graph_builder=None, aot_compiled_graph=None):
         source_nodes = tuple(nodes)
@@ -6747,6 +6979,153 @@ class _GraphSpec:
                 f"Unexpected graph runtime arguments: {', '.join(unexpected)}"
             )
         raise TaichiRuntimeError("; ".join(details))
+
+    def parallel_candidate_report(self, branches, args=None):
+        root_children = _parallel_logical_root_children(
+            self.pre_optimization_ir_root
+        )
+        branch_indices = _normalize_parallel_branch_indices(
+            branches, len(root_children)
+        )
+        branch_regions = tuple(
+            SequentialRegion(
+                tuple(root_children[index] for index in indices),
+                name=f"parallel_candidate_branch_{branch_index}",
+            )
+            for branch_index, indices in enumerate(branch_indices)
+        )
+        plan = analyze_parallel_candidate(branch_regions)
+        blockers = list(plan.blockers)
+        conflicts = list(plan.conflicts)
+        unresolved = list(plan.unresolved_aliases)
+        runtime_aliases = []
+        storage_facts = []
+        runtime_generation = None
+        backend = None
+
+        if args is not None:
+            self.validate_runtime_args(args, "Graph._parallel_candidate_report")
+            runtime_generation = int(impl.runtime_generation())
+            backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
+            values = dict(self.fixed_runtime_args)
+            values.update(args)
+            descriptions = {}
+
+            def storage(resource):
+                cached = descriptions.get(resource)
+                if cached is not None:
+                    return cached
+                if resource not in values:
+                    fact = ParallelStorageFact(
+                        resource=resource,
+                        supported=False,
+                        owner_status="kMissingRuntimeBinding",
+                        failure_reason="kMissingRuntimeBinding",
+                        source_kind="",
+                        owner_kind="",
+                        program_domain=None,
+                        resource_identity=None,
+                        tree_identity=None,
+                        byte_offset=None,
+                        byte_begin=None,
+                        byte_end=None,
+                        compact_contiguous=None,
+                        index_shape=(),
+                        element_shape=(),
+                        scalar_count=None,
+                        record_stride=None,
+                    )
+                    result = (fact, None)
+                else:
+                    result = _parallel_storage_description(
+                        resource, values[resource]
+                    )
+                descriptions[resource] = result
+                storage_facts.append(result[0])
+                return result
+
+            unresolved_after_binding = []
+            for dependency in unresolved:
+                left_fact, left_description = storage(dependency.left_resource)
+                right_fact, right_description = storage(dependency.right_resource)
+                alias = "kUnknown"
+                if (
+                    left_description is not None
+                    and right_description is not None
+                    and left_fact.supported
+                    and right_fact.supported
+                    and left_fact.owner_status == "kNone"
+                    and right_fact.owner_status == "kNone"
+                ):
+                    try:
+                        alias = analyze_storage_alias(
+                            left_description, right_description
+                        )
+                    except Exception:
+                        alias = "kUnknown"
+                runtime_aliases.append(
+                    ParallelRuntimeAliasFact(
+                        left_branch=dependency.left_branch,
+                        right_branch=dependency.right_branch,
+                        left_resource=dependency.left_resource,
+                        right_resource=dependency.right_resource,
+                        result=alias,
+                        dependencies=dependency.dependencies,
+                    )
+                )
+                if alias == "kProvenOverlap":
+                    conflicts.append(
+                        replace(dependency, alias="proven_overlap")
+                    )
+                elif alias != "kProvenDisjoint":
+                    unresolved_after_binding.append(
+                        replace(dependency, alias="unknown")
+                    )
+                    blockers.append(
+                        "runtime_alias_not_proven:"
+                        f"{dependency.left_resource}:"
+                        f"{dependency.right_resource}"
+                    )
+            unresolved = unresolved_after_binding
+
+        if blockers or conflicts:
+            decision = "rejected"
+            safe = False
+        elif unresolved:
+            decision = "runtime_binding_required"
+            safe = None
+        else:
+            decision = "safe"
+            safe = True
+        return ParallelCandidateReport(
+            schema_version=1,
+            analysis_only=True,
+            execution_changed=False,
+            selection_domain="pre_optimization_logical_root",
+            branch_node_indices=branch_indices,
+            decision=decision,
+            safe=safe,
+            runtime_binding_provided=args is not None,
+            runtime_generation=runtime_generation,
+            backend=backend,
+            branches=plan.branches,
+            conflicts=tuple(conflicts),
+            unresolved_aliases=tuple(unresolved),
+            runtime_aliases=tuple(runtime_aliases),
+            storage=tuple(sorted(storage_facts, key=lambda fact: fact.resource)),
+            blockers=tuple(sorted(set(blockers))),
+            sequential_fallback_peak_bytes=(
+                plan.sequential_fallback_peak_bytes
+            ),
+            parallel_branch_temporary_bytes=(
+                plan.parallel_branch_temporary_bytes
+            ),
+            parallel_peak_bytes=plan.parallel_peak_bytes,
+            memory_overhead_vs_sequential=(
+                plan.memory_overhead_vs_sequential
+            ),
+            partial_output_bytes=0,
+        )
 
     def _validate_nested_control_aliases(self, args):
         for parent_path, parent_names, child_path, child_names in (
@@ -8666,6 +9045,19 @@ class Graph:
         self._runtime_valid = True
         self._run_impl = self._instance.run_impl
         impl.get_runtime().register_runtime_object(self)
+
+    def _parallel_candidate_report(self, branches, args=None):
+        """Analyze a possible root-level fork/join without executing it.
+
+        ``branches`` contains two to four ordered, contiguous groups of root
+        node indices. Supplying ``args`` resolves storage aliases against the
+        current runtime; unknown aliases remain fail-closed. This private
+        contract is intentionally analysis-only while parallel lowering is
+        being qualified.
+        """
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            return self._spec.parallel_candidate_report(branches, args)
 
     def task_manifest(self):
         """Return immutable per-task metadata for this JIT CGraph.

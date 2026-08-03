@@ -512,6 +512,299 @@ class TemporaryMemoryPlan:
         }
 
 
+@dataclass(frozen=True)
+class ParallelEffectDependency:
+    left_branch: int
+    right_branch: int
+    left_resource: str
+    right_resource: str
+    left_access: GraphAccess
+    right_access: GraphAccess
+    alias: str
+    dependencies: Tuple[str, ...]
+
+    def to_dict(self):
+        return {
+            "left_branch": self.left_branch,
+            "right_branch": self.right_branch,
+            "left_resource": self.left_resource,
+            "right_resource": self.right_resource,
+            "left_access": self.left_access.value,
+            "right_access": self.right_access.value,
+            "alias": self.alias,
+            "dependencies": self.dependencies,
+        }
+
+
+@dataclass(frozen=True)
+class ParallelBranchSummary:
+    index: int
+    node_names: Tuple[str, ...]
+    effects: Tuple[ResourceEffect, ...]
+    temporary_peak_bytes: int
+    temporary_opaque_bytes: int
+
+    def to_dict(self):
+        return {
+            "index": self.index,
+            "node_names": self.node_names,
+            "effects": tuple(effect.to_dict() for effect in self.effects),
+            "temporary_peak_bytes": self.temporary_peak_bytes,
+            "temporary_opaque_bytes": self.temporary_opaque_bytes,
+        }
+
+
+@dataclass(frozen=True)
+class ParallelCandidatePlan:
+    branches: Tuple[ParallelBranchSummary, ...]
+    conflicts: Tuple[ParallelEffectDependency, ...]
+    unresolved_aliases: Tuple[ParallelEffectDependency, ...]
+    blockers: Tuple[str, ...]
+    sequential_fallback_peak_bytes: int
+    parallel_branch_temporary_bytes: int
+    parallel_peak_bytes: int
+    memory_overhead_vs_sequential: int
+
+    @property
+    def decision(self):
+        if self.blockers or self.conflicts:
+            return "rejected"
+        if self.unresolved_aliases:
+            return "runtime_binding_required"
+        return "safe"
+
+    @property
+    def safe(self):
+        if self.decision == "runtime_binding_required":
+            return None
+        return self.decision == "safe"
+
+    def to_dict(self):
+        return {
+            "schema_version": 1,
+            "analysis_only": True,
+            "execution_changed": False,
+            "decision": self.decision,
+            "safe": self.safe,
+            "branches": tuple(branch.to_dict() for branch in self.branches),
+            "conflicts": tuple(conflict.to_dict() for conflict in self.conflicts),
+            "unresolved_aliases": tuple(
+                dependency.to_dict() for dependency in self.unresolved_aliases
+            ),
+            "blockers": self.blockers,
+            "sequential_fallback_peak_bytes": (
+                self.sequential_fallback_peak_bytes
+            ),
+            "parallel_branch_temporary_bytes": (
+                self.parallel_branch_temporary_bytes
+            ),
+            "parallel_peak_bytes": self.parallel_peak_bytes,
+            "memory_overhead_vs_sequential": (
+                self.memory_overhead_vs_sequential
+            ),
+            "partial_output_bytes": 0,
+        }
+
+
+def _parallel_access_properties(access):
+    reads = access in (GraphAccess.READ, GraphAccess.READ_WRITE, GraphAccess.ATOMIC)
+    writes = access in (
+        GraphAccess.WRITE,
+        GraphAccess.READ_WRITE,
+        GraphAccess.ATOMIC,
+        GraphAccess.OPAQUE,
+    )
+    return reads, writes
+
+
+def _merge_parallel_access(lhs, rhs):
+    if GraphAccess.OPAQUE in (lhs, rhs):
+        return GraphAccess.OPAQUE
+    if GraphAccess.ATOMIC in (lhs, rhs):
+        return GraphAccess.ATOMIC
+    lhs_reads, lhs_writes = _parallel_access_properties(lhs)
+    rhs_reads, rhs_writes = _parallel_access_properties(rhs)
+    reads = lhs_reads or rhs_reads
+    writes = lhs_writes or rhs_writes
+    if reads and writes:
+        return GraphAccess.READ_WRITE
+    return GraphAccess.WRITE if writes else GraphAccess.READ
+
+
+def _parallel_dependency_kinds(lhs, rhs):
+    if GraphAccess.OPAQUE in (lhs, rhs):
+        return ("opaque",)
+    if GraphAccess.ATOMIC in (lhs, rhs):
+        return ("atomic_overlap",)
+    lhs_reads, lhs_writes = _parallel_access_properties(lhs)
+    rhs_reads, rhs_writes = _parallel_access_properties(rhs)
+    dependencies = []
+    if lhs_writes and rhs_reads:
+        dependencies.append("raw")
+    if lhs_reads and rhs_writes:
+        dependencies.append("war")
+    if lhs_writes and rhs_writes:
+        dependencies.append("waw")
+    return tuple(dependencies)
+
+
+def _parallel_branch_metadata(region, branch_index):
+    effects = {}
+    node_names = []
+    blockers = []
+    temporary_names = set()
+
+    def visit(node):
+        if not isinstance(node, SequentialRegion):
+            node_names.append(node.name)
+        if node.opaque:
+            blockers.append(f"branch_{branch_index}:opaque_node:{node.name}")
+        if node.synchronization:
+            blockers.append(
+                f"branch_{branch_index}:synchronization_boundary:{node.name}"
+            )
+        if isinstance(node, ObservationNode):
+            blockers.append(f"branch_{branch_index}:observation:{node.name}")
+        if node.kind in ("while_region", "if_region", "switch_region"):
+            blockers.append(
+                f"branch_{branch_index}:structured_control:{node.name}"
+            )
+        for side_effect in getattr(node, "side_effects", ()):
+            blockers.append(
+                f"branch_{branch_index}:side_effect:{node.name}:{side_effect}"
+            )
+        for effect in node.effects:
+            if effect.access == GraphAccess.OPAQUE:
+                blockers.append(
+                    f"branch_{branch_index}:opaque_effect:{effect.resource}"
+                )
+            key = (effect.resource, effect.runtime_bound)
+            previous = effects.get(key)
+            effects[key] = (
+                effect.access
+                if previous is None
+                else _merge_parallel_access(previous, effect.access)
+            )
+        for requirement in node.temporaries:
+            temporary_names.add(requirement.name)
+        for child in node.children:
+            visit(child)
+
+    visit(region)
+    temporary_plan = plan_temporary_memory(region)
+    if temporary_plan.conflicting_requirements:
+        blockers.append(
+            f"branch_{branch_index}:conflicting_temporary_requirement"
+        )
+    summary = ParallelBranchSummary(
+        index=branch_index,
+        node_names=tuple(node_names),
+        effects=tuple(
+            ResourceEffect(resource, access, runtime_bound)
+            for (resource, runtime_bound), access in sorted(effects.items())
+        ),
+        temporary_peak_bytes=temporary_plan.planned_peak_bytes,
+        temporary_opaque_bytes=temporary_plan.opaque_bytes,
+    )
+    return summary, tuple(blockers), frozenset(temporary_names)
+
+
+def analyze_parallel_candidate(branches):
+    """Conservatively analyze sibling branches without changing execution."""
+
+    branches = tuple(branches)
+    if not 2 <= len(branches) <= 4:
+        raise ValueError("parallel candidate requires between 2 and 4 branches")
+    if not all(isinstance(branch, SequentialRegion) for branch in branches):
+        raise TypeError("parallel candidate branches must be SequentialRegion values")
+
+    summaries = []
+    blockers = []
+    temporary_owners = {}
+    for branch_index, branch in enumerate(branches):
+        summary, branch_blockers, temporary_names = _parallel_branch_metadata(
+            branch, branch_index
+        )
+        summaries.append(summary)
+        blockers.extend(branch_blockers)
+        for name in temporary_names:
+            previous = temporary_owners.get(name)
+            if previous is not None:
+                blockers.append(
+                    "temporary_shared_across_branches:"
+                    f"{name}:branch_{previous}:branch_{branch_index}"
+                )
+            else:
+                temporary_owners[name] = branch_index
+
+    conflicts = []
+    unresolved = []
+    for left_index, left in enumerate(summaries):
+        for right in summaries[left_index + 1 :]:
+            for left_effect in left.effects:
+                for right_effect in right.effects:
+                    dependencies = _parallel_dependency_kinds(
+                        left_effect.access, right_effect.access
+                    )
+                    if not dependencies:
+                        continue
+                    same_resource = left_effect.resource == right_effect.resource
+                    if same_resource:
+                        conflicts.append(
+                            ParallelEffectDependency(
+                                left.index,
+                                right.index,
+                                left_effect.resource,
+                                right_effect.resource,
+                                left_effect.access,
+                                right_effect.access,
+                                "proven_overlap",
+                                dependencies,
+                            )
+                        )
+                    elif left_effect.runtime_bound or right_effect.runtime_bound:
+                        unresolved.append(
+                            ParallelEffectDependency(
+                                left.index,
+                                right.index,
+                                left_effect.resource,
+                                right_effect.resource,
+                                left_effect.access,
+                                right_effect.access,
+                                "runtime_required",
+                                dependencies,
+                            )
+                        )
+
+    sequential_region = SequentialRegion(
+        tuple(child for branch in branches for child in branch.children),
+        name="parallel_candidate_sequential_fallback",
+    )
+    sequential_plan = plan_temporary_memory(sequential_region)
+    parallel_temporary_bytes = sum(
+        branch.temporary_peak_bytes + branch.temporary_opaque_bytes
+        for branch in summaries
+    )
+    parallel_peak_bytes = parallel_temporary_bytes
+    return ParallelCandidatePlan(
+        branches=tuple(summaries),
+        conflicts=tuple(conflicts),
+        unresolved_aliases=tuple(unresolved),
+        blockers=tuple(sorted(set(blockers))),
+        sequential_fallback_peak_bytes=(
+            sequential_plan.planned_peak_bytes + sequential_plan.opaque_bytes
+        ),
+        parallel_branch_temporary_bytes=parallel_temporary_bytes,
+        parallel_peak_bytes=parallel_peak_bytes,
+        memory_overhead_vs_sequential=max(
+            0,
+            parallel_peak_bytes
+            - sequential_plan.planned_peak_bytes
+            - sequential_plan.opaque_bytes,
+        ),
+    )
+
+
 def _fusion_blocker(node):
     if not isinstance(node, DispatchNode):
         return "not_dispatch"
