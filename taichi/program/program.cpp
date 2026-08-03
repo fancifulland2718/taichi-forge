@@ -262,7 +262,7 @@ Program::RuntimeSubmissionWriteScope::~RuntimeSubmissionWriteScope() {
 Program::RuntimeSubmissionTransaction::RuntimeSubmissionTransaction(
     Program *program,
     bool gpu_timing)
-    : program_(program) {
+    : program_(program), gpu_timing_requested_(gpu_timing) {
   TI_ASSERT(program_ != nullptr);
   // The outer scope must observe tracking enabled so nested kernel/CGraph
   // launches reuse this reader instead of opening segment-local boundaries.
@@ -315,8 +315,47 @@ void Program::RuntimeSubmissionTransaction::mark_submission() noexcept {
   }
 }
 
+void Program::RuntimeSubmissionTransaction::begin_gpu_region_timing(
+    const std::string &path_id) {
+  TI_ERROR_IF(finished_, "Runtime submission transaction already finished");
+  TI_ERROR_IF(!gpu_timing_requested_,
+              "GPU region timing requires an instrumented transaction");
+  TI_ERROR_IF(path_id.empty(), "GPU region timing path must not be empty");
+  StreamGpuTiming timing;
+  if (program_->compile_config().arch == Arch::cuda) {
+    timing = RuntimeCompletion::begin_cuda_gpu_timing(
+        nullptr, program_->runtime_fault_domain_);
+  } else {
+    timing = program_->program_impl_->begin_runtime_gpu_timing();
+  }
+  gpu_region_timings_.push_back({path_id, std::move(timing)});
+  active_gpu_region_timings_.push_back(gpu_region_timings_.size() - 1);
+}
+
+void Program::RuntimeSubmissionTransaction::end_gpu_region_timing(
+    const std::string &path_id) {
+  TI_ERROR_IF(finished_, "Runtime submission transaction already finished");
+  TI_ERROR_IF(active_gpu_region_timings_.empty(),
+              "GPU region timing ended without a matching begin");
+  const std::size_t index = active_gpu_region_timings_.back();
+  auto &region = gpu_region_timings_[index];
+  TI_ERROR_IF(region.path_id != path_id,
+              "GPU region timing must end in nested stack order");
+  if (region.timing) {
+    if (program_->compile_config().arch == Arch::cuda) {
+      RuntimeCompletion::end_cuda_gpu_timing(
+          region.timing, nullptr, program_->runtime_fault_domain_);
+    } else {
+      program_->program_impl_->end_runtime_gpu_timing(region.timing);
+    }
+  }
+  active_gpu_region_timings_.pop_back();
+}
+
 RuntimeCompletion Program::RuntimeSubmissionTransaction::finish() {
   TI_ERROR_IF(finished_, "Runtime submission transaction already finished");
+  TI_ERROR_IF(!active_gpu_region_timings_.empty(),
+              "Runtime submission transaction has unfinished GPU region timing");
   if (gpu_timing_) {
     if (program_->compile_config().arch == Arch::cuda) {
       RuntimeCompletion::end_cuda_gpu_timing(
@@ -334,7 +373,8 @@ RuntimeCompletion Program::RuntimeSubmissionTransaction::finish() {
   submission_scope_.reset();
   finished_ = true;
   Program *program = std::exchange(program_, nullptr);
-  return program->record_runtime_completion(std::move(gpu_timing_));
+  return program->record_runtime_completion(
+      std::move(gpu_timing_), std::move(gpu_region_timings_));
 }
 
 std::vector<SNodeTreeDependency> Program::snapshot_snode_tree_dependencies(
@@ -7009,7 +7049,8 @@ std::size_t Program::runtime_completion_resource_count(
 }
 
 RuntimeCompletion Program::record_runtime_completion(
-    StreamGpuTiming gpu_timing) {
+    StreamGpuTiming gpu_timing,
+    std::vector<RuntimeGpuRegionTiming> gpu_region_timings) {
   ensure_runtime_submission_allowed("runtime completion recording");
   collect_ready_runtime_completions();
 
@@ -7064,14 +7105,15 @@ RuntimeCompletion Program::record_runtime_completion(
         // Toolkit-versioned runtime dependency is introduced.
         result = RuntimeCompletion::from_cuda_stream(
             runtime_completion_domain_, sequence, nullptr,
-            runtime_fault_domain_, std::move(gpu_timing));
+            runtime_fault_domain_, std::move(gpu_timing),
+            std::move(gpu_region_timings));
       } else if (compile_config().arch == Arch::vulkan) {
         // A work epoch exists, so flush() intentionally records a fence even
         // when the work came from a replay/native path outside current_cmdlist.
         result = RuntimeCompletion::from_stream_semaphore(
             Arch::vulkan, runtime_completion_domain_, sequence,
             program_impl_->flush(), runtime_fault_domain_,
-            std::move(gpu_timing));
+            std::move(gpu_timing), std::move(gpu_region_timings));
       } else {
         // F2's supported contract is CPU/CUDA/Vulkan. Other compiled backends
         // retain their legacy synchronous fallback without a fake token.

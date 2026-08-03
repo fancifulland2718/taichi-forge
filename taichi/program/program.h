@@ -189,6 +189,8 @@ class TI_DLL_EXPORT Program {
     ~RuntimeSubmissionTransaction();
 
     void mark_submission() noexcept;
+    void begin_gpu_region_timing(const std::string &path_id);
+    void end_gpu_region_timing(const std::string &path_id);
     RuntimeCompletion finish();
 
    private:
@@ -200,7 +202,10 @@ class TI_DLL_EXPORT Program {
     std::optional<RuntimeSubmissionScope> submission_scope_;
     bool submission_batch_open_{false};
     bool finished_{false};
+    bool gpu_timing_requested_{false};
     StreamGpuTiming gpu_timing_;
+    std::vector<RuntimeGpuRegionTiming> gpu_region_timings_;
+    std::vector<std::size_t> active_gpu_region_timings_;
   };
 
   uint64 *result_buffer{nullptr};  // Note that this result_buffer is used
@@ -307,7 +312,8 @@ class TI_DLL_EXPORT Program {
   // F2 internal completion API. Existing kernel calls, Graph.run(), native
   // primitives and ti.sync() retain their public return values.
   RuntimeCompletion record_runtime_completion(
-      StreamGpuTiming gpu_timing = nullptr);
+      StreamGpuTiming gpu_timing = nullptr,
+      std::vector<RuntimeGpuRegionTiming> gpu_region_timings = {});
   std::unique_ptr<RuntimeSubmissionTransaction>
   begin_runtime_submission_transaction(bool gpu_timing = false);
   TI_FORCE_INLINE void mark_runtime_submission_pending() noexcept {

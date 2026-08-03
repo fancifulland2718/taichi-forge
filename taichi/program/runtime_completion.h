@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "taichi/common/core.h"
 #include "taichi/common/logging.h"
@@ -13,6 +14,16 @@
 namespace taichi::lang {
 
 class RuntimeFaultDomain;
+
+struct RuntimeGpuRegionTiming {
+  std::string path_id;
+  StreamGpuTiming timing;
+};
+
+struct RuntimeGpuRegionTimingSnapshot {
+  std::string path_id;
+  StreamGpuTimingSnapshot timing;
+};
 
 // Type-erased owner for resources that must outlive a backend submission.
 // Program provides the concrete batch; RuntimeCompletion only controls when
@@ -44,13 +55,16 @@ class TI_DLL_EXPORT RuntimeCompletion {
       std::uint64_t sequence,
       StreamSemaphore semaphore,
       std::shared_ptr<RuntimeFaultDomain> fault_domain = nullptr,
-      StreamGpuTiming gpu_timing = nullptr);
+      StreamGpuTiming gpu_timing = nullptr,
+      std::vector<RuntimeGpuRegionTiming> gpu_region_timings = {});
   static RuntimeCompletion from_cuda_stream(std::uint64_t program_domain,
                                             std::uint64_t sequence,
                                             void *stream,
                                             std::shared_ptr<RuntimeFaultDomain>
                                                 fault_domain = nullptr,
-                                            StreamGpuTiming gpu_timing = nullptr);
+                                            StreamGpuTiming gpu_timing = nullptr,
+                                            std::vector<RuntimeGpuRegionTiming>
+                                                gpu_region_timings = {});
 
   static StreamGpuTiming begin_cuda_gpu_timing(
       void *stream,
@@ -77,6 +91,8 @@ class TI_DLL_EXPORT RuntimeCompletion {
   std::size_t retained_resource_count(std::uint32_t kind) const noexcept;
   std::string first_error_message() const;
   StreamGpuTimingSnapshot gpu_timing_snapshot() const;
+  std::vector<RuntimeGpuRegionTimingSnapshot>
+  gpu_region_timing_snapshots() const;
 
   // Internal Program hooks. Attaching is allowed exactly once while pending.
   void attach_resources(

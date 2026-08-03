@@ -284,12 +284,14 @@ struct RuntimeCompletion::State {
   State(std::unique_ptr<CompletionPrimitive> primitive,
         std::shared_ptr<RuntimeFaultDomain> fault_domain,
         std::uint64_t sequence,
-        StreamGpuTiming gpu_timing = nullptr)
+        StreamGpuTiming gpu_timing = nullptr,
+        std::vector<RuntimeGpuRegionTiming> gpu_region_timings = {})
       : status(CompletionStatus::pending),
         fault_domain(std::move(fault_domain)),
         sequence(sequence),
         primitive(std::move(primitive)),
-        gpu_timing(std::move(gpu_timing)) {
+        gpu_timing(std::move(gpu_timing)),
+        gpu_region_timings(std::move(gpu_region_timings)) {
     TI_ASSERT(this->primitive != nullptr);
   }
 
@@ -474,6 +476,36 @@ struct RuntimeCompletion::State {
     return timing->snapshot();
   }
 
+  std::vector<RuntimeGpuRegionTimingSnapshot> region_timing_snapshots() const {
+    std::vector<RuntimeGpuRegionTiming> timings;
+    CompletionStatus current;
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      current = status.load(std::memory_order_relaxed);
+      timings = gpu_region_timings;
+    }
+    std::vector<RuntimeGpuRegionTimingSnapshot> results;
+    results.reserve(timings.size());
+    for (const auto &region : timings) {
+      StreamGpuTimingSnapshot snapshot;
+      if (!region.timing) {
+        snapshot.status = "unsupported";
+        snapshot.measurement_path_changed = true;
+      } else if (current == CompletionStatus::pending) {
+        snapshot.status = "pending";
+        snapshot.measurement_path_changed = true;
+      } else if (current == CompletionStatus::failed ||
+                 current == CompletionStatus::invalidated) {
+        snapshot.status = "failed";
+        snapshot.measurement_path_changed = true;
+      } else {
+        snapshot = region.timing->snapshot();
+      }
+      results.push_back({region.path_id, std::move(snapshot)});
+    }
+    return results;
+  }
+
   void record_first_error_locked(std::exception_ptr error,
                                  CompletionStatus failure_status) {
     if (!first_error) {
@@ -508,6 +540,7 @@ struct RuntimeCompletion::State {
   std::uint64_t sequence{0};
   std::unique_ptr<CompletionPrimitive> primitive;
   StreamGpuTiming gpu_timing;
+  std::vector<RuntimeGpuRegionTiming> gpu_region_timings;
   std::shared_ptr<RuntimeCompletionResources> resources;
   std::exception_ptr first_error;
   std::string first_error_text;
@@ -542,7 +575,8 @@ RuntimeCompletion RuntimeCompletion::from_stream_semaphore(
     std::uint64_t sequence,
     StreamSemaphore semaphore,
     std::shared_ptr<RuntimeFaultDomain> fault_domain,
-    StreamGpuTiming gpu_timing) {
+    StreamGpuTiming gpu_timing,
+    std::vector<RuntimeGpuRegionTiming> gpu_region_timings) {
   if (!semaphore) {
     return completed(backend, program_domain, sequence,
                      std::move(fault_domain));
@@ -550,7 +584,8 @@ RuntimeCompletion RuntimeCompletion::from_stream_semaphore(
   auto primitive =
       std::make_unique<StreamSemaphoreCompletion>(std::move(semaphore));
   auto state = std::make_shared<State>(std::move(primitive), fault_domain,
-                                       sequence, std::move(gpu_timing));
+                                       sequence, std::move(gpu_timing),
+                                       std::move(gpu_region_timings));
   return RuntimeCompletion(backend, program_domain, sequence,
                            std::move(state), std::move(fault_domain));
 }
@@ -560,13 +595,15 @@ RuntimeCompletion RuntimeCompletion::from_cuda_stream(
     std::uint64_t sequence,
     void *stream,
     std::shared_ptr<RuntimeFaultDomain> fault_domain,
-    StreamGpuTiming gpu_timing) {
+    StreamGpuTiming gpu_timing,
+    std::vector<RuntimeGpuRegionTiming> gpu_region_timings) {
 #ifdef TI_WITH_CUDA
   try {
     auto primitive =
         std::make_unique<CudaEventCompletion>(stream, fault_domain);
     auto state = std::make_shared<State>(std::move(primitive), fault_domain,
-                                         sequence, std::move(gpu_timing));
+                                         sequence, std::move(gpu_timing),
+                                         std::move(gpu_region_timings));
     return RuntimeCompletion(
         Arch::cuda, program_domain, sequence, std::move(state),
         std::move(fault_domain));
@@ -581,6 +618,8 @@ RuntimeCompletion RuntimeCompletion::from_cuda_stream(
   (void)sequence;
   (void)stream;
   (void)fault_domain;
+  (void)gpu_timing;
+  (void)gpu_region_timings;
   TI_ERROR("CUDA runtime completion requested without CUDA support");
 #endif
 }
@@ -681,6 +720,12 @@ std::string RuntimeCompletion::first_error_message() const {
 
 StreamGpuTimingSnapshot RuntimeCompletion::gpu_timing_snapshot() const {
   return state_ ? state_->timing_snapshot() : StreamGpuTimingSnapshot{};
+}
+
+std::vector<RuntimeGpuRegionTimingSnapshot>
+RuntimeCompletion::gpu_region_timing_snapshots() const {
+  return state_ ? state_->region_timing_snapshots()
+                : std::vector<RuntimeGpuRegionTimingSnapshot>{};
 }
 
 void RuntimeCompletion::attach_resources(

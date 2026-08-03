@@ -738,6 +738,7 @@ def _structured_submission_metadata(node):
         lowering = "portable"
     return {
         "name": node.name,
+        "path_id": node.region_path,
         "backend": backend,
         "lowering": lowering,
         "max_iterations": node.max_iterations,
@@ -855,6 +856,7 @@ class _GraphStructuredTelemetryRecorder:
         self._metadata = [None] * len(self._nodes)
         self._host_started_ns = [0] * len(self._nodes)
         self._host_enqueue_ns = [0] * len(self._nodes)
+        self._gpu_timing_transaction = None
 
     @property
     def metadata(self):
@@ -868,6 +870,17 @@ class _GraphStructuredTelemetryRecorder:
         self._metadata[:] = [None] * len(self._nodes)
         self._host_started_ns[:] = [0] * len(self._nodes)
         self._host_enqueue_ns[:] = [0] * len(self._nodes)
+        self._gpu_timing_transaction = None
+
+    def attach_gpu_timing(self, transaction):
+        if self._gpu_timing_transaction is not None:
+            raise TaichiRuntimeError(
+                "Graph submission telemetry timing is already attached"
+            )
+        self._gpu_timing_transaction = transaction
+
+    def detach_gpu_timing(self):
+        self._gpu_timing_transaction = None
 
     @staticmethod
     def _control_value(context, name, role):
@@ -900,8 +913,16 @@ class _GraphStructuredTelemetryRecorder:
         self._host_started_ns[index] = time.perf_counter_ns()
         self._metadata[index] = _structured_submission_metadata(node)
         self._capture(index, node, context, 0)
+        if self._gpu_timing_transaction is not None:
+            self._gpu_timing_transaction._begin_gpu_region_timing(
+                self._metadata[index]["path_id"]
+            )
 
     def end_region(self, index, node, context):
+        if self._gpu_timing_transaction is not None:
+            self._gpu_timing_transaction._end_gpu_region_timing(
+                self._metadata[index]["path_id"]
+            )
         self._capture(index, node, context, 1)
         self._host_enqueue_ns[index] = (
             time.perf_counter_ns() - self._host_started_ns[index]
@@ -1002,6 +1023,17 @@ class _GraphStructuredTelemetryArena:
         impl.get_runtime().prog.copy_graph_observations_to_host([storage.arr], [host])
         values = host.reshape(-1)
         recorder = slot["recorder"]
+        gpu_region_timings = (
+            completion._gpu_region_timings() if completion is not None else []
+        )
+        gpu_region_timings_by_path = {}
+        for timing in gpu_region_timings:
+            path_id = str(timing["path_id"])
+            if path_id in gpu_region_timings_by_path:
+                raise TaichiRuntimeError(
+                    "Graph submission telemetry observed duplicate GPU region paths"
+                )
+            gpu_region_timings_by_path[path_id] = timing
         regions = []
         for index, metadata in enumerate(recorder.metadata):
             if metadata is None:
@@ -1037,9 +1069,22 @@ class _GraphStructuredTelemetryArena:
                 elif strategy == "coarse_conditional":
                     skipped_chunks += 1
                 offset_iterations += chunk_size
+            gpu_region = gpu_region_timings_by_path.get(
+                metadata["path_id"],
+                {
+                    "available": False,
+                    "duration_ns": 0,
+                    "exact": False,
+                    "measurement_path_changed": False,
+                    "stream_id": 0,
+                    "status": "unavailable",
+                },
+            )
+            gpu_region_available = bool(gpu_region["available"])
             regions.append(
                 GraphSubmissionRegionTelemetry(
                     name=metadata["name"],
+                    path_id=metadata["path_id"],
                     backend=metadata["backend"],
                     lowering=metadata["lowering"],
                     max_iterations=max_iterations,
@@ -1056,8 +1101,19 @@ class _GraphStructuredTelemetryArena:
                     initial_status=(initial_status if metadata["has_status"] else None),
                     final_status=(final_status if metadata["has_status"] else None),
                     host_enqueue_ns=int(recorder.host_enqueue_ns[index]),
-                    gpu_duration_ns=None,
-                    gpu_timestamp_status="unavailable",
+                    gpu_duration_ns=(
+                        int(gpu_region["duration_ns"])
+                        if gpu_region_available
+                        else None
+                    ),
+                    gpu_timestamp_exact=bool(gpu_region["exact"]),
+                    gpu_measurement_path_changed=bool(
+                        gpu_region["measurement_path_changed"]
+                    ),
+                    gpu_queue_or_stream_id=(
+                        f"{metadata['backend']}:{int(gpu_region['stream_id'])}"
+                    ),
+                    gpu_timestamp_status=str(gpu_region["status"]),
                 )
             )
         with self._lock:
@@ -1084,7 +1140,7 @@ class _GraphStructuredTelemetryArena:
         )
         gpu_available = bool(gpu_timing["available"])
         return GraphSubmissionTelemetry(
-            schema_version=2,
+            schema_version=3,
             backend=backend,
             sequence=int(slot["completion_sequence"]),
             regions=tuple(regions),
@@ -1911,6 +1967,7 @@ class GraphSubmissionRegionTelemetry:
     """One structured while region from an opt-in asynchronous submission."""
 
     name: str
+    path_id: str
     backend: str
     lowering: str
     max_iterations: int
@@ -1928,6 +1985,9 @@ class GraphSubmissionRegionTelemetry:
     final_status: Optional[int]
     host_enqueue_ns: int
     gpu_duration_ns: Optional[int]
+    gpu_timestamp_exact: bool
+    gpu_measurement_path_changed: bool
+    gpu_queue_or_stream_id: str
     gpu_timestamp_status: str
 
 
@@ -2226,7 +2286,7 @@ def structured_control_capabilities():
         compound_terminal_observation = "submission_ticket" if native else "unavailable"
         submission_ticket_region_telemetry = native
         submission_ticket_gpu_timestamps = (
-            "opt_in_whole_ticket" if native else "unavailable"
+            "opt_in_whole_ticket_and_region" if native else "unavailable"
         )
         structured_submit_reason = (
             "none" if native else "cuda_device_control_unavailable"
@@ -2278,7 +2338,9 @@ def structured_control_capabilities():
         compound_terminal_observation = "submission_ticket" if native else "unavailable"
         submission_ticket_region_telemetry = native
         submission_ticket_gpu_timestamps = (
-            "opt_in_whole_ticket_runtime_probe" if native else "unavailable"
+            "opt_in_whole_ticket_and_region_runtime_probe"
+            if native
+            else "unavailable"
         )
         submission_ticket_queue_telemetry = (
             "device_transaction_window" if native else "unavailable"
@@ -8814,14 +8876,21 @@ class Graph:
                     )
                     runtime.prog._record_runtime_graph_submission()
                     if self._contains_structured_control_value:
-                        self._instance.run_for_submission(
-                            args,
-                            (
-                                telemetry_lease.recorder
-                                if telemetry_lease is not None
-                                else None
-                            ),
+                        telemetry_recorder = (
+                            telemetry_lease.recorder
+                            if telemetry_lease is not None
+                            else None
                         )
+                        if telemetry_recorder is not None:
+                            telemetry_recorder.attach_gpu_timing(transaction)
+                        try:
+                            self._instance.run_for_submission(
+                                args,
+                                telemetry_recorder,
+                            )
+                        finally:
+                            if telemetry_recorder is not None:
+                                telemetry_recorder.detach_gpu_timing()
                         self._latest_control_flow_was_async = True
                     else:
                         self._run_impl(args)

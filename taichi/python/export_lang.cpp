@@ -684,12 +684,35 @@ void export_lang(py::module &m) {
             snapshot.driver_owned_bytes_known;
         result["status"] = snapshot.status;
         return result;
+      })
+      .def("_gpu_region_timings", [](const RuntimeCompletion &value) {
+        py::list results;
+        for (const auto &region : value.gpu_region_timing_snapshots()) {
+          py::dict result;
+          result["path_id"] = region.path_id;
+          result["available"] = region.timing.available;
+          result["duration_ns"] = region.timing.duration_ns;
+          result["exact"] = region.timing.exact;
+          result["measurement_path_changed"] =
+              region.timing.measurement_path_changed;
+          result["stream_id"] = region.timing.stream_id;
+          result["driver_owned_bytes"] = region.timing.driver_owned_bytes;
+          result["driver_owned_bytes_known"] =
+              region.timing.driver_owned_bytes_known;
+          result["status"] = region.timing.status;
+          results.append(std::move(result));
+        }
+        return results;
       });
 
   py::class_<Program::RuntimeSubmissionTransaction>(
       m, "_RuntimeSubmissionTransaction")
       .def("_mark_submission",
            &Program::RuntimeSubmissionTransaction::mark_submission)
+      .def("_begin_gpu_region_timing",
+           &Program::RuntimeSubmissionTransaction::begin_gpu_region_timing)
+      .def("_end_gpu_region_timing",
+           &Program::RuntimeSubmissionTransaction::end_gpu_region_timing)
       .def("_finish", &Program::RuntimeSubmissionTransaction::finish,
            py::call_guard<py::gil_scoped_release>());
 
