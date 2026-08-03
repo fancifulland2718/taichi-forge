@@ -983,7 +983,7 @@ class _GraphStructuredTelemetryArena:
         value_count = (
             len(self.nodes) * _GraphStructuredTelemetryRecorder._VALUES_PER_REGION
         )
-        storage = ScalarNdarray(i32, (value_count,))
+        storage = ScalarNdarray(i32, (value_count,)) if value_count else None
         slot = {
             "storage": storage,
             "recorder": _GraphStructuredTelemetryRecorder(self.nodes, storage),
@@ -995,8 +995,6 @@ class _GraphStructuredTelemetryArena:
         return slot
 
     def acquire(self):
-        if not self.nodes:
-            return None
         while True:
             with self._lock:
                 allocated = False
@@ -1025,11 +1023,16 @@ class _GraphStructuredTelemetryArena:
 
     def _read_slot(self, slot, queue, host_submit_ns, completion):
         storage = slot["storage"]
-        host = np.empty(
-            shape=storage.arr.total_shape(),
-            dtype=to_numpy_type(storage.dtype),
-        )
-        impl.get_runtime().prog.copy_graph_observations_to_host([storage.arr], [host])
+        if storage is None:
+            host = np.empty(shape=(0,), dtype=np.int32)
+        else:
+            host = np.empty(
+                shape=storage.arr.total_shape(),
+                dtype=to_numpy_type(storage.dtype),
+            )
+            impl.get_runtime().prog.copy_graph_observations_to_host(
+                [storage.arr], [host]
+            )
         values = host.reshape(-1)
         recorder = slot["recorder"]
         gpu_region_timings = (
@@ -1192,7 +1195,7 @@ class _GraphStructuredTelemetryArena:
             )
             return {
                 "materialized": bool(self._slots),
-                "capacity": self.capacity if self.nodes else 0,
+                "capacity": self.capacity if self._slots else 0,
                 "slots": len(self._slots),
                 "reserved_bytes": len(self._slots) * storage_bytes,
                 "allocations": self._allocations,
@@ -9180,15 +9183,12 @@ class Graph:
         concurrency, and automatic-differentiation rules are identical to
         ``run()``. A shared ``SubmissionPacer`` can bound backend backlog and
         fairly arbitrate complete host submissions before they enqueue work.
-        ``telemetry=True`` adds device snapshots around each structured while
-        region and exposes them through ``SubmissionTicket.telemetry()``.
+        ``telemetry=True`` adds ticket-owned GPU timing. Structured while
+        regions additionally receive device snapshots and per-region timing;
+        all results are exposed through ``SubmissionTicket.telemetry()``.
         """
         if not isinstance(telemetry, bool):
             raise TaichiRuntimeError("Graph.submit() telemetry must be a bool")
-        if telemetry and not self._contains_structured_while_value:
-            raise TaichiRuntimeError(
-                "Graph.submit() telemetry currently requires a structured while"
-            )
         if (
             self._contains_structured_control_value
             and not self._spec.supports_native_structured_submission
