@@ -1330,8 +1330,9 @@ the same execution path and returns a completion ticket.
 | `GraphBuilder.compile()` | Later changes to the builder or original `Sequential` do not modify the compiled graph. |
 | `Graph.run(args, *, trace=False)` | `args` must be a dictionary with exactly the declared keys; missing or extra keys raise `TaichiRuntimeError`. The default returns `None` and does not allocate a dynamic control-flow trace. |
 | `Graph.run(args, *, trace=True)` | Run synchronously and return an immutable `GraphControlFlowTrace`. Its ordered invocations contain a `sequence`, static `definition_path`, dynamic `invocation_path`, optional `parent_iteration`, and the invocation's while/branch report. Unlike `control_flow_stats()`, it preserves every repeated nested invocation. Tracing bypasses strict Vulkan nested replay and uses exact portable-parent execution so each invocation is observable. |
-| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait', telemetry=False)` | Uses the same exact argument, lifecycle, concurrency, and AD contract as `run()`, returns one `SubmissionTicket`, and can opt into shared admission pacing. `telemetry=True` adds per-while device snapshots; the default adds no snapshot kernels or buffers. Structured submission accepts qualified CUDA `native_required` while/if/switch regions and qualified Vulkan `native_required` while regions, including multiple ordered regions in one compound transaction. Portable control and unsupported native combinations fail explicitly. |
-| `SubmissionTicket.telemetry()` | Wait if needed and return an immutable `GraphSubmissionTelemetry` when telemetry was requested; otherwise return `None`. Region reports include terminal counters and stop positions. Nullable GPU duration fields are never inferred from host wall time. |
+| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait', telemetry=False)` | Uses the same exact argument, lifecycle, concurrency, and AD contract as `run()`, returns one `SubmissionTicket`, and can opt into shared admission pacing. `telemetry=True` adds per-while device snapshots and a lazy post-optimization pipeline definition; the default adds no snapshot kernels or buffers and does not materialize a telemetry arena or pipeline report. Structured submission accepts qualified CUDA `native_required` while/if/switch regions and qualified Vulkan `native_required` while regions, including multiple ordered regions in one compound transaction. Portable control and unsupported native combinations fail explicitly. |
+| `SubmissionTicket.telemetry()` | Wait if needed and return an immutable schema-v4 `GraphSubmissionTelemetry` when telemetry was requested; otherwise return `None`. Region reports include terminal counters and stop positions, and `pipeline` is the ticket-owned `GraphPipelineReport`. Nullable GPU duration fields are never inferred from host wall time. |
+| `SubmissionTicket.pipeline_report()` | Return the same immutable pipeline object as `ticket.telemetry().pipeline`, waiting if needed. Returns `None` when telemetry was not requested. |
 | `Graph._prewarm()` | Warm the current runtime's backend plan; this internal/advanced entry point does not change the argument contract. |
 
 Concurrent host calls on one graph queue at the complete-invocation boundary;
@@ -1374,6 +1375,8 @@ ticket.wait()
 | --- | --- |
 | `ticket.done()` | Poll this invocation without a device-wide synchronization. Returns `True` after successful completion; repeated calls are safe. A deferred backend error is raised when observed. |
 | `ticket.wait()` | Wait only for work ordered through this invocation. It does not imply a global `ti.sync()`; repeated calls are safe and return `None`. |
+| `ticket.telemetry()` | Return opt-in immutable submission telemetry after completion, or `None` for a default submission. |
+| `ticket.pipeline_report()` | Return the opt-in immutable `GraphPipelineReport`, or `None` for a default submission. |
 | `ticket.backend` | Read-only backend name for diagnostics. |
 | `ticket.sequence` | Read-only, Program-local monotonically increasing completion sequence for diagnostics; it is not a portable persistence or cross-runtime ordering key. |
 
@@ -1536,6 +1539,24 @@ slot, or do not qualify the current backend fail before submission.
 Consecutive ordinary CGraph and compatible recordable-provider segments are
 compiled as one backend region; conflicting fixed or private bindings fail
 before backend work is submitted.
+
+When submission telemetry is requested, every compiled native action also has
+an immutable `NativeActionManifest`. It contains symbolic runtime bindings,
+resource effects, temporary requirements, fixed/private binding names,
+lifetime-lease count, recordability, qualified backends, update policy, and
+synchronization domain. It never contains provider-owned storage objects,
+allocation handles, or host/device addresses. An opaque action remains
+distinct from a recordable action that was coalesced into a CGraph stage.
+
+`GraphPipelineReport` describes post-optimization execution-root stages, so its
+stage boundaries can differ from source append boundaries. `dispatch_count`
+and `physical_dispatch_count` are static compiled-definition counts, not the
+dynamic iteration count of one invocation. `declared_temporary_bytes` is the
+sum of provider declarations and is not a measured peak allocation. Existing
+structured-region timestamps are mapped to their matching stage; an ordinary
+CGraph/native stage reports `gpu_duration_ns=None` rather than attributing the
+whole-ticket duration to that stage. Whole-ticket GPU timing remains available
+on the pipeline report when the backend can provide it.
 
 Limits:
 

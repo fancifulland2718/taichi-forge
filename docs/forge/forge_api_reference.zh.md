@@ -1135,8 +1135,9 @@ GPU timestamp 时，会明确报告 `unavailable`。
 | `GraphBuilder.compile()` | 后续修改 builder 或原 `Sequential` 不改变已编译 graph。 |
 | `Graph.run(args, *, trace=False)` | `args` 必须是字典，key 与声明参数完全一致；missing/extra key 会抛 `TaichiRuntimeError`。默认返回 `None`，也不分配 dynamic control-flow trace。 |
 | `Graph.run(args, *, trace=True)` | 同步运行并返回 immutable `GraphControlFlowTrace`。其中有序 invocation 包含 `sequence`、静态 `definition_path`、动态 `invocation_path`、可选 `parent_iteration` 和本次调用的 while/branch report。与 `control_flow_stats()` 不同，它会保留每一次重复 nested invocation。trace 会绕过严格 Vulkan nested replay，改用精确 portable-parent 执行，使每次 invocation 都可观测。 |
-| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait', telemetry=False)` | 与 `run()` 使用相同的精确参数、生命周期、并发和 AD 合同，返回一个 `SubmissionTicket`，并可选择加入共享准入节奏。`telemetry=True` 为每个 while 增加 device snapshot；默认不增加 snapshot kernel 或 buffer。结构化提交接受满足资格的 CUDA `native_required` while/if/switch，以及满足资格的 Vulkan `native_required` while；后者可在一个 compound transaction 中包含多个有序 region。portable 控制与不支持的原生组合会明确失败。 |
-| `SubmissionTicket.telemetry()` | 必要时等待，并在请求遥测时返回 immutable `GraphSubmissionTelemetry`；否则返回 `None`。region 报告包含 terminal counter 与停止位置。nullable GPU duration 不会从 host wall time 推测。 |
+| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait', telemetry=False)` | 与 `run()` 使用相同的精确参数、生命周期、并发和 AD 合同，返回一个 `SubmissionTicket`，并可选择加入共享准入节奏。`telemetry=True` 为每个 while 增加 device snapshot，并保留 lazy 的优化后 pipeline definition；默认不增加 snapshot kernel/buffer，也不物化 telemetry arena 或 pipeline report。结构化提交接受满足资格的 CUDA `native_required` while/if/switch，以及满足资格的 Vulkan `native_required` while；后者可在一个 compound transaction 中包含多个有序 region。portable 控制与不支持的原生组合会明确失败。 |
+| `SubmissionTicket.telemetry()` | 必要时等待，并在请求遥测时返回 immutable schema-v4 `GraphSubmissionTelemetry`；否则返回 `None`。region 报告包含 terminal counter 与停止位置，`pipeline` 是 ticket-owned `GraphPipelineReport`。nullable GPU duration 不会从 host wall time 推测。 |
+| `SubmissionTicket.pipeline_report()` | 返回与 `ticket.telemetry().pipeline` 相同的 immutable pipeline 对象，必要时等待；未请求 telemetry 时返回 `None`。 |
 | `Graph._prewarm()` | 预热当前 runtime 的 backend plan；这是内部/高级入口，不改变 graph 参数合同。 |
 
 同一个 graph 的并发 host 调用以完整 invocation 为单位排队；不同 graph 不共享该锁。
@@ -1171,6 +1172,8 @@ ticket.wait()
 | --- | --- |
 | `ticket.done()` | 非阻塞轮询本次 invocation，不做 device-wide synchronization。成功完成后返回 `True`；可重复调用。延迟出现的后端错误会在观察到时抛出。 |
 | `ticket.wait()` | 只等待排序到本次 invocation 的工作；不等价于全局 `ti.sync()`。可重复调用并返回 `None`。 |
+| `ticket.telemetry()` | 完成后返回 opt-in immutable submission telemetry；默认提交返回 `None`。 |
+| `ticket.pipeline_report()` | 返回 opt-in immutable `GraphPipelineReport`；默认提交返回 `None`。 |
 | `ticket.backend` | 只读后端名称，仅用于诊断。 |
 | `ticket.sequence` | Program 内单调递增的只读完成序号，仅用于诊断；它不是可持久化或跨 runtime 的排序 key。 |
 
@@ -1306,6 +1309,20 @@ workspace requirement；Graph 为每个 invocation 分配有界 arena storage，
 不能绑定当前 slot 或尚未资格化当前 backend 的 provider 会在提交前明确失败。
 连续的 ordinary CGraph 与兼容 recordable-provider segment 会编译为一个 backend region；
 fixed/private binding 冲突会在提交 backend work 前明确失败。
+
+请求 submission telemetry 时，每个已编译 native action 还会拥有 immutable
+`NativeActionManifest`。它包含符号化 runtime binding、resource effect、temporary
+requirement、fixed/private binding 名、lifetime lease 数、recordability、合格 backend、
+update policy 与 synchronization domain；绝不包含 provider-owned storage 对象、allocation
+handle 或 host/device 地址。opaque action 与已经合并进 CGraph stage 的 recordable action
+仍会被明确区分。
+
+`GraphPipelineReport` 描述优化后的 execution-root stage，因此 stage 边界可能不同于源码的
+append 边界。`dispatch_count` 与 `physical_dispatch_count` 是静态编译定义计数，不是本次
+invocation 的动态迭代数。`declared_temporary_bytes` 是 provider 声明之和，不是实测 peak
+allocation。已有 structured-region timestamp 会映射到对应 stage；普通 CGraph/native
+stage 会报告 `gpu_duration_ns=None`，不会把 whole-ticket duration 伪装成该 stage 的耗时。
+backend 可提供时，pipeline report 仍会保留 whole-ticket GPU timing。
 
 局限：
 

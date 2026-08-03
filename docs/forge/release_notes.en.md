@@ -43,6 +43,24 @@ grouped under the behavior they shipped.
 
 ## Unreleased
 
+- Opt-in Graph submission telemetry now includes an immutable, ticket-owned
+  `GraphPipelineReport` for the post-optimization execution root. Each stage
+  reports its logical and physical dispatch counts, runtime argument names,
+  native-action composition, declared temporary bytes, and any existing
+  structured-region GPU timestamp. `NativeActionManifest` freezes the
+  provider's symbolic bindings, effects, temporary requirements, and
+  recordability/backend contract without exposing storage objects or device
+  addresses. Ordinary stages do not invent a per-stage duration when only a
+  whole-ticket timestamp is available. The default `telemetry=False` path does
+  not materialize the report or its telemetry arena.
+- CUDA driver-only stable radix sort now derives the 16 digit bases inside
+  each scatter block and removes the standalone digit-base kernel and
+  workspace. In a matched full-pipeline 1,048,576-item random-key A/B on an
+  RTX 5090, the qualified candidate reduced median sort time from 508.11 us to
+  454.44 us (11.8%) and p95 from 562.41 us to 498.49 us while preserving stable
+  duplicate-key ordering and bounded replay memory. These local qualification
+  figures characterize that device/workload; they are not a universal speedup
+  promise.
 - CUDA driver-only stable radix sort now stops its histogram hierarchy when
   the current level fits one 1,024-item scan tile. For a 32-bit sort whose
   first histogram level has 1,024 blocks, this removes eight redundant scan

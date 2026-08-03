@@ -316,6 +316,18 @@ logical stop positions, encoded and masked iteration slots, skipped coarse
 chunks, the queue-counter window, and host enqueue time. The default path does
 not allocate telemetry storage or enqueue these snapshot kernels.
 
+The same opt-in telemetry owns a `GraphPipelineReport` selected from the
+post-optimization execution root. It preserves coalesced CGraph/native stage
+boundaries and immutable `NativeActionManifest` values for provider-declared
+symbolic effects, bindings, temporaries, and backend eligibility. The report
+never exposes storage objects or addresses. Stage dispatch counts are static
+compiled counts; provider temporary bytes are declarations rather than an
+allocation peak. Structured-region timestamps are attached only where the
+backend already measured that region, while ordinary stages keep their duration
+unavailable and retain the whole-ticket timing separately. Calling
+`ticket.pipeline_report()` returns this same ticket-owned object. With
+`telemetry=False`, no pipeline report or telemetry arena is materialized.
+
 ### Vulkan compound structured transactions
 
 A single Vulkan submission transaction may contain multiple ordered bounded

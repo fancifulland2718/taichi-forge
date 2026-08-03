@@ -40,6 +40,18 @@
 
 ## 待发布 {#unreleased}
 
+- opt-in Graph submission telemetry 现在包含由 ticket 持有、immutable 的
+  `GraphPipelineReport`，描述优化后的 execution root。每个 stage 会报告逻辑/物理
+  dispatch 数、runtime 参数名、native-action 组成、声明的 temporary 字节，以及已有的
+  structured-region GPU timestamp。`NativeActionManifest` 会冻结 provider 的符号 binding、
+  effect、temporary requirement 与 recordability/backend 合同，但不暴露 storage 对象或
+  device 地址。只有 whole-ticket timestamp 时，普通 stage 不会虚构 per-stage duration；
+  默认 `telemetry=False` 路径不会物化该 report 或 telemetry arena。
+- CUDA driver-only stable radix sort 现在直接在每个 scatter block 中导出 16 个 digit base，
+  删除独立 digit-base kernel 与 workspace。在 RTX 5090 上对 1,048,576 项随机 key 做匹配的
+  full-pipeline A/B 时，合格候选的 median 从 508.11 us 降至 454.44 us（11.8%），p95 从
+  562.41 us 降至 498.49 us，同时保持重复 key 的稳定顺序与 replay memory 有界。这组本地
+  资格数据只刻画该设备和 workload，不是对所有场景的无条件提速承诺。
 - CUDA driver-only stable radix sort 在当前 histogram level 已能由一个 1024-item scan
   tile 完成时就终止 hierarchy。对于首层包含 1024 个 block 的 32-bit sort，每次排序会删除
   8 次冗余 scan launch 和 8 次不执行有效 uniform-add 的 launch（device kernel launch 总数
