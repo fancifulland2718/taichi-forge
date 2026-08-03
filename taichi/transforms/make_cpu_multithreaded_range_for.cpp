@@ -62,6 +62,14 @@ class MakeCPUMultithreadedRangeFor : public BasicStmtVisitor {
     if (offloaded->task_type != TaskType::range_for) {
       return;
     }
+    // Device-bounded Graph ranges publish their effective end immediately
+    // before the scheduler runs. Keep the original logical range intact so
+    // the scheduler can clamp it directly; partitioning a fixed-capacity
+    // range into CPU-thread chunks here would make the dynamic end count
+    // chunks instead of logical iterations.
+    if (offloaded->one_to_one) {
+      return;
+    }
 
     auto offloaded_body = std::make_unique<Block>();
     auto one = offloaded_body->insert(

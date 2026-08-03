@@ -3685,6 +3685,9 @@ void export_lang(py::module &m) {
            py::arg("kernel"), py::arg("args"), py::arg("extent"),
            py::arg("capacity"), py::arg("block_dim"),
            py::arg("label") = "")
+      .def("dispatch_cpu_bounded", &GraphBuilder::dispatch_cpu_bounded,
+           py::arg("kernel"), py::arg("args"), py::arg("extent"),
+           py::arg("capacity"), py::arg("label") = "")
       .def("compile", &GraphBuilder::compile)
       .def("_enable_two_map_composer",
            &GraphBuilder::enable_two_map_composer)

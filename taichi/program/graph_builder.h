@@ -61,6 +61,14 @@ class Dispatch : public Node {
     return cuda_bounded_dispatch_.has_value();
   }
 
+  bool is_cpu_bounded() const {
+    return cpu_bounded_dispatch_.has_value();
+  }
+
+  void set_cpu_bounded_dispatch(aot::CpuBoundedDispatchMetadata metadata) {
+    cpu_bounded_dispatch_ = std::move(metadata);
+  }
+
   const std::string &dispatch_label() const {
     return dispatch_label_;
   }
@@ -71,6 +79,7 @@ class Dispatch : public Node {
   std::vector<aot::Arg> symbolic_args_;
   std::optional<aot::Arg> indirect_dispatch_arg_;
   std::optional<aot::CudaBoundedDispatchMetadata> cuda_bounded_dispatch_;
+  std::optional<aot::CpuBoundedDispatchMetadata> cpu_bounded_dispatch_;
   std::string dispatch_label_;
 };
 
@@ -96,6 +105,12 @@ class Sequential : public Node {
                              std::uint32_t capacity,
                              std::uint32_t block_dim,
                              const std::string &dispatch_label = {});
+
+  void dispatch_cpu_bounded(Kernel *kernel,
+                            const std::vector<aot::Arg> &args,
+                            const aot::Arg &extent,
+                            std::uint32_t capacity,
+                            const std::string &dispatch_label = {});
 
   void compile(
       std::vector<aot::CompiledDispatch> &compiled_dispatches) override;
@@ -130,6 +145,13 @@ class GraphBuilder {
       std::uint32_t block_dim,
       const std::string &dispatch_label = {});
 
+  Node *new_cpu_bounded_dispatch_node(
+      Kernel *kernel,
+      const std::vector<aot::Arg> &args,
+      const aot::Arg &extent,
+      std::uint32_t capacity,
+      const std::string &dispatch_label = {});
+
   Sequential *new_sequential_node();
 
   void dispatch(Kernel *kernel,
@@ -147,6 +169,12 @@ class GraphBuilder {
                              std::uint32_t capacity,
                              std::uint32_t block_dim,
                              const std::string &dispatch_label = {});
+
+  void dispatch_cpu_bounded(Kernel *kernel,
+                            const std::vector<aot::Arg> &args,
+                            const aot::Arg &extent,
+                            std::uint32_t capacity,
+                            const std::string &dispatch_label = {});
 
   Sequential *seq() const;
 

@@ -26,6 +26,19 @@ static_assert(sizeof(GraphExecutionGateBinding) == 16);
 static_assert(offsetof(GraphExecutionGateBinding, gate) == 0);
 static_assert(offsetof(GraphExecutionGateBinding, expected) == 8);
 
+// Private CPU Graph binding stored immediately before RuntimeContext's
+// argument buffer. It lets a one-to-one range task derive its scheduler end
+// directly from a DeviceExtent without changing the split-runtime context ABI.
+struct CpuBoundedRangeBinding {
+  std::uintptr_t extent{0};
+  std::int32_t capacity{0};
+  std::uint32_t reserved{0};
+};
+
+static_assert(sizeof(CpuBoundedRangeBinding) == 16);
+static_assert(offsetof(CpuBoundedRangeBinding, extent) == 0);
+static_assert(offsetof(CpuBoundedRangeBinding, capacity) == 8);
+
 // "RuntimeContext" holds necessary data for kernel body execution, such as a
 // pointer to the LLVMRuntime struct, kernel arguments, and the thread id (if on
 // CPU).

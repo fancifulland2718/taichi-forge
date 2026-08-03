@@ -235,6 +235,11 @@ struct CudaBoundedDispatchMetadata {
   std::uint32_t block_dim{0};
 };
 
+struct CpuBoundedDispatchMetadata {
+  Arg extent_arg;
+  std::uint32_t capacity{0};
+};
+
 struct CompiledDispatch {
   std::string kernel_name;
   // JIT-only invocation metadata. AOT payloads remain source-compatible and
@@ -260,6 +265,8 @@ struct CompiledDispatch {
   // Vulkan indirect dispatch because its capture, replay, and capability
   // contracts are backend-specific.
   std::optional<CudaBoundedDispatchMetadata> cuda_bounded_dispatch;
+  // JIT-only CPU scheduler metadata; omitted from the public AOT schema.
+  std::optional<CpuBoundedDispatchMetadata> cpu_bounded_dispatch;
 
   TI_IO_DEF(kernel_name, symbolic_args);
 };
@@ -290,6 +297,9 @@ struct CompiledGraphRuntimeArgPlan {
 struct CompiledGraphDispatchRuntimePlan {
   bool cpu_fast_path{false};
   std::vector<CompiledGraphRuntimeArgPlan> args;
+  std::optional<std::string> bounded_extent_name;
+  std::vector<int> bounded_extent_arg_id;
+  std::uint32_t bounded_capacity{0};
 };
 
 struct CompiledGraphCudaState;

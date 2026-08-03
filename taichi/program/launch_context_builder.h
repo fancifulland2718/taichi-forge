@@ -50,7 +50,10 @@ class LaunchContextBuilder {
     storage::ResolvedDenseBinding resolved;
   };
 
-  explicit LaunchContextBuilder(CallableBase *kernel);
+  explicit LaunchContextBuilder(CallableBase *kernel,
+                                bool cpu_bounded_range = false);
+
+  void set_cpu_bounded_range(void *extent, std::int32_t capacity);
 
   LaunchContextBuilder(LaunchContextBuilder &&) = default;
   LaunchContextBuilder &operator=(LaunchContextBuilder &&) = default;
@@ -179,6 +182,7 @@ class LaunchContextBuilder {
   std::unique_ptr<char[]> arg_buffer_;
   std::unique_ptr<char[]> result_buffer_;
   const StructType *ret_type_;
+  bool has_cpu_bounded_range_binding_{false};
   std::string dispatch_label_;
 
  public:

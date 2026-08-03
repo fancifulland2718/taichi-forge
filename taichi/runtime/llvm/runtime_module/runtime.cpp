@@ -2668,6 +2668,58 @@ void cpu_parallel_range_for_cancellable(RuntimeContext *context,
                         &ctx, cpu_parallel_range_for_cancellable_task);
 }
 
+int cpu_bounded_range_end(RuntimeContext *context, int begin, int end) {
+  auto binding = (CpuBoundedRangeBinding *)(
+      (char *)context->arg_buffer - sizeof(CpuBoundedRangeBinding));
+  auto extent = (i32 *)binding->extent;
+  i32 count = extent[0];
+  if (count < 0) {
+    count = 0;
+    extent[1] = 1;
+  } else if (count > binding->capacity) {
+    count = binding->capacity;
+    extent[1] = 1;
+  }
+  extent[0] = count;
+  const std::int64_t bounded_end =
+      static_cast<std::int64_t>(begin) + static_cast<std::int64_t>(count);
+  return bounded_end < static_cast<std::int64_t>(end)
+             ? static_cast<int>(bounded_end)
+             : end;
+}
+
+void cpu_parallel_range_for_bounded(RuntimeContext *context,
+                                    int num_threads,
+                                    int begin,
+                                    int end,
+                                    int step,
+                                    int block_dim,
+                                    range_for_xlogue prologue,
+                                    RangeForTaskFunc *body,
+                                    range_for_xlogue epilogue,
+                                    std::size_t tls_size) {
+  cpu_parallel_range_for(context, num_threads, begin,
+                         cpu_bounded_range_end(context, begin, end), step,
+                         block_dim, prologue, body, epilogue, tls_size);
+}
+
+void cpu_parallel_range_for_bounded_cancellable(
+    RuntimeContext *context,
+    int num_threads,
+    int begin,
+    int end,
+    int step,
+    int block_dim,
+    range_for_xlogue prologue,
+    RangeForTaskFunc *body,
+    range_for_xlogue epilogue,
+    std::size_t tls_size) {
+  cpu_parallel_range_for_cancellable(
+      context, num_threads, begin,
+      cpu_bounded_range_end(context, begin, end), step, block_dim, prologue,
+      body, epilogue, tls_size);
+}
+
 void gpu_parallel_range_for(RuntimeContext *context,
                             int begin,
                             int end,

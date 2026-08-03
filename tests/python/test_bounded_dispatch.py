@@ -34,7 +34,9 @@ def test_dynamic_work_capabilities_separate_launch_and_iteration_semantics():
         == bounded["execution_semantics"]
     )
     assert observation["worklist_counters"]
-    assert bounded["producer_owned_launch_state"]
+    assert bounded["producer_owned_launch_state"] == (
+        arch == ti.vulkan or bounded["masked_capacity"]
+    )
     assert bounded["no_host_readback"]
     assert bounded["selected_route"] == bounded["route"]
     assert bounded["range_mapping"] in (
@@ -75,16 +77,21 @@ def test_dynamic_work_capabilities_separate_launch_and_iteration_semantics():
             iteration["execution_semantics"] == "exact_dynamic_termination"
         )
     else:
-        assert bounded["execution_semantics"] == "masked_capacity"
-        assert bounded["requested_route"] == "auto"
-        assert bounded["fallback_reason"] == (
-            "cpu_exact_scheduler_lowering_not_qualified"
-        )
+        if bounded["requested_route"] == "exact_scheduler":
+            assert bounded["execution_semantics"] == "exact_cpu_scheduler"
+            assert bounded["exact_physical_grid"]
+            assert bounded["fallback_reason"] == "none"
+        else:
+            assert bounded["execution_semantics"] == "masked_capacity"
+            assert bounded["requested_route"] == "auto"
+            assert bounded["fallback_reason"] == (
+                "cpu_exact_scheduler_lowering_not_qualified"
+            )
         assert iteration["execution_semantics"] == "portable_host_control"
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
-def test_cpu_bounded_route_selection_is_fail_closed(monkeypatch):
+def test_cpu_bounded_route_selection_is_explicit_and_fail_closed(monkeypatch):
     monkeypatch.setenv("TI_CPU_BOUNDED_DISPATCH_MODE", "masked_capacity")
     capabilities = ti.graph.bounded_dispatch_capabilities()
     assert capabilities["requested_route"] == "masked_capacity"
@@ -92,12 +99,116 @@ def test_cpu_bounded_route_selection_is_fail_closed(monkeypatch):
     assert capabilities["fallback_reason"] == "forced_masked_capacity"
 
     monkeypatch.setenv("TI_CPU_BOUNDED_DISPATCH_MODE", "exact_scheduler")
-    with pytest.raises(RuntimeError, match="exact_scheduler"):
-        ti.graph.bounded_dispatch_capabilities()
+    capabilities = ti.graph.bounded_dispatch_capabilities()
+    assert capabilities["requested_route"] == "exact_scheduler"
+    assert capabilities["selected_route"] == "exact_cpu_scheduler"
+    assert capabilities["execution_semantics"] == "exact_cpu_scheduler"
+    assert capabilities["exact_physical_grid"]
+    assert capabilities["zero_count_command_skip"]
+    assert capabilities["range_mapping"] == "cpu_scheduler"
+    assert capabilities["fallback_reason"] == "none"
 
     monkeypatch.setenv("TI_CPU_BOUNDED_DISPATCH_MODE", "invalid")
     with pytest.raises(RuntimeError, match="TI_CPU_BOUNDED_DISPATCH_MODE"):
         ti.graph.bounded_dispatch_capabilities()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_cpu_exact_bounded_dispatch_schedules_useful_range(monkeypatch):
+    monkeypatch.setenv("TI_CPU_BOUNDED_DISPATCH_MODE", "exact_scheduler")
+    capacity = 97
+
+    @ti.kernel
+    def produce(
+        requested: ti.i32,
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.device_extent_publish(extent, capacity, requested)
+
+    @ti.kernel
+    def consume(
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        visited: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in range(capacity):
+            ti.atomic_add(visited[0], 1)
+            if i < ti.device_extent_count(extent):
+                output[i] = i + 7
+
+    requested_arg = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "requested", ti.i32
+    )
+    extent_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "extent", ti.i32, ndim=1
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    visited_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "visited", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(produce, requested_arg, extent_arg)
+    handle = builder.dispatch_bounded(
+        consume,
+        extent_arg,
+        output_arg,
+        visited_arg,
+        extent=extent_arg,
+        capacity=capacity,
+    )
+    graph = builder.compile()
+    output = ti.ndarray(ti.i32, shape=capacity)
+    visited = ti.ndarray(ti.i32, shape=1)
+    extents = (ti.DeviceExtent(capacity), ti.DeviceExtent(capacity))
+
+    assert handle.capabilities.route == "exact_cpu_scheduler"
+    assert handle.capabilities.no_host_readback
+    assert handle.workspace_bytes == 0
+    payload = next(
+        task for task in graph.task_manifest() if "consume" in task.kernel_name
+    )
+    assert payload.range_mapping == "one_to_one"
+
+    def run_case(extent, requested, expected_count, overflow):
+        output.fill(-1)
+        visited.fill(0)
+        before = impl.get_runtime().prog._runtime_statistics_snapshot()
+        graph.run(
+            {
+                "requested": requested,
+                "extent": extent,
+                "output": output,
+                "visited": visited,
+            }
+        )
+        after = impl.get_runtime().prog._runtime_statistics_snapshot()
+        assert after["transfer"] == before["transfer"]
+        assert (
+            after["synchronization"]["program_syncs"]
+            == before["synchronization"]["program_syncs"]
+        )
+        expected = np.full(capacity, -1, dtype=np.int32)
+        expected[:expected_count] = np.arange(expected_count) + 7
+        np.testing.assert_array_equal(output.to_numpy(), expected)
+        assert int(visited.to_numpy()[0]) == expected_count
+        snapshot = handle.snapshot(extent)
+        assert snapshot.useful_count == expected_count
+        assert snapshot.executed_count == expected_count
+        assert snapshot.skipped_count == 0
+        assert snapshot.overflow == overflow
+
+    for requested, expected_count, overflow in (
+        (-1, 0, True),
+        (0, 0, False),
+        (1, 1, False),
+        (33, 33, False),
+        (capacity, capacity, False),
+        (capacity + 11, capacity, True),
+    ):
+        run_case(extents[0], requested, expected_count, overflow)
+    run_case(extents[1], 17, 17, False)
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
@@ -414,9 +525,12 @@ def test_graph_device_bounded_dispatch_routes_and_boundaries():
         assert snapshot.overflow == overflow
         assert snapshot.skipped_count == snapshot.executed_count - count
         if handle.capabilities.exact_grid:
-            assert snapshot.executed_count == min(
-                capacity, ((count + block_dim - 1) // block_dim) * block_dim
-            )
+            if ti.lang.impl.current_cfg().arch == ti.cpu:
+                assert snapshot.executed_count == count
+            else:
+                assert snapshot.executed_count == min(
+                    capacity, ((count + block_dim - 1) // block_dim) * block_dim
+                )
         else:
             assert snapshot.executed_count == capacity
         assert int(visited.to_numpy()[0]) == snapshot.executed_count, (
@@ -530,10 +644,14 @@ def test_graph_device_prefix_sequence_publishes_bounded_launch_state():
         snapshot = handle.snapshot(compact_extent)
         assert snapshot.useful_count == expected_values.size
         if handle.capabilities.exact_grid:
-            assert int(visited.to_numpy()[0]) == min(
-                capacity,
-                ((expected_values.size + block_dim - 1) // block_dim) * block_dim,
-            )
+            if ti.lang.impl.current_cfg().arch == ti.cpu:
+                assert int(visited.to_numpy()[0]) == expected_values.size
+            else:
+                assert int(visited.to_numpy()[0]) == min(
+                    capacity,
+                    ((expected_values.size + block_dim - 1) // block_dim)
+                    * block_dim,
+                )
         else:
             assert int(visited.to_numpy()[0]) == capacity
 

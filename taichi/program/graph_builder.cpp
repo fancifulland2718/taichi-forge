@@ -12,6 +12,7 @@ aot::CompiledDispatch Dispatch::compile_dispatch() const {
   dispatch.symbolic_args = symbolic_args_;
   dispatch.indirect_dispatch_arg = indirect_dispatch_arg_;
   dispatch.cuda_bounded_dispatch = cuda_bounded_dispatch_;
+  dispatch.cpu_bounded_dispatch = cpu_bounded_dispatch_;
   dispatch.ti_kernel = kernel_;
   dispatch.compiled_kernel = nullptr;
   const auto &compiled = kernel_->program->compile_kernel(
@@ -30,6 +31,11 @@ aot::CompiledDispatch Dispatch::compile_dispatch() const {
   TI_ERROR_IF(cuda_bounded_dispatch_.has_value() &&
                   dispatch.compiled_task_count != 1,
               "CUDA bounded Graph kernel {} must compile to exactly one task, "
+              "but compiled to {} tasks",
+              dispatch.kernel_name, dispatch.compiled_task_count);
+  TI_ERROR_IF(cpu_bounded_dispatch_.has_value() &&
+                  dispatch.compiled_task_count != 1,
+              "CPU bounded Graph kernel {} must compile to exactly one task, "
               "but compiled to {} tasks",
               dispatch.kernel_name, dispatch.compiled_task_count);
   dispatch.source_dispatches.push_back(
@@ -66,7 +72,8 @@ void Sequential::compile(
       continue;
     }
     auto compiled = dispatch->compile_dispatch();
-    if (dispatch->is_indirect() || dispatch->is_cuda_bounded()) {
+    if (dispatch->is_indirect() || dispatch->is_cuda_bounded() ||
+        dispatch->is_cpu_bounded()) {
       flush_pending();
       compiled_dispatches.push_back(std::move(compiled));
       continue;
@@ -120,6 +127,16 @@ void Sequential::dispatch_cuda_bounded(
     const std::string &dispatch_label) {
   Node *n = owning_graph_->new_cuda_bounded_dispatch_node(
       kernel, args, extent, capacity, block_dim, dispatch_label);
+  sequence_.push_back(n);
+}
+
+void Sequential::dispatch_cpu_bounded(Kernel *kernel,
+                                      const std::vector<aot::Arg> &args,
+                                      const aot::Arg &extent,
+                                      std::uint32_t capacity,
+                                      const std::string &dispatch_label) {
+  Node *n = owning_graph_->new_cpu_bounded_dispatch_node(
+      kernel, args, extent, capacity, dispatch_label);
   sequence_.push_back(n);
 }
 
@@ -194,6 +211,34 @@ Node *GraphBuilder::new_cuda_bounded_dispatch_node(
   return all_nodes_.back().get();
 }
 
+Node *GraphBuilder::new_cpu_bounded_dispatch_node(
+    Kernel *kernel,
+    const std::vector<aot::Arg> &args,
+    const aot::Arg &extent,
+    std::uint32_t capacity,
+    const std::string &dispatch_label) {
+  validate_dispatch_label(dispatch_label);
+  TI_ERROR_IF(extent.tag != aot::ArgKind::kNdarray ||
+                  extent.dtype_id != PrimitiveTypeID::i32 ||
+                  extent.field_dim != 1 || !extent.element_shape.empty(),
+              "CPU bounded Graph extent {} must be a one-dimensional "
+              "scalar i32 ndarray",
+              extent.name);
+  TI_ERROR_IF(capacity == 0 || capacity > 0x7fffffffu,
+              "CPU bounded Graph capacity is out of range");
+  TI_ERROR_IF(std::find(args.begin(), args.end(), extent) == args.end(),
+              "CPU bounded Graph extent {} must also be a payload argument",
+              extent.name);
+  for (const auto &arg : args) {
+    register_arg(arg);
+  }
+  auto dispatch = std::make_unique<Dispatch>(
+      kernel, args, std::nullopt, std::nullopt, dispatch_label);
+  dispatch->set_cpu_bounded_dispatch({extent, capacity});
+  all_nodes_.push_back(std::move(dispatch));
+  return all_nodes_.back().get();
+}
+
 void GraphBuilder::register_arg(const aot::Arg &arg) {
   if (all_args_.find(arg.name) != all_args_.end()) {
     TI_ERROR_IF(all_args_[arg.name] != arg,
@@ -245,6 +290,16 @@ void GraphBuilder::dispatch_cuda_bounded(
     const std::string &dispatch_label) {
   seq()->dispatch_cuda_bounded(kernel, args, extent, capacity, block_dim,
                                dispatch_label);
+}
+
+void GraphBuilder::dispatch_cpu_bounded(
+    Kernel *kernel,
+    const std::vector<aot::Arg> &args,
+    const aot::Arg &extent,
+    std::uint32_t capacity,
+    const std::string &dispatch_label) {
+  seq()->dispatch_cpu_bounded(kernel, args, extent, capacity,
+                              dispatch_label);
 }
 
 std::optional<aot::CompiledDispatch> GraphBuilder::try_compose_two_maps(

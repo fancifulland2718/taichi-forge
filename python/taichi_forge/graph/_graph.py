@@ -1559,9 +1559,37 @@ def _bounded_route(backend, ordered):
         device_update_ptx_linked = False
         setup_probe_passed = False
         if requested_route == "exact_scheduler":
-            raise TaichiRuntimeError(
-                "CPU bounded exact_scheduler was requested, but the exact "
-                "scheduler lowering has not passed runtime qualification"
+            return BoundedDispatchCapabilities(
+                schema_version=3,
+                backend=backend,
+                requested_route=requested_route,
+                route="exact_cpu_scheduler",
+                minimum_driver_api_version=None,
+                driver_api_version=None,
+                driver_version_eligible=True,
+                required_symbols_loaded=True,
+                device_update_ptx_linked=False,
+                setup_probe_passed=True,
+                device_known_count=True,
+                no_host_readback=True,
+                exact_grid=True,
+                execution_semantics="exact_cpu_scheduler",
+                range_mapping="cpu_scheduler",
+                masked_capacity=False,
+                zero_count_command_skip=True,
+                ordered_segments=False,
+                global_segment_order=False,
+                producer_owned_launch_state=False,
+                producer_owned_launch_state_supported=False,
+                preparation_dispatches=0,
+                baseline_capacity_grid=False,
+                capacity=0,
+                block_dim=None,
+                fallback_reason="none",
+                reason=(
+                    "CPU reads DeviceExtent from the Graph argument buffer "
+                    "and submits only the clamped scheduler range"
+                ),
             )
         reason = (
             "CPU uses the cached fixed-capacity range task and masks payload "
@@ -1730,6 +1758,8 @@ class BoundedDispatchHandle:
 
     def _execution_counts(self, useful):
         if self._capabilities.exact_grid:
+            if self.block_dim is None:
+                return useful, useful
             encoded = (
                 0
                 if useful == 0
@@ -8909,10 +8939,11 @@ class GraphBuilder:
 
         Pass either a device ``extent`` ndarray or a host scalar ``count``.
         The device payload must mask its semantic body with
-        ``device_extent_count(extent)``. Vulkan additionally trims that grid
-        through ``dispatchIndirect``; CUDA and CPU report ``masked_capacity``.
-        A host count is accepted only when compiler metadata proves it is the
-        payload's sole range domain, and is clamped before launch.
+        ``device_extent_count(extent)``. The selected backend route may also
+        trim physical work through Vulkan indirect dispatch, a CUDA
+        device-updated Graph node, or the CPU range scheduler. A host count is
+        accepted only when compiler metadata proves it is the payload's sole
+        range domain, and is clamped before launch.
         """
 
         if isinstance(capacity, bool) or not isinstance(capacity, int):
@@ -9054,6 +9085,14 @@ class GraphBuilder:
                 selected_block,
                 label,
             )
+        elif backend == "cpu" and exact_device_grid:
+            self._record_cpu_bounded_dispatch(
+                kernel_cpp,
+                unzipped_args,
+                extent,
+                capacity,
+                label,
+            )
         else:
             self._record_dispatch(kernel_cpp, unzipped_args, label)
 
@@ -9112,9 +9151,9 @@ class GraphBuilder:
                 f"ordered segmented dispatch is unavailable on backend {backend}"
             )
         ordered_route = _bounded_route(backend, True)
-        if backend == "cuda" and ordered_route.exact_grid:
+        if backend in ("cpu", "cuda") and ordered_route.exact_grid:
             raise TaichiRuntimeError(
-                "CUDA exact device-grid update does not yet support ordered "
+                f"{backend.upper()} exact bounded dispatch does not yet support ordered "
                 "segmented dispatch; select masked_capacity for this graph"
             )
         unique = next(_bounded_dispatch_ids)
@@ -9254,6 +9293,31 @@ class GraphBuilder:
             extent,
             capacity,
             block_dim,
+            label,
+        )
+        self._runtime_graph_dispatches.append((kernel_cpp, tuple(unzipped_args)))
+        self._runtime_graph_arg_names.update(_runtime_arg_names(unzipped_args))
+        self._pending_ir_nodes.append(
+            _dispatch_ir_node(
+                kernel_cpp, unzipped_args, dispatch_label=label
+            )
+        )
+        self._dispatch_count += 1
+
+    def _record_cpu_bounded_dispatch(
+        self,
+        kernel_cpp,
+        unzipped_args,
+        extent,
+        capacity,
+        label="",
+    ):
+        self._aot_graph_plan.dispatch(kernel_cpp, unzipped_args, label)
+        self._ensure_runtime_graph_builder().dispatch_cpu_bounded(
+            kernel_cpp,
+            unzipped_args,
+            extent,
+            capacity,
             label,
         )
         self._runtime_graph_dispatches.append((kernel_cpp, tuple(unzipped_args)))

@@ -23,22 +23,39 @@ inline std::vector<T> concatenate_vector(const std::vector<T> &lhs,
 }
 }  // namespace
 
-LaunchContextBuilder::LaunchContextBuilder(CallableBase *kernel)
+LaunchContextBuilder::LaunchContextBuilder(CallableBase *kernel,
+                                           bool cpu_bounded_range)
     : kernel_(kernel),
       owned_ctx_(std::make_unique<RuntimeContext>()),
       ctx_(owned_ctx_.get()),
-      arg_buffer_(std::make_unique<char[]>(kernel->args_size)),
+      arg_buffer_(std::make_unique<char[]>(
+          (cpu_bounded_range ? sizeof(CpuBoundedRangeBinding) : 0) +
+          kernel->args_size)),
       result_buffer_(std::make_unique<char[]>(kernel->ret_size)),
       ret_type_(kernel->ret_type),
+      has_cpu_bounded_range_binding_(cpu_bounded_range),
       arg_buffer_size(kernel->args_size),
       args_type(kernel->args_type),
       result_buffer_size(kernel->ret_size) {
   TI_COMPILE_PROFILER("launch_context_builder_ctor");
   ctx_->result_buffer = (uint64 *)result_buffer_.get();
-  ctx_->arg_buffer = arg_buffer_.get();
+  ctx_->arg_buffer = arg_buffer_.get() +
+                     (cpu_bounded_range ? sizeof(CpuBoundedRangeBinding) : 0);
   if (const auto *label = current_dispatch_label()) {
     dispatch_label_ = *label;
   }
+}
+
+void LaunchContextBuilder::set_cpu_bounded_range(void *extent,
+                                                 std::int32_t capacity) {
+  TI_ASSERT(has_cpu_bounded_range_binding_);
+  TI_ASSERT(extent != nullptr);
+  TI_ASSERT(capacity > 0);
+  auto *binding = reinterpret_cast<CpuBoundedRangeBinding *>(
+      ctx_->arg_buffer - sizeof(CpuBoundedRangeBinding));
+  binding->extent = reinterpret_cast<std::uintptr_t>(extent);
+  binding->capacity = capacity;
+  binding->reserved = 0;
 }
 
 void LaunchContextBuilder::append_dispatch_label(const std::string &label) {

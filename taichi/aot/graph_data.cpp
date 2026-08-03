@@ -281,6 +281,11 @@ CompiledGraphDispatchRuntimePlan build_cpu_runtime_arg_plan(
     const CompiledDispatch &dispatch) {
   CompiledGraphDispatchRuntimePlan plan;
   plan.cpu_fast_path = true;
+  if (dispatch.cpu_bounded_dispatch.has_value()) {
+    plan.bounded_extent_name =
+        dispatch.cpu_bounded_dispatch->extent_arg.name;
+    plan.bounded_capacity = dispatch.cpu_bounded_dispatch->capacity;
+  }
   plan.args.reserve(dispatch.symbolic_args.size());
   auto *args_type = dispatch.ti_kernel->args_type;
   for (int i = 0; i < dispatch.symbolic_args.size(); ++i) {
@@ -289,6 +294,10 @@ CompiledGraphDispatchRuntimePlan build_cpu_runtime_arg_plan(
     arg_plan.tag = symbolic_arg.tag;
     arg_plan.name = symbolic_arg.name;
     arg_plan.arg_id = {i};
+    if (plan.bounded_extent_name.has_value() &&
+        symbolic_arg.name == *plan.bounded_extent_name) {
+      plan.bounded_extent_arg_id = arg_plan.arg_id;
+    }
     arg_plan.arg_buffer_offset =
         args_type->get_element_offset(arg_plan.arg_id);
     arg_plan.dtype_id = get_primitive_type_id(symbolic_arg.dtype());
@@ -323,12 +332,15 @@ CompiledGraphDispatchRuntimePlan build_cpu_runtime_arg_plan(
   return plan;
 }
 
-void init_runtime_context_from_plan(
+bool init_runtime_context_from_plan(
     const CompiledGraphDispatchRuntimePlan &plan,
     const std::unordered_map<std::string, IValue> &args,
+    Program *expected_program,
     LaunchContextBuilder &ctx) {
   TI_COMPILE_PROFILER("compiled_graph_init_runtime_context");
   char *arg_buffer = ctx.get_context().arg_buffer;
+  void *bounded_extent = nullptr;
+  bool bounded_extent_uses_runtime_storage = false;
   for (const auto &arg_plan : plan.args) {
     auto found = args.find(arg_plan.name);
     TI_ERROR_IF(found == args.end(), "Missing runtime value for {}",
@@ -347,10 +359,26 @@ void init_runtime_context_from_plan(
           *ival.runtime_storage, arg_plan.name, arg_plan.dtype_id,
           arg_plan.field_dim, arg_plan.element_shape);
       ctx.set_arg_runtime_storage(arg_plan.arg_id, *ival.runtime_storage);
+      if (plan.bounded_extent_name.has_value() &&
+          arg_plan.name == *plan.bounded_extent_name) {
+        auto *arr = reinterpret_cast<Ndarray *>(ival.val);
+        TI_ERROR_IF(arr == nullptr || arr->owning_program() != expected_program,
+                    "CPU exact bounded dispatch requires a program-owned "
+                    "DeviceExtent");
+        TI_ERROR_IF(arr->get_nelement() < 2,
+                    "CPU exact bounded DeviceExtent must contain two i32 words");
+        bounded_extent_uses_runtime_storage = true;
+      }
       continue;
     }
     Ndarray *arr = reinterpret_cast<Ndarray *>(ival.val);
     TI_ERROR_IF(arr == nullptr, "Graph received a null Ndarray runtime arg");
+    if (plan.bounded_extent_name.has_value() &&
+        arg_plan.name == *plan.bounded_extent_name) {
+      TI_ERROR_IF(arr->owning_program() != expected_program,
+                  "CPU exact bounded dispatch requires a program-owned "
+                  "DeviceExtent");
+    }
     TI_ERROR_IF(arr->get_element_shape() != arg_plan.element_shape,
                 "Mismatched shape information for argument {}",
                 arg_plan.name);
@@ -367,9 +395,13 @@ void init_runtime_context_from_plan(
                 "got an ndarray with dtype={}",
                 arg_plan.name, PrimitiveType::get(arg_plan.dtype_id).to_string(),
                 arr_primitive_dtype.to_string());
-
-
     intptr_t ptr = arr->get_device_allocation_ptr_as_int();
+    if (plan.bounded_extent_name.has_value() &&
+        arg_plan.name == *plan.bounded_extent_name) {
+      TI_ERROR_IF(arr->get_nelement() < 2,
+                  "CPU exact bounded DeviceExtent must contain two i32 words");
+      bounded_extent = reinterpret_cast<void *>(ptr);
+    }
     ctx.array_ptrs[arg_plan.ndarray_data_ptr_key] = (void *)ptr;
     if (ptr != 0) {
       ctx.array_ptrs[arg_plan.ndarray_grad_ptr_key] = nullptr;
@@ -395,13 +427,25 @@ void init_runtime_context_from_plan(
     }
     ctx.array_runtime_sizes[arg_plan.arg_id] = total_size;
   }
+  if (plan.bounded_extent_name.has_value()) {
+    TI_ERROR_IF(bounded_extent == nullptr &&
+                    !bounded_extent_uses_runtime_storage,
+                "CPU exact bounded DeviceExtent is unavailable");
+    if (bounded_extent != nullptr) {
+      ctx.set_cpu_bounded_range(
+          bounded_extent, static_cast<std::int32_t>(plan.bounded_capacity));
+    }
+  }
+  return bounded_extent_uses_runtime_storage;
 }
 
 #if defined(TI_WITH_LLVM)
 bool try_launch_cached_llvm_kernel(Program *prog,
                                    const CompiledKernelData &compiled,
                                    CompiledGraphJITCachedKernel &cached,
-                                   LaunchContextBuilder &launch_ctx) {
+                                   LaunchContextBuilder &launch_ctx,
+                                   const CompiledGraphDispatchRuntimePlan *plan,
+                                   bool bounded_extent_uses_runtime_storage) {
   auto *launcher =
       dynamic_cast<LLVM::KernelLauncher *>(&prog->get_kernel_launcher());
   auto *llvm_compiled =
@@ -421,6 +465,18 @@ bool try_launch_cached_llvm_kernel(Program *prog,
   }
   if (!launch_ctx.dense_storage_ptrs.empty()) {
     prog->resolve_runtime_storage_launch_context_under_guard(launch_ctx);
+  }
+  if (bounded_extent_uses_runtime_storage) {
+    TI_ASSERT(plan != nullptr && plan->bounded_extent_name.has_value() &&
+              !plan->bounded_extent_arg_id.empty());
+    const auto &binding = launch_ctx.get_resolved_dense_storage(
+        plan->bounded_extent_arg_id);
+    auto *extent = reinterpret_cast<void *>(
+        prog->get_dense_storage_data_ptr_as_int(binding));
+    TI_ERROR_IF(extent == nullptr,
+                "CPU exact bounded DeviceExtent resolved to a null address");
+    launch_ctx.set_cpu_bounded_range(
+        extent, static_cast<std::int32_t>(plan->bounded_capacity));
   }
   if (!launch_ctx.texture_ptrs.empty()) {
     prog->resolve_texture_launch_context_under_guard(launch_ctx);
@@ -3401,20 +3457,30 @@ void CompiledGraph::jit_run_cached(
       cache.runtime_arg_plans.push_back(build_cpu_runtime_arg_plan(dispatch));
     }
   }
+  if (use_cpu_runtime_arg_plan) {
+    for (std::size_t i = 0; i < dispatches.size(); ++i) {
+      TI_ERROR_IF(dispatches[i].cpu_bounded_dispatch.has_value() &&
+                      !cache.runtime_arg_plans[i].cpu_fast_path,
+                  "CPU exact bounded dispatch requires the cached LLVM "
+                  "runtime argument path");
+    }
+  }
   const bool cache_compiled_kernel_data =
       arch_is_cpu(compile_config.arch) || compile_config.arch == Arch::cuda;
   for (std::size_t i = 0; i < dispatches.size(); ++i) {
     const auto &dispatch = dispatches[i];
     TI_ASSERT(dispatch.ti_kernel);
-    LaunchContextBuilder launch_ctx(dispatch.ti_kernel);
+    auto *prog = dispatch.ti_kernel->program;
+    LaunchContextBuilder launch_ctx(
+        dispatch.ti_kernel, dispatch.cpu_bounded_dispatch.has_value());
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
+    bool bounded_extent_uses_runtime_storage = false;
     if (use_cpu_runtime_arg_plan && cache.runtime_arg_plans[i].cpu_fast_path) {
-      init_runtime_context_from_plan(cache.runtime_arg_plans[i], args,
-                                     launch_ctx);
+      bounded_extent_uses_runtime_storage = init_runtime_context_from_plan(
+          cache.runtime_arg_plans[i], args, prog, launch_ctx);
     } else {
       init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
     }
-    auto *prog = dispatch.ti_kernel->program;
     auto &cached = cache.kernels[i];
     const CompiledKernelData *compiled_kernel_data =
         get_or_compile_cached_kernel(dispatch, compile_config, cached,
@@ -3422,10 +3488,14 @@ void CompiledGraph::jit_run_cached(
 #if defined(TI_WITH_LLVM)
     if (arch_is_cpu(compile_config.arch) &&
         try_launch_cached_llvm_kernel(prog, *compiled_kernel_data, cached,
-                                      launch_ctx)) {
+                                      launch_ctx,
+                                      &cache.runtime_arg_plans[i],
+                                      bounded_extent_uses_runtime_storage)) {
       continue;
     }
 #endif
+    TI_ERROR_IF(dispatch.cpu_bounded_dispatch.has_value(),
+                "CPU exact bounded dispatch requires the LLVM fast launcher");
     prog->launch_kernel(*compiled_kernel_data, launch_ctx);
   }
   if (resource_guard) {

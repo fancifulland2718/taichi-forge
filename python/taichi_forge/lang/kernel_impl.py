@@ -1675,9 +1675,11 @@ class Kernel:
             )
         selected = range_tasks[0].selected_block_size
         if selected is None:
-            raise TaichiRuntimeError(
-                "TaskLaunchPolicy backend did not expose a selected block size"
-            )
+            _, backend_kind = self._task_launch_backend_kind()
+            if backend_kind != "cpu" or policy.mode != "auto":
+                raise TaichiRuntimeError(
+                    "TaskLaunchPolicy backend did not expose a selected block size"
+                )
         if policy.mode == "require" and selected != policy.block_dim:
             raise TaichiRuntimeError(
                 f"TaskLaunchPolicy require(block_dim={policy.block_dim}) was not "

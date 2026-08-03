@@ -73,9 +73,16 @@ class TaskCodeGenCPU : public TaskCodeGenLLVM {
 
     auto [begin, end] = get_range_for_bounds(stmt);
 
-    const char *scheduler = compile_config.debug
-                                ? "cpu_parallel_range_for_cancellable"
-                                : "cpu_parallel_range_for";
+    const char *scheduler = nullptr;
+    if (stmt->one_to_one) {
+      scheduler = compile_config.debug
+                      ? "cpu_parallel_range_for_bounded_cancellable"
+                      : "cpu_parallel_range_for_bounded";
+    } else {
+      scheduler = compile_config.debug
+                      ? "cpu_parallel_range_for_cancellable"
+                      : "cpu_parallel_range_for";
+    }
     call(scheduler, get_arg(0),
          tlctx->get_constant(stmt->num_cpu_threads), begin, end,
          tlctx->get_constant(step), tlctx->get_constant(stmt->block_dim),
