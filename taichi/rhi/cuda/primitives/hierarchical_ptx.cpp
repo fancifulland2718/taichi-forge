@@ -89,7 +89,6 @@ struct KernelSet {
   std::array<void *, 2> radix_rank4{};
   void *radix_hist_scan{nullptr};
   void *radix_hist_uniform{nullptr};
-  void *radix_digit_bases{nullptr};
   std::array<void *, 2> radix_scatter4{};
   void *radix_gather_words{nullptr};
   void *radix_copy_words{nullptr};
@@ -283,8 +282,6 @@ void load_kernel_set_once() {
                              "radix_hist_scan");
   driver.module_get_function(&kernel_set.radix_hist_uniform,
                              kernel_set.module, "radix_hist_uniform");
-  driver.module_get_function(&kernel_set.radix_digit_bases,
-                             kernel_set.module, "radix_digit_bases");
   driver.module_get_function(&kernel_set.radix_scatter4[0], kernel_set.module,
                              "radix_scatter4_u32");
   driver.module_get_function(&kernel_set.radix_scatter4[1], kernel_set.module,
@@ -1932,8 +1929,6 @@ std::size_t driver_stable_radix_sort_strided(
         (histogram_count + kScanTileItems - 1u) / kScanTileItems;
   }
   TI_ASSERT(histogram_level_count == expected_histogram_level_count);
-  const std::size_t digit_bases_offset =
-      reserve(kRadixDigits * sizeof(std::uint32_t));
   const std::size_t keys_output_offset = reserve(checked_bytes(key_size));
   const std::size_t values_output_offset =
       has_values ? reserve(checked_bytes(value_size)) : cursor;
@@ -1951,7 +1946,6 @@ std::size_t driver_stable_radix_sort_strided(
   for (std::size_t level = 0; level < histogram_level_count; ++level) {
     histogram_levels[level] = base + histogram_offsets[level];
   }
-  void *digit_bases = base + digit_bases_offset;
   void *keys_output = base + keys_output_offset;
   void *values_output =
       has_values ? static_cast<void *>(base + values_output_offset) : nullptr;
@@ -2022,21 +2016,13 @@ std::size_t driver_stable_radix_sort_strided(
           stream);
     }
 
-    void *digit_bases_arg = digit_bases;
-    std::vector<void *> base_args{&block_histogram_arg,
-                                  &radix_block_count_arg, &digit_bases_arg};
-    CUDAContext::get_instance().launch(
-        kernel.radix_digit_bases, "cuda_driver_radix_digit_bases", base_args,
-        {}, 1, kBlockDim, 0, stream);
-
     void *indices_in_arg = indices_a;
     void *keys_out_arg = sortable_b;
     void *indices_out_arg = indices_b;
     std::vector<void *> scatter_args{
         &keys_in_arg,          &indices_in_arg,       &local_ranks_arg,
-        &block_histogram_arg, &digit_bases_arg,      &keys_out_arg,
-        &indices_out_arg,     &count_arg,             &radix_block_count_arg,
-        &bit};
+        &block_histogram_arg, &keys_out_arg,         &indices_out_arg,
+        &count_arg,           &radix_block_count_arg, &bit};
     CUDAContext::get_instance().launch(
         kernel.radix_scatter4[width_index], "cuda_driver_radix_scatter4",
         scatter_args, {}, grid, kBlockDim, 0, stream);

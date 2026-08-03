@@ -56,7 +56,6 @@ REQUIRED_ENTRIES = (
     "radix_rank4_u64",
     "radix_hist_scan",
     "radix_hist_uniform",
-    "radix_digit_bases",
     "radix_scatter4_u32",
     "radix_scatter4_u64",
     "radix_gather_words",

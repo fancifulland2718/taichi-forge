@@ -2629,36 +2629,29 @@ extern "C" __global__ void radix_hist_uniform(u32 *histogram,
   }
 }
 
-extern "C" __global__ void radix_digit_bases(const u32 *block_histogram,
-                                             u32 block_count,
-                                             u32 *digit_bases) {
-  __shared__ u32 totals[16];
-  const u32 digit = threadIdx.x;
-  if (digit < 16u) {
-    totals[digit] =
-        block_histogram[digit * block_count + block_count - 1u];
-  }
-  block_barrier();
-  if (digit < 16u) {
-    u32 base = 0u;
-    for (u32 previous = 0; previous < digit; ++previous) {
-      base += totals[previous];
-    }
-    digit_bases[digit] = base;
-  }
-}
-
 template <typename T>
 __device__ void radix_scatter4_impl(const T *keys_in,
                                     const u32 *indices_in,
                                     const u32 *local_ranks,
                                     const u32 *block_histogram,
-                                    const u32 *digit_bases,
                                     T *keys_out,
                                     u32 *indices_out,
                                     u32 n,
                                     u32 block_count,
                                     u32 shift) {
+  __shared__ u32 digit_bases[16];
+  const u32 tid = threadIdx.x;
+  if (tid < 32u) {
+    const u32 total =
+        tid < 16u
+            ? block_histogram[tid * block_count + block_count - 1u]
+            : 0u;
+    const u32 base = warp_inclusive_sum(total) - total;
+    if (tid < 16u) {
+      digit_bases[tid] = base;
+    }
+  }
+  block_barrier();
   const u32 index = blockIdx.x * blockDim.x + threadIdx.x;
   if (index >= n) {
     return;
@@ -2679,11 +2672,10 @@ __device__ void radix_scatter4_impl(const T *keys_in,
 #define DEFINE_RADIX_SCATTER4_KERNEL(NAME, TYPE)                            \
   extern "C" __global__ void NAME(                                         \
       const TYPE *keys_in, const u32 *indices_in, const u32 *local_ranks,   \
-      const u32 *block_histogram, const u32 *digit_bases, TYPE *keys_out,   \
-      u32 *indices_out, u32 n, u32 block_count, u32 shift) {                \
+      const u32 *block_histogram, TYPE *keys_out, u32 *indices_out, u32 n,  \
+      u32 block_count, u32 shift) {                                         \
     radix_scatter4_impl(keys_in, indices_in, local_ranks, block_histogram,  \
-                        digit_bases, keys_out, indices_out, n, block_count, \
-                        shift);                                             \
+                        keys_out, indices_out, n, block_count, shift);       \
   }
 
 DEFINE_RADIX_SCATTER4_KERNEL(radix_scatter4_u32, u32)
