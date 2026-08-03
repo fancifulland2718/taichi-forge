@@ -66,8 +66,11 @@ def test_dynamic_work_capabilities_separate_launch_and_iteration_semantics():
         assert bounded["minimum_driver_api_version"] == 12040
         assert not bounded["setup_probe_passed"]
         assert bounded["fallback_reason"] in (
-            "cuda_device_update_lowering_not_qualified",
             "cuda_driver_api_below_12040",
+            "cuda_device_update_symbols_unavailable",
+            "cuda_device_update_lowering_not_compiled",
+            "cuda_device_update_probe_not_run",
+            "cuda_bounded_runtime_path_not_compiled",
         )
         assert iteration["command_termination_exact"] == (
             iteration["execution_semantics"] == "exact_dynamic_termination"
@@ -113,6 +116,28 @@ def test_cuda_bounded_route_selection_is_fail_closed(monkeypatch):
     monkeypatch.setenv("TI_CUDA_BOUNDED_DISPATCH_MODE", "invalid")
     with pytest.raises(RuntimeError, match="TI_CUDA_BOUNDED_DISPATCH_MODE"):
         ti.graph.bounded_dispatch_capabilities()
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_bounded_device_update_driver_probe():
+    probe = dict(ti_core.cuda_bounded_dispatch_probe())
+    assert probe["setup_probe_attempted"]
+    if probe["driver_version_eligible"] and probe["required_symbols_loaded"]:
+        assert probe["device_update_ptx_compiled"]
+        assert probe["device_update_ptx_linked"]
+        assert probe["setup_probe_passed"], probe
+        assert probe["zero_count_command_skip_qualified"]
+        assert probe["probe_sparse_visited"] == 7
+        assert probe["probe_zero_visited"] == 7
+        assert probe["probe_rebound_visited"] == 10
+        assert probe["probe_baseline_visited"] == 74
+        assert probe["probe_reason"] == "none"
+    else:
+        assert not probe["setup_probe_passed"]
+        assert probe["probe_reason"] in (
+            "cuda_driver_api_below_12040",
+            "cuda_device_update_symbols_unavailable",
+        )
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
