@@ -34,9 +34,11 @@ from taichi_forge.types.primitive_types import i32, u32
 from taichi_forge.types.texture_type import FORMAT2TY_CH, TY_CH2FORMAT
 from taichi_forge.graph._native import (
     GraphTemporaryBuffer,
+    NativeActionManifest,
     ProviderOwnedNdarrayBinding,
     RecordableGraphAction,
     compile_native_graph_node,
+    native_action_manifest,
 )
 from taichi_forge.graph._ir import (
     DispatchNode,
@@ -959,8 +961,9 @@ class _GraphStructuredTelemetryLease:
 class _GraphStructuredTelemetryArena:
     """Bounded opt-in device snapshots for asynchronous while submissions."""
 
-    def __init__(self, nodes, capacity=None):
+    def __init__(self, nodes, pipeline_definition, capacity=None):
         self.nodes = tuple(nodes)
+        self._pipeline_definition = pipeline_definition
         self.capacity = int(
             capacity
             if capacity is not None
@@ -1150,9 +1153,17 @@ class _GraphStructuredTelemetryArena:
                 "status": "unavailable",
             }
         )
+        pipeline = _materialize_graph_pipeline_report(
+            self._pipeline_definition(),
+            backend=backend,
+            sequence=int(slot["completion_sequence"]),
+            host_submit_ns=int(host_submit_ns),
+            gpu_timing=gpu_timing,
+            gpu_region_timings=gpu_region_timings,
+        )
         gpu_available = bool(gpu_timing["available"])
         return GraphSubmissionTelemetry(
-            schema_version=3,
+            schema_version=4,
             backend=backend,
             sequence=int(slot["completion_sequence"]),
             regions=tuple(regions),
@@ -1174,6 +1185,7 @@ class _GraphStructuredTelemetryArena:
                 gpu_timing["driver_owned_bytes_known"]
             ),
             gpu_timestamp_status=str(gpu_timing["status"]),
+            pipeline=pipeline,
         )
 
     def _record_wait(self):
@@ -2093,6 +2105,61 @@ class GraphSubmissionQueueTelemetry:
 
 
 @dataclass(frozen=True)
+class GraphPipelineStageReport:
+    """One post-optimization execution stage in a ticket-owned report."""
+
+    stage_index: int
+    path_id: str
+    name: str
+    kind: str
+    region_kind: str
+    dispatch_count: int
+    physical_dispatch_count: int
+    runtime_arg_names: Tuple[str, ...]
+    source_native_count: int
+    native_action_count: int
+    recordable_native_action_count: int
+    opaque_native_action_count: int
+    native_backend_eligible: Optional[bool]
+    effect_count: int
+    declared_temporary_bytes: int
+    synchronization: bool
+    opaque: bool
+    native_actions: Tuple[NativeActionManifest, ...]
+    gpu_duration_ns: Optional[int]
+    gpu_timestamp_scope: str
+    gpu_timestamp_exact: bool
+    gpu_measurement_path_changed: bool
+    gpu_queue_or_stream_id: str
+    gpu_timestamp_status: str
+
+
+@dataclass(frozen=True)
+class GraphPipelineReport:
+    """Immutable post-optimization pipeline snapshot owned by one ticket."""
+
+    schema_version: int
+    selection_domain: str
+    backend: str
+    sequence: int
+    stage_count: int
+    dispatch_count: int
+    physical_dispatch_count: int
+    native_action_count: int
+    recordable_native_action_count: int
+    opaque_native_action_count: int
+    declared_temporary_bytes: int
+    host_submit_ns: int
+    gpu_duration_ns: Optional[int]
+    gpu_timestamp_scope: str
+    gpu_timestamp_exact: bool
+    gpu_measurement_path_changed: bool
+    gpu_queue_or_stream_id: str
+    gpu_timestamp_status: str
+    stages: Tuple[GraphPipelineStageReport, ...]
+
+
+@dataclass(frozen=True)
 class GraphSubmissionTelemetry:
     """Immutable ticket-level structured submission telemetry."""
 
@@ -2112,6 +2179,118 @@ class GraphSubmissionTelemetry:
     gpu_timestamp_resource_bytes: int
     gpu_timestamp_resource_bytes_known: bool
     gpu_timestamp_status: str
+    pipeline: GraphPipelineReport
+
+
+def _materialize_graph_pipeline_report(
+    definition,
+    *,
+    backend,
+    sequence,
+    host_submit_ns,
+    gpu_timing,
+    gpu_region_timings,
+):
+    regions = {str(item["path_id"]): item for item in gpu_region_timings}
+    stages = []
+    for item in definition:
+        actions = tuple(item["native_actions"])
+        region = regions.get(str(item["path_id"]))
+        region_available = bool(region is not None and region["available"])
+        declared_temporary_bytes = sum(
+            temporary.bytes
+            for action in actions
+            for temporary in action.temporaries
+        )
+        stages.append(
+            GraphPipelineStageReport(
+                stage_index=int(item["stage_index"]),
+                path_id=str(item["path_id"]),
+                name=str(item["name"]),
+                kind=str(item["kind"]),
+                region_kind=str(item["region_kind"]),
+                dispatch_count=int(item["dispatch_count"]),
+                physical_dispatch_count=int(item["physical_dispatch_count"]),
+                runtime_arg_names=tuple(item["runtime_arg_names"]),
+                source_native_count=int(item["source_native_count"]),
+                native_action_count=len(actions),
+                recordable_native_action_count=sum(
+                    bool(action.recordable) for action in actions
+                ),
+                opaque_native_action_count=sum(
+                    bool(action.opaque) for action in actions
+                ),
+                native_backend_eligible=(
+                    all(
+                        action.recordable and backend in action.backends
+                        for action in actions
+                    )
+                    if actions
+                    else None
+                ),
+                effect_count=sum(len(action.effects) for action in actions),
+                declared_temporary_bytes=declared_temporary_bytes,
+                synchronization=bool(item["synchronization"]),
+                opaque=bool(item["opaque"]),
+                native_actions=actions,
+                gpu_duration_ns=(
+                    int(region["duration_ns"]) if region_available else None
+                ),
+                gpu_timestamp_scope=(
+                    "structured_region" if region_available else "unavailable"
+                ),
+                gpu_timestamp_exact=(
+                    bool(region["exact"]) if region is not None else False
+                ),
+                gpu_measurement_path_changed=(
+                    bool(region["measurement_path_changed"])
+                    if region is not None
+                    else False
+                ),
+                gpu_queue_or_stream_id=(
+                    f"{backend}:{int(region['stream_id'])}"
+                    if region is not None
+                    else f"{backend}:0"
+                ),
+                gpu_timestamp_status=(
+                    str(region["status"]) if region is not None else "unavailable"
+                ),
+            )
+        )
+    gpu_available = bool(gpu_timing["available"])
+    return GraphPipelineReport(
+        schema_version=1,
+        selection_domain="post_optimization_execution_root",
+        backend=backend,
+        sequence=int(sequence),
+        stage_count=len(stages),
+        dispatch_count=sum(stage.dispatch_count for stage in stages),
+        physical_dispatch_count=sum(
+            stage.physical_dispatch_count for stage in stages
+        ),
+        native_action_count=sum(stage.native_action_count for stage in stages),
+        recordable_native_action_count=sum(
+            stage.recordable_native_action_count for stage in stages
+        ),
+        opaque_native_action_count=sum(
+            stage.opaque_native_action_count for stage in stages
+        ),
+        declared_temporary_bytes=sum(
+            stage.declared_temporary_bytes for stage in stages
+        ),
+        host_submit_ns=int(host_submit_ns),
+        gpu_duration_ns=(
+            int(gpu_timing["duration_ns"]) if gpu_available else None
+        ),
+        gpu_timestamp_scope="whole_ticket",
+        gpu_timestamp_exact=bool(gpu_timing["exact"]),
+        gpu_measurement_path_changed=bool(
+            gpu_timing["measurement_path_changed"]
+        ),
+        gpu_queue_or_stream_id=f"{backend}:{int(gpu_timing['stream_id'])}",
+        gpu_timestamp_status=str(gpu_timing["status"]),
+        stages=tuple(stages),
+    )
 
 
 _COUNTER_FIELDS = (
@@ -3219,6 +3398,7 @@ class _CompiledCGraphNode:
         region_kind="cgraph",
         fixed_runtime_args=None,
         temporary_actions=(),
+        native_action_manifests=(),
     ):
         self.compiled_graph = compiled_graph
         self.dispatch_count = dispatch_count
@@ -3235,6 +3415,15 @@ class _CompiledCGraphNode:
             {} if fixed_runtime_args is None else fixed_runtime_args
         )
         self.temporary_actions = tuple(temporary_actions)
+        self.native_action_manifests = tuple(native_action_manifests)
+        if not all(
+            isinstance(manifest, NativeActionManifest)
+            for manifest in self.native_action_manifests
+        ):
+            raise TaichiRuntimeError(
+                "CGraph native action manifests must contain "
+                "NativeActionManifest values"
+            )
         self.temporary_runtime_arg_names = frozenset().union(
             *(frozenset(action.temporary_bindings) for action in self.temporary_actions)
         )
@@ -3258,6 +3447,10 @@ class _CompiledCGraphNode:
         )
         self.lifetime_leases = tuple(lifetime_leases)
         self.source_native_count = int(source_native_count)
+        if self.source_native_count != len(self.native_action_manifests):
+            raise TaichiRuntimeError(
+                "CGraph source_native_count must match its native action manifests"
+            )
         self.region_kind = region_kind
         self.ir_node = ir_node or SequentialRegion(
             tuple(
@@ -3317,31 +3510,21 @@ class _CompiledNativeGraphNode:
 
     def __init__(self, executable):
         self.executable = executable
-        self.ir_node = getattr(
-            executable,
-            "graph_ir_node",
-            NativeCallNode(type(executable).__name__),
+        self.recordable_action = executable.recordable_action
+        self.action_manifest = native_action_manifest(
+            executable, self.recordable_action
         )
-        schema = tuple(executable.runtime_arg_schema)
-        if not all(isinstance(binding, RuntimeBinding) for binding in schema):
-            raise TaichiRuntimeError(
-                "Native Graph runtime_arg_schema must contain " "RuntimeBinding values"
-            )
+        self.native_action_manifests = (self.action_manifest,)
+        self.ir_node = executable.graph_ir_node
+        schema = self.action_manifest.runtime_bindings
         if any(not binding.required for binding in schema):
             raise TaichiRuntimeError(
                 "Optional native Graph runtime arguments are not supported"
             )
         public_runtime_arg_names = frozenset(binding.name for binding in schema)
         self.temporary_names = frozenset(
-            requirement.name for requirement in executable.temporary_requirements
+            requirement.name for requirement in self.action_manifest.temporaries
         )
-        self.recordable_action = executable.recordable_action
-        if self.recordable_action is not None and not isinstance(
-            self.recordable_action, RecordableGraphAction
-        ):
-            raise TaichiRuntimeError(
-                "Native Graph recordable_action must implement " "RecordableGraphAction"
-            )
         self.fixed_runtime_args = (
             {}
             if self.recordable_action is None
@@ -3794,6 +3977,7 @@ def _compile_plain_sequential_runtime_node(
     fixed_runtime_args = {}
     lifetime_leases = []
     source_native_count = 0
+    native_action_manifests = []
     temporary_actions = []
     for _ in range(repetitions):
         for sequence, sequence_region_kind in zip(sequences, region_kinds):
@@ -3818,6 +4002,7 @@ def _compile_plain_sequential_runtime_node(
                 fixed_runtime_args[binding_name] = value
             lifetime_leases.extend(sequence._lifetime_leases)
             source_native_count += sequence._source_native_count
+            native_action_manifests.extend(sequence._native_action_manifests)
             temporary_actions.extend(sequence._temporary_actions)
     return _CompiledCGraphNode(
         builder.compile(),
@@ -3830,6 +4015,7 @@ def _compile_plain_sequential_runtime_node(
         region_kind=region_kind,
         fixed_runtime_args=fixed_runtime_args,
         temporary_actions=_deduplicate_temporary_actions(temporary_actions),
+        native_action_manifests=native_action_manifests,
     )
 
 
@@ -3894,6 +4080,15 @@ class _CompiledSequentialRegionNode:
         self.source_native_count = sum(
             getattr(node, "source_native_count", 0) for node in self.nodes
         )
+        self.native_action_manifests = tuple(
+            manifest
+            for node in self.nodes
+            for manifest in _native_action_manifests_for_node(node)
+        )
+        if self.source_native_count != len(self.native_action_manifests):
+            raise TaichiRuntimeError(
+                "Structured sequence native count must match its action manifests"
+            )
         self.composer_applied_groups = sum(
             getattr(node, "composer_applied_groups", 0) for node in self.nodes
         )
@@ -6461,6 +6656,87 @@ def _merge_temporary_actions(nodes):
     )
 
 
+def _native_action_manifests_for_node(node):
+    direct = getattr(node, "native_action_manifests", None)
+    if direct is not None:
+        manifests = tuple(direct)
+    else:
+        manifests = tuple(
+            manifest
+            for _, sequence in getattr(node, "_definition_regions", ())
+            for manifest in getattr(sequence, "_native_action_manifests", ())
+        )
+    if not all(isinstance(item, NativeActionManifest) for item in manifests):
+        raise TaichiRuntimeError(
+            "Graph native action manifests must contain NativeActionManifest values"
+        )
+    return manifests
+
+
+def _ir_contains_flag(node, flag):
+    return bool(getattr(node, flag, False)) or any(
+        _ir_contains_flag(child, flag) for child in getattr(node, "children", ())
+    )
+
+
+def _graph_pipeline_definition(nodes):
+    stages = []
+    for index, node in enumerate(nodes):
+        manifests = _native_action_manifests_for_node(node)
+        source_native_count = int(getattr(node, "source_native_count", 0))
+        if source_native_count != len(manifests):
+            raise TaichiRuntimeError(
+                "Graph pipeline native count must match its action manifests"
+            )
+        ir_node = node.ir_node
+        if isinstance(node, _CompiledWhileGraphNode):
+            kind = "while"
+        elif isinstance(node, _CompiledIfGraphNode):
+            kind = "if"
+        elif isinstance(node, _CompiledSwitchGraphNode):
+            kind = "switch"
+        elif isinstance(node, _CompiledCGraphNode):
+            kind = "cgraph"
+        elif isinstance(node, _CompiledNativeGraphNode):
+            kind = "native"
+        elif isinstance(node, _CompiledObservationGraphNode):
+            kind = "observation"
+        else:
+            kind = str(getattr(ir_node, "kind", type(node).__name__))
+        path_id = (
+            str(node.region_path)
+            if _is_structured_control_node(node)
+            else f"root/{index}"
+        )
+        name = str(
+            getattr(node, "name", getattr(ir_node, "name", f"stage_{index}"))
+        )
+        dispatch_count = int(getattr(node, "dispatch_count", 0))
+        stages.append(
+            {
+                "stage_index": index,
+                "path_id": path_id,
+                "name": name,
+                "kind": kind,
+                "region_kind": str(getattr(node, "region_kind", kind)),
+                "dispatch_count": dispatch_count,
+                "physical_dispatch_count": int(
+                    getattr(node, "physical_dispatch_count", dispatch_count)
+                ),
+                "runtime_arg_names": tuple(
+                    sorted(getattr(node, "runtime_arg_names", ()))
+                ),
+                "source_native_count": source_native_count,
+                "native_actions": manifests,
+                "synchronization": _ir_contains_flag(
+                    ir_node, "synchronization"
+                ),
+                "opaque": _ir_contains_flag(ir_node, "opaque"),
+            }
+        )
+    return tuple(stages)
+
+
 def _lower_mixed_backend_regions(nodes):
     backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
     nodes = tuple(nodes)
@@ -6499,6 +6775,7 @@ def _lower_mixed_backend_regions(nodes):
         ir_children = []
         lifetime_leases = []
         region_native_count = 0
+        native_action_manifests = []
         temporary_actions = []
         for node, dispatches in region:
             for kernel, args in dispatches:
@@ -6518,6 +6795,9 @@ def _lower_mixed_backend_regions(nodes):
             lifetime_leases.extend(getattr(node, "lifetime_leases", ()))
             temporary_actions.extend(getattr(node, "temporary_actions", ()))
             region_native_count += getattr(node, "source_native_count", 0)
+            native_action_manifests.extend(
+                _native_action_manifests_for_node(node)
+            )
 
         lowered.append(
             _CompiledCGraphNode(
@@ -6540,6 +6820,7 @@ def _lower_mixed_backend_regions(nodes):
                 ),
                 fixed_runtime_args=fixed_runtime_args,
                 temporary_actions=_deduplicate_temporary_actions(temporary_actions),
+                native_action_manifests=native_action_manifests,
             )
         )
         mixed_region_count += 1
@@ -6758,6 +7039,7 @@ class _GraphSpec:
             self.pre_optimization_ir_root
         )
         self.nodes, self.optimization = _lower_mixed_backend_regions(source_nodes)
+        self._pipeline_definition_cache = None
         applied_groups = sum(
             getattr(node, "composer_applied_groups", 0) for node in self.nodes
         )
@@ -6840,6 +7122,12 @@ class _GraphSpec:
         return bool(structured_nodes) and all(
             node.supports_native_submission for node in structured_nodes
         )
+
+    @property
+    def pipeline_definition(self):
+        if self._pipeline_definition_cache is None:
+            self._pipeline_definition_cache = _graph_pipeline_definition(self.nodes)
+        return self._pipeline_definition_cache
 
     def validate_lifetime_leases(self):
         for lease in self.lifetime_leases:
@@ -7343,7 +7631,8 @@ class _GraphInstance:
             node for node in spec.nodes if isinstance(node, _CompiledWhileGraphNode)
         )
         self._structured_telemetry_arena = _GraphStructuredTelemetryArena(
-            self._structured_telemetry_nodes
+            self._structured_telemetry_nodes,
+            lambda: spec.pipeline_definition,
         )
 
         if len(spec.nodes) == 1 and isinstance(spec.nodes[0], _CompiledCGraphNode):
@@ -7989,6 +8278,7 @@ class Sequential:
         self._fixed_runtime_args = {}
         self._lifetime_leases = []
         self._source_native_count = 0
+        self._native_action_manifests = []
         self._temporary_actions = []
         self._has_indirect_dispatch = False
         self._structured_depth = 0
@@ -8087,6 +8377,7 @@ class Sequential:
         self._lifetime_leases.extend(compiled.lifetime_leases)
         self._temporary_actions.extend(compiled.temporary_actions)
         self._source_native_count += compiled.source_native_count
+        self._native_action_manifests.extend(compiled.native_action_manifests)
         self._dispatch_count += len(dispatches)
         return self
 
@@ -8127,6 +8418,9 @@ class Sequential:
                 view._lifetime_leases.extend(compiled.lifetime_leases)
                 view._temporary_actions.extend(compiled.temporary_actions)
                 view._source_native_count += compiled.source_native_count
+                view._native_action_manifests.extend(
+                    compiled.native_action_manifests
+                )
                 view._dispatch_count += len(compiled.recordable_action.dispatches)
         return view
 
@@ -8155,6 +8449,9 @@ class Sequential:
         self._lifetime_leases.extend(node.lifetime_leases)
         self._temporary_actions.extend(node.temporary_actions)
         self._source_native_count += node.source_native_count
+        self._native_action_manifests.extend(
+            _native_action_manifests_for_node(node)
+        )
         self._dispatch_count += node.dispatch_count
         self._structured_depth = max(self._structured_depth, node.structured_depth)
         return self
@@ -8992,6 +9289,11 @@ class SubmissionTicket:
         self.wait()
         return self._telemetry.materialize()
 
+    def pipeline_report(self):
+        """Return this ticket's opt-in immutable execution-pipeline report."""
+        telemetry = self.telemetry()
+        return None if telemetry is None else telemetry.pipeline
+
     @property
     def backend(self):
         return self._completion.backend
@@ -9746,6 +10048,7 @@ __all__ = [
     "Graph",
     "SubmissionTicket",
     "SubmissionPacer",
+    "NativeActionManifest",
     "GraphExecutionCounters",
     "GraphExecutionSegmentReport",
     "GraphExecutionReport",
@@ -9761,6 +10064,8 @@ __all__ = [
     "GraphControlFlowTrace",
     "GraphSubmissionRegionTelemetry",
     "GraphSubmissionQueueTelemetry",
+    "GraphPipelineStageReport",
+    "GraphPipelineReport",
     "GraphSubmissionTelemetry",
     "bounded_dispatch_capabilities",
     "dynamic_work_capabilities",

@@ -4,7 +4,12 @@ from types import MappingProxyType
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiRuntimeError
-from taichi_forge.graph._ir import NativeCallNode
+from taichi_forge.graph._ir import (
+    NativeCallNode,
+    ResourceEffect,
+    RuntimeBinding,
+    TemporaryRequirement,
+)
 
 
 class ProviderOwnedNdarrayBinding:
@@ -97,6 +102,59 @@ class RecordableActionCapabilities:
             "address_stable": self.address_stable,
             "update_policy": self.update_policy,
             "synchronization_domain": self.synchronization_domain,
+        }
+
+
+@dataclass(frozen=True)
+class NativeActionManifest:
+    """Immutable effect and lowering contract for one native Graph action.
+
+    The manifest freezes provider declarations when a Graph is compiled. It
+    intentionally contains symbolic names and counts, never provider-owned
+    storage objects or runtime addresses.
+    """
+
+    schema_version: int
+    name: str
+    recordable: bool
+    opaque: bool
+    synchronization: bool
+    dispatch_count: int
+    backends: tuple
+    conditional_body_safe: bool
+    address_stable: bool
+    update_policy: str
+    synchronization_domain: str
+    runtime_bindings: tuple
+    effects: tuple
+    temporaries: tuple
+    fixed_binding_names: tuple
+    temporary_bindings: tuple
+    lifetime_lease_count: int
+
+    def to_dict(self):
+        return {
+            "schema_version": self.schema_version,
+            "name": self.name,
+            "recordable": self.recordable,
+            "opaque": self.opaque,
+            "synchronization": self.synchronization,
+            "dispatch_count": self.dispatch_count,
+            "backends": self.backends,
+            "conditional_body_safe": self.conditional_body_safe,
+            "address_stable": self.address_stable,
+            "update_policy": self.update_policy,
+            "synchronization_domain": self.synchronization_domain,
+            "runtime_bindings": tuple(
+                binding.to_dict() for binding in self.runtime_bindings
+            ),
+            "effects": tuple(effect.to_dict() for effect in self.effects),
+            "temporaries": tuple(
+                temporary.to_dict() for temporary in self.temporaries
+            ),
+            "fixed_binding_names": self.fixed_binding_names,
+            "temporary_bindings": self.temporary_bindings,
+            "lifetime_lease_count": self.lifetime_lease_count,
         }
 
 
@@ -242,6 +300,103 @@ class NativeGraphExecutable:
             temporaries=tuple(self.temporary_requirements),
             opaque=self.recordable_action is None,
         )
+
+
+_UNSET_RECORDABLE_ACTION = object()
+
+
+def native_action_manifest(
+    executable, recordable_action=_UNSET_RECORDABLE_ACTION
+):
+    """Freeze and validate one executable's symbolic native-action contract."""
+    if not isinstance(executable, NativeGraphExecutable):
+        raise TaichiRuntimeError(
+            "Native action manifests require a NativeGraphExecutable"
+        )
+    action = (
+        executable.recordable_action
+        if recordable_action is _UNSET_RECORDABLE_ACTION
+        else recordable_action
+    )
+    if action is not None and not isinstance(action, RecordableGraphAction):
+        raise TaichiRuntimeError(
+            "Native Graph recordable_action must implement RecordableGraphAction"
+        )
+
+    runtime_bindings = tuple(executable.runtime_arg_schema)
+    effects = tuple(executable.resource_effects)
+    temporaries = tuple(executable.temporary_requirements)
+    if not all(isinstance(binding, RuntimeBinding) for binding in runtime_bindings):
+        raise TaichiRuntimeError(
+            "Native action runtime bindings must contain RuntimeBinding values"
+        )
+    if not all(isinstance(effect, ResourceEffect) for effect in effects):
+        raise TaichiRuntimeError(
+            "Native action effects must contain ResourceEffect values"
+        )
+    if not all(
+        isinstance(temporary, TemporaryRequirement) for temporary in temporaries
+    ):
+        raise TaichiRuntimeError(
+            "Native action temporaries must contain TemporaryRequirement values"
+        )
+
+    binding_names = tuple(binding.name for binding in runtime_bindings)
+    temporary_names = tuple(temporary.name for temporary in temporaries)
+    if len(binding_names) != len(set(binding_names)):
+        raise TaichiRuntimeError("Native action runtime binding names must be unique")
+    if len(temporary_names) != len(set(temporary_names)):
+        raise TaichiRuntimeError("Native action temporary names must be unique")
+
+    ir_node = executable.graph_ir_node
+    name = getattr(ir_node, "name", type(executable).__name__)
+    if not isinstance(name, str) or not name:
+        raise TaichiRuntimeError("Native action manifest name must be non-empty")
+    ir_effects = tuple(getattr(ir_node, "effects", effects))
+    if not all(isinstance(effect, ResourceEffect) for effect in ir_effects):
+        raise TaichiRuntimeError(
+            "Native action IR effects must contain ResourceEffect values"
+        )
+
+    if action is None:
+        capabilities = RecordableActionCapabilities(backends=())
+        fixed_binding_names = ()
+        temporary_bindings = ()
+        dispatch_count = 0
+        update_policy = "opaque"
+        synchronization_domain = "opaque"
+    else:
+        capabilities = action.capabilities
+        if not isinstance(capabilities, RecordableActionCapabilities):
+            raise TaichiRuntimeError(
+                "Recordable action capabilities must be a "
+                "RecordableActionCapabilities value"
+            )
+        fixed_binding_names = tuple(sorted(action.fixed_bindings))
+        temporary_bindings = tuple(sorted(action.temporary_bindings.items()))
+        dispatch_count = len(tuple(action.dispatches))
+        update_policy = capabilities.update_policy
+        synchronization_domain = capabilities.synchronization_domain
+
+    return NativeActionManifest(
+        schema_version=1,
+        name=name,
+        recordable=action is not None,
+        opaque=bool(getattr(ir_node, "opaque", action is None)),
+        synchronization=bool(getattr(ir_node, "synchronization", False)),
+        dispatch_count=dispatch_count,
+        backends=tuple(capabilities.backends),
+        conditional_body_safe=bool(capabilities.conditional_body_safe),
+        address_stable=bool(capabilities.address_stable) if action else False,
+        update_policy=update_policy,
+        synchronization_domain=synchronization_domain,
+        runtime_bindings=runtime_bindings,
+        effects=ir_effects,
+        temporaries=temporaries,
+        fixed_binding_names=fixed_binding_names,
+        temporary_bindings=temporary_bindings,
+        lifetime_lease_count=len(tuple(executable.lifetime_leases)),
+    )
 
 
 class NativeGraphNode:
