@@ -146,135 +146,223 @@ def _atomic_pipeline(args):
                 value = value * 7 + 3
             output[i] = value
 
-    def build_graph(name, bounded):
+    def build_graph(
+        name,
+        bounded,
+        *,
+        update_policy="per_node",
+    ):
         worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)
         graph_args = worklist.graph_args(name)
         count_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
-        output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1)
+        output_args = tuple(
+            ti.graph.Arg(
+                ti.graph.ArgKind.NDARRAY,
+                f"output_{index}",
+                ti.i32,
+                ndim=1,
+            )
+            for index in range(args.consumers)
+        )
         reset = ti.algorithms.DeviceWorklistSequence(graph_args).prepare_next()
-        launch_state = (
-            worklist.next_extent.dispatch_state(block_dim) if bounded else None
-        )
-        finalize = ti.algorithms.DeviceWorklistSequence(graph_args).finalize_next(
-            dispatch_state=launch_state
-        )
+        launch_state = worklist.next_extent.dispatch_state(block_dim) if bounded else None
+        finalize = ti.algorithms.DeviceWorklistSequence(graph_args).finalize_next(dispatch_state=launch_state)
         builder = ti.graph.GraphBuilder()
+        builder._cuda_bounded_update_policy = update_policy
         builder.append_native(reset)
         builder.dispatch(produce, *graph_args.append_arguments(), count_arg)
         builder.append_native(finalize)
         handle = None
         if bounded:
-            handle = builder.dispatch_bounded(
-                consume_masked,
-                graph_args.next_values,
-                graph_args.next_extent,
-                output_arg,
-                extent=graph_args.next_extent,
-                capacity=capacity,
-                block_dim=block_dim,
-                launch_state=launch_state,
+            handles = tuple(
+                builder.dispatch_bounded(
+                    consume_masked,
+                    graph_args.next_values,
+                    graph_args.next_extent,
+                    output_arg,
+                    extent=graph_args.next_extent,
+                    capacity=capacity,
+                    block_dim=block_dim,
+                    launch_state=launch_state,
+                )
+                for output_arg in output_args
             )
+            handle = handles[0]
         else:
-            builder.dispatch(
-                consume_masked,
-                graph_args.next_values,
-                graph_args.next_extent,
-                output_arg,
-            )
+            for output_arg in output_args:
+                builder.dispatch(
+                    consume_masked,
+                    graph_args.next_values,
+                    graph_args.next_extent,
+                    output_arg,
+                )
         graph = builder.compile()
-        output = ti.ndarray(ti.i32, shape=capacity)
+        outputs = tuple(ti.ndarray(ti.i32, shape=capacity) for _ in range(args.consumers))
         runtime_args = worklist.runtime_arguments(name, include_capacity=True)
-        runtime_args.update(count=produced, output=output)
-        return worklist, graph, output, runtime_args, handle, launch_state
+        runtime_args.update(count=produced)
+        runtime_args.update((f"output_{index}", output) for index, output in enumerate(outputs))
+        return worklist, graph, outputs, runtime_args, handle, launch_state
 
     fixed, fixed_build_us = _build_us(lambda: build_graph("fixed", False))
-    bounded, bounded_build_us = _build_us(lambda: build_graph("bounded", True))
+    fused, fused_build_us = _build_us(lambda: build_graph("fused", True, update_policy="fused"))
+    qualify_fusion = impl.current_cfg().arch == ti_core.Arch.cuda and fused[4].capabilities.exact_grid
+    grouped = None
+    grouped_build_us = None
+    ungrouped = None
+    ungrouped_build_us = None
+    if qualify_fusion:
+        grouped, grouped_build_us = _build_us(lambda: build_graph("grouped", True, update_policy="grouped"))
+        ungrouped, ungrouped_build_us = _build_us(lambda: build_graph("ungrouped", True, update_policy="per_node"))
     host_worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)
-    host_output = ti.ndarray(ti.i32, shape=capacity)
+    host_outputs = tuple(ti.ndarray(ti.i32, shape=capacity) for _ in range(args.consumers))
 
     def host_roundtrip():
         host_worklist.prepare_next()
         produce(*host_worklist.append_arguments(), produced)
         host_worklist.commit_next()
         count = host_worklist.extent.check()
-        consume_exact(host_worklist.values, host_output, count)
+        for output in host_outputs:
+            consume_exact(host_worklist.values, output, count)
 
     def fixed_graph():
         fixed[1].run(fixed[3])
 
-    def bounded_graph():
-        bounded[1].run(bounded[3])
+    def fused_graph():
+        fused[1].run(fused[3])
 
+    def grouped_graph():
+        grouped[1].run(grouped[3])
+
+    def ungrouped_graph():
+        ungrouped[1].run(ungrouped[3])
+
+    variants = {
+        "host_roundtrip": host_roundtrip,
+        "fixed_graph": fixed_graph,
+        "bounded_graph": fused_graph,
+    }
+    if grouped is not None:
+        variants["generic_grouped_graph"] = grouped_graph
+        variants["legacy_ungrouped_graph"] = ungrouped_graph
     first = {
         "host_roundtrip_us": _measure(host_roundtrip, 1),
         "fixed_graph_us": _measure(fixed_graph, 1),
-        "bounded_graph_us": _measure(bounded_graph, 1),
+        "bounded_graph_us": _measure(fused_graph, 1),
     }
-    for call in (host_roundtrip, fixed_graph, bounded_graph):
+    if grouped is not None:
+        first["generic_grouped_graph_us"] = _measure(grouped_graph, 1)
+        first["legacy_ungrouped_graph_us"] = _measure(ungrouped_graph, 1)
+    for call in variants.values():
         for _ in range(args.warmups):
             call()
     ti.sync()
     before = _memory_snapshot()
-    samples = _paired(
-        {
-            "host_roundtrip": host_roundtrip,
-            "fixed_graph": fixed_graph,
-            "bounded_graph": bounded_graph,
-        },
-        args.rounds,
-        args.samples,
-        args.seed,
-    )
+    samples = _paired(variants, args.rounds, args.samples, args.seed)
     after = _memory_snapshot()
 
     expected = np.arange(1, produced + 1, dtype=np.int32)
     for _ in range(args.payload_work):
         expected = expected * 7 + 3
     fixed_graph()
-    bounded_graph()
+    fused_graph()
+    if grouped is not None:
+        grouped_graph()
+        ungrouped_graph()
     ti.sync()
-    fixed_values = np.sort(fixed[2].to_numpy()[:produced])
-    bounded_values = np.sort(bounded[2].to_numpy()[:produced])
     correct = (
         fixed[0].next_extent.snapshot().count == produced
-        and bounded[0].next_extent.snapshot().count == produced
-        and np.array_equal(fixed_values, np.sort(expected))
-        and np.array_equal(bounded_values, np.sort(expected))
+        and fused[0].next_extent.snapshot().count == produced
+        and all(
+            np.array_equal(np.sort(output.to_numpy()[:produced]), np.sort(expected))
+            for output in (*fixed[2], *fused[2])
+        )
     )
-    # Re-snapshot after every first-use and host materialization above.  The
-    # qualification window below measures only the replayable bounded path.
-    bounded_graph()
-    ti.sync()
-    stability_before = _memory_snapshot()
-    for _ in range(args.stability_rounds):
-        bounded_graph()
-    ti.sync()
-    stability_after = _memory_snapshot()
+    if grouped is not None:
+        correct = (
+            correct
+            and grouped[0].next_extent.snapshot().count == produced
+            and ungrouped[0].next_extent.snapshot().count == produced
+            and all(
+                np.array_equal(np.sort(output.to_numpy()[:produced]), np.sort(expected))
+                for output in (*grouped[2], *ungrouped[2])
+            )
+        )
+    # Re-snapshot after every first-use and host materialization above. Each
+    # qualification window measures one replayable CUDA update policy so
+    # allocation growth cannot be hidden by a different variant's pool state.
+    stability_variants = {"bounded_graph": fused_graph}
+    if grouped is not None:
+        stability_variants.update(
+            generic_grouped_graph=grouped_graph,
+            legacy_ungrouped_graph=ungrouped_graph,
+        )
+    stability_memory = {}
+    for name, call in stability_variants.items():
+        call()
+        ti.sync()
+        stability_before = _memory_snapshot()
+        for _ in range(args.stability_rounds):
+            call()
+        ti.sync()
+        stability_after = _memory_snapshot()
+        stability_memory[name] = _non_growth(stability_before, stability_after)
     bounded_us = samples["bounded_graph"]["median_us"]
+
+    def update_stats(graph):
+        segment = next(item for item in graph.execution_stats().segments if item.kind == "cgraph")
+        return {
+            "path": segment.last_path,
+            "driver_error": segment.last_driver_error,
+            "groups": segment.bounded_update_groups,
+            "updater_dispatches": segment.bounded_updater_dispatches,
+            "grouped_payloads": segment.bounded_grouped_payloads,
+            "producer_fused_groups": segment.bounded_producer_fused_groups,
+            "persistent_control_bytes": (segment.persistent_bounded_control_bytes),
+        }
+
     return {
         "capacity": capacity,
+        "consumers": args.consumers,
         "produced": produced,
         "active_percent": args.active_percent,
+        "qualification_policy_overrides": {
+            "bounded_graph": "fused",
+            "generic_grouped_graph": ("grouped" if grouped is not None else None),
+            "legacy_ungrouped_graph": ("per_node" if ungrouped is not None else None),
+        },
         "build_us": {
             "fixed_graph": fixed_build_us,
-            "bounded_graph": bounded_build_us,
+            "bounded_graph": fused_build_us,
+            "generic_grouped_graph": grouped_build_us,
+            "legacy_ungrouped_graph": ungrouped_build_us,
         },
         "first": first,
         "warm": samples,
-        "speedup_vs_host_roundtrip": (
-            samples["host_roundtrip"]["median_us"] / bounded_us
-        ),
+        "speedup_vs_host_roundtrip": (samples["host_roundtrip"]["median_us"] / bounded_us),
         "speedup_vs_fixed_graph": (samples["fixed_graph"]["median_us"] / bounded_us),
-        "bounded_route": bounded[4].capabilities.execution_semantics,
-        "bounded_preparation_dispatches": (
-            bounded[4].capabilities.preparation_dispatches
+        "bounded_route": fused[4].capabilities.execution_semantics,
+        "bounded_preparation_dispatches": (fused[4].capabilities.preparation_dispatches),
+        "producer_fusion_speedup": (
+            None if grouped is None else samples["generic_grouped_graph"]["median_us"] / bounded_us
         ),
+        "update_grouping_speedup": (
+            None
+            if grouped is None
+            else samples["legacy_ungrouped_graph"]["median_us"] / samples["generic_grouped_graph"]["median_us"]
+        ),
+        "combined_update_speedup": (
+            None if grouped is None else samples["legacy_ungrouped_graph"]["median_us"] / bounded_us
+        ),
+        "bounded_graph_stats": update_stats(fused[1]),
+        "generic_grouped_graph_stats": (None if grouped is None else update_stats(grouped[1])),
+        "legacy_ungrouped_graph_stats": (None if ungrouped is None else update_stats(ungrouped[1])),
         "overflow_free_slot_reservation_atomics_per_item": 1,
         "correct": correct,
         "timed_window_memory_stable": _non_growth(before, after),
         "stability_replays": args.stability_rounds,
-        "memory_stable": _non_growth(stability_before, stability_after),
-        "worklist_memory": bounded[0].memory_report(),
+        "stability_memory": stability_memory,
+        "memory_stable": all(stability_memory.values()),
+        "worklist_memory": fused[0].memory_report(),
     }
 
 
@@ -451,6 +539,7 @@ def main():
     parser.add_argument("--active-percent", type=int, default=10)
     parser.add_argument("--block-dim", type=int, default=128)
     parser.add_argument("--payload-work", type=int, default=4)
+    parser.add_argument("--consumers", type=int, default=1)
     parser.add_argument("--rounds", type=int, default=40)
     parser.add_argument("--conflict-rounds", type=int, default=10)
     parser.add_argument("--samples", type=int, default=9)
@@ -469,6 +558,7 @@ def main():
             args.conflict_capacity,
             args.block_dim,
             args.payload_work,
+            args.consumers,
             args.rounds,
             args.conflict_rounds,
             args.samples,

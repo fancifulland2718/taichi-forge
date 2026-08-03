@@ -495,7 +495,9 @@ runtime binding 使用 `worklist.runtime_arguments(name)`。atomic producer Grap
 observation；ticket completion 后可由 `decode_observation(mapping)` 返回
 `DeviceWorklistStatistics`。把匹配的 producer-owned `DeviceDispatchState` 同时交给
 finalize/select/claim node 与 `dispatch_bounded(launch_state=...)`，可删除 Vulkan consumer-side
-preparation dispatch。CPU/CUDA 物理执行保持 masked capacity；实际 route 应查询
+preparation dispatch。CUDA Driver API 12.4 或更高版本也可在强制 exact route 上消费该
+state；经过性能资格后，默认仍采用 per-node updater，grouped update 与 Forge-owned finalize
+fusion 作为显式资格策略提供。实际 route 与 update policy 应查询
 `dynamic_work_capabilities()`。
 
 ### Primitive 算法
@@ -981,16 +983,27 @@ lowering 合同会如实区分后端：
 - Vulkan device-known dispatch 在 device 上写入三个 u32 的 packet，并使用 exact
   `dispatchIndirect` grid。其 payload specialization 采用 `one_to_one` range mapping，
   因而缩小 grid 会真正减少访问的逻辑 index，count=0 会跳过 payload command；
-- CUDA 与 CPU 使用固定容量 Graph task 加 device-side semantic mask。capability 明确报告
-  `route="masked_capacity"`、`exact_grid=False` 且不支持零 command skip；本 API 不会把
-  CUDA conditional Graph 改名为 exact indirect dispatch。
+- CUDA 默认使用固定容量 masked route。Driver API 12.4 或更高版本可通过
+  `TI_CUDA_BOUNDED_DISPATCH_MODE=device_update` 选择 device-updatable Graph node，在不做 host
+  readback 的情况下采用精确的 rounded grid，并在 count=0 时跳过 payload command。这是
+  bounded Graph-node update 合同，不是 CUDA indirect dispatch，也不是 conditional termination；
+- CPU 默认使用固定容量 masked route。强制 `exact_scheduler` route 会在 cached scheduler 中
+  读取 device extent，仅提交钳制后的 range；由于性能交叉点依赖 workload，该 route 仍为 opt-in。
 
 `ti.graph.bounded_dispatch_capabilities()` 可在构图前报告所选 route。返回的 handle 提供
 不可变 capability 与稳定 workspace accounting。`handle.snapshot(extent)` 是显式同步点，
 报告 useful、executed、skipped、encoded 与 overflow count；host-known handle 可无同步地
 报告相同信息。
 
-`ti.graph.dynamic_work_capabilities()` 返回 schema-v2 report，把 count owner、bounded
+CUDA exact Graph 的 `TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY` 接受 `auto`、`per_node`、
+`grouped` 或 `fused`。当前 `auto` 选择 `per_node`：配对性能资格显示，减少 updater dispatch
+数量并未改善资格 GPU 上的完整多 consumer pipeline。`grouped` 用一个 updater 更新连续消费
+同一 launch state 的全部 payload；`fused` 进一步让 Forge 自有的 `DeviceWorklist.finalize`
+producer 自行应用 node update。两个强制策略均保持 zero-count、overflow、reset 与 ordinary
+fallback 安全，但在完整 pipeline 测量支持更改默认值之前保持 opt-in。逐 segment execution
+report 会暴露 group、updater、payload、fused-group、control-byte 与 last-driver-error 字段。
+
+`ti.graph.dynamic_work_capabilities()` 返回 schema-v3 report，把 count owner、bounded
 launch、structured iteration termination、worklist 与 ticket observation 分成独立维度。
 worklist 部分报告 append ordering、single-writer ownership、stable/deterministic transform、
 replay allocation/readback policy、counter 与当前 physical launch route；尤其不会把 CUDA
@@ -1006,7 +1019,8 @@ index。offset 会先钳制以保证执行安全；显式 snapshot 通过总 `ov
 
 这些接口只用于 JIT Graph，AOT export 会明确失败。单个 Vulkan bounded dispatch 的内部
 workspace 为 12 bytes，Vulkan ordered dispatch 为 32 bytes；CPU/CUDA bounded 不使用
-workspace，ordered 使用 20 bytes。producer-owned Vulkan launch state 会用 external 16-byte
+handle-owned workspace，ordered 使用 20 bytes。CUDA exact per-node control 每个 payload 使用
+32 persistent bytes；grouped/fused chain 共使用 `40 + 8 * payloads` bytes。producer-owned Vulkan launch state 会用 external 16-byte
 state 替代 12-byte consumer packet，并报告 handle-owned packet 为 0 byte。exact 物理工作量减少不等于无条件提速：轻量、单独的
 Vulkan payload 可能因 packet preparation 与依赖成本而慢于 fixed Graph。应以完整 workload
 同时对比 fixed Graph 和 direct execution；成对基准脚本为

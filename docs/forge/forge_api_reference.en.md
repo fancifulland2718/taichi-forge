@@ -578,8 +578,11 @@ name=...)` attaches all counters to terminal Graph observation;
 `decode_observation(mapping)` returns `DeviceWorklistStatistics` after ticket
 completion. Passing a matching producer-owned `DeviceDispatchState` to a
 finalize/select/claim node and to `dispatch_bounded(launch_state=...)` removes
-Vulkan's consumer-side preparation dispatch. CPU/CUDA keep masked-capacity
-physical execution; inspect `dynamic_work_capabilities()` for the active route.
+Vulkan's consumer-side preparation dispatch. CUDA Driver API 12.4 or newer can
+also consume this state on the forced exact route. Its performance-qualified
+default remains a per-node updater; grouped updates and Forge-owned finalize
+fusion are available as explicit qualification policies. Inspect
+`dynamic_work_capabilities()` for the selected route and update policy.
 
 ### Primitive Algorithms
 
@@ -1135,10 +1138,15 @@ The lowering contract is backend-honest:
   exact `dispatchIndirect` grid. Its payload specialization uses `one_to_one`
   range mapping, so a smaller grid really visits fewer logical indices and a
   zero count skips the payload command.
-- CUDA and CPU use a fixed-capacity Graph task with a device-side semantic
-  mask. Capabilities report `route="masked_capacity"`, `exact_grid=False`, and
-  no zero-command skip; this API does not relabel CUDA conditional Graphs as
-  exact indirect dispatch.
+- CUDA defaults to the fixed-capacity masked route. With Driver API 12.4 or
+  newer, `TI_CUDA_BOUNDED_DISPATCH_MODE=device_update` selects device-updatable
+  Graph nodes, an exact rounded grid, and zero-count command skip without host
+  readback. This is a bounded Graph-node update contract, not CUDA indirect
+  dispatch and not CUDA conditional termination.
+- CPU defaults to the fixed-capacity masked route. The forced
+  `exact_scheduler` route reads the device extent in the cached scheduler and
+  submits only the clamped range; it remains opt-in because the crossover is
+  workload dependent.
 
 `ti.graph.bounded_dispatch_capabilities()` reports the selected route before a
 Graph is built. The returned handle exposes immutable capabilities and stable
@@ -1146,7 +1154,18 @@ workspace accounting. `handle.snapshot(extent)` is an explicit synchronization
 and reports useful, executed, skipped, encoded, and overflow counts; the
 host-known handle reports the same data without synchronization.
 
-`ti.graph.dynamic_work_capabilities()` returns a schema-v2 report that keeps
+On CUDA exact graphs, `TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY` accepts `auto`,
+`per_node`, `grouped`, or `fused`. `auto` currently selects `per_node`: paired
+qualification found that reducing updater dispatch count did not improve the
+complete multi-consumer pipeline on the qualified GPU. `grouped` updates all
+consecutive consumers of one launch state from one updater. `fused` additionally
+lets the Forge-owned `DeviceWorklist.finalize` producer apply the node updates
+itself. Both forced policies preserve zero-count, overflow, reset, and ordinary
+fallback safety, but are opt-in until whole-pipeline measurements justify a
+new default. Per-segment execution reports expose group, updater, payload,
+fused-group, control-byte, and last-driver-error fields.
+
+`ti.graph.dynamic_work_capabilities()` returns a schema-v3 report that keeps
 the count owner, bounded launch, structured iteration termination, worklist,
 and ticket observation as separate axes. The worklist section reports append
 ordering, single-writer ownership, stable/deterministic transforms, replay
@@ -1166,11 +1185,13 @@ snapshot reports invalid topology through `overflow` and per-segment
 
 These APIs are JIT Graph features. AOT export fails explicitly. Internal
 workspace is 12 bytes for one Vulkan bounded dispatch and 32 bytes for Vulkan
-ordered dispatch; CPU/CUDA bounded dispatch uses no workspace and ordered
-dispatch uses 20 bytes. A producer-owned Vulkan launch state replaces the
-12-byte consumer packet with an external 16-byte state and reports zero
-handle-owned packet bytes. Exact physical work reduction is not a universal
-speedup: a light standalone Vulkan payload can cost more than a fixed Graph
+ordered dispatch; CPU/CUDA bounded dispatch uses no handle-owned workspace and
+ordered dispatch uses 20 bytes. CUDA exact per-node control uses 32 persistent
+bytes per payload; one grouped or fused chain uses `40 + 8 * payloads` bytes.
+A producer-owned Vulkan launch state replaces the 12-byte consumer packet with
+an external 16-byte state and reports zero handle-owned packet bytes. Exact
+physical work reduction is not a universal speedup: a light standalone Vulkan
+payload can cost more than a fixed Graph
 because packet preparation and ordering add a dispatch/dependency. Measure the
 complete workload against both fixed Graph and direct execution. The paired
 harness is `benchmarks/dynamic_workload_bench.py`.
