@@ -42,14 +42,18 @@ def _paired_samples(variants, rounds, samples, seed):
 
 
 def _summarize(samples):
-    return {
-        name: {
+    result = {}
+    for name, values in samples.items():
+        mean = statistics.fmean(values)
+        result[name] = {
             "median_us": statistics.median(values),
+            "p95_us": float(np.percentile(values, 95)),
+            "mean_us": mean,
+            "cv": statistics.pstdev(values) / mean if mean else 0.0,
             "min_us": min(values),
             "max_us": max(values),
         }
-        for name, values in samples.items()
-    }
+    return result
 
 
 def _memory_non_growth(before, after):
@@ -86,6 +90,13 @@ def _pool_ownership_stable(before, after):
         or after[key] == before[key]
         for key in keys
     )
+
+
+def _positive_byte_growth(before, after, *keys):
+    values = tuple((before.get(key), after.get(key)) for key in keys)
+    if any(old is None or new is None for old, new in values):
+        return None
+    return sum(max(0, new - old) for old, new in values)
 
 
 def _prefix_benchmark(args):
@@ -298,6 +309,125 @@ def _graph_benchmark(args):
             summary["direct"]["median_us"] / bounded_us
         )
         reports[case] = {"count": count, **summary}
+
+    stress = None
+    if args.stress_replays:
+        stress_args = {
+            "requested": 0,
+            "extent": extent,
+            "input": input_values,
+            "output": outputs["bounded_graph"],
+        }
+        stress_counts = (
+            0,
+            capacity,
+            1,
+            max(0, capacity - 1),
+        )
+        ti.sync()
+        stress_before = program._runtime_statistics_snapshot()["memory"]
+        stress_host_before = dict(ti_core.get_host_memory_pool_stats())
+        stress_device_before = dict(ti_core.get_device_memory_pool_stats())
+        stress_start = time.perf_counter_ns()
+        for replay in range(args.stress_replays):
+            stress_args["requested"] = stress_counts[replay % len(stress_counts)]
+            bounded_graph.run(stress_args)
+        ti.sync()
+        stress_elapsed = time.perf_counter_ns() - stress_start
+        stress_after = program._runtime_statistics_snapshot()["memory"]
+        stress_host_after = dict(ti_core.get_host_memory_pool_stats())
+        stress_device_after = dict(ti_core.get_device_memory_pool_stats())
+        final_count = stress_counts[(args.stress_replays - 1) % len(stress_counts)]
+        final_snapshot = handle.snapshot(extent)
+        stress = {
+            "replays": args.stress_replays,
+            "mean_us": stress_elapsed / args.stress_replays / 1.0e3,
+            "final_count": final_snapshot.useful_count,
+            "expected_final_count": final_count,
+            "runtime_memory_non_growth": _memory_non_growth(
+                stress_before, stress_after
+            ),
+            "host_pool_stable": _pool_ownership_stable(
+                stress_host_before, stress_host_after
+            ),
+            "device_pool_stable": _pool_ownership_stable(
+                stress_device_before, stress_device_after
+            ),
+        }
+
+    node_memory = None
+    if args.memory_node_count:
+        node_before = program._runtime_statistics_snapshot()["memory"]
+        node_host_before = dict(ti_core.get_host_memory_pool_stats())
+        node_device_before = dict(ti_core.get_device_memory_pool_stats())
+        node_builder = ti.graph.GraphBuilder()
+        node_builder.dispatch(publish, requested_arg, extent_arg)
+        node_handles = []
+        for node in range(args.memory_node_count):
+            node_handles.append(
+                node_builder.dispatch_bounded(
+                    payload,
+                    extent_arg,
+                    input_arg,
+                    output_arg,
+                    extent=extent_arg,
+                    capacity=capacity,
+                    block_dim=block_dim,
+                )
+            )
+        node_graph = node_builder.compile()
+        node_args = {
+            "requested": 0,
+            "extent": extent,
+            "input": input_values,
+            "output": outputs["bounded_graph"],
+        }
+        # Opt in before execution so the report can distinguish capture from
+        # replay, then sample only after both paths have completed.
+        node_graph.execution_stats()
+        node_graph.run(node_args)
+        node_graph.run(node_args)
+        ti.sync()
+        node_report = node_graph.execution_stats()
+        node_after = program._runtime_statistics_snapshot()["memory"]
+        node_host_after = dict(ti_core.get_host_memory_pool_stats())
+        node_device_after = dict(ti_core.get_device_memory_pool_stats())
+        node_memory = {
+            "nodes": args.memory_node_count,
+            "persistent_argument_bytes": (
+                node_report.memory.persistent_argument_bytes
+            ),
+            "persistent_bounded_control_bytes": (
+                node_report.memory.persistent_bounded_control_bytes
+            ),
+            "execution_path": node_report.execution_path,
+            "fallback_reason": node_report.fallback_reason,
+            "segment_argument_bytes": [
+                segment.persistent_argument_bytes
+                for segment in node_report.segments
+            ],
+            "segment_bounded_control_bytes": [
+                segment.persistent_bounded_control_bytes
+                for segment in node_report.segments
+            ],
+            "workspace_bytes": sum(item.workspace_bytes for item in node_handles),
+            "runtime_live_byte_growth": _positive_byte_growth(
+                node_before,
+                node_after,
+                "host_requested_live_bytes",
+                "device_requested_live_bytes",
+            ),
+            "host_pool_byte_growth": _positive_byte_growth(
+                node_host_before,
+                node_host_after,
+                "requested_live_bytes",
+            ),
+            "device_pool_byte_growth": _positive_byte_growth(
+                node_device_before,
+                node_device_after,
+                "requested_live_bytes",
+            ),
+        }
     after = program._runtime_statistics_snapshot()["memory"]
     host_pool_stable = _pool_ownership_stable(
         host_pool_before, dict(ti_core.get_host_memory_pool_stats())
@@ -307,6 +437,7 @@ def _graph_benchmark(args):
     )
 
     correct = True
+    physical_counts = {}
     for name, count in counts.items():
         for output in outputs.values():
             output.fill(-1)
@@ -330,12 +461,21 @@ def _graph_benchmark(args):
             correct = correct and all(
                 float(output[count]) == -1.0 for output in host_outputs.values()
             )
+        physical_counts[name] = {
+            "useful_count": snapshot.useful_count,
+            "executed_count": snapshot.executed_count,
+            "encoded_lanes": snapshot.encoded_lanes,
+            "skipped_count": snapshot.skipped_count,
+        }
     return {
         "capacity": capacity,
         "block_dim": block_dim,
         "payload_work": args.payload_work,
         "capabilities": handle.capabilities.__dict__,
         "cases": reports,
+        "physical_counts": physical_counts,
+        "stress": stress,
+        "node_memory": node_memory,
         "workspace_bytes": handle.workspace_bytes,
         "workspace_allocations": handle.workspace_allocation_count,
         "correct": correct,
@@ -358,6 +498,8 @@ def main():
     parser.add_argument("--graph-rounds", type=int, default=100)
     parser.add_argument("--samples", type=int, default=9)
     parser.add_argument("--warmups", type=int, default=5)
+    parser.add_argument("--stress-replays", type=int, default=0)
+    parser.add_argument("--memory-node-count", type=int, default=0)
     parser.add_argument("--seed", type=int, default=20260802)
     parser.add_argument(
         "--cuda-route",
@@ -382,6 +524,8 @@ def main():
         args.samples,
     ) <= 0:
         parser.error("capacities, block size, rounds, and samples must be positive")
+    if args.stress_replays < 0 or args.memory_node_count < 0:
+        parser.error("stress replay and memory node counts must be non-negative")
 
     if args.arch == "cuda":
         os.environ["TI_CUDA_BOUNDED_DISPATCH_MODE"] = args.cuda_route
