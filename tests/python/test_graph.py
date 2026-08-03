@@ -1805,6 +1805,22 @@ def test_recordable_provider_binds_graph_temporary_arena_without_public_scratch(
     np.testing.assert_array_equal(output.to_numpy(), values * 2 + 1)
     np.testing.assert_array_equal(second_output.to_numpy(), second_values * 2 + 1)
 
+    pipeline = graph.submit(
+        {"source": source, "output": output}, telemetry=True
+    ).pipeline_report()
+    assert pipeline.native_action_count == 1
+    assert pipeline.declared_temporary_bytes == size * 4
+    stage = pipeline.stages[0]
+    assert stage.declared_temporary_bytes == size * 4
+    manifest = stage.native_actions[0]
+    assert tuple(
+        (temporary.name, temporary.bytes, temporary.alignment)
+        for temporary in manifest.temporaries
+    ) == (("provider_scratch", size * 4, 16),)
+    assert manifest.temporary_bindings == (
+        ("__provider_scratch", "provider_scratch"),
+    )
+
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_recordable_provider_temporary_embeds_in_structured_while():
@@ -2341,6 +2357,53 @@ def test_mixed_recordable_native_node_lowers_to_one_backend_region():
     assert report.dispatch_count == 3
     if ti.lang.impl.current_cfg().arch in (ti.cuda, ti.vulkan):
         assert report.backend_graph_segments == 1
+
+    values.fill(0)
+    default_ticket = graph.submit({"values": values})
+    default_ticket.wait()
+    assert default_ticket.pipeline_report() is None
+    assert not graph._instance.structured_telemetry_arena_stats["materialized"]
+
+    values.fill(0)
+    ticket = graph.submit({"values": values}, telemetry=True)
+    pipeline = ticket.pipeline_report()
+    assert isinstance(pipeline, ti.graph.GraphPipelineReport)
+    assert pipeline.schema_version == 1
+    assert pipeline.selection_domain == "post_optimization_execution_root"
+    assert pipeline.sequence == ticket.sequence
+    assert pipeline.stage_count == 1
+    assert pipeline.native_action_count == 1
+    assert pipeline.recordable_native_action_count == 1
+    assert pipeline.opaque_native_action_count == 0
+    assert pipeline.declared_temporary_bytes == 0
+    assert pipeline.host_submit_ns > 0
+    stage = pipeline.stages[0]
+    assert isinstance(stage, ti.graph.GraphPipelineStageReport)
+    assert stage.kind == "cgraph"
+    assert stage.region_kind == "mixed_cgraph_native"
+    assert stage.runtime_arg_names == ("values",)
+    assert stage.source_native_count == 1
+    assert stage.native_action_count == 1
+    assert stage.native_backend_eligible
+    assert stage.effect_count == 1
+    manifest = stage.native_actions[0]
+    assert isinstance(manifest, ti.graph.NativeActionManifest)
+    assert manifest.schema_version == 1
+    assert manifest.name == "recorded_dispatch"
+    assert manifest.recordable
+    assert not manifest.opaque
+    assert manifest.dispatch_count == 1
+    assert manifest.synchronization_domain == "runtime_ordered"
+    assert manifest.update_policy == "rebind"
+    assert manifest.fixed_binding_names == (sym_offset.name,)
+    assert manifest.temporary_bindings == ()
+    assert manifest.lifetime_lease_count == 1
+    assert tuple(binding.name for binding in manifest.runtime_bindings) == (
+        "values",
+    )
+    assert tuple(effect.resource for effect in manifest.effects) == ("values",)
+    assert ticket.telemetry().pipeline == pipeline
+    np.testing.assert_array_equal(values.to_numpy(), np.full(128, 6, dtype=np.int32))
     with pytest.raises(TaichiRuntimeError, match="cannot be serialized"):
         _ = graph._compiled_graph
 
@@ -2448,6 +2511,39 @@ def test_mixed_opaque_native_node_remains_an_explicit_segment():
     graph.run({"values": values})
     assert tracker["runs"] == 1
     np.testing.assert_array_equal(values.to_numpy(), np.full(16, 2, dtype=np.int32))
+
+    ticket = graph.submit({"values": values}, telemetry=True)
+    pipeline = ticket.pipeline_report()
+    assert pipeline.stage_count == 3
+    assert pipeline.native_action_count == 1
+    assert pipeline.recordable_native_action_count == 0
+    assert pipeline.opaque_native_action_count == 1
+    native_stage = pipeline.stages[1]
+    assert native_stage.kind == "native"
+    assert native_stage.opaque
+    assert not native_stage.native_backend_eligible
+    manifest = native_stage.native_actions[0]
+    assert not manifest.recordable
+    assert manifest.opaque
+    assert manifest.backends == ()
+    assert manifest.update_policy == "opaque"
+    assert manifest.synchronization_domain == "opaque"
+
+
+@test_utils.test(arch=ti.cpu)
+def test_native_action_manifest_rejects_untyped_effects():
+    class InvalidEffectExecutable(_OpaqueExecutable):
+        @property
+        def resource_effects(self):
+            return ({"resource": "invalid", "access": "read"},)
+
+    class InvalidEffectNode(NativeGraphNode):
+        def compile(self):
+            return InvalidEffectExecutable({"runs": 0})
+
+    builder = ti.graph.GraphBuilder()
+    with pytest.raises(TaichiRuntimeError, match="ResourceEffect values"):
+        builder.append_native(InvalidEffectNode())
 
 
 @test_utils.test(arch=ti.cpu)
@@ -3996,7 +4092,7 @@ def test_structured_graph_while_reports_exact_stop_and_backend_overshoot():
         assert report.overshoot_iterations == 0
         assert report.chunk_sizes == (5,)
         assert report.observation_boundaries == (0, 5)
-        assert report.native_upgrade_reason == "selected"
+        assert report.native_upgrade_reason == "selected_cuda_conditional_graph"
     elif _is_vulkan_structured_report(report):
         assert ti.lang.impl.current_cfg().arch == ti.vulkan
         assert report.lowering == "vulkan_compact_indirect"
@@ -4711,7 +4807,7 @@ def test_structured_graph_vulkan_ticket_reports_opt_in_region_telemetry():
     args["counter"].fill(0)
     ticket = graph.submit(args, telemetry=True)
     report = ticket.telemetry()
-    assert report.schema_version == 3
+    assert report.schema_version == 4
     assert report.backend == "vulkan"
     assert report.sequence == ticket.sequence
     assert report.device_snapshot_bytes == 24
@@ -4761,6 +4857,15 @@ def test_structured_graph_vulkan_ticket_reports_opt_in_region_telemetry():
     else:
         assert region.gpu_duration_ns is None
         assert not region.gpu_timestamp_exact
+    pipeline = report.pipeline
+    assert ticket.pipeline_report() == pipeline
+    assert pipeline.sequence == ticket.sequence
+    assert pipeline.backend == "vulkan"
+    assert pipeline.stage_count == 1
+    assert pipeline.stages[0].path_id == region.path_id
+    assert pipeline.stages[0].kind == "while"
+    assert pipeline.stages[0].gpu_duration_ns == region.gpu_duration_ns
+    assert pipeline.stages[0].gpu_timestamp_status == region.gpu_timestamp_status
     memory = graph.execution_stats().memory
     assert memory.persistent_telemetry_bytes == 24
     assert memory.telemetry_arena_slots == 1
@@ -4815,6 +4920,14 @@ def test_structured_graph_cuda_ticket_reports_opt_in_region_telemetry():
     assert region.gpu_timestamp_exact
     assert region.gpu_measurement_path_changed
     assert region.gpu_queue_or_stream_id == "cuda:0"
+    pipeline = report.pipeline
+    assert ticket.pipeline_report() == pipeline
+    assert pipeline.sequence == ticket.sequence
+    assert pipeline.backend == "cuda"
+    assert pipeline.stage_count == 1
+    assert pipeline.stages[0].path_id == region.path_id
+    assert pipeline.stages[0].gpu_duration_ns == region.gpu_duration_ns
+    assert pipeline.stages[0].gpu_timestamp_exact
     assert graph.execution_stats().memory.persistent_telemetry_bytes == 24
 
 
@@ -4900,7 +5013,7 @@ def test_graph_ticket_reports_whole_gpu_timing_without_structured_regions():
     assert not graph._instance.structured_telemetry_arena_stats["materialized"]
 
     report = graph.submit(args, telemetry=True).telemetry()
-    assert report.schema_version == 3
+    assert report.schema_version == 4
     assert report.backend in ("cuda", "vulkan")
     assert report.regions == ()
     assert report.device_snapshot_bytes == 0
@@ -4915,6 +5028,19 @@ def test_graph_ticket_reports_whole_gpu_timing_without_structured_regions():
     else:
         assert report.gpu_duration_ns is None
         assert not report.gpu_timestamp_exact
+    pipeline = report.pipeline
+    assert pipeline.backend == report.backend
+    assert pipeline.sequence == report.sequence
+    assert pipeline.stage_count == 1
+    assert pipeline.dispatch_count == 1
+    assert pipeline.physical_dispatch_count == 1
+    assert pipeline.native_action_count == 0
+    assert pipeline.gpu_duration_ns == report.gpu_duration_ns
+    stage = pipeline.stages[0]
+    assert stage.kind == "cgraph"
+    assert stage.path_id == "root/0"
+    assert stage.gpu_duration_ns is None
+    assert stage.gpu_timestamp_scope == "unavailable"
     arena = graph._instance.structured_telemetry_arena_stats
     assert arena["materialized"]
     assert arena["slots"] == 1
