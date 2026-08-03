@@ -1,3 +1,6 @@
+import concurrent.futures
+import threading
+
 import numpy as np
 import pytest
 
@@ -71,7 +74,7 @@ def test_dynamic_work_capabilities_separate_launch_and_iteration_semantics():
             "cuda_device_update_symbols_unavailable",
             "cuda_device_update_lowering_not_compiled",
             "cuda_device_update_probe_not_run",
-            "auto_exact_route_pending_performance_qualification",
+            "auto_exact_route_not_selected_by_performance_qualification",
         )
         assert iteration["command_termination_exact"] == (
             iteration["execution_semantics"] == "exact_dynamic_termination"
@@ -85,7 +88,7 @@ def test_dynamic_work_capabilities_separate_launch_and_iteration_semantics():
             assert bounded["execution_semantics"] == "masked_capacity"
             assert bounded["requested_route"] == "auto"
             assert bounded["fallback_reason"] == (
-                "cpu_exact_scheduler_lowering_not_qualified"
+                "auto_exact_route_not_selected_by_performance_qualification"
             )
         assert iteration["execution_semantics"] == "portable_host_control"
 
@@ -367,6 +370,129 @@ def test_cuda_exact_bounded_dispatch_replay_and_rebind(monkeypatch):
 
     report = graph.execution_stats()
     assert report.memory.persistent_argument_bytes >= 32
+    assert report.memory.persistent_bounded_control_bytes == 32
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_exact_bounded_dispatch_two_graph_concurrent_replay(monkeypatch):
+    arch = ti.lang.impl.current_cfg().arch
+    if arch == ti.cuda:
+        probe = dict(ti_core.cuda_bounded_dispatch_probe())
+        if not probe["exact_device_grid_available"]:
+            pytest.skip(probe["unavailable_reason"])
+        monkeypatch.setenv("TI_CUDA_BOUNDED_DISPATCH_MODE", "device_update")
+    else:
+        monkeypatch.setenv("TI_CPU_BOUNDED_DISPATCH_MODE", "exact_scheduler")
+
+    capacity = 257
+    block_dim = 64
+
+    @ti.kernel
+    def clear(
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        visited: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        visited[0] = 0
+        for i in range(capacity):
+            output[i] = -1
+
+    @ti.kernel
+    def produce(
+        requested: ti.i32,
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.device_extent_publish(extent, capacity, requested)
+
+    @ti.kernel
+    def consume(
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        visited: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        token: ti.i32,
+    ):
+        ti.loop_config(block_dim=block_dim)
+        for i in range(capacity):
+            ti.atomic_add(visited[0], 1)
+            if i < ti.device_extent_count(extent):
+                output[i] = token + i
+
+    requested_arg = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "requested", ti.i32
+    )
+    extent_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "extent", ti.i32, ndim=1
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    visited_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "visited", ti.i32, ndim=1
+    )
+    token_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "token", ti.i32)
+
+    def make_graph():
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(clear, output_arg, visited_arg)
+        builder.dispatch(produce, requested_arg, extent_arg)
+        handle = builder.dispatch_bounded(
+            consume,
+            extent_arg,
+            output_arg,
+            visited_arg,
+            token_arg,
+            extent=extent_arg,
+            capacity=capacity,
+            block_dim=block_dim,
+        )
+        return builder.compile(), handle
+
+    graphs_and_handles = (make_graph(), make_graph())
+    extents = (ti.DeviceExtent(capacity), ti.DeviceExtent(capacity))
+    outputs = (
+        ti.ndarray(ti.i32, shape=capacity),
+        ti.ndarray(ti.i32, shape=capacity),
+    )
+    visited = (ti.ndarray(ti.i32, shape=1), ti.ndarray(ti.i32, shape=1))
+    tokens = (1000, 2000)
+    runtime_args = tuple(
+        {
+            "requested": 0,
+            "extent": extents[index],
+            "output": outputs[index],
+            "visited": visited[index],
+            "token": tokens[index],
+        }
+        for index in range(2)
+    )
+    for index, (graph, _) in enumerate(graphs_and_handles):
+        graph.run(runtime_args[index])
+    ti.sync()
+
+    counts = (0, 1, 65, capacity, 17, capacity - 1)
+    barrier = threading.Barrier(2)
+
+    def replay(index):
+        graph, _ = graphs_and_handles[index]
+        args = runtime_args[index]
+        barrier.wait()
+        for replay_index in range(64):
+            args["requested"] = counts[replay_index % len(counts)]
+            graph.run(args)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        futures = tuple(executor.submit(replay, index) for index in range(2))
+        for future in futures:
+            future.result()
+    ti.sync()
+
+    final_count = counts[63 % len(counts)]
+    for index, (_, handle) in enumerate(graphs_and_handles):
+        snapshot = handle.snapshot(extents[index])
+        assert snapshot.useful_count == final_count
+        assert int(visited[index].to_numpy()[0]) == snapshot.executed_count
+        expected = np.full(capacity, -1, dtype=np.int32)
+        expected[:final_count] = tokens[index] + np.arange(final_count)
+        np.testing.assert_array_equal(outputs[index].to_numpy(), expected)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
@@ -616,7 +742,12 @@ def test_graph_device_prefix_sequence_publishes_bounded_launch_state():
     assert handle.capabilities.producer_owned_launch_state == (
         ti.lang.impl.current_cfg().arch == ti.vulkan
     )
-    assert handle.capabilities.preparation_dispatches == 0
+    assert handle.capabilities.preparation_dispatches == (
+        1
+        if ti.lang.impl.current_cfg().arch == ti.cuda
+        and handle.capabilities.exact_grid
+        else 0
+    )
     assert handle.workspace_allocation_count == 0
     assert handle.workspace_bytes == 0
     assert graph._debug_info["nodes"][0]["kind"] == "device_prefix_sequence"

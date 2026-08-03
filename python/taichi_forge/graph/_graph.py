@@ -1263,6 +1263,7 @@ class GraphExecutionSegmentReport:
     backend_replay_path: bool
     zero_arg_eligible: bool
     persistent_argument_bytes: int
+    persistent_bounded_control_bytes: int
     last_driver_error: int
     retry_backoff_remaining: int
     consecutive_transient_failures: int
@@ -1275,6 +1276,7 @@ class GraphMemoryReport:
     """Known Graph-owned memory; driver-internal memory remains unknown."""
 
     persistent_argument_bytes: int
+    persistent_bounded_control_bytes: int
     persistent_observation_bytes: int
     persistent_temporary_bytes: int
     persistent_bytes: int
@@ -1545,7 +1547,7 @@ def _bounded_route(backend, ordered):
             "forced_masked_capacity"
             if requested_route == "masked_capacity"
             else (
-                "auto_exact_route_pending_performance_qualification"
+                "auto_exact_route_not_selected_by_performance_qualification"
                 if cuda_capabilities["exact_device_grid_available"]
                 else cuda_capabilities["unavailable_reason"]
             )
@@ -1598,7 +1600,7 @@ def _bounded_route(backend, ordered):
         fallback_reason = (
             "forced_masked_capacity"
             if requested_route == "masked_capacity"
-            else "cpu_exact_scheduler_lowering_not_qualified"
+            else "auto_exact_route_not_selected_by_performance_qualification"
         )
         range_mapping = "cpu_scheduler"
         minimum_driver_api_version = None
@@ -2554,6 +2556,7 @@ def _empty_backend_stats():
             "last_fallback_reason": "none",
             "zero_arg_eligible": False,
             "known_persistent_argument_bytes": 0,
+            "known_bounded_control_bytes": 0,
             "known_compiled_tasks": 0,
             "known_compiled_dispatches": 0,
             "last_driver_error": 0,
@@ -3188,6 +3191,7 @@ def _execution_report(
                     backend_replay_path=False,
                     zero_arg_eligible=False,
                     persistent_argument_bytes=0,
+                    persistent_bounded_control_bytes=0,
                     last_driver_error=0,
                     retry_backoff_remaining=0,
                     consecutive_transient_failures=0,
@@ -3249,6 +3253,9 @@ def _execution_report(
                 persistent_argument_bytes=int(
                     stats.get("known_persistent_argument_bytes", 0)
                 ),
+                persistent_bounded_control_bytes=int(
+                    stats.get("known_bounded_control_bytes", 0)
+                ),
                 last_driver_error=int(stats.get("last_driver_error", 0)),
                 retry_backoff_remaining=int(stats.get("retry_backoff_remaining", 0)),
                 consecutive_transient_failures=int(
@@ -3294,6 +3301,10 @@ def _execution_report(
         int(stats.get("known_persistent_argument_bytes", 0))
         for stats in flat_backend_stats
     )
+    persistent_bounded_control_bytes = sum(
+        int(stats.get("known_bounded_control_bytes", 0))
+        for stats in flat_backend_stats
+    )
     temporary_memory_plan = temporary_memory_plan or {}
     temporary_arena_stats = temporary_arena_stats or {}
     observation_arena_stats = observation_arena_stats or {}
@@ -3307,6 +3318,7 @@ def _execution_report(
     persistent_telemetry_bytes = int(telemetry_arena_stats.get("reserved_bytes", 0))
     memory = GraphMemoryReport(
         persistent_argument_bytes=persistent_argument_bytes,
+        persistent_bounded_control_bytes=persistent_bounded_control_bytes,
         persistent_observation_bytes=persistent_observation_bytes,
         persistent_temporary_bytes=persistent_temporary_bytes,
         persistent_bytes=(

@@ -4062,6 +4062,8 @@ void export_lang(py::module &m) {
         result["zero_arg_eligible"] = stats.zero_arg_eligible;
         result["known_persistent_argument_bytes"] =
             stats.known_persistent_argument_bytes;
+        result["known_bounded_control_bytes"] =
+            stats.known_bounded_control_bytes;
         result["known_compiled_tasks"] =
             snapshot.known_compiled_tasks;
         result["known_compiled_dispatches"] =

@@ -1007,6 +1007,15 @@ struct CompiledGraphCudaState {
     allocation_leases.clear();
   }
 
+  uint64_t known_bounded_control_bytes() const {
+    return std::count_if(
+               bounded_dispatch_controls.begin(),
+               bounded_dispatch_controls.end(), [](const auto &control) {
+                 return control.device_control != nullptr;
+               }) *
+           sizeof(cuda::CudaGraphBoundedExtentControl);
+  }
+
   uint64_t known_persistent_argument_bytes() const {
     uint64_t bytes = conditional_control == nullptr
                          ? 0
@@ -1014,8 +1023,7 @@ struct CompiledGraphCudaState {
     if (masked_gate != nullptr) {
       bytes += sizeof(std::uint32_t);
     }
-    bytes += bounded_dispatch_controls.size() *
-             sizeof(cuda::CudaGraphBoundedExtentControl);
+    bytes += known_bounded_control_bytes();
     for (const auto &packet : packets) {
       bytes += packet.packet.device_arg_buffer_size;
     }
@@ -3080,6 +3088,8 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
     }
     result.known_persistent_argument_bytes =
         cuda_graph_state->known_persistent_argument_bytes();
+    result.known_bounded_control_bytes =
+        cuda_graph_state->known_bounded_control_bytes();
     const auto &active_retry = cuda_graph_state->masked_mode
                                    ? cuda_graph_state->masked_retry
                                    : cuda_graph_state->retry;

@@ -378,6 +378,7 @@ struct CompiledGraphStats {
   uint64_t deferred_replay_waits{0};
   uint64_t peak_deferred_replay_batches{0};
   uint64_t known_persistent_argument_bytes{0};
+  uint64_t known_bounded_control_bytes{0};
   uint64_t last_driver_error{0};
   uint32_t retry_backoff_remaining{0};
   uint64_t effect_reads{0};
