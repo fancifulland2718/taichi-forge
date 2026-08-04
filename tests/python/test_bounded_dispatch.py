@@ -764,6 +764,80 @@ def test_cuda_grouped_stateful_bounded_update_shares_one_updater(monkeypatch):
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_grouped_updater_telemetry_is_lazily_enabled(monkeypatch):
+    probe = dict(ti_core.cuda_bounded_dispatch_probe())
+    if not probe["exact_device_grid_available"]:
+        pytest.skip(probe["unavailable_reason"])
+    monkeypatch.setenv("TI_CUDA_BOUNDED_DISPATCH_MODE", "device_update")
+    monkeypatch.setenv(
+        "TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY", "grouped_stateful"
+    )
+
+    capacity = 65
+    block_dim = 32
+
+    @ti.kernel
+    def publish(
+        requested: ti.i32,
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.device_extent_publish(extent, capacity, requested)
+
+    @ti.kernel
+    def consume(
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        observed: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.loop_config(block_dim=block_dim)
+        for i in range(capacity):
+            if i < ti.device_extent_count(extent):
+                ti.atomic_add(observed[0], 1)
+
+    requested_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "requested", ti.i32)
+    extent_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "extent", ti.i32, ndim=1)
+    observed_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "observed", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(publish, requested_arg, extent_arg)
+    for _ in range(2):
+        builder.dispatch_bounded(
+            consume,
+            extent_arg,
+            observed_arg,
+            extent=extent_arg,
+            capacity=capacity,
+            block_dim=block_dim,
+        )
+    graph = builder.compile()
+    extent = ti.DeviceExtent(capacity)
+    observed = ti.ndarray(ti.i32, shape=1)
+    args = {"requested": 17, "extent": extent, "observed": observed}
+
+    # Materialize and initialize the stateful updater before diagnostics are
+    # requested. The first snapshot enables device counters for later replays
+    # without rewriting the cached launch state.
+    graph.run(args)
+    first = graph.execution_stats().segments[0]
+    assert first.bounded_update_replays == 0
+    assert first.bounded_update_state_changes == 0
+    assert first.bounded_update_cache_hits == 0
+    assert first.bounded_node_api_calls == 0
+
+    graph.run(args)
+    graph.run(args)
+    report = graph.execution_stats()
+    segment = report.segments[0]
+    assert segment.bounded_max_group_size == 2
+    assert segment.bounded_update_replays == 2
+    assert segment.bounded_update_state_changes == 0
+    assert segment.bounded_update_cache_hits == 2
+    assert segment.bounded_node_api_calls == 0
+    assert report.memory.persistent_bounded_control_bytes == 96
+    assert int(observed.to_numpy()[0]) == 3 * 2 * 17
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_cuda_launch_state_compatibility_keeps_per_node_ownership(monkeypatch):
     probe = dict(ti_core.cuda_bounded_dispatch_probe())
     if not probe["exact_device_grid_available"]:
