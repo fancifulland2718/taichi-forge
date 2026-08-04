@@ -527,6 +527,21 @@ count 下为 1.049x/1.040x/1.012x。所有路线输出一致；默认 exact rout
 replay 中 runtime memory 不增长。这些结果支持默认启用 logical exactness，但不支持默认启用
 12.4+ updater。
 
+随后又针对重复 bounded payload 对 adaptive route 做了资格测试。两个或更多连续、且
+extent/capacity/block 合同相同的 payload 现在共享一个 stateful updater；单个 payload 保持
+逐节点 control。64 payload、16,777,216 items、每项一次操作、1% useful work 时，grouped
+策略在重复资格测试中的 zero/1%/full count 相比逐节点 control 约快
+1.3x/1.9x/1.04x；一次低离散度 full-count 复测为 grouped 5056 us、per-node 5420 us。
+persistent bounded-control storage 从 2,048 B 降到 560 B。
+该基准仍显式强制 `device_update`，不会把通用 CUDA 默认路线从 logical exactness 改掉。
+
+Vulkan standalone bounded consumer 也用相同原则摊薄 packet preparation。连续匹配 consumer
+共享一个准备好的 12-byte packet，任何中间 action 都会使其失效。64 consumer、4,194,304
+items、每项一次操作时，zero/1%/full median 从 3.14/3.14/3.17 ms 降到
+1.68/1.70/1.72 ms，packet storage 从 768 B 降到 12 B；bounded/fixed ratio 从约
+0.53-0.54x 恢复到 0.97-0.98x。长 replay 资格测试遵守 Vulkan 有界的八槽 in-flight
+ownership，且 memory 保持稳定。
+
 recorded worklist finalize 现在无需公共 launch-state 对象也能获得同一优化。相邻的
 `DeviceWorklistSequence.finalize_next()` 与一个或多个匹配 bounded consumer 会让 Vulkan
 lowering 向 producer 提供一个 Graph-owned 16-byte packet，在同一次 dispatch 中发布 count

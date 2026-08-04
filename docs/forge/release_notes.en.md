@@ -74,6 +74,17 @@ grouped under the behavior they shipped.
   faster at 10% of a 4,194,304-item capacity; at a 16,777,216-item capacity it
   was 4.9%/4.0%/1.2% faster at zero/1%/full count. The adaptive route has a
   workload-dependent updater crossover and therefore is not the default.
+- The opt-in CUDA 12.4+ adaptive physical route now groups two or more
+  consecutive bounded payloads with the same extent/capacity/block contract
+  under one stateful updater. Persistent grid/enabled state is reused when it
+  is unchanged; singleton payloads retain the per-node route. In a 64-payload,
+  16,777,216-capacity, one-operation qualification, grouped/stateful replay
+  was about 1.3x/1.9x/1.04x faster than per-node control at zero/1%/full count
+  across repeated runs; a stable full-count rerun measured 5056 us versus
+  5420 us. Persistent bounded-control storage fell from 2,048 to 560 bytes,
+  and 1,000 alternating replays retained stable ownership. These
+  figures qualify the policy crossover on the tested RTX 5090 rather than
+  making the adaptive route the general CUDA default.
 - CUDA structured control now has a Forge-owned bounded masked Graph route for
   drivers older than 12.8. Qualified Driver API 12.8+ runtimes continue to use
   native conditional Graph nodes; older runtimes use a device latch and
@@ -182,6 +193,13 @@ grouped under the behavior they shipped.
   while ordered segmented CPU dispatch retains its globally ordered masked
   route. CUDA reports logical exactness separately from its saturation-capped
   static or 12.4+ adaptive physical launch.
+  Consecutive standalone Vulkan consumers with the same extent, capacity, and
+  block dimension now share one prepared 12-byte packet; any intervening
+  action conservatively invalidates it. In a 64-consumer, 4,194,304-capacity,
+  one-operation qualification, packet reuse reduced zero/1%/full medians from
+  3.14/3.14/3.17 ms to 1.68/1.70/1.72 ms and reduced packet storage from 768
+  to 12 bytes. The bounded/fixed median ratio recovered from about 0.53-0.54x
+  to 0.97-0.98x; 1,000 bounded-slot replays retained stable ownership.
   Overflow, useful/executed/skipped/encoded work, invalid offsets, workspace,
   and zero-command behavior are available through capability and explicit
   snapshot objects. Provider-qualified recorded producers can now publish a

@@ -497,7 +497,7 @@ observation；ticket completion 后可由 `decode_observation(mapping)` 返回
 consumer 会自动共享 Graph-owned packet，并删除 consumer preparation dispatch。把匹配的
 producer-owned `DeviceDispatchState` 同时交给两端，仍可用于显式 finalize/select/claim packet
 publication。CUDA 上的 `launch_state` 只作为 capacity、extent identity 与 block geometry 的
-兼容适配；Driver API 12.4 exact route 通过 Graph-owned per-node control 读取 extent，不消费
+兼容适配；Driver API 12.4 exact route 通过 Graph-owned control 读取 extent，不消费
 外部 packet。实际物理 route 应查询 `dynamic_work_capabilities()`。
 
 ### Primitive 算法
@@ -1015,10 +1015,12 @@ lowering 合同会如实区分后端：
 publication specialization；每个 handle 的 `preparation_dispatches` 才表示该处 producer/
 consumer 布局是否实际采用。
 
-CUDA 12.4+ adaptive Graph 的 `TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY` 接受 `auto` 或 `per_node`，两者都
-选择经过资格验证的逐节点 updater。旧实验值 `grouped` 与 `fused` 现在会明确拒绝，不能再
-改变公共资源所有权。逐 segment execution report 会暴露实际 updater 数、control bytes 与
-last-driver-error；grouped/fused counter 为保持 schema 兼容而保留，在该路线中为零。
+CUDA 12.4+ adaptive Graph 的 `TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY` 接受 `auto`、
+`grouped_stateful` 或 `per_node`。`auto` 选择内部 grouped/stateful 策略：两个或更多连续且
+extent、capacity、block dimension 完全相同的 payload 共享一个 updater；grid/enabled 未变化时
+在遍历 node array 或调用持久 node-update API 之前直接返回。单个 payload 保持逐节点 updater，任何不同或中间 dispatch 都会
+结束分组。`per_node` 保留为保守 A/B 路线。逐 segment execution report 会暴露实际 updater
+group、grouped payload、control bytes 与 last-driver-error，不改变公共资源所有权。
 
 `ti.graph.dynamic_work_capabilities()` 返回 schema-v4 report，把 count owner、bounded
 launch、structured iteration termination、worklist 与 ticket observation 分成独立维度。
@@ -1034,12 +1036,14 @@ conditional termination 报成 exact indirect grid launch。
 index。offset 会先钳制以保证执行安全；显式 snapshot 通过总 `overflow` 和逐 segment
 `invalid_offsets` 报告非法 topology。固定 segment count 必须在 `[1, 4096]`。
 
-这些接口只用于 JIT Graph，AOT export 会明确失败。standalone Vulkan bounded dispatch 的
-Graph-instance packet 为 12 bytes；自动 specialized worklist publication 持有一个共享的
-16-byte packet，不增加 preparation dispatch，连续匹配 consumer 也不增加 allocation。
+这些接口只用于 JIT Graph，AOT export 会明确失败。extent、capacity、block dimension 完全
+相同的连续 standalone Vulkan consumer 会共享一个 12-byte Graph-instance packet 和一次
+preparation dispatch；中间出现任何 action 都会保守地重新创建 packet。自动 specialized
+worklist publication 则持有一个共享的 16-byte packet，并完全删除 preparation dispatch。
 Vulkan ordered dispatch 为 32 bytes；CPU/CUDA bounded 不使用 Python-owned workspace，
 ordered 使用 20 bytes。默认 CUDA exact route 每个 payload 使用私有的 16-byte argument
-prefix；12.4+ adaptive route 还会额外使用 32 persistent control bytes。显式的
+prefix；12.4+ adaptive 的逐节点 route 每个 payload 使用 32-byte persistent control，
+grouped route 使用一个 48-byte control 加每个 grouped payload 一个 8-byte node handle。显式的
 producer-owned Vulkan launch state 仍是 external 16-byte 兼容 state，并报告 internal packet
 为 0 byte。exact 物理工作量减少不等于无条件提速：轻量、standalone Vulkan payload 可能因
 packet preparation 与依赖成本而慢于 fixed Graph。应以完整 workload 同时对比 fixed Graph

@@ -582,8 +582,8 @@ consumer preparation dispatch. A matching producer-owned
 `DeviceDispatchState` on both sides remains supported for explicit
 finalize/select/claim packet publication. On CUDA, `launch_state` is only a
 compatibility adapter for capacity, extent identity, and block geometry; the
-exact Driver API 12.4 route reads the extent through Graph-owned per-node
-control and does not consume the external packet. Inspect
+exact Driver API 12.4 route reads the extent through Graph-owned controls and
+does not consume the external packet. Inspect
 `dynamic_work_capabilities()` for the selected physical route.
 
 ### Primitive Algorithms
@@ -1182,12 +1182,16 @@ host-known handle reports the same data without synchronization. On Vulkan,
 publication specialization; each handle's `preparation_dispatches` reports
 whether that particular producer/consumer placement actually used it.
 
-On CUDA 12.4+ adaptive graphs, `TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY` accepts `auto` or
-`per_node`; both select the qualified per-node updater. The former experimental
-`grouped` and `fused` values are rejected instead of changing public resource
-ownership. Per-segment execution reports expose the actual updater count,
-control bytes, and last driver error. Grouped/fused counters remain in the
-schema for compatibility and are zero on this route.
+On CUDA 12.4+ adaptive graphs, `TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY` accepts
+`auto`, `grouped_stateful`, or `per_node`. `auto` selects the internal
+grouped/stateful policy: two or more consecutive payloads with the same
+extent, capacity, and block dimension share one updater, and unchanged
+grid/enabled state returns before traversing the node array or issuing
+persistent node-update calls. A singleton retains the
+per-node updater. Any different or intervening dispatch terminates the group.
+`per_node` remains the conservative A/B route. Per-segment execution reports
+expose actual updater groups, grouped payloads, control bytes, and the last
+driver error; this changes no public resource ownership.
 
 `ti.graph.dynamic_work_capabilities()` returns a schema-v4 report that keeps
 the count owner, bounded launch, structured iteration termination, worklist,
@@ -1207,14 +1211,17 @@ against the segment count. Offsets are clamped for safe execution; an explicit
 snapshot reports invalid topology through `overflow` and per-segment
 `invalid_offsets`. The segment count is fixed in `[1, 4096]`.
 
-These APIs are JIT Graph features. AOT export fails explicitly. A standalone
-Vulkan bounded dispatch owns a 12-byte Graph-instance packet, while an
-automatically specialized worklist publication owns one shared 16-byte packet
-and adds no preparation dispatch; consecutive matching consumers do not add
-allocations. Vulkan ordered dispatch uses 32 bytes. CPU/CUDA bounded dispatch
-uses no Python-owned workspace and ordered dispatch uses 20 bytes. The default
-CUDA exact route adds a private 16-byte argument prefix per payload; the 12.4+
-adaptive route additionally uses 32 persistent control bytes per payload. An explicit producer-owned
+These APIs are JIT Graph features. AOT export fails explicitly. Consecutive
+standalone Vulkan consumers with the same extent, capacity, and block
+dimension share one 12-byte Graph-instance packet and one preparation
+dispatch; an intervening action conservatively starts a new packet. An
+automatically specialized worklist publication instead owns one shared
+16-byte packet and adds no preparation dispatch. Vulkan ordered dispatch uses
+32 bytes. CPU/CUDA bounded dispatch uses no Python-owned workspace and ordered
+dispatch uses 20 bytes. The default CUDA exact route adds a private 16-byte
+argument prefix per payload. The 12.4+ adaptive per-node route uses 32
+persistent control bytes per payload; a grouped route uses one 48-byte control
+plus one eight-byte node handle per grouped payload. An explicit producer-owned
 Vulkan launch state remains an external 16-byte compatibility state and reports
 zero internal packet bytes. Exact physical work reduction is not a universal
 speedup: a light standalone Vulkan payload can cost more than a fixed Graph

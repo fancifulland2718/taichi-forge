@@ -61,6 +61,13 @@
   在这台 Windows CUDA 机器上，4,194,304 项容量的 full count 与 masked 相差不到 0.4%，10%
   count 快 2.2%；16,777,216 项容量下 zero/1%/full count 分别快 4.9%/4.0%/1.2%。adaptive
   route 存在依 workload 而变的 updater crossover，因此不作为默认路线。
+- 可选的 CUDA 12.4+ adaptive 物理路线现在会把两个或更多连续、且
+  extent/capacity/block 合同相同的 bounded payload 交给一个 stateful updater。grid/enabled
+  未变化时复用持久状态，单个 payload 保持逐节点路线。在 64 payload、16,777,216 capacity、
+  每项一次操作的重复资格测试中，grouped/stateful 在 zero/1%/full count 相比逐节点 control
+  约快 1.3x/1.9x/1.04x；一次低离散度 full-count 复测为 5056 us 对 5420 us。persistent
+  bounded control 从 2,048 B 降到 560 B，1,000 次交替 replay 中 ownership 保持稳定。这些结果只限定本次
+  RTX 5090 上的策略 crossover，不会把 adaptive route 提升为通用 CUDA 默认路线。
 - CUDA structured control 新增 Forge 自有的 bounded masked Graph 路径，覆盖低于 12.8 的
   driver。满足资格的 Driver API 12.8+ runtime 继续使用原生 conditional Graph node；较旧
   runtime 在普通 CUDA Graph capture 可用时使用 device latch 与 task-entry gate，否则保留
@@ -138,7 +145,13 @@
   具有全局顺序的 offset range。Vulkan 使用 device-written indirect packet 与编译器证明的
   one-to-one range mapping。CPU 的普通 bounded dispatch 使用 exact adaptive scheduler，
   ordered segmented CPU dispatch 则保留全局有序的 masked route；CUDA 会分别如实报告 logical
-  exactness 与 saturation-capped static 或 12.4+ adaptive physical launch。capability 与显式
+  exactness 与 saturation-capped static 或 12.4+ adaptive physical launch。extent、capacity、
+  block dimension 相同的连续 standalone Vulkan consumer 现在共享一个已准备的 12-byte
+  packet；任何中间 action 都会保守失效。在 64 consumer、4,194,304 capacity、每项一次操作的
+  资格测试中，packet 复用把 zero/1%/full median 从 3.14/3.14/3.17 ms 降到
+  1.68/1.70/1.72 ms，packet storage 从 768 B 降到 12 B；bounded/fixed median ratio 从约
+  0.53-0.54x 恢复到 0.97-0.98x，1,000 次 bounded-slot replay 中 ownership 保持稳定。
+  capability 与显式
   snapshot 可观察 overflow、useful/executed/skipped/encoded work、非法 offset、workspace 与
   zero-command 行为。通过资格的 recorded producer 现在可直接发布 Graph-owned Vulkan
   packet；中间插入其他 action 会恢复保守 prepare 路线。Vulkan exact 工作量减少不被表述为

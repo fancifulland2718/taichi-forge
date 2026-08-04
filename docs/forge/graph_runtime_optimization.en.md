@@ -673,6 +673,26 @@ route added one 32-byte persistent control per payload, and 2,000 alternating
 replays retained non-growing runtime memory. These results support defaulting
 to logical exactness without defaulting to the 12.4+ updater.
 
+The adaptive route was then requalified for repeated bounded payloads. Two or
+more consecutive payloads with the same extent/capacity/block contract now
+share one stateful updater; a singleton retains per-node control. With 64
+payloads, 16,777,216 items, one operation, and 1% useful work, the grouped
+policy was about 1.3x/1.9x/1.04x faster than per-node control at
+zero/1%/full count across repeated qualification; a stable full-count rerun
+measured 5056 us grouped versus 5420 us per-node. Persistent bounded-control
+storage fell from 2,048 to 560 bytes. The benchmark still forces
+`device_update`: this optimization does not change the general CUDA default
+from logical exactness.
+
+Vulkan standalone bounded consumers now apply the same amortization principle
+to packet preparation. Consecutive matching consumers share one prepared
+12-byte packet; any intervening action invalidates it. In a 64-consumer,
+4,194,304-item, one-operation run, zero/1%/full medians fell from
+3.14/3.14/3.17 ms to 1.68/1.70/1.72 ms, while packet storage fell from 768 to
+12 bytes. Bounded/fixed ratios recovered from about 0.53-0.54x to 0.97-0.98x.
+The long replay qualification stayed within Vulkan's bounded eight-slot
+in-flight ownership and retained stable memory.
+
 Recorded worklist finalization now provides the same optimization without a
 public launch-state object. When `DeviceWorklistSequence.finalize_next()` is
 adjacent to one or more matching bounded consumers, Vulkan lowering gives the
