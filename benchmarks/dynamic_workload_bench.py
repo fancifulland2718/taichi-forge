@@ -744,6 +744,342 @@ def _cuda_route_comparison(args):
     }
 
 
+def _dynamic_count_sequences(capacity, block_dim, sparse_percent, length, seed):
+    sparse = capacity * sparse_percent // 100
+    sparse = min(capacity, max(0, sparse))
+    second_sparse = min(capacity, max(sparse + block_dim, capacity // 2))
+    boundary_values = tuple(
+        min(capacity, max(0, value))
+        for value in (
+            0,
+            1,
+            block_dim - 1,
+            block_dim,
+            block_dim + 1,
+            2 * block_dim - 1,
+            2 * block_dim,
+            sparse,
+            capacity,
+        )
+    )
+    rng = random.Random(seed)
+    random_values = tuple(rng.randrange(capacity + 1) for _ in range(length))
+
+    def repeat(pattern):
+        return tuple(pattern[index % len(pattern)] for index in range(length))
+
+    burst_pattern = tuple(
+        value for value in (0, sparse, capacity, second_sparse) for _ in range(8)
+    )
+    return {
+        "constant_zero": repeat((0,)),
+        "constant_sparse": repeat((sparse,)),
+        "constant_full": repeat((capacity,)),
+        "alternating_zero_full": repeat((0, capacity)),
+        "alternating_sparse_full": repeat((sparse, capacity)),
+        "bursty": repeat(burst_pattern),
+        "sawtooth": repeat(boundary_values),
+        "random": random_values,
+    }
+
+
+def _planned_state_transitions(sequence, capacity, block_dim):
+    # Each timed batch is primed with the last value, so the first replay has
+    # the same predecessor as a continuously repeated sequence.
+    def state(count):
+        clamped = min(capacity, max(0, count))
+        return (clamped != 0, (clamped + block_dim - 1) // block_dim)
+
+    previous = state(sequence[-1])
+    changes = 0
+    for count in sequence:
+        current = state(count)
+        if current != previous:
+            changes += 1
+        previous = current
+    return {
+        "replays": len(sequence),
+        "state_changes": changes,
+        "cache_hits": len(sequence) - changes,
+        "state_change_rate": changes / len(sequence),
+    }
+
+
+def _paired_dynamic_samples(variants, sequence, samples, seed):
+    names = tuple(variants)
+    orders = [list(names) for _ in range(samples)]
+    rng = random.Random(seed)
+    for order in orders:
+        rng.shuffle(order)
+    result = {name: [] for name in names}
+    for order in orders:
+        for name in order:
+            invoke = variants[name]
+            start = time.perf_counter_ns()
+            for count in sequence:
+                invoke(count)
+            ti.sync()
+            result[name].append(
+                (time.perf_counter_ns() - start) / len(sequence) / 1.0e3
+            )
+    return result
+
+
+def _cuda_update_policy_comparison(args):
+    """Compare CUDA bounded updater policies inside one initialized runtime."""
+
+    probe = dict(ti_core.cuda_bounded_dispatch_probe())
+    if not probe["exact_device_grid_available"]:
+        raise RuntimeError(
+            "CUDA updater-policy comparison requires device_update: "
+            + probe["unavailable_reason"]
+        )
+
+    capacity = args.graph_capacity
+    block_dim = args.block_dim
+    graph_node_count = args.graph_node_count
+    extent = ti.DeviceExtent(capacity)
+    input_values = ti.ndarray(ti.f32, shape=capacity)
+    input_values.from_numpy(
+        (np.arange(capacity, dtype=np.float32) % 251) * np.float32(0.001)
+        + np.float32(0.25)
+    )
+    policy_variants = [
+        ("grouped_stateful", "grouped_stateful"),
+        ("per_node", "per_node"),
+    ]
+    if args.cuda_updater_telemetry == "on":
+        policy_variants.append(("grouped_telemetry", "grouped_stateful"))
+    outputs = {
+        name: ti.ndarray(ti.f32, shape=capacity)
+        for name in ("fixed_graph",) + tuple(name for name, _ in policy_variants)
+    }
+
+    @ti.kernel
+    def publish(
+        requested: ti.i32,
+        state: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.device_extent_publish(state, capacity, requested)
+
+    @ti.kernel
+    def payload(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        source: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        ti.loop_config(block_dim=block_dim)
+        for i in range(capacity):
+            if i < ti.device_extent_count(state):
+                value = source[i]
+                for _ in ti.static(range(args.payload_work)):
+                    value = value * 0.99991 + ti.sin(value + i * 0.000001)
+                output[i] = value
+
+    requested_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "requested", ti.i32)
+    extent_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "extent", ti.i32, ndim=1)
+    input_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "input", ti.f32, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1)
+
+    fixed_builder = ti.graph.GraphBuilder()
+    fixed_builder.dispatch(publish, requested_arg, extent_arg)
+    for _ in range(graph_node_count):
+        fixed_builder.dispatch(payload, extent_arg, input_arg, output_arg)
+    fixed_graph = fixed_builder.compile()
+
+    graphs = {}
+    handles = {}
+    for name, policy in policy_variants:
+        os.environ["TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY"] = policy
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(publish, requested_arg, extent_arg)
+        handles[name] = tuple(
+            builder.dispatch_bounded(
+                payload,
+                extent_arg,
+                input_arg,
+                output_arg,
+                extent=extent_arg,
+                capacity=capacity,
+                block_dim=block_dim,
+            )
+            for _ in range(graph_node_count)
+        )
+        graphs[name] = builder.compile()
+
+    fixed_args = {
+        "requested": 0,
+        "extent": extent.state,
+        "input": input_values,
+        "output": outputs["fixed_graph"],
+    }
+    policy_args = {
+        name: {
+            "requested": 0,
+            "extent": extent,
+            "input": input_values,
+            "output": outputs[name],
+        }
+        for name in graphs
+    }
+
+    def invoke_fixed(count):
+        fixed_args["requested"] = count
+        fixed_graph.run(fixed_args)
+
+    def invoke_policy(name, count):
+        policy_args[name]["requested"] = count
+        graphs[name].run(policy_args[name])
+
+    variants = {
+        "fixed_graph": invoke_fixed,
+        "grouped_stateful": lambda count: invoke_policy(
+            "grouped_stateful", count
+        ),
+        "per_node": lambda count: invoke_policy("per_node", count),
+    }
+    if args.cuda_updater_telemetry == "on":
+        variants["grouped_telemetry"] = lambda count: invoke_policy(
+            "grouped_telemetry", count
+        )
+        graphs["grouped_telemetry"].execution_stats()
+    sequences = _dynamic_count_sequences(
+        capacity,
+        block_dim,
+        args.sparse_percent,
+        args.dynamic_sequence_rounds,
+        args.seed,
+    )
+    if args.dynamic_sequence != "all":
+        sequences = {args.dynamic_sequence: sequences[args.dynamic_sequence]}
+    for sequence in sequences.values():
+        for invoke in variants.values():
+            for count in sequence[: args.warmups]:
+                invoke(count)
+    ti.sync()
+
+    program = impl.get_runtime().prog
+    before = program._runtime_statistics_snapshot()["memory"]
+    host_pool_before = dict(ti_core.get_host_memory_pool_stats())
+    device_pool_before = dict(ti_core.get_device_memory_pool_stats())
+    cases = {}
+    for index, (name, sequence) in enumerate(sequences.items()):
+        for invoke in variants.values():
+            invoke(sequence[-1])
+        ti.sync()
+        telemetry_before = (
+            graphs["grouped_telemetry"].execution_stats().segments[0]
+            if args.cuda_updater_telemetry == "on"
+            else None
+        )
+        samples = _paired_dynamic_samples(
+            variants, sequence, args.samples, args.seed + index
+        )
+        telemetry_after = (
+            graphs["grouped_telemetry"].execution_stats().segments[0]
+            if args.cuda_updater_telemetry == "on"
+            else None
+        )
+        summary = _summarize(samples)
+        grouped_us = summary["grouped_stateful"]["median_us"]
+        per_node_us = summary["per_node"]["median_us"]
+        fixed_us = summary["fixed_graph"]["median_us"]
+        case_result = {
+            "planned": _planned_state_transitions(
+                sequence, capacity, block_dim
+            ),
+            "first_counts": list(sequence[: min(16, len(sequence))]),
+            "samples": summary,
+            "grouped_speedup_over_per_node": per_node_us / grouped_us,
+            "grouped_speedup_over_fixed": fixed_us / grouped_us,
+            "per_node_speedup_over_fixed": fixed_us / per_node_us,
+            "telemetry": (
+                {
+                    field: getattr(telemetry_after, field)
+                    - getattr(telemetry_before, field)
+                    for field in (
+                        "bounded_update_replays",
+                        "bounded_update_state_changes",
+                        "bounded_update_cache_hits",
+                        "bounded_node_api_calls",
+                    )
+                }
+                if telemetry_before is not None
+                else None
+            ),
+        }
+        if args.cuda_updater_telemetry == "on":
+            telemetry_us = summary["grouped_telemetry"]["median_us"]
+            case_result["telemetry_overhead_ratio"] = (
+                telemetry_us / grouped_us
+            )
+        cases[name] = case_result
+
+    correct = True
+    final_counts = {}
+    for name, sequence in sequences.items():
+        final_count = sequence[-1]
+        for output in outputs.values():
+            output.fill(-1)
+        for invoke in variants.values():
+            invoke(final_count)
+        ti.sync()
+        observed = {key: value.to_numpy() for key, value in outputs.items()}
+        reference = observed["fixed_graph"]
+        for output in observed.values():
+            correct = correct and np.allclose(
+                output[:final_count], reference[:final_count]
+            )
+            if final_count < capacity:
+                correct = correct and float(output[final_count]) == -1.0
+        final_counts[name] = {
+            name: handles[name][0].snapshot(extent).useful_count
+            for name in graphs
+        }
+
+    reports = {}
+    for name, graph in graphs.items():
+        report = graph.execution_stats()
+        segment = report.segments[0]
+        reports[name] = {
+            "execution_path": segment.last_path,
+            "fallback_reason": segment.fallback_reason,
+            "bounded_update_groups": segment.bounded_update_groups,
+            "bounded_updater_dispatches": segment.bounded_updater_dispatches,
+            "bounded_grouped_payloads": segment.bounded_grouped_payloads,
+            "bounded_max_group_size": segment.bounded_max_group_size,
+            "bounded_update_replays": segment.bounded_update_replays,
+            "bounded_update_state_changes": (
+                segment.bounded_update_state_changes
+            ),
+            "bounded_update_cache_hits": segment.bounded_update_cache_hits,
+            "bounded_node_api_calls": segment.bounded_node_api_calls,
+            "persistent_argument_bytes": report.memory.persistent_argument_bytes,
+            "persistent_bounded_control_bytes": (
+                report.memory.persistent_bounded_control_bytes
+            ),
+        }
+    after = program._runtime_statistics_snapshot()["memory"]
+    return {
+        "capacity": capacity,
+        "block_dim": block_dim,
+        "graph_node_count": graph_node_count,
+        "payload_work": args.payload_work,
+        "sequence_rounds": args.dynamic_sequence_rounds,
+        "cases": cases,
+        "reports": reports,
+        "final_counts": final_counts,
+        "correct": correct,
+        "runtime_memory_non_growth": _memory_non_growth(before, after),
+        "host_pool_stable": _pool_ownership_stable(
+            host_pool_before, dict(ti_core.get_host_memory_pool_stats())
+        ),
+        "device_pool_stable": _pool_ownership_stable(
+            device_pool_before, dict(ti_core.get_device_memory_pool_stats())
+        ),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--arch", choices=("cpu", "cuda", "vulkan"), required=True)
@@ -760,6 +1096,22 @@ def main():
     parser.add_argument("--warmups", type=int, default=5)
     parser.add_argument("--stress-replays", type=int, default=0)
     parser.add_argument("--memory-node-count", type=int, default=0)
+    parser.add_argument("--dynamic-sequence-rounds", type=int, default=200)
+    parser.add_argument(
+        "--dynamic-sequence",
+        choices=(
+            "all",
+            "constant_zero",
+            "constant_sparse",
+            "constant_full",
+            "alternating_zero_full",
+            "alternating_sparse_full",
+            "bursty",
+            "sawtooth",
+            "random",
+        ),
+        default="all",
+    )
     parser.add_argument("--seed", type=int, default=20260802)
     parser.add_argument(
         "--cuda-route",
@@ -776,6 +1128,16 @@ def main():
         choices=("auto", "reuse_consecutive", "per_consumer"),
         default="auto",
     )
+    parser.add_argument(
+        "--cuda-update-policy",
+        choices=("auto", "grouped_stateful", "per_node", "compare"),
+        default="auto",
+    )
+    parser.add_argument(
+        "--cuda-updater-telemetry",
+        choices=("off", "on"),
+        default="off",
+    )
     args = parser.parse_args()
     if not 0 <= args.sparse_percent <= 100:
         parser.error("--sparse-percent must be in [0, 100]")
@@ -789,6 +1151,7 @@ def main():
             args.prefix_rounds,
             args.graph_rounds,
             args.samples,
+            args.dynamic_sequence_rounds,
         )
         <= 0
     ):
@@ -798,8 +1161,14 @@ def main():
 
     if args.arch == "cuda":
         os.environ["TI_CUDA_BOUNDED_DISPATCH_MODE"] = (
-            "auto" if args.cuda_route == "compare" else args.cuda_route
+            "device_update"
+            if args.cuda_update_policy == "compare"
+            else "auto" if args.cuda_route == "compare" else args.cuda_route
         )
+        if args.cuda_update_policy != "compare":
+            os.environ["TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY"] = (
+                args.cuda_update_policy
+            )
     elif args.arch == "cpu":
         os.environ["TI_CPU_BOUNDED_DISPATCH_MODE"] = args.cpu_route
     elif args.arch == "vulkan":
@@ -807,7 +1176,9 @@ def main():
     arch = {"cpu": ti.cpu, "cuda": ti.cuda, "vulkan": ti.vulkan}[args.arch]
     ti.init(arch=arch, offline_cache=False)
     requested_route = (
-        args.cuda_route
+        "device_update"
+        if args.arch == "cuda" and args.cuda_update_policy == "compare"
+        else args.cuda_route
         if args.arch == "cuda"
         else args.cpu_route if args.arch == "cpu" else "not_applicable"
     )
@@ -838,14 +1209,26 @@ def main():
         "vulkan_packet_policy": (
             args.vulkan_packet_policy if args.arch == "vulkan" else "not_applicable"
         ),
+        "cuda_update_policy": (
+            args.cuda_update_policy if args.arch == "cuda" else "not_applicable"
+        ),
+        "cuda_updater_telemetry": (
+            args.cuda_updater_telemetry
+            if args.arch == "cuda"
+            else "not_applicable"
+        ),
     }
     if args.suite in ("all", "prefix"):
         result["device_prefix"] = _prefix_benchmark(args)
     if args.suite in ("all", "graph"):
         result["bounded_graph"] = (
-            _cuda_route_comparison(args)
-            if args.arch == "cuda" and args.cuda_route == "compare"
-            else _graph_benchmark(args)
+            _cuda_update_policy_comparison(args)
+            if args.arch == "cuda" and args.cuda_update_policy == "compare"
+            else (
+                _cuda_route_comparison(args)
+                if args.arch == "cuda" and args.cuda_route == "compare"
+                else _graph_benchmark(args)
+            )
         )
     print(json.dumps(result, indent=2, sort_keys=True))
 
