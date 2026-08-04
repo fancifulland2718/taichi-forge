@@ -337,7 +337,8 @@ def test_device_worklist_atomic_finalize_feeds_bounded_dispatch_and_report():
     else:
         assert not handle.capabilities.producer_owned_launch_state
         assert not report.exact_physical_grid
-        assert report.executed_count == capacity
+        assert handle.capabilities.logical_iteration_exact
+        assert report.executed_count == produced
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)

@@ -233,7 +233,7 @@ DONE:
 )
 {
     .reg .pred %p<9>;
-    .reg .b32 %r<16>;
+    .reg .b32 %r<17>;
     .reg .b64 %rd<4>;
     .param .b64 call_node;
     .param .b32 call_enabled;
@@ -251,6 +251,7 @@ DONE:
     ld.global.u64 %rd3, [%rd1+8];
     ld.global.u32 %r4, [%rd1+16];
     ld.global.u32 %r5, [%rd1+20];
+    ld.global.u32 %r16, [%rd1+28];
     ld.global.s32 %r6, [%rd3];
     setp.lt.s32 %p2, %r6, 0;
     setp.gt.u32 %p3, %r6, %r4;
@@ -259,7 +260,6 @@ DONE:
     @!%p2 mov.u32 %r7, %r6;
     @%p3 mov.u32 %r7, %r4;
     mov.u32 %r15, 1;
-    @%p4 st.global.u32 [%rd1+28], %r15;
     @%p4 st.global.u32 [%rd3+4], %r15;
     st.global.u32 [%rd3], %r7;
     mov.u32 %r12, 0;
@@ -270,6 +270,7 @@ DONE:
     add.u32 %r9, %r7, %r5;
     sub.u32 %r9, %r9, 1;
     div.u32 %r10, %r9, %r5;
+    min.u32 %r10, %r10, %r16;
 
     st.param.b64 [call_node], %rd2;
     st.param.b32 [call_enabled], %r8;

@@ -54,6 +54,20 @@ class LaunchContextBuilder {
                                 bool cpu_bounded_range = false);
 
   void set_cpu_bounded_range(void *extent, std::int32_t capacity);
+  void set_cuda_bounded_range(const std::vector<int> &extent_arg_id,
+                              std::int32_t capacity);
+
+  bool has_cuda_bounded_range() const noexcept {
+    return has_cuda_bounded_range_binding_;
+  }
+
+  const std::vector<int> &cuda_bounded_extent_arg_id() const noexcept {
+    return cuda_bounded_extent_arg_id_;
+  }
+
+  std::int32_t cuda_bounded_capacity() const noexcept {
+    return cuda_bounded_capacity_;
+  }
 
   LaunchContextBuilder(LaunchContextBuilder &&) = default;
   LaunchContextBuilder &operator=(LaunchContextBuilder &&) = default;
@@ -183,6 +197,9 @@ class LaunchContextBuilder {
   std::unique_ptr<char[]> result_buffer_;
   const StructType *ret_type_;
   bool has_cpu_bounded_range_binding_{false};
+  bool has_cuda_bounded_range_binding_{false};
+  std::vector<int> cuda_bounded_extent_arg_id_;
+  std::int32_t cuda_bounded_capacity_{0};
   std::string dispatch_label_;
 
  public:

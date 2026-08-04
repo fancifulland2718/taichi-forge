@@ -233,6 +233,7 @@ struct CudaBoundedDispatchMetadata {
   Arg extent_arg;
   std::uint32_t capacity{0};
   std::uint32_t block_dim{0};
+  bool adaptive_grid{false};
 };
 
 struct CpuBoundedDispatchMetadata {

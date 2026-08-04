@@ -58,6 +58,16 @@ void LaunchContextBuilder::set_cpu_bounded_range(void *extent,
   binding->reserved = 0;
 }
 
+void LaunchContextBuilder::set_cuda_bounded_range(
+    const std::vector<int> &extent_arg_id,
+    std::int32_t capacity) {
+  TI_ASSERT(!extent_arg_id.empty());
+  TI_ASSERT(capacity > 0);
+  has_cuda_bounded_range_binding_ = true;
+  cuda_bounded_extent_arg_id_ = extent_arg_id;
+  cuda_bounded_capacity_ = capacity;
+}
+
 void LaunchContextBuilder::append_dispatch_label(const std::string &label) {
   if (label.empty()) {
     return;

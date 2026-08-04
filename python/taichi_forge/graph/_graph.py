@@ -1424,6 +1424,8 @@ class BoundedDispatchCapabilities:
     setup_probe_passed: bool
     device_known_count: bool
     no_host_readback: bool
+    logical_iteration_exact: bool
+    physical_launch_kind: str
     exact_grid: bool
     execution_semantics: str
     range_mapping: str
@@ -1532,7 +1534,7 @@ def _cuda_bounded_update_policy():
 def _bounded_route(backend, ordered):
     if backend == "vulkan":
         return BoundedDispatchCapabilities(
-            schema_version=3,
+            schema_version=4,
             backend=backend,
             requested_route="not_applicable",
             route="exact_indirect",
@@ -1544,6 +1546,8 @@ def _bounded_route(backend, ordered):
             setup_probe_passed=True,
             device_known_count=True,
             no_host_readback=True,
+            logical_iteration_exact=True,
+            physical_launch_kind="indirect_one_to_one",
             exact_grid=True,
             execution_semantics="exact_device_grid",
             range_mapping="one_to_one",
@@ -1592,10 +1596,10 @@ def _bounded_route(backend, ordered):
                     f"{cuda_capabilities['unavailable_reason']}"
                 )
             return BoundedDispatchCapabilities(
-                schema_version=3,
+                schema_version=4,
                 backend=backend,
                 requested_route=requested_route,
-                route="exact_device_grid_update",
+                route="adaptive_device_grid_update",
                 minimum_driver_api_version=12040,
                 driver_api_version=driver_api_version,
                 driver_version_eligible=driver_version_eligible,
@@ -1604,9 +1608,11 @@ def _bounded_route(backend, ordered):
                 setup_probe_passed=setup_probe_passed,
                 device_known_count=True,
                 no_host_readback=True,
-                exact_grid=True,
-                execution_semantics="exact_device_grid",
-                range_mapping="one_to_one",
+                logical_iteration_exact=True,
+                physical_launch_kind="adaptive_saturated_grid_stride",
+                exact_grid=False,
+                execution_semantics="exact_device_range",
+                range_mapping="device_bounded_grid_stride",
                 masked_capacity=False,
                 zero_count_command_skip=True,
                 ordered_segments=False,
@@ -1619,26 +1625,87 @@ def _bounded_route(backend, ordered):
                 block_dim=None,
                 fallback_reason="none",
                 reason=(
-                    "CUDA Graph updates uploaded device-updatable kernel "
-                    "nodes before their payloads; the selected update policy "
-                    f"is {update_policy}"
+                    "CUDA loads the logical range end from DeviceExtent and "
+                    "uses a saturation-capped device update only to reduce "
+                    "physical launch work; the selected update policy is "
+                    f"{update_policy}"
                 ),
             )
-        reason = (
-            "CUDA uses a fixed-capacity Graph node and masks payload work from "
-            "the device extent; this is not exact indirect dispatch"
-        )
-        fallback_reason = (
-            "forced_masked_capacity"
-            if requested_route == "masked_capacity"
-            else (
-                "auto_exact_route_not_selected_by_performance_qualification"
-                if cuda_capabilities["exact_device_grid_available"]
-                else cuda_capabilities["unavailable_reason"]
+        if requested_route == "auto" and not ordered:
+            return BoundedDispatchCapabilities(
+                schema_version=4,
+                backend=backend,
+                requested_route=requested_route,
+                route="device_bounded_grid_stride",
+                minimum_driver_api_version=None,
+                driver_api_version=driver_api_version,
+                driver_version_eligible=True,
+                required_symbols_loaded=True,
+                device_update_ptx_linked=device_update_ptx_linked,
+                setup_probe_passed=True,
+                device_known_count=True,
+                no_host_readback=True,
+                logical_iteration_exact=True,
+                physical_launch_kind="saturated_grid_stride",
+                exact_grid=False,
+                execution_semantics="exact_device_range",
+                range_mapping="device_bounded_grid_stride",
+                masked_capacity=False,
+                zero_count_command_skip=False,
+                ordered_segments=False,
+                global_segment_order=False,
+                producer_owned_launch_state=False,
+                producer_owned_launch_state_supported=False,
+                preparation_dispatches=0,
+                baseline_capacity_grid=True,
+                capacity=0,
+                block_dim=None,
+                fallback_reason="none",
+                reason=(
+                    "CUDA uses its ordinary saturation-capped grid-stride "
+                    "scheduler and loads the exact logical range end from "
+                    "DeviceExtent without host readback"
+                ),
             )
+        return BoundedDispatchCapabilities(
+            schema_version=4,
+            backend=backend,
+            requested_route=requested_route,
+            route="masked_capacity",
+            minimum_driver_api_version=None,
+            driver_api_version=driver_api_version,
+            driver_version_eligible=True,
+            required_symbols_loaded=True,
+            device_update_ptx_linked=device_update_ptx_linked,
+            setup_probe_passed=False,
+            device_known_count=True,
+            no_host_readback=True,
+            logical_iteration_exact=False,
+            physical_launch_kind="fixed_capacity_grid_stride",
+            exact_grid=False,
+            execution_semantics="masked_capacity",
+            range_mapping="grid_stride",
+            masked_capacity=True,
+            zero_count_command_skip=False,
+            ordered_segments=False,
+            global_segment_order=False,
+            producer_owned_launch_state=False,
+            producer_owned_launch_state_supported=False,
+            preparation_dispatches=0,
+            baseline_capacity_grid=True,
+            capacity=0,
+            block_dim=None,
+            fallback_reason=(
+                "forced_masked_capacity"
+                if requested_route == "masked_capacity"
+                else "ordered_segments_device_bounded_range_unavailable"
+            ),
+            reason=(
+                "CUDA uses the fixed-capacity masked route for ordered "
+                "segments or as an explicit diagnostic and performance "
+                "baseline"
+            ),
         )
-        range_mapping = "grid_stride"
-        minimum_driver_api_version = 12040
     else:
         driver_api_version = None
         driver_version_eligible = True
@@ -1649,7 +1716,7 @@ def _bounded_route(backend, ordered):
             requested_route == "auto" and not ordered
         ):
             return BoundedDispatchCapabilities(
-                schema_version=3,
+                schema_version=4,
                 backend=backend,
                 requested_route=requested_route,
                 route="exact_cpu_scheduler",
@@ -1661,6 +1728,8 @@ def _bounded_route(backend, ordered):
                 setup_probe_passed=True,
                 device_known_count=True,
                 no_host_readback=True,
+                logical_iteration_exact=True,
+                physical_launch_kind="cpu_dynamic_chunks",
                 exact_grid=True,
                 execution_semantics="exact_cpu_scheduler",
                 range_mapping="cpu_scheduler",
@@ -1693,7 +1762,7 @@ def _bounded_route(backend, ordered):
         range_mapping = "cpu_scheduler"
         minimum_driver_api_version = None
     return BoundedDispatchCapabilities(
-        schema_version=3,
+        schema_version=4,
         backend=backend,
         requested_route=requested_route,
         route="masked_capacity",
@@ -1705,6 +1774,8 @@ def _bounded_route(backend, ordered):
         setup_probe_passed=setup_probe_passed,
         device_known_count=True,
         no_host_readback=True,
+        logical_iteration_exact=False,
+        physical_launch_kind="fixed_capacity_scheduler",
         exact_grid=False,
         execution_semantics="masked_capacity",
         range_mapping=range_mapping,
@@ -1957,7 +2028,13 @@ class BoundedDispatchHandle:
         return {}
 
     def _execution_counts(self, useful):
-        if self._capabilities.exact_grid:
+        if self._capabilities.logical_iteration_exact:
+            if self._capabilities.physical_launch_kind != "indirect_one_to_one":
+                # CPU dynamic chunks and CUDA device-bounded grid-stride both
+                # enter the payload body exactly once for [0, useful). Their
+                # worker/thread envelope is deliberately separate from this
+                # logical execution accounting.
+                return useful, useful
             if self.block_dim is None:
                 return useful, useful
             encoded = (
@@ -2058,7 +2135,7 @@ class HostBoundedDispatchHandle:
         self._runtime_generation = int(impl.runtime_generation())
         self._runtime_program = impl.get_runtime().prog
         self._capabilities = BoundedDispatchCapabilities(
-            schema_version=3,
+            schema_version=4,
             backend=backend,
             requested_route="host_known",
             route="exact_host_range",
@@ -2074,6 +2151,10 @@ class HostBoundedDispatchHandle:
             setup_probe_passed=True,
             device_known_count=False,
             no_host_readback=True,
+            logical_iteration_exact=True,
+            physical_launch_kind=(
+                "cpu_dynamic_range" if backend == "cpu" else "host_sized_grid_stride"
+            ),
             exact_grid=True,
             execution_semantics="exact_host_range",
             range_mapping=(
@@ -2815,7 +2896,7 @@ def bounded_dispatch_capabilities():
     backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
     if backend not in ("cpu", "cuda", "vulkan"):
         return {
-            "schema_version": 3,
+            "schema_version": 4,
             "backend": backend,
             "available": False,
             "requested_route": "not_applicable",
@@ -2830,6 +2911,8 @@ def bounded_dispatch_capabilities():
             "setup_probe_passed": False,
             "device_known_count": False,
             "no_host_readback": False,
+            "logical_iteration_exact": False,
+            "physical_launch_kind": "unsupported",
             "exact_grid": False,
             "exact_physical_grid": False,
             "execution_semantics": "unsupported",
@@ -2875,6 +2958,8 @@ def bounded_dispatch_capabilities():
         "setup_probe_passed": capabilities.setup_probe_passed,
         "device_known_count": capabilities.device_known_count,
         "no_host_readback": capabilities.no_host_readback,
+        "logical_iteration_exact": capabilities.logical_iteration_exact,
+        "physical_launch_kind": capabilities.physical_launch_kind,
         "exact_grid": capabilities.exact_grid,
         "exact_physical_grid": capabilities.exact_grid,
         "execution_semantics": capabilities.execution_semantics,
@@ -3245,7 +3330,7 @@ def dynamic_work_capabilities():
         "completion_attached_"
     )
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "backend": structured["backend"],
         "count_contract": {
             "owner": "DeviceExtent",
@@ -3275,6 +3360,8 @@ def dynamic_work_capabilities():
             "range_mapping": bounded["range_mapping"],
             "device_known_count": bounded["device_known_count"],
             "no_host_readback": bounded["no_host_readback"],
+            "logical_iteration_exact": bounded["logical_iteration_exact"],
+            "physical_launch_kind": bounded["physical_launch_kind"],
             "exact_physical_grid": bounded["exact_grid"],
             "masked_capacity": bounded["masked_capacity"],
             "zero_count_command_skip": bounded["zero_count_command_skip"],
@@ -7148,7 +7235,38 @@ def _record_backend_dispatch(builder, backend, kernel, args, ir_node):
         if isinstance(ir_node, DispatchNode)
         else None
     )
-    if domain is None or domain.physical_grid_requirement != "require_exact":
+    if domain is None:
+        builder.dispatch(kernel, args, label)
+        return
+    requirement = domain.physical_grid_requirement
+    if backend == "cuda" and requirement in (
+        "logical_exact",
+        "adaptive_grid",
+        "require_exact",
+    ):
+        extent = next(
+            (arg for arg in args if getattr(arg, "name", None) == domain.extent),
+            None,
+        )
+        if extent is None:
+            raise TaichiRuntimeError(
+                "CUDA bounded Graph lowering lost its symbolic extent binding"
+            )
+        if domain.block_dim is None:
+            raise TaichiRuntimeError(
+                "CUDA bounded Graph lowering requires a block dimension"
+            )
+        builder.dispatch_cuda_bounded(
+            kernel,
+            args,
+            extent,
+            domain.capacity,
+            domain.block_dim,
+            requirement in ("adaptive_grid", "require_exact"),
+            label,
+        )
+        return
+    if requirement != "require_exact":
         builder.dispatch(kernel, args, label)
         return
     extent = next(
@@ -7159,20 +7277,6 @@ def _record_backend_dispatch(builder, backend, kernel, args, ir_node):
         raise TaichiRuntimeError(
             "Exact bounded Graph lowering lost its symbolic extent binding"
         )
-    if backend == "cuda":
-        if domain.block_dim is None:
-            raise TaichiRuntimeError(
-                "Exact CUDA bounded Graph lowering requires a block dimension"
-            )
-        builder.dispatch_cuda_bounded(
-            kernel,
-            args,
-            extent,
-            domain.capacity,
-            domain.block_dim,
-            label,
-        )
-        return
     if backend == "cpu":
         builder.dispatch_cpu_bounded(
             kernel,
@@ -8654,10 +8758,15 @@ def _bounded_kernel_geometry(
         )
     selected = range_tasks[0]["selected_block_size"]
     if require_one_to_one and not allow_range_setup:
-        if range_tasks[0].get("range_mapping") != "one_to_one":
+        required_mappings = (
+            ("one_to_one", "device_bounded_grid_stride")
+            if backend == "cuda"
+            else ("one_to_one",)
+        )
+        if range_tasks[0].get("range_mapping") not in required_mappings:
             raise TaichiRuntimeError(
                 f"{backend.upper()} bounded dispatch payload did not compile with "
-                "one-to-one range mapping"
+                "the required backend-specialized range mapping"
             )
     if backend in ("cuda", "vulkan"):
         if selected is None or int(selected) <= 0:
@@ -9411,11 +9520,12 @@ class GraphBuilder:
 
         Pass either a device ``extent`` ndarray or a host scalar ``count``.
         The device payload must mask its semantic body with
-        ``device_extent_count(extent)``. The selected backend route may also
-        trim physical work through Vulkan indirect dispatch, a CUDA
-        device-updated Graph node, or the CPU range scheduler. A host count is
-        accepted only when compiler metadata proves it is the payload's sole
-        range domain, and is clamped before launch.
+        ``device_extent_count(extent)`` as a defensive guard. Device-known
+        routes execute only the clamped logical prefix; backends may use CPU
+        scheduler chunks, a CUDA device-bounded grid-stride range, or Vulkan
+        indirect dispatch. A host count is accepted only when compiler
+        metadata proves it is the payload's sole range domain, and is clamped
+        before launch.
         """
 
         if isinstance(capacity, bool) or not isinstance(capacity, int):
@@ -9460,13 +9570,21 @@ class GraphBuilder:
         exact_device_grid = bool(
             selected_route is not None and selected_route.exact_grid
         )
+        logical_exact = bool(
+            selected_route is not None and selected_route.logical_iteration_exact
+        )
+        cuda_bounded_range = backend == "cuda" and logical_exact
+        cuda_adaptive_grid = bool(
+            cuda_bounded_range and selected_route.route == "adaptive_device_grid_update"
+        )
+        specialized_range = exact_device_grid or cuda_bounded_range
         policy = self._bounded_launch_policy(block_dim, block_mode, backend)
         kernel_cpp = gen_cpp_kernel(
             kernel_fn,
             args,
             template_args=template_args,
             task_launch_policy=policy,
-            range_one_to_one=exact_device_grid,
+            range_one_to_one=specialized_range,
         )
         label = _normalize_dispatch_label(label)
 
@@ -9499,7 +9617,7 @@ class GraphBuilder:
         selected_block = _bounded_kernel_geometry(
             kernel_cpp,
             backend,
-            require_one_to_one=exact_device_grid,
+            require_one_to_one=specialized_range,
         )
         if (
             launch_state is not None
@@ -9569,13 +9687,14 @@ class GraphBuilder:
                 preserve_bounded_publication=publication is not None,
             )
             self._bind_internal_runtime_arg(packet_arg, packet)
-        elif backend == "cuda" and exact_device_grid:
+        elif cuda_bounded_range:
             self._record_cuda_bounded_dispatch(
                 kernel_cpp,
                 unzipped_args,
                 extent,
                 capacity,
                 selected_block,
+                cuda_adaptive_grid,
                 label=label,
             )
         elif backend == "cpu" and exact_device_grid:
@@ -9595,7 +9714,13 @@ class GraphBuilder:
             block_dim=selected_block,
             block_mode=policy.mode,
             physical_grid_requirement=(
-                "require_exact" if exact_device_grid else "auto"
+                "adaptive_grid"
+                if cuda_adaptive_grid
+                else (
+                    "logical_exact"
+                    if cuda_bounded_range
+                    else ("require_exact" if exact_device_grid else "auto")
+                )
             ),
         )
         self._pending_ir_nodes[-1] = replace(
@@ -9666,7 +9791,7 @@ class GraphBuilder:
                 f"ordered segmented dispatch is unavailable on backend {backend}"
             )
         ordered_route = _bounded_route(backend, True)
-        if backend in ("cpu", "cuda") and ordered_route.exact_grid:
+        if backend in ("cpu", "cuda") and ordered_route.logical_iteration_exact:
             raise TaichiRuntimeError(
                 f"{backend.upper()} exact bounded dispatch does not yet support ordered "
                 "segmented dispatch; select masked_capacity for this graph"
@@ -9819,6 +9944,7 @@ class GraphBuilder:
         extent,
         capacity,
         block_dim,
+        adaptive_grid,
         label="",
     ):
         self._active_bounded_publication = None
@@ -9831,6 +9957,7 @@ class GraphBuilder:
             extent,
             capacity,
             block_dim,
+            adaptive_grid,
             label,
         )
         self._runtime_graph_dispatches.append((kernel_cpp, tuple(unzipped_args)))

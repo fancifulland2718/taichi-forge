@@ -45,6 +45,9 @@ class KernelLauncher : public LLVM::KernelLauncher {
     std::size_t arg_buffer_size{0};
     std::size_t device_arg_buffer_size{0};
     std::size_t arg_buffer_prefix_size{0};
+    std::uintptr_t bounded_extent{0};
+    std::uint32_t bounded_capacity{0};
+    bool bounded_range{false};
     std::string dispatch_label;
   };
 
@@ -66,6 +69,12 @@ class KernelLauncher : public LLVM::KernelLauncher {
                                  LaunchContextBuilder &ctx,
                                  GraphLaunchPacket &packet,
                                  void *stream);
+  bool prepare_cuda_graph_bounded_range(Handle handle,
+                                        LaunchContextBuilder &ctx,
+                                        GraphLaunchPacket &packet,
+                                        void *extent,
+                                        std::uint32_t capacity,
+                                        void *stream);
   bool prepare_cuda_graph_gated_launch(Handle handle,
                                        LaunchContextBuilder &ctx,
                                        GraphLaunchPacket &packet,
@@ -76,6 +85,12 @@ class KernelLauncher : public LLVM::KernelLauncher {
                                 LaunchContextBuilder &ctx,
                                 std::vector<uint8_t> &host_arg_buffer,
                                 void *stream);
+  bool update_cuda_graph_bounded_range(
+      GraphLaunchPacket &packet,
+      void *extent,
+      std::uint32_t capacity,
+      std::vector<uint8_t> &host_binding,
+      void *stream);
   void capture_cuda_graph_launch(const GraphLaunchPacket &packet,
                                  void *stream);
   bool capture_cuda_graph_bounded_launch(const GraphLaunchPacket &packet,

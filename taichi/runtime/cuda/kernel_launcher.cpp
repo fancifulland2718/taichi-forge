@@ -313,6 +313,9 @@ bool KernelLauncher::prepare_cuda_graph_launch(Handle handle,
   packet.arg_buffer_size = ctx.arg_buffer_size;
   packet.arg_buffer_prefix_size = 0;
   packet.device_arg_buffer_size = packet.arg_buffer_size;
+  packet.bounded_extent = 0;
+  packet.bounded_capacity = 0;
+  packet.bounded_range = false;
   packet.context = context;
   if (packet.arg_buffer_size == 0) {
     // A Field-only graph has no runtime argument storage. The RuntimeContext
@@ -328,6 +331,48 @@ bool KernelLauncher::prepare_cuda_graph_launch(Handle handle,
       packet.device_arg_buffer, packet.context.arg_buffer,
       packet.arg_buffer_size, stream);
   packet.context.arg_buffer = static_cast<char *>(packet.device_arg_buffer);
+  return true;
+}
+
+bool KernelLauncher::prepare_cuda_graph_bounded_range(
+    Handle handle,
+    LaunchContextBuilder &ctx,
+    GraphLaunchPacket &packet,
+    void *extent,
+    std::uint32_t capacity,
+    void *stream) {
+  if (extent == nullptr || capacity == 0 || capacity > 0x7fffffffu) {
+    return false;
+  }
+  RuntimeContext context;
+  if (!prepare_cuda_graph_context(handle, ctx, context)) {
+    return false;
+  }
+
+  CudaBoundedRangeBinding binding;
+  binding.extent = reinterpret_cast<std::uintptr_t>(extent);
+  binding.capacity = static_cast<std::int32_t>(capacity);
+  packet.handle = handle;
+  packet.dispatch_label = ctx.dispatch_label();
+  packet.arg_buffer_size = ctx.arg_buffer_size;
+  packet.arg_buffer_prefix_size = sizeof(binding);
+  packet.device_arg_buffer_size =
+      packet.arg_buffer_prefix_size + packet.arg_buffer_size;
+  packet.bounded_extent = binding.extent;
+  packet.bounded_capacity = capacity;
+  packet.bounded_range = true;
+  packet.context = context;
+  CUDADriver::get_instance().malloc_async(
+      &packet.device_arg_buffer, packet.device_arg_buffer_size, stream);
+  CUDADriver::get_instance().memcpy_host_to_device_async(
+      packet.device_arg_buffer, &binding, sizeof(binding), stream);
+  auto *device_args = static_cast<char *>(packet.device_arg_buffer) +
+                      packet.arg_buffer_prefix_size;
+  if (packet.arg_buffer_size > 0) {
+    CUDADriver::get_instance().memcpy_host_to_device_async(
+        device_args, packet.context.arg_buffer, packet.arg_buffer_size, stream);
+  }
+  packet.context.arg_buffer = device_args;
   return true;
 }
 
@@ -411,6 +456,35 @@ bool KernelLauncher::update_cuda_graph_launch(
                       packet.arg_buffer_prefix_size;
   CUDADriver::get_instance().memcpy_host_to_device_async(
       device_args, host_arg_buffer.data(), packet.arg_buffer_size, stream);
+  return true;
+}
+
+bool KernelLauncher::update_cuda_graph_bounded_range(
+    GraphLaunchPacket &packet,
+    void *extent,
+    std::uint32_t capacity,
+    std::vector<uint8_t> &host_binding,
+    void *stream) {
+  if (!packet.bounded_range || extent == nullptr ||
+      capacity != packet.bounded_capacity ||
+      packet.arg_buffer_prefix_size != sizeof(CudaBoundedRangeBinding) ||
+      packet.device_arg_buffer == nullptr) {
+    return false;
+  }
+  const auto extent_address = reinterpret_cast<std::uintptr_t>(extent);
+  if (packet.bounded_extent == extent_address) {
+    host_binding.clear();
+    return true;
+  }
+  CudaBoundedRangeBinding binding;
+  binding.extent = extent_address;
+  binding.capacity = static_cast<std::int32_t>(capacity);
+  host_binding.resize(sizeof(binding));
+  std::memcpy(host_binding.data(), &binding, sizeof(binding));
+  CUDADriver::get_instance().memcpy_host_to_device_async(
+      packet.device_arg_buffer, host_binding.data(), host_binding.size(),
+      stream);
+  packet.bounded_extent = extent_address;
   return true;
 }
 
@@ -679,13 +753,33 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
         (uint64 *)ensure_device_result_buffer();
   }
   char *device_arg_buffer = nullptr;
-  if (ctx.arg_buffer_size > 0) {
+  const std::size_t arg_buffer_prefix_size =
+      ctx.has_cuda_bounded_range() ? sizeof(CudaBoundedRangeBinding) : 0;
+  const std::size_t device_arg_buffer_size =
+      arg_buffer_prefix_size + ctx.arg_buffer_size;
+  if (device_arg_buffer_size > 0) {
     CUDADriver::get_instance().malloc_async((void **)&device_arg_buffer,
-                                            ctx.arg_buffer_size, nullptr);
-    CUDADriver::get_instance().memcpy_host_to_device_async(
-        device_arg_buffer, host_arg_buffer, ctx.arg_buffer_size,
-        nullptr);
-    ctx.get_context().arg_buffer = device_arg_buffer;
+                                            device_arg_buffer_size, nullptr);
+    if (ctx.has_cuda_bounded_range()) {
+      auto extent_ptr_idx = ctx.cuda_bounded_extent_arg_id();
+      extent_ptr_idx.push_back(TypeFactory::DATA_PTR_POS_IN_NDARRAY);
+      const auto extent_iter = device_ptrs.find(extent_ptr_idx);
+      TI_ERROR_IF(extent_iter == device_ptrs.end() ||
+                      extent_iter->second == nullptr,
+                  "CUDA exact bounded DeviceExtent resolved to a null "
+                  "address");
+      CudaBoundedRangeBinding binding{
+          reinterpret_cast<std::uintptr_t>(extent_iter->second),
+          ctx.cuda_bounded_capacity(), 0};
+      CUDADriver::get_instance().memcpy_host_to_device_async(
+          device_arg_buffer, &binding, sizeof(binding), nullptr);
+    }
+    auto *device_args = device_arg_buffer + arg_buffer_prefix_size;
+    if (ctx.arg_buffer_size > 0) {
+      CUDADriver::get_instance().memcpy_host_to_device_async(
+          device_args, host_arg_buffer, ctx.arg_buffer_size, nullptr);
+    }
+    ctx.get_context().arg_buffer = device_args;
   }
 
   for (auto task : offloaded_tasks) {
@@ -724,7 +818,7 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
       invalidate_sparse_list_cache(task.sparse_mutation_snode_id);
     }
   }
-  if (ctx.arg_buffer_size > 0) {
+  if (device_arg_buffer_size > 0) {
     CUDADriver::get_instance().mem_free_async(device_arg_buffer, nullptr);
   }
   if (ctx.result_buffer_size > 0) {

@@ -60,6 +60,7 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
   std::vector<OffloadedTaskManifest> result;
   result.reserve(data_.compiled_data.tasks.size());
   const bool cpu_execution = arch_is_cpu(arch_);
+  const bool cuda_execution = arch_ == Arch::cuda;
   for (std::size_t index = 0; index < data_.compiled_data.tasks.size();
        ++index) {
     const auto &task = data_.compiled_data.tasks[index];
@@ -71,7 +72,9 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
     item.task_type = task.task_type;
     item.range_mapping =
         task.task_type == OffloadedTaskType::range_for
-            ? (task.one_to_one ? "one_to_one"
+            ? (task.one_to_one ? (cuda_execution
+                                      ? "device_bounded_grid_stride"
+                                      : "one_to_one")
                                : (cpu_execution ? "cpu_scheduler"
                                                 : "grid_stride"))
             : "not_applicable";
@@ -90,9 +93,16 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
       item.selected_block_size = positive_geometry(task.block_dim);
       item.actual_grid_size = item.selected_grid_size;
       item.actual_block_size = item.selected_block_size;
-      item.actual_geometry_kind = "static_direct";
-      item.actual_geometry_reason =
-          "ordinary direct launch uses the backend-selected geometry";
+      if (cuda_execution && task.one_to_one) {
+        item.actual_geometry_kind = "cuda_device_bounded_grid_stride";
+        item.actual_geometry_reason =
+            "the Graph payload uses the saturation-capped static grid and "
+            "loads its logical range end from a device extent";
+      } else {
+        item.actual_geometry_kind = "static_direct";
+        item.actual_geometry_reason =
+            "ordinary direct launch uses the backend-selected geometry";
+      }
     }
     result.push_back(std::move(item));
   }

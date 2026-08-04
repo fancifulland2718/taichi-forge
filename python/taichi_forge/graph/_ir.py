@@ -101,7 +101,12 @@ class BoundedDomain:
             raise ValueError("Bounded domain block_dim must be in [1, 1024]")
         if self.block_mode not in ("auto", "hint", "require"):
             raise ValueError("Bounded domain block_mode is invalid")
-        if self.physical_grid_requirement not in ("auto", "require_exact"):
+        if self.physical_grid_requirement not in (
+            "auto",
+            "logical_exact",
+            "adaptive_grid",
+            "require_exact",
+        ):
             raise ValueError("Bounded domain physical grid requirement is invalid")
         if self.publication_epoch is not None and self.publication_epoch < 0:
             raise ValueError("Bounded domain publication epoch must be non-negative")

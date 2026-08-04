@@ -494,10 +494,29 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
     auto epilogue = create_xlogue(stmt->tls_epilogue);
 
     auto [begin, end] = get_range_for_bounds(stmt);
-    call(stmt->one_to_one ? "gpu_parallel_range_for_one_to_one"
-                          : "gpu_parallel_range_for",
-         get_arg(0), begin, end, tls_prologue, body, epilogue,
-         tlctx->get_constant(stmt->tls_size));
+    if (stmt->one_to_one) {
+      // CUDA bounded Graph payloads keep the backend's ordinary
+      // saturation-capped grid-stride scheduler. Only the logical range end
+      // is loaded from the device extent; CUDA 12.4 node updates may trim the
+      // physical grid further, but correctness never depends on that update.
+      auto *i64_type = llvm::Type::getInt64Ty(*llvm_context);
+      auto *begin_i64 = builder->CreateSExt(begin, i64_type);
+      auto *end_i64 = builder->CreateSExt(end, i64_type);
+      auto *count_i64 = builder->CreateSExt(
+          load_cuda_bounded_extent_count(), i64_type);
+      auto *bounded_end_i64 = builder->CreateAdd(begin_i64, count_i64);
+      bounded_end_i64 = builder->CreateSelect(
+          builder->CreateICmpSLT(bounded_end_i64, end_i64), bounded_end_i64,
+          end_i64);
+      auto *bounded_end =
+          builder->CreateTrunc(bounded_end_i64, builder->getInt32Ty());
+      call("gpu_parallel_range_for", get_arg(0), begin, bounded_end,
+           tls_prologue, body, epilogue,
+           tlctx->get_constant(stmt->tls_size));
+    } else {
+      call("gpu_parallel_range_for", get_arg(0), begin, end, tls_prologue,
+           body, epilogue, tlctx->get_constant(stmt->tls_size));
+    }
   }
 
   void create_offload_mesh_for(OffloadedStmt *stmt) override {
@@ -825,6 +844,69 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
   }
 
  private:
+  // CudaBoundedRangeBinding is a private Graph argument prefix whose layout is
+  // asserted in taichi/program/context.h. Keep the byte offsets explicit here
+  // so the device module does not need a new split-runtime type or symbol.
+  static constexpr int64 kCudaBoundedRangeBindingSize = 16;
+
+  llvm::Value *load_cuda_bounded_extent_count() {
+    auto *i8_type = llvm::Type::getInt8Ty(*llvm_context);
+    auto *i32_type = builder->getInt32Ty();
+    auto *i64_type = llvm::Type::getInt64Ty(*llvm_context);
+    auto *pointer_type = llvm::PointerType::get(*llvm_context, 0);
+    auto *runtime_context_type = get_runtime_type("RuntimeContext");
+    auto *zero = tlctx->get_constant(0);
+    auto *arg_buffer_field = builder->CreateGEP(
+        runtime_context_type, get_context(), {zero, zero});
+    auto *arg_buffer = builder->CreateAlignedLoad(
+        pointer_type, arg_buffer_field, llvm::Align(8), "bounded_args");
+    auto *binding = builder->CreateInBoundsGEP(
+        i8_type, arg_buffer,
+        llvm::ConstantInt::getSigned(i64_type,
+                                     -kCudaBoundedRangeBindingSize),
+        "cuda_bounded_binding");
+    auto *extent_bits = builder->CreateAlignedLoad(
+        i64_type, binding, llvm::Align(8), "cuda_bounded_extent_address");
+    auto *capacity_address = builder->CreateInBoundsGEP(
+        i8_type, binding, llvm::ConstantInt::get(i64_type, 8));
+    auto *capacity = builder->CreateAlignedLoad(
+        i32_type, capacity_address, llvm::Align(4), "cuda_bounded_capacity");
+    auto *extent = builder->CreateIntToPtr(extent_bits, pointer_type);
+    auto *raw_count = builder->CreateAlignedLoad(
+        i32_type, extent, llvm::Align(4), "cuda_bounded_raw_count");
+    auto *negative = builder->CreateICmpSLT(raw_count, zero);
+    auto *above_capacity = builder->CreateICmpSGT(raw_count, capacity);
+    auto *nonnegative = builder->CreateSelect(negative, zero, raw_count);
+    auto *count =
+        builder->CreateSelect(above_capacity, capacity, nonnegative);
+
+    // Exactly one physical lane normalizes invalid producer output and sets
+    // sticky overflow. All lanes use the locally clamped value, so there is no
+    // grid-wide synchronization requirement before entering the range loop.
+    auto *thread_idx =
+        builder->CreateIntrinsic(Intrinsic::nvvm_read_ptx_sreg_tid_x, {}, {});
+    auto *block_idx = builder->CreateIntrinsic(
+        Intrinsic::nvvm_read_ptx_sreg_ctaid_x, {}, {});
+    auto *leader = builder->CreateAnd(builder->CreateICmpEQ(thread_idx, zero),
+                                      builder->CreateICmpEQ(block_idx, zero));
+    auto *invalid = builder->CreateOr(negative, above_capacity);
+    auto *normalize = llvm::BasicBlock::Create(
+        *llvm_context, "cuda_bounded_normalize", func);
+    auto *normalized = llvm::BasicBlock::Create(
+        *llvm_context, "cuda_bounded_normalized", func);
+    builder->CreateCondBr(builder->CreateAnd(leader, invalid), normalize,
+                          normalized);
+    builder->SetInsertPoint(normalize);
+    builder->CreateAlignedStore(count, extent, llvm::Align(4));
+    auto *overflow = builder->CreateInBoundsGEP(
+        i32_type, extent, llvm::ConstantInt::get(i64_type, 1));
+    builder->CreateAlignedStore(tlctx->get_constant(1), overflow,
+                                llvm::Align(4));
+    builder->CreateBr(normalized);
+    builder->SetInsertPoint(normalized);
+    return count;
+  }
+
   int target_compute_capability_{0};
 
   std::tuple<llvm::Value *, llvm::Value *> get_spmd_info() override {

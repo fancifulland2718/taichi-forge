@@ -41,7 +41,7 @@ struct CudaGraphBoundedExtentControl {
   std::uint32_t capacity{0};
   std::uint32_t block_dim{0};
   std::uint32_t driver_status{0};
-  std::uint32_t overflow{0};
+  std::uint32_t max_grid_dim{0};
 };
 
 static_assert(sizeof(CudaGraphBoundedExtentControl) == 32);
@@ -50,7 +50,7 @@ static_assert(offsetof(CudaGraphBoundedExtentControl, extent) == 8);
 static_assert(offsetof(CudaGraphBoundedExtentControl, capacity) == 16);
 static_assert(offsetof(CudaGraphBoundedExtentControl, block_dim) == 20);
 static_assert(offsetof(CudaGraphBoundedExtentControl, driver_status) == 24);
-static_assert(offsetof(CudaGraphBoundedExtentControl, overflow) == 28);
+static_assert(offsetof(CudaGraphBoundedExtentControl, max_grid_dim) == 28);
 
 // One control record can update every bounded payload that consumes the same
 // producer-owned launch state. ``dispatch_packet`` is nonzero for the generic

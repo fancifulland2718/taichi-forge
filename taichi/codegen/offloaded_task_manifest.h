@@ -42,6 +42,8 @@ struct OffloadedTaskManifest {
 
   // Logical range-to-lane mapping. ``one_to_one`` proves that reducing a
   // dispatch grid reduces the number of visited logical indices.
+  // ``device_bounded_grid_stride`` instead keeps the saturation-capped CUDA
+  // grid while loading the logical end from a device extent.
   std::string range_mapping;
 
   std::uint64_t static_shared_bytes{0};

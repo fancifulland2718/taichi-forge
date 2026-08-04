@@ -332,6 +332,28 @@ CompiledGraphDispatchRuntimePlan build_cpu_runtime_arg_plan(
   return plan;
 }
 
+void set_cuda_bounded_range_binding(const CompiledDispatch &dispatch,
+                                    LaunchContextBuilder &ctx) {
+  if (!dispatch.cuda_bounded_dispatch.has_value()) {
+    return;
+  }
+  const auto &metadata = *dispatch.cuda_bounded_dispatch;
+  for (int i = 0; i < dispatch.symbolic_args.size(); ++i) {
+    const auto &arg = dispatch.symbolic_args[i];
+    if (arg.name == metadata.extent_arg.name) {
+      TI_ERROR_IF(arg.tag != ArgKind::kNdarray,
+                  "CUDA exact bounded extent argument {} is not an Ndarray",
+                  arg.name);
+      ctx.set_cuda_bounded_range({i},
+                                 static_cast<std::int32_t>(metadata.capacity));
+      return;
+    }
+  }
+  TI_ERROR("CUDA exact bounded extent argument {} is not bound by the "
+           "dispatch",
+           metadata.extent_arg.name);
+}
+
 bool init_runtime_context_from_plan(
     const CompiledGraphDispatchRuntimePlan &plan,
     const std::unordered_map<std::string, IValue> &args,
@@ -1238,6 +1260,7 @@ std::optional<std::uintptr_t> cuda_graph_ndarray_address(
 bool initialize_cuda_bounded_dispatch_controls(
     const CompiledGraph &graph,
     CompiledGraphCudaState &state,
+    std::uint32_t saturation_grid_dim,
     std::uint32_t *driver_error) {
   TI_ASSERT(driver_error != nullptr);
   *driver_error = CUDA_SUCCESS;
@@ -1245,9 +1268,14 @@ bool initialize_cuda_bounded_dispatch_controls(
   state.bounded_dispatch_controls.resize(graph.dispatches.size());
   if (std::none_of(graph.dispatches.begin(), graph.dispatches.end(),
                    [](const auto &dispatch) {
-                     return dispatch.cuda_bounded_dispatch.has_value();
+                     return dispatch.cuda_bounded_dispatch.has_value() &&
+                            dispatch.cuda_bounded_dispatch->adaptive_grid;
                    })) {
     return true;
+  }
+  if (saturation_grid_dim == 0) {
+    *driver_error = CUDA_ERROR_NOT_SUPPORTED;
+    return false;
   }
   auto &driver = CUDADriver::get_instance();
   if (!driver.launch_kernel_ex.available() || !driver.graph_upload.available()) {
@@ -1259,7 +1287,7 @@ bool initialize_cuda_bounded_dispatch_controls(
   }
   for (std::size_t i = 0; i < graph.dispatches.size(); ++i) {
     const auto &metadata = graph.dispatches[i].cuda_bounded_dispatch;
-    if (!metadata.has_value()) {
+    if (!metadata.has_value() || !metadata->adaptive_grid) {
       continue;
     }
     auto extent = cuda_graph_ndarray_address(state.signature,
@@ -1272,6 +1300,7 @@ bool initialize_cuda_bounded_dispatch_controls(
     control.host_control.extent = *extent;
     control.host_control.capacity = metadata->capacity;
     control.host_control.block_dim = metadata->block_dim;
+    control.host_control.max_grid_dim = saturation_grid_dim;
     *driver_error = driver.malloc.call(
         reinterpret_cast<void **>(&control.device_control),
         sizeof(cuda::CudaGraphBoundedExtentControl));
@@ -1293,7 +1322,7 @@ bool patch_cuda_bounded_dispatch_controls(
   auto &driver = CUDADriver::get_instance();
   for (std::size_t i = 0; i < graph.dispatches.size(); ++i) {
     const auto &metadata = graph.dispatches[i].cuda_bounded_dispatch;
-    if (!metadata.has_value()) {
+    if (!metadata.has_value() || !metadata->adaptive_grid) {
       continue;
     }
     auto &control = state.bounded_dispatch_controls[i];
@@ -1306,7 +1335,6 @@ bool patch_cuda_bounded_dispatch_controls(
     }
     control.host_control.extent = *extent;
     control.host_control.driver_status = 0;
-    control.host_control.overflow = 0;
     host_buffers.emplace_back(sizeof(control.host_control));
     std::memcpy(host_buffers.back().data(), &control.host_control,
                 sizeof(control.host_control));
@@ -1328,7 +1356,8 @@ std::uint32_t capture_cuda_graph_packets(const CompiledGraph &graph,
             graph.dispatches.size());
   for (std::size_t i = 0; i < graph.dispatches.size(); ++i) {
     auto &packet = state.packets[i];
-    if (!graph.dispatches[i].cuda_bounded_dispatch.has_value()) {
+    const auto &metadata = graph.dispatches[i].cuda_bounded_dispatch;
+    if (!metadata.has_value() || !metadata->adaptive_grid) {
       packet.launcher->capture_cuda_graph_launch(packet.packet,
                                                  capture_stream);
       continue;
@@ -1374,6 +1403,7 @@ std::uint32_t upload_cuda_bounded_dispatch_controls(
 bool patch_cuda_graph_arguments(
     const CompiledGraph &graph,
     const std::unordered_map<std::string, IValue> &args,
+    const std::vector<CudaGraphArgSignatureEntry> &signature,
     CompiledGraphCudaState &state,
     std::vector<std::vector<uint8_t>> &host_arg_buffers) {
   if (state.packets.size() != graph.dispatches.size()) {
@@ -1401,6 +1431,20 @@ bool patch_cuda_graph_arguments(
             state.packets[i].packet, launch_ctx, host_arg_buffers.back(),
             /*stream=*/nullptr)) {
       return false;
+    }
+    const auto &metadata = dispatch.cuda_bounded_dispatch;
+    if (metadata.has_value()) {
+      auto extent = cuda_graph_ndarray_address(signature, metadata->extent_arg);
+      if (!extent.has_value()) {
+        return false;
+      }
+      host_arg_buffers.emplace_back();
+      if (!launcher->update_cuda_graph_bounded_range(
+              state.packets[i].packet,
+              reinterpret_cast<void *>(*extent), metadata->capacity,
+              host_arg_buffers.back(), /*stream=*/nullptr)) {
+        return false;
+      }
     }
   }
   return true;
@@ -1541,7 +1585,8 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
                                state->signature, signature->entries);
   if (structurally_compatible) {
     std::vector<std::vector<uint8_t>> host_arg_buffers;
-    if (patch_cuda_graph_arguments(graph, args, *state, host_arg_buffers) &&
+    if (patch_cuda_graph_arguments(graph, args, signature->entries, *state,
+                                   host_arg_buffers) &&
         patch_cuda_bounded_dispatch_controls(
             graph, signature->entries, *state, host_arg_buffers)) {
       std::vector<std::unique_ptr<cuda::CudaDevice::AllocationLease>>
@@ -1622,8 +1667,21 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
     prog->resolve_texture_launch_context_under_guard(launch_ctx);
     CudaGraphCapturePacket capture_packet(capture_stream);
     capture_packet.launcher = launcher;
-    if (!launcher->prepare_cuda_graph_launch(
-            handle, launch_ctx, capture_packet.packet, capture_stream)) {
+    bool prepared = false;
+    if (dispatch.cuda_bounded_dispatch.has_value()) {
+      const auto &metadata = *dispatch.cuda_bounded_dispatch;
+      auto extent =
+          cuda_graph_ndarray_address(state->signature, metadata.extent_arg);
+      prepared = extent.has_value() &&
+                 launcher->prepare_cuda_graph_bounded_range(
+                     handle, launch_ctx, capture_packet.packet,
+                     reinterpret_cast<void *>(*extent), metadata.capacity,
+                     capture_stream);
+    } else {
+      prepared = launcher->prepare_cuda_graph_launch(
+          handle, launch_ctx, capture_packet.packet, capture_stream);
+    }
+    if (!prepared) {
       driver.stream_synchronize(capture_stream);
       state->retry.record_structural_failure();
       mark_cuda_graph_fallback(
@@ -1636,7 +1694,9 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
 
   std::uint32_t bounded_setup_error = CUDA_SUCCESS;
   if (!initialize_cuda_bounded_dispatch_controls(
-          graph, *state, &bounded_setup_error)) {
+          graph, *state,
+          static_cast<std::uint32_t>(compile_config.saturating_grid_dim),
+          &bounded_setup_error)) {
     return handle_cuda_graph_driver_failure(*state, bounded_setup_error,
                                             "bounded control setup");
   }
@@ -1878,7 +1938,8 @@ bool try_run_cuda_masked_control_graph(
                                                         signature->entries);
   if (structurally_compatible) {
     std::vector<std::vector<uint8_t>> host_arg_buffers;
-    if (patch_cuda_graph_arguments(graph, args, *state, host_arg_buffers)) {
+    if (patch_cuda_graph_arguments(graph, args, signature->entries, *state,
+                                   host_arg_buffers)) {
       std::vector<std::unique_ptr<cuda::CudaDevice::AllocationLease>>
           old_allocation_leases;
       if (state->allocations != signature->allocations) {
@@ -2184,7 +2245,8 @@ bool try_run_cuda_bounded_graph(
           state->signature, signature->entries);
   if (structurally_compatible) {
     std::vector<std::vector<uint8_t>> host_arg_buffers;
-    if (patch_cuda_graph_arguments(graph, args, *state, host_arg_buffers)) {
+    if (patch_cuda_graph_arguments(graph, args, signature->entries, *state,
+                                   host_arg_buffers)) {
       std::vector<std::unique_ptr<cuda::CudaDevice::AllocationLease>>
           old_allocation_leases;
       if (state->allocations != signature->allocations) {
@@ -2586,7 +2648,8 @@ bool try_run_cuda_conditional_graph(
           state->signature, signature->entries);
   if (structurally_compatible) {
     std::vector<std::vector<uint8_t>> host_arg_buffers;
-    if (patch_cuda_graph_arguments(graph, args, *state, host_arg_buffers)) {
+    if (patch_cuda_graph_arguments(graph, args, signature->entries, *state,
+                                   host_arg_buffers)) {
       std::vector<std::unique_ptr<cuda::CudaDevice::AllocationLease>>
           old_allocation_leases;
       if (state->allocations != signature->allocations) {
@@ -3223,6 +3286,7 @@ void CompiledGraph::run(
   for (const auto &dispatch : dispatches) {
     TI_ASSERT(dispatch.compiled_kernel);
     LaunchContextBuilder launch_ctx(dispatch.compiled_kernel);
+    set_cuda_bounded_range_binding(dispatch, launch_ctx);
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
     TI_ERROR_IF(
@@ -3499,6 +3563,9 @@ void CompiledGraph::jit_run_cached(
     auto *prog = dispatch.ti_kernel->program;
     LaunchContextBuilder launch_ctx(
         dispatch.ti_kernel, dispatch.cpu_bounded_dispatch.has_value());
+    if (compile_config.arch == Arch::cuda) {
+      set_cuda_bounded_range_binding(dispatch, launch_ctx);
+    }
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     bool bounded_extent_uses_runtime_storage = false;
     if (use_cpu_runtime_arg_plan && cache.runtime_arg_plans[i].cpu_fast_path) {

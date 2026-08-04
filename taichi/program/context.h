@@ -39,6 +39,21 @@ static_assert(sizeof(CpuBoundedRangeBinding) == 16);
 static_assert(offsetof(CpuBoundedRangeBinding, extent) == 0);
 static_assert(offsetof(CpuBoundedRangeBinding, capacity) == 8);
 
+// Private CUDA Graph binding stored immediately before a bounded payload's
+// argument buffer. CUDA range lowering reads the device extent from this
+// prefix and keeps the ordinary saturation-capped grid-stride scheduler. The
+// binding is Graph-owned and does not extend RuntimeContext or the split-wheel
+// ABI.
+struct CudaBoundedRangeBinding {
+  std::uintptr_t extent{0};
+  std::int32_t capacity{0};
+  std::uint32_t reserved{0};
+};
+
+static_assert(sizeof(CudaBoundedRangeBinding) == 16);
+static_assert(offsetof(CudaBoundedRangeBinding, extent) == 0);
+static_assert(offsetof(CudaBoundedRangeBinding, capacity) == 8);
+
 // "RuntimeContext" holds necessary data for kernel body execution, such as a
 // pointer to the LLVMRuntime struct, kernel arguments, and the thread id (if on
 // CPU).
