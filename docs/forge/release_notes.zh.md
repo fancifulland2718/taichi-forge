@@ -40,6 +40,10 @@
 
 ## 待发布 {#unreleased}
 
+- Windows CPU JIT session 现在会在 LLVM RuntimeDyld 分配 object 时保留完整的 COFF section
+  layout，避免反复 reset runtime 或交替初始化 CPU/GPU 后端时偶发
+  `IMAGE_REL_AMD64_ADDR32NB` 有序布局错误。该修改仅作用于 Windows COFF JIT 初始化，不给
+  CUDA/Vulkan Graph replay 增加同步；修复后混合后端 bounded Graph 整套测试连续五轮自然退出。
 - CPU 的 device-known bounded Graph dispatch 现在默认选择 exact scheduler。scheduler
   只读取并钳制一次 extent，零工作量直接跳过；正数 workload 以连续 JIT loop 的形式按自适应
   chunk 执行，不再逐元素调用 callback。这使 CPU grain 与 GPU

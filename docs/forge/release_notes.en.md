@@ -43,6 +43,13 @@ grouped under the behavior they shipped.
 
 ## Unreleased
 
+- Windows CPU JIT sessions now retain the complete COFF object-section layout
+  when LLVM RuntimeDyld allocates an object. This prevents intermittent
+  `IMAGE_REL_AMD64_ADDR32NB` ordered-layout failures after repeated runtime
+  reset or mixed CPU/GPU backend initialization. The change is restricted to
+  the Windows COFF JIT setup and does not add synchronization to CUDA or Vulkan
+  Graph replay. Five consecutive mixed-backend bounded-Graph suites exited
+  cleanly after the fix.
 - CPU device-known bounded Graph dispatch now selects the exact scheduler by
   default. The scheduler snapshots and clamps the extent once, skips zero work,
   and invokes positive work as adaptive contiguous JIT loops instead of

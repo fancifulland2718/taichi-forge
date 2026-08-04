@@ -134,6 +134,13 @@ class JITSessionCPU : public JITSession {
         module_counter_(0),
         memory_manager_(nullptr) {
     if (JTMB.getTargetTriple().isOSBinFormatCOFF()) {
+      // COFF IMAGE_REL_AMD64_ADDR32NB relocations use an image-relative
+      // offset. RuntimeDyld derives that image base from the sections handed
+      // to its memory manager; discarding non-executable sections can leave a
+      // referenced section without a load address after repeated JIT session
+      // creation. Keep the complete object layout on COFF so code, read-only
+      // and read-write sections remain in one ordered allocation domain.
+      object_layer_.setProcessAllSections(true);
       object_layer_.setOverrideObjectFlagsWithResponsibilityFlags(true);
       object_layer_.setAutoClaimResponsibilityForObjectSymbols(true);
     }
