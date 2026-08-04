@@ -63,6 +63,8 @@ def test_sparse_snode_tree_memory_statistics_are_tree_scoped():
     )
 
     if ti.lang.impl.current_cfg().arch in (ti.cpu, ti.cuda):
+        assert memory["runtime_state_reserved_bytes"] > 0
+        assert memory["runtime_state_reserved_bytes"] <= memory["root_reserved_bytes"]
         assert memory["runtime_metadata_requested_bytes"] > 0
         assert memory["direct_ambient_requested_bytes"] > 0
         assert memory["allocator_payload_reserved_bytes"] > 0
@@ -80,6 +82,7 @@ def test_sparse_snode_tree_memory_statistics_are_tree_scoped():
         else:
             assert memory["shared_listgen_workspace_scope"] == "not_used"
     else:
+        assert memory["runtime_state_reserved_bytes"] is None
         assert memory["runtime_metadata_requested_bytes"] is None
         assert memory["allocator_payload_reserved_bytes"] is None
         assert memory["active_list_reserved_bytes"] is None

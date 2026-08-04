@@ -358,6 +358,9 @@ class TI_DLL_EXPORT Program {
 
   SparseSNodeTreeStatistics debug_sparse_snode_tree_statistics(int tree_id);
 
+  SNodeRuntimeDirectoryStatistics
+  debug_snode_runtime_directory_statistics() const;
+
   void debug_reset_sparse_listgen_statistics();
 
   SNodeTreeLifecycleReadGuard acquire_snode_tree_lifecycle_read_guard();

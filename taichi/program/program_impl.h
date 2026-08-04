@@ -67,6 +67,11 @@ class ProgramImpl {
     return {};
   }
 
+  virtual SNodeRuntimeDirectoryStatistics
+  get_snode_runtime_directory_statistics() const {
+    return {};
+  }
+
   virtual void reset_hash_snode_probe_stats(uint64 *result_buffer) {
   }
 

@@ -17,6 +17,11 @@ struct SparseSNodeTreeMemoryStatistics {
   RuntimeOptionalCounter tree_owned_reserved_bytes;
   RuntimeOptionalCounter root_reserved_bytes;
   RuntimeOptionalCounter sparse_pool_reserved_bytes;
+  // LLVM backends append this exact-sized per-node state block to the owning
+  // root allocation. It is included in root_reserved_bytes and therefore in
+  // tree_owned_reserved_bytes; exposing the component keeps the dynamic
+  // directory cost observable without double counting it.
+  RuntimeOptionalCounter runtime_state_reserved_bytes;
 
   RuntimeOptionalCounter runtime_metadata_requested_bytes;
   RuntimeOptionalCounter direct_ambient_requested_bytes;
@@ -69,6 +74,17 @@ struct SparseSNodeTreeStatistics {
   Arch backend{Arch::x64};
   SparseSNodeTreeMemoryStatistics memory;
   SparseSNodeTreeListgenStatistics listgen;
+};
+
+// Program-scoped ownership inventory for the LLVM SNodeTree pointer
+// directory. This is diagnostic-only and never read by generated kernels.
+struct SNodeRuntimeDirectoryStatistics {
+  bool available{false};
+  bool host_visible{false};
+  std::uint64_t capacity{0};
+  std::uint64_t active_tree_count{0};
+  std::uint64_t reserved_bytes{0};
+  std::uint64_t growth_events{0};
 };
 
 }  // namespace taichi::lang

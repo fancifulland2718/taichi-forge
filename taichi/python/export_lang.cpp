@@ -1139,6 +1139,18 @@ void export_lang(py::module &m) {
       .def("_debug_snode_field_mapping_count", [](Program &program) {
         return program.get_snode_to_fields()->size();
       })
+      .def("_debug_snode_runtime_directory_stats", [](Program &program) {
+        const auto snapshot =
+            program.debug_snode_runtime_directory_statistics();
+        py::dict result;
+        result["available"] = snapshot.available;
+        result["host_visible"] = snapshot.host_visible;
+        result["capacity"] = snapshot.capacity;
+        result["active_tree_count"] = snapshot.active_tree_count;
+        result["reserved_bytes"] = snapshot.reserved_bytes;
+        result["growth_events"] = snapshot.growth_events;
+        return result;
+      })
       .def("_debug_sparse_snode_tree_stats",
            [](Program &program, int tree_id) {
              SparseSNodeTreeStatistics snapshot;
@@ -1162,6 +1174,8 @@ void export_lang(py::module &m) {
                  optional_counter(source.root_reserved_bytes);
              memory["sparse_pool_reserved_bytes"] =
                  optional_counter(source.sparse_pool_reserved_bytes);
+             memory["runtime_state_reserved_bytes"] =
+                 optional_counter(source.runtime_state_reserved_bytes);
              memory["runtime_metadata_requested_bytes"] =
                  optional_counter(source.runtime_metadata_requested_bytes);
              memory["direct_ambient_requested_bytes"] =

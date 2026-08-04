@@ -1,3 +1,5 @@
+import struct
+
 import taichi_forge as ti
 from tests import test_utils
 from taichi_forge.lang import impl
@@ -47,20 +49,63 @@ def test_global_snode_ids_above_legacy_1024_limit():
     assert (dst.to_numpy() == [i * 3 + 1 for i in range(16)]).all()
 
 
-@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
-def test_single_tree_above_legacy_4096_snode_limit_and_reuse():
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda],
+    require=ti.extension.sparse,
+    hash_snode_experimental=True,
+    offline_cache=False,
+)
+def test_single_tree_above_legacy_4096_snode_limit_and_sparse_lifecycle():
     builder = ti.FieldsBuilder()
     storage = builder.dense(ti.i, 1)
     last = None
-    # root + dense + 4095 places = 4097 runtime-addressable SNodes.
-    for _ in range(4095):
+    # Keep pointer/dynamic/hash state above the former table boundary instead
+    # of qualifying only dense places. root + dense + 4090 places + the three
+    # sparse node/place pairs = 4098 runtime-addressable SNodes.
+    for _ in range(4090):
         last = ti.field(ti.i32)
         storage.place(last)
+    pointer_value = ti.field(ti.i32)
+    dynamic_value = ti.field(ti.i32)
+    hash_value = ti.field(ti.i32)
+    pointer = builder.pointer(ti.i, 16)
+    pointer.place(pointer_value)
+    dynamic = builder.dynamic(ti.i, 16, 8)
+    dynamic.place(dynamic_value)
+    hash_node = builder.hash(ti.i, 64, capacity=8)
+    hash_node.place(hash_value)
     tree = builder.finalize()
 
-    last[0] = 73
-    assert last[0] == 73
-    assert last.snode.ptr.id >= 4096
+    @ti.kernel
+    def populate():
+        last[0] = 73
+        pointer_value[3] = 11
+        ti.append(dynamic, [], 13)
+        hash_value[5] = 17
+
+    @ti.kernel
+    def reduce() -> ti.i32:
+        total = last[0]
+        for i in pointer_value:
+            total += pointer_value[i]
+        for i in dynamic_value:
+            total += dynamic_value[i]
+        for i in hash_value:
+            total += hash_value[i]
+        return total
+
+    populate()
+    assert reduce() == 114
+    assert hash_value.snode.ptr.id >= 4096
+    memory = dict(
+        impl.get_runtime().prog._debug_sparse_snode_tree_stats(tree.id)["memory"]
+    )
+    assert memory["runtime_state_reserved_bytes"] == 40 + 4098 * 48
+
+    pointer.deactivate_all()
+    dynamic.deactivate_all()
+    hash_node.deactivate_all()
+    assert reduce() == 73
 
     old_tree_id = tree.id
     tree.destroy()
@@ -80,6 +125,10 @@ def test_single_tree_above_legacy_4096_snode_limit_and_reuse():
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
 def test_concurrent_snode_trees_above_legacy_512_limit():
+    prog = impl.get_runtime().prog
+    impl.get_runtime().materialize()
+    baseline = dict(prog._debug_snode_runtime_directory_stats())
+    assert baseline["available"]
     trees = []
     fields = []
     try:
@@ -90,6 +139,15 @@ def test_concurrent_snode_trees_above_legacy_512_limit():
             trees.append(builder.finalize())
             fields.append(field)
 
+        expanded = dict(prog._debug_snode_runtime_directory_stats())
+        assert expanded["capacity"] >= baseline["active_tree_count"] + 513
+        assert expanded["capacity"] & (expanded["capacity"] - 1) == 0
+        assert expanded["active_tree_count"] == baseline["active_tree_count"] + 513
+        assert expanded["reserved_bytes"] == (
+            expanded["capacity"] * struct.calcsize("P")
+        )
+        assert expanded["growth_events"] >= baseline["growth_events"]
+
         fields[0][0] = 17
         fields[-1][0] = 29
         assert fields[0][0] == 17
@@ -97,3 +155,22 @@ def test_concurrent_snode_trees_above_legacy_512_limit():
     finally:
         for tree in reversed(trees):
             tree.destroy()
+    retired = dict(prog._debug_snode_runtime_directory_stats())
+    assert retired["active_tree_count"] == baseline["active_tree_count"]
+    assert retired["capacity"] == expanded["capacity"]
+    assert retired["reserved_bytes"] == expanded["reserved_bytes"]
+    assert retired["growth_events"] == expanded["growth_events"]
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_snode_runtime_directory_diagnostic_is_backend_honest():
+    impl.get_runtime().materialize()
+    stats = dict(impl.get_runtime().prog._debug_snode_runtime_directory_stats())
+    assert stats == {
+        "available": False,
+        "host_visible": False,
+        "capacity": 0,
+        "active_tree_count": 0,
+        "reserved_bytes": 0,
+        "growth_events": 0,
+    }

@@ -110,6 +110,11 @@ class LlvmProgramImpl : public ProgramImpl {
                                                            result_buffer);
   }
 
+  SNodeRuntimeDirectoryStatistics get_snode_runtime_directory_statistics()
+      const override {
+    return runtime_exec_->get_snode_runtime_directory_statistics();
+  }
+
   template <typename T>
   T fetch_result(int i, uint64 *result_buffer) {
     return runtime_exec_->fetch_result<T>(i, result_buffer);

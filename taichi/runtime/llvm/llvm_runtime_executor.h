@@ -166,6 +166,8 @@ class LlvmRuntimeExecutor {
   SparseSNodeTreeMemoryStatistics get_snode_tree_memory_statistics(
       SNodeTree *snode_tree,
       uint64 *result_buffer);
+  SNodeRuntimeDirectoryStatistics get_snode_runtime_directory_statistics()
+      const;
   void reset_hash_snode_probe_stats(uint64 *result_buffer);
   std::vector<int64> get_hash_snode_probe_stats(uint64 *result_buffer);
 
@@ -191,6 +193,7 @@ class LlvmRuntimeExecutor {
   DeviceAllocationUnique snode_tree_runtime_directory_alloc_{nullptr};
   std::vector<void *> snode_tree_runtime_host_directory_;
   std::size_t snode_tree_runtime_directory_capacity_{0};
+  std::uint64_t snode_tree_runtime_directory_growth_events_{0};
   std::unordered_map<int, ActiveSNodeTreeRuntimeState>
       active_snode_tree_runtime_states_;
   DeviceAllocationUnique preallocated_runtime_objects_allocs_ = nullptr;

@@ -9031,6 +9031,13 @@ Program::graph_observation_staging_statistics() {
   return result;
 }
 
+SNodeRuntimeDirectoryStatistics
+Program::debug_snode_runtime_directory_statistics() const {
+  std::shared_lock<std::shared_mutex> lifecycle_lock(
+      snode_tree_lifecycle_mutex_);
+  return program_impl_->get_snode_runtime_directory_statistics();
+}
+
 bool Program::cuda_device_transform_available() const {
 #ifdef TI_WITH_CUDA
   return compile_config().arch == Arch::cuda &&

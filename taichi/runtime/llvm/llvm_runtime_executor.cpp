@@ -420,6 +420,10 @@ LlvmRuntimeExecutor::get_snode_tree_memory_statistics(
   result.root_reserved_bytes = exact(root_bytes);
   result.sparse_pool_reserved_bytes = exact(sparse_pool_bytes);
   result.tree_owned_reserved_bytes = exact(root_bytes + sparse_pool_bytes);
+  std::size_t runtime_state_bytes = 0;
+  TI_ASSERT(llvm_snode_tree_runtime_state_bytes(snodes.size(),
+                                                &runtime_state_bytes));
+  result.runtime_state_reserved_bytes = exact(runtime_state_bytes);
   result.runtime_metadata_requested_bytes =
       exact(raw[kLlvmSparseRuntimeMetadataRequestedBytes]);
   result.direct_ambient_requested_bytes = exact(direct_ambient_bytes);
@@ -452,6 +456,19 @@ LlvmRuntimeExecutor::get_snode_tree_memory_statistics(
   result.shared_listgen_workspace_scope =
       arch_is_cpu(config_.arch) ? "program_shared_capacity_not_tree_owned"
                                 : "not_used";
+  return result;
+}
+
+SNodeRuntimeDirectoryStatistics
+LlvmRuntimeExecutor::get_snode_runtime_directory_statistics() const {
+  SNodeRuntimeDirectoryStatistics result;
+  result.available = true;
+  result.host_visible = arch_use_host_memory(config_.arch);
+  result.capacity = snode_tree_runtime_directory_capacity_;
+  result.active_tree_count = active_snode_tree_runtime_states_.size();
+  result.reserved_bytes =
+      snode_tree_runtime_directory_capacity_ * sizeof(void *);
+  result.growth_events = snode_tree_runtime_directory_growth_events_;
   return result;
 }
 
@@ -1379,6 +1396,7 @@ void LlvmRuntimeExecutor::finalize() {
   snode_tree_runtime_directory_alloc_.reset();
   snode_tree_runtime_host_directory_.clear();
   snode_tree_runtime_directory_capacity_ = 0;
+  snode_tree_runtime_directory_growth_events_ = 0;
   if (config_.arch == Arch::cuda || config_.arch == Arch::amdgpu) {
     const bool backend_calls_safe =
         llvm_device() == nullptr || llvm_device()->backend_calls_safe();
@@ -1513,6 +1531,7 @@ void LlvmRuntimeExecutor::ensure_snode_tree_runtime_directory_capacity(
     snode_tree_runtime_directory_alloc_ = std::move(new_directory_alloc);
   }
   snode_tree_runtime_directory_capacity_ = new_capacity;
+  ++snode_tree_runtime_directory_growth_events_;
 }
 
 void LlvmRuntimeExecutor::preallocate_runtime_memory(
