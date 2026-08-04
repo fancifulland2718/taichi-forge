@@ -2392,10 +2392,12 @@ def test_mixed_recordable_native_node_lowers_to_one_backend_region():
     ticket = graph.submit({"values": values}, telemetry=True)
     pipeline = ticket.pipeline_report()
     assert isinstance(pipeline, ti.graph.GraphPipelineReport)
-    assert pipeline.schema_version == 1
+    assert pipeline.schema_version == 2
     assert pipeline.selection_domain == "post_optimization_execution_root"
     assert pipeline.sequence == ticket.sequence
     assert pipeline.stage_count == 1
+    assert pipeline.task_count >= 3
+    assert pipeline.bounded_dispatch_count == 0
     assert pipeline.native_action_count == 1
     assert pipeline.recordable_native_action_count == 1
     assert pipeline.opaque_native_action_count == 0
@@ -2410,6 +2412,10 @@ def test_mixed_recordable_native_node_lowers_to_one_backend_region():
     assert stage.native_action_count == 1
     assert stage.native_backend_eligible
     assert stage.effect_count == 1
+    assert stage.task_mapping_status == "available"
+    assert stage.bounded_mapping_status == "available"
+    assert stage.tasks
+    assert stage.bounded_dispatches == ()
     manifest = stage.native_actions[0]
     assert isinstance(manifest, ti.graph.NativeActionManifest)
     assert manifest.schema_version == 1
@@ -4888,6 +4894,16 @@ def test_structured_graph_vulkan_ticket_reports_opt_in_region_telemetry():
     assert pipeline.stage_count == 1
     assert pipeline.stages[0].path_id == region.path_id
     assert pipeline.stages[0].kind == "while"
+    assert (
+        pipeline.stages[0].task_mapping_status
+        == "structured_runtime_dependent"
+    )
+    assert (
+        pipeline.stages[0].bounded_mapping_status
+        == "structured_runtime_dependent"
+    )
+    assert pipeline.stages[0].tasks == ()
+    assert pipeline.stages[0].bounded_dispatches == ()
     assert pipeline.stages[0].gpu_duration_ns == region.gpu_duration_ns
     assert pipeline.stages[0].gpu_timestamp_status == region.gpu_timestamp_status
     memory = graph.execution_stats().memory

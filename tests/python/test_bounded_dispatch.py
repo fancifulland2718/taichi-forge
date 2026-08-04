@@ -1918,3 +1918,136 @@ def test_graph_bounded_dispatch_replay_memory_is_stable():
         ):
             if key in before and key in after:
                 assert after[key] <= before[key]
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_bounded_pipeline_telemetry_correlates_labels_geometry_and_work():
+    capacity = 257
+    block_dim = 64
+
+    @ti.kernel
+    def consume(
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in range(capacity):
+            if i < ti.device_extent_count(extent):
+                output[i] += 1
+
+    extent_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "extent", ti.i32, ndim=1
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    for color in ("red", "black"):
+        builder.dispatch_bounded(
+            consume,
+            extent_arg,
+            output_arg,
+            extent=extent_arg,
+            capacity=capacity,
+            block_dim=block_dim,
+            label=f"sweep=7/color={color}",
+        )
+    graph = builder.compile()
+    extent = ti.DeviceExtent(capacity)
+    output = ti.ndarray(ti.i32, shape=capacity)
+    args = {"extent": extent, "output": output}
+
+    extent.set(73)
+    output.fill(0)
+    ordinary = graph.submit(args)
+    ordinary.wait()
+    assert ordinary.pipeline_report() is None
+    assert not graph._instance.structured_telemetry_arena_stats["materialized"]
+
+    extent.set(73)
+    output.fill(0)
+    ticket = graph.submit(args, telemetry=True)
+    # This write is ordered after the ticket's tail snapshot. The report must
+    # retain 73 instead of observing the later reusable DeviceExtent value.
+    extent.set(5)
+    pipeline = ticket.pipeline_report()
+    assert pipeline.schema_version == 2
+    assert pipeline.stage_count == 1
+    assert pipeline.bounded_dispatch_count == 2
+    stage = pipeline.stages[0]
+    assert stage.task_mapping_status == "available"
+    assert stage.bounded_mapping_status == "available"
+    assert stage.tasks
+    assert {task.dispatch_label for task in stage.tasks if task.dispatch_label} == {
+        "sweep=7/color=red",
+        "sweep=7/color=black",
+    }
+    assert all(task.task_id.startswith("tf:") for task in stage.tasks)
+    reports = stage.bounded_dispatches
+    assert {report.label for report in reports} == {
+        "sweep=7/color=red",
+        "sweep=7/color=black",
+    }
+    assert all(report.physical_dispatch_index is not None for report in reports)
+    assert all(report.count_source == "device_extent" for report in reports)
+    assert all(report.source_count == 73 for report in reports)
+    assert all(report.useful_count == 73 for report in reports)
+    assert all(not report.overflow for report in reports)
+    assert all(
+        report.snapshot_status == "ticket_device_snapshot" for report in reports
+    )
+    arch = ti.lang.impl.current_cfg().arch
+    if arch == ti.vulkan:
+        assert all(report.selected_route == "exact_indirect" for report in reports)
+        assert all(report.encoded_lanes == 128 for report in reports)
+        assert all(report.executed_count == 128 for report in reports)
+        assert all(report.skipped_count == 55 for report in reports)
+    else:
+        assert all(report.logical_iteration_exact for report in reports)
+        assert all(report.executed_count == 73 for report in reports)
+        assert all(report.encoded_lanes == 73 for report in reports)
+        assert all(report.skipped_count == 0 for report in reports)
+    telemetry_stats = graph._instance.structured_telemetry_arena_stats
+    assert telemetry_stats["reserved_bytes"] == 8
+    assert telemetry_stats["host_readback_bytes"] == 8
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_host_bounded_pipeline_telemetry_reports_raw_clamped_count_without_buffer():
+    capacity = 17
+
+    @ti.kernel
+    def consume(count: ti.i32, output: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in range(count):
+            output[i] = i + 1
+
+    count_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch_bounded(
+        consume,
+        count_arg,
+        output_arg,
+        count=count_arg,
+        capacity=capacity,
+        block_dim=8,
+        label="host-count",
+    )
+    graph = builder.compile()
+    output = ti.ndarray(ti.i32, shape=capacity)
+    report = graph.submit(
+        {"count": capacity + 9, "output": output}, telemetry=True
+    ).pipeline_report()
+    bounded = report.stages[0].bounded_dispatches[0]
+    assert bounded.count_source == "host_scalar"
+    assert bounded.source_count == capacity + 9
+    assert bounded.useful_count == capacity
+    assert bounded.executed_count == capacity
+    assert bounded.encoded_lanes == (
+        capacity if ti.lang.impl.current_cfg().arch == ti.cpu else 24
+    )
+    assert bounded.skipped_count == 0
+    assert bounded.overflow
+    assert bounded.snapshot_status == "host_argument"
+    assert graph._instance.structured_telemetry_arena_stats["reserved_bytes"] == 0

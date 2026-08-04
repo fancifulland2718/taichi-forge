@@ -738,6 +738,20 @@ def _pack_structured_submission_telemetry(
     destination[offset + 2] = status[None]
 
 
+@kernel_impl.kernel
+def _pack_bounded_pipeline_telemetry(
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    destination: ndarray_type.ndarray(dtype=i32, ndim=1),
+    offset: i32,
+):
+    # This is an opt-in ticket tail snapshot. Keep the two loads in one range
+    # task so CUDA/Vulkan do not acquire a host-visible scalar or add separate
+    # serial offloads to the payload Graph.
+    for _ in range(1):
+        destination[offset] = extent_state[0]
+        destination[offset + 1] = extent_state[1]
+
+
 def _queue_submission_snapshot():
     if impl.current_cfg().arch != _ti_core.Arch.vulkan:
         return None
@@ -922,12 +936,14 @@ class _GraphStructuredTelemetryRecorder:
     _VALUES_PER_PHASE = 3
     _VALUES_PER_REGION = 6
 
-    def __init__(self, nodes, storage):
+    def __init__(self, nodes, storage, bounded_sources=()):
         self._nodes = tuple(nodes)
         self._storage = storage
+        self._bounded_sources = tuple(bounded_sources)
         self._metadata = [None] * len(self._nodes)
         self._host_started_ns = [0] * len(self._nodes)
         self._host_enqueue_ns = [0] * len(self._nodes)
+        self._host_bounded_snapshots = {}
         self._gpu_timing_transaction = None
 
     @property
@@ -942,6 +958,7 @@ class _GraphStructuredTelemetryRecorder:
         self._metadata[:] = [None] * len(self._nodes)
         self._host_started_ns[:] = [0] * len(self._nodes)
         self._host_enqueue_ns[:] = [0] * len(self._nodes)
+        self._host_bounded_snapshots.clear()
         self._gpu_timing_transaction = None
 
     def attach_gpu_timing(self, transaction):
@@ -1000,6 +1017,56 @@ class _GraphStructuredTelemetryRecorder:
             time.perf_counter_ns() - self._host_started_ns[index]
         )
 
+    def capture_bounded(self, args):
+        from taichi_forge.lang.device_extent import DeviceExtent
+
+        device_index = 0
+        base_offset = len(self._nodes) * self._VALUES_PER_REGION
+        for source in self._bounded_sources:
+            key = source["snapshot_key"]
+            value = args[source["count_name"]]
+            if source["count_source"] == "host_scalar":
+                raw = HostBoundedDispatchHandle._host_count(value)
+                self._host_bounded_snapshots[key] = {
+                    "source_count": raw,
+                    "overflow": raw < 0 or raw > source["capacity"],
+                    "snapshot_status": "host_argument",
+                }
+                continue
+            if not isinstance(value, DeviceExtent):
+                raise TaichiRuntimeError(
+                    "Graph pipeline telemetry requires DeviceExtent values for "
+                    "device-count bounded dispatches"
+                )
+            value._validate_current()
+            if value.capacity != source["capacity"]:
+                raise TaichiRuntimeError(
+                    "Graph pipeline telemetry extent capacity does not match "
+                    "the compiled bounded dispatch"
+                )
+            _pack_bounded_pipeline_telemetry(
+                value.state,
+                self._storage,
+                base_offset + device_index * 2,
+            )
+            device_index += 1
+
+    def bounded_snapshots(self, values):
+        result = dict(self._host_bounded_snapshots)
+        device_index = 0
+        base_offset = len(self._nodes) * self._VALUES_PER_REGION
+        for source in self._bounded_sources:
+            if source["count_source"] != "device_extent":
+                continue
+            offset = base_offset + device_index * 2
+            result[source["snapshot_key"]] = {
+                "source_count": int(values[offset]),
+                "overflow": bool(values[offset + 1]),
+                "snapshot_status": "ticket_device_snapshot",
+            }
+            device_index += 1
+        return result
+
 
 class _GraphStructuredTelemetryLease:
     def __init__(self, state):
@@ -1020,11 +1087,13 @@ class _GraphStructuredTelemetryLease:
 
 
 class _GraphStructuredTelemetryArena:
-    """Bounded opt-in device snapshots for asynchronous while submissions."""
+    """Bounded opt-in device snapshots for asynchronous Graph submissions."""
 
     def __init__(self, nodes, pipeline_definition, capacity=None):
         self.nodes = tuple(nodes)
         self._pipeline_definition = pipeline_definition
+        self._pipeline_definition_cache = None
+        self._bounded_sources_cache = None
         self.capacity = int(
             capacity
             if capacity is not None
@@ -1043,14 +1112,48 @@ class _GraphStructuredTelemetryArena:
         self._host_readback_bytes = 0
         self._lock = threading.Lock()
 
+    def _resolve_pipeline_definition(self):
+        if self._pipeline_definition_cache is None:
+            self._pipeline_definition_cache = tuple(self._pipeline_definition())
+        return self._pipeline_definition_cache
+
+    def _bounded_sources(self):
+        if self._bounded_sources_cache is None:
+            sources = []
+            seen = set()
+            for stage in self._resolve_pipeline_definition():
+                for item in stage["bounded_dispatches"]:
+                    key = item["snapshot_key"]
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    sources.append(
+                        {
+                            "snapshot_key": key,
+                            "count_source": item["count_source"],
+                            "count_name": item["count_name"],
+                            "capacity": item["capacity"],
+                        }
+                    )
+            self._bounded_sources_cache = tuple(sources)
+        return self._bounded_sources_cache
+
     def _new_slot(self):
+        bounded_sources = self._bounded_sources()
+        device_bounded_count = sum(
+            item["count_source"] == "device_extent" for item in bounded_sources
+        )
         value_count = (
             len(self.nodes) * _GraphStructuredTelemetryRecorder._VALUES_PER_REGION
+            + device_bounded_count * 2
         )
         storage = ScalarNdarray(i32, (value_count,)) if value_count else None
         slot = {
             "storage": storage,
-            "recorder": _GraphStructuredTelemetryRecorder(self.nodes, storage),
+            "recorder": _GraphStructuredTelemetryRecorder(
+                self.nodes, storage, bounded_sources
+            ),
+            "payload_bytes": value_count * np.dtype(np.int32).itemsize,
             "state": None,
             "completion_sequence": 0,
         }
@@ -1215,12 +1318,13 @@ class _GraphStructuredTelemetryArena:
             }
         )
         pipeline = _materialize_graph_pipeline_report(
-            self._pipeline_definition(),
+            self._resolve_pipeline_definition(),
             backend=backend,
             sequence=int(slot["completion_sequence"]),
             host_submit_ns=int(host_submit_ns),
             gpu_timing=gpu_timing,
             gpu_region_timings=gpu_region_timings,
+            bounded_snapshots=recorder.bounded_snapshots(values),
         )
         gpu_available = bool(gpu_timing["available"])
         return GraphSubmissionTelemetry(
@@ -1261,16 +1365,13 @@ class _GraphStructuredTelemetryArena:
     @property
     def stats(self):
         with self._lock:
-            storage_bytes = (
-                len(self.nodes)
-                * _GraphStructuredTelemetryRecorder._VALUES_PER_REGION
-                * np.dtype(np.int32).itemsize
-            )
             return {
                 "materialized": bool(self._slots),
                 "capacity": self.capacity if self._slots else 0,
                 "slots": len(self._slots),
-                "reserved_bytes": len(self._slots) * storage_bytes,
+                "reserved_bytes": sum(
+                    slot["payload_bytes"] for slot in self._slots
+                ),
                 "allocations": self._allocations,
                 "reuses": self._reuses,
                 "waits": self._waits,
@@ -2600,6 +2701,33 @@ class GraphSubmissionQueueTelemetry:
 
 
 @dataclass(frozen=True)
+class GraphPipelineBoundedDispatchReport:
+    """Ticket-owned work and launch contract for one bounded dispatch."""
+
+    logical_dispatch_index: int
+    physical_dispatch_index: Optional[int]
+    label: str
+    count_source: str
+    count_name: str
+    capacity: int
+    block_dim: Optional[int]
+    ordered: bool
+    segment_index: Optional[int]
+    segment_count: int
+    source_count: Optional[int]
+    useful_count: Optional[int]
+    executed_count: Optional[int]
+    skipped_count: Optional[int]
+    encoded_lanes: Optional[int]
+    overflow: Optional[bool]
+    selected_route: str
+    execution_semantics: str
+    physical_launch_kind: str
+    logical_iteration_exact: bool
+    snapshot_status: str
+
+
+@dataclass(frozen=True)
 class GraphPipelineStageReport:
     """One post-optimization execution stage in a ticket-owned report."""
 
@@ -2621,6 +2749,10 @@ class GraphPipelineStageReport:
     synchronization: bool
     opaque: bool
     native_actions: Tuple[NativeActionManifest, ...]
+    task_mapping_status: str
+    bounded_mapping_status: str
+    tasks: Tuple["GraphTaskManifest", ...]
+    bounded_dispatches: Tuple[GraphPipelineBoundedDispatchReport, ...]
     gpu_duration_ns: Optional[int]
     gpu_timestamp_scope: str
     gpu_timestamp_exact: bool
@@ -2640,6 +2772,8 @@ class GraphPipelineReport:
     stage_count: int
     dispatch_count: int
     physical_dispatch_count: int
+    task_count: int
+    bounded_dispatch_count: int
     native_action_count: int
     recordable_native_action_count: int
     opaque_native_action_count: int
@@ -2677,6 +2811,123 @@ class GraphSubmissionTelemetry:
     pipeline: GraphPipelineReport
 
 
+def _bounded_pipeline_route(domain, backend):
+    if domain.count_source == "host_scalar":
+        return (
+            "exact_host_range",
+            "exact_host_range",
+            "cpu_dynamic_range"
+            if backend == "cpu"
+            else "host_sized_grid_stride",
+            True,
+        )
+    if backend == "vulkan":
+        return (
+            "exact_indirect",
+            "exact_device_grid",
+            "indirect_one_to_one",
+            True,
+        )
+    requirement = domain.physical_grid_requirement
+    if backend == "cuda":
+        if requirement == "adaptive_grid":
+            return (
+                "adaptive_device_grid_update",
+                "exact_device_range",
+                "adaptive_saturated_grid_stride",
+                True,
+            )
+        if requirement == "logical_exact":
+            return (
+                "device_bounded_grid_stride",
+                "exact_device_range",
+                "saturated_grid_stride",
+                True,
+            )
+        return (
+            "masked_capacity",
+            "masked_capacity",
+            "fixed_capacity_grid_stride",
+            False,
+        )
+    if requirement == "require_exact":
+        return (
+            "exact_cpu_scheduler",
+            "exact_cpu_scheduler",
+            "cpu_dynamic_chunks",
+            True,
+        )
+    return (
+        "masked_capacity",
+        "masked_capacity",
+        "fixed_capacity_scheduler",
+        False,
+    )
+
+
+def _materialize_bounded_pipeline_dispatch(item, *, backend, snapshot):
+    domain = item["domain"]
+    route, semantics, launch_kind, logical_exact = _bounded_pipeline_route(
+        domain, backend
+    )
+    source_count = None if snapshot is None else int(snapshot["source_count"])
+    overflow = None if snapshot is None else bool(snapshot["overflow"])
+    useful = executed = skipped = encoded = None
+    snapshot_status = "unavailable" if snapshot is None else snapshot["snapshot_status"]
+    if snapshot is not None and domain.ordered:
+        # The extent is a reliable aggregate source count, but per-segment
+        # useful work also depends on offsets. Do not manufacture a segment
+        # value from the aggregate ticket snapshot.
+        snapshot_status = "ordered_extent_only"
+    elif snapshot is not None:
+        useful = min(max(source_count, 0), domain.capacity)
+        overflow = bool(overflow or source_count != useful)
+        if domain.count_source == "host_scalar":
+            executed = useful
+            encoded = useful
+            if domain.block_dim is not None and useful:
+                encoded = (
+                    (useful + domain.block_dim - 1) // domain.block_dim
+                ) * domain.block_dim
+        elif logical_exact and launch_kind == "indirect_one_to_one":
+            encoded = useful
+            if domain.block_dim is not None and useful:
+                encoded = (
+                    (useful + domain.block_dim - 1) // domain.block_dim
+                ) * domain.block_dim
+            executed = min(domain.capacity, encoded)
+        elif logical_exact:
+            executed = useful
+            encoded = useful
+        else:
+            executed = domain.capacity
+            encoded = domain.capacity
+        skipped = max(0, executed - useful)
+    return GraphPipelineBoundedDispatchReport(
+        logical_dispatch_index=int(item["logical_dispatch_index"]),
+        physical_dispatch_index=item["physical_dispatch_index"],
+        label=str(item["label"]),
+        count_source=domain.count_source,
+        count_name=domain.extent,
+        capacity=domain.capacity,
+        block_dim=domain.block_dim,
+        ordered=domain.ordered,
+        segment_index=domain.segment_index,
+        segment_count=domain.segment_count,
+        source_count=source_count,
+        useful_count=useful,
+        executed_count=executed,
+        skipped_count=skipped,
+        encoded_lanes=encoded,
+        overflow=overflow,
+        selected_route=route,
+        execution_semantics=semantics,
+        physical_launch_kind=launch_kind,
+        logical_iteration_exact=logical_exact,
+        snapshot_status=snapshot_status,
+    )
+
+
 def _materialize_graph_pipeline_report(
     definition,
     *,
@@ -2685,11 +2936,21 @@ def _materialize_graph_pipeline_report(
     host_submit_ns,
     gpu_timing,
     gpu_region_timings,
+    bounded_snapshots,
 ):
     regions = {str(item["path_id"]): item for item in gpu_region_timings}
     stages = []
     for item in definition:
         actions = tuple(item["native_actions"])
+        tasks = tuple(item["tasks"])
+        bounded_dispatches = tuple(
+            _materialize_bounded_pipeline_dispatch(
+                dispatch,
+                backend=backend,
+                snapshot=bounded_snapshots.get(dispatch["snapshot_key"]),
+            )
+            for dispatch in item["bounded_dispatches"]
+        )
         region = regions.get(str(item["path_id"]))
         region_available = bool(region is not None and region["available"])
         declared_temporary_bytes = sum(
@@ -2728,6 +2989,10 @@ def _materialize_graph_pipeline_report(
                 synchronization=bool(item["synchronization"]),
                 opaque=bool(item["opaque"]),
                 native_actions=actions,
+                task_mapping_status=str(item["task_mapping_status"]),
+                bounded_mapping_status=str(item["bounded_mapping_status"]),
+                tasks=tasks,
+                bounded_dispatches=bounded_dispatches,
                 gpu_duration_ns=(
                     int(region["duration_ns"]) if region_available else None
                 ),
@@ -2754,7 +3019,7 @@ def _materialize_graph_pipeline_report(
         )
     gpu_available = bool(gpu_timing["available"])
     return GraphPipelineReport(
-        schema_version=1,
+        schema_version=2,
         selection_domain="post_optimization_execution_root",
         backend=backend,
         sequence=int(sequence),
@@ -2762,6 +3027,10 @@ def _materialize_graph_pipeline_report(
         dispatch_count=sum(stage.dispatch_count for stage in stages),
         physical_dispatch_count=sum(
             stage.physical_dispatch_count for stage in stages
+        ),
+        task_count=sum(len(stage.tasks) for stage in stages),
+        bounded_dispatch_count=sum(
+            len(stage.bounded_dispatches) for stage in stages
         ),
         native_action_count=sum(stage.native_action_count for stage in stages),
         recordable_native_action_count=sum(
@@ -7402,6 +7671,79 @@ def _ir_contains_flag(node, flag):
     )
 
 
+def _pipeline_task_manifests(node):
+    if not isinstance(node, _CompiledCGraphNode):
+        return ()
+    from taichi_forge.lang.task_manifest import GraphTaskManifest
+
+    raw = impl.get_runtime().prog._graph_task_manifest(node.compiled_graph)
+    return tuple(GraphTaskManifest._from_core(item) for item in raw)
+
+
+def _pipeline_mapping_status(node):
+    if isinstance(node, _CompiledCGraphNode):
+        return "available", "available"
+    if _is_structured_control_node(node):
+        return "structured_runtime_dependent", "structured_runtime_dependent"
+    return "not_applicable", "not_applicable"
+
+
+def _pipeline_physical_dispatch_map(tasks, logical_count):
+    by_index = {}
+    for task in tasks:
+        by_index.setdefault(int(task.dispatch_index), []).append(task)
+    mapping = []
+    for physical_index in sorted(by_index):
+        source_count = max(
+            max(1, int(task.source_dispatch_count))
+            for task in by_index[physical_index]
+        )
+        mapping.extend((physical_index,) * source_count)
+    if len(mapping) != logical_count:
+        return (None,) * logical_count
+    return tuple(mapping)
+
+
+def _pipeline_bounded_dispatches(node, tasks, dispatch_count):
+    ir_nodes = _recording_dispatch_ir_nodes(node, dispatch_count)
+    physical_map = _pipeline_physical_dispatch_map(tasks, dispatch_count)
+    label_indices = {}
+    for task in tasks:
+        if task.dispatch_label:
+            label_indices.setdefault(task.dispatch_label, set()).add(
+                int(task.dispatch_index)
+            )
+    result = []
+    for logical_index, ir_node in enumerate(ir_nodes):
+        if not isinstance(ir_node, DispatchNode):
+            continue
+        domain = ir_node.bounded_domain
+        if domain is None:
+            continue
+        physical_index = physical_map[logical_index]
+        label_matches = label_indices.get(ir_node.dispatch_label, set())
+        if ir_node.dispatch_label and len(label_matches) == 1:
+            physical_index = next(iter(label_matches))
+        snapshot_key = (
+            domain.count_source,
+            domain.extent,
+            int(domain.capacity),
+        )
+        result.append(
+            {
+                "logical_dispatch_index": logical_index,
+                "physical_dispatch_index": physical_index,
+                "label": ir_node.dispatch_label,
+                "domain": domain,
+                "count_source": domain.count_source,
+                "count_name": domain.extent,
+                "capacity": int(domain.capacity),
+                "snapshot_key": snapshot_key,
+            }
+        )
+    return tuple(result)
+
+
 def _graph_pipeline_definition(nodes):
     stages = []
     for index, node in enumerate(nodes):
@@ -7435,6 +7777,13 @@ def _graph_pipeline_definition(nodes):
             getattr(node, "name", getattr(ir_node, "name", f"stage_{index}"))
         )
         dispatch_count = int(getattr(node, "dispatch_count", 0))
+        tasks = _pipeline_task_manifests(node)
+        task_mapping_status, bounded_mapping_status = _pipeline_mapping_status(
+            node
+        )
+        bounded_dispatches = _pipeline_bounded_dispatches(
+            node, tasks, dispatch_count
+        )
         stages.append(
             {
                 "stage_index": index,
@@ -7451,6 +7800,10 @@ def _graph_pipeline_definition(nodes):
                 ),
                 "source_native_count": source_native_count,
                 "native_actions": manifests,
+                "task_mapping_status": task_mapping_status,
+                "bounded_mapping_status": bounded_mapping_status,
+                "tasks": tasks,
+                "bounded_dispatches": bounded_dispatches,
                 "synchronization": _ir_contains_flag(
                     ir_node, "synchronization"
                 ),
@@ -9662,6 +10015,17 @@ class GraphBuilder:
             )
             _verify_bounded_host_range(kernel_cpp, unzipped_args, count)
             self._record_dispatch(kernel_cpp, unzipped_args, label)
+            self._pending_ir_nodes[-1] = replace(
+                self._pending_ir_nodes[-1],
+                bounded_domain=BoundedDomain(
+                    extent=count.name,
+                    capacity=capacity,
+                    block_dim=selected_block,
+                    block_mode=policy.mode,
+                    physical_grid_requirement="logical_exact",
+                    count_source="host_scalar",
+                ),
+            )
             handle = HostBoundedDispatchHandle(
                 count_name=count.name,
                 capacity=capacity,
@@ -9973,6 +10337,9 @@ class GraphBuilder:
                     capacity=capacity,
                     block_dim=selected_block,
                     block_mode=policy.mode,
+                    ordered=True,
+                    segment_index=segment,
+                    segment_count=segment_count,
                 ),
             )
             self._bind_internal_runtime_arg(index_arg, segment)
@@ -10648,12 +11015,12 @@ class Graph:
                         telemetry
                     )
                     runtime.prog._record_runtime_graph_submission()
+                    telemetry_recorder = (
+                        telemetry_lease.recorder
+                        if telemetry_lease is not None
+                        else None
+                    )
                     if self._contains_structured_control_value:
-                        telemetry_recorder = (
-                            telemetry_lease.recorder
-                            if telemetry_lease is not None
-                            else None
-                        )
                         if telemetry_recorder is not None:
                             telemetry_recorder.attach_gpu_timing(transaction)
                         try:
@@ -10672,6 +11039,8 @@ class Graph:
                     # once for the whole native portion without changing run().
                     if self._contains_native_nodes_value:
                         transaction._mark_submission()
+                    if telemetry_recorder is not None:
+                        telemetry_recorder.capture_bounded(args)
                     if observation_lease is not None:
                         observation_lease.enqueue_tail_readback()
                     completion = transaction._finish()
@@ -11143,6 +11512,7 @@ __all__ = [
     "GraphControlFlowTrace",
     "GraphSubmissionRegionTelemetry",
     "GraphSubmissionQueueTelemetry",
+    "GraphPipelineBoundedDispatchReport",
     "GraphPipelineStageReport",
     "GraphPipelineReport",
     "GraphSubmissionTelemetry",

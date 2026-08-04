@@ -85,6 +85,10 @@ class BoundedDomain:
     block_mode: str = "auto"
     physical_grid_requirement: str = "auto"
     publication_epoch: Optional[int] = None
+    count_source: str = "device_extent"
+    ordered: bool = False
+    segment_index: Optional[int] = None
+    segment_count: int = 0
 
     def __post_init__(self):
         if not isinstance(self.extent, str) or not self.extent:
@@ -110,6 +114,21 @@ class BoundedDomain:
             raise ValueError("Bounded domain physical grid requirement is invalid")
         if self.publication_epoch is not None and self.publication_epoch < 0:
             raise ValueError("Bounded domain publication epoch must be non-negative")
+        if self.count_source not in ("device_extent", "host_scalar"):
+            raise ValueError("Bounded domain count source is invalid")
+        if self.ordered:
+            if self.count_source != "device_extent":
+                raise ValueError("Ordered bounded domains require a device extent")
+            if self.segment_index is None or self.segment_count <= 0:
+                raise ValueError(
+                    "Ordered bounded domains require a segment index and count"
+                )
+            if not 0 <= self.segment_index < self.segment_count:
+                raise ValueError("Bounded domain segment index is out of range")
+        elif self.segment_index is not None or self.segment_count != 0:
+            raise ValueError(
+                "Non-ordered bounded domains cannot carry segment metadata"
+            )
 
     def to_dict(self):
         return {
@@ -119,6 +138,10 @@ class BoundedDomain:
             "block_mode": self.block_mode,
             "physical_grid_requirement": self.physical_grid_requirement,
             "publication_epoch": self.publication_epoch,
+            "count_source": self.count_source,
+            "ordered": self.ordered,
+            "segment_index": self.segment_index,
+            "segment_count": self.segment_count,
         }
 
 
