@@ -438,7 +438,6 @@ def test_cuda_bounded_route_selection_is_fail_closed(monkeypatch):
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_cuda_bounded_device_update_driver_probe():
     probe = dict(ti_core.cuda_bounded_dispatch_probe())
-    print("CUDA_BOUNDED_PROBE_DIAGNOSTIC", probe)
     assert probe["setup_probe_attempted"]
     if probe["driver_version_eligible"] and probe["required_symbols_loaded"]:
         assert probe["device_update_ptx_compiled"]
