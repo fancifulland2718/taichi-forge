@@ -1,9 +1,9 @@
 # Taichi Forge 版本更新说明
 
-本文是 Taichi Forge 用户可见更新的唯一版本索引。`0.6.0` 已正式发布，当前
-`master` 面向 `0.6.1` 开发；在成对的 shim/runtime 发行边界推进前，包版本元数据仍保持
-`0.6.0`。`0.5.0` 保留为上一个已发布 runtime 源码边界，`0.4.25` 是最后一个公开的
-`0.4.x` 基线。
+本文是 Taichi Forge 用户可见更新的唯一版本索引。`0.6.0` 已正式发布；当前 `master`
+是 `0.6.1` release candidate，源码、shim 与 runtime 包版本元数据已经统一为 `0.6.1`，
+但在成对产物上传前不会声称已经发布。`0.5.0` 保留为上一个已发布 runtime 源码边界，
+`0.4.25` 是最后一个公开的 `0.4.x` 基线。
 
 由于 PyPI 项目容量有限，部分不再重要的旧发行文件已经移除。因此，当前 PyPI 列表中
 找不到某个版本，并不表示它从未存在。下表的源码边界是长期历史锚点；仅涉及打包、CI、
@@ -13,7 +13,7 @@
 
 | 版本 | 历史状态 | 源码边界 | 主要范围 |
 | --- | --- | --- | --- |
-| [待发布](#unreleased) | 0.6.1 开发版本 | 当前 `master` | task launch manifest/policy、动态 LLVM SNode directory、设备端 dynamic worklist、有界 Graph dispatch 与关联 pipeline telemetry |
+| [待发布](#unreleased) | 0.6.1 release candidate | 当前 `master` | task launch manifest/policy、动态 LLVM SNode directory、设备端 dynamic worklist、有界 Graph dispatch 与关联 pipeline telemetry |
 | [0.6.0](#060) | 已正式发布 | `106ad65d25` | 结构化 Graph 控制/遥测与 Vulkan indirect dispatch、稀疏 runtime/线性代数、driver-only CUDA primitive、受管互操作/显示与 runtime 生命周期有界化 |
 | [0.1.0](#010) | 历史源码版本；发行文件可能已移除 | `91ad177685` | scikit-build-core 迁移与 Forge 发行包重命名 |
 | [0.1.1](#011) | 历史源码版本；发行文件可能已移除 | `c771969781` | `taichi_forge` import 重命名与安装布局修复 |
@@ -89,8 +89,9 @@
   driver。满足资格的 Driver API 12.8+ runtime 继续使用原生 conditional Graph node；较旧
   runtime 在普通 CUDA Graph capture 可用时使用 device latch 与 task-entry gate，否则保留
   exact portable control。capability 会明确区分 exact native、bounded masked 与 portable
-  执行，不把它们伪装成相同的物理 launch。本地已通过强制 masked route 资格测试；真实
-  12.8 以下 driver 仍属于 release candidate 验证项。
+  执行，不把它们伪装成相同的物理 launch。在当前 driver 上强制 masked route，可以对
+  Forge 自有 fallback 的语义和性能完成资格验证，不再要求为此保留旧硬件；但这不等于验证
+  某一个旧 driver 的 loader 或厂商实现。
 - 新增只读 offloaded-task manifest 与 JIT dispatch label。manifest 在不发起 profiler probe
   的前提下报告稳定 task identity、`cpu_scheduler`/`grid_stride`/
   `device_bounded_grid_stride`/`one_to_one`/`not_applicable` range mapping、

@@ -12,7 +12,7 @@ name: Publish wheels to PyPI
 #     the built wheels are uploaded to PyPI via Trusted Publishing (OIDC).
 #     If `publish=false` the wheels are only attached as workflow artifacts,
 #     which is useful to validate the pipeline before pushing to PyPI.
-#   * push of a tag matching `v*` — full production release. Requires the
+#   * push of a tag matching `forge-v*` — full production release. Requires the
 #     repo's PyPI Trusted Publisher binding to be configured (see
 #     docs/design/pypi_release.md).
 #
@@ -32,7 +32,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version (e.g. 0.6.0 or 0.6.0rc1); leave empty to use version.txt"
+        description: "Version (e.g. 0.6.1 or 0.6.1rc1); leave empty to use version.txt"
         required: false
         default: ""
       runtime_version:
@@ -49,7 +49,7 @@ on:
         default: "testpypi"
   push:
     tags:
-      - "v*"
+      - "forge-v*"
 
 permissions:
   # Needed by softprops/action-gh-release to create/update the GitHub Release.
@@ -80,8 +80,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            ver="${GITHUB_REF#refs/tags/v}"
+          if [[ "${GITHUB_REF}" == refs/tags/forge-v* ]]; then
+            ver="${GITHUB_REF#refs/tags/forge-v}"
             echo "is_tag=true" >> "$GITHUB_OUTPUT"
           elif [[ -n "${{ github.event.inputs.version }}" ]]; then
             ver="${{ github.event.inputs.version }}"
@@ -90,8 +90,11 @@ jobs:
             ver="$(tr -d ' \t\n' < version.txt)"
             echo "is_tag=false" >> "$GITHUB_OUTPUT"
           fi
+          ver="${ver#forge-v}"
+          ver="${ver#v}"
           if [[ -n "${{ github.event.inputs.runtime_version }}" ]]; then
             runtime_ver="${{ github.event.inputs.runtime_version }}"
+            runtime_ver="${runtime_ver#forge-v}"
             runtime_ver="${runtime_ver#v}"
           else
             runtime_ver="$ver"
@@ -560,8 +563,8 @@ jobs:
         # as a secret named RELEASE_PAT in that case.
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ needs.resolve_version.outputs.version }}
-          name: Taichi v${{ needs.resolve_version.outputs.version }}
+          tag_name: forge-v${{ needs.resolve_version.outputs.version }}
+          name: Taichi Forge v${{ needs.resolve_version.outputs.version }}
           generate_release_notes: true
           draft: ${{ needs.resolve_version.outputs.is_tag != 'true' }}
           prerelease: ${{ contains(needs.resolve_version.outputs.version, 'dev') || contains(needs.resolve_version.outputs.version, 'rc') }}

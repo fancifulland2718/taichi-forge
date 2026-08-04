@@ -6,6 +6,7 @@ from zipfile import ZipFile
 import pytest
 
 from scripts import repair_runtime_wheel
+from scripts import sync_runtime_dependency
 from scripts import validate_installed_runtime
 from scripts import validate_runtime_wheel
 from scripts import validate_shim_wheel
@@ -13,6 +14,21 @@ from taichi_forge._lib import utils as runtime_utils
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.mark.parametrize(
+    ("raw", "normalized"),
+    (
+        ("0.6.1", "0.6.1"),
+        ("v0.6.1", "0.6.1"),
+        ("forge-v0.6.1", "0.6.1"),
+        ("0.6.1rc1", "0.6.1rc1"),
+        ("0.6.1.dev20260805", "0.6.1.dev20260805"),
+    ),
+)
+def test_release_version_normalization(raw, normalized):
+    assert sync_runtime_dependency._normalize_version(raw) == normalized
+    assert sync_runtime_dependency._version_parts(normalized) == ("0", "6", "1")
 
 
 def _write_runtime_wheel(
@@ -708,6 +724,29 @@ def test_runtime_distribution_is_platform_only_not_cuda_versioned():
     )
 
 
+def test_release_version_surfaces_are_aligned():
+    version = sync_runtime_dependency._normalize_version(
+        (REPO_ROOT / "version.txt").read_text(encoding="utf-8")
+    )
+    major, minor, patch = sync_runtime_dependency._version_parts(version)
+    root_pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    runtime_pyproject = (
+        REPO_ROOT / "packaging" / "runtime" / "pyproject.toml"
+    ).read_text(encoding="utf-8")
+    version_header = (REPO_ROOT / "taichi" / "common" / "version.h").read_text(
+        encoding="utf-8"
+    )
+
+    assert f'"taichi-forge-runtime=={version}"' in root_pyproject
+    for text in (root_pyproject, runtime_pyproject):
+        assert f'TI_VERSION_MAJOR = "{major}"' in text
+        assert f'TI_VERSION_MINOR = "{minor}"' in text
+        assert f'TI_VERSION_PATCH = "{patch}"' in text
+    assert f"#define TI_VERSION_MAJOR {major}" in version_header
+    assert f"#define TI_VERSION_MINOR {minor}" in version_header
+    assert f"#define TI_VERSION_PATCH {patch}" in version_header
+
+
 def test_prebuilt_shim_configures_libdevice_version_without_installing_assets():
     cmake = (REPO_ROOT / "cmake" / "TaichiCore.cmake").read_text(
         encoding="utf-8"
@@ -758,6 +797,10 @@ def test_shim_publish_workflow_validates_wheel_boundaries():
     assert all("--no-deps" not in command for command in install_commands)
     assert all("--only-binary=:all:" in command for command in install_commands)
     assert workflow.count("python -m pip check") == 2
+    assert '- "forge-v*"' in workflow
+    assert "refs/tags/forge-v*" in workflow
+    assert "tag_name: forge-v${{" in workflow
+    assert "tag_name: v${{" not in workflow
 
 
 def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():

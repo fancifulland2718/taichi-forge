@@ -51,7 +51,7 @@ wheel.exclude = [
 [tool.scikit-build.cmake.define]
 TI_VERSION_MAJOR = "0"
 TI_VERSION_MINOR = "6"
-TI_VERSION_PATCH = "0"
+TI_VERSION_PATCH = "1"
 TI_PYTHON_INSTALL_PACKAGE = "taichi_forge_runtime"
 TI_WITH_SPLIT_PYTHON_RUNTIME = "ON"
 TI_WITH_PYTHON = "ON"
@@ -64,5 +64,5 @@ TI_WITH_CUPTI = "OFF"
 [tool.scikit-build.metadata.version]
 provider = "scikit_build_core.metadata.regex"
 input = "../../version.txt"
-regex = 'v?(?P<version>[0-9]+\.[0-9]+\.[0-9]+(?:[-+.][0-9A-Za-z.-]+)?)'
+regex = '(?:forge-v|v)?(?P<version>[0-9]+\.[0-9]+\.[0-9]+(?:(?:a|b|rc)[0-9]+|(?:\.dev|\.post)[0-9]+|[-+][0-9A-Za-z.-]+)?)'
 result = "{version}"

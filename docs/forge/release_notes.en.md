@@ -1,10 +1,11 @@
 # Taichi Forge Release Notes
 
 This is the canonical version index for Taichi Forge user-visible changes.
-Version `0.6.0` is the latest published release. Current `master` targets
-`0.6.1`; package metadata remains at `0.6.0` until the paired shim/runtime
-release boundary is advanced. Version `0.5.0` remains the previous published
-runtime source boundary, and `0.4.25` is the final public `0.4.x` baseline.
+Version `0.6.0` is the latest published release. Current `master` is the
+`0.6.1` release candidate and its source, shim, and runtime package metadata
+are aligned at `0.6.1`; this does not claim publication before the paired
+artifacts are uploaded. Version `0.5.0` remains the previous published runtime
+source boundary, and `0.4.25` is the final public `0.4.x` baseline.
 
 PyPI storage is limited, so some nonessential older distributions have been
 removed. Absence from the current PyPI release list does not mean that a
@@ -16,7 +17,7 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
-| [Unreleased](#unreleased) | 0.6.1 development | current `master` | task launch manifests/policies, dynamic LLVM SNode directories, device-resident dynamic worklists, bounded Graph dispatch, and correlated pipeline telemetry |
+| [Unreleased](#unreleased) | 0.6.1 release candidate | current `master` | task launch manifests/policies, dynamic LLVM SNode directories, device-resident dynamic worklists, bounded Graph dispatch, and correlated pipeline telemetry |
 | [0.6.0](#060) | published release | `106ad65d25` | structured Graph control/telemetry and Vulkan indirect dispatch, sparse runtime/linear algebra, driver-only CUDA primitives, managed interoperability/display, and bounded runtime lifetimes |
 | [0.1.0](#010) | historical source release; artifact may be removed | `91ad177685` | scikit-build-core migration and Forge distribution rebrand |
 | [0.1.1](#011) | historical source release; artifact may be removed | `c771969781` | `taichi_forge` import rename and install-layout fixes |
@@ -117,8 +118,10 @@ grouped under the behavior they shipped.
   task-entry gates when ordinary CUDA Graph capture is available, and otherwise
   retain exact portable control. Capabilities distinguish exact native,
   bounded masked, and portable execution instead of presenting them as the same
-  physical launch. The forced masked route is qualified locally; a real
-  pre-12.8 driver remains part of release-candidate validation.
+  physical launch. The forced masked route on a current driver qualifies the
+  Forge-owned fallback semantics and performance without requiring obsolete
+  hardware. It does not claim to validate a particular old driver's loader or
+  vendor implementation.
 - Added read-only offloaded-task manifests and JIT dispatch labels. A manifest
   reports stable task identity, `cpu_scheduler`/`grid_stride`/
   `device_bounded_grid_stride`/`one_to_one`/`not_applicable` range mapping,
