@@ -190,9 +190,9 @@ def _validate_cpu_dynamic_workload() -> None:
     ti.init(arch=ti.cpu, offline_cache=False)
 
     capabilities = ti.graph.dynamic_work_capabilities()
-    if capabilities.get("schema_version") != 3:
+    if capabilities.get("schema_version") != 4:
         raise RuntimeError(
-            "installed runtime does not expose dynamic-work schema v3"
+            "installed runtime does not expose dynamic-work schema v4"
         )
     if not capabilities.get("worklist", {}).get("available", False):
         raise RuntimeError("installed runtime does not expose DeviceWorklist")
