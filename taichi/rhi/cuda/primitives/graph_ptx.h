@@ -67,9 +67,14 @@ struct CudaGraphBoundedGroupControl {
   std::uint32_t last_enabled{0};
   std::uint32_t initialized{0};
   std::uint32_t driver_status{0};
+  std::uint32_t telemetry_enabled{0};
+  std::uint32_t reserved{0};
+  std::uint64_t replay_count{0};
+  std::uint64_t state_change_count{0};
+  std::uint64_t node_api_call_count{0};
 };
 
-static_assert(sizeof(CudaGraphBoundedGroupControl) == 48);
+static_assert(sizeof(CudaGraphBoundedGroupControl) == 80);
 static_assert(offsetof(CudaGraphBoundedGroupControl, extent) == 0);
 static_assert(offsetof(CudaGraphBoundedGroupControl, device_nodes) == 8);
 static_assert(offsetof(CudaGraphBoundedGroupControl, node_count) == 16);
@@ -80,6 +85,10 @@ static_assert(offsetof(CudaGraphBoundedGroupControl, last_grid_x) == 32);
 static_assert(offsetof(CudaGraphBoundedGroupControl, last_enabled) == 36);
 static_assert(offsetof(CudaGraphBoundedGroupControl, initialized) == 40);
 static_assert(offsetof(CudaGraphBoundedGroupControl, driver_status) == 44);
+static_assert(offsetof(CudaGraphBoundedGroupControl, telemetry_enabled) == 48);
+static_assert(offsetof(CudaGraphBoundedGroupControl, replay_count) == 56);
+static_assert(offsetof(CudaGraphBoundedGroupControl, state_change_count) == 64);
+static_assert(offsetof(CudaGraphBoundedGroupControl, node_api_call_count) == 72);
 
 struct CudaGraphBoundedProbeResult {
   bool attempted{false};

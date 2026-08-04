@@ -438,6 +438,7 @@ def test_cuda_bounded_route_selection_is_fail_closed(monkeypatch):
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_cuda_bounded_device_update_driver_probe():
     probe = dict(ti_core.cuda_bounded_dispatch_probe())
+    print("CUDA_BOUNDED_PROBE_DIAGNOSTIC", probe)
     assert probe["setup_probe_attempted"]
     if probe["driver_version_eligible"] and probe["required_symbols_loaded"]:
         assert probe["device_update_ptx_compiled"]
@@ -726,6 +727,14 @@ def test_cuda_grouped_stateful_bounded_update_shares_one_updater(monkeypatch):
         np.testing.assert_array_equal(first.to_numpy(), expected)
         np.testing.assert_array_equal(second.to_numpy(), expected)
 
+    stable_report = graph.execution_stats()
+    stable_segment = stable_report.segments[0]
+    assert stable_segment.bounded_update_replays == 12
+    assert stable_segment.bounded_update_state_changes == 6
+    assert stable_segment.bounded_update_cache_hits == 6
+    assert stable_segment.bounded_node_api_calls == 14
+    assert stable_segment.bounded_max_group_size == 2
+
     rebound_extent = ti.DeviceExtent(capacity)
     args["extent"] = rebound_extent
     args["requested"] = 33
@@ -744,7 +753,12 @@ def test_cuda_grouped_stateful_bounded_update_shares_one_updater(monkeypatch):
     assert segment.bounded_updater_dispatches == 1
     assert segment.bounded_grouped_payloads == 2
     assert segment.bounded_producer_fused_groups == 0
-    assert report.memory.persistent_bounded_control_bytes == 64
+    assert segment.bounded_max_group_size == 2
+    assert segment.bounded_update_replays == 1
+    assert segment.bounded_update_state_changes == 1
+    assert segment.bounded_update_cache_hits == 0
+    assert segment.bounded_node_api_calls == 4
+    assert report.memory.persistent_bounded_control_bytes == 96
     capabilities = ti.graph.bounded_dispatch_capabilities()
     assert capabilities["grouped_updates_supported"]
     assert capabilities["producer_update_policy"] == "grouped_stateful"
@@ -860,6 +874,11 @@ def test_cuda_launch_state_compatibility_keeps_per_node_ownership(monkeypatch):
     assert segment.bounded_updater_dispatches == 2
     assert segment.bounded_grouped_payloads == 0
     assert segment.bounded_producer_fused_groups == 0
+    assert segment.bounded_update_replays == 0
+    assert segment.bounded_update_state_changes == 0
+    assert segment.bounded_update_cache_hits == 0
+    assert segment.bounded_node_api_calls == 0
+    assert segment.bounded_max_group_size == 1
     assert report.memory.persistent_bounded_control_bytes == 64
 
 

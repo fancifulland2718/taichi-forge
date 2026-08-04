@@ -302,9 +302,9 @@ EXTENT_DONE:
     .param .u64 control_param
 )
 {
-    .reg .pred %p<14>;
+    .reg .pred %p<15>;
     .reg .b32 %r<23>;
-    .reg .b64 %rd<8>;
+    .reg .b64 %rd<12>;
     .param .b64 call_node;
     .param .b32 call_enabled;
     .param .align 4 .b8 call_grid[12];
@@ -351,8 +351,20 @@ EXTENT_DONE:
     mov.u32 %r16, 0;
     st.global.u32 [%rd1+44], %r16;
     or.pred %p13, %p9, %p8;
+    ld.global.u32 %r20, [%rd1+48];
+    setp.eq.u32 %p14, %r20, 0;
+    @%p14 bra GROUP_TELEMETRY_REPLAY_DONE;
+    ld.global.u64 %rd8, [%rd1+56];
+    add.u64 %rd8, %rd8, 1;
+    st.global.u64 [%rd1+56], %rd8;
+    @!%p13 bra GROUP_TELEMETRY_REPLAY_DONE;
+    ld.global.u64 %rd9, [%rd1+64];
+    add.u64 %rd9, %rd9, 1;
+    st.global.u64 [%rd1+64], %rd9;
+GROUP_TELEMETRY_REPLAY_DONE:
     @!%p13 bra GROUP_DONE;
     mov.u32 %r17, 0;
+    mov.u32 %r21, 0;
 
 GROUP_LOOP:
     setp.ge.u32 %p10, %r17, %r4;
@@ -365,6 +377,7 @@ GROUP_LOOP:
     @!%p9 bra GROUP_GRID_CHECK;
     st.param.b64 [call_node], %rd7;
     st.param.b32 [call_enabled], %r11;
+    @!%p14 add.u32 %r21, %r21, 1;
     call.uni (call_result), cudaGraphKernelNodeSetEnabled,
         (call_node, call_enabled);
     ld.param.b32 %r16, [call_result];
@@ -380,6 +393,7 @@ GROUP_GRID_CHECK:
     mov.u32 %r18, 1;
     st.param.b32 [call_grid+4], %r18;
     st.param.b32 [call_grid+8], %r18;
+    @!%p14 add.u32 %r21, %r21, 1;
     call.uni (call_result), cudaGraphKernelNodeSetGridDim,
         (call_node, call_grid);
     ld.param.b32 %r16, [call_result];
@@ -394,10 +408,16 @@ GROUP_COMMIT:
     st.global.u32 [%rd1+36], %r11;
     mov.u32 %r19, 1;
     st.global.u32 [%rd1+40], %r19;
-    bra GROUP_DONE;
+    bra GROUP_RECORD_API_CALLS;
 
 GROUP_FAIL:
     st.global.u32 [%rd1+44], %r16;
+GROUP_RECORD_API_CALLS:
+    @%p14 bra GROUP_DONE;
+    cvt.u64.u32 %rd10, %r21;
+    ld.global.u64 %rd11, [%rd1+72];
+    add.u64 %rd11, %rd11, %rd10;
+    st.global.u64 [%rd1+72], %rd11;
 GROUP_DONE:
     ret;
 }

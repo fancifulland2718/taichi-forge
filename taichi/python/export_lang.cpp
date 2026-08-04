@@ -4073,6 +4073,16 @@ void export_lang(py::module &m) {
             stats.known_bounded_grouped_payloads;
         result["known_bounded_producer_fused_groups"] =
             stats.known_bounded_producer_fused_groups;
+        result["bounded_update_replays"] =
+            stats.bounded_update_replays;
+        result["bounded_update_state_changes"] =
+            stats.bounded_update_state_changes;
+        result["bounded_update_cache_hits"] =
+            stats.bounded_update_cache_hits;
+        result["bounded_node_api_calls"] =
+            stats.bounded_node_api_calls;
+        result["known_bounded_max_group_size"] =
+            stats.known_bounded_max_group_size;
         result["known_compiled_tasks"] =
             snapshot.known_compiled_tasks;
         result["known_compiled_dispatches"] =

@@ -385,6 +385,11 @@ struct CompiledGraphStats {
   uint32_t known_bounded_updater_dispatches{0};
   uint32_t known_bounded_grouped_payloads{0};
   uint32_t known_bounded_producer_fused_groups{0};
+  uint64_t bounded_update_replays{0};
+  uint64_t bounded_update_state_changes{0};
+  uint64_t bounded_update_cache_hits{0};
+  uint64_t bounded_node_api_calls{0};
+  uint32_t known_bounded_max_group_size{0};
   uint64_t last_driver_error{0};
   uint32_t retry_backoff_remaining{0};
   uint64_t effect_reads{0};

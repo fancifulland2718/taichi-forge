@@ -1329,6 +1329,11 @@ class GraphExecutionSegmentReport:
     bounded_updater_dispatches: int
     bounded_grouped_payloads: int
     bounded_producer_fused_groups: int
+    bounded_update_replays: int
+    bounded_update_state_changes: int
+    bounded_update_cache_hits: int
+    bounded_node_api_calls: int
+    bounded_max_group_size: int
     last_driver_error: int
     retry_backoff_remaining: int
     consecutive_transient_failures: int
@@ -3530,6 +3535,11 @@ def _execution_report(
                     bounded_updater_dispatches=0,
                     bounded_grouped_payloads=0,
                     bounded_producer_fused_groups=0,
+                    bounded_update_replays=0,
+                    bounded_update_state_changes=0,
+                    bounded_update_cache_hits=0,
+                    bounded_node_api_calls=0,
+                    bounded_max_group_size=0,
                     last_driver_error=0,
                     retry_backoff_remaining=0,
                     consecutive_transient_failures=0,
@@ -3605,6 +3615,21 @@ def _execution_report(
                 ),
                 bounded_producer_fused_groups=int(
                     stats.get("known_bounded_producer_fused_groups", 0)
+                ),
+                bounded_update_replays=int(
+                    stats.get("bounded_update_replays", 0)
+                ),
+                bounded_update_state_changes=int(
+                    stats.get("bounded_update_state_changes", 0)
+                ),
+                bounded_update_cache_hits=int(
+                    stats.get("bounded_update_cache_hits", 0)
+                ),
+                bounded_node_api_calls=int(
+                    stats.get("bounded_node_api_calls", 0)
+                ),
+                bounded_max_group_size=int(
+                    stats.get("known_bounded_max_group_size", 0)
                 ),
                 last_driver_error=int(stats.get("last_driver_error", 0)),
                 retry_backoff_remaining=int(stats.get("retry_backoff_remaining", 0)),
