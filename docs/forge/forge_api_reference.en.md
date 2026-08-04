@@ -1565,7 +1565,11 @@ deferred batches.
 Detailed GPU counters are opt-in. The first call enables them for later
 executions; if GPU work ran before opt-in, `counters_complete` remains false
 for that runtime epoch instead of pretending the older work was counted.
-Calling `execution_stats()` does not synchronize the device.
+`execution_stats()` normally does not synchronize the device. A CUDA Graph
+with device-resident bounded updater control is the explicit exception: the
+call synchronizes before copying driver status and updater counters to produce
+a consistent snapshot. Ordinary Graph replay still performs no telemetry
+readback.
 
 ### `GraphBuilder.append_native(node, *, prewarm=False)`
 

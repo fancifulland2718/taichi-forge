@@ -1320,7 +1320,9 @@ CUDA conditional replay 还会报告异步 control upload、因两个 deferred b
 
 GPU 详细 counter 为 opt-in：第一次调用只为之后的执行启用。若 opt-in 前已有 GPU 工作，
 `counters_complete` 会在该 runtime epoch 保持 false，而不会伪装成已统计旧执行。
-`execution_stats()` 本身不做 device synchronization。
+`execution_stats()` 通常不做 device synchronization。显式例外是带 device-resident bounded
+updater control 的 CUDA Graph：为了复制 driver 状态和 updater counter 并形成一致快照，该调用
+会先同步；普通 Graph replay 仍不会读取 telemetry。
 
 ### `GraphBuilder.append_native(node, *, prewarm=False)`
 
