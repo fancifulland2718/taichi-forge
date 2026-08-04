@@ -66,7 +66,9 @@
   未变化时复用持久状态，单个 payload 保持逐节点路线。在 64 payload、16,777,216 capacity、
   每项一次操作的重复资格测试中，grouped/stateful 在 zero/1%/full count 相比逐节点 control
   约快 1.3x/1.9x/1.04x；一次低离散度 full-count 复测为 5056 us 对 5420 us。persistent
-  bounded control 从 2,048 B 降到 560 B，1,000 次交替 replay 中 ownership 保持稳定。这些结果只限定本次
+  grouped control 现在还包含 opt-in 的 device-side replay、状态变化、cache hit 与实际 node API
+  调用计数，由 `Graph.execution_stats()` 暴露且不增加 replay-time host readback。64 payload 的
+  persistent bounded control 为 592 B，逐节点为 2,048 B；1,000 次交替 replay 中 ownership 保持稳定。这些结果只限定本次
   RTX 5090 上的策略 crossover，不会把 adaptive route 提升为通用 CUDA 默认路线。
 - CUDA structured control 新增 Forge 自有的 bounded masked Graph 路径，覆盖低于 12.8 的
   driver。满足资格的 Driver API 12.8+ runtime 继续使用原生 conditional Graph node；较旧

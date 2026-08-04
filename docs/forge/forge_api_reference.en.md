@@ -1191,7 +1191,13 @@ persistent node-update calls. A singleton retains the
 per-node updater. Any different or intervening dispatch terminates the group.
 `per_node` remains the conservative A/B route. Per-segment execution reports
 expose actual updater groups, grouped payloads, control bytes, and the last
-driver error; this changes no public resource ownership.
+driver error. Calling `Graph.execution_stats()` also opts subsequent stateful
+replays into low-overhead counters: `bounded_update_replays`,
+`bounded_update_state_changes`, `bounded_update_cache_hits`, and
+`bounded_node_api_calls`. `bounded_max_group_size` is static metadata. Reading
+the counters is a synchronization point; ordinary replay does not perform a
+host readback. Rebinding starts a new control epoch, so counters do not combine
+different extent allocations. This changes no public resource ownership.
 
 `ti.graph.dynamic_work_capabilities()` returns a schema-v4 report that keeps
 the count owner, bounded launch, structured iteration termination, worklist,
@@ -1220,7 +1226,7 @@ automatically specialized worklist publication instead owns one shared
 32 bytes. CPU/CUDA bounded dispatch uses no Python-owned workspace and ordered
 dispatch uses 20 bytes. The default CUDA exact route adds a private 16-byte
 argument prefix per payload. The 12.4+ adaptive per-node route uses 32
-persistent control bytes per payload; a grouped route uses one 48-byte control
+persistent control bytes per payload; a grouped route uses one 80-byte control
 plus one eight-byte node handle per grouped payload. An explicit producer-owned
 Vulkan launch state remains an external 16-byte compatibility state and reports
 zero internal packet bytes. Exact physical work reduction is not a universal

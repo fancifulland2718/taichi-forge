@@ -1020,7 +1020,12 @@ CUDA 12.4+ adaptive Graph 的 `TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY` 接受 `auto
 extent、capacity、block dimension 完全相同的 payload 共享一个 updater；grid/enabled 未变化时
 在遍历 node array 或调用持久 node-update API 之前直接返回。单个 payload 保持逐节点 updater，任何不同或中间 dispatch 都会
 结束分组。`per_node` 保留为保守 A/B 路线。逐 segment execution report 会暴露实际 updater
-group、grouped payload、control bytes 与 last-driver-error，不改变公共资源所有权。
+group、grouped payload、control bytes 与 last-driver-error。调用 `Graph.execution_stats()` 还会
+让后续 stateful replay 进入低开销计数：`bounded_update_replays`、
+`bounded_update_state_changes`、`bounded_update_cache_hits` 与
+`bounded_node_api_calls`；`bounded_max_group_size` 是静态元数据。读取 counter 是同步点，普通
+replay 不做 host readback；rebind 会开始新的 control epoch，不混合不同 extent allocation 的
+计数。以上均不改变公共资源所有权。
 
 `ti.graph.dynamic_work_capabilities()` 返回 schema-v4 report，把 count owner、bounded
 launch、structured iteration termination、worklist 与 ticket observation 分成独立维度。
@@ -1043,7 +1048,7 @@ worklist publication 则持有一个共享的 16-byte packet，并完全删除 p
 Vulkan ordered dispatch 为 32 bytes；CPU/CUDA bounded 不使用 Python-owned workspace，
 ordered 使用 20 bytes。默认 CUDA exact route 每个 payload 使用私有的 16-byte argument
 prefix；12.4+ adaptive 的逐节点 route 每个 payload 使用 32-byte persistent control，
-grouped route 使用一个 48-byte control 加每个 grouped payload 一个 8-byte node handle。显式的
+grouped route 使用一个 80-byte control 加每个 grouped payload 一个 8-byte node handle。显式的
 producer-owned Vulkan launch state 仍是 external 16-byte 兼容 state，并报告 internal packet
 为 0 byte。exact 物理工作量减少不等于无条件提速：轻量、standalone Vulkan payload 可能因
 packet preparation 与依赖成本而慢于 fixed Graph。应以完整 workload 同时对比 fixed Graph

@@ -81,8 +81,11 @@ grouped under the behavior they shipped.
   16,777,216-capacity, one-operation qualification, grouped/stateful replay
   was about 1.3x/1.9x/1.04x faster than per-node control at zero/1%/full count
   across repeated runs; a stable full-count rerun measured 5056 us versus
-  5420 us. Persistent bounded-control storage fell from 2,048 to 560 bytes,
-  and 1,000 alternating replays retained stable ownership. These
+  5420 us. The grouped control now includes opt-in device-side replay,
+  state-change, cache-hit, and actual node-API-call counters exposed by
+  `Graph.execution_stats()` without replay-time host readback. Persistent
+  bounded-control storage for 64 payloads is 592 bytes versus 2,048 bytes for
+  per-node control, and 1,000 alternating replays retained stable ownership. These
   figures qualify the policy crossover on the tested RTX 5090 rather than
   making the adaptive route the general CUDA default.
 - CUDA structured control now has a Forge-owned bounded masked Graph route for
