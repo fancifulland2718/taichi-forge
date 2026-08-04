@@ -1160,7 +1160,12 @@ host memory，不会再入队第二次 device readback。observation slot 数量
 `Graph.execution_stats().memory.observation_readback_mode` 会报告实际 route。
 
 显式 `submit(telemetry=True)` 会额外在 device 上记录每个 while region 的进入
-counter/status 与终态 counter/predicate/status。`ticket.telemetry()` 仅在完成后读取
+counter/status 与终态 counter/predicate/status。
+对于 bounded dispatch，它还会为每个 distinct device extent 追加一个双字 tail snapshot，
+并把结果与已编译 task manifest、dispatch label、launch geometry 和 useful/capacity accounting
+关联起来。host-known count 从本次提交的 immutable 参数取得，不分配 device snapshot
+storage。ordered segmented dispatch 只报告 aggregate extent；除非显式观察 offsets，否则
+逐 segment useful work 保持 unavailable。`ticket.telemetry()` 仅在完成后读取
 一次 packed snapshot，
 并报告真实停止轮次、encoded/masked 工作、active/skipped chunk、host enqueue 时间与
 queue counter 窗口。由于外部 graphics/interop producer 可能在同一窗口提交，device-wide
@@ -1178,7 +1183,7 @@ GPU timestamp 时，会明确报告 `unavailable`。
 | `GraphBuilder.compile()` | 后续修改 builder 或原 `Sequential` 不改变已编译 graph。 |
 | `Graph.run(args, *, trace=False)` | `args` 必须是字典，key 与声明参数完全一致；missing/extra key 会抛 `TaichiRuntimeError`。默认返回 `None`，也不分配 dynamic control-flow trace。 |
 | `Graph.run(args, *, trace=True)` | 同步运行并返回 immutable `GraphControlFlowTrace`。其中有序 invocation 包含 `sequence`、静态 `definition_path`、动态 `invocation_path`、可选 `parent_iteration` 和本次调用的 while/branch report。与 `control_flow_stats()` 不同，它会保留每一次重复 nested invocation。trace 会绕过严格 Vulkan nested replay，改用精确 portable-parent 执行，使每次 invocation 都可观测。 |
-| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait', telemetry=False)` | 与 `run()` 使用相同的精确参数、生命周期、并发和 AD 合同，返回一个 `SubmissionTicket`，并可选择加入共享准入节奏。`telemetry=True` 为每个 while 增加 device snapshot，并保留 lazy 的优化后 pipeline definition；默认不增加 snapshot kernel/buffer，也不物化 telemetry arena 或 pipeline report。结构化提交接受满足资格的 CUDA `native_required` while/if/switch，以及满足资格的 Vulkan `native_required` while；后者可在一个 compound transaction 中包含多个有序 region。portable 控制与不支持的原生组合会明确失败。 |
+| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait', telemetry=False)` | 与 `run()` 使用相同的精确参数、生命周期、并发和 AD 合同，返回一个 `SubmissionTicket`，并可选择加入共享准入节奏。`telemetry=True` 为每个 while 增加 snapshot，并追加去重的 bounded-extent tail snapshot，同时保留 lazy 的优化后 pipeline definition；默认不增加 snapshot kernel/buffer，也不物化 telemetry arena 或 pipeline report。结构化提交接受满足资格的 CUDA `native_required` while/if/switch，以及满足资格的 Vulkan `native_required` while；后者可在一个 compound transaction 中包含多个有序 region。portable 控制与不支持的原生组合会明确失败。 |
 | `SubmissionTicket.telemetry()` | 必要时等待，并在请求遥测时返回 immutable schema-v4 `GraphSubmissionTelemetry`；否则返回 `None`。region 报告包含 terminal counter 与停止位置，`pipeline` 是 ticket-owned `GraphPipelineReport`。nullable GPU duration 不会从 host wall time 推测。 |
 | `SubmissionTicket.pipeline_report()` | 返回与 `ticket.telemetry().pipeline` 相同的 immutable pipeline 对象，必要时等待；未请求 telemetry 时返回 `None`。 |
 | `Graph._prewarm()` | 预热当前 runtime 的 backend plan；这是内部/高级入口，不改变 graph 参数合同。 |
@@ -1368,6 +1373,26 @@ invocation 的动态迭代数。`declared_temporary_bytes` 是 provider 声明�
 allocation。已有 structured-region timestamp 会映射到对应 stage；普通 CGraph/native
 stage 会报告 `gpu_duration_ns=None`，不会把 whole-ticket duration 伪装成该 stage 的耗时。
 backend 可提供时，pipeline report 仍会保留 whole-ticket GPU timing。
+
+pipeline schema v2 还会在每个 stage 中暴露 immutable `tasks`、
+`bounded_dispatches`，以及 `task_mapping_status` 和 `bounded_mapping_status`。
+普通编译 CGraph stage 报告 `available`；task 与 profiler/NVTX label 使用同一个
+`GraphTaskManifest` identity，
+并在 backend 能证明时携带 requested、selected 与 invocation-resolved geometry。bounded
+report 包含 logical dispatch index、可无歧义映射时的 physical dispatch index、label、count
+source/name、capacity、block size、selected route、physical launch kind、source/useful/
+executed/skipped/encoded count、overflow 与 snapshot status。`None` 是刻意的诚实边界：例如
+ordered segment 不会用单个 aggregate extent 伪造逐 segment useful count。device snapshot
+属于 ticket slot，因此提交后复用或修改 `DeviceExtent` 不会改变更早的 report。
+structured while/if/switch stage 报告 `structured_runtime_dependent` 并把两个 tuple
+留空：其实际分支、迭代次数和物理 lowering 都在运行时决定，Forge 不会把内部
+CGraph 的局部索引拼接成虚构的物理序列。已有 stage 字段仍会提供 structured
+region timing。
+
+该可观测性是 opt-in 采样工具。默认路径不查询 task manifest、不物化 telemetry arena、
+不追加 snapshot kernel，也不执行 readback。启用后，每个 distinct device extent 在每个活跃
+telemetry slot 中占 8 bytes，并增加一个很小的 tail snapshot dispatch；完整 report
+materialization 会等待 ticket 并读取该 slot。
 
 局限：
 

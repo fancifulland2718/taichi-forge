@@ -291,7 +291,33 @@ ti.root.hash(ti.ij, (4096, 4096), expected_active=8192).place(x)
 
 ---
 
-## 8. 兼容性与版本
+## 8. LLVM CPU/CUDA runtime-directory 边界
+
+Forge 0.6.1 移除了过去用编译期常量限制 LLVM CPU/CUDA Program 的全局固定
+SNode/SNodeTree runtime 表。生成的 kernel 现在通过带 generation 的 tree directory 与
+tree-local node index 寻址。Program directory 在 SNodeTree materialization 边界按几何级
+增长；每棵树在自己的 root allocation 中持有一个精确尺寸 runtime-state block。销毁树时会
+先注销对应 generation，再释放 allocation，因此复用同一个数值 tree id 不会绑定 stale
+kernel 或 resource。
+
+这表示不再声明一个固定的数值 SNode-count ceiling，但不表示内存无限或 materialization
+免费。当前 64-bit LLVM runtime 中每个 node 占 48 bytes，另有 40-byte tree header；root
+allocation 仍保持 page alignment。Program directory 会在 runtime reset 前保留 peak
+power-of-two capacity（64-bit build 每项 8 bytes）。扩容是低频 lifecycle synchronization
+boundary；稳态 kernel lookup 保持 constant-time，也不产生 host readback。
+
+CPU/CUDA 资格覆盖超过 1,024 的全局 id、4,098-node dense/pointer/dynamic/hash 混合树、
+513 棵 live tree、deactivation、销毁与 generation-safe id 复用。AMDGPU 共用 LLVM
+representation，但未进入本矩阵资格范围。Vulkan 不使用该 directory，继续遵循本文描述的
+独立 sparse-runtime 合同。
+
+可以用 `benchmarks/snode_runtime_directory_bench.py` 复现 scaling、lifecycle 与精确内存
+inventory。逐树诊断字段 `runtime_state_reserved_bytes` 已包含在
+`root_reserved_bytes` 中，两者相加会重复计数。
+
+---
+
+## 9. 兼容性与版本
 
 - **API 兼容**：所有公开 Python API（`ti.root.pointer/.dense/.bitmasked/.dynamic/.place`、`ti.activate/.deactivate/.is_active/.length/.append`、`ti.root.deactivate_all` 等）行为与 vanilla 1.7.4 在 LLVM 后端上**严格一致**。Vulkan 上多出的 SNode 类型只新增可用性，不破坏现有用法。
 - **Offline cache**：cache key 已纳入 SNode tree 结构 hash，pool fraction / dynamic 协议变更**自动**触发缓存失效。
@@ -300,7 +326,7 @@ ti.root.hash(ti.ij, (4096, 4096), expected_active=8192).place(x)
 
 ---
 
-## 9. 参考
+## 10. 参考
 
 - 稀疏布局选择指南：[sparse_layout_selection.zh.md](sparse_layout_selection.zh.md)
 - 本 fork 新增编译/运行时/架构/现代化选项一览：[forge_options.zh.md](forge_options.zh.md)

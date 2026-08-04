@@ -293,7 +293,39 @@ Regression baselines: [tests/p4/g9_quant_baseline.py](../../tests/p4/g9_quant_ba
 
 ---
 
-## 8. Compatibility and versioning
+## 8. LLVM CPU/CUDA runtime-directory boundary
+
+Forge 0.6.1 removes the fixed global runtime tables that previously bounded
+LLVM CPU/CUDA Programs by a compile-time number of SNodes and SNodeTrees.
+Generated kernels now address a generation-qualified tree directory and a
+tree-local node index. The Program directory grows geometrically at SNodeTree
+materialization boundaries; each tree owns one exact-sized runtime-state block
+inside its root allocation. Tree destruction unregisters that generation
+before releasing the allocation, so reuse of the numeric tree id cannot bind a
+stale kernel or resource.
+
+This means there is no advertised fixed numeric SNode-count ceiling. It does
+not mean unbounded memory or free materialization: each 64-bit LLVM runtime
+node currently contributes 48 bytes, plus a 40-byte tree header, and the root
+allocation retains page alignment. The Program directory retains its peak
+power-of-two capacity until runtime reset (8 bytes per entry on 64-bit builds).
+Growing it is a rare lifecycle synchronization boundary; steady-state kernel
+lookup remains constant-time and adds no host readback.
+
+The CPU/CUDA qualification covers global ids above 1,024, a 4,098-node mixed
+dense/pointer/dynamic/hash tree, 513 live trees, deactivation, destruction,
+and generation-safe id reuse. AMDGPU shares the LLVM representation but is not
+qualified by this matrix. Vulkan does not use this directory and keeps the
+independent sparse-runtime contracts described in this guide.
+
+Reproduce the scaling, lifecycle, and exact memory inventory with
+`benchmarks/snode_runtime_directory_bench.py`. The per-tree diagnostic field
+`runtime_state_reserved_bytes` is already included in
+`root_reserved_bytes`; adding both would double count memory.
+
+---
+
+## 9. Compatibility and versioning
 
 - **API**: every public Python API (`ti.root.pointer/.dense/.bitmasked/.dynamic/.place`, `ti.activate/.deactivate/.is_active/.length/.append`, `ti.root.deactivate_all`, etc.) preserves vanilla 1.7.4 semantics on the LLVM backends. The newly available SNode types on Vulkan only add reach; nothing existing is broken.
 - **Offline cache**: cache keys already include the SNode-tree structural hash, so changes such as the pool fraction or the dynamic protocol invalidate the cache automatically.
@@ -302,7 +334,7 @@ Regression baselines: [tests/p4/g9_quant_baseline.py](../../tests/p4/g9_quant_ba
 
 ---
 
-## 9. References
+## 10. References
 
 - Sparse layout selection: [sparse_layout_selection.en.md](sparse_layout_selection.en.md)
 - New compile-time / run-time / architecture / modernization options in this fork: [forge_options.en.md](forge_options.en.md)

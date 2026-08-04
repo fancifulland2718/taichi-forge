@@ -13,7 +13,7 @@
 
 | 版本 | 历史状态 | 源码边界 | 主要范围 |
 | --- | --- | --- | --- |
-| [待发布](#unreleased) | 0.6.1 开发版本 | 当前 `master` | task launch manifest/policy、通用 bounded CUDA control、设备端动态 worklist、有界 Graph dispatch 与 completion-attached telemetry |
+| [待发布](#unreleased) | 0.6.1 开发版本 | 当前 `master` | task launch manifest/policy、动态 LLVM SNode directory、设备端 dynamic worklist、有界 Graph dispatch 与关联 pipeline telemetry |
 | [0.6.0](#060) | 已正式发布 | `106ad65d25` | 结构化 Graph 控制/遥测与 Vulkan indirect dispatch、稀疏 runtime/线性代数、driver-only CUDA primitive、受管互操作/显示与 runtime 生命周期有界化 |
 | [0.1.0](#010) | 历史源码版本；发行文件可能已移除 | `91ad177685` | scikit-build-core 迁移与 Forge 发行包重命名 |
 | [0.1.1](#011) | 历史源码版本；发行文件可能已移除 | `c771969781` | `taichi_forge` import 重命名与安装布局修复 |
@@ -40,6 +40,17 @@
 
 ## 待发布 {#unreleased}
 
+- LLVM CPU/CUDA 的 SNode metadata 现在通过按几何级增长的 Program 级 tree directory
+  与逐树精确尺寸 runtime-state block 寻址；旧的全局固定 SNode/tree 表不再构成 runtime
+  容量上限，但 allocation overflow 与 stale tree generation 仍会 fail closed。逐树诊断会
+  单列 runtime-state component 而不重复计入，内部 Program 诊断还会报告 directory
+  capacity、active tree、reserved bytes 与 growth events。资格测试覆盖 CPU/CUDA 上
+  4,098-node 的 dense/pointer/dynamic/hash 混合树、超过 1,024 的全局 id、513 棵同时
+  存活的树、销毁与 generation-safe slot 复用。当前实现的 scaling benchmark 中，
+  4,099-node tree 相对 3-node tree 的 lookup 中位数在 CPU/CUDA 上分别为 1.011x/0.919x；
+  513-tree 阶段把 directory 从 16 项增长到 1,024 项（8 KiB），销毁后 active-tree count
+  恢复。这些是 scaling/ownership 结论，不是相对旧二进制的历史加速比。AMDGPU 采用同一
+  LLVM representation，但尚未取得资格；Vulkan 使用独立 sparse runtime。
 - Windows CPU JIT session 现在会在 LLVM RuntimeDyld 分配 object 时保留完整的 COFF section
   layout，避免反复 reset runtime 或交替初始化 CPU/GPU 后端时偶发
   `IMAGE_REL_AMD64_ADDR32NB` 有序布局错误。该修改仅作用于 Windows COFF JIT 初始化，不给
@@ -98,10 +109,22 @@
 - opt-in Graph submission telemetry 现在包含由 ticket 持有、immutable 的
   `GraphPipelineReport`，描述优化后的 execution root。每个 stage 会报告逻辑/物理
   dispatch 数、runtime 参数名、native-action 组成、声明的 temporary 字节，以及已有的
-  structured-region GPU timestamp。`NativeActionManifest` 会冻结 provider 的符号 binding、
+  structured-region GPU timestamp；普通 CGraph stage 还会公开物理 `GraphTaskManifest`。
+  pipeline schema v2 会把
+  带 label 的 bounded dispatch 与 task identity、selected/actual launch geometry、count
+  source、capacity、block size、selected route 和 ticket-owned useful/executed/encoded work
+  关联起来。device-known count 对每个 distinct extent 只增加一个去重后的双字 tail
+  snapshot；host-known count 不增加 device buffer。ordered segment 只报告可靠的 aggregate
+  extent；没有 offsets snapshot 时不会伪造逐 segment useful work。普通 CGraph stage 把
+  mapping 标记为 `available`；structured while/if/switch stage 则明确标记为
+  `structured_runtime_dependent`，不会虚构扁平物理 task 序列。`NativeActionManifest` 会冻结
+  provider 的符号 binding、
   effect、temporary requirement 与 recordability/backend 合同，但不暴露 storage 对象或
   device 地址。只有 whole-ticket timestamp 时，普通 stage 不会虚构 per-stage duration；
-  默认 `telemetry=False` 路径不会物化该 report 或 telemetry arena。
+  默认 `telemetry=False` 路径不会物化该 report 或 telemetry arena。在 Windows RTX 5090/CPU
+  资格机上，4,097/65,536 bounded payload 只保留一个 8-byte slot；相对
+  `submit().wait()`，完整可选 report 的观测成本约为 CPU 0.529 ms、CUDA 0.350 ms、Vulkan
+  0.510 ms。这是采样/诊断成本，不应理解为可以每步持续免费开启。
 - CUDA driver-only stable radix sort 现在直接在每个 scatter block 中导出 16 个 digit base，
   删除独立 digit-base kernel 与 workspace。在 RTX 5090 上对 1,048,576 项随机 key 做匹配的
   full-pipeline A/B 时，合格候选的 median 从 508.11 us 降至 454.44 us（11.8%），p95 从

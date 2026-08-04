@@ -16,7 +16,7 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
-| [Unreleased](#unreleased) | 0.6.1 development | current `master` | task launch manifests/policies, portable bounded CUDA control, device-resident dynamic worklists, bounded Graph dispatch, and completion-attached telemetry |
+| [Unreleased](#unreleased) | 0.6.1 development | current `master` | task launch manifests/policies, dynamic LLVM SNode directories, device-resident dynamic worklists, bounded Graph dispatch, and correlated pipeline telemetry |
 | [0.6.0](#060) | published release | `106ad65d25` | structured Graph control/telemetry and Vulkan indirect dispatch, sparse runtime/linear algebra, driver-only CUDA primitives, managed interoperability/display, and bounded runtime lifetimes |
 | [0.1.0](#010) | historical source release; artifact may be removed | `91ad177685` | scikit-build-core migration and Forge distribution rebrand |
 | [0.1.1](#011) | historical source release; artifact may be removed | `c771969781` | `taichi_forge` import rename and install-layout fixes |
@@ -43,6 +43,22 @@ grouped under the behavior they shipped.
 
 ## Unreleased
 
+- LLVM CPU/CUDA SNode metadata is now addressed through a geometrically grown
+  per-Program tree directory and exact-sized per-tree runtime-state blocks.
+  The former fixed global SNode and tree tables no longer define a runtime
+  capacity ceiling; allocation overflow and stale tree generations still fail
+  closed. Tree diagnostics expose the runtime-state component without double
+  counting it, and internal Program diagnostics expose directory capacity,
+  active trees, reserved bytes, and growth events. Qualification covered a
+  4,098-node mixed dense/pointer/dynamic/hash tree, global ids above 1,024,
+  513 simultaneously live trees, destruction, and generation-safe slot reuse
+  on CPU and CUDA. In the current-runtime scaling benchmark, a 4,099-node
+  tree's lookup median was 1.011x the 3-node tree on CPU and 0.919x on CUDA;
+  the 513-tree phase grew the directory from 16 to 1,024 entries (8 KiB) and
+  recovered the active-tree count after destruction. These are scaling and
+  ownership results, not a historical pre-refactor speedup. AMDGPU uses the
+  same LLVM representation but remains unqualified; Vulkan has an independent
+  sparse-runtime implementation.
 - Windows CPU JIT sessions now retain the complete COFF object-section layout
   when LLVM RuntimeDyld allocates an object. This prevents intermittent
   `IMAGE_REL_AMD64_ADDR32NB` ordered-layout failures after repeated runtime
@@ -128,12 +144,28 @@ grouped under the behavior they shipped.
   `GraphPipelineReport` for the post-optimization execution root. Each stage
   reports its logical and physical dispatch counts, runtime argument names,
   native-action composition, declared temporary bytes, and any existing
-  structured-region GPU timestamp. `NativeActionManifest` freezes the
+  structured-region GPU timestamp; ordinary CGraph stages additionally expose
+  physical `GraphTaskManifest` entries. Pipeline
+  schema v2 correlates labeled bounded dispatches with task identity and
+  selected/actual launch geometry, count source, capacity, block size,
+  selected route, and ticket-owned useful/executed/encoded work. Device-known
+  counts add one deduplicated two-word tail snapshot per distinct extent;
+  host-known counts add no device buffer. Ordered segments report the reliable
+  aggregate extent but leave per-segment useful work unavailable without an
+  offsets snapshot. Ordinary CGraph stages mark these mappings `available`;
+  structured while/if/switch stages explicitly mark them
+  `structured_runtime_dependent` instead of inventing a flattened physical
+  task sequence. `NativeActionManifest` freezes the
   provider's symbolic bindings, effects, temporary requirements, and
   recordability/backend contract without exposing storage objects or device
   addresses. Ordinary stages do not invent a per-stage duration when only a
   whole-ticket timestamp is available. The default `telemetry=False` path does
-  not materialize the report or its telemetry arena.
+  not materialize the report or its telemetry arena. A Windows RTX 5090/CPU
+  qualification retained one 8-byte slot and measured the optional complete
+  report cost over `submit().wait()` at about 0.529 ms on CPU, 0.350 ms on
+  CUDA, and 0.510 ms on Vulkan for a 4,097-of-65,536 bounded payload. This is a
+  sampling/debugging cost; continuous per-step telemetry is not a zero-cost
+  mode.
 - CUDA driver-only stable radix sort now derives the 16 digit bases inside
   each scatter block and removes the standalone digit-base kernel and
   workspace. In a matched full-pipeline 1,048,576-item random-key A/B on an

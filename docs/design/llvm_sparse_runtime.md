@@ -209,19 +209,31 @@ i32 Dynamic_append(Ptr meta_, Ptr node_, i32 data) {
 
 The runtime code for the LLVM backends can be found at this URL: <https://github.com/taichi-dev/taichi/blob/master/taichi/runtime/llvm/runtime_module/runtime.cpp>. It is important to note that this file is not linked into the core C++ library of Taichi, but instead is compiled into an LLVM byte code file (`.bc`). When Taichi starts, the `.bc` file is loaded into memory, deserialized into an `llvm::Module`, and linked with the JIT compiled Taichi kernels. This design allows the runtime code to be written once and shared between all LLVM backends, such as CPU and CUDA. Furthermore, the sparse runtime can be implemented in any language with sufficient abstraction (e.g., C++) rather than in raw LLVM IR.
 
-The core data structure of this runtime is [`LLVMRuntime`](https://github.com/taichi-dev/taichi/blob/172cab8a57fcfc2d766fe2b7cd40af669dadf326/taichi/runtime/llvm/runtime.cpp#L543), which holds a handful of data:
+The core data structure of this runtime is `LLVMRuntime`, which holds a handful
+of Program-scoped services:
 
-* All the root SNodes info (`roots` and `root_mem_sizes`).
-* SNode memory allocators.
+* A geometrically grown directory of active `LlvmSNodeTreeRuntimeState`
+  pointers. Each entry is generation-qualified and each tree stores its root,
+  root size, and exact-sized tree-local SNode state array.
+* Program-level memory services used by tree-local SNode allocators and lists.
 * Random states (`rand_states`) used by `ti.random`.
 * Print and error message buffers.
 * ...
+
+Older Taichi revisions stored roots, allocators, ambient elements, and list
+state in fixed global arrays indexed by the Program-global SNode id. Forge
+0.6.1 instead encodes `(tree_id, runtime_local_id)` in generated LLVM kernels.
+Directory replacement happens only at a tree materialization boundary and
+retains power-of-two capacity until Program reset. Destroying a tree
+unregisters its generation before its runtime-state allocation is released.
 
 The SNode memory allocator is the bedrock of sparse SNodes. The following sections explain how it is implemented.
 
 ## `NodeManager`: a recycling memory allocator
 
-Each SNode is associated with its own memory allocator. These allocators are stored in an array, [`node_allocators`](https://github.com/taichi-dev/taichi/blob/172cab8a57fcfc2d766fe2b7cd40af669dadf326/taichi/runtime/llvm/runtime.cpp#L562).
+Each allocating SNode is associated with a `NodeManager`. Its pointer lives in
+that node's `LlvmSNodeRuntimeState`, addressed through the tree directory and
+tree-local index rather than a fixed Program-global allocator array.
 
 The allocator is of type [`NodeManager`](https://github.com/taichi-dev/taichi/blob/172cab8a57fcfc2d766fe2b7cd40af669dadf326/taichi/runtime/llvm/runtime.cpp#L619). It contains [three linked lists of type `ListManager`](https://github.com/taichi-dev/taichi/blob/172cab8a57fcfc2d766fe2b7cd40af669dadf326/taichi/runtime/llvm/runtime.cpp#L627):
 
