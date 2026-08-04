@@ -231,10 +231,8 @@ struct GraphSourceDispatchMetadata {
 
 struct CudaBoundedDispatchMetadata {
   Arg extent_arg;
-  std::optional<Arg> launch_state_arg;
   std::uint32_t capacity{0};
   std::uint32_t block_dim{0};
-  bool producer_fused{false};
 };
 
 struct CpuBoundedDispatchMetadata {

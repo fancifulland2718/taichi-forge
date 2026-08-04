@@ -307,6 +307,11 @@ def test_device_worklist_atomic_finalize_feeds_bounded_dispatch_and_report():
         launch_state=launch_state,
     )
     graph = builder.compile()
+    assert all(
+        type(node).__name__ != "_CompiledNativeGraphNode"
+        for node in graph._spec.nodes
+    )
+    assert sum(node.source_native_count for node in graph._spec.nodes) == 2
     output = ti.ndarray(ti.i32, shape=capacity)
     output.fill(-1)
     runtime_args = worklist.runtime_arguments("bounded_frontier", include_capacity=True)
@@ -331,13 +336,8 @@ def test_device_worklist_atomic_finalize_feeds_bounded_dispatch_and_report():
         assert report.executed_count == capacity
 
 
-@test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_cuda_worklist_finalize_fuses_bounded_group_update(monkeypatch):
-    probe = dict(ti_core.cuda_bounded_dispatch_probe())
-    if not probe["exact_device_grid_available"]:
-        pytest.skip(probe["unavailable_reason"])
-    monkeypatch.setenv("TI_CUDA_BOUNDED_DISPATCH_MODE", "device_update")
-    monkeypatch.setenv("TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY", "fused")
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_worklist_finalize_fuses_graph_owned_bounded_publication():
     capacity = 65
     block_dim = 32
 
@@ -353,7 +353,150 @@ def test_cuda_worklist_finalize_fuses_bounded_group_update(monkeypatch):
                 ti.atomic_add(visited[1], 1)
 
     worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)
-    args = worklist.graph_args("fused_frontier")
+    args = worklist.graph_args("vulkan_owned_frontier")
+    count_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
+    first_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "first_visited", ti.i32, ndim=1
+    )
+    second_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "second_visited", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(
+        ti.algorithms.DeviceWorklistSequence(args).prepare_next()
+    )
+    builder.dispatch(_append_range, *args.append_arguments(), count_arg)
+    builder.append_native(
+        ti.algorithms.DeviceWorklistSequence(args).finalize_next()
+    )
+    handles = (
+        builder.dispatch_bounded(
+            consume,
+            args.next_extent,
+            first_arg,
+            extent=args.next_extent,
+            capacity=capacity,
+            block_dim=block_dim,
+        ),
+        builder.dispatch_bounded(
+            consume,
+            args.next_extent,
+            second_arg,
+            extent=args.next_extent,
+            capacity=capacity,
+            block_dim=block_dim,
+        ),
+    )
+    graph = builder.compile()
+
+    assert all(
+        type(node).__name__ == "_CompiledCGraphNode"
+        for node in graph._spec.nodes
+    )
+    assert sum(node.source_native_count for node in graph._spec.nodes) == 2
+    assert graph._spec.execution_definition["internal_storage_bytes"] == 16
+    assert all(
+        not handle.capabilities.producer_owned_launch_state for handle in handles
+    )
+    assert all(handle.capabilities.preparation_dispatches == 0 for handle in handles)
+    assert [handle.workspace_bytes for handle in handles] == [16, 0]
+    assert [handle.workspace_allocation_count for handle in handles] == [1, 0]
+
+    first = ti.ndarray(ti.i32, shape=2)
+    second = ti.ndarray(ti.i32, shape=2)
+    runtime_args = worklist.runtime_arguments(
+        "vulkan_owned_frontier", include_capacity=True
+    )
+    runtime_args.update(count=0, first_visited=first, second_visited=second)
+    for requested in (0, 1, 19, capacity, capacity + 7):
+        runtime_args["count"] = requested
+        first.fill(0)
+        second.fill(0)
+        graph.run(runtime_args)
+        useful = min(requested, capacity)
+        expected_lanes = (
+            0
+            if useful == 0
+            else min(
+                capacity,
+                ((useful + block_dim - 1) // block_dim) * block_dim,
+            )
+        )
+        for visited in (first, second):
+            np.testing.assert_array_equal(
+                visited.to_numpy(), np.array([expected_lanes, useful])
+            )
+    assert graph.execution_stats().memory.persistent_argument_bytes >= 16
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_bounded_publication_falls_back_across_intervening_dispatch():
+    capacity = 17
+    block_dim = 16
+
+    @ti.kernel
+    def preserve_extent(extent_state: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for _ in range(1):
+            extent_state[0] = extent_state[0]
+
+    @ti.kernel
+    def consume(
+        extent_state: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        visited: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.loop_config(block_dim=block_dim)
+        for i in range(capacity):
+            if i < ti.device_extent_count(extent_state):
+                ti.atomic_add(visited[0], 1)
+
+    worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)
+    args = worklist.graph_args("vulkan_separated_frontier")
+    visited_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "separated_visited", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(
+        ti.algorithms.DeviceWorklistSequence(args).finalize_next()
+    )
+    builder.dispatch(preserve_extent, args.next_extent)
+    handle = builder.dispatch_bounded(
+        consume,
+        args.next_extent,
+        visited_arg,
+        extent=args.next_extent,
+        capacity=capacity,
+        block_dim=block_dim,
+    )
+    graph = builder.compile()
+
+    assert handle.capabilities.preparation_dispatches == 1
+    assert handle.workspace_bytes == 12
+    assert graph._spec.execution_definition["internal_storage_bytes"] == 12
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_worklist_finalize_keeps_bounded_state_graph_owned(monkeypatch):
+    probe = dict(ti_core.cuda_bounded_dispatch_probe())
+    if not probe["exact_device_grid_available"]:
+        pytest.skip(probe["unavailable_reason"])
+    monkeypatch.setenv("TI_CUDA_BOUNDED_DISPATCH_MODE", "device_update")
+    monkeypatch.setenv("TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY", "per_node")
+    capacity = 65
+    block_dim = 32
+
+    @ti.kernel
+    def consume(
+        extent_state: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        visited: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.loop_config(block_dim=block_dim)
+        for i in range(capacity):
+            ti.atomic_add(visited[0], 1)
+            if i < ti.device_extent_count(extent_state):
+                ti.atomic_add(visited[1], 1)
+
+    worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)
+    args = worklist.graph_args("owned_frontier")
     count_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
     first_visited_arg = ti.graph.Arg(
         ti.graph.ArgKind.NDARRAY, "first_visited", ti.i32, ndim=1
@@ -363,9 +506,7 @@ def test_cuda_worklist_finalize_fuses_bounded_group_update(monkeypatch):
     )
     launch_state = worklist.next_extent.dispatch_state(block_dim)
     reset = ti.algorithms.DeviceWorklistSequence(args).prepare_next()
-    finalize = ti.algorithms.DeviceWorklistSequence(args).finalize_next(
-        dispatch_state=launch_state
-    )
+    finalize = ti.algorithms.DeviceWorklistSequence(args).finalize_next()
     builder = ti.graph.GraphBuilder()
     builder.append_native(reset)
     builder.dispatch(_append_range, *args.append_arguments(), count_arg)
@@ -390,14 +531,11 @@ def test_cuda_worklist_finalize_fuses_bounded_group_update(monkeypatch):
             launch_state=launch_state,
         ),
     )
-    pending_fusion = builder._pending_cuda_fused_producer
-    assert pending_fusion is not None and pending_fusion[0] is launch_state
-    group_control = pending_fusion[2]
     graph = builder.compile()
     first_visited = ti.ndarray(ti.i32, shape=2)
     second_visited = ti.ndarray(ti.i32, shape=2)
     runtime_args = worklist.runtime_arguments(
-        "fused_frontier", include_capacity=True
+        "owned_frontier", include_capacity=True
     )
     runtime_args.update(
         count=0,
@@ -440,23 +578,70 @@ def test_cuda_worklist_finalize_fuses_bounded_group_update(monkeypatch):
         snapshot = worklist.next_extent.snapshot()
         assert snapshot.count == useful
         assert snapshot.overflow is (requested > capacity)
-        if requested == 1:
-            assert int(group_control.to_numpy()[8]) == 1
-            graph._spec.invalidate_runtime()
-            assert int(group_control.to_numpy()[8]) == 0
-
     assert all(
-        handle.capabilities.producer_owned_launch_state for handle in handles
+        not handle.capabilities.producer_owned_launch_state for handle in handles
     )
-    assert all(handle.capabilities.preparation_dispatches == 0 for handle in handles)
+    assert all(handle.capabilities.preparation_dispatches == 1 for handle in handles)
     report = graph.execution_stats()
     segment = next(item for item in report.segments if item.kind == "cgraph")
     assert segment.last_driver_error == 0
-    assert segment.bounded_update_groups == 1
-    assert segment.bounded_updater_dispatches == 0
-    assert segment.bounded_grouped_payloads == 2
-    assert segment.bounded_producer_fused_groups == 1
-    assert segment.persistent_bounded_control_bytes == 56
+    assert segment.bounded_update_groups == 2
+    assert segment.bounded_updater_dispatches == 2
+    assert segment.bounded_grouped_payloads == 0
+    assert segment.bounded_producer_fused_groups == 0
+    assert segment.persistent_bounded_control_bytes == 64
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_cpu_worklist_finalize_preserves_exact_scheduler_lowering(monkeypatch):
+    monkeypatch.setenv("TI_CPU_BOUNDED_DISPATCH_MODE", "exact_scheduler")
+    capacity = 65
+
+    @ti.kernel
+    def consume(
+        extent_state: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        visited: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in range(capacity):
+            ti.atomic_add(visited[0], 1)
+            if i < ti.device_extent_count(extent_state):
+                ti.atomic_add(visited[1], 1)
+
+    worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)
+    args = worklist.graph_args("cpu_exact_frontier")
+    count_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
+    visited_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "visited", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(
+        ti.algorithms.DeviceWorklistSequence(args).prepare_next()
+    )
+    builder.dispatch(_append_range, *args.append_arguments(), count_arg)
+    builder.append_native(
+        ti.algorithms.DeviceWorklistSequence(args).finalize_next()
+    )
+    handle = builder.dispatch_bounded(
+        consume,
+        args.next_extent,
+        visited_arg,
+        extent=args.next_extent,
+        capacity=capacity,
+    )
+    graph = builder.compile()
+    assert [type(node).__name__ for node in graph._spec.nodes] == [
+        "_CompiledCGraphNode"
+    ]
+    visited = ti.ndarray(ti.i32, shape=2)
+    runtime_args = worklist.runtime_arguments(
+        "cpu_exact_frontier", include_capacity=True
+    )
+    runtime_args.update(count=19, visited=visited)
+    graph.run(runtime_args)
+    np.testing.assert_array_equal(visited.to_numpy(), np.array([19, 19]))
+    report = worklist.execution_report(handle, target="next")
+    assert report.exact_physical_grid
+    assert report.executed_count == 19
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

@@ -102,10 +102,8 @@ class Sequential : public Node {
   void dispatch_cuda_bounded(Kernel *kernel,
                              const std::vector<aot::Arg> &args,
                              const aot::Arg &extent,
-                             const std::optional<aot::Arg> &launch_state,
                              std::uint32_t capacity,
                              std::uint32_t block_dim,
-                             bool producer_fused,
                              const std::string &dispatch_label = {});
 
   void dispatch_cpu_bounded(Kernel *kernel,
@@ -143,10 +141,8 @@ class GraphBuilder {
       Kernel *kernel,
       const std::vector<aot::Arg> &args,
       const aot::Arg &extent,
-      const std::optional<aot::Arg> &launch_state,
       std::uint32_t capacity,
       std::uint32_t block_dim,
-      bool producer_fused,
       const std::string &dispatch_label = {});
 
   Node *new_cpu_bounded_dispatch_node(
@@ -170,10 +166,8 @@ class GraphBuilder {
   void dispatch_cuda_bounded(Kernel *kernel,
                              const std::vector<aot::Arg> &args,
                              const aot::Arg &extent,
-                             const std::optional<aot::Arg> &launch_state,
                              std::uint32_t capacity,
                              std::uint32_t block_dim,
-                             bool producer_fused,
                              const std::string &dispatch_label = {});
 
   void dispatch_cpu_bounded(Kernel *kernel,

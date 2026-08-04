@@ -72,9 +72,9 @@ def device_dispatch_state_publish(
 
     The packet stores the three Vulkan-compatible indirect grid dimensions and
     the immutable block dimension used to derive them. Vulkan consumes the
-    packet through ``dispatchIndirect``; qualified CUDA Graph exact dispatch
-    consumes the same grid through its internal device-side node updater.
-    CPU and masked CUDA routes retain the extent contract and ignore the grid.
+    packet through ``dispatchIndirect``. Qualified CUDA Graph exact dispatch
+    derives its independent Graph-owned node update from the extent; CPU and
+    masked CUDA routes retain the extent contract and ignore the packet.
     """
 
     bounded = device_extent_publish(extent_state, capacity, count)
@@ -188,10 +188,10 @@ class DeviceDispatchState:
 
     Producers publish both the bounded count and a four-word packet.  Words
     zero through two are directly consumable by Vulkan ``dispatchIndirect``;
-    word three stores the immutable block dimension. Qualified CUDA Graph
-    exact dispatch consumes word zero without host readback. CPU and masked
-    CUDA routes retain the same object and extent semantics without claiming
-    exact physical launch.
+    word three stores the immutable block dimension. CUDA keeps this object as
+    a compatibility geometry/identity adapter and derives exact Graph updates
+    from the extent instead of consuming the packet. CPU and masked CUDA routes
+    retain the same extent semantics without claiming exact physical launch.
     """
 
     packet_words = _DISPATCH_PACKET_SIZE

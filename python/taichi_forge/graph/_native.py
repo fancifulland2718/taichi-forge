@@ -158,6 +158,37 @@ class NativeActionManifest:
         }
 
 
+@dataclass(frozen=True)
+class BoundedPublicationTarget:
+    """Graph-owned physical target for an optional producer specialization.
+
+    The extent name and bounds describe semantic data already owned by the
+    provider.  ``packet_storage`` is backend launch scratch owned by the
+    enclosing Graph instance; accepting this target never transfers that
+    ownership to the provider.
+    """
+
+    backend: str
+    extent_name: str
+    capacity: int
+    block_dim: int
+    packet_binding: object
+    packet_storage: object
+    packet_layout: str = "dispatch_indirect_u32x4"
+
+    def __post_init__(self):
+        if self.backend not in ("cpu", "cuda", "vulkan"):
+            raise ValueError("Unsupported bounded publication backend")
+        if not isinstance(self.extent_name, str) or not self.extent_name:
+            raise ValueError("Bounded publication extent name must be nonempty")
+        if not 1 <= int(self.capacity) <= 0x7FFFFFFF:
+            raise ValueError("Bounded publication capacity is out of range")
+        if not 1 <= int(self.block_dim) <= 1024:
+            raise ValueError("Bounded publication block dimension is out of range")
+        if self.packet_binding is None or self.packet_storage is None:
+            raise ValueError("Bounded publication requires Graph-owned packet state")
+
+
 class RecordableGraphAction:
     """Optional provider-neutral lowering contract for a native node.
 
@@ -195,6 +226,17 @@ class RecordableGraphAction:
         """Map private symbolic argument names to temporary requirement names."""
         return MappingProxyType({})
 
+    @property
+    def allows_unused_public_bindings(self):
+        """Whether the physical recipe may consume a subset of public inputs.
+
+        Fixed and temporary bindings must always be consumed. This opt-in is
+        intended for a narrow transition action whose stable native interface
+        is broader than the selected operation, not for silently incomplete
+        provider lowering.
+        """
+        return False
+
     def bind_graph_temporaries(self, temporaries):
         """Resolve one arena slot into private fixed runtime bindings.
 
@@ -215,6 +257,7 @@ class DispatchGraphAction(RecordableGraphAction):
         backends=("cpu", "cuda", "vulkan"),
         conditional_body_safe=True,
         fixed_bindings=None,
+        allow_unused_public_bindings=False,
         update_policy="rebind",
         synchronization_domain="runtime_ordered",
     ):
@@ -232,6 +275,9 @@ class DispatchGraphAction(RecordableGraphAction):
         if any(not isinstance(name, str) or not name for name in bindings):
             raise ValueError("Recordable action fixed binding names must be nonempty")
         self._fixed_bindings = MappingProxyType(bindings)
+        self._allows_unused_public_bindings = bool(
+            allow_unused_public_bindings
+        )
 
     @property
     def capabilities(self):
@@ -244,6 +290,10 @@ class DispatchGraphAction(RecordableGraphAction):
     @property
     def fixed_bindings(self):
         return self._fixed_bindings
+
+    @property
+    def allows_unused_public_bindings(self):
+        return self._allows_unused_public_bindings
 
 
 class NativeGraphExecutable:
@@ -283,6 +333,17 @@ class NativeGraphExecutable:
 
     @property
     def recordable_action(self):
+        return None
+
+    def recordable_bounded_publication(self, target):
+        """Optionally publish a semantic extent into Graph-owned launch state.
+
+        Implementations must return an action equivalent to
+        :attr:`recordable_action` for public state while additionally writing
+        the requested physical packet.  Returning ``None`` keeps the normal
+        producer action and lets the Graph insert a separate preparation
+        dispatch.
+        """
         return None
 
     @property

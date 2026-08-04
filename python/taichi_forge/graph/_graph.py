@@ -33,6 +33,7 @@ from taichi_forge.types.annotations import template
 from taichi_forge.types.primitive_types import i32, u32
 from taichi_forge.types.texture_type import FORMAT2TY_CH, TY_CH2FORMAT
 from taichi_forge.graph._native import (
+    BoundedPublicationTarget,
     GraphTemporaryBuffer,
     NativeActionManifest,
     ProviderOwnedNdarrayBinding,
@@ -41,6 +42,7 @@ from taichi_forge.graph._native import (
     native_action_manifest,
 )
 from taichi_forge.graph._ir import (
+    BoundedDomain,
     DispatchNode,
     IfRegion,
     GraphAccess,
@@ -229,6 +231,65 @@ def _new_runtime_graph_builder():
 
 def _align_up(value, alignment):
     return (value + alignment - 1) // alignment * alignment
+
+
+@dataclass(frozen=True)
+class _GraphInternalNdarraySpec:
+    """Immutable recipe materialized once by each runtime Graph instance."""
+
+    dtype: object
+    shape: tuple
+    element_bytes: int
+
+    def __post_init__(self):
+        shape = tuple(int(value) for value in self.shape)
+        if not shape or any(value <= 0 for value in shape):
+            raise ValueError("Graph internal ndarray shape must be positive")
+        if self.element_bytes <= 0:
+            raise ValueError("Graph internal ndarray element size must be positive")
+        object.__setattr__(self, "shape", shape)
+
+    @property
+    def storage_bytes(self):
+        elements = 1
+        for value in self.shape:
+            elements *= value
+        return elements * self.element_bytes
+
+    def materialize(self):
+        return ScalarNdarray(self.dtype, self.shape)
+
+
+def _materialize_graph_internal_bindings(bindings):
+    materialized = {}
+    storage_by_spec = {}
+    owned = []
+    for name, value in bindings.items():
+        if isinstance(value, _GraphInternalNdarraySpec):
+            key = id(value)
+            storage = storage_by_spec.get(key)
+            if storage is None:
+                storage = value.materialize()
+                storage_by_spec[key] = storage
+                owned.append(storage)
+            materialized[name] = storage
+        else:
+            materialized[name] = value
+    return materialized, tuple(owned)
+
+
+def _graph_internal_storage_bytes(bindings):
+    seen = set()
+    total = 0
+    for value in bindings.values():
+        if not isinstance(value, _GraphInternalNdarraySpec):
+            continue
+        identity = id(value)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        total += value.storage_bytes
+    return total
 
 
 class _GraphTemporaryArenaLease:
@@ -1459,8 +1520,6 @@ def _cuda_bounded_update_policy():
     aliases = {
         "auto": "per_node",
         "per_node": "per_node",
-        "grouped": "grouped",
-        "fused": "fused",
     }
     if requested not in aliases:
         raise TaichiRuntimeError(
@@ -1503,6 +1562,9 @@ def _bounded_route(backend, ordered):
         )
     requested_route = _bounded_route_request(backend)
     if backend == "cuda":
+        update_policy = None
+        if requested_route == "device_update":
+            _, update_policy = _cuda_bounded_update_policy()
         cuda_capabilities = dict(
             (
                 _ti_core.cuda_bounded_dispatch_probe()
@@ -1529,7 +1591,6 @@ def _bounded_route(backend, ordered):
                     "CUDA bounded device_update is unavailable: "
                     f"{cuda_capabilities['unavailable_reason']}"
                 )
-            _, update_policy = _cuda_bounded_update_policy()
             return BoundedDispatchCapabilities(
                 schema_version=3,
                 backend=backend,
@@ -1551,7 +1612,7 @@ def _bounded_route(backend, ordered):
                 ordered_segments=False,
                 global_segment_order=False,
                 producer_owned_launch_state=False,
-                producer_owned_launch_state_supported=True,
+                producer_owned_launch_state_supported=False,
                 preparation_dispatches=1,
                 baseline_capacity_grid=True,
                 capacity=0,
@@ -1649,7 +1710,7 @@ def _bounded_route(backend, ordered):
         ordered_segments=ordered,
         global_segment_order=ordered,
         producer_owned_launch_state=False,
-        producer_owned_launch_state_supported=True,
+        producer_owned_launch_state_supported=False,
         preparation_dispatches=0,
         baseline_capacity_grid=True,
         capacity=0,
@@ -1657,6 +1718,91 @@ def _bounded_route(backend, ordered):
         fallback_reason=fallback_reason,
         reason=reason,
     )
+
+
+class _DeviceExtentGraphContract:
+    """One deduplicated runtime binding contract per symbolic extent.
+
+    The contract owns no device storage. It replaces per-consumer observation
+    handles in Graph lifetime validation and deliberately has no
+    ``bind_graph_arguments`` hook, so a replay validates the extent once.
+    """
+
+    def __init__(self, extent_name, capacity):
+        self.extent_name = extent_name
+        self.capacity = int(capacity)
+        self._expected_extent = None
+        self._runtime_generation = int(impl.runtime_generation())
+        self._runtime_program = impl.get_runtime().prog
+
+    def require_identity(self, extent):
+        from taichi_forge.lang.device_extent import DeviceExtent
+
+        if not isinstance(extent, DeviceExtent):
+            raise TypeError("Bounded extent identity must be a DeviceExtent")
+        extent._validate_current()
+        if extent.capacity != self.capacity:
+            raise ValueError("Bounded extent identity capacity mismatch")
+        if self._expected_extent is None:
+            self._expected_extent = extent
+        elif self._expected_extent is not extent:
+            raise TaichiRuntimeError(
+                "One symbolic bounded extent cannot require multiple owner identities"
+            )
+
+    def validate_graph_lifetime(self):
+        if (
+            impl.runtime_generation() != self._runtime_generation
+            or impl.get_runtime().prog is not self._runtime_program
+        ):
+            raise TaichiRuntimeError(
+                "Bounded extent contract belongs to a stale Taichi runtime"
+            )
+        if self._expected_extent is not None:
+            self._expected_extent._validate_current()
+
+    def validate_graph_bindings(self, args):
+        from taichi_forge.lang.device_extent import DeviceExtent
+
+        self.validate_graph_lifetime()
+        value = args[self.extent_name]
+        if not isinstance(value, DeviceExtent):
+            raise TaichiRuntimeError(
+                "Bounded dispatch extent must be the DeviceExtent whose capacity "
+                "was used to compile this Graph"
+            )
+        value._validate_current()
+        if value.capacity != self.capacity:
+            raise TaichiRuntimeError(
+                "Bounded dispatch DeviceExtent capacity does not match "
+                f"the compiled capacity {self.capacity}"
+            )
+        if self._expected_extent is not None and value is not self._expected_extent:
+            raise TaichiRuntimeError(
+                "Producer-owned bounded state requires its bound DeviceExtent"
+            )
+
+
+class _OrderedOffsetsGraphContract:
+    """Deduplicated shape/type contract for ordered-segment offsets."""
+
+    def __init__(self, offsets_name, segment_count):
+        self.offsets_name = offsets_name
+        self.segment_count = int(segment_count)
+
+    def validate_graph_bindings(self, args):
+        offsets = args[self.offsets_name]
+        if not isinstance(offsets, ScalarNdarray):
+            raise TaichiRuntimeError(
+                "Ordered segmented dispatch offsets must be a scalar i32 ndarray"
+            )
+        if offsets.dtype != i32 or tuple(offsets.shape) != (
+            self.segment_count + 1,
+        ):
+            raise TaichiRuntimeError(
+                "Ordered segmented dispatch offsets must contain "
+                f"{self.segment_count + 1} i32 values"
+            )
 
 
 class BoundedDispatchHandle:
@@ -1677,7 +1823,8 @@ class BoundedDispatchHandle:
         packet=None,
         segment_state=None,
         launch_state=None,
-        producer_fused=False,
+        preparation_dispatches=None,
+        packet_allocation_owner=True,
     ):
         self.extent_name = extent_name
         self.offsets_name = offsets_name
@@ -1688,21 +1835,25 @@ class BoundedDispatchHandle:
         self._packet = packet
         self._segment_state = segment_state
         self._launch_state = launch_state
-        self._producer_fused = bool(producer_fused)
+        self._packet_allocation_owner = bool(packet_allocation_owner)
         self._runtime_generation = int(impl.runtime_generation())
         self._runtime_program = impl.get_runtime().prog
         base = _bounded_route(backend, self._ordered)
+        if preparation_dispatches is None:
+            preparation_dispatches = (
+                0
+                if launch_state is not None and backend == "vulkan"
+                else base.preparation_dispatches
+            )
+        preparation_dispatches = int(preparation_dispatches)
+        if preparation_dispatches < 0:
+            raise ValueError("preparation dispatch count must be nonnegative")
         self._capabilities = replace(
             base,
             capacity=self.capacity,
             block_dim=self.block_dim,
             producer_owned_launch_state=launch_state is not None,
-            preparation_dispatches=(
-                0
-                if launch_state is not None
-                and (backend == "vulkan" or self._producer_fused)
-                else base.preparation_dispatches
-            ),
+            preparation_dispatches=preparation_dispatches,
         )
 
     @property
@@ -1713,18 +1864,31 @@ class BoundedDispatchHandle:
     def workspace_bytes(self):
         packet_bytes = (
             0
-            if self._packet is None or self._launch_state is not None
-            else 3 * 4
+            if (
+                self._packet is None
+                or self._launch_state is not None
+                or not self._packet_allocation_owner
+            )
+            else getattr(self._packet, "storage_bytes", 3 * 4)
         )
-        return packet_bytes + (
+        segment_bytes = (
             0
             if self._segment_state is None
-            else self._SEGMENT_STATE_SIZE * 4
+            else getattr(
+                self._segment_state,
+                "storage_bytes",
+                self._SEGMENT_STATE_SIZE * 4,
+            )
         )
+        return packet_bytes + segment_bytes
 
     @property
     def workspace_allocation_count(self):
-        owns_packet = self._packet is not None and self._launch_state is None
+        owns_packet = (
+            self._packet is not None
+            and self._launch_state is None
+            and self._packet_allocation_owner
+        )
         return int(owns_packet) + int(self._segment_state is not None)
 
     def validate_graph_lifetime(self):
@@ -1738,7 +1902,11 @@ class BoundedDispatchHandle:
                 "Bounded dispatch belongs to a stale Taichi runtime"
             )
         for storage in (self._packet, self._segment_state):
-            if storage is not None and storage.arr is None:
+            if (
+                storage is not None
+                and not isinstance(storage, _GraphInternalNdarraySpec)
+                and storage.arr is None
+            ):
                 raise TaichiRuntimeError(
                     "Bounded dispatch internal storage is no longer available"
                 )
@@ -2712,18 +2880,11 @@ def bounded_dispatch_capabilities():
         "producer_owned_launch_state_supported": (
             capabilities.producer_owned_launch_state_supported
         ),
-        "producer_packet_consumed": backend == "vulkan"
-        or (
-            backend == "cuda"
-            and capabilities.exact_grid
-            and update_policy in ("grouped", "fused")
-        ),
+        "producer_packet_consumed": backend == "vulkan",
         "producer_update_policy_requested": update_policy_requested,
         "producer_update_policy": update_policy,
-        "grouped_updates_supported": backend == "cuda" and capabilities.exact_grid,
-        "forge_producer_fusion_supported": (
-            backend == "cuda" and capabilities.exact_grid
-        ),
+        "grouped_updates_supported": False,
+        "forge_producer_fusion_supported": backend == "vulkan",
         "default_preparation_dispatches": capabilities.preparation_dispatches,
         "updater_dispatches": capabilities.preparation_dispatches,
         "baseline_capacity_grid": capabilities.baseline_capacity_grid,
@@ -3375,7 +3536,7 @@ def _execution_report(
     persistent_argument_bytes = sum(
         int(stats.get("known_persistent_argument_bytes", 0))
         for stats in flat_backend_stats
-    )
+    ) + int(definition.get("internal_storage_bytes", 0))
     persistent_bounded_control_bytes = sum(
         int(stats.get("known_bounded_control_bytes", 0))
         for stats in flat_backend_stats
@@ -3821,6 +3982,9 @@ class _CompiledCGraphNode:
         return info
 
 
+_DEFAULT_NATIVE_RECORDABLE_ACTION = object()
+
+
 class _CompiledNativeGraphNode:
     snode_tree_dependencies = frozenset()
     snode_tree_dependency_info = frozenset()
@@ -3828,9 +3992,17 @@ class _CompiledNativeGraphNode:
     source_native_count = 1
     region_kind = "native"
 
-    def __init__(self, executable):
+    def __init__(
+        self,
+        executable,
+        recordable_action=_DEFAULT_NATIVE_RECORDABLE_ACTION,
+    ):
         self.executable = executable
-        self.recordable_action = executable.recordable_action
+        self.recordable_action = (
+            executable.recordable_action
+            if recordable_action is _DEFAULT_NATIVE_RECORDABLE_ACTION
+            else recordable_action
+        )
         self.action_manifest = native_action_manifest(
             executable, self.recordable_action
         )
@@ -3913,7 +4085,16 @@ class _CompiledNativeGraphNode:
                     for _, args in self.recordable_action.dispatches
                 )
             )
-            if recorder_names != self.recording_runtime_arg_names:
+            required_private_names = frozenset(
+                (*self.fixed_runtime_args, *self.temporary_runtime_arg_names)
+            )
+            complete = recorder_names == self.recording_runtime_arg_names
+            valid_subset = (
+                self.recordable_action.allows_unused_public_bindings
+                and recorder_names <= self.recording_runtime_arg_names
+                and required_private_names <= recorder_names
+            )
+            if not complete and not valid_subset:
                 raise TaichiRuntimeError(
                     "Recordable action dispatch arguments must match its "
                     "public and fixed bindings"
@@ -6939,6 +7120,68 @@ def _recordable_backend_dispatches(node, backend):
     return dispatches or None
 
 
+def _recording_dispatch_ir_nodes(node, dispatch_count):
+    ir_node = getattr(node, "ir_node", None)
+    if isinstance(ir_node, SequentialRegion):
+        children = tuple(ir_node.children)
+        if len(children) == dispatch_count:
+            return children
+    if dispatch_count == 1 and isinstance(ir_node, DispatchNode):
+        return (ir_node,)
+    return (None,) * dispatch_count
+
+
+def _record_backend_dispatch(builder, backend, kernel, args, ir_node):
+    label = (
+        ir_node.dispatch_label
+        if isinstance(ir_node, DispatchNode)
+        else ""
+    )
+    domain = (
+        ir_node.bounded_domain
+        if isinstance(ir_node, DispatchNode)
+        else None
+    )
+    if domain is None or domain.physical_grid_requirement != "require_exact":
+        builder.dispatch(kernel, args, label)
+        return
+    extent = next(
+        (arg for arg in args if getattr(arg, "name", None) == domain.extent),
+        None,
+    )
+    if extent is None:
+        raise TaichiRuntimeError(
+            "Exact bounded Graph lowering lost its symbolic extent binding"
+        )
+    if backend == "cuda":
+        if domain.block_dim is None:
+            raise TaichiRuntimeError(
+                "Exact CUDA bounded Graph lowering requires a block dimension"
+            )
+        builder.dispatch_cuda_bounded(
+            kernel,
+            args,
+            extent,
+            domain.capacity,
+            domain.block_dim,
+            label,
+        )
+        return
+    if backend == "cpu":
+        builder.dispatch_cpu_bounded(
+            kernel,
+            args,
+            extent,
+            domain.capacity,
+            label,
+        )
+        return
+    raise TaichiRuntimeError(
+        "Exact bounded Graph lowering cannot reconstruct the backend launch "
+        f"recipe for {backend}"
+    )
+
+
 def _merge_fixed_runtime_args(nodes):
     merged = {}
     for node in nodes:
@@ -7098,8 +7341,19 @@ def _lower_mixed_backend_regions(nodes):
         native_action_manifests = []
         temporary_actions = []
         for node, dispatches in region:
-            for kernel, args in dispatches:
-                builder.dispatch(kernel, args)
+            dispatch_ir_nodes = _recording_dispatch_ir_nodes(
+                node, len(dispatches)
+            )
+            for (kernel, args), dispatch_ir_node in zip(
+                dispatches, dispatch_ir_nodes
+            ):
+                _record_backend_dispatch(
+                    builder,
+                    backend,
+                    kernel,
+                    args,
+                    dispatch_ir_node,
+                )
                 recording_dispatches.append((kernel, tuple(args)))
             runtime_arg_names.update(
                 getattr(
@@ -7400,6 +7654,9 @@ class _GraphSpec:
             *(frozenset(action.temporary_bindings) for action in self.temporary_actions)
         )
         self.fixed_runtime_args = _merge_fixed_runtime_args(self.nodes)
+        self.internal_storage_bytes = _graph_internal_storage_bytes(
+            self.fixed_runtime_args
+        )
         lifetime_leases = []
         seen_lifetime_leases = set()
         for node in self.nodes:
@@ -7868,14 +8125,20 @@ class _GraphSpec:
             "max_structured_depth": self.max_structured_depth,
             "runtime_arg_count": len(self.runtime_arg_names),
             "fixed_runtime_arg_count": len(self.fixed_runtime_args),
+            "internal_storage_bytes": self.internal_storage_bytes,
             "dependency_info": tuple(sorted(self.snode_tree_dependency_info)),
             "temporary_memory_plan": self.temporary_memory_plan.to_dict(),
         }
 
 
 class _GraphExecutable:
-    def __init__(self, spec):
+    def __init__(self, spec, fixed_runtime_args=None):
         self.spec = spec
+        self.fixed_runtime_args = (
+            spec.fixed_runtime_args
+            if fixed_runtime_args is None
+            else fixed_runtime_args
+        )
         self._context = _GraphRunContext() if self.spec.needs_runtime_args else None
 
     def run(self, args, temporaries=None, trace_recorder=None):
@@ -7886,7 +8149,7 @@ class _GraphExecutable:
         if context is not None:
             context.begin(
                 self.spec.bind_runtime_args(args, temporaries),
-                self.spec.fixed_runtime_args,
+                self.fixed_runtime_args,
                 trace_recorder,
             )
         try:
@@ -7901,7 +8164,7 @@ class _GraphExecutable:
         if context is not None:
             context.begin(
                 self.spec.bind_runtime_args(args, temporaries),
-                self.spec.fixed_runtime_args,
+                self.fixed_runtime_args,
             )
         try:
             telemetry_region = 0
@@ -7935,6 +8198,10 @@ class _GraphInstance:
     def __init__(self, spec, key):
         self.spec = spec
         self.key = key
+        (
+            self._fixed_runtime_args,
+            self._internal_storages,
+        ) = _materialize_graph_internal_bindings(spec.fixed_runtime_args)
         self._executable = None
         self._native_nodes = None
         self._backend_executable = None
@@ -7970,7 +8237,9 @@ class _GraphInstance:
             self._kind = "native_only"
             self._set_run_impl(self._run_native_only)
         else:
-            self._executable = _GraphExecutable(spec)
+            self._executable = _GraphExecutable(
+                spec, self._fixed_runtime_args
+            )
             self._kind = "dispatch_loop"
             self._set_run_impl(self._run_general)
 
@@ -7994,7 +8263,9 @@ class _GraphInstance:
             self.run(args)
             return
         if self._executable is None:
-            self._executable = _GraphExecutable(self.spec)
+            self._executable = _GraphExecutable(
+                self.spec, self._fixed_runtime_args
+            )
         self._executable.run(
             args,
             self._temporary_bindings,
@@ -8005,7 +8276,9 @@ class _GraphInstance:
         if not self.spec.supports_native_structured_submission:
             return self.run(args)
         if self._executable is None:
-            self._executable = _GraphExecutable(self.spec)
+            self._executable = _GraphExecutable(
+                self.spec, self._fixed_runtime_args
+            )
         self._executable.run_for_submission(args, self._temporary_bindings, telemetry)
 
     def bind_temporary_buffers(self, bindings):
@@ -8094,7 +8367,7 @@ class _GraphInstance:
         if context is not None:
             context.begin(
                 self.spec.bind_runtime_args(args, temporaries),
-                self.spec.fixed_runtime_args,
+                self._fixed_runtime_args,
             )
         try:
             self._backend_executable.run(context, temporaries)
@@ -8446,7 +8719,12 @@ def _dispatch_ir_name(kernel_cpp):
 
 
 def _dispatch_ir_node(
-    kernel_cpp, args, *, dispatch_packet=None, dispatch_label=""
+    kernel_cpp,
+    args,
+    *,
+    dispatch_packet=None,
+    dispatch_label="",
+    bounded_domain=None,
 ):
     effects = []
     bindings = []
@@ -8470,6 +8748,8 @@ def _dispatch_ir_node(
         effects=tuple(effects),
         bindings=tuple(bindings),
         opaque=True,
+        bounded_domain=bounded_domain,
+        dispatch_label=dispatch_label,
     )
 
 
@@ -8554,6 +8834,8 @@ def _compiled_dispatch_ir_nodes(compiled_graph, fallback_nodes):
                     opaque=True,
                     elementwise=False,
                     side_effects=side_effects,
+                    bounded_domain=fallback.bounded_domain,
+                    dispatch_label=fallback.dispatch_label,
                 )
             )
             continue
@@ -8567,6 +8849,8 @@ def _compiled_dispatch_ir_nodes(compiled_graph, fallback_nodes):
                 opaque=False,
                 elementwise=bool(record.get("elementwise", False)),
                 side_effects=side_effects,
+                bounded_domain=fallback.bounded_domain,
+                dispatch_label=fallback.dispatch_label,
             )
         )
     return tuple(result)
@@ -8933,14 +9217,11 @@ class GraphBuilder:
         self._observation_names = set()
         self._runtime_graph_fixed_args = {}
         self._runtime_graph_lifetime_leases = []
-        self._cuda_launch_state_args = {}
-        self._pending_cuda_fused_producer = None
-        (
-            self._cuda_bounded_update_policy_requested,
-            self._cuda_bounded_update_policy,
-        ) = _cuda_bounded_update_policy()
+        self._bounded_extent_contracts = {}
+        self._ordered_offsets_contracts = {}
         self._runtime_graph_source_native_count = 0
         self._runtime_graph_native_action_manifests = []
+        self._active_bounded_publication = None
 
     def dispatch(self, kernel_fn, *args, template_args=None, label=None):
         label = _normalize_dispatch_label(label)
@@ -8964,9 +9245,16 @@ class GraphBuilder:
         )
 
     def _record_indirect_dispatch(
-        self, kernel_cpp, unzipped_args, dispatch_packet, label=""
+        self,
+        kernel_cpp,
+        unzipped_args,
+        dispatch_packet,
+        label="",
+        *,
+        preserve_bounded_publication=False,
     ):
-        self._pending_cuda_fused_producer = None
+        if not preserve_bounded_publication:
+            self._active_bounded_publication = None
         self._aot_graph_plan.dispatch_indirect(
             kernel_cpp, unzipped_args, dispatch_packet, label
         )
@@ -9008,32 +9296,87 @@ class GraphBuilder:
             self._runtime_graph_lifetime_leases.append(lease)
         self._aot_graph_plan.mark_internal_fixed_bindings()
 
-    def _cuda_launch_state_binding(self, launch_state):
-        """Return the symbolic state and whether its producer owns the update."""
+    def _vulkan_bounded_publication(self, extent, capacity, block_dim):
+        key = (extent.name, int(capacity), int(block_dim))
+        active = self._active_bounded_publication
+        if active is not None and active["key"] == key:
+            owns_packet = not active["packet_claimed"]
+            active["packet_claimed"] = True
+            return (
+                active["packet_arg"],
+                active["packet"],
+                owns_packet,
+            )
 
-        pending = self._pending_cuda_fused_producer
-        if pending is not None:
-            pending_state, symbolic, _ = pending
-            if pending_state is launch_state:
-                return symbolic, True
-            self._pending_cuda_fused_producer = None
+        self._active_bounded_publication = None
+        if self._dispatch_count != 0 or not self._nodes:
+            return None
+        producer = self._nodes[-1]
+        if not isinstance(producer, _CompiledNativeGraphNode):
+            return None
 
-        key = id(launch_state)
-        existing = self._cuda_launch_state_args.get(key)
-        if existing is not None:
-            existing_state, symbolic = existing
-            if existing_state is launch_state:
-                return symbolic, False
         unique = next(_bounded_dispatch_ids)
-        symbolic = Arg(
+        packet = _GraphInternalNdarraySpec(u32, (4,), 4)
+        packet_arg = Arg(
             ArgKind.NDARRAY,
-            f"__ti_cuda_bounded_launch_state_{unique}",
+            f"__ti_bounded_publication_{unique}",
             u32,
             ndim=1,
         )
-        self._cuda_launch_state_args[key] = (launch_state, symbolic)
-        self._bind_internal_runtime_arg(symbolic, launch_state.packet)
-        return symbolic, False
+        target = BoundedPublicationTarget(
+            backend="vulkan",
+            extent_name=extent.name,
+            capacity=capacity,
+            block_dim=block_dim,
+            packet_binding=packet_arg,
+            packet_storage=packet,
+        )
+        action = producer.executable.recordable_bounded_publication(target)
+        if action is None:
+            return None
+        if not action.supports_backend("vulkan"):
+            raise TaichiRuntimeError(
+                "Bounded publication specialization does not support Vulkan"
+            )
+        self._nodes[-1] = _CompiledNativeGraphNode(
+            producer.executable,
+            recordable_action=action,
+        )
+        self._active_bounded_publication = {
+            "key": key,
+            "packet_arg": packet_arg,
+            "packet": packet,
+            "packet_claimed": True,
+        }
+        return packet_arg, packet, True
+
+    def _bounded_extent_contract(
+        self, extent_name, capacity, *, expected_extent=None
+    ):
+        contract = self._bounded_extent_contracts.get(extent_name)
+        if contract is None:
+            contract = _DeviceExtentGraphContract(extent_name, capacity)
+            self._bounded_extent_contracts[extent_name] = contract
+        elif contract.capacity != capacity:
+            raise TaichiRuntimeError(
+                f"Bounded extent {extent_name!r} changes capacity within one Graph"
+            )
+        if expected_extent is not None:
+            contract.require_identity(expected_extent)
+        self._retain_runtime_graph_lease(contract)
+        return contract
+
+    def _ordered_offsets_contract(self, offsets_name, segment_count):
+        contract = self._ordered_offsets_contracts.get(offsets_name)
+        if contract is None:
+            contract = _OrderedOffsetsGraphContract(offsets_name, segment_count)
+            self._ordered_offsets_contracts[offsets_name] = contract
+        elif contract.segment_count != segment_count:
+            raise TaichiRuntimeError(
+                f"Ordered offsets {offsets_name!r} change segment count within one Graph"
+            )
+        self._retain_runtime_graph_lease(contract)
+        return contract
 
     @staticmethod
     def _bounded_launch_policy(block_dim, block_mode, backend):
@@ -9163,30 +9506,42 @@ class GraphBuilder:
             )
         effective_launch_state = (
             launch_state
-            if backend == "vulkan" or (backend == "cuda" and exact_device_grid)
+            if backend == "vulkan"
             else None
         )
         extent = _require_bounded_symbolic_ndarray(extent, "extent", i32)
         if extent.name not in _runtime_arg_names(unzipped_args):
             raise TaichiRuntimeError(
                 "bounded dispatch payload arguments must include the extent argument"
-            )
+        )
         packet = None
-        producer_fused = False
+        packet_allocation_owner = True
+        preparation_dispatches = None
         if backend == "vulkan":
-            unique = next(_bounded_dispatch_ids)
-            packet = (
-                effective_launch_state.packet
+            publication = (
+                None
                 if effective_launch_state is not None
-                else ScalarNdarray(u32, (3,))
+                else self._vulkan_bounded_publication(
+                    extent, capacity, selected_block
+                )
             )
-            packet_arg = Arg(
-                ArgKind.NDARRAY,
-                f"__ti_bounded_packet_{unique}",
-                u32,
-                ndim=1,
-            )
-            if effective_launch_state is None:
+            if publication is not None:
+                packet_arg, packet, packet_allocation_owner = publication
+                preparation_dispatches = 0
+            else:
+                unique = next(_bounded_dispatch_ids)
+                packet = (
+                    effective_launch_state.packet
+                    if effective_launch_state is not None
+                    else _GraphInternalNdarraySpec(u32, (3,), 4)
+                )
+                packet_arg = Arg(
+                    ArgKind.NDARRAY,
+                    f"__ti_bounded_packet_{unique}",
+                    u32,
+                    ndim=1,
+                )
+            if effective_launch_state is None and publication is None:
                 capacity_arg = Arg(
                     ArgKind.SCALAR, f"__ti_bounded_capacity_{unique}", i32
                 )
@@ -9201,33 +9556,22 @@ class GraphBuilder:
                 self._bind_internal_runtime_arg(capacity_arg, capacity)
                 self._bind_internal_runtime_arg(block_arg, selected_block)
             self._record_indirect_dispatch(
-                kernel_cpp, unzipped_args, packet_arg, label
+                kernel_cpp,
+                unzipped_args,
+                packet_arg,
+                label,
+                preserve_bounded_publication=publication is not None,
             )
             self._bind_internal_runtime_arg(packet_arg, packet)
         elif backend == "cuda" and exact_device_grid:
-            selected_launch_state = (
-                effective_launch_state
-                if self._cuda_bounded_update_policy != "per_node"
-                else None
-            )
-            if selected_launch_state is None:
-                self._pending_cuda_fused_producer = None
-                launch_state_arg = None
-            else:
-                launch_state_arg, producer_fused = self._cuda_launch_state_binding(
-                    selected_launch_state
-                )
             self._record_cuda_bounded_dispatch(
                 kernel_cpp,
                 unzipped_args,
                 extent,
-                launch_state_arg,
                 capacity,
                 selected_block,
-                producer_fused=producer_fused,
                 label=label,
             )
-            effective_launch_state = selected_launch_state
         elif backend == "cpu" and exact_device_grid:
             self._record_cpu_bounded_dispatch(
                 kernel_cpp,
@@ -9239,6 +9583,27 @@ class GraphBuilder:
         else:
             self._record_dispatch(kernel_cpp, unzipped_args, label)
 
+        bounded_domain = BoundedDomain(
+            extent=extent.name,
+            capacity=capacity,
+            block_dim=selected_block,
+            block_mode=policy.mode,
+            physical_grid_requirement=(
+                "require_exact" if exact_device_grid else "auto"
+            ),
+        )
+        self._pending_ir_nodes[-1] = replace(
+            self._pending_ir_nodes[-1], bounded_domain=bounded_domain
+        )
+        self._bounded_extent_contract(
+            extent.name,
+            capacity,
+            expected_extent=(
+                None
+                if effective_launch_state is None
+                else effective_launch_state.extent
+            ),
+        )
         handle = BoundedDispatchHandle(
             extent_name=extent.name,
             capacity=capacity,
@@ -9246,9 +9611,9 @@ class GraphBuilder:
             backend=backend,
             packet=packet,
             launch_state=effective_launch_state,
-            producer_fused=producer_fused,
+            preparation_dispatches=preparation_dispatches,
+            packet_allocation_owner=packet_allocation_owner,
         )
-        self._retain_runtime_graph_lease(handle)
         return handle
 
     def dispatch_ordered_segments(
@@ -9301,8 +9666,14 @@ class GraphBuilder:
                 "segmented dispatch; select masked_capacity for this graph"
             )
         unique = next(_bounded_dispatch_ids)
-        packet = ScalarNdarray(u32, (3,)) if backend == "vulkan" else None
-        segment_state = ScalarNdarray(i32, (BoundedDispatchHandle._SEGMENT_STATE_SIZE,))
+        packet = (
+            _GraphInternalNdarraySpec(u32, (3,), 4)
+            if backend == "vulkan"
+            else None
+        )
+        segment_state = _GraphInternalNdarraySpec(
+            i32, (BoundedDispatchHandle._SEGMENT_STATE_SIZE,), 4
+        )
         state_arg = Arg(
             ArgKind.NDARRAY, f"__ti_segment_state_{unique}", i32, ndim=1
         )
@@ -9389,8 +9760,19 @@ class GraphBuilder:
                 self._record_dispatch(
                     payload_cpp, payload_flattened, payload_label
                 )
+            self._pending_ir_nodes[-1] = replace(
+                self._pending_ir_nodes[-1],
+                bounded_domain=BoundedDomain(
+                    extent=extent.name,
+                    capacity=capacity,
+                    block_dim=selected_block,
+                    block_mode=policy.mode,
+                ),
+            )
             self._bind_internal_runtime_arg(index_arg, segment)
 
+        self._bounded_extent_contract(extent.name, capacity)
+        self._ordered_offsets_contract(offsets.name, segment_count)
         handle = BoundedDispatchHandle(
             extent_name=extent.name,
             offsets_name=offsets.name,
@@ -9402,7 +9784,6 @@ class GraphBuilder:
             packet=packet,
             segment_state=segment_state,
         )
-        self._retain_runtime_graph_lease(handle)
         return handle
 
     def _record_dispatch(
@@ -9410,11 +9791,8 @@ class GraphBuilder:
         kernel_cpp,
         unzipped_args,
         label="",
-        *,
-        _preserve_cuda_fusion=False,
     ):
-        if not _preserve_cuda_fusion:
-            self._pending_cuda_fused_producer = None
+        self._active_bounded_publication = None
         self._aot_graph_plan.dispatch(kernel_cpp, unzipped_args, label)
         self._ensure_runtime_graph_builder().dispatch(
             kernel_cpp, unzipped_args, label
@@ -9433,12 +9811,11 @@ class GraphBuilder:
         kernel_cpp,
         unzipped_args,
         extent,
-        launch_state,
         capacity,
         block_dim,
-        producer_fused=False,
         label="",
     ):
+        self._active_bounded_publication = None
         # The public AOT graph schema stays backend-neutral. The exact CUDA
         # node is a JIT-only specialization carried by the runtime builder.
         self._aot_graph_plan.dispatch(kernel_cpp, unzipped_args, label)
@@ -9446,10 +9823,8 @@ class GraphBuilder:
             kernel_cpp,
             unzipped_args,
             extent,
-            launch_state,
             capacity,
             block_dim,
-            producer_fused,
             label,
         )
         self._runtime_graph_dispatches.append((kernel_cpp, tuple(unzipped_args)))
@@ -9469,6 +9844,7 @@ class GraphBuilder:
         capacity,
         label="",
     ):
+        self._active_bounded_publication = None
         self._aot_graph_plan.dispatch(kernel_cpp, unzipped_args, label)
         self._ensure_runtime_graph_builder().dispatch_cpu_bounded(
             kernel_cpp,
@@ -9492,7 +9868,7 @@ class GraphBuilder:
     def append(self, node):
         # TODO: support appending dispatch node as well.
         assert isinstance(node, Sequential)
-        self._pending_cuda_fused_producer = None
+        self._active_bounded_publication = None
         if node._source_native_count or node._structured_depth:
             self._flush_graph_builder()
             self._nodes.append(
@@ -9549,115 +9925,18 @@ class GraphBuilder:
         self._pending_ir_nodes = []
         self._runtime_graph_fixed_args = {}
         self._runtime_graph_lifetime_leases = []
-        self._cuda_launch_state_args = {}
-        self._pending_cuda_fused_producer = None
         self._runtime_graph_source_native_count = 0
         self._runtime_graph_native_action_manifests = []
+        self._active_bounded_publication = None
 
     def _append_native(self, node, *, prewarm=False):
         executable = compile_native_graph_node(node)
         if prewarm:
             executable.prewarm()
-        if self._try_append_cuda_bounded_producer(executable):
-            return self
+        self._active_bounded_publication = None
         self._flush_graph_builder()
         self._nodes.append(_CompiledNativeGraphNode(executable))
         return self
-
-    def _try_append_cuda_bounded_producer(self, executable):
-        factory = getattr(executable, "_cuda_bounded_fusion_action", None)
-        fusion_state = getattr(executable, "_cuda_bounded_fusion_state", None)
-        if (
-            factory is None
-            or fusion_state is None
-            or impl.current_cfg().arch != _ti_core.Arch.cuda
-        ):
-            return False
-        if not _bounded_route("cuda", False).exact_grid:
-            return False
-        unique = next(_bounded_dispatch_ids)
-        dispatch_packet_arg = Arg(
-            ArgKind.NDARRAY,
-            f"__ti_cuda_bounded_producer_packet_{unique}",
-            u32,
-            ndim=1,
-        )
-        capacity_arg = Arg(
-            ArgKind.SCALAR,
-            f"__ti_cuda_bounded_producer_capacity_{unique}",
-            i32,
-        )
-        group_control = None
-        group_control_arg = None
-        if self._cuda_bounded_update_policy == "fused":
-            group_control = ScalarNdarray(u32, (10,))
-            group_control.fill(0)
-            group_control_arg = Arg(
-                ArgKind.NDARRAY,
-                f"__ti_cuda_bounded_group_control_{unique}",
-                u32,
-                ndim=1,
-            )
-        fused = factory(
-            group_control_arg,
-            group_control,
-            dispatch_packet_arg,
-            capacity_arg,
-        )
-        if fused is None:
-            return False
-        action, launch_state = fused
-        if launch_state is not fusion_state:
-            raise TaichiRuntimeError(
-                "CUDA bounded producer changed fusion state while recording"
-            )
-        if (
-            not isinstance(action, RecordableGraphAction)
-            or not action.supports_backend("cuda")
-            or len(tuple(action.dispatches)) != 1
-        ):
-            raise TaichiRuntimeError(
-                "CUDA bounded producer fusion requires one recordable dispatch"
-            )
-        kernel_cpp, action_args = tuple(action.dispatches)[0]
-        self._record_dispatch(
-            kernel_cpp,
-            list(action_args),
-            _preserve_cuda_fusion=True,
-        )
-        self._pending_ir_nodes[-1] = executable.graph_ir_node
-        by_name = {arg.name: arg for arg in action_args}
-        for name, value in action.fixed_bindings.items():
-            symbolic = by_name.get(name)
-            if symbolic is None:
-                raise TaichiRuntimeError(
-                    "CUDA bounded producer fixed binding is undeclared: " + name
-                )
-            self._bind_internal_runtime_arg(symbolic, value)
-        self._runtime_graph_arg_names.update(
-            binding.name for binding in executable.runtime_arg_schema
-        )
-        self._runtime_graph_source_native_count += 1
-        self._runtime_graph_native_action_manifests.append(
-            native_action_manifest(executable, action)
-        )
-        for lease in (
-            executable,
-            *tuple(executable.lifetime_leases),
-            group_control,
-            action,
-        ):
-            if lease is not None:
-                self._retain_runtime_graph_lease(lease)
-        if group_control is not None:
-            self._pending_cuda_fused_producer = (
-                launch_state,
-                group_control_arg,
-                group_control,
-            )
-        else:
-            self._pending_cuda_fused_producer = None
-        return True
 
     @staticmethod
     def _control_name(value, role):

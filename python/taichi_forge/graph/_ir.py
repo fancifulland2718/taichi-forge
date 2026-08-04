@@ -70,6 +70,54 @@ class TemporaryRequirement:
 
 
 @dataclass(frozen=True)
+class BoundedDomain:
+    """Backend-neutral iteration domain driven by a device extent.
+
+    Backend packets, updater controls, and physical node identities are
+    deliberately excluded. ``publication_epoch`` remains unknown until a
+    producer/effect analysis can prove which extent write reaches the
+    consumer.
+    """
+
+    extent: str
+    capacity: int
+    block_dim: Optional[int] = None
+    block_mode: str = "auto"
+    physical_grid_requirement: str = "auto"
+    publication_epoch: Optional[int] = None
+
+    def __post_init__(self):
+        if not isinstance(self.extent, str) or not self.extent:
+            raise ValueError("Bounded domain extent must be a non-empty resource")
+        if isinstance(self.capacity, bool) or not isinstance(self.capacity, int):
+            raise TypeError("Bounded domain capacity must be an integer")
+        if self.capacity <= 0:
+            raise ValueError("Bounded domain capacity must be positive")
+        if self.block_dim is not None and (
+            isinstance(self.block_dim, bool)
+            or not isinstance(self.block_dim, int)
+            or not 1 <= self.block_dim <= 1024
+        ):
+            raise ValueError("Bounded domain block_dim must be in [1, 1024]")
+        if self.block_mode not in ("auto", "hint", "require"):
+            raise ValueError("Bounded domain block_mode is invalid")
+        if self.physical_grid_requirement not in ("auto", "require_exact"):
+            raise ValueError("Bounded domain physical grid requirement is invalid")
+        if self.publication_epoch is not None and self.publication_epoch < 0:
+            raise ValueError("Bounded domain publication epoch must be non-negative")
+
+    def to_dict(self):
+        return {
+            "extent": self.extent,
+            "capacity": self.capacity,
+            "block_dim": self.block_dim,
+            "block_mode": self.block_mode,
+            "physical_grid_requirement": self.physical_grid_requirement,
+            "publication_epoch": self.publication_epoch,
+        }
+
+
+@dataclass(frozen=True)
 class DispatchNode:
     name: str
     effects: Tuple[ResourceEffect, ...] = ()
@@ -80,6 +128,8 @@ class DispatchNode:
     opaque: bool = True
     elementwise: bool = False
     side_effects: Tuple[str, ...] = ()
+    bounded_domain: Optional[BoundedDomain] = None
+    dispatch_label: str = ""
 
     @property
     def kind(self):
@@ -1116,6 +1166,12 @@ def graph_ir_to_dict(node, _structured_depth=0):
     if isinstance(node, DispatchNode):
         result["elementwise"] = node.elementwise
         result["side_effects"] = node.side_effects
+        result["dispatch_label"] = node.dispatch_label
+        result["bounded_domain"] = (
+            None
+            if node.bounded_domain is None
+            else node.bounded_domain.to_dict()
+        )
     if isinstance(node, ObservationNode):
         result["batch"] = node.batch
     return result

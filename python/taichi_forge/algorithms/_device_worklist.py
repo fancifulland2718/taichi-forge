@@ -6,6 +6,7 @@ count on host.  Stable selection and keyed claim paths reuse Forge's existing
 device prefix, compact, and native stable-sort providers.
 """
 
+import itertools
 from dataclasses import dataclass
 
 import numpy as np
@@ -53,6 +54,7 @@ _STAT_NAMES = (
     "winners",
     "overflow",
 )
+_WORKLIST_RECORDING_IDS = itertools.count(1)
 
 
 def _current_backend_name():
@@ -181,6 +183,7 @@ def _finalize_atomic_worklist_with_dispatch(
     overflow: ndarray_type.ndarray(dtype=i32, ndim=0),
     dispatch_packet: ndarray_type.ndarray(dtype=u32, ndim=1),
     capacity: i32,
+    block_dim: i32,
 ):
     raw = generated[None]
     bounded = ops.min(ops.max(raw, 0), capacity)
@@ -191,58 +194,9 @@ def _finalize_atomic_worklist_with_dispatch(
     winners[None] = bounded
     status = 1 if overflow[None] != 0 or rejected_count != 0 else 0
     overflow[None] = status
+    dispatch_packet[3] = ops.cast(block_dim, u32)
     device_dispatch_state_publish(extent_state, dispatch_packet, capacity, bounded)
     extent_state[1] = status
-
-
-@func
-def _cuda_graph_apply_bounded_group(group_control: template()):
-    if group_control[8] != 0:
-        nodes_address = ops.cast(group_control[2], u64) | (
-            ops.cast(group_control[3], u64) << 32
-        )
-        driver_status = impl.call_internal(
-            "cuda_graph_update_bounded_group",
-            nodes_address,
-            group_control[4],
-            group_control[5],
-            group_control[6],
-            with_runtime_context=False,
-        )
-        group_control[7] = ops.cast(driver_status, u32)
-
-
-@kernel
-def _finalize_atomic_worklist_with_cuda_group(
-    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
-    generated: ndarray_type.ndarray(dtype=i32, ndim=0),
-    accepted: ndarray_type.ndarray(dtype=i32, ndim=0),
-    rejected: ndarray_type.ndarray(dtype=i32, ndim=0),
-    conflicts: ndarray_type.ndarray(dtype=i32, ndim=0),
-    winners: ndarray_type.ndarray(dtype=i32, ndim=0),
-    overflow: ndarray_type.ndarray(dtype=i32, ndim=0),
-    dispatch_packet: ndarray_type.ndarray(dtype=u32, ndim=1),
-    group_control: ndarray_type.ndarray(dtype=u32, ndim=1),
-    capacity: i32,
-):
-    raw = generated[None]
-    bounded = ops.min(ops.max(raw, 0), capacity)
-    rejected_count = ops.max(0, raw - capacity)
-    accepted[None] = bounded
-    rejected[None] = rejected_count
-    conflicts[None] = 0
-    winners[None] = bounded
-    status = 1 if overflow[None] != 0 or rejected_count != 0 else 0
-    overflow[None] = status
-    device_dispatch_state_publish(extent_state, dispatch_packet, capacity, bounded)
-    extent_state[1] = status
-    if group_control[8] != 0 and group_control[9] != 0:
-        block_dim = ops.cast(group_control[9], i32)
-        group_control[5] = ops.cast(
-            (bounded + block_dim - 1) // block_dim, u32
-        )
-        group_control[6] = 1 if bounded != 0 else 0
-        _cuda_graph_apply_bounded_group(group_control)
 
 
 @kernel
@@ -575,6 +529,7 @@ def _finalize_atomic_target(extent, stats, capacity, dispatch_state=None):
         *_stats_tuple(stats),
         dispatch_state.packet,
         capacity,
+        dispatch_state.block_dim,
     )
 
 
@@ -1273,6 +1228,9 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
         self._operation = sequence._operation
         self._arg_names = tuple(sequence._arg_descriptors)
         self._leases = tuple(dict.fromkeys(sequence._leases))
+        self._recording_id = next(_WORKLIST_RECORDING_IDS)
+        self._recordable_action_cache = None
+        self._recordable_action_initialized = False
 
     @property
     def runtime_arg_schema(self):
@@ -1288,69 +1246,121 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
     def lifetime_leases(self):
         return self._leases
 
-    @property
-    def _cuda_bounded_fusion_state(self):
+    def _build_recordable_transition_action(self):
         kind, _, options = self._operation
-        if kind != "finalize" or impl.current_cfg().arch != _ti_core.Arch.cuda:
+        if kind not in ("reset", "finalize"):
             return None
-        return options.get("dispatch_state")
+        from taichi_forge.graph._graph import Arg, ArgKind, gen_cpp_kernel
 
-    def _cuda_bounded_fusion_action(
-        self,
-        group_control_arg,
-        group_control,
-        dispatch_packet_arg,
-        capacity_arg,
-    ):
+        if kind == "reset":
+            symbolic_args = (self._args.next_extent, *self._args.stat_args)
+            kernel_cpp = gen_cpp_kernel(_reset_worklist_target, symbolic_args)
+            fixed_bindings = {}
+        else:
+            prefix = f"__ti_worklist_transition_{self._recording_id}"
+            capacity_arg = Arg(ArgKind.SCALAR, f"{prefix}_capacity", i32)
+            dispatch_state = options.get("dispatch_state")
+            if dispatch_state is not None and impl.current_cfg().arch in (
+                _ti_core.Arch.cuda,
+                _ti_core.Arch.vulkan,
+            ):
+                dispatch_state._validate_current()
+                packet_arg = Arg(
+                    ArgKind.NDARRAY,
+                    f"{prefix}_dispatch_packet",
+                    u32,
+                    ndim=1,
+                )
+                block_arg = Arg(
+                    ArgKind.SCALAR,
+                    f"{prefix}_dispatch_block",
+                    i32,
+                )
+                symbolic_args = (
+                    self._args.next_extent,
+                    *self._args.stat_args,
+                    packet_arg,
+                    capacity_arg,
+                    block_arg,
+                )
+                kernel_cpp = gen_cpp_kernel(
+                    _finalize_atomic_worklist_with_dispatch, symbolic_args
+                )
+                fixed_bindings = {
+                    packet_arg.name: dispatch_state.packet,
+                    capacity_arg.name: self._args.capacity_value,
+                    block_arg.name: dispatch_state.block_dim,
+                }
+            else:
+                symbolic_args = (
+                    self._args.next_extent,
+                    *self._args.stat_args,
+                    capacity_arg,
+                )
+                kernel_cpp = gen_cpp_kernel(
+                    _finalize_atomic_worklist, symbolic_args
+                )
+                fixed_bindings = {
+                    capacity_arg.name: self._args.capacity_value,
+                }
+        return DispatchGraphAction(
+            ((kernel_cpp, symbolic_args),),
+            backends=(_current_backend_name(),),
+            conditional_body_safe=True,
+            fixed_bindings=fixed_bindings,
+            allow_unused_public_bindings=True,
+            update_policy="immutable",
+            synchronization_domain="runtime_ordered",
+        )
+
+    @property
+    def recordable_action(self):
+        if not self._recordable_action_initialized:
+            self._recordable_action_cache = (
+                self._build_recordable_transition_action()
+            )
+            self._recordable_action_initialized = True
+        return self._recordable_action_cache
+
+    def recordable_bounded_publication(self, target):
         kind, _, options = self._operation
-        dispatch_state = options.get("dispatch_state")
         if (
             kind != "finalize"
-            or dispatch_state is None
-            or impl.current_cfg().arch != _ti_core.Arch.cuda
+            or options.get("dispatch_state") is not None
+            or target.backend != "vulkan"
+            or target.packet_layout != "dispatch_indirect_u32x4"
+            or target.extent_name != self._args.next_extent.name
+            or int(target.capacity) != self._args.capacity_value
         ):
             return None
-        dispatch_state._validate_current()
-        from taichi_forge.graph._graph import gen_cpp_kernel
+        from taichi_forge.graph._graph import Arg, ArgKind, gen_cpp_kernel
 
-        if group_control is None:
-            symbolic_args = (
-                self._args.next_extent,
-                *self._args.stat_args,
-                dispatch_packet_arg,
-                capacity_arg,
-            )
-            kernel_cpp = gen_cpp_kernel(
-                _finalize_atomic_worklist_with_dispatch, symbolic_args
-            )
-            fixed_bindings = {
-                dispatch_packet_arg.name: dispatch_state.packet,
-                capacity_arg.name: self._args.capacity_value,
-            }
-        else:
-            symbolic_args = (
-                self._args.next_extent,
-                *self._args.stat_args,
-                dispatch_packet_arg,
-                group_control_arg,
-                capacity_arg,
-            )
-            kernel_cpp = gen_cpp_kernel(
-                _finalize_atomic_worklist_with_cuda_group, symbolic_args
-            )
-            fixed_bindings = {
-                dispatch_packet_arg.name: dispatch_state.packet,
-                group_control_arg.name: group_control,
-                capacity_arg.name: self._args.capacity_value,
-            }
-        action = DispatchGraphAction(
-            ((kernel_cpp, symbolic_args),),
-            backends=("cuda",),
-            conditional_body_safe=False,
-            fixed_bindings=fixed_bindings,
-            update_policy="immutable",
+        prefix = f"__ti_worklist_transition_{self._recording_id}_publication"
+        capacity_arg = Arg(ArgKind.SCALAR, f"{prefix}_capacity", i32)
+        block_arg = Arg(ArgKind.SCALAR, f"{prefix}_block", i32)
+        symbolic_args = (
+            self._args.next_extent,
+            *self._args.stat_args,
+            target.packet_binding,
+            capacity_arg,
+            block_arg,
         )
-        return action, dispatch_state
+        kernel_cpp = gen_cpp_kernel(
+            _finalize_atomic_worklist_with_dispatch, symbolic_args
+        )
+        return DispatchGraphAction(
+            ((kernel_cpp, symbolic_args),),
+            backends=(target.backend,),
+            conditional_body_safe=True,
+            fixed_bindings={
+                target.packet_binding.name: target.packet_storage,
+                capacity_arg.name: int(target.capacity),
+                block_arg.name: int(target.block_dim),
+            },
+            allow_unused_public_bindings=True,
+            update_policy="immutable",
+            synchronization_domain="runtime_ordered",
+        )
 
     def _stats(self, runtime_args):
         return {

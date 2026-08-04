@@ -19,6 +19,7 @@ from taichi_forge.graph._graph import (
     gen_cpp_kernel,
 )
 from taichi_forge.graph._ir import (
+    BoundedDomain,
     DispatchNode,
     GraphAccess,
     ResourceEffect,
@@ -1192,6 +1193,29 @@ def test_structured_control_ir_validates_and_serializes_fixed_schema():
             then_region=body,
             control_inputs=("predicate",),
         )
+
+
+def test_bounded_domain_ir_excludes_backend_launch_state():
+    domain = BoundedDomain(
+        extent="active_extent",
+        capacity=4096,
+        block_dim=128,
+        block_mode="require",
+    )
+    root = SequentialRegion(
+        (DispatchNode("consume", bounded_domain=domain),)
+    )
+    serialized = graph_ir_to_dict(root)["children"][0]["bounded_domain"]
+    assert serialized == {
+        "extent": "active_extent",
+        "capacity": 4096,
+        "block_dim": 128,
+        "block_mode": "require",
+        "physical_grid_requirement": "auto",
+        "publication_epoch": None,
+    }
+    assert "packet" not in serialized
+    assert "launch_state" not in serialized
 
 
 def test_temporary_memory_plan_reuses_only_nonoverlapping_intervals():
