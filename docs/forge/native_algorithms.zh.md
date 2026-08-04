@@ -153,7 +153,7 @@ compact rank 和稳定分层
 hierarchy。在表中 1,048,576-item 的规模上，32-bit sort 的 histogram-scan launch 会从
 16 降为 8，histogram uniform-add launch 从 8 降为 0，workspace 不增长。上表 timing
 不能重新标成 0.6.1 结果。另一次 wheel-to-wheel 测试在同一 RTX 5090/610.62 系统上对比
-公开 0.6.0 wheel（`dbc683028`）与成对的 0.6.1 wheel（`64fbd1c39`）：每只 wheel 分别启动
+公开 0.6.0 wheel（`dbc683028`）与成对的 0.6.1 release-candidate wheel：每只 wheel 分别启动
 三个新进程，每个进程 10 次 warmup、100 次逐次同步 native sort。process median 再取
 median 后分别为 0.51245 ms 和 0.36455 ms，延迟降低 28.9%；报告的 peak workspace 从
 29,426,176 B 降为 29,425,664 B。安装 wheel 后的 13 个 CUDA dtype/payload 与大 hierarchy

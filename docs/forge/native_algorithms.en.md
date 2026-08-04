@@ -177,8 +177,8 @@ one scan tile. At the table's
 1,048,576-item size, that statically reduces a 32-bit sort from 16 to 8
 histogram-scan launches and from 8 to 0 histogram uniform-add launches, with no
 workspace growth. A separate wheel-to-wheel test used the public 0.6.0 wheels
-(`dbc683028`) and paired 0.6.1 wheels (`64fbd1c39`) on the same RTX 5090/610.62
-system. Three fresh processes per wheel each ran ten warmups and 100
+(`dbc683028`) and paired 0.6.1 release-candidate wheels on the same RTX
+5090/610.62 system. Three fresh processes per wheel each ran ten warmups and 100
 end-synchronized native sorts. The median of process medians was 0.51245 ms for
 0.6.0 and 0.36455 ms for 0.6.1, a 28.9% latency reduction; reported peak
 workspace changed from 29,426,176 to 29,425,664 bytes. Thirteen installed-wheel
