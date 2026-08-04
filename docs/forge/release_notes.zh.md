@@ -75,7 +75,12 @@
   的普通 fallback、两 block saturation cap、并发 replay 和 1,000-2,000 次 replay memory stress。
   在这台 Windows CUDA 机器上，4,194,304 项容量的 full count 与 masked 相差不到 0.4%，10%
   count 快 2.2%；16,777,216 项容量下 zero/1%/full count 分别快 4.9%/4.0%/1.2%。adaptive
-  route 存在依 workload 而变的 updater crossover，因此不作为默认路线。
+  route 存在依 workload 而变的 updater crossover，因此不作为默认路线。最终成对 wheel 的
+  forced-route 测试采用 4,194,304 capacity 与每项 16 次 payload 操作；zero、10%、full count
+  下 masked/exact median 分别为 34.026/34.428 us、34.328/33.384 us、34.782/38.144 us。
+  各路线都通过正确性，明确报告不同的物理 count，并在 1,000 replay 中保持 runtime、host
+  pool 与 device pool ownership 稳定。这个接近且依 workload 变化的 crossover，正是保留旧
+  driver masked route 作为合格 fallback 的原因。
 - 可选的 CUDA 12.4+ adaptive 物理路线现在会把两个或更多连续、且
   extent/capacity/block 合同相同的 bounded payload 交给一个 stateful updater。grid/enabled
   未变化时复用持久状态，单个 payload 保持逐节点路线。在 64 payload、16,777,216 capacity、
@@ -91,7 +96,11 @@
   exact portable control。capability 会明确区分 exact native、bounded masked 与 portable
   执行，不把它们伪装成相同的物理 launch。在当前 driver 上强制 masked route，可以对
   Forge 自有 fallback 的语义和性能完成资格验证，不再要求为此保留旧硬件；但这不等于验证
-  某一个旧 driver 的 loader 或厂商实现。
+  某一个旧 driver 的 loader 或厂商实现。成对的 0.6.1 wheel 已通过强制 while、`if`、
+  `switch` 合同。在 262,144 item、16 次迭代、1,000 replay 的 workload 上，强制 masked
+  Graph median 为 366.9 us，原生 conditional Graph 为 465.3 us，portable control 为
+  1,410.9 us，三条路线都准确停在第 16 次。这是特定 workload 的 crossover，不表示 masked
+  control 通常快于原生 CUDA control。
 - 新增只读 offloaded-task manifest 与 JIT dispatch label。manifest 在不发起 profiler probe
   的前提下报告稳定 task identity、`cpu_scheduler`/`grid_stride`/
   `device_bounded_grid_stride`/`one_to_one`/`not_applicable` range mapping、
@@ -134,9 +143,13 @@
 - CUDA driver-only stable radix sort 在当前 histogram level 已能由一个 1024-item scan
   tile 完成时就终止 hierarchy。对于首层包含 1024 个 block 的 32-bit sort，每次排序会删除
   8 次冗余 scan launch 和 8 次不执行有效 uniform-add 的 launch（device kernel launch 总数
-  `53 -> 37`），workspace 也不再保留未使用的 one-element parent。这是 launch/workspace
-  优化，不是新的 CUB 等速声明；native algorithms 文档中的 0.6.0 资格快照会保持历史标签，
-  直到成对的 0.6.1 wheel 完成复测。
+  `53 -> 37`），workspace 也不再保留未使用的 one-element parent。在同一 RTX 5090/610.62
+  系统上，公开 0.6.0 wheel 与 release-candidate 0.6.1 成对测试分别为每只 wheel 启动三个
+  新进程，每个进程 10 次 warmup、100 次逐次同步调用。1,048,576 个 `i32` item 的 process
+  median 再取 median 后从 0.51245 ms 降到 0.36455 ms，延迟降低 28.9%（吞吐 1.41x）；
+  报告的 peak workspace 还减少 512 B 至 29,425,664 B。安装 wheel 后的 13 个 CUDA
+  key/payload dtype 与大 hierarchy 稳定性用例全部通过。这仍是设备/workload 资格数据，
+  不是新的 CUB 等速或通用提速声明。
 - 新增 Graph-independent 的固定容量 `DeviceWorklist`：它持有稳定 front/back storage、
   device-owned `DeviceExtent`、atomic append、stable selection 和确定性整数 key 冲突消解。
   无 overflow 时每个接受项只需要一次 slot-reservation atomic；append 顺序不保证，每次

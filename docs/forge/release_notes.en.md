@@ -97,7 +97,14 @@ grouped under the behavior they shipped.
   the default exact route was within 0.4% of masked at full count and 2.2%
   faster at 10% of a 4,194,304-item capacity; at a 16,777,216-item capacity it
   was 4.9%/4.0%/1.2% faster at zero/1%/full count. The adaptive route has a
-  workload-dependent updater crossover and therefore is not the default.
+  workload-dependent updater crossover and therefore is not the default. A
+  final paired-wheel forced-route run at 4,194,304 capacity and 16 payload
+  operations measured masked/exact medians of 34.026/34.428 us at zero,
+  34.328/33.384 us at 10%, and 34.782/38.144 us at full count. All routes were
+  correct, exposed their distinct physical counts, and retained stable runtime,
+  host-pool, and device-pool ownership across 1,000 replays. The close and
+  workload-dependent crossover is why the older-driver masked route remains a
+  qualified fallback rather than being removed.
 - The opt-in CUDA 12.4+ adaptive physical route now groups two or more
   consecutive bounded payloads with the same extent/capacity/block contract
   under one stateful updater. Persistent grid/enabled state is reused when it
@@ -121,7 +128,12 @@ grouped under the behavior they shipped.
   physical launch. The forced masked route on a current driver qualifies the
   Forge-owned fallback semantics and performance without requiring obsolete
   hardware. It does not claim to validate a particular old driver's loader or
-  vendor implementation.
+  vendor implementation. The paired 0.6.1 wheels passed the forced while,
+  `if`, and `switch` contracts. For a 262,144-item, 16-iteration workload over
+  1,000 replays, forced masked Graph measured 366.9 us median versus 465.3 us
+  for native conditional Graph and 1,410.9 us for portable control; all routes
+  stopped at iteration 16. This crossover is workload-specific, not a general
+  claim that masked control is faster than native CUDA control.
 - Added read-only offloaded-task manifests and JIT dispatch labels. A manifest
   reports stable task identity, `cpu_scheduler`/`grid_stride`/
   `device_bounded_grid_stride`/`one_to_one`/`not_applicable` range mapping,
@@ -182,9 +194,15 @@ grouped under the behavior they shipped.
   first histogram level has 1,024 blocks, this removes eight redundant scan
   launches and eight no-op uniform-add launches per sort (`53 -> 37` total
   device-kernel launches) and removes the unused one-element parent from the
-  workspace. This is a launch/workspace reduction, not a new CUB-parity claim;
-  the 0.6.0 qualification snapshot in the native algorithms guide remains
-  labeled as historical evidence until the paired 0.6.1 wheels are remeasured.
+  workspace. A paired public-0.6.0 versus release-candidate-0.6.1 wheel test on
+  the same RTX 5090/610.62 system used three fresh processes per wheel, ten
+  warmups and 100 end-synchronized calls per process. The median of process
+  medians for 1,048,576 `i32` items fell from 0.51245 ms to 0.36455 ms, a
+  28.9% latency reduction (1.41x throughput), while reported peak workspace
+  fell by 512 bytes to 29,425,664 bytes. Thirteen installed-wheel CUDA
+  key/payload dtype and large-hierarchy stability cases passed. This is a
+  device/workload qualification, not a new CUB-parity or universal-speedup
+  claim.
 - Added `DeviceWorklist`, a Graph-independent fixed-capacity front/back
   container with a device-owned `DeviceExtent`, atomic append, stable
   selection, and deterministic integer-key conflict resolution. Atomic append
