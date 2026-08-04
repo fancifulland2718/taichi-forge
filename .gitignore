@@ -101,6 +101,7 @@ _build_imgui.log
 python/taichi_forge/_lib/runtime/
 python/taichi_forge/_lib/c_api/
 python/taichi_forge/_lib/core/
+python/taichi/_lib/core/taichi_runtime.dll
 issues/
 benchmarks/results/
 external_refs/
