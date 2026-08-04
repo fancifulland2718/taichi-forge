@@ -1645,7 +1645,9 @@ def _bounded_route(backend, ordered):
         required_symbols_loaded = False
         device_update_ptx_linked = False
         setup_probe_passed = False
-        if requested_route == "exact_scheduler":
+        if requested_route == "exact_scheduler" or (
+            requested_route == "auto" and not ordered
+        ):
             return BoundedDispatchCapabilities(
                 schema_version=3,
                 backend=backend,
@@ -1675,7 +1677,8 @@ def _bounded_route(backend, ordered):
                 fallback_reason="none",
                 reason=(
                     "CPU reads DeviceExtent from the Graph argument buffer "
-                    "and submits only the clamped scheduler range"
+                    "and submits only the clamped range as adaptive contiguous "
+                    "chunks independent of GPU block geometry"
                 ),
             )
         reason = (
@@ -1685,7 +1688,7 @@ def _bounded_route(backend, ordered):
         fallback_reason = (
             "forced_masked_capacity"
             if requested_route == "masked_capacity"
-            else "auto_exact_route_not_selected_by_performance_qualification"
+            else "ordered_segments_exact_cpu_scheduler_unavailable"
         )
         range_mapping = "cpu_scheduler"
         minimum_driver_api_version = None
@@ -2847,7 +2850,10 @@ def bounded_dispatch_capabilities():
             "fallback_reason": "backend_not_qualified",
             "reason": "backend is not qualified for bounded dispatch",
         }
-    capabilities = _bounded_route(backend, True)
+    # Report the default single bounded-dispatch route. Ordered segmented
+    # dispatch has its own per-operation lowering and may conservatively fall
+    # back when that selected exact route cannot preserve global segment order.
+    capabilities = _bounded_route(backend, False)
     if backend == "cuda":
         update_policy_requested, update_policy = _cuda_bounded_update_policy()
     else:

@@ -995,8 +995,13 @@ lowering 合同会如实区分后端：
   `TI_CUDA_BOUNDED_DISPATCH_MODE=device_update` 选择 device-updatable Graph node，在不做 host
   readback 的情况下采用精确的 rounded grid，并在 count=0 时跳过 payload command。这是
   bounded Graph-node update 合同，不是 CUDA indirect dispatch，也不是 conditional termination；
-- CPU 默认使用固定容量 masked route。强制 `exact_scheduler` route 会在 cached scheduler 中
-  读取 device extent，仅提交钳制后的 range；由于性能交叉点依赖 workload，该 route 仍为 opt-in。
+- CPU 默认使用 exact scheduler route。它只读取并钳制一次 device extent；零 range 直接跳过，
+  正数 workload 则提交为自适应的连续 JIT loop。CPU chunk 与 GPU `block_dim` 解耦，因此
+  LLVM 仍有机会进行 loop vectorization。仅在需要保守的固定容量
+  fallback 或 A/B 诊断时，才设置
+  `TI_CPU_BOUNDED_DISPATCH_MODE=masked_capacity`。CPU ordered segmented
+  dispatch 尚无 exact lowering：`auto` 会针对该操作回退到保持全局顺序的 masked route，
+  强制 `exact_scheduler` 则 fail closed。
 
 `ti.graph.bounded_dispatch_capabilities()` 可在构图前报告所选 route。返回的 handle 提供
 不可变 capability 与稳定 workspace accounting。`handle.snapshot(extent)` 是显式同步点，

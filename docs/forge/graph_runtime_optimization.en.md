@@ -623,11 +623,11 @@ samples. Check results against ordinary dispatch rather than judging only
 throughput.
 
 `benchmarks/dynamic_workload_bench.py` compares a device-count-driven payload
-through direct dispatch, fixed masked Graph, and `dispatch_bounded()`. On the
-current Windows qualification machine, 1,048,576 f32 elements, 16 nontrivial
-payload operations per active element, and zero/10%/full counts produced the
-following median ratio ranges. A ratio above one means bounded Graph was
-faster than the named baseline:
+through direct dispatch, fixed masked Graph, and `dispatch_bounded()`. The
+earlier cross-backend baseline on the Windows qualification machine used
+1,048,576 f32 elements, 16 nontrivial payload operations per active element,
+and zero/10%/full counts. It produced the following median ratio ranges. A
+ratio above one means bounded Graph was faster than the named baseline:
 
 | Backend | direct / bounded | fixed Graph / bounded | Device-known route |
 | --- | ---: | ---: | --- |
@@ -646,6 +646,17 @@ fixed Graph solely because the active count is sparse. All three runs retained
 correct results and non-growing runtime-owned memory; the Vulkan Graph instance
 owned one stable 12-byte packet.
 
+CPU was subsequently requalified after its bounded lowering moved from
+per-element callbacks to adaptive contiguous JIT chunks and selected exact
+scheduling by default. With 262,144 elements and the same 16-operation payload,
+exact/fixed-masked p50 ratios at zero/10%/full counts were
+6.55x/2.78x/0.997x; the p95 ratios were 6.50x/2.67x/0.999x. Thus sparse work
+now benefits materially while full-capacity work stays within one percent of
+the fixed Graph in this qualification. Results remained correct, and 1,000
+alternating exact replays retained stable runtime, host-pool, and device-pool
+ownership. These figures characterize this CPU and workload rather than
+promising a universal ratio.
+
 Recorded worklist finalization now provides the same optimization without a
 public launch-state object. When `DeviceWorklistSequence.finalize_next()` is
 adjacent to one or more matching bounded consumers, Vulkan lowering gives the
@@ -654,7 +665,7 @@ and removes the preparation dispatch. Consecutive consumers reuse that packet;
 an intervening action restores the standalone 12-byte packet and prepare path.
 `DeviceDispatchState` remains a compatibility adapter for explicit packet
 producers such as an existing `DevicePrefixSequence`. CPU ignores that packet
-and keeps its masked-capacity default. CUDA also ignores it and independently
+and uses its exact adaptive scheduler. CUDA also ignores it and independently
 selects Graph-owned per-node exact control or masked fallback.
 
 The paired `device_worklist_bench.py` qualification used 262,144 items, 10%

@@ -43,6 +43,21 @@ grouped under the behavior they shipped.
 
 ## Unreleased
 
+- CPU device-known bounded Graph dispatch now selects the exact scheduler by
+  default. The scheduler snapshots and clamps the extent once, skips zero work,
+  and invokes positive work as adaptive contiguous JIT loops instead of
+  per-element callbacks.
+  This decouples CPU grain from GPU `block_dim` and restores LLVM loop
+  vectorization. The forced `masked_capacity` route remains available for
+  fallback and A/B diagnosis. The lowering reuses the existing CPU bounded
+  binding and runtime scheduler symbols, so it adds no split-runtime ABI or
+  symbol requirement. On the Windows qualification machine, a
+  262,144-element payload with 16 nontrivial operations measured exact/fixed
+  masked p50 speedups of 6.55x at zero count and 2.78x at 10% count, while the
+  full-count ratio was 0.997x; p95 ratios were 6.50x, 2.67x, and 0.999x.
+  Correctness covered clamping, overflow, TLS reductions, `continue`, and two
+  independent concurrent Graph callers; 1,000 alternating replays retained
+  stable runtime, host-pool, and device-pool ownership.
 - CUDA structured control now has a Forge-owned bounded masked Graph route for
   drivers older than 12.8. Qualified Driver API 12.8+ runtimes continue to use
   native conditional Graph nodes; older runtimes use a device latch and
@@ -111,8 +126,9 @@ grouped under the behavior they shipped.
   An adjacent Vulkan finalize and bounded consumer automatically publish into
   one Graph-owned exact indirect packet, with no public launch-state object or
   preparation dispatch; matching consecutive consumers reuse the packet. CPU
-  uses masked capacity by default, while CUDA reports either its Graph-owned
-  exact per-node route or masked fallback without consuming a Vulkan packet.
+  uses its exact adaptive scheduler by default, while CUDA reports either its
+  Graph-owned exact per-node route or masked fallback without consuming a
+  Vulkan packet.
   Deterministic keyed claim has
   an intentional workload crossover: at 262,144 active items it measured
   8.63x/9.05x over a full host round trip on CUDA/Vulkan, while a sparse 1,638
@@ -123,7 +139,7 @@ grouped under the behavior they shipped.
   device-count-driven pipelines. Vulkan compact can now publish its bounded
   dispatch packet with the output count and pass it to
   `dispatch_bounded(launch_state=...)`, removing the consumer preparation
-  dispatch. CPU keeps its honest masked-capacity default; CUDA independently
+  dispatch. CPU uses its exact adaptive scheduler by default; CUDA independently
   reports Graph-owned exact per-node control or masked fallback. The unified
   `dynamic_work_capabilities()` report separates physical launch semantics,
   structured iteration termination, and completion observation.
@@ -145,7 +161,10 @@ grouped under the behavior they shipped.
   device-known bounded work, plus `dispatch_ordered_segments()` for globally
   ordered offset ranges using one reusable payload specialization. Vulkan uses
   device-written indirect packets and a compiler-proven one-to-one range
-  mapping; CUDA and CPU report their fixed-capacity masked route honestly.
+  mapping. CPU uses its exact adaptive scheduler for ordinary bounded dispatch,
+  while ordered segmented CPU dispatch retains its globally ordered masked
+  route. CUDA reports its selected exact Graph-node update or fixed-capacity
+  masked route honestly.
   Overflow, useful/executed/skipped/encoded work, invalid offsets, workspace,
   and zero-command behavior are available through capability and explicit
   snapshot objects. Provider-qualified recorded producers can now publish a

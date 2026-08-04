@@ -81,16 +81,10 @@ def test_dynamic_work_capabilities_separate_launch_and_iteration_semantics():
         )
     else:
         assert not bounded["forge_producer_fusion_supported"]
-        if bounded["requested_route"] == "exact_scheduler":
-            assert bounded["execution_semantics"] == "exact_cpu_scheduler"
-            assert bounded["exact_physical_grid"]
-            assert bounded["fallback_reason"] == "none"
-        else:
-            assert bounded["execution_semantics"] == "masked_capacity"
-            assert bounded["requested_route"] == "auto"
-            assert bounded["fallback_reason"] == (
-                "auto_exact_route_not_selected_by_performance_qualification"
-            )
+        assert bounded["requested_route"] == "auto"
+        assert bounded["execution_semantics"] == "exact_cpu_scheduler"
+        assert bounded["exact_physical_grid"]
+        assert bounded["fallback_reason"] == "none"
         assert iteration["execution_semantics"] == "portable_host_control"
 
 
@@ -153,6 +147,12 @@ def test_bounded_internal_launch_storage_is_graph_instance_owned():
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_cpu_bounded_route_selection_is_explicit_and_fail_closed(monkeypatch):
+    monkeypatch.delenv("TI_CPU_BOUNDED_DISPATCH_MODE", raising=False)
+    capabilities = ti.graph.bounded_dispatch_capabilities()
+    assert capabilities["requested_route"] == "auto"
+    assert capabilities["selected_route"] == "exact_cpu_scheduler"
+    assert capabilities["fallback_reason"] == "none"
+
     monkeypatch.setenv("TI_CPU_BOUNDED_DISPATCH_MODE", "masked_capacity")
     capabilities = ti.graph.bounded_dispatch_capabilities()
     assert capabilities["requested_route"] == "masked_capacity"
@@ -270,6 +270,113 @@ def test_cpu_exact_bounded_dispatch_schedules_useful_range(monkeypatch):
     ):
         run_case(extents[0], requested, expected_count, overflow)
     run_case(extents[1], 17, 17, False)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_cpu_exact_bounded_dispatch_preserves_tls_and_continue(monkeypatch):
+    monkeypatch.setenv("TI_CPU_BOUNDED_DISPATCH_MODE", "exact_scheduler")
+    capacity = 4097
+    total = ti.field(ti.i64, shape=())
+
+    @ti.kernel
+    def produce(
+        requested: ti.i32,
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.device_extent_publish(extent, capacity, requested)
+
+    @ti.kernel
+    def consume(extent: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        # GPU launch geometry must not become CPU scheduler grain. The scalar
+        # field reduction also exercises the per-chunk TLS prologue/epilogue.
+        ti.loop_config(block_dim=1)
+        for i in range(capacity):
+            if i >= ti.device_extent_count(extent) or i % 3 == 0:
+                continue
+            total[None] += i % 11 + 1
+
+    requested_arg = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "requested", ti.i32
+    )
+    extent_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "extent", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(produce, requested_arg, extent_arg)
+    handle = builder.dispatch_bounded(
+        consume,
+        extent_arg,
+        extent=extent_arg,
+        capacity=capacity,
+        block_dim=256,
+    )
+    graph = builder.compile()
+    extent = ti.DeviceExtent(capacity)
+
+    for requested in (0, 1, 511, 512, 513, capacity, capacity + 1):
+        total[None] = 0
+        graph.run({"requested": requested, "extent": extent})
+        expected_count = min(requested, capacity)
+        expected = sum(
+            index % 11 + 1
+            for index in range(expected_count)
+            if index % 3 != 0
+        )
+        assert total[None] == expected
+        snapshot = handle.snapshot(extent)
+        assert snapshot.executed_count == expected_count
+        assert snapshot.overflow == (requested > capacity)
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False, debug=True)
+def test_cpu_exact_bounded_dispatch_debug_chunk_preserves_continue(monkeypatch):
+    monkeypatch.delenv("TI_CPU_BOUNDED_DISPATCH_MODE", raising=False)
+    capacity = 513
+
+    @ti.kernel
+    def produce(
+        requested: ti.i32,
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.device_extent_publish(extent, capacity, requested)
+
+    @ti.kernel
+    def consume(
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.loop_config(block_dim=1)
+        for i in range(capacity):
+            if i >= ti.device_extent_count(extent) or i % 5 == 0:
+                continue
+            output[i] = i + 1
+
+    requested_arg = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "requested", ti.i32
+    )
+    extent_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "extent", ti.i32, ndim=1
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(produce, requested_arg, extent_arg)
+    builder.dispatch_bounded(
+        consume,
+        extent_arg,
+        output_arg,
+        extent=extent_arg,
+        capacity=capacity,
+    )
+    graph = builder.compile()
+    extent = ti.DeviceExtent(capacity)
+    output = ti.ndarray(ti.i32, shape=capacity)
+    output.fill(-1)
+    graph.run({"requested": capacity, "extent": extent, "output": output})
+    expected = np.arange(1, capacity + 1, dtype=np.int32)
+    expected[::5] = -1
+    np.testing.assert_array_equal(output.to_numpy(), expected)
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)

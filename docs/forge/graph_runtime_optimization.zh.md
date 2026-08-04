@@ -489,8 +489,8 @@ median 与 tail latency，并记录长时间 replay/churn 前后的 GPU memory�
 dispatch 校验结果，不能只看吞吐。
 
 `benchmarks/dynamic_workload_bench.py` 将 device-count-driven payload 的 direct
-dispatch、fixed masked Graph 与 `dispatch_bounded()` 做成对比较。当前 Windows 资格机器上，
-1,048,576 个 f32 元素、每个 active 元素 16 个非平凡 payload 操作，并覆盖
+dispatch、fixed masked Graph 与 `dispatch_bounded()` 做成对比较。较早的跨后端基线在 Windows
+资格机器上使用 1,048,576 个 f32 元素、每个 active 元素 16 个非平凡 payload 操作，并覆盖
 zero/10%/full count，得到下列 median ratio 范围。ratio 大于一表示 bounded Graph 比所列
 基线更快：
 
@@ -508,13 +508,20 @@ dispatch 与依赖成本高于所节省的工作量。应基于 device-known/exa
 均正确且 runtime-owned memory 不增长；Vulkan Graph instance 持有一个稳定的 12-byte
 packet。
 
+CPU bounded lowering 随后从逐元素 callback 改为自适应连续 JIT chunk，并把 exact scheduler
+设为默认路线。在 262,144 项、同样每项 16 次操作的复测中，zero/10%/full count 下
+exact/fixed-masked 的 p50 比值为 6.55x/2.78x/0.997x，p95 比值为
+6.50x/2.67x/0.999x。因此稀疏 workload 获得明显收益，而满容量 workload 在本次资格中与
+fixed Graph 的差距保持在 1% 内。结果保持正确，1,000 次交替 exact replay 中 runtime、host
+pool 与 device pool ownership 均稳定。这组数字只刻画该 CPU 与 workload，不代表普遍比值。
+
 recorded worklist finalize 现在无需公共 launch-state 对象也能获得同一优化。相邻的
 `DeviceWorklistSequence.finalize_next()` 与一个或多个匹配 bounded consumer 会让 Vulkan
 lowering 向 producer 提供一个 Graph-owned 16-byte packet，在同一次 dispatch 中发布 count
 与 grid，并删除 preparation dispatch。连续 consumer 复用该 packet；中间插入其他 action
 则恢复 standalone 12-byte packet 与 prepare 路线。`DeviceDispatchState` 继续作为已有
-`DevicePrefixSequence` 等显式 packet producer 的兼容适配器。CPU 忽略该 packet 并保持
-masked-capacity 默认路线；CUDA 同样不消费它，并独立选择 Graph-owned per-node exact control
+`DevicePrefixSequence` 等显式 packet producer 的兼容适配器。CPU 忽略该 packet，并继续使用
+默认的 exact adaptive scheduler；CUDA 同样不消费它，并独立选择 Graph-owned per-node exact control
 或 masked fallback。
 
 成对的 `device_worklist_bench.py` 资格测试在同一 Windows Vulkan 设备上使用 262,144 items、

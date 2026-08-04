@@ -1156,10 +1156,15 @@ The lowering contract is backend-honest:
   Graph nodes, an exact rounded grid, and zero-count command skip without host
   readback. This is a bounded Graph-node update contract, not CUDA indirect
   dispatch and not CUDA conditional termination.
-- CPU defaults to the fixed-capacity masked route. The forced
-  `exact_scheduler` route reads the device extent in the cached scheduler and
-  submits only the clamped range; it remains opt-in because the crossover is
-  workload dependent.
+- CPU defaults to the exact scheduler route. It snapshots and clamps the
+  device extent once, skips a zero range, and submits positive work as adaptive
+  contiguous JIT loops. CPU chunking is independent of GPU `block_dim`, so LLVM
+  retains its loop-vectorization opportunity. Set
+  `TI_CPU_BOUNDED_DISPATCH_MODE=masked_capacity` only to force the conservative
+  fixed-capacity fallback or to run an A/B diagnostic. CPU ordered segmented
+  dispatch does not yet have an exact lowering: `auto` falls back to its
+  globally ordered masked route for that operation, while a forced
+  `exact_scheduler` request fails closed.
 
 `ti.graph.bounded_dispatch_capabilities()` reports the selected route before a
 Graph is built. The returned handle exposes immutable capabilities and stable

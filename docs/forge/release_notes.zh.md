@@ -40,6 +40,16 @@
 
 ## 待发布 {#unreleased}
 
+- CPU 的 device-known bounded Graph dispatch 现在默认选择 exact scheduler。scheduler
+  只读取并钳制一次 extent，零工作量直接跳过；正数 workload 以连续 JIT loop 的形式按自适应
+  chunk 执行，不再逐元素调用 callback。这使 CPU grain 与 GPU
+  `block_dim` 解耦，并恢复 LLVM loop vectorization。强制 `masked_capacity` route 继续作为
+  fallback 与 A/B 诊断入口。lowering 复用已有 CPU bounded binding 与 runtime scheduler
+  symbol，不新增 split-runtime ABI 或 symbol 要求。在 Windows 资格机器上，262,144 项、每项 16 次非平凡操作的
+  payload 相对同轮 fixed masked Graph，在 zero/10%/full count 下的 p50 比值分别为
+  6.55x/2.78x/0.997x，p95 比值为 6.50x/2.67x/0.999x。正确性覆盖钳制、overflow、TLS
+  reduction、`continue` 与两个相互独立的并发 Graph caller；1,000 次交替 replay 中
+  runtime、host pool 与 device pool ownership 均保持稳定。
 - CUDA structured control 新增 Forge 自有的 bounded masked Graph 路径，覆盖低于 12.8 的
   driver。满足资格的 Driver API 12.8+ runtime 继续使用原生 conditional Graph node；较旧
   runtime 在普通 CUDA Graph capture 可用时使用 device latch 与 task-entry gate，否则保留
@@ -88,7 +98,7 @@
   重新分配；首次执行仍可能准备 native provider workspace。
   相邻的 Vulkan finalize 与 bounded consumer 会自动发布到一个 Graph-owned exact indirect
   packet，无需公共 launch-state 对象或 preparation dispatch；连续匹配 consumer 会复用该
-  packet。CPU 默认使用 masked capacity；CUDA 不消费 Vulkan packet，并如实报告
+  packet。CPU 默认使用 exact adaptive scheduler；CUDA 不消费 Vulkan packet，并如实报告
   Graph-owned per-node exact route 或 masked fallback。
   确定性 keyed claim 存在明确 workload crossover：262,144 个 active item 时相对完整 host
   round trip 在 CUDA/Vulkan 上分别为 8.63x/9.05x；稀疏 1,638 项在三后端上都更慢。
@@ -97,7 +107,7 @@
 - 新增 `DeviceDispatchState` 与 `DevicePrefixSequence`，用于 fixed-topology、
   device-count-driven pipeline。Vulkan compact 可把 bounded dispatch packet 与输出 count
   一起发布，再交给 `dispatch_bounded(launch_state=...)`，从而删除 consumer preparation
-  dispatch；CPU 保持如实报告的 masked-capacity 默认路线；CUDA 独立报告 Graph-owned
+  dispatch；CPU 默认使用 exact adaptive scheduler；CUDA 独立报告 Graph-owned
   per-node exact control 或 masked fallback。统一的
   `dynamic_work_capabilities()` 会分别报告物理 launch、structured iteration termination 与
   completion observation。
@@ -114,7 +124,9 @@
 - 新增 `GraphBuilder.dispatch_bounded()`，支持 host-known exact range 与 device-known
   bounded work；新增 `dispatch_ordered_segments()`，用同一个 payload specialization 执行
   具有全局顺序的 offset range。Vulkan 使用 device-written indirect packet 与编译器证明的
-  one-to-one range mapping；CUDA/CPU 如实报告 fixed-capacity masked route。capability 与显式
+  one-to-one range mapping。CPU 的普通 bounded dispatch 使用 exact adaptive scheduler，
+  ordered segmented CPU dispatch 则保留全局有序的 masked route；CUDA 如实报告所选的 exact
+  Graph-node update 或 fixed-capacity masked route。capability 与显式
   snapshot 可观察 overflow、useful/executed/skipped/encoded work、非法 offset、workspace 与
   zero-command 行为。通过资格的 recorded producer 现在可直接发布 Graph-owned Vulkan
   packet；中间插入其他 action 会恢复保守 prepare 路线。Vulkan exact 工作量减少不被表述为

@@ -330,6 +330,10 @@ def test_device_worklist_atomic_finalize_feeds_bounded_dispatch_and_report():
         assert handle.capabilities.preparation_dispatches == 0
         assert report.exact_physical_grid
         assert report.executed_count == block_dim
+    elif impl.current_cfg().arch in (ti_core.Arch.x64, ti_core.Arch.arm64):
+        assert not handle.capabilities.producer_owned_launch_state
+        assert report.exact_physical_grid
+        assert report.executed_count == produced
     else:
         assert not handle.capabilities.producer_owned_launch_state
         assert not report.exact_physical_grid
