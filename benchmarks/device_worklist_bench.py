@@ -2,12 +2,14 @@
 
 Run one backend per process.  Timed batches end with ``ti.sync()``.  The
 atomic suite compares host-readback, fixed masked Graph, and bounded Graph
-pipelines.  The conflict suite compares a device-resident stable claim with a
-full host round trip and reports build/first/warm costs separately.
+pipelines, including the legacy launch-state adapter as a paired ownership
+control. The conflict suite compares a device-resident stable claim with a full
+host round trip and reports build/first/warm costs separately.
 """
 
 import argparse
 import json
+import os
 import random
 import statistics
 import time
@@ -35,13 +37,35 @@ def _paired(variants, rounds, samples, seed):
         rng.shuffle(order)
         for name in order:
             values[name].append(_measure(variants[name], rounds))
+    return {name: _summarize(samples_) for name, samples_ in values.items()}, values
+
+
+def _summarize(samples):
+    mean = statistics.fmean(samples)
     return {
-        name: {
-            "median_us": statistics.median(samples_),
-            "min_us": min(samples_),
-            "max_us": max(samples_),
-        }
-        for name, samples_ in values.items()
+        "median_us": statistics.median(samples),
+        "p95_us": float(np.percentile(samples, 95)),
+        "p99_us": float(np.percentile(samples, 99)),
+        "mean_us": mean,
+        "cv": statistics.pstdev(samples) / mean if mean else 0.0,
+        "min_us": min(samples),
+        "max_us": max(samples),
+    }
+
+
+def _paired_speedup(numerator, denominator):
+    if len(numerator) != len(denominator):
+        raise RuntimeError("paired benchmark sample counts do not match")
+    ratios = [left / right for left, right in zip(numerator, denominator)]
+    mean = statistics.fmean(ratios)
+    return {
+        "median": statistics.median(ratios),
+        "p05": float(np.percentile(ratios, 5)),
+        "p95": float(np.percentile(ratios, 95)),
+        "mean": mean,
+        "cv": statistics.pstdev(ratios) / mean if mean else 0.0,
+        "min": min(ratios),
+        "max": max(ratios),
     }
 
 
@@ -150,7 +174,7 @@ def _atomic_pipeline(args):
         name,
         bounded,
         *,
-        update_policy="per_node",
+        compatibility_state=False,
     ):
         worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)
         graph_args = worklist.graph_args(name)
@@ -165,10 +189,15 @@ def _atomic_pipeline(args):
             for index in range(args.consumers)
         )
         reset = ti.algorithms.DeviceWorklistSequence(graph_args).prepare_next()
-        launch_state = worklist.next_extent.dispatch_state(block_dim) if bounded else None
-        finalize = ti.algorithms.DeviceWorklistSequence(graph_args).finalize_next(dispatch_state=launch_state)
+        launch_state = (
+            worklist.next_extent.dispatch_state(block_dim)
+            if bounded and compatibility_state
+            else None
+        )
+        finalize = ti.algorithms.DeviceWorklistSequence(
+            graph_args
+        ).finalize_next(dispatch_state=launch_state)
         builder = ti.graph.GraphBuilder()
-        builder._cuda_bounded_update_policy = update_policy
         builder.append_native(reset)
         builder.dispatch(produce, *graph_args.append_arguments(), count_arg)
         builder.append_native(finalize)
@@ -197,24 +226,32 @@ def _atomic_pipeline(args):
                     output_arg,
                 )
         graph = builder.compile()
-        outputs = tuple(ti.ndarray(ti.i32, shape=capacity) for _ in range(args.consumers))
+        outputs = tuple(
+            ti.ndarray(ti.i32, shape=capacity)
+            for _ in range(args.consumers)
+        )
         runtime_args = worklist.runtime_arguments(name, include_capacity=True)
         runtime_args.update(count=produced)
-        runtime_args.update((f"output_{index}", output) for index, output in enumerate(outputs))
+        runtime_args.update(
+            (f"output_{index}", output)
+            for index, output in enumerate(outputs)
+        )
         return worklist, graph, outputs, runtime_args, handle, launch_state
 
     fixed, fixed_build_us = _build_us(lambda: build_graph("fixed", False))
-    fused, fused_build_us = _build_us(lambda: build_graph("fused", True, update_policy="fused"))
-    qualify_fusion = impl.current_cfg().arch == ti_core.Arch.cuda and fused[4].capabilities.exact_grid
-    grouped = None
-    grouped_build_us = None
-    ungrouped = None
-    ungrouped_build_us = None
-    if qualify_fusion:
-        grouped, grouped_build_us = _build_us(lambda: build_graph("grouped", True, update_policy="grouped"))
-        ungrouped, ungrouped_build_us = _build_us(lambda: build_graph("ungrouped", True, update_policy="per_node"))
+    bounded, bounded_build_us = _build_us(
+        lambda: build_graph("bounded", True)
+    )
+    compatibility, compatibility_build_us = _build_us(
+        lambda: build_graph(
+            "compatibility", True, compatibility_state=True
+        )
+    )
     host_worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)
-    host_outputs = tuple(ti.ndarray(ti.i32, shape=capacity) for _ in range(args.consumers))
+    host_outputs = tuple(
+        ti.ndarray(ti.i32, shape=capacity)
+        for _ in range(args.consumers)
+    )
 
     def host_roundtrip():
         host_worklist.prepare_next()
@@ -227,75 +264,61 @@ def _atomic_pipeline(args):
     def fixed_graph():
         fixed[1].run(fixed[3])
 
-    def fused_graph():
-        fused[1].run(fused[3])
+    def bounded_graph():
+        bounded[1].run(bounded[3])
 
-    def grouped_graph():
-        grouped[1].run(grouped[3])
-
-    def ungrouped_graph():
-        ungrouped[1].run(ungrouped[3])
+    def compatibility_state_graph():
+        compatibility[1].run(compatibility[3])
 
     variants = {
         "host_roundtrip": host_roundtrip,
         "fixed_graph": fixed_graph,
-        "bounded_graph": fused_graph,
+        "bounded_graph": bounded_graph,
+        "compatibility_state_graph": compatibility_state_graph,
     }
-    if grouped is not None:
-        variants["generic_grouped_graph"] = grouped_graph
-        variants["legacy_ungrouped_graph"] = ungrouped_graph
     first = {
         "host_roundtrip_us": _measure(host_roundtrip, 1),
         "fixed_graph_us": _measure(fixed_graph, 1),
-        "bounded_graph_us": _measure(fused_graph, 1),
+        "bounded_graph_us": _measure(bounded_graph, 1),
+        "compatibility_state_graph_us": _measure(
+            compatibility_state_graph, 1
+        ),
     }
-    if grouped is not None:
-        first["generic_grouped_graph_us"] = _measure(grouped_graph, 1)
-        first["legacy_ungrouped_graph_us"] = _measure(ungrouped_graph, 1)
     for call in variants.values():
         for _ in range(args.warmups):
             call()
     ti.sync()
     before = _memory_snapshot()
-    samples = _paired(variants, args.rounds, args.samples, args.seed)
+    samples, raw_samples = _paired(
+        variants, args.rounds, args.samples, args.seed
+    )
     after = _memory_snapshot()
 
     expected = np.arange(1, produced + 1, dtype=np.int32)
     for _ in range(args.payload_work):
         expected = expected * 7 + 3
     fixed_graph()
-    fused_graph()
-    if grouped is not None:
-        grouped_graph()
-        ungrouped_graph()
+    bounded_graph()
+    compatibility_state_graph()
     ti.sync()
     correct = (
         fixed[0].next_extent.snapshot().count == produced
-        and fused[0].next_extent.snapshot().count == produced
+        and bounded[0].next_extent.snapshot().count == produced
+        and compatibility[0].next_extent.snapshot().count == produced
         and all(
-            np.array_equal(np.sort(output.to_numpy()[:produced]), np.sort(expected))
-            for output in (*fixed[2], *fused[2])
+            np.array_equal(
+                np.sort(output.to_numpy()[:produced]), np.sort(expected)
+            )
+            for output in (*fixed[2], *bounded[2], *compatibility[2])
         )
     )
-    if grouped is not None:
-        correct = (
-            correct
-            and grouped[0].next_extent.snapshot().count == produced
-            and ungrouped[0].next_extent.snapshot().count == produced
-            and all(
-                np.array_equal(np.sort(output.to_numpy()[:produced]), np.sort(expected))
-                for output in (*grouped[2], *ungrouped[2])
-            )
-        )
     # Re-snapshot after every first-use and host materialization above. Each
-    # qualification window measures one replayable CUDA update policy so
+    # qualification window measures one replayable ownership route so
     # allocation growth cannot be hidden by a different variant's pool state.
-    stability_variants = {"bounded_graph": fused_graph}
-    if grouped is not None:
-        stability_variants.update(
-            generic_grouped_graph=grouped_graph,
-            legacy_ungrouped_graph=ungrouped_graph,
-        )
+    stability_variants = {
+        "bounded_graph": bounded_graph,
+        "compatibility_state_graph": compatibility_state_graph,
+    }
     stability_memory = {}
     for name, call in stability_variants.items():
         call()
@@ -309,15 +332,33 @@ def _atomic_pipeline(args):
     bounded_us = samples["bounded_graph"]["median_us"]
 
     def update_stats(graph):
-        segment = next(item for item in graph.execution_stats().segments if item.kind == "cgraph")
+        segments = tuple(
+            item
+            for item in graph.execution_stats().segments
+            if item.kind == "cgraph"
+        )
         return {
-            "path": segment.last_path,
-            "driver_error": segment.last_driver_error,
-            "groups": segment.bounded_update_groups,
-            "updater_dispatches": segment.bounded_updater_dispatches,
-            "grouped_payloads": segment.bounded_grouped_payloads,
-            "producer_fused_groups": segment.bounded_producer_fused_groups,
-            "persistent_control_bytes": (segment.persistent_bounded_control_bytes),
+            "paths": [segment.last_path for segment in segments],
+            "driver_error": max(
+                (segment.last_driver_error for segment in segments),
+                default=0,
+            ),
+            "groups": sum(
+                segment.bounded_update_groups for segment in segments
+            ),
+            "updater_dispatches": sum(
+                segment.bounded_updater_dispatches for segment in segments
+            ),
+            "grouped_payloads": sum(
+                segment.bounded_grouped_payloads for segment in segments
+            ),
+            "producer_fused_groups": sum(
+                segment.bounded_producer_fused_groups for segment in segments
+            ),
+            "persistent_control_bytes": sum(
+                segment.persistent_bounded_control_bytes
+                for segment in segments
+            ),
         }
 
     return {
@@ -325,44 +366,56 @@ def _atomic_pipeline(args):
         "consumers": args.consumers,
         "produced": produced,
         "active_percent": args.active_percent,
-        "qualification_policy_overrides": {
-            "bounded_graph": "fused",
-            "generic_grouped_graph": ("grouped" if grouped is not None else None),
-            "legacy_ungrouped_graph": ("per_node" if ungrouped is not None else None),
+        "ownership_routes": {
+            "bounded_graph": "graph_owned",
+            "compatibility_state_graph": "legacy_launch_state_adapter",
         },
         "build_us": {
             "fixed_graph": fixed_build_us,
-            "bounded_graph": fused_build_us,
-            "generic_grouped_graph": grouped_build_us,
-            "legacy_ungrouped_graph": ungrouped_build_us,
+            "bounded_graph": bounded_build_us,
+            "compatibility_state_graph": compatibility_build_us,
         },
         "first": first,
         "warm": samples,
-        "speedup_vs_host_roundtrip": (samples["host_roundtrip"]["median_us"] / bounded_us),
-        "speedup_vs_fixed_graph": (samples["fixed_graph"]["median_us"] / bounded_us),
-        "bounded_route": fused[4].capabilities.execution_semantics,
-        "bounded_preparation_dispatches": (fused[4].capabilities.preparation_dispatches),
-        "producer_fusion_speedup": (
-            None if grouped is None else samples["generic_grouped_graph"]["median_us"] / bounded_us
+        "speedup_vs_host_roundtrip": (
+            samples["host_roundtrip"]["median_us"] / bounded_us
         ),
-        "update_grouping_speedup": (
-            None
-            if grouped is None
-            else samples["legacy_ungrouped_graph"]["median_us"] / samples["generic_grouped_graph"]["median_us"]
+        "speedup_vs_fixed_graph": (
+            samples["fixed_graph"]["median_us"] / bounded_us
         ),
-        "combined_update_speedup": (
-            None if grouped is None else samples["legacy_ungrouped_graph"]["median_us"] / bounded_us
+        "bounded_route": bounded[4].capabilities.execution_semantics,
+        "bounded_preparation_dispatches": (
+            bounded[4].capabilities.preparation_dispatches
         ),
-        "bounded_graph_stats": update_stats(fused[1]),
-        "generic_grouped_graph_stats": (None if grouped is None else update_stats(grouped[1])),
-        "legacy_ungrouped_graph_stats": (None if ungrouped is None else update_stats(ungrouped[1])),
+        "compatibility_preparation_dispatches": (
+            compatibility[4].capabilities.preparation_dispatches
+        ),
+        "compatibility_state_speedup": (
+            bounded_us
+            / samples["compatibility_state_graph"]["median_us"]
+        ),
+        "paired_speedups": {
+            "bounded_over_fixed": _paired_speedup(
+                raw_samples["fixed_graph"], raw_samples["bounded_graph"]
+            ),
+            "bounded_over_host_roundtrip": _paired_speedup(
+                raw_samples["host_roundtrip"],
+                raw_samples["bounded_graph"],
+            ),
+            "compatibility_state_over_graph_owned": _paired_speedup(
+                raw_samples["bounded_graph"],
+                raw_samples["compatibility_state_graph"],
+            ),
+        },
+        "bounded_graph_stats": update_stats(bounded[1]),
+        "compatibility_state_graph_stats": update_stats(compatibility[1]),
         "overflow_free_slot_reservation_atomics_per_item": 1,
         "correct": correct,
         "timed_window_memory_stable": _non_growth(before, after),
         "stability_replays": args.stability_rounds,
         "stability_memory": stability_memory,
         "memory_stable": all(stability_memory.values()),
-        "worklist_memory": fused[0].memory_report(),
+        "worklist_memory": bounded[0].memory_report(),
     }
 
 
@@ -449,7 +502,7 @@ def _conflict_pipeline(args):
             call()
     ti.sync()
     before = _memory_snapshot()
-    samples = _paired(
+    samples, _ = _paired(
         {"device_claim": device_claim, "host_roundtrip": host_roundtrip},
         args.conflict_rounds,
         args.samples,
@@ -547,6 +600,16 @@ def main():
     parser.add_argument("--stability-rounds", type=int, default=1000)
     parser.add_argument("--determinism-rounds", type=int, default=32)
     parser.add_argument("--seed", type=int, default=20260802)
+    parser.add_argument(
+        "--cuda-route",
+        choices=("auto", "device_update", "masked_capacity"),
+        default="auto",
+    )
+    parser.add_argument(
+        "--cpu-route",
+        choices=("auto", "exact_scheduler", "masked_capacity"),
+        default="auto",
+    )
     args = parser.parse_args()
     if not 0 <= args.active_percent <= 100:
         parser.error("--active-percent must be in [0, 100]")
@@ -570,11 +633,38 @@ def main():
     ):
         parser.error("capacity, work, rounds, samples, and warmups must be positive")
 
+    if args.arch == "cuda":
+        os.environ["TI_CUDA_BOUNDED_DISPATCH_MODE"] = args.cuda_route
+    elif args.arch == "cpu":
+        os.environ["TI_CPU_BOUNDED_DISPATCH_MODE"] = args.cpu_route
     arch = {"cpu": ti.cpu, "cuda": ti.cuda, "vulkan": ti.vulkan}[args.arch]
     ti.init(arch=arch, offline_cache=False)
+    requested_route = (
+        args.cuda_route
+        if args.arch == "cuda"
+        else args.cpu_route if args.arch == "cpu" else "not_applicable"
+    )
+    bounded_capabilities = ti.graph.bounded_dispatch_capabilities()
+    expected_selected = {
+        "device_update": "exact_device_grid_update",
+        "exact_scheduler": "exact_cpu_scheduler",
+        "masked_capacity": "masked_capacity",
+    }.get(requested_route)
+    route_identity_valid = requested_route in ("auto", "not_applicable") or (
+        bounded_capabilities["selected_route"] == expected_selected
+    )
+    if not route_identity_valid:
+        raise RuntimeError(
+            "worklist benchmark route mismatch: "
+            f"requested={requested_route}, "
+            f"selected={bounded_capabilities['selected_route']}"
+        )
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "arch": args.arch,
+        "requested_route": requested_route,
+        "selected_route": bounded_capabilities["selected_route"],
+        "route_identity_valid": route_identity_valid,
         "capabilities": ti.graph.dynamic_work_capabilities(),
     }
     if args.suite in ("all", "atomic"):
