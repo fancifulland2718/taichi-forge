@@ -846,8 +846,9 @@ geometry。CPU 不伪造 GPU grid，selected/actual 留空，并报告
 `actual_geometry_kind="cpu_runtime_scheduler"`。Vulkan device-indirect dispatch 报告静态
 selected capacity，但 actual grid/block 留空并标记 `"runtime_indirect"`，因为每次调用由
 device packet 决定且不做 host readback。静态与动态 shared-memory bytes 分开报告。
-`range_mapping` 字段取 `cpu_scheduler`、`grid_stride`、`one_to_one` 或
-`not_applicable`。其中 `one_to_one` 是编译器保证：缩小 indirect grid 会同时减少该 task
+`range_mapping` 字段取 `cpu_scheduler`、`grid_stride`、`device_bounded_grid_stride`、
+`one_to_one` 或 `not_applicable`。CUDA device-bounded mapping 使用 device-loaded logical end，
+同时保留 saturation-capped grid-stride worker envelope。其中 `one_to_one` 是编译器保证：缩小 indirect grid 会同时减少该 task
 实际访问的逻辑 range index；普通 GPU range kernel 仍采用 grid-stride。
 
 `task_id` 在相同 specialization cache identity、task ordinal/kind、compile config、device
@@ -950,7 +951,8 @@ fixed-capacity kernel 中使用有界 count；backend 的 exact-indirect 或 mas
 `DeviceDispatchState`。把它同时传给 `DevicePrefix.compact(..., dispatch_state=...)` 和
 `GraphBuilder.dispatch_bounded(..., launch_state=...)` 后，Vulkan compact scatter 会在写入
 count 时一起发布 indirect grid，从而删除 consumer-side packet preparation dispatch。
-CPU/CUDA 不消费该 packet；CUDA 可独立选择 Graph-owned per-node exact route。state、extent、
+CPU/CUDA 不消费该 packet；CUDA 独立使用 exact logical range，并可选择 12.4+ adaptive
+physical control。state、extent、
 capacity 与 block dimension 必须匹配；runtime generation 过期会
 fail closed。
 
@@ -991,10 +993,13 @@ lowering 合同会如实区分后端：
   `dispatchIndirect` grid；通过资格的相邻 recordable producer 则可直接发布共享的
   Graph-owned 四 u32 packet。两者的 payload specialization 都采用 `one_to_one` range
   mapping，因而缩小 grid 会真正减少访问的逻辑 index，count=0 会跳过 payload command；
-- CUDA 默认使用固定容量 masked route。Driver API 12.4 或更高版本可通过
-  `TI_CUDA_BOUNDED_DISPATCH_MODE=device_update` 选择 device-updatable Graph node，在不做 host
-  readback 的情况下采用精确的 rounded grid，并在 count=0 时跳过 payload command。这是
-  bounded Graph-node update 合同，不是 CUDA indirect dispatch，也不是 conditional termination；
+- CUDA 在所有受支持 driver 上默认使用 exact logical-range specialization：device 端读取并钳制
+  `DeviceExtent`，再沿用普通的 saturation-capped grid-stride scheduler，不需要 host readback
+  或 12.4 symbol。物理 thread envelope 不是 exact grid，但只有 `[0, count)` 会进入 range body。
+  Driver API 12.4 或更高版本可通过 `TI_CUDA_BOUNDED_DISPATCH_MODE=device_update` 进一步把物理
+  node grid 缩到 `min(ceil(count / block_dim), saturation_grid)`，并在 count=0 时禁用 payload；
+  正确性不依赖该更新。强制 `masked_capacity` 保留为 A/B 与诊断基线。这些路线都不宣称 CUDA
+  indirect dispatch 或 conditional termination；
 - CPU 默认使用 exact scheduler route。它只读取并钳制一次 device extent；零 range 直接跳过，
   正数 workload 则提交为自适应的连续 JIT loop。CPU chunk 与 GPU `block_dim` 解耦，因此
   LLVM 仍有机会进行 loop vectorization。仅在需要保守的固定容量
@@ -1010,12 +1015,12 @@ lowering 合同会如实区分后端：
 publication specialization；每个 handle 的 `preparation_dispatches` 才表示该处 producer/
 consumer 布局是否实际采用。
 
-CUDA exact Graph 的 `TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY` 接受 `auto` 或 `per_node`，两者都
+CUDA 12.4+ adaptive Graph 的 `TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY` 接受 `auto` 或 `per_node`，两者都
 选择经过资格验证的逐节点 updater。旧实验值 `grouped` 与 `fused` 现在会明确拒绝，不能再
 改变公共资源所有权。逐 segment execution report 会暴露实际 updater 数、control bytes 与
 last-driver-error；grouped/fused counter 为保持 schema 兼容而保留，在该路线中为零。
 
-`ti.graph.dynamic_work_capabilities()` 返回 schema-v3 report，把 count owner、bounded
+`ti.graph.dynamic_work_capabilities()` 返回 schema-v4 report，把 count owner、bounded
 launch、structured iteration termination、worklist 与 ticket observation 分成独立维度。
 worklist 部分报告 append ordering、single-writer ownership、stable/deterministic transform、
 replay allocation/readback policy、counter 与当前 physical launch route；尤其不会把 CUDA
@@ -1033,7 +1038,8 @@ index。offset 会先钳制以保证执行安全；显式 snapshot 通过总 `ov
 Graph-instance packet 为 12 bytes；自动 specialized worklist publication 持有一个共享的
 16-byte packet，不增加 preparation dispatch，连续匹配 consumer 也不增加 allocation。
 Vulkan ordered dispatch 为 32 bytes；CPU/CUDA bounded 不使用 Python-owned workspace，
-ordered 使用 20 bytes。CUDA exact control 每个 payload 使用 32 persistent bytes。显式的
+ordered 使用 20 bytes。默认 CUDA exact route 每个 payload 使用私有的 16-byte argument
+prefix；12.4+ adaptive route 还会额外使用 32 persistent control bytes。显式的
 producer-owned Vulkan launch state 仍是 external 16-byte 兼容 state，并报告 internal packet
 为 0 byte。exact 物理工作量减少不等于无条件提速：轻量、standalone Vulkan payload 可能因
 packet preparation 与依赖成本而慢于 fixed Graph。应以完整 workload 同时对比 fixed Graph

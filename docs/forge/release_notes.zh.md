@@ -50,6 +50,17 @@
   6.55x/2.78x/0.997x，p95 比值为 6.50x/2.67x/0.999x。正确性覆盖钳制、overflow、TLS
   reduction、`continue` 与两个相互独立的并发 Graph caller；1,000 次交替 replay 中
   runtime、host pool 与 device pool ownership 均保持稳定。
+- CUDA device-known bounded dispatch 现在在所有受支持 driver 上都有 exact logical-range
+  lowering。默认路线在 device 端读取并钳制 `DeviceExtent`，沿用普通的 saturation-capped
+  grid-stride launch，因此既不需要 host readback，也不依赖 CUDA 12.4 node update。在通过
+  资格的 12.4+ driver 上，强制 `device_update` 仍可作为物理优化：updated grid 会钳制到同一个
+  saturation grid，并可跳过 zero-count payload；正确性仍由 logical range 保证。capability
+  schema v4 会分别报告 logical exactness 与 physical launch kind；`masked_capacity` 保留为显式
+  A/B 基线。同一 runtime 的成对测试覆盖 zero、block 边界、overflow、ndarray rebind、带 label
+  的普通 fallback、两 block saturation cap、并发 replay 和 1,000-2,000 次 replay memory stress。
+  在这台 Windows CUDA 机器上，4,194,304 项容量的 full count 与 masked 相差不到 0.4%，10%
+  count 快 2.2%；16,777,216 项容量下 zero/1%/full count 分别快 4.9%/4.0%/1.2%。adaptive
+  route 存在依 workload 而变的 updater crossover，因此不作为默认路线。
 - CUDA structured control 新增 Forge 自有的 bounded masked Graph 路径，覆盖低于 12.8 的
   driver。满足资格的 Driver API 12.8+ runtime 继续使用原生 conditional Graph node；较旧
   runtime 在普通 CUDA Graph capture 可用时使用 device latch 与 task-entry gate，否则保留
@@ -57,8 +68,9 @@
   执行，不把它们伪装成相同的物理 launch。本地已通过强制 masked route 资格测试；真实
   12.8 以下 driver 仍属于 release candidate 验证项。
 - 新增只读 offloaded-task manifest 与 JIT dispatch label。manifest 在不发起 profiler probe
-  的前提下报告稳定 task identity、`cpu_scheduler`/`grid_stride`/`one_to_one`/
-  `not_applicable` range mapping、requested/selected/actual grid/block geometry 和静态
+  的前提下报告稳定 task identity、`cpu_scheduler`/`grid_stride`/
+  `device_bounded_grid_stride`/`one_to_one`/`not_applicable` range mapping、
+  requested/selected/actual grid/block geometry 和静态
   shared-memory 上下文。CPU 不填充 GPU geometry；runtime-indirect Vulkan workload 明确
   报告 actual geometry 由 device 决定。label 在 profiler 与可选 NVTX 名称中保持同一个
   task identity；manifest 查询不提交工作，且内存占用保持稳定。
@@ -98,8 +110,8 @@
   重新分配；首次执行仍可能准备 native provider workspace。
   相邻的 Vulkan finalize 与 bounded consumer 会自动发布到一个 Graph-owned exact indirect
   packet，无需公共 launch-state 对象或 preparation dispatch；连续匹配 consumer 会复用该
-  packet。CPU 默认使用 exact adaptive scheduler；CUDA 不消费 Vulkan packet，并如实报告
-  Graph-owned per-node exact route 或 masked fallback。
+  packet。CPU 默认使用 exact adaptive scheduler；CUDA 不消费 Vulkan packet，使用 exact
+  logical range，并可在通过资格的 12.4+ driver 上进一步缩小物理 grid。
   确定性 keyed claim 存在明确 workload crossover：262,144 个 active item 时相对完整 host
   round trip 在 CUDA/Vulkan 上分别为 8.63x/9.05x；稀疏 1,638 项在三后端上都更慢。
   资格基准会分开报告这两类输入，并在 1,000 次 CPU、3,000 次 CUDA/Vulkan replay 中观察到
@@ -107,8 +119,8 @@
 - 新增 `DeviceDispatchState` 与 `DevicePrefixSequence`，用于 fixed-topology、
   device-count-driven pipeline。Vulkan compact 可把 bounded dispatch packet 与输出 count
   一起发布，再交给 `dispatch_bounded(launch_state=...)`，从而删除 consumer preparation
-  dispatch；CPU 默认使用 exact adaptive scheduler；CUDA 独立报告 Graph-owned
-  per-node exact control 或 masked fallback。统一的
+  dispatch；CPU 默认使用 exact adaptive scheduler；CUDA 独立使用 exact logical range，
+  并可选择 12.4+ adaptive physical control。统一的
   `dynamic_work_capabilities()` 会分别报告物理 launch、structured iteration termination 与
   completion observation。
 - Graph 终态 observation 默认附着到 completion。Vulkan/CPU 使用 host-visible arena slot；
@@ -125,8 +137,8 @@
   bounded work；新增 `dispatch_ordered_segments()`，用同一个 payload specialization 执行
   具有全局顺序的 offset range。Vulkan 使用 device-written indirect packet 与编译器证明的
   one-to-one range mapping。CPU 的普通 bounded dispatch 使用 exact adaptive scheduler，
-  ordered segmented CPU dispatch 则保留全局有序的 masked route；CUDA 如实报告所选的 exact
-  Graph-node update 或 fixed-capacity masked route。capability 与显式
+  ordered segmented CPU dispatch 则保留全局有序的 masked route；CUDA 会分别如实报告 logical
+  exactness 与 saturation-capped static 或 12.4+ adaptive physical launch。capability 与显式
   snapshot 可观察 overflow、useful/executed/skipped/encoded work、非法 offset、workspace 与
   zero-command 行为。通过资格的 recorded producer 现在可直接发布 Graph-owned Vulkan
   packet；中间插入其他 action 会恢复保守 prepare 路线。Vulkan exact 工作量减少不被表述为

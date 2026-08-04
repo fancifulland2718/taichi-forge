@@ -977,8 +977,10 @@ device-indirect dispatch reports its static selected capacity but leaves
 actual grid/block unset with `actual_geometry_kind="runtime_indirect"`, since
 the device packet determines each invocation without host readback. Static
 and dynamic shared-memory byte counts are reported separately. The
-`range_mapping` field is `cpu_scheduler`, `grid_stride`, `one_to_one`, or
-`not_applicable`. In particular, `one_to_one` is a compiler proof that reducing
+`range_mapping` field is `cpu_scheduler`, `grid_stride`,
+`device_bounded_grid_stride`, `one_to_one`, or `not_applicable`. The CUDA
+device-bounded mapping has a device-loaded logical end while retaining a
+saturation-capped grid-stride worker envelope. In particular, `one_to_one` is a compiler proof that reducing
 an indirect grid also reduces the logical range indices visited by the task;
 ordinary GPU range kernels remain grid-strided.
 
@@ -1104,8 +1106,8 @@ capability and must not be inferred from this state object.
 `dispatch_state=` to `DevicePrefix.compact()` and as `launch_state=` to
 `GraphBuilder.dispatch_bounded()` lets the Vulkan compact scatter publish the
 count and indirect grid together. This removes the consumer-side packet
-preparation dispatch. CPU and CUDA do not consume the packet; CUDA may
-independently select its Graph-owned exact per-node route. The state, extent,
+preparation dispatch. CPU and CUDA do not consume the packet; CUDA uses its
+exact logical range and may select 12.4+ adaptive physical control. The state, extent,
 capacity, and block dimension must match and stale
 runtime generations fail closed.
 
@@ -1151,11 +1153,16 @@ The lowering contract is backend-honest:
   directly. Both payload specializations use `one_to_one` range mapping, so a
   smaller grid really visits fewer logical indices and a zero count skips the
   payload command.
-- CUDA defaults to the fixed-capacity masked route. With Driver API 12.4 or
-  newer, `TI_CUDA_BOUNDED_DISPATCH_MODE=device_update` selects device-updatable
-  Graph nodes, an exact rounded grid, and zero-count command skip without host
-  readback. This is a bounded Graph-node update contract, not CUDA indirect
-  dispatch and not CUDA conditional termination.
+- CUDA defaults to an exact logical-range specialization on every supported
+  driver. It loads and clamps `DeviceExtent` on device, then uses the ordinary
+  saturation-capped grid-stride scheduler; no host readback or 12.4 symbol is
+  required. The physical thread envelope is not an exact grid, but only
+  `[0, count)` enters the range body. With Driver API 12.4 or newer,
+  `TI_CUDA_BOUNDED_DISPATCH_MODE=device_update` additionally trims the physical
+  node grid to `min(ceil(count / block_dim), saturation_grid)` and disables the
+  payload at zero. Correctness does not depend on that update. The forced
+  `masked_capacity` route remains an A/B and diagnostic baseline. None of these
+  routes claims CUDA indirect dispatch or conditional termination.
 - CPU defaults to the exact scheduler route. It snapshots and clamps the
   device extent once, skips a zero range, and submits positive work as adaptive
   contiguous JIT loops. CPU chunking is independent of GPU `block_dim`, so LLVM
@@ -1175,14 +1182,14 @@ host-known handle reports the same data without synchronization. On Vulkan,
 publication specialization; each handle's `preparation_dispatches` reports
 whether that particular producer/consumer placement actually used it.
 
-On CUDA exact graphs, `TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY` accepts `auto` or
+On CUDA 12.4+ adaptive graphs, `TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY` accepts `auto` or
 `per_node`; both select the qualified per-node updater. The former experimental
 `grouped` and `fused` values are rejected instead of changing public resource
 ownership. Per-segment execution reports expose the actual updater count,
 control bytes, and last driver error. Grouped/fused counters remain in the
 schema for compatibility and are zero on this route.
 
-`ti.graph.dynamic_work_capabilities()` returns a schema-v3 report that keeps
+`ti.graph.dynamic_work_capabilities()` returns a schema-v4 report that keeps
 the count owner, bounded launch, structured iteration termination, worklist,
 and ticket observation as separate axes. The worklist section reports append
 ordering, single-writer ownership, stable/deterministic transforms, replay
@@ -1205,8 +1212,9 @@ Vulkan bounded dispatch owns a 12-byte Graph-instance packet, while an
 automatically specialized worklist publication owns one shared 16-byte packet
 and adds no preparation dispatch; consecutive matching consumers do not add
 allocations. Vulkan ordered dispatch uses 32 bytes. CPU/CUDA bounded dispatch
-uses no Python-owned workspace and ordered dispatch uses 20 bytes. CUDA exact
-control uses 32 persistent bytes per payload. An explicit producer-owned
+uses no Python-owned workspace and ordered dispatch uses 20 bytes. The default
+CUDA exact route adds a private 16-byte argument prefix per payload; the 12.4+
+adaptive route additionally uses 32 persistent control bytes per payload. An explicit producer-owned
 Vulkan launch state remains an external 16-byte compatibility state and reports
 zero internal packet bytes. Exact physical work reduction is not a universal
 speedup: a light standalone Vulkan payload can cost more than a fixed Graph

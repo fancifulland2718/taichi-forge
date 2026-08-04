@@ -515,14 +515,26 @@ exact/fixed-masked 的 p50 比值为 6.55x/2.78x/0.997x，p95 比值为
 fixed Graph 的差距保持在 1% 内。结果保持正确，1,000 次交替 exact replay 中 runtime、host
 pool 与 device pool ownership 均稳定。这组数字只刻画该 CPU 与 workload，不代表普遍比值。
 
+CUDA 随后也完成了复测：默认 bounded lowering 改为 exact logical device range，同时保留
+saturation-capped 物理 grid。`dynamic_workload_bench.py --cuda-route compare` 会在同一 runtime
+内构造 masked、默认 exact 与 12.4+ adaptive Graph，并把它们与 fixed Graph、direct execution
+随机交错采样。4,194,304 项、每项 16 次 payload 操作、10% useful work 时，default-exact/masked
+在 zero/10%/full count 下的 p50 比值为 1.002x/1.022x/0.997x；adaptive 比值为
+0.960x/1.001x/1.029x，说明 updater 存在依 workload 而变的 crossover。另一组 16,777,216 项、
+每项一次 payload 操作、1% useful work 的大容量测试中，default-exact/masked 在 zero/1%/full
+count 下为 1.049x/1.040x/1.012x。所有路线输出一致；默认 exact route 每个 payload 使用 16-byte
+私有 argument prefix，adaptive route 额外使用一个 32-byte persistent control；2,000 次交替
+replay 中 runtime memory 不增长。这些结果支持默认启用 logical exactness，但不支持默认启用
+12.4+ updater。
+
 recorded worklist finalize 现在无需公共 launch-state 对象也能获得同一优化。相邻的
 `DeviceWorklistSequence.finalize_next()` 与一个或多个匹配 bounded consumer 会让 Vulkan
 lowering 向 producer 提供一个 Graph-owned 16-byte packet，在同一次 dispatch 中发布 count
 与 grid，并删除 preparation dispatch。连续 consumer 复用该 packet；中间插入其他 action
 则恢复 standalone 12-byte packet 与 prepare 路线。`DeviceDispatchState` 继续作为已有
 `DevicePrefixSequence` 等显式 packet producer 的兼容适配器。CPU 忽略该 packet，并继续使用
-默认的 exact adaptive scheduler；CUDA 同样不消费它，并独立选择 Graph-owned per-node exact control
-或 masked fallback。
+默认的 exact adaptive scheduler；CUDA 同样不消费它，独立使用 exact logical range，并可在
+12.4+ 上选择 adaptive physical control。
 
 成对的 `device_worklist_bench.py` 资格测试在同一 Windows Vulkan 设备上使用 262,144 items、
 10% active、四个 consumer 与四次 payload operation。自动 Graph-owned 路径 median 为

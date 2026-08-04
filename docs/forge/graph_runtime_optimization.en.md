@@ -657,6 +657,22 @@ alternating exact replays retained stable runtime, host-pool, and device-pool
 ownership. These figures characterize this CPU and workload rather than
 promising a universal ratio.
 
+CUDA was subsequently requalified after its default bounded lowering moved to
+an exact logical device range while retaining the saturation-capped physical
+grid. `dynamic_workload_bench.py --cuda-route compare` builds masked, default
+exact, and 12.4+ adaptive Graphs in one runtime and randomizes the measured
+variant order against fixed Graph and direct execution. With 4,194,304 items,
+16 payload operations, and 10% useful work, default-exact/masked p50 ratios at
+zero/10%/full counts were 1.002x/1.022x/0.997x. The adaptive ratios were
+0.960x/1.001x/1.029x, showing that the updater has a workload-dependent
+crossover. A second large-capacity case with 16,777,216 items, one payload
+operation, and 1% useful work measured default-exact/masked ratios of
+1.049x/1.040x/1.012x at zero/1%/full counts. All routes produced equal output;
+the default exact route used a 16-byte private argument prefix, the adaptive
+route added one 32-byte persistent control per payload, and 2,000 alternating
+replays retained non-growing runtime memory. These results support defaulting
+to logical exactness without defaulting to the 12.4+ updater.
+
 Recorded worklist finalization now provides the same optimization without a
 public launch-state object. When `DeviceWorklistSequence.finalize_next()` is
 adjacent to one or more matching bounded consumers, Vulkan lowering gives the
@@ -665,8 +681,8 @@ and removes the preparation dispatch. Consecutive consumers reuse that packet;
 an intervening action restores the standalone 12-byte packet and prepare path.
 `DeviceDispatchState` remains a compatibility adapter for explicit packet
 producers such as an existing `DevicePrefixSequence`. CPU ignores that packet
-and uses its exact adaptive scheduler. CUDA also ignores it and independently
-selects Graph-owned per-node exact control or masked fallback.
+and uses its exact adaptive scheduler. CUDA also ignores it, uses its exact
+logical range, and may select 12.4+ adaptive physical control.
 
 The paired `device_worklist_bench.py` qualification used 262,144 items, 10%
 active work, four consumers, and four payload operations on the same Windows

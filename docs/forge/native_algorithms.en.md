@@ -227,8 +227,8 @@ one Graph submission without host count observation. When a compact result
 feeds Vulkan bounded dispatch, create `output_extent.dispatch_state(block_dim)`
 and pass it to both compact and `dispatch_bounded()`: the compact scatter then
 publishes the indirect packet with its count, removing one preparation
-dispatch. CPU/CUDA do not consume this packet; CUDA may independently select
-its Graph-owned exact per-node route.
+dispatch. CPU/CUDA do not consume this packet; CUDA independently uses its
+exact logical range and may select 12.4+ adaptive physical control.
 
 On the current Windows qualification machine, a compact-to-scan chain with a
 10% active prefix was 1.05x faster on CPU, 1.32x on CUDA, and 1.90x on Vulkan
@@ -297,8 +297,9 @@ dispatch is required. An intervening action conservatively disables this
 specialization. Passing `worklist.next_extent.dispatch_state(block_dim)` to
 both sides remains a compatibility route for explicit packet publication.
 CPU and CUDA keep the same source-level composition but do not consume that
-packet; CUDA may independently select its exact Graph-owned per-node route
-when available, otherwise both use masked capacity. Query
+packet. CPU uses exact scheduler chunks, while CUDA uses an exact logical
+device range on every supported driver and may optionally trim its physical
+grid with 12.4+ device updates. Query
 `ti.graph.dynamic_work_capabilities()["worklist"]` instead of inferring exact
 launch behavior from the common API.
 

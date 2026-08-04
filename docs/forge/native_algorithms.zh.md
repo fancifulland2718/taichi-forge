@@ -192,7 +192,8 @@ Graph 执行可用 `DevicePrefixSequence` 在 symbolic ndarray 参数上记录�
 submission 中且不观察 host count。compact 结果若接入 Vulkan bounded dispatch，可创建
 `output_extent.dispatch_state(block_dim)` 并同时传给 compact 与 `dispatch_bounded()`；compact
 scatter 会把 indirect packet 与 count 一起发布，删除一次 preparation dispatch。CPU/CUDA
-不消费该 packet；CUDA 可独立选择 Graph-owned per-node exact route。
+不消费该 packet；CUDA 独立使用 exact logical range，并可选择 12.4+ adaptive physical
+control。
 
 在当前 Windows 资格机器上，10% active prefix 的 compact-to-scan chain 相对在两个操作间
 显式调用 `DeviceExtent.snapshot()` 的同一 chain，CPU、CUDA、Vulkan 分别快 1.05x、
@@ -247,8 +248,9 @@ Graph-owned indirect packet：finalizer 在一次 dispatch 中发布 count 与 g
 复用该 packet，无需公共 launch-state 对象或 preparation dispatch。中间插入其他 action 会
 保守禁用该 specialization。把 `worklist.next_extent.dispatch_state(block_dim)` 同时传给两端，
 仍是显式 packet publication 的兼容路线。CPU/CUDA 使用相同 source-level 组合但不消费该
-packet；CUDA 可在可用时独立选择 Graph-owned per-node exact route，否则二者使用 masked
-capacity。应查询 `ti.graph.dynamic_work_capabilities()["worklist"]`，不能从通用 API 反推
+packet；CPU 使用 exact scheduler chunk，CUDA 则在所有受支持 driver 上使用 exact logical
+device range，并可在 12.4+ 上选择 device update 进一步缩小物理 grid。应查询
+`ti.graph.dynamic_work_capabilities()["worklist"]`，不能从通用 API 反推
 exact launch 行为。
 
 ## Consecutive RLE 与 Unique

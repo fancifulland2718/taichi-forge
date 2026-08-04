@@ -58,6 +58,22 @@ grouped under the behavior they shipped.
   Correctness covered clamping, overflow, TLS reductions, `continue`, and two
   independent concurrent Graph callers; 1,000 alternating replays retained
   stable runtime, host-pool, and device-pool ownership.
+- CUDA device-known bounded dispatch now has an exact logical-range lowering
+  on every supported driver. The default route reads and clamps `DeviceExtent`
+  on device and keeps the ordinary saturation-capped grid-stride launch, so it
+  needs neither host readback nor CUDA 12.4 node updates. On qualified 12.4+
+  drivers, the forced `device_update` route remains available as a physical
+  optimization: it caps the updated grid at the same saturation grid and can
+  skip a zero-count payload, while correctness still comes from the logical
+  range. Capabilities now separate logical exactness from physical launch kind
+  and report schema v4; `masked_capacity` remains an explicit A/B baseline.
+  Paired same-runtime tests covered zero, block boundaries, overflow, ndarray
+  rebinding, labeled ordinary fallback, a two-block saturation cap, concurrent
+  replay, and 1,000-2,000 replay memory stress. On this Windows CUDA machine,
+  the default exact route was within 0.4% of masked at full count and 2.2%
+  faster at 10% of a 4,194,304-item capacity; at a 16,777,216-item capacity it
+  was 4.9%/4.0%/1.2% faster at zero/1%/full count. The adaptive route has a
+  workload-dependent updater crossover and therefore is not the default.
 - CUDA structured control now has a Forge-owned bounded masked Graph route for
   drivers older than 12.8. Qualified Driver API 12.8+ runtimes continue to use
   native conditional Graph nodes; older runtimes use a device latch and
@@ -67,8 +83,9 @@ grouped under the behavior they shipped.
   physical launch. The forced masked route is qualified locally; a real
   pre-12.8 driver remains part of release-candidate validation.
 - Added read-only offloaded-task manifests and JIT dispatch labels. A manifest
-  reports stable task identity, `cpu_scheduler`/`grid_stride`/`one_to_one`/
-  `not_applicable` range mapping, requested, selected, and actual grid/block
+  reports stable task identity, `cpu_scheduler`/`grid_stride`/
+  `device_bounded_grid_stride`/`one_to_one`/`not_applicable` range mapping,
+  requested, selected, and actual grid/block
   geometry, and static shared-memory context without launching a profiler
   probe. CPU leaves GPU geometry absent, while runtime-indirect Vulkan work
   explicitly reports that actual geometry is device owned. Labels preserve the
@@ -126,9 +143,9 @@ grouped under the behavior they shipped.
   An adjacent Vulkan finalize and bounded consumer automatically publish into
   one Graph-owned exact indirect packet, with no public launch-state object or
   preparation dispatch; matching consecutive consumers reuse the packet. CPU
-  uses its exact adaptive scheduler by default, while CUDA reports either its
-  Graph-owned exact per-node route or masked fallback without consuming a
-  Vulkan packet.
+  uses its exact adaptive scheduler by default, while CUDA uses its exact
+  logical range without consuming a Vulkan packet and may optionally trim the
+  physical grid on qualified 12.4+ drivers.
   Deterministic keyed claim has
   an intentional workload crossover: at 262,144 active items it measured
   8.63x/9.05x over a full host round trip on CUDA/Vulkan, while a sparse 1,638
@@ -140,7 +157,7 @@ grouped under the behavior they shipped.
   dispatch packet with the output count and pass it to
   `dispatch_bounded(launch_state=...)`, removing the consumer preparation
   dispatch. CPU uses its exact adaptive scheduler by default; CUDA independently
-  reports Graph-owned exact per-node control or masked fallback. The unified
+  uses an exact logical range and may select 12.4+ adaptive physical control. The unified
   `dynamic_work_capabilities()` report separates physical launch semantics,
   structured iteration termination, and completion observation.
 - Graph terminal observations are completion-attached by default. Vulkan/CPU
@@ -163,8 +180,8 @@ grouped under the behavior they shipped.
   device-written indirect packets and a compiler-proven one-to-one range
   mapping. CPU uses its exact adaptive scheduler for ordinary bounded dispatch,
   while ordered segmented CPU dispatch retains its globally ordered masked
-  route. CUDA reports its selected exact Graph-node update or fixed-capacity
-  masked route honestly.
+  route. CUDA reports logical exactness separately from its saturation-capped
+  static or 12.4+ adaptive physical launch.
   Overflow, useful/executed/skipped/encoded work, invalid offsets, workspace,
   and zero-command behavior are available through capability and explicit
   snapshot objects. Provider-qualified recorded producers can now publish a

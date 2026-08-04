@@ -646,7 +646,7 @@ def main():
     )
     bounded_capabilities = ti.graph.bounded_dispatch_capabilities()
     expected_selected = {
-        "device_update": "exact_device_grid_update",
+        "device_update": "adaptive_device_grid_update",
         "exact_scheduler": "exact_cpu_scheduler",
         "masked_capacity": "masked_capacity",
     }.get(requested_route)

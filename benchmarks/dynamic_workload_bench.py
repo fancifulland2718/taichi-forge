@@ -485,6 +485,238 @@ def _graph_benchmark(args):
     }
 
 
+def _cuda_route_comparison(args):
+    """Compare CUDA bounded routes in one runtime to limit process noise."""
+
+    capacity = args.graph_capacity
+    block_dim = args.block_dim
+    extent = ti.DeviceExtent(capacity)
+    input_values = ti.ndarray(ti.f32, shape=capacity)
+    input_values.from_numpy(
+        (np.arange(capacity, dtype=np.float32) % 251) * np.float32(0.001)
+        + np.float32(0.25)
+    )
+
+    route_modes = ["masked_capacity", "auto"]
+    probe = dict(ti_core.cuda_bounded_dispatch_probe())
+    if probe["exact_device_grid_available"]:
+        route_modes.append("device_update")
+    variant_names = {
+        "masked_capacity": "bounded_masked",
+        "auto": "bounded_exact",
+        "device_update": "bounded_adaptive",
+    }
+    outputs = {
+        name: ti.ndarray(ti.f32, shape=capacity)
+        for name in ("direct", "fixed_graph")
+        + tuple(variant_names[mode] for mode in route_modes)
+    }
+
+    @ti.kernel
+    def publish(
+        requested: ti.i32,
+        state: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.device_extent_publish(state, capacity, requested)
+
+    @ti.kernel
+    def payload(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        source: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        ti.loop_config(block_dim=block_dim)
+        for i in range(capacity):
+            if i < ti.device_extent_count(state):
+                value = source[i]
+                for _ in ti.static(range(args.payload_work)):
+                    value = value * 0.99991 + ti.sin(value + i * 0.000001)
+                output[i] = value
+
+    requested_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "requested", ti.i32)
+    extent_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "extent", ti.i32, ndim=1)
+    input_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "input", ti.f32, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1)
+
+    fixed_builder = ti.graph.GraphBuilder()
+    fixed_builder.dispatch(publish, requested_arg, extent_arg)
+    fixed_builder.dispatch(payload, extent_arg, input_arg, output_arg)
+    fixed_graph = fixed_builder.compile()
+
+    route_graphs = {}
+    route_handles = {}
+    route_capabilities = {}
+    for mode in route_modes:
+        os.environ["TI_CUDA_BOUNDED_DISPATCH_MODE"] = mode
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(publish, requested_arg, extent_arg)
+        handle = builder.dispatch_bounded(
+            payload,
+            extent_arg,
+            input_arg,
+            output_arg,
+            extent=extent_arg,
+            capacity=capacity,
+            block_dim=block_dim,
+        )
+        route_graphs[mode] = builder.compile()
+        route_handles[mode] = handle
+        route_capabilities[mode] = handle.capabilities.__dict__
+
+    def variants_for(count):
+        fixed_args = {
+            "requested": count,
+            "extent": extent.state,
+            "input": input_values,
+            "output": outputs["fixed_graph"],
+        }
+        variants = {
+            "direct": lambda: (
+                publish(count, extent.state),
+                payload(extent.state, input_values, outputs["direct"]),
+            ),
+            "fixed_graph": lambda: fixed_graph.run(fixed_args),
+        }
+        for mode in route_modes:
+            name = variant_names[mode]
+            runtime_args = {
+                "requested": count,
+                "extent": extent,
+                "input": input_values,
+                "output": outputs[name],
+            }
+            variants[name] = (
+                lambda graph=route_graphs[mode], bound=runtime_args: graph.run(bound)
+            )
+        return variants
+
+    counts = {
+        "zero": 0,
+        "sparse": capacity * args.sparse_percent // 100,
+        "full": capacity,
+    }
+    for graph in route_graphs.values():
+        graph.execution_stats()
+    for count in counts.values():
+        for call in variants_for(count).values():
+            for _ in range(args.warmups):
+                call()
+    ti.sync()
+
+    program = impl.get_runtime().prog
+    before = program._runtime_statistics_snapshot()["memory"]
+    host_pool_before = dict(ti_core.get_host_memory_pool_stats())
+    device_pool_before = dict(ti_core.get_device_memory_pool_stats())
+    cases = {}
+    for index, (case, count) in enumerate(counts.items()):
+        samples = _paired_samples(
+            variants_for(count),
+            args.graph_rounds,
+            args.samples,
+            args.seed + index,
+        )
+        summary = _summarize(samples)
+        fixed_us = summary["fixed_graph"]["median_us"]
+        masked_us = summary["bounded_masked"]["median_us"]
+        comparisons = {}
+        for mode in route_modes:
+            name = variant_names[mode]
+            route_us = summary[name]["median_us"]
+            comparisons[name] = {
+                "speedup_over_fixed": fixed_us / route_us,
+                "speedup_over_masked": masked_us / route_us,
+                "speedup_over_direct": summary["direct"]["median_us"] / route_us,
+            }
+        cases[case] = {
+            "count": count,
+            "samples": summary,
+            "comparisons": comparisons,
+        }
+
+    correct = True
+    physical_counts = {}
+    for case, count in counts.items():
+        for output in outputs.values():
+            output.fill(-1)
+        for call in variants_for(count).values():
+            call()
+        ti.sync()
+        host_outputs = {key: value.to_numpy() for key, value in outputs.items()}
+        reference = host_outputs["direct"]
+        for output in host_outputs.values():
+            correct = correct and np.allclose(output[:count], reference[:count])
+            if count < capacity:
+                correct = correct and float(output[count]) == -1.0
+        physical_counts[case] = {}
+        for mode in route_modes:
+            snapshot = route_handles[mode].snapshot(extent)
+            physical_counts[case][variant_names[mode]] = {
+                "useful_count": snapshot.useful_count,
+                "executed_count": snapshot.executed_count,
+                "encoded_lanes": snapshot.encoded_lanes,
+                "skipped_count": snapshot.skipped_count,
+            }
+
+    stress = {}
+    if args.stress_replays:
+        stress_counts = (0, capacity, 1, max(0, capacity - 1))
+        for mode in route_modes:
+            name = variant_names[mode]
+            runtime_args = {
+                "requested": 0,
+                "extent": extent,
+                "input": input_values,
+                "output": outputs[name],
+            }
+            ti.sync()
+            memory_before = program._runtime_statistics_snapshot()["memory"]
+            start = time.perf_counter_ns()
+            for replay in range(args.stress_replays):
+                runtime_args["requested"] = stress_counts[replay % len(stress_counts)]
+                route_graphs[mode].run(runtime_args)
+            ti.sync()
+            memory_after = program._runtime_statistics_snapshot()["memory"]
+            stress[name] = {
+                "replays": args.stress_replays,
+                "mean_us": (time.perf_counter_ns() - start)
+                / args.stress_replays
+                / 1.0e3,
+                "runtime_memory_non_growth": _memory_non_growth(
+                    memory_before, memory_after
+                ),
+            }
+
+    memory = {}
+    for mode in route_modes:
+        report = route_graphs[mode].execution_stats()
+        memory[variant_names[mode]] = {
+            "persistent_argument_bytes": report.memory.persistent_argument_bytes,
+            "persistent_bounded_control_bytes": (
+                report.memory.persistent_bounded_control_bytes
+            ),
+            "workspace_bytes": route_handles[mode].workspace_bytes,
+        }
+    after = program._runtime_statistics_snapshot()["memory"]
+    return {
+        "capacity": capacity,
+        "block_dim": block_dim,
+        "payload_work": args.payload_work,
+        "routes": route_capabilities,
+        "cases": cases,
+        "physical_counts": physical_counts,
+        "stress": stress,
+        "memory": memory,
+        "correct": correct,
+        "runtime_memory_non_growth": _memory_non_growth(before, after),
+        "host_pool_stable": _pool_ownership_stable(
+            host_pool_before, dict(ti_core.get_host_memory_pool_stats())
+        ),
+        "device_pool_stable": _pool_ownership_stable(
+            device_pool_before, dict(ti_core.get_device_memory_pool_stats())
+        ),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--arch", choices=("cpu", "cuda", "vulkan"), required=True)
@@ -503,7 +735,7 @@ def main():
     parser.add_argument("--seed", type=int, default=20260802)
     parser.add_argument(
         "--cuda-route",
-        choices=("auto", "device_update", "masked_capacity"),
+        choices=("auto", "device_update", "masked_capacity", "compare"),
         default="auto",
     )
     parser.add_argument(
@@ -528,7 +760,9 @@ def main():
         parser.error("stress replay and memory node counts must be non-negative")
 
     if args.arch == "cuda":
-        os.environ["TI_CUDA_BOUNDED_DISPATCH_MODE"] = args.cuda_route
+        os.environ["TI_CUDA_BOUNDED_DISPATCH_MODE"] = (
+            "auto" if args.cuda_route == "compare" else args.cuda_route
+        )
     elif args.arch == "cpu":
         os.environ["TI_CPU_BOUNDED_DISPATCH_MODE"] = args.cpu_route
     arch = {"cpu": ti.cpu, "cuda": ti.cuda, "vulkan": ti.vulkan}[args.arch]
@@ -540,13 +774,15 @@ def main():
     )
     bounded_capabilities = ti.graph.bounded_dispatch_capabilities()
     expected_selected = {
-        "device_update": "exact_device_grid_update",
+        "device_update": "adaptive_device_grid_update",
         "exact_scheduler": "exact_cpu_scheduler",
         "masked_capacity": "masked_capacity",
     }.get(requested_route)
-    route_identity_valid = requested_route in ("auto", "not_applicable") or (
-        bounded_capabilities["selected_route"] == expected_selected
-    )
+    route_identity_valid = requested_route in (
+        "auto",
+        "compare",
+        "not_applicable",
+    ) or (bounded_capabilities["selected_route"] == expected_selected)
     if not route_identity_valid:
         raise RuntimeError(
             "bounded benchmark route mismatch: "
@@ -564,7 +800,11 @@ def main():
     if args.suite in ("all", "prefix"):
         result["device_prefix"] = _prefix_benchmark(args)
     if args.suite in ("all", "graph"):
-        result["bounded_graph"] = _graph_benchmark(args)
+        result["bounded_graph"] = (
+            _cuda_route_comparison(args)
+            if args.arch == "cuda" and args.cuda_route == "compare"
+            else _graph_benchmark(args)
+        )
     print(json.dumps(result, indent=2, sort_keys=True))
 
 
