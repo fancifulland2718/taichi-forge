@@ -637,22 +637,35 @@ faster than the named baseline:
 
 The Graph routes substantially reduced direct submission overhead, but the
 fixed Graph was faster than bounded dispatch in every measured single-payload
-case. CPU/CUDA bounded execution intentionally shares the fixed masked
-capacity route and stays near it. Vulkan visits only the packet-sized logical
+case. This qualification run used the default fixed masked route on CPU/CUDA,
+which stayed near the fixed Graph. Vulkan visits only the packet-sized logical
 range, but its preparation dispatch and dependency outweighed that saving for
 this workload. Use bounded dispatch for its device-known/exact-work contract
 or when complete-chain measurements justify it; do not substitute it for a
 fixed Graph solely because the active count is sparse. All three runs retained
-correct results and non-growing runtime-owned memory; the Vulkan bounded handle
+correct results and non-growing runtime-owned memory; the Vulkan Graph instance
 owned one stable 12-byte packet.
 
-When a recorded `DevicePrefixSequence` publishes a `DeviceDispatchState`, pass
-that state to `dispatch_bounded(..., launch_state=...)`. Vulkan then writes the
-16-byte launch state in the producer's terminal dispatch and consumes it
-directly, removing the consumer-side preparation dispatch and the handle-owned
-12-byte packet described by the standalone benchmark above. CPU and CUDA keep
-their qualified masked-capacity launch semantics and ignore the packet in the
-replay hot path.
+Recorded worklist finalization now provides the same optimization without a
+public launch-state object. When `DeviceWorklistSequence.finalize_next()` is
+adjacent to one or more matching bounded consumers, Vulkan lowering gives the
+producer one Graph-owned 16-byte packet, publishes count and grid together,
+and removes the preparation dispatch. Consecutive consumers reuse that packet;
+an intervening action restores the standalone 12-byte packet and prepare path.
+`DeviceDispatchState` remains a compatibility adapter for explicit packet
+producers such as an existing `DevicePrefixSequence`. CPU ignores that packet
+and keeps its masked-capacity default. CUDA also ignores it and independently
+selects Graph-owned per-node exact control or masked fallback.
+
+The paired `device_worklist_bench.py` qualification used 262,144 items, 10%
+active work, four consumers, and four payload operations on the same Windows
+Vulkan device. The automatic Graph-owned route measured 470.3 us median versus
+480.7 us for the explicit compatibility state, with a paired
+compatibility/automatic median ratio of 0.9975. Both paths remained correct and
+memory-stable across 1,000 replays. The fixed Graph remained faster at
+367.5 us for this light payload, so producer publication fusion removes fixed
+overhead; it does not change the workload-dependent exact-versus-fixed
+crossover.
 
 `benchmarks/graph_structured_control_bench.py` measures preparation, first run,
 steady wall time, control observations, and (where the backend profiler can see

@@ -493,12 +493,12 @@ runtime binding 使用 `worklist.runtime_arguments(name)`。atomic producer Grap
 `include_capacity=True`，因为 `append_arguments()` 包含 scalar capacity argument。
 `DeviceWorklistGraphArgs.observe(builder, name=...)` 把所有 counter 附加到 Graph terminal
 observation；ticket completion 后可由 `decode_observation(mapping)` 返回
-`DeviceWorklistStatistics`。把匹配的 producer-owned `DeviceDispatchState` 同时交给
-finalize/select/claim node 与 `dispatch_bounded(launch_state=...)`，可删除 Vulkan consumer-side
-preparation dispatch。CUDA Driver API 12.4 或更高版本也可在强制 exact route 上消费该
-state；经过性能资格后，默认仍采用 per-node updater，grouped update 与 Forge-owned finalize
-fusion 作为显式资格策略提供。实际 route 与 update policy 应查询
-`dynamic_work_capabilities()`。
+`DeviceWorklistStatistics`。Vulkan 上相邻的 recorded `finalize_next()` 与匹配 bounded
+consumer 会自动共享 Graph-owned packet，并删除 consumer preparation dispatch。把匹配的
+producer-owned `DeviceDispatchState` 同时交给两端，仍可用于显式 finalize/select/claim packet
+publication。CUDA 上的 `launch_state` 只作为 capacity、extent identity 与 block geometry 的
+兼容适配；Driver API 12.4 exact route 通过 Graph-owned per-node control 读取 extent，不消费
+外部 packet。实际物理 route 应查询 `dynamic_work_capabilities()`。
 
 ### Primitive 算法
 
@@ -950,9 +950,16 @@ fixed-capacity kernel 中使用有界 count；backend 的 exact-indirect 或 mas
 `DeviceDispatchState`。把它同时传给 `DevicePrefix.compact(..., dispatch_state=...)` 和
 `GraphBuilder.dispatch_bounded(..., launch_state=...)` 后，Vulkan compact scatter 会在写入
 count 时一起发布 indirect grid，从而删除 consumer-side packet preparation dispatch。
-CPU/CUDA 仍使用 masked-capacity，不消费该 packet，因为这些路径本来就没有 preparation
-dispatch。state、extent、capacity 与 block dimension 必须匹配；runtime generation 过期会
+CPU/CUDA 不消费该 packet；CUDA 可独立选择 Graph-owned per-node exact route。state、extent、
+capacity 与 block dimension 必须匹配；runtime generation 过期会
 fail closed。
+
+新的 recorded worklist pipeline 通常不需要该适配器。相邻的
+`DeviceWorklistSequence.finalize_next()` 发布同一 extent 时，Graph lowering 会把
+Graph-instance-owned 的四 u32 packet 交给 producer，不再记录 preparation dispatch，并让后续
+具有相同 capacity/block dimension 的连续 consumer 复用该 packet。中间出现其他 dispatch，
+或 producer 未通过该 specialization 资格时，会保守恢复 standalone preparation。
+`DeviceDispatchState` 继续用于显式 packet producer 与向后兼容。
 
 ### 有界与有序分段 Graph dispatch
 
@@ -980,9 +987,10 @@ lowering 合同会如实区分后端：
 
 - host-known count 在 enqueue 前钳制到 `[0, capacity]`，并在 CPU、CUDA、Vulkan 上使用
   实际 scalar range，不涉及 device readback；
-- Vulkan device-known dispatch 在 device 上写入三个 u32 的 packet，并使用 exact
-  `dispatchIndirect` grid。其 payload specialization 采用 `one_to_one` range mapping，
-  因而缩小 grid 会真正减少访问的逻辑 index，count=0 会跳过 payload command；
+- standalone Vulkan device-known dispatch 在 device 上写入三个 u32 的 packet，并使用 exact
+  `dispatchIndirect` grid；通过资格的相邻 recordable producer 则可直接发布共享的
+  Graph-owned 四 u32 packet。两者的 payload specialization 都采用 `one_to_one` range
+  mapping，因而缩小 grid 会真正减少访问的逻辑 index，count=0 会跳过 payload command；
 - CUDA 默认使用固定容量 masked route。Driver API 12.4 或更高版本可通过
   `TI_CUDA_BOUNDED_DISPATCH_MODE=device_update` 选择 device-updatable Graph node，在不做 host
   readback 的情况下采用精确的 rounded grid，并在 count=0 时跳过 payload command。这是
@@ -993,15 +1001,14 @@ lowering 合同会如实区分后端：
 `ti.graph.bounded_dispatch_capabilities()` 可在构图前报告所选 route。返回的 handle 提供
 不可变 capability 与稳定 workspace accounting。`handle.snapshot(extent)` 是显式同步点，
 报告 useful、executed、skipped、encoded 与 overflow count；host-known handle 可无同步地
-报告相同信息。
+报告相同信息。Vulkan 的 `forge_producer_fusion_supported` 表示框架支持 provider-qualified
+publication specialization；每个 handle 的 `preparation_dispatches` 才表示该处 producer/
+consumer 布局是否实际采用。
 
-CUDA exact Graph 的 `TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY` 接受 `auto`、`per_node`、
-`grouped` 或 `fused`。当前 `auto` 选择 `per_node`：配对性能资格显示，减少 updater dispatch
-数量并未改善资格 GPU 上的完整多 consumer pipeline。`grouped` 用一个 updater 更新连续消费
-同一 launch state 的全部 payload；`fused` 进一步让 Forge 自有的 `DeviceWorklist.finalize`
-producer 自行应用 node update。两个强制策略均保持 zero-count、overflow、reset 与 ordinary
-fallback 安全，但在完整 pipeline 测量支持更改默认值之前保持 opt-in。逐 segment execution
-report 会暴露 group、updater、payload、fused-group、control-byte 与 last-driver-error 字段。
+CUDA exact Graph 的 `TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY` 接受 `auto` 或 `per_node`，两者都
+选择经过资格验证的逐节点 updater。旧实验值 `grouped` 与 `fused` 现在会明确拒绝，不能再
+改变公共资源所有权。逐 segment execution report 会暴露实际 updater 数、control bytes 与
+last-driver-error；grouped/fused counter 为保持 schema 兼容而保留，在该路线中为零。
 
 `ti.graph.dynamic_work_capabilities()` 返回 schema-v3 report，把 count owner、bounded
 launch、structured iteration termination、worklist 与 ticket observation 分成独立维度。
@@ -1017,14 +1024,16 @@ conditional termination 报成 exact indirect grid launch。
 index。offset 会先钳制以保证执行安全；显式 snapshot 通过总 `overflow` 和逐 segment
 `invalid_offsets` 报告非法 topology。固定 segment count 必须在 `[1, 4096]`。
 
-这些接口只用于 JIT Graph，AOT export 会明确失败。单个 Vulkan bounded dispatch 的内部
-workspace 为 12 bytes，Vulkan ordered dispatch 为 32 bytes；CPU/CUDA bounded 不使用
-handle-owned workspace，ordered 使用 20 bytes。CUDA exact per-node control 每个 payload 使用
-32 persistent bytes；grouped/fused chain 共使用 `40 + 8 * payloads` bytes。producer-owned Vulkan launch state 会用 external 16-byte
-state 替代 12-byte consumer packet，并报告 handle-owned packet 为 0 byte。exact 物理工作量减少不等于无条件提速：轻量、单独的
-Vulkan payload 可能因 packet preparation 与依赖成本而慢于 fixed Graph。应以完整 workload
-同时对比 fixed Graph 和 direct execution；成对基准脚本为
-`benchmarks/dynamic_workload_bench.py`。
+这些接口只用于 JIT Graph，AOT export 会明确失败。standalone Vulkan bounded dispatch 的
+Graph-instance packet 为 12 bytes；自动 specialized worklist publication 持有一个共享的
+16-byte packet，不增加 preparation dispatch，连续匹配 consumer 也不增加 allocation。
+Vulkan ordered dispatch 为 32 bytes；CPU/CUDA bounded 不使用 Python-owned workspace，
+ordered 使用 20 bytes。CUDA exact control 每个 payload 使用 32 persistent bytes。显式的
+producer-owned Vulkan launch state 仍是 external 16-byte 兼容 state，并报告 internal packet
+为 0 byte。exact 物理工作量减少不等于无条件提速：轻量、standalone Vulkan payload 可能因
+packet preparation 与依赖成本而慢于 fixed Graph。应以完整 workload 同时对比 fixed Graph
+和 direct execution；成对基准脚本为 `benchmarks/dynamic_workload_bench.py` 与
+`benchmarks/device_worklist_bench.py`。
 
 ### `GraphBuilder.dispatch_indirect(kernel, *args, dispatch_packet, template_args=None, label=None)`
 

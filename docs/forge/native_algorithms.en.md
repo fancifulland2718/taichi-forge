@@ -227,8 +227,8 @@ one Graph submission without host count observation. When a compact result
 feeds Vulkan bounded dispatch, create `output_extent.dispatch_state(block_dim)`
 and pass it to both compact and `dispatch_bounded()`: the compact scatter then
 publishes the indirect packet with its count, removing one preparation
-dispatch. CPU/CUDA keep their documented masked-capacity route and do not
-consume this packet.
+dispatch. CPU/CUDA do not consume this packet; CUDA may independently select
+its Graph-owned exact per-node route.
 
 On the current Windows qualification machine, a compact-to-scan chain with a
 10% active prefix was 1.05x faster on CPU, 1.32x on CUDA, and 1.90x on Vulkan
@@ -289,11 +289,16 @@ observation, while
 completion. `execution_report()` is an explicit synchronized boundary that can
 join these counters with a `dispatch_bounded()` snapshot.
 
-Vulkan can pass `worklist.next_extent.dispatch_state(block_dim)` to both the
-finalize/select/claim operation and `dispatch_bounded(launch_state=...)`, so
-the producer publishes the exact indirect packet and the consumer adds no
-preparation dispatch. CPU and CUDA keep the same source-level composition but
-execute the bounded consumer as masked capacity. Query
+On Vulkan, an adjacent recorded `finalize_next()` and
+`dispatch_bounded()` now automatically share a Graph-owned indirect packet.
+The finalizer publishes count and grid in one dispatch, consecutive matching
+consumers reuse the packet, and no public launch-state object or preparation
+dispatch is required. An intervening action conservatively disables this
+specialization. Passing `worklist.next_extent.dispatch_state(block_dim)` to
+both sides remains a compatibility route for explicit packet publication.
+CPU and CUDA keep the same source-level composition but do not consume that
+packet; CUDA may independently select its exact Graph-owned per-node route
+when available, otherwise both use masked capacity. Query
 `ti.graph.dynamic_work_capabilities()["worklist"]` instead of inferring exact
 launch behavior from the common API.
 

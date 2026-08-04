@@ -576,13 +576,15 @@ graphs also pass `include_capacity=True` because `append_arguments()` includes
 a scalar capacity argument. `DeviceWorklistGraphArgs.observe(builder,
 name=...)` attaches all counters to terminal Graph observation;
 `decode_observation(mapping)` returns `DeviceWorklistStatistics` after ticket
-completion. Passing a matching producer-owned `DeviceDispatchState` to a
-finalize/select/claim node and to `dispatch_bounded(launch_state=...)` removes
-Vulkan's consumer-side preparation dispatch. CUDA Driver API 12.4 or newer can
-also consume this state on the forced exact route. Its performance-qualified
-default remains a per-node updater; grouped updates and Forge-owned finalize
-fusion are available as explicit qualification policies. Inspect
-`dynamic_work_capabilities()` for the selected route and update policy.
+completion. On Vulkan, an adjacent recorded `finalize_next()` and matching
+bounded consumer automatically share a Graph-owned packet and remove the
+consumer preparation dispatch. A matching producer-owned
+`DeviceDispatchState` on both sides remains supported for explicit
+finalize/select/claim packet publication. On CUDA, `launch_state` is only a
+compatibility adapter for capacity, extent identity, and block geometry; the
+exact Driver API 12.4 route reads the extent through Graph-owned per-node
+control and does not consume the external packet. Inspect
+`dynamic_work_capabilities()` for the selected physical route.
 
 ### Primitive Algorithms
 
@@ -1102,10 +1104,19 @@ capability and must not be inferred from this state object.
 `dispatch_state=` to `DevicePrefix.compact()` and as `launch_state=` to
 `GraphBuilder.dispatch_bounded()` lets the Vulkan compact scatter publish the
 count and indirect grid together. This removes the consumer-side packet
-preparation dispatch. CPU and CUDA retain their masked-capacity execution and
-do not consume the packet because those routes have no preparation dispatch to
-remove. The state, extent, capacity, and block dimension must match and stale
+preparation dispatch. CPU and CUDA do not consume the packet; CUDA may
+independently select its Graph-owned exact per-node route. The state, extent,
+capacity, and block dimension must match and stale
 runtime generations fail closed.
+
+New recorded worklist pipelines normally do not need that adapter. When an
+adjacent `DeviceWorklistSequence.finalize_next()` publishes the same extent,
+Graph lowering supplies a Graph-instance-owned four-u32 packet to the
+producer, records no preparation dispatch, and reuses that packet for
+consecutive consumers with the same capacity and block dimension. An
+intervening dispatch or an unqualified producer conservatively restores the
+standalone preparation path. `DeviceDispatchState` remains supported for
+explicit packet producers and backward compatibility.
 
 ### Bounded and ordered segmented Graph dispatch
 
@@ -1134,10 +1145,12 @@ The lowering contract is backend-honest:
 
 - A host-known count is clamped to `[0, capacity]` before enqueue and uses the
   actual scalar range on CPU, CUDA, and Vulkan. No device readback is involved.
-- Vulkan device-known dispatch writes a three-u32 packet on device and uses an
-  exact `dispatchIndirect` grid. Its payload specialization uses `one_to_one`
-  range mapping, so a smaller grid really visits fewer logical indices and a
-  zero count skips the payload command.
+- A standalone Vulkan device-known dispatch writes a three-u32 packet on
+  device and uses an exact `dispatchIndirect` grid. A qualified adjacent
+  recordable producer can instead publish a shared Graph-owned four-u32 packet
+  directly. Both payload specializations use `one_to_one` range mapping, so a
+  smaller grid really visits fewer logical indices and a zero count skips the
+  payload command.
 - CUDA defaults to the fixed-capacity masked route. With Driver API 12.4 or
   newer, `TI_CUDA_BOUNDED_DISPATCH_MODE=device_update` selects device-updatable
   Graph nodes, an exact rounded grid, and zero-count command skip without host
@@ -1152,18 +1165,17 @@ The lowering contract is backend-honest:
 Graph is built. The returned handle exposes immutable capabilities and stable
 workspace accounting. `handle.snapshot(extent)` is an explicit synchronization
 and reports useful, executed, skipped, encoded, and overflow counts; the
-host-known handle reports the same data without synchronization.
+host-known handle reports the same data without synchronization. On Vulkan,
+`forge_producer_fusion_supported` reports support for provider-qualified
+publication specialization; each handle's `preparation_dispatches` reports
+whether that particular producer/consumer placement actually used it.
 
-On CUDA exact graphs, `TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY` accepts `auto`,
-`per_node`, `grouped`, or `fused`. `auto` currently selects `per_node`: paired
-qualification found that reducing updater dispatch count did not improve the
-complete multi-consumer pipeline on the qualified GPU. `grouped` updates all
-consecutive consumers of one launch state from one updater. `fused` additionally
-lets the Forge-owned `DeviceWorklist.finalize` producer apply the node updates
-itself. Both forced policies preserve zero-count, overflow, reset, and ordinary
-fallback safety, but are opt-in until whole-pipeline measurements justify a
-new default. Per-segment execution reports expose group, updater, payload,
-fused-group, control-byte, and last-driver-error fields.
+On CUDA exact graphs, `TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY` accepts `auto` or
+`per_node`; both select the qualified per-node updater. The former experimental
+`grouped` and `fused` values are rejected instead of changing public resource
+ownership. Per-segment execution reports expose the actual updater count,
+control bytes, and last driver error. Grouped/fused counters remain in the
+schema for compatibility and are zero on this route.
 
 `ti.graph.dynamic_work_capabilities()` returns a schema-v3 report that keeps
 the count owner, bounded launch, structured iteration termination, worklist,
@@ -1183,18 +1195,20 @@ against the segment count. Offsets are clamped for safe execution; an explicit
 snapshot reports invalid topology through `overflow` and per-segment
 `invalid_offsets`. The segment count is fixed in `[1, 4096]`.
 
-These APIs are JIT Graph features. AOT export fails explicitly. Internal
-workspace is 12 bytes for one Vulkan bounded dispatch and 32 bytes for Vulkan
-ordered dispatch; CPU/CUDA bounded dispatch uses no handle-owned workspace and
-ordered dispatch uses 20 bytes. CUDA exact per-node control uses 32 persistent
-bytes per payload; one grouped or fused chain uses `40 + 8 * payloads` bytes.
-A producer-owned Vulkan launch state replaces the 12-byte consumer packet with
-an external 16-byte state and reports zero handle-owned packet bytes. Exact
-physical work reduction is not a universal speedup: a light standalone Vulkan
-payload can cost more than a fixed Graph
+These APIs are JIT Graph features. AOT export fails explicitly. A standalone
+Vulkan bounded dispatch owns a 12-byte Graph-instance packet, while an
+automatically specialized worklist publication owns one shared 16-byte packet
+and adds no preparation dispatch; consecutive matching consumers do not add
+allocations. Vulkan ordered dispatch uses 32 bytes. CPU/CUDA bounded dispatch
+uses no Python-owned workspace and ordered dispatch uses 20 bytes. CUDA exact
+control uses 32 persistent bytes per payload. An explicit producer-owned
+Vulkan launch state remains an external 16-byte compatibility state and reports
+zero internal packet bytes. Exact physical work reduction is not a universal
+speedup: a light standalone Vulkan payload can cost more than a fixed Graph
 because packet preparation and ordering add a dispatch/dependency. Measure the
 complete workload against both fixed Graph and direct execution. The paired
-harness is `benchmarks/dynamic_workload_bench.py`.
+harnesses are `benchmarks/dynamic_workload_bench.py` and
+`benchmarks/device_worklist_bench.py`.
 
 ### `GraphBuilder.dispatch_indirect(kernel, *args, dispatch_packet, template_args=None, label=None)`
 

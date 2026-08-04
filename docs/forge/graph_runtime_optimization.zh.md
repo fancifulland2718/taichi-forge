@@ -501,18 +501,28 @@ zero/10%/full count，得到下列 median ratio 范围。ratio 大于一表示 b
 | Vulkan | 1.53x-1.66x | 0.822x-0.952x | exact indirect、one-to-one range |
 
 Graph route 显著降低了 direct submission 固定开销，但所有被测单 payload 场景中 fixed
-Graph 都快于 bounded dispatch。CPU/CUDA bounded 有意复用 fixed masked-capacity route，
-因此保持接近。Vulkan 确实只访问 packet 指定的逻辑 range，但该 workload 中 preparation
+Graph 都快于 bounded dispatch。本次资格测试在 CPU/CUDA 上使用默认 fixed masked-capacity
+route，因此保持接近。Vulkan 确实只访问 packet 指定的逻辑 range，但该 workload 中 preparation
 dispatch 与依赖成本高于所节省的工作量。应基于 device-known/exact-work 合同或完整 chain
 实测收益选用 bounded dispatch，不能仅因 active count 稀疏就替换 fixed Graph。三后端结果
-均正确且 runtime-owned memory 不增长；Vulkan bounded handle 持有一个稳定的 12-byte
+均正确且 runtime-owned memory 不增长；Vulkan Graph instance 持有一个稳定的 12-byte
 packet。
 
-当可记录的 `DevicePrefixSequence` 产生 `DeviceDispatchState` 时，可将该 state 传给
-`dispatch_bounded(..., launch_state=...)`。Vulkan 会在 producer 的末端 dispatch 中写入
-16-byte launch state 并直接消费，从而消除上述单独基准中的 consumer-side
-preparation dispatch 和 handle-owned 12-byte packet。CPU 和 CUDA 保持已资格化的
-masked-capacity launch 语义，并在 replay hot path 忽略该 packet。
+recorded worklist finalize 现在无需公共 launch-state 对象也能获得同一优化。相邻的
+`DeviceWorklistSequence.finalize_next()` 与一个或多个匹配 bounded consumer 会让 Vulkan
+lowering 向 producer 提供一个 Graph-owned 16-byte packet，在同一次 dispatch 中发布 count
+与 grid，并删除 preparation dispatch。连续 consumer 复用该 packet；中间插入其他 action
+则恢复 standalone 12-byte packet 与 prepare 路线。`DeviceDispatchState` 继续作为已有
+`DevicePrefixSequence` 等显式 packet producer 的兼容适配器。CPU 忽略该 packet 并保持
+masked-capacity 默认路线；CUDA 同样不消费它，并独立选择 Graph-owned per-node exact control
+或 masked fallback。
+
+成对的 `device_worklist_bench.py` 资格测试在同一 Windows Vulkan 设备上使用 262,144 items、
+10% active、四个 consumer 与四次 payload operation。自动 Graph-owned 路径 median 为
+470.3 us，显式兼容 state 为 480.7 us；配对的 compatibility/automatic median ratio 为
+0.9975。两条路线均保持正确，并通过 1,000 次 replay 的 memory-stability 检查。该轻量 payload
+的 fixed Graph 仍为 367.5 us，因此 producer publication fusion 消除的是固定开销，并不改变
+exact 与 fixed 之间依赖 workload 的交叉点。
 
 `benchmarks/graph_structured_control_bench.py` 分别测量 preparation、first run、
 steady wall time、control observation，以及 backend profiler 可见时的 device kernel time。

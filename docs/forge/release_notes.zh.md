@@ -86,7 +86,10 @@
   记录成可复用 Graph native action。Graph 参数可把 generated/accepted/rejected/conflict/
   winner/overflow 计数附着到 `SubmissionTicket`，steady-state replay 不读取 host count、也不
   重新分配；首次执行仍可能准备 native provider workspace。
-  Vulkan 消费 producer-owned exact indirect packet；CPU/CUDA 继续如实报告 masked-capacity。
+  相邻的 Vulkan finalize 与 bounded consumer 会自动发布到一个 Graph-owned exact indirect
+  packet，无需公共 launch-state 对象或 preparation dispatch；连续匹配 consumer 会复用该
+  packet。CPU 默认使用 masked capacity；CUDA 不消费 Vulkan packet，并如实报告
+  Graph-owned per-node exact route 或 masked fallback。
   确定性 keyed claim 存在明确 workload crossover：262,144 个 active item 时相对完整 host
   round trip 在 CUDA/Vulkan 上分别为 8.63x/9.05x；稀疏 1,638 项在三后端上都更慢。
   资格基准会分开报告这两类输入，并在 1,000 次 CPU、3,000 次 CUDA/Vulkan replay 中观察到
@@ -94,7 +97,8 @@
 - 新增 `DeviceDispatchState` 与 `DevicePrefixSequence`，用于 fixed-topology、
   device-count-driven pipeline。Vulkan compact 可把 bounded dispatch packet 与输出 count
   一起发布，再交给 `dispatch_bounded(launch_state=...)`，从而删除 consumer preparation
-  dispatch；CPU/CUDA 保持如实报告的 masked-capacity route。统一的
+  dispatch；CPU 保持如实报告的 masked-capacity 默认路线；CUDA 独立报告 Graph-owned
+  per-node exact control 或 masked fallback。统一的
   `dynamic_work_capabilities()` 会分别报告物理 launch、structured iteration termination 与
   completion observation。
 - Graph 终态 observation 默认附着到 completion。Vulkan/CPU 使用 host-visible arena slot；
@@ -112,8 +116,9 @@
   具有全局顺序的 offset range。Vulkan 使用 device-written indirect packet 与编译器证明的
   one-to-one range mapping；CUDA/CPU 如实报告 fixed-capacity masked route。capability 与显式
   snapshot 可观察 overflow、useful/executed/skipped/encoded work、非法 offset、workspace 与
-  zero-command 行为。Vulkan exact 工作量减少不被表述为无条件提速：轻量单独 payload 中，
-  preparation dispatch 的成本可能更高。
+  zero-command 行为。通过资格的 recorded producer 现在可直接发布 Graph-owned Vulkan
+  packet；中间插入其他 action 会恢复保守 prepare 路线。Vulkan exact 工作量减少不被表述为
+  无条件提速：轻量 standalone payload 中，preparation dispatch 的成本可能更高。
 - 新增 `DeviceExtent`：以稳定的两槽 device state 保存有界 count 与 sticky overflow。
   device-side publish 无 host readback 地完成钳制；同一 allocation 可由普通 kernel、JIT Graph
   参数和兼容的 count-producing primitive 共享。reset/normalize 保持 device-side，显式

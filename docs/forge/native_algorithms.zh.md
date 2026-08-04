@@ -192,7 +192,7 @@ Graph 执行可用 `DevicePrefixSequence` 在 symbolic ndarray 参数上记录�
 submission 中且不观察 host count。compact 结果若接入 Vulkan bounded dispatch，可创建
 `output_extent.dispatch_state(block_dim)` 并同时传给 compact 与 `dispatch_bounded()`；compact
 scatter 会把 indirect packet 与 count 一起发布，删除一次 preparation dispatch。CPU/CUDA
-继续使用文档所述 masked-capacity route，不消费该 packet。
+不消费该 packet；CUDA 可独立选择 Graph-owned per-node exact route。
 
 在当前 Windows 资格机器上，10% active prefix 的 compact-to-scan chain 相对在两个操作间
 显式调用 `DeviceExtent.snapshot()` 的同一 chain，CPU、CUDA、Vulkan 分别快 1.05x、
@@ -242,11 +242,14 @@ workspace。`args.observe()` 把六个 counter 加到 completion-attached ticket
 completion 后由 `args.decode_observation()` 生成 `DeviceWorklistStatistics`。
 `execution_report()` 是显式同步边界，可把这些 counter 与 `dispatch_bounded()` snapshot 合并。
 
-Vulkan 可把 `worklist.next_extent.dispatch_state(block_dim)` 同时传给 finalize/select/claim 与
-`dispatch_bounded(launch_state=...)`；producer 直接发布 exact indirect packet，consumer 不再
-增加 preparation dispatch。CPU/CUDA 使用同一 source-level 组合，但 bounded consumer 仍为
-masked capacity。应查询 `ti.graph.dynamic_work_capabilities()["worklist"]`，不能从通用 API
-反推 exact launch 行为。
+Vulkan 上相邻的 recorded `finalize_next()` 与 `dispatch_bounded()` 现在会自动共享
+Graph-owned indirect packet：finalizer 在一次 dispatch 中发布 count 与 grid，连续匹配 consumer
+复用该 packet，无需公共 launch-state 对象或 preparation dispatch。中间插入其他 action 会
+保守禁用该 specialization。把 `worklist.next_extent.dispatch_state(block_dim)` 同时传给两端，
+仍是显式 packet publication 的兼容路线。CPU/CUDA 使用相同 source-level 组合但不消费该
+packet；CUDA 可在可用时独立选择 Graph-owned per-node exact route，否则二者使用 masked
+capacity。应查询 `ti.graph.dynamic_work_capabilities()["worklist"]`，不能从通用 API 反推
+exact launch 行为。
 
 ## Consecutive RLE 与 Unique
 

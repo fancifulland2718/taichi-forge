@@ -108,8 +108,12 @@ grouped under the behavior they shipped.
   can attach generated/accepted/rejected/conflict/winner/overflow counters to a
   `SubmissionTicket` without steady-state replay host count readback or
   allocation.
-  Vulkan consumes an exact producer-owned indirect launch packet; CPU/CUDA
-  continue to report masked-capacity execution. Deterministic keyed claim has
+  An adjacent Vulkan finalize and bounded consumer automatically publish into
+  one Graph-owned exact indirect packet, with no public launch-state object or
+  preparation dispatch; matching consecutive consumers reuse the packet. CPU
+  uses masked capacity by default, while CUDA reports either its Graph-owned
+  exact per-node route or masked fallback without consuming a Vulkan packet.
+  Deterministic keyed claim has
   an intentional workload crossover: at 262,144 active items it measured
   8.63x/9.05x over a full host round trip on CUDA/Vulkan, while a sparse 1,638
   item claim was slower on all three backends. The qualification harness keeps
@@ -119,7 +123,8 @@ grouped under the behavior they shipped.
   device-count-driven pipelines. Vulkan compact can now publish its bounded
   dispatch packet with the output count and pass it to
   `dispatch_bounded(launch_state=...)`, removing the consumer preparation
-  dispatch. CPU/CUDA preserve their honest masked-capacity route. The unified
+  dispatch. CPU keeps its honest masked-capacity default; CUDA independently
+  reports Graph-owned exact per-node control or masked fallback. The unified
   `dynamic_work_capabilities()` report separates physical launch semantics,
   structured iteration termination, and completion observation.
 - Graph terminal observations are completion-attached by default. Vulkan/CPU
@@ -143,9 +148,11 @@ grouped under the behavior they shipped.
   mapping; CUDA and CPU report their fixed-capacity masked route honestly.
   Overflow, useful/executed/skipped/encoded work, invalid offsets, workspace,
   and zero-command behavior are available through capability and explicit
-  snapshot objects. Exact Vulkan work reduction is not presented as an
-  unconditional speedup: the preparation dispatch can outweigh it for light
-  standalone payloads.
+  snapshot objects. Provider-qualified recorded producers can now publish a
+  Graph-owned Vulkan packet directly; an intervening action restores the
+  conservative prepare path. Exact Vulkan work reduction is not presented as
+  an unconditional speedup: the preparation dispatch can outweigh it for
+  light standalone payloads.
 - Added `DeviceExtent`, a stable two-slot device state for bounded counts and
   sticky overflow. Device-side publish clamps without host readback; the same
   allocation can be shared by ordinary kernels, JIT Graph arguments, and
