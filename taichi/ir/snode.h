@@ -87,6 +87,10 @@ class SNode {
 
   static std::atomic<int> counter;
   int id{0};
+  // Dense, tree-local index used exclusively by LLVM runtime state. Unlike
+  // |id|, this value is assigned after an SNodeTree is finalized and does not
+  // grow with SNodes created by previously destroyed trees.
+  int runtime_local_id{-1};
   int depth{0};
 
   std::string name;

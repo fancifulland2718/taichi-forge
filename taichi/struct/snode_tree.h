@@ -74,13 +74,19 @@ class SNodeTree {
     return layout_fingerprint_;
   }
 
+  int num_snodes() const {
+    return num_snodes_;
+  }
+
  private:
   int id_{0};
   std::uint64_t generation_{0};
   std::uint64_t layout_fingerprint_{0};
+  int num_snodes_{0};
   std::unique_ptr<SNode> root_{nullptr};
 
   void check_tree_validity(SNode &node);
+  void assign_runtime_local_ids(SNode &node);
 };
 
 /**

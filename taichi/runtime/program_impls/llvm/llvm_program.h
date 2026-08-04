@@ -50,6 +50,7 @@ class LlvmProgramImpl : public ProgramImpl {
   void materialize_snode_tree(SNodeTree *tree, uint64 *result_buffer) override;
 
   void cache_field(int snode_tree_id,
+                   std::uint64_t tree_generation,
                    int root_id,
                    const StructCompiler &struct_compiler);
 

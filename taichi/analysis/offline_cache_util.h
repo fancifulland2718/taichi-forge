@@ -115,7 +115,10 @@ class Kernel;
 //  24 - Program-global SNode capacity (2026-07). LLVMRuntime expands every
 //       SNode-id-indexed table from 1024 to 4096 entries. Cached LLVM kernels
 //       embed runtime field offsets and are ABI-incompatible with this layout.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 24;
+//  25 - Tree-local LLVM SNode runtime state (2026-08). Field cache metadata
+//       records deterministic tree-local node ids and cached kernels use the
+//       tree directory instead of Program-global fixed-capacity arrays.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 25;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

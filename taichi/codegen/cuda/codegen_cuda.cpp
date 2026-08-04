@@ -605,10 +605,13 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
         return;
       }
     }
-    auto snode_id = tlctx->get_constant(stmt->snode->id);
+    const uint64 runtime_key =
+        (uint64(static_cast<uint32>(stmt->snode->get_snode_tree_id())) << 32) |
+        uint64(static_cast<uint32>(stmt->snode->runtime_local_id));
+    auto snode_runtime_key = tlctx->get_constant(runtime_key);
     {
       init_offloaded_task_function(stmt, "gather_list");
-      call("gc_parallel_0", get_context(), snode_id);
+      call("gc_parallel_0", get_context(), snode_runtime_key);
       finalize_offloaded_task_function();
       current_task->grid_dim = compile_config.saturating_grid_dim;
       current_task->block_dim = 64;
@@ -617,7 +620,7 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
     }
     {
       init_offloaded_task_function(stmt, "reinit_lists");
-      call("gc_parallel_1", get_context(), snode_id);
+      call("gc_parallel_1", get_context(), snode_runtime_key);
       finalize_offloaded_task_function();
       current_task->grid_dim = 1;
       current_task->block_dim = 1;
@@ -626,7 +629,7 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
     }
     {
       init_offloaded_task_function(stmt, "zero_fill");
-      call("gc_parallel_2", get_context(), snode_id);
+      call("gc_parallel_2", get_context(), snode_runtime_key);
       finalize_offloaded_task_function();
       current_task->grid_dim = compile_config.saturating_grid_dim;
       current_task->block_dim = 64;

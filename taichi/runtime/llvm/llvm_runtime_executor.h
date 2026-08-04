@@ -130,6 +130,8 @@ class LlvmRuntimeExecutor {
   // derived from snode_metas. Default 0 keeps the legacy P-Sparse-Mem-1
   // behavior intact for callers that don't pass an override.
   void preallocate_runtime_memory(std::size_t override_size = 0);
+  void ensure_snode_tree_runtime_directory_capacity(std::size_t required);
+  void zero_device_memory(void *ptr, std::size_t size);
 
   /* ------------------------- */
   /* ---- Runtime Helpers ---- */
@@ -182,6 +184,15 @@ class LlvmRuntimeExecutor {
 
   std::unique_ptr<SNodeTreeBufferManager> snode_tree_buffer_manager_{nullptr};
   std::unordered_map<int, DeviceAllocation> snode_tree_allocs_;
+  struct ActiveSNodeTreeRuntimeState {
+    void *ptr{nullptr};
+    std::uint64_t generation{0};
+  };
+  DeviceAllocationUnique snode_tree_runtime_directory_alloc_{nullptr};
+  std::vector<void *> snode_tree_runtime_host_directory_;
+  std::size_t snode_tree_runtime_directory_capacity_{0};
+  std::unordered_map<int, ActiveSNodeTreeRuntimeState>
+      active_snode_tree_runtime_states_;
   DeviceAllocationUnique preallocated_runtime_objects_allocs_ = nullptr;
   DeviceAllocationUnique preallocated_runtime_memory_allocs_ = nullptr;
   std::unordered_map<DeviceAllocationId, DeviceAllocation>

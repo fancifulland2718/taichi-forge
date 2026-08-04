@@ -15,7 +15,7 @@ STRUCT_FIELD(DynamicMeta, chunk_size);
 
 inline Ptr Dynamic_allocate_zeroed_chunk(DynamicMeta *meta) {
   auto rt = meta->context->runtime;
-  auto alloc = rt->node_allocators[meta->snode_id];
+  auto alloc = snode_runtime_state(rt, meta)->node_allocator;
   auto chunk = alloc->allocate();
   std::memset(chunk, 0, sizeof(Ptr) + meta->chunk_size * meta->element_size);
   grid_memfence();
@@ -59,7 +59,7 @@ void Dynamic_deactivate(Ptr meta_, Ptr node_) {
       mark_element_lists_dirty_if_reuse((StructMeta *)meta);
       auto p_chunk_ptr = &node->ptr;
       auto rt = meta->context->runtime;
-      auto alloc = rt->node_allocators[meta->snode_id];
+      auto alloc = snode_runtime_state(rt, meta)->node_allocator;
       while (*p_chunk_ptr) {
         alloc->recycle(*p_chunk_ptr);
         p_chunk_ptr = (Ptr *)*p_chunk_ptr;
@@ -119,7 +119,7 @@ Ptr Dynamic_lookup_element(Ptr meta_, Ptr node_, int i) {
       chunk_start += chunk_size;
     }
   } else {
-    return (meta->context->runtime)->ambient_elements[meta->snode_id];
+    return snode_runtime_state(meta->context->runtime, meta)->ambient_element;
   }
 }
 

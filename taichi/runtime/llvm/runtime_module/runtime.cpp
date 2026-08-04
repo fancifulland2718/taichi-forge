@@ -26,6 +26,7 @@
 #include "taichi/inc/cuda_kernel_utils.inc.h"
 #include "taichi/math/arithmetic.h"
 #include "taichi/runtime/llvm/list_manager_constants.h"
+#include "taichi/runtime/llvm/snode_runtime_state.h"
 #include "taichi/runtime/llvm/sparse_tree_statistics.h"
 
 struct RuntimeContext;
@@ -308,6 +309,8 @@ STRUCT_FIELD(RuntimeContext, result_buffer)
 
 // Common Attributes
 struct StructMeta {
+  i32 snode_tree_id;
+  i32 runtime_local_id;
   i32 snode_id;
   std::size_t element_size;
   i64 max_num_elements;
@@ -328,6 +331,8 @@ struct StructMeta {
   RuntimeContext *context;
 };
 
+STRUCT_FIELD(StructMeta, snode_tree_id)
+STRUCT_FIELD(StructMeta, runtime_local_id)
 STRUCT_FIELD(StructMeta, snode_id)
 STRUCT_FIELD(StructMeta, element_size)
 STRUCT_FIELD(StructMeta, max_num_elements)
@@ -634,26 +639,22 @@ struct LLVMRuntime {
   host_vsnprintf_type host_vsnprintf;
   Ptr memory_pool;
 
-  Ptr roots[kMaxNumSnodeTreesLlvm];
-  size_t root_mem_sizes[kMaxNumSnodeTreesLlvm];
+  LlvmSNodeTreeRuntimeState **snode_tree_states;
+  i32 snode_tree_state_capacity;
 
   Ptr thread_pool;
   parallel_for_type parallel_for;
-  ListManager *element_lists[taichi_max_num_snodes];
-  i32 element_list_dirty_epoch[taichi_max_num_snodes];
-  i32 element_list_dirty_flag[taichi_max_num_snodes];
-  i32 element_list_version[taichi_max_num_snodes];
-  i32 element_list_clean_epoch[taichi_max_num_snodes];
-  i32 element_list_clean_parent_version[taichi_max_num_snodes];
-  NodeManager *node_allocators[taichi_max_num_snodes];
-  Ptr ambient_elements[taichi_max_num_snodes];
 #if !ARCH_cuda && !ARCH_amdgpu
-  ListManager *recycled_element_lists[taichi_max_num_snodes *
+  // These arrays are a bounded CPU performance cache, not an address space or
+  // correctness limit. Overflowing entries are released instead of rejected.
+  static constexpr i32 kRecycledSNodeCacheEntries = 4096;
+  ListManager *recycled_element_lists[kRecycledSNodeCacheEntries *
                                       kLlvmElementListChunkSizeClasses];
   i32 recycled_element_list_count;
-  NodeManager *recycled_node_allocators[taichi_max_num_snodes];
+  NodeManager *recycled_node_allocators[kRecycledSNodeCacheEntries];
   i32 recycled_node_allocator_count;
-  RecycledDirectAmbient recycled_direct_ambients[taichi_max_num_snodes];
+  RecycledDirectAmbient
+      recycled_direct_ambients[kRecycledSNodeCacheEntries];
   i32 recycled_direct_ambient_count;
 #endif
   Ptr temporaries;
@@ -732,21 +733,47 @@ struct LLVMRuntime {
   }
 };
 
+LlvmSNodeTreeRuntimeState *snode_tree_runtime_state(LLVMRuntime *runtime,
+                                                   int tree_id) {
+  taichi_assert_runtime(runtime, tree_id >= 0,
+                        "Negative LLVM SNodeTree runtime id.");
+  taichi_assert_runtime(runtime,
+                        tree_id < runtime->snode_tree_state_capacity,
+                        "LLVM SNodeTree runtime directory is too small.");
+  auto *tree = runtime->snode_tree_states[tree_id];
+  taichi_assert_runtime(runtime, tree != nullptr,
+                        "LLVM SNodeTree runtime state is unavailable.");
+  return tree;
+}
+
+LlvmSNodeRuntimeState *snode_runtime_state(LLVMRuntime *runtime,
+                                           int tree_id,
+                                           int local_id) {
+  auto *tree = snode_tree_runtime_state(runtime, tree_id);
+  taichi_assert_runtime(runtime, local_id >= 0 && local_id < tree->node_count,
+                        "LLVM tree-local SNode id is out of bounds.");
+  return &tree->nodes[local_id];
+}
+
+LlvmSNodeRuntimeState *snode_runtime_state(LLVMRuntime *runtime,
+                                           StructMeta *meta) {
+  return snode_runtime_state(runtime, meta->snode_tree_id,
+                             meta->runtime_local_id);
+}
+
+LlvmSNodeRuntimeState *snode_runtime_state(LLVMRuntime *runtime,
+                                           uint64 runtime_key) {
+  const int tree_id = static_cast<int>(runtime_key >> 32);
+  const int local_id = static_cast<int>(runtime_key & 0xffffffffu);
+  return snode_runtime_state(runtime, tree_id, local_id);
+}
+
 u1 runtime_has_error(LLVMRuntime *runtime) {
   return __atomic_load_n(&runtime->error_code,
                          std::memory_order::memory_order_acquire) != 0;
 }
 
 // TODO: are these necessary?
-STRUCT_FIELD_ARRAY(LLVMRuntime, element_lists);
-STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_dirty_epoch);
-STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_dirty_flag);
-STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_version);
-STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_clean_epoch);
-STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_clean_parent_version);
-STRUCT_FIELD_ARRAY(LLVMRuntime, node_allocators);
-STRUCT_FIELD_ARRAY(LLVMRuntime, roots);
-STRUCT_FIELD_ARRAY(LLVMRuntime, root_mem_sizes);
 STRUCT_FIELD(LLVMRuntime, temporaries);
 STRUCT_FIELD(LLVMRuntime, assert_failed);
 STRUCT_FIELD(LLVMRuntime, host_printf);
@@ -1022,19 +1049,21 @@ Ptr acquire_direct_ambient(LLVMRuntime *runtime, std::size_t node_size) {
 
 extern "C" void runtime_prepare_snode_tree_destroy(
     LLVMRuntime *runtime,
-    int snode_id,
+    int tree_id,
+    int local_id,
     std::size_t direct_ambient_bytes,
     int first_snode,
     int last_snode) {
 #if !ARCH_cuda && !ARCH_amdgpu
+  auto *state = snode_runtime_state(runtime, tree_id, local_id);
   if (first_snode != 0) {
     runtime->destroying_tree_sparse_payload_bytes = 0;
   }
   runtime->destroying_tree_sparse_payload_bytes += direct_ambient_bytes;
   runtime->destroying_tree_sparse_payload_bytes +=
-      list_manager_dynamic_storage_bytes(runtime->element_lists[snode_id]);
+      list_manager_dynamic_storage_bytes(state->element_list);
   runtime->destroying_tree_sparse_payload_bytes +=
-      node_manager_dynamic_storage_bytes(runtime->node_allocators[snode_id]);
+      node_manager_dynamic_storage_bytes(state->node_allocator);
 
   if (last_snode != 0) {
     const std::size_t tree_payload_bytes =
@@ -1048,7 +1077,8 @@ extern "C" void runtime_prepare_snode_tree_destroy(
   }
 #else
   (void)runtime;
-  (void)snode_id;
+  (void)tree_id;
+  (void)local_id;
   (void)direct_ambient_bytes;
   (void)first_snode;
   (void)last_snode;
@@ -1057,77 +1087,96 @@ extern "C" void runtime_prepare_snode_tree_destroy(
 
 extern "C" void runtime_destroy_snode_resources(
     LLVMRuntime *runtime,
-    int snode_id,
+    int tree_id,
+    int local_id,
     int has_element_list,
     int has_node_allocator,
     int has_direct_ambient,
     std::size_t direct_ambient_size) {
 #if !ARCH_cuda && !ARCH_amdgpu
+  auto *state = snode_runtime_state(runtime, tree_id, local_id);
   if (has_element_list) {
-    taichi_assert_runtime(
-        runtime,
-        runtime->recycled_element_list_count <
-            taichi_max_num_snodes * kLlvmElementListChunkSizeClasses,
-        "Recycled element-list capacity exceeded.");
-    ListManager *list = runtime->element_lists[snode_id];
+    ListManager *list = state->element_list;
     const std::size_t list_bytes =
         list_manager_dynamic_storage_bytes(list);
-    if (runtime->release_current_tree_sparse_payload) {
+    const bool cache_available =
+        runtime->recycled_element_list_count <
+        LLVMRuntime::kRecycledSNodeCacheEntries *
+            kLlvmElementListChunkSizeClasses;
+    if (runtime->release_current_tree_sparse_payload || !cache_available) {
       release_list_manager_dynamic_storage(runtime, list);
     } else {
       runtime->recycled_sparse_payload_bytes += list_bytes;
     }
-    reset_list_manager_for_reuse(list, false);
-    runtime->recycled_element_lists[runtime->recycled_element_list_count++] =
-        list;
-    runtime->element_lists[snode_id] = nullptr;
+    if (cache_available) {
+      reset_list_manager_for_reuse(list, false);
+      runtime
+          ->recycled_element_lists[runtime->recycled_element_list_count++] =
+          list;
+    } else {
+      runtime->host_releaser(runtime->memory_pool, sizeof(ListManager), list);
+    }
+    state->element_list = nullptr;
   }
 
   if (has_node_allocator) {
-    taichi_assert_runtime(
-        runtime,
-        runtime->recycled_node_allocator_count < taichi_max_num_snodes,
-        "Recycled NodeManager capacity exceeded.");
-    NodeManager *manager = runtime->node_allocators[snode_id];
+    NodeManager *manager = state->node_allocator;
     const std::size_t manager_bytes =
         node_manager_dynamic_storage_bytes(manager);
-    if (runtime->release_current_tree_sparse_payload) {
+    const bool cache_available =
+        runtime->recycled_node_allocator_count <
+        LLVMRuntime::kRecycledSNodeCacheEntries;
+    if (runtime->release_current_tree_sparse_payload || !cache_available) {
       release_list_manager_dynamic_storage(runtime, manager->free_list);
       release_list_manager_dynamic_storage(runtime, manager->recycled_list);
       release_list_manager_dynamic_storage(runtime, manager->data_list);
     } else {
       runtime->recycled_sparse_payload_bytes += manager_bytes;
     }
-    runtime->recycled_node_allocators[
-        runtime->recycled_node_allocator_count++] = manager;
-    runtime->node_allocators[snode_id] = nullptr;
+    if (cache_available) {
+      runtime->recycled_node_allocators[
+          runtime->recycled_node_allocator_count++] = manager;
+    } else {
+      runtime->host_releaser(runtime->memory_pool, sizeof(ListManager),
+                             manager->free_list);
+      runtime->host_releaser(runtime->memory_pool, sizeof(ListManager),
+                             manager->recycled_list);
+      runtime->host_releaser(runtime->memory_pool, sizeof(ListManager),
+                             manager->data_list);
+      runtime->host_releaser(runtime->memory_pool, sizeof(NodeManager),
+                             manager);
+    }
+    state->node_allocator = nullptr;
   }
 
   if (has_direct_ambient && direct_ambient_size > 0) {
     if (runtime->release_current_tree_sparse_payload) {
       runtime->host_releaser(runtime->memory_pool, direct_ambient_size,
-                             runtime->ambient_elements[snode_id]);
+                             state->ambient_element);
     } else {
-      taichi_assert_runtime(
-          runtime,
-          runtime->recycled_direct_ambient_count < taichi_max_num_snodes,
-          "Recycled ambient capacity exceeded.");
-      runtime->recycled_direct_ambients[
-          runtime->recycled_direct_ambient_count++] = {
-          runtime->ambient_elements[snode_id], direct_ambient_size};
-      runtime->recycled_sparse_payload_bytes += direct_ambient_size;
+      if (runtime->recycled_direct_ambient_count <
+          LLVMRuntime::kRecycledSNodeCacheEntries) {
+        runtime->recycled_direct_ambients[
+            runtime->recycled_direct_ambient_count++] = {
+            state->ambient_element, direct_ambient_size};
+        runtime->recycled_sparse_payload_bytes += direct_ambient_size;
+      } else {
+        runtime->host_releaser(runtime->memory_pool, direct_ambient_size,
+                               state->ambient_element);
+      }
     }
   }
 
-  runtime->ambient_elements[snode_id] = nullptr;
-  runtime->element_list_dirty_epoch[snode_id] = 1;
-  runtime->element_list_dirty_flag[snode_id] = 1;
-  runtime->element_list_version[snode_id] = 0;
-  runtime->element_list_clean_epoch[snode_id] = 0;
-  runtime->element_list_clean_parent_version[snode_id] = 0;
+  state->ambient_element = nullptr;
+  state->element_list_dirty_epoch = 1;
+  state->element_list_dirty_flag = 1;
+  state->element_list_version = 0;
+  state->element_list_clean_epoch = 0;
+  state->element_list_clean_parent_version = 0;
 #else
   (void)runtime;
-  (void)snode_id;
+  (void)tree_id;
+  (void)local_id;
   (void)has_element_list;
   (void)has_node_allocator;
   (void)has_direct_ambient;
@@ -1186,11 +1235,13 @@ void runtime_sparse_tree_statistics_reset(uint64 *result) {
 }
 
 void runtime_sparse_snode_statistics_collect(LLVMRuntime *runtime,
-                                             int snode_id,
+                                             int tree_id,
+                                             int local_id,
                                              int has_element_lists,
                                              uint64 *result) {
+  auto *state = snode_runtime_state(runtime, tree_id, local_id);
   if (has_element_lists != 0) {
-    ListManager *active_list = runtime->element_lists[snode_id];
+    ListManager *active_list = state->element_list;
     if (active_list != nullptr) {
       const uint64 chunk_bytes =
           uint64(active_list->max_num_elements_per_chunk) *
@@ -1206,7 +1257,7 @@ void runtime_sparse_snode_statistics_collect(LLVMRuntime *runtime,
     }
   }
 
-  NodeManager *allocator = runtime->node_allocators[snode_id];
+  NodeManager *allocator = state->node_allocator;
   if (allocator == nullptr) {
     return;
   }
@@ -1258,14 +1309,27 @@ void runtime_sparse_snode_statistics_collect(LLVMRuntime *runtime,
       uint64(in_use_elements) * uint64(data->element_size);
 }
 
-RUNTIME_STRUCT_FIELD_ARRAY(LLVMRuntime, node_allocators);
-RUNTIME_STRUCT_FIELD_ARRAY(LLVMRuntime, element_lists);
-RUNTIME_STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_dirty_epoch);
-RUNTIME_STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_dirty_flag);
-RUNTIME_STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_version);
-RUNTIME_STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_clean_epoch);
-RUNTIME_STRUCT_FIELD_ARRAY(LLVMRuntime, element_list_clean_parent_version);
 RUNTIME_STRUCT_FIELD(LLVMRuntime, total_requested_memory);
+
+Ptr LLVMRuntime_get_snode_tree_root(LLVMRuntime *runtime, int tree_id) {
+  return snode_tree_runtime_state(runtime, tree_id)->root;
+}
+
+void runtime_get_snode_node_allocator(LLVMRuntime *runtime,
+                                      int tree_id,
+                                      int local_id) {
+  runtime->set_result(taichi_result_buffer_runtime_query_id,
+                      snode_runtime_state(runtime, tree_id, local_id)
+                          ->node_allocator);
+}
+
+void runtime_get_snode_element_list(LLVMRuntime *runtime,
+                                    int tree_id,
+                                    int local_id) {
+  runtime->set_result(taichi_result_buffer_runtime_query_id,
+                      snode_runtime_state(runtime, tree_id, local_id)
+                          ->element_list);
+}
 
 void runtime_hash_probe_stats_reset(LLVMRuntime *runtime) {
   runtime->hash_insert_probe_count = 0;
@@ -1310,39 +1374,38 @@ void mark_element_lists_dirty_if_reuse(StructMeta *meta) {
     return;
   }
   auto runtime = meta->context->runtime;
-  auto snode_id = meta->snode_id;
-  if (runtime->element_list_dirty_flag[snode_id] != 0) {
+  auto *state = snode_runtime_state(runtime, meta);
+  if (state->element_list_dirty_flag != 0) {
     return;
   }
-  if (atomic_exchange_i32(&runtime->element_list_dirty_flag[snode_id], 1) ==
-      0) {
-    atomic_add_i32(&runtime->element_list_dirty_epoch[snode_id], 1);
+  if (atomic_exchange_i32(&state->element_list_dirty_flag, 1) == 0) {
+    atomic_add_i32(&state->element_list_dirty_epoch, 1);
   }
 }
 
 u1 element_list_is_current(LLVMRuntime *runtime,
                            StructMeta *parent,
                            StructMeta *child) {
-  auto child_id = child->snode_id;
-  auto parent_id = parent->snode_id;
-  return runtime->element_list_clean_epoch[child_id] ==
-             runtime->element_list_dirty_epoch[child_id] &&
-         runtime->element_list_clean_parent_version[child_id] ==
-             runtime->element_list_version[parent_id];
+  auto *child_state = snode_runtime_state(runtime, child);
+  auto *parent_state = snode_runtime_state(runtime, parent);
+  return child_state->element_list_clean_epoch ==
+             child_state->element_list_dirty_epoch &&
+         child_state->element_list_clean_parent_version ==
+             parent_state->element_list_version;
 }
 
 void mark_element_list_current(LLVMRuntime *runtime,
                                StructMeta *parent,
                                StructMeta *child) {
-  auto child_id = child->snode_id;
-  auto parent_id = parent->snode_id;
+  auto *child_state = snode_runtime_state(runtime, child);
+  auto *parent_state = snode_runtime_state(runtime, parent);
   if (block_idx() == 0 && thread_idx() == 0) {
-    runtime->element_list_clean_epoch[child_id] =
-        runtime->element_list_dirty_epoch[child_id];
-    runtime->element_list_clean_parent_version[child_id] =
-        runtime->element_list_version[parent_id];
-    runtime->element_list_dirty_flag[child_id] = 0;
-    atomic_add_i32(&runtime->element_list_version[child_id], 1);
+    child_state->element_list_clean_epoch =
+        child_state->element_list_dirty_epoch;
+    child_state->element_list_clean_parent_version =
+        parent_state->element_list_version;
+    child_state->element_list_dirty_flag = 0;
+    atomic_add_i32(&child_state->element_list_version, 1);
   }
 }
 
@@ -1524,6 +1587,8 @@ void runtime_initialize(
   runtime->host_printf = host_printf;
   runtime->host_vsnprintf = host_vsnprintf;
   runtime->memory_pool = memory_pool;
+  runtime->snode_tree_states = nullptr;
+  runtime->snode_tree_state_capacity = 0;
 
   runtime->total_requested_memory = 0;
   runtime->materializing_element_list_backing_chunk = nullptr;
@@ -1553,13 +1618,6 @@ void runtime_initialize(
   runtime->rand_states = (RandState *)runtime->allocate_aligned(
       runtime->runtime_objects_chunk,
       sizeof(RandState) * runtime->num_rand_states, taichi_page_size);
-  for (int i = 0; i < taichi_max_num_snodes; i++) {
-    runtime->element_list_dirty_epoch[i] = 1;
-    runtime->element_list_dirty_flag[i] = 1;
-    runtime->element_list_version[i] = 0;
-    runtime->element_list_clean_epoch[i] = 0;
-    runtime->element_list_clean_parent_version[i] = 0;
-  }
 }
 
 void runtime_initialize_memory(LLVMRuntime *runtime,
@@ -1621,69 +1679,108 @@ void runtime_cpu_parallel_listgen_workspace_statistics(LLVMRuntime *runtime,
 }
 #endif
 
+void runtime_set_snode_tree_directory(LLVMRuntime *runtime,
+                                      Ptr directory,
+                                      int capacity) {
+  taichi_assert_runtime(runtime, capacity >= 0,
+                        "Negative LLVM SNodeTree directory capacity.");
+  runtime->snode_tree_states =
+      reinterpret_cast<LlvmSNodeTreeRuntimeState **>(directory);
+  runtime->snode_tree_state_capacity = capacity;
+}
+
+void runtime_register_snode_tree_state(LLVMRuntime *runtime,
+                                       int tree_id,
+                                       Ptr state_ptr,
+                                       uint64 generation) {
+  taichi_assert_runtime(runtime, tree_id >= 0 &&
+                                     tree_id < runtime->snode_tree_state_capacity,
+                        "LLVM SNodeTree runtime directory is too small.");
+  auto *tree = reinterpret_cast<LlvmSNodeTreeRuntimeState *>(state_ptr);
+  taichi_assert_runtime(runtime, tree != nullptr &&
+                                     tree->generation == generation,
+                        "LLVM SNodeTree runtime generation mismatch.");
+  runtime->snode_tree_states[tree_id] = tree;
+}
+
+void runtime_unregister_snode_tree_state(LLVMRuntime *runtime,
+                                         int tree_id,
+                                         uint64 generation) {
+  auto *tree = snode_tree_runtime_state(runtime, tree_id);
+  taichi_assert_runtime(runtime, tree->generation == generation,
+                        "Stale LLVM SNodeTree runtime destroy request.");
+  runtime->snode_tree_states[tree_id] = nullptr;
+}
+
 void runtime_initialize_snode_element_list(LLVMRuntime *runtime,
-                                           const int snode_id,
+                                           int tree_id,
+                                           int local_id,
                                            std::size_t chunk_num_elements) {
-  taichi_assert_runtime(runtime, runtime->element_lists[snode_id] == nullptr,
+  auto *state = snode_runtime_state(runtime, tree_id, local_id);
+  taichi_assert_runtime(runtime, state->element_list == nullptr,
                         "SNode element list initialized twice.");
 #if !ARCH_cuda && !ARCH_amdgpu
-  runtime->element_lists[snode_id] =
-      acquire_element_list(runtime, chunk_num_elements);
+  state->element_list = acquire_element_list(runtime, chunk_num_elements);
 #else
-  runtime->element_lists[snode_id] = runtime->create<ListManager>(
+  state->element_list = runtime->create<ListManager>(
       runtime, sizeof(Element), chunk_num_elements);
 #endif
 }
 
-void runtime_reset_snode_slot(LLVMRuntime *runtime, const int snode_id) {
-  runtime->element_lists[snode_id] = nullptr;
-  runtime->node_allocators[snode_id] = nullptr;
-  runtime->ambient_elements[snode_id] = nullptr;
-  runtime->element_list_dirty_epoch[snode_id] = 1;
-  runtime->element_list_dirty_flag[snode_id] = 1;
-  runtime->element_list_version[snode_id] = 0;
-  runtime->element_list_clean_epoch[snode_id] = 0;
-  runtime->element_list_clean_parent_version[snode_id] = 0;
-}
-
 void runtime_initialize_snodes(LLVMRuntime *runtime,
                                std::size_t root_size,
-                               const int root_id,
-                               const int num_snodes,
-                               const int snode_tree_id,
+                               int root_local_id,
+                               int num_snodes,
+                               int snode_tree_id,
+                               uint64 generation,
                                std::size_t rounded_size,
                                Ptr ptr,
+                               Ptr state_ptr,
+                               std::size_t state_bytes,
                                std::size_t root_list_chunk_num_elements,
                                bool all_dense) {
-  // For Metal runtime, we have to make sure that both the beginning address
-  // and the size of the root buffer memory are aligned to page size.
-  runtime->root_mem_sizes[snode_tree_id] = rounded_size;
-  runtime->roots[snode_tree_id] = ptr;
-  // SNode ids are globally unique but one tree's ids need not be contiguous:
-  // the default root can gain children after another FieldsBuilder finalizes.
-  // The executor resets each actual id before entering this function.
-  (void)num_snodes;
+  (void)root_size;
+  std::size_t required_state_bytes = 0;
+  taichi_assert_runtime(
+      runtime,
+      llvm_snode_tree_runtime_state_bytes(num_snodes, &required_state_bytes) &&
+          required_state_bytes <= state_bytes,
+      "LLVM SNodeTree runtime state allocation is too small.");
+  auto *tree = reinterpret_cast<LlvmSNodeTreeRuntimeState *>(state_ptr);
+  tree->root = ptr;
+  tree->root_mem_size = rounded_size;
+  tree->nodes = reinterpret_cast<LlvmSNodeRuntimeState *>(
+      state_ptr + llvm_snode_tree_runtime_nodes_offset());
+  tree->node_count = num_snodes;
+  tree->reserved = 0;
+  tree->generation = generation;
+  for (int i = 0; i < num_snodes; ++i) {
+    tree->nodes[i] = LlvmSNodeRuntimeState{};
+  }
+  runtime_register_snode_tree_state(runtime, snode_tree_id, state_ptr,
+                                    generation);
+
   // runtime->request_allocate_aligned ready to use
   // initialize the root node element list
   if (all_dense) {
     return;
   }
-  runtime_initialize_snode_element_list(runtime, root_id,
+  runtime_initialize_snode_element_list(runtime, snode_tree_id, root_local_id,
                                         root_list_chunk_num_elements);
+  auto *root_state = snode_runtime_state(runtime, snode_tree_id, root_local_id);
   Element elem;
   elem.loop_bounds[0] = 0;
   elem.loop_bounds[1] = 1;
-  elem.element = runtime->roots[snode_tree_id];
+  elem.element = tree->root;
   for (int i = 0; i < taichi_max_num_indices; i++) {
     elem.pcoord.val[i] = 0;
   }
 
-  runtime->element_lists[root_id]->append(&elem);
-  runtime->element_list_clean_epoch[root_id] =
-      runtime->element_list_dirty_epoch[root_id];
-  runtime->element_list_dirty_flag[root_id] = 0;
-  runtime->element_list_clean_parent_version[root_id] = 0;
-  runtime->element_list_version[root_id] = 1;
+  root_state->element_list->append(&elem);
+  root_state->element_list_clean_epoch = root_state->element_list_dirty_epoch;
+  root_state->element_list_dirty_flag = 0;
+  root_state->element_list_clean_parent_version = 0;
+  root_state->element_list_version = 1;
 }
 
 void LLVMRuntime_initialize_thread_pool(LLVMRuntime *runtime,
@@ -1694,13 +1791,14 @@ void LLVMRuntime_initialize_thread_pool(LLVMRuntime *runtime,
 }
 
 void runtime_NodeAllocator_initialize(LLVMRuntime *runtime,
-                                      int snode_id,
+                                      int tree_id,
+                                      int local_id,
                                       std::size_t node_size) {
+  auto *state = snode_runtime_state(runtime, tree_id, local_id);
 #if !ARCH_cuda && !ARCH_amdgpu
-  runtime->node_allocators[snode_id] =
-      acquire_node_manager(runtime, node_size, 1024 * 16);
+  state->node_allocator = acquire_node_manager(runtime, node_size, 1024 * 16);
 #else
-  runtime->node_allocators[snode_id] =
+  state->node_allocator =
       runtime->create<NodeManager>(runtime, node_size, 1024 * 16);
 #endif
 }
@@ -1711,21 +1809,25 @@ void runtime_NodeAllocator_initialize(LLVMRuntime *runtime,
 // 112.5 MiB → 14.7 MiB for MPM pointer). The NodeManager ctor
 // still applies its 128 MiB ceiling halving as a safety clamp.
 void runtime_NodeAllocator_initialize_ex(LLVMRuntime *runtime,
-                                          int snode_id,
+                                          int tree_id,
+                                          int local_id,
                                           std::size_t node_size,
                                           int chunk_num_elements) {
+  auto *state = snode_runtime_state(runtime, tree_id, local_id);
 #if !ARCH_cuda && !ARCH_amdgpu
-  runtime->node_allocators[snode_id] =
+  state->node_allocator =
       acquire_node_manager(runtime, node_size, chunk_num_elements);
 #else
-  runtime->node_allocators[snode_id] =
+  state->node_allocator =
       runtime->create<NodeManager>(runtime, node_size, chunk_num_elements);
 #endif
 }
 
 void runtime_allocate_ambient_direct(LLVMRuntime *runtime,
-                                     int snode_id,
+                                     int tree_id,
+                                     int local_id,
                                      std::size_t node_size) {
+  auto *state = snode_runtime_state(runtime, tree_id, local_id);
 #if !ARCH_cuda && !ARCH_amdgpu
   auto ambient = acquire_direct_ambient(runtime, node_size);
 #else
@@ -1733,7 +1835,7 @@ void runtime_allocate_ambient_direct(LLVMRuntime *runtime,
                                           node_size, 8, true /*request*/);
 #endif
   std::memset(ambient, 0, node_size);
-  runtime->ambient_elements[snode_id] = ambient;
+  state->ambient_element = ambient;
 }
 
 // Phase 1 (2026-05): assign a dedicated bump region (carved from the global
@@ -1742,16 +1844,20 @@ void runtime_allocate_ambient_direct(LLVMRuntime *runtime,
 // will route their data chunk allocations to this region instead of
 // runtime->runtime_memory_chunk.
 void runtime_NodeAllocator_set_dedicated_pool(LLVMRuntime *runtime,
-                                              int snode_id,
+                                              int tree_id,
+                                              int local_id,
                                               Ptr ptr,
                                               std::size_t size) {
-  runtime->node_allocators[snode_id]->set_dedicated_pool(ptr, size);
+  snode_runtime_state(runtime, tree_id, local_id)
+      ->node_allocator->set_dedicated_pool(ptr, size);
 }
 
 void runtime_NodeAllocator_set_deterministic_capacity(LLVMRuntime *runtime,
-                                                      int snode_id,
+                                                      int tree_id,
+                                                      int local_id,
                                                       int capacity) {
-  auto allocator = runtime->node_allocators[snode_id];
+  auto allocator =
+      snode_runtime_state(runtime, tree_id, local_id)->node_allocator;
   allocator->deterministic_capacity = capacity;
   allocator->deterministic_active = 0;
   allocator->deterministic_peak = 0;
@@ -1775,10 +1881,12 @@ void runtime_element_lists_prepare_backing_pool(LLVMRuntime *runtime) {
 }
 
 void runtime_element_list_set_backing_pool(LLVMRuntime *runtime,
-                                           int snode_id) {
+                                           int tree_id,
+                                           int local_id) {
+  auto *state = snode_runtime_state(runtime, tree_id, local_id);
   if (runtime->materializing_element_list_backing_chunk != nullptr &&
-      runtime->element_lists[snode_id] != nullptr) {
-    runtime->element_lists[snode_id]->backing_chunk =
+      state->element_list != nullptr) {
+    state->element_list->backing_chunk =
         runtime->materializing_element_list_backing_chunk;
   }
 }
@@ -2098,7 +2206,7 @@ void clear_list(LLVMRuntime *runtime, StructMeta *parent, StructMeta *child) {
   if (child->listgen_reuse && element_list_is_current(runtime, parent, child)) {
     return;
   }
-  auto child_list = runtime->element_lists[child->snode_id];
+  auto child_list = snode_runtime_state(runtime, child)->element_list;
   child_list->clear();
 }
 
@@ -2141,8 +2249,8 @@ void element_listgen_root_impl(LLVMRuntime *runtime,
   }
   // If there's just one element in the parent list, we need to use the blocks
   // (instead of threads) to split the parent container
-  auto parent_list = runtime->element_lists[parent->snode_id];
-  auto child_list = runtime->element_lists[child->snode_id];
+  auto parent_list = snode_runtime_state(runtime, parent)->element_list;
+  auto child_list = snode_runtime_state(runtime, child)->element_list;
   int child_list_size_before = 0;
   if constexpr (RecordWork) {
     child_list_size_before = child_list->size();
@@ -2286,7 +2394,7 @@ bool element_listgen_nonroot_parallel(LLVMRuntime *runtime,
                                       StructMeta *child,
                                       uint64 *scanned_elements,
                                       uint64 *emitted_elements) {
-  auto parent_list = runtime->element_lists[parent->snode_id];
+  auto parent_list = snode_runtime_state(runtime, parent)->element_list;
   const i32 num_parent_elements = parent_list->size();
   if (runtime->parallel_for == nullptr || runtime->thread_pool == nullptr ||
       runtime->num_rand_states <= 1 ||
@@ -2323,13 +2431,13 @@ bool element_listgen_nonroot_parallel(LLVMRuntime *runtime,
   }
   output_offsets->resize(static_cast<i32>(num_offsets));
   output_offsets->get<i32>(0) =
-      runtime->element_lists[child->snode_id]->size();
+      snode_runtime_state(runtime, child)->element_list->size();
 
   CpuParallelListgenContext context{
       parent,
       child,
       parent_list,
-      runtime->element_lists[child->snode_id],
+      snode_runtime_state(runtime, child)->element_list,
       output_offsets,
   };
   runtime->parallel_for(runtime->thread_pool, num_parent_elements,
@@ -2385,9 +2493,9 @@ void element_listgen_nonroot_impl(LLVMRuntime *runtime,
     record_sparse_listgen_work<RecordWork>(runtime, 0, 0, true);
     return;
   }
-  auto parent_list = runtime->element_lists[parent->snode_id];
+  auto parent_list = snode_runtime_state(runtime, parent)->element_list;
   int num_parent_elements = parent_list->size();
-  auto child_list = runtime->element_lists[child->snode_id];
+  auto child_list = snode_runtime_state(runtime, child)->element_list;
   int child_list_size_before = 0;
   uint64 scanned_elements = 0;
   if constexpr (RecordWork) {
@@ -2544,13 +2652,14 @@ void cpu_struct_for_block_helper(void *ctx_, int thread_id, int i) {
 }
 
 void parallel_struct_for(RuntimeContext *context,
-                         int snode_id,
+                         uint64 snode_runtime_key,
                          int element_size,
                          int element_split,
                          BlockTask *task,
                          std::size_t tls_buffer_size,
                          int num_threads) {
-  auto list = (context->runtime)->element_lists[snode_id];
+  auto list =
+      snode_runtime_state(context->runtime, snode_runtime_key)->element_list;
   auto list_tail = list->size();
 #if ARCH_cuda || ARCH_amdgpu
   int i = block_idx();
@@ -2985,8 +3094,8 @@ Ptr ListManager::allocate() {
   return get_element_ptr(i);
 }
 
-void node_gc(LLVMRuntime *runtime, int snode_id) {
-  runtime->node_allocators[snode_id]->gc_serial();
+void node_gc(LLVMRuntime *runtime, uint64 snode_runtime_key) {
+  snode_runtime_state(runtime, snode_runtime_key)->node_allocator->gc_serial();
 }
 
 void gc_parallel_impl_0(RuntimeContext *context, NodeManager *allocator) {
@@ -3015,9 +3124,11 @@ void gc_parallel_impl_0(RuntimeContext *context, NodeManager *allocator) {
   }
 }
 
-void gc_parallel_0(RuntimeContext *context, int snode_id) {
+void gc_parallel_0(RuntimeContext *context, uint64 snode_runtime_key) {
   LLVMRuntime *runtime = context->runtime;
-  gc_parallel_impl_0(context, runtime->node_allocators[snode_id]);
+  gc_parallel_impl_0(
+      context,
+      snode_runtime_state(runtime, snode_runtime_key)->node_allocator);
 }
 
 void gc_parallel_impl_1(NodeManager *allocator) {
@@ -3032,9 +3143,10 @@ void gc_parallel_impl_1(NodeManager *allocator) {
   allocator->recycled_list->clear();
 }
 
-void gc_parallel_1(RuntimeContext *context, int snode_id) {
+void gc_parallel_1(RuntimeContext *context, uint64 snode_runtime_key) {
   LLVMRuntime *runtime = context->runtime;
-  gc_parallel_impl_1(runtime->node_allocators[snode_id]);
+  gc_parallel_impl_1(
+      snode_runtime_state(runtime, snode_runtime_key)->node_allocator);
 }
 
 void gc_parallel_impl_2(NodeManager *allocator) {
@@ -3076,9 +3188,10 @@ void gc_parallel_impl_2(NodeManager *allocator) {
   }
 }
 
-void gc_parallel_2(RuntimeContext *context, int snode_id) {
+void gc_parallel_2(RuntimeContext *context, uint64 snode_runtime_key) {
   LLVMRuntime *runtime = context->runtime;
-  gc_parallel_impl_2(runtime->node_allocators[snode_id]);
+  gc_parallel_impl_2(
+      snode_runtime_state(runtime, snode_runtime_key)->node_allocator);
 }
 }
 

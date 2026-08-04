@@ -45,3 +45,55 @@ def test_global_snode_ids_above_legacy_1024_limit():
 
     copy()
     assert (dst.to_numpy() == [i * 3 + 1 for i in range(16)]).all()
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_single_tree_above_legacy_4096_snode_limit_and_reuse():
+    builder = ti.FieldsBuilder()
+    storage = builder.dense(ti.i, 1)
+    last = None
+    # root + dense + 4095 places = 4097 runtime-addressable SNodes.
+    for _ in range(4095):
+        last = ti.field(ti.i32)
+        storage.place(last)
+    tree = builder.finalize()
+
+    last[0] = 73
+    assert last[0] == 73
+    assert last.snode.ptr.id >= 4096
+
+    old_tree_id = tree.id
+    tree.destroy()
+
+    # Global diagnostic ids keep increasing, while the runtime directory and
+    # per-tree local state safely reuse the destroyed tree slot.
+    replacement_builder = ti.FieldsBuilder()
+    replacement = ti.field(ti.i32)
+    replacement_builder.dense(ti.i, 1).place(replacement)
+    replacement_tree = replacement_builder.finalize()
+    assert replacement_tree.id == old_tree_id
+    assert replacement.snode.ptr.id > last.snode.ptr.id
+    replacement[0] = 91
+    assert replacement[0] == 91
+    replacement_tree.destroy()
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_concurrent_snode_trees_above_legacy_512_limit():
+    trees = []
+    fields = []
+    try:
+        for _ in range(513):
+            builder = ti.FieldsBuilder()
+            field = ti.field(ti.i32)
+            builder.dense(ti.i, 1).place(field)
+            trees.append(builder.finalize())
+            fields.append(field)
+
+        fields[0][0] = 17
+        fields[-1][0] = 29
+        assert fields[0][0] == 17
+        assert fields[-1][0] == 29
+    finally:
+        for tree in reversed(trees):
+            tree.destroy()

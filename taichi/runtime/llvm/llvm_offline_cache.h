@@ -67,6 +67,7 @@ struct LlvmOfflineCache {
     struct SNodeCacheData {
       int id{0};
       int parent_id{-1};
+      int runtime_local_id{-1};
       SNodeType type = SNodeType::undefined;
       size_t cell_size_bytes{0};
       size_t chunk_size{0};
@@ -84,6 +85,7 @@ struct LlvmOfflineCache {
 
       TI_IO_DEF(id,
                 parent_id,
+                runtime_local_id,
                 type,
                 cell_size_bytes,
                 chunk_size,
@@ -94,11 +96,18 @@ struct LlvmOfflineCache {
     };
 
     int tree_id{0};
+    std::uint64_t tree_generation{1};
     int root_id{0};
+    int root_runtime_local_id{0};
     size_t root_size{0};
     std::vector<SNodeCacheData> snode_metas;
 
-    TI_IO_DEF(tree_id, root_id, root_size, snode_metas);
+    TI_IO_DEF(tree_id,
+              tree_generation,
+              root_id,
+              root_runtime_local_id,
+              root_size,
+              snode_metas);
 
     // TODO(zhanlue): refactor llvm::Modules
     //

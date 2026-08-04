@@ -96,6 +96,15 @@ SNodeTree::SNodeTree(int id,
     : id_(id), generation_(generation), root_(std::move(root)) {
   TI_ASSERT(generation_ != 0);
   check_tree_validity(*root_);
+  assign_runtime_local_ids(*root_);
+}
+
+void SNodeTree::assign_runtime_local_ids(SNode &node) {
+  TI_ASSERT(node.runtime_local_id < 0);
+  node.runtime_local_id = num_snodes_++;
+  for (auto &ch : node.ch) {
+    assign_runtime_local_ids(*ch);
+  }
 }
 
 void SNodeTree::check_tree_validity(SNode &node) {

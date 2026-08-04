@@ -9,13 +9,6 @@ constexpr int taichi_max_num_args = 8;
 // TODO: refine argument passing
 constexpr int taichi_max_num_args_total = 64;
 constexpr int taichi_max_num_args_extra = 32;
-// SNode ids are globally unique within one Program, including across
-// separately materialized SNode trees. Production applications can therefore
-// exceed the legacy 1024-id ceiling without any individual tree being large.
-// LLVM runtimes index several fixed tables by this global id, so the capacity
-// must cover the whole Program rather than one tree.
-constexpr int taichi_max_num_snodes = 4096;
-constexpr int kMaxNumSnodeTreesLlvm = 512;
 constexpr int taichi_max_gpu_block_dim = 1024;
 constexpr std::size_t taichi_global_tmp_buffer_size = 1024 * 1024;
 constexpr int taichi_max_num_mem_requests = 1024 * 64;

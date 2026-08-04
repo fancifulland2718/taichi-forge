@@ -526,6 +526,10 @@ void TaskCodeGenLLVM::emit_struct_meta_base(const std::string &name,
         StructCompilerLLVM::get_llvm_element_type(module.get(), snode);
     element_size = tlctx->get_type_size(element_ty);
   }
+  common.set("snode_tree_id",
+             tlctx->get_constant(snode->get_snode_tree_id()));
+  common.set("runtime_local_id",
+             tlctx->get_constant(snode->runtime_local_id));
   common.set("snode_id", tlctx->get_constant(snode->id));
   common.set("element_size", tlctx->get_constant((uint64)element_size));
   common.set("max_num_elements",
@@ -1440,7 +1444,10 @@ void TaskCodeGenLLVM::emit_gc(OffloadedStmt *stmt) {
       return;  // skip GC — slots already cleared, allocator state is idle
     }
   }
-  call("node_gc", get_runtime(), tlctx->get_constant(snode->id));
+  const uint64 runtime_key =
+      (uint64(static_cast<uint32>(snode->get_snode_tree_id())) << 32) |
+      uint64(static_cast<uint32>(snode->runtime_local_id));
+  call("node_gc", get_runtime(), tlctx->get_constant(runtime_key));
 }
 
 void TaskCodeGenLLVM::create_increment(llvm::Value *ptr, llvm::Value *value) {
@@ -2764,7 +2771,10 @@ void TaskCodeGenLLVM::create_offload_struct_for(OffloadedStmt *stmt) {
     struct_for_tls_sizes.insert(stmt->tls_size);
   }
   // Loop over nodes in the element list, in parallel
-  call(struct_for_func, get_context(), tlctx->get_constant(leaf_block->id),
+  const uint64 runtime_key =
+      (uint64(static_cast<uint32>(leaf_block->get_snode_tree_id())) << 32) |
+      uint64(static_cast<uint32>(leaf_block->runtime_local_id));
+  call(struct_for_func, get_context(), tlctx->get_constant(runtime_key),
        tlctx->get_constant(list_element_size), tlctx->get_constant(num_splits),
        body, tlctx->get_constant(stmt->tls_size),
        tlctx->get_constant(stmt->num_cpu_threads));
@@ -3160,7 +3170,7 @@ llvm::IntegerType *TaskCodeGenLLVM::get_integer_type(int bits) {
 }
 
 llvm::Value *TaskCodeGenLLVM::get_root(int snode_tree_id) {
-  return call("LLVMRuntime_get_roots", get_runtime(),
+  return call("LLVMRuntime_get_snode_tree_root", get_runtime(),
               tlctx->get_constant(snode_tree_id));
 }
 

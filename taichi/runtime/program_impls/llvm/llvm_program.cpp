@@ -61,7 +61,7 @@ void LlvmProgramImpl::compile_snode_tree_types(SNodeTree *tree) {
   int root_id = tree->root()->id;
 
   // Add compiled result to Cache
-  cache_field(snode_tree_id, root_id, *struct_compiler);
+  cache_field(snode_tree_id, tree->generation(), root_id, *struct_compiler);
 }
 
 void LlvmProgramImpl::materialize_snode_tree(SNodeTree *tree,
@@ -95,6 +95,7 @@ std::unique_ptr<AotModuleBuilder> LlvmProgramImpl::make_aot_module_builder(
 }
 
 void LlvmProgramImpl::cache_field(int snode_tree_id,
+                                  std::uint64_t tree_generation,
                                   int root_id,
                                   const StructCompiler &struct_compiler) {
   if (cache_data_->fields.find(snode_tree_id) != cache_data_->fields.end()) {
@@ -104,15 +105,22 @@ void LlvmProgramImpl::cache_field(int snode_tree_id,
 
   LlvmOfflineCache::FieldCacheData ret;
   ret.tree_id = snode_tree_id;
+  ret.tree_generation = tree_generation;
   ret.root_id = root_id;
   ret.root_size = struct_compiler.root_size;
 
   const auto &snodes = struct_compiler.snodes;
+  const auto root = std::find_if(
+      snodes.begin(), snodes.end(),
+      [root_id](const SNode *snode) { return snode->id == root_id; });
+  TI_ASSERT(root != snodes.end());
+  ret.root_runtime_local_id = (*root)->runtime_local_id;
   for (size_t i = 0; i < snodes.size(); i++) {
     LlvmOfflineCache::FieldCacheData::SNodeCacheData snode_cache_data;
     snode_cache_data.id = snodes[i]->id;
     snode_cache_data.parent_id =
         snodes[i]->parent == nullptr ? -1 : snodes[i]->parent->id;
+    snode_cache_data.runtime_local_id = snodes[i]->runtime_local_id;
     snode_cache_data.type = snodes[i]->type;
     snode_cache_data.cell_size_bytes = snodes[i]->cell_size_bytes;
     snode_cache_data.chunk_size = snodes[i]->chunk_size;

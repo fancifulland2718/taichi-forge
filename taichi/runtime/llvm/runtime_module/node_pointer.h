@@ -75,7 +75,7 @@ void Pointer_activate(Ptr meta_, Ptr node, int i) {
     }
     u32 mask = cuda_active_mask();
     auto rt = meta->context->runtime;
-    auto nm = rt->node_allocators[meta->snode_id];
+    auto nm = snode_runtime_state(rt, meta)->node_allocator;
     // CS-2: deterministic pool carved from the TAIL of the dedicated chunk.
     // The head is bumped by ListManager data allocations; the tail is stable.
     // reserve = max_num_elements × element_size bytes at the end.
@@ -113,7 +113,7 @@ void Pointer_activate(Ptr meta_, Ptr node, int i) {
           lock,
           [&] {
             auto rt = meta->context->runtime;
-            auto alloc = rt->node_allocators[meta->snode_id];
+            auto alloc = snode_runtime_state(rt, meta)->node_allocator;
             auto allocated = (u64)alloc->allocate();
             std::memset((Ptr)allocated, 0, meta->element_size);
             grid_memfence();
@@ -142,7 +142,7 @@ void Pointer_deactivate(Ptr meta, Ptr node, int i) {
       auto previous = atomic_exchange_u64((u64 *)&data_ptr, 0);
       if (previous != 0 && previous != pointer_slot_busy) {
         auto rt = smeta->context->runtime;
-        auto nm = rt->node_allocators[smeta->snode_id];
+        auto nm = snode_runtime_state(rt, smeta)->node_allocator;
         atomic_add_i32(&nm->deterministic_active, -1);
         mark_element_lists_dirty_if_reuse(smeta);
       }
@@ -152,7 +152,7 @@ void Pointer_deactivate(Ptr meta, Ptr node, int i) {
     locked_task(lock, [&] {
       if (data_ptr != nullptr) {
         auto rt = smeta->context->runtime;
-        auto alloc = rt->node_allocators[smeta->snode_id];
+        auto alloc = snode_runtime_state(rt, smeta)->node_allocator;
         alloc->recycle(data_ptr);
         data_ptr = nullptr;
         mark_element_lists_dirty_if_reuse(smeta);
@@ -173,7 +173,7 @@ void Pointer_reset_all(Ptr meta, Ptr node) {
   if (block_idx() == 0 && thread_idx() == 0) {
     mark_element_lists_dirty_if_reuse(smeta);
     auto rt = smeta->context->runtime;
-    rt->node_allocators[smeta->snode_id]->deterministic_active = 0;
+    snode_runtime_state(rt, smeta)->node_allocator->deterministic_active = 0;
   }
   int linear = block_idx() * block_dim() + thread_idx();
   for (int i = linear; i < num_elements; i += block_dim() * grid_dim()) {
@@ -193,7 +193,8 @@ Ptr Pointer_lookup_element(Ptr meta, Ptr node, int i) {
   if (data_ptr == nullptr) {
     auto smeta = (StructMeta *)meta;
     auto context = smeta->context;
-    data_ptr = (context->runtime)->ambient_elements[smeta->snode_id];
+    data_ptr =
+        snode_runtime_state(context->runtime, smeta)->ambient_element;
   }
   return data_ptr;
 }

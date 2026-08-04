@@ -184,7 +184,8 @@ inline Ptr Hash_resolve_payload(HashMeta *meta,
         atomic_exchange_i32(slot_ptr, 0);
         taichi_assert_runtime(meta->context->runtime, false,
                               "Hash SNode compact child pool overflow.");
-        return meta->context->runtime->ambient_elements[meta->snode_id];
+        return snode_runtime_state(meta->context->runtime, meta)
+            ->ambient_element;
       }
       auto child = Hash_compact_child_pool_element(meta, node, slot);
       std::memset(child, 0, meta->compact_child_pool_stride);
@@ -198,7 +199,7 @@ inline Ptr Hash_resolve_payload(HashMeta *meta,
     }
   }
   if (slot_plus_one == 0) {
-    return meta->context->runtime->ambient_elements[meta->snode_id];
+    return snode_runtime_state(meta->context->runtime, meta)->ambient_element;
   }
   return Hash_compact_child_pool_element(meta, node, slot_plus_one - 1);
 }
@@ -348,7 +349,7 @@ Ptr Hash_lookup_element(Ptr meta_, Ptr node, int i) {
   auto meta = (HashMeta *)meta_;
   auto bucket = Hash_find_bucket(meta, node, i);
   if (bucket < 0) {
-    return meta->context->runtime->ambient_elements[meta->snode_id];
+    return snode_runtime_state(meta->context->runtime, meta)->ambient_element;
   }
   return Hash_resolve_payload(meta, node, bucket, /*activate_child=*/false);
 }
@@ -359,7 +360,7 @@ Ptr Hash_lookup_or_activate_element(Ptr meta_, Ptr node, int i) {
   if (bucket < 0) {
     taichi_assert_runtime(meta->context->runtime, false,
                           "Hash SNode table overflow.");
-    return meta->context->runtime->ambient_elements[meta->snode_id];
+    return snode_runtime_state(meta->context->runtime, meta)->ambient_element;
   }
   return Hash_resolve_payload(meta, node, bucket, /*activate_child=*/true);
 }
@@ -405,8 +406,8 @@ void element_listgen_root_hash_impl(LLVMRuntime *runtime,
     return;
   }
   auto child = (HashMeta *)child_;
-  auto parent_list = runtime->element_lists[parent->snode_id];
-  auto child_list = runtime->element_lists[child->snode_id];
+  auto parent_list = snode_runtime_state(runtime, parent)->element_list;
+  auto child_list = snode_runtime_state(runtime, child)->element_list;
   int child_list_size_before = 0;
   if constexpr (RecordWork) {
     child_list_size_before = child_list->size();
@@ -485,9 +486,9 @@ void element_listgen_nonroot_hash_impl(LLVMRuntime *runtime,
     return;
   }
   auto child = (HashMeta *)child_;
-  auto parent_list = runtime->element_lists[parent->snode_id];
+  auto parent_list = snode_runtime_state(runtime, parent)->element_list;
   int num_parent_elements = parent_list->size();
-  auto child_list = runtime->element_lists[child->snode_id];
+  auto child_list = snode_runtime_state(runtime, child)->element_list;
   int child_list_size_before = 0;
   uint64 scanned_elements = 0;
   if constexpr (RecordWork) {
@@ -595,9 +596,9 @@ void element_listgen_nonroot_hash_parent_hash_impl(LLVMRuntime *runtime,
     return;
   }
   auto child = (HashMeta *)child_;
-  auto parent_list = runtime->element_lists[parent->snode_id];
+  auto parent_list = snode_runtime_state(runtime, parent)->element_list;
   int num_parent_elements = parent_list->size();
-  auto child_list = runtime->element_lists[child->snode_id];
+  auto child_list = snode_runtime_state(runtime, child)->element_list;
   int child_list_size_before = 0;
   uint64 scanned_elements = 0;
   if constexpr (RecordWork) {

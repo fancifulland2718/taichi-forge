@@ -3,6 +3,7 @@
 #include "taichi/rhi/common/host_memory_pool.h"
 #include "taichi/runtime/llvm/list_manager_constants.h"
 #include "taichi/runtime/llvm/llvm_offline_cache.h"
+#include "taichi/runtime/llvm/snode_runtime_state.h"
 #include "taichi/runtime/llvm/sparse_tree_statistics.h"
 
 #include <algorithm>
@@ -306,9 +307,9 @@ std::size_t LlvmRuntimeExecutor::get_snode_num_dynamically_allocated(
     uint64 *result_buffer) {
   TI_ASSERT(arch_uses_llvm(config_.arch));
 
-  auto node_allocator =
-      runtime_query<void *>("LLVMRuntime_get_node_allocators", result_buffer,
-                            llvm_runtime_, snode->id);
+  auto node_allocator = runtime_query<void *>(
+      "get_snode_node_allocator", result_buffer, snode->get_snode_tree_id(),
+      snode->runtime_local_id);
   auto deterministic_capacity = runtime_query<int32>(
       "NodeManager_get_deterministic_capacity", result_buffer,
       node_allocator);
@@ -373,8 +374,9 @@ LlvmRuntimeExecutor::get_snode_tree_memory_statistics(
   runtime_jit->call<uint64 *>("runtime_sparse_tree_statistics_reset",
                               result_buffer);
   for (SNode *snode : snodes) {
-    runtime_jit->call<void *, int, int, uint64 *>(
-        "runtime_sparse_snode_statistics_collect", llvm_runtime_, snode->id,
+    runtime_jit->call<void *, int, int, int, uint64 *>(
+        "runtime_sparse_snode_statistics_collect", llvm_runtime_,
+        snode->get_snode_tree_id(), snode->runtime_local_id,
         all_dense ? 0 : 1, result_buffer);
   }
   synchronize();
@@ -532,9 +534,9 @@ void LlvmRuntimeExecutor::print_memory_profiler_info(
   // TODO: is there a way to set locale only locally in this function?
 
   std::function<void(SNode *, int)> visit = [&](SNode *snode, int depth) {
-    auto element_list =
-        runtime_query<void *>("LLVMRuntime_get_element_lists", result_buffer,
-                              llvm_runtime_, snode->id);
+    auto element_list = runtime_query<void *>(
+        "get_snode_element_list", result_buffer, snode->get_snode_tree_id(),
+        snode->runtime_local_id);
 
     if (snode->type != SNodeType::place) {
       fmt::print("SNode {:10}\n", snode->get_node_type_name_hinted());
@@ -543,9 +545,9 @@ void LlvmRuntimeExecutor::print_memory_profiler_info(
         fmt::print("  active element list:");
         print_list_manager_info(element_list, result_buffer);
 
-        auto node_allocator =
-            runtime_query<void *>("LLVMRuntime_get_node_allocators",
-                                  result_buffer, llvm_runtime_, snode->id);
+        auto node_allocator = runtime_query<void *>(
+            "get_snode_node_allocator", result_buffer,
+            snode->get_snode_tree_id(), snode->runtime_local_id);
 
         if (node_allocator) {
           auto free_list = runtime_query<void *>("NodeManager_get_free_list",
@@ -606,20 +608,38 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
   const auto snode_metas = field_cache_data.snode_metas;
   const int tree_id = field_cache_data.tree_id;
   const int root_id = field_cache_data.root_id;
+  const int root_runtime_local_id =
+      field_cache_data.root_runtime_local_id;
+  const std::uint64_t tree_generation = field_cache_data.tree_generation;
 
-  TI_ERROR_IF(tree_id < 0 || tree_id >= kMaxNumSnodeTreesLlvm,
-              "LLVM SNode tree id {} exceeds the runtime capacity of {}.",
-              tree_id, kMaxNumSnodeTreesLlvm);
-  TI_ERROR_IF(root_id < 0 || root_id >= taichi_max_num_snodes,
-              "LLVM root SNode id {} exceeds the runtime capacity of {}.",
-              root_id, taichi_max_num_snodes);
+  TI_ERROR_IF(tree_id < 0, "LLVM SNode tree id must be non-negative.");
+  TI_ERROR_IF(tree_generation == 0,
+              "LLVM SNode tree generation must be non-zero.");
+  TI_ERROR_IF(snode_metas.empty(), "LLVM SNode tree has no SNodes.");
+  TI_ERROR_IF(snode_metas.size() >
+                  std::size_t(std::numeric_limits<int>::max()),
+              "LLVM SNode tree has too many nodes for tree-local indexing.");
+  std::vector<bool> local_ids_seen(snode_metas.size(), false);
+  std::unordered_map<int, int> runtime_local_ids;
+  runtime_local_ids.reserve(snode_metas.size());
   for (const auto &meta : snode_metas) {
-    TI_ERROR_IF(
-        meta.id < 0 || meta.id >= taichi_max_num_snodes,
-        "LLVM SNode id {} exceeds the runtime capacity of {}. Refusing to "
-        "index runtime metadata out of bounds.",
-        meta.id, taichi_max_num_snodes);
+    TI_ERROR_IF(meta.runtime_local_id < 0 ||
+                    std::size_t(meta.runtime_local_id) >= snode_metas.size(),
+                "LLVM tree-local SNode id {} is out of range [0, {}).",
+                meta.runtime_local_id, snode_metas.size());
+    TI_ERROR_IF(local_ids_seen[meta.runtime_local_id],
+                "Duplicate LLVM tree-local SNode id {}.",
+                meta.runtime_local_id);
+    local_ids_seen[meta.runtime_local_id] = true;
+    runtime_local_ids.emplace(meta.id, meta.runtime_local_id);
   }
+  const auto root_meta = std::find_if(
+      snode_metas.begin(), snode_metas.end(), [&](const auto &meta) {
+        return meta.runtime_local_id == root_runtime_local_id;
+      });
+  TI_ERROR_IF(root_meta == snode_metas.end() || root_meta->id != root_id,
+              "LLVM root SNode metadata does not match tree-local id {}.",
+              root_runtime_local_id);
 
   bool all_dense = config_.demote_dense_struct_fors;
   DeviceAllocationUnique *sparse_tree_pool_alloc = nullptr;
@@ -1077,48 +1097,51 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
 
   TI_TRACE("Allocating data structure of size {} bytes", root_size);
   std::size_t rounded_size = taichi::iroundup(root_size, taichi_page_size);
+  std::size_t runtime_state_bytes = 0;
+  TI_ERROR_IF(!llvm_snode_tree_runtime_state_bytes(snode_metas.size(),
+                                                   &runtime_state_bytes),
+              "LLVM SNodeTree runtime state size overflow.");
+  TI_ERROR_IF(rounded_size > std::numeric_limits<std::size_t>::max() -
+                                 runtime_state_bytes,
+              "LLVM SNodeTree root allocation size overflow.");
+  const std::size_t tree_allocation_size =
+      rounded_size + runtime_state_bytes;
 
-  Ptr root_buffer = snode_tree_buffer_manager_->allocate(rounded_size, tree_id,
-                                                         result_buffer);
-  if (config_.arch == Arch::cuda) {
-#if defined(TI_WITH_CUDA)
-    auto context_guard = CUDAContext::get_instance().get_guard();
-    CUDADriver::get_instance().memset(root_buffer, 0, rounded_size);
-#else
-    TI_NOT_IMPLEMENTED
-#endif
-  } else if (config_.arch == Arch::amdgpu) {
-#if defined(TI_WITH_AMDGPU)
-    AMDGPUDriver::get_instance().memset(root_buffer, 0, rounded_size);
-#else
-    TI_NOT_IMPLEMENTED;
-#endif
-  } else {
-    std::memset(root_buffer, 0, rounded_size);
-  }
+  ensure_snode_tree_runtime_directory_capacity(std::size_t(tree_id) + 1);
+  Ptr root_buffer = snode_tree_buffer_manager_->allocate(
+      tree_allocation_size, tree_id, result_buffer);
+  zero_device_memory(root_buffer, tree_allocation_size);
+  Ptr runtime_state_buffer = root_buffer + rounded_size;
 
   DeviceAllocation alloc =
       llvm_device()->import_memory(root_buffer, rounded_size);
 
   snode_tree_allocs_[tree_id] = alloc;
 
-  for (const auto &meta : snode_metas) {
-    runtime_jit->call<void *, int>("runtime_reset_snode_slot", llvm_runtime_,
-                                   meta.id);
-  }
-  runtime_jit->call<void *, std::size_t, int, int, int, std::size_t, Ptr>(
-      "runtime_initialize_snodes", llvm_runtime_, root_size, root_id,
-      (int)snode_metas.size(), tree_id, rounded_size, root_buffer,
-      element_list_chunk_elements.at(root_id), all_dense);
+  runtime_jit
+      ->call<void *, std::size_t, int, int, int, std::uint64_t, std::size_t,
+             Ptr, Ptr, std::size_t, std::size_t, bool>(
+          "runtime_initialize_snodes", llvm_runtime_, root_size,
+          root_runtime_local_id, static_cast<int>(snode_metas.size()), tree_id,
+          tree_generation, rounded_size, root_buffer, runtime_state_buffer,
+          runtime_state_bytes, element_list_chunk_elements.at(root_id),
+          all_dense);
+  const bool state_inserted =
+      active_snode_tree_runtime_states_
+          .try_emplace(tree_id,
+                       ActiveSNodeTreeRuntimeState{runtime_state_buffer,
+                                                   tree_generation})
+          .second;
+  TI_ASSERT(state_inserted);
 
   if (!all_dense) {
     for (const auto &meta : snode_metas) {
       if (meta.id == root_id || meta.type == SNodeType::place) {
         continue;
       }
-      runtime_jit->call<void *, int, std::size_t>(
-          "runtime_initialize_snode_element_list", llvm_runtime_, meta.id,
-          element_list_chunk_elements.at(meta.id));
+      runtime_jit->call<void *, int, int, std::size_t>(
+          "runtime_initialize_snode_element_list", llvm_runtime_, tree_id,
+          meta.runtime_local_id, element_list_chunk_elements.at(meta.id));
     }
   }
 
@@ -1144,18 +1167,19 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
       }
       TI_TRACE("Initializing allocator for snode {} (node size {}, chunk_elems {})",
                snode_id, node_size, chunk_elems);
-      runtime_jit->call<void *, int, std::size_t, int>(
-          "runtime_NodeAllocator_initialize_ex", llvm_runtime_, snode_id,
-          node_size, chunk_elems);
+      runtime_jit->call<void *, int, int, std::size_t, int>(
+          "runtime_NodeAllocator_initialize_ex", llvm_runtime_, tree_id,
+          snode_metas[i].runtime_local_id, node_size, chunk_elems);
       if (config_.cuda_pointer_deterministic_pool_enabled() &&
           snode_metas[i].type == SNodeType::pointer &&
           snode_metas[i].num_cells_per_container ==
               snode_metas[i].total_num_cells_from_root) {
         TI_ASSERT(snode_metas[i].num_cells_per_container <=
                   std::numeric_limits<int>::max());
-        runtime_jit->call<void *, int, int>(
+        runtime_jit->call<void *, int, int, int>(
             "runtime_NodeAllocator_set_deterministic_capacity", llvm_runtime_,
-            snode_id, (int)snode_metas[i].num_cells_per_container);
+            tree_id, snode_metas[i].runtime_local_id,
+            (int)snode_metas[i].num_cells_per_container);
       }
     }
   }
@@ -1211,9 +1235,9 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
         void *region_ptr = static_cast<char *>(buf_base) + offset;
         TI_TRACE("Phase-1: snode {} pool {:.2f} MiB at +{:.2f} MiB",
                  p.first, p.second / 1048576.0, offset / 1048576.0);
-        runtime_jit->call<void *, int, void *, std::size_t>(
+        runtime_jit->call<void *, int, int, void *, std::size_t>(
             "runtime_NodeAllocator_set_dedicated_pool", llvm_runtime_,
-            p.first, region_ptr, p.second);
+            tree_id, runtime_local_ids.at(p.first), region_ptr, p.second);
         offset += p.second;
       }
     }
@@ -1229,9 +1253,9 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
     if (node_size > 0) {
       TI_TRACE("Allocating direct ambient for snode {} (node size {})",
                snode_metas[i].id, node_size);
-      runtime_jit->call<void *, int, std::size_t>(
+      runtime_jit->call<void *, int, int, std::size_t>(
           "runtime_allocate_ambient_direct", llvm_runtime_,
-          snode_metas[i].id, node_size);
+          tree_id, snode_metas[i].runtime_local_id, node_size);
     }
   }
 
@@ -1243,8 +1267,9 @@ void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
     runtime_jit->call<void *>("runtime_element_lists_prepare_backing_pool",
                               llvm_runtime_);
     for (const auto &meta : snode_metas) {
-      runtime_jit->call<void *, int>("runtime_element_list_set_backing_pool",
-                                     llvm_runtime_, meta.id);
+      runtime_jit->call<void *, int, int>(
+          "runtime_element_list_set_backing_pool", llvm_runtime_, tree_id,
+          meta.runtime_local_id);
     }
     runtime_jit->call<void *>("runtime_element_lists_finalize_backing_pool",
                               llvm_runtime_);
@@ -1349,6 +1374,11 @@ uint64_t *LlvmRuntimeExecutor::get_device_alloc_info_ptr(
 
 void LlvmRuntimeExecutor::finalize() {
   profiler_ = nullptr;
+  active_snode_tree_runtime_states_.clear();
+  snode_tree_allocs_.clear();
+  snode_tree_runtime_directory_alloc_.reset();
+  snode_tree_runtime_host_directory_.clear();
+  snode_tree_runtime_directory_capacity_ = 0;
   if (config_.arch == Arch::cuda || config_.arch == Arch::amdgpu) {
     const bool backend_calls_safe =
         llvm_device() == nullptr || llvm_device()->backend_calls_safe();
@@ -1411,6 +1441,78 @@ void *LlvmRuntimeExecutor::preallocate_memory(
   devalloc = std::make_unique<DeviceAllocationGuard>(
       std::move(preallocated_device_buffer_alloc));
   return preallocated_device_buffer;
+}
+
+void LlvmRuntimeExecutor::zero_device_memory(void *ptr, std::size_t size) {
+  if (config_.arch == Arch::cuda) {
+#if defined(TI_WITH_CUDA)
+    auto context_guard = CUDAContext::get_instance().get_guard();
+    CUDADriver::get_instance().memset(ptr, 0, size);
+#else
+    TI_NOT_IMPLEMENTED
+#endif
+  } else if (config_.arch == Arch::amdgpu) {
+#if defined(TI_WITH_AMDGPU)
+    AMDGPUDriver::get_instance().memset(ptr, 0, size);
+#else
+    TI_NOT_IMPLEMENTED;
+#endif
+  } else {
+    std::memset(ptr, 0, size);
+  }
+}
+
+void LlvmRuntimeExecutor::ensure_snode_tree_runtime_directory_capacity(
+    std::size_t required) {
+  if (required <= snode_tree_runtime_directory_capacity_) {
+    return;
+  }
+  TI_ERROR_IF(required > std::size_t(std::numeric_limits<int>::max()),
+              "LLVM SNodeTree directory size {} exceeds the runtime index "
+              "range.",
+              required);
+
+  std::size_t new_capacity =
+      std::max<std::size_t>(snode_tree_runtime_directory_capacity_, 16);
+  while (new_capacity < required) {
+    TI_ERROR_IF(new_capacity >
+                    std::size_t(std::numeric_limits<int>::max()) / 2,
+                "LLVM SNodeTree directory capacity overflow.");
+    new_capacity *= 2;
+  }
+  TI_ERROR_IF(new_capacity >
+                  std::numeric_limits<std::size_t>::max() / sizeof(void *),
+              "LLVM SNodeTree directory allocation overflow.");
+
+  // Directory replacement is rare (geometric growth) and materialization is
+  // already a lifecycle boundary. Drain users of the old directory before
+  // publishing and eventually freeing it.
+  synchronize();
+  DeviceAllocationUnique new_directory_alloc;
+  const std::size_t bytes = new_capacity * sizeof(void *);
+  void *new_directory = nullptr;
+  if (arch_use_host_memory(config_.arch)) {
+    snode_tree_runtime_host_directory_.resize(new_capacity, nullptr);
+    new_directory = snode_tree_runtime_host_directory_.data();
+  } else {
+    new_directory = preallocate_memory(bytes, new_directory_alloc);
+    zero_device_memory(new_directory, bytes);
+  }
+
+  auto *runtime_jit = get_runtime_jit_module();
+  runtime_jit->call<void *, void *, int>(
+      "runtime_set_snode_tree_directory", llvm_runtime_, new_directory,
+      static_cast<int>(new_capacity));
+  for (const auto &[tree_id, state] : active_snode_tree_runtime_states_) {
+    runtime_jit->call<void *, int, void *, std::uint64_t>(
+        "runtime_register_snode_tree_state", llvm_runtime_, tree_id, state.ptr,
+        state.generation);
+  }
+  synchronize();
+  if (!arch_use_host_memory(config_.arch)) {
+    snode_tree_runtime_directory_alloc_ = std::move(new_directory_alloc);
+  }
+  snode_tree_runtime_directory_capacity_ = new_capacity;
 }
 
 void LlvmRuntimeExecutor::preallocate_runtime_memory(
@@ -1605,23 +1707,37 @@ void LlvmRuntimeExecutor::destroy_snode_tree(SNodeTree *snode_tree) {
       SNode *snode = snodes[i];
       const std::size_t ambient_size = direct_ambient_size(
           snode->type, snode->cell_size_bytes, snode->chunk_size);
-      runtime_jit->call<void *, int, std::size_t, int, int>(
-          "runtime_prepare_snode_tree_destroy", llvm_runtime_, snode->id,
-          ambient_size, i == 0 ? 1 : 0,
+      runtime_jit->call<void *, int, int, std::size_t, int, int>(
+          "runtime_prepare_snode_tree_destroy", llvm_runtime_,
+          snode_tree->id(), snode->runtime_local_id, ambient_size,
+          i == 0 ? 1 : 0,
           i + 1 == snodes.size() ? 1 : 0);
     }
     for (SNode *snode : snodes) {
       const std::size_t ambient_size = direct_ambient_size(
           snode->type, snode->cell_size_bytes, snode->chunk_size);
       runtime_jit
-          ->call<void *, int, int, int, int, std::size_t>(
-              "runtime_destroy_snode_resources", llvm_runtime_, snode->id,
+          ->call<void *, int, int, int, int, int, std::size_t>(
+              "runtime_destroy_snode_resources", llvm_runtime_,
+              snode_tree->id(), snode->runtime_local_id,
               !all_dense && snode->type != SNodeType::place ? 1 : 0,
               is_gc_able(snode->type) ? 1 : 0,
               ambient_size > 0 ? 1 : 0, ambient_size);
     }
   }
+  const auto active_state =
+      active_snode_tree_runtime_states_.find(snode_tree->id());
+  TI_ASSERT(active_state != active_snode_tree_runtime_states_.end());
+  TI_ASSERT(active_state->second.generation == snode_tree->generation());
+  get_runtime_jit_module()->call<void *, int, std::uint64_t>(
+      "runtime_unregister_snode_tree_state", llvm_runtime_, snode_tree->id(),
+      snode_tree->generation());
+  active_snode_tree_runtime_states_.erase(active_state);
   get_llvm_context()->delete_snode_tree(snode_tree->id());
+  const auto tree_alloc = snode_tree_allocs_.find(snode_tree->id());
+  TI_ASSERT(tree_alloc != snode_tree_allocs_.end());
+  llvm_device()->dealloc_memory(tree_alloc->second);
+  snode_tree_allocs_.erase(tree_alloc);
   snode_tree_buffer_manager_->destroy(snode_tree);
   sparse_tree_pool_allocs_.erase(snode_tree->id());
   sparse_tree_pool_sizes_.erase(snode_tree->id());
