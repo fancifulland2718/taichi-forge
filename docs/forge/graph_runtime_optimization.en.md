@@ -387,6 +387,10 @@ qualification.
 The GFX host API mutex is held for the complete transaction, preventing an
 unrelated producer from being absorbed into the batch. The fixed eight-slot
 replay ring provides bounded inter-invocation backpressure. A
+non-indirect Graph may still use ordinary task launch when every slot is busy;
+an indirect Graph instead waits for the oldest slot because its device-written
+dispatch packet has no semantics-preserving ordinary fallback. This wait is
+entered only after all eight slots are in flight and never grows the ring. A
 `SubmissionPacer` can regulate complete invocations and lanes, but neither
 mechanism preempts GPU work or assigns priorities. Large compound submissions
 should keep explicit iteration budgets and use application-level pacing when

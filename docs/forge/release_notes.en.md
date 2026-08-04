@@ -242,6 +242,12 @@ grouped under the behavior they shipped.
   3.14/3.14/3.17 ms to 1.68/1.70/1.72 ms and reduced packet storage from 768
   to 12 bytes. The bounded/fixed median ratio recovered from about 0.53-0.54x
   to 0.97-0.98x; 1,000 bounded-slot replays retained stable ownership.
+  The fixed eight-slot Vulkan replay ring now applies bounded backpressure
+  when an indirect Graph has more submissions in flight than available slots.
+  Such a Graph cannot preserve its device-written dispatch packet through the
+  ordinary-launch fallback, so saturation waits for the oldest slot instead
+  of failing or growing replay memory; unsaturated and ordinary Graph paths
+  are unchanged.
   Overflow, useful/executed/skipped/encoded work, invalid offsets, workspace,
   and zero-command behavior are available through capability and explicit
   snapshot objects. Provider-qualified recorded producers can now publish a

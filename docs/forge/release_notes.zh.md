@@ -180,6 +180,9 @@
   资格测试中，packet 复用把 zero/1%/full median 从 3.14/3.14/3.17 ms 降到
   1.68/1.70/1.72 ms，packet storage 从 768 B 降到 12 B；bounded/fixed median ratio 从约
   0.53-0.54x 恢复到 0.97-0.98x，1,000 次 bounded-slot replay 中 ownership 保持稳定。
+  固定 8-slot Vulkan replay ring 现在会在 indirect Graph 的在途提交超过可用 slot 时施加
+  有界背压。该 Graph 无法通过 ordinary-launch fallback 保留 device-written dispatch packet，
+  因而饱和时等待最旧 slot，而不是失败或扩张 replay 内存；未饱和路径与普通 Graph 路径不变。
   capability 与显式
   snapshot 可观察 overflow、useful/executed/skipped/encoded work、非法 offset、workspace 与
   zero-command 行为。通过资格的 recorded producer 现在可直接发布 Graph-owned Vulkan

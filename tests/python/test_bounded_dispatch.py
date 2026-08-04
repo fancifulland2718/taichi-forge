@@ -1136,6 +1136,11 @@ def test_bounded_same_graph_inflight_submissions_preserve_internal_state(
         block_dim=block_dim,
     )
     graph = builder.compile()
+    # Enable replay counters before the first submission so this regression
+    # also proves that fixed-slot backpressure does not escape through an
+    # ordinary fallback, which cannot preserve indirect dispatch semantics.
+    if ti.lang.impl.current_cfg().arch == ti.vulkan:
+        graph.execution_stats()
 
     counts = (0, 1, 33, capacity, 19, capacity - 1) * 2
     extents = tuple(ti.DeviceExtent(capacity) for _ in counts)
@@ -1154,6 +1159,13 @@ def test_bounded_same_graph_inflight_submissions_preserve_internal_state(
         )
     for ticket in reversed(tickets):
         ticket.wait()
+
+    if ti.lang.impl.current_cfg().arch == ti.vulkan:
+        replay_stats = graph._graph_stats[0]
+        assert replay_stats["attempts"] == len(tickets)
+        assert replay_stats["ordinary_fallbacks"] == 0
+        assert replay_stats["replay_slot_saturation_fallbacks"] == 0
+        assert replay_stats["records"] + replay_stats["replays"] == len(tickets)
 
     for index, count in enumerate(counts):
         expected = np.full(capacity, -1, dtype=np.int32)

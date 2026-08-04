@@ -3128,9 +3128,14 @@ bool GfxRuntime::try_launch_graph(
 
   executable.refresh_prepared_cache(key, prepared);
 
+  // Ordinary replay may fall back to individually launched tasks when the
+  // fixed slot ring is busy. Indirect dispatch cannot: its device-written
+  // packet is consumed by the recorded command, so applying bounded
+  // backpressure is the only semantics-preserving fixed-memory path.
   GfxRuntime::GraphReplayExecutable::Slot *slot =
       executable.acquire_ready_slot(
           key, structure_key,
+          has_indirect_dispatch ||
           (structured_control != nullptr && structured_result == nullptr) ||
               (nested_control != nullptr && nested_result == nullptr));
   if (slot == nullptr) {

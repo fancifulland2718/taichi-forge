@@ -437,8 +437,10 @@ ready 前，command buffer、descriptor 与 completion semaphore 继续由旧 st
 teardown 前关闭 registration。
 
 Replay 有意采用固定 8 个在途 slot 的 ring。普通 `Graph.run()` replay 在全部 slot 忙时
-可以使用 ordinary dispatch。异步结构化提交则会在下一个完整 replay slot 边界等待，不会
-先提交半个 invocation 再 fallback。本地有界扩容实验消除了少量饱和 fallback，却没有形成
+可以使用 ordinary dispatch。indirect Graph 无法在 ordinary launch 中保留 device-written
+dispatch packet，因此会在全部 slot 在途时等待最旧 slot；未饱和提交不增加等待，ring 也不
+扩张。异步结构化提交同样会在下一个完整 replay slot 边界等待，不会先提交半个 invocation
+再 fallback。本地有界扩容实验消除了少量饱和 fallback，却没有形成
 可重复的中位吞吐收益。1024-graph churn 样本在 16-slot 上限下让 driver 报告的 Vulkan
 memory 增加约 2.55 GiB，即使 host RSS 和精确结果仍稳定。driver 可能在 host graph state
 退役后继续保留 command、descriptor 与 semaphore pool。
