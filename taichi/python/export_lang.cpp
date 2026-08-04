@@ -3684,7 +3684,8 @@ void export_lang(py::module &m) {
       .def("dispatch_cuda_bounded", &GraphBuilder::dispatch_cuda_bounded,
            py::arg("kernel"), py::arg("args"), py::arg("extent"),
            py::arg("capacity"), py::arg("block_dim"),
-           py::arg("adaptive_grid"), py::arg("label") = "")
+           py::arg("adaptive_grid"), py::arg("grouped_update") = false,
+           py::arg("label") = "")
       .def("dispatch_cpu_bounded", &GraphBuilder::dispatch_cpu_bounded,
            py::arg("kernel"), py::arg("args"), py::arg("extent"),
            py::arg("capacity"), py::arg("label") = "")

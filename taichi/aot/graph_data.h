@@ -234,6 +234,7 @@ struct CudaBoundedDispatchMetadata {
   std::uint32_t capacity{0};
   std::uint32_t block_dim{0};
   bool adaptive_grid{false};
+  bool grouped_update{false};
 };
 
 struct CpuBoundedDispatchMetadata {

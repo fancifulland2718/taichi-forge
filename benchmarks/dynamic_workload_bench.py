@@ -186,6 +186,7 @@ def _prefix_benchmark(args):
 def _graph_benchmark(args):
     capacity = args.graph_capacity
     block_dim = args.block_dim
+    graph_node_count = args.graph_node_count
     extent = ti.DeviceExtent(capacity)
     input_values = ti.ndarray(ti.f32, shape=capacity)
     outputs = {
@@ -233,19 +234,23 @@ def _graph_benchmark(args):
 
     fixed_builder = ti.graph.GraphBuilder()
     fixed_builder.dispatch(publish, requested_arg, extent_arg)
-    fixed_builder.dispatch(payload, extent_arg, input_arg, output_arg)
+    for _ in range(graph_node_count):
+        fixed_builder.dispatch(payload, extent_arg, input_arg, output_arg)
     fixed_graph = fixed_builder.compile()
 
     bounded_builder = ti.graph.GraphBuilder()
     bounded_builder.dispatch(publish, requested_arg, extent_arg)
-    handle = bounded_builder.dispatch_bounded(
-        payload,
-        extent_arg,
-        input_arg,
-        output_arg,
-        extent=extent_arg,
-        capacity=capacity,
-        block_dim=block_dim,
+    handles = tuple(
+        bounded_builder.dispatch_bounded(
+            payload,
+            extent_arg,
+            input_arg,
+            output_arg,
+            extent=extent_arg,
+            capacity=capacity,
+            block_dim=block_dim,
+        )
+        for _ in range(graph_node_count)
     )
     bounded_graph = bounded_builder.compile()
 
@@ -262,11 +267,14 @@ def _graph_benchmark(args):
             "input": input_values,
             "output": outputs["bounded_graph"],
         }
+
+        def direct():
+            publish(count, extent.state)
+            for _ in range(graph_node_count):
+                payload(extent.state, input_values, outputs["direct"])
+
         return {
-            "direct": lambda: (
-                publish(count, extent.state),
-                payload(extent.state, input_values, outputs["direct"]),
-            ),
+            "direct": direct,
             "fixed_graph": lambda: fixed_graph.run(fixed_args),
             "bounded_graph": lambda: bounded_graph.run(bounded_args),
         }
@@ -332,13 +340,18 @@ def _graph_benchmark(args):
         for replay in range(args.stress_replays):
             stress_args["requested"] = stress_counts[replay % len(stress_counts)]
             bounded_graph.run(stress_args)
+            # Vulkan Graph replay owns a bounded in-flight slot set. Keep the
+            # stress test within that documented ownership contract while
+            # still exercising long-lived slot reuse and memory stability.
+            if args.arch == "vulkan" and (replay + 1) % 8 == 0:
+                ti.sync()
         ti.sync()
         stress_elapsed = time.perf_counter_ns() - stress_start
         stress_after = program._runtime_statistics_snapshot()["memory"]
         stress_host_after = dict(ti_core.get_host_memory_pool_stats())
         stress_device_after = dict(ti_core.get_device_memory_pool_stats())
         final_count = stress_counts[(args.stress_replays - 1) % len(stress_counts)]
-        final_snapshot = handle.snapshot(extent)
+        final_snapshot = handles[0].snapshot(extent)
         stress = {
             "replays": args.stress_replays,
             "mean_us": stress_elapsed / args.stress_replays / 1.0e3,
@@ -445,7 +458,7 @@ def _graph_benchmark(args):
         for call in variants.values():
             call()
         ti.sync()
-        snapshot = handle.snapshot(extent)
+        snapshot = handles[0].snapshot(extent)
         if snapshot.useful_count != count:
             raise RuntimeError(f"bounded count mismatch for {name}")
         host_outputs = {key: value.to_numpy() for key, value in outputs.items()}
@@ -470,14 +483,17 @@ def _graph_benchmark(args):
     return {
         "capacity": capacity,
         "block_dim": block_dim,
+        "graph_node_count": graph_node_count,
         "payload_work": args.payload_work,
-        "capabilities": handle.capabilities.__dict__,
+        "capabilities": handles[0].capabilities.__dict__,
         "cases": reports,
         "physical_counts": physical_counts,
         "stress": stress,
         "node_memory": node_memory,
-        "workspace_bytes": handle.workspace_bytes,
-        "workspace_allocations": handle.workspace_allocation_count,
+        "workspace_bytes": sum(handle.workspace_bytes for handle in handles),
+        "workspace_allocations": sum(
+            handle.workspace_allocation_count for handle in handles
+        ),
         "correct": correct,
         "runtime_memory_non_growth": _memory_non_growth(before, after),
         "host_pool_stable": host_pool_stable,
@@ -490,6 +506,7 @@ def _cuda_route_comparison(args):
 
     capacity = args.graph_capacity
     block_dim = args.block_dim
+    graph_node_count = args.graph_node_count
     extent = ti.DeviceExtent(capacity)
     input_values = ti.ndarray(ti.f32, shape=capacity)
     input_values.from_numpy(
@@ -540,7 +557,8 @@ def _cuda_route_comparison(args):
 
     fixed_builder = ti.graph.GraphBuilder()
     fixed_builder.dispatch(publish, requested_arg, extent_arg)
-    fixed_builder.dispatch(payload, extent_arg, input_arg, output_arg)
+    for _ in range(graph_node_count):
+        fixed_builder.dispatch(payload, extent_arg, input_arg, output_arg)
     fixed_graph = fixed_builder.compile()
 
     route_graphs = {}
@@ -550,18 +568,21 @@ def _cuda_route_comparison(args):
         os.environ["TI_CUDA_BOUNDED_DISPATCH_MODE"] = mode
         builder = ti.graph.GraphBuilder()
         builder.dispatch(publish, requested_arg, extent_arg)
-        handle = builder.dispatch_bounded(
-            payload,
-            extent_arg,
-            input_arg,
-            output_arg,
-            extent=extent_arg,
-            capacity=capacity,
-            block_dim=block_dim,
+        handles = tuple(
+            builder.dispatch_bounded(
+                payload,
+                extent_arg,
+                input_arg,
+                output_arg,
+                extent=extent_arg,
+                capacity=capacity,
+                block_dim=block_dim,
+            )
+            for _ in range(graph_node_count)
         )
         route_graphs[mode] = builder.compile()
-        route_handles[mode] = handle
-        route_capabilities[mode] = handle.capabilities.__dict__
+        route_handles[mode] = handles
+        route_capabilities[mode] = handles[0].capabilities.__dict__
 
     def variants_for(count):
         fixed_args = {
@@ -570,11 +591,14 @@ def _cuda_route_comparison(args):
             "input": input_values,
             "output": outputs["fixed_graph"],
         }
+
+        def direct():
+            publish(count, extent.state)
+            for _ in range(graph_node_count):
+                payload(extent.state, input_values, outputs["direct"])
+
         variants = {
-            "direct": lambda: (
-                publish(count, extent.state),
-                payload(extent.state, input_values, outputs["direct"]),
-            ),
+            "direct": direct,
             "fixed_graph": lambda: fixed_graph.run(fixed_args),
         }
         for mode in route_modes:
@@ -649,7 +673,7 @@ def _cuda_route_comparison(args):
                 correct = correct and float(output[count]) == -1.0
         physical_counts[case] = {}
         for mode in route_modes:
-            snapshot = route_handles[mode].snapshot(extent)
+            snapshot = route_handles[mode][0].snapshot(extent)
             physical_counts[case][variant_names[mode]] = {
                 "useful_count": snapshot.useful_count,
                 "executed_count": snapshot.executed_count,
@@ -694,12 +718,15 @@ def _cuda_route_comparison(args):
             "persistent_bounded_control_bytes": (
                 report.memory.persistent_bounded_control_bytes
             ),
-            "workspace_bytes": route_handles[mode].workspace_bytes,
+            "workspace_bytes": sum(
+                handle.workspace_bytes for handle in route_handles[mode]
+            ),
         }
     after = program._runtime_statistics_snapshot()["memory"]
     return {
         "capacity": capacity,
         "block_dim": block_dim,
+        "graph_node_count": graph_node_count,
         "payload_work": args.payload_work,
         "routes": route_capabilities,
         "cases": cases,
@@ -723,6 +750,7 @@ def main():
     parser.add_argument("--suite", choices=("all", "prefix", "graph"), default="all")
     parser.add_argument("--prefix-capacity", type=int, default=1 << 18)
     parser.add_argument("--graph-capacity", type=int, default=1 << 20)
+    parser.add_argument("--graph-node-count", type=int, default=1)
     parser.add_argument("--sparse-percent", type=int, default=10)
     parser.add_argument("--block-dim", type=int, default=128)
     parser.add_argument("--payload-work", type=int, default=16)
@@ -743,18 +771,27 @@ def main():
         choices=("auto", "exact_scheduler", "masked_capacity"),
         default="auto",
     )
+    parser.add_argument(
+        "--vulkan-packet-policy",
+        choices=("auto", "reuse_consecutive", "per_consumer"),
+        default="auto",
+    )
     args = parser.parse_args()
     if not 0 <= args.sparse_percent <= 100:
         parser.error("--sparse-percent must be in [0, 100]")
-    if min(
-        args.prefix_capacity,
-        args.graph_capacity,
-        args.block_dim,
-        args.payload_work,
-        args.prefix_rounds,
-        args.graph_rounds,
-        args.samples,
-    ) <= 0:
+    if (
+        min(
+            args.prefix_capacity,
+            args.graph_capacity,
+            args.graph_node_count,
+            args.block_dim,
+            args.payload_work,
+            args.prefix_rounds,
+            args.graph_rounds,
+            args.samples,
+        )
+        <= 0
+    ):
         parser.error("capacities, block size, rounds, and samples must be positive")
     if args.stress_replays < 0 or args.memory_node_count < 0:
         parser.error("stress replay and memory node counts must be non-negative")
@@ -765,6 +802,8 @@ def main():
         )
     elif args.arch == "cpu":
         os.environ["TI_CPU_BOUNDED_DISPATCH_MODE"] = args.cpu_route
+    elif args.arch == "vulkan":
+        os.environ["TI_GRAPH_VULKAN_BOUNDED_PACKET_POLICY"] = args.vulkan_packet_policy
     arch = {"cpu": ti.cpu, "cuda": ti.cuda, "vulkan": ti.vulkan}[args.arch]
     ti.init(arch=arch, offline_cache=False)
     requested_route = (
@@ -796,6 +835,9 @@ def main():
         "selected_route": bounded_capabilities["selected_route"],
         "route_identity_valid": route_identity_valid,
         "bounded_dispatch_capabilities": bounded_capabilities,
+        "vulkan_packet_policy": (
+            args.vulkan_packet_policy if args.arch == "vulkan" else "not_applicable"
+        ),
     }
     if args.suite in ("all", "prefix"):
         result["device_prefix"] = _prefix_benchmark(args)

@@ -555,14 +555,9 @@ def test_cuda_worklist_finalize_keeps_bounded_state_graph_owned(monkeypatch):
         second_visited.fill(0)
         graph.run(runtime_args)
         useful = min(requested, capacity)
-        expected_lanes = (
-            0
-            if useful == 0
-            else min(
-                capacity,
-                ((useful + block_dim - 1) // block_dim) * block_dim,
-            )
-        )
+        # CUDA's bounded grid-stride range exposes logical iterations, not
+        # Vulkan's block-rounded encoded lane count.
+        expected_lanes = useful
         for visited in (first_visited, second_visited):
             observed = visited.to_numpy()
             segment = next(

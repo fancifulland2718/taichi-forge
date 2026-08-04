@@ -52,30 +52,34 @@ static_assert(offsetof(CudaGraphBoundedExtentControl, block_dim) == 20);
 static_assert(offsetof(CudaGraphBoundedExtentControl, driver_status) == 24);
 static_assert(offsetof(CudaGraphBoundedExtentControl, max_grid_dim) == 28);
 
-// One control record can update every bounded payload that consumes the same
-// producer-owned launch state. ``dispatch_packet`` is nonzero for the generic
-// updater route. A Forge-owned fused producer writes ``grid_x``/``enabled``
-// directly and leaves ``dispatch_packet`` null.
+// One stateful control record updates every consecutive bounded payload that
+// consumes the same extent/capacity/block contract. The updater caches the
+// last applied state because device-updated Graph node properties persist
+// across replays.
 struct CudaGraphBoundedGroupControl {
-  std::uintptr_t dispatch_packet{0};
+  std::uintptr_t extent{0};
   std::uintptr_t device_nodes{0};
   std::uint32_t node_count{0};
-  std::uint32_t grid_x{0};
-  std::uint32_t enabled{0};
-  std::uint32_t driver_status{0};
-  std::uint32_t ready{0};
+  std::uint32_t capacity{0};
   std::uint32_t block_dim{0};
+  std::uint32_t max_grid_dim{0};
+  std::uint32_t last_grid_x{0};
+  std::uint32_t last_enabled{0};
+  std::uint32_t initialized{0};
+  std::uint32_t driver_status{0};
 };
 
-static_assert(sizeof(CudaGraphBoundedGroupControl) == 40);
-static_assert(offsetof(CudaGraphBoundedGroupControl, dispatch_packet) == 0);
+static_assert(sizeof(CudaGraphBoundedGroupControl) == 48);
+static_assert(offsetof(CudaGraphBoundedGroupControl, extent) == 0);
 static_assert(offsetof(CudaGraphBoundedGroupControl, device_nodes) == 8);
 static_assert(offsetof(CudaGraphBoundedGroupControl, node_count) == 16);
-static_assert(offsetof(CudaGraphBoundedGroupControl, grid_x) == 20);
-static_assert(offsetof(CudaGraphBoundedGroupControl, enabled) == 24);
-static_assert(offsetof(CudaGraphBoundedGroupControl, driver_status) == 28);
-static_assert(offsetof(CudaGraphBoundedGroupControl, ready) == 32);
-static_assert(offsetof(CudaGraphBoundedGroupControl, block_dim) == 36);
+static_assert(offsetof(CudaGraphBoundedGroupControl, capacity) == 20);
+static_assert(offsetof(CudaGraphBoundedGroupControl, block_dim) == 24);
+static_assert(offsetof(CudaGraphBoundedGroupControl, max_grid_dim) == 28);
+static_assert(offsetof(CudaGraphBoundedGroupControl, last_grid_x) == 32);
+static_assert(offsetof(CudaGraphBoundedGroupControl, last_enabled) == 36);
+static_assert(offsetof(CudaGraphBoundedGroupControl, initialized) == 40);
+static_assert(offsetof(CudaGraphBoundedGroupControl, driver_status) == 44);
 
 struct CudaGraphBoundedProbeResult {
   bool attempted{false};

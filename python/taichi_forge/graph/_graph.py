@@ -1520,12 +1520,30 @@ def _cuda_bounded_update_policy():
         "TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY", "auto"
     ).strip().lower()
     aliases = {
-        "auto": "per_node",
+        "auto": "grouped_stateful",
         "per_node": "per_node",
+        "grouped_stateful": "grouped_stateful",
     }
     if requested not in aliases:
         raise TaichiRuntimeError(
             "TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY must be one of "
+            f"{'|'.join(aliases)}, got {requested!r}"
+        )
+    return requested, aliases[requested]
+
+
+def _vulkan_bounded_packet_policy():
+    requested = os.environ.get(
+        "TI_GRAPH_VULKAN_BOUNDED_PACKET_POLICY", "auto"
+    ).strip().lower()
+    aliases = {
+        "auto": "reuse_consecutive",
+        "reuse_consecutive": "reuse_consecutive",
+        "per_consumer": "per_consumer",
+    }
+    if requested not in aliases:
+        raise TaichiRuntimeError(
+            "TI_GRAPH_VULKAN_BOUNDED_PACKET_POLICY must be one of "
             f"{'|'.join(aliases)}, got {requested!r}"
         )
     return requested, aliases[requested]
@@ -2974,7 +2992,10 @@ def bounded_dispatch_capabilities():
         "producer_packet_consumed": backend == "vulkan",
         "producer_update_policy_requested": update_policy_requested,
         "producer_update_policy": update_policy,
-        "grouped_updates_supported": False,
+        "grouped_updates_supported": (
+            backend == "cuda"
+            and capabilities.route == "adaptive_device_grid_update"
+        ),
         "forge_producer_fusion_supported": backend == "vulkan",
         "default_preparation_dispatches": capabilities.preparation_dispatches,
         "updater_dispatches": capabilities.preparation_dispatches,
@@ -7263,6 +7284,10 @@ def _record_backend_dispatch(builder, backend, kernel, args, ir_node):
             domain.capacity,
             domain.block_dim,
             requirement in ("adaptive_grid", "require_exact"),
+            (
+                requirement in ("adaptive_grid", "require_exact")
+                and _cuda_bounded_update_policy()[1] == "grouped_stateful"
+            ),
             label,
         )
         return
@@ -9412,6 +9437,9 @@ class GraphBuilder:
         self._aot_graph_plan.mark_internal_fixed_bindings()
 
     def _vulkan_bounded_publication(self, extent, capacity, block_dim):
+        if _vulkan_bounded_packet_policy()[1] == "per_consumer":
+            self._active_bounded_publication = None
+            return None
         key = (extent.name, int(capacity), int(block_dim))
         active = self._active_bounded_publication
         if active is not None and active["key"] == key:
@@ -9577,6 +9605,10 @@ class GraphBuilder:
         cuda_adaptive_grid = bool(
             cuda_bounded_range and selected_route.route == "adaptive_device_grid_update"
         )
+        cuda_grouped_update = bool(
+            cuda_adaptive_grid
+            and _cuda_bounded_update_policy()[1] == "grouped_stateful"
+        )
         specialized_range = exact_device_grid or cuda_bounded_range
         policy = self._bounded_launch_policy(block_dim, block_mode, backend)
         kernel_cpp = gen_cpp_kernel(
@@ -9641,6 +9673,7 @@ class GraphBuilder:
         packet = None
         packet_allocation_owner = True
         preparation_dispatches = None
+        preserve_vulkan_packet = False
         if backend == "vulkan":
             publication = (
                 None
@@ -9652,6 +9685,7 @@ class GraphBuilder:
             if publication is not None:
                 packet_arg, packet, packet_allocation_owner = publication
                 preparation_dispatches = 0
+                preserve_vulkan_packet = True
             else:
                 unique = next(_bounded_dispatch_ids)
                 packet = (
@@ -9679,12 +9713,27 @@ class GraphBuilder:
                 self._record_dispatch(prepare_cpp, list(prepare_args))
                 self._bind_internal_runtime_arg(capacity_arg, capacity)
                 self._bind_internal_runtime_arg(block_arg, selected_block)
+                # The packet remains valid for consecutive consumers of the
+                # same extent contract. Any intervening action clears this
+                # conservative builder-local publication state.
+                if _vulkan_bounded_packet_policy()[1] == "reuse_consecutive":
+                    self._active_bounded_publication = {
+                        "key": (
+                            extent.name,
+                            int(capacity),
+                            int(selected_block),
+                        ),
+                        "packet_arg": packet_arg,
+                        "packet": packet,
+                        "packet_claimed": True,
+                    }
+                    preserve_vulkan_packet = True
             self._record_indirect_dispatch(
                 kernel_cpp,
                 unzipped_args,
                 packet_arg,
                 label,
-                preserve_bounded_publication=publication is not None,
+                preserve_bounded_publication=preserve_vulkan_packet,
             )
             self._bind_internal_runtime_arg(packet_arg, packet)
         elif cuda_bounded_range:
@@ -9695,6 +9744,7 @@ class GraphBuilder:
                 capacity,
                 selected_block,
                 cuda_adaptive_grid,
+                cuda_grouped_update,
                 label=label,
             )
         elif backend == "cpu" and exact_device_grid:
@@ -9945,6 +9995,7 @@ class GraphBuilder:
         capacity,
         block_dim,
         adaptive_grid,
+        grouped_update,
         label="",
     ):
         self._active_bounded_publication = None
@@ -9958,6 +10009,7 @@ class GraphBuilder:
             capacity,
             block_dim,
             adaptive_grid,
+            grouped_update,
             label,
         )
         self._runtime_graph_dispatches.append((kernel_cpp, tuple(unzipped_args)))

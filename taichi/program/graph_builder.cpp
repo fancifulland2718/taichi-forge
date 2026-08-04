@@ -125,9 +125,10 @@ void Sequential::dispatch_cuda_bounded(
     std::uint32_t capacity,
     std::uint32_t block_dim,
     bool adaptive_grid,
+    bool grouped_update,
     const std::string &dispatch_label) {
   Node *n = owning_graph_->new_cuda_bounded_dispatch_node(
-      kernel, args, extent, capacity, block_dim, adaptive_grid,
+      kernel, args, extent, capacity, block_dim, adaptive_grid, grouped_update,
       dispatch_label);
   sequence_.push_back(n);
 }
@@ -191,6 +192,7 @@ Node *GraphBuilder::new_cuda_bounded_dispatch_node(
     std::uint32_t capacity,
     std::uint32_t block_dim,
     bool adaptive_grid,
+    bool grouped_update,
     const std::string &dispatch_label) {
   validate_dispatch_label(dispatch_label);
   TI_ERROR_IF(extent.tag != aot::ArgKind::kNdarray ||
@@ -202,14 +204,16 @@ Node *GraphBuilder::new_cuda_bounded_dispatch_node(
   TI_ERROR_IF(capacity == 0 || capacity > 0x7fffffffu || block_dim == 0 ||
                   block_dim > 1024,
               "CUDA bounded Graph capacity/block are out of range");
+  TI_ERROR_IF(grouped_update && !adaptive_grid,
+              "CUDA grouped bounded update requires adaptive grid control");
   TI_ERROR_IF(std::find(args.begin(), args.end(), extent) == args.end(),
               "CUDA bounded Graph extent {} must also be a payload argument",
               extent.name);
   for (const auto &arg : args) {
     register_arg(arg);
   }
-  aot::CudaBoundedDispatchMetadata metadata{extent, capacity, block_dim,
-                                             adaptive_grid};
+  aot::CudaBoundedDispatchMetadata metadata{
+      extent, capacity, block_dim, adaptive_grid, grouped_update};
   all_nodes_.push_back(std::make_unique<Dispatch>(
       kernel, args, std::nullopt, std::move(metadata), dispatch_label));
   return all_nodes_.back().get();
@@ -292,9 +296,10 @@ void GraphBuilder::dispatch_cuda_bounded(
     std::uint32_t capacity,
     std::uint32_t block_dim,
     bool adaptive_grid,
+    bool grouped_update,
     const std::string &dispatch_label) {
   seq()->dispatch_cuda_bounded(kernel, args, extent, capacity, block_dim,
-                               adaptive_grid, dispatch_label);
+                               adaptive_grid, grouped_update, dispatch_label);
 }
 
 void GraphBuilder::dispatch_cpu_bounded(

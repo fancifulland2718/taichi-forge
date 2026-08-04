@@ -890,6 +890,14 @@ struct CudaGraphBoundedDispatchControl {
   cuda::CudaGraphBoundedExtentControl host_control;
 };
 
+struct CudaGraphBoundedDispatchGroup {
+  cuda::CudaGraphBoundedGroupControl *device_control{nullptr};
+  std::uintptr_t *device_nodes{nullptr};
+  cuda::CudaGraphBoundedGroupControl host_control;
+  std::vector<std::uintptr_t> host_nodes;
+  std::vector<std::size_t> dispatch_indices;
+};
+
 }  // namespace
 
 struct CompiledGraphCudaState {
@@ -900,6 +908,9 @@ struct CompiledGraphCudaState {
   std::unique_ptr<CudaGraphCaptureStream> capture_stream;
   std::vector<CudaGraphCapturePacket> packets;
   std::vector<CudaGraphBoundedDispatchControl> bounded_dispatch_controls;
+  std::vector<CudaGraphBoundedDispatchGroup> bounded_dispatch_groups;
+  std::vector<std::int32_t> bounded_dispatch_group_indices;
+  std::vector<std::int32_t> bounded_dispatch_group_member_indices;
   CudaGraphExecHandle graph_exec;
   cuda::CudaGraphConditionalControl *conditional_control{nullptr};
   std::uint64_t conditional_handle{0};
@@ -994,6 +1005,19 @@ struct CompiledGraphCudaState {
       }
     }
     bounded_dispatch_controls.clear();
+    for (auto &group : bounded_dispatch_groups) {
+      if (group.device_control != nullptr) {
+        CUDADriver::get_instance().mem_free(group.device_control);
+        group.device_control = nullptr;
+      }
+      if (group.device_nodes != nullptr) {
+        CUDADriver::get_instance().mem_free(group.device_nodes);
+        group.device_nodes = nullptr;
+      }
+    }
+    bounded_dispatch_groups.clear();
+    bounded_dispatch_group_indices.clear();
+    bounded_dispatch_group_member_indices.clear();
     conditional_handle = 0;
     conditional_mode = false;
     masked_mode = false;
@@ -1030,12 +1054,21 @@ struct CompiledGraphCudaState {
   }
 
   uint64_t known_bounded_control_bytes() const {
-    return std::count_if(
-               bounded_dispatch_controls.begin(),
-               bounded_dispatch_controls.end(), [](const auto &control) {
-                 return control.device_control != nullptr;
-               }) *
-           sizeof(cuda::CudaGraphBoundedExtentControl);
+    uint64_t bytes = std::count_if(bounded_dispatch_controls.begin(),
+                                   bounded_dispatch_controls.end(),
+                                   [](const auto &control) {
+                                     return control.device_control != nullptr;
+                                   }) *
+                     sizeof(cuda::CudaGraphBoundedExtentControl);
+    for (const auto &group : bounded_dispatch_groups) {
+      if (group.device_control != nullptr) {
+        bytes += sizeof(cuda::CudaGraphBoundedGroupControl);
+      }
+      if (group.device_nodes != nullptr) {
+        bytes += group.host_nodes.size() * sizeof(std::uintptr_t);
+      }
+    }
+    return bytes;
   }
 
   uint64_t known_persistent_argument_bytes() const {
@@ -1266,6 +1299,10 @@ bool initialize_cuda_bounded_dispatch_controls(
   *driver_error = CUDA_SUCCESS;
   state.bounded_dispatch_controls.clear();
   state.bounded_dispatch_controls.resize(graph.dispatches.size());
+  state.bounded_dispatch_groups.clear();
+  state.bounded_dispatch_group_indices.assign(graph.dispatches.size(), -1);
+  state.bounded_dispatch_group_member_indices.assign(graph.dispatches.size(),
+                                                     -1);
   if (std::none_of(graph.dispatches.begin(), graph.dispatches.end(),
                    [](const auto &dispatch) {
                      return dispatch.cuda_bounded_dispatch.has_value() &&
@@ -1285,9 +1322,16 @@ bool initialize_cuda_bounded_dispatch_controls(
   if (!cuda::driver_graph_prepare_bounded_update(driver_error)) {
     return false;
   }
-  for (std::size_t i = 0; i < graph.dispatches.size(); ++i) {
+  auto same_group_contract = [](const CudaBoundedDispatchMetadata &lhs,
+                                const CudaBoundedDispatchMetadata &rhs) {
+    return rhs.adaptive_grid && rhs.grouped_update &&
+           lhs.extent_arg == rhs.extent_arg && lhs.capacity == rhs.capacity &&
+           lhs.block_dim == rhs.block_dim;
+  };
+  for (std::size_t i = 0; i < graph.dispatches.size();) {
     const auto &metadata = graph.dispatches[i].cuda_bounded_dispatch;
     if (!metadata.has_value() || !metadata->adaptive_grid) {
+      ++i;
       continue;
     }
     auto extent = cuda_graph_ndarray_address(state.signature,
@@ -1295,6 +1339,59 @@ bool initialize_cuda_bounded_dispatch_controls(
     if (!extent.has_value()) {
       *driver_error = CUDA_ERROR_NOT_SUPPORTED;
       return false;
+    }
+    if (metadata->grouped_update) {
+      std::size_t end = i + 1;
+      while (end < graph.dispatches.size()) {
+        const auto &candidate = graph.dispatches[end].cuda_bounded_dispatch;
+        if (!candidate.has_value() ||
+            !same_group_contract(*metadata, *candidate)) {
+          break;
+        }
+        ++end;
+      }
+      if (end - i > 1) {
+        CudaGraphBoundedDispatchGroup group;
+        group.host_control.extent = *extent;
+        group.host_control.node_count = static_cast<std::uint32_t>(end - i);
+        group.host_control.capacity = metadata->capacity;
+        group.host_control.block_dim = metadata->block_dim;
+        group.host_control.max_grid_dim = saturation_grid_dim;
+        group.host_nodes.resize(end - i);
+        group.dispatch_indices.reserve(end - i);
+        for (std::size_t dispatch_index = i; dispatch_index < end;
+             ++dispatch_index) {
+          group.dispatch_indices.push_back(dispatch_index);
+        }
+        *driver_error =
+            driver.malloc.call(reinterpret_cast<void **>(&group.device_control),
+                               sizeof(cuda::CudaGraphBoundedGroupControl));
+        if (*driver_error != CUDA_SUCCESS) {
+          return false;
+        }
+        *driver_error = driver.malloc.call(
+            reinterpret_cast<void **>(&group.device_nodes),
+            group.host_nodes.size() * sizeof(std::uintptr_t));
+        if (*driver_error != CUDA_SUCCESS) {
+          driver.mem_free.call(group.device_control);
+          group.device_control = nullptr;
+          return false;
+        }
+        group.host_control.device_nodes =
+            reinterpret_cast<std::uintptr_t>(group.device_nodes);
+        const auto group_index =
+            static_cast<std::int32_t>(state.bounded_dispatch_groups.size());
+        for (std::size_t member = 0; member < group.dispatch_indices.size();
+             ++member) {
+          const auto dispatch_index = group.dispatch_indices[member];
+          state.bounded_dispatch_group_indices[dispatch_index] = group_index;
+          state.bounded_dispatch_group_member_indices[dispatch_index] =
+              static_cast<std::int32_t>(member);
+        }
+        state.bounded_dispatch_groups.push_back(std::move(group));
+        i = end;
+        continue;
+      }
     }
     auto &control = state.bounded_dispatch_controls[i];
     control.host_control.extent = *extent;
@@ -1307,6 +1404,7 @@ bool initialize_cuda_bounded_dispatch_controls(
     if (*driver_error != CUDA_SUCCESS) {
       return false;
     }
+    ++i;
   }
   return true;
 }
@@ -1319,10 +1417,18 @@ bool patch_cuda_bounded_dispatch_controls(
   if (state.bounded_dispatch_controls.size() != graph.dispatches.size()) {
     return false;
   }
+  if (state.bounded_dispatch_group_indices.size() != graph.dispatches.size() ||
+      state.bounded_dispatch_group_member_indices.size() !=
+          graph.dispatches.size()) {
+    return false;
+  }
   auto &driver = CUDADriver::get_instance();
   for (std::size_t i = 0; i < graph.dispatches.size(); ++i) {
     const auto &metadata = graph.dispatches[i].cuda_bounded_dispatch;
     if (!metadata.has_value() || !metadata->adaptive_grid) {
+      continue;
+    }
+    if (state.bounded_dispatch_group_indices[i] >= 0) {
       continue;
     }
     auto &control = state.bounded_dispatch_controls[i];
@@ -1338,9 +1444,40 @@ bool patch_cuda_bounded_dispatch_controls(
     host_buffers.emplace_back(sizeof(control.host_control));
     std::memcpy(host_buffers.back().data(), &control.host_control,
                 sizeof(control.host_control));
-    driver.memcpy_host_to_device_async(
-        control.device_control, host_buffers.back().data(),
-        sizeof(control.host_control), nullptr);
+    driver.memcpy_host_to_device_async(control.device_control,
+                                       host_buffers.back().data(),
+                                       sizeof(control.host_control), nullptr);
+    if (state.diagnostics_enabled) {
+      ++state.stats.asynchronous_control_updates;
+    }
+  }
+  for (auto &group : state.bounded_dispatch_groups) {
+    if (group.dispatch_indices.empty() || group.device_control == nullptr ||
+        group.device_nodes == nullptr) {
+      return false;
+    }
+    const auto &metadata =
+        graph.dispatches[group.dispatch_indices.front()].cuda_bounded_dispatch;
+    if (!metadata.has_value() || !metadata->adaptive_grid ||
+        !metadata->grouped_update) {
+      return false;
+    }
+    auto extent = cuda_graph_ndarray_address(signature, metadata->extent_arg);
+    if (!extent.has_value()) {
+      return false;
+    }
+    if (group.host_control.extent == *extent) {
+      continue;
+    }
+    group.host_control.extent = *extent;
+    group.host_control.initialized = 0;
+    group.host_control.driver_status = 0;
+    host_buffers.emplace_back(sizeof(group.host_control));
+    std::memcpy(host_buffers.back().data(), &group.host_control,
+                sizeof(group.host_control));
+    driver.memcpy_host_to_device_async(group.device_control,
+                                       host_buffers.back().data(),
+                                       sizeof(group.host_control), nullptr);
     if (state.diagnostics_enabled) {
       ++state.stats.asynchronous_control_updates;
     }
@@ -1352,7 +1489,10 @@ std::uint32_t capture_cuda_graph_packets(const CompiledGraph &graph,
                                          CompiledGraphCudaState &state,
                                          void *capture_stream) {
   TI_ASSERT(state.packets.size() == graph.dispatches.size());
-  TI_ASSERT(state.bounded_dispatch_controls.size() ==
+  TI_ASSERT(state.bounded_dispatch_controls.size() == graph.dispatches.size());
+  TI_ASSERT(state.bounded_dispatch_group_indices.size() ==
+            graph.dispatches.size());
+  TI_ASSERT(state.bounded_dispatch_group_member_indices.size() ==
             graph.dispatches.size());
   for (std::size_t i = 0; i < graph.dispatches.size(); ++i) {
     auto &packet = state.packets[i];
@@ -1360,6 +1500,33 @@ std::uint32_t capture_cuda_graph_packets(const CompiledGraph &graph,
     if (!metadata.has_value() || !metadata->adaptive_grid) {
       packet.launcher->capture_cuda_graph_launch(packet.packet,
                                                  capture_stream);
+      continue;
+    }
+    const auto group_index = state.bounded_dispatch_group_indices[i];
+    if (metadata->grouped_update && group_index >= 0) {
+      const auto member_index = state.bounded_dispatch_group_member_indices[i];
+      if (member_index < 0 || static_cast<std::size_t>(group_index) >=
+                                  state.bounded_dispatch_groups.size()) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+      }
+      auto &group = state.bounded_dispatch_groups[group_index];
+      if (static_cast<std::size_t>(member_index) >= group.host_nodes.size() ||
+          group.device_control == nullptr || group.device_nodes == nullptr) {
+        return CUDA_ERROR_NOT_SUPPORTED;
+      }
+      if (member_index == 0) {
+        cuda::driver_graph_update_bounded_group(group.device_control,
+                                                capture_stream);
+      }
+      void *device_node = nullptr;
+      std::uint32_t driver_error = CUDA_SUCCESS;
+      if (!packet.launcher->capture_cuda_graph_bounded_launch(
+              packet.packet, capture_stream, &device_node, &driver_error)) {
+        return driver_error == CUDA_SUCCESS ? CUDA_ERROR_NOT_SUPPORTED
+                                            : driver_error;
+      }
+      group.host_nodes[member_index] =
+          reinterpret_cast<std::uintptr_t>(device_node);
       continue;
     }
     auto &control = state.bounded_dispatch_controls[i];
@@ -1393,6 +1560,26 @@ std::uint32_t upload_cuda_bounded_dispatch_controls(
         const_cast<cuda::CudaGraphBoundedExtentControl *>(
             &control.host_control),
         sizeof(control.host_control));
+    if (error != CUDA_SUCCESS) {
+      return error;
+    }
+  }
+  for (const auto &group : state.bounded_dispatch_groups) {
+    if (group.device_control == nullptr || group.device_nodes == nullptr ||
+        group.host_nodes.empty()) {
+      return CUDA_ERROR_NOT_SUPPORTED;
+    }
+    auto error = driver.memcpy_host_to_device.call(
+        group.device_nodes,
+        const_cast<std::uintptr_t *>(group.host_nodes.data()),
+        group.host_nodes.size() * sizeof(std::uintptr_t));
+    if (error != CUDA_SUCCESS) {
+      return error;
+    }
+    error = driver.memcpy_host_to_device.call(
+        group.device_control,
+        const_cast<cuda::CudaGraphBoundedGroupControl *>(&group.host_control),
+        sizeof(group.host_control));
     if (error != CUDA_SUCCESS) {
       return error;
     }
@@ -1746,7 +1933,8 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
     return handle_cuda_graph_driver_failure(*state, instantiate_err,
                                             "instantiate");
   }
-  if (std::any_of(state->bounded_dispatch_controls.begin(),
+  if (!state->bounded_dispatch_groups.empty() ||
+      std::any_of(state->bounded_dispatch_controls.begin(),
                   state->bounded_dispatch_controls.end(),
                   [](const auto &control) {
                     return control.device_control != nullptr;
@@ -3130,7 +3318,8 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
     cuda_graph_state->diagnostics_enabled = true;
     cuda_graph_state->stats.backend = CompiledGraphBackend::cuda;
     CompiledGraphStats result = cuda_graph_state->stats;
-    if (!cuda_graph_state->bounded_dispatch_controls.empty()) {
+    if (!cuda_graph_state->bounded_dispatch_controls.empty() ||
+        !cuda_graph_state->bounded_dispatch_groups.empty()) {
       CUDADriver::get_instance().stream_synchronize(nullptr);
       for (const auto &control :
            cuda_graph_state->bounded_dispatch_controls) {
@@ -3145,6 +3334,20 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
           break;
         }
       }
+      if (result.last_driver_error == 0) {
+        for (const auto &group : cuda_graph_state->bounded_dispatch_groups) {
+          if (group.device_control == nullptr) {
+            continue;
+          }
+          cuda::CudaGraphBoundedGroupControl observed;
+          CUDADriver::get_instance().memcpy_device_to_host(
+              &observed, group.device_control, sizeof(observed));
+          if (observed.driver_status != CUDA_SUCCESS) {
+            result.last_driver_error = observed.driver_status;
+            break;
+          }
+        }
+      }
     }
     if (!diagnostics_previously_enabled &&
         (result.last_path != CompiledGraphExecutionPath::none ||
@@ -3155,19 +3358,25 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
         cuda_graph_state->known_persistent_argument_bytes();
     result.known_bounded_control_bytes =
         cuda_graph_state->known_bounded_control_bytes();
-    result.known_bounded_update_groups = static_cast<std::uint32_t>(
-        std::count_if(cuda_graph_state->bounded_dispatch_controls.begin(),
-                      cuda_graph_state->bounded_dispatch_controls.end(),
-                      [](const auto &control) {
-                        return control.device_control != nullptr;
-                      }));
-    result.known_bounded_updater_dispatches = static_cast<std::uint32_t>(
-        std::count_if(cuda_graph_state->bounded_dispatch_controls.begin(),
-                      cuda_graph_state->bounded_dispatch_controls.end(),
-                      [](const auto &control) {
-                        return control.device_control != nullptr;
-                      }));
-    result.known_bounded_grouped_payloads = 0;
+    const auto per_node_update_count = static_cast<std::uint32_t>(std::count_if(
+        cuda_graph_state->bounded_dispatch_controls.begin(),
+        cuda_graph_state->bounded_dispatch_controls.end(),
+        [](const auto &control) { return control.device_control != nullptr; }));
+    const auto grouped_update_count = static_cast<std::uint32_t>(
+        cuda_graph_state->bounded_dispatch_groups.size());
+    result.known_bounded_update_groups =
+        per_node_update_count + grouped_update_count;
+    result.known_bounded_updater_dispatches =
+        per_node_update_count + grouped_update_count;
+    result.known_bounded_grouped_payloads = std::accumulate(
+        cuda_graph_state->bounded_dispatch_groups.begin(),
+        cuda_graph_state->bounded_dispatch_groups.end(), 0u,
+        [](std::uint32_t total, const auto &group) {
+          return total +
+                 (group.host_nodes.size() > 1
+                      ? static_cast<std::uint32_t>(group.host_nodes.size())
+                      : 0u);
+        });
     result.known_bounded_producer_fused_groups = 0;
     const auto &active_retry = cuda_graph_state->masked_mode
                                    ? cuda_graph_state->masked_retry

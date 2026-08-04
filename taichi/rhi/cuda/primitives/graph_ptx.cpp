@@ -254,7 +254,7 @@ DONE:
     ld.global.u32 %r16, [%rd1+28];
     ld.global.s32 %r6, [%rd3];
     setp.lt.s32 %p2, %r6, 0;
-    setp.gt.u32 %p3, %r6, %r4;
+    setp.gt.s32 %p3, %r6, %r4;
     or.pred %p4, %p2, %p3;
     @%p2 mov.u32 %r7, 0;
     @!%p2 mov.u32 %r7, %r6;
@@ -302,8 +302,8 @@ EXTENT_DONE:
     .param .u64 control_param
 )
 {
-    .reg .pred %p<12>;
-    .reg .b32 %r<18>;
+    .reg .pred %p<14>;
+    .reg .b32 %r<23>;
     .reg .b64 %rd<8>;
     .param .b64 call_node;
     .param .b32 call_enabled;
@@ -317,65 +317,87 @@ EXTENT_DONE:
     @%p1 bra GROUP_DONE;
 
     ld.param.u64 %rd1, [control_param];
-    ld.global.u32 %r4, [%rd1+32];
-    setp.eq.u32 %p2, %r4, 0;
-    @%p2 bra GROUP_DONE;
-    mov.u32 %r5, 0;
-    st.global.u32 [%rd1+28], %r5;
-
     ld.global.u64 %rd2, [%rd1+0];
-    setp.eq.u64 %p3, %rd2, 0;
-    @%p3 bra GROUP_LOAD_FUSED;
-    ld.global.u32 %r6, [%rd2+0];
-    setp.ne.u32 %p4, %r6, 0;
-    selp.u32 %r7, 1, 0, %p4;
-    st.global.u32 [%rd1+20], %r6;
-    st.global.u32 [%rd1+24], %r7;
-    bra GROUP_HAVE_GRID;
-
-GROUP_LOAD_FUSED:
-    ld.global.u32 %r6, [%rd1+20];
-    ld.global.u32 %r7, [%rd1+24];
-
-GROUP_HAVE_GRID:
     ld.global.u64 %rd3, [%rd1+8];
-    ld.global.u32 %r9, [%rd1+16];
-    mov.u32 %r10, 0;
+    ld.global.u32 %r4, [%rd1+16];
+    ld.global.u32 %r5, [%rd1+20];
+    ld.global.u32 %r6, [%rd1+24];
+    ld.global.u32 %r7, [%rd1+28];
+    ld.global.s32 %r8, [%rd2];
+    setp.lt.s32 %p2, %r8, 0;
+    setp.gt.s32 %p3, %r8, %r5;
+    or.pred %p4, %p2, %p3;
+    @%p2 mov.u32 %r9, 0;
+    @!%p2 mov.u32 %r9, %r8;
+    @%p3 mov.u32 %r9, %r5;
+    mov.u32 %r10, 1;
+    @%p4 st.global.u32 [%rd2+4], %r10;
+    st.global.u32 [%rd2], %r9;
+
+    setp.ne.u32 %p5, %r9, 0;
+    selp.u32 %r11, 1, 0, %p5;
+    add.u32 %r12, %r9, %r6;
+    sub.u32 %r12, %r12, 1;
+    div.u32 %r12, %r12, %r6;
+    min.u32 %r12, %r12, %r7;
+
+    ld.global.u32 %r13, [%rd1+40];
+    ld.global.u32 %r14, [%rd1+32];
+    ld.global.u32 %r15, [%rd1+36];
+    setp.eq.u32 %p6, %r13, 0;
+    setp.ne.u32 %p7, %r11, %r15;
+    setp.ne.u32 %p8, %r12, %r14;
+    or.pred %p9, %p6, %p7;
+    mov.u32 %r16, 0;
+    st.global.u32 [%rd1+44], %r16;
+    or.pred %p13, %p9, %p8;
+    @!%p13 bra GROUP_DONE;
+    mov.u32 %r17, 0;
 
 GROUP_LOOP:
-    setp.ge.u32 %p6, %r10, %r9;
-    @%p6 bra GROUP_DONE;
-    cvt.u64.u32 %rd4, %r10;
+    setp.ge.u32 %p10, %r17, %r4;
+    @%p10 bra GROUP_COMMIT;
+    cvt.u64.u32 %rd4, %r17;
     shl.b64 %rd5, %rd4, 3;
     add.u64 %rd6, %rd3, %rd5;
     ld.global.u64 %rd7, [%rd6];
+
+    @!%p9 bra GROUP_GRID_CHECK;
     st.param.b64 [call_node], %rd7;
-    st.param.b32 [call_enabled], %r7;
+    st.param.b32 [call_enabled], %r11;
     call.uni (call_result), cudaGraphKernelNodeSetEnabled,
         (call_node, call_enabled);
-    ld.param.b32 %r12, [call_result];
-    setp.ne.u32 %p7, %r12, 0;
-    @%p7 bra GROUP_CHECK;
-    setp.eq.u32 %p9, %r7, 0;
-    @%p9 bra GROUP_NEXT;
+    ld.param.b32 %r16, [call_result];
+    setp.ne.u32 %p11, %r16, 0;
+    @%p11 bra GROUP_FAIL;
+
+GROUP_GRID_CHECK:
+    setp.eq.u32 %p12, %r11, 0;
+    @%p12 bra GROUP_NEXT;
 
     st.param.b64 [call_node], %rd7;
-    st.param.b32 [call_grid+0], %r6;
-    mov.u32 %r11, 1;
-    st.param.b32 [call_grid+4], %r11;
-    st.param.b32 [call_grid+8], %r11;
+    st.param.b32 [call_grid+0], %r12;
+    mov.u32 %r18, 1;
+    st.param.b32 [call_grid+4], %r18;
+    st.param.b32 [call_grid+8], %r18;
     call.uni (call_result), cudaGraphKernelNodeSetGridDim,
         (call_node, call_grid);
-    ld.param.b32 %r12, [call_result];
-
-GROUP_CHECK:
-    setp.ne.u32 %p8, %r12, 0;
-    @%p8 st.global.u32 [%rd1+28], %r12;
-    @%p8 bra GROUP_DONE;
+    ld.param.b32 %r16, [call_result];
+    setp.ne.u32 %p11, %r16, 0;
+    @%p11 bra GROUP_FAIL;
 GROUP_NEXT:
-    add.u32 %r10, %r10, 1;
+    add.u32 %r17, %r17, 1;
     bra GROUP_LOOP;
 
+GROUP_COMMIT:
+    st.global.u32 [%rd1+32], %r12;
+    st.global.u32 [%rd1+36], %r11;
+    mov.u32 %r19, 1;
+    st.global.u32 [%rd1+40], %r19;
+    bra GROUP_DONE;
+
+GROUP_FAIL:
+    st.global.u32 [%rd1+44], %r16;
 GROUP_DONE:
     ret;
 }
@@ -484,6 +506,7 @@ bool ensure_bounded_module(std::uint32_t *driver_error) {
   return bounded_module_error == CUDA_SUCCESS && bounded_module != nullptr &&
          bounded_update_func != nullptr &&
          bounded_extent_update_func != nullptr &&
+         bounded_group_update_func != nullptr &&
          bounded_probe_payload_func != nullptr;
 }
 

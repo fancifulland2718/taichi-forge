@@ -105,6 +105,7 @@ class Sequential : public Node {
                              std::uint32_t capacity,
                              std::uint32_t block_dim,
                              bool adaptive_grid,
+                             bool grouped_update = false,
                              const std::string &dispatch_label = {});
 
   void dispatch_cpu_bounded(Kernel *kernel,
@@ -145,6 +146,7 @@ class GraphBuilder {
       std::uint32_t capacity,
       std::uint32_t block_dim,
       bool adaptive_grid,
+      bool grouped_update = false,
       const std::string &dispatch_label = {});
 
   Node *new_cpu_bounded_dispatch_node(
@@ -171,6 +173,7 @@ class GraphBuilder {
                              std::uint32_t capacity,
                              std::uint32_t block_dim,
                              bool adaptive_grid,
+                             bool grouped_update = false,
                              const std::string &dispatch_label = {});
 
   void dispatch_cpu_bounded(Kernel *kernel,
