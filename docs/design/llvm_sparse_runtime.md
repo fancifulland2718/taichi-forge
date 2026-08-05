@@ -227,6 +227,37 @@ Directory replacement happens only at a tree materialization boundary and
 retains power-of-two capacity until Program reset. Destroying a tree
 unregisters its generation before its runtime-state allocation is released.
 
+## CUDA compact root bindings
+
+The dynamic directory is the source of truth for lifecycle and sparse-runtime
+metadata, but it is not the field-addressing ABI for a CUDA no-return kernel.
+When such a kernel is registered, the launcher validates every dependency
+against the live host directory and snapshots the root pointers in the sorted
+full-kernel dependency order. A kernel with one tree stores that root directly;
+a kernel with multiple trees owns an immutable device table with one pointer
+per dependency. Every independently compiled offloaded task receives the same
+full-kernel order, so tasks with disjoint tree subsets cannot disagree about a
+slot.
+
+The binding is carried in the otherwise unused `RuntimeContext` result-buffer
+slot. LLVM emits its load in the task entry block, before the grid-stride loop,
+and marks a multi-tree slot load invariant. Direct launch and CUDA Graph replay
+therefore perform no per-access directory traversal and need no host readback
+or replay-time allocation. The single-tree case adds no device allocation. The
+multi-tree logical payload is `sizeof(void *) * dependency_count` for each
+registered kernel and is released with the launcher context; physical VRAM
+reservation may be larger because CUDA driver allocations have implementation-
+defined granularity.
+
+CPU kernels and LLVM kernels with return values retain the general directory
+accessor because the latter use the result-buffer slot for actual results. Old
+cached CUDA modules also safely ignore a supplied compact binding and continue
+to use the directory. Tree destruction still takes the Program lifecycle lock,
+drains device work, retires kernel/Graph launcher contexts, and unregisters the
+generation before freeing the root. Compact bindings therefore optimize an
+already validated pointer; they do not replace lifecycle validation or restore
+a fixed global SNode-id limit.
+
 The SNode memory allocator is the bedrock of sparse SNodes. The following sections explain how it is implemented.
 
 ## `NodeManager`: a recycling memory allocator

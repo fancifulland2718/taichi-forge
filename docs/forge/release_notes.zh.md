@@ -50,11 +50,18 @@
   4,099-node tree 相对 3-node tree 的 lookup 中位数在 CPU/CUDA 上分别为 1.011x/0.919x；
   513-tree 阶段把 directory 从 16 项增长到 1,024 项（8 KiB），销毁后 active-tree count
   恢复。这些是 scaling/ownership 结论，不是相对旧二进制的历史加速比。AMDGPU 采用同一
-  LLVM representation，但尚未取得资格；Vulkan 使用独立 sparse runtime。静态绑定的 LLVM
-  field access 现在只在每个 offloaded function 入口解析一次已经验证的 tree root；directory
-  边界、generation 与 lifetime 检查仍位于注册和 launch 边界，不再由每个 GPU thread 在热点
-  字段地址计算中反复执行。tree 销毁、无关 tree 退休、tree-id 复用以及 CPU/CUDA/Vulkan 共
-  12 项 Graph 生命周期资格仍保持应有的 fail-closed 行为。
+  LLVM representation，但尚未取得资格；Vulkan 使用独立 sparse runtime。CUDA 无返回值
+  kernel 现在会在注册时验证 live tree，随后获得不可变的紧凑 root binding：单 tree 直接携带
+  root pointer，不产生 binding allocation；多 tree 每个依赖只占 8 字节，而且即使不同 offload
+  访问互不相交的 tree，也统一使用完整 kernel 的稳定映射。生成的 root load 位于 grid-stride
+  loop 外，Graph replay 不执行 directory lookup、host readback、分配或同步。CPU 与有返回值的
+  LLVM kernel 继续使用通用 directory accessor；directory 边界、generation 与 lifetime 检查
+  仍保留在注册和 launch 边界。同一台 Windows RTX 5090 资格机器上的配对 synthetic HVP
+  probe 中，candidate 与公开 0.6.0 在 Nsight Compute 下分别执行 5,504/5,632 条 SASS 指令、
+  耗时 1.66/2.144 us，Graph replay 中位数为 11.122/11.255 us。这证明热点路径回退已被移除，
+  不代表所有应用都能获得额外加速。23 项定向生命周期与高 id 资格覆盖双 tree/双 offload
+  映射、销毁、无关 tree 退休、tree-id 复用、4,098-node tree 与 513 棵同时存活的 tree，且未
+  放宽 fail-closed 行为。
 - Windows CPU JIT session 现在会把每个 LLVM RuntimeDyld COFF object 放入同一个按页对齐的
   `Code -> read-only -> read-write` 映射中，满足 `ADDR32NB` 对 image-relative 顺序、32-bit
   span 以及大于系统页的 section alignment 要求；这替代了此前仅保留全部 object section、

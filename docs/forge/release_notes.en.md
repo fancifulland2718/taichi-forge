@@ -59,13 +59,24 @@ grouped under the behavior they shipped.
   recovered the active-tree count after destruction. These are scaling and
   ownership results, not a historical pre-refactor speedup. AMDGPU uses the
   same LLVM representation but remains unqualified; Vulkan has an independent
-  sparse-runtime implementation. Statically bound LLVM field access now
-  resolves the already validated tree root once at each offloaded function
-  entry. Directory bounds, generation, and lifetime checks remain at
-  registration and launch boundaries instead of being repeated by every GPU
-  thread during hot field address calculation. Destruction, unrelated-tree
-  retirement, tree-id reuse, and 12 CPU/CUDA/Vulkan Graph lifecycle cases
-  qualification continue to fail closed where required.
+  sparse-runtime implementation. CUDA no-return kernels now receive an
+  immutable compact root binding after live-tree validation at kernel
+  registration. A one-tree kernel carries the root pointer directly and needs
+  no binding allocation; a multi-tree kernel owns eight bytes per dependency,
+  and every offload uses the same full-kernel mapping even when its tree set is
+  disjoint from other tasks. The generated root load is outside the
+  grid-stride loop, while Graph replay performs no directory lookup, host
+  readback, allocation, or synchronization. CPU and result-returning LLVM
+  kernels retain the general directory accessor. Directory bounds, generation,
+  and lifetime checks remain at registration and launch boundaries. A matched
+  synthetic HVP probe on the Windows RTX 5090 qualification machine measured
+  5,504 versus 5,632 executed SASS instructions and 1.66 versus 2.144 us under
+  Nsight Compute for the candidate and public 0.6.0 respectively; Graph replay
+  medians were 11.122 versus 11.255 us. This qualifies removal of the hot-path
+  regression, not a universal application speedup. Twenty-three targeted
+  lifecycle and high-id cases covered two-tree/two-offload mapping,
+  destruction, unrelated-tree retirement, tree-id reuse, 4,098-node trees,
+  and 513 simultaneously live trees without weakening fail-closed behavior.
 - Windows CPU JIT sessions now allocate each LLVM RuntimeDyld COFF object from
   one page-aligned `Code -> read-only -> read-write` mapping. This satisfies
   the image-relative ordering and 32-bit span required by `ADDR32NB`, including
