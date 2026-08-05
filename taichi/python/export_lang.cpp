@@ -713,6 +713,20 @@ void export_lang(py::module &m) {
            &Program::RuntimeSubmissionTransaction::begin_gpu_region_timing)
       .def("_end_gpu_region_timing",
            &Program::RuntimeSubmissionTransaction::end_gpu_region_timing)
+      .def("_submission_statistics",
+           [](const Program::RuntimeSubmissionTransaction &transaction) {
+        const RuntimeSubmissionStatistics snapshot =
+            transaction.submission_statistics();
+        py::dict result;
+        result["kernel_submissions"] = snapshot.kernel_submissions;
+        result["graph_submissions"] = snapshot.graph_submissions;
+        result["graph_backend_submissions"] =
+            snapshot.graph_backend_submissions;
+        result["backend_graph_launches"] =
+            snapshot.backend_graph_launches;
+        result["native_submissions"] = snapshot.native_submissions;
+        return result;
+      })
       .def("_finish", &Program::RuntimeSubmissionTransaction::finish,
            py::call_guard<py::gil_scoped_release>());
 
@@ -903,6 +917,8 @@ void export_lang(py::module &m) {
             snapshot.submission.graph_submissions;
         submission["graph_backend_submissions"] =
             snapshot.submission.graph_backend_submissions;
+        submission["backend_graph_launches"] =
+            snapshot.submission.backend_graph_launches;
         submission["native_submissions"] =
             snapshot.submission.native_submissions;
         submission["failed_submissions"] =
@@ -1098,7 +1114,7 @@ void export_lang(py::module &m) {
         return program.runtime_trace().export_chrome_trace(path);
       })
       .def("_record_runtime_completion",
-           &Program::record_runtime_completion,
+           [](Program &program) { return program.record_runtime_completion(); },
            py::call_guard<py::gil_scoped_release>())
       .def("_record_runtime_graph_submission", [](Program &program) {
         program.record_runtime_submission_stat(RuntimeSubmissionKind::kGraph);

@@ -4964,7 +4964,7 @@ def test_structured_graph_vulkan_ticket_reports_opt_in_region_telemetry():
     args["counter"].fill(0)
     ticket = graph.submit(args, telemetry=True)
     report = ticket.telemetry()
-    assert report.schema_version == 4
+    assert report.schema_version == 5
     assert report.backend == "vulkan"
     assert report.sequence == ticket.sequence
     assert report.device_snapshot_bytes == 24
@@ -4988,6 +4988,20 @@ def test_structured_graph_vulkan_ticket_reports_opt_in_region_telemetry():
     assert not report.queue.exact
     assert report.queue.queue_submit_calls >= 2
     assert report.queue.batched_queue_submit_calls >= 1
+    execution = report.execution
+    assert execution.logical_graph_invocations == 1
+    assert execution.logical_region_definitions == 1
+    assert execution.logical_region_invocations == 1
+    assert execution.backend_graph_launches >= 1
+    assert execution.backend_graph_launches_exact
+    assert execution.stream_graph_enqueue_calls is None
+    assert not execution.stream_graph_enqueue_exact
+    assert (
+        execution.physical_queue_submissions
+        == report.queue.queue_submit_calls
+    )
+    assert not execution.physical_queue_submissions_exact
+    assert execution.physical_queue_scope == report.queue.scope
 
     assert len(report.regions) == 1
     region = report.regions[0]
@@ -5059,6 +5073,20 @@ def test_structured_graph_cuda_ticket_reports_opt_in_region_telemetry():
     assert report.backend == "cuda"
     assert report.sequence == ticket.sequence
     assert not report.queue.available
+    execution = report.execution
+    assert execution.logical_graph_invocations == 1
+    assert execution.logical_region_definitions == 1
+    assert execution.logical_region_invocations == 1
+    assert execution.backend_graph_launches >= 1
+    assert execution.backend_graph_launches_exact
+    assert (
+        execution.stream_graph_enqueue_calls
+        == execution.backend_graph_launches
+    )
+    assert execution.stream_graph_enqueue_exact
+    assert execution.physical_queue_submissions is None
+    assert not execution.physical_queue_submissions_exact
+    assert execution.physical_queue_scope == "unavailable"
     assert report.gpu_timestamp_status == "instrumented_exact"
     assert report.gpu_timestamp_scope == "whole_ticket"
     assert report.gpu_duration_ns is not None
@@ -5180,9 +5208,18 @@ def test_graph_ticket_reports_whole_gpu_timing_without_structured_regions():
     assert not graph._instance.structured_telemetry_arena_stats["materialized"]
 
     report = graph.submit(args, telemetry=True).telemetry()
-    assert report.schema_version == 4
+    assert report.schema_version == 5
     assert report.backend in ("cuda", "vulkan")
     assert report.regions == ()
+    assert report.execution.logical_graph_invocations == 1
+    assert report.execution.logical_region_definitions == 0
+    assert report.execution.logical_region_invocations == 0
+    assert (
+        report.execution.kernel_submissions
+        + report.execution.native_submissions
+        + report.execution.backend_graph_launches
+        >= 1
+    )
     assert report.device_snapshot_bytes == 0
     assert report.host_readback_bytes == 0
     assert report.gpu_timestamp_scope == "whole_ticket"

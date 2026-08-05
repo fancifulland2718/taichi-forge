@@ -60,7 +60,11 @@ def test_runtime_statistics_kernel_completion_sync_and_memory():
 
     prog = ti.lang.impl.get_runtime().prog
     before = prog._runtime_statistics_snapshot()
-    assert before["schema_version"] == 2
+    assert before["schema_version"] == 3
+    assert (
+        before["submission"]["backend_graph_launches"]
+        == before["submission"]["graph_backend_submissions"]
+    )
     assert before["backend"] in ("x64", "cuda", "vulkan")
     assert before["program_domain"] > 0
     assert before["memory"]["live_resources"] >= 1
@@ -283,6 +287,10 @@ def test_runtime_statistics_graph_adapter_matches_execution_report():
         key: after["submission"][key] - before["submission"][key]
         for key in after["submission"]
     }
+    assert (
+        submission_delta["backend_graph_launches"]
+        == submission_delta["graph_backend_submissions"]
+    )
     graph_delta = {
         key: after["graph"][key] - before["graph"][key]
         for key in after["graph"]

@@ -12,7 +12,7 @@ namespace taichi::lang {
 // Public runtime statistics snapshots use a versioned, backend-neutral POD
 // contract. Backends may populate only the fields they can measure; an
 // unavailable value is different from a measured zero.
-constexpr std::uint32_t kRuntimeStatisticsSchemaVersion = 2;
+constexpr std::uint32_t kRuntimeStatisticsSchemaVersion = 3;
 
 struct RuntimeOptionalCounter {
   std::uint64_t value{0};
@@ -22,7 +22,11 @@ struct RuntimeOptionalCounter {
 struct RuntimeSubmissionStatistics {
   std::uint64_t kernel_submissions{0};
   std::uint64_t graph_submissions{0};
+  // Compatibility name retained for schema-v1/v2 consumers. Both fields
+  // count successful backend Graph launches, not logical Graph invocations
+  // or physical driver queue submissions.
   std::uint64_t graph_backend_submissions{0};
+  std::uint64_t backend_graph_launches{0};
   std::uint64_t native_submissions{0};
   std::uint64_t failed_submissions{0};
 };
@@ -159,6 +163,8 @@ class TI_DLL_EXPORT RuntimeStatistics final {
     result.submission.graph_submissions = load(graph_submissions_);
     result.submission.graph_backend_submissions =
         load(graph_backend_submissions_);
+    result.submission.backend_graph_launches =
+        result.submission.graph_backend_submissions;
     result.submission.native_submissions = load(native_submissions_);
     result.submission.failed_submissions = load(failed_submissions_);
     result.synchronization.program_syncs = load(program_syncs_);

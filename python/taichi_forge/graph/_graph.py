@@ -857,6 +857,7 @@ class _GraphStructuredTelemetryState:
         self._sequence = sequence
         self._completion = None
         self._queue = None
+        self._submission_statistics = None
         self._host_submit_ns = 0
         self._result = None
         self._discarded = False
@@ -871,7 +872,7 @@ class _GraphStructuredTelemetryState:
     def recorder(self):
         return self._slot["recorder"]
 
-    def attach(self, completion, queue, host_submit_ns):
+    def attach(self, completion, queue, host_submit_ns, submission_statistics):
         with self._lock:
             if self._released:
                 raise TaichiRuntimeError(
@@ -882,6 +883,7 @@ class _GraphStructuredTelemetryState:
             # attaches this slot, but the token still owns the timing sample.
             self._completion = completion
             self._queue = queue
+            self._submission_statistics = dict(submission_statistics)
             self._host_submit_ns = int(host_submit_ns)
             self._slot["completion_sequence"] = int(completion.sequence)
         return self
@@ -907,6 +909,7 @@ class _GraphStructuredTelemetryState:
                 self._queue,
                 self._host_submit_ns,
                 self._completion,
+                self._submission_statistics,
             )
             self._result = result
             self._released = True
@@ -941,6 +944,7 @@ class _GraphStructuredTelemetryState:
                     self._queue,
                     self._host_submit_ns,
                     self._completion,
+                    self._submission_statistics,
                 )
             self._released = True
             release = True
@@ -1089,10 +1093,12 @@ class _GraphStructuredTelemetryLease:
         self._state = state
         self.recorder = state.recorder
 
-    def attach(self, completion, queue, host_submit_ns):
+    def attach(self, completion, queue, host_submit_ns, submission_statistics):
         if self._state is None:
             return None
-        state = self._state.attach(completion, queue, host_submit_ns)
+        state = self._state.attach(
+            completion, queue, host_submit_ns, submission_statistics
+        )
         self._state = None
         return state
 
@@ -1204,7 +1210,14 @@ class _GraphStructuredTelemetryArena:
                 )
             oldest.make_reusable()
 
-    def _read_slot(self, slot, queue, host_submit_ns, completion):
+    def _read_slot(
+        self,
+        slot,
+        queue,
+        host_submit_ns,
+        completion,
+        submission_statistics,
+    ):
         storage = slot["storage"]
         if storage is None:
             host = np.empty(shape=(0,), dtype=np.int32)
@@ -1343,12 +1356,19 @@ class _GraphStructuredTelemetryArena:
             bounded_snapshots=recorder.bounded_snapshots(values),
         )
         gpu_available = bool(gpu_timing["available"])
+        execution = _materialize_graph_submission_execution_telemetry(
+            backend=backend,
+            regions=regions,
+            queue=queue,
+            submission_statistics=submission_statistics,
+        )
         return GraphSubmissionTelemetry(
-            schema_version=4,
+            schema_version=5,
             backend=backend,
             sequence=int(slot["completion_sequence"]),
             regions=tuple(regions),
             queue=queue,
+            execution=execution,
             host_submit_ns=int(host_submit_ns),
             device_snapshot_bytes=int(host.nbytes),
             host_readback_bytes=int(host.nbytes),
@@ -2728,6 +2748,61 @@ class GraphSubmissionQueueTelemetry:
 
 
 @dataclass(frozen=True)
+class GraphSubmissionExecutionTelemetry:
+    """Submission taxonomy for one ticket, without backend overclaiming."""
+
+    logical_graph_invocations: int
+    logical_region_definitions: int
+    logical_region_invocations: int
+    kernel_submissions: int
+    native_submissions: int
+    backend_graph_launches: int
+    backend_graph_launches_exact: bool
+    stream_graph_enqueue_calls: Optional[int]
+    stream_graph_enqueue_exact: bool
+    physical_queue_submissions: Optional[int]
+    physical_queue_submissions_exact: bool
+    physical_queue_scope: str
+
+
+def _materialize_graph_submission_execution_telemetry(
+    *, backend, regions, queue, submission_statistics
+):
+    statistics = submission_statistics or {}
+    backend_launches = int(statistics.get("backend_graph_launches", 0))
+    logical_graph_invocations = int(statistics.get("graph_submissions", 0))
+    # A region snapshot represents one invocation of a top-level structured
+    # region. Nested child invocation multiplicity is populated by the nested
+    # lowering when it expands child snapshots.
+    logical_region_invocations = sum(
+        int(getattr(region, "logical_invocations", 1)) for region in regions
+    )
+    if backend == "cuda":
+        stream_graph_enqueue_calls = backend_launches
+        stream_graph_enqueue_exact = True
+    else:
+        stream_graph_enqueue_calls = None
+        stream_graph_enqueue_exact = False
+    physical_queue_submissions = (
+        int(queue.queue_submit_calls) if queue.available else None
+    )
+    return GraphSubmissionExecutionTelemetry(
+        logical_graph_invocations=logical_graph_invocations,
+        logical_region_definitions=len(regions),
+        logical_region_invocations=logical_region_invocations,
+        kernel_submissions=int(statistics.get("kernel_submissions", 0)),
+        native_submissions=int(statistics.get("native_submissions", 0)),
+        backend_graph_launches=backend_launches,
+        backend_graph_launches_exact=True,
+        stream_graph_enqueue_calls=stream_graph_enqueue_calls,
+        stream_graph_enqueue_exact=stream_graph_enqueue_exact,
+        physical_queue_submissions=physical_queue_submissions,
+        physical_queue_submissions_exact=bool(queue.available and queue.exact),
+        physical_queue_scope=str(queue.scope),
+    )
+
+
+@dataclass(frozen=True)
 class GraphPipelineBoundedDispatchReport:
     """Ticket-owned work and launch contract for one bounded dispatch."""
 
@@ -2824,6 +2899,7 @@ class GraphSubmissionTelemetry:
     sequence: int
     regions: Tuple[GraphSubmissionRegionTelemetry, ...]
     queue: GraphSubmissionQueueTelemetry
+    execution: GraphSubmissionExecutionTelemetry
     host_submit_ns: int
     device_snapshot_bytes: int
     host_readback_bytes: int
@@ -11502,6 +11578,11 @@ class Graph:
                     if observation_lease is not None:
                         observation_lease.enqueue_tail_readback()
                     completion = transaction._finish()
+                    submission_statistics = (
+                        transaction._submission_statistics()
+                        if telemetry
+                        else None
+                    )
                     host_submit_ns = time.perf_counter_ns() - host_submit_start_ns
                     queue_after = _queue_submission_snapshot() if telemetry else None
                     if temporary_lease is not None:
@@ -11515,6 +11596,7 @@ class Graph:
                             completion,
                             _queue_submission_delta(queue_before, queue_after),
                             host_submit_ns,
+                            submission_statistics,
                         )
                         telemetry_lease = None
                     if internal_storage_lease is not None:
@@ -11981,6 +12063,7 @@ __all__ = [
     "GraphControlFlowTrace",
     "GraphSubmissionRegionTelemetry",
     "GraphSubmissionQueueTelemetry",
+    "GraphSubmissionExecutionTelemetry",
     "GraphPipelineBoundedDispatchReport",
     "GraphPipelineStageReport",
     "GraphPipelineReport",

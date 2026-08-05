@@ -287,10 +287,18 @@ Program::RuntimeSubmissionTransaction::RuntimeSubmissionTransaction(
       submission_batch_open_ = false;
       throw;
     }
+    previous_telemetry_transaction_ =
+        Program::active_runtime_submission_telemetry_transaction();
+    Program::active_runtime_submission_telemetry_transaction() = this;
   }
 }
 
 Program::RuntimeSubmissionTransaction::~RuntimeSubmissionTransaction() {
+  if (gpu_timing_requested_ &&
+      Program::active_runtime_submission_telemetry_transaction() == this) {
+    Program::active_runtime_submission_telemetry_transaction() =
+        previous_telemetry_transaction_;
+  }
   if (program_ != nullptr && submission_batch_open_) {
     // Preserve already-recorded work on exception paths. A backend failure is
     // reported by the next explicit completion/synchronize boundary.
@@ -372,6 +380,11 @@ RuntimeCompletion Program::RuntimeSubmissionTransaction::finish() {
   // while this transaction still owns the corresponding reader.
   submission_scope_.reset();
   finished_ = true;
+  if (gpu_timing_requested_ &&
+      Program::active_runtime_submission_telemetry_transaction() == this) {
+    Program::active_runtime_submission_telemetry_transaction() =
+        previous_telemetry_transaction_;
+  }
   Program *program = std::exchange(program_, nullptr);
   return program->record_runtime_completion(
       std::move(gpu_timing_), std::move(gpu_region_timings_));
@@ -7217,6 +7230,13 @@ Program::begin_runtime_submission_transaction(bool gpu_timing) {
               "Cannot begin a submission transaction after Program finalize");
   return std::unique_ptr<RuntimeSubmissionTransaction>(
       new RuntimeSubmissionTransaction(this, gpu_timing));
+}
+
+Program::RuntimeSubmissionTransaction *&
+Program::active_runtime_submission_telemetry_transaction() noexcept {
+  static thread_local RuntimeSubmissionTransaction *active_transaction =
+      nullptr;
+  return active_transaction;
 }
 
 std::unordered_map<std::string, std::uint64_t>

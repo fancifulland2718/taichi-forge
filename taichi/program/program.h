@@ -192,6 +192,9 @@ class TI_DLL_EXPORT Program {
     void begin_gpu_region_timing(const std::string &path_id);
     void end_gpu_region_timing(const std::string &path_id);
     RuntimeCompletion finish();
+    RuntimeSubmissionStatistics submission_statistics() const noexcept {
+      return submission_statistics_;
+    }
 
    private:
     friend class Program;
@@ -203,6 +206,8 @@ class TI_DLL_EXPORT Program {
     bool submission_batch_open_{false};
     bool finished_{false};
     bool gpu_timing_requested_{false};
+    RuntimeSubmissionTransaction *previous_telemetry_transaction_{nullptr};
+    RuntimeSubmissionStatistics submission_statistics_;
     StreamGpuTiming gpu_timing_;
     std::vector<RuntimeGpuRegionTiming> gpu_region_timings_;
     std::vector<std::size_t> active_gpu_region_timings_;
@@ -325,6 +330,7 @@ class TI_DLL_EXPORT Program {
     // The dirty publication and schema-v1 telemetry are independent relaxed
     // operations; neither imposes cross-counter event ordering.
     mark_runtime_submission_pending();
+    record_runtime_submission_transaction_stat(kind);
     runtime_fault_domain_->statistics().record_submission(kind);
     if (runtime_trace_.enabled()) {
       runtime_trace_.record_instant(runtime_trace_kind(kind));
@@ -332,6 +338,7 @@ class TI_DLL_EXPORT Program {
   }
   TI_FORCE_INLINE void record_runtime_submission_stat(
       RuntimeSubmissionKind kind) noexcept {
+    record_runtime_submission_transaction_stat(kind);
     runtime_fault_domain_->statistics().record_submission(kind);
     if (runtime_trace_.enabled()) {
       runtime_trace_.record_instant(runtime_trace_kind(kind));
@@ -3444,6 +3451,32 @@ class TI_DLL_EXPORT Program {
   void release_runtime_submission_reader() noexcept;
   void acquire_runtime_submission_writer() noexcept;
   void release_runtime_submission_writer() noexcept;
+  static RuntimeSubmissionTransaction *&
+  active_runtime_submission_telemetry_transaction() noexcept;
+  TI_FORCE_INLINE void record_runtime_submission_transaction_stat(
+      RuntimeSubmissionKind kind) noexcept {
+    RuntimeSubmissionTransaction *transaction =
+        active_runtime_submission_telemetry_transaction();
+    if (transaction == nullptr || transaction->program_ != this) {
+      return;
+    }
+    auto &statistics = transaction->submission_statistics_;
+    switch (kind) {
+      case RuntimeSubmissionKind::kKernel:
+        ++statistics.kernel_submissions;
+        break;
+      case RuntimeSubmissionKind::kGraph:
+        ++statistics.graph_submissions;
+        break;
+      case RuntimeSubmissionKind::kGraphBackendSubmission:
+        ++statistics.graph_backend_submissions;
+        ++statistics.backend_graph_launches;
+        break;
+      case RuntimeSubmissionKind::kNative:
+        ++statistics.native_submissions;
+        break;
+    }
+  }
 
   CompileConfig compile_config_;
 
