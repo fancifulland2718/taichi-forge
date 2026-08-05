@@ -60,6 +60,10 @@ class TaskCodeGenLLVM : public IRVisitor, public LLVMModuleBuilder {
   bool returned{false};
   std::unordered_set<int> used_tree_ids;
   std::unordered_set<int> struct_for_tls_sizes;
+  // Sorted exactly like CompiledKernelData::used_snode_tree_ids. CUDA
+  // no-return kernels use this compact index rather than indexing a runtime
+  // directory by the process-global SNodeTree id.
+  std::vector<int> cuda_root_binding_tree_ids;
   const Callable *current_callable{nullptr};
 
   // The task_codegen_id represents the id of the offloaded task
@@ -83,7 +87,9 @@ class TaskCodeGenLLVM : public IRVisitor, public LLVMModuleBuilder {
                            TaichiLLVMContext &tlctx,
                            const Kernel *kernel,
                            IRNode *ir,
-                           std::unique_ptr<llvm::Module> &&module = nullptr);
+                           std::unique_ptr<llvm::Module> &&module = nullptr,
+                           const std::vector<int> *cuda_root_binding_tree_ids =
+                               nullptr);
 
   Arch current_arch() const {
     return compile_config.arch;

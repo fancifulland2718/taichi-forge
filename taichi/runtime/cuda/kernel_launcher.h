@@ -33,6 +33,9 @@ class KernelLauncher : public LLVM::KernelLauncher {
     std::vector<int> snode_tree_ids;
     std::vector<std::pair<std::vector<int>, Callable::Parameter>> parameters;
     std::vector<OffloadedTask> offloaded_tasks;
+    void *root_binding{nullptr};
+    std::shared_ptr<void> root_binding_owner;
+    bool uses_root_binding{false};
   };
 
  public:
@@ -109,6 +112,8 @@ class KernelLauncher : public LLVM::KernelLauncher {
   bool sparse_list_task_is_current(const OffloadedTask &task);
   void mark_sparse_list_task_launched(const OffloadedTask &task);
   void invalidate_sparse_list_cache(int sparse_mutation_snode_id);
+  void initialize_root_binding(const LLVM::CompiledKernelData &compiled,
+                               Context &context);
 
   bool listgen_reuse_adaptive_{false};
   // Sparse-list reuse metadata describes one CUDA runtime, not one launch.

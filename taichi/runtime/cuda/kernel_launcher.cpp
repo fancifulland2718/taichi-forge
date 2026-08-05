@@ -15,6 +15,15 @@ namespace cuda {
 
 namespace {
 
+std::shared_ptr<void> own_cuda_allocation(void *ptr) {
+  return std::shared_ptr<void>(ptr, [](void *allocation) {
+    if (allocation != nullptr) {
+      CUDAContext::get_instance().make_current();
+      CUDADriver::get_instance().mem_free(allocation);
+    }
+  });
+}
+
 void add_cuda_graph_execution_gate(LLVMCompiledKernel &compiled) {
   TI_ASSERT(compiled.module != nullptr);
   auto &module = *compiled.module;
@@ -67,6 +76,48 @@ void add_cuda_graph_execution_gate(LLVMCompiledKernel &compiled) {
 }
 
 }  // namespace
+
+void KernelLauncher::initialize_root_binding(
+    const LLVM::CompiledKernelData &compiled,
+    Context &context) {
+  // The result-buffer slot is otherwise unused for a no-return kernel. New
+  // kernels use it for the compact binding; old cached kernels safely ignore
+  // it and continue resolving roots through the runtime directory.
+  context.uses_root_binding = compiled.get_internal_data().rets.empty() &&
+                              !context.snode_tree_ids.empty();
+  if (!context.uses_root_binding) {
+    return;
+  }
+
+  TI_ASSERT(compiled.get_internal_data().rets.empty());
+  TI_ASSERT(!context.snode_tree_ids.empty());
+  TI_TRACE("Initializing CUDA root binding for {} SNodeTree(s)",
+           context.snode_tree_ids.size());
+  auto *executor = get_runtime_executor();
+  std::vector<void *> roots;
+  roots.reserve(context.snode_tree_ids.size());
+  for (int tree_id : context.snode_tree_ids) {
+    roots.push_back(executor->get_snode_tree_root_ptr(tree_id));
+  }
+
+  if (roots.size() == 1) {
+    context.root_binding = roots.front();
+    TI_TRACE("Using direct CUDA root binding {}", context.root_binding);
+    return;
+  }
+
+  CUDAContext::get_instance().make_current();
+  const std::size_t binding_bytes = roots.size() * sizeof(void *);
+  void *device_binding = nullptr;
+  CUDADriver::get_instance().malloc(&device_binding, binding_bytes);
+  auto owner = own_cuda_allocation(device_binding);
+  CUDADriver::get_instance().memcpy_host_to_device(
+      device_binding, roots.data(), binding_bytes);
+  context.root_binding = device_binding;
+  context.root_binding_owner = std::move(owner);
+  TI_TRACE("Using compact CUDA root table {} ({} bytes)",
+           context.root_binding, binding_bytes);
+}
 
 bool KernelLauncher::on_cuda_device(void *ptr) {
   unsigned int attr_val = 0;
@@ -293,10 +344,13 @@ bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
   }
 
   context = ctx.get_context();
-  // A zero-size result buffer is never dereferenced by the compiled tasks.
-  // Canonicalize it so capture packets do not retain a transient host address
-  // and compatible argument updates do not spuriously require recapture.
-  context.result_buffer = nullptr;
+  // A no-return CUDA field task repurposes this otherwise unused slot for its
+  // registration-owned compact root binding. Other tasks canonicalize it so
+  // capture packets do not retain a transient host address.
+  context.result_buffer = launcher_ctx->uses_root_binding
+                              ? static_cast<uint64_t *>(
+                                    launcher_ctx->root_binding)
+                              : nullptr;
   return true;
 }
 
@@ -752,6 +806,12 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
     ctx.get_context().result_buffer =
         (uint64 *)ensure_device_result_buffer();
   }
+  if (launcher_ctx->uses_root_binding) {
+    TI_ASSERT(ctx.result_buffer_size == 0);
+    TI_ASSERT(launcher_ctx->root_binding != nullptr);
+    ctx.get_context().result_buffer =
+        static_cast<uint64_t *>(launcher_ctx->root_binding);
+  }
   char *device_arg_buffer = nullptr;
   const std::size_t arg_buffer_prefix_size =
       ctx.has_cuda_bounded_range() ? sizeof(CudaBoundedRangeBinding) : 0;
@@ -867,6 +927,7 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
     ctx->snode_tree_ids = compiled.snode_tree_ids();
     ctx->parameters = std::move(parameters);
     ctx->offloaded_tasks = std::move(data.tasks);
+    initialize_root_binding(compiled, *ctx);
     const bool was_inserted = contexts_.emplace(index, std::move(ctx)).second;
     TI_ASSERT(was_inserted);
 
@@ -895,6 +956,7 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel_graph_gated(
   ctx->snode_tree_ids = compiled.snode_tree_ids();
   ctx->parameters = std::move(parameters);
   ctx->offloaded_tasks = std::move(data.tasks);
+  initialize_root_binding(compiled, *ctx);
   const bool inserted =
       contexts_.emplace(handle.get_launch_id(), std::move(ctx)).second;
   TI_ASSERT(inserted);

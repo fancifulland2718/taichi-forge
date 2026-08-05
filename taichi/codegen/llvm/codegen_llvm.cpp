@@ -579,7 +579,8 @@ TaskCodeGenLLVM::TaskCodeGenLLVM(int id,
                                  TaichiLLVMContext &tlctx,
                                  const Kernel *kernel,
                                  IRNode *ir,
-                                 std::unique_ptr<llvm::Module> &&module)
+                                 std::unique_ptr<llvm::Module> &&module,
+                                 const std::vector<int> *root_binding_tree_ids)
     // TODO: simplify LLVMModuleBuilder ctor input
     : LLVMModuleBuilder(
           module == nullptr ? tlctx.new_module("kernel") : std::move(module),
@@ -591,6 +592,10 @@ TaskCodeGenLLVM::TaskCodeGenLLVM(int id,
       task_codegen_id(id) {
   if (ir == nullptr)
     this->ir = kernel->ir.get();
+  if (compile_config.arch == Arch::cuda && kernel->rets.empty()) {
+    TI_ASSERT(root_binding_tree_ids != nullptr);
+    cuda_root_binding_tree_ids = *root_binding_tree_ids;
+  }
   initialize_context();
 
   context_ty = get_runtime_type("RuntimeContext");
@@ -3177,14 +3182,44 @@ llvm::Value *TaskCodeGenLLVM::get_root(int snode_tree_id) {
     return found->second;
   }
 
-  // Program/Graph launch validation owns the tree lifecycle transaction for
-  // the whole backend submission. Hoisting this unchecked lookup into the
-  // entry block both preserves dynamic-directory generality and keeps field
-  // address calculation as cheap as the former fixed root table.
   llvm::IRBuilderBase::InsertPointGuard guard(*builder);
   builder->SetInsertPoint(entry_block);
-  auto *root = call("LLVMRuntime_get_snode_tree_root_unchecked", get_runtime(),
-                    tlctx->get_constant(snode_tree_id));
+  llvm::Value *root = nullptr;
+  const auto binding = std::lower_bound(cuda_root_binding_tree_ids.begin(),
+                                        cuda_root_binding_tree_ids.end(),
+                                        snode_tree_id);
+  if (binding != cuda_root_binding_tree_ids.end() &&
+      *binding == snode_tree_id) {
+    TI_ASSERT(compile_config.arch == Arch::cuda && kernel->rets.empty());
+    auto *pointer_type = llvm::PointerType::get(*llvm_context, 0);
+    auto *zero = tlctx->get_constant(0);
+    auto *root_binding_field = builder->CreateGEP(
+        context_ty, get_context(), {zero, tlctx->get_constant(3)});
+    auto *compact_binding = builder->CreateAlignedLoad(
+        pointer_type, root_binding_field, llvm::Align(8),
+        "cuda_snode_root_binding");
+    if (cuda_root_binding_tree_ids.size() == 1) {
+      root = compact_binding;
+    } else {
+      const auto binding_index =
+          static_cast<std::uint64_t>(binding -
+                                     cuda_root_binding_tree_ids.begin());
+      auto *root_slot = builder->CreateInBoundsGEP(
+          pointer_type, compact_binding,
+          llvm::ConstantInt::get(llvm::Type::getInt64Ty(*llvm_context),
+                                 binding_index));
+      auto *root_load = builder->CreateAlignedLoad(
+          pointer_type, root_slot, llvm::Align(8), "cuda_snode_root");
+      root_load->setMetadata(
+          llvm::LLVMContext::MD_invariant_load,
+          llvm::MDNode::get(*llvm_context,
+                            llvm::ArrayRef<llvm::Metadata *>{}));
+      root = root_load;
+    }
+  } else {
+    root = call("LLVMRuntime_get_snode_tree_root_unchecked", get_runtime(),
+                tlctx->get_constant(snode_tree_id));
+  }
   function_roots.emplace(snode_tree_id, root);
   return root;
 }

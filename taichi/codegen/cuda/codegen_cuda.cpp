@@ -14,6 +14,7 @@
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
 #include "taichi/analysis/offline_cache_util.h"
+#include "taichi/analysis/gather_snode_tree_dependencies.h"
 #include "taichi/ir/analysis.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/codegen/codegen_utils.h"
@@ -22,6 +23,20 @@
 namespace taichi::lang {
 
 using namespace llvm;
+
+KernelCodeGenCUDA::KernelCodeGenCUDA(
+    const CompileConfig &compile_config,
+    const DeviceCapabilityConfig &device_caps,
+    const Kernel *kernel,
+    IRNode *ir,
+    TaichiLLVMContext &tlctx)
+    : KernelCodeGen(compile_config, kernel, ir, tlctx),
+      device_caps_(device_caps),
+      root_binding_tree_ids_(
+          kernel->rets.empty()
+              ? irpass::analysis::gather_snode_tree_dependencies(*ir)
+              : std::vector<int>{}) {
+}
 
 // NVVM IR Spec:
 // https://docs.nvidia.com/cuda/archive/10.0/pdf/NVVM_IR_Specification.pdf
@@ -46,8 +61,10 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
                            const DeviceCapabilityConfig &device_caps,
                            TaichiLLVMContext &tlctx,
                            const Kernel *kernel,
+                           const std::vector<int> &root_binding_tree_ids,
                            IRNode *ir = nullptr)
-      : TaskCodeGenLLVM(id, config, tlctx, kernel, ir),
+      : TaskCodeGenLLVM(id, config, tlctx, kernel, ir, nullptr,
+                        &root_binding_tree_ids),
         target_compute_capability_(
             device_caps.contains(DeviceCapability::cuda_compute_capability)
                 ? static_cast<int>(device_caps.get(
@@ -927,7 +944,8 @@ LLVMCompiledTask KernelCodeGenCUDA::compile_task(
     std::unique_ptr<llvm::Module> &&module,
     IRNode *block) {
   TaskCodeGenCUDA gen(task_codegen_id, config, device_caps_,
-                      get_taichi_llvm_context(), kernel, block);
+                      get_taichi_llvm_context(), kernel,
+                      root_binding_tree_ids_, block);
   return gen.run_compilation();
 }
 

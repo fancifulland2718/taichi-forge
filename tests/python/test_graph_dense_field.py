@@ -753,6 +753,50 @@ def test_dense_field_graph_template_owner_uses_two_dense_trees(container):
     assert source_tree is not target_tree
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_dense_field_graph_multi_offload_uses_kernel_root_mapping():
+    first = ti.field(dtype=ti.i32)
+    second = ti.field(dtype=ti.i32)
+    first_builder = ti.FieldsBuilder()
+    first_builder.dense(ti.i, 17).place(first)
+    first_tree = first_builder.finalize()
+    second_builder = ti.FieldsBuilder()
+    second_builder.dense(ti.i, 29).place(second)
+    second_tree = second_builder.finalize()
+
+    @ti.kernel
+    def advance():
+        for i in first:
+            first[i] += i + 1
+        for i in second:
+            second[i] += i * 2 + 3
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(advance)
+    graph = builder.compile()
+    range_tasks = [
+        task for task in graph.task_manifest() if task.task_type == "range_for"
+    ]
+    assert len(range_tasks) == 2
+    assert graph._spec.snode_tree_dependencies == {
+        (first_tree.id, first_tree.generation),
+        (second_tree.id, second_tree.generation),
+    }
+
+    graph.run({})
+    graph.run({})
+    ti.sync()
+    np.testing.assert_array_equal(
+        first.to_numpy(), (np.arange(17, dtype=np.int32) + 1) * 2
+    )
+    np.testing.assert_array_equal(
+        second.to_numpy(), (np.arange(29, dtype=np.int32) * 2 + 3) * 2
+    )
+
+    first_tree.destroy()
+    second_tree.destroy()
+
+
 @test_utils.test(arch=_DENSE_GRAPH_ARCHS)
 def test_dense_field_graph_destroyed_tree_is_rejected():
     values = ti.field(dtype=ti.i32)

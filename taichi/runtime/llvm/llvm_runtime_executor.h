@@ -67,6 +67,11 @@ class LlvmRuntimeExecutor {
 
   uint64_t *get_device_alloc_info_ptr(const DeviceAllocation &alloc);
 
+  // Returns the already-materialized root allocation after validating the
+  // tree id against the live host directory. CUDA uses this only while
+  // registering a generation-owned compact kernel binding.
+  void *get_snode_tree_root_ptr(int tree_id);
+
   const CompileConfig &get_config() const {
     return config_;
   }

@@ -13,10 +13,7 @@ class KernelCodeGenCUDA : public KernelCodeGen {
                              const DeviceCapabilityConfig &device_caps,
                              const Kernel *kernel,
                              IRNode *ir,
-                             TaichiLLVMContext &tlctx)
-      : KernelCodeGen(compile_config, kernel, ir, tlctx),
-        device_caps_(device_caps) {
-  }
+                             TaichiLLVMContext &tlctx);
 
 // TODO: Stop defining this macro guards in the headers
 #ifdef TI_WITH_LLVM
@@ -29,6 +26,7 @@ class KernelCodeGenCUDA : public KernelCodeGen {
 
  private:
   DeviceCapabilityConfig device_caps_;
+  std::vector<int> root_binding_tree_ids_;
 };
 
 }  // namespace taichi::lang

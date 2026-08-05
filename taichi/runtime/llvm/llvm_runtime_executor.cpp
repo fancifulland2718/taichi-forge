@@ -611,8 +611,17 @@ void LlvmRuntimeExecutor::print_memory_profiler_info(
 }
 
 DevicePtr LlvmRuntimeExecutor::get_snode_tree_device_ptr(int tree_id) {
-  DeviceAllocation tree_alloc = snode_tree_allocs_[tree_id];
-  return tree_alloc.get_ptr();
+  auto tree = snode_tree_allocs_.find(tree_id);
+  TI_ERROR_IF(tree == snode_tree_allocs_.end(),
+              "SNodeTree id={} has no live LLVM root allocation.", tree_id);
+  return tree->second.get_ptr();
+}
+
+void *LlvmRuntimeExecutor::get_snode_tree_root_ptr(int tree_id) {
+  auto tree = snode_tree_allocs_.find(tree_id);
+  TI_ERROR_IF(tree == snode_tree_allocs_.end(),
+              "SNodeTree id={} has no live LLVM root allocation.", tree_id);
+  return get_device_alloc_info_ptr(tree->second);
 }
 
 void LlvmRuntimeExecutor::initialize_llvm_runtime_snodes(
