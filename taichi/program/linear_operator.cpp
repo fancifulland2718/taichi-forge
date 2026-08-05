@@ -1335,11 +1335,20 @@ OperatorBinding make_adjoint_operator_binding(OperatorBinding operand) {
 
 namespace {
 
-void validate_synchronous_composite_operand(const OperatorAction &operand,
-                                            const char *role) {
-  TI_ERROR_IF(operand.capabilities().asynchronous_submit,
-              "M3 {} operator composition requires a synchronous operand; "
-              "GPU/Graph composite lowering is deferred.",
+void validate_composite_operand(const OperatorAction &operand,
+                                const char *role,
+                                Program *program) {
+  const bool gpu_composition =
+      program && !arch_is_cpu(program->compile_config().arch);
+  TI_ERROR_IF(!gpu_composition &&
+                  operand.capabilities().asynchronous_submit,
+              "{} operator composition requires a synchronous operand on "
+              "host and CPU.",
+              role);
+  TI_ERROR_IF(gpu_composition &&
+                  program->compile_config().arch != Arch::cuda &&
+                  program->compile_config().arch != Arch::vulkan,
+              "{} operator composition supports only CPU, CUDA, and Vulkan.",
               role);
 }
 
@@ -1354,11 +1363,59 @@ void validate_host_composite_views(const OperatorVectorView &input,
               "GPU/Graph lowering is deferred.");
 }
 
+void validate_device_composite_views(const OperatorVectorView &input,
+                                     const OperatorVectorView &output,
+                                     Program *program) {
+  TI_ERROR_IF(!program || input.program != program || output.program != program,
+              "GPU composite operator views must belong to their Program.");
+  TI_ERROR_IF(!input.ndarray || !output.ndarray,
+              "GPU composite operator lowering requires scalar ndarrays; "
+              "qualified Field operands are staged on device.");
+  TI_ERROR_IF(input.space.scalar_type != PrimitiveType::f32 ||
+                  output.space.scalar_type != PrimitiveType::f32,
+              "GPU composite operator lowering currently requires f32.");
+}
+
+void transform_composite_ndarray(Program *program,
+                                 Ndarray *values,
+                                 double scale) {
+  TI_ASSERT(program && values);
+  const Arch arch = program->compile_config().arch;
+  if (arch == Arch::cuda) {
+    TI_ERROR_IF(!program->cuda_device_transform_available(),
+                "CUDA composite scaling requires native device transform.");
+    program->cuda_device_transform_affine_ndarray(values, values, 1, scale,
+                                                   0.0);
+    return;
+  }
+  TI_ERROR_IF(arch != Arch::vulkan || !program->vulkan_transform_available() ||
+                  !program->vulkan_transform_value_type_available(1),
+              "Vulkan composite scaling requires native f32 transform.");
+  program->vulkan_transform_affine_ndarray_trusted(values, values, 1, scale,
+                                                    0.0);
+}
+
+void add_composite_ndarray(Program *program,
+                           Ndarray *addend,
+                           Ndarray *output) {
+  TI_ASSERT(program && addend && output);
+  const Arch arch = program->compile_config().arch;
+  if (arch == Arch::cuda) {
+    TI_ERROR_IF(!program->cuda_device_add_merge_available(),
+                "CUDA operator sum requires native device add-merge.");
+    program->cuda_device_add_merge_ndarray(addend, output, 1);
+    return;
+  }
+  TI_ERROR_IF(arch != Arch::vulkan || !program->vulkan_add_merge_available() ||
+                  !program->vulkan_add_merge_value_type_available(1),
+              "Vulkan operator sum requires native f32 add-merge.");
+  program->vulkan_add_merge_ndarray(addend, output, 1);
+}
+
 OperatorVectorView as_raw_composite_view(const OperatorVectorView &view,
                                          bool writable) {
   auto result = view;
   result.allocation_identity = view.data;
-  result.ndarray = nullptr;
   result.writable = writable;
   return result;
 }
@@ -1437,23 +1494,71 @@ struct HostCompositeScratch {
   std::vector<std::uint64_t> words;
 };
 
+struct CompositeScratch {
+  CompositeScratch(OperatorSpaceDesc space, Program *program)
+      : host(std::move(space)),
+        program(program),
+        program_lifetime(program ? program->weak_resource_lifetime_token()
+                                 : std::weak_ptr<ProgramLifetimeToken>{}) {
+    if (program) {
+      TI_ERROR_IF(
+          (!arch_is_cpu(program->compile_config().arch) &&
+           host.space.scalar_type != PrimitiveType::f32) ||
+              host.space.scalar_extent > static_cast<std::size_t>(
+                                             (std::numeric_limits<int>::max)()),
+          "Program-backed composite scratch requires an extent no larger "
+          "than INT_MAX and f32 storage on GPU.");
+      array = program->create_ndarray(
+          host.space.scalar_type,
+          {static_cast<int>(host.space.scalar_extent)},
+          ExternalArrayLayout::kNull, false);
+    }
+  }
+
+  ~CompositeScratch() {
+    Program::delete_ndarray_if_alive(program, program_lifetime, array);
+  }
+
+  OperatorVectorView view(Program *active_program) {
+    if (array) {
+      TI_ERROR_IF(active_program != program,
+                  "Composite scratch belongs to another Program.");
+      return OperatorVectorView::from_ndarray(program, *array, host.space,
+                                              true);
+    }
+    TI_ERROR_IF(active_program,
+                "Program-backed composite scratch requires an ndarray "
+                "allocation.");
+    return host.view(active_program);
+  }
+
+  Ndarray *ndarray() const {
+    return array;
+  }
+
+  HostCompositeScratch host;
+  Program *program{nullptr};
+  std::weak_ptr<ProgramLifetimeToken> program_lifetime;
+  Ndarray *array{nullptr};
+};
+
 struct SumCompositeScratch {
-  explicit SumCompositeScratch(const OperatorDescriptor &descriptor)
-      : forward(descriptor.range), adjoint(descriptor.domain) {
+  SumCompositeScratch(const OperatorDescriptor &descriptor, Program *program)
+      : forward(descriptor.range, program), adjoint(descriptor.domain, program) {
   }
 
   std::mutex mutex;
-  HostCompositeScratch forward;
-  HostCompositeScratch adjoint;
+  CompositeScratch forward;
+  CompositeScratch adjoint;
 };
 
 struct ProductCompositeScratch {
-  explicit ProductCompositeScratch(OperatorSpaceDesc intermediate)
-      : intermediate(std::move(intermediate)) {
+  ProductCompositeScratch(OperatorSpaceDesc intermediate, Program *program)
+      : intermediate(std::move(intermediate), program) {
   }
 
   std::mutex mutex;
-  HostCompositeScratch intermediate;
+  CompositeScratch intermediate;
 };
 
 OperatorTraitClaim structurally_derived_claim(
@@ -1648,16 +1753,21 @@ OperatorBinding make_identity_operator_binding(OperatorSpaceDesc space,
 }
 
 OperatorBinding make_scaled_operator_binding(double scale,
-                                              OperatorBinding operand) {
+                                              OperatorBinding operand,
+                                              Program *program) {
   TI_ERROR_IF(!std::isfinite(scale),
               "Scaled operator requires a finite scalar.");
   const auto &source = operand.action();
-  validate_synchronous_composite_operand(source, "scaled");
+  validate_composite_operand(source, "scaled", program);
   const auto descriptor = source.descriptor();
   const auto traits = scaled_operator_traits(scale, source);
   auto capabilities = source.capabilities();
   capabilities.native_generalized_apply = false;
-  capabilities.asynchronous_submit = false;
+  capabilities.asynchronous_submit =
+      program && !arch_is_cpu(program->compile_config().arch);
+  capabilities.explicit_sequence = capabilities.asynchronous_submit;
+  capabilities.dense_storage_operands = false;
+  capabilities.dense_storage_affine_operands = false;
   const std::string provider_name =
       "scale(" + source.provider_name() + ")";
   auto metadata = make_composite_metadata_action(
@@ -1666,18 +1776,28 @@ OperatorBinding make_scaled_operator_binding(double scale,
   return OperatorBinding::from_generation_publisher(
       std::move(metadata),
       [operand = std::move(operand), descriptor, traits, capabilities,
-       provider_name, scale] {
+       provider_name, scale, program] {
         auto source_generation = operand.pin();
         const auto stamp = source_generation.resource_stamp();
         auto action = OperatorAction(
             descriptor, traits, capabilities, provider_name,
             [stamp] { return stamp; },
-            [source_generation = std::move(source_generation), scale](
+            [source_generation = std::move(source_generation), scale,
+             program](
                 OperatorApplyMode mode, const OperatorVectorView &input,
                 const OperatorVectorView &output) {
-              validate_host_composite_views(input, output);
+              if (program && !arch_is_cpu(program->compile_config().arch)) {
+                validate_device_composite_views(input, output, program);
+              } else {
+                validate_host_composite_views(input, output);
+              }
               source_generation.apply_overwrite(mode, input, output);
-              scale_composite_vector(scale, output);
+              if (program && !arch_is_cpu(program->compile_config().arch)) {
+                transform_composite_ndarray(
+                    program, const_cast<Ndarray *>(output.ndarray), scale);
+              } else {
+                scale_composite_vector(scale, output);
+              }
             });
         return OperatorPinnedAction::from_retained_action(std::move(action),
                                                           stamp);
@@ -1751,13 +1871,21 @@ OperatorVectorView composite_subview(const OperatorVectorView &view,
   result.space = space;
   result.data += scalar_offset * data_type_size(space.scalar_type);
   result.allocation_identity = result.data;
+  // An offset view no longer describes the original ndarray or dense-storage
+  // binding. Block-diagonal composition is host-only until subrange bindings
+  // have a first-class runtime representation.
+  result.ndarray = nullptr;
+  result.dense_storage = nullptr;
+  result.runtime_storage = nullptr;
+  result.resolved_dense_storage = nullptr;
   return result;
 }
 
 }  // namespace
 
 OperatorBinding make_sum_operator_binding(OperatorBinding left,
-                                           OperatorBinding right) {
+                                           OperatorBinding right,
+                                           Program *program) {
   const auto &left_action = left.action();
   const auto &right_action = right.action();
   TI_ERROR_IF(left_action.descriptor().domain !=
@@ -1765,8 +1893,8 @@ OperatorBinding make_sum_operator_binding(OperatorBinding left,
                   left_action.descriptor().range !=
                       right_action.descriptor().range,
               "Operator sum requires identical operand descriptors.");
-  validate_synchronous_composite_operand(left_action, "sum");
-  validate_synchronous_composite_operand(right_action, "sum");
+  validate_composite_operand(left_action, "sum", program);
+  validate_composite_operand(right_action, "sum", program);
 
   const auto descriptor = left_action.descriptor();
   const auto traits = sum_operator_traits(left_action, right_action);
@@ -1774,13 +1902,17 @@ OperatorBinding make_sum_operator_binding(OperatorBinding left,
   capabilities.adjoint_apply =
       left_action.capabilities().adjoint_apply &&
       right_action.capabilities().adjoint_apply;
+  capabilities.asynchronous_submit =
+      program && !arch_is_cpu(program->compile_config().arch);
+  capabilities.explicit_sequence = capabilities.asynchronous_submit;
+  capabilities.persistent_workspace = program != nullptr;
   const std::string provider_name =
       "sum(" + left_action.provider_name() + "," +
       right_action.provider_name() + ")";
   std::vector<OperatorBinding> operands;
   operands.push_back(std::move(left));
   operands.push_back(std::move(right));
-  auto scratch = std::make_shared<SumCompositeScratch>(descriptor);
+  auto scratch = std::make_shared<SumCompositeScratch>(descriptor, program);
   auto metadata = make_composite_metadata_action(
       descriptor, traits, capabilities, provider_name, [operands] {
         return combine_operator_generations(
@@ -1798,7 +1930,14 @@ OperatorBinding make_sum_operator_binding(OperatorBinding left,
             [pins = std::move(pins), scratch](
                 OperatorApplyMode mode, const OperatorVectorView &input,
                 const OperatorVectorView &output) {
-              validate_host_composite_views(input, output);
+              const bool device = input.program &&
+                                  !arch_is_cpu(
+                                      input.program->compile_config().arch);
+              if (device) {
+                validate_device_composite_views(input, output, input.program);
+              } else {
+                validate_host_composite_views(input, output);
+              }
               std::lock_guard<std::mutex> lock(scratch->mutex);
               auto raw_input = as_raw_composite_view(input, false);
               auto raw_output = as_raw_composite_view(output, true);
@@ -1807,9 +1946,21 @@ OperatorBinding make_sum_operator_binding(OperatorBinding left,
                        ? scratch->forward
                        : scratch->adjoint)
                       .view(input.program);
+              TI_ERROR_IF(input.program &&
+                              (!raw_input.ndarray ||
+                               !raw_output.ndarray || !temporary.ndarray),
+                          "Program-backed operator sum requires ndarray "
+                          "views for input, output, and scratch.");
               pins[0].apply_overwrite(mode, raw_input, raw_output);
               pins[1].apply_overwrite(mode, raw_input, temporary);
-              add_composite_vector(temporary, raw_output);
+              if (device) {
+                add_composite_ndarray(
+                    input.program,
+                    const_cast<Ndarray *>(temporary.ndarray),
+                    const_cast<Ndarray *>(raw_output.ndarray));
+              } else {
+                add_composite_vector(temporary, raw_output);
+              }
             });
         return OperatorPinnedAction::from_retained_action(std::move(action),
                                                           stamp);
@@ -1817,15 +1968,16 @@ OperatorBinding make_sum_operator_binding(OperatorBinding left,
 }
 
 OperatorBinding make_composed_operator_binding(OperatorBinding outer,
-                                                OperatorBinding inner) {
+                                                OperatorBinding inner,
+                                                Program *program) {
   const auto &outer_action = outer.action();
   const auto &inner_action = inner.action();
   TI_ERROR_IF(inner_action.descriptor().range !=
                   outer_action.descriptor().domain,
               "Operator composition requires the inner range to equal the "
               "outer domain.");
-  validate_synchronous_composite_operand(outer_action, "product");
-  validate_synchronous_composite_operand(inner_action, "product");
+  validate_composite_operand(outer_action, "product", program);
+  validate_composite_operand(inner_action, "product", program);
 
   const OperatorDescriptor descriptor{inner_action.descriptor().domain,
                                       outer_action.descriptor().range};
@@ -1835,6 +1987,10 @@ OperatorBinding make_composed_operator_binding(OperatorBinding outer,
   capabilities.adjoint_apply =
       outer_action.capabilities().adjoint_apply &&
       inner_action.capabilities().adjoint_apply;
+  capabilities.asynchronous_submit =
+      program && !arch_is_cpu(program->compile_config().arch);
+  capabilities.explicit_sequence = capabilities.asynchronous_submit;
+  capabilities.persistent_workspace = program != nullptr;
   const std::string provider_name =
       "compose(" + outer_action.provider_name() + "," +
       inner_action.provider_name() + ")";
@@ -1842,7 +1998,7 @@ OperatorBinding make_composed_operator_binding(OperatorBinding outer,
   operands.push_back(std::move(outer));
   operands.push_back(std::move(inner));
   auto scratch = std::make_shared<ProductCompositeScratch>(
-      intermediate_space);
+      intermediate_space, program);
   auto metadata = make_composite_metadata_action(
       descriptor, traits, capabilities, provider_name, [operands] {
         return combine_operator_generations(
@@ -1860,7 +2016,12 @@ OperatorBinding make_composed_operator_binding(OperatorBinding outer,
             [pins = std::move(pins), scratch](
                 OperatorApplyMode mode, const OperatorVectorView &input,
                 const OperatorVectorView &output) {
-              validate_host_composite_views(input, output);
+              if (input.program &&
+                  !arch_is_cpu(input.program->compile_config().arch)) {
+                validate_device_composite_views(input, output, input.program);
+              } else {
+                validate_host_composite_views(input, output);
+              }
               std::lock_guard<std::mutex> lock(scratch->mutex);
               auto raw_input = as_raw_composite_view(input, false);
               auto raw_output = as_raw_composite_view(output, true);
@@ -1889,7 +2050,7 @@ OperatorBinding make_block_diagonal_operator_binding(
   bool adjoint_apply = true;
   for (const auto &block : blocks) {
     const auto &action = block.action();
-    validate_synchronous_composite_operand(action, "block-diagonal");
+    validate_composite_operand(action, "block-diagonal", nullptr);
     TI_ERROR_IF(!same_composite_space_kind(
                     action.descriptor().domain, first_descriptor.domain) ||
                     !same_composite_space_kind(
@@ -4239,7 +4400,8 @@ make_scaled_operator_handle(
     LinearOperatorHandle &operand) {
   return std::make_unique<LinearOperatorHandle>(
       operand.program(),
-      make_scaled_operator_binding(scale, operand.binding()));
+      make_scaled_operator_binding(scale, operand.binding(),
+                                   operand.program()));
 }
 
 namespace {
@@ -4262,7 +4424,8 @@ make_sum_operator_handle(
   validate_same_public_operator_program(left, right, "sum");
   return std::make_unique<LinearOperatorHandle>(
       left.program(),
-      make_sum_operator_binding(left.binding(), right.binding()));
+      make_sum_operator_binding(left.binding(), right.binding(),
+                                left.program()));
 }
 
 std::unique_ptr<LinearOperatorHandle>
@@ -4272,7 +4435,8 @@ make_composed_operator_handle(
   validate_same_public_operator_program(outer, inner, "composition");
   return std::make_unique<LinearOperatorHandle>(
       outer.program(),
-      make_composed_operator_binding(outer.binding(), inner.binding()));
+      make_composed_operator_binding(outer.binding(), inner.binding(),
+                                     outer.program()));
 }
 
 std::unique_ptr<LinearOperatorHandle>

@@ -28,6 +28,41 @@ def _compiled_identity(size):
     )
 
 
+def _compiled_graph_identity(size, *, multi_dispatch=False):
+    topology = ti.ndarray(ti.i32, shape=size)
+    topology.from_numpy(np.arange(size, dtype=np.int32))
+
+    @ti.kernel
+    def apply_identity(
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(size):
+            y[index] = x[topology_data[index]]
+
+    topology_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "topology", ti.i32, ndim=1)
+    input_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "input", ti.f32, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1)
+    builder = ti.graph.GraphBuilder()
+    workspace = None
+    if multi_dispatch:
+        temporary = ti.ndarray(ti.f32, shape=size)
+        temporary_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "temporary", ti.f32, ndim=1)
+        builder.dispatch(apply_identity, topology_arg, input_arg, temporary_arg)
+        builder.dispatch(apply_identity, topology_arg, temporary_arg, output_arg)
+        workspace = {"temporary": temporary}
+    else:
+        builder.dispatch(apply_identity, topology_arg, input_arg, output_arg)
+    return ti.linalg.LinearOperator.from_graph(
+        builder.compile(),
+        size,
+        topology={"topology": topology},
+        workspace=workspace,
+        traits=ti.linalg.OperatorTraits.spd(),
+    )
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_dense_scalar_field_apply_solve_and_staging_reuse():
     values = np.arange(6, dtype=np.float32).reshape(2, 3)
@@ -136,6 +171,86 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
         volume_source, out=volume_output
     )
     np.testing.assert_array_equal(volume_output.to_numpy(), volume_values)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+@pytest.mark.parametrize("multi_dispatch", [False, True])
+def test_compiled_graph_direct_scalar_field_operands(multi_dispatch):
+    values = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+    source = ti.field(ti.f32, shape=values.shape)
+    output = ti.field(ti.f32, shape=values.shape)
+    source.from_numpy(values)
+
+    operator = _compiled_graph_identity(values.size, multi_dispatch=multi_dispatch)
+    assert operator.capabilities.dense_storage_operands
+    assert operator.apply(source, out=output) is output
+    assert operator.apply(source, out=output) is output
+    np.testing.assert_array_equal(output.to_numpy(), values)
+
+    stats = operator.statistics()["vector_io"]
+    assert stats["staging_buffer_builds"] == 0
+    assert stats["pack_calls"] == 0
+    assert stats["unpack_calls"] == 0
+    assert stats["direct_dense_field_submissions"] == 2
+    assert stats["direct_bindings"] == 4
+    assert stats["last_input_execution_mode"] == "direct_contiguous"
+    assert stats["last_output_execution_mode"] == "direct_contiguous"
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_compiled_graph_direct_packed_fields_and_outer_graph_action():
+    vector_values = np.arange(12, dtype=np.float32).reshape(2, 2, 3)
+    vector_source = ti.Vector.field(3, ti.f32, shape=(2, 2))
+    vector_output = ti.Vector.field(3, ti.f32, shape=(2, 2))
+    vector_source.from_numpy(vector_values)
+    vector_operator = _compiled_graph_identity(vector_values.size)
+    vector_operator.apply(vector_source, out=vector_output)
+    np.testing.assert_array_equal(vector_output.to_numpy(), vector_values)
+
+    matrix_values = np.arange(16, dtype=np.float32).reshape(2, 2, 2, 2)
+    matrix_source = ti.Matrix.field(2, 2, ti.f32, shape=(2, 2))
+    matrix_output = ti.Matrix.field(2, 2, ti.f32, shape=(2, 2))
+    matrix_source.from_numpy(matrix_values)
+    matrix_base = _compiled_graph_identity(matrix_values.size, multi_dispatch=True)
+    matrix_operator = (2.0 * matrix_base + matrix_base).compose(matrix_base)
+
+    input_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "input", ti.f32, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1)
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(matrix_operator.graph_action(input_arg, output_arg))
+    graph = builder.compile()
+    graph.run({"input": matrix_source, "output": matrix_output})
+    graph.run({"input": matrix_source, "output": matrix_output})
+    np.testing.assert_array_equal(matrix_output.to_numpy(), matrix_values * 3.0)
+
+    assert vector_operator.statistics()["vector_io"]["direct_dense_field_submissions"] == 1
+    graph_stats = graph.execution_stats()
+    assert graph_stats.runtime_arg_count == 2
+    assert graph_stats.memory.transient_temporary_bytes == matrix_values.size * 8
+    assert graph_stats.memory.persistent_temporary_bytes == matrix_values.size * 8
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_graph_cached_direct_field_binding_rejects_destroyed_tree():
+    size = 4
+    source = ti.field(ti.f32)
+    output = ti.field(ti.f32)
+    source_builder = ti.FieldsBuilder()
+    source_builder.dense(ti.i, size).place(source)
+    source_builder.dense(ti.i, size).place(output)
+    source_tree = source_builder.finalize()
+    source.from_numpy(np.arange(size, dtype=np.float32))
+
+    operator = _compiled_graph_identity(size)
+    input_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "input", ti.f32, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1)
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(operator.graph_action(input_arg, output_arg))
+    graph = builder.compile()
+    graph.run({"input": source, "output": output})
+    source_tree.destroy()
+    with pytest.raises(RuntimeError, match="(?:destroyed|retired) SNodeTree"):
+        graph.run({"input": source, "output": output})
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

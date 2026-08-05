@@ -839,11 +839,14 @@ OperatorBinding make_adjoint_operator_binding(OperatorBinding operand);
 OperatorBinding make_identity_operator_binding(OperatorSpaceDesc space,
                                                 Program *program = nullptr);
 OperatorBinding make_scaled_operator_binding(double scale,
-                                              OperatorBinding operand);
+                                              OperatorBinding operand,
+                                              Program *program = nullptr);
 OperatorBinding make_sum_operator_binding(OperatorBinding left,
-                                           OperatorBinding right);
+                                           OperatorBinding right,
+                                           Program *program = nullptr);
 OperatorBinding make_composed_operator_binding(OperatorBinding outer,
-                                                OperatorBinding inner);
+                                                OperatorBinding inner,
+                                                Program *program = nullptr);
 OperatorBinding make_block_diagonal_operator_binding(
     std::vector<OperatorBinding> blocks);
 

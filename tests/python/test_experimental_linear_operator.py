@@ -117,6 +117,17 @@ def test_experimental_identity_composition_and_apply():
     with pytest.raises(TypeError):
         identity.traits["positive_definite"]["value"] = False
 
+    f64_identity = ti.linalg.identity(4, dtype=ti.f64)
+    f64_values = ti.ndarray(ti.f64, shape=4)
+    f64_values.from_numpy(np.asarray([1.0, -2.0, 3.0, 0.5], dtype=np.float64))
+    f64_composed = (2.0 * f64_identity + f64_identity).compose(f64_identity)
+    np.testing.assert_allclose(
+        f64_composed.apply(f64_values).to_numpy(),
+        3.0 * f64_values.to_numpy(),
+        rtol=1.0e-12,
+    )
+    assert f64_composed.capabilities.persistent_workspace
+
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_experimental_cg_and_bicgstab_reuse_plans():
@@ -301,6 +312,7 @@ def test_experimental_kernel_traits_numeric_update_and_cg():
         assert stats["operations"]["host_scalar_readbacks"] == 1
     assert result.converged
     np.testing.assert_allclose(result.solution.to_numpy(), exact, rtol=2e-4)
+
     exact_initial = plan.solve(rhs, initial_guess=_vector(exact))
     assert exact_initial.converged and exact_initial.iterations == 0
 
@@ -323,6 +335,111 @@ def test_experimental_kernel_traits_numeric_update_and_cg():
     np.testing.assert_allclose(
         operator.apply(_vector(np.ones(size))).to_numpy(), updated.to_numpy()
     )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_recordable_operator_scale_sum_compose_and_workspace_reuse():
+    size = 8
+    topology = ti.ndarray(ti.i32, shape=size)
+    topology.from_numpy(np.arange(size, dtype=np.int32))
+    diagonal = _vector(np.linspace(1.5, 3.25, size, dtype=np.float32))
+
+    @ti.kernel
+    def diagonal_apply(
+        active_size: ti.i32,
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        numeric_data: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(active_size):
+            y[index] = numeric_data[index] * x[topology_data[index]]
+
+    base = ti.linalg.LinearOperator.from_kernel(
+        diagonal_apply,
+        size,
+        topology,
+        numeric=diagonal,
+        traits=ti.linalg.OperatorTraits.spd(),
+    )
+    composed = (2.0 * base + base).compose(base)
+    values = np.linspace(-1.0, 1.0, size, dtype=np.float32)
+    source = _vector(values)
+    output = ti.ndarray(ti.f32, shape=size)
+    expected = 3.0 * diagonal.to_numpy() ** 2 * values
+
+    composed.apply(source, out=output)
+    composed.apply(source, out=output)
+    np.testing.assert_allclose(output.to_numpy(), expected, rtol=2e-5)
+
+    input_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "input", ti.f32, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1)
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(composed.graph_action(input_arg, output_arg))
+    graph = builder.compile()
+    graph.run({"input": source, "output": output})
+    first_memory = graph.execution_stats().memory
+    graph.run({"input": source, "output": output})
+    second_memory = graph.execution_stats().memory
+    np.testing.assert_allclose(output.to_numpy(), expected, rtol=2e-5)
+    assert first_memory.transient_temporary_bytes == size * 8
+    assert first_memory.temporary_plan_materialized
+    assert first_memory.temporary_arena_allocations == 1
+    assert second_memory.temporary_arena_allocations == 1
+    assert second_memory.temporary_arena_reuses >= 1
+
+    second_values = values + 0.25
+    second_source = _vector(second_values)
+    first_async_output = ti.ndarray(ti.f32, shape=size)
+    second_async_output = ti.ndarray(ti.f32, shape=size)
+    first_ticket = graph.submit({"input": source, "output": first_async_output})
+    second_ticket = graph.submit({"input": second_source, "output": second_async_output})
+    first_ticket.wait()
+    second_ticket.wait()
+    np.testing.assert_allclose(first_async_output.to_numpy(), expected, rtol=2e-5)
+    np.testing.assert_allclose(
+        second_async_output.to_numpy(),
+        3.0 * diagonal.to_numpy() ** 2 * second_values,
+        rtol=2e-5,
+    )
+    async_memory = graph.execution_stats().memory
+    assert 1 <= async_memory.temporary_arena_allocations <= 2
+    assert async_memory.temporary_arena_slots <= 2
+
+    spd_composition = 0.5 * base + 0.5 * base
+    exact = np.sin(np.linspace(0.1, 1.1, size, dtype=np.float32))
+    plan = ti.linalg.experimental.SolvePlan(
+        spd_composition,
+        method="cg",
+        max_iterations=32,
+        atol=1e-5,
+    )
+    if impl.current_cfg().arch in (ti.cuda, ti.vulkan):
+        capabilities = plan.execution_capabilities()
+        assert not capabilities["bounded_convergent"]["supported"]
+        assert capabilities["device_convergent"]["supported"]
+        assert capabilities["device_convergent"]["automatic_selection_qualified"]
+        with pytest.raises(RuntimeError, match="require the qualified device_convergent"):
+            ti.linalg.experimental.SolvePlan(
+                spd_composition,
+                method="cg",
+                max_iterations=32,
+                atol=1e-5,
+                execution_policy="host_check_every_k",
+                check_interval=4,
+            )
+    if (
+        impl.current_cfg().arch in (ti.cuda, ti.vulkan)
+        and not plan.execution_capabilities()["device_convergent"]["supported"]
+    ):
+        pytest.skip("recordable structured Graph control is unavailable")
+    result = plan.solve(_vector(diagonal.to_numpy() * exact))
+    assert result.converged
+    np.testing.assert_allclose(result.solution.to_numpy(), exact, rtol=3e-3)
+    if impl.current_cfg().arch in (ti.cuda, ti.vulkan):
+        stats = plan.statistics()
+        assert stats["identity"]["solver_execution_policy"] == ("device_convergent")
+        assert stats["operations"]["host_scalar_readbacks"] == 1
 
 
 @test_utils.test(

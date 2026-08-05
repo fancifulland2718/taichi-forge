@@ -148,7 +148,13 @@ struct CompiledKernelLinearOperator::ResourceGeneration {
     TI_ERROR_IF(mode != OperatorApplyMode::forward || !valid_operand(input) ||
                     !valid_operand(output),
                 "Compiled-kernel operator generation requires forward "
-                "ndarray or resolved dense storage views.");
+                "ndarray or resolved dense storage views (mode={}, "
+                "input_ndarray={}, input_dense={}, output_ndarray={}, "
+                "output_dense={}).",
+                static_cast<int>(mode), input.ndarray != nullptr,
+                input.dense_storage && input.resolved_dense_storage,
+                output.ndarray != nullptr,
+                output.dense_storage && output.resolved_dense_storage);
     std::lock_guard<std::mutex> lock(launch_mutex);
     // CPU launchers lower kNdarray placeholders to raw pointers in place.
     // Restore every fixed slot so this context remains generation-stable.
