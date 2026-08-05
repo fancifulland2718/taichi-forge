@@ -157,7 +157,10 @@ grouped under the behavior they shipped.
   stopped at iteration 16. This crossover is workload-specific, not a general
   claim that masked control is faster than native CUDA control.
 - Added single-ticket execution for the strictly qualified depth-two
-  `while -> while` shape. CPU performs exact host control and returns a
+  `while -> ordered while[1..8]` shape. The outer body may place ordinary
+  actions between leaf inner loops; inner controls must be disjoint and the
+  complete hierarchy remains capped at 4,096 encoded actions. CPU performs
+  exact host control and returns a
   completed ticket; Vulkan uses bounded conditional replay; CUDA uses bounded
   static topology without an intermediate host readback. A qualified Driver
   API 12.4+ CUDA runtime first passes a cached setup probe and then uses
@@ -185,6 +188,33 @@ grouped under the behavior they shipped.
   higher-memory route is a warm replay optimization, not a cold-start claim.
   These figures qualify this machine and workload rather than a universal
   backend speedup.
+  A separate ordered-two-inner qualification used four active outer steps,
+  4,096 items, first-inner stops 6/7/8/9, and second-inner stop 2. The single
+  ticket measured 796.15 us on CUDA and 2,045.45 us on Vulkan, versus
+  4,463.7 us and 6,522.1 us for an optimistic host-known outer loop that still
+  waited for each adaptive inner Graph: 5.61x and 3.19x faster respectively.
+- Graph submission telemetry schema v5 now separates logical Graph and region
+  invocations, backend Graph launches, CUDA stream enqueues, and physical queue
+  submissions. CUDA leaves the physical-queue count explicitly unavailable;
+  Vulkan reports a device transaction-window delta and marks it non-exact.
+  Ticket-owned nested telemetry preserves every inner stop position and uses
+  `logical_invocations` to distinguish repeated child calls from the final
+  iteration count. The opt-in path adds no host readback to normal submissions.
+- Graphs containing exclusive Graph-owned solver storage can now compile with
+  one to 64 workspace lanes. Lanes are materialized lazily, selected from
+  completed lanes in round-robin order, and may be pinned per submission;
+  saturation either waits or fails immediately by policy. This removes the
+  completion-fence dependency between queued solves while preserving separate
+  terminals and workspaces. It does not create backend streams or promise GPU
+  overlap. Memory reporting includes lane capacity, materialized/busy counts,
+  waits, saturation failures, and aggregate persistent bytes; each additional
+  materialized lane has linear workspace cost. In paired-order local Windows
+  diagnostics, two lanes reduced two-solve completion by 11.6-22.5% on CUDA
+  at 4,194,304 items and by 6.1-7.9% on Vulkan at 262,144 items. Internal
+  storage doubled exactly from 83,918,892 to 167,837,784 bytes on CUDA and
+  from 5,244,972 to 10,489,944 bytes on Vulkan. These non-strict-idle figures
+  qualify the queueing mechanism, not general solver throughput or GPU
+  parallelism.
 - Added read-only offloaded-task manifests and JIT dispatch labels. A manifest
   reports stable task identity, `cpu_scheduler`/`grid_stride`/
   `device_bounded_grid_stride`/`one_to_one`/`not_applicable` range mapping,

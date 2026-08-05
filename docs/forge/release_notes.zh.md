@@ -115,8 +115,10 @@
   Graph median 为 366.9 us，原生 conditional Graph 为 465.3 us，portable control 为
   1,410.9 us，三条路线都准确停在第 16 次。这是特定 workload 的 crossover，不表示 masked
   control 通常快于原生 CUDA control。
-- 新增严格限定的 depth-2 `while -> while` 单 ticket 执行。CPU 使用精确 host control 并
-  返回 completed ticket；Vulkan 使用 bounded conditional replay；CUDA 使用 bounded
+- 新增严格限定的 depth-2 `while -> ordered while[1..8]` 单 ticket 执行。outer body
+  可以在各 leaf inner loop 之间放置普通 action；inner control 必须互不别名，完整层级仍
+  最多编码 4,096 个 action。CPU 使用精确 host control 并返回 completed ticket；Vulkan
+  使用 bounded conditional replay；CUDA 使用 bounded
   静态拓扑，且两层之间不做 host readback。通过资格的 Driver API 12.4+ CUDA runtime 会
   先执行缓存的 setup probe，再使用 device-updatable kernel-node group，每个业务 dispatch
   只编译一次；较旧或未通过资格的 runtime 使用 Forge 自有、与版本无关的双 gate
@@ -135,6 +137,27 @@
   14,272 B）、强制 CUDA masking 648 B、Vulkan 1,304 B、CPU 0 B。CUDA cold invocation
   约为 104 ms，fallback 约为 101 ms，因此高内存路径是 warm replay 优化，不是 cold-start
   提速声明。这些数字只限定本机和当前 workload，不代表所有 backend 的无条件收益。
+  另一组 ordered-two-inner 资格 workload 使用 4 个 active outer step、4,096 item、第一
+  inner 停在 6/7/8/9、第二 inner 停在 2。单 ticket 在 CUDA/Vulkan 上分别为
+  796.15/2,045.45 us；乐观的 host-known outer loop 仍需等待每个 adaptive inner Graph，
+  分别为 4,463.7/6,522.1 us，即快 5.61x/3.19x。
+- Graph submission telemetry schema v5 现在分别报告 logical Graph/region invocation、
+  backend Graph launch、CUDA stream enqueue 与物理 queue submission。CUDA 会明确把物理
+  queue count 标记为不可用；Vulkan 报告 device transaction-window delta，并标记为非精确。
+  ticket 持有的 nested telemetry 会保留每个 inner 的停止位置，并以
+  `logical_invocations` 区分 child 被重复调用的次数与最终 iteration count。该 opt-in 路径
+  不给普通 submission 增加 host readback。
+- 含 exclusive Graph-owned solver storage 的 Graph 现在可以配置一至 64 个 workspace
+  lane。lane 按需惰性物化，自动 round-robin 优先选择已完成的 lane，也可以逐 submission
+  固定；全部占用时按策略等待或立即失败。它消除了多个已排队 solve 之间的 completion-fence
+  依赖，同时保持 terminal 与 workspace 独立；不会创建 backend stream，也不承诺 GPU
+  重叠执行。memory report 会报告 lane capacity、materialized/busy 数量、wait、saturation
+  failure 与聚合 persistent bytes；每个额外物化 lane 都线性增加 workspace 成本。本地
+  Windows 的正反顺序诊断中，双 lane 在 4,194,304-item CUDA 上把两次 solve 总完成时间
+  降低 11.6-22.5%，在 262,144-item Vulkan 上降低 6.1-7.9%。internal storage 在 CUDA
+  上严格从 83,918,892 增至 167,837,784 B，在 Vulkan 上从 5,244,972 增至
+  10,489,944 B。这些非 strict-idle 数字只资格化 queueing 机制，不代表通用 solver
+  throughput 或 GPU 物理并行。
 - 新增只读 offloaded-task manifest 与 JIT dispatch label。manifest 在不发起 profiler probe
   的前提下报告稳定 task identity、`cpu_scheduler`/`grid_stride`/
   `device_bounded_grid_stride`/`one_to_one`/`not_applicable` range mapping、
