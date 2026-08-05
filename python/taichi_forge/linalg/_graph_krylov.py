@@ -58,6 +58,7 @@ class GraphKrylovSolver:
             name: ti.ndarray(ti.f32, shape=self._size)
             for name in ("ax", "r", "z", "p", "ap")
         }
+        self._direct_solution = None
         self._reduction_block_dim = 256
         self._reduction_items_per_thread = 4
         reduction_threads = (
@@ -116,6 +117,18 @@ class GraphKrylovSolver:
         reduction_items_per_thread = self._reduction_items_per_thread
         reduction_partial_count = self._reduction_partial_count
         reduction_worker_count = self._reduction_worker_count
+
+        @ti.kernel
+        def initialize_solution(
+            initial_x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            use_initial_guess: ti.i32,
+        ):
+            for index in range(size):
+                if use_initial_guess != 0:
+                    x[index] = initial_x[index]
+                else:
+                    x[index] = 0.0
 
         @ti.kernel
         def initialize_blocks(
@@ -417,6 +430,16 @@ class GraphKrylovSolver:
                     p[index] = z[index] + beta[None] * p[index]
 
         @ti.kernel
+        def export_solution(
+            x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            copy_output: ti.i32,
+        ):
+            for index in range(size):
+                if copy_output != 0:
+                    output[index] = x[index]
+
+        @ti.kernel
         def write_terminal(
             status: ti.types.ndarray(dtype=ti.i32, ndim=0),
             counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
@@ -431,7 +454,10 @@ class GraphKrylovSolver:
             terminal[3] = residual_sq[None]
             terminal[4] = norm_b_sq[None]
 
-        vectors = {name: _array_arg(name) for name in ("b", "x", *self._vectors)}
+        vectors = {
+            name: _array_arg(name)
+            for name in ("b", "initial_x", "x", "output", *self._vectors)
+        }
         partials = {
             name: _array_arg(name) for name in self._reduction_partials
         }
@@ -442,8 +468,16 @@ class GraphKrylovSolver:
         status = _scalar_array_arg("status", ti.i32)
         counter = _scalar_array_arg("counter", ti.i32)
         terminal = _array_arg("terminal")
+        use_initial_guess = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "use_initial_guess", ti.i32)
+        copy_output = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "copy_output", ti.i32)
 
         builder = ti.graph.GraphBuilder()
+        builder.dispatch(
+            initialize_solution,
+            vectors["initial_x"],
+            vectors["x"],
+            use_initial_guess,
+        )
         builder.append_native(
             self._operator.graph_action(vectors["x"], vectors["ax"])
         )
@@ -599,6 +633,12 @@ class GraphKrylovSolver:
             name=f"linear_operator_{self._method}",
         )
         builder.dispatch(
+            export_solution,
+            vectors["x"],
+            vectors["output"],
+            copy_output,
+        )
+        builder.dispatch(
             write_terminal,
             status,
             counter,
@@ -608,6 +648,7 @@ class GraphKrylovSolver:
             terminal,
         )
         self._kernels = (
+            initialize_solution,
             initialize_blocks,
             finalize_initialize,
             seed_cg,
@@ -622,6 +663,7 @@ class GraphKrylovSolver:
             finalize_next,
             prepare_beta,
             update_direction,
+            export_solution,
             write_terminal,
         )
         graph = builder.compile()
@@ -645,10 +687,20 @@ class GraphKrylovSolver:
             "breakdown_reason": "none",
         }
 
-    def solve_arrays(self, x, b):
+    def solve_arrays(self, x, b, initial_x=None, *, direct_output=False):
+        use_initial_guess = initial_x is not None
+        if direct_output and self._direct_solution is None:
+            self._direct_solution = ti.ndarray(ti.f32, shape=self._size)
+        work_x = self._direct_solution if direct_output else x
+        if initial_x is None:
+            initial_x = work_x
         arguments = {
-            "x": x,
+            "x": work_x,
+            "output": x,
             "b": b,
+            "initial_x": initial_x,
+            "use_initial_guess": int(use_initial_guess),
+            "copy_output": int(direct_output),
             **self._vectors,
             **self._reduction_partials,
             **self._scalars,
@@ -743,8 +795,9 @@ class GraphKrylovSolver:
     def _debug_runtime_stats(self):
         iterations = int(self._last_result["iterations"])
         reduction_workspace_bytes = self._reduction_partial_count * 2 * 4
+        persistent_vector_count = 5 + int(self._direct_solution is not None)
         workspace_bytes = (
-            (5 * self._size + 5 + 8) * 4
+            (persistent_vector_count * self._size + 5 + 8) * 4
             + 3 * 4
             + reduction_workspace_bytes
         )
@@ -789,6 +842,9 @@ class GraphKrylovSolver:
             "reduction_block_dim": self._reduction_block_dim,
             "reduction_items_per_thread": self._reduction_items_per_thread,
             "reduction_workspace_bytes": reduction_workspace_bytes,
+            "direct_solution_workspace_bytes": (
+                self._size * 4 if self._direct_solution is not None else 0
+            ),
         }
         operations = {
             "solve_calls": self._solve_calls,

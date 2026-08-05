@@ -106,21 +106,36 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
 
     stats = plan.statistics()
     vector_stats = stats["vector_io"]
-    assert vector_stats["staging_buffer_builds"] == 2
-    assert vector_stats["staging_buffer_reuses"] == 2
+    direct_solve = stats["execution_capabilities"]["direct_dense_field_solve"]["selected"]
+    if direct_solve:
+        assert vector_stats["staging_buffer_builds"] == 0
+        assert vector_stats["staging_buffer_reuses"] == 0
+        assert vector_stats["transfer_plan_builds"] == 0
+        assert vector_stats["transfer_plan_reuses"] == 0
+        assert vector_stats["transfer_native_submissions"] == 0
+        assert vector_stats["transfer_graph_submissions"] == 0
+        assert vector_stats["pack_calls"] == 0
+        assert vector_stats["unpack_calls"] == 0
+        assert vector_stats["completion_syncs"] == 0
+        assert vector_stats["direct_graph_solve_submissions"] == 2
+        assert vector_stats["direct_graph_solve_full_boundary_submissions"] == 2
+        assert vector_stats["direct_dense_field_submissions"] == 2
+        assert vector_stats["direct_graph_solve_field_bindings"] == 4
+    else:
+        assert vector_stats["staging_buffer_builds"] == 2
+        assert vector_stats["staging_buffer_reuses"] == 2
+        assert vector_stats["transfer_plan_builds"] == 2
+        assert vector_stats["transfer_plan_reuses"] == 2
+        assert vector_stats["transfer_native_submissions"] == (
+            0 if impl.current_cfg().arch == ti.cuda else 4
+        )
+        assert vector_stats["transfer_graph_submissions"] == (
+            4 if impl.current_cfg().arch == ti.cuda else 0
+        )
+        assert vector_stats["pack_calls"] == 2
+        assert vector_stats["unpack_calls"] == 2
+        assert vector_stats["completion_syncs"] == 2
     assert vector_stats["implicit_view_builds"] == 2
-    assert vector_stats["implicit_view_reuses"] == 2
-    assert vector_stats["transfer_plan_builds"] == 2
-    assert vector_stats["transfer_plan_reuses"] == 2
-    assert vector_stats["transfer_native_submissions"] == (
-        0 if impl.current_cfg().arch == ti.cuda else 4
-    )
-    assert vector_stats["transfer_graph_submissions"] == (
-        4 if impl.current_cfg().arch == ti.cuda else 0
-    )
-    assert vector_stats["pack_calls"] == 2
-    assert vector_stats["unpack_calls"] == 2
-    assert vector_stats["completion_syncs"] == 2
     assert stats["execution_capabilities"]["vector_io"]["dense_field"][
         "execution_mode"
     ] == "provider_qualified"
@@ -129,6 +144,9 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
     assert capabilities["dense_field"]["zero_copy"] is False
     assert capabilities["dense_field"]["zero_copy_condition"] == (
         "canonical full field and provider dense_storage_operands"
+    )
+    assert capabilities["dense_field"]["solve_direct_binding_semantics"] == (
+        "Graph-fused boundary copy into plan-owned iterative storage"
     )
     assert capabilities["dense_field"]["value_host_transfer"] is False
     assert capabilities["dense_field"]["conversion_scope"] == (
@@ -157,6 +175,14 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
         assert device_stats["identity"]["backend_family"] == (
             "vulkan" if impl.current_cfg().arch == ti.vulkan else "cuda"
         )
+        device_vector_stats = device_stats["vector_io"]
+        assert device_vector_stats["staging_buffer_builds"] == 0
+        assert device_vector_stats["pack_calls"] == 0
+        assert device_vector_stats["unpack_calls"] == 0
+        assert device_vector_stats["transfer_graph_submissions"] == 0
+        assert device_vector_stats["transfer_native_submissions"] == 0
+        assert device_vector_stats["direct_graph_solve_submissions"] == 1
+        assert device_vector_stats["direct_dense_field_submissions"] == 1
         if impl.current_cfg().arch == ti.vulkan:
             control = device_plan._solver._graph.control_flow_stats()[0]
             assert control.lowering == "vulkan_compact_indirect"
@@ -171,6 +197,117 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
         volume_source, out=volume_output
     )
     np.testing.assert_array_equal(volume_output.to_numpy(), volume_values)
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+@pytest.mark.parametrize("method", ["cg", "pcg"])
+def test_graph_krylov_composition_binds_full_fields_and_initial_guess_directly(
+    method,
+):
+    size = 16
+    values = np.linspace(0.25, 4.0, size, dtype=np.float32)
+    rhs = ti.field(ti.f32, shape=size)
+    solution = ti.field(ti.f32, shape=size)
+    initial = ti.field(ti.f32, shape=size)
+    rhs.from_numpy(values)
+    initial.from_numpy(values)
+
+    base = _compiled_identity(size)
+    operator = 0.5 * base + 0.5 * base
+    options = {}
+    if method == "pcg":
+        options["preconditioner"] = base
+    plan = ti.linalg.experimental.SolvePlan(
+        operator,
+        method=method,
+        max_iterations=8,
+        atol=1e-6,
+        execution_policy="device_convergent",
+        **options,
+    )
+
+    cold = plan.solve(rhs, out=solution)
+    warm = plan.solve(rhs, initial_guess=initial, out=solution)
+    solution.from_numpy(values)
+    aliased_initial = plan.solve(rhs, initial_guess=solution, out=solution)
+
+    assert cold.converged and cold.iterations == 1
+    assert warm.converged and warm.iterations == 0
+    assert aliased_initial.converged and aliased_initial.iterations == 0
+    np.testing.assert_allclose(solution.to_numpy(), values, rtol=1e-6)
+
+    stats = plan.statistics()["vector_io"]
+    assert stats["staging_buffer_builds"] == 0
+    assert stats["pack_calls"] == 0
+    assert stats["unpack_calls"] == 0
+    assert stats["transfer_graph_submissions"] == 0
+    assert stats["transfer_native_submissions"] == 0
+    assert stats["direct_graph_solve_submissions"] == 3
+    assert stats["direct_graph_solve_full_boundary_submissions"] == 3
+    assert stats["direct_graph_solve_field_bindings"] == 8
+    assert stats["direct_graph_solve_initial_guess_bindings"] == 2
+    assert stats["direct_dense_field_submissions"] == 3
+
+    with pytest.raises(RuntimeError, match="RHS and output may not alias"):
+        plan.solve(rhs, out=rhs)
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_graph_krylov_indexed_views_remain_explicitly_staged():
+    source = ti.field(ti.f32, shape=6)
+    output = ti.field(ti.f32, shape=6)
+    source.from_numpy(np.arange(6, dtype=np.float32))
+    output.fill(-1)
+    indices = ti.ndarray(ti.i32, shape=3)
+    indices.from_numpy(np.asarray([5, 1, 3], dtype=np.int32))
+    source_view = ti.linalg.vector_view(source, indices=indices)
+    output_view = ti.linalg.vector_view(output, indices=indices)
+
+    plan = ti.linalg.experimental.SolvePlan(
+        _compiled_identity(3),
+        method="cg",
+        max_iterations=8,
+        atol=1e-6,
+        execution_policy="device_convergent",
+    )
+    result = plan.solve(source_view, out=output_view)
+    assert result.converged
+    np.testing.assert_array_equal(
+        output.to_numpy(),
+        np.asarray([-1, 1, -1, 3, -1, 5], dtype=np.float32),
+    )
+
+    stats = plan.statistics()["vector_io"]
+    assert stats["staging_buffer_builds"] == 2
+    assert stats["pack_calls"] == 1
+    assert stats["unpack_calls"] == 1
+    assert stats["direct_graph_solve_submissions"] == 0
+    assert stats["direct_graph_solve_full_boundary_submissions"] == 0
+    assert stats["direct_dense_field_submissions"] == 0
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_graph_krylov_cached_direct_field_rejects_destroyed_tree():
+    size = 4
+    rhs = ti.field(ti.f32)
+    solution = ti.field(ti.f32)
+    builder = ti.FieldsBuilder()
+    builder.dense(ti.i, size).place(rhs)
+    builder.dense(ti.i, size).place(solution)
+    tree = builder.finalize()
+    rhs.from_numpy(np.arange(size, dtype=np.float32))
+
+    plan = ti.linalg.experimental.SolvePlan(
+        _compiled_identity(size),
+        method="cg",
+        max_iterations=8,
+        atol=1e-6,
+        execution_policy="device_convergent",
+    )
+    assert plan.solve(rhs, out=solution).converged
+    tree.destroy()
+    with pytest.raises(RuntimeError, match="(?:destroyed|retired) SNodeTree"):
+        plan.solve(rhs, out=solution)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

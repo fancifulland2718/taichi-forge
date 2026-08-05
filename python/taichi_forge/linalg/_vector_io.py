@@ -1093,6 +1093,13 @@ def vector_io_capabilities():
             "zero_copy_condition": (
                 "canonical full field and provider dense_storage_operands"
             ),
+            "solve_direct_binding_scope": (
+                "CUDA/Vulkan recordable f32 CG/PCG with contiguous full-field "
+                "RHS, solution, or initial guess"
+            ),
+            "solve_direct_binding_semantics": (
+                "Graph-fused boundary copy into plan-owned iterative storage"
+            ),
         },
         "sparse_snode": {
             "execution_mode": "unavailable",
@@ -1133,6 +1140,10 @@ class _VectorIOCache:
             "direct_bindings": 0,
             "direct_dense_field_submissions": 0,
             "direct_dense_view_submissions": 0,
+            "direct_graph_solve_submissions": 0,
+            "direct_graph_solve_full_boundary_submissions": 0,
+            "direct_graph_solve_field_bindings": 0,
+            "direct_graph_solve_initial_guess_bindings": 0,
             "direct_storage_operand_builds": 0,
             "direct_storage_operand_reuses": 0,
             "completion_syncs": 0,
@@ -1288,6 +1299,42 @@ class _VectorIOCache:
             "kDirectContiguous",
             "kDirectContiguous",
         )
+
+    def record_direct_graph_solve(self, input_operand, output_operand, initial_operand):
+        direct_operands = tuple(
+            operand
+            for operand in (input_operand, output_operand, initial_operand)
+            if operand is not None and operand.direct_dense
+        )
+        if not direct_operands:
+            return
+
+        def public_mode(mode):
+            return {
+                "kDirectContiguous": "direct_contiguous",
+                "kDirectAffine": "direct_affine",
+            }[mode]
+
+        self._stats["direct_graph_solve_submissions"] += 1
+        self._stats["direct_bindings"] += len(direct_operands)
+        self._stats["direct_graph_solve_field_bindings"] += sum(
+            operand.storage_kind == "dense_field" for operand in direct_operands
+        )
+        self._stats["direct_graph_solve_initial_guess_bindings"] += int(
+            initial_operand is not None and initial_operand.direct_dense
+        )
+        if input_operand.direct_dense:
+            self._stats["last_input_storage"] = input_operand.storage_kind
+            self._stats["last_input_execution_mode"] = public_mode(input_operand.execution_mode)
+        if output_operand.direct_dense:
+            self._stats["last_output_storage"] = output_operand.storage_kind
+            self._stats["last_output_execution_mode"] = public_mode(output_operand.execution_mode)
+        if input_operand.direct_dense and output_operand.direct_dense:
+            self._stats["direct_graph_solve_full_boundary_submissions"] += 1
+            if input_operand.storage_kind == output_operand.storage_kind == "dense_field":
+                self._stats["direct_dense_field_submissions"] += 1
+            else:
+                self._stats["direct_dense_view_submissions"] += 1
 
     def record_completion_sync(self):
         self._stats["completion_syncs"] += 1

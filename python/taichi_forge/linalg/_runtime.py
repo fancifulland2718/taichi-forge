@@ -240,6 +240,109 @@ class _DirectStorageOperand:
     alias_owner_key: object
 
 
+@dataclass(frozen=True)
+class _GraphKrylovOperand:
+    public: object
+    runtime_value: object
+    staged: Optional[_VectorOperand]
+    description: object
+    storage_kind: str
+    execution_mode: str
+    exact_key: tuple
+    alias_owner_key: object
+    direct_dense: bool
+
+
+def _graph_krylov_staged_operand(operand):
+    description = _flatten_storage_to_scalar_vector(describe_storage(operand.array))
+    if description.descriptor is None:
+        raise TaichiRuntimeError("Graph Krylov staging ndarray could not be described")
+    return _GraphKrylovOperand(
+        public=operand.public,
+        runtime_value=operand.array,
+        staged=operand,
+        description=description,
+        storage_kind="ndarray",
+        execution_mode="kDirectContiguous",
+        exact_key=operand.exact_key,
+        alias_owner_key=operand.alias_owner_key,
+        direct_dense=False,
+    )
+
+
+def _try_direct_graph_krylov_operand(value, role, size, dtype, vector_cache, binding_cache):
+    if isinstance(value, ScalarNdarray):
+        return None
+    normalized = _direct_scalar_storage_description(value, role, vector_cache)
+    if normalized is None:
+        return None
+    public_view, description, storage_kind, alias_owner_key = normalized
+    descriptor = description.descriptor
+    properties = description.properties
+    if (
+        descriptor.scalar_type != dtype
+        or int(properties["scalar_count"]) != int(size)
+        or tuple(descriptor.index_shape) != (int(size),)
+        or tuple(descriptor.element_shape)
+    ):
+        raise TaichiRuntimeError(f"{role} must have scalar dtype {dtype} and extent {size}")
+
+    source = public_view._field if isinstance(public_view, VectorView) else value
+    cached = binding_cache.get(role)
+    if cached is not None and cached[0] is value and cached[1] == int(size):
+        dense_view, execution_mode, exact_key = cached[2:]
+    else:
+        try:
+            dense_view = DenseNdarrayView(source, description)
+            if _current_program().config().arch == _ti_core.Arch.cuda:
+                try:
+                    argument = dense_view._runtime_storage_argument("graph_capture", "capture")
+                except ValueError:
+                    argument = dense_view._runtime_storage_argument("graph_replay", "replay")
+            else:
+                argument = dense_view._runtime_storage_argument("graph_replay", "replay")
+        except ValueError:
+            return None
+        qualification = dict(argument.qualification)
+        execution_mode = qualification["execution_mode"]
+        if (
+            not qualification["zero_copy_qualified"]
+            or not qualification["replayable"]
+            or qualification["reason"] != "kNone"
+            or execution_mode != "kDirectContiguous"
+        ):
+            return None
+        if isinstance(public_view, VectorView):
+            exact_key = ("dense_field", public_view._exact_view_key)
+        else:
+            exact_key = (
+                "dense_storage",
+                tuple(descriptor.resource_identity),
+                int(descriptor.fingerprint),
+            )
+        binding_cache[role] = (value, int(size), dense_view, execution_mode, exact_key)
+    return _GraphKrylovOperand(
+        public=value,
+        runtime_value=dense_view,
+        staged=None,
+        description=description,
+        storage_kind=storage_kind,
+        execution_mode=execution_mode,
+        exact_key=exact_key,
+        alias_owner_key=alias_owner_key,
+        direct_dense=True,
+    )
+
+
+def _graph_krylov_operands_overlap(left, right):
+    alias = analyze_storage_alias(left.description, right.description)
+    return alias != "kProvenDisjoint" and left.alias_owner_key == right.alias_owner_key
+
+
+def _graph_krylov_operands_exact(left, right):
+    return left.exact_key == right.exact_key
+
+
 def _direct_scalar_storage_description(value, role, cache):
     if isinstance(value, DenseNdarrayView):
         if value._runtime_prog is not _current_program():
@@ -1276,6 +1379,24 @@ def _cached_graph_dense_vector_binding(cache, name, value, extent):
     return description, view
 
 
+def _validate_graph_dense_vector_disjoint(descriptions, message):
+    alias = analyze_storage_alias(*descriptions)
+    if alias == "kProvenDisjoint":
+        return
+    descriptors = tuple(description.descriptor for description in descriptions)
+    source_kinds = {str(descriptor.source_kind) for descriptor in descriptors}
+    has_dense_field = any(
+        kind.startswith("kDense") and kind.endswith("Field")
+        for kind in source_kinds
+    )
+    if "kNdarray" in source_kinds and has_dense_field and all(
+        kind == "kNdarray" or kind.startswith("kDense") and kind.endswith("Field")
+        for kind in source_kinds
+    ):
+        return
+    raise TaichiRuntimeError(f"{message} ({alias})")
+
+
 class _LinearOperatorGraphExecutable(NativeGraphExecutable):
     def __init__(self, operator, input_arg, output_arg, adjoint):
         from taichi_forge.graph._graph import Arg, ArgKind
@@ -1481,9 +1602,10 @@ class _LinearOperatorGraphExecutable(NativeGraphExecutable):
                 extent,
             )
             descriptions.append(description)
-        alias = analyze_storage_alias(*descriptions)
-        if alias != "kProvenDisjoint":
-            raise TaichiRuntimeError("LinearOperator Graph input and output must be proven " f"disjoint ({alias})")
+        _validate_graph_dense_vector_disjoint(
+            descriptions,
+            "LinearOperator Graph input and output must be proven disjoint",
+        )
 
 
 class _LinearOperatorGraphNode(NativeGraphNode):
@@ -1785,9 +1907,10 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
                 extent,
             )
             descriptions.append(description)
-        alias = analyze_storage_alias(*descriptions)
-        if alias != "kProvenDisjoint":
-            raise TaichiRuntimeError("LinearOperator Graph input and output must be proven " f"disjoint ({alias})")
+        _validate_graph_dense_vector_disjoint(
+            descriptions,
+            "LinearOperator Graph input and output must be proven disjoint",
+        )
 
 
 class _LinearOperatorCompositionGraphNode(NativeGraphNode):
@@ -3299,6 +3422,9 @@ class SolvePlan:
         )
         self._solver = self._build_solver()
         self._uses_graph_krylov = hasattr(self._solver, "solve_arrays")
+        self._graph_krylov_direct_field_enabled = True
+        self._graph_krylov_last_direct_field_boundary = False
+        self._graph_krylov_binding_cache = {}
         get_runtime().register_runtime_object(self)
 
     def _invalidate_runtime(self):
@@ -3306,6 +3432,9 @@ class SolvePlan:
         # Program allocator/backend teardown.
         self._solver = None
         self._uses_graph_krylov = False
+        self._graph_krylov_direct_field_enabled = False
+        self._graph_krylov_last_direct_field_boundary = False
+        self._graph_krylov_binding_cache = None
         self._native_preconditioner = None
         self._vector_io = None
         self.operator = None
@@ -4322,6 +4451,103 @@ class SolvePlan:
             )
         raise TaichiRuntimeError("unsupported PCG backend")
 
+    def _prepare_graph_krylov_input_operand(self, value, role, size, staging_role):
+        direct = None
+        if self._graph_krylov_direct_field_enabled:
+            direct = _try_direct_graph_krylov_operand(
+                value,
+                role,
+                size,
+                self.operator.dtype,
+                self._vector_io,
+                self._graph_krylov_binding_cache,
+            )
+        if direct is not None:
+            return direct
+        return _graph_krylov_staged_operand(
+            _prepare_vector_input(
+                value,
+                role,
+                size,
+                self.operator.dtype,
+                self._vector_io,
+                staging_role,
+            )
+        )
+
+    def _prepare_graph_krylov_output_operand(self, value, role, size, staging_role):
+        direct = None
+        if self._graph_krylov_direct_field_enabled:
+            direct = _try_direct_graph_krylov_operand(
+                value,
+                role,
+                size,
+                self.operator.dtype,
+                self._vector_io,
+                self._graph_krylov_binding_cache,
+            )
+        if direct is not None:
+            return direct
+        return _graph_krylov_staged_operand(
+            _prepare_vector_output(
+                value,
+                role,
+                size,
+                self.operator.dtype,
+                self._vector_io,
+                staging_role,
+            )
+        )
+
+    def _prepare_graph_krylov_operands(self, rhs, initial_guess, out, size):
+        rhs_operand = self._prepare_graph_krylov_input_operand(
+            rhs,
+            "SolvePlan RHS",
+            size,
+            "solve_rhs",
+        )
+        if out is None:
+            out = ScalarNdarray(self.operator.dtype, (size,))
+        output_operand = self._prepare_graph_krylov_output_operand(
+            out,
+            "SolvePlan output",
+            size,
+            "solve_output",
+        )
+        if _graph_krylov_operands_overlap(rhs_operand, output_operand):
+            raise TaichiRuntimeError("SolvePlan RHS and output may not alias")
+
+        initial_operand = None
+        if initial_guess is not None:
+            output_view = self._vector_io.view(out, "SolvePlan output")
+            initial_view = self._vector_io.view(
+                initial_guess, "SolvePlan initial_guess"
+            )
+            shares_output = (
+                initial_view is not None
+                and output_view is not None
+                and initial_view._exact_view_key == output_view._exact_view_key
+            )
+            initial_operand = self._prepare_graph_krylov_input_operand(
+                (initial_view if initial_view is not None else initial_guess),
+                "SolvePlan initial_guess",
+                size,
+                "solve_output" if shares_output else "solve_initial",
+            )
+            if _graph_krylov_operands_overlap(initial_operand, rhs_operand):
+                raise TaichiRuntimeError(
+                    "SolvePlan RHS and initial_guess may not alias"
+                )
+            if (
+                _graph_krylov_operands_overlap(initial_operand, output_operand)
+                and not _graph_krylov_operands_exact(initial_operand, output_operand)
+            ):
+                raise TaichiRuntimeError(
+                    "SolvePlan initial_guess and output overlap without "
+                    "being the same vector view"
+                )
+        return out, rhs_operand, output_operand, initial_operand
+
     def solve(self, rhs, *, initial_guess=None, out=None):
         """Solves one RHS with persistent plan-owned workspace."""
         if self.operator is None or self._solver is None:
@@ -4334,59 +4560,80 @@ class SolvePlan:
                 "SolvePlan cannot be used after ti.reset()"
             )
         size = self.operator.shape[0]
-        rhs_operand = _prepare_vector_input(
-            rhs,
-            "SolvePlan RHS",
-            size,
-            self.operator.dtype,
-            self._vector_io,
-            "solve_rhs",
-        )
-        if out is None:
-            out = ScalarNdarray(self.operator.dtype, (size,))
-        output_operand = _prepare_vector_output(
-            out,
-            "SolvePlan output",
-            size,
-            self.operator.dtype,
-            self._vector_io,
-            "solve_output",
-        )
-        if _vector_operands_overlap(rhs_operand, output_operand):
-            raise TaichiRuntimeError("SolvePlan RHS and output may not alias")
-        if initial_guess is None:
-            output_operand.array.fill(0)
+        graph_rhs_operand = None
+        graph_output_operand = None
+        graph_initial_operand = None
+        if self._uses_graph_krylov:
+            (
+                out,
+                graph_rhs_operand,
+                graph_output_operand,
+                graph_initial_operand,
+            ) = self._prepare_graph_krylov_operands(
+                rhs,
+                initial_guess,
+                out,
+                size,
+            )
+            self._graph_krylov_last_direct_field_boundary = bool(
+                graph_rhs_operand.direct_dense
+                and graph_output_operand.direct_dense
+            )
         else:
-            initial_view = self._vector_io.view(
-                initial_guess, "SolvePlan initial_guess"
-            )
-            shares_output = (
-                initial_view is not None
-                and output_operand.view is not None
-                and initial_view._exact_view_key
-                == output_operand.view._exact_view_key
-            )
-            initial_operand = _prepare_vector_input(
-                (initial_view if initial_view is not None else initial_guess),
-                "SolvePlan initial_guess",
+            self._graph_krylov_last_direct_field_boundary = False
+            rhs_operand = _prepare_vector_input(
+                rhs,
+                "SolvePlan RHS",
                 size,
                 self.operator.dtype,
                 self._vector_io,
-                "solve_output" if shares_output else "solve_initial",
+                "solve_rhs",
             )
-            if _vector_operands_overlap(initial_operand, rhs_operand):
-                raise TaichiRuntimeError(
-                    "SolvePlan RHS and initial_guess may not alias"
+            if out is None:
+                out = ScalarNdarray(self.operator.dtype, (size,))
+            output_operand = _prepare_vector_output(
+                out,
+                "SolvePlan output",
+                size,
+                self.operator.dtype,
+                self._vector_io,
+                "solve_output",
+            )
+            if _vector_operands_overlap(rhs_operand, output_operand):
+                raise TaichiRuntimeError("SolvePlan RHS and output may not alias")
+            if initial_guess is None:
+                output_operand.array.fill(0)
+            else:
+                initial_view = self._vector_io.view(
+                    initial_guess, "SolvePlan initial_guess"
                 )
-            if _vector_operands_overlap(
-                initial_operand, output_operand
-            ) and not _vector_operands_exact(initial_operand, output_operand):
-                raise TaichiRuntimeError(
-                    "SolvePlan initial_guess and output overlap without "
-                    "being the same vector view"
+                shares_output = (
+                    initial_view is not None
+                    and output_operand.view is not None
+                    and initial_view._exact_view_key
+                    == output_operand.view._exact_view_key
                 )
-            if not _vector_operands_exact(initial_operand, output_operand):
-                output_operand.array.copy_from(initial_operand.array)
+                initial_operand = _prepare_vector_input(
+                    (initial_view if initial_view is not None else initial_guess),
+                    "SolvePlan initial_guess",
+                    size,
+                    self.operator.dtype,
+                    self._vector_io,
+                    "solve_output" if shares_output else "solve_initial",
+                )
+                if _vector_operands_overlap(initial_operand, rhs_operand):
+                    raise TaichiRuntimeError(
+                        "SolvePlan RHS and initial_guess may not alias"
+                    )
+                if _vector_operands_overlap(
+                    initial_operand, output_operand
+                ) and not _vector_operands_exact(initial_operand, output_operand):
+                    raise TaichiRuntimeError(
+                        "SolvePlan initial_guess and output overlap without "
+                        "being the same vector view"
+                    )
+                if not _vector_operands_exact(initial_operand, output_operand):
+                    output_operand.array.copy_from(initial_operand.array)
         if self._native_preconditioner is not None:
             preconditioner_stats = dict(
                 self._native_preconditioner._debug_runtime_stats()
@@ -4400,7 +4647,21 @@ class SolvePlan:
             preconditioner_scope = self.preconditioner.pin()
         cpu_arches = (_ti_core.Arch.x64, _ti_core.Arch.arm64)
         if self._uses_graph_krylov:
-            self._solver.solve_arrays(output_operand.array, rhs_operand.array)
+            self._solver.solve_arrays(
+                graph_output_operand.runtime_value,
+                graph_rhs_operand.runtime_value,
+                (
+                    None
+                    if graph_initial_operand is None
+                    else graph_initial_operand.runtime_value
+                ),
+                direct_output=graph_output_operand.direct_dense,
+            )
+            self._vector_io.record_direct_graph_solve(
+                graph_rhs_operand,
+                graph_output_operand,
+                graph_initial_operand,
+            )
         elif (
             self.method in ("bicgstab", "gmres", "fgmres", "minres")
             and self._program.config().arch in cpu_arches
@@ -4416,12 +4677,21 @@ class SolvePlan:
                 output_operand.array.arr,
                 rhs_operand.array.arr,
             )
-        _finish_vector_output(
-            self._vector_io,
-            output_operand,
-            self.operator.dtype,
-            size,
-        )
+        if self._uses_graph_krylov:
+            if graph_output_operand.staged is not None:
+                _finish_vector_output(
+                    self._vector_io,
+                    graph_output_operand.staged,
+                    self.operator.dtype,
+                    size,
+                )
+        else:
+            _finish_vector_output(
+                self._vector_io,
+                output_operand,
+                self.operator.dtype,
+                size,
+            )
         snapshot = dict(self._solver._get_last_result())
         return SolveResult(solution=out, **snapshot)
 
@@ -4501,6 +4771,45 @@ class SolvePlan:
         self.operator._ensure_valid()
         result = self._execution_policy_capabilities()
         result["vector_io"] = _vector_io_capabilities()
+        result["direct_dense_field_solve"] = {
+            "supported": bool(self._uses_graph_krylov),
+            "enabled": bool(
+                self._uses_graph_krylov
+                and self._graph_krylov_direct_field_enabled
+            ),
+            "selected": bool(
+                self._uses_graph_krylov
+                and self._graph_krylov_last_direct_field_boundary
+            ),
+            "primitive": (
+                "graph_fused_runtime_storage_boundary"
+                if self._uses_graph_krylov
+                else "device_staged"
+            ),
+            "qualified_methods": ("cg", "pcg"),
+            "qualified_dtypes": ("f32",),
+            "qualified_layouts": (
+                "root_dense_scalar_contiguous",
+                "root_dense_packed_vector_matrix_contiguous",
+            ),
+            "initialization": (
+                "graph_preamble"
+                if self._uses_graph_krylov
+                else "boundary_copy_or_fill"
+            ),
+            "iterative_storage": (
+                "plan_owned_ndarray"
+                if self._uses_graph_krylov
+                else "backend_solver_owned"
+            ),
+            "boundary_copy": (
+                "graph_preamble_epilogue"
+                if self._uses_graph_krylov
+                else "separate_transfer_submission"
+            ),
+            "unsupported_layout_fallback": "device_staged",
+            "value_host_transfer": False,
+        }
         return result
 
 
