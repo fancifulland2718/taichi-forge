@@ -29,7 +29,7 @@ def _percentile(values, fraction):
     return values[position]
 
 
-def _diagonal_operator(size):
+def _diagonal_operator(size, provider):
     diagonal_host = np.linspace(1.0, 4.0, size, dtype=np.float32)
     topology = ti.ndarray(ti.i32, shape=size)
     numeric = ti.ndarray(ti.f32, shape=size)
@@ -55,6 +55,8 @@ def _diagonal_operator(size):
         numeric=numeric,
         traits=ti.linalg.OperatorTraits.spd(),
     )
+    if provider == "composition_sum":
+        operator = 0.5 * operator + 0.5 * operator
     return operator, diagonal_host
 
 
@@ -191,6 +193,11 @@ def main():
     parser.add_argument(
         "--arch", choices=("cpu", "cuda", "vulkan"), required=True
     )
+    parser.add_argument(
+        "--provider",
+        choices=("compiled_kernel", "composition_sum"),
+        default="compiled_kernel",
+    )
     parser.add_argument("--size", type=int, default=262144)
     parser.add_argument("--max-iterations", type=int, default=32)
     parser.add_argument("--atol", type=float, default=1.0e-4)
@@ -199,6 +206,7 @@ def main():
     parser.add_argument("--warmups", type=int, default=3)
     parser.add_argument("--repeats", type=int, default=20)
     parser.add_argument("--kernel-profiler", action="store_true")
+    parser.add_argument("--output")
     parser.add_argument(
         "--policies",
         nargs="+",
@@ -217,7 +225,7 @@ def main():
         offline_cache=False,
         kernel_profiler=args.kernel_profiler,
     )
-    operator, diagonal = _diagonal_operator(args.size)
+    operator, diagonal = _diagonal_operator(args.size, args.provider)
     exact = np.sin(
         np.linspace(0.0, 8.0, args.size, dtype=np.float32)
     )
@@ -296,6 +304,7 @@ def main():
     report = {
         "schema": "taichi_forge.linalg.graph_krylov_benchmark.v1",
         "arch": args.arch,
+        "provider": args.provider,
         "size": args.size,
         "max_iterations": args.max_iterations,
         "warmups": args.warmups,
@@ -303,7 +312,7 @@ def main():
         "policies": list(policies),
         "contract": {
             "dtype": "f32",
-            "provider": "compiled_kernel",
+            "provider": args.provider,
             "method": "cg",
             "timed_boundary": "synchronous_SolvePlan.solve_completion",
             "output_zero_fill_is_included": True,
@@ -317,7 +326,11 @@ def main():
         "results": results,
     }
     ti.reset()
-    print(json.dumps(report, indent=2))
+    encoded = json.dumps(report, indent=2)
+    print(encoded)
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as stream:
+            stream.write(encoded + "\n")
 
 
 if __name__ == "__main__":
