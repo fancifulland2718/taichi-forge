@@ -1,12 +1,12 @@
-# Linux 0.6.1 Release Candidate 验证
+# Linux 0.6.1 发行资格验证
 
-本文是 Taichi Forge 0.6.1 release candidate 的 Linux 验证矩阵。它继承已发布 0.6.0 runtime
-加固后仍有价值的复测项，并覆盖当前源码候选。它是测试计划，**不**表示所有列出路径已经在
-Linux 通过。请在干净的 x86_64 Linux runner 上，以目标发布依赖运行，并记录 GPU、driver、
+本文是功能收口后的 Taichi Forge 0.6.1 源码的 Linux 发行资格矩阵。它继承已发布 0.6.0
+runtime 加固后仍有价值的复测项，并覆盖当前 release source。它是测试计划，**不**表示所有
+列出路径已经在 Linux 通过。请在干净的 x86_64 Linux runner 上，以目标发布依赖运行，并记录 GPU、driver、
 Vulkan loader、窗口系统；只有运行隔离的 reference workflow 时才记录 CUDA Toolkit。
 
-该矩阵用于阻断 0.6.1 candidate，不会追溯成为已经发布的 0.6.0 的门槛。历史功能只在当前
-candidate 需要重新取得 Linux 证据时列入，不应据此理解为 0.6.1 新增。
+该矩阵用于阻断 0.6.1 发行，不会追溯成为已经发布的 0.6.0 的门槛。历史功能只在当前
+0.6.1 源码需要重新取得 Linux 证据时列入，不应据此理解为 0.6.1 新增。
 
 ## Release 阻断项
 

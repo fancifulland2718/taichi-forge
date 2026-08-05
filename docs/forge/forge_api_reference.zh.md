@@ -1095,12 +1095,10 @@ active Taichi task 在 payload side effect 前返回；不做逐轮 host readbac
 
 `Sequential` 提供相同的 `while`/`if`/`switch` API，因此任一 region kind 都可再包含
 一层结构化控制。depth=2 语义保持精确：CPU 对完整 tree 使用精确 host control；parent
-使用 exact portable control，满足资格的 `auto` leaf 可保留已有 flat native route：
-CUDA `while`/`if`/`switch` 或 Vulkan `while`。这是默认的 portable-parent/native-leaf
-路径，不代表通用的原生 depth=2 合同；满足严格资格的 Vulkan `while` 包含 `while`
-定义还可升级到下述单次同步 bounded replay。nested definition 会拒绝显式
-`lowering_mode="native_required"`，且所有 depth=2 Graph 当前
-都不支持异步 `submit()`。
+通常使用 exact portable control，满足资格的 `auto` leaf 可保留已有 flat native route：
+CUDA `while`/`if`/`switch` 或 Vulkan `while`。CUDA 与 Vulkan 还支持下述有序
+`while -> while[1..8]` 单 ticket 结构；其它 depth=2 形态使用 portable parent control，
+并拒绝异步 `submit()`。
 
 Vulkan 提供两种不同的 `while` 路径。`portable` 保留由 host 观测的精确 replay。满足资格
 的 `native_required` region 使用有界 device-controlled masking：每个 region 最多八个
@@ -1114,16 +1112,17 @@ active chunk 内收敛后，剩余轮次仍由 mask 关闭；之后的 inactive 
 conditional-command 层跳过 shader dispatch。该路径保持精确逻辑结果，但不提供 exact
 dynamic command termination，因为 active chunk 的命令已经编码。
 
-一种严格的 depth=2 Vulkan `while` 包含 `while` 形态可在 trace 关闭且 outer mode 为
-`auto` 时，通过普通 `Graph.run()` 使用单次同步有界 replay。outer body 必须恰好包含
-一个 leaf inner `while`；outer condition、可选 body prefix/suffix 和 inner
-condition/body 只能包含普通 dispatch 或已满足资格的 recordable action。两层都必须
-提供 counter；两层的 predicate、counter 与可选 status control 必须全部互不别名，
-并且是同一 Program 所有的单元素 `i32` device ndarray。
+对于下述共享的有序 depth=2 结构，Vulkan 可在 trace 关闭且 outer mode 为 `auto` 或
+`native_required` 时，通过普通 `Graph.run()` 或 `Graph.submit()` 使用一次有界 replay。
+outer condition、body gap 与每个 inner condition/body 只能包含普通 dispatch 或已满足
+资格的 recordable action。outer 与每个 inner 都必须提供 counter；所有 predicate、
+counter 与可选 status control 必须全部互不别名，并且是同一 Program 所有的单元素
+`i32` device ndarray。
 `VK_EXT_conditional_rendering`、nested runtime binding 和普通 Vulkan replay mode 必须
-满足资格，kernel profiler 与 Vulkan dispatch cache 必须关闭。outer/inner budget 都
-必须在 1 到 64 之间；inner chunk size 必须为正且不得超过 64 或 inner budget；完整程序
-最多编码 4096 个 action。不满足该严格资格的形态使用 exact portable-parent control；
+满足资格，kernel profiler 与 Vulkan dispatch cache 必须关闭。每个 loop budget 都必须
+在 1 到 64 之间；每个 inner chunk size 必须为正且不得超过 64 或对应 inner budget；
+完整程序按加法计算后最多编码 4096 个 action。不满足该严格资格的形态使用
+exact portable-parent control；
 满足资格的 leaf `while` 仍可使用上述 flat Vulkan route。
 该优化仍不提供原生 Vulkan `if`/`switch`，也不提供 exact dynamic command-stream
 termination。

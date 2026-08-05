@@ -4230,7 +4230,7 @@ def test_nested_structured_switch_trace_records_each_selected_branch():
 
 
 @test_utils.test(arch=ti.cpu)
-def test_nested_structured_control_rejects_depth_three_and_native_required():
+def test_nested_structured_control_rejects_depth_three_and_cpu_native_required():
     @ti.kernel
     def set_true(predicate: ti.types.ndarray(dtype=ti.i32, ndim=0)):
         predicate[None] = 1
@@ -4282,7 +4282,7 @@ def test_nested_structured_control_rejects_depth_three_and_native_required():
     native_builder = ti.graph.GraphBuilder()
     with pytest.raises(
         TaichiRuntimeError,
-        match="nested native_required lowering is unavailable",
+        match="Graph if native_required mode needs CUDA",
     ):
         native_builder.if_then_else(
             root_condition,

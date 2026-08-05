@@ -2,10 +2,11 @@
 
 This is the canonical version index for Taichi Forge user-visible changes.
 Version `0.6.0` is the latest published release. Current `master` is the
-`0.6.1` release candidate and its source, shim, and runtime package metadata
-are aligned at `0.6.1`; this does not claim publication before the paired
-artifacts are uploaded. Version `0.5.0` remains the previous published runtime
-source boundary, and `0.4.25` is the final public `0.4.x` baseline.
+feature-complete `0.6.1` release source, and its source, shim, and runtime
+package metadata are aligned at `0.6.1`; this does not claim publication before
+the paired artifacts are uploaded. Version `0.5.0` remains the previous
+published runtime source boundary, and `0.4.25` is the final public `0.4.x`
+baseline.
 
 PyPI storage is limited, so some nonessential older distributions have been
 removed. Absence from the current PyPI release list does not mean that a
@@ -17,7 +18,7 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
-| [Unreleased](#unreleased) | 0.6.1 release candidate | current `master` | task launch manifests/policies, dynamic LLVM SNode directories, device-resident dynamic worklists, bounded Graph dispatch, and correlated pipeline telemetry |
+| [Unreleased](#unreleased) | feature-complete 0.6.1 release source | current `master` | task launch manifests/policies, dynamic LLVM SNode directories, device-resident dynamic worklists, bounded Graph dispatch, and correlated pipeline telemetry |
 | [0.6.0](#060) | published release | `106ad65d25` | structured Graph control/telemetry and Vulkan indirect dispatch, sparse runtime/linear algebra, driver-only CUDA primitives, managed interoperability/display, and bounded runtime lifetimes |
 | [0.1.0](#010) | historical source release; artifact may be removed | `91ad177685` | scikit-build-core migration and Forge distribution rebrand |
 | [0.1.1](#011) | historical source release; artifact may be removed | `c771969781` | `taichi_forge` import rename and install-layout fixes |

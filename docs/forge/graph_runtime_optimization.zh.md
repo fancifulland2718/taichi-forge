@@ -201,8 +201,9 @@ provider action 只有在 provider 声明适合结构化 body 时才能进入 re
 不支持的 provider 会明确失败。
 
 CUDA 与 Vulkan 共享一种满足资格的 depth=2 结构：trace 关闭且 outer mode 为 `auto`
-或 `native_required` 时，outer `while` 的 body 恰好包含一个 leaf inner `while`，可以
-执行为一次 bounded backend submission。两层都必须提供 counter；两层的 predicate、
+或 `native_required` 时，outer `while` 的 body 可以顺序包含一至八个 leaf inner `while`，
+并执行为一次 bounded backend submission。inner 之前、之间和之后允许普通 dispatch 或
+满足资格的 recordable action。outer 与每个 inner 都必须提供 counter；所有 predicate、
 counter 与可选 status control 必须全部互不别名，并且是同一 Program 所有的单元素 i32
 device ndarray。Vulkan 还要求 conditional rendering、nested runtime binding 与普通
 replay 可用，并关闭 kernel profiler 与 Vulkan dispatch cache。CUDA 要求普通 Graph
@@ -213,10 +214,11 @@ Forge 使用与 CUDA 版本无关的双 gate task-entry masking。可以在当�
 `TI_GRAPH_CUDA_FORCE_MASKED_CONTROL=1` 强制该 fallback 做 A/B 资格测试。两种 CUDA
 路径都不依赖 12.8 conditional node。
 
-outer/inner 上限都必须位于 1 到 64，inner chunk 必须为正且不得超过 64 或 inner
-budget，完整程序最多编码 4096 个 action。outer prefix/suffix 以及两层 condition/body
-sequence 只能包含普通 dispatch 或满足资格的 recordable action。Vulkan 使用 bounded
-conditional replay。所有 GPU 路径都不会在两层之间做 host readback，但仍保留 bounded
+outer 与每个 inner 的上限都必须位于 1 到 64；每个 inner chunk 必须为正且不得超过 64
+或对应 inner budget；完整程序按加法计算后最多编码 4096 个 action。outer prefix/suffix、
+各 inner 之间的 gap 以及所有 condition/body sequence 只能包含普通 dispatch 或满足资格的
+recordable action。Vulkan 使用 bounded conditional replay。所有 GPU 路径都不会在两层
+之间做 host readback，但仍保留 bounded
 静态拓扑，因此都不宣称 exact dynamic command termination。其他 nested 结构使用 exact
 portable-parent control；满足资格的 leaf `while` 仍可使用 flat backend route。Vulkan
 仍不支持原生 `if`/`switch`。

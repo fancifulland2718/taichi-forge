@@ -1285,14 +1285,11 @@ command issue actually stops after exit.
 The same `while`/`if`/`switch` APIs are available on `Sequential`, allowing any
 of those region kinds to contain one more structured level. Depth-two
 semantics are exact. CPU executes the complete tree with exact host control.
-At depth two, the parent uses exact portable control. A qualified `auto` leaf
-may retain its existing flat native route: CUDA `while`/`if`/`switch`, or
-Vulkan `while`. This is the default portable-parent/native-leaf route, not a
-general native depth-two contract. A strictly qualified Vulkan
-while-containing-while definition may additionally upgrade to the single
-synchronous bounded replay described below. Nested definitions reject an
-explicit `lowering_mode="native_required"`, and every depth-two
-Graph currently rejects asynchronous `submit()`.
+At depth two, the parent normally uses exact portable control and a qualified
+`auto` leaf may retain its flat native route: CUDA `while`/`if`/`switch`, or
+Vulkan `while`. CUDA and Vulkan additionally qualify the ordered
+`while -> while[1..8]` single-ticket shape described below. Other depth-two
+shapes use portable parent control and reject asynchronous `submit()`.
 
 Vulkan provides two distinct `while` routes. `portable` retains exact
 host-observed replay. A qualified `native_required` region uses bounded
@@ -1310,23 +1307,22 @@ inactive chunk skips its shader dispatches at the conditional-command level.
 This preserves exact logical results but does not provide exact dynamic command
 termination: commands for the active chunk are already encoded.
 
-One strict depth-two Vulkan `while`-containing-`while` shape can run as a
-single synchronous bounded replay during ordinary `Graph.run()` when tracing
-is disabled and the outer mode is `auto`. The outer body must contain exactly
-one leaf inner `while`, with only ordinary dispatches or qualified recordable
-actions in the outer condition, optional body prefix/suffix, and inner
-condition/body. Both loops require counters. Their predicate, counter, and
-optional status controls must be mutually distinct one-element `i32` device
-ndarrays owned by the same Program. `VK_EXT_conditional_rendering`, nested
-runtime binding, and ordinary Vulkan replay mode must be qualified; the kernel
-profiler and Vulkan dispatch cache must be disabled. The outer and inner
-budgets must each be from 1 through 64, the inner chunk size must be positive
-and no larger than 64 or its budget, and the complete encoded program must
-contain at most 4096 actions. Shapes outside this strict qualification use
-exact portable-parent control; an eligible leaf `while` may still use the flat
-Vulkan route described above. This optimization still does not make Vulkan
-`if`/`switch` native and does not provide exact dynamic command-stream
-termination.
+For the shared ordered depth-two shape described below, Vulkan can run one
+bounded replay during ordinary `Graph.run()` or `Graph.submit()` when tracing
+is disabled and the outer mode is `auto` or `native_required`. The outer
+condition, body gaps, and every inner condition/body may contain only ordinary
+dispatches or qualified recordable actions. Every loop requires a counter;
+all predicate, counter, and optional status controls must be mutually distinct
+one-element `i32` device ndarrays owned by the same Program.
+`VK_EXT_conditional_rendering`, nested runtime binding, and ordinary Vulkan
+replay mode must be qualified; the kernel profiler and Vulkan dispatch cache
+must be disabled. Every loop budget must be from 1 through 64, each inner chunk
+size must be positive and no larger than 64 or its budget, and the additive
+complete encoded program must contain at most 4096 actions. Shapes outside
+this qualification use exact portable-parent control; an eligible leaf
+`while` may still use the flat Vulkan route described above. This optimization
+still does not make Vulkan `if`/`switch` native and does not provide exact
+dynamic command-stream termination.
 
 One Vulkan `Graph.submit()` may contain multiple qualified
 `native_required` `while` regions. Forge enqueues them in program order inside

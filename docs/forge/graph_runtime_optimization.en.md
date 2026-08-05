@@ -204,12 +204,14 @@ Current lowering is explicit:
 | CUDA | `auto` uses a native CUDA conditional Graph on qualified Driver API 12.8+ runtimes; older drivers use Forge's bounded masked Graph when ordinary CUDA Graph capture is available; otherwise exact portable replay | Qualified 12.8+ runtimes use native CUDA IF/SWITCH nodes; older drivers use the same internal device latch and task-entry gate contract; otherwise exact portable host control |
 | Vulkan | Exact portable replay, or qualified `native_required` bounded masking with positive per-region chunk sizes capped at 64 and an eight-chunk/512-iteration region limit | Exact portable host control |
 
-At depth two, CPU executes both levels with exact host control and returns an
-already-completed submission ticket. CUDA and Vulkan additionally qualify one
-native shape: an outer `while` whose body contains exactly one leaf inner
-`while`. It executes under one backend submission and one ticket. Other shapes
-retain exact portable-parent control; a qualified `auto` leaf may still use its
-existing flat native route.
+At depth two, CPU executes the complete tree with exact host control and
+returns an already-completed submission ticket. CUDA and Vulkan additionally
+qualify one ordered native shape: an outer `while` whose body contains from one
+through eight leaf inner `while` regions, with ordinary dispatch or qualified
+recordable-action gaps between them. It executes under one backend submission
+and one ticket. Other shapes retain exact portable-parent control and reject
+asynchronous submission; a qualified `auto` leaf may still use its existing
+flat native route.
 
 `ti.graph.structured_control_capabilities()` returns the active backend's
 schema-v4 portable lowering and device-control qualification. The report
@@ -244,9 +246,11 @@ unsupported providers fail closed.
 
 CUDA and Vulkan share one qualified depth-two shape: with tracing disabled and
 the outer mode set to `auto` or `native_required`, an outer `while` whose body
-contains exactly one leaf inner `while` can execute as one bounded backend
-submission. Both loops require counters. Their predicate, counter, and
-optional status controls must be mutually distinct one-element i32 device
+contains from one through eight ordered leaf inner `while` regions can execute
+as one bounded backend submission. Ordinary dispatches and qualified
+recordable actions may appear before, between, or after the inner regions.
+The outer loop and every inner loop require counters. All predicate, counter,
+and optional status controls must be mutually distinct one-element i32 device
 ndarrays owned by the same Program. Vulkan additionally requires conditional
 rendering, nested runtime binding, and ordinary replay, with the kernel
 profiler and Vulkan dispatch cache disabled. CUDA requires ordinary Graph
@@ -259,11 +263,12 @@ masking route; `TI_GRAPH_CUDA_FORCE_MASKED_CONTROL=1` forces that fallback for
 A/B qualification on a current driver. Neither CUDA route depends on 12.8
 conditional nodes.
 
-The outer and inner bounds are each from 1 through 64; the inner chunk is
-positive and no larger than 64 or its budget; and the complete encoded program
-contains at most 4096 actions. The outer prefix/suffix and both loop
-condition/body sequences must contain only ordinary dispatches or qualified
-recordable actions. Vulkan uses bounded conditional replay. All GPU routes
+The outer and every inner bound are each from 1 through 64; every inner chunk
+is positive and no larger than 64 or its budget; and the additive complete
+encoded program contains at most 4096 actions. The outer prefix/suffix, gaps
+between inner regions, and all loop condition/body sequences must contain only
+ordinary dispatches or qualified recordable actions. Vulkan uses bounded
+conditional replay. All GPU routes
 avoid host readback between the two levels but retain bounded static topology;
 none claims exact dynamic command termination. Any other nested shape takes
 exact portable-parent control; an eligible leaf `while` may still use its flat
