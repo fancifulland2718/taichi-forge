@@ -196,7 +196,9 @@ struct DeviceBiCGSTABVulkanReplayState {
 
 #else
 
-struct DeviceBiCGSTABVulkanReplayState {};
+struct DeviceBiCGSTABVulkanReplayState {
+  std::string unavailable_reason{"vulkan_backend_unavailable"};
+};
 
 #endif
 

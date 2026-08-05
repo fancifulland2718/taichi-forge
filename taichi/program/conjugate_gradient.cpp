@@ -178,11 +178,24 @@ struct VulkanSolverChunkReplayState {
   void reset() {
     slots.clear();
   }
+
+  std::uint64_t executable_count() const {
+    return static_cast<std::uint64_t>(
+        std::count_if(slots.begin(), slots.end(), [](const auto &slot) {
+          return slot && slot->cache.entry.cmdlist != nullptr;
+        }));
+  }
 };
 
 #else
 
-struct VulkanSolverChunkReplayState {};
+struct VulkanSolverChunkReplayState {
+  std::string unavailable_reason{"vulkan_backend_unavailable"};
+
+  std::uint64_t executable_count() const {
+    return 0;
+  }
+};
 
 #endif
 
@@ -4142,11 +4155,7 @@ VulkanCGIterationPlan::debug_runtime_statistics() const {
       last_convergence_observation_boundaries_;
   if (solver_chunk_replay_state_) {
     result.solver_replay_executable_count =
-        static_cast<std::uint64_t>(std::count_if(
-            solver_chunk_replay_state_->slots.begin(),
-            solver_chunk_replay_state_->slots.end(), [](const auto &slot) {
-              return slot && slot->cache.entry.cmdlist != nullptr;
-            }));
+        solver_chunk_replay_state_->executable_count();
   }
   if (adaptive_ &&
       execution_policy_ == SparseSolveExecutionPolicy::bounded_convergent) {

@@ -203,7 +203,9 @@ struct DeviceMINRESVulkanReplayState {
 
 #else
 
-struct DeviceMINRESVulkanReplayState {};
+struct DeviceMINRESVulkanReplayState {
+  std::string unavailable_reason{"vulkan_backend_unavailable"};
+};
 
 #endif
 

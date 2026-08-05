@@ -200,7 +200,9 @@ struct DeviceGMRESVulkanReplayState {
 
 #else
 
-struct DeviceGMRESVulkanReplayState {};
+struct DeviceGMRESVulkanReplayState {
+  std::string unavailable_reason{"vulkan_backend_unavailable"};
+};
 
 #endif
 
