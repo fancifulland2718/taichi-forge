@@ -3618,6 +3618,279 @@ def test_nested_structured_while_is_exact_and_reports_stable_paths(monkeypatch):
     )
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_nested_structured_while_submits_ordered_inner_sequence(monkeypatch):
+    @ti.kernel
+    def evaluate_outer(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        limit: ti.i32,
+    ):
+        predicate[None] = int(state[None] < limit)
+
+    @ti.kernel
+    def reset_inner(
+        a_state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        a_counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        b_state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        b_counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        phase: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        a_state[None] = 0
+        a_counter[None] = 0
+        b_state[None] = 0
+        b_counter[None] = 0
+        phase[None] = 0
+
+    @ti.kernel
+    def evaluate_a(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        outer_state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        predicate[None] = int(state[None] < outer_state[None] + 1)
+
+    @ti.kernel
+    def evaluate_b(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        predicate[None] = int(state[None] < 2)
+
+    @ti.kernel
+    def step_a(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        total: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        phase: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        if predicate[None] != 0:
+            state[None] += 1
+            counter[None] += 1
+            total[None] += 1
+            phase[None] += 1
+
+    @ti.kernel
+    def step_b(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        total: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        phase: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        if predicate[None] != 0:
+            state[None] += 1
+            counter[None] += 1
+            total[None] += 1
+            phase[None] += 10
+
+    @ti.kernel
+    def mark_between(
+        a_counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        phase: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        phase[None] = 100 + a_counter[None]
+
+    @ti.kernel
+    def finish_outer(
+        outer_state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        outer_predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        outer_counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        a_counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        b_counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        phase: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        a_stops: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        b_stops: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        phases: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        if outer_predicate[None] != 0:
+            index = outer_counter[None]
+            a_stops[index] = a_counter[None]
+            b_stops[index] = b_counter[None]
+            phases[index] = phase[None]
+            outer_state[None] += 1
+            outer_counter[None] += 1
+
+    scalar = lambda name: ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=0
+    )
+    controls = {
+        name: scalar(name)
+        for name in (
+            "outer_state",
+            "outer_predicate",
+            "outer_counter",
+            "a_state",
+            "a_predicate",
+            "a_counter",
+            "a_total",
+            "b_state",
+            "b_predicate",
+            "b_counter",
+            "b_total",
+            "phase",
+        )
+    }
+    a_stops = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "a_stops", ti.i32, ndim=1)
+    b_stops = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "b_stops", ti.i32, ndim=1)
+    phases = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "phases", ti.i32, ndim=1)
+    outer_limit = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "outer_limit", ti.i32
+    )
+
+    builder = ti.graph.GraphBuilder()
+    outer_condition = builder.create_sequential()
+    outer_condition.dispatch(
+        evaluate_outer,
+        controls["outer_state"],
+        controls["outer_predicate"],
+        outer_limit,
+    )
+    a_condition = builder.create_sequential()
+    a_condition.dispatch(
+        evaluate_a,
+        controls["a_state"],
+        controls["a_predicate"],
+        controls["outer_state"],
+    )
+    a_body = builder.create_sequential()
+    a_body.dispatch(
+        step_a,
+        controls["a_state"],
+        controls["a_predicate"],
+        controls["a_counter"],
+        controls["a_total"],
+        controls["phase"],
+    )
+    b_condition = builder.create_sequential()
+    b_condition.dispatch(
+        evaluate_b, controls["b_state"], controls["b_predicate"]
+    )
+    b_body = builder.create_sequential()
+    b_body.dispatch(
+        step_b,
+        controls["b_state"],
+        controls["b_predicate"],
+        controls["b_counter"],
+        controls["b_total"],
+        controls["phase"],
+    )
+    outer_body = builder.create_sequential()
+    outer_body.dispatch(
+        reset_inner,
+        controls["a_state"],
+        controls["a_counter"],
+        controls["b_state"],
+        controls["b_counter"],
+        controls["phase"],
+    )
+    outer_body.while_loop(
+        a_condition,
+        a_body,
+        predicate=controls["a_predicate"],
+        counter=controls["a_counter"],
+        max_iterations=4,
+        chunk_size=4,
+        masked_execution=True,
+        name="inner_pcg",
+    )
+    outer_body.dispatch(mark_between, controls["a_counter"], controls["phase"])
+    outer_body.while_loop(
+        b_condition,
+        b_body,
+        predicate=controls["b_predicate"],
+        counter=controls["b_counter"],
+        max_iterations=4,
+        chunk_size=2,
+        masked_execution=True,
+        name="line_search",
+    )
+    outer_body.dispatch(
+        finish_outer,
+        controls["outer_state"],
+        controls["outer_predicate"],
+        controls["outer_counter"],
+        controls["a_counter"],
+        controls["b_counter"],
+        controls["phase"],
+        a_stops,
+        b_stops,
+        phases,
+    )
+    builder.while_loop(
+        outer_condition,
+        outer_body,
+        predicate=controls["outer_predicate"],
+        counter=controls["outer_counter"],
+        max_iterations=4,
+        chunk_size=4,
+        masked_execution=True,
+        name="outer_newton",
+    )
+    graph = builder.compile()
+
+    args = {name: ti.ndarray(ti.i32, shape=()) for name in controls}
+    for value in args.values():
+        value.fill(0)
+    for name in ("a_stops", "b_stops", "phases"):
+        args[name] = ti.ndarray(ti.i32, shape=(4,))
+        args[name].fill(0)
+
+    ticket = graph.submit({**args, "outer_limit": 3}, telemetry=True)
+    ticket.wait()
+    assert args["outer_state"].to_numpy()[()] == 3
+    assert args["outer_counter"].to_numpy()[()] == 3
+    assert args["a_total"].to_numpy()[()] == 6
+    assert args["b_total"].to_numpy()[()] == 6
+    assert tuple(args["a_stops"].to_numpy()[:3]) == (1, 2, 3)
+    assert tuple(args["b_stops"].to_numpy()[:3]) == (2, 2, 2)
+    assert tuple(args["phases"].to_numpy()[:3]) == (121, 122, 123)
+    telemetry = ticket.telemetry()
+    assert tuple(region.path_id for region in telemetry.regions) == (
+        "outer_newton",
+        "outer_newton/body/inner_pcg",
+        "outer_newton/body/line_search",
+    )
+    assert tuple(region.logical_invocations for region in telemetry.regions) == (
+        1,
+        3,
+        3,
+    )
+    assert tuple(region.logical_iterations for region in telemetry.regions) == (
+        3,
+        3,
+        2,
+    )
+    assert telemetry.execution.logical_region_definitions == 3
+    assert telemetry.execution.logical_region_invocations == 7
+
+    if ti.lang.impl.current_cfg().arch != ti.cpu:
+        assert graph._debug_info["nodes"][0]["nested_native_upgrade_eligible"]
+    if ti.lang.impl.current_cfg().arch == ti.cuda:
+        assert graph._graph_stats[0]["last_path"] in (
+            "cuda_device_update_nested_capture",
+            "cuda_device_update_nested_replay",
+            "cuda_device_update_nested_patched_replay",
+            "cuda_masked_capture",
+            "cuda_masked_replay",
+            "cuda_masked_patched_replay",
+        )
+        monkeypatch.setenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "1")
+        for value in args.values():
+            value.fill(0)
+        fallback_ticket = graph.submit({**args, "outer_limit": 3})
+        fallback_ticket.wait()
+        assert tuple(args["a_stops"].to_numpy()[:3]) == (1, 2, 3)
+        assert tuple(args["b_stops"].to_numpy()[:3]) == (2, 2, 2)
+        assert tuple(args["phases"].to_numpy()[:3]) == (121, 122, 123)
+        assert graph._graph_stats[0]["last_path"] in (
+            "cuda_masked_capture",
+            "cuda_masked_replay",
+            "cuda_masked_patched_replay",
+        )
+
+
 @test_utils.test(arch=ti.vulkan)
 def test_nested_structured_while_respects_explicit_portable_outer_lowering():
     @ti.kernel

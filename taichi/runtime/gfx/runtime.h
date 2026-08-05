@@ -333,26 +333,31 @@ class TI_DLL_EXPORT GfxRuntime {
   // The Vulkan implementation prepares every static dispatch once, records
   // one bounded command buffer, gates each outer iteration with conditional
   // rendering, and masks the inner loop with compact indirect dispatch.
+  struct GraphNestedStructuredInnerControl {
+    DevicePtr inner_predicate{kDeviceNullPtr};
+    DevicePtr inner_counter{kDeviceNullPtr};
+    DevicePtr inner_status{kDeviceNullPtr};
+    std::size_t inner_condition_dispatch_begin{0};
+    std::size_t inner_body_dispatch_begin{0};
+    std::size_t inner_dispatch_end{0};
+    std::uint32_t inner_max_iterations{0};
+    std::uint32_t inner_chunk_size{0};
+    bool inner_has_status{false};
+  };
+
   struct GraphNestedStructuredControl {
     DevicePtr outer_predicate{kDeviceNullPtr};
     DevicePtr outer_counter{kDeviceNullPtr};
     DevicePtr outer_status{kDeviceNullPtr};
-    DevicePtr inner_predicate{kDeviceNullPtr};
-    DevicePtr inner_counter{kDeviceNullPtr};
-    DevicePtr inner_status{kDeviceNullPtr};
     std::size_t outer_condition_dispatch_count{0};
-    std::size_t inner_condition_dispatch_begin{0};
-    std::size_t inner_body_dispatch_begin{0};
-    std::size_t outer_suffix_dispatch_begin{0};
     std::uint32_t outer_max_iterations{0};
-    std::uint32_t inner_max_iterations{0};
-    std::uint32_t inner_chunk_size{0};
     bool outer_has_status{false};
-    bool inner_has_status{false};
+    std::vector<GraphNestedStructuredInnerControl> inner_controls;
   };
 
   struct GraphNestedStructuredResult {
     bool submitted{false};
+    std::uint32_t inner_region_count{0};
     std::uint32_t outer_logical_iterations{0};
     std::uint32_t outer_encoded_iterations{0};
     std::int32_t outer_initial_predicate{0};
@@ -406,17 +411,25 @@ class TI_DLL_EXPORT GfxRuntime {
       std::unique_ptr<ShaderResourceSet> structured_gate_resources;
       std::unique_ptr<ShaderResourceSet> structured_terminal_resources;
       std::unique_ptr<ShaderResourceSet> nested_outer_initial_resources;
-      std::unique_ptr<ShaderResourceSet> nested_inner_initial_resources;
-      std::unique_ptr<ShaderResourceSet> nested_inner_terminal_resources;
+      std::vector<std::unique_ptr<ShaderResourceSet>>
+          nested_inner_controller_resources;
+      std::vector<std::unique_ptr<ShaderResourceSet>>
+          nested_inner_initial_resources;
+      std::vector<std::unique_ptr<ShaderResourceSet>>
+          nested_inner_terminal_resources;
       std::unique_ptr<ShaderResourceSet> nested_outer_terminal_resources;
       std::unique_ptr<Pipeline> structured_controller_pipeline;
       std::unique_ptr<Pipeline> structured_gate_pipeline;
       std::unique_ptr<Pipeline> structured_terminal_pipeline;
       std::unique_ptr<Pipeline> nested_outer_initial_pipeline;
-      std::unique_ptr<Pipeline> nested_inner_initial_pipeline;
-      std::unique_ptr<Pipeline> nested_inner_terminal_pipeline;
+      std::vector<std::unique_ptr<Pipeline>>
+          nested_inner_controller_pipelines;
+      std::vector<std::unique_ptr<Pipeline>> nested_inner_initial_pipelines;
+      std::vector<std::unique_ptr<Pipeline>> nested_inner_terminal_pipelines;
       std::unique_ptr<Pipeline> nested_outer_terminal_pipeline;
       std::vector<uint32_t> structured_group_counts;
+      std::vector<std::vector<uint32_t>> nested_group_counts;
+      std::vector<bool> nested_has_status;
       bool structured_has_status{false};
       bool structured_nested{false};
       bool structured_outer_has_status{false};

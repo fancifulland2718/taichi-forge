@@ -437,6 +437,7 @@ struct CompiledGraphStructuredResult {
 
 struct CompiledGraphNestedStructuredResult {
   bool submitted{false};
+  std::uint32_t inner_region_count{0};
   std::uint32_t outer_logical_iterations{0};
   std::uint32_t outer_encoded_iterations{0};
   std::int32_t outer_initial_predicate{0};
@@ -458,6 +459,20 @@ struct CompiledGraphNestedStructuredResult {
   std::uint32_t zero_dispatches{0};
   std::uint32_t control_bytes{0};
   std::uint32_t observation_bytes{0};
+};
+
+// One ordered leaf while in a depth-2 outer while. Dispatch boundaries use
+// the flattened CompiledGraph coordinate space. `dispatch_end` is exclusive
+// and includes the terminal condition copy repeated after every body step.
+struct CompiledGraphNestedInnerControl {
+  Ndarray *predicate{nullptr};
+  Ndarray *counter{nullptr};
+  Ndarray *status{nullptr};
+  std::size_t condition_dispatch_begin{0};
+  std::size_t body_dispatch_begin{0};
+  std::size_t dispatch_end{0};
+  int max_iterations{0};
+  int chunk_size{0};
 };
 
 // A transient capture error must not permanently disable an otherwise valid
@@ -640,6 +655,17 @@ struct TI_DLL_EXPORT CompiledGraph {
       int outer_max_iterations,
       int inner_max_iterations,
       bool allow_device_update) const;
+  bool jit_submit_bounded_cuda_nested_sequence_cached(
+      const CompileConfig &compile_config,
+      const std::unordered_map<std::string, IValue> &args,
+      CompiledGraphJITCache &cache,
+      Ndarray *outer_predicate,
+      Ndarray *outer_counter,
+      Ndarray *outer_status,
+      const std::vector<CompiledGraphNestedInnerControl> &inner_controls,
+      std::size_t outer_condition_dispatch_count,
+      int outer_max_iterations,
+      bool allow_device_update) const;
   CompiledGraphStructuredResult jit_run_bounded_vulkan_cached(
       const CompileConfig &compile_config,
       const std::unordered_map<std::string, IValue> &args,
@@ -679,6 +705,18 @@ struct TI_DLL_EXPORT CompiledGraph {
       int outer_max_iterations,
       int inner_max_iterations,
       int inner_chunk_size,
+      bool wait_for_result = true) const;
+  CompiledGraphNestedStructuredResult
+  jit_run_bounded_vulkan_nested_sequence_cached(
+      const CompileConfig &compile_config,
+      const std::unordered_map<std::string, IValue> &args,
+      CompiledGraphJITCache &cache,
+      Ndarray *outer_predicate,
+      Ndarray *outer_counter,
+      Ndarray *outer_status,
+      const std::vector<CompiledGraphNestedInnerControl> &inner_controls,
+      std::size_t outer_condition_dispatch_count,
+      int outer_max_iterations,
       bool wait_for_result = true) const;
   bool jit_run_conditional_cuda_cached(
       const CompileConfig &compile_config,

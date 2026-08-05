@@ -934,6 +934,10 @@ struct CompiledGraphCudaState {
   std::array<std::size_t, 4> masked_nested_boundaries{};
   int masked_nested_outer_max_iterations{0};
   int masked_nested_inner_max_iterations{0};
+  std::vector<void *> nested_inner_gates;
+  std::vector<DeviceAllocation> nested_inner_selector_allocations;
+  std::vector<std::array<std::size_t, 3>> nested_inner_boundaries;
+  std::vector<int> nested_inner_max_iterations;
   int conditional_type{-1};
   int conditional_default_branch{-1};
   std::vector<int> conditional_branch_dispatch_counts;
@@ -1013,6 +1017,12 @@ struct CompiledGraphCudaState {
       CUDADriver::get_instance().mem_free(masked_inner_gate);
       masked_inner_gate = nullptr;
     }
+    for (void *gate : nested_inner_gates) {
+      if (gate != nullptr) {
+        CUDADriver::get_instance().mem_free(gate);
+      }
+    }
+    nested_inner_gates.clear();
     if (nested_device_controls != nullptr) {
       CUDADriver::get_instance().mem_free(nested_device_controls);
       nested_device_controls = nullptr;
@@ -1055,6 +1065,9 @@ struct CompiledGraphCudaState {
     masked_nested_boundaries = {};
     masked_nested_outer_max_iterations = 0;
     masked_nested_inner_max_iterations = 0;
+    nested_inner_selector_allocations.clear();
+    nested_inner_boundaries.clear();
+    nested_inner_max_iterations.clear();
     masked_default_branch = -1;
     masked_branch_dispatch_counts.clear();
     masked_selector_allocation = kDeviceNullAllocation;
@@ -2353,13 +2366,9 @@ bool try_run_cuda_device_update_nested_control_graph(
     CompiledGraphJITCache &cache,
     Program &program,
     Ndarray &outer_selector,
-    Ndarray &inner_selector,
+    const std::vector<CompiledGraphNestedInnerControl> &inner_controls,
     std::size_t outer_condition_dispatch_count,
-    std::size_t inner_condition_dispatch_begin,
-    std::size_t inner_body_dispatch_begin,
-    std::size_t outer_suffix_dispatch_begin,
     int outer_max_iterations,
-    int inner_max_iterations,
     RuntimeStatistics *statistics) {
   auto *state = get_cuda_graph_state(cache);
   if (state->diagnostics_enabled) {
@@ -2376,73 +2385,126 @@ bool try_run_cuda_device_update_nested_control_graph(
   };
 
   const std::size_t dispatch_count = graph.dispatches.size();
-  const bool ordered_boundaries =
-      outer_condition_dispatch_count != 0 &&
-      outer_condition_dispatch_count <= inner_condition_dispatch_begin &&
-      inner_condition_dispatch_begin < inner_body_dispatch_begin &&
-      inner_body_dispatch_begin < outer_suffix_dispatch_begin &&
-      outer_suffix_dispatch_begin < dispatch_count;
-  const std::size_t inner_condition_dispatch_count =
-      ordered_boundaries
-          ? inner_body_dispatch_begin - inner_condition_dispatch_begin
-          : 0;
-  const std::size_t inner_terminal_condition_begin =
-      outer_suffix_dispatch_begin >= inner_condition_dispatch_count
-          ? outer_suffix_dispatch_begin - inner_condition_dispatch_count
-          : 0;
   const std::size_t final_outer_condition_begin =
       dispatch_count >= outer_condition_dispatch_count
           ? dispatch_count - outer_condition_dispatch_count
           : 0;
-  const bool valid_iteration_limits =
-      outer_max_iterations > 0 && outer_max_iterations <= 64 &&
-      inner_max_iterations > 0 && inner_max_iterations <= 64;
+  bool ordered_boundaries = outer_condition_dispatch_count != 0 &&
+                            outer_condition_dispatch_count < dispatch_count &&
+                            !inner_controls.empty() &&
+                            inner_controls.size() <= 8;
+  bool valid_iteration_limits =
+      outer_max_iterations > 0 && outer_max_iterations <= 64;
+  std::size_t boundary_cursor = outer_condition_dispatch_count;
+  std::size_t single_copy_repeated_dispatches = 0;
+  std::size_t repeated_dispatches = 0;
+  std::size_t controls_per_outer = 1;
+  std::vector<std::array<std::size_t, 3>> boundaries;
+  boundaries.reserve(inner_controls.size());
+  for (const auto &inner : inner_controls) {
+    const std::size_t condition_count =
+        inner.body_dispatch_begin >= inner.condition_dispatch_begin
+            ? inner.body_dispatch_begin - inner.condition_dispatch_begin
+            : 0;
+    const std::size_t terminal_condition_begin =
+        inner.dispatch_end >= condition_count
+            ? inner.dispatch_end - condition_count
+            : 0;
+    ordered_boundaries =
+        ordered_boundaries &&
+        boundary_cursor <= inner.condition_dispatch_begin &&
+        inner.condition_dispatch_begin < inner.body_dispatch_begin &&
+        inner.body_dispatch_begin < terminal_condition_begin &&
+        terminal_condition_begin < inner.dispatch_end &&
+        inner.dispatch_end <= final_outer_condition_begin;
+    valid_iteration_limits =
+        valid_iteration_limits && inner.max_iterations > 0 &&
+        inner.max_iterations <= 64;
+    const std::size_t repeated =
+        inner.dispatch_end >= inner.body_dispatch_begin
+            ? inner.dispatch_end - inner.body_dispatch_begin
+            : 0;
+    if (repeated > (std::numeric_limits<std::size_t>::max)() /
+                       std::max(inner.max_iterations, 1)) {
+      valid_iteration_limits = false;
+    } else {
+      single_copy_repeated_dispatches += repeated;
+      repeated_dispatches +=
+          repeated * static_cast<std::size_t>(inner.max_iterations);
+      controls_per_outer += static_cast<std::size_t>(inner.max_iterations);
+    }
+    boundaries.push_back({inner.condition_dispatch_begin,
+                          inner.body_dispatch_begin, inner.dispatch_end});
+    boundary_cursor = inner.dispatch_end;
+  }
+  const std::size_t static_dispatches =
+      dispatch_count >= outer_condition_dispatch_count +
+                            single_copy_repeated_dispatches
+          ? dispatch_count - outer_condition_dispatch_count -
+                single_copy_repeated_dispatches
+          : (std::numeric_limits<std::size_t>::max)();
+  const std::size_t per_outer_dispatches =
+      static_dispatches <= (std::numeric_limits<std::size_t>::max)() -
+                               repeated_dispatches
+          ? static_dispatches + repeated_dispatches
+          : (std::numeric_limits<std::size_t>::max)();
   const std::size_t encoded_dispatches =
-      ordered_boundaries && valid_iteration_limits
+      valid_iteration_limits &&
+              per_outer_dispatches <=
+                  ((std::numeric_limits<std::size_t>::max)() -
+                   outer_condition_dispatch_count) /
+                      static_cast<std::size_t>(outer_max_iterations)
           ? outer_condition_dispatch_count +
                 static_cast<std::size_t>(outer_max_iterations) *
-                    ((inner_body_dispatch_begin -
-                      outer_condition_dispatch_count) +
-                     static_cast<std::size_t>(inner_max_iterations) *
-                         (outer_suffix_dispatch_begin -
-                          inner_body_dispatch_begin) +
-                     (dispatch_count - outer_suffix_dispatch_begin))
+                    per_outer_dispatches
           : (std::numeric_limits<std::size_t>::max)();
   const std::size_t control_count =
-      valid_iteration_limits
+      valid_iteration_limits &&
+              controls_per_outer <=
+                  (std::numeric_limits<std::size_t>::max)() /
+                      static_cast<std::size_t>(outer_max_iterations)
           ? static_cast<std::size_t>(outer_max_iterations) *
-                (static_cast<std::size_t>(inner_max_iterations) + 1)
+                controls_per_outer
           : (std::numeric_limits<std::size_t>::max)();
   constexpr std::size_t kMaxEncodedDispatches = 4096;
   constexpr std::size_t kMaxPredicateGroups = 4096;
   if (compile_config.debug || dispatch_count == 0 || !valid_iteration_limits ||
-      !ordered_boundaries || inner_condition_dispatch_count == 0 ||
-      inner_body_dispatch_begin >= inner_terminal_condition_begin ||
-      inner_terminal_condition_begin >= outer_suffix_dispatch_begin ||
-      outer_suffix_dispatch_begin > final_outer_condition_begin ||
+      !ordered_boundaries ||
       final_outer_condition_begin >= dispatch_count ||
       encoded_dispatches > kMaxEncodedDispatches ||
       control_count > kMaxPredicateGroups ||
       outer_selector.get_nelement() != 1 ||
-      inner_selector.get_nelement() != 1 ||
       outer_selector.get_element_data_type() != PrimitiveType::i32 ||
-      inner_selector.get_element_data_type() != PrimitiveType::i32 ||
-      outer_selector.owning_program() != &program ||
-      inner_selector.owning_program() != &program) {
+      outer_selector.owning_program() != &program) {
     return structural_fallback();
   }
 
   const DeviceAllocation outer_allocation =
       outer_selector.get_device_allocation();
-  const DeviceAllocation inner_allocation =
-      inner_selector.get_device_allocation();
-  if (outer_allocation == inner_allocation) {
-    return structural_fallback();
+  std::vector<DeviceAllocation> inner_allocations;
+  inner_allocations.reserve(inner_controls.size());
+  for (const auto &inner : inner_controls) {
+    if (inner.predicate == nullptr || inner.predicate->get_nelement() != 1 ||
+        inner.predicate->get_element_data_type() != PrimitiveType::i32 ||
+        inner.predicate->owning_program() != &program) {
+      return structural_fallback();
+    }
+    const DeviceAllocation allocation =
+        inner.predicate->get_device_allocation();
+    if (allocation == outer_allocation ||
+        std::find(inner_allocations.begin(), inner_allocations.end(),
+                  allocation) != inner_allocations.end()) {
+      return structural_fallback();
+    }
+    inner_allocations.push_back(allocation);
   }
   auto *selector_device =
       dynamic_cast<cuda::CudaDevice *>(outer_allocation.device);
   if (selector_device == nullptr ||
-      inner_allocation.device != selector_device) {
+      std::any_of(inner_allocations.begin(), inner_allocations.end(),
+                  [&](const DeviceAllocation &allocation) {
+                    return allocation.device != selector_device;
+                  })) {
     return structural_fallback();
   }
   auto &driver = CUDADriver::get_instance();
@@ -2477,7 +2539,9 @@ bool try_run_cuda_device_update_nested_control_graph(
     }
   };
   add_control_allocation(outer_allocation);
-  add_control_allocation(inner_allocation);
+  for (const DeviceAllocation &allocation : inner_allocations) {
+    add_control_allocation(allocation);
+  }
   std::sort(
       signature->allocations.begin(), signature->allocations.end(),
       [](const DeviceAllocation &lhs, const DeviceAllocation &rhs) {
@@ -2489,16 +2553,18 @@ bool try_run_cuda_device_update_nested_control_graph(
   CUDAContext::get_instance().make_current();
   state->collect_ready_deferred_resources();
 
-  const std::array<std::size_t, 4> boundaries{
-      outer_condition_dispatch_count, inner_condition_dispatch_begin,
-      inner_body_dispatch_begin, outer_suffix_dispatch_begin};
+  std::vector<int> inner_max_iterations;
+  inner_max_iterations.reserve(inner_controls.size());
+  for (const auto &inner : inner_controls) {
+    inner_max_iterations.push_back(inner.max_iterations);
+  }
   const bool topology_matches =
       state->device_update_nested_mode &&
-      state->masked_nested_boundaries == boundaries &&
+      state->nested_inner_boundaries == boundaries &&
       state->masked_nested_outer_max_iterations == outer_max_iterations &&
-      state->masked_nested_inner_max_iterations == inner_max_iterations &&
+      state->nested_inner_max_iterations == inner_max_iterations &&
       state->masked_selector_allocation == outer_allocation &&
-      state->masked_inner_selector_allocation == inner_allocation;
+      state->nested_inner_selector_allocations == inner_allocations;
   if (topology_matches && state->graph_exec &&
       state->signature == signature->entries &&
       state->allocations == signature->allocations) {
@@ -2574,10 +2640,10 @@ bool try_run_cuda_device_update_nested_control_graph(
   state->device_update_nested_mode = true;
   state->masked_control_type = 3;
   state->masked_selector_allocation = outer_allocation;
-  state->masked_inner_selector_allocation = inner_allocation;
-  state->masked_nested_boundaries = boundaries;
+  state->nested_inner_selector_allocations = inner_allocations;
+  state->nested_inner_boundaries = boundaries;
   state->masked_nested_outer_max_iterations = outer_max_iterations;
-  state->masked_nested_inner_max_iterations = inner_max_iterations;
+  state->nested_inner_max_iterations = inner_max_iterations;
   if (state->diagnostics_enabled) {
     ++state->stats.capture_attempts;
     if (is_recapture) {
@@ -2590,29 +2656,49 @@ bool try_run_cuda_device_update_nested_control_graph(
 
   void *capture_stream = state->ensure_capture_stream();
   driver.malloc(&state->masked_gate, sizeof(std::uint32_t));
-  driver.malloc(&state->masked_inner_gate, sizeof(std::uint32_t));
+  state->nested_inner_gates.assign(inner_controls.size(), nullptr);
+  for (void *&gate : state->nested_inner_gates) {
+    driver.malloc(&gate, sizeof(std::uint32_t));
+  }
   driver.malloc(reinterpret_cast<void **>(&state->nested_device_controls),
                 control_count * sizeof(cuda::CudaGraphPredicateGroupControl));
   state->nested_host_controls.assign(control_count, {});
   std::vector<std::vector<std::uintptr_t>> control_nodes(control_count);
   auto *outer_ptr = selector_device->get_alloc_info(outer_allocation).ptr;
-  auto *inner_ptr = selector_device->get_alloc_info(inner_allocation).ptr;
-  for (std::size_t control_index = 0; control_index < control_count;
-       ++control_index) {
-    const bool outer_control =
-        control_index % (static_cast<std::size_t>(inner_max_iterations) + 1) ==
-        0;
-    auto &control = state->nested_host_controls[control_index];
-    control.predicate =
-        reinterpret_cast<std::uintptr_t>(outer_control ? outer_ptr : inner_ptr);
-    control.parent_gate =
-        outer_control ? 0
-                      : reinterpret_cast<std::uintptr_t>(state->masked_gate);
-    control.gate = reinterpret_cast<std::uintptr_t>(
-        outer_control ? state->masked_gate : state->masked_inner_gate);
-    control.continue_while_nonzero = 1;
-    control.telemetry_enabled = state->diagnostics_enabled ? 1u : 0u;
+  std::vector<void *> inner_ptrs;
+  inner_ptrs.reserve(inner_allocations.size());
+  for (const DeviceAllocation &allocation : inner_allocations) {
+    inner_ptrs.push_back(selector_device->get_alloc_info(allocation).ptr);
   }
+  std::size_t initialized_control_count = 0;
+  for (int outer_iteration = 0; outer_iteration < outer_max_iterations;
+       ++outer_iteration) {
+    auto &outer_control =
+        state->nested_host_controls[initialized_control_count++];
+    outer_control.predicate = reinterpret_cast<std::uintptr_t>(outer_ptr);
+    outer_control.parent_gate = 0;
+    outer_control.gate =
+        reinterpret_cast<std::uintptr_t>(state->masked_gate);
+    outer_control.continue_while_nonzero = 1;
+    outer_control.telemetry_enabled = state->diagnostics_enabled ? 1u : 0u;
+    for (std::size_t child = 0; child < inner_controls.size(); ++child) {
+      for (int inner_iteration = 0;
+           inner_iteration < inner_controls[child].max_iterations;
+           ++inner_iteration) {
+        auto &control =
+            state->nested_host_controls[initialized_control_count++];
+        control.predicate =
+            reinterpret_cast<std::uintptr_t>(inner_ptrs[child]);
+        control.parent_gate =
+            reinterpret_cast<std::uintptr_t>(state->masked_gate);
+        control.gate = reinterpret_cast<std::uintptr_t>(
+            state->nested_inner_gates[child]);
+        control.continue_while_nonzero = 1;
+        control.telemetry_enabled = state->diagnostics_enabled ? 1u : 0u;
+      }
+    }
+  }
+  TI_ASSERT(initialized_control_count == control_count);
 
   for (std::size_t i = 0; i < dispatch_count; ++i) {
     const auto &dispatch = graph.dispatches[i];
@@ -2692,25 +2778,31 @@ bool try_run_cuda_device_update_nested_control_graph(
       const std::size_t outer_control_index = control_index++;
       cuda::driver_graph_update_predicate_group(
           state->nested_device_controls + outer_control_index, capture_stream);
-      for (std::size_t i = outer_condition_dispatch_count;
-           i < inner_body_dispatch_begin && payload_error == CUDA_SUCCESS;
-           ++i) {
-        payload_error = capture_payload(i, outer_control_index);
-      }
-      for (int inner_iteration = 0; inner_iteration < inner_max_iterations &&
-                                    payload_error == CUDA_SUCCESS;
-           ++inner_iteration) {
-        const std::size_t inner_control_index = control_index++;
-        cuda::driver_graph_update_predicate_group(
-            state->nested_device_controls + inner_control_index,
-            capture_stream);
-        for (std::size_t i = inner_body_dispatch_begin;
-             i < outer_suffix_dispatch_begin && payload_error == CUDA_SUCCESS;
+      std::size_t payload_cursor = outer_condition_dispatch_count;
+      for (const auto &inner : inner_controls) {
+        for (std::size_t i = payload_cursor;
+             i < inner.body_dispatch_begin &&
+             payload_error == CUDA_SUCCESS;
              ++i) {
-          payload_error = capture_payload(i, inner_control_index);
+          payload_error = capture_payload(i, outer_control_index);
         }
+        for (int inner_iteration = 0;
+             inner_iteration < inner.max_iterations &&
+             payload_error == CUDA_SUCCESS;
+             ++inner_iteration) {
+          const std::size_t inner_control_index = control_index++;
+          cuda::driver_graph_update_predicate_group(
+              state->nested_device_controls + inner_control_index,
+              capture_stream);
+          for (std::size_t i = inner.body_dispatch_begin;
+               i < inner.dispatch_end && payload_error == CUDA_SUCCESS;
+               ++i) {
+            payload_error = capture_payload(i, inner_control_index);
+          }
+        }
+        payload_cursor = inner.dispatch_end;
       }
-      for (std::size_t i = outer_suffix_dispatch_begin;
+      for (std::size_t i = payload_cursor;
            i < dispatch_count && payload_error == CUDA_SUCCESS; ++i) {
         payload_error = capture_payload(i, outer_control_index);
       }
@@ -2820,13 +2912,9 @@ bool try_run_cuda_masked_nested_control_graph(
     CompiledGraphJITCache &cache,
     Program &program,
     Ndarray &outer_selector,
-    Ndarray &inner_selector,
+    const std::vector<CompiledGraphNestedInnerControl> &inner_controls,
     std::size_t outer_condition_dispatch_count,
-    std::size_t inner_condition_dispatch_begin,
-    std::size_t inner_body_dispatch_begin,
-    std::size_t outer_suffix_dispatch_begin,
     int outer_max_iterations,
-    int inner_max_iterations,
     RuntimeStatistics *statistics) {
   auto *state = get_cuda_graph_state(cache);
   if (state->diagnostics_enabled) {
@@ -2843,66 +2931,101 @@ bool try_run_cuda_masked_nested_control_graph(
   };
 
   const std::size_t dispatch_count = graph.dispatches.size();
-  const bool ordered_boundaries =
-      outer_condition_dispatch_count != 0 &&
-      outer_condition_dispatch_count <= inner_condition_dispatch_begin &&
-      inner_condition_dispatch_begin < inner_body_dispatch_begin &&
-      inner_body_dispatch_begin < outer_suffix_dispatch_begin &&
-      outer_suffix_dispatch_begin < dispatch_count;
-  const std::size_t inner_condition_dispatch_count =
-      ordered_boundaries
-          ? inner_body_dispatch_begin - inner_condition_dispatch_begin
-          : 0;
-  const std::size_t inner_terminal_condition_begin =
-      outer_suffix_dispatch_begin >= inner_condition_dispatch_count
-          ? outer_suffix_dispatch_begin - inner_condition_dispatch_count
-          : 0;
   const std::size_t final_outer_condition_begin =
       dispatch_count >= outer_condition_dispatch_count
           ? dispatch_count - outer_condition_dispatch_count
           : 0;
-  const bool valid_iteration_limits =
-      outer_max_iterations > 0 && outer_max_iterations <= 64 &&
-      inner_max_iterations > 0 && inner_max_iterations <= 64;
+  bool ordered_boundaries = outer_condition_dispatch_count != 0 &&
+                            outer_condition_dispatch_count < dispatch_count &&
+                            !inner_controls.empty() &&
+                            inner_controls.size() <= 8;
+  bool valid_iteration_limits =
+      outer_max_iterations > 0 && outer_max_iterations <= 64;
+  std::size_t boundary_cursor = outer_condition_dispatch_count;
+  std::size_t single_copy_repeated_dispatches = 0;
+  std::size_t repeated_dispatches = 0;
+  std::vector<std::array<std::size_t, 3>> boundaries;
+  boundaries.reserve(inner_controls.size());
+  for (const auto &inner : inner_controls) {
+    const std::size_t condition_count =
+        inner.body_dispatch_begin >= inner.condition_dispatch_begin
+            ? inner.body_dispatch_begin - inner.condition_dispatch_begin
+            : 0;
+    const std::size_t terminal_condition_begin =
+        inner.dispatch_end >= condition_count
+            ? inner.dispatch_end - condition_count
+            : 0;
+    ordered_boundaries =
+        ordered_boundaries &&
+        boundary_cursor <= inner.condition_dispatch_begin &&
+        inner.condition_dispatch_begin < inner.body_dispatch_begin &&
+        inner.body_dispatch_begin < terminal_condition_begin &&
+        terminal_condition_begin < inner.dispatch_end &&
+        inner.dispatch_end <= final_outer_condition_begin;
+    valid_iteration_limits =
+        valid_iteration_limits && inner.max_iterations > 0 &&
+        inner.max_iterations <= 64;
+    const std::size_t repeated =
+        inner.dispatch_end >= inner.body_dispatch_begin
+            ? inner.dispatch_end - inner.body_dispatch_begin
+            : 0;
+    single_copy_repeated_dispatches += repeated;
+    repeated_dispatches +=
+        repeated * static_cast<std::size_t>(std::max(inner.max_iterations, 1));
+    boundaries.push_back({inner.condition_dispatch_begin,
+                          inner.body_dispatch_begin, inner.dispatch_end});
+    boundary_cursor = inner.dispatch_end;
+  }
+  const std::size_t static_dispatches =
+      dispatch_count >= outer_condition_dispatch_count +
+                            single_copy_repeated_dispatches
+          ? dispatch_count - outer_condition_dispatch_count -
+                single_copy_repeated_dispatches
+          : (std::numeric_limits<std::size_t>::max)();
   const std::size_t encoded_dispatches =
-      ordered_boundaries && valid_iteration_limits
+      valid_iteration_limits &&
+              static_dispatches <= 4096 && repeated_dispatches <= 4096
           ? outer_condition_dispatch_count +
                 static_cast<std::size_t>(outer_max_iterations) *
-                    ((inner_body_dispatch_begin -
-                      outer_condition_dispatch_count) +
-                     static_cast<std::size_t>(inner_max_iterations) *
-                         (outer_suffix_dispatch_begin -
-                          inner_body_dispatch_begin) +
-                     (dispatch_count - outer_suffix_dispatch_begin))
+                    (static_dispatches + repeated_dispatches)
           : (std::numeric_limits<std::size_t>::max)();
   constexpr std::size_t kMaxEncodedDispatches = 4096;
   if (compile_config.debug || dispatch_count == 0 || !valid_iteration_limits ||
-      !ordered_boundaries || inner_condition_dispatch_count == 0 ||
-      inner_body_dispatch_begin >= inner_terminal_condition_begin ||
-      inner_terminal_condition_begin >= outer_suffix_dispatch_begin ||
-      outer_suffix_dispatch_begin > final_outer_condition_begin ||
+      !ordered_boundaries ||
       final_outer_condition_begin >= dispatch_count ||
       encoded_dispatches > kMaxEncodedDispatches ||
       outer_selector.get_nelement() != 1 ||
-      inner_selector.get_nelement() != 1 ||
       outer_selector.get_element_data_type() != PrimitiveType::i32 ||
-      inner_selector.get_element_data_type() != PrimitiveType::i32 ||
-      outer_selector.owning_program() != &program ||
-      inner_selector.owning_program() != &program) {
+      outer_selector.owning_program() != &program) {
     return structural_fallback();
   }
 
   const DeviceAllocation outer_allocation =
       outer_selector.get_device_allocation();
-  const DeviceAllocation inner_allocation =
-      inner_selector.get_device_allocation();
-  if (outer_allocation == inner_allocation) {
-    return structural_fallback();
+  std::vector<DeviceAllocation> inner_allocations;
+  inner_allocations.reserve(inner_controls.size());
+  for (const auto &inner : inner_controls) {
+    if (inner.predicate == nullptr || inner.predicate->get_nelement() != 1 ||
+        inner.predicate->get_element_data_type() != PrimitiveType::i32 ||
+        inner.predicate->owning_program() != &program) {
+      return structural_fallback();
+    }
+    const DeviceAllocation allocation =
+        inner.predicate->get_device_allocation();
+    if (allocation == outer_allocation ||
+        std::find(inner_allocations.begin(), inner_allocations.end(),
+                  allocation) != inner_allocations.end()) {
+      return structural_fallback();
+    }
+    inner_allocations.push_back(allocation);
   }
   auto *selector_device =
       dynamic_cast<cuda::CudaDevice *>(outer_allocation.device);
   if (selector_device == nullptr ||
-      inner_allocation.device != selector_device) {
+      std::any_of(inner_allocations.begin(), inner_allocations.end(),
+                  [&](const DeviceAllocation &allocation) {
+                    return allocation.device != selector_device;
+                  })) {
     return structural_fallback();
   }
   auto &driver = CUDADriver::get_instance();
@@ -2933,7 +3056,9 @@ bool try_run_cuda_masked_nested_control_graph(
     }
   };
   add_control_allocation(outer_allocation);
-  add_control_allocation(inner_allocation);
+  for (const DeviceAllocation &allocation : inner_allocations) {
+    add_control_allocation(allocation);
+  }
   std::sort(
       signature->allocations.begin(), signature->allocations.end(),
       [](const DeviceAllocation &lhs, const DeviceAllocation &rhs) {
@@ -2945,16 +3070,18 @@ bool try_run_cuda_masked_nested_control_graph(
   CUDAContext::get_instance().make_current();
   state->collect_ready_deferred_resources();
 
-  const std::array<std::size_t, 4> boundaries{
-      outer_condition_dispatch_count, inner_condition_dispatch_begin,
-      inner_body_dispatch_begin, outer_suffix_dispatch_begin};
+  std::vector<int> inner_max_iterations;
+  inner_max_iterations.reserve(inner_controls.size());
+  for (const auto &inner : inner_controls) {
+    inner_max_iterations.push_back(inner.max_iterations);
+  }
   const bool topology_matches =
       state->masked_mode && state->masked_nested_mode &&
-      state->masked_nested_boundaries == boundaries &&
+      state->nested_inner_boundaries == boundaries &&
       state->masked_nested_outer_max_iterations == outer_max_iterations &&
-      state->masked_nested_inner_max_iterations == inner_max_iterations &&
+      state->nested_inner_max_iterations == inner_max_iterations &&
       state->masked_selector_allocation == outer_allocation &&
-      state->masked_inner_selector_allocation == inner_allocation;
+      state->nested_inner_selector_allocations == inner_allocations;
   if (topology_matches && state->graph_exec &&
       state->signature == signature->entries &&
       state->allocations == signature->allocations) {
@@ -3030,10 +3157,10 @@ bool try_run_cuda_masked_nested_control_graph(
   state->masked_nested_mode = true;
   state->masked_control_type = 3;
   state->masked_selector_allocation = outer_allocation;
-  state->masked_inner_selector_allocation = inner_allocation;
-  state->masked_nested_boundaries = boundaries;
+  state->nested_inner_selector_allocations = inner_allocations;
+  state->nested_inner_boundaries = boundaries;
   state->masked_nested_outer_max_iterations = outer_max_iterations;
-  state->masked_nested_inner_max_iterations = inner_max_iterations;
+  state->nested_inner_max_iterations = inner_max_iterations;
   if (state->diagnostics_enabled) {
     ++state->stats.capture_attempts;
     if (is_recapture) {
@@ -3051,7 +3178,10 @@ bool try_run_cuda_masked_nested_control_graph(
     return structural_fallback();
   }
   driver.malloc(&state->masked_gate, sizeof(std::uint32_t));
-  driver.malloc(&state->masked_inner_gate, sizeof(std::uint32_t));
+  state->nested_inner_gates.assign(inner_controls.size(), nullptr);
+  for (void *&gate : state->nested_inner_gates) {
+    driver.malloc(&gate, sizeof(std::uint32_t));
+  }
   for (std::size_t i = 0; i < dispatch_count; ++i) {
     const auto &dispatch = graph.dispatches[i];
     TI_ASSERT(dispatch.ti_kernel);
@@ -3067,8 +3197,15 @@ bool try_run_cuda_masked_nested_control_graph(
     const auto &llvm_ckd =
         dynamic_cast<const LLVM::CompiledKernelData &>(*compiled_kernel_data);
     const bool initial_outer_condition = i < outer_condition_dispatch_count;
-    const bool inner_gated =
-        i >= inner_body_dispatch_begin && i < outer_suffix_dispatch_begin;
+    const auto inner_gate = [&]() -> void * {
+      for (std::size_t child = 0; child < inner_controls.size(); ++child) {
+        if (i >= inner_controls[child].body_dispatch_begin &&
+            i < inner_controls[child].dispatch_end) {
+          return state->nested_inner_gates[child];
+        }
+      }
+      return nullptr;
+    }();
     auto handle = initial_outer_condition
                       ? launcher->register_llvm_kernel(llvm_ckd)
                       : launcher->register_llvm_kernel_graph_gated(llvm_ckd);
@@ -3086,7 +3223,7 @@ bool try_run_cuda_masked_nested_control_graph(
                   handle, launch_ctx, capture_packet.packet, capture_stream)
             : launcher->prepare_cuda_graph_gated_launch(
                   handle, launch_ctx, capture_packet.packet,
-                  inner_gated ? state->masked_inner_gate : state->masked_gate,
+                  inner_gate != nullptr ? inner_gate : state->masked_gate,
                   1u, capture_stream);
     if (!prepared) {
       driver.stream_synchronize(capture_stream);
@@ -3096,7 +3233,11 @@ bool try_run_cuda_masked_nested_control_graph(
   }
 
   auto *outer_ptr = selector_device->get_alloc_info(outer_allocation).ptr;
-  auto *inner_ptr = selector_device->get_alloc_info(inner_allocation).ptr;
+  std::vector<void *> inner_ptrs;
+  inner_ptrs.reserve(inner_allocations.size());
+  for (const DeviceAllocation &allocation : inner_allocations) {
+    inner_ptrs.push_back(selector_device->get_alloc_info(allocation).ptr);
+  }
   driver.stream_synchronize(capture_stream);
   auto capture_lock =
       CUDAContext::get_instance().get_graph_capture_lock_guard();
@@ -3117,24 +3258,28 @@ bool try_run_cuda_masked_nested_control_graph(
          ++outer_iteration) {
       cuda::driver_graph_latch_while(outer_ptr, state->masked_gate, true,
                                      capture_stream);
-      for (std::size_t i = outer_condition_dispatch_count;
-           i < inner_body_dispatch_begin; ++i) {
-        state->packets[i].launcher->capture_cuda_graph_launch(
-            state->packets[i].packet, capture_stream);
-      }
-      for (int inner_iteration = 0; inner_iteration < inner_max_iterations;
-           ++inner_iteration) {
-        cuda::driver_graph_latch_nested_while(state->masked_gate, inner_ptr,
-                                              state->masked_inner_gate, true,
-                                              capture_stream);
-        for (std::size_t i = inner_body_dispatch_begin;
-             i < outer_suffix_dispatch_begin; ++i) {
+      std::size_t payload_cursor = outer_condition_dispatch_count;
+      for (std::size_t child = 0; child < inner_controls.size(); ++child) {
+        const auto &inner = inner_controls[child];
+        for (std::size_t i = payload_cursor;
+             i < inner.body_dispatch_begin; ++i) {
           state->packets[i].launcher->capture_cuda_graph_launch(
               state->packets[i].packet, capture_stream);
         }
+        for (int inner_iteration = 0;
+             inner_iteration < inner.max_iterations; ++inner_iteration) {
+          cuda::driver_graph_latch_nested_while(
+              state->masked_gate, inner_ptrs[child],
+              state->nested_inner_gates[child], true, capture_stream);
+          for (std::size_t i = inner.body_dispatch_begin;
+               i < inner.dispatch_end; ++i) {
+            state->packets[i].launcher->capture_cuda_graph_launch(
+                state->packets[i].packet, capture_stream);
+          }
+        }
+        payload_cursor = inner.dispatch_end;
       }
-      for (std::size_t i = outer_suffix_dispatch_begin; i < dispatch_count;
-           ++i) {
+      for (std::size_t i = payload_cursor; i < dispatch_count; ++i) {
         state->packets[i].launcher->capture_cuda_graph_launch(
             state->packets[i].packet, capture_stream);
       }
@@ -4922,27 +5067,21 @@ bool CompiledGraph::jit_run_bounded_cuda_masked_cached(
   throw;
 }
 
-bool CompiledGraph::jit_submit_bounded_cuda_nested_cached(
+bool CompiledGraph::jit_submit_bounded_cuda_nested_sequence_cached(
     const CompileConfig &compile_config,
     const std::unordered_map<std::string, IValue> &args,
     CompiledGraphJITCache &cache,
     Ndarray *outer_predicate,
     Ndarray *outer_counter,
     Ndarray *outer_status,
-    Ndarray *inner_predicate,
-    Ndarray *inner_counter,
-    Ndarray *inner_status,
+    const std::vector<CompiledGraphNestedInnerControl> &inner_controls,
     std::size_t outer_condition_dispatch_count,
-    std::size_t inner_condition_dispatch_begin,
-    std::size_t inner_body_dispatch_begin,
-    std::size_t outer_suffix_dispatch_begin,
     int outer_max_iterations,
-    int inner_max_iterations,
     bool allow_device_update) const try {
 #if defined(TI_WITH_CUDA)
   if (compile_config.arch != Arch::cuda || outer_predicate == nullptr ||
-      outer_counter == nullptr || inner_predicate == nullptr ||
-      inner_counter == nullptr) {
+      outer_counter == nullptr || inner_controls.empty() ||
+      inner_controls.size() > 8) {
     return false;
   }
   Program *program = jit_graph_program(*this);
@@ -4955,31 +5094,36 @@ bool CompiledGraph::jit_submit_bounded_cuda_nested_cached(
            control->owning_program() == program;
   };
   if (!valid_control(outer_predicate) || !valid_control(outer_counter) ||
-      !valid_control(inner_predicate) || !valid_control(inner_counter) ||
-      (outer_status != nullptr && !valid_control(outer_status)) ||
-      (inner_status != nullptr && !valid_control(inner_status))) {
+      (outer_status != nullptr && !valid_control(outer_status))) {
     return false;
   }
-  std::array<DeviceAllocation, 6> controls{
+  std::vector<DeviceAllocation> controls{
       outer_predicate->get_device_allocation(),
-      outer_counter->get_device_allocation(),
-      outer_status != nullptr ? outer_status->get_device_allocation()
-                              : kDeviceNullAllocation,
-      inner_predicate->get_device_allocation(),
-      inner_counter->get_device_allocation(),
-      inner_status != nullptr ? inner_status->get_device_allocation()
-                              : kDeviceNullAllocation};
-  const std::array<bool, 6> active{true, true, outer_status != nullptr,
-                                   true, true, inner_status != nullptr};
-  for (std::size_t i = 0; i < controls.size(); ++i) {
-    if (!active[i]) {
-      continue;
+      outer_counter->get_device_allocation()};
+  if (outer_status != nullptr) {
+    controls.push_back(outer_status->get_device_allocation());
+  }
+  for (const auto &inner : inner_controls) {
+    if (!valid_control(inner.predicate) || !valid_control(inner.counter) ||
+        (inner.status != nullptr && !valid_control(inner.status))) {
+      return false;
     }
-    for (std::size_t j = i + 1; j < controls.size(); ++j) {
-      if (active[j] && controls[i] == controls[j]) {
-        return false;
-      }
+    controls.push_back(inner.predicate->get_device_allocation());
+    controls.push_back(inner.counter->get_device_allocation());
+    if (inner.status != nullptr) {
+      controls.push_back(inner.status->get_device_allocation());
     }
+  }
+  std::sort(controls.begin(), controls.end(),
+            [](const DeviceAllocation &lhs, const DeviceAllocation &rhs) {
+              if (lhs.device != rhs.device) {
+                return reinterpret_cast<std::uintptr_t>(lhs.device) <
+                       reinterpret_cast<std::uintptr_t>(rhs.device);
+              }
+              return lhs.alloc_id < rhs.alloc_id;
+            });
+  if (std::adjacent_find(controls.begin(), controls.end()) != controls.end()) {
+    return false;
   }
 
   program->ensure_runtime_submission_allowed(
@@ -4989,13 +5133,15 @@ bool CompiledGraph::jit_submit_bounded_cuda_nested_cached(
   auto resource_views = graph_runtime_resource_views(args, program);
   resource_views.ndarrays.add(outer_predicate);
   resource_views.ndarrays.add(outer_counter);
-  resource_views.ndarrays.add(inner_predicate);
-  resource_views.ndarrays.add(inner_counter);
   if (outer_status != nullptr) {
     resource_views.ndarrays.add(outer_status);
   }
-  if (inner_status != nullptr) {
-    resource_views.ndarrays.add(inner_status);
+  for (const auto &inner : inner_controls) {
+    resource_views.ndarrays.add(inner.predicate);
+    resource_views.ndarrays.add(inner.counter);
+    if (inner.status != nullptr) {
+      resource_views.ndarrays.add(inner.status);
+    }
   }
   std::optional<Program::RuntimeResourceGraphScope> resource_guard;
   if (!resource_views.empty()) {
@@ -5037,17 +5183,13 @@ bool CompiledGraph::jit_submit_bounded_cuda_nested_cached(
       allow_device_update &&
       try_run_cuda_device_update_nested_control_graph(
           *this, compile_config, args, cache, *program, *outer_predicate,
-          *inner_predicate, outer_condition_dispatch_count,
-          inner_condition_dispatch_begin, inner_body_dispatch_begin,
-          outer_suffix_dispatch_begin, outer_max_iterations,
-          inner_max_iterations, &program->runtime_statistics());
+          inner_controls, outer_condition_dispatch_count,
+          outer_max_iterations, &program->runtime_statistics());
   if (!device_update_submitted &&
       !try_run_cuda_masked_nested_control_graph(
           *this, compile_config, args, cache, *program, *outer_predicate,
-          *inner_predicate, outer_condition_dispatch_count,
-          inner_condition_dispatch_begin, inner_body_dispatch_begin,
-          outer_suffix_dispatch_begin, outer_max_iterations,
-          inner_max_iterations, &program->runtime_statistics())) {
+          inner_controls, outer_condition_dispatch_count,
+          outer_max_iterations, &program->runtime_statistics())) {
     return false;
   }
   program->mark_runtime_submission(
@@ -5072,6 +5214,38 @@ bool CompiledGraph::jit_submit_bounded_cuda_nested_cached(
     program->record_runtime_submission_failure();
   }
   throw;
+}
+
+bool CompiledGraph::jit_submit_bounded_cuda_nested_cached(
+    const CompileConfig &compile_config,
+    const std::unordered_map<std::string, IValue> &args,
+    CompiledGraphJITCache &cache,
+    Ndarray *outer_predicate,
+    Ndarray *outer_counter,
+    Ndarray *outer_status,
+    Ndarray *inner_predicate,
+    Ndarray *inner_counter,
+    Ndarray *inner_status,
+    std::size_t outer_condition_dispatch_count,
+    std::size_t inner_condition_dispatch_begin,
+    std::size_t inner_body_dispatch_begin,
+    std::size_t outer_suffix_dispatch_begin,
+    int outer_max_iterations,
+    int inner_max_iterations,
+    bool allow_device_update) const {
+  CompiledGraphNestedInnerControl inner;
+  inner.predicate = inner_predicate;
+  inner.counter = inner_counter;
+  inner.status = inner_status;
+  inner.condition_dispatch_begin = inner_condition_dispatch_begin;
+  inner.body_dispatch_begin = inner_body_dispatch_begin;
+  inner.dispatch_end = outer_suffix_dispatch_begin;
+  inner.max_iterations = inner_max_iterations;
+  inner.chunk_size = inner_max_iterations;
+  return jit_submit_bounded_cuda_nested_sequence_cached(
+      compile_config, args, cache, outer_predicate, outer_counter,
+      outer_status, {inner}, outer_condition_dispatch_count,
+      outer_max_iterations, allow_device_update);
 }
 
 CompiledGraphStructuredResult
@@ -5382,24 +5556,45 @@ CompiledGraph::jit_run_bounded_vulkan_nested_cached(
     int outer_max_iterations,
     int inner_max_iterations,
     int inner_chunk_size,
+    bool wait_for_result) const {
+  CompiledGraphNestedInnerControl inner;
+  inner.predicate = inner_predicate;
+  inner.counter = inner_counter;
+  inner.status = inner_status;
+  inner.condition_dispatch_begin = inner_condition_dispatch_begin;
+  inner.body_dispatch_begin = inner_body_dispatch_begin;
+  inner.dispatch_end = outer_suffix_dispatch_begin;
+  inner.max_iterations = inner_max_iterations;
+  inner.chunk_size = inner_chunk_size;
+  return jit_run_bounded_vulkan_nested_sequence_cached(
+      compile_config, args, cache, outer_predicate, outer_counter,
+      outer_status, {inner}, outer_condition_dispatch_count,
+      outer_max_iterations, wait_for_result);
+}
+
+CompiledGraphNestedStructuredResult
+CompiledGraph::jit_run_bounded_vulkan_nested_sequence_cached(
+    const CompileConfig &compile_config,
+    const std::unordered_map<std::string, IValue> &args,
+    CompiledGraphJITCache &cache,
+    Ndarray *outer_predicate,
+    Ndarray *outer_counter,
+    Ndarray *outer_status,
+    const std::vector<CompiledGraphNestedInnerControl> &inner_controls,
+    std::size_t outer_condition_dispatch_count,
+    int outer_max_iterations,
     bool wait_for_result) const try {
   CompiledGraphNestedStructuredResult result;
 #if defined(TI_WITH_VULKAN)
   constexpr int kNestedMaximumOuterIterations = 64;
   constexpr int kNestedMaximumChunkIterations = 64;
+  constexpr std::size_t kNestedMaximumInnerRegions = 8;
   if (compile_config.arch != Arch::vulkan || outer_predicate == nullptr ||
-      outer_counter == nullptr || inner_predicate == nullptr ||
-      inner_counter == nullptr || outer_max_iterations <= 0 ||
+      outer_counter == nullptr || inner_controls.empty() ||
+      inner_controls.size() > kNestedMaximumInnerRegions ||
+      outer_max_iterations <= 0 ||
       outer_max_iterations > kNestedMaximumOuterIterations ||
-      inner_max_iterations <= 0 || inner_chunk_size <= 0 ||
-      inner_max_iterations > kNestedMaximumChunkIterations ||
-      inner_chunk_size > kNestedMaximumChunkIterations ||
-      inner_chunk_size > inner_max_iterations ||
-      outer_condition_dispatch_count == 0 ||
-      outer_condition_dispatch_count > inner_condition_dispatch_begin ||
-      inner_condition_dispatch_begin >= inner_body_dispatch_begin ||
-      inner_body_dispatch_begin >= outer_suffix_dispatch_begin ||
-      outer_suffix_dispatch_begin >= dispatches.size()) {
+      outer_condition_dispatch_count == 0) {
     return result;
   }
   Program *program = jit_graph_program(*this);
@@ -5412,32 +5607,40 @@ CompiledGraph::jit_run_bounded_vulkan_nested_cached(
            control->owning_program() == program;
   };
   if (!valid_control(outer_predicate) || !valid_control(outer_counter) ||
-      !valid_control(inner_predicate) || !valid_control(inner_counter) ||
-      (outer_status != nullptr && !valid_control(outer_status)) ||
-      (inner_status != nullptr && !valid_control(inner_status))) {
+      (outer_status != nullptr && !valid_control(outer_status))) {
     return result;
   }
-  std::array<DevicePtr, 6> control_ptrs{
+  std::vector<DevicePtr> control_ptrs{
       outer_predicate->get_device_allocation().get_ptr(),
-      outer_counter->get_device_allocation().get_ptr(),
-      outer_status != nullptr
-          ? outer_status->get_device_allocation().get_ptr()
-          : kDeviceNullPtr,
-      inner_predicate->get_device_allocation().get_ptr(),
-      inner_counter->get_device_allocation().get_ptr(),
-      inner_status != nullptr
-          ? inner_status->get_device_allocation().get_ptr()
-          : kDeviceNullPtr};
-  const std::array<bool, 6> control_ptr_active{
-      true, true, outer_status != nullptr, true, true,
-      inner_status != nullptr};
-  for (std::size_t i = 0; i < control_ptrs.size(); ++i) {
-    if (!control_ptr_active[i]) {
-      continue;
+      outer_counter->get_device_allocation().get_ptr()};
+  if (outer_status != nullptr) {
+    control_ptrs.push_back(outer_status->get_device_allocation().get_ptr());
+  }
+  std::size_t boundary_cursor = outer_condition_dispatch_count;
+  for (const auto &inner : inner_controls) {
+    if (!valid_control(inner.predicate) || !valid_control(inner.counter) ||
+        (inner.status != nullptr && !valid_control(inner.status)) ||
+        inner.max_iterations <= 0 || inner.chunk_size <= 0 ||
+        inner.max_iterations > kNestedMaximumChunkIterations ||
+        inner.chunk_size > kNestedMaximumChunkIterations ||
+        inner.chunk_size > inner.max_iterations ||
+        boundary_cursor > inner.condition_dispatch_begin ||
+        inner.condition_dispatch_begin >= inner.body_dispatch_begin ||
+        inner.body_dispatch_begin >= inner.dispatch_end ||
+        inner.dispatch_end >= dispatches.size()) {
+      return result;
     }
+    control_ptrs.push_back(
+        inner.predicate->get_device_allocation().get_ptr());
+    control_ptrs.push_back(inner.counter->get_device_allocation().get_ptr());
+    if (inner.status != nullptr) {
+      control_ptrs.push_back(inner.status->get_device_allocation().get_ptr());
+    }
+    boundary_cursor = inner.dispatch_end;
+  }
+  for (std::size_t i = 0; i < control_ptrs.size(); ++i) {
     for (std::size_t j = i + 1; j < control_ptrs.size(); ++j) {
-      if (control_ptr_active[j] &&
-          control_ptrs[i].alloc_id == control_ptrs[j].alloc_id &&
+      if (control_ptrs[i].alloc_id == control_ptrs[j].alloc_id &&
           control_ptrs[i].offset == control_ptrs[j].offset) {
         return result;
       }
@@ -5451,13 +5654,15 @@ CompiledGraph::jit_run_bounded_vulkan_nested_cached(
   auto resource_views = graph_runtime_resource_views(args, program);
   resource_views.ndarrays.add(outer_predicate);
   resource_views.ndarrays.add(outer_counter);
-  resource_views.ndarrays.add(inner_predicate);
-  resource_views.ndarrays.add(inner_counter);
   if (outer_status != nullptr) {
     resource_views.ndarrays.add(outer_status);
   }
-  if (inner_status != nullptr) {
-    resource_views.ndarrays.add(inner_status);
+  for (const auto &inner : inner_controls) {
+    resource_views.ndarrays.add(inner.predicate);
+    resource_views.ndarrays.add(inner.counter);
+    if (inner.status != nullptr) {
+      resource_views.ndarrays.add(inner.status);
+    }
   }
   std::optional<Program::RuntimeResourceGraphScope> resource_guard;
   if (!resource_views.empty()) {
@@ -5499,29 +5704,36 @@ CompiledGraph::jit_run_bounded_vulkan_nested_cached(
   control.outer_predicate =
       outer_predicate->get_device_allocation().get_ptr();
   control.outer_counter = outer_counter->get_device_allocation().get_ptr();
-  control.inner_predicate =
-      inner_predicate->get_device_allocation().get_ptr();
-  control.inner_counter = inner_counter->get_device_allocation().get_ptr();
   control.outer_has_status = outer_status != nullptr;
-  control.inner_has_status = inner_status != nullptr;
   if (outer_status != nullptr) {
     control.outer_status = outer_status->get_device_allocation().get_ptr();
   }
-  if (inner_status != nullptr) {
-    control.inner_status = inner_status->get_device_allocation().get_ptr();
-  }
   control.outer_condition_dispatch_count =
       outer_condition_dispatch_count;
-  control.inner_condition_dispatch_begin =
-      inner_condition_dispatch_begin;
-  control.inner_body_dispatch_begin = inner_body_dispatch_begin;
-  control.outer_suffix_dispatch_begin = outer_suffix_dispatch_begin;
   control.outer_max_iterations =
       static_cast<std::uint32_t>(outer_max_iterations);
-  control.inner_max_iterations =
-      static_cast<std::uint32_t>(inner_max_iterations);
-  control.inner_chunk_size =
-      static_cast<std::uint32_t>(inner_chunk_size);
+  control.inner_controls.reserve(inner_controls.size());
+  for (const auto &inner : inner_controls) {
+    gfx::GfxRuntime::GraphNestedStructuredInnerControl gfx_inner;
+    gfx_inner.inner_predicate =
+        inner.predicate->get_device_allocation().get_ptr();
+    gfx_inner.inner_counter =
+        inner.counter->get_device_allocation().get_ptr();
+    gfx_inner.inner_has_status = inner.status != nullptr;
+    if (inner.status != nullptr) {
+      gfx_inner.inner_status =
+          inner.status->get_device_allocation().get_ptr();
+    }
+    gfx_inner.inner_condition_dispatch_begin =
+        inner.condition_dispatch_begin;
+    gfx_inner.inner_body_dispatch_begin = inner.body_dispatch_begin;
+    gfx_inner.inner_dispatch_end = inner.dispatch_end;
+    gfx_inner.inner_max_iterations =
+        static_cast<std::uint32_t>(inner.max_iterations);
+    gfx_inner.inner_chunk_size =
+        static_cast<std::uint32_t>(inner.chunk_size);
+    control.inner_controls.push_back(gfx_inner);
+  }
 
   gfx::GfxRuntime::GraphNestedStructuredResult gfx_result;
   if (!try_run_vulkan_graph(*this, compile_config, args, cache,
@@ -5540,6 +5752,7 @@ CompiledGraph::jit_run_bounded_vulkan_nested_cached(
     return result;
   }
   result.submitted = gfx_result.submitted;
+  result.inner_region_count = gfx_result.inner_region_count;
   result.outer_logical_iterations =
       gfx_result.outer_logical_iterations;
   result.outer_encoded_iterations =

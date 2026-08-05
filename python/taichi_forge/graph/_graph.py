@@ -841,6 +841,7 @@ def _structured_submission_metadata(node):
     return {
         "name": node.name,
         "path_id": node.region_path,
+        "control_depth": node.control_depth,
         "backend": backend,
         "lowering": lowering,
         "max_iterations": node.max_iterations,
@@ -848,6 +849,20 @@ def _structured_submission_metadata(node):
         "chunk_strategies": chunk_strategies,
         "has_status": node.status is not None,
     }
+
+
+def _submission_telemetry_region_nodes(node):
+    result = []
+
+    def visit(current):
+        if isinstance(current, _CompiledWhileGraphNode):
+            result.append(current)
+        for _, children in getattr(current, "_definition_children", ()):
+            for child in children:
+                visit(child)
+
+    visit(node)
+    return tuple(result)
 
 
 class _GraphStructuredTelemetryState:
@@ -1289,13 +1304,30 @@ class _GraphStructuredTelemetryArena:
                 },
             )
             gpu_region_available = bool(gpu_region["available"])
+            control_depth = int(metadata["control_depth"])
+            logical_invocations = 1
+            if control_depth > 1:
+                parent_regions = tuple(
+                    region
+                    for region in regions
+                    if metadata["path_id"].startswith(region.path_id + "/")
+                    and region.control_depth == control_depth - 1
+                )
+                if len(parent_regions) != 1:
+                    raise TaichiRuntimeError(
+                        "Graph submission telemetry could not identify the "
+                        "unique parent structured region"
+                    )
+                logical_invocations = parent_regions[0].logical_iterations
             regions.append(
                 GraphSubmissionRegionTelemetry(
                     name=metadata["name"],
                     path_id=metadata["path_id"],
                     backend=metadata["backend"],
                     lowering=metadata["lowering"],
+                    control_depth=control_depth,
                     max_iterations=max_iterations,
+                    logical_invocations=logical_invocations,
                     logical_iterations=logical,
                     encoded_iterations=sum(chunk_sizes),
                     masked_iterations=sum(chunk_sizes) - logical,
@@ -1310,9 +1342,7 @@ class _GraphStructuredTelemetryArena:
                     final_status=(final_status if metadata["has_status"] else None),
                     host_enqueue_ns=int(recorder.host_enqueue_ns[index]),
                     gpu_duration_ns=(
-                        int(gpu_region["duration_ns"])
-                        if gpu_region_available
-                        else None
+                        int(gpu_region["duration_ns"]) if gpu_region_available else None
                     ),
                     gpu_timestamp_exact=bool(gpu_region["exact"]),
                     gpu_measurement_path_changed=bool(
@@ -2713,7 +2743,9 @@ class GraphSubmissionRegionTelemetry:
     path_id: str
     backend: str
     lowering: str
+    control_depth: int
     max_iterations: int
+    logical_invocations: int
     logical_iterations: int
     encoded_iterations: int
     masked_iterations: int
@@ -3375,8 +3407,7 @@ def bounded_dispatch_capabilities():
         "producer_update_policy_requested": update_policy_requested,
         "producer_update_policy": update_policy,
         "grouped_updates_supported": (
-            backend == "cuda"
-            and capabilities.route == "adaptive_device_grid_update"
+            backend == "cuda" and capabilities.route == "adaptive_device_grid_update"
         ),
         "forge_producer_fusion_supported": backend == "vulkan",
         "default_preparation_dispatches": capabilities.preparation_dispatches,
@@ -3437,9 +3468,7 @@ def structured_control_capabilities():
     compound_tail_strategy = "none"
     queue_submit_policy = "backend_default"
     parallel_indirect_dispatch = False
-    parallel_indirect_dispatch_reason = (
-        "native_vulkan_graph_replay_unavailable"
-    )
+    parallel_indirect_dispatch_reason = "native_vulkan_graph_replay_unavailable"
     compound_single_preparation = False
     structured_barrier_policy = "unavailable"
     nested_native_compiled = bool(
@@ -3447,14 +3476,14 @@ def structured_control_capabilities():
             arch == _ti_core.Arch.cuda
             and hasattr(
                 _ti_core.CompiledGraph,
-                "jit_submit_bounded_cuda_nested_cached",
+                "jit_submit_bounded_cuda_nested_sequence_cached",
             )
         )
         or (
             arch == _ti_core.Arch.vulkan
             and hasattr(
                 _ti_core.CompiledGraph,
-                "jit_run_bounded_vulkan_nested_cached",
+                "jit_run_bounded_vulkan_nested_sequence_cached",
             )
         )
     )
@@ -5377,9 +5406,7 @@ def _graph_control_name(value, role):
 def _graph_control_names(values, role):
     names = tuple(_graph_control_name(value, role) for value in values)
     if len(names) != len(set(names)):
-        raise TaichiRuntimeError(
-            f"Graph {role} must not contain duplicate resources"
-        )
+        raise TaichiRuntimeError(f"Graph {role} must not contain duplicate resources")
     return names
 
 
@@ -5449,9 +5476,9 @@ def _compile_native_nested_while_runtime_node(
     if arch not in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan):
         return unavailable("backend_is_not_cuda_or_vulkan")
     binding = (
-        "jit_submit_bounded_cuda_nested_cached"
+        "jit_submit_bounded_cuda_nested_sequence_cached"
         if arch == _ti_core.Arch.cuda
-        else "jit_run_bounded_vulkan_nested_cached"
+        else "jit_run_bounded_vulkan_nested_sequence_cached"
     )
     if not hasattr(_ti_core.CompiledGraph, binding):
         return unavailable("nested_runtime_binding_unavailable")
@@ -5464,7 +5491,10 @@ def _compile_native_nested_while_runtime_node(
         return unavailable("outer_counter_required")
     if outer_max_iterations <= 0 or outer_max_iterations > 64:
         return unavailable("outer_iteration_budget_out_of_range")
-    if arch == _ti_core.Arch.vulkan and not impl.get_runtime().prog._vulkan_conditional_rendering_available():
+    if (
+        arch == _ti_core.Arch.vulkan
+        and not impl.get_runtime().prog._vulkan_conditional_rendering_available()
+    ):
         return unavailable("vulkan_conditional_rendering_unavailable")
 
     condition_pairs = tuple(zip(condition._items, condition._ir_nodes))
@@ -5472,110 +5502,112 @@ def _compile_native_nested_while_runtime_node(
     if any(item[0] not in ("dispatch", "native") for item, _ in condition_pairs):
         return unavailable("outer_condition_must_be_plain")
     structured_indices = tuple(
-        index
-        for index, (item, _) in enumerate(body_pairs)
-        if item[0] == "structured"
+        index for index, (item, _) in enumerate(body_pairs) if item[0] == "structured"
     )
-    if len(structured_indices) != 1:
-        return unavailable("exactly_one_inner_region_required")
-    inner_index = structured_indices[0]
-    inner = body_pairs[inner_index][0][1]
-    if not isinstance(inner, _CompiledWhileGraphNode):
-        return unavailable("inner_region_must_be_while")
-    if inner._has_nested_control:
-        return unavailable("inner_region_must_be_leaf")
-    if inner.counter is None:
-        return unavailable("inner_counter_required")
-    if inner.max_iterations <= 0 or inner.max_iterations > 64:
-        return unavailable("inner_iteration_budget_out_of_range")
-    if inner.compound_chunk_limit <= 0 or inner.compound_chunk_limit > 64:
-        return unavailable("inner_chunk_size_out_of_range")
-    if not inner._native_upgrade_eligible:
-        return unavailable(f"inner_native_unavailable:{inner._native_upgrade_reason}")
+    if not structured_indices:
+        return unavailable("inner_region_required")
+    if len(structured_indices) > 8:
+        return unavailable("inner_region_count_exceeds_eight")
 
     outer_controls = {outer_predicate, outer_counter}
-    inner_controls = {inner.predicate, inner.counter}
     if outer_status is not None:
         outer_controls.add(outer_status)
-    if inner.status is not None:
-        inner_controls.add(inner.status)
-    if outer_controls & inner_controls:
-        return unavailable("outer_and_inner_control_resources_must_be_independent")
+    all_controls = set(outer_controls)
+    inners = []
+    inner_sequences = []
+    for inner_slot, inner_index in enumerate(structured_indices):
+        inner = body_pairs[inner_index][0][1]
+        if not isinstance(inner, _CompiledWhileGraphNode):
+            return unavailable("inner_region_must_be_while")
+        if inner._has_nested_control:
+            return unavailable("inner_region_must_be_leaf")
+        if inner.counter is None:
+            return unavailable("inner_counter_required")
+        if inner.max_iterations <= 0 or inner.max_iterations > 64:
+            return unavailable("inner_iteration_budget_out_of_range")
+        if inner.compound_chunk_limit <= 0 or inner.compound_chunk_limit > 64:
+            return unavailable("inner_chunk_size_out_of_range")
+        if not inner._native_upgrade_eligible:
+            return unavailable(
+                f"inner_native_unavailable:{inner._native_upgrade_reason}"
+            )
+        controls = {inner.predicate, inner.counter}
+        if inner.status is not None:
+            controls.add(inner.status)
+        if all_controls & controls:
+            return unavailable("nested_control_resources_must_be_pairwise_independent")
+        all_controls.update(controls)
+        regions = dict(inner._definition_regions)
+        inner_condition = regions["condition"]
+        inner_body = regions["body"]
+        for sequence, role in (
+            (inner_condition, f"inner_{inner_slot}_condition"),
+            (inner_body, f"inner_{inner_slot}_body"),
+        ):
+            if any(item[0] not in ("dispatch", "native") for item in sequence._items):
+                return unavailable(f"{role}_must_be_plain")
+        inners.append(inner)
+        inner_sequences.append((inner_condition, inner_body))
 
-    prefix_pairs = body_pairs[:inner_index]
-    suffix_pairs = body_pairs[inner_index + 1 :]
-    for pairs, role in (
-        (prefix_pairs, "outer_prefix"),
-        (suffix_pairs, "outer_suffix"),
-    ):
+    plain_segments = []
+    cursor = 0
+    for inner_index in structured_indices:
+        pairs = body_pairs[cursor:inner_index]
         if any(item[0] not in ("dispatch", "native") for item, _ in pairs):
-            return unavailable(f"{role}_must_be_plain")
+            return unavailable("outer_between_inner_actions_must_be_plain")
+        plain_segments.append(body._plain_view(pairs))
+        cursor = inner_index + 1
+    trailing_pairs = body_pairs[cursor:]
+    if any(item[0] not in ("dispatch", "native") for item, _ in trailing_pairs):
+        return unavailable("outer_suffix_must_be_plain")
+    plain_segments.append(body._plain_view(trailing_pairs))
 
-    inner_regions = dict(inner._definition_regions)
-    inner_condition = inner_regions["condition"]
-    inner_body = inner_regions["body"]
-    for sequence, role in (
-        (inner_condition, "inner_condition"),
-        (inner_body, "inner_body"),
-    ):
-        if any(item[0] not in ("dispatch", "native") for item in sequence._items):
-            return unavailable(f"{role}_must_be_plain")
-
-    prefix = body._plain_view(prefix_pairs)
-    suffix = body._plain_view(suffix_pairs)
     outer_condition_count = condition._dispatch_count
-    inner_condition_begin = outer_condition_count + prefix._dispatch_count
-    inner_body_begin = inner_condition_begin + inner_condition._dispatch_count
-    outer_suffix_begin = (
-        inner_body_begin
-        + inner_body._dispatch_count
-        + inner_condition._dispatch_count
-    )
+    dispatch_cursor = outer_condition_count
+    descriptors = []
+    flattened_sequences = [condition]
+    region_kinds = ["while_condition"]
+    repeated_dispatches = 0
+    for segment, inner, (inner_condition, inner_body) in zip(
+        plain_segments, inners, inner_sequences
+    ):
+        flattened_sequences.extend(
+            (segment, inner_condition, inner_body, inner_condition)
+        )
+        region_kinds.extend(
+            ("while_body", "while_condition", "while_body", "while_condition")
+        )
+        dispatch_cursor += segment._dispatch_count
+        condition_begin = dispatch_cursor
+        body_begin = condition_begin + inner_condition._dispatch_count
+        end = body_begin + inner_body._dispatch_count + inner_condition._dispatch_count
+        descriptors.append((condition_begin, body_begin, end))
+        repeated_dispatches += inner.max_iterations * (end - body_begin)
+        dispatch_cursor = end
+    trailing = plain_segments[-1]
+    flattened_sequences.extend((trailing, condition))
+    region_kinds.extend(("while_body", "while_condition"))
     flattened_dispatch_count = (
-        outer_suffix_begin
-        + suffix._dispatch_count
-        + condition._dispatch_count
+        dispatch_cursor + trailing._dispatch_count + condition._dispatch_count
+    )
+    single_copy_repeated = sum(end - body for _, body, end in descriptors)
+    outer_static_dispatches = (
+        flattened_dispatch_count - outer_condition_count - single_copy_repeated
     )
     encoded_action_count = outer_condition_count + outer_max_iterations * (
-        prefix._dispatch_count
-        + inner_condition._dispatch_count
-        + inner.max_iterations
-        * (inner_body._dispatch_count + inner_condition._dispatch_count)
-        + suffix._dispatch_count
-        + condition._dispatch_count
+        outer_static_dispatches + repeated_dispatches
     )
     if flattened_dispatch_count <= 0 or encoded_action_count > 4096:
         return unavailable("encoded_action_budget_exceeded")
 
     compiled = _compile_plain_sequential_runtime_node(
-        (
-            condition,
-            prefix,
-            inner_condition,
-            inner_body,
-            inner_condition,
-            suffix,
-            condition,
-        ),
+        tuple(flattened_sequences),
         name=f"{outer_name}_{_backend_name(_ti_core.arch_name(arch))}_nested",
         region_kind="while_nested",
-        region_kinds=(
-            "while_condition",
-            "while_body",
-            "while_condition",
-            "while_body",
-            "while_condition",
-            "while_body",
-            "while_condition",
-        ),
+        region_kinds=tuple(region_kinds),
     )
-    boundaries = (
-        outer_condition_count,
-        inner_condition_begin,
-        inner_body_begin,
-        outer_suffix_begin,
-    )
-    return compiled, inner, boundaries, "eligible"
+    boundaries = (outer_condition_count, tuple(descriptors))
+    return compiled, tuple(inners), boundaries, "eligible"
 
 
 class _CompiledWhileGraphNode:
@@ -5792,7 +5824,11 @@ class _CompiledWhileGraphNode:
         dependency_nodes = (
             self._condition,
             *self._chunks.values(),
-            *((self._vulkan_structured,) if self._vulkan_structured is not None else ()),
+            *(
+                (self._vulkan_structured,)
+                if self._vulkan_structured is not None
+                else ()
+            ),
             *((self._vulkan_nested,) if self._vulkan_nested is not None else ()),
             *((self._cuda_nested,) if self._cuda_nested is not None else ()),
         )
@@ -5849,22 +5885,27 @@ class _CompiledWhileGraphNode:
             _while_upgrade_status(arch, lowering_mode)
         )
         self._cuda_control_lowering = (
-            _cuda_structured_control_lowering()
-            if arch == _ti_core.Arch.cuda
-            else None
+            _cuda_structured_control_lowering() if arch == _ti_core.Arch.cuda else None
         )
         if self._has_nested_control:
-            nested_compiled = self._vulkan_nested is not None or self._cuda_nested is not None
+            nested_compiled = (
+                self._vulkan_nested is not None or self._cuda_nested is not None
+            )
             self._native_upgrade_eligible = nested_compiled
             self._native_upgrade_reason = (
                 "eligible_nested_bounded"
                 if nested_compiled
-                else (self._vulkan_nested_reason if arch == _ti_core.Arch.vulkan else self._cuda_nested_reason)
+                else (
+                    self._vulkan_nested_reason
+                    if arch == _ti_core.Arch.vulkan
+                    else self._cuda_nested_reason
+                )
             )
             self._native_submission_eligible = nested_compiled
             if lowering_mode == "native_required" and not nested_compiled:
                 raise TaichiRuntimeError(
-                    f"Graph while {name!r} native nested lowering unavailable: " f"{self._native_upgrade_reason}"
+                    f"Graph while {name!r} native nested lowering unavailable: "
+                    f"{self._native_upgrade_reason}"
                 )
         if self._native_upgrade_eligible and self.counter is None:
             if lowering_mode == "native_required":
@@ -5908,8 +5949,12 @@ class _CompiledWhileGraphNode:
         self._last_report = None
         if self._has_nested_control:
             runtime_args = context.runtime_args()
-            nested = self._vulkan_nested if impl.current_cfg().arch == _ti_core.Arch.vulkan else self._cuda_nested
-            inner = (
+            nested = (
+                self._vulkan_nested
+                if impl.current_cfg().arch == _ti_core.Arch.vulkan
+                else self._cuda_nested
+            )
+            inners = (
                 self._vulkan_nested_inner
                 if impl.current_cfg().arch == _ti_core.Arch.vulkan
                 else self._cuda_nested_inner
@@ -5919,8 +5964,10 @@ class _CompiledWhileGraphNode:
                 if impl.current_cfg().arch == _ti_core.Arch.vulkan
                 else self._cuda_nested_boundaries
             )
-            if nested is None or inner is None or boundaries is None:
-                raise TaichiRuntimeError("Native nested Graph while submission became unavailable")
+            if nested is None or inners is None or boundaries is None:
+                raise TaichiRuntimeError(
+                    "Native nested Graph while submission became unavailable"
+                )
 
             def control_ndarray(name):
                 if name is None:
@@ -5930,73 +5977,71 @@ class _CompiledWhileGraphNode:
             outer_predicate = control_ndarray(self.predicate)
             outer_counter = control_ndarray(self.counter)
             outer_status = control_ndarray(self.status)
-            inner_predicate = control_ndarray(inner.predicate)
-            inner_counter = control_ndarray(inner.counter)
-            inner_status = control_ndarray(inner.status)
+            inner_predicates = tuple(
+                control_ndarray(inner.predicate) for inner in inners
+            )
+            inner_counters = tuple(control_ndarray(inner.counter) for inner in inners)
+            inner_statuses = tuple(control_ndarray(inner.status) for inner in inners)
             if any(
                 value is None
                 for value in (
                     outer_predicate,
                     outer_counter,
-                    inner_predicate,
-                    inner_counter,
+                    *inner_predicates,
+                    *inner_counters,
                 )
             ):
                 raise TaichiRuntimeError(
-                    "Native nested Graph while submission requires ndarray " "predicate and counter resources"
+                    "Native nested Graph while submission requires ndarray "
+                    "predicate and counter resources"
                 )
-            if (self.status is not None and outer_status is None) or (
+            if (self.status is not None and outer_status is None) or any(
                 inner.status is not None and inner_status is None
+                for inner, inner_status in zip(inners, inner_statuses)
             ):
-                raise TaichiRuntimeError("Native nested Graph while submission requires ndarray " "status resources")
-            (
-                outer_condition_count,
-                inner_condition_begin,
-                inner_body_begin,
-                outer_suffix_begin,
-            ) = boundaries
+                raise TaichiRuntimeError(
+                    "Native nested Graph while submission requires ndarray "
+                    "status resources"
+                )
+            outer_condition_count, inner_boundaries = boundaries
             flattened_args = context.flattened_args(nested.recording_runtime_arg_names)
             if impl.current_cfg().arch == _ti_core.Arch.vulkan:
                 result = dict(
-                    nested.compiled_graph.jit_run_bounded_vulkan_nested_cached(
+                    nested.compiled_graph.jit_run_bounded_vulkan_nested_sequence_cached(
                         context.compile_config(),
                         flattened_args,
                         self._native_jit_cache,
                         outer_predicate,
                         outer_counter,
-                        inner_predicate,
-                        inner_counter,
+                        inner_predicates,
+                        inner_counters,
                         outer_condition_count,
-                        inner_condition_begin,
-                        inner_body_begin,
-                        outer_suffix_begin,
+                        inner_boundaries,
                         self.max_iterations,
-                        inner.max_iterations,
-                        inner.compound_chunk_limit,
+                        tuple(inner.max_iterations for inner in inners),
+                        tuple(inner.compound_chunk_limit for inner in inners),
                         outer_status,
-                        inner_status,
+                        inner_statuses,
                         False,
                     )
                 )
                 submitted = bool(result.get("submitted", False))
             else:
                 submitted = bool(
-                    nested.compiled_graph.jit_submit_bounded_cuda_nested_cached(
+                    nested.compiled_graph.jit_submit_bounded_cuda_nested_sequence_cached(
                         context.compile_config(),
                         flattened_args,
                         self._native_jit_cache,
                         outer_predicate,
                         outer_counter,
-                        inner_predicate,
-                        inner_counter,
+                        inner_predicates,
+                        inner_counters,
                         outer_condition_count,
-                        inner_condition_begin,
-                        inner_body_begin,
-                        outer_suffix_begin,
+                        inner_boundaries,
                         self.max_iterations,
-                        inner.max_iterations,
+                        tuple(inner.max_iterations for inner in inners),
                         outer_status,
-                        inner_status,
+                        inner_statuses,
                         _cuda_nested_device_update_qualified(),
                     )
                 )
@@ -6106,6 +6151,7 @@ class _CompiledWhileGraphNode:
             or self._vulkan_nested is None
             or self._vulkan_nested_inner is None
             or self._vulkan_nested_boundaries is None
+            or len(self._vulkan_nested_inner) != 1
             or context.control_trace_enabled()
         ):
             return False
@@ -6117,7 +6163,7 @@ class _CompiledWhileGraphNode:
         if native_run is None:
             return False
 
-        inner = self._vulkan_nested_inner
+        inner = self._vulkan_nested_inner[0]
 
         def control_ndarray(name):
             if name is None:
@@ -6145,12 +6191,10 @@ class _CompiledWhileGraphNode:
         if inner.status is not None and inner_status is None:
             return False
 
-        (
-            outer_condition_count,
-            inner_condition_begin,
-            inner_body_begin,
-            outer_suffix_begin,
-        ) = self._vulkan_nested_boundaries
+        outer_condition_count, inner_boundaries = self._vulkan_nested_boundaries
+        inner_condition_begin, inner_body_begin, outer_suffix_begin = (
+            inner_boundaries[0]
+        )
         result = dict(
             native_run(
                 context.compile_config(),
@@ -9005,9 +9049,7 @@ class _GraphExecutable:
         context = self._context
         if context is not None:
             context.begin(
-                self.spec.bind_runtime_args(
-                    args, temporaries, self.fixed_runtime_args
-                ),
+                self.spec.bind_runtime_args(args, temporaries, self.fixed_runtime_args),
                 None,
                 trace_recorder,
             )
@@ -9022,9 +9064,7 @@ class _GraphExecutable:
         context = self._context
         if context is not None:
             context.begin(
-                self.spec.bind_runtime_args(
-                    args, temporaries, self.fixed_runtime_args
-                ),
+                self.spec.bind_runtime_args(args, temporaries, self.fixed_runtime_args),
             )
         try:
             telemetry_region = 0
@@ -9040,13 +9080,26 @@ class _GraphExecutable:
                     if telemetry is not None and isinstance(
                         node, _CompiledWhileGraphNode
                     ):
-                        telemetry.begin_region(telemetry_region, node, context)
+                        telemetry_nodes = _submission_telemetry_region_nodes(node)
+                        for offset, telemetry_node in enumerate(telemetry_nodes):
+                            telemetry.begin_region(
+                                telemetry_region + offset,
+                                telemetry_node,
+                                context,
+                            )
                     node.run_for_submission(context, temporaries)
                     if telemetry is not None and isinstance(
                         node, _CompiledWhileGraphNode
                     ):
-                        telemetry.end_region(telemetry_region, node, context)
-                        telemetry_region += 1
+                        for offset, telemetry_node in reversed(
+                            tuple(enumerate(telemetry_nodes))
+                        ):
+                            telemetry.end_region(
+                                telemetry_region + offset,
+                                telemetry_node,
+                                context,
+                            )
+                        telemetry_region += len(telemetry_nodes)
                 elif isinstance(node, _CompiledSequentialRegionNode):
                     node.run_for_submission(context, temporaries)
                 else:
@@ -9065,8 +9118,7 @@ class _GraphInstance:
             self._internal_storages,
         ) = _materialize_graph_internal_bindings(spec.fixed_runtime_args)
         self._exclusive_internal_storage = any(
-            isinstance(value, _GraphInternalNdarraySpec)
-            and value.exclusive_submission
+            isinstance(value, _GraphInternalNdarraySpec) and value.exclusive_submission
             for value in spec.fixed_runtime_args.values()
         )
         self._exclusive_internal_completion = None
@@ -9086,7 +9138,9 @@ class _GraphInstance:
         )
         self._observation_arena = _GraphObservationArena(self._observation_nodes)
         self._structured_telemetry_nodes = tuple(
-            node for node in spec.nodes if isinstance(node, _CompiledWhileGraphNode)
+            node
+            for node in spec.structured_control_nodes
+            if isinstance(node, _CompiledWhileGraphNode)
         )
         self._structured_telemetry_arena = _GraphStructuredTelemetryArena(
             self._structured_telemetry_nodes,

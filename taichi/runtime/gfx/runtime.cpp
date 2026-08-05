@@ -52,7 +52,8 @@ constexpr std::size_t kNestedStructuredMaximumOuterIterations = 64;
 std::vector<uint32_t> make_compact_controller_spirv(
     const DeviceCapabilityConfig &caps,
     const std::vector<uint32_t> &group_counts,
-    bool has_status) {
+    bool has_status,
+    std::size_t control_word_offset = 0) {
   spirv::IRBuilder builder(Arch::vulkan, &caps);
   builder.init_header();
   const auto u32 = builder.u32_type();
@@ -69,7 +70,8 @@ std::vector<uint32_t> make_compact_controller_spirv(
   const auto active = builder.ne(predicate_value, zero);
   const auto active_increment = builder.select(active, one, zero);
   const auto observation_base = builder.uint_immediate_number(
-      u32, group_counts.size() * kStructuredPacketWords);
+      u32, control_word_offset +
+               group_counts.size() * kStructuredPacketWords);
   const auto logical_count_ptr =
       builder.struct_array_access(u32, control, observation_base);
   const auto logical_count = builder.load_variable(logical_count_ptr, u32);
@@ -77,7 +79,8 @@ std::vector<uint32_t> make_compact_controller_spirv(
     const auto initial_status_ptr = builder.struct_array_access(
         u32, control,
         builder.uint_immediate_number(
-            u32, group_counts.size() * kStructuredPacketWords + 4));
+            u32, control_word_offset +
+                     group_counts.size() * kStructuredPacketWords + 4));
     const auto initial_status =
         builder.load_variable(initial_status_ptr, u32);
     const auto status_value = builder.load_variable(
@@ -92,7 +95,7 @@ std::vector<uint32_t> make_compact_controller_spirv(
 
   for (std::size_t i = 0; i < group_counts.size(); ++i) {
     const auto packet_base = builder.uint_immediate_number(
-        u32, i * kStructuredPacketWords);
+        u32, control_word_offset + i * kStructuredPacketWords);
     const auto group_count =
         builder.uint_immediate_number(u32, group_counts[i]);
     builder.store_variable(
@@ -102,13 +105,13 @@ std::vector<uint32_t> make_compact_controller_spirv(
         builder.struct_array_access(
             u32, control,
             builder.uint_immediate_number(
-                u32, i * kStructuredPacketWords + 1)),
+                u32, control_word_offset + i * kStructuredPacketWords + 1)),
         one);
     builder.store_variable(
         builder.struct_array_access(
             u32, control,
             builder.uint_immediate_number(
-                u32, i * kStructuredPacketWords + 2)),
+                u32, control_word_offset + i * kStructuredPacketWords + 2)),
         one);
   }
 
@@ -234,7 +237,9 @@ std::vector<uint32_t> make_nested_inner_initial_spirv(
     const DeviceCapabilityConfig &caps,
     std::size_t header_word_offset,
     std::size_t trace_word_offset,
-    bool has_status) {
+    std::size_t trace_row_words,
+    bool has_status,
+    bool advance_outer) {
   spirv::IRBuilder builder(Arch::vulkan, &caps);
   builder.init_header();
   const auto u32 = builder.u32_type();
@@ -250,16 +255,27 @@ std::vector<uint32_t> make_nested_inner_initial_spirv(
       u32, control,
       builder.uint_immediate_number(u32, header_word_offset));
   const auto logical = builder.load_variable(logical_ptr, u32);
-  builder.store_variable(
-      builder.struct_array_access(
-          u32, control,
-          builder.uint_immediate_number(u32, header_word_offset + 1)),
-      logical);
-  builder.store_variable(logical_ptr, builder.add(logical, one));
+  if (advance_outer) {
+    builder.store_variable(
+        builder.struct_array_access(
+            u32, control,
+            builder.uint_immediate_number(u32, header_word_offset + 1)),
+        logical);
+    builder.store_variable(logical_ptr, builder.add(logical, one));
+  }
+  const auto row_index =
+      advance_outer
+          ? logical
+          : builder.load_variable(
+                builder.struct_array_access(
+                    u32, control,
+                    builder.uint_immediate_number(
+                        u32, header_word_offset + 1)),
+                u32);
   const auto row = builder.add(
       builder.uint_immediate_number(u32, trace_word_offset),
-      builder.mul(logical, builder.uint_immediate_number(
-                               u32, kNestedStructuredTraceWords)));
+      builder.mul(row_index,
+                  builder.uint_immediate_number(u32, trace_row_words)));
   const auto counter_value = builder.load_variable(
       builder.struct_array_access(u32, counter, zero), u32);
   builder.store_variable(
@@ -294,6 +310,7 @@ std::vector<uint32_t> make_nested_inner_terminal_spirv(
     std::size_t inner_observation_word_offset,
     std::size_t header_word_offset,
     std::size_t trace_word_offset,
+    std::size_t trace_row_words,
     bool has_status) {
   spirv::IRBuilder builder(Arch::vulkan, &caps);
   builder.init_header();
@@ -313,8 +330,8 @@ std::vector<uint32_t> make_nested_inner_terminal_spirv(
       u32);
   const auto row = builder.add(
       builder.uint_immediate_number(u32, trace_word_offset),
-      builder.mul(row_index, builder.uint_immediate_number(
-                                   u32, kNestedStructuredTraceWords)));
+      builder.mul(row_index,
+                  builder.uint_immediate_number(u32, trace_row_words)));
   const auto inner_logical = builder.load_variable(
       builder.struct_array_access(
           u32, control,
@@ -2616,24 +2633,22 @@ bool GfxRuntime::try_launch_graph(
       return ptr.device == device_ && ptr.alloc_id != 0 &&
              ptr.offset % alignof(std::uint32_t) == 0;
     };
-    const std::array<DevicePtr, 6> control_ptrs{
-        nested_control->outer_predicate,
-        nested_control->outer_counter,
-        nested_control->outer_status,
-        nested_control->inner_predicate,
-        nested_control->inner_counter,
-        nested_control->inner_status};
-    const std::array<bool, 6> control_ptr_active{
-        true, true, nested_control->outer_has_status, true, true,
-        nested_control->inner_has_status};
+    std::vector<DevicePtr> control_ptrs{
+        nested_control->outer_predicate, nested_control->outer_counter};
+    if (nested_control->outer_has_status) {
+      control_ptrs.push_back(nested_control->outer_status);
+    }
+    for (const auto &inner : nested_control->inner_controls) {
+      control_ptrs.push_back(inner.inner_predicate);
+      control_ptrs.push_back(inner.inner_counter);
+      if (inner.inner_has_status) {
+        control_ptrs.push_back(inner.inner_status);
+      }
+    }
     bool controls_alias = false;
     for (std::size_t i = 0; i < control_ptrs.size(); ++i) {
-      if (!control_ptr_active[i]) {
-        continue;
-      }
       for (std::size_t j = i + 1; j < control_ptrs.size(); ++j) {
-        if (control_ptr_active[j] &&
-            control_ptrs[i].alloc_id == control_ptrs[j].alloc_id &&
+        if (control_ptrs[i].alloc_id == control_ptrs[j].alloc_id &&
             control_ptrs[i].offset == control_ptrs[j].offset) {
           controls_alias = true;
           break;
@@ -2643,71 +2658,58 @@ bool GfxRuntime::try_launch_graph(
         break;
       }
     }
+    bool inner_valid = !nested_control->inner_controls.empty() &&
+                       nested_control->inner_controls.size() <= 8;
+    std::size_t boundary_cursor =
+        nested_control->outer_condition_dispatch_count;
+    for (const auto &inner : nested_control->inner_controls) {
+      inner_valid =
+          inner_valid && valid_scalar(inner.inner_predicate) &&
+          valid_scalar(inner.inner_counter) &&
+          (!inner.inner_has_status || valid_scalar(inner.inner_status)) &&
+          boundary_cursor <= inner.inner_condition_dispatch_begin &&
+          inner.inner_condition_dispatch_begin <
+              inner.inner_body_dispatch_begin &&
+          inner.inner_body_dispatch_begin < inner.inner_dispatch_end &&
+          inner.inner_dispatch_end < dispatches.size() &&
+          inner.inner_max_iterations > 0 &&
+          inner.inner_max_iterations <= 64 && inner.inner_chunk_size > 0 &&
+          inner.inner_chunk_size <= inner.inner_max_iterations &&
+          inner.inner_chunk_size <= 64;
+      boundary_cursor = inner.inner_dispatch_end;
+    }
     if (!device_->supports_conditional_commands() ||
         !valid_scalar(nested_control->outer_predicate) ||
         !valid_scalar(nested_control->outer_counter) ||
-        !valid_scalar(nested_control->inner_predicate) ||
-        !valid_scalar(nested_control->inner_counter) ||
         (nested_control->outer_has_status &&
          !valid_scalar(nested_control->outer_status)) ||
-        (nested_control->inner_has_status &&
-         !valid_scalar(nested_control->inner_status)) ||
-        controls_alias ||
+        controls_alias || !inner_valid ||
         nested_control->outer_condition_dispatch_count == 0 ||
-        nested_control->outer_condition_dispatch_count >
-            nested_control->inner_condition_dispatch_begin ||
-        nested_control->inner_condition_dispatch_begin >=
-            nested_control->inner_body_dispatch_begin ||
-        nested_control->inner_body_dispatch_begin >=
-            nested_control->outer_suffix_dispatch_begin ||
-        nested_control->outer_suffix_dispatch_begin >= dispatches.size() ||
         nested_control->outer_max_iterations == 0 ||
         nested_control->outer_max_iterations >
-            kNestedStructuredMaximumOuterIterations ||
-        nested_control->inner_max_iterations == 0 ||
-        nested_control->inner_max_iterations > 64 ||
-        nested_control->inner_chunk_size == 0 ||
-        nested_control->inner_chunk_size >
-            nested_control->inner_max_iterations ||
-        nested_control->inner_chunk_size > 64) {
+            kNestedStructuredMaximumOuterIterations) {
       return reject();
     }
     key.insert(
         key.end(),
         {0xC100u,
          nested_control->outer_condition_dispatch_count,
-         nested_control->inner_condition_dispatch_begin,
-         nested_control->inner_body_dispatch_begin,
-         nested_control->outer_suffix_dispatch_begin,
          nested_control->outer_max_iterations,
-         nested_control->inner_max_iterations,
-         nested_control->inner_chunk_size,
          nested_control->outer_has_status ? 1u : 0u,
-         nested_control->inner_has_status ? 1u : 0u,
+         nested_control->inner_controls.size(),
          nested_control->outer_predicate.alloc_id,
          nested_control->outer_predicate.offset,
          nested_control->outer_counter.alloc_id,
          nested_control->outer_counter.offset,
          nested_control->outer_status.alloc_id,
-         nested_control->outer_status.offset,
-         nested_control->inner_predicate.alloc_id,
-         nested_control->inner_predicate.offset,
-         nested_control->inner_counter.alloc_id,
-         nested_control->inner_counter.offset,
-         nested_control->inner_status.alloc_id,
-         nested_control->inner_status.offset});
+         nested_control->outer_status.offset});
     structure_key.insert(
         structure_key.end(),
         {0xC100u,
          nested_control->outer_condition_dispatch_count,
-         nested_control->inner_condition_dispatch_begin,
-         nested_control->inner_body_dispatch_begin,
-         nested_control->outer_suffix_dispatch_begin,
          nested_control->outer_max_iterations,
-         nested_control->inner_max_iterations,
-         nested_control->inner_chunk_size,
          nested_control->outer_has_status ? 1u : 0u,
-         nested_control->inner_has_status ? 1u : 0u});
+         nested_control->inner_controls.size()});
     const auto push_control_structure = [&](DevicePtr ptr) {
       push_runtime_structure(
           DeviceAllocation{ptr.device, ptr.alloc_id}, ptr.offset,
@@ -2718,10 +2720,30 @@ bool GfxRuntime::try_launch_graph(
     if (nested_control->outer_has_status) {
       push_control_structure(nested_control->outer_status);
     }
-    push_control_structure(nested_control->inner_predicate);
-    push_control_structure(nested_control->inner_counter);
-    if (nested_control->inner_has_status) {
-      push_control_structure(nested_control->inner_status);
+    for (const auto &inner : nested_control->inner_controls) {
+      key.insert(key.end(),
+                 {inner.inner_condition_dispatch_begin,
+                  inner.inner_body_dispatch_begin,
+                  inner.inner_dispatch_end, inner.inner_max_iterations,
+                  inner.inner_chunk_size,
+                  inner.inner_has_status ? 1u : 0u,
+                  inner.inner_predicate.alloc_id,
+                  inner.inner_predicate.offset,
+                  inner.inner_counter.alloc_id,
+                  inner.inner_counter.offset,
+                  inner.inner_status.alloc_id,
+                  inner.inner_status.offset});
+      structure_key.insert(
+          structure_key.end(),
+          {inner.inner_condition_dispatch_begin,
+           inner.inner_body_dispatch_begin, inner.inner_dispatch_end,
+           inner.inner_max_iterations, inner.inner_chunk_size,
+           inner.inner_has_status ? 1u : 0u});
+      push_control_structure(inner.inner_predicate);
+      push_control_structure(inner.inner_counter);
+      if (inner.inner_has_status) {
+        push_control_structure(inner.inner_status);
+      }
     }
   }
 
@@ -2947,10 +2969,16 @@ bool GfxRuntime::try_launch_graph(
   }
   std::size_t structured_initial_tasks = 0;
   std::vector<uint32_t> structured_group_counts;
+  struct NestedTaskRange {
+    std::size_t condition_begin{0};
+    std::size_t body_begin{0};
+    std::size_t end{0};
+    std::vector<std::uint32_t> group_counts;
+    std::size_t packet_word_offset{0};
+    std::size_t observation_word_offset{0};
+  };
   std::size_t nested_outer_condition_task_end = 0;
-  std::size_t nested_inner_condition_task_begin = 0;
-  std::size_t nested_inner_body_task_begin = 0;
-  std::size_t nested_outer_suffix_task_begin = 0;
+  std::vector<NestedTaskRange> nested_task_ranges;
   if (structured_control != nullptr) {
     for (std::size_t i = 0;
          i < structured_control->initial_dispatch_count; ++i) {
@@ -3033,71 +3061,70 @@ bool GfxRuntime::try_launch_graph(
     nested_outer_condition_task_end =
         dispatch_task_offsets[nested_control
                                   ->outer_condition_dispatch_count];
-    nested_inner_condition_task_begin =
-        dispatch_task_offsets[nested_control
-                                  ->inner_condition_dispatch_begin];
-    nested_inner_body_task_begin =
-        dispatch_task_offsets[nested_control
-                                  ->inner_body_dispatch_begin];
-    nested_outer_suffix_task_begin =
-        dispatch_task_offsets[nested_control
-                                  ->outer_suffix_dispatch_begin];
     if (nested_outer_condition_task_end == 0 ||
-        nested_outer_condition_task_end >
-            nested_inner_condition_task_begin ||
-        nested_inner_condition_task_begin >=
-            nested_inner_body_task_begin ||
-        nested_inner_body_task_begin >=
-            nested_outer_suffix_task_begin ||
-        nested_outer_suffix_task_begin >= total_tasks) {
+        nested_outer_condition_task_end >= total_tasks) {
       return reject();
     }
-    for (std::size_t i = nested_inner_body_task_begin;
-         i < nested_outer_suffix_task_begin; ++i) {
-      const auto dispatch_index = static_cast<std::size_t>(
-          std::upper_bound(dispatch_task_offsets.begin(),
-                           dispatch_task_offsets.end(), i) -
-          dispatch_task_offsets.begin() - 1);
-      const auto task_index =
-          static_cast<int>(i - dispatch_task_offsets[dispatch_index]);
-      const auto &attribs =
-          prepared[dispatch_index]
-              .kernel->ti_kernel_attribs()
-              .tasks_attribs[task_index];
-      if (attribs.advisory_num_threads_per_group <= 0) {
+    nested_task_ranges.reserve(nested_control->inner_controls.size());
+    std::size_t task_cursor = nested_outer_condition_task_end;
+    std::uint64_t repeated_payload_tasks = 0;
+    std::uint64_t single_copy_payload_tasks = 0;
+    std::uint64_t inner_controller_actions = 0;
+    for (const auto &inner : nested_control->inner_controls) {
+      NestedTaskRange range;
+      range.condition_begin =
+          dispatch_task_offsets[inner.inner_condition_dispatch_begin];
+      range.body_begin =
+          dispatch_task_offsets[inner.inner_body_dispatch_begin];
+      range.end = dispatch_task_offsets[inner.inner_dispatch_end];
+      if (task_cursor > range.condition_begin ||
+          range.condition_begin >= range.body_begin ||
+          range.body_begin >= range.end || range.end > total_tasks) {
         return reject();
       }
-      const int group_x =
-          (attribs.advisory_total_num_threads +
-           attribs.advisory_num_threads_per_group - 1) /
-          attribs.advisory_num_threads_per_group;
-      if (group_x < 0) {
+      for (std::size_t i = range.body_begin; i < range.end; ++i) {
+        const auto dispatch_index = static_cast<std::size_t>(
+            std::upper_bound(dispatch_task_offsets.begin(),
+                             dispatch_task_offsets.end(), i) -
+            dispatch_task_offsets.begin() - 1);
+        const auto task_index =
+            static_cast<int>(i - dispatch_task_offsets[dispatch_index]);
+        const auto &attribs =
+            prepared[dispatch_index]
+                .kernel->ti_kernel_attribs()
+                .tasks_attribs[task_index];
+        if (attribs.advisory_num_threads_per_group <= 0) {
+          return reject();
+        }
+        const int group_x =
+            (attribs.advisory_total_num_threads +
+             attribs.advisory_num_threads_per_group - 1) /
+            attribs.advisory_num_threads_per_group;
+        if (group_x < 0) {
+          return reject();
+        }
+        range.group_counts.push_back(static_cast<std::uint32_t>(group_x));
+      }
+      if (range.group_counts.empty() ||
+          range.group_counts.size() > kStructuredMaximumPackets) {
         return reject();
       }
-      structured_group_counts.push_back(
-          static_cast<std::uint32_t>(group_x));
+      const std::uint64_t payload_tasks = range.end - range.body_begin;
+      single_copy_payload_tasks += payload_tasks;
+      repeated_payload_tasks +=
+          static_cast<std::uint64_t>(inner.inner_max_iterations) *
+          payload_tasks;
+      inner_controller_actions +=
+          2 + static_cast<std::uint64_t>(inner.inner_max_iterations);
+      task_cursor = range.end;
+      nested_task_ranges.push_back(std::move(range));
     }
-    if (structured_group_counts.empty() ||
-        structured_group_counts.size() > kStructuredMaximumPackets) {
-      return reject();
-    }
-    const std::uint64_t prefix_tasks =
-        nested_inner_condition_task_begin -
-        nested_outer_condition_task_end;
-    const std::uint64_t inner_initial_tasks =
-        nested_inner_body_task_begin -
-        nested_inner_condition_task_begin;
-    const std::uint64_t inner_payload_tasks =
-        nested_outer_suffix_task_begin -
-        nested_inner_body_task_begin;
-    const std::uint64_t suffix_tasks =
-        total_tasks - nested_outer_suffix_task_begin;
+    const std::uint64_t static_tasks =
+        total_tasks - nested_outer_condition_task_end -
+        single_copy_payload_tasks;
     const std::uint64_t per_outer_actions =
-        1 + prefix_tasks + 1 + inner_initial_tasks +
-        static_cast<std::uint64_t>(
-            nested_control->inner_max_iterations) *
-            (inner_payload_tasks + 1) +
-        1 + suffix_tasks;
+        1 + static_tasks + repeated_payload_tasks +
+        inner_controller_actions;
     const std::uint64_t encoded_actions =
         nested_outer_condition_task_end + 2 +
         static_cast<std::uint64_t>(
@@ -3107,6 +3134,7 @@ bool GfxRuntime::try_launch_graph(
       return reject();
     }
     structured_strategy = GraphStructuredStrategy::compact;
+    structured_group_counts = nested_task_ranges.front().group_counts;
     key.insert(key.end(),
                {0xC101u, static_cast<std::uint64_t>(encoded_actions)});
     structure_key.insert(
@@ -3252,23 +3280,33 @@ bool GfxRuntime::try_launch_graph(
 
   const bool nested_structured = nested_control != nullptr;
   std::size_t structured_observation_word_offset = 0;
+  std::size_t nested_outer_gate_word_offset = 0;
   std::size_t nested_header_word_offset = 0;
   std::size_t nested_trace_word_offset = 0;
+  std::size_t nested_trace_row_words = 0;
   std::size_t structured_control_bytes = 0;
   if (!structured_group_counts.empty()) {
     if (nested_structured) {
-      structured_observation_word_offset =
-          structured_group_counts.size() * kStructuredPacketWords;
-      nested_header_word_offset =
-          structured_observation_word_offset +
-          kStructuredObservationWords;
+      std::size_t child_control_words = 0;
+      for (auto &range : nested_task_ranges) {
+        range.packet_word_offset = child_control_words;
+        range.observation_word_offset =
+            child_control_words +
+            range.group_counts.size() * kStructuredPacketWords;
+        child_control_words =
+            range.observation_word_offset + kStructuredObservationWords;
+      }
+      nested_outer_gate_word_offset = child_control_words;
+      nested_header_word_offset = nested_outer_gate_word_offset + 1;
       nested_trace_word_offset =
           nested_header_word_offset + kNestedStructuredHeaderWords;
+      nested_trace_row_words =
+          nested_task_ranges.size() * kNestedStructuredTraceWords;
       structured_control_bytes =
           (nested_trace_word_offset +
            static_cast<std::size_t>(
                nested_control->outer_max_iterations) *
-               kNestedStructuredTraceWords) *
+               nested_trace_row_words) *
           sizeof(std::uint32_t);
     } else {
       structured_observation_word_offset =
@@ -3315,21 +3353,34 @@ bool GfxRuntime::try_launch_graph(
                 ? (kNestedStructuredHeaderWords +
                    static_cast<std::size_t>(
                        nested_control->outer_max_iterations) *
-                       kNestedStructuredTraceWords) *
+                       nested_trace_row_words) *
                       sizeof(std::uint32_t)
                 : kStructuredObservationWords * sizeof(std::uint32_t);
   if (structured_control != nullptr || nested_control != nullptr) {
     const bool inner_has_status =
-        nested_structured ? nested_control->inner_has_status
-                          : structured_control->has_status;
+        !nested_structured && structured_control->has_status;
     const bool outer_has_status =
         nested_structured && nested_control->outer_has_status;
+    std::vector<std::vector<std::uint32_t>> nested_group_counts;
+    std::vector<bool> nested_has_status;
+    if (nested_structured) {
+      nested_group_counts.reserve(nested_task_ranges.size());
+      nested_has_status.reserve(nested_task_ranges.size());
+      for (std::size_t child = 0; child < nested_task_ranges.size(); ++child) {
+        nested_group_counts.push_back(
+            nested_task_ranges[child].group_counts);
+        nested_has_status.push_back(
+            nested_control->inner_controls[child].inner_has_status);
+      }
+    }
     const bool rebuild_control =
         !slot->structured_control_buffer ||
         slot->structured_control_bytes != structured_control_bytes ||
         slot->structured_observation_bytes !=
             structured_observation_bytes ||
         slot->structured_group_counts != structured_group_counts ||
+        slot->nested_group_counts != nested_group_counts ||
+        slot->nested_has_status != nested_has_status ||
         slot->structured_has_status != inner_has_status ||
         slot->structured_nested != nested_structured ||
         slot->structured_outer_has_status != outer_has_status ||
@@ -3372,46 +3423,63 @@ bool GfxRuntime::try_launch_graph(
       slot->structured_observation_bytes =
           structured_observation_bytes;
       slot->structured_group_counts = structured_group_counts;
+      slot->nested_group_counts = nested_group_counts;
+      slot->nested_has_status = nested_has_status;
       slot->structured_has_status = inner_has_status;
       slot->structured_nested = nested_structured;
       slot->structured_outer_has_status = outer_has_status;
       slot->structured_strategy = structured_strategy;
-      slot->structured_controller_pipeline = create_structured_pipeline(
-          device_,
-          !nested_structured &&
-                  structured_strategy ==
-                      GraphStructuredStrategy::conditional
-              ? make_conditional_controller_spirv(
-                    device_->get_caps(),
-                    structured_control->max_iterations,
-                    inner_has_status)
-              : !nested_structured &&
-                        structured_strategy ==
-                            GraphStructuredStrategy::chained
-              ? make_chained_controller_spirv(
-                    device_->get_caps(), structured_group_counts,
-                    structured_control->max_iterations,
-                    inner_has_status)
-              : make_compact_controller_spirv(
-                    device_->get_caps(), structured_group_counts,
-                    inner_has_status),
-          !nested_structured &&
-                  structured_strategy ==
-                      GraphStructuredStrategy::conditional
-              ? "vulkan_conditional_controller"
-              : !nested_structured &&
-                        structured_strategy ==
-                            GraphStructuredStrategy::chained
-              ? "vulkan_chained_controller"
-              : nested_structured ? "vulkan_nested_compact_controller"
-                                  : "vulkan_compact_controller");
+      if (nested_structured) {
+        slot->structured_controller_pipeline.reset();
+        slot->structured_controller_resources.reset();
+        slot->nested_inner_controller_pipelines.clear();
+        slot->nested_inner_controller_resources.clear();
+        for (std::size_t child = 0; child < nested_task_ranges.size(); ++child) {
+          slot->nested_inner_controller_pipelines.push_back(
+              create_structured_pipeline(
+                  device_,
+                  make_compact_controller_spirv(
+                      device_->get_caps(),
+                      nested_task_ranges[child].group_counts,
+                      nested_control->inner_controls[child].inner_has_status,
+                      nested_task_ranges[child].packet_word_offset),
+                  "vulkan_nested_compact_controller"));
+          slot->nested_inner_controller_resources.push_back(
+              device_->create_resource_set_unique());
+        }
+      } else {
+        slot->nested_inner_controller_pipelines.clear();
+        slot->nested_inner_controller_resources.clear();
+        slot->structured_controller_pipeline = create_structured_pipeline(
+            device_,
+            structured_strategy == GraphStructuredStrategy::conditional
+                ? make_conditional_controller_spirv(
+                      device_->get_caps(),
+                      structured_control->max_iterations,
+                      inner_has_status)
+                : structured_strategy == GraphStructuredStrategy::chained
+                      ? make_chained_controller_spirv(
+                            device_->get_caps(), structured_group_counts,
+                            structured_control->max_iterations,
+                            inner_has_status)
+                      : make_compact_controller_spirv(
+                            device_->get_caps(), structured_group_counts,
+                            inner_has_status),
+            structured_strategy == GraphStructuredStrategy::conditional
+                ? "vulkan_conditional_controller"
+                : structured_strategy == GraphStructuredStrategy::chained
+                      ? "vulkan_chained_controller"
+                      : "vulkan_compact_controller");
+        slot->structured_controller_resources =
+            device_->create_resource_set_unique();
+      }
       if (nested_structured ||
           structured_strategy ==
               GraphStructuredStrategy::coarse_conditional) {
         const std::uint32_t stable_predicate_index =
             nested_structured
                 ? static_cast<std::uint32_t>(
-                      structured_observation_word_offset + 1)
+                      nested_outer_gate_word_offset)
                 : static_cast<std::uint32_t>(
                       structured_observation_word_offset +
                       kStructuredObservationWords);
@@ -3427,8 +3495,6 @@ bool GfxRuntime::try_launch_graph(
         slot->structured_gate_pipeline.reset();
         slot->structured_gate_resources.reset();
       }
-      slot->structured_controller_resources =
-          device_->create_resource_set_unique();
       if (!nested_structured && structured_terminal_observation) {
         slot->structured_terminal_pipeline = create_structured_pipeline(
             device_,
@@ -3449,20 +3515,38 @@ bool GfxRuntime::try_launch_graph(
                 device_->get_caps(), nested_header_word_offset,
                 outer_has_status, /*terminal=*/false),
             "vulkan_nested_outer_initial");
-        slot->nested_inner_initial_pipeline = create_structured_pipeline(
-            device_,
-            make_nested_inner_initial_spirv(
-                device_->get_caps(), nested_header_word_offset,
-                nested_trace_word_offset, inner_has_status),
-            "vulkan_nested_inner_initial");
-        slot->nested_inner_terminal_pipeline = create_structured_pipeline(
-            device_,
-            make_nested_inner_terminal_spirv(
-                device_->get_caps(),
-                structured_observation_word_offset,
-                nested_header_word_offset, nested_trace_word_offset,
-                inner_has_status),
-            "vulkan_nested_inner_terminal");
+        slot->nested_inner_initial_pipelines.clear();
+        slot->nested_inner_terminal_pipelines.clear();
+        slot->nested_inner_initial_resources.clear();
+        slot->nested_inner_terminal_resources.clear();
+        for (std::size_t child = 0; child < nested_task_ranges.size(); ++child) {
+          const bool child_has_status =
+              nested_control->inner_controls[child].inner_has_status;
+          const std::size_t child_trace_offset =
+              nested_trace_word_offset +
+              child * kNestedStructuredTraceWords;
+          slot->nested_inner_initial_pipelines.push_back(
+              create_structured_pipeline(
+                  device_,
+                  make_nested_inner_initial_spirv(
+                      device_->get_caps(), nested_header_word_offset,
+                      child_trace_offset, nested_trace_row_words,
+                      child_has_status, child == 0),
+                  "vulkan_nested_inner_initial"));
+          slot->nested_inner_terminal_pipelines.push_back(
+              create_structured_pipeline(
+                  device_,
+                  make_nested_inner_terminal_spirv(
+                      device_->get_caps(),
+                      nested_task_ranges[child].observation_word_offset,
+                      nested_header_word_offset, child_trace_offset,
+                      nested_trace_row_words, child_has_status),
+                  "vulkan_nested_inner_terminal"));
+          slot->nested_inner_initial_resources.push_back(
+              device_->create_resource_set_unique());
+          slot->nested_inner_terminal_resources.push_back(
+              device_->create_resource_set_unique());
+        }
         slot->nested_outer_terminal_pipeline =
             create_structured_pipeline(
                 device_,
@@ -3472,20 +3556,16 @@ bool GfxRuntime::try_launch_graph(
                 "vulkan_nested_outer_terminal");
         slot->nested_outer_initial_resources =
             device_->create_resource_set_unique();
-        slot->nested_inner_initial_resources =
-            device_->create_resource_set_unique();
-        slot->nested_inner_terminal_resources =
-            device_->create_resource_set_unique();
         slot->nested_outer_terminal_resources =
             device_->create_resource_set_unique();
       } else {
         slot->nested_outer_initial_pipeline.reset();
-        slot->nested_inner_initial_pipeline.reset();
-        slot->nested_inner_terminal_pipeline.reset();
+        slot->nested_inner_initial_pipelines.clear();
+        slot->nested_inner_terminal_pipelines.clear();
         slot->nested_outer_terminal_pipeline.reset();
         slot->nested_outer_initial_resources.reset();
-        slot->nested_inner_initial_resources.reset();
-        slot->nested_inner_terminal_resources.reset();
+        slot->nested_inner_initial_resources.clear();
+        slot->nested_inner_terminal_resources.clear();
         slot->nested_outer_terminal_resources.reset();
       }
       slot->recorded = false;
@@ -3498,20 +3578,19 @@ bool GfxRuntime::try_launch_graph(
       return true;
     }
     if (nested_control != nullptr) {
-      auto *controller = slot->structured_controller_resources.get();
       auto *outer_gate = slot->structured_gate_resources.get();
       auto *outer_initial =
           slot->nested_outer_initial_resources.get();
-      auto *inner_initial =
-          slot->nested_inner_initial_resources.get();
-      auto *inner_terminal =
-          slot->nested_inner_terminal_resources.get();
       auto *outer_terminal =
           slot->nested_outer_terminal_resources.get();
-      if (controller == nullptr || outer_gate == nullptr ||
-          outer_initial == nullptr ||
-          inner_initial == nullptr || inner_terminal == nullptr ||
+      if (outer_gate == nullptr || outer_initial == nullptr ||
           outer_terminal == nullptr ||
+          slot->nested_inner_controller_resources.size() !=
+              nested_control->inner_controls.size() ||
+          slot->nested_inner_initial_resources.size() !=
+              nested_control->inner_controls.size() ||
+          slot->nested_inner_terminal_resources.size() !=
+              nested_control->inner_controls.size() ||
           !slot->structured_control_buffer) {
         return false;
       }
@@ -3519,15 +3598,6 @@ bool GfxRuntime::try_launch_graph(
           nested_control->outer_has_status
               ? nested_control->outer_status
               : nested_control->outer_counter;
-      const DevicePtr inner_status =
-          nested_control->inner_has_status
-              ? nested_control->inner_status
-              : nested_control->inner_counter;
-      controller->rw_buffer(0, nested_control->inner_predicate,
-                            sizeof(std::uint32_t));
-      controller->rw_buffer(1, *slot->structured_control_buffer);
-      controller->rw_buffer(2, inner_status,
-                            sizeof(std::uint32_t));
       outer_gate->rw_buffer(0, nested_control->outer_predicate,
                             sizeof(std::uint32_t));
       outer_gate->rw_buffer(1, *slot->structured_control_buffer);
@@ -3539,20 +3609,48 @@ bool GfxRuntime::try_launch_graph(
                                sizeof(std::uint32_t));
       outer_initial->rw_buffer(3,
                                *slot->structured_control_buffer);
-      inner_initial->rw_buffer(0, nested_control->inner_counter,
-                               sizeof(std::uint32_t));
-      inner_initial->rw_buffer(1, inner_status,
-                               sizeof(std::uint32_t));
-      inner_initial->rw_buffer(2,
-                               *slot->structured_control_buffer);
-      inner_terminal->rw_buffer(0, nested_control->inner_predicate,
-                                sizeof(std::uint32_t));
-      inner_terminal->rw_buffer(1, nested_control->inner_counter,
-                                sizeof(std::uint32_t));
-      inner_terminal->rw_buffer(2, inner_status,
-                                sizeof(std::uint32_t));
-      inner_terminal->rw_buffer(3,
-                                *slot->structured_control_buffer);
+      bool inner_ready = true;
+      for (std::size_t child = 0;
+           child < nested_control->inner_controls.size(); ++child) {
+        const auto &inner = nested_control->inner_controls[child];
+        auto *controller =
+            slot->nested_inner_controller_resources[child].get();
+        auto *inner_initial =
+            slot->nested_inner_initial_resources[child].get();
+        auto *inner_terminal =
+            slot->nested_inner_terminal_resources[child].get();
+        if (controller == nullptr || inner_initial == nullptr ||
+            inner_terminal == nullptr) {
+          return false;
+        }
+        const DevicePtr inner_status =
+            inner.inner_has_status ? inner.inner_status
+                                   : inner.inner_counter;
+        controller->rw_buffer(0, inner.inner_predicate,
+                              sizeof(std::uint32_t));
+        controller->rw_buffer(1, *slot->structured_control_buffer);
+        controller->rw_buffer(2, inner_status, sizeof(std::uint32_t));
+        inner_initial->rw_buffer(0, inner.inner_counter,
+                                 sizeof(std::uint32_t));
+        inner_initial->rw_buffer(1, inner_status,
+                                 sizeof(std::uint32_t));
+        inner_initial->rw_buffer(2, *slot->structured_control_buffer);
+        inner_terminal->rw_buffer(0, inner.inner_predicate,
+                                  sizeof(std::uint32_t));
+        inner_terminal->rw_buffer(1, inner.inner_counter,
+                                  sizeof(std::uint32_t));
+        inner_terminal->rw_buffer(2, inner_status,
+                                  sizeof(std::uint32_t));
+        inner_terminal->rw_buffer(3, *slot->structured_control_buffer);
+        inner_ready =
+            inner_ready &&
+            controller->prepare_for_replay(patch_existing) ==
+                RhiResult::success &&
+            inner_initial->prepare_for_replay(patch_existing) ==
+                RhiResult::success &&
+            inner_terminal->prepare_for_replay(patch_existing) ==
+                RhiResult::success;
+      }
       outer_terminal->rw_buffer(0, nested_control->outer_predicate,
                                 sizeof(std::uint32_t));
       outer_terminal->rw_buffer(1, nested_control->outer_counter,
@@ -3561,15 +3659,10 @@ bool GfxRuntime::try_launch_graph(
                                 sizeof(std::uint32_t));
       outer_terminal->rw_buffer(3,
                                 *slot->structured_control_buffer);
-      return controller->prepare_for_replay(patch_existing) ==
-                 RhiResult::success &&
+      return inner_ready &&
              outer_gate->prepare_for_replay(patch_existing) ==
                  RhiResult::success &&
              outer_initial->prepare_for_replay(patch_existing) ==
-                 RhiResult::success &&
-             inner_initial->prepare_for_replay(patch_existing) ==
-                 RhiResult::success &&
-             inner_terminal->prepare_for_replay(patch_existing) ==
                  RhiResult::success &&
              outer_terminal->prepare_for_replay(patch_existing) ==
                  RhiResult::success;
@@ -3689,60 +3782,75 @@ bool GfxRuntime::try_launch_graph(
           static_cast<std::int32_t>(words[6]);
       nested_result->outer_final_status =
           static_cast<std::int32_t>(words[7]);
+      nested_result->inner_region_count = static_cast<std::uint32_t>(
+          nested_control->inner_controls.size());
       const std::uint32_t logical_outer =
           nested_result->outer_logical_iterations;
-      nested_result->inner_logical_iterations.reserve(logical_outer);
-      nested_result->inner_encoded_iterations.assign(
-          logical_outer, nested_control->inner_max_iterations);
-      nested_result->inner_initial_counters.reserve(logical_outer);
-      nested_result->inner_final_counters.reserve(logical_outer);
-      nested_result->inner_final_predicates.reserve(logical_outer);
-      nested_result->inner_initial_statuses.reserve(logical_outer);
-      nested_result->inner_final_statuses.reserve(logical_outer);
+      const std::size_t inner_sample_count =
+          static_cast<std::size_t>(logical_outer) *
+          nested_control->inner_controls.size();
+      nested_result->inner_logical_iterations.reserve(inner_sample_count);
+      nested_result->inner_encoded_iterations.reserve(inner_sample_count);
+      nested_result->inner_initial_counters.reserve(inner_sample_count);
+      nested_result->inner_final_counters.reserve(inner_sample_count);
+      nested_result->inner_final_predicates.reserve(inner_sample_count);
+      nested_result->inner_initial_statuses.reserve(inner_sample_count);
+      nested_result->inner_final_statuses.reserve(inner_sample_count);
       std::uint64_t active_payload_dispatches = 0;
       for (std::uint32_t i = 0; i < logical_outer; ++i) {
-        const std::size_t row =
-            kNestedStructuredHeaderWords +
-            static_cast<std::size_t>(i) *
-                kNestedStructuredTraceWords;
-        if (row + kNestedStructuredTraceWords > words.size()) {
-          fail_committed_observation("contained a truncated nested trace");
+        for (std::size_t child = 0;
+             child < nested_control->inner_controls.size(); ++child) {
+          const std::size_t row =
+              kNestedStructuredHeaderWords +
+              static_cast<std::size_t>(i) * nested_trace_row_words +
+              child * kNestedStructuredTraceWords;
+          if (row + kNestedStructuredTraceWords > words.size()) {
+            fail_committed_observation("contained a truncated nested trace");
+          }
+          const auto &inner = nested_control->inner_controls[child];
+          const std::uint32_t inner_logical =
+              std::min(words[row], inner.inner_max_iterations);
+          nested_result->inner_logical_iterations.push_back(inner_logical);
+          nested_result->inner_encoded_iterations.push_back(
+              inner.inner_max_iterations);
+          nested_result->inner_initial_counters.push_back(
+              static_cast<std::int32_t>(words[row + 1]));
+          nested_result->inner_final_counters.push_back(
+              static_cast<std::int32_t>(words[row + 2]));
+          nested_result->inner_final_predicates.push_back(
+              static_cast<std::int32_t>(words[row + 3]));
+          nested_result->inner_initial_statuses.push_back(
+              static_cast<std::int32_t>(words[row + 4]));
+          nested_result->inner_final_statuses.push_back(
+              static_cast<std::int32_t>(words[row + 5]));
+          active_payload_dispatches +=
+              static_cast<std::uint64_t>(inner_logical) *
+              nested_task_ranges[child].group_counts.size();
         }
-        const std::uint32_t inner_logical =
-            std::min(words[row],
-                     nested_control->inner_max_iterations);
-        nested_result->inner_logical_iterations.push_back(
-            inner_logical);
-        nested_result->inner_initial_counters.push_back(
-            static_cast<std::int32_t>(words[row + 1]));
-        nested_result->inner_final_counters.push_back(
-            static_cast<std::int32_t>(words[row + 2]));
-        nested_result->inner_final_predicates.push_back(
-            static_cast<std::int32_t>(words[row + 3]));
-        nested_result->inner_initial_statuses.push_back(
-            static_cast<std::int32_t>(words[row + 4]));
-        nested_result->inner_final_statuses.push_back(
-            static_cast<std::int32_t>(words[row + 5]));
-        active_payload_dispatches +=
-            static_cast<std::uint64_t>(inner_logical) *
-            structured_group_counts.size();
       }
-      const std::uint64_t encoded_inner_dispatches =
-          static_cast<std::uint64_t>(
-              nested_control->outer_max_iterations) *
-          nested_control->inner_max_iterations *
-          structured_group_counts.size();
+      std::uint64_t encoded_inner_dispatches = 0;
+      std::uint64_t inner_controller_count = 0;
+      for (std::size_t child = 0;
+           child < nested_control->inner_controls.size(); ++child) {
+        encoded_inner_dispatches +=
+            static_cast<std::uint64_t>(
+                nested_control->outer_max_iterations) *
+            nested_control->inner_controls[child].inner_max_iterations *
+            nested_task_ranges[child].group_counts.size();
+        inner_controller_count +=
+            nested_control->inner_controls[child].inner_max_iterations;
+      }
       nested_result->controller_dispatches =
           static_cast<std::uint32_t>(
               static_cast<std::uint64_t>(
                   nested_control->outer_max_iterations) *
-              (nested_control->inner_max_iterations + 1));
+              (inner_controller_count + 1));
       nested_result->controller_invocations =
           static_cast<std::uint32_t>(
               static_cast<std::uint64_t>(
                   nested_control->outer_max_iterations) +
               static_cast<std::uint64_t>(logical_outer) *
-                  nested_control->inner_max_iterations);
+                  inner_controller_count);
       nested_result->indirect_dispatches =
           static_cast<std::uint32_t>(encoded_inner_dispatches);
       nested_result->zero_dispatches =
@@ -4100,16 +4208,10 @@ bool GfxRuntime::try_launch_graph(
             count_structured_barrier(/*exit_boundary=*/false);
           };
       const std::size_t inner_control_bytes =
-          (structured_observation_word_offset +
-           kStructuredObservationWords) *
-          sizeof(std::uint32_t);
-      const std::size_t structured_packet_bytes =
-          structured_observation_word_offset *
-          sizeof(std::uint32_t);
+          nested_header_word_offset * sizeof(std::uint32_t);
       const DevicePtr outer_stable_predicate =
           slot->structured_control_buffer->get_ptr(
-              (structured_observation_word_offset + 1) *
-              sizeof(std::uint32_t));
+              nested_outer_gate_word_offset * sizeof(std::uint32_t));
       cmdlist->buffer_fill(slot->structured_control_buffer->get_ptr(),
                            structured_control_bytes, 0);
       cmdlist->buffer_transition(
@@ -4179,83 +4281,87 @@ bool GfxRuntime::try_launch_graph(
             "RhiResult({})",
             status);
 
-        for (std::size_t i = nested_outer_condition_task_end;
-             i < nested_inner_condition_task_begin; ++i) {
-          dispatch_task(structured_tasks[i], nullptr);
-        }
-        dispatch_nested_controller(
-            slot->nested_inner_initial_pipeline.get(),
-            slot->nested_inner_initial_resources.get(),
-            "inner initial");
-        for (std::size_t i =
-                 nested_inner_condition_task_begin;
-             i < nested_inner_body_task_begin; ++i) {
-          dispatch_task(structured_tasks[i], nullptr);
-        }
-
-        for (std::uint32_t inner_iteration = 0;
-             inner_iteration <
-             nested_control->inner_max_iterations;
-             ++inner_iteration) {
-          flush_structured_pending(/*exit_boundary=*/false);
-          cmdlist->buffer_transition(
-              nested_control->inner_predicate,
-              sizeof(std::uint32_t),
-              {BufferBarrierStage::Compute,
-               BufferBarrierAccess::ShaderWrite,
-               BufferBarrierStage::Compute,
-               BufferBarrierAccess::ShaderRead});
-          cmdlist->bind_pipeline(
-              slot->structured_controller_pipeline.get());
-          status = cmdlist->bind_shader_resources(
-              slot->structured_controller_resources.get());
-          TI_ERROR_IF(
-              status != RhiResult::success,
-              "Vulkan nested inner controller resource binding "
-              "failed: RhiResult({})",
-              status);
-          status = cmdlist->dispatch(1);
-          TI_ERROR_IF(
-              status != RhiResult::success,
-              "Vulkan nested inner controller dispatch failed: "
-              "RhiResult({})",
-              status);
-          cmdlist->memory_barrier();
-          count_structured_barrier(/*exit_boundary=*/false);
-          cmdlist->buffer_transition(
-              slot->structured_control_buffer->get_ptr(),
-              structured_packet_bytes,
-              {BufferBarrierStage::Compute,
-               BufferBarrierAccess::ShaderWrite,
-               BufferBarrierStage::IndirectCommand,
-               BufferBarrierAccess::IndirectCommandRead});
-          for (std::size_t i =
-                   nested_inner_body_task_begin;
-               i < nested_outer_suffix_task_begin; ++i) {
-            const std::size_t packet =
-                i - nested_inner_body_task_begin;
-            const DevicePtr indirect =
-                slot->structured_control_buffer->get_ptr(
-                    packet * kStructuredPacketWords *
-                    sizeof(std::uint32_t));
-            dispatch_task(structured_tasks[i], &indirect);
+        std::size_t task_cursor = nested_outer_condition_task_end;
+        for (std::size_t child = 0;
+             child < nested_task_ranges.size(); ++child) {
+          const auto &range = nested_task_ranges[child];
+          const auto &inner = nested_control->inner_controls[child];
+          for (std::size_t i = task_cursor; i < range.condition_begin; ++i) {
+            dispatch_task(structured_tasks[i], nullptr);
           }
-          cmdlist->buffer_transition(
-              slot->structured_control_buffer->get_ptr(),
-              structured_packet_bytes,
-              {BufferBarrierStage::IndirectCommand,
-               BufferBarrierAccess::IndirectCommandRead,
-               BufferBarrierStage::Compute,
-               BufferBarrierAccess::ShaderRead |
-                   BufferBarrierAccess::ShaderWrite});
-        }
+          dispatch_nested_controller(
+              slot->nested_inner_initial_pipelines[child].get(),
+              slot->nested_inner_initial_resources[child].get(),
+              "inner initial");
+          for (std::size_t i = range.condition_begin;
+               i < range.body_begin; ++i) {
+            dispatch_task(structured_tasks[i], nullptr);
+          }
 
-        dispatch_nested_controller(
-            slot->nested_inner_terminal_pipeline.get(),
-            slot->nested_inner_terminal_resources.get(),
-            "inner terminal");
-        for (std::size_t i =
-                 nested_outer_suffix_task_begin;
+          const std::size_t packet_bytes =
+              range.group_counts.size() * kStructuredPacketWords *
+              sizeof(std::uint32_t);
+          const DevicePtr packet_base =
+              slot->structured_control_buffer->get_ptr(
+                  range.packet_word_offset * sizeof(std::uint32_t));
+          for (std::uint32_t inner_iteration = 0;
+               inner_iteration < inner.inner_max_iterations;
+               ++inner_iteration) {
+            flush_structured_pending(/*exit_boundary=*/false);
+            cmdlist->buffer_transition(
+                inner.inner_predicate, sizeof(std::uint32_t),
+                {BufferBarrierStage::Compute,
+                 BufferBarrierAccess::ShaderWrite,
+                 BufferBarrierStage::Compute,
+                 BufferBarrierAccess::ShaderRead});
+            cmdlist->bind_pipeline(
+                slot->nested_inner_controller_pipelines[child].get());
+            status = cmdlist->bind_shader_resources(
+                slot->nested_inner_controller_resources[child].get());
+            TI_ERROR_IF(
+                status != RhiResult::success,
+                "Vulkan nested inner controller resource binding "
+                "failed: RhiResult({})",
+                status);
+            status = cmdlist->dispatch(1);
+            TI_ERROR_IF(
+                status != RhiResult::success,
+                "Vulkan nested inner controller dispatch failed: "
+                "RhiResult({})",
+                status);
+            cmdlist->memory_barrier();
+            count_structured_barrier(/*exit_boundary=*/false);
+            cmdlist->buffer_transition(
+                packet_base, packet_bytes,
+                {BufferBarrierStage::Compute,
+                 BufferBarrierAccess::ShaderWrite,
+                 BufferBarrierStage::IndirectCommand,
+                 BufferBarrierAccess::IndirectCommandRead});
+            for (std::size_t i = range.body_begin; i < range.end; ++i) {
+              const std::size_t packet = i - range.body_begin;
+              const DevicePtr indirect =
+                  slot->structured_control_buffer->get_ptr(
+                      (range.packet_word_offset +
+                       packet * kStructuredPacketWords) *
+                      sizeof(std::uint32_t));
+              dispatch_task(structured_tasks[i], &indirect);
+            }
+            cmdlist->buffer_transition(
+                packet_base, packet_bytes,
+                {BufferBarrierStage::IndirectCommand,
+                 BufferBarrierAccess::IndirectCommandRead,
+                 BufferBarrierStage::Compute,
+                 BufferBarrierAccess::ShaderRead |
+                     BufferBarrierAccess::ShaderWrite});
+          }
+
+          dispatch_nested_controller(
+              slot->nested_inner_terminal_pipelines[child].get(),
+              slot->nested_inner_terminal_resources[child].get(),
+              "inner terminal");
+          task_cursor = range.end;
+        }
+        for (std::size_t i = task_cursor;
              i < structured_tasks.size(); ++i) {
           dispatch_task(structured_tasks[i], nullptr);
         }
