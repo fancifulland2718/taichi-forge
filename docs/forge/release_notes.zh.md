@@ -375,6 +375,14 @@
   indirect dispatch，以及 stale numeric、SNode 或 runtime generation 都会明确失败。
   单独录制一个 action 不保证提速；预期收益来自与周围 Graph
   action 的组合。
+- 当所有 leaf 都提供可录制 f32 action 时，`LinearOperator` 的 scale、sum、compose 与显式
+  adjoint tree 现在会递归 lowering。sum/compose 使用 Graph-owned bounded temporary
+  arena 的 typed f32 storage，不公开 scratch runtime 参数，并为并发 submission 保持独立
+  lane。standalone f32 scale/sum/compose 也可在 CUDA/Vulkan 执行；sum/compose 持有私有
+  persistent workspace。recordable composed CG/PCG provider 在两个 GPU backend 上自动使用
+  已资格化 device-convergent 路径，不会改选 host-check 替代方案。
+  `linear_operator_composition_bench.py` 会比较自动 Graph、等价显式 Graph、standalone/无
+  Graph 执行，以及 compact Field 的 direct/staged binding，并报告正确性和 temporary 内存。
 - 新增 compiled-kernel f32 CG/PCG 的显式 CUDA `device_convergent` 执行。该路径通过通用
   结构化 Graph 和可录制 A/M action 完成，每次 solve 只读取一个 terminal packet，并在
   provider 不可用或 stale 时明确失败。并行 vector update 与持久两级 shared-block

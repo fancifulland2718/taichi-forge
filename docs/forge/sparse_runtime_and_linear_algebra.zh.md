@@ -173,8 +173,8 @@ ndarray RHS；CUDA 文档路径要求 Taichi ndarray。shape 与 dtype 必须与
 | `SparseBiCGSTAB` | 显式非对称 square matrix | mutable CSR/CSC 与 fixed CSR/BSR，`f32/f64` | 不支持 | 不支持 |
 | `MatrixFreeCG` | SPD 应用 operator | field/kernel 路径 | field/kernel 路径 | backend/dtype 支持该 operator 时可用 |
 | `MatrixFreeBICGSTAB` | 非对称应用 operator | field/kernel 路径 | field/kernel 路径 | backend/dtype 支持该 operator 时可用 |
-| `experimental.SolvePlan(method="cg")` | trait-qualified SPD stored/kernel/Graph operator | fixed CSR/BSR 与 composition，`f32/f64`；compiled provider 为 `f32` | fixed CSR 与 compiled provider，`f32` | fixed CSR/BSR 与 compiled provider，`f32` |
-| `experimental.SolvePlan(method="pcg")` | trait-qualified SPD operator 与 preconditioner | CSR Jacobi、BSR block-Jacobi 或 fixed-linear operator，`f32/f64` | CSR/BSR 内置项或 compiled-kernel A/M，`f32` | CSR/BSR 内置项或 compiled-kernel A/M，`f32` |
+| `experimental.SolvePlan(method="cg")` | trait-qualified SPD stored/kernel/Graph operator | fixed CSR/BSR 与 composition，`f32/f64`；compiled provider 为 `f32` | fixed CSR、compiled provider 与 recordable composition，`f32` | fixed CSR/BSR、compiled provider 与 recordable composition，`f32` |
+| `experimental.SolvePlan(method="pcg")` | trait-qualified SPD operator 与 preconditioner | CSR Jacobi、BSR block-Jacobi 或 fixed-linear operator，`f32/f64` | CSR/BSR 内置项或 recordable compiled/composed A/M，`f32` | CSR/BSR 内置项或 recordable compiled/composed A/M，`f32` |
 | `experimental.SolvePlan(method="minres")` | trait-qualified self-adjoint、使用时 nonsingular 的 operator；若有 preconditioner 则必须 SPD | identity、任意兼容 provider，`f32/f64` | fixed CSR/BSR 或 compiled provider，支持 identity、内置项或兼容 fixed-linear preconditioning，`f32` | fixed CSR/BSR 或 compiled provider，支持 identity、内置项或兼容 fixed-linear preconditioning，`f32` |
 | `experimental.SolvePlan(method="bicgstab")` | 一般 square operator | 任意受支持 experimental CPU provider，`f32/f64` | fixed CSR/BSR 或 compiled A/M，`f32` | fixed CSR/BSR 或 compiled A/M，`f32` |
 | `experimental.SolvePlan(method="gmres")` | 一般 square operator；fixed restart 8/16/32 | 任意受支持 experimental CPU provider，`f32/f64` | fixed CSR/BSR 或 compiled A/M，`f32` | fixed CSR/BSR 或 compiled A/M，`f32` |
@@ -186,11 +186,13 @@ conditioning，这些数学合同由调用方负责。
 ### 绑定 runtime 的 LinearOperator
 
 `ti.linalg.LinearOperator` 使用统一 capability 与 lifecycle 合同覆盖 fixed
-stored CSR/BSR、compiled-kernel 和 compiled-Graph apply。vector 使用一维 scalar Taichi
-ndarray，operator 保留可复用 native execution plan。数学性质通过 `OperatorTraits`
-附加；SPD 性质未知时，CG/PCG 会拒绝构造。CPU 提供最小的
-scale/sum/composition/adjoint/block-diagonal 代数；不受支持的 GPU composition 明确失败，
-不执行 host fallback。
+stored CSR/BSR、compiled-kernel 和 compiled-Graph apply。公开 vector operand 接受一维
+scalar Taichi ndarray 与合格的 compact root-dense Field；Graph provider 会直接绑定后者，
+不做 staging。数学性质通过 `OperatorTraits` 附加；SPD 性质未知时，CG/PCG 会拒绝构造。
+CPU 支持 `f32/f64` scale/sum/composition 以及现有 adjoint、block-diagonal 代数。
+CUDA/Vulkan 在所有 child 都是 recordable provider 时下放 `f32`
+scale/sum/composition，并使用持久或 Graph-owned device workspace；其他 GPU composition
+明确失败，不执行 host fallback。
 
 `experimental.SolvePlan` 跨 RHS 调用保留 solver workspace，并返回同时包含 solution 与
 完整 terminal state 的 `SolveResult`。CUDA/Vulkan 为 short-recurrence solver 支持显式的

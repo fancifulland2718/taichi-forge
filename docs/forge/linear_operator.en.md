@@ -1,6 +1,6 @@
 # LinearOperator and Experimental SolvePlan
 
-> This page describes the current Taichi Forge `0.6.0` contract; see
+> This page describes the current Taichi Forge `0.6.1` contract; see
 > [release notes](release_notes.en.md) for version attribution.
 
 `ti.linalg.LinearOperator` provides a runtime-bound linear-map abstraction for
@@ -115,12 +115,12 @@ compact full fields when the selected provider reports
 dense field descriptor -> resolved range + submission lease -> provider operands
 ```
 
-Compiled-kernel providers accept direct field operands on CPU, CUDA, and
-Vulkan. Fixed native CSR/BSR providers accept them on CPU and CUDA; the Vulkan
-native sparse provider remains staged. Compiled Graph providers do not accept
-direct field operands. Direct input and output must be non-aliasing, have the
-exact dtype and scalar extent, and both qualify for a compact scalar-flat
-mapping.
+Compiled-kernel and direct-dispatch compiled-Graph providers accept direct
+field operands on CPU, CUDA, and Vulkan. This includes ordered multi-dispatch
+Graph providers. Fixed native CSR/BSR providers accept them on CPU and CUDA;
+the Vulkan native sparse provider remains staged. Direct input and output must
+be non-aliasing, have the exact dtype and scalar extent, and both qualify for a
+compact scalar-flat mapping.
 
 All other supported cases retain an explicit device-staging path:
 
@@ -283,15 +283,21 @@ action. Updating the operator numeric generation makes an already compiled
 Graph stale; rebuild the Graph so every replay uses one immutable provider
 generation.
 
-This recordable contract applies to compiled-kernel providers and to
-direct-dispatch compiled-Graph providers. Both the generic rectangular or
-explicit-adjoint form and the legacy square forward-only form preserve the
-compiled Graph's ordered multi-dispatch sequence. `adjoint=True` records the
-explicit adjoint Graph; the legacy square form does not infer one. A
-compiled-Graph provider containing indirect dispatch, stored sparse,
-composed, and other unsupported providers fail explicitly instead of
-materializing an operator or inserting a hidden apply fallback. The provider
-recording protocol itself is not a public custom-native callback API.
+This recordable contract applies to compiled-kernel providers,
+direct-dispatch compiled-Graph providers, and f32 scale/sum/compose/adjoint
+trees whose leaves are recordable. Composition is lowered recursively while
+preserving child dispatch order. Sum and compose allocate typed f32 temporary
+vectors from the Graph-owned bounded arena, so scratch does not become a
+public runtime argument and concurrent submissions receive independent arena
+lanes. The memory report exposes the planned and persistent temporary bytes.
+Both the generic rectangular or explicit-adjoint form and the legacy square
+forward-only form preserve the compiled Graph's ordered multi-dispatch
+sequence. `adjoint=True` records the explicit adjoint Graph; the legacy square
+form does not infer one. Compiled-Graph providers containing indirect
+dispatch, stored sparse providers, block-diagonal compositions, and other
+unsupported providers fail explicitly instead of materializing an operator or
+inserting a hidden apply fallback. The provider recording protocol itself is
+not a public custom-native callback API.
 
 Recording one action does not by itself guarantee a speedup. The main use is
 composing multiple operator actions and adjacent kernels into a larger Graph
@@ -410,10 +416,14 @@ for other combinations without a host fallback.
 provider exposes explicit adjoint application; no self-adjointness assumption
 is used as an implementation fallback.
 
-Scale, sum, composition, block diagonal, and identity execute on CPU. Their
-GPU lowering is not part of the current API. Attempting GPU composition fails
-at construction instead of running host code or synchronizing through an
-implicit staging path.
+Scale, sum, and compose execute on CPU and, for f32 Program-bound operands, on
+CUDA and Vulkan. Standalone sum/compose retain a private persistent ndarray
+workspace; their recordable form instead uses Graph-owned typed temporaries.
+Compact Field operands bind directly when the composition is embedded with
+`graph_action()`; standalone composition retains the documented reusable
+boundary-staging behavior. Identity and block diagonal remain CPU-only. GPU
+f64 composition and generalized `alpha/beta/addend` composition fail without
+running host code or silently changing provider.
 
 ## SolvePlan and SolveResult
 
@@ -679,15 +689,15 @@ fails during plan construction.
 
 ### Current unsupported boundary
 
-The `0.6.0` numerical-tooling contract intentionally does not provide:
+The `0.6.1` numerical-tooling contract intentionally does not provide:
 
 - nonlinear, residual-dependent, adaptive, or Python-callback preconditioners;
 - automatic restart selection, block or multi-RHS Krylov methods, recycling,
   deflation, pipelining, or communication-avoiding GMRES variants;
 - MINRES-QLP, singular minimum-norm/minimum-length guarantees, or automatic
   nullspace handling;
-- GPU `f64` GMRES-family execution, GPU operator composition, or generalized
-  GPU `alpha/beta/addend` apply;
+- GPU `f64` GMRES-family execution, GPU f64/block-diagonal composition, or
+  generalized GPU `alpha/beta/addend` apply;
 - variable-action CUDA Graph/Vulkan command replay or single-system
   asynchronous solve submission; device-convergent execution outside the
   qualified CUDA and Vulkan scopes documented below;
@@ -826,6 +836,14 @@ plan = ti.linalg.experimental.SolvePlan(
   `qualification_scope="explicit_only"`; its automatic default remains the
   K=4 `"host_check_every_k"` path because Graph construction/capture and first
   execution must be amortized by repeated warm solves.
+- A recordable f32 scale/sum/compose operator used by CUDA or Vulkan CG/PCG
+  automatically selects `"device_convergent"`. This is the only qualified GPU
+  solve policy for composed providers: no host-check path substitutes
+  standalone applies or moves vectors between Field and ndarray storage inside
+  Krylov. CUDA stops at the exact logical iteration. Vulkan reports the exact
+  logical stop but may execute an inactive encoded tail. Each backend reads one
+  terminal packet per solve; an unavailable structured-Graph path fails rather
+  than selecting another policy.
 - CUDA GMRES/FGMRES defaults to `"host_check_every_k"` and requires
   `check_interval == restart`. Stored identity-preconditioned GMRES records a
   reusable restart-cycle Graph; FGMRES and other non-recordable provider
@@ -843,7 +861,8 @@ plan = ti.linalg.experimental.SolvePlan(
   CG/PCG/MINRES/BiCGSTAB plans default to `"host_check_every_k"` with K=4;
   stored identity-preconditioned GMRES uses the same default with
   `check_interval == restart`. Qualified matrix-free methods outside the
-  recordable compiled-kernel CG/PCG scope use K=4 or restart-sized host checks.
+  recordable compiled-kernel/composition CG/PCG scope use K=4 or restart-sized
+  host checks.
   Explicit `"fixed_budget_masked"` remains available for workloads that
   intentionally consume the full iteration budget. These policies support
   `atol`, `rtol`, and their combined effective tolerance.
@@ -881,7 +900,7 @@ boundary, never within a Krylov iteration.
 FGMRES action tables use direct native submission on both GPU backends. No
 identity-GMRES replay path is silently reused for a variable action schedule.
 
-Outside the recordable compiled-kernel CG/PCG device-convergent scope,
+Outside the recordable compiled-kernel/composition CG/PCG device-convergent scope,
 compiled-kernel and compiled Graph A/M providers use direct outer solver-chunk
 submission. That outer recurrence boundary is independent of provider
 execution: each compiled Graph apply uses its provider-owned compiled Graph
@@ -942,16 +961,18 @@ qualified, and the backend primitive (`cuda_conditional_graph_or_chunk_replay`,
 `cuda_graph_chunk_replay`, `vulkan_structured_graph`, or
 `vulkan_command_replay`). Post-solve statistics remain authoritative for the
 actual replay or direct-submission path.
-Direct `"device_convergent"` execution has two qualified CUDA scopes and one
-qualified Vulkan scope. A single-system stored f32 CSR/BSR CG/PCG plan is
+Direct `"device_convergent"` execution covers stored and recordable-provider
+scopes. A single-system stored f32 CSR/BSR CG/PCG plan is
 eligible for automatic
 selection through `"bounded_convergent"` when the driver, conditional-Graph
 entry points, device setter, provider capture, and cuBLAS workspace
 requirements are satisfied; otherwise the documented chunk fallback is used.
 A single-system compiled-kernel f32 CG/PCG plan may request the generic
 structured-Graph path explicitly when its A/M actions are recordable, but is
-not selected automatically on CUDA. On Vulkan, the same recordable
-compiled-kernel f32 CG/PCG scope is automatically selected and reports
+not selected automatically on CUDA. A recordable f32 composition is selected
+automatically on both GPU backends because it has no qualified host-check
+solver lowering. On Vulkan, recordable compiled-kernel and composition
+CG/PCG scopes report
 `primitive="vulkan_dispatch_indirect"`; unsupported providers fail without
 changing policy or backend. The stored CUDA path requires its solver-specific
 conditional setter and cuBLAS user-workspace support. The compiled-kernel CUDA
@@ -1152,7 +1173,8 @@ model that coupling explicitly.
 | Fixed stored CSR/BSR | `f32`, `f64` | `f32` | `f32` |
 | Compiled kernel | `f32` | `f32` | `f32` |
 | Compiled Graph | `f32` | `f32` | `f32` |
-| Identity/composition | `f32`, `f64` | Unsupported | Unsupported |
+| Identity/block diagonal | `f32`, `f64` | Unsupported | Unsupported |
+| Scale/sum/compose | `f32`, `f64` | `f32` | `f32` |
 
 Kernel and Graph providers support rectangular shapes and explicit adjoints.
 Generalized `alpha/beta` apply is available on CPU; GPU currently supports
@@ -1164,16 +1186,16 @@ overwrite apply only.
 | --- | --- | --- | --- |
 | CG, fixed stored | CSR/BSR, `f32/f64` | CSR, `f32` | CSR/BSR, `f32` |
 | CG, compiled kernel/Graph | `f32` | `f32` | `f32` |
-| CG, CPU composition | `f32/f64` | Unsupported | Unsupported |
+| CG, recordable composition | `f32/f64` | `f32`, device-convergent | `f32`, device-convergent |
 | PCG + Jacobi | Fixed CSR, `f32/f64` | Fixed CSR, `f32` | Fixed CSR, `f32` |
 | PCG + block-Jacobi | Fixed BSR, `f32/f64` | Fixed BSR, `f32` | Fixed BSR, `f32` |
-| PCG + fixed-linear operator/plan | Supported providers, `f32/f64` | Compiled-kernel A/M, `f32` | Compiled-kernel A/M, `f32` |
+| PCG + fixed-linear operator/plan | Supported providers, `f32/f64` | Recordable compiled-kernel/composition A/M, `f32`, device-convergent for composition | Recordable compiled-kernel/composition A/M, `f32`, device-convergent for composition |
 | MINRES + identity | Supported providers, `f32/f64` | Fixed CSR/BSR or compiled provider, `f32` | Fixed CSR/BSR or compiled provider, `f32` |
 | MINRES + Jacobi/block-Jacobi | Unsupported | Fixed CSR/BSR respectively, `f32` | Fixed CSR/BSR respectively, `f32` |
 | MINRES + fixed-linear operator/plan | Unsupported | Compatible device-native A/M, `f32` | Compatible device-native A/M, `f32` |
 | Independent batched CG/PCG | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` |
 | Batched fixed-budget submission | Unsupported | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` |
-| Device-convergent conditional execution | Unsupported | Stored f32 CSR/BSR CG/PCG automatic; compiled-kernel f32 CG/PCG explicit-only | Recordable compiled-kernel f32 CG/PCG automatic |
+| Device-convergent conditional execution | Unsupported | Stored f32 CSR/BSR and recordable-composition CG/PCG automatic; compiled-kernel f32 CG/PCG explicit-only | Recordable compiled-kernel/composition f32 CG/PCG automatic |
 | BiCGSTAB + identity | Supported host-action providers, `f32/f64` | Fixed CSR/BSR or compiled provider, `f32` | Fixed CSR/BSR or compiled provider, `f32` |
 | BiCGSTAB + fixed-linear right preconditioner | Supported host-action providers, `f32/f64` | Compatible device-native A/M, `f32` | Compatible device-native A/M, `f32` |
 | GMRES + identity | Supported host-action providers, `f32/f64` | Fixed CSR/BSR or compiled provider, `f32` | Fixed CSR/BSR or compiled provider, `f32` |

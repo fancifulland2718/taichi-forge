@@ -187,8 +187,8 @@ the matrix exactly, and no implicit host fallback is performed.
 | `SparseBiCGSTAB` | Explicit nonsymmetric square matrix | Mutable CSR/CSC and fixed CSR/BSR, `f32/f64` | Unsupported | Unsupported |
 | `MatrixFreeCG` | SPD application operator | Field/kernel route | Field/kernel route | Available where the backend and dtype support the operator |
 | `MatrixFreeBICGSTAB` | Nonsymmetric application operator | Field/kernel route | Field/kernel route | Available where the backend and dtype support the operator |
-| `experimental.SolvePlan(method="cg")` | Trait-qualified SPD stored/kernel/Graph operator | Fixed CSR/BSR and compositions, `f32/f64`; compiled providers `f32` | Fixed CSR and compiled providers, `f32` | Fixed CSR/BSR and compiled providers, `f32` |
-| `experimental.SolvePlan(method="pcg")` | Trait-qualified SPD operator and preconditioner | CSR Jacobi, BSR block-Jacobi, or fixed-linear operator, `f32/f64` | CSR/BSR built-in or compiled-kernel A/M, `f32` | CSR/BSR built-in or compiled-kernel A/M, `f32` |
+| `experimental.SolvePlan(method="cg")` | Trait-qualified SPD stored/kernel/Graph operator | Fixed CSR/BSR and compositions, `f32/f64`; compiled providers `f32` | Fixed CSR, compiled providers, and recordable compositions, `f32` | Fixed CSR/BSR, compiled providers, and recordable compositions, `f32` |
+| `experimental.SolvePlan(method="pcg")` | Trait-qualified SPD operator and preconditioner | CSR Jacobi, BSR block-Jacobi, or fixed-linear operator, `f32/f64` | CSR/BSR built-in or recordable compiled/composed A/M, `f32` | CSR/BSR built-in or recordable compiled/composed A/M, `f32` |
 | `experimental.SolvePlan(method="minres")` | Trait-qualified self-adjoint, nonsingular-in-use operator; SPD preconditioner when present | Identity, any compatible provider, `f32/f64` | Fixed CSR/BSR or compiled provider, with identity, built-in, or compatible fixed-linear preconditioning, `f32` | Fixed CSR/BSR or compiled provider, with identity, built-in, or compatible fixed-linear preconditioning, `f32` |
 | `experimental.SolvePlan(method="bicgstab")` | General square operator | Any supported experimental CPU provider, `f32/f64` | Fixed CSR/BSR or compiled A/M, `f32` | Fixed CSR/BSR or compiled A/M, `f32` |
 | `experimental.SolvePlan(method="gmres")` | General square operator; fixed restart 8/16/32 | Any supported experimental CPU provider, `f32/f64` | Fixed CSR/BSR or compiled A/M, `f32` | Fixed CSR/BSR or compiled A/M, `f32` |
@@ -201,11 +201,14 @@ CSR/BSR shape. The caller owns those mathematical contracts.
 
 `ti.linalg.LinearOperator` unifies fixed stored CSR/BSR,
 compiled-kernel, and compiled-Graph apply behind one capability and lifecycle
-contract. It uses scalar one-dimensional Taichi ndarrays and retains a reusable
-native execution plan. Mathematical properties are attached through
-`OperatorTraits`; CG/PCG refuse unknown SPD properties. CPU provides minimal
-scale/sum/composition/adjoint/block-diagonal algebra, while unsupported GPU
-composition fails without a host fallback.
+contract. Public vector operands accept scalar one-dimensional Taichi ndarrays
+and qualified compact root-dense Fields; Graph providers bind the latter
+directly without staging. Mathematical properties are attached through
+`OperatorTraits`; CG/PCG refuse unknown SPD properties. CPU supports `f32/f64`
+scale/sum/composition plus the existing adjoint and block-diagonal algebra.
+CUDA and Vulkan lower `f32` scale/sum/composition when every child is a
+recordable provider, using persistent or Graph-owned device workspace. Other
+GPU compositions fail explicitly without a host fallback.
 
 `experimental.SolvePlan` retains solver workspace across RHS calls and returns
 a `SolveResult` containing the solution and complete terminal state. CUDA and

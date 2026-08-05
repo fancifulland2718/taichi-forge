@@ -504,6 +504,18 @@ When upgrading an existing 0.5.0 application, check the following:
   dependent tree, indirect dispatch, and stale numeric, SNode, or runtime
   generations fail closed. Recording one action alone does not promise
   a speedup; the intended gain is composition with surrounding Graph actions.
+- `LinearOperator` scale, sum, compose, and explicit-adjoint trees now lower
+  recursively when every leaf exposes a recordable f32 action. Sum and compose
+  use typed f32 storage from the Graph-owned bounded temporary arena, retain no
+  public scratch argument, and preserve independent lanes for concurrent
+  submissions. Standalone f32 scale/sum/compose also execute on CUDA/Vulkan;
+  sum and compose retain private persistent workspace. Recordable composed
+  CG/PCG providers automatically use the qualified device-convergent path on
+  both GPU backends and fail instead of selecting a host-check substitute.
+  `linear_operator_composition_bench.py` compares the automatic Graph with an
+  equivalent explicit Graph, standalone/no-Graph execution, and direct versus
+  staged compact Field bindings while reporting correctness and temporary
+  memory.
 - Added explicit CUDA `device_convergent` execution for compiled-kernel f32
   CG/PCG through the generic structured Graph and recordable A/M actions. It
   reads one terminal packet per solve and fails closed on unavailable or stale
