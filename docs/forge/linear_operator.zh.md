@@ -429,12 +429,13 @@ x_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "x", ti.f32, ndim=1)
 solve = plan.graph_action(rhs_arg, x_arg, name="inner_pcg")
 builder = ti.graph.GraphBuilder()
 builder.append_native(solve)
-graph = builder.compile()
+graph = builder.compile(workspace_lanes=2, workspace_saturation="raise")
 
 terminal = solve.allocate_terminal()
 ticket = graph.submit({"rhs": rhs, "x": x, **terminal.arguments})
 ticket.wait()
 result = terminal.snapshot()
+print(ticket.workspace_lane)
 ```
 
 `solve.terminal.state` 是 i32[4] symbolic resource，依次保存 status、逻辑迭代数、
@@ -444,22 +445,30 @@ structured region 可以直接在 device 上消费这些 symbolic resource。For
 读回 terminal；`terminal.snapshot()` 是显式 host 边界，应在外层
 `SubmissionTicket` 完成后调用。
 
-该 action 可以追加到 outer `Sequential`，并作为 depth-2 `while -> while` Graph 的唯一
-inner `while`。CPU 使用精确 nested host control；通过显式 setup probe 的 CUDA Driver API
-12.4+ runtime 使用 device-updatable kernel-node group，较旧或未通过资格的 runtime 使用
-Forge 自带、与 CUDA 版本无关的 bounded 双 gate Graph；Vulkan 使用 bounded conditional
-replay。CUDA/Vulkan 会把完整层级保持在一个 ticket 中，两层之间不做 host readback。
-outer suffix kernel 可以读取 `solve.terminal.state`，在推进 outer counter 前把每次 solve 的
-迭代数写入 device trace。这些 GPU 路径仍保留 bounded 静态拓扑，不宣称 exact dynamic
-command termination。
+该 action 可以追加到 outer `Sequential`，并与最多另外七个有序 inner `while` action
+共同组成 depth-2 Graph。取得资格的结构是一个 outer `while`，其 body 顺序包含一至八个
+leaf inner `while`，inner 之间允许普通 dispatch/native action；各 inner control resource
+必须互不别名，完整层级最多编码 4,096 个 action。CPU 使用精确 nested host control；
+通过显式 setup probe 的 CUDA Driver API 12.4+ runtime 使用 device-updatable kernel-node
+group，较旧或未通过资格的 runtime 使用 Forge 自带、与 CUDA 版本无关的 bounded 双 gate
+Graph；Vulkan 使用 bounded conditional replay。CUDA/Vulkan 会把完整层级保持在一个
+ticket 中，两层之间不做 host readback。outer suffix kernel 可以读取每个 solve 的 terminal
+state，在推进 outer counter 前把各自迭代数写入 device trace。这些 GPU 路径仍保留
+bounded 静态拓扑，不宣称 exact dynamic command termination。
 
-Krylov vector 与 recurrence scalar 都是 compiled Graph instance 私有且地址稳定的
-storage。一个 Graph instance 只有一个 workspace lane；第二次异步 submission 会在复用
-该 storage 前等待上一 completion fence。需要真正并发求解时，应编译相互独立的 Graph。
-`Graph.execution_stats().memory` 会报告 persistent bytes、exclusive policy、wait 与
-reuse。runtime operand 可使用合格的一维 scalar ndarray、完整 dense Field，以及 compact
-scalar-flat `vector_view(..., offset=..., length=..., stride=1)` 区间。RHS 与 output
-必须可证明互不相交；独立 initial guess 必须与 output 不相交，或与它是完全相同的 view。
+Krylov vector 与 recurrence scalar 都是 compiled Graph workspace lane 私有且地址稳定的
+storage。默认单 lane 保留安全的 completion-fence 串行化；`workspace_lanes=N` 会按需惰性
+物化最多 `N` 份独立 storage。自动 round-robin 优先选择已经完成的 lane，
+`workspace_lane=i` 可以固定 lane。所有 lane 忙时，`workspace_saturation="wait"` 等待，
+`"raise"` 立即报错。每个实际物化的额外 lane 都线性增加 persistent memory；
+`Graph.execution_stats().memory` 会报告 materialized/busy 数量、acquisition、wait、
+saturation error、persistent bytes 与 reuse。
+
+workspace lane 消除的是已排队 solve 之间的 storage-reuse 等待，不会创建 backend stream，
+也不承诺 GPU 物理并行。若需要独立 submission stream 或并发 host setup，仍应编译相互独立的
+Graph。runtime operand 可使用合格的一维 scalar ndarray、完整 dense Field，以及 compact
+scalar-flat `vector_view(..., offset=..., length=..., stride=1)` 区间。RHS 与 output 必须可
+证明互不相交；独立 initial guess 必须与 output 不相交，或与它是完全相同的 view。
 
 对于系数不变的兼容路径，fixed-linear preconditioner 可以直接作为 operator 传入，而不是
 应用回调：

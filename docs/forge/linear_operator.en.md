@@ -496,12 +496,13 @@ x_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "x", ti.f32, ndim=1)
 solve = plan.graph_action(rhs_arg, x_arg, name="inner_pcg")
 builder = ti.graph.GraphBuilder()
 builder.append_native(solve)
-graph = builder.compile()
+graph = builder.compile(workspace_lanes=2, workspace_saturation="raise")
 
 terminal = solve.allocate_terminal()
 ticket = graph.submit({"rhs": rhs, "x": x, **terminal.arguments})
 ticket.wait()
 result = terminal.snapshot()
+print(ticket.workspace_lane)
 ```
 
 `solve.terminal.state` is an i32[4] symbolic resource containing status,
@@ -513,24 +514,36 @@ resources on device. Forge performs no implicit terminal readback;
 `terminal.snapshot()` is the explicit host boundary and should be called only
 after the enclosing `SubmissionTicket` completes.
 
-The action may be appended to an outer `Sequential` and used as the single
-inner `while` of a depth-two `while -> while` Graph. CPU executes exact nested
-host control. Qualified CUDA Driver API 12.4+ runtimes use device-updatable
-kernel-node groups after an explicit setup probe; older or unqualified runtimes
-use Forge's version-independent bounded double-gate Graph. Vulkan uses bounded
-conditional replay. CUDA and Vulkan keep the complete hierarchy under one
-ticket with no intermediate host readback. An outer suffix kernel may read
-`solve.terminal.state` and store each solve's iteration count in a device trace
-before advancing the outer counter. These GPU routes retain bounded static
-topology and do not claim exact dynamic command termination.
+The action may be appended to an outer `Sequential` together with up to seven
+other ordered inner `while` actions. The qualified depth-two shape is one
+outer `while` whose body contains one to eight leaf inner `while` regions,
+with ordinary dispatch/native actions between them. Inner control resources
+must be disjoint and the complete encoded hierarchy is capped at 4,096
+actions. CPU executes exact nested host control. Qualified CUDA Driver API
+12.4+ runtimes use device-updatable kernel-node groups after an explicit setup
+probe; older or unqualified runtimes use Forge's version-independent bounded
+double-gate Graph. Vulkan uses bounded conditional replay. CUDA and Vulkan
+keep the complete hierarchy under one ticket with no intermediate host
+readback. An outer suffix kernel may read each solve's terminal state and
+store its iteration count in a device trace before advancing the outer
+counter. These GPU routes retain bounded static topology and do not claim
+exact dynamic command termination.
 
 All Krylov vectors and scalar recurrence state are private, address-stable
-storage owned by the compiled Graph instance. One Graph instance has one
-workspace lane: a second asynchronous submission waits for the preceding
-completion fence before reusing that storage. Compile independent Graphs when
-true solve concurrency is required. `Graph.execution_stats().memory` reports
-the persistent bytes, exclusive policy, waits, and reuses. Runtime operands
-accept qualified scalar ndarrays, full dense Fields, and compact scalar-flat
+storage owned by a compiled Graph workspace lane. The default is one lane and
+retains the fail-safe completion-fence serialization. `workspace_lanes=N`
+enables lazy materialization of up to `N` independent storage sets; automatic
+round-robin selection prefers a completed lane, while `workspace_lane=i` pins
+a submission. `workspace_saturation="wait"` waits when every lane is busy and
+`"raise"` fails immediately. Each extra materialized lane has a linear
+persistent-memory cost, visible together with acquisitions, waits, saturation
+errors, and busy/materialized counts in `Graph.execution_stats().memory`.
+
+Workspace lanes remove storage-reuse waits between queued solves; they do not
+create backend streams or promise overlapping GPU execution. Compile
+independent Graphs when separate submission streams or concurrent host setup
+are required. Runtime operands accept qualified scalar ndarrays, full dense
+Fields, and compact scalar-flat
 `vector_view(..., offset=..., length=..., stride=1)` ranges. RHS and output
 must be proven disjoint; a separate initial guess may either be disjoint from
 the output or be its exact view.

@@ -1135,6 +1135,13 @@ Forge 在一个 runtime transaction 中按程序顺序入队，合并它们的 V
 list；稳态执行使用一次 transaction batch 加一次 completion-fence submission。Vulkan
 `if` 与 `switch` 仍只支持 portable 路径。
 
+满足资格的 depth=2 outer `while` 还可以顺序包含 1 到 8 个 leaf inner `while`，inner
+之间允许普通 dispatch gap。CUDA 记录一次 bounded conditional 或兼容 masked Graph
+launch；Vulkan 记录一次 bounded conditional/compact replay。每个 inner 保留独立的
+predicate、counter、可选 status、迭代预算以及 Vulkan chunk size。所有 control 必须互不
+别名，inner 必须是 leaf，完整程序按加法计算后仍最多编码 4096 个 action。该合同用于在
+一次 ticket 内表达 outer 非线性迭代中的多个顺序内层求解/搜索，并不表示 parallel branch。
+
 满足资格的 Vulkan compound replay 按 region 只准备一次 binding、依赖、资源保留与
 submission guard。其 structured command buffer 根据 allocation 级 effect 插入
 RAW/WAR/WAW barrier，并保留保守的 controller/global 边界。能力字段
@@ -1148,8 +1155,8 @@ fail closed。portable 结构化 Graph 使用 `run()` 并明确拒绝 `submit()`
 `native_required` while/if/switch 与 Vulkan `native_required` while 支持 `submit()`。
 有序 device setter 或 Vulkan predicate gate 无需逐 region host 回读即可消费控制状态。
 ticket 可返回显式 `GraphBuilder.observe()` 终态；该次异步 submission 不提供同步
-`control_flow_stats()`。depth=2 结构化 Graph 不支持异步 submission，严格 Vulkan 单
-replay 形态也不例外。
+`control_flow_stats()`。满足上述资格的 depth=2 `while` sequence 使用原生单-ticket
+路径；其它 depth=2 形态仍明确拒绝异步 submission。
 
 终态 observation 默认附着在 submission completion 上。CPU/Vulkan 使用 host-visible
 snapshot slot；CUDA 保持 snapshot 为 device-local，并在记录 ticket completion 前追加一次
@@ -1171,6 +1178,9 @@ storage。ordered segmented dispatch 只报告 aggregate extent；除非显式�
 queue counter 窗口。由于外部 graphics/interop producer 可能在同一窗口提交，device-wide
 queue delta 会标为 non-exact。compound replay 无法在不改变已资格化路径的前提下插入
 GPU timestamp 时，会明确报告 `unavailable`。
+对于 nested sequence，每个 inner definition 都有自己的停止 snapshot；
+`logical_invocations` 表示它被多少次 outer iteration 调用，`logical_iterations` 则仍表示
+最后一次调用的停止位置。
 
 ### `GraphBuilder.compile()`、`Graph.run(args, *, trace=False)` 与 `Graph.submit(args)`
 
@@ -1180,16 +1190,19 @@ GPU timestamp 时，会明确报告 `unavailable`。
 
 | API | 合同 |
 | --- | --- |
-| `GraphBuilder.compile()` | 后续修改 builder 或原 `Sequential` 不改变已编译 graph。 |
+| `GraphBuilder.compile(*, workspace_lanes=1, workspace_saturation='wait')` | 后续修改 builder 或原 `Sequential` 不改变已编译 graph。额外 workspace lane 惰性物化，并且只对含独占 Graph-owned internal storage 的 Graph（例如已记录的 SolvePlan）产生作用；`workspace_saturation='raise'` 会在所有合格 lane 都忙时直接失败而不是等待。 |
 | `Graph.run(args, *, trace=False)` | `args` 必须是字典，key 与声明参数完全一致；missing/extra key 会抛 `TaichiRuntimeError`。默认返回 `None`，也不分配 dynamic control-flow trace。 |
 | `Graph.run(args, *, trace=True)` | 同步运行并返回 immutable `GraphControlFlowTrace`。其中有序 invocation 包含 `sequence`、静态 `definition_path`、动态 `invocation_path`、可选 `parent_iteration` 和本次调用的 while/branch report。与 `control_flow_stats()` 不同，它会保留每一次重复 nested invocation。trace 会绕过严格 Vulkan nested replay，改用精确 portable-parent 执行，使每次 invocation 都可观测。 |
-| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait', telemetry=False)` | 与 `run()` 使用相同的精确参数、生命周期、并发和 AD 合同，返回一个 `SubmissionTicket`，并可选择加入共享准入节奏。`telemetry=True` 为每个 while 增加 snapshot，并追加去重的 bounded-extent tail snapshot，同时保留 lazy 的优化后 pipeline definition；默认不增加 snapshot kernel/buffer，也不物化 telemetry arena 或 pipeline report。结构化提交接受满足资格的 CUDA `native_required` while/if/switch，以及满足资格的 Vulkan `native_required` while；后者可在一个 compound transaction 中包含多个有序 region。portable 控制与不支持的原生组合会明确失败。 |
-| `SubmissionTicket.telemetry()` | 必要时等待，并在请求遥测时返回 immutable schema-v4 `GraphSubmissionTelemetry`；否则返回 `None`。region 报告包含 terminal counter 与停止位置，`pipeline` 是 ticket-owned `GraphPipelineReport`。nullable GPU duration 不会从 host wall time 推测。 |
+| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait', telemetry=False, workspace_lane=None)` | 与 `run()` 使用相同的精确参数、生命周期、并发和 AD 合同，返回一个 `SubmissionTicket`，并可选择加入共享准入节奏。`lane` 仍表示 pacer lane；`workspace_lane` 可把提交固定到一个 Graph-owned execution/workspace lane。`telemetry=True` 为每个 while 增加 snapshot，并追加去重的 bounded-extent tail snapshot，同时保留 lazy 的优化后 pipeline definition；默认不增加 snapshot kernel/buffer，也不物化 telemetry arena 或 pipeline report。结构化提交接受满足资格的 CUDA `native_required` while/if/switch、Vulkan `native_required` while，以及满足资格的 depth=2 multi-inner sequence。portable 控制与不支持的原生组合会明确失败。 |
+| `SubmissionTicket.telemetry()` | 必要时等待，并在请求遥测时返回 immutable schema-v5 `GraphSubmissionTelemetry`；否则返回 `None`。region 报告包含 terminal counter、停止位置和 nested invocation count，`pipeline` 是 ticket-owned `GraphPipelineReport`。nullable GPU duration 不会从 host wall time 推测。 |
 | `SubmissionTicket.pipeline_report()` | 返回与 `ticket.telemetry().pipeline` 相同的 immutable pipeline 对象，必要时等待；未请求 telemetry 时返回 `None`。 |
 | `Graph._prewarm()` | 预热当前 runtime 的 backend plan；这是内部/高级入口，不改变 graph 参数合同。 |
 
 同一个 graph 的并发 host 调用以完整 invocation 为单位排队；不同 graph 不共享该锁。
-该边界不等待 GPU 完成，也不隐含 `ti.sync()`。调用 `ti.reset()` 后必须重新编译 graph。
+该边界不隐含 `ti.sync()`。单 workspace lane 保留旧的 completion-fence 复用规则；多 lane
+可让相互独立的 submission 不再等待上一 lane 的 device completion，但不会使同一
+workspace 可重入，也不承诺在不同 backend stream 上同时执行。调用 `ti.reset()` 后必须
+重新编译 graph。
 销毁任一被引用的 SNodeTree 也会使 Graph stale；构造替代 Field layout 后必须重建 Graph。
 
 `Graph.run()` 与 `Graph.submit()` 都是 primal-only。active `ti.ad.Tape()` 或
@@ -1224,6 +1237,7 @@ ticket.wait()
 | `ticket.pipeline_report()` | 返回 opt-in immutable `GraphPipelineReport`；默认提交返回 `None`。 |
 | `ticket.backend` | 只读后端名称，仅用于诊断。 |
 | `ticket.sequence` | Program 内单调递增的只读完成序号，仅用于诊断；它不是可持久化或跨 runtime 的排序 key。 |
+| `ticket.workspace_lane` | 本次 invocation 选中的只读 Graph-owned workspace lane；与可选的 SubmissionPacer lane 相互独立。 |
 
 CPU 票据返回时已经完成。CUDA/Vulkan 票据可能仍在执行，但极短工作也可能在
 `submit()` 返回前完成。即使应用丢弃票据，runtime 参数 allocation 与 Forge native-node
@@ -1304,7 +1318,7 @@ handle。这不是原地恢复：真实 CUDA context loss 或 Vulkan device loss
 
 ### `Graph.execution_stats()`
 
-返回冻结的 schema v1 `GraphExecutionReport` snapshot。这是稳定公开诊断 API；应用代码
+返回冻结的 schema v5 `GraphExecutionReport` snapshot。这是稳定公开诊断 API；应用代码
 不应直接读取 `_graph_stats`。
 
 顶层 report 包含：
@@ -1315,6 +1329,8 @@ handle。这不是原地恢复：真实 CUDA context loss 或 Vulkan device loss
 - 不包含 pointer 的 static layout fingerprint；
 - 最近一次聚合 execution path 与 fallback reason；
 - backend Graph、backend replay、ordinary fallback segment 数；
+- temporary、observation、telemetry、internal storage 与 workspace lane 的
+  memory/ownership counter；
 - immutable per-segment report 与 counter completeness 状态。
 
 per-segment 数据可区分 CPU `ordinary`、CUDA capture/exact replay/patched

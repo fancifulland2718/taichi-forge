@@ -1337,6 +1337,17 @@ materialization may flush a preceding command list before the compound batch;
 steady execution uses one transaction batch plus the completion-fence
 submission. Vulkan `if` and `switch` remain portable-only.
 
+A qualified depth-two outer `while` may also contain from one through eight
+ordered leaf inner `while` regions, with ordinary dispatch gaps between them.
+CUDA records one bounded conditional or compatibility-masked Graph launch;
+Vulkan records one bounded conditional/compact replay. Each inner region keeps
+its own predicate, counter, optional status, iteration budget, and (on Vulkan)
+chunk size. All controls must be mutually disjoint, every inner region must be
+a leaf, and the additive encoded program remains capped at 4096 actions. This
+is the portable single-ticket shape for an outer nonlinear iteration followed
+by multiple sequential inner solves or searches; it is not parallel branch
+execution.
+
 Qualified Vulkan compound replay prepares bindings, dependencies, retained
 resources, and submission guards once per region. Its structured command
 buffers use allocation-level effects to place RAW/WAR/WAW barriers and retain
@@ -1355,8 +1366,9 @@ Graphs use `run()` and reject `submit()`. Qualified CUDA
 or Vulkan predicate gate consumes control state without a per-region host
 readback. A ticket can expose explicit terminal `GraphBuilder.observe()`
 snapshots; synchronous `control_flow_stats()` are unavailable for that
-asynchronous submission. Depth-two structured Graphs do not support
-asynchronous submission, including the strict Vulkan single-replay shape.
+asynchronous submission. Qualified depth-two `while` sequences use the native
+single-ticket path above; other depth-two shapes still reject asynchronous
+submission.
 
 Terminal observations are attached to the submission completion by default.
 CPU and Vulkan use host-visible snapshot slots; CUDA keeps snapshots in
@@ -1385,6 +1397,9 @@ queue-counter window. Device-wide queue deltas are marked non-exact because
 external graphics/interop producers can submit in the same window. GPU
 timestamps are explicitly `unavailable` while compound replay cannot
 instrument them without changing the qualified path.
+For nested sequences, every inner definition has its own stop snapshot;
+`logical_invocations` reports how many outer iterations invoked it, while
+`logical_iterations` remains the final invocation's stop position.
 
 ### `GraphBuilder.compile()`, `Graph.run(args, *, trace=False)`, and `Graph.submit(args)`
 
@@ -1395,17 +1410,21 @@ the same execution path and returns a completion ticket.
 
 | API | Contract |
 | --- | --- |
-| `GraphBuilder.compile()` | Later changes to the builder or original `Sequential` do not modify the compiled graph. |
+| `GraphBuilder.compile(*, workspace_lanes=1, workspace_saturation='wait')` | Later changes to the builder or original `Sequential` do not modify the compiled graph. Additional workspace lanes are materialized lazily and only affect Graphs with exclusive Graph-owned internal storage, such as a recorded SolvePlan. `workspace_saturation='raise'` fails instead of waiting when every eligible lane is busy. |
 | `Graph.run(args, *, trace=False)` | `args` must be a dictionary with exactly the declared keys; missing or extra keys raise `TaichiRuntimeError`. The default returns `None` and does not allocate a dynamic control-flow trace. |
 | `Graph.run(args, *, trace=True)` | Run synchronously and return an immutable `GraphControlFlowTrace`. Its ordered invocations contain a `sequence`, static `definition_path`, dynamic `invocation_path`, optional `parent_iteration`, and the invocation's while/branch report. Unlike `control_flow_stats()`, it preserves every repeated nested invocation. Tracing bypasses strict Vulkan nested replay and uses exact portable-parent execution so each invocation is observable. |
-| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait', telemetry=False)` | Uses the same exact argument, lifecycle, concurrency, and AD contract as `run()`, returns one `SubmissionTicket`, and can opt into shared admission pacing. `telemetry=True` adds per-while snapshots plus deduplicated bounded-extent tail snapshots and a lazy post-optimization pipeline definition; the default adds no snapshot kernels or buffers and does not materialize a telemetry arena or pipeline report. Structured submission accepts qualified CUDA `native_required` while/if/switch regions and qualified Vulkan `native_required` while regions, including multiple ordered regions in one compound transaction. Portable control and unsupported native combinations fail explicitly. |
-| `SubmissionTicket.telemetry()` | Wait if needed and return an immutable schema-v4 `GraphSubmissionTelemetry` when telemetry was requested; otherwise return `None`. Region reports include terminal counters and stop positions, and `pipeline` is the ticket-owned `GraphPipelineReport`. Nullable GPU duration fields are never inferred from host wall time. |
+| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait', telemetry=False, workspace_lane=None)` | Uses the same exact argument, lifecycle, concurrency, and AD contract as `run()`, returns one `SubmissionTicket`, and can opt into shared admission pacing. `lane` remains the pacer lane; `workspace_lane` optionally pins a Graph-owned execution/workspace lane. `telemetry=True` adds per-while snapshots plus deduplicated bounded-extent tail snapshots and a lazy post-optimization pipeline definition; the default adds no snapshot kernels or buffers and does not materialize a telemetry arena or pipeline report. Structured submission accepts qualified CUDA `native_required` while/if/switch regions and qualified Vulkan `native_required` while regions, including multiple ordered regions and qualified depth-two multi-inner sequences. Portable control and unsupported native combinations fail explicitly. |
+| `SubmissionTicket.telemetry()` | Wait if needed and return an immutable schema-v5 `GraphSubmissionTelemetry` when telemetry was requested; otherwise return `None`. Region reports include terminal counters, stop positions, nested invocation counts, and `pipeline` is the ticket-owned `GraphPipelineReport`. Nullable GPU duration fields are never inferred from host wall time. |
 | `SubmissionTicket.pipeline_report()` | Return the same immutable pipeline object as `ticket.telemetry().pipeline`, waiting if needed. Returns `None` when telemetry was not requested. |
 | `Graph._prewarm()` | Warm the current runtime's backend plan; this internal/advanced entry point does not change the argument contract. |
 
 Concurrent host calls on one graph queue at the complete-invocation boundary;
 independent graphs do not share that lock. This guard does not wait for GPU
-completion or imply `ti.sync()`. Recompile graphs after `ti.reset()`.
+completion or imply `ti.sync()`. A single workspace lane preserves the old
+completion-fence reuse rule. Multiple lanes remove that device-completion wait
+for independent submissions, but do not make one workspace reentrant and do
+not promise simultaneous execution on separate backend streams. Recompile
+graphs after `ti.reset()`.
 Destroying any referenced SNodeTree also makes the Graph stale; rebuild it
 after constructing the replacement Field layout.
 
@@ -1447,6 +1466,7 @@ ticket.wait()
 | `ticket.pipeline_report()` | Return the opt-in immutable `GraphPipelineReport`, or `None` for a default submission. |
 | `ticket.backend` | Read-only backend name for diagnostics. |
 | `ticket.sequence` | Read-only, Program-local monotonically increasing completion sequence for diagnostics; it is not a portable persistence or cross-runtime ordering key. |
+| `ticket.workspace_lane` | Read-only Graph-owned workspace lane selected for this invocation. It is independent of the optional SubmissionPacer lane. |
 
 CPU tickets are complete when returned. CUDA and Vulkan tickets may be pending,
 although very short work can finish before `submit()` returns. Runtime argument
@@ -1547,7 +1567,7 @@ required. Graphs and tickets from the old Program never become valid again.
 
 ### `Graph.execution_stats()`
 
-Returns a frozen `GraphExecutionReport` snapshot with schema version 1. The
+Returns a frozen `GraphExecutionReport` snapshot with schema version 5. The
 report is a stable public diagnostic API; do not consume `_graph_stats`
 directly in application code.
 
@@ -1559,6 +1579,8 @@ The top-level report includes:
 - a pointer-free static layout fingerprint;
 - the last aggregate execution path and fallback reason;
 - backend-graph, backend-replay, and ordinary-fallback segment counts;
+- temporary, observation, telemetry, internal-storage, and workspace-lane
+  memory/ownership counters; and
 - immutable per-segment reports and counter-completeness state.
 
 Per-segment data distinguishes CPU `ordinary`, CUDA capture/exact

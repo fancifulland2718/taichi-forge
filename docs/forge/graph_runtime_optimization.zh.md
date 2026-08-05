@@ -470,7 +470,7 @@ fallback 计数不足以证明优化成立。
 
 ## 诊断
 
-应使用稳定、冻结的 `Graph.execution_stats()` schema v1 report。它公开 definition count、
+应使用稳定、冻结的 `Graph.execution_stats()` schema v5 report。它公开 definition count、
 compiled task count、segment-local runtime argument、带 generation 的 static dependency、
 不含 pointer 的 layout fingerprint、execution/fallback path、replay eligibility、
 persistent argument bytes 与 immutable per-segment counter。应用代码不应读取内部
