@@ -722,6 +722,7 @@ def test_graph_submit_returns_one_public_completion_ticket():
     assert ticket.sequence == next_before_run
     assert next_after_submit == next_before_run + 1
     assert ticket.backend == ti_core.arch_name(impl.current_cfg().arch)
+    assert ticket.workspace_lane == 0
     if impl.current_cfg().arch == ti.cpu:
         assert not ticket._has_backend_work
     else:
@@ -3004,6 +3005,7 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
                 "nested_native_kinds",
                 "nested_native_outer_iteration_limit",
                 "nested_native_inner_iteration_limit",
+                "nested_native_max_ordered_inner_regions",
                 "nested_native_max_encoded_actions",
                 "nested_native_stop_telemetry",
                 "nested_async_route",
@@ -3049,7 +3051,10 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
     expected_nested_native = bool(
         device["runtime_path_qualified"]
         and device["nested_native_lowering_compiled"]
-        and (arch == ti.cuda or (arch == ti.vulkan and device["conditional_rendering_available"]))
+        and (
+            arch == ti.cuda
+            or (arch == ti.vulkan and device["conditional_rendering_available"])
+        )
     )
     assert capabilities["nested_native_lowering"] == expected_nested_native
     assert device["nested_native_lowering"] == expected_nested_native
@@ -3062,12 +3067,13 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
     assert device["nested_native_inner_iteration_limit"] == (
         64 if expected_nested_native else 0
     )
+    assert device["nested_native_max_ordered_inner_regions"] == (
+        8 if expected_nested_native else 0
+    )
     assert device["nested_native_max_encoded_actions"] == (
         4096 if expected_nested_native else 0
     )
-    assert device["nested_native_stop_telemetry"] == bool(
-        expected_nested_native and arch == ti.vulkan
-    )
+    assert device["nested_native_stop_telemetry"] == expected_nested_native
     if expected_nested_native and arch == ti.cuda:
         expected_cuda_route = (
             "cuda_device_node_update"

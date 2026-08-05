@@ -246,7 +246,7 @@ def test_dense_field_graph_execution_report_explains_backend_path():
 
     initial = graph.execution_stats()
     assert isinstance(initial, ti.graph.GraphExecutionReport)
-    assert initial.schema_version == 4
+    assert initial.schema_version == 5
     assert initial.lifecycle_state == "ready"
     assert initial.node_count == 1
     assert initial.cgraph_segment_count == 1
@@ -1066,6 +1066,8 @@ def test_dense_field_graph_reset_keeps_whole_runtime_invalidation():
     ti.reset()
     assert graph._spec is None
     assert graph._instance is None
+    assert graph._latest_instance is None
+    assert graph._workspace_pool is None
     assert graph._instances == {}
     ti.init(arch=arch, enable_fallback=False, offline_cache=False)
     with pytest.raises(TaichiRuntimeError, match="compiled before ti.reset"):

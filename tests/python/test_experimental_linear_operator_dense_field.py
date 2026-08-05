@@ -250,6 +250,109 @@ def test_solve_plan_complete_graph_action_terminal_and_workspace(method):
     assert report.memory.internal_storage_exclusive
 
 
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_solve_plan_graph_action_uses_independent_workspace_lanes():
+    size = 4096
+    plan = ti.linalg.experimental.SolvePlan(
+        _compiled_identity(size), method="cg", max_iterations=8, atol=1e-6
+    )
+    rhs_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "rhs", ti.f32, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1)
+    action = plan.graph_action(rhs_arg, output_arg, name="multi_lane_cg")
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(action)
+    graph = builder.compile(workspace_lanes=2, workspace_saturation="raise")
+
+    first_rhs = ti.ndarray(ti.f32, shape=size)
+    second_rhs = ti.ndarray(ti.f32, shape=size)
+    first_output = ti.ndarray(ti.f32, shape=size)
+    second_output = ti.ndarray(ti.f32, shape=size)
+    first_expected = np.linspace(-1.0, 2.0, size, dtype=np.float32)
+    second_expected = np.linspace(3.0, -2.0, size, dtype=np.float32)
+    first_rhs.from_numpy(first_expected)
+    second_rhs.from_numpy(second_expected)
+    first_packet = action.allocate_terminal()
+    second_packet = action.allocate_terminal()
+
+    first_ticket = graph.submit(
+        {
+            "rhs": first_rhs,
+            "output": first_output,
+            **first_packet.arguments,
+        }
+    )
+    one_lane_memory = graph.execution_stats().memory
+    second_ticket = graph.submit(
+        {
+            "rhs": second_rhs,
+            "output": second_output,
+            **second_packet.arguments,
+        }
+    )
+    assert first_ticket.workspace_lane == 0
+    assert second_ticket.workspace_lane == 1
+    first_ticket.wait()
+    second_ticket.wait()
+
+    assert first_packet.snapshot().converged
+    assert second_packet.snapshot().converged
+    np.testing.assert_allclose(first_output.to_numpy(), first_expected, rtol=1e-6)
+    np.testing.assert_allclose(second_output.to_numpy(), second_expected, rtol=1e-6)
+    two_lane_memory = graph.execution_stats().memory
+    assert one_lane_memory.workspace_lane_capacity == 2
+    assert one_lane_memory.workspace_lanes_materialized == 1
+    assert two_lane_memory.workspace_lanes_materialized == 2
+    assert two_lane_memory.persistent_internal_storage_bytes == (
+        2 * one_lane_memory.persistent_internal_storage_bytes
+    )
+    assert two_lane_memory.workspace_lane_acquisitions == 2
+    assert two_lane_memory.workspace_lane_waits == 0
+    assert two_lane_memory.internal_storage_waits == 0
+    assert two_lane_memory.workspace_lane_saturation_policy == "raise"
+
+    class BusyCompletion:
+        @staticmethod
+        def done():
+            return False
+
+    lane_zero = graph._workspace_pool.primary
+    saved_completion = lane_zero._exclusive_internal_completion
+    lane_zero._exclusive_internal_completion = BusyCompletion()
+    try:
+        with pytest.raises(RuntimeError, match="workspace lanes are occupied"):
+            graph.submit(
+                {
+                    "rhs": first_rhs,
+                    "output": first_output,
+                    **first_packet.arguments,
+                },
+                workspace_lane=0,
+            )
+    finally:
+        lane_zero._exclusive_internal_completion = saved_completion
+
+    pinned_packet = action.allocate_terminal()
+    pinned_output = ti.ndarray(ti.f32, shape=size)
+    pinned_ticket = graph.submit(
+        {
+            "rhs": first_rhs,
+            "output": pinned_output,
+            **pinned_packet.arguments,
+        },
+        workspace_lane=1,
+    )
+    assert pinned_ticket.workspace_lane == 1
+    pinned_ticket.wait()
+    assert pinned_packet.snapshot().converged
+    np.testing.assert_allclose(pinned_output.to_numpy(), first_expected, rtol=1e-6)
+    final_memory = graph.execution_stats().memory
+    assert final_memory.workspace_lanes_materialized == 2
+    assert final_memory.workspace_lane_saturation_errors == 1
+    assert final_memory.persistent_internal_storage_bytes == (
+        two_lane_memory.persistent_internal_storage_bytes
+    )
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_solve_plan_graph_action_runs_inside_nested_single_ticket_loop():
     size = 16

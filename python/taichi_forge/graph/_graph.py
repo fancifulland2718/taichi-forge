@@ -1548,6 +1548,13 @@ class GraphMemoryReport:
     internal_storage_exclusive: bool
     internal_storage_waits: int
     internal_storage_reuses: int
+    workspace_lane_capacity: int
+    workspace_lanes_materialized: int
+    workspace_lanes_busy: int
+    workspace_lane_acquisitions: int
+    workspace_lane_waits: int
+    workspace_lane_saturation_errors: int
+    workspace_lane_saturation_policy: str
     opaque_driver_bytes: Optional[int]
 
 
@@ -3671,8 +3678,11 @@ def structured_control_capabilities():
             "nested_native_kinds": (("while_while",) if nested_native else ()),
             "nested_native_outer_iteration_limit": (64 if nested_native else 0),
             "nested_native_inner_iteration_limit": (64 if nested_native else 0),
+            "nested_native_max_ordered_inner_regions": (
+                8 if nested_native else 0
+            ),
             "nested_native_max_encoded_actions": (4096 if nested_native else 0),
-            "nested_native_stop_telemetry": bool(nested_native and arch == _ti_core.Arch.vulkan),
+            "nested_native_stop_telemetry": nested_native,
             "nested_async_route": (nested_async_route if nested_native else "unavailable"),
             "nested_cuda_device_update_candidate": (nested_cuda_device_update_candidate),
             "nested_cuda_device_update_qualified": (nested_cuda_device_update_qualified),
@@ -4104,19 +4114,22 @@ def _execution_report(
     # control-arena, and observation allocations are still Graph-owned
     # persistent memory. Count every leaf cache once instead of restricting
     # memory accounting to top-level CGraph segments.
+    internal_storage_stats = internal_storage_stats or {}
     persistent_argument_bytes = sum(
         int(stats.get("known_persistent_argument_bytes", 0))
         for stats in flat_backend_stats
-    ) + int(definition.get("internal_storage_bytes", 0))
+    ) + int(
+        internal_storage_stats.get(
+            "reserved_bytes", definition.get("internal_storage_bytes", 0)
+        )
+    )
     persistent_bounded_control_bytes = sum(
-        int(stats.get("known_bounded_control_bytes", 0))
-        for stats in flat_backend_stats
+        int(stats.get("known_bounded_control_bytes", 0)) for stats in flat_backend_stats
     )
     temporary_memory_plan = temporary_memory_plan or {}
     temporary_arena_stats = temporary_arena_stats or {}
     observation_arena_stats = observation_arena_stats or {}
     telemetry_arena_stats = telemetry_arena_stats or {}
-    internal_storage_stats = internal_storage_stats or {}
     temporary_plan_materialized = bool(temporary_arena_stats.get("materialized", False))
     planned_temporary_bytes = int(temporary_memory_plan.get("planned_peak_bytes", 0))
     persistent_temporary_bytes = int(temporary_arena_stats.get("reserved_bytes", 0))
@@ -4183,19 +4196,28 @@ def _execution_report(
         persistent_internal_storage_bytes=int(
             internal_storage_stats.get("reserved_bytes", 0)
         ),
-        internal_storage_exclusive=bool(
-            internal_storage_stats.get("exclusive", False)
+        internal_storage_exclusive=bool(internal_storage_stats.get("exclusive", False)),
+        internal_storage_waits=int(internal_storage_stats.get("waits", 0)),
+        internal_storage_reuses=int(internal_storage_stats.get("reuses", 0)),
+        workspace_lane_capacity=int(internal_storage_stats.get("lane_capacity", 1)),
+        workspace_lanes_materialized=int(
+            internal_storage_stats.get("lanes_materialized", 1)
         ),
-        internal_storage_waits=int(
-            internal_storage_stats.get("waits", 0)
+        workspace_lanes_busy=int(internal_storage_stats.get("lanes_busy", 0)),
+        workspace_lane_acquisitions=int(
+            internal_storage_stats.get("lane_acquisitions", 0)
         ),
-        internal_storage_reuses=int(
-            internal_storage_stats.get("reuses", 0)
+        workspace_lane_waits=int(internal_storage_stats.get("lane_waits", 0)),
+        workspace_lane_saturation_errors=int(
+            internal_storage_stats.get("lane_saturation_errors", 0)
+        ),
+        workspace_lane_saturation_policy=str(
+            internal_storage_stats.get("lane_saturation_policy", "wait")
         ),
         opaque_driver_bytes=None,
     )
     return GraphExecutionReport(
-        schema_version=4,
+        schema_version=5,
         arch=arch,
         lifecycle_state=lifecycle_state,
         node_count=len(segments),
@@ -9162,9 +9184,7 @@ class _GraphInstance:
             self._kind = "native_only"
             self._set_run_impl(self._run_native_only)
         else:
-            self._executable = _GraphExecutable(
-                spec, self._fixed_runtime_args
-            )
+            self._executable = _GraphExecutable(spec, self._fixed_runtime_args)
             self._kind = "dispatch_loop"
             self._set_run_impl(self._run_general)
 
@@ -9187,9 +9207,7 @@ class _GraphInstance:
         if not self._exclusive_internal_storage:
             return None
         if self._exclusive_internal_reserved:
-            raise TaichiRuntimeError(
-                "Graph internal workspace is already reserved"
-            )
+            raise TaichiRuntimeError("Graph internal workspace is already reserved")
         completion = self._exclusive_internal_completion
         if completion is not None:
             if not completion.done():
@@ -9199,6 +9217,15 @@ class _GraphInstance:
             self._exclusive_internal_reuses += 1
         self._exclusive_internal_reserved = True
         return _GraphExclusiveInternalStorageLease(self)
+
+    @property
+    def exclusive_internal_storage_available(self):
+        if not self._exclusive_internal_storage:
+            return True
+        if self._exclusive_internal_reserved:
+            return False
+        completion = self._exclusive_internal_completion
+        return completion is None or completion.done()
 
     def _attach_exclusive_internal_storage(self, completion):
         if not self._exclusive_internal_reserved:
@@ -9227,9 +9254,7 @@ class _GraphInstance:
             self.run(args)
             return
         if self._executable is None:
-            self._executable = _GraphExecutable(
-                self.spec, self._fixed_runtime_args
-            )
+            self._executable = _GraphExecutable(self.spec, self._fixed_runtime_args)
         self._executable.run(
             args,
             self._temporary_bindings,
@@ -9240,9 +9265,7 @@ class _GraphInstance:
         if not self.spec.supports_native_structured_submission:
             return self.run(args)
         if self._executable is None:
-            self._executable = _GraphExecutable(
-                self.spec, self._fixed_runtime_args
-            )
+            self._executable = _GraphExecutable(self.spec, self._fixed_runtime_args)
         self._executable.run_for_submission(args, self._temporary_bindings, telemetry)
 
     def bind_temporary_buffers(self, bindings):
@@ -9373,6 +9396,132 @@ class _GraphInstance:
         return result
 
 
+class _GraphWorkspaceLanePool:
+    def __init__(self, spec, key, capacity, saturation):
+        self._spec = spec
+        self._key = key
+        self._capacity = capacity
+        self._saturation = saturation
+        self._instances = [None] * capacity
+        self._instances[0] = spec.instantiate((*key, 0))
+        self._next_lane = 0
+        self._acquisitions = 0
+        self._waits = 0
+        self._saturation_errors = 0
+
+    @property
+    def primary(self):
+        return self._instances[0]
+
+    @property
+    def instances(self):
+        return tuple(instance for instance in self._instances if instance is not None)
+
+    def _materialize(self, index):
+        instance = self._instances[index]
+        if instance is None:
+            instance = self._spec.instantiate((*self._key, index))
+            self._instances[index] = instance
+        return instance
+
+    def acquire(self, requested_lane=None):
+        if not self.primary._exclusive_internal_storage:
+            if requested_lane not in (None, 0):
+                raise TaichiRuntimeError(
+                    "Graph workspace lanes require exclusive Graph-owned "
+                    "internal storage"
+                )
+            self._acquisitions += 1
+            return 0, self.primary
+        if requested_lane is not None:
+            if isinstance(requested_lane, bool) or not isinstance(
+                requested_lane, (int, np.integer)
+            ):
+                raise TaichiRuntimeError(
+                    "Graph.submit() workspace_lane must be an integer or None"
+                )
+            requested_lane = int(requested_lane)
+            if requested_lane < 0 or requested_lane >= self._capacity:
+                raise TaichiRuntimeError(
+                    "Graph.submit() workspace_lane is outside the configured "
+                    f"range [0, {self._capacity})"
+                )
+            candidates = (requested_lane,)
+        else:
+            candidates = tuple(
+                (self._next_lane + offset) % self._capacity
+                for offset in range(self._capacity)
+            )
+
+        for index in candidates:
+            instance = self._instances[index]
+            if instance is None or instance.exclusive_internal_storage_available:
+                self._next_lane = (index + 1) % self._capacity
+                self._acquisitions += 1
+                return index, self._materialize(index)
+
+        if self._saturation == "raise":
+            self._saturation_errors += 1
+            raise TaichiRuntimeError(
+                "All Graph workspace lanes are occupied; wait for a prior "
+                "SubmissionTicket or compile with workspace_saturation='wait'"
+            )
+
+        index = candidates[0]
+        self._waits += 1
+        self._next_lane = (index + 1) % self._capacity
+        self._acquisitions += 1
+        return index, self._materialize(index)
+
+    def invalidate_runtime(self):
+        for instance in self.instances:
+            instance.invalidate_runtime()
+
+    @staticmethod
+    def _sum_stats(instances, attribute):
+        result = {}
+        for instance in instances:
+            for name, value in getattr(instance, attribute).items():
+                if isinstance(value, bool):
+                    result[name] = bool(result.get(name, False) or value)
+                elif isinstance(value, (int, np.integer)):
+                    result[name] = int(result.get(name, 0)) + int(value)
+                elif name not in result:
+                    result[name] = value
+        return result
+
+    @property
+    def temporary_arena_stats(self):
+        return self._sum_stats(self.instances, "temporary_arena_stats")
+
+    @property
+    def observation_arena_stats(self):
+        return self._sum_stats(self.instances, "observation_arena_stats")
+
+    @property
+    def structured_telemetry_arena_stats(self):
+        return self._sum_stats(self.instances, "structured_telemetry_arena_stats")
+
+    @property
+    def internal_storage_stats(self):
+        stats = self._sum_stats(self.instances, "internal_storage_stats")
+        stats.update(
+            {
+                "lane_capacity": self._capacity,
+                "lanes_materialized": len(self.instances),
+                "lanes_busy": sum(
+                    not instance.exclusive_internal_storage_available
+                    for instance in self.instances
+                ),
+                "lane_acquisitions": self._acquisitions,
+                "lane_waits": self._waits,
+                "lane_saturation_errors": self._saturation_errors,
+                "lane_saturation_policy": self._saturation,
+            }
+        )
+        return stats
+
+
 class _AOTGraphBuilderPlan:
     def __init__(self):
         self._items = []
@@ -9382,15 +9531,11 @@ class _AOTGraphBuilderPlan:
 
     def dispatch(self, kernel_cpp, args, label=""):
         runtime_arg_names = frozenset(_runtime_arg_names(args))
-        self._items.append(
-            ("dispatch", kernel_cpp, args, label, runtime_arg_names)
-        )
+        self._items.append(("dispatch", kernel_cpp, args, label, runtime_arg_names))
         self._runtime_arg_names.update(runtime_arg_names)
 
     def dispatch_indirect(self, kernel_cpp, args, dispatch_packet, label=""):
-        runtime_arg_names = frozenset(
-            (*_runtime_arg_names(args), dispatch_packet.name)
-        )
+        runtime_arg_names = frozenset((*_runtime_arg_names(args), dispatch_packet.name))
         self._items.append(
             (
                 "indirect",
@@ -11224,7 +11369,7 @@ class GraphBuilder:
     def append_native(self, node, *, prewarm=False):
         return self._append_native(node, prewarm=prewarm)
 
-    def compile(self):
+    def compile(self, *, workspace_lanes=1, workspace_saturation="wait"):
         self._flush_graph_builder()
         if not self._nodes:
             return Graph(
@@ -11233,13 +11378,17 @@ class GraphBuilder:
                     0,
                     (),
                     SequentialRegion((), name="cgraph"),
-                )
+                ),
+                workspace_lanes=workspace_lanes,
+                workspace_saturation=workspace_saturation,
             )
         return Graph(
             _GraphSpec(
                 self._nodes,
                 aot_graph_builder=self._aot_graph_plan.snapshot(),
-            )
+            ),
+            workspace_lanes=workspace_lanes,
+            workspace_saturation=workspace_saturation,
         )
 
 
@@ -11257,6 +11406,7 @@ class SubmissionTicket:
         "_observation",
         "_runtime",
         "_telemetry",
+        "_workspace_lane",
     )
 
     def __init__(
@@ -11266,12 +11416,14 @@ class SubmissionTicket:
         admission=None,
         observation=None,
         telemetry=None,
+        workspace_lane=0,
     ):
         self._admission = admission
         self._completion = completion
         self._observation = observation
         self._runtime = runtime
         self._telemetry = telemetry
+        self._workspace_lane = int(workspace_lane)
 
     def done(self):
         if self._admission is None:
@@ -11317,6 +11469,10 @@ class SubmissionTicket:
         return self._completion.sequence
 
     @property
+    def workspace_lane(self):
+        return self._workspace_lane
+
+    @property
     def _has_backend_work(self):
         return self._completion.has_backend_work
 
@@ -11335,10 +11491,33 @@ class SubmissionTicket:
                 pass
 
 
+def _workspace_lane_configuration(workspace_lanes, workspace_saturation):
+    if isinstance(workspace_lanes, bool) or not isinstance(
+        workspace_lanes, (int, np.integer)
+    ):
+        raise TaichiRuntimeError("Graph workspace_lanes must be an integer")
+    workspace_lanes = int(workspace_lanes)
+    if workspace_lanes < 1 or workspace_lanes > 64:
+        raise TaichiRuntimeError("Graph workspace_lanes must be between 1 and 64")
+    if workspace_saturation not in ("wait", "raise"):
+        raise TaichiRuntimeError("Graph workspace_saturation must be 'wait' or 'raise'")
+    return workspace_lanes, workspace_saturation
+
+
 class Graph:
-    def __init__(self, compiled_graph) -> None:
+    def __init__(
+        self,
+        compiled_graph,
+        *,
+        workspace_lanes=1,
+        workspace_saturation="wait",
+    ) -> None:
         self._lifecycle_lock = threading.Lock()
         self._stale_snode_tree_dependencies = set()
+        (
+            self._workspace_lane_capacity,
+            self._workspace_saturation,
+        ) = _workspace_lane_configuration(workspace_lanes, workspace_saturation)
         if isinstance(compiled_graph, _GraphSpec):
             self._spec = compiled_graph
         elif isinstance(compiled_graph, _CompiledCGraphNode):
@@ -11360,7 +11539,9 @@ class Graph:
         self._execution_definition = self._spec.execution_definition
         self._execution_arch = _ti_core.arch_name(impl.current_cfg().arch)
         self._instances = {}
-        self._instance = self._instance_for_current_runtime()
+        self._workspace_pool = self._workspace_pool_for_current_runtime()
+        self._instance = self._workspace_pool.primary
+        self._latest_instance = self._instance
         self._runtime_valid = True
         self._run_impl = self._instance.run_impl
         impl.get_runtime().register_runtime_object(self)
@@ -11450,9 +11631,7 @@ class Graph:
             # increment before the first native call: otherwise two independent
             # Graphs can both snapshot zero, overwrite the count with one, and
             # drive it negative when their paired finally blocks run.
-            internal_storage_lease = (
-                self._instance.acquire_exclusive_internal_storage()
-            )
+            internal_storage_lease = self._instance.acquire_exclusive_internal_storage()
             temporary_lease = self._instance.acquire_temporary_lease()
             observation_lease = None
             try:
@@ -11499,6 +11678,7 @@ class Graph:
         lane=None,
         on_saturation="wait",
         telemetry=False,
+        workspace_lane=None,
     ):
         """Submit one Graph invocation and return a ``SubmissionTicket``.
 
@@ -11510,6 +11690,8 @@ class Graph:
         ``telemetry=True`` adds ticket-owned GPU timing. Structured while
         regions additionally receive device snapshots and per-region timing;
         all results are exposed through ``SubmissionTicket.telemetry()``.
+        Graphs compiled with multiple workspace lanes select a ready lane
+        automatically. ``workspace_lane`` pins a submission to one lane.
         """
         if not isinstance(telemetry, bool):
             raise TaichiRuntimeError("Graph.submit() telemetry must be a bool")
@@ -11542,6 +11724,8 @@ class Graph:
         observation_state = None
         telemetry_lease = None
         telemetry_state = None
+        submission_instance = self._instance
+        workspace_lane_index = 0
         try:
             with self._lifecycle_lock:
                 self._check_runtime_valid()
@@ -11576,13 +11760,16 @@ class Graph:
                 # Publish the AD exclusion count before transaction creation:
                 # the pybind call may release the GIL while waiting for another
                 # runtime submission reader/writer boundary.
-                internal_storage_lease = (
-                    self._instance.acquire_exclusive_internal_storage()
+                workspace_lane_index, submission_instance = (
+                    self._workspace_pool.acquire(workspace_lane)
                 )
-                temporary_lease = self._instance.acquire_temporary_lease()
-                observation_lease = self._instance.acquire_observation_lease()
+                internal_storage_lease = (
+                    submission_instance.acquire_exclusive_internal_storage()
+                )
+                temporary_lease = submission_instance.acquire_temporary_lease()
+                observation_lease = submission_instance.acquire_observation_lease()
                 telemetry_lease = (
-                    self._instance.acquire_structured_telemetry_lease()
+                    submission_instance.acquire_structured_telemetry_lease()
                     if telemetry
                     else None
                 )
@@ -11591,8 +11778,8 @@ class Graph:
                 )
                 runtime._active_graph_submissions = submission_state + 1
                 try:
-                    self._instance.bind_temporary_buffers(temporary_bindings)
-                    self._instance.bind_observation_buffers(
+                    submission_instance.bind_temporary_buffers(temporary_bindings)
+                    submission_instance.bind_observation_buffers(
                         observation_lease.bindings
                         if observation_lease is not None
                         else None
@@ -11612,7 +11799,7 @@ class Graph:
                         if telemetry_recorder is not None:
                             telemetry_recorder.attach_gpu_timing(transaction)
                         try:
-                            self._instance.run_for_submission(
+                            submission_instance.run_for_submission(
                                 args,
                                 telemetry_recorder,
                             )
@@ -11621,7 +11808,7 @@ class Graph:
                                 telemetry_recorder.detach_gpu_timing()
                         self._latest_control_flow_was_async = True
                     else:
-                        self._run_impl(args)
+                        submission_instance.run(args)
                     # CGraph/kernel paths publish work themselves. Native plans
                     # use Program methods outside that launch path, so publish
                     # once for the whole native portion without changing run().
@@ -11633,9 +11820,7 @@ class Graph:
                         observation_lease.enqueue_tail_readback()
                     completion = transaction._finish()
                     submission_statistics = (
-                        transaction._submission_statistics()
-                        if telemetry
-                        else None
+                        transaction._submission_statistics() if telemetry else None
                     )
                     host_submit_ns = time.perf_counter_ns() - host_submit_start_ns
                     queue_after = _queue_submission_snapshot() if telemetry else None
@@ -11656,9 +11841,10 @@ class Graph:
                     if internal_storage_lease is not None:
                         internal_storage_lease.attach(completion)
                         internal_storage_lease = None
+                    self._latest_instance = submission_instance
                 finally:
-                    self._instance.clear_observation_buffers()
-                    self._instance.clear_temporary_buffers()
+                    submission_instance.clear_observation_buffers()
+                    submission_instance.clear_temporary_buffers()
                     runtime._active_graph_submissions -= 1
 
                 if self._contains_native_nodes_value and completion.has_backend_work:
@@ -11683,15 +11869,21 @@ class Graph:
             admission,
             observation=observation_state,
             telemetry=telemetry_state,
+            workspace_lane=workspace_lane_index,
         )
 
-    def _instance_for_current_runtime(self):
+    def _workspace_pool_for_current_runtime(self):
         key = self._spec.instance_key()
-        instance = self._instances.get(key)
-        if instance is None:
-            instance = self._spec.instantiate(key)
-            self._instances[key] = instance
-        return instance
+        pool = self._instances.get(key)
+        if pool is None:
+            pool = _GraphWorkspaceLanePool(
+                self._spec,
+                key,
+                self._workspace_lane_capacity,
+                self._workspace_saturation,
+            )
+            self._instances[key] = pool
+        return pool
 
     def _prewarm(self):
         with self._lifecycle_lock:
@@ -11727,8 +11919,8 @@ class Graph:
             if dependency in self._stale_snode_tree_dependencies:
                 return True
             self._stale_snode_tree_dependencies.add(dependency)
-            for instance in self._instances.values():
-                instance.invalidate_runtime()
+            for pool in self._instances.values():
+                pool.invalidate_runtime()
             self._spec.invalidate_runtime()
             return True
 
@@ -11740,16 +11932,18 @@ class Graph:
         with self._lifecycle_lock:
             self._runtime_valid = False
             self._run_impl = None
-            for instance in self._instances.values():
-                instance.invalidate_runtime()
+            for pool in self._instances.values():
+                pool.invalidate_runtime()
             if self._spec is not None:
                 self._spec.invalidate_runtime()
             self._instance = None
+            self._latest_instance = None
             self._instances.clear()
             # Definition nodes currently own mixed-graph JIT caches and native
             # executables. Release them before Program/backend teardown so
             # backend allocation leases cannot outlive their Device registry.
             self._spec = None
+            self._workspace_pool = None
 
     @property
     def _debug_info(self):
@@ -11767,13 +11961,13 @@ class Graph:
     def _instance_debug_info(self):
         with self._lifecycle_lock:
             self._check_runtime_valid()
-            return self._instance.debug_info
+            return self._latest_instance.debug_info
 
     @property
     def _graph_stats(self):
         with self._lifecycle_lock:
             self._check_runtime_valid()
-            return self._instance.debug_graph_stats
+            return self._latest_instance.debug_graph_stats
 
     def control_flow_stats(self):
         """Return the last invocation of each definition in the latest run.
@@ -11821,29 +12015,29 @@ class Graph:
                 backend_stats = ()
             elif self._stale_snode_tree_dependencies:
                 lifecycle_state = "stale_field_dependency"
-                instance_kind = self._instance.debug_info["kind"]
+                instance_kind = self._latest_instance.debug_info["kind"]
                 backend_stats = ()
             else:
                 lifecycle_state = "ready"
-                instance_kind = self._instance.debug_info["kind"]
-                backend_stats = self._instance.debug_graph_stats
+                instance_kind = self._latest_instance.debug_info["kind"]
+                backend_stats = self._latest_instance.debug_graph_stats
             temporary_arena_stats = (
-                self._instance.temporary_arena_stats
+                self._workspace_pool.temporary_arena_stats
                 if lifecycle_state == "ready"
                 else {}
             )
             observation_arena_stats = (
-                self._instance.observation_arena_stats
+                self._workspace_pool.observation_arena_stats
                 if lifecycle_state == "ready"
                 else {}
             )
             telemetry_arena_stats = (
-                self._instance.structured_telemetry_arena_stats
+                self._workspace_pool.structured_telemetry_arena_stats
                 if lifecycle_state == "ready"
                 else {}
             )
             internal_storage_stats = (
-                self._instance.internal_storage_stats
+                self._workspace_pool.internal_storage_stats
                 if lifecycle_state == "ready"
                 else {}
             )
