@@ -513,6 +513,17 @@ resources on device. Forge performs no implicit terminal readback;
 `terminal.snapshot()` is the explicit host boundary and should be called only
 after the enclosing `SubmissionTicket` completes.
 
+The action may be appended to an outer `Sequential` and used as the single
+inner `while` of a depth-two `while -> while` Graph. CPU executes exact nested
+host control. Qualified CUDA Driver API 12.4+ runtimes use device-updatable
+kernel-node groups after an explicit setup probe; older or unqualified runtimes
+use Forge's version-independent bounded double-gate Graph. Vulkan uses bounded
+conditional replay. CUDA and Vulkan keep the complete hierarchy under one
+ticket with no intermediate host readback. An outer suffix kernel may read
+`solve.terminal.state` and store each solve's iteration count in a device trace
+before advancing the outer counter. These GPU routes retain bounded static
+topology and do not claim exact dynamic command termination.
+
 All Krylov vectors and scalar recurrence state are private, address-stable
 storage owned by the compiled Graph instance. One Graph instance has one
 workspace lane: a second asynchronous submission waits for the preceding

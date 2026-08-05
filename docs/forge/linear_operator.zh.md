@@ -444,6 +444,15 @@ structured region 可以直接在 device 上消费这些 symbolic resource。For
 读回 terminal；`terminal.snapshot()` 是显式 host 边界，应在外层
 `SubmissionTicket` 完成后调用。
 
+该 action 可以追加到 outer `Sequential`，并作为 depth-2 `while -> while` Graph 的唯一
+inner `while`。CPU 使用精确 nested host control；通过显式 setup probe 的 CUDA Driver API
+12.4+ runtime 使用 device-updatable kernel-node group，较旧或未通过资格的 runtime 使用
+Forge 自带、与 CUDA 版本无关的 bounded 双 gate Graph；Vulkan 使用 bounded conditional
+replay。CUDA/Vulkan 会把完整层级保持在一个 ticket 中，两层之间不做 host readback。
+outer suffix kernel 可以读取 `solve.terminal.state`，在推进 outer counter 前把每次 solve 的
+迭代数写入 device trace。这些 GPU 路径仍保留 bounded 静态拓扑，不宣称 exact dynamic
+command termination。
+
 Krylov vector 与 recurrence scalar 都是 compiled Graph instance 私有且地址稳定的
 storage。一个 Graph instance 只有一个 workspace lane；第二次异步 submission 会在复用
 该 storage 前等待上一 completion fence。需要真正并发求解时，应编译相互独立的 Graph。

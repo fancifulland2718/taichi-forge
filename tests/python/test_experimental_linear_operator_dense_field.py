@@ -251,6 +251,108 @@ def test_solve_plan_complete_graph_action_terminal_and_workspace(method):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_solve_plan_graph_action_runs_inside_nested_single_ticket_loop():
+    size = 16
+    plan = ti.linalg.experimental.SolvePlan(_compiled_identity(size), method="cg", max_iterations=8, atol=1e-6)
+    rhs_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "nested_rhs", ti.f32, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "nested_output", ti.f32, ndim=1)
+    action = plan.graph_action(rhs_arg, output_arg, name="nested_cg")
+    terminal = action.terminal
+
+    outer_predicate = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "outer_predicate", ti.i32, ndim=0)
+    outer_counter = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "outer_counter", ti.i32, ndim=0)
+    outer_target = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "outer_target", ti.i32)
+    stop_trace = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "solve_stop_trace", ti.i32, ndim=1)
+
+    @ti.kernel
+    def evaluate_outer(
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        target: ti.i32,
+    ):
+        predicate[None] = int(counter[None] < target)
+
+    @ti.kernel
+    def consume_solve_terminal(
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        terminal_state: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        stops: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        if predicate[None] != 0 and terminal_state[3] == 1:
+            stops[counter[None]] = terminal_state[1]
+            counter[None] += int(terminal_state[0] == 2)
+
+    builder = ti.graph.GraphBuilder()
+    outer_condition = builder.create_sequential()
+    outer_condition.dispatch(evaluate_outer, outer_counter, outer_predicate, outer_target)
+    outer_body = builder.create_sequential()
+    outer_body.append_native(action)
+    outer_body.dispatch(
+        consume_solve_terminal,
+        outer_counter,
+        outer_predicate,
+        terminal.state,
+        stop_trace,
+    )
+    builder.while_loop(
+        outer_condition,
+        outer_body,
+        predicate=outer_predicate,
+        control_inputs=(outer_counter, outer_target),
+        carried_state=(
+            rhs_arg,
+            output_arg,
+            outer_counter,
+            terminal.state,
+            terminal.metrics,
+            stop_trace,
+        ),
+        counter=outer_counter,
+        max_iterations=3,
+        name="outer_newton",
+    )
+    graph = builder.compile()
+    storage = ti.field(ti.f32, shape=48)
+    expected = np.linspace(-1.0, 2.0, size, dtype=np.float32)
+    host = np.zeros(48, dtype=np.float32)
+    host[2 : 2 + size] = expected
+    storage.from_numpy(host)
+    rhs = ti.linalg.vector_view(storage, offset=2, length=size)
+    output = ti.linalg.vector_view(storage, offset=28, length=size)
+    predicate = ti.ndarray(ti.i32, shape=())
+    counter = ti.ndarray(ti.i32, shape=())
+    stops = ti.ndarray(ti.i32, shape=3)
+    predicate.fill(0)
+    counter.fill(0)
+    stops.fill(0)
+    packet = action.allocate_terminal()
+
+    ticket = graph.submit(
+        {
+            "nested_rhs": rhs,
+            "nested_output": output,
+            "outer_predicate": predicate,
+            "outer_counter": counter,
+            "outer_target": 3,
+            "solve_stop_trace": stops,
+            **packet.arguments,
+        }
+    )
+    ticket.wait()
+
+    assert counter.to_numpy()[()] == 3
+    assert tuple(stops.to_numpy()) == (1, 1, 1)
+    snapshot = packet.snapshot()
+    assert snapshot.converged
+    assert snapshot.iterations == 1
+    np.testing.assert_allclose(storage.to_numpy()[28 : 28 + size], expected, rtol=1e-6)
+    memory = graph.execution_stats().memory
+    assert memory.internal_storage_exclusive
+    assert memory.persistent_internal_storage_bytes > size * 4
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_solve_plan_graph_action_binds_disjoint_field_ranges_directly():
     size = 16
     storage = ti.field(ti.f32, shape=48)

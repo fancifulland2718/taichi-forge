@@ -156,6 +156,35 @@ grouped under the behavior they shipped.
   for native conditional Graph and 1,410.9 us for portable control; all routes
   stopped at iteration 16. This crossover is workload-specific, not a general
   claim that masked control is faster than native CUDA control.
+- Added single-ticket execution for the strictly qualified depth-two
+  `while -> while` shape. CPU performs exact host control and returns a
+  completed ticket; Vulkan uses bounded conditional replay; CUDA uses bounded
+  static topology without an intermediate host readback. A qualified Driver
+  API 12.4+ CUDA runtime first passes a cached setup probe and then uses
+  device-updatable kernel-node groups, compiling each business dispatch once.
+  Unqualified or older runtimes use Forge's version-independent two-gate
+  task-entry masking; `TI_GRAPH_CUDA_FORCE_MASKED_CONTROL=1` qualifies that
+  fallback on a current driver. Both loop bounds are at most 64 and the
+  complete encoded program is capped at 4096 actions. Capabilities report the
+  selected/candidate/fallback route and explicitly keep exact dynamic command
+  termination false. An outer suffix can preserve each inner stop position on
+  device, and a recordable provider can expose a terminal packet after ticket
+  completion.
+  In the local Windows qualification with 4,096 items, an 8x16 budget, four
+  active outer iterations, stop positions 6/7/8/6, five warmups, and 30 timed
+  replays, two fresh-process CUDA node-update medians were 652.55 and
+  640.95 us; two forced-fallback medians were 742.45 and 745.15 us. The
+  median-of-process-medians warm reduction was 13.0%. The same nested Graph
+  measured 1,592.85 us on Vulkan versus 9,392.0 us for an optimistic
+  host-known direct-call oracle and 1,929.7 us for a compact root-level Graph.
+  CPU measured 12,260.3 us versus 17,207.95 us direct, but remained 9.7%
+  slower than its 11,171.55 us compact oracle. Persistent argument storage was
+  14,808 bytes for CUDA node update (14,272 bytes of controls), 648 bytes for
+  forced CUDA masking, 1,304 bytes for Vulkan, and zero for CPU. CUDA cold
+  invocation remained about 104 ms versus 101 ms for the fallback, so the
+  higher-memory route is a warm replay optimization, not a cold-start claim.
+  These figures qualify this machine and workload rather than a universal
+  backend speedup.
 - Added read-only offloaded-task manifests and JIT dispatch labels. A manifest
   reports stable task identity, `cpu_scheduler`/`grid_stride`/
   `device_bounded_grid_stride`/`one_to_one`/`not_applicable` range mapping,

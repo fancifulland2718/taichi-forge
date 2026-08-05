@@ -193,8 +193,8 @@ The same `while_loop()`, `if_then_else()`, and `switch()` builders are
 available on `Sequential`, so a root structured region may contain one more
 structured level. Definitions form a single-owner tree. The maximum structured
 depth is two. Deeper definitions, cycles, reuse at multiple call sites, and
-`native_required` nested definitions fail before execution during region
-construction or Graph compilation.
+unqualified `native_required` nested definitions fail before execution during
+region construction or Graph compilation.
 
 Current lowering is explicit:
 
@@ -204,11 +204,12 @@ Current lowering is explicit:
 | CUDA | `auto` uses a native CUDA conditional Graph on qualified Driver API 12.8+ runtimes; older drivers use Forge's bounded masked Graph when ordinary CUDA Graph capture is available; otherwise exact portable replay | Qualified 12.8+ runtimes use native CUDA IF/SWITCH nodes; older drivers use the same internal device latch and task-entry gate contract; otherwise exact portable host control |
 | Vulkan | Exact portable replay, or qualified `native_required` bounded masking with positive per-region chunk sizes capped at 64 and an eight-chunk/512-iteration region limit | Exact portable host control |
 
-At depth two, CPU executes both levels with exact host control. The parent uses
-exact portable control. A qualified `auto` leaf may retain its existing flat
-native route: CUDA `while`/`if`/`switch`, or Vulkan `while`. This is a
-portable-parent/native-leaf composition, not a general nested native Graph
-claim.
+At depth two, CPU executes both levels with exact host control and returns an
+already-completed submission ticket. CUDA and Vulkan additionally qualify one
+native shape: an outer `while` whose body contains exactly one leaf inner
+`while`. It executes under one backend submission and one ticket. Other shapes
+retain exact portable-parent control; a qualified `auto` leaf may still use its
+existing flat native route.
 
 `ti.graph.structured_control_capabilities()` returns the active backend's
 schema-v4 portable lowering and device-control qualification. The report
@@ -241,21 +242,39 @@ selects 64 for compound submission. Recordable provider actions may enter a
 structured body only when their provider declares it safe; opaque or
 unsupported providers fail closed.
 
-Vulkan has one additional qualified depth-two shape: with tracing disabled and
-the outer mode set to `auto`, an outer `while` whose body contains exactly one
-leaf inner `while` can execute as one synchronous bounded replay. Both loops
-require counters. Their predicate, counter, and optional status controls must
-be mutually distinct one-element i32 device ndarrays owned by the same
-Program. Conditional rendering, nested runtime binding, and ordinary Vulkan
-replay must be available, while the kernel profiler and Vulkan dispatch cache
-must be disabled. The outer and inner bounds are each from 1 through 64; the
-inner chunk is positive and no larger than 64 or its budget; and the complete
-encoded program contains at most 4096 actions. The outer prefix/suffix and both
-loop condition/body sequences must contain only ordinary dispatches or
-qualified recordable actions. Any other nested shape takes exact
-portable-parent control; an eligible leaf `while` may still use the flat
-Vulkan route described above. Vulkan still does not provide native
-`if`/`switch` or exact dynamic command-stream termination.
+CUDA and Vulkan share one qualified depth-two shape: with tracing disabled and
+the outer mode set to `auto` or `native_required`, an outer `while` whose body
+contains exactly one leaf inner `while` can execute as one bounded backend
+submission. Both loops require counters. Their predicate, counter, and
+optional status controls must be mutually distinct one-element i32 device
+ndarrays owned by the same Program. Vulkan additionally requires conditional
+rendering, nested runtime binding, and ordinary replay, with the kernel
+profiler and Vulkan dispatch cache disabled. CUDA requires ordinary Graph
+capture. On a qualified Driver API 12.4+ runtime it uses device-updatable
+kernel-node groups: each business dispatch is compiled once, while small
+device updater nodes enable or disable the statically repeated payload groups.
+An explicit cached setup probe qualifies that route. When the probe is
+unavailable or fails, Forge uses its version-independent two-gate task-entry
+masking route; `TI_GRAPH_CUDA_FORCE_MASKED_CONTROL=1` forces that fallback for
+A/B qualification on a current driver. Neither CUDA route depends on 12.8
+conditional nodes.
+
+The outer and inner bounds are each from 1 through 64; the inner chunk is
+positive and no larger than 64 or its budget; and the complete encoded program
+contains at most 4096 actions. The outer prefix/suffix and both loop
+condition/body sequences must contain only ordinary dispatches or qualified
+recordable actions. Vulkan uses bounded conditional replay. All GPU routes
+avoid host readback between the two levels but retain bounded static topology;
+none claims exact dynamic command termination. Any other nested shape takes
+exact portable-parent control; an eligible leaf `while` may still use its flat
+backend route. Vulkan still does not provide native `if`/`switch`.
+
+The device-control capability report exposes `nested_async_route`, the CUDA
+candidate/qualified/forced-off state, the explicit fallback route,
+`nested_no_host_readback`, and `nested_exact_dynamic_termination`. A submitted
+nested Graph can preserve per-outer stop positions in an outer suffix device
+trace, or expose a recordable provider's terminal packet after ticket
+completion; this does not add a hidden host observation between the loops.
 
 Native structured routes distinguish a pre-submit qualification miss from a
 post-submit observation failure. The former may select the documented exact
@@ -308,10 +327,16 @@ branches remain portable. Ordered CUDA setters and Vulkan predicate gates
 consume control state without a per-region host readback. After asynchronous
 structured submission, read terminal state from `ticket.observations()`;
 synchronous control-flow reports remain unavailable for that submission.
-Graphs containing nested structured control do not support asynchronous
-`Graph.submit()` on any backend.
+An eligible depth-two `while -> while` Graph uses one `Graph.submit()` ticket
+on CUDA and Vulkan; CPU executes the exact host-controlled hierarchy before
+returning a completed ticket. The inner terminal may be consumed by an outer
+suffix kernel without host synchronization. A SolvePlan action exposes this
+through its device terminal packet; general code can copy the inner counter or
+status into a device trace in the outer suffix. This retains every outer
+invocation's stop position. Synchronous `Graph.run(trace=True)` remains the
+richer diagnostic path and intentionally uses portable execution.
 For per-invocation diagnosis, `submit(telemetry=True)` records entry/exit
-control scalars around every while region and `ticket.telemetry()` reports
+control scalars around submitted root while regions and `ticket.telemetry()` reports
 logical stop positions, encoded and masked iteration slots, skipped coarse
 chunks, the queue-counter window, and host enqueue time. The default path does
 not allocate telemetry storage or enqueue these snapshot kernels.

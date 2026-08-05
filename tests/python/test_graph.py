@@ -3006,6 +3006,14 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
                 "nested_native_inner_iteration_limit",
                 "nested_native_max_encoded_actions",
                 "nested_native_stop_telemetry",
+                "nested_async_route",
+                "nested_cuda_device_update_candidate",
+                "nested_cuda_device_update_qualified",
+                "nested_cuda_device_update_forced_off",
+                "nested_cuda_fallback_route",
+                "nested_exact_dynamic_termination",
+                "nested_no_host_readback",
+                "nested_submit_stop_observation",
                 "nested_trace_uses_portable_execution",
                 "nested_leaf_native_upgrade",
                 "nested_leaf_native_kinds",
@@ -3039,10 +3047,9 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
     assert device["max_structured_depth"] == 2
     assert device["nested_exact_portable"]
     expected_nested_native = bool(
-        arch == ti.vulkan
-        and device["runtime_path_qualified"]
-        and device["conditional_rendering_available"]
+        device["runtime_path_qualified"]
         and device["nested_native_lowering_compiled"]
+        and (arch == ti.cuda or (arch == ti.vulkan and device["conditional_rendering_available"]))
     )
     assert capabilities["nested_native_lowering"] == expected_nested_native
     assert device["nested_native_lowering"] == expected_nested_native
@@ -3058,15 +3065,39 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
     assert device["nested_native_max_encoded_actions"] == (
         4096 if expected_nested_native else 0
     )
-    assert (
-        device["nested_native_stop_telemetry"]
-        == expected_nested_native
+    assert device["nested_native_stop_telemetry"] == bool(
+        expected_nested_native and arch == ti.vulkan
+    )
+    if expected_nested_native and arch == ti.cuda:
+        expected_cuda_route = (
+            "cuda_device_node_update"
+            if device["nested_cuda_device_update_qualified"]
+            else (
+                "cuda_device_node_update_probe_then_masked_fallback"
+                if device["nested_cuda_device_update_candidate"]
+                else "cuda_masked_bounded_graph"
+            )
+        )
+        assert device["nested_async_route"] == expected_cuda_route
+        assert device["nested_cuda_fallback_route"] == ("cuda_masked_bounded_graph")
+    else:
+        assert device["nested_async_route"] == (
+            "vulkan_conditional_replay" if expected_nested_native and arch == ti.vulkan else "unavailable"
+        )
+        assert not device["nested_cuda_device_update_candidate"]
+        assert not device["nested_cuda_device_update_qualified"]
+        assert not device["nested_cuda_device_update_forced_off"]
+        assert device["nested_cuda_fallback_route"] == "unavailable"
+    assert not device["nested_exact_dynamic_termination"]
+    assert device["nested_no_host_readback"] == expected_nested_native
+    assert device["nested_submit_stop_observation"] == (
+        "device_terminal_packet_or_outer_suffix_trace" if expected_nested_native else "unavailable"
     )
     assert device["nested_trace_uses_portable_execution"]
     assert device["nested_leaf_native_upgrade"] == bool(
         device["runtime_path_qualified"]
     )
-    assert not device["nested_async_submit"]
+    assert device["nested_async_submit"] == expected_nested_native
     assert device["native_max_structured_depth"] == (
         2
         if expected_nested_native
@@ -3226,7 +3257,7 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_nested_structured_while_is_exact_and_reports_stable_paths():
+def test_nested_structured_while_is_exact_and_reports_stable_paths(monkeypatch):
     @ti.kernel
     def evaluate_outer(
         state: ti.types.ndarray(dtype=ti.i32, ndim=0),
@@ -3269,8 +3300,11 @@ def test_nested_structured_while_is_exact_and_reports_stable_paths():
         state: ti.types.ndarray(dtype=ti.i32, ndim=0),
         predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
         counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        inner_counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        inner_stops: ti.types.ndarray(dtype=ti.i32, ndim=1),
     ):
         if predicate[None] != 0:
+            inner_stops[counter[None]] = inner_counter[None]
             state[None] += 1
             counter[None] += 1
 
@@ -3284,6 +3318,7 @@ def test_nested_structured_while_is_exact_and_reports_stable_paths():
     inner_predicate = scalar("inner_predicate")
     inner_counter = scalar("inner_counter")
     inner_total = scalar("inner_total")
+    inner_stops = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "inner_stops", ti.i32, ndim=1)
     outer_target = ti.graph.Arg(
         ti.graph.ArgKind.SCALAR, "outer_target", ti.i32
     )
@@ -3327,7 +3362,12 @@ def test_nested_structured_while_is_exact_and_reports_stable_paths():
         name="inner_pcg",
     )
     outer_body.dispatch(
-        outer_step, outer_state, outer_predicate, outer_counter
+        outer_step,
+        outer_state,
+        outer_predicate,
+        outer_counter,
+        inner_counter,
+        inner_stops,
     )
     builder.while_loop(
         outer_condition,
@@ -3339,6 +3379,7 @@ def test_nested_structured_while_is_exact_and_reports_stable_paths():
             inner_state,
             inner_counter,
             inner_total,
+            inner_stops,
         ),
         counter=outer_counter,
         max_iterations=5,
@@ -3362,6 +3403,8 @@ def test_nested_structured_while_is_exact_and_reports_stable_paths():
     }
     for value in args.values():
         value.fill(0)
+    args["inner_stops"] = ti.ndarray(ti.i32, shape=(5,))
+    args["inner_stops"].fill(0)
     trace = graph.run(
         {**args, "outer_target": 3, "inner_target": 2},
         trace=True,
@@ -3401,6 +3444,8 @@ def test_nested_structured_while_is_exact_and_reports_stable_paths():
     assert args["inner_state"].to_numpy()[()] == 4
     assert args["inner_total"].to_numpy()[()] == 9
 
+    assert tuple(args["inner_stops"].to_numpy()[:3]) == (2, 3, 4)
+
     assert trace.schema_version == 1
     assert tuple(
         invocation.invocation_path for invocation in trace.invocations
@@ -3431,13 +3476,9 @@ def test_nested_structured_while_is_exact_and_reports_stable_paths():
         "outer_newton/body/inner_pcg",
     )
 
-    nested_native = (
-        ti.lang.impl.current_cfg().arch == ti.vulkan
-        and ti.graph.structured_control_capabilities()[
-            "nested_native_lowering"
-        ]
-    )
-    if nested_native:
+    nested_native = ti.graph.structured_control_capabilities()["nested_native_lowering"]
+    vulkan_nested_native = bool(nested_native and ti.lang.impl.current_cfg().arch == ti.vulkan)
+    if vulkan_nested_native:
         for value in args.values():
             value.fill(0)
         assert (
@@ -3464,6 +3505,7 @@ def test_nested_structured_while_is_exact_and_reports_stable_paths():
         assert args["outer_state"].to_numpy()[()] == 3
         assert args["inner_state"].to_numpy()[()] == 4
         assert args["inner_total"].to_numpy()[()] == 9
+        assert tuple(args["inner_stops"].to_numpy()[:3]) == (2, 3, 4)
         memory = graph.execution_stats().memory
         assert outer_native.control_arena_bytes > 0
         assert memory.persistent_argument_bytes >= (
@@ -3497,6 +3539,65 @@ def test_nested_structured_while_is_exact_and_reports_stable_paths():
                 os.environ[fault_name] = previous_fault
         assert args["outer_state"].to_numpy()[()] == 5
         assert args["outer_counter"].to_numpy()[()] == 5
+
+    submit_supported = ti.lang.impl.current_cfg().arch == ti.cpu or nested_native
+    if submit_supported:
+        for value in args.values():
+            value.fill(0)
+        ticket = graph.submit({**args, "outer_target": 3, "inner_target": 2})
+        ticket.wait()
+        assert args["outer_state"].to_numpy()[()] == 3
+        assert args["outer_counter"].to_numpy()[()] == 3
+        assert args["inner_state"].to_numpy()[()] == 4
+        assert args["inner_counter"].to_numpy()[()] == 4
+        assert args["inner_total"].to_numpy()[()] == 9
+        # The outer suffix consumes the inner terminal counter without a host
+        # readback and leaves a stable per-outer stop trace: 2, 3, then 4.
+        assert tuple(args["inner_stops"].to_numpy()[:3]) == (2, 3, 4)
+        if ti.lang.impl.current_cfg().arch == ti.cuda:
+            high_stats = graph._graph_stats[0]
+            capabilities = ti.graph.structured_control_capabilities()["device_control"]
+            if capabilities["nested_cuda_device_update_qualified"]:
+                assert high_stats["last_path"] in (
+                    "cuda_device_update_nested_capture",
+                    "cuda_device_update_nested_replay",
+                    "cuda_device_update_nested_patched_replay",
+                )
+                memory = graph.execution_stats().memory
+                assert 0 < high_stats["known_bounded_control_bytes"] <= 65536
+                assert memory.persistent_argument_bytes >= high_stats["known_bounded_control_bytes"]
+
+                # Reusing the same allocations must retain the compiled
+                # business kernels and take a replay path, not grow control
+                # storage or recapture the bounded topology.
+                control_bytes = high_stats["known_bounded_control_bytes"]
+                for value in args.values():
+                    value.fill(0)
+                replay_ticket = graph.submit({**args, "outer_target": 3, "inner_target": 2})
+                replay_ticket.wait()
+                replay_stats = graph._graph_stats[0]
+                assert replay_stats["last_path"] in (
+                    "cuda_device_update_nested_replay",
+                    "cuda_device_update_nested_patched_replay",
+                )
+                assert replay_stats["known_bounded_control_bytes"] == control_bytes
+                assert tuple(args["inner_stops"].to_numpy()[:3]) == (2, 3, 4)
+
+            # A current driver can force the pre-12.4-compatible route, which
+            # qualifies the legacy double-gate fallback without old hardware.
+            monkeypatch.setenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "1")
+            for value in args.values():
+                value.fill(0)
+            low_ticket = graph.submit({**args, "outer_target": 3, "inner_target": 2})
+            low_ticket.wait()
+            assert args["outer_state"].to_numpy()[()] == 3
+            assert args["inner_total"].to_numpy()[()] == 9
+            assert tuple(args["inner_stops"].to_numpy()[:3]) == (2, 3, 4)
+            assert graph._graph_stats[0]["last_path"] in (
+                "cuda_masked_capture",
+                "cuda_masked_replay",
+                "cuda_masked_patched_replay",
+            )
 
     debug = graph._debug_info
     assert debug["structured_control_count"] == 2

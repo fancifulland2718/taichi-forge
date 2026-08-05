@@ -115,6 +115,26 @@
   Graph median 为 366.9 us，原生 conditional Graph 为 465.3 us，portable control 为
   1,410.9 us，三条路线都准确停在第 16 次。这是特定 workload 的 crossover，不表示 masked
   control 通常快于原生 CUDA control。
+- 新增严格限定的 depth-2 `while -> while` 单 ticket 执行。CPU 使用精确 host control 并
+  返回 completed ticket；Vulkan 使用 bounded conditional replay；CUDA 使用 bounded
+  静态拓扑，且两层之间不做 host readback。通过资格的 Driver API 12.4+ CUDA runtime 会
+  先执行缓存的 setup probe，再使用 device-updatable kernel-node group，每个业务 dispatch
+  只编译一次；较旧或未通过资格的 runtime 使用 Forge 自有、与版本无关的双 gate
+  task-entry masking。可以设置 `TI_GRAPH_CUDA_FORCE_MASKED_CONTROL=1` 在当前 driver 上
+  资格化 fallback。两层上限都不超过 64，完整程序最多编码 4096 个 action。capability 会
+  分别报告 selected/candidate/fallback route，并明确保持 exact dynamic command
+  termination 为 false。outer suffix 可以在 device 上保留每次 inner 的停止位置；
+  recordable provider 可以在 ticket 完成后公开 terminal packet。
+  本地 Windows 资格 workload 使用 4,096 item、8x16 budget、4 次 active outer、停止位置
+  6/7/8/6、5 次 warmup 与 30 次计时 replay。两个新进程中的 CUDA node-update median 为
+  652.55/640.95 us，两个强制 fallback median 为 742.45/745.15 us；process median 再取
+  median 后 warm 延迟降低 13.0%。同一 nested Graph 在 Vulkan 上为 1,592.85 us，乐观的
+  host-known direct-call oracle 为 9,392.0 us，compact root-level Graph 为 1,929.7 us。
+  CPU 为 12,260.3 us，优于 direct 的 17,207.95 us，但仍比 11,171.55 us compact oracle
+  慢 9.7%。persistent argument storage 分别为 CUDA node update 14,808 B（其中 control
+  14,272 B）、强制 CUDA masking 648 B、Vulkan 1,304 B、CPU 0 B。CUDA cold invocation
+  约为 104 ms，fallback 约为 101 ms，因此高内存路径是 warm replay 优化，不是 cold-start
+  提速声明。这些数字只限定本机和当前 workload，不代表所有 backend 的无条件收益。
 - 新增只读 offloaded-task manifest 与 JIT dispatch label。manifest 在不发起 profiler probe
   的前提下报告稳定 task identity、`cpu_scheduler`/`grid_stride`/
   `device_bounded_grid_stride`/`one_to_one`/`not_applicable` range mapping、

@@ -1,9 +1,9 @@
 """Measure depth-2 structured Graph control against bounded outer expansion.
 
-The nested case always uses ``Graph.run()`` because depth-2 native submission
-is intentionally unavailable. ``Graph.run()`` may still select the qualified
-single-replay Vulkan lowering. The two oracle cases can use either ``run`` or
-``submit``:
+The nested case can use ``Graph.submit()`` as one ticket on CPU, qualified
+CUDA, and qualified Vulkan runtimes. ``Graph.run()`` remains available for
+synchronous stop telemetry. The two oracle cases can independently use either
+``run`` or ``submit``:
 
 * ``static_expanded`` records ``outer_budget`` root-level inner while regions
   and gates inactive outer slots.
@@ -17,6 +17,7 @@ which makes early termination independently observable from host timing.
 
 import argparse
 import json
+import os
 import statistics
 import time
 
@@ -217,7 +218,68 @@ def _build_nested_graph(*, size, outer_budget, inner_budget, chunk_size):
         lowering_mode="auto",
         name="outer",
     )
-    return builder.compile()
+    graph = builder.compile()
+
+    def direct_host_oracle(runtime_args):
+        initialize(
+            runtime_args["values"],
+            runtime_args["stop_positions"],
+            runtime_args["outer_predicate"],
+            runtime_args["outer_counter"],
+            runtime_args["inner_predicate"],
+            runtime_args["inner_counter"],
+        )
+        outer_condition(
+            runtime_args["outer_predicate"],
+            runtime_args["outer_counter"],
+            runtime_args["active_outer"],
+        )
+        for outer_index in range(runtime_args["active_outer"]):
+            reset_inner(
+                runtime_args["inner_predicate"],
+                runtime_args["inner_counter"],
+            )
+            inner_condition(
+                runtime_args["inner_predicate"],
+                runtime_args["inner_counter"],
+                runtime_args["outer_predicate"],
+                runtime_args["outer_counter"],
+                runtime_args["inner_base"],
+                runtime_args["inner_variation"],
+            )
+            target = runtime_args["inner_base"] + (outer_index % runtime_args["inner_variation"])
+            for _ in range(target):
+                inner_step(
+                    runtime_args["values"],
+                    runtime_args["inner_predicate"],
+                    runtime_args["inner_counter"],
+                )
+                inner_condition(
+                    runtime_args["inner_predicate"],
+                    runtime_args["inner_counter"],
+                    runtime_args["outer_predicate"],
+                    runtime_args["outer_counter"],
+                    runtime_args["inner_base"],
+                    runtime_args["inner_variation"],
+                )
+            record_stop(
+                runtime_args["stop_positions"],
+                runtime_args["outer_predicate"],
+                runtime_args["outer_counter"],
+                runtime_args["inner_counter"],
+            )
+            outer_step(
+                runtime_args["outer_predicate"],
+                runtime_args["outer_counter"],
+            )
+            outer_condition(
+                runtime_args["outer_predicate"],
+                runtime_args["outer_counter"],
+                runtime_args["active_outer"],
+            )
+        ti.sync()
+
+    return graph, direct_host_oracle
 
 
 def _build_expanded_graph(
@@ -474,10 +536,17 @@ def _backend_counters(graph):
         "exit_barriers",
         "barrier_deferrals",
     )
-    return {
-        name: sum(int(record.get(name, 0)) for record in records)
-        for name in names
-    }
+    counters = {name: sum(int(record.get(name, 0)) for record in records) for name in names}
+    counters["last_paths"] = sorted(
+        {str(record.get("last_path")) for record in records if record.get("last_path") not in (None, "none")}
+    )
+    counters["known_persistent_argument_bytes"] = sum(
+        int(record.get("known_persistent_argument_bytes", 0)) for record in records
+    )
+    counters["known_bounded_control_bytes"] = sum(
+        int(record.get("known_bounded_control_bytes", 0)) for record in records
+    )
+    return counters
 
 
 def _measure(graph, runtime_args, *, mode, warmups, repeats):
@@ -499,6 +568,8 @@ def _measure(graph, runtime_args, *, mode, warmups, repeats):
         completed = time.perf_counter_ns()
         elapsed = (completed - start) / 1.0e3
         return elapsed, 0.0, elapsed
+
+    cold_host, cold_wait, cold_end_to_end = invoke()
 
     for _ in range(warmups):
         invoke()
@@ -559,15 +630,16 @@ def _measure(graph, runtime_args, *, mode, warmups, repeats):
         ]
     return {
         "mode": mode,
+        "cold_invocation_us": {
+            "host_call": cold_host,
+            "completion_wait": cold_wait,
+            "end_to_end": cold_end_to_end,
+        },
         "host_call_us": _summary(host_call_us),
         "completion_wait_us": _summary(completion_wait_us),
         "end_to_end_us": _summary(end_to_end_us),
         "control_flow_reports": reports,
-        "control_flow_report_status": (
-            "synchronous_latest_run"
-            if mode == "run"
-            else "unavailable_after_async_submit"
-        ),
+        "control_flow_report_status": ("synchronous_latest_run" if mode == "run" else "unavailable_after_async_submit"),
         "graph_memory": {
             "persistent_bytes": memory.persistent_bytes,
             "persistent_argument_bytes": memory.persistent_argument_bytes,
@@ -583,6 +655,45 @@ def _measure(graph, runtime_args, *, mode, warmups, repeats):
             queue_after,
         ),
         "backend_counters": _backend_counters(graph),
+    }
+
+
+def _measure_direct(invoke, runtime_args, *, warmups, repeats):
+    def timed():
+        start = time.perf_counter_ns()
+        invoke(runtime_args)
+        return (time.perf_counter_ns() - start) / 1.0e3
+
+    cold = timed()
+    for _ in range(warmups):
+        timed()
+    ti.sync()
+    before = ti.runtime.stats()
+    queue_before = _queue_submission_stats()
+    samples = [timed() for _ in range(repeats)]
+    ti.sync()
+    after = ti.runtime.stats()
+    queue_after = _queue_submission_stats()
+    return {
+        "mode": "direct_host_oracle",
+        "cold_invocation_us": {
+            "host_call": cold,
+            "completion_wait": 0.0,
+            "end_to_end": cold,
+        },
+        "host_call_us": _summary(samples),
+        "completion_wait_us": _summary([0.0] * repeats),
+        "end_to_end_us": _summary(samples),
+        "control_flow_reports": None,
+        "control_flow_report_status": "not_applicable_without_graph",
+        "graph_memory": None,
+        "submission_delta": _runtime_delta(
+            before,
+            after,
+            queue_before,
+            queue_after,
+        ),
+        "backend_counters": None,
     }
 
 
@@ -625,6 +736,21 @@ def main():
     parser.add_argument("--warmups", type=int, default=5)
     parser.add_argument("--repeats", type=int, default=30)
     parser.add_argument(
+        "--nested-mode",
+        choices=("run", "submit"),
+        default="submit",
+        help="Execution mode for the depth-2 nested case",
+    )
+    parser.add_argument(
+        "--cuda-nested-route",
+        choices=("auto", "masked"),
+        default="auto",
+        help=(
+            "Select the qualified 12.4+ node-update route or force the "
+            "pre-12.4-compatible double-gate route"
+        ),
+    )
+    parser.add_argument(
         "--oracle-mode",
         choices=("run", "submit"),
         default="run",
@@ -651,8 +777,42 @@ def main():
     if args.warmups < 0 or args.repeats <= 0:
         parser.error("--warmups must be nonnegative and --repeats positive")
 
+    if args.cuda_nested_route == "masked":
+        os.environ["TI_GRAPH_CUDA_FORCE_MASKED_CONTROL"] = "1"
+    else:
+        os.environ.pop("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", None)
+
     ti.init(arch=_arch(args.arch), offline_cache=False)
     capabilities = ti.graph.structured_control_capabilities()
+    capability_keys = (
+        "nested_structured_control",
+        "max_structured_depth",
+        "nested_exact_portable",
+        "nested_native_lowering",
+        "nested_leaf_native_upgrade",
+        "nested_leaf_native_kinds",
+        "native_max_structured_depth",
+        "nested_async_submit",
+        "nested_async_route",
+        "nested_cuda_device_update_candidate",
+        "nested_cuda_device_update_qualified",
+        "nested_cuda_device_update_forced_off",
+        "nested_cuda_fallback_route",
+        "structured_submit",
+        "structured_submit_reason",
+    )
+    preflight_capabilities = {
+        key: capabilities["device_control"][key] for key in capability_keys
+    }
+    if (
+        args.nested_mode == "submit"
+        and args.arch != "cpu"
+        and not capabilities["device_control"]["nested_async_submit"]
+    ):
+        parser.error(
+            "--nested-mode=submit requires qualified depth-2 submission: "
+            f"{capabilities['device_control']['structured_submit_reason']}"
+        )
     if args.oracle_mode == "submit" and not capabilities["device_control"][
         "structured_submit"
     ]:
@@ -671,7 +831,7 @@ def main():
     cases = []
 
     build_start = time.perf_counter_ns()
-    nested = _build_nested_graph(
+    nested, direct_host_oracle = _build_nested_graph(
         size=args.size,
         outer_budget=args.outer_budget,
         inner_budget=args.inner_budget,
@@ -688,7 +848,7 @@ def main():
     nested_result = _measure(
         nested,
         nested_args,
-        mode="run",
+        mode=args.nested_mode,
         warmups=args.warmups,
         repeats=args.repeats,
     )
@@ -702,10 +862,40 @@ def main():
         {
             "case": "nested",
             "graph_shape": "outer_while_contains_inner_while",
-            "execution_contract": "Graph.run automatic depth-2 control",
+            "execution_contract": (f"Graph.{args.nested_mode} automatic depth-2 control"),
             "recorded_outer_regions": 1,
             "build_ms": nested_build_ms,
             "result": nested_result,
+        }
+    )
+
+    direct_args = _nested_arguments(
+        size=args.size,
+        outer_budget=args.outer_budget,
+        active_outer=args.active_outer,
+        inner_base=args.inner_base,
+        variation=args.inner_variation,
+    )
+    direct_result = _measure_direct(
+        direct_host_oracle,
+        direct_args,
+        warmups=args.warmups,
+        repeats=args.repeats,
+    )
+    direct_result["correctness"] = _validate_outputs(
+        direct_args,
+        size=args.size,
+        outer_budget=args.outer_budget,
+        expected_stops=expected_stops,
+    )
+    cases.append(
+        {
+            "case": "direct_host_oracle",
+            "graph_shape": "no_graph_host_known_exact_work",
+            "execution_contract": ("direct kernel calls with host-known iteration counts"),
+            "recorded_outer_regions": 0,
+            "build_ms": 0.0,
+            "result": direct_result,
         }
     )
 
@@ -761,6 +951,11 @@ def main():
             }
         )
 
+    post_execution = ti.graph.structured_control_capabilities()
+    post_execution_capabilities = {
+        key: post_execution["device_control"][key] for key in capability_keys
+    }
+
     print(
         json.dumps(
             {
@@ -776,28 +971,19 @@ def main():
                 "warmups": args.warmups,
                 "repeats": args.repeats,
                 "oracle_mode": args.oracle_mode,
-                "capabilities": {
-                    key: capabilities["device_control"][key]
-                    for key in (
-                        "nested_structured_control",
-                        "max_structured_depth",
-                        "nested_exact_portable",
-                        "nested_native_lowering",
-                        "nested_leaf_native_upgrade",
-                        "nested_leaf_native_kinds",
-                        "native_max_structured_depth",
-                        "nested_async_submit",
-                        "structured_submit",
-                        "structured_submit_reason",
-                    )
-                },
+                "nested_mode": args.nested_mode,
+                "cuda_nested_route": args.cuda_nested_route,
+                "preflight_capabilities": preflight_capabilities,
+                "capabilities": post_execution_capabilities,
                 "measurement_contract": {
-                    "nested_always_uses_graph_run": True,
+                    "nested_execution_mode": args.nested_mode,
                     "oracle_mode_applies_only_to_non_nested_cases": True,
                     "stop_positions_written_on_device": True,
                     "host_readback_excluded_from_timing": True,
                     "cases_share_one_process_and_jit_cache": True,
                     "compact_oracle_requires_graph_rebuild_for_active_outer": True,
+                    "direct_oracle_uses_host_known_stop_counts": True,
+                    "capabilities_refreshed_after_cached_runtime_probe": True,
                 },
                 "cases": cases,
             },
