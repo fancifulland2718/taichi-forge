@@ -90,6 +90,45 @@ static_assert(offsetof(CudaGraphBoundedGroupControl, replay_count) == 56);
 static_assert(offsetof(CudaGraphBoundedGroupControl, state_change_count) == 64);
 static_assert(offsetof(CudaGraphBoundedGroupControl, node_api_call_count) == 72);
 
+// One predicate group owns every device-updatable payload node guarded by a
+// single structured-control slot. parent_gate is zero for an outer slot and
+// points at the current outer gate for an inner slot. The updater writes gate
+// before touching node state so nested children observe the same decision.
+struct CudaGraphPredicateGroupControl {
+  std::uintptr_t predicate{0};
+  std::uintptr_t parent_gate{0};
+  std::uintptr_t gate{0};
+  std::uintptr_t device_nodes{0};
+  std::uint32_t node_count{0};
+  std::uint32_t continue_while_nonzero{1};
+  std::uint32_t last_enabled{0};
+  std::uint32_t initialized{0};
+  std::uint32_t driver_status{0};
+  std::uint32_t telemetry_enabled{0};
+  std::uint64_t replay_count{0};
+  std::uint64_t state_change_count{0};
+  std::uint64_t node_api_call_count{0};
+};
+
+static_assert(sizeof(CudaGraphPredicateGroupControl) == 80);
+static_assert(offsetof(CudaGraphPredicateGroupControl, predicate) == 0);
+static_assert(offsetof(CudaGraphPredicateGroupControl, parent_gate) == 8);
+static_assert(offsetof(CudaGraphPredicateGroupControl, gate) == 16);
+static_assert(offsetof(CudaGraphPredicateGroupControl, device_nodes) == 24);
+static_assert(offsetof(CudaGraphPredicateGroupControl, node_count) == 32);
+static_assert(offsetof(CudaGraphPredicateGroupControl,
+                       continue_while_nonzero) == 36);
+static_assert(offsetof(CudaGraphPredicateGroupControl, last_enabled) == 40);
+static_assert(offsetof(CudaGraphPredicateGroupControl, initialized) == 44);
+static_assert(offsetof(CudaGraphPredicateGroupControl, driver_status) == 48);
+static_assert(offsetof(CudaGraphPredicateGroupControl, telemetry_enabled) ==
+              52);
+static_assert(offsetof(CudaGraphPredicateGroupControl, replay_count) == 56);
+static_assert(offsetof(CudaGraphPredicateGroupControl, state_change_count) ==
+              64);
+static_assert(offsetof(CudaGraphPredicateGroupControl, node_api_call_count) ==
+              72);
+
 struct CudaGraphBoundedProbeResult {
   bool attempted{false};
   bool passed{false};
@@ -130,6 +169,11 @@ void driver_graph_latch_while(void *predicate,
                               void *gate,
                               bool continue_while_nonzero,
                               void *stream = nullptr);
+void driver_graph_latch_nested_while(void *parent_gate,
+                                     void *predicate,
+                                     void *gate,
+                                     bool continue_while_nonzero,
+                                     void *stream = nullptr);
 void driver_graph_latch_branch(void *selector,
                                void *gate,
                                std::uint32_t conditional_type,
@@ -148,6 +192,9 @@ void driver_graph_update_bounded_extent(CudaGraphBoundedExtentControl *control,
                                         void *stream = nullptr);
 void driver_graph_update_bounded_group(CudaGraphBoundedGroupControl *control,
                                        void *stream = nullptr);
+void driver_graph_update_predicate_group(
+    CudaGraphPredicateGroupControl *control,
+    void *stream = nullptr);
 void *driver_graph_bounded_probe_payload_function();
 CudaGraphBoundedProbeResult driver_graph_bounded_probe(bool run);
 

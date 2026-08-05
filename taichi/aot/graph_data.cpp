@@ -916,13 +916,24 @@ struct CompiledGraphCudaState {
   std::uint64_t conditional_handle{0};
   bool conditional_mode{false};
   void *masked_gate{nullptr};
+  void *masked_inner_gate{nullptr};
   bool masked_mode{false};
+  bool masked_nested_mode{false};
+  bool device_update_nested_mode{false};
+  cuda::CudaGraphPredicateGroupControl *nested_device_controls{nullptr};
+  std::uintptr_t *nested_device_nodes{nullptr};
+  std::vector<cuda::CudaGraphPredicateGroupControl> nested_host_controls;
+  std::vector<std::uintptr_t> nested_host_nodes;
   int masked_control_type{-1};
   int masked_max_iterations{0};
   bool masked_continue_while_nonzero{true};
   int masked_default_branch{-1};
   std::vector<int> masked_branch_dispatch_counts;
   DeviceAllocation masked_selector_allocation{kDeviceNullAllocation};
+  DeviceAllocation masked_inner_selector_allocation{kDeviceNullAllocation};
+  std::array<std::size_t, 4> masked_nested_boundaries{};
+  int masked_nested_outer_max_iterations{0};
+  int masked_nested_inner_max_iterations{0};
   int conditional_type{-1};
   int conditional_default_branch{-1};
   std::vector<int> conditional_branch_dispatch_counts;
@@ -998,6 +1009,20 @@ struct CompiledGraphCudaState {
       CUDADriver::get_instance().mem_free(masked_gate);
       masked_gate = nullptr;
     }
+    if (masked_inner_gate != nullptr) {
+      CUDADriver::get_instance().mem_free(masked_inner_gate);
+      masked_inner_gate = nullptr;
+    }
+    if (nested_device_controls != nullptr) {
+      CUDADriver::get_instance().mem_free(nested_device_controls);
+      nested_device_controls = nullptr;
+    }
+    if (nested_device_nodes != nullptr) {
+      CUDADriver::get_instance().mem_free(nested_device_nodes);
+      nested_device_nodes = nullptr;
+    }
+    nested_host_controls.clear();
+    nested_host_nodes.clear();
     for (auto &control : bounded_dispatch_controls) {
       if (control.device_control != nullptr) {
         CUDADriver::get_instance().mem_free(control.device_control);
@@ -1021,9 +1046,15 @@ struct CompiledGraphCudaState {
     conditional_handle = 0;
     conditional_mode = false;
     masked_mode = false;
+    masked_nested_mode = false;
+    device_update_nested_mode = false;
     masked_control_type = -1;
     masked_max_iterations = 0;
     masked_continue_while_nonzero = true;
+    masked_inner_selector_allocation = kDeviceNullAllocation;
+    masked_nested_boundaries = {};
+    masked_nested_outer_max_iterations = 0;
+    masked_nested_inner_max_iterations = 0;
     masked_default_branch = -1;
     masked_branch_dispatch_counts.clear();
     masked_selector_allocation = kDeviceNullAllocation;
@@ -1068,6 +1099,13 @@ struct CompiledGraphCudaState {
         bytes += group.host_nodes.size() * sizeof(std::uintptr_t);
       }
     }
+    if (nested_device_controls != nullptr) {
+      bytes += nested_host_controls.size() *
+               sizeof(cuda::CudaGraphPredicateGroupControl);
+    }
+    if (nested_device_nodes != nullptr) {
+      bytes += nested_host_nodes.size() * sizeof(std::uintptr_t);
+    }
     return bytes;
   }
 
@@ -1076,6 +1114,9 @@ struct CompiledGraphCudaState {
                          ? 0
                          : sizeof(cuda::CudaGraphConditionalControl);
     if (masked_gate != nullptr) {
+      bytes += sizeof(std::uint32_t);
+    }
+    if (masked_inner_gate != nullptr) {
       bytes += sizeof(std::uint32_t);
     }
     bytes += known_bounded_control_bytes();
@@ -2301,6 +2342,845 @@ bool try_run_cuda_masked_control_graph(
   return true;
 }
 
+// Encode a strict while -> while hierarchy with device-updatable CUDA Graph
+// kernel nodes. Each static business dispatch is compiled once. The bounded
+// topology repeats only lightweight updater nodes and ordinary payload nodes,
+// avoiding the per-dispatch compiler-gated variants used by the legacy route.
+bool try_run_cuda_device_update_nested_control_graph(
+    const CompiledGraph &graph,
+    const CompileConfig &compile_config,
+    const std::unordered_map<std::string, IValue> &args,
+    CompiledGraphJITCache &cache,
+    Program &program,
+    Ndarray &outer_selector,
+    Ndarray &inner_selector,
+    std::size_t outer_condition_dispatch_count,
+    std::size_t inner_condition_dispatch_begin,
+    std::size_t inner_body_dispatch_begin,
+    std::size_t outer_suffix_dispatch_begin,
+    int outer_max_iterations,
+    int inner_max_iterations,
+    RuntimeStatistics *statistics) {
+  auto *state = get_cuda_graph_state(cache);
+  if (state->diagnostics_enabled) {
+    state->stats.backend = CompiledGraphBackend::cuda;
+    ++state->stats.attempts;
+    state->stats.last_driver_error = 0;
+  }
+  auto structural_fallback = [&]() {
+    state->retry.record_structural_failure();
+    mark_cuda_graph_fallback(
+        *state, CompiledGraphFallbackReason::structural_unsupported, true);
+    state->retire();
+    return false;
+  };
+
+  const std::size_t dispatch_count = graph.dispatches.size();
+  const bool ordered_boundaries =
+      outer_condition_dispatch_count != 0 &&
+      outer_condition_dispatch_count <= inner_condition_dispatch_begin &&
+      inner_condition_dispatch_begin < inner_body_dispatch_begin &&
+      inner_body_dispatch_begin < outer_suffix_dispatch_begin &&
+      outer_suffix_dispatch_begin < dispatch_count;
+  const std::size_t inner_condition_dispatch_count =
+      ordered_boundaries
+          ? inner_body_dispatch_begin - inner_condition_dispatch_begin
+          : 0;
+  const std::size_t inner_terminal_condition_begin =
+      outer_suffix_dispatch_begin >= inner_condition_dispatch_count
+          ? outer_suffix_dispatch_begin - inner_condition_dispatch_count
+          : 0;
+  const std::size_t final_outer_condition_begin =
+      dispatch_count >= outer_condition_dispatch_count
+          ? dispatch_count - outer_condition_dispatch_count
+          : 0;
+  const bool valid_iteration_limits =
+      outer_max_iterations > 0 && outer_max_iterations <= 64 &&
+      inner_max_iterations > 0 && inner_max_iterations <= 64;
+  const std::size_t encoded_dispatches =
+      ordered_boundaries && valid_iteration_limits
+          ? outer_condition_dispatch_count +
+                static_cast<std::size_t>(outer_max_iterations) *
+                    ((inner_body_dispatch_begin -
+                      outer_condition_dispatch_count) +
+                     static_cast<std::size_t>(inner_max_iterations) *
+                         (outer_suffix_dispatch_begin -
+                          inner_body_dispatch_begin) +
+                     (dispatch_count - outer_suffix_dispatch_begin))
+          : (std::numeric_limits<std::size_t>::max)();
+  const std::size_t control_count =
+      valid_iteration_limits
+          ? static_cast<std::size_t>(outer_max_iterations) *
+                (static_cast<std::size_t>(inner_max_iterations) + 1)
+          : (std::numeric_limits<std::size_t>::max)();
+  constexpr std::size_t kMaxEncodedDispatches = 4096;
+  constexpr std::size_t kMaxPredicateGroups = 4096;
+  if (compile_config.debug || dispatch_count == 0 || !valid_iteration_limits ||
+      !ordered_boundaries || inner_condition_dispatch_count == 0 ||
+      inner_body_dispatch_begin >= inner_terminal_condition_begin ||
+      inner_terminal_condition_begin >= outer_suffix_dispatch_begin ||
+      outer_suffix_dispatch_begin > final_outer_condition_begin ||
+      final_outer_condition_begin >= dispatch_count ||
+      encoded_dispatches > kMaxEncodedDispatches ||
+      control_count > kMaxPredicateGroups ||
+      outer_selector.get_nelement() != 1 ||
+      inner_selector.get_nelement() != 1 ||
+      outer_selector.get_element_data_type() != PrimitiveType::i32 ||
+      inner_selector.get_element_data_type() != PrimitiveType::i32 ||
+      outer_selector.owning_program() != &program ||
+      inner_selector.owning_program() != &program) {
+    return structural_fallback();
+  }
+
+  const DeviceAllocation outer_allocation =
+      outer_selector.get_device_allocation();
+  const DeviceAllocation inner_allocation =
+      inner_selector.get_device_allocation();
+  if (outer_allocation == inner_allocation) {
+    return structural_fallback();
+  }
+  auto *selector_device =
+      dynamic_cast<cuda::CudaDevice *>(outer_allocation.device);
+  if (selector_device == nullptr ||
+      inner_allocation.device != selector_device) {
+    return structural_fallback();
+  }
+  auto &driver = CUDADriver::get_instance();
+  const bool graph_symbols = driver.stream_begin_capture.available() &&
+                             driver.stream_end_capture.available() &&
+                             driver.graph_instantiate_with_flags.available() &&
+                             driver.graph_launch.available() &&
+                             driver.graph_upload.available() &&
+                             driver.graph_destroy.available() &&
+                             driver.graph_exec_destroy.available() &&
+                             driver.launch_kernel_ex.available();
+  std::uint32_t updater_error = CUDA_SUCCESS;
+  if (!graph_symbols ||
+      !cuda::driver_graph_prepare_bounded_update(&updater_error)) {
+    return structural_fallback();
+  }
+
+  std::optional<CudaGraphSignatureCandidate> signature;
+  try {
+    signature = make_cuda_graph_signature(graph, program, args);
+  } catch (...) {
+    state->retire();
+    throw;
+  }
+  if (!signature.has_value()) {
+    return structural_fallback();
+  }
+  auto add_control_allocation = [&](DeviceAllocation allocation) {
+    if (std::find(signature->allocations.begin(), signature->allocations.end(),
+                  allocation) == signature->allocations.end()) {
+      signature->allocations.push_back(allocation);
+    }
+  };
+  add_control_allocation(outer_allocation);
+  add_control_allocation(inner_allocation);
+  std::sort(
+      signature->allocations.begin(), signature->allocations.end(),
+      [](const DeviceAllocation &lhs, const DeviceAllocation &rhs) {
+        const auto lhs_device = reinterpret_cast<std::uintptr_t>(lhs.device);
+        const auto rhs_device = reinterpret_cast<std::uintptr_t>(rhs.device);
+        return lhs_device == rhs_device ? lhs.alloc_id < rhs.alloc_id
+                                        : lhs_device < rhs_device;
+      });
+  CUDAContext::get_instance().make_current();
+  state->collect_ready_deferred_resources();
+
+  const std::array<std::size_t, 4> boundaries{
+      outer_condition_dispatch_count, inner_condition_dispatch_begin,
+      inner_body_dispatch_begin, outer_suffix_dispatch_begin};
+  const bool topology_matches =
+      state->device_update_nested_mode &&
+      state->masked_nested_boundaries == boundaries &&
+      state->masked_nested_outer_max_iterations == outer_max_iterations &&
+      state->masked_nested_inner_max_iterations == inner_max_iterations &&
+      state->masked_selector_allocation == outer_allocation &&
+      state->masked_inner_selector_allocation == inner_allocation;
+  if (topology_matches && state->graph_exec &&
+      state->signature == signature->entries &&
+      state->allocations == signature->allocations) {
+    driver.graph_launch(state->graph_exec.get(), nullptr);
+    state->stats.last_path =
+        CompiledGraphExecutionPath::cuda_device_update_nested_replay;
+    state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
+    if (state->diagnostics_enabled) {
+      ++state->stats.exact_replays;
+    }
+    if (statistics != nullptr) {
+      statistics->record_graph_replay();
+    }
+    return true;
+  }
+  // The device-update and masked routes share the executable cache but keep
+  // independent retry state. Once the device-update route is disabled, do
+  // not retire a healthy masked executable merely because graph_exec is set.
+  if ((!topology_matches || !state->graph_exec) &&
+      !state->retry.should_attempt()) {
+    if (state->diagnostics_enabled) {
+      ++state->stats.retry_backoff_fallbacks;
+    }
+    mark_cuda_graph_fallback(*state,
+                             CompiledGraphFallbackReason::retry_backoff);
+    return false;
+  }
+
+  auto allocation_leases =
+      acquire_cuda_graph_allocation_leases(signature->allocations);
+  if (!allocation_leases.has_value()) {
+    mark_cuda_graph_fallback(*state,
+                             CompiledGraphFallbackReason::resource_unavailable);
+    return false;
+  }
+  const bool structurally_compatible =
+      topology_matches && state->graph_exec &&
+      cuda_graph_signatures_are_structurally_compatible(state->signature,
+                                                        signature->entries);
+  if (structurally_compatible) {
+    std::vector<std::vector<uint8_t>> host_arg_buffers;
+    if (patch_cuda_graph_arguments(graph, args, signature->entries, *state,
+                                   host_arg_buffers)) {
+      std::vector<std::unique_ptr<cuda::CudaDevice::AllocationLease>>
+          old_allocation_leases;
+      if (state->allocations != signature->allocations) {
+        old_allocation_leases = std::move(state->allocation_leases);
+        state->allocation_leases = std::move(*allocation_leases);
+        state->allocations = signature->allocations;
+      }
+      state->signature = std::move(signature->entries);
+      state->defer_replay_resources(std::move(old_allocation_leases),
+                                    std::move(host_arg_buffers));
+      driver.graph_launch(state->graph_exec.get(), nullptr);
+      state->stats.last_path =
+          CompiledGraphExecutionPath::cuda_device_update_nested_patched_replay;
+      state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
+      if (state->diagnostics_enabled) {
+        ++state->stats.patched_replays;
+      }
+      if (statistics != nullptr) {
+        statistics->record_graph_replay();
+      }
+      return true;
+    }
+  }
+
+  const bool is_recapture = state->has_captured_once;
+  state->retire();
+  state->signature = std::move(signature->entries);
+  state->allocations = signature->allocations;
+  state->allocation_leases = std::move(*allocation_leases);
+  state->device_update_nested_mode = true;
+  state->masked_control_type = 3;
+  state->masked_selector_allocation = outer_allocation;
+  state->masked_inner_selector_allocation = inner_allocation;
+  state->masked_nested_boundaries = boundaries;
+  state->masked_nested_outer_max_iterations = outer_max_iterations;
+  state->masked_nested_inner_max_iterations = inner_max_iterations;
+  if (state->diagnostics_enabled) {
+    ++state->stats.capture_attempts;
+    if (is_recapture) {
+      ++state->stats.recaptures;
+    }
+  }
+  if (cache.kernels.size() != dispatch_count) {
+    cache.kernels.assign(dispatch_count, {});
+  }
+
+  void *capture_stream = state->ensure_capture_stream();
+  driver.malloc(&state->masked_gate, sizeof(std::uint32_t));
+  driver.malloc(&state->masked_inner_gate, sizeof(std::uint32_t));
+  driver.malloc(reinterpret_cast<void **>(&state->nested_device_controls),
+                control_count * sizeof(cuda::CudaGraphPredicateGroupControl));
+  state->nested_host_controls.assign(control_count, {});
+  std::vector<std::vector<std::uintptr_t>> control_nodes(control_count);
+  auto *outer_ptr = selector_device->get_alloc_info(outer_allocation).ptr;
+  auto *inner_ptr = selector_device->get_alloc_info(inner_allocation).ptr;
+  for (std::size_t control_index = 0; control_index < control_count;
+       ++control_index) {
+    const bool outer_control =
+        control_index % (static_cast<std::size_t>(inner_max_iterations) + 1) ==
+        0;
+    auto &control = state->nested_host_controls[control_index];
+    control.predicate =
+        reinterpret_cast<std::uintptr_t>(outer_control ? outer_ptr : inner_ptr);
+    control.parent_gate =
+        outer_control ? 0
+                      : reinterpret_cast<std::uintptr_t>(state->masked_gate);
+    control.gate = reinterpret_cast<std::uintptr_t>(
+        outer_control ? state->masked_gate : state->masked_inner_gate);
+    control.continue_while_nonzero = 1;
+    control.telemetry_enabled = state->diagnostics_enabled ? 1u : 0u;
+  }
+
+  for (std::size_t i = 0; i < dispatch_count; ++i) {
+    const auto &dispatch = graph.dispatches[i];
+    TI_ASSERT(dispatch.ti_kernel);
+    auto *prog = dispatch.ti_kernel->program;
+    auto *launcher = dynamic_cast<cuda::KernelLauncher *>(
+        &prog->get_program_impl()->get_kernel_launcher());
+    if (launcher == nullptr) {
+      return structural_fallback();
+    }
+    auto *compiled_kernel_data =
+        get_or_compile_cached_kernel(dispatch, compile_config, cache.kernels[i],
+                                     /*cache_compiled_kernel_data=*/true);
+    const auto &llvm_ckd =
+        dynamic_cast<const LLVM::CompiledKernelData &>(*compiled_kernel_data);
+    auto handle = launcher->register_llvm_kernel(llvm_ckd);
+    LaunchContextBuilder launch_ctx(dispatch.ti_kernel);
+    launch_ctx.append_dispatch_label(dispatch.dispatch_label);
+    graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
+    prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
+    prog->resolve_runtime_storage_launch_context_under_guard(launch_ctx);
+    prog->resolve_texture_launch_context_under_guard(launch_ctx);
+    CudaGraphCapturePacket capture_packet(capture_stream);
+    capture_packet.launcher = launcher;
+    if (!launcher->prepare_cuda_graph_launch(
+            handle, launch_ctx, capture_packet.packet, capture_stream)) {
+      driver.stream_synchronize(capture_stream);
+      return structural_fallback();
+    }
+    state->packets.push_back(std::move(capture_packet));
+  }
+  state->stats.zero_arg_eligible =
+      !state->packets.empty() &&
+      std::all_of(state->packets.begin(), state->packets.end(),
+                  [](const CudaGraphCapturePacket &packet) {
+                    return packet.packet.arg_buffer_size == 0 &&
+                           packet.packet.device_arg_buffer == nullptr;
+                  });
+
+  driver.stream_synchronize(capture_stream);
+  auto capture_lock =
+      CUDAContext::get_instance().get_graph_capture_lock_guard();
+  const auto begin_error = driver.stream_begin_capture.call(
+      capture_stream, CU_STREAM_CAPTURE_MODE_RELAXED);
+  if (begin_error != CUDA_SUCCESS) {
+    return handle_cuda_graph_driver_failure(
+        *state, begin_error, "nested device-update stream begin capture");
+  }
+  CudaStreamCaptureGuard capture_guard(capture_stream);
+  auto capture_payload = [&](std::size_t packet_index,
+                             std::size_t control_index) {
+    std::vector<void *> device_nodes;
+    std::uint32_t capture_error = CUDA_SUCCESS;
+    if (!state->packets[packet_index]
+             .launcher->capture_cuda_graph_updatable_launch(
+                 state->packets[packet_index].packet, capture_stream,
+                 &device_nodes, &capture_error)) {
+      return capture_error == CUDA_SUCCESS ? CUDA_ERROR_NOT_SUPPORTED
+                                           : capture_error;
+    }
+    auto &destination = control_nodes[control_index];
+    destination.reserve(destination.size() + device_nodes.size());
+    for (void *device_node : device_nodes) {
+      destination.push_back(reinterpret_cast<std::uintptr_t>(device_node));
+    }
+    return static_cast<std::uint32_t>(CUDA_SUCCESS);
+  };
+  std::uint32_t payload_error = CUDA_SUCCESS;
+  try {
+    for (std::size_t i = 0; i < outer_condition_dispatch_count; ++i) {
+      state->packets[i].launcher->capture_cuda_graph_launch(
+          state->packets[i].packet, capture_stream);
+    }
+    std::size_t control_index = 0;
+    for (int outer_iteration = 0; outer_iteration < outer_max_iterations;
+         ++outer_iteration) {
+      const std::size_t outer_control_index = control_index++;
+      cuda::driver_graph_update_predicate_group(
+          state->nested_device_controls + outer_control_index, capture_stream);
+      for (std::size_t i = outer_condition_dispatch_count;
+           i < inner_body_dispatch_begin && payload_error == CUDA_SUCCESS;
+           ++i) {
+        payload_error = capture_payload(i, outer_control_index);
+      }
+      for (int inner_iteration = 0; inner_iteration < inner_max_iterations &&
+                                    payload_error == CUDA_SUCCESS;
+           ++inner_iteration) {
+        const std::size_t inner_control_index = control_index++;
+        cuda::driver_graph_update_predicate_group(
+            state->nested_device_controls + inner_control_index,
+            capture_stream);
+        for (std::size_t i = inner_body_dispatch_begin;
+             i < outer_suffix_dispatch_begin && payload_error == CUDA_SUCCESS;
+             ++i) {
+          payload_error = capture_payload(i, inner_control_index);
+        }
+      }
+      for (std::size_t i = outer_suffix_dispatch_begin;
+           i < dispatch_count && payload_error == CUDA_SUCCESS; ++i) {
+        payload_error = capture_payload(i, outer_control_index);
+      }
+      if (payload_error != CUDA_SUCCESS) {
+        break;
+      }
+    }
+  } catch (...) {
+    if (state->diagnostics_enabled) {
+      ++state->stats.capture_exceptions;
+    }
+    capture_guard.abort();
+    state->retire();
+    throw;
+  }
+  if (payload_error != CUDA_SUCCESS) {
+    capture_guard.abort();
+    return handle_cuda_graph_driver_failure(
+        *state, payload_error, "nested device-update payload capture");
+  }
+  CudaGraphHandle captured_graph;
+  const auto end_error = capture_guard.end(captured_graph.put());
+  if (end_error != CUDA_SUCCESS || !captured_graph) {
+    return handle_cuda_graph_driver_failure(
+        *state, end_error, "nested device-update stream end capture");
+  }
+
+  std::size_t node_count = 0;
+  for (const auto &nodes : control_nodes) {
+    if (nodes.empty() ||
+        nodes.size() > (std::numeric_limits<std::uint32_t>::max)() ||
+        node_count > (std::numeric_limits<std::size_t>::max)() - nodes.size()) {
+      return structural_fallback();
+    }
+    node_count += nodes.size();
+  }
+  driver.malloc(reinterpret_cast<void **>(&state->nested_device_nodes),
+                node_count * sizeof(std::uintptr_t));
+  state->nested_host_nodes.reserve(node_count);
+  std::size_t node_offset = 0;
+  for (std::size_t i = 0; i < control_nodes.size(); ++i) {
+    auto &control = state->nested_host_controls[i];
+    control.device_nodes = reinterpret_cast<std::uintptr_t>(
+        state->nested_device_nodes + node_offset);
+    control.node_count = static_cast<std::uint32_t>(control_nodes[i].size());
+    state->nested_host_nodes.insert(state->nested_host_nodes.end(),
+                                    control_nodes[i].begin(),
+                                    control_nodes[i].end());
+    node_offset += control_nodes[i].size();
+  }
+
+  const auto instantiate_error = driver.graph_instantiate_with_flags.call(
+      state->graph_exec.put(), captured_graph.get(), 0);
+  captured_graph.reset();
+  if (instantiate_error != CUDA_SUCCESS || !state->graph_exec) {
+    return handle_cuda_graph_driver_failure(*state, instantiate_error,
+                                            "nested device-update instantiate");
+  }
+  const auto upload_error =
+      driver.graph_upload.call(state->graph_exec.get(), nullptr);
+  if (upload_error != CUDA_SUCCESS) {
+    return handle_cuda_graph_driver_failure(
+        *state, upload_error, "nested device-update graph upload");
+  }
+  auto control_upload_error = driver.memcpy_host_to_device.call(
+      state->nested_device_nodes, state->nested_host_nodes.data(),
+      state->nested_host_nodes.size() * sizeof(std::uintptr_t));
+  if (control_upload_error == CUDA_SUCCESS) {
+    control_upload_error = driver.memcpy_host_to_device.call(
+        state->nested_device_controls, state->nested_host_controls.data(),
+        state->nested_host_controls.size() *
+            sizeof(cuda::CudaGraphPredicateGroupControl));
+  }
+  if (control_upload_error != CUDA_SUCCESS) {
+    return handle_cuda_graph_driver_failure(
+        *state, control_upload_error, "nested device-update control upload");
+  }
+
+  state->retry.record_success();
+  state->has_captured_once = true;
+  state->stats.last_path =
+      CompiledGraphExecutionPath::cuda_device_update_nested_capture;
+  state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
+  if (state->diagnostics_enabled) {
+    ++state->stats.captures;
+  }
+  if (statistics != nullptr) {
+    statistics->record_graph_capture();
+    if (is_recapture) {
+      statistics->record_graph_recapture();
+    }
+  }
+  driver.graph_launch(state->graph_exec.get(), nullptr);
+  return true;
+}
+
+// Encode a strict while -> while hierarchy into one ordinary CUDA Graph.
+// Two device gates preserve parent/child ownership: the outer gate masks the
+// complete outer payload, while the inner gate is the conjunction of the
+// outer gate and the current inner predicate. This route intentionally uses
+// only ordinary graph capture and PTX latches, so it is available before CUDA
+// 12.8 and has the same bounded-tail contract as Vulkan nested replay.
+bool try_run_cuda_masked_nested_control_graph(
+    const CompiledGraph &graph,
+    const CompileConfig &compile_config,
+    const std::unordered_map<std::string, IValue> &args,
+    CompiledGraphJITCache &cache,
+    Program &program,
+    Ndarray &outer_selector,
+    Ndarray &inner_selector,
+    std::size_t outer_condition_dispatch_count,
+    std::size_t inner_condition_dispatch_begin,
+    std::size_t inner_body_dispatch_begin,
+    std::size_t outer_suffix_dispatch_begin,
+    int outer_max_iterations,
+    int inner_max_iterations,
+    RuntimeStatistics *statistics) {
+  auto *state = get_cuda_graph_state(cache);
+  if (state->diagnostics_enabled) {
+    state->stats.backend = CompiledGraphBackend::cuda;
+    ++state->stats.attempts;
+    state->stats.last_driver_error = 0;
+  }
+  auto structural_fallback = [&]() {
+    state->masked_retry.record_structural_failure();
+    mark_cuda_graph_fallback(
+        *state, CompiledGraphFallbackReason::structural_unsupported, true);
+    state->retire();
+    return false;
+  };
+
+  const std::size_t dispatch_count = graph.dispatches.size();
+  const bool ordered_boundaries =
+      outer_condition_dispatch_count != 0 &&
+      outer_condition_dispatch_count <= inner_condition_dispatch_begin &&
+      inner_condition_dispatch_begin < inner_body_dispatch_begin &&
+      inner_body_dispatch_begin < outer_suffix_dispatch_begin &&
+      outer_suffix_dispatch_begin < dispatch_count;
+  const std::size_t inner_condition_dispatch_count =
+      ordered_boundaries
+          ? inner_body_dispatch_begin - inner_condition_dispatch_begin
+          : 0;
+  const std::size_t inner_terminal_condition_begin =
+      outer_suffix_dispatch_begin >= inner_condition_dispatch_count
+          ? outer_suffix_dispatch_begin - inner_condition_dispatch_count
+          : 0;
+  const std::size_t final_outer_condition_begin =
+      dispatch_count >= outer_condition_dispatch_count
+          ? dispatch_count - outer_condition_dispatch_count
+          : 0;
+  const bool valid_iteration_limits =
+      outer_max_iterations > 0 && outer_max_iterations <= 64 &&
+      inner_max_iterations > 0 && inner_max_iterations <= 64;
+  const std::size_t encoded_dispatches =
+      ordered_boundaries && valid_iteration_limits
+          ? outer_condition_dispatch_count +
+                static_cast<std::size_t>(outer_max_iterations) *
+                    ((inner_body_dispatch_begin -
+                      outer_condition_dispatch_count) +
+                     static_cast<std::size_t>(inner_max_iterations) *
+                         (outer_suffix_dispatch_begin -
+                          inner_body_dispatch_begin) +
+                     (dispatch_count - outer_suffix_dispatch_begin))
+          : (std::numeric_limits<std::size_t>::max)();
+  constexpr std::size_t kMaxEncodedDispatches = 4096;
+  if (compile_config.debug || dispatch_count == 0 || !valid_iteration_limits ||
+      !ordered_boundaries || inner_condition_dispatch_count == 0 ||
+      inner_body_dispatch_begin >= inner_terminal_condition_begin ||
+      inner_terminal_condition_begin >= outer_suffix_dispatch_begin ||
+      outer_suffix_dispatch_begin > final_outer_condition_begin ||
+      final_outer_condition_begin >= dispatch_count ||
+      encoded_dispatches > kMaxEncodedDispatches ||
+      outer_selector.get_nelement() != 1 ||
+      inner_selector.get_nelement() != 1 ||
+      outer_selector.get_element_data_type() != PrimitiveType::i32 ||
+      inner_selector.get_element_data_type() != PrimitiveType::i32 ||
+      outer_selector.owning_program() != &program ||
+      inner_selector.owning_program() != &program) {
+    return structural_fallback();
+  }
+
+  const DeviceAllocation outer_allocation =
+      outer_selector.get_device_allocation();
+  const DeviceAllocation inner_allocation =
+      inner_selector.get_device_allocation();
+  if (outer_allocation == inner_allocation) {
+    return structural_fallback();
+  }
+  auto *selector_device =
+      dynamic_cast<cuda::CudaDevice *>(outer_allocation.device);
+  if (selector_device == nullptr ||
+      inner_allocation.device != selector_device) {
+    return structural_fallback();
+  }
+  auto &driver = CUDADriver::get_instance();
+  const bool graph_symbols = driver.stream_begin_capture.available() &&
+                             driver.stream_end_capture.available() &&
+                             driver.graph_instantiate_with_flags.available() &&
+                             driver.graph_launch.available() &&
+                             driver.graph_destroy.available() &&
+                             driver.graph_exec_destroy.available();
+  if (!graph_symbols || !cuda::driver_graph_mask_latch_compiled()) {
+    return structural_fallback();
+  }
+
+  std::optional<CudaGraphSignatureCandidate> signature;
+  try {
+    signature = make_cuda_graph_signature(graph, program, args);
+  } catch (...) {
+    state->retire();
+    throw;
+  }
+  if (!signature.has_value()) {
+    return structural_fallback();
+  }
+  auto add_control_allocation = [&](DeviceAllocation allocation) {
+    if (std::find(signature->allocations.begin(), signature->allocations.end(),
+                  allocation) == signature->allocations.end()) {
+      signature->allocations.push_back(allocation);
+    }
+  };
+  add_control_allocation(outer_allocation);
+  add_control_allocation(inner_allocation);
+  std::sort(
+      signature->allocations.begin(), signature->allocations.end(),
+      [](const DeviceAllocation &lhs, const DeviceAllocation &rhs) {
+        const auto lhs_device = reinterpret_cast<std::uintptr_t>(lhs.device);
+        const auto rhs_device = reinterpret_cast<std::uintptr_t>(rhs.device);
+        return lhs_device == rhs_device ? lhs.alloc_id < rhs.alloc_id
+                                        : lhs_device < rhs_device;
+      });
+  CUDAContext::get_instance().make_current();
+  state->collect_ready_deferred_resources();
+
+  const std::array<std::size_t, 4> boundaries{
+      outer_condition_dispatch_count, inner_condition_dispatch_begin,
+      inner_body_dispatch_begin, outer_suffix_dispatch_begin};
+  const bool topology_matches =
+      state->masked_mode && state->masked_nested_mode &&
+      state->masked_nested_boundaries == boundaries &&
+      state->masked_nested_outer_max_iterations == outer_max_iterations &&
+      state->masked_nested_inner_max_iterations == inner_max_iterations &&
+      state->masked_selector_allocation == outer_allocation &&
+      state->masked_inner_selector_allocation == inner_allocation;
+  if (topology_matches && state->graph_exec &&
+      state->signature == signature->entries &&
+      state->allocations == signature->allocations) {
+    driver.graph_launch(state->graph_exec.get(), nullptr);
+    state->stats.last_path = CompiledGraphExecutionPath::cuda_masked_replay;
+    state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
+    if (state->diagnostics_enabled) {
+      ++state->stats.masked_replays;
+    }
+    if (statistics != nullptr) {
+      statistics->record_graph_replay();
+    }
+    return true;
+  }
+  // The high and fallback routes share graph_exec. Respect the fallback
+  // route's own retry state even when that slot currently holds a high-route
+  // executable.
+  if ((!topology_matches || !state->graph_exec) &&
+      !state->masked_retry.should_attempt()) {
+    if (state->diagnostics_enabled) {
+      ++state->stats.retry_backoff_fallbacks;
+    }
+    mark_cuda_graph_fallback(*state,
+                             CompiledGraphFallbackReason::retry_backoff);
+    return false;
+  }
+
+  auto allocation_leases =
+      acquire_cuda_graph_allocation_leases(signature->allocations);
+  if (!allocation_leases.has_value()) {
+    mark_cuda_graph_fallback(*state,
+                             CompiledGraphFallbackReason::resource_unavailable);
+    return false;
+  }
+  const bool structurally_compatible =
+      topology_matches && state->graph_exec &&
+      cuda_graph_signatures_are_structurally_compatible(state->signature,
+                                                        signature->entries);
+  if (structurally_compatible) {
+    std::vector<std::vector<uint8_t>> host_arg_buffers;
+    if (patch_cuda_graph_arguments(graph, args, signature->entries, *state,
+                                   host_arg_buffers)) {
+      std::vector<std::unique_ptr<cuda::CudaDevice::AllocationLease>>
+          old_allocation_leases;
+      if (state->allocations != signature->allocations) {
+        old_allocation_leases = std::move(state->allocation_leases);
+        state->allocation_leases = std::move(*allocation_leases);
+        state->allocations = signature->allocations;
+      }
+      state->signature = std::move(signature->entries);
+      state->defer_replay_resources(std::move(old_allocation_leases),
+                                    std::move(host_arg_buffers));
+      driver.graph_launch(state->graph_exec.get(), nullptr);
+      state->stats.last_path =
+          CompiledGraphExecutionPath::cuda_masked_patched_replay;
+      state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
+      if (state->diagnostics_enabled) {
+        ++state->stats.masked_patched_replays;
+      }
+      if (statistics != nullptr) {
+        statistics->record_graph_replay();
+      }
+      return true;
+    }
+  }
+
+  const bool is_recapture = state->has_captured_once;
+  state->retire();
+  state->signature = std::move(signature->entries);
+  state->allocations = signature->allocations;
+  state->allocation_leases = std::move(*allocation_leases);
+  state->masked_mode = true;
+  state->masked_nested_mode = true;
+  state->masked_control_type = 3;
+  state->masked_selector_allocation = outer_allocation;
+  state->masked_inner_selector_allocation = inner_allocation;
+  state->masked_nested_boundaries = boundaries;
+  state->masked_nested_outer_max_iterations = outer_max_iterations;
+  state->masked_nested_inner_max_iterations = inner_max_iterations;
+  if (state->diagnostics_enabled) {
+    ++state->stats.capture_attempts;
+    if (is_recapture) {
+      ++state->stats.recaptures;
+    }
+  }
+  if (cache.kernels.size() != dispatch_count) {
+    cache.kernels.assign(dispatch_count, {});
+  }
+
+  void *capture_stream = state->ensure_capture_stream();
+  try {
+    cuda::driver_graph_prepare_mask_latch();
+  } catch (...) {
+    return structural_fallback();
+  }
+  driver.malloc(&state->masked_gate, sizeof(std::uint32_t));
+  driver.malloc(&state->masked_inner_gate, sizeof(std::uint32_t));
+  for (std::size_t i = 0; i < dispatch_count; ++i) {
+    const auto &dispatch = graph.dispatches[i];
+    TI_ASSERT(dispatch.ti_kernel);
+    auto *prog = dispatch.ti_kernel->program;
+    auto *launcher = dynamic_cast<cuda::KernelLauncher *>(
+        &prog->get_program_impl()->get_kernel_launcher());
+    if (launcher == nullptr) {
+      return structural_fallback();
+    }
+    auto *compiled_kernel_data =
+        get_or_compile_cached_kernel(dispatch, compile_config, cache.kernels[i],
+                                     /*cache_compiled_kernel_data=*/true);
+    const auto &llvm_ckd =
+        dynamic_cast<const LLVM::CompiledKernelData &>(*compiled_kernel_data);
+    const bool initial_outer_condition = i < outer_condition_dispatch_count;
+    const bool inner_gated =
+        i >= inner_body_dispatch_begin && i < outer_suffix_dispatch_begin;
+    auto handle = initial_outer_condition
+                      ? launcher->register_llvm_kernel(llvm_ckd)
+                      : launcher->register_llvm_kernel_graph_gated(llvm_ckd);
+    LaunchContextBuilder launch_ctx(dispatch.ti_kernel);
+    launch_ctx.append_dispatch_label(dispatch.dispatch_label);
+    graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
+    prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
+    prog->resolve_runtime_storage_launch_context_under_guard(launch_ctx);
+    prog->resolve_texture_launch_context_under_guard(launch_ctx);
+    CudaGraphCapturePacket capture_packet(capture_stream);
+    capture_packet.launcher = launcher;
+    const bool prepared =
+        initial_outer_condition
+            ? launcher->prepare_cuda_graph_launch(
+                  handle, launch_ctx, capture_packet.packet, capture_stream)
+            : launcher->prepare_cuda_graph_gated_launch(
+                  handle, launch_ctx, capture_packet.packet,
+                  inner_gated ? state->masked_inner_gate : state->masked_gate,
+                  1u, capture_stream);
+    if (!prepared) {
+      driver.stream_synchronize(capture_stream);
+      return structural_fallback();
+    }
+    state->packets.push_back(std::move(capture_packet));
+  }
+
+  auto *outer_ptr = selector_device->get_alloc_info(outer_allocation).ptr;
+  auto *inner_ptr = selector_device->get_alloc_info(inner_allocation).ptr;
+  driver.stream_synchronize(capture_stream);
+  auto capture_lock =
+      CUDAContext::get_instance().get_graph_capture_lock_guard();
+  const auto begin_error = driver.stream_begin_capture.call(
+      capture_stream, CU_STREAM_CAPTURE_MODE_RELAXED);
+  if (begin_error != CUDA_SUCCESS) {
+    return handle_cuda_graph_driver_failure(
+        *state, begin_error, "nested masked stream begin capture",
+        &state->masked_retry);
+  }
+  CudaStreamCaptureGuard capture_guard(capture_stream);
+  try {
+    for (std::size_t i = 0; i < outer_condition_dispatch_count; ++i) {
+      state->packets[i].launcher->capture_cuda_graph_launch(
+          state->packets[i].packet, capture_stream);
+    }
+    for (int outer_iteration = 0; outer_iteration < outer_max_iterations;
+         ++outer_iteration) {
+      cuda::driver_graph_latch_while(outer_ptr, state->masked_gate, true,
+                                     capture_stream);
+      for (std::size_t i = outer_condition_dispatch_count;
+           i < inner_body_dispatch_begin; ++i) {
+        state->packets[i].launcher->capture_cuda_graph_launch(
+            state->packets[i].packet, capture_stream);
+      }
+      for (int inner_iteration = 0; inner_iteration < inner_max_iterations;
+           ++inner_iteration) {
+        cuda::driver_graph_latch_nested_while(state->masked_gate, inner_ptr,
+                                              state->masked_inner_gate, true,
+                                              capture_stream);
+        for (std::size_t i = inner_body_dispatch_begin;
+             i < outer_suffix_dispatch_begin; ++i) {
+          state->packets[i].launcher->capture_cuda_graph_launch(
+              state->packets[i].packet, capture_stream);
+        }
+      }
+      for (std::size_t i = outer_suffix_dispatch_begin; i < dispatch_count;
+           ++i) {
+        state->packets[i].launcher->capture_cuda_graph_launch(
+            state->packets[i].packet, capture_stream);
+      }
+    }
+  } catch (...) {
+    if (state->diagnostics_enabled) {
+      ++state->stats.capture_exceptions;
+    }
+    capture_guard.abort();
+    state->retire();
+    throw;
+  }
+  CudaGraphHandle captured_graph;
+  const auto end_error = capture_guard.end(captured_graph.put());
+  if (end_error != CUDA_SUCCESS || !captured_graph) {
+    return handle_cuda_graph_driver_failure(*state, end_error,
+                                            "nested masked stream end capture",
+                                            &state->masked_retry);
+  }
+  const auto instantiate_error = driver.graph_instantiate_with_flags.call(
+      state->graph_exec.put(), captured_graph.get(), 0);
+  captured_graph.reset();
+  if (instantiate_error != CUDA_SUCCESS || !state->graph_exec) {
+    return handle_cuda_graph_driver_failure(*state, instantiate_error,
+                                            "nested masked instantiate",
+                                            &state->masked_retry);
+  }
+
+  state->masked_retry.record_success();
+  state->has_captured_once = true;
+  state->stats.last_path = CompiledGraphExecutionPath::cuda_masked_capture;
+  state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
+  if (state->diagnostics_enabled) {
+    ++state->stats.captures;
+    ++state->stats.masked_captures;
+  }
+  if (statistics != nullptr) {
+    statistics->record_graph_capture();
+    if (is_recapture) {
+      statistics->record_graph_recapture();
+    }
+  }
+  driver.graph_launch(state->graph_exec.get(), nullptr);
+  return true;
+}
+
 bool try_run_cuda_bounded_graph(
     const CompiledGraph &graph,
     const CompileConfig &compile_config,
@@ -3321,7 +4201,8 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
     cuda_graph_state->stats.backend = CompiledGraphBackend::cuda;
     CompiledGraphStats result = cuda_graph_state->stats;
     if (!cuda_graph_state->bounded_dispatch_controls.empty() ||
-        !cuda_graph_state->bounded_dispatch_groups.empty()) {
+        !cuda_graph_state->bounded_dispatch_groups.empty() ||
+        cuda_graph_state->nested_device_controls != nullptr) {
       CUDADriver::get_instance().stream_synchronize(nullptr);
       for (const auto &control :
            cuda_graph_state->bounded_dispatch_controls) {
@@ -3366,6 +4247,23 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
           }
         }
       }
+      if (cuda_graph_state->nested_device_controls != nullptr &&
+          !cuda_graph_state->nested_host_controls.empty()) {
+        std::vector<cuda::CudaGraphPredicateGroupControl> observed(
+            cuda_graph_state->nested_host_controls.size());
+        driver.memcpy_device_to_host(
+            observed.data(), cuda_graph_state->nested_device_controls,
+            observed.size() * sizeof(cuda::CudaGraphPredicateGroupControl));
+        for (const auto &control : observed) {
+          result.bounded_update_replays += control.replay_count;
+          result.bounded_update_state_changes += control.state_change_count;
+          result.bounded_node_api_calls += control.node_api_call_count;
+          if (control.driver_status != CUDA_SUCCESS &&
+              result.last_driver_error == 0) {
+            result.last_driver_error = control.driver_status;
+          }
+        }
+      }
       result.bounded_update_cache_hits =
           result.bounded_update_replays -
           std::min(result.bounded_update_replays,
@@ -3386,10 +4284,12 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
         [](const auto &control) { return control.device_control != nullptr; }));
     const auto grouped_update_count = static_cast<std::uint32_t>(
         cuda_graph_state->bounded_dispatch_groups.size());
+    const auto nested_update_count = static_cast<std::uint32_t>(
+        cuda_graph_state->nested_host_controls.size());
     result.known_bounded_update_groups =
-        per_node_update_count + grouped_update_count;
+        per_node_update_count + grouped_update_count + nested_update_count;
     result.known_bounded_updater_dispatches =
-        per_node_update_count + grouped_update_count;
+        per_node_update_count + grouped_update_count + nested_update_count;
     result.known_bounded_grouped_payloads = std::accumulate(
         cuda_graph_state->bounded_dispatch_groups.begin(),
         cuda_graph_state->bounded_dispatch_groups.end(), 0u,
@@ -3399,12 +4299,20 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
                       ? static_cast<std::uint32_t>(group.host_nodes.size())
                       : 0u);
         });
+    if (nested_update_count != 0) {
+      result.known_bounded_grouped_payloads += static_cast<std::uint32_t>(
+          cuda_graph_state->nested_host_nodes.size());
+    }
     result.known_bounded_max_group_size =
         per_node_update_count == 0 ? 0u : 1u;
     for (const auto &group : cuda_graph_state->bounded_dispatch_groups) {
       result.known_bounded_max_group_size = std::max(
           result.known_bounded_max_group_size,
           static_cast<std::uint32_t>(group.host_nodes.size()));
+    }
+    for (const auto &control : cuda_graph_state->nested_host_controls) {
+      result.known_bounded_max_group_size =
+          std::max(result.known_bounded_max_group_size, control.node_count);
     }
     result.known_bounded_producer_fused_groups = 0;
     const auto &active_retry = cuda_graph_state->masked_mode
@@ -4014,6 +4922,158 @@ bool CompiledGraph::jit_run_bounded_cuda_masked_cached(
   throw;
 }
 
+bool CompiledGraph::jit_submit_bounded_cuda_nested_cached(
+    const CompileConfig &compile_config,
+    const std::unordered_map<std::string, IValue> &args,
+    CompiledGraphJITCache &cache,
+    Ndarray *outer_predicate,
+    Ndarray *outer_counter,
+    Ndarray *outer_status,
+    Ndarray *inner_predicate,
+    Ndarray *inner_counter,
+    Ndarray *inner_status,
+    std::size_t outer_condition_dispatch_count,
+    std::size_t inner_condition_dispatch_begin,
+    std::size_t inner_body_dispatch_begin,
+    std::size_t outer_suffix_dispatch_begin,
+    int outer_max_iterations,
+    int inner_max_iterations,
+    bool allow_device_update) const try {
+#if defined(TI_WITH_CUDA)
+  if (compile_config.arch != Arch::cuda || outer_predicate == nullptr ||
+      outer_counter == nullptr || inner_predicate == nullptr ||
+      inner_counter == nullptr) {
+    return false;
+  }
+  Program *program = jit_graph_program(*this);
+  if (program == nullptr) {
+    return false;
+  }
+  const auto valid_control = [&](const Ndarray *control) {
+    return control != nullptr && control->get_nelement() == 1 &&
+           control->get_element_data_type() == PrimitiveType::i32 &&
+           control->owning_program() == program;
+  };
+  if (!valid_control(outer_predicate) || !valid_control(outer_counter) ||
+      !valid_control(inner_predicate) || !valid_control(inner_counter) ||
+      (outer_status != nullptr && !valid_control(outer_status)) ||
+      (inner_status != nullptr && !valid_control(inner_status))) {
+    return false;
+  }
+  std::array<DeviceAllocation, 6> controls{
+      outer_predicate->get_device_allocation(),
+      outer_counter->get_device_allocation(),
+      outer_status != nullptr ? outer_status->get_device_allocation()
+                              : kDeviceNullAllocation,
+      inner_predicate->get_device_allocation(),
+      inner_counter->get_device_allocation(),
+      inner_status != nullptr ? inner_status->get_device_allocation()
+                              : kDeviceNullAllocation};
+  const std::array<bool, 6> active{true, true, outer_status != nullptr,
+                                   true, true, inner_status != nullptr};
+  for (std::size_t i = 0; i < controls.size(); ++i) {
+    if (!active[i]) {
+      continue;
+    }
+    for (std::size_t j = i + 1; j < controls.size(); ++j) {
+      if (active[j] && controls[i] == controls[j]) {
+        return false;
+      }
+    }
+  }
+
+  program->ensure_runtime_submission_allowed(
+      "nested bounded CUDA Graph launch");
+  auto tree_lifecycle_guard =
+      program->acquire_snode_tree_lifecycle_read_guard();
+  auto resource_views = graph_runtime_resource_views(args, program);
+  resource_views.ndarrays.add(outer_predicate);
+  resource_views.ndarrays.add(outer_counter);
+  resource_views.ndarrays.add(inner_predicate);
+  resource_views.ndarrays.add(inner_counter);
+  if (outer_status != nullptr) {
+    resource_views.ndarrays.add(outer_status);
+  }
+  if (inner_status != nullptr) {
+    resource_views.ndarrays.add(inner_status);
+  }
+  std::optional<Program::RuntimeResourceGraphScope> resource_guard;
+  if (!resource_views.empty()) {
+    resource_guard.emplace(program->acquire_runtime_resource_graph_scope());
+    if (!resource_views.ndarrays.empty()) {
+      program->retain_ndarrays_for_external_submission(
+          resource_views.ndarrays.data(), resource_views.ndarrays.size());
+    }
+    if (!resource_views.runtime_storage.empty()) {
+      program->retain_runtime_storage_for_graph_submission(
+          resource_views.runtime_storage.data(),
+          resource_views.runtime_storage.size());
+    }
+    if (!resource_views.textures.empty()) {
+      program->retain_textures_for_external_submission(
+          resource_views.textures.data(), resource_views.textures.size());
+    }
+  }
+  auto completion_scope = program->acquire_runtime_submission_scope();
+  auto cuda_submission_lock =
+      CUDAContext::get_instance().get_submission_lock_guard();
+  std::lock_guard<std::mutex> lock(cache.run_mutex);
+  if (cache.validated_snode_tree_program != program ||
+      cache.validated_snode_tree_epoch != tree_lifecycle_guard.epoch()) {
+    try {
+      program->validate_snode_tree_dependencies(snode_tree_dependencies);
+    } catch (...) {
+      cache.cuda_graph_state.reset();
+      cache.kernels.clear();
+      cache.runtime_arg_plans.clear();
+      cache.validated_snode_tree_program = nullptr;
+      cache.validated_snode_tree_epoch = 0;
+      throw;
+    }
+    cache.validated_snode_tree_program = program;
+    cache.validated_snode_tree_epoch = tree_lifecycle_guard.epoch();
+  }
+  const bool device_update_submitted =
+      allow_device_update &&
+      try_run_cuda_device_update_nested_control_graph(
+          *this, compile_config, args, cache, *program, *outer_predicate,
+          *inner_predicate, outer_condition_dispatch_count,
+          inner_condition_dispatch_begin, inner_body_dispatch_begin,
+          outer_suffix_dispatch_begin, outer_max_iterations,
+          inner_max_iterations, &program->runtime_statistics());
+  if (!device_update_submitted &&
+      !try_run_cuda_masked_nested_control_graph(
+          *this, compile_config, args, cache, *program, *outer_predicate,
+          *inner_predicate, outer_condition_dispatch_count,
+          inner_condition_dispatch_begin, inner_body_dispatch_begin,
+          outer_suffix_dispatch_begin, outer_max_iterations,
+          inner_max_iterations, &program->runtime_statistics())) {
+    return false;
+  }
+  program->mark_runtime_submission(
+      RuntimeSubmissionKind::kGraphBackendSubmission);
+  if (resource_guard) {
+    resource_guard->finish_external_access_epoch();
+  }
+  return true;
+#else
+  return false;
+#endif
+} catch (const BackendRuntimeError &error) {
+  Program *program = jit_graph_program(*this);
+  if (program != nullptr) {
+    program->record_runtime_submission_failure();
+    program->report_backend_runtime_error(error);
+  }
+  throw;
+} catch (...) {
+  Program *program = jit_graph_program(*this);
+  if (program != nullptr) {
+    program->record_runtime_submission_failure();
+  }
+  throw;
+}
+
 CompiledGraphStructuredResult
 CompiledGraph::jit_run_bounded_vulkan_cached(
     const CompileConfig &compile_config,
@@ -4321,7 +5381,8 @@ CompiledGraph::jit_run_bounded_vulkan_nested_cached(
     std::size_t outer_suffix_dispatch_begin,
     int outer_max_iterations,
     int inner_max_iterations,
-    int inner_chunk_size) const try {
+    int inner_chunk_size,
+    bool wait_for_result) const try {
   CompiledGraphNestedStructuredResult result;
 #if defined(TI_WITH_VULKAN)
   constexpr int kNestedMaximumOuterIterations = 64;
@@ -4463,16 +5524,20 @@ CompiledGraph::jit_run_bounded_vulkan_nested_cached(
       static_cast<std::uint32_t>(inner_chunk_size);
 
   gfx::GfxRuntime::GraphNestedStructuredResult gfx_result;
-  if (!try_run_vulkan_graph(
-          *this, compile_config, args, cache,
-          &program->runtime_statistics(), nullptr, nullptr, &control,
-          &gfx_result)) {
+  if (!try_run_vulkan_graph(*this, compile_config, args, cache,
+                            &program->runtime_statistics(), nullptr, nullptr,
+                            &control,
+                            wait_for_result ? &gfx_result : nullptr)) {
     return result;
   }
   program->mark_runtime_submission(
       RuntimeSubmissionKind::kGraphBackendSubmission);
   if (resource_guard) {
     resource_guard->finish_external_access_epoch();
+  }
+  if (!wait_for_result) {
+    result.submitted = true;
+    return result;
   }
   result.submitted = gfx_result.submitted;
   result.outer_logical_iterations =

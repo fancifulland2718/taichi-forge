@@ -2493,15 +2493,6 @@ bool GfxRuntime::try_launch_graph(
         GraphReplayFallbackReason::structural_unsupported;
     return false;
   }
-  // Nested structured replay is synchronous-only. Reject an observation-less
-  // request before any queue submission instead of letting the encoder assume
-  // that terminal observation storage exists.
-  if (nested_control != nullptr && nested_result == nullptr) {
-    state.last_path = GraphReplayLastPath::fallback;
-    state.last_fallback_reason =
-        GraphReplayFallbackReason::structural_unsupported;
-    return false;
-  }
   if (structured_control != nullptr && nested_control != nullptr) {
     state.last_path = GraphReplayLastPath::fallback;
     state.last_fallback_reason =
@@ -3309,9 +3300,14 @@ bool GfxRuntime::try_launch_graph(
       kStructuredChainedMaximumControlBytes) {
     return reject();
   }
+  // Nested replay uses the same device-side snapshot buffer for its gate
+  // controller even when the caller does not request an immediate host
+  // observation. Keeping that buffer internal lets asynchronous submission
+  // return after queueing while preserving exactly the same encoded control
+  // semantics as the synchronous diagnostic path.
   const bool structured_terminal_observation =
       (structured_control != nullptr && structured_result != nullptr) ||
-      (nested_control != nullptr && nested_result != nullptr);
+      nested_control != nullptr;
   const std::size_t structured_observation_bytes =
       !structured_terminal_observation
           ? 0

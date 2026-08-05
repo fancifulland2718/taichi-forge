@@ -1658,6 +1658,13 @@ def _cuda_bounded_update_policy():
     return requested, aliases[requested]
 
 
+def _cuda_nested_device_update_qualified():
+    if os.environ.get("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "0") == "1":
+        return False
+    capabilities = dict(_ti_core.cuda_bounded_dispatch_probe())
+    return bool(capabilities.get("exact_device_grid_available", False))
+
+
 def _vulkan_bounded_packet_policy():
     requested = os.environ.get(
         "TI_GRAPH_VULKAN_BOUNDED_PACKET_POLICY", "auto"
@@ -3108,6 +3115,9 @@ _BACKEND_GRAPH_PATHS = frozenset(
         "cuda_masked_capture",
         "cuda_masked_replay",
         "cuda_masked_patched_replay",
+        "cuda_device_update_nested_capture",
+        "cuda_device_update_nested_replay",
+        "cuda_device_update_nested_patched_replay",
         "vulkan_record",
         "vulkan_replay",
         "vulkan_patched_replay",
@@ -3119,6 +3129,8 @@ _BACKEND_REPLAY_PATHS = frozenset(
         "cuda_patched_replay",
         "cuda_masked_replay",
         "cuda_masked_patched_replay",
+        "cuda_device_update_nested_replay",
+        "cuda_device_update_nested_patched_replay",
         "vulkan_replay",
         "vulkan_patched_replay",
     )
@@ -3354,11 +3366,27 @@ def structured_control_capabilities():
     )
     compound_single_preparation = False
     structured_barrier_policy = "unavailable"
-    nested_native_compiled = hasattr(
-        _ti_core.CompiledGraph,
-        "jit_run_bounded_vulkan_nested_cached",
+    nested_native_compiled = bool(
+        (
+            arch == _ti_core.Arch.cuda
+            and hasattr(
+                _ti_core.CompiledGraph,
+                "jit_submit_bounded_cuda_nested_cached",
+            )
+        )
+        or (
+            arch == _ti_core.Arch.vulkan
+            and hasattr(
+                _ti_core.CompiledGraph,
+                "jit_run_bounded_vulkan_nested_cached",
+            )
+        )
     )
     nested_native = False
+    nested_cuda_device_update_candidate = False
+    nested_cuda_device_update_qualified = False
+    nested_cuda_device_update_forced_off = False
+    nested_async_route = "unavailable"
     if arch == _ti_core.Arch.cuda:
         cuda = dict(_ti_core.cuda_conditional_graph_capabilities())
         exact_compiled = bool(
@@ -3400,6 +3428,25 @@ def structured_control_capabilities():
         stops_command_issue_after_exit = using_exact
         exact_dynamic_termination = using_exact
         max_encoded_dispatches = 4096 if primitive == "cuda_masked_bounded_graph" else 0
+        nested_native = bool(native and nested_native_compiled)
+        nested_cuda_device_update_forced_off = os.environ.get("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "0") == "1"
+        nested_update = dict(_ti_core.cuda_bounded_dispatch_capabilities())
+        nested_cuda_device_update_candidate = bool(
+            not nested_cuda_device_update_forced_off
+            and nested_update.get("driver_version_eligible", False)
+            and nested_update.get("required_symbols_loaded", False)
+            and nested_update.get("device_update_ptx_compiled", False)
+        )
+        nested_cuda_device_update_qualified = bool(
+            nested_cuda_device_update_candidate and nested_update.get("setup_probe_passed", False)
+        )
+        if nested_native:
+            if nested_cuda_device_update_qualified:
+                nested_async_route = "cuda_device_node_update"
+            elif nested_cuda_device_update_candidate:
+                nested_async_route = "cuda_device_node_update_probe_then_masked_fallback"
+            else:
+                nested_async_route = "cuda_masked_bounded_graph"
         if native:
             reason = "none"
         elif not exact_compiled and not masked_compiled:
@@ -3481,6 +3528,8 @@ def structured_control_capabilities():
             and conditional_rendering_available
             and nested_native_compiled
         )
+        if nested_native:
+            nested_async_route = "vulkan_conditional_replay"
         reason = (
             "vulkan_if_switch_runtime_not_compiled"
             if vulkan_runtime_mode_qualified
@@ -3514,19 +3563,23 @@ def structured_control_capabilities():
             "nested_exact_portable": True,
             "nested_native_lowering": nested_native,
             "nested_native_lowering_compiled": nested_native_compiled,
-            "nested_native_kinds": (
-                ("while_while",) if nested_native else ()
+            "nested_native_kinds": (("while_while",) if nested_native else ()),
+            "nested_native_outer_iteration_limit": (64 if nested_native else 0),
+            "nested_native_inner_iteration_limit": (64 if nested_native else 0),
+            "nested_native_max_encoded_actions": (4096 if nested_native else 0),
+            "nested_native_stop_telemetry": bool(nested_native and arch == _ti_core.Arch.vulkan),
+            "nested_async_route": (nested_async_route if nested_native else "unavailable"),
+            "nested_cuda_device_update_candidate": (nested_cuda_device_update_candidate),
+            "nested_cuda_device_update_qualified": (nested_cuda_device_update_qualified),
+            "nested_cuda_device_update_forced_off": (nested_cuda_device_update_forced_off),
+            "nested_cuda_fallback_route": (
+                "cuda_masked_bounded_graph" if nested_native and arch == _ti_core.Arch.cuda else "unavailable"
             ),
-            "nested_native_outer_iteration_limit": (
-                64 if nested_native else 0
+            "nested_exact_dynamic_termination": False,
+            "nested_no_host_readback": nested_native,
+            "nested_submit_stop_observation": (
+                "device_terminal_packet_or_outer_suffix_trace" if nested_native else "unavailable"
             ),
-            "nested_native_inner_iteration_limit": (
-                64 if nested_native else 0
-            ),
-            "nested_native_max_encoded_actions": (
-                4096 if nested_native else 0
-            ),
-            "nested_native_stop_telemetry": nested_native,
             "nested_trace_uses_portable_execution": True,
             "nested_leaf_native_upgrade": native,
             "nested_leaf_native_kinds": (
@@ -3534,16 +3587,12 @@ def structured_control_capabilities():
                 if arch == _ti_core.Arch.cuda and native
                 else (("while",) if arch == _ti_core.Arch.vulkan and native else ())
             ),
-            "native_max_structured_depth": (
-                2 if nested_native else (1 if native else 0)
-            ),
-            "nested_async_submit": False,
+            "native_max_structured_depth": (2 if nested_native else (1 if native else 0)),
+            "nested_async_submit": nested_native,
             "structured_submit": structured_submit,
             "structured_submit_reason": structured_submit_reason,
             "parallel_indirect_dispatch": parallel_indirect_dispatch,
-            "parallel_indirect_dispatch_reason": (
-                parallel_indirect_dispatch_reason
-            ),
+            "parallel_indirect_dispatch_reason": (parallel_indirect_dispatch_reason),
             "compound_single_preparation": compound_single_preparation,
             "structured_barrier_policy": structured_barrier_policy,
             "compound_structured_submit": compound_structured_submit,
@@ -3556,9 +3605,7 @@ def structured_control_capabilities():
             "compound_per_region_chunk_size": compound_per_region_chunk_size,
             "compound_chunk_size_limit": compound_chunk_size_limit,
             "compound_first_chunk_strategies": compound_first_chunk_strategies,
-            "compound_default_first_chunk_strategy": (
-                compound_default_first_chunk_strategy
-            ),
+            "compound_default_first_chunk_strategy": (compound_default_first_chunk_strategy),
             "submission_ticket_region_telemetry": (submission_ticket_region_telemetry),
             "submission_ticket_queue_telemetry": (submission_ticket_queue_telemetry),
             "submission_ticket_gpu_timestamps": (submission_ticket_gpu_timestamps),
@@ -3567,14 +3614,8 @@ def structured_control_capabilities():
             "per_iteration_host_observation": False,
             "stops_command_issue_after_exit": stops_command_issue_after_exit,
             "exact_dynamic_termination": exact_dynamic_termination,
-            "exact_conditional_graph": (
-                arch == _ti_core.Arch.cuda
-                and primitive == "cuda_conditional_graph"
-            ),
-            "bounded_masked_graph": (
-                arch == _ti_core.Arch.cuda
-                and primitive == "cuda_masked_bounded_graph"
-            ),
+            "exact_conditional_graph": (arch == _ti_core.Arch.cuda and primitive == "cuda_conditional_graph"),
+            "bounded_masked_graph": (arch == _ti_core.Arch.cuda and primitive == "cuda_masked_bounded_graph"),
             "primitive": primitive,
             "skip_strategy": skip_strategy,
             "rhi_primitive_compiled": rhi_primitive_compiled,
@@ -3608,12 +3649,8 @@ def structured_control_capabilities():
                 else ()
             ),
             "chained_runtime_qualified": False,
-            "chained_max_encoded_dispatches": (
-                256 if arch == _ti_core.Arch.vulkan else 0
-            ),
-            "max_control_bytes_per_slot": (
-                64 * 1024 if arch == _ti_core.Arch.vulkan else 0
-            ),
+            "chained_max_encoded_dispatches": (256 if arch == _ti_core.Arch.vulkan else 0),
+            "max_control_bytes_per_slot": (64 * 1024 if arch == _ti_core.Arch.vulkan else 0),
             "unsupported_reason": reason,
         },
         "cuda_conditional_graph": cuda,
@@ -5283,11 +5320,6 @@ def _prepare_structured_definition(kind, name, lowering_mode, definition_regions
             "depth of 2"
         )
     nested = child_depth != 0
-    if nested and lowering_mode == "native_required":
-        raise TaichiRuntimeError(
-            f"Graph {kind} {name!r} contains nested structured control, "
-            "but nested native_required lowering is unavailable"
-        )
     if nested:
         for sequence in sequences:
             for node in _sequence_structured_nodes(sequence):
@@ -5317,7 +5349,7 @@ def _set_control_region_path(node, path, depth):
             )
 
 
-def _compile_vulkan_nested_while_runtime_node(
+def _compile_native_nested_while_runtime_node(
     condition,
     body,
     *,
@@ -5327,33 +5359,36 @@ def _compile_vulkan_nested_while_runtime_node(
     outer_status,
     outer_max_iterations,
 ):
-    """Build the strict depth-2 Vulkan while -> while replay program.
+    """Build the strict depth-2 while -> while backend replay program.
 
     The returned CGraph contains one copy of every static dispatch. Native
-    Vulkan lowering owns bounded command encoding; Python never expands the
-    outer x inner Cartesian product.
+    CUDA/Vulkan lowering owns bounded command encoding; Python never expands
+    the outer x inner Cartesian product.
     """
 
     def unavailable(reason):
         return None, None, None, reason
 
-    if impl.current_cfg().arch != _ti_core.Arch.vulkan:
-        return unavailable("backend_is_not_vulkan")
-    if not hasattr(
-        _ti_core.CompiledGraph,
-        "jit_run_bounded_vulkan_nested_cached",
-    ):
+    arch = impl.current_cfg().arch
+    if arch not in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan):
+        return unavailable("backend_is_not_cuda_or_vulkan")
+    binding = (
+        "jit_submit_bounded_cuda_nested_cached"
+        if arch == _ti_core.Arch.cuda
+        else "jit_run_bounded_vulkan_nested_cached"
+    )
+    if not hasattr(_ti_core.CompiledGraph, binding):
         return unavailable("nested_runtime_binding_unavailable")
     config = impl.current_cfg()
-    if config.kernel_profiler:
+    if arch == _ti_core.Arch.vulkan and config.kernel_profiler:
         return unavailable("kernel_profiler_enabled")
-    if config.vulkan_dispatch_cache:
+    if arch == _ti_core.Arch.vulkan and config.vulkan_dispatch_cache:
         return unavailable("vulkan_dispatch_cache_enabled")
     if outer_counter is None:
         return unavailable("outer_counter_required")
     if outer_max_iterations <= 0 or outer_max_iterations > 64:
         return unavailable("outer_iteration_budget_out_of_range")
-    if not impl.get_runtime().prog._vulkan_conditional_rendering_available():
+    if arch == _ti_core.Arch.vulkan and not impl.get_runtime().prog._vulkan_conditional_rendering_available():
         return unavailable("vulkan_conditional_rendering_unavailable")
 
     condition_pairs = tuple(zip(condition._items, condition._ir_nodes))
@@ -5446,7 +5481,7 @@ def _compile_vulkan_nested_while_runtime_node(
             suffix,
             condition,
         ),
-        name=f"{outer_name}_vulkan_nested",
+        name=f"{outer_name}_{_backend_name(_ti_core.arch_name(arch))}_nested",
         region_kind="while_nested",
         region_kinds=(
             "while_condition",
@@ -5647,13 +5682,12 @@ class _CompiledWhileGraphNode:
         self._vulkan_nested_inner = None
         self._vulkan_nested_boundaries = None
         self._vulkan_nested_reason = "not_nested"
+        self._cuda_nested = None
+        self._cuda_nested_inner = None
+        self._cuda_nested_boundaries = None
+        self._cuda_nested_reason = "not_nested"
         if self._has_nested_control and lowering_mode != "portable":
-            (
-                self._vulkan_nested,
-                self._vulkan_nested_inner,
-                self._vulkan_nested_boundaries,
-                self._vulkan_nested_reason,
-            ) = _compile_vulkan_nested_while_runtime_node(
+            nested = _compile_native_nested_while_runtime_node(
                 condition,
                 body,
                 outer_name=name,
@@ -5662,17 +5696,29 @@ class _CompiledWhileGraphNode:
                 outer_status=status,
                 outer_max_iterations=self.max_iterations,
             )
+            if arch == _ti_core.Arch.vulkan:
+                (
+                    self._vulkan_nested,
+                    self._vulkan_nested_inner,
+                    self._vulkan_nested_boundaries,
+                    self._vulkan_nested_reason,
+                ) = nested
+            elif arch == _ti_core.Arch.cuda:
+                (
+                    self._cuda_nested,
+                    self._cuda_nested_inner,
+                    self._cuda_nested_boundaries,
+                    self._cuda_nested_reason,
+                ) = nested
         elif self._has_nested_control:
             self._vulkan_nested_reason = "outer_portable_lowering_requested"
+            self._cuda_nested_reason = "outer_portable_lowering_requested"
         dependency_nodes = (
             self._condition,
             *self._chunks.values(),
-            *(
-                (self._vulkan_structured,)
-                if self._vulkan_structured is not None
-                else ()
-            ),
+            *((self._vulkan_structured,) if self._vulkan_structured is not None else ()),
             *((self._vulkan_nested,) if self._vulkan_nested is not None else ()),
+            *((self._cuda_nested,) if self._cuda_nested is not None else ()),
         )
         self.temporary_actions = _merge_temporary_actions(dependency_nodes)
         self.temporary_runtime_arg_names = frozenset().union(
@@ -5732,8 +5778,18 @@ class _CompiledWhileGraphNode:
             else None
         )
         if self._has_nested_control:
-            self._native_upgrade_eligible = False
-            self._native_upgrade_reason = "nested_structured_portable_exact"
+            nested_compiled = self._vulkan_nested is not None or self._cuda_nested is not None
+            self._native_upgrade_eligible = nested_compiled
+            self._native_upgrade_reason = (
+                "eligible_nested_bounded"
+                if nested_compiled
+                else (self._vulkan_nested_reason if arch == _ti_core.Arch.vulkan else self._cuda_nested_reason)
+            )
+            self._native_submission_eligible = nested_compiled
+            if lowering_mode == "native_required" and not nested_compiled:
+                raise TaichiRuntimeError(
+                    f"Graph while {name!r} native nested lowering unavailable: " f"{self._native_upgrade_reason}"
+                )
         if self._native_upgrade_eligible and self.counter is None:
             if lowering_mode == "native_required":
                 raise TaichiRuntimeError(
@@ -5748,17 +5804,9 @@ class _CompiledWhileGraphNode:
         return max(size for size in self._chunks if size <= remaining)
 
     def _mark_nested_portable(self):
-        if self.lowering_mode == "native_required":
-            raise TaichiRuntimeError(
-                f"Graph while {self.name!r} is nested at {self.region_path!r}, "
-                "but nested native_required lowering is unavailable"
-            )
-        # The enclosing control node remains an exact, host-observed parent,
-        # but a depth-2 leaf can reuse its already-qualified flat CUDA/Vulkan
-        # replay. Disabling the leaf replay turns outer x inner into one host
-        # synchronization per logical inner iteration, defeating the purpose
-        # of hierarchical control. This is a leaf upgrade, not native depth-2
-        # submission: the complete Graph still rejects submit().
+        # The enclosing control node owns native depth-2 lowering. Mark the
+        # child so portable synchronous execution may still reuse its flat
+        # backend replay when the parent itself is not submitted.
         self._nested_subregion = True
 
     @property
@@ -5766,7 +5814,7 @@ class _CompiledWhileGraphNode:
         if impl.current_cfg().arch in (_ti_core.Arch.x64, _ti_core.Arch.arm64):
             return self.lowering_mode in ("auto", "portable")
         return (
-            self.lowering_mode == "native_required"
+            self.lowering_mode in ("auto", "native_required")
             and self._native_upgrade_eligible
             and self.counter is not None
             and self._native_submission_eligible
@@ -5782,6 +5830,105 @@ class _CompiledWhileGraphNode:
             self.run(context, temporaries)
             return
         self._last_report = None
+        if self._has_nested_control:
+            runtime_args = context.runtime_args()
+            nested = self._vulkan_nested if impl.current_cfg().arch == _ti_core.Arch.vulkan else self._cuda_nested
+            inner = (
+                self._vulkan_nested_inner
+                if impl.current_cfg().arch == _ti_core.Arch.vulkan
+                else self._cuda_nested_inner
+            )
+            boundaries = (
+                self._vulkan_nested_boundaries
+                if impl.current_cfg().arch == _ti_core.Arch.vulkan
+                else self._cuda_nested_boundaries
+            )
+            if nested is None or inner is None or boundaries is None:
+                raise TaichiRuntimeError("Native nested Graph while submission became unavailable")
+
+            def control_ndarray(name):
+                if name is None:
+                    return None
+                return getattr(runtime_args[name], "arr", None)
+
+            outer_predicate = control_ndarray(self.predicate)
+            outer_counter = control_ndarray(self.counter)
+            outer_status = control_ndarray(self.status)
+            inner_predicate = control_ndarray(inner.predicate)
+            inner_counter = control_ndarray(inner.counter)
+            inner_status = control_ndarray(inner.status)
+            if any(
+                value is None
+                for value in (
+                    outer_predicate,
+                    outer_counter,
+                    inner_predicate,
+                    inner_counter,
+                )
+            ):
+                raise TaichiRuntimeError(
+                    "Native nested Graph while submission requires ndarray " "predicate and counter resources"
+                )
+            if (self.status is not None and outer_status is None) or (
+                inner.status is not None and inner_status is None
+            ):
+                raise TaichiRuntimeError("Native nested Graph while submission requires ndarray " "status resources")
+            (
+                outer_condition_count,
+                inner_condition_begin,
+                inner_body_begin,
+                outer_suffix_begin,
+            ) = boundaries
+            flattened_args = context.flattened_args(nested.recording_runtime_arg_names)
+            if impl.current_cfg().arch == _ti_core.Arch.vulkan:
+                result = dict(
+                    nested.compiled_graph.jit_run_bounded_vulkan_nested_cached(
+                        context.compile_config(),
+                        flattened_args,
+                        self._native_jit_cache,
+                        outer_predicate,
+                        outer_counter,
+                        inner_predicate,
+                        inner_counter,
+                        outer_condition_count,
+                        inner_condition_begin,
+                        inner_body_begin,
+                        outer_suffix_begin,
+                        self.max_iterations,
+                        inner.max_iterations,
+                        inner.compound_chunk_limit,
+                        outer_status,
+                        inner_status,
+                        False,
+                    )
+                )
+                submitted = bool(result.get("submitted", False))
+            else:
+                submitted = bool(
+                    nested.compiled_graph.jit_submit_bounded_cuda_nested_cached(
+                        context.compile_config(),
+                        flattened_args,
+                        self._native_jit_cache,
+                        outer_predicate,
+                        outer_counter,
+                        inner_predicate,
+                        inner_counter,
+                        outer_condition_count,
+                        inner_condition_begin,
+                        inner_body_begin,
+                        outer_suffix_begin,
+                        self.max_iterations,
+                        inner.max_iterations,
+                        outer_status,
+                        inner_status,
+                        _cuda_nested_device_update_qualified(),
+                    )
+                )
+            if not submitted:
+                raise TaichiRuntimeError(
+                    "Native nested Graph while submission became unavailable; " "synchronous fallback is disabled"
+                )
+            return
         if impl.current_cfg().arch == _ti_core.Arch.vulkan:
             if self.max_iterations == 0:
                 self._condition.run(context)
@@ -6508,6 +6655,7 @@ class _CompiledWhileGraphNode:
             and active
             and self.max_iterations > 0
             and self._native_upgrade_eligible
+            and not self._has_nested_control
         ):
             predicate_ndarray = getattr(predicate_object, "arr", None)
             if predicate_ndarray is None:
@@ -6665,12 +6813,14 @@ class _CompiledWhileGraphNode:
             self._vulkan_structured.invalidate_runtime()
         if self._vulkan_nested is not None:
             self._vulkan_nested.invalidate_runtime()
+        if self._cuda_nested is not None:
+            self._cuda_nested.invalidate_runtime()
 
     @property
     def debug_graph_stats(self):
         chunk_stats = tuple(node.debug_graph_stats for node in self._chunks.values())
         condition_stats = (self._condition.debug_graph_stats,)
-        if self._vulkan_nested is not None:
+        if self._vulkan_nested is not None or self._cuda_nested is not None:
             return (
                 self._native_jit_cache._debug_graph_stats(),
                 *condition_stats,
@@ -6704,11 +6854,13 @@ class _CompiledWhileGraphNode:
             "max_nested_depth": self.structured_depth,
             "nested_portable_exact": self._portable_exact_nested,
             "nested_subregion": self._nested_subregion,
-            "nested_leaf_native_upgrade_eligible": (
-                self._nested_subregion and self._native_upgrade_eligible
+            "nested_leaf_native_upgrade_eligible": (self._nested_subregion and self._native_upgrade_eligible),
+            "nested_native_upgrade_eligible": (self._vulkan_nested is not None or self._cuda_nested is not None),
+            "nested_native_upgrade_reason": (
+                self._vulkan_nested_reason
+                if impl.current_cfg().arch == _ti_core.Arch.vulkan
+                else self._cuda_nested_reason
             ),
-            "nested_native_upgrade_eligible": self._vulkan_nested is not None,
-            "nested_native_upgrade_reason": self._vulkan_nested_reason,
             "condition_dispatch_count": self.condition_dispatch_count,
             "body_dispatch_count": self.body_dispatch_count,
             "max_iterations": self.max_iterations,
@@ -8292,10 +8444,8 @@ class _GraphSpec:
 
     @property
     def supports_native_structured_submission(self):
-        structured_nodes = self.structured_control_nodes
-        return bool(structured_nodes) and all(
-            node.supports_native_submission for node in structured_nodes
-        )
+        structured_roots = tuple(node for node in self.structured_control_nodes if node.control_depth == 1)
+        return bool(structured_roots) and all(node.supports_native_submission for node in structured_roots)
 
     @property
     def pipeline_definition(self):

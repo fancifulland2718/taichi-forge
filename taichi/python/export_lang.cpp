@@ -3724,7 +3724,24 @@ void export_lang(py::module &m) {
     int outer_max_iterations{0};
     int inner_max_iterations{0};
     int inner_chunk_size{0};
+    bool wait_for_result{true};
     aot::CompiledGraphNestedStructuredResult *result{nullptr};
+  };
+
+  struct CudaNestedGraphRequest {
+    Ndarray *outer_predicate{nullptr};
+    Ndarray *outer_counter{nullptr};
+    Ndarray *outer_status{nullptr};
+    Ndarray *inner_predicate{nullptr};
+    Ndarray *inner_counter{nullptr};
+    Ndarray *inner_status{nullptr};
+    std::size_t outer_condition_dispatch_count{0};
+    std::size_t inner_condition_dispatch_begin{0};
+    std::size_t inner_body_dispatch_begin{0};
+    std::size_t outer_suffix_dispatch_begin{0};
+    int outer_max_iterations{0};
+    int inner_max_iterations{0};
+    bool allow_device_update{true};
   };
 
   auto jit_run_graph = [](aot::CompiledGraph *self,
@@ -3753,7 +3770,8 @@ void export_lang(py::module &m) {
                                *vulkan_chunk_strategies = nullptr,
                            const VulkanNestedGraphRequest
                                *vulkan_nested = nullptr,
-                           bool cuda_masked_control = false) -> bool {
+                           bool cuda_masked_control = false,
+         const CudaNestedGraphRequest *cuda_nested = nullptr) -> bool {
         std::unordered_map<std::string, aot::IValue> args;
         auto insert_scalar_arg = [&args](std::string arg_name,
                                          DataType expected_dtype,
@@ -3899,8 +3917,7 @@ void export_lang(py::module &m) {
         py::gil_scoped_release release;
         if (vulkan_nested != nullptr) {
           TI_ASSERT(cache != nullptr);
-          TI_ASSERT(vulkan_nested->result != nullptr);
-          *vulkan_nested->result =
+      auto result =
               self->jit_run_bounded_vulkan_nested_cached(
                   compile_config, args, *cache,
                   vulkan_nested->outer_predicate,
@@ -3915,8 +3932,27 @@ void export_lang(py::module &m) {
                   vulkan_nested->outer_suffix_dispatch_begin,
                   vulkan_nested->outer_max_iterations,
                   vulkan_nested->inner_max_iterations,
-                  vulkan_nested->inner_chunk_size);
+                  vulkan_nested->inner_chunk_size,
+          vulkan_nested->wait_for_result);
+      if (vulkan_nested->result != nullptr) {
+        *vulkan_nested->result = std::move(result);
           return vulkan_nested->result->submitted;
+      }
+      return result.submitted;
+    }
+    if (cuda_nested != nullptr) {
+      TI_ASSERT(cache != nullptr);
+      return self->jit_submit_bounded_cuda_nested_cached(
+          compile_config, args, *cache, cuda_nested->outer_predicate,
+          cuda_nested->outer_counter, cuda_nested->outer_status,
+          cuda_nested->inner_predicate, cuda_nested->inner_counter,
+          cuda_nested->inner_status,
+          cuda_nested->outer_condition_dispatch_count,
+          cuda_nested->inner_condition_dispatch_begin,
+          cuda_nested->inner_body_dispatch_begin,
+          cuda_nested->outer_suffix_dispatch_begin,
+          cuda_nested->outer_max_iterations, cuda_nested->inner_max_iterations,
+          cuda_nested->allow_device_update);
         }
         if (vulkan_chunk_iterations != nullptr) {
           TI_ASSERT(cache != nullptr);
@@ -4006,6 +4042,15 @@ void export_lang(py::module &m) {
               return "cuda_masked_replay";
             case aot::CompiledGraphExecutionPath::cuda_masked_patched_replay:
               return "cuda_masked_patched_replay";
+            case aot::CompiledGraphExecutionPath::
+                cuda_device_update_nested_capture:
+              return "cuda_device_update_nested_capture";
+            case aot::CompiledGraphExecutionPath::
+                cuda_device_update_nested_replay:
+              return "cuda_device_update_nested_replay";
+            case aot::CompiledGraphExecutionPath::
+                cuda_device_update_nested_patched_replay:
+              return "cuda_device_update_nested_patched_replay";
             case aot::CompiledGraphExecutionPath::vulkan_record:
               return "vulkan_record";
             case aot::CompiledGraphExecutionPath::vulkan_replay:
@@ -4411,7 +4456,8 @@ void export_lang(py::module &m) {
               std::size_t outer_suffix_dispatch_begin,
               int outer_max_iterations, int inner_max_iterations,
               int inner_chunk_size, Ndarray *outer_status,
-              Ndarray *inner_status) {
+              Ndarray *inner_status,
+              bool wait_for_result) {
             aot::CompiledGraphNestedStructuredResult result;
             VulkanNestedGraphRequest request;
             request.outer_predicate = &outer_predicate;
@@ -4431,14 +4477,15 @@ void export_lang(py::module &m) {
             request.outer_max_iterations = outer_max_iterations;
             request.inner_max_iterations = inner_max_iterations;
             request.inner_chunk_size = inner_chunk_size;
-            request.result = &result;
+            request.wait_for_result = wait_for_result;
+            request.result = wait_for_result ? &result : nullptr;
             jit_run_graph(
                 self, compile_config, pyargs, &cache, nullptr, 0,
                 true, nullptr, nullptr, -1, -1, nullptr, nullptr,
                 nullptr, 0, true, 0, nullptr, true, nullptr,
                 nullptr, &request);
             py::dict encoded;
-            encoded["submitted"] = result.submitted;
+            encoded["submitted"] = wait_for_result ? result.submitted : true;
             encoded["outer_logical_iterations"] =
                 result.outer_logical_iterations;
             encoded["outer_encoded_iterations"] =
@@ -4493,7 +4540,51 @@ void export_lang(py::module &m) {
           py::arg("inner_max_iterations"),
           py::arg("inner_chunk_size"),
           py::arg("outer_status") = nullptr,
-          py::arg("inner_status") = nullptr)
+          py::arg("inner_status") = nullptr, py::arg("wait_for_result") = true)
+      .def(
+          "jit_submit_bounded_cuda_nested_cached",
+          [jit_run_graph](
+              aot::CompiledGraph *self, const CompileConfig &compile_config,
+              const py::dict &pyargs, aot::CompiledGraphJITCache &cache,
+              Ndarray &outer_predicate, Ndarray &outer_counter,
+              Ndarray &inner_predicate, Ndarray &inner_counter,
+              std::size_t outer_condition_dispatch_count,
+              std::size_t inner_condition_dispatch_begin,
+              std::size_t inner_body_dispatch_begin,
+              std::size_t outer_suffix_dispatch_begin, int outer_max_iterations,
+              int inner_max_iterations, Ndarray *outer_status,
+              Ndarray *inner_status, bool allow_device_update) {
+            CudaNestedGraphRequest request;
+            request.outer_predicate = &outer_predicate;
+            request.outer_counter = &outer_counter;
+            request.outer_status = outer_status;
+            request.inner_predicate = &inner_predicate;
+            request.inner_counter = &inner_counter;
+            request.inner_status = inner_status;
+            request.outer_condition_dispatch_count =
+                outer_condition_dispatch_count;
+            request.inner_condition_dispatch_begin =
+                inner_condition_dispatch_begin;
+            request.inner_body_dispatch_begin = inner_body_dispatch_begin;
+            request.outer_suffix_dispatch_begin = outer_suffix_dispatch_begin;
+            request.outer_max_iterations = outer_max_iterations;
+            request.inner_max_iterations = inner_max_iterations;
+            request.allow_device_update = allow_device_update;
+            return jit_run_graph(self, compile_config, pyargs, &cache, nullptr,
+                                 0, true, nullptr, nullptr, -1, -1, nullptr,
+                                 nullptr, nullptr, 0, true, 0, nullptr, true,
+                                 nullptr, nullptr, nullptr, false, &request);
+          },
+          py::arg("compile_config"), py::arg("args"), py::arg("cache"),
+          py::arg("outer_predicate"), py::arg("outer_counter"),
+          py::arg("inner_predicate"), py::arg("inner_counter"),
+          py::arg("outer_condition_dispatch_count"),
+          py::arg("inner_condition_dispatch_begin"),
+          py::arg("inner_body_dispatch_begin"),
+          py::arg("outer_suffix_dispatch_begin"),
+          py::arg("outer_max_iterations"), py::arg("inner_max_iterations"),
+          py::arg("outer_status") = nullptr, py::arg("inner_status") = nullptr,
+          py::arg("allow_device_update") = true)
       .def("jit_run_conditional_cuda_cached",
            [jit_run_graph](aot::CompiledGraph *self,
                            const CompileConfig &compile_config,

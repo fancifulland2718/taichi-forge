@@ -161,6 +161,33 @@ STORE_SELECTOR:
     st.global.u32 [%rd2], %r8;
     ret;
 }
+
+.visible .entry graph_latch_nested_while(
+    .param .u64 parent_gate_param,
+    .param .u64 predicate_param,
+    .param .u64 gate_param,
+    .param .u32 continue_nonzero_param
+)
+{
+    .reg .pred %p<5>;
+    .reg .b32 %r<5>;
+    .reg .b64 %rd<4>;
+
+    ld.param.u64 %rd1, [parent_gate_param];
+    ld.param.u64 %rd2, [predicate_param];
+    ld.param.u64 %rd3, [gate_param];
+    ld.param.u32 %r1, [continue_nonzero_param];
+    ld.global.u32 %r2, [%rd1];
+    ld.global.u32 %r3, [%rd2];
+    setp.ne.u32 %p1, %r2, 0;
+    setp.ne.u32 %p2, %r1, 0;
+    @%p2 setp.ne.u32 %p3, %r3, 0;
+    @!%p2 setp.eq.u32 %p3, %r3, 0;
+    and.pred %p4, %p1, %p3;
+    selp.u32 %r4, 1, 0, %p4;
+    st.global.u32 [%rd3], %r4;
+    ret;
+}
 )ptx";
 
 const char kCudaGraphBoundedUpdatePtx[] = R"ptx(
@@ -422,6 +449,101 @@ GROUP_DONE:
     ret;
 }
 
+.visible .entry graph_update_predicate_group(
+    .param .u64 control_param
+)
+{
+    .reg .pred %p<12>;
+    .reg .b32 %r<16>;
+    .reg .b64 %rd<12>;
+    .param .b64 call_node;
+    .param .b32 call_enabled;
+    .param .b32 call_result;
+
+    mov.u32 %r1, %ctaid.x;
+    mov.u32 %r2, %tid.x;
+    or.b32 %r3, %r1, %r2;
+    setp.ne.u32 %p1, %r3, 0;
+    @%p1 bra PREDICATE_GROUP_DONE;
+
+    ld.param.u64 %rd1, [control_param];
+    ld.global.u64 %rd2, [%rd1+0];
+    ld.global.u64 %rd3, [%rd1+8];
+    ld.global.u64 %rd4, [%rd1+16];
+    ld.global.u64 %rd5, [%rd1+24];
+    ld.global.u32 %r4, [%rd1+32];
+    ld.global.u32 %r5, [%rd1+36];
+    ld.global.s32 %r6, [%rd2];
+
+    mov.u32 %r7, 1;
+    setp.eq.u64 %p2, %rd3, 0;
+    @!%p2 ld.global.u32 %r7, [%rd3];
+    setp.ne.u32 %p3, %r7, 0;
+    setp.ne.s32 %p4, %r6, 0;
+    selp.u32 %r8, 1, 0, %p4;
+    xor.b32 %r9, %r8, 1;
+    setp.ne.u32 %p5, %r5, 0;
+    selp.u32 %r10, %r8, %r9, %p5;
+    selp.u32 %r11, 1, 0, %p3;
+    and.b32 %r12, %r10, %r11;
+    st.global.u32 [%rd4], %r12;
+
+    mov.u32 %r13, 0;
+    st.global.u32 [%rd1+48], %r13;
+    ld.global.u32 %r14, [%rd1+52];
+    setp.eq.u32 %p6, %r14, 0;
+    @%p6 bra PREDICATE_GROUP_TELEMETRY_DONE;
+    ld.global.u64 %rd6, [%rd1+56];
+    add.u64 %rd6, %rd6, 1;
+    st.global.u64 [%rd1+56], %rd6;
+PREDICATE_GROUP_TELEMETRY_DONE:
+    ld.global.u32 %r7, [%rd1+40];
+    ld.global.u32 %r8, [%rd1+44];
+    setp.eq.u32 %p7, %r8, 0;
+    setp.ne.u32 %p8, %r7, %r12;
+    or.pred %p9, %p7, %p8;
+    @!%p9 bra PREDICATE_GROUP_DONE;
+    @%p6 bra PREDICATE_GROUP_CHANGE_RECORDED;
+    ld.global.u64 %rd7, [%rd1+64];
+    add.u64 %rd7, %rd7, 1;
+    st.global.u64 [%rd1+64], %rd7;
+PREDICATE_GROUP_CHANGE_RECORDED:
+    mov.u32 %r9, 0;
+
+PREDICATE_GROUP_LOOP:
+    setp.ge.u32 %p10, %r9, %r4;
+    @%p10 bra PREDICATE_GROUP_COMMIT;
+    cvt.u64.u32 %rd8, %r9;
+    shl.b64 %rd9, %rd8, 3;
+    add.u64 %rd10, %rd5, %rd9;
+    ld.global.u64 %rd11, [%rd10];
+    st.param.b64 [call_node], %rd11;
+    st.param.b32 [call_enabled], %r12;
+    call.uni (call_result), cudaGraphKernelNodeSetEnabled,
+        (call_node, call_enabled);
+    ld.param.b32 %r15, [call_result];
+    setp.ne.u32 %p11, %r15, 0;
+    @%p11 bra PREDICATE_GROUP_FAIL;
+    add.u32 %r9, %r9, 1;
+    bra PREDICATE_GROUP_LOOP;
+
+PREDICATE_GROUP_COMMIT:
+    st.global.u32 [%rd1+40], %r12;
+    mov.u32 %r10, 1;
+    st.global.u32 [%rd1+44], %r10;
+    @%p6 bra PREDICATE_GROUP_DONE;
+    cvt.u64.u32 %rd8, %r4;
+    ld.global.u64 %rd9, [%rd1+72];
+    add.u64 %rd9, %rd9, %rd8;
+    st.global.u64 [%rd1+72], %rd9;
+    bra PREDICATE_GROUP_DONE;
+
+PREDICATE_GROUP_FAIL:
+    st.global.u32 [%rd1+48], %r15;
+PREDICATE_GROUP_DONE:
+    ret;
+}
+
 .visible .entry graph_bounded_probe_payload(
     .param .u64 visited_param
 )
@@ -442,6 +564,7 @@ void *set_branch_conditional_func{nullptr};
 std::once_flag mask_module_once;
 void *mask_module{nullptr};
 void *latch_while_func{nullptr};
+void *latch_nested_while_func{nullptr};
 void *latch_branch_func{nullptr};
 
 std::once_flag bounded_module_once;
@@ -449,6 +572,7 @@ void *bounded_module{nullptr};
 void *bounded_update_func{nullptr};
 void *bounded_extent_update_func{nullptr};
 void *bounded_group_update_func{nullptr};
+void *predicate_group_update_func{nullptr};
 void *bounded_probe_payload_func{nullptr};
 std::uint32_t bounded_module_error{0};
 
@@ -479,6 +603,8 @@ void load_mask_module_once() {
                              nullptr);
   driver.module_get_function(&latch_while_func, mask_module,
                              "graph_latch_while");
+  driver.module_get_function(&latch_nested_while_func, mask_module,
+                             "graph_latch_nested_while");
   driver.module_get_function(&latch_branch_func, mask_module,
                              "graph_latch_branch");
 }
@@ -514,6 +640,12 @@ void load_bounded_module_once() {
     return;
   }
   bounded_module_error = driver.module_get_function.call(
+      &predicate_group_update_func, bounded_module,
+      "graph_update_predicate_group");
+  if (bounded_module_error != CUDA_SUCCESS) {
+    return;
+  }
+  bounded_module_error = driver.module_get_function.call(
       &bounded_probe_payload_func, bounded_module,
       "graph_bounded_probe_payload");
 }
@@ -527,6 +659,7 @@ bool ensure_bounded_module(std::uint32_t *driver_error) {
          bounded_update_func != nullptr &&
          bounded_extent_update_func != nullptr &&
          bounded_group_update_func != nullptr &&
+         predicate_group_update_func != nullptr &&
          bounded_probe_payload_func != nullptr;
 }
 
@@ -579,6 +712,18 @@ void driver_graph_latch_while(void *predicate,
   CUDAContext::get_instance().launch(latch_while_func, "cuda_graph_latch_while",
                                      {&predicate, &gate, &continue_arg}, {}, 1,
                                      1, 0, stream);
+}
+
+void driver_graph_latch_nested_while(void *parent_gate,
+                                     void *predicate,
+                                     void *gate,
+                                     bool continue_while_nonzero,
+                                     void *stream) {
+  ensure_mask_module();
+  std::uint32_t continue_arg = continue_while_nonzero ? 1u : 0u;
+  CUDAContext::get_instance().launch(
+      latch_nested_while_func, "cuda_graph_latch_nested_while",
+      {&parent_gate, &predicate, &gate, &continue_arg}, {}, 1, 1, 0, stream);
 }
 
 void driver_graph_latch_branch(void *selector,
@@ -635,6 +780,19 @@ void driver_graph_update_bounded_group(CudaGraphBoundedGroupControl *control,
   void *control_arg = control;
   CUDAContext::get_instance().launch(bounded_group_update_func,
                                      "cuda_graph_update_bounded_group",
+                                     {&control_arg}, {}, 1, 1, 0, stream);
+}
+
+void driver_graph_update_predicate_group(
+    CudaGraphPredicateGroupControl *control,
+    void *stream) {
+  std::uint32_t driver_error = CUDA_SUCCESS;
+  TI_ERROR_IF(!ensure_bounded_module(&driver_error),
+              "CUDA predicate Graph updater PTX failed to load: {}",
+              get_cuda_error_message(driver_error));
+  void *control_arg = control;
+  CUDAContext::get_instance().launch(predicate_group_update_func,
+                                     "cuda_graph_update_predicate_group",
                                      {&control_arg}, {}, 1, 1, 0, stream);
 }
 

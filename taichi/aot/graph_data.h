@@ -331,6 +331,9 @@ enum class CompiledGraphExecutionPath : uint8_t {
   cuda_masked_capture,
   cuda_masked_replay,
   cuda_masked_patched_replay,
+  cuda_device_update_nested_capture,
+  cuda_device_update_nested_replay,
+  cuda_device_update_nested_patched_replay,
   vulkan_record,
   vulkan_replay,
   vulkan_patched_replay,
@@ -620,6 +623,23 @@ struct TI_DLL_EXPORT CompiledGraph {
       Ndarray *predicate,
       int max_iterations,
       bool continue_while_nonzero) const;
+  bool jit_submit_bounded_cuda_nested_cached(
+      const CompileConfig &compile_config,
+      const std::unordered_map<std::string, IValue> &args,
+      CompiledGraphJITCache &cache,
+      Ndarray *outer_predicate,
+      Ndarray *outer_counter,
+      Ndarray *outer_status,
+      Ndarray *inner_predicate,
+      Ndarray *inner_counter,
+      Ndarray *inner_status,
+      std::size_t outer_condition_dispatch_count,
+      std::size_t inner_condition_dispatch_begin,
+      std::size_t inner_body_dispatch_begin,
+      std::size_t outer_suffix_dispatch_begin,
+      int outer_max_iterations,
+      int inner_max_iterations,
+      bool allow_device_update) const;
   CompiledGraphStructuredResult jit_run_bounded_vulkan_cached(
       const CompileConfig &compile_config,
       const std::unordered_map<std::string, IValue> &args,
@@ -642,8 +662,7 @@ struct TI_DLL_EXPORT CompiledGraph {
       std::size_t initial_dispatch_count,
       const std::vector<int> &chunk_iterations,
       const std::vector<std::uint32_t> &strategies) const;
-  CompiledGraphNestedStructuredResult
-  jit_run_bounded_vulkan_nested_cached(
+  CompiledGraphNestedStructuredResult jit_run_bounded_vulkan_nested_cached(
       const CompileConfig &compile_config,
       const std::unordered_map<std::string, IValue> &args,
       CompiledGraphJITCache &cache,
@@ -659,7 +678,8 @@ struct TI_DLL_EXPORT CompiledGraph {
       std::size_t outer_suffix_dispatch_begin,
       int outer_max_iterations,
       int inner_max_iterations,
-      int inner_chunk_size) const;
+      int inner_chunk_size,
+      bool wait_for_result = true) const;
   bool jit_run_conditional_cuda_cached(
       const CompileConfig &compile_config,
       const std::unordered_map<std::string, IValue> &args,

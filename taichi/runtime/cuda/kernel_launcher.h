@@ -100,6 +100,10 @@ class KernelLauncher : public LLVM::KernelLauncher {
                                          void *stream,
                                          void **device_node,
                                          std::uint32_t *driver_error);
+  bool capture_cuda_graph_updatable_launch(const GraphLaunchPacket &packet,
+                                           void *stream,
+                                           std::vector<void *> *device_nodes,
+                                           std::uint32_t *driver_error);
 
  private:
   bool prepare_cuda_graph_context(Handle handle,
