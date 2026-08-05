@@ -1,5 +1,6 @@
 // A LLVM JIT compiler for CPU archs wrapper
 
+#include <limits>
 #include <memory>
 
 #ifdef TI_WITH_LLVM
@@ -31,6 +32,8 @@
 #include "llvm/Support/DynamicLibrary.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/Memory.h"
+#include "llvm/Support/Process.h"
 #include "llvm/Target/TargetMachine.h"
 // PassManagerBuilder was removed in LLVM 17. jit_cpu.cpp never used it
 // directly (ORC's ConcurrentIRCompiler handles optimization on its own).
@@ -61,6 +64,177 @@ typedef orc::ObjectLinkingLayer ObjLayerT;
 #else
 typedef orc::RTDyldObjectLinkingLayer ObjLayerT;
 #endif
+#endif
+
+#if defined(TI_WITH_LLVM) && defined(_WIN32)
+namespace {
+
+class OrderedCoffSectionMemoryManager final : public RTDyldMemoryManager {
+ public:
+  ~OrderedCoffSectionMemoryManager() override {
+    deregisterEHFrames();
+  }
+
+  bool needsToReserveAllocationSpace() override {
+    return true;
+  }
+
+  void reserveAllocationSpace(uintptr_t code_size,
+                              Align code_align,
+                              uintptr_t ro_size,
+                              Align ro_align,
+                              uintptr_t rw_size,
+                              Align rw_align) override {
+    TI_ASSERT(allocation_.base() == nullptr);
+    const auto page_size =
+        static_cast<std::uintptr_t>(sys::Process::getPageSizeEstimate());
+    code_reserved_ = align_up(code_size, page_size);
+    ro_reserved_ = align_up(ro_size, page_size);
+    rw_reserved_ = align_up(rw_size, page_size);
+    const auto code_segment_align =
+        std::max<std::uintptr_t>(page_size, code_align.value());
+    const auto ro_segment_align =
+        std::max<std::uintptr_t>(page_size, ro_align.value());
+    const auto rw_segment_align =
+        std::max<std::uintptr_t>(page_size, rw_align.value());
+    std::uintptr_t total_size = 0;
+    add_allocation_size(total_size, code_reserved_, code_segment_align);
+    add_allocation_size(total_size, ro_reserved_, ro_segment_align);
+    add_allocation_size(total_size, rw_reserved_, rw_segment_align);
+    total_size = std::max(total_size, page_size);
+
+    std::error_code error;
+    auto block = sys::Memory::allocateMappedMemory(
+        total_size, nullptr,
+        sys::Memory::MF_READ | sys::Memory::MF_WRITE, error);
+    TI_ERROR_IF(error || block.base() == nullptr,
+                "Failed to reserve ordered COFF JIT memory: {}",
+                error.message());
+    allocation_ = sys::OwningMemoryBlock(block);
+
+    auto *allocation_begin = static_cast<std::uint8_t *>(allocation_.base());
+    auto *allocation_end = allocation_begin + total_size;
+    auto *code_begin = aligned_pointer(allocation_begin, code_segment_align);
+    auto *ro_begin = aligned_pointer(code_begin + code_reserved_,
+                                     ro_segment_align);
+    auto *rw_begin =
+        aligned_pointer(ro_begin + ro_reserved_, rw_segment_align);
+    TI_ASSERT(rw_begin <= allocation_end &&
+              rw_reserved_ <=
+                  static_cast<std::uintptr_t>(allocation_end - rw_begin));
+    code_ = {code_begin, code_begin, code_begin + code_reserved_};
+    ro_ = {ro_begin, ro_begin, ro_begin + ro_reserved_};
+    rw_ = {rw_begin, rw_begin, rw_begin + rw_reserved_};
+    code_.alignment = code_align.value();
+    ro_.alignment = ro_align.value();
+    rw_.alignment = rw_align.value();
+  }
+
+  std::uint8_t *allocateCodeSection(uintptr_t size,
+                                    unsigned alignment,
+                                    unsigned,
+                                    StringRef) override {
+    return allocate(code_, size, alignment);
+  }
+
+  std::uint8_t *allocateDataSection(uintptr_t size,
+                                    unsigned alignment,
+                                    unsigned,
+                                    StringRef,
+                                    bool read_only) override {
+    return allocate(read_only ? ro_ : rw_, size, alignment);
+  }
+
+  bool finalizeMemory(std::string *error_message = nullptr) override {
+    if (protect(code_.begin, code_reserved_,
+                sys::Memory::MF_READ | sys::Memory::MF_EXEC,
+                error_message)) {
+      return true;
+    }
+    if (protect(ro_.begin, ro_reserved_, sys::Memory::MF_READ,
+                error_message)) {
+      return true;
+    }
+    if (code_reserved_ != 0) {
+      sys::Memory::InvalidateInstructionCache(code_.begin, code_reserved_);
+    }
+    return false;
+  }
+
+ private:
+  struct Segment {
+    std::uint8_t *begin{nullptr};
+    std::uint8_t *cursor{nullptr};
+    std::uint8_t *end{nullptr};
+    std::uintptr_t alignment{1};
+  };
+
+  static std::uintptr_t align_up(std::uintptr_t value,
+                                 std::uintptr_t alignment) {
+    TI_ASSERT(alignment != 0 && (alignment & (alignment - 1)) == 0);
+    return (value + alignment - 1) & ~(alignment - 1);
+  }
+
+  static void add_allocation_size(std::uintptr_t &total,
+                                  std::uintptr_t size,
+                                  std::uintptr_t alignment) {
+    TI_ASSERT(alignment != 0 && (alignment & (alignment - 1)) == 0);
+    constexpr auto max_size = std::numeric_limits<std::uintptr_t>::max();
+    TI_ERROR_IF(size > max_size - total ||
+                    alignment - 1 > max_size - total - size,
+                "Ordered COFF JIT allocation size overflow");
+    total += size + alignment - 1;
+  }
+
+  static std::uint8_t *aligned_pointer(std::uint8_t *pointer,
+                                       std::uintptr_t alignment) {
+    return reinterpret_cast<std::uint8_t *>(
+        align_up(reinterpret_cast<std::uintptr_t>(pointer), alignment));
+  }
+
+  static std::uint8_t *allocate(Segment &segment,
+                                std::uintptr_t size,
+                                std::uintptr_t alignment) {
+    alignment = std::max<std::uintptr_t>(alignment, segment.alignment);
+    auto address = align_up(reinterpret_cast<std::uintptr_t>(segment.cursor),
+                            alignment);
+    auto *result = reinterpret_cast<std::uint8_t *>(address);
+    if (result < segment.begin || result > segment.end ||
+        size > static_cast<std::uintptr_t>(segment.end - result)) {
+      return nullptr;
+    }
+    segment.cursor = result + size;
+    return result;
+  }
+
+  static bool protect(std::uint8_t *begin,
+                      std::uintptr_t size,
+                      unsigned flags,
+                      std::string *error_message) {
+    if (size == 0) {
+      return false;
+    }
+    auto block = sys::MemoryBlock(begin, size);
+    const auto error = sys::Memory::protectMappedMemory(block, flags);
+    if (!error) {
+      return false;
+    }
+    if (error_message != nullptr) {
+      *error_message = error.message();
+    }
+    return true;
+  }
+
+  sys::OwningMemoryBlock allocation_;
+  Segment code_;
+  Segment ro_;
+  Segment rw_;
+  std::uintptr_t code_reserved_{0};
+  std::uintptr_t ro_reserved_{0};
+  std::uintptr_t rw_reserved_{0};
+};
+
+}  // namespace
 #endif
 
 std::pair<JITTargetMachineBuilder, llvm::DataLayout> get_host_target_info() {
@@ -106,7 +280,6 @@ class JITSessionCPU : public JITSession {
   std::mutex mut_;
   std::vector<llvm::orc::JITDylib *> all_libs_;
   int module_counter_;
-  SectionMemoryManager *memory_manager_;
 
  public:
   JITSessionCPU(TaichiLLVMContext *tlctx,
@@ -121,9 +294,12 @@ class JITSessionCPU : public JITSession {
 #else
         object_layer_(es_,
                       [&]() {
-                        auto smgr = std::make_unique<SectionMemoryManager>();
-                        memory_manager_ = smgr.get();
-                        return smgr;
+#if defined(_WIN32)
+                        return std::make_unique<
+                            OrderedCoffSectionMemoryManager>();
+#else
+                        return std::make_unique<SectionMemoryManager>();
+#endif
                       }),
 #endif
         compile_layer_(es_,
@@ -131,16 +307,8 @@ class JITSessionCPU : public JITSession {
                        std::make_unique<ConcurrentIRCompiler>(JTMB)),
         dl_(DL),
         mangle_(es_, this->dl_),
-        module_counter_(0),
-        memory_manager_(nullptr) {
+        module_counter_(0) {
     if (JTMB.getTargetTriple().isOSBinFormatCOFF()) {
-      // COFF IMAGE_REL_AMD64_ADDR32NB relocations use an image-relative
-      // offset. RuntimeDyld derives that image base from the sections handed
-      // to its memory manager; discarding non-executable sections can leave a
-      // referenced section without a load address after repeated JIT session
-      // creation. Keep the complete object layout on COFF so code, read-only
-      // and read-write sections remain in one ordered allocation domain.
-      object_layer_.setProcessAllSections(true);
       object_layer_.setOverrideObjectFlagsWithResponsibilityFlags(true);
       object_layer_.setAutoClaimResponsibilityForObjectSymbols(true);
     }
@@ -148,8 +316,6 @@ class JITSessionCPU : public JITSession {
 
   ~JITSessionCPU() override {
     std::lock_guard<std::mutex> _(mut_);
-    if (memory_manager_)
-      memory_manager_->deregisterEHFrames();
     if (auto Err = es_.endSession())
       es_.reportError(std::move(Err));
   }
@@ -197,12 +363,8 @@ class JITSessionCPU : public JITSession {
         std::find(all_libs_.begin(), all_libs_.end(), cpu_module->dylib_);
     TI_ASSERT(lib_it != all_libs_.end());
     cantFail(es_.removeJITDylib(*cpu_module->dylib_));
-    // RTDyldObjectLinkingLayer owns one SectionMemoryManager per object. The
-    // legacy raw pointer only supported an eager final deregistration, but it
-    // may point at the manager just destroyed by removeJITDylib(). Never keep
-    // that non-owning pointer across individual module retirement; ORC owns
-    // deregistration/destruction for the remaining runtime module.
-    memory_manager_ = nullptr;
+    // RTDyldObjectLinkingLayer owns the per-object memory manager and performs
+    // EH-frame deregistration before releasing it.
     all_libs_.erase(lib_it);
     modules.erase(module_it);
     return true;
