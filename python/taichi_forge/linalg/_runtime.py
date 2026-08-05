@@ -361,7 +361,9 @@ def _direct_scalar_storage_description(value, role, cache):
         if view is None or view._direct_storage_description is None:
             return None
         description = view._direct_storage_description
-        storage_kind = "dense_field"
+        storage_kind = (
+            "dense_field_range" if view.ranged else "dense_field"
+        )
         public = view
         alias_owner_key = view._alias_owner_key
 
@@ -448,7 +450,17 @@ def _prepare_vector_output(
 
 
 def _vector_operands_overlap(left, right):
-    return left.alias_owner_key == right.alias_owner_key
+    if left.alias_owner_key != right.alias_owner_key:
+        return False
+    if left.view is None or right.view is None:
+        return True
+    if left.view.indexed or right.view.indexed:
+        return True
+    left_storage = left.view._direct_storage_description
+    right_storage = right.view._direct_storage_description
+    if left_storage is None or right_storage is None:
+        return True
+    return analyze_storage_alias(left_storage, right_storage) != "kProvenDisjoint"
 
 
 def _vector_operands_exact(left, right):

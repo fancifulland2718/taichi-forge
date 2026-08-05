@@ -6466,9 +6466,16 @@ storage::ResolvedDenseBinding Program::resolve_dense_storage_descriptor(
     TI_ERROR_IF(anchor == nullptr || anchor->type != SNodeType::place,
                 "Dense storage binding anchor is no longer available");
     const DevicePtr field_ptr = get_dense_field_device_ptr(anchor);
-    TI_ERROR_IF(field_ptr.offset != binding.byte_offset,
-                "Dense storage binding offset no longer matches its SNode "
+    const std::uint64_t payload_begin = owner.snode_payload_byte_begin;
+    const std::uint64_t payload_end = owner.snode_payload_byte_end;
+    TI_ERROR_IF(field_ptr.offset != payload_begin,
+                "Dense storage binding base no longer matches its SNode "
                 "layout");
+    TI_ERROR_IF(payload_end < payload_begin ||
+                    binding.byte_offset < payload_begin ||
+                    binding.byte_offset > payload_end ||
+                    binding.byte_size > payload_end - binding.byte_offset,
+                "Dense storage range exceeds its SNode payload");
     binding.allocation = DeviceAllocation{field_ptr.device, field_ptr.alloc_id};
     dense_storage_field_bindings_.fetch_add(1, std::memory_order_relaxed);
   } else if (owner.kind == storage::StorageOwnerKind::kExternalManaged) {

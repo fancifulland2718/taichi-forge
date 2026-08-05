@@ -9,6 +9,7 @@ device resident throughout that conversion.
 from dataclasses import dataclass
 import hashlib
 import math
+import operator
 from types import MappingProxyType
 
 import numpy as np
@@ -19,6 +20,7 @@ from taichi_forge.lang._ndarray import ScalarNdarray
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang._storage_view import (
     _flatten_storage_to_scalar_vector,
+    _slice_storage_description,
     describe_storage,
 )
 from taichi_forge.lang.field import (
@@ -34,7 +36,7 @@ from taichi_forge.types import ndarray_type
 from taichi_forge.types.annotations import template
 
 
-_VECTOR_IO_SCHEMA = "taichi_forge.linalg.vector_io.v1"
+_VECTOR_IO_SCHEMA = "taichi_forge.linalg.vector_io.v2"
 _SUPPORTED_VALUE_DTYPES = (f32, f64)
 _IMPLICIT_VIEW_CACHE_LIMIT = 16
 _TRANSFER_PLAN_CACHE_LIMIT = 32
@@ -338,6 +340,74 @@ def _scatter_tensor_field(
     lanes = static(field.n if field.ndim == 1 else field.n * field.m)
     for index in range(indices.shape[0]):
         scalar_index = indices[index]
+        item_index = scalar_index // lanes
+        lane = scalar_index % lanes
+        _tensor_field_store_lane_flat(
+            field, item_index, lane, input_arr[index]
+        )
+
+
+@kernel
+def _gather_range_scalar_field(
+    field: template(),
+    offset: i32,
+    stride: i32,
+    output: ndarray_type.ndarray(ndim=1),
+):
+    for index in range(output.shape[0]):
+        output[index] = _scalar_field_load_flat(
+            field, offset + index * stride
+        )
+
+
+@kernel
+def _scatter_range_scalar_field(
+    input_arr: ndarray_type.ndarray(ndim=1),
+    offset: i32,
+    stride: i32,
+    field: template(),
+):
+    for index in range(input_arr.shape[0]):
+        _scalar_field_store_flat(
+            field, offset + index * stride, input_arr[index]
+        )
+
+
+@kernel
+def _gather_range_tensor_field(
+    field: template(),
+    offset: i32,
+    stride: i32,
+    output: ndarray_type.ndarray(ndim=1),
+):
+    lanes = static(field.n if field.ndim == 1 else field.n * field.m)
+    for index in range(output.shape[0]):
+        scalar_index = offset + index * stride
+        item_index = scalar_index // lanes
+        lane = scalar_index % lanes
+        value = _tensor_field_load_flat(field, item_index)
+        output[index] = 0
+        if static(field.ndim == 1):
+            for p in static(range(field.n)):
+                if lane == p:
+                    output[index] = value[p]
+        else:
+            for p in static(range(field.n)):
+                for q in static(range(field.m)):
+                    if lane == p * field.m + q:
+                        output[index] = value[p, q]
+
+
+@kernel
+def _scatter_range_tensor_field(
+    input_arr: ndarray_type.ndarray(ndim=1),
+    offset: i32,
+    stride: i32,
+    field: template(),
+):
+    lanes = static(field.n if field.ndim == 1 else field.n * field.m)
+    for index in range(input_arr.shape[0]):
+        scalar_index = offset + index * stride
         item_index = scalar_index // lanes
         lane = scalar_index % lanes
         _tensor_field_store_lane_flat(
@@ -696,7 +766,15 @@ class VectorView:
 
     _TOKEN = object()
 
-    def __init__(self, token, field, descriptor, indices, indices_digest):
+    def __init__(
+        self,
+        token,
+        field,
+        descriptor,
+        indices,
+        indices_digest,
+        range_spec=None,
+    ):
         if token is not self._TOKEN:
             raise TypeError("Use ti.linalg.vector_view()")
         self._field = field
@@ -704,6 +782,19 @@ class VectorView:
         self._indices = indices
         self._indexed = indices is not None
         self._indices_digest = indices_digest
+        self._range = range_spec
+        self._ranged = range_spec is not None
+        self._range_storage_description = None
+        if self._indexed and self._ranged:
+            raise TaichiRuntimeError(
+                "VectorView indices and scalar-flat range are mutually exclusive"
+            )
+        if self._ranged and descriptor.flat_storage_description is not None:
+            offset, length, stride = range_spec
+            self._range_storage_description = _slice_storage_description(
+                descriptor.flat_storage_description,
+                (slice(offset, offset + length * stride, stride),),
+            )
         self._program = _current_program()
         self._runtime_generation = int(impl.runtime_generation())
         self._retired = False
@@ -713,9 +804,11 @@ class VectorView:
         self.element_shape = descriptor.element_shape
         self.source_scalar_extent = descriptor.scalar_extent
         self.scalar_extent = (
-            descriptor.scalar_extent
-            if indices is None
-            else int(indices.shape[0])
+            int(indices.shape[0])
+            if indices is not None
+            else int(range_spec[1])
+            if range_spec is not None
+            else descriptor.scalar_extent
         )
         self.shape = (self.scalar_extent,)
         impl.get_runtime().register_runtime_object(self)
@@ -725,9 +818,19 @@ class VectorView:
         return self._indexed
 
     @property
+    def ranged(self):
+        return self._ranged
+
+    @property
+    def range(self):
+        return self._range
+
+    @property
     def _direct_storage_description(self):
         if self.indexed:
             return None
+        if self.ranged:
+            return self._range_storage_description
         return self._descriptor.flat_storage_description
 
     @property
@@ -744,6 +847,8 @@ class VectorView:
                 "layout_kind": (
                     "indexed_scalar_flat"
                     if self.indexed
+                    else "range_scalar_flat"
+                    if self.ranged
                     else "full_scalar_flat"
                 ),
                 "execution_mode": (
@@ -759,6 +864,8 @@ class VectorView:
                 "index_validation": (
                     "host_once_immutable_snapshot"
                     if self.indexed
+                    else "host_once_immutable_bounds"
+                    if self.ranged
                     else "not_applicable"
                 ),
                 "dtype": str(self.dtype),
@@ -771,6 +878,7 @@ class VectorView:
                 "byte_offset": self._descriptor.byte_offset,
                 "item_stride": self._descriptor.item_stride,
                 "indices_digest": self._indices_digest,
+                "range": self._range,
             }
         )
 
@@ -780,9 +888,15 @@ class VectorView:
 
     @property
     def _exact_view_key(self):
+        if self.indexed:
+            topology = ("indices", self._indices_digest)
+        elif self.ranged:
+            topology = ("range", *self._range)
+        else:
+            topology = ("full",)
         return (
             self._descriptor.alias_owner_key,
-            self._indices_digest if self.indexed else None,
+            topology,
         )
 
     def _ensure_valid(self, role="VectorView"):
@@ -827,6 +941,16 @@ class VectorView:
                 _gather_scalar_field(self._field, self._indices, output)
             else:
                 _gather_tensor_field(self._field, self._indices, output)
+        elif self.ranged:
+            offset, _, stride = self._range
+            if self._descriptor.storage_kind == "dense_scalar":
+                _gather_range_scalar_field(
+                    self._field, offset, stride, output
+                )
+            else:
+                _gather_range_tensor_field(
+                    self._field, offset, stride, output
+                )
         elif self._descriptor.storage_kind == "dense_scalar":
             _pack_scalar_field(self._field, output)
         else:
@@ -839,28 +963,97 @@ class VectorView:
                 _scatter_scalar_field(input_arr, self._indices, self._field)
             else:
                 _scatter_tensor_field(input_arr, self._indices, self._field)
+        elif self.ranged:
+            offset, _, stride = self._range
+            if self._descriptor.storage_kind == "dense_scalar":
+                _scatter_range_scalar_field(
+                    input_arr, offset, stride, self._field
+                )
+            else:
+                _scatter_range_tensor_field(
+                    input_arr, offset, stride, self._field
+                )
         elif self._descriptor.storage_kind == "dense_scalar":
             _unpack_scalar_field(input_arr, self._field)
         else:
             _unpack_tensor_field(input_arr, self._field)
 
 
-def vector_view(field, *, indices=None):
+def _normalize_scalar_flat_range(offset, length, stride, extent):
+    range_requested = offset is not None or length is not None or stride != 1
+    if not range_requested:
+        return None
+    if offset is None or length is None:
+        raise TaichiRuntimeError(
+            "vector_view scalar-flat range requires both offset and length"
+        )
+
+    values = []
+    for name, value in (
+        ("offset", offset),
+        ("length", length),
+        ("stride", stride),
+    ):
+        if isinstance(value, bool):
+            raise TaichiRuntimeError(f"vector_view {name} must be an integer")
+        try:
+            value = operator.index(value)
+        except TypeError as exc:
+            raise TaichiRuntimeError(
+                f"vector_view {name} must be an integer"
+            ) from exc
+        values.append(int(value))
+    offset, length, stride = values
+    if offset < 0:
+        raise TaichiRuntimeError("vector_view offset must be non-negative")
+    if length <= 0:
+        raise TaichiRuntimeError("vector_view length must be positive")
+    if stride <= 0:
+        raise TaichiRuntimeError("vector_view stride must be positive")
+    last = offset + (length - 1) * stride
+    if last >= int(extent):
+        raise TaichiRuntimeError(
+            "vector_view scalar-flat range exceeds source extent "
+            f"{extent}: offset={offset}, length={length}, stride={stride}"
+        )
+    return offset, length, stride
+
+
+def vector_view(field, *, indices=None, offset=None, length=None, stride=1):
     """Returns a scalar-flat, runtime-bound view of a dense Taichi field.
 
     ``indices`` is an optional one-dimensional ``ti.i32`` ndarray or dense
     scalar field.  It is validated and snapshotted at construction, so the view
     has immutable subset topology.  Indices address the source field's
     canonical scalar-flat order and must be in range and unique.
+
+    ``offset`` and ``length`` optionally select an immutable scalar-flat range;
+    ``stride`` defaults to one. Range arguments are mutually exclusive with
+    ``indices`` and are validated without reading Field values.
     """
 
     if isinstance(field, VectorView):
-        if indices is not None:
+        if (
+            indices is not None
+            or offset is not None
+            or length is not None
+            or stride != 1
+        ):
             raise TaichiRuntimeError(
-                "indices cannot be supplied when field is already a VectorView"
+                "indices or range arguments cannot be supplied when field is "
+                "already a VectorView"
             )
         return field._ensure_valid()
     descriptor = _describe_value_field(field, "vector_view field")
+    if indices is not None and (
+        offset is not None or length is not None or stride != 1
+    ):
+        raise TaichiRuntimeError(
+            "vector_view indices and scalar-flat range are mutually exclusive"
+        )
+    range_spec = _normalize_scalar_flat_range(
+        offset, length, stride, descriptor.scalar_extent
+    )
     indices_snapshot = None
     indices_digest = None
     if indices is not None:
@@ -873,6 +1066,7 @@ def vector_view(field, *, indices=None):
         descriptor,
         indices_snapshot,
         indices_digest,
+        range_spec,
     )
 
 
@@ -916,6 +1110,7 @@ class _NativeVectorTransfer:
         if (
             not allow_native_bulk
             or view.indexed
+            or view.ranged
             or not _native_transfer_arch_supported()
             or not hasattr(program, method_name)
             or descriptor.item_stride
@@ -985,6 +1180,7 @@ class _CompiledVectorTransfer:
 
         self._field = view._field
         self._indices = view._indices
+        self._range = view.range
         self._staging = staging
         self._exact_view_key = view._exact_view_key
         self._direction = direction
@@ -1022,6 +1218,41 @@ class _CompiledVectorTransfer:
                 "indices": self._indices,
                 "staging": self._staging,
             }
+        elif view.ranged:
+            offset_arg = Arg(ArgKind.SCALAR, "offset", i32)
+            stride_arg = Arg(ArgKind.SCALAR, "stride", i32)
+            if direction == "pack":
+                transfer_kernel = (
+                    _gather_range_scalar_field
+                    if view._descriptor.storage_kind == "dense_scalar"
+                    else _gather_range_tensor_field
+                )
+                builder.dispatch(
+                    transfer_kernel,
+                    offset_arg,
+                    stride_arg,
+                    staging_arg,
+                    template_args=template_args,
+                )
+            else:
+                transfer_kernel = (
+                    _scatter_range_scalar_field
+                    if view._descriptor.storage_kind == "dense_scalar"
+                    else _scatter_range_tensor_field
+                )
+                builder.dispatch(
+                    transfer_kernel,
+                    staging_arg,
+                    offset_arg,
+                    stride_arg,
+                    template_args=template_args,
+                )
+            offset, _, stride = self._range
+            self._arguments = {
+                "offset": offset,
+                "stride": stride,
+                "staging": self._staging,
+            }
         else:
             if direction == "pack":
                 transfer_kernel = (
@@ -1048,6 +1279,7 @@ class _CompiledVectorTransfer:
             direction == self._direction
             and view._field is self._field
             and view._indices is self._indices
+            and view.range == self._range
             and view._exact_view_key == self._exact_view_key
             and staging is self._staging
         )
@@ -1078,11 +1310,17 @@ def vector_io_capabilities():
             "layouts": (
                 "root_dense_scalar_1d_2d_3d",
                 "root_dense_packed_vector_matrix_1d_2d_3d",
+                "range_scalar_flat",
                 "indexed_scalar_flat",
             ),
             "index_topology": "immutable_validated_snapshot",
             "index_validation": "host_once_at_view_construction",
             "indexed_output_policy": "unique_indices_required",
+            "range_topology": "immutable_validated_affine",
+            "range_validation": "host_once_at_view_construction",
+            "range_direct_condition": (
+                "stride=1 and compact scalar-flat storage"
+            ),
             "value_host_transfer": False,
             "staging_reuse": "operator_or_plan_owned",
             "conversion_scope": "apply_or_solve_boundary_only",
@@ -1091,11 +1329,12 @@ def vector_io_capabilities():
             ),
             "zero_copy": False,
             "zero_copy_condition": (
-                "canonical full field and provider dense_storage_operands"
+                "canonical full field or contiguous scalar-flat range and "
+                "provider dense_storage_operands"
             ),
             "solve_direct_binding_scope": (
                 "CUDA/Vulkan recordable f32 CG/PCG with contiguous full-field "
-                "RHS, solution, or initial guess"
+                "or scalar-flat range RHS, solution, or initial guess"
             ),
             "solve_direct_binding_semantics": (
                 "Graph-fused boundary copy into plan-owned iterative storage"
@@ -1135,6 +1374,8 @@ class _VectorIOCache:
             "unpack_calls": 0,
             "indexed_gather_calls": 0,
             "indexed_scatter_calls": 0,
+            "range_gather_calls": 0,
+            "range_scatter_calls": 0,
             "packed_logical_bytes": 0,
             "unpacked_logical_bytes": 0,
             "direct_bindings": 0,
@@ -1143,6 +1384,7 @@ class _VectorIOCache:
             "direct_graph_solve_submissions": 0,
             "direct_graph_solve_full_boundary_submissions": 0,
             "direct_graph_solve_field_bindings": 0,
+            "direct_graph_solve_range_bindings": 0,
             "direct_graph_solve_initial_guess_bindings": 0,
             "direct_storage_operand_builds": 0,
             "direct_storage_operand_reuses": 0,
@@ -1229,8 +1471,14 @@ class _VectorIOCache:
         self._stats["packed_logical_bytes"] += logical_bytes
         if view.indexed:
             self._stats["indexed_gather_calls"] += 1
+        elif view.ranged:
+            self._stats["range_gather_calls"] += 1
         self._stats["last_input_storage"] = (
-            "indexed_dense_field" if view.indexed else "dense_field"
+            "indexed_dense_field"
+            if view.indexed
+            else "range_dense_field"
+            if view.ranged
+            else "dense_field"
         )
         self._stats["last_input_execution_mode"] = "device_staged"
         return staging
@@ -1242,8 +1490,14 @@ class _VectorIOCache:
         self._stats["unpacked_logical_bytes"] += logical_bytes
         if view.indexed:
             self._stats["indexed_scatter_calls"] += 1
+        elif view.ranged:
+            self._stats["range_scatter_calls"] += 1
         self._stats["last_output_storage"] = (
-            "indexed_dense_field" if view.indexed else "dense_field"
+            "indexed_dense_field"
+            if view.indexed
+            else "range_dense_field"
+            if view.ranged
+            else "dense_field"
         )
         self._stats["last_output_execution_mode"] = "device_staged"
 
@@ -1318,7 +1572,12 @@ class _VectorIOCache:
         self._stats["direct_graph_solve_submissions"] += 1
         self._stats["direct_bindings"] += len(direct_operands)
         self._stats["direct_graph_solve_field_bindings"] += sum(
-            operand.storage_kind == "dense_field" for operand in direct_operands
+            operand.storage_kind in ("dense_field", "dense_field_range")
+            for operand in direct_operands
+        )
+        self._stats["direct_graph_solve_range_bindings"] += sum(
+            operand.storage_kind == "dense_field_range"
+            for operand in direct_operands
         )
         self._stats["direct_graph_solve_initial_guess_bindings"] += int(
             initial_operand is not None and initial_operand.direct_dense
@@ -1331,7 +1590,12 @@ class _VectorIOCache:
             self._stats["last_output_execution_mode"] = public_mode(output_operand.execution_mode)
         if input_operand.direct_dense and output_operand.direct_dense:
             self._stats["direct_graph_solve_full_boundary_submissions"] += 1
-            if input_operand.storage_kind == output_operand.storage_kind == "dense_field":
+            if (
+                input_operand.storage_kind
+                in ("dense_field", "dense_field_range")
+                and output_operand.storage_kind
+                in ("dense_field", "dense_field_range")
+            ):
                 self._stats["direct_dense_field_submissions"] += 1
             else:
                 self._stats["direct_dense_view_submissions"] += 1

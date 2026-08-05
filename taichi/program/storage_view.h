@@ -132,6 +132,8 @@ struct StorageOwnerRef {
   SNodeTreeDependency tree;
   int anchor_snode_id{-1};
   std::vector<int> component_snode_ids;
+  std::uint64_t snode_payload_byte_begin{0};
+  std::uint64_t snode_payload_byte_end{0};
   std::uint64_t external_owner_domain{0};
   std::uint32_t external_slot{0};
   std::uint32_t external_generation{0};
@@ -141,7 +143,9 @@ struct StorageOwnerRef {
   static StorageOwnerRef snode_payload(std::uint64_t program_domain,
                                        SNodeTreeDependency tree,
                                        int anchor_snode_id,
-                                       std::vector<int> component_snode_ids);
+                                       std::vector<int> component_snode_ids,
+                                       std::uint64_t payload_byte_begin,
+                                       std::uint64_t payload_byte_end);
   static StorageOwnerRef external_managed(std::uint64_t owner_domain,
                                           std::uint32_t slot,
                                           std::uint32_t generation);

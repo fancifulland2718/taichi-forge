@@ -56,6 +56,8 @@ void fingerprint_owner(std::uint64_t &value,
       for (int component : owner.component_snode_ids) {
         fingerprint_integer(value, component);
       }
+      fingerprint_integer(value, owner.snode_payload_byte_begin);
+      fingerprint_integer(value, owner.snode_payload_byte_end);
       break;
     case StorageOwnerKind::kExternalManaged:
       fingerprint_integer(value, owner.external_owner_domain);
@@ -366,13 +368,17 @@ StorageOwnerRef StorageOwnerRef::snode_payload(
     std::uint64_t program_domain,
     SNodeTreeDependency tree,
     int anchor_snode_id,
-    std::vector<int> component_snode_ids) {
+    std::vector<int> component_snode_ids,
+    std::uint64_t payload_byte_begin,
+    std::uint64_t payload_byte_end) {
   StorageOwnerRef owner;
   owner.kind = StorageOwnerKind::kSNodePayload;
   owner.program_domain = program_domain;
   owner.tree = tree;
   owner.anchor_snode_id = anchor_snode_id;
   owner.component_snode_ids = std::move(component_snode_ids);
+  owner.snode_payload_byte_begin = payload_byte_begin;
+  owner.snode_payload_byte_end = payload_byte_end;
   return owner;
 }
 
@@ -401,7 +407,8 @@ bool StorageOwnerRef::valid() const noexcept {
       return program_domain != 0 && ndarray_handle;
     case StorageOwnerKind::kSNodePayload:
       return program_domain != 0 && tree.tree_id >= 0 && tree.generation != 0 &&
-             anchor_snode_id >= 0;
+             anchor_snode_id >= 0 &&
+             snode_payload_byte_end >= snode_payload_byte_begin;
     case StorageOwnerKind::kExternalManaged:
       return external_owner_domain != 0 && external_generation != 0;
     case StorageOwnerKind::kSubmissionScopedHost:
@@ -423,7 +430,9 @@ bool StorageOwnerRef::same_logical_owner(
     case StorageOwnerKind::kSNodePayload:
       return program_domain == other.program_domain && tree == other.tree &&
              anchor_snode_id == other.anchor_snode_id &&
-             component_snode_ids == other.component_snode_ids;
+             component_snode_ids == other.component_snode_ids &&
+             snode_payload_byte_begin == other.snode_payload_byte_begin &&
+             snode_payload_byte_end == other.snode_payload_byte_end;
     case StorageOwnerKind::kExternalManaged:
       return external_owner_domain == other.external_owner_domain &&
              external_slot == other.external_slot &&
@@ -1273,10 +1282,26 @@ DenseStorageBuildResult describe_dense_field_storage(
   const StorageSourceKind source_kind =
       components.size() == 1 ? StorageSourceKind::kDenseScalarField
                              : StorageSourceKind::kDensePackedField;
+  // Establish the complete payload window once, before any derived slice
+  // changes the descriptor's reachable range. Derived descriptors preserve
+  // the owner and therefore cannot make a subrange appear to be a new field
+  // base. Resolution revalidates both this frozen window and the live SNode
+  // anchor/generation on every submission.
+  auto provisional = build_dense_storage_descriptor(
+      StorageOwnerRef::snode_payload(
+          program.runtime_program_generation(), dependencies.front(),
+          anchor->id, component_ids, field_offset, field_offset),
+      source_kind, layout);
+  if (!provisional) {
+    return provisional;
+  }
+  const auto &payload = provisional.descriptor->properties();
   return build_dense_storage_descriptor(
-      StorageOwnerRef::snode_payload(program.runtime_program_generation(),
-                                     dependencies.front(), anchor->id,
-                                     std::move(component_ids)),
+      StorageOwnerRef::snode_payload(
+          program.runtime_program_generation(), dependencies.front(),
+          anchor->id, std::move(component_ids),
+          static_cast<std::uint64_t>(payload.reachable_begin),
+          static_cast<std::uint64_t>(payload.reachable_end)),
       source_kind, layout);
 }
 

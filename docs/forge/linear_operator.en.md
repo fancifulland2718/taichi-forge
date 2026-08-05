@@ -98,6 +98,23 @@ solution_view = ti.linalg.vector_view(solution, indices=indices)
 result = active_plan.solve(rhs_view, out=solution_view)
 ```
 
+For a continuous participant-owned interval, use an immutable scalar-flat
+range instead of an index map:
+
+```python
+rhs_view = ti.linalg.vector_view(rhs, offset=offset, length=count)
+solution_view = ti.linalg.vector_view(solution, offset=offset, length=count)
+```
+
+`offset`, `length`, and `stride` are host-known integers interpreted after the
+field has been flattened in canonical scalar order. `offset >= 0`,
+`length > 0`, and `stride > 0`; the final selected scalar must remain in the
+source extent. Range arguments and `indices` are mutually exclusive. A
+`stride=1` compact range preserves a direct dense-storage descriptor and can
+bind the qualified CUDA/Vulkan Graph Krylov boundary without a gather or
+scatter. `stride>1` remains a device-staged affine view and is never reported
+as direct contiguous storage.
+
 `indices` may be a one-dimensional `ti.i32` ndarray or root-dense scalar field.
 View construction copies, validates, and freezes the index topology. Indices
 must be nonempty, in the source scalar-extent range, and unique. Later mutation
@@ -137,13 +154,14 @@ never inside a Krylov iteration. A field `out` is unpacked or scattered before
 the synchronous API returns.
 
 CUDA/Vulkan recordable f32 CG/PCG has a narrower direct-binding path for
-canonical compact full-field RHS, output, and initial guess operands. The Field
+canonical compact full-field or `stride=1` scalar-range RHS, output, and
+initial-guess operands. The Field
 is a runtime argument of the solver Graph; its preamble and epilogue copy the
 boundary values to and from one plan-owned ndarray used by the recurrence. This
 removes separate pack/unpack submissions, one completion synchronization, and
 one of the two boundary staging vectors. It is not provider-native zero-copy:
 the iterative solution deliberately remains ndarray-backed so Field/SNode
-addressing is not repeated in every Krylov update. Indexed, offset, padded,
+addressing is not repeated in every Krylov update. Indexed, strided, padded,
 masked, or scatter views retain the reusable staging path.
 
 RHS/input may not overlap output. An `initial_guess` or `addend` may be the exact

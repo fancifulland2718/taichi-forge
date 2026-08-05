@@ -210,6 +210,33 @@ TEST(StorageViewTest, FingerprintContainsStableOwnerAndLogicalMapping) {
             different_owner.descriptor->fingerprint());
 }
 
+TEST(StorageViewTest, SNodePayloadWindowIsPartOfLogicalOwnerIdentity) {
+  SNodeTreeDependency tree{3, 7, 11};
+  auto first = StorageOwnerRef::snode_payload(17, tree, 23, {23}, 64, 128);
+  auto same = StorageOwnerRef::snode_payload(17, tree, 23, {23}, 64, 128);
+  auto different_window =
+      StorageOwnerRef::snode_payload(17, tree, 23, {23}, 64, 132);
+  auto invalid_window =
+      StorageOwnerRef::snode_payload(17, tree, 23, {23}, 128, 64);
+
+  EXPECT_TRUE(first.valid());
+  EXPECT_TRUE(first.same_logical_owner(same));
+  EXPECT_FALSE(first.same_logical_owner(different_window));
+  EXPECT_TRUE(first.same_physical_owner(different_window));
+  EXPECT_FALSE(invalid_window.valid());
+
+  auto first_descriptor = build_f32(
+      {4}, {4}, {}, {}, 64, first,
+      StorageSourceKind::kDenseScalarField);
+  auto different_descriptor = build_f32(
+      {4}, {4}, {}, {}, 64, different_window,
+      StorageSourceKind::kDenseScalarField);
+  ASSERT_TRUE(first_descriptor);
+  ASSERT_TRUE(different_descriptor);
+  EXPECT_NE(first_descriptor.descriptor->fingerprint(),
+            different_descriptor.descriptor->fingerprint());
+}
+
 TEST(StorageViewTest, LogicalAliasAnalysisIsTriState) {
   RuntimeResourceHandle handle{51, 7, 0, 1};
   RuntimeResourceHandle other_handle{51, 7, 1, 1};

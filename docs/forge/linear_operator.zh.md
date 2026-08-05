@@ -84,6 +84,20 @@ solution_view = ti.linalg.vector_view(solution, indices=indices)
 result = active_plan.solve(rhs_view, out=solution_view)
 ```
 
+participant 拥有连续区间时，应使用 immutable scalar-flat range，而不是构造 index map：
+
+```python
+rhs_view = ti.linalg.vector_view(rhs, offset=offset, length=count)
+solution_view = ti.linalg.vector_view(solution, offset=offset, length=count)
+```
+
+`offset`、`length` 与 `stride` 是 host-known integer，在 field 按 canonical scalar
+顺序 flatten 后解释。要求 `offset >= 0`、`length > 0`、`stride > 0`，最后一个选中
+scalar 必须仍在 source extent 内；range 参数与 `indices` 互斥。compact field 上
+`stride=1` 的 range 保留 direct dense-storage descriptor，可以直接绑定通过资格验证的
+CUDA/Vulkan Graph Krylov boundary，不产生 gather/scatter。`stride>1` 仍是 device-staged
+affine view，且绝不会报告为 direct contiguous storage。
+
 `indices` 可以是一维 `ti.i32` ndarray 或 root-dense scalar field。构造 view 时会复制、
 检查并冻结 index topology；index 必须非空、在 source scalar extent 范围内且唯一。
 后续修改原始 indices 不会改变既有 view。该构造执行一次显式 host validation；vector
@@ -116,12 +130,12 @@ scalar ndarray result -> device unpack or scatter -> dense field/view
 复用兼容的 staging ndarray；warm solve 不重新分配，转换只发生在 apply/solve 边界，不进入
 Krylov iteration。field `out` 会在同步 API 返回前完成 unpack/scatter。
 
-CUDA/Vulkan 上可录制的 f32 CG/PCG 对 canonical compact full-field RHS、output 与
-initial guess 提供更窄的 direct-binding 路径。Field 直接成为 solver Graph 的 runtime
+CUDA/Vulkan 上可录制的 f32 CG/PCG 对 canonical compact full-field 或 `stride=1`
+scalar-range RHS、output 与 initial guess 提供更窄的 direct-binding 路径。Field 直接成为 solver Graph 的 runtime
 argument；Graph preamble/epilogue 把边界值复制到一个 plan-owned recurrence ndarray，或从中
 写回 Field。它会删除独立 pack/unpack submission、一次 completion sync 和两个 boundary
 staging vector 中的一个，但不是 provider-native zero-copy：iteration solution 有意保持
-ndarray backing，避免每次 Krylov update 重复 Field/SNode 寻址。indexed、offset、padded、
+ndarray backing，避免每次 Krylov update 重复 Field/SNode 寻址。indexed、strided、padded、
 masked 或 scatter view 继续使用可复用 staging。
 
 RHS/input 不能与 output 重叠；`initial_guess` 或 `addend` 可以与 output 是精确相同的 view，

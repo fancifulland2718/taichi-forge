@@ -143,7 +143,8 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
     assert capabilities["ndarray"]["zero_copy"] is True
     assert capabilities["dense_field"]["zero_copy"] is False
     assert capabilities["dense_field"]["zero_copy_condition"] == (
-        "canonical full field and provider dense_storage_operands"
+        "canonical full field or contiguous scalar-flat range and provider "
+        "dense_storage_operands"
     )
     assert capabilities["dense_field"]["solve_direct_binding_semantics"] == (
         "Graph-fused boundary copy into plan-owned iterative storage"
@@ -518,6 +519,173 @@ def test_packed_vector_and_matrix_fields_use_scalar_flat_lane_order():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_scalar_flat_range_views_apply_and_preserve_disjoint_storage():
+    source_values = np.arange(12, dtype=np.float32)
+    storage = ti.field(ti.f32, shape=12)
+    storage.from_numpy(source_values)
+
+    source_view = ti.linalg.vector_view(
+        storage, offset=1, length=4
+    )
+    output_view = ti.linalg.vector_view(
+        storage, offset=7, length=4
+    )
+    assert source_view.metadata["layout_kind"] == "range_scalar_flat"
+    assert source_view.metadata["range"] == (1, 4, 1)
+    assert source_view.metadata["index_validation"] == (
+        "host_once_immutable_bounds"
+    )
+    assert source_view.scalar_extent == 4
+    assert source_view.source_scalar_extent == 12
+
+    operator = _compiled_identity(4)
+    assert operator.apply(source_view, out=output_view) is output_view
+    expected = source_values.copy()
+    expected[7:11] = source_values[1:5]
+    np.testing.assert_array_equal(storage.to_numpy(), expected)
+
+    with pytest.raises(RuntimeError, match="input/output aliasing"):
+        operator.apply(
+            ti.linalg.vector_view(storage, offset=1, length=4),
+            out=ti.linalg.vector_view(storage, offset=3, length=4),
+        )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_scalar_flat_range_views_cross_packed_lanes_and_stage_stride():
+    values = np.arange(18, dtype=np.float32).reshape(6, 3)
+    source = ti.Vector.field(3, ti.f32, shape=6)
+    output = ti.Vector.field(3, ti.f32, shape=6)
+    source.from_numpy(values)
+    output.fill(-1)
+
+    contiguous_source = ti.linalg.vector_view(
+        source, offset=2, length=7
+    )
+    contiguous_output = ti.linalg.vector_view(
+        output, offset=5, length=7
+    )
+    _compiled_identity(7).apply(contiguous_source, out=contiguous_output)
+    expected = np.full(values.size, -1, dtype=np.float32)
+    expected[5:12] = values.reshape(-1)[2:9]
+    np.testing.assert_array_equal(output.to_numpy().reshape(-1), expected)
+
+    strided_output = ti.Vector.field(3, ti.f32, shape=6)
+    strided_output.fill(-1)
+    strided_source_view = ti.linalg.vector_view(
+        source, offset=1, length=5, stride=3
+    )
+    strided_output_view = ti.linalg.vector_view(
+        strided_output, offset=2, length=5, stride=3
+    )
+    operator = _compiled_identity(5)
+    operator.apply(strided_source_view, out=strided_output_view)
+    expected = np.full(values.size, -1, dtype=np.float32)
+    expected[[2, 5, 8, 11, 14]] = values.reshape(-1)[[1, 4, 7, 10, 13]]
+    np.testing.assert_array_equal(
+        strided_output.to_numpy().reshape(-1), expected
+    )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_solveplan_contiguous_range_direct_and_strided_range_staged():
+    values = np.asarray([1.0, -2.0, 3.0, 4.0], dtype=np.float32)
+    source = ti.field(ti.f32, shape=12)
+    output = ti.field(ti.f32, shape=12)
+    source.fill(0)
+    output.fill(-1)
+    source.from_numpy(
+        np.asarray([0, 0, *values, 0, 0, 0, 0, 0, 0], dtype=np.float32)
+    )
+    rhs = ti.linalg.vector_view(source, offset=2, length=4)
+    solution = ti.linalg.vector_view(output, offset=5, length=4)
+    plan = ti.linalg.experimental.SolvePlan(
+        _compiled_identity(4),
+        method="cg",
+        max_iterations=8,
+        atol=1e-6,
+        execution_policy=(
+            "device_convergent"
+            if impl.current_cfg().arch in (ti.cuda, ti.vulkan)
+            else None
+        ),
+    )
+
+    result = plan.solve(rhs, out=solution)
+    assert result.converged
+    np.testing.assert_allclose(
+        output.to_numpy()[5:9], values, rtol=1e-6, atol=1e-6
+    )
+    stats = plan.statistics()["vector_io"]
+    if impl.current_cfg().arch in (ti.cuda, ti.vulkan):
+        assert stats["direct_graph_solve_submissions"] == 1
+        assert stats["direct_graph_solve_range_bindings"] == 2
+        assert stats["range_gather_calls"] == 0
+        assert stats["range_scatter_calls"] == 0
+    else:
+        assert stats["range_gather_calls"] == 1
+        assert stats["range_scatter_calls"] == 1
+
+    strided_source = ti.field(ti.f32, shape=12)
+    strided_output = ti.field(ti.f32, shape=12)
+    strided_source.from_numpy(
+        np.asarray([1, 0, -2, 0, 3, 0, 4, 0, 0, 0, 0, 0], dtype=np.float32)
+    )
+    strided_output.fill(-1)
+    strided_plan = ti.linalg.experimental.SolvePlan(
+        _compiled_identity(4), method="cg", max_iterations=8, atol=1e-6
+    )
+    strided_result = strided_plan.solve(
+        ti.linalg.vector_view(
+            strided_source, offset=0, length=4, stride=2
+        ),
+        out=ti.linalg.vector_view(
+            strided_output, offset=1, length=4, stride=2
+        ),
+    )
+    assert strided_result.converged
+    np.testing.assert_allclose(
+        strided_output.to_numpy()[[1, 3, 5, 7]],
+        values,
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    strided_stats = strided_plan.statistics()["vector_io"]
+    assert strided_stats["range_gather_calls"] == 1
+    assert strided_stats["range_scatter_calls"] == 1
+    assert strided_stats["direct_graph_solve_range_bindings"] == 0
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_scalar_flat_range_view_validation():
+    field = ti.field(ti.f32, shape=8)
+    indices = ti.ndarray(ti.i32, shape=2)
+    indices.from_numpy(np.asarray([0, 1], dtype=np.int32))
+
+    invalid = (
+        ({"offset": 1}, "both offset and length"),
+        ({"length": 1}, "both offset and length"),
+        ({"offset": -1, "length": 1}, "non-negative"),
+        ({"offset": 0, "length": 0}, "positive"),
+        ({"offset": 0, "length": 1, "stride": 0}, "positive"),
+        ({"offset": 7, "length": 2}, "exceeds source extent"),
+        ({"offset": True, "length": 1}, "must be an integer"),
+    )
+    for kwargs, message in invalid:
+        with pytest.raises(RuntimeError, match=message):
+            ti.linalg.vector_view(field, **kwargs)
+
+    with pytest.raises(RuntimeError, match="mutually exclusive"):
+        ti.linalg.vector_view(
+            field, indices=indices, offset=0, length=2
+        )
+    with pytest.raises(RuntimeError, match="already a VectorView"):
+        ti.linalg.vector_view(
+            ti.linalg.vector_view(field), offset=0, length=2
+        )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_stored_csr_dense_field_path_is_provider_qualified():
     dense = np.asarray(
         [[3.0, -1.0, 0.0], [0.5, 2.0, 1.0], [0.0, -2.0, 4.0]],
@@ -648,6 +816,17 @@ def test_dense_vector_view_validation_alias_and_tree_lifetime():
     tree.destroy()
     with pytest.raises(RuntimeError, match="destroyed SNodeTree"):
         operator.apply(stale_view)
+
+    ranged_field = ti.field(ti.f32)
+    ranged_builder = ti.FieldsBuilder()
+    ranged_builder.dense(ti.i, 6).place(ranged_field)
+    ranged_tree = ranged_builder.finalize()
+    stale_range = ti.linalg.vector_view(
+        ranged_field, offset=1, length=4
+    )
+    ranged_tree.destroy()
+    with pytest.raises(RuntimeError, match="destroyed SNodeTree"):
+        operator.apply(stale_range)
 
     replacement_field = ti.field(ti.f32)
     replacement_builder = ti.FieldsBuilder()
