@@ -130,15 +130,27 @@ scalar ndarray result -> device unpack or scatter -> dense field/view
 ```
 
 This includes indexed views, padded or non-compact fields, generalized apply,
-`out=None`, and every `SolvePlan.solve()` field boundary. Each operator or plan
-owns and reuses compatible staging ndarrays. A warm solve does not allocate
-staging, and conversions occur only at apply/solve boundaries, never inside a
-Krylov iteration. A field `out` is unpacked or scattered before the synchronous
-API returns. RHS/input may not overlap output. An `initial_guess` or `addend`
-may be the exact same view as output; nonexact overlap fails. Stable raw-field
-bindings are qualified once per operator or plan and then reuse the same
-implicit view and transfer plan. Native bulk transfer is used where the backend
-supports it; other staged layouts use compiled conversion Graph replay.
+`out=None`, and `SolvePlan.solve()` outside the qualified Graph Krylov scope.
+Each operator or plan owns and reuses compatible staging ndarrays. A warm solve
+does not allocate staging, and conversions occur only at apply/solve boundaries,
+never inside a Krylov iteration. A field `out` is unpacked or scattered before
+the synchronous API returns.
+
+CUDA/Vulkan recordable f32 CG/PCG has a narrower direct-binding path for
+canonical compact full-field RHS, output, and initial guess operands. The Field
+is a runtime argument of the solver Graph; its preamble and epilogue copy the
+boundary values to and from one plan-owned ndarray used by the recurrence. This
+removes separate pack/unpack submissions, one completion synchronization, and
+one of the two boundary staging vectors. It is not provider-native zero-copy:
+the iterative solution deliberately remains ndarray-backed so Field/SNode
+addressing is not repeated in every Krylov update. Indexed, offset, padded,
+masked, or scatter views retain the reusable staging path.
+
+RHS/input may not overlap output. An `initial_guess` or `addend` may be the exact
+same view as output; nonexact overlap fails. Stable raw-field bindings are
+qualified once per operator or plan and then reuse the same implicit view and
+transfer plan or Graph runtime binding. Native bulk transfer is used where the
+backend supports it; other staged layouts use compiled conversion Graph replay.
 
 Capabilities and actual conversion costs are observable:
 
@@ -154,10 +166,13 @@ the requested operation still decide execution. Statistics report direct
 dense-field submissions, staging builds/reuses/reserved bytes, implicit-view
 and transfer-plan builds/reuses/evictions, native/Graph transfer submissions,
 pack/unpack and indexed gather/scatter calls, logical bytes, direct ndarray
-bindings, completion synchronizations, and coalesced operator
-synchronizations. `execution_mode="device_staged"` means the field API is
-supported without moving vector values through the host; it does not mean
-provider-native zero-copy.
+bindings, direct Graph-solve boundary submissions and bindings, completion
+synchronizations, and coalesced operator synchronizations.
+`execution_capabilities()["direct_dense_field_solve"]` distinguishes support,
+enablement, and whether the latest solve selected a complete direct Field
+boundary. `execution_mode="device_staged"` means the field API is supported
+without moving vector values through the host; it does not mean provider-native
+zero-copy.
 
 ## Stored operator and CG
 
@@ -888,14 +903,15 @@ synchronization. The Graph terminates at the exact logical iteration, so this
 path has no masked tail work, and a persistent plan replays the cached
 executable while its topology, workspace, and output binding remain stable.
 
-For qualified Vulkan compiled-kernel CG/PCG, the structured Graph owns the
-same complete recurrence region but uses compact device masking rather than
-dynamic command-stream termination. Logical convergence is exact; an encoded
-block may retain an inactive tail. The provider action, dense ndarray
-workspaces, predicate, counter, status, and reduction buffers have fixed
-runtime bindings. Dense fields remain a public solve-boundary format: values
-are packed to and unpacked from those device workspaces only at the solve
-boundary, never within a Krylov iteration.
+For qualified CUDA/Vulkan recordable compiled-kernel or composition CG/PCG, the
+structured Graph owns the complete recurrence region. Vulkan uses compact
+device masking rather than dynamic command-stream termination, so logical
+convergence is exact while an encoded block may retain an inactive tail. The
+provider action, dense ndarray workspaces, predicate, counter, status, and
+reduction buffers have fixed runtime bindings. Canonical compact full Fields
+bind to the Graph preamble/epilogue described above; other supported Fields use
+separate staging. Neither route moves Field/ndarray values inside a Krylov
+iteration.
 
 FGMRES action tables use direct native submission on both GPU backends. No
 identity-GMRES replay path is silently reused for a variable action schedule.

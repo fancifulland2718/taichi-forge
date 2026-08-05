@@ -528,14 +528,31 @@ When upgrading an existing 0.5.0 application, check the following:
   f32 CSR/BSR CG/PCG retains its automatic conditional-Graph upgrade. The new
   `linear_operator_graph_krylov_bench.py` reports build, first, warm, profiler,
   terminal, and true-residual evidence per policy.
+- Qualified CUDA/Vulkan recordable f32 CG/PCG plans now bind canonical compact
+  full-field RHS, output, and initial-guess operands as solver-Graph runtime
+  arguments. The Graph preamble/epilogue moves boundary values through one
+  plan-owned iterative ndarray, removing separate pack/unpack submissions, one
+  completion synchronization, and one of the former two boundary staging
+  vectors. This is a Graph-fused boundary path, not provider-native zero-copy;
+  indexed/non-compact layouts and other solver/provider combinations remain
+  staged. New telemetry distinguishes support, enablement, latest full-boundary
+  selection, direct bindings, and fallback transfers. In a local Windows
+  qualification with ten effective CG iterations, repeated 262,144-scalar
+  composition runs reduced warm median latency by 2.3%–4.3% on CUDA and
+  3.9%–11.2% on Vulkan; 2,304-scalar runs were about 4.1%–4.2% and
+  10.3%–11.1%. These measurements establish the local crossover and observed
+  desktop-run spread, not a universal speedup.
+  `linear_operator_graph_field_solve_bench.py` provides the paired
+  ndarray/forced-staging/direct test.
 - `ti.linalg.LinearOperator.apply()` and single-system `SolvePlan.solve()` accept
   supported 1D/2D/3D root-dense scalar, Vector, and Matrix fields. Overwrite
   `LinearOperator.apply()` directly binds canonical compact full fields for
   compiled-kernel and compiled-Graph providers on CPU/CUDA/Vulkan, and for
   fixed native CSR/BSR providers on CPU/CUDA. Generalized apply forms, Vulkan
-  native sparse providers, indexed/non-compact views, and all
-  `SolvePlan.solve()` field boundaries use reusable device staging. Warm solves
-  do not allocate staging, and conversion never enters a Krylov iteration.
+  native sparse providers, indexed/non-compact views, and SolvePlan combinations
+  outside the qualified recordable f32 CG/PCG scope use reusable device staging.
+  Warm solves do not allocate staging, and conversion never enters a Krylov
+  iteration.
   Stable raw-field bindings reuse qualified implicit views and transfer plans;
   execution telemetry distinguishes direct submissions from native or compiled
   Graph pack/unpack paths.

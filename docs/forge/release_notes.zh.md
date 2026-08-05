@@ -392,13 +392,26 @@
   摊销仍由 workload 显式决定。stored f32 CSR/BSR CG/PCG 继续保留自动
   conditional-Graph upgrade。新增 `linear_operator_graph_krylov_bench.py`，按 policy 报告
   build、first、warm、profiler、terminal 与真实 residual 证据。
+- CUDA/Vulkan 上满足资格的 recordable f32 CG/PCG plan 现在会把 canonical compact
+  full-field RHS、output 与 initial guess 绑定为 solver Graph runtime argument。Graph
+  preamble/epilogue 通过一个 plan-owned iterative ndarray 搬运边界值，删除独立
+  pack/unpack submission、一次 completion sync 和原有两个 boundary staging vector 中的
+  一个。这是 Graph-fused boundary 路径，不是 provider-native zero-copy；indexed/non-compact
+  layout 与其它 solver/provider 组合继续 staging。新增 telemetry 会区分能力支持、启用状态、
+  最近一次完整边界选择、direct binding 与 fallback transfer。在本地 Windows、10 次有效 CG
+  的资格测试中，重复 262,144 scalar composition 的 warm median 在 CUDA/Vulkan 上分别
+  降低 2.3%–4.3%/3.9%–11.2%；2,304 scalar 时分别约为 4.1%–4.2%/10.3%–11.1%。
+  这些数字同时呈现本机 crossover 与桌面运行波动，不是无条件提速承诺。新增
+  `linear_operator_graph_field_solve_bench.py` 提供
+  ndarray/forced-staging/direct 配对测试。
 - `ti.linalg.LinearOperator.apply()` 与单系统 `SolvePlan.solve()` 接受受支持的
   1D/2D/3D root-dense scalar、Vector 和 Matrix field。overwrite
   `LinearOperator.apply()` 可在 CPU/CUDA/Vulkan 的 compiled-kernel 与
   compiled-Graph provider 上直接绑定 canonical compact full field，fixed native
   CSR/BSR provider 则覆盖 CPU/CUDA。generalized apply、Vulkan native sparse
-  provider、indexed/non-compact view 以及全部 `SolvePlan.solve()` field 边界使用可复用
-  device staging。warm solve 不重新分配 staging，转换不会进入 Krylov iteration。
+  provider、indexed/non-compact view，以及不属于 recordable f32 CG/PCG 资格范围的
+  SolvePlan 组合使用可复用 device staging。warm solve 不重新分配 staging，转换不会进入
+  Krylov iteration。
   稳定 raw-field binding 复用已验证的 implicit view 与 transfer plan；执行 telemetry
   明确区分 direct submission、native pack/unpack 和 compiled Graph pack/unpack 路径。
 - 新增 runtime-bound `VectorView` 与 `vector_view(field, indices=...)`，用于声明经过

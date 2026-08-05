@@ -112,12 +112,22 @@ scalar ndarray result -> device unpack or scatter -> dense field/view
 ```
 
 这包括 indexed view、padded 或 non-compact field、generalized apply、`out=None`，以及
-全部 `SolvePlan.solve()` field 边界。每个 operator/plan 持有并复用兼容的 staging
-ndarray；warm solve 不重新分配，转换只发生在 apply/solve 边界，不进入 Krylov
-iteration。field `out` 会在同步 API 返回前完成 unpack/scatter。RHS/input 不能与 output
-重叠；`initial_guess` 或 `addend` 可以与 output 是精确相同的 view，非精确重叠会失败。
-稳定 raw field binding 只完成一次资格解析，并复用 implicit view 与 transfer plan；backend
-支持时使用 native bulk transfer，其它 staged layout 使用 compiled conversion Graph replay。
+不属于 Graph Krylov 资格范围的 `SolvePlan.solve()` field 边界。每个 operator/plan 持有并
+复用兼容的 staging ndarray；warm solve 不重新分配，转换只发生在 apply/solve 边界，不进入
+Krylov iteration。field `out` 会在同步 API 返回前完成 unpack/scatter。
+
+CUDA/Vulkan 上可录制的 f32 CG/PCG 对 canonical compact full-field RHS、output 与
+initial guess 提供更窄的 direct-binding 路径。Field 直接成为 solver Graph 的 runtime
+argument；Graph preamble/epilogue 把边界值复制到一个 plan-owned recurrence ndarray，或从中
+写回 Field。它会删除独立 pack/unpack submission、一次 completion sync 和两个 boundary
+staging vector 中的一个，但不是 provider-native zero-copy：iteration solution 有意保持
+ndarray backing，避免每次 Krylov update 重复 Field/SNode 寻址。indexed、offset、padded、
+masked 或 scatter view 继续使用可复用 staging。
+
+RHS/input 不能与 output 重叠；`initial_guess` 或 `addend` 可以与 output 是精确相同的 view，
+非精确重叠会失败。稳定 raw field binding 只完成一次资格解析，并复用 implicit view、
+transfer plan 或 Graph runtime binding；backend 支持时使用 native bulk transfer，其它 staged
+layout 使用 compiled conversion Graph replay。
 
 可以查询支持面和实际转换开销：
 
@@ -131,8 +141,10 @@ stats = plan.statistics()["vector_io"]
 flatten；实际执行仍由 provider capability 与本次 operation 决定。`stats` 报告 direct
 dense-field submission、staging build/reuse/reserved bytes、implicit view 与 transfer plan
 的 build/reuse/eviction、native/Graph transfer submission、pack/unpack、indexed
-gather/scatter、logical bytes、direct ndarray binding、completion sync 和合并的 operator
-sync 次数。
+gather/scatter、logical bytes、direct ndarray binding、direct Graph-solve boundary
+submission/binding、completion sync 和合并的 operator sync 次数。
+`execution_capabilities()["direct_dense_field_solve"]` 会区分能力是否支持、是否启用，以及
+最近一次 solve 是否真正选中了完整 direct Field 边界。
 `execution_mode="device_staged"` 表示支持 field API 且数值不经过 host；它不等同于
 provider-native zero-copy。
 
@@ -767,12 +779,12 @@ terminal state 观察，但迭代内部不再执行逐轮 host scalar reduction 
 Graph 在精确的逻辑 iteration 上终止，因此不会产生 masked tail work；只要 topology、
 workspace 与 output binding 保持稳定，persistent plan 就会复用同一 executable。
 
-对于资格满足的 Vulkan compiled-kernel CG/PCG，结构化 Graph 同样持有完整 recurrence
-region，但使用 compact device masking，而不是动态截断 command stream。逻辑收敛轮数精确；
-已编码 block 可以包含 inactive tail。provider action、dense ndarray workspace、predicate、
-counter、status 与 reduction buffer 均使用固定 runtime binding。dense field 仍是公开的
-solve 边界格式：其值只在 solve 边界 pack 到这些 device workspace 或从中 unpack，不会在
-Krylov iteration 内转换。
+对于资格满足的 CUDA/Vulkan recordable compiled-kernel 或 composition CG/PCG，结构化
+Graph 持有完整 recurrence region。Vulkan 使用 compact device masking，而不是动态截断
+command stream，因此逻辑收敛轮数精确，但已编码 block 可以包含 inactive tail。provider
+action、dense ndarray workspace、predicate、counter、status 与 reduction buffer 均使用固定
+runtime binding。canonical compact full Field 使用上文 Graph preamble/epilogue binding；其它
+受支持 Field 使用独立 staging。两条路线都不会在 Krylov iteration 内搬运 Field/ndarray 值。
 
 FGMRES action table 在两个 GPU backend 上都使用 direct native submission；系统不会为
 variable action schedule 静默复用 identity-GMRES replay 路径。
