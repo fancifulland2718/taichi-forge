@@ -1315,6 +1315,17 @@ Ptr LLVMRuntime_get_snode_tree_root(LLVMRuntime *runtime, int tree_id) {
   return snode_tree_runtime_state(runtime, tree_id)->root;
 }
 
+// Kernel entry points are registered and launched while Program owns the
+// SNodeTree lifecycle read transaction. Graph entry points additionally
+// validate the captured tree generation before reaching the backend. Keep the
+// checked accessor above for runtime queries and diagnostics, but do not
+// repeat directory bounds/null assertions at every statically bound field
+// access in a hot kernel.
+Ptr LLVMRuntime_get_snode_tree_root_unchecked(LLVMRuntime *runtime,
+                                              int tree_id) {
+  return runtime->snode_tree_states[tree_id]->root;
+}
+
 void runtime_get_snode_node_allocator(LLVMRuntime *runtime,
                                       int tree_id,
                                       int local_id) {

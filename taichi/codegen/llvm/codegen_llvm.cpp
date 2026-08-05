@@ -3170,8 +3170,23 @@ llvm::IntegerType *TaskCodeGenLLVM::get_integer_type(int bits) {
 }
 
 llvm::Value *TaskCodeGenLLVM::get_root(int snode_tree_id) {
-  return call("LLVMRuntime_get_snode_tree_root", get_runtime(),
-              tlctx->get_constant(snode_tree_id));
+  TI_ASSERT(func != nullptr);
+  auto &function_roots = root_lookup_cache[func];
+  if (const auto found = function_roots.find(snode_tree_id);
+      found != function_roots.end()) {
+    return found->second;
+  }
+
+  // Program/Graph launch validation owns the tree lifecycle transaction for
+  // the whole backend submission. Hoisting this unchecked lookup into the
+  // entry block both preserves dynamic-directory generality and keeps field
+  // address calculation as cheap as the former fixed root table.
+  llvm::IRBuilderBase::InsertPointGuard guard(*builder);
+  builder->SetInsertPoint(entry_block);
+  auto *root = call("LLVMRuntime_get_snode_tree_root_unchecked", get_runtime(),
+                    tlctx->get_constant(snode_tree_id));
+  function_roots.emplace(snode_tree_id, root);
+  return root;
 }
 
 llvm::Value *TaskCodeGenLLVM::get_runtime() {

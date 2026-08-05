@@ -69,6 +69,12 @@ class TaskCodeGenLLVM : public IRVisitor, public LLVMModuleBuilder {
 
   std::unordered_map<Function *, llvm::Function *> func_map;
 
+  // A statically bound field can be referenced many times in one offloaded
+  // task. Resolve its already-validated runtime root once in the entry block
+  // instead of performing a directory lookup at every IR access site.
+  std::unordered_map<llvm::Function *, std::unordered_map<int, llvm::Value *>>
+      root_lookup_cache;
+
   using IRVisitor::visit;
   using LLVMModuleBuilder::call;
 
