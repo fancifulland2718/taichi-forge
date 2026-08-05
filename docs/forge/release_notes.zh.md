@@ -50,11 +50,18 @@
   4,099-node tree 相对 3-node tree 的 lookup 中位数在 CPU/CUDA 上分别为 1.011x/0.919x；
   513-tree 阶段把 directory 从 16 项增长到 1,024 项（8 KiB），销毁后 active-tree count
   恢复。这些是 scaling/ownership 结论，不是相对旧二进制的历史加速比。AMDGPU 采用同一
-  LLVM representation，但尚未取得资格；Vulkan 使用独立 sparse runtime。
-- Windows CPU JIT session 现在会在 LLVM RuntimeDyld 分配 object 时保留完整的 COFF section
-  layout，避免反复 reset runtime 或交替初始化 CPU/GPU 后端时偶发
+  LLVM representation，但尚未取得资格；Vulkan 使用独立 sparse runtime。静态绑定的 LLVM
+  field access 现在只在每个 offloaded function 入口解析一次已经验证的 tree root；directory
+  边界、generation 与 lifetime 检查仍位于注册和 launch 边界，不再由每个 GPU thread 在热点
+  字段地址计算中反复执行。tree 销毁、无关 tree 退休、tree-id 复用以及 CPU/CUDA/Vulkan 共
+  12 项 Graph 生命周期资格仍保持应有的 fail-closed 行为。
+- Windows CPU JIT session 现在会把每个 LLVM RuntimeDyld COFF object 放入同一个按页对齐的
+  `Code -> read-only -> read-write` 映射中，满足 `ADDR32NB` 对 image-relative 顺序、32-bit
+  span 以及大于系统页的 section alignment 要求；这替代了此前仅保留全部 object section、
+  但不足以约束实际分配地址的策略。该修改避免反复 reset runtime 或交替初始化 CPU/GPU 后端时偶发
   `IMAGE_REL_AMD64_ADDR32NB` 有序布局错误。该修改仅作用于 Windows COFF JIT 初始化，不给
-  CUDA/Vulkan Graph replay 增加同步；修复后混合后端 bounded Graph 整套测试连续五轮自然退出。
+  CUDA/Vulkan Graph replay 增加同步；修复后混合后端 bounded Graph 生命周期整套测试连续五轮
+  自然退出，环境敏感的 CUDA driver setup probe 在隔离运行时也通过。
 - CPU 的 device-known bounded Graph dispatch 现在默认选择 exact scheduler。scheduler
   只读取并钳制一次 extent，零工作量直接跳过；正数 workload 以连续 JIT loop 的形式按自适应
   chunk 执行，不再逐元素调用 callback。这使 CPU grain 与 GPU

@@ -59,14 +59,25 @@ grouped under the behavior they shipped.
   recovered the active-tree count after destruction. These are scaling and
   ownership results, not a historical pre-refactor speedup. AMDGPU uses the
   same LLVM representation but remains unqualified; Vulkan has an independent
-  sparse-runtime implementation.
-- Windows CPU JIT sessions now retain the complete COFF object-section layout
-  when LLVM RuntimeDyld allocates an object. This prevents intermittent
+  sparse-runtime implementation. Statically bound LLVM field access now
+  resolves the already validated tree root once at each offloaded function
+  entry. Directory bounds, generation, and lifetime checks remain at
+  registration and launch boundaries instead of being repeated by every GPU
+  thread during hot field address calculation. Destruction, unrelated-tree
+  retirement, tree-id reuse, and 12 CPU/CUDA/Vulkan Graph lifecycle cases
+  qualification continue to fail closed where required.
+- Windows CPU JIT sessions now allocate each LLVM RuntimeDyld COFF object from
+  one page-aligned `Code -> read-only -> read-write` mapping. This satisfies
+  the image-relative ordering and 32-bit span required by `ADDR32NB`, including
+  section alignments larger than the OS page, and replaces the earlier
+  insufficient policy of merely retaining all object sections. This prevents
+  intermittent
   `IMAGE_REL_AMD64_ADDR32NB` ordered-layout failures after repeated runtime
   reset or mixed CPU/GPU backend initialization. The change is restricted to
   the Windows COFF JIT setup and does not add synchronization to CUDA or Vulkan
-  Graph replay. Five consecutive mixed-backend bounded-Graph suites exited
-  cleanly after the fix.
+  Graph replay. Five consecutive mixed-backend bounded-Graph lifecycle suites
+  exited cleanly after the fix; the environment-sensitive CUDA driver setup
+  probe also passed when isolated.
 - CPU device-known bounded Graph dispatch now selects the exact scheduler by
   default. The scheduler snapshots and clamps the extent once, skips zero work,
   and invokes positive work as adaptive contiguous JIT loops instead of
