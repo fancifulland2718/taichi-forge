@@ -416,6 +416,42 @@ print(result.iterations, result.residual_norm, result.termination_reason)
 stats = plan.statistics()
 ```
 
+### 完整 SolvePlan Graph action
+
+若 f32 CG/PCG plan 的 operator 与可选 fixed-linear preconditioner 均可录制，
+可以把完整求解直接内联进外层 Graph。这里得到的是 structured action，不会在
+Graph 内部再次调用 `Graph.run()`：
+
+```python
+rhs_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "rhs", ti.f32, ndim=1)
+x_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "x", ti.f32, ndim=1)
+
+solve = plan.graph_action(rhs_arg, x_arg, name="inner_pcg")
+builder = ti.graph.GraphBuilder()
+builder.append_native(solve)
+graph = builder.compile()
+
+terminal = solve.allocate_terminal()
+ticket = graph.submit({"rhs": rhs, "x": x, **terminal.arguments})
+ticket.wait()
+result = terminal.snapshot()
+```
+
+`solve.terminal.state` 是 i32[4] symbolic resource，依次保存 status、逻辑迭代数、
+breakdown code 和完成标记；`solve.terminal.metrics` 是 f32[4] resource，保存初始
+残差平方、最终残差平方、reference norm 平方和 effective tolerance 平方。外层
+structured region 可以直接在 device 上消费这些 symbolic resource。Forge 不会隐式
+读回 terminal；`terminal.snapshot()` 是显式 host 边界，应在外层
+`SubmissionTicket` 完成后调用。
+
+Krylov vector 与 recurrence scalar 都是 compiled Graph instance 私有且地址稳定的
+storage。一个 Graph instance 只有一个 workspace lane；第二次异步 submission 会在复用
+该 storage 前等待上一 completion fence。需要真正并发求解时，应编译相互独立的 Graph。
+`Graph.execution_stats().memory` 会报告 persistent bytes、exclusive policy、wait 与
+reuse。runtime operand 可使用合格的一维 scalar ndarray、完整 dense Field，以及 compact
+scalar-flat `vector_view(..., offset=..., length=..., stride=1)` 区间。RHS 与 output
+必须可证明互不相交；独立 initial guess 必须与 output 不相交，或与它是完全相同的 view。
+
 对于系数不变的兼容路径，fixed-linear preconditioner 可以直接作为 operator 传入，而不是
 应用回调：
 

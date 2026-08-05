@@ -19,6 +19,19 @@ _NATIVE_MAX_ITERATIONS = 0
 _NATIVE_BREAKDOWN = 1
 _NATIVE_CONVERGED = 2
 
+_VECTOR_NAMES = ("ax", "r", "z", "p", "ap")
+_PARTIAL_NAMES = ("partial0", "partial1")
+_SCALAR_NAMES = (
+    "initial_residual_sq",
+    "residual_sq",
+    "norm_b_sq",
+    "rz_old",
+    "rz_new",
+    "pap",
+    "alpha",
+    "beta",
+)
+
 
 def _array_arg(name, dtype=ti.f32):
     return ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, dtype, ndim=1)
@@ -39,6 +52,7 @@ class GraphKrylovSolver:
         max_iterations,
         absolute_tolerance,
         relative_tolerance,
+        recordable_only=False,
     ):
         self._operator = operator
         self._preconditioner = preconditioner
@@ -52,12 +66,19 @@ class GraphKrylovSolver:
             self._backend_family = "cuda"
         elif arch == _ti_core.Arch.vulkan:
             self._backend_family = "vulkan"
+        elif arch in (_ti_core.Arch.x64, _ti_core.Arch.arm64):
+            self._backend_family = "cpu"
         else:
-            raise RuntimeError("GraphKrylovSolver requires CUDA or Vulkan")
-        self._vectors = {
-            name: ti.ndarray(ti.f32, shape=self._size)
-            for name in ("ax", "r", "z", "p", "ap")
-        }
+            raise RuntimeError("GraphKrylovSolver requires CPU, CUDA, or Vulkan")
+        self._recordable_only = bool(recordable_only)
+        self._vectors = (
+            {}
+            if self._recordable_only
+            else {
+                name: ti.ndarray(ti.f32, shape=self._size)
+                for name in _VECTOR_NAMES
+            }
+        )
         self._direct_solution = None
         self._reduction_block_dim = 256
         self._reduction_items_per_thread = 4
@@ -65,35 +86,44 @@ class GraphKrylovSolver:
             self._size + self._reduction_items_per_thread - 1
         ) // self._reduction_items_per_thread
         self._reduction_partial_count = (
-            reduction_threads + self._reduction_block_dim - 1
-        ) // self._reduction_block_dim
+            1
+            if self._backend_family == "cpu"
+            else (reduction_threads + self._reduction_block_dim - 1)
+            // self._reduction_block_dim
+        )
         self._reduction_worker_count = (
             self._reduction_partial_count * self._reduction_block_dim
         )
-        self._reduction_partials = {
-            name: ti.ndarray(ti.f32, shape=self._reduction_partial_count)
-            for name in ("partial0", "partial1")
-        }
-        self._scalars = {
-            name: ti.ndarray(ti.f32, shape=())
-            for name in (
-                "initial_residual_sq",
-                "residual_sq",
-                "norm_b_sq",
-                "rz_old",
-                "rz_new",
-                "pap",
-                "alpha",
-                "beta",
-            )
-        }
-        self._predicate = ti.ndarray(ti.i32, shape=())
-        self._status = ti.ndarray(ti.i32, shape=())
-        self._counter = ti.ndarray(ti.i32, shape=())
+        self._reduction_partials = (
+            {}
+            if self._recordable_only
+            else {
+                name: ti.ndarray(ti.f32, shape=self._reduction_partial_count)
+                for name in _PARTIAL_NAMES
+            }
+        )
+        self._scalars = (
+            {}
+            if self._recordable_only
+            else {
+                name: ti.ndarray(ti.f32, shape=()) for name in _SCALAR_NAMES
+            }
+        )
+        self._predicate = (
+            None if self._recordable_only else ti.ndarray(ti.i32, shape=())
+        )
+        self._status = (
+            None if self._recordable_only else ti.ndarray(ti.i32, shape=())
+        )
+        self._counter = (
+            None if self._recordable_only else ti.ndarray(ti.i32, shape=())
+        )
         # One terminal packet causes one public readback/synchronization. Status
         # and iteration counts are exactly representable for the supported
         # bounded iteration range.
-        self._terminal = ti.ndarray(ti.f32, shape=5)
+        self._terminal = (
+            None if self._recordable_only else ti.ndarray(ti.f32, shape=5)
+        )
         self._last_result = self._not_run_result()
         self._solve_calls = 0
         self._logical_iterations = 0
@@ -117,6 +147,7 @@ class GraphKrylovSolver:
         reduction_items_per_thread = self._reduction_items_per_thread
         reduction_partial_count = self._reduction_partial_count
         reduction_worker_count = self._reduction_worker_count
+        use_block_reduction = self._backend_family != "cpu"
 
         @ti.kernel
         def initialize_solution(
@@ -138,36 +169,45 @@ class GraphKrylovSolver:
             residual_partial: ti.types.ndarray(dtype=ti.f32, ndim=1),
             rhs_partial: ti.types.ndarray(dtype=ti.f32, ndim=1),
         ):
-            ti.loop_config(block_dim=reduction_block_dim)
-            for worker in range(reduction_worker_count):
-                lane = worker % reduction_block_dim
-                residual_pad = ti.simt.block.SharedArray(
-                    (reduction_block_dim,), ti.f32
-                )
-                rhs_pad = ti.simt.block.SharedArray(
-                    (reduction_block_dim,), ti.f32
-                )
-                residual_sum = 0.0
-                rhs_sum = 0.0
-                for item in ti.static(range(reduction_items_per_thread)):
-                    index = worker * reduction_items_per_thread + item
-                    if index < size:
-                        value = b[index] - ax[index]
-                        r[index] = value
-                        residual_sum += value * value
-                        rhs_sum += b[index] * b[index]
-                residual_pad[lane] = residual_sum
-                rhs_pad[lane] = rhs_sum
-                ti.simt.block.sync()
-                for stride in ti.static([128, 64, 32, 16, 8, 4, 2, 1]):
-                    if lane < stride:
-                        residual_pad[lane] += residual_pad[lane + stride]
-                        rhs_pad[lane] += rhs_pad[lane + stride]
+            if ti.static(use_block_reduction):
+                ti.loop_config(block_dim=reduction_block_dim)
+                for worker in range(reduction_worker_count):
+                    lane = worker % reduction_block_dim
+                    residual_pad = ti.simt.block.SharedArray(
+                        (reduction_block_dim,), ti.f32
+                    )
+                    rhs_pad = ti.simt.block.SharedArray(
+                        (reduction_block_dim,), ti.f32
+                    )
+                    residual_sum = 0.0
+                    rhs_sum = 0.0
+                    for item in ti.static(range(reduction_items_per_thread)):
+                        index = worker * reduction_items_per_thread + item
+                        if index < size:
+                            value = b[index] - ax[index]
+                            r[index] = value
+                            residual_sum += value * value
+                            rhs_sum += b[index] * b[index]
+                    residual_pad[lane] = residual_sum
+                    rhs_pad[lane] = rhs_sum
                     ti.simt.block.sync()
-                if lane == 0:
-                    block = worker // reduction_block_dim
-                    residual_partial[block] = residual_pad[0]
-                    rhs_partial[block] = rhs_pad[0]
+                    for stride in ti.static([128, 64, 32, 16, 8, 4, 2, 1]):
+                        if lane < stride:
+                            residual_pad[lane] += residual_pad[lane + stride]
+                            rhs_pad[lane] += rhs_pad[lane + stride]
+                        ti.simt.block.sync()
+                    if lane == 0:
+                        block = worker // reduction_block_dim
+                        residual_partial[block] = residual_pad[0]
+                        rhs_partial[block] = rhs_pad[0]
+            else:
+                residual_partial[0] = 0.0
+                rhs_partial[0] = 0.0
+                for index in range(size):
+                    value = b[index] - ax[index]
+                    r[index] = value
+                    ti.atomic_add(residual_partial[0], value * value)
+                    ti.atomic_add(rhs_partial[0], b[index] * b[index])
 
         @ti.kernel
         def finalize_initialize(
@@ -240,25 +280,30 @@ class GraphKrylovSolver:
             ap: ti.types.ndarray(dtype=ti.f32, ndim=1),
             partial: ti.types.ndarray(dtype=ti.f32, ndim=1),
         ):
-            ti.loop_config(block_dim=reduction_block_dim)
-            for worker in range(reduction_worker_count):
-                lane = worker % reduction_block_dim
-                pad = ti.simt.block.SharedArray(
-                    (reduction_block_dim,), ti.f32
-                )
-                value = 0.0
-                for item in ti.static(range(reduction_items_per_thread)):
-                    index = worker * reduction_items_per_thread + item
-                    if index < size:
-                        value += p[index] * ap[index]
-                pad[lane] = value
-                ti.simt.block.sync()
-                for stride in ti.static([128, 64, 32, 16, 8, 4, 2, 1]):
-                    if lane < stride:
-                        pad[lane] += pad[lane + stride]
+            if ti.static(use_block_reduction):
+                ti.loop_config(block_dim=reduction_block_dim)
+                for worker in range(reduction_worker_count):
+                    lane = worker % reduction_block_dim
+                    pad = ti.simt.block.SharedArray(
+                        (reduction_block_dim,), ti.f32
+                    )
+                    value = 0.0
+                    for item in ti.static(range(reduction_items_per_thread)):
+                        index = worker * reduction_items_per_thread + item
+                        if index < size:
+                            value += p[index] * ap[index]
+                    pad[lane] = value
                     ti.simt.block.sync()
-                if lane == 0:
-                    partial[worker // reduction_block_dim] = pad[0]
+                    for stride in ti.static([128, 64, 32, 16, 8, 4, 2, 1]):
+                        if lane < stride:
+                            pad[lane] += pad[lane + stride]
+                        ti.simt.block.sync()
+                    if lane == 0:
+                        partial[worker // reduction_block_dim] = pad[0]
+            else:
+                partial[0] = 0.0
+                for index in range(size):
+                    ti.atomic_add(partial[0], p[index] * ap[index])
 
         @ti.kernel
         def finalize_pap(
@@ -312,36 +357,45 @@ class GraphKrylovSolver:
             residual_partial: ti.types.ndarray(dtype=ti.f32, ndim=1),
             rz_partial: ti.types.ndarray(dtype=ti.f32, ndim=1),
         ):
-            ti.loop_config(block_dim=reduction_block_dim)
-            for worker in range(reduction_worker_count):
-                lane = worker % reduction_block_dim
-                residual_pad = ti.simt.block.SharedArray(
-                    (reduction_block_dim,), ti.f32
-                )
-                rz_pad = ti.simt.block.SharedArray(
-                    (reduction_block_dim,), ti.f32
-                )
-                residual_sum = 0.0
-                rz_sum = 0.0
-                for item in ti.static(range(reduction_items_per_thread)):
-                    index = worker * reduction_items_per_thread + item
-                    if index < size:
-                        value = r[index]
-                        z[index] = value
-                        residual_sum += value * value
-                        rz_sum += value * value
-                residual_pad[lane] = residual_sum
-                rz_pad[lane] = rz_sum
-                ti.simt.block.sync()
-                for stride in ti.static([128, 64, 32, 16, 8, 4, 2, 1]):
-                    if lane < stride:
-                        residual_pad[lane] += residual_pad[lane + stride]
-                        rz_pad[lane] += rz_pad[lane + stride]
+            if ti.static(use_block_reduction):
+                ti.loop_config(block_dim=reduction_block_dim)
+                for worker in range(reduction_worker_count):
+                    lane = worker % reduction_block_dim
+                    residual_pad = ti.simt.block.SharedArray(
+                        (reduction_block_dim,), ti.f32
+                    )
+                    rz_pad = ti.simt.block.SharedArray(
+                        (reduction_block_dim,), ti.f32
+                    )
+                    residual_sum = 0.0
+                    rz_sum = 0.0
+                    for item in ti.static(range(reduction_items_per_thread)):
+                        index = worker * reduction_items_per_thread + item
+                        if index < size:
+                            value = r[index]
+                            z[index] = value
+                            residual_sum += value * value
+                            rz_sum += value * value
+                    residual_pad[lane] = residual_sum
+                    rz_pad[lane] = rz_sum
                     ti.simt.block.sync()
-                if lane == 0:
-                    block = worker // reduction_block_dim
-                    residual_partial[block] = residual_pad[0]
-                    rz_partial[block] = rz_pad[0]
+                    for stride in ti.static([128, 64, 32, 16, 8, 4, 2, 1]):
+                        if lane < stride:
+                            residual_pad[lane] += residual_pad[lane + stride]
+                            rz_pad[lane] += rz_pad[lane + stride]
+                        ti.simt.block.sync()
+                    if lane == 0:
+                        block = worker // reduction_block_dim
+                        residual_partial[block] = residual_pad[0]
+                        rz_partial[block] = rz_pad[0]
+            else:
+                residual_partial[0] = 0.0
+                rz_partial[0] = 0.0
+                for index in range(size):
+                    value = r[index]
+                    z[index] = value
+                    ti.atomic_add(residual_partial[0], value * value)
+                    ti.atomic_add(rz_partial[0], value * value)
 
         @ti.kernel
         def reduce_next_pcg_blocks(
@@ -350,35 +404,43 @@ class GraphKrylovSolver:
             residual_partial: ti.types.ndarray(dtype=ti.f32, ndim=1),
             rz_partial: ti.types.ndarray(dtype=ti.f32, ndim=1),
         ):
-            ti.loop_config(block_dim=reduction_block_dim)
-            for worker in range(reduction_worker_count):
-                lane = worker % reduction_block_dim
-                residual_pad = ti.simt.block.SharedArray(
-                    (reduction_block_dim,), ti.f32
-                )
-                rz_pad = ti.simt.block.SharedArray(
-                    (reduction_block_dim,), ti.f32
-                )
-                residual_sum = 0.0
-                rz_sum = 0.0
-                for item in ti.static(range(reduction_items_per_thread)):
-                    index = worker * reduction_items_per_thread + item
-                    if index < size:
-                        value = r[index]
-                        residual_sum += value * value
-                        rz_sum += value * z[index]
-                residual_pad[lane] = residual_sum
-                rz_pad[lane] = rz_sum
-                ti.simt.block.sync()
-                for stride in ti.static([128, 64, 32, 16, 8, 4, 2, 1]):
-                    if lane < stride:
-                        residual_pad[lane] += residual_pad[lane + stride]
-                        rz_pad[lane] += rz_pad[lane + stride]
+            if ti.static(use_block_reduction):
+                ti.loop_config(block_dim=reduction_block_dim)
+                for worker in range(reduction_worker_count):
+                    lane = worker % reduction_block_dim
+                    residual_pad = ti.simt.block.SharedArray(
+                        (reduction_block_dim,), ti.f32
+                    )
+                    rz_pad = ti.simt.block.SharedArray(
+                        (reduction_block_dim,), ti.f32
+                    )
+                    residual_sum = 0.0
+                    rz_sum = 0.0
+                    for item in ti.static(range(reduction_items_per_thread)):
+                        index = worker * reduction_items_per_thread + item
+                        if index < size:
+                            value = r[index]
+                            residual_sum += value * value
+                            rz_sum += value * z[index]
+                    residual_pad[lane] = residual_sum
+                    rz_pad[lane] = rz_sum
                     ti.simt.block.sync()
-                if lane == 0:
-                    block = worker // reduction_block_dim
-                    residual_partial[block] = residual_pad[0]
-                    rz_partial[block] = rz_pad[0]
+                    for stride in ti.static([128, 64, 32, 16, 8, 4, 2, 1]):
+                        if lane < stride:
+                            residual_pad[lane] += residual_pad[lane + stride]
+                            rz_pad[lane] += rz_pad[lane + stride]
+                        ti.simt.block.sync()
+                    if lane == 0:
+                        block = worker // reduction_block_dim
+                        residual_partial[block] = residual_pad[0]
+                        rz_partial[block] = rz_pad[0]
+            else:
+                residual_partial[0] = 0.0
+                rz_partial[0] = 0.0
+                for index in range(size):
+                    value = r[index]
+                    ti.atomic_add(residual_partial[0], value * value)
+                    ti.atomic_add(rz_partial[0], value * z[index])
 
         @ti.kernel
         def finalize_next(
@@ -454,15 +516,41 @@ class GraphKrylovSolver:
             terminal[3] = residual_sq[None]
             terminal[4] = norm_b_sq[None]
 
+        @ti.kernel
+        def write_graph_terminal(
+            status: ti.types.ndarray(dtype=ti.i32, ndim=0),
+            counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+            initial_residual_sq: ti.types.ndarray(dtype=ti.f32, ndim=0),
+            residual_sq: ti.types.ndarray(dtype=ti.f32, ndim=0),
+            norm_b_sq: ti.types.ndarray(dtype=ti.f32, ndim=0),
+            terminal_state: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            terminal_metrics: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        ):
+            native_status = _NATIVE_MAX_ITERATIONS
+            if status[None] == _CONVERGED:
+                native_status = _NATIVE_CONVERGED
+            elif status[None] == _BREAKDOWN:
+                native_status = _NATIVE_BREAKDOWN
+            terminal_state[0] = native_status
+            terminal_state[1] = counter[None]
+            terminal_state[2] = int(status[None] == _BREAKDOWN)
+            terminal_state[3] = 1
+            terminal_metrics[0] = initial_residual_sq[None]
+            terminal_metrics[1] = residual_sq[None]
+            terminal_metrics[2] = norm_b_sq[None]
+            reference = ti.sqrt(ti.max(norm_b_sq[None], 0.0))
+            threshold = ti.max(atol, rtol * reference)
+            terminal_metrics[3] = threshold * threshold
+
         vectors = {
             name: _array_arg(name)
-            for name in ("b", "initial_x", "x", "output", *self._vectors)
+            for name in ("b", "initial_x", "x", "output", *_VECTOR_NAMES)
         }
         partials = {
-            name: _array_arg(name) for name in self._reduction_partials
+            name: _array_arg(name) for name in _PARTIAL_NAMES
         }
         scalars = {
-            name: _scalar_array_arg(name, ti.f32) for name in self._scalars
+            name: _scalar_array_arg(name, ti.f32) for name in _SCALAR_NAMES
         }
         predicate = _scalar_array_arg("predicate", ti.i32)
         status = _scalar_array_arg("status", ti.i32)
@@ -629,7 +717,9 @@ class GraphKrylovSolver:
             ),
             counter=counter,
             max_iterations=max_iterations,
-            lowering_mode="native_required",
+            lowering_mode=(
+                "auto" if self._backend_family == "cpu" else "native_required"
+            ),
             name=f"linear_operator_{self._method}",
         )
         builder.dispatch(
@@ -647,28 +737,248 @@ class GraphKrylovSolver:
             scalars["norm_b_sq"],
             terminal,
         )
-        self._kernels = (
-            initialize_solution,
-            initialize_blocks,
-            finalize_initialize,
-            seed_cg,
-            seed_pcg,
-            evaluate_condition,
-            reduce_pap_blocks,
-            finalize_pap,
-            prepare_alpha,
-            update_solution_residual,
-            reduce_next_cg_blocks,
-            reduce_next_pcg_blocks,
-            finalize_next,
-            prepare_beta,
-            update_direction,
-            export_solution,
-            write_terminal,
-        )
+        self._kernels = {
+            "initialize_solution": initialize_solution,
+            "initialize_blocks": initialize_blocks,
+            "finalize_initialize": finalize_initialize,
+            "seed_cg": seed_cg,
+            "seed_pcg": seed_pcg,
+            "evaluate_condition": evaluate_condition,
+            "reduce_pap_blocks": reduce_pap_blocks,
+            "finalize_pap": finalize_pap,
+            "prepare_alpha": prepare_alpha,
+            "update_solution_residual": update_solution_residual,
+            "reduce_next_cg_blocks": reduce_next_cg_blocks,
+            "reduce_next_pcg_blocks": reduce_next_pcg_blocks,
+            "finalize_next": finalize_next,
+            "prepare_beta": prepare_beta,
+            "update_direction": update_direction,
+            "export_solution": export_solution,
+            "write_terminal": write_terminal,
+            "write_graph_terminal": write_graph_terminal,
+        }
         graph = builder.compile()
         self._runtime_arg_names = frozenset(graph._spec.runtime_arg_names)
         return graph
+
+    def recordable_sequence(
+        self,
+        rhs,
+        output,
+        terminal_state,
+        terminal_metrics,
+        *,
+        initial_guess=None,
+        private_prefix,
+        name,
+    ):
+        """Build one inlined solve program with Graph-instance-owned state."""
+
+        sequence = ti.graph.GraphBuilder().create_sequential()
+
+        def internal_ndarray(suffix, dtype, shape):
+            return sequence._bind_internal_ndarray(
+                f"{private_prefix}_{suffix}",
+                dtype,
+                shape,
+                exclusive_submission=True,
+            )
+
+        vectors = {
+            key: internal_ndarray(key, ti.f32, (self._size,))
+            for key in _VECTOR_NAMES
+        }
+        partials = {
+            key: internal_ndarray(
+                key, ti.f32, (self._reduction_partial_count,)
+            )
+            for key in _PARTIAL_NAMES
+        }
+        scalars = {
+            key: internal_ndarray(key, ti.f32, ()) for key in _SCALAR_NAMES
+        }
+        predicate = internal_ndarray("predicate", ti.i32, ())
+        status = internal_ndarray("status", ti.i32, ())
+        counter = internal_ndarray("counter", ti.i32, ())
+        use_initial_guess = sequence._bind_internal_scalar(
+            f"{private_prefix}_use_initial_guess",
+            ti.i32,
+            int(initial_guess is not None),
+        )
+        if initial_guess is None:
+            initial_guess = output
+
+        kernels = self._kernels
+        sequence.dispatch(
+            kernels["initialize_solution"],
+            initial_guess,
+            output,
+            use_initial_guess,
+        )
+        sequence.append_native(
+            self._operator.graph_action(output, vectors["ax"])
+        )
+        sequence.dispatch(
+            kernels["initialize_blocks"],
+            rhs,
+            vectors["ax"],
+            vectors["r"],
+            partials["partial0"],
+            partials["partial1"],
+        )
+        sequence.dispatch(
+            kernels["finalize_initialize"],
+            partials["partial0"],
+            partials["partial1"],
+            scalars["initial_residual_sq"],
+            scalars["residual_sq"],
+            scalars["norm_b_sq"],
+            predicate,
+            status,
+            counter,
+        )
+        if self._preconditioner is None:
+            sequence.dispatch(
+                kernels["seed_cg"],
+                vectors["r"],
+                vectors["z"],
+                vectors["p"],
+                scalars["residual_sq"],
+                scalars["rz_old"],
+            )
+        else:
+            sequence.append_native(
+                self._preconditioner.graph_action(
+                    vectors["r"], vectors["z"]
+                )
+            )
+            sequence.dispatch(
+                kernels["seed_pcg"],
+                vectors["r"],
+                vectors["z"],
+                vectors["p"],
+                scalars["rz_old"],
+            )
+
+        condition = ti.graph.GraphBuilder().create_sequential()
+        condition.dispatch(
+            kernels["evaluate_condition"],
+            scalars["residual_sq"],
+            scalars["norm_b_sq"],
+            predicate,
+            status,
+        )
+        body = ti.graph.GraphBuilder().create_sequential()
+        body.append_native(
+            self._operator.graph_action(vectors["p"], vectors["ap"])
+        )
+        body.dispatch(
+            kernels["reduce_pap_blocks"],
+            vectors["p"],
+            vectors["ap"],
+            partials["partial0"],
+        )
+        body.dispatch(
+            kernels["finalize_pap"],
+            partials["partial0"],
+            scalars["pap"],
+        )
+        body.dispatch(
+            kernels["prepare_alpha"],
+            scalars["rz_old"],
+            scalars["pap"],
+            scalars["alpha"],
+            status,
+        )
+        body.dispatch(
+            kernels["update_solution_residual"],
+            output,
+            vectors["r"],
+            vectors["p"],
+            vectors["ap"],
+            scalars["alpha"],
+            status,
+        )
+        if self._preconditioner is None:
+            body.dispatch(
+                kernels["reduce_next_cg_blocks"],
+                vectors["r"],
+                vectors["z"],
+                partials["partial0"],
+                partials["partial1"],
+            )
+        else:
+            body.append_native(
+                self._preconditioner.graph_action(
+                    vectors["r"], vectors["z"]
+                )
+            )
+            body.dispatch(
+                kernels["reduce_next_pcg_blocks"],
+                vectors["r"],
+                vectors["z"],
+                partials["partial0"],
+                partials["partial1"],
+            )
+        body.dispatch(
+            kernels["finalize_next"],
+            partials["partial0"],
+            partials["partial1"],
+            scalars["residual_sq"],
+            scalars["rz_new"],
+        )
+        body.dispatch(
+            kernels["prepare_beta"],
+            scalars["rz_old"],
+            scalars["rz_new"],
+            scalars["beta"],
+            status,
+            counter,
+        )
+        body.dispatch(
+            kernels["update_direction"],
+            vectors["z"],
+            vectors["p"],
+            scalars["beta"],
+            status,
+        )
+        sequence.while_loop(
+            condition,
+            body,
+            predicate=predicate,
+            status=status,
+            control_inputs=(
+                scalars["residual_sq"],
+                scalars["norm_b_sq"],
+            ),
+            carried_state=(
+                output,
+                vectors["r"],
+                vectors["z"],
+                vectors["p"],
+                vectors["ap"],
+                scalars["residual_sq"],
+                scalars["rz_old"],
+                scalars["rz_new"],
+            ),
+            counter=counter,
+            max_iterations=self._max_iterations,
+            lowering_mode=(
+                "auto" if self._backend_family == "cpu" else "native_required"
+            ),
+            name=name,
+        )
+        sequence.dispatch(
+            kernels["write_graph_terminal"],
+            status,
+            counter,
+            scalars["initial_residual_sq"],
+            scalars["residual_sq"],
+            scalars["norm_b_sq"],
+            terminal_state,
+            terminal_metrics,
+        )
+        return sequence
 
     def _not_run_result(self):
         return {

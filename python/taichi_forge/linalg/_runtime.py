@@ -161,6 +161,106 @@ class SolveResult:
     breakdown_reason: str
 
 
+@dataclass(frozen=True)
+class SolveGraphTerminalSnapshot:
+    """Host snapshot of one completed recordable SolvePlan invocation."""
+
+    status_code: int
+    termination_reason: str
+    converged: bool
+    breakdown: bool
+    reached_max_iterations: bool
+    iterations: int
+    initial_residual_norm: float
+    residual_norm: float
+    relative_reference_norm: float
+    effective_tolerance: float
+    breakdown_reason: str
+
+
+class SolveGraphTerminalPacket:
+    """Runtime storage for a :class:`SolveGraphTerminal` resource pair."""
+
+    def __init__(self, terminal):
+        self._terminal = terminal
+        self._program = _current_program()
+        self.state = ScalarNdarray(i32, (4,))
+        self.metrics = ScalarNdarray(f32, (4,))
+        self.state.fill(0)
+        self.metrics.fill(0)
+        self._arguments = MappingProxyType(
+            {
+                terminal.state.name: self.state,
+                terminal.metrics.name: self.metrics,
+            }
+        )
+
+    @property
+    def arguments(self):
+        """Runtime Graph arguments owned by this packet."""
+
+        if self._program is not _current_program():
+            raise TaichiRuntimeError(
+                "Solve Graph terminal packet belongs to another runtime"
+            )
+        return self._arguments
+
+    def snapshot(self):
+        """Read a completed packet; call after its SubmissionTicket completes."""
+
+        if self._program is not _current_program():
+            raise TaichiRuntimeError(
+                "Solve Graph terminal packet belongs to another runtime"
+            )
+        state = np.asarray(self.state.to_numpy(), dtype=np.int32)
+        metrics = np.asarray(self.metrics.to_numpy(), dtype=np.float32)
+        if int(state[3]) != 1:
+            raise TaichiRuntimeError(
+                "Solve Graph terminal packet has not been completed"
+            )
+        status = int(state[0])
+        if status == 2:
+            reason = "converged"
+        elif status == 1:
+            reason = "breakdown"
+        elif status == 0:
+            reason = "max_iterations"
+        else:
+            raise TaichiRuntimeError(
+                f"Solve Graph terminal packet has invalid status {status}"
+            )
+        return SolveGraphTerminalSnapshot(
+            status_code=status,
+            termination_reason=reason,
+            converged=status == 2,
+            breakdown=status == 1,
+            reached_max_iterations=status == 0,
+            iterations=int(state[1]),
+            initial_residual_norm=math.sqrt(max(float(metrics[0]), 0.0)),
+            residual_norm=math.sqrt(max(float(metrics[1]), 0.0)),
+            relative_reference_norm=math.sqrt(max(float(metrics[2]), 0.0)),
+            effective_tolerance=math.sqrt(max(float(metrics[3]), 0.0)),
+            breakdown_reason=(
+                "alpha_denominator" if int(state[2]) != 0 else "none"
+            ),
+        )
+
+
+class SolveGraphTerminal:
+    """Symbolic, device-resident terminal state for one SolvePlan action."""
+
+    def __init__(self, state_name, metrics_name):
+        from taichi_forge.graph._graph import Arg, ArgKind
+
+        self.state = Arg(ArgKind.NDARRAY, state_name, i32, ndim=1)
+        self.metrics = Arg(ArgKind.NDARRAY, metrics_name, f32, ndim=1)
+
+    def allocate(self):
+        """Allocate one independently submitable runtime terminal packet."""
+
+        return SolveGraphTerminalPacket(self)
+
+
 def _current_program():
     program = get_runtime().prog
     if program is None:
@@ -1375,7 +1475,15 @@ def _cached_graph_dense_vector_binding(cache, name, value, extent):
     cached = cache.get(name)
     if cached is not None and cached[0] is value and cached[1] == extent:
         return cached[2], cached[3]
-    description = _flatten_storage_to_scalar_vector(describe_storage(value))
+    if isinstance(value, VectorView):
+        value._ensure_valid(f"LinearOperator Graph argument {name!r}")
+        description = value._direct_storage_description
+        if description is None:
+            description = describe_storage(value)
+    else:
+        description = _flatten_storage_to_scalar_vector(
+            describe_storage(value)
+        )
     descriptor = description.descriptor
     if (
         descriptor is None
@@ -3306,6 +3414,286 @@ class PreconditionerPlan:
         return result
 
 
+class _SolvePlanGraphExecutable(NativeGraphExecutable):
+    def __init__(
+        self,
+        plan,
+        solver,
+        rhs_arg,
+        output_arg,
+        initial_arg,
+        terminal,
+        *,
+        name,
+    ):
+        from taichi_forge.graph._graph import ArgKind
+
+        vector_args = [(rhs_arg, "RHS"), (output_arg, "output")]
+        if initial_arg is not None:
+            vector_args.append((initial_arg, "initial_guess"))
+        for value, role in vector_args:
+            if (
+                getattr(value, "tag", None) != ArgKind.NDARRAY
+                or value.dtype() != f32
+                or int(value.field_dim) != 1
+                or tuple(value.element_shape) != ()
+            ):
+                raise TaichiRuntimeError(
+                    f"SolvePlan Graph {role} must be a symbolic scalar f32 "
+                    "1-D ndarray"
+                )
+        if rhs_arg.name == output_arg.name:
+            raise TaichiRuntimeError(
+                "SolvePlan Graph RHS and output must use distinct resources"
+            )
+        if initial_arg is not None and initial_arg.name == rhs_arg.name:
+            raise TaichiRuntimeError(
+                "SolvePlan Graph initial_guess and RHS must use distinct resources"
+            )
+        self._plan = plan
+        self._solver = solver
+        self._rhs_name = rhs_arg.name
+        self._output_name = output_arg.name
+        self._initial_name = (
+            None if initial_arg is None else initial_arg.name
+        )
+        self._terminal = terminal
+        self._name = name
+        self._expected_operator_stamp = tuple(
+            plan.operator._handle._resource_stamp()
+        )
+        schema_names = [self._rhs_name, self._output_name]
+        if self._initial_name not in (None, self._output_name):
+            schema_names.append(self._initial_name)
+        schema_names.extend((terminal.state.name, terminal.metrics.name))
+        self._runtime_arg_schema = tuple(
+            RuntimeBinding(name, "dense_vector")
+            for name in schema_names[: 2 + int(
+                self._initial_name not in (None, self._output_name)
+            )]
+        ) + (
+            RuntimeBinding(terminal.state.name, "terminal_state"),
+            RuntimeBinding(terminal.metrics.name, "terminal_metrics"),
+        )
+        effects = [
+            ResourceEffect(self._rhs_name, GraphAccess.READ),
+            ResourceEffect(self._output_name, GraphAccess.WRITE),
+        ]
+        if self._initial_name not in (None, self._output_name):
+            effects.append(ResourceEffect(self._initial_name, GraphAccess.READ))
+        effects.extend(
+            (
+                ResourceEffect(terminal.state.name, GraphAccess.WRITE),
+                ResourceEffect(terminal.metrics.name, GraphAccess.WRITE),
+            )
+        )
+        self._resource_effects = tuple(effects)
+        self._graph_binding_views = {}
+        private_prefix = f"__solve_plan_{id(self):x}"
+        self._sequence = solver.recordable_sequence(
+            rhs_arg,
+            output_arg,
+            terminal.state,
+            terminal.metrics,
+            initial_guess=initial_arg,
+            private_prefix=private_prefix,
+            name=name,
+        )
+
+    @property
+    def runtime_arg_schema(self):
+        return self._runtime_arg_schema
+
+    @property
+    def resource_effects(self):
+        return self._resource_effects
+
+    @property
+    def recordable_sequence(self):
+        return self._sequence
+
+    @property
+    def debug_info(self):
+        return {
+            "kind": "solve_plan",
+            "method": self._plan.method,
+            "name": self._name,
+            "recordable": True,
+            "terminal_state": self._terminal.state.name,
+            "terminal_metrics": self._terminal.metrics.name,
+        }
+
+    def validate_graph_lifetime(self):
+        if self._plan._program is not _current_program():
+            raise TaichiRuntimeError(
+                "SolvePlan Graph action belongs to another runtime"
+            )
+        self._plan.operator._ensure_valid()
+        if tuple(self._plan.operator._handle._resource_stamp()) != (
+            self._expected_operator_stamp
+        ):
+            raise TaichiRuntimeError(
+                "SolvePlan operator provider generation changed; rebuild the Graph"
+            )
+
+    def _terminal_array(self, runtime_args, symbol, dtype, role):
+        value = runtime_args[symbol.name]
+        value = _require_current_scalar_ndarray(value, role, dtype=dtype)
+        if value.shape != (4,):
+            raise TaichiRuntimeError(f"{role} must have shape (4,)")
+        return value
+
+    def bind_graph_arguments(self, runtime_args):
+        replacements = {}
+        names = [self._rhs_name, self._output_name]
+        if self._initial_name not in (None, self._output_name):
+            names.append(self._initial_name)
+        for name in names:
+            _, view = _cached_graph_dense_vector_binding(
+                self._graph_binding_views,
+                name,
+                runtime_args[name],
+                self._plan.operator.shape[0],
+            )
+            if view is not None:
+                replacements[name] = view
+        return replacements
+
+    def validate_graph_bindings(self, runtime_args):
+        descriptions = {}
+        names = [self._rhs_name, self._output_name]
+        if self._initial_name not in (None, self._output_name):
+            names.append(self._initial_name)
+        for name in names:
+            description, _ = _cached_graph_dense_vector_binding(
+                self._graph_binding_views,
+                name,
+                runtime_args[name],
+                self._plan.operator.shape[0],
+            )
+            descriptions[name] = description
+        _validate_graph_dense_vector_disjoint(
+            (descriptions[self._rhs_name], descriptions[self._output_name]),
+            "SolvePlan Graph RHS and output must be proven disjoint",
+        )
+        if self._initial_name not in (None, self._output_name):
+            _validate_graph_dense_vector_disjoint(
+                (
+                    descriptions[self._rhs_name],
+                    descriptions[self._initial_name],
+                ),
+                "SolvePlan Graph RHS and initial_guess must be proven disjoint",
+            )
+            initial_output_alias = analyze_storage_alias(
+                descriptions[self._initial_name],
+                descriptions[self._output_name],
+            )
+            initial_value = runtime_args[self._initial_name]
+            output_value = runtime_args[self._output_name]
+            exact_view = initial_value is output_value or (
+                getattr(initial_value, "_exact_view_key", None) is not None
+                and getattr(initial_value, "_exact_view_key", None)
+                == getattr(output_value, "_exact_view_key", None)
+            )
+            if initial_output_alias != "kProvenDisjoint" and not exact_view:
+                raise TaichiRuntimeError(
+                    "SolvePlan Graph initial_guess and output overlap without "
+                    f"being the same vector view ({initial_output_alias})"
+                )
+        self._terminal_array(
+            runtime_args,
+            self._terminal.state,
+            i32,
+            "SolvePlan Graph terminal state",
+        )
+        self._terminal_array(
+            runtime_args,
+            self._terminal.metrics,
+            f32,
+            "SolvePlan Graph terminal metrics",
+        )
+
+    def run(self, runtime_args):
+        result = self._plan.solve(
+            runtime_args[self._rhs_name],
+            initial_guess=(
+                None
+                if self._initial_name is None
+                else runtime_args[self._initial_name]
+            ),
+            out=runtime_args[self._output_name],
+        )
+        terminal_state = self._terminal_array(
+            runtime_args,
+            self._terminal.state,
+            i32,
+            "SolvePlan Graph terminal state",
+        )
+        terminal_metrics = self._terminal_array(
+            runtime_args,
+            self._terminal.metrics,
+            f32,
+            "SolvePlan Graph terminal metrics",
+        )
+        terminal_state.from_numpy(
+            np.asarray(
+                [
+                    result.status_code,
+                    result.iterations,
+                    int(result.breakdown),
+                    1,
+                ],
+                dtype=np.int32,
+            )
+        )
+        terminal_metrics.from_numpy(
+            np.asarray(
+                [
+                    result.initial_residual_norm**2,
+                    result.residual_norm**2,
+                    result.relative_reference_norm**2,
+                    result.effective_tolerance**2,
+                ],
+                dtype=np.float32,
+            )
+        )
+
+
+class _SolvePlanGraphNode(NativeGraphNode):
+    def __init__(
+        self,
+        plan,
+        solver,
+        rhs_arg,
+        output_arg,
+        initial_arg,
+        terminal,
+        *,
+        name,
+    ):
+        self._plan = plan
+        self._solver = solver
+        self._rhs_arg = rhs_arg
+        self._output_arg = output_arg
+        self._initial_arg = initial_arg
+        self.terminal = terminal
+        self.name = name
+
+    def allocate_terminal(self):
+        return self.terminal.allocate()
+
+    def compile(self):
+        return _SolvePlanGraphExecutable(
+            self._plan,
+            self._solver,
+            self._rhs_arg,
+            self._output_arg,
+            self._initial_arg,
+            self.terminal,
+            name=self.name,
+        )
+
+
 class SolvePlan:
     """Persistent CG, PCG, MINRES, BiCGSTAB, GMRES, or FGMRES plan.
 
@@ -3437,6 +3825,8 @@ class SolvePlan:
         self._graph_krylov_direct_field_enabled = True
         self._graph_krylov_last_direct_field_boundary = False
         self._graph_krylov_binding_cache = {}
+        self._graph_action_solver = None
+        self._graph_action_serial = 0
         get_runtime().register_runtime_object(self)
 
     def _invalidate_runtime(self):
@@ -3447,6 +3837,7 @@ class SolvePlan:
         self._graph_krylov_direct_field_enabled = False
         self._graph_krylov_last_direct_field_boundary = False
         self._graph_krylov_binding_cache = None
+        self._graph_action_solver = None
         self._native_preconditioner = None
         self._vector_io = None
         self.operator = None
@@ -4560,6 +4951,95 @@ class SolvePlan:
                 )
         return out, rhs_operand, output_operand, initial_operand
 
+    def graph_action(
+        self,
+        rhs,
+        output,
+        *,
+        initial_guess=None,
+        name=None,
+    ):
+        """Record this complete solve into an enclosing Graph.
+
+        The returned native node owns symbolic device terminal resources via
+        ``node.terminal``. Allocate one runtime packet with
+        ``node.allocate_terminal()`` and include ``packet.arguments`` in the
+        enclosing Graph arguments. No terminal state is read back before the
+        caller waits for the enclosing ``SubmissionTicket``.
+        """
+
+        if self.operator is None or self._program is not _current_program():
+            raise TaichiRuntimeError(
+                "SolvePlan cannot be used after ti.reset()"
+            )
+        self.operator._ensure_valid()
+        if self.method not in ("cg", "pcg"):
+            raise TaichiRuntimeError(
+                "SolvePlan Graph actions currently support CG and PCG"
+            )
+        if self.operator.dtype != f32:
+            raise TaichiRuntimeError(
+                "SolvePlan Graph actions currently require f32"
+            )
+        if not self.operator._supports_graph_action():
+            raise TaichiRuntimeError(
+                "SolvePlan Graph action requires a recordable operator"
+            )
+        preconditioner = None
+        if self.method == "pcg":
+            if isinstance(self.preconditioner, LinearOperator):
+                preconditioner = self.preconditioner
+            elif isinstance(self.preconditioner, PreconditionerPlan):
+                self.preconditioner._require_target(self.operator)
+                self.preconditioner._require_fixed_behavior("PCG Graph action")
+                preconditioner = self.preconditioner._consumer_action
+            else:
+                raise TaichiRuntimeError(
+                    "PCG Graph action requires a fixed recordable "
+                    "LinearOperator or PreconditionerPlan"
+                )
+            self._require_fixed_linear_preconditioner(preconditioner)
+            if not preconditioner._supports_graph_action():
+                raise TaichiRuntimeError(
+                    "PCG Graph action requires a recordable preconditioner"
+                )
+        if name is None:
+            name = f"{self.method}_solve_{self._graph_action_serial}"
+        if not isinstance(name, str) or not name:
+            raise TaichiRuntimeError(
+                "SolvePlan Graph action name must be a nonempty string"
+            )
+        from taichi_forge.linalg._graph_krylov import GraphKrylovSolver
+
+        if self._graph_action_solver is None:
+            if isinstance(self._solver, GraphKrylovSolver):
+                self._graph_action_solver = self._solver
+            else:
+                self._graph_action_solver = GraphKrylovSolver(
+                    self.operator,
+                    preconditioner,
+                    max_iterations=self.max_iterations,
+                    absolute_tolerance=self.atol,
+                    relative_tolerance=self.rtol,
+                    recordable_only=True,
+                )
+        serial = self._graph_action_serial
+        self._graph_action_serial += 1
+        terminal_prefix = f"__solve_terminal_{id(self):x}_{serial}"
+        terminal = SolveGraphTerminal(
+            f"{terminal_prefix}_state",
+            f"{terminal_prefix}_metrics",
+        )
+        return _SolvePlanGraphNode(
+            self,
+            self._graph_action_solver,
+            rhs,
+            output,
+            initial_guess,
+            terminal,
+            name=name,
+        )
+
     def solve(self, rhs, *, initial_guess=None, out=None):
         """Solves one RHS with persistent plan-owned workspace."""
         if self.operator is None or self._solver is None:
@@ -4847,6 +5327,9 @@ __all__ = [
     "OperatorTraits",
     "PreconditionerPlan",
     "PreconditionerSession",
+    "SolveGraphTerminal",
+    "SolveGraphTerminalPacket",
+    "SolveGraphTerminalSnapshot",
     "SolvePlan",
     "SolveQualificationReport",
     "SolveResult",

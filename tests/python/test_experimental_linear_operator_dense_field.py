@@ -200,6 +200,90 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
     np.testing.assert_array_equal(volume_output.to_numpy(), volume_values)
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+@pytest.mark.parametrize("method", ["cg", "pcg"])
+def test_solve_plan_complete_graph_action_terminal_and_workspace(method):
+    size = 16
+    operator = _compiled_identity(size)
+    options = {"preconditioner": operator} if method == "pcg" else {}
+    plan = ti.linalg.experimental.SolvePlan(
+        operator,
+        method=method,
+        max_iterations=8,
+        atol=1e-6,
+        **options,
+    )
+    rhs_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "solve_rhs", ti.f32, ndim=1
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "solve_output", ti.f32, ndim=1
+    )
+    action = plan.graph_action(
+        rhs_arg, output_arg, name=f"recorded_{method}"
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(action)
+    graph = builder.compile()
+
+    rhs = ti.ndarray(ti.f32, shape=size)
+    output = ti.ndarray(ti.f32, shape=size)
+    expected = np.linspace(-2.0, 3.0, size, dtype=np.float32)
+    rhs.from_numpy(expected)
+    packet = action.allocate_terminal()
+    ticket = graph.submit(
+        {
+            "solve_rhs": rhs,
+            "solve_output": output,
+            **packet.arguments,
+        }
+    )
+    ticket.wait()
+
+    snapshot = packet.snapshot()
+    assert snapshot.converged
+    assert snapshot.iterations == 1
+    assert snapshot.residual_norm == pytest.approx(0.0, abs=1e-7)
+    np.testing.assert_allclose(output.to_numpy(), expected, rtol=1e-6)
+    report = graph.execution_stats()
+    assert report.memory.persistent_internal_storage_bytes > size * 4
+    assert report.memory.internal_storage_exclusive
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_solve_plan_graph_action_binds_disjoint_field_ranges_directly():
+    size = 16
+    storage = ti.field(ti.f32, shape=48)
+    expected = np.linspace(0.5, 2.0, size, dtype=np.float32)
+    host = np.zeros(48, dtype=np.float32)
+    host[3 : 3 + size] = expected
+    storage.from_numpy(host)
+    rhs = ti.linalg.vector_view(storage, offset=3, length=size)
+    output = ti.linalg.vector_view(storage, offset=27, length=size)
+
+    plan = ti.linalg.experimental.SolvePlan(
+        _compiled_identity(size), method="cg", max_iterations=8, atol=1e-6
+    )
+    rhs_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "rhs", ti.f32, ndim=1)
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1
+    )
+    action = plan.graph_action(rhs_arg, output_arg)
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(action)
+    graph = builder.compile()
+    packet = action.allocate_terminal()
+    ticket = graph.submit(
+        {"rhs": rhs, "output": output, **packet.arguments}
+    )
+    ticket.wait()
+
+    assert packet.snapshot().converged
+    np.testing.assert_allclose(
+        storage.to_numpy()[27 : 27 + size], expected, rtol=1e-6
+    )
+
+
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
 @pytest.mark.parametrize("method", ["cg", "pcg"])
 def test_graph_krylov_composition_binds_full_fields_and_initial_guess_directly(

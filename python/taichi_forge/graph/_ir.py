@@ -78,6 +78,37 @@ class TemporaryRequirement:
 
 
 @dataclass(frozen=True)
+class InternalNdarrayRequirement:
+    """Graph-instance-owned ndarray storage required by a recorded action.
+
+    Unlike a temporary, this storage remains address-stable for the lifetime
+    of one compiled Graph instance. ``exclusive_submission`` declares that a
+    later asynchronous invocation must not reuse it until the preceding
+    completion fence has retired.
+    """
+
+    dtype: object
+    shape: tuple
+    element_bytes: int
+    exclusive_submission: bool = False
+
+    def __post_init__(self):
+        shape = tuple(int(value) for value in self.shape)
+        if any(value <= 0 for value in shape):
+            raise ValueError("Graph internal ndarray shape must be positive")
+        if self.element_bytes <= 0:
+            raise ValueError("Graph internal ndarray element size must be positive")
+        object.__setattr__(self, "shape", shape)
+
+    @property
+    def storage_bytes(self):
+        elements = 1
+        for value in self.shape:
+            elements *= value
+        return elements * self.element_bytes
+
+
+@dataclass(frozen=True)
 class BoundedDomain:
     """Backend-neutral iteration domain driven by a device extent.
 

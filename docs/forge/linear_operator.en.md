@@ -483,6 +483,47 @@ print(result.iterations, result.residual_norm, result.termination_reason)
 stats = plan.statistics()
 ```
 
+### Complete SolvePlan Graph action
+
+An f32 CG/PCG plan whose operator and optional fixed-linear preconditioner are
+recordable can inline the complete solve into an enclosing Graph. This is a
+structured action, not a nested `Graph.run()` call:
+
+```python
+rhs_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "rhs", ti.f32, ndim=1)
+x_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "x", ti.f32, ndim=1)
+
+solve = plan.graph_action(rhs_arg, x_arg, name="inner_pcg")
+builder = ti.graph.GraphBuilder()
+builder.append_native(solve)
+graph = builder.compile()
+
+terminal = solve.allocate_terminal()
+ticket = graph.submit({"rhs": rhs, "x": x, **terminal.arguments})
+ticket.wait()
+result = terminal.snapshot()
+```
+
+`solve.terminal.state` is an i32[4] symbolic resource containing status,
+logical iteration count, breakdown code, and a completion marker.
+`solve.terminal.metrics` is an f32[4] resource containing initial residual
+squared, final residual squared, reference norm squared, and effective
+tolerance squared. An enclosing structured region may consume these symbolic
+resources on device. Forge performs no implicit terminal readback;
+`terminal.snapshot()` is the explicit host boundary and should be called only
+after the enclosing `SubmissionTicket` completes.
+
+All Krylov vectors and scalar recurrence state are private, address-stable
+storage owned by the compiled Graph instance. One Graph instance has one
+workspace lane: a second asynchronous submission waits for the preceding
+completion fence before reusing that storage. Compile independent Graphs when
+true solve concurrency is required. `Graph.execution_stats().memory` reports
+the persistent bytes, exclusive policy, waits, and reuses. Runtime operands
+accept qualified scalar ndarrays, full dense Fields, and compact scalar-flat
+`vector_view(..., offset=..., length=..., stride=1)` ranges. RHS and output
+must be proven disjoint; a separate initial guess may either be disjoint from
+the output or be its exact view.
+
 For the coefficient-invariant compatibility path, a fixed-linear
 preconditioner may be passed as an operator rather than as an application
 callback:

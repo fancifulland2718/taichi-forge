@@ -46,6 +46,7 @@ from taichi_forge.graph._ir import (
     DispatchNode,
     IfRegion,
     GraphAccess,
+    InternalNdarrayRequirement,
     NativeCallNode,
     ObservationNode,
     ParallelBranchSummary,
@@ -233,31 +234,7 @@ def _align_up(value, alignment):
     return (value + alignment - 1) // alignment * alignment
 
 
-@dataclass(frozen=True)
-class _GraphInternalNdarraySpec:
-    """Immutable recipe materialized once by each runtime Graph instance."""
-
-    dtype: object
-    shape: tuple
-    element_bytes: int
-
-    def __post_init__(self):
-        shape = tuple(int(value) for value in self.shape)
-        if not shape or any(value <= 0 for value in shape):
-            raise ValueError("Graph internal ndarray shape must be positive")
-        if self.element_bytes <= 0:
-            raise ValueError("Graph internal ndarray element size must be positive")
-        object.__setattr__(self, "shape", shape)
-
-    @property
-    def storage_bytes(self):
-        elements = 1
-        for value in self.shape:
-            elements *= value
-        return elements * self.element_bytes
-
-    def materialize(self):
-        return ScalarNdarray(self.dtype, self.shape)
+_GraphInternalNdarraySpec = InternalNdarrayRequirement
 
 
 def _materialize_graph_internal_bindings(bindings):
@@ -269,7 +246,7 @@ def _materialize_graph_internal_bindings(bindings):
             key = id(value)
             storage = storage_by_spec.get(key)
             if storage is None:
-                storage = value.materialize()
+                storage = ScalarNdarray(value.dtype, value.shape)
                 storage_by_spec[key] = storage
                 owned.append(storage)
             materialized[name] = storage
@@ -308,6 +285,21 @@ class _GraphTemporaryArenaLease:
         if self._slot is not None:
             self._slot["completion"] = None
             self._slot = None
+
+
+class _GraphExclusiveInternalStorageLease:
+    def __init__(self, instance):
+        self._instance = instance
+
+    def attach(self, completion):
+        if self._instance is not None:
+            self._instance._attach_exclusive_internal_storage(completion)
+            self._instance = None
+
+    def cancel(self):
+        if self._instance is not None:
+            self._instance._cancel_exclusive_internal_storage()
+            self._instance = None
 
 
 class _GraphTemporaryArena:
@@ -1502,6 +1494,10 @@ class GraphMemoryReport:
     telemetry_arena_waits: int
     telemetry_materializations: int
     telemetry_host_readback_bytes: int
+    persistent_internal_storage_bytes: int
+    internal_storage_exclusive: bool
+    internal_storage_waits: int
+    internal_storage_reuses: int
     opaque_driver_bytes: Optional[int]
 
 
@@ -3780,6 +3776,7 @@ def _execution_report(
     temporary_arena_stats=None,
     observation_arena_stats=None,
     telemetry_arena_stats=None,
+    internal_storage_stats=None,
 ):
     flat_backend_stats = tuple(_flatten_backend_stats(backend_stats))
     segments = []
@@ -3977,6 +3974,7 @@ def _execution_report(
     temporary_arena_stats = temporary_arena_stats or {}
     observation_arena_stats = observation_arena_stats or {}
     telemetry_arena_stats = telemetry_arena_stats or {}
+    internal_storage_stats = internal_storage_stats or {}
     temporary_plan_materialized = bool(temporary_arena_stats.get("materialized", False))
     planned_temporary_bytes = int(temporary_memory_plan.get("planned_peak_bytes", 0))
     persistent_temporary_bytes = int(temporary_arena_stats.get("reserved_bytes", 0))
@@ -4039,6 +4037,18 @@ def _execution_report(
         ),
         telemetry_host_readback_bytes=int(
             telemetry_arena_stats.get("host_readback_bytes", 0)
+        ),
+        persistent_internal_storage_bytes=int(
+            internal_storage_stats.get("reserved_bytes", 0)
+        ),
+        internal_storage_exclusive=bool(
+            internal_storage_stats.get("exclusive", False)
+        ),
+        internal_storage_waits=int(
+            internal_storage_stats.get("waits", 0)
+        ),
+        internal_storage_reuses=int(
+            internal_storage_stats.get("reuses", 0)
         ),
         opaque_driver_bytes=None,
     )
@@ -5036,7 +5046,22 @@ class _CompiledSequentialRegionNode:
                 for node in self.nodes
             )
         )
-        self.fixed_runtime_args = _merge_fixed_runtime_args(self.nodes)
+        fixed_runtime_args = dict(_merge_fixed_runtime_args(self.nodes))
+        for sequence in definition_sequences:
+            for binding_name, value in sequence._fixed_runtime_args.items():
+                existing = fixed_runtime_args.get(binding_name)
+                if existing is not None and existing is not value:
+                    if not (
+                        isinstance(existing, (int, float))
+                        and isinstance(value, (int, float))
+                        and existing == value
+                    ):
+                        raise TaichiRuntimeError(
+                            "Structured sequence provides conflicting fixed "
+                            f"binding {binding_name!r}"
+                        )
+                fixed_runtime_args[binding_name] = value
+        self.fixed_runtime_args = fixed_runtime_args
         self.recording_runtime_arg_names = frozenset().union(
             *(
                 getattr(
@@ -5050,11 +5075,20 @@ class _CompiledSequentialRegionNode:
         self.runtime_arg_names = self.recording_runtime_arg_names.difference(
             (*self.fixed_runtime_args, *self.temporary_runtime_arg_names)
         )
-        self.lifetime_leases = tuple(
-            lease
-            for node in self.nodes
-            for lease in getattr(node, "lifetime_leases", ())
-        )
+        lifetime_leases = []
+        seen_lifetime_leases = set()
+        for owner in (*self.nodes, *definition_sequences):
+            leases = getattr(
+                owner,
+                "lifetime_leases",
+                getattr(owner, "_lifetime_leases", ()),
+            )
+            for lease in leases:
+                identity = id(lease)
+                if identity not in seen_lifetime_leases:
+                    seen_lifetime_leases.add(identity)
+                    lifetime_leases.append(lease)
+        self.lifetime_leases = tuple(lifetime_leases)
         self.snode_tree_dependencies = frozenset().union(
             *(node.snode_tree_dependencies for node in self.nodes)
         )
@@ -5082,6 +5116,27 @@ class _CompiledSequentialRegionNode:
     def run(self, context, temporaries=None):
         for node in self.nodes:
             node.run(context, temporaries)
+
+    @property
+    def supports_native_submission(self):
+        return all(
+            node.supports_native_submission
+            for node in self.control_nodes
+        )
+
+    def run_for_submission(self, context, temporaries=None):
+        if not self.supports_native_submission:
+            raise TaichiRuntimeError(
+                "Structured sequence submission requires every control "
+                "region to provide submission-capable native lowering"
+            )
+        for node in self.nodes:
+            if _is_structured_control_node(node):
+                node.run_for_submission(context, temporaries)
+            elif isinstance(node, _CompiledSequentialRegionNode):
+                node.run_for_submission(context, temporaries)
+            else:
+                node.run(context, temporaries)
 
     def materialize_pending_report(self):
         for node in self.control_nodes:
@@ -5708,6 +5763,8 @@ class _CompiledWhileGraphNode:
 
     @property
     def supports_native_submission(self):
+        if impl.current_cfg().arch in (_ti_core.Arch.x64, _ti_core.Arch.arm64):
+            return self.lowering_mode in ("auto", "portable")
         return (
             self.lowering_mode == "native_required"
             and self._native_upgrade_eligible
@@ -5721,6 +5778,9 @@ class _CompiledWhileGraphNode:
                 "Graph while submission requires a submission-capable "
                 "native_required backend lowering"
             )
+        if impl.current_cfg().arch in (_ti_core.Arch.x64, _ti_core.Arch.arm64):
+            self.run(context, temporaries)
+            return
         self._last_report = None
         if impl.current_cfg().arch == _ti_core.Arch.vulkan:
             if self.max_iterations == 0:
@@ -8249,14 +8309,25 @@ class _GraphSpec:
             if validate is not None:
                 validate()
 
-    def bind_runtime_args(self, args, temporaries=None):
-        bound = args
+    def bind_runtime_args(self, args, temporaries=None, fixed_runtime_args=None):
+        if fixed_runtime_args:
+            overlap = fixed_runtime_args.keys() & args.keys()
+            if overlap:
+                raise TaichiRuntimeError(
+                    "Graph runtime arguments collide with provider-owned "
+                    "fixed bindings: " + ", ".join(sorted(overlap))
+                )
+            bound = dict(fixed_runtime_args)
+            bound.update(args)
+        else:
+            bound = args
+        provider_args = bound
         owners = {}
         for lease in self.lifetime_leases:
             bind = getattr(lease, "bind_graph_arguments", None)
             if bind is None:
                 continue
-            replacements = bind(args)
+            replacements = bind(provider_args)
             if not replacements:
                 continue
             if not isinstance(replacements, dict):
@@ -8266,16 +8337,30 @@ class _GraphSpec:
             if bound is args:
                 bound = dict(args)
             for name, value in replacements.items():
-                if name not in self.runtime_arg_names:
+                if name not in self.runtime_arg_names and name not in (
+                    fixed_runtime_args or {}
+                ):
                     raise TaichiRuntimeError(
                         f"Graph provider attempted to bind unknown argument {name!r}"
                     )
                 previous = owners.get(name)
                 if previous is not None and bound[name] is not value:
-                    raise TaichiRuntimeError(
-                        "Graph providers produced conflicting argument "
-                        f"bindings for {name!r}"
+                    previous_descriptor = getattr(
+                        bound[name], "descriptor", None
                     )
+                    value_descriptor = getattr(value, "descriptor", None)
+                    equivalent = (
+                        previous_descriptor is not None
+                        and value_descriptor is not None
+                        and int(previous_descriptor.fingerprint)
+                        == int(value_descriptor.fingerprint)
+                    )
+                    if not equivalent:
+                        raise TaichiRuntimeError(
+                            "Graph providers produced conflicting argument "
+                            f"bindings for {name!r}"
+                        )
+                    value = bound[name]
                 bound[name] = value
                 owners[name] = lease
         temporary_args = self.bind_temporary_args(temporaries)
@@ -8361,17 +8446,26 @@ class _GraphSpec:
         self._temporary_binding_cache[cache_key] = resolved
         return resolved
 
-    def validate_runtime_args(self, args, entrypoint="Graph.run"):
+    def validate_runtime_args(
+        self,
+        args,
+        entrypoint="Graph.run",
+        fixed_runtime_args=None,
+    ):
         if not isinstance(args, dict):
             raise TaichiRuntimeError(
                 f"{entrypoint}() expects a dict of runtime arguments, got {type(args)}"
             )
         if args.keys() == self.runtime_arg_names:
-            self._validate_nested_control_aliases(args)
+            validation_args = args
+            if fixed_runtime_args:
+                validation_args = dict(fixed_runtime_args)
+                validation_args.update(args)
+            self._validate_nested_control_aliases(validation_args)
             for lease in self.lifetime_leases:
                 validate = getattr(lease, "validate_graph_bindings", None)
                 if validate is not None:
-                    validate(args)
+                    validate(validation_args)
             return
 
         missing = sorted(self.runtime_arg_names.difference(args.keys()))
@@ -8685,8 +8779,10 @@ class _GraphExecutable:
         context = self._context
         if context is not None:
             context.begin(
-                self.spec.bind_runtime_args(args, temporaries),
-                self.fixed_runtime_args,
+                self.spec.bind_runtime_args(
+                    args, temporaries, self.fixed_runtime_args
+                ),
+                None,
                 trace_recorder,
             )
         try:
@@ -8700,8 +8796,9 @@ class _GraphExecutable:
         context = self._context
         if context is not None:
             context.begin(
-                self.spec.bind_runtime_args(args, temporaries),
-                self.fixed_runtime_args,
+                self.spec.bind_runtime_args(
+                    args, temporaries, self.fixed_runtime_args
+                ),
             )
         try:
             telemetry_region = 0
@@ -8724,6 +8821,8 @@ class _GraphExecutable:
                     ):
                         telemetry.end_region(telemetry_region, node, context)
                         telemetry_region += 1
+                elif isinstance(node, _CompiledSequentialRegionNode):
+                    node.run_for_submission(context, temporaries)
                 else:
                     node.run(context, temporaries)
         finally:
@@ -8739,6 +8838,15 @@ class _GraphInstance:
             self._fixed_runtime_args,
             self._internal_storages,
         ) = _materialize_graph_internal_bindings(spec.fixed_runtime_args)
+        self._exclusive_internal_storage = any(
+            isinstance(value, _GraphInternalNdarraySpec)
+            and value.exclusive_submission
+            for value in spec.fixed_runtime_args.values()
+        )
+        self._exclusive_internal_completion = None
+        self._exclusive_internal_reserved = False
+        self._exclusive_internal_waits = 0
+        self._exclusive_internal_reuses = 0
         self._executable = None
         self._native_nodes = None
         self._backend_executable = None
@@ -8794,6 +8902,45 @@ class _GraphInstance:
 
     def run(self, args):
         self._run_impl(self, args, self._temporary_bindings)
+
+    def acquire_exclusive_internal_storage(self):
+        if not self._exclusive_internal_storage:
+            return None
+        if self._exclusive_internal_reserved:
+            raise TaichiRuntimeError(
+                "Graph internal workspace is already reserved"
+            )
+        completion = self._exclusive_internal_completion
+        if completion is not None:
+            if not completion.done():
+                completion.wait()
+                self._exclusive_internal_waits += 1
+            self._exclusive_internal_completion = None
+            self._exclusive_internal_reuses += 1
+        self._exclusive_internal_reserved = True
+        return _GraphExclusiveInternalStorageLease(self)
+
+    def _attach_exclusive_internal_storage(self, completion):
+        if not self._exclusive_internal_reserved:
+            raise TaichiRuntimeError(
+                "Graph internal workspace attachment lost its reservation"
+            )
+        self._exclusive_internal_reserved = False
+        self._exclusive_internal_completion = (
+            completion if completion.has_backend_work else None
+        )
+
+    def _cancel_exclusive_internal_storage(self):
+        self._exclusive_internal_reserved = False
+
+    @property
+    def internal_storage_stats(self):
+        return {
+            "reserved_bytes": int(self.spec.internal_storage_bytes),
+            "exclusive": self._exclusive_internal_storage,
+            "waits": self._exclusive_internal_waits,
+            "reuses": self._exclusive_internal_reuses,
+        }
 
     def run_traced(self, args, trace_recorder):
         if not self.spec.structured_control_nodes:
@@ -8903,8 +9050,9 @@ class _GraphInstance:
         context = self._run_context
         if context is not None:
             context.begin(
-                self.spec.bind_runtime_args(args, temporaries),
-                self._fixed_runtime_args,
+                self.spec.bind_runtime_args(
+                    args, temporaries, self._fixed_runtime_args
+                ),
             )
         try:
             self._backend_executable.run(context, temporaries)
@@ -9435,6 +9583,47 @@ class Sequential:
         self._has_indirect_dispatch = False
         self._structured_depth = 0
 
+    def _bind_internal_ndarray(
+        self,
+        name,
+        dtype,
+        shape,
+        *,
+        exclusive_submission=False,
+    ):
+        """Reserve private address-stable storage for a provider sequence."""
+
+        if not isinstance(name, str) or not name:
+            raise TaichiRuntimeError(
+                "Graph internal ndarray binding name must be nonempty"
+            )
+        if name in self._fixed_runtime_args:
+            raise TaichiRuntimeError(
+                f"Graph internal binding {name!r} is already defined"
+            )
+        shape = tuple(int(value) for value in shape)
+        self._fixed_runtime_args[name] = InternalNdarrayRequirement(
+            dtype,
+            shape,
+            _ti_core.data_type_size(dtype),
+            bool(exclusive_submission),
+        )
+        return Arg(ArgKind.NDARRAY, name, dtype, ndim=len(shape))
+
+    def _bind_internal_scalar(self, name, dtype, value):
+        """Bind one private immutable scalar for a provider sequence."""
+
+        if not isinstance(name, str) or not name:
+            raise TaichiRuntimeError(
+                "Graph internal scalar binding name must be nonempty"
+            )
+        if name in self._fixed_runtime_args:
+            raise TaichiRuntimeError(
+                f"Graph internal binding {name!r} is already defined"
+            )
+        self._fixed_runtime_args[name] = value
+        return Arg(ArgKind.SCALAR, name, dtype)
+
     def dispatch(self, kernel_fn, *args, template_args=None, label=None):
         label = _normalize_dispatch_label(label)
         kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
@@ -9492,6 +9681,9 @@ class Sequential:
         executable = compile_native_graph_node(node)
         if prewarm:
             executable.prewarm()
+        structured = executable.recordable_sequence
+        if structured is not None:
+            return self._append_recordable_sequence(structured, executable)
         compiled = _CompiledNativeGraphNode(executable)
         action = compiled.recordable_action
         if action is None:
@@ -9531,6 +9723,73 @@ class Sequential:
         self._source_native_count += compiled.source_native_count
         self._native_action_manifests.extend(compiled.native_action_manifests)
         self._dispatch_count += len(dispatches)
+        return self
+
+    def _append_recordable_sequence(self, sequence, executable):
+        if not isinstance(sequence, Sequential):
+            raise TaichiRuntimeError(
+                "Native recordable_sequence must be a Graph Sequential"
+            )
+        if not sequence._items:
+            raise TaichiRuntimeError(
+                "Native recordable_sequence must contain at least one action"
+            )
+        schema = tuple(executable.runtime_arg_schema)
+        if any(not binding.required for binding in schema):
+            raise TaichiRuntimeError(
+                "Optional structured native Graph arguments are not supported"
+            )
+        schema_names = frozenset(binding.name for binding in schema)
+        if len(schema_names) != len(schema):
+            raise TaichiRuntimeError(
+                "Structured native Graph runtime bindings must be unique"
+            )
+        public_names = sequence._recording_runtime_arg_names.difference(
+            sequence._fixed_runtime_args
+        )
+        if public_names != schema_names:
+            missing = sorted(schema_names.difference(public_names))
+            unexpected = sorted(public_names.difference(schema_names))
+            details = []
+            if missing:
+                details.append("missing " + ", ".join(missing))
+            if unexpected:
+                details.append("unexpected " + ", ".join(unexpected))
+            raise TaichiRuntimeError(
+                "Structured native Graph sequence bindings do not match its "
+                "public schema: " + "; ".join(details)
+            )
+        for name, value in sequence._fixed_runtime_args.items():
+            existing = self._fixed_runtime_args.get(name)
+            if existing is not None and existing is not value:
+                if not (
+                    isinstance(existing, (int, float))
+                    and isinstance(value, (int, float))
+                    and existing == value
+                ):
+                    raise TaichiRuntimeError(
+                        "Structured native actions provide conflicting fixed "
+                        f"binding {name!r}"
+                    )
+            self._fixed_runtime_args[name] = value
+        self._items.extend(sequence._items)
+        self._ir_nodes.extend(sequence._ir_nodes)
+        self._runtime_arg_names.update(sequence._runtime_arg_names)
+        self._recording_runtime_arg_names.update(
+            sequence._recording_runtime_arg_names
+        )
+        self._lifetime_leases.extend(sequence._lifetime_leases)
+        self._lifetime_leases.append(executable)
+        self._temporary_actions.extend(sequence._temporary_actions)
+        self._source_native_count += sequence._source_native_count
+        self._native_action_manifests.extend(
+            sequence._native_action_manifests
+        )
+        self._dispatch_count += sequence._dispatch_count
+        self._has_indirect_dispatch |= sequence._has_indirect_dispatch
+        self._structured_depth = max(
+            self._structured_depth, sequence._structured_depth
+        )
         return self
 
     def _plain_view(self, item_pairs):
@@ -10534,6 +10793,11 @@ class GraphBuilder:
         executable = compile_native_graph_node(node)
         if prewarm:
             executable.prewarm()
+        structured = executable.recordable_sequence
+        if structured is not None:
+            sequence = Sequential()
+            sequence._append_recordable_sequence(structured, executable)
+            return self.append(sequence)
         self._active_bounded_publication = None
         self._flush_graph_builder()
         self._nodes.append(_CompiledNativeGraphNode(executable))
@@ -10874,7 +11138,10 @@ class Graph:
         with self._lifecycle_lock:
             self._check_runtime_valid()
             runtime = impl.pytaichi
-            self._spec.validate_runtime_args(args)
+            self._spec.validate_runtime_args(
+                args,
+                fixed_runtime_args=self._instance._fixed_runtime_args,
+            )
             submission_state = runtime._active_graph_submissions
             if submission_state < 0:
                 raise TaichiRuntimeError(
@@ -10903,6 +11170,9 @@ class Graph:
             # increment before the first native call: otherwise two independent
             # Graphs can both snapshot zero, overwrite the count with one, and
             # drive it negative when their paired finally blocks run.
+            internal_storage_lease = (
+                self._instance.acquire_exclusive_internal_storage()
+            )
             temporary_lease = self._instance.acquire_temporary_lease()
             observation_lease = None
             try:
@@ -10935,6 +11205,8 @@ class Graph:
                     observation_lease.cancel()
                 if temporary_lease is not None:
                     temporary_lease.cancel()
+                if internal_storage_lease is not None:
+                    internal_storage_lease.cancel()
         if trace_recorder is not None:
             return trace_recorder.finish()
         return None
@@ -10967,12 +11239,16 @@ class Graph:
         ):
             raise TaichiRuntimeError(
                 "Graph.submit() supports structured control only when every "
-                "region has native_required asynchronous backend lowering"
+                "region has a submission-capable backend lowering"
             )
         runtime = impl.pytaichi
         with self._lifecycle_lock:
             self._check_runtime_valid()
-            self._spec.validate_runtime_args(args, "Graph.submit")
+            self._spec.validate_runtime_args(
+                args,
+                "Graph.submit",
+                self._instance._fixed_runtime_args,
+            )
         admission = _reserve_paced_submission(
             pacer,
             runtime,
@@ -10981,6 +11257,7 @@ class Graph:
             on_saturation=on_saturation,
         )
         temporary_lease = None
+        internal_storage_lease = None
         observation_lease = None
         observation_state = None
         telemetry_lease = None
@@ -10994,7 +11271,11 @@ class Graph:
                         "runtime reinitialization. Please rebuild the graph "
                         "after ti.init()."
                     )
-                self._spec.validate_runtime_args(args, "Graph.submit")
+                self._spec.validate_runtime_args(
+                    args,
+                    "Graph.submit",
+                    self._instance._fixed_runtime_args,
+                )
                 submission_state = runtime._active_graph_submissions
                 if submission_state < 0:
                     raise TaichiRuntimeError(
@@ -11015,6 +11296,9 @@ class Graph:
                 # Publish the AD exclusion count before transaction creation:
                 # the pybind call may release the GIL while waiting for another
                 # runtime submission reader/writer boundary.
+                internal_storage_lease = (
+                    self._instance.acquire_exclusive_internal_storage()
+                )
                 temporary_lease = self._instance.acquire_temporary_lease()
                 observation_lease = self._instance.acquire_observation_lease()
                 telemetry_lease = (
@@ -11083,6 +11367,9 @@ class Graph:
                             host_submit_ns,
                         )
                         telemetry_lease = None
+                    if internal_storage_lease is not None:
+                        internal_storage_lease.attach(completion)
+                        internal_storage_lease = None
                 finally:
                     self._instance.clear_observation_buffers()
                     self._instance.clear_temporary_buffers()
@@ -11097,6 +11384,8 @@ class Graph:
                 telemetry_lease.cancel()
             if temporary_lease is not None:
                 temporary_lease.cancel()
+            if internal_storage_lease is not None:
+                internal_storage_lease.cancel()
             if admission is not None:
                 admission._cancel()
             raise
@@ -11267,6 +11556,11 @@ class Graph:
                 if lifecycle_state == "ready"
                 else {}
             )
+            internal_storage_stats = (
+                self._instance.internal_storage_stats
+                if lifecycle_state == "ready"
+                else {}
+            )
             observation_staging_bytes = 0
             if lifecycle_state == "ready" and (
                 self._contains_structured_control_value
@@ -11290,6 +11584,7 @@ class Graph:
                 temporary_arena_stats=temporary_arena_stats,
                 observation_arena_stats=observation_arena_stats,
                 telemetry_arena_stats=telemetry_arena_stats,
+                internal_storage_stats=internal_storage_stats,
             )
 
     @property

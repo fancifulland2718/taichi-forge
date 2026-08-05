@@ -335,6 +335,18 @@ class NativeGraphExecutable:
     def recordable_action(self):
         return None
 
+    @property
+    def recordable_sequence(self):
+        """Optional structured sequence equivalent to :meth:`run`.
+
+        Flat providers should continue to expose ``recordable_action``. A
+        provider whose semantics include structured control may instead
+        return a Graph ``Sequential`` definition. The Graph frontend validates
+        its public bindings and inlines it at compile time; implementations
+        must never submit or run a second Graph from this property.
+        """
+        return None
+
     def recordable_bounded_publication(self, target):
         """Optionally publish a semantic extent into Graph-owned launch state.
 
