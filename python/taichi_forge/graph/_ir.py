@@ -52,6 +52,7 @@ class TemporaryRequirement:
     name: str
     bytes: int
     alignment: int = 1
+    storage_kind: str = "raw_i32"
 
     def __post_init__(self):
         if not self.name:
@@ -60,13 +61,20 @@ class TemporaryRequirement:
             raise ValueError("Graph temporary bytes must be non-negative")
         if self.alignment <= 0:
             raise ValueError("Graph temporary alignment must be positive")
+        if self.storage_kind not in ("raw_i32", "f32"):
+            raise ValueError("Unsupported Graph temporary storage kind")
+        if self.storage_kind == "f32" and (self.bytes % 4 != 0 or self.alignment % 4 != 0):
+            raise ValueError("f32 Graph temporaries require four-byte size and alignment")
 
     def to_dict(self):
-        return {
+        result = {
             "name": self.name,
             "bytes": self.bytes,
             "alignment": self.alignment,
         }
+        if self.storage_kind != "raw_i32":
+            result["storage_kind"] = self.storage_kind
+        return result
 
 
 @dataclass(frozen=True)
@@ -561,6 +569,7 @@ class TemporaryAllocation:
     bytes: int
     alignment: int
     slot: int
+    storage_kind: str = "raw_i32"
 
 
 @dataclass(frozen=True)
@@ -987,6 +996,7 @@ def plan_temporary_memory(root):
                     "last": current_position,
                     "bytes": requirement.bytes,
                     "alignment": requirement.alignment,
+                    "storage_kind": requirement.storage_kind,
                     "conflict": False,
                 }
             else:
@@ -994,6 +1004,7 @@ def plan_temporary_memory(root):
                 if (
                     entry["bytes"] != requirement.bytes
                     or entry["alignment"] != requirement.alignment
+                    or entry["storage_kind"] != requirement.storage_kind
                 ):
                     entry["conflict"] = True
                     entry["bytes"] = max(entry["bytes"], requirement.bytes)
@@ -1016,15 +1027,18 @@ def plan_temporary_memory(root):
             name,
             entry["bytes"],
             entry["alignment"],
+            entry["storage_kind"],
         )
         for name, entry in declarations.items()
         if not entry["conflict"]
     )
     slots = []
     allocation_slots = {}
-    for first, last, name, byte_count, alignment in intervals:
+    for first, last, name, byte_count, alignment, storage_kind in intervals:
         available = [
-            (index, slot) for index, slot in enumerate(slots) if slot["last"] < first
+            (index, slot)
+            for index, slot in enumerate(slots)
+            if slot["last"] < first and slot["storage_kind"] == storage_kind
         ]
         if available:
             slot_index, slot = min(
@@ -1046,19 +1060,23 @@ def plan_temporary_memory(root):
                     "last": last,
                     "bytes": byte_count,
                     "alignment": alignment,
+                    "storage_kind": storage_kind,
                 }
             )
         allocation_slots[name] = slot_index
 
-    peak_bytes = 0
+    peak_by_kind = {}
     slot_payload_bytes = 0
-    slot_offsets = []
-    for slot in slots:
+    slot_offsets = {}
+    for slot_index, slot in enumerate(slots):
+        storage_kind = slot["storage_kind"]
         alignment = slot["alignment"]
-        peak_bytes = (peak_bytes + alignment - 1) // alignment * alignment
-        slot_offsets.append(peak_bytes)
-        peak_bytes += slot["bytes"]
+        kind_peak = peak_by_kind.get(storage_kind, 0)
+        kind_peak = (kind_peak + alignment - 1) // alignment * alignment
+        slot_offsets[slot_index] = kind_peak
+        peak_by_kind[storage_kind] = kind_peak + slot["bytes"]
         slot_payload_bytes += slot["bytes"]
+    peak_bytes = sum(peak_by_kind.values())
     planned_logical_bytes = logical_bytes - opaque_bytes
     return TemporaryMemoryPlan(
         declared_bytes=declared_bytes,
@@ -1076,6 +1094,7 @@ def plan_temporary_memory(root):
                 bytes=entry["bytes"],
                 alignment=entry["alignment"],
                 slot=allocation_slots[name],
+                storage_kind=entry["storage_kind"],
             )
             for name, entry in sorted(declarations.items())
             if not entry["conflict"]

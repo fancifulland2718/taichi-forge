@@ -30,7 +30,7 @@ from taichi_forge.types._argument_descriptor import (
 )
 from taichi_forge.types import ndarray_type
 from taichi_forge.types.annotations import template
-from taichi_forge.types.primitive_types import i32, u32
+from taichi_forge.types.primitive_types import f32, i32, u32
 from taichi_forge.types.texture_type import FORMAT2TY_CH, TY_CH2FORMAT
 from taichi_forge.graph._native import (
     BoundedPublicationTarget,
@@ -332,6 +332,22 @@ class _GraphTemporaryArena:
         self._reuses = 0
         self._waits = 0
         self._storage_bytes = _align_up(plan.planned_peak_bytes, self._WORD_BYTES)
+        self._typed_slot_bytes = {}
+        for allocation in plan.allocations:
+            if allocation.storage_kind == "f32":
+                self._typed_slot_bytes[allocation.slot] = max(
+                    self._typed_slot_bytes.get(allocation.slot, 0),
+                    allocation.bytes,
+                )
+        self._raw_storage_bytes = max(
+            (
+                allocation.offset + allocation.bytes
+                for allocation in plan.allocations
+                if allocation.storage_kind == "raw_i32"
+            ),
+            default=0,
+        )
+        self._raw_storage_bytes = _align_up(self._raw_storage_bytes, self._WORD_BYTES)
         self._available = bool(plan.allocations) and not (
             plan.conflicting_requirements
             or any(
@@ -341,22 +357,30 @@ class _GraphTemporaryArena:
         )
 
     def _new_slot(self):
-        storage = (
+        raw_storage = (
             None
-            if self._storage_bytes == 0
-            else ScalarNdarray(i32, (self._storage_bytes // self._WORD_BYTES,))
+            if self._raw_storage_bytes == 0
+            else ScalarNdarray(i32, (self._raw_storage_bytes // self._WORD_BYTES,))
         )
+        typed_storage = {
+            slot: ScalarNdarray(f32, (byte_count // self._WORD_BYTES,))
+            for slot, byte_count in self._typed_slot_bytes.items()
+        }
         bindings = {
             allocation.name: GraphTemporaryBuffer(
-                storage=storage,
-                offset=allocation.offset,
+                storage=(typed_storage[allocation.slot] if allocation.storage_kind == "f32" else raw_storage),
+                offset=(0 if allocation.storage_kind == "f32" else allocation.offset),
                 bytes=allocation.bytes,
                 alignment=allocation.alignment,
                 slot=allocation.slot,
             )
             for allocation in self.plan.allocations
         }
-        slot = {"storage": storage, "bindings": bindings, "completion": None}
+        slot = {
+            "storage": (raw_storage, typed_storage),
+            "bindings": bindings,
+            "completion": None,
+        }
         self._slots.append(slot)
         self._allocations += 1
         return slot

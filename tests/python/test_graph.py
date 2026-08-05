@@ -1283,6 +1283,32 @@ def test_temporary_memory_plan_reuses_only_nonoverlapping_intervals():
     assert conflict_plan["planned_peak_bytes"] == 0
 
 
+def test_temporary_memory_plan_separates_typed_storage_slots():
+    with pytest.raises(ValueError, match="four-byte"):
+        TemporaryRequirement("invalid_f32", 6, 4, storage_kind="f32")
+
+    mixed = SequentialRegion(
+        (
+            DispatchNode(
+                "raw",
+                temporaries=(TemporaryRequirement("raw", 64, 16),),
+            ),
+            DispatchNode(
+                "typed",
+                temporaries=(TemporaryRequirement("typed", 32, 16, storage_kind="f32"),),
+            ),
+        )
+    )
+    plan = plan_temporary_memory(mixed)
+    assert plan.planned_peak_bytes == 96
+    assert plan.reused_bytes == 0
+    assert plan.slot_count == 2
+    assert tuple((allocation.name, allocation.offset, allocation.storage_kind) for allocation in plan.allocations) == (
+        ("raw", 0, "raw_i32"),
+        ("typed", 0, "f32"),
+    )
+
+
 def test_parallel_candidate_analysis_is_fail_closed_and_memory_aware():
     safe = analyze_parallel_candidate(
         (
