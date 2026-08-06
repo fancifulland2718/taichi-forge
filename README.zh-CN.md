@@ -34,13 +34,14 @@ Forge 主要以 vanilla Taichi 1.7.4 的公开 API 作为兼容参考。Forge �
 
 ## 版本历史
 
-当前正式发布版本是 `0.6.0`，`master` 面向 `0.6.1` 开发；`0.4.25` 是最后一个公开的
+当前正式发布版本是 `0.6.1`，`master` 面向 `0.6.2` 开发；`0.4.25` 是最后一个公开的
 `0.4.x` 基线。由于 PyPI
 项目容量有限，部分不再重要的旧发行文件已经移除。因此，完整版本索引使用长期稳定的
 Git 源码边界，不把当前 PyPI 文件列表误当成全部历史。
 
 | 版本 | 用户可见范围 |
 | --- | --- |
+| [0.6.1](docs/forge/release_notes.zh.md#061) | 动态 SNode directory 与 CUDA 热 root 绑定；task launch policy、label 与关联 Graph telemetry；精确/有界及嵌套 Graph 执行；设备端 worklist 与 prefix pipeline；LinearOperator/SolvePlan composition、直接 Field 绑定与多 lane 提交；CUDA radix 和 runtime/JIT 生命周期加固。最终 Python shim/source 边界为 `b129ad94c`，配对 native runtime build identity 为 `c268ca5671e8`。 |
 | [0.6.0](docs/forge/release_notes.zh.md#060) | 结构化 Graph 控制/遥测与 Vulkan indirect dispatch；runtime-bound linear operator、稀疏 runtime 与 Krylov 工具；driver-only CUDA primitive；受管 dense/external 互操作与 CUDA-Vulkan 显示共享；边缘布局/字体缩放；正确性与生命周期加固。 |
 | [0.5.0](docs/forge/release_notes.zh.md#050) | `0.4.25` 之后的异步 backend/runtime 安全与有界可观测性；CUDA/Vulkan Graph replay 与生命周期加固；Dense Field Graph、严格参数/AD 合同和 block 级异构环境。 |
 | [0.4.25](docs/forge/release_notes.zh.md#0425) | GGUI 事件泵与空 ImGui frame 生命周期修复。 |
@@ -115,7 +116,10 @@ Windows/Ubuntu 需要安装的包、LLVM 20、Vulkan SDK、`CMAKE_ARGS` 以及
 
 - Forge 是独立发布线，不要假设 Forge 版本号与上游 Taichi 版本号一一对应。
 - 名称含 `experimental_` 的 native 算法 API 是公开入口，但仍允许比长期 vanilla API 更保守地演进。
-- 严格跨设备 zero-copy 渲染不是全局承诺。根据来源后端和资源所有权合同，部分显示路径是 near-zero-copy 或 staging-based。
+- 合格的 CUDA-to-Vulkan GGUI 图像使用 `0.6.0` 已提供的共享分配与 external semaphore
+  zero-copy 路径；合格的 Vulkan-native 图像保持同设备直接路径。不支持的来源布局、缺少
+  external memory/semaphore 能力、物理设备不匹配，以及 host 或非 GPU 来源会明确使用 staging。
+  可通过 `Window.get_display_stats()` 核实实际选择的路径。
 - 公开兼容目标是已支持路径的源码兼容，而不是保留所有上游实现细节。
 
 ## 许可证
