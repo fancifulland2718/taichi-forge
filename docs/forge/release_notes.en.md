@@ -1,12 +1,10 @@
 # Taichi Forge Release Notes
 
 This is the canonical version index for Taichi Forge user-visible changes.
-Version `0.6.0` is the latest published release. Current `master` is the
-feature-complete `0.6.1` release source, and its source, shim, and runtime
-package metadata are aligned at `0.6.1`; this does not claim publication before
-the paired artifacts are uploaded. Version `0.5.0` remains the previous
-published runtime source boundary, and `0.4.25` is the final public `0.4.x`
-baseline.
+Version `0.6.1` is the latest published release. Its final Python shim/source
+boundary is `b129ad94c`; the paired published native runtime wheel reports
+build identity `c268ca5671e8`. Version `0.6.0` remains the previous published
+runtime source boundary, and `0.4.25` is the final public `0.4.x` baseline.
 
 PyPI storage is limited, so some nonessential older distributions have been
 removed. Absence from the current PyPI release list does not mean that a
@@ -18,7 +16,7 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
-| [Unreleased](#unreleased) | feature-complete 0.6.1 release source | current `master` | task launch manifests/policies, dynamic LLVM SNode directories, device-resident dynamic worklists, bounded Graph dispatch, and correlated pipeline telemetry |
+| [0.6.1](#061) | published release | `b129ad94c` | task launch manifests/policies, dynamic LLVM SNode directories, device-resident dynamic worklists, bounded Graph dispatch, and correlated pipeline telemetry |
 | [0.6.0](#060) | published release | `106ad65d25` | structured Graph control/telemetry and Vulkan indirect dispatch, sparse runtime/linear algebra, driver-only CUDA primitives, managed interoperability/display, and bounded runtime lifetimes |
 | [0.1.0](#010) | historical source release; artifact may be removed | `91ad177685` | scikit-build-core migration and Forge distribution rebrand |
 | [0.1.1](#011) | historical source release; artifact may be removed | `c771969781` | `taichi_forge` import rename and install-layout fixes |
@@ -43,8 +41,18 @@ grouped under the behavior they shipped.
 | [0.4.25](#0425) | retained on PyPI; final public 0.4.x baseline | `7dad067ca` | GGUI event-pump and ImGui lifecycle fixes |
 | [0.5.0](#050) | published runtime source boundary | `95626e8036` | async runtime safety, Graph replay/lifetime work, Dense Field Graph |
 
-## Unreleased
+## 0.6.1
 
+- Release provenance is intentionally split: `b129ad94c` is the final Python
+  shim/source boundary, while the immutable published runtime wheel identifies
+  its native build as `c268ca5671e8`. The distribution versions remain matched;
+  their source commits need not be equal after a compatible shim-only fix.
+- The final split-wheel shim now retires CPU/Vulkan Graph caches without
+  initializing the CUDA driver. It acquires the CUDA submission lock only when
+  a cache actually owns CUDA Graph state, preserving CUDA lock ordering without
+  adding work to the Graph execution hot path. This keeps the already-published
+  native runtime wheel unchanged and fixes installed-wheel validation on
+  no-driver Windows/Linux hosts.
 - LLVM CPU/CUDA SNode metadata is now addressed through a geometrically grown
   per-Program tree directory and exact-sized per-tree runtime-state blocks.
   The former fixed global SNode and tree tables no longer define a runtime
