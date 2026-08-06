@@ -3,8 +3,10 @@
 This is the canonical version index for Taichi Forge user-visible changes.
 Version `0.6.1` is the latest published release. Its final Python shim/source
 boundary is `b129ad94c`; the paired published native runtime wheel reports
-build identity `c268ca5671e8`. Version `0.6.0` remains the previous published
-runtime source boundary, and `0.4.25` is the final public `0.4.x` baseline.
+build identity `c268ca5671e8`. Current `master` targets `0.6.2`, and its source,
+shim, and runtime package metadata are aligned at `0.6.2`. Version `0.6.0`
+remains the previous published runtime source boundary, and `0.4.25` is the
+final public `0.4.x` baseline.
 
 PyPI storage is limited, so some nonessential older distributions have been
 removed. Absence from the current PyPI release list does not mean that a
@@ -16,6 +18,7 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
+| [Unreleased](#unreleased) | 0.6.2 development | current `master` | no user-visible changes recorded yet |
 | [0.6.1](#061) | published release | `b129ad94c` | task launch manifests/policies, dynamic LLVM SNode directories, device-resident dynamic worklists, bounded Graph dispatch, and correlated pipeline telemetry |
 | [0.6.0](#060) | published release | `106ad65d25` | structured Graph control/telemetry and Vulkan indirect dispatch, sparse runtime/linear algebra, driver-only CUDA primitives, managed interoperability/display, and bounded runtime lifetimes |
 | [0.1.0](#010) | historical source release; artifact may be removed | `91ad177685` | scikit-build-core migration and Forge distribution rebrand |
@@ -40,6 +43,10 @@ grouped under the behavior they shipped.
 | [0.4.24](#0424) | retained on PyPI | `f8dfb3e2a` | GGUI device-image staging and render cadence |
 | [0.4.25](#0425) | retained on PyPI; final public 0.4.x baseline | `7dad067ca` | GGUI event-pump and ImGui lifecycle fixes |
 | [0.5.0](#050) | published runtime source boundary | `95626e8036` | async runtime safety, Graph replay/lifetime work, Dense Field Graph |
+
+## Unreleased
+
+No user-visible `0.6.2` changes have been recorded yet.
 
 ## 0.6.1
 
