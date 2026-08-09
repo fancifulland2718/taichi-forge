@@ -6,6 +6,8 @@ from taichi_forge.linalg._runtime import (
     OperatorCapabilities,
     OperatorQualificationReport,
     OperatorTraits,
+    SmallBlockInverseBuilder,
+    SmallBlockInverseResult,
     VectorView,
     aslinearoperator,
     block_diagonal,

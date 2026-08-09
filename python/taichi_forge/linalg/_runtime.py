@@ -2988,6 +2988,248 @@ def inverse_block_diagonal(inverse_blocks, block_size, *, assume_spd):
     )
 
 
+@dataclass(frozen=True)
+class SmallBlockInverseResult:
+    """Device-resident outputs of :class:`SmallBlockInverseBuilder`."""
+
+    inverse_blocks: object
+    status: object
+
+
+class _SmallBlockInverseGraphExecutable(NativeGraphExecutable):
+    def __init__(self, builder, blocks_arg, output_arg, status_arg):
+        from taichi_forge.graph._graph import Arg, ArgKind, gen_cpp_kernel
+
+        expected = (
+            (blocks_arg, "blocks", f32),
+            (output_arg, "inverse_blocks", f32),
+            (status_arg, "status", i32),
+        )
+        for value, role, dtype in expected:
+            if (
+                getattr(value, "tag", None) != ArgKind.NDARRAY
+                or value.dtype() != dtype
+                or int(value.field_dim) != 1
+                or tuple(value.element_shape) != ()
+            ):
+                raise TaichiRuntimeError(
+                    f"SmallBlockInverseBuilder Graph {role} must be a " f"symbolic scalar {dtype} 1-D ndarray"
+                )
+        names = (blocks_arg.name, output_arg.name, status_arg.name)
+        if len(set(names)) != len(names):
+            raise TaichiRuntimeError("SmallBlockInverseBuilder Graph resources must use distinct " "symbolic names")
+        prefix = f"__small_block_inverse_{id(self):x}"
+        count_name = f"{prefix}_block_count"
+        regularization_name = f"{prefix}_regularization"
+        tolerance_name = f"{prefix}_pivot_tolerance"
+        count_arg = Arg(ArgKind.SCALAR, count_name, i32)
+        regularization_arg = Arg(ArgKind.SCALAR, regularization_name, f32)
+        tolerance_arg = Arg(ArgKind.SCALAR, tolerance_name, f32)
+        dispatch_args = (
+            count_arg,
+            regularization_arg,
+            tolerance_arg,
+            blocks_arg,
+            output_arg,
+            status_arg,
+        )
+        self._builder = builder
+        self._names = names
+        self._action = DispatchGraphAction(
+            ((gen_cpp_kernel(builder._kernel, dispatch_args), dispatch_args),),
+            backends=("cpu", "cuda", "vulkan"),
+            conditional_body_safe=True,
+            fixed_bindings={
+                count_name: builder.block_count,
+                regularization_name: builder.regularization,
+                tolerance_name: builder.pivot_tolerance,
+            },
+            update_policy="rebind",
+            synchronization_domain="runtime_ordered",
+        )
+        self._runtime_arg_schema = tuple(RuntimeBinding(name, "dense_vector") for name in names)
+        self._resource_effects = (
+            ResourceEffect(names[0], GraphAccess.READ),
+            ResourceEffect(names[1], GraphAccess.WRITE),
+            ResourceEffect(names[2], GraphAccess.WRITE),
+        )
+
+    @property
+    def runtime_arg_schema(self):
+        return self._runtime_arg_schema
+
+    @property
+    def resource_effects(self):
+        return self._resource_effects
+
+    @property
+    def recordable_action(self):
+        return self._action
+
+    @property
+    def graph_ir_node(self):
+        return NativeCallNode(
+            name="small_block_inverse_build",
+            effects=self._resource_effects,
+            bindings=self._runtime_arg_schema,
+            opaque=False,
+        )
+
+    @property
+    def debug_info(self):
+        return {
+            "kind": "small_block_inverse_build",
+            "block_size": self._builder.block_size,
+            "block_count": self._builder.block_count,
+            "dispatch_count": 1,
+            "status": "device_resident_per_block",
+        }
+
+    def run(self, runtime_args):
+        self._builder.build(
+            runtime_args[self._names[0]],
+            out=runtime_args[self._names[1]],
+            status=runtime_args[self._names[2]],
+        )
+
+    def validate_graph_bindings(self, runtime_args):
+        expected = (
+            (self._names[0], f32, self._builder.coefficient_count),
+            (self._names[1], f32, self._builder.coefficient_count),
+            (self._names[2], i32, self._builder.block_count),
+        )
+        descriptions = []
+        for name, dtype, extent in expected:
+            description = _flatten_storage_to_scalar_vector(describe_storage(runtime_args[name]))
+            descriptor = description.descriptor
+            if (
+                descriptor is None
+                or descriptor.scalar_type != dtype
+                or tuple(descriptor.index_shape) != (extent,)
+                or tuple(descriptor.element_shape)
+            ):
+                raise TaichiRuntimeError(
+                    f"SmallBlockInverseBuilder Graph argument {name!r} "
+                    f"must expose exactly {extent} scalar {dtype} values"
+                )
+            descriptions.append(description)
+        if any(
+            analyze_storage_alias(descriptions[left], descriptions[right]) != "kProvenDisjoint"
+            for left in range(len(descriptions))
+            for right in range(left + 1, len(descriptions))
+        ):
+            raise TaichiRuntimeError(
+                "SmallBlockInverseBuilder Graph blocks, output, and status " "must be proven disjoint"
+            )
+
+
+class _SmallBlockInverseGraphNode(NativeGraphNode):
+    def __init__(self, builder, blocks_arg, output_arg, status_arg):
+        self._builder = builder
+        self._blocks_arg = blocks_arg
+        self._output_arg = output_arg
+        self._status_arg = status_arg
+
+    def compile(self):
+        return _SmallBlockInverseGraphExecutable(
+            self._builder,
+            self._blocks_arg,
+            self._output_arg,
+            self._status_arg,
+        )
+
+
+class SmallBlockInverseBuilder:
+    """Builds independent row-major f32 inverse blocks on the device.
+
+    The builder has fixed block size/count and supports only sizes 1--4.
+    Status remains device resident: 0 is success, 1 is non-finite input or
+    result, and 2 is a singular/ill-conditioned pivot. Failed blocks are
+    written as zero. This primitive does not infer or assert SPD.
+    """
+
+    def __init__(
+        self,
+        block_size,
+        block_count,
+        *,
+        regularization=0.0,
+        pivot_tolerance=1.0e-8,
+    ):
+        self.block_size = _require_positive_size(block_size, "block_size")
+        self.block_count = _require_positive_size(block_count, "block_count")
+        if self.block_size not in (1, 2, 3, 4):
+            raise TaichiRuntimeError("SmallBlockInverseBuilder supports block_size 1, 2, 3, or 4")
+        try:
+            self.regularization = float(regularization)
+            self.pivot_tolerance = float(pivot_tolerance)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise TaichiRuntimeError("regularization and pivot_tolerance must be finite") from exc
+        if not math.isfinite(self.regularization) or self.regularization < 0.0:
+            raise TaichiRuntimeError("regularization must be finite and non-negative")
+        if not math.isfinite(self.pivot_tolerance) or self.pivot_tolerance <= 0.0:
+            raise TaichiRuntimeError("pivot_tolerance must be finite and positive")
+        self.coefficient_count = self.block_count * self.block_size * self.block_size
+        from taichi_forge.linalg._preconditioner_kernels import (
+            build_inverse_blocks_1_f32,
+            build_inverse_blocks_2_f32,
+            build_inverse_blocks_3_f32,
+            build_inverse_blocks_4_f32,
+        )
+
+        self._kernel = {
+            1: build_inverse_blocks_1_f32,
+            2: build_inverse_blocks_2_f32,
+            3: build_inverse_blocks_3_f32,
+            4: build_inverse_blocks_4_f32,
+        }[self.block_size]
+        self._program = _current_program()
+
+    def _ensure_valid(self):
+        if self._program is not _current_program():
+            raise TaichiRuntimeError("SmallBlockInverseBuilder belongs to an inactive or " "different runtime")
+
+    def build(self, blocks, *, out=None, status=None):
+        """Enqueues one device build and returns device-resident outputs."""
+        self._ensure_valid()
+        blocks = _require_current_scalar_ndarray(blocks, "blocks", dtype=f32)
+        if tuple(blocks.shape) != (self.coefficient_count,):
+            raise TaichiRuntimeError("blocks length does not match block_size * block_size * " "block_count")
+        if out is None:
+            out = ScalarNdarray(f32, (self.coefficient_count,))
+        out = _require_current_scalar_ndarray(out, "out", dtype=f32)
+        if tuple(out.shape) != (self.coefficient_count,):
+            raise TaichiRuntimeError("inverse block output has an incompatible length")
+        if status is None:
+            status = ScalarNdarray(i32, (self.block_count,))
+        status = _require_current_scalar_ndarray(status, "status", dtype=i32)
+        if tuple(status.shape) != (self.block_count,):
+            raise TaichiRuntimeError("inverse block status has an incompatible length")
+        descriptions = tuple(
+            _flatten_storage_to_scalar_vector(describe_storage(value)) for value in (blocks, out, status)
+        )
+        if any(
+            analyze_storage_alias(descriptions[left], descriptions[right]) != "kProvenDisjoint"
+            for left in range(len(descriptions))
+            for right in range(left + 1, len(descriptions))
+        ):
+            raise TaichiRuntimeError("blocks, inverse block output, and status must be disjoint")
+        self._kernel(
+            self.block_count,
+            self.regularization,
+            self.pivot_tolerance,
+            blocks,
+            out,
+            status,
+        )
+        return SmallBlockInverseResult(out, status)
+
+    def graph_action(self, blocks, output, status):
+        """Returns a one-dispatch recordable Graph build action."""
+        self._ensure_valid()
+        return _SmallBlockInverseGraphNode(self, blocks, output, status)
+
+
 def aslinearoperator(value, *, traits=None):
     """Returns ``value`` as a stable :class:`ti.linalg.LinearOperator`."""
     if isinstance(value, LinearOperator):
@@ -6613,6 +6855,8 @@ __all__ = [
     "LinearOperator",
     "OperatorCapabilities",
     "OperatorTraits",
+    "SmallBlockInverseBuilder",
+    "SmallBlockInverseResult",
     "PreconditionerPlan",
     "PreconditionerSession",
     "SolveGraphTerminal",
@@ -6630,6 +6874,7 @@ __all__ = [
     "aslinearoperator",
     "block_diagonal",
     "identity",
+    "inverse_block_diagonal",
     "vector_io_capabilities",
     "vector_view",
 ]
