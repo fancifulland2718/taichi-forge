@@ -1,6 +1,7 @@
 """Backend-portable recurrence kernels for independent batched CG/PCG."""
 
 from taichi_forge.lang import ops
+from taichi_forge.lang.device_extent import device_extent_count
 from taichi_forge.lang.kernel_impl import kernel
 from taichi_forge.types import ndarray_type
 from taichi_forge.types.annotations import template
@@ -28,6 +29,16 @@ INT_STATE_SLOTS = 3
 ACTIVE_COUNT = 0
 EXECUTED_SYSTEM_ITERATIONS = 1
 COUNTER_SLOTS = 2
+
+TERMINAL_SCHEMA_VERSION = 1
+TERMINAL_HEADER_SLOTS = 4
+TERMINAL_STATUS = 0
+TERMINAL_ITERATIONS = 1
+TERMINAL_INITIAL_RR = 2
+TERMINAL_FINAL_RR = 3
+TERMINAL_REFERENCE_NORM = 4
+TERMINAL_EFFECTIVE_TOLERANCE = 5
+TERMINAL_SYSTEM_SLOTS = 6
 
 
 @kernel
@@ -64,10 +75,98 @@ def evaluate_active_systems(
 
 
 @kernel
+def publish_active_system_extent(
+    int_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    active_systems: ndarray_type.ndarray(dtype=i32, ndim=1),
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    float_state: ndarray_type.ndarray(dtype=f32, ndim=1),
+    system_size: i32,
+    batch_size: i32,
+):
+    for _ in range(1):
+        active_count = 0
+        for env in range(batch_size):
+            float_state[P_AP * batch_size + env] = 0.0
+            if int_state[ACTIVE * batch_size + env] != 0:
+                active_systems[active_count] = env
+                active_count += 1
+        extent_state[0] = active_count * system_size
+        extent_state[1] = 0
+
+
+@kernel
 def advance_loop_counter(
     counter: ndarray_type.ndarray(dtype=i32, ndim=0),
 ):
     counter[None] += 1
+
+
+@kernel
+def publish_terminal_packet_device(
+    float_state: ndarray_type.ndarray(dtype=f32, ndim=1),
+    int_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    counters: ndarray_type.ndarray(dtype=i32, ndim=1),
+    logical_counter: ndarray_type.ndarray(dtype=i32, ndim=0),
+    packet: ndarray_type.ndarray(dtype=i32, ndim=1),
+    batch_size: i32,
+):
+    for _ in range(1):
+        packet[0] = TERMINAL_SCHEMA_VERSION
+        packet[1] = logical_counter[None]
+        packet[2] = counters[EXECUTED_SYSTEM_ITERATIONS]
+        packet[3] = counters[ACTIVE_COUNT]
+    for env in range(batch_size):
+        base = TERMINAL_HEADER_SLOTS + env * TERMINAL_SYSTEM_SLOTS
+        packet[base + TERMINAL_STATUS] = int_state[STATUS * batch_size + env]
+        packet[base + TERMINAL_ITERATIONS] = int_state[
+            ITERATIONS * batch_size + env
+        ]
+        packet[base + TERMINAL_INITIAL_RR] = ops.bit_cast(
+            float_state[INITIAL_RR * batch_size + env], i32
+        )
+        packet[base + TERMINAL_FINAL_RR] = ops.bit_cast(
+            float_state[RR_CURRENT * batch_size + env], i32
+        )
+        packet[base + TERMINAL_REFERENCE_NORM] = ops.bit_cast(
+            float_state[REFERENCE_NORM * batch_size + env], i32
+        )
+        packet[base + TERMINAL_EFFECTIVE_TOLERANCE] = ops.bit_cast(
+            float_state[EFFECTIVE_TOLERANCE * batch_size + env], i32
+        )
+
+
+@kernel
+def publish_terminal_packet_host_count(
+    float_state: ndarray_type.ndarray(dtype=f32, ndim=1),
+    int_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    counters: ndarray_type.ndarray(dtype=i32, ndim=1),
+    logical_iterations: i32,
+    packet: ndarray_type.ndarray(dtype=i32, ndim=1),
+    batch_size: i32,
+):
+    for _ in range(1):
+        packet[0] = TERMINAL_SCHEMA_VERSION
+        packet[1] = logical_iterations
+        packet[2] = counters[EXECUTED_SYSTEM_ITERATIONS]
+        packet[3] = counters[ACTIVE_COUNT]
+    for env in range(batch_size):
+        base = TERMINAL_HEADER_SLOTS + env * TERMINAL_SYSTEM_SLOTS
+        packet[base + TERMINAL_STATUS] = int_state[STATUS * batch_size + env]
+        packet[base + TERMINAL_ITERATIONS] = int_state[
+            ITERATIONS * batch_size + env
+        ]
+        packet[base + TERMINAL_INITIAL_RR] = ops.bit_cast(
+            float_state[INITIAL_RR * batch_size + env], i32
+        )
+        packet[base + TERMINAL_FINAL_RR] = ops.bit_cast(
+            float_state[RR_CURRENT * batch_size + env], i32
+        )
+        packet[base + TERMINAL_REFERENCE_NORM] = ops.bit_cast(
+            float_state[REFERENCE_NORM * batch_size + env], i32
+        )
+        packet[base + TERMINAL_EFFECTIVE_TOLERANCE] = ops.bit_cast(
+            float_state[EFFECTIVE_TOLERANCE * batch_size + env], i32
+        )
 
 
 @kernel
@@ -153,6 +252,32 @@ def reduce_dot(
 
 
 @kernel
+def reduce_dot_compact(
+        left: ndarray_type.ndarray(dtype=f32, ndim=1),
+        right: ndarray_type.ndarray(dtype=f32, ndim=1),
+        float_state: ndarray_type.ndarray(dtype=f32, ndim=1),
+        int_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+        active_systems: ndarray_type.ndarray(dtype=i32, ndim=1),
+        extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+        total_size: template(),
+        system_size: i32,
+        batch_size: i32,
+        state_slot: template(),
+):
+    for compact_index in range(total_size):
+        if compact_index < device_extent_count(extent_state):
+            active_slot = compact_index // system_size
+            local_index = compact_index - active_slot * system_size
+            env = active_systems[active_slot]
+            if int_state[ACTIVE * batch_size + env] != 0:
+                index = env * system_size + local_index
+                ops.atomic_add(
+                    float_state[state_slot * batch_size + env],
+                    left[index] * right[index],
+                )
+
+
+@kernel
 def validate_initial_rho(
         float_state: ndarray_type.ndarray(dtype=f32, ndim=1),
         int_state: ndarray_type.ndarray(dtype=i32, ndim=1),
@@ -194,6 +319,7 @@ def prepare_alpha(
         preconditioned: template(),
 ):
     for env in range(batch_size):
+        float_state[RR_NEXT * batch_size + env] = 0.0
         if int_state[ACTIVE * batch_size + env] != 0:
             denominator = float_state[P_AP * batch_size + env]
             numerator = float_state[
@@ -237,6 +363,63 @@ def update_solution_residual(
             ops.atomic_add(float_state[RR_NEXT * batch_size + env],
                            value * value)
     for env in range(batch_size):
+        if int_state[ACTIVE * batch_size + env] != 0:
+            rr_next = float_state[RR_NEXT * batch_size + env]
+            int_state[ITERATIONS * batch_size + env] += 1
+            ops.atomic_add(counters[EXECUTED_SYSTEM_ITERATIONS], 1)
+            invalid = (rr_next != rr_next or rr_next < 0.0
+                       or rr_next > 3.402823466e38)
+            if invalid:
+                float_state[RR_CURRENT * batch_size + env] = rr_next
+                int_state[STATUS * batch_size + env] = 1
+                int_state[ACTIVE * batch_size + env] = 0
+                ops.atomic_sub(counters[ACTIVE_COUNT], 1)
+            elif rr_next <= float_state[TOLERANCE_SQUARED * batch_size + env]:
+                float_state[RR_CURRENT * batch_size + env] = rr_next
+                int_state[STATUS * batch_size + env] = 2
+                int_state[ACTIVE * batch_size + env] = 0
+                ops.atomic_sub(counters[ACTIVE_COUNT], 1)
+
+
+@kernel
+def update_solution_residual_compact_values(
+    direction: ndarray_type.ndarray(dtype=f32, ndim=1),
+    applied: ndarray_type.ndarray(dtype=f32, ndim=1),
+    solution: ndarray_type.ndarray(dtype=f32, ndim=1),
+    residual: ndarray_type.ndarray(dtype=f32, ndim=1),
+    float_state: ndarray_type.ndarray(dtype=f32, ndim=1),
+    int_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    active_systems: ndarray_type.ndarray(dtype=i32, ndim=1),
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    total_size: template(),
+    system_size: i32,
+    batch_size: i32,
+):
+    for compact_index in range(total_size):
+        if compact_index < device_extent_count(extent_state):
+            active_slot = compact_index // system_size
+            local_index = compact_index - active_slot * system_size
+            env = active_systems[active_slot]
+            if int_state[ACTIVE * batch_size + env] != 0:
+                index = env * system_size + local_index
+                alpha = float_state[ALPHA * batch_size + env]
+                solution[index] += alpha * direction[index]
+                value = residual[index] - alpha * applied[index]
+                residual[index] = value
+                ops.atomic_add(
+                    float_state[RR_NEXT * batch_size + env], value * value
+                )
+
+
+@kernel
+def finish_solution_residual_compact(
+    float_state: ndarray_type.ndarray(dtype=f32, ndim=1),
+    int_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    counters: ndarray_type.ndarray(dtype=i32, ndim=1),
+    batch_size: i32,
+):
+    for env in range(batch_size):
+        float_state[RHO_NEXT * batch_size + env] = 0.0
         if int_state[ACTIVE * batch_size + env] != 0:
             rr_next = float_state[RR_NEXT * batch_size + env]
             int_state[ITERATIONS * batch_size + env] += 1
@@ -303,6 +486,71 @@ def prepare_direction(
                 float_state[BETA * batch_size + env] * direction[index])
         else:
             direction[index] = 0.0
+
+
+@kernel
+def prepare_direction_compact_coefficients(
+    float_state: ndarray_type.ndarray(dtype=f32, ndim=1),
+    int_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    counters: ndarray_type.ndarray(dtype=i32, ndim=1),
+    batch_size: i32,
+    preconditioned: template(),
+):
+    for env in range(batch_size):
+        if int_state[ACTIVE * batch_size + env] != 0:
+            numerator = float_state[(RHO_NEXT if preconditioned else RR_NEXT) *
+                                    batch_size + env]
+            denominator = float_state[
+                (RHO_CURRENT if preconditioned else RR_CURRENT) * batch_size +
+                env]
+            beta = numerator / denominator
+            invalid = (numerator != numerator or numerator <= 0.0
+                       or numerator > 3.402823466e38
+                       or denominator != denominator or denominator <= 0.0
+                       or denominator > 3.402823466e38 or beta != beta
+                       or beta > 3.402823466e38 or beta < -3.402823466e38)
+            if invalid:
+                float_state[RR_CURRENT * batch_size +
+                            env] = float_state[RR_NEXT * batch_size + env]
+                int_state[STATUS * batch_size + env] = 1
+                int_state[ACTIVE * batch_size + env] = 0
+                ops.atomic_sub(counters[ACTIVE_COUNT], 1)
+                beta = 0.0
+            else:
+                float_state[RR_CURRENT * batch_size +
+                            env] = float_state[RR_NEXT * batch_size + env]
+                if preconditioned:
+                    float_state[RHO_CURRENT * batch_size + env] = numerator
+            float_state[BETA * batch_size + env] = beta
+        else:
+            float_state[BETA * batch_size + env] = 0.0
+
+
+@kernel
+def update_direction_compact_values(
+    source: ndarray_type.ndarray(dtype=f32, ndim=1),
+    direction: ndarray_type.ndarray(dtype=f32, ndim=1),
+    float_state: ndarray_type.ndarray(dtype=f32, ndim=1),
+    int_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    active_systems: ndarray_type.ndarray(dtype=i32, ndim=1),
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    total_size: template(),
+    system_size: i32,
+    batch_size: i32,
+):
+    for compact_index in range(total_size):
+        if compact_index < device_extent_count(extent_state):
+            active_slot = compact_index // system_size
+            local_index = compact_index - active_slot * system_size
+            env = active_systems[active_slot]
+            index = env * system_size + local_index
+            if int_state[ACTIVE * batch_size + env] != 0:
+                direction[index] = (
+                    source[index] +
+                    float_state[BETA * batch_size + env] * direction[index]
+                )
+            else:
+                direction[index] = 0.0
 
 
 @kernel

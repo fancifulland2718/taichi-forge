@@ -243,12 +243,103 @@ def test_independent_batched_fixed_operator_pcg():
     stats = plan.statistics()
     assert stats["operations"]["preconditioner_apply_calls"] > 0
     assert stats["resources"]["workspace_vectors"] == 4
-    assert stats["resources"]["state_bytes"] == 68 * batch_size + 8
+    assert stats["resources"]["state_bytes"] == 92 * batch_size + 24
     assert (
         stats["operations"]["host_synchronizations"]
         > stats["operations"]["host_checks"]
     )
     assert stats["contract"]["per_system_status"]
+
+
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False
+)
+def test_independent_batched_pcg_accepts_recordable_preconditioner_plan():
+    experimental = ti.linalg.experimental
+    batch_size = 3
+    system_size = 8
+    total_size = batch_size * system_size
+    topology = ti.ndarray(ti.i32, shape=total_size)
+    topology.from_numpy(np.arange(total_size, dtype=np.int32))
+    diagonal_host = np.resize(
+        np.asarray([2.0, 3.0, 5.0, 7.0], dtype=np.float32),
+        total_size,
+    )
+
+    @ti.kernel
+    def diagonal_apply(
+        active_size: ti.i32,
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        numeric_data: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(active_size):
+            y[index] = numeric_data[index] * x[topology_data[index]]
+
+    traits = ti.linalg.OperatorTraits.spd()
+    operator = ti.linalg.LinearOperator.from_kernel(
+        diagonal_apply,
+        total_size,
+        topology,
+        numeric=_vector(diagonal_host),
+        traits=traits,
+    )
+    inverse = ti.linalg.LinearOperator.from_kernel(
+        diagonal_apply,
+        total_size,
+        topology,
+        numeric=_vector(1.0 / diagonal_host),
+        traits=traits,
+    )
+    preconditioner = experimental.PreconditionerPlan(
+        operator, inverse, method="caller_block"
+    ).setup()
+    policy = (
+        None
+        if impl.current_cfg().arch == ti.cpu
+        else "device_convergent"
+    )
+    plan = experimental.BatchedSolvePlan(
+        operator,
+        batch_size,
+        independent_systems=True,
+        method="pcg",
+        preconditioner=preconditioner,
+        max_iterations=8,
+        atol=1e-6,
+        execution_policy=policy,
+    )
+    exact = np.linspace(-0.75, 1.25, total_size, dtype=np.float32)
+    result = plan.solve(_vector(diagonal_host * exact))
+
+    assert result.all_converged
+    assert result.iterations == (1, 1, 1)
+    np.testing.assert_allclose(
+        result.solution.to_numpy(), exact, rtol=2e-4, atol=2e-4
+    )
+
+    updated_diagonal = diagonal_host * np.float32(1.25)
+    operator.update_numeric(
+        _vector(updated_diagonal),
+        expected_topology_version=1,
+        expected_numeric_version=1,
+    )
+    with pytest.raises(RuntimeError, match="stale"):
+        plan.solve(_vector(updated_diagonal * exact))
+
+    inverse.update_numeric(
+        _vector(1.0 / updated_diagonal),
+        expected_topology_version=1,
+        expected_numeric_version=1,
+    )
+    preconditioner.update()
+    updated = plan.solve(_vector(updated_diagonal * exact))
+    assert updated.all_converged
+    np.testing.assert_allclose(
+        updated.solution.to_numpy(), exact, rtol=2e-4, atol=2e-4
+    )
+    assert preconditioner.statistics()["pins"] >= 1
 
 
 @test_utils.test(
@@ -432,6 +523,42 @@ def test_independent_batched_fixed_budget_submission_and_workspace_slots():
     assert pacing["completed"] == 2
     assert pacing["lanes"]["primary"]["completed"] == 1
     assert pacing["lanes"]["secondary"]["completed"] == 1
+
+    pool = plan.workspace_pool(2, workspace_saturation="raise")
+    pool_out0 = ti.ndarray(ti.f32, shape=total_size)
+    pool_out1 = ti.ndarray(ti.f32, shape=total_size)
+    pooled0 = pool.submit(rhs, out=pool_out0)
+    pooled1 = pool.submit(rhs, out=pool_out1)
+    assert (pooled0.workspace_lane, pooled1.workspace_lane) == (0, 1)
+    with pytest.raises(RuntimeError, match="workspace lanes are occupied"):
+        pool.submit(rhs)
+    assert pooled0.result().all_converged
+    assert pooled1.result().all_converged
+    pool_stats = pool.statistics()
+    assert pool_stats["workspace_lanes"] == 2
+    assert pool_stats["materialized_lanes"] == 2
+    assert pool_stats["pending_lanes"] == ()
+    assert pool_stats["saturation_rejections"] == 1
+    assert pool_stats["graph_instance_per_materialized_lane"]
+    assert pool_stats["materialized_workspace_payload_bytes"] == (
+        2 * pool_stats["workspace_payload_bytes_per_lane"]
+    )
+
+    waiting_root = plan.clone_workspace()
+    waiting_pool = waiting_root.workspace_pool(
+        1, workspace_saturation="wait"
+    )
+    waiting_out0 = ti.ndarray(ti.f32, shape=total_size)
+    waiting_out1 = ti.ndarray(ti.f32, shape=total_size)
+    waiting0 = waiting_pool.submit(rhs, out=waiting_out0)
+    waiting1 = waiting_pool.submit(rhs, out=waiting_out1)
+    assert waiting0.result().all_converged
+    assert waiting1.result().all_converged
+    waiting_stats = waiting_pool.statistics()
+    assert waiting_stats["workspace_lanes"] == 1
+    assert waiting_stats["materialized_lanes"] == 1
+    assert waiting_stats["saturation_waits"] == 1
+    assert waiting_stats["pending_lanes"] == ()
 
     chunked = experimental.BatchedSolvePlan(
         operator,
@@ -620,12 +747,21 @@ def test_independent_batched_device_convergent_pcg_rebinds_a_and_m():
         execution_policy="device_convergent",
     )
     exact = np.linspace(-1.0, 1.0, total_size, dtype=np.float32)
-    first = plan.submit(_vector(diagonal_host * exact)).result()
+    first_submission = plan.submit(
+        _vector(diagonal_host * exact), telemetry=True
+    )
+    first = first_submission.result()
     assert first.all_converged
     assert max(first.iterations) == 1
     np.testing.assert_allclose(
         first.solution.to_numpy(), exact, rtol=3e-4, atol=3e-4
     )
+    ticket_telemetry = first_submission.telemetry()
+    assert ticket_telemetry.backend in ("cuda", "vulkan")
+    assert ticket_telemetry.logical_iterations == 1
+    assert ticket_telemetry.executed_system_iterations == batch_size
+    assert ticket_telemetry.provider_system_iterations == batch_size
+    assert ticket_telemetry.terminal_packet_bytes == (4 + 6 * batch_size) * 4
 
     updated_diagonal = diagonal_host * np.float32(1.75)
     operator.update_numeric(
@@ -652,6 +788,8 @@ def test_independent_batched_device_convergent_pcg_rebinds_a_and_m():
     assert replay["preconditioner_apply_included"]
     assert replay["last_control_report"]["logical_iterations"] == 1
     assert stats["operations"]["last_issued_iterations"] == 1
+    assert stats["submission"]["telemetry_requests"] == 1
+    assert stats["submission"]["telemetry_materializations"] == 1
     assert stats["contract"]["device_convergent_provider_actions"]
 
 
@@ -820,6 +958,79 @@ def test_device_convergent_batched_terminal_edge_cases():
     ).submit(_vector(np.ones(total_size, dtype=np.float32))).result()
     assert breakdown.breakdown == (True, True)
     assert breakdown.termination_reasons == ("breakdown", "breakdown")
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_device_convergent_active_system_compaction_matches_dense_recurrence():
+    experimental = ti.linalg.experimental
+    batch_size = 8
+    system_size = 32
+    total_size = batch_size * system_size
+    topology = ti.ndarray(ti.i32, shape=total_size)
+    topology.from_numpy(np.arange(total_size, dtype=np.int32))
+
+    @ti.kernel
+    def diagonal_apply(
+        active_size: ti.i32,
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        numeric_data: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(active_size):
+            y[index] = numeric_data[index] * x[topology_data[index]]
+
+    diagonal = np.tile(
+        np.linspace(1.0, 9.0, system_size, dtype=np.float32), batch_size
+    )
+    action = ti.linalg.LinearOperator.from_kernel(
+        diagonal_apply,
+        total_size,
+        topology,
+        numeric=_vector(diagonal),
+        traits=ti.linalg.OperatorTraits.spd(),
+    )
+    preconditioner = ti.linalg.inverse_block_diagonal(
+        _vector(1.0 / np.sqrt(diagonal)), 1, assume_spd=True
+    )
+    exact = np.linspace(-1.0, 1.0, total_size, dtype=np.float32)
+    exact[:system_size] = 0.0
+    rhs = _vector(diagonal * exact)
+    common = dict(
+        independent_systems=True,
+        method="pcg",
+        preconditioner=preconditioner,
+        max_iterations=32,
+        atol=1e-5,
+        execution_policy="device_convergent",
+    )
+    dense = experimental.BatchedSolvePlan(
+        action, batch_size, **common
+    ).solve(rhs)
+    compact_plan = experimental.BatchedSolvePlan(
+        action,
+        batch_size,
+        active_system_compaction=True,
+        **common,
+    )
+    compact = compact_plan.solve(rhs)
+
+    assert compact.termination_reasons == dense.termination_reasons
+    assert compact.iterations == dense.iterations
+    np.testing.assert_allclose(
+        compact.solution.to_numpy(),
+        dense.solution.to_numpy(),
+        rtol=3e-4,
+        atol=3e-4,
+    )
+    capability = compact_plan.statistics()["active_system_compaction"]
+    assert capability["enabled"]
+    assert not capability["logical_iteration_exact"]
+    assert capability["masked_capacity"]
+    assert not capability["provider_apply_compacted"]
+    resources = compact_plan.statistics()["resources"]
+    assert resources["state_bytes"] == 96 * batch_size + 44
+    assert resources["terminal_packet_bytes"] == (4 + 6 * batch_size) * 4
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
@@ -1086,7 +1297,7 @@ def test_independent_batched_contract_and_zero_budget():
         plan.submit(_vector([1.0, 2.0, 3.0, 4.0]))
     cloned = plan.clone_workspace()
     stats = cloned.statistics()
-    assert stats["schema_version"] == 4
+    assert stats["schema_version"] == 5
     assert stats["submission"]["asynchrony_scope"] == "host_completion"
     assert stats["submission"]["admission_unit"] == (
         "whole_solve_invocation"
@@ -1097,8 +1308,8 @@ def test_independent_batched_contract_and_zero_budget():
     resources = stats["resources"]
     assert resources["workspace_builds"] == 1
     assert resources["workspace_vector_bytes"] == 3 * 4 * 4
-    assert resources["state_bytes"] == 68 * 2 + 8
-    assert resources["workspace_payload_bytes"] == 192
-    assert resources["clone_workspace_payload_bytes"] == 192
+    assert resources["state_bytes"] == 92 * 2 + 24
+    assert resources["workspace_payload_bytes"] == 256
+    assert resources["clone_workspace_payload_bytes"] == 256
     assert resources["byte_accounting"] == "logical_ndarray_payload_only"
     assert "allocator_rounding" in resources["byte_accounting_excludes"]

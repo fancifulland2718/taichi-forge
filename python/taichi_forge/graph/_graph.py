@@ -36,6 +36,7 @@ from taichi_forge.graph._native import (
     BoundedPublicationTarget,
     GraphTemporaryBuffer,
     NativeActionManifest,
+    PreparedGraphBindings,
     ProviderOwnedNdarrayBinding,
     RecordableGraphAction,
     compile_native_graph_node,
@@ -8489,6 +8490,12 @@ def _parallel_storage_description(resource, value):
     return fact, description
 
 
+@dataclass(frozen=True)
+class _PreparedGraphInvocation:
+    arguments: object
+    submission_owners: tuple
+
+
 class _GraphSpec:
     def __init__(self, nodes, aot_graph_builder=None, aot_compiled_graph=None):
         source_nodes = tuple(nodes)
@@ -8615,7 +8622,11 @@ class _GraphSpec:
                     owners.append(owner)
         return tuple(owners)
 
-    def bind_runtime_args(self, args, temporaries=None, fixed_runtime_args=None):
+    def prepare_runtime_args(
+        self, args, temporaries=None, fixed_runtime_args=None
+    ):
+        if isinstance(args, _PreparedGraphInvocation):
+            return args
         if fixed_runtime_args:
             overlap = fixed_runtime_args.keys() & args.keys()
             if overlap:
@@ -8628,12 +8639,28 @@ class _GraphSpec:
         else:
             bound = args
         provider_args = bound
-        owners = {}
+        binding_owners = {}
+        submission_owners = []
+        submission_owner_ids = set()
         for lease in self.lifetime_leases:
             bind = getattr(lease, "bind_graph_arguments", None)
             if bind is None:
                 continue
-            replacements = bind(provider_args)
+            prepared = bind(provider_args)
+            if isinstance(prepared, PreparedGraphBindings):
+                replacements = prepared.replacements
+                lease_submission_owners = prepared.submission_owners
+            else:
+                replacements = prepared
+                acquire = getattr(lease, "graph_submission_owners", None)
+                lease_submission_owners = (
+                    () if acquire is None else tuple(acquire())
+                )
+            for owner in lease_submission_owners:
+                identity = id(owner)
+                if identity not in submission_owner_ids:
+                    submission_owner_ids.add(identity)
+                    submission_owners.append(owner)
             if not replacements:
                 continue
             if not isinstance(replacements, dict):
@@ -8649,7 +8676,7 @@ class _GraphSpec:
                     raise TaichiRuntimeError(
                         f"Graph provider attempted to bind unknown argument {name!r}"
                     )
-                previous = owners.get(name)
+                previous = binding_owners.get(name)
                 if previous is not None and bound[name] is not value:
                     previous_descriptor = getattr(
                         bound[name], "descriptor", None
@@ -8668,7 +8695,7 @@ class _GraphSpec:
                         )
                     value = bound[name]
                 bound[name] = value
-                owners[name] = lease
+                binding_owners[name] = lease
         temporary_args = self.bind_temporary_args(temporaries)
         if temporary_args:
             if bound is args:
@@ -8680,7 +8707,12 @@ class _GraphSpec:
                         f"{name!r}"
                     )
                 bound[name] = value
-        return bound
+        return _PreparedGraphInvocation(bound, tuple(submission_owners))
+
+    def bind_runtime_args(self, args, temporaries=None, fixed_runtime_args=None):
+        return self.prepare_runtime_args(
+            args, temporaries, fixed_runtime_args
+        ).arguments
 
     def bind_temporary_args(self, temporaries):
         if not self.temporary_actions:
@@ -10103,6 +10135,86 @@ class Sequential:
         self._dispatch_count += 1
         return self
 
+    def _dispatch_bounded(
+        self,
+        kernel_fn,
+        *args,
+        extent,
+        capacity,
+        block_dim=128,
+        template_args=None,
+        label=None,
+    ):
+        """Append an internal device-bounded CUDA payload to this region.
+
+        Structured Vulkan replay does not yet carry a reusable indirect packet
+        inside a conditional body, so this deliberately fails closed outside
+        CUDA.  The private entry point keeps that backend qualification from
+        becoming a broader public Graph promise before the Vulkan ownership
+        model is complete.
+        """
+
+        backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
+        if backend != "cuda":
+            raise TaichiRuntimeError(
+                "structured bounded dispatch is currently qualified only for CUDA"
+            )
+        if isinstance(capacity, bool) or not isinstance(capacity, int):
+            raise TypeError("bounded dispatch capacity must be an integer")
+        if capacity <= 0 or capacity > 0x7FFFFFFF:
+            raise ValueError("bounded dispatch capacity must be in [1, 2^31-1]")
+        extent = _require_bounded_symbolic_ndarray(extent, "extent", i32)
+        unzipped_args = flatten_args(args)
+        if extent.name not in _runtime_arg_names(unzipped_args):
+            raise TaichiRuntimeError(
+                "bounded dispatch payload arguments must include the extent argument"
+            )
+        route = _bounded_route(backend, False)
+        if not (route.device_known_count and route.no_host_readback):
+            raise TaichiRuntimeError(
+                "CUDA structured bounded dispatch requires a device-known, "
+                "no-readback route"
+            )
+        policy = GraphBuilder._bounded_launch_policy(
+            block_dim, "require", backend
+        )
+        kernel_cpp = gen_cpp_kernel(
+            kernel_fn,
+            args,
+            template_args=template_args,
+            task_launch_policy=policy,
+            range_one_to_one=False,
+        )
+        selected_block = _bounded_kernel_geometry(
+            kernel_cpp, backend
+        )
+        label = _normalize_dispatch_label(label)
+        ir_node = replace(
+            _dispatch_ir_node(
+                kernel_cpp, unzipped_args, dispatch_label=label
+            ),
+            bounded_domain=BoundedDomain(
+                extent=extent.name,
+                capacity=capacity,
+                block_dim=selected_block,
+                block_mode=policy.mode,
+                # CUDA's standalone bounded node cannot currently be nested
+                # safely in a conditional Graph. Keep the capacity grid and
+                # use the compact prefix as the semantic mask; capability
+                # reporting must not call this exact physical dispatch.
+                physical_grid_requirement="auto",
+            ),
+        )
+        self._dispatches.append((kernel_cpp, unzipped_args))
+        self._dispatch_labels.append(label)
+        self._items.append(("dispatch", kernel_cpp, unzipped_args, label))
+        self._ir_nodes.append(ir_node)
+        names = _runtime_arg_names(unzipped_args)
+        self._runtime_arg_names.update(names)
+        self._recording_runtime_arg_names.update(names)
+        self._dispatch_count += 1
+        return self
+
     def dispatch_indirect(
         self,
         kernel_fn,
@@ -10432,10 +10544,14 @@ class Sequential:
     def _dispatch_to(self, builder, *, region_kind="sequential"):
         backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
         recording_dispatches = []
-        for item in self._items:
+        for item, ir_node in zip(self._items, self._ir_nodes):
             if item[0] == "dispatch":
                 _, kernel_cpp, args, label = item
-                dispatches = ((kernel_cpp, tuple(args)),)
+                _record_backend_dispatch(
+                    builder, backend, kernel_cpp, tuple(args), ir_node
+                )
+                recording_dispatches.append((kernel_cpp, tuple(args)))
+                continue
             elif item[0] == "indirect":
                 _, kernel_cpp, args, dispatch_packet, label = item
                 builder.dispatch_indirect(
@@ -11689,11 +11805,16 @@ class Graph:
                         if observation_lease is not None
                         else None
                     )
+                    prepared = self._spec.prepare_runtime_args(
+                        args,
+                        temporary_bindings,
+                        self._instance._fixed_runtime_args,
+                    )
                     runtime.prog._record_runtime_graph_submission()
                     if trace_recorder is None:
-                        self._run_impl(args)
+                        self._run_impl(prepared)
                     else:
-                        self._instance.run_traced(args, trace_recorder)
+                        self._instance.run_traced(prepared, trace_recorder)
                     self._latest_control_flow_was_async = False
                     if observation_lease is not None:
                         self._last_observations = observation_lease.materialize()
@@ -11838,12 +11959,17 @@ class Graph:
                         if telemetry_lease is not None
                         else None
                     )
+                    prepared = self._spec.prepare_runtime_args(
+                        args,
+                        temporary_bindings,
+                        submission_instance._fixed_runtime_args,
+                    )
                     if self._contains_structured_control_value:
                         if telemetry_recorder is not None:
                             telemetry_recorder.attach_gpu_timing(transaction)
                         try:
                             submission_instance.run_for_submission(
-                                args,
+                                prepared,
                                 telemetry_recorder,
                             )
                         finally:
@@ -11851,8 +11977,8 @@ class Graph:
                                 telemetry_recorder.detach_gpu_timing()
                         self._latest_control_flow_was_async = True
                     else:
-                        submission_instance.run(args)
-                    submission_owners = self._spec.graph_submission_owners()
+                        submission_instance.run(prepared)
+                    submission_owners = prepared.submission_owners
                     # CGraph/kernel paths publish work themselves. Native plans
                     # use Program methods outside that launch path, so publish
                     # once for the whole native portion without changing run().

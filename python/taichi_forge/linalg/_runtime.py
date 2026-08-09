@@ -31,6 +31,7 @@ from taichi_forge.graph._native import (
     DispatchGraphAction,
     NativeGraphExecutable,
     NativeGraphNode,
+    PreparedGraphBindings,
     ProviderOwnedNdarrayBinding,
 )
 from taichi_forge.lang._ndarray import ScalarNdarray
@@ -1769,7 +1770,6 @@ class _LinearOperatorGraphExecutable(NativeGraphExecutable):
         self._record = operator._handle._recordable_kernel(adjoint)
         self._expected_stamp = tuple(self._record._resource_stamp())
         self._record_signature = self._compatible_record_signature(self._record)
-        self._last_submission_records = (self._record,)
         prefix = f"__linear_operator_{id(self._record):x}"
         graph_dispatches = tuple(self._record._graph_dispatches)
         self._opaque_graph_ir = bool(graph_dispatches)
@@ -2021,17 +2021,14 @@ class _LinearOperatorGraphExecutable(NativeGraphExecutable):
                     fixed_ndarrays[source_name], record
                 )
             replacements[private_name] = value
-        self._last_submission_records = (record,)
-        return replacements
-
-    def graph_submission_owners(self):
-        return self._last_submission_records
+        return PreparedGraphBindings(replacements, (record,))
 
     def validate_graph_lifetime(self):
         self._current_compatible_record()
 
     def bind_graph_arguments(self, runtime_args):
-        replacements = self._bind_provider_generation()
+        prepared = self._bind_provider_generation()
+        replacements = dict(prepared.replacements)
         expected = (
             (self._input_name, self._operator.shape[0 if self._adjoint else 1]),
             (self._output_name, self._operator.shape[1 if self._adjoint else 0]),
@@ -2045,7 +2042,9 @@ class _LinearOperatorGraphExecutable(NativeGraphExecutable):
             )
             if view is not None:
                 replacements[name] = view
-        return replacements
+        return PreparedGraphBindings(
+            replacements, prepared.submission_owners
+        )
 
     def validate_graph_bindings(self, runtime_args):
         expected = (
@@ -2470,7 +2469,8 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
             child.validate_graph_lifetime()
 
     def bind_graph_arguments(self, runtime_args):
-        replacements = self._bind_provider_generation()
+        prepared = self._bind_provider_generation()
+        replacements = dict(prepared.replacements)
         expected = (
             (
                 self._input_name,
@@ -2490,30 +2490,29 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
             )
             if view is not None:
                 replacements[name] = view
-        return replacements
+        return PreparedGraphBindings(
+            replacements, prepared.submission_owners
+        )
 
     def _bind_provider_generation(self):
         replacements = {}
+        submission_owners = []
+        owner_ids = set()
         for child in self._children:
-            child_replacements = child._bind_provider_generation()
+            prepared = child._bind_provider_generation()
+            child_replacements = prepared.replacements
             overlap = replacements.keys() & child_replacements.keys()
             if overlap:
                 raise TaichiRuntimeError(
                     "LinearOperator composition generation binding collision"
                 )
             replacements.update(child_replacements)
-        return replacements
-
-    def graph_submission_owners(self):
-        owners = []
-        seen = set()
-        for child in self._children:
-            for owner in child.graph_submission_owners():
+            for owner in prepared.submission_owners:
                 identity = id(owner)
-                if identity not in seen:
-                    seen.add(identity)
-                    owners.append(owner)
-        return tuple(owners)
+                if identity not in owner_ids:
+                    owner_ids.add(identity)
+                    submission_owners.append(owner)
+        return PreparedGraphBindings(replacements, tuple(submission_owners))
 
     def validate_graph_bindings(self, runtime_args):
         expected = (
@@ -6237,6 +6236,8 @@ class SolvePlan:
 from taichi_forge.linalg._batched_solver import (  # noqa: E402
     BatchedSolvePlan,
     BatchedSolveResult,
+    BatchedSolveWorkspacePool,
+    BatchedSubmissionTelemetry,
     SolveSubmission,
 )
 from taichi_forge.linalg._solve_qualification import (  # noqa: E402
@@ -6249,6 +6250,8 @@ from taichi_forge.linalg._solve_qualification import (  # noqa: E402
 __all__ = [
     "BatchedSolvePlan",
     "BatchedSolveResult",
+    "BatchedSolveWorkspacePool",
+    "BatchedSubmissionTelemetry",
     "LinearOperator",
     "OperatorCapabilities",
     "OperatorTraits",

@@ -8,6 +8,8 @@ solver and preconditioner execution plans remain in this namespace.
 from taichi_forge.linalg._runtime import (
     BatchedSolvePlan,
     BatchedSolveResult,
+    BatchedSolveWorkspacePool,
+    BatchedSubmissionTelemetry,
     PreconditionerPlan,
     PreconditionerSession,
     SolveGraphTerminal,
@@ -25,6 +27,8 @@ from taichi_forge.linalg._runtime import (
 __all__ = [
     "BatchedSolvePlan",
     "BatchedSolveResult",
+    "BatchedSolveWorkspacePool",
+    "BatchedSubmissionTelemetry",
     "PreconditionerPlan",
     "PreconditionerSession",
     "SolveGraphTerminal",

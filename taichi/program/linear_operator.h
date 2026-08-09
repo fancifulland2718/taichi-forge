@@ -739,6 +739,9 @@ class ExperimentalPreconditionerPlanHandle {
   OperatorResourceStamp accepted_target_stamp() const;
   OperatorResourceStamp accepted_action_stamp() const;
   OperatorBinding consumer_binding();
+  bool supports_recordable_action() const;
+  std::shared_ptr<LinearOperatorRecordableKernel> recordable_kernel(
+      OperatorApplyMode mode);
   ExperimentalPreconditionerPlanRuntimeStatistics
   debug_runtime_statistics() const;
 
@@ -752,6 +755,7 @@ class ExperimentalPreconditionerPlanHandle {
   Program *program_{nullptr};
   OperatorDescriptor target_descriptor_;
   OperatorBinding target_binding_;
+  LinearOperatorHandle *action_handle_{nullptr};
   std::unique_ptr<OperatorPlan> action_plan_;
   std::unique_ptr<OperatorResourceGenerationPublisher>
       approved_generations_;

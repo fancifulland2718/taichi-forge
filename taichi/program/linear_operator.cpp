@@ -2751,6 +2751,7 @@ ExperimentalPreconditionerPlanHandle::ExperimentalPreconditionerPlanHandle(
     : program_(program),
       target_descriptor_(target.descriptor()),
       target_binding_(target.binding()),
+      action_handle_(&action),
       action_plan_(
           std::make_unique<OperatorPlan>(program, action.binding())),
       approved_generations_(
@@ -2947,6 +2948,47 @@ OperatorBinding ExperimentalPreconditionerPlanHandle::consumer_binding() {
       std::move(metadata_action),
       [this] { return approved_generations_->acquire(); });
   return binding.with_execution_lowering(action_plan_->execution_kind());
+}
+
+bool ExperimentalPreconditionerPlanHandle::supports_recordable_action() const {
+  return action_handle_ && action_handle_->supports_recordable_kernel();
+}
+
+std::shared_ptr<LinearOperatorRecordableKernel>
+ExperimentalPreconditionerPlanHandle::recordable_kernel(
+    OperatorApplyMode mode) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  TI_ERROR_IF(!is_setup_,
+              "PreconditionerPlan must be setup before recording its action.");
+  TI_ERROR_IF(!supports_recordable_action(),
+              "PreconditionerPlan action is not recordable.");
+
+  // Pin the exact target/action pair approved by setup()/update(). Fetching
+  // only the source provider's latest record would silently bypass the
+  // plan's stale/reuse contract and would leave the target provenance
+  // unowned while an asynchronous Graph is in flight.
+  auto session = std::shared_ptr<ExperimentalPreconditionerSession>(
+      pin_locked().release());
+  auto record = action_handle_->recordable_kernel(mode);
+  TI_ERROR_IF(
+      !record ||
+          operator_resource_changes(session->action_stamp(),
+                                    record->resource_stamp()) != 0,
+      "PreconditionerPlan action changed while its approved Graph binding "
+      "was being prepared; call update() and retry.");
+  auto owner = std::make_shared<std::pair<
+      std::shared_ptr<LinearOperatorRecordableKernel>,
+      std::shared_ptr<ExperimentalPreconditionerSession>>>(record, session);
+  if (record->kernel()) {
+    return std::make_shared<LinearOperatorRecordableKernel>(
+        record->program(), record->kernel(), record->active_size(),
+        record->topology(), record->numeric(), record->resource_stamp(),
+        std::move(owner));
+  }
+  return std::make_shared<LinearOperatorRecordableKernel>(
+      record->program(), record->graph(), record->fixed_i32(),
+      record->fixed_ndarrays(), record->state_dependencies(),
+      record->resource_stamp(), std::move(owner));
 }
 
 std::unique_ptr<ExperimentalPreconditionerSession>
@@ -4480,8 +4522,15 @@ std::unique_ptr<LinearOperatorHandle>
 make_experimental_preconditioner_action_handle(
     Program *program,
     ExperimentalPreconditionerPlanHandle &plan) {
+  LinearOperatorHandle::RecordableKernelFn recordable_kernel;
+  if (plan.supports_recordable_action()) {
+    recordable_kernel = [&plan](OperatorApplyMode mode) {
+      return plan.recordable_kernel(mode);
+    };
+  }
   return std::make_unique<LinearOperatorHandle>(
-      program, plan.consumer_binding());
+      program, plan.consumer_binding(), nullptr, nullptr,
+      std::move(recordable_kernel));
 }
 
 }  // namespace taichi::lang

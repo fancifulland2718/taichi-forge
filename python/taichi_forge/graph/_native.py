@@ -60,6 +60,27 @@ class ProviderOwnedNdarrayBinding:
 
 
 @dataclass(frozen=True)
+class PreparedGraphBindings:
+    """One atomic provider binding result for a Graph invocation.
+
+    ``replacements`` and ``submission_owners`` describe the same immutable
+    provider generation.  Returning them together prevents a later owner
+    query from observing a newer generation than the storage bindings that
+    were prepared for this invocation.
+    """
+
+    replacements: object
+    submission_owners: tuple = ()
+
+    def __post_init__(self):
+        if not isinstance(self.replacements, MappingProxyType) and not isinstance(
+            self.replacements, dict
+        ):
+            raise TypeError("Prepared Graph replacements must be a mapping")
+        object.__setattr__(self, "submission_owners", tuple(self.submission_owners))
+
+
+@dataclass(frozen=True)
 class GraphTemporaryBuffer:
     """One named byte slice in a Graph-owned runtime allocation."""
 
