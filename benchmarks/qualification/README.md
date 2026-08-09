@@ -132,6 +132,12 @@ two modes share one diagonal SPD system, exact solution, common batch, balanced
 sample order, and replay plateau gates. Any mode ratio is an internal Forge
 API-boundary diagnostic, never a Forge/vanilla or Forge/Warp speedup.
 
+Run `audit_linear_operator_solve_plan.py <run-dir>` after a formal run. The
+offline auditor recomputes both raw-sample summaries and verifies policy,
+provenance, public qualification reports, explicit/automatic route evidence,
+disclosed unsupported capabilities, exact residual gates, replay plateau,
+bilingual output, and the absence of a cross-framework speedup.
+
 `device_prefix_chain` is `THIN-003`. Forge uses `DeviceExtent`, `DevicePrefix`,
 and one reusable `DevicePrefixWorkspace`. Vanilla manually composes the same
 device-count-masked stable compact plus scan using reusable public prefix-sum

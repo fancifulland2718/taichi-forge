@@ -112,6 +112,11 @@ stable scatter kernel。两边均计时完整 adapter call；内部 stage 数和
 exact solution、共同 batch、平衡样本顺序和回放平台门槛。任何 mode ratio 都只是
 Forge 内部 API 边界诊断，绝不是 Forge/vanilla 或 Forge/Warp speedup。
 
+正式运行后执行 `audit_linear_operator_solve_plan.py <run-dir>`。离线审计器会重算
+两个 mode 的原始样本统计，并检查门槛、来源、公共 qualification report、显式/自动
+route 证据、明确披露的 unsupported 能力、残差门槛、回放平台、双语输出，以及没有
+跨框架 speedup。
+
 `device_prefix_chain` 是 `THIN-003`。Forge 使用 `DeviceExtent`、`DevicePrefix` 和
 一个可复用 `DevicePrefixWorkspace`；vanilla 用可复用的公共 prefix-sum executor
 手工组合相同的 device-count-masked stable compact + scan。两个计时 adapter 都不在
