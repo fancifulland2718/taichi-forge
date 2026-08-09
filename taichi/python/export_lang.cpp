@@ -6709,6 +6709,12 @@ void export_lang(py::module &m) {
           py::arg("expected_numeric_version"))
       .def("_supports_numeric_update",
            &LinearOperatorHandle::supports_numeric_update)
+      .def("_update_affine_parameters",
+           &LinearOperatorHandle::update_affine_parameters,
+           py::arg("alpha"), py::arg("beta"),
+           py::arg("expected_version"), py::arg("next_version"))
+      .def("_supports_affine_parameter_update",
+           &LinearOperatorHandle::supports_affine_parameter_update)
       .def("_supports_recordable_kernel",
            &LinearOperatorHandle::supports_recordable_kernel)
       .def(
@@ -7000,6 +7006,13 @@ void export_lang(py::module &m) {
         make_composed_operator_handle,
         py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
         py::arg("outer"), py::arg("inner"));
+  m.def("_make_parameterized_affine_operator",
+        make_parameterized_affine_operator_handle,
+        py::keep_alive<0, 1>(), py::keep_alive<0, 2>(),
+        py::arg("left"), py::arg("right"), py::arg("alpha"),
+        py::arg("beta"), py::arg("alpha_min"),
+        py::arg("alpha_max"), py::arg("beta_min"),
+        py::arg("beta_max"));
   m.def(
       "_make_block_diagonal_operator",
       [](const py::iterable &items) {

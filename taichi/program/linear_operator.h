@@ -576,6 +576,8 @@ class LinearOperatorHandle {
       const NumericUpdateArguments &,
       std::uint64_t,
       std::uint64_t)>;
+  using AffineParameterUpdateFn = std::function<std::uint64_t(
+      double, double, std::uint64_t, std::uint64_t)>;
   using RecordableKernelFn = std::function<
       std::shared_ptr<LinearOperatorRecordableKernel>(OperatorApplyMode)>;
 
@@ -583,7 +585,8 @@ class LinearOperatorHandle {
                        OperatorBinding binding,
                        std::shared_ptr<void> provider_owner = {},
                        NumericUpdateFn numeric_update = {},
-                       RecordableKernelFn recordable_kernel = {});
+                       RecordableKernelFn recordable_kernel = {},
+                       AffineParameterUpdateFn affine_parameter_update = {});
   LinearOperatorHandle(
       const LinearOperatorHandle &) = delete;
   LinearOperatorHandle &operator=(
@@ -620,6 +623,11 @@ class LinearOperatorHandle {
                       std::uint64_t expected_topology_version,
                       std::uint64_t expected_numeric_version);
   bool supports_numeric_update() const;
+  std::uint64_t update_affine_parameters(double alpha,
+                                         double beta,
+                                         std::uint64_t expected_version,
+                                         std::uint64_t next_version);
+  bool supports_affine_parameter_update() const;
   std::shared_ptr<LinearOperatorRecordableKernel> recordable_kernel(
       OperatorApplyMode mode);
   bool supports_recordable_kernel() const;
@@ -629,6 +637,7 @@ class LinearOperatorHandle {
   std::shared_ptr<void> provider_owner_;
   NumericUpdateFn numeric_update_;
   RecordableKernelFn recordable_kernel_;
+  AffineParameterUpdateFn affine_parameter_update_;
   OperatorBinding binding_;
   std::unique_ptr<OperatorPlan> plan_;
 };
@@ -952,6 +961,16 @@ std::unique_ptr<LinearOperatorHandle>
 make_composed_operator_handle(
     LinearOperatorHandle &outer,
     LinearOperatorHandle &inner);
+std::unique_ptr<LinearOperatorHandle>
+make_parameterized_affine_operator_handle(
+    LinearOperatorHandle &left,
+    LinearOperatorHandle &right,
+    double alpha,
+    double beta,
+    double alpha_min,
+    double alpha_max,
+    double beta_min,
+    double beta_max);
 std::unique_ptr<LinearOperatorHandle>
 make_block_diagonal_operator_handle(
     const std::vector<LinearOperatorHandle *> &blocks);

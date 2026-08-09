@@ -2142,8 +2142,279 @@ OperatorBinding make_composed_operator_binding(OperatorBinding outer,
       });
 }
 
+namespace {
+
+struct AffineParameterRange {
+  double minimum{0.0};
+  double maximum{0.0};
+
+  bool contains(double value) const {
+    return value >= minimum && value <= maximum;
+  }
+};
+
+struct AffineParameterSnapshot {
+  double alpha{0.0};
+  double beta{0.0};
+  std::uint64_t version{1};
+};
+
+OperatorMathematicalTraits parameterized_affine_traits(
+    const OperatorAction &left,
+    const OperatorAction &right,
+    const AffineParameterRange &alpha,
+    const AffineParameterRange &beta) {
+  OperatorMathematicalTraits traits;
+  if (left.descriptor().domain != left.descriptor().range ||
+      right.descriptor().domain != right.descriptor().range) {
+    return traits;
+  }
+  const auto &left_traits = left.mathematical_traits();
+  const auto &right_traits = right.mathematical_traits();
+  traits.self_adjoint = structurally_derived_true_claim(
+      left_traits.self_adjoint, right_traits.self_adjoint);
+
+  const bool left_nonnegative =
+      alpha.minimum >= 0.0 &&
+      left_traits.positive_semidefinite.known() &&
+      left_traits.positive_semidefinite.value;
+  const bool right_nonnegative =
+      beta.minimum >= 0.0 &&
+      right_traits.positive_semidefinite.known() &&
+      right_traits.positive_semidefinite.value;
+  if (left_nonnegative && right_nonnegative &&
+      traits.self_adjoint.known() && traits.self_adjoint.value) {
+    traits.positive_semidefinite = {
+        true, OperatorTraitProvenance::derived_structurally,
+        left_traits.positive_semidefinite.validity_scope |
+            right_traits.positive_semidefinite.validity_scope |
+            operator_dependency(OperatorResourceDependency::schema)};
+  }
+
+  const bool left_strict =
+      alpha.minimum > 0.0 && left_traits.positive_definite.known() &&
+      left_traits.positive_definite.value;
+  const bool right_strict =
+      beta.minimum > 0.0 && right_traits.positive_definite.known() &&
+      right_traits.positive_definite.value;
+  if (traits.positive_semidefinite.known() &&
+      traits.positive_semidefinite.value &&
+      (left_strict || right_strict)) {
+    const auto scope =
+        traits.positive_semidefinite.validity_scope |
+        (left_strict ? left_traits.positive_definite.validity_scope
+                     : right_traits.positive_definite.validity_scope);
+    traits.positive_definite = {
+        true, OperatorTraitProvenance::derived_structurally, scope};
+    traits.singular = {
+        false, OperatorTraitProvenance::derived_structurally, scope};
+  }
+  return traits;
+}
+
+OperatorResourceStamp affine_parameter_stamp(
+    const std::vector<OperatorPinnedAction> &pins,
+    std::uint64_t version) {
+  auto stamp = combine_operator_generations(pins);
+  stamp.numeric_revision =
+      combine_operator_revision(stamp.numeric_revision, version);
+  return stamp;
+}
+
+void apply_parameterized_affine(
+    Program *program,
+    const std::vector<OperatorPinnedAction> &pins,
+    const AffineParameterSnapshot &parameters,
+    SumCompositeScratch &scratch,
+    OperatorApplyMode mode,
+    const OperatorVectorView &input,
+    const OperatorVectorView &output) {
+  TI_ASSERT(pins.size() == 2);
+  const bool device =
+      program && !arch_is_cpu(program->compile_config().arch);
+  if (device) {
+    validate_device_composite_views(input, output, program);
+  } else {
+    validate_host_composite_views(input, output);
+  }
+  auto scale_output = [&](double scale, const OperatorVectorView &view) {
+    if (scale == 1.0) {
+      return;
+    }
+    if (device) {
+      TI_ASSERT(view.ndarray);
+      transform_composite_ndarray(
+          program, const_cast<Ndarray *>(view.ndarray),
+          const_cast<Ndarray *>(view.ndarray), scale);
+    } else {
+      scale_composite_vector(scale, view);
+    }
+  };
+
+  if (parameters.alpha == 0.0) {
+    if (parameters.beta == 0.0) {
+      if (device) {
+        TI_ASSERT(output.ndarray);
+        transform_composite_ndarray(
+            program, const_cast<Ndarray *>(output.ndarray),
+            const_cast<Ndarray *>(output.ndarray), 0.0);
+      } else {
+        scale_composite_vector(0.0, output);
+      }
+      return;
+    }
+    pins[1].apply_overwrite(mode, input, output);
+    scale_output(parameters.beta, output);
+    return;
+  }
+  if (parameters.beta == 0.0) {
+    pins[0].apply_overwrite(mode, input, output);
+    scale_output(parameters.alpha, output);
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(scratch.mutex);
+  auto temporary =
+      (mode == OperatorApplyMode::forward ? scratch.forward : scratch.adjoint)
+          .view(program);
+  pins[0].apply_overwrite(mode, input, output);
+  pins[1].apply_overwrite(mode, input, temporary);
+  scale_output(parameters.alpha, output);
+  scale_output(parameters.beta, temporary);
+  if (device) {
+    TI_ASSERT(temporary.ndarray && output.ndarray);
+    add_composite_ndarray(program,
+                          const_cast<Ndarray *>(temporary.ndarray),
+                          const_cast<Ndarray *>(output.ndarray));
+  } else {
+    add_composite_vector(temporary, output);
+  }
+}
+
+class ParameterizedAffineOperatorOwner {
+ public:
+  ParameterizedAffineOperatorOwner(Program *program,
+                                   OperatorBinding left,
+                                   OperatorBinding right,
+                                   AffineParameterSnapshot initial,
+                                   AffineParameterRange alpha_range,
+                                   AffineParameterRange beta_range)
+      : program_(program),
+        operands_{std::move(left), std::move(right)},
+        parameters_(initial),
+        alpha_range_(alpha_range),
+        beta_range_(beta_range),
+        scratch_(operands_[0].action().descriptor(), program) {
+    const auto &left_descriptor = operands_[0].action().descriptor();
+    const auto &right_descriptor = operands_[1].action().descriptor();
+    TI_ERROR_IF(left_descriptor.domain != right_descriptor.domain ||
+                    left_descriptor.range != right_descriptor.range,
+                "Parameterized affine operators require identical operand "
+                "descriptors.");
+    TI_ERROR_IF(!std::isfinite(alpha_range_.minimum) ||
+                    !std::isfinite(alpha_range_.maximum) ||
+                    alpha_range_.minimum > alpha_range_.maximum ||
+                    !std::isfinite(beta_range_.minimum) ||
+                    !std::isfinite(beta_range_.maximum) ||
+                    beta_range_.minimum > beta_range_.maximum,
+                "Parameterized affine coefficient ranges must be finite "
+                "closed intervals.");
+    validate_values(initial.alpha, initial.beta);
+    validate_composite_operand(operands_[0].action(),
+                               "parameterized affine", program_);
+    validate_composite_operand(operands_[1].action(),
+                               "parameterized affine", program_);
+  }
+
+  OperatorBinding binding(
+      const std::shared_ptr<ParameterizedAffineOperatorOwner> &owner) {
+    const auto descriptor = operands_[0].action().descriptor();
+    const auto traits = parameterized_affine_traits(
+        operands_[0].action(), operands_[1].action(), alpha_range_,
+        beta_range_);
+    OperatorCapabilities capabilities;
+    capabilities.adjoint_apply =
+        operands_[0].action().capabilities().adjoint_apply &&
+        operands_[1].action().capabilities().adjoint_apply;
+    capabilities.asynchronous_submit =
+        program_ && !arch_is_cpu(program_->compile_config().arch);
+    capabilities.explicit_sequence = capabilities.asynchronous_submit;
+    capabilities.persistent_workspace = true;
+    const std::string provider_name = "parameterized_affine";
+    auto metadata = make_composite_metadata_action(
+        descriptor, traits, capabilities, provider_name,
+        [owner] { return owner->resource_stamp(); });
+    return OperatorBinding::from_generation_publisher(
+        std::move(metadata), [owner, descriptor, traits, capabilities,
+                              provider_name] {
+          const auto parameters = owner->snapshot();
+          auto pins = pin_composite_operands(owner->operands_);
+          const auto stamp =
+              affine_parameter_stamp(pins, parameters.version);
+          auto action = OperatorAction(
+              descriptor, traits, capabilities, provider_name,
+              [stamp] { return stamp; },
+              [owner, pins = std::move(pins), parameters](
+                  OperatorApplyMode mode, const OperatorVectorView &input,
+                  const OperatorVectorView &output) {
+                apply_parameterized_affine(
+                    owner->program_, pins, parameters, owner->scratch_, mode,
+                    input, output);
+              });
+          return OperatorPinnedAction::from_retained_action(
+              std::move(action), stamp);
+        });
+  }
+
+  std::uint64_t update(double alpha,
+                       double beta,
+                       std::uint64_t expected_version,
+                       std::uint64_t next_version) {
+    validate_values(alpha, beta);
+    TI_ERROR_IF(next_version <= expected_version,
+                "Parameterized affine next version must increase.");
+    std::lock_guard<std::mutex> lock(mutex_);
+    TI_ERROR_IF(parameters_.version != expected_version,
+                "Parameterized affine generation changed: expected {}, "
+                "current {}.",
+                expected_version, parameters_.version);
+    parameters_ = {alpha, beta, next_version};
+    return parameters_.version;
+  }
+
+  AffineParameterSnapshot snapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return parameters_;
+  }
+
+  OperatorResourceStamp resource_stamp() const {
+    const auto parameters = snapshot();
+    return affine_parameter_stamp(pin_composite_operands(operands_),
+                                  parameters.version);
+  }
+
+ private:
+  void validate_values(double alpha, double beta) const {
+    TI_ERROR_IF(!std::isfinite(alpha) || !alpha_range_.contains(alpha) ||
+                    !std::isfinite(beta) || !beta_range_.contains(beta),
+                "Parameterized affine coefficients must be finite and "
+                "inside their declared ranges.");
+  }
+
+  Program *program_{nullptr};
+  std::vector<OperatorBinding> operands_;
+  mutable std::mutex mutex_;
+  AffineParameterSnapshot parameters_;
+  AffineParameterRange alpha_range_;
+  AffineParameterRange beta_range_;
+  SumCompositeScratch scratch_;
+};
+
+}  // namespace
+
 OperatorBinding make_block_diagonal_operator_binding(
-    std::vector<OperatorBinding> blocks) {
+    std::vector<OperatorBinding> blocks,
+    Program *program) {
   TI_ERROR_IF(blocks.empty(),
               "Block-diagonal operator requires at least one block.");
   const auto first_descriptor = blocks.front().action().descriptor();
@@ -2564,11 +2835,13 @@ LinearOperatorHandle::LinearOperatorHandle(
     OperatorBinding binding,
     std::shared_ptr<void> provider_owner,
     NumericUpdateFn numeric_update,
-    RecordableKernelFn recordable_kernel)
+    RecordableKernelFn recordable_kernel,
+    AffineParameterUpdateFn affine_parameter_update)
     : program_(program),
       provider_owner_(std::move(provider_owner)),
       numeric_update_(std::move(numeric_update)),
       recordable_kernel_(std::move(recordable_kernel)),
+      affine_parameter_update_(std::move(affine_parameter_update)),
       binding_(std::move(binding)),
       plan_(std::make_unique<OperatorPlan>(program_, binding_)) {
   TI_ERROR_IF(!program_,
@@ -2733,6 +3006,21 @@ void LinearOperatorHandle::update_numeric(
 
 bool LinearOperatorHandle::supports_numeric_update() const {
   return static_cast<bool>(numeric_update_);
+}
+
+std::uint64_t LinearOperatorHandle::update_affine_parameters(
+    double alpha,
+    double beta,
+    std::uint64_t expected_version,
+    std::uint64_t next_version) {
+  TI_ERROR_IF(!affine_parameter_update_,
+              "LinearOperator does not own updateable affine parameters.");
+  return affine_parameter_update_(alpha, beta, expected_version,
+                                  next_version);
+}
+
+bool LinearOperatorHandle::supports_affine_parameter_update() const {
+  return static_cast<bool>(affine_parameter_update_);
 }
 
 std::shared_ptr<LinearOperatorRecordableKernel>
@@ -4619,6 +4907,36 @@ make_experimental_preconditioner_plan_handle(
     std::string method) {
   return std::make_unique<ExperimentalPreconditionerPlanHandle>(
       program, target, action, std::move(method));
+}
+
+std::unique_ptr<LinearOperatorHandle>
+make_parameterized_affine_operator_handle(
+    LinearOperatorHandle &left,
+    LinearOperatorHandle &right,
+    double alpha,
+    double beta,
+    double alpha_min,
+    double alpha_max,
+    double beta_min,
+    double beta_max) {
+  validate_same_public_operator_program(left, right,
+                                        "parameterized affine");
+  auto owner = std::make_shared<ParameterizedAffineOperatorOwner>(
+      left.program(), left.binding(), right.binding(),
+      AffineParameterSnapshot{alpha, beta, 1},
+      AffineParameterRange{alpha_min, alpha_max},
+      AffineParameterRange{beta_min, beta_max});
+  auto binding = owner->binding(owner);
+  LinearOperatorHandle::AffineParameterUpdateFn update =
+      [owner](double next_alpha, double next_beta,
+              std::uint64_t expected_version, std::uint64_t next_version) {
+        return owner->update(next_alpha, next_beta, expected_version,
+                             next_version);
+      };
+  return std::make_unique<LinearOperatorHandle>(
+      left.program(), std::move(binding), owner,
+      LinearOperatorHandle::NumericUpdateFn{},
+      LinearOperatorHandle::RecordableKernelFn{}, std::move(update));
 }
 
 std::unique_ptr<LinearOperatorHandle>

@@ -408,6 +408,90 @@ def test_shifted_operator_rejects_rectangular_shape():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_parameterized_affine_rebinds_one_atomic_generation_without_rebuild():
+    left_values = np.asarray([2.0, 3.0, 5.0, 7.0], np.float32)
+    right_values = np.asarray([1.0, 4.0, 2.0, 6.0], np.float32)
+    left = _diagonal_operator(left_values, traits=ti.linalg.OperatorTraits.spd())
+    right = _diagonal_operator(right_values, traits=ti.linalg.OperatorTraits.spd())
+    operator = left.parameterized_affine(
+        right,
+        alpha=1.0,
+        beta=0.25,
+        alpha_range=(0.5, 2.0),
+        beta_range=(0.0, 1.0),
+    )
+    assert operator.parameters["version"] == 1
+    assert operator.traits["positive_definite"]["value"]
+    graph = _operator_graph(operator)
+    input_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "parameter_debug_input", ti.f32, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "parameter_debug_output", ti.f32, ndim=1)
+    debug = operator.graph_action(input_arg, output_arg).compile().debug_info
+    values = np.asarray([0.5, -1.0, 2.0, 1.5], np.float32)
+    source = ti.ndarray(ti.f32, shape=4)
+    first_output = ti.ndarray(ti.f32, shape=4)
+    second_output = ti.ndarray(ti.f32, shape=4)
+    source.from_numpy(values)
+
+    first = graph.submit({"input": source, "output": first_output})
+    version = operator.update_parameters(alpha=1.5, beta=0.75, expected_version=1)
+    assert version == 2
+    second = graph.submit({"input": source, "output": second_output})
+    first.wait()
+    second.wait()
+    np.testing.assert_allclose(
+        first_output.to_numpy(),
+        values * (left_values + 0.25 * right_values),
+        rtol=2e-6,
+        atol=2e-6,
+    )
+    np.testing.assert_allclose(
+        second_output.to_numpy(),
+        values * (1.5 * left_values + 0.75 * right_values),
+        rtol=2e-6,
+        atol=2e-6,
+    )
+    np.testing.assert_allclose(
+        operator.apply(source).to_numpy(),
+        second_output.to_numpy(),
+        rtol=2e-6,
+        atol=2e-6,
+    )
+    assert debug["dispatch_count"] == 3
+    assert debug["temporary_bytes"] == values.nbytes
+    with pytest.raises(RuntimeError, match="generation changed"):
+        operator.update_parameters(alpha=1.0, beta=0.5, expected_version=1)
+    with pytest.raises(RuntimeError, match="outside"):
+        operator.update_parameters(alpha=-1.0, beta=0.5, expected_version=2)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_parameterized_identity_shift_uses_no_composition_temporary():
+    base_values = np.asarray([2.0, 3.0, 5.0, 7.0], np.float32)
+    base = _diagonal_operator(base_values, traits=ti.linalg.OperatorTraits.spd())
+    operator = base.parameterized_affine(
+        alpha=1.0,
+        beta=0.5,
+        alpha_range=(1.0, 1.0),
+        beta_range=(0.0, 2.0),
+    )
+    graph = _operator_graph(operator)
+    input_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "shift_debug_input", ti.f32, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "shift_debug_output", ti.f32, ndim=1)
+    debug = operator.graph_action(input_arg, output_arg).compile().debug_info
+    assert debug["dispatch_count"] == 2
+    assert debug["temporary_bytes"] == 0
+    values = np.asarray([1.0, -2.0, 0.25, 3.0], np.float32)
+    source = ti.ndarray(ti.f32, shape=4)
+    output = ti.ndarray(ti.f32, shape=4)
+    source.from_numpy(values)
+    graph.run({"input": source, "output": output})
+    np.testing.assert_allclose(output.to_numpy(), values * (base_values + 0.5))
+    operator.update_parameters(alpha=1.0, beta=1.25, expected_version=1)
+    graph.run({"input": source, "output": output})
+    np.testing.assert_allclose(output.to_numpy(), values * (base_values + 1.25))
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_deep_composition_reuses_one_temporary_for_forward_and_adjoint():
     matrices = [
         np.asarray([[1.0 + 0.1 * index, 0.2], [-0.1, 0.9]], np.float32)
