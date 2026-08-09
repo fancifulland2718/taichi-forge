@@ -14,6 +14,7 @@ from benchmarks.qualification.single_kernel_microbench import (
     _native_compact_route,
     _device_prefix_chain_route,
     _particle_hash_route,
+    _adaptive_pbd_route,
     balanced_pair_orders,
     paired_log_summary,
     qualification_policy_errors,
@@ -237,6 +238,34 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         Plan.method_name = "field_kernel_fallback"
         self.assertFalse(_particle_hash_route(
             Workspace(), "forge", "cuda", bins=16)["passed"])
+
+    def test_adaptive_pbd_route_requires_fixed_native_worklist(self):
+        class Plan:
+            backend = "cuda_device"
+            method_name = "cuda_device_compact_ndarray"
+
+        class CompactWorkspace:
+            _native_compact_plan = Plan()
+            workspace_bytes_current = 64
+            workspace_bytes_peak = 64
+
+        class Workspace:
+            _compact = CompactWorkspace()
+
+        class Worklist:
+            workspace = Workspace()
+            capacity = 32
+
+            @staticmethod
+            def memory_report():
+                return {"fixed_capacity": True,
+                        "replay_allocation_count": 0}
+
+        self.assertTrue(_adaptive_pbd_route(
+            Worklist(), "forge", "cuda")["passed"])
+        Plan.method_name = "kernel_fallback"
+        self.assertFalse(_adaptive_pbd_route(
+            Worklist(), "forge", "cuda")["passed"])
 
 
 if __name__ == "__main__":

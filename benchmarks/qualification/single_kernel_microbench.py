@@ -78,6 +78,7 @@ OPERATIONS = (
     "device_prefix_chain",
     "active_grid_mpm",
     "particle_spatial_hash",
+    "adaptive_pbd",
     "snode_churn",
     "snode_concurrent",
     "mpm_graph",
@@ -2962,6 +2963,318 @@ def _build_particle_spatial_hash_case(ti: Any, runtime_name: str,
     }
 
 
+def _adaptive_pbd_route(worklist: Any | None, runtime_name: str,
+                        backend: str) -> dict[str, Any]:
+    if runtime_name == "forge":
+        workspace = getattr(worklist, "workspace", None)
+        compact_workspace = getattr(workspace, "_compact", None)
+        compact_route = _native_compact_route(
+            compact_workspace, runtime_name, backend)
+        memory = worklist.memory_report()
+        return {
+            "classification": "forge_device_worklist_adaptive_pbd",
+            "compact_route": compact_route,
+            "capacity": worklist.capacity,
+            "memory_report": memory,
+            "replay_allocation_count": memory["replay_allocation_count"],
+            "passed": bool(
+                compact_route["passed"]
+                and memory["fixed_capacity"]
+                and memory["replay_allocation_count"] == 0
+            ),
+        }
+    return {
+        "classification": "vanilla_device_count_mask_prefix_scatter_pbd",
+        "observed_method": (
+            "device-count mask, reusable PrefixSumExecutor, stable scatter"
+        ),
+        "passed": True,
+    }
+
+
+def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
+                             elements: int) -> dict[str, Any]:
+    """Build a deterministic 2-D adaptive distance-constraint solve."""
+    import numpy as np
+
+    constraints = elements
+    particles = constraints * 2
+    iterations = 10
+    relaxation = np.float32(0.4)
+    residual_factor = np.float32(1.0) - relaxation
+    tolerance = np.float32(1.0e-3)
+    rest_length = np.float32(1.0)
+    host_constraints = np.arange(constraints, dtype=np.int32)
+    host_stretch = (
+        np.float32(0.002)
+        + (host_constraints % 251).astype(np.float32)
+        * (np.float32(0.198) / np.float32(250.0))
+    )
+    expected_residual = host_stretch.copy()
+    expected_history = []
+    for _ in range(iterations):
+        active = expected_residual > tolerance
+        expected_residual[active] *= residual_factor
+        expected_history.append(int(np.count_nonzero(
+            expected_residual > tolerance)))
+    expected_left_x = (host_stretch - expected_residual) * np.float32(0.5)
+    expected_right_x = rest_length + host_stretch - expected_left_x
+
+    positions = ti.Vector.ndarray(2, ti.f32, shape=particles)
+    stretch = ti.ndarray(ti.f32, shape=constraints)
+    flags = ti.ndarray(ti.i32, shape=constraints)
+    active_history = ti.ndarray(ti.i32, shape=iterations)
+    stretch.from_numpy(host_stretch)
+    worklist = None
+    vanilla_values = vanilla_extents = None
+    prefix_field = None
+    scanner = None
+    if runtime_name == "forge":
+        worklist = ti.algorithms.DeviceWorklist(constraints, ti.i32)
+    else:
+        vanilla_values = (
+            ti.ndarray(ti.i32, shape=constraints),
+            ti.ndarray(ti.i32, shape=constraints),
+        )
+        vanilla_extents = (
+            ti.ndarray(ti.i32, shape=1),
+            ti.ndarray(ti.i32, shape=1),
+        )
+        prefix_field = ti.field(dtype=ti.i32, shape=constraints)
+        scanner = ti.algorithms.PrefixSumExecutor(constraints)
+
+    @ti.kernel
+    def initialize_problem(
+            target_positions: ti.types.ndarray(ndim=1),
+            source_stretch: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            active_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            history: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for constraint in range(constraints):
+            y = (
+                ti.cast(constraint % 1024, ti.f32)
+                / ti.cast(1024, ti.f32)
+            )
+            target_positions[2 * constraint] = ti.Vector([0.0, y])
+            target_positions[2 * constraint + 1] = ti.Vector([
+                rest_length + source_stretch[constraint], y])
+            active_values[constraint] = constraint
+        for iteration in range(iterations):
+            history[iteration] = 0
+
+    @ti.kernel
+    def initialize_vanilla_extent(
+            extent: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        extent[0] = constraints
+
+    @ti.kernel
+    def project_active(
+            active_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_positions: ti.types.ndarray(ndim=1),
+            next_flags: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for slot in range(constraints):
+            next_flags[slot] = 0
+            if slot < extent[0]:
+                constraint = active_values[slot]
+                left_index = 2 * constraint
+                right_index = left_index + 1
+                delta = (
+                    target_positions[right_index]
+                    - target_positions[left_index]
+                )
+                length = ti.sqrt(delta.dot(delta))
+                residual = length - rest_length
+                if ti.abs(residual) > tolerance:
+                    correction = (
+                        0.5 * relaxation * residual / length
+                    ) * delta
+                    target_positions[left_index] += correction
+                    target_positions[right_index] -= correction
+                    if ti.abs(residual) * residual_factor > tolerance:
+                        next_flags[slot] = 1
+
+    @ti.kernel
+    def stage_vanilla_flags(
+            source_flags: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for slot in range(constraints):
+            prefix_field[slot] = source_flags[slot]
+
+    @ti.kernel
+    def scatter_vanilla_active(
+            source_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            source_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            destination: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            destination_extent: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        destination_extent[0] = prefix_field[constraints - 1]
+        for slot in range(constraints):
+            if source_flags[slot] != 0:
+                destination[prefix_field[slot] - 1] = source_values[slot]
+
+    @ti.kernel
+    def record_extent(
+            extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            history: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            iteration: ti.i32):
+        history[iteration] = extent[0]
+
+    def launch() -> None:
+        if runtime_name == "forge":
+            worklist.clear()
+            initialize_problem(
+                positions, stretch, worklist.values, active_history)
+            worklist.extent.set(constraints)
+            for iteration in range(iterations):
+                project_active(
+                    worklist.values, worklist.extent.state, positions, flags)
+                worklist.select(flags, method="auto")
+                record_extent(
+                    worklist.extent.state, active_history, iteration)
+        else:
+            initialize_problem(
+                positions, stretch, vanilla_values[0], active_history)
+            initialize_vanilla_extent(vanilla_extents[0])
+            vanilla_extents[1].fill(0)
+            front = 0
+            for iteration in range(iterations):
+                back = 1 - front
+                project_active(
+                    vanilla_values[front], vanilla_extents[front], positions,
+                    flags)
+                stage_vanilla_flags(flags)
+                scanner.run(prefix_field)
+                scatter_vanilla_active(
+                    vanilla_values[front], flags, vanilla_values[back],
+                    vanilla_extents[back])
+                record_extent(
+                    vanilla_extents[back], active_history, iteration)
+                front = back
+
+    def reset() -> None:
+        positions.fill(0)
+        flags.fill(0)
+        active_history.fill(0)
+        if runtime_name == "forge":
+            worklist.clear()
+        else:
+            for value in vanilla_values:
+                value.fill(0)
+            for extent in vanilla_extents:
+                extent.fill(0)
+            prefix_field.fill(0)
+
+    def validate_fresh() -> dict[str, Any]:
+        reset()
+        ti.sync()
+        launch()
+        ti.sync()
+        actual_positions = positions.to_numpy()
+        actual_history = active_history.to_numpy()
+        actual_left = actual_positions[0::2, 0]
+        actual_right = actual_positions[1::2, 0]
+        actual_y_error = float(np.max(np.abs(
+            actual_positions[:, 1]
+            - np.repeat(
+                (host_constraints % 1024).astype(np.float32)
+                / np.float32(1024.0), 2))))
+        left_error = float(np.max(np.abs(actual_left - expected_left_x)))
+        right_error = float(np.max(np.abs(actual_right - expected_right_x)))
+        actual_residual = actual_right - actual_left - rest_length
+        residual_error = float(np.max(np.abs(
+            actual_residual - expected_residual)))
+        history_mismatches = int(np.count_nonzero(
+            actual_history != np.asarray(expected_history, dtype=np.int32)))
+        monotonic = bool(np.all(actual_history[1:] <= actual_history[:-1]))
+        fingerprint = {
+            "finite": bool(np.all(np.isfinite(actual_positions))),
+            "position_sum": [
+                float(actual_positions[:, 0].astype(np.float64).sum()),
+                float(actual_positions[:, 1].astype(np.float64).sum()),
+            ],
+            "residual_max": float(np.max(np.abs(actual_residual))),
+            "active_history": actual_history.astype(np.int64).tolist(),
+            "sample_positions": actual_positions[:8].astype(
+                np.float64).reshape(-1).tolist(),
+        }
+        return {
+            "passed": bool(
+                fingerprint["finite"]
+                and left_error <= 2.0e-5
+                and right_error <= 2.0e-5
+                and residual_error <= 3.0e-5
+                and actual_y_error == 0.0
+                and history_mismatches == 0
+                and monotonic
+            ),
+            "comparison": "analytic_independent_distance_constraint_solution",
+            "max_left_position_error": left_error,
+            "max_right_position_error": right_error,
+            "max_residual_error": residual_error,
+            "max_y_error": actual_y_error,
+            "active_history": actual_history.astype(np.int64).tolist(),
+            "expected_active_history": expected_history,
+            "history_mismatch_count": history_mismatches,
+            "active_history_monotonic": monotonic,
+            "endpoint_fingerprint": fingerprint,
+        }
+
+    return {
+        "launch": launch,
+        "reset": reset,
+        "validate": validate_fresh,
+        "route": lambda: _adaptive_pbd_route(
+            worklist, runtime_name, backend),
+        "logical_bytes": 0,
+        "traffic_model": (
+            "fixed-iteration adaptive PBD solve with device-resident active "
+            "constraints; no simplified bandwidth is claimed"
+        ),
+        "case_preparation": {
+            "constraints": constraints,
+            "particles": particles,
+            "iterations": iterations,
+            "relaxation": float(relaxation),
+            "tolerance": float(tolerance),
+            "expected_active_history": expected_history,
+        },
+        "workload_contract": {
+            "case_id": "THIN-006",
+            "comparison_class": "thin-capability",
+            "semantics": "2d_adaptive_independent_distance_constraint_pbd",
+            "dimension": "2d",
+            "dtype": "f32_positions_i32_constraint_ids",
+            "constraints": constraints,
+            "particles": particles,
+            "iterations": iterations,
+            "relaxation": float(relaxation),
+            "tolerance": float(tolerance),
+            "forge_adapter": (
+                "fixed-capacity DeviceWorklist stable select with device extent"
+            ),
+            "vanilla_adapter": (
+                "device-count mask, reusable PrefixSumExecutor, and stable "
+                "scatter between two fixed-capacity active-id buffers"
+            ),
+            "shared": (
+                "same deterministic problem reset, independent distance "
+                "constraints, project kernel, flags, iteration cap, residual "
+                "threshold, active-order semantics, and synchronization"
+            ),
+            "allowed_difference": (
+                "only active-set storage/selection adapter; both scan fixed "
+                "capacity and keep counts device resident during timing"
+            ),
+            "correctness": (
+                "analytic final positions/residuals, exact active-count history, "
+                "finite state, and cross-runtime endpoint fingerprint"
+            ),
+            "timing": (
+                "frozen repeated complete reset-plus-ten-iteration solves plus "
+                "one outer sync; setup and correctness excluded"
+            ),
+        },
+    }
+
+
 def _numeric_growth(before: dict[str, Any] | None,
                     after: dict[str, Any] | None,
                     keys: Sequence[str]) -> dict[str, Any]:
@@ -3209,6 +3522,9 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
                 ti, args.runtime, args.backend, args.preset)
         elif args.operation == "particle_spatial_hash":
             case = _build_particle_spatial_hash_case(
+                ti, args.runtime, args.backend, config["elements"])
+        elif args.operation == "adaptive_pbd":
+            case = _build_adaptive_pbd_case(
                 ti, args.runtime, args.backend, config["elements"])
         elif args.operation == "snode_churn":
             case = _build_snode_churn_case(
@@ -3537,6 +3853,29 @@ def _check_pyvenv(python: Path) -> dict[str, Any]:
 def _mpm_cross_runtime_endpoint_equivalent(
         results: dict[str, dict[str, Any]]) -> bool:
     forge = results["forge"]
+    if forge["operation"] == "adaptive_pbd":
+        vanilla = results["vanilla"]
+        for validation_name in ("validation_before", "validation_after"):
+            left = forge[validation_name]["endpoint_fingerprint"]
+            right = vanilla[validation_name]["endpoint_fingerprint"]
+            if not left.get("finite") or not right.get("finite"):
+                return False
+            if left["active_history"] != right["active_history"]:
+                return False
+            for key in ("position_sum", "sample_positions"):
+                if len(left[key]) != len(right[key]):
+                    return False
+                if any(
+                        not math.isclose(float(a), float(b), rel_tol=5.0e-5,
+                                         abs_tol=5.0e-5)
+                        for a, b in zip(left[key], right[key])):
+                    return False
+            if not math.isclose(
+                    float(left["residual_max"]),
+                    float(right["residual_max"]),
+                    rel_tol=5.0e-5, abs_tol=5.0e-5):
+                return False
+        return True
     if forge["operation"] not in (
             "mpm_graph", "mpm_direct", "active_grid_mpm"):
         return True

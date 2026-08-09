@@ -33,6 +33,7 @@ Forge/vanilla 比较均由相邻且不重叠的 fresh-process 对组成。
 | `device_prefix_chain` | device-resident active-prefix stable compact 后接 inclusive scan |
 | `active_grid_mpm` | 一个带 active-grid 更新 adapter 的静态平衡二维 MLS-MPM substep |
 | `particle_spatial_hash` | 二维 cell hash、bucket 构建与固定半径邻域查询 |
+| `adaptive_pbd` | 十轮上限的二维 adaptive 距离约束求解 |
 | `snode_churn` | 一次 pointer+dense SNodeTree create/use/sync/destroy 生命周期事务 |
 
 这些是控制/回归 microbench，用于测量普通 kernel 路径，能够发现运行时额外成本
@@ -104,6 +105,13 @@ key/query kernel、i32 field 布局，以及 exact key/offset、canonicalized bu
 neighbor oracle。Forge 使用 native bucket-builder workspace；vanilla 使用并行 count、
 可复用公共 prefix sum、cursor copy 与 atomic scatter。每个 bucket 内部次序无约束，
 只在计时外 canonicalize。独立入口为 `particle_spatial_hash_microbench.py`。
+
+`adaptive_pbd` 是 `THIN-006`。它以相同松弛系数、残差阈值、projection kernel、
+active 顺序和 device-resident count，对 65,536 个相互独立的二维距离约束最多求解
+十轮；每个计时 solve 都重置同一个确定性问题。Forge 使用固定容量
+`DeviceWorklist`，vanilla 在两块固定 buffer 之间用 device-count mask、可复用 prefix
+sum 与 stable scatter。必须通过解析位置/残差、逐轮 exact active count 和跨 runtime
+fingerprint。独立入口为 `adaptive_pbd_microbench.py`。
 
 `snode_churn` 是 `DIRECT-004` 的历史 churn 半项。两边使用相同公开 FieldsBuilder
 DSL 与 kernel；每个计时 launch 创建一个 pointer+dense tree、激活 64 个 cell、exact

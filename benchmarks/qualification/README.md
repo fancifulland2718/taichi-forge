@@ -35,6 +35,7 @@ classified direct, stability, and thin-capability cases:
 | `device_prefix_chain` | device-resident active-prefix stable compact followed by inclusive scan |
 | `active_grid_mpm` | one stationary 2-D MLS-MPM substep with an active-grid update adapter |
 | `particle_spatial_hash` | 2-D cell hashing, bucket construction, and fixed-radius neighbor query |
+| `adaptive_pbd` | ten-iteration 2-D adaptive distance-constraint solve |
 | `snode_churn` | one pointer+dense SNodeTree create/use/sync/destroy lifecycle transaction |
 
 These are control/regression microbenchmarks. They measure the ordinary kernel
@@ -123,6 +124,15 @@ Forge uses the native bucket-builder workspace; vanilla uses parallel count,
 a reusable public prefix sum, cursor copy, and atomic scatter. Per-bucket order
 is unspecified and canonicalized only outside timing. Use
 `particle_spatial_hash_microbench.py`.
+
+`adaptive_pbd` is `THIN-006`. It solves 65,536 independent 2-D distance
+constraints for at most ten iterations with identical relaxation, residual
+threshold, projection kernel, active ordering, and device-resident counts.
+Every timed solve resets the same deterministic problem. Forge uses a
+fixed-capacity `DeviceWorklist`; vanilla uses a device-count mask, reusable
+prefix sum, and stable scatter between two fixed buffers. Analytic positions,
+residuals, exact per-iteration active counts, and cross-runtime fingerprints
+must pass. Use `adaptive_pbd_microbench.py`.
 
 `snode_churn` is the historical-churn half of `DIRECT-004`. Both runtimes use
 the same public FieldsBuilder DSL and kernels. Every measured launch creates
