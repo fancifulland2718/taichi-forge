@@ -468,9 +468,14 @@ operands, on CUDA and Vulkan. A recordable shifted operator lowers to the base
 provider action followed by one in-place `axpby`; it does not launch a second
 identity provider or allocate an identity-sized temporary. Standalone
 sum/compose retain a private persistent ndarray workspace; their recordable
-form instead uses Graph-owned typed temporaries. Compact Field operands bind
-directly when the composition is embedded with `graph_action()`; standalone
-composition retains the documented reusable boundary-staging behavior.
+form instead uses Graph-owned typed temporaries. Equal-extent pure compose
+chains are flattened in their exact leaf/adjoint order and alternate between
+the destination and one scratch vector. Their Graph temporary therefore stays
+at one vector from depth 2 onward instead of growing with syntax-tree depth;
+rectangular or mixed-extent chains retain the conservative nested lowering.
+Compact Field operands bind directly when the composition is embedded with
+`graph_action()`; standalone composition retains the documented reusable
+boundary-staging behavior.
 Public `identity()` and general block diagonal remain CPU-only. GPU f64
 composition and generalized `alpha/beta/addend` composition fail without
 running host code or silently changing provider.
@@ -479,9 +484,34 @@ running host code or silently changing provider.
 helper for common physics layouts. The caller supplies already inverted,
 row-major f32 blocks and must state `assume_spd=True`; Forge deliberately does
 not read them back, invert them, regularize them, or infer SPD. Sizes 1 through
-4 are supported on CPU, CUDA, and Vulkan. Compatible values-only updates use
-the ordinary immutable-generation rebind contract, which lets the same
+4 are supported on CPU, CUDA, and Vulkan. Each size has a statically specialized
+kernel and derives row/block offsets from the scalar index; only one constant-
+size topology word is snapshotted instead of an offset table proportional to
+the vector length. Compatible values-only updates copy only inverse values and
+use the ordinary immutable-generation rebind contract, which lets the same
 single-system or batched PCG Graph consume a refreshed preconditioner safely.
+
+### Fixed-topology implicit reference
+
+[`implicit_linear_operator.py`](../../python/taichi_forge/examples/simulation/implicit_linear_operator.py)
+is a headless CPU/CUDA/Vulkan reference for a time-varying implicit physics
+solve. It keeps spring connectivity fixed, publishes new A/M numeric
+generations, explicitly approves the rebuilt 2x2 inverse-block action through
+`PreconditionerPlan.update()`, and reuses one PCG `SolvePlan`:
+
+```bash
+python -m taichi_forge.examples.simulation.implicit_linear_operator \
+  --arch cuda --nodes 2304 --steps 120 --telemetry
+```
+
+The example deliberately uses only public primitives. CUDA/Vulkan submit the
+complete solve through one cached Graph ticket; compact Vector fields are
+handled inside that recorded action without separate pack/unpack submissions.
+CPU uses the documented synchronous completed-ticket path. `result()` is the
+single terminal materialization point, and the reported iteration count is the
+logical early-stop position. Vulkan may additionally encode a bounded masked
+tail, visible through opt-in telemetry; it is not reported as useful solver
+work.
 
 ## SolvePlan and SolveResult
 

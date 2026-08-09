@@ -69,6 +69,13 @@ grouped under the behavior they shipped.
   storage from 2 MiB to 1 MiB, and warm submit/wait median fell from 270.2 to
   203.5 us on CUDA and from 555.3 to 465.9 us on Vulkan. These are workload-
   specific qualification results, not universal speedup guarantees.
+- Equal-extent pure `compose()` chains now flatten in exact forward/adjoint
+  leaf order and ping-pong through the destination plus one Graph scratch
+  vector. Depth-4/depth-8 chains therefore use one N-vector rather than three/
+  seven. In a local 262,144-element source qualification, depth-8 warm medians
+  improved by 12.6% on CPU, 15.9% on CUDA, and 11.5% on Vulkan; depth-2 stayed
+  in the previous noise band. Rectangular and mixed-extent chains retain the
+  conservative nested lowering.
 - Recordable f32 CG/PCG `SolvePlan.submit()` on CUDA/Vulkan now wraps the
   complete device-convergent solve in a cached one-action Graph and returns one
   `SolvePlanSubmission`. Its terminal
@@ -136,8 +143,12 @@ grouped under the behavior they shipped.
   the heterogeneous case. These measurements qualify this workload, not a
   universal speedup.
 - Added `inverse_block_diagonal()` for caller-supplied row-major f32 inverse
-  blocks of size 1 through 4. It is recordable on CPU/CUDA/Vulkan and uses the
-  same numeric rebind/pinning contract as other compiled providers. The caller
+  blocks of size 1 through 4. Each size now uses a specialized kernel and a
+  constant-size topology word instead of two offsets per scalar row. At
+  262,144 scalars this reduces the operator-owned topology snapshot from about
+  2 MiB to 4 bytes; paired warm apply medians remained within backend noise.
+  It is recordable on CPU/CUDA/Vulkan and uses the same numeric rebind/pinning
+  contract as other compiled providers. The caller
   must explicitly assert SPD; Forge does not read back, invert, regularize, or
   infer the blocks. On a local 64-system, 262,144-scalar diagonal workload, an
   exact inverse reduced roughly 72-100 unpreconditioned/sqrt-scaled iterations
@@ -146,6 +157,18 @@ grouped under the behavior they shipped.
   exact two-iteration inverse, host-check remained faster, preserving the new
   policy as explicit-only and demonstrating that preconditioner quality and
   convergence length determine the crossover.
+- Added a headless fixed-topology implicit spring reference using public
+  `LinearOperator`, 2x2 `inverse_block_diagonal`, `PreconditionerPlan`, compact
+  Vector fields, numeric-generation updates, and one reusable `SolvePlan`.
+  A local 2,304-node qualification reduced logical iterations from 54 (CG) to
+  6 (PCG). Warm median solve latency changed from 37.061 to 7.281 ms on CPU and
+  3.455 to 2.412 ms on CUDA; Vulkan was within noise at 7.377/7.460 ms because
+  its bounded path encoded 96 slots for 6 useful iterations (90 masked).
+  Rebind-plus-solve remained far below rebuild-plus-solve on CUDA and Vulkan,
+  and a 1,000-frame test on all three backends kept one GPU Graph, released all
+  1,004 retired generations, left no active lease, and observed stop positions
+  from 4 through 6. These figures qualify this example and expose the Vulkan
+  tail cost; they are not universal solver-speed guarantees.
 - Added `LinearOperator.shifted(shift)`. Recordable f32 GPU lowering executes
   the base provider followed by one in-place `axpby`, with no second identity
   provider dispatch and no identity-sized temporary. Non-square operators,

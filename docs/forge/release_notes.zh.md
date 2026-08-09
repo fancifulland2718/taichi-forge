@@ -59,6 +59,11 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
   配对的 262,144 项、三 leaf 资格测试中，dispatch 从 8 降到 5，temporary 从 2 MiB 降到
   1 MiB；CUDA warm submit/wait 中位数从 270.2 降到 203.5 us，Vulkan 从 555.3 降到
   465.9 us。该数据只描述这一 workload，不是普遍加速承诺。
+- 等长的纯 `compose()` chain 现在会按精确 forward/adjoint leaf 顺序扁平化，并在
+  destination 与一条 Graph scratch vector 之间 ping-pong。depth 4/8 因而只使用一条
+  N-vector，而不是三/七条。本地 262,144 项源码资格中，depth-8 warm median 在
+  CPU/CUDA/Vulkan 上分别改善 12.6%/15.9%/11.5%；depth-2 保持在原有噪声范围。
+  rectangular 与 mixed-extent chain 继续使用保守 nested lowering。
 - CUDA/Vulkan 上 recordable f32 CG/PCG 的 `SolvePlan.submit()` 现在会把完整
   device-convergent 求解包装进缓存的单 action Graph，并返回一个 `SolvePlanSubmission`。
   terminal packet 在 `done()`/`wait()` 期间保持
@@ -107,13 +112,25 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
   pool 与 device pool memory 保持稳定，异构 case 的阈值边缘浮点终止最多相差一轮。这些数据
   只资格化该 workload，不是普遍加速承诺。
 - 新增 `inverse_block_diagonal()`，接受调用方提供的 row-major f32 inverse block，block size
-  为 1 到 4。它在 CPU/CUDA/Vulkan 上可录制，并复用普通 compiled provider 的 numeric
-  rebind/pinning 合同。调用方必须显式断言 SPD；Forge 不回读、求逆、正则化或推断 block。
+  为 1 到 4。每种尺寸现在使用专门化 kernel 与常数大小 topology word，不再为每个 scalar
+  row 保存两个 offset；在 262,144 scalar 下，operator-owned topology snapshot 从约 2 MiB
+  降至 4 bytes，配对 warm apply median 在各后端噪声范围内。它在 CPU/CUDA/Vulkan 上可录制，
+  并复用普通 compiled provider 的 numeric rebind/pinning 合同。调用方必须显式断言 SPD；
+  Forge 不回读、求逆、正则化或推断 block。
   本地 64 系统、262,144 scalar diagonal workload 中，精确 inverse 把约 72-100 次未充分
   预条件/sqrt-scaled iteration 降至 2 次。较难的 sqrt-scaled preconditioner 下，
   device-convergent PCG 相对 host-check-K4 在 CUDA/Vulkan 分别快 3.1%/17.3%；精确 inverse
   只有两轮时 host-check 反而更快，因此新 policy 保持 explicit-only，也说明 crossover 首先
   取决于预条件质量和收敛长度。
+- 新增使用公开 `LinearOperator`、2x2 `inverse_block_diagonal`、`PreconditionerPlan`、compact
+  Vector Field、numeric-generation update 与单个可复用 `SolvePlan` 的 headless 固定拓扑
+  隐式弹簧参考。本地 2,304 节点资格中，logical iteration 从 CG 的 54 次降至 PCG 的 6 次；
+  warm median 在 CPU 上从 37.061 降至 7.281 ms，在 CUDA 上从 3.455 降至 2.412 ms。
+  Vulkan 为噪声范围内的 7.377/7.460 ms，因为 bounded 路径为 6 次有效迭代编码了 96 个
+  slot（90 masked）。CUDA/Vulkan 的 rebind-plus-solve 明显低于 rebuild-plus-solve；三后端
+  1,000 帧测试均只保留一张 GPU Graph，释放全部 1,004 个 retired generation，active lease
+  为 0，停止位置保持在 4 到 6 次。该数据只资格化此参考并公开 Vulkan tail 成本，不是普遍
+  solver 加速承诺。
 - 新增 `LinearOperator.shifted(shift)`。recordable f32 GPU lowering 执行 base provider 后只
   增加一个 in-place `axpby`，不会发射第二个 identity provider，也不分配 identity-sized
   temporary。非方阵、非有限 shift 及不受支持的 dtype/backend 组合都会明确失败。

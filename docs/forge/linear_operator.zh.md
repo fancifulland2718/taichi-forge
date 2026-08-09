@@ -401,16 +401,39 @@ scale、shift、sum 与 compose 在 CPU 上执行；对于 Program-bound f32 ope
 与 Vulkan。recordable shifted operator 会 lower 为 base provider action 加一个 in-place
 `axpby`，不会再发射 identity provider，也不分配等长 temporary。standalone sum/compose
 持有私有 persistent ndarray workspace；recordable 形式改用 Graph-owned typed temporary。
-组合嵌入 `graph_action()` 时可直接绑定 compact Field；standalone 组合仍使用上文可复用的
-边界 staging。公开 `identity()` 与通用 block diagonal 仍只支持 CPU。GPU f64 composition
+等长的纯 compose chain 会按精确 leaf/adjoint 顺序扁平化，并在 destination 与一条 scratch
+vector 之间交替，因此 depth 2 以后 Graph temporary 始终只有一条 vector，不再随语法树深度
+增长；rectangular 或 mixed-extent chain 继续使用保守的 nested lowering。组合嵌入
+`graph_action()` 时可直接绑定 compact Field；standalone 组合仍使用上文可复用的边界 staging。
+公开 `identity()` 与通用 block diagonal 仍只支持 CPU。GPU f64 composition
 和通用 `alpha/beta/addend` composition 会明确失败，不执行 host code，也不会静默替换
 provider。
 
 `inverse_block_diagonal()` 是面向常见物理布局的 recordable fixed-linear preconditioner
 helper。调用方提供已经求逆、row-major 的 f32 block，并必须声明 `assume_spd=True`；Forge
 不会回读、求逆、正则化或推断其 SPD 性质。CPU、CUDA、Vulkan 支持 block size 1 到 4。
-兼容的 values-only update 使用普通 immutable-generation rebind 合同，因此同一个单系统或
-batched PCG Graph 可以安全消费更新后的 preconditioner。
+每种尺寸使用静态专门化 kernel，并从 scalar index 推导 row/block offset；operator 只快照
+一个常数大小的 topology word，不再持有随 vector 长度增长的 offset table。兼容的
+values-only update 只复制 inverse values，并使用普通 immutable-generation rebind 合同，
+因此同一个单系统或 batched PCG Graph 可以安全消费更新后的 preconditioner。
+
+### 固定拓扑隐式求解参考
+
+[`implicit_linear_operator.py`](../../python/taichi_forge/examples/simulation/implicit_linear_operator.py)
+是一个 headless CPU/CUDA/Vulkan 参考路径。它保持 spring connectivity 不变，逐步发布新的
+A/M numeric generation，通过 `PreconditionerPlan.update()` 显式批准重建后的 2x2 inverse
+block action，并复用同一个 PCG `SolvePlan`：
+
+```bash
+python -m taichi_forge.examples.simulation.implicit_linear_operator \
+  --arch cuda --nodes 2304 --steps 120 --telemetry
+```
+
+示例只使用公开 primitive。CUDA/Vulkan 通过一张缓存 Graph ticket 提交完整求解；compact
+Vector Field 的边界处理位于已录制 action 内，不产生独立 pack/unpack submission。CPU 使用
+文档所述的同步 completed-ticket 路径。`result()` 是唯一 terminal materialization 点，报告的
+iteration 是逻辑早停位置；Vulkan 还可能编码有界 masked tail，该部分通过 opt-in telemetry
+可见，但不会被记作有效 solver work。
 
 ## SolvePlan 与 SolveResult
 
