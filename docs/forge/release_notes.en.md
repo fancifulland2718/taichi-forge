@@ -178,6 +178,40 @@ grouped under the behavior they shipped.
   0.298 to 0.222 ms on CUDA and from 0.568 to 0.441 ms on Vulkan, with zero
   numerical error.
 
+- Generalized `LinearOperator.apply(alpha=..., beta=..., addend=...)` now uses
+  device-native f32 ndarray transform/scaled-add lowering on CUDA and Vulkan.
+  It performs no host readback and allocates no N-vector in the non-aliasing
+  path; exact addend/output aliasing reuses one persistent scratch. In a local
+  paired 262,144-element qualification, native apply versus an equivalent
+  two-dispatch Graph measured 0.822/0.955 ms on CPU, 0.240/0.380 ms on CUDA,
+  and 0.401/0.422 ms on Vulkan. These host-synchronous measurements are
+  workload-specific rather than a universal speedup claim.
+- Added atomically updateable `parameterized_affine()` operators. Mandatory
+  closed coefficient ranges bound conservative trait derivation, optimistic
+  versions reject stale updates, and every submission pins one complete
+  alpha/beta generation. Cached Graphs patch two scalar bindings without
+  rebuilding or reading a device parameter array. A local update-plus-run
+  versus rebuild-plus-run qualification measured 1.561/3.923 ms on CPU,
+  0.815/3.745 ms on CUDA, and 1.304/5.208 ms on Vulkan. After 1,020 published
+  generations on each backend, all 1,020 retired generations were released
+  and no active lease remained.
+- Fixed-layout `block_diagonal()` standalone apply now supports qualified f32
+  CUDA/Vulkan leaves, and Program-bound CPU leaves use the same runtime-storage
+  subrange contract. Consecutive domain/range slices are resolved once and
+  submitted in leaf order without gather/scatter, whole-vector staging, or an
+  N-sized temporary. It deliberately does not fuse leaf kernels: a two-leaf
+  262,144-element identity probe cost 0.792 ms CPU, 0.264 ms CUDA, and 0.458 ms
+  Vulkan versus 0.388/0.135/0.335 ms for one fused kernel. Permuted,
+  overlapping, non-affine, and recordable-container forms remain unsupported.
+- Added `SmallBlockInverseBuilder` for fixed f32 row-major blocks of size 1-4.
+  Its direct and one-dispatch Graph forms run partial-pivot Gauss-Jordan
+  on device, leave per-block success/non-finite/singular status resident, and
+  zero failed outputs without inferring SPD. For 16,384 4x4 identity blocks,
+  local device build versus host readback/NumPy inverse/upload measured
+  0.824/5.175 ms on CPU, 0.410/6.195 ms on CUDA, and 0.722/7.667 ms on Vulkan.
+  A 1,000-build reuse stress on all three backends retained the same caller-
+  owned output/status allocations.
+
 ## 0.6.1
 
 - Release provenance is intentionally split: `b129ad94c` is the final Python

@@ -382,17 +382,31 @@ E = operator.adjoint()
 F = ti.linalg.block_diagonal((operator, B))
 I = ti.linalg.identity(size, dtype=ti.f32)
 S = operator.shifted(0.01)    # operator(x) + 0.01 * x
+P = operator.parameterized_affine(
+    alpha=1.0,
+    beta=0.01,
+    alpha_range=(1.0, 1.0),
+    beta_range=(0.0, 0.1),
+)
+P.update_parameters(alpha=1.0, beta=0.02, expected_version=1)
 
 # flat row-major 的 1x1、2x2、3x3 或 4x4 inverse block
 M = ti.linalg.inverse_block_diagonal(
     inverse_blocks, block_size=3, assume_spd=True
 )
+
+inverse = ti.linalg.SmallBlockInverseBuilder(3, block_count).build(blocks)
+M = ti.linalg.inverse_block_diagonal(
+    inverse.inverse_blocks, block_size=3, assume_spd=True
+)
 ```
 
 通用形式为 `out = alpha * A(x) + beta * addend`。input/output alias 始终被拒绝；
 `addend` 可以与 `out` 相同，以表达原地累加。当 `beta == 0` 时，`addend` 不会被验证或
-读取。通用系数 lowering 当前支持 CPU；CUDA/Vulkan 只接受 `alpha == 1`、`beta == 0`
-的 overwrite apply，其它组合明确失败且不经 host fallback。
+读取。通用系数 lowering 支持 CPU，并在 CUDA/Vulkan 上支持 f32 ndarray operand。GPU 使用
+device transform/scaled-add primitive，不发生 host readback；非 alias 路径不分配 N-sized
+scratch。当 `addend is out` 时，一个持久 scratch 会在计算 `A(x)` 前保留旧 addend。GPU f64
+与不支持的 storage layout 明确失败，不经 host fallback。
 
 只有 provider 提供显式 adjoint apply 时才能调用
 `adjoint()`；实现不会把 self-adjoint trait 当作 fallback。
@@ -405,9 +419,16 @@ scale、shift、sum 与 compose 在 CPU 上执行；对于 Program-bound f32 ope
 vector 之间交替，因此 depth 2 以后 Graph temporary 始终只有一条 vector，不再随语法树深度
 增长；rectangular 或 mixed-extent chain 继续使用保守的 nested lowering。组合嵌入
 `graph_action()` 时可直接绑定 compact Field；standalone 组合仍使用上文可复用的边界 staging。
-公开 `identity()` 与通用 block diagonal 仍只支持 CPU。GPU f64 composition
-和通用 `alpha/beta/addend` composition 会明确失败，不执行 host code，也不会静默替换
-provider。
+`parameterized_affine()` 会把 alpha 与 beta 作为一个 immutable generation 原子发布。构造时
+必须声明的系数闭区间同时也是 trait 证明边界：只有 SPD/PSD 在整个区间上都成立时才会保留。
+更新采用乐观 `expected_version` 检查；缓存 Graph action 会 rebind 新的二标量 snapshot 而不
+重建，in-flight submission 继续 pin 它实际提交的旧 snapshot。
+
+公开 `identity()` 仍只支持 CPU。通用 `block_diagonal()` 还支持 CUDA/Vulkan f32 standalone
+apply，但要求每个 leaf 都提供经过资格验证的 direct affine dense storage。leaf 按顺序直接
+绑定连续 domain/range subview，不执行 gather、scatter、全向量 staging 或 N-sized temporary。
+permutation、overlap 或不具备资格的 layout 会明确失败；block container 本身暂不作为公开
+Graph action。GPU f64 composition 仍不支持。
 
 `inverse_block_diagonal()` 是面向常见物理布局的 recordable fixed-linear preconditioner
 helper。调用方提供已经求逆、row-major 的 f32 block，并必须声明 `assume_spd=True`；Forge
@@ -416,6 +437,13 @@ helper。调用方提供已经求逆、row-major 的 f32 block，并必须声明
 一个常数大小的 topology word，不再持有随 vector 长度增长的 offset table。兼容的
 values-only update 只复制 inverse values，并使用普通 immutable-generation rebind 合同，
 因此同一个单系统或 batched PCG Graph 可以安全消费更新后的 preconditioner。
+
+`SmallBlockInverseBuilder` 可在 device 上构造上述 f32 row-major inverse block，固定 block
+size 为 1 到 4。它同时提供 direct `build()` 与单 dispatch `graph_action()`。带 partial pivot 的
+Gauss-Jordan 会应用调用方给出的非负对角 regularization，并为每个 block 写入 device-resident
+status：0 表示成功、1 表示输入非有限、2 表示 pivot 奇异或病态；失败 block 的输出为零。
+Forge 不自动读回 status，也不推断 SPD；调用方应按自身策略检查 status，并独立作出
+`assume_spd` 断言。
 
 ### 固定拓扑隐式求解参考
 
@@ -1216,12 +1244,13 @@ operator/preconditioner 资源。大型 solve
 | Fixed stored CSR/BSR | `f32`、`f64` | `f32` | `f32` |
 | Compiled kernel | `f32` | `f32` | `f32` |
 | Compiled Graph | `f32` | `f32` | `f32` |
-| Identity/block diagonal | `f32`、`f64` | 不支持 | 不支持 |
+| Identity | `f32`、`f64` | 不支持 | 不支持 |
+| fixed-layout block diagonal | `f32`、`f64` | qualified direct-affine leaf，`f32` | qualified direct-affine leaf，`f32` |
 | 调用方提供的 inverse block diagonal，size 1-4 | `f32` | `f32` | `f32` |
 | Scale/shift/sum/compose | `f32`、`f64` | `f32` | `f32` |
 
-kernel/Graph provider 支持矩形 shape 和显式 adjoint。通用 `alpha/beta` apply 支持 CPU；
-GPU 当前只支持 overwrite apply。
+kernel/Graph provider 支持矩形 shape 和显式 adjoint。通用 `alpha/beta` apply 支持 CPU，
+并在 CUDA/Vulkan 上支持 f32 ndarray operand；GPU f64 与非 ndarray 的通用 storage 仍不支持。
 
 ### Solver
 

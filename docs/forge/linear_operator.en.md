@@ -445,19 +445,34 @@ E = operator.adjoint()
 F = ti.linalg.block_diagonal((operator, B))
 I = ti.linalg.identity(size, dtype=ti.f32)
 S = operator.shifted(0.01)    # operator(x) + 0.01 * x
+P = operator.parameterized_affine(
+    alpha=1.0,
+    beta=0.01,
+    alpha_range=(1.0, 1.0),
+    beta_range=(0.0, 0.1),
+)
+P.update_parameters(alpha=1.0, beta=0.02, expected_version=1)
 
 # Flat row-major inverse 1x1, 2x2, 3x3, or 4x4 blocks.
 M = ti.linalg.inverse_block_diagonal(
     inverse_blocks, block_size=3, assume_spd=True
+)
+
+inverse = ti.linalg.SmallBlockInverseBuilder(3, block_count).build(blocks)
+M = ti.linalg.inverse_block_diagonal(
+    inverse.inverse_blocks, block_size=3, assume_spd=True
 )
 ```
 
 The generalized form is `out = alpha * A(x) + beta * addend`. Input/output
 aliasing is always rejected. `addend` may alias `out` for in-place
 accumulation. When `beta == 0`, `addend` is neither validated nor read.
-Generalized coefficient lowering is currently available on CPU. CUDA and
-Vulkan accept overwrite apply (`alpha == 1`, `beta == 0`) and fail explicitly
-for other combinations without a host fallback.
+Generalized coefficient lowering is available on CPU and for f32 ndarray
+operands on CUDA/Vulkan. GPU lowering uses device transform/scaled-add
+primitives and performs no host readback. The non-aliasing path allocates no
+N-sized scratch. If `addend is out`, one persistent scratch preserves the old
+addend before `A(x)` is evaluated. GPU f64 and unsupported storage layouts fail
+explicitly without a host fallback.
 
 `adjoint()` is available only when the
 provider exposes explicit adjoint application; no self-adjointness assumption
@@ -476,9 +491,20 @@ rectangular or mixed-extent chains retain the conservative nested lowering.
 Compact Field operands bind directly when the composition is embedded with
 `graph_action()`; standalone composition retains the documented reusable
 boundary-staging behavior.
-Public `identity()` and general block diagonal remain CPU-only. GPU f64
-composition and generalized `alpha/beta/addend` composition fail without
-running host code or silently changing provider.
+`parameterized_affine()` publishes alpha and beta as one immutable generation.
+The mandatory closed coefficient ranges are also the trait-proof boundary:
+SPD/PSD properties are retained only when they hold over the complete ranges.
+An update uses optimistic `expected_version` validation, and cached Graph
+actions rebind the new two-scalar snapshot without rebuilding; in-flight
+submissions keep the exact old snapshot pinned.
+
+Public `identity()` remains CPU-only. General `block_diagonal()` additionally
+supports f32 CUDA/Vulkan standalone apply when every leaf exposes qualified
+direct affine dense storage. Leaves bind consecutive domain/range subviews and
+run in order without gather, scatter, full-vector staging, or an N-sized
+temporary. Permuted, overlapping, or non-recordable layouts fail explicitly;
+the block container itself is not a public Graph action. GPU f64 composition
+also remains unsupported.
 
 `inverse_block_diagonal()` is the recordable fixed-linear preconditioner
 helper for common physics layouts. The caller supplies already inverted,
@@ -490,6 +516,15 @@ size topology word is snapshotted instead of an offset table proportional to
 the vector length. Compatible values-only updates copy only inverse values and
 use the ordinary immutable-generation rebind contract, which lets the same
 single-system or batched PCG Graph consume a refreshed preconditioner safely.
+
+`SmallBlockInverseBuilder` constructs those f32 row-major inverse blocks on
+the device for fixed block sizes 1 through 4. It provides direct `build()` and
+one-dispatch `graph_action()` forms. Partial-pivot Gauss-Jordan
+elimination applies the requested nonnegative diagonal regularization and
+writes one device-resident status per block: 0 for success, 1 for non-finite
+input, and 2 for a singular or ill-conditioned pivot. A failed block is zeroed.
+Forge does not read back status or infer SPD; callers must inspect status when
+their policy requires it and make the independent `assume_spd` assertion.
 
 ### Fixed-topology implicit reference
 
@@ -1447,13 +1482,15 @@ model that coupling explicitly.
 | Fixed stored CSR/BSR | `f32`, `f64` | `f32` | `f32` |
 | Compiled kernel | `f32` | `f32` | `f32` |
 | Compiled Graph | `f32` | `f32` | `f32` |
-| Identity/block diagonal | `f32`, `f64` | Unsupported | Unsupported |
+| Identity | `f32`, `f64` | Unsupported | Unsupported |
+| Fixed-layout block diagonal | `f32`, `f64` | Qualified direct-affine leaves, `f32` | Qualified direct-affine leaves, `f32` |
 | Caller-supplied inverse block diagonal, sizes 1-4 | `f32` | `f32` | `f32` |
 | Scale/shift/sum/compose | `f32`, `f64` | `f32` | `f32` |
 
 Kernel and Graph providers support rectangular shapes and explicit adjoints.
-Generalized `alpha/beta` apply is available on CPU; GPU currently supports
-overwrite apply only.
+Generalized `alpha/beta` apply is available on CPU and for f32 ndarray
+operands on CUDA/Vulkan. GPU f64 and non-ndarray generalized storage remain
+unsupported.
 
 ### Solvers
 

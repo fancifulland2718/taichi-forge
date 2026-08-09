@@ -137,6 +137,31 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
   本地 262,144 项配对 Graph 资格中，dispatch 从 3 降到 2，CUDA warm submit/wait 中位数
   从 0.298 降到 0.222 ms，Vulkan 从 0.568 降到 0.441 ms，数值误差为 0。
 
+- `LinearOperator.apply(alpha=..., beta=..., addend=...)` 的通用形式现在会在 CUDA/Vulkan
+  上使用 device-native f32 ndarray transform/scaled-add lowering。非 alias 路径不发生 host
+  readback，也不分配 N-vector；addend/output 精确 alias 时复用一个持久 scratch。本地
+  262,144 元素成对资格测试中，native apply 与等价双 dispatch Graph 分别为：CPU
+  0.822/0.955 ms、CUDA 0.240/0.380 ms、Vulkan 0.401/0.422 ms。该同步边界结果只代表当前
+  workload，不是通用加速承诺。
+- 新增可原子更新的 `parameterized_affine()`。必须声明的系数闭区间限定保守 trait 推导；
+  optimistic version 会拒绝 stale update，每次 submission pin 一个完整 alpha/beta generation。
+  缓存 Graph 直接 patch 两个 scalar binding，不重建，也不在 kernel 中读取 device parameter
+  array。本地 update-plus-run/rebuild-plus-run 分别为：CPU 1.561/3.923 ms、CUDA
+  0.815/3.745 ms、Vulkan 1.304/5.208 ms。三后端各发布 1,020 个 generation 后，1,020 个
+  retired generation 全部释放，active lease 为零。
+- fixed-layout `block_diagonal()` standalone apply 现在支持合格的 CUDA/Vulkan f32 leaf；
+  Program-bound CPU leaf 也使用相同 runtime-storage subrange 合同。连续 domain/range slice
+  一次解析并按 leaf 顺序提交，不执行 gather/scatter、全向量 staging 或 N-sized temporary。
+  该合同不做 kernel fusion：双 leaf、262,144 元素 identity probe 在 CPU/CUDA/Vulkan 分别为
+  0.792/0.264/0.458 ms，而单融合 kernel 为 0.388/0.135/0.335 ms。permutation、overlap、
+  non-affine 与 recordable container 形式仍不支持。
+- 新增 `SmallBlockInverseBuilder`，面向 size 1-4 的固定 f32 row-major block。direct 与单 dispatch
+  Graph 形式都在 device 上执行带 partial pivot 的 Gauss-Jordan，把 success/non-finite/
+  singular 的逐 block status 留在 device，并把失败输出清零且不推断 SPD。对 16,384 个 4x4
+  identity block，本地 device build 与 host readback/NumPy inverse/upload 分别为：CPU
+  0.824/5.175 ms、CUDA 0.410/6.195 ms、Vulkan 0.722/7.667 ms。三后端 1,000 次复用压力
+  测试保持调用方提供的 output/status allocation 不变。
+
 ## 0.6.1
 
 - `0.6.1` 的发布来源有意分开记录：`b129ad94c` 是最终 Python shim/source 边界，已经冻结的
