@@ -74,6 +74,7 @@ OPERATIONS = (
     "native_transform",
     "native_gather",
     "native_scatter",
+    "native_compact",
     "mpm_graph",
     "mpm_direct",
 )
@@ -1199,6 +1200,180 @@ def _build_native_indexed_copy_case(ti: Any, runtime_name: str, backend: str,
     }
 
 
+def _native_compact_route(workspace: Any | None, runtime_name: str,
+                          backend: str) -> dict[str, Any]:
+    if runtime_name == "forge":
+        plan = getattr(workspace, "_native_compact_plan", None)
+        expected_backend = {
+            "cuda": "cuda_device",
+            "vulkan": "vulkan_native",
+            "cpu": "cpu_native",
+        }[backend]
+        expected_method = {
+            "cuda": "cuda_device_compact_ndarray",
+            "vulkan": "vulkan_compact_ndarray",
+            "cpu": "cpu_compact_ndarray",
+        }[backend]
+        observed_backend = getattr(plan, "backend", None)
+        observed_method = getattr(plan, "method_name", None)
+        return {
+            "classification": "forge_native_stable_compact_plan",
+            "expected_backend": expected_backend,
+            "expected_method": expected_method,
+            "observed_plan_backend": observed_backend,
+            "observed_method": observed_method,
+            "workspace_bytes_current": getattr(
+                workspace, "workspace_bytes_current", None),
+            "workspace_bytes_peak": getattr(
+                workspace, "workspace_bytes_peak", None),
+            "passed": bool(
+                plan is not None
+                and observed_backend == expected_backend
+                and observed_method == expected_method
+            ),
+        }
+    return {
+        "classification": "vanilla_stable_prefix_scan_compact_pipeline",
+        "expected_backend": backend,
+        "expected_method": (
+            "flags-to-prefix kernel, PrefixSumExecutor, stable scatter kernel"
+        ),
+        "observed_plan_backend": backend,
+        "observed_method": "qualification_stable_compact_pipeline",
+        "workspace_bytes_current": None,
+        "workspace_bytes_peak": None,
+        "passed": True,
+    }
+
+
+def _build_native_compact_case(ti: Any, runtime_name: str, backend: str,
+                               elements: int) -> dict[str, Any]:
+    import numpy as np
+
+    host_values = ((np.arange(elements, dtype=np.int64) * 31 + 11) % 2003
+                   - 1001).astype(np.int32)
+    host_flags = ((np.arange(elements) % 3 == 0)
+                  | (np.arange(elements) % 17 == 0)).astype(np.int32)
+    expected = host_values[host_flags != 0]
+    selected_count = int(expected.size)
+    values = ti.ndarray(dtype=ti.i32, shape=elements)
+    flags = ti.ndarray(dtype=ti.i32, shape=elements)
+    output = ti.ndarray(dtype=ti.i32, shape=elements)
+    count = ti.ndarray(dtype=ti.i32, shape=1)
+    values.from_numpy(host_values)
+    flags.from_numpy(host_flags)
+    output.fill(0)
+    count.fill(0)
+
+    prefix = ti.field(dtype=ti.i32, shape=elements) if runtime_name == "vanilla" else None
+    scanner = (
+        ti.algorithms.PrefixSumExecutor(elements)
+        if runtime_name == "vanilla" else None
+    )
+
+    @ti.kernel
+    def flags_to_prefix(
+            source_flags: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in source_flags:
+            prefix[i] = 1 if source_flags[i] != 0 else 0
+
+    @ti.kernel
+    def stable_scatter(
+            source_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            source_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            destination: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            destination_count: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        destination_count[0] = prefix[elements - 1]
+        for i in source_flags:
+            if source_flags[i] != 0:
+                destination[prefix[i] - 1] = source_values[i]
+
+    workspace = (
+        ti.algorithms.CompactWorkspace(max_items=elements)
+        if runtime_name == "forge" else None
+    )
+
+    def launch() -> None:
+        if runtime_name == "forge":
+            ti.algorithms.experimental_compact(
+                values, flags, output, count, method="auto", workspace=workspace)
+        else:
+            flags_to_prefix(flags)
+            scanner.run(prefix)
+            stable_scatter(values, flags, output, count)
+
+    def reset() -> None:
+        output.fill(0)
+        count.fill(0)
+        if prefix is not None:
+            prefix.fill(0)
+
+    def validate_fresh() -> dict[str, Any]:
+        reset()
+        ti.sync()
+        launch()
+        ti.sync()
+        actual_count = int(count.to_numpy()[0])
+        actual = output.to_numpy()[:selected_count]
+        mismatch = np.flatnonzero(actual != expected)
+        return {
+            "passed": actual_count == selected_count and mismatch.size == 0,
+            "comparison": "exact_stable_i32_compact",
+            "actual_count": actual_count,
+            "expected_count": selected_count,
+            "mismatch_count": int(mismatch.size),
+            "first_mismatch": (
+                None if mismatch.size == 0 else int(mismatch[0])
+            ),
+        }
+
+    return {
+        "launch": launch,
+        "reset": reset,
+        "validate": validate_fresh,
+        "route": lambda: _native_compact_route(
+            workspace, runtime_name, backend),
+        "logical_bytes": elements * 8 + selected_count * 4 + 4,
+        "traffic_model": (
+            "semantic minimum: one i32 value and flag read per input, one i32 "
+            "write per selected item, and one count write; internal prefix and "
+            "workspace traffic excluded"
+        ),
+        "workload_contract": {
+            "case_id": "THIN-002-COMPACT",
+            "comparison_class": "thin-capability",
+            "semantics": "stable_select_values_whose_i32_flag_is_nonzero",
+            "dtype": "i32",
+            "storage": "ndarray_values_flags_output_and_count",
+            "input_pattern": "((i * 31 + 11) % 2003) - 1001",
+            "flag_pattern": "i % 3 == 0 or i % 17 == 0",
+            "selected_count": selected_count,
+            "forge_adapter": (
+                "experimental_compact(method=auto,reusable CompactWorkspace)"
+            ),
+            "vanilla_adapter": (
+                "flags-to-prefix kernel plus reusable PrefixSumExecutor plus "
+                "stable scatter kernel"
+            ),
+            "shared": (
+                "same ndarray values/flags/output/count, stable-selection "
+                "semantics, one adapter invocation per batch iteration, outer "
+                "synchronization, and exact ordered oracle"
+            ),
+            "allowed_difference": (
+                "internal stage count and workspace implementation differ; "
+                "vanilla uses its public reusable PrefixSumExecutor"
+            ),
+            "correctness": "exact_count_and_exact_ordered_i32_prefix",
+            "timing": (
+                "frozen repeated complete compact adapter calls plus one outer "
+                "sync; initialization, first call, and correctness are excluded"
+            ),
+            "elements": elements,
+        },
+    }
+
+
 def _load_graph_mpm_workload() -> tuple[Any, Path]:
     source = Path(__file__).resolve().parents[1] / "graph_mpm_replay_bench.py"
     spec = importlib.util.spec_from_file_location(
@@ -1684,6 +1859,9 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         elif args.operation == "native_scatter":
             case = _build_native_indexed_copy_case(
                 ti, args.runtime, args.backend, config["elements"], True)
+        elif args.operation == "native_compact":
+            case = _build_native_compact_case(
+                ti, args.runtime, args.backend, config["elements"])
         elif args.operation in ("mpm_graph", "mpm_direct"):
             case = _build_mpm_case(
                 ti, args.runtime, args.operation, args.preset)

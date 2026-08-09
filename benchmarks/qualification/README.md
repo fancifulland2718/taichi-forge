@@ -31,6 +31,7 @@ three direct comparisons, and one explicitly classified thin-capability case:
 | `native_transform` | elementwise i32 affine transform; one source read and one destination write per element |
 | `native_gather` | indexed i32 read through a full-permutation index ndarray |
 | `native_scatter` | indexed i32 write through the same unique full permutation |
+| `native_compact` | stable flag selection with exact count and ordered-output oracle |
 
 These are control/regression microbenchmarks. They measure the ordinary kernel
 path and may detect runtime tax or a real base-path improvement, but they do not
@@ -85,6 +86,13 @@ destination index is unique and in range before timing. This removes duplicate
 write races from the comparison. Forge's native scatter plan and the vanilla
 equivalent kernel are checked independently through
 `native_scatter_microbench.py`.
+
+`native_compact` compares Forge's stable native compact with a non-trivial
+vanilla stable pipeline: flags-to-prefix kernel, reusable public
+`PrefixSumExecutor`, and stable scatter kernel. The complete adapter call is
+timed on each side; internal stage count and workspace are declared differences.
+Count and selected order must both match exactly. Use
+`native_compact_microbench.py`.
 
 ## Fairness contract implemented by the runner
 
@@ -192,6 +200,16 @@ Indexed scatter has a separate process and run ID:
 ```powershell
 C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
   benchmarks\qualification\native_scatter_microbench.py `
+  --backend cuda --preset small --intent diagnostic `
+  --pairs 1 --samples 5 --warmups 2 `
+  --target-sample-ms 20 --stability-replays 0
+```
+
+Stable compact is another isolated run:
+
+```powershell
+C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
+  benchmarks\qualification\native_compact_microbench.py `
   --backend cuda --preset small --intent diagnostic `
   --pairs 1 --samples 5 --warmups 2 `
   --target-sample-ms 20 --stability-replays 0

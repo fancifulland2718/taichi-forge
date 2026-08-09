@@ -29,6 +29,7 @@ Forge/vanilla 比较均由相邻且不重叠的 fresh-process 对组成。
 | `native_transform` | 逐元素 i32 affine transform；每元素一次源读取和一次目标写入 |
 | `native_gather` | 通过全排列 index ndarray 执行 indexed i32 read |
 | `native_scatter` | 通过同一个唯一全排列执行 indexed i32 write |
+| `native_compact` | stable flag selection，并 exact 校验 count 与有序输出 |
 
 这些是控制/回归 microbench，用于测量普通 kernel 路径，能够发现运行时额外成本
 或真实的基础路径提升；但它们不覆盖 Graph、native primitive、bounded dispatch、
@@ -72,6 +73,12 @@ i32 输出与 native plan 检查。它同样属于 `thin-capability`，独立入
 `native_scatter` 使用同一个排列合同，在计时前证明每个目标索引唯一且在范围内，
 从而排除重复写竞争。Forge native scatter plan 与 vanilla 等价 kernel 通过
 `native_scatter_microbench.py` 独立检查。
+
+`native_compact` 把 Forge stable native compact 与一个非简单串行循环的 vanilla
+稳定 pipeline 对比：flags-to-prefix kernel、可复用的公开 `PrefixSumExecutor` 和
+stable scatter kernel。两边均计时完整 adapter call；内部 stage 数和 workspace 是
+明确允许的差异。count 与被选元素顺序必须同时 exact 一致。独立入口为
+`native_compact_microbench.py`。
 
 ## runner 已实现的公平性合同
 
@@ -170,6 +177,16 @@ indexed scatter 使用另一个进程与 run ID：
 ```powershell
 C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
   benchmarks\qualification\native_scatter_microbench.py `
+  --backend cuda --preset small --intent diagnostic `
+  --pairs 1 --samples 5 --warmups 2 `
+  --target-sample-ms 20 --stability-replays 0
+```
+
+stable compact 也是独立运行：
+
+```powershell
+C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
+  benchmarks\qualification\native_compact_microbench.py `
   --backend cuda --preset small --intent diagnostic `
   --pairs 1 --samples 5 --warmups 2 `
   --target-sample-ms 20 --stability-replays 0

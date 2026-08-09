@@ -11,6 +11,7 @@ from benchmarks.qualification.single_kernel_microbench import (
     _native_reduce_route,
     _native_transform_route,
     _native_indexed_copy_route,
+    _native_compact_route,
     balanced_pair_orders,
     paired_log_summary,
     qualification_policy_errors,
@@ -173,6 +174,22 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
             Workspace(), "forge", "cuda", scatter=True)["passed"])
         self.assertFalse(_native_indexed_copy_route(
             Workspace(), "forge", "cuda", scatter=False)["passed"])
+
+    def test_native_compact_route_requires_cuda_device_plan(self):
+        class Plan:
+            backend = "cuda_device"
+            method_name = "cuda_device_compact_ndarray"
+
+        class Workspace:
+            _native_compact_plan = Plan()
+            workspace_bytes_current = 8192
+            workspace_bytes_peak = 8192
+
+        self.assertTrue(
+            _native_compact_route(Workspace(), "forge", "cuda")["passed"])
+        Plan.backend = "cuda_cub"
+        self.assertFalse(
+            _native_compact_route(Workspace(), "forge", "cuda")["passed"])
 
 
 if __name__ == "__main__":
