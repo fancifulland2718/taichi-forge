@@ -72,6 +72,7 @@ OPERATIONS = (
     "parallel_sort",
     "native_reduce",
     "native_transform",
+    "native_gather",
     "mpm_graph",
     "mpm_direct",
 )
@@ -1032,6 +1033,171 @@ def _build_native_transform_case(ti: Any, runtime_name: str, backend: str,
     }
 
 
+def _native_indexed_copy_route(workspace: Any | None, runtime_name: str,
+                               backend: str, scatter: bool) -> dict[str, Any]:
+    operation = "scatter" if scatter else "gather"
+    if runtime_name == "forge":
+        plan = getattr(workspace, "_native_indexed_copy_plan", None)
+        expected_backend = {
+            "cuda": "cuda_device",
+            "vulkan": "vulkan_native",
+            "cpu": "cpu_native",
+        }[backend]
+        prefix = {
+            "cuda": "cuda_device",
+            "vulkan": "vulkan",
+            "cpu": "cpu",
+        }[backend]
+        expected_method = f"{prefix}_{operation}_ndarray"
+        observed_backend = getattr(plan, "backend", None)
+        observed_method = getattr(plan, "method_name", None)
+        return {
+            "classification": f"forge_native_{operation}_plan",
+            "expected_backend": expected_backend,
+            "expected_method": expected_method,
+            "observed_plan_backend": observed_backend,
+            "observed_method": observed_method,
+            "workspace_bytes_current": getattr(
+                workspace, "workspace_bytes_current", None),
+            "workspace_bytes_peak": getattr(
+                workspace, "workspace_bytes_peak", None),
+            "passed": bool(
+                plan is not None
+                and observed_backend == expected_backend
+                and observed_method == expected_method
+            ),
+        }
+    return {
+        "classification": f"vanilla_equivalent_i32_{operation}_kernel",
+        "expected_backend": backend,
+        "expected_method": f"one indexed i32 {operation} Taichi kernel",
+        "observed_plan_backend": backend,
+        "observed_method": f"qualification_{operation}_i32_kernel",
+        "workspace_bytes_current": 0,
+        "workspace_bytes_peak": 0,
+        "passed": True,
+    }
+
+
+def _build_native_indexed_copy_case(ti: Any, runtime_name: str, backend: str,
+                                    elements: int,
+                                    scatter: bool) -> dict[str, Any]:
+    import numpy as np
+
+    operation = "scatter" if scatter else "gather"
+    host = ((np.arange(elements, dtype=np.int64) * 31 + 11) % 2003
+            - 1001).astype(np.int32)
+    host_indices = (
+        (np.arange(elements, dtype=np.int64) * 17 + 5) % elements
+    ).astype(np.int32)
+    expected = np.zeros(elements, dtype=np.int32)
+    if scatter:
+        expected[host_indices] = host
+    else:
+        expected = host[host_indices]
+    values = ti.ndarray(dtype=ti.i32, shape=elements)
+    indices = ti.ndarray(dtype=ti.i32, shape=elements)
+    output = ti.ndarray(dtype=ti.i32, shape=elements)
+    values.from_numpy(host)
+    indices.from_numpy(host_indices)
+    output.fill(0)
+
+    @ti.kernel
+    def vanilla_gather(
+            source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            index: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            destination: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in index:
+            destination[i] = source[index[i]]
+
+    @ti.kernel
+    def vanilla_scatter(
+            source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            index: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            destination: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in index:
+            destination[index[i]] = source[i]
+
+    workspace = (
+        ti.algorithms.IndexedCopyWorkspace(max_items=elements)
+        if runtime_name == "forge" else None
+    )
+
+    def launch() -> None:
+        if runtime_name == "forge":
+            primitive = (
+                ti.algorithms.experimental_scatter if scatter
+                else ti.algorithms.experimental_gather
+            )
+            primitive(values, indices, output, method="auto", workspace=workspace)
+        elif scatter:
+            vanilla_scatter(values, indices, output)
+        else:
+            vanilla_gather(values, indices, output)
+
+    def reset() -> None:
+        output.fill(0)
+
+    def validate_fresh() -> dict[str, Any]:
+        output.fill(0)
+        ti.sync()
+        launch()
+        ti.sync()
+        actual = output.to_numpy()
+        mismatch = np.flatnonzero(actual != expected)
+        return {
+            "passed": mismatch.size == 0,
+            "comparison": f"exact_i32_{operation}",
+            "mismatch_count": int(mismatch.size),
+            "first_mismatch": (
+                None if mismatch.size == 0 else int(mismatch[0])
+            ),
+        }
+
+    return {
+        "launch": launch,
+        "reset": reset,
+        "validate": validate_fresh,
+        "route": lambda: _native_indexed_copy_route(
+            workspace, runtime_name, backend, scatter),
+        "logical_bytes": elements * 12,
+        "traffic_model": (
+            "semantic minimum: one i32 index read, one i32 payload read, and "
+            "one i32 destination write per item; implementation workspace "
+            "traffic excluded"
+        ),
+        "workload_contract": {
+            "case_id": f"THIN-002-{operation.upper()}",
+            "comparison_class": "thin-capability",
+            "semantics": (
+                "dst_i_equals_src_indices_i" if not scatter
+                else "dst_indices_i_equals_src_i_with_unique_permutation"
+            ),
+            "dtype": "i32",
+            "storage": "three_same_length_1d_ndarrays",
+            "input_pattern": "((i * 31 + 11) % 2003) - 1001",
+            "index_pattern": "(i * 17 + 5) % n; full permutation for presets",
+            "unique_in_range_indices": True,
+            "forge_adapter": (
+                f"experimental_{operation}(method=auto,reusable "
+                "IndexedCopyWorkspace)"
+            ),
+            "vanilla_adapter": f"one common-source indexed {operation} kernel",
+            "shared": (
+                "same ndarray allocation, values, indices, indexed-copy "
+                "semantics, output dtype/shape, launch count, outer "
+                "synchronization, and exact oracle"
+            ),
+            "correctness": "exact_i32_elementwise",
+            "timing": (
+                f"frozen repeated {operation} calls plus one outer sync; "
+                "initialization, first call, and correctness are excluded"
+            ),
+            "elements": elements,
+        },
+    }
+
+
 def _load_graph_mpm_workload() -> tuple[Any, Path]:
     source = Path(__file__).resolve().parents[1] / "graph_mpm_replay_bench.py"
     spec = importlib.util.spec_from_file_location(
@@ -1511,6 +1677,9 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         elif args.operation == "native_transform":
             case = _build_native_transform_case(
                 ti, args.runtime, args.backend, config["elements"])
+        elif args.operation == "native_gather":
+            case = _build_native_indexed_copy_case(
+                ti, args.runtime, args.backend, config["elements"], False)
         elif args.operation in ("mpm_graph", "mpm_direct"):
             case = _build_mpm_case(
                 ti, args.runtime, args.operation, args.preset)

@@ -29,6 +29,7 @@ three direct comparisons, and one explicitly classified thin-capability case:
 | `parallel_sort` | dense i32 key sort through `ti.algorithms.parallel_sort(keys)`; sort-network traffic is not reduced to GB/s |
 | `native_reduce` | whole-array i32 sum to one-element ndarray; semantic minimum is one input read and one scalar output |
 | `native_transform` | elementwise i32 affine transform; one source read and one destination write per element |
+| `native_gather` | indexed i32 read through a full-permutation index ndarray |
 
 These are control/regression microbenchmarks. They measure the ordinary kernel
 path and may detect runtime tax or a real base-path improvement, but they do not
@@ -72,6 +73,11 @@ uses a reusable `TransformWorkspace`; vanilla uses one equivalent elementwise
 Taichi kernel. Exact i32 output and the selected native plan are required. It is
 also a `thin-capability` case and has the dedicated entry point
 `native_transform_microbench.py`.
+
+`native_gather` is the next isolated `THIN-002` subcase. Both sides use the
+same full-permutation i32 indices and exact output oracle. Forge must select its
+cached native indexed-copy plan; vanilla runs one equivalent indexed-read
+kernel. Its entry point is `native_gather_microbench.py`.
 
 ## Fairness contract implemented by the runner
 
@@ -159,6 +165,16 @@ The affine transform subcase has its own invocation and run ID:
 ```powershell
 C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
   benchmarks\qualification\native_transform_microbench.py `
+  --backend cuda --preset small --intent diagnostic `
+  --pairs 1 --samples 5 --warmups 2 `
+  --target-sample-ms 20 --stability-replays 0
+```
+
+Indexed gather is launched separately:
+
+```powershell
+C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
+  benchmarks\qualification\native_gather_microbench.py `
   --backend cuda --preset small --intent diagnostic `
   --pairs 1 --samples 5 --warmups 2 `
   --target-sample-ms 20 --stability-replays 0

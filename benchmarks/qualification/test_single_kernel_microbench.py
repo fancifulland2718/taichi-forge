@@ -10,6 +10,7 @@ from benchmarks.qualification.single_kernel_microbench import (
     _enhanced_memory_plateau,
     _native_reduce_route,
     _native_transform_route,
+    _native_indexed_copy_route,
     balanced_pair_orders,
     paired_log_summary,
     qualification_policy_errors,
@@ -138,6 +139,25 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         Plan.backend = "field_kernel"
         self.assertFalse(
             _native_transform_route(Workspace(), "forge", "cuda")["passed"])
+
+    def test_native_gather_route_requires_cached_native_plan(self):
+        class Plan:
+            backend = "cuda_device"
+            method_name = "cuda_device_gather_ndarray"
+
+        class Workspace:
+            _native_indexed_copy_plan = Plan()
+            workspace_bytes_current = 0
+            workspace_bytes_peak = 0
+
+        route = _native_indexed_copy_route(
+            Workspace(), "forge", "cuda", scatter=False)
+        self.assertTrue(route["passed"])
+        self.assertEqual(route["observed_method"],
+                         "cuda_device_gather_ndarray")
+        Plan.method_name = "gather_i32_ndarray_kernel_fallback"
+        self.assertFalse(_native_indexed_copy_route(
+            Workspace(), "forge", "cuda", scatter=False)["passed"])
 
 
 if __name__ == "__main__":
