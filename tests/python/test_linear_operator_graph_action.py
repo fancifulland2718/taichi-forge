@@ -91,6 +91,50 @@ def _rectangular_operator(values):
     )
 
 
+def _dense_2x2_operator(values):
+    values = np.asarray(values, dtype=np.float32).reshape(2, 2)
+    topology = ti.ndarray(ti.i32, shape=1)
+    numeric = ti.ndarray(ti.f32, shape=4)
+    topology.fill(0)
+    numeric.from_numpy(values.reshape(-1))
+
+    @ti.kernel
+    def apply_dense(
+        active_size: ti.i32,
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        numeric_data: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for row in range(active_size):
+            y[row] = (
+                numeric_data[row * 2] * x[0]
+                + numeric_data[row * 2 + 1] * x[1]
+            )
+
+    @ti.kernel
+    def apply_dense_adjoint(
+        active_size: ti.i32,
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        numeric_data: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for column in range(active_size):
+            y[column] = (
+                numeric_data[column] * x[0]
+                + numeric_data[2 + column] * x[1]
+            )
+
+    return ti.linalg.LinearOperator.from_kernel(
+        apply_dense,
+        (2, 2),
+        topology,
+        adjoint=apply_dense_adjoint,
+        numeric=numeric,
+    )
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_linear_operator_graph_action_reuses_provider_generation_and_dense_storage():
     operator = _diagonal_operator([2.0, 3.0, 5.0, 7.0])
@@ -364,6 +408,74 @@ def test_shifted_operator_rejects_rectangular_shape():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_deep_composition_reuses_one_temporary_for_forward_and_adjoint():
+    matrices = [
+        np.asarray([[1.0 + 0.1 * index, 0.2], [-0.1, 0.9]], np.float32)
+        for index in range(8)
+    ]
+    operators = [_dense_2x2_operator(matrix) for matrix in matrices]
+    composed = operators[0]
+    expected_matrix = matrices[0]
+    for operator, matrix in zip(operators[1:], matrices[1:]):
+        composed = operator.compose(composed)
+        expected_matrix = matrix @ expected_matrix
+
+    input_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "input", ti.f32, ndim=1
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1
+    )
+    executable = composed.graph_action(input_arg, output_arg).compile()
+    assert executable.debug_info["dispatch_count"] == len(matrices)
+    assert executable.debug_info["composition_chain_length"] == len(matrices)
+    assert executable.debug_info["reuses_composition_temporary"]
+    assert executable.debug_info["temporary_bytes"] == 2 * 4
+
+    values = np.asarray([0.75, -1.25], dtype=np.float32)
+    source = ti.ndarray(ti.f32, shape=2)
+    output = ti.ndarray(ti.f32, shape=2)
+    source.from_numpy(values)
+    forward = _operator_graph(composed)
+    forward.run({"input": source, "output": output})
+    np.testing.assert_allclose(
+        output.to_numpy(), expected_matrix @ values, rtol=2e-5, atol=2e-5
+    )
+    assert forward.execution_stats().memory.transient_temporary_bytes == 2 * 4
+
+    adjoint = _operator_graph(composed, adjoint=True)
+    adjoint.run({"input": source, "output": output})
+    np.testing.assert_allclose(
+        output.to_numpy(), expected_matrix.T @ values, rtol=2e-5, atol=2e-5
+    )
+    adjoint_executable = composed.graph_action(
+        input_arg, output_arg, adjoint=True
+    ).compile()
+    assert adjoint_executable.debug_info["composition_chain_length"] == len(
+        matrices
+    )
+    assert adjoint_executable.debug_info["reuses_composition_temporary"]
+    assert adjoint_executable.debug_info["temporary_bytes"] == 2 * 4
+
+    rebound_matrix = np.asarray([[0.75, -0.3], [0.4, 1.25]], np.float32)
+    rebound = ti.ndarray(ti.f32, shape=4)
+    rebound.from_numpy(rebound_matrix.reshape(-1))
+    operators[3].update_numeric(
+        rebound,
+        expected_topology_version=1,
+        expected_numeric_version=1,
+    )
+    matrices[3] = rebound_matrix
+    expected_matrix = matrices[0]
+    for matrix in matrices[1:]:
+        expected_matrix = matrix @ expected_matrix
+    forward.run({"input": source, "output": output})
+    np.testing.assert_allclose(
+        output.to_numpy(), expected_matrix @ values, rtol=2e-5, atol=2e-5
+    )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_inverse_block_diagonal_is_recordable_and_numerically_rebindable():
     inverse_blocks = np.asarray(
         [
@@ -376,6 +488,12 @@ def test_inverse_block_diagonal_is_recordable_and_numerically_rebindable():
     numeric.from_numpy(inverse_blocks)
     action = ti.linalg.inverse_block_diagonal(
         numeric, 2, assume_spd=True
+    )
+    resources = action._provider_core._debug_runtime_stats()["resources"]
+    assert resources["pattern_reserved_bytes"] == np.dtype(np.int32).itemsize
+    assert resources["values_reserved_bytes"] == inverse_blocks.nbytes
+    assert resources["operator_owned_reserved_bytes"] == (
+        np.dtype(np.int32).itemsize + inverse_blocks.nbytes
     )
     graph = _operator_graph(action)
     values = np.asarray([1.0, -2.0, 0.5, 3.0], dtype=np.float32)
@@ -408,6 +526,84 @@ def test_inverse_block_diagonal_is_recordable_and_numerically_rebindable():
 
     with pytest.raises(RuntimeError, match="assume_spd=True"):
         ti.linalg.inverse_block_diagonal(updated, 2, assume_spd=False)
+
+
+@pytest.mark.parametrize("block_size", [1, 2, 3, 4])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_inverse_block_diagonal_specializes_each_supported_block_size(block_size):
+    block_count = 3
+    blocks = np.empty((block_count, block_size, block_size), dtype=np.float32)
+    for block in range(block_count):
+        matrix = np.eye(block_size, dtype=np.float32) * (1.5 + block)
+        matrix += np.ones((block_size, block_size), dtype=np.float32) * 0.05
+        blocks[block] = matrix
+    flattened = blocks.reshape(-1)
+    numeric = ti.ndarray(ti.f32, shape=flattened.size)
+    numeric.from_numpy(flattened)
+    action = ti.linalg.inverse_block_diagonal(
+        numeric, block_size, assume_spd=True
+    )
+    graph = _operator_graph(action)
+    values = np.linspace(
+        -1.0, 2.0, block_count * block_size, dtype=np.float32
+    )
+    source = ti.ndarray(ti.f32, shape=values.size)
+    output = ti.ndarray(ti.f32, shape=values.size)
+    source.from_numpy(values)
+    graph.run({"input": source, "output": output})
+    expected = blocks @ values.reshape(block_count, block_size, 1)
+    np.testing.assert_allclose(
+        output.to_numpy(), expected.reshape(-1), rtol=1e-6, atol=1e-6
+    )
+    resources = action._provider_core._debug_runtime_stats()["resources"]
+    assert resources["pattern_reserved_bytes"] == np.dtype(np.int32).itemsize
+    assert resources["values_reserved_bytes"] == flattened.nbytes
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_inverse_block_diagonal_submission_pins_its_numeric_generation():
+    first_values = np.asarray(
+        [2.0, 0.25, 0.25, 1.0, 1.5, 0.0, 0.0, 0.75],
+        dtype=np.float32,
+    )
+    second_values = np.asarray(
+        [0.75, 0.0, 0.0, 0.5, 2.0, -0.25, -0.25, 1.25],
+        dtype=np.float32,
+    )
+    numeric = ti.ndarray(ti.f32, shape=first_values.size)
+    numeric.from_numpy(first_values)
+    action = ti.linalg.inverse_block_diagonal(
+        numeric, 2, assume_spd=True
+    )
+    graph = _operator_graph(action)
+    source_values = np.asarray([1.0, -2.0, 0.5, 3.0], np.float32)
+    source = ti.ndarray(ti.f32, shape=4)
+    first_output = ti.ndarray(ti.f32, shape=4)
+    second_output = ti.ndarray(ti.f32, shape=4)
+    source.from_numpy(source_values)
+
+    first = graph.submit({"input": source, "output": first_output})
+    replacement = ti.ndarray(ti.f32, shape=second_values.size)
+    replacement.from_numpy(second_values)
+    action.update_numeric(
+        replacement,
+        expected_topology_version=1,
+        expected_numeric_version=1,
+    )
+    second = graph.submit({"input": source, "output": second_output})
+    first.wait()
+    second.wait()
+
+    expected_first = first_values.reshape(2, 2, 2) @ source_values.reshape(
+        2, 2, 1
+    )
+    expected_second = second_values.reshape(2, 2, 2) @ source_values.reshape(
+        2, 2, 1
+    )
+    np.testing.assert_allclose(first_output.to_numpy(), expected_first.reshape(-1))
+    np.testing.assert_allclose(second_output.to_numpy(), expected_second.reshape(-1))
+    resources = action._provider_core._debug_runtime_stats()["resources"]
+    assert resources["resource_generation_active_leases"] == 0
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

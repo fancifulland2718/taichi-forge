@@ -2178,6 +2178,9 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
         requirements = []
         temporary_bindings = {}
         private_fixed = {}
+        composition_chain_length = 0
+        reuses_composition_temporary = False
+        reads_output_before_final_write = False
 
         def append_child(child_operator, child_input, child_output, child_adjoint):
             child = child_operator.graph_action(
@@ -2234,6 +2237,28 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
                 )
                 return
             result.append((float(coefficient), candidate, term_adjoint))
+
+        def composition_leaves(candidate, term_adjoint, result):
+            candidate_spec = candidate._composition_spec
+            if candidate_spec is None:
+                result.append((candidate, term_adjoint))
+                return
+            candidate_kind = candidate_spec[0]
+            if candidate_kind == "adjoint":
+                composition_leaves(
+                    candidate_spec[1], not term_adjoint, result
+                )
+                return
+            if candidate_kind == "compose":
+                outer, inner = candidate_spec[1], candidate_spec[2]
+                if term_adjoint:
+                    composition_leaves(outer, True, result)
+                    composition_leaves(inner, True, result)
+                else:
+                    composition_leaves(inner, False, result)
+                    composition_leaves(outer, False, result)
+                return
+            result.append((candidate, term_adjoint))
 
         def append_weighted_terms(terms, extent):
             first_scale, first_operator, first_adjoint = terms[0]
@@ -2355,14 +2380,38 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
             )
         elif kind == "compose":
             outer, inner = spec[1], spec[2]
-            intermediate_extent = inner.shape[0]
-            scratch = temporary_arg(intermediate_extent, "compose_scratch")
-            if adjoint:
-                append_child(outer, input_arg, scratch, True)
-                append_child(inner, scratch, output_arg, True)
+            leaves = []
+            composition_leaves(operator, adjoint, leaves)
+            output_extent = operator.shape[1 if adjoint else 0]
+            leaf_output_extents = [
+                leaf.shape[1 if leaf_adjoint else 0]
+                for leaf, leaf_adjoint in leaves
+            ]
+            if len(leaves) > 2 and all(
+                extent == output_extent for extent in leaf_output_extents
+            ):
+                scratch = temporary_arg(output_extent, "compose_scratch")
+                source = input_arg
+                target = output_arg if len(leaves) % 2 else scratch
+                for leaf, leaf_adjoint in leaves:
+                    append_child(leaf, source, target, leaf_adjoint)
+                    source = target
+                    target = scratch if target is output_arg else output_arg
+                composition_chain_length = len(leaves)
+                reuses_composition_temporary = True
+                reads_output_before_final_write = True
             else:
-                append_child(inner, input_arg, scratch, False)
-                append_child(outer, scratch, output_arg, False)
+                intermediate_extent = inner.shape[0]
+                scratch = temporary_arg(
+                    intermediate_extent, "compose_scratch"
+                )
+                if adjoint:
+                    append_child(outer, input_arg, scratch, True)
+                    append_child(inner, scratch, output_arg, True)
+                else:
+                    append_child(inner, input_arg, scratch, False)
+                    append_child(outer, scratch, output_arg, False)
+                composition_chain_length = 2
         else:
             raise TaichiRuntimeError(
                 f"Unsupported LinearOperator composition kind {kind!r}"
@@ -2407,9 +2456,18 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
                     state_effects.append(effect)
         self._resource_effects = (
             ResourceEffect(self._input_name, GraphAccess.READ),
-            ResourceEffect(self._output_name, GraphAccess.WRITE),
+            ResourceEffect(
+                self._output_name,
+                (
+                    GraphAccess.READ_WRITE
+                    if reads_output_before_final_write
+                    else GraphAccess.WRITE
+                ),
+            ),
             *state_effects,
         )
+        self._composition_chain_length = composition_chain_length
+        self._reuses_composition_temporary = reuses_composition_temporary
         self._fallback_operator = operator.adjoint() if adjoint else operator
 
     def run(self, runtime_args):
@@ -2456,6 +2514,8 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
             "adjoint": self._adjoint,
             "dispatch_count": len(self._action.dispatches),
             "temporary_bytes": sum(item.bytes for item in self._temporary_requirements),
+            "composition_chain_length": self._composition_chain_length,
+            "reuses_composition_temporary": self._reuses_composition_temporary,
         }
 
     def validate_graph_lifetime(self):
@@ -2606,23 +2666,24 @@ def inverse_block_diagonal(inverse_blocks, block_size, *, assume_spd):
         )
     block_count = coefficients // block_coefficients
     size = block_count * block_size
-    topology_host = np.empty(2 * size + 1, dtype=np.int32)
-    for index in range(size):
-        block = index // block_size
-        row = index % block_size
-        topology_host[2 * index] = (
-            block * block_coefficients + row * block_size
-        )
-        topology_host[2 * index + 1] = block * block_size
-    topology_host[-1] = block_size
-    topology = ScalarNdarray(i32, topology_host.shape)
-    topology.from_numpy(topology_host)
+    topology = ScalarNdarray(i32, (1,))
+    topology.fill(block_size)
     from taichi_forge.linalg._preconditioner_kernels import (
-        apply_inverse_blocks_f32,
+        apply_inverse_blocks_1_f32,
+        apply_inverse_blocks_2_f32,
+        apply_inverse_blocks_3_f32,
+        apply_inverse_blocks_4_f32,
     )
 
+    kernel = {
+        1: apply_inverse_blocks_1_f32,
+        2: apply_inverse_blocks_2_f32,
+        3: apply_inverse_blocks_3_f32,
+        4: apply_inverse_blocks_4_f32,
+    }[block_size]
+
     return LinearOperator.from_kernel(
-        apply_inverse_blocks_f32,
+        kernel,
         size,
         topology,
         numeric=inverse_blocks,
