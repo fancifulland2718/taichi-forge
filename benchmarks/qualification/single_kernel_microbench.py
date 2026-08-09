@@ -76,6 +76,7 @@ OPERATIONS = (
     "native_scatter",
     "native_compact",
     "device_prefix_chain",
+    "active_grid_mpm",
     "snode_churn",
     "snode_concurrent",
     "mpm_graph",
@@ -90,6 +91,11 @@ GRAPH_MPM_PRESETS = {
     "small": {"particles": 4_096, "grid": 64, "substeps": 2},
     "medium": {"particles": 16_384, "grid": 128, "substeps": 4},
     "large": {"particles": 65_536, "grid": 256, "substeps": 8},
+}
+ACTIVE_GRID_MPM_PRESETS = {
+    "small": {"particles": 4_096, "grid": 256, "substeps": 1},
+    "medium": {"particles": 16_384, "grid": 512, "substeps": 1},
+    "large": {"particles": 65_536, "grid": 1_024, "substeps": 1},
 }
 DEPENDENCIES = {
     "numpy": "numpy",
@@ -2247,6 +2253,423 @@ def _build_mpm_case(ti: Any, runtime_name: str, operation: str,
     }
 
 
+def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
+                                preset: str) -> dict[str, Any]:
+    """Build one stationary 2-D MLS-MPM step with a thin active-grid adapter.
+
+    The stationary equilibrium keeps the active-domain cardinality and physical
+    state fixed across long timing batches.  Both runtimes pay for identical
+    grid clearing, P2G active marking, and G2P kernels.  Only the grid-update
+    domain differs: vanilla visits the full grid, while Forge compacts the same
+    flags on device and launches the same update body over active cell ids.
+    """
+    import numpy as np
+
+    config = ACTIVE_GRID_MPM_PRESETS[preset]
+    particles = config["particles"]
+    grid = config["grid"]
+    substeps = config["substeps"]
+    if substeps != 1:
+        raise ValueError("active-grid qualification currently fixes one substep")
+    grid_cells = grid * grid
+    block_dim = 128
+    dx = 1.0 / grid
+    inv_dx = float(grid)
+    dt = 1.0e-4
+    p_vol = (dx * 0.5) ** 2
+    p_mass = p_vol
+    elastic_modulus = 400.0
+
+    @ti.kernel
+    def init_state(
+            x: ti.types.ndarray(ndim=1),
+            v: ti.types.ndarray(ndim=1),
+            C: ti.types.ndarray(ndim=1),
+            J: ti.types.ndarray(ndim=1)):
+        side = ti.cast(ti.sqrt(ti.cast(particles, ti.f32)), ti.i32)
+        for p in range(particles):
+            i = p % side
+            j = p // side
+            fx = (ti.cast(i, ti.f32) + 0.5) / ti.cast(side, ti.f32)
+            fy = (ti.cast(j, ti.f32) + 0.5) / ti.cast(side, ti.f32)
+            x[p] = ti.Vector([fx * 0.10 + 0.45, fy * 0.10 + 0.45])
+            v[p] = ti.Vector.zero(ti.f32, 2)
+            C[p] = ti.Matrix.zero(ti.f32, 2, 2)
+            J[p] = 1.0
+
+    @ti.kernel
+    def init_active_ids(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for index in values:
+            values[index] = index
+
+    @ti.kernel
+    def reset_grid(
+            grid_v: ti.types.ndarray(ndim=2),
+            grid_m: ti.types.ndarray(dtype=ti.f32, ndim=2),
+            active_flags: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i, j in grid_m:
+            grid_v[i, j] = ti.Vector.zero(ti.f32, 2)
+            grid_m[i, j] = 0.0
+            active_flags[i * grid + j] = 0
+
+    @ti.kernel
+    def p2g(
+            x: ti.types.ndarray(ndim=1),
+            v: ti.types.ndarray(ndim=1),
+            C: ti.types.ndarray(ndim=1),
+            J: ti.types.ndarray(ndim=1),
+            grid_v: ti.types.ndarray(ndim=2),
+            grid_m: ti.types.ndarray(dtype=ti.f32, ndim=2),
+            active_flags: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for p in x:
+            Xp = x[p] * inv_dx
+            base = ti.cast(Xp - 0.5, ti.i32)
+            fx = Xp - ti.cast(base, ti.f32)
+            w = [
+                0.5 * (1.5 - fx) ** 2,
+                0.75 - (fx - 1.0) ** 2,
+                0.5 * (fx - 0.5) ** 2,
+            ]
+            stress = (
+                -dt * 4.0 * elastic_modulus * p_vol * (J[p] - 1.0)
+                * inv_dx * inv_dx
+            )
+            affine = ti.Matrix([[stress, 0.0], [0.0, stress]]) + p_mass * C[p]
+            for i, j in ti.static(ti.ndrange(3, 3)):
+                offset = ti.Vector([i, j])
+                node = base + offset
+                dpos = (ti.cast(offset, ti.f32) - fx) * dx
+                weight = w[i].x * w[j].y
+                grid_v[node] += weight * (p_mass * v[p] + affine @ dpos)
+                grid_m[node] += weight * p_mass
+                ti.atomic_or(active_flags[node.x * grid + node.y], 1)
+
+    @ti.kernel
+    def update_grid_full(
+            grid_v: ti.types.ndarray(ndim=2),
+            grid_m: ti.types.ndarray(dtype=ti.f32, ndim=2)):
+        for i, j in grid_m:
+            if grid_m[i, j] > 0.0:
+                grid_v[i, j] /= grid_m[i, j]
+
+    if runtime_name == "forge":
+        @ti.kernel
+        def update_grid_active(
+                active_ids: ti.types.ndarray(dtype=ti.i32, ndim=1),
+                active_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+                grid_v: ti.types.ndarray(ndim=2),
+                grid_m: ti.types.ndarray(dtype=ti.f32, ndim=2)):
+            ti.loop_config(block_dim=block_dim)
+            for active_index in range(grid_cells):
+                if active_index < ti.device_extent_count(active_extent):
+                    flat = active_ids[active_index]
+                    i = flat // grid
+                    j = flat - i * grid
+                    if grid_m[i, j] > 0.0:
+                        grid_v[i, j] /= grid_m[i, j]
+    else:
+        update_grid_active = None
+
+    @ti.kernel
+    def g2p(
+            x: ti.types.ndarray(ndim=1),
+            v: ti.types.ndarray(ndim=1),
+            C: ti.types.ndarray(ndim=1),
+            J: ti.types.ndarray(ndim=1),
+            grid_v: ti.types.ndarray(ndim=2)):
+        for p in x:
+            Xp = x[p] * inv_dx
+            base = ti.cast(Xp - 0.5, ti.i32)
+            fx = Xp - ti.cast(base, ti.f32)
+            w = [
+                0.5 * (1.5 - fx) ** 2,
+                0.75 - (fx - 1.0) ** 2,
+                0.5 * (fx - 0.5) ** 2,
+            ]
+            new_v = ti.Vector.zero(ti.f32, 2)
+            new_C = ti.Matrix.zero(ti.f32, 2, 2)
+            for i, j in ti.static(ti.ndrange(3, 3)):
+                offset = ti.Vector([i, j])
+                dpos = ti.cast(offset, ti.f32) - fx
+                weight = w[i].x * w[j].y
+                node_v = grid_v[base + offset]
+                new_v += weight * node_v
+                new_C += 4.0 * weight * node_v.outer_product(dpos) * inv_dx
+            v[p] = new_v
+            x[p] += dt * new_v
+            J[p] *= 1.0 + dt * new_C.trace()
+            C[p] = new_C
+
+    def make_arrays() -> tuple[Any, ...]:
+        return (
+            ti.Vector.ndarray(2, ti.f32, shape=particles),
+            ti.Vector.ndarray(2, ti.f32, shape=particles),
+            ti.Matrix.ndarray(2, 2, ti.f32, shape=particles),
+            ti.ndarray(ti.f32, shape=particles),
+            ti.Vector.ndarray(2, ti.f32, shape=(grid, grid)),
+            ti.ndarray(ti.f32, shape=(grid, grid)),
+            ti.ndarray(ti.f32, shape=(grid, grid)),
+        )
+
+    arrays = make_arrays()
+    reference_arrays = make_arrays()
+    active_flags = ti.ndarray(ti.i32, shape=grid_cells)
+    reference_flags = ti.ndarray(ti.i32, shape=grid_cells)
+    active_ids = ti.ndarray(ti.i32, shape=grid_cells)
+    compacted_ids = ti.ndarray(ti.i32, shape=grid_cells)
+    init_active_ids(active_ids)
+    compacted_ids.fill(0)
+
+    vec2 = ti.types.vector(2, ti.f32)
+    mat2 = ti.types.matrix(2, 2, ti.f32)
+    symbols = {
+        "x": ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "x", vec2, ndim=1),
+        "v": ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "v", vec2, ndim=1),
+        "C": ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "C", mat2, ndim=1),
+        "J": ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "J", ti.f32, ndim=1),
+        "grid_v": ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY, "grid_v", vec2, ndim=2),
+        "grid_m": ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY, "grid_m", ti.f32, ndim=2),
+        "flags": ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY, "flags", ti.i32, ndim=1),
+    }
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(
+        reset_grid, symbols["grid_v"], symbols["grid_m"], symbols["flags"])
+    builder.dispatch(
+        p2g, symbols["x"], symbols["v"], symbols["C"], symbols["J"],
+        symbols["grid_v"], symbols["grid_m"], symbols["flags"])
+
+    input_extent = output_extent = sequence = bounded_handle = None
+    if runtime_name == "forge":
+        symbols.update({
+            "active_ids": ti.graph.Arg(
+                ti.graph.ArgKind.NDARRAY, "active_ids", ti.i32, ndim=1),
+            "input_extent": ti.graph.Arg(
+                ti.graph.ArgKind.NDARRAY, "input_extent", ti.i32, ndim=1),
+            "compacted_ids": ti.graph.Arg(
+                ti.graph.ArgKind.NDARRAY, "compacted_ids", ti.i32, ndim=1),
+            "output_extent": ti.graph.Arg(
+                ti.graph.ArgKind.NDARRAY, "output_extent", ti.i32, ndim=1),
+        })
+        input_extent = ti.DeviceExtent(grid_cells)
+        output_extent = ti.DeviceExtent(grid_cells)
+        input_extent.set(grid_cells)
+        launch_state = output_extent.dispatch_state(block_dim)
+        sequence = ti.algorithms.DevicePrefixSequence(grid_cells)
+        sequence.input(symbols["active_ids"], symbols["input_extent"]).compact(
+            symbols["flags"], symbols["compacted_ids"],
+            symbols["output_extent"], dispatch_state=launch_state)
+        builder.append_native(sequence)
+        bounded_handle = builder.dispatch_bounded(
+            update_grid_active,
+            symbols["compacted_ids"], symbols["output_extent"],
+            symbols["grid_v"], symbols["grid_m"],
+            extent=symbols["output_extent"], capacity=grid_cells,
+            block_dim=block_dim, launch_state=launch_state)
+    else:
+        builder.dispatch(update_grid_full, symbols["grid_v"], symbols["grid_m"])
+    builder.dispatch(
+        g2p, symbols["x"], symbols["v"], symbols["C"], symbols["J"],
+        symbols["grid_v"])
+    graph_started = time.perf_counter_ns()
+    graph = builder.compile()
+    ti.sync()
+    graph_build_ms = (time.perf_counter_ns() - graph_started) / 1.0e6
+
+    x, v, C, J, grid_v, grid_m, _ = arrays
+    graph_args = {
+        "x": x, "v": v, "C": C, "J": J,
+        "grid_v": grid_v, "grid_m": grid_m, "flags": active_flags,
+    }
+    if runtime_name == "forge":
+        graph_args.update({
+            "active_ids": active_ids,
+            "input_extent": input_extent,
+            "compacted_ids": compacted_ids,
+            "output_extent": output_extent,
+        })
+
+    def reset_state(target: Sequence[Any], flags: Any) -> None:
+        target_x, target_v, target_C, target_J, target_grid_v, target_grid_m, image = target
+        init_state(target_x, target_v, target_C, target_J)
+        reset_grid(target_grid_v, target_grid_m, flags)
+        image.fill(0)
+        if runtime_name == "forge" and target is arrays:
+            input_extent.set(grid_cells)
+            output_extent.reset()
+
+    def direct_full_frame(target: Sequence[Any], flags: Any) -> None:
+        target_x, target_v, target_C, target_J, target_grid_v, target_grid_m, _ = target
+        reset_grid(target_grid_v, target_grid_m, flags)
+        p2g(target_x, target_v, target_C, target_J,
+            target_grid_v, target_grid_m, flags)
+        update_grid_full(target_grid_v, target_grid_m)
+        g2p(target_x, target_v, target_C, target_J, target_grid_v)
+
+    def launch() -> None:
+        graph.run(graph_args)
+
+    def reset() -> None:
+        reset_state(arrays, active_flags)
+
+    def validate_fresh() -> dict[str, Any]:
+        reset_state(arrays, active_flags)
+        reset_state(reference_arrays, reference_flags)
+        ti.sync()
+        launch()
+        direct_full_frame(reference_arrays, reference_flags)
+        ti.sync()
+        comparison = _mpm_state_comparison(arrays, reference_arrays)
+        flags_host = active_flags.to_numpy()
+        mass_host = grid_m.to_numpy()
+        mass_mask = mass_host > np.float32(0.0)
+        active_count = int(flags_host.sum())
+        mass_active_count = int(mass_mask.sum())
+        published_count = (
+            int(output_extent.snapshot().count)
+            if runtime_name == "forge" else active_count
+        )
+        expected_mass = particles * p_mass
+        actual_mass = float(mass_host.astype(np.float64).sum())
+        mass_error = abs(actual_mass - expected_mass)
+        mass_tolerance = max(1.0e-8, abs(expected_mass) * 5.0e-5)
+        flags_match_mass = bool(np.array_equal(
+            flags_host.astype(bool), mass_mask.reshape(-1)))
+        fingerprint = _mpm_endpoint_fingerprint(arrays)
+        comparison.update({
+            "comparison": "same-runtime_active_grid_vs_full_grid_state",
+            "endpoint_fingerprint": fingerprint,
+            "active_count": active_count,
+            "mass_active_count": mass_active_count,
+            "published_count": published_count,
+            "active_fraction": active_count / grid_cells,
+            "flags_match_positive_mass": flags_match_mass,
+            "expected_grid_mass": expected_mass,
+            "actual_grid_mass": actual_mass,
+            "grid_mass_abs_error": mass_error,
+            "grid_mass_tolerance": mass_tolerance,
+        })
+        comparison["passed"] = bool(
+            comparison["passed"]
+            and fingerprint["finite"]
+            and flags_match_mass
+            and active_count == mass_active_count == published_count
+            and 0 < active_count < grid_cells
+            and mass_error <= mass_tolerance
+        )
+        reset_state(arrays, active_flags)
+        ti.sync()
+        return comparison
+
+    def route() -> dict[str, Any]:
+        class_module = graph.__class__.__module__
+        if runtime_name == "vanilla":
+            return {
+                "classification": "vanilla_full_grid_mls_mpm_graph",
+                "public_api": "GraphBuilder dispatch of full-grid update",
+                "class_module": class_module,
+                "update_domain": grid_cells,
+                "passed": bool(
+                    class_module == "taichi.graph._graph"
+                    and getattr(graph, "_compiled_graph", None) is not None
+                ),
+            }
+        compact_route = _native_compact_route(
+            getattr(sequence.workspace, "_compact", None),
+            runtime_name, backend)
+        capabilities = bounded_handle.capabilities
+        return {
+            "classification": "forge_device_compact_bounded_active_grid_graph",
+            "public_api": (
+                "DevicePrefixSequence.compact plus GraphBuilder.dispatch_bounded"
+            ),
+            "class_module": class_module,
+            "compact_route": compact_route,
+            "bounded_route": capabilities.route,
+            "bounded_backend": capabilities.backend,
+            "no_host_readback": capabilities.no_host_readback,
+            "device_known_count": capabilities.device_known_count,
+            "logical_iteration_exact": capabilities.logical_iteration_exact,
+            "physical_launch_kind": capabilities.physical_launch_kind,
+            "masked_capacity": capabilities.masked_capacity,
+            "exact_grid": capabilities.exact_grid,
+            "producer_owned_launch_state": (
+                capabilities.producer_owned_launch_state),
+            "preparation_dispatches": capabilities.preparation_dispatches,
+            "workspace_bytes": (
+                sequence.workspace.workspace_bytes_current
+                + bounded_handle.workspace_bytes),
+            "passed": bool(
+                class_module == "taichi_forge.graph._graph"
+                and compact_route["passed"]
+                and capabilities.backend == backend
+                and capabilities.device_known_count
+                and capabilities.no_host_readback
+                and capabilities.logical_iteration_exact
+            ),
+        }
+
+    return {
+        "launch": launch,
+        "reset": reset,
+        "validate": validate_fresh,
+        "route": route,
+        "logical_bytes": 0,
+        "traffic_model": (
+            "stationary MLS-MPM substep; no simplified logical-byte bandwidth "
+            "is claimed"
+        ),
+        "case_preparation": {
+            "graph_build_ms": graph_build_ms,
+            "particles": particles,
+            "grid": grid,
+            "grid_cells": grid_cells,
+            "substeps": substeps,
+            "block_dim": block_dim,
+        },
+        "workload_contract": {
+            "case_id": "THIN-004",
+            "comparison_class": "thin-capability",
+            "semantics": "stationary_equilibrium_2d_mls_mpm_substep",
+            "dimension": "2d",
+            "dtype": "f32",
+            "particles": particles,
+            "grid": grid,
+            "grid_cells": grid_cells,
+            "substeps": substeps,
+            "gravity": 0.0,
+            "initial_region": "centered_0.10_by_0.10",
+            "forge_adapter": (
+                "device stable compact of P2G active flags followed by "
+                "a requested producer-owned bounded grid-update dispatch; "
+                "route evidence records whether the backend actually selects it"
+            ),
+            "vanilla_adapter": "full-grid update kernel in one compiled graph",
+            "shared": (
+                "same stationary MLS-MPM state, f32 particle/grid arrays, grid "
+                "reset, P2G active marking, grid update body, G2P, graph replay, "
+                "outer synchronization, state tolerance, and mass oracle"
+            ),
+            "allowed_difference": (
+                "only the grid-update domain adapter: Forge device active set "
+                "versus vanilla full grid"
+            ),
+            "correctness": (
+                "same-runtime active/full full-state comparison, cross-runtime "
+                "endpoint equivalence, exact active-mask/count agreement, finite "
+                "state, and grid-mass conservation"
+            ),
+            "timing": (
+                "frozen repeated complete one-substep graph calls plus one outer "
+                "sync; build, initialization, correctness, and host observation "
+                "excluded"
+            ),
+        },
+    }
+
+
 def _numeric_growth(before: dict[str, Any] | None,
                     after: dict[str, Any] | None,
                     keys: Sequence[str]) -> dict[str, Any]:
@@ -2489,6 +2912,9 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         elif args.operation == "device_prefix_chain":
             case = _build_device_prefix_chain_case(
                 ti, args.runtime, args.backend, config["elements"])
+        elif args.operation == "active_grid_mpm":
+            case = _build_active_grid_mpm_case(
+                ti, args.runtime, args.backend, args.preset)
         elif args.operation == "snode_churn":
             case = _build_snode_churn_case(
                 ti, args.runtime, args.backend)
@@ -2816,7 +3242,8 @@ def _check_pyvenv(python: Path) -> dict[str, Any]:
 def _mpm_cross_runtime_endpoint_equivalent(
         results: dict[str, dict[str, Any]]) -> bool:
     forge = results["forge"]
-    if forge["operation"] not in ("mpm_graph", "mpm_direct"):
+    if forge["operation"] not in (
+            "mpm_graph", "mpm_direct", "active_grid_mpm"):
         return True
     vanilla = results["vanilla"]
     for validation_name in ("validation_before", "validation_after"):

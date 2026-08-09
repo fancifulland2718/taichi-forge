@@ -13,8 +13,8 @@ Forge/vanilla 比较均由相邻且不重叠的 fresh-process 对组成。
 
 ## 范围
 
-`single_kernel_microbench.py` 提供五个共用 ndarray 控制 kernel、三个直接对比
-案例，以及一个明确分类的薄能力案例：
+`single_kernel_microbench.py` 提供共用控制项，以及逐项分类的直接、稳定性和
+薄能力案例：
 
 | 操作 | 逻辑访存模型 |
 |---|---|
@@ -31,6 +31,7 @@ Forge/vanilla 比较均由相邻且不重叠的 fresh-process 对组成。
 | `native_scatter` | 通过同一个唯一全排列执行 indexed i32 write |
 | `native_compact` | stable flag selection，并 exact 校验 count 与有序输出 |
 | `device_prefix_chain` | device-resident active-prefix stable compact 后接 inclusive scan |
+| `active_grid_mpm` | 一个带 active-grid 更新 adapter 的静态平衡二维 MLS-MPM substep |
 | `snode_churn` | 一次 pointer+dense SNodeTree create/use/sync/destroy 生命周期事务 |
 
 这些是控制/回归 microbench，用于测量普通 kernel 路径，能够发现运行时额外成本
@@ -87,6 +88,14 @@ stable scatter kernel。两边均计时完整 adapter call；内部 stage 数和
 手工组合相同的 device-count-masked stable compact + scan。两个计时 adapter 都不在
 host 读取 count，并 exact 校验 count、compact 顺序与 scan prefix。独立入口为
 `device_prefix_chain_microbench.py`。
+
+`active_grid_mpm` 是 `THIN-004`。两边共享同一个静态平衡 f32 二维 MLS-MPM
+状态、256² 网格、4,096 粒子、grid reset、P2G 活跃标记、更新 body、G2P、compiled
+Graph replay、全状态容差和质量/活跃 mask oracle。零重力让长 batch 中的状态与
+841-node 活跃域保持固定。vanilla 访问全部 65,536 个网格节点；Forge 对同一 flags
+请求 device stable compact + bounded dispatch。route 证据必须披露物理 launch 类型、
+exact-grid 支持、producer-owned state 与 host readback 状态。它属于 thin-capability，
+不是相同公开 API 对比；独立入口为 `active_grid_mpm_microbench.py`。
 
 `snode_churn` 是 `DIRECT-004` 的历史 churn 半项。两边使用相同公开 FieldsBuilder
 DSL 与 kernel；每个计时 launch 创建一个 pointer+dense tree、激活 64 个 cell、exact

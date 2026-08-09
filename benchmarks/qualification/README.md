@@ -15,8 +15,8 @@ qualification constants in `single_kernel_microbench.py`.
 
 ## Scope
 
-`single_kernel_microbench.py` provides five shared ndarray control kernels,
-three direct comparisons, and one explicitly classified thin-capability case:
+`single_kernel_microbench.py` provides shared controls plus individually
+classified direct, stability, and thin-capability cases:
 
 | Operation | Logical traffic model |
 |---|---|
@@ -33,6 +33,7 @@ three direct comparisons, and one explicitly classified thin-capability case:
 | `native_scatter` | indexed i32 write through the same unique full permutation |
 | `native_compact` | stable flag selection with exact count and ordered-output oracle |
 | `device_prefix_chain` | device-resident active-prefix stable compact followed by inclusive scan |
+| `active_grid_mpm` | one stationary 2-D MLS-MPM substep with an active-grid update adapter |
 | `snode_churn` | one pointer+dense SNodeTree create/use/sync/destroy lifecycle transaction |
 
 These are control/regression microbenchmarks. They measure the ordinary kernel
@@ -102,6 +103,16 @@ device-count-masked stable compact plus scan using reusable public prefix-sum
 executors. Neither timed adapter observes the count on the host. The exact
 count, compacted order, and scanned prefix are checked. Its entry point is
 `device_prefix_chain_microbench.py`.
+
+`active_grid_mpm` is `THIN-004`. Both runtimes run the same stationary f32
+2-D MLS-MPM state, 256-square grid, 4,096 particles, grid reset, P2G active
+marking, update body, G2P, compiled-graph replay, full-state tolerance, and
+mass/active-mask oracles. Zero gravity keeps the state and 841-node active
+domain fixed through long batches. Vanilla visits all 65,536 grid nodes;
+Forge requests device stable compact plus bounded dispatch over the same flags.
+Route evidence must disclose the physical launch kind, exact-grid support,
+producer-owned state, and host-readback status. This is a thin-capability case,
+not a same-public-API comparison. Use `active_grid_mpm_microbench.py`.
 
 `snode_churn` is the historical-churn half of `DIRECT-004`. Both runtimes use
 the same public FieldsBuilder DSL and kernels. Every measured launch creates
