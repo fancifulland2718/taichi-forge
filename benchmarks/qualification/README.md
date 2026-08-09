@@ -111,6 +111,12 @@ The Warp kernel cache is redirected to the Git-ignored qualification output
 tree so compilation does not mutate a user-global cache and remains writable
 inside the isolated workspace.
 
+Run `audit_warp_baseline.py <run-dir>` after a qualification-intent external
+run. The offline auditor recomputes timing statistics from raw samples and
+checks the frozen contract, exact oracle, clean Git provenance, strict policy,
+noise/device/isolation evidence, replay plateau, bilingual artifacts, and the
+absence of a cross-framework speedup field.
+
 `native_compact` compares Forge's stable native compact with a non-trivial
 vanilla stable pipeline: flags-to-prefix kernel, reusable public
 `PrefixSumExecutor`, and stable scatter kernel. The complete adapter call is

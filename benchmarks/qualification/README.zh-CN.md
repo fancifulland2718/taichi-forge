@@ -94,6 +94,11 @@ Toolhelp 进程快照证明属于自身祖先链的 PID；相同 executable path
 Warp kernel cache 被重定向到 Git 忽略的 qualification 输出目录，因此编译不会
 修改用户全局 cache，并能在隔离 workspace 内正常写入。
 
+qualification intent 的外部运行完成后，执行
+`audit_warp_baseline.py <run-dir>`。离线审计器会从原始样本重新计算统计量，并检查
+冻结合同、exact oracle、干净 Git 来源、严格门槛、噪声/设备/隔离证据、回放平台、
+双语产物，以及没有跨框架 speedup 字段。
+
 `native_compact` 把 Forge stable native compact 与一个非简单串行循环的 vanilla
 稳定 pipeline 对比：flags-to-prefix kernel、可复用的公开 `PrefixSumExecutor` 和
 stable scatter kernel。两边均计时完整 adapter call；内部 stage 数和 workspace 是
