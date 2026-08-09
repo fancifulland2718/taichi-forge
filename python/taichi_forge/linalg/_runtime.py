@@ -1288,8 +1288,10 @@ class LinearOperator:
         vector/view as ``out`` so callers can express in-place accumulation;
         nonexact field-view overlap is rejected. When ``beta`` is zero,
         ``addend`` is neither validated nor read. Generalized coefficients are
-        currently lowered on CPU; GPU providers fail closed unless
-        ``alpha == 1`` and ``beta == 0``.
+        lowered without host readback on CPU, CUDA, and Vulkan. GPU lowering
+        currently requires f32 ndarray operands; an exact ``addend is out``
+        alias uses one persistent operator scratch so the old addend remains
+        available until the provider result has been produced.
         """
         self._ensure_valid()
         try:

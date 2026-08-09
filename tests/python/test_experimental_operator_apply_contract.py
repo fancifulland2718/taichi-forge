@@ -72,7 +72,7 @@ def test_generalized_apply_cpu_contract_and_aliasing():
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
-def test_generalized_apply_gpu_fails_closed_without_host_fallback():
+def test_generalized_apply_gpu_uses_device_lowering_without_host_fallback():
     size = 4
     topology = ti.ndarray(ti.i32, shape=size)
     topology.from_numpy(np.arange(size, dtype=np.int32))
@@ -96,8 +96,33 @@ def test_generalized_apply_gpu_fails_closed_without_host_fallback():
         operator.apply(values, beta=0.0, addend=poison).to_numpy(),
         values.to_numpy(),
     )
-    with pytest.raises(RuntimeError, match="unavailable on this GPU"):
-        operator.apply(values, alpha=0.5)
-    with pytest.raises(RuntimeError, match="unavailable on this GPU"):
-        operator.apply(values, beta=1.0, addend=values)
-    assert operator.statistics()["generalized_lowerings"] == 0
+    np.testing.assert_allclose(
+        operator.apply(values, alpha=0.5).to_numpy(),
+        0.5 * values.to_numpy(),
+    )
+    addend = _array(ti.f32, [-0.5, 1.0, 4.0, -2.0])
+    np.testing.assert_allclose(
+        operator.apply(values, alpha=1.75, beta=-0.25, addend=addend).to_numpy(),
+        1.75 * values.to_numpy() - 0.25 * addend.to_numpy(),
+        rtol=2e-6,
+        atol=2e-6,
+    )
+    accumulator_values = addend.to_numpy()
+    operator.apply(
+        values,
+        out=addend,
+        alpha=2.0,
+        beta=0.5,
+        addend=addend,
+    )
+    np.testing.assert_allclose(
+        addend.to_numpy(),
+        2.0 * values.to_numpy() + 0.5 * accumulator_values,
+        rtol=2e-6,
+        atol=2e-6,
+    )
+    zero = operator.apply(values, alpha=0.0, beta=0.0)
+    np.testing.assert_array_equal(zero.to_numpy(), np.zeros(size, np.float32))
+    stats = operator.statistics()
+    assert stats["generalized_lowerings"] == 4
+    assert stats["scratch_builds"] == 1

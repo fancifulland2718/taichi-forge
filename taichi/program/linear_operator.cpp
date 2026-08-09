@@ -24,6 +24,16 @@ namespace {
 
 std::atomic<std::uint64_t> next_operator_generation_domain{1};
 
+void add_scaled_composite_ndarray(Program *program,
+                                  Ndarray *addend,
+                                  Ndarray *output,
+                                  std::size_t extent,
+                                  double scale);
+void transform_composite_ndarray(Program *program,
+                                 Ndarray *source,
+                                 Ndarray *output,
+                                 double scale);
+
 std::uint64_t allocate_operator_generation_domain() {
   const auto domain =
       next_operator_generation_domain.fetch_add(1, std::memory_order_relaxed);
@@ -1169,11 +1179,57 @@ OperatorSubmission OperatorPlan::submit(const OperatorPinnedAction &pinned,
                               !capabilities().asynchronous_submit);
   }
 
-  TI_ERROR_IF(program_ && !arch_is_cpu(program_->compile_config().arch),
-              "Generalized operator lowering is unavailable on this GPU "
-              "backend; only overwrite apply is supported and no host "
-              "fallback was performed.");
   statistics_.generalized_lowerings++;
+  if (program_ && !arch_is_cpu(program_->compile_config().arch)) {
+    TI_ERROR_IF(expected_output.scalar_type != PrimitiveType::f32 ||
+                    !request.input.ndarray || !request.output.ndarray ||
+                    (request.addend && !request.addend->ndarray),
+                "GPU generalized operator lowering requires scalar f32 "
+                "ndarray operands; no host fallback was performed.");
+    auto *output = const_cast<Ndarray *>(request.output.ndarray);
+    auto *addend = request.addend
+                       ? const_cast<Ndarray *>(request.addend->ndarray)
+                       : nullptr;
+    const bool addend_aliases_output =
+        request.beta != 0.0 && request.addend &&
+        operator_views_overlap(*request.addend, request.output);
+    TI_ERROR_IF(addend_aliases_output && addend != output,
+                "GPU generalized operator addend/output overlap must be an "
+                "exact ndarray alias.");
+
+    if (request.alpha == 0.0) {
+      if (request.beta == 0.0) {
+        transform_composite_ndarray(program_, output, output, 0.0);
+      } else {
+        transform_composite_ndarray(program_, addend, output, request.beta);
+      }
+      return OperatorSubmission(pinned, RuntimeCompletion{}, false);
+    }
+
+    if (addend_aliases_output) {
+      auto applied = scratch_for(expected_output, request.mode);
+      TI_ASSERT(applied.ndarray);
+      action.apply_overwrite(request.mode, request.input, applied);
+      statistics_.primitive_apply_calls++;
+      transform_composite_ndarray(program_, output, output, request.beta);
+      add_scaled_composite_ndarray(
+          program_, const_cast<Ndarray *>(applied.ndarray), output,
+          expected_output.scalar_extent, request.alpha);
+    } else {
+      action.apply_overwrite(request.mode, request.input, request.output);
+      statistics_.primitive_apply_calls++;
+      if (request.alpha != 1.0) {
+        transform_composite_ndarray(program_, output, output, request.alpha);
+      }
+      if (request.beta != 0.0) {
+        add_scaled_composite_ndarray(program_, addend, output,
+                                     expected_output.scalar_extent,
+                                     request.beta);
+      }
+    }
+    return OperatorSubmission(pinned, RuntimeCompletion{}, false);
+  }
+
   OperatorVectorView applied;
   OperatorVectorView *applied_ptr = nullptr;
   if (request.alpha != 0.0) {
@@ -1410,6 +1466,53 @@ void add_composite_ndarray(Program *program,
                   !program->vulkan_add_merge_value_type_available(1),
               "Vulkan operator sum requires native f32 add-merge.");
   program->vulkan_add_merge_ndarray(addend, output, 1);
+}
+
+void add_scaled_composite_ndarray(Program *program,
+                                  Ndarray *addend,
+                                  Ndarray *output,
+                                  std::size_t extent,
+                                  double scale) {
+  TI_ASSERT(program && addend && output);
+  if (scale == 0.0) {
+    return;
+  }
+  const Arch arch = program->compile_config().arch;
+  if (arch == Arch::cuda) {
+    TI_ERROR_IF(!program->cuda_device_add_merge_available(),
+                "CUDA generalized operator apply requires native device "
+                "scaled-add.");
+    program->cuda_device_add_scaled_ndarray(addend, output, 1, scale);
+    return;
+  }
+  TI_ERROR_IF(arch != Arch::vulkan ||
+                  !program->vulkan_sparse_algebra_available(),
+              "Vulkan generalized operator apply requires native f32 "
+              "AXPY.");
+  program->vulkan_sparse_axpy(addend, output, extent,
+                              static_cast<float>(scale));
+}
+
+void transform_composite_ndarray(Program *program,
+                                 Ndarray *source,
+                                 Ndarray *output,
+                                 double scale) {
+  TI_ASSERT(program && source && output);
+  const Arch arch = program->compile_config().arch;
+  if (arch == Arch::cuda) {
+    TI_ERROR_IF(!program->cuda_device_transform_available(),
+                "CUDA generalized operator apply requires native device "
+                "transform.");
+    program->cuda_device_transform_affine_ndarray(source, output, 1, scale,
+                                                   0.0);
+    return;
+  }
+  TI_ERROR_IF(arch != Arch::vulkan || !program->vulkan_transform_available() ||
+                  !program->vulkan_transform_value_type_available(1),
+              "Vulkan generalized operator apply requires native f32 "
+              "transform.");
+  program->vulkan_transform_affine_ndarray_trusted(source, output, 1, scale,
+                                                    0.0);
 }
 
 OperatorVectorView as_raw_composite_view(const OperatorVectorView &view,
