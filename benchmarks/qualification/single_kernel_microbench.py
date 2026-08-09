@@ -79,6 +79,7 @@ OPERATIONS = (
     "active_grid_mpm",
     "particle_spatial_hash",
     "adaptive_pbd",
+    "marching_squares",
     "snode_churn",
     "snode_concurrent",
     "mpm_graph",
@@ -3275,6 +3276,199 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
     }
 
 
+def _build_marching_squares_case(ti: Any, runtime_name: str, backend: str,
+                                 elements: int) -> dict[str, Any]:
+    """Extract stable contour cells and case codes from an analytic circle."""
+    import numpy as np
+
+    cell_side = math.isqrt(elements)
+    if cell_side * cell_side != elements:
+        raise ValueError("marching squares requires a square cell count")
+    node_side = cell_side + 1
+    coordinates = np.linspace(
+        np.float32(-1.0), np.float32(1.0), node_side, dtype=np.float32)
+    xx, yy = np.meshgrid(coordinates, coordinates, indexing="ij")
+    host_scalar = (xx * xx + yy * yy - np.float32(0.55**2)).astype(np.float32)
+    corners = (
+        (host_scalar[:-1, :-1] >= 0).astype(np.int32)
+        | ((host_scalar[1:, :-1] >= 0).astype(np.int32) << 1)
+        | ((host_scalar[1:, 1:] >= 0).astype(np.int32) << 2)
+        | ((host_scalar[:-1, 1:] >= 0).astype(np.int32) << 3)
+    )
+    flat_cases = corners.reshape(-1)
+    active_mask = (flat_cases != 0) & (flat_cases != 15)
+    expected_cells = np.flatnonzero(active_mask).astype(np.int32)
+    expected_cases = flat_cases[active_mask].astype(np.int32)
+    selected_count = int(expected_cells.size)
+
+    scalar = ti.ndarray(ti.f32, shape=(node_side, node_side))
+    cell_ids = ti.ndarray(ti.i32, shape=elements)
+    flags = ti.ndarray(ti.i32, shape=elements)
+    compacted = ti.ndarray(ti.i32, shape=elements)
+    count = ti.ndarray(ti.i32, shape=1)
+    case_codes = ti.ndarray(ti.i32, shape=elements)
+    scalar.from_numpy(host_scalar)
+    compacted.fill(-1)
+    case_codes.fill(-1)
+    count.fill(0)
+    prefix = None
+    scanner = None
+    workspace = None
+    if runtime_name == "forge":
+        workspace = ti.algorithms.CompactWorkspace(max_items=elements)
+    else:
+        prefix = ti.field(dtype=ti.i32, shape=elements)
+        scanner = ti.algorithms.PrefixSumExecutor(elements)
+
+    @ti.func
+    def cell_case(source: ti.template(), i: ti.i32, j: ti.i32):
+        return (
+            ti.cast(source[i, j] >= 0.0, ti.i32)
+            | (ti.cast(source[i + 1, j] >= 0.0, ti.i32) << 1)
+            | (ti.cast(source[i + 1, j + 1] >= 0.0, ti.i32) << 2)
+            | (ti.cast(source[i, j + 1] >= 0.0, ti.i32) << 3)
+        )
+
+    @ti.kernel
+    def classify(
+            source: ti.types.ndarray(dtype=ti.f32, ndim=2),
+            target_ids: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_flags: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for cell in range(elements):
+            i = cell // cell_side
+            j = cell - i * cell_side
+            code = cell_case(source, i, j)
+            target_ids[cell] = cell
+            target_flags[cell] = 1 if code != 0 and code != 15 else 0
+
+    @ti.kernel
+    def stage_flags(
+            source_flags: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for cell in range(elements):
+            prefix[cell] = source_flags[cell]
+
+    @ti.kernel
+    def stable_scatter(
+            source_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            source_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            destination: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            destination_count: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        destination_count[0] = prefix[elements - 1]
+        for cell in range(elements):
+            if source_flags[cell] != 0:
+                destination[prefix[cell] - 1] = source_values[cell]
+
+    @ti.kernel
+    def emit_cases(
+            source: ti.types.ndarray(dtype=ti.f32, ndim=2),
+            selected_cells: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            selected_count_state: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            output_codes: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for selected in range(elements):
+            if selected < selected_count_state[0]:
+                cell = selected_cells[selected]
+                i = cell // cell_side
+                j = cell - i * cell_side
+                output_codes[selected] = cell_case(source, i, j)
+
+    def launch() -> None:
+        classify(scalar, cell_ids, flags)
+        if runtime_name == "forge":
+            ti.algorithms.experimental_compact(
+                cell_ids, flags, compacted, count,
+                method="auto", workspace=workspace)
+        else:
+            stage_flags(flags)
+            scanner.run(prefix)
+            stable_scatter(cell_ids, flags, compacted, count)
+        emit_cases(scalar, compacted, count, case_codes)
+
+    def reset() -> None:
+        flags.fill(0)
+        compacted.fill(-1)
+        count.fill(0)
+        case_codes.fill(-1)
+        if prefix is not None:
+            prefix.fill(0)
+
+    def validate_fresh() -> dict[str, Any]:
+        reset()
+        ti.sync()
+        launch()
+        ti.sync()
+        actual_count = int(count.to_numpy()[0])
+        actual_cells = compacted.to_numpy()[:selected_count]
+        actual_cases = case_codes.to_numpy()[:selected_count]
+        cell_mismatch = int(np.count_nonzero(actual_cells != expected_cells))
+        case_mismatch = int(np.count_nonzero(actual_cases != expected_cases))
+        return {
+            "passed": bool(
+                actual_count == selected_count
+                and cell_mismatch == 0
+                and case_mismatch == 0
+            ),
+            "comparison": "exact_stable_marching_squares_cell_and_case_output",
+            "actual_count": actual_count,
+            "expected_count": selected_count,
+            "cell_mismatch_count": cell_mismatch,
+            "case_mismatch_count": case_mismatch,
+            "ambiguous_case_5_count": int(np.count_nonzero(
+                actual_cases == 5)),
+            "ambiguous_case_10_count": int(np.count_nonzero(
+                actual_cases == 10)),
+        }
+
+    return {
+        "launch": launch,
+        "reset": reset,
+        "validate": validate_fresh,
+        "route": lambda: _native_compact_route(
+            workspace, runtime_name, backend),
+        "logical_bytes": 0,
+        "traffic_model": (
+            "Marching Squares classification, stable contour-cell compact, and "
+            "case emission; no simplified bandwidth is claimed"
+        ),
+        "case_preparation": {
+            "cell_side": cell_side,
+            "node_side": node_side,
+            "cells": elements,
+            "selected_count": selected_count,
+            "selected_fraction": selected_count / elements,
+            "circle_radius": 0.55,
+        },
+        "workload_contract": {
+            "case_id": "THIN-007-MARCHING-SQUARES",
+            "comparison_class": "thin-capability",
+            "semantics": "stable_marching_squares_contour_cell_extraction",
+            "dimension": "2d",
+            "dtype": "f32_scalar_i32_cell_and_case",
+            "cell_side": cell_side,
+            "node_side": node_side,
+            "cells": elements,
+            "selected_count": selected_count,
+            "circle_radius": 0.55,
+            "forge_adapter": (
+                "experimental_compact with reusable native CompactWorkspace"
+            ),
+            "vanilla_adapter": (
+                "flags-to-prefix, reusable PrefixSumExecutor, and stable scatter"
+            ),
+            "shared": (
+                "same analytic scalar grid, corner convention, classification "
+                "and emission kernels, stable output order, synchronization, "
+                "and exact cell/case oracle"
+            ),
+            "allowed_difference": "only the stable compact adapter",
+            "correctness": "exact selected count, row-major cell ids, and case codes",
+            "timing": (
+                "frozen repeated complete classify-compact-emit calls plus one "
+                "outer sync; scalar setup and correctness excluded"
+            ),
+        },
+    }
+
+
 def _numeric_growth(before: dict[str, Any] | None,
                     after: dict[str, Any] | None,
                     keys: Sequence[str]) -> dict[str, Any]:
@@ -3525,6 +3719,9 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
                 ti, args.runtime, args.backend, config["elements"])
         elif args.operation == "adaptive_pbd":
             case = _build_adaptive_pbd_case(
+                ti, args.runtime, args.backend, config["elements"])
+        elif args.operation == "marching_squares":
+            case = _build_marching_squares_case(
                 ti, args.runtime, args.backend, config["elements"])
         elif args.operation == "snode_churn":
             case = _build_snode_churn_case(

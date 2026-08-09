@@ -36,6 +36,7 @@ classified direct, stability, and thin-capability cases:
 | `active_grid_mpm` | one stationary 2-D MLS-MPM substep with an active-grid update adapter |
 | `particle_spatial_hash` | 2-D cell hashing, bucket construction, and fixed-radius neighbor query |
 | `adaptive_pbd` | ten-iteration 2-D adaptive distance-constraint solve |
+| `marching_squares` | stable 2-D contour-cell extraction and case emission |
 | `snode_churn` | one pointer+dense SNodeTree create/use/sync/destroy lifecycle transaction |
 
 These are control/regression microbenchmarks. They measure the ordinary kernel
@@ -133,6 +134,13 @@ fixed-capacity `DeviceWorklist`; vanilla uses a device-count mask, reusable
 prefix sum, and stable scatter between two fixed buffers. Analytic positions,
 residuals, exact per-iteration active counts, and cross-runtime fingerprints
 must pass. Use `adaptive_pbd_microbench.py`.
+
+`marching_squares` is the first `THIN-007` subcase. On a 256-square analytic
+circle grid it shares the scalar input, corner convention, classification and
+case-emission kernels, stable row-major output, and exact cell/case oracle.
+Forge uses native stable compact; vanilla uses flags-to-prefix, a reusable
+public prefix sum, and stable scatter. The selected set is 564 of 65,536 cells.
+Use `marching_squares_microbench.py`.
 
 `snode_churn` is the historical-churn half of `DIRECT-004`. Both runtimes use
 the same public FieldsBuilder DSL and kernels. Every measured launch creates
