@@ -33,6 +33,7 @@ three direct comparisons, and one explicitly classified thin-capability case:
 | `native_scatter` | indexed i32 write through the same unique full permutation |
 | `native_compact` | stable flag selection with exact count and ordered-output oracle |
 | `device_prefix_chain` | device-resident active-prefix stable compact followed by inclusive scan |
+| `snode_churn` | one pointer+dense SNodeTree create/use/sync/destroy lifecycle transaction |
 
 These are control/regression microbenchmarks. They measure the ordinary kernel
 path and may detect runtime tax or a real base-path improvement, but they do not
@@ -101,6 +102,14 @@ device-count-masked stable compact plus scan using reusable public prefix-sum
 executors. Neither timed adapter observes the count on the host. The exact
 count, compacted order, and scanned prefix are checked. Its entry point is
 `device_prefix_chain_microbench.py`.
+
+`snode_churn` is the historical-churn half of `DIRECT-004`. Both runtimes use
+the same public FieldsBuilder DSL and kernels. Every measured launch creates
+one pointer+dense tree, activates 64 cells, checks the exact struct-for sum,
+synchronizes, and destroys the tree. Forge additionally proves generation and
+runtime-directory recovery; unavailable vanilla counters are not invented.
+Simultaneously-live capacity remains a separate case. Use
+`snode_churn_microbench.py`.
 
 ## Fairness contract implemented by the runner
 
@@ -231,6 +240,16 @@ C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
   --backend cuda --preset small --intent diagnostic `
   --pairs 1 --samples 5 --warmups 2 `
   --target-sample-ms 20 --stability-replays 0
+```
+
+Pointer-SNode historical churn is launched separately:
+
+```powershell
+C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
+  benchmarks\qualification\snode_churn_microbench.py `
+  --backend cuda --preset small --intent diagnostic `
+  --pairs 1 --samples 5 --warmups 2 `
+  --target-sample-ms 20 --stability-replays 100
 ```
 
 For an already validated case, qualification mode enforces the fixed minimums:

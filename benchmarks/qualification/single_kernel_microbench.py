@@ -76,6 +76,7 @@ OPERATIONS = (
     "native_scatter",
     "native_compact",
     "device_prefix_chain",
+    "snode_churn",
     "mpm_graph",
     "mpm_direct",
 )
@@ -1622,6 +1623,201 @@ def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
     }
 
 
+def _snode_churn_route(ti: Any, state: dict[str, Any],
+                       runtime_name: str) -> dict[str, Any]:
+    directory = None
+    directory_error = None
+    if runtime_name == "forge":
+        try:
+            program = ti.lang.impl.get_runtime().prog
+            method = getattr(program, "_debug_snode_runtime_directory_stats", None)
+            directory = None if method is None else dict(method())
+        except Exception as error:  # pragma: no cover - evidence path
+            directory_error = repr(error)
+    baseline_active = state.get("baseline_active_tree_count")
+    observed_active = (
+        None if directory is None else directory.get("active_tree_count")
+    )
+    generations = state["generations"]
+    generation_available = bool(generations and generations[-1] is not None)
+    active_recovered = (
+        True if runtime_name == "vanilla" else bool(
+            directory is not None
+            and directory.get("available") is True
+            and observed_active == baseline_active
+        )
+    )
+    return {
+        "classification": (
+            "forge_generation_aware_snode_tree_churn"
+            if runtime_name == "forge"
+            else "vanilla_public_snode_tree_churn"
+        ),
+        "public_api": "ti.FieldsBuilder().pointer().dense().place(); tree.destroy()",
+        "cycles_completed": state["cycles_completed"],
+        "unique_tree_ids": len(state["tree_ids"]),
+        "last_tree_id": state.get("last_tree_id"),
+        "generation_available": generation_available,
+        "last_generation": generations[-1] if generations else None,
+        "runtime_directory": directory,
+        "runtime_directory_error": directory_error,
+        "baseline_active_tree_count": baseline_active,
+        "active_tree_count_after_destroy": observed_active,
+        "passed": bool(
+            state["cycles_completed"] >= 1
+            and state["last_error"] is None
+            and active_recovered
+            and (runtime_name == "vanilla" or generation_available)
+        ),
+    }
+
+
+def _build_snode_churn_case(ti: Any, runtime_name: str,
+                            backend: str) -> dict[str, Any]:
+    root_blocks = 64
+    block_size = 8
+    active_blocks = 8
+    active_cells = active_blocks * block_size
+    expected = active_cells * (active_cells + 1) // 2
+    accumulator = ti.field(dtype=ti.i32, shape=())
+
+    @ti.kernel
+    def activate(field: ti.template()):
+        for block in range(active_blocks):
+            for offset in ti.static(range(block_size)):
+                index = block * block_size + offset
+                field[index] = index + 1
+
+    @ti.kernel
+    def reduce_active(field: ti.template()):
+        accumulator[None] = 0
+        for index in field:
+            ti.atomic_add(accumulator[None], field[index])
+
+    ti.lang.impl.get_runtime().materialize()
+    accumulator[None] = 0
+    ti.sync()
+    baseline_active = None
+    if runtime_name == "forge":
+        directory = dict(
+            ti.lang.impl.get_runtime().prog._debug_snode_runtime_directory_stats())
+        baseline_active = directory.get("active_tree_count")
+    state: dict[str, Any] = {
+        "cycles_completed": 0,
+        "tree_ids": set(),
+        "generations": [],
+        "last_tree_id": None,
+        "last_error": None,
+        "baseline_active_tree_count": baseline_active,
+    }
+
+    def launch() -> None:
+        field = builder = pointer = tree = None
+        try:
+            field = ti.field(dtype=ti.i32)
+            builder = ti.FieldsBuilder()
+            pointer = builder.pointer(ti.i, root_blocks)
+            pointer.dense(ti.i, block_size).place(field)
+            tree = builder.finalize()
+            tree_id = int(tree.id)
+            generation_value = getattr(tree, "generation", None)
+            generation = (
+                None if generation_value is None else int(generation_value)
+            )
+            activate(field)
+            reduce_active(field)
+            ti.sync()
+            tree.destroy()
+            state["cycles_completed"] += 1
+            state["tree_ids"].add(tree_id)
+            state["last_tree_id"] = tree_id
+            state["generations"].append(generation)
+            if len(state["generations"]) > 4096:
+                del state["generations"][:-4096]
+        except Exception as error:
+            state["last_error"] = repr(error)
+            if tree is not None:
+                try:
+                    tree.destroy()
+                except Exception:
+                    pass
+            raise
+        finally:
+            del tree, pointer, builder, field
+
+    def reset() -> None:
+        accumulator[None] = 0
+
+    def validate_fresh() -> dict[str, Any]:
+        launch()
+        actual = int(accumulator[None])
+        generations = [
+            value for value in state["generations"] if value is not None
+        ]
+        generation_increasing = (
+            None if not generations else all(
+                left < right
+                for left, right in zip(generations, generations[1:])
+            )
+        )
+        route = _snode_churn_route(ti, state, runtime_name)
+        return {
+            "passed": bool(actual == expected and route["passed"]),
+            "comparison": "exact_pointer_dense_activation_and_struct_for_sum",
+            "actual": actual,
+            "expected": expected,
+            "cycles_completed": state["cycles_completed"],
+            "unique_tree_ids": len(state["tree_ids"]),
+            "generation_strictly_increasing": generation_increasing,
+            "active_tree_count_recovered": (
+                route["active_tree_count_after_destroy"]
+                == route["baseline_active_tree_count"]
+                if runtime_name == "forge" else None
+            ),
+        }
+
+    return {
+        "launch": launch,
+        "reset": reset,
+        "validate": validate_fresh,
+        "route": lambda: _snode_churn_route(ti, state, runtime_name),
+        "logical_bytes": 0,
+        "traffic_model": (
+            "lifecycle transaction; no simplified logical bandwidth is claimed"
+        ),
+        "workload_contract": {
+            "case_id": "DIRECT-004-CHURN",
+            "comparison_class": "direct-stability",
+            "public_api": (
+                "ti.FieldsBuilder pointer+dense tree finalize/use/destroy"
+            ),
+            "layout": "pointer_1d_64_blocks_then_dense_8",
+            "active_blocks": active_blocks,
+            "active_cells": active_cells,
+            "semantics": (
+                "create one tree, activate deterministic prefix, exact struct-for "
+                "sum, synchronize, destroy, and return to baseline live count"
+            ),
+            "shared": (
+                "same FieldsBuilder DSL, kernels, active pattern, result oracle, "
+                "synchronization-before-destroy, cycle count, and process boundary"
+            ),
+            "allowed_difference": (
+                "Forge exposes tree generation/runtime-directory telemetry; "
+                "vanilla records those fields as unavailable"
+            ),
+            "correctness": "exact_i32_sum_and_no_live_tree_after_each_cycle",
+            "timing": (
+                "one full cold create-use-sync-destroy transaction per launch; "
+                "this is lifecycle throughput, not warm kernel latency"
+            ),
+            "scope_boundary": (
+                "historical churn only; simultaneous-live capacity is a separate case"
+            ),
+        },
+    }
+
+
 def _load_graph_mpm_workload() -> tuple[Any, Path]:
     source = Path(__file__).resolve().parents[1] / "graph_mpm_replay_bench.py"
     spec = importlib.util.spec_from_file_location(
@@ -2113,6 +2309,9 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         elif args.operation == "device_prefix_chain":
             case = _build_device_prefix_chain_case(
                 ti, args.runtime, args.backend, config["elements"])
+        elif args.operation == "snode_churn":
+            case = _build_snode_churn_case(
+                ti, args.runtime, args.backend)
         elif args.operation in ("mpm_graph", "mpm_direct"):
             case = _build_mpm_case(
                 ti, args.runtime, args.operation, args.preset)

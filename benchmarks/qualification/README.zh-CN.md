@@ -31,6 +31,7 @@ Forge/vanilla 比较均由相邻且不重叠的 fresh-process 对组成。
 | `native_scatter` | 通过同一个唯一全排列执行 indexed i32 write |
 | `native_compact` | stable flag selection，并 exact 校验 count 与有序输出 |
 | `device_prefix_chain` | device-resident active-prefix stable compact 后接 inclusive scan |
+| `snode_churn` | 一次 pointer+dense SNodeTree create/use/sync/destroy 生命周期事务 |
 
 这些是控制/回归 microbench，用于测量普通 kernel 路径，能够发现运行时额外成本
 或真实的基础路径提升；但它们不覆盖 Graph、native primitive、bounded dispatch、
@@ -86,6 +87,12 @@ stable scatter kernel。两边均计时完整 adapter call；内部 stage 数和
 手工组合相同的 device-count-masked stable compact + scan。两个计时 adapter 都不在
 host 读取 count，并 exact 校验 count、compact 顺序与 scan prefix。独立入口为
 `device_prefix_chain_microbench.py`。
+
+`snode_churn` 是 `DIRECT-004` 的历史 churn 半项。两边使用相同公开 FieldsBuilder
+DSL 与 kernel；每个计时 launch 创建一个 pointer+dense tree、激活 64 个 cell、exact
+校验 struct-for sum、同步并销毁。Forge 另外证明 generation 与 runtime-directory
+恢复；vanilla 不可用的计数器不会伪造。simultaneously-live capacity 保持为另一独立
+案例。入口为 `snode_churn_microbench.py`。
 
 ## runner 已实现的公平性合同
 
@@ -207,6 +214,16 @@ C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
   --backend cuda --preset small --intent diagnostic `
   --pairs 1 --samples 5 --warmups 2 `
   --target-sample-ms 20 --stability-replays 0
+```
+
+pointer-SNode 历史 churn 单独启动：
+
+```powershell
+C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
+  benchmarks\qualification\snode_churn_microbench.py `
+  --backend cuda --preset small --intent diagnostic `
+  --pairs 1 --samples 5 --warmups 2 `
+  --target-sample-ms 20 --stability-replays 100
 ```
 
 某个单项验证稳定后，资格模式会强制执行固定最低门槛：
