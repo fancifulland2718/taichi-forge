@@ -1,6 +1,6 @@
 # LinearOperator and Experimental SolvePlan
 
-> This page describes the current Taichi Forge `0.6.1` contract; see
+> This page describes the current Taichi Forge `0.6.2` development contract; see
 > [release notes](release_notes.en.md) for version attribution.
 
 `ti.linalg.LinearOperator` provides a runtime-bound linear-map abstraction for
@@ -787,7 +787,7 @@ fails during plan construction.
 
 ### Current unsupported boundary
 
-The `0.6.1` numerical-tooling contract intentionally does not provide:
+The `0.6.2` numerical-tooling contract intentionally does not provide:
 
 - nonlinear, residual-dependent, adaptive, or Python-callback preconditioners;
 - automatic restart selection, block or multi-RHS Krylov methods, recycling,
@@ -934,6 +934,13 @@ plan = ti.linalg.experimental.SolvePlan(
   `qualification_scope="explicit_only"`; its automatic default remains the
   K=4 `"host_check_every_k"` path because Graph construction/capture and first
   execution must be amortized by repeated warm solves.
+- A recordable compiled-Graph f32 PCG plan automatically selects
+  `"device_convergent"` when both A and its fixed-linear M action qualify.
+  The same provider keeps symbolic Krylov input/output bindings through every
+  ordered dispatch, so a canonical compact Field or contiguous Field range
+  does not add SolvePlan pack/unpack submissions. Recordable compiled-Graph CG
+  also accepts an explicit device-convergent request, but retains its existing
+  host-check default until that policy has a general latency advantage.
 - A recordable f32 scale/sum/compose operator used by CUDA or Vulkan CG/PCG
   automatically selects `"device_convergent"`. This is the only qualified GPU
   solve policy for composed providers: no host-check path substitutes
@@ -946,9 +953,9 @@ plan = ti.linalg.experimental.SolvePlan(
   `check_interval == restart`. Stored identity-preconditioned GMRES records a
   reusable restart-cycle Graph; FGMRES and other non-recordable provider
   combinations preserve direct submission.
-- Vulkan recordable compiled-kernel f32 CG/PCG defaults to
-  `"device_convergent"`. A generic structured Graph records the A action and,
-  for PCG, a fixed-linear compiled-kernel M action. Its compact device-control
+- Vulkan recordable compiled-kernel f32 CG/PCG and recordable compiled-Graph
+  PCG default to `"device_convergent"`. A generic structured Graph records the
+  A action and, for PCG, a fixed-linear recordable M action. Its compact device-control
   plan keeps recurrence state on the device and performs no per-iteration
   host observation. Budgets that exceed one encoded command plan are executed
   as bounded chunks of at most 64 iterations, with one terminal observation
@@ -959,7 +966,7 @@ plan = ti.linalg.experimental.SolvePlan(
   CG/PCG/MINRES/BiCGSTAB plans default to `"host_check_every_k"` with K=4;
   stored identity-preconditioned GMRES uses the same default with
   `check_interval == restart`. Qualified matrix-free methods outside the
-  recordable compiled-kernel/composition CG/PCG scope use K=4 or restart-sized
+  recordable provider CG/PCG scope use K=4 or restart-sized
   host checks.
   Explicit `"fixed_budget_masked"` remains available for workloads that
   intentionally consume the full iteration budget. These policies support
@@ -986,7 +993,8 @@ synchronization. The Graph terminates at the exact logical iteration, so this
 path has no masked tail work, and a persistent plan replays the cached
 executable while its topology, workspace, and output binding remain stable.
 
-For qualified CUDA/Vulkan recordable compiled-kernel or composition CG/PCG, the
+For qualified CUDA/Vulkan recordable compiled-kernel, compiled-Graph, or
+composition CG/PCG, the
 structured Graph owns the complete recurrence region. Vulkan uses compact
 device masking rather than dynamic command-stream termination, so logical
 convergence is exact while an encoded block may retain an inactive tail. The
@@ -999,7 +1007,7 @@ iteration.
 FGMRES action tables use direct native submission on both GPU backends. No
 identity-GMRES replay path is silently reused for a variable action schedule.
 
-Outside the recordable compiled-kernel/composition CG/PCG device-convergent scope,
+Outside the recordable-provider CG/PCG device-convergent scope,
 compiled-kernel and compiled Graph A/M providers use direct outer solver-chunk
 submission. That outer recurrence boundary is independent of provider
 execution: each compiled Graph apply uses its provider-owned compiled Graph
@@ -1068,10 +1076,10 @@ entry points, device setter, provider capture, and cuBLAS workspace
 requirements are satisfied; otherwise the documented chunk fallback is used.
 A single-system compiled-kernel f32 CG/PCG plan may request the generic
 structured-Graph path explicitly when its A/M actions are recordable, but is
-not selected automatically on CUDA. A recordable f32 composition is selected
-automatically on both GPU backends because it has no qualified host-check
-solver lowering. On Vulkan, recordable compiled-kernel and composition
-CG/PCG scopes report
+not selected automatically on CUDA. A recordable compiled-Graph f32 PCG plan
+and a recordable f32 composition are selected automatically on both GPU
+backends; compiled-Graph CG remains explicit-only. On Vulkan, all qualified
+recordable-provider CG/PCG scopes report
 `primitive="vulkan_dispatch_indirect"`; unsupported providers fail without
 changing policy or backend. The stored CUDA path requires its solver-specific
 conditional setter and cuBLAS user-workspace support. The compiled-kernel CUDA
@@ -1080,8 +1088,8 @@ require the cuBLAS workspace symbol. The Vulkan path requires the qualified
 structured-Graph runtime and recordable fixed f32 bindings.
 `device_convergent.qualification_scope` and
 `automatic_selection_qualified` expose this distinction. Explicit requests
-fail without fallback. Compiled-Graph, batched, CPU, and non-recordable
-providers do not claim device-convergent execution.
+fail without fallback. Batched, CPU, and non-recordable providers do not claim
+device-convergent execution.
 
 ## Independent batched CG and PCG
 
@@ -1288,13 +1296,13 @@ overwrite apply only.
 | CG, recordable composition | `f32/f64` | `f32`, device-convergent | `f32`, device-convergent |
 | PCG + Jacobi | Fixed CSR, `f32/f64` | Fixed CSR, `f32` | Fixed CSR, `f32` |
 | PCG + block-Jacobi | Fixed BSR, `f32/f64` | Fixed BSR, `f32` | Fixed BSR, `f32` |
-| PCG + fixed-linear operator/plan | Supported providers, `f32/f64` | Recordable compiled-kernel/composition A/M, `f32`, device-convergent for composition | Recordable compiled-kernel/composition A/M, `f32`, device-convergent for composition |
+| PCG + fixed-linear operator/plan | Supported providers, `f32/f64` | Recordable compiled-kernel/Graph/composition A/M, `f32`; Graph/composition device-convergent automatically | Recordable compiled-kernel/Graph/composition A/M, `f32`; Graph/composition device-convergent automatically |
 | MINRES + identity | Supported providers, `f32/f64` | Fixed CSR/BSR or compiled provider, `f32` | Fixed CSR/BSR or compiled provider, `f32` |
 | MINRES + Jacobi/block-Jacobi | Unsupported | Fixed CSR/BSR respectively, `f32` | Fixed CSR/BSR respectively, `f32` |
 | MINRES + fixed-linear operator/plan | Unsupported | Compatible device-native A/M, `f32` | Compatible device-native A/M, `f32` |
 | Independent batched CG/PCG | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` |
 | Batched fixed-budget submission | Unsupported | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` |
-| Device-convergent conditional execution | Unsupported | Stored f32 CSR/BSR and recordable-composition CG/PCG automatic; compiled-kernel f32 CG/PCG explicit-only | Recordable compiled-kernel/composition f32 CG/PCG automatic |
+| Device-convergent conditional execution | Unsupported | Stored f32 CSR/BSR, recordable compiled-Graph PCG, and composition CG/PCG automatic; compiled-kernel and compiled-Graph CG explicit-only | Recordable compiled-kernel CG/PCG, compiled-Graph PCG, and composition CG/PCG automatic; compiled-Graph CG explicit-only |
 | BiCGSTAB + identity | Supported host-action providers, `f32/f64` | Fixed CSR/BSR or compiled provider, `f32` | Fixed CSR/BSR or compiled provider, `f32` |
 | BiCGSTAB + fixed-linear right preconditioner | Supported host-action providers, `f32/f64` | Compatible device-native A/M, `f32` | Compatible device-native A/M, `f32` |
 | GMRES + identity | Supported host-action providers, `f32/f64` | Fixed CSR/BSR or compiled provider, `f32` | Fixed CSR/BSR or compiled provider, `f32` |

@@ -2662,35 +2662,25 @@ def _solver_execution_capabilities(
         )
         if (
             unavailable_reason == "none"
-            and provider_kind in ("kernel", "composition")
+            and provider_kind != "stored"
             and not provider_recordable
         ):
-            unavailable_reason = "compiled_kernel_action_not_recordable"
+            unavailable_reason = "provider_action_not_recordable"
     elif is_vulkan:
         conditional_primitive = "vulkan_dispatch_indirect"
         if not vulkan_structured_runtime_mode:
             unavailable_reason = "vulkan_runtime_mode_disables_graph_replay"
-        elif provider_kind in ("kernel", "composition") and provider_recordable:
+        elif provider_recordable:
             unavailable_reason = "none"
-        elif provider_kind in ("kernel", "composition"):
-            unavailable_reason = (
-                "vulkan_compiled_kernel_action_not_recordable"
-            )
         elif provider_kind == "stored":
             unavailable_reason = (
                 "vulkan_stored_solver_indirect_dispatch_path_not_compiled"
             )
-        elif provider_kind == "graph":
-            unavailable_reason = (
-                "vulkan_compiled_graph_indirect_dispatch_not_qualified"
-            )
         else:
-            unavailable_reason = (
-                "vulkan_provider_indirect_dispatch_unsupported"
-            )
+            unavailable_reason = "vulkan_provider_action_not_recordable"
         prerequisites = (
             "qualified Vulkan structured Graph runtime",
-            "recordable compiled-kernel provider action",
+            "recordable provider action",
             "fixed f32 dense vector and workspace bindings",
         )
     else:
@@ -2707,9 +2697,8 @@ def _solver_execution_capabilities(
         and dtype == f32
         and (is_cpu or is_cuda or is_vulkan)
     )
-    composition_device_qualified = (
+    recordable_device_qualified = (
         not batched
-        and provider_kind == "composition"
         and provider_recordable
         and preconditioner_replay_qualified
         and method in ("cg", "pcg")
@@ -2735,7 +2724,7 @@ def _solver_execution_capabilities(
         "fixed_budget_masked": (provider_kind != "composition" and (is_vulkan or (batched and is_cuda))),
         "bounded_convergent": bounded_qualified,
         "device_convergent": (
-            (bounded_qualified or composition_device_qualified)
+            (bounded_qualified or recordable_device_qualified)
             and (
                 (is_cuda and cuda_device_convergent_available and (provider_kind == "stored" or provider_recordable))
                 or (is_vulkan and vulkan_structured_runtime_mode and provider_recordable)
@@ -2761,7 +2750,12 @@ def _solver_execution_capabilities(
         )
     )
     device_automatic_selection = native_upgrade_automatic or (
-        composition_device_qualified and policies["device_convergent"]
+        recordable_device_qualified
+        and (
+            provider_kind in ("graph_action", "composition")
+            or (provider_kind == "graph" and method == "pcg")
+        )
+        and policies["device_convergent"]
     )
     native_replay_qualified = (
         not batched
@@ -2790,7 +2784,7 @@ def _solver_execution_capabilities(
         )
     elif is_cuda and bounded_qualified and provider_kind == "stored":
         default_execution_policy = "bounded_convergent"
-    elif is_cuda and provider_kind == "composition" and policies["device_convergent"]:
+    elif is_cuda and device_automatic_selection:
         default_execution_policy = "device_convergent"
     elif is_cuda and (
         native_replay_qualified
@@ -2798,11 +2792,7 @@ def _solver_execution_capabilities(
         or method in ("gmres", "fgmres")
     ):
         default_execution_policy = "host_check_every_k"
-    elif (
-        is_vulkan
-        and policies["device_convergent"]
-        and provider_kind in ("kernel", "composition")
-    ):
+    elif is_vulkan and device_automatic_selection:
         default_execution_policy = "device_convergent"
     elif is_vulkan and (
         native_replay_qualified or matrix_free_batching_qualified
@@ -2814,7 +2804,7 @@ def _solver_execution_capabilities(
         default_execution_policy = "host_each_iteration"
     device_unavailable_reason = (
         unavailable_reason
-        if bounded_qualified or composition_device_qualified
+        if bounded_qualified or recordable_device_qualified
         else "solver_contract_not_qualified_for_device_convergent"
     )
     return {
@@ -2846,7 +2836,7 @@ def _solver_execution_capabilities(
                 else is_vulkan
             ),
             "provider_qualified": (
-                (bounded_qualified or composition_device_qualified)
+                (bounded_qualified or recordable_device_qualified)
                 and (
                     (is_cuda and (provider_kind == "stored" or provider_recordable))
                     or (is_vulkan and vulkan_structured_runtime_mode and provider_recordable)
@@ -2868,7 +2858,8 @@ def _solver_execution_capabilities(
                 else (
                     "compiled_kernel_graph_krylov_not_latency_qualified"
                     if policies["device_convergent"]
-                    and provider_kind in ("kernel", "composition")
+                    and provider_kind
+                    in ("kernel", "graph", "graph_action", "composition")
                     else device_unavailable_reason
                 )
             ),
@@ -3700,8 +3691,10 @@ class SolvePlan:
     ``pcg`` accepts fixed stored CSR/BSR providers with explicit ``"jacobi"``
     or ``"block_jacobi"`` selection. It also accepts a trusted SPD
     :class:`LinearOperator` or an explicitly versioned
-    :class:`PreconditionerPlan` as a fixed-linear preconditioner. GPU custom
-    preconditioners currently require compiled-kernel A and M providers.
+    :class:`PreconditionerPlan` as a fixed-linear preconditioner. GPU
+    device-convergent PCG requires recordable f32 A and M actions; qualified
+    compiled-kernel, compiled-Graph, and composed providers share that
+    capability contract.
     MINRES supports CPU ``f32``/``f64`` identity preconditioning and device-
     resident CUDA/Vulkan ``f32`` identity or trusted fixed-linear SPD
     preconditioning. BiCGSTAB supports CPU ``f32``/``f64`` host actions and
@@ -3759,7 +3752,6 @@ class SolvePlan:
         if method == "pcg" and isinstance(preconditioner, LinearOperator):
             self._preconditioner_replay_qualified = bool(
                 preconditioner.dtype == f32
-                and preconditioner._provider_kind in ("kernel", "composition")
                 and preconditioner._supports_graph_action()
             )
         elif method == "pcg" and isinstance(
@@ -3770,8 +3762,7 @@ class SolvePlan:
                 preconditioner.behavior == "fixed_linear"
                 and action is not None
                 and action.dtype == f32
-                and action._provider_kind == "kernel"
-                and action._handle._supports_recordable_kernel()
+                and action._supports_graph_action()
             )
         if method in ("gmres", "fgmres"):
             if restart is None:
@@ -4580,7 +4571,7 @@ class SolvePlan:
                 )
             if arch == _ti_core.Arch.cuda:
                 if (
-                    kind in ("kernel", "composition")
+                    self.operator._supports_graph_action()
                     and self._native_execution_policy == "device_convergent"
                 ):
                     from taichi_forge.linalg._graph_krylov import (
@@ -4630,7 +4621,7 @@ class SolvePlan:
                 )
             if arch == _ti_core.Arch.vulkan:
                 if (
-                    kind in ("kernel", "composition")
+                    self.operator._supports_graph_action()
                     and self._native_execution_policy == "device_convergent"
                 ):
                     from taichi_forge.linalg._graph_krylov import (
@@ -4686,15 +4677,10 @@ class SolvePlan:
             self._require_fixed_linear_preconditioner(preconditioner_action)
             if (
                 arch in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan)
-                and kind in ("kernel", "composition")
-                and preconditioner_action._provider_kind in ("kernel", "composition")
+                and self.operator._supports_graph_action()
+                and preconditioner_action._supports_graph_action()
                 and self._native_execution_policy == "device_convergent"
             ):
-                if not (self.operator._supports_graph_action() and preconditioner_action._supports_graph_action()):
-                    raise TaichiRuntimeError(
-                        "GPU device-convergent PCG requires recordable "
-                        "compiled-kernel A and M providers"
-                    )
                 from taichi_forge.linalg._graph_krylov import (
                     GraphKrylovSolver,
                 )
@@ -4721,8 +4707,9 @@ class SolvePlan:
                 or preconditioner_action._provider_kind != "kernel"
             ):
                 raise TaichiRuntimeError(
-                    "GPU fixed-linear PCG currently requires compiled-kernel "
-                    "A and M providers"
+                    "GPU fixed-linear PCG requires recordable A and M providers "
+                    "with execution_policy='device_convergent', or legacy "
+                    "compiled-kernel A and M providers"
                 )
             if arch == _ti_core.Arch.cuda:
                 factory = _ti_core._make_cuda_experimental_pcg_solver

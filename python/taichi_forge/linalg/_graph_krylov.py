@@ -1190,6 +1190,21 @@ class GraphKrylovSolver:
                 if self._last_control_report is None
                 else self._last_control_report.lowering
             ),
+            "last_encoded_iterations": (
+                iterations
+                if self._last_control_report is None
+                else int(self._last_control_report.encoded_iterations)
+            ),
+            "last_masked_iterations": (
+                0
+                if self._last_control_report is None
+                else int(self._last_control_report.masked_iterations)
+            ),
+            "last_window_sizes": (
+                []
+                if self._last_control_report is None
+                else list(self._last_control_report.chunk_sizes)
+            ),
             "last_elapsed_seconds": self._last_elapsed_seconds,
         }
         return {

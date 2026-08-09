@@ -1,6 +1,6 @@
 # LinearOperator 与实验性 SolvePlan
 
-> 本文说明 Taichi Forge `0.6.1` 的当前合同；功能归属见
+> 本文说明 Taichi Forge `0.6.2` 开发版本的当前合同；功能归属见
 > [版本更新说明](release_notes.zh.md)。
 
 `ti.linalg.LinearOperator` 提供绑定 runtime 的线性映射抽象，可使用 fixed sparse
@@ -679,7 +679,7 @@ Python iteration callback、自动 restart 选择、block GMRES 或领域 outer-
 
 ### 当前未支持边界
 
-`0.6.1` 数值工具合同有意不提供：
+`0.6.2` 数值工具合同有意不提供：
 
 - nonlinear、依赖 residual、adaptive 或 Python callback 驱动的 preconditioner；
 - 自动 restart 选择、block/multi-RHS Krylov、recycling、deflation、pipelining 或
@@ -805,6 +805,11 @@ plan = ti.linalg.experimental.SolvePlan(
   资格，但标记为 `qualification_scope="explicit_only"`；自动默认仍采用 K=4
   `"host_check_every_k"`，因为 Graph 构造/capture 与 first execution 的成本需要由多次
   warm solve 摊薄。
+- 当 A 与 fixed-linear M action 都满足录制资格时，recordable compiled-Graph f32 PCG
+  会自动选择 `"device_convergent"`。provider 的每个有序 dispatch 都直接消费符号化 Krylov
+  input/output，因此 canonical compact Field 或连续 Field range 不会增加 SolvePlan
+  pack/unpack submission。recordable compiled-Graph CG 也可显式请求 device-convergent，
+  但在尚无普遍 latency 优势时保留既有 host-check 默认策略。
 - recordable f32 scale/sum/compose operator 用于 CUDA 或 Vulkan CG/PCG 时，会自动选择
   `"device_convergent"`。这是 composed provider 唯一满足资格的 GPU solve policy：系统
   不会用 host-check 路径替换 standalone apply，也不会在 Krylov 内部搬运 Field/ndarray
@@ -814,9 +819,9 @@ plan = ti.linalg.experimental.SolvePlan(
 - CUDA GMRES/FGMRES 默认使用 `"host_check_every_k"`，并要求
   `check_interval == restart`。stored identity-preconditioned GMRES 会录制可复用的
   restart-cycle Graph；FGMRES 与其它不可录制的 provider 组合保持 direct submission。
-- Vulkan 上可录制的 compiled-kernel f32 CG/PCG 默认使用
+- Vulkan 上可录制的 compiled-kernel f32 CG/PCG 与 recordable compiled-Graph PCG 默认使用
   `"device_convergent"`。通用结构化 Graph 会录制 A action；PCG 还会录制
-  fixed-linear compiled-kernel M action。compact device-control plan 把 recurrence
+  fixed-linear recordable M action。compact device-control plan 把 recurrence
   state 保留在 device 上，不做逐 iteration host observation。超过单一 command plan
   容量的预算会按最多 64 轮的有界 chunk 执行，每个 chunk 只观察一次 terminal state。
   Vulkan kernel-profiler 或 dispatch-cache mode 会关闭 command replay；自动策略此时
@@ -825,7 +830,7 @@ plan = ti.linalg.experimental.SolvePlan(
 - 其它具备 replay 资格的 Vulkan fixed stored 或 compiled f32
   CG/PCG/MINRES/BiCGSTAB plan 默认使用 K=4 的 `"host_check_every_k"`；stored
   identity-preconditioned GMRES 使用同一默认策略，并要求
-  `check_interval == restart`。不属于可录制 compiled-kernel/composition CG/PCG 范围的
+  `check_interval == restart`。不属于可录制 provider CG/PCG 范围的
   matrix-free 方法使用 K=4 或 restart 大小的 host check。对于明确需要消耗完整
   iteration 预算的 workload，仍可显式选择 `"fixed_budget_masked"`。这些策略均支持
   `atol`、`rtol` 及其组合后的 effective tolerance。
@@ -847,7 +852,8 @@ terminal state 观察，但迭代内部不再执行逐轮 host scalar reduction 
 Graph 在精确的逻辑 iteration 上终止，因此不会产生 masked tail work；只要 topology、
 workspace 与 output binding 保持稳定，persistent plan 就会复用同一 executable。
 
-对于资格满足的 CUDA/Vulkan recordable compiled-kernel 或 composition CG/PCG，结构化
+对于资格满足的 CUDA/Vulkan recordable compiled-kernel、compiled-Graph 或 composition
+CG/PCG，结构化
 Graph 持有完整 recurrence region。Vulkan 使用 compact device masking，而不是动态截断
 command stream，因此逻辑收敛轮数精确，但已编码 block 可以包含 inactive tail。provider
 action、dense ndarray workspace、predicate、counter、status 与 reduction buffer 均使用固定
@@ -857,7 +863,7 @@ runtime binding。canonical compact full Field 使用上文 Graph preamble/epilo
 FGMRES action table 在两个 GPU backend 上都使用 direct native submission；系统不会为
 variable action schedule 静默复用 identity-GMRES replay 路径。
 
-除可录制 compiled-kernel/composition CG/PCG 的 device-convergent 范围外，compiled-kernel 与
+除可录制 provider CG/PCG 的 device-convergent 范围外，compiled-kernel 与
 compiled Graph A/M provider 的外层 solver chunk 均按 direct submission 执行。这个外层
 recurrence 边界与 provider 自身的执行方式相互独立：
 compiled Graph apply 使用 provider 持有的 compiled Graph plan，compiled-kernel apply
@@ -910,17 +916,18 @@ direct-submission 路径的权威记录。
 CSR/BSR CG/PCG 在 driver、conditional-Graph 入口、device setter、provider capture 与
 cuBLAS workspace 均满足资格时，可通过 `"bounded_convergent"` 自动选择；否则使用文档
 规定的 chunk fallback。在 CUDA 上，单系统 compiled-kernel f32 CG/PCG 在 A/M action
-可录制时，可显式请求通用结构化 Graph 路径，但不会自动选中；recordable f32 composition
-在两个 GPU backend 上都会自动选中，因为它没有满足资格的 host-check solver lowering。
+可录制时，可显式请求通用结构化 Graph 路径，但不会自动选中；recordable compiled-Graph
+f32 PCG 与 recordable f32 composition 在两个 GPU backend 上都会自动选中，compiled-Graph
+CG 则保持 explicit-only。
 stored 路径要求 solver-specific conditional setter 与 cuBLAS user-workspace 支持。在
-Vulkan 上，可录制 compiled-kernel/composition f32 CG/PCG 范围会报告
+Vulkan 上，所有满足资格的 recordable-provider f32 CG/PCG 范围会报告
 `primitive="vulkan_dispatch_indirect"`；不支持的 provider 会直接失败，不会更换 policy
 或 backend。
 CUDA compiled-kernel 路径要求 general Graph conditional setter，不依赖 cuBLAS
 workspace symbol；Vulkan 路径要求已资格化的结构化 Graph runtime 和可录制的固定 f32
 binding。`device_convergent.qualification_scope` 与
 `automatic_selection_qualified` 会公开该区别。显式请求不可用时失败，不做 fallback。
-compiled-Graph、batched、CPU 与不可录制 provider 不宣称支持 device-convergent execution。
+batched、CPU 与不可录制 provider 不宣称支持 device-convergent execution。
 
 ## 独立批量 CG 与 PCG
 
@@ -1097,13 +1104,13 @@ GPU 当前只支持 overwrite apply。
 | CG，recordable composition | `f32/f64` | `f32`，仅 device-convergent | `f32`，仅 device-convergent |
 | PCG + Jacobi | fixed CSR，`f32/f64` | fixed CSR，`f32` | fixed CSR，`f32` |
 | PCG + block-Jacobi | fixed BSR，`f32/f64` | fixed BSR，`f32` | fixed BSR，`f32` |
-| PCG + fixed-linear operator/plan | 受支持 provider，`f32/f64` | 可录制 compiled-kernel/composition A/M，`f32`；composition 仅 device-convergent | 可录制 compiled-kernel/composition A/M，`f32`；composition 仅 device-convergent |
+| PCG + fixed-linear operator/plan | 受支持 provider，`f32/f64` | 可录制 compiled-kernel/Graph/composition A/M，`f32`；Graph/composition 自动使用 device-convergent | 可录制 compiled-kernel/Graph/composition A/M，`f32`；Graph/composition 自动使用 device-convergent |
 | MINRES + identity | 受支持 provider，`f32/f64` | fixed CSR/BSR 或 compiled provider，`f32` | fixed CSR/BSR 或 compiled provider，`f32` |
 | MINRES + Jacobi/block-Jacobi | 不支持 | 分别为 fixed CSR/BSR，`f32` | 分别为 fixed CSR/BSR，`f32` |
 | MINRES + fixed-linear operator/plan | 不支持 | 兼容的 device-native A/M，`f32` | 兼容的 device-native A/M，`f32` |
 | 独立批量 CG/PCG | fixed stored 或 compiled-kernel A/M，`f32` | fixed stored 或 compiled-kernel A/M，`f32` | fixed stored 或 compiled-kernel A/M，`f32` |
 | 批量 fixed-budget submission | 不支持 | fixed stored 或 compiled-kernel A/M，`f32` | fixed stored 或 compiled-kernel A/M，`f32` |
-| device-convergent 条件执行 | 不支持 | stored f32 CSR/BSR 与 recordable-composition CG/PCG 自动；compiled-kernel f32 CG/PCG 仅显式 | 可录制 compiled-kernel/composition f32 CG/PCG 自动 |
+| device-convergent 条件执行 | 不支持 | stored f32 CSR/BSR、recordable compiled-Graph PCG 与 composition CG/PCG 自动；compiled-kernel 与 compiled-Graph CG 仅显式 | recordable compiled-kernel CG/PCG、compiled-Graph PCG 与 composition CG/PCG 自动；compiled-Graph CG 仅显式 |
 | BiCGSTAB + identity | 受支持 host-action provider，`f32/f64` | fixed CSR/BSR 或 compiled provider，`f32` | fixed CSR/BSR 或 compiled provider，`f32` |
 | BiCGSTAB + fixed-linear 右预条件 | 受支持 host-action provider，`f32/f64` | 兼容的 device-native A/M，`f32` | 兼容的 device-native A/M，`f32` |
 | GMRES + identity | 受支持 host-action provider，`f32/f64` | fixed CSR/BSR 或 compiled provider，`f32` | fixed CSR/BSR 或 compiled provider，`f32` |

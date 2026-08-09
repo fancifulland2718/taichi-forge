@@ -236,7 +236,8 @@ def test_solve_plan_complete_graph_action_terminal_and_workspace(method):
             "solve_rhs": rhs,
             "solve_output": output,
             **packet.arguments,
-        }
+        },
+        telemetry=True,
     )
     ticket.wait()
 
@@ -248,6 +249,66 @@ def test_solve_plan_complete_graph_action_terminal_and_workspace(method):
     report = graph.execution_stats()
     assert report.memory.persistent_internal_storage_bytes > size * 4
     assert report.memory.internal_storage_exclusive
+    telemetry = ticket.telemetry()
+    assert tuple(region.path_id for region in telemetry.regions) == (
+        f"recorded_{method}",
+    )
+    assert telemetry.regions[0].logical_invocations == 1
+    assert telemetry.regions[0].logical_iterations == 1
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_compiled_graph_provider_pcg_uses_recordable_device_control():
+    size = 32
+    operator = _compiled_graph_identity(size, multi_dispatch=True)
+    preconditioner = _compiled_graph_identity(size, multi_dispatch=True)
+    plan = ti.linalg.experimental.SolvePlan(
+        operator,
+        method="pcg",
+        preconditioner=preconditioner,
+        max_iterations=8,
+        atol=1e-6,
+    )
+
+    capabilities = plan.execution_capabilities()
+    assert capabilities["default_execution_policy"] == "device_convergent"
+    assert capabilities["device_convergent"]["supported"]
+    assert capabilities["device_convergent"]["provider_qualified"]
+    assert capabilities["device_convergent"][
+        "automatic_selection_qualified"
+    ]
+
+    expected = np.linspace(-2.0, 3.0, size, dtype=np.float32)
+    rhs = ti.field(ti.f32, shape=size)
+    output = ti.field(ti.f32, shape=size)
+    rhs.from_numpy(expected)
+    output.fill(0.0)
+    result = plan.solve(rhs, out=output)
+
+    assert result.converged
+    assert result.iterations == 1
+    np.testing.assert_allclose(output.to_numpy(), expected, rtol=1e-6)
+    stats = plan.statistics()
+    assert stats["identity"]["solver_execution_policy"] == "device_convergent"
+    assert stats["identity"]["solver_control_path"] == "generic_structured_graph"
+    assert stats["identity"]["preconditioner_method"] == "linear_operator"
+    assert stats["operations"]["preconditioner_apply_calls"] == 2
+    assert stats["operations"]["host_scalar_readbacks"] == 1
+    vector_stats = stats["vector_io"]
+    assert vector_stats["pack_calls"] == 0
+    assert vector_stats["unpack_calls"] == 0
+    assert vector_stats["transfer_graph_submissions"] == 0
+    assert vector_stats["transfer_native_submissions"] == 0
+    assert vector_stats["direct_graph_solve_submissions"] == 1
+    assert vector_stats["direct_graph_solve_full_boundary_submissions"] == 1
+    assert vector_stats["direct_dense_field_submissions"] == 1
+    if impl.current_cfg().arch == ti.vulkan:
+        assert stats["operations"]["last_encoded_iterations"] == 8
+        assert stats["operations"]["last_masked_iterations"] == 7
+        assert stats["operations"]["last_window_sizes"] == [8]
+    else:
+        assert stats["operations"]["last_encoded_iterations"] == 1
+        assert stats["operations"]["last_masked_iterations"] == 0
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
@@ -440,7 +501,8 @@ def test_solve_plan_graph_action_runs_inside_nested_single_ticket_loop():
             "outer_target": 3,
             "solve_stop_trace": stops,
             **packet.arguments,
-        }
+        },
+        telemetry=True,
     )
     ticket.wait()
 
@@ -449,6 +511,19 @@ def test_solve_plan_graph_action_runs_inside_nested_single_ticket_loop():
     snapshot = packet.snapshot()
     assert snapshot.converged
     assert snapshot.iterations == 1
+    telemetry = ticket.telemetry()
+    assert tuple(region.path_id for region in telemetry.regions) == (
+        "outer_newton",
+        "outer_newton/body/nested_cg",
+    )
+    assert tuple(region.logical_invocations for region in telemetry.regions) == (
+        1,
+        3,
+    )
+    assert tuple(region.logical_iterations for region in telemetry.regions) == (
+        3,
+        1,
+    )
     np.testing.assert_allclose(storage.to_numpy()[28 : 28 + size], expected, rtol=1e-6)
     memory = graph.execution_stats().memory
     assert memory.internal_storage_exclusive

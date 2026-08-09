@@ -14,7 +14,7 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
 
 | 版本 | 历史状态 | 源码边界 | 主要范围 |
 | --- | --- | --- | --- |
-| [待发布](#unreleased) | 0.6.2 开发版本 | 当前 `master` | 尚无已记录的用户可见变更 |
+| [待发布](#unreleased) | 0.6.2 开发版本 | 当前 `master` | Graph 生命周期/遥测修复与 recordable compiled-Graph PCG |
 | [0.6.1](#061) | 已正式发布 | `b129ad94c` | task launch manifest/policy、动态 LLVM SNode directory、设备端 dynamic worklist、有界 Graph dispatch 与关联 pipeline telemetry |
 | [0.6.0](#060) | 已正式发布 | `106ad65d25` | 结构化 Graph 控制/遥测与 Vulkan indirect dispatch、稀疏 runtime/线性代数、driver-only CUDA primitive、受管互操作/显示与 runtime 生命周期有界化 |
 | [0.1.0](#010) | 历史源码版本；发行文件可能已移除 | `91ad177685` | scikit-build-core 迁移与 Forge 发行包重命名 |
@@ -42,7 +42,17 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
 
 ## 待发布 {#unreleased}
 
-尚无已记录的 `0.6.2` 用户可见变更。
+- CUDA-enabled runtime 只使用过 CPU 或 Vulkan Graph state 时，Graph cache reset/析构不再
+  构造 CUDA context；真正的 CUDA cache 继续保持 submission lock 顺序。0.6.1 split shim
+  中的兼容 override 已迁移到最终的 native runtime 所有权位置。
+- nested Graph execution statistics 统一消费扁平 backend mapping；异步 telemetry 以稳定
+  region path 记录 recordable/native Sequential 内的 structured region。缺失或重复 region
+  仍然 fail closed。
+- recordable f32 compiled-Graph A/M provider 现在可在 CUDA/Vulkan 上执行 device-resident
+  convergence control 的 fixed-linear PCG。compiled-Graph PCG 自动选择该路径；
+  compiled-Graph CG 保留原默认策略并可显式 opt in。满足资格的连续 Field operand 直接绑定，
+  不产生 SolvePlan pack/unpack submission。solver statistics 同时公开 logical、encoded 与
+  masked iteration，使 exact 和 bounded backend 上的早停均可观察。
 
 ## 0.6.1
 

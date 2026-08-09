@@ -119,8 +119,8 @@ The qualified provider matrix is:
 | Compiled Graph, Vulkan | Direct command replay | Direct command replay |
 | Fixed native CSR/BSR, CPU/CUDA | Direct | Unsupported |
 | Fixed native CSR/BSR, Vulkan | Dense-field device staging | Unsupported |
-| `SolvePlan.solve()` dense field / `VectorView` | Device staged | Not applicable |
-| `SolvePlan.solve()` explicit `DenseNdarrayView` | Unsupported | Unsupported |
+| `SolvePlan.solve()` dense field / `VectorView` | Direct Graph boundary for qualified Graph Krylov; otherwise device staged | Direct Graph boundary only for qualified `stride=1`; otherwise device staged |
+| `SolvePlan.solve()` explicit `DenseNdarrayView` | Unsupported public boundary | Unsupported public boundary |
 
 Direct bindings do not allocate a scalar-vector staging buffer and do not copy
 payload values. CUDA Graph capture remains limited to compact mappings; affine

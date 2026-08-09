@@ -18,7 +18,7 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
-| [Unreleased](#unreleased) | 0.6.2 development | current `master` | no user-visible changes recorded yet |
+| [Unreleased](#unreleased) | 0.6.2 development | current `master` | Graph lifecycle/telemetry fixes and recordable compiled-Graph PCG |
 | [0.6.1](#061) | published release | `b129ad94c` | task launch manifests/policies, dynamic LLVM SNode directories, device-resident dynamic worklists, bounded Graph dispatch, and correlated pipeline telemetry |
 | [0.6.0](#060) | published release | `106ad65d25` | structured Graph control/telemetry and Vulkan indirect dispatch, sparse runtime/linear algebra, driver-only CUDA primitives, managed interoperability/display, and bounded runtime lifetimes |
 | [0.1.0](#010) | historical source release; artifact may be removed | `91ad177685` | scikit-build-core migration and Forge distribution rebrand |
@@ -46,7 +46,21 @@ grouped under the behavior they shipped.
 
 ## Unreleased
 
-No user-visible `0.6.2` changes have been recorded yet.
+- Graph cache reset and destruction now avoid constructing the CUDA context
+  when a CUDA-enabled runtime has only used CPU or Vulkan Graph state. CUDA
+  caches retain submission-lock ordering; the 0.6.1 split-shim compatibility
+  override has moved to its final native-runtime owner.
+- Nested Graph execution statistics now consume a single flattened backend
+  mapping, and asynchronous telemetry instruments structured regions inside
+  recordable/native Sequential actions by stable region path. Missing or
+  duplicate regions continue to fail closed.
+- Recordable f32 compiled-Graph A/M providers can now execute fixed-linear PCG
+  with device-resident convergence control on CUDA and Vulkan. Compiled-Graph
+  PCG selects this path automatically; compiled-Graph CG keeps its previous
+  default and may opt in explicitly. Qualified contiguous Field operands bind
+  directly with no SolvePlan pack/unpack submission. Solver statistics expose
+  logical, encoded, and masked iteration counts so early stopping remains
+  observable on exact and bounded backends.
 
 ## 0.6.1
 

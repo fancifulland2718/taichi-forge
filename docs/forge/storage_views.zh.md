@@ -110,8 +110,8 @@ kernel 参数或 LinearOperator direct operand。
 | 已编译 Graph，Vulkan | Direct command replay | Direct command replay |
 | Fixed native CSR/BSR，CPU/CUDA | Direct | 不支持 |
 | Fixed native CSR/BSR，Vulkan | dense-field device staging | 不支持 |
-| `SolvePlan.solve()` dense field / `VectorView` | Device staged | 不适用 |
-| `SolvePlan.solve()` 显式 `DenseNdarrayView` | 不支持 | 不支持 |
+| `SolvePlan.solve()` dense field / `VectorView` | 满足 Graph Krylov 资格时 direct Graph boundary；否则 device staged | 仅满足 `stride=1` Graph Krylov 资格时 direct Graph boundary；否则 device staged |
+| `SolvePlan.solve()` 显式 `DenseNdarrayView` | 不属于公开合同 | 不属于公开合同 |
 
 direct binding 不分配 scalar-vector staging buffer，也不复制 payload。CUDA Graph
 capture 仍限于 compact mapping；affine Graph operand 通过已记录的 ordinary fallback
