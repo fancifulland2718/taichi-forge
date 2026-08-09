@@ -15,6 +15,7 @@ from benchmarks.qualification.single_kernel_microbench import (
     _device_prefix_chain_route,
     _particle_hash_route,
     _adaptive_pbd_route,
+    _bfs_worklist_route,
     balanced_pair_orders,
     paired_log_summary,
     qualification_policy_errors,
@@ -265,6 +266,31 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
             Worklist(), "forge", "cuda")["passed"])
         Plan.method_name = "kernel_fallback"
         self.assertFalse(_adaptive_pbd_route(
+            Worklist(), "forge", "cuda")["passed"])
+
+    def test_bfs_route_rejects_overflow(self):
+        class Stats:
+            generated = 4
+            accepted = 4
+            rejected = 0
+            overflow = False
+
+        class Worklist:
+            capacity = 32
+
+            @staticmethod
+            def memory_report():
+                return {"fixed_capacity": True,
+                        "replay_allocation_count": 0}
+
+            @staticmethod
+            def statistics():
+                return Stats()
+
+        self.assertTrue(_bfs_worklist_route(
+            Worklist(), "forge", "cuda")["passed"])
+        Stats.overflow = True
+        self.assertFalse(_bfs_worklist_route(
             Worklist(), "forge", "cuda")["passed"])
 
 

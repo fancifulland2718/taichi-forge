@@ -35,6 +35,7 @@ Forge/vanilla 比较均由相邻且不重叠的 fresh-process 对组成。
 | `particle_spatial_hash` | 二维 cell hash、bucket 构建与固定半径邻域查询 |
 | `adaptive_pbd` | 十轮上限的二维 adaptive 距离约束求解 |
 | `marching_squares` | 稳定二维轮廓 cell 提取与 case 输出 |
+| `bfs_worklist` | 固定深度、逐层同步的二维网格 BFS |
 | `snode_churn` | 一次 pointer+dense SNodeTree create/use/sync/destroy 生命周期事务 |
 
 这些是控制/回归 microbench，用于测量普通 kernel 路径，能够发现运行时额外成本
@@ -119,6 +120,12 @@ fingerprint。独立入口为 `adaptive_pbd_microbench.py`。
 row-major 输出和 exact cell/case oracle。Forge 使用 native stable compact；vanilla
 使用 flags-to-prefix、可复用公共 prefix sum 与 stable scatter。最终选中
 564/65,536 个 cell。独立入口为 `marching_squares_microbench.py`。
+
+`bfs_worklist` 是第二个 `THIN-007` 子案例。它从中心遍历 256² 四邻接网格的 64
+层；两边共享 atomic-min first-visit 语义、device-resident count、full-capacity
+expansion，以及完整 distance/per-level-frontier exact oracle，frontier 内部次序明确
+不作为结果。Forge 使用 DeviceWorklist prepare/append/commit，vanilla 使用双缓冲
+ndarray 与 atomic count。独立入口为 `bfs_worklist_microbench.py`。
 
 `snode_churn` 是 `DIRECT-004` 的历史 churn 半项。两边使用相同公开 FieldsBuilder
 DSL 与 kernel；每个计时 launch 创建一个 pointer+dense tree、激活 64 个 cell、exact

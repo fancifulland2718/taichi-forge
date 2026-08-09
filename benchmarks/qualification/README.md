@@ -37,6 +37,7 @@ classified direct, stability, and thin-capability cases:
 | `particle_spatial_hash` | 2-D cell hashing, bucket construction, and fixed-radius neighbor query |
 | `adaptive_pbd` | ten-iteration 2-D adaptive distance-constraint solve |
 | `marching_squares` | stable 2-D contour-cell extraction and case emission |
+| `bfs_worklist` | fixed-depth level-synchronous 2-D grid BFS |
 | `snode_churn` | one pointer+dense SNodeTree create/use/sync/destroy lifecycle transaction |
 
 These are control/regression microbenchmarks. They measure the ordinary kernel
@@ -141,6 +142,14 @@ case-emission kernels, stable row-major output, and exact cell/case oracle.
 Forge uses native stable compact; vanilla uses flags-to-prefix, a reusable
 public prefix sum, and stable scatter. The selected set is 564 of 65,536 cells.
 Use `marching_squares_microbench.py`.
+
+`bfs_worklist` is the second `THIN-007` subcase. It traverses 64 levels of a
+256-square four-neighbor grid from the center. Both sides share atomic-min
+first-visit semantics, device-resident counts, full-capacity expansion, and
+exact full-distance/per-level-frontier oracles; frontier order is deliberately
+unspecified. Forge uses DeviceWorklist prepare/append/commit, while vanilla
+uses double-buffered ndarrays and an atomic count. Use
+`bfs_worklist_microbench.py`.
 
 `snode_churn` is the historical-churn half of `DIRECT-004`. Both runtimes use
 the same public FieldsBuilder DSL and kernels. Every measured launch creates

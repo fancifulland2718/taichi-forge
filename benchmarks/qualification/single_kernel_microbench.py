@@ -80,6 +80,7 @@ OPERATIONS = (
     "particle_spatial_hash",
     "adaptive_pbd",
     "marching_squares",
+    "bfs_worklist",
     "snode_churn",
     "snode_concurrent",
     "mpm_graph",
@@ -3469,6 +3470,319 @@ def _build_marching_squares_case(ti: Any, runtime_name: str, backend: str,
     }
 
 
+def _bfs_worklist_route(worklist: Any | None, runtime_name: str,
+                        backend: str) -> dict[str, Any]:
+    if runtime_name == "forge":
+        memory = worklist.memory_report()
+        stats = worklist.statistics()
+        return {
+            "classification": "forge_device_worklist_atomic_bfs_frontier",
+            "backend": backend,
+            "capacity": worklist.capacity,
+            "memory_report": memory,
+            "last_transition_statistics": {
+                "generated": stats.generated,
+                "accepted": stats.accepted,
+                "rejected": stats.rejected,
+                "overflow": stats.overflow,
+            },
+            "passed": bool(
+                memory["fixed_capacity"]
+                and memory["replay_allocation_count"] == 0
+                and not stats.overflow
+            ),
+        }
+    return {
+        "classification": "vanilla_atomic_device_count_bfs_frontier",
+        "backend": backend,
+        "observed_method": (
+            "double-buffered i32 frontier plus atomic device count"
+        ),
+        "passed": True,
+    }
+
+
+def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
+                             elements: int) -> dict[str, Any]:
+    """Run a fixed-depth level-synchronous BFS on a square 2-D grid."""
+    import numpy as np
+
+    side = math.isqrt(elements)
+    if side * side != elements:
+        raise ValueError("BFS worklist requires a square node count")
+    levels = min(64, side - 1)
+    source_x = side // 2
+    source_y = side // 2
+    source = source_x * side + source_y
+    xx = np.arange(side, dtype=np.int32)[:, None]
+    yy = np.arange(side, dtype=np.int32)[None, :]
+    host_distance = np.abs(xx - source_x) + np.abs(yy - source_y)
+    expected_distance = np.where(
+        host_distance <= levels, host_distance, -1).astype(np.int32).reshape(-1)
+    expected_history = [
+        int(np.count_nonzero(host_distance == level))
+        for level in range(1, levels + 1)
+    ]
+    expected_visited = int(np.count_nonzero(expected_distance >= 0))
+
+    distance = ti.ndarray(ti.i32, shape=elements)
+    frontier_history = ti.ndarray(ti.i32, shape=levels)
+    worklist = None
+    vanilla_values = vanilla_extents = None
+    if runtime_name == "forge":
+        worklist = ti.algorithms.DeviceWorklist(elements, ti.i32)
+    else:
+        vanilla_values = (
+            ti.ndarray(ti.i32, shape=elements),
+            ti.ndarray(ti.i32, shape=elements),
+        )
+        vanilla_extents = (
+            ti.ndarray(ti.i32, shape=1),
+            ti.ndarray(ti.i32, shape=1),
+        )
+
+    @ti.kernel
+    def initialize_bfs(
+            target_distance: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            active_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            active_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            history: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for node in range(elements):
+            target_distance[node] = levels + 1
+            active_values[node] = 0
+        target_distance[source] = 0
+        active_values[0] = source
+        active_extent[0] = 1
+        for level in range(levels):
+            history[level] = 0
+
+    @ti.kernel
+    def reset_extent(
+            extent: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        extent[0] = 0
+
+    if runtime_name == "forge":
+        @ti.kernel
+        def expand_forge(
+                current_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+                current_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+                target_distance: ti.types.ndarray(dtype=ti.i32, ndim=1),
+                next_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+                next_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+                generated: ti.types.ndarray(dtype=ti.i32, ndim=0),
+                overflow: ti.types.ndarray(dtype=ti.i32, ndim=0),
+                capacity: ti.i32,
+                next_level: ti.i32):
+            for slot in range(elements):
+                if slot < current_extent[0]:
+                    node = current_values[slot]
+                    x = node // side
+                    y = node - x * side
+                    for direction in ti.static(range(4)):
+                        nx = x
+                        ny = y
+                        if direction == 0:
+                            nx -= 1
+                        elif direction == 1:
+                            nx += 1
+                        elif direction == 2:
+                            ny -= 1
+                        else:
+                            ny += 1
+                        if 0 <= nx < side and 0 <= ny < side:
+                            neighbor = nx * side + ny
+                            previous = ti.atomic_min(
+                                target_distance[neighbor], next_level)
+                            if previous > next_level:
+                                ti.algorithms.device_worklist_append(
+                                    next_values, next_extent, generated,
+                                    overflow, capacity, neighbor)
+    else:
+        expand_forge = None
+
+    @ti.kernel
+    def expand_vanilla(
+            current_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            current_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_distance: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            next_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            next_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            next_level: ti.i32):
+        for slot in range(elements):
+            if slot < current_extent[0]:
+                node = current_values[slot]
+                x = node // side
+                y = node - x * side
+                for direction in ti.static(range(4)):
+                    nx = x
+                    ny = y
+                    if direction == 0:
+                        nx -= 1
+                    elif direction == 1:
+                        nx += 1
+                    elif direction == 2:
+                        ny -= 1
+                    else:
+                        ny += 1
+                    if 0 <= nx < side and 0 <= ny < side:
+                        neighbor = nx * side + ny
+                        previous = ti.atomic_min(
+                            target_distance[neighbor], next_level)
+                        if previous > next_level:
+                            target = ti.atomic_add(next_extent[0], 1)
+                            if target < elements:
+                                next_values[target] = neighbor
+
+    @ti.kernel
+    def record_frontier(
+            extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            history: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            level_index: ti.i32):
+        history[level_index] = extent[0]
+
+    @ti.kernel
+    def finalize_distance(
+            target_distance: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for node in range(elements):
+            if target_distance[node] > levels:
+                target_distance[node] = -1
+
+    def launch() -> None:
+        if runtime_name == "forge":
+            worklist.clear()
+            initialize_bfs(
+                distance, worklist.values, worklist.extent.state,
+                frontier_history)
+            for level_index in range(levels):
+                worklist.prepare_next()
+                expand_forge(
+                    worklist.values, worklist.extent.state, distance,
+                    *worklist.append_arguments(), level_index + 1)
+                worklist.commit_next()
+                record_frontier(
+                    worklist.extent.state, frontier_history, level_index)
+            finalize_distance(distance)
+        else:
+            initialize_bfs(
+                distance, vanilla_values[0], vanilla_extents[0],
+                frontier_history)
+            vanilla_extents[1].fill(0)
+            front = 0
+            for level_index in range(levels):
+                back = 1 - front
+                reset_extent(vanilla_extents[back])
+                expand_vanilla(
+                    vanilla_values[front], vanilla_extents[front], distance,
+                    vanilla_values[back], vanilla_extents[back],
+                    level_index + 1)
+                record_frontier(
+                    vanilla_extents[back], frontier_history, level_index)
+                front = back
+            finalize_distance(distance)
+
+    def reset() -> None:
+        distance.fill(-1)
+        frontier_history.fill(0)
+        if runtime_name == "forge":
+            worklist.clear()
+        else:
+            for values in vanilla_values:
+                values.fill(0)
+            for extent in vanilla_extents:
+                extent.fill(0)
+
+    def validate_fresh() -> dict[str, Any]:
+        reset()
+        ti.sync()
+        launch()
+        ti.sync()
+        actual_distance = distance.to_numpy()
+        actual_history = frontier_history.to_numpy()
+        distance_mismatch = int(np.count_nonzero(
+            actual_distance != expected_distance))
+        history_mismatch = int(np.count_nonzero(
+            actual_history != np.asarray(expected_history, dtype=np.int32)))
+        visited = int(np.count_nonzero(actual_distance >= 0))
+        fingerprint = {
+            "finite": True,
+            "visited_count": visited,
+            "distance_sum": int(actual_distance[actual_distance >= 0].sum(
+                dtype=np.int64)),
+            "frontier_history": actual_history.astype(np.int64).tolist(),
+            "sample_distance": actual_distance[:16].astype(np.int64).tolist(),
+        }
+        return {
+            "passed": bool(
+                distance_mismatch == 0
+                and history_mismatch == 0
+                and visited == expected_visited
+            ),
+            "comparison": "exact_fixed_depth_grid_bfs_distance_map",
+            "distance_mismatch_count": distance_mismatch,
+            "history_mismatch_count": history_mismatch,
+            "visited_count": visited,
+            "expected_visited_count": expected_visited,
+            "frontier_history": actual_history.astype(np.int64).tolist(),
+            "expected_frontier_history": expected_history,
+            "endpoint_fingerprint": fingerprint,
+        }
+
+    return {
+        "launch": launch,
+        "reset": reset,
+        "validate": validate_fresh,
+        "route": lambda: _bfs_worklist_route(
+            worklist, runtime_name, backend),
+        "logical_bytes": 0,
+        "traffic_model": (
+            "fixed-depth level-synchronous grid BFS with device frontiers; no "
+            "simplified bandwidth is claimed"
+        ),
+        "case_preparation": {
+            "side": side,
+            "nodes": elements,
+            "levels": levels,
+            "source": source,
+            "expected_visited_count": expected_visited,
+            "maximum_frontier": max(expected_history),
+        },
+        "workload_contract": {
+            "case_id": "THIN-007-BFS",
+            "comparison_class": "thin-capability",
+            "semantics": "fixed_depth_level_synchronous_2d_grid_bfs",
+            "dimension": "2d",
+            "dtype": "i32_node_frontier_and_distance",
+            "side": side,
+            "nodes": elements,
+            "levels": levels,
+            "source": source,
+            "forge_adapter": (
+                "DeviceWorklist prepare/atomic-append/commit frontier transition"
+            ),
+            "vanilla_adapter": (
+                "double-buffered frontier with atomic device count"
+            ),
+            "shared": (
+                "same square graph, source, level cap, four-neighbor expansion, "
+                "atomic-min first-visit test, device-resident counts, outer sync, and "
+                "exact distance/history oracle"
+            ),
+            "allowed_difference": (
+                "only frontier append/finalize adapter; frontier order is "
+                "unspecified and is not used as an oracle"
+            ),
+            "correctness": (
+                "exact full distance map, visited count, and per-level frontier "
+                "cardinality plus cross-runtime fingerprint"
+            ),
+            "timing": (
+                "frozen repeated complete reset-plus-64-level traversals plus "
+                "one outer sync; setup and correctness excluded"
+            ),
+        },
+    }
+
+
 def _numeric_growth(before: dict[str, Any] | None,
                     after: dict[str, Any] | None,
                     keys: Sequence[str]) -> dict[str, Any]:
@@ -3722,6 +4036,9 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
                 ti, args.runtime, args.backend, config["elements"])
         elif args.operation == "marching_squares":
             case = _build_marching_squares_case(
+                ti, args.runtime, args.backend, config["elements"])
+        elif args.operation == "bfs_worklist":
+            case = _build_bfs_worklist_case(
                 ti, args.runtime, args.backend, config["elements"])
         elif args.operation == "snode_churn":
             case = _build_snode_churn_case(
@@ -4071,6 +4388,14 @@ def _mpm_cross_runtime_endpoint_equivalent(
                     float(left["residual_max"]),
                     float(right["residual_max"]),
                     rel_tol=5.0e-5, abs_tol=5.0e-5):
+                return False
+        return True
+    if forge["operation"] == "bfs_worklist":
+        vanilla = results["vanilla"]
+        for validation_name in ("validation_before", "validation_after"):
+            left = forge[validation_name]["endpoint_fingerprint"]
+            right = vanilla[validation_name]["endpoint_fingerprint"]
+            if left != right:
                 return False
         return True
     if forge["operation"] not in (
