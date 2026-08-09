@@ -197,6 +197,7 @@ def _audit(run_dir: Path) -> dict[str, Any]:
 
     neutral_signatures = set()
     workload_signatures = set()
+    comparison_classes = set()
     for child in children:
         environment = child["environment"]
         dependency_versions = tuple(sorted(
@@ -211,8 +212,19 @@ def _audit(run_dir: Path) -> dict[str, Any]:
             tuple(sorted(child["measurement_config"].items())),
             json.dumps(child.get("workload_contract", {}), sort_keys=True),
         ))
+        comparison_class = child.get("workload_contract", {}).get(
+            "comparison_class")
+        if comparison_class is not None:
+            comparison_classes.add(comparison_class)
     _check(len(neutral_signatures) == 1, "neutral dependency parity", failures)
     _check(len(workload_signatures) == 1, "workload parity", failures)
+    if "comparison_class" in summary:
+        _check(len(comparison_classes) == 1,
+               "comparison class consistency", failures)
+        _check(
+            len(comparison_classes) == 1
+            and summary["comparison_class"] == next(iter(comparison_classes)),
+            "comparison class summary", failures)
 
     recomputed_rows = []
     all_intervals = []
@@ -331,6 +343,11 @@ def _audit(run_dir: Path) -> dict[str, Any]:
         float(config["target_sample_ms"])
         for child in children)
     if extended_contract:
+        if "comparison_class_consistent" in summary.get("method_checks", {}):
+            _check(
+                summary["method_checks"]["comparison_class_consistent"] is
+                (len(comparison_classes) == 1),
+                "comparison class method check", failures)
         _check(
             summary.get("method_checks", {}).get("physical_device_binding") is
             all(child["device_identity"]["binding_verified"]

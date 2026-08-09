@@ -15,8 +15,8 @@ qualification constants in `single_kernel_microbench.py`.
 
 ## Scope
 
-`single_kernel_microbench.py` provides five shared ndarray control kernels and
-one identical-public-API PrefixSum case:
+`single_kernel_microbench.py` provides five shared ndarray control kernels,
+three direct comparisons, and one explicitly classified thin-capability case:
 
 | Operation | Logical traffic model |
 |---|---|
@@ -27,6 +27,7 @@ one identical-public-API PrefixSum case:
 | `reduce_chunks` | one i32 read per element and one i32 chunk write |
 | `prefix_sum` | i32 inclusive scan through `ti.algorithms.PrefixSumExecutor(n).run(field)`; one logical input read and output write |
 | `parallel_sort` | dense i32 key sort through `ti.algorithms.parallel_sort(keys)`; sort-network traffic is not reduced to GB/s |
+| `native_reduce` | whole-array i32 sum to one-element ndarray; semantic minimum is one input read and one scalar output |
 
 These are control/regression microbenchmarks. They measure the ordinary kernel
 path and may detect runtime tax or a real base-path improvement, but they do not
@@ -55,6 +56,15 @@ second ndarray set and validates full x/v/C/J/grid/image state with fixed gates,
 then retains a cross-runtime endpoint fingerprint. `mpm_direct` is an independent
 control for the same workload and is never timed in the Graph process. The entry
 points are `graph_mpm_microbench.py` and `mpm_direct_control.py`.
+
+`native_reduce` is `THIN-001`. Forge uses
+`ti.algorithms.experimental_reduce(..., workspace=ReduceWorkspace(...))` while
+vanilla uses one equivalent common-source i32 atomic-sum kernel. Both sides fix
+the same ndarray data, reduction semantics, output dtype/shape, launch count,
+outer synchronization, and exact oracle. Because the public API and algorithm
+are intentionally different, reports label it `thin-capability`; it can support
+only a narrowly attributed native-reduction claim. Its one-case entry point is
+`native_reduce_microbench.py`.
 
 ## Fairness contract implemented by the runner
 
@@ -122,6 +132,16 @@ and `mpm_direct_control.py`:
 ```powershell
 C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
   benchmarks\qualification\graph_mpm_microbench.py `
+  --backend cuda --preset small --intent diagnostic `
+  --pairs 1 --samples 5 --warmups 2 `
+  --target-sample-ms 20 --stability-replays 0
+```
+
+The native reduction adapter is likewise developed as one isolated case:
+
+```powershell
+C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
+  benchmarks\qualification\native_reduce_microbench.py `
   --backend cuda --preset small --intent diagnostic `
   --pairs 1 --samples 5 --warmups 2 `
   --target-sample-ms 20 --stability-replays 0

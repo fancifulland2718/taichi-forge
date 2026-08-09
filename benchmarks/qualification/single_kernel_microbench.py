@@ -70,6 +70,7 @@ OPERATIONS = (
     "reduce_chunks",
     "prefix_sum",
     "parallel_sort",
+    "native_reduce",
     "mpm_graph",
     "mpm_direct",
 )
@@ -646,6 +647,7 @@ def _build_prefix_sum_case(ti: Any, runtime_name: str, backend: str,
         ),
         "workload_contract": {
             "case_id": "DIRECT-001",
+            "comparison_class": "direct",
             "public_api": "ti.algorithms.PrefixSumExecutor(n).run(field)",
             "dtype": "i32",
             "storage": "dense_1d_field",
@@ -743,6 +745,7 @@ def _build_parallel_sort_case(ti: Any, runtime_name: str,
         ),
         "workload_contract": {
             "case_id": "DIRECT-002",
+            "comparison_class": "direct-control",
             "public_api": "ti.algorithms.parallel_sort(keys)",
             "dtype": "i32",
             "storage": "dense_1d_field",
@@ -753,6 +756,140 @@ def _build_parallel_sort_case(ti: Any, runtime_name: str,
                 "frozen repeated parallel_sort(keys) calls plus implementation "
                 "syncs and one outer sync; reset and correctness are excluded; "
                 "the sorting network is data independent"
+            ),
+            "elements": elements,
+        },
+    }
+
+
+def _native_reduce_route(workspace: Any | None, runtime_name: str,
+                         backend: str) -> dict[str, Any]:
+    if runtime_name == "forge":
+        plan = getattr(workspace, "_native_reduce_plan", None)
+        expected_backend = {
+            "cuda": "cuda_device",
+            "vulkan": "vulkan_native",
+            "cpu": "cpu_native",
+        }[backend]
+        expected_method = {
+            "cuda": "cuda_device_reduce_ndarray",
+            "vulkan": "vulkan_reduce_ndarray",
+            "cpu": "cpu_reduce_ndarray",
+        }[backend]
+        observed_backend = getattr(plan, "backend", None)
+        observed_method = getattr(plan, "method_name", None)
+        passed = bool(
+            plan is not None
+            and observed_backend == expected_backend
+            and observed_method in (
+                expected_method,
+                "vulkan_reduce_i32_ndarray",
+            )
+        )
+        return {
+            "classification": "forge_native_reduce_plan",
+            "expected_backend": expected_backend,
+            "expected_method": expected_method,
+            "observed_plan_backend": observed_backend,
+            "observed_method": observed_method,
+            "workspace_bytes_current": getattr(
+                workspace, "workspace_bytes_current", None),
+            "workspace_bytes_peak": getattr(
+                workspace, "workspace_bytes_peak", None),
+            "passed": passed,
+        }
+    return {
+        "classification": "vanilla_equivalent_i32_atomic_sum_kernel",
+        "expected_backend": backend,
+        "expected_method": "one output reset plus parallel i32 atomic_add",
+        "observed_plan_backend": backend,
+        "observed_method": "qualification_reduce_i32_kernel",
+        "workspace_bytes_current": 0,
+        "workspace_bytes_peak": 0,
+        "passed": True,
+    }
+
+
+def _build_native_reduce_case(ti: Any, runtime_name: str, backend: str,
+                              elements: int) -> dict[str, Any]:
+    import numpy as np
+
+    host = ((np.arange(elements, dtype=np.int64) % 17) - 8).astype(np.int32)
+    expected = int(host.astype(np.int64).sum())
+    values = ti.ndarray(dtype=ti.i32, shape=elements)
+    output = ti.ndarray(dtype=ti.i32, shape=1)
+    values.from_numpy(host)
+    output.fill(0)
+
+    @ti.kernel
+    def vanilla_reduce(
+            source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            destination: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        destination[0] = 0
+        for i in source:
+            ti.atomic_add(destination[0], source[i])
+
+    workspace = (
+        ti.algorithms.ReduceWorkspace(max_items=elements)
+        if runtime_name == "forge" else None
+    )
+
+    def launch() -> None:
+        if runtime_name == "forge":
+            ti.algorithms.experimental_reduce(
+                values, output, op="sum", method="auto", workspace=workspace)
+        else:
+            vanilla_reduce(values, output)
+
+    def reset() -> None:
+        output.fill(0)
+
+    def validate_fresh() -> dict[str, Any]:
+        output.fill(0)
+        ti.sync()
+        launch()
+        ti.sync()
+        actual = int(output.to_numpy()[0])
+        return {
+            "passed": actual == expected,
+            "comparison": "exact_i32_sum",
+            "actual": actual,
+            "expected": expected,
+            "absolute_error": abs(actual - expected),
+        }
+
+    return {
+        "launch": launch,
+        "reset": reset,
+        "validate": validate_fresh,
+        "route": lambda: _native_reduce_route(
+            workspace, runtime_name, backend),
+        "logical_bytes": elements * 4 + 4,
+        "traffic_model": (
+            "semantic minimum: one i32 input read per element and one scalar "
+            "i32 output; implementation workspace traffic excluded"
+        ),
+        "workload_contract": {
+            "case_id": "THIN-001",
+            "comparison_class": "thin-capability",
+            "semantics": "whole_1d_i32_sum_to_one_element_ndarray",
+            "dtype": "i32",
+            "storage": "1d_ndarray_to_1d_length_one_ndarray",
+            "input_pattern": "(i % 17) - 8",
+            "forge_adapter": (
+                "experimental_reduce(op=sum, method=auto, reusable ReduceWorkspace)"
+            ),
+            "vanilla_adapter": (
+                "one common-source Taichi kernel with output reset and i32 atomic_add"
+            ),
+            "shared": (
+                "same ndarray allocation, values, sum semantics, output dtype/shape, "
+                "launch count, outer synchronization, and exact oracle"
+            ),
+            "correctness": "exact_i32",
+            "timing": (
+                "frozen repeated reduction calls plus one outer sync; initialization, "
+                "first call, and correctness are excluded"
             ),
             "elements": elements,
         },
@@ -986,6 +1123,7 @@ def _build_mpm_case(ti: Any, runtime_name: str, operation: str,
         },
         "workload_contract": {
             "case_id": "DIRECT-003" if operation == "mpm_graph" else "DIRECT-003-CONTROL",
+            "comparison_class": "direct" if operation == "mpm_graph" else "control",
             "mode": "graph" if operation == "mpm_graph" else "direct",
             "workload_source": str(source),
             "workload_source_sha256": sha256_file(source),
@@ -1231,6 +1369,9 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         elif args.operation == "parallel_sort":
             case = _build_parallel_sort_case(
                 ti, args.runtime, config["elements"])
+        elif args.operation == "native_reduce":
+            case = _build_native_reduce_case(
+                ti, args.runtime, args.backend, config["elements"])
         elif args.operation in ("mpm_graph", "mpm_direct"):
             case = _build_mpm_case(
                 ti, args.runtime, args.operation, args.preset)
@@ -1240,6 +1381,7 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
                                config["stencil_side"])
             case["workload_contract"] = {
                 "case_id": "CONTROL-001",
+                "comparison_class": "control",
                 "operation": args.operation,
                 "elements": config["elements"],
                 "stencil_side": config["stencil_side"],
@@ -1687,6 +1829,7 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
         name for name, passed in summary["claim_gate_results"].items()
         if not passed
     ]
+    comparison_class = summary["comparison_class"]
     forge_evidence = summary["runtime_evidence"]["forge"]
     vanilla_evidence = summary["runtime_evidence"]["vanilla"]
     forge_route = forge_evidence["route"]
@@ -1711,6 +1854,7 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             f"- 后端：`{cfg['backend']}`",
             f"- 规模：`{cfg['preset']}`",
             f"- 用途：`{cfg['intent']}`",
+            f"- 对比分类：`{comparison_class}`",
             f"- 共同 batch size：{summary['common_batch_size']}",
             f"- Fresh-process A/B 对：{result['pair_count']}",
             "- 速度比定义：vanilla / Forge，大于 1 表示 Forge 更快。",
@@ -1743,6 +1887,10 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             f"最少 replay：{vanilla_stability['minimum_replays']}；Forge 专有增强计数器"
             "明确为 unavailable。",
             "- First-call 仅作诊断；本报告的性能 gate 只适用于 warm steady-state。",
+            ("- thin-capability 结果只归因于本案例中声明的薄 capability adapter，"
+             "不得写成相同公开 API 或 Forge 整体加速。"
+             if comparison_class == "thin-capability" else
+             "- 本案例分类和允许差异由 workload contract 固定。"),
             "",
             "## 方法学边界",
             "",
@@ -1760,6 +1908,7 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             f"- Backend: `{cfg['backend']}`",
             f"- Preset: `{cfg['preset']}`",
             f"- Intent: `{cfg['intent']}`",
+            f"- Comparison class: `{comparison_class}`",
             f"- Common batch size: {summary['common_batch_size']}",
             f"- Fresh-process A/B pairs: {result['pair_count']}",
             "- Speedup definition: vanilla / Forge; values above 1 favor Forge.",
@@ -1796,6 +1945,11 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             "enhanced counters are explicitly unavailable.",
             "- First-call values are diagnostic only; performance gates in this "
             "report apply only to warm steady state.",
+            ("- A thin-capability result is attributable only to the declared "
+             "adapter in this case; it is neither an identical-public-API nor "
+             "an overall Forge speedup claim."
+             if comparison_class == "thin-capability" else
+             "- The workload contract fixes this case's class and allowed differences."),
             "",
             "## Method boundary",
             "",
@@ -1820,6 +1974,8 @@ def _write_bilingual_reports(output_dir: Path, summary: dict[str, Any]) -> None:
         f"- 环境隔离：{'通过' if summary['method_checks']['isolated_environments'] else '失败'}\n"
         f"- 中性依赖一致：{'通过' if summary['method_checks']['neutral_dependency_parity'] else '失败'}\n"
         f"- 工作负载合同一致：{'通过' if summary['method_checks']['workload_equivalence'] else '失败'}\n"
+        "- 对比分类一致："
+        f"{'通过' if summary['method_checks']['comparison_class_consistent'] else '失败'}\n"
         f"- 单 backend：通过（`{summary['config']['backend']}`）\n"
         f"- 单 kernel：通过（`{summary['config']['operation']}`）\n"
         f"- 共同 batch：{'通过' if summary['method_checks']['common_batch'] else '失败'}\n"
@@ -1847,6 +2003,8 @@ def _write_bilingual_reports(output_dir: Path, summary: dict[str, Any]) -> None:
         f"{'pass' if summary['method_checks']['neutral_dependency_parity'] else 'fail'}\n"
         "- Workload contract parity: "
         f"{'pass' if summary['method_checks']['workload_equivalence'] else 'fail'}\n"
+        "- Comparison-class consistency: "
+        f"{'pass' if summary['method_checks']['comparison_class_consistent'] else 'fail'}\n"
         f"- Single backend: pass (`{summary['config']['backend']}`)\n"
         f"- Single kernel: pass (`{summary['config']['operation']}`)\n"
         f"- Common batch: {'pass' if summary['method_checks']['common_batch'] else 'fail'}\n"
@@ -2052,6 +2210,9 @@ def _parent_main(args: argparse.Namespace) -> int:
         )
         for child in children
     }
+    comparison_classes = {
+        child["workload_contract"]["comparison_class"] for child in children
+    }
     order_counts = {
         "forge->vanilla": sum(
             tuple(order) == ("forge", "vanilla") for order, _ in pair_groups),
@@ -2065,6 +2226,7 @@ def _parent_main(args: argparse.Namespace) -> int:
             child["environment_isolated"] for child in children),
         "neutral_dependency_parity": len(neutral_environment_signatures) == 1,
         "workload_equivalence": len(workload_signatures) == 1,
+        "comparison_class_consistent": len(comparison_classes) == 1,
         "common_batch": all(
             child["batch_size"] == common_batch for child in children),
         "scored_timing_window": all(
@@ -2129,6 +2291,7 @@ def _parent_main(args: argparse.Namespace) -> int:
         "run_id": run_id,
         "completed_at_utc": datetime.now(timezone.utc).isoformat(),
         "config": manifest["config"],
+        "comparison_class": next(iter(comparison_classes)),
         "common_batch_size": common_batch,
         "pilot_suggestions": {
             runtime: pilot_results[runtime]["suggested_batch_size"]

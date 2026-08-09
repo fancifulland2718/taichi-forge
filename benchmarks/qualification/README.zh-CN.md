@@ -13,8 +13,8 @@ Forge/vanilla 比较均由相邻且不重叠的 fresh-process 对组成。
 
 ## 范围
 
-`single_kernel_microbench.py` 提供五个共用 ndarray 控制 kernel，以及一个完全同
-公开 API 的 PrefixSum 案例：
+`single_kernel_microbench.py` 提供五个共用 ndarray 控制 kernel、三个直接对比
+案例，以及一个明确分类的薄能力案例：
 
 | 操作 | 逻辑访存模型 |
 |---|---|
@@ -25,6 +25,7 @@ Forge/vanilla 比较均由相邻且不重叠的 fresh-process 对组成。
 | `reduce_chunks` | 每元素一次 i32 读取、每 chunk 一次 i32 写入 |
 | `prefix_sum` | `ti.algorithms.PrefixSumExecutor(n).run(field)` 的 i32 inclusive scan；逻辑输入/输出各一次 |
 | `parallel_sort` | `ti.algorithms.parallel_sort(keys)` 的 dense i32 key sort；排序网络内部流量不简化为 GB/s |
+| `native_reduce` | 整个 i32 数组归约到单元素 ndarray；语义最小流量为一次输入读取和一个标量输出 |
 
 这些是控制/回归 microbench，用于测量普通 kernel 路径，能够发现运行时额外成本
 或真实的基础路径提升；但它们不覆盖 Graph、native primitive、bounded dispatch、
@@ -47,6 +48,14 @@ substep 和 10 个 dispatch/frame。两边只允许 Graph runtime 内部不同�
 门槛验证，并保存跨 runtime endpoint fingerprint。`mpm_direct` 是同 workload 的
 独立控制项，不能与 Graph 在同一进程混测。对应入口分别为
 `graph_mpm_microbench.py` 和 `mpm_direct_control.py`。
+
+`native_reduce` 是 `THIN-001`。Forge 使用
+`ti.algorithms.experimental_reduce(..., workspace=ReduceWorkspace(...))`，
+vanilla 使用一个等价的共用源码 i32 atomic-sum kernel。两边固定相同 ndarray 数据、
+归约语义、输出 dtype/shape、launch 数、外层同步和 exact oracle。由于公开 API 与
+算法有意不同，报告将其标记为 `thin-capability`，只能支持明确归因于 native
+reduction 的窄结论，不能写成完全同 API 或 Forge 整体加速。单项入口为
+`native_reduce_microbench.py`。
 
 ## runner 已实现的公平性合同
 
@@ -105,6 +114,16 @@ Graph MLS-MPM 也必须单独启动；direct 控制使用另一个 run ID 和
 ```powershell
 C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
   benchmarks\qualification\graph_mpm_microbench.py `
+  --backend cuda --preset small --intent diagnostic `
+  --pairs 1 --samples 5 --warmups 2 `
+  --target-sample-ms 20 --stability-replays 0
+```
+
+native reduction adapter 同样只通过独立单项入口开发：
+
+```powershell
+C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
+  benchmarks\qualification\native_reduce_microbench.py `
   --backend cuda --preset small --intent diagnostic `
   --pairs 1 --samples 5 --warmups 2 `
   --target-sample-ms 20 --stability-replays 0

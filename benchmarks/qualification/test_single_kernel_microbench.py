@@ -8,6 +8,7 @@ from benchmarks.qualification.single_kernel_microbench import (
     _ExclusiveBenchmarkLock,
     QUALIFICATION_MINIMUMS,
     _enhanced_memory_plateau,
+    _native_reduce_route,
     balanced_pair_orders,
     paired_log_summary,
     qualification_policy_errors,
@@ -102,6 +103,24 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertIn("live_resources",
                       result["runtime_memory"]["growing_fields"])
+
+    def test_native_reduce_route_requires_the_declared_cuda_plan(self):
+        class Plan:
+            backend = "cuda_device"
+            method_name = "cuda_device_reduce_ndarray"
+
+        class Workspace:
+            _native_reduce_plan = Plan()
+            workspace_bytes_current = 4096
+            workspace_bytes_peak = 4096
+
+        passed = _native_reduce_route(Workspace(), "forge", "cuda")
+        self.assertTrue(passed["passed"])
+        self.assertEqual(passed["observed_method"],
+                         "cuda_device_reduce_ndarray")
+        Plan.method_name = "unexpected_fallback"
+        failed = _native_reduce_route(Workspace(), "forge", "cuda")
+        self.assertFalse(failed["passed"])
 
 
 if __name__ == "__main__":
