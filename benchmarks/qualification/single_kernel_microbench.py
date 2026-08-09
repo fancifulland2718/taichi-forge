@@ -1,0 +1,1484 @@
+import argparse
+import ctypes
+import gc
+import importlib
+from importlib import metadata as importlib_metadata
+import importlib.util
+import json
+import math
+import os
+from pathlib import Path
+import random
+import statistics
+import subprocess
+import sys
+import time
+import traceback
+from datetime import datetime, timezone
+from typing import Any, Callable, Sequence
+
+try:
+    from .runtime_common import (
+        command_output,
+        git_metadata,
+        gpu_compute_processes,
+        gpu_conflicting_processes,
+        gpu_snapshot,
+        host_metadata,
+        logical_bandwidth_gbps,
+        percentile,
+        process_gpu_memory_mib,
+        sha256_file,
+        summarize_samples,
+        working_set_bytes,
+        write_csv,
+        write_json,
+        write_jsonl,
+    )
+except ImportError:  # Direct script execution in the benchmark subprocess.
+    from runtime_common import (
+        command_output,
+        git_metadata,
+        gpu_compute_processes,
+        gpu_conflicting_processes,
+        gpu_snapshot,
+        host_metadata,
+        logical_bandwidth_gbps,
+        percentile,
+        process_gpu_memory_mib,
+        sha256_file,
+        summarize_samples,
+        working_set_bytes,
+        write_csv,
+        write_json,
+        write_jsonl,
+    )
+
+
+SCHEMA = "taichi_forge.single_kernel_microbench.v1"
+RESULT_PREFIX = "SINGLE_KERNEL_RESULT "
+OPERATIONS = ("fill", "copy", "saxpy", "stencil2d", "reduce_chunks")
+PRESETS = {
+    "small": {"elements": 65_536, "stencil_side": 256},
+    "medium": {"elements": 1_048_576, "stencil_side": 1_024},
+    "large": {"elements": 16_777_216, "stencil_side": 4_096},
+}
+DEPENDENCIES = {
+    "numpy": "numpy",
+    "colorama": "colorama",
+    "dill": "dill",
+    "rich": "rich",
+}
+QUALIFICATION_MINIMUMS = {
+    "pairs": 10,
+    "samples": 30,
+    "warmups": 5,
+    "target_sample_ms": 100.0,
+    "stability_replays": 1_000,
+}
+QUALIFICATION_MAX_CV_PERCENT = 5.0
+QUALIFICATION_MIN_FAVORABLE_PAIR_FRACTION = 0.8
+QUALIFICATION_MAX_REGRESSING_PAIR_FLOOR = 0.97
+QUALIFICATION_MAX_CPU_UTIL_PERCENT = 20.0
+QUALIFICATION_MAX_GPU_UTIL_PERCENT = 15.0
+QUALIFICATION_MAX_GPU_TEMPERATURE_C = 65.0
+PILOT_TIMING_HEADROOM = 1.20
+WINDOWS_BENCHMARK_MUTEX = "Global\\TaichiForgeQualificationMicrobench"
+
+
+class _ExclusiveBenchmarkLock:
+
+    def __init__(self) -> None:
+        self._handle: int | None = None
+
+    def __enter__(self) -> dict[str, Any]:
+        if os.name != "nt":
+            raise RuntimeError(
+                "the qualification driver lock is currently implemented for Windows")
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                          ctypes.c_wchar_p]
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle.restype = ctypes.c_int
+        handle = kernel32.CreateMutexW(None, True, WINDOWS_BENCHMARK_MUTEX)
+        if not handle:
+            raise OSError(ctypes.get_last_error(), "CreateMutexW failed")
+        if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+            kernel32.CloseHandle(handle)
+            raise RuntimeError(
+                "another qualification benchmark driver is already active")
+        self._handle = int(handle)
+        return {"kind": "windows_named_mutex", "name": WINDOWS_BENCHMARK_MUTEX,
+                "acquired": True}
+
+    def __exit__(self, exc_type: Any, exc_value: Any, exc_tb: Any) -> None:
+        if self._handle is not None:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+            kernel32.CloseHandle.restype = ctypes.c_int
+            kernel32.CloseHandle(ctypes.c_void_p(self._handle))
+            self._handle = None
+
+
+def balanced_pair_orders(pair_count: int, seed: int) -> list[tuple[str, str]]:
+    if pair_count <= 0:
+        raise ValueError("pair_count must be positive")
+    first = ["forge", "vanilla"]
+    if random.Random(seed).randrange(2):
+        first.reverse()
+    second = list(reversed(first))
+    return [tuple(first if index % 2 == 0 else second)
+            for index in range(pair_count)]
+
+
+def select_common_batch(suggestions: Sequence[int]) -> int:
+    values = [int(value) for value in suggestions]
+    if not values or any(value <= 0 for value in values):
+        raise ValueError("positive pilot batch suggestions are required")
+    return max(values)
+
+
+def paired_log_summary(speedups: Sequence[float], seed: int,
+                       resamples: int = 10_000) -> dict[str, Any]:
+    values = [float(value) for value in speedups]
+    if not values or any(value <= 0.0 or not math.isfinite(value)
+                         for value in values):
+        raise ValueError("finite positive paired speedups are required")
+    logs = [math.log(value) for value in values]
+    median_log = float(statistics.median(logs))
+    if len(logs) == 1:
+        lower_log = upper_log = logs[0]
+    else:
+        rng = random.Random(seed)
+        bootstrapped = [
+            float(statistics.median(rng.choice(logs) for _ in logs))
+            for _ in range(resamples)
+        ]
+        lower_log = percentile(bootstrapped, 2.5)
+        upper_log = percentile(bootstrapped, 97.5)
+    return {
+        "pair_count": len(values),
+        "pair_speedups": values,
+        "median_speedup_x": math.exp(median_log),
+        "bootstrap_95_low_x": math.exp(lower_log),
+        "bootstrap_95_high_x": math.exp(upper_log),
+        "min_speedup_x": min(values),
+        "max_speedup_x": max(values),
+    }
+
+
+def qualification_policy_errors(args: argparse.Namespace) -> list[str]:
+    if args.intent != "qualification":
+        return []
+    errors = []
+    for name, minimum in QUALIFICATION_MINIMUMS.items():
+        value = getattr(args, name)
+        if value < minimum:
+            errors.append(f"{name}={value} is below qualification minimum {minimum}")
+    if args.pairs % 2:
+        errors.append("qualification pairs must be even for exact AB/BA balance")
+    if args.cpu_affinity == "none":
+        errors.append("qualification requires explicit or automatic CPU affinity")
+    if args.max_cpu_util > QUALIFICATION_MAX_CPU_UTIL_PERCENT:
+        errors.append(
+            f"max_cpu_util={args.max_cpu_util} exceeds qualification ceiling "
+            f"{QUALIFICATION_MAX_CPU_UTIL_PERCENT}")
+    if args.backend != "cpu":
+        if args.max_gpu_util > QUALIFICATION_MAX_GPU_UTIL_PERCENT:
+            errors.append(
+                f"max_gpu_util={args.max_gpu_util} exceeds qualification ceiling "
+                f"{QUALIFICATION_MAX_GPU_UTIL_PERCENT}")
+        if args.max_gpu_temp > QUALIFICATION_MAX_GPU_TEMPERATURE_C:
+            errors.append(
+                f"max_gpu_temp={args.max_gpu_temp} exceeds qualification ceiling "
+                f"{QUALIFICATION_MAX_GPU_TEMPERATURE_C}")
+    return errors
+
+
+def _load_taichi(runtime_name: str) -> tuple[Any, float, Path]:
+    started = time.perf_counter_ns()
+    module_name = "taichi_forge" if runtime_name == "forge" else "taichi"
+    ti = importlib.import_module(module_name)
+    core_path = Path(ti._lib.core.__file__).resolve()
+    elapsed_ms = (time.perf_counter_ns() - started) / 1.0e6
+    return ti, elapsed_ms, core_path
+
+
+def _version_text(ti: Any) -> str:
+    version = getattr(ti, "__version__", "unknown")
+    if isinstance(version, tuple):
+        return ".".join(str(part) for part in version)
+    return str(version)
+
+
+def _native_commit(ti: Any) -> str | None:
+    getter = getattr(ti._lib.core, "get_commit_hash", None)
+    if getter is None:
+        return None
+    try:
+        return str(getter())
+    except (RuntimeError, TypeError):
+        return None
+
+
+def _arch_name(ti: Any, arch: Any) -> str:
+    getter = getattr(ti._lib.core, "arch_name", None)
+    if getter is not None:
+        try:
+            return str(getter(arch))
+        except (RuntimeError, TypeError):
+            pass
+    return str(arch)
+
+
+def _path_in_prefix(path: Path, prefix: Path) -> bool:
+    try:
+        path.resolve().relative_to(prefix.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _module_location(name: str) -> str | None:
+    spec = importlib.util.find_spec(name)
+    if spec is None:
+        return None
+    if spec.origin and spec.origin not in ("built-in", "frozen"):
+        return str(Path(spec.origin).resolve())
+    locations = list(spec.submodule_search_locations or ())
+    return None if not locations else str(Path(locations[0]).resolve())
+
+
+def _environment_provenance(runtime_name: str, ti: Any,
+                            core_path: Path) -> dict[str, Any]:
+    prefix = Path(sys.prefix).resolve()
+    package_path = Path(ti.__file__).resolve()
+    dependency_rows = {}
+    external_dependencies = []
+    for distribution, module in DEPENDENCIES.items():
+        try:
+            version = importlib_metadata.version(distribution)
+        except importlib_metadata.PackageNotFoundError:
+            version = None
+        location_text = _module_location(module)
+        in_prefix = bool(location_text and
+                         _path_in_prefix(Path(location_text), prefix))
+        dependency_rows[distribution] = {
+            "version": version,
+            "module_path": location_text,
+            "inside_environment": in_prefix,
+        }
+        if not in_prefix:
+            external_dependencies.append(distribution)
+    external_site_paths = []
+    for entry in sys.path:
+        if not entry or "site-packages" not in entry.lower():
+            continue
+        path = Path(entry).resolve()
+        if not _path_in_prefix(path, prefix):
+            external_site_paths.append(str(path))
+    distribution = "taichi-forge" if runtime_name == "forge" else "taichi"
+    try:
+        package_version = importlib_metadata.version(distribution)
+    except importlib_metadata.PackageNotFoundError:
+        package_version = None
+    return {
+        "sys_prefix": str(prefix),
+        "sys_base_prefix": str(Path(sys.base_prefix).resolve()),
+        "venv_active": prefix != Path(sys.base_prefix).resolve(),
+        "python_executable": str(Path(sys.executable).resolve()),
+        "python_version": sys.version,
+        "package_distribution": distribution,
+        "package_version": package_version,
+        "package_path": str(package_path),
+        "package_inside_environment": _path_in_prefix(package_path, prefix),
+        "core_path": str(core_path),
+        "core_inside_environment": _path_in_prefix(core_path, prefix),
+        "core_sha256": sha256_file(core_path),
+        "dependencies": dependency_rows,
+        "external_dependencies": external_dependencies,
+        "external_site_paths": external_site_paths,
+        "python_no_user_site": os.environ.get("PYTHONNOUSERSITE") == "1",
+        "pythonpath_present": bool(os.environ.get("PYTHONPATH")),
+    }
+
+
+def _environment_isolated(provenance: dict[str, Any]) -> bool:
+    return bool(
+        provenance["venv_active"]
+        and provenance["package_inside_environment"]
+        and provenance["core_inside_environment"]
+        and not provenance["external_dependencies"]
+        and not provenance["external_site_paths"]
+        and provenance["python_no_user_site"]
+        and not provenance["pythonpath_present"]
+    )
+
+
+def _resolve_affinity(spec: str, cpu_threads: int) -> list[int]:
+    logical = os.cpu_count() or 1
+    if spec == "none":
+        return []
+    if spec == "auto":
+        if logical >= cpu_threads * 2:
+            return list(range(0, cpu_threads * 2, 2))
+        return list(range(min(cpu_threads, logical)))
+    cpus = sorted({int(part.strip()) for part in spec.split(",") if part.strip()})
+    if not cpus or cpus[0] < 0 or cpus[-1] >= logical:
+        raise ValueError(f"invalid affinity {spec!r} for {logical} logical CPUs")
+    return cpus
+
+
+def _apply_affinity(cpus: Sequence[int]) -> dict[str, Any]:
+    requested = list(cpus)
+    if not requested:
+        return {"requested": [], "applied": False, "effective": None}
+    if os.name == "nt":
+        if max(requested) >= ctypes.sizeof(ctypes.c_size_t) * 8:
+            raise ValueError("affinity exceeds the current Windows processor group")
+        mask = sum(1 << cpu for cpu in requested)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+        kernel32.SetProcessAffinityMask.argtypes = [ctypes.c_void_p,
+                                                     ctypes.c_size_t]
+        kernel32.SetProcessAffinityMask.restype = ctypes.c_int
+        handle = kernel32.GetCurrentProcess()
+        if not kernel32.SetProcessAffinityMask(handle, ctypes.c_size_t(mask)):
+            raise OSError(ctypes.get_last_error(), "SetProcessAffinityMask failed")
+        return {"requested": requested, "applied": True, "effective": requested}
+    if hasattr(os, "sched_setaffinity"):
+        os.sched_setaffinity(0, set(requested))
+        return {
+            "requested": requested,
+            "applied": True,
+            "effective": sorted(os.sched_getaffinity(0)),
+        }
+    raise RuntimeError("process affinity is unavailable on this platform")
+
+
+def _make_kernel(ti: Any, operation: str) -> Callable[..., None]:
+    if operation == "fill":
+        @ti.kernel
+        def kernel(dst: ti.types.ndarray(dtype=ti.f32, ndim=1), value: ti.f32):
+            for i in dst:
+                dst[i] = value
+        return kernel
+    if operation == "copy":
+        @ti.kernel
+        def kernel(src: ti.types.ndarray(dtype=ti.f32, ndim=1),
+                   dst: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+            for i in dst:
+                dst[i] = src[i]
+        return kernel
+    if operation == "saxpy":
+        @ti.kernel
+        def kernel(x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+                   y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+                   dst: ti.types.ndarray(dtype=ti.f32, ndim=1), a: ti.f32):
+            for i in dst:
+                dst[i] = a * x[i] + y[i]
+        return kernel
+    if operation == "stencil2d":
+        @ti.kernel
+        def kernel(src: ti.types.ndarray(dtype=ti.f32, ndim=2),
+                   dst: ti.types.ndarray(dtype=ti.f32, ndim=2), side: ti.i32):
+            for i, j in ti.ndrange(side, side):
+                if 0 < i < side - 1 and 0 < j < side - 1:
+                    dst[i, j] = 0.2 * (src[i, j] + src[i - 1, j] +
+                                       src[i + 1, j] + src[i, j - 1] +
+                                       src[i, j + 1])
+                else:
+                    dst[i, j] = 0.0
+        return kernel
+    if operation == "reduce_chunks":
+        @ti.kernel
+        def kernel(src: ti.types.ndarray(dtype=ti.i32, ndim=1),
+                   partial: ti.types.ndarray(dtype=ti.i32, ndim=1),
+                   element_count: ti.i32, chunk_size: ti.i32):
+            for block in partial:
+                total = ti.cast(0, ti.i32)
+                ti.loop_config(serialize=True)
+                for offset in range(chunk_size):
+                    index = block * chunk_size + offset
+                    if index < element_count:
+                        total += src[index]
+                partial[block] = total
+        return kernel
+    raise ValueError(operation)
+
+
+def _numeric_validation(actual: Any, expected: Any, atol: float,
+                        rtol: float) -> dict[str, Any]:
+    import numpy as np
+
+    actual64 = np.asarray(actual, dtype=np.float64)
+    expected64 = np.asarray(expected, dtype=np.float64)
+    difference = actual64 - expected64
+    max_abs = float(np.max(np.abs(difference))) if difference.size else 0.0
+    rmse = float(np.sqrt(np.mean(difference * difference))) if difference.size else 0.0
+    scale = float(np.max(np.abs(expected64))) if expected64.size else 0.0
+    tolerance = atol + rtol * scale
+    return {
+        "passed": bool(np.all(np.isfinite(actual64)) and max_abs <= tolerance),
+        "max_abs_error": max_abs,
+        "rmse": rmse,
+        "reference_scale": scale,
+        "atol": atol,
+        "rtol": rtol,
+        "effective_tolerance": tolerance,
+    }
+
+
+def _build_case(ti: Any, kernel: Callable[..., None], operation: str,
+                elements: int, stencil_side: int) -> dict[str, Any]:
+    import numpy as np
+
+    if operation == "fill":
+        dst = ti.ndarray(dtype=ti.f32, shape=elements)
+        return {
+            "launch": lambda: kernel(dst, 1.25),
+            "validate": lambda: _numeric_validation(dst.to_numpy(), 1.25, 0.0, 0.0),
+            "logical_bytes": elements * 4,
+            "traffic_model": "one f32 write per element",
+        }
+    if operation == "copy":
+        host = ((np.arange(elements, dtype=np.int32) % 257) - 128).astype(
+            np.float32) / np.float32(64.0)
+        src = ti.ndarray(dtype=ti.f32, shape=elements)
+        dst = ti.ndarray(dtype=ti.f32, shape=elements)
+        src.from_numpy(host)
+        return {
+            "launch": lambda: kernel(src, dst),
+            "validate": lambda: _numeric_validation(dst.to_numpy(), host, 0.0, 0.0),
+            "logical_bytes": elements * 8,
+            "traffic_model": "one f32 read plus one f32 write per element",
+        }
+    if operation == "saxpy":
+        x_host = ((np.arange(elements, dtype=np.int32) % 509) - 254).astype(
+            np.float32) / np.float32(128.0)
+        y_host = ((np.arange(elements, dtype=np.int32) % 251) - 125).astype(
+            np.float32) / np.float32(64.0)
+        x = ti.ndarray(dtype=ti.f32, shape=elements)
+        y = ti.ndarray(dtype=ti.f32, shape=elements)
+        dst = ti.ndarray(dtype=ti.f32, shape=elements)
+        x.from_numpy(x_host)
+        y.from_numpy(y_host)
+        scale = 1.5
+        expected = np.float32(scale) * x_host + y_host
+        return {
+            "launch": lambda: kernel(x, y, dst, scale),
+            "validate": lambda: _numeric_validation(dst.to_numpy(), expected,
+                                                       2.0e-6, 2.0e-6),
+            "logical_bytes": elements * 12,
+            "traffic_model": "two f32 reads plus one f32 write per element",
+        }
+    if operation == "stencil2d":
+        host = ((np.arange(stencil_side * stencil_side, dtype=np.int32) %
+                 1021).astype(np.float32) / np.float32(1024.0)).reshape(
+                     stencil_side, stencil_side)
+        src = ti.ndarray(dtype=ti.f32, shape=(stencil_side, stencil_side))
+        dst = ti.ndarray(dtype=ti.f32, shape=(stencil_side, stencil_side))
+        src.from_numpy(host)
+        expected = np.zeros_like(host)
+        expected[1:-1, 1:-1] = np.float32(0.2) * (
+            host[1:-1, 1:-1] + host[:-2, 1:-1] + host[2:, 1:-1] +
+            host[1:-1, :-2] + host[1:-1, 2:])
+        return {
+            "launch": lambda: kernel(src, dst, stencil_side),
+            "validate": lambda: _numeric_validation(dst.to_numpy(), expected,
+                                                       2.0e-6, 2.0e-6),
+            "logical_bytes": stencil_side * stencil_side * 24,
+            "traffic_model": "five f32 reads plus one f32 write per grid point",
+        }
+    if operation == "reduce_chunks":
+        host = ((np.arange(elements, dtype=np.int32) % 17) - 8).astype(np.int32)
+        chunk_size = 256
+        block_count = math.ceil(elements / chunk_size)
+        src = ti.ndarray(dtype=ti.i32, shape=elements)
+        partial = ti.ndarray(dtype=ti.i32, shape=block_count)
+        src.from_numpy(host)
+        expected = int(host.astype(np.int64).sum())
+
+        def validate() -> dict[str, Any]:
+            actual = int(partial.to_numpy().astype(np.int64).sum())
+            return {
+                "passed": actual == expected,
+                "actual_sum": actual,
+                "expected_sum": expected,
+                "absolute_error": abs(actual - expected),
+            }
+
+        return {
+            "launch": lambda: kernel(src, partial, elements, chunk_size),
+            "validate": validate,
+            "logical_bytes": elements * 4 + block_count * 4,
+            "traffic_model": "one i32 read per element plus one i32 chunk write",
+        }
+    raise ValueError(operation)
+
+
+def _timed_batch(ti: Any, launch: Callable[[], None], batch_size: int) -> float:
+    ti.sync()
+    started = time.perf_counter_ns()
+    for _ in range(batch_size):
+        launch()
+    ti.sync()
+    return (time.perf_counter_ns() - started) / 1.0e6
+
+
+def _calibrate_batch(ti: Any, launch: Callable[[], None], target_ms: float,
+                     maximum: int = 16_384) -> tuple[int, list[dict[str, Any]]]:
+    batch_size = 1
+    attempts = []
+    while True:
+        elapsed_ms = _timed_batch(ti, launch, batch_size)
+        attempts.append({"batch_size": batch_size, "elapsed_ms": elapsed_ms})
+        if elapsed_ms >= target_ms or batch_size >= maximum:
+            return batch_size, attempts
+        estimate = (batch_size * 2 if elapsed_ms <= 0.0 else
+                    math.ceil(batch_size * target_ms / elapsed_ms))
+        batch_size = min(maximum, max(batch_size * 2, estimate))
+
+
+def _run_stability(ti: Any, launch: Callable[[], None], replays: int,
+                   checkpoint: int, sample_gpu: bool) -> dict[str, Any] | None:
+    if replays <= 0:
+        return None
+    rss_before = working_set_bytes()
+    gpu_before = process_gpu_memory_mib(os.getpid()) if sample_gpu else None
+    windows = []
+    completed = 0
+    while completed < replays:
+        count = min(checkpoint, replays - completed)
+        started = time.perf_counter_ns()
+        for _ in range(count):
+            launch()
+        ti.sync()
+        windows.append((time.perf_counter_ns() - started) / 1.0e6 / count)
+        completed += count
+    rss_after = working_set_bytes()
+    gpu_after = process_gpu_memory_mib(os.getpid()) if sample_gpu else None
+    rss_delta = None if rss_before is None or rss_after is None else rss_after - rss_before
+    gpu_delta = None if gpu_before is None or gpu_after is None else gpu_after - gpu_before
+    return {
+        "replays": replays,
+        "checkpoint": checkpoint,
+        "window_per_launch_ms": windows,
+        "window_summary": summarize_samples(windows),
+        "rss_before_bytes": rss_before,
+        "rss_after_bytes": rss_after,
+        "rss_delta_bytes": rss_delta,
+        "gpu_before_mib": gpu_before,
+        "gpu_after_mib": gpu_after,
+        "gpu_delta_mib": gpu_delta,
+        "memory_guard_passed": bool(
+            (rss_delta is None or rss_delta <= 64 * 1024 * 1024)
+            and (gpu_delta is None or gpu_delta <= 64.0)
+        ),
+    }
+
+
+def _child_result(args: argparse.Namespace) -> dict[str, Any]:
+    affinity = _apply_affinity(_resolve_affinity(args.cpu_affinity,
+                                                  args.cpu_threads))
+    ti, import_ms, core_path = _load_taichi(args.runtime)
+    provenance = _environment_provenance(args.runtime, ti, core_path)
+    requested_arch = getattr(ti, args.backend)
+    init_started = time.perf_counter_ns()
+    ti.init(
+        arch=requested_arch,
+        offline_cache=False,
+        kernel_profiler=False,
+        random_seed=0,
+        cpu_max_num_threads=args.cpu_threads,
+    )
+    init_ms = (time.perf_counter_ns() - init_started) / 1.0e6
+    actual_arch = ti.lang.impl.current_cfg().arch
+    result: dict[str, Any] = {
+        "schema": SCHEMA,
+        "phase": args.phase,
+        "runtime": args.runtime,
+        "operation": args.operation,
+        "backend": args.backend,
+        "preset": args.preset,
+        "pair_index": args.pair_index,
+        "position_in_pair": args.position_in_pair,
+        "measurement_config": {
+            "samples": args.samples,
+            "warmups": args.warmups,
+            "target_sample_ms": args.target_sample_ms,
+            "stability_replays": args.stability_replays,
+            "stability_checkpoint": args.stability_checkpoint,
+            "cpu_threads": args.cpu_threads,
+        },
+        "process_id": os.getpid(),
+        "affinity": affinity,
+        "environment": provenance,
+        "environment_isolated": _environment_isolated(provenance),
+        "taichi_version": _version_text(ti),
+        "native_commit": _native_commit(ti),
+        "import_ms": import_ms,
+        "init_ms": init_ms,
+        "requested_arch": _arch_name(ti, requested_arch),
+        "actual_arch": _arch_name(ti, actual_arch),
+        "arch_match": actual_arch == requested_arch,
+        "batch_size": args.batch_size,
+        "samples": [],
+        "status": "running",
+        "teardown": {},
+    }
+    try:
+        if actual_arch != requested_arch:
+            result.update(status="rejected", rejection_reason="backend fallback")
+            return result
+        if not result["environment_isolated"]:
+            result.update(status="rejected",
+                          rejection_reason="environment isolation failed")
+            return result
+        config = PRESETS[args.preset]
+        kernel = _make_kernel(ti, args.operation)
+        case = _build_case(ti, kernel, args.operation, config["elements"],
+                           config["stencil_side"])
+        result["logical_bytes"] = case["logical_bytes"]
+        result["traffic_model"] = case["traffic_model"]
+        result["first_call_ms"] = _timed_batch(ti, case["launch"], 1)
+        result["validation_before"] = case["validate"]()
+        result["warmup_ms"] = [
+            _timed_batch(ti, case["launch"], 1) for _ in range(args.warmups)
+        ]
+        if args.phase == "pilot":
+            suggestion, attempts = _calibrate_batch(
+                ti, case["launch"],
+                args.target_sample_ms * PILOT_TIMING_HEADROOM)
+            result["suggested_batch_size"] = suggestion
+            result["pilot_attempts"] = attempts
+            result["pilot_target_with_headroom_ms"] = (
+                args.target_sample_ms * PILOT_TIMING_HEADROOM)
+        else:
+            raw_batch_ms = [
+                _timed_batch(ti, case["launch"], args.batch_size)
+                for _ in range(args.samples)
+            ]
+            samples = [value / args.batch_size for value in raw_batch_ms]
+            summary = summarize_samples(samples)
+            summary["logical_bandwidth_gbps"] = logical_bandwidth_gbps(
+                case["logical_bytes"], float(summary["median_ms"]))
+            result["raw_batch_ms"] = raw_batch_ms
+            result["samples"] = samples
+            result["summary"] = summary
+            result["stability"] = _run_stability(
+                ti, case["launch"], args.stability_replays,
+                args.stability_checkpoint, args.backend != "cpu")
+        result["validation_after"] = case["validate"]()
+        stability = result.get("stability")
+        result["status"] = "passed" if (
+            result["validation_before"]["passed"]
+            and result["validation_after"]["passed"]
+            and (stability is None or stability["memory_guard_passed"])
+        ) else "failed"
+        return result
+    finally:
+        sync_error = reset_error = None
+        try:
+            ti.sync()
+        except Exception as error:  # pragma: no cover - captured in artifact
+            sync_error = repr(error)
+        pre_reset_rss = working_set_bytes()
+        pre_reset_gpu = (process_gpu_memory_mib(os.getpid())
+                         if args.backend != "cpu" else None)
+        try:
+            ti.reset()
+        except Exception as error:  # pragma: no cover - captured in artifact
+            reset_error = repr(error)
+        gc.collect()
+        result["teardown"] = {
+            "sync_error": sync_error,
+            "reset_error": reset_error,
+            "pre_reset_rss_bytes": pre_reset_rss,
+            "post_reset_rss_bytes": working_set_bytes(),
+            "pre_reset_gpu_mib": pre_reset_gpu,
+            "post_reset_gpu_mib": (process_gpu_memory_mib(os.getpid())
+                                   if args.backend != "cpu" else None),
+        }
+        if sync_error is not None or reset_error is not None:
+            result["status"] = "failed"
+
+
+def _child_main(args: argparse.Namespace) -> int:
+    try:
+        result = _child_result(args)
+    except Exception as error:  # pragma: no cover - emitted for diagnostics
+        result = {
+            "schema": SCHEMA,
+            "phase": args.phase,
+            "runtime": args.runtime,
+            "operation": args.operation,
+            "backend": args.backend,
+            "preset": args.preset,
+            "status": "error",
+            "error": repr(error),
+            "traceback": traceback.format_exc(),
+        }
+    print(RESULT_PREFIX + json.dumps(result, sort_keys=True), flush=True)
+    return 0 if result["status"] == "passed" else 2
+
+
+def _python_processes(
+        ignored_pids: Sequence[int]) -> tuple[list[dict[str, Any]], bool]:
+    ignored = {int(pid) for pid in ignored_pids}
+    if os.name != "nt":
+        return [], False
+    script = (
+        "Get-Process -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.ProcessName -in @('python','pythonw') } | "
+        "Select-Object Id,ProcessName,Path | ConvertTo-Json -Compress"
+    )
+    output = command_output(["powershell", "-NoProfile", "-Command", script])
+    if output is None:
+        return [], False
+    if not output:
+        return [], True
+    value = json.loads(output)
+    rows = value if isinstance(value, list) else [value]
+    return ([row for row in rows
+             if int(row.get("Id", -1)) not in ignored], True)
+
+
+def _filetime_value(value: Any) -> int:
+    return (int(value.dwHighDateTime) << 32) | int(value.dwLowDateTime)
+
+
+def _cpu_utilization_percent(interval_seconds: float = 0.25) -> float | None:
+    if os.name != "nt":
+        return None
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetSystemTimes.argtypes = [ctypes.POINTER(wintypes.FILETIME)] * 3
+    kernel32.GetSystemTimes.restype = wintypes.BOOL
+
+    def sample() -> tuple[int, int, int]:
+        idle = wintypes.FILETIME()
+        kernel = wintypes.FILETIME()
+        user = wintypes.FILETIME()
+        if not kernel32.GetSystemTimes(ctypes.byref(idle), ctypes.byref(kernel),
+                                       ctypes.byref(user)):
+            raise OSError(ctypes.get_last_error(), "GetSystemTimes failed")
+        return (_filetime_value(idle), _filetime_value(kernel),
+                _filetime_value(user))
+
+    try:
+        before = sample()
+        time.sleep(interval_seconds)
+        after = sample()
+    except OSError:
+        return None
+    idle_delta = after[0] - before[0]
+    total_delta = (after[1] - before[1]) + (after[2] - before[2])
+    if total_delta <= 0:
+        return None
+    return max(0.0, min(100.0, (1.0 - idle_delta / total_delta) * 100.0))
+
+
+def _noise_observation(backend: str, ignored_pids: Sequence[int],
+                       max_cpu_util: float, max_gpu_util: float,
+                       max_gpu_temp: float) -> dict[str, Any]:
+    python_conflicts, python_process_telemetry = _python_processes(ignored_pids)
+    cpu_util = _cpu_utilization_percent()
+    compute = gpu_compute_processes() if backend != "cpu" else []
+    gpu_conflicts = (gpu_conflicting_processes(compute, ignored_pids)
+                     if backend != "cpu" else [])
+    gpu = gpu_snapshot() if backend != "cpu" else []
+    gpu_util_values = []
+    gpu_temp_values = []
+    for row in gpu:
+        try:
+            gpu_util_values.append(float(row["utilization.gpu"]))
+            gpu_temp_values.append(float(row["temperature.gpu"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    reasons = []
+    if not python_process_telemetry:
+        reasons.append("Python process telemetry is unavailable")
+    if python_conflicts:
+        reasons.append("another Python process is active")
+    if cpu_util is None:
+        reasons.append("CPU utilization telemetry is unavailable")
+    if cpu_util is not None and cpu_util > max_cpu_util:
+        reasons.append(f"CPU utilization {cpu_util:.1f}% exceeds {max_cpu_util:.1f}%")
+    if backend != "cpu" and not gpu:
+        reasons.append("GPU telemetry is unavailable")
+    if gpu_conflicts:
+        reasons.append("a competing GPU compute process is active")
+    if gpu_util_values and max(gpu_util_values) > max_gpu_util:
+        reasons.append(
+            f"GPU utilization {max(gpu_util_values):.1f}% exceeds {max_gpu_util:.1f}%")
+    if gpu_temp_values and max(gpu_temp_values) > max_gpu_temp:
+        reasons.append(
+            f"GPU temperature {max(gpu_temp_values):.1f}C exceeds {max_gpu_temp:.1f}C")
+    return {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "passed": not reasons,
+        "reasons": reasons,
+        "cpu_utilization_percent": cpu_util,
+        "python_conflicts": python_conflicts,
+        "python_process_telemetry_available": python_process_telemetry,
+        "gpu_compute_processes": compute,
+        "gpu_conflicts": gpu_conflicts,
+        "gpu_snapshot": gpu,
+    }
+
+
+def _extract_result(stdout: str) -> dict[str, Any] | None:
+    for line in reversed(stdout.splitlines()):
+        if line.startswith(RESULT_PREFIX):
+            try:
+                return json.loads(line[len(RESULT_PREFIX):])
+            except json.JSONDecodeError:
+                return None
+    return None
+
+
+def _child_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    environment.pop("PYTHONHOME", None)
+    environment.pop("TAICHI_PYTHON_PYD", None)
+    environment["PYTHONNOUSERSITE"] = "1"
+    environment["PYTHONHASHSEED"] = "0"
+    environment["PYTHONUNBUFFERED"] = "1"
+    return environment
+
+
+def _run_child(args: argparse.Namespace, runtime: str, phase: str,
+               output_dir: Path, label: str, pair_index: int,
+               position_in_pair: int, batch_size: int) -> dict[str, Any]:
+    python = args.forge_python if runtime == "forge" else args.vanilla_python
+    command = [
+        str(Path(python).resolve()),
+        str(Path(__file__).resolve()),
+        "--child",
+        "--runtime", runtime,
+        "--phase", phase,
+        "--operation", args.operation,
+        "--backend", args.backend,
+        "--preset", args.preset,
+        "--pair-index", str(pair_index),
+        "--position-in-pair", str(position_in_pair),
+        "--batch-size", str(batch_size),
+        "--samples", str(args.samples),
+        "--warmups", str(args.warmups),
+        "--target-sample-ms", str(args.target_sample_ms),
+        "--stability-replays", str(args.stability_replays),
+        "--stability-checkpoint", str(args.stability_checkpoint),
+        "--cpu-threads", str(args.cpu_threads),
+        "--cpu-affinity", args.cpu_affinity,
+    ]
+    parent_launch_started_ns = time.perf_counter_ns()
+    parent_launch_started_utc = datetime.now(timezone.utc).isoformat()
+    completed = subprocess.run(
+        command,
+        cwd=Path(__file__).resolve().parents[2],
+        env=_child_environment(),
+        capture_output=True,
+        text=True,
+        timeout=args.child_timeout_seconds,
+        check=False,
+    )
+    parent_launch_finished_ns = time.perf_counter_ns()
+    log_dir = output_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / f"{label}.stdout.txt").write_text(
+        completed.stdout, encoding="utf-8", errors="replace")
+    (log_dir / f"{label}.stderr.txt").write_text(
+        completed.stderr, encoding="utf-8", errors="replace")
+    result = _extract_result(completed.stdout)
+    if result is None:
+        raise RuntimeError(f"{label} did not emit a parseable result")
+    result["return_code"] = completed.returncode
+    result["parent_launch_started_utc"] = parent_launch_started_utc
+    result["parent_launch_started_ns"] = parent_launch_started_ns
+    result["parent_launch_finished_ns"] = parent_launch_finished_ns
+    write_json(output_dir / "children" / f"{label}.json", result)
+    if completed.returncode != 0 or result.get("status") != "passed":
+        raise RuntimeError(
+            f"{label} failed: {result.get('rejection_reason') or result.get('error')}")
+    return result
+
+
+def _check_pyvenv(python: Path) -> dict[str, Any]:
+    cfg_path = python.resolve().parents[1] / "pyvenv.cfg"
+    text = cfg_path.read_text(encoding="utf-8") if cfg_path.is_file() else ""
+    system_site = any(
+        line.strip().lower() == "include-system-site-packages = true"
+        for line in text.splitlines()
+    )
+    return {
+        "python": str(python.resolve()),
+        "pyvenv_cfg": str(cfg_path),
+        "pyvenv_cfg_present": cfg_path.is_file(),
+        "include_system_site_packages": system_site,
+        "passed": cfg_path.is_file() and not system_site,
+    }
+
+
+def _pair_row(pair_index: int, order: Sequence[str],
+              results: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    forge = results["forge"]
+    vanilla = results["vanilla"]
+    forge_median = float(forge["summary"]["median_ms"])
+    vanilla_median = float(vanilla["summary"]["median_ms"])
+    forge_p95 = float(forge["summary"]["p95_ms"])
+    vanilla_p95 = float(vanilla["summary"]["p95_ms"])
+    return {
+        "pair_index": pair_index,
+        "order": "->".join(order),
+        "batch_size": forge["batch_size"],
+        "forge_median_ms": forge_median,
+        "vanilla_median_ms": vanilla_median,
+        "median_speedup_x": vanilla_median / forge_median,
+        "forge_p95_ms": forge_p95,
+        "vanilla_p95_ms": vanilla_p95,
+        "p95_speedup_x": vanilla_p95 / forge_p95,
+        "forge_first_call_ms": forge["first_call_ms"],
+        "vanilla_first_call_ms": vanilla["first_call_ms"],
+        "first_call_speedup_x": vanilla["first_call_ms"] / forge["first_call_ms"],
+        "forge_cv_percent": forge["summary"]["cv_percent"],
+        "vanilla_cv_percent": vanilla["summary"]["cv_percent"],
+        "forge_native_commit": forge["native_commit"],
+        "vanilla_native_commit": vanilla["native_commit"],
+    }
+
+
+def _neutral_environment_signature(result: dict[str, Any]) -> tuple[Any, ...]:
+    environment = result["environment"]
+    dependencies = environment["dependencies"]
+    return (
+        environment["python_version"],
+        tuple((name, dependencies[name]["version"])
+              for name in sorted(dependencies)),
+    )
+
+
+def _pair_execution_is_sequential(
+        order: Sequence[str], results: dict[str, dict[str, Any]]) -> bool:
+    first, second = (results[runtime] for runtime in order)
+    return bool(
+        first["position_in_pair"] == 1
+        and second["position_in_pair"] == 2
+        and first["parent_launch_started_ns"] < first["parent_launch_finished_ns"]
+        <= second["parent_launch_started_ns"] < second["parent_launch_finished_ns"]
+    )
+
+
+def _report_text(summary: dict[str, Any], language: str) -> str:
+    result = summary["paired_summary"]
+    cfg = summary["config"]
+    qualified = summary["ready_for_performance_claim"]
+    failed_claim_gates = [
+        name for name, passed in summary["claim_gate_results"].items()
+        if not passed
+    ]
+    if language == "zh-CN":
+        lines = [
+            "# 单 kernel 本机 microbench 报告",
+            "",
+            f"- Run ID：`{summary['run_id']}`",
+            f"- 操作：`{cfg['operation']}`",
+            f"- 后端：`{cfg['backend']}`",
+            f"- 规模：`{cfg['preset']}`",
+            f"- 用途：`{cfg['intent']}`",
+            f"- 共同 batch size：{summary['common_batch_size']}",
+            f"- Fresh-process A/B 对：{result['pair_count']}",
+            "- 速度比定义：vanilla / Forge，大于 1 表示 Forge 更快。",
+            "",
+            "## 配对结果",
+            "",
+            f"- 配对中位速度比：{result['median_speedup_x']:.4f}x",
+            f"- Paired bootstrap 95% 区间：[{result['bootstrap_95_low_x']:.4f}, "
+            f"{result['bootstrap_95_high_x']:.4f}]x",
+            f"- p95 配对中位速度比：{summary['p95_paired_summary']['median_speedup_x']:.4f}x",
+            f"- 有利配对占比：{summary['quality']['favorable_pair_fraction']:.1%}",
+            f"- 最大子进程 CV：{summary['quality']['max_child_cv_percent']:.2f}%",
+            f"- 性能宣称资格：{'通过' if qualified else '未通过'}",
+            "- 未通过的固定发布门槛：" +
+            ("无" if not failed_claim_gates else ", ".join(failed_claim_gates)),
+            "",
+            "## 方法学边界",
+            "",
+            "本报告只覆盖一个 kernel、一个 backend 和一个规模。Forge 与 vanilla "
+            "串行相邻运行，使用相同 batch size；主统计单位是 fresh-process A/B 对，"
+            "未池化跨进程 batch。完整环境、噪声准入、原始样本、正确性和 teardown "
+            "证据保存在同一 run 目录。",
+        ]
+    else:
+        lines = [
+            "# Local single-kernel microbenchmark report",
+            "",
+            f"- Run ID: `{summary['run_id']}`",
+            f"- Operation: `{cfg['operation']}`",
+            f"- Backend: `{cfg['backend']}`",
+            f"- Preset: `{cfg['preset']}`",
+            f"- Intent: `{cfg['intent']}`",
+            f"- Common batch size: {summary['common_batch_size']}",
+            f"- Fresh-process A/B pairs: {result['pair_count']}",
+            "- Speedup definition: vanilla / Forge; values above 1 favor Forge.",
+            "",
+            "## Paired result",
+            "",
+            f"- Paired median speedup: {result['median_speedup_x']:.4f}x",
+            f"- Paired bootstrap 95% interval: [{result['bootstrap_95_low_x']:.4f}, "
+            f"{result['bootstrap_95_high_x']:.4f}]x",
+            "- Paired median p95 speedup: "
+            f"{summary['p95_paired_summary']['median_speedup_x']:.4f}x",
+            "- Favorable-pair fraction: "
+            f"{summary['quality']['favorable_pair_fraction']:.1%}",
+            "- Maximum child-process CV: "
+            f"{summary['quality']['max_child_cv_percent']:.2f}%",
+            f"- Eligible for a performance claim: {'yes' if qualified else 'no'}",
+            "- Failed fixed publication gates: " +
+            ("none" if not failed_claim_gates else ", ".join(failed_claim_gates)),
+            "",
+            "## Method boundary",
+            "",
+            "This report covers one kernel, one backend, and one size only. Forge "
+            "and vanilla ran adjacently and sequentially with one common batch size. "
+            "The primary unit is a fresh-process A/B pair; batches were not pooled "
+            "across processes. The run directory retains environment, noise-admission, "
+            "raw-sample, correctness, and teardown evidence.",
+        ]
+    return "\n".join(lines) + "\n"
+
+
+def _write_bilingual_reports(output_dir: Path, summary: dict[str, Any]) -> None:
+    (output_dir / "report.zh-CN.md").write_text(
+        _report_text(summary, "zh-CN"), encoding="utf-8")
+    (output_dir / "report.en.md").write_text(
+        _report_text(summary, "en"), encoding="utf-8")
+    validation_zh = (
+        "# 方法学验证\n\n"
+        "- 独占 benchmark 锁："
+        f"{'通过' if summary['method_checks']['exclusive_driver_lock'] else '失败'}\n"
+        f"- 环境隔离：{'通过' if summary['method_checks']['isolated_environments'] else '失败'}\n"
+        f"- 中性依赖一致：{'通过' if summary['method_checks']['neutral_dependency_parity'] else '失败'}\n"
+        f"- 工作负载合同一致：{'通过' if summary['method_checks']['workload_equivalence'] else '失败'}\n"
+        f"- 单 backend：通过（`{summary['config']['backend']}`）\n"
+        f"- 单 kernel：通过（`{summary['config']['operation']}`）\n"
+        f"- 共同 batch：{'通过' if summary['method_checks']['common_batch'] else '失败'}\n"
+        f"- 计时窗口：{'通过' if summary['method_checks']['scored_timing_window'] else '失败'}\n"
+        f"- 相邻串行 A/B：{'通过' if summary['method_checks']['adjacent_sequential_pairs'] else '失败'}\n"
+        f"- AB/BA 完全平衡：{'通过' if summary['method_checks']['balanced_pair_order'] else '失败'}\n"
+        f"- 全部噪声准入：{'通过' if summary['method_checks']['noise_admission'] else '失败'}\n"
+        "- 正确性与 teardown："
+        f"{'通过' if summary['method_checks']['correctness_and_teardown'] else '失败'}\n"
+        f"- 稳定性 replay：{'通过' if summary['method_checks']['stability_complete'] else '失败'}\n"
+        f"- 双语 artifact：通过\n"
+    )
+    validation_en = (
+        "# Method validation\n\n"
+        "- Exclusive benchmark lock: "
+        f"{'pass' if summary['method_checks']['exclusive_driver_lock'] else 'fail'}\n"
+        "- Isolated environments: "
+        f"{'pass' if summary['method_checks']['isolated_environments'] else 'fail'}\n"
+        "- Neutral dependency parity: "
+        f"{'pass' if summary['method_checks']['neutral_dependency_parity'] else 'fail'}\n"
+        "- Workload contract parity: "
+        f"{'pass' if summary['method_checks']['workload_equivalence'] else 'fail'}\n"
+        f"- Single backend: pass (`{summary['config']['backend']}`)\n"
+        f"- Single kernel: pass (`{summary['config']['operation']}`)\n"
+        f"- Common batch: {'pass' if summary['method_checks']['common_batch'] else 'fail'}\n"
+        "- Scored timing window: "
+        f"{'pass' if summary['method_checks']['scored_timing_window'] else 'fail'}\n"
+        "- Adjacent sequential A/B: "
+        f"{'pass' if summary['method_checks']['adjacent_sequential_pairs'] else 'fail'}\n"
+        "- Exactly balanced AB/BA order: "
+        f"{'pass' if summary['method_checks']['balanced_pair_order'] else 'fail'}\n"
+        "- All noise admissions: "
+        f"{'pass' if summary['method_checks']['noise_admission'] else 'fail'}\n"
+        "- Correctness and teardown: "
+        f"{'pass' if summary['method_checks']['correctness_and_teardown'] else 'fail'}\n"
+        "- Stability replay: "
+        f"{'pass' if summary['method_checks']['stability_complete'] else 'fail'}\n"
+        "- Bilingual artifacts: pass\n"
+    )
+    (output_dir / "validation.zh-CN.md").write_text(validation_zh, encoding="utf-8")
+    (output_dir / "validation.en.md").write_text(validation_en, encoding="utf-8")
+
+
+def _write_failure_artifacts(output_dir: Path, manifest: dict[str, Any],
+                             error: BaseException) -> None:
+    reason = f"{type(error).__name__}: {error}"
+    failure = {
+        "schema": SCHEMA,
+        "run_id": manifest.get("run_id"),
+        "failed_at_utc": datetime.now(timezone.utc).isoformat(),
+        "reason": reason,
+        "traceback": traceback.format_exc(),
+        "ready_for_performance_claim": False,
+    }
+    manifest["failure"] = failure
+    write_json(output_dir / "manifest.json", manifest)
+    write_json(output_dir / "failure.json", failure)
+    (output_dir / "failure.zh-CN.md").write_text(
+        "# 单 kernel 运行失败\n\n"
+        f"- Run ID：`{failure['run_id']}`\n"
+        f"- 原因：`{reason}`\n"
+        "- 性能宣称资格：未通过\n"
+        "- 处置：保留诊断证据；修复或清空干扰后使用新 run ID 重跑。\n",
+        encoding="utf-8")
+    (output_dir / "failure.en.md").write_text(
+        "# Single-kernel run failure\n\n"
+        f"- Run ID: `{failure['run_id']}`\n"
+        f"- Reason: `{reason}`\n"
+        "- Performance-claim eligibility: fail\n"
+        "- Action: retain diagnostics and rerun with a new run ID after repair "
+        "or removal of interference.\n",
+        encoding="utf-8")
+
+
+def _parent_main(args: argparse.Namespace) -> int:
+    policy_errors = qualification_policy_errors(args)
+    if policy_errors:
+        raise ValueError("; ".join(policy_errors))
+    forge_python = Path(args.forge_python).resolve()
+    vanilla_python = Path(args.vanilla_python).resolve()
+    if forge_python == vanilla_python:
+        raise ValueError("Forge and vanilla must use different venv interpreters")
+    for path in (forge_python, vanilla_python, Path(args.forge_shim_wheel),
+                 Path(args.forge_runtime_wheel)):
+        if not path.is_file():
+            raise FileNotFoundError(path)
+    venv_checks = {
+        "forge": _check_pyvenv(forge_python),
+        "vanilla": _check_pyvenv(vanilla_python),
+    }
+    if not all(check["passed"] for check in venv_checks.values()):
+        raise RuntimeError("both interpreters must be isolated venvs")
+
+    repo_root = Path(__file__).resolve().parents[2]
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_id = args.run_id or (
+        f"single-{args.operation}-{args.backend}-{args.preset}-{timestamp}")
+    if Path(run_id).name != run_id:
+        raise ValueError("run_id must be one path component")
+    output_dir = Path(args.output_root).resolve() / run_id
+    if output_dir.exists():
+        raise FileExistsError(output_dir)
+    output_dir.mkdir(parents=True)
+    args._active_output_dir = output_dir
+
+    manifest = {
+        "schema": SCHEMA,
+        "run_id": run_id,
+        "started_at_utc": datetime.now(timezone.utc).isoformat(),
+        "git": git_metadata(repo_root),
+        "host": host_metadata(),
+        "config": {
+            "operation": args.operation,
+            "backend": args.backend,
+            "preset": args.preset,
+            "intent": args.intent,
+            "pairs": args.pairs,
+            "samples": args.samples,
+            "warmups": args.warmups,
+            "target_sample_ms": args.target_sample_ms,
+            "stability_replays": args.stability_replays,
+            "stability_checkpoint": args.stability_checkpoint,
+            "cpu_threads": args.cpu_threads,
+            "cpu_affinity": args.cpu_affinity,
+            "seed": args.seed,
+            "max_cpu_util": args.max_cpu_util,
+            "max_gpu_util": args.max_gpu_util,
+            "max_gpu_temp": args.max_gpu_temp,
+        },
+        "environments": venv_checks,
+        "exclusive_driver_lock": args._benchmark_lock,
+        "forge_wheels": {
+            "shim": {
+                "path": str(Path(args.forge_shim_wheel).resolve()),
+                "sha256": sha256_file(Path(args.forge_shim_wheel)),
+            },
+            "runtime": {
+                "path": str(Path(args.forge_runtime_wheel).resolve()),
+                "sha256": sha256_file(Path(args.forge_runtime_wheel)),
+            },
+        },
+        "pair_orders": balanced_pair_orders(args.pairs, args.seed),
+        "noise_observations": [],
+    }
+    args._active_manifest = manifest
+    write_json(output_dir / "manifest.json", manifest)
+
+    ignored = [os.getpid()]
+    initial_noise = _noise_observation(
+        args.backend, ignored, args.max_cpu_util, args.max_gpu_util,
+        args.max_gpu_temp)
+    manifest["noise_observations"].append({"label": "before_pilot",
+                                            **initial_noise})
+    write_json(output_dir / "manifest.json", manifest)
+    if not initial_noise["passed"]:
+        raise RuntimeError("noise admission failed before pilot: " +
+                           "; ".join(initial_noise["reasons"]))
+
+    pilot_results = {}
+    for position, runtime in enumerate(("forge", "vanilla"), start=1):
+        pilot_results[runtime] = _run_child(
+            args, runtime, "pilot", output_dir, f"pilot-{runtime}", 0,
+            position, 1)
+    common_batch = select_common_batch([
+        pilot_results["forge"]["suggested_batch_size"],
+        pilot_results["vanilla"]["suggested_batch_size"],
+    ])
+
+    pair_rows = []
+    children = []
+    pair_groups = []
+    for pair_index, order in enumerate(manifest["pair_orders"], start=1):
+        before = _noise_observation(
+            args.backend, ignored, args.max_cpu_util, args.max_gpu_util,
+            args.max_gpu_temp)
+        manifest["noise_observations"].append({
+            "label": f"pair-{pair_index:02d}-before", **before})
+        if not before["passed"]:
+            write_json(output_dir / "manifest.json", manifest)
+            raise RuntimeError(
+                f"noise admission failed before pair {pair_index}: " +
+                "; ".join(before["reasons"]))
+        results = {}
+        for position, runtime in enumerate(order, start=1):
+            label = f"pair-{pair_index:02d}-{position}-{runtime}"
+            results[runtime] = _run_child(
+                args, runtime, "score", output_dir, label, pair_index,
+                position, common_batch)
+            children.append(results[runtime])
+            between = _noise_observation(
+                args.backend, ignored, args.max_cpu_util, args.max_gpu_util,
+                args.max_gpu_temp)
+            manifest["noise_observations"].append({
+                "label": f"{label}-after", **between})
+            if not between["passed"]:
+                write_json(output_dir / "manifest.json", manifest)
+                raise RuntimeError(
+                    f"noise admission failed after {label}: " +
+                    "; ".join(between["reasons"]))
+        pair_groups.append((order, results))
+        pair_rows.append(_pair_row(pair_index, order, results))
+        write_jsonl(output_dir / "pairs.jsonl", pair_rows)
+        write_csv(output_dir / "pairs.csv", pair_rows)
+
+    paired = paired_log_summary(
+        [row["median_speedup_x"] for row in pair_rows], args.seed)
+    p95_paired = paired_log_summary(
+        [row["p95_speedup_x"] for row in pair_rows], args.seed + 1)
+    neutral_environment_signatures = {
+        _neutral_environment_signature(child) for child in children
+    }
+    workload_signatures = {
+        (
+            child["operation"], child["backend"], child["preset"],
+            child["logical_bytes"], child["traffic_model"],
+            child["batch_size"],
+            tuple(sorted(child["measurement_config"].items())),
+        )
+        for child in children
+    }
+    order_counts = {
+        "forge->vanilla": sum(
+            tuple(order) == ("forge", "vanilla") for order, _ in pair_groups),
+        "vanilla->forge": sum(
+            tuple(order) == ("vanilla", "forge") for order, _ in pair_groups),
+    }
+    method_checks = {
+        "exclusive_driver_lock": bool(
+            manifest["exclusive_driver_lock"].get("acquired")),
+        "isolated_environments": all(
+            child["environment_isolated"] for child in children),
+        "neutral_dependency_parity": len(neutral_environment_signatures) == 1,
+        "workload_equivalence": len(workload_signatures) == 1,
+        "common_batch": all(
+            child["batch_size"] == common_batch for child in children),
+        "scored_timing_window": all(
+            statistics.median(child["raw_batch_ms"]) >= args.target_sample_ms
+            for child in children),
+        "adjacent_sequential_pairs": all(
+            _pair_execution_is_sequential(order, results)
+            for order, results in pair_groups),
+        "balanced_pair_order": (
+            order_counts["forge->vanilla"] == order_counts["vanilla->forge"]),
+        "noise_admission": all(
+            item["passed"] for item in manifest["noise_observations"]),
+        "correctness_and_teardown": all(
+            child["status"] == "passed"
+            and child["validation_before"]["passed"]
+            and child["validation_after"]["passed"]
+            and child["teardown"]["sync_error"] is None
+            and child["teardown"]["reset_error"] is None
+            for child in children),
+        "stability_complete": all(
+            child.get("stability") is not None
+            and child["stability"]["replays"] >= args.stability_replays
+            and child["stability"]["memory_guard_passed"]
+            for child in children),
+    }
+    favorable_pair_fraction = sum(
+        row["median_speedup_x"] > 1.0 for row in pair_rows) / len(pair_rows)
+    max_child_cv = max(float(child["summary"]["cv_percent"])
+                       for child in children)
+    quality = {
+        "favorable_pair_fraction": favorable_pair_fraction,
+        "minimum_pair_speedup_x": min(
+            row["median_speedup_x"] for row in pair_rows),
+        "max_child_cv_percent": max_child_cv,
+        "order_counts": order_counts,
+    }
+    policy_complete = not qualification_policy_errors(args)
+    claim_gate_results = {
+        "qualification_policy": args.intent == "qualification" and policy_complete,
+        "all_method_checks": all(method_checks.values()),
+        "paired_median_above_1_03": paired["median_speedup_x"] > 1.03,
+        "paired_bootstrap_low_above_1": paired["bootstrap_95_low_x"] > 1.0,
+        "paired_p95_median_above_1": p95_paired["median_speedup_x"] > 1.0,
+        "favorable_pair_fraction_at_least_0_8": (
+            favorable_pair_fraction >= QUALIFICATION_MIN_FAVORABLE_PAIR_FRACTION),
+        "no_pair_below_0_97": (
+            quality["minimum_pair_speedup_x"] >=
+            QUALIFICATION_MAX_REGRESSING_PAIR_FLOOR),
+        "max_child_cv_at_most_5_percent": (
+            max_child_cv <= QUALIFICATION_MAX_CV_PERCENT),
+    }
+    ready_for_claim = bool(
+        all(claim_gate_results.values())
+    )
+    summary = {
+        "schema": SCHEMA,
+        "run_id": run_id,
+        "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+        "config": manifest["config"],
+        "common_batch_size": common_batch,
+        "pilot_suggestions": {
+            runtime: pilot_results[runtime]["suggested_batch_size"]
+            for runtime in ("forge", "vanilla")
+        },
+        "pair_rows": pair_rows,
+        "paired_summary": paired,
+        "p95_paired_summary": p95_paired,
+        "quality": quality,
+        "method_checks": method_checks,
+        "claim_gate_results": claim_gate_results,
+        "ready_for_qualification_report": bool(
+            args.intent == "qualification"
+            and policy_complete
+            and all(method_checks.values())),
+        "ready_for_performance_claim": ready_for_claim,
+        "claim_rule": (
+            "qualification policy complete; all method checks pass; paired median "
+            "> 1.03; paired bootstrap 95% low > 1; paired p95 median > 1; "
+            "at least 80% favorable pairs; no pair below 0.97; max child CV <= 5%"
+        ),
+    }
+    manifest["completed_at_utc"] = summary["completed_at_utc"]
+    manifest["result"] = {
+        "pair_count": len(pair_rows),
+        "ready_for_performance_claim": ready_for_claim,
+    }
+    write_json(output_dir / "manifest.json", manifest)
+    write_json(output_dir / "summary.json", summary)
+    _write_bilingual_reports(output_dir, summary)
+    print(output_dir)
+    return 0
+
+
+def _parser() -> argparse.ArgumentParser:
+    repo_root = Path(__file__).resolve().parents[2]
+    parser = argparse.ArgumentParser(
+        description=(
+            "Industry-style local A/B microbenchmark for exactly one kernel, "
+            "one backend, and one size"))
+    parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--phase", choices=("pilot", "score"),
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--runtime", choices=("forge", "vanilla"),
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--pair-index", type=int, default=0,
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--position-in-pair", type=int, default=0,
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--batch-size", type=int, default=1,
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--operation", choices=OPERATIONS, required=True)
+    parser.add_argument("--backend", choices=("cpu", "cuda", "vulkan"),
+                        required=True)
+    parser.add_argument("--preset", choices=tuple(PRESETS), required=True)
+    parser.add_argument("--intent", choices=("diagnostic", "qualification"),
+                        default="diagnostic")
+    parser.add_argument("--pairs", type=int, default=1)
+    parser.add_argument("--samples", type=int, default=5)
+    parser.add_argument("--warmups", type=int, default=2)
+    parser.add_argument("--target-sample-ms", type=float, default=20.0)
+    parser.add_argument("--stability-replays", type=int, default=0)
+    parser.add_argument("--stability-checkpoint", type=int, default=50)
+    parser.add_argument("--cpu-threads", type=int, default=16)
+    parser.add_argument("--cpu-affinity", default="auto")
+    parser.add_argument("--seed", type=int, default=20260810)
+    parser.add_argument("--max-cpu-util", type=float, default=20.0)
+    parser.add_argument("--max-gpu-util", type=float, default=15.0)
+    parser.add_argument("--max-gpu-temp", type=float, default=65.0)
+    parser.add_argument("--child-timeout-seconds", type=int, default=900)
+    parser.add_argument(
+        "--forge-python",
+        default=str(repo_root / "temp_outputs" / "benchmark_envs" /
+                    "forge-wheel-isolated-py310" / "Scripts" / "python.exe"))
+    parser.add_argument(
+        "--vanilla-python",
+        default=str(repo_root / "temp_outputs" / "benchmark_envs" /
+                    "vanilla-py310" / "Scripts" / "python.exe"))
+    parser.add_argument(
+        "--forge-shim-wheel",
+        default=str(repo_root / "dist" /
+                    "taichi_forge-0.6.2-cp310-cp310-win_amd64.whl"))
+    parser.add_argument(
+        "--forge-runtime-wheel",
+        default=str(repo_root / "dist" /
+                    "taichi_forge_runtime-0.6.2-py3-none-win_amd64.whl"))
+    parser.add_argument(
+        "--output-root",
+        default=str(repo_root / "temp_outputs" / "qualification" /
+                    "single_kernel"))
+    parser.add_argument("--run-id")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    positive = {
+        "pairs": args.pairs,
+        "samples": args.samples,
+        "warmups_plus_one": args.warmups + 1,
+        "target_sample_ms": args.target_sample_ms,
+        "stability_checkpoint": args.stability_checkpoint,
+        "cpu_threads": args.cpu_threads,
+        "batch_size": args.batch_size,
+    }
+    for name, value in positive.items():
+        if value <= 0:
+            raise ValueError(f"{name} must be positive")
+    if args.stability_replays < 0:
+        raise ValueError("stability_replays must not be negative")
+    if args.child:
+        if args.runtime is None or args.phase is None:
+            raise ValueError("child mode requires --runtime and --phase")
+        return _child_main(args)
+    try:
+        with _ExclusiveBenchmarkLock() as lock:
+            args._benchmark_lock = lock
+            return _parent_main(args)
+    except Exception as error:
+        output_dir = getattr(args, "_active_output_dir", None)
+        manifest = getattr(args, "_active_manifest", None)
+        if output_dir is not None and manifest is not None:
+            _write_failure_artifacts(output_dir, manifest, error)
+        raise
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

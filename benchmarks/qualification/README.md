@@ -1,0 +1,114 @@
+# Local single-kernel qualification
+
+English | [简体中文](README.zh-CN.md)
+
+This directory contains the reviewed local A/B microbenchmark for ordinary
+Taichi kernels. The executable accepts exactly one operation, one backend, and
+one size. It never launches different backend benchmarks together, and every
+Forge/vanilla comparison is an adjacent, non-overlapping fresh-process pair.
+
+The bilingual working plans intentionally live in the Git-ignored local area:
+`temp_outputs/qualification/planning/PLAN.en.md` and `PLAN.zh-CN.md`. They are
+not release source and must not be added to Git. Publication thresholds are
+fixed in those plans and encoded by `QUALIFICATION_MINIMUMS` and the associated
+qualification constants in `single_kernel_microbench.py`.
+
+## Scope
+
+`single_kernel_microbench.py` provides five shared ndarray kernels:
+
+| Operation | Logical traffic model |
+|---|---|
+| `fill` | one f32 write per element |
+| `copy` | one f32 read and one f32 write per element |
+| `saxpy` | two f32 reads and one f32 write per element |
+| `stencil2d` | five f32 reads and one f32 write per grid point |
+| `reduce_chunks` | one i32 read per element and one i32 chunk write |
+
+These are control/regression microbenchmarks. They measure the ordinary kernel
+path and may detect runtime tax or a real base-path improvement, but they do not
+exercise Graph, native primitives, bounded dispatch, worklists, LinearOperator,
+or another Forge-only API. Results must not be extrapolated to those features.
+
+## Fairness contract implemented by the runner
+
+- Forge and vanilla use separate dependency-complete venvs. Child processes
+  remove `PYTHONPATH`/`PYTHONHOME`, disable user site packages, prove that the
+  selected package/core/dependencies live in that venv, and require matching
+  Python and neutral dependency versions.
+- One non-scored pilot runs on each side. The larger suggested batch is frozen
+  for every scored process, so both sides execute the same launch count and the
+  scored batch meets the requested timing window.
+- Process order alternates AB/BA with a fixed seed. The primary observations
+  are pair-level `vanilla / Forge` speedups; samples from different processes
+  are never pooled.
+- A system-wide named mutex allows only one qualification driver at a time, so
+  separate CPU/CUDA/Vulkan benchmark invocations cannot overlap accidentally.
+- Each child applies the same CPU thread count and affinity, disables Taichi's
+  offline cache, separates import/init/first-call/warm timing, synchronizes at
+  identical boundaries, validates before and after timing, and syncs/resets on
+  teardown.
+- Before the pilot, before every pair, and after every child, the parent rejects
+  other Python processes, excessive CPU use, competing GPU work, excessive GPU
+  utilization or temperature, and unavailable required telemetry. A rejected
+  run stops; it is not averaged or silently retried.
+- A qualification result is publishable only when every encoded methodology,
+  stability, variability, paired-effect, and bilingual-artifact gate passes.
+  Diagnostic runs can never produce a performance claim.
+
+## Development smoke: one case only
+
+First create or select two complete isolated environments. Then run a minimal
+diagnostic for one CPU kernel:
+
+```powershell
+C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
+  benchmarks\qualification\single_kernel_microbench.py `
+  --operation fill --backend cpu --preset small `
+  --intent diagnostic --pairs 1 --samples 5 --warmups 2 `
+  --target-sample-ms 20 --stability-replays 0
+```
+
+This smoke validates execution and evidence generation only. It cannot support
+a speed claim. Do not replace it with an aggregate or multi-backend launch while
+developing a case.
+
+For an already validated case, qualification mode enforces the fixed minimums:
+
+```powershell
+C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
+  benchmarks\qualification\single_kernel_microbench.py `
+  --operation fill --backend cpu --preset small `
+  --intent qualification --pairs 10 --samples 30 --warmups 5 `
+  --target-sample-ms 100 --stability-replays 1000
+```
+
+Run artifacts are written under
+`temp_outputs/qualification/single_kernel/<run-id>/`. They include the manifest,
+per-child JSON and stdout/stderr, pair-level JSONL/CSV, raw batch samples,
+environment and wheel hashes, noise observations, `summary.json`, and paired
+Chinese/English reports and validations.
+
+Recompute the evidence from the per-child artifacts with the separate auditor:
+
+```powershell
+C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
+  benchmarks\qualification\audit_single_kernel_run.py `
+  temp_outputs\qualification\single_kernel\<run-id>
+```
+
+The auditor also validates admission-failed runs from `failure.json` and the
+paired Chinese/English failure files; such an audit can pass artifact integrity
+while performance-claim eligibility remains false.
+
+## Interpretation boundary
+
+Logical GB/s is a source-level traffic estimate, not a memory-controller
+counter. First call includes compilation plus one launch. Steady-state timing
+includes Python submission and one synchronization around the frozen batch.
+Stability memory limits are qualification guardrails, not engine limits. CUDA
+context residency must remain separate from live Taichi allocation claims.
+
+The earlier full-matrix exploratory harness and its source snapshot are retained
+only under `temp_outputs/qualification/legacy_common_kernel_exploration/`; they
+are not part of this qualification implementation.
