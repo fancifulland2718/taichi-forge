@@ -9,6 +9,7 @@ from benchmarks.qualification.single_kernel_microbench import (
     QUALIFICATION_MINIMUMS,
     _enhanced_memory_plateau,
     _native_reduce_route,
+    _native_transform_route,
     balanced_pair_orders,
     paired_log_summary,
     qualification_policy_errors,
@@ -121,6 +122,22 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         Plan.method_name = "unexpected_fallback"
         failed = _native_reduce_route(Workspace(), "forge", "cuda")
         self.assertFalse(failed["passed"])
+
+    def test_native_transform_route_rejects_fallback(self):
+        class Plan:
+            backend = "cuda_device"
+            method_name = "cuda_device_transform_affine_ndarray"
+
+        class Workspace:
+            _native_transform_plan = Plan()
+            workspace_bytes_current = 0
+            workspace_bytes_peak = 0
+
+        self.assertTrue(
+            _native_transform_route(Workspace(), "forge", "cuda")["passed"])
+        Plan.backend = "field_kernel"
+        self.assertFalse(
+            _native_transform_route(Workspace(), "forge", "cuda")["passed"])
 
 
 if __name__ == "__main__":

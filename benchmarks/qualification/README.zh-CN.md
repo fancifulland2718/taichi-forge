@@ -26,6 +26,7 @@ Forge/vanilla 比较均由相邻且不重叠的 fresh-process 对组成。
 | `prefix_sum` | `ti.algorithms.PrefixSumExecutor(n).run(field)` 的 i32 inclusive scan；逻辑输入/输出各一次 |
 | `parallel_sort` | `ti.algorithms.parallel_sort(keys)` 的 dense i32 key sort；排序网络内部流量不简化为 GB/s |
 | `native_reduce` | 整个 i32 数组归约到单元素 ndarray；语义最小流量为一次输入读取和一个标量输出 |
+| `native_transform` | 逐元素 i32 affine transform；每元素一次源读取和一次目标写入 |
 
 这些是控制/回归 microbench，用于测量普通 kernel 路径，能够发现运行时额外成本
 或真实的基础路径提升；但它们不覆盖 Graph、native primitive、bounded dispatch、
@@ -56,6 +57,11 @@ vanilla 使用一个等价的共用源码 i32 atomic-sum kernel。两边固定�
 算法有意不同，报告将其标记为 `thin-capability`，只能支持明确归因于 native
 reduction 的窄结论，不能写成完全同 API 或 Forge 整体加速。单项入口为
 `native_reduce_microbench.py`。
+
+`native_transform` 是拆开的第一个 `THIN-002` 数据搬运子案例。Forge 使用可复用
+`TransformWorkspace`，vanilla 使用一个等价的逐元素 Taichi kernel；必须通过 exact
+i32 输出与 native plan 检查。它同样属于 `thin-capability`，独立入口为
+`native_transform_microbench.py`。
 
 ## runner 已实现的公平性合同
 
@@ -124,6 +130,16 @@ native reduction adapter 同样只通过独立单项入口开发：
 ```powershell
 C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
   benchmarks\qualification\native_reduce_microbench.py `
+  --backend cuda --preset small --intent diagnostic `
+  --pairs 1 --samples 5 --warmups 2 `
+  --target-sample-ms 20 --stability-replays 0
+```
+
+affine transform 子案例使用自己的入口与 run ID：
+
+```powershell
+C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
+  benchmarks\qualification\native_transform_microbench.py `
   --backend cuda --preset small --intent diagnostic `
   --pairs 1 --samples 5 --warmups 2 `
   --target-sample-ms 20 --stability-replays 0

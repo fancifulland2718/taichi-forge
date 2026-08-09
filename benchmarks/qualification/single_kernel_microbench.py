@@ -71,6 +71,7 @@ OPERATIONS = (
     "prefix_sum",
     "parallel_sort",
     "native_reduce",
+    "native_transform",
     "mpm_graph",
     "mpm_direct",
 )
@@ -896,6 +897,141 @@ def _build_native_reduce_case(ti: Any, runtime_name: str, backend: str,
     }
 
 
+def _native_transform_route(workspace: Any | None, runtime_name: str,
+                            backend: str) -> dict[str, Any]:
+    if runtime_name == "forge":
+        plan = getattr(workspace, "_native_transform_plan", None)
+        expected_backend = {
+            "cuda": "cuda_device",
+            "vulkan": "vulkan_native",
+            "cpu": "cpu_native",
+        }[backend]
+        allowed_methods = {
+            "cuda": {"cuda_device_transform_affine_ndarray"},
+            "vulkan": {
+                "vulkan_transform_affine_ndarray",
+                "vulkan_transform_affine_ndarray_trusted",
+            },
+            "cpu": {"cpu_transform_affine_ndarray"},
+        }[backend]
+        observed_backend = getattr(plan, "backend", None)
+        observed_method = getattr(plan, "method_name", None)
+        passed = bool(
+            plan is not None
+            and observed_backend == expected_backend
+            and observed_method in allowed_methods
+        )
+        return {
+            "classification": "forge_native_transform_plan",
+            "expected_backend": expected_backend,
+            "expected_methods": sorted(allowed_methods),
+            "observed_plan_backend": observed_backend,
+            "observed_method": observed_method,
+            "workspace_bytes_current": getattr(
+                workspace, "workspace_bytes_current", None),
+            "workspace_bytes_peak": getattr(
+                workspace, "workspace_bytes_peak", None),
+            "passed": passed,
+        }
+    return {
+        "classification": "vanilla_equivalent_i32_affine_kernel",
+        "expected_backend": backend,
+        "expected_methods": ["one elementwise i32 affine Taichi kernel"],
+        "observed_plan_backend": backend,
+        "observed_method": "qualification_transform_i32_kernel",
+        "workspace_bytes_current": 0,
+        "workspace_bytes_peak": 0,
+        "passed": True,
+    }
+
+
+def _build_native_transform_case(ti: Any, runtime_name: str, backend: str,
+                                 elements: int) -> dict[str, Any]:
+    import numpy as np
+
+    host = ((np.arange(elements, dtype=np.int64) % 1009) - 504).astype(np.int32)
+    expected = (host * np.int32(3) + np.int32(7)).astype(np.int32)
+    values = ti.ndarray(dtype=ti.i32, shape=elements)
+    output = ti.ndarray(dtype=ti.i32, shape=elements)
+    values.from_numpy(host)
+    output.fill(0)
+
+    @ti.kernel
+    def vanilla_transform(
+            source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            destination: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in source:
+            destination[i] = source[i] * 3 + 7
+
+    workspace = (
+        ti.algorithms.TransformWorkspace(max_items=elements)
+        if runtime_name == "forge" else None
+    )
+
+    def launch() -> None:
+        if runtime_name == "forge":
+            ti.algorithms.experimental_transform(
+                values, output, scale=3, bias=7, method="auto",
+                workspace=workspace)
+        else:
+            vanilla_transform(values, output)
+
+    def reset() -> None:
+        output.fill(0)
+
+    def validate_fresh() -> dict[str, Any]:
+        output.fill(0)
+        ti.sync()
+        launch()
+        ti.sync()
+        actual = output.to_numpy()
+        mismatch = np.flatnonzero(actual != expected)
+        return {
+            "passed": mismatch.size == 0,
+            "comparison": "exact_i32_affine_transform",
+            "mismatch_count": int(mismatch.size),
+            "first_mismatch": (
+                None if mismatch.size == 0 else int(mismatch[0])
+            ),
+        }
+
+    return {
+        "launch": launch,
+        "reset": reset,
+        "validate": validate_fresh,
+        "route": lambda: _native_transform_route(
+            workspace, runtime_name, backend),
+        "logical_bytes": elements * 8,
+        "traffic_model": (
+            "semantic minimum: one i32 source read and one i32 destination "
+            "write per element; implementation workspace traffic excluded"
+        ),
+        "workload_contract": {
+            "case_id": "THIN-002-TRANSFORM",
+            "comparison_class": "thin-capability",
+            "semantics": "dst_i_equals_src_i_times_3_plus_7",
+            "dtype": "i32",
+            "storage": "1d_ndarray_to_same_shape_1d_ndarray",
+            "input_pattern": "(i % 1009) - 504",
+            "forge_adapter": (
+                "experimental_transform(scale=3,bias=7,method=auto,reusable "
+                "TransformWorkspace)"
+            ),
+            "vanilla_adapter": "one common-source elementwise Taichi kernel",
+            "shared": (
+                "same ndarray allocation, values, affine semantics, output "
+                "dtype/shape, launch count, outer synchronization, and exact oracle"
+            ),
+            "correctness": "exact_i32_elementwise",
+            "timing": (
+                "frozen repeated transform calls plus one outer sync; "
+                "initialization, first call, and correctness are excluded"
+            ),
+            "elements": elements,
+        },
+    }
+
+
 def _load_graph_mpm_workload() -> tuple[Any, Path]:
     source = Path(__file__).resolve().parents[1] / "graph_mpm_replay_bench.py"
     spec = importlib.util.spec_from_file_location(
@@ -1371,6 +1507,9 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
                 ti, args.runtime, config["elements"])
         elif args.operation == "native_reduce":
             case = _build_native_reduce_case(
+                ti, args.runtime, args.backend, config["elements"])
+        elif args.operation == "native_transform":
+            case = _build_native_transform_case(
                 ti, args.runtime, args.backend, config["elements"])
         elif args.operation in ("mpm_graph", "mpm_direct"):
             case = _build_mpm_case(
