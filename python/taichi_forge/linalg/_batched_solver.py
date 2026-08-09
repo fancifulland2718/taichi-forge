@@ -40,7 +40,7 @@ def _feature_enabled_from_env(name):
     return value.strip().casefold() not in ("0", "false", "off", "no")
 
 
-def _batched_recurrence_replay_capability(program):
+def _batched_recurrence_replay_capability(program, execution_policy=None):
     arch = program.config().arch
     if arch == _ti_core.Arch.cuda:
         env_name = _CUDA_BATCHED_RECURRENCE_REPLAY_ENV
@@ -56,13 +56,25 @@ def _batched_recurrence_replay_capability(program):
             "environment_control": None,
             "unsupported_reason": "gpu_backend_required",
         }
-    enabled = _feature_enabled_from_env(env_name)
+    transaction_safe = not (
+        arch == _ti_core.Arch.vulkan
+        and execution_policy == "fixed_budget_masked"
+    )
+    enabled = _feature_enabled_from_env(env_name) and transaction_safe
     return {
-        "qualified": True,
+        "qualified": transaction_safe,
         "enabled": enabled,
         "backend": backend,
         "environment_control": env_name,
-        "unsupported_reason": None if enabled else "disabled_by_environment",
+        "unsupported_reason": (
+            None
+            if enabled
+            else (
+                "vulkan_active_submission_batch_sync_unsafe"
+                if not transaction_safe
+                else "disabled_by_environment"
+            )
+        ),
     }
 
 
@@ -72,6 +84,10 @@ def _graph_ndarray_arg(name, dtype):
 
 def _graph_i32_arg(name):
     return Arg(ArgKind.SCALAR, name, i32)
+
+
+def _graph_i32_scalar_arg(name):
+    return Arg(ArgKind.NDARRAY, name, i32, ndim=0)
 
 
 class _BatchedRecurrenceReplay:
@@ -248,6 +264,313 @@ class _BatchedRecurrenceReplay:
         return 2
 
 
+class _BatchedDeviceConvergentReplay:
+    """One device-controlled Graph containing batched A, M, and recurrence.
+
+    The Graph owns no caller vectors, so one instance can be rebound to a new
+    RHS/output pair after its plan workspace lane becomes free. Recordable
+    provider actions dynamically rebind compatible numeric generations at
+    submission time and pin the exact A/M records until backend completion.
+    """
+
+    def __init__(self, plan):
+        self._plan = plan
+        self._graph = self._build_graph(plan)
+        self._runtime_arg_names = frozenset(
+            self._graph._spec.runtime_arg_names
+        )
+        self.graph_builds = 1
+        self.submissions = 0
+        self.last_control_report = None
+
+    @staticmethod
+    def _build_graph(plan):
+        names = {
+            name: _graph_ndarray_arg(name, dtype)
+            for name, dtype in (
+                ("rhs", f32),
+                ("initial", f32),
+                ("output", f32),
+                ("applied", f32),
+                ("residual", f32),
+                ("direction", f32),
+                ("float_state", f32),
+                ("int_state", i32),
+                ("counters", i32),
+                ("absolute_tolerance", f32),
+                ("relative_tolerance", f32),
+            )
+        }
+        if plan.method == "pcg":
+            names["preconditioned_residual"] = _graph_ndarray_arg(
+                "preconditioned_residual", f32
+            )
+        predicate = _graph_i32_scalar_arg("predicate")
+        status = _graph_i32_scalar_arg("status")
+        counter = _graph_i32_scalar_arg("counter")
+        use_initial_guess = _graph_i32_arg("use_initial_guess")
+        total_size = _graph_i32_arg("total_size")
+        system_size = _graph_i32_arg("system_size")
+        batch_size = _graph_i32_arg("batch_size")
+
+        builder = GraphBuilder()
+        builder.dispatch(
+            _kernels.initialize_output,
+            names["initial"],
+            names["output"],
+            use_initial_guess,
+            total_size,
+        )
+        builder.append_native(
+            plan.operator.graph_action(names["output"], names["applied"])
+        )
+        builder.dispatch(
+            _kernels.initialize_residual,
+            names["rhs"],
+            names["applied"],
+            names["residual"],
+            names["float_state"],
+            names["int_state"],
+            names["absolute_tolerance"],
+            names["relative_tolerance"],
+            names["counters"],
+            total_size,
+            system_size,
+            batch_size,
+        )
+        if plan.max_iterations > 0 and plan.method == "pcg":
+            builder.append_native(
+                plan.preconditioner.graph_action(
+                    names["residual"], names["preconditioned_residual"]
+                )
+            )
+            builder.dispatch(
+                _kernels.reduce_dot,
+                names["residual"],
+                names["preconditioned_residual"],
+                names["float_state"],
+                names["int_state"],
+                total_size,
+                system_size,
+                batch_size,
+                template_args={"state_slot": _kernels.RHO_CURRENT},
+            )
+            builder.dispatch(
+                _kernels.validate_initial_rho,
+                names["float_state"],
+                names["int_state"],
+                names["counters"],
+                batch_size,
+            )
+        if plan.max_iterations > 0:
+            source = (
+                names["preconditioned_residual"]
+                if plan.method == "pcg"
+                else names["residual"]
+            )
+            builder.dispatch(
+                _kernels.initialize_direction,
+                source,
+                names["direction"],
+                names["int_state"],
+                total_size,
+                system_size,
+                batch_size,
+            )
+        builder.dispatch(
+            _kernels.initialize_loop_control, predicate, status, counter
+        )
+
+        condition = builder.create_sequential()
+        condition.dispatch(
+            _kernels.evaluate_active_systems,
+            names["counters"],
+            predicate,
+            status,
+        )
+        body = builder.create_sequential()
+        body.append_native(
+            plan.operator.graph_action(names["direction"], names["applied"])
+        )
+        body.dispatch(
+            _kernels.reduce_dot,
+            names["direction"],
+            names["applied"],
+            names["float_state"],
+            names["int_state"],
+            total_size,
+            system_size,
+            batch_size,
+            template_args={"state_slot": _kernels.P_AP},
+        )
+        body.dispatch(
+            _kernels.prepare_alpha,
+            names["float_state"],
+            names["int_state"],
+            names["counters"],
+            batch_size,
+            template_args={"preconditioned": plan.method == "pcg"},
+        )
+        body.dispatch(
+            _kernels.update_solution_residual,
+            names["direction"],
+            names["applied"],
+            names["output"],
+            names["residual"],
+            names["float_state"],
+            names["int_state"],
+            names["counters"],
+            total_size,
+            system_size,
+            batch_size,
+        )
+        if plan.method == "pcg":
+            body.append_native(
+                plan.preconditioner.graph_action(
+                    names["residual"], names["preconditioned_residual"]
+                )
+            )
+            body.dispatch(
+                _kernels.reduce_dot,
+                names["residual"],
+                names["preconditioned_residual"],
+                names["float_state"],
+                names["int_state"],
+                total_size,
+                system_size,
+                batch_size,
+                template_args={"state_slot": _kernels.RHO_NEXT},
+            )
+        source = (
+            names["preconditioned_residual"]
+            if plan.method == "pcg"
+            else names["residual"]
+        )
+        body.dispatch(
+            _kernels.prepare_direction,
+            source,
+            names["direction"],
+            names["float_state"],
+            names["int_state"],
+            names["counters"],
+            total_size,
+            system_size,
+            batch_size,
+            template_args={"preconditioned": plan.method == "pcg"},
+        )
+        body.dispatch(_kernels.advance_loop_counter, counter)
+
+        carried_state = (
+            names["output"],
+            names["applied"],
+            names["residual"],
+            names["direction"],
+            names["float_state"],
+            names["int_state"],
+            names["counters"],
+        )
+        if plan.method == "pcg":
+            carried_state += (names["preconditioned_residual"],)
+        chunk_size = min(
+            64,
+            max(
+                plan.check_interval,
+                (plan.max_iterations + 7) // 8,
+                1,
+            ),
+        )
+        builder.while_loop(
+            condition,
+            body,
+            predicate=predicate,
+            status=status,
+            control_inputs=(names["counters"],),
+            carried_state=carried_state,
+            counter=counter,
+            max_iterations=plan.max_iterations,
+            chunk_size=chunk_size,
+            lowering_mode="native_required",
+            name="batched_device_convergent_pcg"
+            if plan.method == "pcg"
+            else "batched_device_convergent_cg",
+        )
+        builder.dispatch(
+            _kernels.mark_max_iterations,
+            names["float_state"],
+            names["int_state"],
+            names["counters"],
+            batch_size,
+        )
+        return builder.compile()
+
+    def submit(
+        self,
+        rhs,
+        initial_guess,
+        output,
+        *,
+        pacer,
+        lane,
+        on_saturation,
+    ):
+        plan = self._plan
+        arguments = {
+            "rhs": rhs,
+            "initial": output if initial_guess is None else initial_guess,
+            "output": output,
+            "applied": plan._ap,
+            "residual": plan._residual,
+            "direction": plan._direction,
+            "float_state": plan._float_state,
+            "int_state": plan._int_state,
+            "counters": plan._counters,
+            "absolute_tolerance": plan._absolute_tolerance,
+            "relative_tolerance": plan._relative_tolerance,
+            "predicate": plan._device_predicate,
+            "status": plan._device_status,
+            "counter": plan._device_counter,
+            "use_initial_guess": int(initial_guess is not None),
+            "total_size": plan.total_size,
+            "system_size": plan.system_size,
+            "batch_size": plan.batch_size,
+        }
+        if plan.method == "pcg":
+            arguments["preconditioned_residual"] = (
+                plan._preconditioned_residual
+            )
+        arguments = {
+            name: value
+            for name, value in arguments.items()
+            if name in self._runtime_arg_names
+        }
+        ticket = self._graph.submit(
+            arguments,
+            pacer=pacer,
+            lane=lane,
+            on_saturation=on_saturation,
+        )
+        self.submissions += 1
+        return ticket
+
+    def update_control_report(self, logical_iterations):
+        # Asynchronous structured submissions deliberately do not expose the
+        # mutable Graph-wide control-flow report. The plan-owned counter is an
+        # exact per-ticket terminal value and remains available without opting
+        # every production solve into the heavier telemetry snapshot path.
+        self.last_control_report = {
+            "name": (
+                "batched_device_convergent_pcg"
+                if self._plan.method == "pcg"
+                else "batched_device_convergent_cg"
+            ),
+            "logical_iterations": int(logical_iterations),
+            "encoded_iterations": None,
+            "masked_iterations": None,
+            "source": "plan_device_counter",
+        }
+        return self.last_control_report
+
+
 @dataclass(frozen=True)
 class BatchedSolveResult:
     """Immutable per-system terminal snapshot from `BatchedSolvePlan`."""
@@ -295,6 +618,7 @@ class SolveSubmission:
         "_solution",
         "_issued_iterations",
         "_admission",
+        "_graph_ticket",
         "__weakref__",
     )
 
@@ -309,6 +633,7 @@ class SolveSubmission:
         preconditioner_session,
         issued_iterations,
         admission=None,
+        graph_ticket=None,
     ):
         self._plan = plan
         self._completion = completion
@@ -319,6 +644,7 @@ class SolveSubmission:
         self._preconditioner_session = preconditioner_session
         self._issued_iterations = issued_iterations
         self._admission = admission
+        self._graph_ticket = graph_ticket
         self._result = None
         self._failure = None
         self._invalid_reason = None
@@ -329,6 +655,8 @@ class SolveSubmission:
             return True
         if self._invalid_reason is not None:
             return True
+        if self._graph_ticket is not None:
+            return self._graph_ticket.done()
         if self._admission is None:
             return self._completion.done()
         return self._admission._completion_done(self._completion)
@@ -355,10 +683,14 @@ class SolveSubmission:
 
     @property
     def backend(self):
+        if self._graph_ticket is not None:
+            return self._graph_ticket.backend
         return self._completion.backend
 
     @property
     def sequence(self):
+        if self._graph_ticket is not None:
+            return self._graph_ticket.sequence
         return self._completion.sequence
 
 
@@ -556,7 +888,11 @@ class BatchedSolvePlan:
         self._submission_rejections = 0
         self._pending_submission = None
         self._submission_lane = _new_submission_lane("batched_solve_plan")
-        self._recurrence_replay_capability = _batched_recurrence_replay_capability(self._program)
+        self._recurrence_replay_capability = (
+            _batched_recurrence_replay_capability(
+                self._program, self.execution_policy
+            )
+        )
         self._recurrence_replay = None
         self._recurrence_replay_builds = 0
         self._recurrence_replay_graph_builds = 0
@@ -564,6 +900,10 @@ class BatchedSolvePlan:
         self._recurrence_replay_logical_kernels = 0
         self._recurrence_replay_rebinds = 0
         self._recurrence_direct_kernel_submissions = 0
+        self._device_convergent_replay = None
+        self._device_convergent_graph_builds = 0
+        self._device_convergent_graph_submissions = 0
+        self._device_convergent_logical_iterations = 0
         self._lifecycle_lock = threading.RLock()
         self._build_workspace()
         get_runtime().register_runtime_object(self)
@@ -580,25 +920,25 @@ class BatchedSolvePlan:
         if not isinstance(policy, str):
             raise TaichiRuntimeError("execution_policy must be a string")
         policy = policy.casefold()
+        capabilities = self._execution_policy_capabilities()
         if policy == "device_convergent":
-            capability = _solver_execution_capabilities(
-                self._program,
-                self.operator._provider_kind,
-                batched=True,
-            )["device_convergent"]
-            raise TaichiRuntimeError(
-                "BatchedSolvePlan execution_policy='device_convergent' is "
-                "unsupported; no fallback was performed: "
-                f"{capability['unsupported_reason']}"
-            )
+            capability = capabilities["device_convergent"]
+            if not capability["supported"]:
+                raise TaichiRuntimeError(
+                    "BatchedSolvePlan execution_policy='device_convergent' "
+                    "is unsupported; no fallback was performed: "
+                    f"{capability['unsupported_reason']}"
+                )
         if policy not in (
             "host_each_iteration",
             "host_check_every_k",
             "fixed_budget_masked",
+            "device_convergent",
         ):
             raise TaichiRuntimeError(
                 "BatchedSolvePlan supports host_each_iteration, "
-                "host_check_every_k, or fixed_budget_masked"
+                "host_check_every_k, fixed_budget_masked, or "
+                "device_convergent"
             )
         if arch in cpu_arches and policy != "host_each_iteration":
             raise TaichiRuntimeError(
@@ -608,6 +948,7 @@ class BatchedSolvePlan:
             "host_each_iteration": 1,
             "host_check_every_k": 4,
             "fixed_budget_masked": max(self.max_iterations, 1),
+            "device_convergent": 16,
         }[policy]
         if check_interval is None:
             check_interval = expected
@@ -629,7 +970,32 @@ class BatchedSolvePlan:
             raise TaichiRuntimeError(
                 "host_check_every_k currently supports K=4 or K=8"
             )
+        if policy == "device_convergent" and check_interval not in (
+            1,
+            2,
+            4,
+            8,
+            16,
+        ):
+            raise TaichiRuntimeError(
+                "device_convergent check_interval controls portable chunk "
+                "sizing and must be one of 1, 2, 4, 8, or 16"
+            )
         return policy, check_interval
+
+    def _execution_policy_capabilities(self):
+        preconditioner_recordable = self.preconditioner is None or (
+            self.preconditioner._supports_graph_action()
+        )
+        return _solver_execution_capabilities(
+            self._program,
+            self.operator._provider_kind,
+            batched=True,
+            method=self.method,
+            dtype=self.operator.dtype,
+            preconditioner_replay_qualified=preconditioner_recordable,
+            provider_recordable=self.operator._supports_graph_action(),
+        )
 
     def _build_workspace(self):
         self._ap = ScalarNdarray(f32, (self.total_size,))
@@ -647,6 +1013,21 @@ class BatchedSolvePlan:
             i32, (_kernels.INT_STATE_SLOTS * self.batch_size,)
         )
         self._counters = ScalarNdarray(i32, (_kernels.COUNTER_SLOTS,))
+        self._device_predicate = (
+            ScalarNdarray(i32, ())
+            if self.execution_policy == "device_convergent"
+            else None
+        )
+        self._device_status = (
+            ScalarNdarray(i32, ())
+            if self.execution_policy == "device_convergent"
+            else None
+        )
+        self._device_counter = (
+            ScalarNdarray(i32, ())
+            if self.execution_policy == "device_convergent"
+            else None
+        )
         self._absolute_tolerance = ScalarNdarray(
             f32, (self.batch_size,)
         )
@@ -670,7 +1051,9 @@ class BatchedSolvePlan:
             )
             if submission is not None:
                 try:
-                    if submission._admission is None:
+                    if submission._graph_ticket is not None:
+                        submission._graph_ticket.wait()
+                    elif submission._admission is None:
                         submission._completion.wait()
                     else:
                         submission._admission._completion_wait(
@@ -687,6 +1070,7 @@ class BatchedSolvePlan:
                 )
                 submission._operator_session = None
                 submission._preconditioner_session = None
+                submission._graph_ticket = None
                 submission._plan = None
                 self._pending_submission = None
         self.operator = None
@@ -699,14 +1083,19 @@ class BatchedSolvePlan:
         self._float_state = None
         self._int_state = None
         self._counters = None
+        self._device_predicate = None
+        self._device_status = None
+        self._device_counter = None
         self._absolute_tolerance = None
         self._relative_tolerance = None
         self._recurrence_replay = None
+        self._device_convergent_replay = None
 
     def _mark_sessions_synchronized(
         self, operator_session, preconditioner_session
     ):
-        operator_session._mark_synchronized()
+        if operator_session is not None:
+            operator_session._mark_synchronized()
         if preconditioner_session is not None:
             preconditioner_session._mark_synchronized()
 
@@ -734,6 +1123,13 @@ class BatchedSolvePlan:
             self._recurrence_replay_builds += 1
             self._recurrence_replay_graph_builds += replay.graph_builds
         return self._recurrence_replay
+
+    def _get_device_convergent_replay(self):
+        if self._device_convergent_replay is None:
+            replay = _BatchedDeviceConvergentReplay(self)
+            self._device_convergent_replay = replay
+            self._device_convergent_graph_builds += replay.graph_builds
+        return self._device_convergent_replay
 
     def _validate_solve_io(self, rhs, initial_guess, out):
         if self.operator is None or self._program is None:
@@ -852,10 +1248,12 @@ class BatchedSolvePlan:
         operator_session,
         preconditioner_session,
         prepare_next,
+        *,
+        allow_graph_replay=True,
     ):
         self._submit(operator_session, self._direction, self._ap)
         self._operator_apply_calls += 1
-        replay = self._get_recurrence_replay()
+        replay = self._get_recurrence_replay() if allow_graph_replay else None
         if replay is None:
             _kernels.reduce_dot(
                 self._direction,
@@ -1024,7 +1422,7 @@ class BatchedSolvePlan:
         lane=None,
         on_saturation="wait",
     ):
-        """Submits one fixed-budget GPU solve without waiting for completion.
+        """Submits one qualified GPU solve without waiting for completion.
 
         The plan owns one workspace slot. A second submission is rejected
         until the first ticket is waited or materialized with ``result()``;
@@ -1039,11 +1437,24 @@ class BatchedSolvePlan:
             raise TaichiRuntimeError(
                 "BatchedSolvePlan.submit requires a CUDA or Vulkan plan"
             )
-        if self.execution_policy != "fixed_budget_masked":
+        if self.execution_policy not in (
+            "fixed_budget_masked",
+            "device_convergent",
+        ):
             raise TaichiRuntimeError(
                 "BatchedSolvePlan.submit requires "
-                "execution_policy='fixed_budget_masked'; chunked host checks "
-                "are synchronous and no worker-thread fallback is performed"
+                "execution_policy='fixed_budget_masked' or "
+                "'device_convergent'; chunked host checks are synchronous "
+                "and no worker-thread fallback is performed"
+            )
+        if self.execution_policy == "device_convergent":
+            return self._submit_device_convergent(
+                rhs,
+                initial_guess=initial_guess,
+                out=out,
+                pacer=pacer,
+                lane=lane,
+                on_saturation=on_saturation,
             )
         with self._lifecycle_lock:
             runtime = get_runtime()
@@ -1110,6 +1521,9 @@ class BatchedSolvePlan:
                             operator_session,
                             preconditioner_session,
                             iteration + 1 < self.max_iterations,
+                            allow_graph_replay=(
+                                arch != _ti_core.Arch.vulkan
+                            ),
                         )
                     _kernels.mark_max_iterations(
                         self._float_state,
@@ -1164,6 +1578,69 @@ class BatchedSolvePlan:
                 admission._cancel()
             raise
 
+    def _submit_device_convergent(
+        self,
+        rhs,
+        *,
+        initial_guess,
+        out,
+        pacer,
+        lane,
+        on_saturation,
+    ):
+        with self._lifecycle_lock:
+            runtime = get_runtime()
+            runtime.collect_ready_runtime_submission_owners()
+            pending = (
+                self._pending_submission()
+                if self._pending_submission is not None
+                else None
+            )
+            if pending is not None:
+                self._submission_rejections += 1
+                raise TaichiRuntimeError(
+                    "BatchedSolvePlan workspace slot is occupied; call "
+                    "wait()/result() on the pending SolveSubmission or use "
+                    "clone_workspace()"
+                )
+            rhs, initial_guess, out = self._validate_solve_io(
+                rhs, initial_guess, out
+            )
+            replay = self._get_device_convergent_replay()
+            ticket = replay.submit(
+                rhs,
+                initial_guess,
+                out,
+                pacer=pacer,
+                lane=lane,
+                on_saturation=on_saturation,
+            )
+            self._solve_calls += 1
+            self._submission_calls += 1
+            self._device_convergent_graph_submissions += 1
+            if self._solve_calls > 1:
+                self._workspace_reuses += 1
+            submission = SolveSubmission(
+                self,
+                ticket._completion,
+                runtime,
+                rhs,
+                out,
+                None,
+                None,
+                None,
+                graph_ticket=ticket,
+            )
+            self._pending_submission = weakref.ref(submission)
+            if ticket._has_backend_work:
+                if not runtime.transfer_runtime_submission_owner(
+                    ticket._completion, submission
+                ):
+                    runtime.retain_runtime_submission_owner(
+                        ticket._completion, submission
+                    )
+            return submission
+
     def _complete_submission(self, submission):
         with self._lifecycle_lock:
             if submission._result is not None:
@@ -1181,7 +1658,9 @@ class BatchedSolvePlan:
                 )
             completion_observed = False
             try:
-                if submission._admission is None:
+                if submission._graph_ticket is not None:
+                    submission._graph_ticket.wait()
+                elif submission._admission is None:
                     submission._completion.wait()
                 else:
                     submission._admission._completion_wait(
@@ -1189,12 +1668,34 @@ class BatchedSolvePlan:
                     )
                 completion_observed = True
                 self._host_synchronizations += 1
-                self._mark_sessions_synchronized(
-                    submission._operator_session,
-                    submission._preconditioner_session,
-                )
+                issued_iterations = submission._issued_iterations
+                if submission._graph_ticket is not None:
+                    issued_iterations = int(
+                        self._device_counter.to_numpy().reshape(-1)[0]
+                    )
+                    self._host_synchronizations += 1
+                    self._device_to_host_bytes += np.dtype(np.int32).itemsize
+                    self._device_convergent_logical_iterations += (
+                        issued_iterations
+                    )
+                    self._operator_apply_calls += 1 + issued_iterations
+                    self._provider_system_iterations += (
+                        issued_iterations * self.batch_size
+                    )
+                    if self.method == "pcg" and self.max_iterations > 0:
+                        self._preconditioner_apply_calls += (
+                            1 + issued_iterations
+                        )
+                    self._device_convergent_replay.update_control_report(
+                        issued_iterations
+                    )
+                else:
+                    self._mark_sessions_synchronized(
+                        submission._operator_session,
+                        submission._preconditioner_session,
+                    )
                 submission._result = self._snapshot_result(
-                    submission._solution, submission._issued_iterations
+                    submission._solution, issued_iterations
                 )
                 self._completed_submissions += 1
             except Exception as exc:
@@ -1205,12 +1706,13 @@ class BatchedSolvePlan:
                 # it cannot tell whether submit retained a Python owner.
                 # Release is idempotent; perform it after every successfully
                 # observed completion, even if terminal snapshotting fails.
-                if completion_observed:
+                if completion_observed and submission._graph_ticket is None:
                     submission._runtime.release_runtime_submission_owner(
                         submission._completion
                     )
                 submission._operator_session = None
                 submission._preconditioner_session = None
+                submission._graph_ticket = None
                 submission._plan = None
                 self._pending_submission = None
 
@@ -1247,7 +1749,10 @@ class BatchedSolvePlan:
 
     def solve(self, rhs, *, initial_guess=None, out=None):
         """Solves one flat batch and returns per-system terminal metadata."""
-        if self.execution_policy == "fixed_budget_masked":
+        if self.execution_policy in (
+            "fixed_budget_masked",
+            "device_convergent",
+        ):
             return self.submit(
                 rhs, initial_guess=initial_guess, out=out
             ).result()
@@ -1322,11 +1827,7 @@ class BatchedSolvePlan:
                     "BatchedSolvePlan cannot be used after ti.reset()"
                 )
             self.operator._ensure_valid()
-            return _solver_execution_capabilities(
-                self._program,
-                self.operator._provider_kind,
-                batched=True,
-            )
+            return self._execution_policy_capabilities()
 
     def _statistics_locked(self):
         if self.operator is None or self._program is None:
@@ -1351,6 +1852,11 @@ class BatchedSolvePlan:
             + 2
             * self.batch_size
             * np.dtype(np.float32).itemsize
+            + (
+                3 * np.dtype(np.int32).itemsize
+                if self.execution_policy == "device_convergent"
+                else 0
+            )
         )
         workspace_payload_bytes = workspace_vector_bytes + state_bytes
         pending_submission = (
@@ -1368,6 +1874,24 @@ class BatchedSolvePlan:
                 "plan_built": self._recurrence_replay is not None,
             }
         )
+        device_report = None
+        if self._device_convergent_replay is not None:
+            report = self._device_convergent_replay.last_control_report
+            if report is not None:
+                device_report = dict(report)
+        device_convergent_replay = {
+            "implementation": "structured_taichi_graph",
+            "scope": "initialization_operator_preconditioner_recurrence",
+            "operator_apply_included": True,
+            "preconditioner_apply_included": self.method == "pcg",
+            "plan_built": self._device_convergent_replay is not None,
+            "graph_builds": self._device_convergent_graph_builds,
+            "submissions": self._device_convergent_graph_submissions,
+            "logical_iterations": (
+                self._device_convergent_logical_iterations
+            ),
+            "last_control_report": device_report,
+        }
         return {
             "schema_version": 4,
             "backend_family": str(self._program.config().arch),
@@ -1378,24 +1902,23 @@ class BatchedSolvePlan:
             "total_size": self.total_size,
             "execution_policy": self.execution_policy,
             "check_interval": self.check_interval,
-            "execution_capabilities": _solver_execution_capabilities(
-                self._program,
-                self.operator._provider_kind,
-                batched=True,
-            ),
+            "execution_capabilities": self._execution_policy_capabilities(),
             "recurrence_replay": recurrence_replay,
+            "device_convergent_replay": device_convergent_replay,
             "submission": {
                 "qualified": (
                     self._program.config().arch
                     in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan)
-                    and self.execution_policy == "fixed_budget_masked"
+                    and self.execution_policy
+                    in ("fixed_budget_masked", "device_convergent")
                 ),
                 "unsupported_reason": (
                     None
                     if self._program.config().arch
                     in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan)
-                    and self.execution_policy == "fixed_budget_masked"
-                    else "requires_gpu_fixed_budget_masked"
+                    and self.execution_policy
+                    in ("fixed_budget_masked", "device_convergent")
+                    else "requires_gpu_submission_policy"
                 ),
                 "workspace_slots": 1,
                 "asynchrony_scope": "host_completion",
@@ -1453,9 +1976,20 @@ class BatchedSolvePlan:
                 "recurrence_replay_builds": self._recurrence_replay_builds,
                 "recurrence_replay_graph_builds": self._recurrence_replay_graph_builds,
                 "recurrence_replay_submissions": self._recurrence_replay_submissions,
-                "recurrence_replay_logical_kernels": self._recurrence_replay_logical_kernels,
+                "recurrence_replay_logical_kernels": (
+                    self._recurrence_replay_logical_kernels
+                ),
                 "recurrence_replay_rebinds": self._recurrence_replay_rebinds,
-                "recurrence_direct_kernel_submissions": self._recurrence_direct_kernel_submissions,
+                "recurrence_direct_kernel_submissions": (
+                    self._recurrence_direct_kernel_submissions
+                ),
+                "device_convergent_graph_builds": self._device_convergent_graph_builds,
+                "device_convergent_graph_submissions": (
+                    self._device_convergent_graph_submissions
+                ),
+                "device_convergent_logical_iterations": (
+                    self._device_convergent_logical_iterations
+                ),
             },
             "transfers": {
                 "device_to_host_bytes": self._device_to_host_bytes,
@@ -1477,7 +2011,11 @@ class BatchedSolvePlan:
                 "asynchronous_submission": (
                     self._program.config().arch
                     in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan)
-                    and self.execution_policy == "fixed_budget_masked"
+                    and self.execution_policy
+                    in ("fixed_budget_masked", "device_convergent")
+                ),
+                "device_convergent_provider_actions": (
+                    self.execution_policy == "device_convergent"
                 ),
                 "workspace_cloning": True,
                 "multi_rhs": False,

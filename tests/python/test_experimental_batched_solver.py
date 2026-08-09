@@ -486,18 +486,27 @@ def test_batched_recurrence_graph_replay_reuses_plan_and_rebinds_output(
         second_output.to_numpy(), exact, rtol=3e-4, atol=3e-4
     )
     replay = second_stats["recurrence_replay"]
-    assert replay["qualified"] and replay["enabled"]
-    assert replay["plan_built"]
     assert replay["scope"] == "iteration_recurrence_only"
     assert not replay["operator_apply_included"]
     operations = second_stats["operations"]
-    assert operations["recurrence_replay_builds"] == 1
-    assert operations["recurrence_replay_graph_builds"] == 2
-    assert operations["recurrence_replay_submissions"] == 8
-    assert operations["recurrence_replay_logical_kernels"] == 30
-    assert operations["recurrence_replay_rebinds"] == 1
-    assert operations["recurrence_direct_kernel_submissions"] == 0
-    assert first_stats["operations"]["recurrence_replay_rebinds"] == 0
+    if impl.current_cfg().arch == ti.cuda:
+        assert replay["qualified"] and replay["enabled"]
+        assert replay["plan_built"]
+        assert operations["recurrence_replay_builds"] == 1
+        assert operations["recurrence_replay_graph_builds"] == 2
+        assert operations["recurrence_replay_submissions"] == 8
+        assert operations["recurrence_replay_logical_kernels"] == 30
+        assert operations["recurrence_replay_rebinds"] == 1
+        assert operations["recurrence_direct_kernel_submissions"] == 0
+        assert first_stats["operations"]["recurrence_replay_rebinds"] == 0
+    else:
+        assert not replay["qualified"] and not replay["enabled"]
+        assert replay["unsupported_reason"] == (
+            "vulkan_active_submission_batch_sync_unsafe"
+        )
+        assert operations["recurrence_replay_builds"] == 0
+        assert operations["recurrence_replay_submissions"] == 0
+        assert operations["recurrence_direct_kernel_submissions"] == 30
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
@@ -537,11 +546,280 @@ def test_batched_pcg_replays_post_preconditioner_recurrence(monkeypatch):
         result.solution.to_numpy(), exact, rtol=3e-4, atol=3e-4
     )
     operations = plan.statistics()["operations"]
-    assert operations["recurrence_replay_builds"] == 1
-    assert operations["recurrence_replay_graph_builds"] == 3
-    assert operations["recurrence_replay_submissions"] == 7
-    assert operations["recurrence_replay_logical_kernels"] == 18
-    assert operations["recurrence_direct_kernel_submissions"] == 0
+    if impl.current_cfg().arch == ti.cuda:
+        assert operations["recurrence_replay_builds"] == 1
+        assert operations["recurrence_replay_graph_builds"] == 3
+        assert operations["recurrence_replay_submissions"] == 7
+        assert operations["recurrence_replay_logical_kernels"] == 18
+        assert operations["recurrence_direct_kernel_submissions"] == 0
+    else:
+        assert operations["recurrence_replay_builds"] == 0
+        assert operations["recurrence_replay_submissions"] == 0
+        assert operations["recurrence_direct_kernel_submissions"] == 18
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_independent_batched_device_convergent_pcg_rebinds_a_and_m():
+    experimental = ti.linalg.experimental
+    batch_size = 3
+    system_size = 8
+    total_size = batch_size * system_size
+    topology = ti.ndarray(ti.i32, shape=total_size)
+    topology.from_numpy(np.arange(total_size, dtype=np.int32))
+    diagonal_host = np.resize(
+        np.asarray([1.0, 3.0, 17.0, 97.0], dtype=np.float32),
+        total_size,
+    )
+
+    @ti.kernel
+    def diagonal_apply(
+        active_size: ti.i32,
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        numeric_data: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(active_size):
+            y[index] = numeric_data[index] * x[topology_data[index]]
+
+    traits = ti.linalg.OperatorTraits.spd()
+    operator = ti.linalg.LinearOperator.from_kernel(
+        diagonal_apply,
+        total_size,
+        topology,
+        numeric=_vector(diagonal_host),
+        traits=traits,
+    )
+    preconditioner = ti.linalg.inverse_block_diagonal(
+        _vector(1.0 / diagonal_host),
+        1,
+        assume_spd=True,
+    )
+    probe = experimental.BatchedSolvePlan(
+        operator,
+        batch_size,
+        independent_systems=True,
+        method="pcg",
+        preconditioner=preconditioner,
+        max_iterations=16,
+        atol=1e-5,
+    )
+    capability = probe.execution_capabilities()["device_convergent"]
+    if not capability["supported"]:
+        pytest.skip(capability["unsupported_reason"])
+    assert not capability["automatic_selection_qualified"]
+
+    plan = experimental.BatchedSolvePlan(
+        operator,
+        batch_size,
+        independent_systems=True,
+        method="pcg",
+        preconditioner=preconditioner,
+        max_iterations=16,
+        atol=1e-5,
+        execution_policy="device_convergent",
+    )
+    exact = np.linspace(-1.0, 1.0, total_size, dtype=np.float32)
+    first = plan.submit(_vector(diagonal_host * exact)).result()
+    assert first.all_converged
+    assert max(first.iterations) == 1
+    np.testing.assert_allclose(
+        first.solution.to_numpy(), exact, rtol=3e-4, atol=3e-4
+    )
+
+    updated_diagonal = diagonal_host * np.float32(1.75)
+    operator.update_numeric(
+        _vector(updated_diagonal),
+        expected_topology_version=1,
+        expected_numeric_version=1,
+    )
+    preconditioner.update_numeric(
+        _vector(1.0 / updated_diagonal),
+        expected_topology_version=1,
+        expected_numeric_version=1,
+    )
+    second = plan.submit(_vector(updated_diagonal * exact)).result()
+    assert second.all_converged
+    assert max(second.iterations) == 1
+    np.testing.assert_allclose(
+        second.solution.to_numpy(), exact, rtol=3e-4, atol=3e-4
+    )
+    stats = plan.statistics()
+    replay = stats["device_convergent_replay"]
+    assert replay["graph_builds"] == 1
+    assert replay["submissions"] == 2
+    assert replay["operator_apply_included"]
+    assert replay["preconditioner_apply_included"]
+    assert replay["last_control_report"]["logical_iterations"] == 1
+    assert stats["operations"]["last_issued_iterations"] == 1
+    assert stats["contract"]["device_convergent_provider_actions"]
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_convergent_block_inverse_preconditioning_reduces_iterations():
+    experimental = ti.linalg.experimental
+    batch_size = 4
+    system_size = 32
+    total_size = batch_size * system_size
+    topology = ti.ndarray(ti.i32, shape=total_size)
+    topology.from_numpy(np.arange(total_size, dtype=np.int32))
+    system_diagonal = np.geomspace(
+        1.0, 100.0, system_size, dtype=np.float32
+    )
+    diagonal = np.tile(system_diagonal, batch_size)
+
+    @ti.kernel
+    def diagonal_apply(
+        active_size: ti.i32,
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        numeric_data: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(active_size):
+            y[index] = numeric_data[index] * x[topology_data[index]]
+
+    operator = ti.linalg.LinearOperator.from_kernel(
+        diagonal_apply,
+        total_size,
+        topology,
+        numeric=_vector(diagonal),
+        traits=ti.linalg.OperatorTraits.spd(),
+    )
+    preconditioner = ti.linalg.inverse_block_diagonal(
+        _vector(1.0 / diagonal), 1, assume_spd=True
+    )
+    probe = experimental.BatchedSolvePlan(
+        operator,
+        batch_size,
+        independent_systems=True,
+        max_iterations=64,
+        atol=1e-5,
+    )
+    if not probe.execution_capabilities()["device_convergent"]["supported"]:
+        pytest.skip(
+            probe.execution_capabilities()["device_convergent"][
+                "unsupported_reason"
+            ]
+        )
+    common = dict(
+        independent_systems=True,
+        max_iterations=64,
+        atol=1e-5,
+        execution_policy="device_convergent",
+    )
+    cg = experimental.BatchedSolvePlan(
+        operator, batch_size, method="cg", **common
+    )
+    pcg = experimental.BatchedSolvePlan(
+        operator,
+        batch_size,
+        method="pcg",
+        preconditioner=preconditioner,
+        **common,
+    )
+    exact = np.linspace(-1.0, 1.0, total_size, dtype=np.float32)
+    rhs = _vector(diagonal * exact)
+    cg_result = cg.solve(rhs)
+    pcg_result = pcg.solve(rhs)
+    assert cg_result.all_converged and pcg_result.all_converged
+    assert max(cg_result.iterations) >= 20
+    assert max(pcg_result.iterations) <= 2
+    np.testing.assert_allclose(
+        pcg_result.solution.to_numpy(), exact, rtol=4e-4, atol=4e-4
+    )
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_convergent_batched_terminal_edge_cases():
+    experimental = ti.linalg.experimental
+    batch_size = 2
+    total_size = 4
+    topology = ti.ndarray(ti.i32, shape=total_size)
+    topology.from_numpy(np.arange(total_size, dtype=np.int32))
+
+    @ti.kernel
+    def diagonal_apply(
+        active_size: ti.i32,
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        numeric_data: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(active_size):
+            y[index] = numeric_data[index] * x[topology_data[index]]
+
+    traits = ti.linalg.OperatorTraits.spd()
+
+    def operator(values):
+        return ti.linalg.LinearOperator.from_kernel(
+            diagonal_apply,
+            total_size,
+            topology,
+            numeric=_vector(values),
+            traits=traits,
+        )
+
+    diagonal = np.asarray([2.0, 3.0, 5.0, 7.0], dtype=np.float32)
+    action = operator(diagonal)
+    probe = experimental.BatchedSolvePlan(
+        action,
+        batch_size,
+        independent_systems=True,
+        max_iterations=4,
+        atol=1e-6,
+    )
+    capability = probe.execution_capabilities()["device_convergent"]
+    if not capability["supported"]:
+        pytest.skip(capability["unsupported_reason"])
+
+    plan = experimental.BatchedSolvePlan(
+        action,
+        batch_size,
+        independent_systems=True,
+        max_iterations=4,
+        atol=1e-6,
+        execution_policy="device_convergent",
+    )
+    exact = np.asarray([1.0, -2.0, 0.5, 3.0], dtype=np.float32)
+    rhs = _vector(diagonal * exact)
+    initially_converged = plan.submit(
+        rhs, initial_guess=_vector(exact)
+    ).result()
+    assert initially_converged.all_converged
+    assert initially_converged.iterations == (0, 0)
+
+    mixed_exact = np.asarray([0.0, 0.0, 1.0, 2.0], dtype=np.float32)
+    mixed = plan.submit(_vector(diagonal * mixed_exact)).result()
+    assert mixed.all_converged
+    assert mixed.iterations[0] == 0
+    assert mixed.iterations[1] > 0
+    assert plan.statistics()["device_convergent_replay"][
+        "last_control_report"
+    ]["logical_iterations"] == max(mixed.iterations)
+
+    zero_budget = experimental.BatchedSolvePlan(
+        action,
+        batch_size,
+        independent_systems=True,
+        max_iterations=0,
+        atol=1e-6,
+        execution_policy="device_convergent",
+    ).submit(rhs).result()
+    assert zero_budget.reached_max_iterations == (True, True)
+    assert zero_budget.iterations == (0, 0)
+
+    invalid_spd_action = operator(np.zeros(total_size, dtype=np.float32))
+    breakdown = experimental.BatchedSolvePlan(
+        invalid_spd_action,
+        batch_size,
+        independent_systems=True,
+        max_iterations=4,
+        atol=1e-6,
+        execution_policy="device_convergent",
+    ).submit(_vector(np.ones(total_size, dtype=np.float32))).result()
+    assert breakdown.breakdown == (True, True)
+    assert breakdown.termination_reasons == ("breakdown", "breakdown")
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
@@ -575,6 +853,8 @@ def test_batched_recurrence_graph_replay_can_be_disabled(monkeypatch):
     assert not stats["recurrence_replay"]["enabled"]
     assert stats["recurrence_replay"]["unsupported_reason"] == (
         "disabled_by_environment"
+        if impl.current_cfg().arch == ti.cuda
+        else "vulkan_active_submission_batch_sync_unsafe"
     )
     operations = stats["operations"]
     assert operations["recurrence_replay_builds"] == 0
@@ -680,7 +960,7 @@ def test_solver_conditional_execution_capabilities_are_explicit():
         assert single.execution_policy == "host_check_every_k"
         assert not conditional["supported"]
         assert conditional["rhi_primitive_compiled"]
-        assert not conditional["runtime_path_compiled"]
+        assert conditional["runtime_path_compiled"]
         assert not conditional["provider_qualified"]
         assert conditional["primitive"] == "vulkan_dispatch_indirect"
         assert conditional["unsupported_reason"] == (

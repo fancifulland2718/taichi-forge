@@ -31,6 +31,46 @@ COUNTER_SLOTS = 2
 
 
 @kernel
+def initialize_output(
+    initial: ndarray_type.ndarray(dtype=f32, ndim=1),
+    output: ndarray_type.ndarray(dtype=f32, ndim=1),
+    use_initial_guess: i32,
+    total_size: i32,
+):
+    for index in range(total_size):
+        output[index] = initial[index] if use_initial_guess != 0 else 0.0
+
+
+@kernel
+def initialize_loop_control(
+    predicate: ndarray_type.ndarray(dtype=i32, ndim=0),
+    status: ndarray_type.ndarray(dtype=i32, ndim=0),
+    counter: ndarray_type.ndarray(dtype=i32, ndim=0),
+):
+    predicate[None] = 0
+    status[None] = 0
+    counter[None] = 0
+
+
+@kernel
+def evaluate_active_systems(
+    counters: ndarray_type.ndarray(dtype=i32, ndim=1),
+    predicate: ndarray_type.ndarray(dtype=i32, ndim=0),
+    status: ndarray_type.ndarray(dtype=i32, ndim=0),
+):
+    active = counters[ACTIVE_COUNT]
+    predicate[None] = int(active > 0)
+    status[None] = int(active <= 0)
+
+
+@kernel
+def advance_loop_counter(
+    counter: ndarray_type.ndarray(dtype=i32, ndim=0),
+):
+    counter[None] += 1
+
+
+@kernel
 def initialize_residual(
     rhs: ndarray_type.ndarray(dtype=f32, ndim=1),
     applied: ndarray_type.ndarray(dtype=f32, ndim=1),
