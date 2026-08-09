@@ -6663,6 +6663,16 @@ void export_lang(py::module &m) {
             stamp.numeric_revision, stamp.binding_revision);
       });
 
+  py::class_<LinearOperatorAffineParameterSnapshot,
+             std::shared_ptr<LinearOperatorAffineParameterSnapshot>>(
+      m, "LinearOperatorAffineParameterSnapshot")
+      .def_property_readonly(
+          "alpha", &LinearOperatorAffineParameterSnapshot::alpha)
+      .def_property_readonly(
+          "beta", &LinearOperatorAffineParameterSnapshot::beta)
+      .def_property_readonly(
+          "version", &LinearOperatorAffineParameterSnapshot::version);
+
   py::class_<LinearOperatorHandle>(
       m, "LinearOperatorHandle")
       .def("_apply", &LinearOperatorHandle::apply,
@@ -6715,6 +6725,8 @@ void export_lang(py::module &m) {
            py::arg("expected_version"), py::arg("next_version"))
       .def("_supports_affine_parameter_update",
            &LinearOperatorHandle::supports_affine_parameter_update)
+      .def("_affine_parameter_snapshot",
+           &LinearOperatorHandle::affine_parameter_snapshot)
       .def("_supports_recordable_kernel",
            &LinearOperatorHandle::supports_recordable_kernel)
       .def(

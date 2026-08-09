@@ -421,6 +421,9 @@ def test_parameterized_affine_rebinds_one_atomic_generation_without_rebuild():
         beta_range=(0.0, 1.0),
     )
     assert operator.parameters["version"] == 1
+    first_generation = operator._parameter_state.recordable_generation()
+    assert first_generation.version == 1
+    assert not hasattr(operator._parameter_state, "provider")
     assert operator.traits["positive_definite"]["value"]
     graph = _operator_graph(operator)
     input_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "parameter_debug_input", ti.f32, ndim=1)
@@ -435,6 +438,11 @@ def test_parameterized_affine_rebinds_one_atomic_generation_without_rebuild():
     first = graph.submit({"input": source, "output": first_output})
     version = operator.update_parameters(alpha=1.5, beta=0.75, expected_version=1)
     assert version == 2
+    second_generation = operator._parameter_state.recordable_generation()
+    assert second_generation.version == 2
+    assert second_generation is not first_generation
+    assert first_generation.alpha == 1.0
+    assert first_generation.beta == 0.25
     second = graph.submit({"input": source, "output": second_output})
     first.wait()
     second.wait()

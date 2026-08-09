@@ -38,21 +38,6 @@ def axpby_f32(
 
 
 @kernel
-def parameter_anchor_f32(
-    active_size: i32,
-    topology: ndarray_type.ndarray(dtype=i32, ndim=1),
-    parameters: ndarray_type.ndarray(dtype=f32, ndim=1),
-    input: ndarray_type.ndarray(dtype=f32, ndim=1),
-    output: ndarray_type.ndarray(dtype=f32, ndim=1),
-):
-    # This ordinary provider owns the immutable two-scalar numeric generation
-    # used by parameterized affine Graph actions. Its apply is intentionally a
-    # valid linear map so the generation can use the standard operator ABI.
-    for index in range(active_size):
-        output[index] = parameters[0] * input[index]
-
-
-@kernel
 def parameter_axpby_f32(
     addend: ndarray_type.ndarray(dtype=f32, ndim=1),
     output: ndarray_type.ndarray(dtype=f32, ndim=1),

@@ -563,6 +563,25 @@ class OperatorPlan {
   OperatorPlanRuntimeStatistics statistics_;
 };
 
+// Immutable affine coefficient generation. Graph submissions retain the
+// exact object they bind so a later coefficient update cannot change an
+// in-flight submission.
+class LinearOperatorAffineParameterSnapshot {
+ public:
+  LinearOperatorAffineParameterSnapshot(double alpha,
+                                        double beta,
+                                        std::uint64_t version);
+
+  double alpha() const;
+  double beta() const;
+  std::uint64_t version() const;
+
+ private:
+  double alpha_{0.0};
+  double beta_{0.0};
+  std::uint64_t version_{1};
+};
+
 // Opaque native state behind the stable Python LinearOperator API.
 // It deliberately exposes neither provider resources nor submission tickets:
 // the public synchronous boundary owns one reusable OperatorPlan and keeps all
@@ -578,6 +597,8 @@ class LinearOperatorHandle {
       std::uint64_t)>;
   using AffineParameterUpdateFn = std::function<std::uint64_t(
       double, double, std::uint64_t, std::uint64_t)>;
+  using AffineParameterSnapshotFn = std::function<
+      std::shared_ptr<LinearOperatorAffineParameterSnapshot>()>;
   using RecordableKernelFn = std::function<
       std::shared_ptr<LinearOperatorRecordableKernel>(OperatorApplyMode)>;
 
@@ -586,7 +607,8 @@ class LinearOperatorHandle {
                        std::shared_ptr<void> provider_owner = {},
                        NumericUpdateFn numeric_update = {},
                        RecordableKernelFn recordable_kernel = {},
-                       AffineParameterUpdateFn affine_parameter_update = {});
+                       AffineParameterUpdateFn affine_parameter_update = {},
+                       AffineParameterSnapshotFn affine_parameter_snapshot = {});
   LinearOperatorHandle(
       const LinearOperatorHandle &) = delete;
   LinearOperatorHandle &operator=(
@@ -628,6 +650,8 @@ class LinearOperatorHandle {
                                          std::uint64_t expected_version,
                                          std::uint64_t next_version);
   bool supports_affine_parameter_update() const;
+  std::shared_ptr<LinearOperatorAffineParameterSnapshot>
+  affine_parameter_snapshot() const;
   std::shared_ptr<LinearOperatorRecordableKernel> recordable_kernel(
       OperatorApplyMode mode);
   bool supports_recordable_kernel() const;
@@ -638,6 +662,7 @@ class LinearOperatorHandle {
   NumericUpdateFn numeric_update_;
   RecordableKernelFn recordable_kernel_;
   AffineParameterUpdateFn affine_parameter_update_;
+  AffineParameterSnapshotFn affine_parameter_snapshot_;
   OperatorBinding binding_;
   std::unique_ptr<OperatorPlan> plan_;
 };

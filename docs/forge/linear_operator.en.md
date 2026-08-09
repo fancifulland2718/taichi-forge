@@ -500,7 +500,9 @@ Python value fails instead of becoming infinity, and a positive bound that
 rounds to zero cannot incorrectly preserve an SPD claim.
 An update uses optimistic `expected_version` validation, and cached Graph
 actions rebind the new two-scalar snapshot without rebuilding; in-flight
-submissions keep the exact old snapshot pinned.
+submissions keep the exact old snapshot pinned. The snapshot is owned by the
+native affine operator: updating it does not allocate or upload a dummy device
+parameter array.
 
 Public `identity()` remains CPU-only. General `block_diagonal()` additionally
 supports f32 CUDA/Vulkan standalone apply when every leaf exposes qualified

@@ -821,27 +821,11 @@ def _normalize_parameter_range(value, initial, role, dtype):
 
 
 class _AffineParameterState:
-    def __init__(self, alpha, beta, alpha_range, beta_range, dtype):
-        from taichi_forge.linalg._composition_kernels import parameter_anchor_f32
-
-        self._lock = threading.RLock()
-        self.alpha = float(alpha)
-        self.beta = float(beta)
+    def __init__(self, handle, alpha_range, beta_range, dtype):
+        self._handle = handle
         self.alpha_range = tuple(alpha_range)
         self.beta_range = tuple(beta_range)
         self.dtype = dtype
-        self.version = 1
-        topology = ScalarNdarray(i32, (1,))
-        topology.fill(0)
-        numeric = ScalarNdarray(f32, (2,))
-        numeric.from_numpy(np.asarray([alpha, beta], dtype=np.float32))
-        self.provider = LinearOperator.from_kernel(
-            parameter_anchor_f32,
-            1,
-            topology,
-            numeric=numeric,
-        )
-        self._record = self.provider._handle._recordable_kernel(False)
 
     def _validate_values(self, alpha, beta):
         values = []
@@ -859,53 +843,30 @@ class _AffineParameterState:
             values.append(value)
         return tuple(values)
 
-    def update(self, owner, alpha, beta, expected_version):
-        with self._lock:
-            if expected_version != self.version:
-                raise TaichiRuntimeError(
-                    "parameterized affine generation changed: " f"expected {expected_version}, current {self.version}"
-                )
-            alpha, beta = self._validate_values(alpha, beta)
-            next_version = self.version + 1
-            replacement = ScalarNdarray(f32, (2,))
-            replacement.from_numpy(np.asarray([alpha, beta], dtype=np.float32))
-            # Publish the device snapshot first. All remaining native checks
-            # were already mirrored above and therefore cannot fail without a
-            # runtime fault; Graph binders hold this same lock.
-            self.provider.update_numeric(
-                replacement,
-                expected_topology_version=1,
-                expected_numeric_version=self.version,
-            )
-            replacement_record = self.provider._handle._recordable_kernel(False)
-            owner._handle._update_affine_parameters(alpha, beta, self.version, next_version)
-            self.alpha = alpha
-            self.beta = beta
-            self.version = next_version
-            self._record = replacement_record
-            return self.version
+    def update(self, alpha, beta, expected_version):
+        alpha, beta = self._validate_values(alpha, beta)
+        return self._handle._update_affine_parameters(
+            alpha, beta, expected_version, expected_version + 1
+        )
 
     def recordable_generation(self):
-        with self._lock:
-            self.provider._ensure_valid()
-            return self._record
+        return self._handle._affine_parameter_snapshot()
 
     def recordable_snapshot(self):
-        with self._lock:
-            self.provider._ensure_valid()
-            return self._record, self.alpha, self.beta
+        generation = self.recordable_generation()
+        return generation, generation.alpha, generation.beta
 
     def snapshot(self):
-        with self._lock:
-            return MappingProxyType(
-                {
-                    "alpha": self.alpha,
-                    "beta": self.beta,
-                    "alpha_range": self.alpha_range,
-                    "beta_range": self.beta_range,
-                    "version": self.version,
-                }
-            )
+        generation = self.recordable_generation()
+        return MappingProxyType(
+            {
+                "alpha": generation.alpha,
+                "beta": generation.beta,
+                "alpha_range": self.alpha_range,
+                "beta_range": self.beta_range,
+                "version": generation.version,
+            }
+        )
 
 
 class LinearOperator:
@@ -1687,9 +1648,6 @@ class LinearOperator:
             _ti_core.Arch.arm64,
         ):
             raise TaichiRuntimeError("GPU parameterized affine operators require f32")
-        state = _AffineParameterState(
-            alpha, beta, alpha_range, beta_range, self.dtype
-        )
         handle = _ti_core._make_parameterized_affine_operator(
             self._handle,
             other._handle,
@@ -1700,10 +1658,13 @@ class LinearOperator:
             beta_range[0],
             beta_range[1],
         )
+        state = _AffineParameterState(
+            handle, alpha_range, beta_range, self.dtype
+        )
         result = self._from_handle(
             handle,
             provider_kind="composition",
-            retained=(self, other, state.provider),
+            retained=(self, other, state),
             composition_spec=(
                 "parameterized_affine",
                 state,
@@ -1729,7 +1690,7 @@ class LinearOperator:
             raise TaichiRuntimeError("expected_version must be a positive integer") from exc
         if expected_version <= 0:
             raise TaichiRuntimeError("expected_version must be a positive integer")
-        return state.update(self, alpha, beta, expected_version)
+        return state.update(alpha, beta, expected_version)
 
     @property
     def parameters(self):
@@ -2414,7 +2375,6 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
         reads_output_before_final_write = False
         self._parameter_state = None
         self._parameter_fixed_names = None
-        self._parameter_record_signature = None
 
         def append_child(child_operator, child_input, child_output, child_adjoint):
             child = child_operator.graph_action(
@@ -2581,9 +2541,7 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
             else:
                 addend_arg = temporary_arg(extent, "parameterized_affine_scratch")
                 append_child(right, input_arg, addend_arg, adjoint)
-            record, parameter_alpha, parameter_beta = state.recordable_snapshot()
-            if record._numeric is None or tuple(record._numeric.shape) != (2,):
-                raise TaichiRuntimeError("parameterized affine coefficient generation has an " "incompatible schema")
+            _, parameter_alpha, parameter_beta = state.recordable_snapshot()
             alpha_name = f"{prefix}_alpha"
             beta_name = f"{prefix}_beta"
             alpha_arg = Arg(ArgKind.SCALAR, alpha_name, f32)
@@ -2616,11 +2574,6 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
             )
             self._parameter_state = state
             self._parameter_fixed_names = (alpha_name, beta_name)
-            self._parameter_record_signature = (
-                tuple(record._resource_stamp())[:4],
-                str(record._numeric.element_data_type()),
-                tuple(record._numeric.shape),
-            )
         elif kind in ("adjoint", "scale", "sum"):
             extent = operator.shape[1 if adjoint else 0]
             terms = []
@@ -2816,16 +2769,7 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
         for child in self._children:
             child.validate_graph_lifetime()
         if self._parameter_state is not None:
-            self._validate_parameter_record(self._parameter_state.recordable_generation())
-
-    def _validate_parameter_record(self, record):
-        current = (
-            tuple(record._resource_stamp())[:4],
-            str(record._numeric.element_data_type()),
-            tuple(record._numeric.shape),
-        )
-        if current != self._parameter_record_signature:
-            raise TaichiRuntimeError("parameterized affine coefficient schema changed; rebuild " "the Graph")
+            self._parameter_state.recordable_generation()
 
     def bind_graph_arguments(self, runtime_args):
         prepared = self._bind_provider_generation()
@@ -2872,12 +2816,11 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
                     owner_ids.add(identity)
                     submission_owners.append(owner)
         if self._parameter_state is not None:
-            record, alpha, beta = self._parameter_state.recordable_snapshot()
-            self._validate_parameter_record(record)
+            generation, alpha, beta = self._parameter_state.recordable_snapshot()
             alpha_name, beta_name = self._parameter_fixed_names
             replacements[alpha_name] = float(alpha)
             replacements[beta_name] = float(beta)
-            submission_owners.append(record)
+            submission_owners.append(generation)
         return PreparedGraphBindings(replacements, tuple(submission_owners))
 
     def validate_graph_bindings(self, runtime_args):

@@ -424,7 +424,8 @@ vector 之间交替，因此 depth 2 以后 Graph temporary 始终只有一条 v
 对于 f32 operator，系数和区间端点会先规范化为 f32 kernel 实际执行的值；超出 f32
 表示范围的有限 Python 值会明确失败，正下界若舍入为零也不会错误保留 SPD 结论。
 更新采用乐观 `expected_version` 检查；缓存 Graph action 会 rebind 新的二标量 snapshot 而不
-重建，in-flight submission 继续 pin 它实际提交的旧 snapshot。
+重建，in-flight submission 继续 pin 它实际提交的旧 snapshot。snapshot 由原生 affine
+operator 直接持有；更新不再分配或上传虚拟 device parameter array。
 
 公开 `identity()` 仍只支持 CPU。通用 `block_diagonal()` 还支持 CUDA/Vulkan f32 standalone
 apply，但要求每个 leaf 都提供经过资格验证的 direct affine dense storage。leaf 按顺序直接

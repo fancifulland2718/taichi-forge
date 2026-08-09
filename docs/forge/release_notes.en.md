@@ -191,12 +191,13 @@ grouped under the behavior they shipped.
   versions reject stale updates, and every submission pins one complete
   alpha/beta generation. f32 coefficients and range endpoints are canonicalized
   before trait derivation, so unrepresentable values fail and a positive bound
-  that rounds to zero cannot preserve an invalid SPD claim. Cached Graphs patch two scalar bindings without
-  rebuilding or reading a device parameter array. A local update-plus-run
-  versus rebuild-plus-run qualification measured 1.561/3.923 ms on CPU,
-  0.815/3.745 ms on CUDA, and 1.304/5.208 ms on Vulkan. After 1,020 published
-  generations on each backend, all 1,020 retired generations were released
-  and no active lease remained.
+  that rounds to zero cannot preserve an invalid SPD claim. Cached Graphs patch
+  two scalar bindings from one native immutable snapshot without rebuilding,
+  allocating a dummy provider, or uploading a device parameter array. A local
+  262,144-element update-plus-run versus rebuild-plus-run qualification measured
+  0.996/3.534 ms on CPU, 0.372/3.675 ms on CUDA, and 0.410/4.531 ms on Vulkan.
+  These synchronous measurements are workload-specific; correctness tests also
+  retain an old snapshot across an overlapping update/submission boundary.
 - Fixed-layout `block_diagonal()` standalone apply now supports qualified f32
   CUDA/Vulkan leaves, and Program-bound CPU leaves use the same runtime-storage
   subrange contract. Consecutive domain/range slices are resolved once and

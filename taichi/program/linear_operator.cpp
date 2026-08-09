@@ -2153,12 +2153,6 @@ struct AffineParameterRange {
   }
 };
 
-struct AffineParameterSnapshot {
-  double alpha{0.0};
-  double beta{0.0};
-  std::uint64_t version{1};
-};
-
 OperatorMathematicalTraits parameterized_affine_traits(
     const OperatorAction &left,
     const OperatorAction &right,
@@ -2224,7 +2218,7 @@ OperatorResourceStamp affine_parameter_stamp(
 void apply_parameterized_affine(
     Program *program,
     const std::vector<OperatorPinnedAction> &pins,
-    const AffineParameterSnapshot &parameters,
+    const LinearOperatorAffineParameterSnapshot &parameters,
     SumCompositeScratch &scratch,
     OperatorApplyMode mode,
     const OperatorVectorView &input,
@@ -2251,8 +2245,8 @@ void apply_parameterized_affine(
     }
   };
 
-  if (parameters.alpha == 0.0) {
-    if (parameters.beta == 0.0) {
+  if (parameters.alpha() == 0.0) {
+    if (parameters.beta() == 0.0) {
       if (device) {
         TI_ASSERT(output.ndarray);
         transform_composite_ndarray(
@@ -2264,12 +2258,12 @@ void apply_parameterized_affine(
       return;
     }
     pins[1].apply_overwrite(mode, input, output);
-    scale_output(parameters.beta, output);
+    scale_output(parameters.beta(), output);
     return;
   }
-  if (parameters.beta == 0.0) {
+  if (parameters.beta() == 0.0) {
     pins[0].apply_overwrite(mode, input, output);
-    scale_output(parameters.alpha, output);
+    scale_output(parameters.alpha(), output);
     return;
   }
 
@@ -2279,8 +2273,8 @@ void apply_parameterized_affine(
           .view(program);
   pins[0].apply_overwrite(mode, input, output);
   pins[1].apply_overwrite(mode, input, temporary);
-  scale_output(parameters.alpha, output);
-  scale_output(parameters.beta, temporary);
+  scale_output(parameters.alpha(), output);
+  scale_output(parameters.beta(), temporary);
   if (device) {
     TI_ASSERT(temporary.ndarray && output.ndarray);
     add_composite_ndarray(program,
@@ -2296,12 +2290,13 @@ class ParameterizedAffineOperatorOwner {
   ParameterizedAffineOperatorOwner(Program *program,
                                    OperatorBinding left,
                                    OperatorBinding right,
-                                   AffineParameterSnapshot initial,
+                                   LinearOperatorAffineParameterSnapshot initial,
                                    AffineParameterRange alpha_range,
                                    AffineParameterRange beta_range)
       : program_(program),
         operands_{std::move(left), std::move(right)},
-        parameters_(initial),
+        parameters_(
+            std::make_shared<LinearOperatorAffineParameterSnapshot>(initial)),
         alpha_range_(alpha_range),
         beta_range_(beta_range),
         scratch_(operands_[0].action().descriptor(), program) {
@@ -2319,7 +2314,7 @@ class ParameterizedAffineOperatorOwner {
                     beta_range_.minimum > beta_range_.maximum,
                 "Parameterized affine coefficient ranges must be finite "
                 "closed intervals.");
-    validate_values(initial.alpha, initial.beta);
+    validate_values(initial.alpha(), initial.beta());
     validate_composite_operand(operands_[0].action(),
                                "parameterized affine", program_);
     validate_composite_operand(operands_[1].action(),
@@ -2350,7 +2345,7 @@ class ParameterizedAffineOperatorOwner {
           const auto parameters = owner->snapshot();
           auto pins = pin_composite_operands(owner->operands_);
           const auto stamp =
-              affine_parameter_stamp(pins, parameters.version);
+              affine_parameter_stamp(pins, parameters->version());
           auto action = OperatorAction(
               descriptor, traits, capabilities, provider_name,
               [stamp] { return stamp; },
@@ -2358,7 +2353,7 @@ class ParameterizedAffineOperatorOwner {
                   OperatorApplyMode mode, const OperatorVectorView &input,
                   const OperatorVectorView &output) {
                 apply_parameterized_affine(
-                    owner->program_, pins, parameters, owner->scratch_, mode,
+                    owner->program_, pins, *parameters, owner->scratch_, mode,
                     input, output);
               });
           return OperatorPinnedAction::from_retained_action(
@@ -2374,15 +2369,16 @@ class ParameterizedAffineOperatorOwner {
     TI_ERROR_IF(next_version <= expected_version,
                 "Parameterized affine next version must increase.");
     std::lock_guard<std::mutex> lock(mutex_);
-    TI_ERROR_IF(parameters_.version != expected_version,
+    TI_ERROR_IF(parameters_->version() != expected_version,
                 "Parameterized affine generation changed: expected {}, "
                 "current {}.",
-                expected_version, parameters_.version);
-    parameters_ = {alpha, beta, next_version};
-    return parameters_.version;
+                expected_version, parameters_->version());
+    parameters_ = std::make_shared<LinearOperatorAffineParameterSnapshot>(
+        alpha, beta, next_version);
+    return parameters_->version();
   }
 
-  AffineParameterSnapshot snapshot() const {
+  std::shared_ptr<LinearOperatorAffineParameterSnapshot> snapshot() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return parameters_;
   }
@@ -2390,7 +2386,7 @@ class ParameterizedAffineOperatorOwner {
   OperatorResourceStamp resource_stamp() const {
     const auto parameters = snapshot();
     return affine_parameter_stamp(pin_composite_operands(operands_),
-                                  parameters.version);
+                                  parameters->version());
   }
 
  private:
@@ -2404,7 +2400,7 @@ class ParameterizedAffineOperatorOwner {
   Program *program_{nullptr};
   std::vector<OperatorBinding> operands_;
   mutable std::mutex mutex_;
-  AffineParameterSnapshot parameters_;
+  std::shared_ptr<LinearOperatorAffineParameterSnapshot> parameters_;
   AffineParameterRange alpha_range_;
   AffineParameterRange beta_range_;
   SumCompositeScratch scratch_;
@@ -2979,18 +2975,39 @@ OperatorResourceStamp LinearOperatorRecordableKernel::resource_stamp() const {
   return stamp_;
 }
 
+LinearOperatorAffineParameterSnapshot::
+    LinearOperatorAffineParameterSnapshot(double alpha,
+                                          double beta,
+                                          std::uint64_t version)
+    : alpha_(alpha), beta_(beta), version_(version) {
+}
+
+double LinearOperatorAffineParameterSnapshot::alpha() const {
+  return alpha_;
+}
+
+double LinearOperatorAffineParameterSnapshot::beta() const {
+  return beta_;
+}
+
+std::uint64_t LinearOperatorAffineParameterSnapshot::version() const {
+  return version_;
+}
+
 LinearOperatorHandle::LinearOperatorHandle(
     Program *program,
     OperatorBinding binding,
     std::shared_ptr<void> provider_owner,
     NumericUpdateFn numeric_update,
     RecordableKernelFn recordable_kernel,
-    AffineParameterUpdateFn affine_parameter_update)
+    AffineParameterUpdateFn affine_parameter_update,
+    AffineParameterSnapshotFn affine_parameter_snapshot)
     : program_(program),
       provider_owner_(std::move(provider_owner)),
       numeric_update_(std::move(numeric_update)),
       recordable_kernel_(std::move(recordable_kernel)),
       affine_parameter_update_(std::move(affine_parameter_update)),
+      affine_parameter_snapshot_(std::move(affine_parameter_snapshot)),
       binding_(std::move(binding)),
       plan_(std::make_unique<OperatorPlan>(program_, binding_)) {
   TI_ERROR_IF(!program_,
@@ -3170,6 +3187,13 @@ std::uint64_t LinearOperatorHandle::update_affine_parameters(
 
 bool LinearOperatorHandle::supports_affine_parameter_update() const {
   return static_cast<bool>(affine_parameter_update_);
+}
+
+std::shared_ptr<LinearOperatorAffineParameterSnapshot>
+LinearOperatorHandle::affine_parameter_snapshot() const {
+  TI_ERROR_IF(!affine_parameter_snapshot_,
+              "LinearOperator does not own updateable affine parameters.");
+  return affine_parameter_snapshot_();
 }
 
 std::shared_ptr<LinearOperatorRecordableKernel>
@@ -5042,7 +5066,7 @@ make_parameterized_affine_operator_handle(
                                         "parameterized affine");
   auto owner = std::make_shared<ParameterizedAffineOperatorOwner>(
       left.program(), left.binding(), right.binding(),
-      AffineParameterSnapshot{alpha, beta, 1},
+      LinearOperatorAffineParameterSnapshot{alpha, beta, 1},
       AffineParameterRange{alpha_min, alpha_max},
       AffineParameterRange{beta_min, beta_max});
   auto binding = owner->binding(owner);
@@ -5052,10 +5076,13 @@ make_parameterized_affine_operator_handle(
         return owner->update(next_alpha, next_beta, expected_version,
                              next_version);
       };
+  LinearOperatorHandle::AffineParameterSnapshotFn snapshot =
+      [owner] { return owner->snapshot(); };
   return std::make_unique<LinearOperatorHandle>(
       left.program(), std::move(binding), owner,
       LinearOperatorHandle::NumericUpdateFn{},
-      LinearOperatorHandle::RecordableKernelFn{}, std::move(update));
+      LinearOperatorHandle::RecordableKernelFn{}, std::move(update),
+      std::move(snapshot));
 }
 
 std::unique_ptr<LinearOperatorHandle>

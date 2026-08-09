@@ -146,10 +146,11 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
 - 新增可原子更新的 `parameterized_affine()`。必须声明的系数闭区间限定保守 trait 推导；
   optimistic version 会拒绝 stale update，每次 submission pin 一个完整 alpha/beta generation。
   f32 系数与区间端点会在 trait 推导前规范化，无法表示的值会失败，舍入为零的正下界也不会
-  保留无效 SPD 结论。缓存 Graph 直接 patch 两个 scalar binding，不重建，也不在 kernel 中读取 device parameter
-  array。本地 update-plus-run/rebuild-plus-run 分别为：CPU 1.561/3.923 ms、CUDA
-  0.815/3.745 ms、Vulkan 1.304/5.208 ms。三后端各发布 1,020 个 generation 后，1,020 个
-  retired generation 全部释放，active lease 为零。
+  保留无效 SPD 结论。缓存 Graph 从同一个原生 immutable snapshot 直接 patch 两个 scalar
+  binding，不重建、不创建虚拟 provider，也不上传 device parameter array。本地 262,144
+  元素 update-plus-run/rebuild-plus-run 分别为：CPU 0.996/3.534 ms、CUDA
+  0.372/3.675 ms、Vulkan 0.410/4.531 ms。该同步结果只代表当前 workload；正确性测试还会
+  在 update 与重叠 submission 之间保留并验证旧 snapshot。
 - fixed-layout `block_diagonal()` standalone apply 现在支持合格的 CUDA/Vulkan f32 leaf；
   Program-bound CPU leaf 也使用相同 runtime-storage subrange 合同。连续 domain/range slice
   一次解析并按 leaf 顺序提交，不执行 gather/scatter、全向量 staging 或 N-sized temporary。
