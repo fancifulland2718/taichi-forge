@@ -88,6 +88,24 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
   继续使用 bounded encoded/masked tail 语义；既有 host-check 默认策略不变。Vulkan
   fixed-budget 使用 direct recurrence dispatch，因为 active submission batch 内的 nested
   replay synchronization 不属于已资格化操作。
+- Graph provider argument 与 generation owner 现在会作为一个 immutable launch snapshot
+  一次性准备。全部 composition leaf 会先完成验证，再发布任何 binding，因此 values-only
+  update 不会把一个 generation 的 replacement argument 与另一 generation 的 lifetime owner
+  混合。已经 setup 的 fixed-linear `PreconditionerPlan` 在 approved action 可录制时也可录制；
+  每张 Graph ticket 会 pin 精确 approved target/action pair，stale 或未批准 generation 仍然
+  fail closed。
+- batched solver statistics 升级为 schema v5，每次 solve 只发布一个 packed terminal packet。
+  opt-in per-ticket telemetry 报告 logical/executed/provider work、active efficiency、可用
+  encoded/masked work、Graph launch、physical queue submission 与不做推测的 timing。惰性
+  `workspace_pool()` 提供各自带 completion fence、带内存计账的 Graph/workspace lane，并用
+  wait/raise 明确处理饱和；它不宣称独立 GPU stream 或物理重叠。
+- CUDA device-convergent batched CG/PCG 可显式压缩活跃系统的 recurrence reduction 与 vector
+  update，且不回读 host count。A/M provider apply 仍作用于完整 batch；capability 会如实报告
+  capacity-grid masked prefix，而不是 exact indirect dispatch。该选项默认关闭，CPU/Vulkan
+  不可用。本地 262,144 scalar、64 system 的交错资格测试中，异构 batch 从 19.855 降至
+  18.044 ms（快 9.1%），全 hard 对照从 58.508 降至 56.679 ms（快 3.1%）；runtime、host
+  pool 与 device pool memory 保持稳定，异构 case 的阈值边缘浮点终止最多相差一轮。这些数据
+  只资格化该 workload，不是普遍加速承诺。
 - 新增 `inverse_block_diagonal()`，接受调用方提供的 row-major f32 inverse block，block size
   为 1 到 4。它在 CPU/CUDA/Vulkan 上可录制，并复用普通 compiled provider 的 numeric
   rebind/pinning 合同。调用方必须显式断言 SPD；Forge 不回读、求逆、正则化或推断 block。

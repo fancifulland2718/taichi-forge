@@ -791,6 +791,12 @@ generation 的 publish/retire/release 计数，`SolvePlan.statistics()` 另行�
 selection 与 schedule wrap。setup/update 在 host 边界执行；session apply 与 solver
 iteration 只调用 native `OperatorAction`，不执行 Python callback。
 
+已经 setup 且 approved action 可录制的 fixed-linear plan 可直接由 recordable PCG 与 batched
+PCG 消费。Graph recording 不会绕过 plan 生命周期：每次 launch 会原子验证并 pin 已批准的
+target/action generation，异步 ticket 保留这一精确组合直到完成。stale target、未批准的
+action generation 或不可录制 action 都会明确失败。variable-linear action table 仍是 FGMRES
+的 direct native 能力，不会被提升为 Graph replay。
+
 对于 variable-linear table，`update(accept_reuse=...)` 可以接收一个应用于所有 action 的
 boolean，也可以为每个 action 分别提供 boolean。任何 generation 发布前都会验证完整的
 next table；一个 stale 或不兼容 action 会拒绝整个 update。已经 pin 旧 table 的 solve
@@ -1018,7 +1024,8 @@ input。全局 SPD trait 不能证明这一分区性质。违反该合同得到�
 - 所有系统使用相同 scalar extent 与 f32 dtype；
 - `rhs`、`initial_guess` 和 `out` 的 shape 为 `(B * N,)`；
 - `atol` 与 `rtol` 可以是 scalar，也可以是长度为 `B` 的 sequence；
-- variable offset、active compaction 与 ragged system 不属于当前合同。
+- variable offset 与 ragged system 不属于当前合同；可选 active-system compaction
+  不改变同构扁平布局。
 
 `method="cg"` 使用 identity preconditioner。`method="pcg"` 要求一个可信 SPD
 `LinearOperator`，在相同扁平分区上应用 fixed-linear 近似逆。CPU、CUDA 与 Vulkan
@@ -1050,6 +1057,15 @@ replay，并可能保留已记录的 encoded/masked tail。两端在 loop active
 该路径在全部系统 terminal 后会停止后续 full-batch A/M payload，但不会对部分活跃 batch 内的
 A/M 做 compaction。
 
+CUDA `device_convergent` plan 可显式设置 `active_system_compaction=True`。该路径在设备端
+发布稳定的活跃系统列表，只压缩 recurrence reduction 与 vector update；A/M provider 仍作用于
+完整扁平 batch，因此 capability 明确报告 `provider_apply_compacted=False`，scope 为
+`recurrence_vector_payloads`。compact route 使用 capacity-grid masked prefix，不是 exact
+indirect launch，也不回读 host count；CPU/Vulkan 不支持时会明确失败，不做静默模拟。它默认
+关闭，因为收益取决于收敛差异、provider 成本和 batch size；并行 reduction 顺序变化还可能使
+处在阈值边缘的浮点 stop 相差一轮，但不改变收敛合同。应检查
+`statistics()["active_system_compaction"]`，不能只根据 backend 名称推断支持。
+
 所有路径都会 pin 实际提交的 operator/preconditioner generation。兼容的 values-only update
 会 rebind 到缓存的 device-convergent Graph，而不重建 Graph；在途 submission 会保留旧
 generation 直到完成。上一轮 solve 完成后更换 `out` 只需 patch Graph binding。每个 workspace
@@ -1060,13 +1076,20 @@ provider system iteration、active efficiency、host check、transfer 和 persis
 大小，使上述区别可观察。CG plan 拥有三个长度为 `B * N` 的 workspace vector，PCG 拥有
 四个；此外还保留逐环境 recurrence、tolerance 与 status state。调用方拥有的 RHS、
 solution、initial guess 和 provider resource 不计入这些 plan workspace 数字。batch plan
-统计使用 schema version 4，并报告 `recurrence_replay_builds`、
+统计使用 schema version 5，并报告 `recurrence_replay_builds`、
 `recurrence_replay_graph_builds`、`recurrence_replay_submissions`、
 `recurrence_replay_logical_kernels`、output `recurrence_replay_rebinds` 与 direct recurrence
 kernel submission；`recurrence_replay` record 会明确说明 A/M provider apply 不属于 Graph
 host-check replay 范围。`device_convergent_replay` 另行报告完整 solve scope、Graph
 build/submission 数、logical stop counter 与可用 structured-control telemetry。若 backend
 无法在不增加同步的前提下公开 encoded/masked count，则保持 unavailable，不进行推测。
+
+每次完成的 solve 都发布一个 packed terminal packet，其中包含全局 logical counter 以及全部
+逐系统 status、iteration、residual 与 tolerance；`result()` 只物化一次该 packet。使用
+`submit(..., telemetry=True)` 时，`submission.telemetry()` 还会返回 immutable per-ticket
+logical/executed/provider work、active efficiency、可用 encoded/masked count、backend Graph
+launch、physical queue submission 与不做推测的 timing 字段。telemetry 为 opt-in；backend
+无法提供的 counter 保持 `None`。
 
 使用 `benchmarks/batched_graph_pcg_bench.py` 以交错样本比较 policy 与 preconditioner
 质量；脚本还会检查 warmup 后 runtime、host pool 与 device pool 是否稳定。
@@ -1095,20 +1118,20 @@ submission.wait()
 result = submission.result()
 ```
 
-多个异步 solve producer 共享 GPU 时，可为 workspace clone 指定独立 lane，并用同一个
+多个异步 solve producer 共享 GPU 时，可创建惰性、带内存计账的 workspace pool，并用同一个
 `SubmissionPacer` 控制整体 backlog 与公平准入：
 
 ~~~python
-secondary = plan.clone_workspace()
+pool = plan.workspace_pool(2, workspace_saturation="wait")
 pacer = ti.graph.SubmissionPacer(
     2,
     max_in_flight_per_lane=1,
     max_queued=8,
 )
-primary_ticket = plan.submit(
+primary_ticket = pool.submit(
     rhs_a, out=x_a, pacer=pacer, lane='primary_physics'
 )
-secondary_ticket = secondary.submit(
+secondary_ticket = pool.submit(
     rhs_b, out=x_b, pacer=pacer, lane='secondary_physics'
 )
 primary_result = primary_ticket.result()
@@ -1137,14 +1160,23 @@ work，再把尚未完成取值的 ticket 明确标记为 stale。
 
 一个 `BatchedSolvePlan` 只拥有一个 submission slot。在 pending ticket 完成并生成结果前
 再次提交会失败，不会共享 Krylov vector。需要多个独立 in-flight submission 时，使用
-`clone = plan.clone_workspace()`；每个 clone 都拥有另一套完整 CG/PCG workspace vector
-与 state。chunked host-check policy 和 CPU plan 没有通过 `submit()` 资格；调用会明确
+`clone = plan.clone_workspace()` 手动管理，或使用 `plan.workspace_pool(lanes)` 做惰性
+round-robin 选择。每个已物化 lane 都拥有另一套完整 CG/PCG workspace vector、terminal
+state 与独立 Graph instance。可用 `workspace_lane=i` 固定 lane；所有 lane 忙时，
+`workspace_saturation="raise"` 立即失败，`"wait"` 等待并物化一个已完成 lane。
+`submission.workspace_lane` 报告实际 lane；`pool.statistics()` 报告 capacity/materialized/
+pending lane 以及逐 lane、已物化和总容量 payload bytes。workspace lane 消除 mutable state
+与 completion fence 的别名，不承诺不同 GPU stream/queue 或物理重叠。每个 root plan 应只
+建立一个 pool。chunked host-check policy 和 CPU plan 没有通过 `submit()` 资格；调用会明确
 失败，而不是把同步循环移动到 worker thread。
 
-对 batch size `B`、每个系统大小 `N`，f32 CG 每个 plan/clone 的逻辑 workspace payload 为
-`12 * B * N + 68 * B + 8` 字节，PCG 为 `16 * B * N + 68 * B + 8` 字节。使用
-`statistics()["resources"]["clone_workspace_payload_bytes"]` 在创建 clone pool 前计算总量。
-该数字不包含 allocator/driver 开销、调用方 vector 或 operator/preconditioner 资源。大型 solve
+对 batch size `B`、每个系统大小 `N`，f32 host-check CG 每个 plan/clone 的逻辑 workspace
+payload 为 `12 * B * N + 92 * B + 24` 字节，PCG 为
+`16 * B * N + 92 * B + 24` 字节；device-convergent plan 另加 12 字节，启用 CUDA
+active-system compaction 再增加 `4 * B + 8` 字节。这些公式已包含 packed terminal packet。
+创建 pool 前应检查 `statistics()["resources"]["clone_workspace_payload_bytes"]`，惰性物化后
+以 `pool.statistics()` 为准。该数字不包含 allocator/driver 开销、调用方 vector 或
+operator/preconditioner 资源。大型 solve
 默认使用 `max_in_flight=1`；只有 profile 证明宿主重叠带来有效收益且资源与尾延迟仍满足预算时，
 才增加到 2。小系统应优先扩大 batch，而不是按物理实体创建 plan clone。
 

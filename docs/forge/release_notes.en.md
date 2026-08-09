@@ -110,6 +110,31 @@ grouped under the behavior they shipped.
   Vulkan fixed-budget execution uses direct recurrence dispatches because a
   nested replay synchronization inside an active submission batch is not
   qualified.
+- Graph provider arguments and generation owners are now prepared as one
+  immutable launch snapshot. Composition leaves are validated before any
+  binding is published, so a values-only update cannot mix replacement
+  arguments from one generation with lifetime owners from another. A setup
+  fixed-linear `PreconditionerPlan` is recordable when its approved action is
+  recordable; every Graph ticket pins the exact approved target/action pair,
+  while stale or unapproved generations continue to fail closed.
+- Batched solver statistics use schema v5 and every solve publishes one packed
+  terminal packet. Opt-in per-ticket telemetry reports logical/executed/provider
+  work, active efficiency, available encoded/masked work, Graph launches,
+  physical queue submissions, and non-inferred timing. A lazy
+  `workspace_pool()` adds independently fenced, memory-accounted Graph/workspace
+  lanes with explicit wait/raise saturation; it does not claim independent GPU
+  streams or physical overlap.
+- CUDA device-convergent batched CG/PCG can explicitly compact active systems
+  for recurrence reductions and vector updates without a host count readback.
+  A/M provider applies remain full-batch, and the capability truthfully reports
+  a capacity-grid masked prefix rather than exact indirect dispatch. The option
+  is off by default and unavailable on CPU/Vulkan. In a local 262,144-scalar,
+  64-system interleaved qualification, a heterogeneous batch improved from
+  19.855 to 18.044 ms (9.1%); an all-hard control improved from 58.508 to
+  56.679 ms (3.1%). Runtime, host-pool, and device-pool memory were stable;
+  borderline floating-point termination differed by at most one iteration in
+  the heterogeneous case. These measurements qualify this workload, not a
+  universal speedup.
 - Added `inverse_block_diagonal()` for caller-supplied row-major f32 inverse
   blocks of size 1 through 4. It is recordable on CPU/CUDA/Vulkan and uses the
   same numeric rebind/pinning contract as other compiled providers. The caller

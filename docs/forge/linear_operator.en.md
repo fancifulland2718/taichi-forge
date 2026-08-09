@@ -922,6 +922,14 @@ action selections and schedule wraps. Setup and update execute at host
 boundaries; session apply and solver iterations invoke native `OperatorAction`
 objects without Python callbacks.
 
+A setup fixed-linear plan whose approved action is recordable can be consumed
+directly by recordable PCG and batched PCG. Graph recording does not bypass the
+plan lifecycle: each launch atomically validates and pins the approved target
+and action generations, and the asynchronous ticket owns that exact pair
+through completion. A stale target, unapproved action generation, or
+nonrecordable action fails explicitly. Variable-linear action tables remain a
+direct native FGMRES facility and are not promoted to Graph replay.
+
 For a variable-linear table, `update(accept_reuse=...)` accepts either one
 boolean for all actions or one boolean per action. The complete next table is
 validated before any generation is published: one stale or incompatible
@@ -1195,8 +1203,8 @@ The first public layout is deliberately homogeneous and flat:
 - all systems have the same scalar extent and f32 dtype;
 - `rhs`, `initial_guess`, and `out` have shape `(B * N,)`;
 - `atol` and `rtol` may be scalars or length-`B` sequences; and
-- variable offsets, active compaction, and ragged systems are not part of this
-  contract.
+- variable offsets and ragged systems are not part of this contract. Optional
+  active-system compaction does not change the homogeneous flat layout.
 
 `method="cg"` uses identity preconditioning. `method="pcg"` requires a
 trusted SPD `LinearOperator` that applies a fixed-linear approximate inverse
@@ -1240,6 +1248,20 @@ only when terminal state is materialized. This route stops subsequent full
 batch A/M payload once all systems are terminal, but it does not compact A/M
 within a partially active batch.
 
+CUDA `device_convergent` plans may explicitly set
+`active_system_compaction=True`. This publishes a stable device-side list of
+active systems and compacts only recurrence reductions and vector updates.
+The A/M providers still apply to the complete flat batch, so the capability
+reports `provider_apply_compacted=False` and scope
+`recurrence_vector_payloads`. The compact route uses a capacity-grid masked
+prefix rather than exact indirect launch, performs no host count readback, and
+is neither available nor silently emulated on CPU or Vulkan. It remains off by
+default because its benefit depends on convergence heterogeneity, provider
+cost, and batch size; changing the parallel reduction order may also move a
+borderline floating-point stop by one logical iteration without changing the
+convergence contract. Inspect `statistics()["active_system_compaction"]`
+instead of inferring support from the backend name.
+
 All paths pin the exact operator and preconditioner generations they submit.
 Compatible values-only updates are rebound into a cached device-convergent
 Graph without reconstructing it; in-flight submissions keep the older
@@ -1254,7 +1276,7 @@ active efficiency, host checks, transfers, and persistent resource sizes. A CG
 plan owns three length-`B * N` workspace vectors; PCG owns four. It also owns
 per-environment recurrence, tolerance, and status state. Caller-owned RHS,
 solution, initial guess, and provider resources are excluded from these plan
-workspace counts. Batched-plan statistics use schema version 4 and report
+workspace counts. Batched-plan statistics use schema version 5 and report
 `recurrence_replay_builds`, `recurrence_replay_graph_builds`,
 `recurrence_replay_submissions`, `recurrence_replay_logical_kernels`, output
 `recurrence_replay_rebinds`, and direct recurrence-kernel submissions. The
@@ -1264,6 +1286,15 @@ reports its whole-solve scope, Graph build/submission counts, logical stop
 counter, and available structured-control telemetry. Encoded or masked counts
 remain unavailable rather than inferred when a backend cannot expose them
 without adding synchronization.
+
+Every completed solve publishes one packed terminal packet containing the
+global logical counter and all per-system status, iteration, residual, and
+tolerance values. `result()` materializes that packet once. With
+`submit(..., telemetry=True)`, `submission.telemetry()` additionally returns
+immutable per-ticket logical/executed/provider work, active efficiency,
+available encoded/masked counts, backend Graph launches, physical queue
+submissions, and non-inferred timing fields. Telemetry is opt-in; unavailable
+backend counters remain `None`.
 
 Use `benchmarks/batched_graph_pcg_bench.py` to compare policies and
 preconditioner quality with interleaved samples; it also checks steady runtime,
@@ -1294,21 +1325,21 @@ submission.wait()
 result = submission.result()
 ```
 
-When multiple asynchronous solve producers share a GPU, assign independent
-lanes to workspace clones and use one `SubmissionPacer` to bound aggregate
-backlog and provide fair admission:
+When multiple asynchronous solve producers share a GPU, create a lazy,
+memory-accounted workspace pool and use one `SubmissionPacer` to bound
+aggregate backlog and provide fair admission:
 
 ~~~python
-secondary = plan.clone_workspace()
+pool = plan.workspace_pool(2, workspace_saturation="wait")
 pacer = ti.graph.SubmissionPacer(
     2,
     max_in_flight_per_lane=1,
     max_queued=8,
 )
-primary_ticket = plan.submit(
+primary_ticket = pool.submit(
     rhs_a, out=x_a, pacer=pacer, lane='primary_physics'
 )
-secondary_ticket = secondary.submit(
+secondary_ticket = pool.submit(
     rhs_b, out=x_b, pacer=pacer, lane='secondary_physics'
 )
 primary_result = primary_ticket.result()
@@ -1346,17 +1377,28 @@ bytes.
 One `BatchedSolvePlan` owns one submission slot. Submitting again before the
 pending ticket is completed and materialized fails instead of sharing Krylov
 vectors. Use `clone = plan.clone_workspace()` when independent submissions
-must be in flight concurrently. Each clone owns another complete set of CG or
-PCG workspace vectors and state. Chunked host-check policies and CPU plans are
-not qualified for `submit()`; a call fails explicitly rather than moving a
-synchronous loop to a worker thread.
+must be managed manually, or `plan.workspace_pool(lanes)` for lazy round-robin
+selection. Each materialized pool lane owns another complete set of CG/PCG
+workspace vectors, terminal state, and an independent Graph instance. A pool
+may pin a submission with `workspace_lane=i`; `workspace_saturation="raise"`
+fails immediately when all lanes are busy, while `"wait"` waits for and
+materializes a completed lane. `submission.workspace_lane` reports the chosen
+lane, and `pool.statistics()` reports capacity/materialized/pending lanes plus
+per-lane, materialized, and capacity payload bytes. Workspace lanes remove
+mutable-state and completion-fence aliasing; they do not promise distinct GPU
+streams, queues, or physical overlap. Use one pool per root plan. Chunked
+host-check policies and CPU plans are not qualified for `submit()`; a call
+fails explicitly rather than moving a synchronous loop to a worker thread.
 
-For batch size `B` and per-system size `N`, each f32 CG plan or clone has a
-logical workspace payload of `12 * B * N + 68 * B + 8` bytes. PCG uses
-`16 * B * N + 68 * B + 8` bytes. Inspect
+For batch size `B` and per-system size `N`, each f32 host-check CG plan or
+clone has a logical workspace payload of `12 * B * N + 92 * B + 24` bytes;
+PCG uses `16 * B * N + 92 * B + 24`. A device-convergent plan adds 12 bytes.
+Enabling CUDA active-system compaction adds another `4 * B + 8` bytes. These
+figures include the packed terminal packet. Inspect
 `statistics()["resources"]["clone_workspace_payload_bytes"]` before creating
-a clone pool. Allocator and driver overhead, caller vectors, and operator or
-preconditioner resources are excluded. Use `max_in_flight=1` by default for a
+a pool; `pool.statistics()` is authoritative after lazy lane materialization.
+Allocator and driver overhead, caller vectors, and operator or preconditioner
+resources are excluded. Use `max_in_flight=1` by default for a
 large solve. Increase it to 2 only when profiling demonstrates useful host
 overlap with acceptable memory and tail latency. For small systems, increase
 batching instead of creating one plan clone per application entity.
