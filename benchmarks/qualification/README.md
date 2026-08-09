@@ -30,6 +30,7 @@ three direct comparisons, and one explicitly classified thin-capability case:
 | `native_reduce` | whole-array i32 sum to one-element ndarray; semantic minimum is one input read and one scalar output |
 | `native_transform` | elementwise i32 affine transform; one source read and one destination write per element |
 | `native_gather` | indexed i32 read through a full-permutation index ndarray |
+| `native_scatter` | indexed i32 write through the same unique full permutation |
 
 These are control/regression microbenchmarks. They measure the ordinary kernel
 path and may detect runtime tax or a real base-path improvement, but they do not
@@ -78,6 +79,12 @@ also a `thin-capability` case and has the dedicated entry point
 same full-permutation i32 indices and exact output oracle. Forge must select its
 cached native indexed-copy plan; vanilla runs one equivalent indexed-read
 kernel. Its entry point is `native_gather_microbench.py`.
+
+`native_scatter` uses the same permutation contract, which proves that every
+destination index is unique and in range before timing. This removes duplicate
+write races from the comparison. Forge's native scatter plan and the vanilla
+equivalent kernel are checked independently through
+`native_scatter_microbench.py`.
 
 ## Fairness contract implemented by the runner
 
@@ -175,6 +182,16 @@ Indexed gather is launched separately:
 ```powershell
 C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
   benchmarks\qualification\native_gather_microbench.py `
+  --backend cuda --preset small --intent diagnostic `
+  --pairs 1 --samples 5 --warmups 2 `
+  --target-sample-ms 20 --stability-replays 0
+```
+
+Indexed scatter has a separate process and run ID:
+
+```powershell
+C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
+  benchmarks\qualification\native_scatter_microbench.py `
   --backend cuda --preset small --intent diagnostic `
   --pairs 1 --samples 5 --warmups 2 `
   --target-sample-ms 20 --stability-replays 0

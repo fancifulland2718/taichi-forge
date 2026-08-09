@@ -159,6 +159,21 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         self.assertFalse(_native_indexed_copy_route(
             Workspace(), "forge", "cuda", scatter=False)["passed"])
 
+    def test_native_scatter_route_distinguishes_gather_plan(self):
+        class Plan:
+            backend = "cuda_device"
+            method_name = "cuda_device_scatter_ndarray"
+
+        class Workspace:
+            _native_indexed_copy_plan = Plan()
+            workspace_bytes_current = 0
+            workspace_bytes_peak = 0
+
+        self.assertTrue(_native_indexed_copy_route(
+            Workspace(), "forge", "cuda", scatter=True)["passed"])
+        self.assertFalse(_native_indexed_copy_route(
+            Workspace(), "forge", "cuda", scatter=False)["passed"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -73,6 +73,7 @@ OPERATIONS = (
     "native_reduce",
     "native_transform",
     "native_gather",
+    "native_scatter",
     "mpm_graph",
     "mpm_direct",
 )
@@ -1680,6 +1681,9 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         elif args.operation == "native_gather":
             case = _build_native_indexed_copy_case(
                 ti, args.runtime, args.backend, config["elements"], False)
+        elif args.operation == "native_scatter":
+            case = _build_native_indexed_copy_case(
+                ti, args.runtime, args.backend, config["elements"], True)
         elif args.operation in ("mpm_graph", "mpm_direct"):
             case = _build_mpm_case(
                 ti, args.runtime, args.operation, args.preset)
