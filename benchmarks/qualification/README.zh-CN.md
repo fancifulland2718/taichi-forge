@@ -105,6 +105,13 @@ stable scatter kernel。两边均计时完整 adapter call；内部 stage 数和
 明确允许的差异。count 与被选元素顺序必须同时 exact 一致。独立入口为
 `native_compact_microbench.py`。
 
+`linear_operator_solve_plan_qualification.py` 是最后的 Forge-only 案例。它先使用
+公开 `qualify_operator` 与 `qualify_solve_plan` 生成合同证据，再分别通过 eager
+`SolvePlan.solve` 和 compiled Graph submit/wait 边界测量显式 CUDA
+`device_convergent` CG 的绝对同步完成时间。两种模式共享同一 diagonal SPD 系统、
+exact solution、共同 batch、平衡样本顺序和回放平台门槛。任何 mode ratio 都只是
+Forge 内部 API 边界诊断，绝不是 Forge/vanilla 或 Forge/Warp speedup。
+
 `device_prefix_chain` 是 `THIN-003`。Forge 使用 `DeviceExtent`、`DevicePrefix` 和
 一个可复用 `DevicePrefixWorkspace`；vanilla 用可复用的公共 prefix-sum executor
 手工组合相同的 device-count-masked stable compact + scan。两个计时 adapter 都不在

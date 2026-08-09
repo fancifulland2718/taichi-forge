@@ -124,6 +124,14 @@ timed on each side; internal stage count and workspace are declared differences.
 Count and selected order must both match exactly. Use
 `native_compact_microbench.py`.
 
+`linear_operator_solve_plan_qualification.py` is the final Forge-only case. It
+uses public `qualify_operator` and `qualify_solve_plan` evidence, then measures
+absolute synchronous completion for explicit CUDA `device_convergent` CG
+through eager `SolvePlan.solve` and compiled Graph submit/wait boundaries. The
+two modes share one diagonal SPD system, exact solution, common batch, balanced
+sample order, and replay plateau gates. Any mode ratio is an internal Forge
+API-boundary diagnostic, never a Forge/vanilla or Forge/Warp speedup.
+
 `device_prefix_chain` is `THIN-003`. Forge uses `DeviceExtent`, `DevicePrefix`,
 and one reusable `DevicePrefixWorkspace`. Vanilla manually composes the same
 device-count-masked stable compact plus scan using reusable public prefix-sum
