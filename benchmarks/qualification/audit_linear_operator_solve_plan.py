@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any, Sequence
 
 try:
-    from .linear_operator_solve_plan_qualification import MODES, SCHEMA
+    from .linear_operator_solve_plan_qualification import (
+        MODES, SCHEMA, expected_route)
     from .runtime_common import summarize_samples, write_json
     from .single_kernel_microbench import (
         QUALIFICATION_MAX_CPU_UTIL_PERCENT, QUALIFICATION_MAX_CV_PERCENT,
@@ -18,7 +19,8 @@ try:
         WINDOWS_BENCHMARK_MUTEX,
     )
 except ImportError:
-    from linear_operator_solve_plan_qualification import MODES, SCHEMA
+    from linear_operator_solve_plan_qualification import (
+        MODES, SCHEMA, expected_route)
     from runtime_common import summarize_samples, write_json
     from single_kernel_microbench import (
         QUALIFICATION_MAX_CPU_UTIL_PERCENT, QUALIFICATION_MAX_CV_PERCENT,
@@ -90,6 +92,7 @@ def audit_artifact(run_dir: Path) -> dict[str, Any]:
         check.get("name"): check.get("status")
         for check in public_operator.get("checks", [])
     }
+    route_contract = expected_route(result.get("backend"))
     checks = {
         "schema": result.get("schema") == SCHEMA == manifest.get("schema"),
         "status": result.get("status") == "passed",
@@ -142,18 +145,20 @@ def audit_artifact(run_dir: Path) -> dict[str, Any]:
             and all(check.get("status") == "passed"
                     for check in public_solve.get("checks", []))),
         "unsupported_capabilities_disclosed": bool(
-            operator_statuses.get("generalized_apply") == "unsupported"
+            operator_statuses.get("generalized_apply") in (
+                "passed", "unsupported")
             and operator_statuses.get("adjoint_dot_product") == "unsupported"),
         "route": bool(
             result.get("route", {}).get(
                 "device_convergent_capability", {}).get("supported")
             and result.get("route", {}).get(
                 "device_convergent_capability", {}).get("primitive")
-            == "cuda_conditional_graph"
+            == route_contract["primitive"]
             and result.get("route", {}).get("automatic_selected_policy")
-            == "host_check_every_k"
+            == route_contract["automatic_policy"]
             and result.get("route", {}).get(
-                "automatic_selection_qualified") is False),
+                "automatic_selection_qualified")
+            is route_contract["automatic_selection_qualified"]),
         "sample_counts": all(
             len(result.get("samples_ms", {}).get(mode, []))
             == len(result.get("raw_batch_ms", {}).get(mode, []))

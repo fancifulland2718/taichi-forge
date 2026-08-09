@@ -53,6 +53,25 @@ PRESETS = {"small": 65_536, "medium": 262_144}
 MODES = ("eager_device_convergent", "graph_device_convergent")
 
 
+def expected_route(backend: str) -> dict[str, Any]:
+    routes = {
+        "cuda": {
+            "primitive": "cuda_conditional_graph",
+            "automatic_policy": "host_check_every_k",
+            "automatic_selection_qualified": False,
+        },
+        "vulkan": {
+            "primitive": "vulkan_dispatch_indirect",
+            "automatic_policy": "device_convergent",
+            "automatic_selection_qualified": True,
+        },
+    }
+    try:
+        return dict(routes[backend])
+    except KeyError as error:
+        raise ValueError(f"unsupported backend {backend!r}") from error
+
+
 def balanced_mode_orders(sample_count: int) -> list[tuple[str, str]]:
     if sample_count <= 0:
         raise ValueError("sample_count must be positive")
@@ -185,11 +204,12 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     ti, import_ms, core_path = _load_taichi("forge")
     environment = _environment_provenance("forge", ti, core_path)
     init_started = time.perf_counter_ns()
-    ti.init(arch=ti.cuda, offline_cache=False, kernel_profiler=False,
+    requested_arch = getattr(ti, args.backend)
+    ti.init(arch=requested_arch, offline_cache=False, kernel_profiler=False,
             random_seed=0, cpu_max_num_threads=args.cpu_threads)
     init_ms = (time.perf_counter_ns() - init_started) / 1.0e6
     actual_arch = ti.lang.impl.current_cfg().arch
-    device = runtime_device_identity(ti, "cuda")
+    device = runtime_device_identity(ti, args.backend)
     elements = PRESETS[args.preset]
     diagonal_host = np.linspace(1.0, 4.0, elements, dtype=np.float32)
     exact = np.sin(np.linspace(0.0, 8.0, elements, dtype=np.float32))
@@ -333,11 +353,11 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     result = {
         "schema": SCHEMA, "status": "passed", "case_id": "FORGEONLY-001",
         "comparison_class": "forge-only-api-mode", "intent": args.intent,
-        "backend": "cuda", "preset": args.preset, "elements": elements,
+        "backend": args.backend, "preset": args.preset, "elements": elements,
         "dtype": "f32", "method": "cg", "import_ms": import_ms,
-        "init_ms": init_ms, "requested_arch": "cuda",
+        "init_ms": init_ms, "requested_arch": args.backend,
         "actual_arch": _arch_name(ti, actual_arch),
-        "arch_match": actual_arch == ti.cuda, "environment": environment,
+        "arch_match": actual_arch == requested_arch, "environment": environment,
         "affinity": affinity, "device_identity": device,
         "operator_qualification": operator_qualification,
         "solve_qualification": solve_qualification,
@@ -400,6 +420,13 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 "solver_execution_policy"] == "device_convergent"
             and graph_plan.statistics()["identity"][
                 "solver_execution_policy"] == "device_convergent"),
+        "declared_backend_route": bool(
+            device_capability["primitive"]
+            == expected_route(args.backend)["primitive"]
+            and identity.get("solver_execution_policy")
+            == expected_route(args.backend)["automatic_policy"]
+            and device_capability.get("automatic_selection_qualified")
+            is expected_route(args.backend)["automatic_selection_qualified"]),
         "correctness_before_and_after": all(
             item["passed"] for item in
             (*correctness.values(), *final_correctness.values())),
@@ -473,6 +500,8 @@ def _write_reports(output_dir: Path, result: dict[str, Any]) -> None:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--backend", choices=("cuda", "vulkan"),
+                        default="cuda")
     parser.add_argument("--preset", choices=tuple(PRESETS), default="small")
     parser.add_argument("--intent", choices=("diagnostic", "qualification"),
                         default="diagnostic")
@@ -502,7 +531,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("stability settings must be positive")
     repo_root = Path(__file__).resolve().parents[2]
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_id = args.run_id or f"linear-solve-{args.preset}-{timestamp}"
+    run_id = args.run_id or (
+        f"linear-solve-{args.backend}-{args.preset}-{timestamp}")
     if Path(run_id).name != run_id:
         raise ValueError("run_id must be one path component")
     output_dir = (repo_root / args.output_root / run_id).resolve()
@@ -521,7 +551,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ignored = [os.getpid(), *_windows_process_ancestors(os.getpid())]
             manifest["noise_ignored_process_lineage"] = ignored
             before = _noise_observation(
-                "cuda", ignored, args.max_cpu_util, args.max_gpu_util,
+                args.backend, ignored, args.max_cpu_util, args.max_gpu_util,
                 args.max_gpu_temp)
             manifest["noise_observations"].append({"label": "before", **before})
             write_json(output_dir / "manifest.json", manifest)
@@ -530,7 +560,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                                    "; ".join(before["reasons"]))
             result = _run(args)
             after = _noise_observation(
-                "cuda", ignored, args.max_cpu_util, args.max_gpu_util,
+                args.backend, ignored, args.max_cpu_util, args.max_gpu_util,
                 args.max_gpu_temp)
             manifest["noise_observations"].append({"label": "after", **after})
             result["noise_admission"] = {
