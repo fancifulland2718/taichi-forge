@@ -30,6 +30,7 @@ Forge/vanilla 比较均由相邻且不重叠的 fresh-process 对组成。
 | `native_gather` | 通过全排列 index ndarray 执行 indexed i32 read |
 | `native_scatter` | 通过同一个唯一全排列执行 indexed i32 write |
 | `native_compact` | stable flag selection，并 exact 校验 count 与有序输出 |
+| `device_prefix_chain` | device-resident active-prefix stable compact 后接 inclusive scan |
 
 这些是控制/回归 microbench，用于测量普通 kernel 路径，能够发现运行时额外成本
 或真实的基础路径提升；但它们不覆盖 Graph、native primitive、bounded dispatch、
@@ -79,6 +80,12 @@ i32 输出与 native plan 检查。它同样属于 `thin-capability`，独立入
 stable scatter kernel。两边均计时完整 adapter call；内部 stage 数和 workspace 是
 明确允许的差异。count 与被选元素顺序必须同时 exact 一致。独立入口为
 `native_compact_microbench.py`。
+
+`device_prefix_chain` 是 `THIN-003`。Forge 使用 `DeviceExtent`、`DevicePrefix` 和
+一个可复用 `DevicePrefixWorkspace`；vanilla 用可复用的公共 prefix-sum executor
+手工组合相同的 device-count-masked stable compact + scan。两个计时 adapter 都不在
+host 读取 count，并 exact 校验 count、compact 顺序与 scan prefix。独立入口为
+`device_prefix_chain_microbench.py`。
 
 ## runner 已实现的公平性合同
 
@@ -187,6 +194,16 @@ stable compact 也是独立运行：
 ```powershell
 C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
   benchmarks\qualification\native_compact_microbench.py `
+  --backend cuda --preset small --intent diagnostic `
+  --pairs 1 --samples 5 --warmups 2 `
+  --target-sample-ms 20 --stability-replays 0
+```
+
+device-prefix chain 同样独立运行：
+
+```powershell
+C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
+  benchmarks\qualification\device_prefix_chain_microbench.py `
   --backend cuda --preset small --intent diagnostic `
   --pairs 1 --samples 5 --warmups 2 `
   --target-sample-ms 20 --stability-replays 0

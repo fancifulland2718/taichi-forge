@@ -75,6 +75,7 @@ OPERATIONS = (
     "native_gather",
     "native_scatter",
     "native_compact",
+    "device_prefix_chain",
     "mpm_graph",
     "mpm_direct",
 )
@@ -1374,6 +1375,253 @@ def _build_native_compact_case(ti: Any, runtime_name: str, backend: str,
     }
 
 
+def _device_prefix_chain_route(workspace: Any | None, runtime_name: str,
+                               backend: str, elements: int) -> dict[str, Any]:
+    if runtime_name == "forge":
+        compact_workspace = getattr(workspace, "_compact", None)
+        compact_plan = getattr(compact_workspace, "_native_compact_plan", None)
+        scanners = getattr(workspace, "_scan_executors", {})
+        scanner = scanners.get(elements)
+        scan_plan = getattr(scanner, "_native_scan_plan", None)
+        expected_backend = {
+            "cuda": "cuda_device",
+            "vulkan": "vulkan_native",
+            "cpu": "cpu_native",
+        }[backend]
+        expected_compact = {
+            "cuda": "cuda_device_compact_ndarray",
+            "vulkan": "vulkan_compact_ndarray",
+            "cpu": "cpu_compact_ndarray",
+        }[backend]
+        expected_scan = {
+            "cuda": "cuda_device_inclusive_scan_ndarray",
+            "vulkan": "vulkan_inclusive_scan_ndarray",
+            "cpu": "cpu_inclusive_scan_ndarray",
+        }[backend]
+        compact_backend = getattr(compact_plan, "backend", None)
+        compact_method = getattr(compact_plan, "method_name", None)
+        scan_backend = getattr(scan_plan, "backend", None)
+        scan_method = getattr(scan_plan, "method_name", None)
+        return {
+            "classification": "forge_device_resident_prefix_compact_scan",
+            "expected_backend": expected_backend,
+            "expected_compact_method": expected_compact,
+            "expected_scan_method": expected_scan,
+            "observed_compact_backend": compact_backend,
+            "observed_compact_method": compact_method,
+            "observed_scan_backend": scan_backend,
+            "observed_scan_method": scan_method,
+            "workspace_bytes_current": getattr(
+                workspace, "workspace_bytes_current", None),
+            "workspace_bytes_peak": getattr(
+                workspace, "workspace_bytes_peak", None),
+            "allocation_count": getattr(workspace, "allocation_count", None),
+            "passed": bool(
+                compact_plan is not None
+                and scan_plan is not None
+                and compact_backend == expected_backend
+                and scan_backend == expected_backend
+                and compact_method == expected_compact
+                and scan_method == expected_scan
+            ),
+        }
+    return {
+        "classification": "vanilla_device_count_stable_compact_scan_pipeline",
+        "expected_backend": backend,
+        "expected_compact_method": (
+            "masked flags plus PrefixSumExecutor plus stable scatter"
+        ),
+        "expected_scan_method": "second reusable PrefixSumExecutor",
+        "observed_compact_backend": backend,
+        "observed_compact_method": "qualification_device_count_compact",
+        "observed_scan_backend": backend,
+        "observed_scan_method": "qualification_prefix_scan_without_host_count",
+        "workspace_bytes_current": None,
+        "workspace_bytes_peak": None,
+        "allocation_count": None,
+        "passed": True,
+    }
+
+
+def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
+                                    elements: int) -> dict[str, Any]:
+    import numpy as np
+
+    active_count = elements * 3 // 5
+    host_values = (np.arange(elements, dtype=np.int32) % 17) + 1
+    host_flags = (np.arange(elements) % 4 != 0).astype(np.int32)
+    selected = host_values[:active_count][host_flags[:active_count] != 0]
+    expected_scan = np.cumsum(selected, dtype=np.int64).astype(np.int32)
+    selected_count = int(selected.size)
+    values = ti.ndarray(dtype=ti.i32, shape=elements)
+    flags = ti.ndarray(dtype=ti.i32, shape=elements)
+    compacted = ti.ndarray(dtype=ti.i32, shape=elements)
+    scanned = ti.ndarray(dtype=ti.i32, shape=elements)
+    values.from_numpy(host_values)
+    flags.from_numpy(host_flags)
+    compacted.fill(0)
+    scanned.fill(0)
+
+    forge_extent = forge_output_extent = forge_workspace = source_prefix = None
+    compacted_prefix = None
+    vanilla_input_count = vanilla_output_count = None
+    compact_prefix_field = scan_field = None
+    compact_scanner = scan_scanner = None
+    if runtime_name == "forge":
+        forge_extent = ti.DeviceExtent(elements)
+        forge_output_extent = ti.DeviceExtent(elements)
+        forge_workspace = ti.algorithms.DevicePrefixWorkspace(elements)
+        forge_extent.set(active_count)
+        source_prefix = ti.algorithms.device_prefix(
+            values, forge_extent, workspace=forge_workspace)
+        compacted_prefix = ti.algorithms.device_prefix(
+            compacted, forge_output_extent, workspace=forge_workspace)
+    else:
+        vanilla_input_count = ti.ndarray(dtype=ti.i32, shape=1)
+        vanilla_output_count = ti.ndarray(dtype=ti.i32, shape=1)
+        vanilla_input_count.from_numpy(np.array([active_count], dtype=np.int32))
+        vanilla_output_count.fill(0)
+        compact_prefix_field = ti.field(dtype=ti.i32, shape=elements)
+        scan_field = ti.field(dtype=ti.i32, shape=elements)
+        compact_scanner = ti.algorithms.PrefixSumExecutor(elements)
+        scan_scanner = ti.algorithms.PrefixSumExecutor(elements)
+
+    @ti.kernel
+    def vanilla_stage_flags(
+            source_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            input_count: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in source_flags:
+            compact_prefix_field[i] = (
+                1 if i < input_count[0] and source_flags[i] != 0 else 0
+            )
+
+    @ti.kernel
+    def vanilla_scatter_and_stage_scan(
+            source_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            source_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            input_count: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            destination: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            output_count: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        output_count[0] = compact_prefix_field[elements - 1]
+        for i in range(elements):
+            scan_field[i] = 0
+        for i in source_flags:
+            if i < input_count[0] and source_flags[i] != 0:
+                target = compact_prefix_field[i] - 1
+                destination[target] = source_values[i]
+                scan_field[target] = source_values[i]
+
+    @ti.kernel
+    def vanilla_copy_scan(
+            destination: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in range(elements):
+            destination[i] = scan_field[i]
+
+    def launch() -> None:
+        if runtime_name == "forge":
+            source_prefix.compact(
+                flags, compacted, forge_output_extent, method="auto")
+            compacted_prefix.scan(scanned)
+        else:
+            vanilla_stage_flags(flags, vanilla_input_count)
+            compact_scanner.run(compact_prefix_field)
+            vanilla_scatter_and_stage_scan(
+                values, flags, vanilla_input_count, compacted,
+                vanilla_output_count)
+            scan_scanner.run(scan_field)
+            vanilla_copy_scan(scanned)
+
+    def reset() -> None:
+        compacted.fill(0)
+        scanned.fill(0)
+        if runtime_name == "forge":
+            forge_extent.set(active_count)
+            forge_output_extent.reset()
+        else:
+            vanilla_input_count.from_numpy(
+                np.array([active_count], dtype=np.int32))
+            vanilla_output_count.fill(0)
+            compact_prefix_field.fill(0)
+            scan_field.fill(0)
+
+    def validate_fresh() -> dict[str, Any]:
+        reset()
+        ti.sync()
+        launch()
+        ti.sync()
+        actual_count = (
+            forge_output_extent.snapshot().count
+            if runtime_name == "forge"
+            else int(vanilla_output_count.to_numpy()[0])
+        )
+        actual_compacted = compacted.to_numpy()[:selected_count]
+        actual_scan = scanned.to_numpy()[:selected_count]
+        compact_mismatch = np.flatnonzero(actual_compacted != selected)
+        scan_mismatch = np.flatnonzero(actual_scan != expected_scan)
+        return {
+            "passed": bool(
+                actual_count == selected_count
+                and compact_mismatch.size == 0
+                and scan_mismatch.size == 0
+            ),
+            "comparison": "exact_device_count_stable_compact_then_scan",
+            "actual_count": int(actual_count),
+            "expected_count": selected_count,
+            "compact_mismatch_count": int(compact_mismatch.size),
+            "scan_mismatch_count": int(scan_mismatch.size),
+            "actual_last": int(actual_scan[-1]),
+            "expected_last": int(expected_scan[-1]),
+        }
+
+    return {
+        "launch": launch,
+        "reset": reset,
+        "validate": validate_fresh,
+        "route": lambda: _device_prefix_chain_route(
+            forge_workspace, runtime_name, backend, elements),
+        "logical_bytes": elements * 8 + selected_count * 12 + 8,
+        "traffic_model": (
+            "semantic minimum for active-prefix flags/value reads, selected "
+            "compact write, selected scan read/write, and device count state; "
+            "internal prefix/workspace traffic excluded"
+        ),
+        "workload_contract": {
+            "case_id": "THIN-003",
+            "comparison_class": "thin-capability",
+            "semantics": "device_count_masked_stable_compact_then_inclusive_scan",
+            "dtype": "i32",
+            "capacity": elements,
+            "active_count": active_count,
+            "selected_count": selected_count,
+            "input_pattern": "i % 17 + 1",
+            "flag_pattern": "i % 4 != 0",
+            "forge_adapter": (
+                "DevicePrefix.compact followed by DevicePrefix.scan with one "
+                "reusable DevicePrefixWorkspace and device-resident extents"
+            ),
+            "vanilla_adapter": (
+                "device-count masked flags, reusable PrefixSumExecutor, stable "
+                "scatter/stage, second reusable PrefixSumExecutor, output copy"
+            ),
+            "shared": (
+                "same capacity, active count, ndarray inputs/outputs, stable "
+                "compact and inclusive-scan semantics, no host count observation "
+                "inside timed calls, outer synchronization, and exact oracle"
+            ),
+            "allowed_difference": (
+                "Forge owns DeviceExtent/DevicePrefix composition; vanilla "
+                "manually composes the equivalent device-resident pipeline"
+            ),
+            "correctness": "exact_count_compacted_order_and_scan_prefix",
+            "timing": (
+                "frozen repeated complete compact-plus-scan adapter calls plus "
+                "one outer sync; reset and host observations are excluded"
+            ),
+            "elements": elements,
+        },
+    }
+
+
 def _load_graph_mpm_workload() -> tuple[Any, Path]:
     source = Path(__file__).resolve().parents[1] / "graph_mpm_replay_bench.py"
     spec = importlib.util.spec_from_file_location(
@@ -1861,6 +2109,9 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
                 ti, args.runtime, args.backend, config["elements"], True)
         elif args.operation == "native_compact":
             case = _build_native_compact_case(
+                ti, args.runtime, args.backend, config["elements"])
+        elif args.operation == "device_prefix_chain":
+            case = _build_device_prefix_chain_case(
                 ti, args.runtime, args.backend, config["elements"])
         elif args.operation in ("mpm_graph", "mpm_direct"):
             case = _build_mpm_case(

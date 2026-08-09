@@ -32,6 +32,7 @@ three direct comparisons, and one explicitly classified thin-capability case:
 | `native_gather` | indexed i32 read through a full-permutation index ndarray |
 | `native_scatter` | indexed i32 write through the same unique full permutation |
 | `native_compact` | stable flag selection with exact count and ordered-output oracle |
+| `device_prefix_chain` | device-resident active-prefix stable compact followed by inclusive scan |
 
 These are control/regression microbenchmarks. They measure the ordinary kernel
 path and may detect runtime tax or a real base-path improvement, but they do not
@@ -93,6 +94,13 @@ vanilla stable pipeline: flags-to-prefix kernel, reusable public
 timed on each side; internal stage count and workspace are declared differences.
 Count and selected order must both match exactly. Use
 `native_compact_microbench.py`.
+
+`device_prefix_chain` is `THIN-003`. Forge uses `DeviceExtent`, `DevicePrefix`,
+and one reusable `DevicePrefixWorkspace`. Vanilla manually composes the same
+device-count-masked stable compact plus scan using reusable public prefix-sum
+executors. Neither timed adapter observes the count on the host. The exact
+count, compacted order, and scanned prefix are checked. Its entry point is
+`device_prefix_chain_microbench.py`.
 
 ## Fairness contract implemented by the runner
 
@@ -210,6 +218,16 @@ Stable compact is another isolated run:
 ```powershell
 C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
   benchmarks\qualification\native_compact_microbench.py `
+  --backend cuda --preset small --intent diagnostic `
+  --pairs 1 --samples 5 --warmups 2 `
+  --target-sample-ms 20 --stability-replays 0
+```
+
+The device-prefix chain is also isolated:
+
+```powershell
+C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
+  benchmarks\qualification\device_prefix_chain_microbench.py `
   --backend cuda --preset small --intent diagnostic `
   --pairs 1 --samples 5 --warmups 2 `
   --target-sample-ms 20 --stability-replays 0

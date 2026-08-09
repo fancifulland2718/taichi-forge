@@ -12,6 +12,7 @@ from benchmarks.qualification.single_kernel_microbench import (
     _native_transform_route,
     _native_indexed_copy_route,
     _native_compact_route,
+    _device_prefix_chain_route,
     balanced_pair_orders,
     paired_log_summary,
     qualification_policy_errors,
@@ -190,6 +191,34 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         Plan.backend = "cuda_cub"
         self.assertFalse(
             _native_compact_route(Workspace(), "forge", "cuda")["passed"])
+
+    def test_device_prefix_route_requires_both_native_stages(self):
+        class CompactPlan:
+            backend = "cuda_device"
+            method_name = "cuda_device_compact_ndarray"
+
+        class ScanPlan:
+            backend = "cuda_device"
+            method_name = "cuda_device_inclusive_scan_ndarray"
+
+        class CompactWorkspace:
+            _native_compact_plan = CompactPlan()
+
+        class Scanner:
+            _native_scan_plan = ScanPlan()
+
+        class Workspace:
+            _compact = CompactWorkspace()
+            _scan_executors = {64: Scanner()}
+            workspace_bytes_current = 1024
+            workspace_bytes_peak = 1024
+            allocation_count = 2
+
+        self.assertTrue(_device_prefix_chain_route(
+            Workspace(), "forge", "cuda", 64)["passed"])
+        ScanPlan.method_name = "legacy_scan"
+        self.assertFalse(_device_prefix_chain_route(
+            Workspace(), "forge", "cuda", 64)["passed"])
 
 
 if __name__ == "__main__":
