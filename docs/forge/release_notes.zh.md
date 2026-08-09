@@ -14,7 +14,7 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
 
 | 版本 | 历史状态 | 源码边界 | 主要范围 |
 | --- | --- | --- | --- |
-| [待发布](#unreleased) | 0.6.2 开发版本 | 当前 `master` | Graph 生命周期/遥测修复、weighted operator lowering 与 recordable Graph PCG submission |
+| [待发布](#unreleased) | 0.6.2 开发版本 | 当前 `master` | Graph 生命周期/遥测修复、numeric generation rebind、recordable Graph PCG 与 device-convergent batched PCG |
 | [0.6.1](#061) | 已正式发布 | `b129ad94c` | task launch manifest/policy、动态 LLVM SNode directory、设备端 dynamic worklist、有界 Graph dispatch 与关联 pipeline telemetry |
 | [0.6.0](#060) | 已正式发布 | `106ad65d25` | 结构化 Graph 控制/遥测与 Vulkan indirect dispatch、稀疏 runtime/线性代数、driver-only CUDA primitive、受管互操作/显示与 runtime 生命周期有界化 |
 | [0.1.0](#010) | 历史源码版本；发行文件可能已移除 | `91ad177685` | scikit-build-core 迁移与 Forge 发行包重命名 |
@@ -75,6 +75,32 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
   fused-provider 上界为 1.789/3.864 ms，kernel host-check-K4 对照为 4.042/4.727 ms。managed/manual Graph 均使用
   5,244,972 persistent bytes。该本地配对测量只验证 overhead 与停止遥测，不是普遍 solver
   加速承诺。
+- 兼容的 values-only `LinearOperator` generation 现在会在 launch 时 rebind 到缓存的 Graph
+  action 与 SolvePlan Graph。所有 composition leaf 先完成两阶段验证；topology/schema/state
+  tree/runtime 变化仍 fail closed，每张异步 ticket 会 pin 本次实际提交的 immutable numeric
+  owner。本地 262,144 项 update/run 资格中，cached rebind 相对重建 Graph 在 CPU 上为
+  0.924/1.583 ms、CUDA 为 0.438/1.044 ms、Vulkan 为 0.587/1.094 ms。完成后 13 个 retired
+  generation 均已释放，active lease 为 0。
+- `BatchedSolvePlan` 在 A 与可选 fixed-linear M 都是 recordable f32 action 时，新增显式
+  `device_convergent` CUDA/Vulkan 执行。一个 structured Graph 包含初始化、A/M、reduction、
+  recurrence、逐系统 status 和全局 active predicate；`submit()` 返回一张 ticket，terminal
+  materialization 会报告精确 logical stop iteration，迭代 loop 内不经 host readback。Vulkan
+  继续使用 bounded encoded/masked tail 语义；既有 host-check 默认策略不变。Vulkan
+  fixed-budget 使用 direct recurrence dispatch，因为 active submission batch 内的 nested
+  replay synchronization 不属于已资格化操作。
+- 新增 `inverse_block_diagonal()`，接受调用方提供的 row-major f32 inverse block，block size
+  为 1 到 4。它在 CPU/CUDA/Vulkan 上可录制，并复用普通 compiled provider 的 numeric
+  rebind/pinning 合同。调用方必须显式断言 SPD；Forge 不回读、求逆、正则化或推断 block。
+  本地 64 系统、262,144 scalar diagonal workload 中，精确 inverse 把约 72-100 次未充分
+  预条件/sqrt-scaled iteration 降至 2 次。较难的 sqrt-scaled preconditioner 下，
+  device-convergent PCG 相对 host-check-K4 在 CUDA/Vulkan 分别快 3.1%/17.3%；精确 inverse
+  只有两轮时 host-check 反而更快，因此新 policy 保持 explicit-only，也说明 crossover 首先
+  取决于预条件质量和收敛长度。
+- 新增 `LinearOperator.shifted(shift)`。recordable f32 GPU lowering 执行 base provider 后只
+  增加一个 in-place `axpby`，不会发射第二个 identity provider，也不分配 identity-sized
+  temporary。非方阵、非有限 shift 及不受支持的 dtype/backend 组合都会明确失败。
+  本地 262,144 项配对 Graph 资格中，dispatch 从 3 降到 2，CUDA warm submit/wait 中位数
+  从 0.298 降到 0.222 ms，Vulkan 从 0.568 降到 0.441 ms，数值误差为 0。
 
 ## 0.6.1
 

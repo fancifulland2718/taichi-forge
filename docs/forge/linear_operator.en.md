@@ -312,12 +312,14 @@ The symbolic input/output arguments use the one-dimensional scalar vector ABI.
 At runtime they accept a matching scalar ndarray or a dense storage object that
 the Graph runtime can scalar-linearize without copying. Input and output must
 be proven disjoint. `adjoint=True` requires an explicitly registered adjoint
-action. Updating the operator numeric generation makes an already compiled
-Graph stale; rebuild the Graph so every replay uses one immutable provider
-generation.
+action. A compatible values-only update is rebound at launch without rebuilding
+the Graph. The submission pins the exact immutable numeric generation it uses,
+so an in-flight launch remains valid while a newer generation is published.
+Topology, schema, state-tree, or runtime-generation changes still fail closed
+and require a new Graph.
 
 This recordable contract applies to compiled-kernel providers,
-direct-dispatch compiled-Graph providers, and f32 scale/sum/compose/adjoint
+direct-dispatch compiled-Graph providers, and f32 scale/shift/sum/compose/adjoint
 trees whose leaves are recordable. Composition is lowered recursively while
 preserving child dispatch order. Ordered scale/sum subtrees are normalized to
 weighted leaves: a two-leaf weighted sum uses the two provider actions plus
@@ -396,10 +398,12 @@ dispatches. A one-dispatch Graph still executes correctly, while
 
 Both generic and legacy compiled-Graph providers can export their ordered
 forward dispatches through `graph_action()`. The generic form also exports an
-explicitly registered adjoint Graph. Updating a numeric generation makes an
-already compiled outer Graph stale and requires rebuilding it. Destroying or
-replacing a declared state SNodeTree, using the action after `ti.reset()`, or
-otherwise changing the owning runtime also fails closed; reusing a numeric
+explicitly registered adjoint Graph. A compatible numeric generation is
+rebound into the already compiled outer Graph at launch. The complete leaf set
+is validated before any binding is changed, and the resulting submission pins
+one coherent generation snapshot. Destroying or replacing a declared state
+SNodeTree, changing topology/schema, using the action after `ti.reset()`, or
+otherwise changing the owning runtime still fails closed; reusing a numeric
 tree id does not revive the old action.
 
 ## Mathematical traits
@@ -440,6 +444,12 @@ D = operator.compose(B)       # operator(B(x))
 E = operator.adjoint()
 F = ti.linalg.block_diagonal((operator, B))
 I = ti.linalg.identity(size, dtype=ti.f32)
+S = operator.shifted(0.01)    # operator(x) + 0.01 * x
+
+# Flat row-major inverse 1x1, 2x2, 3x3, or 4x4 blocks.
+M = ti.linalg.inverse_block_diagonal(
+    inverse_blocks, block_size=3, assume_spd=True
+)
 ```
 
 The generalized form is `out = alpha * A(x) + beta * addend`. Input/output
@@ -453,14 +463,25 @@ for other combinations without a host fallback.
 provider exposes explicit adjoint application; no self-adjointness assumption
 is used as an implementation fallback.
 
-Scale, sum, and compose execute on CPU and, for f32 Program-bound operands, on
-CUDA and Vulkan. Standalone sum/compose retain a private persistent ndarray
-workspace; their recordable form instead uses Graph-owned typed temporaries.
-Compact Field operands bind directly when the composition is embedded with
-`graph_action()`; standalone composition retains the documented reusable
-boundary-staging behavior. Identity and block diagonal remain CPU-only. GPU
-f64 composition and generalized `alpha/beta/addend` composition fail without
+Scale, shift, sum, and compose execute on CPU and, for f32 Program-bound
+operands, on CUDA and Vulkan. A recordable shifted operator lowers to the base
+provider action followed by one in-place `axpby`; it does not launch a second
+identity provider or allocate an identity-sized temporary. Standalone
+sum/compose retain a private persistent ndarray workspace; their recordable
+form instead uses Graph-owned typed temporaries. Compact Field operands bind
+directly when the composition is embedded with `graph_action()`; standalone
+composition retains the documented reusable boundary-staging behavior.
+Public `identity()` and general block diagonal remain CPU-only. GPU f64
+composition and generalized `alpha/beta/addend` composition fail without
 running host code or silently changing provider.
+
+`inverse_block_diagonal()` is the recordable fixed-linear preconditioner
+helper for common physics layouts. The caller supplies already inverted,
+row-major f32 blocks and must state `assume_spd=True`; Forge deliberately does
+not read them back, invert them, regularize them, or infer SPD. Sizes 1 through
+4 are supported on CPU, CUDA, and Vulkan. Compatible values-only updates use
+the ordinary immutable-generation rebind contract, which lets the same
+single-system or batched PCG Graph consume a refreshed preconditioner safely.
 
 ## SolvePlan and SolveResult
 
@@ -1131,8 +1152,9 @@ require the cuBLAS workspace symbol. The Vulkan path requires the qualified
 structured-Graph runtime and recordable fixed f32 bindings.
 `device_convergent.qualification_scope` and
 `automatic_selection_qualified` expose this distinction. Explicit requests
-fail without fallback. Batched, CPU, and non-recordable providers do not claim
-device-convergent execution.
+fail without fallback. Independent batched f32 CG/PCG additionally qualifies
+an explicit device-convergent policy when every A/M action is recordable; CPU
+and non-recordable providers do not claim this execution mode.
 
 ## Independent batched CG and PCG
 
@@ -1192,20 +1214,39 @@ same numerical contract as a single-system CG/PCG solve.
 
 CPU uses `"host_each_iteration"`. CUDA and Vulkan default to
 `"host_check_every_k"` with `K=4`; they also accept `K=8`, explicit
-`"host_each_iteration"`, or `"fixed_budget_masked"`. A host-check chunk may
-issue inactive tail iterations before observing that all environments have
-terminated. Recurrence and vector-update kernels mask inactive environments,
-but the monolithic A/M provider still applies to the full flat batch. Provider
-apply compaction is therefore not implied by convergence masking.
+`"host_each_iteration"`, `"fixed_budget_masked"`, or explicit
+`"device_convergent"`. The latter requires recordable f32 A/M actions and is
+not selected automatically. A host-check chunk may issue inactive tail
+iterations before observing that all environments have terminated. Recurrence
+and vector-update kernels mask inactive environments, but the monolithic A/M
+provider still applies to the full flat batch. Provider apply compaction is
+therefore not implied by convergence masking.
 
-CUDA and Vulkan compile the stable iteration recurrence into plan-owned
-Taichi Graphs and reuse those graphs across solves. CG submits one recurrence
-Graph per iteration; PCG submits one segment after A and another after M. The
-operator and preconditioner remain pinned provider actions outside these
-graphs, so stored and compiled-kernel generations retain their normal update
-and retirement contracts. Replacing `out` patches the Graph binding after the
-previous solve completes. Each workspace clone owns an independent replay
-plan and therefore does not serialize through another clone's Graph lock.
+For host-check execution, CUDA and Vulkan compile the stable iteration
+recurrence into plan-owned Taichi Graphs and reuse those graphs across solves.
+CG submits one recurrence Graph per iteration; PCG submits one segment after A
+and another after M. A Vulkan fixed-budget transaction uses safe direct
+recurrence dispatches because synchronizing a nested replay inside an active
+submission batch is not a qualified operation.
+
+The explicit device-convergent route instead records initialization, every A/M
+provider action, reductions, per-system recurrence/status updates, and the
+global active predicate in one structured Graph. `submit()` produces one Graph
+ticket. CUDA uses its qualified structured control path; Vulkan uses bounded
+conditional replay and may retain a documented encoded/masked tail. Neither
+backend reads convergence through the host while the loop is active. The
+plan-owned device counter records the actual stopping iteration and is read
+only when terminal state is materialized. This route stops subsequent full
+batch A/M payload once all systems are terminal, but it does not compact A/M
+within a partially active batch.
+
+All paths pin the exact operator and preconditioner generations they submit.
+Compatible values-only updates are rebound into a cached device-convergent
+Graph without reconstructing it; in-flight submissions keep the older
+generation alive through completion. Replacing `out` patches the Graph binding
+after the previous solve completes. Each workspace clone owns an independent
+replay plan and therefore does not serialize through another clone's Graph
+lock.
 
 `statistics()` makes this distinction observable through executed system
 iterations, provider system iterations, masked provider system iterations,
@@ -1218,13 +1259,24 @@ workspace counts. Batched-plan statistics use schema version 4 and report
 `recurrence_replay_submissions`, `recurrence_replay_logical_kernels`, output
 `recurrence_replay_rebinds`, and direct recurrence-kernel submissions. The
 `recurrence_replay` record explicitly states that A/M provider applies are not
-part of the Graph replay scope.
+part of that host-check replay scope. `device_convergent_replay` separately
+reports its whole-solve scope, Graph build/submission counts, logical stop
+counter, and available structured-control telemetry. Encoded or masked counts
+remain unavailable rather than inferred when a backend cannot expose them
+without adding synchronization.
 
-### Asynchronous fixed-budget submission
+Use `benchmarks/batched_graph_pcg_bench.py` to compare policies and
+preconditioner quality with interleaved samples; it also checks steady runtime,
+host-pool, and device-pool state after warmup. Use
+`linear_operator_graph_rebind_bench.py` for generation churn and
+`linear_operator_shifted_bench.py` for shifted-versus-explicit-identity
+lowering. These are local qualification tools, not fixed performance promises.
 
-CUDA and Vulkan batch plans using `execution_policy="fixed_budget_masked"`
-can submit the complete masked iteration budget without materializing terminal
-state at the call boundary:
+### Asynchronous fixed-budget or device-convergent submission
+
+CUDA and Vulkan batch plans using `execution_policy="fixed_budget_masked"` or
+the qualified `"device_convergent"` policy can submit without materializing
+terminal state at the call boundary:
 
 ```python
 plan = ti.linalg.experimental.BatchedSolvePlan(
@@ -1233,7 +1285,7 @@ plan = ti.linalg.experimental.BatchedSolvePlan(
     independent_systems=True,
     max_iterations=8,
     atol=1e-6,
-    execution_policy="fixed_budget_masked",
+    execution_policy="device_convergent",
 )
 
 submission = plan.submit(rhs_flat, out=x_flat)
@@ -1324,7 +1376,8 @@ model that coupling explicitly.
 | Compiled kernel | `f32` | `f32` | `f32` |
 | Compiled Graph | `f32` | `f32` | `f32` |
 | Identity/block diagonal | `f32`, `f64` | Unsupported | Unsupported |
-| Scale/sum/compose | `f32`, `f64` | `f32` | `f32` |
+| Caller-supplied inverse block diagonal, sizes 1-4 | `f32` | `f32` | `f32` |
+| Scale/shift/sum/compose | `f32`, `f64` | `f32` | `f32` |
 
 Kernel and Graph providers support rectangular shapes and explicit adjoints.
 Generalized `alpha/beta` apply is available on CPU; GPU currently supports
@@ -1343,9 +1396,9 @@ overwrite apply only.
 | MINRES + identity | Supported providers, `f32/f64` | Fixed CSR/BSR or compiled provider, `f32` | Fixed CSR/BSR or compiled provider, `f32` |
 | MINRES + Jacobi/block-Jacobi | Unsupported | Fixed CSR/BSR respectively, `f32` | Fixed CSR/BSR respectively, `f32` |
 | MINRES + fixed-linear operator/plan | Unsupported | Compatible device-native A/M, `f32` | Compatible device-native A/M, `f32` |
-| Independent batched CG/PCG | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` |
-| Batched fixed-budget submission | Unsupported | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or compiled-kernel A/M, `f32` |
-| Device-convergent conditional execution | Unsupported | Stored f32 CSR/BSR, recordable compiled-Graph PCG, and composition CG/PCG automatic; compiled-kernel and compiled-Graph CG explicit-only | Recordable compiled-kernel CG/PCG, compiled-Graph PCG, and composition CG/PCG automatic; compiled-Graph CG explicit-only |
+| Independent batched CG/PCG | Fixed stored or compiled-kernel A/M, `f32` | Fixed stored or recordable A/M, `f32` | Fixed stored or recordable A/M, `f32` |
+| Batched asynchronous submission | Unsupported | Fixed-budget stored/compiled-kernel or device-convergent recordable A/M, `f32` | Fixed-budget stored/compiled-kernel or device-convergent recordable A/M, `f32` |
+| Device-convergent conditional execution | Unsupported | Single-system scopes listed above; independent batched recordable A/M explicit-only | Single-system scopes listed above; independent batched recordable A/M explicit-only |
 | BiCGSTAB + identity | Supported host-action providers, `f32/f64` | Fixed CSR/BSR or compiled provider, `f32` | Fixed CSR/BSR or compiled provider, `f32` |
 | BiCGSTAB + fixed-linear right preconditioner | Supported host-action providers, `f32/f64` | Compatible device-native A/M, `f32` | Compatible device-native A/M, `f32` |
 | GMRES + identity | Supported host-action providers, `f32/f64` | Fixed CSR/BSR or compiled provider, `f32` | Fixed CSR/BSR or compiled provider, `f32` |

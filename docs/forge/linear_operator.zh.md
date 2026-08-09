@@ -272,12 +272,13 @@ kernel 组合，因此迭代 body 不会为每次 operator apply 回到 Python�
 
 symbolic input/output 使用一维 scalar vector ABI。runtime 可传入匹配的 scalar ndarray，
 或 Graph runtime 能无复制 scalar-linearize 的 dense storage。input/output 必须能证明互不
-alias。`adjoint=True` 要求显式登记 adjoint action。更新 operator numeric generation
-会使已经编译的 Graph stale；必须重建 Graph，确保每次 replay 只使用一个 immutable
-provider generation。
+alias。`adjoint=True` 要求显式登记 adjoint action。兼容的 values-only update 会在 launch
+时 rebind，不需要重建 Graph。submission 会 pin 本次实际使用的 immutable numeric
+generation，因此发布新 generation 时在途工作仍安全。topology、schema、state tree 或
+runtime generation 变化仍会 fail closed，并要求新建 Graph。
 
 当前 recordable 合同适用于 compiled-kernel provider、只含 direct dispatch 的
-compiled-Graph provider，以及 leaf 均可录制的 f32 scale/sum/compose/adjoint 树。组合会
+compiled-Graph provider，以及 leaf 均可录制的 f32 scale/shift/sum/compose/adjoint 树。组合会
 递归 lowering 并保持 child dispatch 顺序。有序 scale/sum subtree 会规范化为 weighted
 leaf：两项加权和只执行两个 provider action 与一个 in-place `axpby`，更多项也只复用一条
 scratch vector；`compose` 仍保持 operator 边界与有序 intermediate。以上路径从
@@ -339,10 +340,11 @@ Graph fallback，但不会改变数学 provider。Vulkan Graph replay 要求至�
 `ordinary_graph_fallback`。
 
 通用和 legacy compiled-Graph provider 都可通过 `graph_action()` 导出保持顺序的 forward
-dispatch；通用形式还可导出显式登记的 adjoint Graph。更新 numeric generation 会使已经
-编译的外层 Graph stale，必须重建。销毁或替换已声明 state 的 SNodeTree、在 `ti.reset()`
-后继续使用 action，或改变 owning runtime 都会 fail closed；复用相同数值 tree id 不会
-恢复旧 action。
+dispatch；通用形式还可导出显式登记的 adjoint Graph。兼容的 numeric generation 会在
+launch 时 rebind 到已编译的外层 Graph；所有 leaf 先完成两阶段验证，再统一替换 binding，
+submission 则 pin 一个自洽的 generation snapshot。销毁或替换已声明 state 的
+SNodeTree、改变 topology/schema、在 `ti.reset()` 后继续使用 action，或改变 owning
+runtime 都会 fail closed；复用相同数值 tree id 不会恢复旧 action。
 
 ## 数学 trait
 
@@ -379,6 +381,12 @@ D = operator.compose(B)       # operator(B(x))
 E = operator.adjoint()
 F = ti.linalg.block_diagonal((operator, B))
 I = ti.linalg.identity(size, dtype=ti.f32)
+S = operator.shifted(0.01)    # operator(x) + 0.01 * x
+
+# flat row-major 的 1x1、2x2、3x3 或 4x4 inverse block
+M = ti.linalg.inverse_block_diagonal(
+    inverse_blocks, block_size=3, assume_spd=True
+)
 ```
 
 通用形式为 `out = alpha * A(x) + beta * addend`。input/output alias 始终被拒绝；
@@ -389,12 +397,20 @@ I = ti.linalg.identity(size, dtype=ti.f32)
 只有 provider 提供显式 adjoint apply 时才能调用
 `adjoint()`；实现不会把 self-adjoint trait 当作 fallback。
 
-scale、sum 与 compose 在 CPU 上执行；对于 Program-bound f32 operand，也支持 CUDA 与
-Vulkan。standalone sum/compose 持有私有 persistent ndarray workspace；recordable 形式
-改用 Graph-owned typed temporary。组合嵌入 `graph_action()` 时可直接绑定 compact Field；
-standalone 组合仍使用上文可复用的边界 staging。identity 与 block diagonal 仍只支持 CPU。
-GPU f64 composition 和通用 `alpha/beta/addend` composition 会明确失败，不执行 host code，
-也不会静默替换 provider。
+scale、shift、sum 与 compose 在 CPU 上执行；对于 Program-bound f32 operand，也支持 CUDA
+与 Vulkan。recordable shifted operator 会 lower 为 base provider action 加一个 in-place
+`axpby`，不会再发射 identity provider，也不分配等长 temporary。standalone sum/compose
+持有私有 persistent ndarray workspace；recordable 形式改用 Graph-owned typed temporary。
+组合嵌入 `graph_action()` 时可直接绑定 compact Field；standalone 组合仍使用上文可复用的
+边界 staging。公开 `identity()` 与通用 block diagonal 仍只支持 CPU。GPU f64 composition
+和通用 `alpha/beta/addend` composition 会明确失败，不执行 host code，也不会静默替换
+provider。
+
+`inverse_block_diagonal()` 是面向常见物理布局的 recordable fixed-linear preconditioner
+helper。调用方提供已经求逆、row-major 的 f32 block，并必须声明 `assume_spd=True`；Forge
+不会回读、求逆、正则化或推断其 SPD 性质。CPU、CUDA、Vulkan 支持 block size 1 到 4。
+兼容的 values-only update 使用普通 immutable-generation rebind 合同，因此同一个单系统或
+batched PCG Graph 可以安全消费更新后的 preconditioner。
 
 ## SolvePlan 与 SolveResult
 
@@ -963,7 +979,8 @@ CUDA compiled-kernel 路径要求 general Graph conditional setter，不依赖 c
 workspace symbol；Vulkan 路径要求已资格化的结构化 Graph runtime 和可录制的固定 f32
 binding。`device_convergent.qualification_scope` 与
 `automatic_selection_qualified` 会公开该区别。显式请求不可用时失败，不做 fallback。
-batched、CPU 与不可录制 provider 不宣称支持 device-convergent execution。
+独立批量 f32 CG/PCG 在全部 A/M action 可录制时还支持显式 device-convergent policy；
+CPU 与不可录制 provider 不宣称支持该执行模式。
 
 ## 独立批量 CG 与 PCG
 
@@ -1014,18 +1031,29 @@ backend capability 与资格边界约束；batch plan 不会经 host staging，�
 扁平 solution ndarray。batch size 为 1 时使用同一套单系统 CG/PCG 数值合同。
 
 CPU 使用 `"host_each_iteration"`。CUDA 与 Vulkan 默认使用 K=4 的
-`"host_check_every_k"`；也可选择 K=8、显式 `"host_each_iteration"` 或
-`"fixed_budget_masked"`。host-check chunk 在观察到所有环境已终止前，可能发出 inactive
-tail iteration。recurrence 与 vector-update kernel 会屏蔽 inactive 环境，但整体 A/M
-provider 仍作用于完整扁平 batch；因此 convergence masking 不代表 provider apply 已做
-compaction。
+`"host_check_every_k"`；也可选择 K=8、显式 `"host_each_iteration"`、
+`"fixed_budget_masked"` 或显式 `"device_convergent"`。最后一种要求可录制的 f32 A/M
+action，且不会自动选中。host-check chunk 在观察到所有环境已终止前，可能发出 inactive tail
+iteration。recurrence 与 vector-update kernel 会屏蔽 inactive 环境，但整体 A/M provider
+仍作用于完整扁平 batch；因此 convergence masking 不代表 provider apply 已做 compaction。
 
-CUDA 与 Vulkan 会把稳定的 iteration recurrence 编译为 plan-owned Taichi Graph，并在
-后续 solve 中复用。CG 每轮提交一个 recurrence Graph；PCG 在 A 之后和 M 之后分别提交一个
-segment。operator 与 preconditioner 仍是 Graph 外部的 pinned provider action，因此 stored
-和 compiled-kernel generation 继续遵循原有 update/retirement 合同。上一轮 solve 完成后
-更换 `out` 只需 patch Graph binding。每个 workspace clone 拥有独立 replay plan，不会因
-共享另一 clone 的 Graph lock 而串行化。
+host-check 执行会把稳定的 iteration recurrence 编译为 plan-owned Taichi Graph，并在后续
+solve 中复用。CG 每轮提交一个 recurrence Graph；PCG 在 A 之后和 M 之后分别提交一个
+segment。Vulkan fixed-budget transaction 使用安全的 direct recurrence dispatch，因为在
+active submission batch 内同步 nested replay 不属于已资格化操作。
+
+显式 device-convergent 路径则把初始化、全部 A/M provider action、reduction、逐系统
+recurrence/status 更新和全局 active predicate 录入一个 structured Graph；`submit()` 只产生
+一个 Graph ticket。CUDA 使用已资格化的 structured control，Vulkan 使用 bounded conditional
+replay，并可能保留已记录的 encoded/masked tail。两端在 loop active 时都不会经 host 读取
+收敛状态。plan-owned device counter 记录真实停止 iteration，只在物化 terminal state 时读取。
+该路径在全部系统 terminal 后会停止后续 full-batch A/M payload，但不会对部分活跃 batch 内的
+A/M 做 compaction。
+
+所有路径都会 pin 实际提交的 operator/preconditioner generation。兼容的 values-only update
+会 rebind 到缓存的 device-convergent Graph，而不重建 Graph；在途 submission 会保留旧
+generation 直到完成。上一轮 solve 完成后更换 `out` 只需 patch Graph binding。每个 workspace
+clone 拥有独立 replay plan，不会因共享另一 clone 的 Graph lock 而串行化。
 
 `statistics()` 会分别报告 executed system iteration、provider system iteration、masked
 provider system iteration、active efficiency、host check、transfer 和 persistent resource
@@ -1036,12 +1064,20 @@ solution、initial guess 和 provider resource 不计入这些 plan workspace �
 `recurrence_replay_graph_builds`、`recurrence_replay_submissions`、
 `recurrence_replay_logical_kernels`、output `recurrence_replay_rebinds` 与 direct recurrence
 kernel submission；`recurrence_replay` record 会明确说明 A/M provider apply 不属于 Graph
-replay 范围。
+host-check replay 范围。`device_convergent_replay` 另行报告完整 solve scope、Graph
+build/submission 数、logical stop counter 与可用 structured-control telemetry。若 backend
+无法在不增加同步的前提下公开 encoded/masked count，则保持 unavailable，不进行推测。
 
-### 异步 fixed-budget submission
+使用 `benchmarks/batched_graph_pcg_bench.py` 以交错样本比较 policy 与 preconditioner
+质量；脚本还会检查 warmup 后 runtime、host pool 与 device pool 是否稳定。
+`linear_operator_graph_rebind_bench.py` 用于 generation churn，
+`linear_operator_shifted_bench.py` 用于 shifted 与显式 identity lowering 对照。这些是本地
+资格工具，不是固定性能承诺。
 
-使用 `execution_policy="fixed_budget_masked"` 的 CUDA/Vulkan batch plan 可以提交完整的
-masked iteration budget，而不在调用返回前读取 terminal state：
+### 异步 fixed-budget 或 device-convergent submission
+
+使用 `execution_policy="fixed_budget_masked"` 或满足资格的 `"device_convergent"` 的
+CUDA/Vulkan batch plan 可以提交完整 solve，而不在调用返回前读取 terminal state：
 
 ```python
 plan = ti.linalg.experimental.BatchedSolvePlan(
@@ -1050,7 +1086,7 @@ plan = ti.linalg.experimental.BatchedSolvePlan(
     independent_systems=True,
     max_iterations=8,
     atol=1e-6,
-    execution_policy="fixed_budget_masked",
+    execution_policy="device_convergent",
 )
 
 submission = plan.submit(rhs_flat, out=x_flat)
@@ -1126,7 +1162,8 @@ work，再把尚未完成取值的 ticket 明确标记为 stale。
 | Compiled kernel | `f32` | `f32` | `f32` |
 | Compiled Graph | `f32` | `f32` | `f32` |
 | Identity/block diagonal | `f32`、`f64` | 不支持 | 不支持 |
-| Scale/sum/compose | `f32`、`f64` | `f32` | `f32` |
+| 调用方提供的 inverse block diagonal，size 1-4 | `f32` | `f32` | `f32` |
+| Scale/shift/sum/compose | `f32`、`f64` | `f32` | `f32` |
 
 kernel/Graph provider 支持矩形 shape 和显式 adjoint。通用 `alpha/beta` apply 支持 CPU；
 GPU 当前只支持 overwrite apply。
@@ -1144,9 +1181,9 @@ GPU 当前只支持 overwrite apply。
 | MINRES + identity | 受支持 provider，`f32/f64` | fixed CSR/BSR 或 compiled provider，`f32` | fixed CSR/BSR 或 compiled provider，`f32` |
 | MINRES + Jacobi/block-Jacobi | 不支持 | 分别为 fixed CSR/BSR，`f32` | 分别为 fixed CSR/BSR，`f32` |
 | MINRES + fixed-linear operator/plan | 不支持 | 兼容的 device-native A/M，`f32` | 兼容的 device-native A/M，`f32` |
-| 独立批量 CG/PCG | fixed stored 或 compiled-kernel A/M，`f32` | fixed stored 或 compiled-kernel A/M，`f32` | fixed stored 或 compiled-kernel A/M，`f32` |
-| 批量 fixed-budget submission | 不支持 | fixed stored 或 compiled-kernel A/M，`f32` | fixed stored 或 compiled-kernel A/M，`f32` |
-| device-convergent 条件执行 | 不支持 | stored f32 CSR/BSR、recordable compiled-Graph PCG 与 composition CG/PCG 自动；compiled-kernel 与 compiled-Graph CG 仅显式 | recordable compiled-kernel CG/PCG、compiled-Graph PCG 与 composition CG/PCG 自动；compiled-Graph CG 仅显式 |
+| 独立批量 CG/PCG | fixed stored 或 compiled-kernel A/M，`f32` | fixed stored 或 recordable A/M，`f32` | fixed stored 或 recordable A/M，`f32` |
+| 批量异步 submission | 不支持 | fixed-budget stored/compiled-kernel 或 device-convergent recordable A/M，`f32` | fixed-budget stored/compiled-kernel 或 device-convergent recordable A/M，`f32` |
+| device-convergent 条件执行 | 不支持 | 上述单系统范围；独立批量 recordable A/M 仅显式 | 上述单系统范围；独立批量 recordable A/M 仅显式 |
 | BiCGSTAB + identity | 受支持 host-action provider，`f32/f64` | fixed CSR/BSR 或 compiled provider，`f32` | fixed CSR/BSR 或 compiled provider，`f32` |
 | BiCGSTAB + fixed-linear 右预条件 | 受支持 host-action provider，`f32/f64` | 兼容的 device-native A/M，`f32` | 兼容的 device-native A/M，`f32` |
 | GMRES + identity | 受支持 host-action provider，`f32/f64` | fixed CSR/BSR 或 compiled provider，`f32` | fixed CSR/BSR 或 compiled provider，`f32` |

@@ -18,7 +18,7 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
-| [Unreleased](#unreleased) | 0.6.2 development | current `master` | Graph lifecycle/telemetry fixes, weighted operator lowering, and recordable Graph PCG submission |
+| [Unreleased](#unreleased) | 0.6.2 development | current `master` | Graph lifecycle/telemetry fixes, numeric-generation rebinding, recordable Graph PCG, and device-convergent batched PCG |
 | [0.6.1](#061) | published release | `b129ad94c` | task launch manifests/policies, dynamic LLVM SNode directories, device-resident dynamic worklists, bounded Graph dispatch, and correlated pipeline telemetry |
 | [0.6.0](#060) | published release | `106ad65d25` | structured Graph control/telemetry and Vulkan indirect dispatch, sparse runtime/linear algebra, driver-only CUDA primitives, managed interoperability/display, and bounded runtime lifetimes |
 | [0.1.0](#010) | historical source release; artifact may be removed | `91ad177685` | scikit-build-core migration and Forge distribution rebrand |
@@ -92,6 +92,43 @@ grouped under the behavior they shipped.
   used 5,244,972 persistent bytes.
   These paired local measurements qualify overhead and stop telemetry, not a
   universal solver-speed claim.
+- Compatible values-only `LinearOperator` generations now rebind into cached
+  Graph actions and SolvePlan Graphs at launch. Validation is two-phase across
+  every composition leaf; topology/schema/state-tree/runtime changes still
+  fail closed, and each asynchronous ticket pins the exact immutable numeric
+  owners that it submits. A local 262,144-element update/run qualification
+  measured cached rebind versus Graph rebuild at 0.924/1.583 ms on CPU,
+  0.438/1.044 ms on CUDA, and 0.587/1.094 ms on Vulkan. Thirteen retired
+  generations were all released after completion, with no active lease left.
+- `BatchedSolvePlan` now accepts explicit `device_convergent` CUDA/Vulkan
+  execution when A and the optional fixed-linear M are recordable f32 actions.
+  One structured Graph contains initialization, A/M, reductions, recurrence,
+  per-system status, and the global active predicate; `submit()` returns one
+  ticket, and terminal materialization exposes the exact logical stopping
+  iteration without an iteration-loop host readback. Vulkan retains bounded
+  encoded/masked tail semantics. The existing host-check default is unchanged.
+  Vulkan fixed-budget execution uses direct recurrence dispatches because a
+  nested replay synchronization inside an active submission batch is not
+  qualified.
+- Added `inverse_block_diagonal()` for caller-supplied row-major f32 inverse
+  blocks of size 1 through 4. It is recordable on CPU/CUDA/Vulkan and uses the
+  same numeric rebind/pinning contract as other compiled providers. The caller
+  must explicitly assert SPD; Forge does not read back, invert, regularize, or
+  infer the blocks. On a local 64-system, 262,144-scalar diagonal workload, an
+  exact inverse reduced roughly 72-100 unpreconditioned/sqrt-scaled iterations
+  to two. With the harder sqrt-scaled preconditioner, device-convergent PCG was
+  3.1% faster than host-check-K4 on CUDA and 17.3% faster on Vulkan. With the
+  exact two-iteration inverse, host-check remained faster, preserving the new
+  policy as explicit-only and demonstrating that preconditioner quality and
+  convergence length determine the crossover.
+- Added `LinearOperator.shifted(shift)`. Recordable f32 GPU lowering executes
+  the base provider followed by one in-place `axpby`, with no second identity
+  provider dispatch and no identity-sized temporary. Non-square operators,
+  non-finite shifts, and unsupported dtype/backend combinations fail
+  explicitly. In a local 262,144-element paired Graph qualification, this
+  reduced dispatches from three to two and warm submit/wait median from
+  0.298 to 0.222 ms on CUDA and from 0.568 to 0.441 ms on Vulkan, with zero
+  numerical error.
 
 ## 0.6.1
 
