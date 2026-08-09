@@ -24,6 +24,7 @@ Forge/vanilla 比较均由相邻且不重叠的 fresh-process 对组成。
 | `stencil2d` | 每格点五次 f32 读取和一次 f32 写入 |
 | `reduce_chunks` | 每元素一次 i32 读取、每 chunk 一次 i32 写入 |
 | `prefix_sum` | `ti.algorithms.PrefixSumExecutor(n).run(field)` 的 i32 inclusive scan；逻辑输入/输出各一次 |
+| `parallel_sort` | `ti.algorithms.parallel_sort(keys)` 的 dense i32 key sort；排序网络内部流量不简化为 GB/s |
 
 这些是控制/回归 microbench，用于测量普通 kernel 路径，能够发现运行时额外成本
 或真实的基础路径提升；但它们不覆盖 Graph、native primitive、bounded dispatch、
@@ -33,6 +34,11 @@ worklist、LinearOperator 或其他 Forge-only API，结论不得外推到这些
 输入、exact oracle 和同步边界。Forge 必须命中 native dense-field scan plan，
 vanilla 必须命中其 legacy field workspace；route 不符合时 child 失败。为了保持
 单项开发入口，优先使用 `prefix_sum_microbench.py`，它固定操作且不能变成聚合器。
+
+`parallel_sort` 是 `DIRECT-002`。Forge wheel 的公开兼容 wrapper 明确固定
+`method="legacy"`、stable 和 exact，vanilla 也执行 legacy odd-even merge network；
+因此它用于验证透明兼容路径，而不是预设 native 提升。输入为确定性 i32 field，
+与 NumPy stable sort 逐元素 exact 比较。专用入口为 `parallel_sort_microbench.py`。
 
 `mpm_graph` 是 `DIRECT-003`：它直接复用 `benchmarks/graph_mpm_replay_bench.py`
 中的二维 MLS-MPM kernel 和 ndarray。small preset 为 4,096 粒子、64² 网格、2 个

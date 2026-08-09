@@ -69,6 +69,7 @@ OPERATIONS = (
     "stencil2d",
     "reduce_chunks",
     "prefix_sum",
+    "parallel_sort",
     "mpm_graph",
     "mpm_direct",
 )
@@ -660,6 +661,104 @@ def _build_prefix_sum_case(ti: Any, runtime_name: str, backend: str,
     }
 
 
+def _parallel_sort_route(ti: Any, runtime_name: str) -> dict[str, Any]:
+    function = ti.algorithms.parallel_sort
+    source_path = inspect.getsourcefile(function)
+    source = None if source_path is None else Path(source_path).resolve()
+    try:
+        source_text = inspect.getsource(function)
+    except (OSError, TypeError):
+        source_text = ""
+    module = function.__module__
+    if runtime_name == "forge":
+        legacy_contract = (
+            'method="legacy"' in source_text
+            and 'precision="exact"' in source_text
+        )
+        passed = module == "taichi_forge.algorithms._algorithms" and legacy_contract
+        observed_method = "sort(method=legacy, stable=True, precision=exact)"
+        classification = "forge_legacy_compatibility_wrapper"
+    else:
+        legacy_contract = "sort_stage" in source_text and "sync()" in source_text
+        passed = module == "taichi.algorithms._algorithms" and legacy_contract
+        observed_method = "legacy_odd_even_merge_sort"
+        classification = "vanilla_legacy_parallel_sort"
+    return {
+        "public_api": "ti.algorithms.parallel_sort(keys)",
+        "classification": classification,
+        "function_module": module,
+        "function_source": None if source is None else str(source),
+        "function_source_sha256": (
+            None if source is None or not source.is_file() else sha256_file(source)
+        ),
+        "observed_method": observed_method,
+        "source_contract_verified": legacy_contract,
+        "passed": passed,
+    }
+
+
+def _build_parallel_sort_case(ti: Any, runtime_name: str,
+                              elements: int) -> dict[str, Any]:
+    import numpy as np
+
+    keys = ti.field(dtype=ti.i32, shape=elements)
+    host = ((np.arange(elements, dtype=np.int64) * 1_103_515_245
+             + 12_345) & 0x7FFF_FFFF).astype(np.int32)
+    host ^= ((np.arange(elements, dtype=np.int32) % 31) << 13)
+    expected = np.sort(host, kind="stable")
+
+    def reset() -> None:
+        keys.from_numpy(host)
+
+    def launch() -> None:
+        ti.algorithms.parallel_sort(keys)
+
+    def validate_fresh() -> dict[str, Any]:
+        keys.from_numpy(host)
+        ti.sync()
+        ti.algorithms.parallel_sort(keys)
+        ti.sync()
+        actual = keys.to_numpy()
+        mismatch = np.flatnonzero(actual != expected)
+        return {
+            "passed": mismatch.size == 0,
+            "comparison": "exact_i32_sorted_keys",
+            "mismatch_count": int(mismatch.size),
+            "first_mismatch_index": (
+                None if mismatch.size == 0 else int(mismatch[0])
+            ),
+            "minimum": int(actual[0]),
+            "maximum": int(actual[-1]),
+        }
+
+    return {
+        "launch": launch,
+        "reset": reset,
+        "validate": validate_fresh,
+        "route": lambda: _parallel_sort_route(ti, runtime_name),
+        "logical_bytes": 0,
+        "traffic_model": (
+            "legacy odd-even merge sort network; no simplified logical-byte "
+            "bandwidth is claimed"
+        ),
+        "workload_contract": {
+            "case_id": "DIRECT-002",
+            "public_api": "ti.algorithms.parallel_sort(keys)",
+            "dtype": "i32",
+            "storage": "dense_1d_field",
+            "semantics": "ascending_in_place_key_sort",
+            "input_pattern": "deterministic_lcg_xor",
+            "correctness": "exact_i32_against_numpy_stable_sort",
+            "timing": (
+                "frozen repeated parallel_sort(keys) calls plus implementation "
+                "syncs and one outer sync; reset and correctness are excluded; "
+                "the sorting network is data independent"
+            ),
+            "elements": elements,
+        },
+    }
+
+
 def _load_graph_mpm_workload() -> tuple[Any, Path]:
     source = Path(__file__).resolve().parents[1] / "graph_mpm_replay_bench.py"
     spec = importlib.util.spec_from_file_location(
@@ -1129,6 +1228,9 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         if args.operation == "prefix_sum":
             case = _build_prefix_sum_case(
                 ti, args.runtime, args.backend, config["elements"])
+        elif args.operation == "parallel_sort":
+            case = _build_parallel_sort_case(
+                ti, args.runtime, config["elements"])
         elif args.operation in ("mpm_graph", "mpm_direct"):
             case = _build_mpm_case(
                 ti, args.runtime, args.operation, args.preset)

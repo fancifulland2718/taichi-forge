@@ -26,6 +26,7 @@ one identical-public-API PrefixSum case:
 | `stencil2d` | five f32 reads and one f32 write per grid point |
 | `reduce_chunks` | one i32 read per element and one i32 chunk write |
 | `prefix_sum` | i32 inclusive scan through `ti.algorithms.PrefixSumExecutor(n).run(field)`; one logical input read and output write |
+| `parallel_sort` | dense i32 key sort through `ti.algorithms.parallel_sort(keys)`; sort-network traffic is not reduced to GB/s |
 
 These are control/regression microbenchmarks. They measure the ordinary kernel
 path and may detect runtime tax or a real base-path improvement, but they do not
@@ -38,6 +39,13 @@ its native dense-field scan plan while vanilla must use its legacy field
 workspace; a route mismatch fails the child. Use `prefix_sum_microbench.py` as
 the one-case development entry point; it fixes the operation and cannot become
 an aggregate launcher.
+
+`parallel_sort` is `DIRECT-002`. The Forge wheel's public compatibility wrapper
+explicitly fixes `method="legacy"`, stable, and exact, while vanilla also runs
+its legacy odd-even merge network. This tests transparent compatibility rather
+than assuming a native improvement. A deterministic i32 field is compared
+element-by-element with NumPy stable sort. Its dedicated entry point is
+`parallel_sort_microbench.py`.
 
 `mpm_graph` is `DIRECT-003`. It reuses the 2-D MLS-MPM kernels and ndarrays from
 `benchmarks/graph_mpm_replay_bench.py`. The small preset has 4,096 particles, a
