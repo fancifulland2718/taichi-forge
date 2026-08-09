@@ -13,6 +13,7 @@ from benchmarks.qualification.single_kernel_microbench import (
     _native_indexed_copy_route,
     _native_compact_route,
     _device_prefix_chain_route,
+    _particle_hash_route,
     balanced_pair_orders,
     paired_log_summary,
     qualification_policy_errors,
@@ -219,6 +220,23 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         ScanPlan.method_name = "legacy_scan"
         self.assertFalse(_device_prefix_chain_route(
             Workspace(), "forge", "cuda", 64)["passed"])
+
+    def test_particle_hash_route_requires_native_bucket_plan(self):
+        class Plan:
+            backend = "cuda_device_bucket_builder"
+            method_name = "cuda_device_bucket_builder_dense_field"
+
+        class Workspace:
+            _native_bucket_builder_plan = Plan()
+            workspace_bytes_current = 64
+            workspace_bytes_peak = 128
+
+        route = _particle_hash_route(
+            Workspace(), "forge", "cuda", bins=16)
+        self.assertTrue(route["passed"])
+        Plan.method_name = "field_kernel_fallback"
+        self.assertFalse(_particle_hash_route(
+            Workspace(), "forge", "cuda", bins=16)["passed"])
 
 
 if __name__ == "__main__":

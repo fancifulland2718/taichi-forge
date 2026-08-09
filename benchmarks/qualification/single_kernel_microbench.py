@@ -77,6 +77,7 @@ OPERATIONS = (
     "native_compact",
     "device_prefix_chain",
     "active_grid_mpm",
+    "particle_spatial_hash",
     "snode_churn",
     "snode_concurrent",
     "mpm_graph",
@@ -2670,6 +2671,297 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
     }
 
 
+def _particle_hash_route(workspace: Any | None, runtime_name: str,
+                         backend: str, bins: int) -> dict[str, Any]:
+    if runtime_name == "forge":
+        plan = getattr(workspace, "_native_bucket_builder_plan", None)
+        expected_backend = {
+            "cuda": "cuda_device_bucket_builder",
+            "vulkan": "vulkan_native_bucket_builder",
+            "cpu": "cpu_native_bucket_builder",
+        }[backend]
+        expected_methods = {
+            "cuda": {
+                "cuda_device_bucket_builder_dense_field",
+                "cuda_device_bucket_builder_ndarray",
+                "cuda_device_bucket_builder_i32_ndarray",
+            },
+            "vulkan": {
+                "vulkan_bucket_builder_dense_field",
+                "vulkan_bucket_builder_ndarray",
+                "vulkan_bucket_builder_i32_ndarray",
+            },
+            "cpu": {
+                "cpu_bucket_builder_dense_field",
+                "cpu_bucket_builder_ndarray",
+            },
+        }[backend]
+        observed_backend = getattr(plan, "backend", None)
+        observed_method = getattr(plan, "method_name", None)
+        return {
+            "classification": "forge_native_particle_bucket_builder",
+            "expected_backend": expected_backend,
+            "expected_methods": sorted(expected_methods),
+            "observed_backend": observed_backend,
+            "observed_method": observed_method,
+            "bins": bins,
+            "workspace_bytes_current": getattr(
+                workspace, "workspace_bytes_current", None),
+            "workspace_bytes_peak": getattr(
+                workspace, "workspace_bytes_peak", None),
+            "passed": bool(
+                plan is not None
+                and observed_backend == expected_backend
+                and observed_method in expected_methods
+            ),
+        }
+    return {
+        "classification": "vanilla_equivalent_particle_bucket_pipeline",
+        "expected_backend": backend,
+        "observed_backend": backend,
+        "observed_method": (
+            "clear-count, reusable PrefixSumExecutor, cursor copy, atomic "
+            "scatter"
+        ),
+        "bins": bins,
+        "passed": True,
+    }
+
+
+def _build_particle_spatial_hash_case(ti: Any, runtime_name: str,
+                                      backend: str,
+                                      elements: int) -> dict[str, Any]:
+    """Build a 2-D particle cell hash followed by an exact neighbor query."""
+    import numpy as np
+
+    particle_side = math.isqrt(elements)
+    if particle_side * particle_side != elements:
+        raise ValueError("particle spatial hash requires a square element count")
+    hash_side = max(8, particle_side // 2)
+    bins = hash_side * hash_side
+    radius = 0.49 / particle_side
+    radius_squared = radius * radius
+
+    host_index = np.arange(elements, dtype=np.int32)
+    host_x = ((host_index % particle_side).astype(np.float32) + 0.5) / np.float32(
+        particle_side)
+    host_y = ((host_index // particle_side).astype(np.float32) + 0.5) / np.float32(
+        particle_side)
+    host_positions = np.stack((host_x, host_y), axis=1).astype(np.float32)
+    host_cell_x = np.minimum(
+        (host_x * np.float32(hash_side)).astype(np.int32), hash_side - 1)
+    host_cell_y = np.minimum(
+        (host_y * np.float32(hash_side)).astype(np.int32), hash_side - 1)
+    expected_keys = host_cell_x * hash_side + host_cell_y
+    expected_counts = np.bincount(expected_keys, minlength=bins).astype(np.int32)
+    expected_offsets = np.zeros(bins + 1, dtype=np.int32)
+    expected_offsets[1:] = np.cumsum(
+        expected_counts, dtype=np.int64).astype(np.int32)
+
+    positions = ti.Vector.ndarray(2, ti.f32, shape=elements)
+    positions.from_numpy(host_positions)
+    keys = ti.field(dtype=ti.i32, shape=elements)
+    values = ti.field(dtype=ti.i32, shape=elements)
+    offsets = ti.field(dtype=ti.i32, shape=bins + 1)
+    output = ti.field(dtype=ti.i32, shape=elements)
+    neighbors = ti.field(dtype=ti.i32, shape=elements)
+    cursor = None
+    scanner = None
+    workspace = None
+    if runtime_name == "forge":
+        workspace = ti.algorithms.BucketBuilderWorkspace(
+            max_items=elements, max_bins=bins)
+    else:
+        cursor = ti.field(dtype=ti.i32, shape=bins)
+        scanner = ti.algorithms.PrefixSumExecutor(bins + 1)
+
+    @ti.kernel
+    def initialize_values():
+        for p in range(elements):
+            values[p] = p
+
+    @ti.kernel
+    def generate_keys(
+            source: ti.types.ndarray(ndim=1)):
+        for p in range(elements):
+            cell = ti.min(
+                ti.cast(source[p] * ti.cast(hash_side, ti.f32), ti.i32),
+                ti.Vector([hash_side - 1, hash_side - 1]),
+            )
+            keys[p] = cell.x * hash_side + cell.y
+
+    @ti.kernel
+    def vanilla_count():
+        for bucket in range(bins + 1):
+            offsets[bucket] = 0
+        for p in range(elements):
+            key = keys[p]
+            if 0 <= key < bins:
+                ti.atomic_add(offsets[key + 1], 1)
+
+    @ti.kernel
+    def vanilla_copy_cursor():
+        for bucket in range(bins):
+            cursor[bucket] = offsets[bucket]
+
+    @ti.kernel
+    def vanilla_scatter():
+        for p in range(elements):
+            key = keys[p]
+            if 0 <= key < bins:
+                target = ti.atomic_add(cursor[key], 1)
+                output[target] = values[p]
+
+    @ti.kernel
+    def query_neighbors(
+            source: ti.types.ndarray(ndim=1)):
+        for p in range(elements):
+            key = keys[p]
+            cell_x = key // hash_side
+            cell_y = key - cell_x * hash_side
+            count = 0
+            for delta_x, delta_y in ti.static(ti.ndrange((-1, 2), (-1, 2))):
+                neighbor_x = cell_x + delta_x
+                neighbor_y = cell_y + delta_y
+                if (0 <= neighbor_x < hash_side
+                        and 0 <= neighbor_y < hash_side):
+                    bucket = neighbor_x * hash_side + neighbor_y
+                    begin = ti.cast(offsets[bucket], ti.i32)
+                    end = ti.cast(offsets[bucket + 1], ti.i32)
+                    for cursor_index in range(begin, end):
+                        other = output[cursor_index]
+                        displacement = source[p] - source[other]
+                        if displacement.dot(displacement) <= radius_squared:
+                            count += 1
+            neighbors[p] = count
+
+    initialize_values()
+    ti.sync()
+
+    def launch() -> None:
+        generate_keys(positions)
+        if runtime_name == "forge":
+            ti.algorithms.experimental_bucket_builder(
+                keys, values, offsets, output,
+                method="auto", workspace=workspace)
+        else:
+            vanilla_count()
+            scanner.run(offsets)
+            vanilla_copy_cursor()
+            vanilla_scatter()
+        query_neighbors(positions)
+
+    def reset() -> None:
+        keys.fill(-1)
+        offsets.fill(0)
+        output.fill(-1)
+        neighbors.fill(0)
+        if cursor is not None:
+            cursor.fill(0)
+
+    def validate_fresh() -> dict[str, Any]:
+        reset()
+        ti.sync()
+        launch()
+        ti.sync()
+        actual_keys = keys.to_numpy()
+        actual_offsets = offsets.to_numpy()
+        actual_output = output.to_numpy()
+        actual_neighbors = neighbors.to_numpy()
+        bucket_mismatch_count = 0
+        if np.array_equal(actual_offsets, expected_offsets):
+            for bucket in range(bins):
+                begin = int(expected_offsets[bucket])
+                end = int(expected_offsets[bucket + 1])
+                actual_bucket = np.sort(actual_output[begin:end])
+                expected_bucket = np.flatnonzero(expected_keys == bucket)
+                if not np.array_equal(actual_bucket, expected_bucket):
+                    bucket_mismatch_count += 1
+        else:
+            bucket_mismatch_count = bins
+        key_mismatch_count = int(np.count_nonzero(actual_keys != expected_keys))
+        offset_mismatch_count = int(
+            np.count_nonzero(actual_offsets != expected_offsets))
+        neighbor_mismatch_count = int(np.count_nonzero(actual_neighbors != 1))
+        return {
+            "passed": bool(
+                key_mismatch_count == 0
+                and offset_mismatch_count == 0
+                and bucket_mismatch_count == 0
+                and neighbor_mismatch_count == 0
+            ),
+            "comparison": "exact_2d_cell_hash_buckets_and_neighbor_counts",
+            "key_mismatch_count": key_mismatch_count,
+            "offset_mismatch_count": offset_mismatch_count,
+            "bucket_mismatch_count": bucket_mismatch_count,
+            "neighbor_mismatch_count": neighbor_mismatch_count,
+            "particle_count": elements,
+            "bins": bins,
+            "particles_per_bin_min": int(expected_counts.min()),
+            "particles_per_bin_max": int(expected_counts.max()),
+            "neighbor_count_min": int(actual_neighbors.min()),
+            "neighbor_count_max": int(actual_neighbors.max()),
+        }
+
+    return {
+        "launch": launch,
+        "reset": reset,
+        "validate": validate_fresh,
+        "route": lambda: _particle_hash_route(
+            workspace, runtime_name, backend, bins),
+        "logical_bytes": 0,
+        "traffic_model": (
+            "particle cell hashing plus bucket construction and neighborhood "
+            "query; no simplified logical-byte bandwidth is claimed"
+        ),
+        "case_preparation": {
+            "particles": elements,
+            "particle_side": particle_side,
+            "hash_side": hash_side,
+            "bins": bins,
+            "radius": radius,
+            "particles_per_bin": int(expected_counts[0]),
+        },
+        "workload_contract": {
+            "case_id": "THIN-005",
+            "comparison_class": "thin-capability",
+            "semantics": "2d_particle_cell_hash_then_exact_radius_query",
+            "dimension": "2d",
+            "dtype": "f32_positions_i32_indices",
+            "particles": elements,
+            "particle_side": particle_side,
+            "hash_side": hash_side,
+            "bins": bins,
+            "radius": radius,
+            "forge_adapter": (
+                "native BucketBuilderWorkspace pipeline between shared key and "
+                "neighbor-query kernels"
+            ),
+            "vanilla_adapter": (
+                "equivalent clear/count, reusable PrefixSumExecutor, cursor "
+                "copy, and atomic-scatter pipeline"
+            ),
+            "shared": (
+                "same positions, key kernel, i32 fields, cell mapping, bucket "
+                "semantics, query kernel, radius, synchronization, and exact "
+                "key/offset/bucket/neighbor oracles"
+            ),
+            "allowed_difference": (
+                "only the fixed-bin bucket-construction adapter; per-bucket "
+                "particle order is unspecified and canonicalized for validation"
+            ),
+            "correctness": (
+                "exact keys and offsets, canonicalized exact bucket membership, "
+                "and exact per-particle neighbor count"
+            ),
+            "timing": (
+                "frozen repeated key-build, complete bucket adapter, and query "
+                "calls plus one outer sync; setup and correctness excluded"
+            ),
+        },
+    }
+
+
 def _numeric_growth(before: dict[str, Any] | None,
                     after: dict[str, Any] | None,
                     keys: Sequence[str]) -> dict[str, Any]:
@@ -2915,6 +3207,9 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         elif args.operation == "active_grid_mpm":
             case = _build_active_grid_mpm_case(
                 ti, args.runtime, args.backend, args.preset)
+        elif args.operation == "particle_spatial_hash":
+            case = _build_particle_spatial_hash_case(
+                ti, args.runtime, args.backend, config["elements"])
         elif args.operation == "snode_churn":
             case = _build_snode_churn_case(
                 ti, args.runtime, args.backend)

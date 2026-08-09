@@ -34,6 +34,7 @@ classified direct, stability, and thin-capability cases:
 | `native_compact` | stable flag selection with exact count and ordered-output oracle |
 | `device_prefix_chain` | device-resident active-prefix stable compact followed by inclusive scan |
 | `active_grid_mpm` | one stationary 2-D MLS-MPM substep with an active-grid update adapter |
+| `particle_spatial_hash` | 2-D cell hashing, bucket construction, and fixed-radius neighbor query |
 | `snode_churn` | one pointer+dense SNodeTree create/use/sync/destroy lifecycle transaction |
 
 These are control/regression microbenchmarks. They measure the ordinary kernel
@@ -113,6 +114,15 @@ Forge requests device stable compact plus bounded dispatch over the same flags.
 Route evidence must disclose the physical launch kind, exact-grid support,
 producer-owned state, and host-readback status. This is a thin-capability case,
 not a same-public-API comparison. Use `active_grid_mpm_microbench.py`.
+
+`particle_spatial_hash` is `THIN-005`. The small case maps 65,536 regular-grid
+particles into 16,384 cells, four particles per cell, then runs the same
+fixed-radius neighbor query. Both sides share positions, key/query kernels,
+i32 field layout, and exact key/offset/canonicalized-bucket/neighbor oracles.
+Forge uses the native bucket-builder workspace; vanilla uses parallel count,
+a reusable public prefix sum, cursor copy, and atomic scatter. Per-bucket order
+is unspecified and canonicalized only outside timing. Use
+`particle_spatial_hash_microbench.py`.
 
 `snode_churn` is the historical-churn half of `DIRECT-004`. Both runtimes use
 the same public FieldsBuilder DSL and kernels. Every measured launch creates
