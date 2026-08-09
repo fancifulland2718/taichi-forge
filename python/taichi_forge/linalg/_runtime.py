@@ -12,6 +12,7 @@ import json
 import math
 import operator as _operator
 import platform
+import threading
 import time
 from types import MappingProxyType
 from typing import Mapping, Optional, Sequence
@@ -161,6 +162,110 @@ class SolveResult:
     breakdown_reason: str
 
 
+class SolvePlanSubmission:
+    """One asynchronous single-system :class:`SolvePlan` invocation.
+
+    ``wait()`` waits only for backend completion. ``result()`` additionally
+    materializes the submission-owned device terminal packet exactly once.
+    The wrapper retains every runtime operand, the cached Graph, and the plan
+    until completion, including when the user drops the object early.
+    """
+
+    __slots__ = (
+        "_absolute_tolerance",
+        "_graph",
+        "_initial_guess",
+        "_lock",
+        "_packet",
+        "_plan",
+        "_relative_tolerance",
+        "_result",
+        "_rhs",
+        "_solution",
+        "_ticket",
+    )
+
+    def __init__(
+        self,
+        plan,
+        graph,
+        ticket,
+        packet,
+        rhs,
+        solution,
+        initial_guess,
+    ):
+        self._plan = plan
+        self._graph = graph
+        self._ticket = ticket
+        self._packet = packet
+        self._rhs = rhs
+        self._solution = solution
+        self._initial_guess = initial_guess
+        self._absolute_tolerance = float(plan.atol)
+        self._relative_tolerance = float(plan.rtol)
+        self._result = None
+        self._lock = threading.Lock()
+
+    def done(self):
+        """Return whether backend work is complete without terminal readback."""
+
+        return self._ticket.done()
+
+    def wait(self):
+        """Wait for backend completion without reading the terminal packet."""
+
+        self._ticket.wait()
+
+    def result(self):
+        """Wait and return the immutable solve result and terminal snapshot."""
+
+        with self._lock:
+            if self._result is None:
+                self._ticket.wait()
+                snapshot = self._packet.snapshot()
+                self._result = SolveResult(
+                    solution=self._solution,
+                    absolute_tolerance=self._absolute_tolerance,
+                    relative_tolerance=self._relative_tolerance,
+                    **snapshot.__dict__,
+                )
+                plan = self._plan
+                lock = getattr(plan, "_submission_lock", None)
+                if lock is not None:
+                    with lock:
+                        plan._submission_terminal_materializations += 1
+            return self._result
+
+    def telemetry(self):
+        """Wait if needed and return opt-in Graph submission telemetry."""
+
+        return self._ticket.telemetry()
+
+    def pipeline_report(self):
+        """Return this submission's opt-in execution-pipeline report."""
+
+        return self._ticket.pipeline_report()
+
+    @property
+    def terminal_packet(self):
+        """The device-resident terminal packet owned by this submission."""
+
+        return self._packet
+
+    @property
+    def backend(self):
+        return self._ticket.backend
+
+    @property
+    def sequence(self):
+        return self._ticket.sequence
+
+    @property
+    def workspace_lane(self):
+        return self._ticket.workspace_lane
+
+
 @dataclass(frozen=True)
 class SolveGraphTerminalSnapshot:
     """Host snapshot of one completed recordable SolvePlan invocation."""
@@ -181,13 +286,16 @@ class SolveGraphTerminalSnapshot:
 class SolveGraphTerminalPacket:
     """Runtime storage for a :class:`SolveGraphTerminal` resource pair."""
 
-    def __init__(self, terminal):
+    def __init__(self, terminal, *, initialize=True):
         self._terminal = terminal
         self._program = _current_program()
+        self._submission_ticket = None
+        self._initialized = bool(initialize)
         self.state = ScalarNdarray(i32, (4,))
         self.metrics = ScalarNdarray(f32, (4,))
-        self.state.fill(0)
-        self.metrics.fill(0)
+        if initialize:
+            self.state.fill(0)
+            self.metrics.fill(0)
         self._arguments = MappingProxyType(
             {
                 terminal.state.name: self.state,
@@ -211,6 +319,10 @@ class SolveGraphTerminalPacket:
         if self._program is not _current_program():
             raise TaichiRuntimeError(
                 "Solve Graph terminal packet belongs to another runtime"
+            )
+        if not self._initialized and self._submission_ticket is None:
+            raise TaichiRuntimeError(
+                "Solve Graph terminal packet has not been submitted"
             )
         state = np.asarray(self.state.to_numpy(), dtype=np.int32)
         metrics = np.asarray(self.metrics.to_numpy(), dtype=np.float32)
@@ -245,6 +357,13 @@ class SolveGraphTerminalPacket:
             ),
         )
 
+    def _attach_submission(self, ticket):
+        if self._submission_ticket is not None:
+            raise TaichiRuntimeError(
+                "Solve Graph terminal packet is already submitted"
+            )
+        self._submission_ticket = ticket
+
 
 class SolveGraphTerminal:
     """Symbolic, device-resident terminal state for one SolvePlan action."""
@@ -255,10 +374,10 @@ class SolveGraphTerminal:
         self.state = Arg(ArgKind.NDARRAY, state_name, i32, ndim=1)
         self.metrics = Arg(ArgKind.NDARRAY, metrics_name, f32, ndim=1)
 
-    def allocate(self):
+    def allocate(self, *, initialize=True):
         """Allocate one independently submitable runtime terminal packet."""
 
-        return SolveGraphTerminalPacket(self)
+        return SolveGraphTerminalPacket(self, initialize=initialize)
 
 
 def _current_program():
@@ -3748,8 +3867,8 @@ class _SolvePlanGraphNode(NativeGraphNode):
         self.terminal = terminal
         self.name = name
 
-    def allocate_terminal(self):
-        return self.terminal.allocate()
+    def allocate_terminal(self, *, initialize=True):
+        return self.terminal.allocate(initialize=initialize)
 
     def compile(self):
         return _SolvePlanGraphExecutable(
@@ -3794,6 +3913,8 @@ class SolvePlan:
         check_interval=None,
         bounded_mode="auto",
         restart=None,
+        submission_workspace_lanes=1,
+        submission_workspace_saturation="wait",
     ):
         if not isinstance(operator, LinearOperator):
             raise TypeError("operator must be ti.linalg.LinearOperator")
@@ -3864,6 +3985,30 @@ class SolvePlan:
                 "restart is accepted only for method='gmres' or 'fgmres'"
             )
         self.restart = restart
+        if isinstance(submission_workspace_lanes, bool):
+            raise TaichiRuntimeError(
+                "submission_workspace_lanes must be an integer"
+            )
+        try:
+            submission_workspace_lanes = _operator.index(
+                submission_workspace_lanes
+            )
+        except TypeError as exc:
+            raise TaichiRuntimeError(
+                "submission_workspace_lanes must be an integer"
+            ) from exc
+        if not 1 <= submission_workspace_lanes <= 64:
+            raise TaichiRuntimeError(
+                "submission_workspace_lanes must be between 1 and 64"
+            )
+        if submission_workspace_saturation not in ("wait", "raise"):
+            raise TaichiRuntimeError(
+                "submission_workspace_saturation must be 'wait' or 'raise'"
+            )
+        self.submission_workspace_lanes = submission_workspace_lanes
+        self.submission_workspace_saturation = (
+            submission_workspace_saturation
+        )
         self._program = _current_program()
         if not isinstance(bounded_mode, str):
             raise TaichiRuntimeError("bounded_mode must be a string")
@@ -3896,6 +4041,14 @@ class SolvePlan:
         self._graph_krylov_binding_cache = {}
         self._graph_action_solver = None
         self._graph_action_serial = 0
+        self._submission_lock = threading.RLock()
+        self._submission_graphs = {}
+        self._submission_graph_builds = 0
+        self._submission_calls = 0
+        self._submission_successes = 0
+        self._submission_failures = 0
+        self._submission_telemetry_requests = 0
+        self._submission_terminal_materializations = 0
         get_runtime().register_runtime_object(self)
 
     def _invalidate_runtime(self):
@@ -3907,6 +4060,7 @@ class SolvePlan:
         self._graph_krylov_last_direct_field_boundary = False
         self._graph_krylov_binding_cache = None
         self._graph_action_solver = None
+        self._submission_graphs = None
         self._native_preconditioner = None
         self._vector_io = None
         self.operator = None
@@ -5105,6 +5259,132 @@ class SolvePlan:
             name=name,
         )
 
+    def _submission_graph(self, with_initial_guess):
+        if self.operator is None or self._submission_graphs is None:
+            raise TaichiRuntimeError(
+                "SolvePlan cannot be used after ti.reset()"
+            )
+        key = bool(with_initial_guess)
+        with self._submission_lock:
+            cached = self._submission_graphs.get(key)
+            if cached is not None:
+                return cached
+
+            from taichi_forge.graph._graph import Arg, ArgKind, GraphBuilder
+
+            variant = "initial" if key else "zero"
+            prefix = f"__solve_submit_{id(self):x}_{variant}"
+            rhs_arg = Arg(ArgKind.NDARRAY, f"{prefix}_rhs", f32, ndim=1)
+            output_arg = Arg(
+                ArgKind.NDARRAY, f"{prefix}_output", f32, ndim=1
+            )
+            initial_arg = (
+                Arg(
+                    ArgKind.NDARRAY,
+                    f"{prefix}_initial",
+                    f32,
+                    ndim=1,
+                )
+                if key
+                else None
+            )
+            action = self.graph_action(
+                rhs_arg,
+                output_arg,
+                initial_guess=initial_arg,
+                name=f"{self.method}_submit_{variant}",
+            )
+            builder = GraphBuilder()
+            builder.append_native(action)
+            graph = builder.compile(
+                workspace_lanes=self.submission_workspace_lanes,
+                workspace_saturation=(
+                    self.submission_workspace_saturation
+                ),
+            )
+            cached = {
+                "graph": graph,
+                "action": action,
+                "rhs_name": rhs_arg.name,
+                "output_name": output_arg.name,
+                "initial_name": (
+                    None if initial_arg is None else initial_arg.name
+                ),
+            }
+            self._submission_graphs[key] = cached
+            self._submission_graph_builds += 1
+            return cached
+
+    def submit(
+        self,
+        rhs,
+        *,
+        initial_guess=None,
+        out=None,
+        pacer=None,
+        lane=None,
+        on_saturation="wait",
+        telemetry=False,
+        workspace_lane=None,
+    ):
+        """Submit one complete solve and return a single async ticket wrapper.
+
+        The implementation records :meth:`graph_action` into one lazily cached
+        Graph and delegates admission, workspace-lane ownership, backend
+        completion, and telemetry to :meth:`Graph.submit`. No terminal state is
+        read on this path. ``SolvePlanSubmission.wait()`` waits for completion;
+        ``result()`` performs the one terminal-packet materialization.
+        """
+
+        with self._submission_lock:
+            self._submission_calls += 1
+            if telemetry:
+                self._submission_telemetry_requests += 1
+        try:
+            cached = self._submission_graph(initial_guess is not None)
+            if out is None:
+                out = ScalarNdarray(
+                    self.operator.dtype, (self.operator.shape[0],)
+                )
+            packet = cached["action"].allocate_terminal(initialize=False)
+            arguments = {
+                cached["rhs_name"]: rhs,
+                cached["output_name"]: out,
+                **packet.arguments,
+            }
+            if initial_guess is not None:
+                arguments[cached["initial_name"]] = initial_guess
+            graph = cached["graph"]
+            ticket = graph.submit(
+                arguments,
+                pacer=pacer,
+                lane=lane,
+                on_saturation=on_saturation,
+                telemetry=telemetry,
+                workspace_lane=workspace_lane,
+            )
+            packet._attach_submission(ticket)
+            submission = SolvePlanSubmission(
+                self,
+                graph,
+                ticket,
+                packet,
+                rhs,
+                out,
+                initial_guess,
+            )
+            if ticket._has_backend_work:
+                get_runtime().transfer_runtime_submission_owner(
+                    ticket._completion, submission
+                )
+        except BaseException:
+            with self._submission_lock:
+                self._submission_failures += 1
+            raise
+        with self._submission_lock:
+            self._submission_successes += 1
+        return submission
+
     def solve(self, rhs, *, initial_guess=None, out=None):
         """Solves one RHS with persistent plan-owned workspace."""
         if self.operator is None or self._solver is None:
@@ -5252,6 +5532,67 @@ class SolvePlan:
         snapshot = dict(self._solver._get_last_result())
         return SolveResult(solution=out, **snapshot)
 
+    def submission_statistics(self):
+        """Return ownership, lane, memory, and materialization counters."""
+
+        if self.operator is None or self._submission_graphs is None:
+            raise TaichiRuntimeError(
+                "SolvePlan cannot be used after ti.reset()"
+            )
+        with self._submission_lock:
+            graphs = tuple(
+                ("with_initial_guess" if key else "zero_initial_guess", value)
+                for key, value in self._submission_graphs.items()
+            )
+            result = {
+                "workspace_lane_capacity": self.submission_workspace_lanes,
+                "workspace_saturation_policy": (
+                    self.submission_workspace_saturation
+                ),
+                "graphs_materialized": self._submission_graph_builds,
+                "submit_calls": self._submission_calls,
+                "submit_successes": self._submission_successes,
+                "submit_failures": self._submission_failures,
+                "telemetry_requests": self._submission_telemetry_requests,
+                "terminal_materializations": (
+                    self._submission_terminal_materializations
+                ),
+            }
+        persistent_bytes = 0
+        transient_bytes = 0
+        lanes_materialized = 0
+        lanes_busy = 0
+        variants = {}
+        for name, cached in graphs:
+            report = cached["graph"].execution_stats()
+            memory = report.memory
+            persistent_bytes += memory.persistent_internal_storage_bytes
+            transient_bytes += memory.transient_temporary_bytes
+            lanes_materialized += memory.workspace_lanes_materialized
+            lanes_busy += memory.workspace_lanes_busy
+            variants[name] = {
+                "persistent_internal_storage_bytes": (
+                    memory.persistent_internal_storage_bytes
+                ),
+                "transient_temporary_bytes": (
+                    memory.transient_temporary_bytes
+                ),
+                "workspace_lanes_materialized": (
+                    memory.workspace_lanes_materialized
+                ),
+                "workspace_lanes_busy": memory.workspace_lanes_busy,
+            }
+        result.update(
+            {
+                "persistent_internal_storage_bytes": persistent_bytes,
+                "transient_temporary_bytes": transient_bytes,
+                "workspace_lanes_materialized": lanes_materialized,
+                "workspace_lanes_busy": lanes_busy,
+                "variants": variants,
+            }
+        )
+        return result
+
     def statistics(self):
         """Returns backend-neutral plan resource and operation telemetry."""
         if self.operator is None or self._solver is None:
@@ -5316,6 +5657,7 @@ class SolvePlan:
             "fast_path": "pass_explicit_out",
         }
         result["vector_io"] = self._vector_io.statistics()
+        result["submission"] = self.submission_statistics()
         result["execution_capabilities"] = self.execution_capabilities()
         return result
 
@@ -5396,6 +5738,7 @@ __all__ = [
     "SolveGraphTerminalPacket",
     "SolveGraphTerminalSnapshot",
     "SolvePlan",
+    "SolvePlanSubmission",
     "SolveQualificationReport",
     "SolveResult",
     "SolveSubmission",

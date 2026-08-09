@@ -487,6 +487,40 @@ print(result.iterations, result.residual_norm, result.termination_reason)
 stats = plan.statistics()
 ```
 
+An f32 CG/PCG plan with recordable A/M providers can also own a cached
+one-action Graph and submit the complete solve asynchronously:
+
+```python
+plan = ti.linalg.experimental.SolvePlan(
+    operator,
+    method="pcg",
+    preconditioner=preconditioner,
+    submission_workspace_lanes=2,
+    submission_workspace_saturation="raise",
+)
+submission = plan.submit(rhs, out=x, telemetry=True)
+# no terminal packet readback has occurred
+submission.wait()                 # backend completion only
+result = submission.result()      # one explicit terminal materialization
+print(submission.workspace_lane, result.iterations)
+```
+
+`SolvePlanSubmission` retains the plan, runtime operands, output, terminal
+packet, and cached Graph through completion. `done()` and `wait()` do not read
+the terminal packet; `result()` reads it once and caches the immutable
+`SolveResult`. `telemetry()` exposes the underlying single Graph submission.
+The no-initial-guess and explicit-initial-guess forms are cached separately;
+each materialized variant owns its own lane pool. `submission_statistics()`
+reports those variants, lane use, persistent/transient bytes, submissions,
+failures, telemetry requests, and terminal materializations.
+
+The convenience path adds no solver or backend primitive: it is exactly
+`graph_action()` inside a cached Graph followed by `Graph.submit()`. Therefore
+its qualification and failure boundary is the same recordable f32 CG/PCG
+contract. `submission_workspace_lanes=N` gives each in-flight lane independent
+Krylov storage; extra lanes increase persistent memory linearly and do not
+promise physical kernel overlap.
+
 ### Complete SolvePlan Graph action
 
 An f32 CG/PCG plan whose operator and optional fixed-linear preconditioner are

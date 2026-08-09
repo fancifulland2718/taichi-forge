@@ -257,6 +257,92 @@ def test_solve_plan_complete_graph_action_terminal_and_workspace(method):
     assert telemetry.regions[0].logical_iterations == 1
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_solve_plan_submit_owns_terminal_ticket_and_workspace_lane():
+    size = 64
+    plan = ti.linalg.experimental.SolvePlan(
+        _compiled_identity(size),
+        method="cg",
+        max_iterations=8,
+        atol=1e-6,
+        submission_workspace_lanes=2,
+        submission_workspace_saturation="raise",
+    )
+    expected = np.linspace(-2.0, 3.0, size, dtype=np.float32)
+    rhs = ti.field(ti.f32, shape=size)
+    output = ti.field(ti.f32, shape=size)
+    rhs.from_numpy(expected)
+    output.fill(0.0)
+
+    submission = plan.submit(
+        rhs,
+        out=output,
+        telemetry=True,
+        workspace_lane=1,
+    )
+    assert isinstance(
+        submission, ti.linalg.experimental.SolvePlanSubmission
+    )
+    assert submission.workspace_lane == 1
+    before_result = plan.submission_statistics()
+    assert before_result["submit_calls"] == 1
+    assert before_result["submit_successes"] == 1
+    assert before_result["terminal_materializations"] == 0
+    assert before_result["graphs_materialized"] == 1
+    assert before_result["workspace_lane_capacity"] == 2
+
+    submission.wait()
+    assert plan.submission_statistics()["terminal_materializations"] == 0
+    result = submission.result()
+    assert submission.result() is result
+    assert result.solution is output
+    assert result.converged
+    assert result.iterations == 1
+    np.testing.assert_allclose(output.to_numpy(), expected, rtol=1e-6)
+    telemetry = submission.telemetry()
+    assert tuple(region.path_id for region in telemetry.regions) == (
+        "cg_submit_zero",
+    )
+
+    initial = ti.ndarray(ti.f32, shape=size)
+    initial.fill(0.25)
+    second = plan.submit(rhs, initial_guess=initial, workspace_lane=0)
+    second_result = second.result()
+    assert second_result.converged
+    np.testing.assert_allclose(
+        second_result.solution.to_numpy(), expected, rtol=1e-6
+    )
+    final_stats = plan.statistics()["submission"]
+    assert final_stats["submit_calls"] == 2
+    assert final_stats["submit_successes"] == 2
+    assert final_stats["submit_failures"] == 0
+    assert final_stats["telemetry_requests"] == 1
+    assert final_stats["terminal_materializations"] == 2
+    assert final_stats["graphs_materialized"] == 2
+    assert set(final_stats["variants"]) == {
+        "zero_initial_guess",
+        "with_initial_guess",
+    }
+    assert final_stats["persistent_internal_storage_bytes"] > size * 4
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_solve_plan_submit_workspace_configuration_fails_closed():
+    operator = _compiled_identity(4)
+    with pytest.raises(
+        RuntimeError, match="submission_workspace_lanes must be between"
+    ):
+        ti.linalg.experimental.SolvePlan(
+            operator, submission_workspace_lanes=0
+        )
+    with pytest.raises(
+        RuntimeError, match="submission_workspace_saturation"
+    ):
+        ti.linalg.experimental.SolvePlan(
+            operator, submission_workspace_saturation="drop"
+        )
+
+
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
 def test_compiled_graph_provider_pcg_uses_recordable_device_control():
     size = 32

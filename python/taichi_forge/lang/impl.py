@@ -599,6 +599,21 @@ class PyTaichi:
         # even though its caller observes that sticky backend failure.
         self.collect_ready_runtime_submission_owners()
 
+    def transfer_runtime_submission_owner(self, completion, owner):
+        """Replace an already-published owner without a second driver poll."""
+
+        key = self._runtime_submission_key(completion)
+        with self._runtime_submission_owner_lock:
+            current = self._runtime_submission_owners.get(key)
+            if current is None:
+                return False
+            if current[0] is completion:
+                self._runtime_submission_owners[key] = (completion, owner)
+                return True
+        raise RuntimeError(
+            "runtime submission owner changed before ownership transfer"
+        )
+
     def release_runtime_submission_owner(self, completion):
         key = self._runtime_submission_key(completion)
         with self._runtime_submission_owner_lock:

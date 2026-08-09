@@ -59,6 +59,13 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
   配对的 262,144 项、三 leaf 资格测试中，dispatch 从 8 降到 5，temporary 从 2 MiB 降到
   1 MiB；CUDA warm submit/wait 中位数从 270.2 降到 203.5 us，Vulkan 从 555.3 降到
   465.9 us。该数据只描述这一 workload，不是普遍加速承诺。
+- recordable f32 CG/PCG 的 `SolvePlan.submit()` 现在会把完整求解包装进缓存的单 action
+  Graph，并返回一个 `SolvePlanSubmission`。terminal packet 在 `done()`/`wait()` 期间保持
+  device-resident，只由 `result()` 物化一次；可选 workspace lane 提供独立 Krylov storage，
+  statistics 会公开 variant/lane memory 与 terminal readback。该路径与等价手写 Graph 使用
+  相同 persistent bytes。在本地配对的 262,144 项测试中，wrapper 相对该 Graph 的开销在
+  CUDA 为 2.1%，Vulkan 为噪声范围内的 -1.2%；terminal result 的物化仍是显式的额外同步/
+  readback。
 
 ## 0.6.1
 

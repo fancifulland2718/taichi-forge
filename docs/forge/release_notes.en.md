@@ -69,6 +69,15 @@ grouped under the behavior they shipped.
   storage from 2 MiB to 1 MiB, and warm submit/wait median fell from 270.2 to
   203.5 us on CUDA and from 555.3 to 465.9 us on Vulkan. These are workload-
   specific qualification results, not universal speedup guarantees.
+- Recordable f32 CG/PCG `SolvePlan.submit()` now wraps the complete solve in a
+  cached one-action Graph and returns one `SolvePlanSubmission`. Its terminal
+  packet remains device-resident through `done()`/`wait()` and is materialized
+  once by `result()`. Optional workspace lanes provide independent Krylov
+  storage, while statistics expose variant/lane memory and terminal readbacks.
+  The managed path uses the same persistent bytes as an equivalent hand-built
+  Graph. In a paired local 262,144-element probe, wrapper overhead versus that
+  Graph was 2.1% on CUDA and within noise (-1.2%) on Vulkan; terminal-result
+  materialization remains an explicit additional synchronization/readback.
 
 ## 0.6.1
 
