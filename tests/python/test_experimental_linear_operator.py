@@ -63,6 +63,33 @@ def _kernel_identity(size):
     return ti.linalg.LinearOperator.from_kernel(apply_identity, size, topology, traits=ti.linalg.OperatorTraits.spd())
 
 
+def _kernel_diagonal(values):
+    values = np.asarray(values, dtype=np.float32)
+    topology = ti.ndarray(ti.i32, shape=1)
+    topology.fill(0)
+    numeric = ti.ndarray(ti.f32, shape=values.size)
+    numeric.from_numpy(values)
+
+    @ti.kernel
+    def apply_diagonal(
+        active_size: ti.i32,
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        numeric_data: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(active_size):
+            y[index] = numeric_data[index] * x[index]
+
+    return ti.linalg.LinearOperator.from_kernel(
+        apply_diagonal,
+        values.size,
+        topology,
+        numeric=numeric,
+        traits=ti.linalg.OperatorTraits.spd(),
+    )
+
+
 def test_cuda_device_convergent_capabilities_are_provider_specific():
     from taichi_forge.linalg._runtime import _cuda_device_convergent_status
 
@@ -152,6 +179,43 @@ def test_fixed_layout_block_diagonal_uses_direct_subranges():
     np.testing.assert_allclose(blocks.apply(source).to_numpy(), source_values)
     assert blocks.capabilities.dense_storage_operands
     assert blocks.capabilities.dense_storage_affine_operands
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_fixed_layout_block_diagonal_is_a_recordable_solveplan_operator_and_preconditioner():
+    diagonal = np.asarray([2.0, 4.0, 3.0, 5.0, 7.0], np.float32)
+    operator = ti.linalg.block_diagonal(
+        (_kernel_diagonal(diagonal[:2]), _kernel_diagonal(diagonal[2:]))
+    )
+    preconditioner = ti.linalg.block_diagonal(
+        (
+            _kernel_diagonal(1.0 / diagonal[:2]),
+            _kernel_diagonal(1.0 / diagonal[2:]),
+        )
+    )
+    options = {}
+    if impl.current_cfg().arch in (ti.cuda, ti.vulkan):
+        options["execution_policy"] = "device_convergent"
+    plan = ti.linalg.experimental.SolvePlan(
+        operator,
+        method="pcg",
+        preconditioner=preconditioner,
+        max_iterations=8,
+        atol=1e-6,
+        **options,
+    )
+    expected = np.asarray([0.5, -1.0, 2.0, 1.5, -0.25], np.float32)
+    rhs = _vector(diagonal * expected)
+    result = plan.submit(rhs).result()
+    assert result.converged
+    assert result.iterations == 1
+    np.testing.assert_allclose(
+        result.solution.to_numpy(), expected, rtol=2e-5, atol=2e-5
+    )
+    stats = plan.statistics()
+    if impl.current_cfg().arch in (ti.cuda, ti.vulkan):
+        assert stats["submission"]["execution_path"] == "cached_graph_submission"
+        assert stats["submission"]["graphs_materialized"] == 1
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

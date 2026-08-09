@@ -202,10 +202,19 @@ grouped under the behavior they shipped.
   CUDA/Vulkan leaves, and Program-bound CPU leaves use the same runtime-storage
   subrange contract. Consecutive domain/range slices are resolved once and
   submitted in leaf order without gather/scatter, whole-vector staging, or an
-  N-sized temporary. It deliberately does not fuse leaf kernels: a two-leaf
+  N-sized temporary. A container whose leaves are recordable can now be one
+  Graph/SolvePlan action: private derived subviews preserve the two-argument
+  public ABI, remain zero-staging through nested compositions, and let one
+  outer submission amortize their binding across all solver iterations. It
+  deliberately does not fuse leaf kernels: a two-leaf
   262,144-element identity probe cost 0.792 ms CPU, 0.264 ms CUDA, and 0.458 ms
-  Vulkan versus 0.388/0.135/0.335 ms for one fused kernel. Permuted,
-  overlapping, non-affine, and recordable-container forms remain unsupported.
+  Vulkan versus 0.388/0.135/0.335 ms for one fused kernel. A synchronous
+  single-action Graph qualification measured 1.037/0.504/0.486 ms versus
+  0.815/0.367/0.563 ms for standalone CPU/CUDA/Vulkan apply, with two
+  dispatches and zero planned temporary bytes. This boundary measurement is
+  not a universal speedup claim; the intended benefit is one outer Graph
+  ticket without per-iteration staging. Permuted, overlapping, and non-affine
+  forms remain unsupported.
 - Added `SmallBlockInverseBuilder` for fixed f32 row-major blocks of size 1-4.
   Its direct and one-dispatch Graph forms run partial-pivot Gauss-Jordan
   on device with block-scale-relative pivot tolerance, leave per-block

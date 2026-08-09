@@ -154,9 +154,15 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
 - fixed-layout `block_diagonal()` standalone apply 现在支持合格的 CUDA/Vulkan f32 leaf；
   Program-bound CPU leaf 也使用相同 runtime-storage subrange 合同。连续 domain/range slice
   一次解析并按 leaf 顺序提交，不执行 gather/scatter、全向量 staging 或 N-sized temporary。
-  该合同不做 kernel fusion：双 leaf、262,144 元素 identity probe 在 CPU/CUDA/Vulkan 分别为
+  leaf 可录制时，container 现在可作为一个 Graph/SolvePlan action；private derived subview
+  保持双参数公开 ABI，在嵌套 composition 中仍为 zero-staging，并让一次外层 submission 在
+  全部 solver iteration 间摊销绑定成本。该合同不做 kernel fusion：双 leaf、262,144 元素
+  identity probe 在 CPU/CUDA/Vulkan 分别为
   0.792/0.264/0.458 ms，而单融合 kernel 为 0.388/0.135/0.335 ms。permutation、overlap、
-  non-affine 与 recordable container 形式仍不支持。
+  non-affine 形式仍不支持。同步单 action Graph 资格测试为 1.037/0.504/0.486 ms，standalone
+  CPU/CUDA/Vulkan apply 为 0.815/0.367/0.563 ms；均为两个 dispatch，Graph planned temporary
+  bytes 为零。该边界数据不是通用加速承诺；预期收益是一次外层 Graph ticket，且迭代间不做
+  staging。
 - 新增 `SmallBlockInverseBuilder`，面向 size 1-4 的固定 f32 row-major block。direct 与单 dispatch
   Graph 形式都在 device 上以相对 block 尺度的 pivot tolerance 执行带 partial pivot 的 Gauss-Jordan，把 success/non-finite/
   singular 的逐 block status 留在 device，并把失败输出清零且不推断 SPD。对 16,384 个 4x4

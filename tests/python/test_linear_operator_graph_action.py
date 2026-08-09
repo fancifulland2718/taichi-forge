@@ -598,6 +598,127 @@ def test_deep_composition_reuses_one_temporary_for_forward_and_adjoint():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_fixed_layout_block_diagonal_records_zero_copy_subviews_and_adjoint():
+    first_matrix = np.asarray(
+        [[2.0, -1.0, 0.5], [0.25, 3.0, 1.0]], np.float32
+    )
+    second_matrix = np.asarray(
+        [[4.0, -2.0, 0.75], [1.5, 0.5, -3.0]], np.float32
+    )
+    first = _rectangular_operator(first_matrix)
+    second = _rectangular_operator(second_matrix)
+    operator = ti.linalg.block_diagonal((first, second))
+    assert operator._supports_graph_action()
+
+    forward = _operator_graph(operator)
+    source_values = np.asarray(
+        [1.0, -2.0, 0.5, 3.0, -1.0, 2.0], np.float32
+    )
+    source = ti.ndarray(ti.f32, shape=6)
+    output = ti.ndarray(ti.f32, shape=4)
+    source.from_numpy(source_values)
+    forward.run({"input": source, "output": output})
+    expected = np.concatenate(
+        (first_matrix @ source_values[:3], second_matrix @ source_values[3:])
+    )
+    np.testing.assert_allclose(output.to_numpy(), expected)
+    executable = operator.graph_action(
+        ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "block_input", ti.f32, ndim=1),
+        ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "block_output", ti.f32, ndim=1),
+    ).compile()
+    assert executable.debug_info["dispatch_count"] == 2
+    assert executable.debug_info["temporary_bytes"] == 0
+    assert executable.debug_info["block_count"] == 2
+    assert executable.debug_info["zero_copy_block_subviews"]
+    assert len(executable.derived_runtime_arg_schema) == 4
+    report = forward.execution_stats()
+    assert report.memory.planned_temporary_bytes == 0
+
+    updated_second_matrix = np.asarray(
+        [[1.0, 0.5, -0.25], [-2.0, 3.0, 0.75]], np.float32
+    )
+    old_output = ti.ndarray(ti.f32, shape=4)
+    updated_output = ti.ndarray(ti.f32, shape=4)
+    old_ticket = forward.submit(
+        {"input": source, "output": old_output}, telemetry=True
+    )
+    updated_numeric = ti.ndarray(ti.f32, shape=updated_second_matrix.size)
+    updated_numeric.from_numpy(updated_second_matrix.reshape(-1))
+    second.update_numeric(
+        updated_numeric,
+        expected_topology_version=1,
+        expected_numeric_version=1,
+    )
+    updated_ticket = forward.submit(
+        {"input": source, "output": updated_output}
+    )
+    old_ticket.wait()
+    updated_ticket.wait()
+    pipeline = old_ticket.pipeline_report()
+    assert pipeline is not None
+    manifests = tuple(
+        manifest
+        for stage in pipeline.stages
+        for manifest in stage.native_actions
+    )
+    assert sum(
+        len(manifest.derived_runtime_bindings) for manifest in manifests
+    ) == 4
+    np.testing.assert_allclose(old_output.to_numpy(), expected)
+    expected_updated = np.concatenate(
+        (
+            first_matrix @ source_values[:3],
+            updated_second_matrix @ source_values[3:],
+        )
+    )
+    np.testing.assert_allclose(updated_output.to_numpy(), expected_updated)
+
+    field_source = ti.field(ti.f32, shape=6)
+    field_output = ti.field(ti.f32, shape=4)
+    field_source.from_numpy(source_values)
+    forward.run({"input": field_source, "output": field_output})
+    np.testing.assert_allclose(field_output.to_numpy(), expected_updated)
+
+    scaled = _operator_graph(0.5 * operator)
+    scaled.run({"input": source, "output": output})
+    np.testing.assert_allclose(output.to_numpy(), 0.5 * expected_updated)
+
+    nested = ti.linalg.block_diagonal((operator, first))
+    nested_source_values = np.concatenate(
+        (source_values, np.asarray([-0.5, 1.5, 2.0], np.float32))
+    )
+    nested_source = ti.ndarray(ti.f32, shape=9)
+    nested_output = ti.ndarray(ti.f32, shape=6)
+    nested_source.from_numpy(nested_source_values)
+    _operator_graph(nested).run(
+        {"input": nested_source, "output": nested_output}
+    )
+    np.testing.assert_allclose(
+        nested_output.to_numpy(),
+        np.concatenate(
+            (
+                expected_updated,
+                first_matrix @ nested_source_values[6:],
+            )
+        ),
+    )
+
+    adjoint = _operator_graph(operator, adjoint=True)
+    adjoint_source_values = np.asarray([0.5, -1.0, 2.0, 0.25], np.float32)
+    adjoint_source = ti.ndarray(ti.f32, shape=4)
+    adjoint_output = ti.ndarray(ti.f32, shape=6)
+    adjoint_source.from_numpy(adjoint_source_values)
+    adjoint.run({"input": adjoint_source, "output": adjoint_output})
+    expected_adjoint = np.concatenate(
+        (
+            first_matrix.T @ adjoint_source_values[:2],
+            updated_second_matrix.T @ adjoint_source_values[2:],
+        )
+    )
+    np.testing.assert_allclose(adjoint_output.to_numpy(), expected_adjoint)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_inverse_block_diagonal_is_recordable_and_numerically_rebindable():
     inverse_blocks = np.asarray(
         [

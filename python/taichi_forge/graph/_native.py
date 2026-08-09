@@ -147,6 +147,7 @@ class NativeActionManifest:
     update_policy: str
     synchronization_domain: str
     runtime_bindings: tuple
+    derived_runtime_bindings: tuple
     effects: tuple
     temporaries: tuple
     fixed_binding_names: tuple
@@ -168,6 +169,10 @@ class NativeActionManifest:
             "synchronization_domain": self.synchronization_domain,
             "runtime_bindings": tuple(
                 binding.to_dict() for binding in self.runtime_bindings
+            ),
+            "derived_runtime_bindings": tuple(
+                binding.to_dict()
+                for binding in self.derived_runtime_bindings
             ),
             "effects": tuple(effect.to_dict() for effect in self.effects),
             "temporaries": tuple(
@@ -341,6 +346,17 @@ class NativeGraphExecutable:
         return ()
 
     @property
+    def derived_runtime_arg_schema(self):
+        """Private bindings derived from public arguments at submission.
+
+        Derived bindings participate in recording but are not supplied by the
+        Graph caller. Implementations must bind every declared name from the
+        same public invocation in :meth:`bind_graph_arguments` without
+        allocating or staging hidden storage.
+        """
+        return ()
+
+    @property
     def resource_effects(self):
         return ()
 
@@ -418,11 +434,22 @@ def native_action_manifest(
         )
 
     runtime_bindings = tuple(executable.runtime_arg_schema)
+    derived_runtime_bindings = tuple(
+        executable.derived_runtime_arg_schema
+    )
     effects = tuple(executable.resource_effects)
     temporaries = tuple(executable.temporary_requirements)
     if not all(isinstance(binding, RuntimeBinding) for binding in runtime_bindings):
         raise TaichiRuntimeError(
             "Native action runtime bindings must contain RuntimeBinding values"
+        )
+    if not all(
+        isinstance(binding, RuntimeBinding)
+        for binding in derived_runtime_bindings
+    ):
+        raise TaichiRuntimeError(
+            "Native action derived runtime bindings must contain "
+            "RuntimeBinding values"
         )
     if not all(isinstance(effect, ResourceEffect) for effect in effects):
         raise TaichiRuntimeError(
@@ -436,9 +463,21 @@ def native_action_manifest(
         )
 
     binding_names = tuple(binding.name for binding in runtime_bindings)
+    derived_binding_names = tuple(
+        binding.name for binding in derived_runtime_bindings
+    )
     temporary_names = tuple(temporary.name for temporary in temporaries)
     if len(binding_names) != len(set(binding_names)):
         raise TaichiRuntimeError("Native action runtime binding names must be unique")
+    if len(derived_binding_names) != len(set(derived_binding_names)):
+        raise TaichiRuntimeError(
+            "Native action derived runtime binding names must be unique"
+        )
+    if set(binding_names) & set(derived_binding_names):
+        raise TaichiRuntimeError(
+            "Native action public and derived runtime bindings must be "
+            "disjoint"
+        )
     if len(temporary_names) != len(set(temporary_names)):
         raise TaichiRuntimeError("Native action temporary names must be unique")
 
@@ -485,6 +524,7 @@ def native_action_manifest(
         update_policy=update_policy,
         synchronization_domain=synchronization_domain,
         runtime_bindings=runtime_bindings,
+        derived_runtime_bindings=derived_runtime_bindings,
         effects=ir_effects,
         temporaries=temporaries,
         fixed_binding_names=fixed_binding_names,

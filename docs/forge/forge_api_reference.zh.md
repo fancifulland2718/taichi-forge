@@ -1376,8 +1376,9 @@ workspace requirement；Graph 为每个 invocation 分配有界 arena storage，
 fixed/private binding 冲突会在提交 backend work 前明确失败。
 
 请求 submission telemetry 时，每个已编译 native action 还会拥有 immutable
-`NativeActionManifest`。它包含符号化 runtime binding、resource effect、temporary
-requirement、fixed/private binding 名、lifetime lease 数、recordability、合格 backend、
+`NativeActionManifest`。它包含符号化 public runtime binding、provider-derived private
+runtime binding、resource effect、temporary requirement、fixed/private binding 名、
+lifetime lease 数、recordability、合格 backend、
 update policy 与 synchronization domain；绝不包含 provider-owned storage 对象、allocation
 handle 或 host/device 地址。opaque action 与已经合并进 CGraph stage 的 recordable action
 仍会被明确区分。
@@ -1600,7 +1601,7 @@ operator API 另见[LinearOperator 与 SolvePlan](linear_operator.zh.md)。
 | `ti.linalg.vector_io_capabilities()` / storage-view metadata | 查询版本化 storage、layout、execution mode、zero-copy 资格与 indexed topology 合同。 | compiled kernel 在 CPU/CUDA/Vulkan 上直接绑定 compact 与一维 scalar affine runtime storage。compiled Graph 直接绑定 compact storage，并通过 backend-qualified dispatch 保持 affine zero-copy 执行。native CSR/BSR 在 CPU/CUDA 上接受 compact direct storage；Vulkan dense field 与 solve boundary 使用可复用 device staging。 |
 | `operator.apply(x, out=None, *, alpha=1, beta=0, addend=None)` / `operator @ x` | 同步执行 `out = alpha * A(x) + beta * addend`。 | 一维 scalar ndarray、可 scalar-linearize 的 dense field/view 或经过资格验证的 `DenseNdarrayView`；CPU 与 CUDA/Vulkan f32 ndarray 支持通用系数；`beta=0` 不读取 addend；禁止 input/output alias。GPU addend/output alias 使用一个持久 scratch。 |
 | `operator.parameterized_affine(other=None, *, alpha, beta, alpha_range, beta_range)` / `.update_parameters(...)` | 构造 `alpha*A + beta*B`；省略 `other` 时为 identity shift，并原子发布系数 generation。 | CPU `f32/f64`；CUDA/Vulkan Program-bound `f32`。必须声明闭区间，trait 证明以整个区间为边界。更新需要精确当前 version；缓存 Graph action 无需重建即可 rebind，并 pin in-flight generation。 |
-| `operator.scaled(...)`、`.shifted(...)`、`operator + other`、`.compose(...)`、`.adjoint()`、`block_diagonal(...)`、`identity(...)` | 构造最小线性算子代数。 | CPU `f32/f64`；CUDA/Vulkan 支持 Program-bound f32 scale/shift/sum/compose。GPU fixed-layout block diagonal 要求 direct-affine f32 leaf，以连续 zero-staging subview 执行；container 本身不可录制。recordable shift 只增加一个 in-place `axpby`，不分配 identity-sized temporary。adjoint 需要显式 capability。 |
+| `operator.scaled(...)`、`.shifted(...)`、`operator + other`、`.compose(...)`、`.adjoint()`、`block_diagonal(...)`、`identity(...)` | 构造最小线性算子代数。 | CPU `f32/f64`；CUDA/Vulkan 支持 Program-bound f32 scale/shift/sum/compose。GPU fixed-layout block diagonal 要求 direct-affine f32 leaf，以连续 zero-staging subview 执行。leaf 可录制时，container 本身也是 Graph/SolvePlan action，使用 private derived subview 且没有 block-sized temporary。recordable shift 只增加一个 in-place `axpby`，不分配 identity-sized temporary。adjoint 需要显式 capability。 |
 | `ti.linalg.inverse_block_diagonal(inverse_blocks, block_size, *, assume_spd)` | 从调用方提供的 row-major f32 inverse block 构造 recordable fixed-linear scalar/small-block preconditioner。 | CPU/CUDA/Vulkan；block size 1-4，每种尺寸使用专门化 kernel 与常数大小 topology metadata。Forge 不回读、求逆、正则化或推断 SPD；兼容 numeric update 只复制 inverse values，并 rebind 到缓存 Graph submission。 |
 | `ti.linalg.SmallBlockInverseBuilder(block_size, block_count, regularization=0, pivot_tolerance=...)` | 通过 `build()` 或单 dispatch `graph_action()` 在 device 上构造 row-major f32 inverse block。 | CPU/CUDA/Vulkan，size 1-4。pivot tolerance 相对于 regularized block 的最大绝对系数；f32 无法表示的控制值会失败。逐 block device status：0 成功、1 非有限、2 奇异/病态；失败输出为零。不隐式读回 status 或推断 SPD。 |
 | `ti.linalg.qualify_operator(operator, reference=..., ...)` | 生成版本化、JSON 可序列化的 provider-neutral 协议证据。 | 记录 oracle/adjoint/generalized apply、同步计时、resource stamp 与 native counter；unsupported 不 fallback。 |

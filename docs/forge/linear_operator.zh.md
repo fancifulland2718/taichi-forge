@@ -278,18 +278,22 @@ generation，因此发布新 generation 时在途工作仍安全。topology、sc
 runtime generation 变化仍会 fail closed，并要求新建 Graph。
 
 当前 recordable 合同适用于 compiled-kernel provider、只含 direct dispatch 的
-compiled-Graph provider，以及 leaf 均可录制的 f32 scale/shift/sum/compose/adjoint 树。组合会
-递归 lowering 并保持 child dispatch 顺序。有序 scale/sum subtree 会规范化为 weighted
-leaf：两项加权和只执行两个 provider action 与一个 in-place `axpby`，更多项也只复用一条
-scratch vector；`compose` 仍保持 operator 边界与有序 intermediate。以上路径从
-Graph-owned bounded arena 取得 typed f32 temporary，因此 scratch 不会成为公共 runtime
-参数，并发 submission 会使用独立 arena lane。memory report 会公开 planned/persistent
-temporary bytes。通用的
+compiled-Graph provider、fixed-layout `block_diagonal()` container，以及 leaf 均可录制的
+f32 scale/shift/sum/compose/adjoint 树。组合会递归 lowering 并保持 child dispatch 顺序。
+block container 会在 submission 时从两个公开 vector binding 派生连续 domain/range subview；
+这些 private view 不会成为调用方参数，不执行 staging 或 storage allocation，并且 container
+嵌入其它 recordable composition 后仍保持该合同。有序 scale/sum subtree 会规范化为
+weighted leaf：两项加权和只执行两个 provider action 与一个 in-place `axpby`，更多项也只
+复用一条 scratch vector；`compose` 仍保持 operator 边界与有序 intermediate。需要 scratch
+的路径从 Graph-owned bounded arena 取得 typed f32 temporary，因此 scratch 不会成为公共
+runtime 参数，并发 submission 会使用独立 arena lane。memory report 会公开
+planned/persistent temporary bytes。通用的
 矩形/显式 adjoint 形式和 legacy 方阵 forward-only 形式都会保持 compiled Graph 原有的
 有序 multi-dispatch sequence。`adjoint=True` 录制显式 adjoint Graph；legacy 方阵形式
-不会推断 adjoint。含 indirect dispatch 的 compiled-Graph、stored sparse、block-diagonal
-composition 与其它不支持的 provider 会明确失败，不会 materialize operator 或插入隐藏
-的 apply fallback。provider recording 协议本身不是公开的自定义 native callback API。
+不会推断 adjoint。含 indirect dispatch 的 compiled-Graph、stored sparse 与其它不支持的
+provider 会明确失败，不会 materialize operator 或插入隐藏的 apply fallback。block-diagonal
+录制只覆盖 leaf 可录制的固定连续布局；permutation、overlap 与 non-affine view 仍不支持。
+provider recording 协议本身不是公开的自定义 native callback API。
 
 只录制一个 action 并不保证性能提升。它的主要价值是把多个 operator action 与相邻
 kernel 组合为更大的 Graph region，以摊销固定提交成本。应用应测量完整组合 workload，
@@ -430,8 +434,11 @@ operator 直接持有；更新不再分配或上传虚拟 device parameter array
 公开 `identity()` 仍只支持 CPU。通用 `block_diagonal()` 还支持 CUDA/Vulkan f32 standalone
 apply，但要求每个 leaf 都提供经过资格验证的 direct affine dense storage。leaf 按顺序直接
 绑定连续 domain/range subview，不执行 gather、scatter、全向量 staging 或 N-sized temporary。
-permutation、overlap 或不具备资格的 layout 会明确失败；block container 本身暂不作为公开
-Graph action。GPU f64 composition 仍不支持。
+当所有 leaf 都可录制时，同一 fixed-layout container 也是公开 Graph action，并可直接作为
+SolvePlan operator 或 fixed-linear preconditioner。private subview 每次外层 submission 只派生
+一次，因此多迭代 SolvePlan 可摊销绑定成本，同时保持单 ticket 且不产生 block-sized scratch。
+这是 dispatch composition，不是 kernel fusion。permutation、overlap、non-affine 或不具备
+recordable 资格的 layout 会明确失败。GPU f64 composition 仍不支持。
 
 `inverse_block_diagonal()` 是面向常见物理布局的 recordable fixed-linear preconditioner
 helper。调用方提供已经求逆、row-major 的 f32 block，并必须声明 `assume_spd=True`；Forge

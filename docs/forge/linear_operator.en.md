@@ -319,23 +319,29 @@ Topology, schema, state-tree, or runtime-generation changes still fail closed
 and require a new Graph.
 
 This recordable contract applies to compiled-kernel providers,
-direct-dispatch compiled-Graph providers, and f32 scale/shift/sum/compose/adjoint
-trees whose leaves are recordable. Composition is lowered recursively while
-preserving child dispatch order. Ordered scale/sum subtrees are normalized to
-weighted leaves: a two-leaf weighted sum uses the two provider actions plus
-one in-place `axpby`, and larger sums reuse one scratch vector. `compose`
-keeps its operator boundary and ordered intermediate. These paths allocate
-typed f32 temporary vectors from the Graph-owned bounded arena, so scratch
-does not become a public runtime argument and concurrent submissions receive
-independent arena lanes. The memory report exposes the planned and persistent
-temporary bytes.
+direct-dispatch compiled-Graph providers, fixed-layout `block_diagonal()`
+containers, and f32 scale/shift/sum/compose/adjoint trees whose leaves are
+recordable. Composition is lowered recursively while preserving child dispatch
+order. A block container derives consecutive domain/range subviews from its
+two public vector bindings at submission; these private views do not become
+caller arguments, do not stage or allocate storage, and remain valid when the
+container is nested inside another recordable composition. Ordered scale/sum
+subtrees are normalized to weighted leaves: a two-leaf weighted sum uses the
+two provider actions plus one in-place `axpby`, and larger sums reuse one
+scratch vector. `compose` keeps its operator boundary and ordered intermediate.
+Paths that need scratch allocate typed f32 temporary vectors from the
+Graph-owned bounded arena, so scratch does not become a public runtime argument
+and concurrent submissions receive independent arena lanes. The memory report
+exposes the planned and persistent temporary bytes.
 Both the generic rectangular or explicit-adjoint form and the legacy square
 forward-only form preserve the compiled Graph's ordered multi-dispatch
 sequence. `adjoint=True` records the explicit adjoint Graph; the legacy square
 form does not infer one. Compiled-Graph providers containing indirect
-dispatch, stored sparse providers, block-diagonal compositions, and other
-unsupported providers fail explicitly instead of materializing an operator or
-inserting a hidden apply fallback. The provider recording protocol itself is
+dispatch, stored sparse providers, and other unsupported providers fail
+explicitly instead of materializing an operator or inserting a hidden apply
+fallback. Block-diagonal recording is limited to
+fixed, consecutive layouts with recordable leaves; permutation, overlap, and
+non-affine views remain unsupported. The provider recording protocol itself is
 not a public custom-native callback API.
 
 Recording one action does not by itself guarantee a speedup. The main use is
@@ -508,9 +514,13 @@ Public `identity()` remains CPU-only. General `block_diagonal()` additionally
 supports f32 CUDA/Vulkan standalone apply when every leaf exposes qualified
 direct affine dense storage. Leaves bind consecutive domain/range subviews and
 run in order without gather, scatter, full-vector staging, or an N-sized
-temporary. Permuted, overlapping, or non-recordable layouts fail explicitly;
-the block container itself is not a public Graph action. GPU f64 composition
-also remains unsupported.
+temporary. When every leaf is recordable, the same fixed-layout container is a
+public Graph action and may be used directly as a SolvePlan operator or
+fixed-linear preconditioner. Its private subviews are derived once per outer
+submission, so a multi-iteration SolvePlan amortizes that binding work while
+keeping one ticket and zero block-sized scratch. This is dispatch composition,
+not kernel fusion. Permuted, overlapping, non-affine, or non-recordable layouts
+fail explicitly. GPU f64 composition also remains unsupported.
 
 `inverse_block_diagonal()` is the recordable fixed-linear preconditioner
 helper for common physics layouts. The caller supplies already inverted,

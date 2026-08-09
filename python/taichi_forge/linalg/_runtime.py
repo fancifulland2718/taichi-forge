@@ -42,6 +42,7 @@ from taichi_forge.lang.matrix import MatrixField
 from taichi_forge.lang._storage_view import (
     DenseNdarrayView,
     _flatten_storage_to_scalar_vector,
+    _slice_storage_description,
     analyze_storage_alias,
     describe_storage,
 )
@@ -1864,6 +1865,8 @@ class LinearOperator:
             return spec[2]._supports_graph_action()
         if spec[0] == "parameterized_affine":
             return spec[2]._supports_graph_action() and (bool(spec[4]) or spec[3]._supports_graph_action())
+        if spec[0] == "block_diagonal":
+            return all(block._supports_graph_action() for block in spec[1])
         return all(operand._supports_graph_action() for operand in spec[1:] if isinstance(operand, LinearOperator))
 
     def statistics(self):
@@ -2278,12 +2281,14 @@ class _LinearOperatorCompositionGraphAction(DispatchGraphAction):
         fixed_bindings,
         temporary_bindings,
         temporary_requirements,
+        allow_unused_public_bindings=False,
     ):
         super().__init__(
             dispatches,
             backends=("cpu", "cuda", "vulkan"),
             conditional_body_safe=True,
             fixed_bindings=fixed_bindings,
+            allow_unused_public_bindings=allow_unused_public_bindings,
             update_policy="rebind",
             synchronization_domain="runtime_ordered",
         )
@@ -2375,6 +2380,9 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
         reads_output_before_final_write = False
         self._parameter_state = None
         self._parameter_fixed_names = None
+        self._block_bindings = ()
+        self._block_graph_binding_views = {}
+        derived_runtime_bindings = []
 
         def append_child(child_operator, child_input, child_output, child_adjoint):
             child = child_operator.graph_action(
@@ -2389,6 +2397,9 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
             dispatches.extend(action.dispatches)
             requirements.extend(child.temporary_requirements)
             temporary_bindings.update(action.temporary_bindings)
+            derived_runtime_bindings.extend(
+                child.derived_runtime_arg_schema
+            )
 
         def temporary_arg(extent, suffix):
             symbol_name = f"{prefix}_{suffix}"
@@ -2527,7 +2538,66 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
                     )
                 )
 
-        if kind == "parameterized_affine":
+        if kind == "block_diagonal":
+            blocks = tuple(spec[1])
+            block_bindings = []
+            input_offset = 0
+            output_offset = 0
+            input_parent_extent = operator.shape[0 if adjoint else 1]
+            output_parent_extent = operator.shape[1 if adjoint else 0]
+            for index, block in enumerate(blocks):
+                input_extent = block.shape[0 if adjoint else 1]
+                output_extent = block.shape[1 if adjoint else 0]
+                block_input_name = f"{prefix}_block_{index}_input"
+                block_output_name = f"{prefix}_block_{index}_output"
+                block_input_arg = Arg(
+                    ArgKind.NDARRAY, block_input_name, f32, ndim=1
+                )
+                block_output_arg = Arg(
+                    ArgKind.NDARRAY, block_output_name, f32, ndim=1
+                )
+                append_child(
+                    block,
+                    block_input_arg,
+                    block_output_arg,
+                    adjoint,
+                )
+                derived_runtime_bindings.extend(
+                    (
+                        RuntimeBinding(block_input_name, "dense_vector"),
+                        RuntimeBinding(block_output_name, "dense_vector"),
+                    )
+                )
+                block_bindings.extend(
+                    (
+                        (
+                            block_input_name,
+                            self._input_name,
+                            input_parent_extent,
+                            input_offset,
+                            input_extent,
+                        ),
+                        (
+                            block_output_name,
+                            self._output_name,
+                            output_parent_extent,
+                            output_offset,
+                            output_extent,
+                        ),
+                    )
+                )
+                input_offset += input_extent
+                output_offset += output_extent
+            if (
+                input_offset != input_parent_extent
+                or output_offset != output_parent_extent
+            ):
+                raise TaichiRuntimeError(
+                    "fixed-layout block operator extents do not cover the "
+                    "parent spaces"
+                )
+            self._block_bindings = tuple(block_bindings)
+        elif kind == "parameterized_affine":
             state, left, right, identity_shift = (
                 spec[1],
                 spec[2],
@@ -2680,10 +2750,14 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
             fixed_bindings=fixed,
             temporary_bindings=temporary_bindings,
             temporary_requirements=self._temporary_requirements,
+            allow_unused_public_bindings=bool(derived_runtime_bindings),
         )
         self._runtime_arg_schema = (
             RuntimeBinding(self._input_name, "dense_vector"),
             RuntimeBinding(self._output_name, "dense_vector"),
+        )
+        self._derived_runtime_arg_schema = tuple(
+            derived_runtime_bindings
         )
         state_effects = []
         seen_effects = set()
@@ -2722,6 +2796,10 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
         return self._runtime_arg_schema
 
     @property
+    def derived_runtime_arg_schema(self):
+        return self._derived_runtime_arg_schema
+
+    @property
     def resource_effects(self):
         return self._resource_effects
 
@@ -2757,6 +2835,8 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
             "temporary_bytes": sum(item.bytes for item in self._temporary_requirements),
             "composition_chain_length": self._composition_chain_length,
             "reuses_composition_temporary": self._reuses_composition_temporary,
+            "block_count": len(self._block_bindings) // 2,
+            "zero_copy_block_subviews": bool(self._block_bindings),
         }
 
     def validate_graph_lifetime(self):
@@ -2793,8 +2873,37 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
             )
             if view is not None:
                 replacements[name] = view
+        replacements.update(self._bind_block_subviews(runtime_args))
+        augmented_runtime_args = dict(runtime_args)
+        augmented_runtime_args.update(replacements)
+        submission_owners = list(prepared.submission_owners)
+        owner_ids = {id(owner) for owner in submission_owners}
+        for child in self._children:
+            derived_names = {
+                binding.name
+                for binding in child.derived_runtime_arg_schema
+            }
+            if not derived_names:
+                continue
+            child_prepared = child.bind_graph_arguments(
+                augmented_runtime_args
+            )
+            for name in derived_names:
+                if name not in child_prepared.replacements:
+                    raise TaichiRuntimeError(
+                        "LinearOperator composition child did not bind "
+                        f"derived Graph argument {name!r}"
+                    )
+                value = child_prepared.replacements[name]
+                replacements[name] = value
+                augmented_runtime_args[name] = value
+            for owner in child_prepared.submission_owners:
+                identity = id(owner)
+                if identity not in owner_ids:
+                    owner_ids.add(identity)
+                    submission_owners.append(owner)
         return PreparedGraphBindings(
-            replacements, prepared.submission_owners
+            replacements, tuple(submission_owners)
         )
 
     def _bind_provider_generation(self):
@@ -2822,6 +2931,39 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
             replacements[beta_name] = float(beta)
             submission_owners.append(generation)
         return PreparedGraphBindings(replacements, tuple(submission_owners))
+
+    def _bind_block_subviews(self, runtime_args):
+        replacements = {}
+        for name, parent_name, parent_extent, offset, extent in self._block_bindings:
+            value = runtime_args[parent_name]
+            cached = self._block_graph_binding_views.get(name)
+            if (
+                cached is not None
+                and cached[0] is value
+                and cached[1] == offset
+                and cached[2] == extent
+            ):
+                replacements[name] = cached[3]
+                continue
+            description, _ = _cached_graph_dense_vector_binding(
+                self._graph_binding_views,
+                parent_name,
+                value,
+                parent_extent,
+            )
+            sliced = _slice_storage_description(
+                description,
+                (slice(offset, offset + extent),),
+            )
+            view = DenseNdarrayView(value, sliced)
+            self._block_graph_binding_views[name] = (
+                value,
+                offset,
+                extent,
+                view,
+            )
+            replacements[name] = view
+        return replacements
 
     def validate_graph_bindings(self, runtime_args):
         expected = (
@@ -3217,7 +3359,10 @@ def block_diagonal(blocks: Sequence[LinearOperator]):
         [block._handle for block in blocks]
     )
     return LinearOperator._from_handle(
-        handle, provider_kind="composition", retained=blocks
+        handle,
+        provider_kind="composition",
+        retained=blocks,
+        composition_spec=("block_diagonal", blocks),
     )
 
 

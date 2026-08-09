@@ -4515,6 +4515,11 @@ class _CompiledCGraphNode:
         self.temporary_runtime_arg_names = frozenset().union(
             *(frozenset(action.temporary_bindings) for action in self.temporary_actions)
         )
+        self.derived_runtime_arg_names = frozenset(
+            binding.name
+            for manifest in self.native_action_manifests
+            for binding in manifest.derived_runtime_bindings
+        )
         if not self.fixed_runtime_args.keys() <= self.recording_runtime_arg_names:
             raise TaichiRuntimeError(
                 "CGraph fixed bindings must be declared runtime arguments"
@@ -4523,12 +4528,20 @@ class _CompiledCGraphNode:
             raise TaichiRuntimeError(
                 "CGraph temporary bindings must be declared runtime arguments"
             )
+        if not self.derived_runtime_arg_names <= self.recording_runtime_arg_names:
+            raise TaichiRuntimeError(
+                "CGraph derived bindings must be declared runtime arguments"
+            )
         if self.fixed_runtime_args.keys() & self.temporary_runtime_arg_names:
             raise TaichiRuntimeError(
                 "CGraph fixed and temporary bindings must be disjoint"
             )
         self.runtime_arg_names = self.recording_runtime_arg_names.difference(
-            (*self.fixed_runtime_args, *self.temporary_runtime_arg_names)
+            (
+                *self.fixed_runtime_args,
+                *self.temporary_runtime_arg_names,
+                *self.derived_runtime_arg_names,
+            )
         )
         self.recording_dispatches = tuple(
             (kernel, tuple(args)) for kernel, args in recording_dispatches
@@ -4616,11 +4629,19 @@ class _CompiledNativeGraphNode:
         self.native_action_manifests = (self.action_manifest,)
         self.ir_node = executable.graph_ir_node
         schema = self.action_manifest.runtime_bindings
+        derived_schema = self.action_manifest.derived_runtime_bindings
         if any(not binding.required for binding in schema):
             raise TaichiRuntimeError(
                 "Optional native Graph runtime arguments are not supported"
             )
+        if any(not binding.required for binding in derived_schema):
+            raise TaichiRuntimeError(
+                "Optional native Graph derived arguments are not supported"
+            )
         public_runtime_arg_names = frozenset(binding.name for binding in schema)
+        self.derived_runtime_arg_names = frozenset(
+            binding.name for binding in derived_schema
+        )
         self.temporary_names = frozenset(
             requirement.name for requirement in self.action_manifest.temporaries
         )
@@ -4665,16 +4686,27 @@ class _CompiledNativeGraphNode:
                 "arguments: " + ", ".join(sorted(overlap))
             )
         private_overlap = self.temporary_runtime_arg_names & (
-            public_runtime_arg_names | self.fixed_runtime_args.keys()
+            public_runtime_arg_names
+            | self.derived_runtime_arg_names
+            | self.fixed_runtime_args.keys()
         )
         if private_overlap:
             raise TaichiRuntimeError(
                 "Recordable action temporary symbols overlap public or fixed "
                 "arguments: " + ", ".join(sorted(private_overlap))
             )
+        derived_overlap = self.derived_runtime_arg_names & (
+            public_runtime_arg_names | self.fixed_runtime_args.keys()
+        )
+        if derived_overlap:
+            raise TaichiRuntimeError(
+                "Recordable action derived bindings overlap public or fixed "
+                "arguments: " + ", ".join(sorted(derived_overlap))
+            )
         self.recording_runtime_arg_names = frozenset(
             (
                 *public_runtime_arg_names,
+                *self.derived_runtime_arg_names,
                 *self.fixed_runtime_args.keys(),
                 *self.temporary_runtime_arg_names,
             )
@@ -4693,7 +4725,10 @@ class _CompiledNativeGraphNode:
                 )
             )
             required_private_names = frozenset(
-                (*self.fixed_runtime_args, *self.temporary_runtime_arg_names)
+                (
+                    *self.fixed_runtime_args,
+                    *self.temporary_runtime_arg_names,
+                )
             )
             complete = recorder_names == self.recording_runtime_arg_names
             valid_subset = (
@@ -4704,7 +4739,7 @@ class _CompiledNativeGraphNode:
             if not complete and not valid_subset:
                 raise TaichiRuntimeError(
                     "Recordable action dispatch arguments must match its "
-                    "public and fixed bindings"
+                    "public, derived, and fixed bindings"
                 )
 
     def run(self, context, temporaries=None):
@@ -5237,8 +5272,15 @@ class _CompiledSequentialRegionNode:
                 for node in self.nodes
             )
         )
+        self.derived_runtime_arg_names = _merge_derived_runtime_arg_names(
+            self.nodes
+        )
         self.runtime_arg_names = self.recording_runtime_arg_names.difference(
-            (*self.fixed_runtime_args, *self.temporary_runtime_arg_names)
+            (
+                *self.fixed_runtime_args,
+                *self.temporary_runtime_arg_names,
+                *self.derived_runtime_arg_names,
+            )
         )
         lifetime_leases = []
         seen_lifetime_leases = set()
@@ -5863,8 +5905,15 @@ class _CompiledWhileGraphNode:
         self.recording_runtime_arg_names = frozenset().union(
             *(node.recording_runtime_arg_names for node in dependency_nodes)
         )
+        self.derived_runtime_arg_names = _merge_derived_runtime_arg_names(
+            dependency_nodes
+        )
         self.runtime_arg_names = self.recording_runtime_arg_names.difference(
-            (*self.fixed_runtime_args, *self.temporary_runtime_arg_names)
+            (
+                *self.fixed_runtime_args,
+                *self.temporary_runtime_arg_names,
+                *self.derived_runtime_arg_names,
+            )
         )
         active_sequences = (
             (condition,) if self.max_iterations == 0 else (condition, body)
@@ -7140,8 +7189,13 @@ class _CompiledIfGraphNode:
         self.recording_runtime_arg_names = frozenset().union(
             *(node.recording_runtime_arg_names for node in nodes)
         )
+        self.derived_runtime_arg_names = _merge_derived_runtime_arg_names(nodes)
         self.runtime_arg_names = self.recording_runtime_arg_names.difference(
-            (*self.fixed_runtime_args, *self.temporary_runtime_arg_names)
+            (
+                *self.fixed_runtime_args,
+                *self.temporary_runtime_arg_names,
+                *self.derived_runtime_arg_names,
+            )
         )
         sequences = tuple(
             region
@@ -7535,8 +7589,13 @@ class _CompiledSwitchGraphNode:
         self.recording_runtime_arg_names = frozenset().union(
             *(node.recording_runtime_arg_names for node in nodes)
         )
+        self.derived_runtime_arg_names = _merge_derived_runtime_arg_names(nodes)
         self.runtime_arg_names = self.recording_runtime_arg_names.difference(
-            (*self.fixed_runtime_args, *self.temporary_runtime_arg_names)
+            (
+                *self.fixed_runtime_args,
+                *self.temporary_runtime_arg_names,
+                *self.derived_runtime_arg_names,
+            )
         )
         sequences = (condition, *branches)
         if default_region is not None:
@@ -8123,6 +8182,15 @@ def _pipeline_bounded_dispatches(node, tasks, dispatch_count):
     return tuple(result)
 
 
+def _merge_derived_runtime_arg_names(nodes):
+    return frozenset().union(
+        *(
+            getattr(node, "derived_runtime_arg_names", frozenset())
+            for node in nodes
+        )
+    )
+
+
 def _graph_pipeline_definition(nodes):
     stages = []
     for index, node in enumerate(nodes):
@@ -8564,6 +8632,12 @@ class _GraphSpec:
                     seen_lifetime_leases.add(identity)
                     lifetime_leases.append(lease)
         self.lifetime_leases = tuple(lifetime_leases)
+        self.derived_runtime_arg_names = frozenset().union(
+            *(
+                getattr(node, "derived_runtime_arg_names", frozenset())
+                for node in self.nodes
+            )
+        )
         all_runtime_arg_names = frozenset().union(
             *(
                 getattr(
@@ -8575,7 +8649,11 @@ class _GraphSpec:
             )
         )
         self.runtime_arg_names = all_runtime_arg_names.difference(
-            (*self.fixed_runtime_args, *self.temporary_runtime_arg_names)
+            (
+                *self.fixed_runtime_args,
+                *self.temporary_runtime_arg_names,
+                *self.derived_runtime_arg_names,
+            )
         )
         self.snode_tree_dependencies = frozenset().union(
             *(n.snode_tree_dependencies for n in self.nodes)
@@ -8670,8 +8748,10 @@ class _GraphSpec:
             if bound is args:
                 bound = dict(args)
             for name, value in replacements.items():
-                if name not in self.runtime_arg_names and name not in (
-                    fixed_runtime_args or {}
+                if (
+                    name not in self.runtime_arg_names
+                    and name not in self.derived_runtime_arg_names
+                    and name not in (fixed_runtime_args or {})
                 ):
                     raise TaichiRuntimeError(
                         f"Graph provider attempted to bind unknown argument {name!r}"
@@ -8696,6 +8776,12 @@ class _GraphSpec:
                     value = bound[name]
                 bound[name] = value
                 binding_owners[name] = lease
+        missing_derived = self.derived_runtime_arg_names.difference(bound)
+        if missing_derived:
+            raise TaichiRuntimeError(
+                "Graph provider did not bind derived arguments: "
+                + ", ".join(sorted(missing_derived))
+            )
         temporary_args = self.bind_temporary_args(temporaries)
         if temporary_args:
             if bound is args:
@@ -10069,6 +10155,7 @@ class Sequential:
         self._ir_nodes = []
         self._runtime_arg_names = set()
         self._recording_runtime_arg_names = set()
+        self._derived_runtime_arg_names = set()
         self._fixed_runtime_args = {}
         self._lifetime_leases = []
         self._source_native_count = 0
@@ -10292,6 +10379,9 @@ class Sequential:
         self._ir_nodes.append(compiled.ir_node)
         self._runtime_arg_names.update(compiled.runtime_arg_names)
         self._recording_runtime_arg_names.update(compiled.recording_runtime_arg_names)
+        self._derived_runtime_arg_names.update(
+            compiled.derived_runtime_arg_names
+        )
         self._lifetime_leases.extend(compiled.lifetime_leases)
         self._temporary_actions.extend(compiled.temporary_actions)
         self._source_native_count += compiled.source_native_count
@@ -10319,7 +10409,10 @@ class Sequential:
                 "Structured native Graph runtime bindings must be unique"
             )
         public_names = sequence._recording_runtime_arg_names.difference(
-            sequence._fixed_runtime_args
+            (
+                *sequence._fixed_runtime_args,
+                *sequence._derived_runtime_arg_names,
+            )
         )
         if public_names != schema_names:
             missing = sorted(schema_names.difference(public_names))
@@ -10351,6 +10444,9 @@ class Sequential:
         self._runtime_arg_names.update(sequence._runtime_arg_names)
         self._recording_runtime_arg_names.update(
             sequence._recording_runtime_arg_names
+        )
+        self._derived_runtime_arg_names.update(
+            sequence._derived_runtime_arg_names
         )
         self._lifetime_leases.extend(sequence._lifetime_leases)
         self._lifetime_leases.append(executable)
@@ -10400,6 +10496,9 @@ class Sequential:
                 view._recording_runtime_arg_names.update(
                     compiled.recording_runtime_arg_names
                 )
+                view._derived_runtime_arg_names.update(
+                    compiled.derived_runtime_arg_names
+                )
                 view._lifetime_leases.extend(compiled.lifetime_leases)
                 view._temporary_actions.extend(compiled.temporary_actions)
                 view._source_native_count += compiled.source_native_count
@@ -10431,6 +10530,7 @@ class Sequential:
         self._ir_nodes.append(node.ir_node)
         self._runtime_arg_names.update(node.runtime_arg_names)
         self._recording_runtime_arg_names.update(node.recording_runtime_arg_names)
+        self._derived_runtime_arg_names.update(node.derived_runtime_arg_names)
         self._lifetime_leases.extend(node.lifetime_leases)
         self._temporary_actions.extend(node.temporary_actions)
         self._source_native_count += node.source_native_count

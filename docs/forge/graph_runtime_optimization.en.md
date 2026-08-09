@@ -349,7 +349,8 @@ not allocate telemetry storage or enqueue these snapshot kernels.
 The same opt-in telemetry owns a `GraphPipelineReport` selected from the
 post-optimization execution root. It preserves coalesced CGraph/native stage
 boundaries and immutable `NativeActionManifest` values for provider-declared
-symbolic effects, bindings, temporaries, and backend eligibility. The report
+symbolic effects, public and provider-derived private bindings, temporaries,
+and backend eligibility. The report
 never exposes storage objects or addresses. Stage dispatch counts are static
 compiled counts; provider temporary bytes are declarations rather than an
 allocation peak. Structured-region timestamps are attached only where the
