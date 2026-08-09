@@ -2,6 +2,10 @@ import numpy as np
 
 import taichi_forge as ti
 from taichi_forge.examples.simulation.implicit_mass_spring import Cloth
+from taichi_forge.examples.simulation.implicit_linear_operator import (
+    ImplicitSpringChain,
+)
+from taichi_forge.lang import impl
 from tests import test_utils
 
 
@@ -69,3 +73,33 @@ def test_implicit_mass_spring_reuses_fixed_symbolic_pattern():
     assert cloth.solver_pattern_analyzed
     assert np.all(np.isfinite(positions))
     assert np.linalg.norm(positions - initial_positions) > 0.0
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_implicit_linear_operator_rebinds_coefficients_and_reuses_solve_plan():
+    simulation = ImplicitSpringChain(node_count=24)
+    initial_displacement = simulation.displacement.to_numpy()
+    results = [simulation.step() for _ in range(4)]
+
+    assert all(result.converged for result in results)
+    assert all(0 < result.iterations <= 96 for result in results)
+    assert simulation.operator_numeric_version == 4
+    assert simulation.preconditioner_numeric_version == 4
+    displacement = simulation.displacement.to_numpy()
+    assert np.all(np.isfinite(displacement))
+    assert np.linalg.norm(displacement - initial_displacement) > 0.0
+
+    lifecycle = simulation.preconditioner.statistics()
+    assert lifecycle["setup_calls"] == 1
+    assert lifecycle["update_successes"] == 3
+    assert lifecycle["stale_rejections"] == 0
+    stats = simulation.solve_plan.statistics()
+    if impl.current_cfg().arch in (ti.cuda, ti.vulkan):
+        assert stats["submission"]["execution_path"] == "cached_graph_submission"
+        assert stats["submission"]["graphs_materialized"] == 1
+        assert stats["vector_io"]["pack_calls"] == 0
+        assert stats["vector_io"]["unpack_calls"] == 0
+    else:
+        assert stats["operations"]["operator_plan_invalidations"] == 0
+        assert stats["operations"]["workspace_builds"] == 1
+        assert stats["operations"]["workspace_reuses"] == 3
