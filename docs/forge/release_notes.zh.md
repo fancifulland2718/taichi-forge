@@ -162,7 +162,12 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
   singular 的逐 block status 留在 device，并把失败输出清零且不推断 SPD。对 16,384 个 4x4
   identity block，本地 device build 与 host readback/NumPy inverse/upload 分别为：CPU
   0.824/5.175 ms、CUDA 0.410/6.195 ms、Vulkan 0.722/7.667 ms。三后端 1,000 次复用压力
-  测试保持调用方提供的 output/status allocation 不变。
+  测试保持调用方提供的 output/status allocation 不变。implicit spring 参考路径现在会在
+  device 上完成 coefficient 组装、inverse 构造和 status 保留，再发布 preconditioner
+  generation。本地 2,304 节点、30 步端到端资格中，device refresh 与原 host 组装路径分别为：
+  CPU 9.282/8.966 ms、CUDA 6.240/6.527 ms、Vulkan 10.017/13.130 ms；三端逻辑 PCG
+  迭代均为 6，失败 block 为 0。CPU 只保留一个较小的实测开销，GPU 则消除了 host
+  round trip；该时间只代表当前 workload。
 
 ## 0.6.1
 

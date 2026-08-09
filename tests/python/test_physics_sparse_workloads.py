@@ -85,6 +85,20 @@ def test_implicit_linear_operator_rebinds_coefficients_and_reuses_solve_plan():
     assert all(0 < result.iterations <= 96 for result in results)
     assert simulation.operator_numeric_version == 4
     assert simulation.preconditioner_numeric_version == 4
+    assert np.all(simulation.inverse_status.to_numpy() == 0)
+    expected_operator, expected_blocks, _ = simulation._coefficients(3)
+    np.testing.assert_allclose(
+        simulation.operator_candidate.to_numpy(),
+        expected_operator,
+        rtol=2e-6,
+        atol=2e-6,
+    )
+    np.testing.assert_allclose(
+        simulation.inverse_blocks.to_numpy(),
+        np.linalg.inv(expected_blocks.reshape(-1, 2, 2)).reshape(-1),
+        rtol=2e-5,
+        atol=2e-5,
+    )
     displacement = simulation.displacement.to_numpy()
     assert np.all(np.isfinite(displacement))
     assert np.linalg.norm(displacement - initial_displacement) > 0.0

@@ -454,8 +454,9 @@ Forge 不自动读回 status，也不推断 SPD；调用方应按自身策略检
 
 [`implicit_linear_operator.py`](../../python/taichi_forge/examples/simulation/implicit_linear_operator.py)
 是一个 headless CPU/CUDA/Vulkan 参考路径。它保持 spring connectivity 不变，逐步发布新的
-A/M numeric generation，通过 `PreconditionerPlan.update()` 显式批准重建后的 2x2 inverse
-block action，并复用同一个 PCG `SolvePlan`：
+A/M numeric generation，在 device 上组装变化的 2x2 system block 及其 inverse，通过
+`PreconditionerPlan.update()` 显式批准重建后的 inverse-block action，并复用同一个 PCG
+`SolvePlan`：
 
 ```bash
 python -m taichi_forge.examples.simulation.implicit_linear_operator \
@@ -466,7 +467,8 @@ python -m taichi_forge.examples.simulation.implicit_linear_operator \
 Vector Field 的边界处理位于已录制 action 内，不产生独立 pack/unpack submission。CPU 使用
 文档所述的同步 completed-ticket 路径。`result()` 是唯一 terminal materialization 点，报告的
 iteration 是逻辑早停位置；Vulkan 还可能编码有界 masked tail，该部分通过 opt-in telemetry
-可见，但不会被记作有效 solver work。
+可见，但不会被记作有效 solver work。逐 block inverse status 在时间步内始终留在 device，
+仅由示例末尾的资格报告读取一次。
 
 ## SolvePlan 与 SolveResult
 

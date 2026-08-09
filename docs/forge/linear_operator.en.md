@@ -541,7 +541,8 @@ their policy requires it and make the independent `assume_spd` assertion.
 [`implicit_linear_operator.py`](../../python/taichi_forge/examples/simulation/implicit_linear_operator.py)
 is a headless CPU/CUDA/Vulkan reference for a time-varying implicit physics
 solve. It keeps spring connectivity fixed, publishes new A/M numeric
-generations, explicitly approves the rebuilt 2x2 inverse-block action through
+generations, assembles the changing 2x2 system blocks and their inverses on
+device, explicitly approves the rebuilt inverse-block action through
 `PreconditionerPlan.update()`, and reuses one PCG `SolvePlan`:
 
 ```bash
@@ -556,7 +557,8 @@ CPU uses the documented synchronous completed-ticket path. `result()` is the
 single terminal materialization point, and the reported iteration count is the
 logical early-stop position. Vulkan may additionally encode a bounded masked
 tail, visible through opt-in telemetry; it is not reported as useful solver
-work.
+work. Per-block inverse status remains device-resident throughout stepping and
+is read only once by the example's final qualification report.
 
 ## SolvePlan and SolveResult
 

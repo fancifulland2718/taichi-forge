@@ -214,7 +214,14 @@ grouped under the behavior they shipped.
   local device build versus host readback/NumPy inverse/upload measured
   0.824/5.175 ms on CPU, 0.410/6.195 ms on CUDA, and 0.722/7.667 ms on Vulkan.
   A 1,000-build reuse stress on all three backends retained the same caller-
-  owned output/status allocations.
+  owned output/status allocations. The implicit spring reference now keeps
+  coefficient assembly, inverse construction, and status on device before
+  publishing the preconditioner generation. In a local 2,304-node, 30-step
+  end-to-end qualification, device refresh versus the prior host assembly path
+  measured 9.282/8.966 ms on CPU, 6.240/6.527 ms on CUDA, and 10.017/13.130 ms
+  on Vulkan, with the same six logical PCG iterations and zero failed blocks.
+  CPU therefore keeps only a small measured overhead while the GPU paths avoid
+  the host round trip; these timings are workload-specific.
 
 ## 0.6.1
 

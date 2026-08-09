@@ -83,11 +83,22 @@ class ImplicitSpringChain:
         topology.from_numpy(topology_host)
         self.topology = topology
 
-        operator_values, inverse_blocks, edge_values = self._coefficients(0)
+        operator_values, system_blocks, edge_values = self._coefficients(0)
         self.operator_numeric = ti.ndarray(ti.f32, shape=operator_values.size)
         self.operator_numeric.from_numpy(operator_values)
-        self.inverse_blocks = ti.ndarray(ti.f32, shape=inverse_blocks.size)
-        self.inverse_blocks.from_numpy(inverse_blocks)
+        self.operator_candidate = ti.ndarray(ti.f32, shape=operator_values.size)
+        self.system_blocks = ti.ndarray(ti.f32, shape=system_blocks.size)
+        self.system_blocks.from_numpy(system_blocks)
+        self.inverse_blocks = ti.ndarray(ti.f32, shape=system_blocks.size)
+        self.inverse_status = ti.ndarray(ti.i32, shape=self.node_count)
+        self.inverse_builder = ti.linalg.SmallBlockInverseBuilder(
+            2, self.node_count
+        )
+        self.inverse_builder.build(
+            self.system_blocks,
+            out=self.inverse_blocks,
+            status=self.inverse_status,
+        )
         self.edge_stiffness.from_numpy(edge_values)
 
         traits = ti.linalg.OperatorTraits.spd()
@@ -140,35 +151,81 @@ class ImplicitSpringChain:
         diagonal = self.mass_values.copy()
         diagonal[:-1] += scaled_edges
         diagonal[1:] += scaled_edges
-        inverse_blocks = np.zeros(
+        system_blocks = np.zeros(
             (self.node_count, 2, 2), dtype=np.float32
         )
-        inverse_blocks[:, 0, 0] = 1.0 / diagonal
-        inverse_blocks[:, 1, 1] = 1.0 / diagonal
-        return operator_values, inverse_blocks.reshape(-1), edge_values
+        system_blocks[:, 0, 0] = diagonal
+        system_blocks[:, 1, 1] = diagonal
+        return operator_values, system_blocks.reshape(-1), edge_values
+
+    @ti.kernel
+    def assemble_numeric_generation(
+        self,
+        step: ti.i32,
+        node_mass: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        edge_stiffness: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        operator_numeric: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        system_blocks: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        scale = 1.0 + 0.2 * ti.sin(0.075 * ti.cast(step, ti.f32))
+        dt_squared = self.dt * self.dt
+        for node in range(self.node_count):
+            diagonal = node_mass[node]
+            if node > 0:
+                edge = node - 1
+                weight = scale * (
+                    700.0
+                    + 120.0 * ti.cast(edge % 5, ti.f32) / 4.0
+                )
+                diagonal += dt_squared * weight
+            if node < self.edge_count:
+                weight = scale * (
+                    700.0
+                    + 120.0 * ti.cast(node % 5, ti.f32) / 4.0
+                )
+                diagonal += dt_squared * weight
+            operator_numeric[node] = node_mass[node]
+            block = 4 * node
+            system_blocks[block] = diagonal
+            system_blocks[block + 1] = 0.0
+            system_blocks[block + 2] = 0.0
+            system_blocks[block + 3] = diagonal
+        for edge in range(self.edge_count):
+            weight = scale * (
+                700.0
+                + 120.0 * ti.cast(edge % 5, ti.f32) / 4.0
+            )
+            edge_stiffness[edge] = weight
+            operator_numeric[self.node_count + edge] = (
+                dt_squared * weight
+            )
 
     def _publish_coefficients(self, step):
-        operator_values, inverse_blocks, edge_values = self._coefficients(step)
-        next_operator = ti.ndarray(ti.f32, shape=operator_values.size)
-        next_operator.from_numpy(operator_values)
-        next_inverse = ti.ndarray(ti.f32, shape=inverse_blocks.size)
-        next_inverse.from_numpy(inverse_blocks)
-        self.edge_stiffness.from_numpy(edge_values)
+        self.assemble_numeric_generation(
+            step,
+            self.node_mass,
+            self.edge_stiffness,
+            self.operator_candidate,
+            self.system_blocks,
+        )
+        self.inverse_builder.build(
+            self.system_blocks,
+            out=self.inverse_blocks,
+            status=self.inverse_status,
+        )
         self.operator.update_numeric(
-            next_operator,
+            self.operator_candidate,
             expected_topology_version=1,
             expected_numeric_version=self.operator_numeric_version,
         )
         self.inverse.update_numeric(
-            next_inverse,
+            self.inverse_blocks,
             expected_topology_version=1,
             expected_numeric_version=self.preconditioner_numeric_version,
         )
         self.operator_numeric_version += 1
         self.preconditioner_numeric_version += 1
         self.preconditioner.update()
-        self.operator_numeric = next_operator
-        self.inverse_blocks = next_inverse
 
     @ti.kernel
     def initialize_state(self):
@@ -245,13 +302,19 @@ def main():
         result = simulation.step(telemetry=args.telemetry)
         iterations.append(result.iterations)
     displacement = simulation.displacement.to_numpy()
+    failed_inverse_blocks = int(
+        np.count_nonzero(simulation.inverse_status.to_numpy())
+    )
     print(
         f"arch={args.arch} steps={args.steps} "
         f"iterations=[{min(iterations)}, {max(iterations)}] "
         f"residual={result.residual_norm:.3e} "
         f"termination={result.termination_reason} "
         f"max_displacement={np.linalg.norm(displacement, axis=1).max():.6f} "
-        f"operator_generation={simulation.operator_numeric_version}"
+        f"operator_generation={simulation.operator_numeric_version} "
+        f"preconditioner_generation="
+        f"{simulation.preconditioner_numeric_version} "
+        f"inverse_status_nonzero={failed_inverse_blocks}"
     )
     if args.telemetry:
         telemetry = simulation.last_submission_telemetry
