@@ -494,6 +494,10 @@ boundary-staging behavior.
 `parameterized_affine()` publishes alpha and beta as one immutable generation.
 The mandatory closed coefficient ranges are also the trait-proof boundary:
 SPD/PSD properties are retained only when they hold over the complete ranges.
+For an f32 operator, coefficients and range endpoints are first canonicalized
+to the values that the f32 kernels actually execute. An out-of-range finite
+Python value fails instead of becoming infinity, and a positive bound that
+rounds to zero cannot incorrectly preserve an SPD claim.
 An update uses optimistic `expected_version` validation, and cached Graph
 actions rebind the new two-scalar snapshot without rebuilding; in-flight
 submissions keep the exact old snapshot pinned.
@@ -521,7 +525,11 @@ single-system or batched PCG Graph consume a refreshed preconditioner safely.
 the device for fixed block sizes 1 through 4. It provides direct `build()` and
 one-dispatch `graph_action()` forms. Partial-pivot Gauss-Jordan
 elimination applies the requested nonnegative diagonal regularization and
-writes one device-resident status per block: 0 for success, 1 for non-finite
+writes a scale-relative pivot decision: `pivot_tolerance` is multiplied by the
+largest absolute regularized coefficient in the block. This keeps the status
+decision invariant when a block is uniformly rescaled. Controls that cannot be
+represented by the f32 kernel fail at construction. The builder writes one
+device-resident status per block: 0 for success, 1 for non-finite
 input, and 2 for a singular or ill-conditioned pivot. A failed block is zeroed.
 Forge does not read back status or infer SPD; callers must inspect status when
 their policy requires it and make the independent `assume_spd` assertion.
@@ -695,8 +703,9 @@ plan = ti.linalg.experimental.SolvePlan(
 `inverse_operator` maps the range of `operator` back to its domain and must
 have the same dtype. It must carry trusted self-adjoint, positive-definite,
 and nonsingular traits. CPU accepts any provider combination supported by
-the operator execution plan. CUDA and Vulkan require both the system
-operator and preconditioner to be compiled-kernel providers. Their topology
+the operator execution plan. CUDA and Vulkan accept the recordable
+compiled-kernel, compiled-Graph, or qualified composition combinations listed
+in the support matrix below. Their topology
 and numeric generations are pinned together for each solve; there is no
 host callback or backend fallback.
 

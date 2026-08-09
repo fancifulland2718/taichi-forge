@@ -22,14 +22,20 @@ def _build_inverse_block_f32(
     augmented = Matrix.zero(f32, block_size, block_size * 2)
     source_offset = block * static(block_size * block_size)
     state = 0
+    matrix_scale = 0.0
     for row, column in static(ndrange(block_size, block_size)):
         value = blocks[source_offset + row * block_size + column]
         if row == column:
             value += regularization
         if isnan(value) or isinf(value):
             state = 1
+        matrix_scale = max(matrix_scale, abs(value))
         augmented[row, column] = value
         augmented[row, block_size + column] = 1.0 if row == column else 0.0
+
+    if matrix_scale == 0.0 and state == 0:
+        state = 2
+    pivot_threshold = pivot_tolerance * matrix_scale
 
     for pivot in static(range(block_size)):
         selected = pivot
@@ -41,7 +47,7 @@ def _build_inverse_block_f32(
                 selected = candidate
         if isnan(magnitude) or isinf(magnitude):
             state = 1
-        elif magnitude <= pivot_tolerance and state == 0:
+        elif magnitude <= pivot_threshold and state == 0:
             state = 2
         if state == 0:
             for column in static(range(block_size * 2)):

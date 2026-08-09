@@ -421,6 +421,8 @@ vector 之间交替，因此 depth 2 以后 Graph temporary 始终只有一条 v
 `graph_action()` 时可直接绑定 compact Field；standalone 组合仍使用上文可复用的边界 staging。
 `parameterized_affine()` 会把 alpha 与 beta 作为一个 immutable generation 原子发布。构造时
 必须声明的系数闭区间同时也是 trait 证明边界：只有 SPD/PSD 在整个区间上都成立时才会保留。
+对于 f32 operator，系数和区间端点会先规范化为 f32 kernel 实际执行的值；超出 f32
+表示范围的有限 Python 值会明确失败，正下界若舍入为零也不会错误保留 SPD 结论。
 更新采用乐观 `expected_version` 检查；缓存 Graph action 会 rebind 新的二标量 snapshot 而不
 重建，in-flight submission 继续 pin 它实际提交的旧 snapshot。
 
@@ -440,8 +442,10 @@ values-only update 只复制 inverse values，并使用普通 immutable-generati
 
 `SmallBlockInverseBuilder` 可在 device 上构造上述 f32 row-major inverse block，固定 block
 size 为 1 到 4。它同时提供 direct `build()` 与单 dispatch `graph_action()`。带 partial pivot 的
-Gauss-Jordan 会应用调用方给出的非负对角 regularization，并为每个 block 写入 device-resident
-status：0 表示成功、1 表示输入非有限、2 表示 pivot 奇异或病态；失败 block 的输出为零。
+Gauss-Jordan 会应用调用方给出的非负对角 regularization；`pivot_tolerance` 会乘以
+regularized block 的最大绝对系数，因此 block 整体缩放不会改变状态判断。无法由 f32 kernel
+表示的控制值会在构造时失败。builder 为每个 block 写入 device-resident status：0 表示成功、
+1 表示输入非有限、2 表示 pivot 奇异或病态；失败 block 的输出为零。
 Forge 不自动读回 status，也不推断 SPD；调用方应按自身策略检查 status，并独立作出
 `assume_spd` 断言。
 
@@ -589,8 +593,9 @@ plan = ti.linalg.experimental.SolvePlan(
 
 `inverse_operator` 必须把 `operator` 的 range 映射回 domain，且 dtype 相同；它必须
 携带可信的 self-adjoint、positive-definite 与 nonsingular trait。CPU 接受 operator
-execution plan 支持的 provider 组合；CUDA/Vulkan 要求系统 operator 与 preconditioner
-都是 compiled-kernel provider。每次 solve 会成对 pin 它们的 topology 与 numeric
+execution plan 支持的 provider 组合；CUDA/Vulkan 接受下方支持矩阵列出的可录制
+compiled-kernel、compiled-Graph 或合格 composition 组合。每次 solve 会成对 pin 它们的
+topology 与 numeric
 generation，不调用 host callback，也不执行 backend fallback。
 
 ### MINRES

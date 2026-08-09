@@ -189,7 +189,9 @@ grouped under the behavior they shipped.
 - Added atomically updateable `parameterized_affine()` operators. Mandatory
   closed coefficient ranges bound conservative trait derivation, optimistic
   versions reject stale updates, and every submission pins one complete
-  alpha/beta generation. Cached Graphs patch two scalar bindings without
+  alpha/beta generation. f32 coefficients and range endpoints are canonicalized
+  before trait derivation, so unrepresentable values fail and a positive bound
+  that rounds to zero cannot preserve an invalid SPD claim. Cached Graphs patch two scalar bindings without
   rebuilding or reading a device parameter array. A local update-plus-run
   versus rebuild-plus-run qualification measured 1.561/3.923 ms on CPU,
   0.815/3.745 ms on CUDA, and 1.304/5.208 ms on Vulkan. After 1,020 published
@@ -205,7 +207,8 @@ grouped under the behavior they shipped.
   overlapping, non-affine, and recordable-container forms remain unsupported.
 - Added `SmallBlockInverseBuilder` for fixed f32 row-major blocks of size 1-4.
   Its direct and one-dispatch Graph forms run partial-pivot Gauss-Jordan
-  on device, leave per-block success/non-finite/singular status resident, and
+  on device with block-scale-relative pivot tolerance, leave per-block
+  success/non-finite/singular status resident, and
   zero failed outputs without inferring SPD. For 16,384 4x4 identity blocks,
   local device build versus host readback/NumPy inverse/upload measured
   0.824/5.175 ms on CPU, 0.410/6.195 ms on CUDA, and 0.722/7.667 ms on Vulkan.

@@ -69,3 +69,36 @@ def test_small_block_inverse_builder_status_and_regularization():
         rtol=2e-5,
         atol=2e-5,
     )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_small_block_inverse_builder_uses_scale_relative_pivot_tolerance():
+    matrices = np.asarray(
+        [
+            [[2.0e-12, 0.25e-12], [0.25e-12, 1.0e-12]],
+            [[2.0e12, 0.25e12], [0.25e12, 1.0e12]],
+            [[1.0, 0.0], [0.0, 1.0e-10]],
+        ],
+        np.float32,
+    )
+    result = ti.linalg.SmallBlockInverseBuilder(
+        2, 3, pivot_tolerance=1.0e-6
+    ).build(_array(ti.f32, matrices))
+    np.testing.assert_array_equal(result.status.to_numpy(), [0, 0, 2])
+    expected = np.linalg.inv(matrices[:2].astype(np.float64)).astype(np.float32)
+    np.testing.assert_allclose(
+        result.inverse_blocks.to_numpy().reshape(3, 2, 2)[:2],
+        expected,
+        rtol=3e-5,
+        atol=1e-20,
+    )
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_small_block_inverse_builder_rejects_unrepresentable_f32_controls():
+    with pytest.raises(RuntimeError, match="representable as f32"):
+        ti.linalg.SmallBlockInverseBuilder(2, 1, regularization=1.0e100)
+    with pytest.raises(RuntimeError, match="representable as f32|positive"):
+        ti.linalg.SmallBlockInverseBuilder(2, 1, pivot_tolerance=1.0e-100)
+    with pytest.raises(RuntimeError, match="representable as f32"):
+        ti.linalg.SmallBlockInverseBuilder(2, 1, regularization=1.0e-100)

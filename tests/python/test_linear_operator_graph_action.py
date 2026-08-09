@@ -492,6 +492,36 @@ def test_parameterized_identity_shift_uses_no_composition_temporary():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_parameterized_affine_uses_executed_f32_values_for_traits_and_updates():
+    base = _diagonal_operator(
+        np.asarray([2.0, 3.0], np.float32),
+        traits=ti.linalg.OperatorTraits.spd(),
+    )
+    operator = base.parameterized_affine(
+        alpha=1.0e-50,
+        beta=0.0,
+        alpha_range=(1.0e-50, 1.0e-40),
+        beta_range=(0.0, 0.0),
+    )
+    assert operator.parameters["alpha"] == 0.0
+    assert operator.parameters["alpha_range"][0] == 0.0
+    assert not operator.traits["positive_definite"]["value"]
+    with pytest.raises(RuntimeError, match="representable as f32"):
+        operator.update_parameters(
+            alpha=1.0e100,
+            beta=0.0,
+            expected_version=1,
+        )
+    with pytest.raises(RuntimeError, match="representable as f32"):
+        base.parameterized_affine(
+            alpha=1.0,
+            beta=0.0,
+            alpha_range=(1.0, 1.0e100),
+            beta_range=(0.0, 0.0),
+        )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_deep_composition_reuses_one_temporary_for_forward_and_adjoint():
     matrices = [
         np.asarray([[1.0 + 0.1 * index, 0.2], [-0.1, 0.9]], np.float32)

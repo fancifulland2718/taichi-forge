@@ -789,7 +789,21 @@ def _readonly_copy(value):
     return value
 
 
-def _normalize_parameter_range(value, initial, role):
+def _canonical_parameter_scalar(value, dtype, role):
+    try:
+        value = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise TaichiRuntimeError(f"{role} must be finite") from exc
+    if not math.isfinite(value):
+        raise TaichiRuntimeError(f"{role} must be finite")
+    if dtype == f32:
+        if abs(value) > float(np.finfo(np.float32).max):
+            raise TaichiRuntimeError(f"{role} must be representable as f32")
+        value = float(np.float32(value))
+    return value
+
+
+def _normalize_parameter_range(value, initial, role, dtype):
     if value is None:
         raise TaichiRuntimeError(f"{role} requires an explicit finite (minimum, maximum) range")
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
@@ -797,11 +811,9 @@ def _normalize_parameter_range(value, initial, role):
     value = tuple(value)
     if len(value) != 2:
         raise TaichiRuntimeError(f"{role} must be a finite (minimum, maximum) pair")
-    try:
-        minimum, maximum = (float(item) for item in value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise TaichiRuntimeError(f"{role} must be a finite (minimum, maximum) pair") from exc
-    if not math.isfinite(minimum) or not math.isfinite(maximum) or minimum > maximum:
+    minimum = _canonical_parameter_scalar(value[0], dtype, f"{role} minimum")
+    maximum = _canonical_parameter_scalar(value[1], dtype, f"{role} maximum")
+    if minimum > maximum:
         raise TaichiRuntimeError(f"{role} must be a finite ordered closed interval")
     if initial < minimum or initial > maximum:
         raise TaichiRuntimeError(f"{role} does not contain its initial value {initial}")
@@ -809,7 +821,7 @@ def _normalize_parameter_range(value, initial, role):
 
 
 class _AffineParameterState:
-    def __init__(self, alpha, beta, alpha_range, beta_range):
+    def __init__(self, alpha, beta, alpha_range, beta_range, dtype):
         from taichi_forge.linalg._composition_kernels import parameter_anchor_f32
 
         self._lock = threading.RLock()
@@ -817,6 +829,7 @@ class _AffineParameterState:
         self.beta = float(beta)
         self.alpha_range = tuple(alpha_range)
         self.beta_range = tuple(beta_range)
+        self.dtype = dtype
         self.version = 1
         topology = ScalarNdarray(i32, (1,))
         topology.fill(0)
@@ -836,10 +849,9 @@ class _AffineParameterState:
             (alpha, self.alpha_range, "alpha"),
             (beta, self.beta_range, "beta"),
         ):
-            try:
-                value = float(value)
-            except (TypeError, ValueError, OverflowError) as exc:
-                raise TaichiRuntimeError(f"parameterized affine {role} must be finite") from exc
+            value = _canonical_parameter_scalar(
+                value, self.dtype, f"parameterized affine {role}"
+            )
             if not math.isfinite(value) or value < bounds[0] or value > bounds[1]:
                 raise TaichiRuntimeError(
                     f"parameterized affine {role}={value} is outside its " f"declared range {bounds}"
@@ -1639,15 +1651,10 @@ class LinearOperator:
         qualification. One update publishes alpha and beta atomically.
         """
         self._ensure_valid()
-        try:
-            alpha = float(alpha)
-            beta = float(beta)
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise TaichiRuntimeError("parameterized affine coefficients must be finite") from exc
-        if not math.isfinite(alpha) or not math.isfinite(beta):
-            raise TaichiRuntimeError("parameterized affine coefficients must be finite")
-        alpha_range = _normalize_parameter_range(alpha_range, alpha, "alpha_range")
-        beta_range = _normalize_parameter_range(beta_range, beta, "beta_range")
+        alpha = _canonical_parameter_scalar(alpha, self.dtype, "parameterized affine alpha")
+        beta = _canonical_parameter_scalar(beta, self.dtype, "parameterized affine beta")
+        alpha_range = _normalize_parameter_range(alpha_range, alpha, "alpha_range", self.dtype)
+        beta_range = _normalize_parameter_range(beta_range, beta, "beta_range", self.dtype)
         identity_shift = other is None
         if identity_shift:
             if self.shape[0] != self.shape[1]:
@@ -1680,7 +1687,9 @@ class LinearOperator:
             _ti_core.Arch.arm64,
         ):
             raise TaichiRuntimeError("GPU parameterized affine operators require f32")
-        state = _AffineParameterState(alpha, beta, alpha_range, beta_range)
+        state = _AffineParameterState(
+            alpha, beta, alpha_range, beta_range, self.dtype
+        )
         handle = _ti_core._make_parameterized_affine_operator(
             self._handle,
             other._handle,
@@ -3161,13 +3170,22 @@ class SmallBlockInverseBuilder:
         if self.block_size not in (1, 2, 3, 4):
             raise TaichiRuntimeError("SmallBlockInverseBuilder supports block_size 1, 2, 3, or 4")
         try:
-            self.regularization = float(regularization)
-            self.pivot_tolerance = float(pivot_tolerance)
+            requested_regularization = float(regularization)
         except (TypeError, ValueError, OverflowError) as exc:
-            raise TaichiRuntimeError("regularization and pivot_tolerance must be finite") from exc
-        if not math.isfinite(self.regularization) or self.regularization < 0.0:
+            raise TaichiRuntimeError("regularization must be finite") from exc
+        self.regularization = _canonical_parameter_scalar(
+            regularization, f32, "regularization"
+        )
+        self.pivot_tolerance = _canonical_parameter_scalar(
+            pivot_tolerance, f32, "pivot_tolerance"
+        )
+        if self.regularization < 0.0:
             raise TaichiRuntimeError("regularization must be finite and non-negative")
-        if not math.isfinite(self.pivot_tolerance) or self.pivot_tolerance <= 0.0:
+        if requested_regularization != 0.0 and self.regularization == 0.0:
+            raise TaichiRuntimeError(
+                "nonzero regularization must be representable as f32"
+            )
+        if self.pivot_tolerance <= 0.0:
             raise TaichiRuntimeError("pivot_tolerance must be finite and positive")
         self.coefficient_count = self.block_count * self.block_size * self.block_size
         from taichi_forge.linalg._preconditioner_kernels import (
