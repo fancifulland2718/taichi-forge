@@ -1974,9 +1974,9 @@ OperatorVectorView composite_subview(const OperatorVectorView &view,
   result.space = space;
   result.data += scalar_offset * data_type_size(space.scalar_type);
   result.allocation_identity = result.data;
-  // An offset view no longer describes the original ndarray or dense-storage
-  // binding. Block-diagonal composition is host-only until subrange bindings
-  // have a first-class runtime representation.
+  // Raw host composition deliberately drops the original storage identity.
+  // Program-bound fixed-layout blocks use RuntimeStorageArgument subranges
+  // instead of this helper.
   result.ndarray = nullptr;
   result.dense_storage = nullptr;
   result.runtime_storage = nullptr;
@@ -2422,9 +2422,11 @@ OperatorBinding make_block_diagonal_operator_binding(
   descriptor.domain.scalar_extent = 0;
   descriptor.range.scalar_extent = 0;
   bool adjoint_apply = true;
+  bool dense_storage_operands = program != nullptr;
+  bool dense_storage_affine_operands = program != nullptr;
   for (const auto &block : blocks) {
     const auto &action = block.action();
-    validate_composite_operand(action, "block-diagonal", nullptr);
+    validate_composite_operand(action, "block-diagonal", program);
     TI_ERROR_IF(!same_composite_space_kind(
                     action.descriptor().domain, first_descriptor.domain) ||
                     !same_composite_space_kind(
@@ -2444,11 +2446,28 @@ OperatorBinding make_block_diagonal_operator_binding(
         action.descriptor().range.scalar_extent;
     adjoint_apply =
         adjoint_apply && action.capabilities().adjoint_apply;
+    dense_storage_operands =
+        dense_storage_operands &&
+        action.capabilities().dense_storage_operands;
+    dense_storage_affine_operands =
+        dense_storage_affine_operands &&
+        action.capabilities().dense_storage_affine_operands;
   }
+  const bool device =
+      program && !arch_is_cpu(program->compile_config().arch);
+  TI_ERROR_IF(device && !dense_storage_affine_operands,
+              "GPU block-diagonal operators require every leaf to support "
+              "direct affine dense-storage operands; no staging fallback "
+              "was performed.");
   const auto traits =
       block_diagonal_operator_traits(blocks, descriptor);
   OperatorCapabilities capabilities;
   capabilities.adjoint_apply = adjoint_apply;
+  capabilities.asynchronous_submit = device;
+  capabilities.explicit_sequence = device;
+  capabilities.dense_storage_operands = dense_storage_operands;
+  capabilities.dense_storage_affine_operands =
+      dense_storage_affine_operands;
   const std::string provider_name = "block_diagonal";
   auto metadata = make_composite_metadata_action(
       descriptor, traits, capabilities, provider_name, [blocks] {
@@ -2458,18 +2477,148 @@ OperatorBinding make_block_diagonal_operator_binding(
   return OperatorBinding::from_generation_publisher(
       std::move(metadata),
       [blocks = std::move(blocks), descriptor, traits, capabilities,
-       provider_name] {
+       provider_name, program] {
         auto pins = pin_composite_operands(blocks);
         const auto stamp = combine_operator_generations(pins);
         auto action = OperatorAction(
             descriptor, traits, capabilities, provider_name,
             [stamp] { return stamp; },
-            [pins = std::move(pins)](
+            [pins = std::move(pins), program, capabilities](
                 OperatorApplyMode mode, const OperatorVectorView &input,
                 const OperatorVectorView &output) {
-              validate_host_composite_views(input, output);
+              const bool direct_storage =
+                  program && capabilities.dense_storage_affine_operands;
+              if (!direct_storage) {
+                validate_host_composite_views(input, output);
+              } else {
+                TI_ERROR_IF(input.program != program ||
+                                output.program != program,
+                            "Fixed-layout block-diagonal operands must belong to "
+                            "their construction Program.");
+                TI_ERROR_IF((!input.ndarray && !input.dense_storage) ||
+                                (!output.ndarray && !output.dense_storage),
+                            "Fixed-layout block-diagonal operands require qualified "
+                            "ndarray or dense-storage views.");
+              }
               std::size_t input_offset = 0;
               std::size_t output_offset = 0;
+              if (direct_storage) {
+                auto base_descriptor = [](const OperatorVectorView &view) {
+                  if (view.dense_storage) {
+                    return storage::DenseStorageBuildResult{
+                        storage::StorageFailureReason::kNone,
+                        *view.dense_storage};
+                  }
+                  TI_ASSERT(view.ndarray);
+                  auto described = storage::describe_ndarray_storage(
+                      *view.ndarray,
+                      storage::StorageAccess::kReadWrite);
+                  TI_ERROR_IF(!described,
+                              "Unable to describe block-diagonal ndarray "
+                              "storage: {}.",
+                              storage::to_string(described.reason));
+                  return storage::flatten_dense_storage_to_scalar_vector(
+                      *described.descriptor);
+                };
+                auto input_base = base_descriptor(input);
+                auto output_base = base_descriptor(output);
+                TI_ERROR_IF(!input_base || !output_base,
+                            "GPU block-diagonal storage must flatten to a "
+                            "compact scalar vector.");
+
+                std::vector<std::unique_ptr<
+                    storage::RuntimeStorageArgument>> arguments;
+                std::vector<const storage::RuntimeStorageArgument *>
+                    argument_ptrs;
+                std::vector<OperatorSpaceDesc> input_spaces;
+                std::vector<OperatorSpaceDesc> output_spaces;
+                arguments.reserve(pins.size() * 2);
+                argument_ptrs.reserve(pins.size() * 2);
+                input_spaces.reserve(pins.size());
+                output_spaces.reserve(pins.size());
+                for (const auto &pin : pins) {
+                  const auto &block_descriptor = pin.descriptor();
+                  const auto &block_input =
+                      input_space(block_descriptor, mode);
+                  const auto &block_output =
+                      output_space(block_descriptor, mode);
+                  auto input_slice = storage::slice_dense_storage(
+                      *input_base.descriptor,
+                      {static_cast<std::int64_t>(input_offset)},
+                      {static_cast<std::int64_t>(
+                          block_input.scalar_extent)},
+                      {1});
+                  auto output_slice = storage::slice_dense_storage(
+                      *output_base.descriptor,
+                      {static_cast<std::int64_t>(output_offset)},
+                      {static_cast<std::int64_t>(
+                          block_output.scalar_extent)},
+                      {1});
+                  TI_ERROR_IF(!input_slice || !output_slice,
+                              "GPU block-diagonal subrange construction "
+                              "failed.");
+                  auto requirement = [program](bool writable) {
+                    storage::RuntimeStorageRequirement result;
+                    result.dense.require_scalar_type = true;
+                    result.dense.scalar_type = PrimitiveType::f32;
+                    result.dense.min_index_rank = 1;
+                    result.dense.max_index_rank = 1;
+                    result.dense.max_element_rank = 0;
+                    result.dense.require_ndarray_abi = true;
+                    result.dense.accept_compact_subrange = true;
+                    result.dense.require_unique_mapping = true;
+                    result.dense.require_writable = writable;
+                    result.consumer =
+                        storage::RuntimeStorageConsumer::kGraphReplay;
+                    result.mode = storage::RuntimeStorageMode::kReplay;
+                    result.backend = program->compile_config().arch;
+                    return result;
+                  };
+                  arguments.push_back(std::make_unique<
+                                      storage::RuntimeStorageArgument>(
+                      std::move(*input_slice.descriptor),
+                      requirement(false)));
+                  arguments.push_back(std::make_unique<
+                                      storage::RuntimeStorageArgument>(
+                      std::move(*output_slice.descriptor),
+                      requirement(true)));
+                  argument_ptrs.push_back(arguments[arguments.size() - 2].get());
+                  argument_ptrs.push_back(arguments.back().get());
+                  input_spaces.push_back(block_input);
+                  output_spaces.push_back(block_output);
+                  input_offset += block_input.scalar_extent;
+                  output_offset += block_output.scalar_extent;
+                }
+                program->with_resolved_runtime_storage_arguments(
+                    argument_ptrs,
+                    [&](const storage::ResolvedDenseBinding *bindings,
+                        std::size_t count) {
+                      TI_ASSERT(count == pins.size() * 2);
+                      for (std::size_t index = 0; index < pins.size();
+                           ++index) {
+                        auto input_view =
+                            OperatorVectorView::from_dense_storage(
+                                program, *arguments[index * 2],
+                                bindings[index * 2], input_spaces[index],
+                                false);
+                        auto output_view =
+                            OperatorVectorView::from_dense_storage(
+                                program, *arguments[index * 2 + 1],
+                                bindings[index * 2 + 1],
+                                output_spaces[index], true);
+                        TI_ERROR_IF(
+                            !input_view.dense_storage ||
+                                !input_view.resolved_dense_storage ||
+                                !output_view.dense_storage ||
+                                !output_view.resolved_dense_storage,
+                            "Fixed-layout block-diagonal subviews were not "
+                            "resolved before leaf apply.");
+                        pins[index].apply_overwrite(mode, input_view,
+                                                    output_view);
+                      }
+                    });
+                return;
+              }
               for (const auto &pin : pins) {
                 const auto &block_descriptor = pin.descriptor();
                 const auto &block_input =
@@ -4880,36 +5029,6 @@ make_composed_operator_handle(
 }
 
 std::unique_ptr<LinearOperatorHandle>
-make_block_diagonal_operator_handle(
-    const std::vector<LinearOperatorHandle *> &blocks) {
-  TI_ERROR_IF(blocks.empty(),
-              "LinearOperator block_diagonal requires at least one block.");
-  TI_ERROR_IF(!blocks.front(),
-              "LinearOperator block_diagonal received a null block.");
-  Program *program = blocks.front()->program();
-  std::vector<OperatorBinding> bindings;
-  bindings.reserve(blocks.size());
-  for (const auto *block : blocks) {
-    TI_ERROR_IF(!block || block->program() != program,
-                "LinearOperator block_diagonal operands must belong to the "
-                "same Program.");
-    bindings.push_back(block->binding());
-  }
-  return std::make_unique<LinearOperatorHandle>(
-      program, make_block_diagonal_operator_binding(std::move(bindings)));
-}
-
-std::unique_ptr<ExperimentalPreconditionerPlanHandle>
-make_experimental_preconditioner_plan_handle(
-    Program *program,
-    LinearOperatorHandle &target,
-    LinearOperatorHandle &action,
-    std::string method) {
-  return std::make_unique<ExperimentalPreconditionerPlanHandle>(
-      program, target, action, std::move(method));
-}
-
-std::unique_ptr<LinearOperatorHandle>
 make_parameterized_affine_operator_handle(
     LinearOperatorHandle &left,
     LinearOperatorHandle &right,
@@ -4937,6 +5056,37 @@ make_parameterized_affine_operator_handle(
       left.program(), std::move(binding), owner,
       LinearOperatorHandle::NumericUpdateFn{},
       LinearOperatorHandle::RecordableKernelFn{}, std::move(update));
+}
+
+std::unique_ptr<LinearOperatorHandle>
+make_block_diagonal_operator_handle(
+    const std::vector<LinearOperatorHandle *> &blocks) {
+  TI_ERROR_IF(blocks.empty(),
+              "LinearOperator block_diagonal requires at least one block.");
+  TI_ERROR_IF(!blocks.front(),
+              "LinearOperator block_diagonal received a null block.");
+  Program *program = blocks.front()->program();
+  std::vector<OperatorBinding> bindings;
+  bindings.reserve(blocks.size());
+  for (const auto *block : blocks) {
+    TI_ERROR_IF(!block || block->program() != program,
+                "LinearOperator block_diagonal operands must belong to the "
+                "same Program.");
+    bindings.push_back(block->binding());
+  }
+  return std::make_unique<LinearOperatorHandle>(
+      program,
+      make_block_diagonal_operator_binding(std::move(bindings), program));
+}
+
+std::unique_ptr<ExperimentalPreconditionerPlanHandle>
+make_experimental_preconditioner_plan_handle(
+    Program *program,
+    LinearOperatorHandle &target,
+    LinearOperatorHandle &action,
+    std::string method) {
+  return std::make_unique<ExperimentalPreconditionerPlanHandle>(
+      program, target, action, std::move(method));
 }
 
 std::unique_ptr<LinearOperatorHandle>

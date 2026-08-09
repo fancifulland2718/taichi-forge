@@ -43,9 +43,24 @@ def _fixed_csr(dense):
         np.tile(np.arange(columns, dtype=np.int32), rows)
     )
     numeric.from_numpy(dense.reshape(-1))
-    return ti.linalg.SparsePattern.csr(
-        rows, columns, row_offsets, column_indices
-    ).matrix(numeric)
+    return ti.linalg.SparsePattern.csr(rows, columns, row_offsets, column_indices).matrix(numeric)
+
+
+def _kernel_identity(size):
+    topology = ti.ndarray(ti.i32, shape=1)
+    topology.fill(0)
+
+    @ti.kernel
+    def apply_identity(
+        active_size: ti.i32,
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(active_size):
+            y[index] = x[index]
+
+    return ti.linalg.LinearOperator.from_kernel(apply_identity, size, topology, traits=ti.linalg.OperatorTraits.spd())
 
 
 def test_cuda_device_convergent_capabilities_are_provider_specific():
@@ -127,6 +142,16 @@ def test_experimental_identity_composition_and_apply():
         rtol=1.0e-12,
     )
     assert f64_composed.capabilities.persistent_workspace
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_fixed_layout_block_diagonal_uses_direct_subranges():
+    blocks = ti.linalg.block_diagonal((_kernel_identity(2), _kernel_identity(3)))
+    source_values = np.asarray([1.0, 2.0, -3.0, 4.0, 5.0], np.float32)
+    source = _vector(source_values)
+    np.testing.assert_allclose(blocks.apply(source).to_numpy(), source_values)
+    assert blocks.capabilities.dense_storage_operands
+    assert blocks.capabilities.dense_storage_affine_operands
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

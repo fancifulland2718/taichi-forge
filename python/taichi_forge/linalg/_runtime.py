@@ -3000,7 +3000,7 @@ def aslinearoperator(value, *, traits=None):
 
 
 def block_diagonal(blocks: Sequence[LinearOperator]):
-    """Creates a CPU block-diagonal operator from one or more blocks."""
+    """Creates a fixed-layout block-diagonal operator from one or more blocks."""
     blocks = tuple(blocks)
     if not blocks or any(
         not isinstance(block, LinearOperator) for block in blocks

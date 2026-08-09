@@ -861,7 +861,8 @@ OperatorBinding make_composed_operator_binding(OperatorBinding outer,
                                                 OperatorBinding inner,
                                                 Program *program = nullptr);
 OperatorBinding make_block_diagonal_operator_binding(
-    std::vector<OperatorBinding> blocks);
+    std::vector<OperatorBinding> blocks,
+    Program *program = nullptr);
 
 OperatorBinding make_cpu_csr_operator_binding(Program *program,
                                               CpuSparseCsrMatrix &matrix);
