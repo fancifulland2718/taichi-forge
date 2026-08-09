@@ -81,6 +81,19 @@ i32 输出与 native plan 检查。它同样属于 `thin-capability`，独立入
 从而排除重复写竞争。Forge native scatter plan 与 vanilla 等价 kernel 通过
 `native_scatter_microbench.py` 独立检查。
 
+`warp_transform_baseline.py` 是相同 `THIN-002-TRANSFORM` i32 affine 语义的
+隔离外部基线。它在 Warp 自己的进程和环境中运行，验证 CUDA UUID 和精确输出，
+把首次调用/JIT 成本与稳态计时分开，将每个计时窗口校准到至少 100 ms，并检查
+回放期间的内存平台。它只输出 **Warp 绝对基线**；绝不混入 Forge/vanilla 的
+成对加速比，也不描述为相同公共 API 的比较。
+
+Windows venv launcher 可能作为 Python 父进程继续存活。外部 runner 只忽略通过
+Toolhelp 进程快照证明属于自身祖先链的 PID；相同 executable path 不足以获得豁免。
+无关 Python 进程仍会让噪声准入失败。
+
+Warp kernel cache 被重定向到 Git 忽略的 qualification 输出目录，因此编译不会
+修改用户全局 cache，并能在隔离 workspace 内正常写入。
+
 `native_compact` 把 Forge stable native compact 与一个非简单串行循环的 vanilla
 稳定 pipeline 对比：flags-to-prefix kernel、可复用的公开 `PrefixSumExecutor` 和
 stable scatter kernel。两边均计时完整 adapter call；内部 stage 数和 workspace 是

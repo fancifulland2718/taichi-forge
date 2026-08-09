@@ -94,6 +94,23 @@ write races from the comparison. Forge's native scatter plan and the vanilla
 equivalent kernel are checked independently through
 `native_scatter_microbench.py`.
 
+`warp_transform_baseline.py` is the isolated external baseline for the same
+`THIN-002-TRANSFORM` i32 affine semantics. It runs Warp in its own process and
+environment, verifies the CUDA UUID and exact output, separates first-call/JIT
+cost from steady-state timing, calibrates each scored window to at least 100 ms,
+and checks a replay memory plateau. Its output is an **absolute Warp baseline**;
+it is never merged into the paired Forge/vanilla speedup or treated as a
+same-public-API comparison.
+
+On Windows, a venv launcher can remain as a Python parent process. The external
+runner ignores only PIDs proven to be in its Toolhelp ancestor chain; matching
+an executable path is deliberately insufficient. Unrelated Python processes
+still fail noise admission.
+
+The Warp kernel cache is redirected to the Git-ignored qualification output
+tree so compilation does not mutate a user-global cache and remains writable
+inside the isolated workspace.
+
 `native_compact` compares Forge's stable native compact with a non-trivial
 vanilla stable pipeline: flags-to-prefix kernel, reusable public
 `PrefixSumExecutor`, and stable scatter kernel. The complete adapter call is
