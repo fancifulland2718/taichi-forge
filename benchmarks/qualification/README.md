@@ -2,8 +2,8 @@
 
 English | [简体中文](README.zh-CN.md)
 
-This directory contains the reviewed local A/B microbenchmark for ordinary
-Taichi kernels. The executable accepts exactly one operation, one backend, and
+This directory contains the reviewed local Taichi one-operation A/B
+microbenchmark. The executable accepts exactly one operation, one backend, and
 one size. It never launches different backend benchmarks together, and every
 Forge/vanilla comparison is an adjacent, non-overlapping fresh-process pair.
 
@@ -15,7 +15,8 @@ qualification constants in `single_kernel_microbench.py`.
 
 ## Scope
 
-`single_kernel_microbench.py` provides five shared ndarray kernels:
+`single_kernel_microbench.py` provides five shared ndarray control kernels and
+one identical-public-API PrefixSum case:
 
 | Operation | Logical traffic model |
 |---|---|
@@ -24,11 +25,19 @@ qualification constants in `single_kernel_microbench.py`.
 | `saxpy` | two f32 reads and one f32 write per element |
 | `stencil2d` | five f32 reads and one f32 write per grid point |
 | `reduce_chunks` | one i32 read per element and one i32 chunk write |
+| `prefix_sum` | i32 inclusive scan through `ti.algorithms.PrefixSumExecutor(n).run(field)`; one logical input read and output write |
 
 These are control/regression microbenchmarks. They measure the ordinary kernel
 path and may detect runtime tax or a real base-path improvement, but they do not
 exercise Graph, native primitives, bounded dispatch, worklists, LinearOperator,
 or another Forge-only API. Results must not be extrapolated to those features.
+
+`prefix_sum` is `DIRECT-001`. Both sides run the same workload, dense i32 field,
+deterministic input, exact oracle, and synchronization boundary. Forge must use
+its native dense-field scan plan while vanilla must use its legacy field
+workspace; a route mismatch fails the child. Use `prefix_sum_microbench.py` as
+the one-case development entry point; it fixes the operation and cannot become
+an aggregate launcher.
 
 ## Fairness contract implemented by the runner
 
@@ -48,6 +57,13 @@ or another Forge-only API. Results must not be extrapolated to those features.
   offline cache, separates import/init/first-call/warm timing, synchronizes at
   identical boundaries, validates before and after timing, and syncs/resets on
   teardown.
+- GPU children are pinned to device zero. Forge's CUDA runtime UUID must match
+  the nvidia-smi UUID. A runtime without a UUID passes only on this single-GPU
+  host with explicit device-zero binding; ambiguous multi-GPU runs fail closed.
+- Forge stability snapshots runtime live memory and host/device memory pools
+  before and after replay. Current/live/raw/cached state must plateau. Forge-only
+  counters unavailable in vanilla are explicitly recorded as unavailable, while
+  RSS, process GPU memory, and reset evidence remain separate.
 - Before the pilot, before every pair, and after every child, the parent rejects
   other Python processes, excessive CPU use, competing GPU work, excessive GPU
   utilization or temperature, and unavailable required telemetry. A rejected
@@ -72,6 +88,16 @@ C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
 This smoke validates execution and evidence generation only. It cannot support
 a speed claim. Do not replace it with an aggregate or multi-backend launch while
 developing a case.
+
+The first one-case CUDA PrefixSum probe uses its dedicated entry point:
+
+```powershell
+C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
+  benchmarks\qualification\prefix_sum_microbench.py `
+  --backend cuda --preset small --intent diagnostic `
+  --pairs 1 --samples 5 --warmups 2 `
+  --target-sample-ms 20 --stability-replays 0
+```
 
 For an already validated case, qualification mode enforces the fixed minimums:
 

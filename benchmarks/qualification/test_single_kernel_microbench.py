@@ -1,4 +1,5 @@
 import argparse
+import json
 import math
 import os
 import unittest
@@ -6,11 +7,13 @@ import unittest
 from benchmarks.qualification.single_kernel_microbench import (
     _ExclusiveBenchmarkLock,
     QUALIFICATION_MINIMUMS,
+    _enhanced_memory_plateau,
     balanced_pair_orders,
     paired_log_summary,
     qualification_policy_errors,
     select_common_batch,
 )
+from benchmarks.qualification.runtime_common import normalize_gpu_uuid
 
 
 class SingleKernelMicrobenchTest(unittest.TestCase):
@@ -62,6 +65,43 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         ])
         args.intent = "diagnostic"
         self.assertEqual(qualification_policy_errors(args), [])
+
+    def test_gpu_uuid_normalization_matches_runtime_and_nvidia_forms(self):
+        self.assertEqual(
+            normalize_gpu_uuid("GPU-a69ec138-0e30-8d1e-e299-4a0f2a2a6645"),
+            "a69ec1380e308d1ee2994a0f2a2a6645",
+        )
+        self.assertEqual(
+            normalize_gpu_uuid(bytes.fromhex(
+                "a69ec1380e308d1ee2994a0f2a2a6645")),
+            "a69ec1380e308d1ee2994a0f2a2a6645",
+        )
+        self.assertIsNone(normalize_gpu_uuid("not-a-device-uuid"))
+
+    def test_enhanced_memory_plateau_rejects_live_growth(self):
+        before = {
+            "available": True,
+            "runtime": {"memory": {
+                "device_raw_bytes": 128,
+                "device_requested_live_bytes": 64,
+                "live_resources": 1,
+            }},
+            "pools": {
+                "host": {"capacity_bytes": 0, "raw_bytes": 0,
+                         "requested_live_bytes": 0, "reserved_bytes": 0,
+                         "used_bytes": 0},
+                "device": {"cached_blocks": 0, "cached_bytes": 0,
+                           "raw_bytes": 128, "raw_chunks": 1},
+            },
+        }
+        stable = json.loads(json.dumps(before))
+        self.assertTrue(_enhanced_memory_plateau(before, stable)["passed"])
+        growing = json.loads(json.dumps(before))
+        growing["runtime"]["memory"]["live_resources"] = 2
+        result = _enhanced_memory_plateau(before, growing)
+        self.assertFalse(result["passed"])
+        self.assertIn("live_resources",
+                      result["runtime_memory"]["growing_fields"])
 
 
 if __name__ == "__main__":

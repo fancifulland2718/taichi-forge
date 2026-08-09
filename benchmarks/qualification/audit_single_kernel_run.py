@@ -131,6 +131,10 @@ def _audit(run_dir: Path) -> dict[str, Any]:
         _check(child.get("arch_match") is True, "backend match", failures)
         _check(child.get("environment_isolated") is True,
                "environment isolation", failures)
+        _check(child.get("device_identity", {}).get("binding_verified") is True,
+               "physical device binding", failures)
+        _check(child.get("route", {}).get("passed") is True,
+               "execution route", failures)
         _check(child["validation_before"]["passed"] is True,
                "correctness before", failures)
         _check(child["validation_after"]["passed"] is True,
@@ -175,6 +179,7 @@ def _audit(run_dir: Path) -> dict[str, Any]:
             child["logical_bytes"], child["traffic_model"],
             child["batch_size"],
             tuple(sorted(child["measurement_config"].items())),
+            json.dumps(child["workload_contract"], sort_keys=True),
         ))
     _check(len(neutral_signatures) == 1, "neutral dependency parity", failures)
     _check(len(workload_signatures) == 1, "workload parity", failures)
@@ -278,11 +283,28 @@ def _audit(run_dir: Path) -> dict[str, Any]:
         child.get("stability") is not None
         and child["stability"]["replays"] >= int(config["stability_replays"])
         and child["stability"]["memory_guard_passed"]
+        and (
+            child["runtime"] != "forge"
+            or child["stability"].get("enhanced_plateau", {}).get("passed")
+            is True
+        )
         for child in children)
     timing_window_complete = all(
         statistics.median(child["raw_batch_ms"]) >=
         float(config["target_sample_ms"])
         for child in children)
+    _check(
+        summary.get("method_checks", {}).get("physical_device_binding") is
+        all(child["device_identity"]["binding_verified"] for child in children),
+        "physical device method check", failures)
+    _check(
+        summary.get("method_checks", {}).get("route_verified") is
+        all(child["route"]["passed"] for child in children),
+        "route method check", failures)
+    _check(
+        summary.get("method_checks", {}).get("stability_complete") is
+        stability_complete,
+        "stability method check", failures)
     all_method_checks = bool(
         not failures
         and order_counts["forge->vanilla"] == order_counts["vanilla->forge"]

@@ -114,6 +114,124 @@ def gpu_snapshot() -> list[dict[str, str]]:
     )
 
 
+def normalize_gpu_uuid(value: str | bytes | None) -> str | None:
+    """Normalizes CUDA/nvidia-smi UUIDs to one lower-case hexadecimal value."""
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.hex().lower()
+    normalized = str(value).strip().lower()
+    if normalized.startswith("gpu-"):
+        normalized = normalized[4:]
+    normalized = normalized.replace("-", "")
+    if len(normalized) != 32 or any(
+            character not in "0123456789abcdef" for character in normalized):
+        return None
+    return normalized
+
+
+def runtime_device_identity(ti: Any, backend: str) -> dict[str, Any]:
+    """Records and, where possible, proves the physical GPU used by Taichi.
+
+    A single enumerated GPU plus explicit device-zero environment binding is a
+    sufficient local proof for runtimes that expose no current-device UUID.
+    Forge's CUDA runtime provides a stronger UUID that is matched against
+    nvidia-smi. Multi-GPU runs fail closed unless that stronger proof exists.
+    """
+    if backend == "cpu":
+        return {
+            "backend": backend,
+            "required": False,
+            "binding_verified": True,
+            "verification": "not_applicable",
+        }
+    rows = gpu_snapshot()
+    normalized_rows = [
+        {
+            "index": row.get("index"),
+            "name": row.get("name"),
+            "uuid": row.get("uuid"),
+            "normalized_uuid": normalize_gpu_uuid(row.get("uuid")),
+        }
+        for row in rows
+    ]
+    current_uuid = None
+    uuid_error = None
+    getter = getattr(ti._lib.core, "_current_cuda_external_device_uuid", None)
+    if backend == "cuda" and getter is not None:
+        try:
+            program = ti.lang.impl.get_runtime().prog
+            current_uuid = normalize_gpu_uuid(bytes(getter(program)))
+        except (AttributeError, RuntimeError, TypeError, ValueError) as error:
+            uuid_error = repr(error)
+    matches = [
+        row for row in normalized_rows
+        if current_uuid is not None and row["normalized_uuid"] == current_uuid
+    ]
+    forced_zero = (
+        os.environ.get("TI_VISIBLE_DEVICE") == "0"
+        and (backend != "cuda" or os.environ.get("CUDA_VISIBLE_DEVICES") == "0")
+    )
+    if current_uuid is not None:
+        verified = len(matches) == 1
+        verification = "runtime_uuid_matches_nvidia_smi"
+    else:
+        verified = len(normalized_rows) == 1 and forced_zero
+        verification = "single_gpu_with_explicit_device_zero_binding"
+    return {
+        "backend": backend,
+        "required": True,
+        "binding_verified": verified,
+        "verification": verification,
+        "runtime_uuid": current_uuid,
+        "runtime_uuid_error": uuid_error,
+        "visible_device_environment": {
+            "TI_VISIBLE_DEVICE": os.environ.get("TI_VISIBLE_DEVICE"),
+            "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        },
+        "nvidia_smi_devices": normalized_rows,
+        "matching_devices": matches,
+    }
+
+
+def runtime_memory_observation(ti: Any) -> dict[str, Any]:
+    """Returns optional Forge runtime and allocator snapshots without fallback."""
+    runtime_memory = None
+    runtime_error = None
+    pool_stats = None
+    pool_error = None
+    try:
+        program = ti.lang.impl.get_runtime().prog
+        snapshot = getattr(program, "_runtime_statistics_snapshot", None)
+        if snapshot is not None:
+            raw = dict(snapshot())
+            runtime_memory = {
+                "schema_version": raw.get("schema_version"),
+                "backend": raw.get("backend"),
+                "program_domain": raw.get("program_domain"),
+                "memory": dict(raw.get("memory", {})),
+            }
+    except (AttributeError, RuntimeError, TypeError, ValueError) as error:
+        runtime_error = repr(error)
+    host_getter = getattr(ti._lib.core, "get_host_memory_pool_stats", None)
+    device_getter = getattr(ti._lib.core, "get_device_memory_pool_stats", None)
+    if host_getter is not None and device_getter is not None:
+        try:
+            pool_stats = {
+                "host": dict(host_getter()),
+                "device": dict(device_getter()),
+            }
+        except (RuntimeError, TypeError, ValueError) as error:
+            pool_error = repr(error)
+    return {
+        "available": runtime_memory is not None and pool_stats is not None,
+        "runtime": runtime_memory,
+        "pools": pool_stats,
+        "runtime_error": runtime_error,
+        "pool_error": pool_error,
+    }
+
+
 def gpu_compute_processes() -> list[dict[str, str]]:
     fields = ["pid", "process_name", "used_gpu_memory"]
     output = command_output([

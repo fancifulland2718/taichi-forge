@@ -2,7 +2,7 @@
 
 [English](README.md) | 简体中文
 
-本目录包含经过复核的本机普通 Taichi kernel A/B microbench。入口每次只接受一个
+本目录包含经过复核的本机 Taichi 单操作 A/B microbench。入口每次只接受一个
 操作、一个 backend 和一个规模，不会同时启动不同 backend 的性能进程；每次
 Forge/vanilla 比较均由相邻且不重叠的 fresh-process 对组成。
 
@@ -13,7 +13,8 @@ Forge/vanilla 比较均由相邻且不重叠的 fresh-process 对组成。
 
 ## 范围
 
-`single_kernel_microbench.py` 提供五个共用 ndarray kernel：
+`single_kernel_microbench.py` 提供五个共用 ndarray 控制 kernel，以及一个完全同
+公开 API 的 PrefixSum 案例：
 
 | 操作 | 逻辑访存模型 |
 |---|---|
@@ -22,10 +23,16 @@ Forge/vanilla 比较均由相邻且不重叠的 fresh-process 对组成。
 | `saxpy` | 每元素两次 f32 读取和一次 f32 写入 |
 | `stencil2d` | 每格点五次 f32 读取和一次 f32 写入 |
 | `reduce_chunks` | 每元素一次 i32 读取、每 chunk 一次 i32 写入 |
+| `prefix_sum` | `ti.algorithms.PrefixSumExecutor(n).run(field)` 的 i32 inclusive scan；逻辑输入/输出各一次 |
 
 这些是控制/回归 microbench，用于测量普通 kernel 路径，能够发现运行时额外成本
 或真实的基础路径提升；但它们不覆盖 Graph、native primitive、bounded dispatch、
 worklist、LinearOperator 或其他 Forge-only API，结论不得外推到这些能力。
+
+`prefix_sum` 是 `DIRECT-001`：两边运行同一份 workload、dense i32 field、确定性
+输入、exact oracle 和同步边界。Forge 必须命中 native dense-field scan plan，
+vanilla 必须命中其 legacy field workspace；route 不符合时 child 失败。为了保持
+单项开发入口，优先使用 `prefix_sum_microbench.py`，它固定操作且不能变成聚合器。
 
 ## runner 已实现的公平性合同
 
@@ -41,6 +48,12 @@ worklist、LinearOperator 或其他 Forge-only API，结论不得外推到这些
 - 每个子进程使用相同 CPU 线程数与 affinity，关闭 Taichi 离线缓存，分开记录
   import/init/first-call/warm，使用相同同步边界，在计时前后验证正确性，并在退出前
   显式 sync/reset。
+- GPU child 固定 device 0。Forge CUDA runtime UUID 必须与 `nvidia-smi` UUID
+  匹配；缺少 runtime UUID 的 runtime 仅在本机只有一个 GPU 且显式 device-zero
+  绑定时通过，多 GPU 不明确时 fail closed。
+- Forge stability 前后读取 runtime live memory 和 host/device memory pool，
+  current/live/raw/cached 状态必须 plateau；vanilla 不提供的 Forge 专有计数器明确
+  记为 unavailable。RSS、进程 GPU memory 和 reset 证据继续分别保存。
 - pilot 前、每对之前以及每个子进程之后，父进程都会检查其他 Python 进程、CPU
   占用、GPU 竞争进程、GPU 利用率与温度，以及必需监控是否可用。准入失败即停止，
   不把污染数据纳入平均，也不静默自动重试。
@@ -61,6 +74,16 @@ C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
 
 该 smoke 只验证执行与证据生成，不能支持速度宣称。开发单项测试时，不得改成聚合
 入口或同时启动多 backend。
+
+CUDA PrefixSum 的首个单项探针使用独立入口：
+
+```powershell
+C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
+  benchmarks\qualification\prefix_sum_microbench.py `
+  --backend cuda --preset small --intent diagnostic `
+  --pairs 1 --samples 5 --warmups 2 `
+  --target-sample-ms 20 --stability-replays 0
+```
 
 某个单项验证稳定后，资格模式会强制执行固定最低门槛：
 

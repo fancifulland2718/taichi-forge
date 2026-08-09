@@ -4,6 +4,7 @@ import gc
 import importlib
 from importlib import metadata as importlib_metadata
 import importlib.util
+import inspect
 import json
 import math
 import os
@@ -28,6 +29,8 @@ try:
         logical_bandwidth_gbps,
         percentile,
         process_gpu_memory_mib,
+        runtime_device_identity,
+        runtime_memory_observation,
         sha256_file,
         summarize_samples,
         working_set_bytes,
@@ -46,6 +49,8 @@ except ImportError:  # Direct script execution in the benchmark subprocess.
         logical_bandwidth_gbps,
         percentile,
         process_gpu_memory_mib,
+        runtime_device_identity,
+        runtime_memory_observation,
         sha256_file,
         summarize_samples,
         working_set_bytes,
@@ -57,7 +62,14 @@ except ImportError:  # Direct script execution in the benchmark subprocess.
 
 SCHEMA = "taichi_forge.single_kernel_microbench.v1"
 RESULT_PREFIX = "SINGLE_KERNEL_RESULT "
-OPERATIONS = ("fill", "copy", "saxpy", "stencil2d", "reduce_chunks")
+OPERATIONS = (
+    "fill",
+    "copy",
+    "saxpy",
+    "stencil2d",
+    "reduce_chunks",
+    "prefix_sum",
+)
 PRESETS = {
     "small": {"elements": 65_536, "stencil_side": 256},
     "medium": {"elements": 1_048_576, "stencil_side": 1_024},
@@ -518,6 +530,204 @@ def _build_case(ti: Any, kernel: Callable[..., None], operation: str,
     raise ValueError(operation)
 
 
+def _prefix_sum_route(executor: Any, runtime_name: str,
+                      backend: str) -> dict[str, Any]:
+    source_path = inspect.getsourcefile(executor.__class__)
+    source = None if source_path is None else Path(source_path).resolve()
+    plan = getattr(executor, "_native_scan_plan", None)
+    plan_backend = getattr(plan, "backend", None)
+    method_name = getattr(plan, "method_name", None)
+    class_module = executor.__class__.__module__
+    if runtime_name == "forge":
+        expected_backend = {
+            "cuda": "cuda_device",
+            "vulkan": "vulkan_native",
+            "cpu": "cpu_native",
+        }[backend]
+        expected_method = {
+            "cuda": "cuda_device_inclusive_scan_dense_field",
+            "vulkan": "vulkan_inclusive_scan_dense_field",
+            "cpu": "cpu_inclusive_scan_dense_field",
+        }[backend]
+        passed = bool(
+            class_module == "taichi_forge.algorithms._algorithms"
+            and plan is not None
+            and plan_backend == expected_backend
+            and method_name == expected_method
+            and getattr(executor, "large_arr", "missing") is None
+        )
+        classification = "native_dense_field_plan"
+    else:
+        expected_backend = "legacy_helper"
+        expected_method = "field_workspace_scan"
+        passed = bool(
+            class_module == "taichi.algorithms._algorithms"
+            and plan is None
+            and hasattr(executor, "large_arr")
+        )
+        classification = "legacy_i32_field_helper"
+    return {
+        "public_api": "ti.algorithms.PrefixSumExecutor(n).run(field)",
+        "class_module": class_module,
+        "class_source": None if source is None else str(source),
+        "class_source_sha256": (
+            None if source is None or not source.is_file() else sha256_file(source)
+        ),
+        "classification": classification,
+        "expected_backend": expected_backend,
+        "expected_method": expected_method,
+        "observed_plan_backend": plan_backend,
+        "observed_method": method_name,
+        "legacy_workspace_present": hasattr(executor, "large_arr"),
+        "legacy_workspace_materialized": (
+            getattr(executor, "large_arr", None) is not None
+        ),
+        "passed": passed,
+    }
+
+
+def _build_prefix_sum_case(ti: Any, runtime_name: str, backend: str,
+                           elements: int) -> dict[str, Any]:
+    import numpy as np
+
+    values = ti.field(dtype=ti.i32, shape=elements)
+    executor = ti.algorithms.PrefixSumExecutor(elements)
+    host_input = ((np.arange(elements, dtype=np.int64) % 7) - 3).astype(
+        np.int32)
+    expected = np.cumsum(host_input.astype(np.int64), dtype=np.int64).astype(
+        np.int32)
+
+    @ti.kernel
+    def reset_input():
+        for i in values:
+            values[i] = (i % 7) - 3
+
+    def launch() -> None:
+        executor.run(values)
+
+    def reset() -> None:
+        reset_input()
+
+    def validate_fresh() -> dict[str, Any]:
+        reset_input()
+        ti.sync()
+        executor.run(values)
+        ti.sync()
+        actual = values.to_numpy()
+        mismatch = np.flatnonzero(actual != expected)
+        return {
+            "passed": mismatch.size == 0,
+            "comparison": "exact_i32",
+            "mismatch_count": int(mismatch.size),
+            "first_mismatch_index": (
+                None if mismatch.size == 0 else int(mismatch[0])
+            ),
+            "actual_last": int(actual[-1]),
+            "expected_last": int(expected[-1]),
+        }
+
+    return {
+        "launch": launch,
+        "reset": reset,
+        "validate": validate_fresh,
+        "route": lambda: _prefix_sum_route(executor, runtime_name, backend),
+        "logical_bytes": elements * 8,
+        "traffic_model": (
+            "logical inclusive scan interface: one i32 input read plus one i32 "
+            "output write per element; implementation-internal traffic excluded"
+        ),
+        "workload_contract": {
+            "case_id": "DIRECT-001",
+            "public_api": "ti.algorithms.PrefixSumExecutor(n).run(field)",
+            "dtype": "i32",
+            "storage": "dense_1d_field",
+            "semantics": "inclusive_in_place_scan",
+            "input_pattern": "(i % 7) - 3",
+            "correctness": "exact_i32_after_fresh_reset_and_one_scan",
+            "timing": (
+                "frozen repeated run(field) calls plus one outer sync; reset "
+                "and correctness scan are outside scored timing"
+            ),
+            "elements": elements,
+        },
+    }
+
+
+def _numeric_growth(before: dict[str, Any] | None,
+                    after: dict[str, Any] | None,
+                    keys: Sequence[str]) -> dict[str, Any]:
+    deltas: dict[str, int | float | None] = {}
+    regressions = []
+    comparable = 0
+    for key in keys:
+        left = None if before is None else before.get(key)
+        right = None if after is None else after.get(key)
+        if (isinstance(left, (int, float)) and not isinstance(left, bool)
+                and isinstance(right, (int, float)) and not isinstance(right, bool)):
+            delta = right - left
+            deltas[key] = delta
+            comparable += 1
+            if delta > 0:
+                regressions.append(key)
+        else:
+            deltas[key] = None
+    return {
+        "comparable_field_count": comparable,
+        "deltas": deltas,
+        "growing_fields": regressions,
+        "passed": comparable > 0 and not regressions,
+    }
+
+
+def _enhanced_memory_plateau(before: dict[str, Any],
+                             after: dict[str, Any]) -> dict[str, Any]:
+    runtime_keys = (
+        "device_cached_bytes",
+        "device_raw_bytes",
+        "device_requested_live_bytes",
+        "host_capacity_bytes",
+        "host_raw_bytes",
+        "host_requested_live_bytes",
+        "inflight_resources",
+        "live_resources",
+        "retiring_resources",
+        "cuda_mempool_reserved_bytes",
+        "cuda_mempool_used_bytes",
+    )
+    host_pool_keys = (
+        "capacity_bytes",
+        "raw_bytes",
+        "requested_live_bytes",
+        "reserved_bytes",
+        "used_bytes",
+    )
+    device_pool_keys = ("cached_blocks", "cached_bytes", "raw_bytes", "raw_chunks")
+    before_runtime = (before.get("runtime") or {}).get("memory")
+    after_runtime = (after.get("runtime") or {}).get("memory")
+    before_pools = before.get("pools") or {}
+    after_pools = after.get("pools") or {}
+    runtime = _numeric_growth(before_runtime, after_runtime, runtime_keys)
+    host_pool = _numeric_growth(
+        before_pools.get("host"), after_pools.get("host"), host_pool_keys)
+    device_pool = _numeric_growth(
+        before_pools.get("device"), after_pools.get("device"), device_pool_keys)
+    return {
+        "required": True,
+        "available_before": bool(before.get("available")),
+        "available_after": bool(after.get("available")),
+        "runtime_memory": runtime,
+        "host_pool": host_pool,
+        "device_pool": device_pool,
+        "passed": bool(
+            before.get("available")
+            and after.get("available")
+            and runtime["passed"]
+            and host_pool["passed"]
+            and device_pool["passed"]
+        ),
+    }
+
+
 def _timed_batch(ti: Any, launch: Callable[[], None], batch_size: int) -> float:
     ti.sync()
     started = time.perf_counter_ns()
@@ -542,9 +752,11 @@ def _calibrate_batch(ti: Any, launch: Callable[[], None], target_ms: float,
 
 
 def _run_stability(ti: Any, launch: Callable[[], None], replays: int,
-                   checkpoint: int, sample_gpu: bool) -> dict[str, Any] | None:
+                   checkpoint: int, sample_gpu: bool,
+                   runtime_name: str) -> dict[str, Any] | None:
     if replays <= 0:
         return None
+    enhanced_before = runtime_memory_observation(ti)
     rss_before = working_set_bytes()
     gpu_before = process_gpu_memory_mib(os.getpid()) if sample_gpu else None
     windows = []
@@ -559,6 +771,18 @@ def _run_stability(ti: Any, launch: Callable[[], None], replays: int,
         completed += count
     rss_after = working_set_bytes()
     gpu_after = process_gpu_memory_mib(os.getpid()) if sample_gpu else None
+    enhanced_after = runtime_memory_observation(ti)
+    if runtime_name == "forge":
+        enhanced_plateau = _enhanced_memory_plateau(
+            enhanced_before, enhanced_after)
+    else:
+        enhanced_plateau = {
+            "required": False,
+            "available_before": bool(enhanced_before.get("available")),
+            "available_after": bool(enhanced_after.get("available")),
+            "passed": True,
+            "reason": "vanilla does not expose Forge runtime/pool counters",
+        }
     rss_delta = None if rss_before is None or rss_after is None else rss_after - rss_before
     gpu_delta = None if gpu_before is None or gpu_after is None else gpu_after - gpu_before
     return {
@@ -572,9 +796,13 @@ def _run_stability(ti: Any, launch: Callable[[], None], replays: int,
         "gpu_before_mib": gpu_before,
         "gpu_after_mib": gpu_after,
         "gpu_delta_mib": gpu_delta,
+        "enhanced_before": enhanced_before,
+        "enhanced_after": enhanced_after,
+        "enhanced_plateau": enhanced_plateau,
         "memory_guard_passed": bool(
             (rss_delta is None or rss_delta <= 64 * 1024 * 1024)
             and (gpu_delta is None or gpu_delta <= 64.0)
+            and enhanced_plateau["passed"]
         ),
     }
 
@@ -595,6 +823,7 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
     )
     init_ms = (time.perf_counter_ns() - init_started) / 1.0e6
     actual_arch = ti.lang.impl.current_cfg().arch
+    device_identity = runtime_device_identity(ti, args.backend)
     result: dict[str, Any] = {
         "schema": SCHEMA,
         "phase": args.phase,
@@ -623,6 +852,7 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         "requested_arch": _arch_name(ti, requested_arch),
         "actual_arch": _arch_name(ti, actual_arch),
         "arch_match": actual_arch == requested_arch,
+        "device_identity": device_identity,
         "batch_size": args.batch_size,
         "samples": [],
         "status": "running",
@@ -636,13 +866,38 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
             result.update(status="rejected",
                           rejection_reason="environment isolation failed")
             return result
+        if not device_identity["binding_verified"]:
+            result.update(status="rejected",
+                          rejection_reason="physical GPU binding is unverified")
+            return result
         config = PRESETS[args.preset]
-        kernel = _make_kernel(ti, args.operation)
-        case = _build_case(ti, kernel, args.operation, config["elements"],
-                           config["stencil_side"])
+        if args.operation == "prefix_sum":
+            case = _build_prefix_sum_case(
+                ti, args.runtime, args.backend, config["elements"])
+        else:
+            kernel = _make_kernel(ti, args.operation)
+            case = _build_case(ti, kernel, args.operation, config["elements"],
+                               config["stencil_side"])
+            case["workload_contract"] = {
+                "case_id": "CONTROL-001",
+                "operation": args.operation,
+                "elements": config["elements"],
+                "stencil_side": config["stencil_side"],
+            }
         result["logical_bytes"] = case["logical_bytes"]
         result["traffic_model"] = case["traffic_model"]
+        result["workload_contract"] = case["workload_contract"]
+        if "reset" in case:
+            case["reset"]()
+            ti.sync()
         result["first_call_ms"] = _timed_batch(ti, case["launch"], 1)
+        result["route"] = (
+            case["route"]() if "route" in case else {
+                "classification": "ordinary_taichi_kernel",
+                "passed": True,
+            }
+        )
+        result["runtime_memory_at_ready"] = runtime_memory_observation(ti)
         result["validation_before"] = case["validate"]()
         result["warmup_ms"] = [
             _timed_batch(ti, case["launch"], 1) for _ in range(args.warmups)
@@ -669,12 +924,14 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
             result["summary"] = summary
             result["stability"] = _run_stability(
                 ti, case["launch"], args.stability_replays,
-                args.stability_checkpoint, args.backend != "cpu")
+                args.stability_checkpoint, args.backend != "cpu", args.runtime)
         result["validation_after"] = case["validate"]()
         stability = result.get("stability")
         result["status"] = "passed" if (
             result["validation_before"]["passed"]
             and result["validation_after"]["passed"]
+            and result["route"]["passed"]
+            and result["device_identity"]["binding_verified"]
             and (stability is None or stability["memory_guard_passed"])
         ) else "failed"
         return result
@@ -687,11 +944,13 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         pre_reset_rss = working_set_bytes()
         pre_reset_gpu = (process_gpu_memory_mib(os.getpid())
                          if args.backend != "cpu" else None)
+        enhanced_pre_reset = runtime_memory_observation(ti)
         try:
             ti.reset()
         except Exception as error:  # pragma: no cover - captured in artifact
             reset_error = repr(error)
         gc.collect()
+        enhanced_post_reset = runtime_memory_observation(ti)
         result["teardown"] = {
             "sync_error": sync_error,
             "reset_error": reset_error,
@@ -700,6 +959,8 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
             "pre_reset_gpu_mib": pre_reset_gpu,
             "post_reset_gpu_mib": (process_gpu_memory_mib(os.getpid())
                                    if args.backend != "cpu" else None),
+            "enhanced_pre_reset": enhanced_pre_reset,
+            "enhanced_post_reset": enhanced_post_reset,
         }
         if sync_error is not None or reset_error is not None:
             result["status"] = "failed"
@@ -839,7 +1100,7 @@ def _extract_result(stdout: str) -> dict[str, Any] | None:
     return None
 
 
-def _child_environment() -> dict[str, str]:
+def _child_environment(backend: str) -> dict[str, str]:
     environment = os.environ.copy()
     environment.pop("PYTHONPATH", None)
     environment.pop("PYTHONHOME", None)
@@ -847,6 +1108,10 @@ def _child_environment() -> dict[str, str]:
     environment["PYTHONNOUSERSITE"] = "1"
     environment["PYTHONHASHSEED"] = "0"
     environment["PYTHONUNBUFFERED"] = "1"
+    if backend != "cpu":
+        environment["TI_VISIBLE_DEVICE"] = "0"
+    if backend == "cuda":
+        environment["CUDA_VISIBLE_DEVICES"] = "0"
     return environment
 
 
@@ -879,7 +1144,7 @@ def _run_child(args: argparse.Namespace, runtime: str, phase: str,
     completed = subprocess.run(
         command,
         cwd=Path(__file__).resolve().parents[2],
-        env=_child_environment(),
+        env=_child_environment(args.backend),
         capture_output=True,
         text=True,
         timeout=args.child_timeout_seconds,
@@ -971,6 +1236,54 @@ def _pair_execution_is_sequential(
     )
 
 
+def _runtime_evidence_summary(children: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    evidence: dict[str, Any] = {}
+    for runtime_name in ("forge", "vanilla"):
+        selected = [child for child in children
+                    if child["runtime"] == runtime_name]
+        if not selected:
+            continue
+        representative = selected[0]
+        stability = [child["stability"] for child in selected
+                     if child.get("stability") is not None]
+        rss_deltas = [item["rss_delta_bytes"] for item in stability
+                      if item.get("rss_delta_bytes") is not None]
+        gpu_deltas = [item["gpu_delta_mib"] for item in stability
+                      if item.get("gpu_delta_mib") is not None]
+        evidence[runtime_name] = {
+            "route": representative["route"],
+            "device_identity": representative["device_identity"],
+            "correctness_all_passed": all(
+                child["validation_before"]["passed"]
+                and child["validation_after"]["passed"]
+                for child in selected),
+            "stability": {
+                "completed_child_count": len(stability),
+                "minimum_replays": (
+                    None if not stability else min(item["replays"]
+                                                   for item in stability)
+                ),
+                "maximum_rss_delta_bytes": (
+                    None if not rss_deltas else max(rss_deltas)
+                ),
+                "maximum_gpu_delta_mib": (
+                    None if not gpu_deltas else max(gpu_deltas)
+                ),
+                "memory_guard_all_passed": bool(
+                    stability
+                    and all(item["memory_guard_passed"] for item in stability)
+                ),
+                "enhanced_plateau_required": runtime_name == "forge",
+                "enhanced_plateau_all_passed": bool(
+                    stability
+                    and all(item["enhanced_plateau"]["passed"]
+                            for item in stability)
+                ),
+            },
+        }
+    return evidence
+
+
 def _report_text(summary: dict[str, Any], language: str) -> str:
     result = summary["paired_summary"]
     cfg = summary["config"]
@@ -979,6 +1292,15 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
         name for name, passed in summary["claim_gate_results"].items()
         if not passed
     ]
+    forge_evidence = summary["runtime_evidence"]["forge"]
+    vanilla_evidence = summary["runtime_evidence"]["vanilla"]
+    forge_route = forge_evidence["route"]
+    vanilla_route = vanilla_evidence["route"]
+    gpu_rows = forge_evidence["device_identity"].get("nvidia_smi_devices", [])
+    gpu_name = "unknown" if not gpu_rows else gpu_rows[0].get("name", "unknown")
+    gpu_uuid = "unknown" if not gpu_rows else gpu_rows[0].get("uuid", "unknown")
+    forge_stability = forge_evidence["stability"]
+    vanilla_stability = vanilla_evidence["stability"]
     if language == "zh-CN":
         lines = [
             "# 单 kernel 本机 microbench 报告",
@@ -1003,6 +1325,23 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             f"- 性能宣称资格：{'通过' if qualified else '未通过'}",
             "- 未通过的固定发布门槛：" +
             ("无" if not failed_claim_gates else ", ".join(failed_claim_gates)),
+            "",
+            "## Route、设备与稳定性证据",
+            "",
+            f"- Forge route：`{forge_route['classification']}` / "
+            f"`{forge_route.get('observed_method')}`；验证："
+            f"{'通过' if forge_route['passed'] else '失败'}。",
+            f"- Vanilla route：`{vanilla_route['classification']}`；验证："
+            f"{'通过' if vanilla_route['passed'] else '失败'}。",
+            f"- 物理 GPU：`{gpu_name}`，UUID `{gpu_uuid}`；Forge UUID 匹配与 "
+            "vanilla 单 GPU device-zero 绑定均记录在 child artifact。",
+            f"- Forge stability child：{forge_stability['completed_child_count']}；"
+            f"最少 replay：{forge_stability['minimum_replays']}；增强 pool/live plateau："
+            f"{'通过' if forge_stability['enhanced_plateau_all_passed'] else '未完成'}。",
+            f"- Vanilla stability child：{vanilla_stability['completed_child_count']}；"
+            f"最少 replay：{vanilla_stability['minimum_replays']}；Forge 专有增强计数器"
+            "明确为 unavailable。",
+            "- First-call 仅作诊断；本报告的性能 gate 只适用于 warm steady-state。",
             "",
             "## 方法学边界",
             "",
@@ -1039,6 +1378,24 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             "- Failed fixed publication gates: " +
             ("none" if not failed_claim_gates else ", ".join(failed_claim_gates)),
             "",
+            "## Route, device, and stability evidence",
+            "",
+            f"- Forge route: `{forge_route['classification']}` / "
+            f"`{forge_route.get('observed_method')}`; verification "
+            f"{'passed' if forge_route['passed'] else 'failed'}.",
+            f"- Vanilla route: `{vanilla_route['classification']}`; verification "
+            f"{'passed' if vanilla_route['passed'] else 'failed'}.",
+            f"- Physical GPU: `{gpu_name}`, UUID `{gpu_uuid}`. Forge UUID matching "
+            "and vanilla's single-GPU device-zero proof are retained per child.",
+            f"- Forge stability children: {forge_stability['completed_child_count']}; "
+            f"minimum replays: {forge_stability['minimum_replays']}; enhanced "
+            f"pool/live plateau: {'pass' if forge_stability['enhanced_plateau_all_passed'] else 'not complete'}.",
+            f"- Vanilla stability children: {vanilla_stability['completed_child_count']}; "
+            f"minimum replays: {vanilla_stability['minimum_replays']}; Forge-only "
+            "enhanced counters are explicitly unavailable.",
+            "- First-call values are diagnostic only; performance gates in this "
+            "report apply only to warm steady state.",
+            "",
             "## Method boundary",
             "",
             "This report covers one kernel, one backend, and one size only. Forge "
@@ -1069,6 +1426,9 @@ def _write_bilingual_reports(output_dir: Path, summary: dict[str, Any]) -> None:
         f"- 相邻串行 A/B：{'通过' if summary['method_checks']['adjacent_sequential_pairs'] else '失败'}\n"
         f"- AB/BA 完全平衡：{'通过' if summary['method_checks']['balanced_pair_order'] else '失败'}\n"
         f"- 全部噪声准入：{'通过' if summary['method_checks']['noise_admission'] else '失败'}\n"
+        "- 物理设备绑定："
+        f"{'通过' if summary['method_checks']['physical_device_binding'] else '失败'}\n"
+        f"- 实际 route：{'通过' if summary['method_checks']['route_verified'] else '失败'}\n"
         "- 正确性与 teardown："
         f"{'通过' if summary['method_checks']['correctness_and_teardown'] else '失败'}\n"
         f"- 稳定性 replay：{'通过' if summary['method_checks']['stability_complete'] else '失败'}\n"
@@ -1095,6 +1455,10 @@ def _write_bilingual_reports(output_dir: Path, summary: dict[str, Any]) -> None:
         f"{'pass' if summary['method_checks']['balanced_pair_order'] else 'fail'}\n"
         "- All noise admissions: "
         f"{'pass' if summary['method_checks']['noise_admission'] else 'fail'}\n"
+        "- Physical device binding: "
+        f"{'pass' if summary['method_checks']['physical_device_binding'] else 'fail'}\n"
+        "- Actual execution route: "
+        f"{'pass' if summary['method_checks']['route_verified'] else 'fail'}\n"
         "- Correctness and teardown: "
         f"{'pass' if summary['method_checks']['correctness_and_teardown'] else 'fail'}\n"
         "- Stability replay: "
@@ -1279,6 +1643,7 @@ def _parent_main(args: argparse.Namespace) -> int:
             child["logical_bytes"], child["traffic_model"],
             child["batch_size"],
             tuple(sorted(child["measurement_config"].items())),
+            json.dumps(child["workload_contract"], sort_keys=True),
         )
         for child in children
     }
@@ -1307,6 +1672,9 @@ def _parent_main(args: argparse.Namespace) -> int:
             order_counts["forge->vanilla"] == order_counts["vanilla->forge"]),
         "noise_admission": all(
             item["passed"] for item in manifest["noise_observations"]),
+        "physical_device_binding": all(
+            child["device_identity"]["binding_verified"] for child in children),
+        "route_verified": all(child["route"]["passed"] for child in children),
         "correctness_and_teardown": all(
             child["status"] == "passed"
             and child["validation_before"]["passed"]
@@ -1363,6 +1731,7 @@ def _parent_main(args: argparse.Namespace) -> int:
         "paired_summary": paired,
         "p95_paired_summary": p95_paired,
         "quality": quality,
+        "runtime_evidence": _runtime_evidence_summary(children),
         "method_checks": method_checks,
         "claim_gate_results": claim_gate_results,
         "ready_for_qualification_report": bool(
