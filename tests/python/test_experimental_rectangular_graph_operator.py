@@ -187,19 +187,28 @@ def test_rectangular_graph_explicit_adjoint_update_and_qualification():
         expected_topology_version=1,
         expected_numeric_version=1,
     )
-    for stale_graph, stale_input, stale_output in (
+    for rebound_graph, rebound_input, rebound_output in (
         (forward_outer, forward_input, forward_output),
         (adjoint_outer, adjoint_input, adjoint_output),
     ):
-        with pytest.raises(
-            ti.TaichiRuntimeError, match="generation changed"
-        ):
-            stale_graph.run(
-                {
-                    "outer_input": stale_input,
-                    "outer_output": stale_output,
-                }
-            )
+        rebound_graph.run(
+            {
+                "outer_input": rebound_input,
+                "outer_output": rebound_output,
+            }
+        )
+    np.testing.assert_allclose(
+        forward_output.to_numpy(),
+        updated_matrix @ domain,
+        rtol=2e-5,
+        atol=2e-5,
+    )
+    np.testing.assert_allclose(
+        adjoint_output.to_numpy(),
+        updated_matrix.T @ range_values,
+        rtol=2e-5,
+        atol=2e-5,
+    )
     np.testing.assert_allclose(
         operator.apply(_array(np.float32, domain)).to_numpy(),
         updated_matrix @ domain,

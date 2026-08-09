@@ -10,6 +10,7 @@ from taichi_forge.linalg._runtime import (
     aslinearoperator,
     block_diagonal,
     identity,
+    inverse_block_diagonal,
     qualify_operator,
     summarize_operator_qualifications,
     vector_io_capabilities,

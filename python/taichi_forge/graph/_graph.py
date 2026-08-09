@@ -8601,6 +8601,20 @@ class _GraphSpec:
             if validate is not None:
                 validate()
 
+    def graph_submission_owners(self):
+        owners = []
+        seen = set()
+        for lease in self.lifetime_leases:
+            acquire = getattr(lease, "graph_submission_owners", None)
+            if acquire is None:
+                continue
+            for owner in tuple(acquire()):
+                identity = id(owner)
+                if identity not in seen:
+                    seen.add(identity)
+                    owners.append(owner)
+        return tuple(owners)
+
     def bind_runtime_args(self, args, temporaries=None, fixed_runtime_args=None):
         if fixed_runtime_args:
             overlap = fixed_runtime_args.keys() & args.keys()
@@ -11428,6 +11442,7 @@ class SubmissionTicket:
         "_completion",
         "_observation",
         "_runtime",
+        "_submission_owners",
         "_telemetry",
         "_workspace_lane",
     )
@@ -11440,11 +11455,13 @@ class SubmissionTicket:
         observation=None,
         telemetry=None,
         workspace_lane=0,
+        submission_owners=(),
     ):
         self._admission = admission
         self._completion = completion
         self._observation = observation
         self._runtime = runtime
+        self._submission_owners = tuple(submission_owners)
         self._telemetry = telemetry
         self._workspace_lane = int(workspace_lane)
 
@@ -11455,6 +11472,7 @@ class SubmissionTicket:
             ready = self._admission._completion_done(self._completion)
         if ready:
             self._runtime.release_runtime_submission_owner(self._completion)
+            self._submission_owners = ()
         return ready
 
     def wait(self):
@@ -11463,6 +11481,7 @@ class SubmissionTicket:
         else:
             self._admission._completion_wait(self._completion)
         self._runtime.release_runtime_submission_owner(self._completion)
+        self._submission_owners = ()
 
     def observations(self):
         """Wait if needed, then materialize this submission's snapshot."""
@@ -11747,6 +11766,7 @@ class Graph:
         observation_state = None
         telemetry_lease = None
         telemetry_state = None
+        submission_owners = ()
         submission_instance = self._instance
         workspace_lane_index = 0
         try:
@@ -11832,6 +11852,7 @@ class Graph:
                         self._latest_control_flow_was_async = True
                     else:
                         submission_instance.run(args)
+                    submission_owners = self._spec.graph_submission_owners()
                     # CGraph/kernel paths publish work themselves. Native plans
                     # use Program methods outside that launch path, so publish
                     # once for the whole native portion without changing run().
@@ -11870,8 +11891,12 @@ class Graph:
                     submission_instance.clear_temporary_buffers()
                     runtime._active_graph_submissions -= 1
 
-                if self._contains_native_nodes_value and completion.has_backend_work:
-                    runtime.retain_runtime_submission_owner(completion, self)
+                if (
+                    self._contains_native_nodes_value or submission_owners
+                ) and completion.has_backend_work:
+                    runtime.retain_runtime_submission_owner(
+                        completion, (self, *submission_owners)
+                    )
         except BaseException:
             if observation_lease is not None:
                 observation_lease.cancel()
@@ -11893,6 +11918,7 @@ class Graph:
             observation=observation_state,
             telemetry=telemetry_state,
             workspace_lane=workspace_lane_index,
+            submission_owners=submission_owners,
         )
 
     def _workspace_pool_for_current_runtime(self):

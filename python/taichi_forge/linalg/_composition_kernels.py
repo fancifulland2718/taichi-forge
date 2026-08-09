@@ -5,6 +5,17 @@ from taichi_forge.types import f32, i32, ndarray_type
 
 
 @kernel
+def identity_f32(
+    active_size: i32,
+    operator_data: ndarray_type.ndarray(dtype=i32, ndim=1),
+    input: ndarray_type.ndarray(dtype=f32, ndim=1),
+    output: ndarray_type.ndarray(dtype=f32, ndim=1),
+):
+    for index in range(active_size):
+        output[index] = input[index]
+
+
+@kernel
 def scale_f32(
     values: ndarray_type.ndarray(dtype=f32, ndim=1),
     scale: f32,

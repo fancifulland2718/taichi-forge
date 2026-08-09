@@ -7,7 +7,7 @@ import taichi_forge as ti
 from tests import test_utils
 
 
-def _diagonal_operator(values):
+def _diagonal_operator(values, *, traits=None):
     values = np.asarray(values, dtype=np.float32)
     size = values.size
     topology = ti.ndarray(ti.i32, shape=size)
@@ -27,7 +27,11 @@ def _diagonal_operator(values):
             y[index] = numeric_data[index] * x[topology_data[index]]
 
     return ti.linalg.LinearOperator.from_kernel(
-        apply_diagonal, size, topology, numeric=numeric
+        apply_diagonal,
+        size,
+        topology,
+        numeric=numeric,
+        traits=traits,
     )
 
 
@@ -134,11 +138,7 @@ def test_linear_operator_graph_action_reuses_provider_generation_and_dense_stora
         expected_topology_version=1,
         expected_numeric_version=1,
     )
-    with pytest.raises(ti.TaichiRuntimeError, match="generation changed"):
-        graph.run({"input": input_array, "output": output_array})
-
-    rebuilt = _operator_graph(operator)
-    rebuilt.run({"input": input_array, "output": output_array})
+    graph.run({"input": input_array, "output": output_array})
     np.testing.assert_allclose(
         output_array.to_numpy(),
         values * np.asarray([4.0, 6.0, 10.0, 14.0], dtype=np.float32),
@@ -182,21 +182,232 @@ def test_linear_operator_graph_action_records_rectangular_adjoint_for_dense_stor
         expected_topology_version=1,
         expected_numeric_version=1,
     )
-    for graph, input_value, output_value in (
-        (forward, forward_input, forward_output),
-        (adjoint, adjoint_input, adjoint_output),
-    ):
-        with pytest.raises(ti.TaichiRuntimeError, match="generation changed"):
-            graph.run({"input": input_value, "output": output_value})
-
-    rebuilt_adjoint = _operator_graph(operator, adjoint=True)
-    rebuilt_adjoint.run(
+    forward.run({"input": forward_input, "output": forward_output})
+    adjoint.run(
         {"input": adjoint_input, "output": adjoint_output}
+    )
+    np.testing.assert_allclose(
+        forward_output.to_numpy(), 2.0 * matrix @ forward_values
     )
     np.testing.assert_allclose(
         adjoint_output.to_numpy().reshape(-1),
         2.0 * matrix.T @ adjoint_values,
     )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_linear_operator_graph_action_pins_rebound_submission_generations():
+    operator = _diagonal_operator([2.0, 3.0, 5.0, 7.0])
+    graph = _operator_graph(operator)
+    values = np.asarray([0.5, -1.0, 2.0, 1.5], dtype=np.float32)
+    source = ti.ndarray(ti.f32, shape=4)
+    first_output = ti.ndarray(ti.f32, shape=4)
+    second_output = ti.ndarray(ti.f32, shape=4)
+    source.from_numpy(values)
+
+    second_generation = ti.ndarray(ti.f32, shape=4)
+    second_values = np.asarray([4.0, 6.0, 10.0, 14.0], dtype=np.float32)
+    second_generation.from_numpy(second_values)
+    operator.update_numeric(
+        second_generation,
+        expected_topology_version=1,
+        expected_numeric_version=1,
+    )
+    first = graph.submit({"input": source, "output": first_output})
+
+    third_generation = ti.ndarray(ti.f32, shape=4)
+    third_values = np.asarray([8.0, 12.0, 20.0, 28.0], dtype=np.float32)
+    third_generation.from_numpy(third_values)
+    operator.update_numeric(
+        third_generation,
+        expected_topology_version=1,
+        expected_numeric_version=2,
+    )
+    second = graph.submit({"input": source, "output": second_output})
+
+    assert tuple(first._submission_owners[0]._resource_stamp())[4] == 2
+    assert tuple(second._submission_owners[0]._resource_stamp())[4] == 3
+    first.wait()
+    second.wait()
+    assert first._submission_owners == ()
+    assert second._submission_owners == ()
+    np.testing.assert_allclose(first_output.to_numpy(), second_values * values)
+    np.testing.assert_allclose(second_output.to_numpy(), third_values * values)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_graph_numeric_rebind_churn_releases_retired_provider_generations():
+    operator = _diagonal_operator([2.0, 3.0, 5.0, 7.0])
+    graph = _operator_graph(operator)
+    source = ti.ndarray(ti.f32, shape=4)
+    output = ti.ndarray(ti.f32, shape=4)
+    source.fill(1.0)
+    graph.run({"input": source, "output": output})
+
+    for generation in range(1, 33):
+        values = np.asarray([2.0, 3.0, 5.0, 7.0], np.float32) * (
+            generation + 1
+        )
+        numeric = ti.ndarray(ti.f32, shape=4)
+        numeric.from_numpy(values)
+        operator.update_numeric(
+            numeric,
+            expected_topology_version=1,
+            expected_numeric_version=generation,
+        )
+        graph.run({"input": source, "output": output})
+    np.testing.assert_allclose(output.to_numpy(), values)
+    provider = operator._provider_core._debug_runtime_stats()
+    operations = provider["operations"]
+    resources = provider["resources"]
+    assert operations["resource_generations_published"] == 33
+    assert operations["resource_generations_retired"] == 32
+    assert operations["resource_generations_released"] == 32
+    assert resources["resource_generation_active_leases"] == 0
+    assert resources["operator_owned_reserved_bytes"] == 32
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_solve_plan_submit_rebinds_operator_and_preconditioner_generations():
+    diagonal = np.asarray([2.0, 3.0, 5.0, 7.0], dtype=np.float32)
+    traits = ti.linalg.OperatorTraits.spd()
+    operator = _diagonal_operator(diagonal, traits=traits)
+    preconditioner = _diagonal_operator(1.0 / diagonal, traits=traits)
+    plan = ti.linalg.experimental.SolvePlan(
+        operator,
+        method="pcg",
+        preconditioner=preconditioner,
+        max_iterations=16,
+        atol=1e-6,
+        execution_policy="device_convergent",
+    )
+    exact = np.asarray([0.5, -1.0, 2.0, 1.5], dtype=np.float32)
+    rhs = ti.ndarray(ti.f32, shape=4)
+    rhs.from_numpy(diagonal * exact)
+    first = plan.submit(rhs)
+    first_result = first.result()
+    assert first_result.converged
+    np.testing.assert_allclose(first_result.solution.to_numpy(), exact)
+    cached_graph = next(iter(plan._submission_graphs.values()))["graph"]
+
+    rebound_diagonal = 1.75 * diagonal
+    next_operator = ti.ndarray(ti.f32, shape=4)
+    next_preconditioner = ti.ndarray(ti.f32, shape=4)
+    next_operator.from_numpy(rebound_diagonal)
+    next_preconditioner.from_numpy(1.0 / rebound_diagonal)
+    operator.update_numeric(
+        next_operator,
+        expected_topology_version=1,
+        expected_numeric_version=1,
+    )
+    preconditioner.update_numeric(
+        next_preconditioner,
+        expected_topology_version=1,
+        expected_numeric_version=1,
+    )
+    rebound_rhs = ti.ndarray(ti.f32, shape=4)
+    rebound_rhs.from_numpy(rebound_diagonal * exact)
+    second_result = plan.submit(rebound_rhs).result()
+    assert second_result.converged
+    np.testing.assert_allclose(second_result.solution.to_numpy(), exact)
+    assert next(iter(plan._submission_graphs.values()))["graph"] is cached_graph
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_shifted_operator_graph_action_fuses_identity_term_and_rebinds():
+    base = _diagonal_operator([2.0, 3.0, 5.0, 7.0])
+    assert base.shifted(0.0) is base
+    with pytest.raises(RuntimeError, match="finite"):
+        base.shifted(float("nan"))
+    shifted = base.shifted(1.5)
+    graph = _operator_graph(shifted)
+    values = np.asarray([0.5, -1.0, 2.0, 1.5], dtype=np.float32)
+    source = ti.ndarray(ti.f32, shape=4)
+    output = ti.ndarray(ti.f32, shape=4)
+    source.from_numpy(values)
+
+    direct = shifted.apply(source)
+    np.testing.assert_allclose(
+        direct.to_numpy(),
+        values * np.asarray([3.5, 4.5, 6.5, 8.5], dtype=np.float32),
+    )
+    graph.run({"input": source, "output": output})
+    np.testing.assert_allclose(
+        output.to_numpy(),
+        values * np.asarray([3.5, 4.5, 6.5, 8.5], dtype=np.float32),
+    )
+    node = graph._debug_info["nodes"][0]
+    assert node["dispatch_count"] == 2
+    assert node.get("temporary_bytes", 0) == 0
+
+    updated = ti.ndarray(ti.f32, shape=4)
+    updated.from_numpy(np.asarray([4.0, 6.0, 10.0, 14.0], np.float32))
+    base.update_numeric(
+        updated,
+        expected_topology_version=1,
+        expected_numeric_version=1,
+    )
+    graph.run({"input": source, "output": output})
+    np.testing.assert_allclose(
+        output.to_numpy(),
+        values * np.asarray([5.5, 7.5, 11.5, 15.5], dtype=np.float32),
+    )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_shifted_operator_rejects_rectangular_shape():
+    operator = _rectangular_operator(
+        [[1.0, 0.0, 2.0], [0.0, 3.0, -1.0]]
+    )
+    with pytest.raises(RuntimeError, match="square"):
+        operator.shifted(1.0)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_inverse_block_diagonal_is_recordable_and_numerically_rebindable():
+    inverse_blocks = np.asarray(
+        [
+            [2.0, 0.25, 0.25, 1.0],
+            [1.5, -0.125, -0.125, 0.75],
+        ],
+        dtype=np.float32,
+    ).reshape(-1)
+    numeric = ti.ndarray(ti.f32, shape=inverse_blocks.size)
+    numeric.from_numpy(inverse_blocks)
+    action = ti.linalg.inverse_block_diagonal(
+        numeric, 2, assume_spd=True
+    )
+    graph = _operator_graph(action)
+    values = np.asarray([1.0, -2.0, 0.5, 3.0], dtype=np.float32)
+    source = ti.ndarray(ti.f32, shape=4)
+    output = ti.ndarray(ti.f32, shape=4)
+    source.from_numpy(values)
+    expected = inverse_blocks.reshape(2, 2, 2) @ values.reshape(2, 2, 1)
+    graph.run({"input": source, "output": output})
+    np.testing.assert_allclose(output.to_numpy(), expected.reshape(-1))
+    assert action.traits["self_adjoint"]["value"]
+    assert action.traits["positive_definite"]["value"]
+
+    updated_host = np.asarray(
+        [
+            [1.0, 0.0, 0.0, 0.5],
+            [0.75, 0.0, 0.0, 0.25],
+        ],
+        dtype=np.float32,
+    ).reshape(-1)
+    updated = ti.ndarray(ti.f32, shape=updated_host.size)
+    updated.from_numpy(updated_host)
+    action.update_numeric(
+        updated,
+        expected_topology_version=1,
+        expected_numeric_version=1,
+    )
+    graph.run({"input": source, "output": output})
+    expected = updated_host.reshape(2, 2, 2) @ values.reshape(2, 2, 1)
+    np.testing.assert_allclose(output.to_numpy(), expected.reshape(-1))
+
+    with pytest.raises(RuntimeError, match="assume_spd=True"):
+        ti.linalg.inverse_block_diagonal(updated, 2, assume_spd=False)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
@@ -393,8 +604,10 @@ def test_compiled_graph_operator_exports_ordered_multi_dispatch_action(
         expected_topology_version=1,
         expected_numeric_version=1,
     )
-    with pytest.raises(ti.TaichiRuntimeError, match="generation changed"):
-        graph.run({"input": input_array, "output": output_array})
+    graph.run({"input": input_array, "output": output_array})
+    np.testing.assert_allclose(
+        output_array.to_numpy(), replacement.to_numpy() * values + 1.0
+    )
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

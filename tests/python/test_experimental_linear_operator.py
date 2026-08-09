@@ -393,7 +393,9 @@ def test_recordable_operator_scale_sum_compose_and_workspace_reuse():
     first_async_output = ti.ndarray(ti.f32, shape=size)
     second_async_output = ti.ndarray(ti.f32, shape=size)
     first_ticket = graph.submit({"input": source, "output": first_async_output})
-    second_ticket = graph.submit({"input": second_source, "output": second_async_output})
+    second_ticket = graph.submit(
+        {"input": second_source, "output": second_async_output}
+    )
     first_ticket.wait()
     second_ticket.wait()
     np.testing.assert_allclose(first_async_output.to_numpy(), expected, rtol=2e-5)
@@ -405,6 +407,19 @@ def test_recordable_operator_scale_sum_compose_and_workspace_reuse():
     async_memory = graph.execution_stats().memory
     assert 1 <= async_memory.temporary_arena_allocations <= 2
     assert async_memory.temporary_arena_slots <= 2
+
+    rebound_diagonal = 1.25 * diagonal.to_numpy()
+    base.update_numeric(
+        _vector(rebound_diagonal),
+        expected_topology_version=1,
+        expected_numeric_version=1,
+    )
+    graph.run({"input": source, "output": output})
+    np.testing.assert_allclose(
+        output.to_numpy(),
+        3.0 * rebound_diagonal**2 * values,
+        rtol=2e-5,
+    )
 
     spd_composition = 0.5 * base + 0.5 * base
     exact = np.sin(np.linspace(0.1, 1.1, size, dtype=np.float32))
@@ -419,7 +434,9 @@ def test_recordable_operator_scale_sum_compose_and_workspace_reuse():
         assert not capabilities["bounded_convergent"]["supported"]
         assert capabilities["device_convergent"]["supported"]
         assert capabilities["device_convergent"]["automatic_selection_qualified"]
-        with pytest.raises(RuntimeError, match="require the qualified device_convergent"):
+        with pytest.raises(
+            RuntimeError, match="require the qualified device_convergent"
+        ):
             ti.linalg.experimental.SolvePlan(
                 spd_composition,
                 method="cg",
@@ -433,7 +450,7 @@ def test_recordable_operator_scale_sum_compose_and_workspace_reuse():
         and not plan.execution_capabilities()["device_convergent"]["supported"]
     ):
         pytest.skip("recordable structured Graph control is unavailable")
-    result = plan.solve(_vector(diagonal.to_numpy() * exact))
+    result = plan.solve(_vector(rebound_diagonal * exact))
     assert result.converged
     np.testing.assert_allclose(result.solution.to_numpy(), exact, rtol=3e-3)
     if impl.current_cfg().arch in (ti.cuda, ti.vulkan):
@@ -1159,8 +1176,26 @@ def test_experimental_fixed_linear_operator_pcg():
         expected_topology_version=1,
         expected_numeric_version=1,
     )
-    with pytest.raises(RuntimeError, match="generation"):
-        plan.solve(_vector(2.0 * diagonal.to_numpy() * exact))
+    updated_rhs = _vector(2.0 * diagonal.to_numpy() * exact)
+    if impl.current_cfg().arch == ti.vulkan:
+        rebound = plan.solve(updated_rhs)
+        assert rebound.converged
+        np.testing.assert_allclose(
+            rebound.solution.to_numpy(), exact, rtol=2e-4
+        )
+    elif impl.current_cfg().arch == ti.cuda and capabilities[
+        "device_convergent"
+    ]["supported"]:
+        rebound = device_plan.solve(updated_rhs)
+        assert rebound.converged
+        np.testing.assert_allclose(
+            rebound.solution.to_numpy(), exact, rtol=2e-4
+        )
+        with pytest.raises(RuntimeError, match="generation"):
+            plan.solve(updated_rhs)
+    else:
+        with pytest.raises(RuntimeError, match="generation"):
+            plan.solve(updated_rhs)
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)

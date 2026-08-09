@@ -1457,6 +1457,58 @@ class LinearOperator:
             composition_spec=("scale", scale, self),
         )
 
+    def shifted(self, shift):
+        """Returns ``self + shift * I`` with fused recordable lowering.
+
+        The operator must be square. On GPU Graph paths the identity term is
+        accumulated directly from the input after the provider action, so the
+        shift does not create a second operator dispatch or temporary vector.
+        """
+        self._ensure_valid()
+        if self.shape[0] != self.shape[1]:
+            raise TaichiRuntimeError("operator shifts require a square operator")
+        try:
+            shift = float(shift)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise TaichiRuntimeError("operator shift must be finite") from exc
+        if not math.isfinite(shift):
+            raise TaichiRuntimeError("operator shift must be finite")
+        if shift == 0.0:
+            return self
+        retained = (self,)
+        arch = self._program.config().arch
+        if arch in (_ti_core.Arch.x64, _ti_core.Arch.arm64):
+            identity_handle = _ti_core._make_identity_operator(
+                self._program, self.dtype, self.shape[0]
+            )
+        else:
+            if self.dtype != f32:
+                raise TaichiRuntimeError(
+                    "GPU shifted operators currently require f32"
+                )
+            from taichi_forge.linalg._composition_kernels import identity_f32
+
+            topology = ScalarNdarray(i32, (1,))
+            topology.fill(0)
+            identity_operator = LinearOperator.from_kernel(
+                identity_f32,
+                self.shape[0],
+                topology,
+                traits=OperatorTraits.spd(),
+            )
+            identity_handle = identity_operator._handle
+            retained = (self, identity_operator)
+        shifted_handle = _ti_core._make_sum_operator(
+            self._handle,
+            _ti_core._make_scaled_operator(shift, identity_handle),
+        )
+        return self._from_handle(
+            shifted_handle,
+            provider_kind="composition",
+            retained=retained,
+            composition_spec=("shift", shift, self),
+        )
+
     def __mul__(self, scale):
         return self.scaled(scale)
 
@@ -1585,20 +1637,30 @@ class LinearOperator:
         a :class:`ti.graph.GraphBuilder` or embedded in a structured
         ``Sequential`` region. Provider topology/numeric snapshots remain
         owned by the operator; no second device allocation or copy is made.
-        A numeric generation update invalidates already compiled Graphs and
-        requires rebuilding them.
+        Compatible values-only updates are rebound when the Graph is launched,
+        and each submission pins the immutable numeric generation that it
+        actually uses. A topology, schema, state-tree, or runtime-generation
+        change still invalidates the compiled Graph and fails closed instead
+        of rebuilding implicitly.
         """
         self._ensure_valid()
         if not isinstance(adjoint, bool):
             raise TypeError("adjoint must be bool")
         if self.dtype != f32:
-            raise TaichiRuntimeError("LinearOperator Graph actions currently require f32")
+            raise TaichiRuntimeError(
+                "LinearOperator Graph actions currently require f32"
+            )
         if self._composition_spec is not None:
             return _LinearOperatorCompositionGraphNode(self, input, output, adjoint)
         if not self._handle._supports_recordable_kernel():
-            raise TaichiRuntimeError("LinearOperator provider does not expose a recordable " "kernel action")
+            raise TaichiRuntimeError(
+                "LinearOperator provider does not expose a recordable "
+                "kernel action"
+            )
         if adjoint and not self.capabilities.adjoint_apply:
-            raise TaichiRuntimeError("LinearOperator provider does not expose an adjoint action")
+            raise TaichiRuntimeError(
+                "LinearOperator provider does not expose an adjoint action"
+            )
         return _LinearOperatorGraphNode(self, input, output, adjoint)
 
     def _supports_graph_action(self):
@@ -1607,9 +1669,13 @@ class LinearOperator:
         spec = self._composition_spec
         if spec is None:
             return bool(self._handle._supports_recordable_kernel())
-        if spec[0] == "scale":
+        if spec[0] in ("scale", "shift"):
             return spec[2]._supports_graph_action()
-        return all(operand._supports_graph_action() for operand in spec[1:] if isinstance(operand, LinearOperator))
+        return all(
+            operand._supports_graph_action()
+            for operand in spec[1:]
+            if isinstance(operand, LinearOperator)
+        )
 
     def statistics(self):
         """Returns native execution counters for this operator plan."""
@@ -1646,9 +1712,14 @@ def _cached_graph_dense_vector_binding(cache, name, value, extent):
         or tuple(descriptor.element_shape)
     ):
         raise TaichiRuntimeError(
-            f"LinearOperator Graph argument {name!r} must expose " f"exactly {extent} scalar f32 values without staging"
+            f"LinearOperator Graph argument {name!r} must expose "
+            f"exactly {extent} scalar f32 values without staging"
         )
-    view = None if isinstance(value, ScalarNdarray) else DenseNdarrayView(value, description)
+    view = (
+        None
+        if isinstance(value, ScalarNdarray)
+        else DenseNdarrayView(value, description)
+    )
     cache[name] = (value, extent, description, view)
     return description, view
 
@@ -1682,18 +1753,27 @@ class _LinearOperatorGraphExecutable(NativeGraphExecutable):
                 or int(value.field_dim) != 1
                 or tuple(value.element_shape) != ()
             ):
-                raise TaichiRuntimeError(f"LinearOperator Graph {role} must be a symbolic scalar " "f32 1-D ndarray")
+                raise TaichiRuntimeError(
+                    f"LinearOperator Graph {role} must be a symbolic scalar "
+                    "f32 1-D ndarray"
+                )
         if input_arg.name == output_arg.name:
-            raise TaichiRuntimeError("LinearOperator Graph input and output must use distinct " "symbolic resources")
+            raise TaichiRuntimeError(
+                "LinearOperator Graph input and output must use distinct "
+                "symbolic resources"
+            )
         self._operator = operator
         self._input_name = input_arg.name
         self._output_name = output_arg.name
         self._adjoint = adjoint
         self._record = operator._handle._recordable_kernel(adjoint)
         self._expected_stamp = tuple(self._record._resource_stamp())
+        self._record_signature = self._compatible_record_signature(self._record)
+        self._last_submission_records = (self._record,)
         prefix = f"__linear_operator_{id(self._record):x}"
         graph_dispatches = tuple(self._record._graph_dispatches)
         self._opaque_graph_ir = bool(graph_dispatches)
+        self._fixed_binding_sources = {}
         fixed = {}
         if graph_dispatches:
             remapped = {
@@ -1703,6 +1783,7 @@ class _LinearOperatorGraphExecutable(NativeGraphExecutable):
             for name, value in dict(self._record._fixed_i32).items():
                 private_name = f"{prefix}_{name}"
                 fixed[private_name] = int(value)
+                self._fixed_binding_sources[private_name] = ("i32", name)
                 remapped[name] = Arg(
                     ArgKind.SCALAR, private_name, i32
                 )
@@ -1712,6 +1793,10 @@ class _LinearOperatorGraphExecutable(NativeGraphExecutable):
                 private_name = f"{prefix}_{name}"
                 fixed[private_name] = ProviderOwnedNdarrayBinding(
                     value, self._record
+                )
+                self._fixed_binding_sources[private_name] = (
+                    "ndarray",
+                    name,
                 )
                 remapped[name] = Arg(
                     ArgKind.NDARRAY,
@@ -1742,6 +1827,14 @@ class _LinearOperatorGraphExecutable(NativeGraphExecutable):
                     topology, self._record
                 ),
             }
+            self._fixed_binding_sources[active_name] = (
+                "active_size",
+                None,
+            )
+            self._fixed_binding_sources[topology_name] = (
+                "topology",
+                None,
+            )
             symbols = [
                 Arg(ArgKind.SCALAR, active_name, i32),
                 Arg(
@@ -1755,6 +1848,10 @@ class _LinearOperatorGraphExecutable(NativeGraphExecutable):
             if numeric is not None:
                 fixed[numeric_name] = ProviderOwnedNdarrayBinding(
                     numeric, self._record
+                )
+                self._fixed_binding_sources[numeric_name] = (
+                    "numeric",
+                    None,
                 )
                 symbols.append(
                     Arg(
@@ -1771,7 +1868,7 @@ class _LinearOperatorGraphExecutable(NativeGraphExecutable):
             backends=("cpu", "cuda", "vulkan"),
             conditional_body_safe=True,
             fixed_bindings=fixed,
-            update_policy="rebuild",
+            update_policy="rebind",
             synchronization_domain="runtime_ordered",
         )
         self._runtime_arg_schema = (
@@ -1834,19 +1931,107 @@ class _LinearOperatorGraphExecutable(NativeGraphExecutable):
             "kind": "linear_operator_apply",
             "provider": self._operator.provider,
             "adjoint": self._adjoint,
-            "update_policy": "rebuild",
+            "update_policy": "rebind",
             "graph_ir_opaque": self._opaque_graph_ir,
             "recordable": dict(self._record._recordable_stats),
         }
 
-    def validate_graph_lifetime(self):
+    @staticmethod
+    def _ndarray_schema(value):
+        return (
+            str(value.element_data_type()),
+            tuple(value.shape),
+        )
+
+    @classmethod
+    def _compatible_record_signature(cls, record):
+        graph_dispatches = tuple(record._graph_dispatches)
+        if graph_dispatches:
+            dispatch_schema = tuple(
+                tuple(
+                    (
+                        symbol.name,
+                        str(getattr(symbol, "tag", "")),
+                        str(symbol.dtype()),
+                        int(symbol.field_dim),
+                        tuple(symbol.element_shape),
+                    )
+                    for symbol in symbols
+                )
+                for _, symbols in graph_dispatches
+            )
+            return (
+                "graph",
+                tuple(sorted(dict(record._fixed_i32).items())),
+                tuple(
+                    sorted(
+                        (name, cls._ndarray_schema(value))
+                        for name, value in dict(
+                            record._fixed_ndarrays
+                        ).items()
+                    )
+                ),
+                tuple(record._state_dependencies),
+                dispatch_schema,
+            )
+        topology = record._topology
+        numeric = record._numeric
+        return (
+            "kernel",
+            int(record.active_size),
+            cls._ndarray_schema(topology),
+            None if numeric is None else cls._ndarray_schema(numeric),
+            tuple(record._state_dependencies),
+        )
+
+    def _current_compatible_record(self):
         self._operator._ensure_valid()
-        current = tuple(self._operator._handle._resource_stamp())
-        if current != self._expected_stamp:
-            raise TaichiRuntimeError("LinearOperator provider generation changed; rebuild the Graph")
+        record = self._operator._handle._recordable_kernel(self._adjoint)
+        current = tuple(record._resource_stamp())
+        if current[:4] != self._expected_stamp[:4]:
+            raise TaichiRuntimeError(
+                "LinearOperator provider topology changed; rebuild the Graph"
+            )
+        if self._compatible_record_signature(record) != self._record_signature:
+            raise TaichiRuntimeError(
+                "LinearOperator recordable action schema changed; rebuild the Graph"
+            )
+        return record
+
+    def _bind_provider_generation(self):
+        record = self._current_compatible_record()
+        replacements = {}
+        fixed_i32 = dict(record._fixed_i32)
+        fixed_ndarrays = dict(record._fixed_ndarrays)
+        for private_name, (kind, source_name) in (
+            self._fixed_binding_sources.items()
+        ):
+            if kind == "active_size":
+                value = int(record.active_size)
+            elif kind == "topology":
+                value = ProviderOwnedNdarrayBinding(
+                    record._topology, record
+                )
+            elif kind == "numeric":
+                value = ProviderOwnedNdarrayBinding(record._numeric, record)
+            elif kind == "i32":
+                value = int(fixed_i32[source_name])
+            else:
+                value = ProviderOwnedNdarrayBinding(
+                    fixed_ndarrays[source_name], record
+                )
+            replacements[private_name] = value
+        self._last_submission_records = (record,)
+        return replacements
+
+    def graph_submission_owners(self):
+        return self._last_submission_records
+
+    def validate_graph_lifetime(self):
+        self._current_compatible_record()
 
     def bind_graph_arguments(self, runtime_args):
-        replacements = {}
+        replacements = self._bind_provider_generation()
         expected = (
             (self._input_name, self._operator.shape[0 if self._adjoint else 1]),
             (self._output_name, self._operator.shape[1 if self._adjoint else 0]),
@@ -1912,10 +2097,12 @@ class _LinearOperatorCompositionGraphAction(DispatchGraphAction):
             backends=("cpu", "cuda", "vulkan"),
             conditional_body_safe=True,
             fixed_bindings=fixed_bindings,
-            update_policy="rebuild",
+            update_policy="rebind",
             synchronization_domain="runtime_ordered",
         )
-        self._composition_temporary_bindings = MappingProxyType(dict(temporary_bindings))
+        self._composition_temporary_bindings = MappingProxyType(
+            dict(temporary_bindings)
+        )
         self._composition_temporary_requirements = {
             requirement.name: requirement for requirement in temporary_requirements
         }
@@ -1929,7 +2116,11 @@ class _LinearOperatorCompositionGraphAction(DispatchGraphAction):
         for symbol, requirement_name in self.temporary_bindings.items():
             requirement = self._composition_temporary_requirements[requirement_name]
             binding = temporaries[requirement_name]
-            if binding.offset != 0 or binding.bytes != requirement.bytes or binding.alignment < requirement.alignment:
+            if (
+                binding.offset != 0
+                or binding.bytes != requirement.bytes
+                or binding.alignment < requirement.alignment
+            ):
                 return None
             result[symbol] = binding.storage
         return result
@@ -1946,7 +2137,9 @@ def _merge_linear_operator_graph_fixed_bindings(executables):
             previous_array = getattr(previous, "arr", None)
             value_array = getattr(value, "arr", None)
             if previous != value and previous_array is not value_array:
-                raise TaichiRuntimeError("LinearOperator composition fixed Graph binding collision")
+                raise TaichiRuntimeError(
+                    "LinearOperator composition fixed Graph binding collision"
+                )
     return fixed
 
 
@@ -1962,9 +2155,15 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
                 or int(value.field_dim) != 1
                 or tuple(value.element_shape) != ()
             ):
-                raise TaichiRuntimeError(f"LinearOperator Graph {role} must be a symbolic scalar " "f32 1-D ndarray")
+                raise TaichiRuntimeError(
+                    f"LinearOperator Graph {role} must be a symbolic scalar "
+                    "f32 1-D ndarray"
+                )
         if input_arg.name == output_arg.name:
-            raise TaichiRuntimeError("LinearOperator Graph input and output must use distinct " "symbolic resources")
+            raise TaichiRuntimeError(
+                "LinearOperator Graph input and output must use distinct "
+                "symbolic resources"
+            )
 
         self._operator = operator
         self._input_name = input_arg.name
@@ -1982,10 +2181,14 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
         private_fixed = {}
 
         def append_child(child_operator, child_input, child_output, child_adjoint):
-            child = child_operator.graph_action(child_input, child_output, adjoint=child_adjoint).compile()
+            child = child_operator.graph_action(
+                child_input, child_output, adjoint=child_adjoint
+            ).compile()
             action = child.recordable_action
             if action is None:
-                raise TaichiRuntimeError("LinearOperator composition child is not recordable")
+                raise TaichiRuntimeError(
+                    "LinearOperator composition child is not recordable"
+                )
             children.append(child)
             dispatches.extend(action.dispatches)
             requirements.extend(child.temporary_requirements)
@@ -1994,7 +2197,9 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
         def temporary_arg(extent, suffix):
             symbol_name = f"{prefix}_{suffix}"
             requirement_name = f"{symbol_name}_storage"
-            requirement = TemporaryRequirement(requirement_name, int(extent) * 4, 16, "f32")
+            requirement = TemporaryRequirement(
+                requirement_name, int(extent) * 4, 16, "f32"
+            )
             requirements.append(requirement)
             temporary_bindings[symbol_name] = requirement_name
             return Arg(ArgKind.NDARRAY, symbol_name, f32, ndim=1)
@@ -2109,6 +2314,46 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
             terms = []
             weighted_terms(operator, 1.0, adjoint, terms)
             append_weighted_terms(terms, extent)
+        elif kind == "shift":
+            shift, base = float(spec[1]), spec[2]
+            extent = operator.shape[1 if adjoint else 0]
+            append_child(base, input_arg, output_arg, adjoint)
+            size_name = f"{prefix}_size"
+            output_scale_name = f"{prefix}_output_scale"
+            shift_name = f"{prefix}_shift"
+            size_arg = Arg(ArgKind.SCALAR, size_name, i32)
+            output_scale_arg = Arg(
+                ArgKind.SCALAR, output_scale_name, f32
+            )
+            shift_arg = Arg(ArgKind.SCALAR, shift_name, f32)
+            private_fixed.update(
+                {
+                    size_name: int(extent),
+                    output_scale_name: 1.0,
+                    shift_name: shift,
+                }
+            )
+            dispatches.append(
+                (
+                    gen_cpp_kernel(
+                        axpby_f32,
+                        (
+                            input_arg,
+                            output_arg,
+                            output_scale_arg,
+                            shift_arg,
+                            size_arg,
+                        ),
+                    ),
+                    (
+                        input_arg,
+                        output_arg,
+                        output_scale_arg,
+                        shift_arg,
+                        size_arg,
+                    ),
+                )
+            )
         elif kind == "compose":
             outer, inner = spec[1], spec[2]
             intermediate_extent = inner.shape[0]
@@ -2120,18 +2365,24 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
                 append_child(inner, input_arg, scratch, False)
                 append_child(outer, scratch, output_arg, False)
         else:
-            raise TaichiRuntimeError(f"Unsupported LinearOperator composition kind {kind!r}")
+            raise TaichiRuntimeError(
+                f"Unsupported LinearOperator composition kind {kind!r}"
+            )
 
         fixed = _merge_linear_operator_graph_fixed_bindings(children)
         overlap = fixed.keys() & private_fixed.keys()
         if overlap:
-            raise TaichiRuntimeError("LinearOperator composition private Graph binding collision")
+            raise TaichiRuntimeError(
+                "LinearOperator composition private Graph binding collision"
+            )
         fixed.update(private_fixed)
         requirement_by_name = {}
         for requirement in requirements:
             previous = requirement_by_name.get(requirement.name)
             if previous is not None and previous != requirement:
-                raise TaichiRuntimeError("LinearOperator composition temporary requirement collision")
+                raise TaichiRuntimeError(
+                    "LinearOperator composition temporary requirement collision"
+                )
             requirement_by_name[requirement.name] = requirement
         self._children = tuple(children)
         self._temporary_requirements = tuple(requirement_by_name.values())
@@ -2211,13 +2462,15 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
     def validate_graph_lifetime(self):
         self._operator._ensure_valid()
         current = tuple(self._operator._handle._resource_stamp())
-        if current != self._expected_stamp:
-            raise TaichiRuntimeError("LinearOperator composition generation changed; rebuild the Graph")
+        if current[:4] != self._expected_stamp[:4]:
+            raise TaichiRuntimeError(
+                "LinearOperator composition topology changed; rebuild the Graph"
+            )
         for child in self._children:
             child.validate_graph_lifetime()
 
     def bind_graph_arguments(self, runtime_args):
-        replacements = {}
+        replacements = self._bind_provider_generation()
         expected = (
             (
                 self._input_name,
@@ -2238,6 +2491,29 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
             if view is not None:
                 replacements[name] = view
         return replacements
+
+    def _bind_provider_generation(self):
+        replacements = {}
+        for child in self._children:
+            child_replacements = child._bind_provider_generation()
+            overlap = replacements.keys() & child_replacements.keys()
+            if overlap:
+                raise TaichiRuntimeError(
+                    "LinearOperator composition generation binding collision"
+                )
+            replacements.update(child_replacements)
+        return replacements
+
+    def graph_submission_owners(self):
+        owners = []
+        seen = set()
+        for child in self._children:
+            for owner in child.graph_submission_owners():
+                identity = id(owner)
+                if identity not in seen:
+                    seen.add(identity)
+                    owners.append(owner)
+        return tuple(owners)
 
     def validate_graph_bindings(self, runtime_args):
         expected = (
@@ -2294,6 +2570,64 @@ def identity(size, dtype=f32):
     handle = _ti_core._make_identity_operator(_current_program(), dtype, size)
     return LinearOperator._from_handle(
         handle, provider_kind="composition", retained=()
+    )
+
+
+def inverse_block_diagonal(inverse_blocks, block_size, *, assume_spd):
+    """Builds a recordable scalar or small-block inverse action.
+
+    ``inverse_blocks`` is a flat row-major f32 ndarray containing independent
+    1x1, 2x2, 3x3, or 4x4 inverse blocks. No device-to-host validation is
+    performed. Passing ``assume_spd=True`` is therefore an explicit assertion
+    that every supplied block is symmetric positive definite and suitable as
+    a fixed-linear CG/PCG preconditioner. Numeric generations can later be
+    published with :meth:`LinearOperator.update_numeric` without rebuilding a
+    compatible Graph.
+    """
+    inverse_blocks = _require_current_scalar_ndarray(
+        inverse_blocks, "inverse_blocks", dtype=f32
+    )
+    block_size = _require_positive_size(block_size, "block_size")
+    if block_size not in (1, 2, 3, 4):
+        raise TaichiRuntimeError(
+            "inverse_block_diagonal supports block_size 1, 2, 3, or 4"
+        )
+    if assume_spd is not True:
+        raise TaichiRuntimeError(
+            "inverse_block_diagonal requires assume_spd=True; Forge does "
+            "not read back or infer the mathematical validity of device "
+            "preconditioner coefficients"
+        )
+    coefficients = int(inverse_blocks.shape[0])
+    block_coefficients = block_size * block_size
+    if coefficients == 0 or coefficients % block_coefficients != 0:
+        raise TaichiRuntimeError(
+            "inverse_blocks length must be a positive multiple of "
+            "block_size * block_size"
+        )
+    block_count = coefficients // block_coefficients
+    size = block_count * block_size
+    topology_host = np.empty(2 * size + 1, dtype=np.int32)
+    for index in range(size):
+        block = index // block_size
+        row = index % block_size
+        topology_host[2 * index] = (
+            block * block_coefficients + row * block_size
+        )
+        topology_host[2 * index + 1] = block * block_size
+    topology_host[-1] = block_size
+    topology = ScalarNdarray(i32, topology_host.shape)
+    topology.from_numpy(topology_host)
+    from taichi_forge.linalg._preconditioner_kernels import (
+        apply_inverse_blocks_f32,
+    )
+
+    return LinearOperator.from_kernel(
+        apply_inverse_blocks_f32,
+        size,
+        topology,
+        numeric=inverse_blocks,
+        traits=OperatorTraits.spd(),
     )
 
 
@@ -2822,7 +3156,9 @@ def _validate_solve_controls(dtype, max_iterations, atol, rtol):
 
 
 def _cuda_device_convergent_status(cuda_conditional, provider_kind):
-    if provider_kind != "stored" and cuda_conditional.get("internal_masked_graph_available", False):
+    if provider_kind != "stored" and cuda_conditional.get(
+        "internal_masked_graph_available", False
+    ):
         reason = "none"
     elif not cuda_conditional["driver_version_eligible"]:
         reason = "cuda_driver_api_version_below_12_8"
@@ -2930,8 +3266,7 @@ def _solver_execution_capabilities(
         and (is_cpu or is_cuda or is_vulkan)
     )
     recordable_device_qualified = (
-        not batched
-        and provider_recordable
+        provider_recordable
         and preconditioner_replay_qualified
         and method in ("cg", "pcg")
         and dtype == f32
@@ -2949,17 +3284,40 @@ def _solver_execution_capabilities(
     policies = {
         "host_each_iteration": (
             is_cpu
-            or (provider_kind != "composition" and is_cuda and method not in ("gmres", "fgmres"))
-            or (provider_kind != "composition" and batched and is_vulkan)
+            or (
+                provider_kind != "composition"
+                and is_cuda
+                and method not in ("gmres", "fgmres")
+            )
+            or (
+                provider_kind != "composition"
+                and batched
+                and is_vulkan
+            )
         ),
-        "host_check_every_k": (provider_kind != "composition" and (is_cuda or is_vulkan)),
-        "fixed_budget_masked": (provider_kind != "composition" and (is_vulkan or (batched and is_cuda))),
+        "host_check_every_k": (
+            provider_kind != "composition" and (is_cuda or is_vulkan)
+        ),
+        "fixed_budget_masked": (
+            provider_kind != "composition"
+            and (is_vulkan or (batched and is_cuda))
+        ),
         "bounded_convergent": bounded_qualified,
         "device_convergent": (
             (bounded_qualified or recordable_device_qualified)
             and (
-                (is_cuda and cuda_device_convergent_available and (provider_kind == "stored" or provider_recordable))
-                or (is_vulkan and vulkan_structured_runtime_mode and provider_recordable)
+                (
+                    is_cuda
+                    and cuda_device_convergent_available
+                    and (
+                        provider_kind == "stored" or provider_recordable
+                    )
+                )
+                or (
+                    is_vulkan
+                    and vulkan_structured_runtime_mode
+                    and provider_recordable
+                )
             )
         ),
     }
@@ -2971,23 +3329,34 @@ def _solver_execution_capabilities(
                 and cuda_device_convergent_available
                 and (provider_kind == "stored" or provider_recordable)
             )
-            or (is_vulkan and vulkan_structured_runtime_mode and provider_recordable)
+            or (
+                is_vulkan
+                and vulkan_structured_runtime_mode
+                and provider_recordable
+            )
         )
     )
     native_upgrade_automatic = (
         native_upgrade_available
         and (
             provider_kind == "stored"
-            or (is_vulkan and provider_kind in ("kernel", "composition") and provider_recordable)
+            or (
+                is_vulkan
+                and provider_kind in ("kernel", "composition")
+                and provider_recordable
+            )
         )
     )
-    device_automatic_selection = native_upgrade_automatic or (
-        recordable_device_qualified
-        and (
-            provider_kind in ("graph_action", "composition")
-            or (provider_kind == "graph" and method == "pcg")
+    device_automatic_selection = not batched and (
+        native_upgrade_automatic
+        or (
+            recordable_device_qualified
+            and (
+                provider_kind in ("graph_action", "composition")
+                or (provider_kind == "graph" and method == "pcg")
+            )
+            and policies["device_convergent"]
         )
-        and policies["device_convergent"]
     )
     native_replay_qualified = (
         not batched
@@ -3071,7 +3440,11 @@ def _solver_execution_capabilities(
                 (bounded_qualified or recordable_device_qualified)
                 and (
                     (is_cuda and (provider_kind == "stored" or provider_recordable))
-                    or (is_vulkan and vulkan_structured_runtime_mode and provider_recordable)
+                    or (
+                        is_vulkan
+                        and vulkan_structured_runtime_mode
+                        and provider_recordable
+                    )
                 )
             ),
             "automatic_selection_qualified": device_automatic_selection,
@@ -3752,11 +4125,11 @@ class _SolvePlanGraphExecutable(NativeGraphExecutable):
                 "SolvePlan Graph action belongs to another runtime"
             )
         self._plan.operator._ensure_valid()
-        if tuple(self._plan.operator._handle._resource_stamp()) != (
-            self._expected_operator_stamp
+        if tuple(self._plan.operator._handle._resource_stamp())[:4] != (
+            self._expected_operator_stamp[:4]
         ):
             raise TaichiRuntimeError(
-                "SolvePlan operator provider generation changed; rebuild the Graph"
+                "SolvePlan operator topology changed; rebuild the Graph"
             )
 
     def _terminal_array(self, runtime_args, symbol, dtype, role):
