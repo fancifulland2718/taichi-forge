@@ -162,13 +162,47 @@ class SolveResult:
     breakdown_reason: str
 
 
+class _CompletedSolvePlanTicket:
+    __slots__ = ()
+
+    def done(self):
+        return True
+
+    def wait(self):
+        return None
+
+    def telemetry(self):
+        return None
+
+    def pipeline_report(self):
+        return None
+
+    @property
+    def backend(self):
+        return "cpu"
+
+    @property
+    def sequence(self):
+        return None
+
+    @property
+    def workspace_lane(self):
+        return 0
+
+    @property
+    def _has_backend_work(self):
+        return False
+
+
 class SolvePlanSubmission:
     """One asynchronous single-system :class:`SolvePlan` invocation.
 
-    ``wait()`` waits only for backend completion. ``result()`` additionally
-    materializes the submission-owned device terminal packet exactly once.
-    The wrapper retains every runtime operand, the cached Graph, and the plan
-    until completion, including when the user drops the object early.
+    On CUDA/Vulkan, ``wait()`` waits only for backend completion and
+    ``result()`` additionally materializes the submission-owned device
+    terminal packet exactly once. CPU submissions contain an already-complete
+    native result. The wrapper retains every runtime operand, the optional
+    cached Graph, and the plan until completion, including when the user drops
+    the object early.
     """
 
     __slots__ = (
@@ -194,6 +228,7 @@ class SolvePlanSubmission:
         rhs,
         solution,
         initial_guess,
+        completed_result=None,
     ):
         self._plan = plan
         self._graph = graph
@@ -204,7 +239,7 @@ class SolvePlanSubmission:
         self._initial_guess = initial_guess
         self._absolute_tolerance = float(plan.atol)
         self._relative_tolerance = float(plan.rtol)
-        self._result = None
+        self._result = completed_result
         self._lock = threading.Lock()
 
     def done(self):
@@ -249,7 +284,7 @@ class SolvePlanSubmission:
 
     @property
     def terminal_packet(self):
-        """The device-resident terminal packet owned by this submission."""
+        """The device terminal packet, or ``None`` for completed CPU work."""
 
         return self._packet
 
@@ -4049,6 +4084,7 @@ class SolvePlan:
         self._submission_failures = 0
         self._submission_telemetry_requests = 0
         self._submission_terminal_materializations = 0
+        self._submission_native_completed_results = 0
         get_runtime().register_runtime_object(self)
 
     def _invalidate_runtime(self):
@@ -5264,6 +5300,12 @@ class SolvePlan:
             raise TaichiRuntimeError(
                 "SolvePlan cannot be used after ti.reset()"
             )
+        capability = self._submission_capability()
+        if not capability["qualified"]:
+            raise TaichiRuntimeError(
+                "SolvePlan.submit is unsupported; no fallback was performed: "
+                f"{capability['unsupported_reason']}"
+            )
         key = bool(with_initial_guess)
         with self._submission_lock:
             cached = self._submission_graphs.get(key)
@@ -5315,6 +5357,62 @@ class SolvePlan:
             self._submission_graph_builds += 1
             return cached
 
+    def _submission_capability(self):
+        arch = self._program.config().arch
+        if arch in (_ti_core.Arch.x64, _ti_core.Arch.arm64):
+            return {
+                "qualified": True,
+                "asynchronous": False,
+                "unsupported_reason": "none",
+            }
+        if arch not in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan):
+            return {
+                "qualified": False,
+                "asynchronous": False,
+                "unsupported_reason": "unsupported_backend",
+            }
+        if self.method not in ("cg", "pcg") or self.operator.dtype != f32:
+            return {
+                "qualified": False,
+                "asynchronous": False,
+                "unsupported_reason": "recordable_f32_cg_pcg_required",
+            }
+        if self._native_execution_policy != "device_convergent":
+            return {
+                "qualified": False,
+                "asynchronous": False,
+                "unsupported_reason": "device_convergent_policy_required",
+            }
+        if not self.operator._supports_graph_action():
+            return {
+                "qualified": False,
+                "asynchronous": False,
+                "unsupported_reason": "operator_action_not_recordable",
+            }
+        if self.method == "pcg":
+            if isinstance(self.preconditioner, LinearOperator):
+                preconditioner = self.preconditioner
+            elif isinstance(self.preconditioner, PreconditionerPlan):
+                preconditioner = self.preconditioner._consumer_action
+            else:
+                preconditioner = None
+            if (
+                preconditioner is None
+                or not preconditioner._supports_graph_action()
+            ):
+                return {
+                    "qualified": False,
+                    "asynchronous": False,
+                    "unsupported_reason": (
+                        "preconditioner_action_not_recordable"
+                    ),
+                }
+        return {
+            "qualified": True,
+            "asynchronous": True,
+            "unsupported_reason": "none",
+        }
+
     def submit(
         self,
         rhs,
@@ -5327,13 +5425,14 @@ class SolvePlan:
         telemetry=False,
         workspace_lane=None,
     ):
-        """Submit one complete solve and return a single async ticket wrapper.
+        """Submit one complete solve and return one ticket-shaped wrapper.
 
-        The implementation records :meth:`graph_action` into one lazily cached
-        Graph and delegates admission, workspace-lane ownership, backend
-        completion, and telemetry to :meth:`Graph.submit`. No terminal state is
-        read on this path. ``SolvePlanSubmission.wait()`` waits for completion;
-        ``result()`` performs the one terminal-packet materialization.
+        CUDA/Vulkan record :meth:`graph_action` into one lazily cached Graph
+        and delegate admission, workspace-lane ownership, completion, and
+        telemetry to :meth:`Graph.submit`. No terminal state is read on that
+        path; ``result()`` performs the one terminal-packet materialization.
+        CPU uses the existing synchronous native solve and returns an already-
+        complete lane-0 wrapper without Graph telemetry.
         """
 
         with self._submission_lock:
@@ -5341,6 +5440,36 @@ class SolvePlan:
             if telemetry:
                 self._submission_telemetry_requests += 1
         try:
+            if not isinstance(telemetry, bool):
+                raise TaichiRuntimeError(
+                    "SolvePlan.submit() telemetry must be a bool"
+                )
+            if self._program.config().arch in (
+                _ti_core.Arch.x64,
+                _ti_core.Arch.arm64,
+            ):
+                if workspace_lane not in (None, 0):
+                    raise TaichiRuntimeError(
+                        "CPU SolvePlan.submit completes synchronously and "
+                        "supports workspace_lane 0 only"
+                    )
+                result = self.solve(
+                    rhs, initial_guess=initial_guess, out=out
+                )
+                submission = SolvePlanSubmission(
+                    self,
+                    None,
+                    _CompletedSolvePlanTicket(),
+                    None,
+                    rhs,
+                    result.solution,
+                    initial_guess,
+                    completed_result=result,
+                )
+                with self._submission_lock:
+                    self._submission_successes += 1
+                    self._submission_native_completed_results += 1
+                return submission
             cached = self._submission_graph(initial_guess is not None)
             if out is None:
                 out = ScalarNdarray(
@@ -5545,7 +5674,21 @@ class SolvePlan:
                 for key, value in self._submission_graphs.items()
             )
             result = {
-                "workspace_lane_capacity": self.submission_workspace_lanes,
+                "execution_path": (
+                    "native_cpu_completed"
+                    if self._program.config().arch
+                    in (_ti_core.Arch.x64, _ti_core.Arch.arm64)
+                    else "cached_graph_submission"
+                ),
+                "configured_workspace_lane_capacity": (
+                    self.submission_workspace_lanes
+                ),
+                "workspace_lane_capacity": (
+                    1
+                    if self._program.config().arch
+                    in (_ti_core.Arch.x64, _ti_core.Arch.arm64)
+                    else self.submission_workspace_lanes
+                ),
                 "workspace_saturation_policy": (
                     self.submission_workspace_saturation
                 ),
@@ -5557,7 +5700,11 @@ class SolvePlan:
                 "terminal_materializations": (
                     self._submission_terminal_materializations
                 ),
+                "native_completed_results": (
+                    self._submission_native_completed_results
+                ),
             }
+            result.update(self._submission_capability())
         persistent_bytes = 0
         transient_bytes = 0
         lanes_materialized = 0

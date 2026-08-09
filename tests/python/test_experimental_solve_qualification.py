@@ -89,7 +89,7 @@ def test_single_solve_qualification_factory_true_residual_and_matrix():
         repetitions=2,
         metadata={"case": "single_diagonal"},
     )
-    assert report.passed
+    assert report.passed, report.to_json()
     record = report.to_dict()
     assert record["schema"] == "taichi_forge.linalg.solve_qualification.v1"
     assert record["plan"]["kind"] == "single"
@@ -121,6 +121,40 @@ def test_single_solve_qualification_factory_true_residual_and_matrix():
     assert matrix["rows"][0]["checks"]["true_residual"] == "passed"
     with pytest.raises(TypeError):
         report.record["passed"] = False
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_single_solve_qualification_uses_qualified_async_submission():
+    diagonal = np.asarray([2.0, 3.0, 5.0, 7.0], dtype=np.float32)
+    operator = _diagonal_operator(diagonal)
+    preconditioner = _diagonal_operator(1.0 / diagonal)
+    plan = ti.linalg.experimental.SolvePlan(
+        operator,
+        method="pcg",
+        preconditioner=preconditioner,
+        max_iterations=8,
+        atol=1e-6,
+        execution_policy="device_convergent",
+    )
+    exact = np.asarray([0.5, -1.0, 2.0, 1.5], dtype=np.float32)
+    report = ti.linalg.experimental.qualify_solve_plan(
+        plan,
+        _vector(diagonal * exact),
+        reference=exact,
+        warmup=0,
+        repetitions=2,
+    )
+
+    assert report.passed, report.to_json()
+    record = report.to_dict()
+    assert record["timing"]["host_submit_available"]
+    assert record["timing"]["warm_host_submit_ms"]["median"] >= 0.0
+    assert record["timing"]["warm_completion_wait_ms"]["median"] >= 0.0
+    submission = record["statistics"]["final"]["submission"]
+    assert submission["qualified"]
+    assert submission["asynchronous"]
+    assert submission["submit_successes"] == 3
+    assert submission["terminal_materializations"] == 3
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

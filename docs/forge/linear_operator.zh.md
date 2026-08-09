@@ -419,8 +419,9 @@ print(result.iterations, result.residual_norm, result.termination_reason)
 stats = plan.statistics()
 ```
 
-若 f32 CG/PCG plan 的 A/M provider 均可录制，也可以由 plan 持有一个缓存的单 action
-Graph，并异步提交完整求解：
+在 CUDA/Vulkan 上，若 f32 CG/PCG plan 的 A/M provider 均可录制且选择了取得资格的
+`device_convergent` policy，也可以由 plan 持有一个缓存的单 action Graph，并异步提交
+完整求解：
 
 ```python
 plan = ti.linalg.experimental.SolvePlan(
@@ -437,17 +438,19 @@ result = submission.result()      # 一次显式 terminal materialization
 print(submission.workspace_lane, result.iterations)
 ```
 
-`SolvePlanSubmission` 会把 plan、runtime operand、output、terminal packet 与缓存 Graph
-保留到 completion。`done()`/`wait()` 不读 terminal；`result()` 只读一次并缓存 immutable
-`SolveResult`；`telemetry()` 暴露同一次 Graph submission 的遥测。无 initial guess 与显式
+在 CUDA/Vulkan 上，`SolvePlanSubmission` 会把 plan、runtime operand、output、terminal
+packet 与缓存 Graph 保留到 completion。`done()`/`wait()` 不读 terminal；`result()` 只读
+一次并缓存 immutable `SolveResult`；`telemetry()` 暴露同一次 Graph submission 的遥测。无 initial guess 与显式
 initial guess 会分别缓存，每个已物化 variant 有自己的 lane pool。
 `submission_statistics()` 报告 variant、lane、persistent/transient bytes、提交/失败、
 telemetry request 与 terminal materialization。
 
-该便捷路径不新增 solver/backend primitive；它严格等价于把 `graph_action()` 放入缓存 Graph
-后调用 `Graph.submit()`，因此资格与失败边界仍是相同的 recordable f32 CG/PCG 合同。
-`submission_workspace_lanes=N` 为每条在途 lane 提供独立 Krylov storage；额外 lane 会线性
-增加 persistent memory，但不承诺 kernel 的物理并行。
+GPU 便捷路径不新增 solver/backend primitive；它严格等价于把 `graph_action()` 放入缓存
+Graph 后调用 `Graph.submit()`，因此资格与失败边界仍是相同的 recordable f32 CG/PCG
+device-convergent 合同。`submission_workspace_lanes=N` 为每条在途 GPU lane 提供独立
+Krylov storage；额外 lane 会线性增加 persistent memory，但不承诺 kernel 的物理并行。
+CPU 则同步执行既有精确 native `solve()` 并返回已经完成的 `SolvePlanSubmission`：只使用
+lane 0，没有 device terminal packet/Graph telemetry，也不会复刻 GPU 风格的 masked capacity。
 
 ### 完整 SolvePlan Graph action
 

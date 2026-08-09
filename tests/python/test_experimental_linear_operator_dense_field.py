@@ -63,6 +63,138 @@ def _compiled_graph_identity(size, *, multi_dispatch=False):
     )
 
 
+def _compiled_graph_stencil_and_jacobi(size):
+    topology = ti.ndarray(ti.i32, shape=size)
+    topology.from_numpy(np.arange(size, dtype=np.int32))
+    diagonal_values = 2.5 + 0.25 * np.sin(
+        np.linspace(0.0, 5.0, size, dtype=np.float32)
+    )
+    diagonal = ti.ndarray(ti.f32, shape=size)
+    diagonal.from_numpy(diagonal_values.astype(np.float32))
+
+    @ti.kernel
+    def stencil_diagonal(
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        diagonal_data: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        temporary: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for slot in range(size):
+            index = topology_data[slot]
+            temporary[index] = diagonal_data[index] * x[index]
+
+    @ti.kernel
+    def stencil_left(
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        temporary: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for slot in range(size):
+            index = topology_data[slot]
+            if index > 0:
+                temporary[index] -= 0.9 * x[index - 1]
+
+    @ti.kernel
+    def stencil_right(
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        temporary: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for slot in range(size):
+            index = topology_data[slot]
+            y[index] = temporary[index]
+            if index + 1 < size:
+                y[index] -= 0.9 * x[index + 1]
+
+    @ti.kernel
+    def jacobi_apply(
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        diagonal_data: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        temporary: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for slot in range(size):
+            index = topology_data[slot]
+            temporary[index] = x[index] / diagonal_data[index]
+
+    @ti.kernel
+    def copy_vector(
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        temporary: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for slot in range(size):
+            index = topology_data[slot]
+            y[index] = temporary[index]
+
+    topology_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "topology", ti.i32, ndim=1
+    )
+    diagonal_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "diagonal", ti.f32, ndim=1
+    )
+    input_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "input", ti.f32, ndim=1
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1
+    )
+    temporary_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "temporary", ti.f32, ndim=1
+    )
+
+    operator_temporary = ti.ndarray(ti.f32, shape=size)
+    operator_builder = ti.graph.GraphBuilder()
+    operator_builder.dispatch(
+        stencil_diagonal,
+        topology_arg,
+        diagonal_arg,
+        input_arg,
+        temporary_arg,
+    )
+    operator_builder.dispatch(
+        stencil_left, topology_arg, input_arg, temporary_arg
+    )
+    operator_builder.dispatch(
+        stencil_right,
+        topology_arg,
+        input_arg,
+        temporary_arg,
+        output_arg,
+    )
+    operator = ti.linalg.LinearOperator.from_graph(
+        operator_builder.compile(),
+        size,
+        topology={"topology": topology},
+        numeric={"diagonal": diagonal},
+        workspace={"temporary": operator_temporary},
+        traits=ti.linalg.OperatorTraits.spd(),
+    )
+
+    preconditioner_temporary = ti.ndarray(ti.f32, shape=size)
+    preconditioner_builder = ti.graph.GraphBuilder()
+    preconditioner_builder.dispatch(
+        jacobi_apply,
+        topology_arg,
+        diagonal_arg,
+        input_arg,
+        temporary_arg,
+    )
+    preconditioner_builder.dispatch(
+        copy_vector, topology_arg, temporary_arg, output_arg
+    )
+    preconditioner = ti.linalg.LinearOperator.from_graph(
+        preconditioner_builder.compile(),
+        size,
+        topology={"topology": topology},
+        numeric={"diagonal": diagonal},
+        workspace={"temporary": preconditioner_temporary},
+        traits=ti.linalg.OperatorTraits.spd(),
+    )
+    return operator, preconditioner, diagonal_values.astype(np.float32)
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_dense_scalar_field_apply_solve_and_staging_reuse():
     values = np.arange(6, dtype=np.float32).reshape(2, 3)
@@ -260,6 +392,9 @@ def test_solve_plan_complete_graph_action_terminal_and_workspace(method):
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_solve_plan_submit_owns_terminal_ticket_and_workspace_lane():
     size = 64
+    options = {}
+    if impl.current_cfg().arch in (ti.cuda, ti.vulkan):
+        options["execution_policy"] = "device_convergent"
     plan = ti.linalg.experimental.SolvePlan(
         _compiled_identity(size),
         method="cg",
@@ -267,6 +402,7 @@ def test_solve_plan_submit_owns_terminal_ticket_and_workspace_lane():
         atol=1e-6,
         submission_workspace_lanes=2,
         submission_workspace_saturation="raise",
+        **options,
     )
     expected = np.linspace(-2.0, 3.0, size, dtype=np.float32)
     rhs = ti.field(ti.f32, shape=size)
@@ -274,22 +410,30 @@ def test_solve_plan_submit_owns_terminal_ticket_and_workspace_lane():
     rhs.from_numpy(expected)
     output.fill(0.0)
 
+    requested_lane = 0 if impl.current_cfg().arch == ti.cpu else 1
     submission = plan.submit(
         rhs,
         out=output,
         telemetry=True,
-        workspace_lane=1,
+        workspace_lane=requested_lane,
     )
     assert isinstance(
         submission, ti.linalg.experimental.SolvePlanSubmission
     )
-    assert submission.workspace_lane == 1
+    assert submission.workspace_lane == requested_lane
     before_result = plan.submission_statistics()
     assert before_result["submit_calls"] == 1
     assert before_result["submit_successes"] == 1
     assert before_result["terminal_materializations"] == 0
-    assert before_result["graphs_materialized"] == 1
-    assert before_result["workspace_lane_capacity"] == 2
+    assert before_result["configured_workspace_lane_capacity"] == 2
+    if impl.current_cfg().arch == ti.cpu:
+        assert before_result["graphs_materialized"] == 0
+        assert before_result["workspace_lane_capacity"] == 1
+        assert before_result["native_completed_results"] == 1
+    else:
+        assert before_result["graphs_materialized"] == 1
+        assert before_result["workspace_lane_capacity"] == 2
+        assert before_result["native_completed_results"] == 0
 
     submission.wait()
     assert plan.submission_statistics()["terminal_materializations"] == 0
@@ -300,9 +444,12 @@ def test_solve_plan_submit_owns_terminal_ticket_and_workspace_lane():
     assert result.iterations == 1
     np.testing.assert_allclose(output.to_numpy(), expected, rtol=1e-6)
     telemetry = submission.telemetry()
-    assert tuple(region.path_id for region in telemetry.regions) == (
-        "cg_submit_zero",
-    )
+    if impl.current_cfg().arch == ti.cpu:
+        assert telemetry is None
+    else:
+        assert tuple(region.path_id for region in telemetry.regions) == (
+            "cg_submit_zero",
+        )
 
     initial = ti.ndarray(ti.f32, shape=size)
     initial.fill(0.25)
@@ -317,13 +464,23 @@ def test_solve_plan_submit_owns_terminal_ticket_and_workspace_lane():
     assert final_stats["submit_successes"] == 2
     assert final_stats["submit_failures"] == 0
     assert final_stats["telemetry_requests"] == 1
-    assert final_stats["terminal_materializations"] == 2
-    assert final_stats["graphs_materialized"] == 2
-    assert set(final_stats["variants"]) == {
-        "zero_initial_guess",
-        "with_initial_guess",
-    }
-    assert final_stats["persistent_internal_storage_bytes"] > size * 4
+    if impl.current_cfg().arch == ti.cpu:
+        assert final_stats["execution_path"] == "native_cpu_completed"
+        assert final_stats["terminal_materializations"] == 0
+        assert final_stats["native_completed_results"] == 2
+        assert final_stats["graphs_materialized"] == 0
+        assert final_stats["variants"] == {}
+        assert final_stats["persistent_internal_storage_bytes"] == 0
+    else:
+        assert final_stats["execution_path"] == "cached_graph_submission"
+        assert final_stats["terminal_materializations"] == 2
+        assert final_stats["native_completed_results"] == 0
+        assert final_stats["graphs_materialized"] == 2
+        assert set(final_stats["variants"]) == {
+            "zero_initial_guess",
+            "with_initial_guess",
+        }
+        assert final_stats["persistent_internal_storage_bytes"] > size * 4
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
@@ -341,6 +498,31 @@ def test_solve_plan_submit_workspace_configuration_fails_closed():
         ti.linalg.experimental.SolvePlan(
             operator, submission_workspace_saturation="drop"
         )
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_solve_plan_submit_requires_device_convergent_policy_on_gpu():
+    plan = ti.linalg.experimental.SolvePlan(
+        _compiled_identity(8),
+        method="cg",
+        max_iterations=8,
+        atol=1e-6,
+        execution_policy="host_check_every_k",
+        check_interval=4,
+    )
+    submission = plan.submission_statistics()
+    assert not submission["qualified"]
+    assert not submission["asynchronous"]
+    assert (
+        submission["unsupported_reason"]
+        == "device_convergent_policy_required"
+    )
+    rhs = ti.ndarray(ti.f32, shape=8)
+    rhs.fill(1.0)
+    with pytest.raises(
+        RuntimeError, match="device_convergent_policy_required"
+    ):
+        plan.submit(rhs)
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
@@ -395,6 +577,65 @@ def test_compiled_graph_provider_pcg_uses_recordable_device_control():
     else:
         assert stats["operations"]["last_encoded_iterations"] == 1
         assert stats["operations"]["last_masked_iterations"] == 0
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_multidispatch_graph_pcg_submit_converges_and_reports_stop_position():
+    size = 128
+    operator, preconditioner, diagonal = (
+        _compiled_graph_stencil_and_jacobi(size)
+    )
+    plan = ti.linalg.experimental.SolvePlan(
+        operator,
+        method="pcg",
+        preconditioner=preconditioner,
+        max_iterations=64,
+        atol=1e-5,
+        rtol=1e-5,
+    )
+    exact = np.sin(np.linspace(0.1, 3.0, size, dtype=np.float32))
+    rhs_values = diagonal * exact
+    rhs_values[1:] -= 0.9 * exact[:-1]
+    rhs_values[:-1] -= 0.9 * exact[1:]
+    rhs = ti.ndarray(ti.f32, shape=size)
+    output = ti.ndarray(ti.f32, shape=size)
+    rhs.from_numpy(rhs_values)
+
+    submission = plan.submit(rhs, out=output, telemetry=True)
+    result = submission.result()
+    assert result.converged
+    assert 2 < result.iterations < plan.max_iterations
+    actual = output.to_numpy()
+    np.testing.assert_allclose(actual, exact, rtol=4e-4, atol=4e-4)
+    applied = diagonal * actual
+    applied[1:] -= 0.9 * actual[:-1]
+    applied[:-1] -= 0.9 * actual[1:]
+    true_residual = float(np.linalg.norm(rhs_values - applied))
+    assert true_residual <= max(plan.atol, plan.rtol * np.linalg.norm(rhs_values)) * 4
+
+    telemetry = submission.telemetry()
+    if impl.current_cfg().arch == ti.cpu:
+        assert telemetry is None
+    else:
+        assert len(telemetry.regions) == 1
+        region = telemetry.regions[0]
+        assert region.path_id == "pcg_submit_zero"
+        assert region.logical_iterations == result.iterations
+        assert region.encoded_iterations >= region.logical_iterations
+        assert region.masked_iterations == (
+            region.encoded_iterations - region.logical_iterations
+        )
+    submission_stats = plan.submission_statistics()
+    if impl.current_cfg().arch == ti.cpu:
+        assert submission_stats["execution_path"] == "native_cpu_completed"
+        assert submission_stats["terminal_materializations"] == 0
+        assert submission_stats["native_completed_results"] == 1
+        assert submission_stats["persistent_internal_storage_bytes"] == 0
+    else:
+        assert submission_stats["execution_path"] == "cached_graph_submission"
+        assert submission_stats["terminal_materializations"] == 1
+        assert submission_stats["native_completed_results"] == 0
+        assert submission_stats["persistent_internal_storage_bytes"] > size * 4
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)

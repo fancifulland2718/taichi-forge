@@ -14,7 +14,7 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
 
 | 版本 | 历史状态 | 源码边界 | 主要范围 |
 | --- | --- | --- | --- |
-| [待发布](#unreleased) | 0.6.2 开发版本 | 当前 `master` | Graph 生命周期/遥测修复与 recordable compiled-Graph PCG |
+| [待发布](#unreleased) | 0.6.2 开发版本 | 当前 `master` | Graph 生命周期/遥测修复、weighted operator lowering 与 recordable Graph PCG submission |
 | [0.6.1](#061) | 已正式发布 | `b129ad94c` | task launch manifest/policy、动态 LLVM SNode directory、设备端 dynamic worklist、有界 Graph dispatch 与关联 pipeline telemetry |
 | [0.6.0](#060) | 已正式发布 | `106ad65d25` | 结构化 Graph 控制/遥测与 Vulkan indirect dispatch、稀疏 runtime/线性代数、driver-only CUDA primitive、受管互操作/显示与 runtime 生命周期有界化 |
 | [0.1.0](#010) | 历史源码版本；发行文件可能已移除 | `91ad177685` | scikit-build-core 迁移与 Forge 发行包重命名 |
@@ -59,13 +59,22 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
   配对的 262,144 项、三 leaf 资格测试中，dispatch 从 8 降到 5，temporary 从 2 MiB 降到
   1 MiB；CUDA warm submit/wait 中位数从 270.2 降到 203.5 us，Vulkan 从 555.3 降到
   465.9 us。该数据只描述这一 workload，不是普遍加速承诺。
-- recordable f32 CG/PCG 的 `SolvePlan.submit()` 现在会把完整求解包装进缓存的单 action
-  Graph，并返回一个 `SolvePlanSubmission`。terminal packet 在 `done()`/`wait()` 期间保持
+- CUDA/Vulkan 上 recordable f32 CG/PCG 的 `SolvePlan.submit()` 现在会把完整
+  device-convergent 求解包装进缓存的单 action Graph，并返回一个 `SolvePlanSubmission`。
+  terminal packet 在 `done()`/`wait()` 期间保持
   device-resident，只由 `result()` 物化一次；可选 workspace lane 提供独立 Krylov storage，
   statistics 会公开 variant/lane memory 与 terminal readback。该路径与等价手写 Graph 使用
   相同 persistent bytes。在本地配对的 262,144 项测试中，wrapper 相对该 Graph 的开销在
   CUDA 为 2.1%，Vulkan 为噪声范围内的 -1.2%；terminal result 的物化仍是显式的额外同步/
-  readback。
+  readback。CPU 使用既有精确 native solve 并返回 completed lane-0 submission，避免 GPU
+  风格 masked replay；它不开放 Graph terminal packet/Graph telemetry。
+- 非平凡资格用三个 dispatch 表达 SPD stencil A、两个 dispatch 表达 Jacobi M。在 262,144
+  项下两个 GPU backend 均于第 13 轮停止：CUDA encoded=13、无 masked tail；Vulkan
+  encoded=64、masked=51。在最终 60-sample 源码资格中，warm managed submit/wait 中位数在
+  CUDA/Vulkan 上分别为 1.856/4.107 ms；同一手写 Graph 为 1.825/4.053 ms，
+  fused-provider 上界为 1.789/3.864 ms，kernel host-check-K4 对照为 4.042/4.727 ms。managed/manual Graph 均使用
+  5,244,972 persistent bytes。该本地配对测量只验证 overhead 与停止遥测，不是普遍 solver
+  加速承诺。
 
 ## 0.6.1
 

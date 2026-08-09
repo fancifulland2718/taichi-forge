@@ -18,7 +18,7 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
-| [Unreleased](#unreleased) | 0.6.2 development | current `master` | Graph lifecycle/telemetry fixes and recordable compiled-Graph PCG |
+| [Unreleased](#unreleased) | 0.6.2 development | current `master` | Graph lifecycle/telemetry fixes, weighted operator lowering, and recordable Graph PCG submission |
 | [0.6.1](#061) | published release | `b129ad94c` | task launch manifests/policies, dynamic LLVM SNode directories, device-resident dynamic worklists, bounded Graph dispatch, and correlated pipeline telemetry |
 | [0.6.0](#060) | published release | `106ad65d25` | structured Graph control/telemetry and Vulkan indirect dispatch, sparse runtime/linear algebra, driver-only CUDA primitives, managed interoperability/display, and bounded runtime lifetimes |
 | [0.1.0](#010) | historical source release; artifact may be removed | `91ad177685` | scikit-build-core migration and Forge distribution rebrand |
@@ -69,8 +69,9 @@ grouped under the behavior they shipped.
   storage from 2 MiB to 1 MiB, and warm submit/wait median fell from 270.2 to
   203.5 us on CUDA and from 555.3 to 465.9 us on Vulkan. These are workload-
   specific qualification results, not universal speedup guarantees.
-- Recordable f32 CG/PCG `SolvePlan.submit()` now wraps the complete solve in a
-  cached one-action Graph and returns one `SolvePlanSubmission`. Its terminal
+- Recordable f32 CG/PCG `SolvePlan.submit()` on CUDA/Vulkan now wraps the
+  complete device-convergent solve in a cached one-action Graph and returns one
+  `SolvePlanSubmission`. Its terminal
   packet remains device-resident through `done()`/`wait()` and is materialized
   once by `result()`. Optional workspace lanes provide independent Krylov
   storage, while statistics expose variant/lane memory and terminal readbacks.
@@ -78,6 +79,19 @@ grouped under the behavior they shipped.
   Graph. In a paired local 262,144-element probe, wrapper overhead versus that
   Graph was 2.1% on CUDA and within noise (-1.2%) on Vulkan; terminal-result
   materialization remains an explicit additional synchronization/readback.
+  CPU uses the existing exact native solve and returns a completed lane-0
+  submission, avoiding GPU-style masked replay; it exposes no Graph terminal
+  packet or Graph telemetry.
+- A nontrivial qualification uses a three-dispatch SPD stencil A and a two-
+  dispatch Jacobi M. At 262,144 elements both GPU backends stopped at iteration
+  13: CUDA encoded 13 with no masked tail, while Vulkan encoded 64 and masked
+  51. In the final 60-sample source qualification, warm managed submit/wait
+  medians were 1.856 ms on CUDA and 4.107 ms on Vulkan; the same manual Graph
+  was 1.825/4.053 ms, fused-provider upper bounds were 1.789/3.864 ms, and
+  kernel host-check-K4 controls were 4.042/4.727 ms. Each managed/manual Graph
+  used 5,244,972 persistent bytes.
+  These paired local measurements qualify overhead and stop telemetry, not a
+  universal solver-speed claim.
 
 ## 0.6.1
 

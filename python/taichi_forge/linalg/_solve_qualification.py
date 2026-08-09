@@ -199,9 +199,14 @@ def _true_residual(plan, rhs_host, solution):
 
 def _run_once(plan, rhs, initial_guess, out, pacer, lane, on_saturation):
     submission = plan.statistics().get("submission", {})
-    asynchronous = bool(submission.get("qualified", False))
+    asynchronous = bool(
+        submission.get(
+            "asynchronous", submission.get("qualified", False)
+        )
+    )
     start_ns = time.perf_counter_ns()
     submit_ns = None
+    submission_trace = None
     if asynchronous:
         submit_start_ns = time.perf_counter_ns()
         ticket = plan.submit(
@@ -211,17 +216,30 @@ def _run_once(plan, rhs, initial_guess, out, pacer, lane, on_saturation):
             pacer=pacer,
             lane=lane,
             on_saturation=on_saturation,
+            **({"telemetry": True} if isinstance(plan, SolvePlan) else {}),
         )
         submit_ns = time.perf_counter_ns() - submit_start_ns
         result = ticket.result()
+        elapsed_ns = time.perf_counter_ns() - start_ns
+        if isinstance(plan, SolvePlan):
+            telemetry = ticket.telemetry()
+            if telemetry is not None and telemetry.regions:
+                region = telemetry.regions[-1]
+                submission_trace = {
+                    "logical_iterations": int(region.logical_iterations),
+                    "encoded_iterations": int(region.encoded_iterations),
+                    "masked_iterations": int(region.masked_iterations),
+                    "region_path": region.path_id,
+                }
     else:
         if pacer is not None or lane is not None or on_saturation != "wait":
             raise TaichiRuntimeError(
                 "pacer/lane/on_saturation require a qualified asynchronous "
-                "BatchedSolvePlan"
+                "SolvePlan or BatchedSolvePlan"
             )
         result = plan.solve(rhs, initial_guess=initial_guess, out=out)
-    return result, time.perf_counter_ns() - start_ns, submit_ns
+        elapsed_ns = time.perf_counter_ns() - start_ns
+    return result, elapsed_ns, submit_ns, submission_trace
 
 
 def qualify_solve_plan(
@@ -246,10 +264,12 @@ def qualify_solve_plan(
 
     ``plan_or_factory`` may be an existing plan or a zero-argument factory.
     A factory lets the report measure plan construction separately. Timing is
-    synchronous wall time unless a qualified fixed-budget batch exposes its
-    public asynchronous submission boundary. No device timestamp is inferred
-    from wall time. By default the qualification helper allocates and reuses
-    one output array when ``out`` is omitted. Set
+    synchronous wall time unless a qualified plan exposes its public
+    asynchronous submission boundary. Single-system submissions request
+    ticket telemetry so logical/encoded/masked stopping work remains valid
+    even though the plan-owned synchronous counters are not mutated. No device
+    timestamp is inferred from wall time. By default the qualification helper
+    allocates and reuses one output array when ``out`` is omitted. Set
     ``use_plan_default_output=True`` to benchmark the plan's native
     ``out=None`` return path instead.
     """
@@ -339,7 +359,7 @@ def qualify_solve_plan(
     initial_statistics = _json_copy(plan.statistics())
     solve_pool_before = _memory_pool_snapshot()
     pacer_before = _json_copy(pacer.statistics()) if pacer else None
-    _, first_ns, first_submit_ns = _run_once(
+    _, first_ns, first_submit_ns, _ = _run_once(
         plan, rhs, initial_guess, out, pacer, lane, on_saturation
     )
     first_statistics = _json_copy(plan.statistics())
@@ -356,7 +376,7 @@ def qualify_solve_plan(
     iteration_trace = []
     provider_system_iterations = 0
     for repetition in range(repetitions):
-        result, elapsed_ns, submission_ns = _run_once(
+        result, elapsed_ns, submission_ns, submission_trace = _run_once(
             plan, rhs, initial_guess, out, pacer, lane, on_saturation
         )
         results.append(result)
@@ -398,26 +418,31 @@ def qualify_solve_plan(
             )
         else:
             logical = int(result.iterations)
-            boundaries = list(
-                per_solve_operations.get(
-                    "last_convergence_observation_boundaries", []
-                )
-            )
-            reported_executed = per_solve_operations.get(
-                "last_executed_iterations"
-            )
-            backend_family = per_solve_statistics.get("identity", {}).get(
-                "backend_family"
-            )
-            if reported_executed is None or (
-                int(reported_executed) < logical
-                and backend_family in ("cpu", "x64", "arm64")
-            ):
-                executed = logical
-                executed_source = "logical_fallback_cpu_unreported"
+            if submission_trace is not None:
+                executed = submission_trace["encoded_iterations"]
+                executed_source = "submission_ticket_region"
+                boundaries = []
             else:
-                executed = int(reported_executed)
-                executed_source = "backend_last_executed_iterations"
+                boundaries = list(
+                    per_solve_operations.get(
+                        "last_convergence_observation_boundaries", []
+                    )
+                )
+                reported_executed = per_solve_operations.get(
+                    "last_executed_iterations"
+                )
+                backend_family = per_solve_statistics.get(
+                    "identity", {}
+                ).get("backend_family")
+                if reported_executed is None or (
+                    int(reported_executed) < logical
+                    and backend_family in ("cpu", "x64", "arm64")
+                ):
+                    executed = logical
+                    executed_source = "logical_fallback_cpu_unreported"
+                else:
+                    executed = int(reported_executed)
+                    executed_source = "backend_last_executed_iterations"
             iteration_trace.append(
                 {
                     "repetition": repetition,
@@ -426,6 +451,7 @@ def qualify_solve_plan(
                     "executed_through_iteration": executed,
                     "executed_through_source": executed_source,
                     "convergence_observation_boundaries": boundaries,
+                    "submission_region": submission_trace,
                 }
             )
         if batched:
@@ -540,8 +566,19 @@ def qualify_solve_plan(
         )
         provider_iterations = int(provider_system_iterations)
     else:
-        executed_iterations = int(
-            operation_delta.get("executed_iterations", logical_iterations)
+        ticket_executed = [
+            entry["executed_through_iteration"]
+            for entry in iteration_trace
+            if entry["executed_through_source"] == "submission_ticket_region"
+        ]
+        executed_iterations = (
+            sum(ticket_executed)
+            if len(ticket_executed) == len(iteration_trace)
+            else int(
+                operation_delta.get(
+                    "executed_iterations", logical_iterations
+                )
+            )
         )
         provider_iterations = executed_iterations
     wasted_iterations = max(provider_iterations - logical_iterations, 0)
@@ -586,6 +623,7 @@ def qualify_solve_plan(
         for entry in iteration_trace:
             logical = entry["logical_stop_iteration"]
             executed = entry["executed_through_iteration"]
+            submission_region = entry.get("submission_region")
             boundaries = entry["convergence_observation_boundaries"]
             monotonic = all(
                 left < right
@@ -596,6 +634,10 @@ def qualify_solve_plan(
             )
             trace_passed = trace_passed and (
                 0 <= logical <= executed <= plan.max_iterations
+                and (
+                    submission_region is None
+                    or submission_region["logical_iterations"] == logical
+                )
                 and monotonic
                 and endpoints_valid
             )

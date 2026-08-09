@@ -487,8 +487,9 @@ print(result.iterations, result.residual_norm, result.termination_reason)
 stats = plan.statistics()
 ```
 
-An f32 CG/PCG plan with recordable A/M providers can also own a cached
-one-action Graph and submit the complete solve asynchronously:
+On CUDA/Vulkan, an f32 CG/PCG plan with recordable A/M providers and the
+qualified `device_convergent` policy can own a cached one-action Graph and
+submit the complete solve asynchronously:
 
 ```python
 plan = ti.linalg.experimental.SolvePlan(
@@ -505,21 +506,25 @@ result = submission.result()      # one explicit terminal materialization
 print(submission.workspace_lane, result.iterations)
 ```
 
-`SolvePlanSubmission` retains the plan, runtime operands, output, terminal
-packet, and cached Graph through completion. `done()` and `wait()` do not read
-the terminal packet; `result()` reads it once and caches the immutable
-`SolveResult`. `telemetry()` exposes the underlying single Graph submission.
+On CUDA/Vulkan, `SolvePlanSubmission` retains the plan, runtime operands,
+output, terminal packet, and cached Graph through completion. `done()` and
+`wait()` do not read the terminal packet; `result()` reads it once and caches
+the immutable `SolveResult`. `telemetry()` exposes the underlying single Graph
+submission.
 The no-initial-guess and explicit-initial-guess forms are cached separately;
 each materialized variant owns its own lane pool. `submission_statistics()`
 reports those variants, lane use, persistent/transient bytes, submissions,
 failures, telemetry requests, and terminal materializations.
 
-The convenience path adds no solver or backend primitive: it is exactly
+The GPU convenience path adds no solver or backend primitive: it is exactly
 `graph_action()` inside a cached Graph followed by `Graph.submit()`. Therefore
 its qualification and failure boundary is the same recordable f32 CG/PCG
-contract. `submission_workspace_lanes=N` gives each in-flight lane independent
-Krylov storage; extra lanes increase persistent memory linearly and do not
-promise physical kernel overlap.
+device-convergent contract. `submission_workspace_lanes=N` gives each in-flight
+GPU lane independent Krylov storage; extra lanes increase persistent memory
+linearly and do not promise physical kernel overlap. CPU instead executes the
+existing exact native `solve()` synchronously and returns an already-completed
+`SolvePlanSubmission`: it uses lane 0, has no device terminal packet or Graph
+telemetry, and avoids replaying a GPU-style masked capacity.
 
 ### Complete SolvePlan Graph action
 
