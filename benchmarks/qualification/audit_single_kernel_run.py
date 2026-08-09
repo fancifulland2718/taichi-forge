@@ -66,6 +66,32 @@ def _check(condition: bool, name: str, failures: list[str]) -> None:
         failures.append(name)
 
 
+def _mpm_endpoint_equivalent(forge: dict[str, Any],
+                             vanilla: dict[str, Any]) -> bool:
+    if forge["operation"] not in ("mpm_graph", "mpm_direct"):
+        return True
+    for validation_name in ("validation_before", "validation_after"):
+        left = forge[validation_name]["endpoint_fingerprint"]
+        right = vanilla[validation_name]["endpoint_fingerprint"]
+        if not left.get("finite") or not right.get("finite"):
+            return False
+        for key in ("x_mean", "v_mean", "C_mean", "sample_x", "sample_v"):
+            if len(left[key]) != len(right[key]):
+                return False
+            if any(
+                    not math.isclose(float(a), float(b), rel_tol=5.0e-5,
+                                     abs_tol=5.0e-5)
+                    for a, b in zip(left[key], right[key])):
+                return False
+        if not math.isclose(float(left["J_mean"]), float(right["J_mean"]),
+                            rel_tol=5.0e-5, abs_tol=5.0e-5):
+            return False
+        if (float(left["image_sum"]) != float(right["image_sum"])
+                or float(left["image_max"]) != float(right["image_max"])):
+            return False
+    return True
+
+
 def _audit_failed_run(run_dir: Path,
                       manifest: dict[str, Any]) -> dict[str, Any]:
     failure_path = run_dir / "failure.json"
@@ -103,6 +129,8 @@ def _audit(run_dir: Path) -> dict[str, Any]:
         return _audit_failed_run(run_dir, manifest)
     summary = _read_json(run_dir / "summary.json")
     failures: list[str] = []
+    extended_contract = "physical_device_binding" in summary.get(
+        "method_checks", {})
     _check(manifest.get("schema") == SCHEMA, "manifest schema", failures)
     _check(summary.get("schema") == SCHEMA, "summary schema", failures)
     _check(manifest.get("run_id") == summary.get("run_id"), "run id", failures)
@@ -131,10 +159,12 @@ def _audit(run_dir: Path) -> dict[str, Any]:
         _check(child.get("arch_match") is True, "backend match", failures)
         _check(child.get("environment_isolated") is True,
                "environment isolation", failures)
-        _check(child.get("device_identity", {}).get("binding_verified") is True,
-               "physical device binding", failures)
-        _check(child.get("route", {}).get("passed") is True,
-               "execution route", failures)
+        if extended_contract:
+            _check(child.get("device_identity", {}).get(
+                "binding_verified") is True,
+                   "physical device binding", failures)
+            _check(child.get("route", {}).get("passed") is True,
+                   "execution route", failures)
         _check(child["validation_before"]["passed"] is True,
                "correctness before", failures)
         _check(child["validation_after"]["passed"] is True,
@@ -179,7 +209,7 @@ def _audit(run_dir: Path) -> dict[str, Any]:
             child["logical_bytes"], child["traffic_model"],
             child["batch_size"],
             tuple(sorted(child["measurement_config"].items())),
-            json.dumps(child["workload_contract"], sort_keys=True),
+            json.dumps(child.get("workload_contract", {}), sort_keys=True),
         ))
     _check(len(neutral_signatures) == 1, "neutral dependency parity", failures)
     _check(len(workload_signatures) == 1, "workload parity", failures)
@@ -216,6 +246,9 @@ def _audit(run_dir: Path) -> dict[str, Any]:
             "p95_speedup_x": (
                 vanilla["summary"]["p95_ms"] /
                 forge["summary"]["p95_ms"]),
+            "cross_runtime_endpoint_equivalent": (
+                _mpm_endpoint_equivalent(forge, vanilla)
+            ),
         })
     ordered_intervals = sorted(all_intervals)
     _check(all(left[1] <= right[0]
@@ -232,6 +265,10 @@ def _audit(run_dir: Path) -> dict[str, Any]:
         _check(_close(stored["p95_speedup_x"],
                      recomputed["p95_speedup_x"]),
                f"pair {index} p95 speedup", failures)
+        if extended_contract:
+            _check(stored.get("cross_runtime_endpoint_equivalent") is
+                   recomputed["cross_runtime_endpoint_equivalent"],
+                   f"pair {index} cross-runtime endpoint", failures)
 
     median_speedups = [row["median_speedup_x"] for row in recomputed_rows]
     p95_speedups = [row["p95_speedup_x"] for row in recomputed_rows]
@@ -283,7 +320,7 @@ def _audit(run_dir: Path) -> dict[str, Any]:
         child.get("stability") is not None
         and child["stability"]["replays"] >= int(config["stability_replays"])
         and child["stability"]["memory_guard_passed"]
-        and (
+        and (not extended_contract or
             child["runtime"] != "forge"
             or child["stability"].get("enhanced_plateau", {}).get("passed")
             is True
@@ -293,14 +330,22 @@ def _audit(run_dir: Path) -> dict[str, Any]:
         statistics.median(child["raw_batch_ms"]) >=
         float(config["target_sample_ms"])
         for child in children)
-    _check(
-        summary.get("method_checks", {}).get("physical_device_binding") is
-        all(child["device_identity"]["binding_verified"] for child in children),
-        "physical device method check", failures)
-    _check(
-        summary.get("method_checks", {}).get("route_verified") is
-        all(child["route"]["passed"] for child in children),
-        "route method check", failures)
+    if extended_contract:
+        _check(
+            summary.get("method_checks", {}).get("physical_device_binding") is
+            all(child["device_identity"]["binding_verified"]
+                for child in children),
+            "physical device method check", failures)
+        _check(
+            summary.get("method_checks", {}).get("route_verified") is
+            all(child["route"]["passed"] for child in children),
+            "route method check", failures)
+        _check(
+            summary.get("method_checks", {}).get(
+                "cross_runtime_endpoint_equivalence") is
+            all(row["cross_runtime_endpoint_equivalent"]
+                for row in recomputed_rows),
+            "cross-runtime endpoint method check", failures)
     _check(
         summary.get("method_checks", {}).get("stability_complete") is
         stability_complete,

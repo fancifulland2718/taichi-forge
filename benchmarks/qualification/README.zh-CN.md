@@ -1,4 +1,4 @@
-# 本机单 kernel 资格测试
+# 本机单操作资格测试
 
 [English](README.md) | 简体中文
 
@@ -33,6 +33,14 @@ worklist、LinearOperator 或其他 Forge-only API，结论不得外推到这些
 输入、exact oracle 和同步边界。Forge 必须命中 native dense-field scan plan，
 vanilla 必须命中其 legacy field workspace；route 不符合时 child 失败。为了保持
 单项开发入口，优先使用 `prefix_sum_microbench.py`，它固定操作且不能变成聚合器。
+
+`mpm_graph` 是 `DIRECT-003`：它直接复用 `benchmarks/graph_mpm_replay_bench.py`
+中的二维 MLS-MPM kernel 和 ndarray。small preset 为 4,096 粒子、64² 网格、2 个
+substep 和 10 个 dispatch/frame。两边只允许 Graph runtime 内部不同；每个 child
+用另一组 ndarray 执行相同 direct kernel 序列，对 x/v/C/J/grid/image 全状态按固定
+门槛验证，并保存跨 runtime endpoint fingerprint。`mpm_direct` 是同 workload 的
+独立控制项，不能与 Graph 在同一进程混测。对应入口分别为
+`graph_mpm_microbench.py` 和 `mpm_direct_control.py`。
 
 ## runner 已实现的公平性合同
 
@@ -80,6 +88,17 @@ CUDA PrefixSum 的首个单项探针使用独立入口：
 ```powershell
 C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
   benchmarks\qualification\prefix_sum_microbench.py `
+  --backend cuda --preset small --intent diagnostic `
+  --pairs 1 --samples 5 --warmups 2 `
+  --target-sample-ms 20 --stability-replays 0
+```
+
+Graph MLS-MPM 也必须单独启动；direct 控制使用另一个 run ID 和
+`mpm_direct_control.py`：
+
+```powershell
+C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
+  benchmarks\qualification\graph_mpm_microbench.py `
   --backend cuda --preset small --intent diagnostic `
   --pairs 1 --samples 5 --warmups 2 `
   --target-sample-ms 20 --stability-replays 0

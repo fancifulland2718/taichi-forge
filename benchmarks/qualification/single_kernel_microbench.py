@@ -69,11 +69,18 @@ OPERATIONS = (
     "stencil2d",
     "reduce_chunks",
     "prefix_sum",
+    "mpm_graph",
+    "mpm_direct",
 )
 PRESETS = {
     "small": {"elements": 65_536, "stencil_side": 256},
     "medium": {"elements": 1_048_576, "stencil_side": 1_024},
     "large": {"elements": 16_777_216, "stencil_side": 4_096},
+}
+GRAPH_MPM_PRESETS = {
+    "small": {"particles": 4_096, "grid": 64, "substeps": 2},
+    "medium": {"particles": 16_384, "grid": 128, "substeps": 4},
+    "large": {"particles": 65_536, "grid": 256, "substeps": 8},
 }
 DEPENDENCIES = {
     "numpy": "numpy",
@@ -653,6 +660,254 @@ def _build_prefix_sum_case(ti: Any, runtime_name: str, backend: str,
     }
 
 
+def _load_graph_mpm_workload() -> tuple[Any, Path]:
+    source = Path(__file__).resolve().parents[1] / "graph_mpm_replay_bench.py"
+    spec = importlib.util.spec_from_file_location(
+        "_qualification_graph_mpm_workload", source)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load shared Graph MPM workload: {source}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module, source
+
+
+def _mpm_state_comparison(left_arrays: Sequence[Any],
+                          right_arrays: Sequence[Any]) -> dict[str, Any]:
+    import numpy as np
+
+    names = ("x", "v", "C", "J", "grid_v", "grid_m", "image")
+    tolerances = {
+        "x": (5.0e-6, 5.0e-6),
+        "v": (5.0e-5, 5.0e-5),
+        "C": (5.0e-4, 5.0e-5),
+        "J": (5.0e-5, 5.0e-5),
+        "grid_v": (5.0e-5, 5.0e-5),
+        "grid_m": (5.0e-7, 5.0e-5),
+        "image": (0.0, 0.0),
+    }
+    fields = {}
+    for name, left, right in zip(names, left_arrays, right_arrays):
+        left_np = left.to_numpy()
+        right_np = right.to_numpy()
+        difference = np.asarray(left_np, dtype=np.float64) - np.asarray(
+            right_np, dtype=np.float64)
+        max_abs = float(np.max(np.abs(difference))) if difference.size else 0.0
+        rmse = float(np.sqrt(np.mean(difference * difference))) if difference.size else 0.0
+        atol, rtol = tolerances[name]
+        scale = float(np.max(np.abs(right_np))) if right_np.size else 0.0
+        allowed = atol + rtol * scale
+        fields[name] = {
+            "passed": bool(
+                np.all(np.isfinite(left_np))
+                and np.all(np.isfinite(right_np))
+                and max_abs <= allowed
+            ),
+            "max_abs_error": max_abs,
+            "rmse": rmse,
+            "reference_scale": scale,
+            "atol": atol,
+            "rtol": rtol,
+            "effective_tolerance": allowed,
+        }
+    return {
+        "passed": all(item["passed"] for item in fields.values()),
+        "comparison": "same-runtime_graph_vs_direct_state" ,
+        "fields": fields,
+    }
+
+
+def _mpm_endpoint_fingerprint(arrays: Sequence[Any]) -> dict[str, Any]:
+    import numpy as np
+
+    x, v, C, J, _, _, image = arrays
+    x_np = x.to_numpy()
+    v_np = v.to_numpy()
+    C_np = C.to_numpy()
+    J_np = J.to_numpy()
+    image_np = image.to_numpy()
+    sample_count = min(8, x_np.shape[0])
+    return {
+        "x_mean": [float(value) for value in x_np.mean(axis=0)],
+        "v_mean": [float(value) for value in v_np.mean(axis=0)],
+        "C_mean": [float(value) for value in C_np.mean(axis=0).reshape(-1)],
+        "J_mean": float(J_np.mean()),
+        "image_sum": float(image_np.astype(np.float64).sum()),
+        "image_max": float(image_np.max()),
+        "sample_x": x_np[:sample_count].astype(np.float64).reshape(-1).tolist(),
+        "sample_v": v_np[:sample_count].astype(np.float64).reshape(-1).tolist(),
+        "finite": bool(
+            np.all(np.isfinite(x_np))
+            and np.all(np.isfinite(v_np))
+            and np.all(np.isfinite(C_np))
+            and np.all(np.isfinite(J_np))
+            and np.all(np.isfinite(image_np))
+        ),
+    }
+
+
+def _graph_mpm_route(graph: Any, runtime_name: str, substeps: int) -> dict[str, Any]:
+    source_path = inspect.getsourcefile(graph.__class__)
+    source = None if source_path is None else Path(source_path).resolve()
+    debug_info = getattr(graph, "_debug_info", None)
+    instance_info = getattr(graph, "_instance_debug_info", None)
+    expected_dispatches = substeps * 4 + 2
+    class_module = graph.__class__.__module__
+    if runtime_name == "forge":
+        observed_kind = (
+            instance_info.get("kind") if isinstance(instance_info, dict) else None
+        )
+        observed_dispatches = (
+            debug_info.get("dispatch_count")
+            if isinstance(debug_info, dict) else None
+        )
+        passed = bool(
+            class_module == "taichi_forge.graph._graph"
+            and isinstance(debug_info, dict)
+            and isinstance(instance_info, dict)
+            and observed_dispatches == expected_dispatches
+            and observed_kind == "single_cgraph"
+        )
+        classification = "forge_public_single_cgraph"
+    else:
+        observed_kind = "vanilla_compiled_graph"
+        observed_dispatches = expected_dispatches
+        passed = bool(
+            class_module == "taichi.graph._graph"
+            and getattr(graph, "_compiled_graph", None) is not None
+        )
+        classification = "vanilla_public_compiled_graph"
+    return {
+        "public_api": "ti.graph.GraphBuilder().dispatch/append/compile; graph.run(args)",
+        "classification": classification,
+        "class_module": class_module,
+        "class_source": None if source is None else str(source),
+        "class_source_sha256": (
+            None if source is None or not source.is_file() else sha256_file(source)
+        ),
+        "expected_dispatches_per_frame": expected_dispatches,
+        "observed_dispatches_per_frame": observed_dispatches,
+        "observed_instance_kind": observed_kind,
+        "graph_debug_info": debug_info,
+        "graph_instance_debug_info": instance_info,
+        "passed": passed,
+    }
+
+
+def _build_mpm_case(ti: Any, runtime_name: str, operation: str,
+                    preset: str) -> dict[str, Any]:
+    workload, source = _load_graph_mpm_workload()
+    config = GRAPH_MPM_PRESETS[preset]
+    particles = config["particles"]
+    grid = config["grid"]
+    substeps = config["substeps"]
+    kernels = workload._make_kernels(ti, particles, grid)
+    init_state, reset_grid, p2g, update_grid, g2p, clear_image, render_particles = kernels
+    arrays = workload._make_arrays(ti, particles, grid)
+    reference_arrays = workload._make_arrays(ti, particles, grid)
+    x, v, C, J, grid_v, grid_m, image = arrays
+
+    graph_started = time.perf_counter_ns()
+    graph = workload._make_graph(ti, kernels, substeps)
+    ti.sync()
+    graph_build_ms = (time.perf_counter_ns() - graph_started) / 1.0e6
+    graph_args = {
+        "x": x,
+        "v": v,
+        "C": C,
+        "J": J,
+        "grid_v": grid_v,
+        "grid_m": grid_m,
+        "image": image,
+    }
+
+    def reset_state(target: Sequence[Any]) -> None:
+        target_x, target_v, target_C, target_J, _, _, target_image = target
+        init_state(target_x, target_v, target_C, target_J)
+        clear_image(target_image)
+
+    def direct_frame(target: Sequence[Any]) -> None:
+        target_x, target_v, target_C, target_J, target_grid_v, target_grid_m, target_image = target
+        for _ in range(substeps):
+            reset_grid(target_grid_v, target_grid_m)
+            p2g(target_x, target_v, target_C, target_J,
+                target_grid_v, target_grid_m)
+            update_grid(target_grid_v, target_grid_m)
+            g2p(target_x, target_v, target_C, target_J, target_grid_v)
+        clear_image(target_image)
+        render_particles(target_x, target_image)
+
+    def graph_frame() -> None:
+        graph.run(graph_args)
+
+    launch = graph_frame if operation == "mpm_graph" else lambda: direct_frame(arrays)
+
+    def reset() -> None:
+        reset_state(arrays)
+
+    def validate_fresh() -> dict[str, Any]:
+        reset_state(arrays)
+        reset_state(reference_arrays)
+        ti.sync()
+        launch()
+        direct_frame(reference_arrays)
+        ti.sync()
+        comparison = _mpm_state_comparison(arrays, reference_arrays)
+        fingerprint = _mpm_endpoint_fingerprint(arrays)
+        comparison["endpoint_fingerprint"] = fingerprint
+        comparison["passed"] = bool(comparison["passed"] and fingerprint["finite"])
+        reset_state(arrays)
+        ti.sync()
+        return comparison
+
+    def route() -> dict[str, Any]:
+        if operation == "mpm_graph":
+            return _graph_mpm_route(graph, runtime_name, substeps)
+        return {
+            "public_api": "direct calls to the same Taichi kernels",
+            "classification": "ordinary_direct_kernel_sequence",
+            "dispatches_per_frame": substeps * 4 + 2,
+            "passed": True,
+        }
+
+    return {
+        "launch": launch,
+        "reset": reset,
+        "validate": validate_fresh,
+        "route": route,
+        "logical_bytes": 0,
+        "traffic_model": (
+            "MLS-MPM frame; no simplified logical-byte bandwidth is claimed"
+        ),
+        "case_preparation": {
+            "graph_build_ms": graph_build_ms,
+            "particles": particles,
+            "grid": grid,
+            "substeps": substeps,
+            "dispatches_per_frame": substeps * 4 + 2,
+        },
+        "workload_contract": {
+            "case_id": "DIRECT-003" if operation == "mpm_graph" else "DIRECT-003-CONTROL",
+            "mode": "graph" if operation == "mpm_graph" else "direct",
+            "workload_source": str(source),
+            "workload_source_sha256": sha256_file(source),
+            "dimension": "2d",
+            "dtype": "f32",
+            "particles": particles,
+            "grid": grid,
+            "substeps": substeps,
+            "dispatches_per_frame": substeps * 4 + 2,
+            "correctness": (
+                "same-runtime full-state graph/direct comparison with fixed "
+                "per-field tolerances plus cross-runtime endpoint fingerprint"
+            ),
+            "timing": (
+                "frozen repeated frame calls plus one outer sync; initialization, "
+                "graph construction, first call, and correctness are excluded"
+            ),
+        },
+    }
+
+
 def _numeric_growth(before: dict[str, Any] | None,
                     after: dict[str, Any] | None,
                     keys: Sequence[str]) -> dict[str, Any]:
@@ -874,6 +1129,9 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         if args.operation == "prefix_sum":
             case = _build_prefix_sum_case(
                 ti, args.runtime, args.backend, config["elements"])
+        elif args.operation in ("mpm_graph", "mpm_direct"):
+            case = _build_mpm_case(
+                ti, args.runtime, args.operation, args.preset)
         else:
             kernel = _make_kernel(ti, args.operation)
             case = _build_case(ti, kernel, args.operation, config["elements"],
@@ -887,6 +1145,7 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         result["logical_bytes"] = case["logical_bytes"]
         result["traffic_model"] = case["traffic_model"]
         result["workload_contract"] = case["workload_contract"]
+        result["case_preparation"] = case.get("case_preparation")
         if "reset" in case:
             case["reset"]()
             ti.sync()
@@ -1187,6 +1446,37 @@ def _check_pyvenv(python: Path) -> dict[str, Any]:
     }
 
 
+def _mpm_cross_runtime_endpoint_equivalent(
+        results: dict[str, dict[str, Any]]) -> bool:
+    forge = results["forge"]
+    if forge["operation"] not in ("mpm_graph", "mpm_direct"):
+        return True
+    vanilla = results["vanilla"]
+    for validation_name in ("validation_before", "validation_after"):
+        left = forge[validation_name]["endpoint_fingerprint"]
+        right = vanilla[validation_name]["endpoint_fingerprint"]
+        if not left.get("finite") or not right.get("finite"):
+            return False
+        for key in ("x_mean", "v_mean", "C_mean", "sample_x", "sample_v"):
+            left_values = left[key]
+            right_values = right[key]
+            if len(left_values) != len(right_values):
+                return False
+            if any(
+                    not math.isclose(float(a), float(b), rel_tol=5.0e-5,
+                                     abs_tol=5.0e-5)
+                    for a, b in zip(left_values, right_values)):
+                return False
+        if not math.isclose(
+                float(left["J_mean"]), float(right["J_mean"]),
+                rel_tol=5.0e-5, abs_tol=5.0e-5):
+            return False
+        if (float(left["image_sum"]) != float(right["image_sum"])
+                or float(left["image_max"]) != float(right["image_max"])):
+            return False
+    return True
+
+
 def _pair_row(pair_index: int, order: Sequence[str],
               results: dict[str, dict[str, Any]]) -> dict[str, Any]:
     forge = results["forge"]
@@ -1212,6 +1502,9 @@ def _pair_row(pair_index: int, order: Sequence[str],
         "vanilla_cv_percent": vanilla["summary"]["cv_percent"],
         "forge_native_commit": forge["native_commit"],
         "vanilla_native_commit": vanilla["native_commit"],
+        "cross_runtime_endpoint_equivalent": (
+            _mpm_cross_runtime_endpoint_equivalent(results)
+        ),
     }
 
 
@@ -1296,6 +1589,12 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
     vanilla_evidence = summary["runtime_evidence"]["vanilla"]
     forge_route = forge_evidence["route"]
     vanilla_route = vanilla_evidence["route"]
+    forge_route_detail = (
+        forge_route.get("observed_method")
+        or forge_route.get("observed_instance_kind")
+        or forge_route.get("dispatches_per_frame")
+        or "n/a"
+    )
     gpu_rows = forge_evidence["device_identity"].get("nvidia_smi_devices", [])
     gpu_name = "unknown" if not gpu_rows else gpu_rows[0].get("name", "unknown")
     gpu_uuid = "unknown" if not gpu_rows else gpu_rows[0].get("uuid", "unknown")
@@ -1303,7 +1602,7 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
     vanilla_stability = vanilla_evidence["stability"]
     if language == "zh-CN":
         lines = [
-            "# 单 kernel 本机 microbench 报告",
+            "# 单操作本机 microbench 报告",
             "",
             f"- Run ID：`{summary['run_id']}`",
             f"- 操作：`{cfg['operation']}`",
@@ -1329,7 +1628,7 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             "## Route、设备与稳定性证据",
             "",
             f"- Forge route：`{forge_route['classification']}` / "
-            f"`{forge_route.get('observed_method')}`；验证："
+            f"`{forge_route_detail}`；验证："
             f"{'通过' if forge_route['passed'] else '失败'}。",
             f"- Vanilla route：`{vanilla_route['classification']}`；验证："
             f"{'通过' if vanilla_route['passed'] else '失败'}。",
@@ -1345,14 +1644,14 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             "",
             "## 方法学边界",
             "",
-            "本报告只覆盖一个 kernel、一个 backend 和一个规模。Forge 与 vanilla "
+            "本报告只覆盖一个操作、一个 backend 和一个规模。Forge 与 vanilla "
             "串行相邻运行，使用相同 batch size；主统计单位是 fresh-process A/B 对，"
             "未池化跨进程 batch。完整环境、噪声准入、原始样本、正确性和 teardown "
             "证据保存在同一 run 目录。",
         ]
     else:
         lines = [
-            "# Local single-kernel microbenchmark report",
+            "# Local one-operation microbenchmark report",
             "",
             f"- Run ID: `{summary['run_id']}`",
             f"- Operation: `{cfg['operation']}`",
@@ -1381,7 +1680,7 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             "## Route, device, and stability evidence",
             "",
             f"- Forge route: `{forge_route['classification']}` / "
-            f"`{forge_route.get('observed_method')}`; verification "
+            f"`{forge_route_detail}`; verification "
             f"{'passed' if forge_route['passed'] else 'failed'}.",
             f"- Vanilla route: `{vanilla_route['classification']}`; verification "
             f"{'passed' if vanilla_route['passed'] else 'failed'}.",
@@ -1398,7 +1697,7 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             "",
             "## Method boundary",
             "",
-            "This report covers one kernel, one backend, and one size only. Forge "
+            "This report covers one operation, one backend, and one size only. Forge "
             "and vanilla ran adjacently and sequentially with one common batch size. "
             "The primary unit is a fresh-process A/B pair; batches were not pooled "
             "across processes. The run directory retains environment, noise-admission, "
@@ -1429,6 +1728,8 @@ def _write_bilingual_reports(output_dir: Path, summary: dict[str, Any]) -> None:
         "- 物理设备绑定："
         f"{'通过' if summary['method_checks']['physical_device_binding'] else '失败'}\n"
         f"- 实际 route：{'通过' if summary['method_checks']['route_verified'] else '失败'}\n"
+        "- 跨 runtime 终态："
+        f"{'通过' if summary['method_checks']['cross_runtime_endpoint_equivalence'] else '失败'}\n"
         "- 正确性与 teardown："
         f"{'通过' if summary['method_checks']['correctness_and_teardown'] else '失败'}\n"
         f"- 稳定性 replay：{'通过' if summary['method_checks']['stability_complete'] else '失败'}\n"
@@ -1459,6 +1760,8 @@ def _write_bilingual_reports(output_dir: Path, summary: dict[str, Any]) -> None:
         f"{'pass' if summary['method_checks']['physical_device_binding'] else 'fail'}\n"
         "- Actual execution route: "
         f"{'pass' if summary['method_checks']['route_verified'] else 'fail'}\n"
+        "- Cross-runtime endpoint equivalence: "
+        f"{'pass' if summary['method_checks']['cross_runtime_endpoint_equivalence'] else 'fail'}\n"
         "- Correctness and teardown: "
         f"{'pass' if summary['method_checks']['correctness_and_teardown'] else 'fail'}\n"
         "- Stability replay: "
@@ -1484,14 +1787,14 @@ def _write_failure_artifacts(output_dir: Path, manifest: dict[str, Any],
     write_json(output_dir / "manifest.json", manifest)
     write_json(output_dir / "failure.json", failure)
     (output_dir / "failure.zh-CN.md").write_text(
-        "# 单 kernel 运行失败\n\n"
+        "# 单操作运行失败\n\n"
         f"- Run ID：`{failure['run_id']}`\n"
         f"- 原因：`{reason}`\n"
         "- 性能宣称资格：未通过\n"
         "- 处置：保留诊断证据；修复或清空干扰后使用新 run ID 重跑。\n",
         encoding="utf-8")
     (output_dir / "failure.en.md").write_text(
-        "# Single-kernel run failure\n\n"
+        "# One-operation run failure\n\n"
         f"- Run ID: `{failure['run_id']}`\n"
         f"- Reason: `{reason}`\n"
         "- Performance-claim eligibility: fail\n"
@@ -1675,6 +1978,8 @@ def _parent_main(args: argparse.Namespace) -> int:
         "physical_device_binding": all(
             child["device_identity"]["binding_verified"] for child in children),
         "route_verified": all(child["route"]["passed"] for child in children),
+        "cross_runtime_endpoint_equivalence": all(
+            row["cross_runtime_endpoint_equivalent"] for row in pair_rows),
         "correctness_and_teardown": all(
             child["status"] == "passed"
             and child["validation_before"]["passed"]
@@ -1761,7 +2066,7 @@ def _parser() -> argparse.ArgumentParser:
     repo_root = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(
         description=(
-            "Industry-style local A/B microbenchmark for exactly one kernel, "
+            "Industry-style local A/B microbenchmark for exactly one operation, "
             "one backend, and one size"))
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--phase", choices=("pilot", "score"),

@@ -1,4 +1,4 @@
-# Local single-kernel qualification
+# Local one-operation qualification
 
 English | [简体中文](README.zh-CN.md)
 
@@ -38,6 +38,15 @@ its native dense-field scan plan while vanilla must use its legacy field
 workspace; a route mismatch fails the child. Use `prefix_sum_microbench.py` as
 the one-case development entry point; it fixes the operation and cannot become
 an aggregate launcher.
+
+`mpm_graph` is `DIRECT-003`. It reuses the 2-D MLS-MPM kernels and ndarrays from
+`benchmarks/graph_mpm_replay_bench.py`. The small preset has 4,096 particles, a
+64-square grid, two substeps, and ten dispatches per frame. Only Graph runtime
+internals may differ. Every child executes the same direct kernel sequence on a
+second ndarray set and validates full x/v/C/J/grid/image state with fixed gates,
+then retains a cross-runtime endpoint fingerprint. `mpm_direct` is an independent
+control for the same workload and is never timed in the Graph process. The entry
+points are `graph_mpm_microbench.py` and `mpm_direct_control.py`.
 
 ## Fairness contract implemented by the runner
 
@@ -94,6 +103,17 @@ The first one-case CUDA PrefixSum probe uses its dedicated entry point:
 ```powershell
 C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
   benchmarks\qualification\prefix_sum_microbench.py `
+  --backend cuda --preset small --intent diagnostic `
+  --pairs 1 --samples 5 --warmups 2 `
+  --target-sample-ms 20 --stability-replays 0
+```
+
+Graph MLS-MPM is also launched alone. Its direct control uses a separate run ID
+and `mpm_direct_control.py`:
+
+```powershell
+C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
+  benchmarks\qualification\graph_mpm_microbench.py `
   --backend cuda --preset small --intent diagnostic `
   --pairs 1 --samples 5 --warmups 2 `
   --target-sample-ms 20 --stability-replays 0
