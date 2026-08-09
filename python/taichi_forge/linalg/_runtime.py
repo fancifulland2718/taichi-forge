@@ -1799,7 +1799,7 @@ def _merge_linear_operator_graph_fixed_bindings(executables):
 class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
     def __init__(self, operator, input_arg, output_arg, adjoint):
         from taichi_forge.graph._graph import Arg, ArgKind, gen_cpp_kernel
-        from taichi_forge.linalg._composition_kernels import add_f32, scale_f32
+        from taichi_forge.linalg._composition_kernels import axpby_f32, scale_f32
 
         for value, role in ((input_arg, "input"), (output_arg, "output")):
             if (
@@ -1845,38 +1845,116 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
             temporary_bindings[symbol_name] = requirement_name
             return Arg(ArgKind.NDARRAY, symbol_name, f32, ndim=1)
 
-        if kind == "adjoint":
-            append_child(spec[1], input_arg, output_arg, not adjoint)
-        elif kind == "scale":
-            scale = float(spec[1])
-            child = spec[2]
-            append_child(child, input_arg, output_arg, adjoint)
-            extent = operator.shape[1 if adjoint else 0]
-            scale_name = f"{prefix}_scale"
-            size_name = f"{prefix}_size"
-            scale_arg = Arg(ArgKind.SCALAR, scale_name, f32)
-            size_arg = Arg(ArgKind.SCALAR, size_name, i32)
-            private_fixed.update({scale_name: scale, size_name: int(extent)})
-            dispatches.append(
-                (
-                    gen_cpp_kernel(scale_f32, (output_arg, scale_arg, size_arg)),
-                    (output_arg, scale_arg, size_arg),
+        def weighted_terms(candidate, coefficient, term_adjoint, result):
+            candidate_spec = candidate._composition_spec
+            if candidate_spec is None:
+                result.append((float(coefficient), candidate, term_adjoint))
+                return
+            candidate_kind = candidate_spec[0]
+            if candidate_kind == "scale":
+                weighted_terms(
+                    candidate_spec[2],
+                    coefficient * float(candidate_spec[1]),
+                    term_adjoint,
+                    result,
                 )
+                return
+            if candidate_kind == "sum":
+                weighted_terms(
+                    candidate_spec[1], coefficient, term_adjoint, result
+                )
+                weighted_terms(
+                    candidate_spec[2], coefficient, term_adjoint, result
+                )
+                return
+            if candidate_kind == "adjoint":
+                weighted_terms(
+                    candidate_spec[1],
+                    coefficient,
+                    not term_adjoint,
+                    result,
+                )
+                return
+            result.append((float(coefficient), candidate, term_adjoint))
+
+        def append_weighted_terms(terms, extent):
+            first_scale, first_operator, first_adjoint = terms[0]
+            append_child(
+                first_operator, input_arg, output_arg, first_adjoint
             )
-        elif kind == "sum":
-            extent = operator.shape[1 if adjoint else 0]
-            scratch = temporary_arg(extent, "sum_scratch")
-            append_child(spec[1], input_arg, output_arg, adjoint)
-            append_child(spec[2], input_arg, scratch, adjoint)
+            if len(terms) == 1:
+                if first_scale == 1.0:
+                    return
+                scale_name = f"{prefix}_scale"
+                size_name = f"{prefix}_size"
+                scale_arg = Arg(ArgKind.SCALAR, scale_name, f32)
+                size_arg = Arg(ArgKind.SCALAR, size_name, i32)
+                private_fixed.update(
+                    {scale_name: first_scale, size_name: int(extent)}
+                )
+                dispatches.append(
+                    (
+                        gen_cpp_kernel(
+                            scale_f32, (output_arg, scale_arg, size_arg)
+                        ),
+                        (output_arg, scale_arg, size_arg),
+                    )
+                )
+                return
+
+            scratch = temporary_arg(extent, "weighted_sum_scratch")
             size_name = f"{prefix}_size"
             size_arg = Arg(ArgKind.SCALAR, size_name, i32)
             private_fixed[size_name] = int(extent)
-            dispatches.append(
-                (
-                    gen_cpp_kernel(add_f32, (scratch, output_arg, size_arg)),
-                    (scratch, output_arg, size_arg),
+            for index, (term_scale, term_operator, term_adjoint) in enumerate(
+                terms[1:], start=1
+            ):
+                append_child(
+                    term_operator, input_arg, scratch, term_adjoint
                 )
-            )
+                output_scale_name = f"{prefix}_output_scale_{index}"
+                addend_scale_name = f"{prefix}_addend_scale_{index}"
+                output_scale_arg = Arg(
+                    ArgKind.SCALAR, output_scale_name, f32
+                )
+                addend_scale_arg = Arg(
+                    ArgKind.SCALAR, addend_scale_name, f32
+                )
+                private_fixed.update(
+                    {
+                        output_scale_name: (
+                            first_scale if index == 1 else 1.0
+                        ),
+                        addend_scale_name: term_scale,
+                    }
+                )
+                dispatches.append(
+                    (
+                        gen_cpp_kernel(
+                            axpby_f32,
+                            (
+                                scratch,
+                                output_arg,
+                                output_scale_arg,
+                                addend_scale_arg,
+                                size_arg,
+                            ),
+                        ),
+                        (
+                            scratch,
+                            output_arg,
+                            output_scale_arg,
+                            addend_scale_arg,
+                            size_arg,
+                        ),
+                    )
+                )
+
+        if kind in ("adjoint", "scale", "sum"):
+            extent = operator.shape[1 if adjoint else 0]
+            terms = []
+            weighted_terms(operator, 1.0, adjoint, terms)
+            append_weighted_terms(terms, extent)
         elif kind == "compose":
             outer, inner = spec[1], spec[2]
             intermediate_extent = inner.shape[0]

@@ -319,10 +319,14 @@ generation.
 This recordable contract applies to compiled-kernel providers,
 direct-dispatch compiled-Graph providers, and f32 scale/sum/compose/adjoint
 trees whose leaves are recordable. Composition is lowered recursively while
-preserving child dispatch order. Sum and compose allocate typed f32 temporary
-vectors from the Graph-owned bounded arena, so scratch does not become a
-public runtime argument and concurrent submissions receive independent arena
-lanes. The memory report exposes the planned and persistent temporary bytes.
+preserving child dispatch order. Ordered scale/sum subtrees are normalized to
+weighted leaves: a two-leaf weighted sum uses the two provider actions plus
+one in-place `axpby`, and larger sums reuse one scratch vector. `compose`
+keeps its operator boundary and ordered intermediate. These paths allocate
+typed f32 temporary vectors from the Graph-owned bounded arena, so scratch
+does not become a public runtime argument and concurrent submissions receive
+independent arena lanes. The memory report exposes the planned and persistent
+temporary bytes.
 Both the generic rectangular or explicit-adjoint form and the legacy square
 forward-only form preserve the compiled Graph's ordered multi-dispatch
 sequence. `adjoint=True` records the explicit adjoint Graph; the legacy square

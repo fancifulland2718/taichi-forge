@@ -53,6 +53,12 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
   compiled-Graph CG 保留原默认策略并可显式 opt in。满足资格的连续 Field operand 直接绑定，
   不产生 SolvePlan pack/unpack submission。solver statistics 同时公开 logical、encoded 与
   masked iteration，使 exact 和 bounded backend 上的早停均可观察。
+- recordable scale/sum composition 现在会把有序 subtree 规范化为 weighted leaf，并用单个
+  in-place `axpby` 完成每次累加。该 lowering 保持 provider 顺序与 generation/lifetime
+  检查，只复用一条 Graph-owned scratch vector，也不宣称跨 provider kernel fusion。在本地
+  配对的 262,144 项、三 leaf 资格测试中，dispatch 从 8 降到 5，temporary 从 2 MiB 降到
+  1 MiB；CUDA warm submit/wait 中位数从 270.2 降到 203.5 us，Vulkan 从 555.3 降到
+  465.9 us。该数据只描述这一 workload，不是普遍加速承诺。
 
 ## 0.6.1
 

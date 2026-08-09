@@ -278,9 +278,12 @@ provider generation。
 
 当前 recordable 合同适用于 compiled-kernel provider、只含 direct dispatch 的
 compiled-Graph provider，以及 leaf 均可录制的 f32 scale/sum/compose/adjoint 树。组合会
-递归 lowering 并保持 child dispatch 顺序；sum 与 compose 从 Graph-owned bounded arena
-取得 typed f32 temporary，因此 scratch 不会成为公共 runtime 参数，并发 submission 会
-使用独立 arena lane。memory report 会公开 planned/persistent temporary bytes。通用的
+递归 lowering 并保持 child dispatch 顺序。有序 scale/sum subtree 会规范化为 weighted
+leaf：两项加权和只执行两个 provider action 与一个 in-place `axpby`，更多项也只复用一条
+scratch vector；`compose` 仍保持 operator 边界与有序 intermediate。以上路径从
+Graph-owned bounded arena 取得 typed f32 temporary，因此 scratch 不会成为公共 runtime
+参数，并发 submission 会使用独立 arena lane。memory report 会公开 planned/persistent
+temporary bytes。通用的
 矩形/显式 adjoint 形式和 legacy 方阵 forward-only 形式都会保持 compiled Graph 原有的
 有序 multi-dispatch sequence。`adjoint=True` 录制显式 adjoint Graph；legacy 方阵形式
 不会推断 adjoint。含 indirect dispatch 的 compiled-Graph、stored sparse、block-diagonal

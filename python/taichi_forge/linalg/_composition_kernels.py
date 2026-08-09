@@ -15,10 +15,14 @@ def scale_f32(
 
 
 @kernel
-def add_f32(
+def axpby_f32(
     addend: ndarray_type.ndarray(dtype=f32, ndim=1),
     output: ndarray_type.ndarray(dtype=f32, ndim=1),
+    output_scale: f32,
+    addend_scale: f32,
     size: i32,
 ):
     for index in range(size):
-        output[index] += addend[index]
+        output[index] = (
+            output_scale * output[index] + addend_scale * addend[index]
+        )

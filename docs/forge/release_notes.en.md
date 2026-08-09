@@ -61,6 +61,14 @@ grouped under the behavior they shipped.
   directly with no SolvePlan pack/unpack submission. Solver statistics expose
   logical, encoded, and masked iteration counts so early stopping remains
   observable on exact and bounded backends.
+- Recordable scale/sum composition now normalizes ordered weighted leaves and
+  lowers each accumulation to one in-place `axpby`. It preserves provider
+  order and generation/lifetime checks, reuses one Graph-owned scratch vector,
+  and does not claim cross-provider kernel fusion. In a paired local 262,144-
+  element, three-leaf qualification, dispatches fell from 8 to 5, temporary
+  storage from 2 MiB to 1 MiB, and warm submit/wait median fell from 270.2 to
+  203.5 us on CUDA and from 555.3 to 465.9 us on Vulkan. These are workload-
+  specific qualification results, not universal speedup guarantees.
 
 ## 0.6.1
 

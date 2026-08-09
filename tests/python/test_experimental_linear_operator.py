@@ -442,6 +442,62 @@ def test_recordable_operator_scale_sum_compose_and_workspace_reuse():
         assert stats["operations"]["host_scalar_readbacks"] == 1
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_recordable_weighted_sum_flattens_dispatches_and_workspace():
+    size = 12
+    topology = ti.ndarray(ti.i32, shape=size)
+    topology.from_numpy(np.arange(size, dtype=np.int32))
+    diagonal = _vector(np.linspace(1.0, 2.0, size, dtype=np.float32))
+
+    @ti.kernel
+    def diagonal_apply(
+        active_size: ti.i32,
+        topology_data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        numeric_data: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(active_size):
+            y[index] = numeric_data[index] * x[topology_data[index]]
+
+    base = ti.linalg.LinearOperator.from_kernel(
+        diagonal_apply,
+        size,
+        topology,
+        numeric=diagonal,
+        traits=ti.linalg.OperatorTraits.spd(),
+    )
+    weighted = 0.25 * base + (0.5 * base + 0.75 * base)
+    input_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "weighted_input", ti.f32, ndim=1
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "weighted_output", ti.f32, ndim=1
+    )
+    executable = weighted.graph_action(input_arg, output_arg).compile()
+
+    assert executable.debug_info["dispatch_count"] == 5
+    assert sum(
+        requirement.bytes for requirement in executable.temporary_requirements
+    ) == size * 4
+
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(weighted.graph_action(input_arg, output_arg))
+    graph = builder.compile()
+    values = np.linspace(-2.0, 3.0, size, dtype=np.float32)
+    source = _vector(values)
+    output = ti.ndarray(ti.f32, shape=size)
+    graph.run({"weighted_input": source, "weighted_output": output})
+    np.testing.assert_allclose(
+        output.to_numpy(),
+        1.5 * diagonal.to_numpy() * values,
+        rtol=2e-5,
+    )
+    memory = graph.execution_stats().memory
+    assert memory.transient_temporary_bytes == size * 4
+    assert memory.temporary_arena_allocations == 1
+
+
 @test_utils.test(
     arch=ti.vulkan,
     kernel_profiler=True,
