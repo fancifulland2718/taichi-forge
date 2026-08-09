@@ -111,6 +111,13 @@ runtime-directory recovery; unavailable vanilla counters are not invented.
 Simultaneously-live capacity remains a separate case. Use
 `snode_churn_microbench.py`.
 
+`snode_concurrent` is that separate simultaneous-capacity case. Small/medium/
+large hold 128/512/1,400 independent dense scalar trees live at once. Only
+after all are finalized does the case use the first and last trees, synchronize,
+and retire everything in reverse order. This measures current live capacity,
+not historical ID churn. Start with small through
+`snode_concurrent_microbench.py`; larger presets advance only after it passes.
+
 ## Fairness contract implemented by the runner
 
 - Forge and vanilla use separate dependency-complete venvs. Child processes
@@ -250,6 +257,16 @@ C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
   --backend cuda --preset small --intent diagnostic `
   --pairs 1 --samples 5 --warmups 2 `
   --target-sample-ms 20 --stability-replays 100
+```
+
+Simultaneously-live capacity has its own entry point:
+
+```powershell
+C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
+  benchmarks\qualification\snode_concurrent_microbench.py `
+  --backend cuda --preset small --intent diagnostic `
+  --pairs 1 --samples 3 --warmups 1 `
+  --target-sample-ms 100 --stability-replays 0
 ```
 
 For an already validated case, qualification mode enforces the fixed minimums:

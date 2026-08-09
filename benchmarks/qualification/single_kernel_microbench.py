@@ -77,6 +77,7 @@ OPERATIONS = (
     "native_compact",
     "device_prefix_chain",
     "snode_churn",
+    "snode_concurrent",
     "mpm_graph",
     "mpm_direct",
 )
@@ -1818,6 +1819,185 @@ def _build_snode_churn_case(ti: Any, runtime_name: str,
     }
 
 
+def _snode_concurrent_route(state: dict[str, Any], runtime_name: str,
+                            concurrent_trees: int) -> dict[str, Any]:
+    forge_evidence_ok = (
+        runtime_name != "forge" or bool(
+            state["peak_directory"] is not None
+            and state["after_directory"] is not None
+            and state["peak_directory"].get("available") is True
+            and state["peak_directory"].get("active_tree_count")
+            == state["baseline_active_tree_count"] + concurrent_trees
+            and state["after_directory"].get("active_tree_count")
+            == state["baseline_active_tree_count"]
+        )
+    )
+    return {
+        "classification": (
+            "forge_simultaneously_live_snode_capacity"
+            if runtime_name == "forge"
+            else "vanilla_simultaneously_live_snode_capacity"
+        ),
+        "public_api": "ti.FieldsBuilder().dense().place(); tree.destroy()",
+        "concurrent_tree_target": concurrent_trees,
+        "cycles_completed": state["cycles_completed"],
+        "peak_unique_tree_ids": state["peak_unique_tree_ids"],
+        "baseline_active_tree_count": state["baseline_active_tree_count"],
+        "peak_runtime_directory": state["peak_directory"],
+        "after_destroy_runtime_directory": state["after_directory"],
+        "runtime_directory_available": runtime_name == "forge",
+        "last_error": state["last_error"],
+        "passed": bool(
+            state["cycles_completed"] >= 1
+            and state["last_error"] is None
+            and state["peak_unique_tree_ids"] == concurrent_trees
+            and forge_evidence_ok
+        ),
+    }
+
+
+def _build_snode_concurrent_case(ti: Any, runtime_name: str,
+                                 preset: str) -> dict[str, Any]:
+    concurrent_trees = {
+        "small": 128,
+        "medium": 512,
+        "large": 1400,
+    }[preset]
+    accumulator = ti.field(dtype=ti.i32, shape=())
+
+    @ti.kernel
+    def write_value(field: ti.template(), value: ti.i32):
+        field[0] = value
+
+    @ti.kernel
+    def sum_endpoints(first: ti.template(), last: ti.template()):
+        accumulator[None] = first[0] + last[0]
+
+    ti.lang.impl.get_runtime().materialize()
+    accumulator[None] = 0
+    ti.sync()
+    baseline_active = None
+    if runtime_name == "forge":
+        baseline_active = dict(
+            ti.lang.impl.get_runtime().prog._debug_snode_runtime_directory_stats()
+        )["active_tree_count"]
+    state: dict[str, Any] = {
+        "cycles_completed": 0,
+        "peak_unique_tree_ids": 0,
+        "baseline_active_tree_count": baseline_active,
+        "peak_directory": None,
+        "after_directory": None,
+        "last_error": None,
+    }
+
+    def launch() -> None:
+        fields = []
+        builders = []
+        trees = []
+        destroyed = set()
+        try:
+            for _ in range(concurrent_trees):
+                field = ti.field(dtype=ti.i32)
+                builder = ti.FieldsBuilder()
+                builder.dense(ti.i, 1).place(field)
+                tree = builder.finalize()
+                fields.append(field)
+                builders.append(builder)
+                trees.append(tree)
+            tree_ids = [int(tree.id) for tree in trees]
+            state["peak_unique_tree_ids"] = len(set(tree_ids))
+            if runtime_name == "forge":
+                state["peak_directory"] = dict(
+                    ti.lang.impl.get_runtime().prog.
+                    _debug_snode_runtime_directory_stats())
+            write_value(fields[0], 17)
+            write_value(fields[-1], 29)
+            sum_endpoints(fields[0], fields[-1])
+            ti.sync()
+            for index in range(len(trees) - 1, -1, -1):
+                trees[index].destroy()
+                destroyed.add(index)
+            if runtime_name == "forge":
+                state["after_directory"] = dict(
+                    ti.lang.impl.get_runtime().prog.
+                    _debug_snode_runtime_directory_stats())
+            state["cycles_completed"] += 1
+        except Exception as error:
+            state["last_error"] = repr(error)
+            raise
+        finally:
+            for index in range(len(trees) - 1, -1, -1):
+                if index not in destroyed:
+                    try:
+                        trees[index].destroy()
+                    except Exception:
+                        pass
+            fields.clear()
+            builders.clear()
+            trees.clear()
+
+    def reset() -> None:
+        accumulator[None] = 0
+
+    def validate_fresh() -> dict[str, Any]:
+        launch()
+        actual = int(accumulator[None])
+        route = _snode_concurrent_route(
+            state, runtime_name, concurrent_trees)
+        return {
+            "passed": bool(actual == 46 and route["passed"]),
+            "comparison": "exact_first_plus_last_tree_value",
+            "actual": actual,
+            "expected": 46,
+            "concurrent_tree_target": concurrent_trees,
+            "peak_unique_tree_ids": state["peak_unique_tree_ids"],
+            "active_tree_count_recovered": (
+                None if runtime_name == "vanilla" else
+                state["after_directory"]["active_tree_count"]
+                == state["baseline_active_tree_count"]
+            ),
+        }
+
+    return {
+        "launch": launch,
+        "reset": reset,
+        "validate": validate_fresh,
+        "route": lambda: _snode_concurrent_route(
+            state, runtime_name, concurrent_trees),
+        "logical_bytes": 0,
+        "traffic_model": (
+            "simultaneously-live lifecycle capacity; no logical bandwidth claimed"
+        ),
+        "workload_contract": {
+            "case_id": "DIRECT-004-CONCURRENT",
+            "comparison_class": "direct-stability",
+            "public_api": "ti.FieldsBuilder dense tree finalize/use/destroy",
+            "layout": "one dense scalar per independent SNodeTree",
+            "concurrent_trees": concurrent_trees,
+            "semantics": (
+                "create all trees before use/destruction, prove every live id is "
+                "unique, use first/last trees, then destroy all in reverse order"
+            ),
+            "shared": (
+                "same FieldsBuilder DSL, simultaneous tree count, endpoint kernels, "
+                "exact oracle, synchronization, reverse destruction, and process"
+            ),
+            "allowed_difference": (
+                "Forge reports runtime-directory capacity/count; vanilla marks "
+                "that telemetry unavailable"
+            ),
+            "correctness": "all_unique_live_ids_endpoint_sum_and_full_retirement",
+            "timing": (
+                "one full simultaneous create/use/sync/destroy transaction; "
+                "not historical churn and not warm kernel latency"
+            ),
+            "scope_boundary": (
+                "simultaneously-live capacity only; historical churn is DIRECT-004-CHURN"
+            ),
+        },
+    }
+
+
 def _load_graph_mpm_workload() -> tuple[Any, Path]:
     source = Path(__file__).resolve().parents[1] / "graph_mpm_replay_bench.py"
     spec = importlib.util.spec_from_file_location(
@@ -2312,6 +2492,9 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         elif args.operation == "snode_churn":
             case = _build_snode_churn_case(
                 ti, args.runtime, args.backend)
+        elif args.operation == "snode_concurrent":
+            case = _build_snode_concurrent_case(
+                ti, args.runtime, args.preset)
         elif args.operation in ("mpm_graph", "mpm_direct"):
             case = _build_mpm_case(
                 ti, args.runtime, args.operation, args.preset)

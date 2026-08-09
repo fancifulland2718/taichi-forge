@@ -94,6 +94,11 @@ DSL 与 kernel；每个计时 launch 创建一个 pointer+dense tree、激活 64
 恢复；vanilla 不可用的计数器不会伪造。simultaneously-live capacity 保持为另一独立
 案例。入口为 `snode_churn_microbench.py`。
 
+`snode_concurrent` 是独立的同时容量案例。small/medium/large 分别同时保持
+128/512/1,400 个独立 dense scalar tree；所有 tree finalize 后才使用首尾两个、同步，
+再按逆序全部退休。它测量当前 live capacity，不是历史 ID churn。先通过
+`snode_concurrent_microbench.py` 的 small，之后才允许扩展规模。
+
 ## runner 已实现的公平性合同
 
 - Forge 与 vanilla 使用两个依赖完备的独立 venv。子进程删除 `PYTHONPATH` /
@@ -224,6 +229,16 @@ C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
   --backend cuda --preset small --intent diagnostic `
   --pairs 1 --samples 5 --warmups 2 `
   --target-sample-ms 20 --stability-replays 100
+```
+
+同时 live capacity 使用自己的入口：
+
+```powershell
+C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
+  benchmarks\qualification\snode_concurrent_microbench.py `
+  --backend cuda --preset small --intent diagnostic `
+  --pairs 1 --samples 3 --warmups 1 `
+  --target-sample-ms 100 --stability-replays 0
 ```
 
 某个单项验证稳定后，资格模式会强制执行固定最低门槛：
