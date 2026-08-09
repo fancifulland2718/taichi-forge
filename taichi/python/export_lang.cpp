@@ -80,69 +80,6 @@ void reset_fs_inner_stats();
 
 }  // namespace taichi::lang
 
-#if defined(TI_WITH_SPLIT_PYTHON_RUNTIME) && \
-    !defined(TI_BUILDING_PYTHON_RUNTIME)
-namespace taichi::lang::aot {
-
-#if defined(__GNUC__)
-#define TI_SPLIT_RUNTIME_LOCAL_OVERRIDE \
-  __attribute__((visibility("hidden")))
-#else
-#define TI_SPLIT_RUNTIME_LOCAL_OVERRIDE
-#endif
-
-// The split Python wheel is allowed to be newer than the already-published
-// native runtime wheel.  Keep this ABI-compatible override in the shim so a
-// CUDA-enabled runtime can still reset CPU/Vulkan graphs on hosts where the
-// CUDA driver is absent.  The native implementation in the 0.6.1 runtime
-// acquires CUDAContext unconditionally, even when this cache has never owned
-// CUDA graph state.
-//
-// Do not put work on the graph execution hot path to compensate for that old
-// runtime.  Probe under run_mutex during the cold reset path instead.  If CUDA
-// state exists, retain the native CUDA-submission-lock -> run_mutex ordering;
-// otherwise run_mutex alone is sufficient to retire CPU/Vulkan state.
-TI_SPLIT_RUNTIME_LOCAL_OVERRIDE void
-CompiledGraphJITCache::clear_runtime_state() {
-  auto clear_locked = [this]() {
-    cuda_graph_state.reset();
-    vulkan_graph_state.reset();
-    vulkan_inline_stats = {};
-    graph_diagnostics_counters_complete = true;
-    kernels.clear();
-    runtime_arg_plans.clear();
-    validated_snode_tree_program = nullptr;
-    validated_snode_tree_epoch = 0;
-  };
-
-#if defined(TI_WITH_CUDA)
-  std::unique_lock<std::mutex> run_lock(run_mutex);
-  if (cuda_graph_state == nullptr) {
-    clear_locked();
-    return;
-  }
-
-  run_lock.unlock();
-  auto cuda_submission_lock =
-      CUDAContext::get_instance().get_submission_lock_guard();
-  run_lock.lock();
-  clear_locked();
-#else
-  std::lock_guard<std::mutex> run_lock(run_mutex);
-  clear_locked();
-#endif
-}
-
-TI_SPLIT_RUNTIME_LOCAL_OVERRIDE
-CompiledGraphJITCache::~CompiledGraphJITCache() {
-  clear_runtime_state();
-}
-
-#undef TI_SPLIT_RUNTIME_LOCAL_OVERRIDE
-
-}  // namespace taichi::lang::aot
-#endif
-
 namespace taichi {
 namespace {
 

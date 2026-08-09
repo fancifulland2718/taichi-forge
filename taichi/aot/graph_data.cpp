@@ -4551,21 +4551,42 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
 }
 
 void CompiledGraphJITCache::clear_runtime_state() {
+  auto clear_locked = [this]() {
+    cuda_graph_state.reset();
+    vulkan_graph_state.reset();
+    vulkan_inline_stats = {};
+    graph_diagnostics_counters_complete = true;
+    kernels.clear();
+    runtime_arg_plans.clear();
+    validated_snode_tree_program = nullptr;
+    validated_snode_tree_epoch = 0;
+  };
+
 #if defined(TI_WITH_CUDA)
-  // Match jit_run_cached() lock ordering so reset/destruction cannot retire a
-  // graph executable while another CUDA submission transaction is active.
+  // A CUDA-enabled build may run only CPU/Vulkan graphs on a machine without
+  // an NVIDIA driver. Do not construct CUDAContext unless this cache actually
+  // owns CUDA state. Probe under run_mutex, which is also the state-creation
+  // lock used by jit_run_cached().
+  std::unique_lock<std::mutex> run_lock(run_mutex);
+  if (cuda_graph_state == nullptr) {
+    clear_locked();
+    return;
+  }
+
+  // Match jit_run_cached()'s CUDA-submission-lock -> run_mutex ordering so
+  // reset/destruction cannot retire an executable during a submission. Drop
+  // run_mutex before taking the outer lock, then reacquire it and clear the
+  // current state. A concurrent run is therefore either completed first or
+  // starts from an empty cache after this reset.
+  run_lock.unlock();
   auto cuda_submission_lock =
       CUDAContext::get_instance().get_submission_lock_guard();
+  run_lock.lock();
+  clear_locked();
+#else
+  std::lock_guard<std::mutex> run_lock(run_mutex);
+  clear_locked();
 #endif
-  std::lock_guard<std::mutex> lock(run_mutex);
-  cuda_graph_state.reset();
-  vulkan_graph_state.reset();
-  vulkan_inline_stats = {};
-  graph_diagnostics_counters_complete = true;
-  kernels.clear();
-  runtime_arg_plans.clear();
-  validated_snode_tree_program = nullptr;
-  validated_snode_tree_epoch = 0;
 }
 
 CompiledGraphJITCache::~CompiledGraphJITCache() {
