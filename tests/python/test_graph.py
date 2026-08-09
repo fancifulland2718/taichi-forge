@@ -3989,6 +3989,90 @@ def test_nested_structured_while_respects_explicit_portable_outer_lowering():
     assert inner_report.logical_iterations == 0
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_execution_stats_flattens_cgraph_stats_around_structured_sequence():
+    @ti.kernel
+    def add_one(value: ti.types.ndarray(dtype=ti.i32, ndim=0)):
+        value[None] += 1
+
+    @ti.kernel
+    def evaluate(
+        value: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        target: ti.i32,
+    ):
+        predicate[None] = int(value[None] < target)
+
+    @ti.kernel
+    def advance(
+        value: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        value[None] += 1
+        counter[None] += 1
+
+    value_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "stats_value", ti.i32, ndim=0
+    )
+    predicate_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "stats_predicate", ti.i32, ndim=0
+    )
+    counter_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "stats_counter", ti.i32, ndim=0
+    )
+    target_arg = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "stats_target", ti.i32
+    )
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(add_one, value_arg)
+    condition = builder.create_sequential()
+    condition.dispatch(evaluate, value_arg, predicate_arg, target_arg)
+    body = builder.create_sequential()
+    body.dispatch(advance, value_arg, counter_arg)
+    builder.while_loop(
+        condition,
+        body,
+        predicate=predicate_arg,
+        control_inputs=(value_arg, target_arg),
+        carried_state=(value_arg, counter_arg),
+        counter=counter_arg,
+        max_iterations=4,
+        name="stats_loop",
+    )
+    builder.dispatch(add_one, value_arg)
+    graph = builder.compile()
+
+    value = ti.ndarray(ti.i32, shape=())
+    predicate = ti.ndarray(ti.i32, shape=())
+    counter = ti.ndarray(ti.i32, shape=())
+    value.fill(0)
+    predicate.fill(0)
+    counter.fill(0)
+    # The first report enables native detail counters. Exercise the following
+    # run with the nested backend-statistics shape that previously leaked a
+    # tuple into the public segment aggregator.
+    graph.execution_stats()
+    graph.run(
+        {
+            "stats_value": value,
+            "stats_predicate": predicate,
+            "stats_counter": counter,
+            "stats_target": 3,
+        }
+    )
+
+    report = graph.execution_stats()
+    assert tuple(segment.kind for segment in report.segments) == (
+        "cgraph",
+        "while",
+        "cgraph",
+    )
+    assert report.cgraph_segment_count == 2
+    assert value.to_numpy()[()] == 4
+    assert counter.to_numpy()[()] == 2
+
+
 @test_utils.test(arch=ti.cpu)
 def test_nested_structured_if_reports_selected_branch_and_clears_stale_report():
     @ti.kernel

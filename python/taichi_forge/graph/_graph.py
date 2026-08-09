@@ -3994,8 +3994,8 @@ def _execution_report(
             continue
 
         stats = (
-            backend_stats[stats_cursor]
-            if stats_cursor < len(backend_stats)
+            flat_backend_stats[stats_cursor]
+            if stats_cursor < len(flat_backend_stats)
             else _empty_backend_stats()
         )
         stats_cursor += 1
@@ -9063,6 +9063,62 @@ class _GraphExecutable:
             else fixed_runtime_args
         )
         self._context = _GraphRunContext() if self.spec.needs_runtime_args else None
+        self._telemetry_region_indices = {
+            node.region_path: index
+            for index, node in enumerate(self.spec.structured_control_nodes)
+            if isinstance(node, _CompiledWhileGraphNode)
+        }
+
+    def _run_node_for_submission(self, node, context, temporaries, telemetry):
+        if isinstance(node, _CompiledSequentialRegionNode):
+            if not node.supports_native_submission:
+                raise TaichiRuntimeError(
+                    "Structured sequence submission requires every control "
+                    "region to provide submission-capable native lowering"
+                )
+            for child in node.nodes:
+                self._run_node_for_submission(
+                    child, context, temporaries, telemetry
+                )
+            return
+
+        if isinstance(
+            node,
+            (
+                _CompiledWhileGraphNode,
+                _CompiledIfGraphNode,
+                _CompiledSwitchGraphNode,
+            ),
+        ):
+            telemetry_nodes = ()
+            telemetry_indices = ()
+            if telemetry is not None and isinstance(node, _CompiledWhileGraphNode):
+                telemetry_nodes = _submission_telemetry_region_nodes(node)
+                try:
+                    telemetry_indices = tuple(
+                        self._telemetry_region_indices[item.region_path]
+                        for item in telemetry_nodes
+                    )
+                except KeyError as exc:
+                    raise TaichiRuntimeError(
+                        "Graph submission telemetry region is absent from the "
+                        "structured definition"
+                    ) from exc
+                for index, telemetry_node in zip(
+                    telemetry_indices, telemetry_nodes
+                ):
+                    telemetry.begin_region(index, telemetry_node, context)
+            try:
+                node.run_for_submission(context, temporaries)
+            finally:
+                if telemetry is not None and telemetry_nodes:
+                    for index, telemetry_node in reversed(
+                        tuple(zip(telemetry_indices, telemetry_nodes))
+                    ):
+                        telemetry.end_region(index, telemetry_node, context)
+            return
+
+        node.run(context, temporaries)
 
     def run(self, args, temporaries=None, trace_recorder=None):
         # Graph.run() holds a per-Graph lock, so this context can safely reuse
@@ -9089,43 +9145,10 @@ class _GraphExecutable:
                 self.spec.bind_runtime_args(args, temporaries, self.fixed_runtime_args),
             )
         try:
-            telemetry_region = 0
             for node in self.spec.nodes:
-                if isinstance(
-                    node,
-                    (
-                        _CompiledWhileGraphNode,
-                        _CompiledIfGraphNode,
-                        _CompiledSwitchGraphNode,
-                    ),
-                ):
-                    if telemetry is not None and isinstance(
-                        node, _CompiledWhileGraphNode
-                    ):
-                        telemetry_nodes = _submission_telemetry_region_nodes(node)
-                        for offset, telemetry_node in enumerate(telemetry_nodes):
-                            telemetry.begin_region(
-                                telemetry_region + offset,
-                                telemetry_node,
-                                context,
-                            )
-                    node.run_for_submission(context, temporaries)
-                    if telemetry is not None and isinstance(
-                        node, _CompiledWhileGraphNode
-                    ):
-                        for offset, telemetry_node in reversed(
-                            tuple(enumerate(telemetry_nodes))
-                        ):
-                            telemetry.end_region(
-                                telemetry_region + offset,
-                                telemetry_node,
-                                context,
-                            )
-                        telemetry_region += len(telemetry_nodes)
-                elif isinstance(node, _CompiledSequentialRegionNode):
-                    node.run_for_submission(context, temporaries)
-                else:
-                    node.run(context, temporaries)
+                self._run_node_for_submission(
+                    node, context, temporaries, telemetry
+                )
         finally:
             if context is not None:
                 context.end()
