@@ -1616,7 +1616,7 @@ def _native_compact_route(
         "kernel_source_owner": "benchmark",
         "kernel_source_sha256": kernel_source_sha256,
         "helper_api_used": False,
-        "native_api_used": False,
+        "specialized_api_used": False,
         "benchmark_workspace_kind": "two_dense_i32_fields",
         "benchmark_workspace_field_count": 2,
         "scan_algorithm": "inclusive_hillis_steele_ping_pong",
@@ -1777,7 +1777,7 @@ def _build_native_compact_case(ti: Any, runtime_name: str, backend: str,
             "kernel_source_sha256": source_sha256,
             "kernel_adapter": "benchmark_defined_ti_kernel_pipeline",
             "kernel_helper_api_used": False,
-            "kernel_native_api_used": False,
+            "kernel_specialized_api_used": False,
             "kernel_benchmark_workspace_kind": "two_dense_i32_fields",
             "kernel_benchmark_workspace_field_count": 2,
             "kernel_scan_algorithm": "inclusive_hillis_steele_ping_pong",
@@ -6077,7 +6077,7 @@ def _parent_main(args: argparse.Namespace) -> int:
                             "kernel_source_sha256")
                         and child["route"].get("helper_api_used") is False
                         and (
-                            child["route"].get("native_api_used") is False
+                            child["route"].get("specialized_api_used") is False
                             and child["route"].get(
                                 "benchmark_workspace_field_count") == 2
                             and child["route"].get("scan_algorithm")

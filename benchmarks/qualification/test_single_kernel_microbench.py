@@ -691,7 +691,7 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         self.assertEqual(route["kernel_source_owner"], "benchmark")
         self.assertEqual(route["kernel_source_sha256"], source_sha256)
         self.assertFalse(route["helper_api_used"])
-        self.assertFalse(route["native_api_used"])
+        self.assertFalse(route["specialized_api_used"])
         self.assertEqual(route["benchmark_workspace_field_count"], 2)
         self.assertEqual(route["scan_steps"], 16)
         self.assertEqual(route["final_scan_copy_kernel_invocations"], 0)

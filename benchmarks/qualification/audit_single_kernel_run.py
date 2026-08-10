@@ -677,7 +677,7 @@ def _audit(run_dir: Path) -> dict[str, Any]:
                         "kernel_source_sha256")
                     and child["route"].get("helper_api_used") is False
                     and (
-                        child["route"].get("native_api_used") is False
+                        child["route"].get("specialized_api_used") is False
                         and child["route"].get(
                             "benchmark_workspace_field_count") == 2
                         and child["route"].get("scan_algorithm")
