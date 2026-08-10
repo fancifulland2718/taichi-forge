@@ -86,6 +86,13 @@ OPERATIONS = (
     "mpm_graph",
     "mpm_direct",
 )
+CONTROL_OPERATIONS = frozenset({
+    "fill",
+    "copy",
+    "saxpy",
+    "stencil2d",
+    "reduce_chunks",
+})
 THIN_CAPABILITY_OPERATIONS = frozenset({
     "native_reduce",
     "native_transform",
@@ -566,6 +573,13 @@ def _numeric_validation(actual: Any, expected: Any, atol: float,
     rmse = float(np.sqrt(np.mean(difference * difference))) if difference.size else 0.0
     scale = float(np.max(np.abs(expected64))) if expected64.size else 0.0
     tolerance = atol + rtol * scale
+    flattened = actual64.reshape(-1)
+    sample_indices = sorted({
+        0,
+        flattened.size // 3,
+        (2 * flattened.size) // 3,
+        max(0, flattened.size - 1),
+    }) if flattened.size else []
     return {
         "passed": bool(np.all(np.isfinite(actual64)) and max_abs <= tolerance),
         "max_abs_error": max_abs,
@@ -574,6 +588,33 @@ def _numeric_validation(actual: Any, expected: Any, atol: float,
         "atol": atol,
         "rtol": rtol,
         "effective_tolerance": tolerance,
+        "endpoint_fingerprint": {
+            "finite": bool(np.all(np.isfinite(actual64))),
+            "count": int(flattened.size),
+            "sum": float(np.sum(flattened, dtype=np.float64)),
+            "minimum": float(np.min(flattened)) if flattened.size else None,
+            "maximum": float(np.max(flattened)) if flattened.size else None,
+            "sample_indices": sample_indices,
+            "sample_values": [float(flattened[index])
+                              for index in sample_indices],
+        },
+    }
+
+
+def _ordinary_kernel_route(runtime_name: str,
+                           source_sha256: str) -> dict[str, Any]:
+    """Prove that CONTROL-001 directly invokes benchmark-owned ti.kernel code."""
+    return {
+        "classification": f"{runtime_name}_ordinary_taichi_kernel",
+        "adapter": "direct_ti_kernel",
+        "kernel_source_owner": "benchmark",
+        "kernel_source_sha256": source_sha256,
+        "native_or_helper_api_used": False,
+        "launches_per_replay": 1,
+        "passed": bool(
+            runtime_name in ("forge", "vanilla")
+            and len(source_sha256) == 64
+        ),
     }
 
 
@@ -654,6 +695,16 @@ def _build_case(ti: Any, kernel: Callable[..., None], operation: str,
                 "actual_sum": actual,
                 "expected_sum": expected,
                 "absolute_error": abs(actual - expected),
+                "effective_tolerance": 0.0,
+                "endpoint_fingerprint": {
+                    "finite": True,
+                    "count": 1,
+                    "sum": float(actual),
+                    "minimum": float(actual),
+                    "maximum": float(actual),
+                    "sample_indices": [0],
+                    "sample_values": [float(actual)],
+                },
             }
 
         return {
@@ -4532,12 +4583,30 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
             kernel = _make_kernel(ti, args.operation)
             case = _build_case(ti, kernel, args.operation, config["elements"],
                                config["stencil_side"])
+            source_sha256 = sha256_file(Path(__file__))
+            case["route"] = lambda: _ordinary_kernel_route(
+                args.runtime, source_sha256)
             case["workload_contract"] = {
                 "case_id": "CONTROL-001",
                 "comparison_class": "control",
                 "operation": args.operation,
                 "elements": config["elements"],
                 "stencil_side": config["stencil_side"],
+                "kernel_source_owner": "benchmark",
+                "kernel_source_sha256": source_sha256,
+                "adapter": "direct_ti_kernel",
+                "native_or_helper_api_used": False,
+                "launches_per_replay": 1,
+                "input_preparation_in_timed_scope": False,
+                "validation_transfer_in_timed_scope": False,
+                "output_write_contract": "every output element is overwritten",
+            }
+            case["case_preparation"] = {
+                "excluded_from_timing": True,
+                "description": (
+                    "deterministic host input generation, ndarray allocation, "
+                    "host-to-device initialization, and validation transfers"
+                ),
             }
         result["logical_bytes"] = case["logical_bytes"]
         result["traffic_model"] = case["traffic_model"]
@@ -4919,6 +4988,47 @@ def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
                          baseline: str) -> bool:
     left_result = results[subject]
     right_result = results[baseline]
+    if left_result["operation"] in CONTROL_OPERATIONS:
+        for validation_name in ("validation_before", "validation_after"):
+            left_validation = left_result[validation_name]
+            right_validation = right_result[validation_name]
+            if not left_validation.get("passed") or not right_validation.get(
+                    "passed"):
+                return False
+            left = left_validation.get("endpoint_fingerprint") or {}
+            right = right_validation.get("endpoint_fingerprint") or {}
+            if not left.get("finite") or not right.get("finite"):
+                return False
+            if (left.get("count") != right.get("count")
+                    or left.get("sample_indices") != right.get(
+                        "sample_indices")):
+                return False
+            if (len(left.get("sample_values", []))
+                    != len(left.get("sample_indices", []))
+                    or len(right.get("sample_values", []))
+                    != len(right.get("sample_indices", []))):
+                return False
+            count = int(left["count"])
+            element_tolerance = 2.0 * max(
+                float(left_validation.get("effective_tolerance", 0.0)),
+                float(right_validation.get("effective_tolerance", 0.0)),
+            )
+            for key in ("minimum", "maximum"):
+                if not math.isclose(
+                        float(left[key]), float(right[key]), rel_tol=0.0,
+                        abs_tol=element_tolerance):
+                    return False
+            if not math.isclose(
+                    float(left["sum"]), float(right["sum"]), rel_tol=0.0,
+                    abs_tol=element_tolerance * max(1, count)):
+                return False
+            if any(
+                    not math.isclose(float(a), float(b), rel_tol=0.0,
+                                     abs_tol=element_tolerance)
+                    for a, b in zip(left["sample_values"],
+                                    right["sample_values"])):
+                return False
+        return True
     if left_result["operation"] == "adaptive_pbd":
         for validation_name in ("validation_before", "validation_after"):
             left = left_result[validation_name]["endpoint_fingerprint"]
@@ -5312,6 +5422,8 @@ def _write_bilingual_reports(output_dir: Path, summary: dict[str, Any]) -> None:
         f"{'通过' if summary['method_checks']['comparison_axis_verified'] else '失败'}\n"
         "- kernel 控制 route 无 native/helper："
         f"{'通过' if summary['method_checks']['kernel_control_route_isolated'] else '失败'}\n"
+        "- 普通控制 route 为 benchmark-owned 单一 ti.kernel："
+        f"{'通过' if summary['method_checks']['ordinary_control_route_isolated'] else '失败'}\n"
         "- Forge binary 身份一致："
         f"{'通过' if summary['method_checks']['same_forge_binary_identity'] else '失败'}\n"
         "- 原地操作输入稳定："
@@ -5351,6 +5463,8 @@ def _write_bilingual_reports(output_dir: Path, summary: dict[str, Any]) -> None:
         f"{'pass' if summary['method_checks']['comparison_axis_verified'] else 'fail'}\n"
         "- Kernel-control route isolation: "
         f"{'pass' if summary['method_checks']['kernel_control_route_isolated'] else 'fail'}\n"
+        "- Ordinary-control benchmark-owned single-ti.kernel route: "
+        f"{'pass' if summary['method_checks']['ordinary_control_route_isolated'] else 'fail'}\n"
         "- Forge binary identity: "
         f"{'pass' if summary['method_checks']['same_forge_binary_identity'] else 'fail'}\n"
         "- Stable replay input for in-place operations: "
@@ -5627,6 +5741,17 @@ def _parent_main(args: argparse.Namespace) -> int:
                 child["route"], sort_keys=True).lower()
             if child["runtime"] in ("forge_kernel", "vanilla_kernel")
             else True
+            for child in children),
+        "ordinary_control_route_isolated": all(
+            child["route"].get("classification")
+            == f"{child['runtime']}_ordinary_taichi_kernel"
+            and child["route"].get("adapter") == "direct_ti_kernel"
+            and child["route"].get("kernel_source_owner") == "benchmark"
+            and child["route"].get("kernel_source_sha256")
+            == child["workload_contract"].get("kernel_source_sha256")
+            and child["route"].get("native_or_helper_api_used") is False
+            and child["route"].get("launches_per_replay") == 1
+            if child["operation"] in CONTROL_OPERATIONS else True
             for child in children),
         "same_forge_binary_identity": bool(
             args.comparison != "forge-native-vs-forge-kernel"

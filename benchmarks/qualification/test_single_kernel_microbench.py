@@ -17,6 +17,8 @@ from benchmarks.qualification.single_kernel_microbench import (
     _native_transform_route,
     _native_indexed_copy_route,
     _native_compact_route,
+    _ordinary_kernel_route,
+    _endpoint_equivalent,
     _device_prefix_chain_route,
     _particle_hash_route,
     _adaptive_pbd_route,
@@ -31,9 +33,59 @@ from benchmarks.qualification.single_kernel_microbench import (
     warmup_batch_size,
 )
 from benchmarks.qualification.runtime_common import normalize_gpu_uuid
+from benchmarks.qualification.audit_single_kernel_run import (
+    _endpoint_equivalent as _audit_endpoint_equivalent,
+)
 
 
 class SingleKernelMicrobenchTest(unittest.TestCase):
+
+    def test_ordinary_kernel_route_proves_benchmark_owned_single_launch(self):
+        route = _ordinary_kernel_route("forge", "a" * 64)
+        self.assertTrue(route["passed"])
+        self.assertEqual(route["classification"],
+                         "forge_ordinary_taichi_kernel")
+        self.assertEqual(route["adapter"], "direct_ti_kernel")
+        self.assertFalse(route["native_or_helper_api_used"])
+        self.assertEqual(route["launches_per_replay"], 1)
+        self.assertFalse(_ordinary_kernel_route("forge", "short")["passed"])
+
+    def test_ordinary_endpoint_equivalence_uses_actual_fingerprints(self):
+        validation = {
+            "passed": True,
+            "effective_tolerance": 0.0,
+            "endpoint_fingerprint": {
+                "finite": True,
+                "count": 4,
+                "sum": 10.0,
+                "minimum": 1.0,
+                "maximum": 4.0,
+                "sample_indices": [0, 1, 2, 3],
+                "sample_values": [1.0, 2.0, 3.0, 4.0],
+            },
+        }
+        results = {
+            "forge": {
+                "operation": "copy",
+                "validation_before": json.loads(json.dumps(validation)),
+                "validation_after": json.loads(json.dumps(validation)),
+            },
+            "vanilla": {
+                "operation": "copy",
+                "validation_before": json.loads(json.dumps(validation)),
+                "validation_after": json.loads(json.dumps(validation)),
+            },
+        }
+        self.assertTrue(_endpoint_equivalent(results, "forge", "vanilla"))
+        self.assertTrue(_audit_endpoint_equivalent(
+            results["forge"], results["vanilla"]))
+        results["vanilla"]["validation_after"]["endpoint_fingerprint"][
+            "sample_values"][2] = 3.5
+        results["vanilla"]["validation_after"]["endpoint_fingerprint"][
+            "sum"] = 10.5
+        self.assertFalse(_endpoint_equivalent(results, "forge", "vanilla"))
+        self.assertFalse(_audit_endpoint_equivalent(
+            results["forge"], results["vanilla"]))
 
     def test_profiler_range_rejects_normal_parent_or_non_cuda_run(self):
         with self.assertRaisesRegex(

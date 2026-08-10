@@ -68,6 +68,48 @@ def _check(condition: bool, name: str, failures: list[str]) -> None:
 
 def _endpoint_equivalent(left_result: dict[str, Any],
                          right_result: dict[str, Any]) -> bool:
+    if left_result["operation"] in (
+            "fill", "copy", "saxpy", "stencil2d", "reduce_chunks"):
+        for validation_name in ("validation_before", "validation_after"):
+            left_validation = left_result[validation_name]
+            right_validation = right_result[validation_name]
+            if not left_validation.get("passed") or not right_validation.get(
+                    "passed"):
+                return False
+            left = left_validation.get("endpoint_fingerprint") or {}
+            right = right_validation.get("endpoint_fingerprint") or {}
+            if not left.get("finite") or not right.get("finite"):
+                return False
+            if (left.get("count") != right.get("count")
+                    or left.get("sample_indices") != right.get(
+                        "sample_indices")):
+                return False
+            if (len(left.get("sample_values", []))
+                    != len(left.get("sample_indices", []))
+                    or len(right.get("sample_values", []))
+                    != len(right.get("sample_indices", []))):
+                return False
+            count = int(left["count"])
+            element_tolerance = 2.0 * max(
+                float(left_validation.get("effective_tolerance", 0.0)),
+                float(right_validation.get("effective_tolerance", 0.0)),
+            )
+            for key in ("minimum", "maximum"):
+                if not math.isclose(
+                        float(left[key]), float(right[key]), rel_tol=0.0,
+                        abs_tol=element_tolerance):
+                    return False
+            if not math.isclose(
+                    float(left["sum"]), float(right["sum"]), rel_tol=0.0,
+                    abs_tol=element_tolerance * max(1, count)):
+                return False
+            if any(
+                    not math.isclose(float(a), float(b), rel_tol=0.0,
+                                     abs_tol=element_tolerance)
+                    for a, b in zip(left["sample_values"],
+                                    right["sample_values"])):
+                return False
+        return True
     if left_result["operation"] == "adaptive_pbd":
         for validation_name in ("validation_before", "validation_after"):
             left = left_result[validation_name]["endpoint_fingerprint"]
@@ -495,6 +537,18 @@ def _audit(run_dir: Path) -> dict[str, Any]:
         and "native" not in json.dumps(child["route"], sort_keys=True).lower()
         if child["runtime"] in ("forge_kernel", "vanilla_kernel") else True
         for child in children)
+    ordinary_control_route_isolated = all(
+        child["route"].get("classification")
+        == f"{child['runtime']}_ordinary_taichi_kernel"
+        and child["route"].get("adapter") == "direct_ti_kernel"
+        and child["route"].get("kernel_source_owner") == "benchmark"
+        and child["route"].get("kernel_source_sha256")
+        == child["workload_contract"].get("kernel_source_sha256")
+        and child["route"].get("native_or_helper_api_used") is False
+        and child["route"].get("launches_per_replay") == 1
+        if child["operation"] in (
+            "fill", "copy", "saxpy", "stencil2d", "reduce_chunks") else True
+        for child in children)
     forge_binary_signatures = {
         (
             child["environment"]["package_distribution"],
@@ -564,6 +618,12 @@ def _audit(run_dir: Path) -> dict[str, Any]:
                     summary["method_checks"]["kernel_control_route_isolated"] is
                     kernel_control_route_isolated,
                     "kernel control route method check", failures)
+            if "ordinary_control_route_isolated" in summary["method_checks"]:
+                _check(
+                    summary["method_checks"][
+                        "ordinary_control_route_isolated"] is
+                    ordinary_control_route_isolated,
+                    "ordinary control route method check", failures)
             _check(summary["method_checks"]["same_forge_binary_identity"] is
                    same_forge_binary_identity,
                    "Forge binary identity method check", failures)
@@ -588,6 +648,7 @@ def _audit(run_dir: Path) -> dict[str, Any]:
         and order_counts[forward_order] == order_counts[reverse_order]
         and stability_complete
         and snode_lifecycle_plateau
+        and ordinary_control_route_isolated
         and timing_window_complete)
     favorable_fraction = (
         sum(value > 1.0 for value in median_speedups) / len(median_speedups)

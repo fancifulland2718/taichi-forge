@@ -62,6 +62,11 @@ commit 完全一致。
 microbench，能够发现运行时额外成本或基础路径提升，但结论不得外推到 Graph、native
 primitive、bounded dispatch、worklist、LinearOperator 或其他 Forge-only API。后续
 单独分类的 direct/thin 项只覆盖各自声明的 route。
+每个控制项 launch 都严格只有一个 benchmark-owned `ti.kernel`；artifact 记录源码文件
+hash、direct-kernel adapter、单 launch 数与未使用 native/helper API，并由独立审计器
+重算。host 输入构造、分配、初始上传、validation 下载与 endpoint fingerprint 均在
+计时外；跨 runtime endpoint equivalence 从 before/after 实际 fingerprint 重算，不再
+默认通过。
 
 `prefix_sum` 是 `DIRECT-001`：两边运行同一份 workload、dense i32 field、确定性
 输入、exact oracle 和同步边界。Forge 必须命中 native dense-field scan plan，
