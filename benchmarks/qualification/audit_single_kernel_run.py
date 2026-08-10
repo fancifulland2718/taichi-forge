@@ -110,6 +110,24 @@ def _endpoint_equivalent(left_result: dict[str, Any],
                                     right["sample_values"])):
                 return False
         return True
+    if left_result["operation"] == "native_reduce":
+        for validation_name in ("validation_before", "validation_after"):
+            left = left_result[validation_name]
+            right = right_result[validation_name]
+            if not left.get("passed") or not right.get("passed"):
+                return False
+            for value in (left, right):
+                if not all(
+                        isinstance(value.get(key), int)
+                        for key in ("actual", "expected", "absolute_error")):
+                    return False
+                if (value["actual"] != value["expected"]
+                        or value["absolute_error"] != 0):
+                    return False
+            if (left["actual"] != right["actual"]
+                    or left["expected"] != right["expected"]):
+                return False
+        return True
     if left_result["operation"] == "adaptive_pbd":
         for validation_name in ("validation_before", "validation_after"):
             left = left_result[validation_name]["endpoint_fingerprint"]
@@ -532,10 +550,30 @@ def _audit(run_dir: Path) -> dict[str, Any]:
         == expected_axes[child["runtime"]]
         for child in children)
     kernel_control_route_isolated = all(
-        child["route"]["classification"].startswith(
-            f"{child['runtime']}_")
-        and "native" not in json.dumps(child["route"], sort_keys=True).lower()
-        if child["runtime"] in ("forge_kernel", "vanilla_kernel") else True
+        (
+            child["route"]["classification"].startswith(
+                f"{child['runtime']}_")
+            and "native" not in json.dumps(
+                child["route"], sort_keys=True).lower()
+            and (
+                child["operation"] != "native_reduce"
+                or (
+                    child["route"].get("adapter")
+                    == "benchmark_defined_ti_kernel"
+                    and child["route"].get("kernel_source_owner")
+                    == "benchmark"
+                    and child["route"].get("kernel_source_sha256")
+                    == child["workload_contract"].get(
+                        "kernel_source_sha256")
+                    and child["route"].get("helper_api_used") is False
+                    and child["route"].get("workspace_present") is False
+                    and child["route"].get(
+                        "ti_kernel_invocations_per_replay") == 1
+                    and child["route"].get(
+                        "physical_backend_launches_assumed") is False
+                )
+            )
+        ) if child["runtime"] in ("forge_kernel", "vanilla_kernel") else True
         for child in children)
     ordinary_control_route_isolated = all(
         child["route"].get("classification")

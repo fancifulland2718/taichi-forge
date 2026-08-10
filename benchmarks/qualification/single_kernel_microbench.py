@@ -997,7 +997,8 @@ def _build_parallel_sort_case(ti: Any, runtime_name: str,
 
 
 def _native_reduce_route(workspace: Any | None, runtime_name: str,
-                         backend: str) -> dict[str, Any]:
+                         backend: str,
+                         kernel_source_sha256: str) -> dict[str, Any]:
     if runtime_name == "forge":
         plan = getattr(workspace, "_native_reduce_plan", None)
         expected_backend = {
@@ -1032,15 +1033,27 @@ def _native_reduce_route(workspace: Any | None, runtime_name: str,
                 workspace, "workspace_bytes_peak", None),
             "passed": passed,
         }
+    passed = bool(
+        runtime_name in ("forge_kernel", "vanilla_kernel")
+        and workspace is None
+        and len(kernel_source_sha256) == 64
+    )
     return {
         "classification": f"{runtime_name}_equivalent_i32_atomic_sum_kernel",
+        "adapter": "benchmark_defined_ti_kernel",
+        "kernel_source_owner": "benchmark",
+        "kernel_source_sha256": kernel_source_sha256,
+        "helper_api_used": False,
+        "workspace_present": workspace is not None,
+        "ti_kernel_invocations_per_replay": 1,
+        "physical_backend_launches_assumed": False,
         "expected_backend": backend,
         "expected_method": "one output reset plus parallel i32 atomic_add",
         "observed_plan_backend": backend,
         "observed_method": "qualification_reduce_i32_kernel",
         "workspace_bytes_current": 0,
         "workspace_bytes_peak": 0,
-        "passed": True,
+        "passed": passed,
     }
 
 
@@ -1048,6 +1061,7 @@ def _build_native_reduce_case(ti: Any, runtime_name: str, backend: str,
                               elements: int) -> dict[str, Any]:
     import numpy as np
 
+    source_sha256 = sha256_file(Path(__file__))
     host = ((np.arange(elements, dtype=np.int64) % 17) - 8).astype(np.int32)
     expected = int(host.astype(np.int64).sum())
     values = ti.ndarray(dtype=ti.i32, shape=elements)
@@ -1097,7 +1111,7 @@ def _build_native_reduce_case(ti: Any, runtime_name: str, backend: str,
         "reset": reset,
         "validate": validate_fresh,
         "route": lambda: _native_reduce_route(
-            workspace, runtime_name, backend),
+            workspace, runtime_name, backend, source_sha256),
         "logical_bytes": elements * 4 + 4,
         "traffic_model": (
             "semantic minimum: one i32 input read per element and one scalar "
@@ -1116,6 +1130,12 @@ def _build_native_reduce_case(ti: Any, runtime_name: str, backend: str,
             "vanilla_adapter": (
                 "one common-source Taichi kernel with output reset and i32 atomic_add"
             ),
+            "kernel_source_owner": "benchmark",
+            "kernel_source_sha256": source_sha256,
+            "kernel_adapter": "benchmark_defined_ti_kernel",
+            "kernel_helper_api_used": False,
+            "kernel_ti_invocations_per_replay": 1,
+            "kernel_physical_backend_launches_assumed": False,
             "shared": (
                 "same ndarray allocation, values, sum semantics, output dtype/shape, "
                 "launch count, outer synchronization, and exact oracle"
@@ -5031,6 +5051,24 @@ def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
                                     right["sample_values"])):
                 return False
         return True
+    if left_result["operation"] == "native_reduce":
+        for validation_name in ("validation_before", "validation_after"):
+            left = left_result[validation_name]
+            right = right_result[validation_name]
+            if not left.get("passed") or not right.get("passed"):
+                return False
+            for value in (left, right):
+                if not all(
+                        isinstance(value.get(key), int)
+                        for key in ("actual", "expected", "absolute_error")):
+                    return False
+                if (value["actual"] != value["expected"]
+                        or value["absolute_error"] != 0):
+                    return False
+            if (left["actual"] != right["actual"]
+                    or left["expected"] != right["expected"]):
+                return False
+        return True
     if left_result["operation"] == "adaptive_pbd":
         for validation_name in ("validation_before", "validation_after"):
             left = left_result[validation_name]["endpoint_fingerprint"]
@@ -5737,11 +5775,30 @@ def _parent_main(args: argparse.Namespace) -> int:
             == expected_axes[child["runtime"]]
             for child in children),
         "kernel_control_route_isolated": all(
-            child["route"]["classification"].startswith(
-                f"{child['runtime']}_")
-            and "native" not in json.dumps(
-                child["route"], sort_keys=True).lower()
-            if child["runtime"] in ("forge_kernel", "vanilla_kernel")
+            (
+                child["route"]["classification"].startswith(
+                    f"{child['runtime']}_")
+                and "native" not in json.dumps(
+                    child["route"], sort_keys=True).lower()
+                and (
+                    child["operation"] != "native_reduce"
+                    or (
+                        child["route"].get("adapter")
+                        == "benchmark_defined_ti_kernel"
+                        and child["route"].get("kernel_source_owner")
+                        == "benchmark"
+                        and child["route"].get("kernel_source_sha256")
+                        == child["workload_contract"].get(
+                            "kernel_source_sha256")
+                        and child["route"].get("helper_api_used") is False
+                        and child["route"].get("workspace_present") is False
+                        and child["route"].get(
+                            "ti_kernel_invocations_per_replay") == 1
+                        and child["route"].get(
+                            "physical_backend_launches_assumed") is False
+                    )
+                )
+            ) if child["runtime"] in ("forge_kernel", "vanilla_kernel")
             else True
             for child in children),
         "ordinary_control_route_isolated": all(

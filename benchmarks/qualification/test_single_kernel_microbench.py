@@ -88,6 +88,35 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         self.assertFalse(_audit_endpoint_equivalent(
             results["forge"], results["vanilla"]))
 
+    def test_native_reduce_endpoint_equivalence_uses_exact_actual_values(self):
+        validation = {
+            "passed": True,
+            "actual": -8,
+            "expected": -8,
+            "absolute_error": 0,
+        }
+        results = {
+            "forge": {
+                "operation": "native_reduce",
+                "validation_before": dict(validation),
+                "validation_after": dict(validation),
+            },
+            "forge_kernel": {
+                "operation": "native_reduce",
+                "validation_before": dict(validation),
+                "validation_after": dict(validation),
+            },
+        }
+        self.assertTrue(
+            _endpoint_equivalent(results, "forge", "forge_kernel"))
+        self.assertTrue(_audit_endpoint_equivalent(
+            results["forge"], results["forge_kernel"]))
+        results["forge_kernel"]["validation_after"]["actual"] = -7
+        self.assertFalse(
+            _endpoint_equivalent(results, "forge", "forge_kernel"))
+        self.assertFalse(_audit_endpoint_equivalent(
+            results["forge"], results["forge_kernel"]))
+
     def test_profiler_range_rejects_normal_parent_or_non_cuda_run(self):
         with self.assertRaisesRegex(
                 ValueError, "requires one CUDA score sample in child mode"):
@@ -152,6 +181,23 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
             route["classification"],
             "forge_kernel_equivalent_i32_affine_kernel",
         )
+
+    def test_native_reduce_kernel_route_proves_benchmark_control(self):
+        source_sha256 = "a" * 64
+        route = _native_reduce_route(
+            None, "forge_kernel", "cuda", source_sha256)
+        self.assertTrue(route["passed"])
+        self.assertEqual(route["adapter"], "benchmark_defined_ti_kernel")
+        self.assertEqual(route["kernel_source_owner"], "benchmark")
+        self.assertEqual(route["kernel_source_sha256"], source_sha256)
+        self.assertFalse(route["helper_api_used"])
+        self.assertFalse(route["workspace_present"])
+        self.assertEqual(route["ti_kernel_invocations_per_replay"], 1)
+        self.assertFalse(route["physical_backend_launches_assumed"])
+        self.assertFalse(_native_reduce_route(
+            object(), "forge_kernel", "cuda", source_sha256)["passed"])
+        self.assertFalse(_native_reduce_route(
+            None, "forge_kernel", "cuda", "short")["passed"])
 
     def test_common_batch_uses_larger_pilot_suggestion(self):
         self.assertEqual(select_common_batch([128, 512]), 512)
@@ -350,12 +396,14 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
             workspace_bytes_current = 4096
             workspace_bytes_peak = 4096
 
-        passed = _native_reduce_route(Workspace(), "forge", "cuda")
+        passed = _native_reduce_route(
+            Workspace(), "forge", "cuda", "a" * 64)
         self.assertTrue(passed["passed"])
         self.assertEqual(passed["observed_method"],
                          "cuda_device_reduce_ndarray")
         Plan.method_name = "unexpected_fallback"
-        failed = _native_reduce_route(Workspace(), "forge", "cuda")
+        failed = _native_reduce_route(
+            Workspace(), "forge", "cuda", "a" * 64)
         self.assertFalse(failed["passed"])
 
     def test_native_transform_route_rejects_fallback(self):
