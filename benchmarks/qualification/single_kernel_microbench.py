@@ -610,7 +610,8 @@ def _ordinary_kernel_route(runtime_name: str,
         "kernel_source_owner": "benchmark",
         "kernel_source_sha256": source_sha256,
         "native_or_helper_api_used": False,
-        "launches_per_replay": 1,
+        "ti_kernel_invocations_per_replay": 1,
+        "physical_backend_launches_assumed": False,
         "passed": bool(
             runtime_name in ("forge", "vanilla")
             and len(source_sha256) == 64
@@ -4596,7 +4597,8 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
                 "kernel_source_sha256": source_sha256,
                 "adapter": "direct_ti_kernel",
                 "native_or_helper_api_used": False,
-                "launches_per_replay": 1,
+                "ti_kernel_invocations_per_replay": 1,
+                "physical_backend_launches_assumed": False,
                 "input_preparation_in_timed_scope": False,
                 "validation_transfer_in_timed_scope": False,
                 "output_write_contract": "every output element is overwritten",
@@ -5750,7 +5752,8 @@ def _parent_main(args: argparse.Namespace) -> int:
             and child["route"].get("kernel_source_sha256")
             == child["workload_contract"].get("kernel_source_sha256")
             and child["route"].get("native_or_helper_api_used") is False
-            and child["route"].get("launches_per_replay") == 1
+            and child["route"].get("ti_kernel_invocations_per_replay") == 1
+            and child["route"].get("physical_backend_launches_assumed") is False
             if child["operation"] in CONTROL_OPERATIONS else True
             for child in children),
         "same_forge_binary_identity": bool(

@@ -47,7 +47,8 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
                          "forge_ordinary_taichi_kernel")
         self.assertEqual(route["adapter"], "direct_ti_kernel")
         self.assertFalse(route["native_or_helper_api_used"])
-        self.assertEqual(route["launches_per_replay"], 1)
+        self.assertEqual(route["ti_kernel_invocations_per_replay"], 1)
+        self.assertFalse(route["physical_backend_launches_assumed"])
         self.assertFalse(_ordinary_kernel_route("forge", "short")["passed"])
 
     def test_ordinary_endpoint_equivalence_uses_actual_fingerprints(self):

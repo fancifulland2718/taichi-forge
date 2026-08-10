@@ -545,7 +545,8 @@ def _audit(run_dir: Path) -> dict[str, Any]:
         and child["route"].get("kernel_source_sha256")
         == child["workload_contract"].get("kernel_source_sha256")
         and child["route"].get("native_or_helper_api_used") is False
-        and child["route"].get("launches_per_replay") == 1
+        and child["route"].get("ti_kernel_invocations_per_replay") == 1
+        and child["route"].get("physical_backend_launches_assumed") is False
         if child["operation"] in (
             "fill", "copy", "saxpy", "stencil2d", "reduce_chunks") else True
         for child in children)

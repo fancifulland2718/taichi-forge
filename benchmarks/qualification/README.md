@@ -67,12 +67,14 @@ control/regression microbenchmarks. They may detect runtime tax or a base-path
 improvement but must not be extrapolated to Graph, native primitives, bounded
 dispatch, worklists, LinearOperator, or another Forge-only API. The separately
 classified direct/thin entries below exercise only their declared routes.
-Each control launch is exactly one benchmark-owned `ti.kernel`; the source-file
-hash, direct-kernel adapter, one-launch count, and absence of native/helper APIs
-are recorded and independently audited. Host input construction, allocation,
-initial upload, validation download, and endpoint fingerprinting stay outside
-the timed window. Cross-runtime endpoint equivalence is recomputed from the
-actual before/after fingerprints instead of being assumed.
+Each control replay makes exactly one benchmark-owned `ti.kernel` invocation;
+the source-file hash, direct-kernel adapter, invocation count, and absence of
+native/helper APIs are recorded and independently audited. This does not assume
+one physical backend launch: Nsight records the actual offloaded-task/kernel
+topology, which can contain multiple CUDA launches for one Taichi kernel call.
+Host input construction, allocation, initial upload, validation download, and
+endpoint fingerprinting stay outside the timed window. Cross-runtime endpoint
+equivalence is recomputed from actual before/after fingerprints.
 
 `prefix_sum` is `DIRECT-001`. Both sides run the same workload, dense i32 field,
 deterministic input, exact oracle, and synchronization boundary. Forge must use
