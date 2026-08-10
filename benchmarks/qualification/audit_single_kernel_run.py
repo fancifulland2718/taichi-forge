@@ -66,6 +66,64 @@ def _check(condition: bool, name: str, failures: list[str]) -> None:
         failures.append(name)
 
 
+def _reported_exact_i32_vector_valid(vector: dict[str, Any]) -> bool:
+    actual = vector.get("actual_values_i32")
+    expected = vector.get("expected_values_i32")
+    if (not isinstance(actual, list) or not isinstance(expected, list)
+            or not actual or len(actual) != len(expected)
+            or any(not isinstance(value, int) or isinstance(value, bool)
+                   or value < -(2 ** 31) or value >= 2 ** 31
+                   for value in actual + expected)):
+        return False
+
+    def evidence(values: list[int]) -> dict[str, Any]:
+        payload = bytearray()
+        for value in values:
+            payload.extend(int(value).to_bytes(4, "little", signed=True))
+        count = len(values)
+        sample_indices = sorted(set((
+            0, count // 4, count // 2, (3 * count) // 4, count - 1,
+        )))
+        return {
+            "count": count,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "sum": sum(values),
+            "minimum": min(values),
+            "maximum": max(values),
+            "sample_indices": sample_indices,
+            "samples": [values[index] for index in sample_indices],
+        }
+
+    actual_evidence = evidence(actual)
+    expected_evidence = evidence(expected)
+    mismatches = [
+        index for index, (left, right) in enumerate(zip(actual, expected))
+        if left != right
+    ]
+    return bool(
+        vector.get("count") == actual_evidence["count"]
+        and vector.get("expected_count") == expected_evidence["count"]
+        and vector.get("actual_sha256") == actual_evidence["sha256"]
+        and vector.get("expected_sha256") == expected_evidence["sha256"]
+        and vector.get("actual_sum") == actual_evidence["sum"]
+        and vector.get("expected_sum") == expected_evidence["sum"]
+        and vector.get("actual_minimum") == actual_evidence["minimum"]
+        and vector.get("expected_minimum") == expected_evidence["minimum"]
+        and vector.get("actual_maximum") == actual_evidence["maximum"]
+        and vector.get("expected_maximum") == expected_evidence["maximum"]
+        and vector.get("sample_indices")
+        == actual_evidence["sample_indices"]
+        and vector.get("expected_sample_indices")
+        == expected_evidence["sample_indices"]
+        and vector.get("actual_samples") == actual_evidence["samples"]
+        and vector.get("expected_samples") == expected_evidence["samples"]
+        and vector.get("mismatch_count") == len(mismatches)
+        and vector.get("first_mismatch")
+        == (None if not mismatches else mismatches[0])
+        and not mismatches
+    )
+
+
 def _endpoint_equivalent(left_result: dict[str, Any],
                          right_result: dict[str, Any]) -> bool:
     if left_result["operation"] in (
@@ -514,11 +572,69 @@ def _endpoint_equivalent(left_result: dict[str, Any],
                     return False
         return True
     if left_result["operation"] == "bfs_worklist":
-        return all(
-            left_result[name]["endpoint_fingerprint"]
-            == right_result[name]["endpoint_fingerprint"]
-            for name in ("validation_before", "validation_after")
+        vector_names = ("distance_i32", "frontier_history_i32")
+        exact_keys = (
+            "count", "expected_count", "actual_sha256", "expected_sha256",
+            "actual_sum", "expected_sum", "actual_minimum",
+            "expected_minimum", "actual_maximum", "expected_maximum",
+            "sample_indices", "expected_sample_indices", "actual_samples",
+            "expected_samples", "actual_values_i32", "expected_values_i32",
+            "mismatch_count", "first_mismatch",
         )
+        for validation_name in ("validation_before", "validation_after"):
+            left = left_result[validation_name]
+            right = right_result[validation_name]
+            for value in (left, right):
+                if (not value.get("passed")
+                        or value.get("comparison") !=
+                        "exact_fixed_depth_grid_bfs_full_distance_and_frontier_vectors"
+                        or value.get("distance_mismatch_count") != 0
+                        or value.get("history_mismatch_count") != 0
+                        or value.get("visited_count") !=
+                        value.get("expected_visited_count")
+                        or set(value.get("endpoint_vectors", {})) !=
+                        set(vector_names)):
+                    return False
+                vectors = value["endpoint_vectors"]
+                if any(not _reported_exact_i32_vector_valid(vectors[name])
+                       for name in vector_names):
+                    return False
+                actual_distance = vectors["distance_i32"]["actual_values_i32"]
+                expected_distance = vectors["distance_i32"][
+                    "expected_values_i32"]
+                actual_history = vectors["frontier_history_i32"][
+                    "actual_values_i32"]
+                expected_history = vectors["frontier_history_i32"][
+                    "expected_values_i32"]
+                visited = sum(distance >= 0 for distance in actual_distance)
+                if (visited != value["visited_count"]
+                        or sum(distance >= 0 for distance in expected_distance)
+                        != value["expected_visited_count"]
+                        or value.get("frontier_history") != actual_history
+                        or value.get("expected_frontier_history") !=
+                        expected_history):
+                    return False
+                fingerprint = value.get("endpoint_fingerprint", {})
+                if (fingerprint.get("finite") is not True
+                        or fingerprint.get("visited_count") != visited
+                        or fingerprint.get("distance_sha256") !=
+                        vectors["distance_i32"]["actual_sha256"]
+                        or fingerprint.get("frontier_history_sha256") !=
+                        vectors["frontier_history_i32"]["actual_sha256"]):
+                    return False
+            for vector_name in vector_names:
+                for key in exact_keys:
+                    if (left["endpoint_vectors"][vector_name].get(key) !=
+                            right["endpoint_vectors"][vector_name].get(key)):
+                        return False
+        for result in (left_result, right_result):
+            before = result["validation_before"]["endpoint_vectors"]
+            after = result["validation_after"]["endpoint_vectors"]
+            for vector_name in vector_names:
+                if any(before[vector_name].get(key) !=
+                       after[vector_name].get(key) for key in exact_keys):
+                    return False
+        return True
     if left_result["operation"] not in (
             "mpm_graph", "mpm_direct", "active_grid_mpm"):
         return True
@@ -656,6 +772,88 @@ def _marching_squares_kernel_control_route_isolated(
         and route.get("expected_backend") == child.get("backend")
         and route.get("observed_backend") == child.get("backend")
         and route.get("cells") == contract.get("cells")
+    )
+
+
+def _bfs_worklist_kernel_control_route_isolated(
+        child: dict[str, Any]) -> bool:
+    if (child.get("operation") != "bfs_worklist"
+            or child.get("runtime") not in (
+                "forge_kernel", "vanilla_kernel")):
+        return True
+    route = child.get("route", {})
+    contract = child.get("workload_contract", {})
+    return bool(
+        route.get("passed") is True
+        and route.get("classification")
+        == f"{child['runtime']}_equivalent_bfs_kernel_pipeline"
+        and route.get("adapter") == "benchmark_defined_ti_kernel_pipeline"
+        and "native" not in json.dumps(route, sort_keys=True).lower()
+        and route.get("kernel_source_owner") == "benchmark"
+        and route.get("kernel_source_sha256")
+        == contract.get("kernel_source_sha256")
+        and route.get("helper_api_used") is False
+        and route.get("specialized_api_used") is False
+        and route.get("benchmark_workspace_kind")
+        == contract.get("kernel_benchmark_workspace_kind")
+        and route.get("benchmark_workspace_field_count") == 4
+        and route.get("benchmark_workspace_field_count")
+        == contract.get("kernel_benchmark_workspace_field_count")
+        and route.get("stage_kernel_names")
+        == contract.get("kernel_stage_names")
+        and route.get("initialize_ti_kernel_invocations_per_replay") == 1
+        and route.get("reset_extent_ti_kernel_invocations_per_replay")
+        == contract.get("kernel_reset_extent_ti_invocations_per_replay")
+        and route.get("expand_ti_kernel_invocations_per_replay")
+        == contract.get("kernel_expand_ti_invocations_per_replay")
+        and route.get("record_ti_kernel_invocations_per_replay")
+        == contract.get("kernel_record_ti_invocations_per_replay")
+        and route.get("finalize_ti_kernel_invocations_per_replay") == 1
+        and route.get("ti_kernel_invocations_per_replay")
+        == contract.get("kernel_ti_invocations_per_replay")
+        and route.get("physical_backend_launches_assumed") is False
+        and route.get("expected_backend") == child.get("backend")
+        and route.get("observed_backend") == child.get("backend")
+        and route.get("nodes") == contract.get("nodes")
+        and route.get("levels") == contract.get("levels")
+    )
+
+
+def _bfs_worklist_native_route_admitted(child: dict[str, Any]) -> bool:
+    if (child.get("operation") != "bfs_worklist"
+            or child.get("runtime") != "forge"):
+        return True
+    route = child.get("route", {})
+    contract = child.get("workload_contract", {})
+    memory = route.get("memory_report", {})
+    transition = route.get("last_transition_statistics", {})
+    return bool(
+        route.get("passed") is True
+        and route.get("classification")
+        == "forge_native_device_worklist_bfs_pipeline"
+        and route.get("adapter")
+        == "forge_native_device_worklist_frontier_pipeline"
+        and route.get("kernel_source_owner") == "benchmark"
+        and route.get("kernel_source_sha256")
+        == contract.get("kernel_source_sha256")
+        and route.get("capacity") == contract.get("nodes")
+        and route.get("nodes") == contract.get("nodes")
+        and route.get("levels") == contract.get("levels")
+        and route.get("benchmark_ti_kernel_invocations_per_replay")
+        == 2 + 2 * contract.get("levels", -1)
+        and route.get("device_worklist_transitions_per_replay")
+        == contract.get("levels")
+        and route.get("physical_backend_launches_assumed") is False
+        and route.get("expected_backend") == child.get("backend")
+        and route.get("observed_backend") == child.get("backend")
+        and memory.get("fixed_capacity") is True
+        and memory.get("replay_allocation_count") == 0
+        and transition.get("generated")
+        == contract.get("expected_last_frontier")
+        and transition.get("accepted")
+        == contract.get("expected_last_frontier")
+        and transition.get("rejected") == 0
+        and transition.get("overflow") is False
     )
 
 
@@ -1170,6 +1368,12 @@ def _audit(run_dir: Path) -> dict[str, Any]:
     marching_squares_kernel_control_route_isolated = all(
         _marching_squares_kernel_control_route_isolated(child)
         for child in children)
+    bfs_worklist_kernel_control_route_isolated = all(
+        _bfs_worklist_kernel_control_route_isolated(child)
+        for child in children)
+    bfs_worklist_native_route_admitted = all(
+        _bfs_worklist_native_route_admitted(child)
+        for child in children)
     ordinary_control_route_isolated = all(
         child["route"].get("classification")
         == f"{child['runtime']}_ordinary_taichi_kernel"
@@ -1267,6 +1471,20 @@ def _audit(run_dir: Path) -> dict[str, Any]:
                     marching_squares_kernel_control_route_isolated,
                     "Marching Squares kernel control route method check",
                     failures)
+            if ("bfs_worklist_kernel_control_route_isolated"
+                    in summary["method_checks"]):
+                _check(
+                    summary["method_checks"][
+                        "bfs_worklist_kernel_control_route_isolated"] is
+                    bfs_worklist_kernel_control_route_isolated,
+                    "BFS worklist kernel control route method check", failures)
+            if ("bfs_worklist_native_route_admitted"
+                    in summary["method_checks"]):
+                _check(
+                    summary["method_checks"][
+                        "bfs_worklist_native_route_admitted"] is
+                    bfs_worklist_native_route_admitted,
+                    "BFS worklist native route method check", failures)
             if "ordinary_control_route_isolated" in summary["method_checks"]:
                 _check(
                     summary["method_checks"][

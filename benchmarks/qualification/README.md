@@ -263,11 +263,18 @@ assume physical CUDA launches; Nsight Systems measures topology separately.
 Use `marching_squares_microbench.py`.
 
 `bfs_worklist` is the second `THIN-007` subcase. It traverses 64 levels of a
-256-square four-neighbor grid from the center. Both sides share atomic-min
+256-square four-neighbor grid from the center. All routes share atomic-min
 first-visit semantics, device-resident counts, full-capacity expansion, and
 exact full-distance/per-level-frontier oracles; frontier order is deliberately
-unspecified. Forge uses DeviceWorklist prepare/append/commit, while vanilla
-uses double-buffered ndarrays and an atomic count. Use
+unspecified. Forge/kernel and vanilla/kernel execute the same benchmark-owned
+194-logical-kernel pipeline with two frontier ndarrays, two extent ndarrays,
+explicit extent-reset kernels, and no helper or specialized API. Forge/native
+is compared separately with Forge/kernel and uses fixed-capacity DeviceWorklist
+prepare/append/commit transitions. Admission stores the complete 65,536-entry
+distance vector and 64-entry history vector and independently recomputes their
+raw i32 SHA-256, statistics, samples, mismatch count, and first mismatch before
+and after scoring. Logical invocation counts do not assume physical backend
+launches; Systems/Compute measure topology separately. Use
 `bfs_worklist_microbench.py`.
 
 `snode_churn` is the historical-churn half of `DIRECT-004`. Both runtimes use

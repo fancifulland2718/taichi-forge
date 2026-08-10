@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -26,6 +27,8 @@ from benchmarks.qualification.single_kernel_microbench import (
     _marching_squares_route,
     _marching_squares_kernel_control_route_isolated,
     _bfs_worklist_route,
+    _bfs_worklist_kernel_control_route_isolated,
+    _bfs_worklist_native_route_admitted,
     balanced_pair_orders,
     comparison_definition,
     comparison_participants,
@@ -40,6 +43,10 @@ from benchmarks.qualification.audit_single_kernel_run import (
     _endpoint_equivalent as _audit_endpoint_equivalent,
     _marching_squares_kernel_control_route_isolated as
     _audit_marching_squares_kernel_control_route_isolated,
+    _bfs_worklist_kernel_control_route_isolated as
+    _audit_bfs_worklist_kernel_control_route_isolated,
+    _bfs_worklist_native_route_admitted as
+    _audit_bfs_worklist_native_route_admitted,
 )
 
 
@@ -1223,7 +1230,7 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         self.assertFalse(_audit_endpoint_equivalent(
             results["forge"], results["forge_kernel"]))
 
-    def test_bfs_route_rejects_overflow(self):
+    def test_bfs_route_admits_native_and_strong_kernel_paths(self):
         class Stats:
             generated = 4
             accepted = 4
@@ -1242,11 +1249,154 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
             def statistics():
                 return Stats()
 
-        self.assertTrue(_bfs_worklist_route(
-            Worklist(), "forge", "cuda")["passed"])
+        native = _bfs_worklist_route(
+            Worklist(), "forge", "cuda", 32, 4, 4, "a" * 64)
+        self.assertTrue(native["passed"])
+        self.assertEqual(
+            native["adapter"],
+            "forge_native_device_worklist_frontier_pipeline")
+        native_child = {
+            "operation": "bfs_worklist",
+            "runtime": "forge",
+            "backend": "cuda",
+            "route": native,
+            "workload_contract": {
+                "nodes": 32,
+                "levels": 4,
+                "expected_last_frontier": 4,
+                "kernel_source_sha256": "a" * 64,
+            },
+        }
+        self.assertTrue(_bfs_worklist_native_route_admitted(native_child))
+        self.assertTrue(
+            _audit_bfs_worklist_native_route_admitted(native_child))
         Stats.overflow = True
         self.assertFalse(_bfs_worklist_route(
-            Worklist(), "forge", "cuda")["passed"])
+            Worklist(), "forge", "cuda", 32, 4, 4, "a" * 64)[
+                "passed"])
+        Stats.overflow = False
+
+        control = _bfs_worklist_route(
+            None, "forge_kernel", "cuda", 65536, 64, 256, "b" * 64)
+        self.assertTrue(control["passed"])
+        self.assertEqual(
+            control["adapter"], "benchmark_defined_ti_kernel_pipeline")
+        self.assertEqual(control["benchmark_workspace_field_count"], 4)
+        self.assertEqual(control["ti_kernel_invocations_per_replay"], 194)
+        self.assertFalse(control["physical_backend_launches_assumed"])
+        self.assertFalse(_bfs_worklist_route(
+            object(), "vanilla_kernel", "cuda", 65536, 64, 256,
+            "b" * 64)["passed"])
+
+        contract = {
+            "nodes": 65536,
+            "levels": 64,
+            "kernel_source_sha256": "b" * 64,
+            "kernel_benchmark_workspace_kind": (
+                "two_frontier_i32_ndarrays_and_two_extent_i32_ndarrays"
+            ),
+            "kernel_benchmark_workspace_field_count": 4,
+            "kernel_stage_names": [
+                "initialize_bfs", "reset_back_extent", "expand_frontier",
+                "record_frontier", "finalize_distance",
+            ],
+            "kernel_reset_extent_ti_invocations_per_replay": 64,
+            "kernel_expand_ti_invocations_per_replay": 64,
+            "kernel_record_ti_invocations_per_replay": 64,
+            "kernel_ti_invocations_per_replay": 194,
+        }
+        child = {
+            "operation": "bfs_worklist",
+            "runtime": "forge_kernel",
+            "backend": "cuda",
+            "route": control,
+            "workload_contract": contract,
+        }
+        self.assertTrue(_bfs_worklist_kernel_control_route_isolated(child))
+        self.assertTrue(
+            _audit_bfs_worklist_kernel_control_route_isolated(child))
+        del contract["kernel_ti_invocations_per_replay"]
+        self.assertFalse(_bfs_worklist_kernel_control_route_isolated(child))
+        self.assertFalse(
+            _audit_bfs_worklist_kernel_control_route_isolated(child))
+
+    def test_bfs_endpoint_recomputes_full_raw_vectors(self):
+        def exact(values):
+            count = len(values)
+            sample_indices = sorted(set((
+                0, count // 4, count // 2,
+                (3 * count) // 4, count - 1,
+            )))
+            payload = b"".join(
+                int(value).to_bytes(4, "little", signed=True)
+                for value in values)
+            digest = hashlib.sha256(payload).hexdigest()
+            return {
+                "count": count,
+                "expected_count": count,
+                "actual_sha256": digest,
+                "expected_sha256": digest,
+                "actual_sum": sum(values),
+                "expected_sum": sum(values),
+                "actual_minimum": min(values),
+                "expected_minimum": min(values),
+                "actual_maximum": max(values),
+                "expected_maximum": max(values),
+                "sample_indices": sample_indices,
+                "expected_sample_indices": sample_indices,
+                "actual_samples": [values[index] for index in sample_indices],
+                "expected_samples": [
+                    values[index] for index in sample_indices],
+                "actual_values_i32": values,
+                "expected_values_i32": values,
+                "mismatch_count": 0,
+                "first_mismatch": None,
+            }
+
+        distance = [-1, 0, 1, 1, 2]
+        history = [2, 1]
+        distance_vector = exact(distance)
+        history_vector = exact(history)
+        validation = {
+            "passed": True,
+            "comparison": (
+                "exact_fixed_depth_grid_bfs_full_distance_and_frontier_vectors"
+            ),
+            "distance_mismatch_count": 0,
+            "history_mismatch_count": 0,
+            "visited_count": 4,
+            "expected_visited_count": 4,
+            "frontier_history": history,
+            "expected_frontier_history": history,
+            "endpoint_fingerprint": {
+                "finite": True,
+                "visited_count": 4,
+                "distance_sha256": distance_vector["actual_sha256"],
+                "frontier_history_sha256": history_vector["actual_sha256"],
+            },
+            "endpoint_vectors": {
+                "distance_i32": distance_vector,
+                "frontier_history_i32": history_vector,
+            },
+        }
+        results = {
+            name: {
+                "operation": "bfs_worklist",
+                "validation_before": json.loads(json.dumps(validation)),
+                "validation_after": json.loads(json.dumps(validation)),
+            }
+            for name in ("forge", "forge_kernel")
+        }
+        self.assertTrue(_endpoint_equivalent(
+            results, "forge", "forge_kernel"))
+        self.assertTrue(_audit_endpoint_equivalent(
+            results["forge"], results["forge_kernel"]))
+        results["forge_kernel"]["validation_after"]["endpoint_vectors"][
+            "distance_i32"]["actual_values_i32"][2] = 99
+        self.assertFalse(_endpoint_equivalent(
+            results, "forge", "forge_kernel"))
+        self.assertFalse(_audit_endpoint_equivalent(
+            results["forge"], results["forge_kernel"]))
 
 
 if __name__ == "__main__":

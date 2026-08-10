@@ -219,10 +219,16 @@ invocation 数不推定物理 CUDA launch 数；拓扑必须由 Nsight Systems �
 为 `marching_squares_microbench.py`。
 
 `bfs_worklist` 是第二个 `THIN-007` 子案例。它从中心遍历 256² 四邻接网格的 64
-层；两边共享 atomic-min first-visit 语义、device-resident count、full-capacity
+层；三条路线共享 atomic-min first-visit 语义、device-resident count、full-capacity
 expansion，以及完整 distance/per-level-frontier exact oracle，frontier 内部次序明确
-不作为结果。Forge 使用 DeviceWorklist prepare/append/commit，vanilla 使用双缓冲
-ndarray 与 atomic count。独立入口为 `bfs_worklist_microbench.py`。
+不作为结果。Forge/kernel 与 vanilla/kernel 执行相同的 benchmark-owned 194-logical-
+kernel pipeline，使用两个 frontier ndarray、两个 extent ndarray、显式 extent-reset
+kernel，且不使用 helper 或 specialized API。Forge/native 另行与 Forge/kernel 比较，
+使用固定容量 DeviceWorklist prepare/append/commit transition。准入保存完整 65,536-entry
+distance vector 与 64-entry history vector，并在计时前后独立重算 raw i32 SHA-256、
+统计、样本、mismatch count 与首个 mismatch。逻辑 invocation 数不推定物理 backend
+launch 数；Systems/Compute 单独实测拓扑。独立入口为
+`bfs_worklist_microbench.py`。
 
 `snode_churn` 是 `DIRECT-004` 的历史 churn 半项。两边使用相同公开 FieldsBuilder
 DSL 与 kernel；每个计时 launch 创建一个 pointer+dense tree、激活 64 个 cell、exact

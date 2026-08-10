@@ -4874,13 +4874,28 @@ def _build_marching_squares_case(ti: Any, runtime_name: str, backend: str,
 
 
 def _bfs_worklist_route(worklist: Any | None, runtime_name: str,
-                        backend: str) -> dict[str, Any]:
+                        backend: str, nodes: int, levels: int,
+                        expected_last_frontier: int,
+                        kernel_source_sha256: str) -> dict[str, Any]:
+    stage_kernel_names = [
+        "initialize_bfs", "reset_back_extent", "expand_frontier",
+        "record_frontier", "finalize_distance",
+    ]
     if runtime_name == "forge":
         memory = worklist.memory_report()
         stats = worklist.statistics()
         return {
-            "classification": "forge_device_worklist_atomic_bfs_frontier",
-            "backend": backend,
+            "classification": "forge_native_device_worklist_bfs_pipeline",
+            "adapter": "forge_native_device_worklist_frontier_pipeline",
+            "kernel_source_owner": "benchmark",
+            "kernel_source_sha256": kernel_source_sha256,
+            "stage_kernel_names": [
+                "initialize_bfs", "prepare_next", "expand_frontier",
+                "commit_next", "record_frontier", "finalize_distance",
+            ],
+            "benchmark_ti_kernel_invocations_per_replay": 2 + 2 * levels,
+            "device_worklist_transitions_per_replay": levels,
+            "physical_backend_launches_assumed": False,
             "capacity": worklist.capacity,
             "memory_report": memory,
             "last_transition_statistics": {
@@ -4889,20 +4904,143 @@ def _bfs_worklist_route(worklist: Any | None, runtime_name: str,
                 "rejected": stats.rejected,
                 "overflow": stats.overflow,
             },
+            "nodes": nodes,
+            "levels": levels,
+            "expected_backend": backend,
+            "observed_backend": backend,
             "passed": bool(
-                memory["fixed_capacity"]
+                runtime_name == "forge"
+                and worklist.capacity == nodes
+                and memory["fixed_capacity"]
                 and memory["replay_allocation_count"] == 0
+                and stats.generated == expected_last_frontier
+                and stats.accepted == expected_last_frontier
+                and stats.rejected == 0
                 and not stats.overflow
+                and isinstance(kernel_source_sha256, str)
+                and len(kernel_source_sha256) == 64
+                and levels > 0
             ),
         }
+    control_invocations = 2 + 3 * levels
     return {
-        "classification": f"{runtime_name}_atomic_device_count_bfs_frontier",
-        "backend": backend,
-        "observed_method": (
-            "double-buffered i32 frontier plus atomic device count"
+        "classification": f"{runtime_name}_equivalent_bfs_kernel_pipeline",
+        "adapter": "benchmark_defined_ti_kernel_pipeline",
+        "kernel_source_owner": "benchmark",
+        "kernel_source_sha256": kernel_source_sha256,
+        "helper_api_used": False,
+        "specialized_api_used": False,
+        "benchmark_workspace_kind": (
+            "two_frontier_i32_ndarrays_and_two_extent_i32_ndarrays"
         ),
-        "passed": True,
+        "benchmark_workspace_field_count": 4,
+        "stage_kernel_names": stage_kernel_names,
+        "initialize_ti_kernel_invocations_per_replay": 1,
+        "reset_extent_ti_kernel_invocations_per_replay": levels,
+        "expand_ti_kernel_invocations_per_replay": levels,
+        "record_ti_kernel_invocations_per_replay": levels,
+        "finalize_ti_kernel_invocations_per_replay": 1,
+        "ti_kernel_invocations_per_replay": control_invocations,
+        "physical_backend_launches_assumed": False,
+        "nodes": nodes,
+        "levels": levels,
+        "expected_backend": backend,
+        "observed_backend": backend,
+        "observed_method": (
+            "benchmark-owned double-buffered i32 frontier, atomic device "
+            "count, extent reset, history, and distance-finalization kernels"
+        ),
+        "passed": bool(
+            runtime_name in ("forge_kernel", "vanilla_kernel")
+            and worklist is None
+            and isinstance(kernel_source_sha256, str)
+            and len(kernel_source_sha256) == 64
+            and nodes > 0
+            and levels > 0
+        ),
     }
+
+
+def _bfs_worklist_kernel_control_route_isolated(
+        child: dict[str, Any]) -> bool:
+    if (child.get("operation") != "bfs_worklist"
+            or child.get("runtime") not in (
+                "forge_kernel", "vanilla_kernel")):
+        return True
+    route = child.get("route", {})
+    contract = child.get("workload_contract", {})
+    return bool(
+        route.get("passed") is True
+        and route.get("classification")
+        == f"{child['runtime']}_equivalent_bfs_kernel_pipeline"
+        and route.get("adapter") == "benchmark_defined_ti_kernel_pipeline"
+        and "native" not in json.dumps(route, sort_keys=True).lower()
+        and route.get("kernel_source_owner") == "benchmark"
+        and route.get("kernel_source_sha256")
+        == contract.get("kernel_source_sha256")
+        and route.get("helper_api_used") is False
+        and route.get("specialized_api_used") is False
+        and route.get("benchmark_workspace_kind")
+        == contract.get("kernel_benchmark_workspace_kind")
+        and route.get("benchmark_workspace_field_count") == 4
+        and route.get("benchmark_workspace_field_count")
+        == contract.get("kernel_benchmark_workspace_field_count")
+        and route.get("stage_kernel_names")
+        == contract.get("kernel_stage_names")
+        and route.get("initialize_ti_kernel_invocations_per_replay") == 1
+        and route.get("reset_extent_ti_kernel_invocations_per_replay")
+        == contract.get("kernel_reset_extent_ti_invocations_per_replay")
+        and route.get("expand_ti_kernel_invocations_per_replay")
+        == contract.get("kernel_expand_ti_invocations_per_replay")
+        and route.get("record_ti_kernel_invocations_per_replay")
+        == contract.get("kernel_record_ti_invocations_per_replay")
+        and route.get("finalize_ti_kernel_invocations_per_replay") == 1
+        and route.get("ti_kernel_invocations_per_replay")
+        == contract.get("kernel_ti_invocations_per_replay")
+        and route.get("physical_backend_launches_assumed") is False
+        and route.get("expected_backend") == child.get("backend")
+        and route.get("observed_backend") == child.get("backend")
+        and route.get("nodes") == contract.get("nodes")
+        and route.get("levels") == contract.get("levels")
+    )
+
+
+def _bfs_worklist_native_route_admitted(child: dict[str, Any]) -> bool:
+    if (child.get("operation") != "bfs_worklist"
+            or child.get("runtime") != "forge"):
+        return True
+    route = child.get("route", {})
+    contract = child.get("workload_contract", {})
+    memory = route.get("memory_report", {})
+    transition = route.get("last_transition_statistics", {})
+    return bool(
+        route.get("passed") is True
+        and route.get("classification")
+        == "forge_native_device_worklist_bfs_pipeline"
+        and route.get("adapter")
+        == "forge_native_device_worklist_frontier_pipeline"
+        and route.get("kernel_source_owner") == "benchmark"
+        and route.get("kernel_source_sha256")
+        == contract.get("kernel_source_sha256")
+        and route.get("capacity") == contract.get("nodes")
+        and route.get("nodes") == contract.get("nodes")
+        and route.get("levels") == contract.get("levels")
+        and route.get("benchmark_ti_kernel_invocations_per_replay")
+        == 2 + 2 * contract.get("levels", -1)
+        and route.get("device_worklist_transitions_per_replay")
+        == contract.get("levels")
+        and route.get("physical_backend_launches_assumed") is False
+        and route.get("expected_backend") == child.get("backend")
+        and route.get("observed_backend") == child.get("backend")
+        and memory.get("fixed_capacity") is True
+        and memory.get("replay_allocation_count") == 0
+        and transition.get("generated")
+        == contract.get("expected_last_frontier")
+        and transition.get("accepted")
+        == contract.get("expected_last_frontier")
+        and transition.get("rejected") == 0
+        and transition.get("overflow") is False
+    )
 
 
 def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
@@ -4910,6 +5048,7 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
     """Run a fixed-depth level-synchronous BFS on a square 2-D grid."""
     import numpy as np
 
+    source_sha256 = sha256_file(Path(__file__))
     side = math.isqrt(elements)
     if side * side != elements:
         raise ValueError("BFS worklist requires a square node count")
@@ -5069,7 +5208,6 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
             initialize_bfs(
                 distance, vanilla_values[0], vanilla_extents[0],
                 frontier_history)
-            vanilla_extents[1].fill(0)
             front = 0
             for level_index in range(levels):
                 back = 1 - front
@@ -5101,18 +5239,83 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
         ti.sync()
         actual_distance = distance.to_numpy()
         actual_history = frontier_history.to_numpy()
-        distance_mismatch = int(np.count_nonzero(
-            actual_distance != expected_distance))
-        history_mismatch = int(np.count_nonzero(
-            actual_history != np.asarray(expected_history, dtype=np.int32)))
+        expected_history_i32 = np.asarray(expected_history, dtype=np.int32)
+
+        def exact_i32_vector(actual: Any, expected: Any) -> dict[str, Any]:
+            actual_i32 = np.ascontiguousarray(
+                actual, dtype=np.int32).reshape(-1)
+            expected_i32 = np.ascontiguousarray(
+                expected, dtype=np.int32).reshape(-1)
+            if actual_i32.size == expected_i32.size:
+                mismatch = np.flatnonzero(actual_i32 != expected_i32)
+                mismatch_count = int(mismatch.size)
+                first_mismatch = (
+                    None if mismatch.size == 0 else int(mismatch[0]))
+            else:
+                mismatch_count = max(
+                    int(actual_i32.size), int(expected_i32.size))
+                first_mismatch = 0
+
+            def evidence(vector: Any) -> dict[str, Any]:
+                count_value = int(vector.size)
+                sample_indices = sorted(set((
+                    0, count_value // 4, count_value // 2,
+                    (3 * count_value) // 4, count_value - 1,
+                ))) if count_value else []
+                return {
+                    "count": count_value,
+                    "sha256": hashlib.sha256(vector.tobytes()).hexdigest(),
+                    "sum": int(vector.astype(np.int64).sum()),
+                    "minimum": int(vector.min()) if count_value else None,
+                    "maximum": int(vector.max()) if count_value else None,
+                    "sample_indices": sample_indices,
+                    "samples": [
+                        int(vector[index]) for index in sample_indices],
+                    "values_i32": vector.astype(np.int64).tolist(),
+                }
+
+            actual_evidence = evidence(actual_i32)
+            expected_evidence = evidence(expected_i32)
+            return {
+                "count": actual_evidence["count"],
+                "expected_count": expected_evidence["count"],
+                "actual_sha256": actual_evidence["sha256"],
+                "expected_sha256": expected_evidence["sha256"],
+                "actual_sum": actual_evidence["sum"],
+                "expected_sum": expected_evidence["sum"],
+                "actual_minimum": actual_evidence["minimum"],
+                "expected_minimum": expected_evidence["minimum"],
+                "actual_maximum": actual_evidence["maximum"],
+                "expected_maximum": expected_evidence["maximum"],
+                "sample_indices": actual_evidence["sample_indices"],
+                "expected_sample_indices": expected_evidence[
+                    "sample_indices"],
+                "actual_samples": actual_evidence["samples"],
+                "expected_samples": expected_evidence["samples"],
+                "actual_values_i32": actual_evidence["values_i32"],
+                "expected_values_i32": expected_evidence["values_i32"],
+                "mismatch_count": mismatch_count,
+                "first_mismatch": first_mismatch,
+            }
+
+        endpoint_vectors = {
+            "distance_i32": exact_i32_vector(
+                actual_distance, expected_distance),
+            "frontier_history_i32": exact_i32_vector(
+                actual_history, expected_history_i32),
+        }
+        distance_mismatch = endpoint_vectors["distance_i32"][
+            "mismatch_count"]
+        history_mismatch = endpoint_vectors["frontier_history_i32"][
+            "mismatch_count"]
         visited = int(np.count_nonzero(actual_distance >= 0))
         fingerprint = {
             "finite": True,
             "visited_count": visited,
-            "distance_sum": int(actual_distance[actual_distance >= 0].sum(
-                dtype=np.int64)),
-            "frontier_history": actual_history.astype(np.int64).tolist(),
-            "sample_distance": actual_distance[:16].astype(np.int64).tolist(),
+            "distance_sha256": endpoint_vectors["distance_i32"][
+                "actual_sha256"],
+            "frontier_history_sha256": endpoint_vectors[
+                "frontier_history_i32"]["actual_sha256"],
         }
         return {
             "passed": bool(
@@ -5120,7 +5323,9 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
                 and history_mismatch == 0
                 and visited == expected_visited
             ),
-            "comparison": "exact_fixed_depth_grid_bfs_distance_map",
+            "comparison": (
+                "exact_fixed_depth_grid_bfs_full_distance_and_frontier_vectors"
+            ),
             "distance_mismatch_count": distance_mismatch,
             "history_mismatch_count": history_mismatch,
             "visited_count": visited,
@@ -5128,6 +5333,7 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
             "frontier_history": actual_history.astype(np.int64).tolist(),
             "expected_frontier_history": expected_history,
             "endpoint_fingerprint": fingerprint,
+            "endpoint_vectors": endpoint_vectors,
         }
 
     return {
@@ -5135,7 +5341,8 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
         "reset": reset,
         "validate": validate_fresh,
         "route": lambda: _bfs_worklist_route(
-            worklist, runtime_name, backend),
+            worklist, runtime_name, backend, elements, levels,
+            expected_history[-1], source_sha256),
         "logical_bytes": 0,
         "traffic_model": (
             "fixed-depth level-synchronous grid BFS with device frontiers; no "
@@ -5148,6 +5355,7 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
             "source": source,
             "expected_visited_count": expected_visited,
             "maximum_frontier": max(expected_history),
+            "expected_last_frontier": expected_history[-1],
         },
         "workload_contract": {
             "case_id": "THIN-007-BFS",
@@ -5159,6 +5367,25 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
             "nodes": elements,
             "levels": levels,
             "source": source,
+            "expected_last_frontier": expected_history[-1],
+            "kernel_source_owner": "benchmark",
+            "kernel_source_sha256": source_sha256,
+            "kernel_adapter": "benchmark_defined_ti_kernel_pipeline",
+            "kernel_helper_api_used": False,
+            "kernel_specialized_api_used": False,
+            "kernel_benchmark_workspace_kind": (
+                "two_frontier_i32_ndarrays_and_two_extent_i32_ndarrays"
+            ),
+            "kernel_benchmark_workspace_field_count": 4,
+            "kernel_stage_names": [
+                "initialize_bfs", "reset_back_extent", "expand_frontier",
+                "record_frontier", "finalize_distance",
+            ],
+            "kernel_reset_extent_ti_invocations_per_replay": levels,
+            "kernel_expand_ti_invocations_per_replay": levels,
+            "kernel_record_ti_invocations_per_replay": levels,
+            "kernel_ti_invocations_per_replay": 2 + 3 * levels,
+            "kernel_physical_backend_launches_assumed": False,
             "forge_adapter": (
                 "DeviceWorklist prepare/atomic-append/commit frontier transition"
             ),
@@ -5168,7 +5395,7 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
             "shared": (
                 "same square graph, source, level cap, four-neighbor expansion, "
                 "atomic-min first-visit test, device-resident counts, outer sync, and "
-                "exact distance/history oracle"
+                "exact full-vector distance/history oracle"
             ),
             "allowed_difference": (
                 "only frontier append/finalize adapter; frontier order is "
@@ -5176,7 +5403,8 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
             ),
             "correctness": (
                 "exact full distance map, visited count, and per-level frontier "
-                "cardinality plus cross-runtime fingerprint"
+                "cardinality with raw values, SHA-256, statistics, samples, "
+                "mismatch count, and first mismatch"
             ),
             "timing": (
                 "frozen repeated complete reset-plus-64-level traversals plus "
@@ -5977,6 +6205,64 @@ def _check_pyvenv(python: Path) -> dict[str, Any]:
     }
 
 
+def _reported_exact_i32_vector_valid(vector: dict[str, Any]) -> bool:
+    actual = vector.get("actual_values_i32")
+    expected = vector.get("expected_values_i32")
+    if (not isinstance(actual, list) or not isinstance(expected, list)
+            or not actual or len(actual) != len(expected)
+            or any(not isinstance(value, int) or isinstance(value, bool)
+                   or value < -(2 ** 31) or value >= 2 ** 31
+                   for value in actual + expected)):
+        return False
+
+    def evidence(values: list[int]) -> dict[str, Any]:
+        payload = bytearray()
+        for value in values:
+            payload.extend(int(value).to_bytes(4, "little", signed=True))
+        count = len(values)
+        sample_indices = sorted(set((
+            0, count // 4, count // 2, (3 * count) // 4, count - 1,
+        )))
+        return {
+            "count": count,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "sum": sum(values),
+            "minimum": min(values),
+            "maximum": max(values),
+            "sample_indices": sample_indices,
+            "samples": [values[index] for index in sample_indices],
+        }
+
+    actual_evidence = evidence(actual)
+    expected_evidence = evidence(expected)
+    mismatches = [
+        index for index, (left, right) in enumerate(zip(actual, expected))
+        if left != right
+    ]
+    return bool(
+        vector.get("count") == actual_evidence["count"]
+        and vector.get("expected_count") == expected_evidence["count"]
+        and vector.get("actual_sha256") == actual_evidence["sha256"]
+        and vector.get("expected_sha256") == expected_evidence["sha256"]
+        and vector.get("actual_sum") == actual_evidence["sum"]
+        and vector.get("expected_sum") == expected_evidence["sum"]
+        and vector.get("actual_minimum") == actual_evidence["minimum"]
+        and vector.get("expected_minimum") == expected_evidence["minimum"]
+        and vector.get("actual_maximum") == actual_evidence["maximum"]
+        and vector.get("expected_maximum") == expected_evidence["maximum"]
+        and vector.get("sample_indices")
+        == actual_evidence["sample_indices"]
+        and vector.get("expected_sample_indices")
+        == expected_evidence["sample_indices"]
+        and vector.get("actual_samples") == actual_evidence["samples"]
+        and vector.get("expected_samples") == expected_evidence["samples"]
+        and vector.get("mismatch_count") == len(mismatches)
+        and vector.get("first_mismatch")
+        == (None if not mismatches else mismatches[0])
+        and not mismatches
+    )
+
+
 def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
                          baseline: str) -> bool:
     left_result = results[subject]
@@ -6426,11 +6712,68 @@ def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
                     return False
         return True
     if left_result["operation"] == "bfs_worklist":
+        vector_names = ("distance_i32", "frontier_history_i32")
+        exact_keys = (
+            "count", "expected_count", "actual_sha256", "expected_sha256",
+            "actual_sum", "expected_sum", "actual_minimum",
+            "expected_minimum", "actual_maximum", "expected_maximum",
+            "sample_indices", "expected_sample_indices", "actual_samples",
+            "expected_samples", "actual_values_i32", "expected_values_i32",
+            "mismatch_count", "first_mismatch",
+        )
         for validation_name in ("validation_before", "validation_after"):
-            left = left_result[validation_name]["endpoint_fingerprint"]
-            right = right_result[validation_name]["endpoint_fingerprint"]
-            if left != right:
-                return False
+            left = left_result[validation_name]
+            right = right_result[validation_name]
+            for value in (left, right):
+                if (not value.get("passed")
+                        or value.get("comparison") !=
+                        "exact_fixed_depth_grid_bfs_full_distance_and_frontier_vectors"
+                        or value.get("distance_mismatch_count") != 0
+                        or value.get("history_mismatch_count") != 0
+                        or value.get("visited_count") !=
+                        value.get("expected_visited_count")
+                        or set(value.get("endpoint_vectors", {})) !=
+                        set(vector_names)):
+                    return False
+                vectors = value["endpoint_vectors"]
+                if any(not _reported_exact_i32_vector_valid(vectors[name])
+                       for name in vector_names):
+                    return False
+                actual_distance = vectors["distance_i32"]["actual_values_i32"]
+                expected_distance = vectors["distance_i32"][
+                    "expected_values_i32"]
+                actual_history = vectors["frontier_history_i32"][
+                    "actual_values_i32"]
+                expected_history = vectors["frontier_history_i32"][
+                    "expected_values_i32"]
+                visited = sum(distance >= 0 for distance in actual_distance)
+                if (visited != value["visited_count"]
+                        or sum(distance >= 0 for distance in expected_distance)
+                        != value["expected_visited_count"]
+                        or value.get("frontier_history") != actual_history
+                        or value.get("expected_frontier_history") !=
+                        expected_history):
+                    return False
+                fingerprint = value.get("endpoint_fingerprint", {})
+                if (fingerprint.get("finite") is not True
+                        or fingerprint.get("visited_count") != visited
+                        or fingerprint.get("distance_sha256") !=
+                        vectors["distance_i32"]["actual_sha256"]
+                        or fingerprint.get("frontier_history_sha256") !=
+                        vectors["frontier_history_i32"]["actual_sha256"]):
+                    return False
+            for vector_name in vector_names:
+                for key in exact_keys:
+                    if (left["endpoint_vectors"][vector_name].get(key) !=
+                            right["endpoint_vectors"][vector_name].get(key)):
+                        return False
+        for result in (left_result, right_result):
+            before = result["validation_before"]["endpoint_vectors"]
+            after = result["validation_after"]["endpoint_vectors"]
+            for vector_name in vector_names:
+                if any(before[vector_name].get(key) !=
+                       after[vector_name].get(key) for key in exact_keys):
+                    return False
         return True
     if left_result["operation"] not in (
             "mpm_graph", "mpm_direct", "active_grid_mpm"):
@@ -7266,6 +7609,12 @@ def _parent_main(args: argparse.Namespace) -> int:
             for child in children),
         "marching_squares_kernel_control_route_isolated": all(
             _marching_squares_kernel_control_route_isolated(child)
+            for child in children),
+        "bfs_worklist_kernel_control_route_isolated": all(
+            _bfs_worklist_kernel_control_route_isolated(child)
+            for child in children),
+        "bfs_worklist_native_route_admitted": all(
+            _bfs_worklist_native_route_admitted(child)
             for child in children),
         "ordinary_control_route_isolated": all(
             child["route"].get("classification")
