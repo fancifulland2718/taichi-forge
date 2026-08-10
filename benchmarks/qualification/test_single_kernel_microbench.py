@@ -23,6 +23,8 @@ from benchmarks.qualification.single_kernel_microbench import (
     _active_grid_mpm_route,
     _particle_hash_route,
     _adaptive_pbd_route,
+    _marching_squares_route,
+    _marching_squares_kernel_control_route_isolated,
     _bfs_worklist_route,
     balanced_pair_orders,
     comparison_definition,
@@ -36,6 +38,8 @@ from benchmarks.qualification.single_kernel_microbench import (
 from benchmarks.qualification.runtime_common import normalize_gpu_uuid
 from benchmarks.qualification.audit_single_kernel_run import (
     _endpoint_equivalent as _audit_endpoint_equivalent,
+    _marching_squares_kernel_control_route_isolated as
+    _audit_marching_squares_kernel_control_route_isolated,
 )
 
 
@@ -1083,6 +1087,137 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
             results["forge"], results["forge_kernel"]))
         results["forge_kernel"]["validation_after"]["endpoint_vectors"][
             "positions_f32"]["sha256"] = "e" * 64
+        self.assertFalse(_endpoint_equivalent(
+            results, "forge", "forge_kernel"))
+        self.assertFalse(_audit_endpoint_equivalent(
+            results["forge"], results["forge_kernel"]))
+
+    def test_marching_squares_route_admits_native_and_strong_kernel_paths(self):
+        class Plan:
+            backend = "cuda_device"
+            method_name = "cuda_device_compact_ndarray"
+
+        class Workspace:
+            _native_compact_plan = Plan()
+            workspace_bytes_current = 1024
+            workspace_bytes_peak = 2048
+
+        native = _marching_squares_route(
+            Workspace(), "forge", "cuda", 65536, "a" * 64)
+        self.assertTrue(native["passed"])
+        self.assertTrue(native["compact_route"]["passed"])
+        self.assertEqual(
+            native["stage_kernel_names"],
+            ["classify", "stable_compact", "emit_cases"])
+
+        control = _marching_squares_route(
+            None, "forge_kernel", "cuda", 65536, "b" * 64)
+        self.assertTrue(control["passed"])
+        self.assertEqual(
+            control["adapter"], "benchmark_defined_ti_kernel_pipeline")
+        self.assertEqual(control["benchmark_workspace_field_count"], 2)
+        self.assertEqual(control["scan_elements"], 65536)
+        self.assertEqual(control["scan_steps"], 16)
+        self.assertEqual(
+            control["final_scan_copy_kernel_invocations"], 0)
+        self.assertEqual(
+            control["non_scan_ti_kernel_invocations_per_replay"], 4)
+        self.assertEqual(control["ti_kernel_invocations_per_replay"], 20)
+        self.assertFalse(control["physical_backend_launches_assumed"])
+        self.assertFalse(_marching_squares_route(
+            object(), "vanilla_kernel", "cuda", 65536, "b" * 64)[
+                "passed"])
+        self.assertFalse(_marching_squares_route(
+            None, "vanilla_kernel", "cuda", 65536, "short")["passed"])
+
+        contract = {
+            "cells": 65536,
+            "kernel_source_sha256": "b" * 64,
+            "kernel_benchmark_workspace_kind": (
+                "one_prefix_i32_dense_field_and_one_scan_scratch_i32_dense_field"
+            ),
+            "kernel_benchmark_workspace_field_count": 2,
+            "kernel_scan_algorithm": "inclusive_hillis_steele_ping_pong",
+            "kernel_scan_elements": 65536,
+            "kernel_scan_steps": 16,
+            "kernel_final_scan_copy_kernel_invocations": 0,
+            "kernel_non_scan_ti_invocations_per_replay": 4,
+            "kernel_stage_names": [
+                "classify", "stage_flags", "scan_ping_pong",
+                "stable_scatter", "emit_cases"],
+            "kernel_ti_invocations_per_replay": 20,
+        }
+        child = {
+            "operation": "marching_squares",
+            "runtime": "forge_kernel",
+            "backend": "cuda",
+            "route": control,
+            "workload_contract": contract,
+        }
+        self.assertTrue(
+            _marching_squares_kernel_control_route_isolated(child))
+        self.assertTrue(
+            _audit_marching_squares_kernel_control_route_isolated(child))
+        del contract["kernel_scan_steps"]
+        self.assertFalse(
+            _marching_squares_kernel_control_route_isolated(child))
+        self.assertFalse(
+            _audit_marching_squares_kernel_control_route_isolated(child))
+
+    def test_marching_squares_endpoint_requires_full_ordered_vectors(self):
+        def exact(sha256):
+            return {
+                "count": 4,
+                "expected_count": 4,
+                "actual_sha256": sha256,
+                "expected_sha256": sha256,
+                "actual_sum": 6,
+                "expected_sum": 6,
+                "actual_minimum": 0,
+                "expected_minimum": 0,
+                "actual_maximum": 3,
+                "expected_maximum": 3,
+                "sample_indices": [0, 1, 2, 3],
+                "expected_sample_indices": [0, 1, 2, 3],
+                "actual_samples": [0, 1, 2, 3],
+                "expected_samples": [0, 1, 2, 3],
+                "mismatch_count": 0,
+                "first_mismatch": None,
+            }
+
+        cells_sha = "c" * 64
+        cases_sha = "d" * 64
+        validation = {
+            "passed": True,
+            "comparison": (
+                "exact_stable_marching_squares_full_cell_and_case_vectors"),
+            "actual_count": 4,
+            "expected_count": 4,
+            "endpoint_fingerprint": {
+                "finite": True,
+                "selected_count": 4,
+                "selected_cells_sha256": cells_sha,
+                "case_codes_sha256": cases_sha,
+            },
+            "endpoint_vectors": {
+                "selected_cells_i32": exact(cells_sha),
+                "case_codes_i32": exact(cases_sha),
+            },
+        }
+        results = {
+            name: {
+                "operation": "marching_squares",
+                "validation_before": json.loads(json.dumps(validation)),
+                "validation_after": json.loads(json.dumps(validation)),
+            }
+            for name in ("forge", "forge_kernel")
+        }
+        self.assertTrue(_endpoint_equivalent(
+            results, "forge", "forge_kernel"))
+        self.assertTrue(_audit_endpoint_equivalent(
+            results["forge"], results["forge_kernel"]))
+        results["forge_kernel"]["validation_after"]["endpoint_vectors"][
+            "case_codes_i32"]["actual_sha256"] = "e" * 64
         self.assertFalse(_endpoint_equivalent(
             results, "forge", "forge_kernel"))
         self.assertFalse(_audit_endpoint_equivalent(

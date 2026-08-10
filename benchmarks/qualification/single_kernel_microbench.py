@@ -4432,11 +4432,155 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
     }
 
 
+def _marching_squares_route(
+        workspace: Any | None,
+        runtime_name: str,
+        backend: str,
+        elements: int,
+        kernel_source_sha256: str) -> dict[str, Any]:
+    stage_kernel_names = [
+        "classify", "stage_flags", "scan_ping_pong", "stable_scatter",
+        "emit_cases",
+    ]
+    if runtime_name == "forge":
+        compact_route = _native_compact_route(
+            workspace, runtime_name, backend)
+        return {
+            "classification": "forge_native_marching_squares_pipeline",
+            "adapter": "forge_native_stable_compact_pipeline",
+            "kernel_source_owner": "benchmark",
+            "kernel_source_sha256": kernel_source_sha256,
+            "stage_kernel_names": [
+                "classify", "stable_compact", "emit_cases"],
+            "compact_route": compact_route,
+            "workspace_bytes_current": getattr(
+                workspace, "workspace_bytes_current", None),
+            "workspace_bytes_peak": getattr(
+                workspace, "workspace_bytes_peak", None),
+            "cells": elements,
+            "expected_backend": backend,
+            "observed_backend": backend,
+            "passed": bool(
+                compact_route.get("passed") is True
+                and isinstance(kernel_source_sha256, str)
+                and len(kernel_source_sha256) == 64
+                and elements > 0
+            ),
+        }
+    scan_steps = (
+        (elements - 1).bit_length()
+        if isinstance(elements, int) and elements > 0 else None
+    )
+    final_scan_copy_invocations = (
+        scan_steps % 2 if scan_steps is not None else None
+    )
+    non_scan_invocations = 4
+    kernel_invocations = (
+        non_scan_invocations + scan_steps + final_scan_copy_invocations
+        if scan_steps is not None else None
+    )
+    return {
+        "classification": (
+            f"{runtime_name}_equivalent_marching_squares_kernel_pipeline"
+        ),
+        "adapter": "benchmark_defined_ti_kernel_pipeline",
+        "kernel_source_owner": "benchmark",
+        "kernel_source_sha256": kernel_source_sha256,
+        "helper_api_used": False,
+        "specialized_api_used": False,
+        "benchmark_workspace_kind": (
+            "one_prefix_i32_dense_field_and_one_scan_scratch_i32_dense_field"
+        ),
+        "benchmark_workspace_field_count": 2,
+        "scan_algorithm": "inclusive_hillis_steele_ping_pong",
+        "scan_elements": elements,
+        "scan_steps": scan_steps,
+        "final_scan_copy_kernel_invocations": final_scan_copy_invocations,
+        "non_scan_ti_kernel_invocations_per_replay": non_scan_invocations,
+        "stage_kernel_names": stage_kernel_names,
+        "ti_kernel_invocations_per_replay": kernel_invocations,
+        "physical_backend_launches_assumed": False,
+        "expected_backend": backend,
+        "observed_backend": backend,
+        "observed_method": (
+            "benchmark-owned classification, flag staging, shared "
+            "Hillis-Steele i32 scan, stable scatter, and case emission kernels"
+        ),
+        "cells": elements,
+        "passed": bool(
+            runtime_name in ("forge_kernel", "vanilla_kernel")
+            and workspace is None
+            and isinstance(kernel_source_sha256, str)
+            and len(kernel_source_sha256) == 64
+            and scan_steps is not None
+        ),
+    }
+
+
+def _marching_squares_kernel_control_route_isolated(
+        child: dict[str, Any]) -> bool:
+    if (child.get("operation") != "marching_squares"
+            or child.get("runtime") not in (
+                "forge_kernel", "vanilla_kernel")):
+        return True
+    route = child.get("route", {})
+    contract = child.get("workload_contract", {})
+    return bool(
+        route.get("passed") is True
+        and route.get("classification")
+        == f"{child['runtime']}_equivalent_marching_squares_kernel_pipeline"
+        and route.get("adapter") == "benchmark_defined_ti_kernel_pipeline"
+        and "native" not in json.dumps(route, sort_keys=True).lower()
+        and route.get("kernel_source_owner") == "benchmark"
+        and route.get("kernel_source_sha256")
+        == contract.get("kernel_source_sha256")
+        and route.get("helper_api_used") is False
+        and route.get("specialized_api_used") is False
+        and route.get("benchmark_workspace_kind")
+        == contract.get("kernel_benchmark_workspace_kind")
+        and route.get("benchmark_workspace_field_count") == 2
+        and route.get("benchmark_workspace_field_count")
+        == contract.get("kernel_benchmark_workspace_field_count")
+        and route.get("scan_algorithm")
+        == "inclusive_hillis_steele_ping_pong"
+        and route.get("scan_algorithm")
+        == contract.get("kernel_scan_algorithm")
+        and route.get("scan_elements")
+        == contract.get("kernel_scan_elements")
+        and route.get("scan_steps")
+        == contract.get("kernel_scan_steps")
+        and route.get("final_scan_copy_kernel_invocations")
+        == contract.get("kernel_final_scan_copy_kernel_invocations")
+        and route.get("non_scan_ti_kernel_invocations_per_replay")
+        == contract.get("kernel_non_scan_ti_invocations_per_replay")
+        and route.get("stage_kernel_names")
+        == contract.get("kernel_stage_names")
+        and route.get("ti_kernel_invocations_per_replay")
+        == contract.get("kernel_ti_invocations_per_replay")
+        and route.get("physical_backend_launches_assumed") is False
+        and route.get("expected_backend") == child.get("backend")
+        and route.get("observed_backend") == child.get("backend")
+        and route.get("cells") == contract.get("cells")
+    )
+
+
 def _build_marching_squares_case(ti: Any, runtime_name: str, backend: str,
                                  elements: int) -> dict[str, Any]:
     """Extract stable contour cells and case codes from an analytic circle."""
     import numpy as np
 
+    source_sha256 = sha256_file(Path(__file__))
+    scan_steps = (elements - 1).bit_length()
+    final_scan_copy_invocations = scan_steps % 2
+    non_scan_kernel_invocations = 4
+    kernel_invocations = (
+        non_scan_kernel_invocations + scan_steps
+        + final_scan_copy_invocations
+    )
+    kernel_stage_names = [
+        "classify", "stage_flags", "scan_ping_pong", "stable_scatter",
+        "emit_cases",
+    ]
     cell_side = math.isqrt(elements)
     if cell_side * cell_side != elements:
         raise ValueError("marching squares requires a square cell count")
@@ -4558,33 +4702,110 @@ def _build_marching_squares_case(ti: Any, runtime_name: str, backend: str,
         launch()
         ti.sync()
         actual_count = int(count.to_numpy()[0])
-        actual_cells = compacted.to_numpy()[:selected_count]
-        actual_cases = case_codes.to_numpy()[:selected_count]
-        cell_mismatch = int(np.count_nonzero(actual_cells != expected_cells))
-        case_mismatch = int(np.count_nonzero(actual_cases != expected_cases))
+        actual_cells = compacted.to_numpy()[:actual_count]
+        actual_cases = case_codes.to_numpy()[:actual_count]
+
+        def exact_i32_vector(actual: Any, expected: Any) -> dict[str, Any]:
+            actual_i32 = np.ascontiguousarray(
+                actual, dtype=np.int32).reshape(-1)
+            expected_i32 = np.ascontiguousarray(
+                expected, dtype=np.int32).reshape(-1)
+            if actual_i32.size == expected_i32.size:
+                mismatch = np.flatnonzero(actual_i32 != expected_i32)
+                mismatch_count = int(mismatch.size)
+                first_mismatch = (
+                    None if mismatch.size == 0 else int(mismatch[0]))
+            else:
+                mismatch_count = max(
+                    int(actual_i32.size), int(expected_i32.size))
+                first_mismatch = 0
+
+            def evidence(vector: Any) -> dict[str, Any]:
+                count_value = int(vector.size)
+                sample_indices = sorted(set((
+                    0, count_value // 4, count_value // 2,
+                    (3 * count_value) // 4, count_value - 1,
+                ))) if count_value else []
+                return {
+                    "count": count_value,
+                    "sha256": hashlib.sha256(vector.tobytes()).hexdigest(),
+                    "sum": int(vector.astype(np.int64).sum()),
+                    "minimum": int(vector.min()) if count_value else None,
+                    "maximum": int(vector.max()) if count_value else None,
+                    "sample_indices": sample_indices,
+                    "samples": [
+                        int(vector[index]) for index in sample_indices],
+                }
+
+            actual_evidence = evidence(actual_i32)
+            expected_evidence = evidence(expected_i32)
+            return {
+                "count": actual_evidence["count"],
+                "expected_count": expected_evidence["count"],
+                "actual_sha256": actual_evidence["sha256"],
+                "expected_sha256": expected_evidence["sha256"],
+                "actual_sum": actual_evidence["sum"],
+                "expected_sum": expected_evidence["sum"],
+                "actual_minimum": actual_evidence["minimum"],
+                "expected_minimum": expected_evidence["minimum"],
+                "actual_maximum": actual_evidence["maximum"],
+                "expected_maximum": expected_evidence["maximum"],
+                "sample_indices": actual_evidence["sample_indices"],
+                "expected_sample_indices": expected_evidence["sample_indices"],
+                "actual_samples": actual_evidence["samples"],
+                "expected_samples": expected_evidence["samples"],
+                "mismatch_count": mismatch_count,
+                "first_mismatch": first_mismatch,
+            }
+
+        endpoint_vectors = {
+            "selected_cells_i32": exact_i32_vector(
+                actual_cells, expected_cells),
+            "case_codes_i32": exact_i32_vector(
+                actual_cases, expected_cases),
+        }
+        fingerprint = {
+            "finite": True,
+            "selected_count": actual_count,
+            "selected_cells_sha256": endpoint_vectors[
+                "selected_cells_i32"]["actual_sha256"],
+            "case_codes_sha256": endpoint_vectors[
+                "case_codes_i32"]["actual_sha256"],
+        }
         return {
             "passed": bool(
                 actual_count == selected_count
-                and cell_mismatch == 0
-                and case_mismatch == 0
+                and all(
+                    vector["count"] == vector["expected_count"]
+                    and vector["actual_sha256"] == vector["expected_sha256"]
+                    and vector["mismatch_count"] == 0
+                    and vector["first_mismatch"] is None
+                    for vector in endpoint_vectors.values()
+                )
             ),
-            "comparison": "exact_stable_marching_squares_cell_and_case_output",
+            "comparison": (
+                "exact_stable_marching_squares_full_cell_and_case_vectors"
+            ),
             "actual_count": actual_count,
             "expected_count": selected_count,
-            "cell_mismatch_count": cell_mismatch,
-            "case_mismatch_count": case_mismatch,
+            "cell_mismatch_count": endpoint_vectors[
+                "selected_cells_i32"]["mismatch_count"],
+            "case_mismatch_count": endpoint_vectors[
+                "case_codes_i32"]["mismatch_count"],
             "ambiguous_case_5_count": int(np.count_nonzero(
                 actual_cases == 5)),
             "ambiguous_case_10_count": int(np.count_nonzero(
                 actual_cases == 10)),
+            "endpoint_fingerprint": fingerprint,
+            "endpoint_vectors": endpoint_vectors,
         }
 
     return {
         "launch": launch,
         "reset": reset,
         "validate": validate_fresh,
-        "route": lambda: _native_compact_route(
-            workspace, runtime_name, backend),
+        "route": lambda: _marching_squares_route(
+            workspace, runtime_name, backend, elements, source_sha256),
         "logical_bytes": 0,
         "traffic_model": (
             "Marching Squares classification, stable contour-cell compact, and "
@@ -4609,6 +4830,25 @@ def _build_marching_squares_case(ti: Any, runtime_name: str, backend: str,
             "cells": elements,
             "selected_count": selected_count,
             "circle_radius": 0.55,
+            "kernel_source_owner": "benchmark",
+            "kernel_source_sha256": source_sha256,
+            "kernel_adapter": "benchmark_defined_ti_kernel_pipeline",
+            "kernel_helper_api_used": False,
+            "kernel_specialized_api_used": False,
+            "kernel_benchmark_workspace_kind": (
+                "one_prefix_i32_dense_field_and_one_scan_scratch_i32_dense_field"
+            ),
+            "kernel_benchmark_workspace_field_count": 2,
+            "kernel_scan_algorithm": "inclusive_hillis_steele_ping_pong",
+            "kernel_scan_elements": elements,
+            "kernel_scan_steps": scan_steps,
+            "kernel_final_scan_copy_kernel_invocations": (
+                final_scan_copy_invocations),
+            "kernel_non_scan_ti_invocations_per_replay": (
+                non_scan_kernel_invocations),
+            "kernel_stage_names": kernel_stage_names,
+            "kernel_ti_invocations_per_replay": kernel_invocations,
+            "kernel_physical_backend_launches_assumed": False,
             "forge_adapter": (
                 "experimental_compact with reusable native CompactWorkspace"
             ),
@@ -4618,10 +4858,13 @@ def _build_marching_squares_case(ti: Any, runtime_name: str, backend: str,
             "shared": (
                 "same analytic scalar grid, corner convention, classification "
                 "and emission kernels, stable output order, synchronization, "
-                "and exact cell/case oracle"
+                "and exact full-vector cell/case oracle"
             ),
             "allowed_difference": "only the stable compact adapter",
-            "correctness": "exact selected count, row-major cell ids, and case codes",
+            "correctness": (
+                "exact selected count and full ordered row-major cell-id/case-code "
+                "vectors with SHA-256, statistics, samples, and mismatch location"
+            ),
             "timing": (
                 "frozen repeated complete classify-compact-emit calls plus one "
                 "outer sync; scalar setup and correctness excluded"
@@ -5995,6 +6238,85 @@ def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
                                 key)):
                         return False
         return True
+    if left_result["operation"] == "marching_squares":
+        vector_names = ("selected_cells_i32", "case_codes_i32")
+        exact_keys = (
+            "count", "expected_count", "actual_sha256", "expected_sha256",
+            "actual_sum", "expected_sum", "actual_minimum",
+            "expected_minimum", "actual_maximum", "expected_maximum",
+            "sample_indices", "expected_sample_indices", "actual_samples",
+            "expected_samples", "mismatch_count", "first_mismatch",
+        )
+        for validation_name in ("validation_before", "validation_after"):
+            left = left_result[validation_name]
+            right = right_result[validation_name]
+            for value in (left, right):
+                if (not value.get("passed")
+                        or value.get("comparison") !=
+                        "exact_stable_marching_squares_full_cell_and_case_vectors"
+                        or not isinstance(value.get("actual_count"), int)
+                        or value["actual_count"] <= 0
+                        or value["actual_count"] != value.get("expected_count")
+                        or set(value.get("endpoint_vectors", {})) !=
+                        set(vector_names)):
+                    return False
+                for vector_name in vector_names:
+                    vector = value["endpoint_vectors"][vector_name]
+                    if (not isinstance(vector.get("count"), int)
+                            or vector["count"] <= 0
+                            or vector["count"] != vector.get("expected_count")
+                            or vector["count"] != value["actual_count"]
+                            or not isinstance(
+                                vector.get("actual_sha256"), str)
+                            or len(vector["actual_sha256"]) != 64
+                            or vector["actual_sha256"] != vector.get(
+                                "expected_sha256")
+                            or vector.get("mismatch_count") != 0
+                            or vector.get("first_mismatch") is not None):
+                        return False
+                    for suffix in (
+                            "sum", "minimum", "maximum", "samples"):
+                        if vector.get(f"actual_{suffix}") != vector.get(
+                                f"expected_{suffix}"):
+                            return False
+                    if (vector.get("sample_indices") !=
+                            vector.get("expected_sample_indices")
+                            or len(vector.get("sample_indices", [])) != len(
+                                vector.get("actual_samples", []))):
+                        return False
+                fingerprint = value.get("endpoint_fingerprint", {})
+                if (fingerprint.get("finite") is not True
+                        or fingerprint.get("selected_count") !=
+                        value["actual_count"]
+                        or fingerprint.get("selected_cells_sha256") !=
+                        value["endpoint_vectors"]["selected_cells_i32"][
+                            "actual_sha256"]
+                        or fingerprint.get("case_codes_sha256") !=
+                        value["endpoint_vectors"]["case_codes_i32"][
+                            "actual_sha256"]):
+                    return False
+            if (left["actual_count"] != right["actual_count"]
+                    or left["expected_count"] != right["expected_count"]):
+                return False
+            for vector_name in vector_names:
+                for key in exact_keys:
+                    if (left["endpoint_vectors"][vector_name].get(key) !=
+                            right["endpoint_vectors"][vector_name].get(key)):
+                        return False
+        for result in (left_result, right_result):
+            before = result["validation_before"]
+            after = result["validation_after"]
+            if (before.get("actual_count") != after.get("actual_count")
+                    or before.get("expected_count") !=
+                    after.get("expected_count")):
+                return False
+            for vector_name in vector_names:
+                if any(
+                        before["endpoint_vectors"][vector_name].get(key) !=
+                        after["endpoint_vectors"][vector_name].get(key)
+                        for key in exact_keys):
+                    return False
+        return True
     if left_result["operation"] == "adaptive_pbd":
         observed_names = ("positions_f32", "residuals_f32")
         exact_names = ("active_history_i32", "final_active_ids_i32")
@@ -6941,6 +7263,9 @@ def _parent_main(args: argparse.Namespace) -> int:
             for child in children),
         "adaptive_pbd_kernel_control_route_isolated": all(
             _adaptive_pbd_kernel_control_route_isolated(child)
+            for child in children),
+        "marching_squares_kernel_control_route_isolated": all(
+            _marching_squares_kernel_control_route_isolated(child)
             for child in children),
         "ordinary_control_route_isolated": all(
             child["route"].get("classification")

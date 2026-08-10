@@ -326,6 +326,85 @@ def _endpoint_equivalent(left_result: dict[str, Any],
                                 key)):
                         return False
         return True
+    if left_result["operation"] == "marching_squares":
+        vector_names = ("selected_cells_i32", "case_codes_i32")
+        exact_keys = (
+            "count", "expected_count", "actual_sha256", "expected_sha256",
+            "actual_sum", "expected_sum", "actual_minimum",
+            "expected_minimum", "actual_maximum", "expected_maximum",
+            "sample_indices", "expected_sample_indices", "actual_samples",
+            "expected_samples", "mismatch_count", "first_mismatch",
+        )
+        for validation_name in ("validation_before", "validation_after"):
+            left = left_result[validation_name]
+            right = right_result[validation_name]
+            for value in (left, right):
+                if (not value.get("passed")
+                        or value.get("comparison") !=
+                        "exact_stable_marching_squares_full_cell_and_case_vectors"
+                        or not isinstance(value.get("actual_count"), int)
+                        or value["actual_count"] <= 0
+                        or value["actual_count"] != value.get("expected_count")
+                        or set(value.get("endpoint_vectors", {})) !=
+                        set(vector_names)):
+                    return False
+                for vector_name in vector_names:
+                    vector = value["endpoint_vectors"][vector_name]
+                    if (not isinstance(vector.get("count"), int)
+                            or vector["count"] <= 0
+                            or vector["count"] != vector.get("expected_count")
+                            or vector["count"] != value["actual_count"]
+                            or not isinstance(
+                                vector.get("actual_sha256"), str)
+                            or len(vector["actual_sha256"]) != 64
+                            or vector["actual_sha256"] != vector.get(
+                                "expected_sha256")
+                            or vector.get("mismatch_count") != 0
+                            or vector.get("first_mismatch") is not None):
+                        return False
+                    for suffix in (
+                            "sum", "minimum", "maximum", "samples"):
+                        if vector.get(f"actual_{suffix}") != vector.get(
+                                f"expected_{suffix}"):
+                            return False
+                    if (vector.get("sample_indices") !=
+                            vector.get("expected_sample_indices")
+                            or len(vector.get("sample_indices", [])) != len(
+                                vector.get("actual_samples", []))):
+                        return False
+                fingerprint = value.get("endpoint_fingerprint", {})
+                if (fingerprint.get("finite") is not True
+                        or fingerprint.get("selected_count") !=
+                        value["actual_count"]
+                        or fingerprint.get("selected_cells_sha256") !=
+                        value["endpoint_vectors"]["selected_cells_i32"][
+                            "actual_sha256"]
+                        or fingerprint.get("case_codes_sha256") !=
+                        value["endpoint_vectors"]["case_codes_i32"][
+                            "actual_sha256"]):
+                    return False
+            if (left["actual_count"] != right["actual_count"]
+                    or left["expected_count"] != right["expected_count"]):
+                return False
+            for vector_name in vector_names:
+                for key in exact_keys:
+                    if (left["endpoint_vectors"][vector_name].get(key) !=
+                            right["endpoint_vectors"][vector_name].get(key)):
+                        return False
+        for result in (left_result, right_result):
+            before = result["validation_before"]
+            after = result["validation_after"]
+            if (before.get("actual_count") != after.get("actual_count")
+                    or before.get("expected_count") !=
+                    after.get("expected_count")):
+                return False
+            for vector_name in vector_names:
+                if any(
+                        before["endpoint_vectors"][vector_name].get(key) !=
+                        after["endpoint_vectors"][vector_name].get(key)
+                        for key in exact_keys):
+                    return False
+        return True
     if left_result["operation"] == "adaptive_pbd":
         observed_names = ("positions_f32", "residuals_f32")
         exact_names = ("active_history_i32", "final_active_ids_i32")
@@ -530,6 +609,53 @@ def _adaptive_pbd_kernel_control_route_isolated(
         and route.get("observed_backend") == child.get("backend")
         and route.get("constraints") == contract.get("constraints")
         and route.get("iterations") == contract.get("iterations")
+    )
+
+
+def _marching_squares_kernel_control_route_isolated(
+        child: dict[str, Any]) -> bool:
+    if (child.get("operation") != "marching_squares"
+            or child.get("runtime") not in (
+                "forge_kernel", "vanilla_kernel")):
+        return True
+    route = child.get("route", {})
+    contract = child.get("workload_contract", {})
+    return bool(
+        route.get("passed") is True
+        and route.get("classification")
+        == f"{child['runtime']}_equivalent_marching_squares_kernel_pipeline"
+        and route.get("adapter") == "benchmark_defined_ti_kernel_pipeline"
+        and "native" not in json.dumps(route, sort_keys=True).lower()
+        and route.get("kernel_source_owner") == "benchmark"
+        and route.get("kernel_source_sha256")
+        == contract.get("kernel_source_sha256")
+        and route.get("helper_api_used") is False
+        and route.get("specialized_api_used") is False
+        and route.get("benchmark_workspace_kind")
+        == contract.get("kernel_benchmark_workspace_kind")
+        and route.get("benchmark_workspace_field_count") == 2
+        and route.get("benchmark_workspace_field_count")
+        == contract.get("kernel_benchmark_workspace_field_count")
+        and route.get("scan_algorithm")
+        == "inclusive_hillis_steele_ping_pong"
+        and route.get("scan_algorithm")
+        == contract.get("kernel_scan_algorithm")
+        and route.get("scan_elements")
+        == contract.get("kernel_scan_elements")
+        and route.get("scan_steps")
+        == contract.get("kernel_scan_steps")
+        and route.get("final_scan_copy_kernel_invocations")
+        == contract.get("kernel_final_scan_copy_kernel_invocations")
+        and route.get("non_scan_ti_kernel_invocations_per_replay")
+        == contract.get("kernel_non_scan_ti_invocations_per_replay")
+        and route.get("stage_kernel_names")
+        == contract.get("kernel_stage_names")
+        and route.get("ti_kernel_invocations_per_replay")
+        == contract.get("kernel_ti_invocations_per_replay")
+        and route.get("physical_backend_launches_assumed") is False
+        and route.get("expected_backend") == child.get("backend")
+        and route.get("observed_backend") == child.get("backend")
+        and route.get("cells") == contract.get("cells")
     )
 
 
@@ -1041,6 +1167,9 @@ def _audit(run_dir: Path) -> dict[str, Any]:
     adaptive_pbd_kernel_control_route_isolated = all(
         _adaptive_pbd_kernel_control_route_isolated(child)
         for child in children)
+    marching_squares_kernel_control_route_isolated = all(
+        _marching_squares_kernel_control_route_isolated(child)
+        for child in children)
     ordinary_control_route_isolated = all(
         child["route"].get("classification")
         == f"{child['runtime']}_ordinary_taichi_kernel"
@@ -1130,6 +1259,14 @@ def _audit(run_dir: Path) -> dict[str, Any]:
                         "adaptive_pbd_kernel_control_route_isolated"] is
                     adaptive_pbd_kernel_control_route_isolated,
                     "adaptive PBD kernel control route method check", failures)
+            if ("marching_squares_kernel_control_route_isolated"
+                    in summary["method_checks"]):
+                _check(
+                    summary["method_checks"][
+                        "marching_squares_kernel_control_route_isolated"] is
+                    marching_squares_kernel_control_route_isolated,
+                    "Marching Squares kernel control route method check",
+                    failures)
             if "ordinary_control_route_isolated" in summary["method_checks"]:
                 _check(
                     summary["method_checks"][
@@ -1161,7 +1298,9 @@ def _audit(run_dir: Path) -> dict[str, Any]:
         and stability_complete
         and snode_lifecycle_plateau
         and ordinary_control_route_isolated
-        and timing_window_complete)
+        and timing_window_complete
+        and all(bool(value) for value in
+                summary.get("method_checks", {}).values()))
     favorable_fraction = (
         sum(value > 1.0 for value in median_speedups) / len(median_speedups)
         if median_speedups else 0.0)

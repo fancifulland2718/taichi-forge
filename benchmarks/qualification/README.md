@@ -247,10 +247,19 @@ scoring, and independent recomputation. Logical invocation counts never assume
 physical backend launch counts; Systems/Compute must measure those separately.
 
 `marching_squares` is the first `THIN-007` subcase. On a 256-square analytic
-circle grid it shares the scalar input, corner convention, classification and
-case-emission kernels, stable row-major output, and exact cell/case oracle.
-Forge uses native stable compact; vanilla uses flags-to-prefix, a reusable
-public prefix sum, and stable scatter. The selected set is 564 of 65,536 cells.
+circle grid all three routes share the scalar input, corner convention,
+classification and case-emission kernels, stable row-major output, and exact
+full-vector cell/case oracle. Forge/kernel and vanilla/kernel execute the same
+benchmark-owned source SHA: classification, flag staging, 16 full-capacity
+65,536-element Hillis-Steele scan kernels, stable scatter, and case emission,
+for 20 declared logical Taichi kernel invocations per replay and two declared
+benchmark workspace fields. No helper or specialized API is admitted on this
+compatibility axis. Forge/native is compared separately with Forge/kernel and
+uses native stable compact between the shared classification and emission
+kernels. Admission requires identical ordered output before and after scoring,
+including raw SHA-256, statistics, samples, mismatch count, and first mismatch
+for all 564 selected cell IDs and case codes. Logical invocation counts never
+assume physical CUDA launches; Nsight Systems measures topology separately.
 Use `marching_squares_microbench.py`.
 
 `bfs_worklist` is the second `THIN-007` subcase. It traverses 64 levels of a

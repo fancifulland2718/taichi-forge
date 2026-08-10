@@ -206,10 +206,17 @@ SHA-256，并由独立审计重算。逻辑 invocation 数不推定物理 backen
 由 Systems/Compute 单独实测。
 
 `marching_squares` 是第一个 `THIN-007` 子案例。在 256² analytic circle 网格上，
-两边共享 scalar 输入、corner 约定、classification/case-emission kernel、稳定的
-row-major 输出和 exact cell/case oracle。Forge 使用 native stable compact；vanilla
-使用 flags-to-prefix、可复用公共 prefix sum 与 stable scatter。最终选中
-564/65,536 个 cell。独立入口为 `marching_squares_microbench.py`。
+三条路线共享 scalar 输入、corner 约定、classification/case-emission kernel、稳定的
+row-major 输出和完整向量 exact cell/case oracle。Forge/kernel 与 vanilla/kernel
+执行相同 benchmark-owned source SHA：classification、flag staging、16 次完整容量为
+65,536-element 的 Hillis-Steele scan kernel、stable scatter 和 case emission；每个
+replay 明确为 20 次逻辑 Taichi kernel invocation，并声明两个 benchmark workspace
+field。compatibility 轴不准入 helper 或 specialized API。Forge/native 另行与
+Forge/kernel 比较，在共享 classification/emission kernel 之间使用 native stable
+compact。准入要求计时前后有序输出完全一致，并为全部 564 个 selected cell ID 和
+case code 提供 raw SHA-256、统计、样本、mismatch count 与首个 mismatch。逻辑
+invocation 数不推定物理 CUDA launch 数；拓扑必须由 Nsight Systems 单独实测。独立入口
+为 `marching_squares_microbench.py`。
 
 `bfs_worklist` 是第二个 `THIN-007` 子案例。它从中心遍历 256² 四邻接网格的 64
 层；两边共享 atomic-min first-visit 语义、device-resident count、full-capacity
