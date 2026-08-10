@@ -213,11 +213,17 @@ thin-capability case, not a same-public-API comparison. Use
 
 `particle_spatial_hash` is `THIN-005`. The small case maps 65,536 regular-grid
 particles into 16,384 cells, four particles per cell, then runs the same
-fixed-radius neighbor query. Both sides share positions, key/query kernels,
-i32 field layout, and exact key/offset/canonicalized-bucket/neighbor oracles.
-Forge uses the native bucket-builder workspace; vanilla uses parallel count,
-a reusable public prefix sum, cursor copy, and atomic scatter. Per-bucket order
-is unspecified and canonicalized only outside timing. Use
+fixed-radius neighbor query. Its required matrix is vanilla/kernel,
+Forge/kernel, and Forge/native. Both kernel controls prove the same benchmark-
+owned source SHA and pipeline: key generation, clear/count, a 15-step shared
+Hillis-Steele scan plus final copy, cursor copy, atomic scatter, and query. The
+pipeline has two benchmark workspace fields and 21 Taichi invocations per
+replay; it does not assume a physical backend-launch count. Forge/native uses
+the reusable native bucket-builder workspace between the same key and query
+kernels. Per-bucket order is unspecified and canonicalized only outside
+timing. Correctness and cross-runtime admission independently require exact
+SHA-256, sum, extrema, and samples for keys, offsets, canonicalized bucket
+membership, and neighbor counts. Use
 `particle_spatial_hash_microbench.py`.
 
 `adaptive_pbd` is `THIN-006`. It solves 65,536 independent 2-D distance

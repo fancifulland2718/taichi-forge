@@ -886,6 +886,81 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         self.assertFalse(_particle_hash_route(
             Workspace(), "forge", "cuda", bins=16)["passed"])
 
+    def test_particle_hash_kernel_route_proves_shared_pipeline(self):
+        source_sha256 = "9" * 64
+        route = _particle_hash_route(
+            None, "forge_kernel", "cuda", bins=16384,
+            kernel_source_sha256=source_sha256)
+        self.assertTrue(route["passed"])
+        self.assertEqual(
+            route["adapter"], "benchmark_defined_ti_kernel_pipeline")
+        self.assertEqual(route["kernel_source_owner"], "benchmark")
+        self.assertEqual(route["kernel_source_sha256"], source_sha256)
+        self.assertFalse(route["helper_api_used"])
+        self.assertFalse(route["specialized_api_used"])
+        self.assertEqual(route["benchmark_workspace_field_count"], 2)
+        self.assertEqual(route["scan_elements"], 16385)
+        self.assertEqual(route["scan_steps"], 15)
+        self.assertEqual(route["final_scan_copy_kernel_invocations"], 1)
+        self.assertEqual(
+            route["non_scan_ti_kernel_invocations_per_replay"], 5)
+        self.assertEqual(route["ti_kernel_invocations_per_replay"], 21)
+        self.assertFalse(route["physical_backend_launches_assumed"])
+        self.assertFalse(_particle_hash_route(
+            object(), "forge_kernel", "cuda", bins=16384,
+            kernel_source_sha256=source_sha256)["passed"])
+        self.assertFalse(_particle_hash_route(
+            None, "vanilla_kernel", "cuda", bins=16384,
+            kernel_source_sha256="short")["passed"])
+
+    def test_particle_hash_endpoint_requires_all_exact_vectors(self):
+        def vector(sha256: str, count: int) -> dict:
+            return {
+                "count": count,
+                "actual_sha256": sha256,
+                "expected_sha256": sha256,
+                "actual_sum": 6,
+                "expected_sum": 6,
+                "actual_minimum": 0,
+                "expected_minimum": 0,
+                "actual_maximum": 3,
+                "expected_maximum": 3,
+                "sample_indices": [0, 1, 3],
+                "actual_samples": [0, 1, 3],
+                "expected_samples": [0, 1, 3],
+                "mismatch_count": 0,
+                "first_mismatch": None,
+            }
+
+        validation = {
+            "passed": True,
+            "comparison": "exact_2d_cell_hash_buckets_and_neighbor_counts",
+            "endpoint_vectors": {
+                "keys": vector("a" * 64, 4),
+                "offsets": vector("b" * 64, 5),
+                "canonical_output": vector("c" * 64, 4),
+                "neighbors": vector("d" * 64, 4),
+            },
+        }
+        results = {
+            name: {
+                "operation": "particle_spatial_hash",
+                "validation_before": json.loads(json.dumps(validation)),
+                "validation_after": json.loads(json.dumps(validation)),
+            }
+            for name in ("forge", "forge_kernel")
+        }
+        self.assertTrue(_endpoint_equivalent(
+            results, "forge", "forge_kernel"))
+        self.assertTrue(_audit_endpoint_equivalent(
+            results["forge"], results["forge_kernel"]))
+        results["forge_kernel"]["validation_after"]["endpoint_vectors"][
+            "canonical_output"]["actual_sha256"] = "e" * 64
+        self.assertFalse(_endpoint_equivalent(
+            results, "forge", "forge_kernel"))
+        self.assertFalse(_audit_endpoint_equivalent(
+            results["forge"], results["forge_kernel"]))
+
     def test_adaptive_pbd_route_requires_fixed_native_worklist(self):
         class Plan:
             backend = "cuda_device"

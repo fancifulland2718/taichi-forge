@@ -3437,8 +3437,9 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
     }
 
 
-def _particle_hash_route(workspace: Any | None, runtime_name: str,
-                         backend: str, bins: int) -> dict[str, Any]:
+def _particle_hash_route(
+        workspace: Any | None, runtime_name: str, backend: str, bins: int,
+        kernel_source_sha256: str | None = None) -> dict[str, Any]:
     if runtime_name == "forge":
         plan = getattr(workspace, "_native_bucket_builder_plan", None)
         expected_backend = {
@@ -3481,18 +3482,54 @@ def _particle_hash_route(workspace: Any | None, runtime_name: str,
                 and observed_method in expected_methods
             ),
         }
+    scan_elements = bins + 1
+    scan_steps = (scan_elements - 1).bit_length() if bins > 0 else None
+    final_scan_copy_invocations = (
+        scan_steps % 2 if scan_steps is not None else None
+    )
+    non_scan_kernel_invocations = 5
+    kernel_invocations = (
+        non_scan_kernel_invocations + scan_steps
+        + final_scan_copy_invocations
+        if scan_steps is not None else None
+    )
+    passed = bool(
+        runtime_name in ("forge_kernel", "vanilla_kernel")
+        and workspace is None
+        and isinstance(kernel_source_sha256, str)
+        and len(kernel_source_sha256) == 64
+        and scan_steps is not None
+    )
     return {
         "classification": f"{runtime_name}_equivalent_particle_bucket_pipeline",
+        "adapter": "benchmark_defined_ti_kernel_pipeline",
+        "kernel_source_owner": "benchmark",
+        "kernel_source_sha256": kernel_source_sha256,
+        "helper_api_used": False,
+        "specialized_api_used": False,
+        "benchmark_workspace_kind": "cursor_i32_and_scan_scratch_i32_dense_fields",
+        "benchmark_workspace_field_count": 2,
+        "scan_algorithm": "inclusive_hillis_steele_ping_pong",
+        "scan_elements": scan_elements,
+        "scan_steps": scan_steps,
+        "final_scan_copy_kernel_invocations": final_scan_copy_invocations,
+        "non_scan_ti_kernel_invocations_per_replay": non_scan_kernel_invocations,
+        "stage_kernel_names": [
+            "generate_keys", "count_clear_and_atomic", "scan_ping_pong",
+            "copy_cursor", "atomic_scatter", "query_neighbors",
+        ],
+        "ti_kernel_invocations_per_replay": kernel_invocations,
+        "physical_backend_launches_assumed": False,
         "expected_backend": backend,
         "observed_backend": backend,
         "observed_method": (
-            "clear-count, shared Hillis-Steele i32 scan kernels, cursor copy, "
-            "atomic scatter"
-            if runtime_name in ("forge_kernel", "vanilla_kernel") else
-            "clear-count, reusable PrefixSumExecutor, cursor copy, atomic scatter"
+            "benchmark-owned key, clear/count, shared Hillis-Steele i32 scan, "
+            "cursor-copy, atomic-scatter, and neighbor-query kernels"
         ),
         "bins": bins,
-        "passed": True,
+        "workspace_bytes_current": None,
+        "workspace_bytes_peak": None,
+        "passed": passed,
     }
 
 
@@ -3525,6 +3562,17 @@ def _build_particle_spatial_hash_case(ti: Any, runtime_name: str,
     expected_offsets = np.zeros(bins + 1, dtype=np.int32)
     expected_offsets[1:] = np.cumsum(
         expected_counts, dtype=np.int64).astype(np.int32)
+    expected_output = np.argsort(expected_keys, kind="stable").astype(np.int32)
+    expected_neighbors = np.ones(elements, dtype=np.int32)
+    source_sha256 = sha256_file(Path(__file__))
+    scan_elements = bins + 1
+    scan_steps = (scan_elements - 1).bit_length()
+    final_scan_copy_invocations = scan_steps % 2
+    non_scan_kernel_invocations = 5
+    kernel_invocations = (
+        non_scan_kernel_invocations + scan_steps
+        + final_scan_copy_invocations
+    )
 
     positions = ti.Vector.ndarray(2, ti.f32, shape=elements)
     positions.from_numpy(host_positions)
@@ -3641,27 +3689,73 @@ def _build_particle_spatial_hash_case(ti: Any, runtime_name: str,
         actual_offsets = offsets.to_numpy()
         actual_output = output.to_numpy()
         actual_neighbors = neighbors.to_numpy()
+        actual_canonical_output = actual_output.copy()
         bucket_mismatch_count = 0
         if np.array_equal(actual_offsets, expected_offsets):
             for bucket in range(bins):
                 begin = int(expected_offsets[bucket])
                 end = int(expected_offsets[bucket + 1])
-                actual_bucket = np.sort(actual_output[begin:end])
-                expected_bucket = np.flatnonzero(expected_keys == bucket)
-                if not np.array_equal(actual_bucket, expected_bucket):
+                actual_canonical_output[begin:end].sort()
+                if not np.array_equal(
+                        actual_canonical_output[begin:end],
+                        expected_output[begin:end]):
                     bucket_mismatch_count += 1
         else:
             bucket_mismatch_count = bins
         key_mismatch_count = int(np.count_nonzero(actual_keys != expected_keys))
         offset_mismatch_count = int(
             np.count_nonzero(actual_offsets != expected_offsets))
-        neighbor_mismatch_count = int(np.count_nonzero(actual_neighbors != 1))
+        neighbor_mismatch_count = int(
+            np.count_nonzero(actual_neighbors != expected_neighbors))
+
+        def exact_vector(actual: Any, expected: Any) -> dict[str, Any]:
+            actual_i32 = np.ascontiguousarray(actual, dtype=np.int32)
+            expected_i32 = np.ascontiguousarray(expected, dtype=np.int32)
+            mismatch = np.flatnonzero(actual_i32 != expected_i32)
+            count = int(expected_i32.size)
+            sample_indices = sorted(set((
+                0, count // 4, count // 2, (3 * count) // 4, count - 1)))
+            return {
+                "count": count,
+                "actual_sha256": hashlib.sha256(
+                    actual_i32.tobytes()).hexdigest(),
+                "expected_sha256": hashlib.sha256(
+                    expected_i32.tobytes()).hexdigest(),
+                "actual_sum": int(actual_i32.astype(np.int64).sum()),
+                "expected_sum": int(expected_i32.astype(np.int64).sum()),
+                "actual_minimum": int(actual_i32.min()),
+                "expected_minimum": int(expected_i32.min()),
+                "actual_maximum": int(actual_i32.max()),
+                "expected_maximum": int(expected_i32.max()),
+                "sample_indices": sample_indices,
+                "actual_samples": [
+                    int(actual_i32[index]) for index in sample_indices],
+                "expected_samples": [
+                    int(expected_i32[index]) for index in sample_indices],
+                "mismatch_count": int(mismatch.size),
+                "first_mismatch": (
+                    None if mismatch.size == 0 else int(mismatch[0])),
+            }
+
+        fingerprints = {
+            "keys": exact_vector(actual_keys, expected_keys),
+            "offsets": exact_vector(actual_offsets, expected_offsets),
+            "canonical_output": exact_vector(
+                actual_canonical_output, expected_output),
+            "neighbors": exact_vector(actual_neighbors, expected_neighbors),
+        }
         return {
             "passed": bool(
                 key_mismatch_count == 0
                 and offset_mismatch_count == 0
                 and bucket_mismatch_count == 0
                 and neighbor_mismatch_count == 0
+                and all(
+                    vector["actual_sha256"] == vector["expected_sha256"]
+                    and vector["mismatch_count"] == 0
+                    and vector["first_mismatch"] is None
+                    for vector in fingerprints.values()
+                )
             ),
             "comparison": "exact_2d_cell_hash_buckets_and_neighbor_counts",
             "key_mismatch_count": key_mismatch_count,
@@ -3674,6 +3768,7 @@ def _build_particle_spatial_hash_case(ti: Any, runtime_name: str,
             "particles_per_bin_max": int(expected_counts.max()),
             "neighbor_count_min": int(actual_neighbors.min()),
             "neighbor_count_max": int(actual_neighbors.max()),
+            "endpoint_vectors": fingerprints,
         }
 
     return {
@@ -3681,7 +3776,7 @@ def _build_particle_spatial_hash_case(ti: Any, runtime_name: str,
         "reset": reset,
         "validate": validate_fresh,
         "route": lambda: _particle_hash_route(
-            workspace, runtime_name, backend, bins),
+            workspace, runtime_name, backend, bins, source_sha256),
         "logical_bytes": 0,
         "traffic_model": (
             "particle cell hashing plus bucket construction and neighborhood "
@@ -3706,6 +3801,27 @@ def _build_particle_spatial_hash_case(ti: Any, runtime_name: str,
             "hash_side": hash_side,
             "bins": bins,
             "radius": radius,
+            "kernel_source_owner": "benchmark",
+            "kernel_source_sha256": source_sha256,
+            "kernel_adapter": "benchmark_defined_ti_kernel_pipeline",
+            "kernel_helper_api_used": False,
+            "kernel_specialized_api_used": False,
+            "kernel_benchmark_workspace_kind": (
+                "cursor_i32_and_scan_scratch_i32_dense_fields"),
+            "kernel_benchmark_workspace_field_count": 2,
+            "kernel_scan_algorithm": "inclusive_hillis_steele_ping_pong",
+            "kernel_scan_elements": scan_elements,
+            "kernel_scan_steps": scan_steps,
+            "kernel_final_scan_copy_kernel_invocations": (
+                final_scan_copy_invocations),
+            "kernel_non_scan_ti_invocations_per_replay": (
+                non_scan_kernel_invocations),
+            "kernel_stage_names": [
+                "generate_keys", "count_clear_and_atomic", "scan_ping_pong",
+                "copy_cursor", "atomic_scatter", "query_neighbors",
+            ],
+            "kernel_ti_invocations_per_replay": kernel_invocations,
+            "kernel_physical_backend_launches_assumed": False,
             "forge_adapter": (
                 "native BucketBuilderWorkspace pipeline between shared key and "
                 "neighbor-query kernels"
@@ -3724,8 +3840,9 @@ def _build_particle_spatial_hash_case(ti: Any, runtime_name: str,
                 "particle order is unspecified and canonicalized for validation"
             ),
             "correctness": (
-                "exact keys and offsets, canonicalized exact bucket membership, "
-                "and exact per-particle neighbor count"
+                "exact cross-runtime SHA-256/sum/extrema/samples for keys, "
+                "offsets, canonicalized bucket membership, and per-particle "
+                "neighbor counts"
             ),
             "timing": (
                 "frozen repeated key-build, complete bucket adapter, and query "
@@ -5570,6 +5687,53 @@ def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
                             != right[vector_name].get(key)):
                         return False
         return True
+    if left_result["operation"] == "particle_spatial_hash":
+        vector_names = (
+            "keys", "offsets", "canonical_output", "neighbors")
+        exact_keys = (
+            "count", "actual_sha256", "expected_sha256", "actual_sum",
+            "expected_sum", "actual_minimum", "expected_minimum",
+            "actual_maximum", "expected_maximum", "sample_indices",
+            "actual_samples", "expected_samples", "mismatch_count",
+            "first_mismatch",
+        )
+        for validation_name in ("validation_before", "validation_after"):
+            left = left_result[validation_name]
+            right = right_result[validation_name]
+            for value in (left, right):
+                if (not value.get("passed")
+                        or value.get("comparison") !=
+                        "exact_2d_cell_hash_buckets_and_neighbor_counts"
+                        or set(value.get("endpoint_vectors", {})) !=
+                        set(vector_names)):
+                    return False
+                for vector_name in vector_names:
+                    vector = value["endpoint_vectors"][vector_name]
+                    if (not isinstance(vector.get("count"), int)
+                            or vector["count"] <= 0
+                            or not isinstance(
+                                vector.get("actual_sha256"), str)
+                            or len(vector["actual_sha256"]) != 64
+                            or vector["actual_sha256"] != vector.get(
+                                "expected_sha256")
+                            or vector.get("mismatch_count") != 0
+                            or vector.get("first_mismatch") is not None):
+                        return False
+                    for suffix in (
+                            "sum", "minimum", "maximum", "samples"):
+                        if vector.get(f"actual_{suffix}") != vector.get(
+                                f"expected_{suffix}"):
+                            return False
+                    if len(vector.get("sample_indices", [])) != len(
+                            vector.get("actual_samples", [])):
+                        return False
+            for vector_name in vector_names:
+                for key in exact_keys:
+                    if (left["endpoint_vectors"][vector_name].get(key)
+                            != right["endpoint_vectors"][vector_name].get(
+                                key)):
+                        return False
+        return True
     if left_result["operation"] == "adaptive_pbd":
         for validation_name in ("validation_before", "validation_after"):
             left = left_result[validation_name]["endpoint_fingerprint"]
@@ -6302,12 +6466,14 @@ def _parent_main(args: argparse.Namespace) -> int:
                     child["operation"] not in (
                         "native_reduce", "native_transform", "native_gather",
                         "native_scatter", "native_compact",
-                        "device_prefix_chain", "active_grid_mpm")
+                        "device_prefix_chain", "active_grid_mpm",
+                        "particle_spatial_hash")
                     or (
                         child["route"].get("adapter") == (
                             "benchmark_defined_ti_kernel_pipeline"
                             if child["operation"] in (
-                                "native_compact", "device_prefix_chain")
+                                "native_compact", "device_prefix_chain",
+                                "particle_spatial_hash")
                             else (
                                 "benchmark_defined_ti_kernel_graph_pipeline"
                                 if child["operation"] == "active_grid_mpm"
@@ -6375,9 +6541,43 @@ def _parent_main(args: argparse.Namespace) -> int:
                                     == child["workload_contract"].get(
                                         "kernel_stage_ti_invocations_per_replay")
                                     if child["operation"]
-                                    == "device_prefix_chain" else
-                                    child["route"].get(
-                                        "workspace_present") is False
+                                    == "device_prefix_chain" else (
+                                        child["route"].get(
+                                            "specialized_api_used") is False
+                                        and child["route"].get(
+                                            "benchmark_workspace_field_count")
+                                        == 2
+                                        and child["route"].get(
+                                            "scan_algorithm")
+                                        == "inclusive_hillis_steele_ping_pong"
+                                        and child["route"].get(
+                                            "scan_elements")
+                                        == child["workload_contract"].get(
+                                            "kernel_scan_elements")
+                                        and child["route"].get("scan_steps")
+                                        == child["workload_contract"].get(
+                                            "kernel_scan_steps")
+                                        and child["route"].get(
+                                            "final_scan_copy_kernel_"
+                                            "invocations")
+                                        == child["workload_contract"].get(
+                                            "kernel_final_scan_copy_kernel_"
+                                            "invocations")
+                                        and child["route"].get(
+                                            "non_scan_ti_kernel_"
+                                            "invocations_per_replay")
+                                        == child["workload_contract"].get(
+                                            "kernel_non_scan_ti_"
+                                            "invocations_per_replay")
+                                        and child["route"].get(
+                                            "stage_kernel_names")
+                                        == child["workload_contract"].get(
+                                            "kernel_stage_names")
+                                        if child["operation"]
+                                        == "particle_spatial_hash" else
+                                        child["route"].get(
+                                            "workspace_present") is False
+                                    )
                                 )
                             )
                         )

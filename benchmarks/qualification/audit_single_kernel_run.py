@@ -279,6 +279,53 @@ def _endpoint_equivalent(left_result: dict[str, Any],
                             != right[vector_name].get(key)):
                         return False
         return True
+    if left_result["operation"] == "particle_spatial_hash":
+        vector_names = (
+            "keys", "offsets", "canonical_output", "neighbors")
+        exact_keys = (
+            "count", "actual_sha256", "expected_sha256", "actual_sum",
+            "expected_sum", "actual_minimum", "expected_minimum",
+            "actual_maximum", "expected_maximum", "sample_indices",
+            "actual_samples", "expected_samples", "mismatch_count",
+            "first_mismatch",
+        )
+        for validation_name in ("validation_before", "validation_after"):
+            left = left_result[validation_name]
+            right = right_result[validation_name]
+            for value in (left, right):
+                if (not value.get("passed")
+                        or value.get("comparison") !=
+                        "exact_2d_cell_hash_buckets_and_neighbor_counts"
+                        or set(value.get("endpoint_vectors", {})) !=
+                        set(vector_names)):
+                    return False
+                for vector_name in vector_names:
+                    vector = value["endpoint_vectors"][vector_name]
+                    if (not isinstance(vector.get("count"), int)
+                            or vector["count"] <= 0
+                            or not isinstance(
+                                vector.get("actual_sha256"), str)
+                            or len(vector["actual_sha256"]) != 64
+                            or vector["actual_sha256"] != vector.get(
+                                "expected_sha256")
+                            or vector.get("mismatch_count") != 0
+                            or vector.get("first_mismatch") is not None):
+                        return False
+                    for suffix in (
+                            "sum", "minimum", "maximum", "samples"):
+                        if vector.get(f"actual_{suffix}") != vector.get(
+                                f"expected_{suffix}"):
+                            return False
+                    if len(vector.get("sample_indices", [])) != len(
+                            vector.get("actual_samples", [])):
+                        return False
+            for vector_name in vector_names:
+                for key in exact_keys:
+                    if (left["endpoint_vectors"][vector_name].get(key)
+                            != right["endpoint_vectors"][vector_name].get(
+                                key)):
+                        return False
+        return True
     if left_result["operation"] == "adaptive_pbd":
         for validation_name in ("validation_before", "validation_after"):
             left = left_result[validation_name]["endpoint_fingerprint"]
@@ -727,12 +774,14 @@ def _audit(run_dir: Path) -> dict[str, Any]:
                 child["operation"] not in (
                     "native_reduce", "native_transform", "native_gather",
                     "native_scatter", "native_compact",
-                    "device_prefix_chain", "active_grid_mpm")
+                    "device_prefix_chain", "active_grid_mpm",
+                    "particle_spatial_hash")
                 or (
                     child["route"].get("adapter") == (
                         "benchmark_defined_ti_kernel_pipeline"
                         if child["operation"] in (
-                            "native_compact", "device_prefix_chain")
+                            "native_compact", "device_prefix_chain",
+                            "particle_spatial_hash")
                         else (
                             "benchmark_defined_ti_kernel_graph_pipeline"
                             if child["operation"] == "active_grid_mpm"
@@ -800,9 +849,43 @@ def _audit(run_dir: Path) -> dict[str, Any]:
                                 == child["workload_contract"].get(
                                     "kernel_stage_ti_invocations_per_replay")
                                 if child["operation"]
-                                == "device_prefix_chain" else
-                                child["route"].get(
-                                    "workspace_present") is False
+                                == "device_prefix_chain" else (
+                                    child["route"].get(
+                                        "specialized_api_used") is False
+                                    and child["route"].get(
+                                        "benchmark_workspace_field_count")
+                                    == 2
+                                    and child["route"].get(
+                                        "scan_algorithm")
+                                    == "inclusive_hillis_steele_ping_pong"
+                                    and child["route"].get(
+                                        "scan_elements")
+                                    == child["workload_contract"].get(
+                                        "kernel_scan_elements")
+                                    and child["route"].get("scan_steps")
+                                    == child["workload_contract"].get(
+                                        "kernel_scan_steps")
+                                    and child["route"].get(
+                                        "final_scan_copy_kernel_"
+                                        "invocations")
+                                    == child["workload_contract"].get(
+                                        "kernel_final_scan_copy_kernel_"
+                                        "invocations")
+                                    and child["route"].get(
+                                        "non_scan_ti_kernel_"
+                                        "invocations_per_replay")
+                                    == child["workload_contract"].get(
+                                        "kernel_non_scan_ti_"
+                                        "invocations_per_replay")
+                                    and child["route"].get(
+                                        "stage_kernel_names")
+                                    == child["workload_contract"].get(
+                                        "kernel_stage_names")
+                                    if child["operation"]
+                                    == "particle_spatial_hash" else
+                                    child["route"].get(
+                                        "workspace_present") is False
+                                )
                             )
                         )
                     )

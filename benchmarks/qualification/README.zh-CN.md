@@ -178,11 +178,16 @@ thin-capability，不是相同公开 API 对比；独立入口为
 `active_grid_mpm_microbench.py`。
 
 `particle_spatial_hash` 是 `THIN-005`。small 案例把 65,536 个规则网格粒子映射到
-16,384 个 cell，每 cell 4 粒子，随后执行相同的固定半径邻域查询。两边共享位置、
-key/query kernel、i32 field 布局，以及 exact key/offset、canonicalized bucket 和
-neighbor oracle。Forge 使用 native bucket-builder workspace；vanilla 使用并行 count、
-可复用公共 prefix sum、cursor copy 与 atomic scatter。每个 bucket 内部次序无约束，
-只在计时外 canonicalize。独立入口为 `particle_spatial_hash_microbench.py`。
+16,384 个 cell，每 cell 4 粒子，随后执行相同的固定半径邻域查询；必须覆盖
+vanilla/kernel、Forge/kernel 和 Forge/native。两个 kernel control 证明相同的
+benchmark-owned source SHA 与 pipeline：key generation、clear/count、15 步共享
+Hillis-Steele scan 加最终 copy、cursor copy、atomic scatter 和 query。每 replay 使用
+两块 benchmark workspace field、执行 21 次 Taichi invocation，不假设物理 backend
+launch 数。Forge/native 在相同 key/query kernel 之间使用可复用 native bucket-builder
+workspace。每个 bucket 内部次序无约束，只在计时外 canonicalize。正确性和跨 runtime
+准入分别要求 keys、offsets、canonicalized bucket membership 与 neighbor counts 的
+exact SHA-256、sum、极值和样本。独立入口为
+`particle_spatial_hash_microbench.py`。
 
 `adaptive_pbd` 是 `THIN-006`。它以相同松弛系数、残差阈值、projection kernel、
 active 顺序和 device-resident count，对 65,536 个相互独立的二维距离约束最多求解
