@@ -4066,6 +4066,38 @@ def _timed_batch(ti: Any, launch: Callable[[], None], batch_size: int) -> float:
     return (time.perf_counter_ns() - started) / 1.0e6
 
 
+class _CudaProfilerRange:
+    """Opt-in scored-window marker for Nsight; never used by normal A/B runs."""
+
+    def __init__(self, enabled: bool) -> None:
+        self._enabled = enabled
+        self._driver: Any | None = None
+
+    def __enter__(self) -> None:
+        if not self._enabled:
+            return
+        if os.name != "nt":
+            raise RuntimeError(
+                "--cuda-profiler-range is currently implemented for Windows")
+        driver = ctypes.WinDLL("nvcuda.dll")
+        driver.cuProfilerStart.argtypes = []
+        driver.cuProfilerStart.restype = ctypes.c_int
+        driver.cuProfilerStop.argtypes = []
+        driver.cuProfilerStop.restype = ctypes.c_int
+        result = int(driver.cuProfilerStart())
+        if result != 0:
+            raise RuntimeError(f"cuProfilerStart failed with CUresult {result}")
+        self._driver = driver
+
+    def __exit__(self, exc_type: Any, exc_value: Any, exc_tb: Any) -> None:
+        if self._driver is None:
+            return
+        result = int(self._driver.cuProfilerStop())
+        self._driver = None
+        if result != 0 and exc_type is None:
+            raise RuntimeError(f"cuProfilerStop failed with CUresult {result}")
+
+
 def _calibrate_batch(ti: Any, launch: Callable[[], None], target_ms: float,
                      maximum: int = 16_384) -> tuple[int, list[dict[str, Any]]]:
     batch_size = 1
@@ -4178,6 +4210,7 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
             "stability_replays": args.stability_replays,
             "stability_checkpoint": args.stability_checkpoint,
             "cpu_threads": args.cpu_threads,
+            "cuda_profiler_range": args.cuda_profiler_range,
         },
         "process_id": os.getpid(),
         "affinity": affinity,
@@ -4333,10 +4366,11 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
             result["pilot_target_with_headroom_ms"] = (
                 args.target_sample_ms * PILOT_TIMING_HEADROOM)
         else:
-            raw_batch_ms = [
-                _timed_batch(ti, measured_launch, args.batch_size)
-                for _ in range(args.samples)
-            ]
+            with _CudaProfilerRange(args.cuda_profiler_range):
+                raw_batch_ms = [
+                    _timed_batch(ti, measured_launch, args.batch_size)
+                    for _ in range(args.samples)
+                ]
             samples = [value / args.batch_size for value in raw_batch_ms]
             summary = summarize_samples(samples)
             summary["logical_bandwidth_gbps"] = logical_bandwidth_gbps(
@@ -5422,6 +5456,8 @@ def _parser() -> argparse.ArgumentParser:
                         help=argparse.SUPPRESS)
     parser.add_argument("--batch-size", type=int, default=1,
                         help=argparse.SUPPRESS)
+    parser.add_argument("--cuda-profiler-range", action="store_true",
+                        help=argparse.SUPPRESS)
     parser.add_argument("--operation", choices=OPERATIONS, required=True)
     parser.add_argument("--comparison", choices=COMPARISONS,
                         default="forge-vs-vanilla")
@@ -5485,6 +5521,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise ValueError(f"{name} must be positive")
     if args.stability_replays < 0:
         raise ValueError("stability_replays must not be negative")
+    if args.cuda_profiler_range and (
+            not args.child or args.phase != "score" or args.backend != "cuda"
+            or args.samples != 1):
+        raise ValueError(
+            "--cuda-profiler-range requires one CUDA score sample in child mode")
     if args.child:
         if args.runtime is None or args.phase is None:
             raise ValueError("child mode requires --runtime and --phase")

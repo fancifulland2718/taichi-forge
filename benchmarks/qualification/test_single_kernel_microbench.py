@@ -19,6 +19,7 @@ from benchmarks.qualification.single_kernel_microbench import (
     balanced_pair_orders,
     comparison_definition,
     comparison_participants,
+    main,
     paired_log_summary,
     qualification_policy_errors,
     select_common_batch,
@@ -27,6 +28,16 @@ from benchmarks.qualification.runtime_common import normalize_gpu_uuid
 
 
 class SingleKernelMicrobenchTest(unittest.TestCase):
+
+    def test_profiler_range_rejects_normal_parent_or_non_cuda_run(self):
+        with self.assertRaisesRegex(
+                ValueError, "requires one CUDA score sample in child mode"):
+            main([
+                "--operation", "fill",
+                "--backend", "cpu",
+                "--preset", "small",
+                "--cuda-profiler-range",
+            ])
 
     @unittest.skipUnless(os.name == "nt", "Windows named mutex test")
     def test_exclusive_driver_lock_rejects_overlap(self):

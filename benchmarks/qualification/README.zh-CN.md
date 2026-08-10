@@ -226,6 +226,37 @@ DSL 与 kernel；每个计时 launch 创建一个 pointer+dense tree、激活 64
 - 只有编码的方法学、稳定性、波动、配对效果和双语 artifact 门槛全部通过，资格
   结果才可发布。`diagnostic` 运行无论数字如何都不能形成性能宣称。
 
+## Nsight 诊断合同
+
+wall-clock 资格测试与 profiler 诊断必须分开运行。Nsight 开销、replay duration 和
+profiler 内 API 时间绝不能用作可发布速度比。先用 Systems 识别 kernel/API 拓扑，再
+把 Compute 限定到选中的 CUDA kernel，读取 launch geometry、occupancy、memory
+hierarchy、instruction 和 stall 证据。Vulkan 只使用 Systems，不得套用 CUDA-only
+counter 解释。
+
+profiling child 必须使用 `--child --phase score --samples 1`，并显式启用
+`--cuda-profiler-range`。正常 parent A/B 永远不传该参数。marker 只在 scored batch
+外围调用 `cuProfilerStart/Stop`，因此 initialization、first call、warmup、correctness、
+stability 和 teardown 都不进入 capture。例如：
+
+```powershell
+$artifactPath = "temp_outputs\qualification\nsight\transform-forge-native"
+$forgePython = "temp_outputs\benchmark_envs\forge-wheel-isolated-py310\Scripts\python.exe"
+nsys profile --trace=cuda --capture-range=cudaProfilerApi `
+  --capture-range-end=stop --sample=none --cpuctxsw=none `
+  --output=$artifactPath $forgePython `
+  benchmarks\qualification\single_kernel_microbench.py `
+  --child --phase score --runtime forge --operation native_transform `
+  --backend cuda --preset small --samples 1 --latency-samples 1 `
+  --warmups 1 --batch-size 1 --stability-replays 0 `
+  --cpu-affinity none --cuda-profiler-range
+```
+
+Forge/native、Forge/kernel 和 vanilla/kernel 必须分进程串行 profile。保留
+`.nsys-rep`/`.ncu-rep`、工具版本、命令、wheel/core 身份、device UUID、kernel/API
+计数、grid/block/thread 形状及选定硬件 counter。只有 route/correctness 与 profiler
+拓扑共同支持时，才把时间信号归因到具体实现；否则继续记为 observation。
+
 ## 开发 smoke：一次只测一项
 
 先建立或选择两个完整隔离环境，然后运行一个最小 CPU 诊断：

@@ -273,6 +273,41 @@ not historical ID churn. Start with small through
   stability, variability, paired-effect, and bilingual-artifact gate passes.
   Diagnostic runs can never produce a performance claim.
 
+## Nsight diagnostic contract
+
+Wall-clock qualification and profiler diagnosis are separate runs. Nsight
+overhead, replay duration, and profiler-reported API time must never be used as
+a publishable speedup. Systems is used first to identify kernel/API topology;
+Compute is then restricted to a selected CUDA kernel for launch geometry,
+occupancy, memory hierarchy, instruction, and stall evidence. Vulkan uses
+Systems only and must not be interpreted through CUDA-only counters.
+
+A profiling child must use `--child --phase score --samples 1` and explicitly
+opt in with `--cuda-profiler-range`. Normal parent-driven A/B commands never set
+this flag. The marker calls `cuProfilerStart/Stop` only around the scored batch,
+so initialization, first call, warmup, correctness, stability, and teardown are
+outside the capture. For example:
+
+```powershell
+$artifactPath = "temp_outputs\qualification\nsight\transform-forge-native"
+$forgePython = "temp_outputs\benchmark_envs\forge-wheel-isolated-py310\Scripts\python.exe"
+nsys profile --trace=cuda --capture-range=cudaProfilerApi `
+  --capture-range-end=stop --sample=none --cpuctxsw=none `
+  --output=$artifactPath $forgePython `
+  benchmarks\qualification\single_kernel_microbench.py `
+  --child --phase score --runtime forge --operation native_transform `
+  --backend cuda --preset small --samples 1 --latency-samples 1 `
+  --warmups 1 --batch-size 1 --stability-replays 0 `
+  --cpu-affinity none --cuda-profiler-range
+```
+
+Profile Forge/native, Forge/kernel, and vanilla/kernel serially in separate
+processes. Retain the `.nsys-rep`/`.ncu-rep`, tool version, command, wheel/core
+identity, device UUID, kernel counts, CUDA API counts, grid/block/thread shape,
+and selected hardware counters. A time signal is attributed to an
+implementation cause only when route/correctness evidence and profiler topology
+agree; otherwise it remains an observation.
+
 ## Development smoke: one case only
 
 First create or select two complete isolated environments. Then run a minimal
