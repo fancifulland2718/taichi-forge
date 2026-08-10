@@ -984,10 +984,109 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
                         "replay_allocation_count": 0}
 
         self.assertTrue(_adaptive_pbd_route(
-            Worklist(), "forge", "cuda")["passed"])
+            Worklist(), "forge", "cuda", 32, 10, "a" * 64)["passed"])
         Plan.method_name = "kernel_fallback"
         self.assertFalse(_adaptive_pbd_route(
-            Worklist(), "forge", "cuda")["passed"])
+            Worklist(), "forge", "cuda", 32, 10, "a" * 64)["passed"])
+
+    def test_adaptive_pbd_kernel_route_is_strongly_admitted(self):
+        route = _adaptive_pbd_route(
+            None, "forge_kernel", "cuda", 65536, 10, "a" * 64)
+        self.assertTrue(route["passed"])
+        self.assertEqual(
+            route["adapter"], "benchmark_defined_ti_kernel_pipeline")
+        self.assertEqual(route["benchmark_workspace_field_count"], 6)
+        self.assertEqual(route["scan_pipelines_per_replay"], 10)
+        self.assertEqual(route["scan_steps_per_pipeline"], 16)
+        self.assertEqual(
+            route["final_scan_copy_kernel_invocations_per_pipeline"], 0)
+        self.assertEqual(route["non_scan_ti_kernel_invocations_per_replay"], 42)
+        self.assertEqual(route["ti_kernel_invocations_per_replay"], 202)
+        self.assertFalse(_adaptive_pbd_route(
+            None, "vanilla_kernel", "cuda", 65536, 10, None)["passed"])
+
+    def test_adaptive_pbd_endpoint_requires_full_vectors(self):
+        def observed(sha256):
+            return {
+                "count": 4,
+                "dtype": "float32",
+                "sha256": sha256,
+                "sum": 6.0,
+                "minimum": 0.0,
+                "maximum": 3.0,
+                "sample_indices": [0, 1, 2, 3],
+                "samples": [0.0, 1.0, 2.0, 3.0],
+            }
+
+        def exact(sha256):
+            return {
+                "count": 4,
+                "expected_count": 4,
+                "actual_sha256": sha256,
+                "expected_sha256": sha256,
+                "actual_sum": 6,
+                "expected_sum": 6,
+                "actual_minimum": 0,
+                "expected_minimum": 0,
+                "actual_maximum": 3,
+                "expected_maximum": 3,
+                "sample_indices": [0, 1, 2, 3],
+                "expected_sample_indices": [0, 1, 2, 3],
+                "actual_samples": [0, 1, 2, 3],
+                "expected_samples": [0, 1, 2, 3],
+                "mismatch_count": 0,
+                "first_mismatch": None,
+            }
+
+        positions_sha = "a" * 64
+        residuals_sha = "b" * 64
+        history_sha = "c" * 64
+        active_sha = "d" * 64
+        validation = {
+            "passed": True,
+            "comparison": (
+                "analytic_full_state_and_exact_cross_route_adaptive_pbd"),
+            "max_left_position_error": 1.0e-7,
+            "max_right_position_error": 2.0e-7,
+            "max_residual_error": 2.0e-7,
+            "max_y_error": 0.0,
+            "history_mismatch_count": 0,
+            "active_id_mismatch_count": 0,
+            "active_id_first_mismatch": None,
+            "actual_active_extent": 4,
+            "expected_active_extent": 4,
+            "endpoint_fingerprint": {
+                "finite": True,
+                "positions_sha256": positions_sha,
+                "residuals_sha256": residuals_sha,
+                "active_history_sha256": history_sha,
+                "final_active_ids_sha256": active_sha,
+            },
+            "endpoint_vectors": {
+                "positions_f32": observed(positions_sha),
+                "residuals_f32": observed(residuals_sha),
+                "active_history_i32": exact(history_sha),
+                "final_active_ids_i32": exact(active_sha),
+            },
+        }
+        results = {
+            name: {
+                "operation": "adaptive_pbd",
+                "validation_before": json.loads(json.dumps(validation)),
+                "validation_after": json.loads(json.dumps(validation)),
+            }
+            for name in ("forge", "forge_kernel")
+        }
+        self.assertTrue(_endpoint_equivalent(
+            results, "forge", "forge_kernel"))
+        self.assertTrue(_audit_endpoint_equivalent(
+            results["forge"], results["forge_kernel"]))
+        results["forge_kernel"]["validation_after"]["endpoint_vectors"][
+            "positions_f32"]["sha256"] = "e" * 64
+        self.assertFalse(_endpoint_equivalent(
+            results, "forge", "forge_kernel"))
+        self.assertFalse(_audit_endpoint_equivalent(
+            results["forge"], results["forge_kernel"]))
 
     def test_bfs_route_rejects_overflow(self):
         class Stats:

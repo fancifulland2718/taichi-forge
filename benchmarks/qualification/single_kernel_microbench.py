@@ -3852,8 +3852,10 @@ def _build_particle_spatial_hash_case(ti: Any, runtime_name: str,
     }
 
 
-def _adaptive_pbd_route(worklist: Any | None, runtime_name: str,
-                        backend: str) -> dict[str, Any]:
+def _adaptive_pbd_route(
+        worklist: Any | None, runtime_name: str, backend: str,
+        constraints: int, iterations: int,
+        kernel_source_sha256: str | None = None) -> dict[str, Any]:
     if runtime_name == "forge":
         workspace = getattr(worklist, "workspace", None)
         compact_workspace = getattr(workspace, "_compact", None)
@@ -3862,14 +3864,80 @@ def _adaptive_pbd_route(worklist: Any | None, runtime_name: str,
         memory = worklist.memory_report()
         return {
             "classification": "forge_device_worklist_adaptive_pbd",
+            "public_api": "DeviceWorklist.select(flags, method=auto)",
+            "adapter": "forge_native_device_worklist_pipeline",
+            "kernel_source_owner": "benchmark",
+            "kernel_source_sha256": kernel_source_sha256,
             "compact_route": compact_route,
             "capacity": worklist.capacity,
+            "constraints": constraints,
+            "iterations": iterations,
             "memory_report": memory,
             "replay_allocation_count": memory["replay_allocation_count"],
             "passed": bool(
                 compact_route["passed"]
+                and worklist.capacity == constraints
+                and iterations == 10
+                and isinstance(kernel_source_sha256, str)
+                and len(kernel_source_sha256) == 64
                 and memory["fixed_capacity"]
                 and memory["replay_allocation_count"] == 0
+            ),
+        }
+    if runtime_name in ("forge_kernel", "vanilla_kernel"):
+        scan_steps = (constraints - 1).bit_length()
+        final_scan_copy_invocations = scan_steps % 2
+        scan_pipelines_per_replay = iterations
+        non_scan_kernel_invocations = 2 + 4 * iterations
+        kernel_invocations = (
+            non_scan_kernel_invocations
+            + scan_pipelines_per_replay
+            * (scan_steps + final_scan_copy_invocations)
+        )
+        return {
+            "classification": (
+                f"{runtime_name}_equivalent_adaptive_pbd_kernel_pipeline"
+            ),
+            "adapter": "benchmark_defined_ti_kernel_pipeline",
+            "kernel_source_owner": "benchmark",
+            "kernel_source_sha256": kernel_source_sha256,
+            "helper_api_used": False,
+            "specialized_api_used": False,
+            "benchmark_workspace_kind": (
+                "two_active_id_i32_ndarrays_two_extent_i32_ndarrays_"
+                "one_prefix_i32_dense_field_and_one_scan_scratch_i32_dense_field"
+            ),
+            "benchmark_workspace_field_count": 6,
+            "scan_algorithm": "inclusive_hillis_steele_ping_pong",
+            "scan_elements": constraints,
+            "scan_pipelines_per_replay": scan_pipelines_per_replay,
+            "scan_steps_per_pipeline": scan_steps,
+            "final_scan_copy_kernel_invocations_per_pipeline": (
+                final_scan_copy_invocations),
+            "non_scan_ti_kernel_invocations_per_replay": (
+                non_scan_kernel_invocations),
+            "stage_kernel_names": [
+                "initialize_problem", "initialize_extents", "project_active",
+                "stage_flags", "scan_ping_pong", "stable_scatter",
+                "record_extent",
+            ],
+            "ti_kernel_invocations_per_replay": kernel_invocations,
+            "physical_backend_launches_assumed": False,
+            "expected_backend": backend,
+            "observed_backend": backend,
+            "observed_method": (
+                "benchmark-owned initialization, projection, flag staging, "
+                "shared Hillis-Steele i32 scan, stable scatter, and extent "
+                "record kernels"
+            ),
+            "constraints": constraints,
+            "iterations": iterations,
+            "passed": bool(
+                worklist is None
+                and constraints > 0
+                and iterations == 10
+                and isinstance(kernel_source_sha256, str)
+                and len(kernel_source_sha256) == 64
             ),
         }
     return {
@@ -3881,6 +3949,57 @@ def _adaptive_pbd_route(worklist: Any | None, runtime_name: str,
         ),
         "passed": True,
     }
+
+
+def _adaptive_pbd_kernel_control_route_isolated(
+        child: dict[str, Any]) -> bool:
+    if (child.get("operation") != "adaptive_pbd"
+            or child.get("runtime") not in (
+                "forge_kernel", "vanilla_kernel")):
+        return True
+    route = child.get("route", {})
+    contract = child.get("workload_contract", {})
+    return bool(
+        route.get("passed") is True
+        and route.get("classification")
+        == f"{child['runtime']}_equivalent_adaptive_pbd_kernel_pipeline"
+        and route.get("adapter") == "benchmark_defined_ti_kernel_pipeline"
+        and "native" not in json.dumps(route, sort_keys=True).lower()
+        and route.get("kernel_source_owner") == "benchmark"
+        and route.get("kernel_source_sha256")
+        == contract.get("kernel_source_sha256")
+        and route.get("helper_api_used") is False
+        and route.get("specialized_api_used") is False
+        and route.get("benchmark_workspace_kind")
+        == contract.get("kernel_benchmark_workspace_kind")
+        and route.get("benchmark_workspace_field_count") == 6
+        and route.get("benchmark_workspace_field_count")
+        == contract.get("kernel_benchmark_workspace_field_count")
+        and route.get("scan_algorithm")
+        == "inclusive_hillis_steele_ping_pong"
+        and route.get("scan_algorithm")
+        == contract.get("kernel_scan_algorithm")
+        and route.get("scan_elements")
+        == contract.get("kernel_scan_elements")
+        and route.get("scan_pipelines_per_replay")
+        == contract.get("kernel_scan_pipelines_per_replay")
+        and route.get("scan_steps_per_pipeline")
+        == contract.get("kernel_scan_steps_per_pipeline")
+        and route.get("final_scan_copy_kernel_invocations_per_pipeline")
+        == contract.get(
+            "kernel_final_scan_copy_kernel_invocations_per_pipeline")
+        and route.get("non_scan_ti_kernel_invocations_per_replay")
+        == contract.get("kernel_non_scan_ti_invocations_per_replay")
+        and route.get("stage_kernel_names")
+        == contract.get("kernel_stage_names")
+        and route.get("ti_kernel_invocations_per_replay")
+        == contract.get("kernel_ti_invocations_per_replay")
+        and route.get("physical_backend_launches_assumed") is False
+        and route.get("expected_backend") == child.get("backend")
+        and route.get("observed_backend") == child.get("backend")
+        and route.get("constraints") == contract.get("constraints")
+        and route.get("iterations") == contract.get("iterations")
+    )
 
 
 def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
@@ -3910,6 +4029,18 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
             expected_residual > tolerance)))
     expected_left_x = (host_stretch - expected_residual) * np.float32(0.5)
     expected_right_x = rest_length + host_stretch - expected_left_x
+    expected_active_ids = np.flatnonzero(
+        expected_residual > tolerance).astype(np.int32)
+    source_sha256 = sha256_file(Path(__file__))
+    scan_steps = (constraints - 1).bit_length()
+    final_scan_copy_invocations = scan_steps % 2
+    scan_pipelines_per_replay = iterations
+    non_scan_kernel_invocations = 2 + 4 * iterations
+    kernel_invocations = (
+        non_scan_kernel_invocations
+        + scan_pipelines_per_replay
+        * (scan_steps + final_scan_copy_invocations)
+    )
 
     positions = ti.Vector.ndarray(2, ti.f32, shape=particles)
     stretch = ti.ndarray(ti.f32, shape=constraints)
@@ -3958,9 +4089,11 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
             history[iteration] = 0
 
     @ti.kernel
-    def initialize_vanilla_extent(
-            extent: ti.types.ndarray(dtype=ti.i32, ndim=1)):
-        extent[0] = constraints
+    def initialize_vanilla_extents(
+            front_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            back_extent: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        front_extent[0] = constraints
+        back_extent[0] = 0
 
     @ti.kernel
     def project_active(
@@ -4028,8 +4161,8 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
         else:
             initialize_problem(
                 positions, stretch, vanilla_values[0], active_history)
-            initialize_vanilla_extent(vanilla_extents[0])
-            vanilla_extents[1].fill(0)
+            initialize_vanilla_extents(
+                vanilla_extents[0], vanilla_extents[1])
             front = 0
             for iteration in range(iterations):
                 back = 1 - front
@@ -4075,21 +4208,102 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
         left_error = float(np.max(np.abs(actual_left - expected_left_x)))
         right_error = float(np.max(np.abs(actual_right - expected_right_x)))
         actual_residual = actual_right - actual_left - rest_length
+        if runtime_name == "forge":
+            actual_active_extent = int(worklist.extent.state.to_numpy()[0])
+            actual_active_ids = worklist.values.to_numpy()[
+                :actual_active_extent]
+        else:
+            final_buffer = iterations % 2
+            actual_active_extent = int(
+                vanilla_extents[final_buffer].to_numpy()[0])
+            actual_active_ids = vanilla_values[final_buffer].to_numpy()[
+                :actual_active_extent]
         residual_error = float(np.max(np.abs(
             actual_residual - expected_residual)))
         history_mismatches = int(np.count_nonzero(
             actual_history != np.asarray(expected_history, dtype=np.int32)))
         monotonic = bool(np.all(actual_history[1:] <= actual_history[:-1]))
+        if actual_active_ids.size == expected_active_ids.size:
+            active_id_mismatches = np.flatnonzero(
+                actual_active_ids != expected_active_ids)
+            active_id_mismatch_count = int(active_id_mismatches.size)
+            active_id_first_mismatch = (
+                None if active_id_mismatches.size == 0
+                else int(active_id_mismatches[0]))
+        else:
+            active_id_mismatch_count = max(
+                int(actual_active_ids.size), int(expected_active_ids.size))
+            active_id_first_mismatch = 0
+
+        def observed_vector(actual: Any, dtype: Any) -> dict[str, Any]:
+            vector = np.ascontiguousarray(actual, dtype=dtype).reshape(-1)
+            count = int(vector.size)
+            sample_indices = sorted(set((
+                0, count // 4, count // 2, (3 * count) // 4, count - 1)))
+            return {
+                "count": count,
+                "dtype": str(vector.dtype),
+                "sha256": hashlib.sha256(vector.tobytes()).hexdigest(),
+                "sum": float(vector.astype(np.float64).sum()),
+                "minimum": float(vector.min()),
+                "maximum": float(vector.max()),
+                "sample_indices": sample_indices,
+                "samples": [
+                    float(vector[index]) for index in sample_indices],
+            }
+
+        def exact_i32_vector(actual: Any, expected: Any) -> dict[str, Any]:
+            actual_i32 = np.ascontiguousarray(actual, dtype=np.int32).reshape(-1)
+            expected_i32 = np.ascontiguousarray(
+                expected, dtype=np.int32).reshape(-1)
+            if actual_i32.size == expected_i32.size:
+                mismatch = np.flatnonzero(actual_i32 != expected_i32)
+                mismatch_count = int(mismatch.size)
+                first_mismatch = (
+                    None if mismatch.size == 0 else int(mismatch[0]))
+            else:
+                mismatch_count = max(
+                    int(actual_i32.size), int(expected_i32.size))
+                first_mismatch = 0
+            actual_evidence = observed_vector(actual_i32, np.int32)
+            expected_evidence = observed_vector(expected_i32, np.int32)
+            return {
+                "count": actual_evidence["count"],
+                "expected_count": expected_evidence["count"],
+                "actual_sha256": actual_evidence["sha256"],
+                "expected_sha256": expected_evidence["sha256"],
+                "actual_sum": int(actual_i32.astype(np.int64).sum()),
+                "expected_sum": int(expected_i32.astype(np.int64).sum()),
+                "actual_minimum": int(actual_i32.min()),
+                "expected_minimum": int(expected_i32.min()),
+                "actual_maximum": int(actual_i32.max()),
+                "expected_maximum": int(expected_i32.max()),
+                "sample_indices": actual_evidence["sample_indices"],
+                "actual_samples": [
+                    int(value) for value in actual_evidence["samples"]],
+                "expected_sample_indices": expected_evidence["sample_indices"],
+                "expected_samples": [
+                    int(value) for value in expected_evidence["samples"]],
+                "mismatch_count": mismatch_count,
+                "first_mismatch": first_mismatch,
+            }
+
+        endpoint_vectors = {
+            "positions_f32": observed_vector(actual_positions, np.float32),
+            "residuals_f32": observed_vector(actual_residual, np.float32),
+            "active_history_i32": exact_i32_vector(
+                actual_history, np.asarray(expected_history, dtype=np.int32)),
+            "final_active_ids_i32": exact_i32_vector(
+                actual_active_ids, expected_active_ids),
+        }
         fingerprint = {
             "finite": bool(np.all(np.isfinite(actual_positions))),
-            "position_sum": [
-                float(actual_positions[:, 0].astype(np.float64).sum()),
-                float(actual_positions[:, 1].astype(np.float64).sum()),
-            ],
-            "residual_max": float(np.max(np.abs(actual_residual))),
-            "active_history": actual_history.astype(np.int64).tolist(),
-            "sample_positions": actual_positions[:8].astype(
-                np.float64).reshape(-1).tolist(),
+            "positions_sha256": endpoint_vectors["positions_f32"]["sha256"],
+            "residuals_sha256": endpoint_vectors["residuals_f32"]["sha256"],
+            "active_history_sha256": endpoint_vectors[
+                "active_history_i32"]["actual_sha256"],
+            "final_active_ids_sha256": endpoint_vectors[
+                "final_active_ids_i32"]["actual_sha256"],
         }
         return {
             "passed": bool(
@@ -4100,8 +4314,22 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
                 and actual_y_error == 0.0
                 and history_mismatches == 0
                 and monotonic
+                and actual_active_extent == int(expected_active_ids.size)
+                and active_id_mismatch_count == 0
+                and all(
+                    vector["count"] == vector["expected_count"]
+                    and vector["actual_sha256"] == vector["expected_sha256"]
+                    and vector["mismatch_count"] == 0
+                    and vector["first_mismatch"] is None
+                    for vector in (
+                        endpoint_vectors["active_history_i32"],
+                        endpoint_vectors["final_active_ids_i32"],
+                    )
+                )
             ),
-            "comparison": "analytic_independent_distance_constraint_solution",
+            "comparison": (
+                "analytic_full_state_and_exact_cross_route_adaptive_pbd"
+            ),
             "max_left_position_error": left_error,
             "max_right_position_error": right_error,
             "max_residual_error": residual_error,
@@ -4110,7 +4338,12 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
             "expected_active_history": expected_history,
             "history_mismatch_count": history_mismatches,
             "active_history_monotonic": monotonic,
+            "actual_active_extent": actual_active_extent,
+            "expected_active_extent": int(expected_active_ids.size),
+            "active_id_mismatch_count": active_id_mismatch_count,
+            "active_id_first_mismatch": active_id_first_mismatch,
             "endpoint_fingerprint": fingerprint,
+            "endpoint_vectors": endpoint_vectors,
         }
 
     return {
@@ -4118,7 +4351,8 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
         "reset": reset,
         "validate": validate_fresh,
         "route": lambda: _adaptive_pbd_route(
-            worklist, runtime_name, backend),
+            worklist, runtime_name, backend, constraints, iterations,
+            source_sha256),
         "logical_bytes": 0,
         "traffic_model": (
             "fixed-iteration adaptive PBD solve with device-resident active "
@@ -4131,6 +4365,7 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
             "relaxation": float(relaxation),
             "tolerance": float(tolerance),
             "expected_active_history": expected_history,
+            "expected_final_active_count": int(expected_active_ids.size),
         },
         "workload_contract": {
             "case_id": "THIN-006",
@@ -4143,6 +4378,31 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
             "iterations": iterations,
             "relaxation": float(relaxation),
             "tolerance": float(tolerance),
+            "kernel_source_owner": "benchmark",
+            "kernel_source_sha256": source_sha256,
+            "kernel_adapter": "benchmark_defined_ti_kernel_pipeline",
+            "kernel_helper_api_used": False,
+            "kernel_specialized_api_used": False,
+            "kernel_benchmark_workspace_kind": (
+                "two_active_id_i32_ndarrays_two_extent_i32_ndarrays_"
+                "one_prefix_i32_dense_field_and_one_scan_scratch_i32_dense_field"
+            ),
+            "kernel_benchmark_workspace_field_count": 6,
+            "kernel_scan_algorithm": "inclusive_hillis_steele_ping_pong",
+            "kernel_scan_elements": constraints,
+            "kernel_scan_pipelines_per_replay": scan_pipelines_per_replay,
+            "kernel_scan_steps_per_pipeline": scan_steps,
+            "kernel_final_scan_copy_kernel_invocations_per_pipeline": (
+                final_scan_copy_invocations),
+            "kernel_non_scan_ti_invocations_per_replay": (
+                non_scan_kernel_invocations),
+            "kernel_stage_names": [
+                "initialize_problem", "initialize_extents", "project_active",
+                "stage_flags", "scan_ping_pong", "stable_scatter",
+                "record_extent",
+            ],
+            "kernel_ti_invocations_per_replay": kernel_invocations,
+            "kernel_physical_backend_launches_assumed": False,
             "forge_adapter": (
                 "fixed-capacity DeviceWorklist stable select with device extent"
             ),
@@ -4160,8 +4420,9 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
                 "capacity and keep counts device resident during timing"
             ),
             "correctness": (
-                "analytic final positions/residuals, exact active-count history, "
-                "finite state, and cross-runtime endpoint fingerprint"
+                "analytic full-state final positions/residuals, exact active-count "
+                "history, exact final active IDs/order, finite state, and full-vector "
+                "cross-runtime SHA-256 evidence"
             ),
             "timing": (
                 "frozen repeated complete reset-plus-ten-iteration solves plus "
@@ -5735,26 +5996,112 @@ def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
                         return False
         return True
     if left_result["operation"] == "adaptive_pbd":
+        observed_names = ("positions_f32", "residuals_f32")
+        exact_names = ("active_history_i32", "final_active_ids_i32")
+        observed_keys = (
+            "count", "dtype", "sha256", "sum", "minimum", "maximum",
+            "sample_indices", "samples",
+        )
+        exact_keys = (
+            "count", "expected_count", "actual_sha256", "expected_sha256",
+            "actual_sum", "expected_sum", "actual_minimum",
+            "expected_minimum", "actual_maximum", "expected_maximum",
+            "sample_indices", "expected_sample_indices", "actual_samples",
+            "expected_samples", "mismatch_count", "first_mismatch",
+        )
         for validation_name in ("validation_before", "validation_after"):
-            left = left_result[validation_name]["endpoint_fingerprint"]
-            right = right_result[validation_name]["endpoint_fingerprint"]
-            if not left.get("finite") or not right.get("finite"):
-                return False
-            if left["active_history"] != right["active_history"]:
-                return False
-            for key in ("position_sum", "sample_positions"):
-                if len(left[key]) != len(right[key]):
+            left = left_result[validation_name]
+            right = right_result[validation_name]
+            for value in (left, right):
+                if (not value.get("passed")
+                        or value.get("comparison") !=
+                        "analytic_full_state_and_exact_cross_route_adaptive_pbd"
+                        or set(value.get("endpoint_vectors", {})) !=
+                        set((*observed_names, *exact_names))
+                        or not value.get("endpoint_fingerprint", {}).get(
+                            "finite")
+                        or float(value.get("max_left_position_error", math.inf))
+                        > 2.0e-5
+                        or float(value.get("max_right_position_error", math.inf))
+                        > 2.0e-5
+                        or float(value.get("max_residual_error", math.inf))
+                        > 3.0e-5
+                        or float(value.get("max_y_error", math.inf)) != 0.0
+                        or value.get("history_mismatch_count") != 0
+                        or value.get("active_id_mismatch_count") != 0
+                        or value.get("active_id_first_mismatch") is not None
+                        or value.get("actual_active_extent") !=
+                        value.get("expected_active_extent")):
                     return False
-                if any(
-                        not math.isclose(float(a), float(b), rel_tol=5.0e-5,
-                                         abs_tol=5.0e-5)
-                        for a, b in zip(left[key], right[key])):
+                for vector_name in observed_names:
+                    vector = value["endpoint_vectors"][vector_name]
+                    if (not isinstance(vector.get("count"), int)
+                            or vector["count"] <= 0
+                            or vector.get("dtype") != "float32"
+                            or not isinstance(vector.get("sha256"), str)
+                            or len(vector["sha256"]) != 64
+                            or not all(math.isfinite(float(vector.get(key)))
+                                       for key in (
+                                           "sum", "minimum", "maximum"))
+                            or len(vector.get("sample_indices", [])) !=
+                            len(vector.get("samples", []))):
+                        return False
+                for vector_name in exact_names:
+                    vector = value["endpoint_vectors"][vector_name]
+                    if (not isinstance(vector.get("count"), int)
+                            or vector["count"] <= 0
+                            or vector["count"] != vector.get("expected_count")
+                            or not isinstance(
+                                vector.get("actual_sha256"), str)
+                            or len(vector["actual_sha256"]) != 64
+                            or vector["actual_sha256"] != vector.get(
+                                "expected_sha256")
+                            or vector.get("mismatch_count") != 0
+                            or vector.get("first_mismatch") is not None):
+                        return False
+                    for suffix in (
+                            "sum", "minimum", "maximum", "samples"):
+                        if vector.get(f"actual_{suffix}") != vector.get(
+                                f"expected_{suffix}"):
+                            return False
+                    if (vector.get("sample_indices") !=
+                            vector.get("expected_sample_indices")
+                            or len(vector.get("sample_indices", [])) != len(
+                                vector.get("actual_samples", []))):
+                        return False
+                fingerprint = value["endpoint_fingerprint"]
+                if (fingerprint.get("positions_sha256") !=
+                        value["endpoint_vectors"]["positions_f32"]["sha256"]
+                        or fingerprint.get("residuals_sha256") !=
+                        value["endpoint_vectors"]["residuals_f32"]["sha256"]
+                        or fingerprint.get("active_history_sha256") !=
+                        value["endpoint_vectors"]["active_history_i32"][
+                            "actual_sha256"]
+                        or fingerprint.get("final_active_ids_sha256") !=
+                        value["endpoint_vectors"]["final_active_ids_i32"][
+                            "actual_sha256"]):
                     return False
-            if not math.isclose(
-                    float(left["residual_max"]),
-                    float(right["residual_max"]),
-                    rel_tol=5.0e-5, abs_tol=5.0e-5):
-                return False
+            for vector_name in observed_names:
+                for key in observed_keys:
+                    if (left["endpoint_vectors"][vector_name].get(key) !=
+                            right["endpoint_vectors"][vector_name].get(key)):
+                        return False
+            for vector_name in exact_names:
+                for key in exact_keys:
+                    if (left["endpoint_vectors"][vector_name].get(key) !=
+                            right["endpoint_vectors"][vector_name].get(key)):
+                        return False
+        for result in (left_result, right_result):
+            before = result["validation_before"]["endpoint_vectors"]
+            after = result["validation_after"]["endpoint_vectors"]
+            for vector_name in observed_names:
+                if any(before[vector_name].get(key) !=
+                       after[vector_name].get(key) for key in observed_keys):
+                    return False
+            for vector_name in exact_names:
+                if any(before[vector_name].get(key) !=
+                       after[vector_name].get(key) for key in exact_keys):
+                    return False
         return True
     if left_result["operation"] == "bfs_worklist":
         for validation_name in ("validation_before", "validation_after"):
@@ -6591,6 +6938,9 @@ def _parent_main(args: argparse.Namespace) -> int:
                 )
             ) if child["runtime"] in ("forge_kernel", "vanilla_kernel")
             else True
+            for child in children),
+        "adaptive_pbd_kernel_control_route_isolated": all(
+            _adaptive_pbd_kernel_control_route_isolated(child)
             for child in children),
         "ordinary_control_route_isolated": all(
             child["route"].get("classification")

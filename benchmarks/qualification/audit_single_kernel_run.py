@@ -327,24 +327,112 @@ def _endpoint_equivalent(left_result: dict[str, Any],
                         return False
         return True
     if left_result["operation"] == "adaptive_pbd":
+        observed_names = ("positions_f32", "residuals_f32")
+        exact_names = ("active_history_i32", "final_active_ids_i32")
+        observed_keys = (
+            "count", "dtype", "sha256", "sum", "minimum", "maximum",
+            "sample_indices", "samples",
+        )
+        exact_keys = (
+            "count", "expected_count", "actual_sha256", "expected_sha256",
+            "actual_sum", "expected_sum", "actual_minimum",
+            "expected_minimum", "actual_maximum", "expected_maximum",
+            "sample_indices", "expected_sample_indices", "actual_samples",
+            "expected_samples", "mismatch_count", "first_mismatch",
+        )
         for validation_name in ("validation_before", "validation_after"):
-            left = left_result[validation_name]["endpoint_fingerprint"]
-            right = right_result[validation_name]["endpoint_fingerprint"]
-            if not left.get("finite") or not right.get("finite"):
-                return False
-            if left["active_history"] != right["active_history"]:
-                return False
-            for key in ("position_sum", "sample_positions"):
-                if len(left[key]) != len(right[key]):
+            left = left_result[validation_name]
+            right = right_result[validation_name]
+            for value in (left, right):
+                if (not value.get("passed")
+                        or value.get("comparison") !=
+                        "analytic_full_state_and_exact_cross_route_adaptive_pbd"
+                        or set(value.get("endpoint_vectors", {})) !=
+                        set((*observed_names, *exact_names))
+                        or not value.get("endpoint_fingerprint", {}).get(
+                            "finite")
+                        or float(value.get("max_left_position_error", math.inf))
+                        > 2.0e-5
+                        or float(value.get("max_right_position_error", math.inf))
+                        > 2.0e-5
+                        or float(value.get("max_residual_error", math.inf))
+                        > 3.0e-5
+                        or float(value.get("max_y_error", math.inf)) != 0.0
+                        or value.get("history_mismatch_count") != 0
+                        or value.get("active_id_mismatch_count") != 0
+                        or value.get("active_id_first_mismatch") is not None
+                        or value.get("actual_active_extent") !=
+                        value.get("expected_active_extent")):
                     return False
-                if any(not math.isclose(float(a), float(b), rel_tol=5.0e-5,
-                                        abs_tol=5.0e-5)
-                       for a, b in zip(left[key], right[key])):
+                for vector_name in observed_names:
+                    vector = value["endpoint_vectors"][vector_name]
+                    if (not isinstance(vector.get("count"), int)
+                            or vector["count"] <= 0
+                            or vector.get("dtype") != "float32"
+                            or not isinstance(vector.get("sha256"), str)
+                            or len(vector["sha256"]) != 64
+                            or not all(math.isfinite(float(vector.get(key)))
+                                       for key in (
+                                           "sum", "minimum", "maximum"))
+                            or len(vector.get("sample_indices", [])) !=
+                            len(vector.get("samples", []))):
+                        return False
+                for vector_name in exact_names:
+                    vector = value["endpoint_vectors"][vector_name]
+                    if (not isinstance(vector.get("count"), int)
+                            or vector["count"] <= 0
+                            or vector["count"] != vector.get("expected_count")
+                            or not isinstance(
+                                vector.get("actual_sha256"), str)
+                            or len(vector["actual_sha256"]) != 64
+                            or vector["actual_sha256"] != vector.get(
+                                "expected_sha256")
+                            or vector.get("mismatch_count") != 0
+                            or vector.get("first_mismatch") is not None):
+                        return False
+                    for suffix in (
+                            "sum", "minimum", "maximum", "samples"):
+                        if vector.get(f"actual_{suffix}") != vector.get(
+                                f"expected_{suffix}"):
+                            return False
+                    if (vector.get("sample_indices") !=
+                            vector.get("expected_sample_indices")
+                            or len(vector.get("sample_indices", [])) != len(
+                                vector.get("actual_samples", []))):
+                        return False
+                fingerprint = value["endpoint_fingerprint"]
+                if (fingerprint.get("positions_sha256") !=
+                        value["endpoint_vectors"]["positions_f32"]["sha256"]
+                        or fingerprint.get("residuals_sha256") !=
+                        value["endpoint_vectors"]["residuals_f32"]["sha256"]
+                        or fingerprint.get("active_history_sha256") !=
+                        value["endpoint_vectors"]["active_history_i32"][
+                            "actual_sha256"]
+                        or fingerprint.get("final_active_ids_sha256") !=
+                        value["endpoint_vectors"]["final_active_ids_i32"][
+                            "actual_sha256"]):
                     return False
-            if not math.isclose(float(left["residual_max"]),
-                                float(right["residual_max"]),
-                                rel_tol=5.0e-5, abs_tol=5.0e-5):
-                return False
+            for vector_name in observed_names:
+                for key in observed_keys:
+                    if (left["endpoint_vectors"][vector_name].get(key) !=
+                            right["endpoint_vectors"][vector_name].get(key)):
+                        return False
+            for vector_name in exact_names:
+                for key in exact_keys:
+                    if (left["endpoint_vectors"][vector_name].get(key) !=
+                            right["endpoint_vectors"][vector_name].get(key)):
+                        return False
+        for result in (left_result, right_result):
+            before = result["validation_before"]["endpoint_vectors"]
+            after = result["validation_after"]["endpoint_vectors"]
+            for vector_name in observed_names:
+                if any(before[vector_name].get(key) !=
+                       after[vector_name].get(key) for key in observed_keys):
+                    return False
+            for vector_name in exact_names:
+                if any(before[vector_name].get(key) !=
+                       after[vector_name].get(key) for key in exact_keys):
+                    return False
         return True
     if left_result["operation"] == "bfs_worklist":
         return all(
@@ -392,6 +480,57 @@ def _endpoint_equivalent(left_result: dict[str, Any],
                 or float(left["image_max"]) != float(right["image_max"])):
             return False
     return True
+
+
+def _adaptive_pbd_kernel_control_route_isolated(
+        child: dict[str, Any]) -> bool:
+    if (child.get("operation") != "adaptive_pbd"
+            or child.get("runtime") not in (
+                "forge_kernel", "vanilla_kernel")):
+        return True
+    route = child.get("route", {})
+    contract = child.get("workload_contract", {})
+    return bool(
+        route.get("passed") is True
+        and route.get("classification")
+        == f"{child['runtime']}_equivalent_adaptive_pbd_kernel_pipeline"
+        and route.get("adapter") == "benchmark_defined_ti_kernel_pipeline"
+        and "native" not in json.dumps(route, sort_keys=True).lower()
+        and route.get("kernel_source_owner") == "benchmark"
+        and route.get("kernel_source_sha256")
+        == contract.get("kernel_source_sha256")
+        and route.get("helper_api_used") is False
+        and route.get("specialized_api_used") is False
+        and route.get("benchmark_workspace_kind")
+        == contract.get("kernel_benchmark_workspace_kind")
+        and route.get("benchmark_workspace_field_count") == 6
+        and route.get("benchmark_workspace_field_count")
+        == contract.get("kernel_benchmark_workspace_field_count")
+        and route.get("scan_algorithm")
+        == "inclusive_hillis_steele_ping_pong"
+        and route.get("scan_algorithm")
+        == contract.get("kernel_scan_algorithm")
+        and route.get("scan_elements")
+        == contract.get("kernel_scan_elements")
+        and route.get("scan_pipelines_per_replay")
+        == contract.get("kernel_scan_pipelines_per_replay")
+        and route.get("scan_steps_per_pipeline")
+        == contract.get("kernel_scan_steps_per_pipeline")
+        and route.get("final_scan_copy_kernel_invocations_per_pipeline")
+        == contract.get(
+            "kernel_final_scan_copy_kernel_invocations_per_pipeline")
+        and route.get("non_scan_ti_kernel_invocations_per_replay")
+        == contract.get("kernel_non_scan_ti_invocations_per_replay")
+        and route.get("stage_kernel_names")
+        == contract.get("kernel_stage_names")
+        and route.get("ti_kernel_invocations_per_replay")
+        == contract.get("kernel_ti_invocations_per_replay")
+        and route.get("physical_backend_launches_assumed") is False
+        and route.get("expected_backend") == child.get("backend")
+        and route.get("observed_backend") == child.get("backend")
+        and route.get("constraints") == contract.get("constraints")
+        and route.get("iterations") == contract.get("iterations")
+    )
 
 
 def _audit_failed_run(run_dir: Path,
@@ -899,6 +1038,9 @@ def _audit(run_dir: Path) -> dict[str, Any]:
             )
         ) if child["runtime"] in ("forge_kernel", "vanilla_kernel") else True
         for child in children)
+    adaptive_pbd_kernel_control_route_isolated = all(
+        _adaptive_pbd_kernel_control_route_isolated(child)
+        for child in children)
     ordinary_control_route_isolated = all(
         child["route"].get("classification")
         == f"{child['runtime']}_ordinary_taichi_kernel"
@@ -981,6 +1123,13 @@ def _audit(run_dir: Path) -> dict[str, Any]:
                     summary["method_checks"]["kernel_control_route_isolated"] is
                     kernel_control_route_isolated,
                     "kernel control route method check", failures)
+            if ("adaptive_pbd_kernel_control_route_isolated"
+                    in summary["method_checks"]):
+                _check(
+                    summary["method_checks"][
+                        "adaptive_pbd_kernel_control_route_isolated"] is
+                    adaptive_pbd_kernel_control_route_isolated,
+                    "adaptive PBD kernel control route method check", failures)
             if "ordinary_control_route_isolated" in summary["method_checks"]:
                 _check(
                     summary["method_checks"][

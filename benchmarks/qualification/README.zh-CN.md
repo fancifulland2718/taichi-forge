@@ -196,6 +196,15 @@ active 顺序和 device-resident count，对 65,536 个相互独立的二维距�
 sum 与 stable scatter。必须通过解析位置/残差、逐轮 exact active count 和跨 runtime
 fingerprint。独立入口为 `adaptive_pbd_microbench.py`。
 
+修订后的三路线合同以 Forge/kernel 与 vanilla/kernel 作为 compatibility control。
+两者执行相同 benchmark-owned source SHA、十条完整容量为 65,536-element 的
+Hillis-Steele scan pipeline、六个明确声明的 workspace buffer、42 次非 scan 调用，
+以及每 replay 202 次逻辑 Taichi kernel invocation；不准入 helper 或 specialized API。
+Forge/native 另行与 Forge/kernel 比较。准入要求对完整 position/residual 状态验证解析
+误差界，逐轮 active history 与最终 active-ID 顺序 exact 一致，计时前后提供全向量 raw
+SHA-256，并由独立审计重算。逻辑 invocation 数不推定物理 backend launch 数；后者必须
+由 Systems/Compute 单独实测。
+
 `marching_squares` 是第一个 `THIN-007` 子案例。在 256² analytic circle 网格上，
 两边共享 scalar 输入、corner 约定、classification/case-emission kernel、稳定的
 row-major 输出和 exact cell/case oracle。Forge 使用 native stable compact；vanilla

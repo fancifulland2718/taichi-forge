@@ -235,6 +235,17 @@ prefix sum, and stable scatter between two fixed buffers. Analytic positions,
 residuals, exact per-iteration active counts, and cross-runtime fingerprints
 must pass. Use `adaptive_pbd_microbench.py`.
 
+The corrected three-route contract uses Forge/kernel and vanilla/kernel as the
+compatibility controls. Both execute the same benchmark-owned source SHA, ten
+full-capacity 65,536-element Hillis-Steele scan pipelines, six explicitly
+declared workspace buffers, 42 non-scan calls, and 202 logical Taichi kernel
+invocations per replay; no helper or specialized API is admitted. Forge/native
+is compared separately with Forge/kernel. Admission requires analytic error
+bounds over the complete position/residual state, exact active history and
+final active-ID order, full-vector raw SHA-256 evidence before and after
+scoring, and independent recomputation. Logical invocation counts never assume
+physical backend launch counts; Systems/Compute must measure those separately.
+
 `marching_squares` is the first `THIN-007` subcase. On a 256-square analytic
 circle grid it shares the scalar input, corner convention, classification and
 case-emission kernels, stable row-major output, and exact cell/case oracle.
