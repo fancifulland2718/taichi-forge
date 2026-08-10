@@ -139,6 +139,7 @@ QUALIFICATION_MAX_CPU_UTIL_PERCENT = 20.0
 QUALIFICATION_MAX_GPU_UTIL_PERCENT = 15.0
 QUALIFICATION_MAX_GPU_TEMPERATURE_C = 65.0
 PILOT_TIMING_HEADROOM = 1.20
+PILOT_CONFIRMATION_RUNS = 3
 WINDOWS_BENCHMARK_MUTEX = "Global\\TaichiForgeQualificationMicrobench"
 
 
@@ -269,6 +270,20 @@ def select_common_batch(suggestions: Sequence[int]) -> int:
     if not values or any(value <= 0 for value in values):
         raise ValueError("positive pilot batch suggestions are required")
     return max(values)
+
+
+def warmup_batch_size(phase: str, scored_batch_size: int) -> int:
+    """Use the scored replay count when warming a scored child.
+
+    A handful of single-call warmups is too short for microbenchmarks whose
+    frozen common batch contains thousands of replays.  Pilot children still
+    warm one call because their job is to discover that batch size.
+    """
+    if scored_batch_size <= 0:
+        raise ValueError("scored_batch_size must be positive")
+    if phase not in ("pilot", "score"):
+        raise ValueError(f"unknown benchmark phase {phase!r}")
+    return scored_batch_size if phase == "score" else 1
 
 
 def paired_log_summary(speedups: Sequence[float], seed: int,
@@ -4104,11 +4119,28 @@ def _calibrate_batch(ti: Any, launch: Callable[[], None], target_ms: float,
     attempts = []
     while True:
         elapsed_ms = _timed_batch(ti, launch, batch_size)
-        attempts.append({"batch_size": batch_size, "elapsed_ms": elapsed_ms})
+        attempts.append({
+            "batch_size": batch_size,
+            "elapsed_ms": elapsed_ms,
+            "confirmation": False,
+        })
+        steady_elapsed_ms = elapsed_ms
         if elapsed_ms >= target_ms or batch_size >= maximum:
-            return batch_size, attempts
-        estimate = (batch_size * 2 if elapsed_ms <= 0.0 else
-                    math.ceil(batch_size * target_ms / elapsed_ms))
+            confirmation_values = [elapsed_ms]
+            for _ in range(PILOT_CONFIRMATION_RUNS - 1):
+                confirmation_ms = _timed_batch(ti, launch, batch_size)
+                confirmation_values.append(confirmation_ms)
+                attempts.append({
+                    "batch_size": batch_size,
+                    "elapsed_ms": confirmation_ms,
+                    "confirmation": True,
+                })
+            steady_elapsed_ms = float(statistics.median(confirmation_values))
+            if steady_elapsed_ms >= target_ms or batch_size >= maximum:
+                return batch_size, attempts
+        estimate = (
+            batch_size * 2 if steady_elapsed_ms <= 0.0 else
+            math.ceil(batch_size * target_ms / steady_elapsed_ms))
         batch_size = min(maximum, max(batch_size * 2, estimate))
 
 
@@ -4348,8 +4380,15 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         )
         result["runtime_memory_at_ready"] = runtime_memory_observation(ti)
         result["validation_before"] = case["validate"]()
+        warmup_replays = warmup_batch_size(args.phase, args.batch_size)
+        result["warmup_batch_size"] = warmup_replays
+        result["warmup_raw_batch_ms"] = [
+            _timed_batch(ti, measured_launch, warmup_replays)
+            for _ in range(args.warmups)
+        ]
         result["warmup_ms"] = [
-            _timed_batch(ti, measured_launch, 1) for _ in range(args.warmups)
+            value / warmup_replays
+            for value in result["warmup_raw_batch_ms"]
         ]
         result["warm_single_call_latency_ms"] = [
             _timed_batch(ti, measured_launch, 1)
@@ -4363,6 +4402,7 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
                 args.target_sample_ms * PILOT_TIMING_HEADROOM)
             result["suggested_batch_size"] = suggestion
             result["pilot_attempts"] = attempts
+            result["pilot_confirmation_runs"] = PILOT_CONFIRMATION_RUNS
             result["pilot_target_with_headroom_ms"] = (
                 args.target_sample_ms * PILOT_TIMING_HEADROOM)
         else:
@@ -5337,6 +5377,13 @@ def _parent_main(args: argparse.Namespace) -> int:
             for child in children),
         "common_batch": all(
             child["batch_size"] == common_batch for child in children),
+        "batched_score_warmup": all(
+            child.get("warmup_batch_size") == common_batch
+            and len(child.get("warmup_raw_batch_ms", [])) == args.warmups
+            and all(
+                math.isfinite(float(value)) and float(value) > 0.0
+                for value in child.get("warmup_raw_batch_ms", []))
+            for child in children),
         "scored_timing_window": all(
             statistics.median(child["raw_batch_ms"]) >= args.target_sample_ms
             for child in children),

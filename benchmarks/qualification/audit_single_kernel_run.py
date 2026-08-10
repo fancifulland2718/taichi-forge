@@ -212,6 +212,24 @@ def _audit(run_dir: Path) -> dict[str, Any]:
         raw = [float(value) for value in child["raw_batch_ms"]]
         samples = [float(value) for value in child["samples"]]
         batch = int(child["batch_size"])
+        if "batched_score_warmup" in summary.get("method_checks", {}):
+            warmup_batch = int(child.get("warmup_batch_size", 0))
+            warmup_raw = [float(value) for value in child.get(
+                "warmup_raw_batch_ms", [])]
+            warmup_per_replay = [float(value) for value in child.get(
+                "warmup_ms", [])]
+            _check(warmup_batch == batch, "score warmup common batch", failures)
+            _check(len(warmup_raw) == int(summary["config"]["warmups"]),
+                   "score warmup batch count", failures)
+            _check(len(warmup_raw) == len(warmup_per_replay),
+                   "score warmup sample length", failures)
+            _check(all(math.isfinite(value) and value > 0.0
+                       for value in warmup_raw),
+                   "score warmup finite positive batches", failures)
+            _check(all(_close(per_replay, raw_value / warmup_batch)
+                       for per_replay, raw_value in zip(
+                           warmup_per_replay, warmup_raw)),
+                   "score warmup sample derivation", failures)
         _check(len(raw) == int(summary["config"]["samples"]),
                "raw sample count", failures)
         _check(len(raw) == len(samples), "sample length", failures)
@@ -458,6 +476,12 @@ def _audit(run_dir: Path) -> dict[str, Any]:
         child.get("measurement_scope") == "device_reset_plus_operation"
         if child["operation"] in ("prefix_sum", "parallel_sort") else True
         for child in children)
+    batched_score_warmup = all(
+        child.get("warmup_batch_size") == child.get("batch_size")
+        and len(child.get("warmup_raw_batch_ms", [])) == int(config["warmups"])
+        and all(math.isfinite(float(value)) and float(value) > 0.0
+                for value in child.get("warmup_raw_batch_ms", []))
+        for child in children)
     if extended_contract:
         if "comparison_class_consistent" in summary.get("method_checks", {}):
             _check(
@@ -497,6 +521,10 @@ def _audit(run_dir: Path) -> dict[str, Any]:
             _check(summary["method_checks"]["stable_replay_input"] is
                    stable_replay_input,
                    "stable replay input method check", failures)
+            if "batched_score_warmup" in summary["method_checks"]:
+                _check(summary["method_checks"]["batched_score_warmup"] is
+                       batched_score_warmup,
+                       "batched score warmup method check", failures)
     _check(
         summary.get("method_checks", {}).get("stability_complete") is
         stability_complete,

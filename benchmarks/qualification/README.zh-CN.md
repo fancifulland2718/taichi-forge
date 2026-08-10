@@ -201,7 +201,12 @@ DSL 与 kernel；每个计时 launch 创建一个 pointer+dense tree、激活 64
   `PYTHONHOME`，禁止 user site，证明 package/core/dependency 均来自所选 venv，
   并要求两边 Python 与中性依赖版本一致。
 - 两边各运行一次非计分 pilot，随后冻结两者建议值中较大的共同 batch；所有计分
-  进程执行相同 launch 数，计分 batch 还必须达到所要求的计时窗口。
+  进程执行相同 launch 数，计分 batch 还必须达到所要求的计时窗口。候选 pilot batch
+  只有在三次同规模测量的中位数超过带固定 headroom 的目标后才会被接受，避免一次
+  早期冷态或频率状态样本冻结出过小的计分 batch。
+- 每个计分子进程的每次 warmup 也使用该冻结的共同 batch，避免几次不足毫秒的单调用
+  warmup 把 GPU 频率或 allocator 稳态过程泄漏到计分样本。pilot 负责发现 batch，
+  因而 pilot warmup 仍使用单调用。
 - 进程顺序按固定种子交替 AB/BA。主观测量是 comparison definition 中记录的
   pair-level `baseline / subject` 速度比，绝不池化不同进程的样本。
 - 系统级命名 mutex 保证同一时刻只有一个资格 driver，因此独立启动的

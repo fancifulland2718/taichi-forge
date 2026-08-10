@@ -3,9 +3,11 @@ import json
 import math
 import os
 import unittest
+from unittest.mock import patch
 
 from benchmarks.qualification.single_kernel_microbench import (
     _ExclusiveBenchmarkLock,
+    _calibrate_batch,
     QUALIFICATION_MINIMUMS,
     _enhanced_memory_plateau,
     _native_reduce_route,
@@ -23,6 +25,7 @@ from benchmarks.qualification.single_kernel_microbench import (
     paired_log_summary,
     qualification_policy_errors,
     select_common_batch,
+    warmup_batch_size,
 )
 from benchmarks.qualification.runtime_common import normalize_gpu_uuid
 
@@ -98,6 +101,28 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         self.assertEqual(select_common_batch([128, 512]), 512)
         with self.assertRaises(ValueError):
             select_common_batch([128, 0])
+
+    def test_score_warmup_uses_frozen_common_batch(self):
+        self.assertEqual(warmup_batch_size("pilot", 2216), 1)
+        self.assertEqual(warmup_batch_size("score", 2216), 2216)
+        with self.assertRaises(ValueError):
+            warmup_batch_size("score", 0)
+        with self.assertRaises(ValueError):
+            warmup_batch_size("unknown", 1)
+
+    def test_pilot_confirms_candidate_batch_after_steady_state(self):
+        timings = iter([1.0, 130.0, 90.0, 90.0, 180.0, 170.0, 160.0])
+        with patch(
+                "benchmarks.qualification.single_kernel_microbench._timed_batch",
+                side_effect=lambda *_: next(timings)):
+            batch, attempts = _calibrate_batch(None, lambda: None, 120.0)
+        self.assertEqual(batch, 240)
+        self.assertEqual([row["batch_size"] for row in attempts],
+                         [1, 120, 120, 120, 240, 240, 240])
+        self.assertEqual(
+            [row["confirmation"] for row in attempts],
+            [False, False, True, True, False, True, True],
+        )
 
     def test_paired_log_summary_uses_pair_ratios(self):
         summary = paired_log_summary([2.0, 2.0, 2.0], seed=1, resamples=100)

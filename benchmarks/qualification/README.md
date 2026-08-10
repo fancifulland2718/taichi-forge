@@ -242,7 +242,14 @@ not historical ID churn. Start with small through
   Python and neutral dependency versions.
 - One non-scored pilot runs on each side. The larger suggested batch is frozen
   for every scored process, so both sides execute the same launch count and the
-  scored batch meets the requested timing window.
+  scored batch meets the requested timing window. A candidate pilot batch is
+  accepted only after three same-size measurements have a median above the
+  timing target with the fixed headroom; an early cold/clock-state sample cannot
+  freeze an undersized scored batch.
+- Every scored child also uses that frozen common batch for each warmup. This
+  prevents a few sub-millisecond single-call warmups from leaking GPU clock or
+  allocator stabilization into the scored samples. Pilot warmups remain single
+  calls because the pilot is responsible for discovering the batch size.
 - Process order alternates AB/BA with a fixed seed. The primary observations
   are pair-level `baseline / subject` speedups as recorded by the comparison
   definition; samples from different processes are never pooled.
