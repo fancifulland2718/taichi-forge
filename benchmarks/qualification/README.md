@@ -220,8 +220,12 @@ uses double-buffered ndarrays and an atomic count. Use
 `snode_churn` is the historical-churn half of `DIRECT-004`. Both runtimes use
 the same public FieldsBuilder DSL and kernels. Every measured launch creates
 one pointer+dense tree, activates 64 cells, checks the exact struct-for sum,
-synchronizes, and destroys the tree. Forge additionally proves generation and
-runtime-directory recovery; unavailable vanilla counters are not invented.
+synchronizes, destroys the tree, and performs a post-destroy sync. Forge also
+proves generation, runtime-directory, field-mapping, live-kernel-definition,
+and backend-registration recovery. Retired-kernel-shell growth is reported
+separately as intentional Graph-pointer-stability state rather than a leak.
+These Forge-only counters are collected only at validation/stability boundaries,
+outside measured launches; unavailable vanilla counters are not invented.
 Simultaneously-live capacity remains a separate case. Use
 `snode_churn_microbench.py`.
 
@@ -231,6 +235,8 @@ after all are finalized does the case use the first and last trees, synchronize,
 and retire everything in reverse order. This measures current live capacity,
 not historical ID churn. Start with small through
 `snode_concurrent_microbench.py`; larger presets advance only after it passes.
+Peak-directory, tree-ID, and lifecycle counters are collected only by the
+unscored validation path so Forge-only telemetry cannot contaminate A/B timing.
 
 ## Fairness contract implemented by the runner
 
@@ -453,6 +459,10 @@ Run artifacts are written under
 per-child JSON and stdout/stderr, pair-level JSONL/CSV, raw batch samples,
 environment and wheel hashes, noise observations, `summary.json`, and paired
 Chinese/English reports and validations.
+If a stability replay fails, the child JSON still retains completed replay
+count, failed replay index, before/failure RSS and GPU memory, partial route,
+and teardown. The parent run remains fail-closed; the independent auditor only
+validates failure-evidence integrity and never recovers a partial speed ratio.
 
 Recompute the evidence from the per-child artifacts with the separate auditor:
 

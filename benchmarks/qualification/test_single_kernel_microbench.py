@@ -10,6 +10,9 @@ from benchmarks.qualification.single_kernel_microbench import (
     _calibrate_batch,
     QUALIFICATION_MINIMUMS,
     _enhanced_memory_plateau,
+    _snode_lifecycle_plateau,
+    _run_stability,
+    _StabilityReplayError,
     _native_reduce_route,
     _native_transform_route,
     _native_indexed_copy_route,
@@ -188,6 +191,101 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertIn("live_resources",
                       result["runtime_memory"]["growing_fields"])
+
+    def test_snode_lifecycle_plateau_ignores_retired_shell_growth(self):
+        before = {
+            "required": True,
+            "available": True,
+            "runtime_directory": {
+                "active_tree_count": 1,
+                "capacity": 16,
+                "reserved_bytes": 128,
+                "growth_events": 1,
+            },
+            "kernel_lifecycle": {
+                "total_slots": 2,
+                "live_definitions": 2,
+                "retired_shells": 0,
+                "registered_executables": 2,
+            },
+            "snode_field_mapping_count": 1,
+        }
+        after = json.loads(json.dumps(before))
+        after["kernel_lifecycle"]["total_slots"] = 202
+        after["kernel_lifecycle"]["retired_shells"] = 200
+        stable = _snode_lifecycle_plateau(before, after)
+        self.assertTrue(stable["passed"])
+        self.assertEqual(stable["kernel_deltas"]["retired_shells"], 200)
+        growing = json.loads(json.dumps(after))
+        growing["kernel_lifecycle"]["live_definitions"] = 3
+        result = _snode_lifecycle_plateau(before, growing)
+        self.assertFalse(result["passed"])
+        self.assertFalse(result["checks"]["live_definitions_recovered"])
+
+    def test_snode_lifecycle_initial_capacity_growth_can_be_allowed(self):
+        before = {
+            "required": True,
+            "available": True,
+            "runtime_directory": {
+                "active_tree_count": 1,
+                "capacity": 16,
+                "reserved_bytes": 128,
+                "growth_events": 1,
+            },
+            "kernel_lifecycle": {
+                "total_slots": 2,
+                "live_definitions": 2,
+                "retired_shells": 0,
+                "registered_executables": 2,
+            },
+            "snode_field_mapping_count": 1,
+        }
+        after = json.loads(json.dumps(before))
+        after["runtime_directory"].update(
+            capacity=128, reserved_bytes=1024, growth_events=2)
+        after["kernel_lifecycle"]["registered_executables"] = 3
+        self.assertFalse(_snode_lifecycle_plateau(before, after)["passed"])
+        self.assertTrue(_snode_lifecycle_plateau(
+            before, after, require_directory_plateau=False,
+            require_registration_plateau=False)["passed"])
+
+    def test_stability_failure_preserves_partial_replay_and_memory_evidence(self):
+        calls = 0
+
+        def launch():
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise RuntimeError("synthetic lifecycle failure")
+
+        class FakeTi:
+
+            @staticmethod
+            def sync():
+                pass
+
+        observation = {
+            "available": False,
+            "runtime": None,
+            "pools": None,
+            "runtime_error": None,
+            "pool_error": None,
+        }
+        with patch(
+                "benchmarks.qualification.single_kernel_microbench."
+                "runtime_memory_observation", return_value=observation), patch(
+                    "benchmarks.qualification.single_kernel_microbench."
+                    "working_set_bytes", side_effect=[100, 130]), patch(
+                        "benchmarks.qualification.single_kernel_microbench."
+                        "process_gpu_memory_mib", side_effect=[10.0, 25.0]):
+            with self.assertRaises(_StabilityReplayError) as captured:
+                _run_stability(
+                    FakeTi(), launch, 10, 10, True, "vanilla")
+        evidence = captured.exception.evidence
+        self.assertEqual(evidence["completed_replays"], 2)
+        self.assertEqual(evidence["failed_replay_one_based"], 3)
+        self.assertEqual(evidence["rss_delta_bytes"], 30)
+        self.assertEqual(evidence["gpu_delta_mib"], 15.0)
 
     def test_native_reduce_route_requires_the_declared_cuda_plan(self):
         class Plan:

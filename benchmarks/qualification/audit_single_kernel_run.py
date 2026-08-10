@@ -136,7 +136,45 @@ def _audit_failed_run(run_dir: Path,
         path = run_dir / filename
         _check(path.is_file() and path.stat().st_size > 0,
                f"bilingual failure artifact {filename}", failures)
-    scored_children = len(list((run_dir / "children").glob("pair-*.json")))
+    child_paths = list((run_dir / "children").glob("pair-*.json"))
+    config = manifest.get("config", {})
+    for path in child_paths:
+        child = _read_json(path)
+        _check(child.get("schema") == SCHEMA,
+               f"child schema {path.name}", failures)
+        for name in ("operation", "backend", "preset"):
+            _check(child.get(name) == config.get(name),
+                   f"child {name} {path.name}", failures)
+        _check(child.get("status") in ("passed", "failed", "error", "rejected"),
+               f"child terminal status {path.name}", failures)
+        stability_failure = child.get("stability_failure")
+        if stability_failure is not None:
+            requested = int(stability_failure.get("requested_replays", -1))
+            completed = int(stability_failure.get("completed_replays", -1))
+            _check(requested == int(config.get("stability_replays", -2)),
+                   f"stability failure requested replays {path.name}", failures)
+            _check(0 <= completed < requested,
+                   f"stability failure completed replays {path.name}", failures)
+            _check(stability_failure.get("failed_replay_one_based")
+                   == completed + 1,
+                   f"stability failure replay index {path.name}", failures)
+            _check(bool(stability_failure.get("cause")),
+                   f"stability failure cause {path.name}", failures)
+            _check("rss_before_bytes" in stability_failure
+                   and "rss_at_failure_bytes" in stability_failure,
+                   f"stability failure RSS evidence {path.name}", failures)
+            if config.get("backend") != "cpu":
+                _check("gpu_before_mib" in stability_failure
+                       and "gpu_at_failure_mib" in stability_failure,
+                       f"stability failure GPU evidence {path.name}", failures)
+            _check(len(child.get("samples", []))
+                   == int(config.get("samples", -1)),
+                   f"pre-failure scored samples {path.name}", failures)
+            _check(child.get("failure_route", {}).get("cycles_completed", -1)
+                   >= child.get("route_before_scoring", {}).get(
+                       "cycles_completed", 0),
+                   f"failure route progress {path.name}", failures)
+    scored_children = len(child_paths)
     return {
         "schema": "taichi_forge.single_kernel_microbench.audit.v1",
         "run_id": manifest.get("run_id"),
@@ -476,6 +514,14 @@ def _audit(run_dir: Path) -> dict[str, Any]:
         child.get("measurement_scope") == "device_reset_plus_operation"
         if child["operation"] in ("prefix_sum", "parallel_sort") else True
         for child in children)
+    snode_lifecycle_plateau = all(
+        child["operation"] not in ("snode_churn", "snode_concurrent")
+        or (
+            child.get("stability") is not None
+            and child["stability"].get(
+                "snode_lifecycle_plateau", {}).get("passed") is True
+        )
+        for child in children)
     batched_score_warmup = all(
         child.get("warmup_batch_size") == child.get("batch_size")
         and len(child.get("warmup_raw_batch_ms", [])) == int(config["warmups"])
@@ -495,7 +541,10 @@ def _audit(run_dir: Path) -> dict[str, Any]:
             "physical device method check", failures)
         _check(
             summary.get("method_checks", {}).get("route_verified") is
-            all(child["route"]["passed"] for child in children),
+            all(
+                child["route"]["passed"]
+                and child.get("route_before_scoring", child["route"])["passed"]
+                for child in children),
             "route method check", failures)
         endpoint_key = (
             "endpoint_equivalence"
@@ -525,6 +574,11 @@ def _audit(run_dir: Path) -> dict[str, Any]:
                 _check(summary["method_checks"]["batched_score_warmup"] is
                        batched_score_warmup,
                        "batched score warmup method check", failures)
+            if "snode_lifecycle_plateau" in summary["method_checks"]:
+                _check(
+                    summary["method_checks"]["snode_lifecycle_plateau"] is
+                    snode_lifecycle_plateau,
+                    "SNode lifecycle plateau method check", failures)
     _check(
         summary.get("method_checks", {}).get("stability_complete") is
         stability_complete,
@@ -533,6 +587,7 @@ def _audit(run_dir: Path) -> dict[str, Any]:
         not failures
         and order_counts[forward_order] == order_counts[reverse_order]
         and stability_complete
+        and snode_lifecycle_plateau
         and timing_window_complete)
     favorable_fraction = (
         sum(value > 1.0 for value in median_speedups) / len(median_speedups)

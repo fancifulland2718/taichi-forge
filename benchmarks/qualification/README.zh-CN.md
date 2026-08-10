@@ -184,14 +184,19 @@ ndarray 与 atomic count。独立入口为 `bfs_worklist_microbench.py`。
 
 `snode_churn` 是 `DIRECT-004` 的历史 churn 半项。两边使用相同公开 FieldsBuilder
 DSL 与 kernel；每个计时 launch 创建一个 pointer+dense tree、激活 64 个 cell、exact
-校验 struct-for sum、同步并销毁。Forge 另外证明 generation 与 runtime-directory
-恢复；vanilla 不可用的计数器不会伪造。simultaneously-live capacity 保持为另一独立
-案例。入口为 `snode_churn_microbench.py`。
+校验 struct-for sum、同步、销毁并做销毁后同步。Forge 另外证明 generation、
+runtime-directory、field mapping、live kernel definitions 与 backend registrations
+恢复；retired kernel shell 增长按 Graph 指针稳定性设计单独报告，不误判为泄漏。
+这些 Forge-only 计数器只在 validation/stability 边界采集，不进入计时 launch；vanilla
+不可用的计数器不会伪造。simultaneously-live capacity 保持为另一独立案例。入口为
+`snode_churn_microbench.py`。
 
 `snode_concurrent` 是独立的同时容量案例。small/medium/large 分别同时保持
 128/512/1,400 个独立 dense scalar tree；所有 tree finalize 后才使用首尾两个、同步，
 再按逆序全部退休。它测量当前 live capacity，不是历史 ID churn。先通过
-`snode_concurrent_microbench.py` 的 small，之后才允许扩展规模。
+`snode_concurrent_microbench.py` 的 small，之后才允许扩展规模。peak directory、tree
+ID 和生命周期计数只在计时外的 validation 路径采集，避免 Forge-only telemetry
+污染 A/B 时间。
 
 ## runner 已实现的公平性合同
 
@@ -396,6 +401,9 @@ C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
 artifact 写入 `temp_outputs/qualification/single_kernel/<run-id>/`，包括 manifest、
 每个子进程的 JSON 与 stdout/stderr、pair-level JSONL/CSV、原始 batch 样本、环境与
 wheel hash、噪声观测、`summary.json`，以及配对的中英文报告和方法学验证。
+若 stability replay 中途失败，child JSON 仍保留已完成 replay 数、失败 replay 序号、
+失败前后 RSS/GPU memory、partial route 与 teardown；整次父 run 仍 fail closed，独立
+审计器只验证失败证据完整性，不恢复部分性能比。
 
 可使用独立审计器从逐子进程 artifact 重新计算证据：
 

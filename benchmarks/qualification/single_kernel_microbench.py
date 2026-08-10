@@ -1823,6 +1823,114 @@ def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
     }
 
 
+def _snode_lifecycle_observation(ti: Any,
+                                 runtime_name: str) -> dict[str, Any]:
+    """Capture Forge-only lifecycle counters without inventing vanilla data."""
+    if runtime_name != "forge":
+        return {
+            "required": False,
+            "available": False,
+            "reason": "vanilla does not expose Forge lifecycle counters",
+        }
+    try:
+        program = ti.lang.impl.get_runtime().prog
+        directory_getter = getattr(
+            program, "_debug_snode_runtime_directory_stats", None)
+        lifecycle_getter = getattr(
+            program, "_debug_kernel_lifecycle_stats", None)
+        mapping_getter = getattr(
+            program, "_debug_snode_field_mapping_count", None)
+        if (directory_getter is None or lifecycle_getter is None
+                or mapping_getter is None):
+            return {
+                "required": True,
+                "available": False,
+                "error": "one or more Forge lifecycle counters are unavailable",
+            }
+        return {
+            "required": True,
+            "available": True,
+            "runtime_directory": dict(directory_getter()),
+            "kernel_lifecycle": dict(lifecycle_getter()),
+            "snode_field_mapping_count": int(mapping_getter()),
+        }
+    except Exception as error:  # pragma: no cover - evidence path
+        return {
+            "required": True,
+            "available": False,
+            "error": repr(error),
+        }
+
+
+def _snode_lifecycle_plateau(
+        before: dict[str, Any], after: dict[str, Any],
+        *, require_directory_plateau: bool = True,
+        require_registration_plateau: bool = True) -> dict[str, Any]:
+    """Validate live-state recovery while allowing retired kernel shells."""
+    required = bool(before.get("required") or after.get("required"))
+    if not required:
+        return {
+            "required": False,
+            "passed": True,
+            "reason": "vanilla lifecycle counters are unavailable by contract",
+        }
+    before_directory = before.get("runtime_directory") or {}
+    after_directory = after.get("runtime_directory") or {}
+    before_kernels = before.get("kernel_lifecycle") or {}
+    after_kernels = after.get("kernel_lifecycle") or {}
+    checks = {
+        "observations_available": bool(
+            before.get("available") and after.get("available")),
+        "active_tree_count_recovered": (
+            after_directory.get("active_tree_count")
+            == before_directory.get("active_tree_count")),
+        "field_mapping_count_recovered": (
+            after.get("snode_field_mapping_count")
+            == before.get("snode_field_mapping_count")),
+        "live_definitions_recovered": (
+            after_kernels.get("live_definitions")
+            == before_kernels.get("live_definitions")),
+    }
+    if require_registration_plateau:
+        checks["registered_executables_plateau"] = (
+            after_kernels.get("registered_executables")
+            == before_kernels.get("registered_executables"))
+    if require_directory_plateau:
+        checks.update({
+            "directory_capacity_plateau": (
+                after_directory.get("capacity")
+                == before_directory.get("capacity")),
+            "directory_reserved_bytes_plateau": (
+                after_directory.get("reserved_bytes")
+                == before_directory.get("reserved_bytes")),
+            "directory_growth_events_plateau": (
+                after_directory.get("growth_events")
+                == before_directory.get("growth_events")),
+        })
+    numeric_delta_names = (
+        "total_slots", "live_definitions", "retired_shells",
+        "registered_executables",
+    )
+    kernel_deltas = {}
+    for name in numeric_delta_names:
+        left = before_kernels.get(name)
+        right = after_kernels.get(name)
+        kernel_deltas[name] = (
+            right - left
+            if isinstance(left, (int, float))
+            and isinstance(right, (int, float)) else None
+        )
+    return {
+        "required": True,
+        "require_directory_plateau": require_directory_plateau,
+        "require_registration_plateau": require_registration_plateau,
+        "checks": checks,
+        "kernel_deltas": kernel_deltas,
+        "retired_shell_growth_is_expected": True,
+        "passed": all(checks.values()),
+    }
+
+
 def _snode_churn_route(ti: Any, state: dict[str, Any],
                        runtime_name: str) -> dict[str, Any]:
     directory = None
@@ -1847,6 +1955,12 @@ def _snode_churn_route(ti: Any, state: dict[str, Any],
             and observed_active == baseline_active
         )
     )
+    lifecycle_after = _snode_lifecycle_observation(ti, runtime_name)
+    lifecycle_plateau = _snode_lifecycle_plateau(
+        state["baseline_lifecycle"], lifecycle_after,
+        require_directory_plateau=False,
+        require_registration_plateau=False)
+    state["last_lifecycle_observation"] = lifecycle_after
     return {
         "classification": (
             "forge_generation_aware_snode_tree_churn"
@@ -1863,11 +1977,15 @@ def _snode_churn_route(ti: Any, state: dict[str, Any],
         "runtime_directory_error": directory_error,
         "baseline_active_tree_count": baseline_active,
         "active_tree_count_after_destroy": observed_active,
+        "lifecycle_baseline": state["baseline_lifecycle"],
+        "lifecycle_after_destroy": lifecycle_after,
+        "lifecycle_recovery": lifecycle_plateau,
         "passed": bool(
             state["cycles_completed"] >= 1
             and state["last_error"] is None
             and active_recovered
             and (runtime_name == "vanilla" or generation_available)
+            and lifecycle_plateau["passed"]
         ),
     }
 
@@ -1902,6 +2020,7 @@ def _build_snode_churn_case(ti: Any, runtime_name: str,
         directory = dict(
             ti.lang.impl.get_runtime().prog._debug_snode_runtime_directory_stats())
         baseline_active = directory.get("active_tree_count")
+    baseline_lifecycle = _snode_lifecycle_observation(ti, runtime_name)
     state: dict[str, Any] = {
         "cycles_completed": 0,
         "tree_ids": set(),
@@ -1909,9 +2028,11 @@ def _build_snode_churn_case(ti: Any, runtime_name: str,
         "last_tree_id": None,
         "last_error": None,
         "baseline_active_tree_count": baseline_active,
+        "baseline_lifecycle": baseline_lifecycle,
+        "last_lifecycle_observation": baseline_lifecycle,
     }
 
-    def launch() -> None:
+    def launch(*, collect_evidence: bool = False) -> None:
         field = builder = pointer = tree = None
         try:
             field = ti.field(dtype=ti.i32)
@@ -1928,12 +2049,14 @@ def _build_snode_churn_case(ti: Any, runtime_name: str,
             reduce_active(field)
             ti.sync()
             tree.destroy()
+            ti.sync()
             state["cycles_completed"] += 1
-            state["tree_ids"].add(tree_id)
-            state["last_tree_id"] = tree_id
-            state["generations"].append(generation)
-            if len(state["generations"]) > 4096:
-                del state["generations"][:-4096]
+            if collect_evidence:
+                state["tree_ids"].add(tree_id)
+                state["last_tree_id"] = tree_id
+                state["generations"].append(generation)
+                if len(state["generations"]) > 4096:
+                    del state["generations"][:-4096]
         except Exception as error:
             state["last_error"] = repr(error)
             if tree is not None:
@@ -1949,7 +2072,7 @@ def _build_snode_churn_case(ti: Any, runtime_name: str,
         accumulator[None] = 0
 
     def validate_fresh() -> dict[str, Any]:
-        launch()
+        launch(collect_evidence=True)
         actual = int(accumulator[None])
         generations = [
             value for value in state["generations"] if value is not None
@@ -1977,10 +2100,12 @@ def _build_snode_churn_case(ti: Any, runtime_name: str,
         }
 
     return {
-        "launch": launch,
+        "launch": lambda: launch(collect_evidence=False),
         "reset": reset,
         "validate": validate_fresh,
         "route": lambda: _snode_churn_route(ti, state, runtime_name),
+        "stability_observe": lambda: _snode_lifecycle_observation(
+            ti, runtime_name),
         "logical_bytes": 0,
         "traffic_model": (
             "lifecycle transaction; no simplified logical bandwidth is claimed"
@@ -2008,7 +2133,8 @@ def _build_snode_churn_case(ti: Any, runtime_name: str,
             ),
             "correctness": "exact_i32_sum_and_no_live_tree_after_each_cycle",
             "timing": (
-                "one full cold create-use-sync-destroy transaction per launch; "
+                "one full cold create-use-sync-destroy-post_destroy_sync "
+                "transaction per launch; lifecycle telemetry is excluded; "
                 "this is lifecycle throughput, not warm kernel latency"
             ),
             "scope_boundary": (
@@ -2020,6 +2146,11 @@ def _build_snode_churn_case(ti: Any, runtime_name: str,
 
 def _snode_concurrent_route(state: dict[str, Any], runtime_name: str,
                             concurrent_trees: int) -> dict[str, Any]:
+    lifecycle_after = state["last_lifecycle_observation"]
+    lifecycle_plateau = _snode_lifecycle_plateau(
+        state["baseline_lifecycle"], lifecycle_after,
+        require_directory_plateau=False,
+        require_registration_plateau=False)
     forge_evidence_ok = (
         runtime_name != "forge" or bool(
             state["peak_directory"] is not None
@@ -2045,12 +2176,16 @@ def _snode_concurrent_route(state: dict[str, Any], runtime_name: str,
         "peak_runtime_directory": state["peak_directory"],
         "after_destroy_runtime_directory": state["after_directory"],
         "runtime_directory_available": runtime_name == "forge",
+        "lifecycle_baseline": state["baseline_lifecycle"],
+        "lifecycle_after_destroy": lifecycle_after,
+        "lifecycle_recovery": lifecycle_plateau,
         "last_error": state["last_error"],
         "passed": bool(
             state["cycles_completed"] >= 1
             and state["last_error"] is None
             and state["peak_unique_tree_ids"] == concurrent_trees
             and forge_evidence_ok
+            and lifecycle_plateau["passed"]
         ),
     }
 
@@ -2080,16 +2215,19 @@ def _build_snode_concurrent_case(ti: Any, runtime_name: str,
         baseline_active = dict(
             ti.lang.impl.get_runtime().prog._debug_snode_runtime_directory_stats()
         )["active_tree_count"]
+    baseline_lifecycle = _snode_lifecycle_observation(ti, runtime_name)
     state: dict[str, Any] = {
         "cycles_completed": 0,
         "peak_unique_tree_ids": 0,
         "baseline_active_tree_count": baseline_active,
         "peak_directory": None,
         "after_directory": None,
+        "baseline_lifecycle": baseline_lifecycle,
+        "last_lifecycle_observation": baseline_lifecycle,
         "last_error": None,
     }
 
-    def launch() -> None:
+    def launch(*, collect_evidence: bool = False) -> None:
         fields = []
         builders = []
         trees = []
@@ -2103,9 +2241,10 @@ def _build_snode_concurrent_case(ti: Any, runtime_name: str,
                 fields.append(field)
                 builders.append(builder)
                 trees.append(tree)
-            tree_ids = [int(tree.id) for tree in trees]
-            state["peak_unique_tree_ids"] = len(set(tree_ids))
-            if runtime_name == "forge":
+            if collect_evidence:
+                tree_ids = [int(tree.id) for tree in trees]
+                state["peak_unique_tree_ids"] = len(set(tree_ids))
+            if collect_evidence and runtime_name == "forge":
                 state["peak_directory"] = dict(
                     ti.lang.impl.get_runtime().prog.
                     _debug_snode_runtime_directory_stats())
@@ -2116,10 +2255,14 @@ def _build_snode_concurrent_case(ti: Any, runtime_name: str,
             for index in range(len(trees) - 1, -1, -1):
                 trees[index].destroy()
                 destroyed.add(index)
-            if runtime_name == "forge":
+            ti.sync()
+            if collect_evidence and runtime_name == "forge":
                 state["after_directory"] = dict(
                     ti.lang.impl.get_runtime().prog.
                     _debug_snode_runtime_directory_stats())
+            if collect_evidence:
+                state["last_lifecycle_observation"] = (
+                    _snode_lifecycle_observation(ti, runtime_name))
             state["cycles_completed"] += 1
         except Exception as error:
             state["last_error"] = repr(error)
@@ -2139,7 +2282,7 @@ def _build_snode_concurrent_case(ti: Any, runtime_name: str,
         accumulator[None] = 0
 
     def validate_fresh() -> dict[str, Any]:
-        launch()
+        launch(collect_evidence=True)
         actual = int(accumulator[None])
         route = _snode_concurrent_route(
             state, runtime_name, concurrent_trees)
@@ -2158,11 +2301,13 @@ def _build_snode_concurrent_case(ti: Any, runtime_name: str,
         }
 
     return {
-        "launch": launch,
+        "launch": lambda: launch(collect_evidence=False),
         "reset": reset,
         "validate": validate_fresh,
         "route": lambda: _snode_concurrent_route(
             state, runtime_name, concurrent_trees),
+        "stability_observe": lambda: _snode_lifecycle_observation(
+            ti, runtime_name),
         "logical_bytes": 0,
         "traffic_model": (
             "simultaneously-live lifecycle capacity; no logical bandwidth claimed"
@@ -2187,7 +2332,8 @@ def _build_snode_concurrent_case(ti: Any, runtime_name: str,
             ),
             "correctness": "all_unique_live_ids_endpoint_sum_and_full_retirement",
             "timing": (
-                "one full simultaneous create/use/sync/destroy transaction; "
+                "one full simultaneous create/use/sync/destroy/post-destroy-sync "
+                "transaction; peak/directory/lifecycle telemetry is excluded; "
                 "not historical churn and not warm kernel latency"
             ),
             "scope_boundary": (
@@ -4144,12 +4290,24 @@ def _calibrate_batch(ti: Any, launch: Callable[[], None], target_ms: float,
         batch_size = min(maximum, max(batch_size * 2, estimate))
 
 
+class _StabilityReplayError(RuntimeError):
+
+    def __init__(self, cause: BaseException, evidence: dict[str, Any]) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+        self.evidence = evidence
+
+
 def _run_stability(ti: Any, launch: Callable[[], None], replays: int,
                    checkpoint: int, sample_gpu: bool,
-                   runtime_name: str) -> dict[str, Any] | None:
+                   runtime_name: str,
+                   lifecycle_observe: Callable[[], dict[str, Any]] | None = None
+                   ) -> dict[str, Any] | None:
     if replays <= 0:
         return None
     enhanced_before = runtime_memory_observation(ti)
+    lifecycle_before = (
+        None if lifecycle_observe is None else lifecycle_observe())
     rss_before = working_set_bytes()
     gpu_before = process_gpu_memory_mib(os.getpid()) if sample_gpu else None
     windows = []
@@ -4157,14 +4315,52 @@ def _run_stability(ti: Any, launch: Callable[[], None], replays: int,
     while completed < replays:
         count = min(checkpoint, replays - completed)
         started = time.perf_counter_ns()
-        for _ in range(count):
-            launch()
-        ti.sync()
+        completed_before_window = completed
+        try:
+            for _ in range(count):
+                launch()
+                completed += 1
+            ti.sync()
+        except Exception as error:
+            successful_in_window = completed - completed_before_window
+            if successful_in_window > 0:
+                windows.append(
+                    (time.perf_counter_ns() - started) / 1.0e6
+                    / successful_in_window)
+            rss_failure = working_set_bytes()
+            gpu_failure = (
+                process_gpu_memory_mib(os.getpid()) if sample_gpu else None)
+            enhanced_failure = runtime_memory_observation(ti)
+            lifecycle_failure = (
+                None if lifecycle_observe is None else lifecycle_observe())
+            raise _StabilityReplayError(error, {
+                "requested_replays": replays,
+                "completed_replays": completed,
+                "failed_replay_one_based": completed + 1,
+                "checkpoint": checkpoint,
+                "completed_window_per_launch_ms": windows,
+                "cause": repr(error),
+                "rss_before_bytes": rss_before,
+                "rss_at_failure_bytes": rss_failure,
+                "rss_delta_bytes": (
+                    None if rss_before is None or rss_failure is None else
+                    rss_failure - rss_before),
+                "gpu_before_mib": gpu_before,
+                "gpu_at_failure_mib": gpu_failure,
+                "gpu_delta_mib": (
+                    None if gpu_before is None or gpu_failure is None else
+                    gpu_failure - gpu_before),
+                "enhanced_before": enhanced_before,
+                "enhanced_at_failure": enhanced_failure,
+                "snode_lifecycle_before": lifecycle_before,
+                "snode_lifecycle_at_failure": lifecycle_failure,
+            }) from error
         windows.append((time.perf_counter_ns() - started) / 1.0e6 / count)
-        completed += count
     rss_after = working_set_bytes()
     gpu_after = process_gpu_memory_mib(os.getpid()) if sample_gpu else None
     enhanced_after = runtime_memory_observation(ti)
+    lifecycle_after = (
+        None if lifecycle_observe is None else lifecycle_observe())
     if _uses_forge_package(runtime_name):
         enhanced_plateau = _enhanced_memory_plateau(
             enhanced_before, enhanced_after)
@@ -4178,6 +4374,12 @@ def _run_stability(ti: Any, launch: Callable[[], None], replays: int,
         }
     rss_delta = None if rss_before is None or rss_after is None else rss_after - rss_before
     gpu_delta = None if gpu_before is None or gpu_after is None else gpu_after - gpu_before
+    lifecycle_plateau = (
+        None if lifecycle_before is None or lifecycle_after is None else
+        _snode_lifecycle_plateau(
+            lifecycle_before, lifecycle_after,
+            require_directory_plateau=True)
+    )
     return {
         "replays": replays,
         "checkpoint": checkpoint,
@@ -4192,10 +4394,14 @@ def _run_stability(ti: Any, launch: Callable[[], None], replays: int,
         "enhanced_before": enhanced_before,
         "enhanced_after": enhanced_after,
         "enhanced_plateau": enhanced_plateau,
+        "snode_lifecycle_before": lifecycle_before,
+        "snode_lifecycle_after": lifecycle_after,
+        "snode_lifecycle_plateau": lifecycle_plateau,
         "memory_guard_passed": bool(
             (rss_delta is None or rss_delta <= 64 * 1024 * 1024)
             and (gpu_delta is None or gpu_delta <= 64.0)
             and enhanced_plateau["passed"]
+            and (lifecycle_plateau is None or lifecycle_plateau["passed"])
         ),
     }
 
@@ -4372,14 +4578,15 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
             case["reset"]()
             ti.sync()
         result["first_call_ms"] = _timed_batch(ti, measured_launch, 1)
-        result["route"] = (
+        result["runtime_memory_at_ready"] = runtime_memory_observation(ti)
+        result["validation_before"] = case["validate"]()
+        result["route_before_scoring"] = (
             case["route"]() if "route" in case else {
                 "classification": "ordinary_taichi_kernel",
                 "passed": True,
             }
         )
-        result["runtime_memory_at_ready"] = runtime_memory_observation(ti)
-        result["validation_before"] = case["validate"]()
+        result["route"] = result["route_before_scoring"]
         warmup_replays = warmup_batch_size(args.phase, args.batch_size)
         result["warmup_batch_size"] = warmup_replays
         result["warmup_raw_batch_ms"] = [
@@ -4420,16 +4627,37 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
             result["summary"] = summary
             result["stability"] = _run_stability(
                 ti, measured_launch, args.stability_replays,
-                args.stability_checkpoint, args.backend != "cpu", args.runtime)
+                args.stability_checkpoint, args.backend != "cpu", args.runtime,
+                case.get("stability_observe"))
         result["validation_after"] = case["validate"]()
+        result["route_after_scoring"] = (
+            case["route"]() if "route" in case else result["route"])
+        result["route"] = result["route_after_scoring"]
         stability = result.get("stability")
         result["status"] = "passed" if (
             result["validation_before"]["passed"]
             and result["validation_after"]["passed"]
+            and result["route_before_scoring"]["passed"]
             and result["route"]["passed"]
             and result["device_identity"]["binding_verified"]
             and (stability is None or stability["memory_guard_passed"])
         ) else "failed"
+        return result
+    except Exception as error:  # Preserve partial child evidence on failures.
+        result.update(
+            status="error",
+            error=repr(error),
+            traceback=traceback.format_exc(),
+        )
+        if isinstance(error, _StabilityReplayError):
+            result["stability_failure"] = error.evidence
+        if "case" in locals() and "route" in case:
+            try:
+                result["failure_route"] = case["route"]()
+                result["route_after_scoring"] = result["failure_route"]
+                result["route"] = result["failure_route"]
+            except Exception as route_error:  # pragma: no cover - broken context
+                result["failure_route_error"] = repr(route_error)
         return result
     finally:
         sync_error = reset_error = None
@@ -4837,6 +5065,10 @@ def _runtime_evidence_summary(
                       if item.get("rss_delta_bytes") is not None]
         gpu_deltas = [item["gpu_delta_mib"] for item in stability
                       if item.get("gpu_delta_mib") is not None]
+        snode_lifecycle = [
+            item["snode_lifecycle_plateau"] for item in stability
+            if item.get("snode_lifecycle_plateau") is not None
+        ]
         evidence[runtime_name] = {
             "route": representative["route"],
             "device_identity": representative["device_identity"],
@@ -4865,6 +5097,17 @@ def _runtime_evidence_summary(
                     stability
                     and all(item["enhanced_plateau"]["passed"]
                             for item in stability)
+                ),
+                "snode_lifecycle_contract_applicable": bool(
+                    representative["operation"] in (
+                        "snode_churn", "snode_concurrent")),
+                "snode_lifecycle_plateau_required": bool(
+                    representative["operation"] in (
+                        "snode_churn", "snode_concurrent")
+                    and _uses_forge_package(runtime_name)),
+                "snode_lifecycle_plateau_all_passed": bool(
+                    snode_lifecycle
+                    and all(item["passed"] for item in snode_lifecycle)
                 ),
             },
         }
@@ -4953,6 +5196,13 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             f"{baseline_stability['completed_child_count']}；最少 replay："
             f"{baseline_stability['minimum_replays']}；增强 pool/live plateau："
             f"{'通过' if baseline_stability['enhanced_plateau_all_passed'] else '不适用或未完成'}。",
+            ("- SNode 生命周期 plateau："
+             f"`{subject_name}`="
+             f"{'通过' if subject_stability['snode_lifecycle_plateau_all_passed'] else '失败'}；"
+             f"`{baseline_name}`="
+             f"{'通过（计数器不适用）' if baseline_stability['snode_lifecycle_plateau_all_passed'] else '失败'}。"
+             if subject_stability["snode_lifecycle_contract_applicable"] else
+             "- SNode 生命周期 plateau：不适用。"),
             "- First-call 与 warm 单调用 latency 仅作诊断；性能 gate 只适用于"
             "共同 batch、末尾同步一次的 warm throughput/replay 统计。",
             (f"- 归因边界：{definition.get('attribution_zh', definition['attribution'])}。"
@@ -5018,6 +5268,13 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             f"{baseline_stability['completed_child_count']}; minimum replays: "
             f"{baseline_stability['minimum_replays']}; enhanced pool/live plateau: "
             f"{'pass' if baseline_stability['enhanced_plateau_all_passed'] else 'not applicable or incomplete'}.",
+            ("- SNode lifecycle plateau: "
+             f"`{subject_name}`="
+             f"{'pass' if subject_stability['snode_lifecycle_plateau_all_passed'] else 'fail'}; "
+             f"`{baseline_name}`="
+             f"{'pass (counters not applicable)' if baseline_stability['snode_lifecycle_plateau_all_passed'] else 'fail'}."
+             if subject_stability["snode_lifecycle_contract_applicable"] else
+             "- SNode lifecycle plateau: not applicable."),
             "- First-call and warm single-call latency are diagnostic only; "
             "performance gates apply to warm throughput/replay with one final "
             "synchronization per common batch.",
@@ -5074,6 +5331,8 @@ def _write_bilingual_reports(output_dir: Path, summary: dict[str, Any]) -> None:
         "- 正确性与 teardown："
         f"{'通过' if summary['method_checks']['correctness_and_teardown'] else '失败'}\n"
         f"- 稳定性 replay：{'通过' if summary['method_checks']['stability_complete'] else '失败'}\n"
+        "- SNode 生命周期 plateau："
+        f"{'通过' if summary['method_checks']['snode_lifecycle_plateau'] else '失败'}\n"
         f"- 双语 artifact：通过\n"
     )
     validation_en = (
@@ -5117,6 +5376,8 @@ def _write_bilingual_reports(output_dir: Path, summary: dict[str, Any]) -> None:
         f"{'pass' if summary['method_checks']['correctness_and_teardown'] else 'fail'}\n"
         "- Stability replay: "
         f"{'pass' if summary['method_checks']['stability_complete'] else 'fail'}\n"
+        "- SNode lifecycle plateau: "
+        f"{'pass' if summary['method_checks']['snode_lifecycle_plateau'] else 'fail'}\n"
         "- Bilingual artifacts: pass\n"
     )
     (output_dir / "validation.zh-CN.md").write_text(validation_zh, encoding="utf-8")
@@ -5396,7 +5657,10 @@ def _parent_main(args: argparse.Namespace) -> int:
             item["passed"] for item in manifest["noise_observations"]),
         "physical_device_binding": all(
             child["device_identity"]["binding_verified"] for child in children),
-        "route_verified": all(child["route"]["passed"] for child in children),
+        "route_verified": all(
+            child["route"]["passed"]
+            and child.get("route_before_scoring", child["route"])["passed"]
+            for child in children),
         "endpoint_equivalence": all(
             row["endpoint_equivalent"] for row in pair_rows),
         "correctness_and_teardown": all(
@@ -5410,6 +5674,14 @@ def _parent_main(args: argparse.Namespace) -> int:
             child.get("stability") is not None
             and child["stability"]["replays"] >= args.stability_replays
             and child["stability"]["memory_guard_passed"]
+            for child in children),
+        "snode_lifecycle_plateau": all(
+            child["operation"] not in ("snode_churn", "snode_concurrent")
+            or (
+                child.get("stability") is not None
+                and child["stability"].get(
+                    "snode_lifecycle_plateau", {}).get("passed") is True
+            )
             for child in children),
     }
     favorable_pair_fraction = sum(
