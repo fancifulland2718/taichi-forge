@@ -2798,6 +2798,85 @@ def _mpm_endpoint_fingerprint(arrays: Sequence[Any]) -> dict[str, Any]:
     }
 
 
+def _active_grid_mpm_route(
+        graph: Any, runtime_name: str, backend: str, source_sha256: str,
+        grid_cells: int, block_dim: int, sequence: Any | None,
+        bounded_handle: Any | None) -> dict[str, Any]:
+    """Describe the native active-grid route or prove the full-grid control."""
+    class_module = graph.__class__.__module__
+    if not _uses_native_adapter(runtime_name):
+        expected_class_module = (
+            "taichi_forge.graph._graph"
+            if _uses_forge_package(runtime_name)
+            else "taichi.graph._graph"
+        )
+        kernel_names = ["reset_grid", "p2g", "update_grid_full", "g2p"]
+        return {
+            "classification": f"{runtime_name}_full_grid_mls_mpm_graph",
+            "public_api": "GraphBuilder dispatch of four benchmark-owned ti.kernel stages",
+            "adapter": "benchmark_defined_ti_kernel_graph_pipeline",
+            "kernel_source_owner": "benchmark",
+            "kernel_source_sha256": source_sha256,
+            "helper_api_used": False,
+            "specialized_api_used": False,
+            "benchmark_workspace_kind": "none",
+            "benchmark_workspace_field_count": 0,
+            "graph_kernel_names": kernel_names,
+            "graph_dispatches_per_replay": len(kernel_names),
+            "ti_kernel_invocations_per_replay": len(kernel_names),
+            "physical_backend_launches_assumed": False,
+            "class_module": class_module,
+            "expected_class_module": expected_class_module,
+            "update_domain": grid_cells,
+            "passed": bool(
+                runtime_name in ("forge_kernel", "vanilla_kernel")
+                and len(source_sha256) == 64
+                and sequence is None
+                and bounded_handle is None
+                and class_module == expected_class_module
+                and getattr(graph, "_compiled_graph", None) is not None
+            ),
+        }
+
+    compact_route = _native_compact_route(
+        getattr(sequence.workspace, "_compact", None), runtime_name, backend)
+    capabilities = bounded_handle.capabilities
+    return {
+        "classification": "forge_device_compact_bounded_active_grid_graph",
+        "public_api": (
+            "DevicePrefixSequence.compact plus GraphBuilder.dispatch_bounded"
+        ),
+        "adapter": "forge_native_active_grid_graph_pipeline",
+        "kernel_source_owner": "benchmark",
+        "kernel_source_sha256": source_sha256,
+        "class_module": class_module,
+        "compact_route": compact_route,
+        "bounded_route": capabilities.route,
+        "bounded_backend": capabilities.backend,
+        "no_host_readback": capabilities.no_host_readback,
+        "device_known_count": capabilities.device_known_count,
+        "logical_iteration_exact": capabilities.logical_iteration_exact,
+        "physical_launch_kind": capabilities.physical_launch_kind,
+        "masked_capacity": capabilities.masked_capacity,
+        "exact_grid": capabilities.exact_grid,
+        "producer_owned_launch_state": (
+            capabilities.producer_owned_launch_state),
+        "preparation_dispatches": capabilities.preparation_dispatches,
+        "requested_block_dim": block_dim,
+        "workspace_bytes": (
+            sequence.workspace.workspace_bytes_current
+            + bounded_handle.workspace_bytes),
+        "passed": bool(
+            class_module == "taichi_forge.graph._graph"
+            and compact_route["passed"]
+            and capabilities.backend == backend
+            and capabilities.device_known_count
+            and capabilities.no_host_readback
+            and capabilities.logical_iteration_exact
+        ),
+    }
+
+
 def _graph_mpm_route(graph: Any, runtime_name: str, substeps: int) -> dict[str, Any]:
     source_path = inspect.getsourcefile(graph.__class__)
     source = None if source_path is None else Path(source_path).resolve()
@@ -2982,6 +3061,7 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
         raise ValueError("active-grid qualification currently fixes one substep")
     grid_cells = grid * grid
     block_dim = 128
+    source_sha256 = sha256_file(Path(__file__).resolve())
     dx = 1.0 / grid
     inv_dx = float(grid)
     dt = 1.0e-4
@@ -3234,6 +3314,12 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
         flags_host = active_flags.to_numpy()
         mass_host = grid_m.to_numpy()
         mass_mask = mass_host > np.float32(0.0)
+        active_flags_sha256 = hashlib.sha256(
+            np.ascontiguousarray(flags_host.astype(np.uint8)).tobytes()
+        ).hexdigest()
+        mass_mask_sha256 = hashlib.sha256(
+            np.ascontiguousarray(mass_mask.reshape(-1).astype(np.uint8)).tobytes()
+        ).hexdigest()
         active_count = int(flags_host.sum())
         mass_active_count = int(mass_mask.sum())
         published_count = (
@@ -3253,6 +3339,8 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
             "active_count": active_count,
             "mass_active_count": mass_active_count,
             "published_count": published_count,
+            "active_flags_sha256": active_flags_sha256,
+            "mass_mask_sha256": mass_mask_sha256,
             "active_fraction": active_count / grid_cells,
             "flags_match_positive_mass": flags_match_mass,
             "expected_grid_mass": expected_mass,
@@ -3264,6 +3352,7 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
             comparison["passed"]
             and fingerprint["finite"]
             and flags_match_mass
+            and active_flags_sha256 == mass_mask_sha256
             and active_count == mass_active_count == published_count
             and 0 < active_count < grid_cells
             and mass_error <= mass_tolerance
@@ -3273,58 +3362,9 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
         return comparison
 
     def route() -> dict[str, Any]:
-        class_module = graph.__class__.__module__
-        if not _uses_native_adapter(runtime_name):
-            expected_class_module = (
-                "taichi_forge.graph._graph"
-                if _uses_forge_package(runtime_name)
-                else "taichi.graph._graph"
-            )
-            return {
-                "classification": f"{runtime_name}_full_grid_mls_mpm_graph",
-                "public_api": "GraphBuilder dispatch of full-grid update",
-                "class_module": class_module,
-                "expected_class_module": expected_class_module,
-                "update_domain": grid_cells,
-                "passed": bool(
-                    class_module == expected_class_module
-                    and getattr(graph, "_compiled_graph", None) is not None
-                ),
-            }
-        compact_route = _native_compact_route(
-            getattr(sequence.workspace, "_compact", None),
-            runtime_name, backend)
-        capabilities = bounded_handle.capabilities
-        return {
-            "classification": "forge_device_compact_bounded_active_grid_graph",
-            "public_api": (
-                "DevicePrefixSequence.compact plus GraphBuilder.dispatch_bounded"
-            ),
-            "class_module": class_module,
-            "compact_route": compact_route,
-            "bounded_route": capabilities.route,
-            "bounded_backend": capabilities.backend,
-            "no_host_readback": capabilities.no_host_readback,
-            "device_known_count": capabilities.device_known_count,
-            "logical_iteration_exact": capabilities.logical_iteration_exact,
-            "physical_launch_kind": capabilities.physical_launch_kind,
-            "masked_capacity": capabilities.masked_capacity,
-            "exact_grid": capabilities.exact_grid,
-            "producer_owned_launch_state": (
-                capabilities.producer_owned_launch_state),
-            "preparation_dispatches": capabilities.preparation_dispatches,
-            "workspace_bytes": (
-                sequence.workspace.workspace_bytes_current
-                + bounded_handle.workspace_bytes),
-            "passed": bool(
-                class_module == "taichi_forge.graph._graph"
-                and compact_route["passed"]
-                and capabilities.backend == backend
-                and capabilities.device_known_count
-                and capabilities.no_host_readback
-                and capabilities.logical_iteration_exact
-            ),
-        }
+        return _active_grid_mpm_route(
+            graph, runtime_name, backend, source_sha256, grid_cells,
+            block_dim, sequence, bounded_handle)
 
     return {
         "launch": launch,
@@ -3356,6 +3396,18 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
             "substeps": substeps,
             "gravity": 0.0,
             "initial_region": "centered_0.10_by_0.10",
+            "kernel_source_owner": "benchmark",
+            "kernel_source_sha256": source_sha256,
+            "kernel_adapter": "benchmark_defined_ti_kernel_graph_pipeline",
+            "kernel_helper_api_used": False,
+            "kernel_specialized_api_used": False,
+            "kernel_benchmark_workspace_kind": "none",
+            "kernel_benchmark_workspace_field_count": 0,
+            "kernel_graph_kernel_names": [
+                "reset_grid", "p2g", "update_grid_full", "g2p"],
+            "kernel_graph_dispatches_per_replay": 4,
+            "kernel_ti_invocations_per_replay": 4,
+            "kernel_physical_backend_launches_assumed": False,
             "forge_adapter": (
                 "device stable compact of P2G active flags followed by "
                 "a requested producer-owned bounded grid-update dispatch; "
@@ -5551,8 +5603,25 @@ def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
             "mpm_graph", "mpm_direct", "active_grid_mpm"):
         return True
     for validation_name in ("validation_before", "validation_after"):
-        left = left_result[validation_name]["endpoint_fingerprint"]
-        right = right_result[validation_name]["endpoint_fingerprint"]
+        left_validation = left_result[validation_name]
+        right_validation = right_result[validation_name]
+        if (not left_validation.get("passed")
+                or not right_validation.get("passed")):
+            return False
+        if left_result["operation"] == "active_grid_mpm":
+            for key in (
+                    "active_count", "mass_active_count", "published_count",
+                    "active_flags_sha256", "mass_mask_sha256"):
+                if left_validation.get(key) != right_validation.get(key):
+                    return False
+            for value in (left_validation, right_validation):
+                if (not isinstance(value.get("active_flags_sha256"), str)
+                        or len(value["active_flags_sha256"]) != 64
+                        or value["active_flags_sha256"]
+                        != value.get("mass_mask_sha256")):
+                    return False
+        left = left_validation["endpoint_fingerprint"]
+        right = right_validation["endpoint_fingerprint"]
         if not left.get("finite") or not right.get("finite"):
             return False
         for key in ("x_mean", "v_mean", "C_mean", "sample_x", "sample_v"):
@@ -6233,13 +6302,17 @@ def _parent_main(args: argparse.Namespace) -> int:
                     child["operation"] not in (
                         "native_reduce", "native_transform", "native_gather",
                         "native_scatter", "native_compact",
-                        "device_prefix_chain")
+                        "device_prefix_chain", "active_grid_mpm")
                     or (
                         child["route"].get("adapter") == (
                             "benchmark_defined_ti_kernel_pipeline"
                             if child["operation"] in (
                                 "native_compact", "device_prefix_chain")
-                            else "benchmark_defined_ti_kernel"
+                            else (
+                                "benchmark_defined_ti_kernel_graph_pipeline"
+                                if child["operation"] == "active_grid_mpm"
+                                else "benchmark_defined_ti_kernel"
+                            )
                         )
                         and child["route"].get("kernel_source_owner")
                         == "benchmark"
@@ -6248,47 +6321,64 @@ def _parent_main(args: argparse.Namespace) -> int:
                             "kernel_source_sha256")
                         and child["route"].get("helper_api_used") is False
                         and (
-                            child["route"].get("specialized_api_used") is False
-                            and child["route"].get(
-                                "benchmark_workspace_field_count") == 2
-                            and child["route"].get("scan_algorithm")
-                            == "inclusive_hillis_steele_ping_pong"
-                            and child["route"].get("scan_steps")
-                            == child["workload_contract"].get(
-                                "kernel_scan_steps")
-                            and child["route"].get(
-                                "final_scan_copy_kernel_invocations")
-                            == child["workload_contract"].get(
-                                "kernel_final_scan_copy_kernel_invocations")
-                            if child["operation"] == "native_compact" else (
+                            (
                                 child["route"].get(
                                     "specialized_api_used") is False
                                 and child["route"].get(
-                                    "benchmark_workspace_field_count") == 4
+                                    "benchmark_workspace_field_count") == 0
+                                and child["route"].get(
+                                    "graph_kernel_names")
+                                == child["workload_contract"].get(
+                                    "kernel_graph_kernel_names")
+                                and child["route"].get(
+                                    "graph_dispatches_per_replay")
+                                == child["workload_contract"].get(
+                                    "kernel_graph_dispatches_per_replay")
+                            )
+                            if child["operation"] == "active_grid_mpm" else (
+                                child["route"].get(
+                                    "specialized_api_used") is False
+                                and child["route"].get(
+                                    "benchmark_workspace_field_count") == 2
                                 and child["route"].get("scan_algorithm")
                                 == "inclusive_hillis_steele_ping_pong"
-                                and child["route"].get(
-                                    "scan_pipelines_per_replay")
+                                and child["route"].get("scan_steps")
                                 == child["workload_contract"].get(
-                                    "kernel_scan_pipelines_per_replay")
+                                    "kernel_scan_steps")
                                 and child["route"].get(
-                                    "scan_steps_per_pipeline")
+                                    "final_scan_copy_kernel_invocations")
                                 == child["workload_contract"].get(
-                                    "kernel_scan_steps_per_pipeline")
-                                and child["route"].get(
-                                    "final_scan_copy_kernel_invocations_"
-                                    "per_pipeline")
-                                == child["workload_contract"].get(
-                                    "kernel_final_scan_copy_kernel_"
-                                    "invocations_per_pipeline")
-                                and child["route"].get(
-                                    "stage_ti_kernel_invocations_per_replay")
-                                == child["workload_contract"].get(
-                                    "kernel_stage_ti_invocations_per_replay")
-                                if child["operation"]
-                                == "device_prefix_chain" else
-                                child["route"].get(
-                                    "workspace_present") is False
+                                    "kernel_final_scan_copy_kernel_invocations")
+                                if child["operation"] == "native_compact" else (
+                                    child["route"].get(
+                                        "specialized_api_used") is False
+                                    and child["route"].get(
+                                        "benchmark_workspace_field_count") == 4
+                                    and child["route"].get("scan_algorithm")
+                                    == "inclusive_hillis_steele_ping_pong"
+                                    and child["route"].get(
+                                        "scan_pipelines_per_replay")
+                                    == child["workload_contract"].get(
+                                        "kernel_scan_pipelines_per_replay")
+                                    and child["route"].get(
+                                        "scan_steps_per_pipeline")
+                                    == child["workload_contract"].get(
+                                        "kernel_scan_steps_per_pipeline")
+                                    and child["route"].get(
+                                        "final_scan_copy_kernel_invocations_"
+                                        "per_pipeline")
+                                    == child["workload_contract"].get(
+                                        "kernel_final_scan_copy_kernel_"
+                                        "invocations_per_pipeline")
+                                    and child["route"].get(
+                                        "stage_ti_kernel_invocations_per_replay")
+                                    == child["workload_contract"].get(
+                                        "kernel_stage_ti_invocations_per_replay")
+                                    if child["operation"]
+                                    == "device_prefix_chain" else
+                                    child["route"].get(
+                                        "workspace_present") is False
+                                )
                             )
                         )
                         and child["route"].get(

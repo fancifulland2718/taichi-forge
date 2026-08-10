@@ -194,15 +194,22 @@ and after scoring, the runner checks the exact count plus ordered SHA-256, sum,
 extrema, and samples for both compacted and scanned outputs. Its entry point is
 `device_prefix_chain_microbench.py`.
 
-`active_grid_mpm` is `THIN-004`. Both runtimes run the same stationary f32
-2-D MLS-MPM state, 256-square grid, 4,096 particles, grid reset, P2G active
-marking, update body, G2P, compiled-graph replay, full-state tolerance, and
-mass/active-mask oracles. Zero gravity keeps the state and 841-node active
-domain fixed through long batches. Vanilla visits all 65,536 grid nodes;
-Forge requests device stable compact plus bounded dispatch over the same flags.
-Route evidence must disclose the physical launch kind, exact-grid support,
-producer-owned state, and host-readback status. This is a thin-capability case,
-not a same-public-API comparison. Use `active_grid_mpm_microbench.py`.
+`active_grid_mpm` is `THIN-004`. Its required three-route matrix is
+vanilla/kernel, Forge/kernel, and Forge/native. The kernel-compatibility axis
+runs the same benchmark-owned source SHA and four-stage Graph pipeline on both
+packages: grid reset, P2G active marking, full-grid update, and G2P. Route
+evidence proves four `ti.kernel` invocations, no helper/specialized API, and no
+benchmark workspace; it does not assume a physical CUDA-launch count. The
+native-isolation axis changes only the update-domain adapter: Forge requests
+device stable compact plus bounded dispatch over the same flags, while the
+Forge/kernel control retains the full-grid update. All three routes share the
+same stationary f32 2-D MLS-MPM state, 256-square grid, 4,096 particles,
+compiled-graph replay, full-state tolerance, mass oracle, and exact active-mask
+SHA-256. Zero gravity keeps the state and 841-node active domain fixed through
+long batches. Native route evidence must disclose physical launch kind,
+exact-grid support, producer-owned state, and host-readback status. This is a
+thin-capability case, not a same-public-API comparison. Use
+`active_grid_mpm_microbench.py`.
 
 `particle_spatial_hash` is `THIN-005`. The small case maps 65,536 regular-grid
 particles into 16,384 cells, four particles per cell, then runs the same

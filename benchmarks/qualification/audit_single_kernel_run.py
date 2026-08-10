@@ -309,8 +309,25 @@ def _endpoint_equivalent(left_result: dict[str, Any],
             "mpm_graph", "mpm_direct", "active_grid_mpm"):
         return True
     for validation_name in ("validation_before", "validation_after"):
-        left = left_result[validation_name]["endpoint_fingerprint"]
-        right = right_result[validation_name]["endpoint_fingerprint"]
+        left_validation = left_result[validation_name]
+        right_validation = right_result[validation_name]
+        if (not left_validation.get("passed")
+                or not right_validation.get("passed")):
+            return False
+        if left_result["operation"] == "active_grid_mpm":
+            for key in (
+                    "active_count", "mass_active_count", "published_count",
+                    "active_flags_sha256", "mass_mask_sha256"):
+                if left_validation.get(key) != right_validation.get(key):
+                    return False
+            for value in (left_validation, right_validation):
+                if (not isinstance(value.get("active_flags_sha256"), str)
+                        or len(value["active_flags_sha256"]) != 64
+                        or value["active_flags_sha256"]
+                        != value.get("mass_mask_sha256")):
+                    return False
+        left = left_validation["endpoint_fingerprint"]
+        right = right_validation["endpoint_fingerprint"]
         if not left.get("finite") or not right.get("finite"):
             return False
         for key in ("x_mean", "v_mean", "C_mean", "sample_x", "sample_v"):
@@ -710,13 +727,17 @@ def _audit(run_dir: Path) -> dict[str, Any]:
                 child["operation"] not in (
                     "native_reduce", "native_transform", "native_gather",
                     "native_scatter", "native_compact",
-                    "device_prefix_chain")
+                    "device_prefix_chain", "active_grid_mpm")
                 or (
                     child["route"].get("adapter") == (
                         "benchmark_defined_ti_kernel_pipeline"
                         if child["operation"] in (
                             "native_compact", "device_prefix_chain")
-                        else "benchmark_defined_ti_kernel"
+                        else (
+                            "benchmark_defined_ti_kernel_graph_pipeline"
+                            if child["operation"] == "active_grid_mpm"
+                            else "benchmark_defined_ti_kernel"
+                        )
                     )
                     and child["route"].get("kernel_source_owner")
                     == "benchmark"
@@ -725,47 +746,64 @@ def _audit(run_dir: Path) -> dict[str, Any]:
                         "kernel_source_sha256")
                     and child["route"].get("helper_api_used") is False
                     and (
-                        child["route"].get("specialized_api_used") is False
-                        and child["route"].get(
-                            "benchmark_workspace_field_count") == 2
-                        and child["route"].get("scan_algorithm")
-                        == "inclusive_hillis_steele_ping_pong"
-                        and child["route"].get("scan_steps")
-                        == child["workload_contract"].get(
-                            "kernel_scan_steps")
-                        and child["route"].get(
-                            "final_scan_copy_kernel_invocations")
-                        == child["workload_contract"].get(
-                            "kernel_final_scan_copy_kernel_invocations")
-                        if child["operation"] == "native_compact" else (
+                        (
                             child["route"].get(
                                 "specialized_api_used") is False
                             and child["route"].get(
-                                "benchmark_workspace_field_count") == 4
+                                "benchmark_workspace_field_count") == 0
+                            and child["route"].get(
+                                "graph_kernel_names")
+                            == child["workload_contract"].get(
+                                "kernel_graph_kernel_names")
+                            and child["route"].get(
+                                "graph_dispatches_per_replay")
+                            == child["workload_contract"].get(
+                                "kernel_graph_dispatches_per_replay")
+                        )
+                        if child["operation"] == "active_grid_mpm" else (
+                            child["route"].get(
+                                "specialized_api_used") is False
+                            and child["route"].get(
+                                "benchmark_workspace_field_count") == 2
                             and child["route"].get("scan_algorithm")
                             == "inclusive_hillis_steele_ping_pong"
-                            and child["route"].get(
-                                "scan_pipelines_per_replay")
+                            and child["route"].get("scan_steps")
                             == child["workload_contract"].get(
-                                "kernel_scan_pipelines_per_replay")
+                                "kernel_scan_steps")
                             and child["route"].get(
-                                "scan_steps_per_pipeline")
+                                "final_scan_copy_kernel_invocations")
                             == child["workload_contract"].get(
-                                "kernel_scan_steps_per_pipeline")
-                            and child["route"].get(
-                                "final_scan_copy_kernel_invocations_"
-                                "per_pipeline")
-                            == child["workload_contract"].get(
-                                "kernel_final_scan_copy_kernel_"
-                                "invocations_per_pipeline")
-                            and child["route"].get(
-                                "stage_ti_kernel_invocations_per_replay")
-                            == child["workload_contract"].get(
-                                "kernel_stage_ti_invocations_per_replay")
-                            if child["operation"]
-                            == "device_prefix_chain" else
-                            child["route"].get(
-                                "workspace_present") is False
+                                "kernel_final_scan_copy_kernel_invocations")
+                            if child["operation"] == "native_compact" else (
+                                child["route"].get(
+                                    "specialized_api_used") is False
+                                and child["route"].get(
+                                    "benchmark_workspace_field_count") == 4
+                                and child["route"].get("scan_algorithm")
+                                == "inclusive_hillis_steele_ping_pong"
+                                and child["route"].get(
+                                    "scan_pipelines_per_replay")
+                                == child["workload_contract"].get(
+                                    "kernel_scan_pipelines_per_replay")
+                                and child["route"].get(
+                                    "scan_steps_per_pipeline")
+                                == child["workload_contract"].get(
+                                    "kernel_scan_steps_per_pipeline")
+                                and child["route"].get(
+                                    "final_scan_copy_kernel_invocations_"
+                                    "per_pipeline")
+                                == child["workload_contract"].get(
+                                    "kernel_final_scan_copy_kernel_"
+                                    "invocations_per_pipeline")
+                                and child["route"].get(
+                                    "stage_ti_kernel_invocations_per_replay")
+                                == child["workload_contract"].get(
+                                    "kernel_stage_ti_invocations_per_replay")
+                                if child["operation"]
+                                == "device_prefix_chain" else
+                                child["route"].get(
+                                    "workspace_present") is False
+                            )
                         )
                     )
                     and child["route"].get(

@@ -163,13 +163,19 @@ kernel；每个 replay 有 35 次 Taichi kernel 调用，物理 backend launch �
 count；计分前后会对 compact 与 scan 两份输出分别核对 exact count、ordered SHA-256、
 sum、极值与 samples。独立入口为 `device_prefix_chain_microbench.py`。
 
-`active_grid_mpm` 是 `THIN-004`。两边共享同一个静态平衡 f32 二维 MLS-MPM
-状态、256² 网格、4,096 粒子、grid reset、P2G 活跃标记、更新 body、G2P、compiled
-Graph replay、全状态容差和质量/活跃 mask oracle。零重力让长 batch 中的状态与
-841-node 活跃域保持固定。vanilla 访问全部 65,536 个网格节点；Forge 对同一 flags
-请求 device stable compact + bounded dispatch。route 证据必须披露物理 launch 类型、
-exact-grid 支持、producer-owned state 与 host readback 状态。它属于 thin-capability，
-不是相同公开 API 对比；独立入口为 `active_grid_mpm_microbench.py`。
+`active_grid_mpm` 是 `THIN-004`，必须覆盖 vanilla/kernel、Forge/kernel 和
+Forge/native 三条路线。kernel compatibility 轴在两个 package 上运行相同的
+benchmark-owned source SHA 和四阶段 Graph pipeline：grid reset、P2G 活跃标记、
+full-grid update 与 G2P。route 证据证明每次 replay 有四次 `ti.kernel` 调用、未使用
+helper/specialized API、没有 benchmark workspace；它不假定物理 CUDA launch 数。
+native isolation 轴只改变 update-domain adapter：Forge 对同一 flags 请求 device
+stable compact + bounded dispatch，Forge/kernel 控制组保留 full-grid update。三条
+路线共享同一个静态平衡 f32 二维 MLS-MPM 状态、256² 网格、4,096 粒子、compiled
+Graph replay、全状态容差、质量 oracle 与 exact active-mask SHA-256。零重力让长
+batch 中的状态与 841-node 活跃域保持固定。native route 证据必须披露物理 launch
+类型、exact-grid 支持、producer-owned state 与 host readback 状态。它属于
+thin-capability，不是相同公开 API 对比；独立入口为
+`active_grid_mpm_microbench.py`。
 
 `particle_spatial_hash` 是 `THIN-005`。small 案例把 65,536 个规则网格粒子映射到
 16,384 个 cell，每 cell 4 粒子，随后执行相同的固定半径邻域查询。两边共享位置、

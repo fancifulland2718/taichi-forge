@@ -20,6 +20,7 @@ from benchmarks.qualification.single_kernel_microbench import (
     _ordinary_kernel_route,
     _endpoint_equivalent,
     _device_prefix_chain_route,
+    _active_grid_mpm_route,
     _particle_hash_route,
     _adaptive_pbd_route,
     _bfs_worklist_route,
@@ -798,6 +799,75 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
                 "passed"])
         self.assertFalse(_device_prefix_chain_route(
             None, "vanilla_kernel", "cuda", 65536, "short")["passed"])
+
+    def test_active_grid_kernel_route_proves_shared_graph_pipeline(self):
+        class ForgeGraph:
+            _compiled_graph = object()
+
+        ForgeGraph.__module__ = "taichi_forge.graph._graph"
+        source_sha256 = "e" * 64
+        route = _active_grid_mpm_route(
+            ForgeGraph(), "forge_kernel", "cuda", source_sha256,
+            65536, 128, None, None)
+        self.assertTrue(route["passed"])
+        self.assertEqual(
+            route["adapter"], "benchmark_defined_ti_kernel_graph_pipeline")
+        self.assertEqual(route["kernel_source_owner"], "benchmark")
+        self.assertEqual(route["kernel_source_sha256"], source_sha256)
+        self.assertFalse(route["helper_api_used"])
+        self.assertFalse(route["specialized_api_used"])
+        self.assertEqual(route["benchmark_workspace_field_count"], 0)
+        self.assertEqual(
+            route["graph_kernel_names"],
+            ["reset_grid", "p2g", "update_grid_full", "g2p"])
+        self.assertEqual(route["graph_dispatches_per_replay"], 4)
+        self.assertEqual(route["ti_kernel_invocations_per_replay"], 4)
+        self.assertFalse(route["physical_backend_launches_assumed"])
+        self.assertFalse(_active_grid_mpm_route(
+            ForgeGraph(), "forge_kernel", "cuda", "short",
+            65536, 128, None, None)["passed"])
+        self.assertFalse(_active_grid_mpm_route(
+            ForgeGraph(), "forge_kernel", "cuda", source_sha256,
+            65536, 128, object(), None)["passed"])
+
+    def test_active_grid_endpoint_requires_exact_active_mask_evidence(self):
+        validation = {
+            "passed": True,
+            "active_count": 841,
+            "mass_active_count": 841,
+            "published_count": 841,
+            "active_flags_sha256": "f" * 64,
+            "mass_mask_sha256": "f" * 64,
+            "endpoint_fingerprint": {
+                "finite": True,
+                "x_mean": [0.5, 0.5],
+                "v_mean": [0.0, 0.0],
+                "C_mean": [0.0, 0.0, 0.0, 0.0],
+                "J_mean": 1.0,
+                "image_sum": 0.0,
+                "image_max": 0.0,
+                "sample_x": [0.45, 0.45],
+                "sample_v": [0.0, 0.0],
+            },
+        }
+        results = {
+            name: {
+                "operation": "active_grid_mpm",
+                "validation_before": json.loads(json.dumps(validation)),
+                "validation_after": json.loads(json.dumps(validation)),
+            }
+            for name in ("forge", "forge_kernel")
+        }
+        self.assertTrue(_endpoint_equivalent(
+            results, "forge", "forge_kernel"))
+        self.assertTrue(_audit_endpoint_equivalent(
+            results["forge"], results["forge_kernel"]))
+        results["forge_kernel"]["validation_after"][
+            "active_flags_sha256"] = "0" * 64
+        self.assertFalse(_endpoint_equivalent(
+            results, "forge", "forge_kernel"))
+        self.assertFalse(_audit_endpoint_equivalent(
+            results["forge"], results["forge_kernel"]))
 
     def test_particle_hash_route_requires_native_bucket_plan(self):
         class Plan:
