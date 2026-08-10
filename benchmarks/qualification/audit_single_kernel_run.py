@@ -162,6 +162,39 @@ def _endpoint_equivalent(left_result: dict[str, Any],
                 if left.get(key) != right.get(key):
                     return False
         return True
+    if left_result["operation"] == "native_gather":
+        for validation_name in ("validation_before", "validation_after"):
+            left = left_result[validation_name]
+            right = right_result[validation_name]
+            for value in (left, right):
+                if (not value.get("passed")
+                        or value.get("comparison") != "exact_i32_gather"):
+                    return False
+                if (not isinstance(value.get("count"), int)
+                        or value["count"] <= 0
+                        or value.get("mismatch_count") != 0
+                        or value.get("first_mismatch") is not None):
+                    return False
+                if (not isinstance(value.get("actual_sha256"), str)
+                        or len(value["actual_sha256"]) != 64
+                        or value["actual_sha256"]
+                        != value.get("expected_sha256")):
+                    return False
+                for suffix in ("sum", "minimum", "maximum", "samples"):
+                    if value.get(f"actual_{suffix}") != value.get(
+                            f"expected_{suffix}"):
+                        return False
+                if len(value.get("sample_indices", [])) != len(
+                        value.get("actual_samples", [])):
+                    return False
+            for key in (
+                    "count", "actual_sha256", "expected_sha256",
+                    "actual_sum", "expected_sum", "actual_minimum",
+                    "expected_minimum", "actual_maximum", "expected_maximum",
+                    "sample_indices", "actual_samples", "expected_samples"):
+                if left.get(key) != right.get(key):
+                    return False
+        return True
     if left_result["operation"] == "adaptive_pbd":
         for validation_name in ("validation_before", "validation_after"):
             left = left_result[validation_name]["endpoint_fingerprint"]
@@ -591,7 +624,7 @@ def _audit(run_dir: Path) -> dict[str, Any]:
                 child["route"], sort_keys=True).lower()
             and (
                 child["operation"] not in (
-                    "native_reduce", "native_transform")
+                    "native_reduce", "native_transform", "native_gather")
                 or (
                     child["route"].get("adapter")
                     == "benchmark_defined_ti_kernel"

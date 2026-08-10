@@ -154,6 +154,43 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         self.assertFalse(_audit_endpoint_equivalent(
             results["forge"], results["forge_kernel"]))
 
+    def test_native_gather_endpoint_equivalence_uses_exact_fingerprint(self):
+        validation = {
+            "passed": True,
+            "comparison": "exact_i32_gather",
+            "count": 4,
+            "actual_sha256": "c" * 64,
+            "expected_sha256": "c" * 64,
+            "actual_sum": 12,
+            "expected_sum": 12,
+            "actual_minimum": -3,
+            "expected_minimum": -3,
+            "actual_maximum": 8,
+            "expected_maximum": 8,
+            "sample_indices": [0, 1, 2, 3],
+            "actual_samples": [-3, 2, 5, 8],
+            "expected_samples": [-3, 2, 5, 8],
+            "mismatch_count": 0,
+            "first_mismatch": None,
+        }
+        results = {
+            name: {
+                "operation": "native_gather",
+                "validation_before": json.loads(json.dumps(validation)),
+                "validation_after": json.loads(json.dumps(validation)),
+            }
+            for name in ("forge", "forge_kernel")
+        }
+        self.assertTrue(
+            _endpoint_equivalent(results, "forge", "forge_kernel"))
+        self.assertTrue(_audit_endpoint_equivalent(
+            results["forge"], results["forge_kernel"]))
+        results["forge_kernel"]["validation_after"]["actual_samples"][1] = 3
+        self.assertFalse(
+            _endpoint_equivalent(results, "forge", "forge_kernel"))
+        self.assertFalse(_audit_endpoint_equivalent(
+            results["forge"], results["forge_kernel"]))
+
     def test_profiler_range_rejects_normal_parent_or_non_cuda_run(self):
         with self.assertRaisesRegex(
                 ValueError, "requires one CUDA score sample in child mode"):
@@ -485,13 +522,35 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
             workspace_bytes_peak = 0
 
         route = _native_indexed_copy_route(
-            Workspace(), "forge", "cuda", scatter=False)
+            Workspace(), "forge", "cuda", scatter=False,
+            kernel_source_sha256="a" * 64)
         self.assertTrue(route["passed"])
         self.assertEqual(route["observed_method"],
                          "cuda_device_gather_ndarray")
         Plan.method_name = "gather_i32_ndarray_kernel_fallback"
         self.assertFalse(_native_indexed_copy_route(
-            Workspace(), "forge", "cuda", scatter=False)["passed"])
+            Workspace(), "forge", "cuda", scatter=False,
+            kernel_source_sha256="a" * 64)["passed"])
+
+    def test_native_gather_kernel_route_proves_benchmark_control(self):
+        source_sha256 = "a" * 64
+        route = _native_indexed_copy_route(
+            None, "forge_kernel", "cuda", scatter=False,
+            kernel_source_sha256=source_sha256)
+        self.assertTrue(route["passed"])
+        self.assertEqual(route["adapter"], "benchmark_defined_ti_kernel")
+        self.assertEqual(route["kernel_source_owner"], "benchmark")
+        self.assertEqual(route["kernel_source_sha256"], source_sha256)
+        self.assertFalse(route["helper_api_used"])
+        self.assertFalse(route["workspace_present"])
+        self.assertEqual(route["ti_kernel_invocations_per_replay"], 1)
+        self.assertFalse(route["physical_backend_launches_assumed"])
+        self.assertFalse(_native_indexed_copy_route(
+            object(), "forge_kernel", "cuda", scatter=False,
+            kernel_source_sha256=source_sha256)["passed"])
+        self.assertFalse(_native_indexed_copy_route(
+            None, "forge_kernel", "cuda", scatter=False,
+            kernel_source_sha256="short")["passed"])
 
     def test_native_scatter_route_distinguishes_gather_plan(self):
         class Plan:
@@ -504,9 +563,11 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
             workspace_bytes_peak = 0
 
         self.assertTrue(_native_indexed_copy_route(
-            Workspace(), "forge", "cuda", scatter=True)["passed"])
+            Workspace(), "forge", "cuda", scatter=True,
+            kernel_source_sha256="a" * 64)["passed"])
         self.assertFalse(_native_indexed_copy_route(
-            Workspace(), "forge", "cuda", scatter=False)["passed"])
+            Workspace(), "forge", "cuda", scatter=False,
+            kernel_source_sha256="a" * 64)["passed"])
 
     def test_native_compact_route_requires_cuda_device_plan(self):
         class Plan:

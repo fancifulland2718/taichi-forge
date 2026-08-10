@@ -1324,7 +1324,8 @@ def _build_native_transform_case(ti: Any, runtime_name: str, backend: str,
 
 
 def _native_indexed_copy_route(workspace: Any | None, runtime_name: str,
-                               backend: str, scatter: bool) -> dict[str, Any]:
+                               backend: str, scatter: bool,
+                               kernel_source_sha256: str) -> dict[str, Any]:
     operation = "scatter" if scatter else "gather"
     if runtime_name == "forge":
         plan = getattr(workspace, "_native_indexed_copy_plan", None)
@@ -1357,15 +1358,27 @@ def _native_indexed_copy_route(workspace: Any | None, runtime_name: str,
                 and observed_method == expected_method
             ),
         }
+    passed = bool(
+        runtime_name in ("forge_kernel", "vanilla_kernel")
+        and workspace is None
+        and len(kernel_source_sha256) == 64
+    )
     return {
         "classification": f"{runtime_name}_equivalent_i32_{operation}_kernel",
+        "adapter": "benchmark_defined_ti_kernel",
+        "kernel_source_owner": "benchmark",
+        "kernel_source_sha256": kernel_source_sha256,
+        "helper_api_used": False,
+        "workspace_present": workspace is not None,
+        "ti_kernel_invocations_per_replay": 1,
+        "physical_backend_launches_assumed": False,
         "expected_backend": backend,
         "expected_method": f"one indexed i32 {operation} Taichi kernel",
         "observed_plan_backend": backend,
         "observed_method": f"qualification_{operation}_i32_kernel",
         "workspace_bytes_current": 0,
         "workspace_bytes_peak": 0,
-        "passed": True,
+        "passed": passed,
     }
 
 
@@ -1375,16 +1388,34 @@ def _build_native_indexed_copy_case(ti: Any, runtime_name: str, backend: str,
     import numpy as np
 
     operation = "scatter" if scatter else "gather"
+    source_sha256 = sha256_file(Path(__file__))
     host = ((np.arange(elements, dtype=np.int64) * 31 + 11) % 2003
             - 1001).astype(np.int32)
     host_indices = (
         (np.arange(elements, dtype=np.int64) * 17 + 5) % elements
     ).astype(np.int32)
+    index_multiplier = 17
+    index_offset = 5
+    index_multiplier_gcd = math.gcd(index_multiplier, elements)
+    indices_in_range = bool(
+        host_indices.size == elements
+        and int(host_indices.min()) == 0
+        and int(host_indices.max()) == elements - 1
+    )
+    full_permutation_passed = bool(
+        index_multiplier_gcd == 1 and indices_in_range)
+    if not full_permutation_passed:
+        raise ValueError(
+            "indexed-copy qualification requires a proven full permutation")
+    index_sha256 = hashlib.sha256(host_indices.tobytes()).hexdigest()
     expected = np.zeros(elements, dtype=np.int32)
     if scatter:
         expected[host_indices] = host
     else:
         expected = host[host_indices]
+    expected_sha256 = hashlib.sha256(expected.tobytes()).hexdigest()
+    sample_indices = sorted(set((0, elements // 4, elements // 2,
+                                 (3 * elements) // 4, elements - 1)))
     values = ti.ndarray(dtype=ti.i32, shape=elements)
     indices = ti.ndarray(dtype=ti.i32, shape=elements)
     output = ti.ndarray(dtype=ti.i32, shape=elements)
@@ -1438,6 +1469,20 @@ def _build_native_indexed_copy_case(ti: Any, runtime_name: str, backend: str,
         return {
             "passed": mismatch.size == 0,
             "comparison": f"exact_i32_{operation}",
+            "count": int(actual.size),
+            "actual_sha256": hashlib.sha256(actual.tobytes()).hexdigest(),
+            "expected_sha256": expected_sha256,
+            "actual_sum": int(actual.astype(np.int64).sum()),
+            "expected_sum": int(expected.astype(np.int64).sum()),
+            "actual_minimum": int(actual.min()),
+            "expected_minimum": int(expected.min()),
+            "actual_maximum": int(actual.max()),
+            "expected_maximum": int(expected.max()),
+            "sample_indices": sample_indices,
+            "actual_samples": [int(actual[index]) for index in sample_indices],
+            "expected_samples": [
+                int(expected[index]) for index in sample_indices
+            ],
             "mismatch_count": int(mismatch.size),
             "first_mismatch": (
                 None if mismatch.size == 0 else int(mismatch[0])
@@ -1449,13 +1494,25 @@ def _build_native_indexed_copy_case(ti: Any, runtime_name: str, backend: str,
         "reset": reset,
         "validate": validate_fresh,
         "route": lambda: _native_indexed_copy_route(
-            workspace, runtime_name, backend, scatter),
+            workspace, runtime_name, backend, scatter, source_sha256),
         "logical_bytes": elements * 12,
         "traffic_model": (
             "semantic minimum: one i32 index read, one i32 payload read, and "
             "one i32 destination write per item; implementation workspace "
             "traffic excluded"
         ),
+        "case_preparation": {
+            "excluded_from_timing": True,
+            "index_count": elements,
+            "index_minimum": int(host_indices.min()),
+            "index_maximum": int(host_indices.max()),
+            "index_sha256": index_sha256,
+            "affine_multiplier": index_multiplier,
+            "affine_offset": index_offset,
+            "gcd_multiplier_length": index_multiplier_gcd,
+            "full_permutation_passed": full_permutation_passed,
+            "proof": "affine_modulo_bijection_gcd_multiplier_length_equals_one",
+        },
         "workload_contract": {
             "case_id": f"THIN-002-{operation.upper()}",
             "comparison_class": "thin-capability",
@@ -1468,11 +1525,22 @@ def _build_native_indexed_copy_case(ti: Any, runtime_name: str, backend: str,
             "input_pattern": "((i * 31 + 11) % 2003) - 1001",
             "index_pattern": "(i * 17 + 5) % n; full permutation for presets",
             "unique_in_range_indices": True,
+            "index_sha256": index_sha256,
+            "index_permutation_proof": (
+                "affine_modulo_bijection_gcd_17_n_equals_one"
+            ),
+            "index_multiplier_gcd": index_multiplier_gcd,
             "forge_adapter": (
                 f"experimental_{operation}(method=auto,reusable "
                 "IndexedCopyWorkspace)"
             ),
             "vanilla_adapter": f"one common-source indexed {operation} kernel",
+            "kernel_source_owner": "benchmark",
+            "kernel_source_sha256": source_sha256,
+            "kernel_adapter": "benchmark_defined_ti_kernel",
+            "kernel_helper_api_used": False,
+            "kernel_ti_invocations_per_replay": 1,
+            "kernel_physical_backend_launches_assumed": False,
             "shared": (
                 "same ndarray allocation, values, indices, indexed-copy "
                 "semantics, output dtype/shape, launch count, outer "
@@ -5141,6 +5209,39 @@ def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
                 if left.get(key) != right.get(key):
                     return False
         return True
+    if left_result["operation"] == "native_gather":
+        for validation_name in ("validation_before", "validation_after"):
+            left = left_result[validation_name]
+            right = right_result[validation_name]
+            for value in (left, right):
+                if (not value.get("passed")
+                        or value.get("comparison") != "exact_i32_gather"):
+                    return False
+                if (not isinstance(value.get("count"), int)
+                        or value["count"] <= 0
+                        or value.get("mismatch_count") != 0
+                        or value.get("first_mismatch") is not None):
+                    return False
+                if (not isinstance(value.get("actual_sha256"), str)
+                        or len(value["actual_sha256"]) != 64
+                        or value["actual_sha256"]
+                        != value.get("expected_sha256")):
+                    return False
+                for suffix in ("sum", "minimum", "maximum", "samples"):
+                    if value.get(f"actual_{suffix}") != value.get(
+                            f"expected_{suffix}"):
+                        return False
+                if len(value.get("sample_indices", [])) != len(
+                        value.get("actual_samples", [])):
+                    return False
+            for key in (
+                    "count", "actual_sha256", "expected_sha256",
+                    "actual_sum", "expected_sum", "actual_minimum",
+                    "expected_minimum", "actual_maximum", "expected_maximum",
+                    "sample_indices", "actual_samples", "expected_samples"):
+                if left.get(key) != right.get(key):
+                    return False
+        return True
     if left_result["operation"] == "adaptive_pbd":
         for validation_name in ("validation_before", "validation_after"):
             left = left_result[validation_name]["endpoint_fingerprint"]
@@ -5854,7 +5955,7 @@ def _parent_main(args: argparse.Namespace) -> int:
                     child["route"], sort_keys=True).lower()
                 and (
                     child["operation"] not in (
-                        "native_reduce", "native_transform")
+                        "native_reduce", "native_transform", "native_gather")
                     or (
                         child["route"].get("adapter")
                         == "benchmark_defined_ti_kernel"
