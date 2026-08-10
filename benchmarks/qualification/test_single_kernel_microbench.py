@@ -228,6 +228,45 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         self.assertFalse(_audit_endpoint_equivalent(
             results["forge"], results["forge_kernel"]))
 
+    def test_native_compact_endpoint_equivalence_uses_exact_ordered_fingerprint(
+            self):
+        validation = {
+            "passed": True,
+            "comparison": "exact_stable_i32_compact",
+            "actual_count": 4,
+            "expected_count": 4,
+            "actual_sha256": "e" * 64,
+            "expected_sha256": "e" * 64,
+            "actual_sum": 12,
+            "expected_sum": 12,
+            "actual_minimum": -3,
+            "expected_minimum": -3,
+            "actual_maximum": 8,
+            "expected_maximum": 8,
+            "sample_indices": [0, 1, 2, 3],
+            "actual_samples": [5, -3, 8, 2],
+            "expected_samples": [5, -3, 8, 2],
+            "mismatch_count": 0,
+            "first_mismatch": None,
+        }
+        results = {
+            name: {
+                "operation": "native_compact",
+                "validation_before": json.loads(json.dumps(validation)),
+                "validation_after": json.loads(json.dumps(validation)),
+            }
+            for name in ("forge", "forge_kernel")
+        }
+        self.assertTrue(
+            _endpoint_equivalent(results, "forge", "forge_kernel"))
+        self.assertTrue(_audit_endpoint_equivalent(
+            results["forge"], results["forge_kernel"]))
+        results["forge_kernel"]["validation_after"]["actual_samples"][2] = 7
+        self.assertFalse(
+            _endpoint_equivalent(results, "forge", "forge_kernel"))
+        self.assertFalse(_audit_endpoint_equivalent(
+            results["forge"], results["forge_kernel"]))
+
     def test_profiler_range_rejects_normal_parent_or_non_cuda_run(self):
         with self.assertRaisesRegex(
                 ValueError, "requires one CUDA score sample in child mode"):
@@ -641,6 +680,28 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         Plan.backend = "cuda_cub"
         self.assertFalse(
             _native_compact_route(Workspace(), "forge", "cuda")["passed"])
+
+    def test_native_compact_kernel_route_proves_benchmark_pipeline(self):
+        source_sha256 = "c" * 64
+        route = _native_compact_route(
+            None, "vanilla_kernel", "cuda", source_sha256, 65536)
+        self.assertTrue(route["passed"])
+        self.assertEqual(route["adapter"],
+                         "benchmark_defined_ti_kernel_pipeline")
+        self.assertEqual(route["kernel_source_owner"], "benchmark")
+        self.assertEqual(route["kernel_source_sha256"], source_sha256)
+        self.assertFalse(route["helper_api_used"])
+        self.assertFalse(route["native_api_used"])
+        self.assertEqual(route["benchmark_workspace_field_count"], 2)
+        self.assertEqual(route["scan_steps"], 16)
+        self.assertEqual(route["final_scan_copy_kernel_invocations"], 0)
+        self.assertEqual(route["ti_kernel_invocations_per_replay"], 18)
+        self.assertFalse(route["physical_backend_launches_assumed"])
+        self.assertFalse(_native_compact_route(
+            object(), "vanilla_kernel", "cuda", source_sha256, 65536)[
+                "passed"])
+        self.assertFalse(_native_compact_route(
+            None, "vanilla_kernel", "cuda", "short", 65536)["passed"])
 
     def test_device_prefix_route_requires_both_native_stages(self):
         class CompactPlan:

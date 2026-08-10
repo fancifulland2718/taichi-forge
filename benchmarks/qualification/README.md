@@ -156,12 +156,16 @@ checks the frozen contract, exact oracle, clean Git provenance, strict policy,
 noise/device/isolation evidence, replay plateau, bilingual artifacts, and the
 absence of a cross-framework speedup field.
 
-`native_compact` compares Forge's stable native compact with a non-trivial
-vanilla stable pipeline: flags-to-prefix kernel, reusable public
-`PrefixSumExecutor`, and stable scatter kernel. The complete adapter call is
-timed on each side; internal stage count and workspace are declared differences.
-Count and selected order must both match exactly. Use
-`native_compact_microbench.py`.
+`native_compact` is decomposed into two independent axes. The compatibility
+axis runs the same benchmark-owned flags-to-prefix, Hillis-Steele scan, and
+stable-scatter Taichi pipeline through Forge and vanilla packages. The native
+isolation axis compares Forge's stable native compact with that same
+Forge/kernel pipeline. Route admission records the shared source hash, forbids
+helper/native APIs on both kernel controls, and proves the deterministic Taichi
+kernel invocation topology without assuming physical backend launches. The
+actual count and ordered selected values must match by exact digest, sum,
+extrema, and samples before and after timing. A native-versus-vanilla ratio is
+only a superseded end-to-end diagnostic. Use `native_compact_microbench.py`.
 
 `linear_operator_solve_plan_qualification.py` is the final Forge-only case. It
 uses public `qualify_operator` and `qualify_solve_plan` evidence, then measures
@@ -420,6 +424,14 @@ Stable compact is another isolated run:
 ```powershell
 C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
   benchmarks\qualification\native_compact_microbench.py `
+  --comparison forge-kernel-vs-vanilla `
+  --backend cuda --preset small --intent diagnostic `
+  --pairs 1 --samples 5 --warmups 2 `
+  --target-sample-ms 20 --stability-replays 0
+
+C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
+  benchmarks\qualification\native_compact_microbench.py `
+  --comparison forge-native-vs-forge-kernel `
   --backend cuda --preset small --intent diagnostic `
   --pairs 1 --samples 5 --warmups 2 `
   --target-sample-ms 20 --stability-replays 0

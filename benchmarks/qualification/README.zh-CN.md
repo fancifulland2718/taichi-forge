@@ -133,10 +133,13 @@ qualification intent 的外部运行完成后，执行
 冻结合同、exact oracle、干净 Git 来源、严格门槛、噪声/设备/隔离证据、回放平台、
 双语产物，以及没有跨框架 speedup 字段。
 
-`native_compact` 把 Forge stable native compact 与一个非简单串行循环的 vanilla
-稳定 pipeline 对比：flags-to-prefix kernel、可复用的公开 `PrefixSumExecutor` 和
-stable scatter kernel。两边均计时完整 adapter call；内部 stage 数和 workspace 是
-明确允许的差异。count 与被选元素顺序必须同时 exact 一致。独立入口为
+`native_compact` 拆为两条独立轴。compatibility 轴让 Forge 与 vanilla package 运行
+同一套 benchmark-owned flags-to-prefix、Hillis-Steele scan 和 stable-scatter Taichi
+pipeline；native isolation 轴把 Forge stable native compact 与同一 Forge/kernel
+pipeline 对比。route 准入记录共享 source hash，禁止两条 kernel control 使用 helper/
+native API，并证明确定的 Taichi kernel invocation 拓扑，但不臆测物理 backend launch。
+计时前后都必须用 exact digest、sum、极值和 samples 比较实际 count 与有序选中值。
+native-vs-vanilla 比值只保留为被取代的端到端诊断。独立入口为
 `native_compact_microbench.py`。
 
 `linear_operator_solve_plan_qualification.py` 是最后的 Forge-only 案例。它先使用
@@ -362,6 +365,14 @@ stable compact 也是独立运行：
 ```powershell
 C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
   benchmarks\qualification\native_compact_microbench.py `
+  --comparison forge-kernel-vs-vanilla `
+  --backend cuda --preset small --intent diagnostic `
+  --pairs 1 --samples 5 --warmups 2 `
+  --target-sample-ms 20 --stability-replays 0
+
+C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
+  benchmarks\qualification\native_compact_microbench.py `
+  --comparison forge-native-vs-forge-kernel `
   --backend cuda --preset small --intent diagnostic `
   --pairs 1 --samples 5 --warmups 2 `
   --target-sample-ms 20 --stability-replays 0

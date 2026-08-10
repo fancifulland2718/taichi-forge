@@ -1556,8 +1556,12 @@ def _build_native_indexed_copy_case(ti: Any, runtime_name: str, backend: str,
     }
 
 
-def _native_compact_route(workspace: Any | None, runtime_name: str,
-                          backend: str) -> dict[str, Any]:
+def _native_compact_route(
+        workspace: Any | None,
+        runtime_name: str,
+        backend: str,
+        kernel_source_sha256: str | None = None,
+        elements: int | None = None) -> dict[str, Any]:
     if runtime_name == "forge":
         plan = getattr(workspace, "_native_compact_plan", None)
         expected_backend = {
@@ -1588,20 +1592,48 @@ def _native_compact_route(workspace: Any | None, runtime_name: str,
                 and observed_method == expected_method
             ),
         }
+    scan_steps = (
+        (elements - 1).bit_length()
+        if isinstance(elements, int) and elements > 0 else None
+    )
+    final_scan_copy_invocations = (
+        scan_steps % 2 if scan_steps is not None else None
+    )
+    kernel_invocations = (
+        2 + scan_steps + final_scan_copy_invocations
+        if scan_steps is not None else None
+    )
+    passed = bool(
+        runtime_name in ("forge_kernel", "vanilla_kernel")
+        and workspace is None
+        and isinstance(kernel_source_sha256, str)
+        and len(kernel_source_sha256) == 64
+        and scan_steps is not None
+    )
     return {
-        "classification": f"{runtime_name}_stable_prefix_scan_compact_pipeline",
+        "classification": f"{runtime_name}_stable_compact_kernel_pipeline",
+        "adapter": "benchmark_defined_ti_kernel_pipeline",
+        "kernel_source_owner": "benchmark",
+        "kernel_source_sha256": kernel_source_sha256,
+        "helper_api_used": False,
+        "native_api_used": False,
+        "benchmark_workspace_kind": "two_dense_i32_fields",
+        "benchmark_workspace_field_count": 2,
+        "scan_algorithm": "inclusive_hillis_steele_ping_pong",
+        "scan_steps": scan_steps,
+        "final_scan_copy_kernel_invocations": final_scan_copy_invocations,
+        "ti_kernel_invocations_per_replay": kernel_invocations,
+        "physical_backend_launches_assumed": False,
         "expected_backend": backend,
         "expected_method": (
-            "flags-to-prefix kernel, shared Hillis-Steele i32 scan kernels, "
-            "stable scatter kernel"
-            if runtime_name in ("forge_kernel", "vanilla_kernel") else
-            "flags-to-prefix kernel, PrefixSumExecutor, stable scatter kernel"
+            "flags-to-prefix kernel, benchmark-owned Hillis-Steele i32 scan "
+            "kernels, stable scatter kernel"
         ),
         "observed_plan_backend": backend,
         "observed_method": "qualification_stable_compact_pipeline",
         "workspace_bytes_current": None,
         "workspace_bytes_peak": None,
-        "passed": True,
+        "passed": passed,
     }
 
 
@@ -1609,12 +1641,20 @@ def _build_native_compact_case(ti: Any, runtime_name: str, backend: str,
                                elements: int) -> dict[str, Any]:
     import numpy as np
 
+    source_sha256 = sha256_file(Path(__file__))
     host_values = ((np.arange(elements, dtype=np.int64) * 31 + 11) % 2003
                    - 1001).astype(np.int32)
     host_flags = ((np.arange(elements) % 3 == 0)
                   | (np.arange(elements) % 17 == 0)).astype(np.int32)
     expected = host_values[host_flags != 0]
     selected_count = int(expected.size)
+    expected_sha256 = hashlib.sha256(expected.tobytes()).hexdigest()
+    sample_indices = sorted(set((0, selected_count // 4, selected_count // 2,
+                                 (3 * selected_count) // 4,
+                                 selected_count - 1)))
+    scan_steps = (elements - 1).bit_length()
+    final_scan_copy_invocations = scan_steps % 2
+    kernel_invocations = 2 + scan_steps + final_scan_copy_invocations
     values = ti.ndarray(dtype=ti.i32, shape=elements)
     flags = ti.ndarray(dtype=ti.i32, shape=elements)
     output = ti.ndarray(dtype=ti.i32, shape=elements)
@@ -1686,6 +1726,19 @@ def _build_native_compact_case(ti: Any, runtime_name: str, backend: str,
             "comparison": "exact_stable_i32_compact",
             "actual_count": actual_count,
             "expected_count": selected_count,
+            "actual_sha256": hashlib.sha256(actual.tobytes()).hexdigest(),
+            "expected_sha256": expected_sha256,
+            "actual_sum": int(actual.astype(np.int64).sum()),
+            "expected_sum": int(expected.astype(np.int64).sum()),
+            "actual_minimum": int(actual.min()),
+            "expected_minimum": int(expected.min()),
+            "actual_maximum": int(actual.max()),
+            "expected_maximum": int(expected.max()),
+            "sample_indices": sample_indices,
+            "actual_samples": [int(actual[index]) for index in sample_indices],
+            "expected_samples": [
+                int(expected[index]) for index in sample_indices
+            ],
             "mismatch_count": int(mismatch.size),
             "first_mismatch": (
                 None if mismatch.size == 0 else int(mismatch[0])
@@ -1697,7 +1750,7 @@ def _build_native_compact_case(ti: Any, runtime_name: str, backend: str,
         "reset": reset,
         "validate": validate_fresh,
         "route": lambda: _native_compact_route(
-            workspace, runtime_name, backend),
+            workspace, runtime_name, backend, source_sha256, elements),
         "logical_bytes": elements * 8 + selected_count * 4 + 4,
         "traffic_model": (
             "semantic minimum: one i32 value and flag read per input, one i32 "
@@ -1717,19 +1770,35 @@ def _build_native_compact_case(ti: Any, runtime_name: str, backend: str,
                 "experimental_compact(method=auto,reusable CompactWorkspace)"
             ),
             "vanilla_adapter": (
-                "flags-to-prefix kernel plus reusable PrefixSumExecutor plus "
-                "stable scatter kernel"
+                "benchmark-owned flags-to-prefix kernel plus shared "
+                "Hillis-Steele scan kernels plus stable scatter kernel"
             ),
+            "kernel_source_owner": "benchmark",
+            "kernel_source_sha256": source_sha256,
+            "kernel_adapter": "benchmark_defined_ti_kernel_pipeline",
+            "kernel_helper_api_used": False,
+            "kernel_native_api_used": False,
+            "kernel_benchmark_workspace_kind": "two_dense_i32_fields",
+            "kernel_benchmark_workspace_field_count": 2,
+            "kernel_scan_algorithm": "inclusive_hillis_steele_ping_pong",
+            "kernel_scan_steps": scan_steps,
+            "kernel_final_scan_copy_kernel_invocations": (
+                final_scan_copy_invocations
+            ),
+            "kernel_ti_invocations_per_replay": kernel_invocations,
+            "kernel_physical_backend_launches_assumed": False,
             "shared": (
-                "same ndarray values/flags/output/count, stable-selection "
-                "semantics, one adapter invocation per batch iteration, outer "
-                "synchronization, and exact ordered oracle"
+                "same ndarray values/flags/output/count layouts, stable-selection "
+                "semantics, one complete adapter invocation per batch iteration, "
+                "outer synchronization, and exact ordered oracle"
             ),
             "allowed_difference": (
-                "internal stage count and workspace implementation differ; "
-                "vanilla uses its public reusable PrefixSumExecutor"
+                "native internal stages/workspace differ from the shared "
+                "benchmark-owned two-field kernel-control pipeline"
             ),
-            "correctness": "exact_count_and_exact_ordered_i32_prefix",
+            "correctness": (
+                "exact_count_and_exact_ordered_i32_sha256_sum_extrema_samples"
+            ),
             "timing": (
                 "frozen repeated complete compact adapter calls plus one outer "
                 "sync; initialization, first call, and correctness are excluded"
@@ -5244,6 +5313,42 @@ def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
                 if left.get(key) != right.get(key):
                     return False
         return True
+    if left_result["operation"] == "native_compact":
+        for validation_name in ("validation_before", "validation_after"):
+            left = left_result[validation_name]
+            right = right_result[validation_name]
+            for value in (left, right):
+                if (not value.get("passed")
+                        or value.get("comparison")
+                        != "exact_stable_i32_compact"):
+                    return False
+                if (not isinstance(value.get("actual_count"), int)
+                        or value["actual_count"] <= 0
+                        or value["actual_count"] != value.get("expected_count")
+                        or value.get("mismatch_count") != 0
+                        or value.get("first_mismatch") is not None):
+                    return False
+                if (not isinstance(value.get("actual_sha256"), str)
+                        or len(value["actual_sha256"]) != 64
+                        or value["actual_sha256"]
+                        != value.get("expected_sha256")):
+                    return False
+                for suffix in ("sum", "minimum", "maximum", "samples"):
+                    if value.get(f"actual_{suffix}") != value.get(
+                            f"expected_{suffix}"):
+                        return False
+                if len(value.get("sample_indices", [])) != len(
+                        value.get("actual_samples", [])):
+                    return False
+            for key in (
+                    "actual_count", "expected_count", "actual_sha256",
+                    "expected_sha256", "actual_sum", "expected_sum",
+                    "actual_minimum", "expected_minimum", "actual_maximum",
+                    "expected_maximum", "sample_indices", "actual_samples",
+                    "expected_samples"):
+                if left.get(key) != right.get(key):
+                    return False
+        return True
     if left_result["operation"] == "adaptive_pbd":
         for validation_name in ("validation_before", "validation_after"):
             left = left_result[validation_name]["endpoint_fingerprint"]
@@ -5958,19 +6063,39 @@ def _parent_main(args: argparse.Namespace) -> int:
                 and (
                     child["operation"] not in (
                         "native_reduce", "native_transform", "native_gather",
-                        "native_scatter")
+                        "native_scatter", "native_compact")
                     or (
-                        child["route"].get("adapter")
-                        == "benchmark_defined_ti_kernel"
+                        child["route"].get("adapter") == (
+                            "benchmark_defined_ti_kernel_pipeline"
+                            if child["operation"] == "native_compact"
+                            else "benchmark_defined_ti_kernel"
+                        )
                         and child["route"].get("kernel_source_owner")
                         == "benchmark"
                         and child["route"].get("kernel_source_sha256")
                         == child["workload_contract"].get(
                             "kernel_source_sha256")
                         and child["route"].get("helper_api_used") is False
-                        and child["route"].get("workspace_present") is False
+                        and (
+                            child["route"].get("native_api_used") is False
+                            and child["route"].get(
+                                "benchmark_workspace_field_count") == 2
+                            and child["route"].get("scan_algorithm")
+                            == "inclusive_hillis_steele_ping_pong"
+                            and child["route"].get("scan_steps")
+                            == child["workload_contract"].get(
+                                "kernel_scan_steps")
+                            and child["route"].get(
+                                "final_scan_copy_kernel_invocations")
+                            == child["workload_contract"].get(
+                                "kernel_final_scan_copy_kernel_invocations")
+                            if child["operation"] == "native_compact" else
+                            child["route"].get("workspace_present") is False
+                        )
                         and child["route"].get(
-                            "ti_kernel_invocations_per_replay") == 1
+                            "ti_kernel_invocations_per_replay")
+                        == child["workload_contract"].get(
+                            "kernel_ti_invocations_per_replay")
                         and child["route"].get(
                             "physical_backend_launches_assumed") is False
                     )
