@@ -1,6 +1,7 @@
 import argparse
 import ctypes
 import gc
+import hashlib
 import importlib
 from importlib import metadata as importlib_metadata
 import importlib.util
@@ -1151,7 +1152,8 @@ def _build_native_reduce_case(ti: Any, runtime_name: str, backend: str,
 
 
 def _native_transform_route(workspace: Any | None, runtime_name: str,
-                            backend: str) -> dict[str, Any]:
+                            backend: str,
+                            kernel_source_sha256: str) -> dict[str, Any]:
     if runtime_name == "forge":
         plan = getattr(workspace, "_native_transform_plan", None)
         expected_backend = {
@@ -1186,15 +1188,27 @@ def _native_transform_route(workspace: Any | None, runtime_name: str,
                 workspace, "workspace_bytes_peak", None),
             "passed": passed,
         }
+    passed = bool(
+        runtime_name in ("forge_kernel", "vanilla_kernel")
+        and workspace is None
+        and len(kernel_source_sha256) == 64
+    )
     return {
         "classification": f"{runtime_name}_equivalent_i32_affine_kernel",
+        "adapter": "benchmark_defined_ti_kernel",
+        "kernel_source_owner": "benchmark",
+        "kernel_source_sha256": kernel_source_sha256,
+        "helper_api_used": False,
+        "workspace_present": workspace is not None,
+        "ti_kernel_invocations_per_replay": 1,
+        "physical_backend_launches_assumed": False,
         "expected_backend": backend,
         "expected_methods": ["one elementwise i32 affine Taichi kernel"],
         "observed_plan_backend": backend,
         "observed_method": "qualification_transform_i32_kernel",
         "workspace_bytes_current": 0,
         "workspace_bytes_peak": 0,
-        "passed": True,
+        "passed": passed,
     }
 
 
@@ -1202,8 +1216,12 @@ def _build_native_transform_case(ti: Any, runtime_name: str, backend: str,
                                  elements: int) -> dict[str, Any]:
     import numpy as np
 
+    source_sha256 = sha256_file(Path(__file__))
     host = ((np.arange(elements, dtype=np.int64) % 1009) - 504).astype(np.int32)
     expected = (host * np.int32(3) + np.int32(7)).astype(np.int32)
+    expected_sha256 = hashlib.sha256(expected.tobytes()).hexdigest()
+    sample_indices = sorted(set((0, elements // 4, elements // 2,
+                                 (3 * elements) // 4, elements - 1)))
     values = ti.ndarray(dtype=ti.i32, shape=elements)
     output = ti.ndarray(dtype=ti.i32, shape=elements)
     values.from_numpy(host)
@@ -1242,6 +1260,20 @@ def _build_native_transform_case(ti: Any, runtime_name: str, backend: str,
         return {
             "passed": mismatch.size == 0,
             "comparison": "exact_i32_affine_transform",
+            "count": int(actual.size),
+            "actual_sha256": hashlib.sha256(actual.tobytes()).hexdigest(),
+            "expected_sha256": expected_sha256,
+            "actual_sum": int(actual.astype(np.int64).sum()),
+            "expected_sum": int(expected.astype(np.int64).sum()),
+            "actual_minimum": int(actual.min()),
+            "expected_minimum": int(expected.min()),
+            "actual_maximum": int(actual.max()),
+            "expected_maximum": int(expected.max()),
+            "sample_indices": sample_indices,
+            "actual_samples": [int(actual[index]) for index in sample_indices],
+            "expected_samples": [
+                int(expected[index]) for index in sample_indices
+            ],
             "mismatch_count": int(mismatch.size),
             "first_mismatch": (
                 None if mismatch.size == 0 else int(mismatch[0])
@@ -1253,7 +1285,7 @@ def _build_native_transform_case(ti: Any, runtime_name: str, backend: str,
         "reset": reset,
         "validate": validate_fresh,
         "route": lambda: _native_transform_route(
-            workspace, runtime_name, backend),
+            workspace, runtime_name, backend, source_sha256),
         "logical_bytes": elements * 8,
         "traffic_model": (
             "semantic minimum: one i32 source read and one i32 destination "
@@ -1271,6 +1303,12 @@ def _build_native_transform_case(ti: Any, runtime_name: str, backend: str,
                 "TransformWorkspace)"
             ),
             "vanilla_adapter": "one common-source elementwise Taichi kernel",
+            "kernel_source_owner": "benchmark",
+            "kernel_source_sha256": source_sha256,
+            "kernel_adapter": "benchmark_defined_ti_kernel",
+            "kernel_helper_api_used": False,
+            "kernel_ti_invocations_per_replay": 1,
+            "kernel_physical_backend_launches_assumed": False,
             "shared": (
                 "same ndarray allocation, values, affine semantics, output "
                 "dtype/shape, launch count, outer synchronization, and exact oracle"
@@ -5069,6 +5107,40 @@ def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
                     or left["expected"] != right["expected"]):
                 return False
         return True
+    if left_result["operation"] == "native_transform":
+        for validation_name in ("validation_before", "validation_after"):
+            left = left_result[validation_name]
+            right = right_result[validation_name]
+            for value in (left, right):
+                if (not value.get("passed")
+                        or value.get("comparison")
+                        != "exact_i32_affine_transform"):
+                    return False
+                if (not isinstance(value.get("count"), int)
+                        or value["count"] <= 0
+                        or value.get("mismatch_count") != 0
+                        or value.get("first_mismatch") is not None):
+                    return False
+                if (not isinstance(value.get("actual_sha256"), str)
+                        or len(value["actual_sha256"]) != 64
+                        or value["actual_sha256"]
+                        != value.get("expected_sha256")):
+                    return False
+                for suffix in ("sum", "minimum", "maximum", "samples"):
+                    if value.get(f"actual_{suffix}") != value.get(
+                            f"expected_{suffix}"):
+                        return False
+                if len(value.get("sample_indices", [])) != len(
+                        value.get("actual_samples", [])):
+                    return False
+            for key in (
+                    "count", "actual_sha256", "expected_sha256",
+                    "actual_sum", "expected_sum", "actual_minimum",
+                    "expected_minimum", "actual_maximum", "expected_maximum",
+                    "sample_indices", "actual_samples", "expected_samples"):
+                if left.get(key) != right.get(key):
+                    return False
+        return True
     if left_result["operation"] == "adaptive_pbd":
         for validation_name in ("validation_before", "validation_after"):
             left = left_result[validation_name]["endpoint_fingerprint"]
@@ -5781,7 +5853,8 @@ def _parent_main(args: argparse.Namespace) -> int:
                 and "native" not in json.dumps(
                     child["route"], sort_keys=True).lower()
                 and (
-                    child["operation"] != "native_reduce"
+                    child["operation"] not in (
+                        "native_reduce", "native_transform")
                     or (
                         child["route"].get("adapter")
                         == "benchmark_defined_ti_kernel"

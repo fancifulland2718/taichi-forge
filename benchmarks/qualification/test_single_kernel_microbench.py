@@ -117,6 +117,43 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         self.assertFalse(_audit_endpoint_equivalent(
             results["forge"], results["forge_kernel"]))
 
+    def test_native_transform_endpoint_equivalence_uses_exact_fingerprint(self):
+        validation = {
+            "passed": True,
+            "comparison": "exact_i32_affine_transform",
+            "count": 4,
+            "actual_sha256": "a" * 64,
+            "expected_sha256": "a" * 64,
+            "actual_sum": 40,
+            "expected_sum": 40,
+            "actual_minimum": 1,
+            "expected_minimum": 1,
+            "actual_maximum": 19,
+            "expected_maximum": 19,
+            "sample_indices": [0, 1, 2, 3],
+            "actual_samples": [1, 7, 13, 19],
+            "expected_samples": [1, 7, 13, 19],
+            "mismatch_count": 0,
+            "first_mismatch": None,
+        }
+        results = {
+            name: {
+                "operation": "native_transform",
+                "validation_before": json.loads(json.dumps(validation)),
+                "validation_after": json.loads(json.dumps(validation)),
+            }
+            for name in ("forge", "forge_kernel")
+        }
+        self.assertTrue(
+            _endpoint_equivalent(results, "forge", "forge_kernel"))
+        self.assertTrue(_audit_endpoint_equivalent(
+            results["forge"], results["forge_kernel"]))
+        results["forge_kernel"]["validation_after"]["actual_sha256"] = "b" * 64
+        self.assertFalse(
+            _endpoint_equivalent(results, "forge", "forge_kernel"))
+        self.assertFalse(_audit_endpoint_equivalent(
+            results["forge"], results["forge_kernel"]))
+
     def test_profiler_range_rejects_normal_parent_or_non_cuda_run(self):
         with self.assertRaisesRegex(
                 ValueError, "requires one CUDA score sample in child mode"):
@@ -175,12 +212,25 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
                       definition["attribution"])
 
     def test_forge_kernel_route_is_not_labeled_vanilla(self):
-        route = _native_transform_route(None, "forge_kernel", "cuda")
+        source_sha256 = "a" * 64
+        route = _native_transform_route(
+            None, "forge_kernel", "cuda", source_sha256)
         self.assertTrue(route["passed"])
         self.assertEqual(
             route["classification"],
             "forge_kernel_equivalent_i32_affine_kernel",
         )
+        self.assertEqual(route["adapter"], "benchmark_defined_ti_kernel")
+        self.assertEqual(route["kernel_source_owner"], "benchmark")
+        self.assertEqual(route["kernel_source_sha256"], source_sha256)
+        self.assertFalse(route["helper_api_used"])
+        self.assertFalse(route["workspace_present"])
+        self.assertEqual(route["ti_kernel_invocations_per_replay"], 1)
+        self.assertFalse(route["physical_backend_launches_assumed"])
+        self.assertFalse(_native_transform_route(
+            object(), "forge_kernel", "cuda", source_sha256)["passed"])
+        self.assertFalse(_native_transform_route(
+            None, "forge_kernel", "cuda", "short")["passed"])
 
     def test_native_reduce_kernel_route_proves_benchmark_control(self):
         source_sha256 = "a" * 64
@@ -417,10 +467,12 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
             workspace_bytes_peak = 0
 
         self.assertTrue(
-            _native_transform_route(Workspace(), "forge", "cuda")["passed"])
+            _native_transform_route(
+                Workspace(), "forge", "cuda", "a" * 64)["passed"])
         Plan.backend = "field_kernel"
         self.assertFalse(
-            _native_transform_route(Workspace(), "forge", "cuda")["passed"])
+            _native_transform_route(
+                Workspace(), "forge", "cuda", "a" * 64)["passed"])
 
     def test_native_gather_route_requires_cached_native_plan(self):
         class Plan:
