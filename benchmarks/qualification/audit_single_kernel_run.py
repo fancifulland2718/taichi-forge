@@ -66,13 +66,40 @@ def _check(condition: bool, name: str, failures: list[str]) -> None:
         failures.append(name)
 
 
-def _mpm_endpoint_equivalent(forge: dict[str, Any],
-                             vanilla: dict[str, Any]) -> bool:
-    if forge["operation"] not in ("mpm_graph", "mpm_direct"):
+def _endpoint_equivalent(left_result: dict[str, Any],
+                         right_result: dict[str, Any]) -> bool:
+    if left_result["operation"] == "adaptive_pbd":
+        for validation_name in ("validation_before", "validation_after"):
+            left = left_result[validation_name]["endpoint_fingerprint"]
+            right = right_result[validation_name]["endpoint_fingerprint"]
+            if not left.get("finite") or not right.get("finite"):
+                return False
+            if left["active_history"] != right["active_history"]:
+                return False
+            for key in ("position_sum", "sample_positions"):
+                if len(left[key]) != len(right[key]):
+                    return False
+                if any(not math.isclose(float(a), float(b), rel_tol=5.0e-5,
+                                        abs_tol=5.0e-5)
+                       for a, b in zip(left[key], right[key])):
+                    return False
+            if not math.isclose(float(left["residual_max"]),
+                                float(right["residual_max"]),
+                                rel_tol=5.0e-5, abs_tol=5.0e-5):
+                return False
+        return True
+    if left_result["operation"] == "bfs_worklist":
+        return all(
+            left_result[name]["endpoint_fingerprint"]
+            == right_result[name]["endpoint_fingerprint"]
+            for name in ("validation_before", "validation_after")
+        )
+    if left_result["operation"] not in (
+            "mpm_graph", "mpm_direct", "active_grid_mpm"):
         return True
     for validation_name in ("validation_before", "validation_after"):
-        left = forge[validation_name]["endpoint_fingerprint"]
-        right = vanilla[validation_name]["endpoint_fingerprint"]
+        left = left_result[validation_name]["endpoint_fingerprint"]
+        right = right_result[validation_name]["endpoint_fingerprint"]
         if not left.get("finite") or not right.get("finite"):
             return False
         for key in ("x_mean", "v_mean", "C_mean", "sample_x", "sample_v"):
@@ -129,6 +156,12 @@ def _audit(run_dir: Path) -> dict[str, Any]:
         return _audit_failed_run(run_dir, manifest)
     summary = _read_json(run_dir / "summary.json")
     failures: list[str] = []
+    definition = summary.get("comparison_definition", {
+        "name": "forge-vs-vanilla",
+        "subject": "forge",
+        "baseline": "vanilla",
+    })
+    participants = (definition["subject"], definition["baseline"])
     extended_contract = "physical_device_binding" in summary.get(
         "method_checks", {})
     _check(manifest.get("schema") == SCHEMA, "manifest schema", failures)
@@ -136,6 +169,9 @@ def _audit(run_dir: Path) -> dict[str, Any]:
     _check(manifest.get("run_id") == summary.get("run_id"), "run id", failures)
     _check(manifest.get("config") == summary.get("config"), "config identity",
            failures)
+    if "comparison_definition" in summary:
+        _check(summary["comparison_definition"] == summary["config"].get(
+            "comparison_definition"), "comparison definition identity", failures)
     _check(manifest.get("exclusive_driver_lock", {}).get("acquired") is True,
            "exclusive benchmark lock", failures)
 
@@ -194,6 +230,26 @@ def _audit(run_dir: Path) -> dict[str, Any]:
                "child p95", failures)
         _check(_close(recomputed_cv, child["summary"]["cv_percent"]),
                "child CV", failures)
+        if "latency_samples" in summary["config"]:
+            latency_values = [float(value) for value in child.get(
+                "warm_single_call_latency_ms", [])]
+            _check(len(latency_values) == int(summary["config"]["latency_samples"]),
+                   "warm single-call latency sample count", failures)
+            if latency_values:
+                latency_summary = child.get(
+                    "warm_single_call_latency_summary", {})
+                latency_mean = statistics.fmean(latency_values)
+                latency_cv = (
+                    0.0 if latency_mean == 0.0 else
+                    statistics.pstdev(latency_values) / latency_mean * 100.0)
+                _check(_close(statistics.median(latency_values),
+                              latency_summary.get("median_ms")),
+                       "warm single-call latency median", failures)
+                _check(_close(_percentile(latency_values, 95.0),
+                              latency_summary.get("p95_ms")),
+                       "warm single-call latency p95", failures)
+                _check(_close(latency_cv, latency_summary.get("cv_percent")),
+                       "warm single-call latency CV", failures)
 
     neutral_signatures = set()
     workload_signatures = set()
@@ -208,7 +264,7 @@ def _audit(run_dir: Path) -> dict[str, Any]:
         workload_signatures.add((
             child["operation"], child["backend"], child["preset"],
             child["logical_bytes"], child["traffic_model"],
-            child["batch_size"],
+            child["batch_size"], child.get("measurement_scope"),
             tuple(sorted(child["measurement_config"].items())),
             json.dumps(child.get("workload_contract", {}), sort_keys=True),
         ))
@@ -235,7 +291,7 @@ def _audit(run_dir: Path) -> dict[str, Any]:
         if len(pair) != 2:
             continue
         by_runtime = {child["runtime"]: child for child in pair}
-        _check(set(by_runtime) == {"forge", "vanilla"},
+        _check(set(by_runtime) == set(participants),
                f"pair {pair_index} runtimes", failures)
         order = tuple(orders[pair_index - 1])
         ordered = sorted(pair, key=lambda child: child["position_in_pair"])
@@ -249,18 +305,20 @@ def _audit(run_dir: Path) -> dict[str, Any]:
             (first["parent_launch_started_ns"], first["parent_launch_finished_ns"]),
             (second["parent_launch_started_ns"], second["parent_launch_finished_ns"]),
         ))
-        forge = by_runtime["forge"]
-        vanilla = by_runtime["vanilla"]
+        subject = by_runtime[definition["subject"]]
+        baseline = by_runtime[definition["baseline"]]
         recomputed_rows.append({
             "median_speedup_x": (
-                vanilla["summary"]["median_ms"] /
-                forge["summary"]["median_ms"]),
+                baseline["summary"]["median_ms"] /
+                subject["summary"]["median_ms"]),
             "p95_speedup_x": (
-                vanilla["summary"]["p95_ms"] /
-                forge["summary"]["p95_ms"]),
-            "cross_runtime_endpoint_equivalent": (
-                _mpm_endpoint_equivalent(forge, vanilla)
-            ),
+                baseline["summary"]["p95_ms"] /
+                subject["summary"]["p95_ms"]),
+            "endpoint_equivalent": _endpoint_equivalent(subject, baseline),
+            "warm_latency_speedup_x": (
+                baseline["warm_single_call_latency_summary"]["median_ms"] /
+                subject["warm_single_call_latency_summary"]["median_ms"]
+            ) if "latency_samples" in summary["config"] else None,
         })
     ordered_intervals = sorted(all_intervals)
     _check(all(left[1] <= right[0]
@@ -271,6 +329,10 @@ def _audit(run_dir: Path) -> dict[str, Any]:
     _check(len(stored_rows) == len(recomputed_rows), "pair row count", failures)
     for index, (stored, recomputed) in enumerate(
             zip(stored_rows, recomputed_rows), start=1):
+        if "subject" in stored:
+            _check(stored["subject"] == definition["subject"]
+                   and stored["baseline"] == definition["baseline"],
+                   f"pair {index} comparison roles", failures)
         _check(_close(stored["median_speedup_x"],
                      recomputed["median_speedup_x"]),
                f"pair {index} median speedup", failures)
@@ -278,12 +340,19 @@ def _audit(run_dir: Path) -> dict[str, Any]:
                      recomputed["p95_speedup_x"]),
                f"pair {index} p95 speedup", failures)
         if extended_contract:
-            _check(stored.get("cross_runtime_endpoint_equivalent") is
-                   recomputed["cross_runtime_endpoint_equivalent"],
-                   f"pair {index} cross-runtime endpoint", failures)
+            _check(stored.get("endpoint_equivalent",
+                              stored.get("cross_runtime_endpoint_equivalent")) is
+                   recomputed["endpoint_equivalent"],
+                   f"pair {index} comparison endpoint", failures)
+        if recomputed["warm_latency_speedup_x"] is not None:
+            _check(_close(stored.get("warm_latency_speedup_x"),
+                          recomputed["warm_latency_speedup_x"]),
+                   f"pair {index} warm latency speedup", failures)
 
     median_speedups = [row["median_speedup_x"] for row in recomputed_rows]
     p95_speedups = [row["p95_speedup_x"] for row in recomputed_rows]
+    latency_speedups = [row["warm_latency_speedup_x"] for row in recomputed_rows
+                        if row["warm_latency_speedup_x"] is not None]
     if median_speedups:
         for name, expected in _bootstrap_median(
                 median_speedups, int(summary["config"]["seed"])).items():
@@ -293,6 +362,13 @@ def _audit(run_dir: Path) -> dict[str, Any]:
                 p95_speedups, int(summary["config"]["seed"]) + 1).items():
             _check(_close(summary["p95_paired_summary"][name], expected),
                    f"paired p95 {name}", failures)
+        if latency_speedups:
+            for name, expected in _bootstrap_median(
+                    latency_speedups,
+                    int(summary["config"]["seed"]) + 2).items():
+                _check(_close(
+                    summary["warm_single_call_latency_paired_summary"][name],
+                    expected), f"paired warm latency {name}", failures)
 
     expected_noise_count = 1 + pair_count * 3
     observations = manifest["noise_observations"]
@@ -322,18 +398,19 @@ def _audit(run_dir: Path) -> dict[str, Any]:
         and (config["backend"] == "cpu" or (
             float(config.get("max_gpu_util", 15.0)) <= 15.0
             and float(config.get("max_gpu_temp", 65.0)) <= 65.0)))
+    forward_order = "->".join(participants)
+    reverse_order = "->".join(reversed(participants))
     order_counts = {
-        "forge->vanilla": sum(tuple(order) == ("forge", "vanilla")
-                              for order in orders),
-        "vanilla->forge": sum(tuple(order) == ("vanilla", "forge")
-                              for order in orders),
+        forward_order: sum(tuple(order) == participants for order in orders),
+        reverse_order: sum(
+            tuple(order) == tuple(reversed(participants)) for order in orders),
     }
     stability_complete = all(
         child.get("stability") is not None
         and child["stability"]["replays"] >= int(config["stability_replays"])
         and child["stability"]["memory_guard_passed"]
         and (not extended_contract or
-            child["runtime"] != "forge"
+            child.get("runtime_package", child["runtime"]) != "forge"
             or child["stability"].get("enhanced_plateau", {}).get("passed")
             is True
         )
@@ -341,6 +418,45 @@ def _audit(run_dir: Path) -> dict[str, Any]:
     timing_window_complete = all(
         statistics.median(child["raw_batch_ms"]) >=
         float(config["target_sample_ms"])
+        for child in children)
+    expected_axes = {
+        "forge": ("forge", "native" if config["operation"].startswith("native_")
+                  or config["operation"] in (
+                      "device_prefix_chain", "active_grid_mpm",
+                      "particle_spatial_hash", "adaptive_pbd",
+                      "marching_squares", "bfs_worklist") else "kernel"),
+        "forge_kernel": ("forge", "kernel"),
+        "vanilla": ("vanilla", "kernel"),
+        "vanilla_kernel": ("vanilla", "kernel"),
+    }
+    comparison_axis_verified = all(
+        (child.get("runtime_package"), child.get("adapter_kind"))
+        == expected_axes[child["runtime"]]
+        for child in children)
+    kernel_control_route_isolated = all(
+        child["route"]["classification"].startswith(
+            f"{child['runtime']}_")
+        and "native" not in json.dumps(child["route"], sort_keys=True).lower()
+        if child["runtime"] in ("forge_kernel", "vanilla_kernel") else True
+        for child in children)
+    forge_binary_signatures = {
+        (
+            child["environment"]["package_distribution"],
+            child["environment"]["package_version"],
+            child["environment"]["package_path"],
+            child["environment"]["core_path"],
+            child["environment"]["core_sha256"],
+            child["native_commit"],
+        )
+        for child in children
+        if child.get("runtime_package", child["runtime"]) == "forge"
+    }
+    same_forge_binary_identity = bool(
+        definition["name"] != "forge-native-vs-forge-kernel"
+        or len(forge_binary_signatures) == 1)
+    stable_replay_input = all(
+        child.get("measurement_scope") == "device_reset_plus_operation"
+        if child["operation"] in ("prefix_sum", "parallel_sort") else True
         for child in children)
     if extended_contract:
         if "comparison_class_consistent" in summary.get("method_checks", {}):
@@ -357,19 +473,37 @@ def _audit(run_dir: Path) -> dict[str, Any]:
             summary.get("method_checks", {}).get("route_verified") is
             all(child["route"]["passed"] for child in children),
             "route method check", failures)
+        endpoint_key = (
+            "endpoint_equivalence"
+            if "endpoint_equivalence" in summary.get("method_checks", {})
+            else "cross_runtime_endpoint_equivalence"
+        )
         _check(
-            summary.get("method_checks", {}).get(
-                "cross_runtime_endpoint_equivalence") is
-            all(row["cross_runtime_endpoint_equivalent"]
-                for row in recomputed_rows),
-            "cross-runtime endpoint method check", failures)
+            summary.get("method_checks", {}).get(endpoint_key) is
+            all(row["endpoint_equivalent"] for row in recomputed_rows),
+            "comparison endpoint method check", failures)
+        if "comparison_axis_verified" in summary.get("method_checks", {}):
+            _check(summary["method_checks"]["comparison_axis_verified"] is
+                   comparison_axis_verified,
+                   "comparison axis method check", failures)
+            if "kernel_control_route_isolated" in summary["method_checks"]:
+                _check(
+                    summary["method_checks"]["kernel_control_route_isolated"] is
+                    kernel_control_route_isolated,
+                    "kernel control route method check", failures)
+            _check(summary["method_checks"]["same_forge_binary_identity"] is
+                   same_forge_binary_identity,
+                   "Forge binary identity method check", failures)
+            _check(summary["method_checks"]["stable_replay_input"] is
+                   stable_replay_input,
+                   "stable replay input method check", failures)
     _check(
         summary.get("method_checks", {}).get("stability_complete") is
         stability_complete,
         "stability method check", failures)
     all_method_checks = bool(
         not failures
-        and order_counts["forge->vanilla"] == order_counts["vanilla->forge"]
+        and order_counts[forward_order] == order_counts[reverse_order]
         and stability_complete
         and timing_window_complete)
     favorable_fraction = (

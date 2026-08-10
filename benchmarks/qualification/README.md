@@ -5,7 +5,7 @@ English | [简体中文](README.zh-CN.md)
 This directory contains the reviewed local Taichi one-operation A/B
 microbenchmark. The executable accepts exactly one operation, one backend, and
 one size. It never launches different backend benchmarks together, and every
-Forge/vanilla comparison is an adjacent, non-overlapping fresh-process pair.
+comparison is an adjacent, non-overlapping fresh-process pair.
 
 The bilingual working plans intentionally live in the Git-ignored local area:
 `temp_outputs/qualification/planning/PLAN.en.md` and `PLAN.zh-CN.md`. They are
@@ -25,7 +25,7 @@ classified direct, stability, and thin-capability cases:
 | `saxpy` | two f32 reads and one f32 write per element |
 | `stencil2d` | five f32 reads and one f32 write per grid point |
 | `reduce_chunks` | one i32 read per element and one i32 chunk write |
-| `prefix_sum` | i32 inclusive scan through `ti.algorithms.PrefixSumExecutor(n).run(field)`; one logical input read and output write |
+| `prefix_sum` | i32 inclusive scan through `ti.algorithms.PrefixSumExecutor(n).run(field)`; scored traffic includes one reset write plus one logical input read/output write |
 | `parallel_sort` | dense i32 key sort through `ti.algorithms.parallel_sort(keys)`; sort-network traffic is not reduced to GB/s |
 | `native_reduce` | whole-array i32 sum to one-element ndarray; semantic minimum is one input read and one scalar output |
 | `native_transform` | elementwise i32 affine transform; one source read and one destination write per element |
@@ -40,10 +40,33 @@ classified direct, stability, and thin-capability cases:
 | `bfs_worklist` | fixed-depth level-synchronous 2-D grid BFS |
 | `snode_churn` | one pointer+dense SNodeTree create/use/sync/destroy lifecycle transaction |
 
-These are control/regression microbenchmarks. They measure the ordinary kernel
-path and may detect runtime tax or a real base-path improvement, but they do not
-exercise Graph, native primitives, bounded dispatch, worklists, LinearOperator,
-or another Forge-only API. Results must not be extrapolated to those features.
+### Required three-route matrix for thin/native cases
+
+Every `THIN-*` case retains all three routes below. One invocation still runs
+only one adjacent A/B pair; it never launches all routes concurrently.
+
+| `--comparison` | Subject / baseline | What it can answer |
+|---|---|---|
+| `forge-kernel-vs-vanilla` | Forge/kernel vs vanilla/kernel | Same vanilla-compatible kernel across packages; compatibility-path runtime behavior |
+| `forge-native-vs-forge-kernel` | Forge/native vs Forge/kernel | Native adapter benefit inside the exact same Forge venv, wheel, core binary, and dependency set |
+| `forge-vs-vanilla` | Forge/native vs vanilla/kernel for `THIN-*` | Retained end-to-end route microbenchmark; it cannot isolate runtime regression or native-only benefit |
+
+The runner records the subject, baseline, formula, package identity, adapter
+kind, and attribution boundary in JSON and both reports. A value above one
+always favors the recorded subject. The same-Forge comparison additionally
+requires identical package path, native binary path/SHA, version, and native
+commit across its two fresh child processes.
+
+For composite thin cases that need a prefix stage, both kernel controls use
+the benchmark-owned, identical Hillis-Steele i32 Taichi kernels. Neither
+kernel-control route may call a Forge native/helper algorithm entry; the
+offline audit rejects a route classified otherwise.
+
+The ordinary `fill`/`copy`/`saxpy`/`stencil2d`/`reduce_chunks` entries are
+control/regression microbenchmarks. They may detect runtime tax or a base-path
+improvement but must not be extrapolated to Graph, native primitives, bounded
+dispatch, worklists, LinearOperator, or another Forge-only API. The separately
+classified direct/thin entries below exercise only their declared routes.
 
 `prefix_sum` is `DIRECT-001`. Both sides run the same workload, dense i32 field,
 deterministic input, exact oracle, and synchronization boundary. Forge must use
@@ -51,6 +74,11 @@ its native dense-field scan plan while vanilla must use its legacy field
 workspace; a route mismatch fails the child. Use `prefix_sum_microbench.py` as
 the one-case development entry point; it fixes the operation and cannot become
 an aggregate launcher.
+
+Because `prefix_sum` and `parallel_sort` mutate their inputs in place, every
+timed replay first runs a deterministic device reset. Their scored scope is
+therefore explicitly `device_reset_plus_operation`; reset is identical on both
+sides and repeated scans/sorts never consume already transformed input.
 
 `parallel_sort` is `DIRECT-002`. The Forge wheel's public compatibility wrapper
 explicitly fixes `method="legacy"`, stable, and exact, while vanilla also runs
@@ -206,7 +234,9 @@ not historical ID churn. Start with small through
 
 ## Fairness contract implemented by the runner
 
-- Forge and vanilla use separate dependency-complete venvs. Child processes
+- Cross-package pairs use separate dependency-complete venvs. A
+  `forge-native-vs-forge-kernel` pair deliberately uses the same Forge venv for
+  both fresh child processes and verifies identical wheel/core identity. Children
   remove `PYTHONPATH`/`PYTHONHOME`, disable user site packages, prove that the
   selected package/core/dependencies live in that venv, and require matching
   Python and neutral dependency versions.
@@ -214,14 +244,20 @@ not historical ID churn. Start with small through
   for every scored process, so both sides execute the same launch count and the
   scored batch meets the requested timing window.
 - Process order alternates AB/BA with a fixed seed. The primary observations
-  are pair-level `vanilla / Forge` speedups; samples from different processes
-  are never pooled.
+  are pair-level `baseline / subject` speedups as recorded by the comparison
+  definition; samples from different processes are never pooled.
 - A system-wide named mutex allows only one qualification driver at a time, so
   separate CPU/CUDA/Vulkan benchmark invocations cannot overlap accidentally.
 - Each child applies the same CPU thread count and affinity, disables Taichi's
   offline cache, separates import/init/first-call/warm timing, synchronizes at
   identical boundaries, validates before and after timing, and syncs/resets on
   teardown.
+- Warm single-call `call+sync` samples are retained as a latency diagnostic.
+  The fixed publication gate uses only common-batch throughput/replay samples
+  with one final synchronization; latency and throughput ratios are never mixed.
+- In-place scan/sort cases reset deterministic input on device inside every
+  scored replay and label the wider timing scope; other cases remain
+  operation-only unless their workload contract already declares a full reset.
 - GPU children are pinned to device zero. Forge's CUDA runtime UUID must match
   the nvidia-smi UUID. A runtime without a UUID passes only on this single-GPU
   host with explicit device-zero binding; ambiguous multi-GPU runs fail closed.
@@ -290,10 +326,15 @@ The affine transform subcase has its own invocation and run ID:
 ```powershell
 C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
   benchmarks\qualification\native_transform_microbench.py `
+  --comparison forge-native-vs-forge-kernel `
   --backend cuda --preset small --intent diagnostic `
   --pairs 1 --samples 5 --warmups 2 `
   --target-sample-ms 20 --stability-replays 0
 ```
+
+For a thin case, repeat with `--comparison forge-kernel-vs-vanilla` under a new
+run ID. The default `forge-vs-vanilla` route remains a separately labeled
+end-to-end diagnostic; never merge the three invocations into one process.
 
 Indexed gather is launched separately:
 

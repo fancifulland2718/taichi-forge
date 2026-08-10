@@ -86,6 +86,24 @@ OPERATIONS = (
     "mpm_graph",
     "mpm_direct",
 )
+THIN_CAPABILITY_OPERATIONS = frozenset({
+    "native_reduce",
+    "native_transform",
+    "native_gather",
+    "native_scatter",
+    "native_compact",
+    "device_prefix_chain",
+    "active_grid_mpm",
+    "particle_spatial_hash",
+    "adaptive_pbd",
+    "marching_squares",
+    "bfs_worklist",
+})
+COMPARISONS = (
+    "forge-vs-vanilla",
+    "forge-kernel-vs-vanilla",
+    "forge-native-vs-forge-kernel",
+)
 PRESETS = {
     "small": {"elements": 65_536, "stencil_side": 256},
     "medium": {"elements": 1_048_576, "stencil_side": 1_024},
@@ -159,10 +177,86 @@ class _ExclusiveBenchmarkLock:
             self._handle = None
 
 
-def balanced_pair_orders(pair_count: int, seed: int) -> list[tuple[str, str]]:
+def comparison_participants(comparison: str,
+                            operation: str) -> tuple[str, str]:
+    if comparison == "forge-vs-vanilla":
+        return ("forge", "vanilla")
+    if comparison == "forge-kernel-vs-vanilla":
+        if operation not in THIN_CAPABILITY_OPERATIONS:
+            raise ValueError(
+                f"{comparison} is only valid for thin/native operations; "
+                f"{operation!r} has no declared Forge-kernel control")
+        return ("forge_kernel", "vanilla_kernel")
+    if comparison == "forge-native-vs-forge-kernel":
+        if operation not in THIN_CAPABILITY_OPERATIONS:
+            raise ValueError(
+                f"{comparison} is only valid for thin/native operations; "
+                f"{operation!r} has no declared Forge-kernel control")
+        return ("forge", "forge_kernel")
+    raise ValueError(f"unknown comparison {comparison!r}")
+
+
+def comparison_definition(comparison: str, operation: str) -> dict[str, Any]:
+    subject, baseline = comparison_participants(comparison, operation)
+    if comparison == "forge-native-vs-forge-kernel":
+        attribution = (
+            "same Forge wheel/runtime and semantic workload; isolates the opt-in "
+            "native adapter from the Forge-compatible kernel control"
+        )
+        attribution_zh = (
+            "相同 Forge wheel/runtime 与语义 workload；隔离 opt-in native adapter "
+            "相对 Forge-compatible kernel 控制组的差异"
+        )
+    elif comparison == "forge-kernel-vs-vanilla":
+        attribution = (
+            "the same vanilla-compatible kernel adapter across Forge and vanilla; "
+            "isolates cross-package compatibility-path behavior"
+        )
+        attribution_zh = (
+            "Forge 与 vanilla 执行同一 vanilla-compatible kernel adapter；隔离跨 "
+            "package compatibility path 的差异"
+        )
+    elif operation in THIN_CAPABILITY_OPERATIONS:
+        attribution = (
+            "cross-package end-to-end route diagnostic only; does not isolate the "
+            "Forge runtime or the native adapter"
+        )
+        attribution_zh = (
+            "仅为跨 package 端到端路线诊断；不隔离 Forge runtime 或 native adapter"
+        )
+    else:
+        attribution = (
+            "cross-package comparison under the case-specific workload contract"
+        )
+        attribution_zh = "受案例 workload contract 约束的跨 package 对比"
+    return {
+        "name": comparison,
+        "subject": subject,
+        "baseline": baseline,
+        "speedup_formula": f"{baseline}_ms / {subject}_ms",
+        "values_above_one_favor": subject,
+        "attribution": attribution,
+        "attribution_zh": attribution_zh,
+    }
+
+
+def _uses_forge_package(runtime_name: str) -> bool:
+    return runtime_name in ("forge", "forge_kernel")
+
+
+def _uses_native_adapter(runtime_name: str) -> bool:
+    return runtime_name == "forge"
+
+
+def balanced_pair_orders(
+        pair_count: int, seed: int,
+        participants: Sequence[str] = ("forge", "vanilla"),
+) -> list[tuple[str, str]]:
     if pair_count <= 0:
         raise ValueError("pair_count must be positive")
-    first = ["forge", "vanilla"]
+    if len(participants) != 2 or participants[0] == participants[1]:
+        raise ValueError("exactly two distinct participants are required")
+    first = list(participants)
     if random.Random(seed).randrange(2):
         first.reverse()
     second = list(reversed(first))
@@ -236,7 +330,7 @@ def qualification_policy_errors(args: argparse.Namespace) -> list[str]:
 
 def _load_taichi(runtime_name: str) -> tuple[Any, float, Path]:
     started = time.perf_counter_ns()
-    module_name = "taichi_forge" if runtime_name == "forge" else "taichi"
+    module_name = "taichi_forge" if _uses_forge_package(runtime_name) else "taichi"
     ti = importlib.import_module(module_name)
     core_path = Path(ti._lib.core.__file__).resolve()
     elapsed_ms = (time.perf_counter_ns() - started) / 1.0e6
@@ -316,7 +410,7 @@ def _environment_provenance(runtime_name: str, ti: Any,
         path = Path(entry).resolve()
         if not _path_in_prefix(path, prefix):
             external_site_paths.append(str(path))
-    distribution = "taichi-forge" if runtime_name == "forge" else "taichi"
+    distribution = "taichi-forge" if _uses_forge_package(runtime_name) else "taichi"
     try:
         package_version = importlib_metadata.version(distribution)
     except importlib_metadata.PackageNotFoundError:
@@ -556,6 +650,48 @@ def _build_case(ti: Any, kernel: Callable[..., None], operation: str,
     raise ValueError(operation)
 
 
+def _build_common_kernel_i32_scan(ti: Any, values: Any,
+                                  elements: int) -> Callable[[], None]:
+    """Build one identical Hillis-Steele scan source for both packages."""
+    scratch = ti.field(dtype=ti.i32, shape=elements)
+
+    @ti.kernel
+    def values_to_scratch(offset: ti.i32):
+        for i in range(elements):
+            value = values[i]
+            if i >= offset:
+                value += values[i - offset]
+            scratch[i] = value
+
+    @ti.kernel
+    def scratch_to_values(offset: ti.i32):
+        for i in range(elements):
+            value = scratch[i]
+            if i >= offset:
+                value += scratch[i - offset]
+            values[i] = value
+
+    @ti.kernel
+    def copy_scratch_to_values():
+        for i in range(elements):
+            values[i] = scratch[i]
+
+    def run() -> None:
+        offset = 1
+        source_is_values = True
+        while offset < elements:
+            if source_is_values:
+                values_to_scratch(offset)
+            else:
+                scratch_to_values(offset)
+            source_is_values = not source_is_values
+            offset *= 2
+        if not source_is_values:
+            copy_scratch_to_values()
+
+    return run
+
+
 def _prefix_sum_route(executor: Any, runtime_name: str,
                       backend: str) -> dict[str, Any]:
     source_path = inspect.getsourcefile(executor.__class__)
@@ -655,12 +791,14 @@ def _build_prefix_sum_case(ti: Any, runtime_name: str, backend: str,
     return {
         "launch": launch,
         "reset": reset,
+        "reset_each_launch": True,
         "validate": validate_fresh,
         "route": lambda: _prefix_sum_route(executor, runtime_name, backend),
-        "logical_bytes": elements * 8,
+        "logical_bytes": elements * 12,
         "traffic_model": (
-            "logical inclusive scan interface: one i32 input read plus one i32 "
-            "output write per element; implementation-internal traffic excluded"
+            "scored reset-plus-scan scope: one deterministic i32 reset write, "
+            "one logical scan input read, and one logical scan output write per "
+            "element; implementation-internal traffic excluded"
         ),
         "workload_contract": {
             "case_id": "DIRECT-001",
@@ -672,8 +810,8 @@ def _build_prefix_sum_case(ti: Any, runtime_name: str, backend: str,
             "input_pattern": "(i % 7) - 3",
             "correctness": "exact_i32_after_fresh_reset_and_one_scan",
             "timing": (
-                "frozen repeated run(field) calls plus one outer sync; reset "
-                "and correctness scan are outside scored timing"
+                "device reset plus run(field) for every replay, with one outer "
+                "sync per batch; correctness scan is outside scored timing"
             ),
             "elements": elements,
         },
@@ -726,8 +864,19 @@ def _build_parallel_sort_case(ti: Any, runtime_name: str,
     host ^= ((np.arange(elements, dtype=np.int32) % 31) << 13)
     expected = np.sort(host, kind="stable")
 
+    @ti.kernel
+    def reset_keys():
+        for i in keys:
+            index = ti.cast(i, ti.u32)
+            value = (
+                (index * ti.cast(1_103_515_245, ti.u32)
+                 + ti.cast(12_345, ti.u32))
+                & ti.cast(0x7FFF_FFFF, ti.u32)
+            )
+            keys[i] = ti.cast(value, ti.i32) ^ ((i % 31) << 13)
+
     def reset() -> None:
-        keys.from_numpy(host)
+        reset_keys()
 
     def launch() -> None:
         ti.algorithms.parallel_sort(keys)
@@ -753,6 +902,7 @@ def _build_parallel_sort_case(ti: Any, runtime_name: str,
     return {
         "launch": launch,
         "reset": reset,
+        "reset_each_launch": True,
         "validate": validate_fresh,
         "route": lambda: _parallel_sort_route(ti, runtime_name),
         "logical_bytes": 0,
@@ -770,9 +920,9 @@ def _build_parallel_sort_case(ti: Any, runtime_name: str,
             "input_pattern": "deterministic_lcg_xor",
             "correctness": "exact_i32_against_numpy_stable_sort",
             "timing": (
-                "frozen repeated parallel_sort(keys) calls plus implementation "
-                "syncs and one outer sync; reset and correctness are excluded; "
-                "the sorting network is data independent"
+                "deterministic device reset plus parallel_sort(keys) for every "
+                "replay, including implementation syncs and one outer batch sync; "
+                "correctness is excluded"
             ),
             "elements": elements,
         },
@@ -816,7 +966,7 @@ def _native_reduce_route(workspace: Any | None, runtime_name: str,
             "passed": passed,
         }
     return {
-        "classification": "vanilla_equivalent_i32_atomic_sum_kernel",
+        "classification": f"{runtime_name}_equivalent_i32_atomic_sum_kernel",
         "expected_backend": backend,
         "expected_method": "one output reset plus parallel i32 atomic_add",
         "observed_plan_backend": backend,
@@ -950,7 +1100,7 @@ def _native_transform_route(workspace: Any | None, runtime_name: str,
             "passed": passed,
         }
     return {
-        "classification": "vanilla_equivalent_i32_affine_kernel",
+        "classification": f"{runtime_name}_equivalent_i32_affine_kernel",
         "expected_backend": backend,
         "expected_methods": ["one elementwise i32 affine Taichi kernel"],
         "observed_plan_backend": backend,
@@ -1083,7 +1233,7 @@ def _native_indexed_copy_route(workspace: Any | None, runtime_name: str,
             ),
         }
     return {
-        "classification": f"vanilla_equivalent_i32_{operation}_kernel",
+        "classification": f"{runtime_name}_equivalent_i32_{operation}_kernel",
         "expected_backend": backend,
         "expected_method": f"one indexed i32 {operation} Taichi kernel",
         "observed_plan_backend": backend,
@@ -1246,9 +1396,12 @@ def _native_compact_route(workspace: Any | None, runtime_name: str,
             ),
         }
     return {
-        "classification": "vanilla_stable_prefix_scan_compact_pipeline",
+        "classification": f"{runtime_name}_stable_prefix_scan_compact_pipeline",
         "expected_backend": backend,
         "expected_method": (
+            "flags-to-prefix kernel, shared Hillis-Steele i32 scan kernels, "
+            "stable scatter kernel"
+            if runtime_name in ("forge_kernel", "vanilla_kernel") else
             "flags-to-prefix kernel, PrefixSumExecutor, stable scatter kernel"
         ),
         "observed_plan_backend": backend,
@@ -1278,11 +1431,17 @@ def _build_native_compact_case(ti: Any, runtime_name: str, backend: str,
     output.fill(0)
     count.fill(0)
 
-    prefix = ti.field(dtype=ti.i32, shape=elements) if runtime_name == "vanilla" else None
-    scanner = (
-        ti.algorithms.PrefixSumExecutor(elements)
-        if runtime_name == "vanilla" else None
+    prefix = (
+        ti.field(dtype=ti.i32, shape=elements)
+        if not _uses_native_adapter(runtime_name) else None
     )
+    scan_prefix = None
+    if not _uses_native_adapter(runtime_name):
+        if runtime_name in ("forge_kernel", "vanilla_kernel"):
+            scan_prefix = _build_common_kernel_i32_scan(ti, prefix, elements)
+        else:
+            scanner = ti.algorithms.PrefixSumExecutor(elements)
+            scan_prefix = lambda: scanner.run(prefix)
 
     @ti.kernel
     def flags_to_prefix(
@@ -1312,7 +1471,7 @@ def _build_native_compact_case(ti: Any, runtime_name: str, backend: str,
                 values, flags, output, count, method="auto", workspace=workspace)
         else:
             flags_to_prefix(flags)
-            scanner.run(prefix)
+            scan_prefix()
             stable_scatter(values, flags, output, count)
 
     def reset() -> None:
@@ -1438,12 +1597,19 @@ def _device_prefix_chain_route(workspace: Any | None, runtime_name: str,
             ),
         }
     return {
-        "classification": "vanilla_device_count_stable_compact_scan_pipeline",
+        "classification": f"{runtime_name}_device_count_stable_compact_scan_pipeline",
         "expected_backend": backend,
         "expected_compact_method": (
+            "masked flags plus shared Hillis-Steele i32 scan kernels plus "
+            "stable scatter"
+            if runtime_name in ("forge_kernel", "vanilla_kernel") else
             "masked flags plus PrefixSumExecutor plus stable scatter"
         ),
-        "expected_scan_method": "second reusable PrefixSumExecutor",
+        "expected_scan_method": (
+            "second shared Hillis-Steele i32 kernel scan"
+            if runtime_name in ("forge_kernel", "vanilla_kernel") else
+            "second reusable PrefixSumExecutor"
+        ),
         "observed_compact_backend": backend,
         "observed_compact_method": "qualification_device_count_compact",
         "observed_scan_backend": backend,
@@ -1478,7 +1644,7 @@ def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
     compacted_prefix = None
     vanilla_input_count = vanilla_output_count = None
     compact_prefix_field = scan_field = None
-    compact_scanner = scan_scanner = None
+    run_compact_scan = run_output_scan = None
     if runtime_name == "forge":
         forge_extent = ti.DeviceExtent(elements)
         forge_output_extent = ti.DeviceExtent(elements)
@@ -1495,8 +1661,16 @@ def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
         vanilla_output_count.fill(0)
         compact_prefix_field = ti.field(dtype=ti.i32, shape=elements)
         scan_field = ti.field(dtype=ti.i32, shape=elements)
-        compact_scanner = ti.algorithms.PrefixSumExecutor(elements)
-        scan_scanner = ti.algorithms.PrefixSumExecutor(elements)
+        if runtime_name in ("forge_kernel", "vanilla_kernel"):
+            run_compact_scan = _build_common_kernel_i32_scan(
+                ti, compact_prefix_field, elements)
+            run_output_scan = _build_common_kernel_i32_scan(
+                ti, scan_field, elements)
+        else:
+            compact_scanner = ti.algorithms.PrefixSumExecutor(elements)
+            scan_scanner = ti.algorithms.PrefixSumExecutor(elements)
+            run_compact_scan = lambda: compact_scanner.run(compact_prefix_field)
+            run_output_scan = lambda: scan_scanner.run(scan_field)
 
     @ti.kernel
     def vanilla_stage_flags(
@@ -1536,11 +1710,11 @@ def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
             compacted_prefix.scan(scanned)
         else:
             vanilla_stage_flags(flags, vanilla_input_count)
-            compact_scanner.run(compact_prefix_field)
+            run_compact_scan()
             vanilla_scatter_and_stage_scan(
                 values, flags, vanilla_input_count, compacted,
                 vanilla_output_count)
-            scan_scanner.run(scan_field)
+            run_output_scan()
             vanilla_copy_scan(scanned)
 
     def reset() -> None:
@@ -2569,14 +2743,20 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
 
     def route() -> dict[str, Any]:
         class_module = graph.__class__.__module__
-        if runtime_name == "vanilla":
+        if not _uses_native_adapter(runtime_name):
+            expected_class_module = (
+                "taichi_forge.graph._graph"
+                if _uses_forge_package(runtime_name)
+                else "taichi.graph._graph"
+            )
             return {
-                "classification": "vanilla_full_grid_mls_mpm_graph",
+                "classification": f"{runtime_name}_full_grid_mls_mpm_graph",
                 "public_api": "GraphBuilder dispatch of full-grid update",
                 "class_module": class_module,
+                "expected_class_module": expected_class_module,
                 "update_domain": grid_cells,
                 "passed": bool(
-                    class_module == "taichi.graph._graph"
+                    class_module == expected_class_module
                     and getattr(graph, "_compiled_graph", None) is not None
                 ),
             }
@@ -2719,12 +2899,14 @@ def _particle_hash_route(workspace: Any | None, runtime_name: str,
             ),
         }
     return {
-        "classification": "vanilla_equivalent_particle_bucket_pipeline",
+        "classification": f"{runtime_name}_equivalent_particle_bucket_pipeline",
         "expected_backend": backend,
         "observed_backend": backend,
         "observed_method": (
-            "clear-count, reusable PrefixSumExecutor, cursor copy, atomic "
-            "scatter"
+            "clear-count, shared Hillis-Steele i32 scan kernels, cursor copy, "
+            "atomic scatter"
+            if runtime_name in ("forge_kernel", "vanilla_kernel") else
+            "clear-count, reusable PrefixSumExecutor, cursor copy, atomic scatter"
         ),
         "bins": bins,
         "passed": True,
@@ -2769,14 +2951,19 @@ def _build_particle_spatial_hash_case(ti: Any, runtime_name: str,
     output = ti.field(dtype=ti.i32, shape=elements)
     neighbors = ti.field(dtype=ti.i32, shape=elements)
     cursor = None
-    scanner = None
+    run_offset_scan = None
     workspace = None
     if runtime_name == "forge":
         workspace = ti.algorithms.BucketBuilderWorkspace(
             max_items=elements, max_bins=bins)
     else:
         cursor = ti.field(dtype=ti.i32, shape=bins)
-        scanner = ti.algorithms.PrefixSumExecutor(bins + 1)
+        if runtime_name in ("forge_kernel", "vanilla_kernel"):
+            run_offset_scan = _build_common_kernel_i32_scan(
+                ti, offsets, bins + 1)
+        else:
+            scanner = ti.algorithms.PrefixSumExecutor(bins + 1)
+            run_offset_scan = lambda: scanner.run(offsets)
 
     @ti.kernel
     def initialize_values():
@@ -2849,7 +3036,7 @@ def _build_particle_spatial_hash_case(ti: Any, runtime_name: str,
                 method="auto", workspace=workspace)
         else:
             vanilla_count()
-            scanner.run(offsets)
+            run_offset_scan()
             vanilla_copy_cursor()
             vanilla_scatter()
         query_neighbors(positions)
@@ -2986,8 +3173,10 @@ def _adaptive_pbd_route(worklist: Any | None, runtime_name: str,
             ),
         }
     return {
-        "classification": "vanilla_device_count_mask_prefix_scatter_pbd",
+        "classification": f"{runtime_name}_device_count_mask_prefix_scatter_pbd",
         "observed_method": (
+            "device-count mask, shared Hillis-Steele i32 scan kernels, stable scatter"
+            if runtime_name in ("forge_kernel", "vanilla_kernel") else
             "device-count mask, reusable PrefixSumExecutor, stable scatter"
         ),
         "passed": True,
@@ -3030,7 +3219,7 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
     worklist = None
     vanilla_values = vanilla_extents = None
     prefix_field = None
-    scanner = None
+    run_prefix_scan = None
     if runtime_name == "forge":
         worklist = ti.algorithms.DeviceWorklist(constraints, ti.i32)
     else:
@@ -3043,7 +3232,12 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
             ti.ndarray(ti.i32, shape=1),
         )
         prefix_field = ti.field(dtype=ti.i32, shape=constraints)
-        scanner = ti.algorithms.PrefixSumExecutor(constraints)
+        if runtime_name in ("forge_kernel", "vanilla_kernel"):
+            run_prefix_scan = _build_common_kernel_i32_scan(
+                ti, prefix_field, constraints)
+        else:
+            scanner = ti.algorithms.PrefixSumExecutor(constraints)
+            run_prefix_scan = lambda: scanner.run(prefix_field)
 
     @ti.kernel
     def initialize_problem(
@@ -3143,7 +3337,7 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
                     vanilla_values[front], vanilla_extents[front], positions,
                     flags)
                 stage_vanilla_flags(flags)
-                scanner.run(prefix_field)
+                run_prefix_scan()
                 scatter_vanilla_active(
                     vanilla_values[front], flags, vanilla_values[back],
                     vanilla_extents[back])
@@ -3313,13 +3507,18 @@ def _build_marching_squares_case(ti: Any, runtime_name: str, backend: str,
     case_codes.fill(-1)
     count.fill(0)
     prefix = None
-    scanner = None
+    run_prefix_scan = None
     workspace = None
     if runtime_name == "forge":
         workspace = ti.algorithms.CompactWorkspace(max_items=elements)
     else:
         prefix = ti.field(dtype=ti.i32, shape=elements)
-        scanner = ti.algorithms.PrefixSumExecutor(elements)
+        if runtime_name in ("forge_kernel", "vanilla_kernel"):
+            run_prefix_scan = _build_common_kernel_i32_scan(
+                ti, prefix, elements)
+        else:
+            scanner = ti.algorithms.PrefixSumExecutor(elements)
+            run_prefix_scan = lambda: scanner.run(prefix)
 
     @ti.func
     def cell_case(source: ti.template(), i: ti.i32, j: ti.i32):
@@ -3380,7 +3579,7 @@ def _build_marching_squares_case(ti: Any, runtime_name: str, backend: str,
                 method="auto", workspace=workspace)
         else:
             stage_flags(flags)
-            scanner.run(prefix)
+            run_prefix_scan()
             stable_scatter(cell_ids, flags, compacted, count)
         emit_cases(scalar, compacted, count, case_codes)
 
@@ -3493,7 +3692,7 @@ def _bfs_worklist_route(worklist: Any | None, runtime_name: str,
             ),
         }
     return {
-        "classification": "vanilla_atomic_device_count_bfs_frontier",
+        "classification": f"{runtime_name}_atomic_device_count_bfs_frontier",
         "backend": backend,
         "observed_method": (
             "double-buffered i32 frontier plus atomic device count"
@@ -3902,7 +4101,7 @@ def _run_stability(ti: Any, launch: Callable[[], None], replays: int,
     rss_after = working_set_bytes()
     gpu_after = process_gpu_memory_mib(os.getpid()) if sample_gpu else None
     enhanced_after = runtime_memory_observation(ti)
-    if runtime_name == "forge":
+    if _uses_forge_package(runtime_name):
         enhanced_plateau = _enhanced_memory_plateau(
             enhanced_before, enhanced_after)
     else:
@@ -3958,6 +4157,14 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         "schema": SCHEMA,
         "phase": args.phase,
         "runtime": args.runtime,
+        "runtime_package": (
+            "forge" if _uses_forge_package(args.runtime) else "vanilla"
+        ),
+        "adapter_kind": (
+            "native" if (args.runtime == "forge"
+                         and args.operation in THIN_CAPABILITY_OPERATIONS)
+            else "kernel"
+        ),
         "operation": args.operation,
         "backend": args.backend,
         "preset": args.preset,
@@ -3965,6 +4172,7 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         "position_in_pair": args.position_in_pair,
         "measurement_config": {
             "samples": args.samples,
+            "latency_samples": args.latency_samples,
             "warmups": args.warmups,
             "target_sample_ms": args.target_sample_ms,
             "stability_replays": args.stability_replays,
@@ -4062,12 +4270,43 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
             }
         result["logical_bytes"] = case["logical_bytes"]
         result["traffic_model"] = case["traffic_model"]
+        if case["workload_contract"].get("comparison_class") == "thin-capability":
+            kernel_adapter = case["workload_contract"].get(
+                "vanilla_adapter", "declared vanilla-compatible Taichi kernel path")
+            case["workload_contract"]["legacy_vanilla_adapter"] = kernel_adapter
+            case["workload_contract"]["forge_kernel_adapter"] = (
+                "benchmark-defined Taichi kernel control executed by the Forge "
+                "package; composite scan stages use the shared Hillis-Steele i32 "
+                "kernel source and no native/helper algorithm entry"
+            )
+            case["workload_contract"]["vanilla_kernel_adapter"] = (
+                "the identical benchmark-defined Taichi kernel control executed by "
+                "vanilla; composite scan stages use the same Hillis-Steele i32 "
+                "kernel source"
+            )
+            case["workload_contract"]["required_comparison_matrix"] = [
+                "vanilla/kernel",
+                "forge/kernel",
+                "forge/native",
+            ]
         result["workload_contract"] = case["workload_contract"]
         result["case_preparation"] = case.get("case_preparation")
+        measured_launch = case["launch"]
+        if case.get("reset_each_launch"):
+            raw_launch = case["launch"]
+            reset_launch = case["reset"]
+
+            def measured_launch() -> None:
+                reset_launch()
+                raw_launch()
+
+            result["measurement_scope"] = "device_reset_plus_operation"
+        else:
+            result["measurement_scope"] = "operation_only"
         if "reset" in case:
             case["reset"]()
             ti.sync()
-        result["first_call_ms"] = _timed_batch(ti, case["launch"], 1)
+        result["first_call_ms"] = _timed_batch(ti, measured_launch, 1)
         result["route"] = (
             case["route"]() if "route" in case else {
                 "classification": "ordinary_taichi_kernel",
@@ -4077,11 +4316,17 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         result["runtime_memory_at_ready"] = runtime_memory_observation(ti)
         result["validation_before"] = case["validate"]()
         result["warmup_ms"] = [
-            _timed_batch(ti, case["launch"], 1) for _ in range(args.warmups)
+            _timed_batch(ti, measured_launch, 1) for _ in range(args.warmups)
         ]
+        result["warm_single_call_latency_ms"] = [
+            _timed_batch(ti, measured_launch, 1)
+            for _ in range(args.latency_samples)
+        ]
+        result["warm_single_call_latency_summary"] = summarize_samples(
+            result["warm_single_call_latency_ms"])
         if args.phase == "pilot":
             suggestion, attempts = _calibrate_batch(
-                ti, case["launch"],
+                ti, measured_launch,
                 args.target_sample_ms * PILOT_TIMING_HEADROOM)
             result["suggested_batch_size"] = suggestion
             result["pilot_attempts"] = attempts
@@ -4089,7 +4334,7 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
                 args.target_sample_ms * PILOT_TIMING_HEADROOM)
         else:
             raw_batch_ms = [
-                _timed_batch(ti, case["launch"], args.batch_size)
+                _timed_batch(ti, measured_launch, args.batch_size)
                 for _ in range(args.samples)
             ]
             samples = [value / args.batch_size for value in raw_batch_ms]
@@ -4100,7 +4345,7 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
             result["samples"] = samples
             result["summary"] = summary
             result["stability"] = _run_stability(
-                ti, case["launch"], args.stability_replays,
+                ti, measured_launch, args.stability_replays,
                 args.stability_checkpoint, args.backend != "cpu", args.runtime)
         result["validation_after"] = case["validate"]()
         stability = result.get("stability")
@@ -4295,7 +4540,10 @@ def _child_environment(backend: str) -> dict[str, str]:
 def _run_child(args: argparse.Namespace, runtime: str, phase: str,
                output_dir: Path, label: str, pair_index: int,
                position_in_pair: int, batch_size: int) -> dict[str, Any]:
-    python = args.forge_python if runtime == "forge" else args.vanilla_python
+    python = (
+        args.forge_python if _uses_forge_package(runtime)
+        else args.vanilla_python
+    )
     command = [
         str(Path(python).resolve()),
         str(Path(__file__).resolve()),
@@ -4309,6 +4557,7 @@ def _run_child(args: argparse.Namespace, runtime: str, phase: str,
         "--position-in-pair", str(position_in_pair),
         "--batch-size", str(batch_size),
         "--samples", str(args.samples),
+        "--latency-samples", str(args.latency_samples),
         "--warmups", str(args.warmups),
         "--target-sample-ms", str(args.target_sample_ms),
         "--stability-replays", str(args.stability_replays),
@@ -4364,14 +4613,14 @@ def _check_pyvenv(python: Path) -> dict[str, Any]:
     }
 
 
-def _mpm_cross_runtime_endpoint_equivalent(
-        results: dict[str, dict[str, Any]]) -> bool:
-    forge = results["forge"]
-    if forge["operation"] == "adaptive_pbd":
-        vanilla = results["vanilla"]
+def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
+                         baseline: str) -> bool:
+    left_result = results[subject]
+    right_result = results[baseline]
+    if left_result["operation"] == "adaptive_pbd":
         for validation_name in ("validation_before", "validation_after"):
-            left = forge[validation_name]["endpoint_fingerprint"]
-            right = vanilla[validation_name]["endpoint_fingerprint"]
+            left = left_result[validation_name]["endpoint_fingerprint"]
+            right = right_result[validation_name]["endpoint_fingerprint"]
             if not left.get("finite") or not right.get("finite"):
                 return False
             if left["active_history"] != right["active_history"]:
@@ -4390,21 +4639,19 @@ def _mpm_cross_runtime_endpoint_equivalent(
                     rel_tol=5.0e-5, abs_tol=5.0e-5):
                 return False
         return True
-    if forge["operation"] == "bfs_worklist":
-        vanilla = results["vanilla"]
+    if left_result["operation"] == "bfs_worklist":
         for validation_name in ("validation_before", "validation_after"):
-            left = forge[validation_name]["endpoint_fingerprint"]
-            right = vanilla[validation_name]["endpoint_fingerprint"]
+            left = left_result[validation_name]["endpoint_fingerprint"]
+            right = right_result[validation_name]["endpoint_fingerprint"]
             if left != right:
                 return False
         return True
-    if forge["operation"] not in (
+    if left_result["operation"] not in (
             "mpm_graph", "mpm_direct", "active_grid_mpm"):
         return True
-    vanilla = results["vanilla"]
     for validation_name in ("validation_before", "validation_after"):
-        left = forge[validation_name]["endpoint_fingerprint"]
-        right = vanilla[validation_name]["endpoint_fingerprint"]
+        left = left_result[validation_name]["endpoint_fingerprint"]
+        right = right_result[validation_name]["endpoint_fingerprint"]
         if not left.get("finite") or not right.get("finite"):
             return False
         for key in ("x_mean", "v_mean", "C_mean", "sample_x", "sample_v"):
@@ -4428,34 +4675,55 @@ def _mpm_cross_runtime_endpoint_equivalent(
 
 
 def _pair_row(pair_index: int, order: Sequence[str],
-              results: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    forge = results["forge"]
-    vanilla = results["vanilla"]
-    forge_median = float(forge["summary"]["median_ms"])
-    vanilla_median = float(vanilla["summary"]["median_ms"])
-    forge_p95 = float(forge["summary"]["p95_ms"])
-    vanilla_p95 = float(vanilla["summary"]["p95_ms"])
-    return {
+              results: dict[str, dict[str, Any]],
+              definition: dict[str, Any]) -> dict[str, Any]:
+    subject_name = definition["subject"]
+    baseline_name = definition["baseline"]
+    subject = results[subject_name]
+    baseline = results[baseline_name]
+    subject_median = float(subject["summary"]["median_ms"])
+    baseline_median = float(baseline["summary"]["median_ms"])
+    subject_p95 = float(subject["summary"]["p95_ms"])
+    baseline_p95 = float(baseline["summary"]["p95_ms"])
+    row = {
         "pair_index": pair_index,
         "order": "->".join(order),
-        "batch_size": forge["batch_size"],
-        "forge_median_ms": forge_median,
-        "vanilla_median_ms": vanilla_median,
-        "median_speedup_x": vanilla_median / forge_median,
-        "forge_p95_ms": forge_p95,
-        "vanilla_p95_ms": vanilla_p95,
-        "p95_speedup_x": vanilla_p95 / forge_p95,
-        "forge_first_call_ms": forge["first_call_ms"],
-        "vanilla_first_call_ms": vanilla["first_call_ms"],
-        "first_call_speedup_x": vanilla["first_call_ms"] / forge["first_call_ms"],
-        "forge_cv_percent": forge["summary"]["cv_percent"],
-        "vanilla_cv_percent": vanilla["summary"]["cv_percent"],
-        "forge_native_commit": forge["native_commit"],
-        "vanilla_native_commit": vanilla["native_commit"],
-        "cross_runtime_endpoint_equivalent": (
-            _mpm_cross_runtime_endpoint_equivalent(results)
-        ),
+        "batch_size": subject["batch_size"],
+        "subject": subject_name,
+        "baseline": baseline_name,
+        "subject_median_ms": subject_median,
+        "baseline_median_ms": baseline_median,
+        "median_speedup_x": baseline_median / subject_median,
+        "subject_p95_ms": subject_p95,
+        "baseline_p95_ms": baseline_p95,
+        "p95_speedup_x": baseline_p95 / subject_p95,
+        "subject_first_call_ms": subject["first_call_ms"],
+        "baseline_first_call_ms": baseline["first_call_ms"],
+        "first_call_speedup_x": (
+            baseline["first_call_ms"] / subject["first_call_ms"]),
+        "subject_warm_latency_median_ms": subject[
+            "warm_single_call_latency_summary"]["median_ms"],
+        "baseline_warm_latency_median_ms": baseline[
+            "warm_single_call_latency_summary"]["median_ms"],
+        "warm_latency_speedup_x": (
+            baseline["warm_single_call_latency_summary"]["median_ms"]
+            / subject["warm_single_call_latency_summary"]["median_ms"]),
+        "subject_cv_percent": subject["summary"]["cv_percent"],
+        "baseline_cv_percent": baseline["summary"]["cv_percent"],
+        "subject_native_commit": subject["native_commit"],
+        "baseline_native_commit": baseline["native_commit"],
+        "endpoint_equivalent": _endpoint_equivalent(
+            results, subject_name, baseline_name),
     }
+    for participant, result in results.items():
+        row[f"{participant}_median_ms"] = result["summary"]["median_ms"]
+        row[f"{participant}_p95_ms"] = result["summary"]["p95_ms"]
+        row[f"{participant}_first_call_ms"] = result["first_call_ms"]
+        row[f"{participant}_cv_percent"] = result["summary"]["cv_percent"]
+        row[f"{participant}_native_commit"] = result["native_commit"]
+    if definition["name"] == "forge-vs-vanilla":
+        row["cross_runtime_endpoint_equivalent"] = row["endpoint_equivalent"]
+    return row
 
 
 def _neutral_environment_signature(result: dict[str, Any]) -> tuple[Any, ...]:
@@ -4479,9 +4747,11 @@ def _pair_execution_is_sequential(
     )
 
 
-def _runtime_evidence_summary(children: Sequence[dict[str, Any]]) -> dict[str, Any]:
+def _runtime_evidence_summary(
+        children: Sequence[dict[str, Any]],
+        participants: Sequence[str]) -> dict[str, Any]:
     evidence: dict[str, Any] = {}
-    for runtime_name in ("forge", "vanilla"):
+    for runtime_name in participants:
         selected = [child for child in children
                     if child["runtime"] == runtime_name]
         if not selected:
@@ -4516,7 +4786,7 @@ def _runtime_evidence_summary(children: Sequence[dict[str, Any]]) -> dict[str, A
                     stability
                     and all(item["memory_guard_passed"] for item in stability)
                 ),
-                "enhanced_plateau_required": runtime_name == "forge",
+                "enhanced_plateau_required": _uses_forge_package(runtime_name),
                 "enhanced_plateau_all_passed": bool(
                     stability
                     and all(item["enhanced_plateau"]["passed"]
@@ -4536,21 +4806,31 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
         if not passed
     ]
     comparison_class = summary["comparison_class"]
-    forge_evidence = summary["runtime_evidence"]["forge"]
-    vanilla_evidence = summary["runtime_evidence"]["vanilla"]
-    forge_route = forge_evidence["route"]
-    vanilla_route = vanilla_evidence["route"]
-    forge_route_detail = (
-        forge_route.get("observed_method")
-        or forge_route.get("observed_instance_kind")
-        or forge_route.get("dispatches_per_frame")
+    definition = summary.get("comparison_definition", {
+        "name": "forge-vs-vanilla",
+        "subject": "forge",
+        "baseline": "vanilla",
+        "speedup_formula": "vanilla_ms / forge_ms",
+        "values_above_one_favor": "forge",
+        "attribution": "legacy cross-package comparison",
+    })
+    subject_name = definition["subject"]
+    baseline_name = definition["baseline"]
+    subject_evidence = summary["runtime_evidence"][subject_name]
+    baseline_evidence = summary["runtime_evidence"][baseline_name]
+    subject_route = subject_evidence["route"]
+    baseline_route = baseline_evidence["route"]
+    subject_route_detail = (
+        subject_route.get("observed_method")
+        or subject_route.get("observed_instance_kind")
+        or subject_route.get("dispatches_per_frame")
         or "n/a"
     )
-    gpu_rows = forge_evidence["device_identity"].get("nvidia_smi_devices", [])
+    gpu_rows = subject_evidence["device_identity"].get("nvidia_smi_devices", [])
     gpu_name = "unknown" if not gpu_rows else gpu_rows[0].get("name", "unknown")
     gpu_uuid = "unknown" if not gpu_rows else gpu_rows[0].get("uuid", "unknown")
-    forge_stability = forge_evidence["stability"]
-    vanilla_stability = vanilla_evidence["stability"]
+    subject_stability = subject_evidence["stability"]
+    baseline_stability = baseline_evidence["stability"]
     if language == "zh-CN":
         lines = [
             "# 单操作本机 microbench 报告",
@@ -4561,9 +4841,12 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             f"- 规模：`{cfg['preset']}`",
             f"- 用途：`{cfg['intent']}`",
             f"- 对比分类：`{comparison_class}`",
+            f"- 对比轴：`{definition['name']}`（subject=`{subject_name}`，"
+            f"baseline=`{baseline_name}`）",
             f"- 共同 batch size：{summary['common_batch_size']}",
             f"- Fresh-process A/B 对：{result['pair_count']}",
-            "- 速度比定义：vanilla / Forge，大于 1 表示 Forge 更快。",
+            f"- 速度比定义：`{definition['speedup_formula']}`；大于 1 表示 "
+            f"`{definition['values_above_one_favor']}` 更快。",
             "",
             "## 配对结果",
             "",
@@ -4571,6 +4854,8 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             f"- Paired bootstrap 95% 区间：[{result['bootstrap_95_low_x']:.4f}, "
             f"{result['bootstrap_95_high_x']:.4f}]x",
             f"- p95 配对中位速度比：{summary['p95_paired_summary']['median_speedup_x']:.4f}x",
+            "- Warm 单调用（call+sync）诊断速度比："
+            f"{summary['warm_single_call_latency_paired_summary']['median_speedup_x']:.4f}x",
             f"- 有利配对占比：{summary['quality']['favorable_pair_fraction']:.1%}",
             f"- 最大子进程 CV：{summary['quality']['max_child_cv_percent']:.2f}%",
             f"- 性能宣称资格：{'通过' if qualified else '未通过'}",
@@ -4579,29 +4864,32 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             "",
             "## Route、设备与稳定性证据",
             "",
-            f"- Forge route：`{forge_route['classification']}` / "
-            f"`{forge_route_detail}`；验证："
-            f"{'通过' if forge_route['passed'] else '失败'}。",
-            f"- Vanilla route：`{vanilla_route['classification']}`；验证："
-            f"{'通过' if vanilla_route['passed'] else '失败'}。",
-            f"- 物理 GPU：`{gpu_name}`，UUID `{gpu_uuid}`；Forge UUID 匹配与 "
-            "vanilla 单 GPU device-zero 绑定均记录在 child artifact。",
-            f"- Forge stability child：{forge_stability['completed_child_count']}；"
-            f"最少 replay：{forge_stability['minimum_replays']}；增强 pool/live plateau："
-            f"{'通过' if forge_stability['enhanced_plateau_all_passed'] else '未完成'}。",
-            f"- Vanilla stability child：{vanilla_stability['completed_child_count']}；"
-            f"最少 replay：{vanilla_stability['minimum_replays']}；Forge 专有增强计数器"
-            "明确为 unavailable。",
-            "- First-call 仅作诊断；本报告的性能 gate 只适用于 warm steady-state。",
-            ("- thin-capability 结果只归因于本案例中声明的薄 capability adapter，"
-             "不得写成相同公开 API 或 Forge 整体加速。"
+            f"- `{subject_name}` route：`{subject_route['classification']}` / "
+            f"`{subject_route_detail}`；验证："
+            f"{'通过' if subject_route['passed'] else '失败'}。",
+            f"- `{baseline_name}` route：`{baseline_route['classification']}`；验证："
+            f"{'通过' if baseline_route['passed'] else '失败'}。",
+            f"- 物理 GPU：`{gpu_name}`，UUID `{gpu_uuid}`；每个 child 都保留"
+            "实际设备绑定证据。",
+            f"- `{subject_name}` stability child："
+            f"{subject_stability['completed_child_count']}；最少 replay："
+            f"{subject_stability['minimum_replays']}；增强 pool/live plateau："
+            f"{'通过' if subject_stability['enhanced_plateau_all_passed'] else '未完成'}。",
+            f"- `{baseline_name}` stability child："
+            f"{baseline_stability['completed_child_count']}；最少 replay："
+            f"{baseline_stability['minimum_replays']}；增强 pool/live plateau："
+            f"{'通过' if baseline_stability['enhanced_plateau_all_passed'] else '不适用或未完成'}。",
+            "- First-call 与 warm 单调用 latency 仅作诊断；性能 gate 只适用于"
+            "共同 batch、末尾同步一次的 warm throughput/replay 统计。",
+            (f"- 归因边界：{definition.get('attribution_zh', definition['attribution'])}。"
              if comparison_class == "thin-capability" else
              "- 本案例分类和允许差异由 workload contract 固定。"),
             "",
             "## 方法学边界",
             "",
-            "本报告只覆盖一个操作、一个 backend 和一个规模。Forge 与 vanilla "
-            "串行相邻运行，使用相同 batch size；主统计单位是 fresh-process A/B 对，"
+            f"本报告只覆盖一个操作、一个 backend 和一个规模。`{subject_name}` 与 "
+            f"`{baseline_name}` 串行相邻运行，使用相同 batch size；主统计单位是 "
+            "fresh-process A/B 对，"
             "未池化跨进程 batch。完整环境、噪声准入、原始样本、正确性和 teardown "
             "证据保存在同一 run 目录。",
         ]
@@ -4615,9 +4903,12 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             f"- Preset: `{cfg['preset']}`",
             f"- Intent: `{cfg['intent']}`",
             f"- Comparison class: `{comparison_class}`",
+            f"- Comparison axis: `{definition['name']}` (subject=`{subject_name}`, "
+            f"baseline=`{baseline_name}`)",
             f"- Common batch size: {summary['common_batch_size']}",
             f"- Fresh-process A/B pairs: {result['pair_count']}",
-            "- Speedup definition: vanilla / Forge; values above 1 favor Forge.",
+            f"- Speedup definition: `{definition['speedup_formula']}`; values above "
+            f"1 favor `{definition['values_above_one_favor']}`.",
             "",
             "## Paired result",
             "",
@@ -4626,6 +4917,8 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             f"{result['bootstrap_95_high_x']:.4f}]x",
             "- Paired median p95 speedup: "
             f"{summary['p95_paired_summary']['median_speedup_x']:.4f}x",
+            "- Warm single-call (call+sync) diagnostic speedup: "
+            f"{summary['warm_single_call_latency_paired_summary']['median_speedup_x']:.4f}x",
             "- Favorable-pair fraction: "
             f"{summary['quality']['favorable_pair_fraction']:.1%}",
             "- Maximum child-process CV: "
@@ -4636,31 +4929,33 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             "",
             "## Route, device, and stability evidence",
             "",
-            f"- Forge route: `{forge_route['classification']}` / "
-            f"`{forge_route_detail}`; verification "
-            f"{'passed' if forge_route['passed'] else 'failed'}.",
-            f"- Vanilla route: `{vanilla_route['classification']}`; verification "
-            f"{'passed' if vanilla_route['passed'] else 'failed'}.",
-            f"- Physical GPU: `{gpu_name}`, UUID `{gpu_uuid}`. Forge UUID matching "
-            "and vanilla's single-GPU device-zero proof are retained per child.",
-            f"- Forge stability children: {forge_stability['completed_child_count']}; "
-            f"minimum replays: {forge_stability['minimum_replays']}; enhanced "
-            f"pool/live plateau: {'pass' if forge_stability['enhanced_plateau_all_passed'] else 'not complete'}.",
-            f"- Vanilla stability children: {vanilla_stability['completed_child_count']}; "
-            f"minimum replays: {vanilla_stability['minimum_replays']}; Forge-only "
-            "enhanced counters are explicitly unavailable.",
-            "- First-call values are diagnostic only; performance gates in this "
-            "report apply only to warm steady state.",
-            ("- A thin-capability result is attributable only to the declared "
-             "adapter in this case; it is neither an identical-public-API nor "
-             "an overall Forge speedup claim."
+            f"- `{subject_name}` route: `{subject_route['classification']}` / "
+            f"`{subject_route_detail}`; verification "
+            f"{'passed' if subject_route['passed'] else 'failed'}.",
+            f"- `{baseline_name}` route: `{baseline_route['classification']}`; "
+            f"verification {'passed' if baseline_route['passed'] else 'failed'}.",
+            f"- Physical GPU: `{gpu_name}`, UUID `{gpu_uuid}`. Actual device-binding "
+            "evidence is retained for every child.",
+            f"- `{subject_name}` stability children: "
+            f"{subject_stability['completed_child_count']}; minimum replays: "
+            f"{subject_stability['minimum_replays']}; enhanced pool/live plateau: "
+            f"{'pass' if subject_stability['enhanced_plateau_all_passed'] else 'not complete'}.",
+            f"- `{baseline_name}` stability children: "
+            f"{baseline_stability['completed_child_count']}; minimum replays: "
+            f"{baseline_stability['minimum_replays']}; enhanced pool/live plateau: "
+            f"{'pass' if baseline_stability['enhanced_plateau_all_passed'] else 'not applicable or incomplete'}.",
+            "- First-call and warm single-call latency are diagnostic only; "
+            "performance gates apply to warm throughput/replay with one final "
+            "synchronization per common batch.",
+            (f"- Attribution boundary: {definition['attribution']}."
              if comparison_class == "thin-capability" else
              "- The workload contract fixes this case's class and allowed differences."),
             "",
             "## Method boundary",
             "",
-            "This report covers one operation, one backend, and one size only. Forge "
-            "and vanilla ran adjacently and sequentially with one common batch size. "
+            f"This report covers one operation, one backend, and one size only. "
+            f"`{subject_name}` and `{baseline_name}` ran adjacently and sequentially "
+            "with one common batch size. "
             "The primary unit is a fresh-process A/B pair; batches were not pooled "
             "across processes. The run directory retains environment, noise-admission, "
             "raw-sample, correctness, and teardown evidence.",
@@ -4682,6 +4977,14 @@ def _write_bilingual_reports(output_dir: Path, summary: dict[str, Any]) -> None:
         f"- 工作负载合同一致：{'通过' if summary['method_checks']['workload_equivalence'] else '失败'}\n"
         "- 对比分类一致："
         f"{'通过' if summary['method_checks']['comparison_class_consistent'] else '失败'}\n"
+        "- 对比轴验证："
+        f"{'通过' if summary['method_checks']['comparison_axis_verified'] else '失败'}\n"
+        "- kernel 控制 route 无 native/helper："
+        f"{'通过' if summary['method_checks']['kernel_control_route_isolated'] else '失败'}\n"
+        "- Forge binary 身份一致："
+        f"{'通过' if summary['method_checks']['same_forge_binary_identity'] else '失败'}\n"
+        "- 原地操作输入稳定："
+        f"{'通过' if summary['method_checks']['stable_replay_input'] else '失败'}\n"
         f"- 单 backend：通过（`{summary['config']['backend']}`）\n"
         f"- 单 kernel：通过（`{summary['config']['operation']}`）\n"
         f"- 共同 batch：{'通过' if summary['method_checks']['common_batch'] else '失败'}\n"
@@ -4692,8 +4995,8 @@ def _write_bilingual_reports(output_dir: Path, summary: dict[str, Any]) -> None:
         "- 物理设备绑定："
         f"{'通过' if summary['method_checks']['physical_device_binding'] else '失败'}\n"
         f"- 实际 route：{'通过' if summary['method_checks']['route_verified'] else '失败'}\n"
-        "- 跨 runtime 终态："
-        f"{'通过' if summary['method_checks']['cross_runtime_endpoint_equivalence'] else '失败'}\n"
+        "- 对比终态等价："
+        f"{'通过' if summary['method_checks']['endpoint_equivalence'] else '失败'}\n"
         "- 正确性与 teardown："
         f"{'通过' if summary['method_checks']['correctness_and_teardown'] else '失败'}\n"
         f"- 稳定性 replay：{'通过' if summary['method_checks']['stability_complete'] else '失败'}\n"
@@ -4711,6 +5014,14 @@ def _write_bilingual_reports(output_dir: Path, summary: dict[str, Any]) -> None:
         f"{'pass' if summary['method_checks']['workload_equivalence'] else 'fail'}\n"
         "- Comparison-class consistency: "
         f"{'pass' if summary['method_checks']['comparison_class_consistent'] else 'fail'}\n"
+        "- Comparison-axis verification: "
+        f"{'pass' if summary['method_checks']['comparison_axis_verified'] else 'fail'}\n"
+        "- Kernel-control route isolation: "
+        f"{'pass' if summary['method_checks']['kernel_control_route_isolated'] else 'fail'}\n"
+        "- Forge binary identity: "
+        f"{'pass' if summary['method_checks']['same_forge_binary_identity'] else 'fail'}\n"
+        "- Stable replay input for in-place operations: "
+        f"{'pass' if summary['method_checks']['stable_replay_input'] else 'fail'}\n"
         f"- Single backend: pass (`{summary['config']['backend']}`)\n"
         f"- Single kernel: pass (`{summary['config']['operation']}`)\n"
         f"- Common batch: {'pass' if summary['method_checks']['common_batch'] else 'fail'}\n"
@@ -4726,8 +5037,8 @@ def _write_bilingual_reports(output_dir: Path, summary: dict[str, Any]) -> None:
         f"{'pass' if summary['method_checks']['physical_device_binding'] else 'fail'}\n"
         "- Actual execution route: "
         f"{'pass' if summary['method_checks']['route_verified'] else 'fail'}\n"
-        "- Cross-runtime endpoint equivalence: "
-        f"{'pass' if summary['method_checks']['cross_runtime_endpoint_equivalence'] else 'fail'}\n"
+        "- Comparison endpoint equivalence: "
+        f"{'pass' if summary['method_checks']['endpoint_equivalence'] else 'fail'}\n"
         "- Correctness and teardown: "
         f"{'pass' if summary['method_checks']['correctness_and_teardown'] else 'fail'}\n"
         "- Stability replay: "
@@ -4773,25 +5084,35 @@ def _parent_main(args: argparse.Namespace) -> int:
     policy_errors = qualification_policy_errors(args)
     if policy_errors:
         raise ValueError("; ".join(policy_errors))
+    definition = comparison_definition(args.comparison, args.operation)
+    participants = (definition["subject"], definition["baseline"])
+    has_vanilla_package = any(
+        not _uses_forge_package(participant) for participant in participants)
     forge_python = Path(args.forge_python).resolve()
     vanilla_python = Path(args.vanilla_python).resolve()
-    if forge_python == vanilla_python:
+    if has_vanilla_package and forge_python == vanilla_python:
         raise ValueError("Forge and vanilla must use different venv interpreters")
-    for path in (forge_python, vanilla_python, Path(args.forge_shim_wheel),
-                 Path(args.forge_runtime_wheel)):
+    required_paths = [forge_python, Path(args.forge_shim_wheel),
+                      Path(args.forge_runtime_wheel)]
+    if has_vanilla_package:
+        required_paths.append(vanilla_python)
+    for path in required_paths:
         if not path.is_file():
             raise FileNotFoundError(path)
     venv_checks = {
-        "forge": _check_pyvenv(forge_python),
-        "vanilla": _check_pyvenv(vanilla_python),
+        participant: _check_pyvenv(
+            forge_python if _uses_forge_package(participant)
+            else vanilla_python)
+        for participant in participants
     }
     if not all(check["passed"] for check in venv_checks.values()):
-        raise RuntimeError("both interpreters must be isolated venvs")
+        raise RuntimeError("all participant interpreters must be isolated venvs")
 
     repo_root = Path(__file__).resolve().parents[2]
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_id = args.run_id or (
-        f"single-{args.operation}-{args.backend}-{args.preset}-{timestamp}")
+        f"single-{args.operation}-{args.comparison}-{args.backend}-"
+        f"{args.preset}-{timestamp}")
     if Path(run_id).name != run_id:
         raise ValueError("run_id must be one path component")
     output_dir = Path(args.output_root).resolve() / run_id
@@ -4808,11 +5129,14 @@ def _parent_main(args: argparse.Namespace) -> int:
         "host": host_metadata(),
         "config": {
             "operation": args.operation,
+            "comparison": args.comparison,
+            "comparison_definition": definition,
             "backend": args.backend,
             "preset": args.preset,
             "intent": args.intent,
             "pairs": args.pairs,
             "samples": args.samples,
+            "latency_samples": args.latency_samples,
             "warmups": args.warmups,
             "target_sample_ms": args.target_sample_ms,
             "stability_replays": args.stability_replays,
@@ -4836,7 +5160,8 @@ def _parent_main(args: argparse.Namespace) -> int:
                 "sha256": sha256_file(Path(args.forge_runtime_wheel)),
             },
         },
-        "pair_orders": balanced_pair_orders(args.pairs, args.seed),
+        "pair_orders": balanced_pair_orders(
+            args.pairs, args.seed, participants),
         "noise_observations": [],
     }
     args._active_manifest = manifest
@@ -4854,13 +5179,13 @@ def _parent_main(args: argparse.Namespace) -> int:
                            "; ".join(initial_noise["reasons"]))
 
     pilot_results = {}
-    for position, runtime in enumerate(("forge", "vanilla"), start=1):
+    for position, runtime in enumerate(participants, start=1):
         pilot_results[runtime] = _run_child(
             args, runtime, "pilot", output_dir, f"pilot-{runtime}", 0,
             position, 1)
     common_batch = select_common_batch([
-        pilot_results["forge"]["suggested_batch_size"],
-        pilot_results["vanilla"]["suggested_batch_size"],
+        pilot_results[participant]["suggested_batch_size"]
+        for participant in participants
     ])
 
     pair_rows = []
@@ -4895,7 +5220,7 @@ def _parent_main(args: argparse.Namespace) -> int:
                     f"noise admission failed after {label}: " +
                     "; ".join(between["reasons"]))
         pair_groups.append((order, results))
-        pair_rows.append(_pair_row(pair_index, order, results))
+        pair_rows.append(_pair_row(pair_index, order, results, definition))
         write_jsonl(output_dir / "pairs.jsonl", pair_rows)
         write_csv(output_dir / "pairs.csv", pair_rows)
 
@@ -4903,6 +5228,8 @@ def _parent_main(args: argparse.Namespace) -> int:
         [row["median_speedup_x"] for row in pair_rows], args.seed)
     p95_paired = paired_log_summary(
         [row["p95_speedup_x"] for row in pair_rows], args.seed + 1)
+    latency_paired = paired_log_summary(
+        [row["warm_latency_speedup_x"] for row in pair_rows], args.seed + 2)
     neutral_environment_signatures = {
         _neutral_environment_signature(child) for child in children
     }
@@ -4910,7 +5237,7 @@ def _parent_main(args: argparse.Namespace) -> int:
         (
             child["operation"], child["backend"], child["preset"],
             child["logical_bytes"], child["traffic_model"],
-            child["batch_size"],
+            child["batch_size"], child["measurement_scope"],
             tuple(sorted(child["measurement_config"].items())),
             json.dumps(child["workload_contract"], sort_keys=True),
         )
@@ -4919,11 +5246,32 @@ def _parent_main(args: argparse.Namespace) -> int:
     comparison_classes = {
         child["workload_contract"]["comparison_class"] for child in children
     }
+    forge_binary_signatures = {
+        (
+            child["environment"]["package_distribution"],
+            child["environment"]["package_version"],
+            child["environment"]["package_path"],
+            child["environment"]["core_path"],
+            child["environment"]["core_sha256"],
+            child["native_commit"],
+        )
+        for child in children if _uses_forge_package(child["runtime"])
+    }
+    expected_axes = {
+        "forge": ("forge", "native" if args.operation in
+                  THIN_CAPABILITY_OPERATIONS else "kernel"),
+        "forge_kernel": ("forge", "kernel"),
+        "vanilla": ("vanilla", "kernel"),
+        "vanilla_kernel": ("vanilla", "kernel"),
+    }
+    forward_order = "->".join(participants)
+    reverse_order = "->".join(reversed(participants))
     order_counts = {
-        "forge->vanilla": sum(
-            tuple(order) == ("forge", "vanilla") for order, _ in pair_groups),
-        "vanilla->forge": sum(
-            tuple(order) == ("vanilla", "forge") for order, _ in pair_groups),
+        forward_order: sum(
+            tuple(order) == participants for order, _ in pair_groups),
+        reverse_order: sum(
+            tuple(order) == tuple(reversed(participants))
+            for order, _ in pair_groups),
     }
     method_checks = {
         "exclusive_driver_lock": bool(
@@ -4933,6 +5281,26 @@ def _parent_main(args: argparse.Namespace) -> int:
         "neutral_dependency_parity": len(neutral_environment_signatures) == 1,
         "workload_equivalence": len(workload_signatures) == 1,
         "comparison_class_consistent": len(comparison_classes) == 1,
+        "comparison_axis_verified": all(
+            (child["runtime_package"], child["adapter_kind"])
+            == expected_axes[child["runtime"]]
+            for child in children),
+        "kernel_control_route_isolated": all(
+            child["route"]["classification"].startswith(
+                f"{child['runtime']}_")
+            and "native" not in json.dumps(
+                child["route"], sort_keys=True).lower()
+            if child["runtime"] in ("forge_kernel", "vanilla_kernel")
+            else True
+            for child in children),
+        "same_forge_binary_identity": bool(
+            args.comparison != "forge-native-vs-forge-kernel"
+            or len(forge_binary_signatures) == 1),
+        "stable_replay_input": all(
+            child["measurement_scope"] == "device_reset_plus_operation"
+            if child["operation"] in ("prefix_sum", "parallel_sort")
+            else True
+            for child in children),
         "common_batch": all(
             child["batch_size"] == common_batch for child in children),
         "scored_timing_window": all(
@@ -4942,14 +5310,14 @@ def _parent_main(args: argparse.Namespace) -> int:
             _pair_execution_is_sequential(order, results)
             for order, results in pair_groups),
         "balanced_pair_order": (
-            order_counts["forge->vanilla"] == order_counts["vanilla->forge"]),
+            order_counts[forward_order] == order_counts[reverse_order]),
         "noise_admission": all(
             item["passed"] for item in manifest["noise_observations"]),
         "physical_device_binding": all(
             child["device_identity"]["binding_verified"] for child in children),
         "route_verified": all(child["route"]["passed"] for child in children),
-        "cross_runtime_endpoint_equivalence": all(
-            row["cross_runtime_endpoint_equivalent"] for row in pair_rows),
+        "endpoint_equivalence": all(
+            row["endpoint_equivalent"] for row in pair_rows),
         "correctness_and_teardown": all(
             child["status"] == "passed"
             and child["validation_before"]["passed"]
@@ -4997,17 +5365,19 @@ def _parent_main(args: argparse.Namespace) -> int:
         "run_id": run_id,
         "completed_at_utc": datetime.now(timezone.utc).isoformat(),
         "config": manifest["config"],
+        "comparison_definition": definition,
         "comparison_class": next(iter(comparison_classes)),
         "common_batch_size": common_batch,
         "pilot_suggestions": {
             runtime: pilot_results[runtime]["suggested_batch_size"]
-            for runtime in ("forge", "vanilla")
+            for runtime in participants
         },
         "pair_rows": pair_rows,
         "paired_summary": paired,
         "p95_paired_summary": p95_paired,
+        "warm_single_call_latency_paired_summary": latency_paired,
         "quality": quality,
-        "runtime_evidence": _runtime_evidence_summary(children),
+        "runtime_evidence": _runtime_evidence_summary(children, participants),
         "method_checks": method_checks,
         "claim_gate_results": claim_gate_results,
         "ready_for_qualification_report": bool(
@@ -5042,7 +5412,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--phase", choices=("pilot", "score"),
                         help=argparse.SUPPRESS)
-    parser.add_argument("--runtime", choices=("forge", "vanilla"),
+    parser.add_argument(
+        "--runtime",
+        choices=("forge", "forge_kernel", "vanilla", "vanilla_kernel"),
                         help=argparse.SUPPRESS)
     parser.add_argument("--pair-index", type=int, default=0,
                         help=argparse.SUPPRESS)
@@ -5051,6 +5423,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=1,
                         help=argparse.SUPPRESS)
     parser.add_argument("--operation", choices=OPERATIONS, required=True)
+    parser.add_argument("--comparison", choices=COMPARISONS,
+                        default="forge-vs-vanilla")
     parser.add_argument("--backend", choices=("cpu", "cuda", "vulkan"),
                         required=True)
     parser.add_argument("--preset", choices=tuple(PRESETS), required=True)
@@ -5058,6 +5432,7 @@ def _parser() -> argparse.ArgumentParser:
                         default="diagnostic")
     parser.add_argument("--pairs", type=int, default=1)
     parser.add_argument("--samples", type=int, default=5)
+    parser.add_argument("--latency-samples", type=int, default=5)
     parser.add_argument("--warmups", type=int, default=2)
     parser.add_argument("--target-sample-ms", type=float, default=20.0)
     parser.add_argument("--stability-replays", type=int, default=0)
@@ -5098,6 +5473,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     positive = {
         "pairs": args.pairs,
         "samples": args.samples,
+        "latency_samples": args.latency_samples,
         "warmups_plus_one": args.warmups + 1,
         "target_sample_ms": args.target_sample_ms,
         "stability_checkpoint": args.stability_checkpoint,

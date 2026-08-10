@@ -17,6 +17,8 @@ from benchmarks.qualification.single_kernel_microbench import (
     _adaptive_pbd_route,
     _bfs_worklist_route,
     balanced_pair_orders,
+    comparison_definition,
+    comparison_participants,
     paired_log_summary,
     qualification_policy_errors,
     select_common_batch,
@@ -40,6 +42,46 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
                             for order in orders))
         for left, right in zip(orders, orders[1:]):
             self.assertEqual(left, tuple(reversed(right)))
+
+    def test_forge_native_control_uses_two_routes_from_forge(self):
+        participants = comparison_participants(
+            "forge-native-vs-forge-kernel", "native_transform")
+        self.assertEqual(participants, ("forge", "forge_kernel"))
+        orders = balanced_pair_orders(4, 20260810, participants)
+        self.assertEqual(
+            {tuple(order) for order in orders},
+            {("forge", "forge_kernel"), ("forge_kernel", "forge")},
+        )
+        definition = comparison_definition(
+            "forge-native-vs-forge-kernel", "native_transform")
+        self.assertEqual(definition["speedup_formula"],
+                         "forge_kernel_ms / forge_ms")
+        self.assertEqual(definition["values_above_one_favor"], "forge")
+
+    def test_forge_native_control_rejects_non_thin_operation(self):
+        with self.assertRaisesRegex(ValueError, "thin/native operations"):
+            comparison_participants(
+                "forge-native-vs-forge-kernel", "mpm_graph")
+
+    def test_kernel_compatibility_axis_uses_same_adapter_across_packages(self):
+        definition = comparison_definition(
+            "forge-kernel-vs-vanilla", "native_reduce")
+        self.assertEqual(
+            (definition["subject"], definition["baseline"]),
+            ("forge_kernel", "vanilla_kernel"),
+        )
+        self.assertEqual(definition["speedup_formula"],
+                         "vanilla_kernel_ms / forge_kernel_ms")
+        self.assertIn("same vanilla-compatible kernel",
+                      definition["attribution"])
+
+    def test_forge_kernel_route_is_not_labeled_vanilla(self):
+        route = _native_transform_route(None, "forge_kernel", "cuda")
+        self.assertTrue(route["passed"])
+        self.assertEqual(
+            route["classification"],
+            "forge_kernel_equivalent_i32_affine_kernel",
+        )
 
     def test_common_batch_uses_larger_pilot_suggestion(self):
         self.assertEqual(select_common_batch([128, 512]), 512)

@@ -4,7 +4,7 @@
 
 本目录包含经过复核的本机 Taichi 单操作 A/B microbench。入口每次只接受一个
 操作、一个 backend 和一个规模，不会同时启动不同 backend 的性能进程；每次
-Forge/vanilla 比较均由相邻且不重叠的 fresh-process 对组成。
+对比均由相邻且不重叠的 fresh-process 对组成。
 
 中英文工作规划有意保存在 Git 已忽略的本地区域：
 `temp_outputs/qualification/planning/PLAN.zh-CN.md` 与 `PLAN.en.md`。它们不是发布
@@ -23,7 +23,7 @@ Forge/vanilla 比较均由相邻且不重叠的 fresh-process 对组成。
 | `saxpy` | 每元素两次 f32 读取和一次 f32 写入 |
 | `stencil2d` | 每格点五次 f32 读取和一次 f32 写入 |
 | `reduce_chunks` | 每元素一次 i32 读取、每 chunk 一次 i32 写入 |
-| `prefix_sum` | `ti.algorithms.PrefixSumExecutor(n).run(field)` 的 i32 inclusive scan；逻辑输入/输出各一次 |
+| `prefix_sum` | `ti.algorithms.PrefixSumExecutor(n).run(field)` 的 i32 inclusive scan；计分流量含一次 reset 写和逻辑输入/输出各一次 |
 | `parallel_sort` | `ti.algorithms.parallel_sort(keys)` 的 dense i32 key sort；排序网络内部流量不简化为 GB/s |
 | `native_reduce` | 整个 i32 数组归约到单元素 ndarray；语义最小流量为一次输入读取和一个标量输出 |
 | `native_transform` | 逐元素 i32 affine transform；每元素一次源读取和一次目标写入 |
@@ -38,14 +38,39 @@ Forge/vanilla 比较均由相邻且不重叠的 fresh-process 对组成。
 | `bfs_worklist` | 固定深度、逐层同步的二维网格 BFS |
 | `snode_churn` | 一次 pointer+dense SNodeTree create/use/sync/destroy 生命周期事务 |
 
-这些是控制/回归 microbench，用于测量普通 kernel 路径，能够发现运行时额外成本
-或真实的基础路径提升；但它们不覆盖 Graph、native primitive、bounded dispatch、
-worklist、LinearOperator 或其他 Forge-only API，结论不得外推到这些能力。
+### thin/native 案例必须保留的三路线矩阵
+
+每个 `THIN-*` 案例都保留下列三条路线。一次 invocation 仍然只运行一组相邻 A/B，
+不会把三条路线同时启动。
+
+| `--comparison` | subject / baseline | 可以回答的问题 |
+|---|---|---|
+| `forge-kernel-vs-vanilla` | Forge/kernel vs vanilla/kernel | 同一份 vanilla-compatible kernel 换 package 后的 compatibility-path runtime 表现 |
+| `forge-native-vs-forge-kernel` | Forge/native vs Forge/kernel | 在完全相同 Forge venv、wheel、core binary 与依赖下隔离 native adapter 的收益 |
+| `forge-vs-vanilla` | `THIN-*` 中 Forge/native vs vanilla/kernel | 保留的端到端路线 microbench；不能单独解释为 runtime regression 或 native-only 收益 |
+
+runner 会在 JSON 和中英文报告中写明 subject、baseline、速度比公式、package 身份、
+adapter 类型和归因边界；速度比大于一始终表示所记录的 subject 更快。同 Forge 对比
+还强制要求两个 fresh child 的 package path、native binary path/SHA、版本和 native
+commit 完全一致。
+
+对于包含 prefix 阶段的复合 thin 案例，两侧 kernel 控制组都使用 benchmark 自己
+定义且源码完全相同的 Hillis-Steele i32 Taichi kernels。任何 kernel 控制路线都不得
+调用 Forge native/helper 算法入口；若路由分类不满足这一点，离线审计会拒绝该结果。
+
+其中普通 `fill`/`copy`/`saxpy`/`stencil2d`/`reduce_chunks` 是控制/回归
+microbench，能够发现运行时额外成本或基础路径提升，但结论不得外推到 Graph、native
+primitive、bounded dispatch、worklist、LinearOperator 或其他 Forge-only API。后续
+单独分类的 direct/thin 项只覆盖各自声明的 route。
 
 `prefix_sum` 是 `DIRECT-001`：两边运行同一份 workload、dense i32 field、确定性
 输入、exact oracle 和同步边界。Forge 必须命中 native dense-field scan plan，
 vanilla 必须命中其 legacy field workspace；route 不符合时 child 失败。为了保持
 单项开发入口，优先使用 `prefix_sum_microbench.py`，它固定操作且不能变成聚合器。
+
+由于 `prefix_sum` 与 `parallel_sort` 都会原地修改输入，每个计时 replay 现在都会先
+执行确定性的 device reset；计分范围明确记为 `device_reset_plus_operation`。两边的
+reset 完全相同，重复 scan/sort 不再消费已经被变换过的输入。
 
 `parallel_sort` 是 `DIRECT-002`。Forge wheel 的公开兼容 wrapper 明确固定
 `method="legacy"`、stable 和 exact，vanilla 也执行 legacy odd-even merge network；
@@ -170,18 +195,25 @@ DSL 与 kernel；每个计时 launch 创建一个 pointer+dense tree、激活 64
 
 ## runner 已实现的公平性合同
 
-- Forge 与 vanilla 使用两个依赖完备的独立 venv。子进程删除 `PYTHONPATH` /
+- 跨 package 对比使用两个依赖完备的独立 venv；
+  `forge-native-vs-forge-kernel` 则有意让两个 fresh child 使用同一个 Forge venv，
+  并强制验证 wheel/core 身份一致。子进程删除 `PYTHONPATH` /
   `PYTHONHOME`，禁止 user site，证明 package/core/dependency 均来自所选 venv，
   并要求两边 Python 与中性依赖版本一致。
 - 两边各运行一次非计分 pilot，随后冻结两者建议值中较大的共同 batch；所有计分
   进程执行相同 launch 数，计分 batch 还必须达到所要求的计时窗口。
-- 进程顺序按固定种子交替 AB/BA。主观测量是 pair-level 的
-  `vanilla / Forge` 速度比，绝不池化不同进程的样本。
+- 进程顺序按固定种子交替 AB/BA。主观测量是 comparison definition 中记录的
+  pair-level `baseline / subject` 速度比，绝不池化不同进程的样本。
 - 系统级命名 mutex 保证同一时刻只有一个资格 driver，因此独立启动的
   CPU/CUDA/Vulkan benchmark 也不能意外重叠。
 - 每个子进程使用相同 CPU 线程数与 affinity，关闭 Taichi 离线缓存，分开记录
   import/init/first-call/warm，使用相同同步边界，在计时前后验证正确性，并在退出前
   显式 sync/reset。
+- warm 单调用 `call+sync` 样本作为 latency 诊断单独保存；固定发布 gate 只使用共同
+  batch、末尾同步一次的 throughput/replay 样本，两种速度比不得混写。
+- 原地 scan/sort 在每个计分 replay 内执行相同的确定性 device reset，并明确标记
+  扩大的 timing scope；其余案例保持 operation-only，除非 workload contract 本身
+  已声明完整 reset。
 - GPU child 固定 device 0。Forge CUDA runtime UUID 必须与 `nvidia-smi` UUID
   匹配；缺少 runtime UUID 的 runtime 仅在本机只有一个 GPU 且显式 device-zero
   绑定时通过，多 GPU 不明确时 fail closed。
@@ -245,10 +277,15 @@ affine transform 子案例使用自己的入口与 run ID：
 ```powershell
 C:\Users\Administrator\AppData\Local\Programs\Python\Python310\python.exe `
   benchmarks\qualification\native_transform_microbench.py `
+  --comparison forge-native-vs-forge-kernel `
   --backend cuda --preset small --intent diagnostic `
   --pairs 1 --samples 5 --warmups 2 `
   --target-sample-ms 20 --stability-replays 0
 ```
+
+thin 案例还要使用新 run ID 和 `--comparison forge-kernel-vs-vanilla` 再运行一次。
+默认 `forge-vs-vanilla` 路线继续作为单独标记的端到端诊断；三次 invocation 不得合并
+到同一个进程。
 
 indexed gather 单独启动：
 
