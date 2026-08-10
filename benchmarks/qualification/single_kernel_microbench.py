@@ -1808,8 +1808,9 @@ def _build_native_compact_case(ti: Any, runtime_name: str, backend: str,
     }
 
 
-def _device_prefix_chain_route(workspace: Any | None, runtime_name: str,
-                               backend: str, elements: int) -> dict[str, Any]:
+def _device_prefix_chain_route(
+        workspace: Any | None, runtime_name: str, backend: str, elements: int,
+        kernel_source_sha256: str | None = None) -> dict[str, Any]:
     if runtime_name == "forge":
         compact_workspace = getattr(workspace, "_compact", None)
         compact_plan = getattr(compact_workspace, "_native_compact_plan", None)
@@ -1858,6 +1859,63 @@ def _device_prefix_chain_route(workspace: Any | None, runtime_name: str,
                 and scan_method == expected_scan
             ),
         }
+    if runtime_name in ("forge_kernel", "vanilla_kernel"):
+        scan_steps = (elements - 1).bit_length()
+        final_scan_copy_invocations = scan_steps % 2
+        scan_pipelines_per_replay = 2
+        stage_kernel_invocations = 3
+        kernel_invocations = (
+            stage_kernel_invocations
+            + scan_pipelines_per_replay
+            * (scan_steps + final_scan_copy_invocations)
+        )
+        passed = bool(
+            workspace is None
+            and isinstance(kernel_source_sha256, str)
+            and len(kernel_source_sha256) == 64
+            and elements > 0
+        )
+        return {
+            "classification": (
+                f"{runtime_name}_device_count_stable_compact_scan_pipeline"
+            ),
+            "adapter": "benchmark_defined_ti_kernel_pipeline",
+            "kernel_source_owner": "benchmark",
+            "kernel_source_sha256": kernel_source_sha256,
+            "helper_api_used": False,
+            "specialized_api_used": False,
+            "benchmark_workspace_kind": "four_dense_i32_fields",
+            "benchmark_workspace_field_count": 4,
+            "scan_algorithm": "inclusive_hillis_steele_ping_pong",
+            "scan_pipelines_per_replay": scan_pipelines_per_replay,
+            "scan_steps_per_pipeline": scan_steps,
+            "final_scan_copy_kernel_invocations_per_pipeline": (
+                final_scan_copy_invocations
+            ),
+            "stage_ti_kernel_invocations_per_replay": (
+                stage_kernel_invocations
+            ),
+            "ti_kernel_invocations_per_replay": kernel_invocations,
+            "physical_backend_launches_assumed": False,
+            "expected_backend": backend,
+            "expected_compact_method": (
+                "masked flags plus benchmark-owned Hillis-Steele i32 scan "
+                "kernels plus stable scatter"
+            ),
+            "expected_scan_method": (
+                "second benchmark-owned Hillis-Steele i32 kernel scan"
+            ),
+            "observed_compact_backend": backend,
+            "observed_compact_method": "qualification_device_count_compact",
+            "observed_scan_backend": backend,
+            "observed_scan_method": (
+                "qualification_prefix_scan_without_host_count"
+            ),
+            "workspace_bytes_current": None,
+            "workspace_bytes_peak": None,
+            "allocation_count": None,
+            "passed": passed,
+        }
     return {
         "classification": f"{runtime_name}_device_count_stable_compact_scan_pipeline",
         "expected_backend": backend,
@@ -1887,12 +1945,25 @@ def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
                                     elements: int) -> dict[str, Any]:
     import numpy as np
 
+    source_sha256 = sha256_file(Path(__file__))
     active_count = elements * 3 // 5
     host_values = (np.arange(elements, dtype=np.int32) % 17) + 1
     host_flags = (np.arange(elements) % 4 != 0).astype(np.int32)
     selected = host_values[:active_count][host_flags[:active_count] != 0]
     expected_scan = np.cumsum(selected, dtype=np.int64).astype(np.int32)
     selected_count = int(selected.size)
+    sample_indices = sorted(set((0, selected_count // 4, selected_count // 2,
+                                 (3 * selected_count) // 4,
+                                 selected_count - 1)))
+    scan_steps = (elements - 1).bit_length()
+    final_scan_copy_invocations = scan_steps % 2
+    scan_pipelines_per_replay = 2
+    stage_kernel_invocations = 3
+    kernel_invocations = (
+        stage_kernel_invocations
+        + scan_pipelines_per_replay
+        * (scan_steps + final_scan_copy_invocations)
+    )
     values = ti.ndarray(dtype=ti.i32, shape=elements)
     flags = ti.ndarray(dtype=ti.i32, shape=elements)
     compacted = ti.ndarray(dtype=ti.i32, shape=elements)
@@ -2004,19 +2075,45 @@ def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
         )
         actual_compacted = compacted.to_numpy()[:selected_count]
         actual_scan = scanned.to_numpy()[:selected_count]
-        compact_mismatch = np.flatnonzero(actual_compacted != selected)
-        scan_mismatch = np.flatnonzero(actual_scan != expected_scan)
+
+        def exact_vector(actual: Any, expected: Any) -> dict[str, Any]:
+            mismatch = np.flatnonzero(actual != expected)
+            return {
+                "actual_sha256": hashlib.sha256(actual.tobytes()).hexdigest(),
+                "expected_sha256": hashlib.sha256(
+                    expected.tobytes()).hexdigest(),
+                "actual_sum": int(actual.astype(np.int64).sum()),
+                "expected_sum": int(expected.astype(np.int64).sum()),
+                "actual_minimum": int(actual.min()),
+                "expected_minimum": int(expected.min()),
+                "actual_maximum": int(actual.max()),
+                "expected_maximum": int(expected.max()),
+                "sample_indices": sample_indices,
+                "actual_samples": [
+                    int(actual[index]) for index in sample_indices
+                ],
+                "expected_samples": [
+                    int(expected[index]) for index in sample_indices
+                ],
+                "mismatch_count": int(mismatch.size),
+                "first_mismatch": (
+                    None if mismatch.size == 0 else int(mismatch[0])
+                ),
+            }
+
+        compact_evidence = exact_vector(actual_compacted, selected)
+        scan_evidence = exact_vector(actual_scan, expected_scan)
         return {
             "passed": bool(
                 actual_count == selected_count
-                and compact_mismatch.size == 0
-                and scan_mismatch.size == 0
+                and compact_evidence["mismatch_count"] == 0
+                and scan_evidence["mismatch_count"] == 0
             ),
             "comparison": "exact_device_count_stable_compact_then_scan",
             "actual_count": int(actual_count),
             "expected_count": selected_count,
-            "compact_mismatch_count": int(compact_mismatch.size),
-            "scan_mismatch_count": int(scan_mismatch.size),
+            "compacted": compact_evidence,
+            "scanned": scan_evidence,
             "actual_last": int(actual_scan[-1]),
             "expected_last": int(expected_scan[-1]),
         }
@@ -2026,7 +2123,7 @@ def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
         "reset": reset,
         "validate": validate_fresh,
         "route": lambda: _device_prefix_chain_route(
-            forge_workspace, runtime_name, backend, elements),
+            forge_workspace, runtime_name, backend, elements, source_sha256),
         "logical_bytes": elements * 8 + selected_count * 12 + 8,
         "traffic_model": (
             "semantic minimum for active-prefix flags/value reads, selected "
@@ -2051,6 +2148,29 @@ def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
                 "device-count masked flags, reusable PrefixSumExecutor, stable "
                 "scatter/stage, second reusable PrefixSumExecutor, output copy"
             ),
+            "kernel_control_adapter": (
+                "benchmark-owned masked-flags kernel, two shared "
+                "Hillis-Steele scan pipelines, stable scatter/stage kernel, "
+                "and output-copy kernel"
+            ),
+            "kernel_source_owner": "benchmark",
+            "kernel_source_sha256": source_sha256,
+            "kernel_adapter": "benchmark_defined_ti_kernel_pipeline",
+            "kernel_helper_api_used": False,
+            "kernel_specialized_api_used": False,
+            "kernel_benchmark_workspace_kind": "four_dense_i32_fields",
+            "kernel_benchmark_workspace_field_count": 4,
+            "kernel_scan_algorithm": "inclusive_hillis_steele_ping_pong",
+            "kernel_scan_pipelines_per_replay": scan_pipelines_per_replay,
+            "kernel_scan_steps_per_pipeline": scan_steps,
+            "kernel_final_scan_copy_kernel_invocations_per_pipeline": (
+                final_scan_copy_invocations
+            ),
+            "kernel_stage_ti_invocations_per_replay": (
+                stage_kernel_invocations
+            ),
+            "kernel_ti_invocations_per_replay": kernel_invocations,
+            "kernel_physical_backend_launches_assumed": False,
             "shared": (
                 "same capacity, active count, ndarray inputs/outputs, stable "
                 "compact and inclusive-scan semantics, no host count observation "
@@ -2060,7 +2180,10 @@ def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
                 "Forge owns DeviceExtent/DevicePrefix composition; vanilla "
                 "manually composes the equivalent device-resident pipeline"
             ),
-            "correctness": "exact_count_compacted_order_and_scan_prefix",
+            "correctness": (
+                "exact_count_and_ordered_compact_and_scan_sha256_sum_extrema_"
+                "samples"
+            ),
             "timing": (
                 "frozen repeated complete compact-plus-scan adapter calls plus "
                 "one outer sync; reset and host observations are excluded"
@@ -5349,6 +5472,52 @@ def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
                 if left.get(key) != right.get(key):
                     return False
         return True
+    if left_result["operation"] == "device_prefix_chain":
+        exact_keys = (
+            "actual_sha256", "expected_sha256", "actual_sum",
+            "expected_sum", "actual_minimum", "expected_minimum",
+            "actual_maximum", "expected_maximum", "sample_indices",
+            "actual_samples", "expected_samples", "mismatch_count",
+            "first_mismatch",
+        )
+        for validation_name in ("validation_before", "validation_after"):
+            left = left_result[validation_name]
+            right = right_result[validation_name]
+            for value in (left, right):
+                if (not value.get("passed")
+                        or value.get("comparison") !=
+                        "exact_device_count_stable_compact_then_scan"
+                        or not isinstance(value.get("actual_count"), int)
+                        or value["actual_count"] <= 0
+                        or value["actual_count"] != value.get(
+                            "expected_count")):
+                    return False
+                for vector_name in ("compacted", "scanned"):
+                    vector = value.get(vector_name, {})
+                    if (not isinstance(vector.get("actual_sha256"), str)
+                            or len(vector["actual_sha256"]) != 64
+                            or vector["actual_sha256"] != vector.get(
+                                "expected_sha256")
+                            or vector.get("mismatch_count") != 0
+                            or vector.get("first_mismatch") is not None):
+                        return False
+                    for suffix in (
+                            "sum", "minimum", "maximum", "samples"):
+                        if vector.get(f"actual_{suffix}") != vector.get(
+                                f"expected_{suffix}"):
+                            return False
+                    if len(vector.get("sample_indices", [])) != len(
+                            vector.get("actual_samples", [])):
+                        return False
+            if (left["actual_count"] != right["actual_count"]
+                    or left["expected_count"] != right["expected_count"]):
+                return False
+            for vector_name in ("compacted", "scanned"):
+                for key in exact_keys:
+                    if (left[vector_name].get(key)
+                            != right[vector_name].get(key)):
+                        return False
+        return True
     if left_result["operation"] == "adaptive_pbd":
         for validation_name in ("validation_before", "validation_after"):
             left = left_result[validation_name]["endpoint_fingerprint"]
@@ -6063,11 +6232,13 @@ def _parent_main(args: argparse.Namespace) -> int:
                 and (
                     child["operation"] not in (
                         "native_reduce", "native_transform", "native_gather",
-                        "native_scatter", "native_compact")
+                        "native_scatter", "native_compact",
+                        "device_prefix_chain")
                     or (
                         child["route"].get("adapter") == (
                             "benchmark_defined_ti_kernel_pipeline"
-                            if child["operation"] == "native_compact"
+                            if child["operation"] in (
+                                "native_compact", "device_prefix_chain")
                             else "benchmark_defined_ti_kernel"
                         )
                         and child["route"].get("kernel_source_owner")
@@ -6089,8 +6260,36 @@ def _parent_main(args: argparse.Namespace) -> int:
                                 "final_scan_copy_kernel_invocations")
                             == child["workload_contract"].get(
                                 "kernel_final_scan_copy_kernel_invocations")
-                            if child["operation"] == "native_compact" else
-                            child["route"].get("workspace_present") is False
+                            if child["operation"] == "native_compact" else (
+                                child["route"].get(
+                                    "specialized_api_used") is False
+                                and child["route"].get(
+                                    "benchmark_workspace_field_count") == 4
+                                and child["route"].get("scan_algorithm")
+                                == "inclusive_hillis_steele_ping_pong"
+                                and child["route"].get(
+                                    "scan_pipelines_per_replay")
+                                == child["workload_contract"].get(
+                                    "kernel_scan_pipelines_per_replay")
+                                and child["route"].get(
+                                    "scan_steps_per_pipeline")
+                                == child["workload_contract"].get(
+                                    "kernel_scan_steps_per_pipeline")
+                                and child["route"].get(
+                                    "final_scan_copy_kernel_invocations_"
+                                    "per_pipeline")
+                                == child["workload_contract"].get(
+                                    "kernel_final_scan_copy_kernel_"
+                                    "invocations_per_pipeline")
+                                and child["route"].get(
+                                    "stage_ti_kernel_invocations_per_replay")
+                                == child["workload_contract"].get(
+                                    "kernel_stage_ti_invocations_per_replay")
+                                if child["operation"]
+                                == "device_prefix_chain" else
+                                child["route"].get(
+                                    "workspace_present") is False
+                            )
                         )
                         and child["route"].get(
                             "ti_kernel_invocations_per_replay")

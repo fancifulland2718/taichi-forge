@@ -233,6 +233,52 @@ def _endpoint_equivalent(left_result: dict[str, Any],
                 if left.get(key) != right.get(key):
                     return False
         return True
+    if left_result["operation"] == "device_prefix_chain":
+        exact_keys = (
+            "actual_sha256", "expected_sha256", "actual_sum",
+            "expected_sum", "actual_minimum", "expected_minimum",
+            "actual_maximum", "expected_maximum", "sample_indices",
+            "actual_samples", "expected_samples", "mismatch_count",
+            "first_mismatch",
+        )
+        for validation_name in ("validation_before", "validation_after"):
+            left = left_result[validation_name]
+            right = right_result[validation_name]
+            for value in (left, right):
+                if (not value.get("passed")
+                        or value.get("comparison") !=
+                        "exact_device_count_stable_compact_then_scan"
+                        or not isinstance(value.get("actual_count"), int)
+                        or value["actual_count"] <= 0
+                        or value["actual_count"] != value.get(
+                            "expected_count")):
+                    return False
+                for vector_name in ("compacted", "scanned"):
+                    vector = value.get(vector_name, {})
+                    if (not isinstance(vector.get("actual_sha256"), str)
+                            or len(vector["actual_sha256"]) != 64
+                            or vector["actual_sha256"] != vector.get(
+                                "expected_sha256")
+                            or vector.get("mismatch_count") != 0
+                            or vector.get("first_mismatch") is not None):
+                        return False
+                    for suffix in (
+                            "sum", "minimum", "maximum", "samples"):
+                        if vector.get(f"actual_{suffix}") != vector.get(
+                                f"expected_{suffix}"):
+                            return False
+                    if len(vector.get("sample_indices", [])) != len(
+                            vector.get("actual_samples", [])):
+                        return False
+            if (left["actual_count"] != right["actual_count"]
+                    or left["expected_count"] != right["expected_count"]):
+                return False
+            for vector_name in ("compacted", "scanned"):
+                for key in exact_keys:
+                    if (left[vector_name].get(key)
+                            != right[vector_name].get(key)):
+                        return False
+        return True
     if left_result["operation"] == "adaptive_pbd":
         for validation_name in ("validation_before", "validation_after"):
             left = left_result[validation_name]["endpoint_fingerprint"]
@@ -663,11 +709,13 @@ def _audit(run_dir: Path) -> dict[str, Any]:
             and (
                 child["operation"] not in (
                     "native_reduce", "native_transform", "native_gather",
-                    "native_scatter", "native_compact")
+                    "native_scatter", "native_compact",
+                    "device_prefix_chain")
                 or (
                     child["route"].get("adapter") == (
                         "benchmark_defined_ti_kernel_pipeline"
-                        if child["operation"] == "native_compact"
+                        if child["operation"] in (
+                            "native_compact", "device_prefix_chain")
                         else "benchmark_defined_ti_kernel"
                     )
                     and child["route"].get("kernel_source_owner")
@@ -689,8 +737,36 @@ def _audit(run_dir: Path) -> dict[str, Any]:
                             "final_scan_copy_kernel_invocations")
                         == child["workload_contract"].get(
                             "kernel_final_scan_copy_kernel_invocations")
-                        if child["operation"] == "native_compact" else
-                        child["route"].get("workspace_present") is False
+                        if child["operation"] == "native_compact" else (
+                            child["route"].get(
+                                "specialized_api_used") is False
+                            and child["route"].get(
+                                "benchmark_workspace_field_count") == 4
+                            and child["route"].get("scan_algorithm")
+                            == "inclusive_hillis_steele_ping_pong"
+                            and child["route"].get(
+                                "scan_pipelines_per_replay")
+                            == child["workload_contract"].get(
+                                "kernel_scan_pipelines_per_replay")
+                            and child["route"].get(
+                                "scan_steps_per_pipeline")
+                            == child["workload_contract"].get(
+                                "kernel_scan_steps_per_pipeline")
+                            and child["route"].get(
+                                "final_scan_copy_kernel_invocations_"
+                                "per_pipeline")
+                            == child["workload_contract"].get(
+                                "kernel_final_scan_copy_kernel_"
+                                "invocations_per_pipeline")
+                            and child["route"].get(
+                                "stage_ti_kernel_invocations_per_replay")
+                            == child["workload_contract"].get(
+                                "kernel_stage_ti_invocations_per_replay")
+                            if child["operation"]
+                            == "device_prefix_chain" else
+                            child["route"].get(
+                                "workspace_present") is False
+                        )
                     )
                     and child["route"].get(
                         "ti_kernel_invocations_per_replay")

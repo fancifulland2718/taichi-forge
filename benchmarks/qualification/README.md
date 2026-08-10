@@ -182,11 +182,16 @@ provenance, public qualification reports, explicit/automatic route evidence,
 disclosed unsupported capabilities, exact residual gates, replay plateau,
 bilingual output, and the absence of a cross-framework speedup.
 
-`device_prefix_chain` is `THIN-003`. Forge uses `DeviceExtent`, `DevicePrefix`,
-and one reusable `DevicePrefixWorkspace`. Vanilla manually composes the same
-device-count-masked stable compact plus scan using reusable public prefix-sum
-executors. Neither timed adapter observes the count on the host. The exact
-count, compacted order, and scanned prefix are checked. Its entry point is
+`device_prefix_chain` is `THIN-003` and uses the required three-route matrix.
+The compatibility axis runs one benchmark-owned kernel pipeline unchanged in
+the Forge and vanilla packages: a masked-flags kernel, two 16-step
+Hillis-Steele scans, stable scatter/staging, and an output-copy kernel. This is
+35 Taichi kernel invocations per replay; physical backend launches are measured
+with Systems rather than assumed. The native-isolation axis compares that same
+Forge/kernel control with `DeviceExtent`, `DevicePrefix`, and one reusable
+`DevicePrefixWorkspace`. No timed route observes the count on the host. Before
+and after scoring, the runner checks the exact count plus ordered SHA-256, sum,
+extrema, and samples for both compacted and scanned outputs. Its entry point is
 `device_prefix_chain_microbench.py`.
 
 `active_grid_mpm` is `THIN-004`. Both runtimes run the same stationary f32

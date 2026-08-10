@@ -267,6 +267,49 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         self.assertFalse(_audit_endpoint_equivalent(
             results["forge"], results["forge_kernel"]))
 
+    def test_device_prefix_endpoint_equivalence_uses_both_exact_outputs(self):
+        vector = {
+            "actual_sha256": "a" * 64,
+            "expected_sha256": "a" * 64,
+            "actual_sum": 10,
+            "expected_sum": 10,
+            "actual_minimum": 1,
+            "expected_minimum": 1,
+            "actual_maximum": 4,
+            "expected_maximum": 4,
+            "sample_indices": [0, 1, 3],
+            "actual_samples": [1, 2, 4],
+            "expected_samples": [1, 2, 4],
+            "mismatch_count": 0,
+            "first_mismatch": None,
+        }
+        validation = {
+            "passed": True,
+            "comparison": "exact_device_count_stable_compact_then_scan",
+            "actual_count": 4,
+            "expected_count": 4,
+            "compacted": json.loads(json.dumps(vector)),
+            "scanned": json.loads(json.dumps(vector)),
+        }
+        results = {
+            name: {
+                "operation": "device_prefix_chain",
+                "validation_before": json.loads(json.dumps(validation)),
+                "validation_after": json.loads(json.dumps(validation)),
+            }
+            for name in ("forge", "forge_kernel")
+        }
+        self.assertTrue(
+            _endpoint_equivalent(results, "forge", "forge_kernel"))
+        self.assertTrue(_audit_endpoint_equivalent(
+            results["forge"], results["forge_kernel"]))
+        results["forge_kernel"]["validation_after"]["scanned"][
+            "actual_samples"][1] = 99
+        self.assertFalse(
+            _endpoint_equivalent(results, "forge", "forge_kernel"))
+        self.assertFalse(_audit_endpoint_equivalent(
+            results["forge"], results["forge_kernel"]))
+
     def test_profiler_range_rejects_normal_parent_or_non_cuda_run(self):
         with self.assertRaisesRegex(
                 ValueError, "requires one CUDA score sample in child mode"):
@@ -730,6 +773,31 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         ScanPlan.method_name = "legacy_scan"
         self.assertFalse(_device_prefix_chain_route(
             Workspace(), "forge", "cuda", 64)["passed"])
+
+    def test_device_prefix_kernel_route_proves_benchmark_pipeline(self):
+        source_sha256 = "d" * 64
+        route = _device_prefix_chain_route(
+            None, "forge_kernel", "cuda", 65536, source_sha256)
+        self.assertTrue(route["passed"])
+        self.assertEqual(route["adapter"],
+                         "benchmark_defined_ti_kernel_pipeline")
+        self.assertEqual(route["kernel_source_owner"], "benchmark")
+        self.assertEqual(route["kernel_source_sha256"], source_sha256)
+        self.assertFalse(route["helper_api_used"])
+        self.assertFalse(route["specialized_api_used"])
+        self.assertEqual(route["benchmark_workspace_field_count"], 4)
+        self.assertEqual(route["scan_pipelines_per_replay"], 2)
+        self.assertEqual(route["scan_steps_per_pipeline"], 16)
+        self.assertEqual(
+            route["final_scan_copy_kernel_invocations_per_pipeline"], 0)
+        self.assertEqual(route["stage_ti_kernel_invocations_per_replay"], 3)
+        self.assertEqual(route["ti_kernel_invocations_per_replay"], 35)
+        self.assertFalse(route["physical_backend_launches_assumed"])
+        self.assertFalse(_device_prefix_chain_route(
+            object(), "forge_kernel", "cuda", 65536, source_sha256)[
+                "passed"])
+        self.assertFalse(_device_prefix_chain_route(
+            None, "vanilla_kernel", "cuda", 65536, "short")["passed"])
 
     def test_particle_hash_route_requires_native_bucket_plan(self):
         class Plan:

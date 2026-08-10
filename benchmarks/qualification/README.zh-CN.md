@@ -154,11 +154,14 @@ Forge 内部 API 边界诊断，绝不是 Forge/vanilla 或 Forge/Warp speedup�
 route 证据、明确披露的 unsupported 能力、残差门槛、回放平台、双语输出，以及没有
 跨框架 speedup。
 
-`device_prefix_chain` 是 `THIN-003`。Forge 使用 `DeviceExtent`、`DevicePrefix` 和
-一个可复用 `DevicePrefixWorkspace`；vanilla 用可复用的公共 prefix-sum executor
-手工组合相同的 device-count-masked stable compact + scan。两个计时 adapter 都不在
-host 读取 count，并 exact 校验 count、compact 顺序与 scan prefix。独立入口为
-`device_prefix_chain_microbench.py`。
+`device_prefix_chain` 是 `THIN-003`，采用要求的三路线矩阵。compatibility 轴在
+Forge 与 vanilla package 中原样执行同一 benchmark-owned kernel pipeline：masked
+flags kernel、两条 16-step Hillis-Steele scan、stable scatter/staging 和 output-copy
+kernel；每个 replay 有 35 次 Taichi kernel 调用，物理 backend launch 数由 Systems
+实测而不作假设。native-isolation 轴用同一 Forge/kernel 控制组对比 `DeviceExtent`、
+`DevicePrefix` 与一个可复用 `DevicePrefixWorkspace`。所有计时路线都不在 host 读取
+count；计分前后会对 compact 与 scan 两份输出分别核对 exact count、ordered SHA-256、
+sum、极值与 samples。独立入口为 `device_prefix_chain_microbench.py`。
 
 `active_grid_mpm` 是 `THIN-004`。两边共享同一个静态平衡 f32 二维 MLS-MPM
 状态、256² 网格、4,096 粒子、grid reset、P2G 活跃标记、更新 body、G2P、compiled
