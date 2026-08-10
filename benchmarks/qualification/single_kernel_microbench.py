@@ -5209,13 +5209,15 @@ def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
                 if left.get(key) != right.get(key):
                     return False
         return True
-    if left_result["operation"] == "native_gather":
+    if left_result["operation"] in ("native_gather", "native_scatter"):
+        operation = left_result["operation"].removeprefix("native_")
         for validation_name in ("validation_before", "validation_after"):
             left = left_result[validation_name]
             right = right_result[validation_name]
             for value in (left, right):
                 if (not value.get("passed")
-                        or value.get("comparison") != "exact_i32_gather"):
+                        or value.get("comparison")
+                        != f"exact_i32_{operation}"):
                     return False
                 if (not isinstance(value.get("count"), int)
                         or value["count"] <= 0
@@ -5955,7 +5957,8 @@ def _parent_main(args: argparse.Namespace) -> int:
                     child["route"], sort_keys=True).lower()
                 and (
                     child["operation"] not in (
-                        "native_reduce", "native_transform", "native_gather")
+                        "native_reduce", "native_transform", "native_gather",
+                        "native_scatter")
                     or (
                         child["route"].get("adapter")
                         == "benchmark_defined_ti_kernel"

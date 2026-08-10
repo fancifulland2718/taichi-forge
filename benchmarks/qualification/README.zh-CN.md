@@ -109,7 +109,10 @@ i32 输出与 native plan 检查。它同样属于 `thin-capability`，独立入
 运行一个等价的 indexed-read kernel。独立入口为 `native_gather_microbench.py`。
 
 `native_scatter` 使用同一个排列合同，在计时前证明每个目标索引唯一且在范围内，
-从而排除重复写竞争。Forge native scatter plan 与 vanilla 等价 kernel 通过
+从而排除重复写竞争。两个 kernel control 都必须证明相同的 benchmark-owned source
+hash、无 helper/workspace 且每 replay 一次 Taichi invocation；runner 与独立 auditor
+在计时前后比较实际 scatter endpoint。Forge native scatter plan 与等价 kernel
+control 分别通过 `forge-kernel-vs-vanilla`、`forge-native-vs-forge-kernel` 两条轴和
 `native_scatter_microbench.py` 独立检查。
 
 `warp_transform_baseline.py` 是相同 `THIN-002-TRANSFORM` i32 affine 语义的

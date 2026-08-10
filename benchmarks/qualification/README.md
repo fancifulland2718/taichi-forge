@@ -126,9 +126,12 @@ kernel. Its entry point is `native_gather_microbench.py`.
 
 `native_scatter` uses the same permutation contract, which proves that every
 destination index is unique and in range before timing. This removes duplicate
-write races from the comparison. Forge's native scatter plan and the vanilla
-equivalent kernel are checked independently through
-`native_scatter_microbench.py`.
+write races from the comparison. Both kernel controls must prove the same
+benchmark-owned source hash, no helper/workspace, and one Taichi invocation;
+the runner and independent auditor compare the exact actual scatter endpoint
+before and after timing. Forge's native scatter plan and the equivalent kernel
+controls are checked on separate `forge-kernel-vs-vanilla` and
+`forge-native-vs-forge-kernel` axes through `native_scatter_microbench.py`.
 
 `warp_transform_baseline.py` is the isolated external baseline for the same
 `THIN-002-TRANSFORM` i32 affine semantics. It runs Warp in its own process and

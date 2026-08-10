@@ -191,6 +191,43 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         self.assertFalse(_audit_endpoint_equivalent(
             results["forge"], results["forge_kernel"]))
 
+    def test_native_scatter_endpoint_equivalence_uses_exact_fingerprint(self):
+        validation = {
+            "passed": True,
+            "comparison": "exact_i32_scatter",
+            "count": 4,
+            "actual_sha256": "d" * 64,
+            "expected_sha256": "d" * 64,
+            "actual_sum": 12,
+            "expected_sum": 12,
+            "actual_minimum": -3,
+            "expected_minimum": -3,
+            "actual_maximum": 8,
+            "expected_maximum": 8,
+            "sample_indices": [0, 1, 2, 3],
+            "actual_samples": [5, -3, 8, 2],
+            "expected_samples": [5, -3, 8, 2],
+            "mismatch_count": 0,
+            "first_mismatch": None,
+        }
+        results = {
+            name: {
+                "operation": "native_scatter",
+                "validation_before": json.loads(json.dumps(validation)),
+                "validation_after": json.loads(json.dumps(validation)),
+            }
+            for name in ("forge", "forge_kernel")
+        }
+        self.assertTrue(
+            _endpoint_equivalent(results, "forge", "forge_kernel"))
+        self.assertTrue(_audit_endpoint_equivalent(
+            results["forge"], results["forge_kernel"]))
+        results["forge_kernel"]["validation_after"]["actual_sum"] = 13
+        self.assertFalse(
+            _endpoint_equivalent(results, "forge", "forge_kernel"))
+        self.assertFalse(_audit_endpoint_equivalent(
+            results["forge"], results["forge_kernel"]))
+
     def test_profiler_range_rejects_normal_parent_or_non_cuda_run(self):
         with self.assertRaisesRegex(
                 ValueError, "requires one CUDA score sample in child mode"):
@@ -568,6 +605,26 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         self.assertFalse(_native_indexed_copy_route(
             Workspace(), "forge", "cuda", scatter=False,
             kernel_source_sha256="a" * 64)["passed"])
+
+    def test_native_scatter_kernel_route_proves_benchmark_control(self):
+        source_sha256 = "b" * 64
+        route = _native_indexed_copy_route(
+            None, "vanilla_kernel", "cuda", scatter=True,
+            kernel_source_sha256=source_sha256)
+        self.assertTrue(route["passed"])
+        self.assertEqual(route["adapter"], "benchmark_defined_ti_kernel")
+        self.assertEqual(route["kernel_source_owner"], "benchmark")
+        self.assertEqual(route["kernel_source_sha256"], source_sha256)
+        self.assertFalse(route["helper_api_used"])
+        self.assertFalse(route["workspace_present"])
+        self.assertEqual(route["ti_kernel_invocations_per_replay"], 1)
+        self.assertFalse(route["physical_backend_launches_assumed"])
+        self.assertFalse(_native_indexed_copy_route(
+            object(), "vanilla_kernel", "cuda", scatter=True,
+            kernel_source_sha256=source_sha256)["passed"])
+        self.assertFalse(_native_indexed_copy_route(
+            None, "vanilla_kernel", "cuda", scatter=True,
+            kernel_source_sha256="short")["passed"])
 
     def test_native_compact_route_requires_cuda_device_plan(self):
         class Plan:
