@@ -42,6 +42,18 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
 
 ## 待发布 {#unreleased}
 
+- 普通 Forge-owned ndarray launch 现在通过稳定 generation slot 绑定；无 SNode dependency
+  的 compiled kernel 不再取得全局 SNode 生命周期读锁。external/mixed resource 保留完整
+  通用所有权路径，CUDA/Vulkan 异步 submission 继续持有 completion-scoped lease。fast path
+  不增加 host readback 或 replay allocation。
+- dynamic-work capability report 升级为 schema v5，并分别报告 device-extent publication
+  合同、backend reuse、静态 route admission 与 opt-in physical blocks/threads 观测。
+  Prefix/worklist sequence 在 materialization 时固定 provider 与 workspace topology。
+  Worklist conflict resolve 现在把 `dense_atomic`/`radix_grouped` strategy 与 native sort
+  provider 分开；有界 dense domain 按 priority、ordinal、source index 确定性处理 tie，越界
+  key 记为 overflow；小规模 CPU worklist 默认保守保留 radix。配对的
+  `benchmarks/device_worklist_conflict_bench.py` 使用完全相同的输入，校验输出一致性，并报告
+  raw sample/CV 与 workspace byte，用于独立资格化 route。
 - CUDA-enabled runtime 只使用过 CPU 或 Vulkan Graph state 时，Graph cache reset/析构不再
   构造 CUDA context；真正的 CUDA cache 继续保持 submission lock 顺序。0.6.1 split shim
   中的兼容 override 已迁移到最终的 native runtime 所有权位置。

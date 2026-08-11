@@ -214,7 +214,7 @@ asynchronous submission; a qualified `auto` leaf may still use its existing
 flat native route.
 
 `ti.graph.structured_control_capabilities()` returns the active backend's
-schema-v4 portable lowering and device-control qualification. The report
+schema-v5 portable lowering and device-control qualification. The report
 separates primitive availability, complete runtime qualification, compound
 submission, terminal observation, per-region chunk and first-gate policy, tail
 strategy, queue-submit coalescing, and exact dynamic termination. Vulkan

@@ -171,11 +171,12 @@ work 与数值 breakdown。它写入只包含一个整数的 `predicate` ndarray
 | Vulkan | 精确 portable replay，或满足资格的 `native_required` 有界 masking；每个 region 的正数 chunk size 封顶为 64，每个 region 最多八个 chunk/512 轮 | 精确 portable host control |
 
 在 depth=2 时，CPU 以精确 host control 执行两层，并返回已完成的 submission ticket。
-CUDA 与 Vulkan 还验证了一种 native 结构：outer `while` 的 body 恰好包含一个 leaf
-inner `while`，两层由一次 backend submission 和一个 ticket 执行。其他结构仍使用
-exact portable-parent control；满足资格的 `auto` leaf 可继续使用既有 flat native route。
+CUDA 与 Vulkan 还验证了一种有序 native 结构：outer `while` 的 body 按顺序包含 1 至 8 个
+leaf inner `while`，其间可以插入普通 dispatch 或满足资格的 recordable action；整棵结构由
+一次 backend submission 和一个 ticket 执行。其他结构仍使用 exact portable-parent
+control；满足资格的 `auto` leaf 可继续使用既有 flat native route。
 
-`ti.graph.structured_control_capabilities()` 返回当前 backend 的 schema-v4 portable
+`ti.graph.structured_control_capabilities()` 返回当前 backend 的 schema-v5 portable
 lowering 与 device-control 资格。报告分别描述 primitive 可用性、完整 runtime 资格、
 compound submission、终态观测、per-region chunk 与首 gate 策略、tail strategy、
 queue-submit 合并与 exact dynamic termination。Vulkan 声明有界 `while` 执行，但不

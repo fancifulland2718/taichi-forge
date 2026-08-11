@@ -442,7 +442,11 @@ dtype 与语义约束。workspace 可以复用但不可并发共享；`clear()` 
 native Graph node。先用 `sequence.input(values_arg, extent_arg)` 声明 symbolic input，继续
 调用返回 prefix 的方法，最后通过 `builder.append_native(sequence)` 追加。每个已记录操作之间
 count 都留在 device；runtime 参数仍使用普通 Graph ndarray 名称。sequence 一旦追加并编译就
-不可修改，其 workspace 也不能由多个并发 sequence 共享。
+不可修改，其 workspace 也不能由多个并发 sequence 共享。native node materialization 时会
+固定 provider、workspace topology 与 operation routing，因此 steady-state replay 不再重复
+operation-kind/provider 判断。`memory_report()` 报告当前/峰值 workspace byte，并确认 replay
+allocation 为 0。未提供 symbolic backend command 的 native provider 仍通过已 materialize 的
+native node 执行；这一合同不表示跨 operation kernel fusion。
 
 ### Device worklist
 
@@ -468,13 +472,22 @@ worklist 不会自动串行化写入它的独立 Graph submission。capacity sca
 
 `select(flags, *, method="auto", dispatch_state=None)` stable filter 当前 front 到 back 并
 commit。`resolve_conflicts(keys, *, priorities=None, ordinals=None, policy="first",
-method="auto", dispatch_state=None)` 接受 integer key，每个 key 选择一个 winner。policy 可为
+method="auto", strategy="auto", sort_method=None, key_capacity=None,
+dispatch_state=None)` 接受 integer key，每个 key 选择一个 winner。policy 可为
 `first`、`claim`、`min_priority`、`max_priority`；priority policy 要求 i32 priority ndarray。
 tie 依次按 ordinal、source index 决定。返回的 `DeviceConflictResult` 暴露 device-owned keys、
-values、priorities、ordinals、extent 与 counter arrays。这些路径复用既有 CPU/CUDA/Vulkan
-compact 和 native stable-sort provider，不会静默回退到 host round trip。winner reduction
-为每个 sorted key run 分配一次 scan；少量特别长的 run 会降低并行度，性能资格应把它作为
-独立 workload shape 测量。
+values、priorities、ordinals、extent、counter arrays，以及实际选择的 `strategy`、sort
+provider 与 key capacity。
+
+conflict algorithm 与 sort provider 是两层独立选择。`strategy="radix_grouped"` 使用
+`sort_method` 选择的 CPU/CUDA/Vulkan native stable-sort provider；旧 `method` 参数继续作为
+它的向后兼容别名。`strategy="dense_atomic"` 要求有界 integer `key_capacity`，使用确定性的
+多阶段 arbitration 加 key-domain scan；越界 key 会被 rejected 并设置 overflow，不会访问
+scratch 越界。`strategy="auto"` 只在声明的 key domain 足够紧凑时采用 dense，并为小规模
+CPU 保留保守 crossover，其余情况使用 radix。dense 路径目前自行发布 extent，因此拒绝
+`dispatch_state`。两条路线都不会静默回退到 host round trip。radix winner reduction 为每个
+sorted key run 分配一次 scan；少量特别长的 run 会降低并行度，应作为独立 workload shape
+测量。
 
 `statistics()` 与 `snapshot()` 是显式同步 observation。`execution_report(dispatch=None,
 target="current")` 还会与 bounded-dispatch snapshot 合并，报告 useful、executed、skipped、
@@ -487,7 +500,8 @@ encoded、overflow 与 exact-grid state。`memory_report()` 报告 front/back、
 `prepare_next()`、`finalize_next()`、`select()` 或 `resolve_conflicts()`，再通过
 `GraphBuilder.append_native()` 追加。staging 在 submission 前分配；编译后的 action replay
 steady-state 期间不分配，也不读取 host count；首次执行仍可能编译 kernel 并准备 native
-provider workspace。sequence 编译后不可修改，workspace 可串行复用但不可并发共享。
+provider workspace。sequence 在 materialization 时固定 conflict strategy、sort provider 与
+workspace；编译后不可修改，workspace 可串行复用但不可并发共享。
 
 runtime binding 使用 `worklist.runtime_arguments(name)`。atomic producer Graph 还需传
 `include_capacity=True`，因为 `append_arguments()` 包含 scalar capacity argument。
@@ -1027,11 +1041,13 @@ group、grouped payload、control bytes 与 last-driver-error。调用 `Graph.ex
 replay 不做 host readback；rebind 会开始新的 control epoch，不混合不同 extent allocation 的
 计数。以上均不改变公共资源所有权。
 
-`ti.graph.dynamic_work_capabilities()` 返回 schema-v4 report，把 count owner、bounded
+`ti.graph.dynamic_work_capabilities()` 返回 schema-v5 report，把 count owner、bounded
 launch、structured iteration termination、worklist 与 ticket observation 分成独立维度。
 worklist 部分报告 append ordering、single-writer ownership、stable/deterministic transform、
 replay allocation/readback policy、counter 与当前 physical launch route；尤其不会把 CUDA
-conditional termination 报成 exact indirect grid launch。
+conditional termination 报成 exact indirect grid launch。bounded 部分还报告 backend
+publication/reuse 合同、静态 route admission 及其原因，以及是否能在显式观测边界取得真实
+physical blocks/threads。
 
 `GraphBuilder.dispatch_ordered_segments()` 消费 i32 offsets ndarray 与同一
 `DeviceExtent`，按 segment position 追加同一个可复用 payload specialization，并在 segment
@@ -1078,7 +1094,7 @@ storage 和 AOT Graph packet 会明确失败。CPU/CUDA 也会失败关闭，不
 | `GraphBuilder.switch(condition, branches, *, selector, control_inputs=(), default_region=None, lowering_mode="auto", name="switch")` | 追加零基固定 branch table，可指定 default。 |
 | `Sequential.while_loop(...)`、`.if_then_else(...)`、`.switch(...)` | 向 condition、body 或 branch `Sequential` 追加一个结构化 child。定义必须形成 single-owner tree。公开结构化控制的最大深度为 2；更深定义、cycle 或跨多个 call site 复用都会在执行前的 region 构造或 Graph 编译阶段失败。 |
 | `Graph.control_flow_stats()` | 返回最近一次 run 的 immutable `GraphWhileReport` / `GraphBranchReport`。重复 nested 调用时，每个静态 definition 只保留最近一次 invocation。报告包含 `region_path`、`structured_depth` 与 encoded/masked 工作量；满足资格的 Vulkan nested-while outer report 还会提供 `nested_region_path`、`nested_logical_iterations` 与 `nested_encoded_iterations`。原生 CUDA branch report 延迟物化，因此请求该报告是显式同步点。 |
-| `ti.graph.structured_control_capabilities()` | 返回当前 backend 的 schema-v4 portable 与 device-control 合同，分别报告 depth=2 portable 合同、native leaf/nested Vulkan 资格、structured submit、有界 chunk/replay、终态观测、queue-submit 合并与 exact dynamic termination。 |
+| `ti.graph.structured_control_capabilities()` | 返回当前 backend 的 schema-v5 portable 与 device-control 合同，分别报告 depth=2 portable 合同、native leaf/nested Vulkan 资格、structured submit、有界 chunk/replay、终态观测、queue-submit 合并与 exact dynamic termination。 |
 
 condition region 在普通 Taichi kernel 中组合多个 device 值；结构化控制不会调用 Python
 callback。Graph 将 `status` 视为用户定义整数，并与 continue predicate 独立报告。即使

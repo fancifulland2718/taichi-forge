@@ -231,7 +231,11 @@ scratch. A workspace may be reused serially but not by concurrent submissions.
 For Graph execution, `DevicePrefixSequence` records the same prefix operations
 over symbolic ndarray arguments and is appended through
 `GraphBuilder.append_native()`. This keeps the full fixed-topology chain under
-one Graph submission without host count observation. When a compact result
+one Graph submission without host count observation. Provider selection,
+workspace topology, and operation routing are fixed at materialization; replay
+does not repeat the operation-kind branch. This does not fuse provider kernels,
+and a provider without a symbolic backend command remains a materialized native
+call within the Graph node. When a compact result
 feeds Vulkan bounded dispatch, create `output_extent.dispatch_state(block_dim)`
 and pass it to both compact and `dispatch_bounded()`: the compact scatter then
 publishes the indirect packet with its count, removing one preparation
@@ -277,13 +281,17 @@ Graph submissions must be ordered before they write the same worklist. An
 overflow clamps the published count to capacity and remains visible in both
 the `DeviceExtent` and worklist counters. A forged or mismatched Graph capacity
 binding fails closed before writing values. `select(flags)` preserves source
-order. `resolve_conflicts(keys, priorities=..., policy="min_priority")` uses a
-stable native integer-key sort and chooses one winner by key, priority,
-ordinal, then source index. It is deterministic, but its fixed-capacity sort
-and staging make it a dense GPU primitive rather than a universal replacement
-for small host-side arbitration. Winner reduction scans each sorted key run;
-a distribution dominated by one or a few very long runs has lower parallelism
-and should be benchmarked separately.
+order. `resolve_conflicts(keys, priorities=...,
+policy="min_priority", strategy="auto", key_capacity=...)` separates the
+conflict algorithm from the sort provider. A compact bounded integer domain can
+use deterministic `dense_atomic` arbitration; otherwise `radix_grouped` uses
+the backend native stable-sort provider. Equal priority is resolved by ordinal
+and then source index in both strategies. Dense arbitration rejects
+out-of-domain keys with overflow, while radix winner reduction scans each
+sorted key run. A distribution dominated by one or a few very long radix runs
+has lower parallelism and should be benchmarked separately. Use
+`benchmarks/device_worklist_conflict_bench.py` for paired, identical-input
+strategy qualification with parity, raw samples/CV, and workspace accounting.
 
 For Graph replay, create symbolic arguments with `worklist.graph_args(name)`.
 Append separate `DeviceWorklistSequence(args).prepare_next()` and
@@ -291,6 +299,7 @@ Append separate `DeviceWorklistSequence(args).prepare_next()` and
 `resolve_conflicts()` node. Graph-owned staging is allocated before submission;
 steady-state replay neither allocates nor reads the count on the host. First
 execution may still compile kernels and prepare native provider workspace.
+The strategy, provider, and workspace topology are fixed at materialization.
 `args.observe()` adds all six counters to completion-attached ticket
 observation, while
 `args.decode_observation()` materializes `DeviceWorklistStatistics` after

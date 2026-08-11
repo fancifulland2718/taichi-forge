@@ -512,6 +512,12 @@ then append the sequence with `builder.append_native(sequence)`. Counts remain
 on device across every recorded operation; runtime arguments still use the
 normal Graph ndarray names. A sequence becomes immutable after it is appended
 and compiled, and its workspace must not be shared by concurrent sequences.
+Provider selection, workspace topology, and operation routing are fixed when
+the native node is materialized, so steady-state replay does not repeat the
+operation-kind/provider decision. `memory_report()` exposes current/peak
+workspace bytes and confirms zero replay allocations. Native providers that do
+not expose symbolic backend commands still execute through the materialized
+native node; this contract does not imply cross-operation kernel fusion.
 
 ### Device worklists
 
@@ -543,15 +549,27 @@ binding fails closed with sticky overflow before any value write.
 `select(flags, *, method="auto", dispatch_state=None)` stably filters the
 current front into the back and commits it. `resolve_conflicts(keys, *,
 priorities=None, ordinals=None, policy="first", method="auto",
+strategy="auto", sort_method=None, key_capacity=None,
 dispatch_state=None)` accepts integer keys and chooses one winner per key.
 Policies are `first`, `claim`, `min_priority`, and `max_priority`; priority
 policies require an i32 priority ndarray. Ties are resolved by ordinal, then
 source index. The returned `DeviceConflictResult` exposes device-owned keys,
-values, priorities, ordinals, extent, and counter arrays. These paths reuse
-the existing CPU/CUDA/Vulkan compact and native stable-sort providers and do
-not silently fall back to a host round trip. Winner reduction assigns one scan
-to each sorted key run; a few exceptionally long runs reduce parallelism and
-should be treated as a separate workload shape when benchmarking.
+values, priorities, ordinals, extent, counter arrays, selected `strategy`, sort
+provider, and key capacity.
+
+Conflict algorithm selection and sort-provider selection are independent.
+`strategy="radix_grouped"` uses the CPU/CUDA/Vulkan native stable-sort
+provider selected by `sort_method`; the legacy `method` argument remains its
+backward-compatible alias. `strategy="dense_atomic"` requires a bounded
+integer `key_capacity` and uses deterministic multi-pass arbitration followed
+by a key-domain scan. Out-of-domain keys are rejected and set overflow rather
+than accessing scratch out of bounds. `strategy="auto"` admits the dense path
+only for a sufficiently compact declared key domain and uses a conservative
+small-CPU crossover; otherwise it selects radix. The dense path currently owns
+extent publication and therefore rejects `dispatch_state`. Neither strategy
+silently falls back to a host round trip. Radix winner reduction assigns one
+scan to each sorted key run; a few exceptionally long runs reduce parallelism
+and should be treated as a separate workload shape when benchmarking.
 
 `statistics()` and `snapshot()` are explicit synchronized observations.
 `execution_report(dispatch=None, target="current")` additionally joins the
@@ -568,8 +586,9 @@ or `resolve_conflicts()`. Append the result with
 compiled action neither allocates nor reads the count on host during
 steady-state replay. The first execution may still compile kernels and prepare
 native provider workspace.
-The sequence is immutable after compilation and its workspace is serially
-reusable, not concurrently shareable.
+The sequence fixes its conflict strategy, sort provider, and workspace at
+materialization. It is immutable after compilation and its workspace is
+serially reusable, not concurrently shareable.
 
 Bind runtime values with `worklist.runtime_arguments(name)`. Atomic-producer
 graphs also pass `include_capacity=True` because `append_arguments()` includes
@@ -1199,13 +1218,15 @@ the counters is a synchronization point; ordinary replay does not perform a
 host readback. Rebinding starts a new control epoch, so counters do not combine
 different extent allocations. This changes no public resource ownership.
 
-`ti.graph.dynamic_work_capabilities()` returns a schema-v4 report that keeps
+`ti.graph.dynamic_work_capabilities()` returns a schema-v5 report that keeps
 the count owner, bounded launch, structured iteration termination, worklist,
 and ticket observation as separate axes. The worklist section reports append
 ordering, single-writer ownership, stable/deterministic transforms, replay
 allocation/readback policy, counters, and the active physical launch route. In
 particular, CUDA conditional termination is not reported as exact indirect
-grid launch.
+grid launch. The bounded section also reports the backend publication/reuse
+contract, static route admission and its reason, and whether physical
+blocks/threads are available at an explicit observation boundary.
 
 `GraphBuilder.dispatch_ordered_segments()` consumes an i32 offsets ndarray and
 the same `DeviceExtent`. It appends one reusable payload specialization per
@@ -1261,7 +1282,7 @@ before selecting this path.
 | `GraphBuilder.switch(condition, branches, *, selector, control_inputs=(), default_region=None, lowering_mode="auto", name="switch")` | Append a zero-based fixed branch table with an optional default. |
 | `Sequential.while_loop(...)`, `.if_then_else(...)`, `.switch(...)` | Append one structured child to a condition, body, or branch `Sequential`. Definitions form a single-owner tree. The public structured-control depth limit is two; deeper definitions, cycles, or reuse at multiple call sites fail before execution during region construction or Graph compilation. |
 | `Graph.control_flow_stats()` | Return immutable `GraphWhileReport` / `GraphBranchReport` values for the latest run. Repeated nested calls retain only the latest invocation of each static definition. Reports include `region_path`, `structured_depth`, and encoded/masked work counts; a qualified Vulkan nested-while outer report additionally exposes `nested_region_path`, `nested_logical_iterations`, and `nested_encoded_iterations`. Native CUDA branch reports are materialized lazily, so requesting them is an explicit synchronization point. |
-| `ti.graph.structured_control_capabilities()` | Return the schema-v4 portable and device-control contract for the active backend. The result reports the depth-two portable contract and native-leaf/nested-Vulkan qualification separately from structured submit, bounded chunk/replay limits, terminal observation, queue-submit coalescing, and exact dynamic termination. |
+| `ti.graph.structured_control_capabilities()` | Return the schema-v5 portable and device-control contract for the active backend. The result reports the depth-two portable contract and native-leaf/nested-Vulkan qualification separately from structured submit, bounded chunk/replay limits, terminal observation, queue-submit coalescing, and exact dynamic termination. |
 
 Condition regions combine multiple device values in ordinary Taichi kernels;
 structured control does not invoke Python callbacks. Graph treats `status` as

@@ -195,7 +195,10 @@ prefix 有定义；准备 provider 时可以用 neutral value 或 sentinel 覆�
 
 Graph 执行可用 `DevicePrefixSequence` 在 symbolic ndarray 参数上记录同一组 prefix 操作，
 再通过 `GraphBuilder.append_native()` 追加，使整个 fixed-topology chain 位于同一次 Graph
-submission 中且不观察 host count。compact 结果若接入 Vulkan bounded dispatch，可创建
+submission 中且不观察 host count。provider、workspace topology 与 operation routing 在
+materialization 时固定，replay 不再重复 operation-kind 分支；这不会融合 provider kernel，
+没有 symbolic backend command 的 provider 仍作为已 materialize 的 native call 在 Graph node
+中执行。compact 结果若接入 Vulkan bounded dispatch，可创建
 `output_extent.dispatch_state(block_dim)` 并同时传给 compact 与 `dispatch_bounded()`；compact
 scatter 会把 indirect packet 与 count 一起发布，删除一次 preparation dispatch。CPU/CUDA
 不消费该 packet；CUDA 独立使用 exact logical range，并可选择 12.4+ adaptive physical
@@ -235,17 +238,21 @@ worklist.commit_next()
 一次 transition 只有一个 producer owner，多个独立 Graph submission 写同一 worklist 前必须
 显式排序。overflow 会把发布 count 钳制到 capacity，并同时保留在 `DeviceExtent` 与 worklist
 counter 中；伪造或误绑的 Graph capacity 会在写 value 前 fail closed。`select(flags)` 保持
-source order。`resolve_conflicts(keys, priorities=..., policy="min_priority")` 使用 stable
-native integer-key sort，再按 key、
-priority、ordinal、source index 选择一个 winner。该结果确定，但固定容量 sort 与 staging
-更适合 dense GPU workload，不应无条件替代小规模 host arbitration。winner reduction 会
-扫描每个 sorted key run；由一个或少数超长 run 主导的分布并行度更低，应单独做性能资格。
+source order。`resolve_conflicts(keys, priorities=..., policy="min_priority",
+strategy="auto", key_capacity=...)` 将 conflict algorithm 与 sort provider 分开。有界紧凑
+integer domain 可使用确定性的 `dense_atomic` arbitration；其他情况由 `radix_grouped` 使用
+backend native stable-sort provider。两条路线都按 priority、ordinal、source index 处理 tie。
+dense 路线把越界 key 记为 rejected + overflow；radix winner reduction 扫描每个 sorted key
+run，由一个或少数超长 run 主导的分布并行度更低，应单独做性能资格。可用
+`benchmarks/device_worklist_conflict_bench.py` 做同输入配对资格；脚本会验证 parity，并报告
+raw sample/CV 与 workspace accounting。
 
 Graph replay 使用 `worklist.graph_args(name)` 创建 symbolic 参数。可在 user producer 两侧追加
 独立的 `DeviceWorklistSequence(args).prepare_next()` / `.finalize_next()` node，也可记录一个
 `select()` 或 `resolve_conflicts()` node。Graph staging 在 submission 前分配，steady-state
 replay 不分配、也不读取 host count；首次执行仍可能编译 kernel 并准备 native provider
-workspace。`args.observe()` 把六个 counter 加到 completion-attached ticket observation；
+workspace。strategy、provider 与 workspace topology 在 materialization 时固定。
+`args.observe()` 把六个 counter 加到 completion-attached ticket observation；
 completion 后由 `args.decode_observation()` 生成 `DeviceWorklistStatistics`。
 `execution_report()` 是显式同步边界，可把这些 counter 与 `dispatch_bounded()` snapshot 合并。
 

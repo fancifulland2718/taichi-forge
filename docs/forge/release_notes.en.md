@@ -46,6 +46,23 @@ grouped under the behavior they shipped.
 
 ## Unreleased
 
+- Ordinary Forge-owned ndarray launches now bind through stable generation
+  slots, while compiled kernels with no SNode dependency avoid the global
+  SNode lifecycle read guard. External/mixed resources keep the full general
+  ownership path, and asynchronous CUDA/Vulkan submissions retain their
+  completion-scoped leases. The fast path adds no host readback or replay
+  allocation.
+- Dynamic-work capability reports use schema v5 and separate the device-extent
+  publication contract, backend reuse, static route admission, and opt-in
+  physical blocks/threads observation. Prefix/worklist sequences fix provider
+  selection and workspace topology at materialization. Worklist conflict
+  resolution now separates `dense_atomic`/`radix_grouped` strategy from the
+  native sort provider; bounded dense domains use deterministic priority,
+  ordinal, and source-index tie breaking, with out-of-domain keys reported as
+  overflow. Small CPU worklists conservatively retain radix by default. The
+  paired `benchmarks/device_worklist_conflict_bench.py` harness uses identical
+  inputs, verifies output parity, reports raw samples/CV, and accounts
+  workspace bytes for route qualification.
 - Graph cache reset and destruction now avoid constructing the CUDA context
   when a CUDA-enabled runtime has only used CPU or Vulkan Graph state. CUDA
   caches retain submission-lock ordering; the 0.6.1 split-shim compatibility
