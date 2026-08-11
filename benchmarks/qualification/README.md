@@ -183,6 +183,17 @@ provenance, public qualification reports, explicit/automatic route evidence,
 disclosed unsupported capabilities, exact residual gates, replay plateau,
 bilingual output, and the absence of a cross-framework speedup.
 
+After the local case registry and final roll-up are frozen, run
+`audit_final_rollup.py <qualification-root> --nsight-root <nsight-root>`. This
+offline-only command never launches a benchmark. It enforces the 16-case
+registry/order, no pending statuses, Chinese/English case and issue coverage,
+zero qualified direct speedups, the exact five absolute artifact IDs, per-field
+numeric reconciliation against every qualified `result.json`, reruns the Warp
+and solver domain auditors, verifies the DIRECT-005/THIN-008 Nsight references,
+and confirms that no aggregate launcher is being presented when the qualified
+direct set is empty. It writes bilingual `COMPLETION_AUDIT.*.md` and
+`completion_audit.json` under the ignored final artifact directory.
+
 `device_prefix_chain` is `THIN-003` and uses the required three-route matrix.
 The compatibility axis runs one benchmark-owned kernel pipeline unchanged in
 the Forge and vanilla packages: a masked-flags kernel, two 16-step

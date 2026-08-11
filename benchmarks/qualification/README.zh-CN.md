@@ -155,6 +155,15 @@ Forge 内部 API 边界诊断，绝不是 Forge/vanilla 或 Forge/Warp speedup�
 route 证据、明确披露的 unsupported 能力、残差门槛、回放平台、双语输出，以及没有
 跨框架 speedup。
 
+本地案例注册表和最终汇总冻结后，运行
+`audit_final_rollup.py <qualification-root> --nsight-root <nsight-root>`。这个命令
+只做离线审计，绝不启动 benchmark。它会强制检查 16 个案例及顺序、没有 pending
+状态、中英文案例/问题覆盖、合格 direct speedup 为零、五个绝对 artifact ID 完全
+一致，逐字段对照每个合格 `result.json` 重算数值，重新调用 Warp 与 solver 专用审计器，
+验证 DIRECT-005/THIN-008 Nsight 引用，并确认 direct 合格集合为空时没有把聚合 launcher
+包装成交付结果。输出为忽略目录下的双语 `COMPLETION_AUDIT.*.md` 和
+`completion_audit.json`。
+
 `device_prefix_chain` 是 `THIN-003`，采用要求的三路线矩阵。compatibility 轴在
 Forge 与 vanilla package 中原样执行同一 benchmark-owned kernel pipeline：masked
 flags kernel、两条 16-step Hillis-Steele scan、stable scatter/staging 和 output-copy
