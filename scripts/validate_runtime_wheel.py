@@ -6,6 +6,8 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from email.parser import Parser
+import hashlib
+import json
 from pathlib import Path
 import re
 from zipfile import ZipFile
@@ -14,6 +16,9 @@ from zipfile import ZipFile
 PROJECT = "taichi-forge-runtime"
 PACKAGE = "taichi_forge_runtime"
 MANIFEST = f"{PACKAGE}/_lib/runtime_native/cuda_runtime_major.txt"
+WINDOWS_EXPORT_MANIFEST = (
+    f"{PACKAGE}/_lib/runtime_native/taichi_runtime.exports.json"
+)
 CUDA_VARIANT = re.compile(r"(?:^|[+_.-])(?:cu|cuda)\d+", re.IGNORECASE)
 
 
@@ -47,6 +52,79 @@ def _cudart_major(platform: str, name: str) -> int | None:
             re.IGNORECASE,
         )
     return int(match.group(1)) if match else None
+
+
+def _export_digest(symbols: list[str]) -> str:
+    digest = hashlib.sha256()
+    digest.update("\n".join(symbols).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _validate_windows_export_manifest(zf: ZipFile, names: list[str]) -> None:
+    manifests = [name for name in names if name == WINDOWS_EXPORT_MANIFEST]
+    if len(manifests) != 1:
+        raise RuntimeError(
+            f"Expected one {WINDOWS_EXPORT_MANIFEST}, found {manifests}"
+        )
+    try:
+        payload = json.loads(zf.read(manifests[0]).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Invalid Windows runtime export manifest") from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise RuntimeError("Unsupported Windows runtime export manifest schema")
+    if payload.get("dll_audited") is not True:
+        raise RuntimeError("Windows runtime export manifest was not DLL-audited")
+
+    requested = payload.get("exports")
+    actual = payload.get("actual_exports")
+    if (
+        not isinstance(requested, list)
+        or not isinstance(actual, list)
+        or not all(isinstance(symbol, str) and symbol for symbol in requested)
+        or not all(isinstance(symbol, str) and symbol for symbol in actual)
+        or requested != sorted(set(requested))
+        or actual != sorted(set(actual))
+    ):
+        raise RuntimeError("Windows runtime export sets are not canonical")
+
+    requested_set = set(requested)
+    actual_set = set(actual)
+    required_count = payload.get("shim_required_runtime_symbol_count")
+    raw_count = payload.get("raw_defined_symbol_count")
+    limit = payload.get("configured_export_limit")
+    counts = (
+        required_count,
+        raw_count,
+        limit,
+        payload.get("exported_symbol_count"),
+        payload.get("actual_exported_symbol_count"),
+        payload.get("implicit_exported_symbol_count"),
+        payload.get("dropped_raw_symbol_count"),
+    )
+    if not all(isinstance(value, int) and value >= 0 for value in counts):
+        raise RuntimeError("Windows runtime export counts are invalid")
+    if required_count <= 0 or raw_count < required_count:
+        raise RuntimeError("Windows runtime export closure is empty or inconsistent")
+    if payload["exported_symbol_count"] != len(requested):
+        raise RuntimeError("Windows requested export count is inconsistent")
+    if payload["actual_exported_symbol_count"] != len(actual):
+        raise RuntimeError("Windows actual export count is inconsistent")
+    if payload["implicit_exported_symbol_count"] != len(
+        actual_set - requested_set
+    ):
+        raise RuntimeError("Windows implicit export count is inconsistent")
+    if payload["dropped_raw_symbol_count"] != raw_count - required_count:
+        raise RuntimeError("Windows dropped export count is inconsistent")
+    if not requested_set.issubset(actual_set):
+        raise RuntimeError("Windows runtime DLL is missing requested exports")
+    if "taichi_runtime_anchor" not in requested_set:
+        raise RuntimeError("Windows runtime export manifest is missing its ABI anchor")
+    if limit <= 0 or limit > 65_535 or len(actual) > limit:
+        raise RuntimeError("Windows runtime export set exceeds its safety limit")
+    if payload.get("export_set_sha256") != _export_digest(requested):
+        raise RuntimeError("Windows requested export digest is inconsistent")
+    if payload.get("actual_export_set_sha256") != _export_digest(actual):
+        raise RuntimeError("Windows actual export digest is inconsistent")
 
 
 def inspect_runtime_wheel(
@@ -191,6 +269,7 @@ def inspect_runtime_wheel(
                 raise RuntimeError(
                     f"Expected one {import_library} in {wheel.name}"
                 )
+            _validate_windows_export_manifest(zf, names)
 
         wrong_entries = [
             name for name in names if name.startswith("taichi_forge/_lib/")

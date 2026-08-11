@@ -1,4 +1,6 @@
 import os
+import hashlib
+import json
 from pathlib import Path
 import re
 from zipfile import ZipFile
@@ -43,6 +45,7 @@ def _write_runtime_wheel(
     auditwheel_layout: bool = False,
     duplicate_raw_cudart: bool = False,
     dependency_class: str = "toolkit-reference",
+    include_windows_export_manifest: bool = True,
 ) -> None:
     dist_info = f"taichi_forge_runtime-{version}.dist-info"
     native = "taichi_forge_runtime/_lib/runtime_native"
@@ -85,6 +88,43 @@ def _write_runtime_wheel(
             raise ValueError(f"unknown dependency class: {dependency_class}")
         if platform == "windows":
             zf.writestr(f"{native}/taichi_runtime.lib", b"import library")
+            if include_windows_export_manifest:
+                requested = [
+                    "?launch@Kernel@lang@taichi@@QEAAXXZ",
+                    "taichi_runtime_anchor",
+                ]
+                actual = [
+                    "?explicit_api@taichi@@YAXXZ",
+                    *requested,
+                ]
+                requested.sort()
+                actual.sort()
+                requested_digest = hashlib.sha256(
+                    "\n".join(requested).encode("utf-8")
+                ).hexdigest()
+                actual_digest = hashlib.sha256(
+                    "\n".join(actual).encode("utf-8")
+                ).hexdigest()
+                zf.writestr(
+                    f"{native}/taichi_runtime.exports.json",
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "dll_audited": True,
+                            "raw_defined_symbol_count": 5,
+                            "shim_required_runtime_symbol_count": 1,
+                            "exported_symbol_count": 2,
+                            "actual_exported_symbol_count": 3,
+                            "implicit_exported_symbol_count": 1,
+                            "dropped_raw_symbol_count": 4,
+                            "configured_export_limit": 32_768,
+                            "exports": requested,
+                            "actual_exports": actual,
+                            "export_set_sha256": requested_digest,
+                            "actual_export_set_sha256": actual_digest,
+                        }
+                    ),
+                )
         if extra_cudart_major is not None:
             if platform == "windows":
                 extra_name = f"cudart64_{extra_cudart_major}.dll"
@@ -343,6 +383,21 @@ def test_shared_wheel_validator_accepts_driver_only_pair(tmp_path):
 
     assert {info.dependency_class for info in infos} == {"driver-only"}
     assert {info.cuda_major for info in infos} == {None}
+
+
+def test_windows_runtime_wheel_requires_export_manifest(tmp_path):
+    wheel = tmp_path / "taichi_forge_runtime-0.6.2-py3-none-win_amd64.whl"
+    _write_runtime_wheel(
+        wheel,
+        platform="windows",
+        version="0.6.2",
+        cuda_major=0,
+        dependency_class="driver-only",
+        include_windows_export_manifest=False,
+    )
+
+    with pytest.raises(RuntimeError, match="taichi_runtime.exports.json"):
+        validate_runtime_wheel.inspect_runtime_wheel(wheel)
 
 
 def test_shared_wheel_validator_rejects_reference_when_driver_only_required(
