@@ -183,6 +183,21 @@ std::string Kernel::task_launch_policy_cache_key() const {
                      task_launch_policy_->injected_block_dim ? 'i' : 's');
 }
 
+void Kernel::set_snode_tree_dependencies(
+    const std::vector<int> &dependencies) const {
+  std::lock_guard<std::mutex> lock(snode_tree_dependencies_mutex_);
+  if (snode_tree_dependency_state_.load(std::memory_order_relaxed) !=
+      SNodeTreeDependencyState::unknown) {
+    TI_ASSERT(snode_tree_dependencies_ == dependencies);
+    return;
+  }
+  snode_tree_dependencies_ = dependencies;
+  snode_tree_dependency_state_.store(
+      dependencies.empty() ? SNodeTreeDependencyState::none
+                           : SNodeTreeDependencyState::present,
+      std::memory_order_release);
+}
+
 void Kernel::retire_definition() {
   ir.reset();
   context.reset();
@@ -203,7 +218,12 @@ void Kernel::retire_definition() {
   offline_cache_body_.reset();
   compile_tier_override_.reset();
   task_launch_policy_.reset();
-  std::vector<int>().swap(snode_tree_dependencies_);
+  snode_tree_dependency_state_.store(SNodeTreeDependencyState::unknown,
+                                     std::memory_order_release);
+  {
+    std::lock_guard<std::mutex> lock(snode_tree_dependencies_mutex_);
+    std::vector<int>().swap(snode_tree_dependencies_);
+  }
 }
 
 void Kernel::init(Program &program,

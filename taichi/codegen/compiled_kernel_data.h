@@ -115,6 +115,11 @@ class CompiledKernelData {
   // kernel. Graph lifecycle tracking consumes this backend-neutral view.
   virtual std::vector<int> snode_tree_ids() const = 0;
 
+  // Allocation-free hot-path query. Ordinary launch uses this after the
+  // first compilation to avoid taking the global SNode lifecycle guard for
+  // kernels that cannot observe an SNodeTree.
+  virtual bool has_snode_tree_dependencies() const noexcept = 0;
+
   // Number of backend tasks generated for this kernel. Graph diagnostics use
   // this metadata after compilation; it does not trigger compilation itself.
   virtual std::size_t task_count() const = 0;

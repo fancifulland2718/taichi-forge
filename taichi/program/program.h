@@ -71,6 +71,20 @@ struct GraphObservationStagingStatistics {
   std::uint64_t completion_attached_bytes{0};
 };
 
+struct SNodeMetadataStatistics {
+  std::size_t tree_slots{0};
+  std::size_t active_tree_count{0};
+  std::size_t retired_tree_shells{0};
+  std::size_t free_tree_ids{0};
+  std::size_t active_snode_count{0};
+  std::size_t retired_snode_count{0};
+  std::size_t tree_inline_bytes_lower_bound{0};
+  std::size_t snode_inline_bytes_lower_bound{0};
+  std::size_t generation_table_bytes{0};
+  std::size_t active_table_bytes{0};
+  std::size_t global_snode_ids_issued{0};
+};
+
 class Program;
 class ProgramLifetimeToken;
 class ExternalSynchronizationDomain;
@@ -349,6 +363,9 @@ class TI_DLL_EXPORT Program {
   }
   std::unordered_map<std::string, std::uint64_t>
   debug_runtime_completion_stats() const;
+  void debug_reset_ordinary_launch_attribution() noexcept;
+  std::unordered_map<std::string, std::uint64_t>
+  debug_ordinary_launch_attribution() const;
 
   StreamSemaphore flush();
   StreamSemaphore flush_if_pending();
@@ -367,6 +384,8 @@ class TI_DLL_EXPORT Program {
 
   SNodeRuntimeDirectoryStatistics
   debug_snode_runtime_directory_statistics() const;
+
+  SNodeMetadataStatistics debug_snode_metadata_statistics() const;
 
   void debug_reset_sparse_listgen_statistics();
 
@@ -3231,6 +3250,10 @@ class TI_DLL_EXPORT Program {
   struct NdarrayResourceSlotView {
     const Ndarray *view{nullptr};
     NdarrayResourceHandle handle;
+    // unordered_map rehash preserves references and pointers to elements.
+    // Create/retire/launch share runtime_resource_submission_mutex_, so this
+    // direct binding cannot outlive the map entry while it is dereferenced.
+    NdarrayResourceView *resource{nullptr};
   };
 
   using NdarrayInflightLeaseMap =
@@ -3557,6 +3580,32 @@ class TI_DLL_EXPORT Program {
   std::atomic<std::uint64_t> dense_storage_ndarray_bindings_{0};
   std::atomic<std::uint64_t> dense_storage_field_bindings_{0};
   std::atomic<std::uint64_t> dense_storage_external_bindings_{0};
+  struct OrdinaryLaunchAttributionCounters {
+    bool enabled{false};
+    std::atomic<std::uint64_t> launches{0};
+    std::atomic<std::uint64_t> no_resource_fast_path{0};
+    std::atomic<std::uint64_t> graph_transaction_dispatches{0};
+    std::atomic<std::uint64_t> general_resource_launches{0};
+    std::atomic<std::uint64_t> owned_ndarray_only_launches{0};
+    std::atomic<std::uint64_t> snode_guard_acquisitions{0};
+    std::atomic<std::uint64_t> snode_guard_elisions{0};
+    std::atomic<std::uint64_t> resource_lock_acquisitions{0};
+    std::atomic<std::uint64_t> ndarray_slot_validations{0};
+    std::atomic<std::uint64_t> ndarray_map_lookups{0};
+    std::atomic<std::uint64_t> ndarray_lease_clones{0};
+    std::atomic<std::uint64_t> ndarray_inflight_reuses{0};
+    std::atomic<std::uint64_t> ndarray_pins{0};
+    std::atomic<std::uint64_t> total_host_ns{0};
+    std::atomic<std::uint64_t> compile_lookup_ns{0};
+    std::atomic<std::uint64_t> compile_and_launch_total_ns{0};
+    std::atomic<std::uint64_t> snode_guard_wait_ns{0};
+    std::atomic<std::uint64_t> resource_lock_wait_ns{0};
+    std::atomic<std::uint64_t> resource_resolution_ns{0};
+    std::atomic<std::uint64_t> backend_submit_ns{0};
+    std::atomic<std::uint64_t> completion_accounting_ns{0};
+  } ordinary_launch_attribution_;
+  bool ordinary_owned_ndarray_fast_path_enabled_{true};
+  bool ordinary_snode_guard_elision_enabled_{true};
   float64 total_compilation_time_{0.0};
   static std::atomic<int> num_instances_;
   bool finalized_{false};

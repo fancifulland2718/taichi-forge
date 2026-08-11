@@ -1676,6 +1676,65 @@ def test_ndarray_launch_context_rejects_stale_resource_generation():
 
 
 @pytest.mark.run_in_serial
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_owned_ndarray_launch_uses_stable_slot_and_elides_snode_guard(monkeypatch):
+    arch = impl.current_cfg().arch
+    ti.reset()
+    monkeypatch.setenv("TI_DEBUG_ORDINARY_LAUNCH_ATTRIBUTION", "1")
+    ti.init(arch=arch, offline_cache=False)
+
+    @ti.kernel
+    def bump(arr: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        arr[0] += 1
+
+    value = ti.ndarray(ti.i32, shape=1)
+    value.fill(4)
+    bump(value)
+    ti.sync()
+
+    prog = impl.get_runtime().prog
+    prog._debug_reset_ordinary_launch_attribution()
+    bump(value)
+    ti.sync()
+    stats = dict(prog._debug_ordinary_launch_attribution())
+
+    assert stats["owned_ndarray_fast_path"] == 1
+    assert stats["owned_ndarray_only_launches"] == 1
+    assert stats["ndarray_slot_validations"] == 1
+    assert stats["ndarray_map_lookups"] == 0
+    assert stats["snode_guard_acquisitions"] == 0
+    assert stats["snode_guard_elisions"] >= 1
+    assert value.to_numpy()[0] == 6
+
+
+@pytest.mark.run_in_serial
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_field_launch_keeps_required_snode_lifecycle_guard(monkeypatch):
+    arch = impl.current_cfg().arch
+    ti.reset()
+    monkeypatch.setenv("TI_DEBUG_ORDINARY_LAUNCH_ATTRIBUTION", "1")
+    ti.init(arch=arch, offline_cache=False)
+
+    value = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def bump():
+        value[None] += 1
+
+    bump()
+    ti.sync()
+    prog = impl.get_runtime().prog
+    prog._debug_reset_ordinary_launch_attribution()
+    bump()
+    ti.sync()
+    stats = dict(prog._debug_ordinary_launch_attribution())
+
+    assert stats["snode_guard_acquisitions"] >= 1
+    assert stats["snode_guard_elisions"] == 0
+    assert value[None] == 2
+
+
+@pytest.mark.run_in_serial
 @test_utils.test(arch=ti.cpu)
 def test_ndarray_registry_10k_create_use_release_stress():
     @ti.kernel

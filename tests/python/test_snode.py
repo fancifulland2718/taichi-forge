@@ -174,3 +174,38 @@ def test_snode_runtime_directory_diagnostic_is_backend_honest():
         "reserved_bytes": 0,
         "growth_events": 0,
     }
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_snode_metadata_retention_is_bounded_by_peak_live_topology():
+    prog = impl.get_runtime().prog
+    impl.get_runtime().materialize()
+    baseline = dict(prog._debug_snode_metadata_stats())
+
+    def churn_once():
+        builder = ti.FieldsBuilder()
+        value = ti.field(ti.i32)
+        builder.dense(ti.i, 4).place(value)
+        tree = builder.finalize()
+        tree.destroy()
+
+    churn_once()
+    warmed = dict(prog._debug_snode_metadata_stats())
+    for _ in range(31):
+        churn_once()
+    final = dict(prog._debug_snode_metadata_stats())
+
+    assert final["tree_slots"] == warmed["tree_slots"]
+    assert final["active_tree_count"] == baseline["active_tree_count"]
+    assert final["retired_tree_shells"] == warmed["retired_tree_shells"]
+    assert final["retired_snode_count"] == warmed["retired_snode_count"]
+    assert final["tree_inline_bytes_lower_bound"] == warmed[
+        "tree_inline_bytes_lower_bound"
+    ]
+    assert final["snode_inline_bytes_lower_bound"] == warmed[
+        "snode_inline_bytes_lower_bound"
+    ]
+    assert final["generation_table_bytes"] == warmed["generation_table_bytes"]
+    assert final["active_table_bytes"] == warmed["active_table_bytes"]
+    assert final["global_snode_ids_issued"] > warmed["global_snode_ids_issued"]
+    assert final["logical_bytes_are_lower_bounds"]

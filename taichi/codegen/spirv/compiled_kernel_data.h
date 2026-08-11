@@ -37,6 +37,7 @@ class CompiledKernelData : public lang::CompiledKernelData {
   Arch arch() const override;
   std::unique_ptr<lang::CompiledKernelData> clone() const override;
   std::vector<int> snode_tree_ids() const override;
+  bool has_snode_tree_dependencies() const noexcept override;
   std::size_t task_count() const override;
   std::vector<OffloadedTaskManifest> task_manifest() const override;
   const GraphKernelMetadata &graph_metadata() const override {

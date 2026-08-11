@@ -111,6 +111,13 @@ thread_local Program *active_snode_tree_lifecycle_program = nullptr;
 thread_local Program *active_runtime_resource_graph_program = nullptr;
 thread_local Program::RuntimeResourceGraphScope *active_runtime_resource_graph_scope = nullptr;
 
+std::uint64_t ordinary_launch_now_ns() noexcept {
+  return static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+
 class RuntimeProgramSyncStatisticsScope {
  public:
   explicit RuntimeProgramSyncStatisticsScope(Program *program)
@@ -4715,6 +4722,13 @@ Program::Program(Arch desired_arch)
           allocate_runtime_resource_domain()) {
   TI_TRACE("Program initializing...");
 
+  ordinary_launch_attribution_.enabled =
+      get_environ_config("TI_DEBUG_ORDINARY_LAUNCH_ATTRIBUTION", 0) != 0;
+  ordinary_owned_ndarray_fast_path_enabled_ =
+      get_environ_config("TI_DEBUG_ORDINARY_NDARRAY_LEGACY_PATH", 0) == 0;
+  ordinary_snode_guard_elision_enabled_ =
+      get_environ_config("TI_DEBUG_ORDINARY_FORCE_SNODE_GUARD", 0) == 0;
+
   auto [staging_result, staging_handle] =
       dense_field_staging_resources_.emplace(
           kDenseFieldStagingResourceKind);
@@ -5126,44 +5140,97 @@ void Program::launch_kernel(const CompiledKernelData &compiled_kernel_data,
   ensure_runtime_submission_allowed("kernel launch");
   if (ctx.argpack_ptrs.empty() && ctx.ndarray_ptrs.empty() &&
       ctx.texture_ptrs.empty() && ctx.dense_storage_ptrs.empty()) {
+    const bool attribute = ordinary_launch_attribution_.enabled;
+    const std::uint64_t total_started =
+        attribute ? ordinary_launch_now_ns() : 0;
+    if (attribute) {
+      ordinary_launch_attribution_.launches.fetch_add(
+          1, std::memory_order_relaxed);
+      ordinary_launch_attribution_.no_resource_fast_path.fetch_add(
+          1, std::memory_order_relaxed);
+    }
+    auto launch_backend = [&] {
+      const std::uint64_t started = attribute ? ordinary_launch_now_ns() : 0;
+      program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
+                                                          ctx);
+      if (attribute) {
+        ordinary_launch_attribution_.backend_submit_ns.fetch_add(
+            ordinary_launch_now_ns() - started, std::memory_order_relaxed);
+      }
+    };
+    auto account_completion = [&] {
+      const std::uint64_t started = attribute ? ordinary_launch_now_ns() : 0;
+      mark_runtime_submission();
+      check_runtime_error_after_kernel_launch(compiled_kernel_data);
+      if (attribute) {
+        ordinary_launch_attribution_.completion_accounting_ns.fetch_add(
+            ordinary_launch_now_ns() - started, std::memory_order_relaxed);
+      }
+    };
+    auto finish_attribution = [&] {
+      if (attribute) {
+        ordinary_launch_attribution_.total_host_ns.fetch_add(
+            ordinary_launch_now_ns() - total_started,
+            std::memory_order_relaxed);
+      }
+    };
     // Keep the pre-registry ordinary-launch machine path intact. Routing this
     // overwhelmingly common case through launch_kernel_impl() added an
     // out-of-line call, optional guard construction, and a registered-handle
     // branch even though none of them can contribute ownership here.
-    if (active_snode_tree_lifecycle_program != this) {
+    if (active_snode_tree_lifecycle_program != this &&
+        (!ordinary_snode_guard_elision_enabled_ ||
+         compiled_kernel_data.has_snode_tree_dependencies())) {
+      const std::uint64_t started = attribute ? ordinary_launch_now_ns() : 0;
       auto lifecycle_guard = acquire_snode_tree_lifecycle_read_guard();
+      if (attribute) {
+        ordinary_launch_attribution_.snode_guard_acquisitions.fetch_add(
+            1, std::memory_order_relaxed);
+        ordinary_launch_attribution_.snode_guard_wait_ns.fetch_add(
+            ordinary_launch_now_ns() - started,
+            std::memory_order_relaxed);
+      }
       if (!runtime_completion_tracking_enabled_.load(
               std::memory_order_acquire)) {
-        program_impl_->get_kernel_launcher().launch_kernel(
-            compiled_kernel_data, ctx);
-        mark_runtime_submission();
-        check_runtime_error_after_kernel_launch(compiled_kernel_data);
+        launch_backend();
+        account_completion();
+        finish_attribution();
         return;
       }
       auto completion_scope = acquire_runtime_submission_scope();
-      program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
-                                                          ctx);
-      mark_runtime_submission();
-      check_runtime_error_after_kernel_launch(compiled_kernel_data);
+      launch_backend();
+      account_completion();
+      finish_attribution();
       return;
+    }
+    if (active_snode_tree_lifecycle_program != this && attribute) {
+      ordinary_launch_attribution_.snode_guard_elisions.fetch_add(
+          1, std::memory_order_relaxed);
     }
     if (!runtime_completion_tracking_enabled_.load(
             std::memory_order_acquire)) {
-      program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
-                                                          ctx);
-      mark_runtime_submission();
-      check_runtime_error_after_kernel_launch(compiled_kernel_data);
+      launch_backend();
+      account_completion();
+      finish_attribution();
       return;
     }
     auto completion_scope = acquire_runtime_submission_scope();
-    program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
-                                                        ctx);
-    mark_runtime_submission();
-    check_runtime_error_after_kernel_launch(compiled_kernel_data);
+    launch_backend();
+    account_completion();
+    finish_attribution();
     return;
   }
 
   if (active_runtime_resource_graph_program == this) {
+    const bool attribute = ordinary_launch_attribution_.enabled;
+    const std::uint64_t total_started =
+        attribute ? ordinary_launch_now_ns() : 0;
+    if (attribute) {
+      ordinary_launch_attribution_.launches.fetch_add(
+          1, std::memory_order_relaxed);
+      ordinary_launch_attribution_.graph_transaction_dispatches.fetch_add(
+          1, std::memory_order_relaxed);
+    }
     // The enclosing Graph transaction has validated and pinned every runtime
     // argument while owning runtime_resource_submission_mutex_. Per-dispatch
     // owner/handle checks remain, but no registry lookup or recursive lock is
@@ -5173,10 +5240,27 @@ void Program::launch_kernel(const CompiledKernelData &compiled_kernel_data,
     resolve_runtime_storage_launch_context_under_guard(ctx);
     resolve_texture_launch_context_under_guard(ctx);
     auto completion_scope = acquire_runtime_submission_scope();
+    const std::uint64_t backend_started =
+        attribute ? ordinary_launch_now_ns() : 0;
     program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
                                                         ctx);
+    if (attribute) {
+      ordinary_launch_attribution_.backend_submit_ns.fetch_add(
+          ordinary_launch_now_ns() - backend_started,
+          std::memory_order_relaxed);
+    }
+    const std::uint64_t completion_started =
+        attribute ? ordinary_launch_now_ns() : 0;
     mark_runtime_submission();
     check_runtime_error_after_kernel_launch(compiled_kernel_data);
+    if (attribute) {
+      ordinary_launch_attribution_.completion_accounting_ns.fetch_add(
+          ordinary_launch_now_ns() - completion_started,
+          std::memory_order_relaxed);
+      ordinary_launch_attribution_.total_host_ns.fetch_add(
+          ordinary_launch_now_ns() - total_started,
+          std::memory_order_relaxed);
+    }
     return;
   }
   launch_kernel_impl(compiled_kernel_data, ctx, nullptr);
@@ -5194,6 +5278,35 @@ void Program::launch_kernel_impl(
     const CompiledKernelData &compiled_kernel_data,
     LaunchContextBuilder &ctx,
     const KernelLaunchHandle *registered_handle) {
+  const bool attribute = ordinary_launch_attribution_.enabled;
+  const std::uint64_t total_started =
+      attribute ? ordinary_launch_now_ns() : 0;
+  if (attribute) {
+    ordinary_launch_attribution_.launches.fetch_add(
+        1, std::memory_order_relaxed);
+    const bool has_resources =
+        !ctx.argpack_ptrs.empty() || !ctx.ndarray_ptrs.empty() ||
+        !ctx.texture_ptrs.empty() || !ctx.dense_storage_ptrs.empty();
+    if (has_resources) {
+      ordinary_launch_attribution_.general_resource_launches.fetch_add(
+          1, std::memory_order_relaxed);
+    } else {
+      ordinary_launch_attribution_.no_resource_fast_path.fetch_add(
+          1, std::memory_order_relaxed);
+    }
+    if (ctx.argpack_ptrs.empty() && !ctx.ndarray_ptrs.empty() &&
+        ctx.texture_ptrs.empty() && ctx.dense_storage_ptrs.empty()) {
+      ordinary_launch_attribution_.owned_ndarray_only_launches.fetch_add(
+          1, std::memory_order_relaxed);
+    }
+  }
+  auto finish_attribution = [&] {
+    if (attribute) {
+      ordinary_launch_attribution_.total_host_ns.fetch_add(
+          ordinary_launch_now_ns() - total_started,
+          std::memory_order_relaxed);
+    }
+  };
   struct ResolvedDenseBindingReset {
     LaunchContextBuilder *ctx;
     ~ResolvedDenseBindingReset() {
@@ -5202,10 +5315,22 @@ void Program::launch_kernel_impl(
   } resolved_dense_binding_reset{&ctx};
 
   std::optional<SNodeTreeLifecycleReadGuard> lifecycle_guard;
-  if (active_snode_tree_lifecycle_program != this) {
+  if (active_snode_tree_lifecycle_program != this &&
+      (!ordinary_snode_guard_elision_enabled_ ||
+       compiled_kernel_data.has_snode_tree_dependencies())) {
     // Global lock order is SNodeTree lifecycle -> runtime-resource submission.
     // Graph already holds the former; ordinary launches acquire it here.
+    const std::uint64_t started = attribute ? ordinary_launch_now_ns() : 0;
     lifecycle_guard.emplace(acquire_snode_tree_lifecycle_read_guard());
+    if (attribute) {
+      ordinary_launch_attribution_.snode_guard_acquisitions.fetch_add(
+          1, std::memory_order_relaxed);
+      ordinary_launch_attribution_.snode_guard_wait_ns.fetch_add(
+          ordinary_launch_now_ns() - started, std::memory_order_relaxed);
+    }
+  } else if (active_snode_tree_lifecycle_program != this && attribute) {
+    ordinary_launch_attribution_.snode_guard_elisions.fetch_add(
+        1, std::memory_order_relaxed);
   }
   // launch_kernel() handles the dominant no-resource path before entering this
   // ownership-oriented slow path. Keep a defensive fast path for internal
@@ -5213,6 +5338,8 @@ void Program::launch_kernel_impl(
   if (ctx.argpack_ptrs.empty() && ctx.ndarray_ptrs.empty() &&
       ctx.texture_ptrs.empty() && ctx.dense_storage_ptrs.empty()) {
     auto completion_scope = acquire_runtime_submission_scope();
+    const std::uint64_t backend_started =
+        attribute ? ordinary_launch_now_ns() : 0;
     if (registered_handle) {
       program_impl_->get_kernel_launcher().launch_registered_kernel(
           compiled_kernel_data, *registered_handle, ctx);
@@ -5220,8 +5347,21 @@ void Program::launch_kernel_impl(
       program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
                                                           ctx);
     }
+    if (attribute) {
+      ordinary_launch_attribution_.backend_submit_ns.fetch_add(
+          ordinary_launch_now_ns() - backend_started,
+          std::memory_order_relaxed);
+    }
+    const std::uint64_t completion_started =
+        attribute ? ordinary_launch_now_ns() : 0;
     mark_runtime_submission();
     check_runtime_error_after_kernel_launch(compiled_kernel_data);
+    if (attribute) {
+      ordinary_launch_attribution_.completion_accounting_ns.fetch_add(
+          ordinary_launch_now_ns() - completion_started,
+          std::memory_order_relaxed);
+    }
+    finish_attribution();
     return;
   }
 
@@ -5231,6 +5371,8 @@ void Program::launch_kernel_impl(
     resolve_runtime_storage_launch_context_under_guard(ctx);
     resolve_texture_launch_context_under_guard(ctx);
     auto completion_scope = acquire_runtime_submission_scope();
+    const std::uint64_t backend_started =
+        attribute ? ordinary_launch_now_ns() : 0;
     if (registered_handle) {
       program_impl_->get_kernel_launcher().launch_registered_kernel(
           compiled_kernel_data, *registered_handle, ctx);
@@ -5238,8 +5380,21 @@ void Program::launch_kernel_impl(
       program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
                                                           ctx);
     }
+    if (attribute) {
+      ordinary_launch_attribution_.backend_submit_ns.fetch_add(
+          ordinary_launch_now_ns() - backend_started,
+          std::memory_order_relaxed);
+    }
+    const std::uint64_t completion_started =
+        attribute ? ordinary_launch_now_ns() : 0;
     mark_runtime_submission();
     check_runtime_error_after_kernel_launch(compiled_kernel_data);
+    if (attribute) {
+      ordinary_launch_attribution_.completion_accounting_ns.fetch_add(
+          ordinary_launch_now_ns() - completion_started,
+          std::memory_order_relaxed);
+    }
+    finish_attribution();
     return;
   }
 
@@ -5249,16 +5404,32 @@ void Program::launch_kernel_impl(
     // value-initialize the unrelated ArgPack/Ndarray inline lease arrays on
     // every submission. This keeps the same submission transaction and
     // failure recovery as the general mixed-resource path below.
-    std::lock_guard<std::recursive_mutex> resource_submission_lock(
+    const std::uint64_t lock_started =
+        attribute ? ordinary_launch_now_ns() : 0;
+    std::unique_lock<std::recursive_mutex> resource_submission_lock(
         runtime_resource_submission_mutex_);
+    if (attribute) {
+      ordinary_launch_attribution_.resource_lock_acquisitions.fetch_add(
+          1, std::memory_order_relaxed);
+      ordinary_launch_attribution_.resource_lock_wait_ns.fetch_add(
+          ordinary_launch_now_ns() - lock_started,
+          std::memory_order_relaxed);
+    }
     auto completion_scope = acquire_runtime_submission_scope();
     const bool retain_resources_until_sync =
         arch_is_gpu(compile_config().arch);
+    const std::uint64_t resolution_started =
+        attribute ? ordinary_launch_now_ns() : 0;
     TextureLaunchLeases texture_leases;
     if (retain_resources_until_sync) {
       texture_leases = acquire_texture_launch_leases(ctx);
     } else {
       resolve_texture_launch_context(ctx);
+    }
+    if (attribute) {
+      ordinary_launch_attribution_.resource_resolution_ns.fetch_add(
+          ordinary_launch_now_ns() - resolution_started,
+          std::memory_order_relaxed);
     }
 
     bool pin_attempted = false;
@@ -5279,6 +5450,8 @@ void Program::launch_kernel_impl(
       }
     };
     auto launch = [&] {
+      const std::uint64_t backend_started =
+          attribute ? ordinary_launch_now_ns() : 0;
       if (registered_handle) {
         program_impl_->get_kernel_launcher().launch_registered_kernel(
             compiled_kernel_data, *registered_handle, ctx);
@@ -5286,9 +5459,21 @@ void Program::launch_kernel_impl(
         program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
                                                             ctx);
       }
+      if (attribute) {
+        ordinary_launch_attribution_.backend_submit_ns.fetch_add(
+            ordinary_launch_now_ns() - backend_started,
+            std::memory_order_relaxed);
+      }
+      const std::uint64_t completion_started =
+          attribute ? ordinary_launch_now_ns() : 0;
       mark_runtime_submission();
       pin_after_submission();
       check_runtime_error_after_kernel_launch(compiled_kernel_data);
+      if (attribute) {
+        ordinary_launch_attribution_.completion_accounting_ns.fetch_add(
+            ordinary_launch_now_ns() - completion_started,
+            std::memory_order_relaxed);
+      }
     };
     try {
       launch();
@@ -5302,13 +5487,25 @@ void Program::launch_kernel_impl(
       }
       std::rethrow_exception(launch_error);
     }
+    finish_attribution();
     return;
   }
 
-  std::lock_guard<std::recursive_mutex> resource_submission_lock(
+  const std::uint64_t lock_started =
+      attribute ? ordinary_launch_now_ns() : 0;
+  std::unique_lock<std::recursive_mutex> resource_submission_lock(
       runtime_resource_submission_mutex_);
+  if (attribute) {
+    ordinary_launch_attribution_.resource_lock_acquisitions.fetch_add(
+        1, std::memory_order_relaxed);
+    ordinary_launch_attribution_.resource_lock_wait_ns.fetch_add(
+        ordinary_launch_now_ns() - lock_started,
+        std::memory_order_relaxed);
+  }
   auto completion_scope = acquire_runtime_submission_scope();
   const bool retain_resources_until_sync = arch_is_gpu(compile_config().arch);
+  const std::uint64_t resolution_started =
+      attribute ? ordinary_launch_now_ns() : 0;
   ArgPackLaunchLeases argpack_leases;
   if (!ctx.argpack_ptrs.empty()) {
     argpack_leases = acquire_argpack_launch_leases(ctx);
@@ -5333,6 +5530,11 @@ void Program::launch_kernel_impl(
     } else {
       resolve_texture_launch_context(ctx);
     }
+  }
+  if (attribute) {
+    ordinary_launch_attribution_.resource_resolution_ns.fetch_add(
+        ordinary_launch_now_ns() - resolution_started,
+        std::memory_order_relaxed);
   }
 
   ExternalAccessEpoch external_access_epoch;
@@ -5369,6 +5571,8 @@ void Program::launch_kernel_impl(
     }
   };
   auto launch = [&] {
+    const std::uint64_t backend_started =
+        attribute ? ordinary_launch_now_ns() : 0;
     if (registered_handle) {
       program_impl_->get_kernel_launcher().launch_registered_kernel(
           compiled_kernel_data, *registered_handle, ctx);
@@ -5376,9 +5580,21 @@ void Program::launch_kernel_impl(
       program_impl_->get_kernel_launcher().launch_kernel(compiled_kernel_data,
                                                           ctx);
     }
+    if (attribute) {
+      ordinary_launch_attribution_.backend_submit_ns.fetch_add(
+          ordinary_launch_now_ns() - backend_started,
+          std::memory_order_relaxed);
+    }
+    const std::uint64_t completion_started =
+        attribute ? ordinary_launch_now_ns() : 0;
     mark_runtime_submission();
     pin_after_submission();
     check_runtime_error_after_kernel_launch(compiled_kernel_data);
+    if (attribute) {
+      ordinary_launch_attribution_.completion_accounting_ns.fetch_add(
+          ordinary_launch_now_ns() - completion_started,
+          std::memory_order_relaxed);
+    }
   };
 
   try {
@@ -5400,6 +5616,7 @@ void Program::launch_kernel_impl(
     }
     std::rethrow_exception(launch_error);
   }
+  finish_attribution();
 }
 
 void Program::compile_and_launch_kernel(
@@ -5407,9 +5624,45 @@ void Program::compile_and_launch_kernel(
     const DeviceCapabilityConfig &caps,
     const Kernel &kernel_def,
     LaunchContextBuilder &ctx) {
-  auto lifecycle_guard = acquire_snode_tree_lifecycle_read_guard();
+  const bool attribute = ordinary_launch_attribution_.enabled;
+  const std::uint64_t total_started =
+      attribute ? ordinary_launch_now_ns() : 0;
+  std::optional<SNodeTreeLifecycleReadGuard> lifecycle_guard;
+  const auto dependency_state = kernel_def.snode_tree_dependency_state();
+  const bool needs_lifecycle_guard =
+      !ordinary_snode_guard_elision_enabled_ ||
+      dependency_state != Kernel::SNodeTreeDependencyState::none;
+  if (needs_lifecycle_guard) {
+    const std::uint64_t started = attribute ? ordinary_launch_now_ns() : 0;
+    lifecycle_guard.emplace(acquire_snode_tree_lifecycle_read_guard());
+    if (attribute) {
+      ordinary_launch_attribution_.snode_guard_acquisitions.fetch_add(
+          1, std::memory_order_relaxed);
+      ordinary_launch_attribution_.snode_guard_wait_ns.fetch_add(
+          ordinary_launch_now_ns() - started, std::memory_order_relaxed);
+    }
+  } else if (attribute) {
+    ordinary_launch_attribution_.snode_guard_elisions.fetch_add(
+        1, std::memory_order_relaxed);
+  }
+  const std::uint64_t compile_started =
+      attribute ? ordinary_launch_now_ns() : 0;
   const auto &compiled = compile_kernel(compile_config, caps, kernel_def);
+  if (attribute) {
+    ordinary_launch_attribution_.compile_lookup_ns.fetch_add(
+        ordinary_launch_now_ns() - compile_started,
+        std::memory_order_relaxed);
+  }
+  if (ordinary_snode_guard_elision_enabled_ &&
+      !compiled.has_snode_tree_dependencies()) {
+    lifecycle_guard.reset();
+  }
   launch_kernel(compiled, ctx);
+  if (attribute) {
+    ordinary_launch_attribution_.compile_and_launch_total_ns.fetch_add(
+        ordinary_launch_now_ns() - total_started,
+        std::memory_order_relaxed);
+  }
 }
 
 void Program::check_runtime_error_after_kernel_launch(
@@ -5612,6 +5865,52 @@ std::vector<int> Program::get_active_snode_tree_ids() const {
     }
   }
   return active_ids;
+}
+
+SNodeMetadataStatistics Program::debug_snode_metadata_statistics() const {
+  std::shared_lock<std::shared_mutex> lifecycle_lock(
+      snode_tree_lifecycle_mutex_);
+  SNodeMetadataStatistics result;
+  result.tree_slots = snode_trees_.size();
+  result.free_tree_ids = free_snode_tree_ids_.size();
+  result.generation_table_bytes =
+      snode_tree_generations_.capacity() * sizeof(std::uint64_t);
+  result.active_table_bytes =
+      snode_tree_active_.capacity() * sizeof(std::uint8_t);
+  result.global_snode_ids_issued =
+      static_cast<std::size_t>(std::max(global_id_counter_, 0));
+  std::function<std::size_t(const SNode *)> count_snodes =
+      [&](const SNode *snode) -> std::size_t {
+    if (snode == nullptr) {
+      return 0;
+    }
+    std::size_t count = 1;
+    for (const auto &child : snode->ch) {
+      count += count_snodes(child.get());
+    }
+    return count;
+  };
+  for (std::size_t tree_id = 0; tree_id < snode_trees_.size(); ++tree_id) {
+    const auto &tree = snode_trees_[tree_id];
+    if (tree == nullptr) {
+      continue;
+    }
+    const auto count = count_snodes(tree->root());
+    if (tree_id < snode_tree_active_.size() &&
+        snode_tree_active_[tree_id]) {
+      ++result.active_tree_count;
+      result.active_snode_count += count;
+    } else {
+      ++result.retired_tree_shells;
+      result.retired_snode_count += count;
+    }
+  }
+  result.tree_inline_bytes_lower_bound =
+      (result.active_tree_count + result.retired_tree_shells) *
+      sizeof(SNodeTree);
+  result.snode_inline_bytes_lower_bound =
+      (result.active_snode_count + result.retired_snode_count) * sizeof(SNode);
+  return result;
 }
 
 SparseSNodeTreeStatistics Program::debug_sparse_snode_tree_statistics(
@@ -6227,7 +6526,27 @@ void Program::resolve_ndarray_launch_context(LaunchContextBuilder &ctx) {
     }
     TI_ERROR_IF(owner != this,
                 "Kernel launch references an Ndarray from another Program");
+    if (ordinary_owned_ndarray_fast_path_enabled_) {
+      TI_ERROR_IF(expected_handle.index >= ndarray_view_slots_.size(),
+                  "Kernel launch references a stale or retired Ndarray");
+      const auto &slot = ndarray_view_slots_[expected_handle.index];
+      TI_ERROR_IF(slot.view != view || slot.handle != expected_handle ||
+                      slot.resource == nullptr,
+                  "Kernel launch references a stale or retired Ndarray");
+      TI_ASSERT(slot.resource->lease &&
+                slot.resource->lease.get() == view &&
+                slot.resource->handle == expected_handle);
+      if (ordinary_launch_attribution_.enabled) {
+        ordinary_launch_attribution_.ndarray_slot_validations.fetch_add(
+            1, std::memory_order_relaxed);
+      }
+      return slot.resource->lease.get();
+    }
     const auto found = ndarray_views_.find(view);
+    if (ordinary_launch_attribution_.enabled) {
+      ordinary_launch_attribution_.ndarray_map_lookups.fetch_add(
+          1, std::memory_order_relaxed);
+    }
     TI_ERROR_IF(found == ndarray_views_.end() ||
                     found->second.handle != expected_handle,
                 "Kernel launch references a stale or retired Ndarray");
@@ -6325,20 +6644,49 @@ Program::NdarrayLaunchLeases Program::acquire_ndarray_launch_leases(
     }
     TI_ERROR_IF(owner != this,
                 "Kernel launch references an Ndarray from another Program");
-    const auto found = ndarray_views_.find(view);
-    TI_ERROR_IF(found == ndarray_views_.end() ||
-                    found->second.handle != expected_handle,
-                "Kernel launch references a stale or retired Ndarray");
-    const NdarrayResourceView &resource_view = found->second;
-    TI_ASSERT(resource_view.lease && resource_view.lease.get() == view &&
-              resource_view.lease.handle() == expected_handle);
-    if (leases.contains(expected_handle) ||
-        ndarray_inflight_leases_.find(ndarray_lease_key(expected_handle)) !=
-            ndarray_inflight_leases_.end()) {
+    const NdarrayResourceView *resource_view = nullptr;
+    if (ordinary_owned_ndarray_fast_path_enabled_) {
+      TI_ERROR_IF(expected_handle.index >= ndarray_view_slots_.size(),
+                  "Kernel launch references a stale or retired Ndarray");
+      const auto &slot = ndarray_view_slots_[expected_handle.index];
+      TI_ERROR_IF(slot.view != view || slot.handle != expected_handle ||
+                      slot.resource == nullptr,
+                  "Kernel launch references a stale or retired Ndarray");
+      resource_view = slot.resource;
+      if (ordinary_launch_attribution_.enabled) {
+        ordinary_launch_attribution_.ndarray_slot_validations.fetch_add(
+            1, std::memory_order_relaxed);
+      }
+    } else {
+      const auto found = ndarray_views_.find(view);
+      if (ordinary_launch_attribution_.enabled) {
+        ordinary_launch_attribution_.ndarray_map_lookups.fetch_add(
+            1, std::memory_order_relaxed);
+      }
+      TI_ERROR_IF(found == ndarray_views_.end() ||
+                      found->second.handle != expected_handle,
+                  "Kernel launch references a stale or retired Ndarray");
+      resource_view = &found->second;
+    }
+    TI_ASSERT(resource_view->lease && resource_view->lease.get() == view &&
+              resource_view->lease.handle() == expected_handle);
+    if (leases.contains(expected_handle)) {
       return;
     }
-    auto lease = resource_view.lease.clone();
+    if (ndarray_inflight_leases_.find(ndarray_lease_key(expected_handle)) !=
+        ndarray_inflight_leases_.end()) {
+      if (ordinary_launch_attribution_.enabled) {
+        ordinary_launch_attribution_.ndarray_inflight_reuses.fetch_add(
+            1, std::memory_order_relaxed);
+      }
+      return;
+    }
+    auto lease = resource_view->lease.clone();
     TI_ERROR_IF(!lease, "Kernel launch could not clone its Ndarray lease");
+    if (ordinary_launch_attribution_.enabled) {
+      ordinary_launch_attribution_.ndarray_lease_clones.fetch_add(
+          1, std::memory_order_relaxed);
+    }
     leases.add(std::move(lease));
   };
 
@@ -6433,17 +6781,16 @@ storage::ResolvedDenseBinding Program::resolve_dense_storage_descriptor(
     TI_ERROR_IF(handle.index >= ndarray_view_slots_.size(),
                 "Dense storage binding references a stale or retired Ndarray");
     const auto &slot = ndarray_view_slots_[handle.index];
-    TI_ERROR_IF(slot.view == nullptr || slot.handle != handle,
+    TI_ERROR_IF(slot.view == nullptr || slot.handle != handle ||
+                    slot.resource == nullptr,
                 "Dense storage binding references a stale or retired Ndarray");
     const Ndarray *array = slot.view;
     if (arch_is_gpu(compile_config().arch) &&
         ndarray_leases.find(handle) == nullptr &&
         ndarray_inflight_leases_.find(ndarray_lease_key(handle)) ==
             ndarray_inflight_leases_.end()) {
-      const auto found = ndarray_views_.find(array);
-      TI_ASSERT(found != ndarray_views_.end() &&
-                found->second.handle == handle && found->second.lease);
-      auto lease = found->second.lease.clone();
+      TI_ASSERT(slot.resource->handle == handle && slot.resource->lease);
+      auto lease = slot.resource->lease.clone();
       TI_ERROR_IF(!lease,
                   "Dense storage binding could not clone its Ndarray lease");
       ndarray_leases.add(std::move(lease));
@@ -6758,6 +7105,10 @@ void Program::pin_ndarray_launch_leases(NdarrayLaunchLeases &leases) {
     if (ndarray_inflight_leases_.find(key) ==
         ndarray_inflight_leases_.end()) {
       ndarray_inflight_leases_.emplace(key, std::move(lease));
+      if (ordinary_launch_attribution_.enabled) {
+        ordinary_launch_attribution_.ndarray_pins.fetch_add(
+            1, std::memory_order_relaxed);
+      }
     }
   };
   for (std::size_t i = 0; i < leases.inline_count_; ++i) {
@@ -8009,6 +8360,75 @@ DeviceAllocation Program::allocate_host_read_memory_on_device(
   return allocation;
 }
 
+void Program::debug_reset_ordinary_launch_attribution() noexcept {
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
+  auto &stats = ordinary_launch_attribution_;
+#define TI_RESET_ORDINARY_LAUNCH_COUNTER(name) \
+  stats.name.store(0, std::memory_order_relaxed)
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(launches);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(no_resource_fast_path);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(graph_transaction_dispatches);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(general_resource_launches);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(owned_ndarray_only_launches);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(snode_guard_acquisitions);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(snode_guard_elisions);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(resource_lock_acquisitions);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(ndarray_slot_validations);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(ndarray_map_lookups);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(ndarray_lease_clones);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(ndarray_inflight_reuses);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(ndarray_pins);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(total_host_ns);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(compile_lookup_ns);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(compile_and_launch_total_ns);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(snode_guard_wait_ns);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(resource_lock_wait_ns);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(resource_resolution_ns);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(backend_submit_ns);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(completion_accounting_ns);
+#undef TI_RESET_ORDINARY_LAUNCH_COUNTER
+}
+
+std::unordered_map<std::string, std::uint64_t>
+Program::debug_ordinary_launch_attribution() const {
+  const auto &stats = ordinary_launch_attribution_;
+  auto load = [](const std::atomic<std::uint64_t> &value) {
+    return value.load(std::memory_order_relaxed);
+  };
+  return {
+      {"enabled", stats.enabled ? 1u : 0u},
+      {"owned_ndarray_fast_path",
+       ordinary_owned_ndarray_fast_path_enabled_ ? 1u : 0u},
+      {"snode_guard_elision",
+       ordinary_snode_guard_elision_enabled_ ? 1u : 0u},
+      {"launches", load(stats.launches)},
+      {"no_resource_fast_path", load(stats.no_resource_fast_path)},
+      {"graph_transaction_dispatches",
+       load(stats.graph_transaction_dispatches)},
+      {"general_resource_launches", load(stats.general_resource_launches)},
+      {"owned_ndarray_only_launches",
+       load(stats.owned_ndarray_only_launches)},
+      {"snode_guard_acquisitions", load(stats.snode_guard_acquisitions)},
+      {"snode_guard_elisions", load(stats.snode_guard_elisions)},
+      {"resource_lock_acquisitions", load(stats.resource_lock_acquisitions)},
+      {"ndarray_slot_validations", load(stats.ndarray_slot_validations)},
+      {"ndarray_map_lookups", load(stats.ndarray_map_lookups)},
+      {"ndarray_lease_clones", load(stats.ndarray_lease_clones)},
+      {"ndarray_inflight_reuses", load(stats.ndarray_inflight_reuses)},
+      {"ndarray_pins", load(stats.ndarray_pins)},
+      {"total_host_ns", load(stats.total_host_ns)},
+      {"compile_lookup_ns", load(stats.compile_lookup_ns)},
+      {"compile_and_launch_total_ns",
+       load(stats.compile_and_launch_total_ns)},
+      {"snode_guard_wait_ns", load(stats.snode_guard_wait_ns)},
+      {"resource_lock_wait_ns", load(stats.resource_lock_wait_ns)},
+      {"resource_resolution_ns", load(stats.resource_resolution_ns)},
+      {"backend_submit_ns", load(stats.backend_submit_ns)},
+      {"completion_accounting_ns", load(stats.completion_accounting_ns)},
+  };
+}
+
 Ndarray *Program::create_ndarray(const DataType type,
                                  const std::vector<int> &shape,
                                  ExternalArrayLayout layout,
@@ -8043,13 +8463,12 @@ Ndarray *Program::create_ndarray(const DataType type,
     if (handle.index >= ndarray_view_slots_.size()) {
       ndarray_view_slots_.resize(static_cast<std::size_t>(handle.index) + 1);
     }
-    inserted = ndarray_views_
-                   .emplace(view,
-                            NdarrayResourceView{handle, std::move(lease)})
-                   .second;
+    auto [view_iter, view_inserted] = ndarray_views_.emplace(
+        view, NdarrayResourceView{handle, std::move(lease)});
+    inserted = view_inserted;
     if (inserted) {
       TI_ASSERT(ndarray_view_slots_[handle.index].view == nullptr);
-      ndarray_view_slots_[handle.index] = {view, handle};
+      ndarray_view_slots_[handle.index] = {view, handle, &view_iter->second};
     }
   } catch (...) {
     if (handle.index < ndarray_view_slots_.size() &&

@@ -899,6 +899,10 @@ void export_lang(py::module &m) {
         }
         return result;
       })
+      .def("_debug_reset_ordinary_launch_attribution",
+           &Program::debug_reset_ordinary_launch_attribution)
+      .def("_debug_ordinary_launch_attribution",
+           &Program::debug_ordinary_launch_attribution)
       .def("_runtime_statistics_snapshot", [](Program &program) {
         const RuntimeStatisticsSnapshot snapshot =
             program.runtime_statistics_snapshot();
@@ -1165,6 +1169,25 @@ void export_lang(py::module &m) {
         result["active_tree_count"] = snapshot.active_tree_count;
         result["reserved_bytes"] = snapshot.reserved_bytes;
         result["growth_events"] = snapshot.growth_events;
+        return result;
+      })
+      .def("_debug_snode_metadata_stats", [](const Program &program) {
+        const auto snapshot = program.debug_snode_metadata_statistics();
+        py::dict result;
+        result["tree_slots"] = snapshot.tree_slots;
+        result["active_tree_count"] = snapshot.active_tree_count;
+        result["retired_tree_shells"] = snapshot.retired_tree_shells;
+        result["free_tree_ids"] = snapshot.free_tree_ids;
+        result["active_snode_count"] = snapshot.active_snode_count;
+        result["retired_snode_count"] = snapshot.retired_snode_count;
+        result["tree_inline_bytes_lower_bound"] =
+            snapshot.tree_inline_bytes_lower_bound;
+        result["snode_inline_bytes_lower_bound"] =
+            snapshot.snode_inline_bytes_lower_bound;
+        result["generation_table_bytes"] = snapshot.generation_table_bytes;
+        result["active_table_bytes"] = snapshot.active_table_bytes;
+        result["global_snode_ids_issued"] = snapshot.global_snode_ids_issued;
+        result["logical_bytes_are_lower_bounds"] = true;
         return result;
       })
       .def("_debug_sparse_snode_tree_stats",
@@ -4200,6 +4223,19 @@ void export_lang(py::module &m) {
             stats.known_bounded_grouped_payloads;
         result["known_bounded_producer_fused_groups"] =
             stats.known_bounded_producer_fused_groups;
+        result["known_bounded_payloads"] = stats.known_bounded_payloads;
+        result["last_bounded_useful_lanes"] =
+            stats.last_bounded_useful_lanes;
+        result["last_bounded_physical_blocks"] =
+            stats.last_bounded_physical_blocks;
+        result["last_bounded_physical_threads"] =
+            stats.last_bounded_physical_threads;
+        result["last_bounded_baseline_blocks"] =
+            stats.last_bounded_baseline_blocks;
+        result["last_bounded_zero_payloads"] =
+            stats.last_bounded_zero_payloads;
+        result["bounded_physical_observation_available"] =
+            stats.bounded_physical_observation_available;
         result["bounded_update_replays"] =
             stats.bounded_update_replays;
         result["bounded_update_state_changes"] =

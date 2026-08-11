@@ -1,5 +1,8 @@
 #pragma once
 
+#include <atomic>
+#include <cstdint>
+#include <mutex>
 #include <optional>
 #include <string>
 
@@ -19,6 +22,12 @@ class Program;
 
 class TI_DLL_EXPORT Kernel : public Callable {
  public:
+  enum class SNodeTreeDependencyState : std::uint8_t {
+    unknown = 0,
+    none = 1,
+    present = 2,
+  };
+
   enum class TaskLaunchPolicyMode {
     hint,
     require,
@@ -99,8 +108,19 @@ class TI_DLL_EXPORT Kernel : public Callable {
   }
 
   void set_snode_tree_dependencies(
-      const std::vector<int> &dependencies) const {
-    snode_tree_dependencies_ = dependencies;
+      const std::vector<int> &dependencies) const;
+
+  SNodeTreeDependencyState snode_tree_dependency_state() const noexcept {
+    return snode_tree_dependency_state_.load(std::memory_order_acquire);
+  }
+
+  bool snode_tree_dependencies_known() const noexcept {
+    return snode_tree_dependency_state() != SNodeTreeDependencyState::unknown;
+  }
+
+  bool has_snode_tree_dependencies() const noexcept {
+    return snode_tree_dependency_state() ==
+           SNodeTreeDependencyState::present;
   }
 
   bool definition_retired() const {
@@ -125,6 +145,9 @@ class TI_DLL_EXPORT Kernel : public Callable {
   mutable std::optional<std::string> offline_cache_body_;
   std::optional<std::string> compile_tier_override_;
   std::optional<TaskLaunchPolicy> task_launch_policy_;
+  mutable std::mutex snode_tree_dependencies_mutex_;
+  mutable std::atomic<SNodeTreeDependencyState> snode_tree_dependency_state_{
+      SNodeTreeDependencyState::unknown};
   mutable std::vector<int> snode_tree_dependencies_;
 };
 
