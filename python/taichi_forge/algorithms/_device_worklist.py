@@ -101,6 +101,19 @@ def _require_stat_array(value, role):
     return value
 
 
+def _require_dense_winner_table(value, key_capacity):
+    if (
+        not isinstance(value, ScalarNdarray)
+        or value.dtype != i32
+        or tuple(value.shape) != (key_capacity,)
+    ):
+        raise TypeError(
+            "dense winner table must be an i32 ndarray with shape "
+            f"({key_capacity},)"
+        )
+    return value
+
+
 @func
 def device_worklist_append(
     values: template(),
@@ -412,6 +425,36 @@ def _reset_dense_conflict_workspace(
 
 
 @kernel
+def _reset_dense_conflict_table(
+    best_priorities: ndarray_type.ndarray(dtype=i32, ndim=1),
+    best_ordinals: ndarray_type.ndarray(dtype=i32, ndim=1),
+    best_sources: ndarray_type.ndarray(dtype=i32, ndim=1),
+    invalid: ndarray_type.ndarray(dtype=i32, ndim=1),
+    policy: i32,
+):
+    for key in best_sources:
+        best_priorities[key] = (
+            -0x80000000 if policy == 2 else 0x7FFFFFFF
+        )
+        best_ordinals[key] = 0x7FFFFFFF
+        best_sources[key] = 0x7FFFFFFF
+    invalid[0] = 0
+
+
+@kernel
+def _publish_dense_conflict_table(
+    input_extent: ndarray_type.ndarray(dtype=i32, ndim=1),
+    invalid: ndarray_type.ndarray(dtype=i32, ndim=1),
+    generated: ndarray_type.ndarray(dtype=i32, ndim=0),
+    overflow: ndarray_type.ndarray(dtype=i32, ndim=0),
+    generation: ndarray_type.ndarray(dtype=i32, ndim=0),
+):
+    generated[None] = input_extent[0]
+    overflow[None] = 1 if input_extent[1] != 0 or invalid[0] != 0 else 0
+    generation[None] += 1
+
+
+@kernel
 def _select_dense_conflict_priorities(
     keys: ndarray_type.ndarray(),
     priorities: ndarray_type.ndarray(dtype=i32, ndim=1),
@@ -591,6 +634,8 @@ class DeviceConflictResult:
     strategy: str
     sort_method: object
     key_capacity: object
+    output_shape: str = "compact_winner_list"
+    dense_winner_sources: object = None
 
 
 @dataclass(frozen=True)
@@ -768,6 +813,22 @@ def _normalize_conflict_sort_method(method, sort_method):
     return sort_method
 
 
+def _normalize_conflict_output_shape(output_shape):
+    aliases = {
+        "compact": "compact_winner_list",
+        "compact_winner_list": "compact_winner_list",
+        "dense": "dense_winner_table",
+        "dense_winner_table": "dense_winner_table",
+    }
+    try:
+        return aliases[output_shape]
+    except (KeyError, TypeError) as exc:
+        raise ValueError(
+            "conflict output_shape must be compact_winner_list or "
+            "dense_winner_table"
+        ) from exc
+
+
 def _choose_conflict_strategy(strategy, key_capacity, capacity):
     if strategy not in ("auto", "dense_atomic", "radix_grouped"):
         raise ValueError(
@@ -913,6 +974,116 @@ def _select_impl(
     )
     _publish_transition(source_extent, output_extent, stats, False)
     return result
+
+
+def _resolve_dense_table_impl(
+    source_extent,
+    keys,
+    dense_winner_sources,
+    stats,
+    workspace,
+    *,
+    priorities,
+    ordinals,
+    policy,
+    key_capacity,
+):
+    capacity = source_extent.capacity
+    _require_worklist_array(keys, "conflict keys", capacity)
+    if keys.dtype not in _CONFLICT_KEY_DTYPES:
+        raise TypeError("deterministic conflict keys must use an integer dtype")
+    if priorities is not None:
+        _require_worklist_array(priorities, "conflict priorities", capacity, i32)
+    if ordinals is not None:
+        _require_worklist_array(ordinals, "conflict ordinals", capacity, i32)
+    if policy not in ("first", "claim", "min_priority", "max_priority"):
+        raise ValueError(
+            "conflict policy must be first, claim, min_priority, or max_priority"
+        )
+    if policy in ("min_priority", "max_priority") and priorities is None:
+        raise ValueError(f"conflict policy {policy!r} requires priorities")
+    _require_dense_winner_table(dense_winner_sources, key_capacity)
+    if _telemetry_enabled(stats):
+        raise ValueError(
+            "dense winner-only conflict resolution requires telemetry=False; "
+            "winner-count telemetry would require the compact scan being skipped"
+        )
+
+    stage_sources = workspace._buffer("conflict_sources", i32, capacity)
+    best_priorities = workspace._buffer(
+        "dense_conflict_priorities", i32, key_capacity
+    )
+    best_ordinals = workspace._buffer(
+        "dense_conflict_ordinals", i32, key_capacity
+    )
+    invalid = workspace._buffer("dense_conflict_invalid", i32, 1)
+    _stage_conflict_source_indices(stage_sources, source_extent.state)
+    priority_values = priorities if priorities is not None else stage_sources
+    ordinal_values = ordinals if ordinals is not None else stage_sources
+    effective_policy = 0
+    if policy in ("claim", "min_priority") and priorities is not None:
+        effective_policy = 1
+    elif policy == "max_priority":
+        effective_policy = 2
+    _reset_dense_conflict_table(
+        best_priorities,
+        best_ordinals,
+        dense_winner_sources,
+        invalid,
+        effective_policy,
+    )
+    _select_dense_conflict_priorities(
+        keys,
+        priority_values,
+        best_priorities,
+        invalid,
+        source_extent.state,
+        key_capacity,
+        effective_policy,
+    )
+    _select_dense_conflict_ordinals(
+        keys,
+        priority_values,
+        ordinal_values,
+        best_priorities,
+        best_ordinals,
+        source_extent.state,
+        key_capacity,
+        effective_policy,
+    )
+    _select_dense_conflict_sources(
+        keys,
+        priority_values,
+        ordinal_values,
+        best_priorities,
+        best_ordinals,
+        dense_winner_sources,
+        source_extent.state,
+        key_capacity,
+        effective_policy,
+    )
+    _publish_dense_conflict_table(
+        source_extent.state,
+        invalid,
+        stats["generated"],
+        stats["overflow"],
+        stats["generation"],
+    )
+    workspace._refresh_usage()
+    return DeviceConflictResult(
+        keys=None,
+        values=None,
+        priorities=None,
+        ordinals=None,
+        extent=None,
+        statistics=(),
+        policy=policy,
+        strategy="dense_atomic",
+        sort_method=None,
+        key_capacity=key_capacity,
+        output_shape="dense_winner_table",
+        dense_winner_sources=dense_winner_sources,
+    )
 
 
 def _resolve_dense_impl(
@@ -1392,6 +1563,7 @@ class DeviceWorklist:
         sort_method=None,
         key_capacity=None,
         dispatch_state=None,
+        output_shape="compact_winner_list",
     ):
         """Select one deterministic winner for every active integer key.
 
@@ -1410,7 +1582,38 @@ class DeviceWorklist:
                 "dispatch packet; use the next DeviceExtent directly"
             )
         sort_method = _normalize_conflict_sort_method(method, sort_method)
+        output_shape = _normalize_conflict_output_shape(output_shape)
         source_extent = self.extent
+        if output_shape == "dense_winner_table":
+            selected_strategy, key_capacity, _ = _choose_conflict_strategy(
+                strategy, key_capacity, self._capacity
+            )
+            if selected_strategy != "dense_atomic":
+                raise ValueError(
+                    "dense_winner_table output requires the dense_atomic strategy"
+                )
+            if sort_method != "auto":
+                raise ValueError(
+                    "sort_method applies only to compact radix_grouped output"
+                )
+            if dispatch_state is not None:
+                raise ValueError(
+                    "dense_winner_table output does not publish a compact extent"
+                )
+            table = self._workspace._buffer(
+                "dense_conflict_winner_table", i32, key_capacity
+            )
+            return _resolve_dense_table_impl(
+                source_extent,
+                keys,
+                table,
+                self._stats,
+                self._workspace,
+                priorities=priorities,
+                ordinals=ordinals,
+                policy=policy,
+                key_capacity=key_capacity,
+            )
         output_keys = self._workspace._buffer(
             "conflict_output_keys", keys.dtype, self._capacity
         )
@@ -1826,6 +2029,76 @@ class DeviceWorklistSequence:
             },
         )
 
+    def resolve_conflict_winner_table(
+        self,
+        keys,
+        winner_sources,
+        *,
+        priorities=None,
+        ordinals=None,
+        policy="first",
+        key_capacity,
+    ):
+        """Record dense winner-source arbitration without list materialization.
+
+        Empty keys contain ``0x7fffffff``.  The operation intentionally
+        requires telemetry-free worklist arguments because counting winners
+        would reintroduce the scan that this output contract removes.
+        """
+
+        self._ensure_mutable()
+        if self.args.telemetry:
+            raise ValueError(
+                "dense winner-only conflict resolution requires telemetry=False"
+            )
+        key_capacity = _require_capacity(key_capacity, "key_capacity")
+        if key_capacity > self.capacity:
+            raise ValueError(
+                "DeviceWorklist dense key_capacity cannot exceed worklist capacity"
+            )
+        keys = self._register(keys, "keys", ndim=1)
+        winner_sources = self._register(
+            winner_sources, "dense winner sources", dtype=i32, ndim=1
+        )
+        if priorities is not None:
+            priorities = self._register(
+                priorities, "priorities", dtype=i32, ndim=1
+            )
+        if ordinals is not None:
+            ordinals = self._register(ordinals, "ordinals", dtype=i32, ndim=1)
+        if policy not in ("first", "claim", "min_priority", "max_priority"):
+            raise ValueError(
+                "conflict policy must be first, claim, min_priority, or max_priority"
+            )
+        if policy in ("min_priority", "max_priority") and priorities is None:
+            raise ValueError(f"conflict policy {policy!r} requires priorities")
+        self.workspace._buffer("conflict_sources", i32, self.capacity)
+        self.workspace._buffer(
+            "dense_conflict_priorities", i32, key_capacity
+        )
+        self.workspace._buffer(
+            "dense_conflict_ordinals", i32, key_capacity
+        )
+        self.workspace._buffer("dense_conflict_invalid", i32, 1)
+        return self._set_operation(
+            "resolve_dense_table",
+            (
+                keys.name,
+                winner_sources.name,
+                None if priorities is None else priorities.name,
+                None if ordinals is None else ordinals.name,
+            ),
+            {
+                "policy": policy,
+                "strategy": "dense_atomic",
+                "strategy_reason": "dense_winner_table_contract",
+                "sort_method": None,
+                "key_capacity": key_capacity,
+                "dispatch_state": None,
+                "output_shape": "dense_winner_table",
+            },
+        )
+
     def _as_graph_native_node(self):
         self._ensure_mutable()
         if self._operation is None:
@@ -2140,6 +2413,34 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
                 )
 
             return resolve
+        if kind == "resolve_dense_table":
+            keys, winner_sources, priorities, ordinals = values
+            policy = options["policy"]
+            key_capacity = options["key_capacity"]
+
+            def resolve_dense_table(
+                _current_values,
+                current_extent,
+                _next_values,
+                _next_extent,
+                stats,
+                runtime_args,
+            ):
+                _resolve_dense_table_impl(
+                    current_extent,
+                    runtime_args[keys],
+                    runtime_args[winner_sources],
+                    stats,
+                    self._workspace,
+                    priorities=(
+                        None if priorities is None else runtime_args[priorities]
+                    ),
+                    ordinals=None if ordinals is None else runtime_args[ordinals],
+                    policy=policy,
+                    key_capacity=key_capacity,
+                )
+
+            return resolve_dense_table
         raise TaichiRuntimeError(f"Unsupported worklist operation {kind!r}")
 
     def _run_legacy(
@@ -2203,6 +2504,22 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
                 key_capacity=options["key_capacity"],
                 dispatch_state=options["dispatch_state"],
             )
+        elif kind == "resolve_dense_table":
+            _resolve_dense_table_impl(
+                current_extent,
+                runtime_args[values[0]],
+                runtime_args[values[1]],
+                stats,
+                self._workspace,
+                priorities=(
+                    None if values[2] is None else runtime_args[values[2]]
+                ),
+                ordinals=(
+                    None if values[3] is None else runtime_args[values[3]]
+                ),
+                policy=options["policy"],
+                key_capacity=options["key_capacity"],
+            )
         else:
             raise TaichiRuntimeError(f"Unsupported worklist operation {kind!r}")
 
@@ -2240,7 +2557,7 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
             "telemetry_enabled": self._args.telemetry,
             "counter_count": len(self._args.state_args),
         }
-        if self._operation[0] == "resolve":
+        if self._operation[0] in ("resolve", "resolve_dense_table"):
             options = self._operation[2]
             result.update(
                 conflict_strategy=options["strategy"],
@@ -2251,6 +2568,9 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
                     else None
                 ),
                 key_capacity=options["key_capacity"],
+                conflict_output_shape=options.get(
+                    "output_shape", "compact_winner_list"
+                ),
             )
         return result
 

@@ -326,6 +326,91 @@ def test_device_worklist_dense_conflict_matches_radix(policy, priorities):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_worklist_dense_winner_table_skips_compact_materialization():
+    capacity = 32
+    key_capacity = 8
+    count = 6
+    keys = ti.ndarray(ti.i32, shape=capacity)
+    keys.from_numpy(
+        np.pad(
+            np.array([2, 1, 2, 1, 2, 3], dtype=np.int32),
+            (0, capacity - count),
+        )
+    )
+    worklist = ti.algorithms.DeviceWorklist(
+        capacity, ti.i32, telemetry=False
+    )
+    original = np.arange(capacity, dtype=np.int32) + 17
+    worklist.values.from_numpy(original)
+    worklist.extent.set(count)
+
+    result = worklist.resolve_conflicts(
+        keys,
+        strategy="dense_atomic",
+        key_capacity=key_capacity,
+        output_shape="dense_winner_table",
+    )
+    assert result.output_shape == "dense_winner_table"
+    assert result.extent is None
+    assert result.values is None
+    assert result.keys is None
+    expected = np.full(key_capacity, 0x7FFFFFFF, dtype=np.int32)
+    expected[[1, 2, 3]] = [1, 0, 5]
+    np.testing.assert_array_equal(
+        result.dense_winner_sources.to_numpy(), expected
+    )
+    assert worklist.extent.snapshot().count == count
+    np.testing.assert_array_equal(worklist.values.to_numpy(), original)
+    assert worklist.statistics().generation == 1
+    assert not any(
+        role == "dense_conflict_flags"
+        for role, _dtype, _count in worklist.workspace._buffers
+    )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_worklist_graph_dense_winner_table_is_device_resident():
+    capacity = 24
+    key_capacity = 6
+    count = 7
+    keys_host = np.array([4, 2, 4, 2, 4, 5, 1], dtype=np.int32)
+    keys = ti.ndarray(ti.i32, shape=capacity)
+    keys.from_numpy(np.pad(keys_host, (0, capacity - count)))
+    winner_sources = ti.ndarray(ti.i32, shape=key_capacity)
+    worklist = ti.algorithms.DeviceWorklist(
+        capacity, ti.i32, telemetry=False
+    )
+    worklist.extent.set(count)
+    args = worklist.graph_args("dense_claim")
+    keys_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "dense_keys", ti.i32, ndim=1
+    )
+    winners_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "dense_winners", ti.i32, ndim=1
+    )
+    sequence = ti.algorithms.DeviceWorklistSequence(args)
+    sequence.resolve_conflict_winner_table(
+        keys_arg,
+        winners_arg,
+        key_capacity=key_capacity,
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(sequence)
+    graph = builder.compile()
+    runtime_args = worklist.runtime_arguments("dense_claim")
+    runtime_args.update(dense_keys=keys, dense_winners=winner_sources)
+    graph.run(runtime_args)
+
+    expected = np.full(key_capacity, 0x7FFFFFFF, dtype=np.int32)
+    expected[[1, 2, 4, 5]] = [6, 1, 0, 5]
+    np.testing.assert_array_equal(winner_sources.to_numpy(), expected)
+    assert worklist.extent.snapshot().count == count
+    assert worklist.statistics().generation == 1
+    physical = graph.physical_plan()
+    assert physical["fragmented_native_plan"]
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_device_worklist_dense_conflict_reports_out_of_domain_key():
     capacity = 32
     keys = ti.ndarray(ti.i32, shape=capacity)
