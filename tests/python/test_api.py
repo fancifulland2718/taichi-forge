@@ -327,6 +327,7 @@ user_api[ti.algorithms] = [
     "count_if",
     "device_prefix",
     "device_worklist_append",
+    "device_worklist_append_direct",
     "device_worklist_graph_args",
     "experimental_bucket_builder",
     "experimental_compact",

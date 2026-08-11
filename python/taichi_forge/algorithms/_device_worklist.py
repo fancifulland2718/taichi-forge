@@ -77,6 +77,12 @@ def _require_capacity(value, role="capacity"):
     return value
 
 
+def _require_transition_mode(value):
+    if value not in ("staged", "direct"):
+        raise ValueError("DeviceWorklist transition_mode must be staged or direct")
+    return value
+
+
 def _require_worklist_array(value, role, capacity, dtype=None):
     if not isinstance(value, ScalarNdarray):
         raise TypeError(f"DeviceWorklist {role} must be a scalar ti.ndarray")
@@ -146,6 +152,36 @@ def device_worklist_append(
     return result
 
 
+@func
+def device_worklist_append_direct(
+    values: template(),
+    extent_state: template(),
+    overflow: template(),
+    capacity: i32,
+    value: template(),
+):
+    """Append directly into a bounded extent without a finalize dispatch.
+
+    This lower-overhead contract deliberately omits an exact generated-count
+    statistic.  Overflow is sticky and the published extent remains clamped.
+    """
+
+    result = -1
+    if capacity != values.shape[0]:
+        ops.atomic_or(overflow[None], 1)
+        ops.atomic_or(extent_state[1], 1)
+    else:
+        slot = ops.atomic_add(extent_state[0], 1)
+        if slot < capacity:
+            values[slot] = value
+            result = slot
+        else:
+            ops.atomic_min(extent_state[0], capacity)
+            ops.atomic_or(overflow[None], 1)
+            ops.atomic_or(extent_state[1], 1)
+    return result
+
+
 @kernel
 def _reset_worklist_target(
     extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
@@ -176,6 +212,20 @@ def _reset_worklist_target_minimal(
     extent_state[1] = 0
     generated[None] = 0
     overflow[None] = 0
+
+
+@kernel
+def _begin_direct_worklist_transition(
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    overflow: ndarray_type.ndarray(dtype=i32, ndim=0),
+    generation: ndarray_type.ndarray(dtype=i32, ndim=0),
+    advance_generation: i32,
+):
+    extent_state[0] = 0
+    extent_state[1] = 0
+    overflow[None] = 0
+    if advance_generation != 0:
+        generation[None] += 1
 
 
 @kernel
@@ -658,6 +708,7 @@ class DeviceWorklistGraphArgs:
     generation: object
     capacity: object
     telemetry: bool = True
+    transition_mode: str = "staged"
 
     @property
     def stat_args(self):
@@ -685,13 +736,9 @@ class DeviceWorklistGraphArgs:
             values, extent = self.current_values, self.current_extent
         else:
             raise ValueError("DeviceWorklist append target must be current or next")
-        return (
-            values,
-            extent,
-            self.generated,
-            self.overflow,
-            self.capacity,
-        )
+        if self.transition_mode == "direct":
+            return values, extent, self.overflow, self.capacity
+        return values, extent, self.generated, self.overflow, self.capacity
 
     def observe(self, builder, *, name=None):
         """Append completion-attached observation of all worklist counters."""
@@ -735,7 +782,14 @@ class DeviceWorklistGraphArgs:
         )
 
 
-def device_worklist_graph_args(name, capacity, dtype=i32, *, telemetry=True):
+def device_worklist_graph_args(
+    name,
+    capacity,
+    dtype=i32,
+    *,
+    telemetry=True,
+    transition_mode="staged",
+):
     """Create the symbolic argument bundle paired with ``runtime_arguments``."""
 
     if not isinstance(name, str) or not name:
@@ -745,6 +799,11 @@ def device_worklist_graph_args(name, capacity, dtype=i32, *, telemetry=True):
         raise TypeError("DeviceWorklist Graph dtype is not supported")
     if not isinstance(telemetry, bool):
         raise TypeError("DeviceWorklist Graph telemetry must be a bool")
+    transition_mode = _require_transition_mode(transition_mode)
+    if transition_mode == "direct" and telemetry:
+        raise ValueError(
+            "direct DeviceWorklist transitions require telemetry=False"
+        )
     from taichi_forge import graph  # pylint: disable=import-outside-toplevel
 
     ndarray = graph.ArgKind.NDARRAY
@@ -757,7 +816,11 @@ def device_worklist_graph_args(name, capacity, dtype=i32, *, telemetry=True):
         current_extent=graph.Arg(ndarray, f"{name}_current_extent", i32, ndim=1),
         next_values=graph.Arg(ndarray, f"{name}_next_values", dtype, ndim=1),
         next_extent=graph.Arg(ndarray, f"{name}_next_extent", i32, ndim=1),
-        generated=graph.Arg(ndarray, f"{name}_generated", i32, ndim=0),
+        generated=(
+            graph.Arg(ndarray, f"{name}_generated", i32, ndim=0)
+            if transition_mode == "staged"
+            else None
+        ),
         accepted=(
             graph.Arg(ndarray, f"{name}_accepted", i32, ndim=0)
             if telemetry
@@ -782,6 +845,7 @@ def device_worklist_graph_args(name, capacity, dtype=i32, *, telemetry=True):
         generation=graph.Arg(ndarray, f"{name}_generation", i32, ndim=0),
         capacity=graph.Arg(scalar, f"{name}_capacity", i32),
         telemetry=telemetry,
+        transition_mode=transition_mode,
     )
 
 
@@ -1345,7 +1409,15 @@ def _resolve_impl(
 class DeviceWorklist:
     """Stable front/back storage for a device-driven fixed-capacity worklist."""
 
-    def __init__(self, capacity, dtype=i32, *, workspace=None, telemetry=True):
+    def __init__(
+        self,
+        capacity,
+        dtype=i32,
+        *,
+        workspace=None,
+        telemetry=True,
+        transition_mode="staged",
+    ):
         capacity = _require_capacity(capacity)
         if dtype not in _WORKLIST_DTYPES:
             raise TypeError("DeviceWorklist dtype is not supported")
@@ -1353,6 +1425,11 @@ class DeviceWorklist:
             raise TaichiRuntimeError("DeviceWorklist requires an initialized runtime")
         if not isinstance(telemetry, bool):
             raise TypeError("DeviceWorklist telemetry must be a bool")
+        transition_mode = _require_transition_mode(transition_mode)
+        if transition_mode == "direct" and telemetry:
+            raise ValueError(
+                "direct DeviceWorklist transitions require telemetry=False"
+            )
         if workspace is None:
             workspace = DevicePrefixWorkspace(capacity)
         if not isinstance(workspace, DevicePrefixWorkspace):
@@ -1367,10 +1444,15 @@ class DeviceWorklist:
         )
         self._extents = (DeviceExtent(capacity), DeviceExtent(capacity))
         self._telemetry = telemetry
+        self._transition_mode = transition_mode
         state_names = (
             _STATE_NAMES
             if telemetry
-            else ("generated", "overflow", "generation")
+            else (
+                ("generated", "overflow", "generation")
+                if transition_mode == "staged"
+                else ("overflow", "generation")
+            )
         )
         self._stats = {name: ti_ndarray(i32, shape=()) for name in state_names}
         self._stats["generation"].fill(0)
@@ -1441,6 +1523,10 @@ class DeviceWorklist:
         return self._telemetry
 
     @property
+    def transition_mode(self):
+        return self._transition_mode
+
+    @property
     def workspace_bytes_current(self):
         self._workspace._refresh_usage()
         return self._workspace.workspace_bytes_current
@@ -1470,7 +1556,15 @@ class DeviceWorklist:
         """Clear both fronts and all counters without reallocating storage."""
 
         self._validate_current()
-        _reset_target(self._extents[0], self._stats)
+        if self._transition_mode == "direct":
+            _begin_direct_worklist_transition(
+                self._extents[0].state,
+                self._stats["overflow"],
+                self._stats["generation"],
+                0,
+            )
+        else:
+            _reset_target(self._extents[0], self._stats)
         self._extents[1].reset()
         self._front = 0
         self._next_requires_finalize = False
@@ -1480,8 +1574,17 @@ class DeviceWorklist:
         """Reset the back extent and counters before atomic production."""
 
         self._validate_current()
-        _reset_target(self.next_extent, self._stats)
-        self._next_requires_finalize = True
+        if self._transition_mode == "direct":
+            _begin_direct_worklist_transition(
+                self.next_extent.state,
+                self._stats["overflow"],
+                self._stats["generation"],
+                1,
+            )
+            self._next_requires_finalize = False
+        else:
+            _reset_target(self.next_extent, self._stats)
+            self._next_requires_finalize = True
         return self
 
     def commit_next(self, *, dispatch_state=None):
@@ -1514,6 +1617,8 @@ class DeviceWorklist:
             values, extent = self.values, self.extent
         else:
             raise ValueError("DeviceWorklist append target must be current or next")
+        if self._transition_mode == "direct":
+            return values, extent.state, self._stats["overflow"], self._capacity
         return (
             values,
             extent.state,
@@ -1529,6 +1634,10 @@ class DeviceWorklist:
         """Stable-select the current front into the back and commit it."""
 
         self._validate_current()
+        if self._transition_mode == "direct":
+            raise TaichiRuntimeError(
+                "direct DeviceWorklist mode is limited to atomic append transitions"
+            )
         if dispatch_state is not None and impl.current_cfg().arch == _ti_core.Arch.cuda:
             raise TaichiRuntimeError(
                 "CUDA worklist selection does not produce a consumer-owned "
@@ -1576,6 +1685,10 @@ class DeviceWorklist:
         """
 
         self._validate_current()
+        if self._transition_mode == "direct":
+            raise TaichiRuntimeError(
+                "direct DeviceWorklist mode is limited to atomic append transitions"
+            )
         if dispatch_state is not None and impl.current_cfg().arch == _ti_core.Arch.cuda:
             raise TaichiRuntimeError(
                 "CUDA conflict resolution does not produce a consumer-owned "
@@ -1667,7 +1780,7 @@ class DeviceWorklist:
         }
         return DeviceWorklistStatistics(
             schema_version=2,
-            generated=values["generated"],
+            generated=values.get("generated"),
             accepted=values.get("accepted"),
             rejected=values.get("rejected"),
             conflicts=values.get("conflicts"),
@@ -1738,7 +1851,11 @@ class DeviceWorklist:
 
     def graph_args(self, name):
         return device_worklist_graph_args(
-            name, self._capacity, self._dtype, telemetry=self._telemetry
+            name,
+            self._capacity,
+            self._dtype,
+            telemetry=self._telemetry,
+            transition_mode=self._transition_mode,
         )
 
     def runtime_arguments(self, name, *, include_capacity=False):
@@ -1760,6 +1877,9 @@ class DeviceWorklist:
         self._validate_current()
         front_back = 2 * self._capacity * _dtype_bytes(self._dtype)
         counter_bytes = len(self._stats) * 4
+        mandatory_counter_bytes = (
+            8 if self._transition_mode == "direct" else 12
+        )
         owned = front_back + 16 + counter_bytes
         return {
             "schema_version": 1,
@@ -1767,9 +1887,12 @@ class DeviceWorklist:
             "front_back_value_bytes": front_back,
             "extent_bytes": 16,
             "counter_bytes": counter_bytes,
-            "mandatory_counter_bytes": 12,
-            "optional_telemetry_bytes": counter_bytes - 12,
+            "mandatory_counter_bytes": mandatory_counter_bytes,
+            "optional_telemetry_bytes": (
+                counter_bytes - mandatory_counter_bytes
+            ),
             "telemetry_enabled": self._telemetry,
+            "transition_mode": self._transition_mode,
             "workspace_bytes_current": self.workspace_bytes_current,
             "workspace_bytes_peak": self.workspace_bytes_peak,
             "total_bytes_current": owned + self.workspace_bytes_current,
@@ -1884,6 +2007,11 @@ class DeviceWorklistSequence:
         """Record counter/extent publication after an atomic producer."""
 
         self._ensure_mutable()
+        if self.args.transition_mode == "direct":
+            raise TaichiRuntimeError(
+                "direct DeviceWorklist transitions publish during append and "
+                "do not use finalize_next()"
+            )
         if dispatch_state is not None:
             if not isinstance(dispatch_state, DeviceDispatchState):
                 raise TypeError("worklist dispatch_state must be DeviceDispatchState")
@@ -1900,6 +2028,10 @@ class DeviceWorklistSequence:
 
     def select(self, flags, *, method="auto", dispatch_state=None):
         self._ensure_mutable()
+        if self.args.transition_mode == "direct":
+            raise TaichiRuntimeError(
+                "direct DeviceWorklist mode is limited to atomic append transitions"
+            )
         flags = self._register(flags, "flags", dtype=i32, ndim=1)
         # Graph native actions execute inside one backend submission batch.
         # Allocate Python-owned staging now: creating an ndarray from run()
@@ -1940,6 +2072,10 @@ class DeviceWorklistSequence:
         dispatch_state=None,
     ):
         self._ensure_mutable()
+        if self.args.transition_mode == "direct":
+            raise TaichiRuntimeError(
+                "direct DeviceWorklist mode is limited to atomic append transitions"
+            )
         sort_method = _normalize_conflict_sort_method(method, sort_method)
         selected_strategy, key_capacity, strategy_reason = (
             _choose_conflict_strategy(strategy, key_capacity, self.capacity)
@@ -2047,6 +2183,10 @@ class DeviceWorklistSequence:
         """
 
         self._ensure_mutable()
+        if self.args.transition_mode == "direct":
+            raise TaichiRuntimeError(
+                "direct DeviceWorklist mode is limited to atomic append transitions"
+            )
         if self.args.telemetry:
             raise ValueError(
                 "dense winner-only conflict resolution requires telemetry=False"
@@ -2143,12 +2283,26 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
         from taichi_forge.graph._graph import Arg, ArgKind, gen_cpp_kernel
 
         if kind == "reset":
-            if self._args.telemetry:
+            if self._args.transition_mode == "direct":
+                prefix = f"__ti_worklist_transition_{self._recording_id}"
+                advance_arg = Arg(
+                    ArgKind.SCALAR, f"{prefix}_advance_generation", i32
+                )
+                symbolic_args = (
+                    self._args.next_extent,
+                    self._args.overflow,
+                    self._args.generation,
+                    advance_arg,
+                )
+                reset_kernel = _begin_direct_worklist_transition
+                fixed_bindings = {advance_arg.name: 1}
+            elif self._args.telemetry:
                 symbolic_args = (
                     self._args.next_extent,
                     *self._args.stat_args,
                 )
                 reset_kernel = _reset_worklist_target
+                fixed_bindings = {}
             else:
                 symbolic_args = (
                     self._args.next_extent,
@@ -2156,8 +2310,8 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
                     self._args.overflow,
                 )
                 reset_kernel = _reset_worklist_target_minimal
+                fixed_bindings = {}
             kernel_cpp = gen_cpp_kernel(reset_kernel, symbolic_args)
-            fixed_bindings = {}
         else:
             prefix = f"__ti_worklist_transition_{self._recording_id}"
             capacity_arg = Arg(ArgKind.SCALAR, f"{prefix}_capacity", i32)
@@ -2319,7 +2473,15 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
                 stats,
                 _runtime_args,
             ):
-                _reset_target(next_extent, stats)
+                if self._args.transition_mode == "direct":
+                    _begin_direct_worklist_transition(
+                        next_extent.state,
+                        stats["overflow"],
+                        stats["generation"],
+                        1,
+                    )
+                else:
+                    _reset_target(next_extent, stats)
 
             return reset
         if kind == "finalize":
@@ -2454,7 +2616,15 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
     ):
         kind, values, options = self._operation
         if kind == "reset":
-            _reset_target(next_extent, stats)
+            if self._args.transition_mode == "direct":
+                _begin_direct_worklist_transition(
+                    next_extent.state,
+                    stats["overflow"],
+                    stats["generation"],
+                    1,
+                )
+            else:
+                _reset_target(next_extent, stats)
         elif kind == "finalize":
             _finalize_atomic_target(
                 next_extent,
@@ -2555,6 +2725,7 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
             "legacy_replay_forced": self._legacy_replay,
             "backend_native_recording": self._operation[0] in ("reset", "finalize"),
             "telemetry_enabled": self._args.telemetry,
+            "transition_mode": self._args.transition_mode,
             "counter_count": len(self._args.state_args),
         }
         if self._operation[0] in ("resolve", "resolve_dense_table"):
@@ -2593,5 +2764,6 @@ __all__ = [
     "DeviceWorklistSnapshot",
     "DeviceWorklistStatistics",
     "device_worklist_append",
+    "device_worklist_append_direct",
     "device_worklist_graph_args",
 ]

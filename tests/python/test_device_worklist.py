@@ -27,6 +27,24 @@ def _append_range(
         )
 
 
+@ti.kernel
+def _append_range_direct(
+    values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    extent_state: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    overflow: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    capacity: ti.i32,
+    count: ti.i32,
+):
+    for i in range(count):
+        ti.algorithms.device_worklist_append_direct(
+            values,
+            extent_state,
+            overflow,
+            capacity,
+            i * 5 + 2,
+        )
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_device_worklist_atomic_append_clamps_and_reports_overflow():
     capacity = 17
@@ -150,6 +168,76 @@ def test_device_worklist_graph_optional_telemetry_is_not_bound_or_written():
     physical = graph.physical_plan()
     assert physical["backend_recording_complete"]
     assert physical["loose_native_action_count"] == 0
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_worklist_direct_transition_elides_finalize_state():
+    capacity = 17
+    worklist = ti.algorithms.DeviceWorklist(
+        capacity,
+        ti.i32,
+        telemetry=False,
+        transition_mode="direct",
+    )
+    memory = worklist.memory_report()
+    assert memory["mandatory_counter_bytes"] == 8
+    assert memory["counter_bytes"] == 8
+    assert memory["transition_mode"] == "direct"
+    assert set(worklist.stats) == {"overflow", "generation"}
+
+    worklist.prepare_next()
+    _append_range_direct(*worklist.append_arguments(), capacity + 5)
+    worklist.commit_next()
+    snapshot = worklist.snapshot()
+    assert snapshot.extent.count == capacity
+    assert snapshot.extent.overflow
+    assert snapshot.statistics.generated is None
+    assert snapshot.statistics.generation == 1
+    np.testing.assert_array_equal(
+        np.sort(snapshot.values),
+        np.arange(capacity, dtype=np.int32) * 5 + 2,
+    )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_worklist_graph_direct_transition_uses_one_helper():
+    capacity = 29
+    produced = 21
+    worklist = ti.algorithms.DeviceWorklist(
+        capacity,
+        ti.i32,
+        telemetry=False,
+        transition_mode="direct",
+    )
+    args = worklist.graph_args("direct_frontier")
+    count_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
+    reset = ti.algorithms.DeviceWorklistSequence(args).prepare_next()
+    with pytest.raises(
+        ti.TaichiRuntimeError, match="do not use finalize_next"
+    ):
+        ti.algorithms.DeviceWorklistSequence(args).finalize_next()
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(reset, admission="auto")
+    builder.dispatch(
+        _append_range_direct, *args.append_arguments(), count_arg
+    )
+    graph = builder.compile()
+    assert sum(node.source_native_count for node in graph._spec.nodes) == 1
+    physical = graph.physical_plan()
+    assert physical["backend_recording_complete"]
+    assert physical["loose_native_action_count"] == 0
+
+    runtime_args = worklist.runtime_arguments(
+        "direct_frontier", include_capacity=True
+    )
+    runtime_args["count"] = produced
+    graph.run(runtime_args)
+    assert worklist.next_extent.snapshot().count == produced
+    assert worklist.statistics().generation == 1
+    expected = np.arange(produced, dtype=np.int32) * 5 + 2
+    np.testing.assert_array_equal(
+        np.sort(worklist.next_values.to_numpy()[:produced]), expected
+    )
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
