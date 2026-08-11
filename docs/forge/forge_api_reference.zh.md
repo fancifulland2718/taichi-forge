@@ -438,22 +438,24 @@ primitive provider 与 workspace，并不宣称每个 provider 都只执行 acti
 dtype 与语义约束。workspace 可以复用但不可并发共享；`clear()` 释放它持有的 staging
 与 child workspace。
 
-`ti.algorithms.DevicePrefixSequence(capacity)` 可把同一组操作记录成一个 fixed-topology
+`ti.algorithms.DevicePrefixSequence(capacity)` 可把同一组操作记录成一个逻辑 fixed-topology
 native Graph node。先用 `sequence.input(values_arg, extent_arg)` 声明 symbolic input，继续
 调用返回 prefix 的方法，最后通过 `builder.append_native(sequence)` 追加。每个已记录操作之间
 count 都留在 device；runtime 参数仍使用普通 Graph ndarray 名称。sequence 一旦追加并编译就
 不可修改，其 workspace 也不能由多个并发 sequence 共享。native node materialization 时会
 固定 provider、workspace topology 与 operation routing，因此 steady-state replay 不再重复
 operation-kind/provider 判断。`memory_report()` 报告当前/峰值 workspace byte，并确认 replay
-allocation 为 0。未提供 symbolic backend command 的 native provider 仍通过已 materialize 的
-native node 执行；这一合同不表示跨 operation kernel fusion。
+allocation 为 0。当前核心 Prefix provider 尚未提供完整的外层 backend command recipe，
+因此 `append_native(..., admission="auto")` 会拒绝 fragmented plan；默认显式 admission 保留
+诊断用 segmented 路线，其 manifest 与 `physical_plan()` 如实报告 loose helper 和 queue
+topology。这一合同不表示 backend Graph recording 或跨 operation kernel fusion。
 
 ### Device worklist
 
-#### `ti.algorithms.DeviceWorklist(capacity, dtype=ti.i32, *, workspace=None)`
+#### `ti.algorithms.DeviceWorklist(capacity, dtype=ti.i32, *, workspace=None, telemetry=True, transition_mode="staged")`
 
-持有固定容量 front/back scalar storage、成对 `DeviceExtent`、六个 device counter 与可复用
-primitive workspace。value dtype 支持 `i32/u32/i64/u64/f32/f64`；capacity 必须是
+持有固定容量 front/back scalar storage、成对 `DeviceExtent`、mandatory publication state、
+可选 counter 与可复用 primitive workspace。value dtype 支持 `i32/u32/i64/u64/f32/f64`；capacity 必须是
 `[1, 2^31-1]` 内的 Python integer。对象绑定当前 runtime generation，`ti.reset()` 后使用会
 明确拒绝。
 
@@ -462,6 +464,12 @@ direct atomic producer 的生命周期为：
 1. `prepare_next()` 在 device 上重置 back extent 与 counter；
 2. kernel 使用 `*worklist.append_arguments()` 调用 `device_worklist_append()`；
 3. `commit_next(dispatch_state=None)` 不同步地完成 count/counter 发布并交换 front/back。
+
+`telemetry=False` 不分配、不绑定、也不写 accepted/rejected/conflict/winner counter。staged 模式
+保留 generated/overflow/generation，共 12 bytes。`transition_mode="direct"` 要求
+`telemetry=False`，只保留 overflow 与 generation（8 bytes），并使用
+`device_worklist_append_direct()` 让 producer 在 reservation 时发布 extent；它只支持 atomic
+append transition，且 `finalize_next()` 在该模式下无效。
 
 `device_worklist_append(values, extent_state, generated, overflow, capacity,
 value)` 是 `@ti.func`，返回已保留 slot；overflow 时返回 `-1`。无 overflow 路径每个 item
@@ -473,7 +481,8 @@ worklist 不会自动串行化写入它的独立 Graph submission。capacity sca
 `select(flags, *, method="auto", dispatch_state=None)` stable filter 当前 front 到 back 并
 commit。`resolve_conflicts(keys, *, priorities=None, ordinals=None, policy="first",
 method="auto", strategy="auto", sort_method=None, key_capacity=None,
-dispatch_state=None)` 接受 integer key，每个 key 选择一个 winner。policy 可为
+dispatch_state=None, output_shape="compact_winner_list")` 接受 integer key，每个 key 选择一个
+winner。policy 可为
 `first`、`claim`、`min_priority`、`max_priority`；priority policy 要求 i32 priority ndarray。
 tie 依次按 ordinal、source index 决定。返回的 `DeviceConflictResult` 暴露 device-owned keys、
 values、priorities、ordinals、extent、counter arrays，以及实际选择的 `strategy`、sort
@@ -489,6 +498,10 @@ CPU 保留保守 crossover，其余情况使用 radix。dense 路径目前自行
 sorted key run 分配一次 scan；少量特别长的 run 会降低并行度，应作为独立 workload shape
 测量。
 
+`output_shape="dense_winner_table"` 要求显式 `dense_atomic`、有界 `key_capacity` 与
+`telemetry=False`。它只返回 dense source-index table，空 key 为 `0x7fffffff`；不会替换
+worklist front，也不会生成 compact extent、scan、compact 或 winner-list materialization。
+
 `statistics()` 与 `snapshot()` 是显式同步 observation。`execution_report(dispatch=None,
 target="current")` 还会与 bounded-dispatch snapshot 合并，报告 useful、executed、skipped、
 encoded、overflow 与 exact-grid state。`memory_report()` 报告 front/back、extent、counter 和
@@ -497,16 +510,19 @@ encoded、overflow 与 exact-grid state。`memory_report()` 报告 front/back、
 #### `ti.algorithms.DeviceWorklistSequence(args, *, workspace=None)`
 
 在 `worklist.graph_args(name)` 返回的 symbolic bundle 上恰好记录一次 transition：
-`prepare_next()`、`finalize_next()`、`select()` 或 `resolve_conflicts()`，再通过
+`prepare_next()`、`finalize_next()`、`select()`、`resolve_conflicts()` 或
+`resolve_conflict_winner_table()`。direct 模式可记录 `prepare_next()`，但会明确拒绝
+`finalize_next()`。再通过
 `GraphBuilder.append_native()` 追加。staging 在 submission 前分配；编译后的 action replay
 steady-state 期间不分配，也不读取 host count；首次执行仍可能编译 kernel 并准备 native
 provider workspace。sequence 在 materialization 时固定 conflict strategy、sort provider 与
 workspace；编译后不可修改，workspace 可串行复用但不可并发共享。
 
 runtime binding 使用 `worklist.runtime_arguments(name)`。atomic producer Graph 还需传
-`include_capacity=True`，因为 `append_arguments()` 包含 scalar capacity argument。
-`DeviceWorklistGraphArgs.observe(builder, name=...)` 把所有 counter 附加到 Graph terminal
-observation；ticket completion 后可由 `decode_observation(mapping)` 返回
+`include_capacity=True`，因为 `append_arguments()` 包含 scalar capacity argument。完整 telemetry
+下，`DeviceWorklistGraphArgs.observe(builder, name=...)` 把 counter 附加到 Graph terminal
+observation；lean arguments 会拒绝 observation，而不物化隐藏状态。ticket completion 后可由
+`decode_observation(mapping)` 返回
 `DeviceWorklistStatistics`。Vulkan 上相邻的 recorded `finalize_next()` 与匹配 bounded
 consumer 会自动共享 Graph-owned packet，并删除 consumer preparation dispatch。把匹配的
 producer-owned `DeviceDispatchState` 同时交给两端，仍可用于显式 finalize/select/claim packet
@@ -1360,7 +1376,7 @@ GPU 详细 counter 为 opt-in：第一次调用只为之后的执行启用。若
 updater control 的 CUDA Graph：为了复制 driver 状态和 updater counter 并形成一致快照，该调用
 会先同步；普通 Graph replay 仍不会读取 telemetry。
 
-### `GraphBuilder.append_native(node, *, prewarm=False)`
+### `GraphBuilder.append_native(node, *, prewarm=False, admission="explicit")`
 
 位置：`taichi_forge.graph._graph`，在 Forge graph builder 上可用。
 
@@ -1371,7 +1387,7 @@ builder = ti.graph.GraphBuilder()
 
 seq = ti.algorithms.primitive_sequence()
 seq.max_abs_delta(values, reference)
-builder.append_native(seq, prewarm=True)
+builder.append_native(seq, prewarm=True, admission="auto")
 
 graph = builder.compile()
 graph.run({})
@@ -1383,6 +1399,7 @@ graph.run({})
 | --- | --- |
 | `node` | Forge-defined native node，例如 `PrimitiveSequence`、`DeviceCheckResult` 或 `DeviceMetricResult`。 |
 | `prewarm` | 在存入 graph 前编译 / 预热 native node。 |
+| `admission` | `"auto"` 只接受 backend-integrated action；`"explicit"` 还允许诊断用 segmented provider。 |
 
 recordable native node 可进入 mixed dispatch region 和结构化控制。provider 可声明私有
 workspace requirement；Graph 为每个 invocation 分配有界 arena storage，并且不把这些
@@ -1390,6 +1407,12 @@ workspace requirement；Graph 为每个 invocation 分配有界 arena storage，
 不能绑定当前 slot 或尚未资格化当前 backend 的 provider 会在提交前明确失败。
 连续的 ordinary CGraph 与兼容 recordable-provider segment 会编译为一个 backend region；
 fixed/private binding 冲突会在提交 backend work 前明确失败。
+
+默认 `admission="explicit"` 为 provider-local native node 保持向后兼容，但不会把 segmented
+provider 变成同一个 backend Graph 的一部分。生产自动选择应使用 `admission="auto"`；
+fragmented plan 会在 materialization 阶段以稳定 reason code 失败。immutable manifest 与
+`Graph.physical_plan()` 会区分 recordable action、backend Graph launch、physical queue
+submission 与 loose helper。
 
 请求 submission telemetry 时，每个已编译 native action 还会拥有 immutable
 `NativeActionManifest`。它包含符号化 public runtime binding、provider-derived private

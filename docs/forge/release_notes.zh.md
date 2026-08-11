@@ -14,7 +14,7 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
 
 | 版本 | 历史状态 | 源码边界 | 主要范围 |
 | --- | --- | --- | --- |
-| [待发布](#unreleased) | 0.6.2 开发版本 | 当前 `master` | Graph 生命周期/遥测修复、numeric generation rebind、recordable Graph PCG 与 device-convergent batched PCG |
+| [待发布](#unreleased) | 0.6.2 开发版本 | 当前 `master` | execution-plan 收口、dynamic-work/Worklist 合同、runtime export 控制、Graph 生命周期/遥测与 device-convergent 线性代数 |
 | [0.6.1](#061) | 已正式发布 | `b129ad94c` | task launch manifest/policy、动态 LLVM SNode directory、设备端 dynamic worklist、有界 Graph dispatch 与关联 pipeline telemetry |
 | [0.6.0](#060) | 已正式发布 | `106ad65d25` | 结构化 Graph 控制/遥测与 Vulkan indirect dispatch、稀疏 runtime/线性代数、driver-only CUDA primitive、受管互操作/显示与 runtime 生命周期有界化 |
 | [0.1.0](#010) | 历史源码版本；发行文件可能已移除 | `91ad177685` | scikit-build-core 迁移与 Forge 发行包重命名 |
@@ -43,17 +43,36 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
 ## 待发布 {#unreleased}
 
 - 普通 Forge-owned ndarray launch 现在通过稳定 generation slot 绑定；无 SNode dependency
-  的 compiled kernel 不再取得全局 SNode 生命周期读锁。external/mixed resource 保留完整
-  通用所有权路径，CUDA/Vulkan 异步 submission 继续持有 completion-scoped lease。fast path
-  不增加 host readback 或 replay allocation。
+  的 compiled kernel 还会复用 immutable registered execution plan，并不再取得全局 SNode
+  生命周期读锁。external/mixed resource 与 Field/SNode-dependent kernel 保留完整通用所有权
+  路径，CUDA/Vulkan 异步 submission 继续持有 completion-scoped lease。fast path 不增加 host
+  readback 或 replay allocation。在 Windows CPU 上交错执行的 10 对 fresh-process 资格中，
+  zero/one/two/four resource 与 65k range fill 的 Forge/vanilla median throughput ratio 分别为
+  1.024x/1.154x/1.104x/0.993x/0.988x，成对 CV 为 1.2%-2.5%。该数据只资格化这台机器上的
+  fixed launch overhead，不代表通用 kernel throughput。
 - dynamic-work capability report 升级为 schema v5，并分别报告 device-extent publication
-  合同、backend reuse、静态 route admission 与 opt-in physical blocks/threads 观测。
-  Prefix/worklist sequence 在 materialization 时固定 provider 与 workspace topology。
+  合同、backend reuse、静态 route admission 与 opt-in physical blocks/threads 观测。每次
+  publication 都携带 immutable generation，consumer 只会复用同一 generation；CUDA 无法消费
+  producer-owned launch packet 时会拒绝，而不是验证后丢弃。Graph physical plan 分别报告
+  logical native action、backend Graph launch、physical queue submission 与 loose helper。
+  `admission="auto"` 拒绝 fragmented native provider；显式 admission 保留诊断用 segmented
+  execution。Prefix/worklist sequence 在 materialization 时固定 provider 与 workspace topology。
   Worklist conflict resolve 现在把 `dense_atomic`/`radix_grouped` strategy 与 native sort
   provider 分开；有界 dense domain 按 priority、ordinal、source index 确定性处理 tie，越界
   key 记为 overflow；小规模 CPU worklist 默认保守保留 radix。配对的
   `benchmarks/device_worklist_conflict_bench.py` 使用完全相同的输入，校验输出一致性，并报告
   raw sample/CV 与 workspace byte，用于独立资格化 route。
+- `DeviceWorklist(telemetry=False)` 现在会省略 optional counter allocation、binding 与 device
+  write。atomic-append workload 还可选择 `transition_mode="direct"`，把 mandatory counter state
+  从 12 bytes 降到 8 bytes，并删除 finalize action。dense arbitration 可直接返回 source-index
+  winner table，不再生成 scan/compact/winner list。在 capacity=65,536、item=16,384 的配对
+  transition harness 中，direct 路线的 median latency 在 CPU/Vulkan 上分别降低 7.5%/13.1%；
+  CUDA 观测到的 4.8% 方向因 staged CV 超过 5% 而不作为合格结论。
+- Windows split-runtime 构建现在从 pybind object 与显式 runtime anchor 推导 export closure，
+  生成确定性的 ABI manifest，并在链接后审计最终 DLL。本地 MSVC split build 将 requested
+  export 从 114,235 个 raw definition 收窄到 1,367 个；最终 DLL 连同源码显式 export 共暴露
+  2,575 个符号，显著低于 32,768 safety cap。该方案通过控制 ABI surface 修复 LNK1189，
+  无需删除 compiler/backend module。本版本仍保持一个 runtime 包与一个 DLL。
 - CUDA-enabled runtime 只使用过 CPU 或 Vulkan Graph state 时，Graph cache reset/析构不再
   构造 CUDA context；真正的 CUDA cache 继续保持 submission lock 顺序。0.6.1 split shim
   中的兼容 override 已迁移到最终的 native runtime 所有权位置。

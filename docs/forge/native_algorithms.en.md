@@ -24,10 +24,11 @@ capability.
 | `ti.algorithms.parallel_sort(keys, values=None)` | Vanilla-compatible legacy sorter. |
 | `ti.algorithms.PrefixSumExecutor(n).run(values)` | Prefix sum / scan. |
 | `ti.algorithms.device_prefix(values, extent, ...)` | Compose fixed-capacity primitive inputs through a device-resident valid count. |
-| `ti.algorithms.DevicePrefixSequence(capacity)` | Record a fixed-topology valid-prefix pipeline as one Graph native node. |
+| `ti.algorithms.DevicePrefixSequence(capacity)` | Record a fixed-topology valid-prefix pipeline as one logical Graph native node. |
 | `ti.algorithms.DevicePrefixWorkspace(max_items)` | Reuse staging and child primitive workspaces across a valid-prefix pipeline. |
-| `ti.algorithms.DeviceWorklist(capacity, dtype)` | Own reusable front/back storage, device extent, and transition counters for dynamic work. |
+| `ti.algorithms.DeviceWorklist(capacity, dtype, telemetry=..., transition_mode=...)` | Own reusable front/back storage and a staged or direct dynamic-work transition. |
 | `ti.algorithms.device_worklist_append(...)` | Atomically append from Taichi scope without a host count readback. |
+| `ti.algorithms.device_worklist_append_direct(...)` | Atomically append while publishing the bounded extent directly. |
 | `ti.algorithms.DeviceWorklistSequence(args)` | Record one worklist transition as a Graph native action. |
 | `ti.algorithms.experimental_compact(values, flags, output, count, ...)` | Filter values by flags and write compacted output. |
 | `ti.algorithms.experimental_run_length_encode(keys, unique_keys, run_lengths, run_count, ...)` | Encode consecutive integer-key runs entirely on device. |
@@ -230,12 +231,14 @@ scratch. A workspace may be reused serially but not by concurrent submissions.
 
 For Graph execution, `DevicePrefixSequence` records the same prefix operations
 over symbolic ndarray arguments and is appended through
-`GraphBuilder.append_native()`. This keeps the full fixed-topology chain under
-one Graph submission without host count observation. Provider selection,
-workspace topology, and operation routing are fixed at materialization; replay
-does not repeat the operation-kind branch. This does not fuse provider kernels,
-and a provider without a symbolic backend command remains a materialized native
-call within the Graph node. When a compact result
+`GraphBuilder.append_native()`. This gives one user ticket without host count
+observation. Provider selection, workspace topology, and operation routing are
+fixed at materialization; replay does not repeat the operation-kind branch.
+The current core Prefix providers do not yet expose an enclosing-backend Graph
+command recipe. They are therefore a segmented native diagnostic route:
+`admission="auto"` rejects them, while explicit admission reports their loose
+helper and queue topology instead of presenting the node as backend-recorded.
+This does not fuse provider kernels. When a compact result
 feeds Vulkan bounded dispatch, create `output_extent.dispatch_state(block_dim)`
 and pass it to both compact and `dispatch_bounded()`: the compact scatter then
 publishes the indirect packet with its count, removing one preparation
@@ -251,10 +254,11 @@ throughput guarantees. The paired, end-synchronized harness is
 
 ## Device-resident worklists
 
-`DeviceWorklist` adds lifecycle and accounting to the valid-prefix primitives.
-It owns two fixed-capacity scalar ndarrays, two `DeviceExtent` objects, reusable
-primitive workspace, and six device counters. A custom producer appends into
-the back storage and publishes it without observing the count on the host:
+`DeviceWorklist` adds lifecycle and optional accounting to the valid-prefix
+primitives. It owns two fixed-capacity scalar ndarrays, two `DeviceExtent`
+objects, reusable primitive workspace, and either the full counter set or a
+lean mandatory state. A custom producer appends into the back storage and
+publishes it without observing the count on the host:
 
 ```python
 worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)
@@ -275,6 +279,13 @@ produce(*worklist.append_arguments(), requested)
 worklist.commit_next()
 ```
 
+`telemetry=False` omits accepted/rejected/conflict/winner arrays, bindings, and
+device writes. Staged transitions retain generated/overflow/generation in 12
+bytes. `transition_mode="direct"` further reduces mandatory state to
+overflow/generation (8 bytes) and uses `device_worklist_append_direct()` to
+publish extent during slot reservation; it is restricted to atomic append,
+requires `telemetry=False`, and must not be followed by `finalize_next()`.
+
 The overflow-free path performs one atomic slot reservation per item. Atomic
 append order is unspecified. One producer owns a transition; independent
 Graph submissions must be ordered before they write the same worklist. An
@@ -282,7 +293,8 @@ overflow clamps the published count to capacity and remains visible in both
 the `DeviceExtent` and worklist counters. A forged or mismatched Graph capacity
 binding fails closed before writing values. `select(flags)` preserves source
 order. `resolve_conflicts(keys, priorities=...,
-policy="min_priority", strategy="auto", key_capacity=...)` separates the
+policy="min_priority", strategy="auto", key_capacity=...,
+output_shape="compact_winner_list")` separates the
 conflict algorithm from the sort provider. A compact bounded integer domain can
 use deterministic `dense_atomic` arbitration; otherwise `radix_grouped` uses
 the backend native stable-sort provider. Equal priority is resolved by ordinal
@@ -292,18 +304,29 @@ sorted key run. A distribution dominated by one or a few very long radix runs
 has lower parallelism and should be benchmarked separately. Use
 `benchmarks/device_worklist_conflict_bench.py` for paired, identical-input
 strategy qualification with parity, raw samples/CV, and workspace accounting.
+When only per-key ownership is consumed, request
+`output_shape="dense_winner_table"` with `dense_atomic` and
+`telemetry=False`. The result is a `key_capacity`-sized source-index table with
+`0x7fffffff` for empty keys; no compact extent, winner list, scan, or compact
+materialization is produced.
 
 For Graph replay, create symbolic arguments with `worklist.graph_args(name)`.
 Append separate `DeviceWorklistSequence(args).prepare_next()` and
-`.finalize_next()` nodes around a user producer, or record one `select()` or
-`resolve_conflicts()` node. Graph-owned staging is allocated before submission;
+`.finalize_next()` nodes around a staged user producer. A direct transition
+records only `prepare_next()` plus the direct producer. A sequence can also
+record `select()`, compact-list conflict resolution, or
+`resolve_conflict_winner_table()`. Transition helpers are backend-recordable;
+provider pipelines without an integrated action remain explicit segmented
+routes. Graph-owned staging is allocated before submission;
 steady-state replay neither allocates nor reads the count on the host. First
 execution may still compile kernels and prepare native provider workspace.
 The strategy, provider, and workspace topology are fixed at materialization.
-`args.observe()` adds all six counters to completion-attached ticket
-observation, while
+With full telemetry, `args.observe()` adds all counters to completion-attached
+ticket observation, while
 `args.decode_observation()` materializes `DeviceWorklistStatistics` after
-completion. `execution_report()` is an explicit synchronized boundary that can
+completion. Lean arguments reject this observation request instead of
+materializing hidden telemetry. `execution_report()` is an explicit
+synchronized boundary that can
 join these counters with a `dispatch_bounded()` snapshot.
 
 On Vulkan, an adjacent recorded `finalize_next()` and

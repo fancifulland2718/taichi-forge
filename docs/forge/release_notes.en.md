@@ -18,7 +18,7 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
-| [Unreleased](#unreleased) | 0.6.2 development | current `master` | Graph lifecycle/telemetry fixes, numeric-generation rebinding, recordable Graph PCG, and device-convergent batched PCG |
+| [Unreleased](#unreleased) | 0.6.2 development | current `master` | execution-plan closeout, dynamic-work/Worklist contracts, runtime export control, Graph lifecycle/telemetry, and device-convergent linear algebra |
 | [0.6.1](#061) | published release | `b129ad94c` | task launch manifests/policies, dynamic LLVM SNode directories, device-resident dynamic worklists, bounded Graph dispatch, and correlated pipeline telemetry |
 | [0.6.0](#060) | published release | `106ad65d25` | structured Graph control/telemetry and Vulkan indirect dispatch, sparse runtime/linear algebra, driver-only CUDA primitives, managed interoperability/display, and bounded runtime lifetimes |
 | [0.1.0](#010) | historical source release; artifact may be removed | `91ad177685` | scikit-build-core migration and Forge distribution rebrand |
@@ -47,15 +47,27 @@ grouped under the behavior they shipped.
 ## Unreleased
 
 - Ordinary Forge-owned ndarray launches now bind through stable generation
-  slots, while compiled kernels with no SNode dependency avoid the global
-  SNode lifecycle read guard. External/mixed resources keep the full general
-  ownership path, and asynchronous CUDA/Vulkan submissions retain their
-  completion-scoped leases. The fast path adds no host readback or replay
-  allocation.
+  slots and reuse an immutable registered execution plan, while compiled
+  kernels with no SNode dependency avoid the global SNode lifecycle read
+  guard. External/mixed resources and Field/SNode-dependent kernels keep the
+  full general ownership path, and asynchronous CUDA/Vulkan submissions retain
+  their completion-scoped leases. The fast path adds no host readback or
+  replay allocation. In a 10-pair alternating fresh-process Windows CPU
+  qualification, Forge/vanilla median throughput ratios for zero/one/two/four
+  resources and a 65k range fill were 1.024x/1.154x/1.104x/0.993x/0.988x;
+  paired CV was 1.2%-2.5%. These data qualify fixed launch overhead on that
+  machine, not general kernel throughput.
 - Dynamic-work capability reports use schema v5 and separate the device-extent
   publication contract, backend reuse, static route admission, and opt-in
-  physical blocks/threads observation. Prefix/worklist sequences fix provider
-  selection and workspace topology at materialization. Worklist conflict
+  physical blocks/threads observation. Every publication carries an immutable
+  generation; consumers group only by the same published generation, and CUDA
+  rejects rather than discarding a producer-owned launch packet it cannot
+  consume. Graph physical plans separately report logical native actions,
+  backend Graph launches, physical queue submissions, and loose helpers.
+  `admission="auto"` rejects fragmented native providers; explicit admission
+  remains available for diagnostic segmented execution. Prefix/worklist
+  sequences fix provider selection and workspace topology at materialization.
+  Worklist conflict
   resolution now separates `dense_atomic`/`radix_grouped` strategy from the
   native sort provider; bounded dense domains use deterministic priority,
   ordinal, and source-index tie breaking, with out-of-domain keys reported as
@@ -63,6 +75,23 @@ grouped under the behavior they shipped.
   paired `benchmarks/device_worklist_conflict_bench.py` harness uses identical
   inputs, verifies output parity, reports raw samples/CV, and accounts
   workspace bytes for route qualification.
+- `DeviceWorklist(telemetry=False)` now omits optional counter allocation,
+  binding, and device writes. Atomic-append workloads can additionally select
+  `transition_mode="direct"`, reducing mandatory counter state from 12 to 8
+  bytes and removing the finalize action. Dense arbitration can return a
+  source-index winner table directly, without scan/compact/winner-list
+  materialization. In the paired 65,536-capacity/16,384-item transition harness,
+  the direct path reduced median latency by 7.5% on CPU and 13.1% on Vulkan;
+  the observed 4.8% CUDA direction remains unqualified because its staged CV
+  exceeded 5%.
+- Windows split-runtime builds now derive the runtime export closure from the
+  pybind object files plus the explicit runtime anchor, generate a deterministic
+  ABI manifest, and audit the final DLL after linking. The local MSVC split
+  build reduced the requested export set from 114,235 raw definitions to 1,367;
+  the final DLL exposed 2,575 symbols including explicit source exports, well
+  below the 32,768 safety cap. This fixes the LNK1189 import-library failure by
+  controlling the ABI surface rather than deleting compiler or backend
+  modules. The runtime remains one package and one DLL in this release.
 - Graph cache reset and destruction now avoid constructing the CUDA context
   when a CUDA-enabled runtime has only used CPU or Vulkan Graph state. CUDA
   caches retain submission-lock ordering; the 0.6.1 split-shim compatibility

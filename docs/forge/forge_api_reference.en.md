@@ -506,7 +506,7 @@ but must not be used concurrently. `clear()` releases its Python-owned staging
 and child workspaces.
 
 `ti.algorithms.DevicePrefixSequence(capacity)` records the same operations as
-one fixed-topology native Graph node. Declare symbolic inputs with
+one logical fixed-topology native Graph node. Declare symbolic inputs with
 `sequence.input(values_arg, extent_arg)`, chain the returned prefix methods,
 then append the sequence with `builder.append_native(sequence)`. Counts remain
 on device across every recorded operation; runtime arguments still use the
@@ -515,16 +515,21 @@ and compiled, and its workspace must not be shared by concurrent sequences.
 Provider selection, workspace topology, and operation routing are fixed when
 the native node is materialized, so steady-state replay does not repeat the
 operation-kind/provider decision. `memory_report()` exposes current/peak
-workspace bytes and confirms zero replay allocations. Native providers that do
-not expose symbolic backend commands still execute through the materialized
-native node; this contract does not imply cross-operation kernel fusion.
+workspace bytes and confirms zero replay allocations. The current core Prefix
+providers do not expose a complete enclosing-backend command recipe.
+`append_native(..., admission="auto")` therefore rejects the fragmented plan;
+the default explicit admission keeps a diagnostic segmented route whose
+manifest and `physical_plan()` report loose helpers and queue topology. This
+contract does not imply backend Graph recording or cross-operation kernel
+fusion.
 
 ### Device worklists
 
-#### `ti.algorithms.DeviceWorklist(capacity, dtype=ti.i32, *, workspace=None)`
+#### `ti.algorithms.DeviceWorklist(capacity, dtype=ti.i32, *, workspace=None, telemetry=True, transition_mode="staged")`
 
-Owns fixed-capacity front/back scalar storage, paired `DeviceExtent` state, six
-device counters, and reusable primitive workspace. Supported value dtypes are
+Owns fixed-capacity front/back scalar storage, paired `DeviceExtent` state,
+mandatory publication state, optional counters, and reusable primitive
+workspace. Supported value dtypes are
 `i32/u32/i64/u64/f32/f64`; capacity is a positive Python integer no greater
 than `2^31-1`. The object is tied to the active runtime generation and rejects
 use after `ti.reset()`.
@@ -536,6 +541,13 @@ The direct atomic-producer lifecycle is:
    `*worklist.append_arguments()`.
 3. `commit_next(dispatch_state=None)` finalizes count/counters and swaps front
    and back without synchronizing.
+
+`telemetry=False` does not allocate, bind, or write accepted/rejected/conflict/
+winner counters. Staged mode retains generated/overflow/generation in 12 bytes.
+`transition_mode="direct"` requires `telemetry=False`, retains only overflow
+and generation (8 bytes), and uses `device_worklist_append_direct()` so the
+producer publishes its extent during reservation. It supports only atomic
+append transitions; `finalize_next()` is invalid in this mode.
 
 `device_worklist_append(values, extent_state, generated, overflow, capacity,
 value)` is a `@ti.func` and returns the reserved slot or `-1` on overflow. The
@@ -550,7 +562,8 @@ binding fails closed with sticky overflow before any value write.
 current front into the back and commits it. `resolve_conflicts(keys, *,
 priorities=None, ordinals=None, policy="first", method="auto",
 strategy="auto", sort_method=None, key_capacity=None,
-dispatch_state=None)` accepts integer keys and chooses one winner per key.
+dispatch_state=None, output_shape="compact_winner_list")` accepts integer keys
+and chooses one winner per key.
 Policies are `first`, `claim`, `min_priority`, and `max_priority`; priority
 policies require an i32 priority ndarray. Ties are resolved by ordinal, then
 source index. The returned `DeviceConflictResult` exposes device-owned keys,
@@ -571,6 +584,12 @@ silently falls back to a host round trip. Radix winner reduction assigns one
 scan to each sorted key run; a few exceptionally long runs reduce parallelism
 and should be treated as a separate workload shape when benchmarking.
 
+`output_shape="dense_winner_table"` requires explicit `dense_atomic`, a
+bounded `key_capacity`, and `telemetry=False`. It returns only a dense
+source-index table with `0x7fffffff` for empty keys. The worklist front is not
+replaced, and no compact extent, scan, compact, or winner-list materialization
+is created.
+
 `statistics()` and `snapshot()` are explicit synchronized observations.
 `execution_report(dispatch=None, target="current")` additionally joins the
 latest counters with a bounded-dispatch snapshot and reports useful, executed,
@@ -581,7 +600,8 @@ owned front/back, extent, counter, and reusable workspace bytes.
 
 Records exactly one transition over the symbolic bundle returned by
 `worklist.graph_args(name)`: `prepare_next()`, `finalize_next()`, `select()`,
-or `resolve_conflicts()`. Append the result with
+`resolve_conflicts()`, or `resolve_conflict_winner_table()`. Direct mode records
+`prepare_next()` but intentionally rejects `finalize_next()`. Append the result with
 `GraphBuilder.append_native()`. Staging is allocated before submission and the
 compiled action neither allocates nor reads the count on host during
 steady-state replay. The first execution may still compile kernels and prepare
@@ -592,8 +612,10 @@ serially reusable, not concurrently shareable.
 
 Bind runtime values with `worklist.runtime_arguments(name)`. Atomic-producer
 graphs also pass `include_capacity=True` because `append_arguments()` includes
-a scalar capacity argument. `DeviceWorklistGraphArgs.observe(builder,
-name=...)` attaches all counters to terminal Graph observation;
+a scalar capacity argument. With full telemetry,
+`DeviceWorklistGraphArgs.observe(builder, name=...)` attaches counters to
+terminal Graph observation; lean arguments reject observation rather than
+materializing hidden state.
 `decode_observation(mapping)` returns `DeviceWorklistStatistics` after ticket
 completion. On Vulkan, an adjacent recorded `finalize_next()` and matching
 bounded consumer automatically share a Graph-owned packet and remove the
@@ -1617,7 +1639,7 @@ call synchronizes before copying driver status and updater counters to produce
 a consistent snapshot. Ordinary Graph replay still performs no telemetry
 readback.
 
-### `GraphBuilder.append_native(node, *, prewarm=False)`
+### `GraphBuilder.append_native(node, *, prewarm=False, admission="explicit")`
 
 Location: `taichi_forge.graph._graph`; available on the Forge graph builder.
 
@@ -1628,7 +1650,7 @@ builder = ti.graph.GraphBuilder()
 
 seq = ti.algorithms.primitive_sequence()
 seq.max_abs_delta(values, reference)
-builder.append_native(seq, prewarm=True)
+builder.append_native(seq, prewarm=True, admission="auto")
 
 graph = builder.compile()
 graph.run({})
@@ -1640,6 +1662,7 @@ Parameters:
 | --- | --- |
 | `node` | A Forge-defined native node, such as a `PrimitiveSequence`, `DeviceCheckResult`, or `DeviceMetricResult`. |
 | `prewarm` | Compile/warm the native node before storing it in the graph. |
+| `admission` | `"auto"` accepts only a backend-integrated action; `"explicit"` also permits a diagnostic segmented provider. |
 
 Recordable native nodes can participate in mixed dispatch regions and
 structured control. A provider can declare private workspace requirements;
@@ -1650,6 +1673,13 @@ slot, or do not qualify the current backend fail before submission.
 Consecutive ordinary CGraph and compatible recordable-provider segments are
 compiled as one backend region; conflicting fixed or private bindings fail
 before backend work is submitted.
+
+The default `admission="explicit"` preserves backward compatibility for
+provider-local native nodes. It does not make a segmented provider part of one
+backend Graph. Use `admission="auto"` for production selection: a fragmented
+plan fails at materialization with its stable reason code. The immutable
+manifest and `Graph.physical_plan()` distinguish recordable actions, backend
+Graph launches, physical queue submissions, and loose helpers.
 
 When submission telemetry is requested, every compiled native action also has
 an immutable `NativeActionManifest`. It contains symbolic public runtime

@@ -20,10 +20,11 @@
 | `ti.algorithms.parallel_sort(keys, values=None)` | vanilla 兼容的 legacy sorter。 |
 | `ti.algorithms.PrefixSumExecutor(n).run(values)` | Prefix sum / scan。 |
 | `ti.algorithms.device_prefix(values, extent, ...)` | 通过 device-resident 有效数量组合固定容量 primitive 输入。 |
-| `ti.algorithms.DevicePrefixSequence(capacity)` | 把 fixed-topology 有效前缀 pipeline 记录成一个 Graph native node。 |
+| `ti.algorithms.DevicePrefixSequence(capacity)` | 把 fixed-topology 有效前缀 pipeline 记录成一个逻辑 Graph native node。 |
 | `ti.algorithms.DevicePrefixWorkspace(max_items)` | 在有效前缀 pipeline 间复用 staging 与 child primitive workspace。 |
-| `ti.algorithms.DeviceWorklist(capacity, dtype)` | 为动态工作持有可复用 front/back storage、device extent 与 transition counters。 |
+| `ti.algorithms.DeviceWorklist(capacity, dtype, telemetry=..., transition_mode=...)` | 持有可复用 front/back storage，并选择 staged 或 direct 动态 transition。 |
 | `ti.algorithms.device_worklist_append(...)` | 从 Taichi scope atomic append，不读取 host count。 |
+| `ti.algorithms.device_worklist_append_direct(...)` | atomic append 并直接发布 bounded extent。 |
 | `ti.algorithms.DeviceWorklistSequence(args)` | 把一次 worklist transition 记录为 Graph native action。 |
 | `ti.algorithms.experimental_compact(values, flags, output, count, ...)` | 按 flags 过滤并写入紧凑输出。 |
 | `ti.algorithms.experimental_run_length_encode(keys, unique_keys, run_lengths, run_count, ...)` | 完全在 device 上编码连续整数 key run。 |
@@ -194,11 +195,12 @@ prefix 有定义；准备 provider 时可以用 neutral value 或 sentinel 覆�
 并发 submission。
 
 Graph 执行可用 `DevicePrefixSequence` 在 symbolic ndarray 参数上记录同一组 prefix 操作，
-再通过 `GraphBuilder.append_native()` 追加，使整个 fixed-topology chain 位于同一次 Graph
-submission 中且不观察 host count。provider、workspace topology 与 operation routing 在
-materialization 时固定，replay 不再重复 operation-kind 分支；这不会融合 provider kernel，
-没有 symbolic backend command 的 provider 仍作为已 materialize 的 native call 在 Graph node
-中执行。compact 结果若接入 Vulkan bounded dispatch，可创建
+再通过 `GraphBuilder.append_native()` 追加，从而获得一个用户 ticket 且不观察 host count。
+provider、workspace topology 与 operation routing 在 materialization 时固定，replay 不再重复
+operation-kind 分支。当前核心 Prefix provider 尚未提供可并入外层 backend Graph 的 command
+recipe，因此它仍是 segmented native 诊断路线：`admission="auto"` 会拒绝，显式 admission
+则如实报告 loose helper 与 queue topology，而不会把逻辑 node 伪装成 backend-recorded。
+这一合同不表示 provider kernel fusion。compact 结果若接入 Vulkan bounded dispatch，可创建
 `output_extent.dispatch_state(block_dim)` 并同时传给 compact 与 `dispatch_bounded()`；compact
 scatter 会把 indirect packet 与 count 一起发布，删除一次 preparation dispatch。CPU/CUDA
 不消费该 packet；CUDA 独立使用 exact logical range，并可选择 12.4+ adaptive physical
@@ -211,9 +213,9 @@ control。
 
 ## Device-resident worklist
 
-`DeviceWorklist` 在有效前缀 primitive 之上增加生命周期和计数合同。它持有两份固定容量
-scalar ndarray、两个 `DeviceExtent`、可复用 primitive workspace 与六个 device counter。
-自定义 producer 可向 back storage append，并且不在 host 观察 count：
+`DeviceWorklist` 在有效前缀 primitive 之上增加生命周期和可选计数合同。它持有两份固定容量
+scalar ndarray、两个 `DeviceExtent`、可复用 primitive workspace，以及完整 counter 或精简的
+mandatory state。自定义 producer 可向 back storage append，并且不在 host 观察 count：
 
 ```python
 worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)
@@ -234,26 +236,39 @@ produce(*worklist.append_arguments(), requested)
 worklist.commit_next()
 ```
 
+`telemetry=False` 会完全省略 accepted/rejected/conflict/winner 数组、绑定与 device write。
+staged transition 保留 generated/overflow/generation，共 12 bytes；
+`transition_mode="direct"` 进一步只保留 overflow/generation（8 bytes），并用
+`device_worklist_append_direct()` 在 slot reservation 时直接发布 extent。direct 模式仅适用于
+atomic append，要求 `telemetry=False`，之后不得再调用 `finalize_next()`。
+
 无 overflow 时，每个 item 只执行一次 atomic slot reservation。atomic append 顺序不保证；
 一次 transition 只有一个 producer owner，多个独立 Graph submission 写同一 worklist 前必须
 显式排序。overflow 会把发布 count 钳制到 capacity，并同时保留在 `DeviceExtent` 与 worklist
 counter 中；伪造或误绑的 Graph capacity 会在写 value 前 fail closed。`select(flags)` 保持
 source order。`resolve_conflicts(keys, priorities=..., policy="min_priority",
-strategy="auto", key_capacity=...)` 将 conflict algorithm 与 sort provider 分开。有界紧凑
+strategy="auto", key_capacity=..., output_shape="compact_winner_list")` 将 conflict algorithm
+与 sort provider 分开。有界紧凑
 integer domain 可使用确定性的 `dense_atomic` arbitration；其他情况由 `radix_grouped` 使用
 backend native stable-sort provider。两条路线都按 priority、ordinal、source index 处理 tie。
 dense 路线把越界 key 记为 rejected + overflow；radix winner reduction 扫描每个 sorted key
 run，由一个或少数超长 run 主导的分布并行度更低，应单独做性能资格。可用
 `benchmarks/device_worklist_conflict_bench.py` 做同输入配对资格；脚本会验证 parity，并报告
 raw sample/CV 与 workspace accounting。
+若 consumer 只需要逐 key ownership，可在 `dense_atomic`、`telemetry=False` 下请求
+`output_shape="dense_winner_table"`。结果是长度为 `key_capacity` 的 source-index table，空 key
+为 `0x7fffffff`；不会生成 compact extent、winner list、scan 或 compact materialization。
 
-Graph replay 使用 `worklist.graph_args(name)` 创建 symbolic 参数。可在 user producer 两侧追加
-独立的 `DeviceWorklistSequence(args).prepare_next()` / `.finalize_next()` node，也可记录一个
-`select()` 或 `resolve_conflicts()` node。Graph staging 在 submission 前分配，steady-state
+Graph replay 使用 `worklist.graph_args(name)` 创建 symbolic 参数。staged producer 两侧可追加
+独立的 `DeviceWorklistSequence(args).prepare_next()` / `.finalize_next()` node；direct transition
+只记录 `prepare_next()` 与 direct producer。sequence 还可记录 `select()`、compact-list conflict
+resolve 或 `resolve_conflict_winner_table()`。transition helper 可被 backend record；没有 integrated
+action 的 provider pipeline 仍是显式 segmented 路线。Graph staging 在 submission 前分配，steady-state
 replay 不分配、也不读取 host count；首次执行仍可能编译 kernel 并准备 native provider
 workspace。strategy、provider 与 workspace topology 在 materialization 时固定。
-`args.observe()` 把六个 counter 加到 completion-attached ticket observation；
-completion 后由 `args.decode_observation()` 生成 `DeviceWorklistStatistics`。
+完整 telemetry 下，`args.observe()` 把 counter 加到 completion-attached ticket observation；
+completion 后由 `args.decode_observation()` 生成 `DeviceWorklistStatistics`。lean arguments 会拒绝
+observation，而不会偷偷物化 telemetry。
 `execution_report()` 是显式同步边界，可把这些 counter 与 `dispatch_bounded()` snapshot 合并。
 
 Vulkan 上相邻的 recorded `finalize_next()` 与 `dispatch_bounded()` 现在会自动共享
