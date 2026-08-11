@@ -280,6 +280,11 @@ class DevicePrefix:
                     "DeviceDispatchState"
                 )
             dispatch_state.validate_extent(output_extent, require_identity=True)
+            if impl.current_cfg().arch == _ti_core.Arch.cuda:
+                raise TaichiRuntimeError(
+                    "CUDA compact does not publish a consumer-owned dispatch "
+                    "packet; pass the DeviceExtent directly to bounded consumers"
+                )
         staged = self.workspace._buffer("compact_flags", i32, self.capacity)
         device_prefix_stage_flags_ndarray(
             flags, staged, self.extent.state, output_extent.state
@@ -325,8 +330,6 @@ class DevicePrefix:
                 method=method,
                 workspace=self.workspace._compact,
             )
-            if dispatch_state is not None and arch == _ti_core.Arch.cuda:
-                dispatch_state.refresh()
         self.workspace._refresh_usage()
         return DevicePrefix(output, output_extent, workspace=self.workspace)
 
@@ -773,9 +776,14 @@ class DevicePrefixSequence:
                 raise ValueError(
                     "DevicePrefixSequence dispatch_state capacity mismatch"
                 )
+            if impl.current_cfg().arch == _ti_core.Arch.cuda:
+                raise TaichiRuntimeError(
+                    "CUDA DevicePrefixSequence does not publish a consumer-owned "
+                    "dispatch packet; record the DeviceExtent consumer directly"
+                )
         effective_dispatch_state = (
             dispatch_state
-            if impl.current_cfg().arch in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan)
+            if impl.current_cfg().arch == _ti_core.Arch.vulkan
             else None
         )
         if effective_dispatch_state is not None:

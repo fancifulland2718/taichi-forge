@@ -403,9 +403,14 @@ def test_device_worklist_atomic_finalize_feeds_bounded_dispatch_and_report():
     count_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
     output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1)
     launch_state = worklist.next_extent.dispatch_state(block_dim)
+    publication_state = (
+        launch_state
+        if impl.current_cfg().arch == ti_core.Arch.vulkan
+        else None
+    )
     reset = ti.algorithms.DeviceWorklistSequence(args).prepare_next()
     finalize = ti.algorithms.DeviceWorklistSequence(args).finalize_next(
-        dispatch_state=launch_state
+        dispatch_state=publication_state
     )
     builder = ti.graph.GraphBuilder()
     builder.append_native(reset)
@@ -419,7 +424,7 @@ def test_device_worklist_atomic_finalize_feeds_bounded_dispatch_and_report():
         extent=args.next_extent,
         capacity=capacity,
         block_dim=block_dim,
-        launch_state=launch_state,
+        launch_state=publication_state,
     )
     graph = builder.compile()
     assert all(
@@ -595,7 +600,7 @@ def test_vulkan_bounded_publication_falls_back_across_intervening_dispatch():
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_cuda_worklist_finalize_keeps_bounded_state_graph_owned(monkeypatch):
+def test_cuda_worklist_publication_packet_fails_closed(monkeypatch):
     probe = dict(ti_core.cuda_bounded_dispatch_probe())
     if not probe["exact_device_grid_available"]:
         pytest.skip(probe["unavailable_reason"])
@@ -621,17 +626,24 @@ def test_cuda_worklist_finalize_keeps_bounded_state_graph_owned(monkeypatch):
     first_visited_arg = ti.graph.Arg(
         ti.graph.ArgKind.NDARRAY, "first_visited", ti.i32, ndim=1
     )
-    second_visited_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "second_visited", ti.i32, ndim=1
-    )
     launch_state = worklist.next_extent.dispatch_state(block_dim)
+    with pytest.raises(
+        ti.TaichiRuntimeError,
+        match="does not produce a consumer-owned dispatch packet",
+    ):
+        ti.algorithms.DeviceWorklistSequence(args).finalize_next(
+            dispatch_state=launch_state
+        )
     reset = ti.algorithms.DeviceWorklistSequence(args).prepare_next()
     finalize = ti.algorithms.DeviceWorklistSequence(args).finalize_next()
     builder = ti.graph.GraphBuilder()
     builder.append_native(reset)
     builder.dispatch(_append_range, *args.append_arguments(), count_arg)
     builder.append_native(finalize)
-    handles = (
+    with pytest.raises(
+        ti.TaichiRuntimeError,
+        match="does not consume producer-owned DeviceDispatchState",
+    ):
         builder.dispatch_bounded(
             consume,
             args.next_extent,
@@ -640,71 +652,7 @@ def test_cuda_worklist_finalize_keeps_bounded_state_graph_owned(monkeypatch):
             capacity=capacity,
             block_dim=block_dim,
             launch_state=launch_state,
-        ),
-        builder.dispatch_bounded(
-            consume,
-            args.next_extent,
-            second_visited_arg,
-            extent=args.next_extent,
-            capacity=capacity,
-            block_dim=block_dim,
-            launch_state=launch_state,
-        ),
-    )
-    graph = builder.compile()
-    first_visited = ti.ndarray(ti.i32, shape=2)
-    second_visited = ti.ndarray(ti.i32, shape=2)
-    runtime_args = worklist.runtime_arguments(
-        "owned_frontier", include_capacity=True
-    )
-    runtime_args.update(
-        count=0,
-        first_visited=first_visited,
-        second_visited=second_visited,
-    )
-    graph.execution_stats()
-
-    for requested in (1, 0, capacity, 19, capacity + 7, capacity):
-        runtime_args["count"] = requested
-        first_visited.fill(0)
-        second_visited.fill(0)
-        graph.run(runtime_args)
-        useful = min(requested, capacity)
-        # CUDA's bounded grid-stride range exposes logical iterations, not
-        # Vulkan's block-rounded encoded lane count.
-        expected_lanes = useful
-        for visited in (first_visited, second_visited):
-            observed = visited.to_numpy()
-            segment = next(
-                item
-                for item in graph.execution_stats().segments
-                if item.kind == "cgraph"
-            )
-            assert int(observed[0]) == expected_lanes, (
-                segment.last_path,
-                segment.fallback_reason,
-                segment.last_driver_error,
-                segment.bounded_update_groups,
-                segment.bounded_updater_dispatches,
-                segment.bounded_grouped_payloads,
-                segment.bounded_producer_fused_groups,
-            )
-            assert int(observed[1]) == useful
-        snapshot = worklist.next_extent.snapshot()
-        assert snapshot.count == useful
-        assert snapshot.overflow is (requested > capacity)
-    assert all(
-        not handle.capabilities.producer_owned_launch_state for handle in handles
-    )
-    assert all(handle.capabilities.preparation_dispatches == 1 for handle in handles)
-    report = graph.execution_stats()
-    segment = next(item for item in report.segments if item.kind == "cgraph")
-    assert segment.last_driver_error == 0
-    assert segment.bounded_update_groups == 2
-    assert segment.bounded_updater_dispatches == 2
-    assert segment.bounded_grouped_payloads == 0
-    assert segment.bounded_producer_fused_groups == 0
-    assert segment.persistent_bounded_control_bytes == 64
+        )
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

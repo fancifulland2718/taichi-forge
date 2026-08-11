@@ -924,7 +924,7 @@ def test_cuda_grouped_updater_telemetry_is_lazily_enabled(monkeypatch):
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_cuda_launch_state_compatibility_keeps_per_node_ownership(monkeypatch):
+def test_cuda_launch_state_fails_closed_instead_of_discarding_packet(monkeypatch):
     probe = dict(ti_core.cuda_bounded_dispatch_probe())
     if not probe["exact_device_grid_available"]:
         pytest.skip(probe["unavailable_reason"])
@@ -963,14 +963,14 @@ def test_cuda_launch_state_compatibility_keeps_per_node_ownership(monkeypatch):
     first_visited_arg = ti.graph.Arg(
         ti.graph.ArgKind.NDARRAY, "first_visited", ti.i32, ndim=1
     )
-    second_visited_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "second_visited", ti.i32, ndim=1
-    )
     extent = ti.DeviceExtent(capacity)
     launch_state = extent.dispatch_state(block_dim)
     builder = ti.graph.GraphBuilder()
     builder.dispatch(publish, requested_arg, extent_arg, packet_arg)
-    handles = (
+    with pytest.raises(
+        ti.TaichiRuntimeError,
+        match="does not consume producer-owned DeviceDispatchState",
+    ):
         builder.dispatch_bounded(
             consume,
             extent_arg,
@@ -979,66 +979,7 @@ def test_cuda_launch_state_compatibility_keeps_per_node_ownership(monkeypatch):
             capacity=capacity,
             block_dim=block_dim,
             launch_state=launch_state,
-        ),
-        builder.dispatch_bounded(
-            consume,
-            extent_arg,
-            second_visited_arg,
-            extent=extent_arg,
-            capacity=capacity,
-            block_dim=block_dim,
-            launch_state=launch_state,
-        ),
-    )
-    graph = builder.compile()
-    first_visited = ti.ndarray(ti.i32, shape=2)
-    second_visited = ti.ndarray(ti.i32, shape=2)
-    args = {
-        "requested": 0,
-        "extent": extent,
-        "packet": launch_state.packet,
-        "first_visited": first_visited,
-        "second_visited": second_visited,
-    }
-    graph.execution_stats()
-
-    for requested in (1, 0, capacity, 33, capacity):
-        args["requested"] = requested
-        first_visited.fill(0)
-        second_visited.fill(0)
-        graph.run(args)
-        expected_grid_lanes = min(requested, capacity)
-        for visited in (first_visited, second_visited):
-            observed = visited.to_numpy()
-            segment = graph.execution_stats().segments[0]
-            assert int(observed[0]) == expected_grid_lanes, (
-                segment.last_path,
-                segment.fallback_reason,
-                segment.last_driver_error,
-                segment.bounded_update_groups,
-                segment.bounded_updater_dispatches,
-                segment.bounded_grouped_payloads,
-                segment.persistent_bounded_control_bytes,
-            )
-            assert int(observed[1]) == requested
-
-    assert all(
-        not handle.capabilities.producer_owned_launch_state for handle in handles
-    )
-    assert all(handle.capabilities.preparation_dispatches == 1 for handle in handles)
-    report = graph.execution_stats()
-    segment = report.segments[0]
-    assert segment.last_driver_error == 0
-    assert segment.bounded_update_groups == 2
-    assert segment.bounded_updater_dispatches == 2
-    assert segment.bounded_grouped_payloads == 0
-    assert segment.bounded_producer_fused_groups == 0
-    assert segment.bounded_update_replays == 0
-    assert segment.bounded_update_state_changes == 0
-    assert segment.bounded_update_cache_hits == 0
-    assert segment.bounded_node_api_calls == 0
-    assert segment.bounded_max_group_size == 1
-    assert report.memory.persistent_bounded_control_bytes == 64
+        )
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
@@ -1475,12 +1416,17 @@ def test_graph_device_prefix_sequence_publishes_bounded_launch_state():
     input_extent = ti.DeviceExtent(capacity)
     compact_extent = ti.DeviceExtent(capacity)
     launch_state = compact_extent.dispatch_state(block_dim)
+    publication_state = (
+        launch_state
+        if ti.lang.impl.current_cfg().arch == ti.vulkan
+        else None
+    )
     sequence = ti.algorithms.DevicePrefixSequence(capacity)
     sequence.input(values_arg, input_extent_arg).compact(
         flags_arg,
         compacted_arg,
         compact_extent_arg,
-        dispatch_state=launch_state,
+        dispatch_state=publication_state,
     )
     builder = ti.graph.GraphBuilder()
     builder.append_native(sequence)
@@ -1493,7 +1439,7 @@ def test_graph_device_prefix_sequence_publishes_bounded_launch_state():
         extent=compact_extent_arg,
         capacity=capacity,
         block_dim=block_dim,
-        launch_state=launch_state,
+        launch_state=publication_state,
     )
     graph = builder.compile()
 
@@ -1509,10 +1455,6 @@ def test_graph_device_prefix_sequence_publishes_bounded_launch_state():
 
     assert handle.capabilities.producer_owned_launch_state == (
         ti.lang.impl.current_cfg().arch == ti.vulkan
-        or (
-            ti.lang.impl.current_cfg().arch == ti.cuda
-            and handle.capabilities.exact_grid
-        )
     )
     assert handle.capabilities.preparation_dispatches == (
         1

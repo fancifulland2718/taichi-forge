@@ -11051,6 +11051,13 @@ class GraphBuilder:
             raise TaichiRuntimeError(
                 f"bounded dispatch is unavailable on backend {backend}"
             )
+        if launch_state is not None and backend == "cuda":
+            raise TaichiRuntimeError(
+                "CUDA bounded dispatch does not consume producer-owned "
+                "DeviceDispatchState packets. Pass extent= without "
+                "launch_state; CUDA will select its qualified logical/physical "
+                "route from the DeviceExtent."
+            )
         selected_route = (
             None if count is not None else _bounded_route(backend, False)
         )

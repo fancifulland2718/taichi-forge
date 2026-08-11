@@ -692,10 +692,12 @@ def _reset_target(extent, stats):
 
 
 def _finalize_atomic_target(extent, stats, capacity, dispatch_state=None):
-    if dispatch_state is None or impl.current_cfg().arch not in (
-        _ti_core.Arch.cuda,
-        _ti_core.Arch.vulkan,
-    ):
+    if dispatch_state is not None and impl.current_cfg().arch == _ti_core.Arch.cuda:
+        raise TaichiRuntimeError(
+            "CUDA worklist publication does not produce a consumer-owned "
+            "dispatch packet; pass the DeviceExtent directly to bounded consumers"
+        )
+    if dispatch_state is None or impl.current_cfg().arch != _ti_core.Arch.vulkan:
         _finalize_atomic_worklist(extent.state, *_stats_tuple(stats), capacity)
         return
     dispatch_state.validate_extent(extent, require_identity=True)
@@ -1130,6 +1132,11 @@ class DeviceWorklist:
         """Swap front/back ownership; this operation does not synchronize."""
 
         self._validate_current()
+        if dispatch_state is not None and impl.current_cfg().arch == _ti_core.Arch.cuda:
+            raise TaichiRuntimeError(
+                "CUDA worklist publication does not produce a consumer-owned "
+                "dispatch packet; use the next DeviceExtent directly"
+            )
         if self._next_requires_finalize:
             _finalize_atomic_target(
                 self.next_extent,
@@ -1166,6 +1173,11 @@ class DeviceWorklist:
         """Stable-select the current front into the back and commit it."""
 
         self._validate_current()
+        if dispatch_state is not None and impl.current_cfg().arch == _ti_core.Arch.cuda:
+            raise TaichiRuntimeError(
+                "CUDA worklist selection does not produce a consumer-owned "
+                "dispatch packet; use the next DeviceExtent directly"
+            )
         _require_worklist_array(flags, "selection flags", self._capacity, i32)
         source_extent = self.extent
         _select_impl(
@@ -1207,6 +1219,11 @@ class DeviceWorklist:
         """
 
         self._validate_current()
+        if dispatch_state is not None and impl.current_cfg().arch == _ti_core.Arch.cuda:
+            raise TaichiRuntimeError(
+                "CUDA conflict resolution does not produce a consumer-owned "
+                "dispatch packet; use the next DeviceExtent directly"
+            )
         sort_method = _normalize_conflict_sort_method(method, sort_method)
         source_extent = self.extent
         output_keys = self._workspace._buffer(
@@ -1473,6 +1490,11 @@ class DeviceWorklistSequence:
             dispatch_state._validate_current()
             if dispatch_state.capacity != self.capacity:
                 raise ValueError("worklist dispatch_state capacity mismatch")
+            if impl.current_cfg().arch == _ti_core.Arch.cuda:
+                raise TaichiRuntimeError(
+                    "CUDA worklist publication does not produce a consumer-owned "
+                    "dispatch packet; use the next DeviceExtent directly"
+                )
             self._leases.append(dispatch_state)
         return self._set_operation("finalize", (), {"dispatch_state": dispatch_state})
 
@@ -1489,6 +1511,11 @@ class DeviceWorklistSequence:
             dispatch_state._validate_current()
             if dispatch_state.capacity != self.capacity:
                 raise ValueError("worklist dispatch_state capacity mismatch")
+            if impl.current_cfg().arch == _ti_core.Arch.cuda:
+                raise TaichiRuntimeError(
+                    "CUDA worklist selection does not produce a consumer-owned "
+                    "dispatch packet; use the next DeviceExtent directly"
+                )
             self._leases.append(dispatch_state)
         return self._set_operation(
             "select",
@@ -1576,6 +1603,11 @@ class DeviceWorklistSequence:
             dispatch_state._validate_current()
             if dispatch_state.capacity != self.capacity:
                 raise ValueError("worklist dispatch_state capacity mismatch")
+            if impl.current_cfg().arch == _ti_core.Arch.cuda:
+                raise TaichiRuntimeError(
+                    "CUDA conflict resolution does not produce a consumer-owned "
+                    "dispatch packet; use the next DeviceExtent directly"
+                )
             self._leases.append(dispatch_state)
         return self._set_operation(
             "resolve",
