@@ -82,6 +82,7 @@ OPERATIONS = (
     "adaptive_pbd",
     "marching_squares",
     "bfs_worklist",
+    "sparse_block_stencil",
     "snode_churn",
     "snode_concurrent",
     "mpm_graph",
@@ -2712,6 +2713,384 @@ def _build_snode_concurrent_case(ti: Any, runtime_name: str,
             "scope_boundary": (
                 "simultaneously-live capacity only; historical churn is DIRECT-004-CHURN"
             ),
+        },
+    }
+
+
+def _sparse_block_stencil_route(
+        runtime_name: str, source_sha256: str, state: dict[str, Any],
+        active_blocks: int, solver_iterations: int) -> dict[str, Any]:
+    return {
+        "classification": f"{runtime_name}_shared_sparse_block_stencil",
+        "public_api": (
+            "ti.FieldsBuilder().pointer().dense().place(); "
+            "pointer.deactivate_all(); benchmark-owned ti.kernel stages"
+        ),
+        "adapter": "shared_vanilla_compatible_sparse_taichi_pipeline",
+        "kernel_source_owner": "benchmark",
+        "kernel_source_sha256": source_sha256,
+        "native_or_helper_api_used": False,
+        "capacity_hint_used": False,
+        "timed_host_deactivate_calls_per_replay": 1,
+        "ti_kernel_invocations_per_replay": 1 + 3 * solver_iterations,
+        "physical_backend_launches_assumed": False,
+        "expected_active_blocks": active_blocks,
+        "observed_active_blocks": state.get("observed_active_blocks"),
+        "passed": bool(
+            len(source_sha256) == 64
+            and state.get("observed_active_blocks") == active_blocks
+        ),
+    }
+
+
+def _sparse_block_stencil_route_isolated(child: dict[str, Any]) -> bool:
+    if child.get("operation") != "sparse_block_stencil":
+        return True
+    route = child.get("route", {})
+    contract = child.get("workload_contract", {})
+    runtime = child.get("runtime")
+    return bool(
+        runtime in ("forge", "vanilla")
+        and route.get("classification")
+        == f"{runtime}_shared_sparse_block_stencil"
+        and route.get("adapter")
+        == "shared_vanilla_compatible_sparse_taichi_pipeline"
+        and route.get("kernel_source_owner") == "benchmark"
+        and route.get("kernel_source_sha256")
+        == contract.get("kernel_source_sha256")
+        and route.get("native_or_helper_api_used") is False
+        and route.get("capacity_hint_used") is False
+        and route.get("timed_host_deactivate_calls_per_replay") == 1
+        and route.get("ti_kernel_invocations_per_replay")
+        == contract.get("ti_kernel_invocations_per_replay")
+        and route.get("physical_backend_launches_assumed") is False
+        and route.get("expected_active_blocks")
+        == contract.get("active_blocks")
+        and route.get("observed_active_blocks")
+        == contract.get("active_blocks")
+        and route.get("passed") is True
+    )
+
+
+def _build_sparse_block_stencil_case(
+        ti: Any, runtime_name: str, backend: str,
+        preset: str) -> dict[str, Any]:
+    if backend == "vulkan":
+        raise RuntimeError(
+            "vanilla Vulkan sparse SNode is unavailable; report it as a "
+            "capability boundary instead of a direct speed comparison")
+    configs = {
+        "small": {
+            "root_blocks": 48,
+            "block_size": 8,
+            "active_blocks_per_axis": 32,
+            "origin_blocks": 6,
+            "solver_iterations": 4,
+        },
+        "medium": {
+            "root_blocks": 80,
+            "block_size": 8,
+            "active_blocks_per_axis": 64,
+            "origin_blocks": 8,
+            "solver_iterations": 4,
+        },
+        "large": {
+            "root_blocks": 144,
+            "block_size": 8,
+            "active_blocks_per_axis": 128,
+            "origin_blocks": 8,
+            "solver_iterations": 4,
+        },
+    }
+    config = configs[preset]
+    root_blocks = config["root_blocks"]
+    block_size = config["block_size"]
+    active_blocks_per_axis = config["active_blocks_per_axis"]
+    origin_blocks = config["origin_blocks"]
+    solver_iterations = config["solver_iterations"]
+    active_blocks = active_blocks_per_axis**2
+    active_side = active_blocks_per_axis * block_size
+    active_cells = active_side**2
+    domain_size = root_blocks * block_size
+    if origin_blocks + active_blocks_per_axis > root_blocks:
+        raise ValueError("sparse active window must fit in the root")
+
+    x = ti.field(dtype=ti.f32)
+    rhs = ti.field(dtype=ti.f32)
+    ax = ti.field(dtype=ti.f32)
+    x_next = ti.field(dtype=ti.f32)
+    builder = ti.FieldsBuilder()
+    pointer = builder.pointer(ti.ij, (root_blocks, root_blocks))
+    pointer.dense(ti.ij, (block_size, block_size)).place(
+        x, rhs, ax, x_next)
+    tree = builder.finalize()
+
+    dense_x = ti.field(dtype=ti.f32, shape=(domain_size, domain_size))
+    dense_rhs = ti.field(dtype=ti.f32, shape=(domain_size, domain_size))
+    dense_ax = ti.field(dtype=ti.f32, shape=(domain_size, domain_size))
+    dense_next = ti.field(dtype=ti.f32, shape=(domain_size, domain_size))
+    actual_snapshot = ti.ndarray(dtype=ti.f32, shape=active_cells)
+    expected_snapshot = ti.ndarray(dtype=ti.f32, shape=active_cells)
+
+    @ti.func
+    def sparse_neighbor_sum(i, j):
+        value = 0.0
+        if i > 0:
+            value += x[i - 1, j]
+        if i + 1 < domain_size:
+            value += x[i + 1, j]
+        if j > 0:
+            value += x[i, j - 1]
+        if j + 1 < domain_size:
+            value += x[i, j + 1]
+        return value
+
+    @ti.func
+    def dense_neighbor_sum(i, j):
+        value = 0.0
+        if i > 0:
+            value += dense_x[i - 1, j]
+        if i + 1 < domain_size:
+            value += dense_x[i + 1, j]
+        if j > 0:
+            value += dense_x[i, j - 1]
+        if j + 1 < domain_size:
+            value += dense_x[i, j + 1]
+        return value
+
+    @ti.kernel
+    def initialize_sparse(origin: ti.i32):
+        for bi, bj, li, lj in ti.ndrange(
+                active_blocks_per_axis, active_blocks_per_axis,
+                block_size, block_size):
+            i = (origin + bi) * block_size + li
+            j = (origin + bj) * block_size + lj
+            x[i, j] = ti.cast(1 + (i * 7 + j * 11 + 13) % 17, ti.f32)
+            rhs[i, j] = ti.cast(1 + (i * 5 + j * 3 + 7) % 11, ti.f32)
+            ax[i, j] = 0.0
+            x_next[i, j] = 0.0
+
+    @ti.kernel
+    def initialize_dense(origin: ti.i32):
+        for bi, bj, li, lj in ti.ndrange(
+                active_blocks_per_axis, active_blocks_per_axis,
+                block_size, block_size):
+            i = (origin + bi) * block_size + li
+            j = (origin + bj) * block_size + lj
+            dense_x[i, j] = ti.cast(
+                1 + (i * 7 + j * 11 + 13) % 17, ti.f32)
+            dense_rhs[i, j] = ti.cast(
+                1 + (i * 5 + j * 3 + 7) % 11, ti.f32)
+
+    @ti.kernel
+    def apply_sparse_operator():
+        for i, j in x:
+            ax[i, j] = 4.0 * x[i, j] - sparse_neighbor_sum(i, j)
+
+    @ti.kernel
+    def apply_dense_operator(origin: ti.i32):
+        for bi, bj, li, lj in ti.ndrange(
+                active_blocks_per_axis, active_blocks_per_axis,
+                block_size, block_size):
+            i = (origin + bi) * block_size + li
+            j = (origin + bj) * block_size + lj
+            dense_ax[i, j] = (
+                4.0 * dense_x[i, j] - dense_neighbor_sum(i, j))
+
+    @ti.kernel
+    def relax_sparse():
+        for i, j in x:
+            x_next[i, j] = x[i, j] + 0.125 * (rhs[i, j] - ax[i, j])
+
+    @ti.kernel
+    def relax_dense(origin: ti.i32):
+        for bi, bj, li, lj in ti.ndrange(
+                active_blocks_per_axis, active_blocks_per_axis,
+                block_size, block_size):
+            i = (origin + bi) * block_size + li
+            j = (origin + bj) * block_size + lj
+            dense_next[i, j] = (
+                dense_x[i, j]
+                + 0.125 * (dense_rhs[i, j] - dense_ax[i, j]))
+
+    @ti.kernel
+    def commit_sparse():
+        for i, j in x:
+            x[i, j] = x_next[i, j]
+
+    @ti.kernel
+    def commit_dense(origin: ti.i32):
+        for bi, bj, li, lj in ti.ndrange(
+                active_blocks_per_axis, active_blocks_per_axis,
+                block_size, block_size):
+            i = (origin + bi) * block_size + li
+            j = (origin + bj) * block_size + lj
+            dense_x[i, j] = dense_next[i, j]
+
+    @ti.kernel
+    def capture_sparse(origin: ti.i32, output: ti.types.ndarray()):
+        for bi, bj, li, lj in ti.ndrange(
+                active_blocks_per_axis, active_blocks_per_axis,
+                block_size, block_size):
+            local_i = bi * block_size + li
+            local_j = bj * block_size + lj
+            i = (origin + bi) * block_size + li
+            j = (origin + bj) * block_size + lj
+            output[local_i * active_side + local_j] = x[i, j]
+
+    @ti.kernel
+    def capture_dense(origin: ti.i32, output: ti.types.ndarray()):
+        for bi, bj, li, lj in ti.ndrange(
+                active_blocks_per_axis, active_blocks_per_axis,
+                block_size, block_size):
+            local_i = bi * block_size + li
+            local_j = bj * block_size + lj
+            i = (origin + bi) * block_size + li
+            j = (origin + bj) * block_size + lj
+            output[local_i * active_side + local_j] = dense_x[i, j]
+
+    @ti.kernel
+    def count_active_blocks() -> ti.i32:
+        count = 0
+        for bi, bj in ti.ndrange(root_blocks, root_blocks):
+            if ti.is_active(pointer, [bi, bj]):
+                count += 1
+        return count
+
+    def reset() -> None:
+        pointer.deactivate_all()
+        initialize_sparse(origin_blocks)
+
+    def launch() -> None:
+        for _ in range(solver_iterations):
+            apply_sparse_operator()
+            relax_sparse()
+            commit_sparse()
+
+    # A coordinate-identical dense oracle is prepared once outside every
+    # measured window. It is correctness evidence, never a performance baseline.
+    initialize_dense(origin_blocks)
+    for _ in range(solver_iterations):
+        apply_dense_operator(origin_blocks)
+        relax_dense(origin_blocks)
+        commit_dense(origin_blocks)
+    capture_dense(origin_blocks, expected_snapshot)
+    ti.sync()
+    import numpy as np
+    expected_host = np.asarray(expected_snapshot.to_numpy(), dtype=np.float32)
+    source_sha256 = sha256_file(Path(__file__))
+    state: dict[str, Any] = {"observed_active_blocks": None}
+
+    def fingerprint(values: Any) -> dict[str, Any]:
+        vector = np.asarray(values, dtype=np.float32).reshape(-1)
+        sample_indices = sorted(set((
+            0, vector.size // 4, vector.size // 2,
+            (3 * vector.size) // 4, vector.size - 1,
+        )))
+        return {
+            "finite": bool(np.all(np.isfinite(vector))),
+            "count": int(vector.size),
+            "sha256": hashlib.sha256(vector.tobytes()).hexdigest(),
+            "sum": float(vector.astype(np.float64).sum()),
+            "minimum": float(vector.min()),
+            "maximum": float(vector.max()),
+            "sample_indices": sample_indices,
+            "sample_values": [
+                float(vector[index]) for index in sample_indices],
+        }
+
+    expected_fingerprint = fingerprint(expected_host)
+
+    def validate() -> dict[str, Any]:
+        capture_sparse(origin_blocks, actual_snapshot)
+        ti.sync()
+        actual_host = np.asarray(actual_snapshot.to_numpy(), dtype=np.float32)
+        active_count = int(count_active_blocks())
+        state["observed_active_blocks"] = active_count
+        difference = actual_host.astype(np.float64) - expected_host.astype(
+            np.float64)
+        max_abs = float(np.max(np.abs(difference)))
+        rmse = float(np.sqrt(np.mean(difference * difference)))
+        tolerance = 1.0e-5
+        actual_fingerprint = fingerprint(actual_host)
+        return {
+            "passed": bool(
+                active_count == active_blocks
+                and actual_fingerprint["finite"]
+                and max_abs <= tolerance),
+            "comparison": (
+                "coordinate_dense_oracle_for_rebuilt_sparse_five_point_"
+                "weighted_jacobi"),
+            "active_blocks": active_count,
+            "expected_active_blocks": active_blocks,
+            "max_abs_error": max_abs,
+            "rmse": rmse,
+            "effective_tolerance": tolerance,
+            "endpoint_fingerprint": actual_fingerprint,
+            "expected_endpoint_fingerprint": expected_fingerprint,
+        }
+
+    return {
+        "launch": launch,
+        "reset": reset,
+        "reset_each_launch": True,
+        "validate": validate,
+        "route": lambda: _sparse_block_stencil_route(
+            runtime_name, source_sha256, state, active_blocks,
+            solver_iterations),
+        "stability_observe": lambda: _snode_lifecycle_observation(
+            ti, runtime_name),
+        "logical_bytes": 0,
+        "traffic_model": (
+            "sparse deactivate/reactivate plus matrix-free solver transaction; "
+            "no simplified logical bandwidth is claimed"),
+        "case_preparation": {
+            "excluded_from_timing": True,
+            "description": (
+                "tree construction, dense coordinate oracle, oracle execution, "
+                "snapshot allocation, and validation transfers"),
+        },
+        "workload_contract": {
+            "case_id": "DIRECT-005",
+            "comparison_class": "direct",
+            "public_api": (
+                "FieldsBuilder pointer+dense SNode, deactivate_all, and shared "
+                "benchmark-owned Taichi kernels"),
+            "dimensions": 2,
+            "layout": "pointer_2d_then_dense_8x8_four_f32_fields",
+            "root_blocks_per_axis": root_blocks,
+            "domain_cells_per_axis": domain_size,
+            "active_blocks_per_axis": active_blocks_per_axis,
+            "active_blocks": active_blocks,
+            "active_cells": active_cells,
+            "origin_blocks": origin_blocks,
+            "solver_iterations": solver_iterations,
+            "operator": "matrix_free_five_point_poisson",
+            "iteration": "four_weighted_jacobi_omega_0.5_steps",
+            "kernel_source_owner": "benchmark",
+            "kernel_source_sha256": source_sha256,
+            "native_or_helper_api_used": False,
+            "capacity_hint_used": False,
+            "timed_host_deactivate_calls_per_replay": 1,
+            "ti_kernel_invocations_per_replay": 1 + 3 * solver_iterations,
+            "physical_backend_launches_assumed": False,
+            "shared": (
+                "identical FieldsBuilder DSL, pointer/dense layout, kernels, "
+                "active window, reset/rebuild transaction, iterations, oracle, "
+                "timing boundary, and process isolation"),
+            "allowed_difference": (
+                "Forge-only runtime memory/lifecycle counters are validation "
+                "telemetry outside timing and unavailable on vanilla"),
+            "correctness": (
+                "full active-window f32 vector against coordinate-identical "
+                "dense oracle plus exact active-block count"),
+            "timing": (
+                "pointer deactivate_all + deterministic reactivation + four "
+                "sparse weighted-Jacobi steps; one sync outside the common batch"),
+            "scope_boundary": (
+                "CUDA/CPU direct comparison; vanilla Vulkan sparse absence is "
+                "reported as a capability boundary, not a speed ratio"),
+            "tree_id": int(tree.id),
         },
     }
 
@@ -5793,6 +6172,9 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         elif args.operation == "bfs_worklist":
             case = _build_bfs_worklist_case(
                 ti, args.runtime, args.backend, config["elements"])
+        elif args.operation == "sparse_block_stencil":
+            case = _build_sparse_block_stencil_case(
+                ti, args.runtime, args.backend, args.preset)
         elif args.operation == "snode_churn":
             case = _build_snode_churn_case(
                 ti, args.runtime, args.backend)
@@ -6793,6 +7175,74 @@ def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
                        after[vector_name].get(key) for key in exact_keys):
                     return False
         return True
+    if left_result["operation"] == "sparse_block_stencil":
+        comparison = (
+            "coordinate_dense_oracle_for_rebuilt_sparse_five_point_"
+            "weighted_jacobi")
+        fingerprint_keys = (
+            "count", "sha256", "sum", "minimum", "maximum",
+            "sample_indices", "sample_values",
+        )
+        for validation_name in ("validation_before", "validation_after"):
+            left = left_result[validation_name]
+            right = right_result[validation_name]
+            for value in (left, right):
+                tolerance = float(value.get("effective_tolerance", -1.0))
+                actual = value.get("endpoint_fingerprint", {})
+                expected = value.get("expected_endpoint_fingerprint", {})
+                if (not value.get("passed")
+                        or value.get("comparison") != comparison
+                        or value.get("active_blocks") !=
+                        value.get("expected_active_blocks")
+                        or tolerance < 0.0
+                        or float(value.get("max_abs_error", math.inf))
+                        > tolerance
+                        or not math.isfinite(
+                            float(value.get("rmse", math.inf)))
+                        or actual.get("finite") is not True
+                        or expected.get("finite") is not True
+                        or actual.get("count") != expected.get("count")
+                        or actual.get("sample_indices") !=
+                        expected.get("sample_indices")
+                        or not isinstance(actual.get("sha256"), str)
+                        or len(actual["sha256"]) != 64
+                        or not isinstance(expected.get("sha256"), str)
+                        or len(expected["sha256"]) != 64):
+                    return False
+                count = int(actual["count"])
+                if (count <= 0
+                        or len(actual.get("sample_values", [])) !=
+                        len(actual.get("sample_indices", []))
+                        or len(expected.get("sample_values", [])) !=
+                        len(expected.get("sample_indices", []))):
+                    return False
+                for key in ("minimum", "maximum"):
+                    if not math.isclose(
+                            float(actual[key]), float(expected[key]),
+                            rel_tol=0.0, abs_tol=tolerance):
+                        return False
+                if not math.isclose(
+                        float(actual["sum"]), float(expected["sum"]),
+                        rel_tol=0.0, abs_tol=tolerance * count):
+                    return False
+                if any(
+                        not math.isclose(float(a), float(b), rel_tol=0.0,
+                                         abs_tol=tolerance)
+                        for a, b in zip(actual["sample_values"],
+                                        expected["sample_values"])):
+                    return False
+            left_fp = left["endpoint_fingerprint"]
+            right_fp = right["endpoint_fingerprint"]
+            if any(left_fp.get(key) != right_fp.get(key)
+                   for key in fingerprint_keys):
+                return False
+        for result in (left_result, right_result):
+            before = result["validation_before"]["endpoint_fingerprint"]
+            after = result["validation_after"]["endpoint_fingerprint"]
+            if any(before.get(key) != after.get(key)
+                   for key in fingerprint_keys):
+                return False
+        return True
     if left_result["operation"] not in (
             "mpm_graph", "mpm_direct", "active_grid_mpm"):
         return True
@@ -7638,6 +8088,9 @@ def _parent_main(args: argparse.Namespace) -> int:
         "bfs_worklist_native_route_admitted": all(
             _bfs_worklist_native_route_admitted(child)
             for child in children),
+        "sparse_block_stencil_route_isolated": all(
+            _sparse_block_stencil_route_isolated(child)
+            for child in children),
         "ordinary_control_route_isolated": all(
             child["route"].get("classification")
             == f"{child['runtime']}_ordinary_taichi_kernel"
@@ -7655,7 +8108,8 @@ def _parent_main(args: argparse.Namespace) -> int:
             or len(forge_binary_signatures) == 1),
         "stable_replay_input": all(
             child["measurement_scope"] == "device_reset_plus_operation"
-            if child["operation"] in ("prefix_sum", "parallel_sort")
+            if child["operation"] in (
+                "prefix_sum", "parallel_sort", "sparse_block_stencil")
             else True
             for child in children),
         "common_batch": all(
@@ -7698,7 +8152,8 @@ def _parent_main(args: argparse.Namespace) -> int:
             and child["stability"]["memory_guard_passed"]
             for child in children),
         "snode_lifecycle_plateau": all(
-            child["operation"] not in ("snode_churn", "snode_concurrent")
+            child["operation"] not in (
+                "snode_churn", "snode_concurrent", "sparse_block_stencil")
             or (
                 child.get("stability") is not None
                 and child["stability"].get(

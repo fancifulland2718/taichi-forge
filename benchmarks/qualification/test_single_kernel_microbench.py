@@ -30,6 +30,7 @@ from benchmarks.qualification.single_kernel_microbench import (
     _bfs_worklist_route,
     _bfs_worklist_kernel_control_route_isolated,
     _bfs_worklist_native_route_admitted,
+    _sparse_block_stencil_route_isolated,
     balanced_pair_orders,
     comparison_definition,
     comparison_participants,
@@ -48,10 +49,84 @@ from benchmarks.qualification.audit_single_kernel_run import (
     _audit_bfs_worklist_kernel_control_route_isolated,
     _bfs_worklist_native_route_admitted as
     _audit_bfs_worklist_native_route_admitted,
+    _sparse_block_stencil_route_isolated as
+    _audit_sparse_block_stencil_route_isolated,
 )
 
 
 class SingleKernelMicrobenchTest(unittest.TestCase):
+
+    def test_sparse_block_stencil_route_and_endpoint_are_fail_closed(self):
+        source_sha256 = "a" * 64
+        contract = {
+            "kernel_source_sha256": source_sha256,
+            "ti_kernel_invocations_per_replay": 13,
+            "active_blocks": 1024,
+        }
+        route = {
+            "passed": True,
+            "classification": "forge_shared_sparse_block_stencil",
+            "adapter": "shared_vanilla_compatible_sparse_taichi_pipeline",
+            "kernel_source_owner": "benchmark",
+            "kernel_source_sha256": source_sha256,
+            "native_or_helper_api_used": False,
+            "capacity_hint_used": False,
+            "timed_host_deactivate_calls_per_replay": 1,
+            "ti_kernel_invocations_per_replay": 13,
+            "physical_backend_launches_assumed": False,
+            "expected_active_blocks": 1024,
+            "observed_active_blocks": 1024,
+        }
+        child = {
+            "operation": "sparse_block_stencil",
+            "runtime": "forge",
+            "route": route,
+            "workload_contract": contract,
+        }
+        self.assertTrue(_sparse_block_stencil_route_isolated(child))
+        self.assertTrue(_audit_sparse_block_stencil_route_isolated(child))
+        route["capacity_hint_used"] = True
+        self.assertFalse(_sparse_block_stencil_route_isolated(child))
+        self.assertFalse(_audit_sparse_block_stencil_route_isolated(child))
+
+        fingerprint = {
+            "finite": True,
+            "count": 4,
+            "sha256": "b" * 64,
+            "sum": 10.0,
+            "minimum": 1.0,
+            "maximum": 4.0,
+            "sample_indices": [0, 1, 2, 3],
+            "sample_values": [1.0, 2.0, 3.0, 4.0],
+        }
+        validation = {
+            "passed": True,
+            "comparison": (
+                "coordinate_dense_oracle_for_rebuilt_sparse_five_point_"
+                "weighted_jacobi"),
+            "active_blocks": 1,
+            "expected_active_blocks": 1,
+            "max_abs_error": 0.0,
+            "rmse": 0.0,
+            "effective_tolerance": 1.0e-5,
+            "endpoint_fingerprint": json.loads(json.dumps(fingerprint)),
+            "expected_endpoint_fingerprint": json.loads(
+                json.dumps(fingerprint)),
+        }
+        left = {
+            "operation": "sparse_block_stencil",
+            "validation_before": json.loads(json.dumps(validation)),
+            "validation_after": json.loads(json.dumps(validation)),
+        }
+        right = json.loads(json.dumps(left))
+        self.assertTrue(_endpoint_equivalent(
+            {"forge": left, "vanilla": right}, "forge", "vanilla"))
+        self.assertTrue(_audit_endpoint_equivalent(left, right))
+        right["validation_after"]["endpoint_fingerprint"]["sha256"] = (
+            "c" * 64)
+        self.assertFalse(_endpoint_equivalent(
+            {"forge": left, "vanilla": right}, "forge", "vanilla"))
+        self.assertFalse(_audit_endpoint_equivalent(left, right))
 
     def test_ordinary_kernel_route_proves_benchmark_owned_single_launch(self):
         route = _ordinary_kernel_route("forge", "a" * 64)

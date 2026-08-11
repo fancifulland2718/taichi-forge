@@ -635,6 +635,74 @@ def _endpoint_equivalent(left_result: dict[str, Any],
                        after[vector_name].get(key) for key in exact_keys):
                     return False
         return True
+    if left_result["operation"] == "sparse_block_stencil":
+        comparison = (
+            "coordinate_dense_oracle_for_rebuilt_sparse_five_point_"
+            "weighted_jacobi")
+        fingerprint_keys = (
+            "count", "sha256", "sum", "minimum", "maximum",
+            "sample_indices", "sample_values",
+        )
+        for validation_name in ("validation_before", "validation_after"):
+            left = left_result[validation_name]
+            right = right_result[validation_name]
+            for value in (left, right):
+                tolerance = float(value.get("effective_tolerance", -1.0))
+                actual = value.get("endpoint_fingerprint", {})
+                expected = value.get("expected_endpoint_fingerprint", {})
+                if (not value.get("passed")
+                        or value.get("comparison") != comparison
+                        or value.get("active_blocks") !=
+                        value.get("expected_active_blocks")
+                        or tolerance < 0.0
+                        or float(value.get("max_abs_error", math.inf))
+                        > tolerance
+                        or not math.isfinite(
+                            float(value.get("rmse", math.inf)))
+                        or actual.get("finite") is not True
+                        or expected.get("finite") is not True
+                        or actual.get("count") != expected.get("count")
+                        or actual.get("sample_indices") !=
+                        expected.get("sample_indices")
+                        or not isinstance(actual.get("sha256"), str)
+                        or len(actual["sha256"]) != 64
+                        or not isinstance(expected.get("sha256"), str)
+                        or len(expected["sha256"]) != 64):
+                    return False
+                count = int(actual["count"])
+                if (count <= 0
+                        or len(actual.get("sample_values", [])) !=
+                        len(actual.get("sample_indices", []))
+                        or len(expected.get("sample_values", [])) !=
+                        len(expected.get("sample_indices", []))):
+                    return False
+                for key in ("minimum", "maximum"):
+                    if not math.isclose(
+                            float(actual[key]), float(expected[key]),
+                            rel_tol=0.0, abs_tol=tolerance):
+                        return False
+                if not math.isclose(
+                        float(actual["sum"]), float(expected["sum"]),
+                        rel_tol=0.0, abs_tol=tolerance * count):
+                    return False
+                if any(
+                        not math.isclose(float(a), float(b), rel_tol=0.0,
+                                         abs_tol=tolerance)
+                        for a, b in zip(actual["sample_values"],
+                                        expected["sample_values"])):
+                    return False
+            left_fp = left["endpoint_fingerprint"]
+            right_fp = right["endpoint_fingerprint"]
+            if any(left_fp.get(key) != right_fp.get(key)
+                   for key in fingerprint_keys):
+                return False
+        for result in (left_result, right_result):
+            before = result["validation_before"]["endpoint_fingerprint"]
+            after = result["validation_after"]["endpoint_fingerprint"]
+            if any(before.get(key) != after.get(key)
+                   for key in fingerprint_keys):
+                return False
+        return True
     if left_result["operation"] not in (
             "mpm_graph", "mpm_direct", "active_grid_mpm"):
         return True
@@ -854,6 +922,35 @@ def _bfs_worklist_native_route_admitted(child: dict[str, Any]) -> bool:
         == contract.get("expected_last_frontier")
         and transition.get("rejected") == 0
         and transition.get("overflow") is False
+    )
+
+
+def _sparse_block_stencil_route_isolated(child: dict[str, Any]) -> bool:
+    if child.get("operation") != "sparse_block_stencil":
+        return True
+    route = child.get("route", {})
+    contract = child.get("workload_contract", {})
+    runtime = child.get("runtime")
+    return bool(
+        runtime in ("forge", "vanilla")
+        and route.get("classification")
+        == f"{runtime}_shared_sparse_block_stencil"
+        and route.get("adapter")
+        == "shared_vanilla_compatible_sparse_taichi_pipeline"
+        and route.get("kernel_source_owner") == "benchmark"
+        and route.get("kernel_source_sha256")
+        == contract.get("kernel_source_sha256")
+        and route.get("native_or_helper_api_used") is False
+        and route.get("capacity_hint_used") is False
+        and route.get("timed_host_deactivate_calls_per_replay") == 1
+        and route.get("ti_kernel_invocations_per_replay")
+        == contract.get("ti_kernel_invocations_per_replay")
+        and route.get("physical_backend_launches_assumed") is False
+        and route.get("expected_active_blocks")
+        == contract.get("active_blocks")
+        and route.get("observed_active_blocks")
+        == contract.get("active_blocks")
+        and route.get("passed") is True
     )
 
 
@@ -1374,6 +1471,9 @@ def _audit(run_dir: Path) -> dict[str, Any]:
     bfs_worklist_native_route_admitted = all(
         _bfs_worklist_native_route_admitted(child)
         for child in children)
+    sparse_block_stencil_route_isolated = all(
+        _sparse_block_stencil_route_isolated(child)
+        for child in children)
     ordinary_control_route_isolated = all(
         child["route"].get("classification")
         == f"{child['runtime']}_ordinary_taichi_kernel"
@@ -1404,10 +1504,12 @@ def _audit(run_dir: Path) -> dict[str, Any]:
         or len(forge_binary_signatures) == 1)
     stable_replay_input = all(
         child.get("measurement_scope") == "device_reset_plus_operation"
-        if child["operation"] in ("prefix_sum", "parallel_sort") else True
+        if child["operation"] in (
+            "prefix_sum", "parallel_sort", "sparse_block_stencil") else True
         for child in children)
     snode_lifecycle_plateau = all(
-        child["operation"] not in ("snode_churn", "snode_concurrent")
+        child["operation"] not in (
+            "snode_churn", "snode_concurrent", "sparse_block_stencil")
         or (
             child.get("stability") is not None
             and child["stability"].get(
@@ -1485,6 +1587,13 @@ def _audit(run_dir: Path) -> dict[str, Any]:
                         "bfs_worklist_native_route_admitted"] is
                     bfs_worklist_native_route_admitted,
                     "BFS worklist native route method check", failures)
+            if ("sparse_block_stencil_route_isolated"
+                    in summary["method_checks"]):
+                _check(
+                    summary["method_checks"][
+                        "sparse_block_stencil_route_isolated"] is
+                    sparse_block_stencil_route_isolated,
+                    "sparse block stencil route method check", failures)
             if "ordinary_control_route_isolated" in summary["method_checks"]:
                 _check(
                     summary["method_checks"][
