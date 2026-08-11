@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <condition_variable>
 #include <exception>
-#include <memory>
 #include <thread>
 #include <vector>
 
@@ -77,25 +76,25 @@ void ThreadPool::run(int splits,
     return;
   }
 
-  auto job = std::make_shared<Job>();
-  job->splits = splits;
-  job->desired_num_threads =
+  Job job;
+  job.splits = splits;
+  job.desired_num_threads =
       std::clamp(desired_num_threads, 1, max_num_threads_);
-  job->range_for_task_context = range_for_task_context;
-  job->func = func;
+  job.range_for_task_context = range_for_task_context;
+  job.func = func;
 
   std::exception_ptr exception;
   {
     std::unique_lock<std::mutex> lock(mutex_);
     TI_ERROR_IF(exiting_, "ThreadPool is shutting down.");
-    pending_jobs_.push_back(job);
+    pending_jobs_.push_back(&job);
     activate_next_job_locked();
     // A new job can use up to its requested number of already-created
     // workers. Waking all is only a cold submit-side cost; workers that do not
     // obtain a task sleep again under the same mutex.
     worker_cv_.notify_all();
-    completion_cv_.wait(lock, [&job] { return job->completed; });
-    exception = job->exception;
+    completion_cv_.wait(lock, [&job] { return job.completed; });
+    exception = job.exception;
   }
   if (exception) {
     std::rethrow_exception(exception);
@@ -109,79 +108,100 @@ void ThreadPool::activate_next_job_locked() {
   while (!pending_jobs_.empty()) {
     auto job = pending_jobs_.front();
     pending_jobs_.pop_front();
-    if (!job->completed && !job->cancelled) {
-      active_job_ = std::move(job);
+    if (!job->completed && !job->cancelled.load(std::memory_order_relaxed)) {
+      active_job_ = job;
       return;
     }
   }
 }
 
-bool ThreadPool::take_task_locked(std::shared_ptr<Job> *job, int *task_id) {
+bool ThreadPool::join_job_locked(Job **job) {
   auto candidate = active_job_;
-  if (!candidate || candidate->completed || candidate->cancelled ||
-      candidate->next_task >= candidate->splits ||
-      candidate->active_workers >= candidate->desired_num_threads) {
+  if (!candidate || candidate->completed ||
+      candidate->cancelled.load(std::memory_order_relaxed) ||
+      candidate->next_task.load(std::memory_order_relaxed) >=
+          candidate->splits ||
+      candidate->joined_workers >= candidate->desired_num_threads) {
     return false;
   }
 
-  *task_id = candidate->next_task++;
-  candidate->active_workers++;
-  *job = std::move(candidate);
+  candidate->joined_workers++;
+  candidate->active_workers.fetch_add(1, std::memory_order_relaxed);
+  *job = candidate;
   return true;
 }
 
 void ThreadPool::target() {
   const int thread_id = next_worker_id_.fetch_add(1, std::memory_order_relaxed);
   while (true) {
-    std::shared_ptr<Job> job;
-    int task_id = 0;
+    Job *job = nullptr;
     {
       std::unique_lock<std::mutex> lock(mutex_);
       worker_cv_.wait(lock, [this] {
         return exiting_ ||
-               (active_job_ && !active_job_->cancelled &&
-                active_job_->next_task < active_job_->splits &&
-                active_job_->active_workers <
+               (active_job_ &&
+                !active_job_->cancelled.load(std::memory_order_relaxed) &&
+                active_job_->next_task.load(std::memory_order_relaxed) <
+                    active_job_->splits &&
+                active_job_->joined_workers <
                     active_job_->desired_num_threads);
       });
       if (exiting_) {
         break;
       }
-      if (!take_task_locked(&job, &task_id)) {
+      if (!join_job_locked(&job)) {
         continue;
       }
-      // The active job still has another slot in its requested parallelism
-      // budget. Wake one peer so it does not silently degrade to one worker.
+      // Let another worker join before this one consumes the remaining atomic
+      // chunks. The job stays isolated, but chunk claims no longer serialize
+      // through the global pool mutex.
       worker_cv_.notify_one();
     }
 
     std::exception_ptr exception;
     try {
       ScopedThreadPoolExecution execution(this);
-      job->func(job->range_for_task_context, thread_id, task_id);
+      while (!job->cancelled.load(std::memory_order_relaxed)) {
+        const int task_id =
+            job->next_task.fetch_add(1, std::memory_order_relaxed);
+        if (task_id >= job->splits) {
+          break;
+        }
+        job->func(job->range_for_task_context, thread_id, task_id);
+      }
     } catch (...) {
       exception = std::current_exception();
+      job->cancelled.store(true, std::memory_order_relaxed);
     }
 
+    if (exception) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!job->exception) {
+        job->exception = exception;
+      }
+    }
+    const int remaining =
+        job->active_workers.fetch_sub(1, std::memory_order_acq_rel) - 1;
+    if (remaining != 0) {
+      continue;
+    }
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      TI_ASSERT(job->active_workers > 0);
-      job->active_workers--;
-      if (exception && !job->exception) {
-        job->exception = exception;
-        job->cancelled = true;
-      }
-      if ((job->cancelled && job->active_workers == 0) ||
-          (!job->cancelled && job->next_task == job->splits &&
-           job->active_workers == 0)) {
+      const bool exhausted =
+          job->next_task.load(std::memory_order_relaxed) >= job->splits;
+      if (job->cancelled.load(std::memory_order_relaxed) || exhausted) {
         job->completed = true;
         TI_ASSERT(active_job_ == job);
-        active_job_.reset();
+        active_job_ = nullptr;
         activate_next_job_locked();
         completion_cv_.notify_all();
-        worker_cv_.notify_all();
-      } else {
-        worker_cv_.notify_all();
+        // Idle workers already wait on the predicate. Waking every worker
+        // after the final chunk competes with the submitter that must resume
+        // Python and dominated small range launches. Only a queued successor
+        // needs a worker wake-up here.
+        if (active_job_ != nullptr) {
+          worker_cv_.notify_all();
+        }
       }
     }
   }

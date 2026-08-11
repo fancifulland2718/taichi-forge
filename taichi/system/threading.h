@@ -12,7 +12,6 @@
 #include <deque>
 #include <exception>
 #include <functional>
-#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -47,25 +46,24 @@ class ThreadPool {
     int desired_num_threads{1};
     void *range_for_task_context{nullptr};
     RangeForTaskFunc *func{nullptr};
-    int next_task{0};
-    int active_workers{0};
+    std::atomic<int> next_task{0};
+    std::atomic<bool> cancelled{false};
+    std::atomic<int> active_workers{0};
+    int joined_workers{0};
     bool completed{false};
-    bool cancelled{false};
     std::exception_ptr exception;
   };
 
-  // Takes one task from the active FIFO job. `mutex_` must be held. Producers
-  // may enqueue concurrently, but a full job owns the fixed worker budget
-  // until completion: the measured workload does not justify interleaving two
-  // saturated memory-bound jobs.
-  bool take_task_locked(std::shared_ptr<Job> *job, int *task_id);
+  // Joins one worker to the active FIFO job. `mutex_` is paid once per worker,
+  // not once per range chunk; chunks are claimed through Job::next_task.
+  bool join_job_locked(Job **job);
   void activate_next_job_locked();
   void target();
 
   const int max_num_threads_;
   std::vector<std::thread> threads_;
-  std::deque<std::shared_ptr<Job>> pending_jobs_;
-  std::shared_ptr<Job> active_job_;
+  std::deque<Job *> pending_jobs_;
+  Job *active_job_{nullptr};
   std::condition_variable worker_cv_;
   std::condition_variable completion_cv_;
   std::mutex mutex_;
