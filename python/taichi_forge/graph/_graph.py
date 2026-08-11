@@ -11668,7 +11668,11 @@ class GraphBuilder:
         self._runtime_graph_native_action_manifests = []
         self._active_bounded_publication = None
 
-    def _append_native(self, node, *, prewarm=False):
+    def _append_native(self, node, *, prewarm=False, admission="explicit"):
+        if admission not in ("explicit", "auto"):
+            raise TaichiRuntimeError(
+                "Graph native admission must be 'explicit' or 'auto'"
+            )
         executable = compile_native_graph_node(node)
         if prewarm:
             executable.prewarm()
@@ -11677,6 +11681,19 @@ class GraphBuilder:
             sequence = Sequential()
             sequence._append_recordable_sequence(structured, executable)
             return self.append(sequence)
+        if admission == "auto":
+            backend = _backend_name(
+                _ti_core.arch_name(impl.current_cfg().arch)
+            )
+            action = executable.recordable_action
+            if action is None or not action.supports_backend(backend):
+                manifest = native_action_manifest(executable, action)
+                raise TaichiRuntimeError(
+                    "Automatic native Graph admission rejected a fragmented "
+                    f"provider plan: {manifest.name}:"
+                    f"{manifest.fragmentation_reason}. Use admission='explicit' "
+                    "only for diagnostic segmented execution."
+                )
         self._active_bounded_publication = None
         self._flush_graph_builder()
         self._nodes.append(_CompiledNativeGraphNode(executable))
@@ -11820,8 +11837,17 @@ class GraphBuilder:
         self._observation_names.add(name)
         return self
 
-    def append_native(self, node, *, prewarm=False):
-        return self._append_native(node, prewarm=prewarm)
+    def append_native(self, node, *, prewarm=False, admission="explicit"):
+        """Append a native provider under explicit or fail-closed admission.
+
+        ``admission='auto'`` accepts only a provider that can be integrated
+        into the enclosing backend Graph.  ``'explicit'`` preserves the
+        diagnostic segmented route for providers whose backend command plan
+        is not yet integrated.
+        """
+        return self._append_native(
+            node, prewarm=prewarm, admission=admission
+        )
 
     def compile(self, *, workspace_lanes=1, workspace_saturation="wait"):
         self._flush_graph_builder()
@@ -12055,6 +12081,8 @@ class Graph:
             recordable_actions = 0
             opaque_actions = 0
             loose_actions = 0
+            loose_helper_count = 0
+            loose_helper_count_exact = True
             rejection_reasons = []
             publications = {}
             for stage in self._spec.pipeline_definition:
@@ -12068,12 +12096,18 @@ class Graph:
                         if not action.recordable or action.opaque:
                             opaque_actions += 1
                             stage_reasons.append(
-                                f"{action.name}:opaque_native_action"
+                                f"{action.name}:{action.fragmentation_reason}"
                             )
                         else:
                             stage_reasons.append(
                                 f"{action.name}:backend_not_recordable:{backend}"
                             )
+                        if action.loose_helper_count_exact:
+                            loose_helper_count += int(
+                                action.loose_helper_count
+                            )
+                        else:
+                            loose_helper_count_exact = False
                 rejection_reasons.extend(stage_reasons)
                 for bounded in stage["bounded_dispatches"]:
                     key = tuple(bounded["publication_key"])
@@ -12109,6 +12143,15 @@ class Graph:
                                 for action in actions
                             ),
                             "loose_native_actions": len(stage_reasons),
+                            "backend_command_count": sum(
+                                int(action.backend_command_count or 0)
+                                for action in actions
+                                if action.backend_command_count_exact
+                            ),
+                            "backend_command_count_exact": all(
+                                action.backend_command_count_exact
+                                for action in actions
+                            ),
                             "host_observation": stage["kind"] == "observation",
                             "rejection_reasons": tuple(stage_reasons),
                         }
@@ -12139,8 +12182,14 @@ class Graph:
                     # helpers.  Until that provider publishes a command plan,
                     # reporting the action count as an exact helper count
                     # would be misleading.
-                    "loose_helper_count": None,
-                    "loose_helper_count_exact": False,
+                    "loose_helper_count": (
+                        loose_helper_count
+                        if loose_actions and loose_helper_count_exact
+                        else None
+                    ),
+                    "loose_helper_count_exact": bool(
+                        loose_actions and loose_helper_count_exact
+                    ),
                     "host_observation_boundary_count": int(
                         self._spec.observation_count
                     ),

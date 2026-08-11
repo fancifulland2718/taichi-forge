@@ -1421,6 +1421,20 @@ def test_graph_device_prefix_sequence_publishes_bounded_launch_state():
         if ti.lang.impl.current_cfg().arch == ti.vulkan
         else None
     )
+    auto_sequence = ti.algorithms.DevicePrefixSequence(capacity)
+    auto_sequence.input(values_arg, input_extent_arg).compact(
+        flags_arg,
+        compacted_arg,
+        compact_extent_arg,
+        dispatch_state=publication_state,
+    )
+    with pytest.raises(
+        RuntimeError,
+        match="Automatic native Graph admission rejected a fragmented",
+    ):
+        ti.graph.GraphBuilder().append_native(
+            auto_sequence, admission="auto"
+        )
     sequence = ti.algorithms.DevicePrefixSequence(capacity)
     sequence.input(values_arg, input_extent_arg).compact(
         flags_arg,
@@ -1442,6 +1456,7 @@ def test_graph_device_prefix_sequence_publishes_bounded_launch_state():
         launch_state=publication_state,
     )
     graph = builder.compile()
+    physical_plan = graph.physical_plan()
 
     values_host = np.arange(capacity, dtype=np.int32) + 2
     flags_host = ((np.arange(capacity) % 4) != 1).astype(np.int32)
@@ -1477,6 +1492,13 @@ def test_graph_device_prefix_sequence_publishes_bounded_launch_state():
     }[ti.lang.impl.current_cfg().arch]
     assert graph._debug_info["nodes"][0]["materialized_methods"] == (
         expected_method,
+    )
+    assert physical_plan["fragmented_native_plan"]
+    assert physical_plan["loose_native_action_count"] == 1
+    assert physical_plan["loose_helper_count_exact"]
+    assert physical_plan["loose_helper_count"] == 2
+    assert physical_plan["rejection_reasons"] == (
+        "device_prefix_sequence:provider_command_not_graph_integrated",
     )
 
     runtime_args = {

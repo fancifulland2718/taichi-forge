@@ -2491,7 +2491,7 @@ def test_mixed_recordable_native_node_lowers_to_one_backend_region():
     assert stage.bounded_dispatches == ()
     manifest = stage.native_actions[0]
     assert isinstance(manifest, ti.graph.NativeActionManifest)
-    assert manifest.schema_version == 1
+    assert manifest.schema_version == 2
     assert manifest.name == "recorded_dispatch"
     assert manifest.recordable
     assert not manifest.opaque

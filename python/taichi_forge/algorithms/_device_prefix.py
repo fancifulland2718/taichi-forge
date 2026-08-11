@@ -26,7 +26,11 @@ from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang.impl import ndarray as ti_ndarray
 from taichi_forge.types.primitive_types import f32, f64, i32, i64, u32, u64
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect, RuntimeBinding
-from taichi_forge.graph._native import NativeGraphExecutable, NativeGraphNode
+from taichi_forge.graph._native import (
+    BackendCommandPlan,
+    NativeGraphExecutable,
+    NativeGraphNode,
+)
 
 
 _PREFIX_DTYPES = (i32, u32, i64, u64, f32, f64)
@@ -914,6 +918,39 @@ class _DevicePrefixSequenceGraphExecutable(NativeGraphExecutable):
     def lifetime_leases(self):
         return self._dispatch_states
 
+    @property
+    def backend_command_plan(self):
+        helper_counts = {
+            "compact": 2,
+            "scan": 2,
+            "reduce": 2,
+            "sort": 2,
+            "unique": 2,
+            "run_length_encode": 4,
+            "grouped_reduce": 3,
+            "bucket_builder": 3,
+        }
+        backend = {
+            _ti_core.Arch.x64: "cpu",
+            _ti_core.Arch.arm64: "cpu",
+            _ti_core.Arch.cuda: "cuda",
+            _ti_core.Arch.vulkan: "vulkan",
+        }.get(impl.current_cfg().arch)
+        if backend is None:
+            return None
+        return BackendCommandPlan(
+            backend=backend,
+            helper_count=sum(
+                helper_counts[kind] for kind, _, _ in self._operations
+            ),
+            helper_count_exact=True,
+            command_count=None,
+            command_count_exact=False,
+            provider_replay=backend == "vulkan",
+            no_host_readback=True,
+            python_replay_loop=self._legacy_replay,
+        )
+
     def _prefix(self, runtime_args, token):
         values_name, extent_name = self._tokens[token]
         return DevicePrefix(
@@ -1132,6 +1169,20 @@ class _DevicePrefixSequenceGraphExecutable(NativeGraphExecutable):
             "replay_python_operation_loop": self._legacy_replay,
             "legacy_replay_forced": self._legacy_replay,
             "backend_native_recording": False,
+            "backend_command_plan": {
+                "loose_helper_count": self.backend_command_plan.helper_count,
+                "loose_helper_count_exact": (
+                    self.backend_command_plan.helper_count_exact
+                ),
+                "backend_command_count": None,
+                "backend_command_count_exact": False,
+                "provider_replay": self.backend_command_plan.provider_replay,
+                "graph_integrated": False,
+                "automatic_admissible": False,
+                "fragmentation_reason": (
+                    self.backend_command_plan.fragmentation_reason
+                ),
+            },
             "materialized_methods": tuple(
                 options.get("method") for _, _, options in self._operations
                 if "method" in options

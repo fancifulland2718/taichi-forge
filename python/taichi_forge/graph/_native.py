@@ -153,6 +153,13 @@ class NativeActionManifest:
     fixed_binding_names: tuple
     temporary_bindings: tuple
     lifetime_lease_count: int
+    backend_command_count: object = None
+    backend_command_count_exact: bool = False
+    loose_helper_count: object = None
+    loose_helper_count_exact: bool = False
+    backend_command_replay: bool = False
+    automatic_admissible: bool = False
+    fragmentation_reason: str = "none"
 
     def to_dict(self):
         return {
@@ -181,7 +188,49 @@ class NativeActionManifest:
             "fixed_binding_names": self.fixed_binding_names,
             "temporary_bindings": self.temporary_bindings,
             "lifetime_lease_count": self.lifetime_lease_count,
+            "backend_command_count": self.backend_command_count,
+            "backend_command_count_exact": self.backend_command_count_exact,
+            "loose_helper_count": self.loose_helper_count,
+            "loose_helper_count_exact": self.loose_helper_count_exact,
+            "backend_command_replay": self.backend_command_replay,
+            "automatic_admissible": self.automatic_admissible,
+            "fragmentation_reason": self.fragmentation_reason,
         }
+
+
+@dataclass(frozen=True)
+class BackendCommandPlan:
+    """Provider command topology that is not yet an integrated CGraph action.
+
+    The plan makes opaque native execution measurable without pretending that
+    a provider-local replay cache is equivalent to one enclosing Graph.  It is
+    intentionally descriptive: automatic admission remains false until the
+    provider exposes ``recordable_action`` or ``recordable_sequence``.
+    """
+
+    backend: str
+    helper_count: object = None
+    helper_count_exact: bool = False
+    command_count: object = None
+    command_count_exact: bool = False
+    provider_replay: bool = False
+    no_host_readback: bool = True
+    python_replay_loop: bool = False
+    fragmentation_reason: str = "provider_command_not_graph_integrated"
+
+    def __post_init__(self):
+        if self.backend not in ("cpu", "cuda", "vulkan"):
+            raise ValueError("Unsupported backend command plan backend")
+        if self.command_count is not None and int(self.command_count) < 0:
+            raise ValueError("Backend command count must be nonnegative")
+        if self.helper_count is not None and int(self.helper_count) < 0:
+            raise ValueError("Backend helper count must be nonnegative")
+        if self.command_count_exact and self.command_count is None:
+            raise ValueError("Exact backend command plans require a count")
+        if self.helper_count_exact and self.helper_count is None:
+            raise ValueError("Exact backend helper plans require a count")
+        if not self.fragmentation_reason:
+            raise ValueError("Backend command fragmentation reason is required")
 
 
 @dataclass(frozen=True)
@@ -396,6 +445,11 @@ class NativeGraphExecutable:
         return None
 
     @property
+    def backend_command_plan(self):
+        """Optional measured topology for a non-integrated native provider."""
+        return None
+
+    @property
     def graph_ir_node(self):
         info = self.debug_info
         name = (
@@ -428,6 +482,13 @@ def native_action_manifest(
         if recordable_action is _UNSET_RECORDABLE_ACTION
         else recordable_action
     )
+    command_plan = executable.backend_command_plan
+    if command_plan is not None and not isinstance(
+        command_plan, BackendCommandPlan
+    ):
+        raise TaichiRuntimeError(
+            "Native Graph backend_command_plan must be a BackendCommandPlan"
+        )
     if action is not None and not isinstance(action, RecordableGraphAction):
         raise TaichiRuntimeError(
             "Native Graph recordable_action must implement RecordableGraphAction"
@@ -512,7 +573,7 @@ def native_action_manifest(
         synchronization_domain = capabilities.synchronization_domain
 
     return NativeActionManifest(
-        schema_version=1,
+        schema_version=2,
         name=name,
         recordable=action is not None,
         opaque=bool(getattr(ir_node, "opaque", action is None)),
@@ -530,6 +591,31 @@ def native_action_manifest(
         fixed_binding_names=fixed_binding_names,
         temporary_bindings=temporary_bindings,
         lifetime_lease_count=len(tuple(executable.lifetime_leases)),
+        backend_command_count=(
+            None if command_plan is None else command_plan.command_count
+        ),
+        backend_command_count_exact=bool(
+            command_plan is not None and command_plan.command_count_exact
+        ),
+        loose_helper_count=(
+            None if command_plan is None else command_plan.helper_count
+        ),
+        loose_helper_count_exact=bool(
+            command_plan is not None and command_plan.helper_count_exact
+        ),
+        backend_command_replay=bool(
+            command_plan is not None and command_plan.provider_replay
+        ),
+        automatic_admissible=action is not None,
+        fragmentation_reason=(
+            "none"
+            if action is not None
+            else (
+                command_plan.fragmentation_reason
+                if command_plan is not None
+                else "opaque_native_action"
+            )
+        ),
     )
 
 
