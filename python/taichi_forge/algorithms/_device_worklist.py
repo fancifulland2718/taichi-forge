@@ -7,6 +7,7 @@ device prefix, compact, and native stable-sort providers.
 """
 
 import itertools
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -316,6 +317,128 @@ def _materialize_conflict_winners(
             output_ordinals[i] = 0
 
 
+@kernel
+def _reset_dense_conflict_workspace(
+    best_priorities: ndarray_type.ndarray(dtype=i32, ndim=1),
+    best_ordinals: ndarray_type.ndarray(dtype=i32, ndim=1),
+    best_sources: ndarray_type.ndarray(dtype=i32, ndim=1),
+    flags: ndarray_type.ndarray(dtype=i32, ndim=1),
+    invalid: ndarray_type.ndarray(dtype=i32, ndim=1),
+    policy: i32,
+):
+    for i in flags:
+        best_priorities[i] = (
+            -0x80000000 if policy == 2 else 0x7FFFFFFF
+        )
+        best_ordinals[i] = 0x7FFFFFFF
+        best_sources[i] = 0x7FFFFFFF
+        flags[i] = 0
+    invalid[0] = 0
+
+
+@kernel
+def _select_dense_conflict_priorities(
+    keys: ndarray_type.ndarray(),
+    priorities: ndarray_type.ndarray(dtype=i32, ndim=1),
+    best_priorities: ndarray_type.ndarray(dtype=i32, ndim=1),
+    invalid: ndarray_type.ndarray(dtype=i32, ndim=1),
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    key_capacity: i32,
+    policy: i32,
+):
+    for source in keys:
+        if source < extent_state[0]:
+            raw_key = keys[source]
+            if raw_key >= 0 and raw_key < key_capacity:
+                key = ops.cast(raw_key, i32)
+                if policy == 1:
+                    ops.atomic_min(best_priorities[key], priorities[source])
+                elif policy == 2:
+                    ops.atomic_max(best_priorities[key], priorities[source])
+            else:
+                ops.atomic_or(invalid[0], 1)
+
+
+@kernel
+def _select_dense_conflict_ordinals(
+    keys: ndarray_type.ndarray(),
+    priorities: ndarray_type.ndarray(dtype=i32, ndim=1),
+    ordinals: ndarray_type.ndarray(dtype=i32, ndim=1),
+    best_priorities: ndarray_type.ndarray(dtype=i32, ndim=1),
+    best_ordinals: ndarray_type.ndarray(dtype=i32, ndim=1),
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    key_capacity: i32,
+    policy: i32,
+):
+    for source in keys:
+        if source < extent_state[0]:
+            raw_key = keys[source]
+            if raw_key >= 0 and raw_key < key_capacity:
+                key = ops.cast(raw_key, i32)
+                if policy == 0 or priorities[source] == best_priorities[key]:
+                    ops.atomic_min(best_ordinals[key], ordinals[source])
+
+
+@kernel
+def _select_dense_conflict_sources(
+    keys: ndarray_type.ndarray(),
+    priorities: ndarray_type.ndarray(dtype=i32, ndim=1),
+    ordinals: ndarray_type.ndarray(dtype=i32, ndim=1),
+    best_priorities: ndarray_type.ndarray(dtype=i32, ndim=1),
+    best_ordinals: ndarray_type.ndarray(dtype=i32, ndim=1),
+    best_sources: ndarray_type.ndarray(dtype=i32, ndim=1),
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    key_capacity: i32,
+    policy: i32,
+):
+    for source in keys:
+        if source < extent_state[0]:
+            raw_key = keys[source]
+            if raw_key >= 0 and raw_key < key_capacity:
+                key = ops.cast(raw_key, i32)
+                priority_matches = (
+                    policy == 0 or priorities[source] == best_priorities[key]
+                )
+                if priority_matches and ordinals[source] == best_ordinals[key]:
+                    ops.atomic_min(best_sources[key], source)
+
+
+@kernel
+def _mark_dense_conflict_winners(
+    best_sources: ndarray_type.ndarray(dtype=i32, ndim=1),
+    flags: ndarray_type.ndarray(dtype=i32, ndim=1),
+    key_capacity: i32,
+):
+    for key in flags:
+        flags[key] = (
+            1
+            if key < key_capacity and best_sources[key] != 0x7FFFFFFF
+            else 0
+        )
+
+
+@kernel
+def _emit_dense_conflict_winners(
+    flags: ndarray_type.ndarray(dtype=i32, ndim=1),
+    best_sources: ndarray_type.ndarray(dtype=i32, ndim=1),
+    invalid: ndarray_type.ndarray(dtype=i32, ndim=1),
+    output_keys: ndarray_type.ndarray(),
+    winner_sources: ndarray_type.ndarray(dtype=i32, ndim=1),
+    output_extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    key_capacity: i32,
+):
+    for key in flags:
+        if key < key_capacity:
+            previous = flags[key - 1] if key > 0 else 0
+            if flags[key] != previous:
+                output = flags[key] - 1
+                output_keys[output] = key
+                winner_sources[output] = best_sources[key]
+        if key == flags.shape[0] - 1:
+            output_extent_state[0] = flags[key]
+            output_extent_state[1] = invalid[0]
+
+
 @dataclass(frozen=True)
 class DeviceWorklistBinding:
     """Immutable allocation identity of one worklist generation."""
@@ -386,6 +509,9 @@ class DeviceConflictResult:
     extent: DeviceExtent
     statistics: tuple
     policy: str
+    strategy: str
+    sort_method: object
+    key_capacity: object
 
 
 @dataclass(frozen=True)
@@ -508,6 +634,55 @@ def _native_key_sort_method(method):
     )
 
 
+def _normalize_conflict_sort_method(method, sort_method):
+    if sort_method is None:
+        sort_method = method
+    elif method != "auto":
+        raise ValueError(
+            "DeviceWorklist conflict method= is the backward-compatible sort "
+            "provider alias and cannot be combined with sort_method="
+        )
+    if not isinstance(sort_method, str) or not sort_method:
+        raise TypeError("DeviceWorklist conflict sort_method must be a string")
+    return sort_method
+
+
+def _choose_conflict_strategy(strategy, key_capacity, capacity):
+    if strategy not in ("auto", "dense_atomic", "radix_grouped"):
+        raise ValueError(
+            "conflict strategy must be auto, dense_atomic, or radix_grouped"
+        )
+    if key_capacity is not None:
+        key_capacity = _require_capacity(key_capacity, "key_capacity")
+        if key_capacity > capacity:
+            raise ValueError(
+                "DeviceWorklist dense key_capacity cannot exceed worklist capacity"
+            )
+    if strategy == "dense_atomic":
+        if key_capacity is None:
+            raise ValueError("dense_atomic conflict strategy requires key_capacity")
+        return strategy, key_capacity, "explicit_dense_domain"
+    if strategy == "radix_grouped":
+        return strategy, key_capacity, "explicit_radix"
+    # The dense path wins decisively once the problem is large enough to
+    # amortize its fixed reset/scan passes.  Small CPU worklists are the one
+    # measured exception: radix grouping is slightly cheaper there even for a
+    # compact key domain.  Keep explicit ``dense_atomic`` available for users
+    # who know their workload, but make ``auto`` conservative at that crossover.
+    cpu_small_problem = (
+        impl.current_cfg().arch == _ti_core.Arch.x64 and capacity < 4096
+    )
+    if (
+        key_capacity is not None
+        and key_capacity * 4 <= capacity
+        and not cpu_small_problem
+    ):
+        return "dense_atomic", key_capacity, "bounded_dense_domain"
+    if key_capacity is not None and cpu_small_problem:
+        return "radix_grouped", key_capacity, "small_cpu_radix_fallback"
+    return "radix_grouped", key_capacity, "conservative_radix_fallback"
+
+
 def _stats_tuple(stats):
     return tuple(stats[name] for name in _STAT_NAMES)
 
@@ -566,6 +741,123 @@ def _select_impl(
     return result
 
 
+def _resolve_dense_impl(
+    source_values,
+    source_extent,
+    keys,
+    output_values,
+    output_extent,
+    stats,
+    workspace,
+    *,
+    priorities,
+    ordinals,
+    output_keys,
+    output_priorities,
+    output_ordinals,
+    policy,
+    key_capacity,
+):
+    capacity = source_extent.capacity
+    stage_sources = workspace._buffer("conflict_sources", i32, capacity)
+    best_priorities = workspace._buffer(
+        "dense_conflict_priorities", i32, key_capacity
+    )
+    best_ordinals = workspace._buffer(
+        "dense_conflict_ordinals", i32, key_capacity
+    )
+    best_sources = workspace._buffer(
+        "dense_conflict_sources", i32, key_capacity
+    )
+    flags = workspace._buffer("dense_conflict_flags", i32, key_capacity)
+    winner_sources = workspace._buffer("conflict_winner_sources", i32, capacity)
+    invalid = workspace._buffer("dense_conflict_invalid", i32, 1)
+    _stage_conflict_source_indices(stage_sources, source_extent.state)
+    priority_values = priorities if priorities is not None else stage_sources
+    ordinal_values = ordinals if ordinals is not None else stage_sources
+    effective_policy = 0
+    if policy in ("claim", "min_priority") and priorities is not None:
+        effective_policy = 1
+    elif policy == "max_priority":
+        effective_policy = 2
+    _reset_dense_conflict_workspace(
+        best_priorities,
+        best_ordinals,
+        best_sources,
+        flags,
+        invalid,
+        effective_policy,
+    )
+    _select_dense_conflict_priorities(
+        keys,
+        priority_values,
+        best_priorities,
+        invalid,
+        source_extent.state,
+        key_capacity,
+        effective_policy,
+    )
+    _select_dense_conflict_ordinals(
+        keys,
+        priority_values,
+        ordinal_values,
+        best_priorities,
+        best_ordinals,
+        source_extent.state,
+        key_capacity,
+        effective_policy,
+    )
+    _select_dense_conflict_sources(
+        keys,
+        priority_values,
+        ordinal_values,
+        best_priorities,
+        best_ordinals,
+        best_sources,
+        source_extent.state,
+        key_capacity,
+        effective_policy,
+    )
+    _mark_dense_conflict_winners(best_sources, flags, key_capacity)
+    workspace._scanner(key_capacity).run(flags)
+    _emit_dense_conflict_winners(
+        flags,
+        best_sources,
+        invalid,
+        output_keys,
+        winner_sources,
+        output_extent.state,
+        key_capacity,
+    )
+    device_prefix_fill_tail_ndarray(winner_sources, output_extent.state, 0)
+    _materialize_conflict_winners(
+        source_values,
+        priority_values,
+        ordinal_values,
+        winner_sources,
+        output_values,
+        output_priorities,
+        output_ordinals,
+        output_extent.state,
+        int(priorities is not None),
+        int(ordinals is not None),
+    )
+    _publish_transition(source_extent, output_extent, stats, True)
+    workspace._refresh_usage()
+    return DeviceConflictResult(
+        keys=output_keys,
+        values=output_values,
+        priorities=output_priorities,
+        ordinals=output_ordinals,
+        extent=output_extent,
+        statistics=_stats_tuple(stats),
+        policy=policy,
+        strategy="dense_atomic",
+        sort_method=None,
+        key_capacity=key_capacity,
+    )
+
+
 def _resolve_impl(
     source_values,
     source_extent,
@@ -581,7 +873,9 @@ def _resolve_impl(
     output_priorities,
     output_ordinals,
     policy,
-    method,
+    strategy,
+    sort_method,
+    key_capacity,
     dispatch_state,
 ):
     capacity = source_extent.capacity
@@ -600,6 +894,36 @@ def _resolve_impl(
     if policy in ("min_priority", "max_priority") and priorities is None:
         raise ValueError(f"conflict policy {policy!r} requires priorities")
 
+    strategy, key_capacity, _ = _choose_conflict_strategy(
+        strategy, key_capacity, capacity
+    )
+    if strategy == "dense_atomic":
+        if dispatch_state is not None:
+            raise ValueError(
+                "dense_atomic conflict resolution publishes its own extent; "
+                "dispatch_state is currently supported only by radix_grouped"
+            )
+        if sort_method != "auto":
+            raise ValueError(
+                "sort_method applies only to radix_grouped conflict resolution"
+            )
+        return _resolve_dense_impl(
+            source_values,
+            source_extent,
+            keys,
+            output_values,
+            output_extent,
+            stats,
+            workspace,
+            priorities=priorities,
+            ordinals=ordinals,
+            output_keys=output_keys,
+            output_priorities=output_priorities,
+            output_ordinals=output_ordinals,
+            policy=policy,
+            key_capacity=key_capacity,
+        )
+
     stage_keys = workspace._buffer("conflict_keys", keys.dtype, capacity)
     stage_sources = workspace._buffer("conflict_sources", i32, capacity)
     flags = workspace._buffer("conflict_flags", i32, capacity)
@@ -612,7 +936,7 @@ def _resolve_impl(
     _alg.sort(
         stage_keys,
         stage_sources,
-        method=_native_key_sort_method(method),
+        method=_native_key_sort_method(sort_method),
         workspace=workspace._sort,
     )
     priority_values = priorities if priorities is not None else stage_sources
@@ -667,6 +991,9 @@ def _resolve_impl(
         extent=output_extent,
         statistics=_stats_tuple(stats),
         policy=policy,
+        strategy="radix_grouped",
+        sort_method=_native_key_sort_method(sort_method),
+        key_capacity=key_capacity,
     )
 
 
@@ -864,11 +1191,23 @@ class DeviceWorklist:
         ordinals=None,
         policy="first",
         method="auto",
+        strategy="auto",
+        sort_method=None,
+        key_capacity=None,
         dispatch_state=None,
     ):
-        """Select one deterministic winner for every active integer key."""
+        """Select one deterministic winner for every active integer key.
+
+        ``strategy`` chooses the arbitration algorithm. ``sort_method`` chooses
+        only the sort provider used by ``radix_grouped``; the legacy
+        ``method`` spelling remains a backward-compatible alias. Supplying a
+        bounded ``key_capacity`` lets ``auto`` admit ``dense_atomic`` when the
+        key domain is at most one quarter of the candidate capacity; small CPU
+        worklists conservatively retain radix unless dense is explicit.
+        """
 
         self._validate_current()
+        sort_method = _normalize_conflict_sort_method(method, sort_method)
         source_extent = self.extent
         output_keys = self._workspace._buffer(
             "conflict_output_keys", keys.dtype, self._capacity
@@ -893,7 +1232,9 @@ class DeviceWorklist:
             output_priorities=output_priorities,
             output_ordinals=output_ordinals,
             policy=policy,
-            method=method,
+            strategy=strategy,
+            sort_method=sort_method,
+            key_capacity=key_capacity,
             dispatch_state=dispatch_state,
         )
         self._next_requires_finalize = False
@@ -906,6 +1247,9 @@ class DeviceWorklist:
             extent=self.extent,
             statistics=result.statistics,
             policy=result.policy,
+            strategy=result.strategy,
+            sort_method=result.sort_method,
+            key_capacity=result.key_capacity,
         )
 
     def statistics(self):
@@ -1163,9 +1507,30 @@ class DeviceWorklistSequence:
         ordinals=None,
         policy="first",
         method="auto",
+        strategy="auto",
+        sort_method=None,
+        key_capacity=None,
         dispatch_state=None,
     ):
         self._ensure_mutable()
+        sort_method = _normalize_conflict_sort_method(method, sort_method)
+        selected_strategy, key_capacity, strategy_reason = (
+            _choose_conflict_strategy(strategy, key_capacity, self.capacity)
+        )
+        selected_sort_method = (
+            _native_key_sort_method(sort_method)
+            if selected_strategy == "radix_grouped"
+            else sort_method
+        )
+        if selected_strategy == "dense_atomic" and selected_sort_method != "auto":
+            raise ValueError(
+                "sort_method applies only to radix_grouped conflict resolution"
+            )
+        if selected_strategy == "dense_atomic" and dispatch_state is not None:
+            raise ValueError(
+                "dense_atomic conflict resolution currently owns extent "
+                "publication and cannot use dispatch_state"
+            )
         keys = self._register(keys, "keys", ndim=1)
         output_keys = self._register(
             output_keys, "output keys", dtype=keys.dtype(), ndim=1
@@ -1176,14 +1541,30 @@ class DeviceWorklistSequence:
         output_ordinals = self._register(
             output_ordinals, "output ordinals", dtype=i32, ndim=1
         )
-        for role, dtype in (
-            ("conflict_keys", keys.dtype()),
+        workspace_buffers = [
             ("conflict_sources", i32),
-            ("conflict_flags", i32),
-            ("conflict_boundary_sources", i32),
             ("conflict_winner_sources", i32),
-            ("compact_flags", i32),
-        ):
+        ]
+        if selected_strategy == "radix_grouped":
+            workspace_buffers.extend(
+                (
+                    ("conflict_keys", keys.dtype()),
+                    ("conflict_flags", i32),
+                    ("conflict_boundary_sources", i32),
+                    ("compact_flags", i32),
+                )
+            )
+        else:
+            for role in (
+                "dense_conflict_priorities",
+                "dense_conflict_ordinals",
+                "dense_conflict_sources",
+                "dense_conflict_flags",
+            ):
+                self.workspace._buffer(role, i32, key_capacity)
+            self.workspace._buffer("dense_conflict_invalid", i32, 1)
+            self.workspace._scanner(key_capacity)
+        for role, dtype in workspace_buffers:
             self.workspace._buffer(role, dtype, self.capacity)
         if priorities is not None:
             priorities = self._register(priorities, "priorities", dtype=i32, ndim=1)
@@ -1208,7 +1589,10 @@ class DeviceWorklistSequence:
             ),
             {
                 "policy": policy,
-                "method": method,
+                "strategy": selected_strategy,
+                "strategy_reason": strategy_reason,
+                "sort_method": selected_sort_method,
+                "key_capacity": key_capacity,
                 "dispatch_state": dispatch_state,
             },
         )
@@ -1231,6 +1615,10 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
         self._recording_id = next(_WORKLIST_RECORDING_IDS)
         self._recordable_action_cache = None
         self._recordable_action_initialized = False
+        self._runner = self._compile_runner()
+        legacy = os.environ.get("TI_DEBUG_NATIVE_SEQUENCE_LEGACY_REPLAY", "")
+        self._legacy_replay = legacy.strip().lower() in ("1", "true", "on", "yes")
+        self._run_impl = self._run_legacy if self._legacy_replay else self._runner
 
     @property
     def runtime_arg_schema(self):
@@ -1367,17 +1755,123 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
             name: runtime_args[getattr(self._args, name).name] for name in _STAT_NAMES
         }
 
-    def run(self, runtime_args=None):
-        if runtime_args is None:
-            raise TaichiRuntimeError(
-                "DeviceWorklistSequence requires Graph runtime arguments"
-            )
-        args = self._args
-        current_values = runtime_args[args.current_values.name]
-        current_extent = runtime_args[args.current_extent.name]
-        next_values = runtime_args[args.next_values.name]
-        next_extent = runtime_args[args.next_extent.name]
-        stats = self._stats(runtime_args)
+    def _compile_runner(self):
+        kind, values, options = self._operation
+        if kind == "reset":
+
+            def reset(
+                _current_values,
+                _current_extent,
+                _next_values,
+                next_extent,
+                stats,
+                _runtime_args,
+            ):
+                _reset_target(next_extent, stats)
+
+            return reset
+        if kind == "finalize":
+            dispatch_state = options["dispatch_state"]
+
+            def finalize(
+                _current_values,
+                _current_extent,
+                _next_values,
+                next_extent,
+                stats,
+                _runtime_args,
+            ):
+                _finalize_atomic_target(
+                    next_extent,
+                    stats,
+                    self._args.capacity_value,
+                    dispatch_state,
+                )
+
+            return finalize
+        if kind == "select":
+            flags = values[0]
+            method = options["method"]
+            dispatch_state = options["dispatch_state"]
+
+            def select(
+                current_values,
+                current_extent,
+                next_values,
+                next_extent,
+                stats,
+                runtime_args,
+            ):
+                _select_impl(
+                    current_values,
+                    current_extent,
+                    runtime_args[flags],
+                    next_values,
+                    next_extent,
+                    stats,
+                    self._workspace,
+                    method=method,
+                    dispatch_state=dispatch_state,
+                )
+
+            return select
+        if kind == "resolve":
+            (
+                keys,
+                output_keys,
+                output_priorities,
+                output_ordinals,
+                priorities,
+                ordinals,
+            ) = values
+            policy = options["policy"]
+            strategy = options["strategy"]
+            sort_method = options["sort_method"]
+            key_capacity = options["key_capacity"]
+            dispatch_state = options["dispatch_state"]
+
+            def resolve(
+                current_values,
+                current_extent,
+                next_values,
+                next_extent,
+                stats,
+                runtime_args,
+            ):
+                _resolve_impl(
+                    current_values,
+                    current_extent,
+                    runtime_args[keys],
+                    next_values,
+                    next_extent,
+                    stats,
+                    self._workspace,
+                    priorities=(
+                        None if priorities is None else runtime_args[priorities]
+                    ),
+                    ordinals=None if ordinals is None else runtime_args[ordinals],
+                    output_keys=runtime_args[output_keys],
+                    output_priorities=runtime_args[output_priorities],
+                    output_ordinals=runtime_args[output_ordinals],
+                    policy=policy,
+                    strategy=strategy,
+                    sort_method=sort_method,
+                    key_capacity=key_capacity,
+                    dispatch_state=dispatch_state,
+                )
+
+            return resolve
+        raise TaichiRuntimeError(f"Unsupported worklist operation {kind!r}")
+
+    def _run_legacy(
+        self,
+        current_values,
+        current_extent,
+        next_values,
+        next_extent,
+        stats,
+        runtime_args,
+    ):
         kind, values, options = self._operation
         if kind == "reset":
             _reset_target(next_extent, stats)
@@ -1417,27 +1911,68 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
                 next_extent,
                 stats,
                 self._workspace,
-                priorities=(None if priorities is None else runtime_args[priorities]),
+                priorities=(
+                    None if priorities is None else runtime_args[priorities]
+                ),
                 ordinals=None if ordinals is None else runtime_args[ordinals],
                 output_keys=runtime_args[output_keys],
                 output_priorities=runtime_args[output_priorities],
                 output_ordinals=runtime_args[output_ordinals],
                 policy=options["policy"],
-                method=options["method"],
+                strategy=options["strategy"],
+                sort_method=options["sort_method"],
+                key_capacity=options["key_capacity"],
                 dispatch_state=options["dispatch_state"],
             )
         else:
             raise TaichiRuntimeError(f"Unsupported worklist operation {kind!r}")
 
+    def run(self, runtime_args=None):
+        if runtime_args is None:
+            raise TaichiRuntimeError(
+                "DeviceWorklistSequence requires Graph runtime arguments"
+            )
+        args = self._args
+        current_values = runtime_args[args.current_values.name]
+        current_extent = runtime_args[args.current_extent.name]
+        next_values = runtime_args[args.next_values.name]
+        next_extent = runtime_args[args.next_extent.name]
+        stats = self._stats(runtime_args)
+        self._run_impl(
+            current_values,
+            current_extent,
+            next_values,
+            next_extent,
+            stats,
+            runtime_args,
+        )
+
     @property
     def debug_info(self):
-        return {
+        result = {
             "kind": "device_worklist_sequence",
             "operation": self._operation[0],
             "capacity": self._args.capacity_value,
             "counter_count": len(_STAT_NAMES),
             "workspace_bytes_peak": self._workspace.workspace_bytes_peak,
+            "provider_selection": "materialization_time",
+            "replay_operation_branch": self._legacy_replay,
+            "legacy_replay_forced": self._legacy_replay,
+            "backend_native_recording": self._operation[0] in ("reset", "finalize"),
         }
+        if self._operation[0] == "resolve":
+            options = self._operation[2]
+            result.update(
+                conflict_strategy=options["strategy"],
+                conflict_strategy_reason=options["strategy_reason"],
+                sort_provider=(
+                    options["sort_method"]
+                    if options["strategy"] == "radix_grouped"
+                    else None
+                ),
+                key_capacity=options["key_capacity"],
+            )
+        return result
 
 
 class _DeviceWorklistSequenceNode(NativeGraphNode):

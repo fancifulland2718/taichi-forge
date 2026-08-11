@@ -187,6 +187,121 @@ def test_device_worklist_deterministic_keyed_claim(
     assert not snapshot.statistics.overflow
 
 
+@pytest.mark.parametrize(
+    "policy,priorities",
+    [
+        ("first", None),
+        ("claim", np.array([3, 4, 1, 2, 1, 0], dtype=np.int32)),
+        ("min_priority", np.array([3, 4, 1, 2, 1, 0], dtype=np.int32)),
+        ("max_priority", np.array([3, 4, 1, 2, 1, 0], dtype=np.int32)),
+    ],
+)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_worklist_dense_conflict_matches_radix(policy, priorities):
+    capacity = 64
+    count = 6
+    key_capacity = 8
+    keys_host = np.array([2, 1, 2, 1, 2, 3], dtype=np.int32)
+    values_host = np.array([20, 11, 22, 13, 24, 35], dtype=np.int32)
+
+    def resolve(strategy):
+        keys = ti.ndarray(ti.i32, shape=capacity)
+        keys.from_numpy(np.pad(keys_host, (0, capacity - count)))
+        priority_array = None
+        if priorities is not None:
+            priority_array = ti.ndarray(ti.i32, shape=capacity)
+            priority_array.from_numpy(np.pad(priorities, (0, capacity - count)))
+        worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)
+        worklist.values.from_numpy(np.pad(values_host, (0, capacity - count)))
+        worklist.extent.set(count)
+        result = worklist.resolve_conflicts(
+            keys,
+            priorities=priority_array,
+            policy=policy,
+            strategy=strategy,
+            key_capacity=key_capacity,
+        )
+        snapshot = worklist.snapshot()
+        useful = snapshot.extent.count
+        return (
+            result,
+            snapshot,
+            result.keys.to_numpy()[:useful],
+            result.priorities.to_numpy()[:useful],
+            result.ordinals.to_numpy()[:useful],
+            worklist.memory_report(),
+        )
+
+    dense = resolve("dense_atomic")
+    radix = resolve("radix_grouped")
+    assert dense[0].strategy == "dense_atomic"
+    assert dense[0].sort_method is None
+    assert dense[0].key_capacity == key_capacity
+    assert radix[0].strategy == "radix_grouped"
+    np.testing.assert_array_equal(dense[1].values, radix[1].values)
+    np.testing.assert_array_equal(dense[2], radix[2])
+    np.testing.assert_array_equal(dense[3], radix[3])
+    np.testing.assert_array_equal(dense[4], radix[4])
+    assert dense[1].statistics == radix[1].statistics
+    assert dense[5]["workspace_bytes_peak"] < radix[5]["workspace_bytes_peak"]
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_worklist_dense_conflict_reports_out_of_domain_key():
+    capacity = 32
+    keys = ti.ndarray(ti.i32, shape=capacity)
+    keys.from_numpy(
+        np.pad(np.array([0, 7, 2, -1], dtype=np.int32), (0, capacity - 4))
+    )
+    worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)
+    worklist.values.from_numpy(np.arange(capacity, dtype=np.int32))
+    worklist.extent.set(4)
+    result = worklist.resolve_conflicts(
+        keys,
+        strategy="dense_atomic",
+        key_capacity=4,
+    )
+    snapshot = worklist.snapshot()
+    np.testing.assert_array_equal(result.keys.to_numpy()[:2], [0, 2])
+    np.testing.assert_array_equal(snapshot.values, [0, 2])
+    assert snapshot.statistics.generated == 4
+    assert snapshot.statistics.accepted == 2
+    assert snapshot.statistics.rejected == 2
+    assert snapshot.statistics.overflow
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_worklist_conflict_strategy_and_sort_provider_are_separate():
+    capacity = 32
+    worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)
+    keys = ti.ndarray(ti.i32, shape=capacity)
+    with pytest.raises(ValueError, match="cannot be combined"):
+        worklist.resolve_conflicts(
+            keys, method="cpu_native", sort_method="auto"
+        )
+    with pytest.raises(ValueError, match="requires key_capacity"):
+        worklist.resolve_conflicts(keys, strategy="dense_atomic")
+    with pytest.raises(ValueError, match="applies only to radix_grouped"):
+        worklist.resolve_conflicts(
+            keys,
+            strategy="dense_atomic",
+            key_capacity=4,
+            sort_method="cpu_native",
+        )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_worklist_auto_conflict_strategy_respects_small_cpu_crossover():
+    capacity = 1024
+    worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)
+    keys = ti.ndarray(ti.i32, shape=capacity)
+    result = worklist.resolve_conflicts(keys, key_capacity=64)
+    if impl.current_cfg().arch == ti_core.Arch.x64:
+        assert result.strategy == "radix_grouped"
+    else:
+        assert result.strategy == "dense_atomic"
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_device_worklist_graph_sequence_and_completion_observation(monkeypatch):
     monkeypatch.setenv("TI_GRAPH_OBSERVATION_SLOTS", "2")
