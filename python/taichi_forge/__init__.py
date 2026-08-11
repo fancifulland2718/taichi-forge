@@ -3,6 +3,10 @@ from taichi_forge._lib import core as _ti_core
 from taichi_forge._lib.utils import warn_restricted_version
 from taichi_forge._logging import *
 from taichi_forge._snode import *
+from taichi_forge._contracts import (
+    runtime_contract_manifest,
+    validate_runtime_contract,
+)
 from taichi_forge.lang import *  # pylint: disable=W0622 # TODO(archibate): It's `taichi_forge.lang.core` overriding `taichi_forge.core`
 from taichi_forge.types.annotations import *
 

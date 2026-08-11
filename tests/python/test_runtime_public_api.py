@@ -11,6 +11,26 @@ from taichi_forge import runtime as runtime_api
 from tests import test_utils
 
 
+def test_runtime_contract_manifest_is_immutable_and_source_agnostic():
+    manifest = ti.validate_runtime_contract(require_native_manifest=True)
+    assert manifest["schema_version"] == 1
+    assert manifest["native_abi_revision"] == manifest[
+        "required_native_abi_revision"
+    ]
+    assert manifest["schemas"]["dynamic_work"] == 5
+    assert manifest["schemas"]["structured_control"] == 5
+    assert manifest["schemas"]["graph_pipeline"] == 2
+    assert manifest["runtime"]["source_id"]
+    assert manifest["shim"]["source_id"]
+    assert manifest["compiler_compatibility"]["runtime"]
+    assert manifest["compiler_compatibility"]["shim"]
+    assert manifest["features"]["cpu"] is True
+    with pytest.raises(TypeError):
+        manifest["native_abi_revision"] = 0
+    with pytest.raises(TypeError):
+        manifest["schemas"]["dynamic_work"] = 0
+
+
 def test_runtime_public_api_requires_an_initialized_program():
     ti.reset()
     with pytest.raises(ti.TaichiRuntimeError, match=r"requires ti\.init"):
@@ -44,7 +64,7 @@ def test_runtime_stats_and_capabilities_are_immutable_and_exact():
     prog = ti.lang.impl.get_runtime().prog
     raw = prog._runtime_statistics_snapshot()
     snapshot = ti.runtime.stats()
-    assert snapshot.schema_version == raw["schema_version"] == 2
+    assert snapshot.schema_version == raw["schema_version"] == 3
     assert snapshot.backend == raw["backend"]
     assert snapshot.program_domain == raw["program_domain"]
     assert asdict(snapshot.submission) == raw["submission"]

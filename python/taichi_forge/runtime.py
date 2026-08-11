@@ -10,7 +10,7 @@ from typing import Optional
 from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiRuntimeError
 
-_RUNTIME_STATISTICS_SCHEMA_VERSION = 2
+_RUNTIME_STATISTICS_SCHEMA_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -18,6 +18,7 @@ class SubmissionStatistics:
     kernel_submissions: int
     graph_submissions: int
     graph_backend_submissions: int
+    backend_graph_launches: int
     native_submissions: int
     failed_submissions: int
 

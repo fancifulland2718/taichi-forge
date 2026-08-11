@@ -325,6 +325,16 @@ std::string get_version_string();
 
 std::string get_commit_hash();
 
+int get_forge_native_abi_revision();
+
+int get_forge_contract_manifest_schema_version();
+
+std::uint32_t get_forge_runtime_statistics_schema_version();
+
+std::uint64_t get_forge_native_feature_bitmap();
+
+std::string get_forge_native_compiler_abi();
+
 std::string get_cuda_version_string();
 
 class PID {

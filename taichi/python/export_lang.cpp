@@ -9,6 +9,8 @@
 #include <unordered_set>
 #include <utility>
 #include "taichi/ir/snode.h"
+#include "taichi/common/commit_hash.h"
+#include "taichi/common/runtime_contract.h"
 
 #if TI_WITH_LLVM
 #include "llvm/Config/llvm-config.h"
@@ -27,6 +29,7 @@
 #include "taichi/program/extension.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/matrix.h"
+#include "taichi/program/runtime_statistics.h"
 #include "taichi/program/storage_view.h"
 #include "taichi/python/export_storage_view.h"
 #include "taichi/python/export.h"
@@ -5336,6 +5339,29 @@ void export_lang(py::module &m) {
   m.def("get_version_major", get_version_major);
   m.def("get_version_minor", get_version_minor);
   m.def("get_version_patch", get_version_patch);
+  m.def("get_runtime_contract_manifest", [] {
+    py::dict result;
+    result["schema_version"] =
+        get_forge_contract_manifest_schema_version();
+    result["native_abi_revision"] = get_forge_native_abi_revision();
+    result["runtime_statistics_schema"] =
+        get_forge_runtime_statistics_schema_version();
+    result["source_id"] = get_commit_hash();
+    result["shim_source_id"] = TI_COMMIT_HASH;
+    result["runtime_compiler_abi"] = get_forge_native_compiler_abi();
+    result["shim_compiler_abi"] = forge_compiler_abi_identity();
+    const auto bitmap = get_forge_native_feature_bitmap();
+    py::dict features;
+    features["cpu"] = bool(bitmap & kForgeFeatureCpu);
+    features["llvm"] = bool(bitmap & kForgeFeatureLlvm);
+    features["cuda"] = bool(bitmap & kForgeFeatureCuda);
+    features["vulkan"] = bool(bitmap & kForgeFeatureVulkan);
+    features["ggui"] = bool(bitmap & kForgeFeatureGgui);
+    features["opengl"] = bool(bitmap & kForgeFeatureOpenGl);
+    result["features"] = std::move(features);
+    result["legacy_runtime"] = false;
+    return result;
+  });
   m.def("get_llvm_target_support", [] {
 #if defined(TI_WITH_LLVM)
     return LLVM_VERSION_STRING;

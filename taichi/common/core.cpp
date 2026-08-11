@@ -6,6 +6,7 @@
 #include "taichi/common/core.h"
 #include "taichi/common/version.h"
 #include "taichi/common/commit_hash.h"
+#include "taichi/common/runtime_contract.h"
 
 #include <spdlog/fmt/fmt.h>
 #include <cstdlib>
@@ -82,6 +83,42 @@ int get_version_patch() {
 
 std::string get_commit_hash() {
   return TI_COMMIT_HASH;
+}
+
+int get_forge_native_abi_revision() {
+  return kForgeNativeAbiRevision;
+}
+
+int get_forge_contract_manifest_schema_version() {
+  return kForgeContractManifestSchemaVersion;
+}
+
+std::uint32_t get_forge_runtime_statistics_schema_version() {
+  return kForgeRuntimeStatisticsSchemaVersion;
+}
+
+std::uint64_t get_forge_native_feature_bitmap() {
+  std::uint64_t result = kForgeFeatureCpu;
+#if defined(TI_WITH_LLVM)
+  result |= kForgeFeatureLlvm;
+#endif
+#if defined(TI_WITH_CUDA)
+  result |= kForgeFeatureCuda;
+#endif
+#if defined(TI_WITH_VULKAN)
+  result |= kForgeFeatureVulkan;
+#endif
+#if defined(TI_WITH_GGUI)
+  result |= kForgeFeatureGgui;
+#endif
+#if defined(TI_WITH_OPENGL)
+  result |= kForgeFeatureOpenGl;
+#endif
+  return result;
+}
+
+std::string get_forge_native_compiler_abi() {
+  return forge_compiler_abi_identity();
 }
 
 std::string get_cuda_version_string() {

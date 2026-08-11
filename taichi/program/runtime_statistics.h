@@ -5,6 +5,7 @@
 #include <type_traits>
 
 #include "taichi/common/core.h"
+#include "taichi/common/runtime_contract.h"
 #include "taichi/rhi/arch.h"
 
 namespace taichi::lang {
@@ -12,7 +13,8 @@ namespace taichi::lang {
 // Public runtime statistics snapshots use a versioned, backend-neutral POD
 // contract. Backends may populate only the fields they can measure; an
 // unavailable value is different from a measured zero.
-constexpr std::uint32_t kRuntimeStatisticsSchemaVersion = 3;
+constexpr std::uint32_t kRuntimeStatisticsSchemaVersion =
+    taichi::kForgeRuntimeStatisticsSchemaVersion;
 
 struct RuntimeOptionalCounter {
   std::uint64_t value{0};

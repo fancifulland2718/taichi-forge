@@ -49,6 +49,22 @@ def _validate_build_identity() -> str:
     return commit
 
 
+def _validate_contract_manifest() -> None:
+    manifest = ti.validate_runtime_contract(require_native_manifest=True)
+    schemas = manifest["schemas"]
+    if schemas["dynamic_work"] != ti.graph.dynamic_work_capabilities()[
+        "schema_version"
+    ]:
+        raise RuntimeError(
+            "installed dynamic-work capability disagrees with its contract manifest"
+        )
+    _checkpoint(
+        "runtime contract manifest: passed "
+        f"(ABI {manifest['native_abi_revision']}, "
+        f"dynamic-work schema {schemas['dynamic_work']})"
+    )
+
+
 def _runtime_package_dirs() -> list[Path]:
     spec = find_spec("taichi_forge_runtime")
     if spec is None or spec.submodule_search_locations is None:
@@ -190,9 +206,12 @@ def _validate_cpu_dynamic_workload() -> None:
     ti.init(arch=ti.cpu, offline_cache=False)
 
     capabilities = ti.graph.dynamic_work_capabilities()
-    if capabilities.get("schema_version") != 4:
+    expected_schema = ti.runtime_contract_manifest()["schemas"]["dynamic_work"]
+    if capabilities.get("schema_version") != expected_schema:
         raise RuntimeError(
-            "installed runtime does not expose dynamic-work schema v4"
+            "installed runtime does not expose the manifest dynamic-work schema: "
+            f"expected={expected_schema}, "
+            f"actual={capabilities.get('schema_version')!r}"
         )
     if not capabilities.get("worklist", {}).get("available", False):
         raise RuntimeError("installed runtime does not expose DeviceWorklist")
@@ -371,6 +390,7 @@ def main() -> None:
     _checkpoint(f"distribution versions: passed ({version})")
     commit = _validate_build_identity()
     _checkpoint(f"native build identity: passed ({commit})")
+    _validate_contract_manifest()
     cudart, cudart_major = _validate_packaged_cuda_runtime()
     _checkpoint("packaged CUDA runtime: passed")
     _validate_cpu_field_roundtrips()
