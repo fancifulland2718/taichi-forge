@@ -38,6 +38,7 @@ classified direct, stability, and thin-capability cases:
 | `adaptive_pbd` | ten-iteration 2-D adaptive distance-constraint solve |
 | `marching_squares` | stable 2-D contour-cell extraction and case emission |
 | `bfs_worklist` | fixed-depth level-synchronous 2-D grid BFS |
+| `falling_sand` | one deterministic 2-D destination-conflict claim step |
 | `snode_churn` | one pointer+dense SNodeTree create/use/sync/destroy lifecycle transaction |
 
 ### Required three-route matrix for thin/native cases
@@ -276,6 +277,20 @@ raw i32 SHA-256, statistics, samples, mismatch count, and first mismatch before
 and after scoring. Logical invocation counts do not assume physical backend
 launches; Systems/Compute measure topology separately. Use
 `bfs_worklist_microbench.py`.
+
+`falling_sand` is `THIN-008`. The 256-square scene creates one deterministic
+movement proposal per particle above fixed blockers, forcing 10,332 candidates
+to compete for 5,166 destinations. All routes share the initial grid, movement
+preference, proposal kernel, min-priority/source-ordinal tie break, output
+semantics, one outer synchronization, and exact complete grid, destination,
+priority, and winner-source vectors. Forge/kernel and vanilla/kernel execute the
+same benchmark-owned four-kernel pipeline with one i32 destination-claim array;
+no helper or specialized API is admitted. Forge/native is compared separately
+with Forge/kernel and replaces only the atomic-min claim with DeviceWorklist
+stable selection and deterministic keyed conflict resolution. Reset is compiled
+per route so native does not write the control-only claim workspace. Route
+admission and the offline auditor verify these boundaries. Use
+`falling_sand_microbench.py`.
 
 `snode_churn` is the historical-churn half of `DIRECT-004`. Both runtimes use
 the same public FieldsBuilder DSL and kernels. Every measured launch creates

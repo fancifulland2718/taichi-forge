@@ -36,6 +36,7 @@
 | `adaptive_pbd` | 十轮上限的二维 adaptive 距离约束求解 |
 | `marching_squares` | 稳定二维轮廓 cell 提取与 case 输出 |
 | `bfs_worklist` | 固定深度、逐层同步的二维网格 BFS |
+| `falling_sand` | 一次确定性的二维目标冲突申领步骤 |
 | `snode_churn` | 一次 pointer+dense SNodeTree create/use/sync/destroy 生命周期事务 |
 
 ### thin/native 案例必须保留的三路线矩阵
@@ -229,6 +230,16 @@ distance vector 与 64-entry history vector，并在计时前后独立重算 raw
 统计、样本、mismatch count 与首个 mismatch。逻辑 invocation 数不推定物理 backend
 launch 数；Systems/Compute 单独实测拓扑。独立入口为
 `bfs_worklist_microbench.py`。
+
+`falling_sand` 是 `THIN-008`。256² 场景让固定 blocker 上方的每个粒子生成一个
+确定性移动候选，使 10,332 个候选竞争 5,166 个目标。所有路线共用初始网格、移动
+偏好、候选 kernel、最小优先级/源序号决胜、输出语义、一次外层同步，以及完整
+grid、destination、priority 和 winner-source 精确向量。Forge/kernel 与
+vanilla/kernel 执行相同的 benchmark-owned 四 kernel 流水线，只使用一个 i32 目标
+claim 数组，不准入 helper 或 specialized API。Forge/native 另行与 Forge/kernel
+对比，只把 atomic-min claim 替换为 DeviceWorklist 稳定筛选和确定性 keyed 冲突消解。
+reset 按路线编译，使 native 不写仅控制组使用的 claim workspace；route 准入和离线
+审计器都会验证这些边界。独立入口为 `falling_sand_microbench.py`。
 
 `snode_churn` 是 `DIRECT-004` 的历史 churn 半项。两边使用相同公开 FieldsBuilder
 DSL 与 kernel；每个计时 launch 创建一个 pointer+dense tree、激活 64 个 cell、exact
