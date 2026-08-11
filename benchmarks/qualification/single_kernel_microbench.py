@@ -335,6 +335,9 @@ def qualification_policy_errors(args: argparse.Namespace) -> list[str]:
         errors.append("qualification pairs must be even for exact AB/BA balance")
     if args.cpu_affinity == "none":
         errors.append("qualification requires explicit or automatic CPU affinity")
+    if getattr(args, "allow_external_python", False):
+        errors.append(
+            "qualification cannot allow external Python processes")
     if args.max_cpu_util > QUALIFICATION_MAX_CPU_UTIL_PERCENT:
         errors.append(
             f"max_cpu_util={args.max_cpu_util} exceeds qualification ceiling "
@@ -6104,6 +6107,21 @@ def _noise_observation(backend: str, ignored_pids: Sequence[int],
     }
 
 
+def _noise_allows_diagnostic_execution(
+        args: argparse.Namespace, observation: dict[str, Any]) -> bool:
+    """Allow data collection only when Python contention is the sole failure.
+
+    The observation remains failed, so the completed artifact cannot satisfy the
+    noise-admission method check or qualify for a performance claim.
+    """
+    return bool(
+        args.intent == "diagnostic"
+        and getattr(args, "allow_external_python", False)
+        and observation.get("python_conflicts")
+        and observation.get("reasons") == ["another Python process is active"]
+    )
+
+
 def _extract_result(stdout: str) -> dict[str, Any] | None:
     for line in reversed(stdout.splitlines()):
         if line.startswith(RESULT_PREFIX):
@@ -7330,6 +7348,7 @@ def _parent_main(args: argparse.Namespace) -> int:
             "max_cpu_util": args.max_cpu_util,
             "max_gpu_util": args.max_gpu_util,
             "max_gpu_temp": args.max_gpu_temp,
+            "allow_external_python": args.allow_external_python,
         },
         "environments": venv_checks,
         "exclusive_driver_lock": args._benchmark_lock,
@@ -7357,7 +7376,8 @@ def _parent_main(args: argparse.Namespace) -> int:
     manifest["noise_observations"].append({"label": "before_pilot",
                                             **initial_noise})
     write_json(output_dir / "manifest.json", manifest)
-    if not initial_noise["passed"]:
+    if (not initial_noise["passed"]
+            and not _noise_allows_diagnostic_execution(args, initial_noise)):
         raise RuntimeError("noise admission failed before pilot: " +
                            "; ".join(initial_noise["reasons"]))
 
@@ -7380,7 +7400,8 @@ def _parent_main(args: argparse.Namespace) -> int:
             args.max_gpu_temp)
         manifest["noise_observations"].append({
             "label": f"pair-{pair_index:02d}-before", **before})
-        if not before["passed"]:
+        if (not before["passed"]
+                and not _noise_allows_diagnostic_execution(args, before)):
             write_json(output_dir / "manifest.json", manifest)
             raise RuntimeError(
                 f"noise admission failed before pair {pair_index}: " +
@@ -7397,7 +7418,8 @@ def _parent_main(args: argparse.Namespace) -> int:
                 args.max_gpu_temp)
             manifest["noise_observations"].append({
                 "label": f"{label}-after", **between})
-            if not between["passed"]:
+            if (not between["passed"]
+                    and not _noise_allows_diagnostic_execution(args, between)):
                 write_json(output_dir / "manifest.json", manifest)
                 raise RuntimeError(
                     f"noise admission failed after {label}: " +
@@ -7798,6 +7820,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-cpu-util", type=float, default=20.0)
     parser.add_argument("--max-gpu-util", type=float, default=15.0)
     parser.add_argument("--max-gpu-temp", type=float, default=65.0)
+    parser.add_argument(
+        "--allow-external-python",
+        action="store_true",
+        help=(
+            "diagnostic-only: continue when external Python processes are the "
+            "sole noise-admission failure; artifacts remain ineligible for "
+            "performance claims"),
+    )
     parser.add_argument("--child-timeout-seconds", type=int, default=900)
     parser.add_argument(
         "--forge-python",

@@ -9,6 +9,7 @@ from unittest.mock import patch
 from benchmarks.qualification.single_kernel_microbench import (
     _ExclusiveBenchmarkLock,
     _calibrate_batch,
+    _noise_allows_diagnostic_execution,
     QUALIFICATION_MINIMUMS,
     _enhanced_memory_plateau,
     _snode_lifecycle_plateau,
@@ -471,6 +472,23 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         ])
         args.intent = "diagnostic"
         self.assertEqual(qualification_policy_errors(args), [])
+
+    def test_external_python_override_is_diagnostic_only_and_fail_closed(self):
+        observation = {
+            "passed": False,
+            "reasons": ["another Python process is active"],
+            "python_conflicts": [{"Id": 1234, "ProcessName": "python"}],
+        }
+        args = argparse.Namespace(
+            intent="diagnostic", allow_external_python=True)
+        self.assertTrue(_noise_allows_diagnostic_execution(args, observation))
+
+        args.intent = "qualification"
+        self.assertFalse(_noise_allows_diagnostic_execution(args, observation))
+        args.intent = "diagnostic"
+        observation["reasons"].append(
+            "CPU utilization 30.0% exceeds 20.0%")
+        self.assertFalse(_noise_allows_diagnostic_execution(args, observation))
 
     def test_gpu_uuid_normalization_matches_runtime_and_nvidia_forms(self):
         self.assertEqual(
