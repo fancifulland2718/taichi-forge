@@ -733,6 +733,13 @@ void export_lang(py::module &m) {
       .def("_finish", &Program::RuntimeSubmissionTransaction::finish,
            py::call_guard<py::gil_scoped_release>());
 
+  py::class_<Program::RegisteredKernelExecutionPlan>(
+      m, "_RegisteredKernelExecutionPlan")
+      .def(
+          "launch", &Program::RegisteredKernelExecutionPlan::launch,
+          py::arg("program"), py::arg("context"),
+          py::call_guard<py::gil_scoped_release>());
+
   py::class_<Program>(m, "Program")
       .def(py::init<>())
       .def("config", &Program::compile_config,
@@ -3518,6 +3525,9 @@ void export_lang(py::module &m) {
           py::call_guard<py::gil_scoped_release>())
       .def("launch_kernel", &Program::launch_kernel)
       .def("compile_and_launch_kernel", &Program::compile_and_launch_kernel,
+           py::call_guard<py::gil_scoped_release>())
+      .def("_register_kernel_execution_plan",
+           &Program::register_kernel_execution_plan,
            py::call_guard<py::gil_scoped_release>())
       .def("get_device_caps", &Program::get_device_caps);
 

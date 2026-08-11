@@ -1699,6 +1699,7 @@ def test_owned_ndarray_launch_uses_stable_slot_and_elides_snode_guard(monkeypatc
     stats = dict(prog._debug_ordinary_launch_attribution())
 
     assert stats["owned_ndarray_fast_path"] == 1
+    assert stats["registered_execution_plan_launches"] == 1
     assert stats["owned_ndarray_only_launches"] == 1
     assert stats["ndarray_slot_validations"] == 1
     assert stats["ndarray_map_lookups"] == 0
@@ -1710,6 +1711,68 @@ def test_owned_ndarray_launch_uses_stable_slot_and_elides_snode_guard(monkeypatc
         assert stats["backend_task_invocations"] >= 1
         assert stats["backend_task_execution_ns"] > 0
     assert value.to_numpy()[0] == 6
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_ordinary_launch_plan_is_monomorphic_and_resource_safe():
+    @ti.kernel
+    def assign(
+        destination: ti.types.ndarray(dtype=ti.i32, ndim=1), value: ti.i32
+    ) -> ti.i32:
+        destination[0] = value
+        return value + 1
+
+    first = ti.ndarray(ti.i32, shape=1)
+    second = ti.ndarray(ti.i32, shape=1)
+    assert assign(first, 3) == 4
+    first_plan = assign._primal._ordinary_launch_plan
+    assert first_plan is not None
+
+    assert assign(first, 7) == 8
+    assert assign._primal._ordinary_launch_plan is first_plan
+    assert first.to_numpy()[0] == 7
+
+    # A different owned resource cannot alias the previous cached binding.
+    assert assign(second, 11) == 12
+    second_plan = assign._primal._ordinary_launch_plan
+    assert second_plan is not None
+    assert second_plan is not first_plan
+    assert first.to_numpy()[0] == 7
+    assert second.to_numpy()[0] == 11
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_ordinary_launch_plan_excludes_snode_dependent_kernel():
+    field = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def update(value: ti.i32):
+        field[None] = value
+
+    update(5)
+    update(9)
+    assert update._primal._ordinary_launch_plan is None
+    assert field[None] == 9
+
+
+@pytest.mark.run_in_serial
+@test_utils.test(arch=ti.cpu)
+def test_ordinary_launch_plan_is_invalidated_by_runtime_reset():
+    @ti.kernel
+    def assign(destination: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        destination[0] = 17
+
+    first = ti.ndarray(ti.i32, shape=1)
+    assign(first)
+    assert assign._primal._ordinary_launch_plan is not None
+
+    ti.reset()
+    assert assign._primal._ordinary_launch_plan is None
+    ti.init(arch=ti.cpu, offline_cache=False)
+    second = ti.ndarray(ti.i32, shape=1)
+    assign(second)
+    assert assign._primal._ordinary_launch_plan is not None
+    assert second.to_numpy()[0] == 17
 
 
 @pytest.mark.run_in_serial

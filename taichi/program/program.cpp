@@ -5619,6 +5619,37 @@ void Program::launch_kernel_impl(
   finish_attribution();
 }
 
+void Program::RegisteredKernelExecutionPlan::launch(
+    Program &program,
+    LaunchContextBuilder &ctx) const {
+  TI_ERROR_IF(&program != owner_,
+              "Registered kernel execution plan belongs to another Program");
+  TI_ASSERT(compiled_ != nullptr);
+  if (program.ordinary_launch_attribution_.enabled) {
+    program.ordinary_launch_attribution_.registered_execution_plan_launches
+        .fetch_add(1, std::memory_order_relaxed);
+  }
+  program.launch_registered_kernel(*compiled_, handle_, ctx);
+}
+
+std::unique_ptr<Program::RegisteredKernelExecutionPlan>
+Program::register_kernel_execution_plan(
+    const CompileConfig &compile_config,
+    const DeviceCapabilityConfig &caps,
+    const Kernel &kernel_def) {
+  auto lifecycle_guard = acquire_snode_tree_lifecycle_read_guard();
+  const auto &compiled = compile_kernel(compile_config, caps, kernel_def);
+  // A handle tied to an SNodeTree can be retired independently.  Keep those
+  // kernels on the existing generation-checked slow path until relocatable
+  // executable binding is separately qualified.
+  if (compiled.has_snode_tree_dependencies() || !compiled.get_handle()) {
+    return nullptr;
+  }
+  return std::unique_ptr<RegisteredKernelExecutionPlan>(
+      new RegisteredKernelExecutionPlan(this, &compiled,
+                                        *compiled.get_handle()));
+}
+
 void Program::compile_and_launch_kernel(
     const CompileConfig &compile_config,
     const DeviceCapabilityConfig &caps,
@@ -8368,6 +8399,7 @@ void Program::debug_reset_ordinary_launch_attribution() noexcept {
   stats.name.store(0, std::memory_order_relaxed)
   TI_RESET_ORDINARY_LAUNCH_COUNTER(launches);
   TI_RESET_ORDINARY_LAUNCH_COUNTER(no_resource_fast_path);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(registered_execution_plan_launches);
   TI_RESET_ORDINARY_LAUNCH_COUNTER(graph_transaction_dispatches);
   TI_RESET_ORDINARY_LAUNCH_COUNTER(general_resource_launches);
   TI_RESET_ORDINARY_LAUNCH_COUNTER(owned_ndarray_only_launches);
@@ -8407,6 +8439,8 @@ Program::debug_ordinary_launch_attribution() const {
        ordinary_snode_guard_elision_enabled_ ? 1u : 0u},
       {"launches", load(stats.launches)},
       {"no_resource_fast_path", load(stats.no_resource_fast_path)},
+      {"registered_execution_plan_launches",
+       load(stats.registered_execution_plan_launches)},
       {"graph_transaction_dispatches",
        load(stats.graph_transaction_dispatches)},
       {"general_resource_launches", load(stats.general_resource_launches)},

@@ -913,6 +913,50 @@ def _get_global_vars(_func):
 
     return global_vars
 
+
+class _OrdinaryLaunchPlan:
+    """One-entry, generation-safe cache for common direct kernel launches.
+
+    The plan keeps no strong resource references and is replaced rather than
+    accumulated. A different Ndarray object, gradient attachment, or Runtime
+    instance therefore falls back to the regular specialization path once.
+    """
+
+    __slots__ = (
+        "runtime",
+        "key",
+        "kernel_cpp",
+        "native_plan",
+        "bindings",
+        "resource_guards",
+    )
+
+    def __init__(
+        self, runtime, key, kernel_cpp, native_plan, bindings, resource_guards
+    ):
+        self.runtime = runtime
+        self.key = key
+        self.kernel_cpp = kernel_cpp
+        self.native_plan = native_plan
+        self.bindings = bindings
+        self.resource_guards = resource_guards
+
+    def matches(self, runtime, args):
+        if self.runtime is not runtime:
+            return False
+        for index, resource_ref, grad_ref in self.resource_guards:
+            resource = resource_ref()
+            if resource is None or resource is not args[index]:
+                return False
+            grad = resource.grad
+            if grad_ref is None:
+                if grad is not None:
+                    return False
+            elif grad_ref() is not grad:
+                return False
+        return True
+
+
 class Kernel:
     counter = 0
 
@@ -963,6 +1007,7 @@ class Kernel:
     def reset(self):
         self.runtime = impl.get_runtime()
         self.compiled_kernels = {}
+        self._ordinary_launch_plan = None
         self._task_launch_policy_manifests = {}
         self._external_grad_accesses = {}
         self._materializing_external_grad_accesses = set()
@@ -1581,6 +1626,9 @@ class Kernel:
                 raise e
             raise e from None
 
+        return self._finish_launch(launch_ctx, callbacks)
+
+    def _finish_launch(self, launch_ctx, callbacks=()):
         ret = None
         ret_dt = self.return_type
         has_ret = ret_dt is not None
@@ -1599,6 +1647,103 @@ class Kernel:
                 c()
 
         return ret
+
+    def _build_ordinary_launch_plan(self, key, args):
+        if self.autodiff_mode != AutodiffMode.NONE or self.template_slot_locations:
+            return None
+        if len(args) > 64:
+            return None
+        bindings = []
+        resource_guards = []
+        for index, (argument, value) in enumerate(zip(self.arguments, args)):
+            annotation = argument.annotation
+            if id(annotation) in primitive_types.real_type_ids:
+                bindings.append((index, "real", annotation))
+                continue
+            if id(annotation) in primitive_types.integer_type_ids:
+                bindings.append(
+                    (
+                        index,
+                        "signed"
+                        if is_signed(cook_dtype(annotation))
+                        else "unsigned",
+                        annotation,
+                    )
+                )
+                continue
+            if isinstance(annotation, ndarray_type.NdarrayType) and isinstance(
+                value, taichi_forge.lang._ndarray.Ndarray
+            ):
+                try:
+                    resource_ref = weakref.ref(value)
+                    grad_ref = (
+                        None if value.grad is None else weakref.ref(value.grad)
+                    )
+                except TypeError:
+                    return None
+                bindings.append((index, "ndarray", annotation))
+                resource_guards.append((index, resource_ref, grad_ref))
+                continue
+            return None
+        prog = self.runtime.prog
+        native_plan = prog._register_kernel_execution_plan(
+            prog.config(), prog.get_device_caps(), self.compiled_kernels[key]
+        )
+        if native_plan is None:
+            return None
+        return _OrdinaryLaunchPlan(
+            self.runtime,
+            key,
+            self.compiled_kernels[key],
+            native_plan,
+            tuple(bindings),
+            tuple(resource_guards),
+        )
+
+    def _launch_with_ordinary_plan(self, plan, args):
+        launch_ctx = plan.kernel_cpp.make_launch_context()
+        for index, kind, annotation in plan.bindings:
+            value = args[index]
+            indices = (index,)
+            if kind == "real":
+                if not isinstance(value, (float, int, np.floating, np.integer)):
+                    raise TaichiRuntimeTypeError.get(
+                        indices, annotation.to_string(), type(value)
+                    )
+                launch_ctx.set_arg_float(indices, float(value))
+            elif kind in ("signed", "unsigned"):
+                if not isinstance(value, (int, np.integer)):
+                    raise TaichiRuntimeTypeError.get(
+                        indices, annotation.to_string(), type(value)
+                    )
+                if kind == "signed":
+                    launch_ctx.set_arg_int(indices, int(value))
+                else:
+                    launch_ctx.set_arg_uint(indices, int(value))
+            else:
+                primal = value.arr
+                grad = value.grad.arr if value.grad is not None else None
+                if primal is None:
+                    raise TaichiRuntimeError(
+                        "Cannot submit an Ndarray after its Taichi runtime has been reset"
+                    )
+                if value.grad is not None and grad is None:
+                    raise TaichiRuntimeError(
+                        "Cannot submit an Ndarray gradient after its Taichi runtime has been reset"
+                    )
+                if grad is None:
+                    launch_ctx.set_arg_ndarray(indices, primal)
+                else:
+                    launch_ctx.set_arg_ndarray_with_grad(indices, primal, grad)
+        try:
+            prog = self.runtime.prog
+            plan.native_plan.launch(prog, launch_ctx)
+        except Exception as exc:
+            exc = handle_exception_from_cpp(exc)
+            if self.runtime.print_full_traceback:
+                raise exc
+            raise exc from None
+        return self._finish_launch(launch_ctx)
 
     def construct_kernel_ret(self, launch_ctx, ret_type, index=()):
         if isinstance(ret_type, CompoundType):
@@ -1861,6 +2006,19 @@ class Kernel:
         if self.autodiff_mode != AutodiffMode.NONE and impl.current_cfg().opt_level == 0:
             _logging.warn("""opt_level = 1 is enforced to enable gradient computation.""")
             impl.current_cfg().opt_level = 1
+        ordinary_plan = self._ordinary_launch_plan
+        ordinary_fast_eligible = (
+            self.autodiff_mode == AutodiffMode.NONE
+            and self.runtime.target_tape is None
+            and self.runtime.fwd_mode_manager is None
+            and not self.runtime.grad_replaced
+        )
+        if (
+            ordinary_fast_eligible
+            and ordinary_plan is not None
+            and ordinary_plan.matches(self.runtime, args)
+        ):
+            return self._launch_with_ordinary_plan(ordinary_plan, args)
         key = self.ensure_compiled(*args)
         kernel_cpp = self.compiled_kernels[key]
         allocate_all_external_grad = (
@@ -1868,7 +2026,7 @@ class Kernel:
             or self.runtime.target_tape is not None
             or self.runtime.fwd_mode_manager is not None
         )
-        return self.launch_kernel(
+        result = self.launch_kernel(
             kernel_cpp,
             *args,
             _allocate_all_external_grad=allocate_all_external_grad,
@@ -1876,6 +2034,11 @@ class Kernel:
                 key, frozenset()
             ),
         )
+        if ordinary_fast_eligible:
+            self._ordinary_launch_plan = self._build_ordinary_launch_plan(
+                key, args
+            )
+        return result
 
 
 class _TaskLaunchBinding:

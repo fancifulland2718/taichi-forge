@@ -227,6 +227,32 @@ class TI_DLL_EXPORT Program {
     std::vector<std::size_t> active_gpu_region_timings_;
   };
 
+  // Immutable, dependency-free executable binding for repeated ordinary
+  // launches.  The caller still supplies a fresh LaunchContextBuilder for
+  // every invocation; the plan only removes compilation-cache and backend
+  // registration lookup from the steady path.
+  class RegisteredKernelExecutionPlan {
+   public:
+    RegisteredKernelExecutionPlan(const RegisteredKernelExecutionPlan &) =
+        delete;
+    RegisteredKernelExecutionPlan &operator=(
+        const RegisteredKernelExecutionPlan &) = delete;
+
+    void launch(Program &program, LaunchContextBuilder &ctx) const;
+
+   private:
+    friend class Program;
+    RegisteredKernelExecutionPlan(Program *owner,
+                                  const CompiledKernelData *compiled,
+                                  KernelLaunchHandle handle)
+        : owner_(owner), compiled_(compiled), handle_(handle) {
+    }
+
+    Program *owner_{nullptr};
+    const CompiledKernelData *compiled_{nullptr};
+    KernelLaunchHandle handle_;
+  };
+
   uint64 *result_buffer{nullptr};  // Note that this result_buffer is used
                                    // only for runtime JIT functions (e.g.
                                    // `runtime_memory_allocate_aligned`)
@@ -454,6 +480,11 @@ class TI_DLL_EXPORT Program {
                                  const DeviceCapabilityConfig &caps,
                                  const Kernel &kernel_def,
                                  LaunchContextBuilder &ctx);
+
+  std::unique_ptr<RegisteredKernelExecutionPlan>
+  register_kernel_execution_plan(const CompileConfig &compile_config,
+                                 const DeviceCapabilityConfig &caps,
+                                 const Kernel &kernel_def);
 
   void check_runtime_error_after_kernel_launch(
       const CompiledKernelData &compiled_kernel_data);
@@ -3584,6 +3615,7 @@ class TI_DLL_EXPORT Program {
     bool enabled{false};
     std::atomic<std::uint64_t> launches{0};
     std::atomic<std::uint64_t> no_resource_fast_path{0};
+    std::atomic<std::uint64_t> registered_execution_plan_launches{0};
     std::atomic<std::uint64_t> graph_transaction_dispatches{0};
     std::atomic<std::uint64_t> general_resource_launches{0};
     std::atomic<std::uint64_t> owned_ndarray_only_launches{0};
