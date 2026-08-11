@@ -7,6 +7,7 @@ from unittest import mock
 
 from benchmarks.qualification.audit_final_rollup import (
     EXPECTED_CASES,
+    EXPECTED_DIAGNOSTIC_CASE_IDS,
     audit_rollup,
 )
 
@@ -87,19 +88,42 @@ class FinalRollupAuditTest(unittest.TestCase):
         self.results_zh.write_text(final_text, encoding="utf-8")
 
         self._create_qualified_artifacts()
+        self._create_diagnostic_artifacts()
+        self.single_audit_patcher = mock.patch(
+            "benchmarks.qualification.audit_final_rollup."
+            "audit_single_kernel_artifact",
+            side_effect=lambda artifact: json.loads(
+                (artifact / "audit.json").read_text(encoding="utf-8")))
+        self.single_audit_patcher.start()
+        self.addCleanup(self.single_audit_patcher.stop)
         self._write_json(
-            self.nsight / "direct005-sparse-block-stencil-summary.json",
-            {"case": {"id": "DIRECT-005"}})
-        self._write_json(
-            self.nsight / "thin008-falling-sand-summary.json",
-            {"case": {"id": "THIN-008"}})
+            self.nsight / "summary.json",
+            {"graph_mpm_cuda_small": {}, "prefix_sum_cuda_small": {},
+             "parallel_sort_cuda_small": {}, "snode_churn_cuda_small": {}})
+        nsight_payloads = {
+            "ordinary-single-kernel-summary.json": "CONTROL-001",
+            "thin001-native-reduce-summary.json": "THIN-001",
+            "thin002-transform-summary.json": "THIN-002-TRANSFORM",
+            "thin002-gather-summary.json": "THIN-002-GATHER",
+            "thin002-scatter-summary.json": "THIN-002-SCATTER",
+            "thin002-compact-summary.json": "THIN-002-COMPACT",
+            "thin003-device-prefix-summary.json": "THIN-003",
+            "thin004-active-grid-summary.json": "THIN-004",
+            "thin005-particle-hash-summary.json": "THIN-005",
+            "thin006-adaptive-pbd-summary.json": "THIN-006",
+            "thin007-marching-squares-summary.json": (
+                "THIN-007-MARCHING-SQUARES"),
+            "thin007-bfs-summary.json": "THIN-007-BFS",
+            "direct005-sparse-block-stencil-summary.json": "DIRECT-005",
+            "thin008-falling-sand-summary.json": "THIN-008",
+        }
+        for name, token in nsight_payloads.items():
+            self._write_json(self.nsight / name, {"scope": token})
         for results_path in (self.results_en, self.results_zh):
             with results_path.open("a", encoding="utf-8") as stream:
-                stream.write(
-                    "\n" + str(self.nsight.resolve() /
-                                "direct005-sparse-block-stencil-summary.json")
-                    + "\n" + str(self.nsight.resolve() /
-                                  "thin008-falling-sand-summary.json") + "\n")
+                for path in sorted(self.nsight.glob("*summary.json")):
+                    stream.write("\n" + str(path.resolve()))
+                stream.write("\n")
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -193,6 +217,43 @@ class FinalRollupAuditTest(unittest.TestCase):
                 }
             self._write_json(artifact / "result.json", result)
 
+    def _create_diagnostic_artifacts(self):
+        evidence = []
+        for index, case_id in enumerate(EXPECTED_DIAGNOSTIC_CASE_IDS, start=1):
+            run_id = f"diagnostic-{case_id.lower()}"
+            relative = f"../results/diagnostic/{run_id}"
+            artifact = (self.root / "final" / relative).resolve()
+            artifact.mkdir(parents=True, exist_ok=True)
+            audit = {
+                "run_id": run_id,
+                "run_status": "completed",
+                "audit_passed": True,
+                "audit_failures": [],
+                "ready_for_performance_claim": False,
+            }
+            self._write_json(artifact / "audit.json", audit)
+            for name in (
+                    "manifest.json", "audit.en.md", "audit.zh-CN.md",
+                    "summary.json", "report.en.md", "report.zh-CN.md",
+                    "validation.en.md", "validation.zh-CN.md"):
+                (artifact / name).write_text("{}", encoding="utf-8")
+            evidence.append({
+                "case_id": case_id,
+                "evidence_id": f"EVIDENCE-{index:03d}",
+                "run_id": run_id,
+                "artifact": relative,
+                "expected_run_status": "completed",
+                "expected_audit_passed": True,
+                "expected_audit_failures": [],
+                "expected_ready_for_performance_claim": False,
+            })
+        self.diagnostic_path = (
+            self.root / "final" / "diagnostic_evidence.json")
+        self._write_json(self.diagnostic_path, {
+            "schema": "taichi_forge.diagnostic_evidence.v1",
+            "evidence": evidence,
+        })
+
     @mock.patch(
         "benchmarks.qualification.audit_final_rollup.audit_solver_artifact",
         return_value={"passed": True, "errors": []})
@@ -234,6 +295,47 @@ class FinalRollupAuditTest(unittest.TestCase):
         audit = audit_rollup(self.root, self.nsight)
         self.assertFalse(audit["passed"])
         self.assertFalse(audit["checks"]["qualified_artifacts_recomputed"])
+
+    @mock.patch(
+        "benchmarks.qualification.audit_final_rollup.audit_solver_artifact",
+        return_value={"passed": True, "errors": []})
+    @mock.patch(
+        "benchmarks.qualification.audit_final_rollup.audit_warp_artifact",
+        return_value={"passed": True, "errors": []})
+    def test_missing_diagnostic_case_fails(self, _warp, _solver):
+        manifest = json.loads(
+            self.diagnostic_path.read_text(encoding="utf-8"))
+        manifest["evidence"] = manifest["evidence"][:-1]
+        self._write_json(self.diagnostic_path, manifest)
+        audit = audit_rollup(self.root, self.nsight)
+        self.assertFalse(audit["passed"])
+        self.assertFalse(audit["checks"]["diagnostic_case_coverage"])
+
+    @mock.patch(
+        "benchmarks.qualification.audit_final_rollup.audit_solver_artifact",
+        return_value={"passed": True, "errors": []})
+    @mock.patch(
+        "benchmarks.qualification.audit_final_rollup.audit_warp_artifact",
+        return_value={"passed": True, "errors": []})
+    def test_stored_diagnostic_audit_drift_fails(self, _warp, _solver):
+        manifest = json.loads(
+            self.diagnostic_path.read_text(encoding="utf-8"))
+        artifact = (self.root / "final" /
+                    manifest["evidence"][0]["artifact"]).resolve()
+        audit = json.loads((artifact / "audit.json").read_text(
+            encoding="utf-8"))
+        audit["ready_for_performance_claim"] = True
+        self._write_json(artifact / "audit.json", audit)
+        recomputed = dict(audit)
+        recomputed["ready_for_performance_claim"] = False
+        with mock.patch(
+                "benchmarks.qualification.audit_final_rollup."
+                "audit_single_kernel_artifact",
+                return_value=recomputed):
+            final_audit = audit_rollup(self.root, self.nsight)
+        self.assertFalse(final_audit["passed"])
+        self.assertFalse(
+            final_audit["checks"]["diagnostic_artifacts_recomputed"])
 
     @mock.patch(
         "benchmarks.qualification.audit_final_rollup.audit_solver_artifact",

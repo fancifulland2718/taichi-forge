@@ -190,12 +190,16 @@ benchmark. It enforces the 16-case
 registry/order, no pending statuses, Chinese/English case and issue coverage,
 zero qualified direct speedups, the exact five absolute artifact IDs, per-field
 numeric reconciliation against every qualified `result.json`, reruns the Warp
-and solver domain auditors, verifies the DIRECT-005/THIN-008 Nsight references,
-and confirms that no aggregate launcher is being presented when the qualified
-direct set is empty. With `--source-root`, it also requires `local/062-depth`,
-a clean source worktree, and Git-ignored local artifacts. It writes bilingual
-`COMPLETION_AUDIT.*.md` and `completion_audit.json` under the ignored final
-artifact directory.
+and solver domain auditors, and consumes the ignored
+`final/diagnostic_evidence.json` index. Every indexed direct/control/thin
+artifact is independently recomputed; its stored audit, terminal status,
+claim-ineligibility decision, and exact expected failure set must agree. The
+auditor also validates the complete structural-summary inventory and confirms
+that no aggregate launcher is being presented when the qualified direct set is
+empty. With `--source-root`, it additionally requires `local/062-depth`, a
+clean source worktree, and Git-ignored qualification, Nsight, and raw diagnostic
+artifacts. It writes bilingual `COMPLETION_AUDIT.*.md` and
+`completion_audit.json` under the ignored final artifact directory.
 
 `device_prefix_chain` is `THIN-003` and uses the required three-route matrix.
 The compatibility axis runs one benchmark-owned kernel pipeline unchanged in

@@ -1872,6 +1872,11 @@ def _audit(run_dir: Path) -> dict[str, Any]:
     }
 
 
+def audit_artifact(run_dir: Path) -> dict[str, Any]:
+    """Recompute one stored microbenchmark artifact without rewriting it."""
+    return _audit(Path(run_dir).resolve())
+
+
 def _write_reports(run_dir: Path, result: dict[str, Any]) -> None:
     status_zh = "通过" if result["audit_passed"] else "失败"
     status_en = "pass" if result["audit_passed"] else "fail"
@@ -1908,7 +1913,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("run_directory")
     args = parser.parse_args(argv)
     run_dir = Path(args.run_directory).resolve()
-    result = _audit(run_dir)
+    result = audit_artifact(run_dir)
     (run_dir / "audit.json").write_text(
         json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     _write_reports(run_dir, result)
