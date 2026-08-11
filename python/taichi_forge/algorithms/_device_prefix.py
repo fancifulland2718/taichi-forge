@@ -7,6 +7,7 @@ observe the count on host.
 """
 
 import math
+import os
 
 from taichi_forge._lib import core as _ti_core
 from taichi_forge._kernels import (
@@ -29,6 +30,19 @@ from taichi_forge.graph._native import NativeGraphExecutable, NativeGraphNode
 
 
 _PREFIX_DTYPES = (i32, u32, i64, u64, f32, f64)
+
+
+def _planned_native_method(kind, method):
+    if method != "auto":
+        return method
+    arch = impl.current_cfg().arch
+    if arch in (_ti_core.Arch.x64, _ti_core.Arch.arm64):
+        return "cpu_native"
+    if arch == _ti_core.Arch.cuda:
+        return "cuda_device"
+    if arch == _ti_core.Arch.vulkan:
+        return "vulkan_native_radix_u32" if kind == "sort" else "vulkan_native"
+    return method
 
 
 def _dtype_bytes(dtype):
@@ -664,6 +678,27 @@ class DevicePrefixSequence:
     def operation_count(self):
         return len(self._operations)
 
+    @property
+    def workspace_bytes_current(self):
+        self.workspace._refresh_usage()
+        return self.workspace.workspace_bytes_current
+
+    @property
+    def workspace_bytes_peak(self):
+        self.workspace._refresh_usage()
+        return self.workspace.workspace_bytes_peak
+
+    def memory_report(self):
+        return {
+            "schema_version": 1,
+            "capacity": self.capacity,
+            "operation_count": self.operation_count,
+            "workspace_bytes_current": self.workspace_bytes_current,
+            "workspace_bytes_peak": self.workspace_bytes_peak,
+            "workspace_allocation_count": self.workspace.allocation_count,
+            "replay_allocation_count": 0,
+        }
+
     def _ensure_mutable(self):
         if self._compiled:
             raise TaichiRuntimeError(
@@ -805,10 +840,57 @@ class _DevicePrefixSequenceGraphExecutable(NativeGraphExecutable):
     def __init__(self, sequence):
         self._capacity = sequence.capacity
         self._workspace = sequence.workspace
-        self._operations = tuple(sequence._operations)
+        self._legacy_operations = tuple(sequence._operations)
+        self._operations = tuple(
+            self._materialize_operation(op) for op in sequence._operations
+        )
         self._tokens = dict(sequence._tokens)
         self._arg_names = tuple(sequence._arg_descriptors)
         self._dispatch_states = tuple(dict.fromkeys(sequence._dispatch_states))
+        self._steps = tuple(
+            self._compile_step(*operation) for operation in self._operations
+        )
+        self._runner = self._compose_runner(self._steps)
+        legacy = os.environ.get("TI_DEBUG_NATIVE_SEQUENCE_LEGACY_REPLAY", "")
+        self._legacy_replay = legacy.strip().lower() in (
+            "1",
+            "true",
+            "on",
+            "yes",
+        )
+        self._run_impl = (
+            self._run_legacy if self._legacy_replay else self._run_materialized
+        )
+
+    def _materialize_operation(self, operation):
+        kind, args, kwargs = operation
+        options = dict(kwargs)
+        if "method" in options:
+            options["method"] = _planned_native_method(kind, options["method"])
+        if kind == "compact":
+            self._workspace._buffer("compact_flags", i32, self._capacity)
+        elif kind == "unique":
+            self._workspace._buffer("rle_flags", i32, self._capacity)
+        elif kind == "run_length_encode":
+            self._workspace._buffer("rle_flags", i32, self._capacity)
+            self._workspace._buffer("rle_starts", i32, self._capacity)
+            self._workspace._buffer("rle_compacted_starts", i32, self._capacity)
+        return kind, args, options
+
+    @staticmethod
+    def _compose_runner(steps):
+        def finished(_runtime_args, _prefixes):
+            return None
+
+        runner = finished
+        for step in reversed(steps):
+            following = runner
+
+            def runner(runtime_args, prefixes, step=step, following=following):
+                step(runtime_args, prefixes)
+                return following(runtime_args, prefixes)
+
+        return runner
 
     @property
     def runtime_arg_schema(self):
@@ -832,55 +914,173 @@ class _DevicePrefixSequenceGraphExecutable(NativeGraphExecutable):
             workspace=self._workspace,
         )
 
-    def run(self, runtime_args=None):
-        if runtime_args is None:
-            raise TaichiRuntimeError(
-                "DevicePrefixSequence requires Graph runtime arguments"
-            )
+    def _compile_step(self, kind, args, options):
+        if kind == "compact":
+            source, flags, output, output_extent = args
+            output_token = options["output_token"]
+            method = options["method"]
+            dispatch_state = options["dispatch_state"]
+
+            def compact(runtime_args, prefixes):
+                prefixes[output_token] = self._get_prefix(
+                    runtime_args, prefixes, source
+                ).compact(
+                    runtime_args[flags],
+                    runtime_args[output],
+                    runtime_args[output_extent],
+                    method=method,
+                    dispatch_state=dispatch_state,
+                )
+
+            return compact
+        if kind == "scan":
+            source, output = args
+            output_token = options["output_token"]
+
+            def scan(runtime_args, prefixes):
+                prefixes[output_token] = self._get_prefix(
+                    runtime_args, prefixes, source
+                ).scan(runtime_args[output])
+
+            return scan
+        if kind == "reduce":
+            source, output = args
+            call_options = dict(options)
+
+            def reduce(runtime_args, prefixes):
+                self._get_prefix(runtime_args, prefixes, source).reduce(
+                    runtime_args[output], **call_options
+                )
+
+            return reduce
+        if kind == "sort":
+            source, payload = args
+            call_options = dict(options)
+
+            def sort(runtime_args, prefixes):
+                self._get_prefix(runtime_args, prefixes, source).sort(
+                    None if payload is None else runtime_args[payload],
+                    **call_options,
+                )
+
+            return sort
+        if kind == "unique":
+            source, output, output_extent = args
+            output_token = options["output_token"]
+            method = options["method"]
+
+            def unique(runtime_args, prefixes):
+                prefixes[output_token] = self._get_prefix(
+                    runtime_args, prefixes, source
+                ).unique(
+                    runtime_args[output],
+                    runtime_args[output_extent],
+                    method=method,
+                )
+
+            return unique
+        if kind == "run_length_encode":
+            source, output, run_lengths, output_extent = args
+            output_token = options["output_token"]
+            method = options["method"]
+
+            def run_length_encode(runtime_args, prefixes):
+                prefixes[output_token] = self._get_prefix(
+                    runtime_args, prefixes, source
+                ).run_length_encode(
+                    runtime_args[output],
+                    runtime_args[run_lengths],
+                    runtime_args[output_extent],
+                    method=method,
+                )
+
+            return run_length_encode
+        if kind == "grouped_reduce":
+            source, keys, output = args
+            call_options = dict(options)
+
+            def grouped_reduce(runtime_args, prefixes):
+                self._get_prefix(runtime_args, prefixes, source).grouped_reduce(
+                    runtime_args[keys], runtime_args[output], **call_options
+                )
+
+            return grouped_reduce
+        if kind == "bucket_builder":
+            source, keys, offsets, output = args
+            output_token = options["output_token"]
+            method = options["method"]
+
+            def bucket_builder(runtime_args, prefixes):
+                prefixes[output_token] = self._get_prefix(
+                    runtime_args, prefixes, source
+                ).bucket_builder(
+                    runtime_args[keys],
+                    runtime_args[offsets],
+                    runtime_args[output],
+                    method=method,
+                )
+
+            return bucket_builder
+        raise TaichiRuntimeError(
+            f"Unsupported DevicePrefixSequence operation {kind!r}"
+        )
+
+    def _get_prefix(self, runtime_args, prefixes, token):
+        value = prefixes.get(token)
+        if value is None:
+            value = self._prefix(runtime_args, token)
+            prefixes[token] = value
+        return value
+
+    def _run_materialized(self, runtime_args):
+        self._runner(runtime_args, {})
+
+    def _run_legacy(self, runtime_args):
         prefixes = {}
-
-        def prefix(token):
-            value = prefixes.get(token)
-            if value is None:
-                value = self._prefix(runtime_args, token)
-                prefixes[token] = value
-            return value
-
-        for kind, args, kwargs in self._operations:
+        for kind, args, kwargs in self._legacy_operations:
             options = dict(kwargs)
             if kind == "compact":
                 source, flags, output, output_extent = args
                 output_token = options.pop("output_token")
-                result = prefix(source).compact(
+                prefixes[output_token] = self._get_prefix(
+                    runtime_args, prefixes, source
+                ).compact(
                     runtime_args[flags],
                     runtime_args[output],
                     runtime_args[output_extent],
                     method=options["method"],
                     dispatch_state=options["dispatch_state"],
                 )
-                prefixes[output_token] = result
             elif kind == "scan":
                 source, output = args
                 output_token = options.pop("output_token")
-                prefixes[output_token] = prefix(source).scan(runtime_args[output])
+                prefixes[output_token] = self._get_prefix(
+                    runtime_args, prefixes, source
+                ).scan(runtime_args[output])
             elif kind == "reduce":
                 source, output = args
-                prefix(source).reduce(runtime_args[output], **options)
+                self._get_prefix(runtime_args, prefixes, source).reduce(
+                    runtime_args[output], **options
+                )
             elif kind == "sort":
                 source, payload = args
-                prefix(source).sort(
+                self._get_prefix(runtime_args, prefixes, source).sort(
                     None if payload is None else runtime_args[payload], **options
                 )
             elif kind == "unique":
                 source, output, output_extent = args
                 output_token = options.pop("output_token")
-                prefixes[output_token] = prefix(source).unique(
+                prefixes[output_token] = self._get_prefix(
+                    runtime_args, prefixes, source
+                ).unique(
                     runtime_args[output], runtime_args[output_extent], **options
                 )
             elif kind == "run_length_encode":
                 source, output, run_lengths, output_extent = args
                 output_token = options.pop("output_token")
-                prefixes[output_token] = prefix(source).run_length_encode(
+                prefixes[output_token] = self._get_prefix(
+                    runtime_args, prefixes, source
+                ).run_length_encode(
                     runtime_args[output],
                     runtime_args[run_lengths],
                     runtime_args[output_extent],
@@ -888,13 +1088,15 @@ class _DevicePrefixSequenceGraphExecutable(NativeGraphExecutable):
                 )
             elif kind == "grouped_reduce":
                 source, keys, output = args
-                prefix(source).grouped_reduce(
+                self._get_prefix(runtime_args, prefixes, source).grouped_reduce(
                     runtime_args[keys], runtime_args[output], **options
                 )
             elif kind == "bucket_builder":
                 source, keys, offsets, output = args
                 output_token = options.pop("output_token")
-                prefixes[output_token] = prefix(source).bucket_builder(
+                prefixes[output_token] = self._get_prefix(
+                    runtime_args, prefixes, source
+                ).bucket_builder(
                     runtime_args[keys],
                     runtime_args[offsets],
                     runtime_args[output],
@@ -905,12 +1107,27 @@ class _DevicePrefixSequenceGraphExecutable(NativeGraphExecutable):
                     f"Unsupported DevicePrefixSequence operation {kind!r}"
                 )
 
+    def run(self, runtime_args=None):
+        if runtime_args is None:
+            raise TaichiRuntimeError(
+                "DevicePrefixSequence requires Graph runtime arguments"
+            )
+        self._run_impl(runtime_args)
+
     @property
     def debug_info(self):
         return {
             "kind": "device_prefix_sequence",
             "capacity": self._capacity,
             "operation_count": len(self._operations),
+            "provider_selection": "materialization_time",
+            "replay_python_operation_loop": self._legacy_replay,
+            "legacy_replay_forced": self._legacy_replay,
+            "backend_native_recording": False,
+            "materialized_methods": tuple(
+                options.get("method") for _, _, options in self._operations
+                if "method" in options
+            ),
             "producer_owned_dispatch_states": len(self._dispatch_states),
             "workspace_bytes_peak": self._workspace.workspace_bytes_peak,
         }

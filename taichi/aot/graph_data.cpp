@@ -898,6 +898,14 @@ struct CudaGraphBoundedDispatchGroup {
   std::vector<std::size_t> dispatch_indices;
 };
 
+struct CudaGraphBoundedDispatchObservation {
+  Arg extent_arg;
+  std::uint32_t capacity{0};
+  std::uint32_t block_dim{0};
+  std::uint32_t baseline_grid_dim{0};
+  bool adaptive_grid{false};
+};
+
 }  // namespace
 
 struct CompiledGraphCudaState {
@@ -909,6 +917,10 @@ struct CompiledGraphCudaState {
   std::vector<CudaGraphCapturePacket> packets;
   std::vector<CudaGraphBoundedDispatchControl> bounded_dispatch_controls;
   std::vector<CudaGraphBoundedDispatchGroup> bounded_dispatch_groups;
+  // Host-only immutable recipes for opt-in physical launch observation.
+  // They are materialized with the Graph and never touched by replay.
+  std::vector<CudaGraphBoundedDispatchObservation>
+      bounded_dispatch_observations;
   std::vector<std::int32_t> bounded_dispatch_group_indices;
   std::vector<std::int32_t> bounded_dispatch_group_member_indices;
   CudaGraphExecHandle graph_exec;
@@ -1354,9 +1366,34 @@ bool initialize_cuda_bounded_dispatch_controls(
   state.bounded_dispatch_controls.clear();
   state.bounded_dispatch_controls.resize(graph.dispatches.size());
   state.bounded_dispatch_groups.clear();
+  state.bounded_dispatch_observations.clear();
   state.bounded_dispatch_group_indices.assign(graph.dispatches.size(), -1);
   state.bounded_dispatch_group_member_indices.assign(graph.dispatches.size(),
                                                      -1);
+  state.bounded_dispatch_observations.reserve(graph.dispatches.size());
+  for (const auto &dispatch : graph.dispatches) {
+    const auto &metadata = dispatch.cuda_bounded_dispatch;
+    if (!metadata.has_value()) {
+      continue;
+    }
+    auto extent = cuda_graph_ndarray_address(state.signature,
+                                             metadata->extent_arg);
+    if (!extent.has_value()) {
+      *driver_error = CUDA_ERROR_NOT_SUPPORTED;
+      return false;
+    }
+    const auto capacity_grid = static_cast<std::uint32_t>(
+        (static_cast<std::uint64_t>(metadata->capacity) +
+         metadata->block_dim - 1u) /
+        metadata->block_dim);
+    const auto baseline_grid =
+        saturation_grid_dim == 0
+            ? capacity_grid
+            : std::min(capacity_grid, saturation_grid_dim);
+    state.bounded_dispatch_observations.push_back(
+        {metadata->extent_arg, metadata->capacity, metadata->block_dim, baseline_grid,
+         metadata->adaptive_grid});
+  }
   if (std::none_of(graph.dispatches.begin(), graph.dispatches.end(),
                    [](const auto &dispatch) {
                      return dispatch.cuda_bounded_dispatch.has_value() &&
@@ -4347,22 +4384,59 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
     CompiledGraphStats result = cuda_graph_state->stats;
     if (!cuda_graph_state->bounded_dispatch_controls.empty() ||
         !cuda_graph_state->bounded_dispatch_groups.empty() ||
+        !cuda_graph_state->bounded_dispatch_observations.empty() ||
         cuda_graph_state->nested_device_controls != nullptr) {
-      CUDADriver::get_instance().stream_synchronize(nullptr);
+      auto &driver = CUDADriver::get_instance();
+      driver.stream_synchronize(nullptr);
+      result.known_bounded_payloads = static_cast<std::uint32_t>(
+          cuda_graph_state->bounded_dispatch_observations.size());
+      result.bounded_physical_observation_available =
+          !cuda_graph_state->bounded_dispatch_observations.empty();
+      for (const auto &observation :
+           cuda_graph_state->bounded_dispatch_observations) {
+        const auto extent = cuda_graph_ndarray_address(
+            cuda_graph_state->signature, observation.extent_arg);
+        if (!extent.has_value()) {
+          result.bounded_physical_observation_available = false;
+          continue;
+        }
+        std::array<std::int32_t, 2> state_words{};
+        driver.memcpy_device_to_host(
+            state_words.data(), reinterpret_cast<void *>(*extent),
+            sizeof(state_words));
+        const auto useful = static_cast<std::uint32_t>(std::clamp(
+            state_words[0], std::int32_t{0},
+            static_cast<std::int32_t>(observation.capacity)));
+        const auto logical_blocks = static_cast<std::uint32_t>(std::min<
+            std::uint64_t>(
+            (static_cast<std::uint64_t>(useful) + observation.block_dim - 1u) /
+                observation.block_dim,
+            observation.baseline_grid_dim));
+        const auto physical_blocks =
+            observation.adaptive_grid ? logical_blocks
+                                      : observation.baseline_grid_dim;
+        result.last_bounded_useful_lanes += useful;
+        result.last_bounded_physical_blocks += physical_blocks;
+        result.last_bounded_physical_threads +=
+            static_cast<std::uint64_t>(physical_blocks) *
+            observation.block_dim;
+        result.last_bounded_baseline_blocks +=
+            observation.baseline_grid_dim;
+        result.last_bounded_zero_payloads += useful == 0 ? 1u : 0u;
+      }
       for (const auto &control :
            cuda_graph_state->bounded_dispatch_controls) {
         if (control.device_control == nullptr) {
           continue;
         }
         cuda::CudaGraphBoundedExtentControl observed;
-        CUDADriver::get_instance().memcpy_device_to_host(
+        driver.memcpy_device_to_host(
             &observed, control.device_control, sizeof(observed));
         if (observed.driver_status != CUDA_SUCCESS) {
           result.last_driver_error = observed.driver_status;
           break;
         }
       }
-      auto &driver = CUDADriver::get_instance();
       for (auto &group : cuda_graph_state->bounded_dispatch_groups) {
         if (group.device_control == nullptr) {
           continue;

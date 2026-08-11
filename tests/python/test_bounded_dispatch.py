@@ -6,6 +6,7 @@ import pytest
 
 import taichi_forge as ti
 from taichi_forge._lib import core as ti_core
+from taichi_forge.graph._ir import InternalNdarrayRequirement
 from taichi_forge.lang import impl
 from tests import test_utils
 
@@ -18,7 +19,7 @@ def test_dynamic_work_capabilities_separate_launch_and_iteration_semantics():
     observation = capabilities["observation"]
     arch = ti.lang.impl.current_cfg().arch
 
-    assert capabilities["schema_version"] == 4
+    assert capabilities["schema_version"] == 5
     assert capabilities["count_contract"] == {
         "owner": "DeviceExtent",
         "state_words": 2,
@@ -40,6 +41,8 @@ def test_dynamic_work_capabilities_separate_launch_and_iteration_semantics():
     assert bounded["producer_owned_launch_state"] == (arch == ti.vulkan)
     assert bounded["no_host_readback"]
     assert bounded["selected_route"] == bounded["route"]
+    assert bounded["publication_contract"] == "device_extent"
+    assert bounded["static_admission_reason"]
     assert bounded["range_mapping"] in (
         "one_to_one",
         "device_bounded_grid_stride",
@@ -76,6 +79,8 @@ def test_dynamic_work_capabilities_separate_launch_and_iteration_semantics():
         assert bounded["requested_route"] == "auto"
         assert bounded["minimum_driver_api_version"] is None
         assert bounded["updater_dispatches"] == 0
+        assert bounded["static_admission"] == "conservative_saturated"
+        assert bounded["physical_observation"] == "execution_stats_opt_in"
         assert bounded["fallback_reason"] == "none"
         assert iteration["command_termination_exact"] == (
             iteration["execution_semantics"] == "exact_dynamic_termination"
@@ -125,11 +130,11 @@ def test_bounded_internal_launch_storage_is_graph_instance_owned():
     output.fill(0)
 
     if ti.lang.impl.current_cfg().arch == ti.vulkan:
-        assert type(handle._packet).__name__ == "_GraphInternalNdarraySpec"
+        assert isinstance(handle._packet, InternalNdarrayRequirement)
         assert len(graph._instance._internal_storages) == 1
         storage = graph._instance._internal_storages[0]
         assert all(
-            type(value).__name__ != "_GraphInternalNdarraySpec"
+            not isinstance(value, InternalNdarrayRequirement)
             for value in graph._instance._fixed_runtime_args.values()
         )
         assert handle.workspace_bytes == 12
@@ -394,6 +399,7 @@ def test_cuda_bounded_route_selection_is_fail_closed(monkeypatch):
     assert not capabilities["exact_physical_grid"]
     assert capabilities["updater_dispatches"] == 0
     assert capabilities["minimum_driver_api_version"] is None
+    assert capabilities["static_admission"] == "conservative_saturated"
 
     monkeypatch.setenv("TI_CUDA_BOUNDED_DISPATCH_MODE", "masked_capacity")
     capabilities = ti.graph.bounded_dispatch_capabilities()
@@ -421,6 +427,9 @@ def test_cuda_bounded_route_selection_is_fail_closed(monkeypatch):
         assert capabilities["grouped_updates_supported"]
         assert not capabilities["forge_producer_fusion_supported"]
         assert not capabilities["producer_packet_consumed"]
+        assert capabilities["static_admission"] == (
+            "explicit_or_backend_native"
+        )
     else:
         with pytest.raises(RuntimeError, match="device_update"):
             ti.graph.bounded_dispatch_capabilities()
@@ -433,6 +442,76 @@ def test_cuda_bounded_route_selection_is_fail_closed(monkeypatch):
     monkeypatch.setenv("TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY", "invalid")
     with pytest.raises(RuntimeError, match="TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY"):
         ti.graph.bounded_dispatch_capabilities()
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_bounded_execution_stats_observe_physical_launch_position(
+    monkeypatch,
+):
+    monkeypatch.delenv("TI_CUDA_BOUNDED_DISPATCH_MODE", raising=False)
+    capacity = 257
+    block_dim = 32
+
+    @ti.kernel
+    def publish(
+        requested: ti.i32,
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.device_extent_publish(extent, capacity, requested)
+
+    @ti.kernel
+    def consume(
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.loop_config(block_dim=block_dim)
+        for i in range(capacity):
+            if i < ti.device_extent_count(extent):
+                ti.atomic_add(output[0], 1)
+
+    requested_arg = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "requested", ti.i32
+    )
+    extent_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "extent", ti.i32, ndim=1
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(publish, requested_arg, extent_arg)
+    for _ in range(2):
+        builder.dispatch_bounded(
+            consume,
+            extent_arg,
+            output_arg,
+            extent=extent_arg,
+            capacity=capacity,
+            block_dim=block_dim,
+        )
+    graph = builder.compile()
+    extent = ti.DeviceExtent(capacity)
+    output = ti.ndarray(ti.i32, shape=1)
+    args = {"requested": 65, "extent": extent, "output": output}
+
+    graph.run(args)
+    segment = graph.execution_stats().segments[0]
+    assert segment.bounded_physical_observation_available
+    assert segment.bounded_payloads == 2
+    assert segment.bounded_last_useful_lanes == 130
+    assert segment.bounded_last_baseline_blocks == 18
+    assert segment.bounded_last_physical_blocks == 18
+    assert segment.bounded_last_physical_threads == 18 * block_dim
+    assert segment.bounded_last_zero_payloads == 0
+
+    args["requested"] = 0
+    output.fill(0)
+    graph.run(args)
+    segment = graph.execution_stats().segments[0]
+    assert segment.bounded_last_useful_lanes == 0
+    assert segment.bounded_last_physical_blocks == 18
+    assert segment.bounded_last_zero_payloads == 2
+    assert int(output.to_numpy()[0]) == 0
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
@@ -753,6 +832,13 @@ def test_cuda_grouped_stateful_bounded_update_shares_one_updater(monkeypatch):
     assert segment.bounded_grouped_payloads == 2
     assert segment.bounded_producer_fused_groups == 0
     assert segment.bounded_max_group_size == 2
+    assert segment.bounded_physical_observation_available
+    assert segment.bounded_payloads == 2
+    assert segment.bounded_last_useful_lanes == 66
+    assert segment.bounded_last_physical_blocks == 4
+    assert segment.bounded_last_physical_threads == 4 * block_dim
+    assert segment.bounded_last_baseline_blocks == 18
+    assert segment.bounded_last_zero_payloads == 0
     assert segment.bounded_update_replays == 1
     assert segment.bounded_update_state_changes == 1
     assert segment.bounded_update_cache_hits == 0
@@ -1438,6 +1524,18 @@ def test_graph_device_prefix_sequence_publishes_bounded_launch_state():
     assert handle.workspace_bytes == 0
     assert graph._debug_info["nodes"][0]["kind"] == "device_prefix_sequence"
     assert graph._debug_info["nodes"][0]["operation_count"] == 1
+    assert graph._debug_info["nodes"][0]["provider_selection"] == (
+        "materialization_time"
+    )
+    assert not graph._debug_info["nodes"][0]["replay_python_operation_loop"]
+    expected_method = {
+        ti.cpu: "cpu_native",
+        ti.cuda: "cuda_device",
+        ti.vulkan: "vulkan_native",
+    }[ti.lang.impl.current_cfg().arch]
+    assert graph._debug_info["nodes"][0]["materialized_methods"] == (
+        expected_method,
+    )
 
     runtime_args = {
         "values": values,

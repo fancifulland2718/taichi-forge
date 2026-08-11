@@ -388,6 +388,13 @@ struct CompiledGraphStats {
   uint32_t known_bounded_updater_dispatches{0};
   uint32_t known_bounded_grouped_payloads{0};
   uint32_t known_bounded_producer_fused_groups{0};
+  uint32_t known_bounded_payloads{0};
+  uint64_t last_bounded_useful_lanes{0};
+  uint64_t last_bounded_physical_blocks{0};
+  uint64_t last_bounded_physical_threads{0};
+  uint64_t last_bounded_baseline_blocks{0};
+  uint32_t last_bounded_zero_payloads{0};
+  bool bounded_physical_observation_available{false};
   uint64_t bounded_update_replays{0};
   uint64_t bounded_update_state_changes{0};
   uint64_t bounded_update_cache_hits{0};

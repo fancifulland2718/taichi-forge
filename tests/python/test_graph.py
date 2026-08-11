@@ -2968,7 +2968,7 @@ def test_structured_control_capabilities_separate_rhi_and_runtime_paths():
     capabilities = ti.graph.structured_control_capabilities()
     device = capabilities["device_control"]
     arch = ti.lang.impl.current_cfg().arch
-    assert capabilities["schema_version"] == 4
+    assert capabilities["schema_version"] == 5
     assert set(("while", "if", "switch")) <= capabilities["portable"].keys()
     assert (
         set(

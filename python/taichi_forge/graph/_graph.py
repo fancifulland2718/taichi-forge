@@ -1497,6 +1497,13 @@ class GraphExecutionSegmentReport:
     bounded_updater_dispatches: int
     bounded_grouped_payloads: int
     bounded_producer_fused_groups: int
+    bounded_payloads: int
+    bounded_last_useful_lanes: int
+    bounded_last_physical_blocks: int
+    bounded_last_physical_threads: int
+    bounded_last_baseline_blocks: int
+    bounded_last_zero_payloads: int
+    bounded_physical_observation_available: bool
     bounded_update_replays: int
     bounded_update_state_changes: int
     bounded_update_cache_hits: int
@@ -1625,6 +1632,11 @@ class BoundedDispatchCapabilities:
     block_dim: Optional[int]
     fallback_reason: str
     reason: str
+    publication_contract: str = "device_extent"
+    publication_reuse: str = "backend_owned"
+    static_admission: str = "explicit_route"
+    static_admission_reason: str = "none"
+    physical_observation: str = "execution_stats_opt_in"
 
 
 @dataclass(frozen=True)
@@ -1743,7 +1755,7 @@ def _vulkan_bounded_packet_policy():
 def _bounded_route(backend, ordered):
     if backend == "vulkan":
         return BoundedDispatchCapabilities(
-            schema_version=4,
+            schema_version=5,
             backend=backend,
             requested_route="not_applicable",
             route="exact_indirect",
@@ -1805,7 +1817,7 @@ def _bounded_route(backend, ordered):
                     f"{cuda_capabilities['unavailable_reason']}"
                 )
             return BoundedDispatchCapabilities(
-                schema_version=4,
+                schema_version=5,
                 backend=backend,
                 requested_route=requested_route,
                 route="adaptive_device_grid_update",
@@ -1842,7 +1854,7 @@ def _bounded_route(backend, ordered):
             )
         if requested_route == "auto" and not ordered:
             return BoundedDispatchCapabilities(
-                schema_version=4,
+                schema_version=5,
                 backend=backend,
                 requested_route=requested_route,
                 route="device_bounded_grid_stride",
@@ -1877,7 +1889,7 @@ def _bounded_route(backend, ordered):
                 ),
             )
         return BoundedDispatchCapabilities(
-            schema_version=4,
+            schema_version=5,
             backend=backend,
             requested_route=requested_route,
             route="masked_capacity",
@@ -1925,7 +1937,7 @@ def _bounded_route(backend, ordered):
             requested_route == "auto" and not ordered
         ):
             return BoundedDispatchCapabilities(
-                schema_version=4,
+                schema_version=5,
                 backend=backend,
                 requested_route=requested_route,
                 route="exact_cpu_scheduler",
@@ -1971,7 +1983,7 @@ def _bounded_route(backend, ordered):
         range_mapping = "cpu_scheduler"
         minimum_driver_api_version = None
     return BoundedDispatchCapabilities(
-        schema_version=4,
+        schema_version=5,
         backend=backend,
         requested_route=requested_route,
         route="masked_capacity",
@@ -2137,6 +2149,32 @@ class BoundedDispatchHandle:
             block_dim=self.block_dim,
             producer_owned_launch_state=launch_state is not None,
             preparation_dispatches=preparation_dispatches,
+            publication_reuse=(
+                "consecutive_packet"
+                if backend == "vulkan" and preparation_dispatches == 0
+                else (
+                    "grouped_stateful"
+                    if backend == "cuda"
+                    and base.route == "adaptive_device_grid_update"
+                    and _cuda_bounded_update_policy()[1] == "grouped_stateful"
+                    else "per_consumer"
+                )
+            ),
+            static_admission=(
+                "conservative_saturated"
+                if backend == "cuda" and base.requested_route == "auto"
+                else "explicit_or_backend_native"
+            ),
+            static_admission_reason=(
+                "static topology does not prove sparse updater amortization"
+                if backend == "cuda" and base.requested_route == "auto"
+                else "none"
+            ),
+            physical_observation=(
+                "execution_stats_opt_in"
+                if backend == "cuda"
+                else "handle_snapshot_opt_in"
+            ),
         )
 
     @property
@@ -2344,7 +2382,7 @@ class HostBoundedDispatchHandle:
         self._runtime_generation = int(impl.runtime_generation())
         self._runtime_program = impl.get_runtime().prog
         self._capabilities = BoundedDispatchCapabilities(
-            schema_version=4,
+            schema_version=5,
             backend=backend,
             requested_route="host_known",
             route="exact_host_range",
@@ -3280,6 +3318,13 @@ def _empty_backend_stats():
             "known_bounded_updater_dispatches": 0,
             "known_bounded_grouped_payloads": 0,
             "known_bounded_producer_fused_groups": 0,
+            "known_bounded_payloads": 0,
+            "last_bounded_useful_lanes": 0,
+            "last_bounded_physical_blocks": 0,
+            "last_bounded_physical_threads": 0,
+            "last_bounded_baseline_blocks": 0,
+            "last_bounded_zero_payloads": 0,
+            "bounded_physical_observation_available": False,
             "known_compiled_tasks": 0,
             "known_compiled_dispatches": 0,
             "last_driver_error": 0,
@@ -3336,7 +3381,7 @@ def bounded_dispatch_capabilities():
     backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
     if backend not in ("cpu", "cuda", "vulkan"):
         return {
-            "schema_version": 4,
+            "schema_version": 5,
             "backend": backend,
             "available": False,
             "requested_route": "not_applicable",
@@ -3372,6 +3417,11 @@ def bounded_dispatch_capabilities():
             "baseline_capacity_grid": False,
             "fallback_reason": "backend_not_qualified",
             "reason": "backend is not qualified for bounded dispatch",
+            "publication_contract": "unavailable",
+            "publication_reuse": "unavailable",
+            "static_admission": "unsupported",
+            "static_admission_reason": "backend_not_qualified",
+            "physical_observation": "unavailable",
         }
     # Report the default single bounded-dispatch route. Ordered segmented
     # dispatch has its own per-operation lowering and may conservatively fall
@@ -3382,6 +3432,24 @@ def bounded_dispatch_capabilities():
     else:
         update_policy_requested = "not_applicable"
         update_policy = "not_applicable"
+    if backend == "cuda" and capabilities.requested_route == "auto":
+        static_admission = "conservative_saturated"
+        static_admission_reason = (
+            "static topology does not prove sparse updater amortization"
+        )
+    else:
+        static_admission = "explicit_or_backend_native"
+        static_admission_reason = "none"
+    publication_reuse = (
+        "consecutive_packet"
+        if backend == "vulkan"
+        else (
+            update_policy
+            if backend == "cuda"
+            and capabilities.route == "adaptive_device_grid_update"
+            else "per_consumer"
+        )
+    )
     return {
         "schema_version": capabilities.schema_version,
         "backend": backend,
@@ -3423,6 +3491,15 @@ def bounded_dispatch_capabilities():
         "baseline_capacity_grid": capabilities.baseline_capacity_grid,
         "fallback_reason": capabilities.fallback_reason,
         "reason": capabilities.reason,
+        "publication_contract": "device_extent",
+        "publication_reuse": publication_reuse,
+        "static_admission": static_admission,
+        "static_admission_reason": static_admission_reason,
+        "physical_observation": (
+            "execution_stats_opt_in"
+            if backend == "cuda"
+            else "handle_snapshot_opt_in"
+        ),
     }
 
 
@@ -3654,7 +3731,7 @@ def structured_control_capabilities():
         "cpu_exact_host_loop" if backend == "cpu" else "portable_exact_or_masked_replay"
     )
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "backend": backend,
         "portable": {
             "while": portable_while,
@@ -3798,7 +3875,7 @@ def dynamic_work_capabilities():
         "completion_attached_"
     )
     return {
-        "schema_version": 4,
+        "schema_version": 5,
         "backend": structured["backend"],
         "count_contract": {
             "owner": "DeviceExtent",
@@ -3851,6 +3928,13 @@ def dynamic_work_capabilities():
             "updater_dispatches": bounded["updater_dispatches"],
             "baseline_capacity_grid": bounded["baseline_capacity_grid"],
             "fallback_reason": bounded["fallback_reason"],
+            "publication_contract": bounded["publication_contract"],
+            "publication_reuse": bounded["publication_reuse"],
+            "static_admission": bounded["static_admission"],
+            "static_admission_reason": bounded[
+                "static_admission_reason"
+            ],
+            "physical_observation": bounded["physical_observation"],
             "accounting_fields": (
                 "useful_count",
                 "capacity",
@@ -3858,6 +3942,8 @@ def dynamic_work_capabilities():
                 "skipped_count",
                 "encoded_lanes",
                 "overflow",
+                "physical_blocks",
+                "physical_threads",
             ),
         },
         "structured_iteration": {
@@ -3978,6 +4064,13 @@ def _execution_report(
                     bounded_updater_dispatches=0,
                     bounded_grouped_payloads=0,
                     bounded_producer_fused_groups=0,
+                    bounded_payloads=0,
+                    bounded_last_useful_lanes=0,
+                    bounded_last_physical_blocks=0,
+                    bounded_last_physical_threads=0,
+                    bounded_last_baseline_blocks=0,
+                    bounded_last_zero_payloads=0,
+                    bounded_physical_observation_available=False,
                     bounded_update_replays=0,
                     bounded_update_state_changes=0,
                     bounded_update_cache_hits=0,
@@ -4058,6 +4151,27 @@ def _execution_report(
                 ),
                 bounded_producer_fused_groups=int(
                     stats.get("known_bounded_producer_fused_groups", 0)
+                ),
+                bounded_payloads=int(
+                    stats.get("known_bounded_payloads", 0)
+                ),
+                bounded_last_useful_lanes=int(
+                    stats.get("last_bounded_useful_lanes", 0)
+                ),
+                bounded_last_physical_blocks=int(
+                    stats.get("last_bounded_physical_blocks", 0)
+                ),
+                bounded_last_physical_threads=int(
+                    stats.get("last_bounded_physical_threads", 0)
+                ),
+                bounded_last_baseline_blocks=int(
+                    stats.get("last_bounded_baseline_blocks", 0)
+                ),
+                bounded_last_zero_payloads=int(
+                    stats.get("last_bounded_zero_payloads", 0)
+                ),
+                bounded_physical_observation_available=bool(
+                    stats.get("bounded_physical_observation_available", False)
                 ),
                 bounded_update_replays=int(
                     stats.get("bounded_update_replays", 0)
