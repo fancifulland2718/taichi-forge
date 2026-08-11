@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <unordered_map>
 
@@ -22,13 +23,14 @@ class KernelLauncher : public LLVM::KernelLauncher {
     JITModule *jit_module{nullptr};
     std::vector<int> snode_tree_ids;
     std::vector<TaskFunc> task_funcs;
+    std::vector<OffloadedTaskType> task_types;
     std::vector<std::pair<std::string, std::string>> task_trace_metadata;
     std::vector<SparseTaskMetadata> sparse_task_metadata;
     std::vector<std::pair<std::vector<int>, Callable::Parameter>> parameters;
   };
 
  public:
-  using Base::Base;
+  explicit KernelLauncher(Config config);
 
   void launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx) override;
   Handle register_llvm_kernel(
@@ -38,6 +40,9 @@ class KernelLauncher : public LLVM::KernelLauncher {
   void debug_reset_sparse_listgen_statistics() override;
   SparseSNodeTreeListgenStatistics debug_sparse_listgen_statistics(
       const std::vector<int> &snode_ids) override;
+  void debug_reset_launch_attribution() override;
+  std::unordered_map<std::string, std::uint64_t> debug_launch_attribution()
+      const override;
 
  private:
   // A CPU kernel can contain multiple offloaded tasks that share LLVM runtime
@@ -50,6 +55,29 @@ class KernelLauncher : public LLVM::KernelLauncher {
   bool sparse_listgen_telemetry_enabled_{false};
   std::unordered_map<int, SparseListgenNodeStatistics>
       sparse_listgen_telemetry_;
+  struct LaunchAttributionCounters {
+    bool enabled{false};
+    std::atomic<std::uint64_t> launches{0};
+    std::atomic<std::uint64_t> launch_wall_ns{0};
+    std::atomic<std::uint64_t> launch_cpu_ns{0};
+    std::atomic<std::uint64_t> execution_lock_wait_ns{0};
+    std::atomic<std::uint64_t> execution_lock_hold_ns{0};
+    std::atomic<std::uint64_t> registration_lock_wait_ns{0};
+    std::atomic<std::uint64_t> registration_lock_hold_ns{0};
+    std::atomic<std::uint64_t> context_lookup_ns{0};
+    std::atomic<std::uint64_t> argument_binding_ns{0};
+    std::atomic<std::uint64_t> task_execution_ns{0};
+    std::atomic<std::uint64_t> task_invocations{0};
+    std::atomic<std::uint64_t> serial_task_invocations{0};
+    std::atomic<std::uint64_t> serial_task_execution_ns{0};
+    std::atomic<std::uint64_t> range_task_invocations{0};
+    std::atomic<std::uint64_t> range_task_execution_ns{0};
+    std::atomic<std::uint64_t> other_task_invocations{0};
+    std::atomic<std::uint64_t> other_task_execution_ns{0};
+    std::atomic<std::uint64_t> labeled_launches{0};
+    std::atomic<std::uint64_t> sparse_telemetry_launches{0};
+    std::atomic<std::uint64_t> compile_profiler_enabled_launches{0};
+  } launch_attribution_;
 };
 
 }  // namespace cpu

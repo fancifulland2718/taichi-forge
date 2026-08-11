@@ -1,5 +1,9 @@
 #pragma once
 
+#include <cstdint>
+#include <string>
+#include <unordered_map>
+
 #include "taichi/codegen/compiled_kernel_data.h"
 #include "taichi/program/launch_context_builder.h"
 #include "taichi/program/sparse_runtime_statistics.h"
@@ -42,6 +46,14 @@ class KernelLauncher {
   virtual SparseSNodeTreeListgenStatistics
   debug_sparse_listgen_statistics(const std::vector<int> &snode_ids) {
     (void)snode_ids;
+    return {};
+  }
+
+  virtual void debug_reset_launch_attribution() {
+  }
+
+  virtual std::unordered_map<std::string, std::uint64_t>
+  debug_launch_attribution() const {
     return {};
   }
 

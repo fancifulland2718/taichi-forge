@@ -1704,6 +1704,11 @@ def test_owned_ndarray_launch_uses_stable_slot_and_elides_snode_guard(monkeypatc
     assert stats["ndarray_map_lookups"] == 0
     assert stats["snode_guard_acquisitions"] == 0
     assert stats["snode_guard_elisions"] >= 1
+    if arch == ti.cpu:
+        assert stats["backend_enabled"] == 1
+        assert stats["backend_launches"] == 1
+        assert stats["backend_task_invocations"] >= 1
+        assert stats["backend_task_execution_ns"] > 0
     assert value.to_numpy()[0] == 6
 
 

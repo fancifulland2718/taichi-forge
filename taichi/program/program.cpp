@@ -8388,6 +8388,9 @@ void Program::debug_reset_ordinary_launch_attribution() noexcept {
   TI_RESET_ORDINARY_LAUNCH_COUNTER(backend_submit_ns);
   TI_RESET_ORDINARY_LAUNCH_COUNTER(completion_accounting_ns);
 #undef TI_RESET_ORDINARY_LAUNCH_COUNTER
+  if (program_impl_) {
+    program_impl_->get_kernel_launcher().debug_reset_launch_attribution();
+  }
 }
 
 std::unordered_map<std::string, std::uint64_t>
@@ -8396,7 +8399,7 @@ Program::debug_ordinary_launch_attribution() const {
   auto load = [](const std::atomic<std::uint64_t> &value) {
     return value.load(std::memory_order_relaxed);
   };
-  return {
+  std::unordered_map<std::string, std::uint64_t> result = {
       {"enabled", stats.enabled ? 1u : 0u},
       {"owned_ndarray_fast_path",
        ordinary_owned_ndarray_fast_path_enabled_ ? 1u : 0u},
@@ -8427,6 +8430,13 @@ Program::debug_ordinary_launch_attribution() const {
       {"backend_submit_ns", load(stats.backend_submit_ns)},
       {"completion_accounting_ns", load(stats.completion_accounting_ns)},
   };
+  if (program_impl_) {
+    for (const auto &[name, value] :
+         program_impl_->get_kernel_launcher().debug_launch_attribution()) {
+      result.emplace("backend_" + name, value);
+    }
+  }
+  return result;
 }
 
 Ndarray *Program::create_ndarray(const DataType type,
