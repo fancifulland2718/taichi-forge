@@ -830,13 +830,28 @@ if(TI_WITH_PYTHON)
 
     message("PYTHON_LIBRARIES: " ${PYTHON_LIBRARIES})
     set(CORE_WITH_PYBIND_LIBRARY_NAME taichi_python)
+    set(_ti_pybind_compile_targets ${CORE_WITH_PYBIND_LIBRARY_NAME})
     if (NOT ANDROID)
         # NO_EXTRAS is required here to avoid llvm symbol error during build
         file(GLOB TAICHI_PYBIND_SOURCE
             "taichi/python/*.cpp"
             "taichi/python/*.h"
         )
-        pybind11_add_module(${CORE_WITH_PYBIND_LIBRARY_NAME} NO_EXTRAS ${TAICHI_PYBIND_SOURCE})
+        if(MSVC AND TI_WITH_SPLIT_PYTHON_RUNTIME AND
+                NOT TI_WITH_PREBUILT_PYTHON_RUNTIME)
+            set(_ti_pybind_object_target taichi_python_bindings)
+            add_library(${_ti_pybind_object_target} OBJECT ${TAICHI_PYBIND_SOURCE})
+            set_target_properties(${_ti_pybind_object_target} PROPERTIES
+                POSITION_INDEPENDENT_CODE ON)
+            target_link_libraries(${_ti_pybind_object_target}
+                PRIVATE pybind11::module)
+            pybind11_add_module(${CORE_WITH_PYBIND_LIBRARY_NAME} NO_EXTRAS
+                $<TARGET_OBJECTS:${_ti_pybind_object_target}>)
+            list(APPEND _ti_pybind_compile_targets ${_ti_pybind_object_target})
+        else()
+            pybind11_add_module(${CORE_WITH_PYBIND_LIBRARY_NAME} NO_EXTRAS
+                ${TAICHI_PYBIND_SOURCE})
+        endif()
     else()
         add_library(${CORE_WITH_PYBIND_LIBRARY_NAME} SHARED)
     endif ()
@@ -865,12 +880,16 @@ if(TI_WITH_PYTHON)
         # Defined by external/backward-cpp:
         # This will add libraries, definitions and include directories needed by backward
         # by setting each property on the target.
-        target_link_libraries(${CORE_WITH_PYBIND_LIBRARY_NAME} PRIVATE ${BACKWARD_ENABLE})
+        foreach(_ti_pybind_target IN LISTS _ti_pybind_compile_targets)
+            target_link_libraries(${_ti_pybind_target} PRIVATE ${BACKWARD_ENABLE})
+        endforeach()
     endif()
 
     if(TI_WITH_GGUI)
-        target_compile_definitions(${CORE_WITH_PYBIND_LIBRARY_NAME}
-            PRIVATE -DTI_WITH_GGUI -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES)
+        foreach(_ti_pybind_target IN LISTS _ti_pybind_compile_targets)
+            target_compile_definitions(${_ti_pybind_target}
+                PRIVATE -DTI_WITH_GGUI -DIMGUI_IMPL_VULKAN_NO_PROTOTYPES)
+        endforeach()
     endif()
     if(TI_WITH_PREBUILT_PYTHON_RUNTIME)
         foreach(_ti_backend_define IN ITEMS
@@ -884,8 +903,10 @@ if(TI_WITH_PYTHON)
             TI_WITH_DX11
             TI_WITH_DX12)
             if(${_ti_backend_define})
-                target_compile_definitions(${CORE_WITH_PYBIND_LIBRARY_NAME}
-                    PRIVATE -D${_ti_backend_define})
+                foreach(_ti_pybind_target IN LISTS _ti_pybind_compile_targets)
+                    target_compile_definitions(${_ti_pybind_target}
+                        PRIVATE -D${_ti_backend_define})
+                endforeach()
             endif()
         endforeach()
 
@@ -923,15 +944,19 @@ if(TI_WITH_PYTHON)
                 # mode; otherwise every binding translation unit retains an
                 # unresolved Enable/DisableABIBreakingChecks sentinel. The
                 # native runtime build remains fully ABI-checked.
-                target_compile_definitions(${CORE_WITH_PYBIND_LIBRARY_NAME}
-                    PRIVATE LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1)
+                foreach(_ti_pybind_target IN LISTS _ti_pybind_compile_targets)
+                    target_compile_definitions(${_ti_pybind_target}
+                        PRIVATE LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1)
+                endforeach()
             endif()
         endif()
     endif()
 
     if(TI_WITH_SPLIT_PYTHON_RUNTIME)
-        target_compile_definitions(${CORE_WITH_PYBIND_LIBRARY_NAME}
-            PRIVATE TI_WITH_SPLIT_PYTHON_RUNTIME)
+        foreach(_ti_pybind_target IN LISTS _ti_pybind_compile_targets)
+            target_compile_definitions(${_ti_pybind_target}
+                PRIVATE TI_WITH_SPLIT_PYTHON_RUNTIME)
+        endforeach()
         set(CORE_PYTHON_RUNTIME_LIBRARY_NAME taichi_runtime)
 
         function(_ti_link_split_runtime_native_targets target)
@@ -1074,22 +1099,34 @@ if(TI_WITH_PYTHON)
                     "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/taichi_runtime.$<CONFIG>.raw.exports.def")
                 set(_ti_runtime_filtered_exports
                     "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/taichi_runtime.$<CONFIG>.exports.def")
+                set(_ti_runtime_export_manifest
+                    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/taichi_runtime.$<CONFIG>.exports.json")
+                set(_ti_pybind_export_objlist
+                    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/taichi_python.$<CONFIG>.imports.objs")
 
                 file(GENERATE
                     OUTPUT "${_ti_runtime_export_objlist}"
                     CONTENT "$<JOIN:${_ti_windows_runtime_export_objects},\n>\n")
+                file(GENERATE
+                    OUTPUT "${_ti_pybind_export_objlist}"
+                    CONTENT "$<JOIN:$<TARGET_OBJECTS:${_ti_pybind_object_target}>,\n>\n")
                 add_custom_command(
-                    OUTPUT "${_ti_runtime_filtered_exports}"
+                    OUTPUT
+                        "${_ti_runtime_filtered_exports}"
+                        "${_ti_runtime_export_manifest}"
                     COMMAND ${CMAKE_COMMAND} -E __create_def
                         "${_ti_runtime_raw_exports}"
                         "${_ti_runtime_export_objlist}"
                     COMMAND "${PYTHON_EXECUTABLE}"
-                        "${PROJECT_SOURCE_DIR}/misc/filter_windows_runtime_exports.py"
+                        "${PROJECT_SOURCE_DIR}/misc/generate_windows_runtime_export_closure.py"
                         "${_ti_runtime_raw_exports}"
+                        "${_ti_pybind_export_objlist}"
                         "${_ti_runtime_filtered_exports}"
+                        "${_ti_runtime_export_manifest}"
                     DEPENDS
                         ${_ti_windows_runtime_export_objects}
-                        "${PROJECT_SOURCE_DIR}/misc/filter_windows_runtime_exports.py"
+                        $<TARGET_OBJECTS:${_ti_pybind_object_target}>
+                        "${PROJECT_SOURCE_DIR}/misc/generate_windows_runtime_export_closure.py"
                     VERBATIM)
                 set_source_files_properties("${_ti_runtime_filtered_exports}"
                     PROPERTIES GENERATED TRUE)
@@ -1097,6 +1134,15 @@ if(TI_WITH_PYTHON)
                     PRIVATE "${_ti_runtime_filtered_exports}")
                 set_target_properties(${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
                     PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS OFF)
+                add_custom_command(
+                    TARGET ${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
+                    POST_BUILD
+                    COMMAND "${PYTHON_EXECUTABLE}"
+                        "${PROJECT_SOURCE_DIR}/misc/generate_windows_runtime_export_closure.py"
+                        --audit-dll
+                        "$<TARGET_FILE:${CORE_PYTHON_RUNTIME_LIBRARY_NAME}>"
+                        "${_ti_runtime_export_manifest}"
+                    VERBATIM)
             endif()
             target_enable_function_level_linking(${CORE_PYTHON_RUNTIME_LIBRARY_NAME})
 
@@ -1123,6 +1169,12 @@ if(TI_WITH_PYTHON)
                     LIBRARY DESTINATION ${INSTALL_LIB_DIR}/runtime_native
                     ARCHIVE DESTINATION ${INSTALL_LIB_DIR}/runtime_native
                     COMPONENT runtime)
+            if(MSVC)
+                install(FILES "${_ti_runtime_export_manifest}"
+                    DESTINATION ${INSTALL_LIB_DIR}/runtime_native
+                    RENAME taichi_runtime.exports.json
+                    COMPONENT runtime)
+            endif()
         endif()
 
         if(WIN32 OR APPLE)
@@ -1140,38 +1192,44 @@ if(TI_WITH_PYTHON)
         target_link_libraries(${CORE_WITH_PYBIND_LIBRARY_NAME} PRIVATE ${CORE_LIBRARY_NAME})
     endif()
 
-    target_include_directories(${CORE_WITH_PYBIND_LIBRARY_NAME}
-      PRIVATE
-        ${PROJECT_SOURCE_DIR}
-        ${PROJECT_SOURCE_DIR}/external/spdlog/include
-        ${PROJECT_SOURCE_DIR}/external/eigen
-        ${PROJECT_SOURCE_DIR}/external/volk
-        ${PROJECT_SOURCE_DIR}/external/SPIRV-Tools/include
-        ${PROJECT_SOURCE_DIR}/external/SPIRV-Headers/include
-        ${PROJECT_SOURCE_DIR}/external/Vulkan-Headers/include
-        ${PROJECT_SOURCE_DIR}/external/glm
-        ${PROJECT_SOURCE_DIR}/external/imgui
-        ${PROJECT_SOURCE_DIR}/external/imgui/backends
-        ${PROJECT_SOURCE_DIR}/external/FP16/include
-      )
-    target_include_directories(${CORE_WITH_PYBIND_LIBRARY_NAME} SYSTEM
-      PRIVATE
-        ${PROJECT_SOURCE_DIR}/external/VulkanMemoryAllocator/include
-      )
+    foreach(_ti_pybind_target IN LISTS _ti_pybind_compile_targets)
+      target_include_directories(${_ti_pybind_target}
+        PRIVATE
+          ${PROJECT_SOURCE_DIR}
+          ${PROJECT_SOURCE_DIR}/external/spdlog/include
+          ${PROJECT_SOURCE_DIR}/external/eigen
+          ${PROJECT_SOURCE_DIR}/external/volk
+          ${PROJECT_SOURCE_DIR}/external/SPIRV-Tools/include
+          ${PROJECT_SOURCE_DIR}/external/SPIRV-Headers/include
+          ${PROJECT_SOURCE_DIR}/external/Vulkan-Headers/include
+          ${PROJECT_SOURCE_DIR}/external/glm
+          ${PROJECT_SOURCE_DIR}/external/imgui
+          ${PROJECT_SOURCE_DIR}/external/imgui/backends
+          ${PROJECT_SOURCE_DIR}/external/FP16/include
+        )
+      target_include_directories(${_ti_pybind_target} SYSTEM
+        PRIVATE
+          ${PROJECT_SOURCE_DIR}/external/VulkanMemoryAllocator/include
+        )
+    endforeach()
 
     if(TI_WITH_LLVM)
-      target_include_directories(${CORE_WITH_PYBIND_LIBRARY_NAME} SYSTEM
-        PRIVATE
-          ${LLVM_INCLUDE_DIRS}
-        )
+      foreach(_ti_pybind_target IN LISTS _ti_pybind_compile_targets)
+        target_include_directories(${_ti_pybind_target} SYSTEM
+          PRIVATE
+            ${LLVM_INCLUDE_DIRS}
+          )
+      endforeach()
     endif()
 
     if (NOT ANDROID)
-      target_include_directories(${CORE_WITH_PYBIND_LIBRARY_NAME}
-        PRIVATE
-          external/glfw/include
-          external/glad/include
-        )
+      foreach(_ti_pybind_target IN LISTS _ti_pybind_compile_targets)
+        target_include_directories(${_ti_pybind_target}
+          PRIVATE
+            external/glfw/include
+            external/glad/include
+          )
+      endforeach()
     endif()
 
     # These commands should apply to the DLL that is loaded from python, not the OBJECT library.
