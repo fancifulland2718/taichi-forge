@@ -74,6 +74,85 @@ def test_device_worklist_atomic_append_count_boundaries():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_worklist_optional_telemetry_has_no_optional_state():
+    capacity = 13
+    worklist = ti.algorithms.DeviceWorklist(
+        capacity, ti.i32, telemetry=False
+    )
+    assert set(worklist.stats) == {"generated", "overflow", "generation"}
+    memory = worklist.memory_report()
+    assert memory["counter_bytes"] == 12
+    assert memory["mandatory_counter_bytes"] == 12
+    assert memory["optional_telemetry_bytes"] == 0
+    assert not memory["telemetry_enabled"]
+
+    worklist.prepare_next()
+    _append_range(*worklist.append_arguments(), capacity + 3)
+    worklist.commit_next()
+    snapshot = worklist.snapshot()
+    assert snapshot.extent.count == capacity
+    assert snapshot.extent.overflow
+    assert snapshot.statistics.generated == capacity + 3
+    assert snapshot.statistics.accepted is None
+    assert snapshot.statistics.rejected is None
+    assert snapshot.statistics.conflicts is None
+    assert snapshot.statistics.winners is None
+    assert snapshot.statistics.generation == 1
+    assert not snapshot.statistics.telemetry_available
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_worklist_graph_optional_telemetry_is_not_bound_or_written():
+    capacity = 19
+    produced = 11
+    worklist = ti.algorithms.DeviceWorklist(
+        capacity, ti.i32, telemetry=False
+    )
+    args = worklist.graph_args("lean_frontier")
+    assert args.accepted is None
+    assert args.rejected is None
+    assert args.conflicts is None
+    assert args.winners is None
+    with pytest.raises(ti.TaichiRuntimeError, match="telemetry was disabled"):
+        args.observe(ti.graph.GraphBuilder())
+
+    count_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(
+        ti.algorithms.DeviceWorklistSequence(args).prepare_next(),
+        admission="auto",
+    )
+    builder.dispatch(_append_range, *args.append_arguments(), count_arg)
+    builder.append_native(
+        ti.algorithms.DeviceWorklistSequence(args).finalize_next(),
+        admission="auto",
+    )
+    graph = builder.compile()
+    runtime_args = worklist.runtime_arguments(
+        "lean_frontier", include_capacity=True
+    )
+    assert not any(
+        name in runtime_args
+        for name in (
+            "lean_frontier_accepted",
+            "lean_frontier_rejected",
+            "lean_frontier_conflicts",
+            "lean_frontier_winners",
+        )
+    )
+    runtime_args["count"] = produced
+    graph.run(runtime_args)
+    statistics = worklist.statistics()
+    assert worklist.next_extent.snapshot().count == produced
+    assert statistics.generated == produced
+    assert statistics.generation == 1
+    assert not statistics.telemetry_available
+    physical = graph.physical_plan()
+    assert physical["backend_recording_complete"]
+    assert physical["loose_native_action_count"] == 0
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_device_worklist_atomic_append_rejects_capacity_mismatch():
     capacity = 11
     worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)

@@ -47,14 +47,18 @@ from taichi_forge.types.primitive_types import f32, f64, i32, i64, u32, u64
 
 _WORKLIST_DTYPES = (i32, u32, i64, u64, f32, f64)
 _CONFLICT_KEY_DTYPES = (i32, u32, i64, u64)
-_STAT_NAMES = (
-    "generated",
+_OPTIONAL_STAT_NAMES = (
     "accepted",
     "rejected",
     "conflicts",
     "winners",
+)
+_STAT_NAMES = (
+    "generated",
+    *_OPTIONAL_STAT_NAMES,
     "overflow",
 )
+_STATE_NAMES = (*_STAT_NAMES, "generation")
 _WORKLIST_RECORDING_IDS = itertools.count(1)
 
 
@@ -150,6 +154,18 @@ def _reset_worklist_target(
 
 
 @kernel
+def _reset_worklist_target_minimal(
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    generated: ndarray_type.ndarray(dtype=i32, ndim=0),
+    overflow: ndarray_type.ndarray(dtype=i32, ndim=0),
+):
+    extent_state[0] = 0
+    extent_state[1] = 0
+    generated[None] = 0
+    overflow[None] = 0
+
+
+@kernel
 def _finalize_atomic_worklist(
     extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
     generated: ndarray_type.ndarray(dtype=i32, ndim=0),
@@ -158,6 +174,7 @@ def _finalize_atomic_worklist(
     conflicts: ndarray_type.ndarray(dtype=i32, ndim=0),
     winners: ndarray_type.ndarray(dtype=i32, ndim=0),
     overflow: ndarray_type.ndarray(dtype=i32, ndim=0),
+    generation: ndarray_type.ndarray(dtype=i32, ndim=0),
     capacity: i32,
 ):
     raw = generated[None]
@@ -171,6 +188,24 @@ def _finalize_atomic_worklist(
     status = 1 if overflow[None] != 0 or rejected_count != 0 else 0
     overflow[None] = status
     extent_state[1] = status
+    generation[None] += 1
+
+
+@kernel
+def _finalize_atomic_worklist_minimal(
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    generated: ndarray_type.ndarray(dtype=i32, ndim=0),
+    overflow: ndarray_type.ndarray(dtype=i32, ndim=0),
+    generation: ndarray_type.ndarray(dtype=i32, ndim=0),
+    capacity: i32,
+):
+    raw = generated[None]
+    bounded = ops.min(ops.max(raw, 0), capacity)
+    status = 1 if overflow[None] != 0 or raw != bounded else 0
+    extent_state[0] = bounded
+    extent_state[1] = status
+    overflow[None] = status
+    generation[None] += 1
 
 
 @kernel
@@ -182,6 +217,7 @@ def _finalize_atomic_worklist_with_dispatch(
     conflicts: ndarray_type.ndarray(dtype=i32, ndim=0),
     winners: ndarray_type.ndarray(dtype=i32, ndim=0),
     overflow: ndarray_type.ndarray(dtype=i32, ndim=0),
+    generation: ndarray_type.ndarray(dtype=i32, ndim=0),
     dispatch_packet: ndarray_type.ndarray(dtype=u32, ndim=1),
     capacity: i32,
     block_dim: i32,
@@ -198,6 +234,27 @@ def _finalize_atomic_worklist_with_dispatch(
     dispatch_packet[3] = ops.cast(block_dim, u32)
     device_dispatch_state_publish(extent_state, dispatch_packet, capacity, bounded)
     extent_state[1] = status
+    generation[None] += 1
+
+
+@kernel
+def _finalize_atomic_worklist_minimal_with_dispatch(
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    generated: ndarray_type.ndarray(dtype=i32, ndim=0),
+    overflow: ndarray_type.ndarray(dtype=i32, ndim=0),
+    generation: ndarray_type.ndarray(dtype=i32, ndim=0),
+    dispatch_packet: ndarray_type.ndarray(dtype=u32, ndim=1),
+    capacity: i32,
+    block_dim: i32,
+):
+    raw = generated[None]
+    bounded = ops.min(ops.max(raw, 0), capacity)
+    status = 1 if overflow[None] != 0 or raw != bounded else 0
+    overflow[None] = status
+    dispatch_packet[3] = ops.cast(block_dim, u32)
+    device_dispatch_state_publish(extent_state, dispatch_packet, capacity, bounded)
+    extent_state[1] = status
+    generation[None] += 1
 
 
 @kernel
@@ -210,6 +267,7 @@ def _publish_worklist_transition(
     conflicts: ndarray_type.ndarray(dtype=i32, ndim=0),
     winners: ndarray_type.ndarray(dtype=i32, ndim=0),
     overflow: ndarray_type.ndarray(dtype=i32, ndim=0),
+    generation: ndarray_type.ndarray(dtype=i32, ndim=0),
     resolution: i32,
 ):
     source_count = input_extent[0]
@@ -224,6 +282,23 @@ def _publish_worklist_transition(
     overflow[None] = status
     if status != 0:
         output_extent[1] = 1
+    generation[None] += 1
+
+
+@kernel
+def _publish_worklist_transition_minimal(
+    input_extent: ndarray_type.ndarray(dtype=i32, ndim=1),
+    output_extent: ndarray_type.ndarray(dtype=i32, ndim=1),
+    generated: ndarray_type.ndarray(dtype=i32, ndim=0),
+    overflow: ndarray_type.ndarray(dtype=i32, ndim=0),
+    generation: ndarray_type.ndarray(dtype=i32, ndim=0),
+):
+    status = 1 if input_extent[1] != 0 or output_extent[1] != 0 else 0
+    generated[None] = input_extent[0]
+    overflow[None] = status
+    if status != 0:
+        output_extent[1] = 1
+    generation[None] += 1
 
 
 @kernel
@@ -457,11 +532,13 @@ class DeviceWorklistStatistics:
 
     schema_version: int
     generated: int
-    accepted: int
-    rejected: int
-    conflicts: int
-    winners: int
+    accepted: object
+    rejected: object
+    conflicts: object
+    winners: object
     overflow: bool
+    generation: int = 0
+    telemetry_available: bool = True
 
     @property
     def useful_count(self):
@@ -496,6 +573,8 @@ class DeviceWorklistExecutionReport:
     winners: int
     overflow: bool
     exact_physical_grid: bool
+    generation: int = 0
+    telemetry_available: bool = True
 
 
 @dataclass(frozen=True)
@@ -531,18 +610,28 @@ class DeviceWorklistGraphArgs:
     conflicts: object
     winners: object
     overflow: object
+    generation: object
     capacity: object
+    telemetry: bool = True
 
     @property
     def stat_args(self):
-        return (
-            self.generated,
-            self.accepted,
-            self.rejected,
-            self.conflicts,
-            self.winners,
-            self.overflow,
+        return tuple(
+            value
+            for value in (
+                self.generated,
+                self.accepted,
+                self.rejected,
+                self.conflicts,
+                self.winners,
+                self.overflow,
+            )
+            if value is not None
         )
+
+    @property
+    def state_args(self):
+        return (*self.stat_args, self.generation)
 
     def append_arguments(self, *, target="next"):
         if target == "next":
@@ -562,7 +651,13 @@ class DeviceWorklistGraphArgs:
     def observe(self, builder, *, name=None):
         """Append completion-attached observation of all worklist counters."""
 
-        builder.observe(*self.stat_args, name=name or f"{self.name}_worklist")
+        if not self.telemetry:
+            raise TaichiRuntimeError(
+                "DeviceWorklist optional telemetry was disabled for this Graph ABI"
+            )
+        builder.observe(
+            *self.state_args, name=name or f"{self.name}_worklist"
+        )
         return builder
 
     def decode_observation(self, values):
@@ -571,6 +666,10 @@ class DeviceWorklistGraphArgs:
         if not isinstance(values, dict):
             raise TypeError("DeviceWorklist observation must be a mapping")
         decoded = {}
+        if not self.telemetry:
+            raise TaichiRuntimeError(
+                "DeviceWorklist optional telemetry was disabled for this Graph ABI"
+            )
         for stat in _STAT_NAMES:
             key = getattr(self, stat).name
             if key not in values:
@@ -579,17 +678,19 @@ class DeviceWorklistGraphArgs:
                 )
             decoded[stat] = int(values[key])
         return DeviceWorklistStatistics(
-            schema_version=1,
+            schema_version=2,
             generated=decoded["generated"],
             accepted=decoded["accepted"],
             rejected=decoded["rejected"],
             conflicts=decoded["conflicts"],
             winners=decoded["winners"],
             overflow=bool(decoded["overflow"]),
+            generation=int(values[self.generation.name]),
+            telemetry_available=True,
         )
 
 
-def device_worklist_graph_args(name, capacity, dtype=i32):
+def device_worklist_graph_args(name, capacity, dtype=i32, *, telemetry=True):
     """Create the symbolic argument bundle paired with ``runtime_arguments``."""
 
     if not isinstance(name, str) or not name:
@@ -597,6 +698,8 @@ def device_worklist_graph_args(name, capacity, dtype=i32):
     capacity = _require_capacity(capacity)
     if dtype not in _WORKLIST_DTYPES:
         raise TypeError("DeviceWorklist Graph dtype is not supported")
+    if not isinstance(telemetry, bool):
+        raise TypeError("DeviceWorklist Graph telemetry must be a bool")
     from taichi_forge import graph  # pylint: disable=import-outside-toplevel
 
     ndarray = graph.ArgKind.NDARRAY
@@ -610,12 +713,30 @@ def device_worklist_graph_args(name, capacity, dtype=i32):
         next_values=graph.Arg(ndarray, f"{name}_next_values", dtype, ndim=1),
         next_extent=graph.Arg(ndarray, f"{name}_next_extent", i32, ndim=1),
         generated=graph.Arg(ndarray, f"{name}_generated", i32, ndim=0),
-        accepted=graph.Arg(ndarray, f"{name}_accepted", i32, ndim=0),
-        rejected=graph.Arg(ndarray, f"{name}_rejected", i32, ndim=0),
-        conflicts=graph.Arg(ndarray, f"{name}_conflicts", i32, ndim=0),
-        winners=graph.Arg(ndarray, f"{name}_winners", i32, ndim=0),
+        accepted=(
+            graph.Arg(ndarray, f"{name}_accepted", i32, ndim=0)
+            if telemetry
+            else None
+        ),
+        rejected=(
+            graph.Arg(ndarray, f"{name}_rejected", i32, ndim=0)
+            if telemetry
+            else None
+        ),
+        conflicts=(
+            graph.Arg(ndarray, f"{name}_conflicts", i32, ndim=0)
+            if telemetry
+            else None
+        ),
+        winners=(
+            graph.Arg(ndarray, f"{name}_winners", i32, ndim=0)
+            if telemetry
+            else None
+        ),
         overflow=graph.Arg(ndarray, f"{name}_overflow", i32, ndim=0),
+        generation=graph.Arg(ndarray, f"{name}_generation", i32, ndim=0),
         capacity=graph.Arg(scalar, f"{name}_capacity", i32),
+        telemetry=telemetry,
     )
 
 
@@ -687,8 +808,23 @@ def _stats_tuple(stats):
     return tuple(stats[name] for name in _STAT_NAMES)
 
 
+def _telemetry_enabled(stats):
+    return all(name in stats for name in _OPTIONAL_STAT_NAMES)
+
+
+def _statistics_tuple(stats):
+    if not _telemetry_enabled(stats):
+        return ()
+    return _stats_tuple(stats)
+
+
 def _reset_target(extent, stats):
-    _reset_worklist_target(extent.state, *_stats_tuple(stats))
+    if _telemetry_enabled(stats):
+        _reset_worklist_target(extent.state, *_stats_tuple(stats))
+    else:
+        _reset_worklist_target_minimal(
+            extent.state, stats["generated"], stats["overflow"]
+        )
 
 
 def _finalize_atomic_target(extent, stats, capacity, dispatch_state=None):
@@ -698,25 +834,61 @@ def _finalize_atomic_target(extent, stats, capacity, dispatch_state=None):
             "dispatch packet; pass the DeviceExtent directly to bounded consumers"
         )
     if dispatch_state is None or impl.current_cfg().arch != _ti_core.Arch.vulkan:
-        _finalize_atomic_worklist(extent.state, *_stats_tuple(stats), capacity)
+        if _telemetry_enabled(stats):
+            _finalize_atomic_worklist(
+                extent.state,
+                *_stats_tuple(stats),
+                stats["generation"],
+                capacity,
+            )
+        else:
+            _finalize_atomic_worklist_minimal(
+                extent.state,
+                stats["generated"],
+                stats["overflow"],
+                stats["generation"],
+                capacity,
+            )
         return
     dispatch_state.validate_extent(extent, require_identity=True)
-    _finalize_atomic_worklist_with_dispatch(
-        extent.state,
-        *_stats_tuple(stats),
-        dispatch_state.packet,
-        capacity,
-        dispatch_state.block_dim,
-    )
+    if _telemetry_enabled(stats):
+        _finalize_atomic_worklist_with_dispatch(
+            extent.state,
+            *_stats_tuple(stats),
+            stats["generation"],
+            dispatch_state.packet,
+            capacity,
+            dispatch_state.block_dim,
+        )
+    else:
+        _finalize_atomic_worklist_minimal_with_dispatch(
+            extent.state,
+            stats["generated"],
+            stats["overflow"],
+            stats["generation"],
+            dispatch_state.packet,
+            capacity,
+            dispatch_state.block_dim,
+        )
 
 
 def _publish_transition(input_extent, output_extent, stats, resolution):
-    _publish_worklist_transition(
-        input_extent.state,
-        output_extent.state,
-        *_stats_tuple(stats),
-        int(bool(resolution)),
-    )
+    if _telemetry_enabled(stats):
+        _publish_worklist_transition(
+            input_extent.state,
+            output_extent.state,
+            *_stats_tuple(stats),
+            stats["generation"],
+            int(bool(resolution)),
+        )
+    else:
+        _publish_worklist_transition_minimal(
+            input_extent.state,
+            output_extent.state,
+            stats["generated"],
+            stats["overflow"],
+            stats["generation"],
+        )
 
 
 def _select_impl(
@@ -852,7 +1024,7 @@ def _resolve_dense_impl(
         priorities=output_priorities,
         ordinals=output_ordinals,
         extent=output_extent,
-        statistics=_stats_tuple(stats),
+        statistics=_statistics_tuple(stats),
         policy=policy,
         strategy="dense_atomic",
         sort_method=None,
@@ -991,7 +1163,7 @@ def _resolve_impl(
         priorities=output_priorities,
         ordinals=output_ordinals,
         extent=output_extent,
-        statistics=_stats_tuple(stats),
+        statistics=_statistics_tuple(stats),
         policy=policy,
         strategy="radix_grouped",
         sort_method=_native_key_sort_method(sort_method),
@@ -1002,12 +1174,14 @@ def _resolve_impl(
 class DeviceWorklist:
     """Stable front/back storage for a device-driven fixed-capacity worklist."""
 
-    def __init__(self, capacity, dtype=i32, *, workspace=None):
+    def __init__(self, capacity, dtype=i32, *, workspace=None, telemetry=True):
         capacity = _require_capacity(capacity)
         if dtype not in _WORKLIST_DTYPES:
             raise TypeError("DeviceWorklist dtype is not supported")
         if impl.get_runtime().prog is None:
             raise TaichiRuntimeError("DeviceWorklist requires an initialized runtime")
+        if not isinstance(telemetry, bool):
+            raise TypeError("DeviceWorklist telemetry must be a bool")
         if workspace is None:
             workspace = DevicePrefixWorkspace(capacity)
         if not isinstance(workspace, DevicePrefixWorkspace):
@@ -1021,7 +1195,14 @@ class DeviceWorklist:
             ti_ndarray(dtype, shape=capacity),
         )
         self._extents = (DeviceExtent(capacity), DeviceExtent(capacity))
-        self._stats = {name: ti_ndarray(i32, shape=()) for name in _STAT_NAMES}
+        self._telemetry = telemetry
+        state_names = (
+            _STATE_NAMES
+            if telemetry
+            else ("generated", "overflow", "generation")
+        )
+        self._stats = {name: ti_ndarray(i32, shape=()) for name in state_names}
+        self._stats["generation"].fill(0)
         self._front = 0
         self._next_requires_finalize = False
         self._generation = int(impl.runtime_generation())
@@ -1038,7 +1219,7 @@ class DeviceWorklist:
             ),
             stat_allocation_identities=tuple(
                 int(self._stats[name]._runtime_allocation_identity)
-                for name in _STAT_NAMES
+                for name in state_names
             ),
         )
         self.clear()
@@ -1083,6 +1264,10 @@ class DeviceWorklist:
     def stats(self):
         self._validate_current()
         return dict(self._stats)
+
+    @property
+    def telemetry_enabled(self):
+        return self._telemetry
 
     @property
     def workspace_bytes_current(self):
@@ -1274,16 +1459,19 @@ class DeviceWorklist:
 
         self._validate_current()
         values = {
-            name: int(self._stats[name].to_numpy().item()) for name in _STAT_NAMES
+            name: int(value.to_numpy().item())
+            for name, value in self._stats.items()
         }
         return DeviceWorklistStatistics(
-            schema_version=1,
+            schema_version=2,
             generated=values["generated"],
-            accepted=values["accepted"],
-            rejected=values["rejected"],
-            conflicts=values["conflicts"],
-            winners=values["winners"],
+            accepted=values.get("accepted"),
+            rejected=values.get("rejected"),
+            conflicts=values.get("conflicts"),
+            winners=values.get("winners"),
             overflow=bool(values["overflow"]),
+            generation=values["generation"],
+            telemetry_available=self._telemetry,
         )
 
     def snapshot(self):
@@ -1326,7 +1514,7 @@ class DeviceWorklist:
             exact = snapshot.capabilities.exact_grid
             overflow = overflow or snapshot.overflow
         return DeviceWorklistExecutionReport(
-            schema_version=1,
+            schema_version=2,
             backend=backend,
             route=route,
             useful_count=extent_snapshot.count,
@@ -1341,10 +1529,14 @@ class DeviceWorklist:
             winners=statistics.winners,
             overflow=overflow,
             exact_physical_grid=exact,
+            generation=statistics.generation,
+            telemetry_available=statistics.telemetry_available,
         )
 
     def graph_args(self, name):
-        return device_worklist_graph_args(name, self._capacity, self._dtype)
+        return device_worklist_graph_args(
+            name, self._capacity, self._dtype, telemetry=self._telemetry
+        )
 
     def runtime_arguments(self, name, *, include_capacity=False):
         """Bind this worklist to :func:`device_worklist_graph_args`."""
@@ -1364,13 +1556,17 @@ class DeviceWorklist:
     def memory_report(self):
         self._validate_current()
         front_back = 2 * self._capacity * _dtype_bytes(self._dtype)
-        owned = front_back + 16 + 24
+        counter_bytes = len(self._stats) * 4
+        owned = front_back + 16 + counter_bytes
         return {
             "schema_version": 1,
             "capacity": self._capacity,
             "front_back_value_bytes": front_back,
             "extent_bytes": 16,
-            "counter_bytes": 24,
+            "counter_bytes": counter_bytes,
+            "mandatory_counter_bytes": 12,
+            "optional_telemetry_bytes": counter_bytes - 12,
+            "telemetry_enabled": self._telemetry,
             "workspace_bytes_current": self.workspace_bytes_current,
             "workspace_bytes_peak": self.workspace_bytes_peak,
             "total_bytes_current": owned + self.workspace_bytes_current,
@@ -1419,7 +1615,8 @@ class DeviceWorklistSequence:
             (args.next_extent, "next extent", i32, 1),
             *(
                 (value, name, i32, 0)
-                for value, name in zip(args.stat_args, _STAT_NAMES)
+                for name in _STATE_NAMES
+                if (value := getattr(args, name)) is not None
             ),
         ):
             self._register(value, role, dtype=dtype, ndim=ndim)
@@ -1673,8 +1870,20 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
         from taichi_forge.graph._graph import Arg, ArgKind, gen_cpp_kernel
 
         if kind == "reset":
-            symbolic_args = (self._args.next_extent, *self._args.stat_args)
-            kernel_cpp = gen_cpp_kernel(_reset_worklist_target, symbolic_args)
+            if self._args.telemetry:
+                symbolic_args = (
+                    self._args.next_extent,
+                    *self._args.stat_args,
+                )
+                reset_kernel = _reset_worklist_target
+            else:
+                symbolic_args = (
+                    self._args.next_extent,
+                    self._args.generated,
+                    self._args.overflow,
+                )
+                reset_kernel = _reset_worklist_target_minimal
+            kernel_cpp = gen_cpp_kernel(reset_kernel, symbolic_args)
             fixed_bindings = {}
         else:
             prefix = f"__ti_worklist_transition_{self._recording_id}"
@@ -1696,30 +1905,54 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
                     f"{prefix}_dispatch_block",
                     i32,
                 )
-                symbolic_args = (
-                    self._args.next_extent,
-                    *self._args.stat_args,
-                    packet_arg,
-                    capacity_arg,
-                    block_arg,
-                )
-                kernel_cpp = gen_cpp_kernel(
-                    _finalize_atomic_worklist_with_dispatch, symbolic_args
-                )
+                if self._args.telemetry:
+                    symbolic_args = (
+                        self._args.next_extent,
+                        *self._args.stat_args,
+                        self._args.generation,
+                        packet_arg,
+                        capacity_arg,
+                        block_arg,
+                    )
+                    finalize_kernel = _finalize_atomic_worklist_with_dispatch
+                else:
+                    symbolic_args = (
+                        self._args.next_extent,
+                        self._args.generated,
+                        self._args.overflow,
+                        self._args.generation,
+                        packet_arg,
+                        capacity_arg,
+                        block_arg,
+                    )
+                    finalize_kernel = (
+                        _finalize_atomic_worklist_minimal_with_dispatch
+                    )
+                kernel_cpp = gen_cpp_kernel(finalize_kernel, symbolic_args)
                 fixed_bindings = {
                     packet_arg.name: dispatch_state.packet,
                     capacity_arg.name: self._args.capacity_value,
                     block_arg.name: dispatch_state.block_dim,
                 }
             else:
-                symbolic_args = (
-                    self._args.next_extent,
-                    *self._args.stat_args,
-                    capacity_arg,
-                )
-                kernel_cpp = gen_cpp_kernel(
-                    _finalize_atomic_worklist, symbolic_args
-                )
+                if self._args.telemetry:
+                    symbolic_args = (
+                        self._args.next_extent,
+                        *self._args.stat_args,
+                        self._args.generation,
+                        capacity_arg,
+                    )
+                    finalize_kernel = _finalize_atomic_worklist
+                else:
+                    symbolic_args = (
+                        self._args.next_extent,
+                        self._args.generated,
+                        self._args.overflow,
+                        self._args.generation,
+                        capacity_arg,
+                    )
+                    finalize_kernel = _finalize_atomic_worklist_minimal
+                kernel_cpp = gen_cpp_kernel(finalize_kernel, symbolic_args)
                 fixed_bindings = {
                     capacity_arg.name: self._args.capacity_value,
                 }
@@ -1758,16 +1991,28 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
         prefix = f"__ti_worklist_transition_{self._recording_id}_publication"
         capacity_arg = Arg(ArgKind.SCALAR, f"{prefix}_capacity", i32)
         block_arg = Arg(ArgKind.SCALAR, f"{prefix}_block", i32)
-        symbolic_args = (
-            self._args.next_extent,
-            *self._args.stat_args,
-            target.packet_binding,
-            capacity_arg,
-            block_arg,
-        )
-        kernel_cpp = gen_cpp_kernel(
-            _finalize_atomic_worklist_with_dispatch, symbolic_args
-        )
+        if self._args.telemetry:
+            symbolic_args = (
+                self._args.next_extent,
+                *self._args.stat_args,
+                self._args.generation,
+                target.packet_binding,
+                capacity_arg,
+                block_arg,
+            )
+            finalize_kernel = _finalize_atomic_worklist_with_dispatch
+        else:
+            symbolic_args = (
+                self._args.next_extent,
+                self._args.generated,
+                self._args.overflow,
+                self._args.generation,
+                target.packet_binding,
+                capacity_arg,
+                block_arg,
+            )
+            finalize_kernel = _finalize_atomic_worklist_minimal_with_dispatch
+        kernel_cpp = gen_cpp_kernel(finalize_kernel, symbolic_args)
         return DispatchGraphAction(
             ((kernel_cpp, symbolic_args),),
             backends=(target.backend,),
@@ -1784,7 +2029,9 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
 
     def _stats(self, runtime_args):
         return {
-            name: runtime_args[getattr(self._args, name).name] for name in _STAT_NAMES
+            name: runtime_args[value.name]
+            for name in _STATE_NAMES
+            if (value := getattr(self._args, name)) is not None
         }
 
     def _compile_runner(self):
@@ -1985,12 +2232,13 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
             "kind": "device_worklist_sequence",
             "operation": self._operation[0],
             "capacity": self._args.capacity_value,
-            "counter_count": len(_STAT_NAMES),
             "workspace_bytes_peak": self._workspace.workspace_bytes_peak,
             "provider_selection": "materialization_time",
             "replay_operation_branch": self._legacy_replay,
             "legacy_replay_forced": self._legacy_replay,
             "backend_native_recording": self._operation[0] in ("reset", "finalize"),
+            "telemetry_enabled": self._args.telemetry,
+            "counter_count": len(self._args.state_args),
         }
         if self._operation[0] == "resolve":
             options = self._operation[2]
