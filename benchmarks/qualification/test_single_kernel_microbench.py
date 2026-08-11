@@ -30,6 +30,9 @@ from benchmarks.qualification.single_kernel_microbench import (
     _bfs_worklist_route,
     _bfs_worklist_kernel_control_route_isolated,
     _bfs_worklist_native_route_admitted,
+    _falling_sand_route,
+    _falling_sand_kernel_control_route_isolated,
+    _falling_sand_native_route_admitted,
     _sparse_block_stencil_route_isolated,
     balanced_pair_orders,
     comparison_definition,
@@ -49,6 +52,10 @@ from benchmarks.qualification.audit_single_kernel_run import (
     _audit_bfs_worklist_kernel_control_route_isolated,
     _bfs_worklist_native_route_admitted as
     _audit_bfs_worklist_native_route_admitted,
+    _falling_sand_kernel_control_route_isolated as
+    _audit_falling_sand_kernel_control_route_isolated,
+    _falling_sand_native_route_admitted as
+    _audit_falling_sand_native_route_admitted,
     _sparse_block_stencil_route_isolated as
     _audit_sparse_block_stencil_route_isolated,
 )
@@ -1187,6 +1194,170 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
             results["forge"], results["forge_kernel"]))
         results["forge_kernel"]["validation_after"]["endpoint_vectors"][
             "positions_f32"]["sha256"] = "e" * 64
+        self.assertFalse(_endpoint_equivalent(
+            results, "forge", "forge_kernel"))
+        self.assertFalse(_audit_endpoint_equivalent(
+            results["forge"], results["forge_kernel"]))
+
+    def test_falling_sand_route_admits_three_explicit_paths(self):
+        class Stats:
+            generated = 6
+            accepted = 3
+            rejected = 3
+            conflicts = 3
+            winners = 3
+            overflow = False
+
+        class Worklist:
+            capacity = 32
+
+            @staticmethod
+            def memory_report():
+                return {"fixed_capacity": True,
+                        "replay_allocation_count": 0}
+
+            @staticmethod
+            def statistics():
+                return Stats()
+
+        source_sha256 = "c" * 64
+        native = _falling_sand_route(
+            Worklist(), "forge", "cuda", 32, 6, 3, 6, 3,
+            source_sha256)
+        self.assertTrue(native["passed"])
+        contract = {
+            "cells": 32,
+            "expected_candidate_count": 6,
+            "expected_winner_count": 3,
+            "kernel_source_sha256": source_sha256,
+            "native_benchmark_stage_kernel_names": [
+                "reset_sand", "propose_candidates", "initialize_sources",
+                "gather_compact_attributes", "materialize_native_winners",
+            ],
+            "native_control_claim_workspace_reset": False,
+        }
+        child = {
+            "operation": "falling_sand",
+            "runtime": "forge",
+            "backend": "cuda",
+            "route": native,
+            "workload_contract": contract,
+        }
+        self.assertTrue(_falling_sand_native_route_admitted(child))
+        self.assertTrue(_audit_falling_sand_native_route_admitted(child))
+        Stats.conflicts = 2
+        self.assertFalse(_falling_sand_route(
+            Worklist(), "forge", "cuda", 32, 6, 3, 6, 3,
+            source_sha256)["passed"])
+        Stats.conflicts = 3
+
+        control = _falling_sand_route(
+            None, "forge_kernel", "cuda", 32, 6, 3, 6, 3,
+            source_sha256)
+        control_contract = {
+            **contract,
+            "kernel_benchmark_workspace_kind": (
+                "one_i32_destination_claim_array"),
+            "kernel_benchmark_workspace_field_count": 1,
+            "kernel_control_claim_workspace_reset": True,
+            "kernel_stage_names": [
+                "reset_sand", "propose_candidates", "claim_candidates",
+                "materialize_kernel_winners",
+            ],
+            "kernel_ti_invocations_per_replay": 4,
+        }
+        control_child = {
+            "operation": "falling_sand",
+            "runtime": "forge_kernel",
+            "backend": "cuda",
+            "route": control,
+            "workload_contract": control_contract,
+        }
+        self.assertTrue(_falling_sand_kernel_control_route_isolated(
+            control_child))
+        self.assertTrue(_audit_falling_sand_kernel_control_route_isolated(
+            control_child))
+        control["helper_api_used"] = True
+        self.assertFalse(_falling_sand_kernel_control_route_isolated(
+            control_child))
+        self.assertFalse(_audit_falling_sand_kernel_control_route_isolated(
+            control_child))
+
+    def test_falling_sand_endpoint_recomputes_all_raw_vectors(self):
+        def exact(values):
+            count = len(values)
+            sample_indices = sorted(set((
+                0, count // 4, count // 2,
+                (3 * count) // 4, count - 1,
+            )))
+            payload = b"".join(
+                int(value).to_bytes(4, "little", signed=True)
+                for value in values)
+            digest = hashlib.sha256(payload).hexdigest()
+            return {
+                "count": count,
+                "expected_count": count,
+                "actual_sha256": digest,
+                "expected_sha256": digest,
+                "actual_sum": sum(values),
+                "expected_sum": sum(values),
+                "actual_minimum": min(values),
+                "expected_minimum": min(values),
+                "actual_maximum": max(values),
+                "expected_maximum": max(values),
+                "sample_indices": sample_indices,
+                "expected_sample_indices": sample_indices,
+                "actual_samples": [values[index] for index in sample_indices],
+                "expected_samples": [
+                    values[index] for index in sample_indices],
+                "actual_values_i32": values,
+                "expected_values_i32": values,
+                "mismatch_count": 0,
+                "first_mismatch": None,
+            }
+
+        vectors = {
+            "grid_i32": exact([1, 0, -1, 2]),
+            "winner_source_by_destination_i32": exact([-1, 0, -1, -1]),
+            "destinations_i32": exact([1, -1, -1, 1]),
+            "priorities_i32": exact([2, -1, -1, 4]),
+        }
+        validation = {
+            "passed": True,
+            "comparison": (
+                "exact_falling_sand_grid_candidates_and_keyed_winners"),
+            "candidate_count": 2,
+            "expected_candidate_count": 2,
+            "winner_count": 1,
+            "expected_winner_count": 1,
+            "conflict_count": 1,
+            "expected_conflict_count": 1,
+            "endpoint_fingerprint": {
+                "finite": True,
+                "grid_sha256": vectors["grid_i32"]["actual_sha256"],
+                "winner_sources_sha256": vectors[
+                    "winner_source_by_destination_i32"]["actual_sha256"],
+                "destinations_sha256": vectors[
+                    "destinations_i32"]["actual_sha256"],
+                "priorities_sha256": vectors[
+                    "priorities_i32"]["actual_sha256"],
+            },
+            "endpoint_vectors": vectors,
+        }
+        results = {
+            name: {
+                "operation": "falling_sand",
+                "validation_before": json.loads(json.dumps(validation)),
+                "validation_after": json.loads(json.dumps(validation)),
+            }
+            for name in ("forge", "forge_kernel")
+        }
+        self.assertTrue(_endpoint_equivalent(
+            results, "forge", "forge_kernel"))
+        self.assertTrue(_audit_endpoint_equivalent(
+            results["forge"], results["forge_kernel"]))
+        results["forge_kernel"]["validation_after"]["endpoint_vectors"][
+            "grid_i32"]["actual_values_i32"][1] = 99
         self.assertFalse(_endpoint_equivalent(
             results, "forge", "forge_kernel"))
         self.assertFalse(_audit_endpoint_equivalent(

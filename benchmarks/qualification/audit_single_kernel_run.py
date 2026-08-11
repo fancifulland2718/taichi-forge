@@ -635,6 +635,84 @@ def _endpoint_equivalent(left_result: dict[str, Any],
                        after[vector_name].get(key) for key in exact_keys):
                     return False
         return True
+    if left_result["operation"] == "falling_sand":
+        vector_names = (
+            "grid_i32", "winner_source_by_destination_i32",
+            "destinations_i32", "priorities_i32",
+        )
+        exact_keys = (
+            "count", "expected_count", "actual_sha256", "expected_sha256",
+            "actual_sum", "expected_sum", "actual_minimum",
+            "expected_minimum", "actual_maximum", "expected_maximum",
+            "sample_indices", "expected_sample_indices", "actual_samples",
+            "expected_samples", "actual_values_i32", "expected_values_i32",
+            "mismatch_count", "first_mismatch",
+        )
+        count_keys = (
+            "candidate_count", "expected_candidate_count", "winner_count",
+            "expected_winner_count", "conflict_count",
+            "expected_conflict_count",
+        )
+        fingerprint_map = {
+            "grid_sha256": "grid_i32",
+            "winner_sources_sha256": "winner_source_by_destination_i32",
+            "destinations_sha256": "destinations_i32",
+            "priorities_sha256": "priorities_i32",
+        }
+        for validation_name in ("validation_before", "validation_after"):
+            left = left_result[validation_name]
+            right = right_result[validation_name]
+            for value in (left, right):
+                counts = [value.get(key) for key in count_keys]
+                if (not value.get("passed")
+                        or value.get("comparison") !=
+                        "exact_falling_sand_grid_candidates_and_keyed_winners"
+                        or any(not isinstance(item, int) or isinstance(item, bool)
+                               for item in counts)
+                        or value.get("candidate_count") !=
+                        value.get("expected_candidate_count")
+                        or value.get("winner_count") !=
+                        value.get("expected_winner_count")
+                        or value.get("conflict_count") !=
+                        value.get("expected_conflict_count")
+                        or value.get("conflict_count") !=
+                        value.get("candidate_count") - value.get("winner_count")
+                        or value.get("conflict_count", 0) <= 0
+                        or set(value.get("endpoint_vectors", {})) !=
+                        set(vector_names)):
+                    return False
+                vectors = value["endpoint_vectors"]
+                if any(not _reported_exact_i32_vector_valid(vectors[name])
+                       for name in vector_names):
+                    return False
+                fingerprint = value.get("endpoint_fingerprint", {})
+                if fingerprint.get("finite") is not True:
+                    return False
+                for fingerprint_key, vector_name in fingerprint_map.items():
+                    if (fingerprint.get(fingerprint_key) !=
+                            vectors[vector_name]["actual_sha256"]):
+                        return False
+            for key in count_keys:
+                if left.get(key) != right.get(key):
+                    return False
+            for vector_name in vector_names:
+                for key in exact_keys:
+                    if (left["endpoint_vectors"][vector_name].get(key) !=
+                            right["endpoint_vectors"][vector_name].get(key)):
+                        return False
+        for result in (left_result, right_result):
+            before = result["validation_before"]
+            after = result["validation_after"]
+            for key in count_keys:
+                if before.get(key) != after.get(key):
+                    return False
+            for vector_name in vector_names:
+                if any(
+                        before["endpoint_vectors"][vector_name].get(key) !=
+                        after["endpoint_vectors"][vector_name].get(key)
+                        for key in exact_keys):
+                    return False
+        return True
     if left_result["operation"] == "sparse_block_stencil":
         comparison = (
             "coordinate_dense_oracle_for_rebuilt_sparse_five_point_"
@@ -922,6 +1000,105 @@ def _bfs_worklist_native_route_admitted(child: dict[str, Any]) -> bool:
         == contract.get("expected_last_frontier")
         and transition.get("rejected") == 0
         and transition.get("overflow") is False
+    )
+
+
+def _falling_sand_kernel_control_route_isolated(
+        child: dict[str, Any]) -> bool:
+    if (child.get("operation") != "falling_sand"
+            or child.get("runtime") not in (
+                "forge_kernel", "vanilla_kernel")):
+        return True
+    route = child.get("route", {})
+    contract = child.get("workload_contract", {})
+    return bool(
+        route.get("passed") is True
+        and route.get("classification")
+        == f"{child['runtime']}_equivalent_falling_sand_kernel_pipeline"
+        and route.get("adapter") == "benchmark_defined_ti_kernel_pipeline"
+        and "native" not in json.dumps(route, sort_keys=True).lower()
+        and route.get("kernel_source_owner") == "benchmark"
+        and route.get("kernel_source_sha256")
+        == contract.get("kernel_source_sha256")
+        and route.get("helper_api_used") is False
+        and route.get("specialized_api_used") is False
+        and route.get("benchmark_workspace_kind")
+        == contract.get("kernel_benchmark_workspace_kind")
+        and route.get("benchmark_workspace_field_count") == 1
+        and route.get("benchmark_workspace_field_count")
+        == contract.get("kernel_benchmark_workspace_field_count")
+        and route.get("stage_kernel_names")
+        == contract.get("kernel_stage_names")
+        and route.get("ti_kernel_invocations_per_replay")
+        == contract.get("kernel_ti_invocations_per_replay")
+        and route.get("claim_policy")
+        == "atomic_min_priority_then_source_ordinal"
+        and route.get("control_only_claim_workspace_reset") is True
+        and route.get("control_only_claim_workspace_reset")
+        == contract.get("kernel_control_claim_workspace_reset")
+        and route.get("physical_backend_launches_assumed") is False
+        and route.get("expected_candidates")
+        == contract.get("expected_candidate_count")
+        and route.get("expected_winners")
+        == contract.get("expected_winner_count")
+        and route.get("observed_candidates")
+        == contract.get("expected_candidate_count")
+        and route.get("observed_winners")
+        == contract.get("expected_winner_count")
+        and route.get("elements") == contract.get("cells")
+        and route.get("expected_backend") == child.get("backend")
+        and route.get("observed_backend") == child.get("backend")
+    )
+
+
+def _falling_sand_native_route_admitted(child: dict[str, Any]) -> bool:
+    if (child.get("operation") != "falling_sand"
+            or child.get("runtime") != "forge"):
+        return True
+    route = child.get("route", {})
+    contract = child.get("workload_contract", {})
+    memory = route.get("memory_report", {})
+    transition = route.get("last_transition_statistics", {})
+    candidates = contract.get("expected_candidate_count")
+    winners = contract.get("expected_winner_count")
+    return bool(
+        isinstance(candidates, int)
+        and isinstance(winners, int)
+        and route.get("passed") is True
+        and route.get("classification")
+        == "forge_native_falling_sand_keyed_claim_pipeline"
+        and route.get("adapter")
+        == "forge_native_device_worklist_keyed_claim"
+        and route.get("kernel_source_owner") == "benchmark"
+        and route.get("kernel_source_sha256")
+        == contract.get("kernel_source_sha256")
+        and route.get("benchmark_stage_kernel_names")
+        == contract.get("native_benchmark_stage_kernel_names")
+        and route.get("benchmark_ti_kernel_invocations_per_replay") == 5
+        and route.get("device_worklist_transitions_per_replay") == 2
+        and route.get("worklist_transition_names") == [
+            "stable_select_candidates", "deterministic_keyed_claim",
+        ]
+        and route.get("claim_policy")
+        == "min_priority_then_source_ordinal"
+        and route.get("control_only_claim_workspace_reset") is False
+        and route.get("control_only_claim_workspace_reset")
+        == contract.get("native_control_claim_workspace_reset")
+        and route.get("physical_backend_launches_assumed") is False
+        and route.get("capacity") == contract.get("cells")
+        and route.get("elements") == contract.get("cells")
+        and route.get("expected_backend") == child.get("backend")
+        and route.get("observed_backend") == child.get("backend")
+        and memory.get("fixed_capacity") is True
+        and memory.get("replay_allocation_count") == 0
+        and transition.get("generated") == candidates
+        and transition.get("accepted") == winners
+        and transition.get("rejected") == candidates - winners
+        and transition.get("conflicts") == candidates - winners
+        and transition.get("winners") == winners
+        and transition.get("overflow") is False
+        and route.get("observed_candidates") == candidates
+        and route.get("observed_winners") == winners
     )
 
 
@@ -1315,7 +1492,8 @@ def _audit(run_dir: Path) -> dict[str, Any]:
                   or config["operation"] in (
                       "device_prefix_chain", "active_grid_mpm",
                       "particle_spatial_hash", "adaptive_pbd",
-                      "marching_squares", "bfs_worklist") else "kernel"),
+                      "marching_squares", "bfs_worklist",
+                      "falling_sand") else "kernel"),
         "forge_kernel": ("forge", "kernel"),
         "vanilla": ("vanilla", "kernel"),
         "vanilla_kernel": ("vanilla", "kernel"),
@@ -1471,6 +1649,12 @@ def _audit(run_dir: Path) -> dict[str, Any]:
     bfs_worklist_native_route_admitted = all(
         _bfs_worklist_native_route_admitted(child)
         for child in children)
+    falling_sand_kernel_control_route_isolated = all(
+        _falling_sand_kernel_control_route_isolated(child)
+        for child in children)
+    falling_sand_native_route_admitted = all(
+        _falling_sand_native_route_admitted(child)
+        for child in children)
     sparse_block_stencil_route_isolated = all(
         _sparse_block_stencil_route_isolated(child)
         for child in children)
@@ -1505,7 +1689,8 @@ def _audit(run_dir: Path) -> dict[str, Any]:
     stable_replay_input = all(
         child.get("measurement_scope") == "device_reset_plus_operation"
         if child["operation"] in (
-            "prefix_sum", "parallel_sort", "sparse_block_stencil") else True
+            "prefix_sum", "parallel_sort", "sparse_block_stencil",
+            "falling_sand") else True
         for child in children)
     snode_lifecycle_plateau = all(
         child["operation"] not in (
@@ -1587,6 +1772,20 @@ def _audit(run_dir: Path) -> dict[str, Any]:
                         "bfs_worklist_native_route_admitted"] is
                     bfs_worklist_native_route_admitted,
                     "BFS worklist native route method check", failures)
+            if ("falling_sand_kernel_control_route_isolated"
+                    in summary["method_checks"]):
+                _check(
+                    summary["method_checks"][
+                        "falling_sand_kernel_control_route_isolated"] is
+                    falling_sand_kernel_control_route_isolated,
+                    "falling sand kernel control route method check", failures)
+            if ("falling_sand_native_route_admitted"
+                    in summary["method_checks"]):
+                _check(
+                    summary["method_checks"][
+                        "falling_sand_native_route_admitted"] is
+                    falling_sand_native_route_admitted,
+                    "falling sand native route method check", failures)
             if ("sparse_block_stencil_route_isolated"
                     in summary["method_checks"]):
                 _check(

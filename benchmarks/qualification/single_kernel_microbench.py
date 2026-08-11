@@ -82,6 +82,7 @@ OPERATIONS = (
     "adaptive_pbd",
     "marching_squares",
     "bfs_worklist",
+    "falling_sand",
     "sparse_block_stencil",
     "snode_churn",
     "snode_concurrent",
@@ -107,6 +108,7 @@ THIN_CAPABILITY_OPERATIONS = frozenset({
     "adaptive_pbd",
     "marching_squares",
     "bfs_worklist",
+    "falling_sand",
 })
 COMPARISONS = (
     "forge-vs-vanilla",
@@ -5796,6 +5798,635 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
     }
 
 
+def _falling_sand_route(
+        worklist: Any | None, runtime_name: str, backend: str,
+        elements: int, expected_candidates: int, expected_winners: int,
+        observed_candidates: int, observed_winners: int,
+        kernel_source_sha256: str) -> dict[str, Any]:
+    if runtime_name == "forge":
+        memory = worklist.memory_report()
+        stats = worklist.statistics()
+        return {
+            "classification": "forge_native_falling_sand_keyed_claim_pipeline",
+            "adapter": "forge_native_device_worklist_keyed_claim",
+            "kernel_source_owner": "benchmark",
+            "kernel_source_sha256": kernel_source_sha256,
+            "benchmark_stage_kernel_names": [
+                "reset_sand", "propose_candidates", "initialize_sources",
+                "gather_compact_attributes", "materialize_native_winners",
+            ],
+            "benchmark_ti_kernel_invocations_per_replay": 5,
+            "device_worklist_transitions_per_replay": 2,
+            "worklist_transition_names": [
+                "stable_select_candidates", "deterministic_keyed_claim",
+            ],
+            "claim_policy": "min_priority_then_source_ordinal",
+            "control_only_claim_workspace_reset": False,
+            "physical_backend_launches_assumed": False,
+            "capacity": worklist.capacity,
+            "memory_report": memory,
+            "last_transition_statistics": {
+                "generated": stats.generated,
+                "accepted": stats.accepted,
+                "rejected": stats.rejected,
+                "conflicts": stats.conflicts,
+                "winners": stats.winners,
+                "overflow": stats.overflow,
+            },
+            "expected_candidates": expected_candidates,
+            "expected_winners": expected_winners,
+            "observed_candidates": observed_candidates,
+            "observed_winners": observed_winners,
+            "elements": elements,
+            "expected_backend": backend,
+            "observed_backend": backend,
+            "passed": bool(
+                runtime_name == "forge"
+                and worklist.capacity == elements
+                and memory["fixed_capacity"]
+                and memory["replay_allocation_count"] == 0
+                and stats.generated == expected_candidates
+                and stats.accepted == expected_winners
+                and stats.rejected == expected_candidates - expected_winners
+                and stats.conflicts == expected_candidates - expected_winners
+                and stats.winners == expected_winners
+                and not stats.overflow
+                and observed_candidates == expected_candidates
+                and observed_winners == expected_winners
+                and isinstance(kernel_source_sha256, str)
+                and len(kernel_source_sha256) == 64
+            ),
+        }
+    return {
+        "classification": (
+            f"{runtime_name}_equivalent_falling_sand_kernel_pipeline"),
+        "adapter": "benchmark_defined_ti_kernel_pipeline",
+        "kernel_source_owner": "benchmark",
+        "kernel_source_sha256": kernel_source_sha256,
+        "helper_api_used": False,
+        "specialized_api_used": False,
+        "benchmark_workspace_kind": "one_i32_destination_claim_array",
+        "benchmark_workspace_field_count": 1,
+        "stage_kernel_names": [
+            "reset_sand", "propose_candidates", "claim_candidates",
+            "materialize_kernel_winners",
+        ],
+        "ti_kernel_invocations_per_replay": 4,
+        "claim_policy": "atomic_min_priority_then_source_ordinal",
+        "control_only_claim_workspace_reset": True,
+        "physical_backend_launches_assumed": False,
+        "expected_candidates": expected_candidates,
+        "expected_winners": expected_winners,
+        "observed_candidates": observed_candidates,
+        "observed_winners": observed_winners,
+        "elements": elements,
+        "expected_backend": backend,
+        "observed_backend": backend,
+        "passed": bool(
+            runtime_name in ("forge_kernel", "vanilla_kernel")
+            and worklist is None
+            and observed_candidates == expected_candidates
+            and observed_winners == expected_winners
+            and isinstance(kernel_source_sha256, str)
+            and len(kernel_source_sha256) == 64
+        ),
+    }
+
+
+def _falling_sand_kernel_control_route_isolated(
+        child: dict[str, Any]) -> bool:
+    if (child.get("operation") != "falling_sand"
+            or child.get("runtime") not in (
+                "forge_kernel", "vanilla_kernel")):
+        return True
+    route = child.get("route", {})
+    contract = child.get("workload_contract", {})
+    return bool(
+        route.get("passed") is True
+        and route.get("classification")
+        == f"{child['runtime']}_equivalent_falling_sand_kernel_pipeline"
+        and route.get("adapter") == "benchmark_defined_ti_kernel_pipeline"
+        and "native" not in json.dumps(route, sort_keys=True).lower()
+        and route.get("kernel_source_owner") == "benchmark"
+        and route.get("kernel_source_sha256")
+        == contract.get("kernel_source_sha256")
+        and route.get("helper_api_used") is False
+        and route.get("specialized_api_used") is False
+        and route.get("benchmark_workspace_kind")
+        == contract.get("kernel_benchmark_workspace_kind")
+        and route.get("benchmark_workspace_field_count") == 1
+        and route.get("benchmark_workspace_field_count")
+        == contract.get("kernel_benchmark_workspace_field_count")
+        and route.get("stage_kernel_names")
+        == contract.get("kernel_stage_names")
+        and route.get("ti_kernel_invocations_per_replay")
+        == contract.get("kernel_ti_invocations_per_replay")
+        and route.get("claim_policy")
+        == "atomic_min_priority_then_source_ordinal"
+        and route.get("control_only_claim_workspace_reset") is True
+        and route.get("control_only_claim_workspace_reset")
+        == contract.get("kernel_control_claim_workspace_reset")
+        and route.get("physical_backend_launches_assumed") is False
+        and route.get("expected_candidates")
+        == contract.get("expected_candidate_count")
+        and route.get("expected_winners")
+        == contract.get("expected_winner_count")
+        and route.get("observed_candidates")
+        == contract.get("expected_candidate_count")
+        and route.get("observed_winners")
+        == contract.get("expected_winner_count")
+        and route.get("elements") == contract.get("cells")
+        and route.get("expected_backend") == child.get("backend")
+        and route.get("observed_backend") == child.get("backend")
+    )
+
+
+def _falling_sand_native_route_admitted(child: dict[str, Any]) -> bool:
+    if (child.get("operation") != "falling_sand"
+            or child.get("runtime") != "forge"):
+        return True
+    route = child.get("route", {})
+    contract = child.get("workload_contract", {})
+    memory = route.get("memory_report", {})
+    transition = route.get("last_transition_statistics", {})
+    candidates = contract.get("expected_candidate_count")
+    winners = contract.get("expected_winner_count")
+    return bool(
+        isinstance(candidates, int)
+        and isinstance(winners, int)
+        and route.get("passed") is True
+        and route.get("classification")
+        == "forge_native_falling_sand_keyed_claim_pipeline"
+        and route.get("adapter")
+        == "forge_native_device_worklist_keyed_claim"
+        and route.get("kernel_source_owner") == "benchmark"
+        and route.get("kernel_source_sha256")
+        == contract.get("kernel_source_sha256")
+        and route.get("benchmark_stage_kernel_names")
+        == contract.get("native_benchmark_stage_kernel_names")
+        and route.get("benchmark_ti_kernel_invocations_per_replay") == 5
+        and route.get("device_worklist_transitions_per_replay") == 2
+        and route.get("worklist_transition_names") == [
+            "stable_select_candidates", "deterministic_keyed_claim",
+        ]
+        and route.get("claim_policy")
+        == "min_priority_then_source_ordinal"
+        and route.get("control_only_claim_workspace_reset") is False
+        and route.get("control_only_claim_workspace_reset")
+        == contract.get("native_control_claim_workspace_reset")
+        and route.get("physical_backend_launches_assumed") is False
+        and route.get("capacity") == contract.get("cells")
+        and route.get("elements") == contract.get("cells")
+        and route.get("expected_backend") == child.get("backend")
+        and route.get("observed_backend") == child.get("backend")
+        and memory.get("fixed_capacity") is True
+        and memory.get("replay_allocation_count") == 0
+        and transition.get("generated") == candidates
+        and transition.get("accepted") == winners
+        and transition.get("rejected") == candidates - winners
+        and transition.get("conflicts") == candidates - winners
+        and transition.get("winners") == winners
+        and transition.get("overflow") is False
+        and route.get("observed_candidates") == candidates
+        and route.get("observed_winners") == winners
+    )
+
+
+def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str,
+                             elements: int) -> dict[str, Any]:
+    """Resolve one deterministic falling-sand destination-conflict step."""
+    import numpy as np
+
+    source_sha256 = sha256_file(Path(__file__))
+    side = math.isqrt(elements)
+    if side * side != elements:
+        raise ValueError("falling-sand keyed claim requires a square grid")
+
+    initial_host = np.zeros(elements, dtype=np.int32)
+    particle_id = 1
+    for row in range(8, side - 3, 3):
+        for column in range(2, side - 2, 2):
+            initial_host[row * side + column] = particle_id
+            initial_host[(row + 1) * side + column] = -1
+            particle_id += 1
+    initial_host[(side - 1) * side:] = -1
+
+    expected_destinations = np.full(elements, -1, dtype=np.int32)
+    expected_priorities = np.full(elements, -1, dtype=np.int32)
+    candidates_by_destination: dict[int, list[tuple[int, int]]] = {}
+    for source in np.flatnonzero(initial_host > 0):
+        source = int(source)
+        row, column = divmod(source, side)
+        destination = -1
+        if row + 1 < side:
+            down = (row + 1) * side + column
+            if initial_host[down] == 0:
+                destination = down
+            else:
+                direction = 1 if ((column // 2) & 1) else -1
+                preferred_column = column + direction
+                alternate_column = column - direction
+                if (0 <= preferred_column < side
+                        and initial_host[(row + 1) * side
+                                         + preferred_column] == 0):
+                    destination = (row + 1) * side + preferred_column
+                elif (0 <= alternate_column < side
+                      and initial_host[(row + 1) * side
+                                       + alternate_column] == 0):
+                    destination = (row + 1) * side + alternate_column
+        if destination >= 0:
+            priority = (int(initial_host[source]) * 13 + 5) % 97
+            expected_destinations[source] = destination
+            expected_priorities[source] = priority
+            candidates_by_destination.setdefault(destination, []).append(
+                (priority, source))
+
+    expected_winner_sources = np.full(elements, -1, dtype=np.int32)
+    expected_output = initial_host.copy()
+    for destination, candidates in candidates_by_destination.items():
+        _, source = min(candidates)
+        expected_winner_sources[destination] = source
+        expected_output[source] = 0
+        expected_output[destination] = initial_host[source]
+    expected_candidate_count = int(np.count_nonzero(
+        expected_destinations >= 0))
+    expected_winner_count = len(candidates_by_destination)
+    expected_conflict_count = expected_candidate_count - expected_winner_count
+    if not (expected_candidate_count > expected_winner_count > 0):
+        raise RuntimeError("falling-sand scene does not exercise conflicts")
+
+    initial = ti.ndarray(ti.i32, shape=elements)
+    current = ti.ndarray(ti.i32, shape=elements)
+    output = ti.ndarray(ti.i32, shape=elements)
+    destinations = ti.ndarray(ti.i32, shape=elements)
+    priorities = ti.ndarray(ti.i32, shape=elements)
+    flags = ti.ndarray(ti.i32, shape=elements)
+    claims = ti.ndarray(ti.i32, shape=elements)
+    winner_sources = ti.ndarray(ti.i32, shape=elements)
+    candidate_count = ti.ndarray(ti.i32, shape=1)
+    winner_count = ti.ndarray(ti.i32, shape=1)
+    initial.from_numpy(initial_host)
+
+    @ti.func
+    def candidate_destination(
+            source: ti.i32,
+            source_grid: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        destination = -1
+        row = source // side
+        column = source - row * side
+        if source_grid[source] > 0 and row + 1 < side:
+            down = (row + 1) * side + column
+            if source_grid[down] == 0:
+                destination = down
+            else:
+                direction = 1 if ((column // 2) & 1) != 0 else -1
+                preferred_column = column + direction
+                alternate_column = column - direction
+                if (0 <= preferred_column < side
+                        and source_grid[(row + 1) * side
+                                        + preferred_column] == 0):
+                    destination = (row + 1) * side + preferred_column
+                elif (0 <= alternate_column < side
+                      and source_grid[(row + 1) * side
+                                      + alternate_column] == 0):
+                    destination = (row + 1) * side + alternate_column
+        return destination
+
+    @ti.kernel
+    def reset_sand(
+            source_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            next_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_destinations: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_priorities: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_claims: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_winners: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_candidate_count: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_winner_count: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for cell in range(elements):
+            value = source_grid[cell]
+            target_grid[cell] = value
+            next_grid[cell] = value
+            target_destinations[cell] = -1
+            target_priorities[cell] = -1
+            target_flags[cell] = 0
+            if ti.static(runtime_name != "forge"):
+                target_claims[cell] = 0x7FFFFFFF
+            target_winners[cell] = -1
+            if cell == 0:
+                target_candidate_count[0] = 0
+                target_winner_count[0] = 0
+
+    @ti.kernel
+    def propose_candidates(
+            source_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_destinations: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_priorities: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_count: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for source in range(elements):
+            destination = candidate_destination(source, source_grid)
+            if destination >= 0:
+                target_destinations[source] = destination
+                target_priorities[source] = (
+                    source_grid[source] * 13 + 5) % 97
+                target_flags[source] = 1
+                ti.atomic_add(target_count[0], 1)
+
+    @ti.kernel
+    def claim_candidates(
+            source_destinations: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            source_priorities: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_claims: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for source in range(elements):
+            destination = source_destinations[source]
+            if destination >= 0:
+                packed = source_priorities[source] * elements + source
+                ti.atomic_min(target_claims[destination], packed)
+
+    @ti.kernel
+    def materialize_kernel_winners(
+            source_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            source_destinations: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            source_priorities: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            source_claims: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_winners: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_count: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for source in range(elements):
+            destination = source_destinations[source]
+            if destination >= 0:
+                packed = source_priorities[source] * elements + source
+                if source_claims[destination] == packed:
+                    target_grid[source] = 0
+                    target_grid[destination] = source_grid[source]
+                    target_winners[destination] = source
+                    ti.atomic_add(target_count[0], 1)
+
+    worklist = None
+    compact_keys = compact_priorities = compact_ordinals = None
+    if runtime_name == "forge":
+        worklist = ti.algorithms.DeviceWorklist(elements, ti.i32)
+        compact_keys = ti.ndarray(ti.i32, shape=elements)
+        compact_priorities = ti.ndarray(ti.i32, shape=elements)
+        compact_ordinals = ti.ndarray(ti.i32, shape=elements)
+
+        @ti.kernel
+        def initialize_sources(
+                values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+                extent_state: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+            for source in range(elements):
+                values[source] = source
+                if source == 0:
+                    extent_state[0] = elements
+                    extent_state[1] = 0
+
+        @ti.kernel
+        def gather_compact_attributes(
+                active_sources: ti.types.ndarray(dtype=ti.i32, ndim=1),
+                active_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+                source_destinations: ti.types.ndarray(dtype=ti.i32, ndim=1),
+                source_priorities: ti.types.ndarray(dtype=ti.i32, ndim=1),
+                target_keys: ti.types.ndarray(dtype=ti.i32, ndim=1),
+                target_priorities: ti.types.ndarray(dtype=ti.i32, ndim=1),
+                target_ordinals: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+            for slot in range(elements):
+                if slot < active_extent[0]:
+                    source = active_sources[slot]
+                    target_keys[slot] = source_destinations[source]
+                    target_priorities[slot] = source_priorities[source]
+                    target_ordinals[slot] = source
+
+        @ti.kernel
+        def materialize_native_winners(
+                source_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
+                selected_sources: ti.types.ndarray(dtype=ti.i32, ndim=1),
+                selected_keys: ti.types.ndarray(dtype=ti.i32, ndim=1),
+                selected_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+                target_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
+                target_winners: ti.types.ndarray(dtype=ti.i32, ndim=1),
+                target_count: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+            for slot in range(elements):
+                if slot < selected_extent[0]:
+                    source = selected_sources[slot]
+                    destination = selected_keys[slot]
+                    target_grid[source] = 0
+                    target_grid[destination] = source_grid[source]
+                    target_winners[destination] = source
+                    ti.atomic_add(target_count[0], 1)
+    else:
+        initialize_sources = None
+        gather_compact_attributes = None
+        materialize_native_winners = None
+
+    def reset() -> None:
+        reset_sand(
+            initial, current, output, destinations, priorities, flags,
+            claims, winner_sources, candidate_count, winner_count)
+
+    def launch() -> None:
+        propose_candidates(
+            current, destinations, priorities, flags, candidate_count)
+        if runtime_name == "forge":
+            initialize_sources(worklist.values, worklist.extent.state)
+            worklist.select(flags, method="auto")
+            gather_compact_attributes(
+                worklist.values, worklist.extent.state, destinations,
+                priorities, compact_keys, compact_priorities,
+                compact_ordinals)
+            result = worklist.resolve_conflicts(
+                compact_keys, priorities=compact_priorities,
+                ordinals=compact_ordinals, policy="min_priority",
+                method="auto")
+            materialize_native_winners(
+                current, result.values, result.keys, result.extent.state,
+                output, winner_sources, winner_count)
+        else:
+            claim_candidates(destinations, priorities, claims)
+            materialize_kernel_winners(
+                current, destinations, priorities, claims, output,
+                winner_sources, winner_count)
+
+    def exact_i32_vector(actual: Any, expected: Any) -> dict[str, Any]:
+        actual_i32 = np.ascontiguousarray(actual, dtype=np.int32).reshape(-1)
+        expected_i32 = np.ascontiguousarray(
+            expected, dtype=np.int32).reshape(-1)
+        mismatch = (
+            np.flatnonzero(actual_i32 != expected_i32)
+            if actual_i32.size == expected_i32.size
+            else np.arange(max(actual_i32.size, expected_i32.size)))
+
+        def evidence(vector: Any) -> dict[str, Any]:
+            count = int(vector.size)
+            sample_indices = sorted(set((
+                0, count // 4, count // 2, (3 * count) // 4, count - 1,
+            ))) if count else []
+            return {
+                "count": count,
+                "sha256": hashlib.sha256(vector.tobytes()).hexdigest(),
+                "sum": int(vector.astype(np.int64).sum()),
+                "minimum": int(vector.min()) if count else None,
+                "maximum": int(vector.max()) if count else None,
+                "sample_indices": sample_indices,
+                "samples": [int(vector[index]) for index in sample_indices],
+                "values_i32": vector.astype(np.int64).tolist(),
+            }
+
+        actual_evidence = evidence(actual_i32)
+        expected_evidence = evidence(expected_i32)
+        return {
+            "count": actual_evidence["count"],
+            "expected_count": expected_evidence["count"],
+            "actual_sha256": actual_evidence["sha256"],
+            "expected_sha256": expected_evidence["sha256"],
+            "actual_sum": actual_evidence["sum"],
+            "expected_sum": expected_evidence["sum"],
+            "actual_minimum": actual_evidence["minimum"],
+            "expected_minimum": expected_evidence["minimum"],
+            "actual_maximum": actual_evidence["maximum"],
+            "expected_maximum": expected_evidence["maximum"],
+            "sample_indices": actual_evidence["sample_indices"],
+            "expected_sample_indices": expected_evidence["sample_indices"],
+            "actual_samples": actual_evidence["samples"],
+            "expected_samples": expected_evidence["samples"],
+            "actual_values_i32": actual_evidence["values_i32"],
+            "expected_values_i32": expected_evidence["values_i32"],
+            "mismatch_count": int(mismatch.size),
+            "first_mismatch": None if mismatch.size == 0 else int(mismatch[0]),
+        }
+
+    def validate_fresh() -> dict[str, Any]:
+        reset()
+        ti.sync()
+        launch()
+        ti.sync()
+        actual_candidates = int(candidate_count.to_numpy()[0])
+        actual_winners = int(winner_count.to_numpy()[0])
+        vectors = {
+            "grid_i32": exact_i32_vector(output.to_numpy(), expected_output),
+            "winner_source_by_destination_i32": exact_i32_vector(
+                winner_sources.to_numpy(), expected_winner_sources),
+            "destinations_i32": exact_i32_vector(
+                destinations.to_numpy(), expected_destinations),
+            "priorities_i32": exact_i32_vector(
+                priorities.to_numpy(), expected_priorities),
+        }
+        passed = bool(
+            actual_candidates == expected_candidate_count
+            and actual_winners == expected_winner_count
+            and all(
+                vector["count"] == vector["expected_count"]
+                and vector["actual_sha256"] == vector["expected_sha256"]
+                and vector["mismatch_count"] == 0
+                and vector["first_mismatch"] is None
+                for vector in vectors.values()))
+        return {
+            "passed": passed,
+            "comparison": (
+                "exact_falling_sand_grid_candidates_and_keyed_winners"),
+            "candidate_count": actual_candidates,
+            "expected_candidate_count": expected_candidate_count,
+            "winner_count": actual_winners,
+            "expected_winner_count": expected_winner_count,
+            "conflict_count": actual_candidates - actual_winners,
+            "expected_conflict_count": expected_conflict_count,
+            "endpoint_fingerprint": {
+                "finite": True,
+                "grid_sha256": vectors["grid_i32"]["actual_sha256"],
+                "winner_sources_sha256": vectors[
+                    "winner_source_by_destination_i32"]["actual_sha256"],
+                "destinations_sha256": vectors[
+                    "destinations_i32"]["actual_sha256"],
+                "priorities_sha256": vectors[
+                    "priorities_i32"]["actual_sha256"],
+            },
+            "endpoint_vectors": vectors,
+        }
+
+    return {
+        "launch": launch,
+        "reset": reset,
+        "reset_each_launch": True,
+        "validate": validate_fresh,
+        "route": lambda: _falling_sand_route(
+            worklist, runtime_name, backend, elements,
+            expected_candidate_count, expected_winner_count,
+            int(candidate_count.to_numpy()[0]),
+            int(winner_count.to_numpy()[0]), source_sha256),
+        "logical_bytes": 0,
+        "traffic_model": (
+            "one deterministic falling-sand proposal, destination conflict "
+            "claim, and winner materialization; no simplified bandwidth is "
+            "claimed"),
+        "case_preparation": {
+            "side": side,
+            "cells": elements,
+            "particles": particle_id - 1,
+            "candidate_count": expected_candidate_count,
+            "winner_count": expected_winner_count,
+            "conflict_count": expected_conflict_count,
+            "candidate_fraction": expected_candidate_count / elements,
+        },
+        "workload_contract": {
+            "case_id": "THIN-008-FALLING-SAND",
+            "comparison_class": "thin-capability",
+            "semantics": "deterministic_one_step_falling_sand_keyed_claim",
+            "dimension": "2d",
+            "dtype": "i32_grid_destination_priority_ordinal",
+            "side": side,
+            "cells": elements,
+            "particles": particle_id - 1,
+            "expected_candidate_count": expected_candidate_count,
+            "expected_winner_count": expected_winner_count,
+            "expected_conflict_count": expected_conflict_count,
+            "kernel_source_owner": "benchmark",
+            "kernel_source_sha256": source_sha256,
+            "kernel_adapter": "benchmark_defined_ti_kernel_pipeline",
+            "kernel_helper_api_used": False,
+            "kernel_specialized_api_used": False,
+            "kernel_benchmark_workspace_kind": (
+                "one_i32_destination_claim_array"),
+            "kernel_benchmark_workspace_field_count": 1,
+            "kernel_control_claim_workspace_reset": True,
+            "kernel_stage_names": [
+                "reset_sand", "propose_candidates", "claim_candidates",
+                "materialize_kernel_winners",
+            ],
+            "kernel_ti_invocations_per_replay": 4,
+            "kernel_physical_backend_launches_assumed": False,
+            "native_benchmark_stage_kernel_names": [
+                "reset_sand", "propose_candidates", "initialize_sources",
+                "gather_compact_attributes", "materialize_native_winners",
+            ],
+            "native_control_claim_workspace_reset": False,
+            "forge_adapter": (
+                "DeviceWorklist stable select plus deterministic keyed "
+                "min-priority/source-ordinal conflict resolution"),
+            "vanilla_adapter": (
+                "full-grid atomic-min destination claim plus winner "
+                "materialization"),
+            "shared": (
+                "same initial grid, movement preference, candidate proposal "
+                "kernel, priority and source-ordinal tie break, output reset, "
+                "winner materialization semantics, outer synchronization, and "
+                "exact full-vector oracle"),
+            "allowed_difference": (
+                "only destination-conflict adapter: atomic-min claim for the "
+                "kernel control versus DeviceWorklist select/keyed claim; "
+                "each adapter initializes only the workspace it consumes"),
+            "correctness": (
+                "exact complete grid, destination, priority, and winner-source "
+                "vectors plus candidate/winner/conflict counts, SHA-256, "
+                "statistics, samples, mismatch count, and first mismatch"),
+            "timing": (
+                "frozen repeated complete device reset, proposal, conflict "
+                "resolution, and materialization plus one outer sync; host "
+                "scene construction and validation are excluded"),
+        },
+    }
+
+
 def _numeric_growth(before: dict[str, Any] | None,
                     after: dict[str, Any] | None,
                     keys: Sequence[str]) -> dict[str, Any]:
@@ -6171,6 +6802,9 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
                 ti, args.runtime, args.backend, config["elements"])
         elif args.operation == "bfs_worklist":
             case = _build_bfs_worklist_case(
+                ti, args.runtime, args.backend, config["elements"])
+        elif args.operation == "falling_sand":
+            case = _build_falling_sand_case(
                 ti, args.runtime, args.backend, config["elements"])
         elif args.operation == "sparse_block_stencil":
             case = _build_sparse_block_stencil_case(
@@ -7175,6 +7809,84 @@ def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
                        after[vector_name].get(key) for key in exact_keys):
                     return False
         return True
+    if left_result["operation"] == "falling_sand":
+        vector_names = (
+            "grid_i32", "winner_source_by_destination_i32",
+            "destinations_i32", "priorities_i32",
+        )
+        exact_keys = (
+            "count", "expected_count", "actual_sha256", "expected_sha256",
+            "actual_sum", "expected_sum", "actual_minimum",
+            "expected_minimum", "actual_maximum", "expected_maximum",
+            "sample_indices", "expected_sample_indices", "actual_samples",
+            "expected_samples", "actual_values_i32", "expected_values_i32",
+            "mismatch_count", "first_mismatch",
+        )
+        count_keys = (
+            "candidate_count", "expected_candidate_count", "winner_count",
+            "expected_winner_count", "conflict_count",
+            "expected_conflict_count",
+        )
+        fingerprint_map = {
+            "grid_sha256": "grid_i32",
+            "winner_sources_sha256": "winner_source_by_destination_i32",
+            "destinations_sha256": "destinations_i32",
+            "priorities_sha256": "priorities_i32",
+        }
+        for validation_name in ("validation_before", "validation_after"):
+            left = left_result[validation_name]
+            right = right_result[validation_name]
+            for value in (left, right):
+                counts = [value.get(key) for key in count_keys]
+                if (not value.get("passed")
+                        or value.get("comparison") !=
+                        "exact_falling_sand_grid_candidates_and_keyed_winners"
+                        or any(not isinstance(item, int) or isinstance(item, bool)
+                               for item in counts)
+                        or value.get("candidate_count") !=
+                        value.get("expected_candidate_count")
+                        or value.get("winner_count") !=
+                        value.get("expected_winner_count")
+                        or value.get("conflict_count") !=
+                        value.get("expected_conflict_count")
+                        or value.get("conflict_count") !=
+                        value.get("candidate_count") - value.get("winner_count")
+                        or value.get("conflict_count", 0) <= 0
+                        or set(value.get("endpoint_vectors", {})) !=
+                        set(vector_names)):
+                    return False
+                vectors = value["endpoint_vectors"]
+                if any(not _reported_exact_i32_vector_valid(vectors[name])
+                       for name in vector_names):
+                    return False
+                fingerprint = value.get("endpoint_fingerprint", {})
+                if fingerprint.get("finite") is not True:
+                    return False
+                for fingerprint_key, vector_name in fingerprint_map.items():
+                    if (fingerprint.get(fingerprint_key) !=
+                            vectors[vector_name]["actual_sha256"]):
+                        return False
+            for key in count_keys:
+                if left.get(key) != right.get(key):
+                    return False
+            for vector_name in vector_names:
+                for key in exact_keys:
+                    if (left["endpoint_vectors"][vector_name].get(key) !=
+                            right["endpoint_vectors"][vector_name].get(key)):
+                        return False
+        for result in (left_result, right_result):
+            before = result["validation_before"]
+            after = result["validation_after"]
+            for key in count_keys:
+                if before.get(key) != after.get(key):
+                    return False
+            for vector_name in vector_names:
+                if any(
+                        before["endpoint_vectors"][vector_name].get(key) !=
+                        after["endpoint_vectors"][vector_name].get(key)
+                        for key in exact_keys):
+                    return False
+        return True
     if left_result["operation"] == "sparse_block_stencil":
         comparison = (
             "coordinate_dense_oracle_for_rebuilt_sparse_five_point_"
@@ -8088,6 +8800,12 @@ def _parent_main(args: argparse.Namespace) -> int:
         "bfs_worklist_native_route_admitted": all(
             _bfs_worklist_native_route_admitted(child)
             for child in children),
+        "falling_sand_kernel_control_route_isolated": all(
+            _falling_sand_kernel_control_route_isolated(child)
+            for child in children),
+        "falling_sand_native_route_admitted": all(
+            _falling_sand_native_route_admitted(child)
+            for child in children),
         "sparse_block_stencil_route_isolated": all(
             _sparse_block_stencil_route_isolated(child)
             for child in children),
@@ -8109,7 +8827,8 @@ def _parent_main(args: argparse.Namespace) -> int:
         "stable_replay_input": all(
             child["measurement_scope"] == "device_reset_plus_operation"
             if child["operation"] in (
-                "prefix_sum", "parallel_sort", "sparse_block_stencil")
+                "prefix_sum", "parallel_sort", "sparse_block_stencil",
+                "falling_sand")
             else True
             for child in children),
         "common_batch": all(
