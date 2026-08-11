@@ -1,4 +1,5 @@
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -233,6 +234,30 @@ class FinalRollupAuditTest(unittest.TestCase):
         audit = audit_rollup(self.root, self.nsight)
         self.assertFalse(audit["passed"])
         self.assertFalse(audit["checks"]["qualified_artifacts_recomputed"])
+
+    @mock.patch(
+        "benchmarks.qualification.audit_final_rollup.audit_solver_artifact",
+        return_value={"passed": True, "errors": []})
+    @mock.patch(
+        "benchmarks.qualification.audit_final_rollup.audit_warp_artifact",
+        return_value={"passed": True, "errors": []})
+    @mock.patch("benchmarks.qualification.audit_final_rollup._git")
+    def test_wrong_source_branch_fails(self, git, _warp, _solver):
+        def result(_root, *arguments):
+            command = tuple(arguments)
+            if command == ("branch", "--show-current"):
+                return subprocess.CompletedProcess(command, 0, "main\n", "")
+            if command == ("rev-parse", "HEAD"):
+                return subprocess.CompletedProcess(command, 0, "a" * 40, "")
+            if command == ("status", "--short"):
+                return subprocess.CompletedProcess(command, 0, "", "")
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        git.side_effect = result
+        audit = audit_rollup(
+            self.root, self.nsight, Path(self.temporary.name))
+        self.assertFalse(audit["passed"])
+        self.assertFalse(audit["checks"]["source_branch_local_062_depth"])
 
 
 if __name__ == "__main__":

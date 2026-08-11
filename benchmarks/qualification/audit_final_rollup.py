@@ -5,6 +5,7 @@ import argparse
 import json
 import math
 import re
+import subprocess
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -70,6 +71,13 @@ def _isclose(left: Any, right: Any) -> bool:
 
 def _all_present(text: str, values: Sequence[str]) -> bool:
     return all(value in text for value in values)
+
+
+def _git(source_root: Path, *arguments: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", "-C", str(source_root), *arguments],
+        check=False, capture_output=True, text=True, encoding="utf-8",
+        errors="replace")
 
 
 def _metric_tokens(qualified: Sequence[dict[str, Any]]) -> list[str]:
@@ -187,7 +195,8 @@ def _audit_qualified_entry(
 
 
 def audit_rollup(qualification_root: Path,
-                 nsight_root: Path | None = None) -> dict[str, Any]:
+                 nsight_root: Path | None = None,
+                 source_root: Path | None = None) -> dict[str, Any]:
     qualification_root = qualification_root.resolve()
     final_dir = qualification_root / "final"
     registry_path = qualification_root / "cases" / "case_registry.json"
@@ -301,6 +310,33 @@ def audit_rollup(qualification_root: Path,
             _all_present(text, [str(path)]) for text in texts["results"]
             for path in nsight_details))
 
+    source_state: dict[str, Any] | None = None
+    if source_root is not None:
+        source_root = source_root.resolve()
+        branch = _git(source_root, "branch", "--show-current")
+        head = _git(source_root, "rev-parse", "HEAD")
+        status = _git(source_root, "status", "--short")
+        ignored_paths = [qualification_root, *nsight_details]
+        ignored_results = [
+            _git(source_root, "check-ignore", "--quiet", str(path))
+            for path in ignored_paths
+        ]
+        source_state = {
+            "root": str(source_root),
+            "branch": branch.stdout.strip(),
+            "head": head.stdout.strip(),
+            "status_short": status.stdout.splitlines(),
+            "qualification_artifacts_git_ignored": all(
+                result.returncode == 0 for result in ignored_results),
+        }
+        checks["source_branch_local_062_depth"] = bool(
+            branch.returncode == 0
+            and source_state["branch"] == "local/062-depth")
+        checks["source_worktree_clean"] = bool(
+            status.returncode == 0 and not source_state["status_short"])
+        checks["local_artifacts_git_ignored"] = bool(
+            source_state["qualification_artifacts_git_ignored"])
+
     errors = [name for name, passed in checks.items() if not passed]
     return {
         "schema": "taichi_forge.final_qualification_audit.v1",
@@ -322,6 +358,7 @@ def audit_rollup(qualification_root: Path,
                 if issue_ids else None),
         },
         "qualified_artifact_audits": artifact_audits,
+        "source_state": source_state,
         "interpretation": (
             "ready to share within the recorded local-machine and claim boundaries"
             if not errors else "needs revision before final handoff"
@@ -364,8 +401,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("qualification_root", type=Path)
     parser.add_argument("--nsight-root", type=Path)
+    parser.add_argument("--source-root", type=Path)
     args = parser.parse_args(argv)
-    audit = audit_rollup(args.qualification_root, args.nsight_root)
+    audit = audit_rollup(
+        args.qualification_root, args.nsight_root, args.source_root)
     final_dir = args.qualification_root.resolve() / "final"
     if final_dir.is_dir():
         write_json(final_dir / "completion_audit.json", audit)
