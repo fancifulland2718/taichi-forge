@@ -5,11 +5,17 @@ import time
 import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from types import MappingProxyType
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
 from taichi_forge._lib import core as _ti_core
+from taichi_forge._contracts import (
+    DYNAMIC_WORK_SCHEMA_VERSION,
+    GRAPH_PIPELINE_SCHEMA_VERSION,
+    STRUCTURED_CONTROL_SCHEMA_VERSION,
+)
 from taichi_forge.aot.utils import produce_injected_args_for_graph
 from taichi_forge.lang import enums, impl, kernel_impl, ops
 from taichi_forge.lang._ndarray import Ndarray, ScalarNdarray
@@ -3200,7 +3206,7 @@ def _materialize_graph_pipeline_report(
         )
     gpu_available = bool(gpu_timing["available"])
     return GraphPipelineReport(
-        schema_version=2,
+        schema_version=GRAPH_PIPELINE_SCHEMA_VERSION,
         selection_domain="post_optimization_execution_root",
         backend=backend,
         sequence=int(sequence),
@@ -3381,7 +3387,7 @@ def bounded_dispatch_capabilities():
     backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
     if backend not in ("cpu", "cuda", "vulkan"):
         return {
-            "schema_version": 5,
+            "schema_version": DYNAMIC_WORK_SCHEMA_VERSION,
             "backend": backend,
             "available": False,
             "requested_route": "not_applicable",
@@ -3731,7 +3737,7 @@ def structured_control_capabilities():
         "cpu_exact_host_loop" if backend == "cpu" else "portable_exact_or_masked_replay"
     )
     return {
-        "schema_version": 5,
+        "schema_version": STRUCTURED_CONTROL_SCHEMA_VERSION,
         "backend": backend,
         "portable": {
             "while": portable_while,
@@ -3875,7 +3881,7 @@ def dynamic_work_capabilities():
         "completion_attached_"
     )
     return {
-        "schema_version": 5,
+        "schema_version": DYNAMIC_WORK_SCHEMA_VERSION,
         "backend": structured["backend"],
         "count_contract": {
             "owner": "DeviceExtent",
@@ -11952,6 +11958,141 @@ class Graph:
             compiled_graph = nodes[0].compiled_graph
             raw = impl.get_runtime().prog._graph_task_manifest(compiled_graph)
         return tuple(GraphTaskManifest._from_core(item) for item in raw)
+
+    def physical_plan(self):
+        """Return the immutable logical-to-physical Graph execution plan.
+
+        This is a compile/materialization report, not per-submit telemetry.
+        Queue submissions remain ``None`` until a ticket is submitted with
+        ``telemetry=True``.
+        """
+
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            backend = _backend_name(self._execution_arch)
+            stages = []
+            recordable_actions = 0
+            opaque_actions = 0
+            loose_actions = 0
+            rejection_reasons = []
+            publications = {}
+            for stage in self._spec.pipeline_definition:
+                actions = tuple(stage["native_actions"])
+                stage_reasons = []
+                for action in actions:
+                    if action.recordable and backend in action.backends:
+                        recordable_actions += 1
+                    else:
+                        loose_actions += 1
+                        if not action.recordable or action.opaque:
+                            opaque_actions += 1
+                            stage_reasons.append(
+                                f"{action.name}:opaque_native_action"
+                            )
+                        else:
+                            stage_reasons.append(
+                                f"{action.name}:backend_not_recordable:{backend}"
+                            )
+                rejection_reasons.extend(stage_reasons)
+                for bounded in stage["bounded_dispatches"]:
+                    key = tuple(bounded["snapshot_key"])
+                    publication = publications.setdefault(
+                        key,
+                        {
+                            "count_source": str(bounded["count_source"]),
+                            "extent": str(bounded["count_name"]),
+                            "capacity": int(bounded["capacity"]),
+                            "consumer_count": 0,
+                        },
+                    )
+                    publication["consumer_count"] += 1
+                stages.append(
+                    MappingProxyType(
+                        {
+                            "stage_index": int(stage["stage_index"]),
+                            "path_id": str(stage["path_id"]),
+                            "name": str(stage["name"]),
+                            "kind": str(stage["kind"]),
+                            "logical_dispatches": int(stage["dispatch_count"]),
+                            "physical_dispatches": int(
+                                stage["physical_dispatch_count"]
+                            ),
+                            "native_actions": len(actions),
+                            "providers": tuple(action.name for action in actions),
+                            "recordable_native_actions": sum(
+                                action.recordable and backend in action.backends
+                                for action in actions
+                            ),
+                            "loose_native_actions": len(stage_reasons),
+                            "host_observation": stage["kind"] == "observation",
+                            "rejection_reasons": tuple(stage_reasons),
+                        }
+                    )
+                )
+            temporary_plan = self._spec.temporary_memory_plan
+            publication_plan = tuple(
+                MappingProxyType(dict(publication))
+                for _, publication in sorted(
+                    publications.items(), key=lambda item: repr(item[0])
+                )
+            )
+            return MappingProxyType(
+                {
+                    "schema_version": 1,
+                    "backend": backend,
+                    "logical_submission_count": 1,
+                    "logical_node_count": len(self._spec.nodes),
+                    "logical_dispatch_count": int(self._spec.dispatch_count),
+                    "physical_dispatch_count": sum(
+                        stage["physical_dispatches"] for stage in stages
+                    ),
+                    "native_action_count": recordable_actions + loose_actions,
+                    "recordable_native_action_count": recordable_actions,
+                    "opaque_native_action_count": opaque_actions,
+                    "loose_native_action_count": loose_actions,
+                    # An opaque native action can contain one or more backend
+                    # helpers.  Until that provider publishes a command plan,
+                    # reporting the action count as an exact helper count
+                    # would be misleading.
+                    "loose_helper_count": None,
+                    "loose_helper_count_exact": False,
+                    "host_observation_boundary_count": int(
+                        self._spec.observation_count
+                    ),
+                    "backend_recording_complete": loose_actions == 0,
+                    "fragmented_native_plan": loose_actions > 0,
+                    "backend_graph_launches": None,
+                    "backend_graph_launches_exact": False,
+                    "physical_queue_submissions": None,
+                    "physical_queue_submission_source": (
+                        "SubmissionTicket.telemetry"
+                    ),
+                    "rejection_reasons": tuple(sorted(set(rejection_reasons))),
+                    "workspace_topology": MappingProxyType(
+                        {
+                            "fixed_internal_storage_bytes": int(
+                                self._spec.internal_storage_bytes
+                            ),
+                            "temporary_declared_bytes": int(
+                                temporary_plan.declared_bytes
+                            ),
+                            "temporary_peak_bytes": int(
+                                temporary_plan.planned_peak_bytes
+                            ),
+                            "temporary_slot_count": int(
+                                temporary_plan.slot_count
+                            ),
+                        }
+                    ),
+                    "dynamic_publication_count": len(publication_plan),
+                    "dynamic_publication_reuse_count": sum(
+                        max(0, publication["consumer_count"] - 1)
+                        for publication in publication_plan
+                    ),
+                    "dynamic_publications": publication_plan,
+                    "stages": tuple(stages),
+                }
+            )
 
     def run(self, args, *, trace=False):
         """Run synchronously, optionally returning every control invocation.

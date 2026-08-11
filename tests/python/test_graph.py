@@ -1214,6 +1214,10 @@ def test_bounded_domain_ir_excludes_backend_launch_state():
         "block_mode": "require",
         "physical_grid_requirement": "auto",
         "publication_epoch": None,
+        "count_source": "device_extent",
+        "ordered": False,
+        "segment_index": None,
+        "segment_count": 0,
     }
     assert "packet" not in serialized
     assert "launch_state" not in serialized
@@ -2184,6 +2188,48 @@ def test_graph_observation_rejects_unsupported_values_and_runtime_shape():
     wrong_shape = ti.ndarray(ti.i32, shape=1)
     with pytest.raises(TaichiRuntimeError, match="scalar ndarray"):
         graph.run({"value": wrong_shape})
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_graph_physical_plan_is_immutable_and_does_not_invent_queue_counts():
+    @ti.kernel
+    def increment(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in values:
+            values[i] += 1
+
+    values_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(increment, values_arg)
+    graph = builder.compile()
+
+    plan = graph.physical_plan()
+    assert plan["schema_version"] == 1
+    assert plan["logical_submission_count"] == 1
+    assert plan["logical_node_count"] == 1
+    assert plan["logical_dispatch_count"] == 1
+    assert plan["physical_dispatch_count"] == 1
+    assert plan["native_action_count"] == 0
+    assert plan["loose_native_action_count"] == 0
+    assert plan["loose_helper_count"] is None
+    assert not plan["loose_helper_count_exact"]
+    assert plan["backend_graph_launches"] is None
+    assert not plan["backend_graph_launches_exact"]
+    assert plan["physical_queue_submissions"] is None
+    assert plan["physical_queue_submission_source"] == (
+        "SubmissionTicket.telemetry"
+    )
+    assert plan["backend_recording_complete"]
+    assert not plan["fragmented_native_plan"]
+    assert plan["workspace_topology"]["temporary_slot_count"] == 0
+    assert plan["dynamic_publication_count"] == 0
+    assert plan["dynamic_publication_reuse_count"] == 0
+    assert len(plan["stages"]) == 1
+    with pytest.raises(TypeError):
+        plan["logical_node_count"] = 2
+    with pytest.raises(TypeError):
+        plan["stages"][0]["kind"] = "opaque"
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
