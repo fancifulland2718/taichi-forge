@@ -1658,6 +1658,22 @@ class BoundedDispatchSnapshot:
     overflow: bool
 
 
+@dataclass
+class _ActiveBoundedPublication:
+    """One builder-local physical publication and its consumer ownership.
+
+    This is deliberately not part of the public Graph ABI.  It binds the
+    backend packet to the semantic extent/block contract that produced it and
+    prevents a packet from being reused after an intervening action has made
+    the reaching publication ambiguous.
+    """
+
+    key: tuple
+    packet_arg: object
+    packet: object
+    packet_claimed: bool = False
+
+
 @dataclass(frozen=True)
 class OrderedSegmentDispatchSnapshot:
     """One ordered segment from an opt-in dispatch observation."""
@@ -8263,6 +8279,43 @@ def _pipeline_physical_dispatch_map(tasks, logical_count):
 
 
 def _pipeline_bounded_dispatches(node, tasks, dispatch_count):
+    return _pipeline_bounded_dispatches_with_publications(
+        node, tasks, dispatch_count, {}
+    )
+
+
+def _effect_publishes_resource(effect):
+    return effect.access in (
+        GraphAccess.WRITE,
+        GraphAccess.READ_WRITE,
+        GraphAccess.ATOMIC,
+        GraphAccess.OPAQUE,
+    )
+
+
+def _advance_publication_epochs(ir_node, publication_epochs, ignored_resources=()):
+    ignored_resources = frozenset(ignored_resources)
+    children = tuple(getattr(ir_node, "children", ()))
+    if children:
+        for child in children:
+            _advance_publication_epochs(
+                child, publication_epochs, ignored_resources
+            )
+        return
+    for effect in getattr(ir_node, "effects", ()):
+        if (
+            effect.runtime_bound
+            and effect.resource not in ignored_resources
+            and _effect_publishes_resource(effect)
+        ):
+            publication_epochs[effect.resource] = (
+                publication_epochs.get(effect.resource, 0) + 1
+            )
+
+
+def _pipeline_bounded_dispatches_with_publications(
+    node, tasks, dispatch_count, publication_epochs
+):
     ir_nodes = _recording_dispatch_ir_nodes(node, dispatch_count)
     physical_map = _pipeline_physical_dispatch_map(tasks, dispatch_count)
     label_indices = {}
@@ -8277,7 +8330,10 @@ def _pipeline_bounded_dispatches(node, tasks, dispatch_count):
             continue
         domain = ir_node.bounded_domain
         if domain is None:
+            _advance_publication_epochs(ir_node, publication_epochs)
             continue
+        publication_epoch = publication_epochs.get(domain.extent, 0)
+        domain = replace(domain, publication_epoch=publication_epoch)
         physical_index = physical_map[logical_index]
         label_matches = label_indices.get(ir_node.dispatch_label, set())
         if ir_node.dispatch_label and len(label_matches) == 1:
@@ -8286,6 +8342,13 @@ def _pipeline_bounded_dispatches(node, tasks, dispatch_count):
             domain.count_source,
             domain.extent,
             int(domain.capacity),
+        )
+        publication_key = (
+            domain.count_source,
+            domain.extent,
+            int(domain.capacity),
+            domain.block_dim,
+            publication_epoch,
         )
         result.append(
             {
@@ -8297,7 +8360,15 @@ def _pipeline_bounded_dispatches(node, tasks, dispatch_count):
                 "count_name": domain.extent,
                 "capacity": int(domain.capacity),
                 "snapshot_key": snapshot_key,
+                "publication_key": publication_key,
             }
+        )
+        # A bounded payload is contractually a consumer of its extent.  Older
+        # dispatch metadata conservatively labels every ndarray read_write;
+        # allowing that fallback label to manufacture a new publication would
+        # defeat reuse between adjacent consumers.
+        _advance_publication_epochs(
+            ir_node, publication_epochs, (domain.extent,)
         )
     return tuple(result)
 
@@ -8313,6 +8384,7 @@ def _merge_derived_runtime_arg_names(nodes):
 
 def _graph_pipeline_definition(nodes):
     stages = []
+    publication_epochs = {}
     for index, node in enumerate(nodes):
         manifests = _native_action_manifests_for_node(node)
         source_native_count = int(getattr(node, "source_native_count", 0))
@@ -8348,9 +8420,11 @@ def _graph_pipeline_definition(nodes):
         task_mapping_status, bounded_mapping_status = _pipeline_mapping_status(
             node
         )
-        bounded_dispatches = _pipeline_bounded_dispatches(
-            node, tasks, dispatch_count
+        bounded_dispatches = _pipeline_bounded_dispatches_with_publications(
+            node, tasks, dispatch_count, publication_epochs
         )
+        if dispatch_count == 0:
+            _advance_publication_epochs(ir_node, publication_epochs)
         stages.append(
             {
                 "stage_index": index,
@@ -10901,12 +10975,12 @@ class GraphBuilder:
             return None
         key = (extent.name, int(capacity), int(block_dim))
         active = self._active_bounded_publication
-        if active is not None and active["key"] == key:
-            owns_packet = not active["packet_claimed"]
-            active["packet_claimed"] = True
+        if active is not None and active.key == key:
+            owns_packet = not active.packet_claimed
+            active.packet_claimed = True
             return (
-                active["packet_arg"],
-                active["packet"],
+                active.packet_arg,
+                active.packet,
                 owns_packet,
             )
 
@@ -10944,12 +11018,12 @@ class GraphBuilder:
             producer.executable,
             recordable_action=action,
         )
-        self._active_bounded_publication = {
-            "key": key,
-            "packet_arg": packet_arg,
-            "packet": packet,
-            "packet_claimed": True,
-        }
+        self._active_bounded_publication = _ActiveBoundedPublication(
+            key=key,
+            packet_arg=packet_arg,
+            packet=packet,
+            packet_claimed=True,
+        )
         return packet_arg, packet, True
 
     def _bounded_extent_contract(
@@ -11194,16 +11268,16 @@ class GraphBuilder:
                 # same extent contract. Any intervening action clears this
                 # conservative builder-local publication state.
                 if _vulkan_bounded_packet_policy()[1] == "reuse_consecutive":
-                    self._active_bounded_publication = {
-                        "key": (
+                    self._active_bounded_publication = _ActiveBoundedPublication(
+                        key=(
                             extent.name,
                             int(capacity),
                             int(selected_block),
                         ),
-                        "packet_arg": packet_arg,
-                        "packet": packet,
-                        "packet_claimed": True,
-                    }
+                        packet_arg=packet_arg,
+                        packet=packet,
+                        packet_claimed=True,
+                    )
                     preserve_vulkan_packet = True
             self._record_indirect_dispatch(
                 kernel_cpp,
@@ -12002,13 +12076,17 @@ class Graph:
                             )
                 rejection_reasons.extend(stage_reasons)
                 for bounded in stage["bounded_dispatches"]:
-                    key = tuple(bounded["snapshot_key"])
+                    key = tuple(bounded["publication_key"])
                     publication = publications.setdefault(
                         key,
                         {
                             "count_source": str(bounded["count_source"]),
                             "extent": str(bounded["count_name"]),
                             "capacity": int(bounded["capacity"]),
+                            "block_dim": bounded["domain"].block_dim,
+                            "publication_generation": bounded[
+                                "domain"
+                            ].publication_epoch,
                             "consumer_count": 0,
                         },
                     )

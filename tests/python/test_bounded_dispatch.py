@@ -1890,6 +1890,61 @@ def test_vulkan_prepared_packet_is_invalidated_by_intervening_dispatch():
     assert graph._spec.execution_definition["internal_storage_bytes"] == 24
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_physical_plan_groups_consumers_by_publication_generation():
+    capacity = 32
+
+    @ti.kernel
+    def consume(
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in range(capacity):
+            if i < ti.device_extent_count(extent):
+                output[i] += 1
+
+    @ti.kernel
+    def publish_again(extent: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        extent[0] = extent[0]
+
+    extent_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "extent", ti.i32, ndim=1)
+    first_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "first", ti.i32, ndim=1)
+    second_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "second", ti.i32, ndim=1)
+    third_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "third", ti.i32, ndim=1)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch_bounded(
+        consume,
+        extent_arg,
+        first_arg,
+        extent=extent_arg,
+        capacity=capacity,
+    )
+    builder.dispatch_bounded(
+        consume,
+        extent_arg,
+        second_arg,
+        extent=extent_arg,
+        capacity=capacity,
+    )
+    builder.dispatch(publish_again, extent_arg)
+    builder.dispatch_bounded(
+        consume,
+        extent_arg,
+        third_arg,
+        extent=extent_arg,
+        capacity=capacity,
+    )
+    plan = builder.compile().physical_plan()
+
+    assert plan["dynamic_publication_count"] == 2
+    assert plan["dynamic_publication_reuse_count"] == 1
+    publications = plan["dynamic_publications"]
+    assert tuple(item["consumer_count"] for item in publications) == (2, 1)
+    assert tuple(item["publication_generation"] for item in publications) == (0, 1)
+    assert all(item["capacity"] == capacity for item in publications)
+    assert all(item["block_dim"] is None for item in publications)
+
+
 @pytest.mark.run_in_serial
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_graph_bounded_dispatch_replay_memory_is_stable():
