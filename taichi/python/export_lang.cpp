@@ -1248,6 +1248,12 @@ void export_lang(py::module &m) {
            py::arg("gpu_timing") = false)
       .def("_debug_runtime_completion_stats",
            &Program::debug_runtime_completion_stats)
+      .def("_set_cpu_scheduler_telemetry_enabled",
+           &Program::set_cpu_scheduler_telemetry_enabled,
+           py::arg("enabled"))
+      .def("_debug_cpu_scheduler_telemetry",
+           &Program::debug_cpu_scheduler_telemetry,
+           py::arg("reset") = false)
       .def("_debug_kernel_definition_count", [](const Program &program) {
         return program.kernels.size();
       })

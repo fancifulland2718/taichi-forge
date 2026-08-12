@@ -612,6 +612,9 @@ class TI_DLL_EXPORT Program {
   // Internal CPU-native primitive scheduler. The returned object is owned by
   // this Program's LLVM runtime and is never a process-global worker pool.
   ThreadPool *get_cpu_thread_pool();
+  void set_cpu_scheduler_telemetry_enabled(bool enabled);
+  std::unordered_map<std::string, std::uint64_t>
+  debug_cpu_scheduler_telemetry(bool reset = false);
 
   // Process-unique identity for this Program lifetime. Unlike the Program
   // address, this token cannot alias a later Program after reset/destruction.

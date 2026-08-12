@@ -361,6 +361,24 @@ owners, schemas, and purposes. Compile profiling measures compilation;
 methods whose names begin with `_runtime_` are implementation details, not
 public APIs.
 
+### CPU scheduler telemetry
+
+`ti.profiler.set_cpu_scheduler_telemetry(True, reset=True)` opens an explicit
+diagnostic window for the CPU ThreadPool. Query it with
+`ti.profiler.query_cpu_scheduler_telemetry()` and close it by setting `False`.
+The schema-v1 mapping reports submitted/completed/queued jobs, requested and
+completed chunks, requested and joined workers, underfilled and nested-serial
+jobs, exceptions, maximum queue/thread occupancy, and aggregate queue,
+execution, and submitter-wait nanoseconds.
+
+Telemetry is disabled by default. The disabled scheduler path performs one
+relaxed flag load per ThreadPool invocation and does not read a clock or update
+per-chunk counters. Enabled telemetry is intentionally observable and is for
+short CPU investigations, not continuous production monitoring. A reset
+returns the preceding counter window; resetting while jobs are active is a
+diagnostic boundary rather than a transactional event partition. The API does
+not alter thread admission or infer NUMA/CCD topology.
+
 ### `ti.real_func(fn)`
 
 Location: `taichi_forge.lang.kernel_impl`; exported as `ti.real_func`.

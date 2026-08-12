@@ -5725,6 +5725,37 @@ ThreadPool *Program::get_cpu_thread_pool() {
 #endif
 }
 
+void Program::set_cpu_scheduler_telemetry_enabled(bool enabled) {
+  get_cpu_thread_pool()->set_telemetry_enabled(enabled);
+}
+
+std::unordered_map<std::string, std::uint64_t>
+Program::debug_cpu_scheduler_telemetry(bool reset) {
+  const auto stats = get_cpu_thread_pool()->telemetry_statistics(reset);
+  return {
+      {"schema_version", 1},
+      {"enabled", stats.enabled ? 1u : 0u},
+      {"jobs_submitted", stats.jobs_submitted},
+      {"jobs_completed", stats.jobs_completed},
+      {"queued_jobs", stats.queued_jobs},
+      {"nested_serial_jobs", stats.nested_serial_jobs},
+      {"tasks_requested", stats.tasks_requested},
+      {"tasks_completed", stats.tasks_completed},
+      {"nested_serial_tasks", stats.nested_serial_tasks},
+      {"requested_worker_slots", stats.requested_worker_slots},
+      {"joined_workers", stats.joined_workers},
+      {"underfilled_jobs", stats.underfilled_jobs},
+      {"cancelled_jobs", stats.cancelled_jobs},
+      {"exception_jobs", stats.exception_jobs},
+      {"queue_wait_ns", stats.queue_wait_ns},
+      {"execution_ns", stats.execution_ns},
+      {"submitter_wait_ns", stats.submitter_wait_ns},
+      {"max_queue_depth", stats.max_queue_depth},
+      {"max_requested_threads", stats.max_requested_threads},
+      {"max_joined_workers", stats.max_joined_workers},
+  };
+}
+
 static void remove_snode_frontend_caches(
     SNode *parent_snode,
     SNodeRwAccessorsBank *snode_rw_accessors_bank,

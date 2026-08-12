@@ -307,6 +307,20 @@ Program 上的工作不会混入该 session。
 compile profiling 测量编译，`ti.runtime.trace()` 测量有界 runtime host event。
 Program 上以 `_runtime_` 开头的 private method 是实现细节，不属于公开 API。
 
+### CPU scheduler telemetry
+
+`ti.profiler.set_cpu_scheduler_telemetry(True, reset=True)` 会为 CPU ThreadPool
+开启一个显式诊断窗口；使用 `ti.profiler.query_cpu_scheduler_telemetry()` 查询，设置为
+`False` 即关闭。schema-v1 mapping 报告 submitted/completed/queued job、请求与完成的 chunk、
+requested/joined worker、underfilled 与 nested-serial job、异常、最大 queue/thread occupancy，
+以及累计的 queue、execution 和 submitter-wait 纳秒数。
+
+telemetry 默认关闭。关闭时 scheduler 热路径每次 ThreadPool invocation 只执行一次 relaxed
+flag load，不读取时钟，也不更新逐 chunk counter。开启后的开销是有意且可观测的，因此只适合
+有限的 CPU 诊断窗口，不应作为持续生产监控。reset 返回此前的 counter window；若与 active
+job 并发发生，它只是诊断边界，不保证 transaction 式事件切分。该接口不会改变 thread
+admission，也不会推断 NUMA/CCD topology。
+
 ### `ti.real_func(fn)`
 
 位置：`taichi_forge.lang.kernel_impl`，导出为 `ti.real_func`。
