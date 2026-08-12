@@ -46,6 +46,27 @@ grouped under the behavior they shipped.
 
 ## Unreleased
 
+- Bounded device-count dispatch now accepts a per-node
+  `physical_grid="auto|extent|capacity"` policy. `extent` selects the qualified
+  no-readback physical-range route (CPU scheduler chunks, CUDA 12.4+ adaptive
+  node update, or Vulkan indirect dispatch), while `capacity` is an explicit
+  fixed-grid baseline. Capability and handle telemetry report the requested
+  policy and selected backend route without presenting a logical mask as an
+  exact physical launch. CUDA 12.4+ setup qualification now tolerates at most
+  two transient device-node status retries, reports the retry count, and still
+  fails closed on persistent status or driver errors; replay pays no retry or
+  host-synchronization cost.
+- Graphs can declare instance-owned private ndarrays through
+  `GraphBuilder.private_ndarray()` and `Sequential.private_ndarray()`;
+  recordable providers can use `GraphOwnedNdarray` in fixed bindings. Private
+  storage stays outside the public run schema, has stable per-instance
+  addresses, uses completion-fenced exclusive reuse by default, and scales to
+  independent asynchronous workspace lanes with explicit memory accounting.
+- Added default-off CPU ThreadPool telemetry under `ti.profiler`. An opt-in
+  window reports jobs, chunks, worker admission/underfill, queue occupancy,
+  nested serial execution, exceptions, and aggregate queue/execution/wait
+  time. Disabled execution adds only one relaxed flag load per ThreadPool
+  invocation and does not read clocks or update per-chunk counters.
 - Ordinary Forge-owned ndarray launches now bind through stable generation
   slots and reuse an immutable registered execution plan, while compiled
   kernels with no SNode dependency avoid the global SNode lifecycle read

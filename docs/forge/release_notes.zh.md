@@ -42,6 +42,22 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
 
 ## 待发布 {#unreleased}
 
+- device-count bounded dispatch 新增逐节点的
+  `physical_grid="auto|extent|capacity"` 策略。`extent` 选择已通过资格、无 host readback 的
+  物理 range 路线（CPU scheduler chunk、CUDA 12.4+ adaptive node update 或 Vulkan
+  indirect dispatch），`capacity` 则是显式固定 grid 基线。capability 与 handle telemetry 会
+  如实报告请求策略和后端实际 route，不会把 logical mask 伪装成 exact physical launch。CUDA
+  12.4+ setup qualification 对瞬时 device-node status 最多允许两次 retry，并公开 retry count；持续
+  status 或 driver error 仍 fail closed，普通 replay 不承担 retry 或 host synchronization 成本。
+- Graph 可通过 `GraphBuilder.private_ndarray()` 与 `Sequential.private_ndarray()` 声明
+  instance-owned 私有 ndarray；recordable provider 可在 fixed binding 中使用
+  `GraphOwnedNdarray`。私有存储不进入公开 run schema，地址在 instance 生命周期内稳定，默认
+  通过 completion fence 独占复用，并可通过独立 workspace lane 支持异步重叠；内存统计会如实
+  计入每条 lane。
+- `ti.profiler` 新增默认关闭的 CPU ThreadPool telemetry。显式窗口报告 job、chunk、worker
+  admission/underfill、queue occupancy、nested serial、异常与累计 queue/execution/wait 时间。
+  关闭时每次 ThreadPool invocation 只增加一次 relaxed flag load，不读取时钟，也不更新逐
+  chunk counter。
 - 普通 Forge-owned ndarray launch 现在通过稳定 generation slot 绑定；无 SNode dependency
   的 compiled kernel 还会复用 immutable registered execution plan，并不再取得全局 SNode
   生命周期读锁。external/mixed resource 与 Field/SNode-dependent kernel 保留完整通用所有权
