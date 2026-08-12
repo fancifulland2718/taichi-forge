@@ -244,6 +244,27 @@ def _align_up(value, alignment):
 _GraphInternalNdarraySpec = InternalNdarrayRequirement
 
 
+class GraphOwnedNdarray(InternalNdarrayRequirement):
+    """Declarative storage materialized separately by each Graph instance.
+
+    Use this value in a recordable action's ``fixed_bindings``. The binding is
+    private to the compiled Graph and therefore never appears in its public
+    runtime argument schema. Mutable storage should retain the default
+    exclusive-submission contract so completion fences or workspace lanes
+    prevent overlapping replay from aliasing the same allocation.
+    """
+
+    def __init__(self, dtype, shape, *, exclusive_submission=True):
+        if isinstance(shape, int):
+            shape = (shape,)
+        super().__init__(
+            dtype,
+            tuple(shape),
+            _ti_core.data_type_size(dtype),
+            bool(exclusive_submission),
+        )
+
+
 def _materialize_graph_internal_bindings(bindings):
     materialized = {}
     storage_by_spec = {}
@@ -10471,6 +10492,25 @@ class Sequential:
         )
         return Arg(ArgKind.NDARRAY, name, dtype, ndim=len(shape))
 
+    def private_ndarray(
+        self,
+        name,
+        dtype,
+        shape,
+        *,
+        exclusive_submission=True,
+    ):
+        """Declare private address-stable storage for this recorded region."""
+
+        if isinstance(shape, int):
+            shape = (shape,)
+        return self._bind_internal_ndarray(
+            name,
+            dtype,
+            shape,
+            exclusive_submission=exclusive_submission,
+        )
+
     def _bind_internal_scalar(self, name, dtype, value):
         """Bind one private immutable scalar for a provider sequence."""
 
@@ -10981,6 +11021,52 @@ class GraphBuilder:
         self._runtime_graph_source_native_count = 0
         self._runtime_graph_native_action_manifests = []
         self._active_bounded_publication = None
+        self._declared_private_bindings = {}
+
+    def private_ndarray(
+        self,
+        name,
+        dtype,
+        shape,
+        *,
+        exclusive_submission=True,
+    ):
+        """Declare one Graph-instance-owned private ndarray argument."""
+
+        if not isinstance(name, str) or not name:
+            raise ValueError("Graph private ndarray name must be nonempty")
+        if name in self._declared_private_bindings:
+            raise TaichiRuntimeError(
+                f"Graph private binding {name!r} is already defined"
+            )
+        requirement = GraphOwnedNdarray(
+            dtype,
+            shape,
+            exclusive_submission=exclusive_submission,
+        )
+        symbolic = Arg(
+            ArgKind.NDARRAY,
+            name,
+            dtype,
+            ndim=len(requirement.shape),
+        )
+        self._declared_private_bindings[name] = (symbolic, requirement)
+        return symbolic
+
+    def _bind_declared_private_args(self, args):
+        for symbolic in args:
+            declared = self._declared_private_bindings.get(
+                getattr(symbolic, "name", None)
+            )
+            if declared is None:
+                continue
+            expected, requirement = declared
+            if symbolic is not expected:
+                raise TaichiRuntimeError(
+                    f"Graph private binding {expected.name!r} must use the "
+                    "symbol returned by private_ndarray()"
+                )
+            self._bind_internal_runtime_arg(symbolic, requirement)
 
     def dispatch(self, kernel_fn, *args, template_args=None, label=None):
         label = _normalize_dispatch_label(label)
@@ -11012,6 +11098,9 @@ class GraphBuilder:
         *,
         preserve_bounded_publication=False,
     ):
+        self._bind_declared_private_args(
+            (*unzipped_args, dispatch_packet)
+        )
         if not preserve_bounded_publication:
             self._active_bounded_publication = None
         self._aot_graph_plan.dispatch_indirect(
@@ -11644,6 +11733,7 @@ class GraphBuilder:
         unzipped_args,
         label="",
     ):
+        self._bind_declared_private_args(unzipped_args)
         self._active_bounded_publication = None
         self._aot_graph_plan.dispatch(kernel_cpp, unzipped_args, label)
         self._ensure_runtime_graph_builder().dispatch(
@@ -11669,6 +11759,7 @@ class GraphBuilder:
         grouped_update,
         label="",
     ):
+        self._bind_declared_private_args(unzipped_args)
         self._active_bounded_publication = None
         # The public AOT graph schema stays backend-neutral. The exact CUDA
         # node is a JIT-only specialization carried by the runtime builder.
@@ -11700,6 +11791,7 @@ class GraphBuilder:
         capacity,
         label="",
     ):
+        self._bind_declared_private_args(unzipped_args)
         self._active_bounded_publication = None
         self._aot_graph_plan.dispatch(kernel_cpp, unzipped_args, label)
         self._ensure_runtime_graph_builder().dispatch_cpu_bounded(
@@ -11735,6 +11827,23 @@ class GraphBuilder:
             return self
         self._aot_graph_plan.append(node)
         node._dispatch_to(self._runtime_graph_builder)
+        for binding_name, value in node._fixed_runtime_args.items():
+            existing = self._runtime_graph_fixed_args.get(binding_name)
+            if existing is not None and existing is not value:
+                if not (
+                    isinstance(existing, (int, float))
+                    and isinstance(value, (int, float))
+                    and existing == value
+                ):
+                    raise TaichiRuntimeError(
+                        "Appended Graph sequences provide conflicting fixed "
+                        f"binding {binding_name!r}"
+                    )
+            self._runtime_graph_fixed_args[binding_name] = value
+        for lease in node._lifetime_leases:
+            self._retain_runtime_graph_lease(lease)
+        if node._fixed_runtime_args:
+            self._aot_graph_plan.mark_internal_fixed_bindings()
         self._runtime_graph_dispatches.extend(
             (kernel, tuple(args)) for kernel, args in node._dispatches
         )
@@ -13081,6 +13190,7 @@ __all__ = [
     "GraphExecutionSegmentReport",
     "GraphExecutionReport",
     "BoundedDispatchCapabilities",
+    "GraphOwnedNdarray",
     "BoundedDispatchHandle",
     "HostBoundedDispatchHandle",
     "BoundedDispatchSnapshot",

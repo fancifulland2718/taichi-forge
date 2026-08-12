@@ -1200,6 +1200,36 @@ intervening dispatch or an unqualified producer conservatively restores the
 standalone preparation path. `DeviceDispatchState` remains supported for
 explicit packet producers and backward compatibility.
 
+### Graph-owned private ndarray storage
+
+`GraphBuilder.private_ndarray(name, dtype, shape)` declares address-stable
+storage owned by each compiled Graph instance. The returned symbolic ndarray
+can be passed to ordinary dispatches, but its name is removed from the public
+run schema and callers must not bind it:
+
+```python
+builder = ti.graph.GraphBuilder()
+scratch = builder.private_ndarray("scratch", ti.f32, count)
+builder.dispatch(stage, input_arg, scratch)
+builder.dispatch(consume, scratch, output_arg)
+graph = builder.compile(workspace_lanes=2)
+graph.run({"input": values, "output": result})
+```
+
+`Sequential.private_ndarray()` provides the same contract for a recorded
+provider region. A provider that constructs a `RecordableGraphAction` directly
+can place `ti.graph.GraphOwnedNdarray(dtype, shape)` in `fixed_bindings`.
+Materialization happens per Graph instance, identical declaration objects are
+shared across composed regions, and memory appears in
+`execution_stats().memory.persistent_internal_storage_bytes`.
+
+Mutable private storage is exclusive by default. An asynchronous replay keeps
+its lane leased until the completion fence retires; `workspace_lanes=N`
+materializes independent copies for genuine overlap. Set
+`exclusive_submission=False` only for storage whose contents are immutable
+during every overlapping submission. Runtime reset, duplicate bindings, public
+argument injection, and stale instance reuse fail closed.
+
 ### Bounded and ordered segmented Graph dispatch
 
 `GraphBuilder.dispatch_bounded()` accepts exactly one dynamic-count source:

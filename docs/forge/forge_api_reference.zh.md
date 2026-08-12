@@ -1021,6 +1021,32 @@ Graph-instance-owned 的四 u32 packet 交给 producer，不再记录 preparatio
 或 producer 未通过该 specialization 资格时，会保守恢复 standalone preparation。
 `DeviceDispatchState` 继续用于显式 packet producer 与向后兼容。
 
+### Graph-owned 私有 ndarray 存储
+
+`GraphBuilder.private_ndarray(name, dtype, shape)` 声明由每个 compiled Graph
+instance 独立拥有、地址稳定的存储。返回的 symbolic ndarray 可以传给普通 dispatch，但其名称
+会从公开 run schema 中移除，调用方不能再绑定它：
+
+```python
+builder = ti.graph.GraphBuilder()
+scratch = builder.private_ndarray("scratch", ti.f32, count)
+builder.dispatch(stage, input_arg, scratch)
+builder.dispatch(consume, scratch, output_arg)
+graph = builder.compile(workspace_lanes=2)
+graph.run({"input": values, "output": result})
+```
+
+recorded provider region 可使用相同合同的 `Sequential.private_ndarray()`；直接构造
+`RecordableGraphAction` 的 provider 则可在 `fixed_bindings` 中放入
+`ti.graph.GraphOwnedNdarray(dtype, shape)`。存储按 Graph instance materialize；组合 region
+复用同一个 declaration object 时会共享同一份存储；内存计入
+`execution_stats().memory.persistent_internal_storage_bytes`。
+
+可变私有存储默认要求 exclusive submission。异步 replay 会一直持有对应 lane，直到 completion
+fence 退休；`workspace_lanes=N` 会为真正并发 materialize 相互独立的副本。只有当内容在所有重叠
+submission 中均不可变时，才应设置 `exclusive_submission=False`。runtime reset、重复 binding、
+public argument 注入与过期 instance 复用都会 fail closed。
+
 ### 有界与有序分段 Graph dispatch
 
 `GraphBuilder.dispatch_bounded()` 必须且只能接收一种动态 count 来源：运行时由匹配
