@@ -84,9 +84,7 @@ def test_storage_view_describes_existing_dense_storage_without_copy():
     assert flat_vector_field.supported
     assert tuple(flat_vector_field.descriptor.index_shape) == (12,)
     assert tuple(flat_vector_field.descriptor.element_shape) == ()
-    assert flat_vector_field.descriptor.byte_offset == (
-        vector_field_view.descriptor.byte_offset
-    )
+    assert flat_vector_field.descriptor.byte_offset == (vector_field_view.descriptor.byte_offset)
     assert flat_vector_field.descriptor.owner_kind == "kSNodePayload"
     assert flat_vector_field.properties["compact_contiguous"]
 
@@ -192,9 +190,7 @@ def test_storage_view_shadow_checks_existing_algorithm_descriptors(monkeypatch):
 
     authoritative = _algorithms._primitive_view(array)
     assert authoritative.description is not None
-    assert authoritative.description.descriptor.fingerprint == (
-        describe_storage(array).descriptor.fingerprint
-    )
+    assert authoritative.description.descriptor.fingerprint == (describe_storage(array).descriptor.fingerprint)
 
     field = ti.Vector.field(3, ti.f32, shape=4)
     legacy_field = _vector_io._describe_value_field_legacy(field, "value")
@@ -312,9 +308,7 @@ def test_graph_ndarray_prepares_runtime_storage_without_temporary_allocations():
 
     values = ti.ndarray(ti.i32, shape=32)
     values.fill(0)
-    symbolic = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
-    )
+    symbolic = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1)
     builder = ti.graph.GraphBuilder()
     builder.dispatch(increment, symbolic)
     builder.dispatch(increment, symbolic)
@@ -328,9 +322,7 @@ def test_graph_ndarray_prepares_runtime_storage_without_temporary_allocations():
     graph.run({"values": values})
     ti.sync()
 
-    np.testing.assert_array_equal(
-        values.to_numpy(), (np.arange(32, dtype=np.int32) + 1) * 4
-    )
+    np.testing.assert_array_equal(values.to_numpy(), (np.arange(32, dtype=np.int32) + 1) * 4)
     after = program._debug_dense_storage_binding_stats()
     resources_after = program._debug_ndarray_resource_stats()
     assert after["resolved_bindings"] >= before["resolved_bindings"] + 2
@@ -365,9 +357,7 @@ def test_graph_automatically_normalizes_dense_field_and_view_without_copy():
         for i in values:
             values[i] += i + 1
 
-    symbolic = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
-    )
+    symbolic = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1)
     builder = ti.graph.GraphBuilder()
     builder.dispatch(increment, symbolic)
     builder.dispatch(increment, symbolic)
@@ -390,15 +380,11 @@ def test_graph_automatically_normalizes_dense_field_and_view_without_copy():
                 ti.sync()
             graph.run({"values": runtime_value})
         ti.sync()
-        np.testing.assert_array_equal(
-            field.to_numpy(), (np.arange(32, dtype=np.int32) + 1) * 18
-        )
+        np.testing.assert_array_equal(field.to_numpy(), (np.arange(32, dtype=np.int32) + 1) * 18)
 
     bindings_after = program._debug_dense_storage_binding_stats()
     resources_after = program._debug_ndarray_resource_stats()
-    assert bindings_after["field_bindings"] >= (
-        bindings_before["field_bindings"] + 18
-    )
+    assert bindings_after["field_bindings"] >= (bindings_before["field_bindings"] + 18)
     assert bindings_after["temporary_allocations"] == 0
     assert bindings_after["temporary_bytes"] == 0
     assert resources_after["created_total"] == resources_before["created_total"]
@@ -435,9 +421,7 @@ def test_graph_automatically_normalizes_packed_dense_field():
         for i in values:
             values[i] += vec3(1.0, 2.0, 3.0)
 
-    symbolic = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "values", vec3, ndim=1
-    )
+    symbolic = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", vec3, ndim=1)
     builder = ti.graph.GraphBuilder()
     builder.dispatch(update, symbolic)
     graph = builder.compile()
@@ -467,9 +451,7 @@ def test_graph_dense_field_runtime_argument_validates_declared_type_and_rank():
         for i in values:
             values[i] += 1
 
-    symbolic = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
-    )
+    symbolic = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1)
     builder = ti.graph.GraphBuilder()
     builder.dispatch(touch, symbolic)
     graph = builder.compile()
@@ -494,9 +476,7 @@ def test_graph_dense_field_runtime_argument_rejects_retired_tree():
         for i in values:
             values[i] += 1.0
 
-    symbolic = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "values", ti.f32, ndim=1
-    )
+    symbolic = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.f32, ndim=1)
     builder = ti.graph.GraphBuilder()
     builder.dispatch(touch, symbolic)
     graph = builder.compile()
@@ -507,10 +487,9 @@ def test_graph_dense_field_runtime_argument_rejects_retired_tree():
     tree = fields_builder.finalize()
     graph.run({"values": values})
     tree.destroy()
-    with pytest.raises(
-        RuntimeError, match="retired SNodeTree|generation"
-    ):
+    with pytest.raises(RuntimeError, match="retired SNodeTree|generation"):
         graph.run({"values": values})
+
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_cuda_graph_borrowed_field_rejects_retired_generation_and_recaptures():
@@ -519,9 +498,7 @@ def test_cuda_graph_borrowed_field_rejects_retired_generation_and_recaptures():
         for i in values:
             values[i] += 1.0
 
-    symbolic = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "values", ti.f32, ndim=1
-    )
+    symbolic = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.f32, ndim=1)
     builder = ti.graph.GraphBuilder()
     builder.dispatch(touch, symbolic)
     builder.dispatch(touch, symbolic)
@@ -536,9 +513,7 @@ def test_cuda_graph_borrowed_field_rejects_retired_generation_and_recaptures():
     graph.run({"values": old_values})
     graph.run({"values": old_values})
     ti.sync()
-    np.testing.assert_array_equal(
-        old_values.to_numpy(), np.full(8, 4.0, dtype=np.float32)
-    )
+    np.testing.assert_array_equal(old_values.to_numpy(), np.full(8, 4.0, dtype=np.float32))
     first_stats = graph._graph_stats[0]
     assert first_stats["captures"] == 1
     assert first_stats["exact_replays"] == 1
@@ -556,9 +531,7 @@ def test_cuda_graph_borrowed_field_rejects_retired_generation_and_recaptures():
     graph.run({"values": new_values})
     graph.run({"values": new_values})
     ti.sync()
-    np.testing.assert_array_equal(
-        new_values.to_numpy(), np.full(8, 4.0, dtype=np.float32)
-    )
+    np.testing.assert_array_equal(new_values.to_numpy(), np.full(8, 4.0, dtype=np.float32))
     final_stats = graph._graph_stats[0]
     assert final_stats["captures"] == 2
     assert final_stats["recaptures"] == 1
@@ -700,14 +673,10 @@ def test_positive_multiaxis_affine_view_matches_ordinary_and_graph_addressing():
 
     write(view, 20.0)
     expected = initial.copy()
-    expected[np.ix_([1, 3, 5], [2, 5])] = np.array(
-        [[20.0, 21.0], [30.0, 31.0], [40.0, 41.0]], dtype=np.float32
-    )
+    expected[np.ix_([1, 3, 5], [2, 5])] = np.array([[20.0, 21.0], [30.0, 31.0], [40.0, 41.0]], dtype=np.float32)
     np.testing.assert_array_equal(base.to_numpy(), expected)
 
-    symbolic_values = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "values", ti.f32, ndim=2
-    )
+    symbolic_values = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.f32, ndim=2)
     symbolic_bias = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "bias", ti.f32)
     graph_builder = ti.graph.GraphBuilder()
     graph_builder.dispatch(write, symbolic_values, symbolic_bias)
@@ -716,9 +685,7 @@ def test_positive_multiaxis_affine_view_matches_ordinary_and_graph_addressing():
     graph.execution_stats()
     for _ in range(9):
         graph.run({"values": view, "bias": 100.0})
-    expected[np.ix_([1, 3, 5], [2, 5])] = np.array(
-        [[101.0, 102.0], [111.0, 112.0], [121.0, 122.0]], dtype=np.float32
-    )
+    expected[np.ix_([1, 3, 5], [2, 5])] = np.array([[101.0, 102.0], [111.0, 112.0], [121.0, 122.0]], dtype=np.float32)
     np.testing.assert_array_equal(base.to_numpy(), expected)
 
     if impl.current_cfg().arch == ti.cuda:
@@ -763,23 +730,18 @@ def test_positive_affine_view_preserves_contiguous_vector_elements():
     expected[[1, 3, 5], :] += np.array([1.0, 2.0, 3.0], dtype=np.float32)
     np.testing.assert_array_equal(base.to_numpy(), expected)
 
+
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_affine_view_composition_and_a1_exclusions():
     base = ti.ndarray(ti.f32, shape=(8, 9))
-    first = ti.experimental.ndarray_view(
-        base, slices=(slice(1, 8, 2), slice(0, 9, 3))
-    )
-    second = ti.experimental.ndarray_view(
-        first, slices=(slice(1, 4, 2), slice(1, 3))
-    )
+    first = ti.experimental.ndarray_view(base, slices=(slice(1, 8, 2), slice(0, 9, 3)))
+    second = ti.experimental.ndarray_view(first, slices=(slice(1, 4, 2), slice(1, 3)))
     assert second.shape == (2, 2)
     assert tuple(second.descriptor.index_strides_bytes) == (144, 12)
     assert second.descriptor.byte_offset == 120
     assert second.descriptor.resource_identity == first.descriptor.resource_identity
 
-    empty = ti.experimental.ndarray_view(
-        base, slices=(slice(8, 8), slice(None))
-    )
+    empty = ti.experimental.ndarray_view(base, slices=(slice(8, 8), slice(None)))
     assert empty.shape == (0, 9)
     assert empty.description.properties["empty"]
 
@@ -788,9 +750,7 @@ def test_affine_view_composition_and_a1_exclusions():
     with pytest.raises(ValueError, match="strictly positive"):
         ti.experimental.ndarray_view(base, slices=(slice(None, None, 0), slice(None)))
     with pytest.raises(TypeError, match="bounds must be integers"):
-        ti.experimental.ndarray_view(
-            base, slices=(slice(None, None, 1.5), slice(None))
-        )
+        ti.experimental.ndarray_view(base, slices=(slice(None, None, 1.5), slice(None)))
     with pytest.raises(TypeError, match="one slice per index axis"):
         ti.experimental.ndarray_view(base, slices=(1, slice(None)))
     with pytest.raises(ValueError, match="exactly 2"):

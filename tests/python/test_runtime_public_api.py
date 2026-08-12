@@ -14,9 +14,7 @@ from tests import test_utils
 def test_runtime_contract_manifest_is_immutable_and_source_agnostic():
     manifest = ti.validate_runtime_contract(require_native_manifest=True)
     assert manifest["schema_version"] == 1
-    assert manifest["native_abi_revision"] == manifest[
-        "required_native_abi_revision"
-    ]
+    assert manifest["native_abi_revision"] == manifest["required_native_abi_revision"]
     assert manifest["schemas"]["dynamic_work"] == 5
     assert manifest["schemas"]["structured_control"] == 5
     assert manifest["schemas"]["graph_pipeline"] == 2
@@ -87,18 +85,10 @@ def test_runtime_stats_and_capabilities_are_immutable_and_exact():
     assert capabilities.bounded_trace is True
     assert capabilities.trace_schema_version == 1
     assert capabilities.chrome_trace_export is True
-    assert capabilities.backend_wait_telemetry is (
-        raw["synchronization"]["backend_waits"] is not None
-    )
-    assert capabilities.backend_lock_telemetry is (
-        raw["synchronization"]["backend_lock_samples"] is not None
-    )
-    assert capabilities.device_memory_telemetry is (
-        raw["memory"]["device_raw_bytes"] is not None
-    )
-    assert capabilities.cuda_mempool_telemetry is (
-        raw["memory"]["cuda_mempool_reserved_bytes"] is not None
-    )
+    assert capabilities.backend_wait_telemetry is (raw["synchronization"]["backend_waits"] is not None)
+    assert capabilities.backend_lock_telemetry is (raw["synchronization"]["backend_lock_samples"] is not None)
+    assert capabilities.device_memory_telemetry is (raw["memory"]["device_raw_bytes"] is not None)
+    assert capabilities.cuda_mempool_telemetry is (raw["memory"]["cuda_mempool_reserved_bytes"] is not None)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
@@ -130,20 +120,11 @@ def test_runtime_trace_context_exports_and_accounts_exactly():
 
     np.testing.assert_array_equal(result, np.arange(4, dtype=np.int32) + 1)
     assert exported["taichiRuntimeTrace"]["programDomain"] == before.program_domain
-    assert (
-        exported["taichiRuntimeTrace"]["recordedEvents"]
-        == context.summary.recorded_events
-    )
+    assert exported["taichiRuntimeTrace"]["recordedEvents"] == context.summary.recorded_events
     assert len(exported["traceEvents"]) == context.summary.recorded_events
     after = ti.runtime.stats()
-    assert (
-        after.trace.recorded_events - before.trace.recorded_events
-        == context.summary.recorded_events
-    )
-    assert (
-        after.trace.dropped_events - before.trace.dropped_events
-        == context.summary.dropped_events
-    )
+    assert after.trace.recorded_events - before.trace.recorded_events == context.summary.recorded_events
+    assert after.trace.dropped_events - before.trace.dropped_events == context.summary.dropped_events
     with pytest.raises(ti.TaichiRuntimeError, match="one-shot"):
         with context:
             pass

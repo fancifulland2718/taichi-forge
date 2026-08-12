@@ -94,9 +94,7 @@ def test_device_worklist_atomic_append_count_boundaries():
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_device_worklist_optional_telemetry_has_no_optional_state():
     capacity = 13
-    worklist = ti.algorithms.DeviceWorklist(
-        capacity, ti.i32, telemetry=False
-    )
+    worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32, telemetry=False)
     assert set(worklist.stats) == {"generated", "overflow", "generation"}
     memory = worklist.memory_report()
     assert memory["counter_bytes"] == 12
@@ -123,9 +121,7 @@ def test_device_worklist_optional_telemetry_has_no_optional_state():
 def test_device_worklist_graph_optional_telemetry_is_not_bound_or_written():
     capacity = 19
     produced = 11
-    worklist = ti.algorithms.DeviceWorklist(
-        capacity, ti.i32, telemetry=False
-    )
+    worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32, telemetry=False)
     args = worklist.graph_args("lean_frontier")
     assert args.accepted is None
     assert args.rejected is None
@@ -146,9 +142,7 @@ def test_device_worklist_graph_optional_telemetry_is_not_bound_or_written():
         admission="auto",
     )
     graph = builder.compile()
-    runtime_args = worklist.runtime_arguments(
-        "lean_frontier", include_capacity=True
-    )
+    runtime_args = worklist.runtime_arguments("lean_frontier", include_capacity=True)
     assert not any(
         name in runtime_args
         for name in (
@@ -212,32 +206,24 @@ def test_device_worklist_graph_direct_transition_uses_one_helper():
     args = worklist.graph_args("direct_frontier")
     count_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
     reset = ti.algorithms.DeviceWorklistSequence(args).prepare_next()
-    with pytest.raises(
-        ti.TaichiRuntimeError, match="do not use finalize_next"
-    ):
+    with pytest.raises(ti.TaichiRuntimeError, match="do not use finalize_next"):
         ti.algorithms.DeviceWorklistSequence(args).finalize_next()
     builder = ti.graph.GraphBuilder()
     builder.append_native(reset, admission="auto")
-    builder.dispatch(
-        _append_range_direct, *args.append_arguments(), count_arg
-    )
+    builder.dispatch(_append_range_direct, *args.append_arguments(), count_arg)
     graph = builder.compile()
     assert sum(node.source_native_count for node in graph._spec.nodes) == 1
     physical = graph.physical_plan()
     assert physical["backend_recording_complete"]
     assert physical["loose_native_action_count"] == 0
 
-    runtime_args = worklist.runtime_arguments(
-        "direct_frontier", include_capacity=True
-    )
+    runtime_args = worklist.runtime_arguments("direct_frontier", include_capacity=True)
     runtime_args["count"] = produced
     graph.run(runtime_args)
     assert worklist.next_extent.snapshot().count == produced
     assert worklist.statistics().generation == 1
     expected = np.arange(produced, dtype=np.int32) * 5 + 2
-    np.testing.assert_array_equal(
-        np.sort(worklist.next_values.to_numpy()[:produced]), expected
-    )
+    np.testing.assert_array_equal(np.sort(worklist.next_values.to_numpy()[:produced]), expected)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
@@ -277,10 +263,7 @@ def test_device_worklist_stable_selection_stays_device_resident():
     after_enqueue = program._runtime_statistics_snapshot()
     assert after_enqueue["transfer"] == before["transfer"]
     for counter in ("program_syncs", "completion_waits"):
-        assert (
-            after_enqueue["synchronization"][counter]
-            == before["synchronization"][counter]
-        )
+        assert after_enqueue["synchronization"][counter] == before["synchronization"][counter]
 
     expected = values_host[:count][flags_host[:count] != 0]
     snapshot = worklist.snapshot()
@@ -317,9 +300,7 @@ def test_device_worklist_stable_selection_stays_device_resident():
     ],
 )
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_device_worklist_deterministic_keyed_claim(
-    policy, priorities, expected_values, expected_priorities
-):
+def test_device_worklist_deterministic_keyed_claim(policy, priorities, expected_values, expected_priorities):
     capacity = 32
     count = 6
     keys_host = np.array([2, 1, 2, 1, 2, 3], dtype=np.int32)
@@ -343,9 +324,7 @@ def test_device_worklist_deterministic_keyed_claim(
     np.testing.assert_array_equal(result.keys.to_numpy()[:3], [1, 2, 3])
     np.testing.assert_array_equal(snapshot.values, expected_values)
     np.testing.assert_array_equal(result.priorities.to_numpy()[:3], expected_priorities)
-    np.testing.assert_array_equal(
-        result.ordinals.to_numpy()[:3], [1, 0 if policy != "min_priority" else 2, 5]
-    )
+    np.testing.assert_array_equal(result.ordinals.to_numpy()[:3], [1, 0 if policy != "min_priority" else 2, 5])
     assert snapshot.statistics.generated == count
     assert snapshot.statistics.accepted == 3
     assert snapshot.statistics.rejected == 3
@@ -425,9 +404,7 @@ def test_device_worklist_dense_winner_table_skips_compact_materialization():
             (0, capacity - count),
         )
     )
-    worklist = ti.algorithms.DeviceWorklist(
-        capacity, ti.i32, telemetry=False
-    )
+    worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32, telemetry=False)
     original = np.arange(capacity, dtype=np.int32) + 17
     worklist.values.from_numpy(original)
     worklist.extent.set(count)
@@ -444,16 +421,11 @@ def test_device_worklist_dense_winner_table_skips_compact_materialization():
     assert result.keys is None
     expected = np.full(key_capacity, 0x7FFFFFFF, dtype=np.int32)
     expected[[1, 2, 3]] = [1, 0, 5]
-    np.testing.assert_array_equal(
-        result.dense_winner_sources.to_numpy(), expected
-    )
+    np.testing.assert_array_equal(result.dense_winner_sources.to_numpy(), expected)
     assert worklist.extent.snapshot().count == count
     np.testing.assert_array_equal(worklist.values.to_numpy(), original)
     assert worklist.statistics().generation == 1
-    assert not any(
-        role == "dense_conflict_flags"
-        for role, _dtype, _count in worklist.workspace._buffers
-    )
+    assert not any(role == "dense_conflict_flags" for role, _dtype, _count in worklist.workspace._buffers)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
@@ -465,17 +437,11 @@ def test_device_worklist_graph_dense_winner_table_is_device_resident():
     keys = ti.ndarray(ti.i32, shape=capacity)
     keys.from_numpy(np.pad(keys_host, (0, capacity - count)))
     winner_sources = ti.ndarray(ti.i32, shape=key_capacity)
-    worklist = ti.algorithms.DeviceWorklist(
-        capacity, ti.i32, telemetry=False
-    )
+    worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32, telemetry=False)
     worklist.extent.set(count)
     args = worklist.graph_args("dense_claim")
-    keys_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "dense_keys", ti.i32, ndim=1
-    )
-    winners_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "dense_winners", ti.i32, ndim=1
-    )
+    keys_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dense_keys", ti.i32, ndim=1)
+    winners_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dense_winners", ti.i32, ndim=1)
     sequence = ti.algorithms.DeviceWorklistSequence(args)
     sequence.resolve_conflict_winner_table(
         keys_arg,
@@ -502,9 +468,7 @@ def test_device_worklist_graph_dense_winner_table_is_device_resident():
 def test_device_worklist_dense_conflict_reports_out_of_domain_key():
     capacity = 32
     keys = ti.ndarray(ti.i32, shape=capacity)
-    keys.from_numpy(
-        np.pad(np.array([0, 7, 2, -1], dtype=np.int32), (0, capacity - 4))
-    )
+    keys.from_numpy(np.pad(np.array([0, 7, 2, -1], dtype=np.int32), (0, capacity - 4)))
     worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)
     worklist.values.from_numpy(np.arange(capacity, dtype=np.int32))
     worklist.extent.set(4)
@@ -528,9 +492,7 @@ def test_device_worklist_conflict_strategy_and_sort_provider_are_separate():
     worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)
     keys = ti.ndarray(ti.i32, shape=capacity)
     with pytest.raises(ValueError, match="cannot be combined"):
-        worklist.resolve_conflicts(
-            keys, method="cpu_native", sort_method="auto"
-        )
+        worklist.resolve_conflicts(keys, method="cpu_native", sort_method="auto")
     with pytest.raises(ValueError, match="requires key_capacity"):
         worklist.resolve_conflicts(keys, strategy="dense_atomic")
     with pytest.raises(ValueError, match="applies only to radix_grouped"):
@@ -592,9 +554,7 @@ def test_device_worklist_graph_sequence_and_completion_observation(monkeypatch):
     assert statistics.accepted == expected.size
     assert not statistics.overflow
     assert worklist.next_extent.check() == expected.size
-    np.testing.assert_array_equal(
-        worklist.next_values.to_numpy()[: expected.size], expected
-    )
+    np.testing.assert_array_equal(worklist.next_values.to_numpy()[: expected.size], expected)
     memory = graph.execution_stats().memory
     assert memory.observation_completion_attached
     assert memory.observation_readback_mode == (
@@ -655,15 +615,9 @@ def test_device_worklist_atomic_finalize_feeds_bounded_dispatch_and_report():
     count_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
     output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1)
     launch_state = worklist.next_extent.dispatch_state(block_dim)
-    publication_state = (
-        launch_state
-        if impl.current_cfg().arch == ti_core.Arch.vulkan
-        else None
-    )
+    publication_state = launch_state if impl.current_cfg().arch == ti_core.Arch.vulkan else None
     reset = ti.algorithms.DeviceWorklistSequence(args).prepare_next()
-    finalize = ti.algorithms.DeviceWorklistSequence(args).finalize_next(
-        dispatch_state=publication_state
-    )
+    finalize = ti.algorithms.DeviceWorklistSequence(args).finalize_next(dispatch_state=publication_state)
     builder = ti.graph.GraphBuilder()
     builder.append_native(reset)
     builder.dispatch(_append_range, *args.append_arguments(), count_arg)
@@ -679,10 +633,7 @@ def test_device_worklist_atomic_finalize_feeds_bounded_dispatch_and_report():
         launch_state=publication_state,
     )
     graph = builder.compile()
-    assert all(
-        type(node).__name__ != "_CompiledNativeGraphNode"
-        for node in graph._spec.nodes
-    )
+    assert all(type(node).__name__ != "_CompiledNativeGraphNode" for node in graph._spec.nodes)
     assert sum(node.source_native_count for node in graph._spec.nodes) == 2
     output = ti.ndarray(ti.i32, shape=capacity)
     output.fill(-1)
@@ -732,20 +683,12 @@ def test_vulkan_worklist_finalize_fuses_graph_owned_bounded_publication():
     worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)
     args = worklist.graph_args("vulkan_owned_frontier")
     count_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
-    first_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "first_visited", ti.i32, ndim=1
-    )
-    second_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "second_visited", ti.i32, ndim=1
-    )
+    first_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "first_visited", ti.i32, ndim=1)
+    second_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "second_visited", ti.i32, ndim=1)
     builder = ti.graph.GraphBuilder()
-    builder.append_native(
-        ti.algorithms.DeviceWorklistSequence(args).prepare_next()
-    )
+    builder.append_native(ti.algorithms.DeviceWorklistSequence(args).prepare_next())
     builder.dispatch(_append_range, *args.append_arguments(), count_arg)
-    builder.append_native(
-        ti.algorithms.DeviceWorklistSequence(args).finalize_next()
-    )
+    builder.append_native(ti.algorithms.DeviceWorklistSequence(args).finalize_next())
     handles = (
         builder.dispatch_bounded(
             consume,
@@ -766,24 +709,17 @@ def test_vulkan_worklist_finalize_fuses_graph_owned_bounded_publication():
     )
     graph = builder.compile()
 
-    assert all(
-        type(node).__name__ == "_CompiledCGraphNode"
-        for node in graph._spec.nodes
-    )
+    assert all(type(node).__name__ == "_CompiledCGraphNode" for node in graph._spec.nodes)
     assert sum(node.source_native_count for node in graph._spec.nodes) == 2
     assert graph._spec.execution_definition["internal_storage_bytes"] == 16
-    assert all(
-        not handle.capabilities.producer_owned_launch_state for handle in handles
-    )
+    assert all(not handle.capabilities.producer_owned_launch_state for handle in handles)
     assert all(handle.capabilities.preparation_dispatches == 0 for handle in handles)
     assert [handle.workspace_bytes for handle in handles] == [16, 0]
     assert [handle.workspace_allocation_count for handle in handles] == [1, 0]
 
     first = ti.ndarray(ti.i32, shape=2)
     second = ti.ndarray(ti.i32, shape=2)
-    runtime_args = worklist.runtime_arguments(
-        "vulkan_owned_frontier", include_capacity=True
-    )
+    runtime_args = worklist.runtime_arguments("vulkan_owned_frontier", include_capacity=True)
     runtime_args.update(count=0, first_visited=first, second_visited=second)
     for requested in (0, 1, 19, capacity, capacity + 7):
         runtime_args["count"] = requested
@@ -800,9 +736,7 @@ def test_vulkan_worklist_finalize_fuses_graph_owned_bounded_publication():
             )
         )
         for visited in (first, second):
-            np.testing.assert_array_equal(
-                visited.to_numpy(), np.array([expected_lanes, useful])
-            )
+            np.testing.assert_array_equal(visited.to_numpy(), np.array([expected_lanes, useful]))
     assert graph.execution_stats().memory.persistent_argument_bytes >= 16
 
 
@@ -828,13 +762,9 @@ def test_vulkan_bounded_publication_falls_back_across_intervening_dispatch():
 
     worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)
     args = worklist.graph_args("vulkan_separated_frontier")
-    visited_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "separated_visited", ti.i32, ndim=1
-    )
+    visited_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "separated_visited", ti.i32, ndim=1)
     builder = ti.graph.GraphBuilder()
-    builder.append_native(
-        ti.algorithms.DeviceWorklistSequence(args).finalize_next()
-    )
+    builder.append_native(ti.algorithms.DeviceWorklistSequence(args).finalize_next())
     builder.dispatch(preserve_extent, args.next_extent)
     handle = builder.dispatch_bounded(
         consume,
@@ -875,17 +805,13 @@ def test_cuda_worklist_publication_packet_fails_closed(monkeypatch):
     worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)
     args = worklist.graph_args("owned_frontier")
     count_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
-    first_visited_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "first_visited", ti.i32, ndim=1
-    )
+    first_visited_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "first_visited", ti.i32, ndim=1)
     launch_state = worklist.next_extent.dispatch_state(block_dim)
     with pytest.raises(
         ti.TaichiRuntimeError,
         match="does not produce a consumer-owned dispatch packet",
     ):
-        ti.algorithms.DeviceWorklistSequence(args).finalize_next(
-            dispatch_state=launch_state
-        )
+        ti.algorithms.DeviceWorklistSequence(args).finalize_next(dispatch_state=launch_state)
     reset = ti.algorithms.DeviceWorklistSequence(args).prepare_next()
     finalize = ti.algorithms.DeviceWorklistSequence(args).finalize_next()
     builder = ti.graph.GraphBuilder()
@@ -925,17 +851,11 @@ def test_cpu_worklist_finalize_preserves_exact_scheduler_lowering(monkeypatch):
     worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32)
     args = worklist.graph_args("cpu_exact_frontier")
     count_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
-    visited_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "visited", ti.i32, ndim=1
-    )
+    visited_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "visited", ti.i32, ndim=1)
     builder = ti.graph.GraphBuilder()
-    builder.append_native(
-        ti.algorithms.DeviceWorklistSequence(args).prepare_next()
-    )
+    builder.append_native(ti.algorithms.DeviceWorklistSequence(args).prepare_next())
     builder.dispatch(_append_range, *args.append_arguments(), count_arg)
-    builder.append_native(
-        ti.algorithms.DeviceWorklistSequence(args).finalize_next()
-    )
+    builder.append_native(ti.algorithms.DeviceWorklistSequence(args).finalize_next())
     handle = builder.dispatch_bounded(
         consume,
         args.next_extent,
@@ -944,13 +864,9 @@ def test_cpu_worklist_finalize_preserves_exact_scheduler_lowering(monkeypatch):
         capacity=capacity,
     )
     graph = builder.compile()
-    assert [type(node).__name__ for node in graph._spec.nodes] == [
-        "_CompiledCGraphNode"
-    ]
+    assert [type(node).__name__ for node in graph._spec.nodes] == ["_CompiledCGraphNode"]
     visited = ti.ndarray(ti.i32, shape=2)
-    runtime_args = worklist.runtime_arguments(
-        "cpu_exact_frontier", include_capacity=True
-    )
+    runtime_args = worklist.runtime_arguments("cpu_exact_frontier", include_capacity=True)
     runtime_args.update(count=19, visited=visited)
     graph.run(runtime_args)
     np.testing.assert_array_equal(visited.to_numpy(), np.array([19, 19]))
@@ -979,18 +895,10 @@ def test_device_worklist_graph_deterministic_claim_is_recordable():
 
     args = worklist.graph_args("claims")
     keys_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "keys", ti.i32, ndim=1)
-    priorities_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "priorities", ti.i32, ndim=1
-    )
-    output_keys_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "output_keys", ti.i32, ndim=1
-    )
-    output_priorities_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "output_priorities", ti.i32, ndim=1
-    )
-    output_ordinals_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "output_ordinals", ti.i32, ndim=1
-    )
+    priorities_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "priorities", ti.i32, ndim=1)
+    output_keys_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output_keys", ti.i32, ndim=1)
+    output_priorities_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output_priorities", ti.i32, ndim=1)
+    output_ordinals_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output_ordinals", ti.i32, ndim=1)
     sequence = ti.algorithms.DeviceWorklistSequence(args)
     sequence.resolve_conflicts(
         keys_arg,
@@ -1017,9 +925,7 @@ def test_device_worklist_graph_deterministic_claim_is_recordable():
     for _ in range(16):
         observed = graph.submit(runtime_args).observations()["claims"]
         np.testing.assert_array_equal(output_keys.to_numpy()[:4], [2, 4, 5, 6])
-        np.testing.assert_array_equal(
-            worklist.next_values.to_numpy()[:4], [32, 71, 55, 64]
-        )
+        np.testing.assert_array_equal(worklist.next_values.to_numpy()[:4], [32, 71, 55, 64])
         np.testing.assert_array_equal(output_priorities.to_numpy()[:4], [2, 1, 5, 0])
         np.testing.assert_array_equal(output_ordinals.to_numpy()[:4], [3, 2, 6, 5])
     assert observed["claims_generated"] == count
@@ -1058,10 +964,7 @@ def test_device_worklist_workspace_and_runtime_memory_are_stable():
 
     report_after = worklist.memory_report()
     assert report_after == report_before
-    assert (
-        impl.get_runtime().prog._runtime_statistics_snapshot()["memory"]
-        == runtime_before
-    )
+    assert impl.get_runtime().prog._runtime_statistics_snapshot()["memory"] == runtime_before
     assert dict(ti_core.get_host_memory_pool_stats()) == host_before
     assert dict(ti_core.get_device_memory_pool_stats()) == device_before
 

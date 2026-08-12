@@ -60,15 +60,11 @@ def _produce_injected_arg(arg, symbolic_arg=None, has_symbolic_arg=False):
 
         if anno.ndim is not None and ndim != anno.ndim:
             raise TaichiCompilationError(
-                f"{ndim} from Arg {arg.name} doesn't match kernel's "
-                f"annotated ndim={anno.ndim}"
+                f"{ndim} from Arg {arg.name} doesn't match kernel's " f"annotated ndim={anno.ndim}"
             )
 
         expected_descriptor = describe_annotation(anno)
-        if (
-            anno.dtype is not None
-            and not expected_descriptor.element.matches(dtype)
-        ):
+        if anno.dtype is not None and not expected_descriptor.element.matches(dtype):
             raise TaichiCompilationError(
                 f" Arg {arg.name}'s dtype "
                 f"{describe_element_type(dtype).display_name()} doesn't match "
@@ -80,9 +76,7 @@ def _produce_injected_arg(arg, symbolic_arg=None, has_symbolic_arg=False):
         if isinstance(dtype, VectorType):
             return VectorNdarray(dtype.n, dtype=dtype.dtype, shape=shape)
         if isinstance(dtype, MatrixType):
-            return MatrixNdarray(
-                dtype.n, dtype.m, dtype=dtype.dtype, shape=shape
-            )
+            return MatrixNdarray(dtype.n, dtype.m, dtype=dtype.dtype, shape=shape)
         return ScalarNdarray(dtype, shape)
 
     if isinstance(anno, RWTextureType):
@@ -97,18 +91,14 @@ def _produce_injected_arg(arg, symbolic_arg=None, has_symbolic_arg=False):
                 )
             if actual.fmt != expected.fmt:
                 raise TaichiCompilationError(
-                    f"RWTexture format mismatch for argument {arg.name}: "
-                    f"expected {expected.fmt}, got {actual.fmt}."
+                    f"RWTexture format mismatch for argument {arg.name}: " f"expected {expected.fmt}, got {actual.fmt}."
                 )
         return Texture(anno.fmt, (2,) * anno.num_dimensions)
     if isinstance(anno, TextureType):
         if has_symbolic_arg:
             expected = describe_annotation(anno)
             actual = describe_symbolic_arg(symbolic_arg)
-            if (
-                actual.kind not in ("texture", "rw_texture")
-                or actual.ndim != expected.ndim
-            ):
+            if actual.kind not in ("texture", "rw_texture") or actual.ndim != expected.ndim:
                 raise TaichiCompilationError(
                     f"Texture descriptor mismatch for argument {arg.name}: "
                     f"expected ndim={expected.ndim}, got {actual.kind} "
@@ -127,11 +117,7 @@ def _produce_injected_arg(arg, symbolic_arg=None, has_symbolic_arg=False):
                 )
         return Matrix([0] * anno.n * anno.m, dt=anno.dtype)
 
-    dtype = (
-        describe_symbolic_arg(symbolic_arg).element
-        if has_symbolic_arg
-        else describe_element_type(anno)
-    )
+    dtype = describe_symbolic_arg(symbolic_arg).element if has_symbolic_arg else describe_element_type(anno)
     expected = describe_element_type(anno)
     if not expected.matches(dtype):
         raise TaichiCompilationError(
@@ -158,89 +144,55 @@ def _validate_graph_template_exemplar(arg, symbolic_arg, exemplar):
     anno = arg.annotation
     if isinstance(anno, NdarrayType):
         if not isinstance(exemplar, Ndarray):
-            raise TaichiCompilationError(
-                f"Graph template exemplar {arg.name} must be a Taichi ndarray"
-            )
+            raise TaichiCompilationError(f"Graph template exemplar {arg.name} must be a Taichi ndarray")
         symbolic_descriptor = describe_symbolic_arg(symbolic_arg)
         exemplar_descriptor = describe_element_type(exemplar.element_type)
-        if (
-            len(exemplar.shape) != symbolic_descriptor.ndim
-            or not symbolic_descriptor.element.matches(exemplar_descriptor)
+        if len(exemplar.shape) != symbolic_descriptor.ndim or not symbolic_descriptor.element.matches(
+            exemplar_descriptor
         ):
             raise TaichiCompilationError(
                 f"Graph template exemplar {arg.name} does not match its "
                 "symbolic ndarray dtype, ndim, or element shape"
             )
     elif isinstance(anno, TextureType) and not isinstance(exemplar, Texture):
-        raise TaichiCompilationError(
-            f"Graph template exemplar {arg.name} must be a Taichi texture"
-        )
+        raise TaichiCompilationError(f"Graph template exemplar {arg.name} must be a Taichi texture")
 
 
-def produce_injected_args_for_graph(
-    kernel, symbolic_args, template_args=None
-):
+def produce_injected_args_for_graph(kernel, symbolic_args, template_args=None):
     """Inject compile-time values while preserving Graph runtime arguments."""
 
     if template_args is None:
-        has_required_template = any(
-            isinstance(arg.annotation, template)
-            for arg in kernel.arguments
-        )
+        has_required_template = any(isinstance(arg.annotation, template) for arg in kernel.arguments)
         if not has_required_template:
             return produce_injected_args(kernel, symbolic_args=symbolic_args)
         template_args = {}
     if not isinstance(template_args, dict):
-        raise TaichiCompilationError(
-            "Graph template_args must be a dict keyed by kernel argument name"
-        )
+        raise TaichiCompilationError("Graph template_args must be a dict keyed by kernel argument name")
 
     template_keys = frozenset(template_args)
-    symbolic_key = tuple(
-        describe_symbolic_arg(arg).structural_key()
-        for arg in symbolic_args
-    )
+    symbolic_key = tuple(describe_symbolic_arg(arg).structural_key() for arg in symbolic_args)
     cache = getattr(kernel, "_graph_template_injection_cache", None)
-    if (
-        cache is not None
-        and cache[0] == template_keys
-        and cache[1] == symbolic_key
-    ):
-        return [
-            template_args[value] if kind == "template" else value
-            for kind, value in cache[2]
-        ]
+    if cache is not None and cache[0] == template_keys and cache[1] == symbolic_key:
+        return [template_args[value] if kind == "template" else value for kind, value in cache[2]]
 
     arguments_by_name = {arg.name: arg for arg in kernel.arguments}
     unknown = sorted(set(template_args) - set(arguments_by_name))
     if unknown:
-        raise TaichiCompilationError(
-            "Unknown Graph template arguments: " + ", ".join(unknown)
-        )
+        raise TaichiCompilationError("Unknown Graph template arguments: " + ", ".join(unknown))
 
     invalid = sorted(
-        name
-        for name in template_args
-        if not isinstance(arguments_by_name[name].annotation, template_types)
+        name for name in template_args if not isinstance(arguments_by_name[name].annotation, template_types)
     )
     if invalid:
         raise TaichiCompilationError(
             "Graph template_args can only bind ti.template, ndarray, or "
-            "texture parameters; invalid: "
-            + ", ".join(invalid)
+            "texture parameters; invalid: " + ", ".join(invalid)
         )
 
-    required = {
-        arg.name
-        for arg in kernel.arguments
-        if isinstance(arg.annotation, template)
-    }
+    required = {arg.name for arg in kernel.arguments if isinstance(arg.annotation, template)}
     missing = sorted(required - set(template_args))
     if missing:
-        raise TaichiCompilationError(
-            "Missing required Graph template arguments: "
-            + ", ".join(missing)
-        )
+        raise TaichiCompilationError("Missing required Graph template arguments: " + ", ".join(missing))
 
     injected_args = []
     symbolic_index = 0
@@ -251,17 +203,12 @@ def produce_injected_args_for_graph(
             continue
 
         if symbolic_index >= len(symbolic_args):
-            raise TaichiCompilationError(
-                f"Missing symbolic Graph argument for kernel parameter "
-                f"{arg.name}"
-            )
+            raise TaichiCompilationError(f"Missing symbolic Graph argument for kernel parameter " f"{arg.name}")
         symbolic_arg = symbolic_args[symbolic_index]
         symbolic_index += 1
         reconstructed = _produce_injected_arg(arg, symbolic_arg, True)
         if arg.name in template_args:
-            _validate_graph_template_exemplar(
-                arg, symbolic_arg, template_args[arg.name]
-            )
+            _validate_graph_template_exemplar(arg, symbolic_arg, template_args[arg.name])
         injected_args.append(template_args.get(arg.name, reconstructed))
 
     if symbolic_index != len(symbolic_args):
@@ -273,16 +220,12 @@ def produce_injected_args_for_graph(
 
     cacheable = all(
         isinstance(arg.annotation, template)
-        or not isinstance(
-            arg.annotation, (NdarrayType, TextureType, RWTextureType)
-        )
+        or not isinstance(arg.annotation, (NdarrayType, TextureType, RWTextureType))
         for arg in kernel.arguments
     )
     if cacheable:
         actions = tuple(
-            ("template", arg.name)
-            if isinstance(arg.annotation, template)
-            else ("static", injected)
+            ("template", arg.name) if isinstance(arg.annotation, template) else ("static", injected)
             for arg, injected in zip(kernel.arguments, injected_args)
         )
         kernel._graph_template_injection_cache = (

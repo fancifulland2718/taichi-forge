@@ -89,27 +89,31 @@ OPERATIONS = (
     "mpm_graph",
     "mpm_direct",
 )
-CONTROL_OPERATIONS = frozenset({
-    "fill",
-    "copy",
-    "saxpy",
-    "stencil2d",
-    "reduce_chunks",
-})
-THIN_CAPABILITY_OPERATIONS = frozenset({
-    "native_reduce",
-    "native_transform",
-    "native_gather",
-    "native_scatter",
-    "native_compact",
-    "device_prefix_chain",
-    "active_grid_mpm",
-    "particle_spatial_hash",
-    "adaptive_pbd",
-    "marching_squares",
-    "bfs_worklist",
-    "falling_sand",
-})
+CONTROL_OPERATIONS = frozenset(
+    {
+        "fill",
+        "copy",
+        "saxpy",
+        "stencil2d",
+        "reduce_chunks",
+    }
+)
+THIN_CAPABILITY_OPERATIONS = frozenset(
+    {
+        "native_reduce",
+        "native_transform",
+        "native_gather",
+        "native_scatter",
+        "native_compact",
+        "device_prefix_chain",
+        "active_grid_mpm",
+        "particle_spatial_hash",
+        "adaptive_pbd",
+        "marching_squares",
+        "bfs_worklist",
+        "falling_sand",
+    }
+)
 COMPARISONS = (
     "forge-vs-vanilla",
     "forge-kernel-vs-vanilla",
@@ -161,11 +165,9 @@ class _ExclusiveBenchmarkLock:
 
     def __enter__(self) -> dict[str, Any]:
         if os.name != "nt":
-            raise RuntimeError(
-                "the qualification driver lock is currently implemented for Windows")
+            raise RuntimeError("the qualification driver lock is currently implemented for Windows")
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int,
-                                          ctypes.c_wchar_p]
+        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
         kernel32.CreateMutexW.restype = ctypes.c_void_p
         kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
         kernel32.CloseHandle.restype = ctypes.c_int
@@ -174,11 +176,9 @@ class _ExclusiveBenchmarkLock:
             raise OSError(ctypes.get_last_error(), "CreateMutexW failed")
         if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
             kernel32.CloseHandle(handle)
-            raise RuntimeError(
-                "another qualification benchmark driver is already active")
+            raise RuntimeError("another qualification benchmark driver is already active")
         self._handle = int(handle)
-        return {"kind": "windows_named_mutex", "name": WINDOWS_BENCHMARK_MUTEX,
-                "acquired": True}
+        return {"kind": "windows_named_mutex", "name": WINDOWS_BENCHMARK_MUTEX, "acquired": True}
 
     def __exit__(self, exc_type: Any, exc_value: Any, exc_tb: Any) -> None:
         if self._handle is not None:
@@ -189,21 +189,22 @@ class _ExclusiveBenchmarkLock:
             self._handle = None
 
 
-def comparison_participants(comparison: str,
-                            operation: str) -> tuple[str, str]:
+def comparison_participants(comparison: str, operation: str) -> tuple[str, str]:
     if comparison == "forge-vs-vanilla":
         return ("forge", "vanilla")
     if comparison == "forge-kernel-vs-vanilla":
         if operation not in THIN_CAPABILITY_OPERATIONS:
             raise ValueError(
                 f"{comparison} is only valid for thin/native operations; "
-                f"{operation!r} has no declared Forge-kernel control")
+                f"{operation!r} has no declared Forge-kernel control"
+            )
         return ("forge_kernel", "vanilla_kernel")
     if comparison == "forge-native-vs-forge-kernel":
         if operation not in THIN_CAPABILITY_OPERATIONS:
             raise ValueError(
                 f"{comparison} is only valid for thin/native operations; "
-                f"{operation!r} has no declared Forge-kernel control")
+                f"{operation!r} has no declared Forge-kernel control"
+            )
         return ("forge", "forge_kernel")
     raise ValueError(f"unknown comparison {comparison!r}")
 
@@ -225,21 +226,16 @@ def comparison_definition(comparison: str, operation: str) -> dict[str, Any]:
             "isolates cross-package compatibility-path behavior"
         )
         attribution_zh = (
-            "Forge 与 vanilla 执行同一 vanilla-compatible kernel adapter；隔离跨 "
-            "package compatibility path 的差异"
+            "Forge 与 vanilla 执行同一 vanilla-compatible kernel adapter；隔离跨 " "package compatibility path 的差异"
         )
     elif operation in THIN_CAPABILITY_OPERATIONS:
         attribution = (
             "cross-package end-to-end route diagnostic only; does not isolate the "
             "Forge runtime or the native adapter"
         )
-        attribution_zh = (
-            "仅为跨 package 端到端路线诊断；不隔离 Forge runtime 或 native adapter"
-        )
+        attribution_zh = "仅为跨 package 端到端路线诊断；不隔离 Forge runtime 或 native adapter"
     else:
-        attribution = (
-            "cross-package comparison under the case-specific workload contract"
-        )
+        attribution = "cross-package comparison under the case-specific workload contract"
         attribution_zh = "受案例 workload contract 约束的跨 package 对比"
     return {
         "name": comparison,
@@ -261,8 +257,9 @@ def _uses_native_adapter(runtime_name: str) -> bool:
 
 
 def balanced_pair_orders(
-        pair_count: int, seed: int,
-        participants: Sequence[str] = ("forge", "vanilla"),
+    pair_count: int,
+    seed: int,
+    participants: Sequence[str] = ("forge", "vanilla"),
 ) -> list[tuple[str, str]]:
     if pair_count <= 0:
         raise ValueError("pair_count must be positive")
@@ -272,8 +269,7 @@ def balanced_pair_orders(
     if random.Random(seed).randrange(2):
         first.reverse()
     second = list(reversed(first))
-    return [tuple(first if index % 2 == 0 else second)
-            for index in range(pair_count)]
+    return [tuple(first if index % 2 == 0 else second) for index in range(pair_count)]
 
 
 def select_common_batch(suggestions: Sequence[int]) -> int:
@@ -297,11 +293,9 @@ def warmup_batch_size(phase: str, scored_batch_size: int) -> int:
     return scored_batch_size if phase == "score" else 1
 
 
-def paired_log_summary(speedups: Sequence[float], seed: int,
-                       resamples: int = 10_000) -> dict[str, Any]:
+def paired_log_summary(speedups: Sequence[float], seed: int, resamples: int = 10_000) -> dict[str, Any]:
     values = [float(value) for value in speedups]
-    if not values or any(value <= 0.0 or not math.isfinite(value)
-                         for value in values):
+    if not values or any(value <= 0.0 or not math.isfinite(value) for value in values):
         raise ValueError("finite positive paired speedups are required")
     logs = [math.log(value) for value in values]
     median_log = float(statistics.median(logs))
@@ -309,10 +303,7 @@ def paired_log_summary(speedups: Sequence[float], seed: int,
         lower_log = upper_log = logs[0]
     else:
         rng = random.Random(seed)
-        bootstrapped = [
-            float(statistics.median(rng.choice(logs) for _ in logs))
-            for _ in range(resamples)
-        ]
+        bootstrapped = [float(statistics.median(rng.choice(logs) for _ in logs)) for _ in range(resamples)]
         lower_log = percentile(bootstrapped, 2.5)
         upper_log = percentile(bootstrapped, 97.5)
     return {
@@ -339,21 +330,22 @@ def qualification_policy_errors(args: argparse.Namespace) -> list[str]:
     if args.cpu_affinity == "none":
         errors.append("qualification requires explicit or automatic CPU affinity")
     if getattr(args, "allow_external_python", False):
-        errors.append(
-            "qualification cannot allow external Python processes")
+        errors.append("qualification cannot allow external Python processes")
     if args.max_cpu_util > QUALIFICATION_MAX_CPU_UTIL_PERCENT:
         errors.append(
-            f"max_cpu_util={args.max_cpu_util} exceeds qualification ceiling "
-            f"{QUALIFICATION_MAX_CPU_UTIL_PERCENT}")
+            f"max_cpu_util={args.max_cpu_util} exceeds qualification ceiling " f"{QUALIFICATION_MAX_CPU_UTIL_PERCENT}"
+        )
     if args.backend != "cpu":
         if args.max_gpu_util > QUALIFICATION_MAX_GPU_UTIL_PERCENT:
             errors.append(
                 f"max_gpu_util={args.max_gpu_util} exceeds qualification ceiling "
-                f"{QUALIFICATION_MAX_GPU_UTIL_PERCENT}")
+                f"{QUALIFICATION_MAX_GPU_UTIL_PERCENT}"
+            )
         if args.max_gpu_temp > QUALIFICATION_MAX_GPU_TEMPERATURE_C:
             errors.append(
                 f"max_gpu_temp={args.max_gpu_temp} exceeds qualification ceiling "
-                f"{QUALIFICATION_MAX_GPU_TEMPERATURE_C}")
+                f"{QUALIFICATION_MAX_GPU_TEMPERATURE_C}"
+            )
     return errors
 
 
@@ -411,8 +403,7 @@ def _module_location(name: str) -> str | None:
     return None if not locations else str(Path(locations[0]).resolve())
 
 
-def _environment_provenance(runtime_name: str, ti: Any,
-                            core_path: Path) -> dict[str, Any]:
+def _environment_provenance(runtime_name: str, ti: Any, core_path: Path) -> dict[str, Any]:
     prefix = Path(sys.prefix).resolve()
     package_path = Path(ti.__file__).resolve()
     dependency_rows = {}
@@ -423,8 +414,7 @@ def _environment_provenance(runtime_name: str, ti: Any,
         except importlib_metadata.PackageNotFoundError:
             version = None
         location_text = _module_location(module)
-        in_prefix = bool(location_text and
-                         _path_in_prefix(Path(location_text), prefix))
+        in_prefix = bool(location_text and _path_in_prefix(Path(location_text), prefix))
         dependency_rows[distribution] = {
             "version": version,
             "module_path": location_text,
@@ -501,8 +491,7 @@ def _apply_affinity(cpus: Sequence[int]) -> dict[str, Any]:
         mask = sum(1 << cpu for cpu in requested)
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.GetCurrentProcess.restype = ctypes.c_void_p
-        kernel32.SetProcessAffinityMask.argtypes = [ctypes.c_void_p,
-                                                     ctypes.c_size_t]
+        kernel32.SetProcessAffinityMask.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
         kernel32.SetProcessAffinityMask.restype = ctypes.c_int
         handle = kernel32.GetCurrentProcess()
         if not kernel32.SetProcessAffinityMask(handle, ctypes.c_size_t(mask)):
@@ -520,43 +509,56 @@ def _apply_affinity(cpus: Sequence[int]) -> dict[str, Any]:
 
 def _make_kernel(ti: Any, operation: str) -> Callable[..., None]:
     if operation == "fill":
+
         @ti.kernel
         def kernel(dst: ti.types.ndarray(dtype=ti.f32, ndim=1), value: ti.f32):
             for i in dst:
                 dst[i] = value
+
         return kernel
     if operation == "copy":
+
         @ti.kernel
-        def kernel(src: ti.types.ndarray(dtype=ti.f32, ndim=1),
-                   dst: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+        def kernel(src: ti.types.ndarray(dtype=ti.f32, ndim=1), dst: ti.types.ndarray(dtype=ti.f32, ndim=1)):
             for i in dst:
                 dst[i] = src[i]
+
         return kernel
     if operation == "saxpy":
+
         @ti.kernel
-        def kernel(x: ti.types.ndarray(dtype=ti.f32, ndim=1),
-                   y: ti.types.ndarray(dtype=ti.f32, ndim=1),
-                   dst: ti.types.ndarray(dtype=ti.f32, ndim=1), a: ti.f32):
+        def kernel(
+            x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            y: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            dst: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            a: ti.f32,
+        ):
             for i in dst:
                 dst[i] = a * x[i] + y[i]
+
         return kernel
     if operation == "stencil2d":
+
         @ti.kernel
-        def kernel(src: ti.types.ndarray(dtype=ti.f32, ndim=2),
-                   dst: ti.types.ndarray(dtype=ti.f32, ndim=2), side: ti.i32):
+        def kernel(
+            src: ti.types.ndarray(dtype=ti.f32, ndim=2), dst: ti.types.ndarray(dtype=ti.f32, ndim=2), side: ti.i32
+        ):
             for i, j in ti.ndrange(side, side):
                 if 0 < i < side - 1 and 0 < j < side - 1:
-                    dst[i, j] = 0.2 * (src[i, j] + src[i - 1, j] +
-                                       src[i + 1, j] + src[i, j - 1] +
-                                       src[i, j + 1])
+                    dst[i, j] = 0.2 * (src[i, j] + src[i - 1, j] + src[i + 1, j] + src[i, j - 1] + src[i, j + 1])
                 else:
                     dst[i, j] = 0.0
+
         return kernel
     if operation == "reduce_chunks":
+
         @ti.kernel
-        def kernel(src: ti.types.ndarray(dtype=ti.i32, ndim=1),
-                   partial: ti.types.ndarray(dtype=ti.i32, ndim=1),
-                   element_count: ti.i32, chunk_size: ti.i32):
+        def kernel(
+            src: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            partial: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            element_count: ti.i32,
+            chunk_size: ti.i32,
+        ):
             for block in partial:
                 total = ti.cast(0, ti.i32)
                 ti.loop_config(serialize=True)
@@ -565,12 +567,12 @@ def _make_kernel(ti: Any, operation: str) -> Callable[..., None]:
                     if index < element_count:
                         total += src[index]
                 partial[block] = total
+
         return kernel
     raise ValueError(operation)
 
 
-def _numeric_validation(actual: Any, expected: Any, atol: float,
-                        rtol: float) -> dict[str, Any]:
+def _numeric_validation(actual: Any, expected: Any, atol: float, rtol: float) -> dict[str, Any]:
     import numpy as np
 
     actual64 = np.asarray(actual, dtype=np.float64)
@@ -581,12 +583,18 @@ def _numeric_validation(actual: Any, expected: Any, atol: float,
     scale = float(np.max(np.abs(expected64))) if expected64.size else 0.0
     tolerance = atol + rtol * scale
     flattened = actual64.reshape(-1)
-    sample_indices = sorted({
-        0,
-        flattened.size // 3,
-        (2 * flattened.size) // 3,
-        max(0, flattened.size - 1),
-    }) if flattened.size else []
+    sample_indices = (
+        sorted(
+            {
+                0,
+                flattened.size // 3,
+                (2 * flattened.size) // 3,
+                max(0, flattened.size - 1),
+            }
+        )
+        if flattened.size
+        else []
+    )
     return {
         "passed": bool(np.all(np.isfinite(actual64)) and max_abs <= tolerance),
         "max_abs_error": max_abs,
@@ -602,14 +610,12 @@ def _numeric_validation(actual: Any, expected: Any, atol: float,
             "minimum": float(np.min(flattened)) if flattened.size else None,
             "maximum": float(np.max(flattened)) if flattened.size else None,
             "sample_indices": sample_indices,
-            "sample_values": [float(flattened[index])
-                              for index in sample_indices],
+            "sample_values": [float(flattened[index]) for index in sample_indices],
         },
     }
 
 
-def _ordinary_kernel_route(runtime_name: str,
-                           source_sha256: str) -> dict[str, Any]:
+def _ordinary_kernel_route(runtime_name: str, source_sha256: str) -> dict[str, Any]:
     """Prove that CONTROL-001 directly invokes benchmark-owned ti.kernel code."""
     return {
         "classification": f"{runtime_name}_ordinary_taichi_kernel",
@@ -619,15 +625,13 @@ def _ordinary_kernel_route(runtime_name: str,
         "native_or_helper_api_used": False,
         "ti_kernel_invocations_per_replay": 1,
         "physical_backend_launches_assumed": False,
-        "passed": bool(
-            runtime_name in ("forge", "vanilla")
-            and len(source_sha256) == 64
-        ),
+        "passed": bool(runtime_name in ("forge", "vanilla") and len(source_sha256) == 64),
     }
 
 
-def _build_case(ti: Any, kernel: Callable[..., None], operation: str,
-                elements: int, stencil_side: int) -> dict[str, Any]:
+def _build_case(
+    ti: Any, kernel: Callable[..., None], operation: str, elements: int, stencil_side: int
+) -> dict[str, Any]:
     import numpy as np
 
     if operation == "fill":
@@ -639,8 +643,7 @@ def _build_case(ti: Any, kernel: Callable[..., None], operation: str,
             "traffic_model": "one f32 write per element",
         }
     if operation == "copy":
-        host = ((np.arange(elements, dtype=np.int32) % 257) - 128).astype(
-            np.float32) / np.float32(64.0)
+        host = ((np.arange(elements, dtype=np.int32) % 257) - 128).astype(np.float32) / np.float32(64.0)
         src = ti.ndarray(dtype=ti.f32, shape=elements)
         dst = ti.ndarray(dtype=ti.f32, shape=elements)
         src.from_numpy(host)
@@ -651,10 +654,8 @@ def _build_case(ti: Any, kernel: Callable[..., None], operation: str,
             "traffic_model": "one f32 read plus one f32 write per element",
         }
     if operation == "saxpy":
-        x_host = ((np.arange(elements, dtype=np.int32) % 509) - 254).astype(
-            np.float32) / np.float32(128.0)
-        y_host = ((np.arange(elements, dtype=np.int32) % 251) - 125).astype(
-            np.float32) / np.float32(64.0)
+        x_host = ((np.arange(elements, dtype=np.int32) % 509) - 254).astype(np.float32) / np.float32(128.0)
+        y_host = ((np.arange(elements, dtype=np.int32) % 251) - 125).astype(np.float32) / np.float32(64.0)
         x = ti.ndarray(dtype=ti.f32, shape=elements)
         y = ti.ndarray(dtype=ti.f32, shape=elements)
         dst = ti.ndarray(dtype=ti.f32, shape=elements)
@@ -664,26 +665,24 @@ def _build_case(ti: Any, kernel: Callable[..., None], operation: str,
         expected = np.float32(scale) * x_host + y_host
         return {
             "launch": lambda: kernel(x, y, dst, scale),
-            "validate": lambda: _numeric_validation(dst.to_numpy(), expected,
-                                                       2.0e-6, 2.0e-6),
+            "validate": lambda: _numeric_validation(dst.to_numpy(), expected, 2.0e-6, 2.0e-6),
             "logical_bytes": elements * 12,
             "traffic_model": "two f32 reads plus one f32 write per element",
         }
     if operation == "stencil2d":
-        host = ((np.arange(stencil_side * stencil_side, dtype=np.int32) %
-                 1021).astype(np.float32) / np.float32(1024.0)).reshape(
-                     stencil_side, stencil_side)
+        host = (
+            (np.arange(stencil_side * stencil_side, dtype=np.int32) % 1021).astype(np.float32) / np.float32(1024.0)
+        ).reshape(stencil_side, stencil_side)
         src = ti.ndarray(dtype=ti.f32, shape=(stencil_side, stencil_side))
         dst = ti.ndarray(dtype=ti.f32, shape=(stencil_side, stencil_side))
         src.from_numpy(host)
         expected = np.zeros_like(host)
         expected[1:-1, 1:-1] = np.float32(0.2) * (
-            host[1:-1, 1:-1] + host[:-2, 1:-1] + host[2:, 1:-1] +
-            host[1:-1, :-2] + host[1:-1, 2:])
+            host[1:-1, 1:-1] + host[:-2, 1:-1] + host[2:, 1:-1] + host[1:-1, :-2] + host[1:-1, 2:]
+        )
         return {
             "launch": lambda: kernel(src, dst, stencil_side),
-            "validate": lambda: _numeric_validation(dst.to_numpy(), expected,
-                                                       2.0e-6, 2.0e-6),
+            "validate": lambda: _numeric_validation(dst.to_numpy(), expected, 2.0e-6, 2.0e-6),
             "logical_bytes": stencil_side * stencil_side * 24,
             "traffic_model": "five f32 reads plus one f32 write per grid point",
         }
@@ -724,8 +723,7 @@ def _build_case(ti: Any, kernel: Callable[..., None], operation: str,
     raise ValueError(operation)
 
 
-def _build_common_kernel_i32_scan(ti: Any, values: Any,
-                                  elements: int) -> Callable[[], None]:
+def _build_common_kernel_i32_scan(ti: Any, values: Any, elements: int) -> Callable[[], None]:
     """Build one identical Hillis-Steele scan source for both packages."""
     scratch = ti.field(dtype=ti.i32, shape=elements)
 
@@ -766,8 +764,7 @@ def _build_common_kernel_i32_scan(ti: Any, values: Any,
     return run
 
 
-def _prefix_sum_route(executor: Any, runtime_name: str,
-                      backend: str) -> dict[str, Any]:
+def _prefix_sum_route(executor: Any, runtime_name: str, backend: str) -> dict[str, Any]:
     source_path = inspect.getsourcefile(executor.__class__)
     source = None if source_path is None else Path(source_path).resolve()
     plan = getattr(executor, "_native_scan_plan", None)
@@ -797,41 +794,32 @@ def _prefix_sum_route(executor: Any, runtime_name: str,
         expected_backend = "legacy_helper"
         expected_method = "field_workspace_scan"
         passed = bool(
-            class_module == "taichi.algorithms._algorithms"
-            and plan is None
-            and hasattr(executor, "large_arr")
+            class_module == "taichi.algorithms._algorithms" and plan is None and hasattr(executor, "large_arr")
         )
         classification = "legacy_i32_field_helper"
     return {
         "public_api": "ti.algorithms.PrefixSumExecutor(n).run(field)",
         "class_module": class_module,
         "class_source": None if source is None else str(source),
-        "class_source_sha256": (
-            None if source is None or not source.is_file() else sha256_file(source)
-        ),
+        "class_source_sha256": (None if source is None or not source.is_file() else sha256_file(source)),
         "classification": classification,
         "expected_backend": expected_backend,
         "expected_method": expected_method,
         "observed_plan_backend": plan_backend,
         "observed_method": method_name,
         "legacy_workspace_present": hasattr(executor, "large_arr"),
-        "legacy_workspace_materialized": (
-            getattr(executor, "large_arr", None) is not None
-        ),
+        "legacy_workspace_materialized": (getattr(executor, "large_arr", None) is not None),
         "passed": passed,
     }
 
 
-def _build_prefix_sum_case(ti: Any, runtime_name: str, backend: str,
-                           elements: int) -> dict[str, Any]:
+def _build_prefix_sum_case(ti: Any, runtime_name: str, backend: str, elements: int) -> dict[str, Any]:
     import numpy as np
 
     values = ti.field(dtype=ti.i32, shape=elements)
     executor = ti.algorithms.PrefixSumExecutor(elements)
-    host_input = ((np.arange(elements, dtype=np.int64) % 7) - 3).astype(
-        np.int32)
-    expected = np.cumsum(host_input.astype(np.int64), dtype=np.int64).astype(
-        np.int32)
+    host_input = ((np.arange(elements, dtype=np.int64) % 7) - 3).astype(np.int32)
+    expected = np.cumsum(host_input.astype(np.int64), dtype=np.int64).astype(np.int32)
 
     @ti.kernel
     def reset_input():
@@ -855,9 +843,7 @@ def _build_prefix_sum_case(ti: Any, runtime_name: str, backend: str,
             "passed": mismatch.size == 0,
             "comparison": "exact_i32",
             "mismatch_count": int(mismatch.size),
-            "first_mismatch_index": (
-                None if mismatch.size == 0 else int(mismatch[0])
-            ),
+            "first_mismatch_index": (None if mismatch.size == 0 else int(mismatch[0])),
             "actual_last": int(actual[-1]),
             "expected_last": int(expected[-1]),
         }
@@ -902,10 +888,7 @@ def _parallel_sort_route(ti: Any, runtime_name: str) -> dict[str, Any]:
         source_text = ""
     module = function.__module__
     if runtime_name == "forge":
-        legacy_contract = (
-            'method="legacy"' in source_text
-            and 'precision="exact"' in source_text
-        )
+        legacy_contract = 'method="legacy"' in source_text and 'precision="exact"' in source_text
         passed = module == "taichi_forge.algorithms._algorithms" and legacy_contract
         observed_method = "sort(method=legacy, stable=True, precision=exact)"
         classification = "forge_legacy_compatibility_wrapper"
@@ -919,34 +902,26 @@ def _parallel_sort_route(ti: Any, runtime_name: str) -> dict[str, Any]:
         "classification": classification,
         "function_module": module,
         "function_source": None if source is None else str(source),
-        "function_source_sha256": (
-            None if source is None or not source.is_file() else sha256_file(source)
-        ),
+        "function_source_sha256": (None if source is None or not source.is_file() else sha256_file(source)),
         "observed_method": observed_method,
         "source_contract_verified": legacy_contract,
         "passed": passed,
     }
 
 
-def _build_parallel_sort_case(ti: Any, runtime_name: str,
-                              elements: int) -> dict[str, Any]:
+def _build_parallel_sort_case(ti: Any, runtime_name: str, elements: int) -> dict[str, Any]:
     import numpy as np
 
     keys = ti.field(dtype=ti.i32, shape=elements)
-    host = ((np.arange(elements, dtype=np.int64) * 1_103_515_245
-             + 12_345) & 0x7FFF_FFFF).astype(np.int32)
-    host ^= ((np.arange(elements, dtype=np.int32) % 31) << 13)
+    host = ((np.arange(elements, dtype=np.int64) * 1_103_515_245 + 12_345) & 0x7FFF_FFFF).astype(np.int32)
+    host ^= (np.arange(elements, dtype=np.int32) % 31) << 13
     expected = np.sort(host, kind="stable")
 
     @ti.kernel
     def reset_keys():
         for i in keys:
             index = ti.cast(i, ti.u32)
-            value = (
-                (index * ti.cast(1_103_515_245, ti.u32)
-                 + ti.cast(12_345, ti.u32))
-                & ti.cast(0x7FFF_FFFF, ti.u32)
-            )
+            value = (index * ti.cast(1_103_515_245, ti.u32) + ti.cast(12_345, ti.u32)) & ti.cast(0x7FFF_FFFF, ti.u32)
             keys[i] = ti.cast(value, ti.i32) ^ ((i % 31) << 13)
 
     def reset() -> None:
@@ -966,9 +941,7 @@ def _build_parallel_sort_case(ti: Any, runtime_name: str,
             "passed": mismatch.size == 0,
             "comparison": "exact_i32_sorted_keys",
             "mismatch_count": int(mismatch.size),
-            "first_mismatch_index": (
-                None if mismatch.size == 0 else int(mismatch[0])
-            ),
+            "first_mismatch_index": (None if mismatch.size == 0 else int(mismatch[0])),
             "minimum": int(actual[0]),
             "maximum": int(actual[-1]),
         }
@@ -980,10 +953,7 @@ def _build_parallel_sort_case(ti: Any, runtime_name: str,
         "validate": validate_fresh,
         "route": lambda: _parallel_sort_route(ti, runtime_name),
         "logical_bytes": 0,
-        "traffic_model": (
-            "legacy odd-even merge sort network; no simplified logical-byte "
-            "bandwidth is claimed"
-        ),
+        "traffic_model": ("legacy odd-even merge sort network; no simplified logical-byte " "bandwidth is claimed"),
         "workload_contract": {
             "case_id": "DIRECT-002",
             "comparison_class": "direct-control",
@@ -1003,9 +973,9 @@ def _build_parallel_sort_case(ti: Any, runtime_name: str,
     }
 
 
-def _native_reduce_route(workspace: Any | None, runtime_name: str,
-                         backend: str,
-                         kernel_source_sha256: str) -> dict[str, Any]:
+def _native_reduce_route(
+    workspace: Any | None, runtime_name: str, backend: str, kernel_source_sha256: str
+) -> dict[str, Any]:
     if runtime_name == "forge":
         plan = getattr(workspace, "_native_reduce_plan", None)
         expected_backend = {
@@ -1023,7 +993,8 @@ def _native_reduce_route(workspace: Any | None, runtime_name: str,
         passed = bool(
             plan is not None
             and observed_backend == expected_backend
-            and observed_method in (
+            and observed_method
+            in (
                 expected_method,
                 "vulkan_reduce_i32_ndarray",
             )
@@ -1034,16 +1005,12 @@ def _native_reduce_route(workspace: Any | None, runtime_name: str,
             "expected_method": expected_method,
             "observed_plan_backend": observed_backend,
             "observed_method": observed_method,
-            "workspace_bytes_current": getattr(
-                workspace, "workspace_bytes_current", None),
-            "workspace_bytes_peak": getattr(
-                workspace, "workspace_bytes_peak", None),
+            "workspace_bytes_current": getattr(workspace, "workspace_bytes_current", None),
+            "workspace_bytes_peak": getattr(workspace, "workspace_bytes_peak", None),
             "passed": passed,
         }
     passed = bool(
-        runtime_name in ("forge_kernel", "vanilla_kernel")
-        and workspace is None
-        and len(kernel_source_sha256) == 64
+        runtime_name in ("forge_kernel", "vanilla_kernel") and workspace is None and len(kernel_source_sha256) == 64
     )
     return {
         "classification": f"{runtime_name}_equivalent_i32_atomic_sum_kernel",
@@ -1064,8 +1031,7 @@ def _native_reduce_route(workspace: Any | None, runtime_name: str,
     }
 
 
-def _build_native_reduce_case(ti: Any, runtime_name: str, backend: str,
-                              elements: int) -> dict[str, Any]:
+def _build_native_reduce_case(ti: Any, runtime_name: str, backend: str, elements: int) -> dict[str, Any]:
     import numpy as np
 
     source_sha256 = sha256_file(Path(__file__))
@@ -1078,21 +1044,17 @@ def _build_native_reduce_case(ti: Any, runtime_name: str, backend: str,
 
     @ti.kernel
     def vanilla_reduce(
-            source: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            destination: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1), destination: ti.types.ndarray(dtype=ti.i32, ndim=1)
+    ):
         destination[0] = 0
         for i in source:
             ti.atomic_add(destination[0], source[i])
 
-    workspace = (
-        ti.algorithms.ReduceWorkspace(max_items=elements)
-        if runtime_name == "forge" else None
-    )
+    workspace = ti.algorithms.ReduceWorkspace(max_items=elements) if runtime_name == "forge" else None
 
     def launch() -> None:
         if runtime_name == "forge":
-            ti.algorithms.experimental_reduce(
-                values, output, op="sum", method="auto", workspace=workspace)
+            ti.algorithms.experimental_reduce(values, output, op="sum", method="auto", workspace=workspace)
         else:
             vanilla_reduce(values, output)
 
@@ -1117,8 +1079,7 @@ def _build_native_reduce_case(ti: Any, runtime_name: str, backend: str,
         "launch": launch,
         "reset": reset,
         "validate": validate_fresh,
-        "route": lambda: _native_reduce_route(
-            workspace, runtime_name, backend, source_sha256),
+        "route": lambda: _native_reduce_route(workspace, runtime_name, backend, source_sha256),
         "logical_bytes": elements * 4 + 4,
         "traffic_model": (
             "semantic minimum: one i32 input read per element and one scalar "
@@ -1131,12 +1092,8 @@ def _build_native_reduce_case(ti: Any, runtime_name: str, backend: str,
             "dtype": "i32",
             "storage": "1d_ndarray_to_1d_length_one_ndarray",
             "input_pattern": "(i % 17) - 8",
-            "forge_adapter": (
-                "experimental_reduce(op=sum, method=auto, reusable ReduceWorkspace)"
-            ),
-            "vanilla_adapter": (
-                "one common-source Taichi kernel with output reset and i32 atomic_add"
-            ),
+            "forge_adapter": ("experimental_reduce(op=sum, method=auto, reusable ReduceWorkspace)"),
+            "vanilla_adapter": ("one common-source Taichi kernel with output reset and i32 atomic_add"),
             "kernel_source_owner": "benchmark",
             "kernel_source_sha256": source_sha256,
             "kernel_adapter": "benchmark_defined_ti_kernel",
@@ -1157,9 +1114,9 @@ def _build_native_reduce_case(ti: Any, runtime_name: str, backend: str,
     }
 
 
-def _native_transform_route(workspace: Any | None, runtime_name: str,
-                            backend: str,
-                            kernel_source_sha256: str) -> dict[str, Any]:
+def _native_transform_route(
+    workspace: Any | None, runtime_name: str, backend: str, kernel_source_sha256: str
+) -> dict[str, Any]:
     if runtime_name == "forge":
         plan = getattr(workspace, "_native_transform_plan", None)
         expected_backend = {
@@ -1177,27 +1134,19 @@ def _native_transform_route(workspace: Any | None, runtime_name: str,
         }[backend]
         observed_backend = getattr(plan, "backend", None)
         observed_method = getattr(plan, "method_name", None)
-        passed = bool(
-            plan is not None
-            and observed_backend == expected_backend
-            and observed_method in allowed_methods
-        )
+        passed = bool(plan is not None and observed_backend == expected_backend and observed_method in allowed_methods)
         return {
             "classification": "forge_native_transform_plan",
             "expected_backend": expected_backend,
             "expected_methods": sorted(allowed_methods),
             "observed_plan_backend": observed_backend,
             "observed_method": observed_method,
-            "workspace_bytes_current": getattr(
-                workspace, "workspace_bytes_current", None),
-            "workspace_bytes_peak": getattr(
-                workspace, "workspace_bytes_peak", None),
+            "workspace_bytes_current": getattr(workspace, "workspace_bytes_current", None),
+            "workspace_bytes_peak": getattr(workspace, "workspace_bytes_peak", None),
             "passed": passed,
         }
     passed = bool(
-        runtime_name in ("forge_kernel", "vanilla_kernel")
-        and workspace is None
-        and len(kernel_source_sha256) == 64
+        runtime_name in ("forge_kernel", "vanilla_kernel") and workspace is None and len(kernel_source_sha256) == 64
     )
     return {
         "classification": f"{runtime_name}_equivalent_i32_affine_kernel",
@@ -1218,16 +1167,14 @@ def _native_transform_route(workspace: Any | None, runtime_name: str,
     }
 
 
-def _build_native_transform_case(ti: Any, runtime_name: str, backend: str,
-                                 elements: int) -> dict[str, Any]:
+def _build_native_transform_case(ti: Any, runtime_name: str, backend: str, elements: int) -> dict[str, Any]:
     import numpy as np
 
     source_sha256 = sha256_file(Path(__file__))
     host = ((np.arange(elements, dtype=np.int64) % 1009) - 504).astype(np.int32)
     expected = (host * np.int32(3) + np.int32(7)).astype(np.int32)
     expected_sha256 = hashlib.sha256(expected.tobytes()).hexdigest()
-    sample_indices = sorted(set((0, elements // 4, elements // 2,
-                                 (3 * elements) // 4, elements - 1)))
+    sample_indices = sorted(set((0, elements // 4, elements // 2, (3 * elements) // 4, elements - 1)))
     values = ti.ndarray(dtype=ti.i32, shape=elements)
     output = ti.ndarray(dtype=ti.i32, shape=elements)
     values.from_numpy(host)
@@ -1235,21 +1182,16 @@ def _build_native_transform_case(ti: Any, runtime_name: str, backend: str,
 
     @ti.kernel
     def vanilla_transform(
-            source: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            destination: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1), destination: ti.types.ndarray(dtype=ti.i32, ndim=1)
+    ):
         for i in source:
             destination[i] = source[i] * 3 + 7
 
-    workspace = (
-        ti.algorithms.TransformWorkspace(max_items=elements)
-        if runtime_name == "forge" else None
-    )
+    workspace = ti.algorithms.TransformWorkspace(max_items=elements) if runtime_name == "forge" else None
 
     def launch() -> None:
         if runtime_name == "forge":
-            ti.algorithms.experimental_transform(
-                values, output, scale=3, bias=7, method="auto",
-                workspace=workspace)
+            ti.algorithms.experimental_transform(values, output, scale=3, bias=7, method="auto", workspace=workspace)
         else:
             vanilla_transform(values, output)
 
@@ -1277,21 +1219,16 @@ def _build_native_transform_case(ti: Any, runtime_name: str, backend: str,
             "expected_maximum": int(expected.max()),
             "sample_indices": sample_indices,
             "actual_samples": [int(actual[index]) for index in sample_indices],
-            "expected_samples": [
-                int(expected[index]) for index in sample_indices
-            ],
+            "expected_samples": [int(expected[index]) for index in sample_indices],
             "mismatch_count": int(mismatch.size),
-            "first_mismatch": (
-                None if mismatch.size == 0 else int(mismatch[0])
-            ),
+            "first_mismatch": (None if mismatch.size == 0 else int(mismatch[0])),
         }
 
     return {
         "launch": launch,
         "reset": reset,
         "validate": validate_fresh,
-        "route": lambda: _native_transform_route(
-            workspace, runtime_name, backend, source_sha256),
+        "route": lambda: _native_transform_route(workspace, runtime_name, backend, source_sha256),
         "logical_bytes": elements * 8,
         "traffic_model": (
             "semantic minimum: one i32 source read and one i32 destination "
@@ -1304,10 +1241,7 @@ def _build_native_transform_case(ti: Any, runtime_name: str, backend: str,
             "dtype": "i32",
             "storage": "1d_ndarray_to_same_shape_1d_ndarray",
             "input_pattern": "(i % 1009) - 504",
-            "forge_adapter": (
-                "experimental_transform(scale=3,bias=7,method=auto,reusable "
-                "TransformWorkspace)"
-            ),
+            "forge_adapter": ("experimental_transform(scale=3,bias=7,method=auto,reusable " "TransformWorkspace)"),
             "vanilla_adapter": "one common-source elementwise Taichi kernel",
             "kernel_source_owner": "benchmark",
             "kernel_source_sha256": source_sha256,
@@ -1329,9 +1263,9 @@ def _build_native_transform_case(ti: Any, runtime_name: str, backend: str,
     }
 
 
-def _native_indexed_copy_route(workspace: Any | None, runtime_name: str,
-                               backend: str, scatter: bool,
-                               kernel_source_sha256: str) -> dict[str, Any]:
+def _native_indexed_copy_route(
+    workspace: Any | None, runtime_name: str, backend: str, scatter: bool, kernel_source_sha256: str
+) -> dict[str, Any]:
     operation = "scatter" if scatter else "gather"
     if runtime_name == "forge":
         plan = getattr(workspace, "_native_indexed_copy_plan", None)
@@ -1354,20 +1288,14 @@ def _native_indexed_copy_route(workspace: Any | None, runtime_name: str,
             "expected_method": expected_method,
             "observed_plan_backend": observed_backend,
             "observed_method": observed_method,
-            "workspace_bytes_current": getattr(
-                workspace, "workspace_bytes_current", None),
-            "workspace_bytes_peak": getattr(
-                workspace, "workspace_bytes_peak", None),
+            "workspace_bytes_current": getattr(workspace, "workspace_bytes_current", None),
+            "workspace_bytes_peak": getattr(workspace, "workspace_bytes_peak", None),
             "passed": bool(
-                plan is not None
-                and observed_backend == expected_backend
-                and observed_method == expected_method
+                plan is not None and observed_backend == expected_backend and observed_method == expected_method
             ),
         }
     passed = bool(
-        runtime_name in ("forge_kernel", "vanilla_kernel")
-        and workspace is None
-        and len(kernel_source_sha256) == 64
+        runtime_name in ("forge_kernel", "vanilla_kernel") and workspace is None and len(kernel_source_sha256) == 64
     )
     return {
         "classification": f"{runtime_name}_equivalent_i32_{operation}_kernel",
@@ -1388,31 +1316,24 @@ def _native_indexed_copy_route(workspace: Any | None, runtime_name: str,
     }
 
 
-def _build_native_indexed_copy_case(ti: Any, runtime_name: str, backend: str,
-                                    elements: int,
-                                    scatter: bool) -> dict[str, Any]:
+def _build_native_indexed_copy_case(
+    ti: Any, runtime_name: str, backend: str, elements: int, scatter: bool
+) -> dict[str, Any]:
     import numpy as np
 
     operation = "scatter" if scatter else "gather"
     source_sha256 = sha256_file(Path(__file__))
-    host = ((np.arange(elements, dtype=np.int64) * 31 + 11) % 2003
-            - 1001).astype(np.int32)
-    host_indices = (
-        (np.arange(elements, dtype=np.int64) * 17 + 5) % elements
-    ).astype(np.int32)
+    host = ((np.arange(elements, dtype=np.int64) * 31 + 11) % 2003 - 1001).astype(np.int32)
+    host_indices = ((np.arange(elements, dtype=np.int64) * 17 + 5) % elements).astype(np.int32)
     index_multiplier = 17
     index_offset = 5
     index_multiplier_gcd = math.gcd(index_multiplier, elements)
     indices_in_range = bool(
-        host_indices.size == elements
-        and int(host_indices.min()) == 0
-        and int(host_indices.max()) == elements - 1
+        host_indices.size == elements and int(host_indices.min()) == 0 and int(host_indices.max()) == elements - 1
     )
-    full_permutation_passed = bool(
-        index_multiplier_gcd == 1 and indices_in_range)
+    full_permutation_passed = bool(index_multiplier_gcd == 1 and indices_in_range)
     if not full_permutation_passed:
-        raise ValueError(
-            "indexed-copy qualification requires a proven full permutation")
+        raise ValueError("indexed-copy qualification requires a proven full permutation")
     index_sha256 = hashlib.sha256(host_indices.tobytes()).hexdigest()
     expected = np.zeros(elements, dtype=np.int32)
     if scatter:
@@ -1420,8 +1341,7 @@ def _build_native_indexed_copy_case(ti: Any, runtime_name: str, backend: str,
     else:
         expected = host[host_indices]
     expected_sha256 = hashlib.sha256(expected.tobytes()).hexdigest()
-    sample_indices = sorted(set((0, elements // 4, elements // 2,
-                                 (3 * elements) // 4, elements - 1)))
+    sample_indices = sorted(set((0, elements // 4, elements // 2, (3 * elements) // 4, elements - 1)))
     values = ti.ndarray(dtype=ti.i32, shape=elements)
     indices = ti.ndarray(dtype=ti.i32, shape=elements)
     output = ti.ndarray(dtype=ti.i32, shape=elements)
@@ -1431,31 +1351,27 @@ def _build_native_indexed_copy_case(ti: Any, runtime_name: str, backend: str,
 
     @ti.kernel
     def vanilla_gather(
-            source: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            index: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            destination: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        index: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        destination: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
         for i in index:
             destination[i] = source[index[i]]
 
     @ti.kernel
     def vanilla_scatter(
-            source: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            index: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            destination: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        index: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        destination: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
         for i in index:
             destination[index[i]] = source[i]
 
-    workspace = (
-        ti.algorithms.IndexedCopyWorkspace(max_items=elements)
-        if runtime_name == "forge" else None
-    )
+    workspace = ti.algorithms.IndexedCopyWorkspace(max_items=elements) if runtime_name == "forge" else None
 
     def launch() -> None:
         if runtime_name == "forge":
-            primitive = (
-                ti.algorithms.experimental_scatter if scatter
-                else ti.algorithms.experimental_gather
-            )
+            primitive = ti.algorithms.experimental_scatter if scatter else ti.algorithms.experimental_gather
             primitive(values, indices, output, method="auto", workspace=workspace)
         elif scatter:
             vanilla_scatter(values, indices, output)
@@ -1486,21 +1402,16 @@ def _build_native_indexed_copy_case(ti: Any, runtime_name: str, backend: str,
             "expected_maximum": int(expected.max()),
             "sample_indices": sample_indices,
             "actual_samples": [int(actual[index]) for index in sample_indices],
-            "expected_samples": [
-                int(expected[index]) for index in sample_indices
-            ],
+            "expected_samples": [int(expected[index]) for index in sample_indices],
             "mismatch_count": int(mismatch.size),
-            "first_mismatch": (
-                None if mismatch.size == 0 else int(mismatch[0])
-            ),
+            "first_mismatch": (None if mismatch.size == 0 else int(mismatch[0])),
         }
 
     return {
         "launch": launch,
         "reset": reset,
         "validate": validate_fresh,
-        "route": lambda: _native_indexed_copy_route(
-            workspace, runtime_name, backend, scatter, source_sha256),
+        "route": lambda: _native_indexed_copy_route(workspace, runtime_name, backend, scatter, source_sha256),
         "logical_bytes": elements * 12,
         "traffic_model": (
             "semantic minimum: one i32 index read, one i32 payload read, and "
@@ -1523,8 +1434,7 @@ def _build_native_indexed_copy_case(ti: Any, runtime_name: str, backend: str,
             "case_id": f"THIN-002-{operation.upper()}",
             "comparison_class": "thin-capability",
             "semantics": (
-                "dst_i_equals_src_indices_i" if not scatter
-                else "dst_indices_i_equals_src_i_with_unique_permutation"
+                "dst_i_equals_src_indices_i" if not scatter else "dst_indices_i_equals_src_i_with_unique_permutation"
             ),
             "dtype": "i32",
             "storage": "three_same_length_1d_ndarrays",
@@ -1532,14 +1442,9 @@ def _build_native_indexed_copy_case(ti: Any, runtime_name: str, backend: str,
             "index_pattern": "(i * 17 + 5) % n; full permutation for presets",
             "unique_in_range_indices": True,
             "index_sha256": index_sha256,
-            "index_permutation_proof": (
-                "affine_modulo_bijection_gcd_17_n_equals_one"
-            ),
+            "index_permutation_proof": ("affine_modulo_bijection_gcd_17_n_equals_one"),
             "index_multiplier_gcd": index_multiplier_gcd,
-            "forge_adapter": (
-                f"experimental_{operation}(method=auto,reusable "
-                "IndexedCopyWorkspace)"
-            ),
+            "forge_adapter": (f"experimental_{operation}(method=auto,reusable " "IndexedCopyWorkspace)"),
             "vanilla_adapter": f"one common-source indexed {operation} kernel",
             "kernel_source_owner": "benchmark",
             "kernel_source_sha256": source_sha256,
@@ -1563,11 +1468,12 @@ def _build_native_indexed_copy_case(ti: Any, runtime_name: str, backend: str,
 
 
 def _native_compact_route(
-        workspace: Any | None,
-        runtime_name: str,
-        backend: str,
-        kernel_source_sha256: str | None = None,
-        elements: int | None = None) -> dict[str, Any]:
+    workspace: Any | None,
+    runtime_name: str,
+    backend: str,
+    kernel_source_sha256: str | None = None,
+    elements: int | None = None,
+) -> dict[str, Any]:
     if runtime_name == "forge":
         plan = getattr(workspace, "_native_compact_plan", None)
         expected_backend = {
@@ -1588,27 +1494,15 @@ def _native_compact_route(
             "expected_method": expected_method,
             "observed_plan_backend": observed_backend,
             "observed_method": observed_method,
-            "workspace_bytes_current": getattr(
-                workspace, "workspace_bytes_current", None),
-            "workspace_bytes_peak": getattr(
-                workspace, "workspace_bytes_peak", None),
+            "workspace_bytes_current": getattr(workspace, "workspace_bytes_current", None),
+            "workspace_bytes_peak": getattr(workspace, "workspace_bytes_peak", None),
             "passed": bool(
-                plan is not None
-                and observed_backend == expected_backend
-                and observed_method == expected_method
+                plan is not None and observed_backend == expected_backend and observed_method == expected_method
             ),
         }
-    scan_steps = (
-        (elements - 1).bit_length()
-        if isinstance(elements, int) and elements > 0 else None
-    )
-    final_scan_copy_invocations = (
-        scan_steps % 2 if scan_steps is not None else None
-    )
-    kernel_invocations = (
-        2 + scan_steps + final_scan_copy_invocations
-        if scan_steps is not None else None
-    )
+    scan_steps = (elements - 1).bit_length() if isinstance(elements, int) and elements > 0 else None
+    final_scan_copy_invocations = scan_steps % 2 if scan_steps is not None else None
+    kernel_invocations = 2 + scan_steps + final_scan_copy_invocations if scan_steps is not None else None
     passed = bool(
         runtime_name in ("forge_kernel", "vanilla_kernel")
         and workspace is None
@@ -1632,8 +1526,7 @@ def _native_compact_route(
         "physical_backend_launches_assumed": False,
         "expected_backend": backend,
         "expected_method": (
-            "flags-to-prefix kernel, benchmark-owned Hillis-Steele i32 scan "
-            "kernels, stable scatter kernel"
+            "flags-to-prefix kernel, benchmark-owned Hillis-Steele i32 scan " "kernels, stable scatter kernel"
         ),
         "observed_plan_backend": backend,
         "observed_method": "qualification_stable_compact_pipeline",
@@ -1643,21 +1536,18 @@ def _native_compact_route(
     }
 
 
-def _build_native_compact_case(ti: Any, runtime_name: str, backend: str,
-                               elements: int) -> dict[str, Any]:
+def _build_native_compact_case(ti: Any, runtime_name: str, backend: str, elements: int) -> dict[str, Any]:
     import numpy as np
 
     source_sha256 = sha256_file(Path(__file__))
-    host_values = ((np.arange(elements, dtype=np.int64) * 31 + 11) % 2003
-                   - 1001).astype(np.int32)
-    host_flags = ((np.arange(elements) % 3 == 0)
-                  | (np.arange(elements) % 17 == 0)).astype(np.int32)
+    host_values = ((np.arange(elements, dtype=np.int64) * 31 + 11) % 2003 - 1001).astype(np.int32)
+    host_flags = ((np.arange(elements) % 3 == 0) | (np.arange(elements) % 17 == 0)).astype(np.int32)
     expected = host_values[host_flags != 0]
     selected_count = int(expected.size)
     expected_sha256 = hashlib.sha256(expected.tobytes()).hexdigest()
-    sample_indices = sorted(set((0, selected_count // 4, selected_count // 2,
-                                 (3 * selected_count) // 4,
-                                 selected_count - 1)))
+    sample_indices = sorted(
+        set((0, selected_count // 4, selected_count // 2, (3 * selected_count) // 4, selected_count - 1))
+    )
     scan_steps = (elements - 1).bit_length()
     final_scan_copy_invocations = scan_steps % 2
     kernel_invocations = 2 + scan_steps + final_scan_copy_invocations
@@ -1670,10 +1560,7 @@ def _build_native_compact_case(ti: Any, runtime_name: str, backend: str,
     output.fill(0)
     count.fill(0)
 
-    prefix = (
-        ti.field(dtype=ti.i32, shape=elements)
-        if not _uses_native_adapter(runtime_name) else None
-    )
+    prefix = ti.field(dtype=ti.i32, shape=elements) if not _uses_native_adapter(runtime_name) else None
     scan_prefix = None
     if not _uses_native_adapter(runtime_name):
         if runtime_name in ("forge_kernel", "vanilla_kernel"):
@@ -1683,31 +1570,27 @@ def _build_native_compact_case(ti: Any, runtime_name: str, backend: str,
             scan_prefix = lambda: scanner.run(prefix)
 
     @ti.kernel
-    def flags_to_prefix(
-            source_flags: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+    def flags_to_prefix(source_flags: ti.types.ndarray(dtype=ti.i32, ndim=1)):
         for i in source_flags:
             prefix[i] = 1 if source_flags[i] != 0 else 0
 
     @ti.kernel
     def stable_scatter(
-            source_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            source_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            destination: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            destination_count: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        source_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        source_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        destination: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        destination_count: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
         destination_count[0] = prefix[elements - 1]
         for i in source_flags:
             if source_flags[i] != 0:
                 destination[prefix[i] - 1] = source_values[i]
 
-    workspace = (
-        ti.algorithms.CompactWorkspace(max_items=elements)
-        if runtime_name == "forge" else None
-    )
+    workspace = ti.algorithms.CompactWorkspace(max_items=elements) if runtime_name == "forge" else None
 
     def launch() -> None:
         if runtime_name == "forge":
-            ti.algorithms.experimental_compact(
-                values, flags, output, count, method="auto", workspace=workspace)
+            ti.algorithms.experimental_compact(values, flags, output, count, method="auto", workspace=workspace)
         else:
             flags_to_prefix(flags)
             scan_prefix()
@@ -1742,21 +1625,16 @@ def _build_native_compact_case(ti: Any, runtime_name: str, backend: str,
             "expected_maximum": int(expected.max()),
             "sample_indices": sample_indices,
             "actual_samples": [int(actual[index]) for index in sample_indices],
-            "expected_samples": [
-                int(expected[index]) for index in sample_indices
-            ],
+            "expected_samples": [int(expected[index]) for index in sample_indices],
             "mismatch_count": int(mismatch.size),
-            "first_mismatch": (
-                None if mismatch.size == 0 else int(mismatch[0])
-            ),
+            "first_mismatch": (None if mismatch.size == 0 else int(mismatch[0])),
         }
 
     return {
         "launch": launch,
         "reset": reset,
         "validate": validate_fresh,
-        "route": lambda: _native_compact_route(
-            workspace, runtime_name, backend, source_sha256, elements),
+        "route": lambda: _native_compact_route(workspace, runtime_name, backend, source_sha256, elements),
         "logical_bytes": elements * 8 + selected_count * 4 + 4,
         "traffic_model": (
             "semantic minimum: one i32 value and flag read per input, one i32 "
@@ -1772,9 +1650,7 @@ def _build_native_compact_case(ti: Any, runtime_name: str, backend: str,
             "input_pattern": "((i * 31 + 11) % 2003) - 1001",
             "flag_pattern": "i % 3 == 0 or i % 17 == 0",
             "selected_count": selected_count,
-            "forge_adapter": (
-                "experimental_compact(method=auto,reusable CompactWorkspace)"
-            ),
+            "forge_adapter": ("experimental_compact(method=auto,reusable CompactWorkspace)"),
             "vanilla_adapter": (
                 "benchmark-owned flags-to-prefix kernel plus shared "
                 "Hillis-Steele scan kernels plus stable scatter kernel"
@@ -1788,9 +1664,7 @@ def _build_native_compact_case(ti: Any, runtime_name: str, backend: str,
             "kernel_benchmark_workspace_field_count": 2,
             "kernel_scan_algorithm": "inclusive_hillis_steele_ping_pong",
             "kernel_scan_steps": scan_steps,
-            "kernel_final_scan_copy_kernel_invocations": (
-                final_scan_copy_invocations
-            ),
+            "kernel_final_scan_copy_kernel_invocations": (final_scan_copy_invocations),
             "kernel_ti_invocations_per_replay": kernel_invocations,
             "kernel_physical_backend_launches_assumed": False,
             "shared": (
@@ -1802,9 +1676,7 @@ def _build_native_compact_case(ti: Any, runtime_name: str, backend: str,
                 "native internal stages/workspace differ from the shared "
                 "benchmark-owned two-field kernel-control pipeline"
             ),
-            "correctness": (
-                "exact_count_and_exact_ordered_i32_sha256_sum_extrema_samples"
-            ),
+            "correctness": ("exact_count_and_exact_ordered_i32_sha256_sum_extrema_samples"),
             "timing": (
                 "frozen repeated complete compact adapter calls plus one outer "
                 "sync; initialization, first call, and correctness are excluded"
@@ -1815,8 +1687,8 @@ def _build_native_compact_case(ti: Any, runtime_name: str, backend: str,
 
 
 def _device_prefix_chain_route(
-        workspace: Any | None, runtime_name: str, backend: str, elements: int,
-        kernel_source_sha256: str | None = None) -> dict[str, Any]:
+    workspace: Any | None, runtime_name: str, backend: str, elements: int, kernel_source_sha256: str | None = None
+) -> dict[str, Any]:
     if runtime_name == "forge":
         compact_workspace = getattr(workspace, "_compact", None)
         compact_plan = getattr(compact_workspace, "_native_compact_plan", None)
@@ -1851,10 +1723,8 @@ def _device_prefix_chain_route(
             "observed_compact_method": compact_method,
             "observed_scan_backend": scan_backend,
             "observed_scan_method": scan_method,
-            "workspace_bytes_current": getattr(
-                workspace, "workspace_bytes_current", None),
-            "workspace_bytes_peak": getattr(
-                workspace, "workspace_bytes_peak", None),
+            "workspace_bytes_current": getattr(workspace, "workspace_bytes_current", None),
+            "workspace_bytes_peak": getattr(workspace, "workspace_bytes_peak", None),
             "allocation_count": getattr(workspace, "allocation_count", None),
             "passed": bool(
                 compact_plan is not None
@@ -1870,10 +1740,8 @@ def _device_prefix_chain_route(
         final_scan_copy_invocations = scan_steps % 2
         scan_pipelines_per_replay = 2
         stage_kernel_invocations = 3
-        kernel_invocations = (
-            stage_kernel_invocations
-            + scan_pipelines_per_replay
-            * (scan_steps + final_scan_copy_invocations)
+        kernel_invocations = stage_kernel_invocations + scan_pipelines_per_replay * (
+            scan_steps + final_scan_copy_invocations
         )
         passed = bool(
             workspace is None
@@ -1882,9 +1750,7 @@ def _device_prefix_chain_route(
             and elements > 0
         )
         return {
-            "classification": (
-                f"{runtime_name}_device_count_stable_compact_scan_pipeline"
-            ),
+            "classification": (f"{runtime_name}_device_count_stable_compact_scan_pipeline"),
             "adapter": "benchmark_defined_ti_kernel_pipeline",
             "kernel_source_owner": "benchmark",
             "kernel_source_sha256": kernel_source_sha256,
@@ -1895,28 +1761,19 @@ def _device_prefix_chain_route(
             "scan_algorithm": "inclusive_hillis_steele_ping_pong",
             "scan_pipelines_per_replay": scan_pipelines_per_replay,
             "scan_steps_per_pipeline": scan_steps,
-            "final_scan_copy_kernel_invocations_per_pipeline": (
-                final_scan_copy_invocations
-            ),
-            "stage_ti_kernel_invocations_per_replay": (
-                stage_kernel_invocations
-            ),
+            "final_scan_copy_kernel_invocations_per_pipeline": (final_scan_copy_invocations),
+            "stage_ti_kernel_invocations_per_replay": (stage_kernel_invocations),
             "ti_kernel_invocations_per_replay": kernel_invocations,
             "physical_backend_launches_assumed": False,
             "expected_backend": backend,
             "expected_compact_method": (
-                "masked flags plus benchmark-owned Hillis-Steele i32 scan "
-                "kernels plus stable scatter"
+                "masked flags plus benchmark-owned Hillis-Steele i32 scan " "kernels plus stable scatter"
             ),
-            "expected_scan_method": (
-                "second benchmark-owned Hillis-Steele i32 kernel scan"
-            ),
+            "expected_scan_method": ("second benchmark-owned Hillis-Steele i32 kernel scan"),
             "observed_compact_backend": backend,
             "observed_compact_method": "qualification_device_count_compact",
             "observed_scan_backend": backend,
-            "observed_scan_method": (
-                "qualification_prefix_scan_without_host_count"
-            ),
+            "observed_scan_method": ("qualification_prefix_scan_without_host_count"),
             "workspace_bytes_current": None,
             "workspace_bytes_peak": None,
             "allocation_count": None,
@@ -1926,15 +1783,14 @@ def _device_prefix_chain_route(
         "classification": f"{runtime_name}_device_count_stable_compact_scan_pipeline",
         "expected_backend": backend,
         "expected_compact_method": (
-            "masked flags plus shared Hillis-Steele i32 scan kernels plus "
-            "stable scatter"
-            if runtime_name in ("forge_kernel", "vanilla_kernel") else
-            "masked flags plus PrefixSumExecutor plus stable scatter"
+            "masked flags plus shared Hillis-Steele i32 scan kernels plus " "stable scatter"
+            if runtime_name in ("forge_kernel", "vanilla_kernel")
+            else "masked flags plus PrefixSumExecutor plus stable scatter"
         ),
         "expected_scan_method": (
             "second shared Hillis-Steele i32 kernel scan"
-            if runtime_name in ("forge_kernel", "vanilla_kernel") else
-            "second reusable PrefixSumExecutor"
+            if runtime_name in ("forge_kernel", "vanilla_kernel")
+            else "second reusable PrefixSumExecutor"
         ),
         "observed_compact_backend": backend,
         "observed_compact_method": "qualification_device_count_compact",
@@ -1947,8 +1803,7 @@ def _device_prefix_chain_route(
     }
 
 
-def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
-                                    elements: int) -> dict[str, Any]:
+def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str, elements: int) -> dict[str, Any]:
     import numpy as np
 
     source_sha256 = sha256_file(Path(__file__))
@@ -1958,17 +1813,15 @@ def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
     selected = host_values[:active_count][host_flags[:active_count] != 0]
     expected_scan = np.cumsum(selected, dtype=np.int64).astype(np.int32)
     selected_count = int(selected.size)
-    sample_indices = sorted(set((0, selected_count // 4, selected_count // 2,
-                                 (3 * selected_count) // 4,
-                                 selected_count - 1)))
+    sample_indices = sorted(
+        set((0, selected_count // 4, selected_count // 2, (3 * selected_count) // 4, selected_count - 1))
+    )
     scan_steps = (elements - 1).bit_length()
     final_scan_copy_invocations = scan_steps % 2
     scan_pipelines_per_replay = 2
     stage_kernel_invocations = 3
-    kernel_invocations = (
-        stage_kernel_invocations
-        + scan_pipelines_per_replay
-        * (scan_steps + final_scan_copy_invocations)
+    kernel_invocations = stage_kernel_invocations + scan_pipelines_per_replay * (
+        scan_steps + final_scan_copy_invocations
     )
     values = ti.ndarray(dtype=ti.i32, shape=elements)
     flags = ti.ndarray(dtype=ti.i32, shape=elements)
@@ -1989,10 +1842,8 @@ def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
         forge_output_extent = ti.DeviceExtent(elements)
         forge_workspace = ti.algorithms.DevicePrefixWorkspace(elements)
         forge_extent.set(active_count)
-        source_prefix = ti.algorithms.device_prefix(
-            values, forge_extent, workspace=forge_workspace)
-        compacted_prefix = ti.algorithms.device_prefix(
-            compacted, forge_output_extent, workspace=forge_workspace)
+        source_prefix = ti.algorithms.device_prefix(values, forge_extent, workspace=forge_workspace)
+        compacted_prefix = ti.algorithms.device_prefix(compacted, forge_output_extent, workspace=forge_workspace)
     else:
         vanilla_input_count = ti.ndarray(dtype=ti.i32, shape=1)
         vanilla_output_count = ti.ndarray(dtype=ti.i32, shape=1)
@@ -2001,10 +1852,8 @@ def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
         compact_prefix_field = ti.field(dtype=ti.i32, shape=elements)
         scan_field = ti.field(dtype=ti.i32, shape=elements)
         if runtime_name in ("forge_kernel", "vanilla_kernel"):
-            run_compact_scan = _build_common_kernel_i32_scan(
-                ti, compact_prefix_field, elements)
-            run_output_scan = _build_common_kernel_i32_scan(
-                ti, scan_field, elements)
+            run_compact_scan = _build_common_kernel_i32_scan(ti, compact_prefix_field, elements)
+            run_output_scan = _build_common_kernel_i32_scan(ti, scan_field, elements)
         else:
             compact_scanner = ti.algorithms.PrefixSumExecutor(elements)
             scan_scanner = ti.algorithms.PrefixSumExecutor(elements)
@@ -2013,20 +1862,19 @@ def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
 
     @ti.kernel
     def vanilla_stage_flags(
-            source_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            input_count: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        source_flags: ti.types.ndarray(dtype=ti.i32, ndim=1), input_count: ti.types.ndarray(dtype=ti.i32, ndim=1)
+    ):
         for i in source_flags:
-            compact_prefix_field[i] = (
-                1 if i < input_count[0] and source_flags[i] != 0 else 0
-            )
+            compact_prefix_field[i] = 1 if i < input_count[0] and source_flags[i] != 0 else 0
 
     @ti.kernel
     def vanilla_scatter_and_stage_scan(
-            source_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            source_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            input_count: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            destination: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            output_count: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        source_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        source_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        input_count: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        destination: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output_count: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
         output_count[0] = compact_prefix_field[elements - 1]
         for i in range(elements):
             scan_field[i] = 0
@@ -2037,22 +1885,18 @@ def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
                 scan_field[target] = source_values[i]
 
     @ti.kernel
-    def vanilla_copy_scan(
-            destination: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+    def vanilla_copy_scan(destination: ti.types.ndarray(dtype=ti.i32, ndim=1)):
         for i in range(elements):
             destination[i] = scan_field[i]
 
     def launch() -> None:
         if runtime_name == "forge":
-            source_prefix.compact(
-                flags, compacted, forge_output_extent, method="auto")
+            source_prefix.compact(flags, compacted, forge_output_extent, method="auto")
             compacted_prefix.scan(scanned)
         else:
             vanilla_stage_flags(flags, vanilla_input_count)
             run_compact_scan()
-            vanilla_scatter_and_stage_scan(
-                values, flags, vanilla_input_count, compacted,
-                vanilla_output_count)
+            vanilla_scatter_and_stage_scan(values, flags, vanilla_input_count, compacted, vanilla_output_count)
             run_output_scan()
             vanilla_copy_scan(scanned)
 
@@ -2063,8 +1907,7 @@ def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
             forge_extent.set(active_count)
             forge_output_extent.reset()
         else:
-            vanilla_input_count.from_numpy(
-                np.array([active_count], dtype=np.int32))
+            vanilla_input_count.from_numpy(np.array([active_count], dtype=np.int32))
             vanilla_output_count.fill(0)
             compact_prefix_field.fill(0)
             scan_field.fill(0)
@@ -2075,9 +1918,7 @@ def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
         launch()
         ti.sync()
         actual_count = (
-            forge_output_extent.snapshot().count
-            if runtime_name == "forge"
-            else int(vanilla_output_count.to_numpy()[0])
+            forge_output_extent.snapshot().count if runtime_name == "forge" else int(vanilla_output_count.to_numpy()[0])
         )
         actual_compacted = compacted.to_numpy()[:selected_count]
         actual_scan = scanned.to_numpy()[:selected_count]
@@ -2086,8 +1927,7 @@ def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
             mismatch = np.flatnonzero(actual != expected)
             return {
                 "actual_sha256": hashlib.sha256(actual.tobytes()).hexdigest(),
-                "expected_sha256": hashlib.sha256(
-                    expected.tobytes()).hexdigest(),
+                "expected_sha256": hashlib.sha256(expected.tobytes()).hexdigest(),
                 "actual_sum": int(actual.astype(np.int64).sum()),
                 "expected_sum": int(expected.astype(np.int64).sum()),
                 "actual_minimum": int(actual.min()),
@@ -2095,16 +1935,10 @@ def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
                 "actual_maximum": int(actual.max()),
                 "expected_maximum": int(expected.max()),
                 "sample_indices": sample_indices,
-                "actual_samples": [
-                    int(actual[index]) for index in sample_indices
-                ],
-                "expected_samples": [
-                    int(expected[index]) for index in sample_indices
-                ],
+                "actual_samples": [int(actual[index]) for index in sample_indices],
+                "expected_samples": [int(expected[index]) for index in sample_indices],
                 "mismatch_count": int(mismatch.size),
-                "first_mismatch": (
-                    None if mismatch.size == 0 else int(mismatch[0])
-                ),
+                "first_mismatch": (None if mismatch.size == 0 else int(mismatch[0])),
             }
 
         compact_evidence = exact_vector(actual_compacted, selected)
@@ -2128,8 +1962,7 @@ def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
         "launch": launch,
         "reset": reset,
         "validate": validate_fresh,
-        "route": lambda: _device_prefix_chain_route(
-            forge_workspace, runtime_name, backend, elements, source_sha256),
+        "route": lambda: _device_prefix_chain_route(forge_workspace, runtime_name, backend, elements, source_sha256),
         "logical_bytes": elements * 8 + selected_count * 12 + 8,
         "traffic_model": (
             "semantic minimum for active-prefix flags/value reads, selected "
@@ -2169,12 +2002,8 @@ def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
             "kernel_scan_algorithm": "inclusive_hillis_steele_ping_pong",
             "kernel_scan_pipelines_per_replay": scan_pipelines_per_replay,
             "kernel_scan_steps_per_pipeline": scan_steps,
-            "kernel_final_scan_copy_kernel_invocations_per_pipeline": (
-                final_scan_copy_invocations
-            ),
-            "kernel_stage_ti_invocations_per_replay": (
-                stage_kernel_invocations
-            ),
+            "kernel_final_scan_copy_kernel_invocations_per_pipeline": (final_scan_copy_invocations),
+            "kernel_stage_ti_invocations_per_replay": (stage_kernel_invocations),
             "kernel_ti_invocations_per_replay": kernel_invocations,
             "kernel_physical_backend_launches_assumed": False,
             "shared": (
@@ -2186,10 +2015,7 @@ def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
                 "Forge owns DeviceExtent/DevicePrefix composition; vanilla "
                 "manually composes the equivalent device-resident pipeline"
             ),
-            "correctness": (
-                "exact_count_and_ordered_compact_and_scan_sha256_sum_extrema_"
-                "samples"
-            ),
+            "correctness": ("exact_count_and_ordered_compact_and_scan_sha256_sum_extrema_" "samples"),
             "timing": (
                 "frozen repeated complete compact-plus-scan adapter calls plus "
                 "one outer sync; reset and host observations are excluded"
@@ -2199,8 +2025,7 @@ def _build_device_prefix_chain_case(ti: Any, runtime_name: str, backend: str,
     }
 
 
-def _snode_lifecycle_observation(ti: Any,
-                                 runtime_name: str) -> dict[str, Any]:
+def _snode_lifecycle_observation(ti: Any, runtime_name: str) -> dict[str, Any]:
     """Capture Forge-only lifecycle counters without inventing vanilla data."""
     if runtime_name != "forge":
         return {
@@ -2210,14 +2035,10 @@ def _snode_lifecycle_observation(ti: Any,
         }
     try:
         program = ti.lang.impl.get_runtime().prog
-        directory_getter = getattr(
-            program, "_debug_snode_runtime_directory_stats", None)
-        lifecycle_getter = getattr(
-            program, "_debug_kernel_lifecycle_stats", None)
-        mapping_getter = getattr(
-            program, "_debug_snode_field_mapping_count", None)
-        if (directory_getter is None or lifecycle_getter is None
-                or mapping_getter is None):
+        directory_getter = getattr(program, "_debug_snode_runtime_directory_stats", None)
+        lifecycle_getter = getattr(program, "_debug_kernel_lifecycle_stats", None)
+        mapping_getter = getattr(program, "_debug_snode_field_mapping_count", None)
+        if directory_getter is None or lifecycle_getter is None or mapping_getter is None:
             return {
                 "required": True,
                 "available": False,
@@ -2239,9 +2060,12 @@ def _snode_lifecycle_observation(ti: Any,
 
 
 def _snode_lifecycle_plateau(
-        before: dict[str, Any], after: dict[str, Any],
-        *, require_directory_plateau: bool = True,
-        require_registration_plateau: bool = True) -> dict[str, Any]:
+    before: dict[str, Any],
+    after: dict[str, Any],
+    *,
+    require_directory_plateau: bool = True,
+    require_registration_plateau: bool = True,
+) -> dict[str, Any]:
     """Validate live-state recovery while allowing retired kernel shells."""
     required = bool(before.get("required") or after.get("required"))
     if not required:
@@ -2255,36 +2079,35 @@ def _snode_lifecycle_plateau(
     before_kernels = before.get("kernel_lifecycle") or {}
     after_kernels = after.get("kernel_lifecycle") or {}
     checks = {
-        "observations_available": bool(
-            before.get("available") and after.get("available")),
+        "observations_available": bool(before.get("available") and after.get("available")),
         "active_tree_count_recovered": (
-            after_directory.get("active_tree_count")
-            == before_directory.get("active_tree_count")),
+            after_directory.get("active_tree_count") == before_directory.get("active_tree_count")
+        ),
         "field_mapping_count_recovered": (
-            after.get("snode_field_mapping_count")
-            == before.get("snode_field_mapping_count")),
-        "live_definitions_recovered": (
-            after_kernels.get("live_definitions")
-            == before_kernels.get("live_definitions")),
+            after.get("snode_field_mapping_count") == before.get("snode_field_mapping_count")
+        ),
+        "live_definitions_recovered": (after_kernels.get("live_definitions") == before_kernels.get("live_definitions")),
     }
     if require_registration_plateau:
-        checks["registered_executables_plateau"] = (
-            after_kernels.get("registered_executables")
-            == before_kernels.get("registered_executables"))
+        checks["registered_executables_plateau"] = after_kernels.get("registered_executables") == before_kernels.get(
+            "registered_executables"
+        )
     if require_directory_plateau:
-        checks.update({
-            "directory_capacity_plateau": (
-                after_directory.get("capacity")
-                == before_directory.get("capacity")),
-            "directory_reserved_bytes_plateau": (
-                after_directory.get("reserved_bytes")
-                == before_directory.get("reserved_bytes")),
-            "directory_growth_events_plateau": (
-                after_directory.get("growth_events")
-                == before_directory.get("growth_events")),
-        })
+        checks.update(
+            {
+                "directory_capacity_plateau": (after_directory.get("capacity") == before_directory.get("capacity")),
+                "directory_reserved_bytes_plateau": (
+                    after_directory.get("reserved_bytes") == before_directory.get("reserved_bytes")
+                ),
+                "directory_growth_events_plateau": (
+                    after_directory.get("growth_events") == before_directory.get("growth_events")
+                ),
+            }
+        )
     numeric_delta_names = (
-        "total_slots", "live_definitions", "retired_shells",
+        "total_slots",
+        "live_definitions",
+        "retired_shells",
         "registered_executables",
     )
     kernel_deltas = {}
@@ -2292,9 +2115,7 @@ def _snode_lifecycle_plateau(
         left = before_kernels.get(name)
         right = after_kernels.get(name)
         kernel_deltas[name] = (
-            right - left
-            if isinstance(left, (int, float))
-            and isinstance(right, (int, float)) else None
+            right - left if isinstance(left, (int, float)) and isinstance(right, (int, float)) else None
         )
     return {
         "required": True,
@@ -2307,8 +2128,7 @@ def _snode_lifecycle_plateau(
     }
 
 
-def _snode_churn_route(ti: Any, state: dict[str, Any],
-                       runtime_name: str) -> dict[str, Any]:
+def _snode_churn_route(ti: Any, state: dict[str, Any], runtime_name: str) -> dict[str, Any]:
     directory = None
     directory_error = None
     if runtime_name == "forge":
@@ -2319,29 +2139,25 @@ def _snode_churn_route(ti: Any, state: dict[str, Any],
         except Exception as error:  # pragma: no cover - evidence path
             directory_error = repr(error)
     baseline_active = state.get("baseline_active_tree_count")
-    observed_active = (
-        None if directory is None else directory.get("active_tree_count")
-    )
+    observed_active = None if directory is None else directory.get("active_tree_count")
     generations = state["generations"]
     generation_available = bool(generations and generations[-1] is not None)
     active_recovered = (
-        True if runtime_name == "vanilla" else bool(
-            directory is not None
-            and directory.get("available") is True
-            and observed_active == baseline_active
-        )
+        True
+        if runtime_name == "vanilla"
+        else bool(directory is not None and directory.get("available") is True and observed_active == baseline_active)
     )
     lifecycle_after = _snode_lifecycle_observation(ti, runtime_name)
     lifecycle_plateau = _snode_lifecycle_plateau(
-        state["baseline_lifecycle"], lifecycle_after,
+        state["baseline_lifecycle"],
+        lifecycle_after,
         require_directory_plateau=False,
-        require_registration_plateau=False)
+        require_registration_plateau=False,
+    )
     state["last_lifecycle_observation"] = lifecycle_after
     return {
         "classification": (
-            "forge_generation_aware_snode_tree_churn"
-            if runtime_name == "forge"
-            else "vanilla_public_snode_tree_churn"
+            "forge_generation_aware_snode_tree_churn" if runtime_name == "forge" else "vanilla_public_snode_tree_churn"
         ),
         "public_api": "ti.FieldsBuilder().pointer().dense().place(); tree.destroy()",
         "cycles_completed": state["cycles_completed"],
@@ -2366,8 +2182,7 @@ def _snode_churn_route(ti: Any, state: dict[str, Any],
     }
 
 
-def _build_snode_churn_case(ti: Any, runtime_name: str,
-                            backend: str) -> dict[str, Any]:
+def _build_snode_churn_case(ti: Any, runtime_name: str, backend: str) -> dict[str, Any]:
     root_blocks = 64
     block_size = 8
     active_blocks = 8
@@ -2393,8 +2208,7 @@ def _build_snode_churn_case(ti: Any, runtime_name: str,
     ti.sync()
     baseline_active = None
     if runtime_name == "forge":
-        directory = dict(
-            ti.lang.impl.get_runtime().prog._debug_snode_runtime_directory_stats())
+        directory = dict(ti.lang.impl.get_runtime().prog._debug_snode_runtime_directory_stats())
         baseline_active = directory.get("active_tree_count")
     baseline_lifecycle = _snode_lifecycle_observation(ti, runtime_name)
     state: dict[str, Any] = {
@@ -2418,9 +2232,7 @@ def _build_snode_churn_case(ti: Any, runtime_name: str,
             tree = builder.finalize()
             tree_id = int(tree.id)
             generation_value = getattr(tree, "generation", None)
-            generation = (
-                None if generation_value is None else int(generation_value)
-            )
+            generation = None if generation_value is None else int(generation_value)
             activate(field)
             reduce_active(field)
             ti.sync()
@@ -2450,14 +2262,9 @@ def _build_snode_churn_case(ti: Any, runtime_name: str,
     def validate_fresh() -> dict[str, Any]:
         launch(collect_evidence=True)
         actual = int(accumulator[None])
-        generations = [
-            value for value in state["generations"] if value is not None
-        ]
+        generations = [value for value in state["generations"] if value is not None]
         generation_increasing = (
-            None if not generations else all(
-                left < right
-                for left, right in zip(generations, generations[1:])
-            )
+            None if not generations else all(left < right for left, right in zip(generations, generations[1:]))
         )
         route = _snode_churn_route(ti, state, runtime_name)
         return {
@@ -2469,9 +2276,9 @@ def _build_snode_churn_case(ti: Any, runtime_name: str,
             "unique_tree_ids": len(state["tree_ids"]),
             "generation_strictly_increasing": generation_increasing,
             "active_tree_count_recovered": (
-                route["active_tree_count_after_destroy"]
-                == route["baseline_active_tree_count"]
-                if runtime_name == "forge" else None
+                route["active_tree_count_after_destroy"] == route["baseline_active_tree_count"]
+                if runtime_name == "forge"
+                else None
             ),
         }
 
@@ -2480,18 +2287,13 @@ def _build_snode_churn_case(ti: Any, runtime_name: str,
         "reset": reset,
         "validate": validate_fresh,
         "route": lambda: _snode_churn_route(ti, state, runtime_name),
-        "stability_observe": lambda: _snode_lifecycle_observation(
-            ti, runtime_name),
+        "stability_observe": lambda: _snode_lifecycle_observation(ti, runtime_name),
         "logical_bytes": 0,
-        "traffic_model": (
-            "lifecycle transaction; no simplified logical bandwidth is claimed"
-        ),
+        "traffic_model": ("lifecycle transaction; no simplified logical bandwidth is claimed"),
         "workload_contract": {
             "case_id": "DIRECT-004-CHURN",
             "comparison_class": "direct-stability",
-            "public_api": (
-                "ti.FieldsBuilder pointer+dense tree finalize/use/destroy"
-            ),
+            "public_api": ("ti.FieldsBuilder pointer+dense tree finalize/use/destroy"),
             "layout": "pointer_1d_64_blocks_then_dense_8",
             "active_blocks": active_blocks,
             "active_cells": active_cells,
@@ -2513,30 +2315,25 @@ def _build_snode_churn_case(ti: Any, runtime_name: str,
                 "transaction per launch; lifecycle telemetry is excluded; "
                 "this is lifecycle throughput, not warm kernel latency"
             ),
-            "scope_boundary": (
-                "historical churn only; simultaneous-live capacity is a separate case"
-            ),
+            "scope_boundary": ("historical churn only; simultaneous-live capacity is a separate case"),
         },
     }
 
 
-def _snode_concurrent_route(state: dict[str, Any], runtime_name: str,
-                            concurrent_trees: int) -> dict[str, Any]:
+def _snode_concurrent_route(state: dict[str, Any], runtime_name: str, concurrent_trees: int) -> dict[str, Any]:
     lifecycle_after = state["last_lifecycle_observation"]
     lifecycle_plateau = _snode_lifecycle_plateau(
-        state["baseline_lifecycle"], lifecycle_after,
+        state["baseline_lifecycle"],
+        lifecycle_after,
         require_directory_plateau=False,
-        require_registration_plateau=False)
-    forge_evidence_ok = (
-        runtime_name != "forge" or bool(
-            state["peak_directory"] is not None
-            and state["after_directory"] is not None
-            and state["peak_directory"].get("available") is True
-            and state["peak_directory"].get("active_tree_count")
-            == state["baseline_active_tree_count"] + concurrent_trees
-            and state["after_directory"].get("active_tree_count")
-            == state["baseline_active_tree_count"]
-        )
+        require_registration_plateau=False,
+    )
+    forge_evidence_ok = runtime_name != "forge" or bool(
+        state["peak_directory"] is not None
+        and state["after_directory"] is not None
+        and state["peak_directory"].get("available") is True
+        and state["peak_directory"].get("active_tree_count") == state["baseline_active_tree_count"] + concurrent_trees
+        and state["after_directory"].get("active_tree_count") == state["baseline_active_tree_count"]
     )
     return {
         "classification": (
@@ -2566,8 +2363,7 @@ def _snode_concurrent_route(state: dict[str, Any], runtime_name: str,
     }
 
 
-def _build_snode_concurrent_case(ti: Any, runtime_name: str,
-                                 preset: str) -> dict[str, Any]:
+def _build_snode_concurrent_case(ti: Any, runtime_name: str, preset: str) -> dict[str, Any]:
     concurrent_trees = {
         "small": 128,
         "medium": 512,
@@ -2588,9 +2384,9 @@ def _build_snode_concurrent_case(ti: Any, runtime_name: str,
     ti.sync()
     baseline_active = None
     if runtime_name == "forge":
-        baseline_active = dict(
-            ti.lang.impl.get_runtime().prog._debug_snode_runtime_directory_stats()
-        )["active_tree_count"]
+        baseline_active = dict(ti.lang.impl.get_runtime().prog._debug_snode_runtime_directory_stats())[
+            "active_tree_count"
+        ]
     baseline_lifecycle = _snode_lifecycle_observation(ti, runtime_name)
     state: dict[str, Any] = {
         "cycles_completed": 0,
@@ -2621,9 +2417,7 @@ def _build_snode_concurrent_case(ti: Any, runtime_name: str,
                 tree_ids = [int(tree.id) for tree in trees]
                 state["peak_unique_tree_ids"] = len(set(tree_ids))
             if collect_evidence and runtime_name == "forge":
-                state["peak_directory"] = dict(
-                    ti.lang.impl.get_runtime().prog.
-                    _debug_snode_runtime_directory_stats())
+                state["peak_directory"] = dict(ti.lang.impl.get_runtime().prog._debug_snode_runtime_directory_stats())
             write_value(fields[0], 17)
             write_value(fields[-1], 29)
             sum_endpoints(fields[0], fields[-1])
@@ -2633,12 +2427,9 @@ def _build_snode_concurrent_case(ti: Any, runtime_name: str,
                 destroyed.add(index)
             ti.sync()
             if collect_evidence and runtime_name == "forge":
-                state["after_directory"] = dict(
-                    ti.lang.impl.get_runtime().prog.
-                    _debug_snode_runtime_directory_stats())
+                state["after_directory"] = dict(ti.lang.impl.get_runtime().prog._debug_snode_runtime_directory_stats())
             if collect_evidence:
-                state["last_lifecycle_observation"] = (
-                    _snode_lifecycle_observation(ti, runtime_name))
+                state["last_lifecycle_observation"] = _snode_lifecycle_observation(ti, runtime_name)
             state["cycles_completed"] += 1
         except Exception as error:
             state["last_error"] = repr(error)
@@ -2660,8 +2451,7 @@ def _build_snode_concurrent_case(ti: Any, runtime_name: str,
     def validate_fresh() -> dict[str, Any]:
         launch(collect_evidence=True)
         actual = int(accumulator[None])
-        route = _snode_concurrent_route(
-            state, runtime_name, concurrent_trees)
+        route = _snode_concurrent_route(state, runtime_name, concurrent_trees)
         return {
             "passed": bool(actual == 46 and route["passed"]),
             "comparison": "exact_first_plus_last_tree_value",
@@ -2670,9 +2460,9 @@ def _build_snode_concurrent_case(ti: Any, runtime_name: str,
             "concurrent_tree_target": concurrent_trees,
             "peak_unique_tree_ids": state["peak_unique_tree_ids"],
             "active_tree_count_recovered": (
-                None if runtime_name == "vanilla" else
-                state["after_directory"]["active_tree_count"]
-                == state["baseline_active_tree_count"]
+                None
+                if runtime_name == "vanilla"
+                else state["after_directory"]["active_tree_count"] == state["baseline_active_tree_count"]
             ),
         }
 
@@ -2680,14 +2470,10 @@ def _build_snode_concurrent_case(ti: Any, runtime_name: str,
         "launch": lambda: launch(collect_evidence=False),
         "reset": reset,
         "validate": validate_fresh,
-        "route": lambda: _snode_concurrent_route(
-            state, runtime_name, concurrent_trees),
-        "stability_observe": lambda: _snode_lifecycle_observation(
-            ti, runtime_name),
+        "route": lambda: _snode_concurrent_route(state, runtime_name, concurrent_trees),
+        "stability_observe": lambda: _snode_lifecycle_observation(ti, runtime_name),
         "logical_bytes": 0,
-        "traffic_model": (
-            "simultaneously-live lifecycle capacity; no logical bandwidth claimed"
-        ),
+        "traffic_model": ("simultaneously-live lifecycle capacity; no logical bandwidth claimed"),
         "workload_contract": {
             "case_id": "DIRECT-004-CONCURRENT",
             "comparison_class": "direct-stability",
@@ -2703,8 +2489,7 @@ def _build_snode_concurrent_case(ti: Any, runtime_name: str,
                 "exact oracle, synchronization, reverse destruction, and process"
             ),
             "allowed_difference": (
-                "Forge reports runtime-directory capacity/count; vanilla marks "
-                "that telemetry unavailable"
+                "Forge reports runtime-directory capacity/count; vanilla marks " "that telemetry unavailable"
             ),
             "correctness": "all_unique_live_ids_endpoint_sum_and_full_retirement",
             "timing": (
@@ -2712,16 +2497,14 @@ def _build_snode_concurrent_case(ti: Any, runtime_name: str,
                 "transaction; peak/directory/lifecycle telemetry is excluded; "
                 "not historical churn and not warm kernel latency"
             ),
-            "scope_boundary": (
-                "simultaneously-live capacity only; historical churn is DIRECT-004-CHURN"
-            ),
+            "scope_boundary": ("simultaneously-live capacity only; historical churn is DIRECT-004-CHURN"),
         },
     }
 
 
 def _sparse_block_stencil_route(
-        runtime_name: str, source_sha256: str, state: dict[str, Any],
-        active_blocks: int, solver_iterations: int) -> dict[str, Any]:
+    runtime_name: str, source_sha256: str, state: dict[str, Any], active_blocks: int, solver_iterations: int
+) -> dict[str, Any]:
     return {
         "classification": f"{runtime_name}_shared_sparse_block_stencil",
         "public_api": (
@@ -2738,10 +2521,7 @@ def _sparse_block_stencil_route(
         "physical_backend_launches_assumed": False,
         "expected_active_blocks": active_blocks,
         "observed_active_blocks": state.get("observed_active_blocks"),
-        "passed": bool(
-            len(source_sha256) == 64
-            and state.get("observed_active_blocks") == active_blocks
-        ),
+        "passed": bool(len(source_sha256) == 64 and state.get("observed_active_blocks") == active_blocks),
     }
 
 
@@ -2753,34 +2533,27 @@ def _sparse_block_stencil_route_isolated(child: dict[str, Any]) -> bool:
     runtime = child.get("runtime")
     return bool(
         runtime in ("forge", "vanilla")
-        and route.get("classification")
-        == f"{runtime}_shared_sparse_block_stencil"
-        and route.get("adapter")
-        == "shared_vanilla_compatible_sparse_taichi_pipeline"
+        and route.get("classification") == f"{runtime}_shared_sparse_block_stencil"
+        and route.get("adapter") == "shared_vanilla_compatible_sparse_taichi_pipeline"
         and route.get("kernel_source_owner") == "benchmark"
-        and route.get("kernel_source_sha256")
-        == contract.get("kernel_source_sha256")
+        and route.get("kernel_source_sha256") == contract.get("kernel_source_sha256")
         and route.get("native_or_helper_api_used") is False
         and route.get("capacity_hint_used") is False
         and route.get("timed_host_deactivate_calls_per_replay") == 1
-        and route.get("ti_kernel_invocations_per_replay")
-        == contract.get("ti_kernel_invocations_per_replay")
+        and route.get("ti_kernel_invocations_per_replay") == contract.get("ti_kernel_invocations_per_replay")
         and route.get("physical_backend_launches_assumed") is False
-        and route.get("expected_active_blocks")
-        == contract.get("active_blocks")
-        and route.get("observed_active_blocks")
-        == contract.get("active_blocks")
+        and route.get("expected_active_blocks") == contract.get("active_blocks")
+        and route.get("observed_active_blocks") == contract.get("active_blocks")
         and route.get("passed") is True
     )
 
 
-def _build_sparse_block_stencil_case(
-        ti: Any, runtime_name: str, backend: str,
-        preset: str) -> dict[str, Any]:
+def _build_sparse_block_stencil_case(ti: Any, runtime_name: str, backend: str, preset: str) -> dict[str, Any]:
     if backend == "vulkan":
         raise RuntimeError(
             "vanilla Vulkan sparse SNode is unavailable; report it as a "
-            "capability boundary instead of a direct speed comparison")
+            "capability boundary instead of a direct speed comparison"
+        )
     configs = {
         "small": {
             "root_blocks": 48,
@@ -2823,8 +2596,7 @@ def _build_sparse_block_stencil_case(
     x_next = ti.field(dtype=ti.f32)
     builder = ti.FieldsBuilder()
     pointer = builder.pointer(ti.ij, (root_blocks, root_blocks))
-    pointer.dense(ti.ij, (block_size, block_size)).place(
-        x, rhs, ax, x_next)
+    pointer.dense(ti.ij, (block_size, block_size)).place(x, rhs, ax, x_next)
     tree = builder.finalize()
 
     dense_x = ti.field(dtype=ti.f32, shape=(domain_size, domain_size))
@@ -2862,9 +2634,7 @@ def _build_sparse_block_stencil_case(
 
     @ti.kernel
     def initialize_sparse(origin: ti.i32):
-        for bi, bj, li, lj in ti.ndrange(
-                active_blocks_per_axis, active_blocks_per_axis,
-                block_size, block_size):
+        for bi, bj, li, lj in ti.ndrange(active_blocks_per_axis, active_blocks_per_axis, block_size, block_size):
             i = (origin + bi) * block_size + li
             j = (origin + bj) * block_size + lj
             x[i, j] = ti.cast(1 + (i * 7 + j * 11 + 13) % 17, ti.f32)
@@ -2874,15 +2644,11 @@ def _build_sparse_block_stencil_case(
 
     @ti.kernel
     def initialize_dense(origin: ti.i32):
-        for bi, bj, li, lj in ti.ndrange(
-                active_blocks_per_axis, active_blocks_per_axis,
-                block_size, block_size):
+        for bi, bj, li, lj in ti.ndrange(active_blocks_per_axis, active_blocks_per_axis, block_size, block_size):
             i = (origin + bi) * block_size + li
             j = (origin + bj) * block_size + lj
-            dense_x[i, j] = ti.cast(
-                1 + (i * 7 + j * 11 + 13) % 17, ti.f32)
-            dense_rhs[i, j] = ti.cast(
-                1 + (i * 5 + j * 3 + 7) % 11, ti.f32)
+            dense_x[i, j] = ti.cast(1 + (i * 7 + j * 11 + 13) % 17, ti.f32)
+            dense_rhs[i, j] = ti.cast(1 + (i * 5 + j * 3 + 7) % 11, ti.f32)
 
     @ti.kernel
     def apply_sparse_operator():
@@ -2891,13 +2657,10 @@ def _build_sparse_block_stencil_case(
 
     @ti.kernel
     def apply_dense_operator(origin: ti.i32):
-        for bi, bj, li, lj in ti.ndrange(
-                active_blocks_per_axis, active_blocks_per_axis,
-                block_size, block_size):
+        for bi, bj, li, lj in ti.ndrange(active_blocks_per_axis, active_blocks_per_axis, block_size, block_size):
             i = (origin + bi) * block_size + li
             j = (origin + bj) * block_size + lj
-            dense_ax[i, j] = (
-                4.0 * dense_x[i, j] - dense_neighbor_sum(i, j))
+            dense_ax[i, j] = 4.0 * dense_x[i, j] - dense_neighbor_sum(i, j)
 
     @ti.kernel
     def relax_sparse():
@@ -2906,14 +2669,10 @@ def _build_sparse_block_stencil_case(
 
     @ti.kernel
     def relax_dense(origin: ti.i32):
-        for bi, bj, li, lj in ti.ndrange(
-                active_blocks_per_axis, active_blocks_per_axis,
-                block_size, block_size):
+        for bi, bj, li, lj in ti.ndrange(active_blocks_per_axis, active_blocks_per_axis, block_size, block_size):
             i = (origin + bi) * block_size + li
             j = (origin + bj) * block_size + lj
-            dense_next[i, j] = (
-                dense_x[i, j]
-                + 0.125 * (dense_rhs[i, j] - dense_ax[i, j]))
+            dense_next[i, j] = dense_x[i, j] + 0.125 * (dense_rhs[i, j] - dense_ax[i, j])
 
     @ti.kernel
     def commit_sparse():
@@ -2922,18 +2681,14 @@ def _build_sparse_block_stencil_case(
 
     @ti.kernel
     def commit_dense(origin: ti.i32):
-        for bi, bj, li, lj in ti.ndrange(
-                active_blocks_per_axis, active_blocks_per_axis,
-                block_size, block_size):
+        for bi, bj, li, lj in ti.ndrange(active_blocks_per_axis, active_blocks_per_axis, block_size, block_size):
             i = (origin + bi) * block_size + li
             j = (origin + bj) * block_size + lj
             dense_x[i, j] = dense_next[i, j]
 
     @ti.kernel
     def capture_sparse(origin: ti.i32, output: ti.types.ndarray()):
-        for bi, bj, li, lj in ti.ndrange(
-                active_blocks_per_axis, active_blocks_per_axis,
-                block_size, block_size):
+        for bi, bj, li, lj in ti.ndrange(active_blocks_per_axis, active_blocks_per_axis, block_size, block_size):
             local_i = bi * block_size + li
             local_j = bj * block_size + lj
             i = (origin + bi) * block_size + li
@@ -2942,9 +2697,7 @@ def _build_sparse_block_stencil_case(
 
     @ti.kernel
     def capture_dense(origin: ti.i32, output: ti.types.ndarray()):
-        for bi, bj, li, lj in ti.ndrange(
-                active_blocks_per_axis, active_blocks_per_axis,
-                block_size, block_size):
+        for bi, bj, li, lj in ti.ndrange(active_blocks_per_axis, active_blocks_per_axis, block_size, block_size):
             local_i = bi * block_size + li
             local_j = bj * block_size + lj
             i = (origin + bi) * block_size + li
@@ -2979,16 +2732,24 @@ def _build_sparse_block_stencil_case(
     capture_dense(origin_blocks, expected_snapshot)
     ti.sync()
     import numpy as np
+
     expected_host = np.asarray(expected_snapshot.to_numpy(), dtype=np.float32)
     source_sha256 = sha256_file(Path(__file__))
     state: dict[str, Any] = {"observed_active_blocks": None}
 
     def fingerprint(values: Any) -> dict[str, Any]:
         vector = np.asarray(values, dtype=np.float32).reshape(-1)
-        sample_indices = sorted(set((
-            0, vector.size // 4, vector.size // 2,
-            (3 * vector.size) // 4, vector.size - 1,
-        )))
+        sample_indices = sorted(
+            set(
+                (
+                    0,
+                    vector.size // 4,
+                    vector.size // 2,
+                    (3 * vector.size) // 4,
+                    vector.size - 1,
+                )
+            )
+        )
         return {
             "finite": bool(np.all(np.isfinite(vector))),
             "count": int(vector.size),
@@ -2997,8 +2758,7 @@ def _build_sparse_block_stencil_case(
             "minimum": float(vector.min()),
             "maximum": float(vector.max()),
             "sample_indices": sample_indices,
-            "sample_values": [
-                float(vector[index]) for index in sample_indices],
+            "sample_values": [float(vector[index]) for index in sample_indices],
         }
 
     expected_fingerprint = fingerprint(expected_host)
@@ -3009,20 +2769,14 @@ def _build_sparse_block_stencil_case(
         actual_host = np.asarray(actual_snapshot.to_numpy(), dtype=np.float32)
         active_count = int(count_active_blocks())
         state["observed_active_blocks"] = active_count
-        difference = actual_host.astype(np.float64) - expected_host.astype(
-            np.float64)
+        difference = actual_host.astype(np.float64) - expected_host.astype(np.float64)
         max_abs = float(np.max(np.abs(difference)))
         rmse = float(np.sqrt(np.mean(difference * difference)))
         tolerance = 1.0e-5
         actual_fingerprint = fingerprint(actual_host)
         return {
-            "passed": bool(
-                active_count == active_blocks
-                and actual_fingerprint["finite"]
-                and max_abs <= tolerance),
-            "comparison": (
-                "coordinate_dense_oracle_for_rebuilt_sparse_five_point_"
-                "weighted_jacobi"),
+            "passed": bool(active_count == active_blocks and actual_fingerprint["finite"] and max_abs <= tolerance),
+            "comparison": ("coordinate_dense_oracle_for_rebuilt_sparse_five_point_" "weighted_jacobi"),
             "active_blocks": active_count,
             "expected_active_blocks": active_blocks,
             "max_abs_error": max_abs,
@@ -3038,26 +2792,27 @@ def _build_sparse_block_stencil_case(
         "reset_each_launch": True,
         "validate": validate,
         "route": lambda: _sparse_block_stencil_route(
-            runtime_name, source_sha256, state, active_blocks,
-            solver_iterations),
-        "stability_observe": lambda: _snode_lifecycle_observation(
-            ti, runtime_name),
+            runtime_name, source_sha256, state, active_blocks, solver_iterations
+        ),
+        "stability_observe": lambda: _snode_lifecycle_observation(ti, runtime_name),
         "logical_bytes": 0,
         "traffic_model": (
             "sparse deactivate/reactivate plus matrix-free solver transaction; "
-            "no simplified logical bandwidth is claimed"),
+            "no simplified logical bandwidth is claimed"
+        ),
         "case_preparation": {
             "excluded_from_timing": True,
             "description": (
                 "tree construction, dense coordinate oracle, oracle execution, "
-                "snapshot allocation, and validation transfers"),
+                "snapshot allocation, and validation transfers"
+            ),
         },
         "workload_contract": {
             "case_id": "DIRECT-005",
             "comparison_class": "direct",
             "public_api": (
-                "FieldsBuilder pointer+dense SNode, deactivate_all, and shared "
-                "benchmark-owned Taichi kernels"),
+                "FieldsBuilder pointer+dense SNode, deactivate_all, and shared " "benchmark-owned Taichi kernels"
+            ),
             "dimensions": 2,
             "layout": "pointer_2d_then_dense_8x8_four_f32_fields",
             "root_blocks_per_axis": root_blocks,
@@ -3079,19 +2834,24 @@ def _build_sparse_block_stencil_case(
             "shared": (
                 "identical FieldsBuilder DSL, pointer/dense layout, kernels, "
                 "active window, reset/rebuild transaction, iterations, oracle, "
-                "timing boundary, and process isolation"),
+                "timing boundary, and process isolation"
+            ),
             "allowed_difference": (
                 "Forge-only runtime memory/lifecycle counters are validation "
-                "telemetry outside timing and unavailable on vanilla"),
+                "telemetry outside timing and unavailable on vanilla"
+            ),
             "correctness": (
                 "full active-window f32 vector against coordinate-identical "
-                "dense oracle plus exact active-block count"),
+                "dense oracle plus exact active-block count"
+            ),
             "timing": (
                 "pointer deactivate_all + deterministic reactivation + four "
-                "sparse weighted-Jacobi steps; one sync outside the common batch"),
+                "sparse weighted-Jacobi steps; one sync outside the common batch"
+            ),
             "scope_boundary": (
                 "CUDA/CPU direct comparison; vanilla Vulkan sparse absence is "
-                "reported as a capability boundary, not a speed ratio"),
+                "reported as a capability boundary, not a speed ratio"
+            ),
             "tree_id": int(tree.id),
         },
     }
@@ -3099,8 +2859,7 @@ def _build_sparse_block_stencil_case(
 
 def _load_graph_mpm_workload() -> tuple[Any, Path]:
     source = Path(__file__).resolve().parents[1] / "graph_mpm_replay_bench.py"
-    spec = importlib.util.spec_from_file_location(
-        "_qualification_graph_mpm_workload", source)
+    spec = importlib.util.spec_from_file_location("_qualification_graph_mpm_workload", source)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load shared Graph MPM workload: {source}")
     module = importlib.util.module_from_spec(spec)
@@ -3108,8 +2867,7 @@ def _load_graph_mpm_workload() -> tuple[Any, Path]:
     return module, source
 
 
-def _mpm_state_comparison(left_arrays: Sequence[Any],
-                          right_arrays: Sequence[Any]) -> dict[str, Any]:
+def _mpm_state_comparison(left_arrays: Sequence[Any], right_arrays: Sequence[Any]) -> dict[str, Any]:
     import numpy as np
 
     names = ("x", "v", "C", "J", "grid_v", "grid_m", "image")
@@ -3126,19 +2884,14 @@ def _mpm_state_comparison(left_arrays: Sequence[Any],
     for name, left, right in zip(names, left_arrays, right_arrays):
         left_np = left.to_numpy()
         right_np = right.to_numpy()
-        difference = np.asarray(left_np, dtype=np.float64) - np.asarray(
-            right_np, dtype=np.float64)
+        difference = np.asarray(left_np, dtype=np.float64) - np.asarray(right_np, dtype=np.float64)
         max_abs = float(np.max(np.abs(difference))) if difference.size else 0.0
         rmse = float(np.sqrt(np.mean(difference * difference))) if difference.size else 0.0
         atol, rtol = tolerances[name]
         scale = float(np.max(np.abs(right_np))) if right_np.size else 0.0
         allowed = atol + rtol * scale
         fields[name] = {
-            "passed": bool(
-                np.all(np.isfinite(left_np))
-                and np.all(np.isfinite(right_np))
-                and max_abs <= allowed
-            ),
+            "passed": bool(np.all(np.isfinite(left_np)) and np.all(np.isfinite(right_np)) and max_abs <= allowed),
             "max_abs_error": max_abs,
             "rmse": rmse,
             "reference_scale": scale,
@@ -3148,7 +2901,7 @@ def _mpm_state_comparison(left_arrays: Sequence[Any],
         }
     return {
         "passed": all(item["passed"] for item in fields.values()),
-        "comparison": "same-runtime_graph_vs_direct_state" ,
+        "comparison": "same-runtime_graph_vs_direct_state",
         "fields": fields,
     }
 
@@ -3183,16 +2936,20 @@ def _mpm_endpoint_fingerprint(arrays: Sequence[Any]) -> dict[str, Any]:
 
 
 def _active_grid_mpm_route(
-        graph: Any, runtime_name: str, backend: str, source_sha256: str,
-        grid_cells: int, block_dim: int, sequence: Any | None,
-        bounded_handle: Any | None) -> dict[str, Any]:
+    graph: Any,
+    runtime_name: str,
+    backend: str,
+    source_sha256: str,
+    grid_cells: int,
+    block_dim: int,
+    sequence: Any | None,
+    bounded_handle: Any | None,
+) -> dict[str, Any]:
     """Describe the native active-grid route or prove the full-grid control."""
     class_module = graph.__class__.__module__
     if not _uses_native_adapter(runtime_name):
         expected_class_module = (
-            "taichi_forge.graph._graph"
-            if _uses_forge_package(runtime_name)
-            else "taichi.graph._graph"
+            "taichi_forge.graph._graph" if _uses_forge_package(runtime_name) else "taichi.graph._graph"
         )
         kernel_names = ["reset_grid", "p2g", "update_grid_full", "g2p"]
         return {
@@ -3222,14 +2979,11 @@ def _active_grid_mpm_route(
             ),
         }
 
-    compact_route = _native_compact_route(
-        getattr(sequence.workspace, "_compact", None), runtime_name, backend)
+    compact_route = _native_compact_route(getattr(sequence.workspace, "_compact", None), runtime_name, backend)
     capabilities = bounded_handle.capabilities
     return {
         "classification": "forge_device_compact_bounded_active_grid_graph",
-        "public_api": (
-            "DevicePrefixSequence.compact plus GraphBuilder.dispatch_bounded"
-        ),
+        "public_api": ("DevicePrefixSequence.compact plus GraphBuilder.dispatch_bounded"),
         "adapter": "forge_native_active_grid_graph_pipeline",
         "kernel_source_owner": "benchmark",
         "kernel_source_sha256": source_sha256,
@@ -3243,13 +2997,10 @@ def _active_grid_mpm_route(
         "physical_launch_kind": capabilities.physical_launch_kind,
         "masked_capacity": capabilities.masked_capacity,
         "exact_grid": capabilities.exact_grid,
-        "producer_owned_launch_state": (
-            capabilities.producer_owned_launch_state),
+        "producer_owned_launch_state": (capabilities.producer_owned_launch_state),
         "preparation_dispatches": capabilities.preparation_dispatches,
         "requested_block_dim": block_dim,
-        "workspace_bytes": (
-            sequence.workspace.workspace_bytes_current
-            + bounded_handle.workspace_bytes),
+        "workspace_bytes": (sequence.workspace.workspace_bytes_current + bounded_handle.workspace_bytes),
         "passed": bool(
             class_module == "taichi_forge.graph._graph"
             and compact_route["passed"]
@@ -3269,13 +3020,8 @@ def _graph_mpm_route(graph: Any, runtime_name: str, substeps: int) -> dict[str, 
     expected_dispatches = substeps * 4 + 2
     class_module = graph.__class__.__module__
     if runtime_name == "forge":
-        observed_kind = (
-            instance_info.get("kind") if isinstance(instance_info, dict) else None
-        )
-        observed_dispatches = (
-            debug_info.get("dispatch_count")
-            if isinstance(debug_info, dict) else None
-        )
+        observed_kind = instance_info.get("kind") if isinstance(instance_info, dict) else None
+        observed_dispatches = debug_info.get("dispatch_count") if isinstance(debug_info, dict) else None
         passed = bool(
             class_module == "taichi_forge.graph._graph"
             and isinstance(debug_info, dict)
@@ -3287,19 +3033,14 @@ def _graph_mpm_route(graph: Any, runtime_name: str, substeps: int) -> dict[str, 
     else:
         observed_kind = "vanilla_compiled_graph"
         observed_dispatches = expected_dispatches
-        passed = bool(
-            class_module == "taichi.graph._graph"
-            and getattr(graph, "_compiled_graph", None) is not None
-        )
+        passed = bool(class_module == "taichi.graph._graph" and getattr(graph, "_compiled_graph", None) is not None)
         classification = "vanilla_public_compiled_graph"
     return {
         "public_api": "ti.graph.GraphBuilder().dispatch/append/compile; graph.run(args)",
         "classification": classification,
         "class_module": class_module,
         "class_source": None if source is None else str(source),
-        "class_source_sha256": (
-            None if source is None or not source.is_file() else sha256_file(source)
-        ),
+        "class_source_sha256": (None if source is None or not source.is_file() else sha256_file(source)),
         "expected_dispatches_per_frame": expected_dispatches,
         "observed_dispatches_per_frame": observed_dispatches,
         "observed_instance_kind": observed_kind,
@@ -3309,8 +3050,7 @@ def _graph_mpm_route(graph: Any, runtime_name: str, substeps: int) -> dict[str, 
     }
 
 
-def _build_mpm_case(ti: Any, runtime_name: str, operation: str,
-                    preset: str) -> dict[str, Any]:
+def _build_mpm_case(ti: Any, runtime_name: str, operation: str, preset: str) -> dict[str, Any]:
     workload, source = _load_graph_mpm_workload()
     config = GRAPH_MPM_PRESETS[preset]
     particles = config["particles"]
@@ -3345,8 +3085,7 @@ def _build_mpm_case(ti: Any, runtime_name: str, operation: str,
         target_x, target_v, target_C, target_J, target_grid_v, target_grid_m, target_image = target
         for _ in range(substeps):
             reset_grid(target_grid_v, target_grid_m)
-            p2g(target_x, target_v, target_C, target_J,
-                target_grid_v, target_grid_m)
+            p2g(target_x, target_v, target_C, target_J, target_grid_v, target_grid_m)
             update_grid(target_grid_v, target_grid_m)
             g2p(target_x, target_v, target_C, target_J, target_grid_v)
         clear_image(target_image)
@@ -3391,9 +3130,7 @@ def _build_mpm_case(ti: Any, runtime_name: str, operation: str,
         "validate": validate_fresh,
         "route": route,
         "logical_bytes": 0,
-        "traffic_model": (
-            "MLS-MPM frame; no simplified logical-byte bandwidth is claimed"
-        ),
+        "traffic_model": ("MLS-MPM frame; no simplified logical-byte bandwidth is claimed"),
         "case_preparation": {
             "graph_build_ms": graph_build_ms,
             "particles": particles,
@@ -3425,8 +3162,7 @@ def _build_mpm_case(ti: Any, runtime_name: str, operation: str,
     }
 
 
-def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
-                                preset: str) -> dict[str, Any]:
+def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str, preset: str) -> dict[str, Any]:
     """Build one stationary 2-D MLS-MPM step with a thin active-grid adapter.
 
     The stationary equilibrium keeps the active-domain cardinality and physical
@@ -3455,10 +3191,11 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
 
     @ti.kernel
     def init_state(
-            x: ti.types.ndarray(ndim=1),
-            v: ti.types.ndarray(ndim=1),
-            C: ti.types.ndarray(ndim=1),
-            J: ti.types.ndarray(ndim=1)):
+        x: ti.types.ndarray(ndim=1),
+        v: ti.types.ndarray(ndim=1),
+        C: ti.types.ndarray(ndim=1),
+        J: ti.types.ndarray(ndim=1),
+    ):
         side = ti.cast(ti.sqrt(ti.cast(particles, ti.f32)), ti.i32)
         for p in range(particles):
             i = p % side
@@ -3477,9 +3214,10 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
 
     @ti.kernel
     def reset_grid(
-            grid_v: ti.types.ndarray(ndim=2),
-            grid_m: ti.types.ndarray(dtype=ti.f32, ndim=2),
-            active_flags: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        grid_v: ti.types.ndarray(ndim=2),
+        grid_m: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        active_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
         for i, j in grid_m:
             grid_v[i, j] = ti.Vector.zero(ti.f32, 2)
             grid_m[i, j] = 0.0
@@ -3487,13 +3225,14 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
 
     @ti.kernel
     def p2g(
-            x: ti.types.ndarray(ndim=1),
-            v: ti.types.ndarray(ndim=1),
-            C: ti.types.ndarray(ndim=1),
-            J: ti.types.ndarray(ndim=1),
-            grid_v: ti.types.ndarray(ndim=2),
-            grid_m: ti.types.ndarray(dtype=ti.f32, ndim=2),
-            active_flags: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        x: ti.types.ndarray(ndim=1),
+        v: ti.types.ndarray(ndim=1),
+        C: ti.types.ndarray(ndim=1),
+        J: ti.types.ndarray(ndim=1),
+        grid_v: ti.types.ndarray(ndim=2),
+        grid_m: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        active_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
         for p in x:
             Xp = x[p] * inv_dx
             base = ti.cast(Xp - 0.5, ti.i32)
@@ -3503,10 +3242,7 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
                 0.75 - (fx - 1.0) ** 2,
                 0.5 * (fx - 0.5) ** 2,
             ]
-            stress = (
-                -dt * 4.0 * elastic_modulus * p_vol * (J[p] - 1.0)
-                * inv_dx * inv_dx
-            )
+            stress = -dt * 4.0 * elastic_modulus * p_vol * (J[p] - 1.0) * inv_dx * inv_dx
             affine = ti.Matrix([[stress, 0.0], [0.0, stress]]) + p_mass * C[p]
             for i, j in ti.static(ti.ndrange(3, 3)):
                 offset = ti.Vector([i, j])
@@ -3518,20 +3254,20 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
                 ti.atomic_or(active_flags[node.x * grid + node.y], 1)
 
     @ti.kernel
-    def update_grid_full(
-            grid_v: ti.types.ndarray(ndim=2),
-            grid_m: ti.types.ndarray(dtype=ti.f32, ndim=2)):
+    def update_grid_full(grid_v: ti.types.ndarray(ndim=2), grid_m: ti.types.ndarray(dtype=ti.f32, ndim=2)):
         for i, j in grid_m:
             if grid_m[i, j] > 0.0:
                 grid_v[i, j] /= grid_m[i, j]
 
     if runtime_name == "forge":
+
         @ti.kernel
         def update_grid_active(
-                active_ids: ti.types.ndarray(dtype=ti.i32, ndim=1),
-                active_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
-                grid_v: ti.types.ndarray(ndim=2),
-                grid_m: ti.types.ndarray(dtype=ti.f32, ndim=2)):
+            active_ids: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            active_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            grid_v: ti.types.ndarray(ndim=2),
+            grid_m: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        ):
             ti.loop_config(block_dim=block_dim)
             for active_index in range(grid_cells):
                 if active_index < ti.device_extent_count(active_extent):
@@ -3540,16 +3276,18 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
                     j = flat - i * grid
                     if grid_m[i, j] > 0.0:
                         grid_v[i, j] /= grid_m[i, j]
+
     else:
         update_grid_active = None
 
     @ti.kernel
     def g2p(
-            x: ti.types.ndarray(ndim=1),
-            v: ti.types.ndarray(ndim=1),
-            C: ti.types.ndarray(ndim=1),
-            J: ti.types.ndarray(ndim=1),
-            grid_v: ti.types.ndarray(ndim=2)):
+        x: ti.types.ndarray(ndim=1),
+        v: ti.types.ndarray(ndim=1),
+        C: ti.types.ndarray(ndim=1),
+        J: ti.types.ndarray(ndim=1),
+        grid_v: ti.types.ndarray(ndim=2),
+    ):
         for p in x:
             Xp = x[p] * inv_dx
             base = ti.cast(Xp - 0.5, ti.i32)
@@ -3600,52 +3338,56 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
         "v": ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "v", vec2, ndim=1),
         "C": ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "C", mat2, ndim=1),
         "J": ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "J", ti.f32, ndim=1),
-        "grid_v": ti.graph.Arg(
-            ti.graph.ArgKind.NDARRAY, "grid_v", vec2, ndim=2),
-        "grid_m": ti.graph.Arg(
-            ti.graph.ArgKind.NDARRAY, "grid_m", ti.f32, ndim=2),
-        "flags": ti.graph.Arg(
-            ti.graph.ArgKind.NDARRAY, "flags", ti.i32, ndim=1),
+        "grid_v": ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "grid_v", vec2, ndim=2),
+        "grid_m": ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "grid_m", ti.f32, ndim=2),
+        "flags": ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "flags", ti.i32, ndim=1),
     }
     builder = ti.graph.GraphBuilder()
+    builder.dispatch(reset_grid, symbols["grid_v"], symbols["grid_m"], symbols["flags"])
     builder.dispatch(
-        reset_grid, symbols["grid_v"], symbols["grid_m"], symbols["flags"])
-    builder.dispatch(
-        p2g, symbols["x"], symbols["v"], symbols["C"], symbols["J"],
-        symbols["grid_v"], symbols["grid_m"], symbols["flags"])
+        p2g,
+        symbols["x"],
+        symbols["v"],
+        symbols["C"],
+        symbols["J"],
+        symbols["grid_v"],
+        symbols["grid_m"],
+        symbols["flags"],
+    )
 
     input_extent = output_extent = sequence = bounded_handle = None
     if runtime_name == "forge":
-        symbols.update({
-            "active_ids": ti.graph.Arg(
-                ti.graph.ArgKind.NDARRAY, "active_ids", ti.i32, ndim=1),
-            "input_extent": ti.graph.Arg(
-                ti.graph.ArgKind.NDARRAY, "input_extent", ti.i32, ndim=1),
-            "compacted_ids": ti.graph.Arg(
-                ti.graph.ArgKind.NDARRAY, "compacted_ids", ti.i32, ndim=1),
-            "output_extent": ti.graph.Arg(
-                ti.graph.ArgKind.NDARRAY, "output_extent", ti.i32, ndim=1),
-        })
+        symbols.update(
+            {
+                "active_ids": ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "active_ids", ti.i32, ndim=1),
+                "input_extent": ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "input_extent", ti.i32, ndim=1),
+                "compacted_ids": ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "compacted_ids", ti.i32, ndim=1),
+                "output_extent": ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output_extent", ti.i32, ndim=1),
+            }
+        )
         input_extent = ti.DeviceExtent(grid_cells)
         output_extent = ti.DeviceExtent(grid_cells)
         input_extent.set(grid_cells)
         launch_state = output_extent.dispatch_state(block_dim)
         sequence = ti.algorithms.DevicePrefixSequence(grid_cells)
         sequence.input(symbols["active_ids"], symbols["input_extent"]).compact(
-            symbols["flags"], symbols["compacted_ids"],
-            symbols["output_extent"], dispatch_state=launch_state)
+            symbols["flags"], symbols["compacted_ids"], symbols["output_extent"], dispatch_state=launch_state
+        )
         builder.append_native(sequence)
         bounded_handle = builder.dispatch_bounded(
             update_grid_active,
-            symbols["compacted_ids"], symbols["output_extent"],
-            symbols["grid_v"], symbols["grid_m"],
-            extent=symbols["output_extent"], capacity=grid_cells,
-            block_dim=block_dim, launch_state=launch_state)
+            symbols["compacted_ids"],
+            symbols["output_extent"],
+            symbols["grid_v"],
+            symbols["grid_m"],
+            extent=symbols["output_extent"],
+            capacity=grid_cells,
+            block_dim=block_dim,
+            launch_state=launch_state,
+        )
     else:
         builder.dispatch(update_grid_full, symbols["grid_v"], symbols["grid_m"])
-    builder.dispatch(
-        g2p, symbols["x"], symbols["v"], symbols["C"], symbols["J"],
-        symbols["grid_v"])
+    builder.dispatch(g2p, symbols["x"], symbols["v"], symbols["C"], symbols["J"], symbols["grid_v"])
     graph_started = time.perf_counter_ns()
     graph = builder.compile()
     ti.sync()
@@ -3653,16 +3395,23 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
 
     x, v, C, J, grid_v, grid_m, _ = arrays
     graph_args = {
-        "x": x, "v": v, "C": C, "J": J,
-        "grid_v": grid_v, "grid_m": grid_m, "flags": active_flags,
+        "x": x,
+        "v": v,
+        "C": C,
+        "J": J,
+        "grid_v": grid_v,
+        "grid_m": grid_m,
+        "flags": active_flags,
     }
     if runtime_name == "forge":
-        graph_args.update({
-            "active_ids": active_ids,
-            "input_extent": input_extent,
-            "compacted_ids": compacted_ids,
-            "output_extent": output_extent,
-        })
+        graph_args.update(
+            {
+                "active_ids": active_ids,
+                "input_extent": input_extent,
+                "compacted_ids": compacted_ids,
+                "output_extent": output_extent,
+            }
+        )
 
     def reset_state(target: Sequence[Any], flags: Any) -> None:
         target_x, target_v, target_C, target_J, target_grid_v, target_grid_m, image = target
@@ -3676,8 +3425,7 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
     def direct_full_frame(target: Sequence[Any], flags: Any) -> None:
         target_x, target_v, target_C, target_J, target_grid_v, target_grid_m, _ = target
         reset_grid(target_grid_v, target_grid_m, flags)
-        p2g(target_x, target_v, target_C, target_J,
-            target_grid_v, target_grid_m, flags)
+        p2g(target_x, target_v, target_C, target_J, target_grid_v, target_grid_m, flags)
         update_grid_full(target_grid_v, target_grid_m)
         g2p(target_x, target_v, target_C, target_J, target_grid_v)
 
@@ -3698,40 +3446,36 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
         flags_host = active_flags.to_numpy()
         mass_host = grid_m.to_numpy()
         mass_mask = mass_host > np.float32(0.0)
-        active_flags_sha256 = hashlib.sha256(
-            np.ascontiguousarray(flags_host.astype(np.uint8)).tobytes()
-        ).hexdigest()
+        active_flags_sha256 = hashlib.sha256(np.ascontiguousarray(flags_host.astype(np.uint8)).tobytes()).hexdigest()
         mass_mask_sha256 = hashlib.sha256(
             np.ascontiguousarray(mass_mask.reshape(-1).astype(np.uint8)).tobytes()
         ).hexdigest()
         active_count = int(flags_host.sum())
         mass_active_count = int(mass_mask.sum())
-        published_count = (
-            int(output_extent.snapshot().count)
-            if runtime_name == "forge" else active_count
-        )
+        published_count = int(output_extent.snapshot().count) if runtime_name == "forge" else active_count
         expected_mass = particles * p_mass
         actual_mass = float(mass_host.astype(np.float64).sum())
         mass_error = abs(actual_mass - expected_mass)
         mass_tolerance = max(1.0e-8, abs(expected_mass) * 5.0e-5)
-        flags_match_mass = bool(np.array_equal(
-            flags_host.astype(bool), mass_mask.reshape(-1)))
+        flags_match_mass = bool(np.array_equal(flags_host.astype(bool), mass_mask.reshape(-1)))
         fingerprint = _mpm_endpoint_fingerprint(arrays)
-        comparison.update({
-            "comparison": "same-runtime_active_grid_vs_full_grid_state",
-            "endpoint_fingerprint": fingerprint,
-            "active_count": active_count,
-            "mass_active_count": mass_active_count,
-            "published_count": published_count,
-            "active_flags_sha256": active_flags_sha256,
-            "mass_mask_sha256": mass_mask_sha256,
-            "active_fraction": active_count / grid_cells,
-            "flags_match_positive_mass": flags_match_mass,
-            "expected_grid_mass": expected_mass,
-            "actual_grid_mass": actual_mass,
-            "grid_mass_abs_error": mass_error,
-            "grid_mass_tolerance": mass_tolerance,
-        })
+        comparison.update(
+            {
+                "comparison": "same-runtime_active_grid_vs_full_grid_state",
+                "endpoint_fingerprint": fingerprint,
+                "active_count": active_count,
+                "mass_active_count": mass_active_count,
+                "published_count": published_count,
+                "active_flags_sha256": active_flags_sha256,
+                "mass_mask_sha256": mass_mask_sha256,
+                "active_fraction": active_count / grid_cells,
+                "flags_match_positive_mass": flags_match_mass,
+                "expected_grid_mass": expected_mass,
+                "actual_grid_mass": actual_mass,
+                "grid_mass_abs_error": mass_error,
+                "grid_mass_tolerance": mass_tolerance,
+            }
+        )
         comparison["passed"] = bool(
             comparison["passed"]
             and fingerprint["finite"]
@@ -3747,8 +3491,8 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
 
     def route() -> dict[str, Any]:
         return _active_grid_mpm_route(
-            graph, runtime_name, backend, source_sha256, grid_cells,
-            block_dim, sequence, bounded_handle)
+            graph, runtime_name, backend, source_sha256, grid_cells, block_dim, sequence, bounded_handle
+        )
 
     return {
         "launch": launch,
@@ -3756,10 +3500,7 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
         "validate": validate_fresh,
         "route": route,
         "logical_bytes": 0,
-        "traffic_model": (
-            "stationary MLS-MPM substep; no simplified logical-byte bandwidth "
-            "is claimed"
-        ),
+        "traffic_model": ("stationary MLS-MPM substep; no simplified logical-byte bandwidth " "is claimed"),
         "case_preparation": {
             "graph_build_ms": graph_build_ms,
             "particles": particles,
@@ -3787,8 +3528,7 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
             "kernel_specialized_api_used": False,
             "kernel_benchmark_workspace_kind": "none",
             "kernel_benchmark_workspace_field_count": 0,
-            "kernel_graph_kernel_names": [
-                "reset_grid", "p2g", "update_grid_full", "g2p"],
+            "kernel_graph_kernel_names": ["reset_grid", "p2g", "update_grid_full", "g2p"],
             "kernel_graph_dispatches_per_replay": 4,
             "kernel_ti_invocations_per_replay": 4,
             "kernel_physical_backend_launches_assumed": False,
@@ -3804,8 +3544,7 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
                 "outer synchronization, state tolerance, and mass oracle"
             ),
             "allowed_difference": (
-                "only the grid-update domain adapter: Forge device active set "
-                "versus vanilla full grid"
+                "only the grid-update domain adapter: Forge device active set " "versus vanilla full grid"
             ),
             "correctness": (
                 "same-runtime active/full full-state comparison, cross-runtime "
@@ -3822,8 +3561,8 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str,
 
 
 def _particle_hash_route(
-        workspace: Any | None, runtime_name: str, backend: str, bins: int,
-        kernel_source_sha256: str | None = None) -> dict[str, Any]:
+    workspace: Any | None, runtime_name: str, backend: str, bins: int, kernel_source_sha256: str | None = None
+) -> dict[str, Any]:
     if runtime_name == "forge":
         plan = getattr(workspace, "_native_bucket_builder_plan", None)
         expected_backend = {
@@ -3856,26 +3595,18 @@ def _particle_hash_route(
             "observed_backend": observed_backend,
             "observed_method": observed_method,
             "bins": bins,
-            "workspace_bytes_current": getattr(
-                workspace, "workspace_bytes_current", None),
-            "workspace_bytes_peak": getattr(
-                workspace, "workspace_bytes_peak", None),
+            "workspace_bytes_current": getattr(workspace, "workspace_bytes_current", None),
+            "workspace_bytes_peak": getattr(workspace, "workspace_bytes_peak", None),
             "passed": bool(
-                plan is not None
-                and observed_backend == expected_backend
-                and observed_method in expected_methods
+                plan is not None and observed_backend == expected_backend and observed_method in expected_methods
             ),
         }
     scan_elements = bins + 1
     scan_steps = (scan_elements - 1).bit_length() if bins > 0 else None
-    final_scan_copy_invocations = (
-        scan_steps % 2 if scan_steps is not None else None
-    )
+    final_scan_copy_invocations = scan_steps % 2 if scan_steps is not None else None
     non_scan_kernel_invocations = 5
     kernel_invocations = (
-        non_scan_kernel_invocations + scan_steps
-        + final_scan_copy_invocations
-        if scan_steps is not None else None
+        non_scan_kernel_invocations + scan_steps + final_scan_copy_invocations if scan_steps is not None else None
     )
     passed = bool(
         runtime_name in ("forge_kernel", "vanilla_kernel")
@@ -3899,8 +3630,12 @@ def _particle_hash_route(
         "final_scan_copy_kernel_invocations": final_scan_copy_invocations,
         "non_scan_ti_kernel_invocations_per_replay": non_scan_kernel_invocations,
         "stage_kernel_names": [
-            "generate_keys", "count_clear_and_atomic", "scan_ping_pong",
-            "copy_cursor", "atomic_scatter", "query_neighbors",
+            "generate_keys",
+            "count_clear_and_atomic",
+            "scan_ping_pong",
+            "copy_cursor",
+            "atomic_scatter",
+            "query_neighbors",
         ],
         "ti_kernel_invocations_per_replay": kernel_invocations,
         "physical_backend_launches_assumed": False,
@@ -3917,9 +3652,7 @@ def _particle_hash_route(
     }
 
 
-def _build_particle_spatial_hash_case(ti: Any, runtime_name: str,
-                                      backend: str,
-                                      elements: int) -> dict[str, Any]:
+def _build_particle_spatial_hash_case(ti: Any, runtime_name: str, backend: str, elements: int) -> dict[str, Any]:
     """Build a 2-D particle cell hash followed by an exact neighbor query."""
     import numpy as np
 
@@ -3932,20 +3665,15 @@ def _build_particle_spatial_hash_case(ti: Any, runtime_name: str,
     radius_squared = radius * radius
 
     host_index = np.arange(elements, dtype=np.int32)
-    host_x = ((host_index % particle_side).astype(np.float32) + 0.5) / np.float32(
-        particle_side)
-    host_y = ((host_index // particle_side).astype(np.float32) + 0.5) / np.float32(
-        particle_side)
+    host_x = ((host_index % particle_side).astype(np.float32) + 0.5) / np.float32(particle_side)
+    host_y = ((host_index // particle_side).astype(np.float32) + 0.5) / np.float32(particle_side)
     host_positions = np.stack((host_x, host_y), axis=1).astype(np.float32)
-    host_cell_x = np.minimum(
-        (host_x * np.float32(hash_side)).astype(np.int32), hash_side - 1)
-    host_cell_y = np.minimum(
-        (host_y * np.float32(hash_side)).astype(np.int32), hash_side - 1)
+    host_cell_x = np.minimum((host_x * np.float32(hash_side)).astype(np.int32), hash_side - 1)
+    host_cell_y = np.minimum((host_y * np.float32(hash_side)).astype(np.int32), hash_side - 1)
     expected_keys = host_cell_x * hash_side + host_cell_y
     expected_counts = np.bincount(expected_keys, minlength=bins).astype(np.int32)
     expected_offsets = np.zeros(bins + 1, dtype=np.int32)
-    expected_offsets[1:] = np.cumsum(
-        expected_counts, dtype=np.int64).astype(np.int32)
+    expected_offsets[1:] = np.cumsum(expected_counts, dtype=np.int64).astype(np.int32)
     expected_output = np.argsort(expected_keys, kind="stable").astype(np.int32)
     expected_neighbors = np.ones(elements, dtype=np.int32)
     source_sha256 = sha256_file(Path(__file__))
@@ -3953,10 +3681,7 @@ def _build_particle_spatial_hash_case(ti: Any, runtime_name: str,
     scan_steps = (scan_elements - 1).bit_length()
     final_scan_copy_invocations = scan_steps % 2
     non_scan_kernel_invocations = 5
-    kernel_invocations = (
-        non_scan_kernel_invocations + scan_steps
-        + final_scan_copy_invocations
-    )
+    kernel_invocations = non_scan_kernel_invocations + scan_steps + final_scan_copy_invocations
 
     positions = ti.Vector.ndarray(2, ti.f32, shape=elements)
     positions.from_numpy(host_positions)
@@ -3969,13 +3694,11 @@ def _build_particle_spatial_hash_case(ti: Any, runtime_name: str,
     run_offset_scan = None
     workspace = None
     if runtime_name == "forge":
-        workspace = ti.algorithms.BucketBuilderWorkspace(
-            max_items=elements, max_bins=bins)
+        workspace = ti.algorithms.BucketBuilderWorkspace(max_items=elements, max_bins=bins)
     else:
         cursor = ti.field(dtype=ti.i32, shape=bins)
         if runtime_name in ("forge_kernel", "vanilla_kernel"):
-            run_offset_scan = _build_common_kernel_i32_scan(
-                ti, offsets, bins + 1)
+            run_offset_scan = _build_common_kernel_i32_scan(ti, offsets, bins + 1)
         else:
             scanner = ti.algorithms.PrefixSumExecutor(bins + 1)
             run_offset_scan = lambda: scanner.run(offsets)
@@ -3986,8 +3709,7 @@ def _build_particle_spatial_hash_case(ti: Any, runtime_name: str,
             values[p] = p
 
     @ti.kernel
-    def generate_keys(
-            source: ti.types.ndarray(ndim=1)):
+    def generate_keys(source: ti.types.ndarray(ndim=1)):
         for p in range(elements):
             cell = ti.min(
                 ti.cast(source[p] * ti.cast(hash_side, ti.f32), ti.i32),
@@ -4018,8 +3740,7 @@ def _build_particle_spatial_hash_case(ti: Any, runtime_name: str,
                 output[target] = values[p]
 
     @ti.kernel
-    def query_neighbors(
-            source: ti.types.ndarray(ndim=1)):
+    def query_neighbors(source: ti.types.ndarray(ndim=1)):
         for p in range(elements):
             key = keys[p]
             cell_x = key // hash_side
@@ -4028,8 +3749,7 @@ def _build_particle_spatial_hash_case(ti: Any, runtime_name: str,
             for delta_x, delta_y in ti.static(ti.ndrange((-1, 2), (-1, 2))):
                 neighbor_x = cell_x + delta_x
                 neighbor_y = cell_y + delta_y
-                if (0 <= neighbor_x < hash_side
-                        and 0 <= neighbor_y < hash_side):
+                if 0 <= neighbor_x < hash_side and 0 <= neighbor_y < hash_side:
                     bucket = neighbor_x * hash_side + neighbor_y
                     begin = ti.cast(offsets[bucket], ti.i32)
                     end = ti.cast(offsets[bucket + 1], ti.i32)
@@ -4046,9 +3766,7 @@ def _build_particle_spatial_hash_case(ti: Any, runtime_name: str,
     def launch() -> None:
         generate_keys(positions)
         if runtime_name == "forge":
-            ti.algorithms.experimental_bucket_builder(
-                keys, values, offsets, output,
-                method="auto", workspace=workspace)
+            ti.algorithms.experimental_bucket_builder(keys, values, offsets, output, method="auto", workspace=workspace)
         else:
             vanilla_count()
             run_offset_scan()
@@ -4080,31 +3798,24 @@ def _build_particle_spatial_hash_case(ti: Any, runtime_name: str,
                 begin = int(expected_offsets[bucket])
                 end = int(expected_offsets[bucket + 1])
                 actual_canonical_output[begin:end].sort()
-                if not np.array_equal(
-                        actual_canonical_output[begin:end],
-                        expected_output[begin:end]):
+                if not np.array_equal(actual_canonical_output[begin:end], expected_output[begin:end]):
                     bucket_mismatch_count += 1
         else:
             bucket_mismatch_count = bins
         key_mismatch_count = int(np.count_nonzero(actual_keys != expected_keys))
-        offset_mismatch_count = int(
-            np.count_nonzero(actual_offsets != expected_offsets))
-        neighbor_mismatch_count = int(
-            np.count_nonzero(actual_neighbors != expected_neighbors))
+        offset_mismatch_count = int(np.count_nonzero(actual_offsets != expected_offsets))
+        neighbor_mismatch_count = int(np.count_nonzero(actual_neighbors != expected_neighbors))
 
         def exact_vector(actual: Any, expected: Any) -> dict[str, Any]:
             actual_i32 = np.ascontiguousarray(actual, dtype=np.int32)
             expected_i32 = np.ascontiguousarray(expected, dtype=np.int32)
             mismatch = np.flatnonzero(actual_i32 != expected_i32)
             count = int(expected_i32.size)
-            sample_indices = sorted(set((
-                0, count // 4, count // 2, (3 * count) // 4, count - 1)))
+            sample_indices = sorted(set((0, count // 4, count // 2, (3 * count) // 4, count - 1)))
             return {
                 "count": count,
-                "actual_sha256": hashlib.sha256(
-                    actual_i32.tobytes()).hexdigest(),
-                "expected_sha256": hashlib.sha256(
-                    expected_i32.tobytes()).hexdigest(),
+                "actual_sha256": hashlib.sha256(actual_i32.tobytes()).hexdigest(),
+                "expected_sha256": hashlib.sha256(expected_i32.tobytes()).hexdigest(),
                 "actual_sum": int(actual_i32.astype(np.int64).sum()),
                 "expected_sum": int(expected_i32.astype(np.int64).sum()),
                 "actual_minimum": int(actual_i32.min()),
@@ -4112,20 +3823,16 @@ def _build_particle_spatial_hash_case(ti: Any, runtime_name: str,
                 "actual_maximum": int(actual_i32.max()),
                 "expected_maximum": int(expected_i32.max()),
                 "sample_indices": sample_indices,
-                "actual_samples": [
-                    int(actual_i32[index]) for index in sample_indices],
-                "expected_samples": [
-                    int(expected_i32[index]) for index in sample_indices],
+                "actual_samples": [int(actual_i32[index]) for index in sample_indices],
+                "expected_samples": [int(expected_i32[index]) for index in sample_indices],
                 "mismatch_count": int(mismatch.size),
-                "first_mismatch": (
-                    None if mismatch.size == 0 else int(mismatch[0])),
+                "first_mismatch": (None if mismatch.size == 0 else int(mismatch[0])),
             }
 
         fingerprints = {
             "keys": exact_vector(actual_keys, expected_keys),
             "offsets": exact_vector(actual_offsets, expected_offsets),
-            "canonical_output": exact_vector(
-                actual_canonical_output, expected_output),
+            "canonical_output": exact_vector(actual_canonical_output, expected_output),
             "neighbors": exact_vector(actual_neighbors, expected_neighbors),
         }
         return {
@@ -4159,8 +3866,7 @@ def _build_particle_spatial_hash_case(ti: Any, runtime_name: str,
         "launch": launch,
         "reset": reset,
         "validate": validate_fresh,
-        "route": lambda: _particle_hash_route(
-            workspace, runtime_name, backend, bins, source_sha256),
+        "route": lambda: _particle_hash_route(workspace, runtime_name, backend, bins, source_sha256),
         "logical_bytes": 0,
         "traffic_model": (
             "particle cell hashing plus bucket construction and neighborhood "
@@ -4190,29 +3896,28 @@ def _build_particle_spatial_hash_case(ti: Any, runtime_name: str,
             "kernel_adapter": "benchmark_defined_ti_kernel_pipeline",
             "kernel_helper_api_used": False,
             "kernel_specialized_api_used": False,
-            "kernel_benchmark_workspace_kind": (
-                "cursor_i32_and_scan_scratch_i32_dense_fields"),
+            "kernel_benchmark_workspace_kind": ("cursor_i32_and_scan_scratch_i32_dense_fields"),
             "kernel_benchmark_workspace_field_count": 2,
             "kernel_scan_algorithm": "inclusive_hillis_steele_ping_pong",
             "kernel_scan_elements": scan_elements,
             "kernel_scan_steps": scan_steps,
-            "kernel_final_scan_copy_kernel_invocations": (
-                final_scan_copy_invocations),
-            "kernel_non_scan_ti_invocations_per_replay": (
-                non_scan_kernel_invocations),
+            "kernel_final_scan_copy_kernel_invocations": (final_scan_copy_invocations),
+            "kernel_non_scan_ti_invocations_per_replay": (non_scan_kernel_invocations),
             "kernel_stage_names": [
-                "generate_keys", "count_clear_and_atomic", "scan_ping_pong",
-                "copy_cursor", "atomic_scatter", "query_neighbors",
+                "generate_keys",
+                "count_clear_and_atomic",
+                "scan_ping_pong",
+                "copy_cursor",
+                "atomic_scatter",
+                "query_neighbors",
             ],
             "kernel_ti_invocations_per_replay": kernel_invocations,
             "kernel_physical_backend_launches_assumed": False,
             "forge_adapter": (
-                "native BucketBuilderWorkspace pipeline between shared key and "
-                "neighbor-query kernels"
+                "native BucketBuilderWorkspace pipeline between shared key and " "neighbor-query kernels"
             ),
             "vanilla_adapter": (
-                "equivalent clear/count, reusable PrefixSumExecutor, cursor "
-                "copy, and atomic-scatter pipeline"
+                "equivalent clear/count, reusable PrefixSumExecutor, cursor " "copy, and atomic-scatter pipeline"
             ),
             "shared": (
                 "same positions, key kernel, i32 fields, cell mapping, bucket "
@@ -4237,14 +3942,17 @@ def _build_particle_spatial_hash_case(ti: Any, runtime_name: str,
 
 
 def _adaptive_pbd_route(
-        worklist: Any | None, runtime_name: str, backend: str,
-        constraints: int, iterations: int,
-        kernel_source_sha256: str | None = None) -> dict[str, Any]:
+    worklist: Any | None,
+    runtime_name: str,
+    backend: str,
+    constraints: int,
+    iterations: int,
+    kernel_source_sha256: str | None = None,
+) -> dict[str, Any]:
     if runtime_name == "forge":
         workspace = getattr(worklist, "workspace", None)
         compact_workspace = getattr(workspace, "_compact", None)
-        compact_route = _native_compact_route(
-            compact_workspace, runtime_name, backend)
+        compact_route = _native_compact_route(compact_workspace, runtime_name, backend)
         memory = worklist.memory_report()
         return {
             "classification": "forge_device_worklist_adaptive_pbd",
@@ -4273,15 +3981,11 @@ def _adaptive_pbd_route(
         final_scan_copy_invocations = scan_steps % 2
         scan_pipelines_per_replay = iterations
         non_scan_kernel_invocations = 2 + 4 * iterations
-        kernel_invocations = (
-            non_scan_kernel_invocations
-            + scan_pipelines_per_replay
-            * (scan_steps + final_scan_copy_invocations)
+        kernel_invocations = non_scan_kernel_invocations + scan_pipelines_per_replay * (
+            scan_steps + final_scan_copy_invocations
         )
         return {
-            "classification": (
-                f"{runtime_name}_equivalent_adaptive_pbd_kernel_pipeline"
-            ),
+            "classification": (f"{runtime_name}_equivalent_adaptive_pbd_kernel_pipeline"),
             "adapter": "benchmark_defined_ti_kernel_pipeline",
             "kernel_source_owner": "benchmark",
             "kernel_source_sha256": kernel_source_sha256,
@@ -4296,13 +4000,15 @@ def _adaptive_pbd_route(
             "scan_elements": constraints,
             "scan_pipelines_per_replay": scan_pipelines_per_replay,
             "scan_steps_per_pipeline": scan_steps,
-            "final_scan_copy_kernel_invocations_per_pipeline": (
-                final_scan_copy_invocations),
-            "non_scan_ti_kernel_invocations_per_replay": (
-                non_scan_kernel_invocations),
+            "final_scan_copy_kernel_invocations_per_pipeline": (final_scan_copy_invocations),
+            "non_scan_ti_kernel_invocations_per_replay": (non_scan_kernel_invocations),
             "stage_kernel_names": [
-                "initialize_problem", "initialize_extents", "project_active",
-                "stage_flags", "scan_ping_pong", "stable_scatter",
+                "initialize_problem",
+                "initialize_extents",
+                "project_active",
+                "stage_flags",
+                "scan_ping_pong",
+                "stable_scatter",
                 "record_extent",
             ],
             "ti_kernel_invocations_per_replay": kernel_invocations,
@@ -4328,56 +4034,41 @@ def _adaptive_pbd_route(
         "classification": f"{runtime_name}_device_count_mask_prefix_scatter_pbd",
         "observed_method": (
             "device-count mask, shared Hillis-Steele i32 scan kernels, stable scatter"
-            if runtime_name in ("forge_kernel", "vanilla_kernel") else
-            "device-count mask, reusable PrefixSumExecutor, stable scatter"
+            if runtime_name in ("forge_kernel", "vanilla_kernel")
+            else "device-count mask, reusable PrefixSumExecutor, stable scatter"
         ),
         "passed": True,
     }
 
 
-def _adaptive_pbd_kernel_control_route_isolated(
-        child: dict[str, Any]) -> bool:
-    if (child.get("operation") != "adaptive_pbd"
-            or child.get("runtime") not in (
-                "forge_kernel", "vanilla_kernel")):
+def _adaptive_pbd_kernel_control_route_isolated(child: dict[str, Any]) -> bool:
+    if child.get("operation") != "adaptive_pbd" or child.get("runtime") not in ("forge_kernel", "vanilla_kernel"):
         return True
     route = child.get("route", {})
     contract = child.get("workload_contract", {})
     return bool(
         route.get("passed") is True
-        and route.get("classification")
-        == f"{child['runtime']}_equivalent_adaptive_pbd_kernel_pipeline"
+        and route.get("classification") == f"{child['runtime']}_equivalent_adaptive_pbd_kernel_pipeline"
         and route.get("adapter") == "benchmark_defined_ti_kernel_pipeline"
         and "native" not in json.dumps(route, sort_keys=True).lower()
         and route.get("kernel_source_owner") == "benchmark"
-        and route.get("kernel_source_sha256")
-        == contract.get("kernel_source_sha256")
+        and route.get("kernel_source_sha256") == contract.get("kernel_source_sha256")
         and route.get("helper_api_used") is False
         and route.get("specialized_api_used") is False
-        and route.get("benchmark_workspace_kind")
-        == contract.get("kernel_benchmark_workspace_kind")
+        and route.get("benchmark_workspace_kind") == contract.get("kernel_benchmark_workspace_kind")
         and route.get("benchmark_workspace_field_count") == 6
-        and route.get("benchmark_workspace_field_count")
-        == contract.get("kernel_benchmark_workspace_field_count")
-        and route.get("scan_algorithm")
-        == "inclusive_hillis_steele_ping_pong"
-        and route.get("scan_algorithm")
-        == contract.get("kernel_scan_algorithm")
-        and route.get("scan_elements")
-        == contract.get("kernel_scan_elements")
-        and route.get("scan_pipelines_per_replay")
-        == contract.get("kernel_scan_pipelines_per_replay")
-        and route.get("scan_steps_per_pipeline")
-        == contract.get("kernel_scan_steps_per_pipeline")
+        and route.get("benchmark_workspace_field_count") == contract.get("kernel_benchmark_workspace_field_count")
+        and route.get("scan_algorithm") == "inclusive_hillis_steele_ping_pong"
+        and route.get("scan_algorithm") == contract.get("kernel_scan_algorithm")
+        and route.get("scan_elements") == contract.get("kernel_scan_elements")
+        and route.get("scan_pipelines_per_replay") == contract.get("kernel_scan_pipelines_per_replay")
+        and route.get("scan_steps_per_pipeline") == contract.get("kernel_scan_steps_per_pipeline")
         and route.get("final_scan_copy_kernel_invocations_per_pipeline")
-        == contract.get(
-            "kernel_final_scan_copy_kernel_invocations_per_pipeline")
+        == contract.get("kernel_final_scan_copy_kernel_invocations_per_pipeline")
         and route.get("non_scan_ti_kernel_invocations_per_replay")
         == contract.get("kernel_non_scan_ti_invocations_per_replay")
-        and route.get("stage_kernel_names")
-        == contract.get("kernel_stage_names")
-        and route.get("ti_kernel_invocations_per_replay")
-        == contract.get("kernel_ti_invocations_per_replay")
+        and route.get("stage_kernel_names") == contract.get("kernel_stage_names")
+        and route.get("ti_kernel_invocations_per_replay") == contract.get("kernel_ti_invocations_per_replay")
         and route.get("physical_backend_launches_assumed") is False
         and route.get("expected_backend") == child.get("backend")
         and route.get("observed_backend") == child.get("backend")
@@ -4386,8 +4077,7 @@ def _adaptive_pbd_kernel_control_route_isolated(
     )
 
 
-def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
-                             elements: int) -> dict[str, Any]:
+def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str, elements: int) -> dict[str, Any]:
     """Build a deterministic 2-D adaptive distance-constraint solve."""
     import numpy as np
 
@@ -4399,31 +4089,25 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
     tolerance = np.float32(1.0e-3)
     rest_length = np.float32(1.0)
     host_constraints = np.arange(constraints, dtype=np.int32)
-    host_stretch = (
-        np.float32(0.002)
-        + (host_constraints % 251).astype(np.float32)
-        * (np.float32(0.198) / np.float32(250.0))
+    host_stretch = np.float32(0.002) + (host_constraints % 251).astype(np.float32) * (
+        np.float32(0.198) / np.float32(250.0)
     )
     expected_residual = host_stretch.copy()
     expected_history = []
     for _ in range(iterations):
         active = expected_residual > tolerance
         expected_residual[active] *= residual_factor
-        expected_history.append(int(np.count_nonzero(
-            expected_residual > tolerance)))
+        expected_history.append(int(np.count_nonzero(expected_residual > tolerance)))
     expected_left_x = (host_stretch - expected_residual) * np.float32(0.5)
     expected_right_x = rest_length + host_stretch - expected_left_x
-    expected_active_ids = np.flatnonzero(
-        expected_residual > tolerance).astype(np.int32)
+    expected_active_ids = np.flatnonzero(expected_residual > tolerance).astype(np.int32)
     source_sha256 = sha256_file(Path(__file__))
     scan_steps = (constraints - 1).bit_length()
     final_scan_copy_invocations = scan_steps % 2
     scan_pipelines_per_replay = iterations
     non_scan_kernel_invocations = 2 + 4 * iterations
-    kernel_invocations = (
-        non_scan_kernel_invocations
-        + scan_pipelines_per_replay
-        * (scan_steps + final_scan_copy_invocations)
+    kernel_invocations = non_scan_kernel_invocations + scan_pipelines_per_replay * (
+        scan_steps + final_scan_copy_invocations
     )
 
     positions = ti.Vector.ndarray(2, ti.f32, shape=particles)
@@ -4448,76 +4132,68 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
         )
         prefix_field = ti.field(dtype=ti.i32, shape=constraints)
         if runtime_name in ("forge_kernel", "vanilla_kernel"):
-            run_prefix_scan = _build_common_kernel_i32_scan(
-                ti, prefix_field, constraints)
+            run_prefix_scan = _build_common_kernel_i32_scan(ti, prefix_field, constraints)
         else:
             scanner = ti.algorithms.PrefixSumExecutor(constraints)
             run_prefix_scan = lambda: scanner.run(prefix_field)
 
     @ti.kernel
     def initialize_problem(
-            target_positions: ti.types.ndarray(ndim=1),
-            source_stretch: ti.types.ndarray(dtype=ti.f32, ndim=1),
-            active_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            history: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        target_positions: ti.types.ndarray(ndim=1),
+        source_stretch: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        active_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        history: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
         for constraint in range(constraints):
-            y = (
-                ti.cast(constraint % 1024, ti.f32)
-                / ti.cast(1024, ti.f32)
-            )
+            y = ti.cast(constraint % 1024, ti.f32) / ti.cast(1024, ti.f32)
             target_positions[2 * constraint] = ti.Vector([0.0, y])
-            target_positions[2 * constraint + 1] = ti.Vector([
-                rest_length + source_stretch[constraint], y])
+            target_positions[2 * constraint + 1] = ti.Vector([rest_length + source_stretch[constraint], y])
             active_values[constraint] = constraint
         for iteration in range(iterations):
             history[iteration] = 0
 
     @ti.kernel
     def initialize_vanilla_extents(
-            front_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            back_extent: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        front_extent: ti.types.ndarray(dtype=ti.i32, ndim=1), back_extent: ti.types.ndarray(dtype=ti.i32, ndim=1)
+    ):
         front_extent[0] = constraints
         back_extent[0] = 0
 
     @ti.kernel
     def project_active(
-            active_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            target_positions: ti.types.ndarray(ndim=1),
-            next_flags: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        active_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        target_positions: ti.types.ndarray(ndim=1),
+        next_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
         for slot in range(constraints):
             next_flags[slot] = 0
             if slot < extent[0]:
                 constraint = active_values[slot]
                 left_index = 2 * constraint
                 right_index = left_index + 1
-                delta = (
-                    target_positions[right_index]
-                    - target_positions[left_index]
-                )
+                delta = target_positions[right_index] - target_positions[left_index]
                 length = ti.sqrt(delta.dot(delta))
                 residual = length - rest_length
                 if ti.abs(residual) > tolerance:
-                    correction = (
-                        0.5 * relaxation * residual / length
-                    ) * delta
+                    correction = (0.5 * relaxation * residual / length) * delta
                     target_positions[left_index] += correction
                     target_positions[right_index] -= correction
                     if ti.abs(residual) * residual_factor > tolerance:
                         next_flags[slot] = 1
 
     @ti.kernel
-    def stage_vanilla_flags(
-            source_flags: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+    def stage_vanilla_flags(source_flags: ti.types.ndarray(dtype=ti.i32, ndim=1)):
         for slot in range(constraints):
             prefix_field[slot] = source_flags[slot]
 
     @ti.kernel
     def scatter_vanilla_active(
-            source_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            source_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            destination: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            destination_extent: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        source_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        source_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        destination: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        destination_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
         destination_extent[0] = prefix_field[constraints - 1]
         for slot in range(constraints):
             if source_flags[slot] != 0:
@@ -4525,41 +4201,32 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
 
     @ti.kernel
     def record_extent(
-            extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            history: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            iteration: ti.i32):
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        history: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        iteration: ti.i32,
+    ):
         history[iteration] = extent[0]
 
     def launch() -> None:
         if runtime_name == "forge":
             worklist.clear()
-            initialize_problem(
-                positions, stretch, worklist.values, active_history)
+            initialize_problem(positions, stretch, worklist.values, active_history)
             worklist.extent.set(constraints)
             for iteration in range(iterations):
-                project_active(
-                    worklist.values, worklist.extent.state, positions, flags)
+                project_active(worklist.values, worklist.extent.state, positions, flags)
                 worklist.select(flags, method="auto")
-                record_extent(
-                    worklist.extent.state, active_history, iteration)
+                record_extent(worklist.extent.state, active_history, iteration)
         else:
-            initialize_problem(
-                positions, stretch, vanilla_values[0], active_history)
-            initialize_vanilla_extents(
-                vanilla_extents[0], vanilla_extents[1])
+            initialize_problem(positions, stretch, vanilla_values[0], active_history)
+            initialize_vanilla_extents(vanilla_extents[0], vanilla_extents[1])
             front = 0
             for iteration in range(iterations):
                 back = 1 - front
-                project_active(
-                    vanilla_values[front], vanilla_extents[front], positions,
-                    flags)
+                project_active(vanilla_values[front], vanilla_extents[front], positions, flags)
                 stage_vanilla_flags(flags)
                 run_prefix_scan()
-                scatter_vanilla_active(
-                    vanilla_values[front], flags, vanilla_values[back],
-                    vanilla_extents[back])
-                record_extent(
-                    vanilla_extents[back], active_history, iteration)
+                scatter_vanilla_active(vanilla_values[front], flags, vanilla_values[back], vanilla_extents[back])
+                record_extent(vanilla_extents[back], active_history, iteration)
                 front = back
 
     def reset() -> None:
@@ -4584,46 +4251,39 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
         actual_history = active_history.to_numpy()
         actual_left = actual_positions[0::2, 0]
         actual_right = actual_positions[1::2, 0]
-        actual_y_error = float(np.max(np.abs(
-            actual_positions[:, 1]
-            - np.repeat(
-                (host_constraints % 1024).astype(np.float32)
-                / np.float32(1024.0), 2))))
+        actual_y_error = float(
+            np.max(
+                np.abs(
+                    actual_positions[:, 1]
+                    - np.repeat((host_constraints % 1024).astype(np.float32) / np.float32(1024.0), 2)
+                )
+            )
+        )
         left_error = float(np.max(np.abs(actual_left - expected_left_x)))
         right_error = float(np.max(np.abs(actual_right - expected_right_x)))
         actual_residual = actual_right - actual_left - rest_length
         if runtime_name == "forge":
             actual_active_extent = int(worklist.extent.state.to_numpy()[0])
-            actual_active_ids = worklist.values.to_numpy()[
-                :actual_active_extent]
+            actual_active_ids = worklist.values.to_numpy()[:actual_active_extent]
         else:
             final_buffer = iterations % 2
-            actual_active_extent = int(
-                vanilla_extents[final_buffer].to_numpy()[0])
-            actual_active_ids = vanilla_values[final_buffer].to_numpy()[
-                :actual_active_extent]
-        residual_error = float(np.max(np.abs(
-            actual_residual - expected_residual)))
-        history_mismatches = int(np.count_nonzero(
-            actual_history != np.asarray(expected_history, dtype=np.int32)))
+            actual_active_extent = int(vanilla_extents[final_buffer].to_numpy()[0])
+            actual_active_ids = vanilla_values[final_buffer].to_numpy()[:actual_active_extent]
+        residual_error = float(np.max(np.abs(actual_residual - expected_residual)))
+        history_mismatches = int(np.count_nonzero(actual_history != np.asarray(expected_history, dtype=np.int32)))
         monotonic = bool(np.all(actual_history[1:] <= actual_history[:-1]))
         if actual_active_ids.size == expected_active_ids.size:
-            active_id_mismatches = np.flatnonzero(
-                actual_active_ids != expected_active_ids)
+            active_id_mismatches = np.flatnonzero(actual_active_ids != expected_active_ids)
             active_id_mismatch_count = int(active_id_mismatches.size)
-            active_id_first_mismatch = (
-                None if active_id_mismatches.size == 0
-                else int(active_id_mismatches[0]))
+            active_id_first_mismatch = None if active_id_mismatches.size == 0 else int(active_id_mismatches[0])
         else:
-            active_id_mismatch_count = max(
-                int(actual_active_ids.size), int(expected_active_ids.size))
+            active_id_mismatch_count = max(int(actual_active_ids.size), int(expected_active_ids.size))
             active_id_first_mismatch = 0
 
         def observed_vector(actual: Any, dtype: Any) -> dict[str, Any]:
             vector = np.ascontiguousarray(actual, dtype=dtype).reshape(-1)
             count = int(vector.size)
-            sample_indices = sorted(set((
-                0, count // 4, count // 2, (3 * count) // 4, count - 1)))
+            sample_indices = sorted(set((0, count // 4, count // 2, (3 * count) // 4, count - 1)))
             return {
                 "count": count,
                 "dtype": str(vector.dtype),
@@ -4632,22 +4292,18 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
                 "minimum": float(vector.min()),
                 "maximum": float(vector.max()),
                 "sample_indices": sample_indices,
-                "samples": [
-                    float(vector[index]) for index in sample_indices],
+                "samples": [float(vector[index]) for index in sample_indices],
             }
 
         def exact_i32_vector(actual: Any, expected: Any) -> dict[str, Any]:
             actual_i32 = np.ascontiguousarray(actual, dtype=np.int32).reshape(-1)
-            expected_i32 = np.ascontiguousarray(
-                expected, dtype=np.int32).reshape(-1)
+            expected_i32 = np.ascontiguousarray(expected, dtype=np.int32).reshape(-1)
             if actual_i32.size == expected_i32.size:
                 mismatch = np.flatnonzero(actual_i32 != expected_i32)
                 mismatch_count = int(mismatch.size)
-                first_mismatch = (
-                    None if mismatch.size == 0 else int(mismatch[0]))
+                first_mismatch = None if mismatch.size == 0 else int(mismatch[0])
             else:
-                mismatch_count = max(
-                    int(actual_i32.size), int(expected_i32.size))
+                mismatch_count = max(int(actual_i32.size), int(expected_i32.size))
                 first_mismatch = 0
             actual_evidence = observed_vector(actual_i32, np.int32)
             expected_evidence = observed_vector(expected_i32, np.int32)
@@ -4663,11 +4319,9 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
                 "actual_maximum": int(actual_i32.max()),
                 "expected_maximum": int(expected_i32.max()),
                 "sample_indices": actual_evidence["sample_indices"],
-                "actual_samples": [
-                    int(value) for value in actual_evidence["samples"]],
+                "actual_samples": [int(value) for value in actual_evidence["samples"]],
                 "expected_sample_indices": expected_evidence["sample_indices"],
-                "expected_samples": [
-                    int(value) for value in expected_evidence["samples"]],
+                "expected_samples": [int(value) for value in expected_evidence["samples"]],
                 "mismatch_count": mismatch_count,
                 "first_mismatch": first_mismatch,
             }
@@ -4675,19 +4329,15 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
         endpoint_vectors = {
             "positions_f32": observed_vector(actual_positions, np.float32),
             "residuals_f32": observed_vector(actual_residual, np.float32),
-            "active_history_i32": exact_i32_vector(
-                actual_history, np.asarray(expected_history, dtype=np.int32)),
-            "final_active_ids_i32": exact_i32_vector(
-                actual_active_ids, expected_active_ids),
+            "active_history_i32": exact_i32_vector(actual_history, np.asarray(expected_history, dtype=np.int32)),
+            "final_active_ids_i32": exact_i32_vector(actual_active_ids, expected_active_ids),
         }
         fingerprint = {
             "finite": bool(np.all(np.isfinite(actual_positions))),
             "positions_sha256": endpoint_vectors["positions_f32"]["sha256"],
             "residuals_sha256": endpoint_vectors["residuals_f32"]["sha256"],
-            "active_history_sha256": endpoint_vectors[
-                "active_history_i32"]["actual_sha256"],
-            "final_active_ids_sha256": endpoint_vectors[
-                "final_active_ids_i32"]["actual_sha256"],
+            "active_history_sha256": endpoint_vectors["active_history_i32"]["actual_sha256"],
+            "final_active_ids_sha256": endpoint_vectors["final_active_ids_i32"]["actual_sha256"],
         }
         return {
             "passed": bool(
@@ -4711,9 +4361,7 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
                     )
                 )
             ),
-            "comparison": (
-                "analytic_full_state_and_exact_cross_route_adaptive_pbd"
-            ),
+            "comparison": ("analytic_full_state_and_exact_cross_route_adaptive_pbd"),
             "max_left_position_error": left_error,
             "max_right_position_error": right_error,
             "max_residual_error": residual_error,
@@ -4734,9 +4382,7 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
         "launch": launch,
         "reset": reset,
         "validate": validate_fresh,
-        "route": lambda: _adaptive_pbd_route(
-            worklist, runtime_name, backend, constraints, iterations,
-            source_sha256),
+        "route": lambda: _adaptive_pbd_route(worklist, runtime_name, backend, constraints, iterations, source_sha256),
         "logical_bytes": 0,
         "traffic_model": (
             "fixed-iteration adaptive PBD solve with device-resident active "
@@ -4776,20 +4422,20 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
             "kernel_scan_elements": constraints,
             "kernel_scan_pipelines_per_replay": scan_pipelines_per_replay,
             "kernel_scan_steps_per_pipeline": scan_steps,
-            "kernel_final_scan_copy_kernel_invocations_per_pipeline": (
-                final_scan_copy_invocations),
-            "kernel_non_scan_ti_invocations_per_replay": (
-                non_scan_kernel_invocations),
+            "kernel_final_scan_copy_kernel_invocations_per_pipeline": (final_scan_copy_invocations),
+            "kernel_non_scan_ti_invocations_per_replay": (non_scan_kernel_invocations),
             "kernel_stage_names": [
-                "initialize_problem", "initialize_extents", "project_active",
-                "stage_flags", "scan_ping_pong", "stable_scatter",
+                "initialize_problem",
+                "initialize_extents",
+                "project_active",
+                "stage_flags",
+                "scan_ping_pong",
+                "stable_scatter",
                 "record_extent",
             ],
             "kernel_ti_invocations_per_replay": kernel_invocations,
             "kernel_physical_backend_launches_assumed": False,
-            "forge_adapter": (
-                "fixed-capacity DeviceWorklist stable select with device extent"
-            ),
+            "forge_adapter": ("fixed-capacity DeviceWorklist stable select with device extent"),
             "vanilla_adapter": (
                 "device-count mask, reusable PrefixSumExecutor, and stable "
                 "scatter between two fixed-capacity active-id buffers"
@@ -4817,30 +4463,26 @@ def _build_adaptive_pbd_case(ti: Any, runtime_name: str, backend: str,
 
 
 def _marching_squares_route(
-        workspace: Any | None,
-        runtime_name: str,
-        backend: str,
-        elements: int,
-        kernel_source_sha256: str) -> dict[str, Any]:
+    workspace: Any | None, runtime_name: str, backend: str, elements: int, kernel_source_sha256: str
+) -> dict[str, Any]:
     stage_kernel_names = [
-        "classify", "stage_flags", "scan_ping_pong", "stable_scatter",
+        "classify",
+        "stage_flags",
+        "scan_ping_pong",
+        "stable_scatter",
         "emit_cases",
     ]
     if runtime_name == "forge":
-        compact_route = _native_compact_route(
-            workspace, runtime_name, backend)
+        compact_route = _native_compact_route(workspace, runtime_name, backend)
         return {
             "classification": "forge_native_marching_squares_pipeline",
             "adapter": "forge_native_stable_compact_pipeline",
             "kernel_source_owner": "benchmark",
             "kernel_source_sha256": kernel_source_sha256,
-            "stage_kernel_names": [
-                "classify", "stable_compact", "emit_cases"],
+            "stage_kernel_names": ["classify", "stable_compact", "emit_cases"],
             "compact_route": compact_route,
-            "workspace_bytes_current": getattr(
-                workspace, "workspace_bytes_current", None),
-            "workspace_bytes_peak": getattr(
-                workspace, "workspace_bytes_peak", None),
+            "workspace_bytes_current": getattr(workspace, "workspace_bytes_current", None),
+            "workspace_bytes_peak": getattr(workspace, "workspace_bytes_peak", None),
             "cells": elements,
             "expected_backend": backend,
             "observed_backend": backend,
@@ -4851,30 +4493,20 @@ def _marching_squares_route(
                 and elements > 0
             ),
         }
-    scan_steps = (
-        (elements - 1).bit_length()
-        if isinstance(elements, int) and elements > 0 else None
-    )
-    final_scan_copy_invocations = (
-        scan_steps % 2 if scan_steps is not None else None
-    )
+    scan_steps = (elements - 1).bit_length() if isinstance(elements, int) and elements > 0 else None
+    final_scan_copy_invocations = scan_steps % 2 if scan_steps is not None else None
     non_scan_invocations = 4
     kernel_invocations = (
-        non_scan_invocations + scan_steps + final_scan_copy_invocations
-        if scan_steps is not None else None
+        non_scan_invocations + scan_steps + final_scan_copy_invocations if scan_steps is not None else None
     )
     return {
-        "classification": (
-            f"{runtime_name}_equivalent_marching_squares_kernel_pipeline"
-        ),
+        "classification": (f"{runtime_name}_equivalent_marching_squares_kernel_pipeline"),
         "adapter": "benchmark_defined_ti_kernel_pipeline",
         "kernel_source_owner": "benchmark",
         "kernel_source_sha256": kernel_source_sha256,
         "helper_api_used": False,
         "specialized_api_used": False,
-        "benchmark_workspace_kind": (
-            "one_prefix_i32_dense_field_and_one_scan_scratch_i32_dense_field"
-        ),
+        "benchmark_workspace_kind": ("one_prefix_i32_dense_field_and_one_scan_scratch_i32_dense_field"),
         "benchmark_workspace_field_count": 2,
         "scan_algorithm": "inclusive_hillis_steele_ping_pong",
         "scan_elements": elements,
@@ -4901,46 +4533,32 @@ def _marching_squares_route(
     }
 
 
-def _marching_squares_kernel_control_route_isolated(
-        child: dict[str, Any]) -> bool:
-    if (child.get("operation") != "marching_squares"
-            or child.get("runtime") not in (
-                "forge_kernel", "vanilla_kernel")):
+def _marching_squares_kernel_control_route_isolated(child: dict[str, Any]) -> bool:
+    if child.get("operation") != "marching_squares" or child.get("runtime") not in ("forge_kernel", "vanilla_kernel"):
         return True
     route = child.get("route", {})
     contract = child.get("workload_contract", {})
     return bool(
         route.get("passed") is True
-        and route.get("classification")
-        == f"{child['runtime']}_equivalent_marching_squares_kernel_pipeline"
+        and route.get("classification") == f"{child['runtime']}_equivalent_marching_squares_kernel_pipeline"
         and route.get("adapter") == "benchmark_defined_ti_kernel_pipeline"
         and "native" not in json.dumps(route, sort_keys=True).lower()
         and route.get("kernel_source_owner") == "benchmark"
-        and route.get("kernel_source_sha256")
-        == contract.get("kernel_source_sha256")
+        and route.get("kernel_source_sha256") == contract.get("kernel_source_sha256")
         and route.get("helper_api_used") is False
         and route.get("specialized_api_used") is False
-        and route.get("benchmark_workspace_kind")
-        == contract.get("kernel_benchmark_workspace_kind")
+        and route.get("benchmark_workspace_kind") == contract.get("kernel_benchmark_workspace_kind")
         and route.get("benchmark_workspace_field_count") == 2
-        and route.get("benchmark_workspace_field_count")
-        == contract.get("kernel_benchmark_workspace_field_count")
-        and route.get("scan_algorithm")
-        == "inclusive_hillis_steele_ping_pong"
-        and route.get("scan_algorithm")
-        == contract.get("kernel_scan_algorithm")
-        and route.get("scan_elements")
-        == contract.get("kernel_scan_elements")
-        and route.get("scan_steps")
-        == contract.get("kernel_scan_steps")
-        and route.get("final_scan_copy_kernel_invocations")
-        == contract.get("kernel_final_scan_copy_kernel_invocations")
+        and route.get("benchmark_workspace_field_count") == contract.get("kernel_benchmark_workspace_field_count")
+        and route.get("scan_algorithm") == "inclusive_hillis_steele_ping_pong"
+        and route.get("scan_algorithm") == contract.get("kernel_scan_algorithm")
+        and route.get("scan_elements") == contract.get("kernel_scan_elements")
+        and route.get("scan_steps") == contract.get("kernel_scan_steps")
+        and route.get("final_scan_copy_kernel_invocations") == contract.get("kernel_final_scan_copy_kernel_invocations")
         and route.get("non_scan_ti_kernel_invocations_per_replay")
         == contract.get("kernel_non_scan_ti_invocations_per_replay")
-        and route.get("stage_kernel_names")
-        == contract.get("kernel_stage_names")
-        and route.get("ti_kernel_invocations_per_replay")
-        == contract.get("kernel_ti_invocations_per_replay")
+        and route.get("stage_kernel_names") == contract.get("kernel_stage_names")
+        and route.get("ti_kernel_invocations_per_replay") == contract.get("kernel_ti_invocations_per_replay")
         and route.get("physical_backend_launches_assumed") is False
         and route.get("expected_backend") == child.get("backend")
         and route.get("observed_backend") == child.get("backend")
@@ -4948,8 +4566,7 @@ def _marching_squares_kernel_control_route_isolated(
     )
 
 
-def _build_marching_squares_case(ti: Any, runtime_name: str, backend: str,
-                                 elements: int) -> dict[str, Any]:
+def _build_marching_squares_case(ti: Any, runtime_name: str, backend: str, elements: int) -> dict[str, Any]:
     """Extract stable contour cells and case codes from an analytic circle."""
     import numpy as np
 
@@ -4957,20 +4574,19 @@ def _build_marching_squares_case(ti: Any, runtime_name: str, backend: str,
     scan_steps = (elements - 1).bit_length()
     final_scan_copy_invocations = scan_steps % 2
     non_scan_kernel_invocations = 4
-    kernel_invocations = (
-        non_scan_kernel_invocations + scan_steps
-        + final_scan_copy_invocations
-    )
+    kernel_invocations = non_scan_kernel_invocations + scan_steps + final_scan_copy_invocations
     kernel_stage_names = [
-        "classify", "stage_flags", "scan_ping_pong", "stable_scatter",
+        "classify",
+        "stage_flags",
+        "scan_ping_pong",
+        "stable_scatter",
         "emit_cases",
     ]
     cell_side = math.isqrt(elements)
     if cell_side * cell_side != elements:
         raise ValueError("marching squares requires a square cell count")
     node_side = cell_side + 1
-    coordinates = np.linspace(
-        np.float32(-1.0), np.float32(1.0), node_side, dtype=np.float32)
+    coordinates = np.linspace(np.float32(-1.0), np.float32(1.0), node_side, dtype=np.float32)
     xx, yy = np.meshgrid(coordinates, coordinates, indexing="ij")
     host_scalar = (xx * xx + yy * yy - np.float32(0.55**2)).astype(np.float32)
     corners = (
@@ -5003,8 +4619,7 @@ def _build_marching_squares_case(ti: Any, runtime_name: str, backend: str,
     else:
         prefix = ti.field(dtype=ti.i32, shape=elements)
         if runtime_name in ("forge_kernel", "vanilla_kernel"):
-            run_prefix_scan = _build_common_kernel_i32_scan(
-                ti, prefix, elements)
+            run_prefix_scan = _build_common_kernel_i32_scan(ti, prefix, elements)
         else:
             scanner = ti.algorithms.PrefixSumExecutor(elements)
             run_prefix_scan = lambda: scanner.run(prefix)
@@ -5020,9 +4635,10 @@ def _build_marching_squares_case(ti: Any, runtime_name: str, backend: str,
 
     @ti.kernel
     def classify(
-            source: ti.types.ndarray(dtype=ti.f32, ndim=2),
-            target_ids: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            target_flags: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        source: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        target_ids: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        target_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
         for cell in range(elements):
             i = cell // cell_side
             j = cell - i * cell_side
@@ -5031,17 +4647,17 @@ def _build_marching_squares_case(ti: Any, runtime_name: str, backend: str,
             target_flags[cell] = 1 if code != 0 and code != 15 else 0
 
     @ti.kernel
-    def stage_flags(
-            source_flags: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+    def stage_flags(source_flags: ti.types.ndarray(dtype=ti.i32, ndim=1)):
         for cell in range(elements):
             prefix[cell] = source_flags[cell]
 
     @ti.kernel
     def stable_scatter(
-            source_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            source_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            destination: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            destination_count: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        source_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        source_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        destination: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        destination_count: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
         destination_count[0] = prefix[elements - 1]
         for cell in range(elements):
             if source_flags[cell] != 0:
@@ -5049,10 +4665,11 @@ def _build_marching_squares_case(ti: Any, runtime_name: str, backend: str,
 
     @ti.kernel
     def emit_cases(
-            source: ti.types.ndarray(dtype=ti.f32, ndim=2),
-            selected_cells: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            selected_count_state: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            output_codes: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        source: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        selected_cells: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        selected_count_state: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output_codes: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
         for selected in range(elements):
             if selected < selected_count_state[0]:
                 cell = selected_cells[selected]
@@ -5063,9 +4680,7 @@ def _build_marching_squares_case(ti: Any, runtime_name: str, backend: str,
     def launch() -> None:
         classify(scalar, cell_ids, flags)
         if runtime_name == "forge":
-            ti.algorithms.experimental_compact(
-                cell_ids, flags, compacted, count,
-                method="auto", workspace=workspace)
+            ti.algorithms.experimental_compact(cell_ids, flags, compacted, count, method="auto", workspace=workspace)
         else:
             stage_flags(flags)
             run_prefix_scan()
@@ -5090,26 +4705,33 @@ def _build_marching_squares_case(ti: Any, runtime_name: str, backend: str,
         actual_cases = case_codes.to_numpy()[:actual_count]
 
         def exact_i32_vector(actual: Any, expected: Any) -> dict[str, Any]:
-            actual_i32 = np.ascontiguousarray(
-                actual, dtype=np.int32).reshape(-1)
-            expected_i32 = np.ascontiguousarray(
-                expected, dtype=np.int32).reshape(-1)
+            actual_i32 = np.ascontiguousarray(actual, dtype=np.int32).reshape(-1)
+            expected_i32 = np.ascontiguousarray(expected, dtype=np.int32).reshape(-1)
             if actual_i32.size == expected_i32.size:
                 mismatch = np.flatnonzero(actual_i32 != expected_i32)
                 mismatch_count = int(mismatch.size)
-                first_mismatch = (
-                    None if mismatch.size == 0 else int(mismatch[0]))
+                first_mismatch = None if mismatch.size == 0 else int(mismatch[0])
             else:
-                mismatch_count = max(
-                    int(actual_i32.size), int(expected_i32.size))
+                mismatch_count = max(int(actual_i32.size), int(expected_i32.size))
                 first_mismatch = 0
 
             def evidence(vector: Any) -> dict[str, Any]:
                 count_value = int(vector.size)
-                sample_indices = sorted(set((
-                    0, count_value // 4, count_value // 2,
-                    (3 * count_value) // 4, count_value - 1,
-                ))) if count_value else []
+                sample_indices = (
+                    sorted(
+                        set(
+                            (
+                                0,
+                                count_value // 4,
+                                count_value // 2,
+                                (3 * count_value) // 4,
+                                count_value - 1,
+                            )
+                        )
+                    )
+                    if count_value
+                    else []
+                )
                 return {
                     "count": count_value,
                     "sha256": hashlib.sha256(vector.tobytes()).hexdigest(),
@@ -5117,8 +4739,7 @@ def _build_marching_squares_case(ti: Any, runtime_name: str, backend: str,
                     "minimum": int(vector.min()) if count_value else None,
                     "maximum": int(vector.max()) if count_value else None,
                     "sample_indices": sample_indices,
-                    "samples": [
-                        int(vector[index]) for index in sample_indices],
+                    "samples": [int(vector[index]) for index in sample_indices],
                 }
 
             actual_evidence = evidence(actual_i32)
@@ -5143,18 +4764,14 @@ def _build_marching_squares_case(ti: Any, runtime_name: str, backend: str,
             }
 
         endpoint_vectors = {
-            "selected_cells_i32": exact_i32_vector(
-                actual_cells, expected_cells),
-            "case_codes_i32": exact_i32_vector(
-                actual_cases, expected_cases),
+            "selected_cells_i32": exact_i32_vector(actual_cells, expected_cells),
+            "case_codes_i32": exact_i32_vector(actual_cases, expected_cases),
         }
         fingerprint = {
             "finite": True,
             "selected_count": actual_count,
-            "selected_cells_sha256": endpoint_vectors[
-                "selected_cells_i32"]["actual_sha256"],
-            "case_codes_sha256": endpoint_vectors[
-                "case_codes_i32"]["actual_sha256"],
+            "selected_cells_sha256": endpoint_vectors["selected_cells_i32"]["actual_sha256"],
+            "case_codes_sha256": endpoint_vectors["case_codes_i32"]["actual_sha256"],
         }
         return {
             "passed": bool(
@@ -5167,19 +4784,13 @@ def _build_marching_squares_case(ti: Any, runtime_name: str, backend: str,
                     for vector in endpoint_vectors.values()
                 )
             ),
-            "comparison": (
-                "exact_stable_marching_squares_full_cell_and_case_vectors"
-            ),
+            "comparison": ("exact_stable_marching_squares_full_cell_and_case_vectors"),
             "actual_count": actual_count,
             "expected_count": selected_count,
-            "cell_mismatch_count": endpoint_vectors[
-                "selected_cells_i32"]["mismatch_count"],
-            "case_mismatch_count": endpoint_vectors[
-                "case_codes_i32"]["mismatch_count"],
-            "ambiguous_case_5_count": int(np.count_nonzero(
-                actual_cases == 5)),
-            "ambiguous_case_10_count": int(np.count_nonzero(
-                actual_cases == 10)),
+            "cell_mismatch_count": endpoint_vectors["selected_cells_i32"]["mismatch_count"],
+            "case_mismatch_count": endpoint_vectors["case_codes_i32"]["mismatch_count"],
+            "ambiguous_case_5_count": int(np.count_nonzero(actual_cases == 5)),
+            "ambiguous_case_10_count": int(np.count_nonzero(actual_cases == 10)),
             "endpoint_fingerprint": fingerprint,
             "endpoint_vectors": endpoint_vectors,
         }
@@ -5188,8 +4799,7 @@ def _build_marching_squares_case(ti: Any, runtime_name: str, backend: str,
         "launch": launch,
         "reset": reset,
         "validate": validate_fresh,
-        "route": lambda: _marching_squares_route(
-            workspace, runtime_name, backend, elements, source_sha256),
+        "route": lambda: _marching_squares_route(workspace, runtime_name, backend, elements, source_sha256),
         "logical_bytes": 0,
         "traffic_model": (
             "Marching Squares classification, stable contour-cell compact, and "
@@ -5219,26 +4829,18 @@ def _build_marching_squares_case(ti: Any, runtime_name: str, backend: str,
             "kernel_adapter": "benchmark_defined_ti_kernel_pipeline",
             "kernel_helper_api_used": False,
             "kernel_specialized_api_used": False,
-            "kernel_benchmark_workspace_kind": (
-                "one_prefix_i32_dense_field_and_one_scan_scratch_i32_dense_field"
-            ),
+            "kernel_benchmark_workspace_kind": ("one_prefix_i32_dense_field_and_one_scan_scratch_i32_dense_field"),
             "kernel_benchmark_workspace_field_count": 2,
             "kernel_scan_algorithm": "inclusive_hillis_steele_ping_pong",
             "kernel_scan_elements": elements,
             "kernel_scan_steps": scan_steps,
-            "kernel_final_scan_copy_kernel_invocations": (
-                final_scan_copy_invocations),
-            "kernel_non_scan_ti_invocations_per_replay": (
-                non_scan_kernel_invocations),
+            "kernel_final_scan_copy_kernel_invocations": (final_scan_copy_invocations),
+            "kernel_non_scan_ti_invocations_per_replay": (non_scan_kernel_invocations),
             "kernel_stage_names": kernel_stage_names,
             "kernel_ti_invocations_per_replay": kernel_invocations,
             "kernel_physical_backend_launches_assumed": False,
-            "forge_adapter": (
-                "experimental_compact with reusable native CompactWorkspace"
-            ),
-            "vanilla_adapter": (
-                "flags-to-prefix, reusable PrefixSumExecutor, and stable scatter"
-            ),
+            "forge_adapter": ("experimental_compact with reusable native CompactWorkspace"),
+            "vanilla_adapter": ("flags-to-prefix, reusable PrefixSumExecutor, and stable scatter"),
             "shared": (
                 "same analytic scalar grid, corner convention, classification "
                 "and emission kernels, stable output order, synchronization, "
@@ -5257,13 +4859,21 @@ def _build_marching_squares_case(ti: Any, runtime_name: str, backend: str,
     }
 
 
-def _bfs_worklist_route(worklist: Any | None, runtime_name: str,
-                        backend: str, nodes: int, levels: int,
-                        expected_last_frontier: int,
-                        kernel_source_sha256: str) -> dict[str, Any]:
+def _bfs_worklist_route(
+    worklist: Any | None,
+    runtime_name: str,
+    backend: str,
+    nodes: int,
+    levels: int,
+    expected_last_frontier: int,
+    kernel_source_sha256: str,
+) -> dict[str, Any]:
     stage_kernel_names = [
-        "initialize_bfs", "reset_back_extent", "expand_frontier",
-        "record_frontier", "finalize_distance",
+        "initialize_bfs",
+        "reset_back_extent",
+        "expand_frontier",
+        "record_frontier",
+        "finalize_distance",
     ]
     if runtime_name == "forge":
         memory = worklist.memory_report()
@@ -5274,8 +4884,12 @@ def _bfs_worklist_route(worklist: Any | None, runtime_name: str,
             "kernel_source_owner": "benchmark",
             "kernel_source_sha256": kernel_source_sha256,
             "stage_kernel_names": [
-                "initialize_bfs", "prepare_next", "expand_frontier",
-                "commit_next", "record_frontier", "finalize_distance",
+                "initialize_bfs",
+                "prepare_next",
+                "expand_frontier",
+                "commit_next",
+                "record_frontier",
+                "finalize_distance",
             ],
             "benchmark_ti_kernel_invocations_per_replay": 2 + 2 * levels,
             "device_worklist_transitions_per_replay": levels,
@@ -5314,9 +4928,7 @@ def _bfs_worklist_route(worklist: Any | None, runtime_name: str,
         "kernel_source_sha256": kernel_source_sha256,
         "helper_api_used": False,
         "specialized_api_used": False,
-        "benchmark_workspace_kind": (
-            "two_frontier_i32_ndarrays_and_two_extent_i32_ndarrays"
-        ),
+        "benchmark_workspace_kind": ("two_frontier_i32_ndarrays_and_two_extent_i32_ndarrays"),
         "benchmark_workspace_field_count": 4,
         "stage_kernel_names": stage_kernel_names,
         "initialize_ti_kernel_invocations_per_replay": 1,
@@ -5345,32 +4957,24 @@ def _bfs_worklist_route(worklist: Any | None, runtime_name: str,
     }
 
 
-def _bfs_worklist_kernel_control_route_isolated(
-        child: dict[str, Any]) -> bool:
-    if (child.get("operation") != "bfs_worklist"
-            or child.get("runtime") not in (
-                "forge_kernel", "vanilla_kernel")):
+def _bfs_worklist_kernel_control_route_isolated(child: dict[str, Any]) -> bool:
+    if child.get("operation") != "bfs_worklist" or child.get("runtime") not in ("forge_kernel", "vanilla_kernel"):
         return True
     route = child.get("route", {})
     contract = child.get("workload_contract", {})
     return bool(
         route.get("passed") is True
-        and route.get("classification")
-        == f"{child['runtime']}_equivalent_bfs_kernel_pipeline"
+        and route.get("classification") == f"{child['runtime']}_equivalent_bfs_kernel_pipeline"
         and route.get("adapter") == "benchmark_defined_ti_kernel_pipeline"
         and "native" not in json.dumps(route, sort_keys=True).lower()
         and route.get("kernel_source_owner") == "benchmark"
-        and route.get("kernel_source_sha256")
-        == contract.get("kernel_source_sha256")
+        and route.get("kernel_source_sha256") == contract.get("kernel_source_sha256")
         and route.get("helper_api_used") is False
         and route.get("specialized_api_used") is False
-        and route.get("benchmark_workspace_kind")
-        == contract.get("kernel_benchmark_workspace_kind")
+        and route.get("benchmark_workspace_kind") == contract.get("kernel_benchmark_workspace_kind")
         and route.get("benchmark_workspace_field_count") == 4
-        and route.get("benchmark_workspace_field_count")
-        == contract.get("kernel_benchmark_workspace_field_count")
-        and route.get("stage_kernel_names")
-        == contract.get("kernel_stage_names")
+        and route.get("benchmark_workspace_field_count") == contract.get("kernel_benchmark_workspace_field_count")
+        and route.get("stage_kernel_names") == contract.get("kernel_stage_names")
         and route.get("initialize_ti_kernel_invocations_per_replay") == 1
         and route.get("reset_extent_ti_kernel_invocations_per_replay")
         == contract.get("kernel_reset_extent_ti_invocations_per_replay")
@@ -5379,8 +4983,7 @@ def _bfs_worklist_kernel_control_route_isolated(
         and route.get("record_ti_kernel_invocations_per_replay")
         == contract.get("kernel_record_ti_invocations_per_replay")
         and route.get("finalize_ti_kernel_invocations_per_replay") == 1
-        and route.get("ti_kernel_invocations_per_replay")
-        == contract.get("kernel_ti_invocations_per_replay")
+        and route.get("ti_kernel_invocations_per_replay") == contract.get("kernel_ti_invocations_per_replay")
         and route.get("physical_backend_launches_assumed") is False
         and route.get("expected_backend") == child.get("backend")
         and route.get("observed_backend") == child.get("backend")
@@ -5390,8 +4993,7 @@ def _bfs_worklist_kernel_control_route_isolated(
 
 
 def _bfs_worklist_native_route_admitted(child: dict[str, Any]) -> bool:
-    if (child.get("operation") != "bfs_worklist"
-            or child.get("runtime") != "forge"):
+    if child.get("operation") != "bfs_worklist" or child.get("runtime") != "forge":
         return True
     route = child.get("route", {})
     contract = child.get("workload_contract", {})
@@ -5399,36 +5001,28 @@ def _bfs_worklist_native_route_admitted(child: dict[str, Any]) -> bool:
     transition = route.get("last_transition_statistics", {})
     return bool(
         route.get("passed") is True
-        and route.get("classification")
-        == "forge_native_device_worklist_bfs_pipeline"
-        and route.get("adapter")
-        == "forge_native_device_worklist_frontier_pipeline"
+        and route.get("classification") == "forge_native_device_worklist_bfs_pipeline"
+        and route.get("adapter") == "forge_native_device_worklist_frontier_pipeline"
         and route.get("kernel_source_owner") == "benchmark"
-        and route.get("kernel_source_sha256")
-        == contract.get("kernel_source_sha256")
+        and route.get("kernel_source_sha256") == contract.get("kernel_source_sha256")
         and route.get("capacity") == contract.get("nodes")
         and route.get("nodes") == contract.get("nodes")
         and route.get("levels") == contract.get("levels")
-        and route.get("benchmark_ti_kernel_invocations_per_replay")
-        == 2 + 2 * contract.get("levels", -1)
-        and route.get("device_worklist_transitions_per_replay")
-        == contract.get("levels")
+        and route.get("benchmark_ti_kernel_invocations_per_replay") == 2 + 2 * contract.get("levels", -1)
+        and route.get("device_worklist_transitions_per_replay") == contract.get("levels")
         and route.get("physical_backend_launches_assumed") is False
         and route.get("expected_backend") == child.get("backend")
         and route.get("observed_backend") == child.get("backend")
         and memory.get("fixed_capacity") is True
         and memory.get("replay_allocation_count") == 0
-        and transition.get("generated")
-        == contract.get("expected_last_frontier")
-        and transition.get("accepted")
-        == contract.get("expected_last_frontier")
+        and transition.get("generated") == contract.get("expected_last_frontier")
+        and transition.get("accepted") == contract.get("expected_last_frontier")
         and transition.get("rejected") == 0
         and transition.get("overflow") is False
     )
 
 
-def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
-                             elements: int) -> dict[str, Any]:
+def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str, elements: int) -> dict[str, Any]:
     """Run a fixed-depth level-synchronous BFS on a square 2-D grid."""
     import numpy as np
 
@@ -5443,12 +5037,8 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
     xx = np.arange(side, dtype=np.int32)[:, None]
     yy = np.arange(side, dtype=np.int32)[None, :]
     host_distance = np.abs(xx - source_x) + np.abs(yy - source_y)
-    expected_distance = np.where(
-        host_distance <= levels, host_distance, -1).astype(np.int32).reshape(-1)
-    expected_history = [
-        int(np.count_nonzero(host_distance == level))
-        for level in range(1, levels + 1)
-    ]
+    expected_distance = np.where(host_distance <= levels, host_distance, -1).astype(np.int32).reshape(-1)
+    expected_history = [int(np.count_nonzero(host_distance == level)) for level in range(1, levels + 1)]
     expected_visited = int(np.count_nonzero(expected_distance >= 0))
 
     distance = ti.ndarray(ti.i32, shape=elements)
@@ -5469,10 +5059,11 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
 
     @ti.kernel
     def initialize_bfs(
-            target_distance: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            active_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            active_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            history: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        target_distance: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        active_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        active_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        history: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
         for node in range(elements):
             target_distance[node] = levels + 1
             active_values[node] = 0
@@ -5483,22 +5074,23 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
             history[level] = 0
 
     @ti.kernel
-    def reset_extent(
-            extent: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+    def reset_extent(extent: ti.types.ndarray(dtype=ti.i32, ndim=1)):
         extent[0] = 0
 
     if runtime_name == "forge":
+
         @ti.kernel
         def expand_forge(
-                current_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
-                current_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
-                target_distance: ti.types.ndarray(dtype=ti.i32, ndim=1),
-                next_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
-                next_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
-                generated: ti.types.ndarray(dtype=ti.i32, ndim=0),
-                overflow: ti.types.ndarray(dtype=ti.i32, ndim=0),
-                capacity: ti.i32,
-                next_level: ti.i32):
+            current_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            current_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_distance: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            next_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            next_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            generated: ti.types.ndarray(dtype=ti.i32, ndim=0),
+            overflow: ti.types.ndarray(dtype=ti.i32, ndim=0),
+            capacity: ti.i32,
+            next_level: ti.i32,
+        ):
             for slot in range(elements):
                 if slot < current_extent[0]:
                     node = current_values[slot]
@@ -5517,23 +5109,24 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
                             ny += 1
                         if 0 <= nx < side and 0 <= ny < side:
                             neighbor = nx * side + ny
-                            previous = ti.atomic_min(
-                                target_distance[neighbor], next_level)
+                            previous = ti.atomic_min(target_distance[neighbor], next_level)
                             if previous > next_level:
                                 ti.algorithms.device_worklist_append(
-                                    next_values, next_extent, generated,
-                                    overflow, capacity, neighbor)
+                                    next_values, next_extent, generated, overflow, capacity, neighbor
+                                )
+
     else:
         expand_forge = None
 
     @ti.kernel
     def expand_vanilla(
-            current_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            current_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            target_distance: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            next_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            next_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            next_level: ti.i32):
+        current_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        current_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        target_distance: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        next_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        next_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        next_level: ti.i32,
+    ):
         for slot in range(elements):
             if slot < current_extent[0]:
                 node = current_values[slot]
@@ -5552,8 +5145,7 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
                         ny += 1
                     if 0 <= nx < side and 0 <= ny < side:
                         neighbor = nx * side + ny
-                        previous = ti.atomic_min(
-                            target_distance[neighbor], next_level)
+                        previous = ti.atomic_min(target_distance[neighbor], next_level)
                         if previous > next_level:
                             target = ti.atomic_add(next_extent[0], 1)
                             if target < elements:
@@ -5561,14 +5153,14 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
 
     @ti.kernel
     def record_frontier(
-            extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            history: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            level_index: ti.i32):
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        history: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        level_index: ti.i32,
+    ):
         history[level_index] = extent[0]
 
     @ti.kernel
-    def finalize_distance(
-            target_distance: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+    def finalize_distance(target_distance: ti.types.ndarray(dtype=ti.i32, ndim=1)):
         for node in range(elements):
             if target_distance[node] > levels:
                 target_distance[node] = -1
@@ -5576,32 +5168,30 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
     def launch() -> None:
         if runtime_name == "forge":
             worklist.clear()
-            initialize_bfs(
-                distance, worklist.values, worklist.extent.state,
-                frontier_history)
+            initialize_bfs(distance, worklist.values, worklist.extent.state, frontier_history)
             for level_index in range(levels):
                 worklist.prepare_next()
                 expand_forge(
-                    worklist.values, worklist.extent.state, distance,
-                    *worklist.append_arguments(), level_index + 1)
+                    worklist.values, worklist.extent.state, distance, *worklist.append_arguments(), level_index + 1
+                )
                 worklist.commit_next()
-                record_frontier(
-                    worklist.extent.state, frontier_history, level_index)
+                record_frontier(worklist.extent.state, frontier_history, level_index)
             finalize_distance(distance)
         else:
-            initialize_bfs(
-                distance, vanilla_values[0], vanilla_extents[0],
-                frontier_history)
+            initialize_bfs(distance, vanilla_values[0], vanilla_extents[0], frontier_history)
             front = 0
             for level_index in range(levels):
                 back = 1 - front
                 reset_extent(vanilla_extents[back])
                 expand_vanilla(
-                    vanilla_values[front], vanilla_extents[front], distance,
-                    vanilla_values[back], vanilla_extents[back],
-                    level_index + 1)
-                record_frontier(
-                    vanilla_extents[back], frontier_history, level_index)
+                    vanilla_values[front],
+                    vanilla_extents[front],
+                    distance,
+                    vanilla_values[back],
+                    vanilla_extents[back],
+                    level_index + 1,
+                )
+                record_frontier(vanilla_extents[back], frontier_history, level_index)
                 front = back
             finalize_distance(distance)
 
@@ -5626,26 +5216,33 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
         expected_history_i32 = np.asarray(expected_history, dtype=np.int32)
 
         def exact_i32_vector(actual: Any, expected: Any) -> dict[str, Any]:
-            actual_i32 = np.ascontiguousarray(
-                actual, dtype=np.int32).reshape(-1)
-            expected_i32 = np.ascontiguousarray(
-                expected, dtype=np.int32).reshape(-1)
+            actual_i32 = np.ascontiguousarray(actual, dtype=np.int32).reshape(-1)
+            expected_i32 = np.ascontiguousarray(expected, dtype=np.int32).reshape(-1)
             if actual_i32.size == expected_i32.size:
                 mismatch = np.flatnonzero(actual_i32 != expected_i32)
                 mismatch_count = int(mismatch.size)
-                first_mismatch = (
-                    None if mismatch.size == 0 else int(mismatch[0]))
+                first_mismatch = None if mismatch.size == 0 else int(mismatch[0])
             else:
-                mismatch_count = max(
-                    int(actual_i32.size), int(expected_i32.size))
+                mismatch_count = max(int(actual_i32.size), int(expected_i32.size))
                 first_mismatch = 0
 
             def evidence(vector: Any) -> dict[str, Any]:
                 count_value = int(vector.size)
-                sample_indices = sorted(set((
-                    0, count_value // 4, count_value // 2,
-                    (3 * count_value) // 4, count_value - 1,
-                ))) if count_value else []
+                sample_indices = (
+                    sorted(
+                        set(
+                            (
+                                0,
+                                count_value // 4,
+                                count_value // 2,
+                                (3 * count_value) // 4,
+                                count_value - 1,
+                            )
+                        )
+                    )
+                    if count_value
+                    else []
+                )
                 return {
                     "count": count_value,
                     "sha256": hashlib.sha256(vector.tobytes()).hexdigest(),
@@ -5653,8 +5250,7 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
                     "minimum": int(vector.min()) if count_value else None,
                     "maximum": int(vector.max()) if count_value else None,
                     "sample_indices": sample_indices,
-                    "samples": [
-                        int(vector[index]) for index in sample_indices],
+                    "samples": [int(vector[index]) for index in sample_indices],
                     "values_i32": vector.astype(np.int64).tolist(),
                 }
 
@@ -5672,8 +5268,7 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
                 "actual_maximum": actual_evidence["maximum"],
                 "expected_maximum": expected_evidence["maximum"],
                 "sample_indices": actual_evidence["sample_indices"],
-                "expected_sample_indices": expected_evidence[
-                    "sample_indices"],
+                "expected_sample_indices": expected_evidence["sample_indices"],
                 "actual_samples": actual_evidence["samples"],
                 "expected_samples": expected_evidence["samples"],
                 "actual_values_i32": actual_evidence["values_i32"],
@@ -5683,33 +5278,21 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
             }
 
         endpoint_vectors = {
-            "distance_i32": exact_i32_vector(
-                actual_distance, expected_distance),
-            "frontier_history_i32": exact_i32_vector(
-                actual_history, expected_history_i32),
+            "distance_i32": exact_i32_vector(actual_distance, expected_distance),
+            "frontier_history_i32": exact_i32_vector(actual_history, expected_history_i32),
         }
-        distance_mismatch = endpoint_vectors["distance_i32"][
-            "mismatch_count"]
-        history_mismatch = endpoint_vectors["frontier_history_i32"][
-            "mismatch_count"]
+        distance_mismatch = endpoint_vectors["distance_i32"]["mismatch_count"]
+        history_mismatch = endpoint_vectors["frontier_history_i32"]["mismatch_count"]
         visited = int(np.count_nonzero(actual_distance >= 0))
         fingerprint = {
             "finite": True,
             "visited_count": visited,
-            "distance_sha256": endpoint_vectors["distance_i32"][
-                "actual_sha256"],
-            "frontier_history_sha256": endpoint_vectors[
-                "frontier_history_i32"]["actual_sha256"],
+            "distance_sha256": endpoint_vectors["distance_i32"]["actual_sha256"],
+            "frontier_history_sha256": endpoint_vectors["frontier_history_i32"]["actual_sha256"],
         }
         return {
-            "passed": bool(
-                distance_mismatch == 0
-                and history_mismatch == 0
-                and visited == expected_visited
-            ),
-            "comparison": (
-                "exact_fixed_depth_grid_bfs_full_distance_and_frontier_vectors"
-            ),
+            "passed": bool(distance_mismatch == 0 and history_mismatch == 0 and visited == expected_visited),
+            "comparison": ("exact_fixed_depth_grid_bfs_full_distance_and_frontier_vectors"),
             "distance_mismatch_count": distance_mismatch,
             "history_mismatch_count": history_mismatch,
             "visited_count": visited,
@@ -5725,12 +5308,11 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
         "reset": reset,
         "validate": validate_fresh,
         "route": lambda: _bfs_worklist_route(
-            worklist, runtime_name, backend, elements, levels,
-            expected_history[-1], source_sha256),
+            worklist, runtime_name, backend, elements, levels, expected_history[-1], source_sha256
+        ),
         "logical_bytes": 0,
         "traffic_model": (
-            "fixed-depth level-synchronous grid BFS with device frontiers; no "
-            "simplified bandwidth is claimed"
+            "fixed-depth level-synchronous grid BFS with device frontiers; no " "simplified bandwidth is claimed"
         ),
         "case_preparation": {
             "side": side,
@@ -5757,33 +5339,29 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
             "kernel_adapter": "benchmark_defined_ti_kernel_pipeline",
             "kernel_helper_api_used": False,
             "kernel_specialized_api_used": False,
-            "kernel_benchmark_workspace_kind": (
-                "two_frontier_i32_ndarrays_and_two_extent_i32_ndarrays"
-            ),
+            "kernel_benchmark_workspace_kind": ("two_frontier_i32_ndarrays_and_two_extent_i32_ndarrays"),
             "kernel_benchmark_workspace_field_count": 4,
             "kernel_stage_names": [
-                "initialize_bfs", "reset_back_extent", "expand_frontier",
-                "record_frontier", "finalize_distance",
+                "initialize_bfs",
+                "reset_back_extent",
+                "expand_frontier",
+                "record_frontier",
+                "finalize_distance",
             ],
             "kernel_reset_extent_ti_invocations_per_replay": levels,
             "kernel_expand_ti_invocations_per_replay": levels,
             "kernel_record_ti_invocations_per_replay": levels,
             "kernel_ti_invocations_per_replay": 2 + 3 * levels,
             "kernel_physical_backend_launches_assumed": False,
-            "forge_adapter": (
-                "DeviceWorklist prepare/atomic-append/commit frontier transition"
-            ),
-            "vanilla_adapter": (
-                "double-buffered frontier with atomic device count"
-            ),
+            "forge_adapter": ("DeviceWorklist prepare/atomic-append/commit frontier transition"),
+            "vanilla_adapter": ("double-buffered frontier with atomic device count"),
             "shared": (
                 "same square graph, source, level cap, four-neighbor expansion, "
                 "atomic-min first-visit test, device-resident counts, outer sync, and "
                 "exact full-vector distance/history oracle"
             ),
             "allowed_difference": (
-                "only frontier append/finalize adapter; frontier order is "
-                "unspecified and is not used as an oracle"
+                "only frontier append/finalize adapter; frontier order is " "unspecified and is not used as an oracle"
             ),
             "correctness": (
                 "exact full distance map, visited count, and per-level frontier "
@@ -5799,10 +5377,16 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str,
 
 
 def _falling_sand_route(
-        worklist: Any | None, runtime_name: str, backend: str,
-        elements: int, expected_candidates: int, expected_winners: int,
-        observed_candidates: int, observed_winners: int,
-        kernel_source_sha256: str) -> dict[str, Any]:
+    worklist: Any | None,
+    runtime_name: str,
+    backend: str,
+    elements: int,
+    expected_candidates: int,
+    expected_winners: int,
+    observed_candidates: int,
+    observed_winners: int,
+    kernel_source_sha256: str,
+) -> dict[str, Any]:
     if runtime_name == "forge":
         memory = worklist.memory_report()
         stats = worklist.statistics()
@@ -5812,13 +5396,17 @@ def _falling_sand_route(
             "kernel_source_owner": "benchmark",
             "kernel_source_sha256": kernel_source_sha256,
             "benchmark_stage_kernel_names": [
-                "reset_sand", "propose_candidates", "initialize_sources",
-                "gather_compact_attributes", "materialize_native_winners",
+                "reset_sand",
+                "propose_candidates",
+                "initialize_sources",
+                "gather_compact_attributes",
+                "materialize_native_winners",
             ],
             "benchmark_ti_kernel_invocations_per_replay": 5,
             "device_worklist_transitions_per_replay": 2,
             "worklist_transition_names": [
-                "stable_select_candidates", "deterministic_keyed_claim",
+                "stable_select_candidates",
+                "deterministic_keyed_claim",
             ],
             "claim_policy": "min_priority_then_source_ordinal",
             "control_only_claim_workspace_reset": False,
@@ -5858,8 +5446,7 @@ def _falling_sand_route(
             ),
         }
     return {
-        "classification": (
-            f"{runtime_name}_equivalent_falling_sand_kernel_pipeline"),
+        "classification": (f"{runtime_name}_equivalent_falling_sand_kernel_pipeline"),
         "adapter": "benchmark_defined_ti_kernel_pipeline",
         "kernel_source_owner": "benchmark",
         "kernel_source_sha256": kernel_source_sha256,
@@ -5868,7 +5455,9 @@ def _falling_sand_route(
         "benchmark_workspace_kind": "one_i32_destination_claim_array",
         "benchmark_workspace_field_count": 1,
         "stage_kernel_names": [
-            "reset_sand", "propose_candidates", "claim_candidates",
+            "reset_sand",
+            "propose_candidates",
+            "claim_candidates",
             "materialize_kernel_winners",
         ],
         "ti_kernel_invocations_per_replay": 4,
@@ -5893,48 +5482,33 @@ def _falling_sand_route(
     }
 
 
-def _falling_sand_kernel_control_route_isolated(
-        child: dict[str, Any]) -> bool:
-    if (child.get("operation") != "falling_sand"
-            or child.get("runtime") not in (
-                "forge_kernel", "vanilla_kernel")):
+def _falling_sand_kernel_control_route_isolated(child: dict[str, Any]) -> bool:
+    if child.get("operation") != "falling_sand" or child.get("runtime") not in ("forge_kernel", "vanilla_kernel"):
         return True
     route = child.get("route", {})
     contract = child.get("workload_contract", {})
     return bool(
         route.get("passed") is True
-        and route.get("classification")
-        == f"{child['runtime']}_equivalent_falling_sand_kernel_pipeline"
+        and route.get("classification") == f"{child['runtime']}_equivalent_falling_sand_kernel_pipeline"
         and route.get("adapter") == "benchmark_defined_ti_kernel_pipeline"
         and "native" not in json.dumps(route, sort_keys=True).lower()
         and route.get("kernel_source_owner") == "benchmark"
-        and route.get("kernel_source_sha256")
-        == contract.get("kernel_source_sha256")
+        and route.get("kernel_source_sha256") == contract.get("kernel_source_sha256")
         and route.get("helper_api_used") is False
         and route.get("specialized_api_used") is False
-        and route.get("benchmark_workspace_kind")
-        == contract.get("kernel_benchmark_workspace_kind")
+        and route.get("benchmark_workspace_kind") == contract.get("kernel_benchmark_workspace_kind")
         and route.get("benchmark_workspace_field_count") == 1
-        and route.get("benchmark_workspace_field_count")
-        == contract.get("kernel_benchmark_workspace_field_count")
-        and route.get("stage_kernel_names")
-        == contract.get("kernel_stage_names")
-        and route.get("ti_kernel_invocations_per_replay")
-        == contract.get("kernel_ti_invocations_per_replay")
-        and route.get("claim_policy")
-        == "atomic_min_priority_then_source_ordinal"
+        and route.get("benchmark_workspace_field_count") == contract.get("kernel_benchmark_workspace_field_count")
+        and route.get("stage_kernel_names") == contract.get("kernel_stage_names")
+        and route.get("ti_kernel_invocations_per_replay") == contract.get("kernel_ti_invocations_per_replay")
+        and route.get("claim_policy") == "atomic_min_priority_then_source_ordinal"
         and route.get("control_only_claim_workspace_reset") is True
-        and route.get("control_only_claim_workspace_reset")
-        == contract.get("kernel_control_claim_workspace_reset")
+        and route.get("control_only_claim_workspace_reset") == contract.get("kernel_control_claim_workspace_reset")
         and route.get("physical_backend_launches_assumed") is False
-        and route.get("expected_candidates")
-        == contract.get("expected_candidate_count")
-        and route.get("expected_winners")
-        == contract.get("expected_winner_count")
-        and route.get("observed_candidates")
-        == contract.get("expected_candidate_count")
-        and route.get("observed_winners")
-        == contract.get("expected_winner_count")
+        and route.get("expected_candidates") == contract.get("expected_candidate_count")
+        and route.get("expected_winners") == contract.get("expected_winner_count")
+        and route.get("observed_candidates") == contract.get("expected_candidate_count")
+        and route.get("observed_winners") == contract.get("expected_winner_count")
         and route.get("elements") == contract.get("cells")
         and route.get("expected_backend") == child.get("backend")
         and route.get("observed_backend") == child.get("backend")
@@ -5942,8 +5516,7 @@ def _falling_sand_kernel_control_route_isolated(
 
 
 def _falling_sand_native_route_admitted(child: dict[str, Any]) -> bool:
-    if (child.get("operation") != "falling_sand"
-            or child.get("runtime") != "forge"):
+    if child.get("operation") != "falling_sand" or child.get("runtime") != "forge":
         return True
     route = child.get("route", {})
     contract = child.get("workload_contract", {})
@@ -5955,25 +5528,21 @@ def _falling_sand_native_route_admitted(child: dict[str, Any]) -> bool:
         isinstance(candidates, int)
         and isinstance(winners, int)
         and route.get("passed") is True
-        and route.get("classification")
-        == "forge_native_falling_sand_keyed_claim_pipeline"
-        and route.get("adapter")
-        == "forge_native_device_worklist_keyed_claim"
+        and route.get("classification") == "forge_native_falling_sand_keyed_claim_pipeline"
+        and route.get("adapter") == "forge_native_device_worklist_keyed_claim"
         and route.get("kernel_source_owner") == "benchmark"
-        and route.get("kernel_source_sha256")
-        == contract.get("kernel_source_sha256")
-        and route.get("benchmark_stage_kernel_names")
-        == contract.get("native_benchmark_stage_kernel_names")
+        and route.get("kernel_source_sha256") == contract.get("kernel_source_sha256")
+        and route.get("benchmark_stage_kernel_names") == contract.get("native_benchmark_stage_kernel_names")
         and route.get("benchmark_ti_kernel_invocations_per_replay") == 5
         and route.get("device_worklist_transitions_per_replay") == 2
-        and route.get("worklist_transition_names") == [
-            "stable_select_candidates", "deterministic_keyed_claim",
+        and route.get("worklist_transition_names")
+        == [
+            "stable_select_candidates",
+            "deterministic_keyed_claim",
         ]
-        and route.get("claim_policy")
-        == "min_priority_then_source_ordinal"
+        and route.get("claim_policy") == "min_priority_then_source_ordinal"
         and route.get("control_only_claim_workspace_reset") is False
-        and route.get("control_only_claim_workspace_reset")
-        == contract.get("native_control_claim_workspace_reset")
+        and route.get("control_only_claim_workspace_reset") == contract.get("native_control_claim_workspace_reset")
         and route.get("physical_backend_launches_assumed") is False
         and route.get("capacity") == contract.get("cells")
         and route.get("elements") == contract.get("cells")
@@ -5992,8 +5561,7 @@ def _falling_sand_native_route_admitted(child: dict[str, Any]) -> bool:
     )
 
 
-def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str,
-                             elements: int) -> dict[str, Any]:
+def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str, elements: int) -> dict[str, Any]:
     """Resolve one deterministic falling-sand destination-conflict step."""
     import numpy as np
 
@@ -6009,7 +5577,7 @@ def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str,
             initial_host[row * side + column] = particle_id
             initial_host[(row + 1) * side + column] = -1
             particle_id += 1
-    initial_host[(side - 1) * side:] = -1
+    initial_host[(side - 1) * side :] = -1
 
     expected_destinations = np.full(elements, -1, dtype=np.int32)
     expected_priorities = np.full(elements, -1, dtype=np.int32)
@@ -6026,20 +5594,15 @@ def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str,
                 direction = 1 if ((column // 2) & 1) else -1
                 preferred_column = column + direction
                 alternate_column = column - direction
-                if (0 <= preferred_column < side
-                        and initial_host[(row + 1) * side
-                                         + preferred_column] == 0):
+                if 0 <= preferred_column < side and initial_host[(row + 1) * side + preferred_column] == 0:
                     destination = (row + 1) * side + preferred_column
-                elif (0 <= alternate_column < side
-                      and initial_host[(row + 1) * side
-                                       + alternate_column] == 0):
+                elif 0 <= alternate_column < side and initial_host[(row + 1) * side + alternate_column] == 0:
                     destination = (row + 1) * side + alternate_column
         if destination >= 0:
             priority = (int(initial_host[source]) * 13 + 5) % 97
             expected_destinations[source] = destination
             expected_priorities[source] = priority
-            candidates_by_destination.setdefault(destination, []).append(
-                (priority, source))
+            candidates_by_destination.setdefault(destination, []).append((priority, source))
 
     expected_winner_sources = np.full(elements, -1, dtype=np.int32)
     expected_output = initial_host.copy()
@@ -6048,8 +5611,7 @@ def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str,
         expected_winner_sources[destination] = source
         expected_output[source] = 0
         expected_output[destination] = initial_host[source]
-    expected_candidate_count = int(np.count_nonzero(
-        expected_destinations >= 0))
+    expected_candidate_count = int(np.count_nonzero(expected_destinations >= 0))
     expected_winner_count = len(candidates_by_destination)
     expected_conflict_count = expected_candidate_count - expected_winner_count
     if not (expected_candidate_count > expected_winner_count > 0):
@@ -6068,9 +5630,7 @@ def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str,
     initial.from_numpy(initial_host)
 
     @ti.func
-    def candidate_destination(
-            source: ti.i32,
-            source_grid: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+    def candidate_destination(source: ti.i32, source_grid: ti.types.ndarray(dtype=ti.i32, ndim=1)):
         destination = -1
         row = source // side
         column = source - row * side
@@ -6082,28 +5642,25 @@ def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str,
                 direction = 1 if ((column // 2) & 1) != 0 else -1
                 preferred_column = column + direction
                 alternate_column = column - direction
-                if (0 <= preferred_column < side
-                        and source_grid[(row + 1) * side
-                                        + preferred_column] == 0):
+                if 0 <= preferred_column < side and source_grid[(row + 1) * side + preferred_column] == 0:
                     destination = (row + 1) * side + preferred_column
-                elif (0 <= alternate_column < side
-                      and source_grid[(row + 1) * side
-                                      + alternate_column] == 0):
+                elif 0 <= alternate_column < side and source_grid[(row + 1) * side + alternate_column] == 0:
                     destination = (row + 1) * side + alternate_column
         return destination
 
     @ti.kernel
     def reset_sand(
-            source_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            target_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            next_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            target_destinations: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            target_priorities: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            target_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            target_claims: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            target_winners: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            target_candidate_count: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            target_winner_count: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        source_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        target_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        next_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        target_destinations: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        target_priorities: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        target_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        target_claims: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        target_winners: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        target_candidate_count: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        target_winner_count: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
         for cell in range(elements):
             value = source_grid[cell]
             target_grid[cell] = value
@@ -6120,25 +5677,26 @@ def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str,
 
     @ti.kernel
     def propose_candidates(
-            source_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            target_destinations: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            target_priorities: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            target_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            target_count: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        source_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        target_destinations: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        target_priorities: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        target_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        target_count: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
         for source in range(elements):
             destination = candidate_destination(source, source_grid)
             if destination >= 0:
                 target_destinations[source] = destination
-                target_priorities[source] = (
-                    source_grid[source] * 13 + 5) % 97
+                target_priorities[source] = (source_grid[source] * 13 + 5) % 97
                 target_flags[source] = 1
                 ti.atomic_add(target_count[0], 1)
 
     @ti.kernel
     def claim_candidates(
-            source_destinations: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            source_priorities: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            target_claims: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        source_destinations: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        source_priorities: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        target_claims: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
         for source in range(elements):
             destination = source_destinations[source]
             if destination >= 0:
@@ -6147,13 +5705,14 @@ def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str,
 
     @ti.kernel
     def materialize_kernel_winners(
-            source_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            source_destinations: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            source_priorities: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            source_claims: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            target_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            target_winners: ti.types.ndarray(dtype=ti.i32, ndim=1),
-            target_count: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        source_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        source_destinations: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        source_priorities: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        source_claims: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        target_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        target_winners: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        target_count: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
         for source in range(elements):
             destination = source_destinations[source]
             if destination >= 0:
@@ -6174,8 +5733,8 @@ def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str,
 
         @ti.kernel
         def initialize_sources(
-                values: ti.types.ndarray(dtype=ti.i32, ndim=1),
-                extent_state: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+            values: ti.types.ndarray(dtype=ti.i32, ndim=1), extent_state: ti.types.ndarray(dtype=ti.i32, ndim=1)
+        ):
             for source in range(elements):
                 values[source] = source
                 if source == 0:
@@ -6184,13 +5743,14 @@ def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str,
 
         @ti.kernel
         def gather_compact_attributes(
-                active_sources: ti.types.ndarray(dtype=ti.i32, ndim=1),
-                active_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
-                source_destinations: ti.types.ndarray(dtype=ti.i32, ndim=1),
-                source_priorities: ti.types.ndarray(dtype=ti.i32, ndim=1),
-                target_keys: ti.types.ndarray(dtype=ti.i32, ndim=1),
-                target_priorities: ti.types.ndarray(dtype=ti.i32, ndim=1),
-                target_ordinals: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+            active_sources: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            active_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            source_destinations: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            source_priorities: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_keys: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_priorities: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_ordinals: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        ):
             for slot in range(elements):
                 if slot < active_extent[0]:
                     source = active_sources[slot]
@@ -6200,13 +5760,14 @@ def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str,
 
         @ti.kernel
         def materialize_native_winners(
-                source_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
-                selected_sources: ti.types.ndarray(dtype=ti.i32, ndim=1),
-                selected_keys: ti.types.ndarray(dtype=ti.i32, ndim=1),
-                selected_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
-                target_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
-                target_winners: ti.types.ndarray(dtype=ti.i32, ndim=1),
-                target_count: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+            source_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            selected_sources: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            selected_keys: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            selected_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_winners: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_count: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        ):
             for slot in range(elements):
                 if slot < selected_extent[0]:
                     source = selected_sources[slot]
@@ -6215,6 +5776,7 @@ def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str,
                     target_grid[destination] = source_grid[source]
                     target_winners[destination] = source
                     ti.atomic_add(target_count[0], 1)
+
     else:
         initialize_sources = None
         gather_compact_attributes = None
@@ -6222,46 +5784,72 @@ def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str,
 
     def reset() -> None:
         reset_sand(
-            initial, current, output, destinations, priorities, flags,
-            claims, winner_sources, candidate_count, winner_count)
+            initial,
+            current,
+            output,
+            destinations,
+            priorities,
+            flags,
+            claims,
+            winner_sources,
+            candidate_count,
+            winner_count,
+        )
 
     def launch() -> None:
-        propose_candidates(
-            current, destinations, priorities, flags, candidate_count)
+        propose_candidates(current, destinations, priorities, flags, candidate_count)
         if runtime_name == "forge":
             initialize_sources(worklist.values, worklist.extent.state)
             worklist.select(flags, method="auto")
             gather_compact_attributes(
-                worklist.values, worklist.extent.state, destinations,
-                priorities, compact_keys, compact_priorities,
-                compact_ordinals)
+                worklist.values,
+                worklist.extent.state,
+                destinations,
+                priorities,
+                compact_keys,
+                compact_priorities,
+                compact_ordinals,
+            )
             result = worklist.resolve_conflicts(
-                compact_keys, priorities=compact_priorities,
-                ordinals=compact_ordinals, policy="min_priority",
-                method="auto")
+                compact_keys,
+                priorities=compact_priorities,
+                ordinals=compact_ordinals,
+                policy="min_priority",
+                method="auto",
+            )
             materialize_native_winners(
-                current, result.values, result.keys, result.extent.state,
-                output, winner_sources, winner_count)
+                current, result.values, result.keys, result.extent.state, output, winner_sources, winner_count
+            )
         else:
             claim_candidates(destinations, priorities, claims)
-            materialize_kernel_winners(
-                current, destinations, priorities, claims, output,
-                winner_sources, winner_count)
+            materialize_kernel_winners(current, destinations, priorities, claims, output, winner_sources, winner_count)
 
     def exact_i32_vector(actual: Any, expected: Any) -> dict[str, Any]:
         actual_i32 = np.ascontiguousarray(actual, dtype=np.int32).reshape(-1)
-        expected_i32 = np.ascontiguousarray(
-            expected, dtype=np.int32).reshape(-1)
+        expected_i32 = np.ascontiguousarray(expected, dtype=np.int32).reshape(-1)
         mismatch = (
             np.flatnonzero(actual_i32 != expected_i32)
             if actual_i32.size == expected_i32.size
-            else np.arange(max(actual_i32.size, expected_i32.size)))
+            else np.arange(max(actual_i32.size, expected_i32.size))
+        )
 
         def evidence(vector: Any) -> dict[str, Any]:
             count = int(vector.size)
-            sample_indices = sorted(set((
-                0, count // 4, count // 2, (3 * count) // 4, count - 1,
-            ))) if count else []
+            sample_indices = (
+                sorted(
+                    set(
+                        (
+                            0,
+                            count // 4,
+                            count // 2,
+                            (3 * count) // 4,
+                            count - 1,
+                        )
+                    )
+                )
+                if count
+                else []
+            )
             return {
                 "count": count,
                 "sha256": hashlib.sha256(vector.tobytes()).hexdigest(),
@@ -6305,12 +5893,9 @@ def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str,
         actual_winners = int(winner_count.to_numpy()[0])
         vectors = {
             "grid_i32": exact_i32_vector(output.to_numpy(), expected_output),
-            "winner_source_by_destination_i32": exact_i32_vector(
-                winner_sources.to_numpy(), expected_winner_sources),
-            "destinations_i32": exact_i32_vector(
-                destinations.to_numpy(), expected_destinations),
-            "priorities_i32": exact_i32_vector(
-                priorities.to_numpy(), expected_priorities),
+            "winner_source_by_destination_i32": exact_i32_vector(winner_sources.to_numpy(), expected_winner_sources),
+            "destinations_i32": exact_i32_vector(destinations.to_numpy(), expected_destinations),
+            "priorities_i32": exact_i32_vector(priorities.to_numpy(), expected_priorities),
         }
         passed = bool(
             actual_candidates == expected_candidate_count
@@ -6320,11 +5905,12 @@ def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str,
                 and vector["actual_sha256"] == vector["expected_sha256"]
                 and vector["mismatch_count"] == 0
                 and vector["first_mismatch"] is None
-                for vector in vectors.values()))
+                for vector in vectors.values()
+            )
+        )
         return {
             "passed": passed,
-            "comparison": (
-                "exact_falling_sand_grid_candidates_and_keyed_winners"),
+            "comparison": ("exact_falling_sand_grid_candidates_and_keyed_winners"),
             "candidate_count": actual_candidates,
             "expected_candidate_count": expected_candidate_count,
             "winner_count": actual_winners,
@@ -6334,12 +5920,9 @@ def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str,
             "endpoint_fingerprint": {
                 "finite": True,
                 "grid_sha256": vectors["grid_i32"]["actual_sha256"],
-                "winner_sources_sha256": vectors[
-                    "winner_source_by_destination_i32"]["actual_sha256"],
-                "destinations_sha256": vectors[
-                    "destinations_i32"]["actual_sha256"],
-                "priorities_sha256": vectors[
-                    "priorities_i32"]["actual_sha256"],
+                "winner_sources_sha256": vectors["winner_source_by_destination_i32"]["actual_sha256"],
+                "destinations_sha256": vectors["destinations_i32"]["actual_sha256"],
+                "priorities_sha256": vectors["priorities_i32"]["actual_sha256"],
             },
             "endpoint_vectors": vectors,
         }
@@ -6350,15 +5933,22 @@ def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str,
         "reset_each_launch": True,
         "validate": validate_fresh,
         "route": lambda: _falling_sand_route(
-            worklist, runtime_name, backend, elements,
-            expected_candidate_count, expected_winner_count,
+            worklist,
+            runtime_name,
+            backend,
+            elements,
+            expected_candidate_count,
+            expected_winner_count,
             int(candidate_count.to_numpy()[0]),
-            int(winner_count.to_numpy()[0]), source_sha256),
+            int(winner_count.to_numpy()[0]),
+            source_sha256,
+        ),
         "logical_bytes": 0,
         "traffic_model": (
             "one deterministic falling-sand proposal, destination conflict "
             "claim, and winner materialization; no simplified bandwidth is "
-            "claimed"),
+            "claimed"
+        ),
         "case_preparation": {
             "side": side,
             "cells": elements,
@@ -6385,59 +5975,68 @@ def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str,
             "kernel_adapter": "benchmark_defined_ti_kernel_pipeline",
             "kernel_helper_api_used": False,
             "kernel_specialized_api_used": False,
-            "kernel_benchmark_workspace_kind": (
-                "one_i32_destination_claim_array"),
+            "kernel_benchmark_workspace_kind": ("one_i32_destination_claim_array"),
             "kernel_benchmark_workspace_field_count": 1,
             "kernel_control_claim_workspace_reset": True,
             "kernel_stage_names": [
-                "reset_sand", "propose_candidates", "claim_candidates",
+                "reset_sand",
+                "propose_candidates",
+                "claim_candidates",
                 "materialize_kernel_winners",
             ],
             "kernel_ti_invocations_per_replay": 4,
             "kernel_physical_backend_launches_assumed": False,
             "native_benchmark_stage_kernel_names": [
-                "reset_sand", "propose_candidates", "initialize_sources",
-                "gather_compact_attributes", "materialize_native_winners",
+                "reset_sand",
+                "propose_candidates",
+                "initialize_sources",
+                "gather_compact_attributes",
+                "materialize_native_winners",
             ],
             "native_control_claim_workspace_reset": False,
             "forge_adapter": (
                 "DeviceWorklist stable select plus deterministic keyed "
-                "min-priority/source-ordinal conflict resolution"),
-            "vanilla_adapter": (
-                "full-grid atomic-min destination claim plus winner "
-                "materialization"),
+                "min-priority/source-ordinal conflict resolution"
+            ),
+            "vanilla_adapter": ("full-grid atomic-min destination claim plus winner " "materialization"),
             "shared": (
                 "same initial grid, movement preference, candidate proposal "
                 "kernel, priority and source-ordinal tie break, output reset, "
                 "winner materialization semantics, outer synchronization, and "
-                "exact full-vector oracle"),
+                "exact full-vector oracle"
+            ),
             "allowed_difference": (
                 "only destination-conflict adapter: atomic-min claim for the "
                 "kernel control versus DeviceWorklist select/keyed claim; "
-                "each adapter initializes only the workspace it consumes"),
+                "each adapter initializes only the workspace it consumes"
+            ),
             "correctness": (
                 "exact complete grid, destination, priority, and winner-source "
                 "vectors plus candidate/winner/conflict counts, SHA-256, "
-                "statistics, samples, mismatch count, and first mismatch"),
+                "statistics, samples, mismatch count, and first mismatch"
+            ),
             "timing": (
                 "frozen repeated complete device reset, proposal, conflict "
                 "resolution, and materialization plus one outer sync; host "
-                "scene construction and validation are excluded"),
+                "scene construction and validation are excluded"
+            ),
         },
     }
 
 
-def _numeric_growth(before: dict[str, Any] | None,
-                    after: dict[str, Any] | None,
-                    keys: Sequence[str]) -> dict[str, Any]:
+def _numeric_growth(before: dict[str, Any] | None, after: dict[str, Any] | None, keys: Sequence[str]) -> dict[str, Any]:
     deltas: dict[str, int | float | None] = {}
     regressions = []
     comparable = 0
     for key in keys:
         left = None if before is None else before.get(key)
         right = None if after is None else after.get(key)
-        if (isinstance(left, (int, float)) and not isinstance(left, bool)
-                and isinstance(right, (int, float)) and not isinstance(right, bool)):
+        if (
+            isinstance(left, (int, float))
+            and not isinstance(left, bool)
+            and isinstance(right, (int, float))
+            and not isinstance(right, bool)
+        ):
             delta = right - left
             deltas[key] = delta
             comparable += 1
@@ -6453,8 +6052,7 @@ def _numeric_growth(before: dict[str, Any] | None,
     }
 
 
-def _enhanced_memory_plateau(before: dict[str, Any],
-                             after: dict[str, Any]) -> dict[str, Any]:
+def _enhanced_memory_plateau(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     runtime_keys = (
         "device_cached_bytes",
         "device_raw_bytes",
@@ -6481,10 +6079,8 @@ def _enhanced_memory_plateau(before: dict[str, Any],
     before_pools = before.get("pools") or {}
     after_pools = after.get("pools") or {}
     runtime = _numeric_growth(before_runtime, after_runtime, runtime_keys)
-    host_pool = _numeric_growth(
-        before_pools.get("host"), after_pools.get("host"), host_pool_keys)
-    device_pool = _numeric_growth(
-        before_pools.get("device"), after_pools.get("device"), device_pool_keys)
+    host_pool = _numeric_growth(before_pools.get("host"), after_pools.get("host"), host_pool_keys)
+    device_pool = _numeric_growth(before_pools.get("device"), after_pools.get("device"), device_pool_keys)
     return {
         "required": True,
         "available_before": bool(before.get("available")),
@@ -6522,8 +6118,7 @@ class _CudaProfilerRange:
         if not self._enabled:
             return
         if os.name != "nt":
-            raise RuntimeError(
-                "--cuda-profiler-range is currently implemented for Windows")
+            raise RuntimeError("--cuda-profiler-range is currently implemented for Windows")
         driver = ctypes.WinDLL("nvcuda.dll")
         driver.cuProfilerStart.argtypes = []
         driver.cuProfilerStart.restype = ctypes.c_int
@@ -6543,34 +6138,37 @@ class _CudaProfilerRange:
             raise RuntimeError(f"cuProfilerStop failed with CUresult {result}")
 
 
-def _calibrate_batch(ti: Any, launch: Callable[[], None], target_ms: float,
-                     maximum: int = 16_384) -> tuple[int, list[dict[str, Any]]]:
+def _calibrate_batch(
+    ti: Any, launch: Callable[[], None], target_ms: float, maximum: int = 16_384
+) -> tuple[int, list[dict[str, Any]]]:
     batch_size = 1
     attempts = []
     while True:
         elapsed_ms = _timed_batch(ti, launch, batch_size)
-        attempts.append({
-            "batch_size": batch_size,
-            "elapsed_ms": elapsed_ms,
-            "confirmation": False,
-        })
+        attempts.append(
+            {
+                "batch_size": batch_size,
+                "elapsed_ms": elapsed_ms,
+                "confirmation": False,
+            }
+        )
         steady_elapsed_ms = elapsed_ms
         if elapsed_ms >= target_ms or batch_size >= maximum:
             confirmation_values = [elapsed_ms]
             for _ in range(PILOT_CONFIRMATION_RUNS - 1):
                 confirmation_ms = _timed_batch(ti, launch, batch_size)
                 confirmation_values.append(confirmation_ms)
-                attempts.append({
-                    "batch_size": batch_size,
-                    "elapsed_ms": confirmation_ms,
-                    "confirmation": True,
-                })
+                attempts.append(
+                    {
+                        "batch_size": batch_size,
+                        "elapsed_ms": confirmation_ms,
+                        "confirmation": True,
+                    }
+                )
             steady_elapsed_ms = float(statistics.median(confirmation_values))
             if steady_elapsed_ms >= target_ms or batch_size >= maximum:
                 return batch_size, attempts
-        estimate = (
-            batch_size * 2 if steady_elapsed_ms <= 0.0 else
-            math.ceil(batch_size * target_ms / steady_elapsed_ms))
+        estimate = batch_size * 2 if steady_elapsed_ms <= 0.0 else math.ceil(batch_size * target_ms / steady_elapsed_ms)
         batch_size = min(maximum, max(batch_size * 2, estimate))
 
 
@@ -6582,16 +6180,19 @@ class _StabilityReplayError(RuntimeError):
         self.evidence = evidence
 
 
-def _run_stability(ti: Any, launch: Callable[[], None], replays: int,
-                   checkpoint: int, sample_gpu: bool,
-                   runtime_name: str,
-                   lifecycle_observe: Callable[[], dict[str, Any]] | None = None
-                   ) -> dict[str, Any] | None:
+def _run_stability(
+    ti: Any,
+    launch: Callable[[], None],
+    replays: int,
+    checkpoint: int,
+    sample_gpu: bool,
+    runtime_name: str,
+    lifecycle_observe: Callable[[], dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
     if replays <= 0:
         return None
     enhanced_before = runtime_memory_observation(ti)
-    lifecycle_before = (
-        None if lifecycle_observe is None else lifecycle_observe())
+    lifecycle_before = None if lifecycle_observe is None else lifecycle_observe()
     rss_before = working_set_bytes()
     gpu_before = process_gpu_memory_mib(os.getpid()) if sample_gpu else None
     windows = []
@@ -6608,46 +6209,41 @@ def _run_stability(ti: Any, launch: Callable[[], None], replays: int,
         except Exception as error:
             successful_in_window = completed - completed_before_window
             if successful_in_window > 0:
-                windows.append(
-                    (time.perf_counter_ns() - started) / 1.0e6
-                    / successful_in_window)
+                windows.append((time.perf_counter_ns() - started) / 1.0e6 / successful_in_window)
             rss_failure = working_set_bytes()
-            gpu_failure = (
-                process_gpu_memory_mib(os.getpid()) if sample_gpu else None)
+            gpu_failure = process_gpu_memory_mib(os.getpid()) if sample_gpu else None
             enhanced_failure = runtime_memory_observation(ti)
-            lifecycle_failure = (
-                None if lifecycle_observe is None else lifecycle_observe())
-            raise _StabilityReplayError(error, {
-                "requested_replays": replays,
-                "completed_replays": completed,
-                "failed_replay_one_based": completed + 1,
-                "checkpoint": checkpoint,
-                "completed_window_per_launch_ms": windows,
-                "cause": repr(error),
-                "rss_before_bytes": rss_before,
-                "rss_at_failure_bytes": rss_failure,
-                "rss_delta_bytes": (
-                    None if rss_before is None or rss_failure is None else
-                    rss_failure - rss_before),
-                "gpu_before_mib": gpu_before,
-                "gpu_at_failure_mib": gpu_failure,
-                "gpu_delta_mib": (
-                    None if gpu_before is None or gpu_failure is None else
-                    gpu_failure - gpu_before),
-                "enhanced_before": enhanced_before,
-                "enhanced_at_failure": enhanced_failure,
-                "snode_lifecycle_before": lifecycle_before,
-                "snode_lifecycle_at_failure": lifecycle_failure,
-            }) from error
+            lifecycle_failure = None if lifecycle_observe is None else lifecycle_observe()
+            raise _StabilityReplayError(
+                error,
+                {
+                    "requested_replays": replays,
+                    "completed_replays": completed,
+                    "failed_replay_one_based": completed + 1,
+                    "checkpoint": checkpoint,
+                    "completed_window_per_launch_ms": windows,
+                    "cause": repr(error),
+                    "rss_before_bytes": rss_before,
+                    "rss_at_failure_bytes": rss_failure,
+                    "rss_delta_bytes": (
+                        None if rss_before is None or rss_failure is None else rss_failure - rss_before
+                    ),
+                    "gpu_before_mib": gpu_before,
+                    "gpu_at_failure_mib": gpu_failure,
+                    "gpu_delta_mib": (None if gpu_before is None or gpu_failure is None else gpu_failure - gpu_before),
+                    "enhanced_before": enhanced_before,
+                    "enhanced_at_failure": enhanced_failure,
+                    "snode_lifecycle_before": lifecycle_before,
+                    "snode_lifecycle_at_failure": lifecycle_failure,
+                },
+            ) from error
         windows.append((time.perf_counter_ns() - started) / 1.0e6 / count)
     rss_after = working_set_bytes()
     gpu_after = process_gpu_memory_mib(os.getpid()) if sample_gpu else None
     enhanced_after = runtime_memory_observation(ti)
-    lifecycle_after = (
-        None if lifecycle_observe is None else lifecycle_observe())
+    lifecycle_after = None if lifecycle_observe is None else lifecycle_observe()
     if _uses_forge_package(runtime_name):
-        enhanced_plateau = _enhanced_memory_plateau(
-            enhanced_before, enhanced_after)
+        enhanced_plateau = _enhanced_memory_plateau(enhanced_before, enhanced_after)
     else:
         enhanced_plateau = {
             "required": False,
@@ -6659,10 +6255,9 @@ def _run_stability(ti: Any, launch: Callable[[], None], replays: int,
     rss_delta = None if rss_before is None or rss_after is None else rss_after - rss_before
     gpu_delta = None if gpu_before is None or gpu_after is None else gpu_after - gpu_before
     lifecycle_plateau = (
-        None if lifecycle_before is None or lifecycle_after is None else
-        _snode_lifecycle_plateau(
-            lifecycle_before, lifecycle_after,
-            require_directory_plateau=True)
+        None
+        if lifecycle_before is None or lifecycle_after is None
+        else _snode_lifecycle_plateau(lifecycle_before, lifecycle_after, require_directory_plateau=True)
     )
     return {
         "replays": replays,
@@ -6691,8 +6286,7 @@ def _run_stability(ti: Any, launch: Callable[[], None], replays: int,
 
 
 def _child_result(args: argparse.Namespace) -> dict[str, Any]:
-    affinity = _apply_affinity(_resolve_affinity(args.cpu_affinity,
-                                                  args.cpu_threads))
+    affinity = _apply_affinity(_resolve_affinity(args.cpu_affinity, args.cpu_threads))
     ti, import_ms, core_path = _load_taichi(args.runtime)
     provenance = _environment_provenance(args.runtime, ti, core_path)
     requested_arch = getattr(ti, args.backend)
@@ -6711,13 +6305,9 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         "schema": SCHEMA,
         "phase": args.phase,
         "runtime": args.runtime,
-        "runtime_package": (
-            "forge" if _uses_forge_package(args.runtime) else "vanilla"
-        ),
+        "runtime_package": ("forge" if _uses_forge_package(args.runtime) else "vanilla"),
         "adapter_kind": (
-            "native" if (args.runtime == "forge"
-                         and args.operation in THIN_CAPABILITY_OPERATIONS)
-            else "kernel"
+            "native" if (args.runtime == "forge" and args.operation in THIN_CAPABILITY_OPERATIONS) else "kernel"
         ),
         "operation": args.operation,
         "backend": args.backend,
@@ -6756,75 +6346,53 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
             result.update(status="rejected", rejection_reason="backend fallback")
             return result
         if not result["environment_isolated"]:
-            result.update(status="rejected",
-                          rejection_reason="environment isolation failed")
+            result.update(status="rejected", rejection_reason="environment isolation failed")
             return result
         if not device_identity["binding_verified"]:
-            result.update(status="rejected",
-                          rejection_reason="physical GPU binding is unverified")
+            result.update(status="rejected", rejection_reason="physical GPU binding is unverified")
             return result
         config = PRESETS[args.preset]
         if args.operation == "prefix_sum":
-            case = _build_prefix_sum_case(
-                ti, args.runtime, args.backend, config["elements"])
+            case = _build_prefix_sum_case(ti, args.runtime, args.backend, config["elements"])
         elif args.operation == "parallel_sort":
-            case = _build_parallel_sort_case(
-                ti, args.runtime, config["elements"])
+            case = _build_parallel_sort_case(ti, args.runtime, config["elements"])
         elif args.operation == "native_reduce":
-            case = _build_native_reduce_case(
-                ti, args.runtime, args.backend, config["elements"])
+            case = _build_native_reduce_case(ti, args.runtime, args.backend, config["elements"])
         elif args.operation == "native_transform":
-            case = _build_native_transform_case(
-                ti, args.runtime, args.backend, config["elements"])
+            case = _build_native_transform_case(ti, args.runtime, args.backend, config["elements"])
         elif args.operation == "native_gather":
-            case = _build_native_indexed_copy_case(
-                ti, args.runtime, args.backend, config["elements"], False)
+            case = _build_native_indexed_copy_case(ti, args.runtime, args.backend, config["elements"], False)
         elif args.operation == "native_scatter":
-            case = _build_native_indexed_copy_case(
-                ti, args.runtime, args.backend, config["elements"], True)
+            case = _build_native_indexed_copy_case(ti, args.runtime, args.backend, config["elements"], True)
         elif args.operation == "native_compact":
-            case = _build_native_compact_case(
-                ti, args.runtime, args.backend, config["elements"])
+            case = _build_native_compact_case(ti, args.runtime, args.backend, config["elements"])
         elif args.operation == "device_prefix_chain":
-            case = _build_device_prefix_chain_case(
-                ti, args.runtime, args.backend, config["elements"])
+            case = _build_device_prefix_chain_case(ti, args.runtime, args.backend, config["elements"])
         elif args.operation == "active_grid_mpm":
-            case = _build_active_grid_mpm_case(
-                ti, args.runtime, args.backend, args.preset)
+            case = _build_active_grid_mpm_case(ti, args.runtime, args.backend, args.preset)
         elif args.operation == "particle_spatial_hash":
-            case = _build_particle_spatial_hash_case(
-                ti, args.runtime, args.backend, config["elements"])
+            case = _build_particle_spatial_hash_case(ti, args.runtime, args.backend, config["elements"])
         elif args.operation == "adaptive_pbd":
-            case = _build_adaptive_pbd_case(
-                ti, args.runtime, args.backend, config["elements"])
+            case = _build_adaptive_pbd_case(ti, args.runtime, args.backend, config["elements"])
         elif args.operation == "marching_squares":
-            case = _build_marching_squares_case(
-                ti, args.runtime, args.backend, config["elements"])
+            case = _build_marching_squares_case(ti, args.runtime, args.backend, config["elements"])
         elif args.operation == "bfs_worklist":
-            case = _build_bfs_worklist_case(
-                ti, args.runtime, args.backend, config["elements"])
+            case = _build_bfs_worklist_case(ti, args.runtime, args.backend, config["elements"])
         elif args.operation == "falling_sand":
-            case = _build_falling_sand_case(
-                ti, args.runtime, args.backend, config["elements"])
+            case = _build_falling_sand_case(ti, args.runtime, args.backend, config["elements"])
         elif args.operation == "sparse_block_stencil":
-            case = _build_sparse_block_stencil_case(
-                ti, args.runtime, args.backend, args.preset)
+            case = _build_sparse_block_stencil_case(ti, args.runtime, args.backend, args.preset)
         elif args.operation == "snode_churn":
-            case = _build_snode_churn_case(
-                ti, args.runtime, args.backend)
+            case = _build_snode_churn_case(ti, args.runtime, args.backend)
         elif args.operation == "snode_concurrent":
-            case = _build_snode_concurrent_case(
-                ti, args.runtime, args.preset)
+            case = _build_snode_concurrent_case(ti, args.runtime, args.preset)
         elif args.operation in ("mpm_graph", "mpm_direct"):
-            case = _build_mpm_case(
-                ti, args.runtime, args.operation, args.preset)
+            case = _build_mpm_case(ti, args.runtime, args.operation, args.preset)
         else:
             kernel = _make_kernel(ti, args.operation)
-            case = _build_case(ti, kernel, args.operation, config["elements"],
-                               config["stencil_side"])
+            case = _build_case(ti, kernel, args.operation, config["elements"], config["stencil_side"])
             source_sha256 = sha256_file(Path(__file__))
-            case["route"] = lambda: _ordinary_kernel_route(
-                args.runtime, source_sha256)
+            case["route"] = lambda: _ordinary_kernel_route(args.runtime, source_sha256)
             case["workload_contract"] = {
                 "case_id": "CONTROL-001",
                 "comparison_class": "control",
@@ -6852,7 +6420,8 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         result["traffic_model"] = case["traffic_model"]
         if case["workload_contract"].get("comparison_class") == "thin-capability":
             kernel_adapter = case["workload_contract"].get(
-                "vanilla_adapter", "declared vanilla-compatible Taichi kernel path")
+                "vanilla_adapter", "declared vanilla-compatible Taichi kernel path"
+            )
             case["workload_contract"]["legacy_vanilla_adapter"] = kernel_adapter
             case["workload_contract"]["forge_kernel_adapter"] = (
                 "benchmark-defined Taichi kernel control executed by the Forge "
@@ -6890,7 +6459,9 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         result["runtime_memory_at_ready"] = runtime_memory_observation(ti)
         result["validation_before"] = case["validate"]()
         result["route_before_scoring"] = (
-            case["route"]() if "route" in case else {
+            case["route"]()
+            if "route" in case
+            else {
                 "classification": "ordinary_taichi_kernel",
                 "passed": True,
             }
@@ -6898,59 +6469,54 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         result["route"] = result["route_before_scoring"]
         warmup_replays = warmup_batch_size(args.phase, args.batch_size)
         result["warmup_batch_size"] = warmup_replays
-        result["warmup_raw_batch_ms"] = [
-            _timed_batch(ti, measured_launch, warmup_replays)
-            for _ in range(args.warmups)
-        ]
-        result["warmup_ms"] = [
-            value / warmup_replays
-            for value in result["warmup_raw_batch_ms"]
-        ]
+        result["warmup_raw_batch_ms"] = [_timed_batch(ti, measured_launch, warmup_replays) for _ in range(args.warmups)]
+        result["warmup_ms"] = [value / warmup_replays for value in result["warmup_raw_batch_ms"]]
         result["warm_single_call_latency_ms"] = [
-            _timed_batch(ti, measured_launch, 1)
-            for _ in range(args.latency_samples)
+            _timed_batch(ti, measured_launch, 1) for _ in range(args.latency_samples)
         ]
-        result["warm_single_call_latency_summary"] = summarize_samples(
-            result["warm_single_call_latency_ms"])
+        result["warm_single_call_latency_summary"] = summarize_samples(result["warm_single_call_latency_ms"])
         if args.phase == "pilot":
-            suggestion, attempts = _calibrate_batch(
-                ti, measured_launch,
-                args.target_sample_ms * PILOT_TIMING_HEADROOM)
+            suggestion, attempts = _calibrate_batch(ti, measured_launch, args.target_sample_ms * PILOT_TIMING_HEADROOM)
             result["suggested_batch_size"] = suggestion
             result["pilot_attempts"] = attempts
             result["pilot_confirmation_runs"] = PILOT_CONFIRMATION_RUNS
-            result["pilot_target_with_headroom_ms"] = (
-                args.target_sample_ms * PILOT_TIMING_HEADROOM)
+            result["pilot_target_with_headroom_ms"] = args.target_sample_ms * PILOT_TIMING_HEADROOM
         else:
             with _CudaProfilerRange(args.cuda_profiler_range):
-                raw_batch_ms = [
-                    _timed_batch(ti, measured_launch, args.batch_size)
-                    for _ in range(args.samples)
-                ]
+                raw_batch_ms = [_timed_batch(ti, measured_launch, args.batch_size) for _ in range(args.samples)]
             samples = [value / args.batch_size for value in raw_batch_ms]
             summary = summarize_samples(samples)
             summary["logical_bandwidth_gbps"] = logical_bandwidth_gbps(
-                case["logical_bytes"], float(summary["median_ms"]))
+                case["logical_bytes"], float(summary["median_ms"])
+            )
             result["raw_batch_ms"] = raw_batch_ms
             result["samples"] = samples
             result["summary"] = summary
             result["stability"] = _run_stability(
-                ti, measured_launch, args.stability_replays,
-                args.stability_checkpoint, args.backend != "cpu", args.runtime,
-                case.get("stability_observe"))
+                ti,
+                measured_launch,
+                args.stability_replays,
+                args.stability_checkpoint,
+                args.backend != "cpu",
+                args.runtime,
+                case.get("stability_observe"),
+            )
         result["validation_after"] = case["validate"]()
-        result["route_after_scoring"] = (
-            case["route"]() if "route" in case else result["route"])
+        result["route_after_scoring"] = case["route"]() if "route" in case else result["route"]
         result["route"] = result["route_after_scoring"]
         stability = result.get("stability")
-        result["status"] = "passed" if (
-            result["validation_before"]["passed"]
-            and result["validation_after"]["passed"]
-            and result["route_before_scoring"]["passed"]
-            and result["route"]["passed"]
-            and result["device_identity"]["binding_verified"]
-            and (stability is None or stability["memory_guard_passed"])
-        ) else "failed"
+        result["status"] = (
+            "passed"
+            if (
+                result["validation_before"]["passed"]
+                and result["validation_after"]["passed"]
+                and result["route_before_scoring"]["passed"]
+                and result["route"]["passed"]
+                and result["device_identity"]["binding_verified"]
+                and (stability is None or stability["memory_guard_passed"])
+            )
+            else "failed"
+        )
         return result
     except Exception as error:  # Preserve partial child evidence on failures.
         result.update(
@@ -6975,8 +6541,7 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         except Exception as error:  # pragma: no cover - captured in artifact
             sync_error = repr(error)
         pre_reset_rss = working_set_bytes()
-        pre_reset_gpu = (process_gpu_memory_mib(os.getpid())
-                         if args.backend != "cpu" else None)
+        pre_reset_gpu = process_gpu_memory_mib(os.getpid()) if args.backend != "cpu" else None
         enhanced_pre_reset = runtime_memory_observation(ti)
         try:
             ti.reset()
@@ -6990,8 +6555,7 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
             "pre_reset_rss_bytes": pre_reset_rss,
             "post_reset_rss_bytes": working_set_bytes(),
             "pre_reset_gpu_mib": pre_reset_gpu,
-            "post_reset_gpu_mib": (process_gpu_memory_mib(os.getpid())
-                                   if args.backend != "cpu" else None),
+            "post_reset_gpu_mib": (process_gpu_memory_mib(os.getpid()) if args.backend != "cpu" else None),
             "enhanced_pre_reset": enhanced_pre_reset,
             "enhanced_post_reset": enhanced_post_reset,
         }
@@ -7018,8 +6582,7 @@ def _child_main(args: argparse.Namespace) -> int:
     return 0 if result["status"] == "passed" else 2
 
 
-def _python_processes(
-        ignored_pids: Sequence[int]) -> tuple[list[dict[str, Any]], bool]:
+def _python_processes(ignored_pids: Sequence[int]) -> tuple[list[dict[str, Any]], bool]:
     ignored = {int(pid) for pid in ignored_pids}
     if os.name != "nt":
         return [], False
@@ -7035,8 +6598,7 @@ def _python_processes(
         return [], True
     value = json.loads(output)
     rows = value if isinstance(value, list) else [value]
-    return ([row for row in rows
-             if int(row.get("Id", -1)) not in ignored], True)
+    return ([row for row in rows if int(row.get("Id", -1)) not in ignored], True)
 
 
 def _filetime_value(value: Any) -> int:
@@ -7047,6 +6609,7 @@ def _cpu_utilization_percent(interval_seconds: float = 0.25) -> float | None:
     if os.name != "nt":
         return None
     from ctypes import wintypes
+
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.GetSystemTimes.argtypes = [ctypes.POINTER(wintypes.FILETIME)] * 3
     kernel32.GetSystemTimes.restype = wintypes.BOOL
@@ -7055,11 +6618,9 @@ def _cpu_utilization_percent(interval_seconds: float = 0.25) -> float | None:
         idle = wintypes.FILETIME()
         kernel = wintypes.FILETIME()
         user = wintypes.FILETIME()
-        if not kernel32.GetSystemTimes(ctypes.byref(idle), ctypes.byref(kernel),
-                                       ctypes.byref(user)):
+        if not kernel32.GetSystemTimes(ctypes.byref(idle), ctypes.byref(kernel), ctypes.byref(user)):
             raise OSError(ctypes.get_last_error(), "GetSystemTimes failed")
-        return (_filetime_value(idle), _filetime_value(kernel),
-                _filetime_value(user))
+        return (_filetime_value(idle), _filetime_value(kernel), _filetime_value(user))
 
     try:
         before = sample()
@@ -7074,14 +6635,13 @@ def _cpu_utilization_percent(interval_seconds: float = 0.25) -> float | None:
     return max(0.0, min(100.0, (1.0 - idle_delta / total_delta) * 100.0))
 
 
-def _noise_observation(backend: str, ignored_pids: Sequence[int],
-                       max_cpu_util: float, max_gpu_util: float,
-                       max_gpu_temp: float) -> dict[str, Any]:
+def _noise_observation(
+    backend: str, ignored_pids: Sequence[int], max_cpu_util: float, max_gpu_util: float, max_gpu_temp: float
+) -> dict[str, Any]:
     python_conflicts, python_process_telemetry = _python_processes(ignored_pids)
     cpu_util = _cpu_utilization_percent()
     compute = gpu_compute_processes() if backend != "cpu" else []
-    gpu_conflicts = (gpu_conflicting_processes(compute, ignored_pids)
-                     if backend != "cpu" else [])
+    gpu_conflicts = gpu_conflicting_processes(compute, ignored_pids) if backend != "cpu" else []
     gpu = gpu_snapshot() if backend != "cpu" else []
     gpu_util_values = []
     gpu_temp_values = []
@@ -7105,11 +6665,9 @@ def _noise_observation(backend: str, ignored_pids: Sequence[int],
     if gpu_conflicts:
         reasons.append("a competing GPU compute process is active")
     if gpu_util_values and max(gpu_util_values) > max_gpu_util:
-        reasons.append(
-            f"GPU utilization {max(gpu_util_values):.1f}% exceeds {max_gpu_util:.1f}%")
+        reasons.append(f"GPU utilization {max(gpu_util_values):.1f}% exceeds {max_gpu_util:.1f}%")
     if gpu_temp_values and max(gpu_temp_values) > max_gpu_temp:
-        reasons.append(
-            f"GPU temperature {max(gpu_temp_values):.1f}C exceeds {max_gpu_temp:.1f}C")
+        reasons.append(f"GPU temperature {max(gpu_temp_values):.1f}C exceeds {max_gpu_temp:.1f}C")
     return {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "passed": not reasons,
@@ -7123,8 +6681,7 @@ def _noise_observation(backend: str, ignored_pids: Sequence[int],
     }
 
 
-def _noise_allows_diagnostic_execution(
-        args: argparse.Namespace, observation: dict[str, Any]) -> bool:
+def _noise_allows_diagnostic_execution(args: argparse.Namespace, observation: dict[str, Any]) -> bool:
     """Allow data collection only when Python contention is the sole failure.
 
     The observation remains failed, so the completed artifact cannot satisfy the
@@ -7142,7 +6699,7 @@ def _extract_result(stdout: str) -> dict[str, Any] | None:
     for line in reversed(stdout.splitlines()):
         if line.startswith(RESULT_PREFIX):
             try:
-                return json.loads(line[len(RESULT_PREFIX):])
+                return json.loads(line[len(RESULT_PREFIX) :])
             except json.JSONDecodeError:
                 return None
     return None
@@ -7163,33 +6720,53 @@ def _child_environment(backend: str) -> dict[str, str]:
     return environment
 
 
-def _run_child(args: argparse.Namespace, runtime: str, phase: str,
-               output_dir: Path, label: str, pair_index: int,
-               position_in_pair: int, batch_size: int) -> dict[str, Any]:
-    python = (
-        args.forge_python if _uses_forge_package(runtime)
-        else args.vanilla_python
-    )
+def _run_child(
+    args: argparse.Namespace,
+    runtime: str,
+    phase: str,
+    output_dir: Path,
+    label: str,
+    pair_index: int,
+    position_in_pair: int,
+    batch_size: int,
+) -> dict[str, Any]:
+    python = args.forge_python if _uses_forge_package(runtime) else args.vanilla_python
     command = [
         str(Path(python).resolve()),
         str(Path(__file__).resolve()),
         "--child",
-        "--runtime", runtime,
-        "--phase", phase,
-        "--operation", args.operation,
-        "--backend", args.backend,
-        "--preset", args.preset,
-        "--pair-index", str(pair_index),
-        "--position-in-pair", str(position_in_pair),
-        "--batch-size", str(batch_size),
-        "--samples", str(args.samples),
-        "--latency-samples", str(args.latency_samples),
-        "--warmups", str(args.warmups),
-        "--target-sample-ms", str(args.target_sample_ms),
-        "--stability-replays", str(args.stability_replays),
-        "--stability-checkpoint", str(args.stability_checkpoint),
-        "--cpu-threads", str(args.cpu_threads),
-        "--cpu-affinity", args.cpu_affinity,
+        "--runtime",
+        runtime,
+        "--phase",
+        phase,
+        "--operation",
+        args.operation,
+        "--backend",
+        args.backend,
+        "--preset",
+        args.preset,
+        "--pair-index",
+        str(pair_index),
+        "--position-in-pair",
+        str(position_in_pair),
+        "--batch-size",
+        str(batch_size),
+        "--samples",
+        str(args.samples),
+        "--latency-samples",
+        str(args.latency_samples),
+        "--warmups",
+        str(args.warmups),
+        "--target-sample-ms",
+        str(args.target_sample_ms),
+        "--stability-replays",
+        str(args.stability_replays),
+        "--stability-checkpoint",
+        str(args.stability_checkpoint),
+        "--cpu-threads",
+        str(args.cpu_threads),
+        "--cpu-affinity",
+        args.cpu_affinity,
     ]
     parent_launch_started_ns = time.perf_counter_ns()
     parent_launch_started_utc = datetime.now(timezone.utc).isoformat()
@@ -7205,10 +6782,8 @@ def _run_child(args: argparse.Namespace, runtime: str, phase: str,
     parent_launch_finished_ns = time.perf_counter_ns()
     log_dir = output_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    (log_dir / f"{label}.stdout.txt").write_text(
-        completed.stdout, encoding="utf-8", errors="replace")
-    (log_dir / f"{label}.stderr.txt").write_text(
-        completed.stderr, encoding="utf-8", errors="replace")
+    (log_dir / f"{label}.stdout.txt").write_text(completed.stdout, encoding="utf-8", errors="replace")
+    (log_dir / f"{label}.stderr.txt").write_text(completed.stderr, encoding="utf-8", errors="replace")
     result = _extract_result(completed.stdout)
     if result is None:
         raise RuntimeError(f"{label} did not emit a parseable result")
@@ -7218,18 +6793,14 @@ def _run_child(args: argparse.Namespace, runtime: str, phase: str,
     result["parent_launch_finished_ns"] = parent_launch_finished_ns
     write_json(output_dir / "children" / f"{label}.json", result)
     if completed.returncode != 0 or result.get("status") != "passed":
-        raise RuntimeError(
-            f"{label} failed: {result.get('rejection_reason') or result.get('error')}")
+        raise RuntimeError(f"{label} failed: {result.get('rejection_reason') or result.get('error')}")
     return result
 
 
 def _check_pyvenv(python: Path) -> dict[str, Any]:
     cfg_path = python.resolve().parents[1] / "pyvenv.cfg"
     text = cfg_path.read_text(encoding="utf-8") if cfg_path.is_file() else ""
-    system_site = any(
-        line.strip().lower() == "include-system-site-packages = true"
-        for line in text.splitlines()
-    )
+    system_site = any(line.strip().lower() == "include-system-site-packages = true" for line in text.splitlines())
     return {
         "python": str(python.resolve()),
         "pyvenv_cfg": str(cfg_path),
@@ -7242,11 +6813,16 @@ def _check_pyvenv(python: Path) -> dict[str, Any]:
 def _reported_exact_i32_vector_valid(vector: dict[str, Any]) -> bool:
     actual = vector.get("actual_values_i32")
     expected = vector.get("expected_values_i32")
-    if (not isinstance(actual, list) or not isinstance(expected, list)
-            or not actual or len(actual) != len(expected)
-            or any(not isinstance(value, int) or isinstance(value, bool)
-                   or value < -(2 ** 31) or value >= 2 ** 31
-                   for value in actual + expected)):
+    if (
+        not isinstance(actual, list)
+        or not isinstance(expected, list)
+        or not actual
+        or len(actual) != len(expected)
+        or any(
+            not isinstance(value, int) or isinstance(value, bool) or value < -(2**31) or value >= 2**31
+            for value in actual + expected
+        )
+    ):
         return False
 
     def evidence(values: list[int]) -> dict[str, Any]:
@@ -7254,9 +6830,17 @@ def _reported_exact_i32_vector_valid(vector: dict[str, Any]) -> bool:
         for value in values:
             payload.extend(int(value).to_bytes(4, "little", signed=True))
         count = len(values)
-        sample_indices = sorted(set((
-            0, count // 4, count // 2, (3 * count) // 4, count - 1,
-        )))
+        sample_indices = sorted(
+            set(
+                (
+                    0,
+                    count // 4,
+                    count // 2,
+                    (3 * count) // 4,
+                    count - 1,
+                )
+            )
+        )
         return {
             "count": count,
             "sha256": hashlib.sha256(payload).hexdigest(),
@@ -7269,10 +6853,7 @@ def _reported_exact_i32_vector_valid(vector: dict[str, Any]) -> bool:
 
     actual_evidence = evidence(actual)
     expected_evidence = evidence(expected)
-    mismatches = [
-        index for index, (left, right) in enumerate(zip(actual, expected))
-        if left != right
-    ]
+    mismatches = [index for index, (left, right) in enumerate(zip(actual, expected)) if left != right]
     return bool(
         vector.get("count") == actual_evidence["count"]
         and vector.get("expected_count") == expected_evidence["count"]
@@ -7284,42 +6865,34 @@ def _reported_exact_i32_vector_valid(vector: dict[str, Any]) -> bool:
         and vector.get("expected_minimum") == expected_evidence["minimum"]
         and vector.get("actual_maximum") == actual_evidence["maximum"]
         and vector.get("expected_maximum") == expected_evidence["maximum"]
-        and vector.get("sample_indices")
-        == actual_evidence["sample_indices"]
-        and vector.get("expected_sample_indices")
-        == expected_evidence["sample_indices"]
+        and vector.get("sample_indices") == actual_evidence["sample_indices"]
+        and vector.get("expected_sample_indices") == expected_evidence["sample_indices"]
         and vector.get("actual_samples") == actual_evidence["samples"]
         and vector.get("expected_samples") == expected_evidence["samples"]
         and vector.get("mismatch_count") == len(mismatches)
-        and vector.get("first_mismatch")
-        == (None if not mismatches else mismatches[0])
+        and vector.get("first_mismatch") == (None if not mismatches else mismatches[0])
         and not mismatches
     )
 
 
-def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
-                         baseline: str) -> bool:
+def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str, baseline: str) -> bool:
     left_result = results[subject]
     right_result = results[baseline]
     if left_result["operation"] in CONTROL_OPERATIONS:
         for validation_name in ("validation_before", "validation_after"):
             left_validation = left_result[validation_name]
             right_validation = right_result[validation_name]
-            if not left_validation.get("passed") or not right_validation.get(
-                    "passed"):
+            if not left_validation.get("passed") or not right_validation.get("passed"):
                 return False
             left = left_validation.get("endpoint_fingerprint") or {}
             right = right_validation.get("endpoint_fingerprint") or {}
             if not left.get("finite") or not right.get("finite"):
                 return False
-            if (left.get("count") != right.get("count")
-                    or left.get("sample_indices") != right.get(
-                        "sample_indices")):
+            if left.get("count") != right.get("count") or left.get("sample_indices") != right.get("sample_indices"):
                 return False
-            if (len(left.get("sample_values", []))
-                    != len(left.get("sample_indices", []))
-                    or len(right.get("sample_values", []))
-                    != len(right.get("sample_indices", []))):
+            if len(left.get("sample_values", [])) != len(left.get("sample_indices", [])) or len(
+                right.get("sample_values", [])
+            ) != len(right.get("sample_indices", [])):
                 return False
             count = int(left["count"])
             element_tolerance = 2.0 * max(
@@ -7327,19 +6900,16 @@ def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
                 float(right_validation.get("effective_tolerance", 0.0)),
             )
             for key in ("minimum", "maximum"):
-                if not math.isclose(
-                        float(left[key]), float(right[key]), rel_tol=0.0,
-                        abs_tol=element_tolerance):
+                if not math.isclose(float(left[key]), float(right[key]), rel_tol=0.0, abs_tol=element_tolerance):
                     return False
             if not math.isclose(
-                    float(left["sum"]), float(right["sum"]), rel_tol=0.0,
-                    abs_tol=element_tolerance * max(1, count)):
+                float(left["sum"]), float(right["sum"]), rel_tol=0.0, abs_tol=element_tolerance * max(1, count)
+            ):
                 return False
             if any(
-                    not math.isclose(float(a), float(b), rel_tol=0.0,
-                                     abs_tol=element_tolerance)
-                    for a, b in zip(left["sample_values"],
-                                    right["sample_values"])):
+                not math.isclose(float(a), float(b), rel_tol=0.0, abs_tol=element_tolerance)
+                for a, b in zip(left["sample_values"], right["sample_values"])
+            ):
                 return False
         return True
     if left_result["operation"] == "native_reduce":
@@ -7349,15 +6919,11 @@ def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
             if not left.get("passed") or not right.get("passed"):
                 return False
             for value in (left, right):
-                if not all(
-                        isinstance(value.get(key), int)
-                        for key in ("actual", "expected", "absolute_error")):
+                if not all(isinstance(value.get(key), int) for key in ("actual", "expected", "absolute_error")):
                     return False
-                if (value["actual"] != value["expected"]
-                        or value["absolute_error"] != 0):
+                if value["actual"] != value["expected"] or value["absolute_error"] != 0:
                     return False
-            if (left["actual"] != right["actual"]
-                    or left["expected"] != right["expected"]):
+            if left["actual"] != right["actual"] or left["expected"] != right["expected"]:
                 return False
         return True
     if left_result["operation"] == "native_transform":
@@ -7365,32 +6931,40 @@ def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
             left = left_result[validation_name]
             right = right_result[validation_name]
             for value in (left, right):
-                if (not value.get("passed")
-                        or value.get("comparison")
-                        != "exact_i32_affine_transform"):
+                if not value.get("passed") or value.get("comparison") != "exact_i32_affine_transform":
                     return False
-                if (not isinstance(value.get("count"), int)
-                        or value["count"] <= 0
-                        or value.get("mismatch_count") != 0
-                        or value.get("first_mismatch") is not None):
+                if (
+                    not isinstance(value.get("count"), int)
+                    or value["count"] <= 0
+                    or value.get("mismatch_count") != 0
+                    or value.get("first_mismatch") is not None
+                ):
                     return False
-                if (not isinstance(value.get("actual_sha256"), str)
-                        or len(value["actual_sha256"]) != 64
-                        or value["actual_sha256"]
-                        != value.get("expected_sha256")):
+                if (
+                    not isinstance(value.get("actual_sha256"), str)
+                    or len(value["actual_sha256"]) != 64
+                    or value["actual_sha256"] != value.get("expected_sha256")
+                ):
                     return False
                 for suffix in ("sum", "minimum", "maximum", "samples"):
-                    if value.get(f"actual_{suffix}") != value.get(
-                            f"expected_{suffix}"):
+                    if value.get(f"actual_{suffix}") != value.get(f"expected_{suffix}"):
                         return False
-                if len(value.get("sample_indices", [])) != len(
-                        value.get("actual_samples", [])):
+                if len(value.get("sample_indices", [])) != len(value.get("actual_samples", [])):
                     return False
             for key in (
-                    "count", "actual_sha256", "expected_sha256",
-                    "actual_sum", "expected_sum", "actual_minimum",
-                    "expected_minimum", "actual_maximum", "expected_maximum",
-                    "sample_indices", "actual_samples", "expected_samples"):
+                "count",
+                "actual_sha256",
+                "expected_sha256",
+                "actual_sum",
+                "expected_sum",
+                "actual_minimum",
+                "expected_minimum",
+                "actual_maximum",
+                "expected_maximum",
+                "sample_indices",
+                "actual_samples",
+                "expected_samples",
+            ):
                 if left.get(key) != right.get(key):
                     return False
         return True
@@ -7400,32 +6974,40 @@ def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
             left = left_result[validation_name]
             right = right_result[validation_name]
             for value in (left, right):
-                if (not value.get("passed")
-                        or value.get("comparison")
-                        != f"exact_i32_{operation}"):
+                if not value.get("passed") or value.get("comparison") != f"exact_i32_{operation}":
                     return False
-                if (not isinstance(value.get("count"), int)
-                        or value["count"] <= 0
-                        or value.get("mismatch_count") != 0
-                        or value.get("first_mismatch") is not None):
+                if (
+                    not isinstance(value.get("count"), int)
+                    or value["count"] <= 0
+                    or value.get("mismatch_count") != 0
+                    or value.get("first_mismatch") is not None
+                ):
                     return False
-                if (not isinstance(value.get("actual_sha256"), str)
-                        or len(value["actual_sha256"]) != 64
-                        or value["actual_sha256"]
-                        != value.get("expected_sha256")):
+                if (
+                    not isinstance(value.get("actual_sha256"), str)
+                    or len(value["actual_sha256"]) != 64
+                    or value["actual_sha256"] != value.get("expected_sha256")
+                ):
                     return False
                 for suffix in ("sum", "minimum", "maximum", "samples"):
-                    if value.get(f"actual_{suffix}") != value.get(
-                            f"expected_{suffix}"):
+                    if value.get(f"actual_{suffix}") != value.get(f"expected_{suffix}"):
                         return False
-                if len(value.get("sample_indices", [])) != len(
-                        value.get("actual_samples", [])):
+                if len(value.get("sample_indices", [])) != len(value.get("actual_samples", [])):
                     return False
             for key in (
-                    "count", "actual_sha256", "expected_sha256",
-                    "actual_sum", "expected_sum", "actual_minimum",
-                    "expected_minimum", "actual_maximum", "expected_maximum",
-                    "sample_indices", "actual_samples", "expected_samples"):
+                "count",
+                "actual_sha256",
+                "expected_sha256",
+                "actual_sum",
+                "expected_sum",
+                "actual_minimum",
+                "expected_minimum",
+                "actual_maximum",
+                "expected_maximum",
+                "sample_indices",
+                "actual_samples",
+                "expected_samples",
+            ):
                 if left.get(key) != right.get(key):
                     return False
         return True
@@ -7434,397 +7016,451 @@ def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
             left = left_result[validation_name]
             right = right_result[validation_name]
             for value in (left, right):
-                if (not value.get("passed")
-                        or value.get("comparison")
-                        != "exact_stable_i32_compact"):
+                if not value.get("passed") or value.get("comparison") != "exact_stable_i32_compact":
                     return False
-                if (not isinstance(value.get("actual_count"), int)
-                        or value["actual_count"] <= 0
-                        or value["actual_count"] != value.get("expected_count")
-                        or value.get("mismatch_count") != 0
-                        or value.get("first_mismatch") is not None):
+                if (
+                    not isinstance(value.get("actual_count"), int)
+                    or value["actual_count"] <= 0
+                    or value["actual_count"] != value.get("expected_count")
+                    or value.get("mismatch_count") != 0
+                    or value.get("first_mismatch") is not None
+                ):
                     return False
-                if (not isinstance(value.get("actual_sha256"), str)
-                        or len(value["actual_sha256"]) != 64
-                        or value["actual_sha256"]
-                        != value.get("expected_sha256")):
+                if (
+                    not isinstance(value.get("actual_sha256"), str)
+                    or len(value["actual_sha256"]) != 64
+                    or value["actual_sha256"] != value.get("expected_sha256")
+                ):
                     return False
                 for suffix in ("sum", "minimum", "maximum", "samples"):
-                    if value.get(f"actual_{suffix}") != value.get(
-                            f"expected_{suffix}"):
+                    if value.get(f"actual_{suffix}") != value.get(f"expected_{suffix}"):
                         return False
-                if len(value.get("sample_indices", [])) != len(
-                        value.get("actual_samples", [])):
+                if len(value.get("sample_indices", [])) != len(value.get("actual_samples", [])):
                     return False
             for key in (
-                    "actual_count", "expected_count", "actual_sha256",
-                    "expected_sha256", "actual_sum", "expected_sum",
-                    "actual_minimum", "expected_minimum", "actual_maximum",
-                    "expected_maximum", "sample_indices", "actual_samples",
-                    "expected_samples"):
+                "actual_count",
+                "expected_count",
+                "actual_sha256",
+                "expected_sha256",
+                "actual_sum",
+                "expected_sum",
+                "actual_minimum",
+                "expected_minimum",
+                "actual_maximum",
+                "expected_maximum",
+                "sample_indices",
+                "actual_samples",
+                "expected_samples",
+            ):
                 if left.get(key) != right.get(key):
                     return False
         return True
     if left_result["operation"] == "device_prefix_chain":
         exact_keys = (
-            "actual_sha256", "expected_sha256", "actual_sum",
-            "expected_sum", "actual_minimum", "expected_minimum",
-            "actual_maximum", "expected_maximum", "sample_indices",
-            "actual_samples", "expected_samples", "mismatch_count",
+            "actual_sha256",
+            "expected_sha256",
+            "actual_sum",
+            "expected_sum",
+            "actual_minimum",
+            "expected_minimum",
+            "actual_maximum",
+            "expected_maximum",
+            "sample_indices",
+            "actual_samples",
+            "expected_samples",
+            "mismatch_count",
             "first_mismatch",
         )
         for validation_name in ("validation_before", "validation_after"):
             left = left_result[validation_name]
             right = right_result[validation_name]
             for value in (left, right):
-                if (not value.get("passed")
-                        or value.get("comparison") !=
-                        "exact_device_count_stable_compact_then_scan"
-                        or not isinstance(value.get("actual_count"), int)
-                        or value["actual_count"] <= 0
-                        or value["actual_count"] != value.get(
-                            "expected_count")):
+                if (
+                    not value.get("passed")
+                    or value.get("comparison") != "exact_device_count_stable_compact_then_scan"
+                    or not isinstance(value.get("actual_count"), int)
+                    or value["actual_count"] <= 0
+                    or value["actual_count"] != value.get("expected_count")
+                ):
                     return False
                 for vector_name in ("compacted", "scanned"):
                     vector = value.get(vector_name, {})
-                    if (not isinstance(vector.get("actual_sha256"), str)
-                            or len(vector["actual_sha256"]) != 64
-                            or vector["actual_sha256"] != vector.get(
-                                "expected_sha256")
-                            or vector.get("mismatch_count") != 0
-                            or vector.get("first_mismatch") is not None):
+                    if (
+                        not isinstance(vector.get("actual_sha256"), str)
+                        or len(vector["actual_sha256"]) != 64
+                        or vector["actual_sha256"] != vector.get("expected_sha256")
+                        or vector.get("mismatch_count") != 0
+                        or vector.get("first_mismatch") is not None
+                    ):
                         return False
-                    for suffix in (
-                            "sum", "minimum", "maximum", "samples"):
-                        if vector.get(f"actual_{suffix}") != vector.get(
-                                f"expected_{suffix}"):
+                    for suffix in ("sum", "minimum", "maximum", "samples"):
+                        if vector.get(f"actual_{suffix}") != vector.get(f"expected_{suffix}"):
                             return False
-                    if len(vector.get("sample_indices", [])) != len(
-                            vector.get("actual_samples", [])):
+                    if len(vector.get("sample_indices", [])) != len(vector.get("actual_samples", [])):
                         return False
-            if (left["actual_count"] != right["actual_count"]
-                    or left["expected_count"] != right["expected_count"]):
+            if left["actual_count"] != right["actual_count"] or left["expected_count"] != right["expected_count"]:
                 return False
             for vector_name in ("compacted", "scanned"):
                 for key in exact_keys:
-                    if (left[vector_name].get(key)
-                            != right[vector_name].get(key)):
+                    if left[vector_name].get(key) != right[vector_name].get(key):
                         return False
         return True
     if left_result["operation"] == "particle_spatial_hash":
-        vector_names = (
-            "keys", "offsets", "canonical_output", "neighbors")
+        vector_names = ("keys", "offsets", "canonical_output", "neighbors")
         exact_keys = (
-            "count", "actual_sha256", "expected_sha256", "actual_sum",
-            "expected_sum", "actual_minimum", "expected_minimum",
-            "actual_maximum", "expected_maximum", "sample_indices",
-            "actual_samples", "expected_samples", "mismatch_count",
+            "count",
+            "actual_sha256",
+            "expected_sha256",
+            "actual_sum",
+            "expected_sum",
+            "actual_minimum",
+            "expected_minimum",
+            "actual_maximum",
+            "expected_maximum",
+            "sample_indices",
+            "actual_samples",
+            "expected_samples",
+            "mismatch_count",
             "first_mismatch",
         )
         for validation_name in ("validation_before", "validation_after"):
             left = left_result[validation_name]
             right = right_result[validation_name]
             for value in (left, right):
-                if (not value.get("passed")
-                        or value.get("comparison") !=
-                        "exact_2d_cell_hash_buckets_and_neighbor_counts"
-                        or set(value.get("endpoint_vectors", {})) !=
-                        set(vector_names)):
+                if (
+                    not value.get("passed")
+                    or value.get("comparison") != "exact_2d_cell_hash_buckets_and_neighbor_counts"
+                    or set(value.get("endpoint_vectors", {})) != set(vector_names)
+                ):
                     return False
                 for vector_name in vector_names:
                     vector = value["endpoint_vectors"][vector_name]
-                    if (not isinstance(vector.get("count"), int)
-                            or vector["count"] <= 0
-                            or not isinstance(
-                                vector.get("actual_sha256"), str)
-                            or len(vector["actual_sha256"]) != 64
-                            or vector["actual_sha256"] != vector.get(
-                                "expected_sha256")
-                            or vector.get("mismatch_count") != 0
-                            or vector.get("first_mismatch") is not None):
+                    if (
+                        not isinstance(vector.get("count"), int)
+                        or vector["count"] <= 0
+                        or not isinstance(vector.get("actual_sha256"), str)
+                        or len(vector["actual_sha256"]) != 64
+                        or vector["actual_sha256"] != vector.get("expected_sha256")
+                        or vector.get("mismatch_count") != 0
+                        or vector.get("first_mismatch") is not None
+                    ):
                         return False
-                    for suffix in (
-                            "sum", "minimum", "maximum", "samples"):
-                        if vector.get(f"actual_{suffix}") != vector.get(
-                                f"expected_{suffix}"):
+                    for suffix in ("sum", "minimum", "maximum", "samples"):
+                        if vector.get(f"actual_{suffix}") != vector.get(f"expected_{suffix}"):
                             return False
-                    if len(vector.get("sample_indices", [])) != len(
-                            vector.get("actual_samples", [])):
+                    if len(vector.get("sample_indices", [])) != len(vector.get("actual_samples", [])):
                         return False
             for vector_name in vector_names:
                 for key in exact_keys:
-                    if (left["endpoint_vectors"][vector_name].get(key)
-                            != right["endpoint_vectors"][vector_name].get(
-                                key)):
+                    if left["endpoint_vectors"][vector_name].get(key) != right["endpoint_vectors"][vector_name].get(
+                        key
+                    ):
                         return False
         return True
     if left_result["operation"] == "marching_squares":
         vector_names = ("selected_cells_i32", "case_codes_i32")
         exact_keys = (
-            "count", "expected_count", "actual_sha256", "expected_sha256",
-            "actual_sum", "expected_sum", "actual_minimum",
-            "expected_minimum", "actual_maximum", "expected_maximum",
-            "sample_indices", "expected_sample_indices", "actual_samples",
-            "expected_samples", "mismatch_count", "first_mismatch",
+            "count",
+            "expected_count",
+            "actual_sha256",
+            "expected_sha256",
+            "actual_sum",
+            "expected_sum",
+            "actual_minimum",
+            "expected_minimum",
+            "actual_maximum",
+            "expected_maximum",
+            "sample_indices",
+            "expected_sample_indices",
+            "actual_samples",
+            "expected_samples",
+            "mismatch_count",
+            "first_mismatch",
         )
         for validation_name in ("validation_before", "validation_after"):
             left = left_result[validation_name]
             right = right_result[validation_name]
             for value in (left, right):
-                if (not value.get("passed")
-                        or value.get("comparison") !=
-                        "exact_stable_marching_squares_full_cell_and_case_vectors"
-                        or not isinstance(value.get("actual_count"), int)
-                        or value["actual_count"] <= 0
-                        or value["actual_count"] != value.get("expected_count")
-                        or set(value.get("endpoint_vectors", {})) !=
-                        set(vector_names)):
+                if (
+                    not value.get("passed")
+                    or value.get("comparison") != "exact_stable_marching_squares_full_cell_and_case_vectors"
+                    or not isinstance(value.get("actual_count"), int)
+                    or value["actual_count"] <= 0
+                    or value["actual_count"] != value.get("expected_count")
+                    or set(value.get("endpoint_vectors", {})) != set(vector_names)
+                ):
                     return False
                 for vector_name in vector_names:
                     vector = value["endpoint_vectors"][vector_name]
-                    if (not isinstance(vector.get("count"), int)
-                            or vector["count"] <= 0
-                            or vector["count"] != vector.get("expected_count")
-                            or vector["count"] != value["actual_count"]
-                            or not isinstance(
-                                vector.get("actual_sha256"), str)
-                            or len(vector["actual_sha256"]) != 64
-                            or vector["actual_sha256"] != vector.get(
-                                "expected_sha256")
-                            or vector.get("mismatch_count") != 0
-                            or vector.get("first_mismatch") is not None):
+                    if (
+                        not isinstance(vector.get("count"), int)
+                        or vector["count"] <= 0
+                        or vector["count"] != vector.get("expected_count")
+                        or vector["count"] != value["actual_count"]
+                        or not isinstance(vector.get("actual_sha256"), str)
+                        or len(vector["actual_sha256"]) != 64
+                        or vector["actual_sha256"] != vector.get("expected_sha256")
+                        or vector.get("mismatch_count") != 0
+                        or vector.get("first_mismatch") is not None
+                    ):
                         return False
-                    for suffix in (
-                            "sum", "minimum", "maximum", "samples"):
-                        if vector.get(f"actual_{suffix}") != vector.get(
-                                f"expected_{suffix}"):
+                    for suffix in ("sum", "minimum", "maximum", "samples"):
+                        if vector.get(f"actual_{suffix}") != vector.get(f"expected_{suffix}"):
                             return False
-                    if (vector.get("sample_indices") !=
-                            vector.get("expected_sample_indices")
-                            or len(vector.get("sample_indices", [])) != len(
-                                vector.get("actual_samples", []))):
+                    if vector.get("sample_indices") != vector.get("expected_sample_indices") or len(
+                        vector.get("sample_indices", [])
+                    ) != len(vector.get("actual_samples", [])):
                         return False
                 fingerprint = value.get("endpoint_fingerprint", {})
-                if (fingerprint.get("finite") is not True
-                        or fingerprint.get("selected_count") !=
-                        value["actual_count"]
-                        or fingerprint.get("selected_cells_sha256") !=
-                        value["endpoint_vectors"]["selected_cells_i32"][
-                            "actual_sha256"]
-                        or fingerprint.get("case_codes_sha256") !=
-                        value["endpoint_vectors"]["case_codes_i32"][
-                            "actual_sha256"]):
+                if (
+                    fingerprint.get("finite") is not True
+                    or fingerprint.get("selected_count") != value["actual_count"]
+                    or fingerprint.get("selected_cells_sha256")
+                    != value["endpoint_vectors"]["selected_cells_i32"]["actual_sha256"]
+                    or fingerprint.get("case_codes_sha256")
+                    != value["endpoint_vectors"]["case_codes_i32"]["actual_sha256"]
+                ):
                     return False
-            if (left["actual_count"] != right["actual_count"]
-                    or left["expected_count"] != right["expected_count"]):
+            if left["actual_count"] != right["actual_count"] or left["expected_count"] != right["expected_count"]:
                 return False
             for vector_name in vector_names:
                 for key in exact_keys:
-                    if (left["endpoint_vectors"][vector_name].get(key) !=
-                            right["endpoint_vectors"][vector_name].get(key)):
+                    if left["endpoint_vectors"][vector_name].get(key) != right["endpoint_vectors"][vector_name].get(
+                        key
+                    ):
                         return False
         for result in (left_result, right_result):
             before = result["validation_before"]
             after = result["validation_after"]
-            if (before.get("actual_count") != after.get("actual_count")
-                    or before.get("expected_count") !=
-                    after.get("expected_count")):
+            if before.get("actual_count") != after.get("actual_count") or before.get("expected_count") != after.get(
+                "expected_count"
+            ):
                 return False
             for vector_name in vector_names:
                 if any(
-                        before["endpoint_vectors"][vector_name].get(key) !=
-                        after["endpoint_vectors"][vector_name].get(key)
-                        for key in exact_keys):
+                    before["endpoint_vectors"][vector_name].get(key) != after["endpoint_vectors"][vector_name].get(key)
+                    for key in exact_keys
+                ):
                     return False
         return True
     if left_result["operation"] == "adaptive_pbd":
         observed_names = ("positions_f32", "residuals_f32")
         exact_names = ("active_history_i32", "final_active_ids_i32")
         observed_keys = (
-            "count", "dtype", "sha256", "sum", "minimum", "maximum",
-            "sample_indices", "samples",
+            "count",
+            "dtype",
+            "sha256",
+            "sum",
+            "minimum",
+            "maximum",
+            "sample_indices",
+            "samples",
         )
         exact_keys = (
-            "count", "expected_count", "actual_sha256", "expected_sha256",
-            "actual_sum", "expected_sum", "actual_minimum",
-            "expected_minimum", "actual_maximum", "expected_maximum",
-            "sample_indices", "expected_sample_indices", "actual_samples",
-            "expected_samples", "mismatch_count", "first_mismatch",
+            "count",
+            "expected_count",
+            "actual_sha256",
+            "expected_sha256",
+            "actual_sum",
+            "expected_sum",
+            "actual_minimum",
+            "expected_minimum",
+            "actual_maximum",
+            "expected_maximum",
+            "sample_indices",
+            "expected_sample_indices",
+            "actual_samples",
+            "expected_samples",
+            "mismatch_count",
+            "first_mismatch",
         )
         for validation_name in ("validation_before", "validation_after"):
             left = left_result[validation_name]
             right = right_result[validation_name]
             for value in (left, right):
-                if (not value.get("passed")
-                        or value.get("comparison") !=
-                        "analytic_full_state_and_exact_cross_route_adaptive_pbd"
-                        or set(value.get("endpoint_vectors", {})) !=
-                        set((*observed_names, *exact_names))
-                        or not value.get("endpoint_fingerprint", {}).get(
-                            "finite")
-                        or float(value.get("max_left_position_error", math.inf))
-                        > 2.0e-5
-                        or float(value.get("max_right_position_error", math.inf))
-                        > 2.0e-5
-                        or float(value.get("max_residual_error", math.inf))
-                        > 3.0e-5
-                        or float(value.get("max_y_error", math.inf)) != 0.0
-                        or value.get("history_mismatch_count") != 0
-                        or value.get("active_id_mismatch_count") != 0
-                        or value.get("active_id_first_mismatch") is not None
-                        or value.get("actual_active_extent") !=
-                        value.get("expected_active_extent")):
+                if (
+                    not value.get("passed")
+                    or value.get("comparison") != "analytic_full_state_and_exact_cross_route_adaptive_pbd"
+                    or set(value.get("endpoint_vectors", {})) != set((*observed_names, *exact_names))
+                    or not value.get("endpoint_fingerprint", {}).get("finite")
+                    or float(value.get("max_left_position_error", math.inf)) > 2.0e-5
+                    or float(value.get("max_right_position_error", math.inf)) > 2.0e-5
+                    or float(value.get("max_residual_error", math.inf)) > 3.0e-5
+                    or float(value.get("max_y_error", math.inf)) != 0.0
+                    or value.get("history_mismatch_count") != 0
+                    or value.get("active_id_mismatch_count") != 0
+                    or value.get("active_id_first_mismatch") is not None
+                    or value.get("actual_active_extent") != value.get("expected_active_extent")
+                ):
                     return False
                 for vector_name in observed_names:
                     vector = value["endpoint_vectors"][vector_name]
-                    if (not isinstance(vector.get("count"), int)
-                            or vector["count"] <= 0
-                            or vector.get("dtype") != "float32"
-                            or not isinstance(vector.get("sha256"), str)
-                            or len(vector["sha256"]) != 64
-                            or not all(math.isfinite(float(vector.get(key)))
-                                       for key in (
-                                           "sum", "minimum", "maximum"))
-                            or len(vector.get("sample_indices", [])) !=
-                            len(vector.get("samples", []))):
+                    if (
+                        not isinstance(vector.get("count"), int)
+                        or vector["count"] <= 0
+                        or vector.get("dtype") != "float32"
+                        or not isinstance(vector.get("sha256"), str)
+                        or len(vector["sha256"]) != 64
+                        or not all(math.isfinite(float(vector.get(key))) for key in ("sum", "minimum", "maximum"))
+                        or len(vector.get("sample_indices", [])) != len(vector.get("samples", []))
+                    ):
                         return False
                 for vector_name in exact_names:
                     vector = value["endpoint_vectors"][vector_name]
-                    if (not isinstance(vector.get("count"), int)
-                            or vector["count"] <= 0
-                            or vector["count"] != vector.get("expected_count")
-                            or not isinstance(
-                                vector.get("actual_sha256"), str)
-                            or len(vector["actual_sha256"]) != 64
-                            or vector["actual_sha256"] != vector.get(
-                                "expected_sha256")
-                            or vector.get("mismatch_count") != 0
-                            or vector.get("first_mismatch") is not None):
+                    if (
+                        not isinstance(vector.get("count"), int)
+                        or vector["count"] <= 0
+                        or vector["count"] != vector.get("expected_count")
+                        or not isinstance(vector.get("actual_sha256"), str)
+                        or len(vector["actual_sha256"]) != 64
+                        or vector["actual_sha256"] != vector.get("expected_sha256")
+                        or vector.get("mismatch_count") != 0
+                        or vector.get("first_mismatch") is not None
+                    ):
                         return False
-                    for suffix in (
-                            "sum", "minimum", "maximum", "samples"):
-                        if vector.get(f"actual_{suffix}") != vector.get(
-                                f"expected_{suffix}"):
+                    for suffix in ("sum", "minimum", "maximum", "samples"):
+                        if vector.get(f"actual_{suffix}") != vector.get(f"expected_{suffix}"):
                             return False
-                    if (vector.get("sample_indices") !=
-                            vector.get("expected_sample_indices")
-                            or len(vector.get("sample_indices", [])) != len(
-                                vector.get("actual_samples", []))):
+                    if vector.get("sample_indices") != vector.get("expected_sample_indices") or len(
+                        vector.get("sample_indices", [])
+                    ) != len(vector.get("actual_samples", [])):
                         return False
                 fingerprint = value["endpoint_fingerprint"]
-                if (fingerprint.get("positions_sha256") !=
-                        value["endpoint_vectors"]["positions_f32"]["sha256"]
-                        or fingerprint.get("residuals_sha256") !=
-                        value["endpoint_vectors"]["residuals_f32"]["sha256"]
-                        or fingerprint.get("active_history_sha256") !=
-                        value["endpoint_vectors"]["active_history_i32"][
-                            "actual_sha256"]
-                        or fingerprint.get("final_active_ids_sha256") !=
-                        value["endpoint_vectors"]["final_active_ids_i32"][
-                            "actual_sha256"]):
+                if (
+                    fingerprint.get("positions_sha256") != value["endpoint_vectors"]["positions_f32"]["sha256"]
+                    or fingerprint.get("residuals_sha256") != value["endpoint_vectors"]["residuals_f32"]["sha256"]
+                    or fingerprint.get("active_history_sha256")
+                    != value["endpoint_vectors"]["active_history_i32"]["actual_sha256"]
+                    or fingerprint.get("final_active_ids_sha256")
+                    != value["endpoint_vectors"]["final_active_ids_i32"]["actual_sha256"]
+                ):
                     return False
             for vector_name in observed_names:
                 for key in observed_keys:
-                    if (left["endpoint_vectors"][vector_name].get(key) !=
-                            right["endpoint_vectors"][vector_name].get(key)):
+                    if left["endpoint_vectors"][vector_name].get(key) != right["endpoint_vectors"][vector_name].get(
+                        key
+                    ):
                         return False
             for vector_name in exact_names:
                 for key in exact_keys:
-                    if (left["endpoint_vectors"][vector_name].get(key) !=
-                            right["endpoint_vectors"][vector_name].get(key)):
+                    if left["endpoint_vectors"][vector_name].get(key) != right["endpoint_vectors"][vector_name].get(
+                        key
+                    ):
                         return False
         for result in (left_result, right_result):
             before = result["validation_before"]["endpoint_vectors"]
             after = result["validation_after"]["endpoint_vectors"]
             for vector_name in observed_names:
-                if any(before[vector_name].get(key) !=
-                       after[vector_name].get(key) for key in observed_keys):
+                if any(before[vector_name].get(key) != after[vector_name].get(key) for key in observed_keys):
                     return False
             for vector_name in exact_names:
-                if any(before[vector_name].get(key) !=
-                       after[vector_name].get(key) for key in exact_keys):
+                if any(before[vector_name].get(key) != after[vector_name].get(key) for key in exact_keys):
                     return False
         return True
     if left_result["operation"] == "bfs_worklist":
         vector_names = ("distance_i32", "frontier_history_i32")
         exact_keys = (
-            "count", "expected_count", "actual_sha256", "expected_sha256",
-            "actual_sum", "expected_sum", "actual_minimum",
-            "expected_minimum", "actual_maximum", "expected_maximum",
-            "sample_indices", "expected_sample_indices", "actual_samples",
-            "expected_samples", "actual_values_i32", "expected_values_i32",
-            "mismatch_count", "first_mismatch",
+            "count",
+            "expected_count",
+            "actual_sha256",
+            "expected_sha256",
+            "actual_sum",
+            "expected_sum",
+            "actual_minimum",
+            "expected_minimum",
+            "actual_maximum",
+            "expected_maximum",
+            "sample_indices",
+            "expected_sample_indices",
+            "actual_samples",
+            "expected_samples",
+            "actual_values_i32",
+            "expected_values_i32",
+            "mismatch_count",
+            "first_mismatch",
         )
         for validation_name in ("validation_before", "validation_after"):
             left = left_result[validation_name]
             right = right_result[validation_name]
             for value in (left, right):
-                if (not value.get("passed")
-                        or value.get("comparison") !=
-                        "exact_fixed_depth_grid_bfs_full_distance_and_frontier_vectors"
-                        or value.get("distance_mismatch_count") != 0
-                        or value.get("history_mismatch_count") != 0
-                        or value.get("visited_count") !=
-                        value.get("expected_visited_count")
-                        or set(value.get("endpoint_vectors", {})) !=
-                        set(vector_names)):
+                if (
+                    not value.get("passed")
+                    or value.get("comparison") != "exact_fixed_depth_grid_bfs_full_distance_and_frontier_vectors"
+                    or value.get("distance_mismatch_count") != 0
+                    or value.get("history_mismatch_count") != 0
+                    or value.get("visited_count") != value.get("expected_visited_count")
+                    or set(value.get("endpoint_vectors", {})) != set(vector_names)
+                ):
                     return False
                 vectors = value["endpoint_vectors"]
-                if any(not _reported_exact_i32_vector_valid(vectors[name])
-                       for name in vector_names):
+                if any(not _reported_exact_i32_vector_valid(vectors[name]) for name in vector_names):
                     return False
                 actual_distance = vectors["distance_i32"]["actual_values_i32"]
-                expected_distance = vectors["distance_i32"][
-                    "expected_values_i32"]
-                actual_history = vectors["frontier_history_i32"][
-                    "actual_values_i32"]
-                expected_history = vectors["frontier_history_i32"][
-                    "expected_values_i32"]
+                expected_distance = vectors["distance_i32"]["expected_values_i32"]
+                actual_history = vectors["frontier_history_i32"]["actual_values_i32"]
+                expected_history = vectors["frontier_history_i32"]["expected_values_i32"]
                 visited = sum(distance >= 0 for distance in actual_distance)
-                if (visited != value["visited_count"]
-                        or sum(distance >= 0 for distance in expected_distance)
-                        != value["expected_visited_count"]
-                        or value.get("frontier_history") != actual_history
-                        or value.get("expected_frontier_history") !=
-                        expected_history):
+                if (
+                    visited != value["visited_count"]
+                    or sum(distance >= 0 for distance in expected_distance) != value["expected_visited_count"]
+                    or value.get("frontier_history") != actual_history
+                    or value.get("expected_frontier_history") != expected_history
+                ):
                     return False
                 fingerprint = value.get("endpoint_fingerprint", {})
-                if (fingerprint.get("finite") is not True
-                        or fingerprint.get("visited_count") != visited
-                        or fingerprint.get("distance_sha256") !=
-                        vectors["distance_i32"]["actual_sha256"]
-                        or fingerprint.get("frontier_history_sha256") !=
-                        vectors["frontier_history_i32"]["actual_sha256"]):
+                if (
+                    fingerprint.get("finite") is not True
+                    or fingerprint.get("visited_count") != visited
+                    or fingerprint.get("distance_sha256") != vectors["distance_i32"]["actual_sha256"]
+                    or fingerprint.get("frontier_history_sha256") != vectors["frontier_history_i32"]["actual_sha256"]
+                ):
                     return False
             for vector_name in vector_names:
                 for key in exact_keys:
-                    if (left["endpoint_vectors"][vector_name].get(key) !=
-                            right["endpoint_vectors"][vector_name].get(key)):
+                    if left["endpoint_vectors"][vector_name].get(key) != right["endpoint_vectors"][vector_name].get(
+                        key
+                    ):
                         return False
         for result in (left_result, right_result):
             before = result["validation_before"]["endpoint_vectors"]
             after = result["validation_after"]["endpoint_vectors"]
             for vector_name in vector_names:
-                if any(before[vector_name].get(key) !=
-                       after[vector_name].get(key) for key in exact_keys):
+                if any(before[vector_name].get(key) != after[vector_name].get(key) for key in exact_keys):
                     return False
         return True
     if left_result["operation"] == "falling_sand":
         vector_names = (
-            "grid_i32", "winner_source_by_destination_i32",
-            "destinations_i32", "priorities_i32",
+            "grid_i32",
+            "winner_source_by_destination_i32",
+            "destinations_i32",
+            "priorities_i32",
         )
         exact_keys = (
-            "count", "expected_count", "actual_sha256", "expected_sha256",
-            "actual_sum", "expected_sum", "actual_minimum",
-            "expected_minimum", "actual_maximum", "expected_maximum",
-            "sample_indices", "expected_sample_indices", "actual_samples",
-            "expected_samples", "actual_values_i32", "expected_values_i32",
-            "mismatch_count", "first_mismatch",
+            "count",
+            "expected_count",
+            "actual_sha256",
+            "expected_sha256",
+            "actual_sum",
+            "expected_sum",
+            "actual_minimum",
+            "expected_minimum",
+            "actual_maximum",
+            "expected_maximum",
+            "sample_indices",
+            "expected_sample_indices",
+            "actual_samples",
+            "expected_samples",
+            "actual_values_i32",
+            "expected_values_i32",
+            "mismatch_count",
+            "first_mismatch",
         )
         count_keys = (
-            "candidate_count", "expected_candidate_count", "winner_count",
-            "expected_winner_count", "conflict_count",
+            "candidate_count",
+            "expected_candidate_count",
+            "winner_count",
+            "expected_winner_count",
+            "conflict_count",
             "expected_conflict_count",
         )
         fingerprint_map = {
@@ -7838,41 +7474,35 @@ def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
             right = right_result[validation_name]
             for value in (left, right):
                 counts = [value.get(key) for key in count_keys]
-                if (not value.get("passed")
-                        or value.get("comparison") !=
-                        "exact_falling_sand_grid_candidates_and_keyed_winners"
-                        or any(not isinstance(item, int) or isinstance(item, bool)
-                               for item in counts)
-                        or value.get("candidate_count") !=
-                        value.get("expected_candidate_count")
-                        or value.get("winner_count") !=
-                        value.get("expected_winner_count")
-                        or value.get("conflict_count") !=
-                        value.get("expected_conflict_count")
-                        or value.get("conflict_count") !=
-                        value.get("candidate_count") - value.get("winner_count")
-                        or value.get("conflict_count", 0) <= 0
-                        or set(value.get("endpoint_vectors", {})) !=
-                        set(vector_names)):
+                if (
+                    not value.get("passed")
+                    or value.get("comparison") != "exact_falling_sand_grid_candidates_and_keyed_winners"
+                    or any(not isinstance(item, int) or isinstance(item, bool) for item in counts)
+                    or value.get("candidate_count") != value.get("expected_candidate_count")
+                    or value.get("winner_count") != value.get("expected_winner_count")
+                    or value.get("conflict_count") != value.get("expected_conflict_count")
+                    or value.get("conflict_count") != value.get("candidate_count") - value.get("winner_count")
+                    or value.get("conflict_count", 0) <= 0
+                    or set(value.get("endpoint_vectors", {})) != set(vector_names)
+                ):
                     return False
                 vectors = value["endpoint_vectors"]
-                if any(not _reported_exact_i32_vector_valid(vectors[name])
-                       for name in vector_names):
+                if any(not _reported_exact_i32_vector_valid(vectors[name]) for name in vector_names):
                     return False
                 fingerprint = value.get("endpoint_fingerprint", {})
                 if fingerprint.get("finite") is not True:
                     return False
                 for fingerprint_key, vector_name in fingerprint_map.items():
-                    if (fingerprint.get(fingerprint_key) !=
-                            vectors[vector_name]["actual_sha256"]):
+                    if fingerprint.get(fingerprint_key) != vectors[vector_name]["actual_sha256"]:
                         return False
             for key in count_keys:
                 if left.get(key) != right.get(key):
                     return False
             for vector_name in vector_names:
                 for key in exact_keys:
-                    if (left["endpoint_vectors"][vector_name].get(key) !=
-                            right["endpoint_vectors"][vector_name].get(key)):
+                    if left["endpoint_vectors"][vector_name].get(key) != right["endpoint_vectors"][vector_name].get(
+                        key
+                    ):
                         return False
         for result in (left_result, right_result):
             before = result["validation_before"]
@@ -7882,18 +7512,21 @@ def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
                     return False
             for vector_name in vector_names:
                 if any(
-                        before["endpoint_vectors"][vector_name].get(key) !=
-                        after["endpoint_vectors"][vector_name].get(key)
-                        for key in exact_keys):
+                    before["endpoint_vectors"][vector_name].get(key) != after["endpoint_vectors"][vector_name].get(key)
+                    for key in exact_keys
+                ):
                     return False
         return True
     if left_result["operation"] == "sparse_block_stencil":
-        comparison = (
-            "coordinate_dense_oracle_for_rebuilt_sparse_five_point_"
-            "weighted_jacobi")
+        comparison = "coordinate_dense_oracle_for_rebuilt_sparse_five_point_" "weighted_jacobi"
         fingerprint_keys = (
-            "count", "sha256", "sum", "minimum", "maximum",
-            "sample_indices", "sample_values",
+            "count",
+            "sha256",
+            "sum",
+            "minimum",
+            "maximum",
+            "sample_indices",
+            "sample_values",
         )
         for validation_name in ("validation_before", "validation_after"):
             left = left_result[validation_name]
@@ -7902,79 +7535,75 @@ def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
                 tolerance = float(value.get("effective_tolerance", -1.0))
                 actual = value.get("endpoint_fingerprint", {})
                 expected = value.get("expected_endpoint_fingerprint", {})
-                if (not value.get("passed")
-                        or value.get("comparison") != comparison
-                        or value.get("active_blocks") !=
-                        value.get("expected_active_blocks")
-                        or tolerance < 0.0
-                        or float(value.get("max_abs_error", math.inf))
-                        > tolerance
-                        or not math.isfinite(
-                            float(value.get("rmse", math.inf)))
-                        or actual.get("finite") is not True
-                        or expected.get("finite") is not True
-                        or actual.get("count") != expected.get("count")
-                        or actual.get("sample_indices") !=
-                        expected.get("sample_indices")
-                        or not isinstance(actual.get("sha256"), str)
-                        or len(actual["sha256"]) != 64
-                        or not isinstance(expected.get("sha256"), str)
-                        or len(expected["sha256"]) != 64):
+                if (
+                    not value.get("passed")
+                    or value.get("comparison") != comparison
+                    or value.get("active_blocks") != value.get("expected_active_blocks")
+                    or tolerance < 0.0
+                    or float(value.get("max_abs_error", math.inf)) > tolerance
+                    or not math.isfinite(float(value.get("rmse", math.inf)))
+                    or actual.get("finite") is not True
+                    or expected.get("finite") is not True
+                    or actual.get("count") != expected.get("count")
+                    or actual.get("sample_indices") != expected.get("sample_indices")
+                    or not isinstance(actual.get("sha256"), str)
+                    or len(actual["sha256"]) != 64
+                    or not isinstance(expected.get("sha256"), str)
+                    or len(expected["sha256"]) != 64
+                ):
                     return False
                 count = int(actual["count"])
-                if (count <= 0
-                        or len(actual.get("sample_values", [])) !=
-                        len(actual.get("sample_indices", []))
-                        or len(expected.get("sample_values", [])) !=
-                        len(expected.get("sample_indices", []))):
+                if (
+                    count <= 0
+                    or len(actual.get("sample_values", [])) != len(actual.get("sample_indices", []))
+                    or len(expected.get("sample_values", [])) != len(expected.get("sample_indices", []))
+                ):
                     return False
                 for key in ("minimum", "maximum"):
-                    if not math.isclose(
-                            float(actual[key]), float(expected[key]),
-                            rel_tol=0.0, abs_tol=tolerance):
+                    if not math.isclose(float(actual[key]), float(expected[key]), rel_tol=0.0, abs_tol=tolerance):
                         return False
                 if not math.isclose(
-                        float(actual["sum"]), float(expected["sum"]),
-                        rel_tol=0.0, abs_tol=tolerance * count):
+                    float(actual["sum"]), float(expected["sum"]), rel_tol=0.0, abs_tol=tolerance * count
+                ):
                     return False
                 if any(
-                        not math.isclose(float(a), float(b), rel_tol=0.0,
-                                         abs_tol=tolerance)
-                        for a, b in zip(actual["sample_values"],
-                                        expected["sample_values"])):
+                    not math.isclose(float(a), float(b), rel_tol=0.0, abs_tol=tolerance)
+                    for a, b in zip(actual["sample_values"], expected["sample_values"])
+                ):
                     return False
             left_fp = left["endpoint_fingerprint"]
             right_fp = right["endpoint_fingerprint"]
-            if any(left_fp.get(key) != right_fp.get(key)
-                   for key in fingerprint_keys):
+            if any(left_fp.get(key) != right_fp.get(key) for key in fingerprint_keys):
                 return False
         for result in (left_result, right_result):
             before = result["validation_before"]["endpoint_fingerprint"]
             after = result["validation_after"]["endpoint_fingerprint"]
-            if any(before.get(key) != after.get(key)
-                   for key in fingerprint_keys):
+            if any(before.get(key) != after.get(key) for key in fingerprint_keys):
                 return False
         return True
-    if left_result["operation"] not in (
-            "mpm_graph", "mpm_direct", "active_grid_mpm"):
+    if left_result["operation"] not in ("mpm_graph", "mpm_direct", "active_grid_mpm"):
         return True
     for validation_name in ("validation_before", "validation_after"):
         left_validation = left_result[validation_name]
         right_validation = right_result[validation_name]
-        if (not left_validation.get("passed")
-                or not right_validation.get("passed")):
+        if not left_validation.get("passed") or not right_validation.get("passed"):
             return False
         if left_result["operation"] == "active_grid_mpm":
             for key in (
-                    "active_count", "mass_active_count", "published_count",
-                    "active_flags_sha256", "mass_mask_sha256"):
+                "active_count",
+                "mass_active_count",
+                "published_count",
+                "active_flags_sha256",
+                "mass_mask_sha256",
+            ):
                 if left_validation.get(key) != right_validation.get(key):
                     return False
             for value in (left_validation, right_validation):
-                if (not isinstance(value.get("active_flags_sha256"), str)
-                        or len(value["active_flags_sha256"]) != 64
-                        or value["active_flags_sha256"]
-                        != value.get("mass_mask_sha256")):
+                if (
+                    not isinstance(value.get("active_flags_sha256"), str)
+                    or len(value["active_flags_sha256"]) != 64
+                    or value["active_flags_sha256"] != value.get("mass_mask_sha256")
+                ):
                     return False
         left = left_validation["endpoint_fingerprint"]
         right = right_validation["endpoint_fingerprint"]
@@ -7986,23 +7615,22 @@ def _endpoint_equivalent(results: dict[str, dict[str, Any]], subject: str,
             if len(left_values) != len(right_values):
                 return False
             if any(
-                    not math.isclose(float(a), float(b), rel_tol=5.0e-5,
-                                     abs_tol=5.0e-5)
-                    for a, b in zip(left_values, right_values)):
+                not math.isclose(float(a), float(b), rel_tol=5.0e-5, abs_tol=5.0e-5)
+                for a, b in zip(left_values, right_values)
+            ):
                 return False
-        if not math.isclose(
-                float(left["J_mean"]), float(right["J_mean"]),
-                rel_tol=5.0e-5, abs_tol=5.0e-5):
+        if not math.isclose(float(left["J_mean"]), float(right["J_mean"]), rel_tol=5.0e-5, abs_tol=5.0e-5):
             return False
-        if (float(left["image_sum"]) != float(right["image_sum"])
-                or float(left["image_max"]) != float(right["image_max"])):
+        if float(left["image_sum"]) != float(right["image_sum"]) or float(left["image_max"]) != float(
+            right["image_max"]
+        ):
             return False
     return True
 
 
-def _pair_row(pair_index: int, order: Sequence[str],
-              results: dict[str, dict[str, Any]],
-              definition: dict[str, Any]) -> dict[str, Any]:
+def _pair_row(
+    pair_index: int, order: Sequence[str], results: dict[str, dict[str, Any]], definition: dict[str, Any]
+) -> dict[str, Any]:
     subject_name = definition["subject"]
     baseline_name = definition["baseline"]
     subject = results[subject_name]
@@ -8025,21 +7653,18 @@ def _pair_row(pair_index: int, order: Sequence[str],
         "p95_speedup_x": baseline_p95 / subject_p95,
         "subject_first_call_ms": subject["first_call_ms"],
         "baseline_first_call_ms": baseline["first_call_ms"],
-        "first_call_speedup_x": (
-            baseline["first_call_ms"] / subject["first_call_ms"]),
-        "subject_warm_latency_median_ms": subject[
-            "warm_single_call_latency_summary"]["median_ms"],
-        "baseline_warm_latency_median_ms": baseline[
-            "warm_single_call_latency_summary"]["median_ms"],
+        "first_call_speedup_x": (baseline["first_call_ms"] / subject["first_call_ms"]),
+        "subject_warm_latency_median_ms": subject["warm_single_call_latency_summary"]["median_ms"],
+        "baseline_warm_latency_median_ms": baseline["warm_single_call_latency_summary"]["median_ms"],
         "warm_latency_speedup_x": (
             baseline["warm_single_call_latency_summary"]["median_ms"]
-            / subject["warm_single_call_latency_summary"]["median_ms"]),
+            / subject["warm_single_call_latency_summary"]["median_ms"]
+        ),
         "subject_cv_percent": subject["summary"]["cv_percent"],
         "baseline_cv_percent": baseline["summary"]["cv_percent"],
         "subject_native_commit": subject["native_commit"],
         "baseline_native_commit": baseline["native_commit"],
-        "endpoint_equivalent": _endpoint_equivalent(
-            results, subject_name, baseline_name),
+        "endpoint_equivalent": _endpoint_equivalent(results, subject_name, baseline_name),
     }
     for participant, result in results.items():
         row[f"{participant}_median_ms"] = result["summary"]["median_ms"]
@@ -8057,81 +7682,60 @@ def _neutral_environment_signature(result: dict[str, Any]) -> tuple[Any, ...]:
     dependencies = environment["dependencies"]
     return (
         environment["python_version"],
-        tuple((name, dependencies[name]["version"])
-              for name in sorted(dependencies)),
+        tuple((name, dependencies[name]["version"]) for name in sorted(dependencies)),
     )
 
 
-def _pair_execution_is_sequential(
-        order: Sequence[str], results: dict[str, dict[str, Any]]) -> bool:
+def _pair_execution_is_sequential(order: Sequence[str], results: dict[str, dict[str, Any]]) -> bool:
     first, second = (results[runtime] for runtime in order)
     return bool(
         first["position_in_pair"] == 1
         and second["position_in_pair"] == 2
-        and first["parent_launch_started_ns"] < first["parent_launch_finished_ns"]
-        <= second["parent_launch_started_ns"] < second["parent_launch_finished_ns"]
+        and first["parent_launch_started_ns"]
+        < first["parent_launch_finished_ns"]
+        <= second["parent_launch_started_ns"]
+        < second["parent_launch_finished_ns"]
     )
 
 
-def _runtime_evidence_summary(
-        children: Sequence[dict[str, Any]],
-        participants: Sequence[str]) -> dict[str, Any]:
+def _runtime_evidence_summary(children: Sequence[dict[str, Any]], participants: Sequence[str]) -> dict[str, Any]:
     evidence: dict[str, Any] = {}
     for runtime_name in participants:
-        selected = [child for child in children
-                    if child["runtime"] == runtime_name]
+        selected = [child for child in children if child["runtime"] == runtime_name]
         if not selected:
             continue
         representative = selected[0]
-        stability = [child["stability"] for child in selected
-                     if child.get("stability") is not None]
-        rss_deltas = [item["rss_delta_bytes"] for item in stability
-                      if item.get("rss_delta_bytes") is not None]
-        gpu_deltas = [item["gpu_delta_mib"] for item in stability
-                      if item.get("gpu_delta_mib") is not None]
+        stability = [child["stability"] for child in selected if child.get("stability") is not None]
+        rss_deltas = [item["rss_delta_bytes"] for item in stability if item.get("rss_delta_bytes") is not None]
+        gpu_deltas = [item["gpu_delta_mib"] for item in stability if item.get("gpu_delta_mib") is not None]
         snode_lifecycle = [
-            item["snode_lifecycle_plateau"] for item in stability
-            if item.get("snode_lifecycle_plateau") is not None
+            item["snode_lifecycle_plateau"] for item in stability if item.get("snode_lifecycle_plateau") is not None
         ]
         evidence[runtime_name] = {
             "route": representative["route"],
             "device_identity": representative["device_identity"],
             "correctness_all_passed": all(
-                child["validation_before"]["passed"]
-                and child["validation_after"]["passed"]
-                for child in selected),
+                child["validation_before"]["passed"] and child["validation_after"]["passed"] for child in selected
+            ),
             "stability": {
                 "completed_child_count": len(stability),
-                "minimum_replays": (
-                    None if not stability else min(item["replays"]
-                                                   for item in stability)
-                ),
-                "maximum_rss_delta_bytes": (
-                    None if not rss_deltas else max(rss_deltas)
-                ),
-                "maximum_gpu_delta_mib": (
-                    None if not gpu_deltas else max(gpu_deltas)
-                ),
-                "memory_guard_all_passed": bool(
-                    stability
-                    and all(item["memory_guard_passed"] for item in stability)
-                ),
+                "minimum_replays": (None if not stability else min(item["replays"] for item in stability)),
+                "maximum_rss_delta_bytes": (None if not rss_deltas else max(rss_deltas)),
+                "maximum_gpu_delta_mib": (None if not gpu_deltas else max(gpu_deltas)),
+                "memory_guard_all_passed": bool(stability and all(item["memory_guard_passed"] for item in stability)),
                 "enhanced_plateau_required": _uses_forge_package(runtime_name),
                 "enhanced_plateau_all_passed": bool(
-                    stability
-                    and all(item["enhanced_plateau"]["passed"]
-                            for item in stability)
+                    stability and all(item["enhanced_plateau"]["passed"] for item in stability)
                 ),
                 "snode_lifecycle_contract_applicable": bool(
-                    representative["operation"] in (
-                        "snode_churn", "snode_concurrent")),
+                    representative["operation"] in ("snode_churn", "snode_concurrent")
+                ),
                 "snode_lifecycle_plateau_required": bool(
-                    representative["operation"] in (
-                        "snode_churn", "snode_concurrent")
-                    and _uses_forge_package(runtime_name)),
+                    representative["operation"] in ("snode_churn", "snode_concurrent")
+                    and _uses_forge_package(runtime_name)
+                ),
                 "snode_lifecycle_plateau_all_passed": bool(
-                    snode_lifecycle
-                    and all(item["passed"] for item in snode_lifecycle)
+                    snode_lifecycle and all(item["passed"] for item in snode_lifecycle)
                 ),
             },
         }
@@ -8142,19 +7746,19 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
     result = summary["paired_summary"]
     cfg = summary["config"]
     qualified = summary["ready_for_performance_claim"]
-    failed_claim_gates = [
-        name for name, passed in summary["claim_gate_results"].items()
-        if not passed
-    ]
+    failed_claim_gates = [name for name, passed in summary["claim_gate_results"].items() if not passed]
     comparison_class = summary["comparison_class"]
-    definition = summary.get("comparison_definition", {
-        "name": "forge-vs-vanilla",
-        "subject": "forge",
-        "baseline": "vanilla",
-        "speedup_formula": "vanilla_ms / forge_ms",
-        "values_above_one_favor": "forge",
-        "attribution": "legacy cross-package comparison",
-    })
+    definition = summary.get(
+        "comparison_definition",
+        {
+            "name": "forge-vs-vanilla",
+            "subject": "forge",
+            "baseline": "vanilla",
+            "speedup_formula": "vanilla_ms / forge_ms",
+            "values_above_one_favor": "forge",
+            "attribution": "legacy cross-package comparison",
+        },
+    )
     subject_name = definition["subject"]
     baseline_name = definition["baseline"]
     subject_evidence = summary["runtime_evidence"][subject_name]
@@ -8182,8 +7786,7 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             f"- 规模：`{cfg['preset']}`",
             f"- 用途：`{cfg['intent']}`",
             f"- 对比分类：`{comparison_class}`",
-            f"- 对比轴：`{definition['name']}`（subject=`{subject_name}`，"
-            f"baseline=`{baseline_name}`）",
+            f"- 对比轴：`{definition['name']}`（subject=`{subject_name}`，" f"baseline=`{baseline_name}`）",
             f"- 共同 batch size：{summary['common_batch_size']}",
             f"- Fresh-process A/B 对：{result['pair_count']}",
             f"- 速度比定义：`{definition['speedup_formula']}`；大于 1 表示 "
@@ -8200,8 +7803,7 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             f"- 有利配对占比：{summary['quality']['favorable_pair_fraction']:.1%}",
             f"- 最大子进程 CV：{summary['quality']['max_child_cv_percent']:.2f}%",
             f"- 性能宣称资格：{'通过' if qualified else '未通过'}",
-            "- 未通过的固定发布门槛：" +
-            ("无" if not failed_claim_gates else ", ".join(failed_claim_gates)),
+            "- 未通过的固定发布门槛：" + ("无" if not failed_claim_gates else ", ".join(failed_claim_gates)),
             "",
             "## Route、设备与稳定性证据",
             "",
@@ -8210,8 +7812,7 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             f"{'通过' if subject_route['passed'] else '失败'}。",
             f"- `{baseline_name}` route：`{baseline_route['classification']}`；验证："
             f"{'通过' if baseline_route['passed'] else '失败'}。",
-            f"- 物理 GPU：`{gpu_name}`，UUID `{gpu_uuid}`；每个 child 都保留"
-            "实际设备绑定证据。",
+            f"- 物理 GPU：`{gpu_name}`，UUID `{gpu_uuid}`；每个 child 都保留" "实际设备绑定证据。",
             f"- `{subject_name}` stability child："
             f"{subject_stability['completed_child_count']}；最少 replay："
             f"{subject_stability['minimum_replays']}；增强 pool/live plateau："
@@ -8220,18 +7821,22 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             f"{baseline_stability['completed_child_count']}；最少 replay："
             f"{baseline_stability['minimum_replays']}；增强 pool/live plateau："
             f"{'通过' if baseline_stability['enhanced_plateau_all_passed'] else '不适用或未完成'}。",
-            ("- SNode 生命周期 plateau："
-             f"`{subject_name}`="
-             f"{'通过' if subject_stability['snode_lifecycle_plateau_all_passed'] else '失败'}；"
-             f"`{baseline_name}`="
-             f"{'通过（计数器不适用）' if baseline_stability['snode_lifecycle_plateau_all_passed'] else '失败'}。"
-             if subject_stability["snode_lifecycle_contract_applicable"] else
-             "- SNode 生命周期 plateau：不适用。"),
+            (
+                "- SNode 生命周期 plateau："
+                f"`{subject_name}`="
+                f"{'通过' if subject_stability['snode_lifecycle_plateau_all_passed'] else '失败'}；"
+                f"`{baseline_name}`="
+                f"{'通过（计数器不适用）' if baseline_stability['snode_lifecycle_plateau_all_passed'] else '失败'}。"
+                if subject_stability["snode_lifecycle_contract_applicable"]
+                else "- SNode 生命周期 plateau：不适用。"
+            ),
             "- First-call 与 warm 单调用 latency 仅作诊断；性能 gate 只适用于"
             "共同 batch、末尾同步一次的 warm throughput/replay 统计。",
-            (f"- 归因边界：{definition.get('attribution_zh', definition['attribution'])}。"
-             if comparison_class == "thin-capability" else
-             "- 本案例分类和允许差异由 workload contract 固定。"),
+            (
+                f"- 归因边界：{definition.get('attribution_zh', definition['attribution'])}。"
+                if comparison_class == "thin-capability"
+                else "- 本案例分类和允许差异由 workload contract 固定。"
+            ),
             "",
             "## 方法学边界",
             "",
@@ -8251,8 +7856,7 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             f"- Preset: `{cfg['preset']}`",
             f"- Intent: `{cfg['intent']}`",
             f"- Comparison class: `{comparison_class}`",
-            f"- Comparison axis: `{definition['name']}` (subject=`{subject_name}`, "
-            f"baseline=`{baseline_name}`)",
+            f"- Comparison axis: `{definition['name']}` (subject=`{subject_name}`, " f"baseline=`{baseline_name}`)",
             f"- Common batch size: {summary['common_batch_size']}",
             f"- Fresh-process A/B pairs: {result['pair_count']}",
             f"- Speedup definition: `{definition['speedup_formula']}`; values above "
@@ -8263,17 +7867,14 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             f"- Paired median speedup: {result['median_speedup_x']:.4f}x",
             f"- Paired bootstrap 95% interval: [{result['bootstrap_95_low_x']:.4f}, "
             f"{result['bootstrap_95_high_x']:.4f}]x",
-            "- Paired median p95 speedup: "
-            f"{summary['p95_paired_summary']['median_speedup_x']:.4f}x",
+            "- Paired median p95 speedup: " f"{summary['p95_paired_summary']['median_speedup_x']:.4f}x",
             "- Warm single-call (call+sync) diagnostic speedup: "
             f"{summary['warm_single_call_latency_paired_summary']['median_speedup_x']:.4f}x",
-            "- Favorable-pair fraction: "
-            f"{summary['quality']['favorable_pair_fraction']:.1%}",
-            "- Maximum child-process CV: "
-            f"{summary['quality']['max_child_cv_percent']:.2f}%",
+            "- Favorable-pair fraction: " f"{summary['quality']['favorable_pair_fraction']:.1%}",
+            "- Maximum child-process CV: " f"{summary['quality']['max_child_cv_percent']:.2f}%",
             f"- Eligible for a performance claim: {'yes' if qualified else 'no'}",
-            "- Failed fixed publication gates: " +
-            ("none" if not failed_claim_gates else ", ".join(failed_claim_gates)),
+            "- Failed fixed publication gates: "
+            + ("none" if not failed_claim_gates else ", ".join(failed_claim_gates)),
             "",
             "## Route, device, and stability evidence",
             "",
@@ -8292,19 +7893,23 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
             f"{baseline_stability['completed_child_count']}; minimum replays: "
             f"{baseline_stability['minimum_replays']}; enhanced pool/live plateau: "
             f"{'pass' if baseline_stability['enhanced_plateau_all_passed'] else 'not applicable or incomplete'}.",
-            ("- SNode lifecycle plateau: "
-             f"`{subject_name}`="
-             f"{'pass' if subject_stability['snode_lifecycle_plateau_all_passed'] else 'fail'}; "
-             f"`{baseline_name}`="
-             f"{'pass (counters not applicable)' if baseline_stability['snode_lifecycle_plateau_all_passed'] else 'fail'}."
-             if subject_stability["snode_lifecycle_contract_applicable"] else
-             "- SNode lifecycle plateau: not applicable."),
+            (
+                "- SNode lifecycle plateau: "
+                f"`{subject_name}`="
+                f"{'pass' if subject_stability['snode_lifecycle_plateau_all_passed'] else 'fail'}; "
+                f"`{baseline_name}`="
+                f"{'pass (counters not applicable)' if baseline_stability['snode_lifecycle_plateau_all_passed'] else 'fail'}."
+                if subject_stability["snode_lifecycle_contract_applicable"]
+                else "- SNode lifecycle plateau: not applicable."
+            ),
             "- First-call and warm single-call latency are diagnostic only; "
             "performance gates apply to warm throughput/replay with one final "
             "synchronization per common batch.",
-            (f"- Attribution boundary: {definition['attribution']}."
-             if comparison_class == "thin-capability" else
-             "- The workload contract fixes this case's class and allowed differences."),
+            (
+                f"- Attribution boundary: {definition['attribution']}."
+                if comparison_class == "thin-capability"
+                else "- The workload contract fixes this case's class and allowed differences."
+            ),
             "",
             "## Method boundary",
             "",
@@ -8319,10 +7924,8 @@ def _report_text(summary: dict[str, Any], language: str) -> str:
 
 
 def _write_bilingual_reports(output_dir: Path, summary: dict[str, Any]) -> None:
-    (output_dir / "report.zh-CN.md").write_text(
-        _report_text(summary, "zh-CN"), encoding="utf-8")
-    (output_dir / "report.en.md").write_text(
-        _report_text(summary, "en"), encoding="utf-8")
+    (output_dir / "report.zh-CN.md").write_text(_report_text(summary, "zh-CN"), encoding="utf-8")
+    (output_dir / "report.en.md").write_text(_report_text(summary, "en"), encoding="utf-8")
     validation_zh = (
         "# 方法学验证\n\n"
         "- 独占 benchmark 锁："
@@ -8412,8 +8015,7 @@ def _write_bilingual_reports(output_dir: Path, summary: dict[str, Any]) -> None:
     (output_dir / "validation.en.md").write_text(validation_en, encoding="utf-8")
 
 
-def _write_failure_artifacts(output_dir: Path, manifest: dict[str, Any],
-                             error: BaseException) -> None:
+def _write_failure_artifacts(output_dir: Path, manifest: dict[str, Any], error: BaseException) -> None:
     reason = f"{type(error).__name__}: {error}"
     failure = {
         "schema": SCHEMA,
@@ -8432,7 +8034,8 @@ def _write_failure_artifacts(output_dir: Path, manifest: dict[str, Any],
         f"- 原因：`{reason}`\n"
         "- 性能宣称资格：未通过\n"
         "- 处置：保留诊断证据；修复或清空干扰后使用新 run ID 重跑。\n",
-        encoding="utf-8")
+        encoding="utf-8",
+    )
     (output_dir / "failure.en.md").write_text(
         "# One-operation run failure\n\n"
         f"- Run ID: `{failure['run_id']}`\n"
@@ -8440,7 +8043,8 @@ def _write_failure_artifacts(output_dir: Path, manifest: dict[str, Any],
         "- Performance-claim eligibility: fail\n"
         "- Action: retain diagnostics and rerun with a new run ID after repair "
         "or removal of interference.\n",
-        encoding="utf-8")
+        encoding="utf-8",
+    )
 
 
 def _parent_main(args: argparse.Namespace) -> int:
@@ -8449,23 +8053,19 @@ def _parent_main(args: argparse.Namespace) -> int:
         raise ValueError("; ".join(policy_errors))
     definition = comparison_definition(args.comparison, args.operation)
     participants = (definition["subject"], definition["baseline"])
-    has_vanilla_package = any(
-        not _uses_forge_package(participant) for participant in participants)
+    has_vanilla_package = any(not _uses_forge_package(participant) for participant in participants)
     forge_python = Path(args.forge_python).resolve()
     vanilla_python = Path(args.vanilla_python).resolve()
     if has_vanilla_package and forge_python == vanilla_python:
         raise ValueError("Forge and vanilla must use different venv interpreters")
-    required_paths = [forge_python, Path(args.forge_shim_wheel),
-                      Path(args.forge_runtime_wheel)]
+    required_paths = [forge_python, Path(args.forge_shim_wheel), Path(args.forge_runtime_wheel)]
     if has_vanilla_package:
         required_paths.append(vanilla_python)
     for path in required_paths:
         if not path.is_file():
             raise FileNotFoundError(path)
     venv_checks = {
-        participant: _check_pyvenv(
-            forge_python if _uses_forge_package(participant)
-            else vanilla_python)
+        participant: _check_pyvenv(forge_python if _uses_forge_package(participant) else vanilla_python)
         for participant in participants
     }
     if not all(check["passed"] for check in venv_checks.values()):
@@ -8473,9 +8073,7 @@ def _parent_main(args: argparse.Namespace) -> int:
 
     repo_root = Path(__file__).resolve().parents[2]
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_id = args.run_id or (
-        f"single-{args.operation}-{args.comparison}-{args.backend}-"
-        f"{args.preset}-{timestamp}")
+    run_id = args.run_id or (f"single-{args.operation}-{args.comparison}-{args.backend}-" f"{args.preset}-{timestamp}")
     if Path(run_id).name != run_id:
         raise ValueError("run_id must be one path component")
     output_dir = Path(args.output_root).resolve() / run_id
@@ -8524,95 +8122,69 @@ def _parent_main(args: argparse.Namespace) -> int:
                 "sha256": sha256_file(Path(args.forge_runtime_wheel)),
             },
         },
-        "pair_orders": balanced_pair_orders(
-            args.pairs, args.seed, participants),
+        "pair_orders": balanced_pair_orders(args.pairs, args.seed, participants),
         "noise_observations": [],
     }
     args._active_manifest = manifest
     write_json(output_dir / "manifest.json", manifest)
 
     ignored = [os.getpid()]
-    initial_noise = _noise_observation(
-        args.backend, ignored, args.max_cpu_util, args.max_gpu_util,
-        args.max_gpu_temp)
-    manifest["noise_observations"].append({"label": "before_pilot",
-                                            **initial_noise})
+    initial_noise = _noise_observation(args.backend, ignored, args.max_cpu_util, args.max_gpu_util, args.max_gpu_temp)
+    manifest["noise_observations"].append({"label": "before_pilot", **initial_noise})
     write_json(output_dir / "manifest.json", manifest)
-    if (not initial_noise["passed"]
-            and not _noise_allows_diagnostic_execution(args, initial_noise)):
-        raise RuntimeError("noise admission failed before pilot: " +
-                           "; ".join(initial_noise["reasons"]))
+    if not initial_noise["passed"] and not _noise_allows_diagnostic_execution(args, initial_noise):
+        raise RuntimeError("noise admission failed before pilot: " + "; ".join(initial_noise["reasons"]))
 
     pilot_results = {}
     for position, runtime in enumerate(participants, start=1):
-        pilot_results[runtime] = _run_child(
-            args, runtime, "pilot", output_dir, f"pilot-{runtime}", 0,
-            position, 1)
-    common_batch = select_common_batch([
-        pilot_results[participant]["suggested_batch_size"]
-        for participant in participants
-    ])
+        pilot_results[runtime] = _run_child(args, runtime, "pilot", output_dir, f"pilot-{runtime}", 0, position, 1)
+    common_batch = select_common_batch(
+        [pilot_results[participant]["suggested_batch_size"] for participant in participants]
+    )
 
     pair_rows = []
     children = []
     pair_groups = []
     for pair_index, order in enumerate(manifest["pair_orders"], start=1):
-        before = _noise_observation(
-            args.backend, ignored, args.max_cpu_util, args.max_gpu_util,
-            args.max_gpu_temp)
-        manifest["noise_observations"].append({
-            "label": f"pair-{pair_index:02d}-before", **before})
-        if (not before["passed"]
-                and not _noise_allows_diagnostic_execution(args, before)):
+        before = _noise_observation(args.backend, ignored, args.max_cpu_util, args.max_gpu_util, args.max_gpu_temp)
+        manifest["noise_observations"].append({"label": f"pair-{pair_index:02d}-before", **before})
+        if not before["passed"] and not _noise_allows_diagnostic_execution(args, before):
             write_json(output_dir / "manifest.json", manifest)
-            raise RuntimeError(
-                f"noise admission failed before pair {pair_index}: " +
-                "; ".join(before["reasons"]))
+            raise RuntimeError(f"noise admission failed before pair {pair_index}: " + "; ".join(before["reasons"]))
         results = {}
         for position, runtime in enumerate(order, start=1):
             label = f"pair-{pair_index:02d}-{position}-{runtime}"
-            results[runtime] = _run_child(
-                args, runtime, "score", output_dir, label, pair_index,
-                position, common_batch)
+            results[runtime] = _run_child(args, runtime, "score", output_dir, label, pair_index, position, common_batch)
             children.append(results[runtime])
-            between = _noise_observation(
-                args.backend, ignored, args.max_cpu_util, args.max_gpu_util,
-                args.max_gpu_temp)
-            manifest["noise_observations"].append({
-                "label": f"{label}-after", **between})
-            if (not between["passed"]
-                    and not _noise_allows_diagnostic_execution(args, between)):
+            between = _noise_observation(args.backend, ignored, args.max_cpu_util, args.max_gpu_util, args.max_gpu_temp)
+            manifest["noise_observations"].append({"label": f"{label}-after", **between})
+            if not between["passed"] and not _noise_allows_diagnostic_execution(args, between):
                 write_json(output_dir / "manifest.json", manifest)
-                raise RuntimeError(
-                    f"noise admission failed after {label}: " +
-                    "; ".join(between["reasons"]))
+                raise RuntimeError(f"noise admission failed after {label}: " + "; ".join(between["reasons"]))
         pair_groups.append((order, results))
         pair_rows.append(_pair_row(pair_index, order, results, definition))
         write_jsonl(output_dir / "pairs.jsonl", pair_rows)
         write_csv(output_dir / "pairs.csv", pair_rows)
 
-    paired = paired_log_summary(
-        [row["median_speedup_x"] for row in pair_rows], args.seed)
-    p95_paired = paired_log_summary(
-        [row["p95_speedup_x"] for row in pair_rows], args.seed + 1)
-    latency_paired = paired_log_summary(
-        [row["warm_latency_speedup_x"] for row in pair_rows], args.seed + 2)
-    neutral_environment_signatures = {
-        _neutral_environment_signature(child) for child in children
-    }
+    paired = paired_log_summary([row["median_speedup_x"] for row in pair_rows], args.seed)
+    p95_paired = paired_log_summary([row["p95_speedup_x"] for row in pair_rows], args.seed + 1)
+    latency_paired = paired_log_summary([row["warm_latency_speedup_x"] for row in pair_rows], args.seed + 2)
+    neutral_environment_signatures = {_neutral_environment_signature(child) for child in children}
     workload_signatures = {
         (
-            child["operation"], child["backend"], child["preset"],
-            child["logical_bytes"], child["traffic_model"],
-            child["batch_size"], child["measurement_scope"],
+            child["operation"],
+            child["backend"],
+            child["preset"],
+            child["logical_bytes"],
+            child["traffic_model"],
+            child["batch_size"],
+            child["measurement_scope"],
             tuple(sorted(child["measurement_config"].items())),
             json.dumps(child["workload_contract"], sort_keys=True),
         )
         for child in children
     }
-    comparison_classes = {
-        child["workload_contract"]["comparison_class"] for child in children
-    }
+    comparison_classes = {child["workload_contract"]["comparison_class"] for child in children}
     forge_binary_signatures = {
         (
             child["environment"]["package_distribution"],
@@ -8622,11 +8194,11 @@ def _parent_main(args: argparse.Namespace) -> int:
             child["environment"]["core_sha256"],
             child["native_commit"],
         )
-        for child in children if _uses_forge_package(child["runtime"])
+        for child in children
+        if _uses_forge_package(child["runtime"])
     }
     expected_axes = {
-        "forge": ("forge", "native" if args.operation in
-                  THIN_CAPABILITY_OPERATIONS else "kernel"),
+        "forge": ("forge", "native" if args.operation in THIN_CAPABILITY_OPERATIONS else "kernel"),
         "forge_kernel": ("forge", "kernel"),
         "vanilla": ("vanilla", "kernel"),
         "vanilla_kernel": ("vanilla", "kernel"),
@@ -8634,260 +8206,212 @@ def _parent_main(args: argparse.Namespace) -> int:
     forward_order = "->".join(participants)
     reverse_order = "->".join(reversed(participants))
     order_counts = {
-        forward_order: sum(
-            tuple(order) == participants for order, _ in pair_groups),
-        reverse_order: sum(
-            tuple(order) == tuple(reversed(participants))
-            for order, _ in pair_groups),
+        forward_order: sum(tuple(order) == participants for order, _ in pair_groups),
+        reverse_order: sum(tuple(order) == tuple(reversed(participants)) for order, _ in pair_groups),
     }
     method_checks = {
-        "exclusive_driver_lock": bool(
-            manifest["exclusive_driver_lock"].get("acquired")),
-        "isolated_environments": all(
-            child["environment_isolated"] for child in children),
+        "exclusive_driver_lock": bool(manifest["exclusive_driver_lock"].get("acquired")),
+        "isolated_environments": all(child["environment_isolated"] for child in children),
         "neutral_dependency_parity": len(neutral_environment_signatures) == 1,
         "workload_equivalence": len(workload_signatures) == 1,
         "comparison_class_consistent": len(comparison_classes) == 1,
         "comparison_axis_verified": all(
-            (child["runtime_package"], child["adapter_kind"])
-            == expected_axes[child["runtime"]]
-            for child in children),
+            (child["runtime_package"], child["adapter_kind"]) == expected_axes[child["runtime"]] for child in children
+        ),
         "kernel_control_route_isolated": all(
             (
-                child["route"]["classification"].startswith(
-                    f"{child['runtime']}_")
-                and "native" not in json.dumps(
-                    child["route"], sort_keys=True).lower()
-                and (
-                    child["operation"] not in (
-                        "native_reduce", "native_transform", "native_gather",
-                        "native_scatter", "native_compact",
-                        "device_prefix_chain", "active_grid_mpm",
-                        "particle_spatial_hash")
-                    or (
-                        child["route"].get("adapter") == (
-                            "benchmark_defined_ti_kernel_pipeline"
-                            if child["operation"] in (
-                                "native_compact", "device_prefix_chain",
-                                "particle_spatial_hash")
-                            else (
-                                "benchmark_defined_ti_kernel_graph_pipeline"
-                                if child["operation"] == "active_grid_mpm"
-                                else "benchmark_defined_ti_kernel"
-                            )
+                (
+                    child["route"]["classification"].startswith(f"{child['runtime']}_")
+                    and "native" not in json.dumps(child["route"], sort_keys=True).lower()
+                    and (
+                        child["operation"]
+                        not in (
+                            "native_reduce",
+                            "native_transform",
+                            "native_gather",
+                            "native_scatter",
+                            "native_compact",
+                            "device_prefix_chain",
+                            "active_grid_mpm",
+                            "particle_spatial_hash",
                         )
-                        and child["route"].get("kernel_source_owner")
-                        == "benchmark"
-                        and child["route"].get("kernel_source_sha256")
-                        == child["workload_contract"].get(
-                            "kernel_source_sha256")
-                        and child["route"].get("helper_api_used") is False
-                        and (
-                            (
-                                child["route"].get(
-                                    "specialized_api_used") is False
-                                and child["route"].get(
-                                    "benchmark_workspace_field_count") == 0
-                                and child["route"].get(
-                                    "graph_kernel_names")
-                                == child["workload_contract"].get(
-                                    "kernel_graph_kernel_names")
-                                and child["route"].get(
-                                    "graph_dispatches_per_replay")
-                                == child["workload_contract"].get(
-                                    "kernel_graph_dispatches_per_replay")
+                        or (
+                            child["route"].get("adapter")
+                            == (
+                                "benchmark_defined_ti_kernel_pipeline"
+                                if child["operation"]
+                                in ("native_compact", "device_prefix_chain", "particle_spatial_hash")
+                                else (
+                                    "benchmark_defined_ti_kernel_graph_pipeline"
+                                    if child["operation"] == "active_grid_mpm"
+                                    else "benchmark_defined_ti_kernel"
+                                )
                             )
-                            if child["operation"] == "active_grid_mpm" else (
-                                child["route"].get(
-                                    "specialized_api_used") is False
-                                and child["route"].get(
-                                    "benchmark_workspace_field_count") == 2
-                                and child["route"].get("scan_algorithm")
-                                == "inclusive_hillis_steele_ping_pong"
-                                and child["route"].get("scan_steps")
-                                == child["workload_contract"].get(
-                                    "kernel_scan_steps")
-                                and child["route"].get(
-                                    "final_scan_copy_kernel_invocations")
-                                == child["workload_contract"].get(
-                                    "kernel_final_scan_copy_kernel_invocations")
-                                if child["operation"] == "native_compact" else (
-                                    child["route"].get(
-                                        "specialized_api_used") is False
-                                    and child["route"].get(
-                                        "benchmark_workspace_field_count") == 4
-                                    and child["route"].get("scan_algorithm")
-                                    == "inclusive_hillis_steele_ping_pong"
-                                    and child["route"].get(
-                                        "scan_pipelines_per_replay")
-                                    == child["workload_contract"].get(
-                                        "kernel_scan_pipelines_per_replay")
-                                    and child["route"].get(
-                                        "scan_steps_per_pipeline")
-                                    == child["workload_contract"].get(
-                                        "kernel_scan_steps_per_pipeline")
-                                    and child["route"].get(
-                                        "final_scan_copy_kernel_invocations_"
-                                        "per_pipeline")
-                                    == child["workload_contract"].get(
-                                        "kernel_final_scan_copy_kernel_"
-                                        "invocations_per_pipeline")
-                                    and child["route"].get(
-                                        "stage_ti_kernel_invocations_per_replay")
-                                    == child["workload_contract"].get(
-                                        "kernel_stage_ti_invocations_per_replay")
-                                    if child["operation"]
-                                    == "device_prefix_chain" else (
-                                        child["route"].get(
-                                            "specialized_api_used") is False
-                                        and child["route"].get(
-                                            "benchmark_workspace_field_count")
-                                        == 2
-                                        and child["route"].get(
-                                            "scan_algorithm")
-                                        == "inclusive_hillis_steele_ping_pong"
-                                        and child["route"].get(
-                                            "scan_elements")
+                            and child["route"].get("kernel_source_owner") == "benchmark"
+                            and child["route"].get("kernel_source_sha256")
+                            == child["workload_contract"].get("kernel_source_sha256")
+                            and child["route"].get("helper_api_used") is False
+                            and (
+                                (
+                                    child["route"].get("specialized_api_used") is False
+                                    and child["route"].get("benchmark_workspace_field_count") == 0
+                                    and child["route"].get("graph_kernel_names")
+                                    == child["workload_contract"].get("kernel_graph_kernel_names")
+                                    and child["route"].get("graph_dispatches_per_replay")
+                                    == child["workload_contract"].get("kernel_graph_dispatches_per_replay")
+                                )
+                                if child["operation"] == "active_grid_mpm"
+                                else (
+                                    child["route"].get("specialized_api_used") is False
+                                    and child["route"].get("benchmark_workspace_field_count") == 2
+                                    and child["route"].get("scan_algorithm") == "inclusive_hillis_steele_ping_pong"
+                                    and child["route"].get("scan_steps")
+                                    == child["workload_contract"].get("kernel_scan_steps")
+                                    and child["route"].get("final_scan_copy_kernel_invocations")
+                                    == child["workload_contract"].get("kernel_final_scan_copy_kernel_invocations")
+                                    if child["operation"] == "native_compact"
+                                    else (
+                                        child["route"].get("specialized_api_used") is False
+                                        and child["route"].get("benchmark_workspace_field_count") == 4
+                                        and child["route"].get("scan_algorithm") == "inclusive_hillis_steele_ping_pong"
+                                        and child["route"].get("scan_pipelines_per_replay")
+                                        == child["workload_contract"].get("kernel_scan_pipelines_per_replay")
+                                        and child["route"].get("scan_steps_per_pipeline")
+                                        == child["workload_contract"].get("kernel_scan_steps_per_pipeline")
+                                        and child["route"].get("final_scan_copy_kernel_invocations_" "per_pipeline")
                                         == child["workload_contract"].get(
-                                            "kernel_scan_elements")
-                                        and child["route"].get("scan_steps")
-                                        == child["workload_contract"].get(
-                                            "kernel_scan_steps")
-                                        and child["route"].get(
-                                            "final_scan_copy_kernel_"
-                                            "invocations")
-                                        == child["workload_contract"].get(
-                                            "kernel_final_scan_copy_kernel_"
-                                            "invocations")
-                                        and child["route"].get(
-                                            "non_scan_ti_kernel_"
-                                            "invocations_per_replay")
-                                        == child["workload_contract"].get(
-                                            "kernel_non_scan_ti_"
-                                            "invocations_per_replay")
-                                        and child["route"].get(
-                                            "stage_kernel_names")
-                                        == child["workload_contract"].get(
-                                            "kernel_stage_names")
-                                        if child["operation"]
-                                        == "particle_spatial_hash" else
-                                        child["route"].get(
-                                            "workspace_present") is False
+                                            "kernel_final_scan_copy_kernel_" "invocations_per_pipeline"
+                                        )
+                                        and child["route"].get("stage_ti_kernel_invocations_per_replay")
+                                        == child["workload_contract"].get("kernel_stage_ti_invocations_per_replay")
+                                        if child["operation"] == "device_prefix_chain"
+                                        else (
+                                            child["route"].get("specialized_api_used") is False
+                                            and child["route"].get("benchmark_workspace_field_count") == 2
+                                            and child["route"].get("scan_algorithm")
+                                            == "inclusive_hillis_steele_ping_pong"
+                                            and child["route"].get("scan_elements")
+                                            == child["workload_contract"].get("kernel_scan_elements")
+                                            and child["route"].get("scan_steps")
+                                            == child["workload_contract"].get("kernel_scan_steps")
+                                            and child["route"].get("final_scan_copy_kernel_" "invocations")
+                                            == child["workload_contract"].get(
+                                                "kernel_final_scan_copy_kernel_" "invocations"
+                                            )
+                                            and child["route"].get("non_scan_ti_kernel_" "invocations_per_replay")
+                                            == child["workload_contract"].get(
+                                                "kernel_non_scan_ti_" "invocations_per_replay"
+                                            )
+                                            and child["route"].get("stage_kernel_names")
+                                            == child["workload_contract"].get("kernel_stage_names")
+                                            if child["operation"] == "particle_spatial_hash"
+                                            else child["route"].get("workspace_present") is False
+                                        )
                                     )
                                 )
                             )
+                            and child["route"].get("ti_kernel_invocations_per_replay")
+                            == child["workload_contract"].get("kernel_ti_invocations_per_replay")
+                            and child["route"].get("physical_backend_launches_assumed") is False
                         )
-                        and child["route"].get(
-                            "ti_kernel_invocations_per_replay")
-                        == child["workload_contract"].get(
-                            "kernel_ti_invocations_per_replay")
-                        and child["route"].get(
-                            "physical_backend_launches_assumed") is False
                     )
                 )
-            ) if child["runtime"] in ("forge_kernel", "vanilla_kernel")
-            else True
-            for child in children),
+                if child["runtime"] in ("forge_kernel", "vanilla_kernel")
+                else True
+            )
+            for child in children
+        ),
         "adaptive_pbd_kernel_control_route_isolated": all(
-            _adaptive_pbd_kernel_control_route_isolated(child)
-            for child in children),
+            _adaptive_pbd_kernel_control_route_isolated(child) for child in children
+        ),
         "marching_squares_kernel_control_route_isolated": all(
-            _marching_squares_kernel_control_route_isolated(child)
-            for child in children),
+            _marching_squares_kernel_control_route_isolated(child) for child in children
+        ),
         "bfs_worklist_kernel_control_route_isolated": all(
-            _bfs_worklist_kernel_control_route_isolated(child)
-            for child in children),
-        "bfs_worklist_native_route_admitted": all(
-            _bfs_worklist_native_route_admitted(child)
-            for child in children),
+            _bfs_worklist_kernel_control_route_isolated(child) for child in children
+        ),
+        "bfs_worklist_native_route_admitted": all(_bfs_worklist_native_route_admitted(child) for child in children),
         "falling_sand_kernel_control_route_isolated": all(
-            _falling_sand_kernel_control_route_isolated(child)
-            for child in children),
-        "falling_sand_native_route_admitted": all(
-            _falling_sand_native_route_admitted(child)
-            for child in children),
-        "sparse_block_stencil_route_isolated": all(
-            _sparse_block_stencil_route_isolated(child)
-            for child in children),
+            _falling_sand_kernel_control_route_isolated(child) for child in children
+        ),
+        "falling_sand_native_route_admitted": all(_falling_sand_native_route_admitted(child) for child in children),
+        "sparse_block_stencil_route_isolated": all(_sparse_block_stencil_route_isolated(child) for child in children),
         "ordinary_control_route_isolated": all(
-            child["route"].get("classification")
-            == f"{child['runtime']}_ordinary_taichi_kernel"
-            and child["route"].get("adapter") == "direct_ti_kernel"
-            and child["route"].get("kernel_source_owner") == "benchmark"
-            and child["route"].get("kernel_source_sha256")
-            == child["workload_contract"].get("kernel_source_sha256")
-            and child["route"].get("native_or_helper_api_used") is False
-            and child["route"].get("ti_kernel_invocations_per_replay") == 1
-            and child["route"].get("physical_backend_launches_assumed") is False
-            if child["operation"] in CONTROL_OPERATIONS else True
-            for child in children),
+            (
+                child["route"].get("classification") == f"{child['runtime']}_ordinary_taichi_kernel"
+                and child["route"].get("adapter") == "direct_ti_kernel"
+                and child["route"].get("kernel_source_owner") == "benchmark"
+                and child["route"].get("kernel_source_sha256") == child["workload_contract"].get("kernel_source_sha256")
+                and child["route"].get("native_or_helper_api_used") is False
+                and child["route"].get("ti_kernel_invocations_per_replay") == 1
+                and child["route"].get("physical_backend_launches_assumed") is False
+                if child["operation"] in CONTROL_OPERATIONS
+                else True
+            )
+            for child in children
+        ),
         "same_forge_binary_identity": bool(
-            args.comparison != "forge-native-vs-forge-kernel"
-            or len(forge_binary_signatures) == 1),
+            args.comparison != "forge-native-vs-forge-kernel" or len(forge_binary_signatures) == 1
+        ),
         "stable_replay_input": all(
-            child["measurement_scope"] == "device_reset_plus_operation"
-            if child["operation"] in (
-                "prefix_sum", "parallel_sort", "sparse_block_stencil",
-                "falling_sand")
-            else True
-            for child in children),
-        "common_batch": all(
-            child["batch_size"] == common_batch for child in children),
+            (
+                child["measurement_scope"] == "device_reset_plus_operation"
+                if child["operation"] in ("prefix_sum", "parallel_sort", "sparse_block_stencil", "falling_sand")
+                else True
+            )
+            for child in children
+        ),
+        "common_batch": all(child["batch_size"] == common_batch for child in children),
         "batched_score_warmup": all(
             child.get("warmup_batch_size") == common_batch
             and len(child.get("warmup_raw_batch_ms", [])) == args.warmups
             and all(
-                math.isfinite(float(value)) and float(value) > 0.0
-                for value in child.get("warmup_raw_batch_ms", []))
-            for child in children),
+                math.isfinite(float(value)) and float(value) > 0.0 for value in child.get("warmup_raw_batch_ms", [])
+            )
+            for child in children
+        ),
         "scored_timing_window": all(
-            statistics.median(child["raw_batch_ms"]) >= args.target_sample_ms
-            for child in children),
+            statistics.median(child["raw_batch_ms"]) >= args.target_sample_ms for child in children
+        ),
         "adjacent_sequential_pairs": all(
-            _pair_execution_is_sequential(order, results)
-            for order, results in pair_groups),
-        "balanced_pair_order": (
-            order_counts[forward_order] == order_counts[reverse_order]),
-        "noise_admission": all(
-            item["passed"] for item in manifest["noise_observations"]),
-        "physical_device_binding": all(
-            child["device_identity"]["binding_verified"] for child in children),
+            _pair_execution_is_sequential(order, results) for order, results in pair_groups
+        ),
+        "balanced_pair_order": (order_counts[forward_order] == order_counts[reverse_order]),
+        "noise_admission": all(item["passed"] for item in manifest["noise_observations"]),
+        "physical_device_binding": all(child["device_identity"]["binding_verified"] for child in children),
         "route_verified": all(
-            child["route"]["passed"]
-            and child.get("route_before_scoring", child["route"])["passed"]
-            for child in children),
-        "endpoint_equivalence": all(
-            row["endpoint_equivalent"] for row in pair_rows),
+            child["route"]["passed"] and child.get("route_before_scoring", child["route"])["passed"]
+            for child in children
+        ),
+        "endpoint_equivalence": all(row["endpoint_equivalent"] for row in pair_rows),
         "correctness_and_teardown": all(
             child["status"] == "passed"
             and child["validation_before"]["passed"]
             and child["validation_after"]["passed"]
             and child["teardown"]["sync_error"] is None
             and child["teardown"]["reset_error"] is None
-            for child in children),
+            for child in children
+        ),
         "stability_complete": all(
             child.get("stability") is not None
             and child["stability"]["replays"] >= args.stability_replays
             and child["stability"]["memory_guard_passed"]
-            for child in children),
+            for child in children
+        ),
         "snode_lifecycle_plateau": all(
-            child["operation"] not in (
-                "snode_churn", "snode_concurrent", "sparse_block_stencil")
+            child["operation"] not in ("snode_churn", "snode_concurrent", "sparse_block_stencil")
             or (
                 child.get("stability") is not None
-                and child["stability"].get(
-                    "snode_lifecycle_plateau", {}).get("passed") is True
+                and child["stability"].get("snode_lifecycle_plateau", {}).get("passed") is True
             )
-            for child in children),
+            for child in children
+        ),
     }
-    favorable_pair_fraction = sum(
-        row["median_speedup_x"] > 1.0 for row in pair_rows) / len(pair_rows)
-    max_child_cv = max(float(child["summary"]["cv_percent"])
-                       for child in children)
+    favorable_pair_fraction = sum(row["median_speedup_x"] > 1.0 for row in pair_rows) / len(pair_rows)
+    max_child_cv = max(float(child["summary"]["cv_percent"]) for child in children)
     quality = {
         "favorable_pair_fraction": favorable_pair_fraction,
-        "minimum_pair_speedup_x": min(
-            row["median_speedup_x"] for row in pair_rows),
+        "minimum_pair_speedup_x": min(row["median_speedup_x"] for row in pair_rows),
         "max_child_cv_percent": max_child_cv,
         "order_counts": order_counts,
     }
@@ -8898,17 +8422,11 @@ def _parent_main(args: argparse.Namespace) -> int:
         "paired_median_above_1_03": paired["median_speedup_x"] > 1.03,
         "paired_bootstrap_low_above_1": paired["bootstrap_95_low_x"] > 1.0,
         "paired_p95_median_above_1": p95_paired["median_speedup_x"] > 1.0,
-        "favorable_pair_fraction_at_least_0_8": (
-            favorable_pair_fraction >= QUALIFICATION_MIN_FAVORABLE_PAIR_FRACTION),
-        "no_pair_below_0_97": (
-            quality["minimum_pair_speedup_x"] >=
-            QUALIFICATION_MAX_REGRESSING_PAIR_FLOOR),
-        "max_child_cv_at_most_5_percent": (
-            max_child_cv <= QUALIFICATION_MAX_CV_PERCENT),
+        "favorable_pair_fraction_at_least_0_8": (favorable_pair_fraction >= QUALIFICATION_MIN_FAVORABLE_PAIR_FRACTION),
+        "no_pair_below_0_97": (quality["minimum_pair_speedup_x"] >= QUALIFICATION_MAX_REGRESSING_PAIR_FLOOR),
+        "max_child_cv_at_most_5_percent": (max_child_cv <= QUALIFICATION_MAX_CV_PERCENT),
     }
-    ready_for_claim = bool(
-        all(claim_gate_results.values())
-    )
+    ready_for_claim = bool(all(claim_gate_results.values()))
     summary = {
         "schema": SCHEMA,
         "run_id": run_id,
@@ -8917,10 +8435,7 @@ def _parent_main(args: argparse.Namespace) -> int:
         "comparison_definition": definition,
         "comparison_class": next(iter(comparison_classes)),
         "common_batch_size": common_batch,
-        "pilot_suggestions": {
-            runtime: pilot_results[runtime]["suggested_batch_size"]
-            for runtime in participants
-        },
+        "pilot_suggestions": {runtime: pilot_results[runtime]["suggested_batch_size"] for runtime in participants},
         "pair_rows": pair_rows,
         "paired_summary": paired,
         "p95_paired_summary": p95_paired,
@@ -8930,9 +8445,8 @@ def _parent_main(args: argparse.Namespace) -> int:
         "method_checks": method_checks,
         "claim_gate_results": claim_gate_results,
         "ready_for_qualification_report": bool(
-            args.intent == "qualification"
-            and policy_complete
-            and all(method_checks.values())),
+            args.intent == "qualification" and policy_complete and all(method_checks.values())
+        ),
         "ready_for_performance_claim": ready_for_claim,
         "claim_rule": (
             "qualification policy complete; all method checks pass; paired median "
@@ -8955,32 +8469,22 @@ def _parent_main(args: argparse.Namespace) -> int:
 def _parser() -> argparse.ArgumentParser:
     repo_root = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(
-        description=(
-            "Industry-style local A/B microbenchmark for exactly one operation, "
-            "one backend, and one size"))
+        description=("Industry-style local A/B microbenchmark for exactly one operation, " "one backend, and one size")
+    )
     parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--phase", choices=("pilot", "score"),
-                        help=argparse.SUPPRESS)
+    parser.add_argument("--phase", choices=("pilot", "score"), help=argparse.SUPPRESS)
     parser.add_argument(
-        "--runtime",
-        choices=("forge", "forge_kernel", "vanilla", "vanilla_kernel"),
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--pair-index", type=int, default=0,
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--position-in-pair", type=int, default=0,
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--batch-size", type=int, default=1,
-                        help=argparse.SUPPRESS)
-    parser.add_argument("--cuda-profiler-range", action="store_true",
-                        help=argparse.SUPPRESS)
+        "--runtime", choices=("forge", "forge_kernel", "vanilla", "vanilla_kernel"), help=argparse.SUPPRESS
+    )
+    parser.add_argument("--pair-index", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--position-in-pair", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--batch-size", type=int, default=1, help=argparse.SUPPRESS)
+    parser.add_argument("--cuda-profiler-range", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--operation", choices=OPERATIONS, required=True)
-    parser.add_argument("--comparison", choices=COMPARISONS,
-                        default="forge-vs-vanilla")
-    parser.add_argument("--backend", choices=("cpu", "cuda", "vulkan"),
-                        required=True)
+    parser.add_argument("--comparison", choices=COMPARISONS, default="forge-vs-vanilla")
+    parser.add_argument("--backend", choices=("cpu", "cuda", "vulkan"), required=True)
     parser.add_argument("--preset", choices=tuple(PRESETS), required=True)
-    parser.add_argument("--intent", choices=("diagnostic", "qualification"),
-                        default="diagnostic")
+    parser.add_argument("--intent", choices=("diagnostic", "qualification"), default="diagnostic")
     parser.add_argument("--pairs", type=int, default=1)
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument("--latency-samples", type=int, default=5)
@@ -9000,29 +8504,27 @@ def _parser() -> argparse.ArgumentParser:
         help=(
             "diagnostic-only: continue when external Python processes are the "
             "sole noise-admission failure; artifacts remain ineligible for "
-            "performance claims"),
+            "performance claims"
+        ),
     )
     parser.add_argument("--child-timeout-seconds", type=int, default=900)
     parser.add_argument(
         "--forge-python",
-        default=str(repo_root / "temp_outputs" / "benchmark_envs" /
-                    "forge-wheel-isolated-py310" / "Scripts" / "python.exe"))
+        default=str(
+            repo_root / "temp_outputs" / "benchmark_envs" / "forge-wheel-isolated-py310" / "Scripts" / "python.exe"
+        ),
+    )
     parser.add_argument(
         "--vanilla-python",
-        default=str(repo_root / "temp_outputs" / "benchmark_envs" /
-                    "vanilla-py310" / "Scripts" / "python.exe"))
+        default=str(repo_root / "temp_outputs" / "benchmark_envs" / "vanilla-py310" / "Scripts" / "python.exe"),
+    )
     parser.add_argument(
-        "--forge-shim-wheel",
-        default=str(repo_root / "dist" /
-                    "taichi_forge-0.6.2-cp310-cp310-win_amd64.whl"))
+        "--forge-shim-wheel", default=str(repo_root / "dist" / "taichi_forge-0.6.2-cp310-cp310-win_amd64.whl")
+    )
     parser.add_argument(
-        "--forge-runtime-wheel",
-        default=str(repo_root / "dist" /
-                    "taichi_forge_runtime-0.6.2-py3-none-win_amd64.whl"))
-    parser.add_argument(
-        "--output-root",
-        default=str(repo_root / "temp_outputs" / "qualification" /
-                    "single_kernel"))
+        "--forge-runtime-wheel", default=str(repo_root / "dist" / "taichi_forge_runtime-0.6.2-py3-none-win_amd64.whl")
+    )
+    parser.add_argument("--output-root", default=str(repo_root / "temp_outputs" / "qualification" / "single_kernel"))
     parser.add_argument("--run-id")
     return parser
 
@@ -9045,10 +8547,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.stability_replays < 0:
         raise ValueError("stability_replays must not be negative")
     if args.cuda_profiler_range and (
-            not args.child or args.phase != "score" or args.backend != "cuda"
-            or args.samples != 1):
-        raise ValueError(
-            "--cuda-profiler-range requires one CUDA score sample in child mode")
+        not args.child or args.phase != "score" or args.backend != "cuda" or args.samples != 1
+    ):
+        raise ValueError("--cuda-profiler-range requires one CUDA score sample in child mode")
     if args.child:
         if args.runtime is None or args.phase is None:
             raise ValueError("child mode requires --runtime and --phase")

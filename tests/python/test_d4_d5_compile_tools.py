@@ -36,6 +36,7 @@ def test_parallel_compile_accepts_kwargs_task():
     set_x(3, 2)
     assert x[None] == 32
 
+
 @test_utils.test(arch=_ARCHES, exclude=_EXCLUDE)
 def test_parallel_compile_accepts_kernel_opt_level_overrides():
     x = ti.field(ti.i32, shape=())
@@ -71,6 +72,7 @@ def test_parallel_compile_accepts_duplicate_specializations():
     set_x(4)
     assert x[None] == 4
 
+
 @test_utils.test(arch=_ARCHES, exclude=_EXCLUDE)
 def test_compile_profile_captures_python_frontend_events():
     x = ti.field(ti.i32, shape=())
@@ -93,6 +95,7 @@ def test_compile_profile_captures_python_frontend_events():
     assert any(path == "python.func.inline_transform:add_one" for path in paths)
     assert any(path == "python.parallel_compile.submit" for path in paths)
     assert prof.top_n(5)
+
 
 @test_utils.test(arch=_ARCHES, exclude=_EXCLUDE, offline_cache=False)
 def test_compile_profile_captures_cpp_ir_events():

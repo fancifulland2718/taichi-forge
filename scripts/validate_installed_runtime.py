@@ -52,12 +52,8 @@ def _validate_build_identity() -> str:
 def _validate_contract_manifest() -> None:
     manifest = ti.validate_runtime_contract(require_native_manifest=True)
     schemas = manifest["schemas"]
-    if schemas["dynamic_work"] != ti.graph.dynamic_work_capabilities()[
-        "schema_version"
-    ]:
-        raise RuntimeError(
-            "installed dynamic-work capability disagrees with its contract manifest"
-        )
+    if schemas["dynamic_work"] != ti.graph.dynamic_work_capabilities()["schema_version"]:
+        raise RuntimeError("installed dynamic-work capability disagrees with its contract manifest")
     _checkpoint(
         "runtime contract manifest: passed "
         f"(ABI {manifest['native_abi_revision']}, "
@@ -84,18 +80,10 @@ def _validate_cudart_belongs_to_runtime_package(path: Path) -> None:
     candidate_roots = []
     for package_dir in _runtime_package_dirs():
         candidate_roots.append(package_dir)
-        candidate_roots.append(
-            package_dir.parent / f"{package_dir.name}.libs"
-        )
+        candidate_roots.append(package_dir.parent / f"{package_dir.name}.libs")
     resolved = path.resolve()
-    if not any(
-        root.is_dir() and _is_relative_to(resolved, root.resolve())
-        for root in candidate_roots
-    ):
-        raise RuntimeError(
-            "bundled CUDART was not loaded from taichi-forge-runtime: "
-            f"{resolved}"
-        )
+    if not any(root.is_dir() and _is_relative_to(resolved, root.resolve()) for root in candidate_roots):
+        raise RuntimeError("bundled CUDART was not loaded from taichi-forge-runtime: " f"{resolved}")
 
 
 def _packaged_cuda_runtime_major(path: Path) -> int:
@@ -108,9 +96,7 @@ def _packaged_cuda_runtime_major(path: Path) -> int:
             name,
         )
     else:
-        raise RuntimeError(
-            f"unsupported platform for bundled CUDART validation: {platform.system()}"
-        )
+        raise RuntimeError(f"unsupported platform for bundled CUDART validation: {platform.system()}")
     if match is None:
         raise RuntimeError(f"unrecognized bundled CUDART name: {path.name}")
     return int(match.group(1))
@@ -139,10 +125,7 @@ def _validate_packaged_cuda_runtime() -> tuple[Path | None, int | None]:
     if not candidate:
         stray = _packaged_cudart_candidates()
         if stray:
-            raise RuntimeError(
-                "installed driver-only runtime contains undiscovered CUDART: "
-                f"{stray}"
-            )
+            raise RuntimeError("installed driver-only runtime contains undiscovered CUDART: " f"{stray}")
         return None, None
     path = Path(candidate)
     if not path.is_file():
@@ -150,20 +133,15 @@ def _validate_packaged_cuda_runtime() -> tuple[Path | None, int | None]:
     _validate_cudart_belongs_to_runtime_package(path)
 
     major = _packaged_cuda_runtime_major(path)
-    declared_major = os.environ.get(
-        "TI_CUDA_CUB_SORT_BUNDLED_CUDART_MAJOR", ""
-    )
+    declared_major = os.environ.get("TI_CUDA_CUB_SORT_BUNDLED_CUDART_MAJOR", "")
     if declared_major:
         try:
             declared_major_value = int(declared_major)
         except ValueError as exc:
-            raise RuntimeError(
-                f"invalid bundled CUDART manifest major: {declared_major!r}"
-            ) from exc
+            raise RuntimeError(f"invalid bundled CUDART manifest major: {declared_major!r}") from exc
         if declared_major_value != major:
             raise RuntimeError(
-                "bundled CUDART manifest/library mismatch: "
-                f"manifest={declared_major_value}, library={path.name}"
+                "bundled CUDART manifest/library mismatch: " f"manifest={declared_major_value}, library={path.name}"
             )
     return path, major
 
@@ -185,9 +163,7 @@ def _validate_cpu_native_ad() -> None:
             loss[None] += values[i]
 
     with ti.ad.Tape(loss):
-        ti.algorithms.experimental_transform(
-            x, y, scale=2.5, bias=1.0, method="cpu_native"
-        )
+        ti.algorithms.experimental_transform(x, y, scale=2.5, bias=1.0, method="cpu_native")
         sum_output(y)
 
     _checkpoint("cpu native AD: forward and backward passed")
@@ -251,14 +227,10 @@ def _validate_cpu_dynamic_workload() -> None:
     worklist.commit_next()
     snapshot = worklist.snapshot()
     if snapshot.extent.count != capacity or not snapshot.extent.overflow:
-        raise RuntimeError(
-            "DeviceWorklist did not clamp and report an overflowing producer"
-        )
+        raise RuntimeError("DeviceWorklist did not clamp and report an overflowing producer")
 
     graph_args = worklist.graph_args("wheel_worklist")
-    output_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "wheel_worklist_output", ti.i32, ndim=1
-    )
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "wheel_worklist_output", ti.i32, ndim=1)
     builder = ti.graph.GraphBuilder()
     handle = builder.dispatch_bounded(
         consume_items,
@@ -281,9 +253,7 @@ def _validate_cpu_dynamic_workload() -> None:
     np.testing.assert_array_equal(np.sort(output.to_numpy()), expected)
     report = worklist.execution_report(handle)
     if report.useful_count != capacity or report.executed_count != capacity:
-        raise RuntimeError(
-            "bounded DeviceWorklist consumer reported inconsistent execution"
-        )
+        raise RuntimeError("bounded DeviceWorklist consumer reported inconsistent execution")
     ti.reset()
     _checkpoint("cpu dynamic workload: passed")
 
@@ -291,9 +261,7 @@ def _validate_cpu_dynamic_workload() -> None:
 def _validate_cpu_field_roundtrips() -> None:
     """Exercise field addressing and readback through an installed wheel."""
 
-    with tempfile.TemporaryDirectory(
-        prefix="taichi-forge-wheel-cache-"
-    ) as cache_dir:
+    with tempfile.TemporaryDirectory(prefix="taichi-forge-wheel-cache-") as cache_dir:
         for threads, offline_cache in ((1, False), (0, True)):
             mode = f"threads={threads or 'default'}, offline_cache={offline_cache}"
             _checkpoint(f"cpu field roundtrip ({mode}): init")
@@ -353,12 +321,8 @@ def _validate_cpu_field_roundtrips() -> None:
             assert scalar64[None] == np.float64(7.5)
             assert one32[0] == np.float32(-2.0)
             _checkpoint(f"cpu field roundtrip ({mode}): scalar access passed")
-            expected_return = (
-                7.5 + 3.25 - 2.0 + expected32.sum() + expected64.sum()
-            )
-            np.testing.assert_allclose(
-                read_fields(), expected_return, rtol=0, atol=1e-12
-            )
+            expected_return = 7.5 + 3.25 - 2.0 + expected32.sum() + expected64.sum()
+            np.testing.assert_allclose(read_fields(), expected_return, rtol=0, atol=1e-12)
             _checkpoint(f"cpu field roundtrip ({mode}): kernel read passed")
 
             replacement32 = np.linspace(-3.0, 3.0, 7, dtype=np.float32)
@@ -374,12 +338,8 @@ def _validate_cpu_field_roundtrips() -> None:
             reduce_f64()
             _checkpoint(f"cpu field roundtrip ({mode}): f64 reductions passed")
             expected_sum = replacement64.sum(dtype=np.float64)
-            np.testing.assert_allclose(
-                serial64[None], expected_sum, rtol=0, atol=1e-12
-            )
-            np.testing.assert_allclose(
-                atomic64[None], expected_sum, rtol=0, atol=1e-12
-            )
+            np.testing.assert_allclose(serial64[None], expected_sum, rtol=0, atol=1e-12)
+            np.testing.assert_allclose(atomic64[None], expected_sum, rtol=0, atol=1e-12)
             ti.reset()
             _checkpoint(f"cpu field roundtrip ({mode}): reset passed")
 

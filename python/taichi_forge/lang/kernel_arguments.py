@@ -34,17 +34,11 @@ class SparseMatrixEntry:
             )
 
             if op == "Add":
-                insert_triplet_i32_storage(
-                    self.ptr, self.i, self.j, ops.cast(value, self.dtype)
-                )
+                insert_triplet_i32_storage(self.ptr, self.i, self.j, ops.cast(value, self.dtype))
             elif op == "Sub":
-                insert_triplet_i32_storage(
-                    self.ptr, self.i, self.j, -ops.cast(value, self.dtype)
-                )
+                insert_triplet_i32_storage(self.ptr, self.i, self.j, -ops.cast(value, self.dtype))
             else:
-                assert False, (
-                    "Only operations '+=' and '-=' are supported on sparse matrices."
-                )
+                assert False, "Only operations '+=' and '-=' are supported on sparse matrices."
             return
         call_func = f"insert_triplet_{self.dtype}"
         if op == "Add":
