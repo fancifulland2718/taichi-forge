@@ -8997,6 +8997,14 @@ class _GraphSpec:
                     seen_lifetime_leases.add(identity)
                     lifetime_leases.append(lease)
         self.lifetime_leases = tuple(lifetime_leases)
+        self.native_execution_observer_leases = tuple(
+            lease
+            for lease in self.lifetime_leases
+            if getattr(lease, "_record_synchronous_graph_execution", None)
+            is not None
+            or getattr(lease, "_begin_graph_submission_observation", None)
+            is not None
+        )
         self.derived_runtime_arg_names = frozenset().union(
             *(
                 getattr(node, "derived_runtime_arg_names", frozenset())
@@ -9064,6 +9072,30 @@ class _GraphSpec:
                     seen.add(identity)
                     owners.append(owner)
         return tuple(owners)
+
+    def record_synchronous_native_execution(self):
+        """Notify opt-in native leases after one successful synchronous run."""
+
+        for lease in self.native_execution_observer_leases:
+            record = getattr(lease, "_record_synchronous_graph_execution", None)
+            if record is not None:
+                record()
+
+    def begin_native_submission_observations(self, completion):
+        """Create ticket-owned observations for opt-in native leases."""
+
+        observations = []
+        for lease in self.native_execution_observer_leases:
+            begin = getattr(lease, "_begin_graph_submission_observation", None)
+            if begin is not None:
+                observation = begin()
+                if observation is not None:
+                    observations.append(observation)
+        if not completion.has_backend_work:
+            for observation in observations:
+                observation._observe_graph_completion()
+            return ()
+        return tuple(observations)
 
     def prepare_runtime_args(
         self, args, temporaries=None, fixed_runtime_args=None
@@ -12173,6 +12205,7 @@ class SubmissionTicket:
     __slots__ = (
         "_admission",
         "_completion",
+        "_completion_observations",
         "_observation",
         "_runtime",
         "_submission_owners",
@@ -12189,14 +12222,24 @@ class SubmissionTicket:
         telemetry=None,
         workspace_lane=0,
         submission_owners=(),
+        completion_observations=(),
     ):
         self._admission = admission
         self._completion = completion
+        self._completion_observations = tuple(completion_observations)
         self._observation = observation
         self._runtime = runtime
         self._submission_owners = tuple(submission_owners)
         self._telemetry = telemetry
         self._workspace_lane = int(workspace_lane)
+
+    def _observe_completion(self):
+        observations = self._completion_observations
+        if not observations:
+            return
+        self._completion_observations = ()
+        for observation in observations:
+            observation._observe_graph_completion()
 
     def done(self):
         if self._admission is None:
@@ -12204,6 +12247,7 @@ class SubmissionTicket:
         else:
             ready = self._admission._completion_done(self._completion)
         if ready:
+            self._observe_completion()
             self._runtime.release_runtime_submission_owner(self._completion)
             self._submission_owners = ()
         return ready
@@ -12213,6 +12257,7 @@ class SubmissionTicket:
             self._completion.wait()
         else:
             self._admission._completion_wait(self._completion)
+        self._observe_completion()
         self._runtime.release_runtime_submission_owner(self._completion)
         self._submission_owners = ()
 
@@ -12252,6 +12297,13 @@ class SubmissionTicket:
         return self._completion.has_backend_work
 
     def __del__(self):
+        observations = getattr(self, "_completion_observations", ())
+        if observations:
+            try:
+                if self._completion.done():
+                    self._observe_completion()
+            except Exception:
+                pass
         observation = getattr(self, "_observation", None)
         if observation is not None:
             try:
@@ -12308,6 +12360,9 @@ class Graph:
         )
         self._contains_structured_while_value = self._spec.structured_while_count > 0
         self._contains_observations_value = self._spec.observation_count > 0
+        self._has_native_execution_observers = bool(
+            self._spec.native_execution_observer_leases
+        )
         self._last_observations = {}
         self._latest_control_flow_was_async = False
         self._submission_lane = _new_submission_lane("graph")
@@ -12594,6 +12649,8 @@ class Graph:
                         self._run_impl(prepared)
                     else:
                         self._instance.run_traced(prepared, trace_recorder)
+                    if self._has_native_execution_observers:
+                        self._spec.record_synchronous_native_execution()
                     self._latest_control_flow_was_async = False
                     if observation_lease is not None:
                         self._last_observations = observation_lease.materialize()
@@ -12667,6 +12724,7 @@ class Graph:
         telemetry_lease = None
         telemetry_state = None
         submission_owners = ()
+        completion_observations = ()
         submission_instance = self._instance
         workspace_lane_index = 0
         try:
@@ -12816,6 +12874,10 @@ class Graph:
             raise
         if admission is not None:
             admission._attach(completion)
+        if self._has_native_execution_observers:
+            completion_observations = (
+                self._spec.begin_native_submission_observations(completion)
+            )
         return SubmissionTicket(
             completion,
             runtime,
@@ -12824,6 +12886,7 @@ class Graph:
             telemetry=telemetry_state,
             workspace_lane=workspace_lane_index,
             submission_owners=submission_owners,
+            completion_observations=completion_observations,
         )
 
     def _workspace_pool_for_current_runtime(self):

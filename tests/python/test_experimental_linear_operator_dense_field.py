@@ -357,6 +357,9 @@ def test_solve_plan_complete_graph_action_terminal_and_workspace(method):
     builder = ti.graph.GraphBuilder()
     builder.append_native(action)
     graph = builder.compile()
+    initial_action_stats = action.statistics()
+    assert initial_action_stats["compiled_executables"] == 1
+    assert initial_action_stats["enclosing_graph_submissions"] == 0
 
     rhs = ti.ndarray(ti.f32, shape=size)
     output = ti.ndarray(ti.f32, shape=size)
@@ -371,9 +374,18 @@ def test_solve_plan_complete_graph_action_terminal_and_workspace(method):
         },
         telemetry=True,
     )
+    submitted_stats = action.statistics()
+    assert submitted_stats["enclosing_graph_submissions"] == 1
+    if impl.current_cfg().arch == ti.cpu:
+        assert submitted_stats["observed_completions"] == 1
+    else:
+        assert submitted_stats["observed_completions"] in (0, 1)
     ticket.wait()
+    ticket.wait()
+    assert action.statistics()["observed_completions"] == 1
 
     snapshot = packet.snapshot()
+    assert packet.snapshot() == snapshot
     assert snapshot.converged
     assert snapshot.iterations == 1
     assert snapshot.residual_norm == pytest.approx(0.0, abs=1e-7)
@@ -387,6 +399,71 @@ def test_solve_plan_complete_graph_action_terminal_and_workspace(method):
     )
     assert telemetry.regions[0].logical_invocations == 1
     assert telemetry.regions[0].logical_iterations == 1
+    action_stats = action.statistics()
+    assert action_stats["terminal_snapshots"] == 1
+    assert action_stats["terminal_iteration_sum"] == 1
+    plan_stats = plan.graph_action_statistics()
+    assert plan_stats["actions_created"] == 1
+    assert plan_stats["enclosing_graph_submissions"] == 1
+    assert plan_stats["observed_completions"] == 1
+    assert plan_stats["terminal_snapshots"] == 1
+    assert plan.statistics()["graph_actions"] == plan_stats
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_solve_plan_graph_action_attributes_synchronous_graph_run():
+    size = 8
+    plan = ti.linalg.experimental.SolvePlan(
+        _compiled_identity(size), method="cg", max_iterations=4, atol=1e-6
+    )
+    rhs_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "sync_rhs", ti.f32, ndim=1)
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "sync_output", ti.f32, ndim=1
+    )
+    action = plan.graph_action(rhs_arg, output_arg, name="sync_recorded_cg")
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(action)
+    graph = builder.compile()
+    rhs = ti.ndarray(ti.f32, shape=size)
+    output = ti.ndarray(ti.f32, shape=size)
+    rhs.from_numpy(np.arange(size, dtype=np.float32) + 1)
+    packet = action.allocate_terminal()
+
+    graph.run(
+        {
+            "sync_rhs": rhs,
+            "sync_output": output,
+            **packet.arguments,
+        }
+    )
+
+    before_snapshot = action.statistics()
+    assert before_snapshot["enclosing_graph_submissions"] == 1
+    assert before_snapshot["observed_completions"] == 1
+    assert before_snapshot["terminal_snapshots"] == 0
+    assert packet.snapshot().converged
+    after_snapshot = action.statistics()
+    assert after_snapshot["terminal_snapshots"] == 1
+    assert after_snapshot["terminal_iteration_sum"] == 1
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_solve_plan_graph_action_statistics_reject_stale_runtime():
+    size = 4
+    plan = ti.linalg.experimental.SolvePlan(
+        _compiled_identity(size), method="cg", max_iterations=2, atol=1e-6
+    )
+    rhs_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "stale_rhs", ti.f32, ndim=1)
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "stale_output", ti.f32, ndim=1
+    )
+    plan.graph_action(rhs_arg, output_arg)
+
+    ti.reset()
+    ti.init(arch=ti.cpu)
+
+    with pytest.raises(ti.TaichiRuntimeError, match="after ti.reset"):
+        plan.graph_action_statistics()
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
@@ -851,6 +928,12 @@ def test_solve_plan_graph_action_runs_inside_nested_single_ticket_loop():
         3,
         1,
     )
+    action_stats = action.statistics()
+    assert action_stats["enclosing_graph_submissions"] == 1
+    assert action_stats["observed_completions"] == 1
+    assert action_stats["terminal_snapshots"] == 1
+    assert action_stats["terminal_iteration_sum"] == 1
+    assert action_stats["terminal_scope"] == "last_action_invocation_in_packet"
     np.testing.assert_allclose(storage.to_numpy()[28 : 28 + size], expected, rtol=1e-6)
     memory = graph.execution_stats().memory
     assert memory.internal_storage_exclusive

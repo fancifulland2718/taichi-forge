@@ -164,6 +164,64 @@ class SolveResult:
     breakdown_reason: str
 
 
+class _SolvePlanGraphActionRecord:
+    """Host telemetry at enclosing-Graph and explicit terminal boundaries."""
+
+    def __init__(self, *, serial, name, method):
+        self._lock = threading.Lock()
+        self._serial = int(serial)
+        self._name = name
+        self._method = method
+        self._compiled_executables = 0
+        self._enclosing_submissions = 0
+        self._observed_completions = 0
+        self._terminal_snapshots = 0
+        self._terminal_iteration_sum = 0
+        self._last_terminal_iterations = None
+        self._last_terminal_status = "not_materialized"
+
+    def record_compiled(self):
+        with self._lock:
+            self._compiled_executables += 1
+
+    def begin_submission(self):
+        with self._lock:
+            self._enclosing_submissions += 1
+        return self
+
+    def record_synchronous_execution(self):
+        with self._lock:
+            self._enclosing_submissions += 1
+            self._observed_completions += 1
+
+    def _observe_graph_completion(self):
+        with self._lock:
+            self._observed_completions += 1
+
+    def record_terminal_snapshot(self, snapshot):
+        with self._lock:
+            self._terminal_snapshots += 1
+            self._terminal_iteration_sum += int(snapshot.iterations)
+            self._last_terminal_iterations = int(snapshot.iterations)
+            self._last_terminal_status = snapshot.termination_reason
+
+    def statistics(self):
+        with self._lock:
+            return {
+                "serial": self._serial,
+                "name": self._name,
+                "method": self._method,
+                "compiled_executables": self._compiled_executables,
+                "enclosing_graph_submissions": self._enclosing_submissions,
+                "observed_completions": self._observed_completions,
+                "terminal_snapshots": self._terminal_snapshots,
+                "terminal_iteration_sum": self._terminal_iteration_sum,
+                "last_terminal_iterations": self._last_terminal_iterations,
+                "last_terminal_status": self._last_terminal_status,
+                "terminal_scope": "last_action_invocation_in_packet",
+            }
+
+
 class _CompletedSolvePlanTicket:
     __slots__ = ()
 
@@ -325,9 +383,12 @@ class SolveGraphTerminalPacket:
 
     def __init__(self, terminal, *, initialize=True):
         self._terminal = terminal
+        self._action_record = terminal._action_record
         self._program = _current_program()
         self._submission_ticket = None
         self._initialized = bool(initialize)
+        self._snapshot_recorded = False
+        self._snapshot_lock = threading.Lock()
         self.state = ScalarNdarray(i32, (4,))
         self.metrics = ScalarNdarray(f32, (4,))
         if initialize:
@@ -353,46 +414,51 @@ class SolveGraphTerminalPacket:
     def snapshot(self):
         """Read a completed packet; call after its SubmissionTicket completes."""
 
-        if self._program is not _current_program():
-            raise TaichiRuntimeError(
-                "Solve Graph terminal packet belongs to another runtime"
+        with self._snapshot_lock:
+            if self._program is not _current_program():
+                raise TaichiRuntimeError(
+                    "Solve Graph terminal packet belongs to another runtime"
+                )
+            if not self._initialized and self._submission_ticket is None:
+                raise TaichiRuntimeError(
+                    "Solve Graph terminal packet has not been submitted"
+                )
+            state = np.asarray(self.state.to_numpy(), dtype=np.int32)
+            metrics = np.asarray(self.metrics.to_numpy(), dtype=np.float32)
+            if int(state[3]) != 1:
+                raise TaichiRuntimeError(
+                    "Solve Graph terminal packet has not been completed"
+                )
+            status = int(state[0])
+            if status == 2:
+                reason = "converged"
+            elif status == 1:
+                reason = "breakdown"
+            elif status == 0:
+                reason = "max_iterations"
+            else:
+                raise TaichiRuntimeError(
+                    f"Solve Graph terminal packet has invalid status {status}"
+                )
+            snapshot = SolveGraphTerminalSnapshot(
+                status_code=status,
+                termination_reason=reason,
+                converged=status == 2,
+                breakdown=status == 1,
+                reached_max_iterations=status == 0,
+                iterations=int(state[1]),
+                initial_residual_norm=math.sqrt(max(float(metrics[0]), 0.0)),
+                residual_norm=math.sqrt(max(float(metrics[1]), 0.0)),
+                relative_reference_norm=math.sqrt(max(float(metrics[2]), 0.0)),
+                effective_tolerance=math.sqrt(max(float(metrics[3]), 0.0)),
+                breakdown_reason=(
+                    "alpha_denominator" if int(state[2]) != 0 else "none"
+                ),
             )
-        if not self._initialized and self._submission_ticket is None:
-            raise TaichiRuntimeError(
-                "Solve Graph terminal packet has not been submitted"
-            )
-        state = np.asarray(self.state.to_numpy(), dtype=np.int32)
-        metrics = np.asarray(self.metrics.to_numpy(), dtype=np.float32)
-        if int(state[3]) != 1:
-            raise TaichiRuntimeError(
-                "Solve Graph terminal packet has not been completed"
-            )
-        status = int(state[0])
-        if status == 2:
-            reason = "converged"
-        elif status == 1:
-            reason = "breakdown"
-        elif status == 0:
-            reason = "max_iterations"
-        else:
-            raise TaichiRuntimeError(
-                f"Solve Graph terminal packet has invalid status {status}"
-            )
-        return SolveGraphTerminalSnapshot(
-            status_code=status,
-            termination_reason=reason,
-            converged=status == 2,
-            breakdown=status == 1,
-            reached_max_iterations=status == 0,
-            iterations=int(state[1]),
-            initial_residual_norm=math.sqrt(max(float(metrics[0]), 0.0)),
-            residual_norm=math.sqrt(max(float(metrics[1]), 0.0)),
-            relative_reference_norm=math.sqrt(max(float(metrics[2]), 0.0)),
-            effective_tolerance=math.sqrt(max(float(metrics[3]), 0.0)),
-            breakdown_reason=(
-                "alpha_denominator" if int(state[2]) != 0 else "none"
-            ),
-        )
+            if self._action_record is not None and not self._snapshot_recorded:
+                self._action_record.record_terminal_snapshot(snapshot)
+                self._snapshot_recorded = True
+            return snapshot
 
     def _attach_submission(self, ticket):
         if self._submission_ticket is not None:
@@ -405,11 +471,12 @@ class SolveGraphTerminalPacket:
 class SolveGraphTerminal:
     """Symbolic, device-resident terminal state for one SolvePlan action."""
 
-    def __init__(self, state_name, metrics_name):
+    def __init__(self, state_name, metrics_name, *, action_record=None):
         from taichi_forge.graph._graph import Arg, ArgKind
 
         self.state = Arg(ArgKind.NDARRAY, state_name, i32, ndim=1)
         self.metrics = Arg(ArgKind.NDARRAY, metrics_name, f32, ndim=1)
+        self._action_record = action_record
 
     def allocate(self, *, initialize=True):
         """Allocate one independently submitable runtime terminal packet."""
@@ -4724,6 +4791,7 @@ class _SolvePlanGraphExecutable(NativeGraphExecutable):
         output_arg,
         initial_arg,
         terminal,
+        action_record,
         *,
         name,
     ):
@@ -4759,6 +4827,7 @@ class _SolvePlanGraphExecutable(NativeGraphExecutable):
             None if initial_arg is None else initial_arg.name
         )
         self._terminal = terminal
+        self._action_record = action_record
         self._name = name
         self._expected_operator_stamp = tuple(
             plan.operator._handle._resource_stamp()
@@ -4800,6 +4869,13 @@ class _SolvePlanGraphExecutable(NativeGraphExecutable):
             private_prefix=private_prefix,
             name=name,
         )
+        self._action_record.record_compiled()
+
+    def _begin_graph_submission_observation(self):
+        return self._action_record.begin_submission()
+
+    def _record_synchronous_graph_execution(self):
+        self._action_record.record_synchronous_execution()
 
     @property
     def runtime_arg_schema(self):
@@ -4969,6 +5045,7 @@ class _SolvePlanGraphNode(NativeGraphNode):
         output_arg,
         initial_arg,
         terminal,
+        action_record,
         *,
         name,
     ):
@@ -4978,10 +5055,16 @@ class _SolvePlanGraphNode(NativeGraphNode):
         self._output_arg = output_arg
         self._initial_arg = initial_arg
         self.terminal = terminal
+        self._action_record = action_record
         self.name = name
 
     def allocate_terminal(self, *, initialize=True):
         return self.terminal.allocate(initialize=initialize)
+
+    def statistics(self):
+        """Return execution attribution for this recorded solve action."""
+
+        return self._action_record.statistics()
 
     def compile(self):
         return _SolvePlanGraphExecutable(
@@ -4991,6 +5074,7 @@ class _SolvePlanGraphNode(NativeGraphNode):
             self._output_arg,
             self._initial_arg,
             self.terminal,
+            self._action_record,
             name=self.name,
         )
 
@@ -5154,6 +5238,7 @@ class SolvePlan:
         self._graph_krylov_binding_cache = {}
         self._graph_action_solver = None
         self._graph_action_serial = 0
+        self._graph_action_records = []
         self._submission_lock = threading.RLock()
         self._submission_graphs = {}
         self._submission_graph_builds = 0
@@ -5174,6 +5259,7 @@ class SolvePlan:
         self._graph_krylov_last_direct_field_boundary = False
         self._graph_krylov_binding_cache = None
         self._graph_action_solver = None
+        self._graph_action_records = None
         self._submission_graphs = None
         self._native_preconditioner = None
         self._vector_io = None
@@ -6358,10 +6444,17 @@ class SolvePlan:
                 )
         serial = self._graph_action_serial
         self._graph_action_serial += 1
+        action_record = _SolvePlanGraphActionRecord(
+            serial=serial,
+            name=name,
+            method=self.method,
+        )
+        self._graph_action_records.append(action_record)
         terminal_prefix = f"__solve_terminal_{id(self):x}_{serial}"
         terminal = SolveGraphTerminal(
             f"{terminal_prefix}_state",
             f"{terminal_prefix}_metrics",
+            action_record=action_record,
         )
         return _SolvePlanGraphNode(
             self,
@@ -6370,6 +6463,7 @@ class SolvePlan:
             output,
             initial_guess,
             terminal,
+            action_record,
             name=name,
         )
 
@@ -6818,6 +6912,45 @@ class SolvePlan:
         )
         return result
 
+    def graph_action_statistics(self):
+        """Return telemetry owned by complete recorded SolvePlan actions.
+
+        Submission counters describe enclosing Graph invocations. Completion
+        counters advance only when a ticket completion is observed, and
+        terminal iteration counters advance only at explicit packet snapshot
+        boundaries. No terminal readback is performed by this method.
+        """
+
+        if self.operator is None or self._graph_action_records is None:
+            raise TaichiRuntimeError(
+                "SolvePlan cannot be used after ti.reset()"
+            )
+        actions = tuple(
+            record.statistics() for record in self._graph_action_records
+        )
+        return {
+            "schema_version": 1,
+            "actions_created": len(actions),
+            "compiled_executables": sum(
+                item["compiled_executables"] for item in actions
+            ),
+            "enclosing_graph_submissions": sum(
+                item["enclosing_graph_submissions"] for item in actions
+            ),
+            "observed_completions": sum(
+                item["observed_completions"] for item in actions
+            ),
+            "terminal_snapshots": sum(
+                item["terminal_snapshots"] for item in actions
+            ),
+            "terminal_iteration_sum": sum(
+                item["terminal_iteration_sum"] for item in actions
+            ),
+            "completion_semantics": "ticket_observed_without_terminal_readback",
+            "terminal_scope": "last_action_invocation_in_packet",
+            "actions": actions,
+        }
+
     def statistics(self):
         """Returns backend-neutral plan resource and operation telemetry."""
         if self.operator is None or self._solver is None:
@@ -6883,6 +7016,7 @@ class SolvePlan:
         }
         result["vector_io"] = self._vector_io.statistics()
         result["submission"] = self.submission_statistics()
+        result["graph_actions"] = self.graph_action_statistics()
         result["execution_capabilities"] = self.execution_capabilities()
         return result
 
