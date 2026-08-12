@@ -148,6 +148,7 @@ struct CudaGraphBoundedProbeResult {
   std::uint32_t external_update_visited{0};
   std::uint32_t external_reset_visited{0};
   std::uint32_t partial_failure_visited{0};
+  std::uint32_t transient_retries{0};
   std::string reason{"not_attempted"};
 };
 

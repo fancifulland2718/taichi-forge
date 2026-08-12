@@ -395,6 +395,7 @@ void export_misc(py::module &m) {
     result["probe_external_reset_visited"] = probe.external_reset_visited;
     result["probe_partial_failure_visited"] =
         probe.partial_failure_visited;
+    result["probe_transient_retries"] = probe.transient_retries;
     result["probe_reason"] = probe.reason;
     std::string unavailable_reason = "none";
     if (!driver_loaded) {
@@ -439,6 +440,7 @@ void export_misc(py::module &m) {
     result["probe_external_update_visited"] = 0;
     result["probe_external_reset_visited"] = 0;
     result["probe_partial_failure_visited"] = 0;
+    result["probe_transient_retries"] = 0;
     result["probe_reason"] = "cuda_backend_not_compiled";
     result["unavailable_reason"] = "cuda_backend_not_compiled";
 #endif

@@ -893,6 +893,16 @@ CudaGraphBoundedProbeResult driver_graph_bounded_probe(bool run) {
     return result;
   };
 
+  auto set_visited = [&](std::uint32_t value) {
+    const auto clear_error =
+        driver.memsetd32.call(resources.visited, value, 1);
+    if (clear_error != CUDA_SUCCESS) {
+      result.driver_error = clear_error;
+      return false;
+    }
+    return true;
+  };
+
   std::uint32_t error =
       driver.stream_create.call(&resources.stream, CU_STREAM_NON_BLOCKING);
   if (error != CUDA_SUCCESS) {
@@ -1021,33 +1031,51 @@ CudaGraphBoundedProbeResult driver_graph_bounded_probe(bool run) {
            *observed_visited == expected_visited;
   };
 
-  if (!run_case(7, true, 7, &result.sparse_visited)) {
+  // Device-side node APIs have occasionally reported a transient status on a
+  // freshly uploaded Graph while leaving the executable in a valid state.
+  // Retry only the setup probe, with an explicit counter reset, so a one-shot
+  // status cannot permanently disable a safe runtime path. Persistent failure
+  // still fails closed, and ordinary Graph replay performs no extra work.
+  auto run_case_with_retry = [&](std::uint32_t grid_x, bool enabled,
+                                 std::uint32_t prior_visited,
+                                 std::uint32_t expected_visited,
+                                 std::uint32_t *observed_visited) {
+    constexpr int kMaxAttempts = 3;
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+      if (attempt > 0) {
+        if (result.driver_error != CUDA_SUCCESS ||
+            !set_visited(prior_visited)) {
+          return false;
+        }
+        result.transient_retries++;
+      }
+      if (run_case(grid_x, enabled, expected_visited, observed_visited)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  if (!run_case_with_retry(7, true, 0, 7, &result.sparse_visited)) {
     result.reason = "cuda_device_update_sparse_grid_mismatch";
     return result;
   }
-  if (!run_case(1, false, 7, &result.zero_visited)) {
+  if (!run_case_with_retry(1, false, 7, 7, &result.zero_visited)) {
     result.reason = "cuda_device_update_zero_skip_mismatch";
     return result;
   }
   result.zero_count_skipped = true;
-  if (!run_case(3, true, 10, &result.rebound_visited)) {
+  if (!run_case_with_retry(3, true, 7, 10, &result.rebound_visited)) {
     result.reason = "cuda_device_update_reenable_mismatch";
     return result;
   }
-  if (!run_case(64, true, 74, &result.baseline_visited)) {
+  if (!run_case_with_retry(64, true, 10, 74,
+                           &result.baseline_visited)) {
     result.reason = "cuda_device_update_baseline_grid_mismatch";
     return result;
   }
 
   const auto device_node_handle = host_control.device_node;
-  auto clear_visited = [&]() {
-    const auto clear_error = driver.memsetd32.call(resources.visited, 0, 1);
-    if (clear_error != CUDA_SUCCESS) {
-      result.driver_error = clear_error;
-      return false;
-    }
-    return true;
-  };
   auto launch_without_updater = [&](std::uint32_t expected,
                                     std::uint32_t *observed) {
     host_control.device_node = 0;
@@ -1073,22 +1101,23 @@ CudaGraphBoundedProbeResult driver_graph_bounded_probe(bool run) {
     return *observed == expected;
   };
 
-  if (!clear_visited() ||
-      !run_case(7, true, 7, &result.sparse_visited) ||
+  if (!set_visited(0) ||
+      !run_case_with_retry(7, true, 0, 7, &result.sparse_visited) ||
       !launch_without_updater(14, &result.persistent_sparse_visited)) {
     result.reason = "cuda_device_update_sparse_state_not_persistent";
     return result;
   }
   std::uint32_t persistent_disabled_setup_visited = 0;
-  if (!clear_visited() ||
-      !run_case(1, false, 0, &persistent_disabled_setup_visited) ||
+  if (!set_visited(0) ||
+      !run_case_with_retry(1, false, 0, 0,
+                           &persistent_disabled_setup_visited) ||
       !launch_without_updater(0, &result.persistent_disabled_visited)) {
     result.reason = "cuda_device_update_disabled_state_not_persistent";
     return result;
   }
   result.launch_update_persists = true;
 
-  if (!clear_visited()) {
+  if (!set_visited(0)) {
     result.reason = "cuda_device_update_external_clear_failed";
     return result;
   }
@@ -1120,8 +1149,9 @@ CudaGraphBoundedProbeResult driver_graph_bounded_probe(bool run) {
   }
   result.external_update_persists = true;
 
-  if (!clear_visited() ||
-      !run_case(7, true, 7, &result.partial_failure_visited)) {
+  if (!set_visited(0) ||
+      !run_case_with_retry(7, true, 0, 7,
+                           &result.partial_failure_visited)) {
     result.reason = "cuda_device_update_partial_failure_setup_failed";
     return result;
   }

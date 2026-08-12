@@ -597,6 +597,7 @@ def test_cuda_bounded_execution_stats_observe_physical_launch_position(
 def test_cuda_bounded_device_update_driver_probe():
     probe = dict(ti_core.cuda_bounded_dispatch_probe())
     assert probe["setup_probe_attempted"]
+    assert 0 <= probe["probe_transient_retries"] <= 14
     if probe["driver_version_eligible"] and probe["required_symbols_loaded"]:
         assert probe["device_update_ptx_compiled"]
         assert probe["device_update_ptx_linked"]

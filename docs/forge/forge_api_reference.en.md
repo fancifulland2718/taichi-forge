@@ -1339,6 +1339,13 @@ the counters is a synchronization point; ordinary replay does not perform a
 host readback. Rebinding starts a new control epoch, so counters do not combine
 different extent allocations. This changes no public resource ownership.
 
+The CUDA 12.4+ qualification probe is a setup-only safety gate. It permits at
+most two bounded retries when a freshly uploaded Graph returns a transient
+device-node status without a driver error, restoring the probe counter before
+each attempt. `probe_transient_retries` exposes that event. Persistent status
+or driver failures still reject the adaptive route; ordinary replay does not
+inherit probe retries, clock reads, or host synchronization.
+
 `ti.graph.dynamic_work_capabilities()` returns a schema-v5 report that keeps
 the count owner, bounded launch, structured iteration termination, worklist,
 and ticket observation as separate axes. The worklist section reports append

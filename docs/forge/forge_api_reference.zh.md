@@ -1133,6 +1133,11 @@ group、grouped payload、control bytes 与 last-driver-error。调用 `Graph.ex
 replay 不做 host readback；rebind 会开始新的 control epoch，不混合不同 extent allocation 的
 计数。以上均不改变公共资源所有权。
 
+CUDA 12.4+ qualification probe 是仅在 setup 执行的安全门。新上传 Graph 在没有 driver error
+时若返回瞬时 device-node status，probe 最多执行两次有界重试，并在每次尝试前恢复 probe
+counter；`probe_transient_retries` 会如实暴露该事件。持续 status 或 driver failure 仍会拒绝
+adaptive route；普通 replay 不会继承 probe retry、时钟读取或 host synchronization。
+
 `ti.graph.dynamic_work_capabilities()` 返回 schema-v5 report，把 count owner、bounded
 launch、structured iteration termination、worklist 与 ticket observation 分成独立维度。
 worklist 部分报告 append ordering、single-writer ownership、stable/deterministic transform、
