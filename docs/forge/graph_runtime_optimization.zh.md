@@ -6,8 +6,8 @@
 [Forge API 参考](forge_api_reference.zh.md)。
 静态 Field 功能合同单独维护在 [Dense Field Graph](dense_field_graph.zh.md)。
 
-Graph 基础现代化与 native node replay 模型首次发布于 Forge 0.4.1。本文描述当前源码
-（包括 0.6.0 之后待发布 API）的生命周期、后端 replay、结构化控制、诊断与 Dense Field
+Graph 基础现代化与 native node replay 模型首次发布于 Forge 0.4.1。本文描述当前 0.6.2
+源码（包括待发布 0.6.2 API）的生命周期、后端 replay、结构化控制、诊断与 Dense Field
 Graph 合同；各能力的
 首次公开版本见[版本更新说明](release_notes.zh.md)。
 
@@ -474,11 +474,17 @@ fallback 计数不足以证明优化成立。
 
 ## 诊断
 
-应使用稳定、冻结的 `Graph.execution_stats()` schema v5 report。它公开 definition count、
+应使用稳定、冻结的 `Graph.execution_stats()` schema v6 report。它公开 definition count、
 compiled task count、segment-local runtime argument、带 generation 的 static dependency、
 不含 pointer 的 layout fingerprint、execution/fallback path、replay eligibility、
 persistent argument bytes 与 immutable per-segment counter。应用代码不应读取内部
 `Graph._graph_stats` cache。
+
+每个 CGraph segment 还会公开 opt-in 的 `replay_attribution`，把 host preparation 拆为
+lifecycle/resource/CUDA/cache lock wait、稳定 binding lookup、resource retention、SNode
+validation、backend preparation 和 signature matching，并报告 cache hit/miss 与 SNode guard
+elision 次数。关闭时不读取时钟、不更新计数；GPU 纳秒不包含 payload 执行，CPU 的
+`backend_ns` 包含同步 kernel execution。
 
 report 可区分 capture/record、exact replay、patched replay、recapture、ordinary
 fallback、结构性拒绝、暂态失败、retry backoff、capture exception、native dispatch 与

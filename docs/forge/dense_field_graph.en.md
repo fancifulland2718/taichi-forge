@@ -3,7 +3,7 @@
 > First available in `0.5.0`; see [release notes](release_notes.en.md).
 
 Dense Field Graph first shipped in Taichi Forge `0.5.0`; this page describes
-the current `0.6.0` contract for compiling and
+the current `0.6.2` source contract for compiling and
 replaying kernels that either close over or receive dense `ti.field`, vector
 fields, and matrix fields as runtime arguments. Static Field bindings and
 runtime dense-storage bindings use the same public `ti.graph.GraphBuilder` API
@@ -190,25 +190,28 @@ heterogeneous engine
 This avoids one Graph per environment while preserving genuinely different
 layouts between blocks. Each data-oriented owner remains a distinct kernel
 specialization because its root bindings may differ. Forge does not merge
-arbitrary owners by pointer or cache-key tricks; a safe transparent merge would
-require a runtime Field-binding ABI.
+arbitrary closed-over owners by pointer or cache-key tricks. Compatible owners
+can instead use the runtime dense-Field binding ABI; converting unrelated
+closures into that ABI remains an explicit application choice rather than an
+automatic cache optimization.
 
-### Current 0.6.0 boundary
+### Current 0.6.2 source boundary
 
-Taichi Forge 0.6.0 keeps the block model above: applications may own and
+Current Taichi Forge keeps the block model above: applications may own and
 schedule independently compiled Graphs with different stable solver, layout,
 shape, or feature signatures, while each block batches homogeneous
 environments. Domain randomization stays inside a block when it preserves that
 signature; a signature-changing environment belongs in another precompiled
 Graph.
 
-Version 0.6.0 also permits an `ArgKind.NDARRAY` slot to bind different but
-compatible runtime dense Fields between invocations. That path revalidates the
-Program, SNodeTree generation, layout fingerprint, and byte range without
-copying the payload. Closed-over and `template_args` Fields remain static
-bindings. Version 0.6.0 does not provide a unified heterogeneous orchestration
-DSL, an automatic cross-block scheduler, structure-changing Field hot rebinding,
-or a cross-device dependency planner.
+An `ArgKind.NDARRAY` slot may bind different but compatible runtime dense Fields
+between invocations. Program, SNodeTree generation, layout fingerprint, and
+byte range are validated when the binding plan is created or rebound; every
+submission still reacquires generation-qualified ownership without copying the
+payload. Closed-over and `template_args` Fields remain static bindings. Mixed
+CGraph/native actions and structured control are available, but Forge does not
+provide an automatic cross-block environment scheduler, structure-changing
+Field hot rebinding, or a cross-device dependency planner.
 
 Persistent offline cache and deliberate prewarming can reduce repeated compile
 cost without weakening identity or lifetime checks.
@@ -233,10 +236,11 @@ Graph scheduling, or gradient contracts for Forge-native nodes.
 
 ## Diagnostics
 
-`Graph.execution_stats()` returns the stable schema-v1 report. Relevant fields
+`Graph.execution_stats()` returns the stable schema-v6 report. Relevant fields
 include segment definitions, compiled task count, generation-qualified static
 dependencies, pointer-free layout fingerprints, replay eligibility,
-execution/fallback path, persistent argument bytes, and immutable counters.
+execution/fallback path, persistent argument bytes, immutable counters, and
+opt-in host replay attribution.
 
 Do not use private `_graph_stats` storage as an application API. GPU memory,
 host RSS, graph/tree churn, and reset measurements are still needed because a

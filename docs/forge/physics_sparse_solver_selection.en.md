@@ -1,6 +1,6 @@
 # Choosing Sparse Operators and Solvers for Physics Workloads
 
-> Applies to **Taichi Forge 0.6.0**.
+> Applies to the current **Taichi Forge 0.6.2 source contract**.
 
 [中文版本](physics_sparse_solver_selection.zh.md)
 

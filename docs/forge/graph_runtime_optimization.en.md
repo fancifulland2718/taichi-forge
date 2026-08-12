@@ -9,9 +9,9 @@ The static-Field feature contract is maintained separately in
 [Dense Field Graph](dense_field_graph.en.md).
 
 The base Graph modernization and native-node replay model first shipped in
-Forge 0.4.1. This page describes the current source lifetime, backend replay,
-structured-control, diagnostics, and Dense Field Graph contracts, including
-Unreleased APIs after 0.6.0. See the
+Forge 0.4.1. This page describes the current 0.6.2 source lifetime, backend
+replay, structured-control, diagnostics, and Dense Field Graph contracts,
+including the unreleased 0.6.2 APIs. See the
 [release notes](release_notes.en.md) for the introduction version of each
 capability.
 
@@ -606,12 +606,20 @@ eliminating fallback counts alone is not a sufficient optimization result.
 
 ## Diagnostics
 
-Use the stable, frozen `Graph.execution_stats()` schema v5 report. It exposes
+Use the stable, frozen `Graph.execution_stats()` schema v6 report. It exposes
 definition counts, compiled task count, segment-local runtime arguments,
 generation-qualified static dependencies, a pointer-free layout fingerprint,
 execution/fallback path, replay eligibility, persistent argument bytes, and
 immutable per-segment counters. Application code should not read the internal
 `Graph._graph_stats` cache.
+
+Each CGraph segment also exposes opt-in `replay_attribution`. It attributes
+host preparation to lifecycle/resource/CUDA/cache lock wait, stable binding
+lookup, resource retention, SNode validation, backend preparation, and
+signature matching, together with cache hit/miss and SNode-guard elision
+counts. The disabled path performs no clock reads or counter updates, and the
+reported GPU nanoseconds exclude payload execution. CPU `backend_ns` includes
+synchronous kernel execution.
 
 The report distinguishes capture or record, exact replay, patched replay,
 recapture, ordinary fallback, structural rejection, transient failure, retry

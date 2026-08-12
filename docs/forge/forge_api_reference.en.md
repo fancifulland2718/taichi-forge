@@ -1,6 +1,6 @@
 # Taichi Forge API Reference
 
-> Applies to the **current Taichi Forge source after 0.6.0**. This page lists Forge-only public API
+> Applies to the **current Taichi Forge 0.6.2 source**. This page lists Forge-only public API
 > entry points. New options added to Taichi-compatible APIs, such as
 > `ti.init(...)` keywords and `@ti.kernel(...)` keyword options, stay in
 > [Forge options](forge_options.en.md).
@@ -1712,7 +1712,7 @@ required. Graphs and tickets from the old Program never become valid again.
 
 ### `Graph.execution_stats()`
 
-Returns a frozen `GraphExecutionReport` snapshot with schema version 5. The
+Returns a frozen `GraphExecutionReport` snapshot with schema version 6. The
 report is a stable public diagnostic API; do not consume `_graph_stats`
 directly in application code.
 
@@ -1735,6 +1735,14 @@ eligibility, fallback classification, retry state, and detailed counters.
 CUDA conditional replay additionally reports asynchronous control uploads,
 waits caused by the two-batch deferred-resource bound, and the peak number of
 deferred batches.
+
+Schema v6 adds `segment.replay_attribution`, an opt-in cumulative breakdown of
+cached CGraph host preparation. It separates SNode/resource/CUDA/cache lock
+wait, stable binding-plan lookup, resource retention, SNode validation,
+backend preparation, and argument-signature matching. It also reports binding
+plan and exact-signature hit/miss counts plus SNode lifecycle-guard
+acquisition/elision counts. GPU timers stop after host submission and exclude
+payload duration; CPU `backend_ns` includes synchronous kernel execution.
 
 Detailed GPU counters are opt-in. The first call enables them for later
 executions; if GPU work ran before opt-in, `counters_complete` remains false

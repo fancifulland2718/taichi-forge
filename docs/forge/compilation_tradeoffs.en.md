@@ -2,7 +2,7 @@
 
 [中文](compilation_tradeoffs.zh.md)
 
-> This is current `0.6.0` operational guidance for compile controls that
+> This is current `0.6.2` source guidance for compile controls that
 > largely predate `0.5.0`. Feature history is indexed in
 > [release notes](release_notes.en.md).
 
@@ -44,7 +44,7 @@ and other code-generating options are included in Forge offline-cache identity.
 Changing them should compile or load a separate artifact rather than reuse an
 incompatible one.
 
-In Taichi Forge 0.6.0, `debug=True` enables bounds checks only
+In the current Taichi Forge source, `debug=True` enables bounds checks only
 when `check_out_of_bound` was not explicitly selected. Passing
 `check_out_of_bound=False`, or setting `TI_CHECK_OUT_OF_BOUND=0`, isolates the
 bounds-check cost while retaining the other debug behavior. This is a targeted

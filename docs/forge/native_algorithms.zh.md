@@ -7,7 +7,7 @@
 按模块整理的 Forge-only API 符号清单见 [Forge API 参考](forge_api_reference.zh.md)。
 
 核心 native 算法族首次发布于 Forge 0.4.0；Graph native replay 与 device-side 检查分别
-在 0.4.1 和 0.4.23 进入公开版本。本文说明当前源码（包括 0.6.0 之后待发布 API）的
+在 0.4.1 和 0.4.23 进入公开版本。本文说明当前 0.6.2 源码（包括待发布 0.6.2 API）的
 可移植性与安全合同；各项
 能力的首次公开版本见[发行说明](release_notes.zh.md)。
 
@@ -64,7 +64,7 @@
 
 ## 机器可读 capability 合同
 
-Forge 0.6.0 为当前每个 primitive family 公开不可变的 schema-v1 描述：
+从 Forge 0.6.0 起，每个当前 primitive family 都公开不可变的 schema-v1 描述：
 
 ```python
 contract = ti.algorithms.primitive_capability("experimental_reduce")
@@ -127,7 +127,7 @@ PTX 是否可加载以及任何 driver 下限声明，仍必须在目标旧 driv
 [构建 Wheel](build_wheels.zh.md)，Linux 和旧 driver 的待补证据见
 [Linux 复测状态](linux_revalidation.zh.md)。
 
-### CUDA 0.6.0 性能快照与当前边界
+### CUDA 0.6.0 历史性能快照与当前边界
 
 下表是 0.6.0 资格快照，不代表之后每个 `master` 优化的测量结果。数据来自 Windows
 开发机（RTX 5090、driver 610.62、Python 3.10.11）上的 1,048,576 个 i32 item：每项

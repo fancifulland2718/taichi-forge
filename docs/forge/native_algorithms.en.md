@@ -10,8 +10,8 @@ For a module-oriented list of all Forge-only API symbols, see
 
 The core native algorithm family first shipped in Forge 0.4.0, with Graph
 native replay and device-side checks following in 0.4.1 and 0.4.23. This page
-documents the current source portability and safety contract, including
-Unreleased APIs after 0.6.0. See the
+documents the current 0.6.2 source portability and safety contract, including
+the unreleased 0.6.2 APIs. See the
 [release notes](release_notes.en.md) for the introduction version of each
 capability.
 
@@ -71,8 +71,8 @@ should not be used as portability promises across all backends.
 
 ## Machine-readable capability contract
 
-Forge 0.6.0 exposes immutable schema-v1 descriptors for every current primitive
-family:
+Since Forge 0.6.0, immutable schema-v1 descriptors are exposed for every
+current primitive family:
 
 ```python
 contract = ti.algorithms.primitive_capability("experimental_reduce")
@@ -146,7 +146,7 @@ floor still require execution on the target driver. See
 [Linux revalidation](linux_revalidation.en.md) for outstanding Linux and
 older-driver evidence.
 
-### CUDA 0.6.0 performance snapshot and current boundary
+### CUDA 0.6.0 historical performance snapshot and current boundary
 
 The table below is the 0.6.0 qualification snapshot, not a measurement of every
 later `master` optimization. It is one unified hot-path result from the Windows

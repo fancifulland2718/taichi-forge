@@ -1,6 +1,6 @@
 # Taichi Forge — 编译 / 运行时 / 架构 / 现代化选项一览
 
-> 适用于 **Taichi Forge 0.6.0**。除非特别说明，本文列出的选项均为**可选启用**；未显式启用的功能尽量保留 upstream Taichi 1.7.4 行为。
+> 适用于当前 **Taichi Forge 0.6.2 源码合同**。除非特别说明，本文列出的选项均为**可选启用**；未显式启用的功能尽量保留 upstream Taichi 1.7.4 行为。
 > 各选项首次公开版本见[版本更新说明](release_notes.zh.md)；本文描述当前合同，
 > 不会把历史选项重新归类为 `0.5.0` 更新。
 
@@ -161,7 +161,7 @@ Forge 默认从已物化的 SNode 树推导 CUDA sparse SNode pool，并在同�
 
 ## 5. SNode 覆盖度扩展
 
-| SNode 类型 | vanilla 1.7.4 Vulkan | Taichi Forge 0.6.0 Vulkan |
+| SNode 类型 | vanilla 1.7.4 Vulkan | 当前 Taichi Forge Vulkan |
 |---|---|---|
 | `dense` | ✅ | ✅ |
 | `bitmasked` | ❌ | ✅ |
@@ -177,7 +177,7 @@ Vulkan 稀疏 SNode 用法与语义见 [sparse_snode_on_vulkan.zh.md](sparse_sno
 
 Forge 同步至现代工具链；下表对比 vanilla 1.7.4。
 
-| 组件 | vanilla 1.7.4 | Forge 0.6.0 |
+| 组件 | vanilla 1.7.4 | 当前 Forge 源码 |
 |---|---|---|
 | LLVM | 15 | **20.1.7** |
 | Python | 3.7 – 3.12 | **3.10 – 3.14** |

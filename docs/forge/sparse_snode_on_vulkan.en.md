@@ -1,6 +1,6 @@
 # Sparse SNode on Vulkan — User Guide
 
-> Vulkan sparse SNode support was introduced across historical Forge 0.3.0–0.3.2 releases, matured through 0.3.12, and added experimental `hash` in 0.3.13. This guide describes the current 0.6.0 contract; it does not treat those capabilities as 0.6.0 additions. Some historical wheel artifacts may no longer be retained on PyPI because of project storage limits.
+> Vulkan sparse SNode support was introduced across historical Forge 0.3.0–0.3.2 releases, matured through 0.3.12, and added experimental `hash` in 0.3.13. This guide describes the current 0.6.2 source contract; it does not treat those capabilities as 0.6.2 additions. Some historical wheel artifacts may no longer be retained on PyPI because of project storage limits.
 
 ---
 

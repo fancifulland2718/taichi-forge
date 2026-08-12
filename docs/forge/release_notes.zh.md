@@ -54,6 +54,12 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
   `GraphOwnedNdarray`。私有存储不进入公开 run schema，地址在 instance 生命周期内稳定，默认
   通过 completion fence 独占复用，并可通过独立 workspace lane 支持异步重叠；内存统计会如实
   计入每条 lane。
+- cached CGraph replay 现在保留带 generation 的 resource binding plan。纯 ndarray/scalar
+  Graph 不再取得 SNode lifecycle guard；CUDA exact replay 无需重建 allocation vector 即可比较
+  稳定 signature；Vulkan 在资源 generation 与 scalar/matrix 值不变时复用 immutable launch
+  context。Field/SNode binding 继续使用完整 guarded path，各后端仍保留 submission-scoped
+  resource。公开 `Graph.execution_stats()` 升级为 schema v6，新增默认关闭的 host replay
+  attribution；关闭时不读取时钟或计数，所有路径都不新增 host readback。
 - `ti.profiler` 新增默认关闭的 CPU ThreadPool telemetry。显式窗口报告 job、chunk、worker
   admission/underfill、queue occupancy、nested serial、异常与累计 queue/execution/wait 时间。
   关闭时每次 ThreadPool invocation 只增加一次 relaxed flag load，不读取时钟，也不更新逐

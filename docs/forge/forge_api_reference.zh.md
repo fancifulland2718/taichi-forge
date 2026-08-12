@@ -1,6 +1,6 @@
 # Taichi Forge API 参考
 
-> 适用于 **Taichi Forge 0.6.0 之后的当前源码**。本文只列 Forge-only 的公开 API 入口。
+> 适用于 **Taichi Forge 0.6.2 当前源码**。本文只列 Forge-only 的公开 API 入口。
 > 加在 Taichi 兼容 API 里的新选项，例如 `ti.init(...)` 关键字参数和
 > `@ti.kernel(...)` 关键字选项，仍统一放在 [Forge 选项](forge_options.zh.md)。
 > API 首次公开版本统一见[版本更新说明](release_notes.zh.md)；本文包含待发布 API，
@@ -1430,7 +1430,7 @@ handle。这不是原地恢复：真实 CUDA context loss 或 Vulkan device loss
 
 ### `Graph.execution_stats()`
 
-返回冻结的 schema v5 `GraphExecutionReport` snapshot。这是稳定公开诊断 API；应用代码
+返回冻结的 schema v6 `GraphExecutionReport` snapshot。这是稳定公开诊断 API；应用代码
 不应直接读取 `_graph_stats`。
 
 顶层 report 包含：
@@ -1450,6 +1450,13 @@ replay/recapture、Vulkan record/replay、native dispatch 和 ordinary fallback�
 有界 persistent argument bytes、replay eligibility、fallback 分类、retry 状态与详细计数。
 CUDA conditional replay 还会报告异步 control upload、因两个 deferred batch 上限产生的等待，
 以及 deferred batch 峰值。
+
+schema v6 新增逐 segment 的 `replay_attribution`，以 opt-in 累计方式拆分 cached CGraph 的
+host preparation：SNode/resource/CUDA/cache lock wait、稳定 binding-plan lookup、resource
+retention、SNode validation、backend preparation 与 argument-signature matching。它还会报告
+binding plan/exact signature 的 hit/miss，以及 SNode lifecycle guard 的 acquire/elide 次数。
+GPU 计时在 host submission 后停止，不包含 payload duration；CPU 的 `backend_ns` 包含同步
+kernel execution。
 
 GPU 详细 counter 为 opt-in：第一次调用只为之后的执行启用。若 opt-in 前已有 GPU 工作，
 `counters_complete` 会在该 runtime epoch 保持 false，而不会伪装成已统计旧执行。

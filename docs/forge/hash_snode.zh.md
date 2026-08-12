@@ -1,6 +1,6 @@
 # Hash SNode 使用指南
 
-> `hash` SNode 首次发布于 **Taichi Forge 0.3.13**。本文说明当前 0.6.0 合同：它是实验性的固定容量稀疏 SNode，可在 CPU、CUDA、Vulkan 后端使用；默认开启，并会在第一次使用 `SNode.hash()` 时给出实验功能警告。
+> `hash` SNode 首次发布于 **Taichi Forge 0.3.13**。本文说明当前 0.6.2 源码合同：它是实验性的固定容量稀疏 SNode，可在 CPU、CUDA、Vulkan 后端使用；默认开启，并会在第一次使用 `SNode.hash()` 时给出实验功能警告。
 
 ---
 

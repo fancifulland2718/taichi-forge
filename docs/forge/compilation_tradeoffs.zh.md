@@ -2,7 +2,7 @@
 
 [English](compilation_tradeoffs.en.md)
 
-> 本文是面向 `0.6.0` 当前源码的操作建议；其中大部分编译控制早于 `0.5.0`。
+> 本文是面向当前 `0.6.2` 源码的操作建议；其中大部分编译控制早于 `0.5.0`。
 > 功能历史见[版本更新说明](release_notes.zh.md)。
 
 本文说明如何缩短 Taichi Forge 冷编译，同时避免悄悄牺牲生产吞吐、数值可信度或
@@ -38,7 +38,7 @@
 代码的配置已经进入 Forge offline-cache identity。切换它们应生成或加载独立产物，而
 不是复用不兼容 cache。
 
-在 Taichi Forge 0.6.0 中，`debug=True` 只会在未显式指定
+在当前 Taichi Forge 源码中，`debug=True` 只会在未显式指定
 `check_out_of_bound` 时启用越界检查。传入 `check_out_of_bound=False`，或设置
 `TI_CHECK_OUT_OF_BOUND=0`，可以单独隔离 bounds-check 成本，同时保留其它 debug
 行为。这是面向诊断或已经验证过的应用 bounds contract 的定向控制，不是通用的生产调优

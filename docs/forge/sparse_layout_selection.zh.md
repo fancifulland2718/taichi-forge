@@ -1,6 +1,6 @@
 # Taichi Forge 稀疏布局选择指南
 
-> 适用于 Taichi Forge **0.6.0**。
+> 适用于当前 Taichi Forge **0.6.2 源码合同**。
 
 [English version](sparse_layout_selection.en.md)
 
@@ -140,7 +140,7 @@ CUDA/Vulkan sparse struct-for在native Graph capture不可用时使用ordinary e
 
 ## 功能状态
 
-| 路径 | Forge 0.6.0 状态 |
+| 路径 | 当前 Forge 状态 |
 |---|---|
 | dense、pointer、bitmasked、dynamic SNode | 可用 |
 | Hash SNode | 实验性；默认开启并在首次使用时warning |

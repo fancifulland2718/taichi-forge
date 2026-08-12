@@ -8,7 +8,7 @@ sidebar_position: 1
 
 ### Why does my `pip` complain `package not found` when installing Taichi?
 
-You may have a Python interpreter with an unsupported version. Taichi Forge 0.6.0 publishes 64-bit wheels for Python 3.10 through 3.14. For more information about installation-specific issues, see [Installation Troubleshooting](./install.md).
+You may have a Python interpreter with an unsupported version. The published Taichi Forge 0.6.1 release provides 64-bit wheels for Python 3.10 through 3.14. For more information about installation-specific issues, see [Installation Troubleshooting](./install.md).
 
 ## Parallel programming
 

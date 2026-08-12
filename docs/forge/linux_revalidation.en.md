@@ -1,4 +1,8 @@
-# Linux 0.6.1 Release Qualification
+# Archived Linux 0.6.1 Release Qualification
+
+> Historical qualification plan for the published 0.6.1 release. It is retained
+> as reproducible evidence and is not the active 0.6.2 release gate. Current
+> version status is maintained in [release notes](release_notes.en.md).
 
 This is the Linux release qualification matrix for the feature-complete Taichi
 Forge 0.6.1 source.
@@ -9,7 +13,7 @@ x86_64 Linux runner with the intended release dependencies and record the GPU,
 driver, Vulkan loader, window system, and CUDA Toolkit only for the isolated
 reference workflow.
 
-This matrix gates the 0.6.1 release; it is not a retroactive blocker for the
+This matrix gated the 0.6.1 release; it is not a retroactive blocker for the
 already published 0.6.0 release. Historical features are listed only when the
 current release source needs renewed Linux evidence, and their inclusion must
 not be read as a 0.6.1 introduction.

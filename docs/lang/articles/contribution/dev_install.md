@@ -110,7 +110,7 @@ For Windows developers, if none of the VS 2026 editions are installed, `build.py
 
 `build.py` prefers pre-built stock LLVM 20.1.x binaries and may accept LLVM
 19.1.x as a development fallback where the build configuration allows it.
-Release-equivalent Taichi Forge 0.6.0 shim/runtime builds require LLVM 20.x;
+Release-equivalent current Taichi Forge shim/runtime builds require LLVM 20.x;
 the fallback is not release qualification. Taichi no longer maintains any
 custom LLVM source patches — the only customizations are the CMake
 configuration flags used when building LLVM (`LLVM_ENABLE_RTTI=ON`,

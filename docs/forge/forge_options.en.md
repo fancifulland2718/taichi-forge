@@ -1,6 +1,6 @@
 # Taichi Forge — Compile, Runtime, Architecture & Modernization Options
 
-> Applies to **Taichi Forge 0.6.0**. Every option listed here is **opt-in** unless explicitly noted; defaults preserve upstream Taichi 1.7.4 behaviour wherever a feature is not intentionally enabled by Forge.
+> Applies to the current **Taichi Forge 0.6.2 source contract**. Every option listed here is **opt-in** unless explicitly noted; defaults preserve upstream Taichi 1.7.4 behaviour wherever a feature is not intentionally enabled by Forge.
 > Option introduction versions are indexed in [release notes](release_notes.en.md);
 > this current-contract page does not reclassify older options as `0.5.0` work.
 
@@ -164,7 +164,7 @@ Release wheel builds enable all three flags.
 
 ## 5. SNode coverage extensions
 
-| SNode type | vanilla 1.7.4 Vulkan | Taichi Forge 0.6.0 Vulkan |
+| SNode type | vanilla 1.7.4 Vulkan | Current Taichi Forge Vulkan |
 |---|---|---|
 | `dense` | ✅ | ✅ |
 | `bitmasked` | ❌ | ✅ |
@@ -180,7 +180,7 @@ Full Vulkan sparse usage and semantics: [sparse_snode_on_vulkan.en.md](sparse_sn
 
 Forge ships against modern toolchains; the table below summarises the versions vs. vanilla 1.7.4.
 
-| Component | vanilla 1.7.4 | Forge 0.6.0 |
+| Component | vanilla 1.7.4 | Current Forge source |
 |---|---|---|
 | LLVM | 15 | **20.1.7** |
 | Python | 3.7 – 3.12 | **3.10 – 3.14** |

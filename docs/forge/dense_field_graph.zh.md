@@ -2,7 +2,7 @@
 
 > 首次公开于 `0.5.0`；版本归属见[版本更新说明](release_notes.zh.md)。
 
-Dense Field Graph 首次公开于 Taichi Forge `0.5.0`，本文描述当前 `0.6.0` 合同，用于编译和 replay 闭包引用或通过
+Dense Field Graph 首次公开于 Taichi Forge `0.5.0`，本文描述当前 `0.6.2` 源码合同，用于编译和 replay 闭包引用或通过
 runtime 参数接收 dense `ti.field`、vector Field 与 matrix Field 的 kernel。静态 Field
 binding 与 runtime dense-storage binding 使用同一套公开 `ti.graph.GraphBuilder` API，
 且都不复制 Field payload。
@@ -169,20 +169,21 @@ heterogeneous engine
 
 这样既避免每个 environment 一张 Graph，又允许不同 block 保持真正不同的 layout。
 每个 data-oriented owner 仍是独立 kernel specialization，因为其 root binding 可能不同。
-Forge 不通过 pointer 或 cache-key 技巧合并任意 owner；安全的透明合并需要新的 runtime
-Field-binding ABI。
+Forge 不通过 pointer 或 cache-key 技巧合并任意闭包 owner。兼容 owner 可以改用现有 runtime
+dense-Field binding ABI；把任意闭包改写为该 ABI 仍由应用显式决定，不是自动 cache 优化。
 
-### 当前 0.6.0 边界
+### 当前 0.6.2 源码边界
 
-Taichi Forge 0.6.0 继续支持上述 block 模型：应用可以持有和调度多张独立编译的 Graph，
+当前 Taichi Forge 继续支持上述 block 模型：应用可以持有和调度多张独立编译的 Graph，
 各自使用稳定但不同的 solver、layout、shape 或 feature signature，并在每个 block 内批处理
 同构环境。若域随机化不改变 signature，则继续留在 block 内；改变 signature 的环境应进入
 另一张已预编译 Graph。
 
-0.6.0 同时允许 `ArgKind.NDARRAY` slot 在 invocation 之间绑定不同但兼容的 runtime dense
-Field；该路径会重新验证 Program、SNodeTree generation、layout fingerprint 与 byte range，
-不复制 payload。闭包或 `template_args` Field 仍是静态 binding。0.6.0 不提供统一异构编排
-DSL、自动跨 block 调度器、结构变化的 Field 热重绑定或跨设备依赖规划器。
+`ArgKind.NDARRAY` slot 可以在 invocation 之间绑定不同但兼容的 runtime dense Field。
+binding plan 创建或重绑时会验证 Program、SNodeTree generation、layout fingerprint 与 byte
+range；每次提交仍重新取得带 generation 的 ownership，且不复制 payload。闭包或
+`template_args` Field 仍是静态 binding。当前已经支持 mixed CGraph/native action 与结构化
+控制，但不提供自动跨 block environment 调度器、结构变化的 Field 热重绑定或跨设备依赖规划器。
 
 持久 offline cache 与有计划的 prewarm 可以减少重复编译成本，同时不削弱 identity 或
 lifetime 校验。
@@ -205,10 +206,10 @@ Forge-native node 的 gradient 合同。
 
 ## 诊断
 
-`Graph.execution_stats()` 返回稳定的 schema-v1 report。相关字段包括 segment
+`Graph.execution_stats()` 返回稳定的 schema-v6 report。相关字段包括 segment
 definition、compiled task count、带 generation 的 static dependency、不含 pointer 的
 layout fingerprint、replay eligibility、execution/fallback path、
-`persistent_argument_bytes` 与 immutable counter。
+`persistent_argument_bytes`、immutable counter 与 opt-in host replay attribution。
 
 应用不应使用私有 `_graph_stats` storage。由于 driver 可能保留 Python 无法枚举的资源，
 仍须同时检查 GPU memory、host RSS、graph/tree churn 与 reset 测量。
