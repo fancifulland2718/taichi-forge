@@ -229,6 +229,22 @@ TEST(ThreadPoolTest, WorkerExceptionCompletesJobAndPoolRemainsUsable) {
   EXPECT_EQ(completed.load(std::memory_order_relaxed), 8);
 }
 
+TEST(ThreadPoolTest, RepeatedWideShortJobsRetireExactlyOnce) {
+  // Short jobs maximize the race between a worker retiring and another worker
+  // joining the same job.  The completion transition must remain serialized
+  // even though task claims happen lock-free.
+  constexpr int kIterations = 10000;
+  constexpr int kThreads = 16;
+  ThreadPool pool(kThreads);
+  std::atomic<int> completed{0};
+
+  for (int iteration = 0; iteration < kIterations; ++iteration) {
+    pool.run(/*splits=*/2, kThreads, &completed, count_task);
+  }
+
+  EXPECT_EQ(completed.load(std::memory_order_relaxed), kIterations * 2);
+}
+
 #ifdef TI_WITH_LLVM
 TEST(LLVMContextThreadData, ReleasesExitedWorkerContexts) {
   lang::CompileConfig config;

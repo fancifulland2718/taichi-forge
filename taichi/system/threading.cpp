@@ -125,8 +125,17 @@ bool ThreadPool::join_job_locked(Job **job) {
     return false;
   }
 
+  int active_workers =
+      candidate->active_workers.load(std::memory_order_relaxed);
+  while (active_workers >= 0 &&
+         !candidate->active_workers.compare_exchange_weak(
+             active_workers, active_workers + 1, std::memory_order_acq_rel,
+             std::memory_order_relaxed)) {
+  }
+  if (active_workers < 0) {
+    return false;
+  }
   candidate->joined_workers++;
-  candidate->active_workers.fetch_add(1, std::memory_order_relaxed);
   *job = candidate;
   return true;
 }
@@ -180,28 +189,38 @@ void ThreadPool::target() {
         job->exception = exception;
       }
     }
-    const int remaining =
-        job->active_workers.fetch_sub(1, std::memory_order_acq_rel) - 1;
-    if (remaining != 0) {
-      continue;
+
+    int active_workers = job->active_workers.load(std::memory_order_acquire);
+    bool closes_job = false;
+    while (true) {
+      TI_ASSERT(active_workers > 0);
+      const int next_active_workers = active_workers == 1 ? -1
+                                                          : active_workers - 1;
+      if (job->active_workers.compare_exchange_weak(
+              active_workers, next_active_workers, std::memory_order_acq_rel,
+              std::memory_order_acquire)) {
+        closes_job = next_active_workers == -1;
+        break;
+      }
     }
-    {
+    if (closes_job) {
       std::lock_guard<std::mutex> lock(mutex_);
+      TI_ASSERT(job->active_workers.load(std::memory_order_acquire) == -1);
       const bool exhausted =
           job->next_task.load(std::memory_order_relaxed) >= job->splits;
-      if (job->cancelled.load(std::memory_order_relaxed) || exhausted) {
-        job->completed = true;
-        TI_ASSERT(active_job_ == job);
-        active_job_ = nullptr;
-        activate_next_job_locked();
-        completion_cv_.notify_all();
-        // Idle workers already wait on the predicate. Waking every worker
-        // after the final chunk competes with the submitter that must resume
-        // Python and dominated small range launches. Only a queued successor
-        // needs a worker wake-up here.
-        if (active_job_ != nullptr) {
-          worker_cv_.notify_all();
-        }
+      TI_ASSERT(job->cancelled.load(std::memory_order_relaxed) || exhausted);
+      job->active_workers.store(0, std::memory_order_relaxed);
+      job->completed = true;
+      TI_ASSERT(active_job_ == job);
+      active_job_ = nullptr;
+      activate_next_job_locked();
+      completion_cv_.notify_all();
+      // Idle workers already wait on the predicate. Waking every worker
+      // after the final chunk competes with the submitter that must resume
+      // Python and dominated small range launches. Only a queued successor
+      // needs a worker wake-up here.
+      if (active_job_ != nullptr) {
+        worker_cv_.notify_all();
       }
     }
   }

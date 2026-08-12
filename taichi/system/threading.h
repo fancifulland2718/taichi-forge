@@ -48,6 +48,10 @@ class ThreadPool {
     RangeForTaskFunc *func{nullptr};
     std::atomic<int> next_task{0};
     std::atomic<bool> cancelled{false};
+    // Positive values count workers that may still access this stack-owned
+    // Job. The final worker atomically changes 1 to -1 before completing it;
+    // -1 is a closing sentinel that prevents a late join and therefore keeps
+    // the Job alive until the closer releases ThreadPool::mutex_.
     std::atomic<int> active_workers{0};
     int joined_workers{0};
     bool completed{false};
