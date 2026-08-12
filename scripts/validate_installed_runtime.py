@@ -52,8 +52,18 @@ def _validate_build_identity() -> str:
 def _validate_contract_manifest() -> None:
     manifest = ti.validate_runtime_contract(require_native_manifest=True)
     schemas = manifest["schemas"]
-    if schemas["dynamic_work"] != ti.graph.dynamic_work_capabilities()["schema_version"]:
-        raise RuntimeError("installed dynamic-work capability disagrees with its contract manifest")
+    # The contract manifest is backend-independent and intentionally valid
+    # before ti.init().  Do not turn this check into an active Program/device
+    # probe.  _validate_cpu_dynamic_workload() compares the same schema with
+    # the live backend capability after its explicit ti.init().
+    from taichi_forge._contracts import DYNAMIC_WORK_SCHEMA_VERSION
+
+    if schemas["dynamic_work"] != DYNAMIC_WORK_SCHEMA_VERSION:
+        raise RuntimeError(
+            "installed dynamic-work schema disagrees with its shim contract: "
+            f"manifest={schemas['dynamic_work']}, "
+            f"shim={DYNAMIC_WORK_SCHEMA_VERSION}"
+        )
     _checkpoint(
         "runtime contract manifest: passed "
         f"(ABI {manifest['native_abi_revision']}, "

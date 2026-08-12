@@ -29,6 +29,13 @@ def test_runtime_contract_manifest_is_immutable_and_source_agnostic():
         manifest["schemas"]["dynamic_work"] = 0
 
 
+def test_runtime_contract_manifest_is_safe_before_init():
+    ti.reset()
+    manifest = ti.validate_runtime_contract(require_native_manifest=True)
+    assert manifest["schemas"]["dynamic_work"] == 5
+    assert ti.lang.impl.get_runtime().prog is None
+
+
 def test_runtime_public_api_requires_an_initialized_program():
     ti.reset()
     with pytest.raises(ti.TaichiRuntimeError, match=r"requires ti\.init"):
