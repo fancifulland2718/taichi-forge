@@ -164,7 +164,11 @@ def produce_injected_args_for_graph(kernel, symbolic_args, template_args=None):
     if template_args is None:
         has_required_template = any(isinstance(arg.annotation, template) for arg in kernel.arguments)
         if not has_required_template:
-            return produce_injected_args(kernel, symbolic_args=symbolic_args)
+            injected = produce_injected_args(kernel, symbolic_args=symbolic_args)
+            for argument, value in zip(kernel.arguments, injected):
+                if isinstance(argument.annotation, NdarrayType):
+                    value._graph_runtime_affine_exemplar = True
+            return injected
         template_args = {}
     if not isinstance(template_args, dict):
         raise TaichiCompilationError("Graph template_args must be a dict keyed by kernel argument name")
@@ -209,7 +213,16 @@ def produce_injected_args_for_graph(kernel, symbolic_args, template_args=None):
         reconstructed = _produce_injected_arg(arg, symbolic_arg, True)
         if arg.name in template_args:
             _validate_graph_template_exemplar(arg, symbolic_arg, template_args[arg.name])
-        injected_args.append(template_args.get(arg.name, reconstructed))
+        if isinstance(anno, NdarrayType):
+            # A symbolic Graph ndarray may be rebound to a qualified affine
+            # dense storage view at run time. Compile the Graph specialization
+            # with runtime strides even though its temporary compile exemplar
+            # is itself canonical. Ordinary direct ndarray calls retain their
+            # branch-free canonical specialization.
+            reconstructed._graph_runtime_affine_exemplar = True
+            injected_args.append(reconstructed)
+        else:
+            injected_args.append(template_args.get(arg.name, reconstructed))
 
     if symbolic_index != len(symbolic_args):
         raise TaichiCompilationError(

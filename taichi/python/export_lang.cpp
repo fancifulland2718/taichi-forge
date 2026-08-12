@@ -5127,9 +5127,17 @@ void export_lang(py::module &m) {
   m.def("make_reference",
         Expr::make<ReferenceExpression, const Expr &, const DebugInfo &>);
 
-  m.def("make_external_tensor_expr",
-        Expr::make<ExternalTensorExpression, const DataType &, int,
-                   const std::vector<int> &, bool, int, const BoundaryMode &>);
+  m.def(
+      "make_external_tensor_expr",
+      [](const DataType &dt, int ndim, const std::vector<int> &arg_id,
+         bool needs_grad, int arg_depth, const BoundaryMode &boundary,
+         bool runtime_affine) {
+        return Expr::make<ExternalTensorExpression>(
+            dt, ndim, arg_id, needs_grad, arg_depth, boundary,
+            /*byte_offset=*/0, /*byte_stride=*/0, runtime_affine);
+      },
+      "dt"_a, "ndim"_a, "arg_id"_a, "needs_grad"_a, "arg_depth"_a,
+      "boundary"_a, "runtime_affine"_a = true);
   m.def("make_external_tensor_strided_expr",
         Expr::make<ExternalTensorExpression, const DataType &, int,
                    const std::vector<int> &, bool, int, const BoundaryMode &,
@@ -5143,7 +5151,8 @@ void export_lang(py::module &m) {
               dt, external_tensor_expr->ndim, external_tensor_expr->arg_id,
               external_tensor_expr->needs_grad,
               external_tensor_expr->arg_depth, external_tensor_expr->boundary,
-              byte_offset, byte_stride);
+              byte_offset, byte_stride,
+              external_tensor_expr->runtime_affine);
         });
 
   m.def("make_external_tensor_grad_expr",

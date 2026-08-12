@@ -664,6 +664,7 @@ class ASTTransformer(Builder):
                 byte_offset = 0
                 byte_stride = 0
                 logical_element_type = None
+                runtime_affine = True
                 if len(arg_features) >= 7 and arg_features[4] == "struct_member":
                     byte_offset = arg_features[5]
                     byte_stride = arg_features[6]
@@ -676,6 +677,8 @@ class ASTTransformer(Builder):
                     )
                 elif len(arg_features) >= 6 and arg_features[4] == "struct_ndarray":
                     logical_element_type = arg_features[5]
+                elif len(arg_features) >= 5:
+                    runtime_affine = arg_features[4] != "canonical_ndarray"
                 ndarray_args = (
                     to_taichi_type(arg_features[0]),
                     arg_features[1],
@@ -685,6 +688,7 @@ class ASTTransformer(Builder):
                     byte_offset,
                     byte_stride,
                     logical_element_type,
+                    runtime_affine,
                 )
                 return False, (
                     kernel_arguments.decl_ndarray_arg,

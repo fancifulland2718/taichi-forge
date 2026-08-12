@@ -709,7 +709,8 @@ Stmt *make_ndarray_access(Expression::FlattenContext *ctx,
   auto element_dim = -expr->dt.get_shape().size();
   auto external_ptr_stmt = std::make_unique<ExternalPtrStmt>(
       var_stmt, index_stmts, indices.size(), expr->dt.get_shape(),
-      expr->is_grad, expr->boundary, expr->byte_offset, expr->byte_stride);
+      expr->is_grad, expr->boundary, expr->byte_offset, expr->byte_stride,
+      expr->runtime_affine);
   if (expr->ndim - element_dim == indices.size()) {
     // Indexing into an scalar element
     auto element_type = expr->dt.ptr_removed();

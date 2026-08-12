@@ -536,6 +536,9 @@ class ExternalTensorExpression : public Expression {
   BoundaryMode boundary{BoundaryMode::kUnsafe};
   std::size_t byte_offset{0};
   std::size_t byte_stride{0};
+  // Canonical Taichi ndarrays do not need the runtime affine-stride branch.
+  // Explicit dense views keep it enabled in their own specialization.
+  bool runtime_affine{true};
 
   ExternalTensorExpression(const DataType &dt,
                            int ndim,
@@ -544,15 +547,17 @@ class ExternalTensorExpression : public Expression {
                            int arg_depth = false,
                            BoundaryMode boundary = BoundaryMode::kUnsafe,
                            std::size_t byte_offset = 0,
-                           std::size_t byte_stride = 0) {
+                           std::size_t byte_stride = 0,
+                           bool runtime_affine = true) {
     init(dt, ndim, arg_id, needs_grad, arg_depth, boundary, byte_offset,
-         byte_stride);
+         byte_stride, runtime_affine);
   }
 
   explicit ExternalTensorExpression(Expr *expr) : is_grad(true) {
     auto ptr = expr->cast<ExternalTensorExpression>();
     init(ptr->dt, ptr->ndim, ptr->arg_id, ptr->needs_grad, ptr->arg_depth,
-         ptr->boundary, ptr->byte_offset, ptr->byte_stride);
+         ptr->boundary, ptr->byte_offset, ptr->byte_stride,
+         ptr->runtime_affine);
   }
 
   void flatten(FlattenContext *ctx) override;
@@ -581,7 +586,8 @@ class ExternalTensorExpression : public Expression {
             int arg_depth,
             BoundaryMode boundary,
             std::size_t byte_offset,
-            std::size_t byte_stride) {
+            std::size_t byte_stride,
+            bool runtime_affine) {
     this->dt = dt;
     this->ndim = ndim;
     this->arg_id = arg_id;
@@ -590,6 +596,7 @@ class ExternalTensorExpression : public Expression {
     this->boundary = boundary;
     this->byte_offset = byte_offset;
     this->byte_stride = byte_stride;
+    this->runtime_affine = runtime_affine;
   }
 };
 

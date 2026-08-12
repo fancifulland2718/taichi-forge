@@ -157,6 +157,7 @@ def decl_ndarray_arg(
     byte_offset=0,
     byte_stride=0,
     logical_element_type=None,
+    runtime_affine=True,
 ):
     arg_id = impl.get_runtime().compiling_callable.insert_ndarray_param(element_type, ndim, name, needs_grad)
     if byte_stride:
@@ -167,7 +168,15 @@ def decl_ndarray_arg(
             logical_element_type,
         )
     return AnyArray(
-        _ti_core.make_external_tensor_expr(element_type, ndim, arg_id, needs_grad, 0, boundary),
+        _ti_core.make_external_tensor_expr(
+            element_type,
+            ndim,
+            arg_id,
+            needs_grad,
+            0,
+            boundary,
+            runtime_affine,
+        ),
         logical_element_type,
     )
 

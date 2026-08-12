@@ -387,6 +387,7 @@ class ExternalPtrStmt : public Stmt {
   BoundaryMode boundary{BoundaryMode::kUnsafe};
   std::size_t byte_offset{0};
   std::size_t byte_stride{0};
+  bool runtime_affine{true};
 
   ExternalPtrStmt(Stmt *base_ptr,
                   const std::vector<Stmt *> &indices,
@@ -398,7 +399,8 @@ class ExternalPtrStmt : public Stmt {
                   bool is_grad,
                   BoundaryMode boundary,
                   std::size_t byte_offset,
-                  std::size_t byte_stride);
+                  std::size_t byte_stride,
+                  bool runtime_affine = true);
 
   ExternalPtrStmt(Stmt *base_ptr,
                   const std::vector<Stmt *> &indices,
@@ -414,14 +416,15 @@ class ExternalPtrStmt : public Stmt {
                   bool is_grad,
                   BoundaryMode boundary,
                   std::size_t byte_offset,
-                  std::size_t byte_stride);
+                  std::size_t byte_stride,
+                  bool runtime_affine = true);
 
   bool has_global_side_effect() const override {
     return false;
   }
 
   TI_STMT_DEF_FIELDS(ret_type, base_ptr, indices, is_grad, byte_offset,
-                     byte_stride);
+                     byte_stride, runtime_affine);
   TI_DEFINE_ACCEPT_AND_CLONE
 };
 

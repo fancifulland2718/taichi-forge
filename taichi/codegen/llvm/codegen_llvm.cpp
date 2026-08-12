@@ -2277,7 +2277,7 @@ void TaskCodeGenLLVM::visit(ExternalPtrStmt *stmt) {
 
   llvm::Value *affine_condition = nullptr;
   llvm::Value *affine_address_offset = nullptr;
-  if (stmt->byte_stride == 0) {
+  if (stmt->byte_stride == 0 && stmt->runtime_affine) {
     auto mode_arg = builder->CreateGEP(
         struct_type, llvm_val[stmt->base_ptr],
         {tlctx->get_constant(0),
@@ -2358,15 +2358,19 @@ void TaskCodeGenLLVM::visit(ExternalPtrStmt *stmt) {
                                       address_offset);
     auto canonical_ptr = builder->CreateBitCast(
         ret_ptr, llvm::PointerType::get(tlctx->get_data_type(dt), 0));
-    auto i8_ty = llvm::Type::getInt8Ty(*llvm_context);
-    auto affine_base = builder->CreateBitCast(
-        ptr_val, llvm::PointerType::get(i8_ty, 0));
-    auto affine_i8_ptr = builder->CreateGEP(
-        i8_ty, affine_base, affine_address_offset);
-    auto affine_ptr = builder->CreateBitCast(
-        affine_i8_ptr, llvm::PointerType::get(tlctx->get_data_type(dt), 0));
-    llvm_val[stmt] =
-        builder->CreateSelect(affine_condition, affine_ptr, canonical_ptr);
+    if (stmt->runtime_affine) {
+      auto i8_ty = llvm::Type::getInt8Ty(*llvm_context);
+      auto affine_base = builder->CreateBitCast(
+          ptr_val, llvm::PointerType::get(i8_ty, 0));
+      auto affine_i8_ptr = builder->CreateGEP(
+          i8_ty, affine_base, affine_address_offset);
+      auto affine_ptr = builder->CreateBitCast(
+          affine_i8_ptr, llvm::PointerType::get(tlctx->get_data_type(dt), 0));
+      llvm_val[stmt] =
+          builder->CreateSelect(affine_condition, affine_ptr, canonical_ptr);
+    } else {
+      llvm_val[stmt] = canonical_ptr;
+    }
 
   } else {
     auto base_ty = tlctx->get_data_type(dt);
@@ -2391,15 +2395,19 @@ void TaskCodeGenLLVM::visit(ExternalPtrStmt *stmt) {
       auto base =
           builder->CreateBitCast(ptr_val, llvm::PointerType::get(base_ty, 0));
       auto canonical_ptr = builder->CreateGEP(base_ty, base, linear_index);
-      auto i8_ty = llvm::Type::getInt8Ty(*llvm_context);
-      auto affine_base = builder->CreateBitCast(
-          ptr_val, llvm::PointerType::get(i8_ty, 0));
-      auto affine_i8_ptr = builder->CreateGEP(
-          i8_ty, affine_base, affine_address_offset);
-      auto affine_ptr = builder->CreateBitCast(
-          affine_i8_ptr, llvm::PointerType::get(base_ty, 0));
-      llvm_val[stmt] =
-          builder->CreateSelect(affine_condition, affine_ptr, canonical_ptr);
+      if (stmt->runtime_affine) {
+        auto i8_ty = llvm::Type::getInt8Ty(*llvm_context);
+        auto affine_base = builder->CreateBitCast(
+            ptr_val, llvm::PointerType::get(i8_ty, 0));
+        auto affine_i8_ptr = builder->CreateGEP(
+            i8_ty, affine_base, affine_address_offset);
+        auto affine_ptr = builder->CreateBitCast(
+            affine_i8_ptr, llvm::PointerType::get(base_ty, 0));
+        llvm_val[stmt] =
+            builder->CreateSelect(affine_condition, affine_ptr, canonical_ptr);
+      } else {
+        llvm_val[stmt] = canonical_ptr;
+      }
     }
   }
 }

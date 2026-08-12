@@ -97,6 +97,31 @@ def test_callable_template_mapper_ndarray_cache_tracks_grad_state():
 
 
 @test_utils.test()
+def test_callable_template_mapper_separates_canonical_and_affine_ndarrays():
+    arr = ti.ndarray(ti.f32, shape=(4, 4))
+    affine = ti.experimental.ndarray_view(arr, slices=(slice(0, 4, 2), slice(1, 4, 2)))
+    mapper = TaichiCallableTemplateMapper(
+        (KernelArgument(ti.types.ndarray(dtype=ti.f32, ndim=2), "arr"),),
+        (),
+    )
+
+    canonical_id, canonical_features = mapper.lookup((arr,))
+    affine_id, affine_features = mapper.lookup((affine,))
+    assert canonical_id != affine_id
+    assert canonical_features[0][4] == "canonical_ndarray"
+    assert affine_features[0][4] == "runtime_affine_ndarray"
+
+    # Graph compilation uses a canonical temporary only as an exemplar. Its
+    # specialization must remain runtime-affine because an execution may bind
+    # a qualified dense Field/view with non-canonical strides.
+    graph_exemplar = ti.ndarray(ti.f32, shape=(4, 4))
+    graph_exemplar._graph_runtime_affine_exemplar = True
+    graph_id, graph_features = mapper.lookup((graph_exemplar,))
+    assert graph_id == affine_id
+    assert graph_features[0][4] == "runtime_affine_ndarray"
+
+
+@test_utils.test()
 def test_callable_template_mapper_prunes_dead_field_identities():
     mapper = TaichiCallableTemplateMapper(
         (KernelArgument(ti.template(), "field"),),

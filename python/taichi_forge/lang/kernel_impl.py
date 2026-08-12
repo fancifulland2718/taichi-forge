@@ -695,7 +695,18 @@ class TaichiCallableTemplateMapper:
                 needs_grad = False if anno.needs_grad is None else anno.needs_grad
                 if needs_grad:
                     raise TaichiRuntimeTypeError(f"Dense storage view argument {arg_name} does not support gradients")
-                return arg_type.element_type, len(arg.shape), False, anno.boundary
+                layout = (
+                    "canonical_ndarray"
+                    if arg.description.properties.get("ndarray_abi_compatible", False)
+                    else "runtime_affine_ndarray"
+                )
+                return (
+                    arg_type.element_type,
+                    len(arg.shape),
+                    False,
+                    anno.boundary,
+                    layout,
+                )
             if isinstance(arg, taichi_forge.lang._ndarray.StructNdarrayTensorMemberView):
                 anno.check_matched(arg.get_type(), arg_name)
                 needs_grad = False if anno.needs_grad is None else anno.needs_grad
@@ -745,7 +756,18 @@ class TaichiCallableTemplateMapper:
             if isinstance(arg, taichi_forge.lang._ndarray.Ndarray):
                 anno.check_matched(arg.get_type(), arg_name)
                 needs_grad = (arg.grad is not None) if anno.needs_grad is None else anno.needs_grad
-                return arg.element_type, len(arg.shape), needs_grad, anno.boundary
+                layout = (
+                    "runtime_affine_ndarray"
+                    if getattr(arg, "_graph_runtime_affine_exemplar", False)
+                    else "canonical_ndarray"
+                )
+                return (
+                    arg.element_type,
+                    len(arg.shape),
+                    needs_grad,
+                    anno.boundary,
+                    layout,
+                )
             if isinstance(arg, AnyArray):
                 ty = arg.get_type()
                 anno.check_matched(arg.get_type(), arg_name)

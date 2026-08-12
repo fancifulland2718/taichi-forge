@@ -141,6 +141,7 @@ AliasResult alias_analysis(Stmt *var1, Stmt *var2) {
     // identity lets CSE merge distinct fields such as vec[0] and vec[1].
     if (ptr1->byte_offset != ptr2->byte_offset ||
         ptr1->byte_stride != ptr2->byte_stride ||
+        ptr1->runtime_affine != ptr2->runtime_affine ||
         ptr1->boundary != ptr2->boundary) {
       return AliasResult::uncertain;
     }

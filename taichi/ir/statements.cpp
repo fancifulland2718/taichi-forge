@@ -41,13 +41,15 @@ ExternalPtrStmt::ExternalPtrStmt(Stmt *base_ptr,
                                  bool is_grad,
                                  BoundaryMode boundary,
                                  std::size_t byte_offset,
-                                 std::size_t byte_stride)
+                                 std::size_t byte_stride,
+                                 bool runtime_affine)
     : base_ptr(base_ptr),
       indices(indices),
       is_grad(is_grad),
       boundary(boundary),
       byte_offset(byte_offset),
-      byte_stride(byte_stride) {
+      byte_stride(byte_stride),
+      runtime_affine(runtime_affine) {
   ndim = indices.size();
   TI_ASSERT(base_ptr != nullptr);
   TI_ASSERT(base_ptr->is<ArgLoadStmt>());
@@ -68,9 +70,10 @@ ExternalPtrStmt::ExternalPtrStmt(Stmt *base_ptr,
                                  bool is_grad,
                                  BoundaryMode boundary,
                                  std::size_t byte_offset,
-                                 std::size_t byte_stride)
+                                 std::size_t byte_stride,
+                                 bool runtime_affine)
     : ExternalPtrStmt(base_ptr, indices, is_grad, boundary, byte_offset,
-                      byte_stride) {
+                      byte_stride, runtime_affine) {
   this->element_shape = element_shape;
   this->ndim = ndim;
 }

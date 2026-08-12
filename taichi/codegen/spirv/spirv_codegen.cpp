@@ -3497,7 +3497,7 @@ class TaskCodegen : public IRVisitor {
                                         static_cast<int>(element_bytes)));
         }
       }
-      if (stmt->byte_stride == 0) {
+      if (stmt->byte_stride == 0 && stmt->runtime_affine) {
         std::vector<int> mode_indices = arg_id;
         mode_indices.push_back(TypeFactory::SHAPE_POS_IN_NDARRAY);
         mode_indices.push_back(
