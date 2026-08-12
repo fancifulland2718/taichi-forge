@@ -2944,6 +2944,8 @@ def _active_grid_mpm_route(
     block_dim: int,
     sequence: Any | None,
     bounded_handle: Any | None,
+    contract_profile: str = "current",
+    active_worklist: Any | None = None,
 ) -> dict[str, Any]:
     """Describe the native active-grid route or prove the full-grid control."""
     class_module = graph.__class__.__module__
@@ -2969,18 +2971,111 @@ def _active_grid_mpm_route(
             "class_module": class_module,
             "expected_class_module": expected_class_module,
             "update_domain": grid_cells,
+            "contract_profile": contract_profile,
             "passed": bool(
                 runtime_name in ("forge_kernel", "vanilla_kernel")
                 and len(source_sha256) == 64
                 and sequence is None
+                and active_worklist is None
                 and bounded_handle is None
                 and class_module == expected_class_module
                 and getattr(graph, "_compiled_graph", None) is not None
             ),
         }
 
-    compact_route = _native_compact_route(getattr(sequence.workspace, "_compact", None), runtime_name, backend)
     capabilities = bounded_handle.capabilities
+    physical_plan = graph.physical_plan()
+    if contract_profile == "current":
+        memory = active_worklist.memory_report()
+        stats = active_worklist.statistics()
+        return {
+            "classification": "forge_direct_worklist_bounded_active_grid_graph",
+            "public_api": ("device_worklist_append_direct plus " "GraphBuilder.dispatch_bounded"),
+            "adapter": "forge_direct_active_grid_graph_pipeline",
+            "kernel_source_owner": "benchmark",
+            "kernel_source_sha256": source_sha256,
+            "class_module": class_module,
+            "contract_profile": contract_profile,
+            "active_order": "unspecified",
+            "stable_compaction_required": False,
+            "bounded_route": capabilities.route,
+            "bounded_backend": capabilities.backend,
+            "no_host_readback": capabilities.no_host_readback,
+            "device_known_count": capabilities.device_known_count,
+            "logical_iteration_exact": capabilities.logical_iteration_exact,
+            "physical_launch_kind": capabilities.physical_launch_kind,
+            "masked_capacity": capabilities.masked_capacity,
+            "exact_grid": capabilities.exact_grid,
+            "producer_owned_launch_state": (capabilities.producer_owned_launch_state),
+            "preparation_dispatches": capabilities.preparation_dispatches,
+            "requested_block_dim": block_dim,
+            "worklist_memory_report": memory,
+            "worklist_overflow": stats.overflow,
+            "workspace_bytes": (memory["total_bytes_current"] + bounded_handle.workspace_bytes),
+            "backend_recording_complete": physical_plan["backend_recording_complete"],
+            "fragmented_native_plan": physical_plan["fragmented_native_plan"],
+            "loose_native_action_count": physical_plan["loose_native_action_count"],
+            "loose_helper_count": physical_plan["loose_helper_count"],
+            "physical_dispatch_count": physical_plan["physical_dispatch_count"],
+            "physical_plan_rejection_reasons": list(physical_plan["rejection_reasons"]),
+            "passed": bool(
+                class_module == "taichi_forge.graph._graph"
+                and sequence is None
+                and active_worklist is not None
+                and active_worklist.transition_mode == "direct"
+                and not active_worklist.telemetry_enabled
+                and memory["fixed_capacity"]
+                and memory["replay_allocation_count"] == 0
+                and not stats.overflow
+                and capabilities.backend == backend
+                and capabilities.device_known_count
+                and capabilities.no_host_readback
+                and capabilities.logical_iteration_exact
+                and not capabilities.producer_owned_launch_state
+                and physical_plan["backend_recording_complete"]
+                and not physical_plan["fragmented_native_plan"]
+                and physical_plan["loose_native_action_count"] == 0
+            ),
+        }
+
+    sequence_debug = next(
+        (
+            node
+            for node in graph._debug_info.get("nodes", ())
+            if isinstance(node, dict) and node.get("kind") == "device_prefix_sequence"
+        ),
+        {},
+    )
+    compact_workspace = getattr(sequence.workspace, "_compact", None)
+    if backend == "vulkan" and capabilities.producer_owned_launch_state:
+        # Producer-owned Vulkan publication uses the bounded compact provider,
+        # whose packet/block arguments differ from the reusable ordinary
+        # CompactWorkspace plan.  Prove that route directly instead of
+        # requiring an unrelated _native_compact_plan cache entry.
+        observed_methods = tuple(sequence_debug.get("materialized_methods", ()))
+        expected_reason = "device_prefix_sequence:provider_command_not_graph_integrated"
+        compact_route = {
+            "classification": "forge_vulkan_bounded_native_compact_provider",
+            "expected_backend": "vulkan_native",
+            "expected_method": "vulkan_native",
+            "observed_plan_backend": (
+                "vulkan_native" if getattr(compact_workspace, "_vulkan_native_active", False) else None
+            ),
+            "observed_method": (observed_methods[0] if observed_methods else None),
+            "producer_owned_publication": True,
+            "backend_graph_integrated": bool(physical_plan["backend_recording_complete"]),
+            "fragmentation_reason": expected_reason,
+            "workspace_bytes_current": getattr(compact_workspace, "workspace_bytes_current", None),
+            "workspace_bytes_peak": getattr(compact_workspace, "workspace_bytes_peak", None),
+            "passed": bool(
+                observed_methods == ("vulkan_native",)
+                and getattr(compact_workspace, "_vulkan_native_active", False)
+                and physical_plan["fragmented_native_plan"]
+                and expected_reason in physical_plan["rejection_reasons"]
+            ),
+        }
+    else:
+        compact_route = _native_compact_route(compact_workspace, runtime_name, backend)
     return {
         "classification": "forge_device_compact_bounded_active_grid_graph",
         "public_api": ("DevicePrefixSequence.compact plus GraphBuilder.dispatch_bounded"),
@@ -2990,6 +3085,7 @@ def _active_grid_mpm_route(
         "class_module": class_module,
         "compact_route": compact_route,
         "bounded_route": capabilities.route,
+        "contract_profile": contract_profile,
         "bounded_backend": capabilities.backend,
         "no_host_readback": capabilities.no_host_readback,
         "device_known_count": capabilities.device_known_count,
@@ -3001,6 +3097,11 @@ def _active_grid_mpm_route(
         "preparation_dispatches": capabilities.preparation_dispatches,
         "requested_block_dim": block_dim,
         "workspace_bytes": (sequence.workspace.workspace_bytes_current + bounded_handle.workspace_bytes),
+        "backend_recording_complete": physical_plan["backend_recording_complete"],
+        "fragmented_native_plan": physical_plan["fragmented_native_plan"],
+        "loose_native_action_count": physical_plan["loose_native_action_count"],
+        "loose_helper_count": physical_plan["loose_helper_count"],
+        "physical_plan_rejection_reasons": list(physical_plan["rejection_reasons"]),
         "passed": bool(
             class_module == "taichi_forge.graph._graph"
             and compact_route["passed"]
@@ -3008,6 +3109,7 @@ def _active_grid_mpm_route(
             and capabilities.device_known_count
             and capabilities.no_host_readback
             and capabilities.logical_iteration_exact
+            and (contract_profile == "legacy" or capabilities.producer_owned_launch_state == (backend == "vulkan"))
         ),
     }
 
@@ -3162,7 +3264,9 @@ def _build_mpm_case(ti: Any, runtime_name: str, operation: str, preset: str) -> 
     }
 
 
-def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str, preset: str) -> dict[str, Any]:
+def _build_active_grid_mpm_case(
+    ti: Any, runtime_name: str, backend: str, preset: str, contract_profile: str = "current"
+) -> dict[str, Any]:
     """Build one stationary 2-D MLS-MPM step with a thin active-grid adapter.
 
     The stationary equilibrium keeps the active-domain cardinality and physical
@@ -3252,6 +3356,74 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str, preset
                 grid_v[node] += weight * (p_mass * v[p] + affine @ dpos)
                 grid_m[node] += weight * p_mass
                 ti.atomic_or(active_flags[node.x * grid + node.y], 1)
+
+    if runtime_name == "forge":
+
+        @ti.kernel
+        def reset_grid_direct(
+            grid_v: ti.types.ndarray(ndim=2),
+            grid_m: ti.types.ndarray(dtype=ti.f32, ndim=2),
+            active_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            active_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            overflow: ti.types.ndarray(dtype=ti.i32, ndim=0),
+            generation: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        ):
+            for i, j in grid_m:
+                grid_v[i, j] = ti.Vector.zero(ti.f32, 2)
+                grid_m[i, j] = 0.0
+                active_flags[i * grid + j] = 0
+                if i == 0 and j == 0:
+                    active_extent[0] = 0
+                    active_extent[1] = 0
+                    overflow[None] = 0
+                    generation[None] += 1
+
+        @ti.kernel
+        def p2g_direct(
+            x: ti.types.ndarray(ndim=1),
+            v: ti.types.ndarray(ndim=1),
+            C: ti.types.ndarray(ndim=1),
+            J: ti.types.ndarray(ndim=1),
+            grid_v: ti.types.ndarray(ndim=2),
+            grid_m: ti.types.ndarray(dtype=ti.f32, ndim=2),
+            active_flags: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            active_ids: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            active_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            overflow: ti.types.ndarray(dtype=ti.i32, ndim=0),
+            capacity: ti.i32,
+        ):
+            for p in x:
+                Xp = x[p] * inv_dx
+                base = ti.cast(Xp - 0.5, ti.i32)
+                fx = Xp - ti.cast(base, ti.f32)
+                w = [
+                    0.5 * (1.5 - fx) ** 2,
+                    0.75 - (fx - 1.0) ** 2,
+                    0.5 * (fx - 0.5) ** 2,
+                ]
+                stress = -dt * 4.0 * elastic_modulus * p_vol * (J[p] - 1.0) * inv_dx * inv_dx
+                affine = ti.Matrix([[stress, 0.0], [0.0, stress]]) + p_mass * C[p]
+                for i, j in ti.static(ti.ndrange(3, 3)):
+                    offset = ti.Vector([i, j])
+                    node = base + offset
+                    dpos = (ti.cast(offset, ti.f32) - fx) * dx
+                    weight = w[i].x * w[j].y
+                    grid_v[node] += weight * (p_mass * v[p] + affine @ dpos)
+                    grid_m[node] += weight * p_mass
+                    flat = node.x * grid + node.y
+                    previous = ti.atomic_or(active_flags[flat], 1)
+                    if previous == 0:
+                        ti.algorithms.device_worklist_append_direct(
+                            active_ids,
+                            active_extent,
+                            overflow,
+                            capacity,
+                            flat,
+                        )
+
+    else:
+        reset_grid_direct = None
+        p2g_direct = None
 
     @ti.kernel
     def update_grid_full(grid_v: ti.types.ndarray(ndim=2), grid_m: ti.types.ndarray(dtype=ti.f32, ndim=2)):
@@ -3343,20 +3515,69 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str, preset
         "flags": ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "flags", ti.i32, ndim=1),
     }
     builder = ti.graph.GraphBuilder()
-    builder.dispatch(reset_grid, symbols["grid_v"], symbols["grid_m"], symbols["flags"])
-    builder.dispatch(
-        p2g,
-        symbols["x"],
-        symbols["v"],
-        symbols["C"],
-        symbols["J"],
-        symbols["grid_v"],
-        symbols["grid_m"],
-        symbols["flags"],
-    )
 
     input_extent = output_extent = sequence = bounded_handle = None
-    if runtime_name == "forge":
+    active_worklist = worklist_args = None
+    if runtime_name == "forge" and contract_profile == "current":
+        active_worklist = ti.algorithms.DeviceWorklist(
+            grid_cells,
+            ti.i32,
+            telemetry=False,
+            transition_mode="direct",
+        )
+        worklist_args = active_worklist.graph_args("active_grid")
+        builder.dispatch(
+            reset_grid_direct,
+            symbols["grid_v"],
+            symbols["grid_m"],
+            symbols["flags"],
+            worklist_args.current_extent,
+            worklist_args.overflow,
+            worklist_args.generation,
+        )
+        builder.dispatch(
+            p2g_direct,
+            symbols["x"],
+            symbols["v"],
+            symbols["C"],
+            symbols["J"],
+            symbols["grid_v"],
+            symbols["grid_m"],
+            symbols["flags"],
+            worklist_args.current_values,
+            worklist_args.current_extent,
+            worklist_args.overflow,
+            worklist_args.capacity,
+        )
+        bounded_handle = builder.dispatch_bounded(
+            update_grid_active,
+            worklist_args.current_values,
+            worklist_args.current_extent,
+            symbols["grid_v"],
+            symbols["grid_m"],
+            extent=worklist_args.current_extent,
+            capacity=grid_cells,
+            block_dim=block_dim,
+        )
+    else:
+        builder.dispatch(
+            reset_grid,
+            symbols["grid_v"],
+            symbols["grid_m"],
+            symbols["flags"],
+        )
+        builder.dispatch(
+            p2g,
+            symbols["x"],
+            symbols["v"],
+            symbols["C"],
+            symbols["J"],
+            symbols["grid_v"],
+            symbols["grid_m"],
+            symbols["flags"],
+        )
+
+    if runtime_name == "forge" and contract_profile == "legacy":
         symbols.update(
             {
                 "active_ids": ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "active_ids", ti.i32, ndim=1),
@@ -3385,7 +3606,7 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str, preset
             block_dim=block_dim,
             launch_state=launch_state,
         )
-    else:
+    elif runtime_name != "forge":
         builder.dispatch(update_grid_full, symbols["grid_v"], symbols["grid_m"])
     builder.dispatch(g2p, symbols["x"], symbols["v"], symbols["C"], symbols["J"], symbols["grid_v"])
     graph_started = time.perf_counter_ns()
@@ -3403,7 +3624,7 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str, preset
         "grid_m": grid_m,
         "flags": active_flags,
     }
-    if runtime_name == "forge":
+    if runtime_name == "forge" and contract_profile == "legacy":
         graph_args.update(
             {
                 "active_ids": active_ids,
@@ -3412,13 +3633,24 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str, preset
                 "output_extent": output_extent,
             }
         )
+    elif runtime_name == "forge":
+        stats = active_worklist.stats
+        graph_args.update(
+            {
+                worklist_args.current_values.name: active_worklist.values,
+                worklist_args.current_extent.name: active_worklist.extent,
+                worklist_args.overflow.name: stats["overflow"],
+                worklist_args.generation.name: stats["generation"],
+                worklist_args.capacity.name: grid_cells,
+            }
+        )
 
     def reset_state(target: Sequence[Any], flags: Any) -> None:
         target_x, target_v, target_C, target_J, target_grid_v, target_grid_m, image = target
         init_state(target_x, target_v, target_C, target_J)
         reset_grid(target_grid_v, target_grid_m, flags)
         image.fill(0)
-        if runtime_name == "forge" and target is arrays:
+        if runtime_name == "forge" and contract_profile == "legacy" and target is arrays:
             input_extent.set(grid_cells)
             output_extent.reset()
 
@@ -3452,7 +3684,12 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str, preset
         ).hexdigest()
         active_count = int(flags_host.sum())
         mass_active_count = int(mass_mask.sum())
-        published_count = int(output_extent.snapshot().count) if runtime_name == "forge" else active_count
+        if active_worklist is not None:
+            published_count = int(active_worklist.extent.snapshot().count)
+        elif output_extent is not None:
+            published_count = int(output_extent.snapshot().count)
+        else:
+            published_count = active_count
         expected_mass = particles * p_mass
         actual_mass = float(mass_host.astype(np.float64).sum())
         mass_error = abs(actual_mass - expected_mass)
@@ -3491,7 +3728,16 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str, preset
 
     def route() -> dict[str, Any]:
         return _active_grid_mpm_route(
-            graph, runtime_name, backend, source_sha256, grid_cells, block_dim, sequence, bounded_handle
+            graph,
+            runtime_name,
+            backend,
+            source_sha256,
+            grid_cells,
+            block_dim,
+            sequence,
+            bounded_handle,
+            contract_profile,
+            active_worklist,
         )
 
     return {
@@ -3510,7 +3756,8 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str, preset
             "block_dim": block_dim,
         },
         "workload_contract": {
-            "case_id": "THIN-004",
+            "case_id": ("THIN-004-CURRENT" if contract_profile == "current" else "THIN-004-LEGACY"),
+            "contract_profile": contract_profile,
             "comparison_class": "thin-capability",
             "semantics": "stationary_equilibrium_2d_mls_mpm_substep",
             "dimension": "2d",
@@ -3533,9 +3780,15 @@ def _build_active_grid_mpm_case(ti: Any, runtime_name: str, backend: str, preset
             "kernel_ti_invocations_per_replay": 4,
             "kernel_physical_backend_launches_assumed": False,
             "forge_adapter": (
-                "device stable compact of P2G active flags followed by "
-                "a requested producer-owned bounded grid-update dispatch; "
-                "route evidence records whether the backend actually selects it"
+                (
+                    "unordered first-activation append during P2G followed by "
+                    "a consumer-owned bounded grid-update dispatch"
+                )
+                if contract_profile == "current"
+                else (
+                    "device stable compact of P2G active flags followed by "
+                    "a requested producer-owned bounded grid-update dispatch"
+                )
             ),
             "vanilla_adapter": "full-grid update kernel in one compiled graph",
             "shared": (
@@ -4867,6 +5120,7 @@ def _bfs_worklist_route(
     levels: int,
     expected_last_frontier: int,
     kernel_source_sha256: str,
+    fused_recycle: bool = False,
 ) -> dict[str, Any]:
     stage_kernel_names = [
         "initialize_bfs",
@@ -4878,21 +5132,37 @@ def _bfs_worklist_route(
     if runtime_name == "forge":
         memory = worklist.memory_report()
         stats = worklist.statistics()
+        transition_mode = getattr(worklist, "transition_mode", "staged")
+        telemetry_enabled = getattr(worklist, "telemetry_enabled", True)
+        current_contract = transition_mode == "direct"
         return {
             "classification": "forge_native_device_worklist_bfs_pipeline",
             "adapter": "forge_native_device_worklist_frontier_pipeline",
             "kernel_source_owner": "benchmark",
             "kernel_source_sha256": kernel_source_sha256,
-            "stage_kernel_names": [
-                "initialize_bfs",
-                "prepare_next",
-                "expand_frontier",
-                "commit_next",
-                "record_frontier",
-                "finalize_distance",
-            ],
+            "stage_kernel_names": (
+                [
+                    "initialize_bfs",
+                    "expand_frontier",
+                    "record_and_recycle_frontier",
+                    "finalize_distance",
+                ]
+                if current_contract and fused_recycle
+                else [
+                    "initialize_bfs",
+                    "prepare_next",
+                    "expand_frontier",
+                    "commit_next",
+                    "record_frontier",
+                    "finalize_distance",
+                ]
+            ),
             "benchmark_ti_kernel_invocations_per_replay": 2 + 2 * levels,
-            "device_worklist_transitions_per_replay": levels,
+            "device_worklist_transitions_per_replay": (0 if current_contract and fused_recycle else levels),
+            "fused_recycle_boundaries_per_replay": (levels if current_contract and fused_recycle else 0),
+            "contract_profile": ("current" if current_contract else "legacy"),
+            "transition_mode": transition_mode,
+            "telemetry_enabled": telemetry_enabled,
             "physical_backend_launches_assumed": False,
             "capacity": worklist.capacity,
             "memory_report": memory,
@@ -4911,9 +5181,15 @@ def _bfs_worklist_route(
                 and worklist.capacity == nodes
                 and memory["fixed_capacity"]
                 and memory["replay_allocation_count"] == 0
-                and stats.generated == expected_last_frontier
-                and stats.accepted == expected_last_frontier
-                and stats.rejected == 0
+                and (
+                    (stats.generated is None and stats.accepted is None and stats.rejected is None)
+                    if current_contract
+                    else (
+                        stats.generated == expected_last_frontier
+                        and stats.accepted == expected_last_frontier
+                        and stats.rejected == 0
+                    )
+                )
                 and not stats.overflow
                 and isinstance(kernel_source_sha256, str)
                 and len(kernel_source_sha256) == 64
@@ -4999,6 +5275,8 @@ def _bfs_worklist_native_route_admitted(child: dict[str, Any]) -> bool:
     contract = child.get("workload_contract", {})
     memory = route.get("memory_report", {})
     transition = route.get("last_transition_statistics", {})
+    contract_profile = contract.get("contract_profile", "legacy")
+    current_contract = contract_profile == "current"
     return bool(
         route.get("passed") is True
         and route.get("classification") == "forge_native_device_worklist_bfs_pipeline"
@@ -5009,20 +5287,36 @@ def _bfs_worklist_native_route_admitted(child: dict[str, Any]) -> bool:
         and route.get("nodes") == contract.get("nodes")
         and route.get("levels") == contract.get("levels")
         and route.get("benchmark_ti_kernel_invocations_per_replay") == 2 + 2 * contract.get("levels", -1)
-        and route.get("device_worklist_transitions_per_replay") == contract.get("levels")
+        and route.get("device_worklist_transitions_per_replay") == (0 if current_contract else contract.get("levels"))
+        and route.get("fused_recycle_boundaries_per_replay") == (contract.get("levels") if current_contract else 0)
+        and route.get("contract_profile") == contract_profile
+        and route.get("transition_mode") == ("direct" if current_contract else "staged")
+        and route.get("telemetry_enabled") is (not current_contract)
         and route.get("physical_backend_launches_assumed") is False
         and route.get("expected_backend") == child.get("backend")
         and route.get("observed_backend") == child.get("backend")
         and memory.get("fixed_capacity") is True
         and memory.get("replay_allocation_count") == 0
-        and transition.get("generated") == contract.get("expected_last_frontier")
-        and transition.get("accepted") == contract.get("expected_last_frontier")
-        and transition.get("rejected") == 0
+        and (
+            (
+                transition.get("generated") is None
+                and transition.get("accepted") is None
+                and transition.get("rejected") is None
+            )
+            if current_contract
+            else (
+                transition.get("generated") == contract.get("expected_last_frontier")
+                and transition.get("accepted") == contract.get("expected_last_frontier")
+                and transition.get("rejected") == 0
+            )
+        )
         and transition.get("overflow") is False
     )
 
 
-def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str, elements: int) -> dict[str, Any]:
+def _build_bfs_worklist_case(
+    ti: Any, runtime_name: str, backend: str, elements: int, contract_profile: str = "current"
+) -> dict[str, Any]:
     """Run a fixed-depth level-synchronous BFS on a square 2-D grid."""
     import numpy as np
 
@@ -5040,13 +5334,21 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str, elements:
     expected_distance = np.where(host_distance <= levels, host_distance, -1).astype(np.int32).reshape(-1)
     expected_history = [int(np.count_nonzero(host_distance == level)) for level in range(1, levels + 1)]
     expected_visited = int(np.count_nonzero(expected_distance >= 0))
+    fused_recycle = contract_profile == "current" and os.environ.get(
+        "TI_WORKLIST_BFS_FUSED_RECYCLE", "1"
+    ).strip().lower() not in ("0", "off", "false")
 
     distance = ti.ndarray(ti.i32, shape=elements)
     frontier_history = ti.ndarray(ti.i32, shape=levels)
     worklist = None
     vanilla_values = vanilla_extents = None
     if runtime_name == "forge":
-        worklist = ti.algorithms.DeviceWorklist(elements, ti.i32)
+        worklist = ti.algorithms.DeviceWorklist(
+            elements,
+            ti.i32,
+            telemetry=contract_profile == "legacy",
+            transition_mode=("staged" if contract_profile == "legacy" else "direct"),
+        )
     else:
         vanilla_values = (
             ti.ndarray(ti.i32, shape=elements),
@@ -5080,7 +5382,7 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str, elements:
     if runtime_name == "forge":
 
         @ti.kernel
-        def expand_forge(
+        def expand_forge_staged(
             current_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
             current_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
             target_distance: ti.types.ndarray(dtype=ti.i32, ndim=1),
@@ -5115,8 +5417,44 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str, elements:
                                     next_values, next_extent, generated, overflow, capacity, neighbor
                                 )
 
+        @ti.kernel
+        def expand_forge_direct(
+            current_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            current_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_distance: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            next_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            next_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            overflow: ti.types.ndarray(dtype=ti.i32, ndim=0),
+            capacity: ti.i32,
+            next_level: ti.i32,
+        ):
+            for slot in range(elements):
+                if slot < current_extent[0]:
+                    node = current_values[slot]
+                    x = node // side
+                    y = node - x * side
+                    for direction in ti.static(range(4)):
+                        nx = x
+                        ny = y
+                        if direction == 0:
+                            nx -= 1
+                        elif direction == 1:
+                            nx += 1
+                        elif direction == 2:
+                            ny -= 1
+                        else:
+                            ny += 1
+                        if 0 <= nx < side and 0 <= ny < side:
+                            neighbor = nx * side + ny
+                            previous = ti.atomic_min(target_distance[neighbor], next_level)
+                            if previous > next_level:
+                                ti.algorithms.device_worklist_append_direct(
+                                    next_values, next_extent, overflow, capacity, neighbor
+                                )
+
     else:
-        expand_forge = None
+        expand_forge_staged = None
+        expand_forge_direct = None
 
     @ti.kernel
     def expand_vanilla(
@@ -5160,6 +5498,18 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str, elements:
         history[level_index] = extent[0]
 
     @ti.kernel
+    def record_frontier_and_recycle(
+        produced_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        recycled_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        overflow: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        generation: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        history: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        level_index: ti.i32,
+    ):
+        history[level_index] = produced_extent[0]
+        ti.algorithms.device_worklist_recycle_direct(recycled_extent, overflow, generation)
+
+    @ti.kernel
     def finalize_distance(target_distance: ti.types.ndarray(dtype=ti.i32, ndim=1)):
         for node in range(elements):
             if target_distance[node] > levels:
@@ -5170,12 +5520,21 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str, elements:
             worklist.clear()
             initialize_bfs(distance, worklist.values, worklist.extent.state, frontier_history)
             for level_index in range(levels):
-                worklist.prepare_next()
-                expand_forge(
-                    worklist.values, worklist.extent.state, distance, *worklist.append_arguments(), level_index + 1
-                )
-                worklist.commit_next()
-                record_frontier(worklist.extent.state, frontier_history, level_index)
+                if contract_profile == "legacy" or not fused_recycle:
+                    worklist.prepare_next()
+                expand = expand_forge_staged if contract_profile == "legacy" else expand_forge_direct
+                expand(worklist.values, worklist.extent.state, distance, *worklist.append_arguments(), level_index + 1)
+                if contract_profile == "legacy" or not fused_recycle:
+                    worklist.commit_next()
+                    record_frontier(worklist.extent.state, frontier_history, level_index)
+                else:
+                    record_frontier_and_recycle(
+                        worklist.next_extent.state,
+                        *worklist.recycle_arguments(),
+                        frontier_history,
+                        level_index,
+                    )
+                    worklist.commit_recycled_next()
             finalize_distance(distance)
         else:
             initialize_bfs(distance, vanilla_values[0], vanilla_extents[0], frontier_history)
@@ -5308,7 +5667,7 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str, elements:
         "reset": reset,
         "validate": validate_fresh,
         "route": lambda: _bfs_worklist_route(
-            worklist, runtime_name, backend, elements, levels, expected_history[-1], source_sha256
+            worklist, runtime_name, backend, elements, levels, expected_history[-1], source_sha256, fused_recycle
         ),
         "logical_bytes": 0,
         "traffic_model": (
@@ -5324,7 +5683,8 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str, elements:
             "expected_last_frontier": expected_history[-1],
         },
         "workload_contract": {
-            "case_id": "THIN-007-BFS",
+            "case_id": ("THIN-007-BFS-CURRENT" if contract_profile == "current" else "THIN-007-BFS-LEGACY"),
+            "contract_profile": contract_profile,
             "comparison_class": "thin-capability",
             "semantics": "fixed_depth_level_synchronous_2d_grid_bfs",
             "dimension": "2d",
@@ -5353,7 +5713,13 @@ def _build_bfs_worklist_case(ti: Any, runtime_name: str, backend: str, elements:
             "kernel_record_ti_invocations_per_replay": levels,
             "kernel_ti_invocations_per_replay": 2 + 3 * levels,
             "kernel_physical_backend_launches_assumed": False,
-            "forge_adapter": ("DeviceWorklist prepare/atomic-append/commit frontier transition"),
+            "forge_adapter": (
+                (
+                    "DeviceWorklist prepare/atomic-append/commit frontier transition"
+                    if contract_profile == "legacy"
+                    else "DeviceWorklist atomic-append with fused record/recycle boundary"
+                )
+            ),
             "vanilla_adapter": ("double-buffered frontier with atomic device count"),
             "shared": (
                 "same square graph, source, level cap, four-neighbor expansion, "
@@ -5390,23 +5756,44 @@ def _falling_sand_route(
     if runtime_name == "forge":
         memory = worklist.memory_report()
         stats = worklist.statistics()
+        telemetry_enabled = getattr(worklist, "telemetry_enabled", True)
+        current_contract = not telemetry_enabled
         return {
             "classification": "forge_native_falling_sand_keyed_claim_pipeline",
             "adapter": "forge_native_device_worklist_keyed_claim",
             "kernel_source_owner": "benchmark",
             "kernel_source_sha256": kernel_source_sha256,
             "benchmark_stage_kernel_names": [
-                "reset_sand",
-                "propose_candidates",
-                "initialize_sources",
-                "gather_compact_attributes",
-                "materialize_native_winners",
+                *(
+                    [
+                        "reset_sand",
+                        "propose_candidates",
+                        "materialize_dense_winners",
+                    ]
+                    if current_contract
+                    else [
+                        "reset_sand",
+                        "propose_candidates",
+                        "initialize_sources",
+                        "gather_compact_attributes",
+                        "materialize_native_winners",
+                    ]
+                ),
             ],
-            "benchmark_ti_kernel_invocations_per_replay": 5,
-            "device_worklist_transitions_per_replay": 2,
+            "benchmark_ti_kernel_invocations_per_replay": (3 if current_contract else 5),
+            "device_worklist_transitions_per_replay": (1 if current_contract else 2),
+            "contract_profile": ("current" if current_contract else "legacy"),
+            "conflict_output_shape": ("dense_winner_table" if current_contract else "compact_winner_list"),
+            "telemetry_enabled": telemetry_enabled,
             "worklist_transition_names": [
-                "stable_select_candidates",
-                "deterministic_keyed_claim",
+                *(
+                    ["fixed_domain_masked_dense_claim"]
+                    if current_contract
+                    else [
+                        "stable_select_candidates",
+                        "deterministic_keyed_claim",
+                    ]
+                ),
             ],
             "claim_policy": "min_priority_then_source_ordinal",
             "control_only_claim_workspace_reset": False,
@@ -5433,11 +5820,23 @@ def _falling_sand_route(
                 and worklist.capacity == elements
                 and memory["fixed_capacity"]
                 and memory["replay_allocation_count"] == 0
-                and stats.generated == expected_candidates
-                and stats.accepted == expected_winners
-                and stats.rejected == expected_candidates - expected_winners
-                and stats.conflicts == expected_candidates - expected_winners
-                and stats.winners == expected_winners
+                and (
+                    (
+                        stats.generated is None
+                        and stats.accepted is None
+                        and stats.rejected is None
+                        and stats.conflicts is None
+                        and stats.winners is None
+                    )
+                    if current_contract
+                    else (
+                        stats.generated == expected_candidates
+                        and stats.accepted == expected_winners
+                        and stats.rejected == expected_candidates - expected_winners
+                        and stats.conflicts == expected_candidates - expected_winners
+                        and stats.winners == expected_winners
+                    )
+                )
                 and not stats.overflow
                 and observed_candidates == expected_candidates
                 and observed_winners == expected_winners
@@ -5524,6 +5923,8 @@ def _falling_sand_native_route_admitted(child: dict[str, Any]) -> bool:
     transition = route.get("last_transition_statistics", {})
     candidates = contract.get("expected_candidate_count")
     winners = contract.get("expected_winner_count")
+    contract_profile = contract.get("contract_profile", "legacy")
+    current_contract = contract_profile == "current"
     return bool(
         isinstance(candidates, int)
         and isinstance(winners, int)
@@ -5533,13 +5934,20 @@ def _falling_sand_native_route_admitted(child: dict[str, Any]) -> bool:
         and route.get("kernel_source_owner") == "benchmark"
         and route.get("kernel_source_sha256") == contract.get("kernel_source_sha256")
         and route.get("benchmark_stage_kernel_names") == contract.get("native_benchmark_stage_kernel_names")
-        and route.get("benchmark_ti_kernel_invocations_per_replay") == 5
-        and route.get("device_worklist_transitions_per_replay") == 2
+        and route.get("benchmark_ti_kernel_invocations_per_replay") == (3 if current_contract else 5)
+        and route.get("device_worklist_transitions_per_replay") == (1 if current_contract else 2)
+        and route.get("contract_profile") == contract_profile
+        and route.get("conflict_output_shape") == ("dense_winner_table" if current_contract else "compact_winner_list")
+        and route.get("telemetry_enabled") is (not current_contract)
         and route.get("worklist_transition_names")
-        == [
-            "stable_select_candidates",
-            "deterministic_keyed_claim",
-        ]
+        == (
+            ["fixed_domain_masked_dense_claim"]
+            if current_contract
+            else [
+                "stable_select_candidates",
+                "deterministic_keyed_claim",
+            ]
+        )
         and route.get("claim_policy") == "min_priority_then_source_ordinal"
         and route.get("control_only_claim_workspace_reset") is False
         and route.get("control_only_claim_workspace_reset") == contract.get("native_control_claim_workspace_reset")
@@ -5550,18 +5958,31 @@ def _falling_sand_native_route_admitted(child: dict[str, Any]) -> bool:
         and route.get("observed_backend") == child.get("backend")
         and memory.get("fixed_capacity") is True
         and memory.get("replay_allocation_count") == 0
-        and transition.get("generated") == candidates
-        and transition.get("accepted") == winners
-        and transition.get("rejected") == candidates - winners
-        and transition.get("conflicts") == candidates - winners
-        and transition.get("winners") == winners
+        and transition.get("generated") == (None if current_contract else candidates)
+        and (
+            (
+                transition.get("accepted") is None
+                and transition.get("rejected") is None
+                and transition.get("conflicts") is None
+                and transition.get("winners") is None
+            )
+            if current_contract
+            else (
+                transition.get("accepted") == winners
+                and transition.get("rejected") == candidates - winners
+                and transition.get("conflicts") == candidates - winners
+                and transition.get("winners") == winners
+            )
+        )
         and transition.get("overflow") is False
         and route.get("observed_candidates") == candidates
         and route.get("observed_winners") == winners
     )
 
 
-def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str, elements: int) -> dict[str, Any]:
+def _build_falling_sand_case(
+    ti: Any, runtime_name: str, backend: str, elements: int, contract_profile: str = "current"
+) -> dict[str, Any]:
     """Resolve one deterministic falling-sand destination-conflict step."""
     import numpy as np
 
@@ -5726,10 +6147,16 @@ def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str, elements:
     worklist = None
     compact_keys = compact_priorities = compact_ordinals = None
     if runtime_name == "forge":
-        worklist = ti.algorithms.DeviceWorklist(elements, ti.i32)
-        compact_keys = ti.ndarray(ti.i32, shape=elements)
-        compact_priorities = ti.ndarray(ti.i32, shape=elements)
-        compact_ordinals = ti.ndarray(ti.i32, shape=elements)
+        worklist = ti.algorithms.DeviceWorklist(
+            elements,
+            ti.i32,
+            telemetry=contract_profile == "legacy",
+            transition_mode=("staged" if contract_profile == "legacy" else "direct"),
+        )
+        if contract_profile == "legacy":
+            compact_keys = ti.ndarray(ti.i32, shape=elements)
+            compact_priorities = ti.ndarray(ti.i32, shape=elements)
+            compact_ordinals = ti.ndarray(ti.i32, shape=elements)
 
         @ti.kernel
         def initialize_sources(
@@ -5777,10 +6204,27 @@ def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str, elements:
                     target_winners[destination] = source
                     ti.atomic_add(target_count[0], 1)
 
+        @ti.kernel
+        def materialize_dense_winners(
+            source_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            dense_sources: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_grid: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_winners: ti.types.ndarray(dtype=ti.i32, ndim=1),
+            target_count: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        ):
+            for destination in range(elements):
+                source = dense_sources[destination]
+                if source != 0x7FFFFFFF:
+                    target_grid[source] = 0
+                    target_grid[destination] = source_grid[source]
+                    target_winners[destination] = source
+                    ti.atomic_add(target_count[0], 1)
+
     else:
         initialize_sources = None
         gather_compact_attributes = None
         materialize_native_winners = None
+        materialize_dense_winners = None
 
     def reset() -> None:
         reset_sand(
@@ -5799,27 +6243,43 @@ def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str, elements:
     def launch() -> None:
         propose_candidates(current, destinations, priorities, flags, candidate_count)
         if runtime_name == "forge":
-            initialize_sources(worklist.values, worklist.extent.state)
-            worklist.select(flags, method="auto")
-            gather_compact_attributes(
-                worklist.values,
-                worklist.extent.state,
-                destinations,
-                priorities,
-                compact_keys,
-                compact_priorities,
-                compact_ordinals,
-            )
-            result = worklist.resolve_conflicts(
-                compact_keys,
-                priorities=compact_priorities,
-                ordinals=compact_ordinals,
-                policy="min_priority",
-                method="auto",
-            )
-            materialize_native_winners(
-                current, result.values, result.keys, result.extent.state, output, winner_sources, winner_count
-            )
+            if contract_profile == "current":
+                result = worklist.resolve_conflicts_from_mask(
+                    destinations,
+                    flags,
+                    priorities=priorities,
+                    policy="min_priority",
+                    key_capacity=elements,
+                )
+                materialize_dense_winners(
+                    current,
+                    result.dense_winner_sources,
+                    output,
+                    winner_sources,
+                    winner_count,
+                )
+            else:
+                initialize_sources(worklist.values, worklist.extent.state)
+                worklist.select(flags, method="auto")
+                gather_compact_attributes(
+                    worklist.values,
+                    worklist.extent.state,
+                    destinations,
+                    priorities,
+                    compact_keys,
+                    compact_priorities,
+                    compact_ordinals,
+                )
+                result = worklist.resolve_conflicts(
+                    compact_keys,
+                    priorities=compact_priorities,
+                    ordinals=compact_ordinals,
+                    policy="min_priority",
+                    method="auto",
+                )
+                materialize_native_winners(
+                    current, result.values, result.keys, result.extent.state, output, winner_sources, winner_count
+                )
         else:
             claim_candidates(destinations, priorities, claims)
             materialize_kernel_winners(current, destinations, priorities, claims, output, winner_sources, winner_count)
@@ -5959,7 +6419,10 @@ def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str, elements:
             "candidate_fraction": expected_candidate_count / elements,
         },
         "workload_contract": {
-            "case_id": "THIN-008-FALLING-SAND",
+            "case_id": (
+                "THIN-008-FALLING-SAND-CURRENT" if contract_profile == "current" else "THIN-008-FALLING-SAND-LEGACY"
+            ),
+            "contract_profile": contract_profile,
             "comparison_class": "thin-capability",
             "semantics": "deterministic_one_step_falling_sand_keyed_claim",
             "dimension": "2d",
@@ -5987,16 +6450,31 @@ def _build_falling_sand_case(ti: Any, runtime_name: str, backend: str, elements:
             "kernel_ti_invocations_per_replay": 4,
             "kernel_physical_backend_launches_assumed": False,
             "native_benchmark_stage_kernel_names": [
-                "reset_sand",
-                "propose_candidates",
-                "initialize_sources",
-                "gather_compact_attributes",
-                "materialize_native_winners",
+                *(
+                    [
+                        "reset_sand",
+                        "propose_candidates",
+                        "materialize_dense_winners",
+                    ]
+                    if contract_profile == "current"
+                    else [
+                        "reset_sand",
+                        "propose_candidates",
+                        "initialize_sources",
+                        "gather_compact_attributes",
+                        "materialize_native_winners",
+                    ]
+                ),
             ],
             "native_control_claim_workspace_reset": False,
             "forge_adapter": (
                 "DeviceWorklist stable select plus deterministic keyed "
-                "min-priority/source-ordinal conflict resolution"
+                "min-priority/source-ordinal conflict resolution with "
+                + (
+                    "direct fixed-domain mask input and dense winner-table output"
+                    if contract_profile == "current"
+                    else "compact winner-list output"
+                )
             ),
             "vanilla_adapter": ("full-grid atomic-min destination claim plus winner " "materialization"),
             "shared": (
@@ -6369,7 +6847,7 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         elif args.operation == "device_prefix_chain":
             case = _build_device_prefix_chain_case(ti, args.runtime, args.backend, config["elements"])
         elif args.operation == "active_grid_mpm":
-            case = _build_active_grid_mpm_case(ti, args.runtime, args.backend, args.preset)
+            case = _build_active_grid_mpm_case(ti, args.runtime, args.backend, args.preset, args.contract_profile)
         elif args.operation == "particle_spatial_hash":
             case = _build_particle_spatial_hash_case(ti, args.runtime, args.backend, config["elements"])
         elif args.operation == "adaptive_pbd":
@@ -6377,9 +6855,9 @@ def _child_result(args: argparse.Namespace) -> dict[str, Any]:
         elif args.operation == "marching_squares":
             case = _build_marching_squares_case(ti, args.runtime, args.backend, config["elements"])
         elif args.operation == "bfs_worklist":
-            case = _build_bfs_worklist_case(ti, args.runtime, args.backend, config["elements"])
+            case = _build_bfs_worklist_case(ti, args.runtime, args.backend, config["elements"], args.contract_profile)
         elif args.operation == "falling_sand":
-            case = _build_falling_sand_case(ti, args.runtime, args.backend, config["elements"])
+            case = _build_falling_sand_case(ti, args.runtime, args.backend, config["elements"], args.contract_profile)
         elif args.operation == "sparse_block_stencil":
             case = _build_sparse_block_stencil_case(ti, args.runtime, args.backend, args.preset)
         elif args.operation == "snode_churn":
@@ -6745,6 +7223,8 @@ def _run_child(
         args.backend,
         "--preset",
         args.preset,
+        "--contract-profile",
+        args.contract_profile,
         "--pair-index",
         str(pair_index),
         "--position-in-pair",
@@ -8094,6 +8574,7 @@ def _parent_main(args: argparse.Namespace) -> int:
             "comparison_definition": definition,
             "backend": args.backend,
             "preset": args.preset,
+            "contract_profile": args.contract_profile,
             "intent": args.intent,
             "pairs": args.pairs,
             "samples": args.samples,
@@ -8484,6 +8965,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--comparison", choices=COMPARISONS, default="forge-vs-vanilla")
     parser.add_argument("--backend", choices=("cpu", "cuda", "vulkan"), required=True)
     parser.add_argument("--preset", choices=tuple(PRESETS), required=True)
+    parser.add_argument(
+        "--contract-profile",
+        choices=("current", "legacy"),
+        default="current",
+        help=("select current runtime contracts or retained legacy diagnostic " "routes for dynamic-work thin cases"),
+    )
     parser.add_argument("--intent", choices=("diagnostic", "qualification"), default="diagnostic")
     parser.add_argument("--pairs", type=int, default=1)
     parser.add_argument("--samples", type=int, default=5)

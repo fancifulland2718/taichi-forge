@@ -1,4 +1,5 @@
-"""THIN-007: fixed-depth 2-D grid BFS worklist qualification entry point."""
+"""THIN-007-CURRENT: direct/no-telemetry BFS worklist qualification."""
+
 from __future__ import annotations
 
 import sys
@@ -12,10 +13,17 @@ except ImportError:  # Direct execution from this directory.
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
-    if "--operation" in arguments:
-        raise ValueError(
-            "bfs_worklist_microbench.py fixes --operation=bfs_worklist")
-    return _shared_main(["--operation", "bfs_worklist", *arguments])
+    if "--operation" in arguments or "--contract-profile" in arguments:
+        raise ValueError("BFS current-contract entry point fixes its operation and profile")
+    return _shared_main(
+        [
+            "--operation",
+            "bfs_worklist",
+            "--contract-profile",
+            "current",
+            *arguments,
+        ]
+    )
 
 
 if __name__ == "__main__":

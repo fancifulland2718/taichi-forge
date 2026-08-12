@@ -180,14 +180,16 @@ Forge/native 三条路线。kernel compatibility 轴在两个 package 上运行�
 benchmark-owned source SHA 和四阶段 Graph pipeline：grid reset、P2G 活跃标记、
 full-grid update 与 G2P。route 证据证明每次 replay 有四次 `ti.kernel` 调用、未使用
 helper/specialized API、没有 benchmark workspace；它不假定物理 CUDA launch 数。
-native isolation 轴只改变 update-domain adapter：Forge 对同一 flags 请求 device
-stable compact + bounded dispatch，Forge/kernel 控制组保留 full-grid update。三条
+当前 native isolation 轴让 P2G producer 把首次 active cell 直接 append 到 lean、无序
+worklist，再用其 device extent 做 bounded dispatch；整条路径是一个完整 backend-recordable
+Graph，不含 loose prefix action。单独命名的 legacy 入口继续对同一 flags 使用 stable
+compact。Forge/kernel 控制组保留 full-grid update。三条
 路线共享同一个静态平衡 f32 二维 MLS-MPM 状态、256² 网格、4,096 粒子、compiled
 Graph replay、全状态容差、质量 oracle 与 exact active-mask SHA-256。零重力让长
 batch 中的状态与 841-node 活跃域保持固定。native route 证据必须披露物理 launch
 类型、exact-grid 支持、producer-owned state 与 host readback 状态。它属于
 thin-capability，不是相同公开 API 对比；独立入口为
-`active_grid_mpm_microbench.py`。
+`active_grid_mpm_microbench.py`；`active_grid_mpm_legacy_microbench.py` 只用于历史路线诊断。
 
 `particle_spatial_hash` 是 `THIN-005`。small 案例把 65,536 个规则网格粒子映射到
 16,384 个 cell，每 cell 4 粒子，随后执行相同的固定半径邻域查询；必须覆盖
@@ -235,22 +237,30 @@ invocation 数不推定物理 CUDA launch 数；拓扑必须由 Nsight Systems �
 expansion，以及完整 distance/per-level-frontier exact oracle，frontier 内部次序明确
 不作为结果。Forge/kernel 与 vanilla/kernel 执行相同的 benchmark-owned 194-logical-
 kernel pipeline，使用两个 frontier ndarray、两个 extent ndarray、显式 extent-reset
-kernel，且不使用 helper 或 specialized API。Forge/native 另行与 Forge/kernel 比较，
-使用固定容量 DeviceWorklist prepare/append/commit transition。准入保存完整 65,536-entry
+kernel，且不使用 helper 或 specialized API。Forge/native 另行与 Forge/kernel 比较。
+当前入口使用无 optional telemetry 的 lean direct DeviceWorklist transition，并让已有全局有序的
+frontier-record kernel 同时回收 consumed front，因此每层没有独立 prepare/finalize helper；legacy
+入口保留 staged publication 与完整 counter。准入保存完整 65,536-entry
 distance vector 与 64-entry history vector，并在计时前后独立重算 raw i32 SHA-256、
 统计、样本、mismatch count 与首个 mismatch。逻辑 invocation 数不推定物理 backend
 launch 数；Systems/Compute 单独实测拓扑。独立入口为
-`bfs_worklist_microbench.py`。
+`bfs_worklist_microbench.py`；`bfs_worklist_legacy_microbench.py` 保留历史 staged 路线。
+route 证据报告零 transition helper、每层一个 fused recycle boundary；在完整 noise/correctness
+资格通过前，观测 speedup 仍只作为诊断结果。
 
 `falling_sand` 是 `THIN-008`。256² 场景让固定 blocker 上方的每个粒子生成一个
 确定性移动候选，使 10,332 个候选竞争 5,166 个目标。所有路线共用初始网格、移动
 偏好、候选 kernel、最小优先级/源序号决胜、输出语义、一次外层同步，以及完整
 grid、destination、priority 和 winner-source 精确向量。Forge/kernel 与
 vanilla/kernel 执行相同的 benchmark-owned 四 kernel 流水线，只使用一个 i32 目标
-claim 数组，不准入 helper 或 specialized API。Forge/native 另行与 Forge/kernel
-对比，只把 atomic-min claim 替换为 DeviceWorklist 稳定筛选和确定性 keyed 冲突消解。
-reset 按路线编译，使 native 不写仅控制组使用的 claim workspace；route 准入和离线
-审计器都会验证这些边界。独立入口为 `falling_sand_microbench.py`。
+claim 数组，不准入 helper 或 specialized API。Forge/native 另行与 Forge/kernel 对比。
+当前路线把 fixed-domain destination/active 数组直接交给 telemetry-free dense
+winner-table claim，保留原始 source index，并跳过 stable compact 与 attribute gather；
+legacy 路线继续使用 stable selection 和 compact deterministic keyed conflict resolution。
+reset 按路线编译，使 native 不写仅控制组使用的 claim workspace；route 准入和离线审计器
+都会验证这些边界。若通用 claim 的物理计划慢于 fused control，它只作为显式能力，不会
+自动成为性能路线。入口为 `falling_sand_microbench.py`；历史路线使用
+`falling_sand_legacy_microbench.py`。
 
 `snode_churn` 是 `DIRECT-004` 的历史 churn 半项。两边使用相同公开 FieldsBuilder
 DSL 与 kernel；每个计时 launch 创建一个 pointer+dense tree、激活 64 个 cell、exact

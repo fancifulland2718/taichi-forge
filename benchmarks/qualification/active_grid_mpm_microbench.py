@@ -1,4 +1,5 @@
-"""THIN-004: stationary 2-D active-grid MLS-MPM qualification entry point."""
+"""THIN-004-CURRENT: current-contract active-grid MPM qualification."""
+
 from __future__ import annotations
 
 import sys
@@ -12,10 +13,17 @@ except ImportError:  # Direct execution from this directory.
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
-    if "--operation" in arguments:
-        raise ValueError(
-            "active_grid_mpm_microbench.py fixes --operation=active_grid_mpm")
-    return _shared_main(["--operation", "active_grid_mpm", *arguments])
+    if "--operation" in arguments or "--contract-profile" in arguments:
+        raise ValueError("active-grid current-contract entry point fixes its operation and profile")
+    return _shared_main(
+        [
+            "--operation",
+            "active_grid_mpm",
+            "--contract-profile",
+            "current",
+            *arguments,
+        ]
+    )
 
 
 if __name__ == "__main__":

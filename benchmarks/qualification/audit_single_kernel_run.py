@@ -987,6 +987,8 @@ def _bfs_worklist_native_route_admitted(child: dict[str, Any]) -> bool:
     contract = child.get("workload_contract", {})
     memory = route.get("memory_report", {})
     transition = route.get("last_transition_statistics", {})
+    contract_profile = contract.get("contract_profile", "legacy")
+    current_contract = contract_profile == "current"
     return bool(
         route.get("passed") is True
         and route.get("classification") == "forge_native_device_worklist_bfs_pipeline"
@@ -997,15 +999,29 @@ def _bfs_worklist_native_route_admitted(child: dict[str, Any]) -> bool:
         and route.get("nodes") == contract.get("nodes")
         and route.get("levels") == contract.get("levels")
         and route.get("benchmark_ti_kernel_invocations_per_replay") == 2 + 2 * contract.get("levels", -1)
-        and route.get("device_worklist_transitions_per_replay") == contract.get("levels")
+        and route.get("device_worklist_transitions_per_replay") == (0 if current_contract else contract.get("levels"))
+        and route.get("fused_recycle_boundaries_per_replay") == (contract.get("levels") if current_contract else 0)
+        and route.get("contract_profile") == contract_profile
+        and route.get("transition_mode") == ("direct" if current_contract else "staged")
+        and route.get("telemetry_enabled") is (not current_contract)
         and route.get("physical_backend_launches_assumed") is False
         and route.get("expected_backend") == child.get("backend")
         and route.get("observed_backend") == child.get("backend")
         and memory.get("fixed_capacity") is True
         and memory.get("replay_allocation_count") == 0
-        and transition.get("generated") == contract.get("expected_last_frontier")
-        and transition.get("accepted") == contract.get("expected_last_frontier")
-        and transition.get("rejected") == 0
+        and (
+            (
+                transition.get("generated") is None
+                and transition.get("accepted") is None
+                and transition.get("rejected") is None
+            )
+            if current_contract
+            else (
+                transition.get("generated") == contract.get("expected_last_frontier")
+                and transition.get("accepted") == contract.get("expected_last_frontier")
+                and transition.get("rejected") == 0
+            )
+        )
         and transition.get("overflow") is False
     )
 
@@ -1052,6 +1068,8 @@ def _falling_sand_native_route_admitted(child: dict[str, Any]) -> bool:
     transition = route.get("last_transition_statistics", {})
     candidates = contract.get("expected_candidate_count")
     winners = contract.get("expected_winner_count")
+    contract_profile = contract.get("contract_profile", "legacy")
+    current_contract = contract_profile == "current"
     return bool(
         isinstance(candidates, int)
         and isinstance(winners, int)
@@ -1061,13 +1079,20 @@ def _falling_sand_native_route_admitted(child: dict[str, Any]) -> bool:
         and route.get("kernel_source_owner") == "benchmark"
         and route.get("kernel_source_sha256") == contract.get("kernel_source_sha256")
         and route.get("benchmark_stage_kernel_names") == contract.get("native_benchmark_stage_kernel_names")
-        and route.get("benchmark_ti_kernel_invocations_per_replay") == 5
-        and route.get("device_worklist_transitions_per_replay") == 2
+        and route.get("benchmark_ti_kernel_invocations_per_replay") == (3 if current_contract else 5)
+        and route.get("device_worklist_transitions_per_replay") == (1 if current_contract else 2)
+        and route.get("contract_profile") == contract_profile
+        and route.get("conflict_output_shape") == ("dense_winner_table" if current_contract else "compact_winner_list")
+        and route.get("telemetry_enabled") is (not current_contract)
         and route.get("worklist_transition_names")
-        == [
-            "stable_select_candidates",
-            "deterministic_keyed_claim",
-        ]
+        == (
+            ["fixed_domain_masked_dense_claim"]
+            if current_contract
+            else [
+                "stable_select_candidates",
+                "deterministic_keyed_claim",
+            ]
+        )
         and route.get("claim_policy") == "min_priority_then_source_ordinal"
         and route.get("control_only_claim_workspace_reset") is False
         and route.get("control_only_claim_workspace_reset") == contract.get("native_control_claim_workspace_reset")
@@ -1078,11 +1103,22 @@ def _falling_sand_native_route_admitted(child: dict[str, Any]) -> bool:
         and route.get("observed_backend") == child.get("backend")
         and memory.get("fixed_capacity") is True
         and memory.get("replay_allocation_count") == 0
-        and transition.get("generated") == candidates
-        and transition.get("accepted") == winners
-        and transition.get("rejected") == candidates - winners
-        and transition.get("conflicts") == candidates - winners
-        and transition.get("winners") == winners
+        and transition.get("generated") == (None if current_contract else candidates)
+        and (
+            (
+                transition.get("accepted") is None
+                and transition.get("rejected") is None
+                and transition.get("conflicts") is None
+                and transition.get("winners") is None
+            )
+            if current_contract
+            else (
+                transition.get("accepted") == winners
+                and transition.get("rejected") == candidates - winners
+                and transition.get("conflicts") == candidates - winners
+                and transition.get("winners") == winners
+            )
+        )
         and transition.get("overflow") is False
         and route.get("observed_candidates") == candidates
         and route.get("observed_winners") == winners

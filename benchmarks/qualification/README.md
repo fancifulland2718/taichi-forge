@@ -219,16 +219,20 @@ runs the same benchmark-owned source SHA and four-stage Graph pipeline on both
 packages: grid reset, P2G active marking, full-grid update, and G2P. Route
 evidence proves four `ti.kernel` invocations, no helper/specialized API, and no
 benchmark workspace; it does not assume a physical CUDA-launch count. The
-native-isolation axis changes only the update-domain adapter: Forge requests
-device stable compact plus bounded dispatch over the same flags, while the
-Forge/kernel control retains the full-grid update. All three routes share the
+current native-isolation axis lets P2G append each first-active cell directly
+to a lean unordered worklist, then consumes its device extent with bounded
+dispatch. It is one complete backend-recordable Graph with no loose prefix
+action. The separately named legacy entry point preserves stable compact over
+the same flags. The Forge/kernel control retains the full-grid update. All
+three routes share the
 same stationary f32 2-D MLS-MPM state, 256-square grid, 4,096 particles,
 compiled-graph replay, full-state tolerance, mass oracle, and exact active-mask
 SHA-256. Zero gravity keeps the state and 841-node active domain fixed through
 long batches. Native route evidence must disclose physical launch kind,
 exact-grid support, producer-owned state, and host-readback status. This is a
 thin-capability case, not a same-public-API comparison. Use
-`active_grid_mpm_microbench.py`.
+`active_grid_mpm_microbench.py`; use
+`active_grid_mpm_legacy_microbench.py` only for historical-route diagnosis.
 
 `particle_spatial_hash` is `THIN-005`. The small case maps 65,536 regular-grid
 particles into 16,384 cells, four particles per cell, then runs the same
@@ -288,13 +292,19 @@ exact full-distance/per-level-frontier oracles; frontier order is deliberately
 unspecified. Forge/kernel and vanilla/kernel execute the same benchmark-owned
 194-logical-kernel pipeline with two frontier ndarrays, two extent ndarrays,
 explicit extent-reset kernels, and no helper or specialized API. Forge/native
-is compared separately with Forge/kernel and uses fixed-capacity DeviceWorklist
-prepare/append/commit transitions. Admission stores the complete 65,536-entry
+is compared separately with Forge/kernel. The current entry point uses a lean
+direct DeviceWorklist transition with no optional telemetry; its already
+ordered frontier-record kernel also recycles the consumed front, so there is
+no standalone prepare/finalize helper per level. The legacy entry point
+retains staged publication and full counters. Admission stores the complete 65,536-entry
 distance vector and 64-entry history vector and independently recomputes their
 raw i32 SHA-256, statistics, samples, mismatch count, and first mismatch before
 and after scoring. Logical invocation counts do not assume physical backend
 launches; Systems/Compute measure topology separately. Use
-`bfs_worklist_microbench.py`.
+`bfs_worklist_microbench.py`; `bfs_worklist_legacy_microbench.py` preserves the
+historical staged route. Route evidence reports zero transition helpers and
+one fused recycle boundary per level; the benchmark still treats observed
+speedup as diagnostic until the full noise/correctness qualification passes.
 
 `falling_sand` is `THIN-008`. The 256-square scene creates one deterministic
 movement proposal per particle above fixed blockers, forcing 10,332 candidates
@@ -304,11 +314,16 @@ semantics, one outer synchronization, and exact complete grid, destination,
 priority, and winner-source vectors. Forge/kernel and vanilla/kernel execute the
 same benchmark-owned four-kernel pipeline with one i32 destination-claim array;
 no helper or specialized API is admitted. Forge/native is compared separately
-with Forge/kernel and replaces only the atomic-min claim with DeviceWorklist
-stable selection and deterministic keyed conflict resolution. Reset is compiled
-per route so native does not write the control-only claim workspace. Route
-admission and the offline auditor verify these boundaries. Use
-`falling_sand_microbench.py`.
+with Forge/kernel. The current route feeds fixed-domain destination/active
+arrays directly to a telemetry-free dense winner-table claim, preserves
+original source indices, and skips stable compact plus attribute gather. The
+legacy route retains stable selection and compact deterministic keyed conflict
+resolution. Reset is compiled per route so native does not write the
+control-only claim workspace. Route admission and the offline auditor verify
+these boundaries. The generic claim remains an explicit capability when its
+physical plan is slower than the fused control. Use
+`falling_sand_microbench.py`, or `falling_sand_legacy_microbench.py` for the
+historical route.
 
 `snode_churn` is the historical-churn half of `DIRECT-004`. Both runtimes use
 the same public FieldsBuilder DSL and kernels. Every measured launch creates

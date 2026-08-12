@@ -1,4 +1,4 @@
-"""THIN-008-CURRENT: dense-output falling-sand claim qualification."""
+"""THIN-007-LEGACY: retained staged/telemetry BFS diagnostic."""
 
 from __future__ import annotations
 
@@ -14,13 +14,13 @@ except ImportError:  # Direct execution from this directory.
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if "--operation" in arguments or "--contract-profile" in arguments:
-        raise ValueError("falling-sand current-contract entry point fixes its operation and profile")
+        raise ValueError("legacy BFS entry point fixes its operation and profile")
     return _shared_main(
         [
             "--operation",
-            "falling_sand",
+            "bfs_worklist",
             "--contract-profile",
-            "current",
+            "legacy",
             *arguments,
         ]
     )

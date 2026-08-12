@@ -1154,6 +1154,45 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         }
         self.assertTrue(_falling_sand_native_route_admitted(child))
         self.assertTrue(_audit_falling_sand_native_route_admitted(child))
+
+        class LeanStats:
+            generated = None
+            accepted = None
+            rejected = None
+            conflicts = None
+            winners = None
+            overflow = False
+
+        class LeanWorklist:
+            capacity = 32
+            telemetry_enabled = False
+
+            @staticmethod
+            def memory_report():
+                return {"fixed_capacity": True, "replay_allocation_count": 0}
+
+            @staticmethod
+            def statistics():
+                return LeanStats()
+
+        current_native = _falling_sand_route(LeanWorklist(), "forge", "cuda", 32, 6, 3, 6, 3, source_sha256)
+        current_child = {
+            "operation": "falling_sand",
+            "runtime": "forge",
+            "backend": "cuda",
+            "route": current_native,
+            "workload_contract": {
+                **contract,
+                "contract_profile": "current",
+                "native_benchmark_stage_kernel_names": [
+                    "reset_sand",
+                    "propose_candidates",
+                    "materialize_dense_winners",
+                ],
+            },
+        }
+        self.assertTrue(_falling_sand_native_route_admitted(current_child))
+        self.assertTrue(_audit_falling_sand_native_route_admitted(current_child))
         Stats.conflicts = 2
         self.assertFalse(_falling_sand_route(Worklist(), "forge", "cuda", 32, 6, 3, 6, 3, source_sha256)["passed"])
         Stats.conflicts = 3
@@ -1402,6 +1441,42 @@ class SingleKernelMicrobenchTest(unittest.TestCase):
         }
         self.assertTrue(_bfs_worklist_native_route_admitted(native_child))
         self.assertTrue(_audit_bfs_worklist_native_route_admitted(native_child))
+
+        class LeanStats:
+            generated = None
+            accepted = None
+            rejected = None
+            overflow = False
+
+        class LeanWorklist:
+            capacity = 32
+            transition_mode = "direct"
+            telemetry_enabled = False
+
+            @staticmethod
+            def memory_report():
+                return {"fixed_capacity": True, "replay_allocation_count": 0}
+
+            @staticmethod
+            def statistics():
+                return LeanStats()
+
+        current_native = _bfs_worklist_route(LeanWorklist(), "forge", "cuda", 32, 4, 4, "a" * 64, fused_recycle=True)
+        current_child = {
+            "operation": "bfs_worklist",
+            "runtime": "forge",
+            "backend": "cuda",
+            "route": current_native,
+            "workload_contract": {
+                "contract_profile": "current",
+                "nodes": 32,
+                "levels": 4,
+                "expected_last_frontier": 4,
+                "kernel_source_sha256": "a" * 64,
+            },
+        }
+        self.assertTrue(_bfs_worklist_native_route_admitted(current_child))
+        self.assertTrue(_audit_bfs_worklist_native_route_admitted(current_child))
         Stats.overflow = True
         self.assertFalse(_bfs_worklist_route(Worklist(), "forge", "cuda", 32, 4, 4, "a" * 64)["passed"])
         Stats.overflow = False

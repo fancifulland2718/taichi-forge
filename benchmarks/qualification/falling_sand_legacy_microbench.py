@@ -1,4 +1,4 @@
-"""THIN-008-CURRENT: dense-output falling-sand claim qualification."""
+"""THIN-008-LEGACY: retained compact-output conflict diagnostic."""
 
 from __future__ import annotations
 
@@ -14,13 +14,13 @@ except ImportError:  # Direct execution from this directory.
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if "--operation" in arguments or "--contract-profile" in arguments:
-        raise ValueError("falling-sand current-contract entry point fixes its operation and profile")
+        raise ValueError("legacy falling-sand entry point fixes its operation and profile")
     return _shared_main(
         [
             "--operation",
             "falling_sand",
             "--contract-profile",
-            "current",
+            "legacy",
             *arguments,
         ]
     )
