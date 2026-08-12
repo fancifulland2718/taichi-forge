@@ -58,6 +58,59 @@ def _record_and_recycle_direct(
     ti.algorithms.device_worklist_recycle_direct(recycled_extent, overflow, generation)
 
 
+@ti.kernel
+def _reset_dense_claim_table(
+    claims: ti.types.ndarray(ndim=1),
+    overflow: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    generation: ti.types.ndarray(dtype=ti.i32, ndim=0),
+):
+    for key in claims:
+        ti.algorithms.device_dense_conflict_reset_slot(claims, key)
+        if key == 0:
+            ti.algorithms.device_dense_conflict_begin(overflow, generation)
+
+
+@ti.kernel
+def _produce_dense_claims(
+    keys: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    priorities: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    claims: ti.types.ndarray(ndim=1),
+    overflow: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    key_capacity: ti.i32,
+    source_capacity: ti.i32,
+    ordered_priority_min: ti.u32,
+    priority_span: ti.u32,
+    source_bits: ti.i32,
+    maximize: ti.i32,
+):
+    for source in keys:
+        ti.algorithms.device_dense_conflict_claim(
+            claims,
+            overflow,
+            key_capacity,
+            source_capacity,
+            ordered_priority_min,
+            priority_span,
+            source_bits,
+            maximize,
+            keys[source],
+            priorities[source],
+            source,
+        )
+
+
+@ti.kernel
+def _read_dense_claim_winners(
+    claims: ti.types.ndarray(ndim=1),
+    source_bits: ti.i32,
+    winners: ti.types.ndarray(dtype=ti.i32, ndim=1),
+):
+    for key in winners:
+        winners[key] = ti.algorithms.device_dense_conflict_winner_source(
+            claims, key, source_bits
+        )
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_device_worklist_atomic_append_clamps_and_reports_overflow():
     capacity = 17
@@ -585,6 +638,133 @@ def test_device_worklist_masked_dense_claim_reports_active_invalid_key():
         key_capacity=4,
     )
     assert worklist.statistics().overflow
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+@pytest.mark.parametrize(
+    ("policy", "expected"),
+    [
+        ("min_priority", [1, 2, 4, -1]),
+        ("max_priority", [0, 2, 5, -1]),
+    ],
+)
+def test_dense_conflict_claim_table_fuses_bounded_priority_arbitration(
+    policy, expected
+):
+    keys = ti.ndarray(ti.i32, shape=6)
+    priorities = ti.ndarray(ti.i32, shape=6)
+    winners = ti.ndarray(ti.i32, shape=4)
+    keys.from_numpy(np.array([0, 0, 1, 1, 2, 2], dtype=np.int32))
+    priorities.from_numpy(np.array([7, -8, -3, -3, 2, 9], dtype=np.int32))
+    table = ti.algorithms.DenseConflictClaimTable(
+        4,
+        6,
+        priority_range=(-8, 9),
+        policy=policy,
+    )
+
+    assert table.storage_dtype == ti.u32
+    assert table.route == "bounded_priority_source_u32"
+    initial_generation = table.statistics().generation
+    _reset_dense_claim_table(*table.reset_arguments)
+    _produce_dense_claims(keys, priorities, *table.claim_arguments)
+    _read_dense_claim_winners(*table.winner_arguments, winners)
+
+    np.testing.assert_array_equal(winners.to_numpy(), np.array(expected, np.int32))
+    statistics = table.statistics()
+    assert statistics.generation == initial_generation + 1
+    assert not statistics.overflow
+    assert statistics.persistent_bytes == 4 * 4 + 8
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_dense_conflict_claim_table_reports_declared_domain_violation():
+    keys = ti.ndarray(ti.i32, shape=3)
+    priorities = ti.ndarray(ti.i32, shape=3)
+    keys.from_numpy(np.array([0, -1, 2], dtype=np.int32))
+    priorities.from_numpy(np.array([0, 0, 6], dtype=np.int32))
+    table = ti.algorithms.DenseConflictClaimTable(
+        2, 3, priority_range=(-5, 5)
+    )
+
+    _produce_dense_claims(keys, priorities, *table.claim_arguments)
+
+    assert table.statistics().overflow
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_dense_conflict_claim_table_full_i32_priority_uses_u64():
+    keys = ti.ndarray(ti.i32, shape=4)
+    priorities = ti.ndarray(ti.i32, shape=4)
+    winners = ti.ndarray(ti.i32, shape=2)
+    keys.from_numpy(np.array([0, 0, 1, 1], dtype=np.int32))
+    priorities.from_numpy(
+        np.array([0x7FFFFFFF, -0x80000000, -1, -1], dtype=np.int32)
+    )
+    table = ti.algorithms.DenseConflictClaimTable(2, 4)
+
+    assert table.storage_dtype == ti.u64
+    assert table.route == "priority_source_u64"
+    _produce_dense_claims(keys, priorities, *table.claim_arguments)
+    _read_dense_claim_winners(*table.winner_arguments, winners)
+
+    np.testing.assert_array_equal(winners.to_numpy(), np.array([1, 2], np.int32))
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_dense_conflict_claim_table_vulkan_rejects_unbounded_u64_route():
+    with pytest.raises(ti.TaichiRuntimeError, match="bounded priority_range"):
+        ti.algorithms.DenseConflictClaimTable(4, 4)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_dense_conflict_claim_table_graph_abi_reuses_stable_storage():
+    capacity = 8
+    keys = ti.ndarray(ti.i32, shape=capacity)
+    priorities = ti.ndarray(ti.i32, shape=capacity)
+    winners = ti.ndarray(ti.i32, shape=4)
+    keys.from_numpy(np.array([0, 0, 1, 1, 2, 2, 3, 3], dtype=np.int32))
+    priorities.from_numpy(np.array([4, 1, 3, 3, -2, 2, 7, 6], dtype=np.int32))
+    table = ti.algorithms.DenseConflictClaimTable(
+        4, capacity, priority_range=(-2, 7)
+    )
+    claim_args = table.graph_args("fused_claim")
+    keys_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "claim_keys", ti.i32, ndim=1)
+    priorities_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "claim_priorities", ti.i32, ndim=1
+    )
+    winners_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "claim_winners", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(_reset_dense_claim_table, *claim_args.reset_arguments)
+    builder.dispatch(
+        _produce_dense_claims,
+        keys_arg,
+        priorities_arg,
+        *claim_args.claim_arguments,
+    )
+    builder.dispatch(
+        _read_dense_claim_winners,
+        *claim_args.winner_arguments,
+        winners_arg,
+    )
+    graph = builder.compile()
+    arguments = {
+        "claim_keys": keys,
+        "claim_priorities": priorities,
+        "claim_winners": winners,
+        **table.runtime_arguments("fused_claim"),
+    }
+
+    graph.run(arguments)
+    first_generation = table.statistics().generation
+    graph.run(arguments)
+
+    np.testing.assert_array_equal(
+        winners.to_numpy(), np.array([1, 2, 4, 7], dtype=np.int32)
+    )
+    assert table.statistics().generation == first_generation + 1
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
@@ -1131,7 +1311,12 @@ def test_device_worklist_workspace_and_runtime_memory_are_stable():
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_device_worklist_rejects_stale_generation():
     worklist = ti.algorithms.DeviceWorklist(8, ti.i32)
+    claims = ti.algorithms.DenseConflictClaimTable(
+        8, 8, priority_range=(0, 7)
+    )
     ti.reset()
     ti.init(arch=ti.cpu)
     with pytest.raises(ti.TaichiRuntimeError, match="stale"):
         worklist.prepare_next()
+    with pytest.raises(ti.TaichiRuntimeError, match="stale"):
+        claims.reset()

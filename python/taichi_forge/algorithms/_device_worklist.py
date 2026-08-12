@@ -82,6 +82,47 @@ def _packed_dense_conflict_enabled():
     return supported
 
 
+def _ordered_i32(value):
+    return ((int(value) & 0xFFFFFFFF) ^ 0x80000000) & 0xFFFFFFFF
+
+
+def _normalize_dense_claim_priority_range(priority_range):
+    if priority_range is None:
+        return None
+    if (
+        not isinstance(priority_range, (tuple, list))
+        or len(priority_range) != 2
+        or any(isinstance(value, bool) or not isinstance(value, int) for value in priority_range)
+    ):
+        raise TypeError("DenseConflictClaimTable priority_range must be a pair of Python integers")
+    lower, upper = (int(value) for value in priority_range)
+    if lower < -0x80000000 or upper > 0x7FFFFFFF or lower > upper:
+        raise ValueError("DenseConflictClaimTable priority_range must be an ordered signed i32 range")
+    return lower, upper
+
+
+def _dense_claim_encoding(source_capacity, priority_range):
+    source_bits = (source_capacity - 1).bit_length()
+    if priority_range is None:
+        ordered_min = 0
+        priority_span = 0xFFFFFFFF
+    else:
+        lower, upper = priority_range
+        ordered_min = _ordered_i32(lower)
+        priority_span = _ordered_i32(upper) - ordered_min
+    max_packed = (priority_span << source_bits) | (source_capacity - 1)
+    if max_packed < 0xFFFFFFFF:
+        return u32, "bounded_priority_source_u32", ordered_min, priority_span, source_bits
+    if max_packed >= 0xFFFFFFFFFFFFFFFF:
+        raise ValueError("DenseConflictClaimTable priority/source encoding exceeds 64 bits")
+    if _current_backend_name() not in ("cpu", "cuda"):
+        raise TaichiRuntimeError(
+            "DenseConflictClaimTable requires a bounded priority_range that fits "
+            "the portable u32 encoding on Vulkan"
+        )
+    return u64, "priority_source_u64", ordered_min, priority_span, source_bits
+
+
 def _require_capacity(value, role="capacity"):
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"DeviceWorklist {role} must be a Python integer")
@@ -203,6 +244,131 @@ def device_worklist_recycle_direct(
     recycled_extent_state[1] = 0
     overflow[None] = 0
     generation[None] += 1
+
+
+@func
+def device_dense_conflict_begin(
+    overflow: template(),
+    generation: template(),
+):
+    """Begin one fused dense-claim generation.
+
+    Call exactly once in a globally ordered reset/producer kernel. Resetting
+    packed slots is deliberately separate so it can share the caller's dense
+    reset loop without adding a standalone dispatch.
+    """
+
+    overflow[None] = 0
+    generation[None] += 1
+
+
+@func
+def device_dense_conflict_reset_slot(
+    claims: template(),
+    key: i32,
+):
+    """Reset one packed claim slot to the no-winner sentinel."""
+
+    impl.static_assert(
+        claims.get_type().element_type in (u32, u64),
+        "dense conflict claims must use u32 or u64 storage",
+    )
+    if impl.static(claims.get_type().element_type == u32):
+        claims[key] = ops.cast(-1, u32)
+    elif impl.static(claims.get_type().element_type == u64):
+        claims[key] = ops.cast(-1, u64)
+
+
+@func
+def device_dense_conflict_claim(
+    claims: template(),
+    overflow: template(),
+    key_capacity: i32,
+    source_capacity: i32,
+    ordered_priority_min: u32,
+    priority_span: u32,
+    source_bits: i32,
+    maximize: i32,
+    key: template(),
+    priority: i32,
+    source: i32,
+):
+    """Atomically submit one deterministic ``(priority, source)`` claim.
+
+    Return one when the input belongs to the declared key/source/priority
+    domain. Invalid input sets sticky ``overflow`` and performs no write.
+    """
+
+    impl.static_assert(
+        claims.get_type().element_type in (u32, u64),
+        "dense conflict claims must use u32 or u64 storage",
+    )
+    accepted = 0
+    ordered_priority = ops.cast(priority, u32) ^ ops.cast(-0x80000000, u32)
+    in_priority_range = (
+        ordered_priority >= ordered_priority_min
+        and ordered_priority - ordered_priority_min <= priority_span
+    )
+    if (
+        key_capacity == claims.shape[0]
+        and key >= 0
+        and key < key_capacity
+        and source >= 0
+        and source < source_capacity
+        and in_priority_range
+    ):
+        normalized = ordered_priority - ordered_priority_min
+        if maximize != 0:
+            normalized = priority_span - normalized
+        if impl.static(claims.get_type().element_type == u32):
+            candidate = (normalized << source_bits) | ops.cast(source, u32)
+            ops.atomic_min(claims[key], candidate)
+        elif impl.static(claims.get_type().element_type == u64):
+            candidate = (ops.cast(normalized, u64) << source_bits) | ops.cast(source, u64)
+            ops.atomic_min(claims[key], candidate)
+        accepted = 1
+    else:
+        ops.atomic_or(overflow[None], 1)
+    return accepted
+
+
+@func
+def device_dense_conflict_winner_source(
+    claims: template(),
+    key: i32,
+    source_bits: i32,
+):
+    """Return the deterministic winner source for ``key``, or ``-1``."""
+
+    impl.static_assert(
+        claims.get_type().element_type in (u32, u64),
+        "dense conflict claims must use u32 or u64 storage",
+    )
+    source = -1
+    if key >= 0 and key < claims.shape[0]:
+        if impl.static(claims.get_type().element_type == u32):
+            packed = claims[key]
+            if packed != ops.cast(-1, u32):
+                mask = (ops.cast(1, u32) << source_bits) - 1
+                source = ops.cast(packed & mask, i32)
+        elif impl.static(claims.get_type().element_type == u64):
+            packed = claims[key]
+            if packed != ops.cast(-1, u64):
+                mask = (ops.cast(1, u64) << source_bits) - 1
+                source = ops.cast(packed & mask, i32)
+    return source
+
+
+@kernel
+def _reset_dense_conflict_claim_table(
+    claims: ndarray_type.ndarray(ndim=1),
+    overflow: ndarray_type.ndarray(dtype=i32, ndim=0),
+    generation: ndarray_type.ndarray(dtype=i32, ndim=0),
+):
+    for key in claims:
+        device_dense_conflict_reset_slot(claims, key)
+        if key == 0:
+            device_dense_conflict_begin(overflow, generation)
 
 
 @kernel
@@ -868,6 +1034,242 @@ class DeviceConflictResult:
 
 
 @dataclass(frozen=True)
+class DenseConflictClaimStatistics:
+    """Explicit synchronized state for a fused dense claim table."""
+
+    schema_version: int
+    backend: str
+    route: str
+    policy: str
+    key_capacity: int
+    source_capacity: int
+    priority_range: object
+    overflow: bool
+    generation: int
+    persistent_bytes: int
+
+
+@dataclass(frozen=True)
+class DenseConflictClaimGraphArgs:
+    """Symbolic Graph ABI matching :class:`DenseConflictClaimTable`."""
+
+    name: str
+    claims: object
+    overflow: object
+    generation: object
+    key_capacity: object
+    source_capacity: object
+    ordered_priority_min: object
+    priority_span: object
+    source_bits: object
+    maximize: object
+    storage_dtype: object
+
+    @property
+    def reset_arguments(self):
+        return self.claims, self.overflow, self.generation
+
+    @property
+    def claim_arguments(self):
+        return (
+            self.claims,
+            self.overflow,
+            self.key_capacity,
+            self.source_capacity,
+            self.ordered_priority_min,
+            self.priority_span,
+            self.source_bits,
+            self.maximize,
+        )
+
+    @property
+    def winner_arguments(self):
+        return self.claims, self.source_bits
+
+
+class DenseConflictClaimTable:
+    """Fixed-capacity storage for producer-fused dense keyed arbitration.
+
+    A bounded ``priority_range`` selects a portable u32 encoding whenever the
+    declared priority/source product fits. CPU and CUDA additionally support a
+    u64 encoding for wider or full signed-i32 priorities. Vulkan fails closed
+    when the bounded u32 contract cannot be represented.
+    """
+
+    def __init__(
+        self,
+        key_capacity,
+        source_capacity,
+        *,
+        priority_range=None,
+        policy="min_priority",
+    ):
+        key_capacity = _require_capacity(key_capacity, "key_capacity")
+        source_capacity = _require_capacity(source_capacity, "source_capacity")
+        priority_range = _normalize_dense_claim_priority_range(priority_range)
+        if policy not in ("min_priority", "max_priority"):
+            raise ValueError(
+                "DenseConflictClaimTable policy must be min_priority or max_priority"
+            )
+        if impl.get_runtime().prog is None:
+            raise TaichiRuntimeError(
+                "DenseConflictClaimTable requires an initialized runtime"
+            )
+        (
+            storage_dtype,
+            route,
+            ordered_priority_min,
+            priority_span,
+            source_bits,
+        ) = _dense_claim_encoding(source_capacity, priority_range)
+        self._key_capacity = key_capacity
+        self._source_capacity = source_capacity
+        self._priority_range = priority_range
+        self._policy = policy
+        self._storage_dtype = storage_dtype
+        self._route = route
+        self._ordered_priority_min = ordered_priority_min
+        self._priority_span = priority_span
+        self._source_bits = source_bits
+        self._maximize = int(policy == "max_priority")
+        self._claims = ti_ndarray(storage_dtype, shape=key_capacity)
+        self._overflow = ti_ndarray(i32, shape=())
+        self._generation_state = ti_ndarray(i32, shape=())
+        self._generation_state.fill(0)
+        self._runtime_generation = int(impl.runtime_generation())
+        self._program = impl.get_runtime().prog
+        self._allocation_identities = (
+            int(self._claims._runtime_allocation_identity),
+            int(self._overflow._runtime_allocation_identity),
+            int(self._generation_state._runtime_allocation_identity),
+        )
+        self.reset()
+
+    @property
+    def key_capacity(self):
+        return self._key_capacity
+
+    @property
+    def source_capacity(self):
+        return self._source_capacity
+
+    @property
+    def priority_range(self):
+        return self._priority_range
+
+    @property
+    def policy(self):
+        return self._policy
+
+    @property
+    def route(self):
+        return self._route
+
+    @property
+    def storage_dtype(self):
+        return self._storage_dtype
+
+    @property
+    def persistent_bytes(self):
+        return self._key_capacity * (4 if self._storage_dtype == u32 else 8) + 8
+
+    def _validate_current(self):
+        runtime = impl.get_runtime()
+        if (
+            int(impl.runtime_generation()) != self._runtime_generation
+            or runtime.prog is None
+            or runtime.prog is not self._program
+        ):
+            raise TaichiRuntimeError(
+                "DenseConflictClaimTable is stale after runtime reset"
+            )
+        values = (self._claims, self._overflow, self._generation_state)
+        for value, identity in zip(values, self._allocation_identities):
+            if (
+                value.arr is None
+                or int(value._runtime_allocation_identity) != identity
+            ):
+                raise TaichiRuntimeError(
+                    "DenseConflictClaimTable storage is no longer valid"
+                )
+
+    @property
+    def reset_arguments(self):
+        self._validate_current()
+        return self._claims, self._overflow, self._generation_state
+
+    @property
+    def claim_arguments(self):
+        self._validate_current()
+        return (
+            self._claims,
+            self._overflow,
+            self._key_capacity,
+            self._source_capacity,
+            self._ordered_priority_min,
+            self._priority_span,
+            self._source_bits,
+            self._maximize,
+        )
+
+    @property
+    def winner_arguments(self):
+        self._validate_current()
+        return self._claims, self._source_bits
+
+    def reset(self):
+        """Reset the table with one dispatch outside a fused pipeline."""
+
+        self._validate_current()
+        _reset_dense_conflict_claim_table(*self.reset_arguments)
+        return self
+
+    def graph_args(self, name):
+        """Create symbolic arguments matching :meth:`runtime_arguments`."""
+
+        self._validate_current()
+        return dense_conflict_claim_graph_args(
+            name,
+            storage_dtype=self._storage_dtype,
+        )
+
+    def runtime_arguments(self, name):
+        """Return stable runtime bindings for a matching Graph ABI."""
+
+        self._validate_current()
+        if not isinstance(name, str) or not name:
+            raise ValueError("DenseConflictClaimTable Graph name must be non-empty")
+        return {
+            f"{name}_claims": self._claims,
+            f"{name}_overflow": self._overflow,
+            f"{name}_generation": self._generation_state,
+            f"{name}_key_capacity": self._key_capacity,
+            f"{name}_source_capacity": self._source_capacity,
+            f"{name}_ordered_priority_min": self._ordered_priority_min,
+            f"{name}_priority_span": self._priority_span,
+            f"{name}_source_bits": self._source_bits,
+            f"{name}_maximize": self._maximize,
+        }
+
+    def statistics(self):
+        """Synchronize and read sticky overflow and generation state."""
+
+        self._validate_current()
+        return DenseConflictClaimStatistics(
+            schema_version=1,
+            backend=_current_backend_name(),
+            route=self._route,
+            policy=self._policy,
+            key_capacity=self._key_capacity,
+            source_capacity=self._source_capacity,
+            priority_range=self._priority_range,
+            overflow=bool(self._overflow.to_numpy().item()),
+            generation=int(self._generation_state.to_numpy().item()),
+            persistent_bytes=self.persistent_bytes,
+        )
+
+
+@dataclass(frozen=True)
 class DeviceWorklistGraphArgs:
     """Symbolic Graph arguments for one fixed-capacity worklist."""
 
@@ -995,6 +1397,38 @@ def device_worklist_graph_args(
         capacity=graph.Arg(scalar, f"{name}_capacity", i32),
         telemetry=telemetry,
         transition_mode=transition_mode,
+    )
+
+
+def dense_conflict_claim_graph_args(name, *, storage_dtype=u32):
+    """Create the symbolic ABI for a :class:`DenseConflictClaimTable`.
+
+    Prefer ``table.graph_args(name)`` so the symbolic storage dtype is selected
+    from the table's qualified backend encoding.
+    """
+
+    if not isinstance(name, str) or not name:
+        raise ValueError("DenseConflictClaimTable Graph name must be non-empty")
+    if storage_dtype not in (u32, u64):
+        raise TypeError("DenseConflictClaimTable Graph storage must be ti.u32 or ti.u64")
+    from taichi_forge import graph  # pylint: disable=import-outside-toplevel
+
+    ndarray = graph.ArgKind.NDARRAY
+    scalar = graph.ArgKind.SCALAR
+    return DenseConflictClaimGraphArgs(
+        name=name,
+        claims=graph.Arg(ndarray, f"{name}_claims", storage_dtype, ndim=1),
+        overflow=graph.Arg(ndarray, f"{name}_overflow", i32, ndim=0),
+        generation=graph.Arg(ndarray, f"{name}_generation", i32, ndim=0),
+        key_capacity=graph.Arg(scalar, f"{name}_key_capacity", i32),
+        source_capacity=graph.Arg(scalar, f"{name}_source_capacity", i32),
+        ordered_priority_min=graph.Arg(
+            scalar, f"{name}_ordered_priority_min", u32
+        ),
+        priority_span=graph.Arg(scalar, f"{name}_priority_span", u32),
+        source_bits=graph.Arg(scalar, f"{name}_source_bits", i32),
+        maximize=graph.Arg(scalar, f"{name}_maximize", i32),
+        storage_dtype=storage_dtype,
     )
 
 
@@ -2974,6 +3408,9 @@ class _DeviceWorklistSequenceNode(NativeGraphNode):
 
 
 __all__ = [
+    "DenseConflictClaimGraphArgs",
+    "DenseConflictClaimStatistics",
+    "DenseConflictClaimTable",
     "DeviceConflictResult",
     "DeviceWorklist",
     "DeviceWorklistBinding",
@@ -2982,6 +3419,11 @@ __all__ = [
     "DeviceWorklistSequence",
     "DeviceWorklistSnapshot",
     "DeviceWorklistStatistics",
+    "dense_conflict_claim_graph_args",
+    "device_dense_conflict_begin",
+    "device_dense_conflict_claim",
+    "device_dense_conflict_reset_slot",
+    "device_dense_conflict_winner_source",
     "device_worklist_append",
     "device_worklist_append_direct",
     "device_worklist_recycle_direct",
