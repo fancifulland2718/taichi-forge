@@ -146,6 +146,7 @@ class BoundedDomain:
             raise ValueError("Bounded domain block_mode is invalid")
         if self.physical_grid_requirement not in (
             "auto",
+            "fixed_capacity",
             "logical_exact",
             "adaptive_grid",
             "require_exact",

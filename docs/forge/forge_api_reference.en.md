@@ -1218,10 +1218,19 @@ handle = builder.dispatch_bounded(
     extent=extent_arg,
     capacity=capacity,
     block_dim=128,
+    physical_grid="extent",
 )
 graph = builder.compile()
 graph.run({"extent": extent, "input": values, "output": output})
 ```
+
+`physical_grid` is a per-dispatch policy. `"auto"` keeps the backend's
+conservative default, `"extent"` requires physical work to track the clamped
+device extent without host readback, and `"capacity"` records the explicit
+fixed-capacity baseline. `ti.graph.bounded_dispatch_capabilities(policy)`
+reports the route for the same policy before construction. An unavailable
+explicit `"extent"` route fails closed instead of silently becoming a capacity
+launch.
 
 The lowering contract is backend-honest:
 
@@ -1238,17 +1247,20 @@ The lowering contract is backend-honest:
   saturation-capped grid-stride scheduler; no host readback or 12.4 symbol is
   required. The physical thread envelope is not an exact grid, but only
   `[0, count)` enters the range body. With Driver API 12.4 or newer,
-  `TI_CUDA_BOUNDED_DISPATCH_MODE=device_update` additionally trims the physical
+  `physical_grid="extent"` additionally trims the physical
   node grid to `min(ceil(count / block_dim), saturation_grid)` and disables the
   payload at zero. Correctness does not depend on that update. The forced
-  `masked_capacity` route remains an A/B and diagnostic baseline. None of these
+  `physical_grid="capacity"` route remains an A/B and diagnostic baseline.
+  `TI_CUDA_BOUNDED_DISPATCH_MODE` remains only as a process-wide diagnostic
+  override for callers that leave the policy at `"auto"`. None of these
   routes claims CUDA indirect dispatch or conditional termination.
 - CPU defaults to the exact scheduler route. It snapshots and clamps the
   device extent once, skips a zero range, and submits positive work as adaptive
   contiguous JIT loops. CPU chunking is independent of GPU `block_dim`, so LLVM
   retains its loop-vectorization opportunity. Set
-  `TI_CPU_BOUNDED_DISPATCH_MODE=masked_capacity` only to force the conservative
-  fixed-capacity fallback or to run an A/B diagnostic. CPU ordered segmented
+  `physical_grid="capacity"` only to force the conservative fixed-capacity
+  fallback or to run an A/B diagnostic. `TI_CPU_BOUNDED_DISPATCH_MODE` remains
+  a process-wide diagnostic override for `"auto"`. CPU ordered segmented
   dispatch does not yet have an exact lowering: `auto` falls back to its
   globally ordered masked route for that operation, while a forced
   `exact_scheduler` request fails closed.

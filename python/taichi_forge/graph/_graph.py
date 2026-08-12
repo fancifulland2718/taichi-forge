@@ -1643,6 +1643,7 @@ class BoundedDispatchCapabilities:
     static_admission: str = "explicit_route"
     static_admission_reason: str = "none"
     physical_observation: str = "execution_stats_opt_in"
+    physical_grid_policy: str = "auto"
 
 
 @dataclass(frozen=True)
@@ -1705,7 +1706,33 @@ class OrderedSegmentedDispatchSnapshot:
 _bounded_dispatch_ids = itertools.count(1)
 
 
-def _bounded_route_request(backend):
+def _normalize_bounded_physical_grid_policy(value):
+    if not isinstance(value, str):
+        raise TypeError("bounded dispatch physical_grid must be a string")
+    policy = value.strip().lower()
+    aliases = {
+        "auto": "auto",
+        "extent": "extent",
+        "capacity": "capacity",
+    }
+    if policy not in aliases:
+        raise ValueError(
+            "bounded dispatch physical_grid must be one of "
+            f"{'|'.join(aliases)}, got {value!r}"
+        )
+    return aliases[policy]
+
+
+def _bounded_route_request(backend, physical_grid="auto"):
+    physical_grid = _normalize_bounded_physical_grid_policy(physical_grid)
+    if physical_grid == "extent":
+        if backend == "cuda":
+            return "device_update"
+        if backend == "cpu":
+            return "exact_scheduler"
+        return "not_applicable"
+    if physical_grid == "capacity":
+        return "masked_capacity"
     if backend == "cuda":
         env_name = "TI_CUDA_BOUNDED_DISPATCH_MODE"
         default = "auto"
@@ -1774,12 +1801,50 @@ def _vulkan_bounded_packet_policy():
     return requested, aliases[requested]
 
 
-def _bounded_route(backend, ordered):
+def _bounded_route(backend, ordered, physical_grid="auto"):
+    physical_grid = _normalize_bounded_physical_grid_policy(physical_grid)
+    requested_route = _bounded_route_request(backend, physical_grid)
     if backend == "vulkan":
+        if requested_route == "masked_capacity":
+            return BoundedDispatchCapabilities(
+                schema_version=5,
+                backend=backend,
+                requested_route=requested_route,
+                route="masked_capacity",
+                minimum_driver_api_version=None,
+                driver_api_version=None,
+                driver_version_eligible=True,
+                required_symbols_loaded=True,
+                device_update_ptx_linked=False,
+                setup_probe_passed=True,
+                device_known_count=True,
+                no_host_readback=True,
+                logical_iteration_exact=False,
+                physical_launch_kind="fixed_capacity_grid_stride",
+                exact_grid=False,
+                execution_semantics="masked_capacity",
+                range_mapping="grid_stride",
+                masked_capacity=True,
+                zero_count_command_skip=False,
+                ordered_segments=ordered,
+                global_segment_order=ordered,
+                producer_owned_launch_state=False,
+                producer_owned_launch_state_supported=False,
+                preparation_dispatches=0,
+                baseline_capacity_grid=True,
+                capacity=0,
+                block_dim=None,
+                fallback_reason="forced_capacity_policy",
+                reason=(
+                    "Vulkan uses a fixed-capacity grid as explicitly requested "
+                    "by this dispatch"
+                ),
+                physical_grid_policy=physical_grid,
+            )
         return BoundedDispatchCapabilities(
             schema_version=5,
             backend=backend,
-            requested_route="not_applicable",
+            requested_route=requested_route,
             route="exact_indirect",
             minimum_driver_api_version=None,
             driver_api_version=None,
@@ -1806,8 +1871,8 @@ def _bounded_route(backend, ordered):
             block_dim=None,
             fallback_reason="none",
             reason="Vulkan dispatchIndirect consumes a device-written grid packet",
+            physical_grid_policy=physical_grid,
         )
-    requested_route = _bounded_route_request(backend)
     if backend == "cuda":
         update_policy = None
         if requested_route == "device_update":
@@ -1873,6 +1938,7 @@ def _bounded_route(backend, ordered):
                     "physical launch work; the selected update policy is "
                     f"{update_policy}"
                 ),
+                physical_grid_policy=physical_grid,
             )
         if requested_route == "auto" and not ordered:
             return BoundedDispatchCapabilities(
@@ -1909,6 +1975,7 @@ def _bounded_route(backend, ordered):
                     "scheduler and loads the exact logical range end from "
                     "DeviceExtent without host readback"
                 ),
+                physical_grid_policy=physical_grid,
             )
         return BoundedDispatchCapabilities(
             schema_version=5,
@@ -1948,6 +2015,7 @@ def _bounded_route(backend, ordered):
                 "segments or as an explicit diagnostic and performance "
                 "baseline"
             ),
+            physical_grid_policy=physical_grid,
         )
     else:
         driver_api_version = None
@@ -1992,6 +2060,7 @@ def _bounded_route(backend, ordered):
                     "and submits only the clamped range as adaptive contiguous "
                     "chunks independent of GPU block geometry"
                 ),
+                physical_grid_policy=physical_grid,
             )
         reason = (
             "CPU uses the cached fixed-capacity range task and masks payload "
@@ -2034,6 +2103,7 @@ def _bounded_route(backend, ordered):
         block_dim=None,
         fallback_reason=fallback_reason,
         reason=reason,
+        physical_grid_policy=physical_grid,
     )
 
 
@@ -2142,6 +2212,7 @@ class BoundedDispatchHandle:
         launch_state=None,
         preparation_dispatches=None,
         packet_allocation_owner=True,
+        capabilities=None,
     ):
         self.extent_name = extent_name
         self.offsets_name = offsets_name
@@ -2155,7 +2226,11 @@ class BoundedDispatchHandle:
         self._packet_allocation_owner = bool(packet_allocation_owner)
         self._runtime_generation = int(impl.runtime_generation())
         self._runtime_program = impl.get_runtime().prog
-        base = _bounded_route(backend, self._ordered)
+        base = (
+            _bounded_route(backend, self._ordered)
+            if capabilities is None
+            else capabilities
+        )
         if preparation_dispatches is None:
             preparation_dispatches = (
                 0
@@ -3024,14 +3099,14 @@ def _bounded_pipeline_route(domain, backend):
             else "host_sized_grid_stride",
             True,
         )
-    if backend == "vulkan":
+    requirement = domain.physical_grid_requirement
+    if backend == "vulkan" and requirement != "fixed_capacity":
         return (
             "exact_indirect",
             "exact_device_grid",
             "indirect_one_to_one",
             True,
         )
-    requirement = domain.physical_grid_requirement
     if backend == "cuda":
         if requirement == "adaptive_grid":
             return (
@@ -3397,9 +3472,10 @@ def _cuda_structured_control_lowering(capabilities=None):
     return None
 
 
-def bounded_dispatch_capabilities():
-    """Return the active backend's device-known bounded dispatch contract."""
+def bounded_dispatch_capabilities(physical_grid="auto"):
+    """Return one physical-grid policy's device-known dispatch contract."""
 
+    physical_grid = _normalize_bounded_physical_grid_policy(physical_grid)
     backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
     if backend not in ("cpu", "cuda", "vulkan"):
         return {
@@ -3444,11 +3520,15 @@ def bounded_dispatch_capabilities():
             "static_admission": "unsupported",
             "static_admission_reason": "backend_not_qualified",
             "physical_observation": "unavailable",
+            "physical_grid_policy": physical_grid,
+            "supported_physical_grid_policies": (),
         }
     # Report the default single bounded-dispatch route. Ordered segmented
     # dispatch has its own per-operation lowering and may conservatively fall
     # back when that selected exact route cannot preserve global segment order.
-    capabilities = _bounded_route(backend, False)
+    capabilities = _bounded_route(
+        backend, False, physical_grid=physical_grid
+    )
     if backend == "cuda":
         update_policy_requested, update_policy = _cuda_bounded_update_policy()
     else:
@@ -3521,6 +3601,12 @@ def bounded_dispatch_capabilities():
             "execution_stats_opt_in"
             if backend == "cuda"
             else "handle_snapshot_opt_in"
+        ),
+        "physical_grid_policy": capabilities.physical_grid_policy,
+        "supported_physical_grid_policies": (
+            "auto",
+            "extent",
+            "capacity",
         ),
     }
 
@@ -11073,6 +11159,7 @@ class GraphBuilder:
         capacity,
         block_dim=None,
         block_mode="require",
+        physical_grid="auto",
         launch_state=None,
         template_args=None,
         label=None,
@@ -11086,9 +11173,13 @@ class GraphBuilder:
         scheduler chunks, a CUDA device-bounded grid-stride range, or Vulkan
         indirect dispatch. A host count is accepted only when compiler
         metadata proves it is the payload's sole range domain, and is clamped
-        before launch.
+        before launch. ``physical_grid='extent'`` requires a no-readback
+        backend route whose physical work tracks the clamped device extent;
+        ``'capacity'`` is the explicit fixed-grid baseline, and ``'auto'``
+        keeps the backend's conservative admission policy.
         """
 
+        physical_grid = _normalize_bounded_physical_grid_policy(physical_grid)
         if isinstance(capacity, bool) or not isinstance(capacity, int):
             raise TypeError("bounded dispatch capacity must be an integer")
         if capacity <= 0 or capacity > 0x7FFFFFFF:
@@ -11097,12 +11188,22 @@ class GraphBuilder:
             raise ValueError(
                 "bounded dispatch requires exactly one of extent or count"
             )
+        if count is not None and physical_grid != "auto":
+            raise ValueError(
+                "host-known bounded dispatch already uses an exact launch; "
+                "physical_grid must remain 'auto'"
+            )
         if launch_state is not None:
             from taichi_forge.lang.device_extent import DeviceDispatchState
 
             if count is not None:
                 raise ValueError(
                     "producer-owned launch_state is valid only for device extents"
+                )
+            if physical_grid == "capacity":
+                raise ValueError(
+                    "producer-owned launch_state cannot be combined with "
+                    "physical_grid='capacity'"
                 )
             if not isinstance(launch_state, DeviceDispatchState):
                 raise TypeError(
@@ -11133,7 +11234,11 @@ class GraphBuilder:
                 "route from the DeviceExtent."
             )
         selected_route = (
-            None if count is not None else _bounded_route(backend, False)
+            None
+            if count is not None
+            else _bounded_route(
+                backend, False, physical_grid=physical_grid
+            )
         )
         exact_device_grid = bool(
             selected_route is not None and selected_route.exact_grid
@@ -11225,7 +11330,10 @@ class GraphBuilder:
         packet_allocation_owner = True
         preparation_dispatches = None
         preserve_vulkan_packet = False
-        if backend == "vulkan":
+        vulkan_indirect = bool(
+            backend == "vulkan" and selected_route.route == "exact_indirect"
+        )
+        if vulkan_indirect:
             publication = (
                 None
                 if effective_launch_state is not None
@@ -11320,7 +11428,15 @@ class GraphBuilder:
                 else (
                     "logical_exact"
                     if cuda_bounded_range
-                    else ("require_exact" if exact_device_grid else "auto")
+                    else (
+                        "require_exact"
+                        if exact_device_grid
+                        else (
+                            "fixed_capacity"
+                            if physical_grid == "capacity"
+                            else "auto"
+                        )
+                    )
                 )
             ),
         )
@@ -11345,6 +11461,7 @@ class GraphBuilder:
             launch_state=effective_launch_state,
             preparation_dispatches=preparation_dispatches,
             packet_allocation_owner=packet_allocation_owner,
+            capabilities=selected_route,
         )
         return handle
 

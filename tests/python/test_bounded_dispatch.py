@@ -97,6 +97,85 @@ def test_dynamic_work_capabilities_separate_launch_and_iteration_semantics():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_bounded_dispatch_reports_per_dispatch_physical_grid_policy():
+    automatic = ti.graph.bounded_dispatch_capabilities()
+    capacity = ti.graph.bounded_dispatch_capabilities("capacity")
+
+    assert automatic["physical_grid_policy"] == "auto"
+    assert automatic["supported_physical_grid_policies"] == (
+        "auto",
+        "extent",
+        "capacity",
+    )
+    assert capacity["physical_grid_policy"] == "capacity"
+    assert capacity["selected_route"] == "masked_capacity"
+    assert capacity["masked_capacity"]
+    assert capacity["baseline_capacity_grid"]
+    assert not capacity["exact_physical_grid"]
+
+    arch = ti.lang.impl.current_cfg().arch
+    if arch != ti.cuda or dict(
+        ti_core.cuda_bounded_dispatch_capabilities()
+    )["exact_device_grid_available"]:
+        extent = ti.graph.bounded_dispatch_capabilities("extent")
+        assert extent["physical_grid_policy"] == "extent"
+        assert extent["logical_iteration_exact"]
+        assert extent["zero_count_command_skip"]
+        assert extent["selected_route"] in (
+            "exact_cpu_scheduler",
+            "adaptive_device_grid_update",
+            "exact_indirect",
+        )
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_per_dispatch_extent_policy_overrides_process_capacity_default(
+    monkeypatch,
+):
+    monkeypatch.setenv("TI_CPU_BOUNDED_DISPATCH_MODE", "masked_capacity")
+    capacity = 31
+
+    @ti.kernel
+    def consume(
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        visited: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in range(capacity):
+            ti.atomic_add(visited[0], 1)
+            if i < ti.device_extent_count(extent):
+                ti.atomic_add(visited[1], 1)
+
+    extent_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "policy_extent", ti.i32, ndim=1
+    )
+    visited_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "policy_visited", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    handle = builder.dispatch_bounded(
+        consume,
+        extent_arg,
+        visited_arg,
+        extent=extent_arg,
+        capacity=capacity,
+        physical_grid="extent",
+    )
+    graph = builder.compile()
+    extent = ti.DeviceExtent(capacity)
+    extent.set(7)
+    visited = ti.ndarray(ti.i32, shape=2)
+    visited.fill(0)
+
+    graph.run({"policy_extent": extent, "policy_visited": visited})
+
+    assert handle.capabilities.physical_grid_policy == "extent"
+    assert handle.capabilities.route == "exact_cpu_scheduler"
+    np.testing.assert_array_equal(
+        visited.to_numpy(), np.array([7, 7], dtype=np.int32)
+    )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_bounded_internal_launch_storage_is_graph_instance_owned():
     capacity = 17
 

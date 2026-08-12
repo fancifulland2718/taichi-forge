@@ -1038,10 +1038,17 @@ handle = builder.dispatch_bounded(
     extent=extent_arg,
     capacity=capacity,
     block_dim=128,
+    physical_grid="extent",
 )
 graph = builder.compile()
 graph.run({"extent": extent, "input": values, "output": output})
 ```
+
+`physical_grid` 是逐 dispatch 的策略：`"auto"` 保留后端的保守默认选择，
+`"extent"` 要求物理工作量在不经过 host readback 的前提下随钳制后的 device extent 缩放，
+`"capacity"` 则显式记录固定 capacity 基线。构图前可用
+`ti.graph.bounded_dispatch_capabilities(policy)` 查询同一策略的实际 route；显式请求的
+`"extent"` 路线不可用时会 fail closed，不会静默退化成 capacity launch。
 
 lowering 合同会如实区分后端：
 
@@ -1054,15 +1061,16 @@ lowering 合同会如实区分后端：
 - CUDA 在所有受支持 driver 上默认使用 exact logical-range specialization：device 端读取并钳制
   `DeviceExtent`，再沿用普通的 saturation-capped grid-stride scheduler，不需要 host readback
   或 12.4 symbol。物理 thread envelope 不是 exact grid，但只有 `[0, count)` 会进入 range body。
-  Driver API 12.4 或更高版本可通过 `TI_CUDA_BOUNDED_DISPATCH_MODE=device_update` 进一步把物理
+  Driver API 12.4 或更高版本可通过 `physical_grid="extent"` 进一步把物理
   node grid 缩到 `min(ceil(count / block_dim), saturation_grid)`，并在 count=0 时禁用 payload；
-  正确性不依赖该更新。强制 `masked_capacity` 保留为 A/B 与诊断基线。这些路线都不宣称 CUDA
+  正确性不依赖该更新。`physical_grid="capacity"` 保留为 A/B 与诊断基线；
+  `TI_CUDA_BOUNDED_DISPATCH_MODE` 仅作为 `"auto"` 调用方的进程级诊断覆盖。这些路线都不宣称 CUDA
   indirect dispatch 或 conditional termination；
 - CPU 默认使用 exact scheduler route。它只读取并钳制一次 device extent；零 range 直接跳过，
   正数 workload 则提交为自适应的连续 JIT loop。CPU chunk 与 GPU `block_dim` 解耦，因此
   LLVM 仍有机会进行 loop vectorization。仅在需要保守的固定容量
-  fallback 或 A/B 诊断时，才设置
-  `TI_CPU_BOUNDED_DISPATCH_MODE=masked_capacity`。CPU ordered segmented
+  fallback 或 A/B 诊断时，才使用 `physical_grid="capacity"`；
+  `TI_CPU_BOUNDED_DISPATCH_MODE` 仅作为 `"auto"` 的进程级诊断覆盖。CPU ordered segmented
   dispatch 尚无 exact lowering：`auto` 会针对该操作回退到保持全局顺序的 masked route，
   强制 `exact_scheduler` 则 fail closed。
 
