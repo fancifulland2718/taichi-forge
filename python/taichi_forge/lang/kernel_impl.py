@@ -758,7 +758,12 @@ class TaichiCallableTemplateMapper:
                 needs_grad = (arg.grad is not None) if anno.needs_grad is None else anno.needs_grad
                 layout = (
                     "runtime_affine_ndarray"
-                    if getattr(arg, "_graph_runtime_affine_exemplar", False)
+                    if (
+                        getattr(arg, "_runtime_affine_exemplar", False)
+                        or getattr(
+                            arg, "_graph_runtime_affine_exemplar", False
+                        )
+                    )
                     else "canonical_ndarray"
                 )
                 return (

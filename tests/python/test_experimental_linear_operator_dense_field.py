@@ -1326,7 +1326,7 @@ def test_scalar_flat_range_views_apply_and_preserve_disjoint_storage():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_scalar_flat_range_views_cross_packed_lanes_and_stage_stride():
+def test_scalar_flat_range_views_cross_packed_lanes_and_direct_affine_stride():
     values = np.arange(18, dtype=np.float32).reshape(6, 3)
     source = ti.Vector.field(3, ti.f32, shape=6)
     output = ti.Vector.field(3, ti.f32, shape=6)
@@ -1359,6 +1359,11 @@ def test_scalar_flat_range_views_cross_packed_lanes_and_stage_stride():
     np.testing.assert_array_equal(
         strided_output.to_numpy().reshape(-1), expected
     )
+    vector_stats = operator.statistics()["vector_io"]
+    assert vector_stats["last_input_execution_mode"] == "direct_affine"
+    assert vector_stats["last_output_execution_mode"] == "direct_affine"
+    assert vector_stats["pack_calls"] == 0
+    assert vector_stats["unpack_calls"] == 0
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

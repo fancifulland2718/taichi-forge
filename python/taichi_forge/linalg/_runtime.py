@@ -1061,6 +1061,12 @@ class LinearOperator:
                 ) from exc
             compile_input = ScalarNdarray(f32, (input_size,))
             compile_output = ScalarNdarray(f32, (output_size,))
+            # Compiled-kernel operators may bind qualified affine Field or
+            # ndarray views to these two ABI slots. Keep their specialization
+            # distinct from branch-free canonical ndarray kernels so direct
+            # strided operands use the runtime shape/stride metadata.
+            compile_input._runtime_affine_exemplar = True
+            compile_output._runtime_affine_exemplar = True
             compile_args = (
                 active_size,
                 topology,

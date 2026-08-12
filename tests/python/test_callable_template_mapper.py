@@ -120,6 +120,12 @@ def test_callable_template_mapper_separates_canonical_and_affine_ndarrays():
     assert graph_id == affine_id
     assert graph_features[0][4] == "runtime_affine_ndarray"
 
+    operator_exemplar = ti.ndarray(ti.f32, shape=(4, 4))
+    operator_exemplar._runtime_affine_exemplar = True
+    operator_id, operator_features = mapper.lookup((operator_exemplar,))
+    assert operator_id == affine_id
+    assert operator_features[0][4] == "runtime_affine_ndarray"
+
 
 @test_utils.test()
 def test_callable_template_mapper_prunes_dead_field_identities():
