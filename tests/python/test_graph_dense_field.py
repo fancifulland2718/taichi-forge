@@ -246,7 +246,7 @@ def test_dense_field_graph_execution_report_explains_backend_path():
 
     initial = graph.execution_stats()
     assert isinstance(initial, ti.graph.GraphExecutionReport)
-    assert initial.schema_version == 5
+    assert initial.schema_version == 6
     assert initial.lifecycle_state == "ready"
     assert initial.node_count == 1
     assert initial.cgraph_segment_count == 1

@@ -98,6 +98,8 @@ def test_appended_sequence_propagates_private_storage_ownership():
     output = ti.ndarray(ti.i32, shape=size)
     output.fill(0)
 
+    graph.execution_stats()
+    graph.run({"sequence_output": output})
     graph.run({"sequence_output": output})
 
     np.testing.assert_array_equal(
@@ -105,3 +107,6 @@ def test_appended_sequence_propagates_private_storage_ownership():
     )
     assert "sequence_scratch" not in graph._spec.runtime_arg_names
     assert graph._spec.internal_storage_bytes == size * 4
+    replay = graph.execution_stats().segments[0].replay_attribution
+    assert replay.binding_plan_misses == 1
+    assert replay.binding_plan_hits == 1

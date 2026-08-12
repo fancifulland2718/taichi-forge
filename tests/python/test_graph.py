@@ -2691,6 +2691,108 @@ def _run_repeated_inc_graph(graph):
     assert arr.to_numpy()[()] == 4
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_cached_graph_replay_attribution_and_generation_safe_binding_plan():
+    graph = _build_repeated_inc_graph()
+    first = ti.ndarray(ti.i32, shape=())
+    second = ti.ndarray(ti.i32, shape=())
+    first.fill(0)
+    second.fill(20)
+
+    initial = graph.execution_stats().segments[0].replay_attribution
+    assert not initial.enabled
+    assert initial.calls == 0
+
+    graph.run({"arr": first})
+    graph.run({"arr": first})
+    graph.run({"arr": second})
+    report = graph.execution_stats().segments[0].replay_attribution
+
+    assert report.enabled
+    assert report.calls == 3
+    assert report.total_ns > 0
+    assert report.binding_plan_hits == 1
+    assert report.binding_plan_misses == 2
+    assert report.snode_guard_acquisitions == 0
+    assert report.snode_guard_elisions == 3
+    if ti.lang.impl.current_cfg().arch in (ti.cuda, ti.vulkan):
+        assert report.signature_fast_hits == 1
+        assert report.signature_fast_misses == 1
+    else:
+        assert report.signature_fast_hits == 0
+        assert report.signature_fast_misses == 0
+
+    assert first.to_numpy()[()] == 8
+    assert second.to_numpy()[()] == 24
+
+    for _ in range(16):
+        graph.run({"arr": second})
+    ti.sync()
+    memory_before = graph.execution_stats().memory.persistent_bytes
+    for _ in range(32):
+        graph.run({"arr": second})
+    ti.sync()
+    stable = graph.execution_stats()
+    assert stable.segments[0].replay_attribution.binding_plan_hits == 49
+    assert stable.segments[0].replay_attribution.binding_plan_misses == 2
+    assert stable.memory.persistent_bytes == memory_before
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_cached_graph_runtime_field_keeps_snode_lifecycle_guard():
+    graph = _build_repeated_inc_graph()
+    value = ti.field(ti.i32, shape=())
+    value[None] = 10
+
+    graph.execution_stats()
+    graph.run({"arr": value})
+    report = graph.execution_stats().segments[0].replay_attribution
+
+    assert report.enabled
+    assert report.calls == 1
+    assert report.binding_plan_misses == 1
+    assert report.snode_guard_acquisitions == 1
+    assert report.snode_guard_elisions == 0
+    assert value[None] == 14
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_cached_graph_runtime_field_rejects_destroyed_generation():
+    graph = _build_repeated_inc_graph()
+    value = ti.field(ti.i32)
+    fields = ti.FieldsBuilder()
+    fields.place(value)
+    tree = fields.finalize()
+
+    graph.run({"arr": value})
+    tree.destroy()
+    with pytest.raises(RuntimeError, match="stale|destroyed|retired"):
+        graph.run({"arr": value})
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_cached_graph_same_binary_legacy_replay_control():
+    graph = _build_repeated_inc_graph()
+    cache = graph._instance._backend_executable._jit_cache
+    cache._set_stable_replay_optimization(False)
+    value = ti.ndarray(ti.i32, shape=())
+    value.fill(0)
+
+    graph.execution_stats()
+    graph.run({"arr": value})
+    graph.run({"arr": value})
+    report = graph.execution_stats().segments[0].replay_attribution
+
+    assert report.enabled
+    assert report.calls == 2
+    assert report.binding_plan_hits == 0
+    assert report.binding_plan_misses == 2
+    assert report.snode_guard_acquisitions == 2
+    assert report.snode_guard_elisions == 0
+    assert report.signature_fast_hits == 0
+    assert value.to_numpy()[()] == 8
+
+
 @test_utils.test(arch=ti.cpu)
 def test_graph_instance_does_not_form_a_self_cycle():
     graph = _build_repeated_inc_graph()
