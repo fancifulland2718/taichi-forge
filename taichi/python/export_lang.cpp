@@ -782,6 +782,115 @@ void export_lang(py::module &m) {
              }
              return result;
            })
+      .def("_debug_snode_relocation_manifest",
+           [](Program &program, Kernel *kernel) {
+             TI_ERROR_IF(kernel == nullptr,
+                         "SNode relocation manifest query received a null "
+                         "kernel");
+             std::vector<int> tree_ids;
+             std::vector<OffloadedTaskManifest> tasks;
+             std::string kernel_identity;
+             Arch backend = program.compile_config().arch;
+             bool regular_handle_registered = false;
+             bool graph_masked_handle_registered = false;
+             {
+               auto tree_guard =
+                   program.acquire_snode_tree_lifecycle_read_guard();
+               const auto &compiled = program.compile_kernel(
+                   program.compile_config(), program.get_device_caps(),
+                   *kernel);
+               tree_ids = compiled.snode_tree_ids();
+               tasks = compiled.task_manifest();
+               kernel_identity = compiled.kernel_identity();
+               backend = compiled.arch();
+               regular_handle_registered = compiled.get_handle().has_value();
+               graph_masked_handle_registered =
+                   compiled.get_graph_masked_handle().has_value();
+             }
+
+             // This inventory is intentionally fail-closed. It is generated
+             // from the compiled backend object and live tree generations,
+             // but it does not claim that every embedded IR/module reference
+             // has been proven relocatable. Product reuse must remain disabled
+             // until the compiler emits that complete classification itself.
+             const auto dependencies =
+                 program.snapshot_snode_tree_dependencies(tree_ids);
+             py::dict result;
+             result["schema_version"] = 1;
+             result["purpose"] =
+                 "relocatable_snode_executable_readiness";
+             result["backend"] = arch_name(backend);
+             result["kernel_identity"] = kernel_identity;
+             result["has_snode_tree_dependencies"] = !tree_ids.empty();
+             result["coverage"] =
+                 "compiled_dependency_and_task_inventory_only";
+             result["compiler_embedded_state_fully_classified"] = false;
+             result["reuse_admitted"] = false;
+             result["regular_handle_registered"] =
+                 regular_handle_registered;
+             result["graph_masked_handle_registered"] =
+                 graph_masked_handle_registered;
+
+             py::list dependency_items;
+             for (const auto &dependency : dependencies) {
+               py::dict item;
+               item["tree_id"] = dependency.tree_id;
+               item["generation"] = dependency.generation;
+               item["layout_fingerprint"] =
+                   dependency.layout_fingerprint;
+               item["binding_ownership"] = "generation";
+               dependency_items.append(std::move(item));
+             }
+             result["tree_dependencies"] = std::move(dependency_items);
+
+             bool has_sparse_task = false;
+             py::list task_items;
+             for (const auto &task : tasks) {
+               py::dict item = offloaded_task_manifest_to_python(task);
+               py::list generation_state;
+               generation_state.append("tree_id_and_generation");
+               generation_state.append("root_allocation");
+               generation_state.append("runtime_state");
+               if (task.task_type == OffloadedTaskType::listgen) {
+                 has_sparse_task = true;
+                 generation_state.append("sparse_listgen_state");
+                 generation_state.append("active_list_metadata");
+               } else if (task.task_type == OffloadedTaskType::struct_for ||
+                          task.task_type == OffloadedTaskType::gc) {
+                 has_sparse_task = true;
+                 generation_state.append("sparse_allocator_or_active_list");
+               }
+               item["layout_code_candidate"] = true;
+               item["generation_bound_state"] =
+                   std::move(generation_state);
+               item["embedded_state_audited"] = false;
+               task_items.append(std::move(item));
+             }
+             result["tasks"] = std::move(task_items);
+
+             py::list blockers;
+             blockers.append(
+                 "compiler_ir_embedded_state_not_fully_enumerated");
+             blockers.append(
+                 "layout_module_and_generation_binding_not_separated");
+             blockers.append(
+                 "old_work_in_flight_rebind_not_qualified");
+             blockers.append(
+                 "graph_masked_handle_rebind_not_qualified");
+             if (has_sparse_task) {
+               blockers.append(
+                   "sparse_list_and_allocator_relocation_not_qualified");
+             }
+             if (arch_uses_llvm(backend)) {
+               blockers.append(
+                   "llvm_jit_module_registration_is_generation_specific");
+             } else if (backend == Arch::vulkan) {
+               blockers.append(
+                   "vulkan_descriptor_and_pipeline_rebind_not_qualified");
+             }
+             result["blockers"] = std::move(blockers);
+             return result;
+           })
       .def("_graph_task_manifest",
            [](Program &program, const aot::CompiledGraph &graph) {
              auto tree_guard =

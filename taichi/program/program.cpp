@@ -5749,13 +5749,18 @@ static void remove_snode_frontend_caches(
 }
 
 void Program::destroy_snode_tree(SNodeTree *snode_tree) {
+  TI_COMPILE_PROFILER("cpp.snode.destroy.total");
   TI_ASSERT(arch_uses_llvm(compile_config().arch) ||
             compile_config().arch == Arch::vulkan ||
             compile_config().arch == Arch::dx11 ||
             compile_config().arch == Arch::dx12);
 
-  std::unique_lock<std::shared_mutex> lifecycle_lock(
-      snode_tree_lifecycle_mutex_);
+  std::unique_lock<std::shared_mutex> lifecycle_lock;
+  {
+    TI_COMPILE_PROFILER("cpp.snode.destroy.lifecycle_lock");
+    lifecycle_lock =
+        std::unique_lock<std::shared_mutex>(snode_tree_lifecycle_mutex_);
+  }
   TI_ERROR_IF(snode_tree == nullptr, "Cannot destroy a null SNodeTree.");
   const int tree_id = snode_tree->id();
   TI_ERROR_IF(tree_id < 0 ||
@@ -5773,7 +5778,10 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
   // sections and waits for current host submissions to finish. Explicit tree
   // destruction is a cold path, so complete outstanding device work before
   // releasing the root allocation.
-  program_impl_->synchronize();
+  {
+    TI_COMPILE_PROFILER("cpp.snode.destroy.backend_sync");
+    program_impl_->synchronize();
+  }
 
   // When accessing a ti.field at Python scope, SNodeRwAccessorsBank creates
   // a Taichi Kernel to read/write the field in a JIT manner, which caches the
@@ -5789,42 +5797,55 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
 
   std::unordered_set<Kernel *> retired_accessor_kernels;
   // Remove frontend state keyed by SNode pointers before destroying the root.
-  remove_snode_frontend_caches(root, &snode_rw_accessors_bank_,
-                               &snode_to_fields_,
-                               &retired_accessor_kernels);
+  {
+    TI_COMPILE_PROFILER("cpp.snode.destroy.frontend_caches");
+    remove_snode_frontend_caches(root, &snode_rw_accessors_bank_,
+                                 &snode_to_fields_,
+                                 &retired_accessor_kernels);
+  }
 
   // Destroy the root before retiring executable state so an exceptional
   // backend teardown can still leave the old Graph/kernel artifacts intact
   // for the Python transaction's cancellation path.
-  program_impl_->destroy_snode_tree(snode_tree);
+  {
+    TI_COMPILE_PROFILER("cpp.snode.destroy.backend_resources");
+    program_impl_->destroy_snode_tree(snode_tree);
+  }
 
   // Compiled Graph/kernel artifacts contain static root bindings. Python Graph
   // retirement already drained host invocation sections; the Program lifecycle
   // lock and device synchronize above make backend module/pipeline unload safe.
-  program_impl_->get_kernel_compilation_manager().invalidate_snode_tree(
-      tree_id);
-  program_impl_->get_kernel_launcher().retire_snode_tree(tree_id);
+  {
+    TI_COMPILE_PROFILER("cpp.snode.destroy.executables");
+    program_impl_->get_kernel_compilation_manager().invalidate_snode_tree(
+        tree_id);
+    program_impl_->get_kernel_launcher().retire_snode_tree(tree_id);
+  }
 
   // CompiledGraph keeps ordinary Kernel pointers stable for its whole Python
   // lifetime, so retain those definitions as small retired shells. Accessor
   // kernels are private to SNodeRwAccessorsBank, whose entries were removed
   // above; after backend cache retirement they have no remaining observer and
   // can be deleted instead of accumulating one shell per historical field.
-  for (auto iter = kernels.begin(); iter != kernels.end();) {
-    auto &kernel = *iter;
-    if (retired_accessor_kernels.erase(kernel.get()) != 0) {
-      iter = kernels.erase(iter);
-      continue;
-    }
-    if (kernel->definition_retired()) {
+  {
+    TI_COMPILE_PROFILER("cpp.snode.destroy.kernel_definitions");
+    for (auto iter = kernels.begin(); iter != kernels.end();) {
+      auto &kernel = *iter;
+      if (retired_accessor_kernels.erase(kernel.get()) != 0) {
+        iter = kernels.erase(iter);
+        continue;
+      }
+      if (kernel->definition_retired()) {
+        ++iter;
+        continue;
+      }
+      const auto &dependencies = kernel->snode_tree_dependencies();
+      if (std::binary_search(dependencies.begin(), dependencies.end(),
+                             tree_id)) {
+        kernel->retire_definition();
+      }
       ++iter;
-      continue;
     }
-    const auto &dependencies = kernel->snode_tree_dependencies();
-    if (std::binary_search(dependencies.begin(), dependencies.end(), tree_id)) {
-      kernel->retire_definition();
-    }
-    ++iter;
   }
   TI_ASSERT(retired_accessor_kernels.empty());
   if (contains_hash) {
@@ -5837,8 +5858,13 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
 
 SNodeTree *Program::add_snode_tree(std::unique_ptr<SNode> root,
                                    bool compile_only) {
-  std::unique_lock<std::shared_mutex> lifecycle_lock(
-      snode_tree_lifecycle_mutex_);
+  TI_COMPILE_PROFILER("cpp.snode.add.total");
+  std::unique_lock<std::shared_mutex> lifecycle_lock;
+  {
+    TI_COMPILE_PROFILER("cpp.snode.add.lifecycle_lock");
+    lifecycle_lock =
+        std::unique_lock<std::shared_mutex>(snode_tree_lifecycle_mutex_);
+  }
   const int id = allocate_snode_tree_id();
   if (static_cast<std::size_t>(id) == snode_tree_generations_.size()) {
     snode_tree_generations_.push_back(1);
@@ -5857,15 +5883,21 @@ SNodeTree *Program::add_snode_tree(std::unique_ptr<SNode> root,
   tree->root()->set_snode_tree_id(id);
   const bool contains_hash = snode_tree_contains_hash(tree->root());
   try {
-    if (compile_only) {
-      program_impl_->compile_snode_tree_types(tree.get());
-    } else {
-      program_impl_->materialize_snode_tree(tree.get(), result_buffer);
+    {
+      TI_COMPILE_PROFILER("cpp.snode.add.backend_materialize");
+      if (compile_only) {
+        program_impl_->compile_snode_tree_types(tree.get());
+      } else {
+        program_impl_->materialize_snode_tree(tree.get(), result_buffer);
+      }
     }
     // Layout compilation has now finalized cell sizes, offsets and backend-
     // neutral structural metadata. Cache the diagnostic fingerprint once;
     // Graph dispatch collection remains O(number of referenced trees).
-    tree->refresh_layout_fingerprint();
+    {
+      TI_COMPILE_PROFILER("cpp.snode.add.layout_fingerprint");
+      tree->refresh_layout_fingerprint();
+    }
   } catch (...) {
     free_snode_tree_ids_.push(id);
     throw;

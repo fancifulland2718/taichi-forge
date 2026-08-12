@@ -116,6 +116,71 @@ def test_compile_profile_captures_cpp_ir_events():
     assert any("cpp.ir." in path for path in paths)
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_compile_profile_separates_snode_lifecycle_phases():
+    value = ti.field(ti.i32)
+    builder = ti.FieldsBuilder()
+    builder.pointer(ti.i, 8).dense(ti.i, 4).place(value)
+
+    with ti.compile_profile() as prof:
+        tree = builder.finalize()
+        tree.destroy()
+
+    paths = [row["path"] for row in prof.records(include_python=False)]
+    for phase in (
+        "cpp.snode.add.total",
+        "cpp.snode.add.lifecycle_lock",
+        "cpp.snode.add.backend_materialize",
+        "cpp.snode.add.layout_fingerprint",
+        "cpp.snode.destroy.total",
+        "cpp.snode.destroy.lifecycle_lock",
+        "cpp.snode.destroy.backend_sync",
+        "cpp.snode.destroy.frontend_caches",
+        "cpp.snode.destroy.backend_resources",
+        "cpp.snode.destroy.executables",
+        "cpp.snode.destroy.kernel_definitions",
+    ):
+        assert any(phase in path for path in paths), phase
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_snode_relocation_manifest_is_machine_generated_and_fail_closed():
+    value = ti.field(ti.i32)
+    builder = ti.FieldsBuilder()
+    builder.pointer(ti.i, 8).dense(ti.i, 4).place(value)
+    tree = builder.finalize()
+
+    @ti.kernel
+    def sum_active() -> ti.i32:
+        total = 0
+        for i in value:
+            total += value[i]
+        return total
+
+    key = sum_active._primal.ensure_compiled()
+    kernel_cpp = sum_active._primal.compiled_kernels[key]
+    manifest = dict(ti.lang.impl.get_runtime().prog._debug_snode_relocation_manifest(kernel_cpp))
+    tree_id = tree.id
+    tree_generation = tree.generation
+    tree.destroy()
+
+    assert manifest["schema_version"] == 1
+    assert manifest["has_snode_tree_dependencies"]
+    assert manifest["coverage"] == ("compiled_dependency_and_task_inventory_only")
+    assert not manifest["compiler_embedded_state_fully_classified"]
+    assert not manifest["reuse_admitted"]
+    assert len(manifest["tree_dependencies"]) == 1
+    dependency = manifest["tree_dependencies"][0]
+    assert dependency["tree_id"] == tree_id
+    assert dependency["generation"] == tree_generation
+    assert dependency["layout_fingerprint"] != 0
+    task_types = {task["task_type"] for task in manifest["tasks"]}
+    assert "listgen" in task_types
+    assert "struct_for" in task_types
+    assert all(not task["embedded_state_audited"] for task in manifest["tasks"])
+    assert "sparse_list_and_allocator_relocation_not_qualified" in (manifest["blockers"])
+
+
 @test_utils.test(arch=ti.cpu)
 def test_source_template_cache_reuses_ast_template_for_specializations():
     x = ti.field(ti.i32, shape=())
