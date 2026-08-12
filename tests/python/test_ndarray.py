@@ -1727,9 +1727,14 @@ def test_ordinary_launch_plan_is_monomorphic_and_resource_safe():
     assert assign(first, 3) == 4
     first_plan = assign._primal._ordinary_launch_plan
     assert first_plan is not None
+    first_launch_ctx = first_plan.launch_ctx
+    gpu_context_reuse = impl.current_cfg().arch in (ti.cuda, ti.vulkan)
+    assert (first_launch_ctx is not None) == gpu_context_reuse
 
     assert assign(first, 7) == 8
     assert assign._primal._ordinary_launch_plan is first_plan
+    if gpu_context_reuse:
+        assert assign._primal._ordinary_launch_plan.launch_ctx is first_launch_ctx
     assert first.to_numpy()[0] == 7
 
     # A different owned resource cannot alias the previous cached binding.
@@ -1737,8 +1742,33 @@ def test_ordinary_launch_plan_is_monomorphic_and_resource_safe():
     second_plan = assign._primal._ordinary_launch_plan
     assert second_plan is not None
     assert second_plan is not first_plan
+    if gpu_context_reuse:
+        assert second_plan.launch_ctx is not first_launch_ctx
     assert first.to_numpy()[0] == 7
     assert second.to_numpy()[0] == 11
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan])
+def test_ordinary_gpu_launch_plan_copies_reused_scalar_context_per_submission():
+    @ti.kernel
+    def write_slot(
+        destination: ti.types.ndarray(dtype=ti.i32, ndim=1), slot: ti.i32
+    ):
+        destination[slot] = slot
+
+    count = 128
+    destination = ti.ndarray(ti.i32, shape=count)
+    destination.fill(-1)
+    write_slot(destination, 0)
+    plan = write_slot._primal._ordinary_launch_plan
+    assert plan is not None
+    assert plan.launch_ctx is not None
+    for slot in range(1, count):
+        write_slot(destination, slot)
+    ti.sync()
+
+    np.testing.assert_array_equal(destination.to_numpy(), np.arange(count))
+    assert write_slot._primal._ordinary_launch_plan is plan
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])

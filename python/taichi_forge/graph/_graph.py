@@ -12703,13 +12703,19 @@ class Graph:
                 "region has a submission-capable backend lowering"
             )
         runtime = impl.pytaichi
-        with self._lifecycle_lock:
-            self._check_runtime_valid()
-            self._spec.validate_runtime_args(
-                args,
-                "Graph.submit",
-                self._instance._fixed_runtime_args,
-            )
+        # A pacer may release this thread while waiting for an admission slot,
+        # so validate before entering that wait and again immediately before
+        # submission. The unpaced path cannot wait between admission and the
+        # lifecycle-locked submission section; validating it twice only
+        # repeats provider binding, alias, and lifetime checks on the hot path.
+        if pacer is not None:
+            with self._lifecycle_lock:
+                self._check_runtime_valid()
+                self._spec.validate_runtime_args(
+                    args,
+                    "Graph.submit",
+                    self._instance._fixed_runtime_args,
+                )
         admission = _reserve_paced_submission(
             pacer,
             runtime,

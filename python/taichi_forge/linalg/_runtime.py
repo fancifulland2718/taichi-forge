@@ -423,8 +423,16 @@ class SolveGraphTerminalPacket:
                 raise TaichiRuntimeError(
                     "Solve Graph terminal packet has not been submitted"
                 )
-            state = np.asarray(self.state.to_numpy(), dtype=np.int32)
-            metrics = np.asarray(self.metrics.to_numpy(), dtype=np.float32)
+            # State and metrics are separate typed resources, but they form a
+            # single public terminal packet. Read both through one backend
+            # transfer transaction so a completed GPU solve does not pay two
+            # stream flush/readback boundaries during snapshot materialization.
+            state = np.empty((4,), dtype=np.int32)
+            metrics = np.empty((4,), dtype=np.float32)
+            self._program.copy_ndarrays_to_host(
+                (self.state.arr, self.metrics.arr),
+                (state, metrics),
+            )
             if int(state[3]) != 1:
                 raise TaichiRuntimeError(
                     "Solve Graph terminal packet has not been completed"

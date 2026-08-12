@@ -751,6 +751,58 @@ def test_graph_submit_returns_one_public_completion_ticket():
 
 
 @test_utils.test(arch=ti.cpu)
+def test_unpaced_graph_submit_validates_provider_once():
+    @ti.kernel
+    def copy_value(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        output[0] = source[0]
+
+    source_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "source", ti.i32, ndim=1
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    tracker = {"fallback_runs": 0}
+    lease = _ValidatingLease()
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(
+        _RecordedDispatchNode(
+            copy_value,
+            (source_arg, output_arg),
+            tracker,
+            lease,
+        )
+    )
+    graph = builder.compile()
+    source = ti.ndarray(ti.i32, shape=1)
+    output = ti.ndarray(ti.i32, shape=1)
+    source.fill(42)
+    output.fill(0)
+    args = {"source": source, "output": output}
+
+    lifetime_before = lease.validations
+    bindings_before = lease.binding_validations
+    graph.submit(args).wait()
+    assert lease.validations == lifetime_before + 1
+    assert lease.binding_validations == bindings_before + 1
+    assert output.to_numpy()[0] == 42
+
+    pacer = ti.graph.SubmissionPacer(1)
+    lifetime_before = lease.validations
+    bindings_before = lease.binding_validations
+    graph.submit(args, pacer=pacer).wait()
+    assert lease.validations == lifetime_before + 2
+    assert lease.binding_validations == bindings_before + 2
+
+    lease.valid = False
+    with pytest.raises(TaichiRuntimeError, match="generation changed"):
+        graph.submit(args)
+
+
+@test_utils.test(arch=ti.cpu)
 def test_runtime_submission_owner_registry_retains_until_ready():
     runtime = impl.get_runtime()
 
@@ -1590,6 +1642,7 @@ class _ValidatingLease:
     def __init__(self):
         self.valid = True
         self.validations = 0
+        self.binding_validations = 0
 
     def validate_graph_lifetime(self):
         self.validations += 1
@@ -1597,6 +1650,9 @@ class _ValidatingLease:
             raise TaichiRuntimeError(
                 "recordable provider generation changed; rebuild the Graph"
             )
+
+    def validate_graph_bindings(self, runtime_args):
+        self.binding_validations += 1
 
 
 class _OpaqueExecutable(NativeGraphExecutable):

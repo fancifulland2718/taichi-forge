@@ -928,9 +928,11 @@ def _get_global_vars(_func):
 class _OrdinaryLaunchPlan:
     """One-entry, generation-safe cache for common direct kernel launches.
 
-    The plan keeps no strong resource references and is replaced rather than
-    accumulated. A different Ndarray object, gradient attachment, or Runtime
-    instance therefore falls back to the regular specialization path once.
+    GPU plans may keep a reusable launch context with generation-qualified,
+    non-owning native resource handles. Weak Python guards keep it from
+    outliving or silently rebinding those resources. CPU and unsupported
+    backends retain fresh per-call contexts. A different Ndarray object,
+    gradient attachment, or Runtime instance falls back to the regular path.
     """
 
     __slots__ = (
@@ -939,29 +941,47 @@ class _OrdinaryLaunchPlan:
         "kernel_cpp",
         "native_plan",
         "bindings",
+        "scalar_bindings",
         "resource_guards",
+        "launch_ctx",
     )
 
-    def __init__(self, runtime, key, kernel_cpp, native_plan, bindings, resource_guards):
+    def __init__(
+        self,
+        runtime,
+        key,
+        kernel_cpp,
+        native_plan,
+        bindings,
+        scalar_bindings,
+        resource_guards,
+        launch_ctx,
+    ):
         self.runtime = runtime
         self.key = key
         self.kernel_cpp = kernel_cpp
         self.native_plan = native_plan
         self.bindings = bindings
+        self.scalar_bindings = scalar_bindings
         self.resource_guards = resource_guards
+        self.launch_ctx = launch_ctx
 
     def matches(self, runtime, args):
         if self.runtime is not runtime:
             return False
         for index, resource_ref, grad_ref in self.resource_guards:
             resource = resource_ref()
-            if resource is None or resource is not args[index]:
+            if (
+                resource is None
+                or resource is not args[index]
+                or resource.arr is None
+            ):
                 return False
             grad = resource.grad
             if grad_ref is None:
                 if grad is not None:
                     return False
-            elif grad_ref() is not grad:
+            elif grad_ref() is not grad or grad.arr is None:
                 return False
         return True
 
@@ -1633,6 +1653,42 @@ class Kernel:
 
         return ret
 
+    @staticmethod
+    def _bind_ordinary_launch_context(launch_ctx, bindings, args):
+        for index, kind, annotation in bindings:
+            value = args[index]
+            indices = (index,)
+            if kind == "real":
+                if not isinstance(value, (float, int, np.floating, np.integer)):
+                    raise TaichiRuntimeTypeError.get(
+                        indices, annotation.to_string(), type(value)
+                    )
+                launch_ctx.set_arg_float(indices, float(value))
+            elif kind in ("signed", "unsigned"):
+                if not isinstance(value, (int, np.integer)):
+                    raise TaichiRuntimeTypeError.get(
+                        indices, annotation.to_string(), type(value)
+                    )
+                if kind == "signed":
+                    launch_ctx.set_arg_int(indices, int(value))
+                else:
+                    launch_ctx.set_arg_uint(indices, int(value))
+            else:
+                primal = value.arr
+                grad = value.grad.arr if value.grad is not None else None
+                if primal is None:
+                    raise TaichiRuntimeError(
+                        "Cannot submit an Ndarray after its Taichi runtime has been reset"
+                    )
+                if value.grad is not None and grad is None:
+                    raise TaichiRuntimeError(
+                        "Cannot submit an Ndarray gradient after its Taichi runtime has been reset"
+                    )
+                if grad is None:
+                    launch_ctx.set_arg_ndarray(indices, primal)
+                else:
+                    launch_ctx.set_arg_ndarray_with_grad(indices, primal, grad)
+
     def _build_ordinary_launch_plan(self, key, args):
         if self.autodiff_mode != AutodiffMode.NONE or self.template_slot_locations:
             return None
@@ -1672,44 +1728,38 @@ class Kernel:
         )
         if native_plan is None:
             return None
+        launch_ctx = None
+        # CUDA/Vulkan copy the argument payload during submission, so a
+        # monomorphic plan can safely reuse its validated host-side layout.
+        # CPU has a different scheduler/return protocol and remains on fresh
+        # contexts; it is not part of this GPU eager-ABI optimization.
+        if prog.config().arch in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan):
+            launch_ctx = self.compiled_kernels[key].make_launch_context()
+            self._bind_ordinary_launch_context(launch_ctx, bindings, args)
+        scalar_bindings = tuple(
+            binding for binding in bindings if binding[1] != "ndarray"
+        )
         return _OrdinaryLaunchPlan(
             self.runtime,
             key,
             self.compiled_kernels[key],
             native_plan,
             tuple(bindings),
+            scalar_bindings,
             tuple(resource_guards),
+            launch_ctx,
         )
 
     def _launch_with_ordinary_plan(self, plan, args):
-        launch_ctx = plan.kernel_cpp.make_launch_context()
-        for index, kind, annotation in plan.bindings:
-            value = args[index]
-            indices = (index,)
-            if kind == "real":
-                if not isinstance(value, (float, int, np.floating, np.integer)):
-                    raise TaichiRuntimeTypeError.get(indices, annotation.to_string(), type(value))
-                launch_ctx.set_arg_float(indices, float(value))
-            elif kind in ("signed", "unsigned"):
-                if not isinstance(value, (int, np.integer)):
-                    raise TaichiRuntimeTypeError.get(indices, annotation.to_string(), type(value))
-                if kind == "signed":
-                    launch_ctx.set_arg_int(indices, int(value))
-                else:
-                    launch_ctx.set_arg_uint(indices, int(value))
-            else:
-                primal = value.arr
-                grad = value.grad.arr if value.grad is not None else None
-                if primal is None:
-                    raise TaichiRuntimeError("Cannot submit an Ndarray after its Taichi runtime has been reset")
-                if value.grad is not None and grad is None:
-                    raise TaichiRuntimeError(
-                        "Cannot submit an Ndarray gradient after its Taichi runtime has been reset"
-                    )
-                if grad is None:
-                    launch_ctx.set_arg_ndarray(indices, primal)
-                else:
-                    launch_ctx.set_arg_ndarray_with_grad(indices, primal, grad)
+        launch_ctx = plan.launch_ctx
+        if launch_ctx is None:
+            launch_ctx = plan.kernel_cpp.make_launch_context()
+            bindings = plan.bindings
+        else:
+            # Resource identity and generation are fixed by plan.matches().
+            # Refresh only scalar bytes in the reusable GPU context.
+            bindings = plan.scalar_bindings
+        self._bind_ordinary_launch_context(launch_ctx, bindings, args)
         try:
             prog = self.runtime.prog
             plan.native_plan.launch(prog, launch_ctx)
