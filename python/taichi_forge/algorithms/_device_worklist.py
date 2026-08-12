@@ -69,6 +69,19 @@ def _current_backend_name():
     return _ti_core.arch_name(arch)
 
 
+def _packed_dense_conflict_enabled():
+    mode = os.environ.get("TI_WORKLIST_DENSE_PACKED", "auto").strip().lower()
+    if mode not in ("auto", "0", "1", "off", "on", "false", "true"):
+        raise ValueError("TI_WORKLIST_DENSE_PACKED must be auto, 0/off/false, or " "1/on/true")
+    if mode in ("0", "off", "false"):
+        return False
+    backend = _current_backend_name()
+    supported = backend in ("cpu", "cuda")
+    if mode in ("1", "on", "true") and not supported:
+        raise TaichiRuntimeError("packed dense conflict arbitration currently requires CPU or CUDA")
+    return supported
+
+
 def _require_capacity(value, role="capacity"):
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"DeviceWorklist {role} must be a Python integer")
@@ -169,6 +182,27 @@ def device_worklist_append_direct(
             ops.atomic_or(overflow[None], 1)
             ops.atomic_or(extent_state[1], 1)
     return result
+
+
+@func
+def device_worklist_recycle_direct(
+    recycled_extent_state: template(),
+    overflow: template(),
+    generation: template(),
+):
+    """Recycle the consumed front inside a level-boundary kernel.
+
+    Call this exactly once after all reads of the current front and all writes
+    to the next front in that level have completed.  Embedding it in an
+    existing record/control kernel removes a standalone ``prepare_next``
+    dispatch while preserving the global kernel boundary required by the next
+    level.  Only ``transition_mode="direct"`` worklists may use this contract.
+    """
+
+    recycled_extent_state[0] = 0
+    recycled_extent_state[1] = 0
+    overflow[None] = 0
+    generation[None] += 1
 
 
 @kernel
@@ -477,6 +511,73 @@ def _reset_dense_conflict_table(
 
 
 @kernel
+def _reset_dense_conflict_source_table(
+    best_priorities: ndarray_type.ndarray(dtype=i32, ndim=1),
+    best_sources: ndarray_type.ndarray(dtype=i32, ndim=1),
+    invalid: ndarray_type.ndarray(dtype=i32, ndim=1),
+    policy: i32,
+):
+    for key in best_sources:
+        best_priorities[key] = -0x80000000 if policy == 2 else 0x7FFFFFFF
+        best_sources[key] = 0x7FFFFFFF
+    invalid[0] = 0
+
+
+@kernel
+def _reset_dense_conflict_packed_table(
+    best_packed: ndarray_type.ndarray(dtype=u64, ndim=1),
+    invalid: ndarray_type.ndarray(dtype=i32, ndim=1),
+):
+    for key in best_packed:
+        best_packed[key] = ops.cast(-1, u64)
+    invalid[0] = 0
+
+
+@kernel
+def _select_dense_mask_conflict_packed_by_index(
+    keys: ndarray_type.ndarray(),
+    active_flags: ndarray_type.ndarray(dtype=i32, ndim=1),
+    priorities: ndarray_type.ndarray(dtype=i32, ndim=1),
+    best_packed: ndarray_type.ndarray(dtype=u64, ndim=1),
+    invalid: ndarray_type.ndarray(dtype=i32, ndim=1),
+    key_capacity: i32,
+    maximize: i32,
+):
+    for source in keys:
+        if active_flags[source] != 0:
+            raw_key = keys[source]
+            if raw_key >= 0 and raw_key < key_capacity:
+                key = ops.cast(raw_key, i32)
+                # Signed i32 ordering is converted to monotonic u32 ordering;
+                # max-priority inverts that key so both policies use one u64
+                # atomic-min. Source index occupies the low word and remains
+                # the deterministic tie break.
+                ordered_priority = ops.cast(priorities[source], u32) ^ ops.cast(-0x80000000, u32)
+                if maximize != 0:
+                    ordered_priority = ~ordered_priority
+                candidate = (ops.cast(ordered_priority, u64) << 32) | ops.cast(source, u64)
+                ops.atomic_min(best_packed[key], candidate)
+            else:
+                ops.atomic_or(invalid[0], 1)
+
+
+@kernel
+def _decode_dense_mask_conflict_packed_table(
+    best_packed: ndarray_type.ndarray(dtype=u64, ndim=1),
+    winner_sources: ndarray_type.ndarray(dtype=i32, ndim=1),
+    invalid: ndarray_type.ndarray(dtype=i32, ndim=1),
+    overflow: ndarray_type.ndarray(dtype=i32, ndim=0),
+    generation: ndarray_type.ndarray(dtype=i32, ndim=0),
+):
+    for key in winner_sources:
+        packed = best_packed[key]
+        winner_sources[key] = 0x7FFFFFFF if packed == ops.cast(-1, u64) else ops.cast(ops.cast(packed, u32), i32)
+        if key == 0:
+            overflow[None] = invalid[0]
+            generation[None] += 1
+
+
+@kernel
 def _publish_dense_conflict_table(
     input_extent: ndarray_type.ndarray(dtype=i32, ndim=1),
     invalid: ndarray_type.ndarray(dtype=i32, ndim=1),
@@ -486,6 +587,16 @@ def _publish_dense_conflict_table(
 ):
     generated[None] = input_extent[0]
     overflow[None] = 1 if input_extent[1] != 0 or invalid[0] != 0 else 0
+    generation[None] += 1
+
+
+@kernel
+def _publish_dense_mask_conflict_table(
+    invalid: ndarray_type.ndarray(dtype=i32, ndim=1),
+    overflow: ndarray_type.ndarray(dtype=i32, ndim=0),
+    generation: ndarray_type.ndarray(dtype=i32, ndim=0),
+):
+    overflow[None] = invalid[0]
     generation[None] += 1
 
 
@@ -501,6 +612,29 @@ def _select_dense_conflict_priorities(
 ):
     for source in keys:
         if source < extent_state[0]:
+            raw_key = keys[source]
+            if raw_key >= 0 and raw_key < key_capacity:
+                key = ops.cast(raw_key, i32)
+                if policy == 1:
+                    ops.atomic_min(best_priorities[key], priorities[source])
+                elif policy == 2:
+                    ops.atomic_max(best_priorities[key], priorities[source])
+            else:
+                ops.atomic_or(invalid[0], 1)
+
+
+@kernel
+def _select_dense_mask_conflict_priorities(
+    keys: ndarray_type.ndarray(),
+    active_flags: ndarray_type.ndarray(dtype=i32, ndim=1),
+    priorities: ndarray_type.ndarray(dtype=i32, ndim=1),
+    best_priorities: ndarray_type.ndarray(dtype=i32, ndim=1),
+    invalid: ndarray_type.ndarray(dtype=i32, ndim=1),
+    key_capacity: i32,
+    policy: i32,
+):
+    for source in keys:
+        if active_flags[source] != 0:
             raw_key = keys[source]
             if raw_key >= 0 and raw_key < key_capacity:
                 key = ops.cast(raw_key, i32)
@@ -533,6 +667,26 @@ def _select_dense_conflict_ordinals(
 
 
 @kernel
+def _select_dense_mask_conflict_ordinals(
+    keys: ndarray_type.ndarray(),
+    active_flags: ndarray_type.ndarray(dtype=i32, ndim=1),
+    priorities: ndarray_type.ndarray(dtype=i32, ndim=1),
+    ordinals: ndarray_type.ndarray(dtype=i32, ndim=1),
+    best_priorities: ndarray_type.ndarray(dtype=i32, ndim=1),
+    best_ordinals: ndarray_type.ndarray(dtype=i32, ndim=1),
+    key_capacity: i32,
+    policy: i32,
+):
+    for source in keys:
+        if active_flags[source] != 0:
+            raw_key = keys[source]
+            if raw_key >= 0 and raw_key < key_capacity:
+                key = ops.cast(raw_key, i32)
+                if policy == 0 or priorities[source] == best_priorities[key]:
+                    ops.atomic_min(best_ordinals[key], ordinals[source])
+
+
+@kernel
 def _select_dense_conflict_sources(
     keys: ndarray_type.ndarray(),
     priorities: ndarray_type.ndarray(dtype=i32, ndim=1),
@@ -552,6 +706,51 @@ def _select_dense_conflict_sources(
                 priority_matches = policy == 0 or priorities[source] == best_priorities[key]
                 if priority_matches and ordinals[source] == best_ordinals[key]:
                     ops.atomic_min(best_sources[key], source)
+
+
+@kernel
+def _select_dense_mask_conflict_sources(
+    keys: ndarray_type.ndarray(),
+    active_flags: ndarray_type.ndarray(dtype=i32, ndim=1),
+    priorities: ndarray_type.ndarray(dtype=i32, ndim=1),
+    ordinals: ndarray_type.ndarray(dtype=i32, ndim=1),
+    best_priorities: ndarray_type.ndarray(dtype=i32, ndim=1),
+    best_ordinals: ndarray_type.ndarray(dtype=i32, ndim=1),
+    best_sources: ndarray_type.ndarray(dtype=i32, ndim=1),
+    key_capacity: i32,
+    policy: i32,
+):
+    for source in keys:
+        if active_flags[source] != 0:
+            raw_key = keys[source]
+            if raw_key >= 0 and raw_key < key_capacity:
+                key = ops.cast(raw_key, i32)
+                priority_matches = policy == 0 or priorities[source] == best_priorities[key]
+                if priority_matches and ordinals[source] == best_ordinals[key]:
+                    ops.atomic_min(best_sources[key], source)
+
+
+@kernel
+def _select_dense_mask_conflict_sources_by_index(
+    keys: ndarray_type.ndarray(),
+    active_flags: ndarray_type.ndarray(dtype=i32, ndim=1),
+    priorities: ndarray_type.ndarray(dtype=i32, ndim=1),
+    best_priorities: ndarray_type.ndarray(dtype=i32, ndim=1),
+    best_sources: ndarray_type.ndarray(dtype=i32, ndim=1),
+    invalid: ndarray_type.ndarray(dtype=i32, ndim=1),
+    key_capacity: i32,
+    policy: i32,
+):
+    for source in keys:
+        if active_flags[source] != 0:
+            raw_key = keys[source]
+            if raw_key >= 0 and raw_key < key_capacity:
+                key = ops.cast(raw_key, i32)
+                priority_matches = policy == 0 or priorities[source] == best_priorities[key]
+                if priority_matches:
+                    ops.atomic_min(best_sources[key], source)
+            else:
+                ops.atomic_or(invalid[0], 1)
 
 
 @kernel
@@ -665,6 +864,7 @@ class DeviceConflictResult:
     key_capacity: object
     output_shape: str = "compact_winner_list"
     dense_winner_sources: object = None
+    arbitration_route: str = "portable_multi_pass"
 
 
 @dataclass(frozen=True)
@@ -1073,6 +1273,154 @@ def _resolve_dense_table_impl(
         key_capacity=key_capacity,
         output_shape="dense_winner_table",
         dense_winner_sources=dense_winner_sources,
+    )
+
+
+def _resolve_dense_mask_table_impl(
+    keys,
+    active_flags,
+    dense_winner_sources,
+    stats,
+    workspace,
+    *,
+    priorities,
+    ordinals,
+    policy,
+    key_capacity,
+    capacity,
+):
+    _require_worklist_array(keys, "conflict keys", capacity)
+    if keys.dtype not in _CONFLICT_KEY_DTYPES:
+        raise TypeError("deterministic conflict keys must use an integer dtype")
+    _require_worklist_array(active_flags, "conflict active flags", capacity, i32)
+    if ordinals is not None:
+        _require_worklist_array(ordinals, "conflict ordinals", capacity, i32)
+    if priorities is not None:
+        _require_worklist_array(priorities, "conflict priorities", capacity, i32)
+    if policy not in ("first", "claim", "min_priority", "max_priority"):
+        raise ValueError("conflict policy must be first, claim, min_priority, or max_priority")
+    if policy in ("min_priority", "max_priority") and priorities is None:
+        raise ValueError(f"conflict policy {policy!r} requires priorities")
+    _require_dense_winner_table(dense_winner_sources, key_capacity)
+    if _telemetry_enabled(stats):
+        raise ValueError("masked dense winner-only conflict resolution requires " "telemetry=False")
+
+    invalid = workspace._buffer("dense_conflict_invalid", i32, 1)
+    priority_values = priorities if priorities is not None else (ordinals if ordinals is not None else active_flags)
+    effective_policy = 0
+    if policy in ("claim", "min_priority") and priorities is not None:
+        effective_policy = 1
+    elif policy == "max_priority":
+        effective_policy = 2
+    packed_by_index = ordinals is None and effective_policy != 0 and _packed_dense_conflict_enabled()
+    if packed_by_index:
+        best_packed = workspace._buffer("dense_conflict_packed_priority_source", u64, key_capacity)
+        _reset_dense_conflict_packed_table(best_packed, invalid)
+        _select_dense_mask_conflict_packed_by_index(
+            keys,
+            active_flags,
+            priority_values,
+            best_packed,
+            invalid,
+            key_capacity,
+            int(effective_policy == 2),
+        )
+        _decode_dense_mask_conflict_packed_table(
+            best_packed,
+            dense_winner_sources,
+            invalid,
+            stats["overflow"],
+            stats["generation"],
+        )
+    elif ordinals is None:
+        best_priorities = workspace._buffer("dense_conflict_priorities", i32, key_capacity)
+        _reset_dense_conflict_source_table(
+            best_priorities,
+            dense_winner_sources,
+            invalid,
+            effective_policy,
+        )
+        if effective_policy != 0:
+            _select_dense_mask_conflict_priorities(
+                keys,
+                active_flags,
+                priority_values,
+                best_priorities,
+                invalid,
+                key_capacity,
+                effective_policy,
+            )
+        _select_dense_mask_conflict_sources_by_index(
+            keys,
+            active_flags,
+            priority_values,
+            best_priorities,
+            dense_winner_sources,
+            invalid,
+            key_capacity,
+            effective_policy,
+        )
+    else:
+        best_priorities = workspace._buffer("dense_conflict_priorities", i32, key_capacity)
+        best_ordinals = workspace._buffer("dense_conflict_ordinals", i32, key_capacity)
+        _reset_dense_conflict_table(
+            best_priorities,
+            best_ordinals,
+            dense_winner_sources,
+            invalid,
+            effective_policy,
+        )
+        _select_dense_mask_conflict_priorities(
+            keys,
+            active_flags,
+            priority_values,
+            best_priorities,
+            invalid,
+            key_capacity,
+            effective_policy,
+        )
+        _select_dense_mask_conflict_ordinals(
+            keys,
+            active_flags,
+            priority_values,
+            ordinals,
+            best_priorities,
+            best_ordinals,
+            key_capacity,
+            effective_policy,
+        )
+        _select_dense_mask_conflict_sources(
+            keys,
+            active_flags,
+            priority_values,
+            ordinals,
+            best_priorities,
+            best_ordinals,
+            dense_winner_sources,
+            key_capacity,
+            effective_policy,
+        )
+    if not packed_by_index:
+        _publish_dense_mask_conflict_table(
+            invalid,
+            stats["overflow"],
+            stats["generation"],
+        )
+    workspace._refresh_usage()
+    return DeviceConflictResult(
+        keys=None,
+        values=None,
+        priorities=None,
+        ordinals=None,
+        extent=None,
+        statistics=(),
+        policy=policy,
+        strategy="dense_atomic",
+        sort_method=None,
+        key_capacity=key_capacity,
+        output_shape="dense_winner_table",
+        dense_winner_sources=dense_winner_sources,
+        arbitration_route=("packed_priority_source_u64" if packed_by_index else "portable_multi_pass"),
     )
 
 
@@ -1504,6 +1852,34 @@ class DeviceWorklist:
         self._front = 1 - self._front
         return self
 
+    def recycle_arguments(self):
+        """Arguments for :func:`device_worklist_recycle_direct`.
+
+        The returned extent is the current/consumed front.  A user kernel may
+        record the produced ``next_extent`` and recycle these arguments in one
+        globally ordered dispatch, then call :meth:`commit_recycled_next`.
+        """
+
+        self._validate_current()
+        if self._transition_mode != "direct":
+            raise TaichiRuntimeError("fused DeviceWorklist recycling requires transition_mode='direct'")
+        return (
+            self.extent.state,
+            self._stats["overflow"],
+            self._stats["generation"],
+        )
+
+    def commit_recycled_next(self):
+        """Swap fronts after a kernel performed fused direct recycling."""
+
+        self._validate_current()
+        if self._transition_mode != "direct":
+            raise TaichiRuntimeError("commit_recycled_next requires transition_mode='direct'")
+        if self._next_requires_finalize:
+            raise TaichiRuntimeError("commit_recycled_next cannot consume a staged transition")
+        self._front = 1 - self._front
+        return self
+
     def append_arguments(self, *, target="next"):
         """Return arguments consumed by :func:`device_worklist_append`."""
 
@@ -1647,11 +2023,58 @@ class DeviceWorklist:
             key_capacity=result.key_capacity,
         )
 
+    def resolve_conflicts_from_mask(
+        self,
+        keys,
+        active_flags,
+        *,
+        priorities=None,
+        ordinals=None,
+        policy="first",
+        key_capacity,
+    ):
+        """Resolve a fixed-domain candidate mask into a dense winner table.
+
+        Candidate slots keep their original indices, so callers that already
+        own dense key/priority/ordinal arrays do not pay for stable compact or
+        attribute gathering.  The result contains original source indices.
+        When ``ordinals`` is omitted, source index is the deterministic tie
+        break and one arbitration pass plus its workspace are removed.
+        This path deliberately requires ``telemetry=False`` because it does
+        not materialize a compact winner list or count its entries.
+        """
+
+        self._validate_current()
+        key_capacity = _require_capacity(key_capacity, "key_capacity")
+        if key_capacity > self._capacity:
+            raise ValueError("DeviceWorklist dense key_capacity cannot exceed worklist capacity")
+        table = self._workspace._buffer("dense_conflict_winner_table", i32, key_capacity)
+        return _resolve_dense_mask_table_impl(
+            keys,
+            active_flags,
+            table,
+            self._stats,
+            self._workspace,
+            priorities=priorities,
+            ordinals=ordinals,
+            policy=policy,
+            key_capacity=key_capacity,
+            capacity=self._capacity,
+        )
+
     def statistics(self):
         """Synchronize and materialize the latest transition counters."""
 
         self._validate_current()
         values = {name: int(value.to_numpy().item()) for name, value in self._stats.items()}
+        overflow = bool(values["overflow"])
+        if self._transition_mode == "direct":
+            # Fused recycling clears the shared producer flag so the next
+            # level can append without a prepare helper. The published current
+            # extent remains the authoritative status for the just-completed
+            # transition. This extra read occurs only at this explicit
+            # synchronized observation boundary, never in the hot path.
+            overflow = overflow or self.extent.snapshot().overflow
         return DeviceWorklistStatistics(
             schema_version=2,
             generated=values.get("generated"),
@@ -1659,7 +2082,7 @@ class DeviceWorklist:
             rejected=values.get("rejected"),
             conflicts=values.get("conflicts"),
             winners=values.get("winners"),
-            overflow=bool(values["overflow"]),
+            overflow=overflow,
             generation=values["generation"],
             telemetry_available=self._telemetry,
         )
@@ -2561,5 +2984,6 @@ __all__ = [
     "DeviceWorklistStatistics",
     "device_worklist_append",
     "device_worklist_append_direct",
+    "device_worklist_recycle_direct",
     "device_worklist_graph_args",
 ]

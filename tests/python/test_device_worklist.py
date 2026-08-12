@@ -45,6 +45,19 @@ def _append_range_direct(
         )
 
 
+@ti.kernel
+def _record_and_recycle_direct(
+    produced_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    history: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    history_index: ti.i32,
+    recycled_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    overflow: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    generation: ti.types.ndarray(dtype=ti.i32, ndim=0),
+):
+    history[history_index] = produced_extent[0]
+    ti.algorithms.device_worklist_recycle_direct(recycled_extent, overflow, generation)
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_device_worklist_atomic_append_clamps_and_reports_overflow():
     capacity = 17
@@ -224,6 +237,38 @@ def test_device_worklist_graph_direct_transition_uses_one_helper():
     assert worklist.statistics().generation == 1
     expected = np.arange(produced, dtype=np.int32) * 5 + 2
     np.testing.assert_array_equal(np.sort(worklist.next_values.to_numpy()[:produced]), expected)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_worklist_fused_recycle_removes_per_level_prepare_dispatch():
+    capacity = 23
+    worklist = ti.algorithms.DeviceWorklist(
+        capacity,
+        ti.i32,
+        telemetry=False,
+        transition_mode="direct",
+    )
+    history = ti.ndarray(ti.i32, shape=4)
+    requested = [17, 9, 3, capacity + 4]
+    expected = [17, 9, 3, capacity]
+
+    for level, produced in enumerate(requested):
+        _append_range_direct(*worklist.append_arguments(), produced)
+        _record_and_recycle_direct(
+            worklist.next_extent.state,
+            history,
+            level,
+            *worklist.recycle_arguments(),
+        )
+        worklist.commit_recycled_next()
+        assert worklist.extent.snapshot().count == expected[level]
+
+    np.testing.assert_array_equal(history.to_numpy(), expected)
+    assert worklist.statistics().generation == len(expected)
+    assert worklist.statistics().overflow
+    # The consumed front was recycled by the boundary kernel and is already
+    # ready to receive the following level without prepare_next().
+    assert worklist.next_extent.snapshot().count == 0
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
@@ -426,6 +471,120 @@ def test_device_worklist_dense_winner_table_skips_compact_materialization():
     np.testing.assert_array_equal(worklist.values.to_numpy(), original)
     assert worklist.statistics().generation == 1
     assert not any(role == "dense_conflict_flags" for role, _dtype, _count in worklist.workspace._buffers)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_worklist_masked_dense_claim_skips_compact_and_gather():
+    capacity = 32
+    key_capacity = 8
+    count = 6
+    keys = ti.ndarray(ti.i32, shape=capacity)
+    flags = ti.ndarray(ti.i32, shape=capacity)
+    priorities = ti.ndarray(ti.i32, shape=capacity)
+    ordinals = ti.ndarray(ti.i32, shape=capacity)
+    keys.from_numpy(
+        np.pad(
+            np.array([2, 1, 2, 1, 2, 3], dtype=np.int32),
+            (0, capacity - count),
+        )
+    )
+    flags.from_numpy(np.pad(np.ones(count, dtype=np.int32), (0, capacity - count)))
+    priorities.from_numpy(
+        np.pad(
+            np.array([5, 2, 1, 2, 1, 0], dtype=np.int32),
+            (0, capacity - count),
+        )
+    )
+    ordinals.from_numpy(np.arange(capacity, dtype=np.int32))
+    worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32, telemetry=False, transition_mode="direct")
+
+    result = worklist.resolve_conflicts_from_mask(
+        keys,
+        flags,
+        priorities=priorities,
+        ordinals=ordinals,
+        policy="min_priority",
+        key_capacity=key_capacity,
+    )
+
+    expected = np.full(key_capacity, 0x7FFFFFFF, dtype=np.int32)
+    expected[[1, 2, 3]] = [1, 2, 5]
+    np.testing.assert_array_equal(result.dense_winner_sources.to_numpy(), expected)
+    statistics = worklist.statistics()
+    assert statistics.generated is None
+    assert statistics.generation == 1
+    assert not statistics.overflow
+    roles = {role for role, _dtype, _count in worklist.workspace._buffers}
+    assert "dense_conflict_winner_table" in roles
+    assert "compact_flags" not in roles
+    assert "conflict_keys" not in roles
+    assert worklist.workspace._scan_executors == {}
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_worklist_masked_dense_priority_uses_signed_order_and_source_tie():
+    capacity = 16
+    key_capacity = 4
+    keys = ti.ndarray(ti.i32, shape=capacity)
+    flags = ti.ndarray(ti.i32, shape=capacity)
+    priorities = ti.ndarray(ti.i32, shape=capacity)
+    keys.from_numpy(np.pad(np.array([0, 0, 1, 1, 2, 2], np.int32), (0, 10)))
+    flags.from_numpy(np.pad(np.ones(6, np.int32), (0, 10)))
+    priorities.from_numpy(
+        np.pad(
+            np.array(
+                [0x7FFFFFFF, -0x80000000, -7, -7, 3, 9],
+                np.int32,
+            ),
+            (0, 10),
+        )
+    )
+    worklist = ti.algorithms.DeviceWorklist(
+        capacity,
+        ti.i32,
+        telemetry=False,
+        transition_mode="direct",
+    )
+
+    minimum = worklist.resolve_conflicts_from_mask(
+        keys,
+        flags,
+        priorities=priorities,
+        policy="min_priority",
+        key_capacity=key_capacity,
+    )
+    expected_min = np.array([1, 2, 4, 0x7FFFFFFF], np.int32)
+    np.testing.assert_array_equal(minimum.dense_winner_sources.to_numpy(), expected_min)
+    expected_route = "portable_multi_pass" if impl.current_cfg().arch == ti.vulkan else "packed_priority_source_u64"
+    assert minimum.arbitration_route == expected_route
+
+    maximum = worklist.resolve_conflicts_from_mask(
+        keys,
+        flags,
+        priorities=priorities,
+        policy="max_priority",
+        key_capacity=key_capacity,
+    )
+    expected_max = np.array([0, 2, 5, 0x7FFFFFFF], np.int32)
+    np.testing.assert_array_equal(maximum.dense_winner_sources.to_numpy(), expected_max)
+    assert maximum.arbitration_route == expected_route
+    assert not worklist.statistics().overflow
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_worklist_masked_dense_claim_reports_active_invalid_key():
+    capacity = 8
+    keys = ti.ndarray(ti.i32, shape=capacity)
+    flags = ti.ndarray(ti.i32, shape=capacity)
+    keys.from_numpy(np.array([1, -1, 7, 0, 0, 0, 0, 0], dtype=np.int32))
+    flags.from_numpy(np.array([1, 1, 0, 0, 0, 0, 0, 0], dtype=np.int32))
+    worklist = ti.algorithms.DeviceWorklist(capacity, ti.i32, telemetry=False, transition_mode="direct")
+    worklist.resolve_conflicts_from_mask(
+        keys,
+        flags,
+        key_capacity=4,
+    )
+    assert worklist.statistics().overflow
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
