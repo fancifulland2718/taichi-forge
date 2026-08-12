@@ -562,6 +562,15 @@ structured region 可以直接在 device 上消费这些 symbolic resource。For
 读回 terminal；`terminal.snapshot()` 是显式 host 边界，应在外层
 `SubmissionTicket` 完成后调用。
 
+`solve.statistics()` 会在相同边界归属执行信息，不对 Krylov loop 插桩。每次包含该 action 的
+外层 Graph 成功执行，`enclosing_graph_submissions` 增加一次；`done()`/`wait()` 观察到 ticket
+完成时，`observed_completions` 增加（已经完成的 submission 会立即记录），这一过程不读取
+terminal storage。`terminal.snapshot()` 执行显式读回时，每个 packet 的 `terminal_snapshots`
+与 `terminal_iteration_sum` 恰好增加一次。action 位于 outer loop 内时，packet 描述本 packet
+最后一次 invocation；outer region invocation 与 backend replay 数仍以 ticket region telemetry
+为准。`plan.graph_action_statistics()` 汇总该 plan 创建的全部 action，`solve.statistics()` 返回
+单个 action 的记录。
+
 该 action 可以追加到 outer `Sequential`，并与最多另外七个有序 inner `while` action
 共同组成 depth-2 Graph。取得资格的结构是一个 outer `while`，其 body 顺序包含一至八个
 leaf inner `while`，inner 之间允许普通 dispatch/native action；各 inner control resource

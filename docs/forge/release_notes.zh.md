@@ -101,12 +101,21 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
   stable compact 或 attribute gather。winner identity 仍是原始 source index；省略显式
   ordinal 还会删除 ordinal arbitration pass 与 buffer。current-contract 资格入口在通用
   Falling Sand 案例中使用该路线，并保留单独命名的 legacy 入口。本地诊断 A/B 仍由工作负载
-  专用四 kernel atomic control 占优，因此该路线保持显式使用，不宣称自动加速。
+  专用四 kernel atomic control 占优，因此 self-contained resolver 保持显式使用，不宣称自动加速。
 - 未提供自定义 ordinal 时，`resolve_conflicts_from_mask()` 的 priority 形式会在 CPU/CUDA 上用
   packed 64-bit `(signed priority, source index)` 做一次 atomic arbitration；Vulkan 与不支持的
   layout 保持 portable 32-bit multi-pass。packed route 少一个 dispatch，但每个 key 增加 4 bytes
   scratch。五对本地诊断的 median 方向为 CPU 约 5.4%、CUDA 约 22.6%，但 CUDA control 噪声使其
   只能作为 route 决策依据，不能作为可发布吞吐结论。
+- `DenseConflictClaimTable` 现在提供不嵌入具体 workload 逻辑的确定性 producer-fused dense
+  arbitration。声明有界 priority/source domain 后，CPU/CUDA/Vulkan 共用一个 packed u32 table；
+  更宽 domain 在 CPU/CUDA 上使用 u64，并在 Vulkan 上 fail closed。调用方可以把 slot reset 融入
+  已有 reset kernel、把 claim 融入 candidate producer，并在 materialization 中直接读取 winner，
+  因而删除三个独立 conflict helper 和 decoded winner table。本地 65,536 source/32,768 key 的
+  parity probe 把完整流水从六个 kernel 降为三个，conflict storage 从 384 KiB 降为 128 KiB；
+  五组交替 pair 的同步 median 方向为 CPU 1.81x、CUDA 1.72x、Vulkan 1.47x，所有 route 的
+  pair-median CV 均不超过 2.8%。该数据只描述这一有界诊断 shape，不代表自动 route 或普遍
+  吞吐承诺。
 - direct worklist 可在已有全局有序的 record/boundary kernel 内调用
   `device_worklist_recycle_direct()`，随后用 `commit_recycled_next()` 完成 front recycle 与 generation
   前进。这样不削弱 global-ordering 合同，同时每层删除一个独立 prepare helper。64 层配对诊断删除
@@ -129,6 +138,11 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
 - nested Graph execution statistics 统一消费扁平 backend mapping；异步 telemetry 以稳定
   region path 记录 recordable/native Sequential 内的 structured region。缺失或重复 region
   仍然 fail closed。
+- 完整 SolvePlan Graph action 在 structured sequence 内联后仍保留 action-owned host telemetry。
+  每次成功的外层 Graph submission 记一次；ticket poll/wait 会幂等记录 observed completion，
+  不读取 terminal；显式 terminal snapshot 则恰好一次记录 packet 的最终逻辑迭代数。单 action
+  与 plan aggregate 都不增加 kernel、queue submission、device byte 或隐式同步；nested region
+  invocation/replay 数继续由 ticket telemetry 提供。
 - recordable f32 compiled-Graph A/M provider 现在可在 CUDA/Vulkan 上执行 device-resident
   convergence control 的 fixed-linear PCG。compiled-Graph PCG 自动选择该路径；
   compiled-Graph CG 保留原默认策略并可显式 opt in。满足资格的连续 Field operand 直接绑定，

@@ -665,6 +665,18 @@ resources on device. Forge performs no implicit terminal readback;
 `terminal.snapshot()` is the explicit host boundary and should be called only
 after the enclosing `SubmissionTicket` completes.
 
+`solve.statistics()` attributes execution at these same boundaries without
+instrumenting the Krylov loop. `enclosing_graph_submissions` advances once per
+successful outer Graph execution containing this action. `observed_completions`
+advances when `done()`/`wait()` observes its ticket (or immediately for an
+already-complete submission), without reading terminal storage.
+`terminal_snapshots` and `terminal_iteration_sum` advance exactly once per
+packet when `terminal.snapshot()` performs the explicit readback. For an action
+inside an outer loop, the packet describes the last invocation in that packet;
+ticket region telemetry remains the source for outer-region invocation and
+backend replay counts. `plan.graph_action_statistics()` aggregates all actions
+created from the plan, while `solve.statistics()` returns one action record.
+
 The action may be appended to an outer `Sequential` together with up to seven
 other ordered inner `while` actions. The qualified depth-two shape is one
 outer `while` whose body contains one to eight leaf inner `while` regions,

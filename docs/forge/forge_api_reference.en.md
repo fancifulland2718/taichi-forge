@@ -647,6 +647,38 @@ and source-index tie breaking are preserved exactly. Vulkan uses the portable
 one arbitration dispatch and adds four scratch bytes per key; route selection
 does not change the result contract.
 
+#### `ti.algorithms.DenseConflictClaimTable(key_capacity, source_capacity, *, priority_range=None, policy="min_priority")`
+
+Owns a packed dense claim table for callers that already have reset, producer,
+and materialization kernels and therefore cannot benefit from a self-contained
+multi-pass resolver. `policy` is `min_priority` or `max_priority`; source index
+is the deterministic final tie break. A declared signed-i32 `priority_range`
+selects a portable u32 encoding when the complete priority/source domain fits.
+That route is supported on CPU, CUDA, and Vulkan. Wider or full-i32 domains use
+u64 on CPU/CUDA; Vulkan rejects them explicitly and callers may retain
+`resolve_conflicts_from_mask()` as the portable fallback.
+
+The low-level functions are fusion points, not hidden dispatches:
+
+- call `device_dense_conflict_reset_slot(claims, key)` for every key in an
+  already ordered dense reset kernel;
+- call `device_dense_conflict_begin(overflow, generation)` exactly once in the
+  same reset kernel;
+- call `device_dense_conflict_claim(*table.claim_arguments, key, priority,
+  source)` directly in the candidate producer;
+- call `device_dense_conflict_winner_source(*table.winner_arguments, key)` in
+  the consumer/materializer; it returns `-1` for an empty key.
+
+There is no device-wide barrier between reset and claim inside one kernel, so
+they must remain globally ordered dispatches; each may be fused with existing
+work on its side of that boundary. Invalid keys, sources, priorities, or a
+forged capacity set sticky overflow without accessing the table. `reset()` is
+the standalone convenience path. `statistics()` is an explicit synchronized
+overflow/generation snapshot. `graph_args(name)` and `runtime_arguments(name)`
+provide a stable symbolic Graph ABI with no replay allocation. The table owns
+one packed value per key plus two i32 scalars; no decoded i32 winner table is
+materialized.
+
 `statistics()` and `snapshot()` are explicit synchronized observations.
 `execution_report(dispatch=None, target="current")` additionally joins the
 latest counters with a bounded-dispatch snapshot and reports useful, executed,
@@ -2056,6 +2088,7 @@ The runtime-bound operator API is documented separately in
 | `preconditioner.pin()` / `.apply(r, out=None, iteration=0)` / `.metadata` / `.statistics()` | Pin exact target/action generations and apply a native action. | No Python hot-path callback; `iteration` selects a variable-linear action. Reports build/accepted stamps, schedule update counters, generation publish/retire/release telemetry, and refresh operation/transfer/resource counters. Solver telemetry separately reports action selections and wraps. |
 | `ti.linalg.experimental.SolvePlan(operator, method=..., preconditioner=..., execution_policy=..., check_interval=..., restart=..., submission_workspace_lanes=1, submission_workspace_saturation="wait")` | Build a persistent CG, PCG, MINRES, BiCGSTAB, restarted GMRES, or FGMRES plan. | CPU GMRES/FGMRES support compatible `f32/f64` host actions. CUDA/Vulkan `f32` support fixed stored or compiled providers; FGMRES consumes a finite variable-linear action table, stores `restart` preconditioned basis vectors, and uses direct native submission. Submission workspace options apply only to the cached f32 CG/PCG `submit()` Graph. Restart is 8, 16, or 32. See the detailed guide for the complete provider and policy matrix. |
 | `plan.graph_action(rhs_arg, output_arg, initial_guess=..., name=...)` | Inline a complete f32 CG/PCG solve as a structured Graph action and expose device terminal resources. | Requires recordable A and optional fixed-linear M. `action.allocate_terminal()` supplies the explicit runtime packet; one compiled Graph instance owns one completion-fenced workspace lane. |
+| `action.statistics()` / `plan.graph_action_statistics()` | Attribute enclosing Graph submissions, observed ticket completions, and explicit terminal snapshots to one action or all actions created by a plan. | Adds no device dispatch or implicit terminal readback. Iterations advance only when `terminal.snapshot()` materializes the packet; a nested packet describes its last action invocation. |
 | `plan.submit(rhs, initial_guess=None, out=None, pacer=None, lane=None, on_saturation="wait", telemetry=False, workspace_lane=None)` | Submit one complete solve and return `SolvePlanSubmission`. | CUDA/Vulkan require a recordable f32 CG/PCG device-convergent plan, reuse one cached Graph/ticket, and materialize terminal state only in `result()`. CPU executes exact native `solve()` synchronously and returns a completed lane-0 submission without Graph telemetry. |
 | `plan.submission_statistics()` | Inspect cached submission variants, lanes, bytes, calls, failures, telemetry requests, and terminal materializations. | No-initial and explicit-initial variants are independent Graphs and therefore own independent lane pools. |
 | `plan.solve(rhs, initial_guess=None, out=None)` | Return an immutable `SolveResult` with solution, true-residual terminal state, and structured `breakdown_reason`. | Scalar one-dimensional ndarray or supported dense field/view. Qualified recordable Graph Krylov binds compact/contiguous Field operands in its preamble/epilogue without separate pack/unpack submissions; other Field layouts use reusable device pack/gather and unpack/scatter. No conversion occurs inside an iteration. RHS/output aliasing is prohibited. |

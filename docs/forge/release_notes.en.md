@@ -129,7 +129,7 @@ grouped under the behavior they shipped.
   entry points use this route for the generic Falling Sand case and preserve
   separately named legacy entry points. Local diagnostic A/B still favored
   the workload-specific four-kernel atomic control, so this route is explicit
-  and no automatic speedup is claimed.
+  and no automatic speedup is claimed for the self-contained resolver.
 - The priority form of `resolve_conflicts_from_mask()` uses a single packed
   64-bit `(signed priority, source index)` atomic arbitration pass on CPU and
   CUDA when no custom ordinal is supplied. Vulkan and unsupported layouts keep
@@ -137,6 +137,19 @@ grouped under the behavior they shipped.
   but adds four scratch bytes per key; five-pair local diagnostics favored it
   by a median 5.4% on CPU and 22.6% on CUDA, with the CUDA control noise making
   this a route decision rather than a publishable throughput claim.
+- `DenseConflictClaimTable` now exposes deterministic producer-fused dense
+  arbitration without embedding workload logic in Forge. A declared bounded
+  priority/source domain uses one packed u32 table on CPU/CUDA/Vulkan; wider
+  domains use u64 on CPU/CUDA and fail closed on Vulkan. Callers can fuse slot
+  reset into an existing reset kernel, claim into the candidate producer, and
+  decode the winner directly in materialization, removing all three standalone
+  conflict helpers and the decoded winner table. A local 65,536-source/32,768-
+  key parity probe reduced the complete pipeline from six kernels to three and
+  reduced conflict storage from 384 KiB to 128 KiB. Its synchronized median
+  directions over five alternating pairs were 1.81x CPU, 1.72x CUDA, and 1.47x
+  Vulkan, with every route's pair-median CV at or below 2.8%. These describe
+  that bounded diagnostic shape, not an automatic route or general throughput
+  promise.
 - Direct worklists can recycle the consumed front and advance their generation
   inside an already ordered record/boundary kernel through
   `device_worklist_recycle_direct()`, followed by
@@ -172,6 +185,14 @@ grouped under the behavior they shipped.
   mapping, and asynchronous telemetry instruments structured regions inside
   recordable/native Sequential actions by stable region path. Missing or
   duplicate regions continue to fail closed.
+- Complete SolvePlan Graph actions retain action-owned host telemetry after
+  their structured sequence is inlined. One counter records each successful
+  enclosing Graph submission, ticket polling/waiting records an idempotent
+  observed completion without terminal readback, and an explicit terminal
+  snapshot records the packet's final logical iteration count exactly once.
+  Per-action and plan aggregates add no kernel, queue submission, device byte,
+  or implicit synchronization; nested region invocation/replay counts remain
+  available from ticket telemetry.
 - Recordable f32 compiled-Graph A/M providers can now execute fixed-linear PCG
   with device-resident convergence control on CUDA and Vulkan. Compiled-Graph
   PCG selects this path automatically; compiled-Graph CG keeps its previous

@@ -544,6 +544,33 @@ portable 32-bit multi-pass。`DeviceConflictResult.arbitration_route` 报告
 `packed_priority_source_u64` 或 `portable_multi_pass`。packed route 少一个 arbitration dispatch，
 但每个 key 增加 4 bytes scratch；route 不改变结果合同。
 
+#### `ti.algorithms.DenseConflictClaimTable(key_capacity, source_capacity, *, priority_range=None, policy="min_priority")`
+
+为已经持有 reset、producer 与 materialization kernel 的调用方提供 packed dense claim table，
+避免强制使用自包含 multi-pass resolver。`policy` 可为 `min_priority` 或 `max_priority`，source
+index 始终是最终的确定性 tie break。声明 signed-i32 `priority_range` 后，只要完整的
+priority/source domain 可表示，就会选择 CPU/CUDA/Vulkan 通用的 u32 encoding；更宽或完整
+i32 domain 在 CPU/CUDA 上使用 u64。Vulkan 对无法压入 u32 的合同明确拒绝，调用方可继续使用
+`resolve_conflicts_from_mask()` 作为 portable fallback。
+
+底层函数是 fusion point，不会暗中产生 dispatch：
+
+- 在已有且全局有序的 dense reset kernel 中，对每个 key 调用
+  `device_dense_conflict_reset_slot(claims, key)`；
+- 在同一 reset kernel 中恰好一次调用
+  `device_dense_conflict_begin(overflow, generation)`；
+- 在 candidate producer 内直接调用
+  `device_dense_conflict_claim(*table.claim_arguments, key, priority, source)`；
+- 在 consumer/materializer 中调用
+  `device_dense_conflict_winner_source(*table.winner_arguments, key)`；空 key 返回 `-1`。
+
+单个 kernel 内 reset 和 claim 之间没有 device-wide barrier，因此它们必须保持为两个全局有序
+dispatch，但两侧都可与调用方已有工作融合。越界 key/source/priority 或伪造 capacity 会设置
+sticky overflow，不会访问 table。`reset()` 是独立 convenience path；`statistics()` 是显式同步
+的 overflow/generation snapshot。`graph_args(name)` 和 `runtime_arguments(name)` 提供无 replay
+allocation 的稳定 symbolic Graph ABI。该对象只持有每个 key 一个 packed value 和两个 i32
+scalar，不物化 decoded i32 winner table。
+
 `statistics()` 与 `snapshot()` 是显式同步 observation。`execution_report(dispatch=None,
 target="current")` 还会与 bounded-dispatch snapshot 合并，报告 useful、executed、skipped、
 encoded、overflow 与 exact-grid state。`memory_report()` 报告 front/back、extent、counter 和
@@ -1739,6 +1766,7 @@ operator API 另见[LinearOperator 与 SolvePlan](linear_operator.zh.md)。
 | `preconditioner.pin()` / `.apply(r, out=None, iteration=0)` / `.metadata` / `.statistics()` | pin 精确 target/action generation 并应用 native action。 | 无 Python hot-path callback；`iteration` 选择 variable-linear action。报告 build/accepted stamp、schedule update counter、generation publish/retire/release，以及 refresh operation/transfer/resource counter；solver telemetry 另行报告 action selection/wrap。 |
 | `ti.linalg.experimental.SolvePlan(operator, method=..., preconditioner=..., execution_policy=..., check_interval=..., restart=..., submission_workspace_lanes=1, submission_workspace_saturation="wait")` | 构造 persistent CG、PCG、MINRES、BiCGSTAB、restarted GMRES 或 FGMRES plan。 | CPU GMRES/FGMRES 支持兼容的 `f32/f64` host action；CUDA/Vulkan `f32` 支持 fixed stored 或 compiled provider。FGMRES 消费有限 variable-linear action table，持有 `restart` 个预条件 basis vector，并使用 direct native submission。submission workspace 选项只作用于缓存的 f32 CG/PCG `submit()` Graph。restart 可为 8、16 或 32；完整 provider/policy 矩阵见详细指南。 |
 | `plan.graph_action(rhs_arg, output_arg, initial_guess=..., name=...)` | 将完整 f32 CG/PCG 求解内联为 structured Graph action，并开放 device terminal resource。 | 要求可录制的 A 与可选 fixed-linear M；`action.allocate_terminal()` 提供显式 runtime packet；每个 compiled Graph instance 持有一个由 completion fence 保护的 workspace lane。 |
+| `action.statistics()` / `plan.graph_action_statistics()` | 把外层 Graph submission、已观察 ticket completion 与显式 terminal snapshot 归属到单个 action 或 plan 创建的全部 action。 | 不增加 device dispatch，也不隐式读回 terminal。只有 `terminal.snapshot()` 物化 packet 时才累计 iteration；nested packet 描述其最后一次 action invocation。 |
 | `plan.submit(rhs, initial_guess=None, out=None, pacer=None, lane=None, on_saturation="wait", telemetry=False, workspace_lane=None)` | 提交一次完整 solve 并返回 `SolvePlanSubmission`。 | CUDA/Vulkan 要求 recordable f32 CG/PCG device-convergent plan，复用一个缓存 Graph/ticket，并只在 `result()` 物化 terminal；CPU 同步执行精确 native `solve()`，返回无 Graph telemetry 的 completed lane-0 submission。 |
 | `plan.submission_statistics()` | 查询缓存 submission variant、lane、bytes、调用、失败、telemetry request 与 terminal materialization。 | 无 initial 与显式 initial variant 是独立 Graph，因此有独立 lane pool。 |
 | `plan.solve(rhs, initial_guess=None, out=None)` | 返回 immutable `SolveResult`，包含 solution、真实 residual terminal state 与结构化 `breakdown_reason`。 | 一维 scalar ndarray 或受支持 dense field/view。满足资格的 recordable Graph Krylov 在 preamble/epilogue 直接绑定 compact/连续 Field operand，不产生独立 pack/unpack submission；其它 Field layout 使用可复用的 device pack/gather 与 unpack/scatter。迭代内部不转换；禁止 RHS/output alias。 |
