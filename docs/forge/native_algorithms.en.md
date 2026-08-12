@@ -286,6 +286,14 @@ overflow/generation (8 bytes) and uses `device_worklist_append_direct()` to
 publish extent during slot reservation; it is restricted to atomic append,
 requires `telemetry=False`, and must not be followed by `finalize_next()`.
 
+When a workload already has a globally ordered boundary/record kernel, that
+kernel may call `device_worklist_recycle_direct()` with
+`worklist.recycle_arguments()`, then the host calls
+`commit_recycled_next()`. This recycles the consumed front and advances the
+generation without a separate next-level prepare dispatch. It must run exactly
+once after the previous producer and old-front reads have completed; it is not
+a substitute for a cross-block barrier inside a producer.
+
 The overflow-free path performs one atomic slot reservation per item. Atomic
 append order is unspecified. One producer owns a transition; independent
 Graph submissions must be ordered before they write the same worklist. An
@@ -310,10 +318,27 @@ When only per-key ownership is consumed, request
 `0x7fffffff` for empty keys; no compact extent, winner list, scan, or compact
 materialization is produced.
 
+Fixed-domain producers can call `resolve_conflicts_from_mask()` with dense key
+and active-flag arrays. It preserves original source indices while eliminating
+stable candidate compaction and attribute gathering. If no explicit ordinal is
+needed, source index is the deterministic tie break and the ordinal pass and
+buffer are omitted. This telemetry-free winner-table route is explicit: users
+should retain a fused direct-claim kernel when its workload-specific physical
+plan is cheaper.
+
+For priority/claim arbitration without custom ordinals, CPU and CUDA pack the
+signed priority order and source-index tie break into one u64 atomic-min pass.
+Vulkan retains the portable 32-bit multi-pass route. The returned
+`arbitration_route` exposes that choice. Packing removes one dispatch but costs
+four additional workspace bytes per key, so it does not change the guidance to
+benchmark against a workload-specific fused claim.
+
 For Graph replay, create symbolic arguments with `worklist.graph_args(name)`.
 Append separate `DeviceWorklistSequence(args).prepare_next()` and
 `.finalize_next()` nodes around a staged user producer. A direct transition
-records only `prepare_next()` plus the direct producer. A sequence can also
+normally records only `prepare_next()` plus the direct producer. A host-driven
+level loop may instead use the ordered boundary-kernel recycle contract above;
+that low-level path is not a `DeviceWorklistSequence` action. A sequence can also
 record `select()`, compact-list conflict resolution, or
 `resolve_conflict_winner_table()`. Transition helpers are backend-recordable;
 provider pipelines without an integrated action remain explicit segmented

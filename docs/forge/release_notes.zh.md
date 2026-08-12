@@ -50,6 +50,12 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
   zero/one/two/four resource 与 65k range fill 的 Forge/vanilla median throughput ratio 分别为
   1.024x/1.154x/1.104x/0.993x/0.988x，成对 CV 为 1.2%-2.5%。该数据只资格化这台机器上的
   fixed launch overhead，不代表通用 kernel throughput。
+- 普通 compact ndarray specialization 现在在 LLVM/SPIR-V 中保留 canonical addressing，
+  不再让每次访问都读取 affine offset/stride metadata。positive-stride storage view 使用独立的
+  runtime-affine specialization；symbolic Graph ndarray 因 replay 可能绑定两种 layout，继续按
+  runtime-affine 编译。三对本地诊断中，代表性 CPU stencil 相对同一 vanilla control 从
+  0.661x 提升到 1.113x，reduction 从 0.938x 提升到 1.220x；样本数与 CV 不足以把这些倍率作为
+  可移植 speedup 发布。
 - dynamic-work capability report 升级为 schema v5，并分别报告 device-extent publication
   合同、backend reuse、静态 route admission 与 opt-in physical blocks/threads 观测。每次
   publication 都携带 immutable generation，consumer 只会复用同一 generation；CUDA 无法消费
@@ -68,6 +74,28 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
   winner table，不再生成 scan/compact/winner list。在 capacity=65,536、item=16,384 的配对
   transition harness 中，direct 路线的 median latency 在 CPU/Vulkan 上分别降低 7.5%/13.1%；
   CUDA 观测到的 4.8% 方向因 staged CV 超过 5% 而不作为合格结论。
+- fixed-domain conflict producer 现在可调用
+  `DeviceWorklist.resolve_conflicts_from_mask()`，直接消费 dense key/active 数组，不再执行
+  stable compact 或 attribute gather。winner identity 仍是原始 source index；省略显式
+  ordinal 还会删除 ordinal arbitration pass 与 buffer。current-contract 资格入口在通用
+  Falling Sand 案例中使用该路线，并保留单独命名的 legacy 入口。本地诊断 A/B 仍由工作负载
+  专用四 kernel atomic control 占优，因此该路线保持显式使用，不宣称自动加速。
+- 未提供自定义 ordinal 时，`resolve_conflicts_from_mask()` 的 priority 形式会在 CPU/CUDA 上用
+  packed 64-bit `(signed priority, source index)` 做一次 atomic arbitration；Vulkan 与不支持的
+  layout 保持 portable 32-bit multi-pass。packed route 少一个 dispatch，但每个 key 增加 4 bytes
+  scratch。五对本地诊断的 median 方向为 CPU 约 5.4%、CUDA 约 22.6%，但 CUDA control 噪声使其
+  只能作为 route 决策依据，不能作为可发布吞吐结论。
+- direct worklist 可在已有全局有序的 record/boundary kernel 内调用
+  `device_worklist_recycle_direct()`，随后用 `commit_recycled_next()` 完成 front recycle 与 generation
+  前进。这样不削弱 global-ordering 合同，同时每层删除一个独立 prepare helper。64 层配对诊断删除
+  全部 64 个 helper，CPU 方向约 11.9%，CUDA/Vulkan 约 21%；这些只是本地诊断方向，不是跨设备保证。
+- CPU ThreadPool completion protocol 现在会先用 atomic sentinel 封闭 stack-owned job，再发布
+  completion；迟到 worker 无法重新 join 或重复最终状态转换，非最后 worker 也无需取得 pool
+  mutex。installed-runtime manifest validation 还会在 `ti.init()` 前只比较静态 schema，不再
+  为此构造 backend Program。这两项属于发行稳定性修复，不附带吞吐提升声明。
+- compile profile 现在会报告粗粒度 SNode 生命周期 scope，包括 tree materialization、backend
+  synchronization/resource release、executable/kernel-definition retirement 与 lifecycle-lock wait。
+  这些 scope 只在 compile profiling 开启时产生，不改变普通 launch 路径。
 - Windows split-runtime 构建现在从 pybind object 与显式 runtime anchor 推导 export closure，
   生成确定性的 ABI manifest，并在链接后审计最终 DLL。本地 MSVC split build 将 requested
   export 从 114,235 个 raw definition 收窄到 1,367 个；最终 DLL 连同源码显式 export 共暴露

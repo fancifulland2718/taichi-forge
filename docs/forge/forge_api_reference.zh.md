@@ -31,6 +31,10 @@ internal storage 可使用 CUDA Graph capture/replay；positive affine view 在 
 在 submission 前失败，不存在 staging fallback。当前合同仅支持 read-write，不绑定
 gradient owner，也不支持 ArgPack 嵌套、负或 broadcast stride、overlap、axis
 permutation、integer indexing 与 external ownership。
+普通 compact ndarray call 与 positive-affine view 使用不同 compiled specialization：compact
+call 在生成 kernel 中保持 canonical addressing；affine view 读取已经验证的 runtime
+offset/stride metadata。symbolic Graph ndarray 使用 runtime-affine specialization，因此同一
+compiled Graph 可安全绑定两种合格 layout。
 
 完整 layout matrix、生命周期、Graph 路径与示例见
 [实验性 Dense Storage 零拷贝视图](storage_views.zh.md)。
@@ -190,6 +194,9 @@ prof.dump_chrome_trace("compile.json")
 
 - 这是开发和诊断 API，不适合保留在热循环中。
 - C++ pass 级计时的可见性依赖当前 runtime 构建。
+- profiling 开启时，SNode tree add/destroy 会记录粗粒度 lifecycle-lock、backend
+  materialization/synchronization/resource-release、executable retirement 与 kernel-definition
+  retirement scope。它们是诊断阶段边界，不是稳定的 per-pass ABI 名称。
 
 ## `taichi_forge.runtime`
 
@@ -471,6 +478,13 @@ direct atomic producer 的生命周期为：
 `device_worklist_append_direct()` 让 producer 在 reservation 时发布 extent；它只支持 atomic
 append transition，且 `finalize_next()` 在该模式下无效。
 
+如果已有全局有序的 boundary kernel 在前一个 producer 完成之后、消费旧 front 之后恰好调用一次
+`device_worklist_recycle_direct(*worklist.recycle_arguments())`，direct worklist 可删除下一次独立的
+`prepare_next()`。boundary dispatch 完成后调用 `commit_recycled_next()` 交换 host 侧 front identity。
+这是底层顺序合同：它不会在 producer 内插入 device-wide barrier，不能与 staged transition 混用；
+lean shared overflow statistic 会被重置，而已发布的 `next_extent` 仍保留本次 transition 的 overflow。
+显式 `statistics()` 会合并当前已发布 extent，因此 latest overflow 仍可观察，submission 不增加工作。
+
 `device_worklist_append(values, extent_state, generated, overflow, capacity,
 value)` 是 `@ti.func`，返回已保留 slot；overflow 时返回 `-1`。无 overflow 路径每个 item
 只执行一次 reservation atomic。append 顺序不保证；需要顺序的 consumer 必须使用 stable
@@ -501,6 +515,20 @@ sorted key run 分配一次 scan；少量特别长的 run 会降低并行度，�
 `output_shape="dense_winner_table"` 要求显式 `dense_atomic`、有界 `key_capacity` 与
 `telemetry=False`。它只返回 dense source-index table，空 key 为 `0x7fffffff`；不会替换
 worklist front，也不会生成 compact extent、scan、compact 或 winner-list materialization。
+
+`resolve_conflicts_from_mask(keys, active_flags, *, priorities=None,
+ordinals=None, policy="first", key_capacity=...)` 是这一合同的 fixed-domain 形式。
+`keys`、`active_flags` 和可选 attribute 的长度均为 worklist capacity；inactive slot 会被
+忽略，winner value 是原始 source index。它跳过 candidate compact 与 attribute gather。
+省略 `ordinals` 时，source index 是最后的确定性 tie break，同时删除 ordinal arbitration
+pass 和 buffer。该显式底层路径要求 `telemetry=False`，只返回 `dense_winner_sources`；active
+越界 key 会通过 overflow 报告。它不承诺通用 dense claim 一定快于工作负载专用的 fused
+atomic kernel。
+对未提供 custom ordinal 的 `min_priority`/`max_priority`/`claim`，CPU/CUDA 使用 packed 64-bit
+priority/source arbitration，并精确保留 signed priority 顺序与 source-index tie break；Vulkan 使用
+portable 32-bit multi-pass。`DeviceConflictResult.arbitration_route` 报告
+`packed_priority_source_u64` 或 `portable_multi_pass`。packed route 少一个 arbitration dispatch，
+但每个 key 增加 4 bytes scratch；route 不改变结果合同。
 
 `statistics()` 与 `snapshot()` 是显式同步 observation。`execution_report(dispatch=None,
 target="current")` 还会与 bounded-dispatch snapshot 合并，报告 useful、executed、skipped、

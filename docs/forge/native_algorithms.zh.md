@@ -242,6 +242,12 @@ staged transition 保留 generated/overflow/generation，共 12 bytes；
 `device_worklist_append_direct()` 在 slot reservation 时直接发布 extent。direct 模式仅适用于
 atomic append，要求 `telemetry=False`，之后不得再调用 `finalize_next()`。
 
+若 workload 已有全局有序的 boundary/record kernel，该 kernel 可用
+`worklist.recycle_arguments()` 调用 `device_worklist_recycle_direct()`，随后 host 调用
+`commit_recycled_next()`。这样会回收已消费 front、推进 generation，并删除下一层独立 prepare
+dispatch。它必须在前一 producer 与旧 front read 完成后恰好执行一次，不能替代 producer 内的
+跨 block barrier。
+
 无 overflow 时，每个 item 只执行一次 atomic slot reservation。atomic append 顺序不保证；
 一次 transition 只有一个 producer owner，多个独立 Graph submission 写同一 worklist 前必须
 显式排序。overflow 会把发布 count 钳制到 capacity，并同时保留在 `DeviceExtent` 与 worklist
@@ -259,9 +265,22 @@ raw sample/CV 与 workspace accounting。
 `output_shape="dense_winner_table"`。结果是长度为 `key_capacity` 的 source-index table，空 key
 为 `0x7fffffff`；不会生成 compact extent、winner list、scan 或 compact materialization。
 
+fixed-domain producer 可用 dense key 与 active-flag 数组调用
+`resolve_conflicts_from_mask()`。该路径保留原始 source index，并删除 stable candidate
+compact 与 attribute gather。无需显式 ordinal 时，source index 作为确定性 tie break，ordinal
+pass 和 buffer 也会省略。这是一条 telemetry-free 的显式 winner-table 路线；若工作负载专用
+的 fused direct-claim kernel 具有更短的物理计划，用户应继续保留后者。
+
+未提供 custom ordinal 的 priority/claim arbitration 在 CPU/CUDA 上会把 signed priority 顺序与
+source-index tie break 打包为一次 u64 atomic-min pass；Vulkan 保持 portable 32-bit multi-pass。
+返回值的 `arbitration_route` 暴露实际选择。packed route 少一个 dispatch，但每个 key 增加 4 bytes
+workspace，因此仍应与 workload-specific fused claim 做配对基准。
+
 Graph replay 使用 `worklist.graph_args(name)` 创建 symbolic 参数。staged producer 两侧可追加
 独立的 `DeviceWorklistSequence(args).prepare_next()` / `.finalize_next()` node；direct transition
-只记录 `prepare_next()` 与 direct producer。sequence 还可记录 `select()`、compact-list conflict
+通常只记录 `prepare_next()` 与 direct producer。host-driven level loop 也可使用上述有序 boundary
+kernel recycle 合同；该底层路径不是 `DeviceWorklistSequence` action。sequence 还可记录
+`select()`、compact-list conflict
 resolve 或 `resolve_conflict_winner_table()`。transition helper 可被 backend record；没有 integrated
 action 的 provider pipeline 仍是显式 segmented 路线。Graph staging 在 submission 前分配，steady-state
 replay 不分配、也不读取 host count；首次执行仍可能编译 kernel 并准备 native provider

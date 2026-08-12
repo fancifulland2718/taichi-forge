@@ -57,6 +57,14 @@ grouped under the behavior they shipped.
   resources and a 65k range fill were 1.024x/1.154x/1.104x/0.993x/0.988x;
   paired CV was 1.2%-2.5%. These data qualify fixed launch overhead on that
   machine, not general kernel throughput.
+- Ordinary compact ndarray specializations now keep canonical addressing in
+  LLVM/SPIR-V instead of loading affine offset/stride metadata at every access.
+  Positive-stride storage views retain a separate runtime-affine
+  specialization, and symbolic Graph ndarray arguments remain runtime-affine
+  because replay may bind either layout. Three-pair local diagnostics moved a
+  representative CPU stencil from 0.661x to 1.113x and a reduction from
+  0.938x to 1.220x versus the same vanilla controls; sample count and CV do not
+  qualify those ratios as portable speedup claims.
 - Dynamic-work capability reports use schema v5 and separate the device-extent
   publication contract, backend reuse, static route admission, and opt-in
   physical blocks/threads observation. Every publication carries an immutable
@@ -84,6 +92,41 @@ grouped under the behavior they shipped.
   the direct path reduced median latency by 7.5% on CPU and 13.1% on Vulkan;
   the observed 4.8% CUDA direction remains unqualified because its staged CV
   exceeded 5%.
+- Fixed-domain conflict producers can now call
+  `DeviceWorklist.resolve_conflicts_from_mask()` to consume dense key/active
+  arrays without stable compact or attribute-gather stages. Original source
+  indices remain the winner identity; omitting explicit ordinals also removes
+  the ordinal arbitration pass and buffer. Current-contract qualification
+  entry points use this route for the generic Falling Sand case and preserve
+  separately named legacy entry points. Local diagnostic A/B still favored
+  the workload-specific four-kernel atomic control, so this route is explicit
+  and no automatic speedup is claimed.
+- The priority form of `resolve_conflicts_from_mask()` uses a single packed
+  64-bit `(signed priority, source index)` atomic arbitration pass on CPU and
+  CUDA when no custom ordinal is supplied. Vulkan and unsupported layouts keep
+  the portable 32-bit multi-pass path. The packed route removes one dispatch
+  but adds four scratch bytes per key; five-pair local diagnostics favored it
+  by a median 5.4% on CPU and 22.6% on CUDA, with the CUDA control noise making
+  this a route decision rather than a publishable throughput claim.
+- Direct worklists can recycle the consumed front and advance their generation
+  inside an already ordered record/boundary kernel through
+  `device_worklist_recycle_direct()`, followed by
+  `commit_recycled_next()`. This removes one standalone prepare helper per
+  level without weakening the global-ordering requirement. A 64-level paired
+  diagnostic removed all 64 helpers and favored the fused route by 11.9% on
+  CPU and about 21% on CUDA/Vulkan; these are local diagnostic directions, not
+  cross-device guarantees.
+- The CPU ThreadPool completion protocol now closes a stack-owned job with an
+  atomic sentinel before publishing completion. Late workers cannot rejoin or
+  repeat the final transition, while non-final workers avoid the pool mutex.
+  Installed-runtime manifest validation also compares the static schema before
+  `ti.init()` instead of constructing a backend Program. These changes target
+  release stability and do not carry a throughput claim.
+- Compile profiles now expose coarse SNode lifecycle scopes for tree
+  materialization, backend synchronization/resource release, executable and
+  kernel-definition retirement, and lifecycle-lock wait. These scopes are
+  emitted only while compile profiling is active and do not change the normal
+  launch path.
 - Windows split-runtime builds now derive the runtime export closure from the
   pybind object files plus the explicit runtime anchor, generate a deterministic
   ABI manifest, and audit the final DLL after linking. The local MSVC split

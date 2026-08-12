@@ -36,6 +36,11 @@ Vulkan command record/replay. Unsupported layouts raise before submission;
 there is no staging fallback. The current contract is read-write, binds no
 gradient owner, and does not support ArgPack nesting, negative or broadcast
 strides, overlap, axis permutation, integer indexing, or external ownership.
+Ordinary compact ndarray calls and positive-affine views use separate compiled
+specializations: compact calls keep canonical addressing in the generated
+kernel, while affine views load the validated runtime offset/stride metadata.
+Symbolic Graph ndarray arguments use the runtime-affine specialization so one
+compiled Graph may safely bind either qualified layout.
 
 See [Experimental zero-copy dense storage views](storage_views.en.md) for the
 layout matrix, lifetime behavior, Graph paths, and examples.
@@ -216,6 +221,10 @@ Limits:
 - This is a development and diagnosis API. It is not meant to be left in a
   hot loop.
 - Availability of C++ pass-level timing depends on the active runtime build.
+- While profiling is active, SNode tree add/destroy records include coarse
+  lifecycle-lock, backend materialization/synchronization/resource-release,
+  executable-retirement, and kernel-definition-retirement scopes. They are
+  diagnostic phase boundaries, not stable per-pass ABI names.
 
 ## `taichi_forge.runtime`
 
@@ -549,6 +558,18 @@ and generation (8 bytes), and uses `device_worklist_append_direct()` so the
 producer publishes its extent during reservation. It supports only atomic
 append transitions; `finalize_next()` is invalid in this mode.
 
+A direct worklist can eliminate a later standalone `prepare_next()` when an
+already globally ordered boundary kernel calls
+`device_worklist_recycle_direct(*worklist.recycle_arguments())` exactly once
+after the preceding producer has finished and after that boundary has consumed
+the old front. Call `commit_recycled_next()` after the boundary dispatch to
+swap the host-side front identity. This is a low-level ordering contract: it
+does not insert a device-wide barrier inside a producer, cannot be mixed with
+staged transitions, and resets the lean shared overflow statistic while the
+published `next_extent` retains that transition's overflow state. Explicit
+`statistics()` merges the current published extent, so the latest overflow
+remains observable without adding work to submission.
+
 `device_worklist_append(values, extent_state, generated, overflow, capacity,
 value)` is a `@ti.func` and returns the reserved slot or `-1` on overflow. The
 overflow-free path performs one reservation atomic per item. The append order
@@ -589,6 +610,24 @@ bounded `key_capacity`, and `telemetry=False`. It returns only a dense
 source-index table with `0x7fffffff` for empty keys. The worklist front is not
 replaced, and no compact extent, scan, compact, or winner-list materialization
 is created.
+
+`resolve_conflicts_from_mask(keys, active_flags, *, priorities=None,
+ordinals=None, policy="first", key_capacity=...)` is the fixed-domain form of
+that contract. `keys`, `active_flags`, and any attributes have worklist
+capacity; inactive slots are ignored and winner values are original source
+indices. It skips candidate compaction and attribute gathering. Omitting
+`ordinals` uses source index as the deterministic final tie break and removes
+the ordinal arbitration pass and buffer. This explicit low-level path requires
+`telemetry=False`, returns only `dense_winner_sources`, reports an active
+out-of-domain key through overflow, and does not imply that a generic dense
+claim is faster than a fused workload-specific atomic kernel.
+For `min_priority`/`max_priority`/`claim` without custom ordinals, CPU and CUDA
+use a packed 64-bit priority/source arbitration route; signed priority order
+and source-index tie breaking are preserved exactly. Vulkan uses the portable
+32-bit multi-pass route. `DeviceConflictResult.arbitration_route` reports
+`packed_priority_source_u64` or `portable_multi_pass`. The packed route removes
+one arbitration dispatch and adds four scratch bytes per key; route selection
+does not change the result contract.
 
 `statistics()` and `snapshot()` are explicit synchronized observations.
 `execution_report(dispatch=None, target="current")` additionally joins the
