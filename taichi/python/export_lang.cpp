@@ -4231,6 +4231,15 @@ void export_lang(py::module &m) {
       .def(py::init<>())
       .def("clear_runtime_state",
            &aot::CompiledGraphJITCache::clear_runtime_state)
+      .def("_set_stable_replay_optimization",
+           [](aot::CompiledGraphJITCache &cache, bool enabled) {
+             const bool previous =
+                 cache.stable_replay_optimization_enabled.exchange(
+                     enabled, std::memory_order_relaxed);
+             if (previous != enabled) {
+               cache.clear_runtime_state();
+             }
+           })
       .def("_debug_graph_stats", [](aot::CompiledGraphJITCache &cache) {
         const auto snapshot = cache.debug_graph_stats();
         const auto &stats = snapshot.stats;
@@ -4393,6 +4402,37 @@ void export_lang(py::module &m) {
             snapshot.diagnostics_previously_enabled;
         result["diagnostics_counters_complete"] =
             snapshot.diagnostics_counters_complete;
+        result["replay_attribution_enabled"] =
+            snapshot.replay_attribution_enabled;
+        result["replay_calls"] = snapshot.replay_calls;
+        result["replay_total_ns"] = snapshot.replay_total_ns;
+        result["replay_snode_guard_wait_ns"] =
+            snapshot.replay_snode_guard_ns;
+        result["replay_resource_guard_wait_ns"] =
+            snapshot.replay_resource_guard_ns;
+        result["replay_cuda_submission_wait_ns"] =
+            snapshot.replay_cuda_submission_lock_ns;
+        result["replay_cache_wait_ns"] = snapshot.replay_cache_wait_ns;
+        result["replay_binding_plan_ns"] =
+            snapshot.replay_binding_plan_ns;
+        result["replay_resource_retain_ns"] =
+            snapshot.replay_resource_retain_ns;
+        result["replay_snode_validation_ns"] =
+            snapshot.replay_snode_validation_ns;
+        result["replay_backend_ns"] = snapshot.replay_backend_ns;
+        result["replay_signature_ns"] = snapshot.replay_signature_ns;
+        result["replay_binding_plan_hits"] =
+            snapshot.replay_binding_plan_hits;
+        result["replay_binding_plan_misses"] =
+            snapshot.replay_binding_plan_misses;
+        result["replay_signature_fast_hits"] =
+            snapshot.replay_signature_hits;
+        result["replay_signature_fast_misses"] =
+            snapshot.replay_signature_misses;
+        result["replay_snode_guard_acquisitions"] =
+            snapshot.replay_snode_guard_acquisitions;
+        result["replay_snode_guard_elisions"] =
+            snapshot.replay_snode_guard_elisions;
         return result;
       });
 

@@ -16,6 +16,7 @@
 #include "taichi/program/callable.h"
 #include "taichi/aot/module_data.h"
 #include "taichi/program/compile_config.h"
+#include "taichi/program/runtime_resource_registry.h"
 #include "taichi/struct/snode_tree.h"
 #define TI_RUNTIME_HOST
 #include "taichi/program/context.h"
@@ -423,6 +424,74 @@ struct CompiledGraphDebugSnapshot {
   // still available immediately.
   bool diagnostics_previously_enabled{false};
   bool diagnostics_counters_complete{true};
+  bool replay_attribution_enabled{false};
+  uint64_t replay_calls{0};
+  uint64_t replay_total_ns{0};
+  uint64_t replay_snode_guard_ns{0};
+  uint64_t replay_resource_guard_ns{0};
+  uint64_t replay_cuda_submission_lock_ns{0};
+  uint64_t replay_cache_wait_ns{0};
+  uint64_t replay_binding_plan_ns{0};
+  uint64_t replay_resource_retain_ns{0};
+  uint64_t replay_snode_validation_ns{0};
+  uint64_t replay_backend_ns{0};
+  uint64_t replay_signature_ns{0};
+  uint64_t replay_binding_plan_hits{0};
+  uint64_t replay_binding_plan_misses{0};
+  uint64_t replay_signature_hits{0};
+  uint64_t replay_signature_misses{0};
+  uint64_t replay_snode_guard_acquisitions{0};
+  uint64_t replay_snode_guard_elisions{0};
+};
+
+struct CompiledGraphRuntimeResourceIdentity {
+  std::string name;
+  RuntimeResourceHandle handle;
+  const void *object{nullptr};
+};
+
+// Reusable, generation-qualified resource binding for stable Graph replay.
+// The plan stores only high-level identities and object references; submission
+// leases are reacquired for every replay so cached state never extends a
+// resource lifetime on its own.
+struct CompiledGraphRuntimeBindingPlan {
+  Program *program{nullptr};
+  bool initialized{false};
+  uint64_t revision{0};
+  std::vector<CompiledGraphRuntimeResourceIdentity> identities;
+  std::vector<Ndarray *> ndarrays;
+  std::vector<const storage::RuntimeStorageArgument *> runtime_storage;
+  std::vector<Texture *> textures;
+
+  void clear() {
+    program = nullptr;
+    initialized = false;
+    revision = 0;
+    identities.clear();
+    ndarrays.clear();
+    runtime_storage.clear();
+    textures.clear();
+  }
+};
+
+struct CompiledGraphReplayAttribution {
+  uint64_t calls{0};
+  uint64_t total_ns{0};
+  uint64_t snode_guard_ns{0};
+  uint64_t resource_guard_ns{0};
+  uint64_t cuda_submission_lock_ns{0};
+  uint64_t cache_wait_ns{0};
+  uint64_t binding_plan_ns{0};
+  uint64_t resource_retain_ns{0};
+  uint64_t snode_validation_ns{0};
+  uint64_t backend_ns{0};
+  uint64_t signature_ns{0};
+  uint64_t binding_plan_hits{0};
+  uint64_t binding_plan_misses{0};
+  uint64_t signature_hits{0};
+  uint64_t signature_misses{0};
+  uint64_t snode_guard_acquisitions{0};
+  uint64_t snode_guard_elisions{0};
 };
 
 struct CompiledGraphStructuredResult {
@@ -584,6 +653,10 @@ struct CompiledGraphJITCache {
   // Keep their cheap classification in the cache so diagnostics can explain
   // the decision without constructing replay slots or compiling twice.
   CompiledGraphStats vulkan_inline_stats;
+  CompiledGraphRuntimeBindingPlan runtime_binding_plan;
+  std::atomic<bool> stable_replay_optimization_enabled{true};
+  std::atomic<bool> replay_attribution_enabled{false};
+  CompiledGraphReplayAttribution replay_attribution;
   // Detailed counters are opt-in. Failure recovery keeps its own bounded
   // backoff state, so ordinary graph replay does not pay for diagnostics until
   // an internal caller requests _graph_stats.

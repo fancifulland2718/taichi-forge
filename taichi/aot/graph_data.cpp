@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <memory>
 #include <numeric>
@@ -160,6 +161,156 @@ GraphRuntimeResourceViews graph_runtime_resource_views(
     views.textures.add(view);
   }
   return views;
+}
+
+using ReplayClock = std::chrono::steady_clock;
+
+uint64_t replay_elapsed_ns(ReplayClock::time_point begin) {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          ReplayClock::now() - begin)
+          .count());
+}
+
+bool graph_has_runtime_resource_declarations(
+    const std::unordered_map<std::string, IValue> &args) {
+  return std::any_of(args.begin(), args.end(), [](const auto &entry) {
+    return entry.second.tag == ArgKind::kNdarray ||
+           entry.second.tag == ArgKind::kTexture;
+  });
+}
+
+bool graph_runtime_args_require_snode_guard(
+    const std::unordered_map<std::string, IValue> &args) {
+  for (const auto &[name, value] : args) {
+    (void)name;
+    if (value.tag != ArgKind::kNdarray || value.runtime_storage == nullptr) {
+      continue;
+    }
+    if (value.runtime_storage->descriptor().owner().kind ==
+        storage::StorageOwnerKind::kSNodePayload) {
+      return true;
+    }
+  }
+  return false;
+}
+
+template <typename T>
+void append_unique_resource(std::vector<T *> &resources, T *resource) {
+  if (std::find(resources.begin(), resources.end(), resource) ==
+      resources.end()) {
+    resources.push_back(resource);
+  }
+}
+
+CompiledGraphRuntimeResourceIdentity runtime_resource_identity(
+    const std::string &name,
+    const IValue &value) {
+  CompiledGraphRuntimeResourceIdentity identity;
+  identity.name = name;
+  if (value.tag == ArgKind::kNdarray && value.runtime_storage != nullptr) {
+    identity.object = value.runtime_storage;
+    const auto &owner = value.runtime_storage->descriptor().owner();
+    if (owner.kind == storage::StorageOwnerKind::kProgramNdarray) {
+      identity.handle = owner.ndarray_handle;
+    }
+  } else if (value.tag == ArgKind::kNdarray) {
+    auto *array = reinterpret_cast<Ndarray *>(value.val);
+    identity.object = array;
+    if (array != nullptr) {
+      identity.handle = array->runtime_resource_handle();
+    }
+  } else if (value.tag == ArgKind::kTexture) {
+    auto *texture = reinterpret_cast<Texture *>(value.val);
+    identity.object = texture;
+    if (texture != nullptr) {
+      identity.handle = texture->runtime_resource_handle();
+    }
+  }
+  return identity;
+}
+
+bool runtime_binding_plan_matches(
+    const CompiledGraphRuntimeBindingPlan &plan,
+    const std::unordered_map<std::string, IValue> &args,
+    Program *program) {
+  if (!plan.initialized || plan.program != program) {
+    return false;
+  }
+  std::size_t resource_count = 0;
+  for (const auto &[name, value] : args) {
+    if (value.tag != ArgKind::kNdarray && value.tag != ArgKind::kTexture) {
+      continue;
+    }
+    ++resource_count;
+    const auto expected = std::lower_bound(
+        plan.identities.begin(), plan.identities.end(), name,
+        [](const auto &identity, const std::string &candidate) {
+          return identity.name < candidate;
+        });
+    if (expected == plan.identities.end() || expected->name != name) {
+      return false;
+    }
+    const auto current = runtime_resource_identity({}, value);
+    if (current.object != expected->object ||
+        current.handle != expected->handle) {
+      return false;
+    }
+  }
+  return resource_count == plan.identities.size();
+}
+
+void rebuild_runtime_binding_plan(
+    CompiledGraphRuntimeBindingPlan &plan,
+    const std::unordered_map<std::string, IValue> &args,
+    Program *program) {
+  const uint64_t next_revision = plan.revision + 1;
+  plan.clear();
+  plan.program = program;
+  plan.initialized = true;
+  plan.revision = next_revision == 0 ? 1 : next_revision;
+  for (const auto &[name, value] : args) {
+    if (value.tag != ArgKind::kNdarray && value.tag != ArgKind::kTexture) {
+      continue;
+    }
+    plan.identities.push_back(runtime_resource_identity(name, value));
+    if (value.tag == ArgKind::kNdarray && value.runtime_storage != nullptr) {
+      append_unique_resource(plan.runtime_storage, value.runtime_storage);
+    } else if (value.tag == ArgKind::kNdarray) {
+      auto *array = reinterpret_cast<Ndarray *>(value.val);
+      if (array != nullptr && array->owning_program() != nullptr) {
+        append_unique_resource(plan.ndarrays, array);
+      }
+    } else {
+      auto *texture = reinterpret_cast<Texture *>(value.val);
+      if (texture != nullptr && texture->owning_program() != nullptr) {
+        append_unique_resource(plan.textures, texture);
+      }
+    }
+  }
+  std::sort(plan.identities.begin(), plan.identities.end(),
+            [](const auto &lhs, const auto &rhs) {
+              return lhs.name < rhs.name;
+            });
+}
+
+const CompiledGraphRuntimeBindingPlan &prepare_runtime_binding_plan(
+    CompiledGraphJITCache &cache,
+    const std::unordered_map<std::string, IValue> &args,
+    Program *program,
+    bool attribute) {
+  if (runtime_binding_plan_matches(cache.runtime_binding_plan, args,
+                                   program)) {
+    if (attribute) {
+      ++cache.replay_attribution.binding_plan_hits;
+    }
+  } else {
+    rebuild_runtime_binding_plan(cache.runtime_binding_plan, args, program);
+    if (attribute) {
+      ++cache.replay_attribution.binding_plan_misses;
+    }
+  }
+  return cache.runtime_binding_plan;
 }
 
 const CompiledKernelData *get_or_compile_cached_kernel(
@@ -1314,6 +1465,97 @@ make_cuda_graph_signature(const CompiledGraph &graph,
             });
   return signature;
 }
+
+bool cuda_graph_arguments_match_cached_signature(
+    const CompiledGraph &graph,
+    Program &program,
+    const std::unordered_map<std::string, IValue> &args,
+    const std::vector<CudaGraphArgSignatureEntry> &signature) {
+  if (args.size() != signature.size()) {
+    return false;
+  }
+  for (const auto &entry : signature) {
+    const auto value_it = args.find(entry.name);
+    const auto declared_it = graph.args.find(entry.name);
+    if (value_it == args.end() || declared_it == graph.args.end() ||
+        value_it->second.tag != entry.tag ||
+        declared_it->second.tag != entry.tag) {
+      return false;
+    }
+    const IValue &value = value_it->second;
+    if (entry.tag == ArgKind::kNdarray) {
+      DeviceAllocation allocation = kDeviceNullAllocation;
+      uint64_t byte_offset = 0;
+      uint64_t byte_size = 0;
+      uint64_t runtime_signature = 0;
+      PrimitiveTypeID dtype_id = PrimitiveTypeID::unknown;
+      ExternalArrayLayout layout = ExternalArrayLayout::kNull;
+      if (value.runtime_storage != nullptr) {
+        const auto &argument = *value.runtime_storage;
+        const auto &descriptor = argument.descriptor();
+        const auto binding =
+            program.resolve_runtime_storage_argument_under_graph_guard(
+                argument);
+        if (!binding.valid) {
+          return false;
+        }
+        allocation = binding.allocation;
+        byte_offset = binding.byte_offset;
+        byte_size = binding.byte_size;
+        runtime_signature = binding.runtime_signature;
+        dtype_id = descriptor.scalar_type()->as<PrimitiveType>()->type;
+        switch (descriptor.properties().array_layout) {
+          case storage::StorageArrayLayout::kScalar:
+            layout = ExternalArrayLayout::kNull;
+            break;
+          case storage::StorageArrayLayout::kAos:
+            layout = ExternalArrayLayout::kAOS;
+            break;
+          case storage::StorageArrayLayout::kSoa:
+            layout = ExternalArrayLayout::kSOA;
+            break;
+          case storage::StorageArrayLayout::kNone:
+            return false;
+        }
+      } else {
+        auto *array = reinterpret_cast<Ndarray *>(value.val);
+        if (array == nullptr) {
+          return false;
+        }
+        allocation = array->get_device_allocation();
+        byte_size = array->get_nelement() * array->get_element_size();
+        dtype_id =
+            array->get_element_data_type()->as<PrimitiveType>()->type;
+        layout = array->layout;
+      }
+      if (allocation.device != entry.device ||
+          allocation.alloc_id != entry.alloc_id ||
+          byte_offset != entry.byte_offset || byte_size != entry.byte_size ||
+          runtime_signature != entry.runtime_signature ||
+          dtype_id != entry.dtype_id || layout != entry.layout) {
+        return false;
+      }
+    } else if (entry.tag == ArgKind::kScalar) {
+      if (value.val != entry.value) {
+        return false;
+      }
+    } else if (entry.tag == ArgKind::kMatrix) {
+      auto *matrix = reinterpret_cast<Matrix *>(value.val);
+      if (matrix == nullptr ||
+          matrix->length() * data_type_size(matrix->dtype()) !=
+              entry.value_bytes.size() ||
+          std::memcmp(reinterpret_cast<const void *>(matrix->data()),
+                      entry.value_bytes.data(), entry.value_bytes.size()) !=
+              0) {
+        return false;
+      }
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
 std::optional<
     std::vector<std::unique_ptr<cuda::CudaDevice::AllocationLease>>>
 acquire_cuda_graph_allocation_leases(
@@ -1808,7 +2050,49 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
         *state, CompiledGraphFallbackReason::insufficient_dispatches, true);
     return false;
   }
+  const bool attribute = cache.replay_attribution_enabled.load(
+      std::memory_order_relaxed);
+  const bool stable_replay = cache.stable_replay_optimization_enabled.load(
+      std::memory_order_relaxed);
+  if (state->graph_exec && stable_replay) {
+    const auto signature_begin =
+        attribute ? ReplayClock::now() : ReplayClock::time_point{};
+    bool exact_match = false;
+    try {
+      exact_match = cuda_graph_arguments_match_cached_signature(
+          graph, program, args, state->signature);
+    } catch (...) {
+      state->retire();
+      throw;
+    }
+    if (attribute) {
+      cache.replay_attribution.signature_ns +=
+          replay_elapsed_ns(signature_begin);
+      if (exact_match) {
+        ++cache.replay_attribution.signature_hits;
+      } else {
+        ++cache.replay_attribution.signature_misses;
+      }
+    }
+    if (exact_match) {
+      CUDAContext::get_instance().make_current();
+      state->collect_ready_deferred_resources();
+      CUDADriver::get_instance().graph_launch(state->graph_exec.get(),
+                                              nullptr);
+      state->stats.last_path = CompiledGraphExecutionPath::cuda_exact_replay;
+      state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
+      if (state->diagnostics_enabled) {
+        ++state->stats.exact_replays;
+      }
+      if (statistics != nullptr) {
+        statistics->record_graph_replay();
+      }
+      return true;
+    }
+  }
   std::optional<CudaGraphSignatureCandidate> signature;
+  const auto signature_begin =
+      attribute ? ReplayClock::now() : ReplayClock::time_point{};
   try {
     signature = make_cuda_graph_signature(graph, program, args);
   } catch (...) {
@@ -1817,6 +2101,10 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
     // error so no later cleanup keeps an executable with a dead root address.
     state->retire();
     throw;
+  }
+  if (attribute) {
+    cache.replay_attribution.signature_ns +=
+        replay_elapsed_ns(signature_begin);
   }
   if (!signature.has_value()) {
     mark_cuda_graph_fallback(
@@ -4158,8 +4446,21 @@ void CompiledGraphCudaStateDeleter::operator()(
 #endif
 
 #if defined(TI_WITH_VULKAN)
+struct VulkanGraphArgumentSignatureEntry {
+  std::string name;
+  ArgKind tag{ArgKind::kUnknown};
+  uint64_t scalar{0};
+  std::vector<uint8_t> matrix;
+};
+
 struct CompiledGraphVulkanState {
   std::unique_ptr<gfx::GraphReplayRegistration> registration;
+  gfx::GfxRuntime *runtime{nullptr};
+  uint64_t binding_plan_revision{0};
+  std::size_t argument_count{0};
+  std::vector<VulkanGraphArgumentSignatureEntry> argument_signature;
+  std::vector<std::unique_ptr<LaunchContextBuilder>> launch_contexts;
+  std::vector<gfx::GfxRuntime::GraphDispatch> dispatches;
   bool diagnostics_enabled{false};
 };
 
@@ -4182,6 +4483,7 @@ CompiledGraphVulkanState *get_vulkan_graph_state(
     auto state = std::make_unique<CompiledGraphVulkanState>();
     state->registration =
         runtime->register_graph_replay(cache.graph_replay_token());
+    state->runtime = runtime;
     cache.vulkan_graph_state.reset(state.release());
   }
   if (cache.graph_diagnostics_enabled &&
@@ -4233,9 +4535,100 @@ DevicePtr resolve_vulkan_indirect_dispatch_packet(
 struct PreparedVulkanGraphLaunch {
   std::vector<std::unique_ptr<LaunchContextBuilder>> launch_contexts;
   std::vector<gfx::GfxRuntime::GraphDispatch> dispatches;
+  const std::vector<gfx::GfxRuntime::GraphDispatch> *dispatch_view{nullptr};
   gfx::GfxRuntime *runtime{nullptr};
   std::uint64_t replay_key{0};
 };
+
+std::optional<std::vector<VulkanGraphArgumentSignatureEntry>>
+make_vulkan_graph_argument_signature(
+    const CompiledGraph &graph,
+    const std::unordered_map<std::string, IValue> &args) {
+  std::vector<VulkanGraphArgumentSignatureEntry> signature;
+  for (const auto &[name, value] : args) {
+    if (value.tag == ArgKind::kNdarray || value.tag == ArgKind::kTexture) {
+      continue;
+    }
+    const auto declared = graph.args.find(name);
+    if (declared == graph.args.end() || declared->second.tag != value.tag) {
+      return std::nullopt;
+    }
+    VulkanGraphArgumentSignatureEntry entry;
+    entry.name = name;
+    entry.tag = value.tag;
+    if (value.tag == ArgKind::kScalar) {
+      entry.scalar = value.val;
+    } else if (value.tag == ArgKind::kMatrix) {
+      auto *matrix = reinterpret_cast<Matrix *>(value.val);
+      if (matrix == nullptr) {
+        return std::nullopt;
+      }
+      const std::size_t bytes =
+          matrix->length() * data_type_size(matrix->dtype());
+      entry.matrix.resize(bytes);
+      std::memcpy(entry.matrix.data(),
+                  reinterpret_cast<const void *>(matrix->data()), bytes);
+    } else {
+      return std::nullopt;
+    }
+    signature.push_back(std::move(entry));
+  }
+  std::sort(signature.begin(), signature.end(), [](const auto &lhs,
+                                                    const auto &rhs) {
+    return lhs.name < rhs.name;
+  });
+  return signature;
+}
+
+bool vulkan_graph_arguments_match_cached_signature(
+    const CompiledGraph &graph,
+    const std::unordered_map<std::string, IValue> &args,
+    const CompiledGraphVulkanState &state) {
+  if (args.size() != state.argument_count) {
+    return false;
+  }
+  for (const auto &entry : state.argument_signature) {
+    const auto value = args.find(entry.name);
+    const auto declared = graph.args.find(entry.name);
+    if (value == args.end() || declared == graph.args.end() ||
+        value->second.tag != entry.tag ||
+        declared->second.tag != entry.tag) {
+      return false;
+    }
+    if (entry.tag == ArgKind::kScalar) {
+      if (value->second.val != entry.scalar) {
+        return false;
+      }
+    } else if (entry.tag == ArgKind::kMatrix) {
+      auto *matrix = reinterpret_cast<Matrix *>(value->second.val);
+      const std::size_t bytes =
+          matrix == nullptr
+              ? 0
+              : matrix->length() * data_type_size(matrix->dtype());
+      if (matrix == nullptr || bytes != entry.matrix.size() ||
+          std::memcmp(reinterpret_cast<const void *>(matrix->data()),
+                      entry.matrix.data(), bytes) != 0) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+bool vulkan_binding_plan_supports_stable_launch_context(
+    const std::unordered_map<std::string, IValue> &args) {
+  for (const auto &[name, value] : args) {
+    (void)name;
+    if (value.tag != ArgKind::kNdarray || value.runtime_storage == nullptr) {
+      continue;
+    }
+    if (value.runtime_storage->descriptor().owner().kind !=
+        storage::StorageOwnerKind::kProgramNdarray) {
+      return false;
+    }
+  }
+  return true;
+}
 
 bool prepare_vulkan_graph_launch(
     const CompiledGraph &graph,
@@ -4245,6 +4638,51 @@ bool prepare_vulkan_graph_launch(
     PreparedVulkanGraphLaunch &prepared) {
   if (cache.kernels.size() != graph.dispatches.size()) {
     cache.kernels.assign(graph.dispatches.size(), {});
+  }
+  const bool attribute = cache.replay_attribution_enabled.load(
+      std::memory_order_relaxed);
+  auto *existing_state = cache.vulkan_graph_state.get();
+  const bool stable_replay = cache.stable_replay_optimization_enabled.load(
+      std::memory_order_relaxed);
+  Program *graph_program = jit_graph_program(graph);
+  if (stable_replay && graph_program != nullptr &&
+      graph_has_runtime_resource_declarations(args)) {
+    // Structured Vulkan callers share this preparation path but do not pass
+    // through jit_run_cached(). Keep their resource generation in the same
+    // revision domain without double-counting ordinary replay attribution.
+    prepare_runtime_binding_plan(cache, args, graph_program,
+                                 /*attribute=*/false);
+  }
+  if (attribute && stable_replay && existing_state != nullptr &&
+      !existing_state->dispatches.empty() &&
+      existing_state->binding_plan_revision !=
+          cache.runtime_binding_plan.revision) {
+    ++cache.replay_attribution.signature_misses;
+  }
+  if (stable_replay && existing_state != nullptr &&
+      existing_state->binding_plan_revision ==
+          cache.runtime_binding_plan.revision &&
+      !existing_state->dispatches.empty()) {
+    const auto signature_begin =
+        attribute ? ReplayClock::now() : ReplayClock::time_point{};
+    const bool signature_match =
+        vulkan_graph_arguments_match_cached_signature(graph, args,
+                                                       *existing_state);
+    if (attribute) {
+      cache.replay_attribution.signature_ns +=
+          replay_elapsed_ns(signature_begin);
+      if (signature_match) {
+        ++cache.replay_attribution.signature_hits;
+      } else {
+        ++cache.replay_attribution.signature_misses;
+      }
+    }
+    if (signature_match) {
+      prepared.runtime = existing_state->runtime;
+      prepared.replay_key = existing_state->registration->replay_key();
+      prepared.dispatch_view = &existing_state->dispatches;
+      return true;
+    }
   }
   prepared.launch_contexts.reserve(graph.dispatches.size());
   prepared.dispatches.reserve(graph.dispatches.size());
@@ -4296,6 +4734,28 @@ bool prepare_vulkan_graph_launch(
   prepared.runtime = gfx_launcher->runtime();
   auto *state = get_vulkan_graph_state(cache, prepared.runtime);
   prepared.replay_key = state->registration->replay_key();
+  const bool cache_launch =
+      stable_replay &&
+      vulkan_binding_plan_supports_stable_launch_context(args);
+  if (cache_launch) {
+    const auto signature_begin =
+        attribute ? ReplayClock::now() : ReplayClock::time_point{};
+    auto signature = make_vulkan_graph_argument_signature(graph, args);
+    if (attribute) {
+      cache.replay_attribution.signature_ns +=
+          replay_elapsed_ns(signature_begin);
+    }
+    if (signature.has_value()) {
+      state->binding_plan_revision = cache.runtime_binding_plan.revision;
+      state->argument_count = args.size();
+      state->argument_signature = std::move(*signature);
+      state->launch_contexts = std::move(prepared.launch_contexts);
+      state->dispatches = std::move(prepared.dispatches);
+      prepared.dispatch_view = &state->dispatches;
+      return true;
+    }
+  }
+  prepared.dispatch_view = &prepared.dispatches;
   return true;
 }
 
@@ -4342,7 +4802,7 @@ bool try_run_vulkan_graph(const CompiledGraph &graph,
     return false;
   }
   return prepared.runtime->try_launch_graph(
-      prepared.dispatches, prepared.replay_key, statistics,
+      *prepared.dispatch_view, prepared.replay_key, statistics,
       structured_control, structured_result, nested_control, nested_result);
 }
 
@@ -4360,6 +4820,7 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
   std::lock_guard<std::mutex> lock(run_mutex);
   const bool diagnostics_previously_enabled = graph_diagnostics_enabled;
   graph_diagnostics_enabled = true;
+  replay_attribution_enabled.store(true, std::memory_order_relaxed);
   auto finalize = [&](CompiledGraphStats result) {
     CompiledGraphDebugSnapshot snapshot;
     snapshot.stats = result;
@@ -4367,6 +4828,32 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
         diagnostics_previously_enabled;
     snapshot.diagnostics_counters_complete =
         graph_diagnostics_counters_complete;
+    snapshot.replay_attribution_enabled =
+        diagnostics_previously_enabled;
+    snapshot.replay_calls = replay_attribution.calls;
+    snapshot.replay_total_ns = replay_attribution.total_ns;
+    snapshot.replay_snode_guard_ns = replay_attribution.snode_guard_ns;
+    snapshot.replay_resource_guard_ns = replay_attribution.resource_guard_ns;
+    snapshot.replay_cuda_submission_lock_ns =
+        replay_attribution.cuda_submission_lock_ns;
+    snapshot.replay_cache_wait_ns = replay_attribution.cache_wait_ns;
+    snapshot.replay_binding_plan_ns = replay_attribution.binding_plan_ns;
+    snapshot.replay_resource_retain_ns =
+        replay_attribution.resource_retain_ns;
+    snapshot.replay_snode_validation_ns =
+        replay_attribution.snode_validation_ns;
+    snapshot.replay_backend_ns = replay_attribution.backend_ns;
+    snapshot.replay_signature_ns = replay_attribution.signature_ns;
+    snapshot.replay_binding_plan_hits =
+        replay_attribution.binding_plan_hits;
+    snapshot.replay_binding_plan_misses =
+        replay_attribution.binding_plan_misses;
+    snapshot.replay_signature_hits = replay_attribution.signature_hits;
+    snapshot.replay_signature_misses = replay_attribution.signature_misses;
+    snapshot.replay_snode_guard_acquisitions =
+        replay_attribution.snode_guard_acquisitions;
+    snapshot.replay_snode_guard_elisions =
+        replay_attribution.snode_guard_elisions;
     for (const auto &kernel : kernels) {
       if (kernel.task_count ==
           std::numeric_limits<std::uint32_t>::max()) {
@@ -4632,6 +5119,8 @@ void CompiledGraphJITCache::clear_runtime_state() {
     graph_diagnostics_counters_complete = true;
     kernels.clear();
     runtime_arg_plans.clear();
+    runtime_binding_plan.clear();
+    replay_attribution = {};
     validated_snode_tree_program = nullptr;
     validated_snode_tree_epoch = 0;
   };
@@ -4815,16 +5304,138 @@ void CompiledGraph::jit_run_cached(
   if (program != nullptr) {
     program->ensure_runtime_submission_allowed("cached Graph launch");
   }
+  const bool attribute = cache.replay_attribution_enabled.load(
+      std::memory_order_relaxed);
+  const bool stable_replay = cache.stable_replay_optimization_enabled.load(
+      std::memory_order_relaxed);
+  const auto replay_begin =
+      attribute ? ReplayClock::now() : ReplayClock::time_point{};
+  auto finish_attribution = [&]() {
+    if (attribute) {
+      ++cache.replay_attribution.calls;
+      cache.replay_attribution.total_ns += replay_elapsed_ns(replay_begin);
+    }
+  };
   std::optional<Program::SNodeTreeLifecycleReadGuard> tree_lifecycle_guard;
   std::optional<Program::RuntimeResourceGraphScope> resource_guard;
   std::optional<Program::RuntimeSubmissionScope> completion_scope;
-  GraphRuntimeResourceViews resource_views;
+  const bool requires_snode_guard =
+      program != nullptr &&
+      (!stable_replay || !snode_tree_dependencies.empty() ||
+       graph_runtime_args_require_snode_guard(args));
   if (program != nullptr) {
-    tree_lifecycle_guard.emplace(
-        program->acquire_snode_tree_lifecycle_read_guard());
-    resource_views = graph_runtime_resource_views(args, program);
-    if (!resource_views.empty()) {
+    if (requires_snode_guard) {
+      const auto guard_begin =
+          attribute ? ReplayClock::now() : ReplayClock::time_point{};
+      tree_lifecycle_guard.emplace(
+          program->acquire_snode_tree_lifecycle_read_guard());
+      if (attribute) {
+        cache.replay_attribution.snode_guard_ns +=
+            replay_elapsed_ns(guard_begin);
+        ++cache.replay_attribution.snode_guard_acquisitions;
+      }
+    } else if (attribute) {
+      ++cache.replay_attribution.snode_guard_elisions;
+    }
+    if (graph_has_runtime_resource_declarations(args)) {
+      const auto guard_begin =
+          attribute ? ReplayClock::now() : ReplayClock::time_point{};
       resource_guard.emplace(program->acquire_runtime_resource_graph_scope());
+      if (attribute) {
+        cache.replay_attribution.resource_guard_ns +=
+            replay_elapsed_ns(guard_begin);
+      }
+    }
+  }
+#if defined(TI_WITH_CUDA)
+  // A graph is one submission transaction. This is required not only while
+  // capturing: replaying a CUDA graph concurrently with an ordinary kernel on
+  // the shared legacy default stream exposed invalid runtime state to both
+  // callers once Python graph execution started releasing the GIL.
+  std::unique_lock<std::recursive_mutex> cuda_submission_lock;
+  if (compile_config.arch == Arch::cuda) {
+    const auto lock_begin =
+        attribute ? ReplayClock::now() : ReplayClock::time_point{};
+    cuda_submission_lock =
+        CUDAContext::get_instance().get_submission_lock_guard();
+    if (attribute) {
+      cache.replay_attribution.cuda_submission_lock_ns +=
+          replay_elapsed_ns(lock_begin);
+    }
+  }
+#endif
+  const auto cache_wait_begin =
+      attribute ? ReplayClock::now() : ReplayClock::time_point{};
+  std::lock_guard<std::mutex> lock(cache.run_mutex);
+  if (attribute) {
+    cache.replay_attribution.cache_wait_ns +=
+        replay_elapsed_ns(cache_wait_begin);
+  }
+  if (program != nullptr && tree_lifecycle_guard &&
+      (cache.validated_snode_tree_program != program ||
+       cache.validated_snode_tree_epoch != tree_lifecycle_guard->epoch())) {
+    const auto validation_begin =
+        attribute ? ReplayClock::now() : ReplayClock::time_point{};
+    try {
+      program->validate_snode_tree_dependencies(snode_tree_dependencies);
+    } catch (...) {
+      // The dependency is stale. Retire replay/cached launch state before
+      // surfacing the rebuild requirement so no backend object keeps an
+      // executable containing the old root binding.
+      cache.cuda_graph_state.reset();
+      cache.vulkan_graph_state.reset();
+      cache.vulkan_inline_stats = {};
+      cache.kernels.clear();
+      cache.runtime_arg_plans.clear();
+      cache.runtime_binding_plan.clear();
+      cache.validated_snode_tree_program = nullptr;
+      cache.validated_snode_tree_epoch = 0;
+      throw;
+    }
+    cache.validated_snode_tree_program = program;
+    cache.validated_snode_tree_epoch = tree_lifecycle_guard->epoch();
+    if (attribute) {
+      cache.replay_attribution.snode_validation_ns +=
+          replay_elapsed_ns(validation_begin);
+    }
+  }
+  if (program != nullptr && resource_guard) {
+    const auto plan_begin =
+        attribute ? ReplayClock::now() : ReplayClock::time_point{};
+    if (stable_replay) {
+      const auto &plan =
+          prepare_runtime_binding_plan(cache, args, program, attribute);
+      if (attribute) {
+        cache.replay_attribution.binding_plan_ns +=
+            replay_elapsed_ns(plan_begin);
+      }
+      const auto retain_begin =
+          attribute ? ReplayClock::now() : ReplayClock::time_point{};
+      if (!plan.ndarrays.empty()) {
+        program->retain_ndarrays_for_external_submission(plan.ndarrays.data(),
+                                                         plan.ndarrays.size());
+      }
+      if (!plan.runtime_storage.empty()) {
+        program->retain_runtime_storage_for_graph_submission(
+            plan.runtime_storage.data(), plan.runtime_storage.size());
+      }
+      if (!plan.textures.empty()) {
+        program->retain_textures_for_external_submission(plan.textures.data(),
+                                                         plan.textures.size());
+      }
+      if (attribute) {
+        cache.replay_attribution.resource_retain_ns +=
+            replay_elapsed_ns(retain_begin);
+      }
+    } else {
+      const auto resource_views = graph_runtime_resource_views(args, program);
+      if (attribute) {
+        cache.replay_attribution.binding_plan_ns +=
+            replay_elapsed_ns(plan_begin);
+        ++cache.replay_attribution.binding_plan_misses;
+      }
+      const auto retain_begin =
+          attribute ? ReplayClock::now() : ReplayClock::time_point{};
       if (!resource_views.ndarrays.empty()) {
         program->retain_ndarrays_for_external_submission(
             resource_views.ndarrays.data(), resource_views.ndarrays.size());
@@ -4838,42 +5449,18 @@ void CompiledGraph::jit_run_cached(
         program->retain_textures_for_external_submission(
             resource_views.textures.data(), resource_views.textures.size());
       }
+      if (attribute) {
+        cache.replay_attribution.resource_retain_ns +=
+            replay_elapsed_ns(retain_begin);
+      }
     }
     completion_scope.emplace(program->acquire_runtime_submission_scope());
   }
-#if defined(TI_WITH_CUDA)
-  // A graph is one submission transaction. This is required not only while
-  // capturing: replaying a CUDA graph concurrently with an ordinary kernel on
-  // the shared legacy default stream exposed invalid runtime state to both
-  // callers once Python graph execution started releasing the GIL.
-  std::unique_lock<std::recursive_mutex> cuda_submission_lock;
-  if (compile_config.arch == Arch::cuda) {
-    cuda_submission_lock =
-        CUDAContext::get_instance().get_submission_lock_guard();
+  if (program != nullptr && !completion_scope) {
+    completion_scope.emplace(program->acquire_runtime_submission_scope());
   }
-#endif
-  std::lock_guard<std::mutex> lock(cache.run_mutex);
-  if (program != nullptr &&
-      (cache.validated_snode_tree_program != program ||
-       cache.validated_snode_tree_epoch != tree_lifecycle_guard->epoch())) {
-    try {
-      program->validate_snode_tree_dependencies(snode_tree_dependencies);
-    } catch (...) {
-      // The dependency is stale. Retire replay/cached launch state before
-      // surfacing the rebuild requirement so no backend object keeps an
-      // executable containing the old root binding.
-      cache.cuda_graph_state.reset();
-      cache.vulkan_graph_state.reset();
-      cache.vulkan_inline_stats = {};
-      cache.kernels.clear();
-      cache.runtime_arg_plans.clear();
-      cache.validated_snode_tree_program = nullptr;
-      cache.validated_snode_tree_epoch = 0;
-      throw;
-    }
-    cache.validated_snode_tree_program = program;
-    cache.validated_snode_tree_epoch = tree_lifecycle_guard->epoch();
-  }
+  const auto backend_begin =
+      attribute ? ReplayClock::now() : ReplayClock::time_point{};
 #if defined(TI_WITH_CUDA)
   if (compile_config.arch == Arch::cuda) {
     TI_ASSERT(program != nullptr);
@@ -4889,6 +5476,11 @@ void CompiledGraph::jit_run_cached(
       if (resource_guard) {
         resource_guard->finish_external_access_epoch();
       }
+      if (attribute) {
+        cache.replay_attribution.backend_ns +=
+            replay_elapsed_ns(backend_begin);
+      }
+      finish_attribution();
       return;
     }
     if (program != nullptr) {
@@ -4909,6 +5501,11 @@ void CompiledGraph::jit_run_cached(
       if (resource_guard) {
         resource_guard->finish_external_access_epoch();
       }
+      if (attribute) {
+        cache.replay_attribution.backend_ns +=
+            replay_elapsed_ns(backend_begin);
+      }
+      finish_attribution();
       return;
     }
     TI_ERROR_IF(
@@ -4980,6 +5577,10 @@ void CompiledGraph::jit_run_cached(
   if (resource_guard) {
     resource_guard->finish_external_access_epoch();
   }
+  if (attribute) {
+    cache.replay_attribution.backend_ns += replay_elapsed_ns(backend_begin);
+  }
+  finish_attribution();
 } catch (const BackendRuntimeError &error) {
   Program *program = jit_graph_program(*this);
   if (program != nullptr) {
@@ -5602,7 +6203,7 @@ bool CompiledGraph::jit_submit_bounded_vulkan_compound_cached(
       control.status = status->get_device_allocation().get_ptr();
     }
     if (!prepared.runtime->try_launch_graph(
-            prepared.dispatches, prepared.replay_key,
+            *prepared.dispatch_view, prepared.replay_key,
             &program->runtime_statistics(), &control,
             /*structured_result=*/nullptr)) {
       return false;

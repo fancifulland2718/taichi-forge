@@ -1502,6 +1502,67 @@ class GraphExecutionCounters:
 
 
 @dataclass(frozen=True)
+class GraphReplayAttribution:
+    """Opt-in host-side costs for one cached CGraph segment.
+
+    Calling :meth:`Graph.execution_stats` enables collection for later
+    replays. Nanosecond counters are cumulative. GPU payload execution is
+    asynchronous and excluded; CPU ``backend_ns`` includes synchronous kernel
+    execution.
+    """
+
+    enabled: bool
+    calls: int
+    total_ns: int
+    snode_guard_wait_ns: int
+    resource_guard_wait_ns: int
+    cuda_submission_wait_ns: int
+    cache_wait_ns: int
+    binding_plan_ns: int
+    resource_retain_ns: int
+    snode_validation_ns: int
+    backend_ns: int
+    signature_ns: int
+    binding_plan_hits: int
+    binding_plan_misses: int
+    signature_fast_hits: int
+    signature_fast_misses: int
+    snode_guard_acquisitions: int
+    snode_guard_elisions: int
+
+
+_REPLAY_ATTRIBUTION_FIELDS = (
+    "calls",
+    "total_ns",
+    "snode_guard_wait_ns",
+    "resource_guard_wait_ns",
+    "cuda_submission_wait_ns",
+    "cache_wait_ns",
+    "binding_plan_ns",
+    "resource_retain_ns",
+    "snode_validation_ns",
+    "backend_ns",
+    "signature_ns",
+    "binding_plan_hits",
+    "binding_plan_misses",
+    "signature_fast_hits",
+    "signature_fast_misses",
+    "snode_guard_acquisitions",
+    "snode_guard_elisions",
+)
+
+
+def _replay_attribution(stats, *, enabled=False):
+    return GraphReplayAttribution(
+        enabled=bool(stats.get("replay_attribution_enabled", enabled)),
+        **{
+            name: int(stats.get(f"replay_{name}", 0))
+            for name in _REPLAY_ATTRIBUTION_FIELDS
+        },
+    )
+
+
+@dataclass(frozen=True)
 class GraphExecutionSegmentReport:
     """Read-only execution snapshot for one CGraph or native segment."""
 
@@ -1541,6 +1602,7 @@ class GraphExecutionSegmentReport:
     consecutive_transient_failures: int
     counters_complete: bool
     counters: GraphExecutionCounters
+    replay_attribution: GraphReplayAttribution
 
 
 @dataclass(frozen=True)
@@ -4212,6 +4274,7 @@ def _execution_report(
                     counters=GraphExecutionCounters(
                         **{name: 0 for name in _COUNTER_FIELDS}
                     ),
+                    replay_attribution=_replay_attribution({}, enabled=False),
                 )
             )
             continue
@@ -4326,6 +4389,7 @@ def _execution_report(
                 counters=GraphExecutionCounters(
                     **{name: int(stats.get(name, 0)) for name in _COUNTER_FIELDS}
                 ),
+                replay_attribution=_replay_attribution(stats),
             )
         )
 
@@ -4461,7 +4525,7 @@ def _execution_report(
         opaque_driver_bytes=None,
     )
     return GraphExecutionReport(
-        schema_version=5,
+        schema_version=6,
         arch=arch,
         lifecycle_state=lifecycle_state,
         node_count=len(segments),
@@ -13187,6 +13251,7 @@ __all__ = [
     "SubmissionPacer",
     "NativeActionManifest",
     "GraphExecutionCounters",
+    "GraphReplayAttribution",
     "GraphExecutionSegmentReport",
     "GraphExecutionReport",
     "BoundedDispatchCapabilities",
