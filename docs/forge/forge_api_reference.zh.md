@@ -200,8 +200,22 @@ prof.dump_chrome_trace("compile.json")
 
 ## `taichi_forge.runtime`
 
-调用 `ti.init()` 后，可通过 `ti.runtime` 使用运行时可观测性 API。它只报告当前
-Program generation，不改变 kernel、Graph 或 submission 语义。
+可通过 `ti.runtime` 使用运行时可观测性 API。startup 归因在 `ti.init()` 前即可使用；
+Program statistics 与 capability 则要求 active Program。这些接口不改变 kernel、Graph 或
+submission 语义。
+
+### `ti.runtime.configure_startup_profile()` 与 `startup_profile()`
+
+startup profiling 默认关闭。在 import 前设置 `TI_STARTUP_PROFILE=1`，可覆盖 Python import、
+split-runtime 搜索/加载、pybind import 与 runtime-bitcode 配置。也可调用
+`ti.runtime.configure_startup_profile(True, clear=True)` 或传入
+`ti.init(startup_profile=True)`，归因后续 init phase。不可变 schema-v1 snapshot 包含有序
+timestamp event，以及 reset、configuration、backend selection、Program creation、runtime
+materialization 与 primitive-capability registration 的配对 phase duration。
+
+关闭路径不读取时钟。该 profiler 是低频诊断工具，不是 steady-state kernel/Graph tracer；package
+import 后才启用时无法重建 import 或 native-loader 时间。`startup_profile()` 不要求 CUDA driver
+或 active Program。
 
 ### `ti.runtime.stats()`
 
@@ -473,7 +487,7 @@ topology。这一合同不表示 backend Graph recording 或跨 operation kernel
 
 ### Device worklist
 
-#### `ti.algorithms.DeviceWorklist(capacity, dtype=ti.i32, *, workspace=None, telemetry=True, transition_mode="staged")`
+#### `ti.algorithms.DeviceWorklist(capacity, dtype=ti.i32, *, workspace=None, telemetry=True, transition_mode="staged", unique_key_capacity=None)`
 
 持有固定容量 front/back scalar storage、成对 `DeviceExtent`、mandatory publication state、
 可选 counter 与可复用 primitive workspace。value dtype 支持 `i32/u32/i64/u64/f32/f64`；capacity 必须是
@@ -491,6 +505,24 @@ direct atomic producer 的生命周期为：
 `telemetry=False`，只保留 overflow 与 generation（8 bytes），并使用
 `device_worklist_append_direct()` 让 producer 在 reservation 时发布 extent；它只支持 atomic
 append transition，且 `finalize_next()` 在该模式下无效。
+
+`unique_key_capacity` 是有界 dense integer key domain 的显式 direct-mode 合同。它为每个 key
+分配一个持久 i32 generation tag，并增加一个 scalar epoch。producer 调用
+`device_worklist_append_unique_direct(*worklist.unique_append_arguments(), key, value)`，保证
+同一 transition 内每个输出 key 至多 append 一次；transition 之间不清空 tag。非法 key、ABI
+不匹配、capacity overflow、source overflow 或 epoch 耗尽都通过 sticky overflow fail closed。
+输出顺序仍不保证。
+
+`graph_args()` 保留同一 ABI。`transition_arguments(step)` 为静态 multi-stage Graph 返回交替的
+source/target pair；每个 bounded producer 前的
+`DeviceWorklistSequence(args).prepare(target=...)` 推进 epoch。完成后调用
+`commit_direct_transitions(steps)` 只改变 Python front ownership。该能力可表达增量 frontier/halo
+生成，但不会自动删除应用自身的 full-domain copy/select；调用方应在 active-domain kernel 内处理
+retired/default state。一个 worklist 只有一条 completion-ordered lane，不能被并发 submission 写入。
+
+Vulkan 会把相邻的 recordable `prepare()` 与 bounded consumer 降低为同一个 backend Graph
+region。prepare kernel 在同一次 dispatch 中 reset target 并发布 source extent 的 indirect packet；
+steady-state pair 因而只有两个 physical dispatch，且没有 loose/helper launch。
 
 如果已有全局有序的 boundary kernel 在前一个 producer 完成之后、消费旧 front 之后恰好调用一次
 `device_worklist_recycle_direct(*worklist.recycle_arguments())`，direct worklist 可删除下一次独立的
@@ -600,6 +632,20 @@ publication。CUDA 上的 `launch_state` 只作为 capacity、extent identity �
 外部 packet。实际物理 route 应查询 `dynamic_work_capabilities()`。
 
 ### Primitive 算法
+
+#### `ti.algorithms.DeterministicScatterReducePlan(indices, num_groups)`
+
+从 host-visible integer destination index 构造显式可复用 reduction topology。有效 source 按
+destination 稳定分组，并在每组内保留 source ordinal；负数与越界 index 会被忽略。
+`plan.bind(values, output)` 接受 dtype 一致的一维 scalar ndarray 或 root-dense field，支持
+`i32/u32/i64/u64/f32/f64`，持有一条 ordered-value workspace lane，并在 CPU、CUDA、Vulkan
+上逐组从左到右 reduce。`binding.run()` 执行该路线，`binding.graph_action()` 返回 native
+Graph action。
+
+这是一条 opt-in 的可复现与资格路线，不会自动替换 atomic scatter-add，也不支持 AD。独立并发
+执行需要独立 binding；vector assembly 每个 scalar component 使用一个 binding。固定 backend/compiler
+合同内 reduction 顺序可重复，但 API 不承诺不同 backend 或 compiler mode 之间浮点 bit 完全一致。
+`report()` 公开稳定 topology bytes、ordered-value bytes 与 peak workspace bytes。
 
 这些函数在需要 replay 或复用 workspace 时会返回 workspace。重复调用时显式传入
 workspace 可以复用 scratch buffer 和 native plan。

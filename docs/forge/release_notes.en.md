@@ -106,6 +106,13 @@ grouped under the behavior they shipped.
   and from 144.7 to 23.2 ms on Vulkan versus the emulated former single-slot
   policy; these isolated host-path measurements are not application throughput
   claims.
+- Added default-off startup phase attribution through
+  `TI_STARTUP_PROFILE=1`, `ti.runtime.configure_startup_profile()`,
+  `ti.init(startup_profile=True)`, and `ti.runtime.startup_profile()`. Import,
+  split-runtime load, pybind, Program creation, runtime materialization, and
+  primitive-capability registration remain separate checkpoints. The disabled
+  path does not read a clock, and the snapshot is available without an active
+  Program or CUDA driver.
 - Graph, SolvePlan, and device-convergent batched submissions now distinguish
   `telemetry="summary"` from `telemetry="timestamps"`; `True` remains the
   timestamp compatibility alias. Summary mode preserves stop snapshots,
@@ -158,6 +165,26 @@ grouped under the behavior they shipped.
   the direct path reduced median latency by 7.5% on CPU and 13.1% on Vulkan;
   the observed 4.8% CUDA direction remains unqualified because its staged CV
   exceeded 5%.
+- Direct worklists can now add a bounded dense-key generation table through
+  `unique_key_capacity` and call
+  `device_worklist_append_unique_direct()` from a producer. Static Graph stages
+  alternate the two frontiers through `transition_arguments(step)`, advance one
+  epoch without clearing the dense table, propagate overflow, and feed each
+  newly published `DeviceExtent` directly to a bounded consumer. This removes
+  the need for a Forge-side full-domain select/rebuild; end-to-end active-domain
+  scaling still requires the caller to fuse retired/default-state handling and
+  avoid its own full-domain passes. The route is explicit and carries no
+  automatic speedup claim.
+  On Vulkan, recordable prepare now resets the target and publishes the source
+  indirect packet in one dispatch; mixed indirect recording preserves that
+  recipe, producing one backend Graph region with two physical dispatches and
+  no loose helper for one prepare/consume pair.
+- Added `DeterministicScatterReducePlan` as an explicit CPU/CUDA/Vulkan
+  qualification and fixed-topology assembly route. It stably groups immutable
+  integer destinations once, gathers changing values in source order, and
+  performs a left-to-right segmented sum. Existing atomic scatter-add remains
+  the default; deterministic bindings own one workspace lane and report their
+  topology, ordered-value, and peak workspace bytes.
 - Fixed-domain conflict producers can now call
   `DeviceWorklist.resolve_conflicts_from_mask()` to consume dense key/active
   arrays without stable compact or attribute-gather stages. Original source

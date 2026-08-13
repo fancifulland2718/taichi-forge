@@ -26,10 +26,12 @@ capability.
 | `ti.algorithms.device_prefix(values, extent, ...)` | Compose fixed-capacity primitive inputs through a device-resident valid count. |
 | `ti.algorithms.DevicePrefixSequence(capacity)` | Record a fixed-topology valid-prefix pipeline as one logical Graph native node. |
 | `ti.algorithms.DevicePrefixWorkspace(max_items)` | Reuse staging and child primitive workspaces across a valid-prefix pipeline. |
-| `ti.algorithms.DeviceWorklist(capacity, dtype, telemetry=..., transition_mode=...)` | Own reusable front/back storage and a staged or direct dynamic-work transition. |
+| `ti.algorithms.DeviceWorklist(capacity, dtype, telemetry=..., transition_mode=..., unique_key_capacity=...)` | Own reusable front/back storage and staged, direct, or dense-key unique incremental transitions. |
 | `ti.algorithms.device_worklist_append(...)` | Atomically append from Taichi scope without a host count readback. |
 | `ti.algorithms.device_worklist_append_direct(...)` | Atomically append while publishing the bounded extent directly. |
+| `ti.algorithms.device_worklist_append_unique_direct(...)` | Append once per dense integer key in the current transition without clearing the tag table. |
 | `ti.algorithms.DeviceWorklistSequence(args)` | Record one worklist transition as a Graph native action. |
+| `ti.algorithms.DeterministicScatterReducePlan(indices, num_groups)` | Reuse a fixed scatter topology with stable source-order floating-point reduction. |
 | `ti.algorithms.experimental_compact(values, flags, output, count, ...)` | Filter values by flags and write compacted output. |
 | `ti.algorithms.experimental_run_length_encode(keys, unique_keys, run_lengths, run_count, ...)` | Encode consecutive integer-key runs entirely on device. |
 | `ti.algorithms.experimental_unique(values, output, count, ...)` | Select the first item from every consecutive equal run. |
@@ -286,6 +288,17 @@ overflow/generation (8 bytes) and uses `device_worklist_append_direct()` to
 publish extent during slot reservation; it is restricted to atomic append,
 requires `telemetry=False`, and must not be followed by `finalize_next()`.
 
+For a bounded dense key domain, setting `unique_key_capacity` on a direct
+worklist adds one persistent i32 generation tag per key and one scalar epoch.
+The producer calls `device_worklist_append_unique_direct()` while visiting the
+current active prefix. The tag elects one append for every emitted key without
+clearing the tag table, so a producer can generate cells and overlapping halo
+neighbors directly into the next frontier. Invalid keys, capacity overflow,
+and epoch exhaustion set sticky overflow and make later stages fail closed.
+The primitive never scans the dense domain: end-to-end work scales with the
+active domain only when the application also removes full-domain copy/select
+and initializes retired/default state in its producer or consumer.
+
 When a workload already has a globally ordered boundary/record kernel, that
 kernel may call `device_worklist_recycle_direct()` with
 `worklist.recycle_arguments()`, then the host calls
@@ -346,6 +359,18 @@ routes. Graph-owned staging is allocated before submission;
 steady-state replay neither allocates nor reads the count on the host. First
 execution may still compile kernels and prepare native provider workspace.
 The strategy, provider, and workspace topology are fixed at materialization.
+An incremental multi-stage Graph can use `args.transition_arguments(step)` and
+record `DeviceWorklistSequence(args).prepare(target="next"|"current")` before
+each bounded producer. Consecutive steps alternate the two stable buffers; one
+epoch table deduplicates each transition independently, and overflow propagates
+to the following stage. After synchronous completion, or after waiting on an
+asynchronous ticket, `commit_direct_transitions(steps)` updates only Python-side
+front ownership. One worklist remains one completion-ordered workspace lane;
+concurrent submissions require independent worklists.
+On Vulkan, an adjacent recordable prepare and bounded consumer share one
+backend Graph region: prepare resets the target and publishes the source
+indirect packet in one dispatch. The pair therefore has two physical
+dispatches and no loose packet helper.
 With full telemetry, `args.observe()` adds all counters to completion-attached
 ticket observation, while
 `args.decode_observation()` materializes `DeviceWorklistStatistics` after
@@ -367,6 +392,28 @@ device range on every supported driver and may optionally trim its physical
 grid with 12.4+ device updates. Query
 `ti.graph.dynamic_work_capabilities()["worklist"]` instead of inferring exact
 launch behavior from the common API.
+
+## Deterministic fixed-topology scatter reduction
+
+`DeterministicScatterReducePlan(indices, num_groups)` is an explicit
+reproducible alternative to floating-point atomic scatter-add for immutable
+connectivity. Construction validates the host-visible integer topology once,
+stably groups valid source ordinals by destination, and uploads the permutation
+and segment layout. A binding gathers changing contribution values in that
+fixed order and reduces every destination left-to-right on CPU, CUDA, and
+Vulkan. Negative and out-of-range indices are ignored consistently.
+
+This route is not selected automatically and does not change the atomic API.
+It trades one ordered-value buffer, a gather dispatch, and serial work within
+each destination for bitwise-stable accumulation order. It is most appropriate
+for qualification baselines, reproducible fixed-topology assembly, and modest
+per-destination valence. Each binding owns one workspace lane; concurrent
+execution requires independent bindings. `binding.graph_action()` records the
+reusable sequence as a native Graph action, and `report()` exposes topology,
+ordered-value, and peak workspace bytes.
+The current binding is scalar; vector assembly records one binding per
+component. Stable order means repeatability under one backend/compiler
+contract, not a cross-backend floating-point bit-identity promise.
 
 ## Consecutive RLE and Unique
 

@@ -85,6 +85,11 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
   通用路径不再每次 launch 都重复 registration。一个本地 696 次 ping-pong 诊断中，相对模拟
   的旧单槽策略，同步 batch median 在 CUDA 上从 135.9 降至 29.2 ms，在 Vulkan 上从
   144.7 降至 23.2 ms；这些隔离 host-path 数据不代表应用吞吐。
+- 新增默认关闭的 startup phase 归因：可通过 `TI_STARTUP_PROFILE=1`、
+  `ti.runtime.configure_startup_profile()`、`ti.init(startup_profile=True)` 与
+  `ti.runtime.startup_profile()` 使用。import、split-runtime load、pybind、Program creation、
+  runtime materialization 与 primitive-capability registration 保持为独立 checkpoint。关闭路径
+  不读取时钟；snapshot 不要求 active Program 或 CUDA driver。
 - Graph、SolvePlan 与 device-convergent batched submission 现在区分
   `telemetry="summary"` 和 `telemetry="timestamps"`；`True` 保留为 timestamps 的兼容别名。
   summary 保留停止 snapshot、queue/submission taxonomy 与 pipeline structure，但不插入 backend
@@ -122,6 +127,19 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
   winner table，不再生成 scan/compact/winner list。在 capacity=65,536、item=16,384 的配对
   transition harness 中，direct 路线的 median latency 在 CPU/Vulkan 上分别降低 7.5%/13.1%；
   CUDA 观测到的 4.8% 方向因 staged CV 超过 5% 而不作为合格结论。
+- direct worklist 现在可通过 `unique_key_capacity` 增加有界 dense-key generation table，并在
+  producer 内调用 `device_worklist_append_unique_direct()`。静态 Graph stage 使用
+  `transition_arguments(step)` 在两份 frontier 间交替，不清空 dense table 即推进 epoch，传播
+  overflow，并把每次新发布的 `DeviceExtent` 直接交给 bounded consumer。这样不再需要 Forge
+  侧 full-domain select/rebuild；但端到端 active-domain scaling 仍要求调用方融合 retired/default
+  state 处理，并删除自身的 full-domain pass。该路线保持显式，不附带自动加速声明。
+  Vulkan recordable prepare 会在同一次 dispatch 中 reset target 并发布 source indirect packet；
+  mixed indirect recording 会保留该 recipe，使一组 prepare/consume 降为单 backend Graph region、
+  两个 physical dispatch，且没有 loose helper。
+- 新增 `DeterministicScatterReducePlan`，作为显式 CPU/CUDA/Vulkan 资格与 fixed-topology
+  assembly 路线。它只对 immutable integer destination 稳定分组一次，每次按 source 顺序 gather
+  变化的 value，再做从左到右的 segmented sum。既有 atomic scatter-add 仍是默认；确定性 binding
+  拥有一条 workspace lane，并报告 topology、ordered-value 与 peak workspace bytes。
 - fixed-domain conflict producer 现在可调用
   `DeviceWorklist.resolve_conflicts_from_mask()`，直接消费 dense key/active 数组，不再执行
   stable compact 或 attribute gather。winner identity 仍是原始 source index；省略显式

@@ -22,10 +22,12 @@
 | `ti.algorithms.device_prefix(values, extent, ...)` | 通过 device-resident 有效数量组合固定容量 primitive 输入。 |
 | `ti.algorithms.DevicePrefixSequence(capacity)` | 把 fixed-topology 有效前缀 pipeline 记录成一个逻辑 Graph native node。 |
 | `ti.algorithms.DevicePrefixWorkspace(max_items)` | 在有效前缀 pipeline 间复用 staging 与 child primitive workspace。 |
-| `ti.algorithms.DeviceWorklist(capacity, dtype, telemetry=..., transition_mode=...)` | 持有可复用 front/back storage，并选择 staged 或 direct 动态 transition。 |
+| `ti.algorithms.DeviceWorklist(capacity, dtype, telemetry=..., transition_mode=..., unique_key_capacity=...)` | 持有可复用 front/back storage，并选择 staged、direct 或 dense-key unique 增量 transition。 |
 | `ti.algorithms.device_worklist_append(...)` | 从 Taichi scope atomic append，不读取 host count。 |
 | `ti.algorithms.device_worklist_append_direct(...)` | atomic append 并直接发布 bounded extent。 |
+| `ti.algorithms.device_worklist_append_unique_direct(...)` | 在本次 transition 内按 dense integer key 唯一 append，无需清空 tag table。 |
 | `ti.algorithms.DeviceWorklistSequence(args)` | 把一次 worklist transition 记录为 Graph native action。 |
+| `ti.algorithms.DeterministicScatterReducePlan(indices, num_groups)` | 复用固定 scatter topology，按稳定 source 顺序做浮点 reduction。 |
 | `ti.algorithms.experimental_compact(values, flags, output, count, ...)` | 按 flags 过滤并写入紧凑输出。 |
 | `ti.algorithms.experimental_run_length_encode(keys, unique_keys, run_lengths, run_count, ...)` | 完全在 device 上编码连续整数 key run。 |
 | `ti.algorithms.experimental_unique(values, output, count, ...)` | 选择每个连续相等 run 的首项。 |
@@ -242,6 +244,14 @@ staged transition 保留 generated/overflow/generation，共 12 bytes；
 `device_worklist_append_direct()` 在 slot reservation 时直接发布 extent。direct 模式仅适用于
 atomic append，要求 `telemetry=False`，之后不得再调用 `finalize_next()`。
 
+对于有界 dense key domain，可为 direct worklist 设置 `unique_key_capacity`。这会增加每个 key
+一个持久 i32 generation tag 与一个 scalar epoch。producer 在遍历当前 active prefix 时调用
+`device_worklist_append_unique_direct()`；tag 会为每个输出 key 选出唯一 append，且 transition
+之间无需清空整张表，因此 producer 可把 cell 及重叠 halo neighbor 直接写入下一 frontier。
+非法 key、capacity overflow 与 epoch 耗尽都会设置 sticky overflow，并让后续 stage fail closed。
+该 primitive 本身不会扫描 dense domain；只有应用同时删除 full-domain copy/select，并在 producer
+或 consumer 内处理 retired/default state，端到端工作量才真正随 active domain 缩放。
+
 若 workload 已有全局有序的 boundary/record kernel，该 kernel 可用
 `worklist.recycle_arguments()` 调用 `device_worklist_recycle_direct()`，随后 host 调用
 `commit_recycled_next()`。这样会回收已消费 front、推进 generation，并删除下一层独立 prepare
@@ -285,6 +295,14 @@ resolve 或 `resolve_conflict_winner_table()`。transition helper 可被 backend
 action 的 provider pipeline 仍是显式 segmented 路线。Graph staging 在 submission 前分配，steady-state
 replay 不分配、也不读取 host count；首次执行仍可能编译 kernel 并准备 native provider
 workspace。strategy、provider 与 workspace topology 在 materialization 时固定。
+增量 multi-stage Graph 可使用 `args.transition_arguments(step)`，并在每个 bounded producer 前记录
+`DeviceWorklistSequence(args).prepare(target="next"|"current")`。连续 step 在两份稳定 buffer
+之间交替；共享 epoch table 对每次 transition 独立去重，overflow 会传播到下一 stage。同步完成后，
+或等待异步 ticket 后，调用 `commit_direct_transitions(steps)` 只更新 Python-side front ownership。
+一个 worklist 仍是一条 completion-ordered workspace lane；并发 submission 需要独立 worklist。
+Vulkan 会让相邻的 recordable prepare 与 bounded consumer 共享一个 backend Graph region：
+prepare 在同一次 dispatch 中 reset target 并发布 source indirect packet，因此该 pair 只有两个
+physical dispatch，也没有 loose packet helper。
 完整 telemetry 下，`args.observe()` 把 counter 加到 completion-attached ticket observation；
 completion 后由 `args.decode_observation()` 生成 `DeviceWorklistStatistics`。lean arguments 会拒绝
 observation，而不会偷偷物化 telemetry。
@@ -299,6 +317,22 @@ packet；CPU 使用 exact scheduler chunk，CUDA 则在所有受支持 driver �
 device range，并可在 12.4+ 上选择 device update 进一步缩小物理 grid。应查询
 `ti.graph.dynamic_work_capabilities()["worklist"]`，不能从通用 API 反推
 exact launch 行为。
+
+## 固定拓扑确定性 scatter reduction
+
+`DeterministicScatterReducePlan(indices, num_groups)` 是 immutable connectivity 下浮点 atomic
+scatter-add 的显式可复现替代。构造时只读取并验证一次 host-visible integer topology，按 destination
+稳定分组有效 source ordinal，再上传 permutation 与 segment layout。binding 每次把变化的 contribution
+按固定顺序 gather，并在 CPU、CUDA、Vulkan 上对每个 destination 从左到右 reduce。负数和越界
+index 会按统一合同忽略。
+
+该路线不会被自动选择，也不会改变现有 atomic API。它用一个 ordered-value buffer、一次 gather
+dispatch 与每个 destination 内的串行工作，换取 bitwise-stable accumulation order。因此更适合作为
+资格 baseline、可复现 fixed-topology assembly，以及每个 destination valence 不大的场景。每个 binding
+拥有一条 workspace lane；并发执行需要独立 binding。`binding.graph_action()` 可把可复用 sequence
+记录为 native Graph action，`report()` 则公开 topology、ordered-value 与 peak workspace bytes。
+当前 binding 是 scalar；vector assembly 每个 component 记录一个 binding。稳定顺序表示同一
+backend/compiler 合同内可重复，不承诺跨 backend 的浮点 bit 完全一致。
 
 ## Consecutive RLE 与 Unique
 

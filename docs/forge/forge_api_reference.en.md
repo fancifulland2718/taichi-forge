@@ -228,9 +228,26 @@ Limits:
 
 ## `taichi_forge.runtime`
 
-Runtime observability is available as `ti.runtime` after `ti.init()`.
-It reports the current Program generation without changing kernel, Graph, or
-submission semantics.
+Runtime observability is available as `ti.runtime`. Startup attribution is
+available before `ti.init()`; Program statistics and capabilities require an
+active Program. These APIs do not change kernel, Graph, or submission
+semantics.
+
+### `ti.runtime.configure_startup_profile()` and `startup_profile()`
+
+Startup profiling is disabled by default. Set `TI_STARTUP_PROFILE=1` before
+import to include Python import, split-runtime discovery/load, pybind import,
+and runtime-bitcode configuration. Alternatively call
+`ti.runtime.configure_startup_profile(True, clear=True)` or pass
+`ti.init(startup_profile=True)` to attribute subsequent init phases. The
+immutable schema-v1 snapshot contains ordered timestamp events and matched
+phase durations for reset, configuration, backend selection, Program creation,
+runtime materialization, and primitive-capability registration.
+
+The disabled path does not read a clock. The profiler is a low-frequency
+diagnostic, not a steady-state kernel/Graph tracer; enabling it after package
+import cannot reconstruct import or native-loader time. `startup_profile()`
+does not require a CUDA driver or active Program.
 
 ### `ti.runtime.stats()`
 
@@ -552,7 +569,7 @@ fusion.
 
 ### Device worklists
 
-#### `ti.algorithms.DeviceWorklist(capacity, dtype=ti.i32, *, workspace=None, telemetry=True, transition_mode="staged")`
+#### `ti.algorithms.DeviceWorklist(capacity, dtype=ti.i32, *, workspace=None, telemetry=True, transition_mode="staged", unique_key_capacity=None)`
 
 Owns fixed-capacity front/back scalar storage, paired `DeviceExtent` state,
 mandatory publication state, optional counters, and reusable primitive
@@ -575,6 +592,30 @@ winner counters. Staged mode retains generated/overflow/generation in 12 bytes.
 and generation (8 bytes), and uses `device_worklist_append_direct()` so the
 producer publishes its extent during reservation. It supports only atomic
 append transitions; `finalize_next()` is invalid in this mode.
+
+`unique_key_capacity` is an explicit direct-mode contract for a bounded dense
+integer key domain. It allocates one persistent i32 generation tag per key and
+one scalar epoch. A producer calls
+`device_worklist_append_unique_direct(*worklist.unique_append_arguments(), key,
+value)` to append each emitted key at most once in the current transition.
+Tags are not cleared between transitions. Invalid keys, an ABI mismatch,
+capacity overflow, source overflow, and epoch exhaustion fail closed through
+sticky overflow. Output order remains unspecified.
+
+`graph_args()` preserves that ABI. `transition_arguments(step)` returns the
+alternating source/target pair for a static multi-stage Graph, and
+`DeviceWorklistSequence(args).prepare(target=...)` advances the epoch before
+each bounded producer. `commit_direct_transitions(steps)` changes Python front
+ownership only after completion. This enables incremental frontier and halo
+generation but does not itself remove an application full-domain copy/select;
+the caller must update retired/default state as part of its own active-domain
+kernel. A worklist has one completion-ordered lane and cannot be written by
+concurrent submissions.
+
+On Vulkan, an adjacent recordable `prepare()` and bounded consumer are lowered
+into one backend Graph region. The prepare kernel resets the target and
+publishes the source extent's indirect packet in the same dispatch, so the
+steady-state pair contains two physical dispatches and no loose/helper launch.
 
 A direct worklist can eliminate a later standalone `prepare_next()` when an
 already globally ordered boundary kernel calls
@@ -717,6 +758,25 @@ does not consume the external packet. Inspect
 `dynamic_work_capabilities()` for the selected physical route.
 
 ### Primitive Algorithms
+
+#### `ti.algorithms.DeterministicScatterReducePlan(indices, num_groups)`
+
+Builds an explicit reusable reduction topology from host-visible integer
+destination indices. Valid sources are stably grouped by destination while
+preserving source ordinal within each group; negative and out-of-range indices
+are ignored. `plan.bind(values, output)` accepts matching one-dimensional
+scalar ndarrays or root-dense fields with `i32/u32/i64/u64/f32/f64`, owns one
+ordered-value workspace lane, and reduces each group left-to-right on CPU,
+CUDA, and Vulkan. `binding.run()` executes it and
+`binding.graph_action()` returns a native Graph action.
+
+This is an opt-in reproducibility and qualification route. It never replaces
+atomic scatter-add automatically and is not differentiable. Independent
+concurrent execution requires independent bindings. Vector assembly uses one
+binding per scalar component. The order is repeatable for a fixed
+backend/compiler contract; the API does not promise identical floating-point
+bits across different backends or compiler modes. `report()` exposes stable
+topology bytes, ordered-value bytes, and peak workspace bytes.
 
 These functions return a workspace when a workspace object is useful for replay
 or reuse. Pass an explicit workspace to keep scratch buffers and native plans
