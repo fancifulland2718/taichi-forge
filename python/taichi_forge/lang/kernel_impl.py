@@ -887,9 +887,13 @@ class TaichiCallableTemplateMapper:
         dead_keys = [key for key in self.mapping if self._cache_key_is_dead(key)]
         for key in dead_keys:
             del self.mapping[key]
+        if _executable_lifecycle_telemetry_enabled and dead_keys:
+            _executable_lifecycle_telemetry["mapper_dead_keys_pruned"] += len(dead_keys)
 
         arg_features, key = self._extract_features_and_key(args)
         if key not in self.mapping:
+            if _executable_lifecycle_telemetry_enabled:
+                _executable_lifecycle_telemetry["mapper_misses"] += 1
             limit = impl.get_runtime().kernel_specialization_limit
             if len(self.mapping) >= limit:
                 raise TaichiRuntimeError(
@@ -900,6 +904,8 @@ class TaichiCallableTemplateMapper:
                 )
             self.mapping[key] = self._next_mapping_id
             self._next_mapping_id += 1
+        elif _executable_lifecycle_telemetry_enabled:
+            _executable_lifecycle_telemetry["mapper_hits"] += 1
         return self.mapping[key], arg_features
 
     @staticmethod
@@ -926,6 +932,27 @@ def _get_global_vars(_func):
 
 
 _ORDINARY_LAUNCH_PLAN_CACHE_CAPACITY = 4
+
+
+_executable_lifecycle_telemetry_enabled = False
+_executable_lifecycle_telemetry = {
+    "mapper_hits": 0,
+    "mapper_misses": 0,
+    "mapper_dead_keys_pruned": 0,
+}
+
+
+def _set_executable_lifecycle_telemetry_enabled(enabled):
+    global _executable_lifecycle_telemetry_enabled
+    _executable_lifecycle_telemetry_enabled = bool(enabled)
+
+
+def _executable_lifecycle_telemetry_snapshot(reset=False):
+    result = dict(_executable_lifecycle_telemetry)
+    if reset:
+        for name in _executable_lifecycle_telemetry:
+            _executable_lifecycle_telemetry[name] = 0
+    return result
 
 
 class _OrdinaryLaunchPlan:
@@ -1163,18 +1190,28 @@ class Kernel:
         if key in self.compiled_kernels:
             return
 
-        # Program owns every C++ Kernel for the whole runtime and compiled
-        # Graphs keep stable Kernel pointers, so transparent LRU deletion is
-        # unsafe. Bound only the cold cache-miss path; cached launches remain
-        # lock-free and continue to work after the budget is reached.
+        # Bound the cold cache-miss path by resident specialization ownership.
+        # Retired Graph handles remain charged by the native pinned-owner
+        # count; tree-dependent entries with no remaining owner are reclaimed
+        # by the SNodeTree destroy transaction.
         with self.runtime._kernel_compilation_lock:
             if key in self.compiled_kernels:
                 return
             limit = self.runtime.kernel_specialization_limit
-            compiled = self.runtime._compiled_specialization_count
-            if compiled >= limit:
+            native_retired_pins = 0
+            if self.runtime.prog is not None:
+                native_retired_pins = int(
+                    self.runtime.prog._debug_kernel_executable_lifecycle_stats()[
+                        "retired_handles"
+                    ]
+                )
+            resident = (
+                self.runtime._resident_specialization_count + native_retired_pins
+            )
+            if resident >= limit:
+                self.runtime._specialization_budget_rejections += 1
                 raise TaichiRuntimeError(
-                    "Runtime compiled specialization budget reached "
+                    "Runtime resident specialization budget reached "
                     f"kernel_specialization_limit={limit}. Existing "
                     "specializations remain usable; reuse stable template "
                     "arguments, call ti.reset(), or raise the positive limit "
@@ -1188,6 +1225,7 @@ class Kernel:
                 range_one_to_one,
             )
             self.runtime._compiled_specialization_count += 1
+            self.runtime._resident_specialization_count += 1
 
     def _materialize_uncached(
         self,

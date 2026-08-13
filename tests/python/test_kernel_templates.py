@@ -186,3 +186,61 @@ def test_dead_kernel_definition_cannot_reclaim_native_specialization_budget():
 
     with pytest.raises(ti.TaichiRuntimeError, match="kernel_specialization_limit=1"):
         replacement()
+
+
+@test_utils.test(arch=ti.cpu, kernel_specialization_limit=1)
+def test_destroyed_snode_specialization_returns_resident_budget():
+    @ti.kernel
+    def initialize(dst: ti.template(), value: ti.i32):
+        for i in dst:
+            dst[i] = value
+
+    for value in (3, 7):
+        field = ti.field(ti.i32)
+        builder = ti.FieldsBuilder()
+        builder.dense(ti.i, 8).place(field)
+        tree = builder.finalize()
+        initialize(field, value)
+        assert field[4] == value
+        tree.destroy()
+        del field
+        gc.collect()
+
+    stats = ti.lang.impl.get_runtime().debug_kernel_executable_lifecycle_stats()
+    assert stats["historical_materializations"] == 2
+    assert stats["resident_specializations"] == 0
+    assert stats["specialization_reclaims"] == 2
+
+
+@test_utils.test(arch=ti.cpu, kernel_specialization_limit=1)
+def test_stale_graph_handle_keeps_retired_specialization_charged():
+    @ti.kernel
+    def initialize(dst: ti.template()):
+        for i in dst:
+            dst[i] = i
+
+    first = ti.field(ti.i32)
+    first_builder = ti.FieldsBuilder()
+    first_builder.dense(ti.i, 8).place(first)
+    first_tree = first_builder.finalize()
+    graph_builder = ti.graph.GraphBuilder()
+    graph_builder.dispatch(initialize, template_args={"dst": first})
+    graph = graph_builder.compile()
+    graph.run({})
+    first_tree.destroy()
+    del first
+    gc.collect()
+
+    second = ti.field(ti.i32)
+    second_builder = ti.FieldsBuilder()
+    second_builder.dense(ti.i, 8).place(second)
+    second_tree = second_builder.finalize()
+    with pytest.raises(ti.TaichiRuntimeError, match="kernel_specialization_limit=1"):
+        initialize(second)
+
+    del graph
+    del graph_builder
+    gc.collect()
+    initialize(second)
+    assert second[5] == 5
+    second_tree.destroy()

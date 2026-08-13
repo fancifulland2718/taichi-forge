@@ -868,6 +868,7 @@ void export_lang(py::module &m) {
              std::vector<OffloadedTaskManifest> tasks;
              std::string kernel_identity;
              Arch backend = program.compile_config().arch;
+             SNodeRelocationDescriptor relocation;
              bool regular_handle_registered = false;
              bool graph_masked_handle_registered = false;
              {
@@ -880,29 +881,34 @@ void export_lang(py::module &m) {
                tasks = compiled.task_manifest();
                kernel_identity = compiled.kernel_identity();
                backend = compiled.arch();
+               relocation = compiled.snode_relocation_descriptor();
                regular_handle_registered = compiled.get_handle().has_value();
                graph_masked_handle_registered =
                    compiled.get_graph_masked_handle().has_value();
              }
 
-             // This inventory is intentionally fail-closed. It is generated
-             // from the compiled backend object and live tree generations,
-             // but it does not claim that every embedded IR/module reference
-             // has been proven relocatable. Product reuse must remain disabled
-             // until the compiler emits that complete classification itself.
+             // The compiler/runtime descriptor is the product contract. This
+             // binding only serializes it and adds the live generation
+             // snapshot; it must not infer relocation admission itself.
              const auto dependencies =
                  program.snapshot_snode_tree_dependencies(tree_ids);
              py::dict result;
-             result["schema_version"] = 1;
+             result["schema_version"] = relocation.schema_version;
              result["purpose"] =
                  "relocatable_snode_executable_readiness";
              result["backend"] = arch_name(backend);
              result["kernel_identity"] = kernel_identity;
-             result["has_snode_tree_dependencies"] = !tree_ids.empty();
-             result["coverage"] =
-                 "compiled_dependency_and_task_inventory_only";
-             result["compiler_embedded_state_fully_classified"] = false;
-             result["reuse_admitted"] = false;
+             result["has_snode_tree_dependencies"] =
+                 relocation.has_snode_tree_dependencies;
+             result["coverage"] = relocation.compiler_emitted
+                                      ? "compiler_typed_relocation_contract"
+                                      : "legacy_cache_fail_closed_contract";
+             result["compiler_emitted"] = relocation.compiler_emitted;
+             result["relocation_class"] = std::string(
+                 snode_relocation_class_name(relocation.relocation_class));
+             result["compiler_embedded_state_fully_classified"] =
+                 relocation.compiler_embedded_state_fully_classified;
+             result["reuse_admitted"] = relocation.reuse_admitted;
              result["regular_handle_registered"] =
                  regular_handle_registered;
              result["graph_masked_handle_registered"] =
@@ -920,50 +926,36 @@ void export_lang(py::module &m) {
              }
              result["tree_dependencies"] = std::move(dependency_items);
 
-             bool has_sparse_task = false;
              py::list task_items;
-             for (const auto &task : tasks) {
+             TI_ASSERT(tasks.size() == relocation.tasks.size());
+             for (std::size_t index = 0; index < tasks.size(); ++index) {
+               const auto &task = tasks[index];
+               const auto &task_relocation = relocation.tasks[index];
+               TI_ASSERT(task.task_index == task_relocation.task_index);
+               TI_ASSERT(task.task_type == task_relocation.task_type);
                py::dict item = offloaded_task_manifest_to_python(task);
                py::list generation_state;
-               generation_state.append("tree_id_and_generation");
-               generation_state.append("root_allocation");
-               generation_state.append("runtime_state");
-               if (task.task_type == OffloadedTaskType::listgen) {
-                 has_sparse_task = true;
-                 generation_state.append("sparse_listgen_state");
-                 generation_state.append("active_list_metadata");
-               } else if (task.task_type == OffloadedTaskType::struct_for ||
-                          task.task_type == OffloadedTaskType::gc) {
-                 has_sparse_task = true;
-                 generation_state.append("sparse_allocator_or_active_list");
+               for (const auto state :
+                    task_relocation.generation_bound_state) {
+                 generation_state.append(
+                     std::string(snode_relocation_state_name(state)));
                }
                item["layout_code_candidate"] = true;
+               item["relocation_class"] = std::string(
+                   snode_relocation_class_name(
+                       task_relocation.relocation_class));
                item["generation_bound_state"] =
                    std::move(generation_state);
-               item["embedded_state_audited"] = false;
+               item["embedded_state_audited"] =
+                   relocation.compiler_embedded_state_fully_classified;
                task_items.append(std::move(item));
              }
              result["tasks"] = std::move(task_items);
 
              py::list blockers;
-             blockers.append(
-                 "compiler_ir_embedded_state_not_fully_enumerated");
-             blockers.append(
-                 "layout_module_and_generation_binding_not_separated");
-             blockers.append(
-                 "old_work_in_flight_rebind_not_qualified");
-             blockers.append(
-                 "graph_masked_handle_rebind_not_qualified");
-             if (has_sparse_task) {
+             for (const auto blocker : relocation.blockers) {
                blockers.append(
-                   "sparse_list_and_allocator_relocation_not_qualified");
-             }
-             if (arch_uses_llvm(backend)) {
-               blockers.append(
-                   "llvm_jit_module_registration_is_generation_specific");
-             } else if (backend == Arch::vulkan) {
-               blockers.append(
-                   "vulkan_descriptor_and_pipeline_rebind_not_qualified");
+                   std::string(snode_relocation_blocker_name(blocker)));
              }
              result["blockers"] = std::move(blockers);
              return result;
@@ -1355,6 +1347,33 @@ void export_lang(py::module &m) {
             program.get_kernel_launcher().debug_registered_kernel_count();
         return result;
       })
+      .def("_set_kernel_executable_lifecycle_telemetry_enabled",
+           &Program::set_kernel_executable_lifecycle_telemetry_enabled,
+           py::arg("enabled"))
+      .def("_debug_kernel_executable_lifecycle_stats",
+           [](Program &program, bool reset) {
+             const auto stats =
+                 program.debug_kernel_executable_lifecycle_statistics(reset);
+             py::dict result;
+             result["schema_version"] = 1;
+             result["enabled"] = stats.enabled;
+             result["memory_cache_hits"] = stats.memory_cache_hits;
+             result["loaded_cache_hits"] = stats.loaded_cache_hits;
+             result["disk_loads"] = stats.disk_loads;
+             result["compiler_invocations"] = stats.compiler_invocations;
+             result["templates_installed"] = stats.templates_installed;
+             result["templates_retired"] = stats.templates_retired;
+             result["resident_templates"] = stats.resident_templates;
+             result["in_progress_compiles"] = stats.in_progress_compiles;
+             result["live_handles"] = stats.live_handles;
+             result["pinned_handles"] = stats.pinned_handles;
+             result["retired_handles"] = stats.retired_handles;
+             result["handle_inline_bytes"] = stats.handle_inline_bytes;
+             result["registered_executables"] =
+                 program.get_kernel_launcher().debug_registered_kernel_count();
+             return result;
+           },
+           py::arg("reset") = false)
       .def("_debug_kernel_registration_count", [](Program &program) {
         return program.get_kernel_launcher().debug_registered_kernel_count();
       })
@@ -4308,6 +4327,8 @@ void export_lang(py::module &m) {
       .def(py::init<>())
       .def("clear_runtime_state",
            &aot::CompiledGraphJITCache::clear_runtime_state)
+      .def("retire_snode_tree_runtime_state",
+           &aot::CompiledGraphJITCache::retire_snode_tree_runtime_state)
       .def("_set_stable_replay_optimization",
            [](aot::CompiledGraphJITCache &cache, bool enabled) {
              const bool previous =

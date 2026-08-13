@@ -108,8 +108,10 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
   internal_data.metadata.num_snode_trees = config_.compiled_struct_data->size();
   internal_data.metadata.used_snode_tree_ids =
       irpass::analysis::gather_snode_tree_dependencies(chi_ir);
-  return std::make_unique<spirv::CompiledKernelData>(compile_config.arch,
-                                                     internal_data);
+  auto result = std::make_unique<spirv::CompiledKernelData>(
+      compile_config.arch, internal_data);
+  result->initialize_generation_bound_snode_relocation_descriptor(true);
+  return result;
 }
 
 }  // namespace spirv

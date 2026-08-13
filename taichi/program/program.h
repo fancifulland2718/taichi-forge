@@ -392,6 +392,9 @@ class TI_DLL_EXPORT Program {
   void debug_reset_ordinary_launch_attribution() noexcept;
   std::unordered_map<std::string, std::uint64_t>
   debug_ordinary_launch_attribution() const;
+  void set_kernel_executable_lifecycle_telemetry_enabled(bool enabled);
+  KernelExecutableLifecycleStatistics
+  debug_kernel_executable_lifecycle_statistics(bool reset);
 
   StreamSemaphore flush();
   StreamSemaphore flush_if_pending();
@@ -443,7 +446,17 @@ class TI_DLL_EXPORT Program {
                                            const DeviceCapabilityConfig &caps,
                                            const Kernel &kernel_def);
 
+  std::shared_ptr<KernelExecutionHandle> compile_kernel_execution_handle(
+      const CompileConfig &compile_config,
+      const DeviceCapabilityConfig &caps,
+      const Kernel &kernel_def);
+
   const CompiledKernelData *find_cached_kernel(
+      const CompileConfig &compile_config,
+      const std::string &kernel_key,
+      const Kernel &kernel_def);
+
+  std::shared_ptr<KernelExecutionHandle> find_cached_kernel_execution_handle(
       const CompileConfig &compile_config,
       const std::string &kernel_key,
       const Kernel &kernel_def);

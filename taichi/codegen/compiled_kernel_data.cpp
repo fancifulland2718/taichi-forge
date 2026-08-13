@@ -5,6 +5,80 @@
 
 namespace taichi::lang {
 
+void CompiledKernelData::initialize_generation_bound_snode_relocation_descriptor(
+    bool compiler_emitted) {
+  SNodeRelocationDescriptor descriptor;
+  descriptor.backend = arch();
+  descriptor.compiler_emitted = compiler_emitted;
+  descriptor.has_snode_tree_dependencies = has_snode_tree_dependencies();
+  const auto manifests = task_manifest();
+  if (!descriptor.has_snode_tree_dependencies) {
+    descriptor.compiler_embedded_state_fully_classified = true;
+    descriptor.relocation_class = SNodeRelocationClass::not_applicable;
+    descriptor.tasks.reserve(manifests.size());
+    for (const auto &manifest : manifests) {
+      SNodeTaskRelocationDescriptor task;
+      task.task_index = manifest.task_index;
+      task.task_type = manifest.task_type;
+      task.relocation_class = SNodeRelocationClass::not_applicable;
+      descriptor.tasks.push_back(std::move(task));
+    }
+    set_snode_relocation_descriptor(std::move(descriptor));
+    return;
+  }
+
+  descriptor.compiler_embedded_state_fully_classified = false;
+  descriptor.reuse_admitted = false;
+  descriptor.relocation_class = SNodeRelocationClass::generation_bound;
+  descriptor.blockers = {
+      SNodeRelocationBlocker::compiler_embedded_state_unclassified,
+      SNodeRelocationBlocker::executable_and_generation_binding_not_separated,
+      SNodeRelocationBlocker::in_flight_rebind_not_qualified,
+      SNodeRelocationBlocker::graph_masked_rebind_not_qualified,
+  };
+  if (arch_uses_llvm(descriptor.backend)) {
+    descriptor.blockers.push_back(
+        SNodeRelocationBlocker::llvm_registration_generation_specific);
+  } else if (arch_uses_spirv(descriptor.backend)) {
+    descriptor.blockers.push_back(
+        SNodeRelocationBlocker::spirv_registration_generation_specific);
+  }
+
+  descriptor.tasks.reserve(manifests.size());
+  bool has_sparse_task = false;
+  for (const auto &manifest : manifests) {
+    SNodeTaskRelocationDescriptor task;
+    task.task_index = manifest.task_index;
+    task.task_type = manifest.task_type;
+    task.relocation_class = SNodeRelocationClass::generation_bound;
+    task.generation_bound_state = {
+        SNodeRelocationState::tree_identity,
+        SNodeRelocationState::root_allocation,
+        SNodeRelocationState::runtime_state,
+        SNodeRelocationState::backend_registration,
+        SNodeRelocationState::compiler_embedded_state_unclassified,
+    };
+    if (manifest.task_type == OffloadedTaskType::listgen) {
+      has_sparse_task = true;
+      task.generation_bound_state.push_back(
+          SNodeRelocationState::sparse_listgen_state);
+      task.generation_bound_state.push_back(
+          SNodeRelocationState::sparse_active_list_metadata);
+    } else if (manifest.task_type == OffloadedTaskType::struct_for ||
+               manifest.task_type == OffloadedTaskType::gc) {
+      has_sparse_task = true;
+      task.generation_bound_state.push_back(
+          SNodeRelocationState::sparse_allocator_state);
+    }
+    descriptor.tasks.push_back(std::move(task));
+  }
+  if (has_sparse_task) {
+    descriptor.blockers.push_back(
+        SNodeRelocationBlocker::sparse_state_not_qualified);
+  }
+  set_snode_relocation_descriptor(std::move(descriptor));
+}
+
 std::string CompiledKernelData::make_task_identity(
     std::size_t task_index,
     OffloadedTaskType task_type) const {
@@ -119,7 +193,11 @@ CompiledKernelData::Err CompiledKernelData::load(std::istream &is) {
     if (err = translate_err(file.load(is)); err != Err::kNoError) {
       return err;
     }
-    return load_impl(file);
+    const auto result = load_impl(file);
+    if (result == Err::kNoError) {
+      initialize_generation_bound_snode_relocation_descriptor(false);
+    }
+    return result;
   } catch (std::bad_alloc &) {
     return Err::kOutOfMemory;
   }
@@ -152,6 +230,9 @@ std::unique_ptr<CompiledKernelData> CompiledKernelData::load(std::istream &is,
     if (err == Err::kNoError) {
       TI_ASSERT(result);
       err = result->load_impl(file);
+      if (err == Err::kNoError) {
+        result->initialize_generation_bound_snode_relocation_descriptor(false);
+      }
     }
     if (err != Err::kNoError) {
       result = nullptr;

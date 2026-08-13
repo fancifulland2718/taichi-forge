@@ -3,11 +3,13 @@
 #include <string>
 #include <memory>
 #include <optional>
+#include <atomic>
 #include <algorithm>
 #include <vector>
 
 #include "taichi/analysis/graph_kernel_metadata.h"
 #include "taichi/codegen/offloaded_task_manifest.h"
+#include "taichi/codegen/snode_relocation.h"
 #include "taichi/rhi/arch.h"
 
 namespace taichi::lang {
@@ -141,6 +143,22 @@ class CompiledKernelData {
     return kernel_identity_;
   }
 
+  void set_snode_relocation_descriptor(
+      SNodeRelocationDescriptor descriptor) {
+    snode_relocation_descriptor_ = std::move(descriptor);
+  }
+
+  const SNodeRelocationDescriptor &snode_relocation_descriptor() const {
+    return snode_relocation_descriptor_;
+  }
+
+  // Populate the conservative compiler/runtime contract used until a
+  // backend proves a narrower relocation class. Compiler call sites pass
+  // true; legacy offline-cache payloads reconstructed after load pass false
+  // and therefore remain visibly fail closed.
+  void initialize_generation_bound_snode_relocation_descriptor(
+      bool compiler_emitted);
+
   virtual const GraphKernelMetadata &graph_metadata() const = 0;
   virtual void set_graph_metadata(GraphKernelMetadata metadata) = 0;
 
@@ -166,6 +184,11 @@ class CompiledKernelData {
 
   const std::optional<KernelLaunchHandle> &get_graph_masked_handle() const {
     return graph_masked_launch_handle_;
+  }
+
+  void clear_registered_handles() const noexcept {
+    kernel_launch_handle_.reset();
+    graph_masked_launch_handle_.reset();
   }
 
   static std::unique_ptr<CompiledKernelData> load(std::istream &is, Err *p_err);
@@ -194,6 +217,52 @@ class CompiledKernelData {
   // not be cached by a reusable raw object address.
   mutable std::optional<KernelLaunchHandle> graph_masked_launch_handle_;
   std::string kernel_identity_;
+  SNodeRelocationDescriptor snode_relocation_descriptor_;
+};
+
+// Stable ownership boundary between a frontend Kernel definition, compiled
+// Graphs, and backend executable registration. The payload can outlive its
+// compilation-cache entry, while retirement prevents a new launch from using
+// registration IDs removed by an SNodeTree lifecycle transaction.
+class KernelExecutionHandle {
+ public:
+  enum class State : std::uint8_t {
+    active = 0,
+    retired = 1,
+  };
+
+  KernelExecutionHandle(std::uint64_t identity,
+                        std::shared_ptr<CompiledKernelData> payload)
+      : identity_(identity), payload_(std::move(payload)) {
+  }
+
+  std::uint64_t identity() const noexcept {
+    return identity_;
+  }
+
+  bool active() const noexcept {
+    return state_.load(std::memory_order_acquire) == State::active;
+  }
+
+  const CompiledKernelData &compiled() const {
+    return *payload_;
+  }
+
+  std::shared_ptr<const CompiledKernelData> payload_lease() const {
+    return payload_;
+  }
+
+  void retire() noexcept {
+    if (state_.exchange(State::retired, std::memory_order_acq_rel) ==
+        State::active) {
+      payload_->clear_registered_handles();
+    }
+  }
+
+ private:
+  std::uint64_t identity_{0};
+  std::shared_ptr<CompiledKernelData> payload_;
+  std::atomic<State> state_{State::active};
 };
 
 }  // namespace taichi::lang

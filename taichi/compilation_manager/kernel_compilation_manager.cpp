@@ -31,6 +31,14 @@ std::string cache_prefix_from_metadata_filename(
   return metadata_filename;
 }
 
+void record_if_enabled(const std::atomic<bool> &enabled,
+                       std::atomic<std::uint64_t> &counter,
+                       std::uint64_t value = 1) noexcept {
+  if (enabled.load(std::memory_order_relaxed)) {
+    counter.fetch_add(value, std::memory_order_relaxed);
+  }
+}
+
 }  // namespace
 
 namespace offline_cache {
@@ -187,11 +195,15 @@ const CompiledKernelData &KernelCompilationManager::load_or_compile(
       compiled = load_ckd(kernel_key, compile_config.arch);
       if (compiled) {
         from_disk = true;
+        record_if_enabled(executable_lifecycle_telemetry_.enabled,
+                          executable_lifecycle_telemetry_.disk_loads);
         TI_DEBUG("Create kernel '{}' from disk cache (key='{}', unlocked)",
                  kernel_def.get_name(), kernel_key);
       }
     }
     if (!compiled) {
+      record_if_enabled(executable_lifecycle_telemetry_.enabled,
+                        executable_lifecycle_telemetry_.compiler_invocations);
       compiled = compile_kernel(compile_config, caps, kernel_def);
     }
   } catch (...) {
@@ -220,6 +232,28 @@ const CompiledKernelData &KernelCompilationManager::load_or_compile(
   return result;
 }
 
+std::shared_ptr<KernelExecutionHandle>
+KernelCompilationManager::load_or_compile_execution_handle(
+    const CompileConfig &compile_config,
+    const DeviceCapabilityConfig &caps,
+    const Kernel &kernel_def) {
+  const auto &compiled = load_or_compile(compile_config, caps, kernel_def);
+  const auto &kernel_key = compiled.kernel_identity();
+  std::lock_guard<std::mutex> lock(cache_mutex_);
+  if (auto found = caching_kernels_.find(kernel_key);
+      found != caching_kernels_.end()) {
+    return ensure_execution_handle_locked(found->second);
+  }
+  if (auto found = cached_data_.kernels.find(kernel_key);
+      found != cached_data_.kernels.end() &&
+      found->second.compiled_kernel_data != nullptr) {
+    return ensure_execution_handle_locked(found->second);
+  }
+  TI_ERROR("Compiled kernel {} lost its cache owner before handle creation",
+           kernel_key);
+  return nullptr;
+}
+
 const CompiledKernelData *KernelCompilationManager::find_cached_kernel(
     const std::string &kernel_key,
     const Kernel &kernel_def,
@@ -236,6 +270,40 @@ const CompiledKernelData *KernelCompilationManager::find_cached_kernel(
     ensure_metadata_loaded_locked(arch);
   }
   return try_load_cached_kernel_locked(kernel_def, kernel_key, arch, cache_mode);
+}
+
+std::shared_ptr<KernelExecutionHandle>
+KernelCompilationManager::find_cached_execution_handle(
+    const std::string &kernel_key,
+    const Kernel &kernel_def,
+    Arch arch,
+    bool offline_cache) {
+  if (kernel_key.empty()) {
+    return nullptr;
+  }
+  const auto cache_mode =
+      offline_cache && kernel_def.ir_is_ast() ? CacheData::MemAndDiskCache
+                                             : CacheData::MemCache;
+  std::lock_guard<std::mutex> lock(cache_mutex_);
+  if (cache_mode == CacheData::MemAndDiskCache) {
+    ensure_metadata_loaded_locked(arch);
+  }
+  if (auto found = caching_kernels_.find(kernel_key);
+      found != caching_kernels_.end()) {
+    record_if_enabled(executable_lifecycle_telemetry_.enabled,
+                      executable_lifecycle_telemetry_.memory_cache_hits);
+    return ensure_execution_handle_locked(found->second);
+  }
+  if (cache_mode == CacheData::MemAndDiskCache) {
+    if (auto found = cached_data_.kernels.find(kernel_key);
+        found != cached_data_.kernels.end() &&
+        found->second.compiled_kernel_data != nullptr) {
+      record_if_enabled(executable_lifecycle_telemetry_.enabled,
+                        executable_lifecycle_telemetry_.loaded_cache_hits);
+      return ensure_execution_handle_locked(found->second);
+    }
+  }
+  return nullptr;
 }
 
 void KernelCompilationManager::dump() {
@@ -339,6 +407,23 @@ void KernelCompilationManager::dump() {
 
 void KernelCompilationManager::clear() {
   std::lock_guard<std::mutex> guard(cache_mutex_);
+  std::uint64_t retired = caching_kernels_.size();
+  for (auto &[_, kernel] : caching_kernels_) {
+    if (kernel.execution_handle != nullptr) {
+      kernel.execution_handle->retire();
+    }
+  }
+  for (const auto &[_, kernel] : cached_data_.kernels) {
+    retired += kernel.compiled_kernel_data != nullptr ? 1 : 0;
+  }
+  for (auto &[_, kernel] : cached_data_.kernels) {
+    if (kernel.execution_handle != nullptr) {
+      kernel.execution_handle->retire();
+    }
+  }
+  record_if_enabled(executable_lifecycle_telemetry_.enabled,
+                    executable_lifecycle_telemetry_.templates_retired,
+                    retired);
   caching_kernels_.clear();
   cached_data_.kernels.clear();
   cached_data_.size = 0;
@@ -362,6 +447,11 @@ void KernelCompilationManager::invalidate_snode_tree(int tree_id) {
   for (auto iter = caching_kernels_.begin();
        iter != caching_kernels_.end();) {
     if (depends_on_tree(iter->second)) {
+      if (iter->second.execution_handle != nullptr) {
+        iter->second.execution_handle->retire();
+      }
+      record_if_enabled(executable_lifecycle_telemetry_.enabled,
+                        executable_lifecycle_telemetry_.templates_retired);
       iter = caching_kernels_.erase(iter);
     } else {
       ++iter;
@@ -375,6 +465,11 @@ void KernelCompilationManager::invalidate_snode_tree(int tree_id) {
       continue;
     }
     KernelCacheData *entry = &iter->second;
+    if (entry->execution_handle != nullptr) {
+      entry->execution_handle->retire();
+    }
+    record_if_enabled(executable_lifecycle_telemetry_.enabled,
+                      executable_lifecycle_telemetry_.templates_retired);
     updated_data_.erase(
         std::remove(updated_data_.begin(), updated_data_.end(), entry),
         updated_data_.end());
@@ -384,6 +479,68 @@ void KernelCompilationManager::invalidate_snode_tree(int tree_id) {
             : cached_data_.size - iter->second.size;
     iter = cached_data_.kernels.erase(iter);
   }
+}
+
+void KernelCompilationManager::set_executable_lifecycle_telemetry_enabled(
+    bool enabled) noexcept {
+  executable_lifecycle_telemetry_.enabled.store(enabled,
+                                                std::memory_order_relaxed);
+}
+
+KernelExecutableLifecycleStatistics
+KernelCompilationManager::executable_lifecycle_statistics(bool reset) {
+  KernelExecutableLifecycleStatistics result;
+  result.enabled = executable_lifecycle_telemetry_.enabled.load(
+      std::memory_order_relaxed);
+  const auto read = [reset](std::atomic<std::uint64_t> &counter) {
+    return reset ? counter.exchange(0, std::memory_order_relaxed)
+                 : counter.load(std::memory_order_relaxed);
+  };
+  result.memory_cache_hits =
+      read(executable_lifecycle_telemetry_.memory_cache_hits);
+  result.loaded_cache_hits =
+      read(executable_lifecycle_telemetry_.loaded_cache_hits);
+  result.disk_loads = read(executable_lifecycle_telemetry_.disk_loads);
+  result.compiler_invocations =
+      read(executable_lifecycle_telemetry_.compiler_invocations);
+  result.templates_installed =
+      read(executable_lifecycle_telemetry_.templates_installed);
+  result.templates_retired =
+      read(executable_lifecycle_telemetry_.templates_retired);
+  {
+    std::lock_guard<std::mutex> guard(cache_mutex_);
+    result.resident_templates = caching_kernels_.size();
+    for (const auto &[_, kernel] : cached_data_.kernels) {
+      result.resident_templates +=
+          kernel.compiled_kernel_data != nullptr ? 1 : 0;
+    }
+    result.in_progress_compiles = in_progress_keys_.size();
+    for (auto iter = execution_handles_.begin();
+         iter != execution_handles_.end();) {
+      auto handle = iter->lock();
+      if (handle == nullptr) {
+        iter = execution_handles_.erase(iter);
+        continue;
+      }
+      if (handle->active()) {
+        ++result.live_handles;
+      } else {
+        ++result.retired_handles;
+      }
+      const auto owner_floor = handle->active() ? 2L : 1L;
+      if (handle.use_count() > owner_floor) {
+        // The snapshot is always one owner. Active handles normally have a
+        // second cache owner; retired handles do not. Any owner above that
+        // state-specific floor is a Graph/AOT/in-flight lease.
+        ++result.pinned_handles;
+      }
+      ++iter;
+    }
+    result.handle_inline_bytes =
+        (result.live_handles + result.retired_handles) *
+        sizeof(KernelExecutionHandle);
+  }
+  return result;
 }
 
 void KernelCompilationManager::clean_offline_cache(
@@ -473,6 +630,8 @@ const CompiledKernelData *KernelCompilationManager::try_load_cached_kernel_locke
     const auto &kernels = caching_kernels_;
     auto iter = kernels.find(kernel_key);
     if (iter != kernels.end()) {
+      record_if_enabled(executable_lifecycle_telemetry_.enabled,
+                        executable_lifecycle_telemetry_.memory_cache_hits);
       TI_DEBUG("Create kernel '{}' from in-memory cache (key='{}')",
                kernel_def.get_name(), kernel_key);
       return iter->second.compiled_kernel_data.get();
@@ -485,6 +644,8 @@ const CompiledKernelData *KernelCompilationManager::try_load_cached_kernel_locke
     if (iter != kernels.end()) {
       auto &k = iter->second;
       if (k.compiled_kernel_data) {
+        record_if_enabled(executable_lifecycle_telemetry_.enabled,
+                          executable_lifecycle_telemetry_.loaded_cache_hits);
         TI_DEBUG("Create kernel '{}' from cache (key='{}')",
                  kernel_def.get_name(), kernel_key);
         return k.compiled_kernel_data.get();
@@ -496,6 +657,25 @@ const CompiledKernelData *KernelCompilationManager::try_load_cached_kernel_locke
     }
   }
   return nullptr;
+}
+
+std::shared_ptr<KernelExecutionHandle>
+KernelCompilationManager::ensure_execution_handle_locked(
+    KernelCacheData &kernel) {
+  TI_ASSERT(kernel.compiled_kernel_data != nullptr);
+  if (kernel.execution_handle == nullptr ||
+      !kernel.execution_handle->active()) {
+    const auto identity = next_execution_handle_identity_.fetch_add(
+        1, std::memory_order_relaxed);
+    TI_ERROR_IF(identity == 0 ||
+                    identity == std::numeric_limits<std::uint64_t>::max(),
+                "Kernel execution handle identity space exhausted; call "
+                "ti.reset().");
+    kernel.execution_handle = std::make_shared<KernelExecutionHandle>(
+        identity, kernel.compiled_kernel_data);
+    execution_handles_.push_back(kernel.execution_handle);
+  }
+  return kernel.execution_handle;
 }
 
 const CompiledKernelData &
@@ -518,7 +698,10 @@ KernelCompilationManager::install_compiled_kernel_locked(
   k.compiled_kernel_data = std::move(compiled);
   k.size = 0;  // Populate `size` within the KernelCompilationManager::dump()
   k.cache_mode = cache_mode;
-  const auto &kernel_data = (caching_kernels_[kernel_key] = std::move(k));
+  auto &kernel_data = (caching_kernels_[kernel_key] = std::move(k));
+  ensure_execution_handle_locked(kernel_data);
+  record_if_enabled(executable_lifecycle_telemetry_.enabled,
+                    executable_lifecycle_telemetry_.templates_installed);
   return *kernel_data.compiled_kernel_data;
 }
 

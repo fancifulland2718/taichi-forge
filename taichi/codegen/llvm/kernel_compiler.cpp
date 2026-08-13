@@ -62,7 +62,10 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
   data.args_size = kernel_def.args_size;
   data.ret_type = kernel_def.ret_type;
   data.ret_size = kernel_def.ret_size;
-  return std::make_unique<LLVM::CompiledKernelData>(compile_config.arch, data);
+  auto result =
+      std::make_unique<LLVM::CompiledKernelData>(compile_config.arch, data);
+  result->initialize_generation_bound_snode_relocation_descriptor(true);
+  return result;
 }
 
 }  // namespace LLVM

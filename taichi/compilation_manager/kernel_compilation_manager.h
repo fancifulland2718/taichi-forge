@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include <ctime>
+#include <atomic>
 #include <string>
 #include <memory>
 #include <mutex>
@@ -13,6 +14,22 @@
 #include "taichi/codegen/compiled_kernel_data.h"
 
 namespace taichi::lang {
+
+struct KernelExecutableLifecycleStatistics {
+  bool enabled{false};
+  std::uint64_t memory_cache_hits{0};
+  std::uint64_t loaded_cache_hits{0};
+  std::uint64_t disk_loads{0};
+  std::uint64_t compiler_invocations{0};
+  std::uint64_t templates_installed{0};
+  std::uint64_t templates_retired{0};
+  std::uint64_t resident_templates{0};
+  std::uint64_t in_progress_compiles{0};
+  std::uint64_t live_handles{0};
+  std::uint64_t pinned_handles{0};
+  std::uint64_t retired_handles{0};
+  std::uint64_t handle_inline_bytes{0};
+};
 
 struct CacheData {
   enum CacheMode {
@@ -30,7 +47,10 @@ struct CacheData {
     // Dump the kernel to disk if `cache_mode` == `MemAndDiskCache`
     CacheMode cache_mode{MemCache};
 
-    std::unique_ptr<lang::CompiledKernelData> compiled_kernel_data;
+    std::shared_ptr<lang::CompiledKernelData> compiled_kernel_data;
+    // JIT-only strong owner. Excluded from TI_IO_DEF so the on-disk metadata
+    // schema remains a description of bytes, not an in-process lease graph.
+    std::shared_ptr<lang::KernelExecutionHandle> execution_handle;
 
     TI_IO_DEF(kernel_key, size, created_at, last_used_at);
   };
@@ -66,6 +86,11 @@ class KernelCompilationManager final {
                                             const DeviceCapabilityConfig &caps,
                                             const Kernel &kernel_def);
 
+  std::shared_ptr<KernelExecutionHandle> load_or_compile_execution_handle(
+      const CompileConfig &compile_config,
+      const DeviceCapabilityConfig &caps,
+      const Kernel &kernel_def);
+
   // Return an already materialized in-memory kernel for a known specialization
   // key. This intentionally does not load from disk or compile; callers that
   // miss must fall back to load_or_compile().
@@ -73,6 +98,12 @@ class KernelCompilationManager final {
                                                const Kernel &kernel_def,
                                                Arch arch,
                                                bool offline_cache);
+
+  std::shared_ptr<KernelExecutionHandle> find_cached_execution_handle(
+      const std::string &kernel_key,
+      const Kernel &kernel_def,
+      Arch arch,
+      bool offline_cache);
 
   // Dump the cached data in memory to disk
   void dump();
@@ -85,6 +116,11 @@ class KernelCompilationManager final {
   // specified SNodeTree. Explicit tree destruction is a cold transaction, so
   // this waits for outstanding compilation before removing matching entries.
   void invalidate_snode_tree(int tree_id);
+
+  void set_executable_lifecycle_telemetry_enabled(bool enabled) noexcept;
+
+  KernelExecutableLifecycleStatistics executable_lifecycle_statistics(
+      bool reset);
 
   // Run offline cache cleaning
   void clean_offline_cache(offline_cache::CleanCachePolicy policy,
@@ -133,6 +169,9 @@ class KernelCompilationManager final {
       const CompileConfig &compile_config,
       const Kernel &kernel_def);
 
+  std::shared_ptr<KernelExecutionHandle> ensure_execution_handle_locked(
+      KernelCacheData &kernel);
+
   Config config_;
   CachingKernels caching_kernels_;
   CacheData cached_data_;
@@ -154,13 +193,24 @@ class KernelCompilationManager final {
   // same kernel_key, only one compiles and the other waits on `cache_cv_`.
   //
   // Reference-stability note: `load_or_compile` returns
-  // `const CompiledKernelData&` whose target lives on the heap (owned by a
-  // `unique_ptr` inside `KernelCacheData`). The heap address is stable across
-  // map rehashes, so the returned reference remains valid even if other
-  // threads insert into `caching_kernels_` afterwards.
+  // `const CompiledKernelData&` whose target lives on the heap behind the
+  // entry's shared execution handle. The heap address is stable across map
+  // rehashes, and Graph leases can keep it alive after cache retirement.
   mutable std::mutex cache_mutex_;
   std::condition_variable cache_cv_;
   std::unordered_set<std::string> in_progress_keys_;
+  std::atomic<std::uint64_t> next_execution_handle_identity_{1};
+  std::vector<std::weak_ptr<KernelExecutionHandle>> execution_handles_;
+
+  struct ExecutableLifecycleTelemetry {
+    std::atomic<bool> enabled{false};
+    std::atomic<std::uint64_t> memory_cache_hits{0};
+    std::atomic<std::uint64_t> loaded_cache_hits{0};
+    std::atomic<std::uint64_t> disk_loads{0};
+    std::atomic<std::uint64_t> compiler_invocations{0};
+    std::atomic<std::uint64_t> templates_installed{0};
+    std::atomic<std::uint64_t> templates_retired{0};
+  } executable_lifecycle_telemetry_;
 };
 
 }  // namespace taichi::lang

@@ -548,6 +548,9 @@ class PyTaichi:
         # by SNodeTree destruction. Keep a monotonic runtime-lifetime count so
         # dropping Python wrappers cannot bypass the native memory budget.
         self._compiled_specialization_count = 0
+        self._resident_specialization_count = 0
+        self._specialization_reclaims = 0
+        self._specialization_budget_rejections = 0
         self._signal_handler_registry = None
         self.unfinalized_fields_builder = {}
         # P3 — frontend IR size-control knobs. Default 0 = disabled (no
@@ -685,6 +688,7 @@ class PyTaichi:
         self._materialize_dirty = True
 
     def clear_compiled_functions(self):
+        reclaimed = 0
         for k in tuple(self.kernels):
             retired = tuple(
                 key
@@ -694,6 +698,14 @@ class PyTaichi:
             for key in retired:
                 k.compiled_kernels.pop(key, None)
                 k._external_grad_accesses.pop(key, None)
+                reclaimed += 1
+        if reclaimed:
+            if reclaimed > self._resident_specialization_count:
+                raise RuntimeError(
+                    "resident kernel specialization accounting underflow"
+                )
+            self._resident_specialization_count -= reclaimed
+            self._specialization_reclaims += reclaimed
 
     def finalize_fields_builder(self, builder):
         self.unfinalized_fields_builder.pop(builder)
@@ -709,6 +721,62 @@ class PyTaichi:
 
     def get_num_compiled_functions(self):
         return self._compiled_specialization_count
+
+    def set_kernel_executable_lifecycle_telemetry_enabled(self, enabled):
+        """Enable cold-path SNode executable lifecycle attribution.
+
+        Disabled mode adds only one predictable Python boolean branch to
+        dynamic template lookup and one native relaxed-boolean branch to
+        compilation-cache lookup. It never instruments warm device work.
+        """
+
+        from taichi_forge.lang import kernel_impl
+
+        enabled = bool(enabled)
+        kernel_impl._set_executable_lifecycle_telemetry_enabled(enabled)
+        if self.prog is not None:
+            self.prog._set_kernel_executable_lifecycle_telemetry_enabled(enabled)
+
+    def debug_kernel_executable_lifecycle_stats(self, reset=False):
+        from taichi_forge.lang import kernel_impl
+
+        python_stats = kernel_impl._executable_lifecycle_telemetry_snapshot(reset)
+        live_mapper_keys = 0
+        dead_mapper_keys = 0
+        for kernel in tuple(self.kernels):
+            for key in kernel.mapper.mapping:
+                if kernel.mapper._cache_key_is_dead(key):
+                    dead_mapper_keys += 1
+                else:
+                    live_mapper_keys += 1
+        if self.prog is None:
+            native_stats = {
+                "schema_version": 1,
+                "enabled": False,
+                "memory_cache_hits": 0,
+                "loaded_cache_hits": 0,
+                "disk_loads": 0,
+                "compiler_invocations": 0,
+                "templates_installed": 0,
+                "templates_retired": 0,
+                "resident_templates": 0,
+                "in_progress_compiles": 0,
+                "live_handles": 0,
+                "pinned_handles": 0,
+                "retired_handles": 0,
+                "handle_inline_bytes": 0,
+                "registered_executables": 0,
+            }
+        else:
+            native_stats = dict(self.prog._debug_kernel_executable_lifecycle_stats(reset))
+        native_stats.update(python_stats)
+        native_stats["mapper_live_keys"] = live_mapper_keys
+        native_stats["mapper_dead_keys"] = dead_mapper_keys
+        native_stats["historical_materializations"] = self._compiled_specialization_count
+        native_stats["resident_specializations"] = self._resident_specialization_count
+        native_stats["specialization_reclaims"] = self._specialization_reclaims
+        native_stats["budget_rejections"] = self._specialization_budget_rejections
+        return native_stats
 
     def src_info_guard(self, info):
         return SrcInfoGuard(self.src_info_stack, info)

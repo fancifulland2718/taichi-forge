@@ -4669,8 +4669,11 @@ class _CGraphJITExecutable:
             context.compile_config(), context.flattened_args(), self._jit_cache
         )
 
-    def invalidate_runtime(self):
-        self._jit_cache.clear_runtime_state()
+    def invalidate_runtime(self, preserve_executables=False):
+        if preserve_executables:
+            self._jit_cache.retire_snode_tree_runtime_state()
+        else:
+            self._jit_cache.clear_runtime_state()
 
     @property
     def debug_graph_stats(self):
@@ -4976,8 +4979,11 @@ class _CompiledCGraphNode:
             self._jit_cache,
         )
 
-    def invalidate_runtime(self):
-        self._jit_cache.clear_runtime_state()
+    def invalidate_runtime(self, preserve_executables=False):
+        if preserve_executables:
+            self._jit_cache.retire_snode_tree_runtime_state()
+        else:
+            self._jit_cache.clear_runtime_state()
 
     @property
     def debug_graph_stats(self):
@@ -5744,7 +5750,7 @@ class _CompiledSequentialRegionNode:
             if materialize is not None:
                 materialize()
 
-    def invalidate_runtime(self):
+    def invalidate_runtime(self, preserve_executables=False):
         seen = set()
         for node in self.nodes:
             identity = id(node)
@@ -5753,7 +5759,7 @@ class _CompiledSequentialRegionNode:
             seen.add(identity)
             invalidate = getattr(node, "invalidate_runtime", None)
             if invalidate is not None:
-                invalidate()
+                invalidate(preserve_executables=preserve_executables)
 
     @property
     def debug_graph_stats(self):
@@ -7389,17 +7395,28 @@ class _CompiledWhileGraphNode:
             masked_iterations=masked_iterations,
         )
 
-    def invalidate_runtime(self):
-        self._native_jit_cache.clear_runtime_state()
-        self._condition.invalidate_runtime()
+    def invalidate_runtime(self, preserve_executables=False):
+        if preserve_executables:
+            self._native_jit_cache.retire_snode_tree_runtime_state()
+        else:
+            self._native_jit_cache.clear_runtime_state()
+        self._condition.invalidate_runtime(
+            preserve_executables=preserve_executables
+        )
         for node in self._chunks.values():
-            node.invalidate_runtime()
+            node.invalidate_runtime(preserve_executables=preserve_executables)
         if self._vulkan_structured is not None:
-            self._vulkan_structured.invalidate_runtime()
+            self._vulkan_structured.invalidate_runtime(
+                preserve_executables=preserve_executables
+            )
         if self._vulkan_nested is not None:
-            self._vulkan_nested.invalidate_runtime()
+            self._vulkan_nested.invalidate_runtime(
+                preserve_executables=preserve_executables
+            )
         if self._cuda_nested is not None:
-            self._cuda_nested.invalidate_runtime()
+            self._cuda_nested.invalidate_runtime(
+                preserve_executables=preserve_executables
+            )
 
     @property
     def debug_graph_stats(self):
@@ -7806,13 +7823,18 @@ class _CompiledIfGraphNode:
         )
         self._pending_report = None
 
-    def invalidate_runtime(self):
+    def invalidate_runtime(self, preserve_executables=False):
         self._pending_report = None
-        self._native_jit_cache.clear_runtime_state()
-        self._condition.invalidate_runtime()
-        self._then.invalidate_runtime()
+        if preserve_executables:
+            self._native_jit_cache.retire_snode_tree_runtime_state()
+        else:
+            self._native_jit_cache.clear_runtime_state()
+        self._condition.invalidate_runtime(
+            preserve_executables=preserve_executables
+        )
+        self._then.invalidate_runtime(preserve_executables=preserve_executables)
         if self._else is not None:
-            self._else.invalidate_runtime()
+            self._else.invalidate_runtime(preserve_executables=preserve_executables)
 
     @property
     def debug_graph_stats(self):
@@ -8209,14 +8231,21 @@ class _CompiledSwitchGraphNode:
         )
         self._pending_report = None
 
-    def invalidate_runtime(self):
+    def invalidate_runtime(self, preserve_executables=False):
         self._pending_report = None
-        self._native_jit_cache.clear_runtime_state()
-        self._condition.invalidate_runtime()
+        if preserve_executables:
+            self._native_jit_cache.retire_snode_tree_runtime_state()
+        else:
+            self._native_jit_cache.clear_runtime_state()
+        self._condition.invalidate_runtime(
+            preserve_executables=preserve_executables
+        )
         for branch in self._branches:
-            branch.invalidate_runtime()
+            branch.invalidate_runtime(preserve_executables=preserve_executables)
         if self._default is not None:
-            self._default.invalidate_runtime()
+            self._default.invalidate_runtime(
+                preserve_executables=preserve_executables
+            )
 
     @property
     def debug_graph_stats(self):
@@ -9600,12 +9629,12 @@ class _GraphSpec:
             key = self.instance_key()
         return _GraphInstance(self, key)
 
-    def invalidate_runtime(self):
+    def invalidate_runtime(self, preserve_executables=False):
         self._temporary_binding_cache.clear()
         for node in self.nodes:
             invalidate = getattr(node, "invalidate_runtime", None)
             if invalidate is not None:
-                invalidate()
+                invalidate(preserve_executables=preserve_executables)
 
     def instance_key(self):
         runtime = impl.get_runtime()
@@ -10015,11 +10044,11 @@ class _GraphInstance:
         self._set_run_impl(self._run_backend)
         return self
 
-    def invalidate_runtime(self):
+    def invalidate_runtime(self, preserve_executables=False):
         if self._backend_executable is not None:
             invalidate = getattr(self._backend_executable, "invalidate_runtime", None)
             if invalidate is not None:
-                invalidate()
+                invalidate(preserve_executables=preserve_executables)
 
     def prewarm(self):
         if self._backend_executable is not None:
@@ -10159,9 +10188,9 @@ class _GraphWorkspaceLanePool:
         self._acquisitions += 1
         return index, self._materialize(index)
 
-    def invalidate_runtime(self):
+    def invalidate_runtime(self, preserve_executables=False):
         for instance in self.instances:
-            instance.invalidate_runtime()
+            instance.invalidate_runtime(preserve_executables=preserve_executables)
 
     @staticmethod
     def _sum_stats(instances, attribute):
@@ -13170,8 +13199,8 @@ class Graph:
                 return True
             self._stale_snode_tree_dependencies.add(dependency)
             for pool in self._instances.values():
-                pool.invalidate_runtime()
-            self._spec.invalidate_runtime()
+                pool.invalidate_runtime(preserve_executables=True)
+            self._spec.invalidate_runtime(preserve_executables=True)
             return True
 
     def _cancel_snode_tree_retirement(self, dependency):

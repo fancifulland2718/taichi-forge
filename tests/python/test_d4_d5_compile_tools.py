@@ -166,7 +166,9 @@ def test_snode_relocation_manifest_is_machine_generated_and_fail_closed():
 
     assert manifest["schema_version"] == 1
     assert manifest["has_snode_tree_dependencies"]
-    assert manifest["coverage"] == ("compiled_dependency_and_task_inventory_only")
+    assert manifest["coverage"] == "compiler_typed_relocation_contract"
+    assert manifest["compiler_emitted"]
+    assert manifest["relocation_class"] == "generation_bound"
     assert not manifest["compiler_embedded_state_fully_classified"]
     assert not manifest["reuse_admitted"]
     assert len(manifest["tree_dependencies"]) == 1
@@ -178,7 +180,39 @@ def test_snode_relocation_manifest_is_machine_generated_and_fail_closed():
     assert "listgen" in task_types
     assert "struct_for" in task_types
     assert all(not task["embedded_state_audited"] for task in manifest["tasks"])
+    assert all(task["relocation_class"] == "generation_bound" for task in manifest["tasks"])
     assert "sparse_list_and_allocator_relocation_not_qualified" in (manifest["blockers"])
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_snode_executable_lifecycle_telemetry_is_opt_in_and_counts_compilation():
+    value = ti.field(ti.i32, shape=8)
+
+    @ti.kernel
+    def fill(dst: ti.template()):
+        for i in dst:
+            dst[i] = i
+
+    runtime = ti.lang.impl.get_runtime()
+    program = runtime.prog
+    runtime.set_kernel_executable_lifecycle_telemetry_enabled(True)
+    runtime.debug_kernel_executable_lifecycle_stats(True)
+
+    fill(value)
+    key = fill._primal.ensure_compiled(value)
+    kernel_cpp = fill._primal.compiled_kernels[key]
+    program._kernel_task_manifest(kernel_cpp)
+    stats = runtime.debug_kernel_executable_lifecycle_stats()
+
+    assert stats["schema_version"] == 1
+    assert stats["enabled"]
+    assert stats["compiler_invocations"] == 1
+    assert stats["templates_installed"] == 1
+    assert stats["resident_templates"] >= 1
+    assert stats["memory_cache_hits"] >= 1
+    assert stats["mapper_misses"] >= 1
+    assert stats["mapper_live_keys"] >= 1
+    runtime.set_kernel_executable_lifecycle_telemetry_enabled(False)
 
 
 @test_utils.test(arch=ti.cpu)

@@ -319,25 +319,28 @@ const CompiledKernelData *get_or_compile_cached_kernel(
     CompiledGraphJITCachedKernel &cached,
     bool cache_compiled_kernel_data) {
   auto *prog = dispatch.ti_kernel->program;
-  const CompiledKernelData *compiled_kernel_data =
-      cache_compiled_kernel_data ? cached.compiled_kernel_data : nullptr;
-  if (compiled_kernel_data == nullptr && !cached.kernel_key.empty()) {
-    compiled_kernel_data = prog->find_cached_kernel(
-        compile_config, cached.kernel_key, *dispatch.ti_kernel);
-    if (cache_compiled_kernel_data) {
-      cached.compiled_kernel_data = compiled_kernel_data;
-    }
+  auto execution_handle = cached.execution_handle;
+  if (execution_handle != nullptr && !execution_handle->active()) {
+    execution_handle.reset();
+    cached.execution_handle.reset();
   }
-  if (compiled_kernel_data == nullptr) {
-    compiled_kernel_data = &prog->compile_kernel(
+  if (execution_handle == nullptr && !cached.kernel_key.empty()) {
+    execution_handle = prog->find_cached_kernel_execution_handle(
+        compile_config, cached.kernel_key, *dispatch.ti_kernel);
+  }
+  if (execution_handle == nullptr) {
+    execution_handle = prog->compile_kernel_execution_handle(
         compile_config, prog->get_device_caps(), *dispatch.ti_kernel);
     if (cached.kernel_key.empty()) {
       cached.kernel_key = dispatch.ti_kernel->get_cached_kernel_key();
     }
-    if (cache_compiled_kernel_data) {
-      cached.compiled_kernel_data = compiled_kernel_data;
-    }
   }
+  // All JIT Graph paths retain the stable handle. The historical flag is kept
+  // at call sites for source compatibility while Vulkan transitions away from
+  // raw registration pointers.
+  (void)cache_compiled_kernel_data;
+  cached.execution_handle = execution_handle;
+  const auto *compiled_kernel_data = &execution_handle->compiled();
   if (cached.task_count == std::numeric_limits<std::uint32_t>::max()) {
     const std::size_t task_count = compiled_kernel_data->task_count();
     TI_ASSERT(task_count < std::numeric_limits<std::uint32_t>::max());
@@ -5111,6 +5114,28 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
   return finalize({});
 }
 
+namespace {
+
+void retain_graph_execution_handles(
+    std::vector<std::shared_ptr<KernelExecutionHandle>> &retired,
+    const std::vector<CompiledGraphJITCachedKernel> &kernels) {
+  for (const auto &kernel : kernels) {
+    if (kernel.execution_handle == nullptr) {
+      continue;
+    }
+    const auto identity = kernel.execution_handle->identity();
+    const bool already_retained = std::any_of(
+        retired.begin(), retired.end(), [&](const auto &handle) {
+          return handle != nullptr && handle->identity() == identity;
+        });
+    if (!already_retained) {
+      retired.push_back(kernel.execution_handle);
+    }
+  }
+}
+
+}  // namespace
+
 void CompiledGraphJITCache::clear_runtime_state() {
   auto clear_locked = [this]() {
     cuda_graph_state.reset();
@@ -5118,6 +5143,7 @@ void CompiledGraphJITCache::clear_runtime_state() {
     vulkan_inline_stats = {};
     graph_diagnostics_counters_complete = true;
     kernels.clear();
+    retired_execution_handles.clear();
     runtime_arg_plans.clear();
     runtime_binding_plan.clear();
     replay_attribution = {};
@@ -5149,6 +5175,38 @@ void CompiledGraphJITCache::clear_runtime_state() {
 #else
   std::lock_guard<std::mutex> run_lock(run_mutex);
   clear_locked();
+#endif
+}
+
+void CompiledGraphJITCache::retire_snode_tree_runtime_state() {
+  auto retire_locked = [this]() {
+    cuda_graph_state.reset();
+    vulkan_graph_state.reset();
+    vulkan_inline_stats = {};
+    graph_diagnostics_counters_complete = true;
+    retain_graph_execution_handles(retired_execution_handles, kernels);
+    kernels.clear();
+    runtime_arg_plans.clear();
+    runtime_binding_plan.clear();
+    replay_attribution = {};
+    validated_snode_tree_program = nullptr;
+    validated_snode_tree_epoch = 0;
+  };
+
+#if defined(TI_WITH_CUDA)
+  std::unique_lock<std::mutex> run_lock(run_mutex);
+  if (cuda_graph_state == nullptr) {
+    retire_locked();
+    return;
+  }
+  run_lock.unlock();
+  auto cuda_submission_lock =
+      CUDAContext::get_instance().get_submission_lock_guard();
+  run_lock.lock();
+  retire_locked();
+#else
+  std::lock_guard<std::mutex> run_lock(run_mutex);
+  retire_locked();
 #endif
 }
 

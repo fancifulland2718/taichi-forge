@@ -26,6 +26,7 @@ Arch CompiledKernelData::arch() const {
 std::unique_ptr<lang::CompiledKernelData> CompiledKernelData::clone() const {
   auto result = std::make_unique<CompiledKernelData>(arch_, data_);
   result->set_kernel_identity(kernel_identity());
+  result->set_snode_relocation_descriptor(snode_relocation_descriptor());
   return result;
 }
 

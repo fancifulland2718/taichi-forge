@@ -4949,6 +4949,26 @@ const CompiledKernelData &Program::compile_kernel(
   return ckd;
 }
 
+std::shared_ptr<KernelExecutionHandle>
+Program::compile_kernel_execution_handle(
+    const CompileConfig &compile_config,
+    const DeviceCapabilityConfig &caps,
+    const Kernel &kernel_def) {
+  TI_ERROR_IF(kernel_def.ir == nullptr,
+              "Cannot compile a kernel whose SNodeTree dependency has been "
+              "destroyed; rebuild the kernel/Graph.");
+  auto start_t = Time::get_time();
+  TI_AUTO_PROF;
+  auto &mgr = program_impl_->get_kernel_compilation_manager();
+  const auto effective_config =
+      make_effective_kernel_compile_config(compile_config, kernel_def);
+  auto handle = mgr.load_or_compile_execution_handle(
+      effective_config, caps, kernel_def);
+  kernel_def.set_snode_tree_dependencies(handle->compiled().snode_tree_ids());
+  total_compilation_time_ += Time::get_time() - start_t;
+  return handle;
+}
+
 const CompiledKernelData *Program::find_cached_kernel(
     const CompileConfig &compile_config,
     const std::string &kernel_key,
@@ -4964,6 +4984,25 @@ const CompiledKernelData *Program::find_cached_kernel(
     kernel_def.set_snode_tree_dependencies(compiled->snode_tree_ids());
   }
   return compiled;
+}
+
+std::shared_ptr<KernelExecutionHandle>
+Program::find_cached_kernel_execution_handle(
+    const CompileConfig &compile_config,
+    const std::string &kernel_key,
+    const Kernel &kernel_def) {
+  if (kernel_def.ir == nullptr) {
+    return nullptr;
+  }
+  auto &mgr = program_impl_->get_kernel_compilation_manager();
+  auto handle = mgr.find_cached_execution_handle(
+      kernel_key, kernel_def, compile_config.arch,
+      compile_config.offline_cache);
+  if (handle != nullptr) {
+    kernel_def.set_snode_tree_dependencies(
+        handle->compiled().snode_tree_ids());
+  }
+  return handle;
 }
 
 // P5.b: batch / parallel kernel compilation.
@@ -5754,6 +5793,17 @@ Program::debug_cpu_scheduler_telemetry(bool reset) {
       {"max_requested_threads", stats.max_requested_threads},
       {"max_joined_workers", stats.max_joined_workers},
   };
+}
+
+void Program::set_kernel_executable_lifecycle_telemetry_enabled(bool enabled) {
+  program_impl_->get_kernel_compilation_manager()
+      .set_executable_lifecycle_telemetry_enabled(enabled);
+}
+
+KernelExecutableLifecycleStatistics
+Program::debug_kernel_executable_lifecycle_statistics(bool reset) {
+  return program_impl_->get_kernel_compilation_manager()
+      .executable_lifecycle_statistics(reset);
 }
 
 static void remove_snode_frontend_caches(

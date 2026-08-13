@@ -32,6 +32,7 @@ class Texture;
 class Matrix;
 class Kernel;
 class CompiledKernelData;
+class KernelExecutionHandle;
 class Program;
 namespace storage {
 class RuntimeStorageArgument;
@@ -276,7 +277,10 @@ struct CompiledDispatch {
 
 struct CompiledGraphJITCachedKernel {
   std::string kernel_key;
-  const CompiledKernelData *compiled_kernel_data{nullptr};
+  // Keeps the compiled payload alive independently of the frontend Kernel
+  // shell and compilation-cache entry. SNode retirement marks the handle
+  // inactive; Graph generation validation still rejects any new stale submit.
+  std::shared_ptr<KernelExecutionHandle> execution_handle;
   int llvm_launch_id{-1};
   // UINT32_MAX is the unknown sentinel. Keeping this beside llvm_launch_id
   // consumes the struct's existing alignment padding on 64-bit builds.
@@ -639,9 +643,14 @@ struct CompiledGraphJITCache {
   // still alive. This is intentionally separate from the destructor: Python
   // GC may destroy a graph after ti.reset() has already finalized its Program.
   void clear_runtime_state();
+  // A stale SNode-dependent Graph cannot submit again, but it must keep its
+  // compiled executable leases until the Graph itself is released. Backend
+  // replay and generation bindings are still discarded immediately.
+  void retire_snode_tree_runtime_state();
   CompiledGraphDebugSnapshot debug_graph_stats();
 
   std::vector<CompiledGraphJITCachedKernel> kernels;
+  std::vector<std::shared_ptr<KernelExecutionHandle>> retired_execution_handles;
   std::vector<CompiledGraphDispatchRuntimePlan> runtime_arg_plans;
   Program *validated_snode_tree_program{nullptr};
   std::uint64_t validated_snode_tree_epoch{0};
