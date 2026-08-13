@@ -94,6 +94,18 @@ grouped under the behavior they shipped.
   Vulkan over 200 diagnostic samples; these isolated host-path directions are
   not application throughput claims. SNode-dependent kernels remain excluded:
   their compiled data, backend handle, and context type retire with the tree.
+- Ordinary launch plans now use a four-entry, per-Kernel bounded LRU instead
+  of replacing one resource slot. Common ping-pong and triple-buffer ndarray
+  signatures retain independent launch contexts; MRU execution keeps the old
+  single comparison, entries hold only weak resource guards, dead generations
+  are pruned, and `ti.reset()` clears the complete cache. Stable admission
+  failures, including ndarray kernels that capture SNode state, are negatively
+  cached per compiled specialization so the general path does not repeat a
+  registration attempt on every launch. In a local 696-launch ping-pong
+  diagnostic, median synchronized batches moved from 135.9 to 29.2 ms on CUDA
+  and from 144.7 to 23.2 ms on Vulkan versus the emulated former single-slot
+  policy; these isolated host-path measurements are not application throughput
+  claims.
 - Graph, SolvePlan, and device-convergent batched submissions now distinguish
   `telemetry="summary"` from `telemetry="timestamps"`; `True` remains the
   timestamp compatibility alias. Summary mode preserves stop snapshots,
@@ -104,6 +116,13 @@ grouped under the behavior they shipped.
   non-exact queue window retained three queue calls while submitted command
   buffers fell from 12 to 9; timestamp submit/wait/materialization median moved
   from 1028.8 to 942.0 microseconds over 200 diagnostic samples.
+- Added `Graph.prepare_telemetry(mode, slots=1)` to explicitly materialize the
+  bounded telemetry arena, compile packed snapshot kernels, and, for timestamp
+  mode, warm backend event/query initialization without executing the Graph or
+  reading user resources. `SolvePlan.prepare_telemetry()` delegates to the
+  selected cached submission variant, while device-convergent
+  `BatchedSolvePlan.prepare_telemetry()` prepares its single Graph replay.
+  Default `telemetry=False` submissions remain allocation-free.
 - Ordinary compact ndarray specializations now keep canonical addressing in
   LLVM/SPIR-V instead of loading affine offset/stride metadata at every access.
   Positive-stride storage views retain a separate runtime-affine

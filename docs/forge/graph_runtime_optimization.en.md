@@ -366,6 +366,13 @@ allocating marker-only command lists. Timestamp mode still reports
 execution latency. Calling
 `ticket.pipeline_report()` returns this same ticket-owned object. With
 `telemetry=False`, no pipeline report or telemetry arena is materialized.
+Call `graph.prepare_telemetry("summary")` before a sampling window to allocate
+the bounded arena and compile packed snapshot kernels without executing the
+Graph or reading its runtime arguments. `prepare_telemetry("timestamps")`
+also performs one empty instrumented transaction so lazy backend event/query
+initialization is paid at that explicit boundary. The optional `slots` count
+prepares bounded concurrent records for currently materialized workspace lanes;
+default submissions remain unaffected.
 
 ### Vulkan compound structured transactions
 

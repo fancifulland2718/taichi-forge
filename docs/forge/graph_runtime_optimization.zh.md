@@ -291,6 +291,11 @@ opt-in marker 写入 runtime 已拥有的 command list，不再分配 marker-onl
 timestamp 模式仍明确报告 `gpu_measurement_path_changed=True`，它是诊断计时而不是正常执行
 延迟。`ticket.pipeline_report()` 返回
 同一个 ticket-owned 对象。`telemetry=False` 时不会物化 pipeline report 或 telemetry arena。
+在采样窗口前调用 `graph.prepare_telemetry("summary")`，可以在不执行 Graph、也不读取
+runtime argument 的前提下分配有界 arena 并编译 packed snapshot kernel。
+`prepare_telemetry("timestamps")` 还会执行一次空 instrumented transaction，使 backend
+event/query 的惰性初始化成本落在这个显式边界。可选 `slots` 数量会为当前已物化 workspace
+lane 准备有界并发记录；默认 submission 不受影响。
 
 ### Vulkan compound 结构化事务
 

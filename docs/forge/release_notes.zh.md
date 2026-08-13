@@ -78,6 +78,13 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
   CUDA 上从 42.9 降至 34.0 微秒，在 Vulkan 上从 60.6 降至 51.4 微秒；这只是隔离 host
   path 方向，不是应用吞吐声明。SNode-dependent kernel 仍保持排除，因为 compiled data、
   backend handle 与 context type 会随 tree 一同退休。
+- 普通 launch plan 现在使用每 Kernel 四槽的有界 LRU，不再只替换一个资源槽。常见
+  ping-pong 与 triple-buffer ndarray signature 会保留各自 launch context；MRU 稳态仍只做一次
+  比较，entry 只持有弱资源 guard，失效 generation 会被清理，`ti.reset()` 会清空整个缓存。
+  ndarray kernel 捕获 SNode state 等稳定 admission 失败会按 compiled specialization 负缓存，
+  通用路径不再每次 launch 都重复 registration。一个本地 696 次 ping-pong 诊断中，相对模拟
+  的旧单槽策略，同步 batch median 在 CUDA 上从 135.9 降至 29.2 ms，在 Vulkan 上从
+  144.7 降至 23.2 ms；这些隔离 host-path 数据不代表应用吞吐。
 - Graph、SolvePlan 与 device-convergent batched submission 现在区分
   `telemetry="summary"` 和 `telemetry="timestamps"`；`True` 保留为 timestamps 的兼容别名。
   summary 保留停止 snapshot、queue/submission taxonomy 与 pipeline structure，但不插入 backend
@@ -86,6 +93,11 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
   structured probe 的 non-exact queue window 都观测到三次 queue call，而 submitted command
   buffer 从 12 降到 9；200 个诊断样本的 timestamp submit/wait/materialization median 从
   1028.8 降到 942.0 微秒。
+- 新增 `Graph.prepare_telemetry(mode, slots=1)`，可在不执行 Graph、也不读取用户资源的
+  前提下显式物化有界 telemetry arena、编译 packed snapshot kernel，并在 timestamp 模式下
+  预热 backend event/query 初始化。`SolvePlan.prepare_telemetry()` 委托到所选 cached
+  submission variant；device-convergent `BatchedSolvePlan.prepare_telemetry()` 则预热其单个
+  Graph replay。默认 `telemetry=False` submission 仍不产生这些分配。
 - 普通 compact ndarray specialization 现在在 LLVM/SPIR-V 中保留 canonical addressing，
   不再让每次访问都读取 affine offset/stride metadata。positive-stride storage view 使用独立的
   runtime-affine specialization；symbolic Graph ndarray 因 replay 可能绑定两种 layout，继续按
