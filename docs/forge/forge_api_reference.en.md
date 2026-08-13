@@ -629,6 +629,22 @@ published `next_extent` retains that transition's overflow state. Explicit
 `statistics()` merges the current published extent, so the latest overflow
 remains observable without adding work to submission.
 
+For a unique direct worklist, use
+`device_worklist_recycle_unique_direct(*worklist.unique_recycle_arguments())`.
+It advances both generation and the dense-tag epoch and fails closed on either
+counter's exhaustion. The ordinary recycle argument accessor rejects a unique
+worklist.
+
+`fixed_graph_args(builder, name)` is the provider-owned counterpart to
+`graph_args(name)`. It privately binds address-stable worklist resources into
+that builder and removes them from the public runtime argument dictionary.
+The compiled Graph is generation/front-parity qualified, supports only one
+workspace lane, and runtime-orders asynchronous reuse, adding a completion
+fence when the backend exposes pending work. After an odd number
+of committed transitions, use the separately compiled Graph for the other
+front parity. This form expresses ownership; it does not skip native resource
+retention or promise a speedup.
+
 `device_worklist_append(values, extent_state, generated, overflow, capacity,
 value)` is a `@ti.func` and returns the reserved slot or `-1` on overflow. The
 overflow-free path performs one reservation atomic per item. The append order
@@ -765,18 +781,19 @@ Builds an explicit reusable reduction topology from host-visible integer
 destination indices. Valid sources are stably grouped by destination while
 preserving source ordinal within each group; negative and out-of-range indices
 are ignored. `plan.bind(values, output)` accepts matching one-dimensional
-scalar ndarrays or root-dense fields with `i32/u32/i64/u64/f32/f64`, owns one
-ordered-value workspace lane, and reduces each group left-to-right on CPU,
-CUDA, and Vulkan. `binding.run()` executes it and
+scalar or vector ndarrays/root-dense fields with component dtype
+`i32/u32/i64/u64/f32/f64`, and reduces each group left-to-right in one indexed
+dispatch on CPU, CUDA, and Vulkan. `binding.run()` executes it and
 `binding.graph_action()` returns a native Graph action.
 
 This is an opt-in reproducibility and qualification route. It never replaces
 atomic scatter-add automatically and is not differentiable. Independent
-concurrent execution requires independent bindings. Vector assembly uses one
-binding per scalar component. The order is repeatable for a fixed
-backend/compiler contract; the API does not promise identical floating-point
-bits across different backends or compiler modes. `report()` exposes stable
-topology bytes, ordered-value bytes, and peak workspace bytes.
+concurrent execution requires independent bindings. The order is repeatable
+for the same backend/build contract; the API does not promise identical bits
+across backends/compiler modes or improved numerical accuracy. `report()`
+exposes stable topology bytes, component shape, implementation route, and zero
+ordered-value/workspace bytes. Atomic assembly remains the default performance
+route; use this stable-serial plan only when reproducibility is required.
 
 These functions return a workspace when a workspace object is useful for replay
 or reuse. Pass an explicit workspace to keep scratch buffers and native plans
@@ -1650,7 +1667,7 @@ the same execution path and returns a completion ticket.
 
 | API | Contract |
 | --- | --- |
-| `GraphBuilder.compile(*, workspace_lanes=1, workspace_saturation='wait')` | Later changes to the builder or original `Sequential` do not modify the compiled graph. Additional workspace lanes are materialized lazily and only affect Graphs with exclusive Graph-owned internal storage, such as a recorded SolvePlan. `workspace_saturation='raise'` fails instead of waiting when every eligible lane is busy. |
+| `GraphBuilder.compile(*, workspace_lanes=1, workspace_saturation='wait')` | Later changes to the builder or original `Sequential` do not modify the compiled graph. Additional workspace lanes are materialized lazily and only affect Graphs with eligible exclusive Graph-owned internal storage, such as a recorded SolvePlan. Provider-fixed worklist storage deliberately requires one lane and rejects a larger value. `workspace_saturation='raise'` fails instead of waiting when every eligible lane is busy. |
 | `Graph.run(args, *, trace=False)` | `args` must be a dictionary with exactly the declared keys; missing or extra keys raise `TaichiRuntimeError`. The default returns `None` and does not allocate a dynamic control-flow trace. |
 | `Graph.run(args, *, trace=True)` | Run synchronously and return an immutable `GraphControlFlowTrace`. Its ordered invocations contain a `sequence`, static `definition_path`, dynamic `invocation_path`, optional `parent_iteration`, and the invocation's while/branch report. Unlike `control_flow_stats()`, it preserves every repeated nested invocation. Tracing bypasses strict Vulkan nested replay and uses exact portable-parent execution so each invocation is observable. |
 | `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait', telemetry=False, workspace_lane=None)` | Uses the same exact argument, lifecycle, concurrency, and AD contract as `run()`, returns one `SubmissionTicket`, and can opt into shared admission pacing. `lane` remains the pacer lane; `workspace_lane` optionally pins a Graph-owned execution/workspace lane. `telemetry="summary"` adds per-while and bounded-extent snapshots, queue/submission accounting, and the lazy post-optimization pipeline definition without backend timestamp markers. `telemetry="timestamps"` adds whole-ticket/region GPU timestamps; `True` is its compatibility alias. The default adds no telemetry buffers or report. Structured submission accepts qualified CUDA `native_required` while/if/switch regions and qualified Vulkan `native_required` while regions, including multiple ordered regions and qualified depth-two multi-inner sequences. Portable control and unsupported native combinations fail explicitly. |

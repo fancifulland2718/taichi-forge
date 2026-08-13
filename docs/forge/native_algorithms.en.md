@@ -306,6 +306,12 @@ kernel may call `device_worklist_recycle_direct()` with
 generation without a separate next-level prepare dispatch. It must run exactly
 once after the previous producer and old-front reads have completed; it is not
 a substitute for a cross-block barrier inside a producer.
+Unique worklists use the separate
+`device_worklist_recycle_unique_direct()` / `unique_recycle_arguments()` pair.
+That boundary advances both generation and the unique epoch; using the ordinary
+recycle ABI is rejected because stale generation tags could otherwise suppress
+valid appends. Generation or epoch exhaustion sets sticky overflow instead of
+wrapping.
 
 The overflow-free path performs one atomic slot reservation per item. Atomic
 append order is unspecified. One producer owns a transition; independent
@@ -367,6 +373,18 @@ to the following stage. After synchronous completion, or after waiting on an
 asynchronous ticket, `commit_direct_transitions(steps)` updates only Python-side
 front ownership. One worklist remains one completion-ordered workspace lane;
 concurrent submissions require independent worklists.
+When the worklist is permanently owned by one Graph, call
+`worklist.fixed_graph_args(builder, name)` instead. It binds the front/back,
+extent, counter, and unique-tag resources privately, so only unrelated user
+resources remain in the public replay ABI. The binding is qualified by runtime
+generation and the current front parity. Even-transition Graphs retain their
+parity; an odd-transition pipeline needs the Graph compiled for the other
+parity before its next replay. Wrong-parity replay fails before submission.
+Provider-fixed worklists require `workspace_lanes=1`, and asynchronous reuse is
+runtime-ordered (with a completion fence when the backend exposes pending work);
+use an independent worklist and Graph for real concurrency.
+This ownership form does not remove submission-time resource retention and is
+not an automatic throughput promise.
 On Vulkan, an adjacent recordable prepare and bounded consumer share one
 backend Graph region: prepare resets the target and publishes the source
 indirect packet in one dispatch. The pair therefore has two physical
@@ -399,21 +417,22 @@ launch behavior from the common API.
 reproducible alternative to floating-point atomic scatter-add for immutable
 connectivity. Construction validates the host-visible integer topology once,
 stably groups valid source ordinals by destination, and uploads the permutation
-and segment layout. A binding gathers changing contribution values in that
-fixed order and reduces every destination left-to-right on CPU, CUDA, and
-Vulkan. Negative and out-of-range indices are ignored consistently.
+and segment layout. A binding uses one indexed kernel to read changing
+contributions in that fixed order and reduce every destination left-to-right on
+CPU, CUDA, and Vulkan. Scalar and vector ndarray/root-dense Field bindings are
+supported. Negative and out-of-range indices are ignored consistently.
 
 This route is not selected automatically and does not change the atomic API.
-It trades one ordered-value buffer, a gather dispatch, and serial work within
-each destination for bitwise-stable accumulation order. It is most appropriate
-for qualification baselines, reproducible fixed-topology assembly, and modest
-per-destination valence. Each binding owns one workspace lane; concurrent
-execution requires independent bindings. `binding.graph_action()` records the
-reusable sequence as a native Graph action, and `report()` exposes topology,
-ordered-value, and peak workspace bytes.
-The current binding is scalar; vector assembly records one binding per
-component. Stable order means repeatability under one backend/compiler
-contract, not a cross-backend floating-point bit-identity promise.
+It trades serial work within each destination for a stable accumulation order,
+but no longer materializes an ordered-value buffer or a separate gather stage.
+It is most appropriate for qualification baselines, reproducible fixed-topology
+assembly, and modest per-destination valence. `binding.graph_action()` records
+one reusable dispatch, and `report()` exposes topology, component shape, zero
+ordered/workspace bytes, and the `fused_indexed_serial` route.
+Stable order means repeatability under the same backend/build contract; it is
+not a cross-backend bit-identity or improved-accuracy promise. Atomic assembly
+therefore remains the default performance route, while stable serial is chosen
+only when reproducibility is required.
 
 ## Consecutive RLE and Unique
 

@@ -257,6 +257,10 @@ atomic append，要求 `telemetry=False`，之后不得再调用 `finalize_next(
 `commit_recycled_next()`。这样会回收已消费 front、推进 generation，并删除下一层独立 prepare
 dispatch。它必须在前一 producer 与旧 front read 完成后恰好执行一次，不能替代 producer 内的
 跨 block barrier。
+unique worklist 必须改用 `unique_recycle_arguments()` 调用
+`device_worklist_recycle_unique_direct()`；该边界同时推进 generation 与 unique epoch。普通 recycle
+ABI 会被拒绝，以免旧 tag 错误抑制有效 append。generation 或 epoch 耗尽时会设置 sticky overflow，
+不会发生环绕复用。
 
 无 overflow 时，每个 item 只执行一次 atomic slot reservation。atomic append 顺序不保证；
 一次 transition 只有一个 producer owner，多个独立 Graph submission 写同一 worklist 前必须
@@ -300,6 +304,13 @@ workspace。strategy、provider 与 workspace topology 在 materialization 时�
 之间交替；共享 epoch table 对每次 transition 独立去重，overflow 会传播到下一 stage。同步完成后，
 或等待异步 ticket 后，调用 `commit_direct_transitions(steps)` 只更新 Python-side front ownership。
 一个 worklist 仍是一条 completion-ordered workspace lane；并发 submission 需要独立 worklist。
+若 worklist 永久由一个 Graph 持有，可改用 `worklist.fixed_graph_args(builder, name)`。它把
+front/back、extent、counter 与 unique tag 作为 provider-private binding 固定到 Graph，只把无关的
+用户资源留在公开 replay ABI。该绑定受 runtime generation 与当前 front parity 约束：偶数次
+transition 可直接复用；奇数次 pipeline 在下一次 replay 前需要使用为另一 parity 编译的 Graph；
+错 parity 会在提交前拒绝。provider-fixed worklist 要求 `workspace_lanes=1`；异步复用遵循 runtime
+提交顺序，并在后端暴露 pending work 时使用 completion fence。真实并发仍需独立 worklist/Graph。
+该所有权形式不会省略提交期资源保活，也不承诺自动加速。
 Vulkan 会让相邻的 recordable prepare 与 bounded consumer 共享一个 backend Graph region：
 prepare 在同一次 dispatch 中 reset target 并发布 source indirect packet，因此该 pair 只有两个
 physical dispatch，也没有 loose packet helper。
@@ -322,17 +333,17 @@ exact launch 行为。
 
 `DeterministicScatterReducePlan(indices, num_groups)` 是 immutable connectivity 下浮点 atomic
 scatter-add 的显式可复现替代。构造时只读取并验证一次 host-visible integer topology，按 destination
-稳定分组有效 source ordinal，再上传 permutation 与 segment layout。binding 每次把变化的 contribution
-按固定顺序 gather，并在 CPU、CUDA、Vulkan 上对每个 destination 从左到右 reduce。负数和越界
-index 会按统一合同忽略。
+稳定分组有效 source ordinal，再上传 permutation 与 segment layout。binding 使用一个 indexed kernel
+按固定顺序读取变化的 contribution，并在 CPU、CUDA、Vulkan 上对每个 destination 从左到右
+reduce。支持 scalar/vector ndarray 与 root-dense Field；负数和越界 index 会按统一合同忽略。
 
-该路线不会被自动选择，也不会改变现有 atomic API。它用一个 ordered-value buffer、一次 gather
-dispatch 与每个 destination 内的串行工作，换取 bitwise-stable accumulation order。因此更适合作为
-资格 baseline、可复现 fixed-topology assembly，以及每个 destination valence 不大的场景。每个 binding
-拥有一条 workspace lane；并发执行需要独立 binding。`binding.graph_action()` 可把可复用 sequence
-记录为 native Graph action，`report()` 则公开 topology、ordered-value 与 peak workspace bytes。
-当前 binding 是 scalar；vector assembly 每个 component 记录一个 binding。稳定顺序表示同一
-backend/compiler 合同内可重复，不承诺跨 backend 的浮点 bit 完全一致。
+该路线不会被自动选择，也不会改变现有 atomic API。它以每个 destination 内的串行工作换取稳定
+accumulation order，但融合实现不再物化 ordered-value buffer 或独立 gather stage。因此更适合作为
+资格 baseline、可复现 fixed-topology assembly，以及每个 destination valence 不大的场景。
+`binding.graph_action()` 只记录一个 dispatch；`report()` 公开 topology、component shape、
+`fused_indexed_serial` route，以及为零的 ordered/workspace bytes。稳定顺序只承诺同一 backend/build
+合同内可重复，不承诺跨 backend bit 一致，也不表示数值精度更高。atomic assembly 继续作为默认
+性能路线，仅在需要可复现时显式选择 stable serial。
 
 ## Consecutive RLE 与 Unique
 

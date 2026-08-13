@@ -181,10 +181,11 @@ grouped under the behavior they shipped.
   no loose helper for one prepare/consume pair.
 - Added `DeterministicScatterReducePlan` as an explicit CPU/CUDA/Vulkan
   qualification and fixed-topology assembly route. It stably groups immutable
-  integer destinations once, gathers changing values in source order, and
-  performs a left-to-right segmented sum. Existing atomic scatter-add remains
-  the default; deterministic bindings own one workspace lane and report their
-  topology, ordered-value, and peak workspace bytes.
+  integer destinations once and now reads scalar/vector contributions through
+  one fused indexed left-to-right dispatch. Existing atomic scatter-add remains
+  the default; stable serial is opt-in, allocates no ordered-value workspace,
+  and reports same-backend/build repeatability without claiming cross-backend
+  bit identity or improved numerical accuracy.
 - Fixed-domain conflict producers can now call
   `DeviceWorklist.resolve_conflicts_from_mask()` to consume dense key/active
   arrays without stable compact or attribute-gather stages. Original source
@@ -222,6 +223,13 @@ grouped under the behavior they shipped.
   diagnostic removed all 64 helpers and favored the fused route by 11.9% on
   CPU and about 21% on CUDA/Vulkan; these are local diagnostic directions, not
   cross-device guarantees.
+- Unique direct worklists now have an epoch-safe fused recycle boundary that
+  advances generation and the dense tag epoch together and fails closed on
+  exhaustion. Provider-owned `fixed_graph_args()` can also remove stable
+  worklist storage from a Graph's public replay ABI while enforcing runtime
+  generation, front parity, single-lane ownership, and runtime-ordered
+  asynchronous reuse. Fixed ownership retains required native resource leases
+  and carries no automatic speedup claim.
 - The CPU ThreadPool completion protocol now closes a stack-owned job with an
   atomic sentinel before publishing completion. Late workers cannot rejoin or
   repeat the final transition, while non-final workers avoid the pool mutex.

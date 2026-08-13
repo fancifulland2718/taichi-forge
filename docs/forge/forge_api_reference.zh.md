@@ -531,6 +531,17 @@ steady-state pair 因而只有两个 physical dispatch，且没有 loose/helper 
 lean shared overflow statistic 会被重置，而已发布的 `next_extent` 仍保留本次 transition 的 overflow。
 显式 `statistics()` 会合并当前已发布 extent，因此 latest overflow 仍可观察，submission 不增加工作。
 
+unique direct worklist 应改用
+`device_worklist_recycle_unique_direct(*worklist.unique_recycle_arguments())`，以同时推进 generation 与
+dense-tag epoch；任一计数耗尽都会 fail closed。普通 recycle accessor 会拒绝 unique worklist。
+
+`fixed_graph_args(builder, name)` 是 `graph_args(name)` 的 provider-owned 形式：它把地址稳定的
+worklist 资源私有绑定到该 builder，并从公开 runtime argument dict 中移除这些资源。编译结果受
+generation/front parity 约束，只允许一个 workspace lane；异步复用遵循 runtime 提交顺序，并在
+后端暴露 pending work 时使用 completion fence。提交并 commit 奇数次 transition 后，应使用为另一
+front parity 编译的 Graph。该形式表达所有权，不会
+跳过 native 资源保活，也不承诺加速。
+
 `device_worklist_append(values, extent_state, generated, overflow, capacity,
 value)` 是 `@ti.func`，返回已保留 slot；overflow 时返回 `-1`。无 overflow 路径每个 item
 只执行一次 reservation atomic。append 顺序不保证；需要顺序的 consumer 必须使用 stable
@@ -637,15 +648,16 @@ publication。CUDA 上的 `launch_state` 只作为 capacity、extent identity �
 
 从 host-visible integer destination index 构造显式可复用 reduction topology。有效 source 按
 destination 稳定分组，并在每组内保留 source ordinal；负数与越界 index 会被忽略。
-`plan.bind(values, output)` 接受 dtype 一致的一维 scalar ndarray 或 root-dense field，支持
-`i32/u32/i64/u64/f32/f64`，持有一条 ordered-value workspace lane，并在 CPU、CUDA、Vulkan
-上逐组从左到右 reduce。`binding.run()` 执行该路线，`binding.graph_action()` 返回 native
+`plan.bind(values, output)` 接受 dtype 一致的一维 scalar 或 vector ndarray/root-dense Field，
+component dtype 支持 `i32/u32/i64/u64/f32/f64`，并在 CPU、CUDA、Vulkan 上用一个 indexed
+dispatch 逐组从左到右 reduce。`binding.run()` 执行该路线，`binding.graph_action()` 返回 native
 Graph action。
 
 这是一条 opt-in 的可复现与资格路线，不会自动替换 atomic scatter-add，也不支持 AD。独立并发
-执行需要独立 binding；vector assembly 每个 scalar component 使用一个 binding。固定 backend/compiler
-合同内 reduction 顺序可重复，但 API 不承诺不同 backend 或 compiler mode 之间浮点 bit 完全一致。
-`report()` 公开稳定 topology bytes、ordered-value bytes 与 peak workspace bytes。
+执行需要独立 binding。相同 backend/build 合同内 reduction 顺序可重复，但 API 不承诺跨 backend/
+compiler mode bit 一致，也不表示精度更高。`report()` 公开稳定 topology bytes、component shape、
+实现 route，以及为零的 ordered-value/workspace bytes。atomic assembly 保持默认性能路线；只有需要
+可复现时才显式使用 stable serial。
 
 这些函数在需要 replay 或复用 workspace 时会返回 workspace。重复调用时显式传入
 workspace 可以复用 scratch buffer 和 native plan。
@@ -1377,7 +1389,7 @@ measurement-path changed，不能当作正常执行 wall time 发布。
 
 | API | 合同 |
 | --- | --- |
-| `GraphBuilder.compile(*, workspace_lanes=1, workspace_saturation='wait')` | 后续修改 builder 或原 `Sequential` 不改变已编译 graph。额外 workspace lane 惰性物化，并且只对含独占 Graph-owned internal storage 的 Graph（例如已记录的 SolvePlan）产生作用；`workspace_saturation='raise'` 会在所有合格 lane 都忙时直接失败而不是等待。 |
+| `GraphBuilder.compile(*, workspace_lanes=1, workspace_saturation='wait')` | 后续修改 builder 或原 `Sequential` 不改变已编译 graph。额外 workspace lane 惰性物化，并且只对含合格独占 Graph-owned internal storage 的 Graph（例如已记录的 SolvePlan）产生作用；provider-fixed worklist storage 明确只允许一个 lane，传入更大值会被拒绝。`workspace_saturation='raise'` 会在所有合格 lane 都忙时直接失败而不是等待。 |
 | `Graph.run(args, *, trace=False)` | `args` 必须是字典，key 与声明参数完全一致；missing/extra key 会抛 `TaichiRuntimeError`。默认返回 `None`，也不分配 dynamic control-flow trace。 |
 | `Graph.run(args, *, trace=True)` | 同步运行并返回 immutable `GraphControlFlowTrace`。其中有序 invocation 包含 `sequence`、静态 `definition_path`、动态 `invocation_path`、可选 `parent_iteration` 和本次调用的 while/branch report。与 `control_flow_stats()` 不同，它会保留每一次重复 nested invocation。trace 会绕过严格 Vulkan nested replay，改用精确 portable-parent 执行，使每次 invocation 都可观测。 |
 | `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait', telemetry=False, workspace_lane=None)` | 与 `run()` 使用相同的精确参数、生命周期、并发和 AD 合同，返回一个 `SubmissionTicket`，并可选择加入共享准入节奏。`lane` 仍表示 pacer lane；`workspace_lane` 可把提交固定到一个 Graph-owned execution/workspace lane。`telemetry="summary"` 增加 while/bounded snapshot、queue/submission accounting 与 lazy pipeline definition，但不插入 backend timestamp marker；`telemetry="timestamps"` 追加 whole-ticket/region GPU timestamp，`True` 是其兼容别名。默认不增加 telemetry buffer/report。结构化提交接受满足资格的 CUDA `native_required` while/if/switch、Vulkan `native_required` while，以及满足资格的 depth=2 multi-inner sequence。portable 控制与不支持的原生组合会明确失败。 |

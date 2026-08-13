@@ -137,9 +137,10 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
   mixed indirect recording 会保留该 recipe，使一组 prepare/consume 降为单 backend Graph region、
   两个 physical dispatch，且没有 loose helper。
 - 新增 `DeterministicScatterReducePlan`，作为显式 CPU/CUDA/Vulkan 资格与 fixed-topology
-  assembly 路线。它只对 immutable integer destination 稳定分组一次，每次按 source 顺序 gather
-  变化的 value，再做从左到右的 segmented sum。既有 atomic scatter-add 仍是默认；确定性 binding
-  拥有一条 workspace lane，并报告 topology、ordered-value 与 peak workspace bytes。
+  assembly 路线。它只对 immutable integer destination 稳定分组一次，现在用一个融合 indexed
+  dispatch 按 source 顺序读取 scalar/vector contribution 并从左到右求和。既有 atomic scatter-add
+  仍是默认；stable serial 需显式选择，不分配 ordered-value workspace，并只承诺同一 backend/build
+  可重复，不承诺跨后端 bit 一致或数值精度提升。
 - fixed-domain conflict producer 现在可调用
   `DeviceWorklist.resolve_conflicts_from_mask()`，直接消费 dense key/active 数组，不再执行
   stable compact 或 attribute gather。winner identity 仍是原始 source index；省略显式
@@ -164,6 +165,10 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
   `device_worklist_recycle_direct()`，随后用 `commit_recycled_next()` 完成 front recycle 与 generation
   前进。这样不削弱 global-ordering 合同，同时每层删除一个独立 prepare helper。64 层配对诊断删除
   全部 64 个 helper，CPU 方向约 11.9%，CUDA/Vulkan 约 21%；这些只是本地诊断方向，不是跨设备保证。
+- unique direct worklist 新增 epoch-safe fused recycle boundary，同时推进 generation 与 dense-tag
+  epoch，并在耗尽时 fail closed。provider-owned `fixed_graph_args()` 还可从 Graph 的公开 replay ABI
+  移除稳定 worklist storage，同时强制 runtime generation、front parity、单 lane 所有权与按 runtime
+  顺序执行的异步复用。固定所有权仍保留必要的 native resource lease，不附带自动加速声明。
 - CPU ThreadPool completion protocol 现在会先用 atomic sentinel 封闭 stack-owned job，再发布
   completion；迟到 worker 无法重新 join 或重复最终状态转换，非最后 worker 也无需取得 pool
   mutex。installed-runtime manifest validation 还会在 `ti.init()` 前只比较静态 schema，不再
