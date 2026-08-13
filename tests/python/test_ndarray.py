@@ -1771,6 +1771,43 @@ def test_ordinary_gpu_launch_plan_copies_reused_scalar_context_per_submission():
     assert write_slot._primal._ordinary_launch_plan is plan
 
 
+@test_utils.test(arch=[ti.cuda, ti.vulkan])
+def test_ordinary_gpu_launch_plan_batches_scalar_refresh_and_preserves_types():
+    @ti.kernel
+    def write_scalars(
+        destination: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        signed_value: ti.i32,
+        unsigned_value: ti.u32,
+        real_value: ti.f32,
+    ):
+        destination[0] = signed_value
+        destination[1] = unsigned_value
+        destination[2] = real_value
+
+    destination = ti.ndarray(ti.f32, shape=3)
+    write_scalars(destination, 1, 2, 3.0)
+    plan = write_scalars._primal._ordinary_launch_plan
+    assert plan is not None
+    assert plan.scalar_patch_plan is not None
+
+    write_scalars(
+        destination,
+        np.int32(-7),
+        np.uint32(11),
+        np.float32(2.5),
+    )
+    ti.sync()
+    np.testing.assert_allclose(destination.to_numpy(), [-7.0, 11.0, 2.5])
+    assert write_scalars._primal._ordinary_launch_plan is plan
+
+    with pytest.raises(ti.TaichiRuntimeTypeError):
+        write_scalars(destination, "invalid", 1, 1.0)
+
+    write_scalars(destination, 4, 5, 6.5)
+    ti.sync()
+    np.testing.assert_allclose(destination.to_numpy(), [4.0, 5.0, 6.5])
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_ordinary_launch_plan_excludes_snode_dependent_kernel():
     field = ti.field(ti.i32, shape=())

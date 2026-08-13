@@ -942,6 +942,7 @@ class _OrdinaryLaunchPlan:
         "native_plan",
         "bindings",
         "scalar_bindings",
+        "scalar_patch_plan",
         "resource_guards",
         "launch_ctx",
     )
@@ -954,6 +955,7 @@ class _OrdinaryLaunchPlan:
         native_plan,
         bindings,
         scalar_bindings,
+        scalar_patch_plan,
         resource_guards,
         launch_ctx,
     ):
@@ -963,6 +965,7 @@ class _OrdinaryLaunchPlan:
         self.native_plan = native_plan
         self.bindings = bindings
         self.scalar_bindings = scalar_bindings
+        self.scalar_patch_plan = scalar_patch_plan
         self.resource_guards = resource_guards
         self.launch_ctx = launch_ctx
 
@@ -1739,6 +1742,19 @@ class Kernel:
         scalar_bindings = tuple(
             binding for binding in bindings if binding[1] != "ndarray"
         )
+        scalar_patch_plan = None
+        if launch_ctx is not None and scalar_bindings:
+            scalar_patch_plan = _ti_core._ScalarArgumentPatchPlan(
+                [binding[0] for binding in scalar_bindings],
+                "".join(
+                    {
+                        "real": "f",
+                        "signed": "i",
+                        "unsigned": "u",
+                    }[binding[1]]
+                    for binding in scalar_bindings
+                ),
+            )
         return _OrdinaryLaunchPlan(
             self.runtime,
             key,
@@ -1746,6 +1762,7 @@ class Kernel:
             native_plan,
             tuple(bindings),
             scalar_bindings,
+            scalar_patch_plan,
             tuple(resource_guards),
             launch_ctx,
         )
@@ -1758,7 +1775,26 @@ class Kernel:
         else:
             # Resource identity and generation are fixed by plan.matches().
             # Refresh only scalar bytes in the reusable GPU context.
-            bindings = plan.scalar_bindings
+            bindings = ()
+            if plan.scalar_patch_plan is not None:
+                try:
+                    invalid_index = plan.scalar_patch_plan.apply(launch_ctx, args)
+                except Exception as exc:
+                    exc = handle_exception_from_cpp(exc)
+                    if self.runtime.print_full_traceback:
+                        raise exc
+                    raise exc from None
+                if invalid_index >= 0:
+                    binding = next(
+                        item
+                        for item in plan.scalar_bindings
+                        if item[0] == invalid_index
+                    )
+                    raise TaichiRuntimeTypeError.get(
+                        (invalid_index,),
+                        binding[2].to_string(),
+                        type(args[invalid_index]),
+                    )
         self._bind_ordinary_launch_context(launch_ctx, bindings, args)
         try:
             prog = self.runtime.prog

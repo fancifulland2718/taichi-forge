@@ -8,6 +8,7 @@
 #include <type_traits>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 #include "taichi/ir/snode.h"
 #include "taichi/common/commit_hash.h"
 #include "taichi/common/runtime_contract.h"
@@ -85,6 +86,76 @@ void reset_fs_inner_stats();
 
 namespace taichi {
 namespace {
+
+class PythonScalarArgumentPatchPlan {
+ public:
+  PythonScalarArgumentPatchPlan(std::vector<int> indices, std::string kinds) {
+    TI_ERROR_IF(indices.size() != kinds.size(),
+                "Scalar argument patch indices and kinds must have equal size");
+    py::module_ numpy = py::module_::import("numpy");
+    numpy_floating_ = numpy.attr("floating");
+    numpy_integer_ = numpy.attr("integer");
+    entries_.reserve(indices.size());
+    for (std::size_t position = 0; position < indices.size(); ++position) {
+      TI_ERROR_IF(indices[position] < 0,
+                  "Scalar argument patch indices must be non-negative");
+      const char kind = kinds[position];
+      TI_ERROR_IF(kind != 'f' && kind != 'i' && kind != 'u',
+                  "Scalar argument patch kind must be f, i, or u");
+      entries_.push_back({indices[position], kind, {indices[position]}});
+    }
+  }
+
+  int apply(lang::LaunchContextBuilder &context,
+            const py::sequence &args) const {
+    for (const Entry &entry : entries_) {
+      TI_ERROR_IF(static_cast<std::size_t>(entry.index) >= args.size(),
+                  "Scalar argument patch index is outside the argument tuple");
+      const py::handle value = args[entry.index];
+      const bool integer =
+          PyLong_Check(value.ptr()) || is_instance(value, numpy_integer_);
+      if (entry.kind == 'f') {
+        const bool real =
+            integer || PyFloat_Check(value.ptr()) ||
+            is_instance(value, numpy_floating_);
+        if (!real) {
+          return entry.index;
+        }
+        context.set_arg_float(entry.arg_id, py::cast<double>(value));
+      } else {
+        if (!integer) {
+          return entry.index;
+        }
+        if (entry.kind == 'i') {
+          context.set_arg_int(entry.arg_id, py::cast<std::int64_t>(value));
+        } else {
+          context.set_arg_uint(entry.arg_id, py::cast<std::uint64_t>(value));
+        }
+      }
+    }
+    return -1;
+  }
+
+ private:
+  struct Entry {
+    int index;
+    char kind;
+    std::vector<int> arg_id;
+  };
+
+  static bool is_instance(const py::handle &value,
+                          const py::object &type) {
+    const int result = PyObject_IsInstance(value.ptr(), type.ptr());
+    if (result < 0) {
+      throw py::error_already_set();
+    }
+    return result != 0;
+  }
+
+  std::vector<Entry> entries_;
+  py::object numpy_floating_;
+  py::object numpy_integer_;
+};
 
 py::dict offloaded_task_manifest_to_python(
     const lang::OffloadedTaskManifest &task) {
@@ -732,6 +803,12 @@ void export_lang(py::module &m) {
       })
       .def("_finish", &Program::RuntimeSubmissionTransaction::finish,
            py::call_guard<py::gil_scoped_release>());
+
+  py::class_<PythonScalarArgumentPatchPlan>(m, "_ScalarArgumentPatchPlan")
+      .def(py::init<std::vector<int>, std::string>(), py::arg("indices"),
+           py::arg("kinds"))
+      .def("apply", &PythonScalarArgumentPatchPlan::apply, py::arg("context"),
+           py::arg("args"));
 
   py::class_<Program::RegisteredKernelExecutionPlan>(
       m, "_RegisteredKernelExecutionPlan")
