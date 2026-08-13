@@ -272,18 +272,24 @@ outer suffix kernel 可以在没有 host 同步的情况下消费 inner terminal
 通过 device terminal packet 提供这一能力；通用代码可以在 outer suffix 中把 inner
 counter/status 写入 device trace，从而保留每次 outer invocation 的停止位置。同步
 `Graph.run(trace=True)` 仍是信息更完整的诊断路径，并会有意使用 portable execution。
-逐 invocation 诊断可使用 `submit(telemetry=True)`，它在已提交的 root while region 前后记录
+逐 invocation 诊断可使用 `submit(telemetry="summary")`，它在已提交的 root while region 前后记录
 控制 scalar；`ticket.telemetry()` 会报告 logical 停止位置、encoded/masked iteration
 slot、跳过的 coarse chunk、queue-counter 窗口与 host enqueue 时间。默认路径不分配
-遥测 storage，也不入队这些 snapshot kernel。
+遥测 storage，也不入队这些 snapshot kernel。需要 whole-ticket 与 structured-region GPU
+timestamp 时使用 `telemetry="timestamps"`；`telemetry=True` 保留为其兼容别名。summary
+模式不插入 backend timestamp marker，GPU duration 会报告 `disabled_by_mode`，不会从 wall
+time 推测。
 
 同一份 opt-in telemetry 还持有从优化后 execution root 选取的 `GraphPipelineReport`。
 它保留合并后的 CGraph/native stage 边界，以及描述 provider 符号 effect、public 与
 provider-derived private binding、temporary 和 backend 资格的 immutable
 `NativeActionManifest`；报告绝不暴露 storage 对象
 或地址。stage dispatch 数是静态编译计数，provider temporary 字节是声明值而不是 allocation
-峰值。只有 backend 已经测量的 structured region 才会附带 stage timestamp；普通 stage 的
-duration 保持 unavailable，whole-ticket timing 单独保留。`ticket.pipeline_report()` 返回
+峰值。只有 timestamp 模式且 backend 已经测量的 structured region 才会附带 stage timestamp；
+普通 stage 的 duration 保持 unavailable，whole-ticket timing 单独保留。Vulkan 会把这些
+opt-in marker 写入 runtime 已拥有的 command list，不再分配 marker-only command list；
+timestamp 模式仍明确报告 `gpu_measurement_path_changed=True`，它是诊断计时而不是正常执行
+延迟。`ticket.pipeline_report()` 返回
 同一个 ticket-owned 对象。`telemetry=False` 时不会物化 pipeline report 或 telemetry arena。
 
 ### Vulkan compound 结构化事务

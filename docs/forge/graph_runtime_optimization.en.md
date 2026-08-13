@@ -340,11 +340,15 @@ through its device terminal packet; general code can copy the inner counter or
 status into a device trace in the outer suffix. This retains every outer
 invocation's stop position. Synchronous `Graph.run(trace=True)` remains the
 richer diagnostic path and intentionally uses portable execution.
-For per-invocation diagnosis, `submit(telemetry=True)` records entry/exit
+For per-invocation diagnosis, `submit(telemetry="summary")` records entry/exit
 control scalars around submitted root while regions and `ticket.telemetry()` reports
 logical stop positions, encoded and masked iteration slots, skipped coarse
 chunks, the queue-counter window, and host enqueue time. The default path does
-not allocate telemetry storage or enqueue these snapshot kernels.
+not allocate telemetry storage or enqueue these snapshot kernels. Use
+`telemetry="timestamps"` when whole-ticket and structured-region GPU timestamps
+are also required; `telemetry=True` remains its compatibility alias. Summary
+mode inserts no backend timestamp markers and reports GPU duration as
+`disabled_by_mode` rather than inferring it from wall time.
 
 The same opt-in telemetry owns a `GraphPipelineReport` selected from the
 post-optimization execution root. It preserves coalesced CGraph/native stage
@@ -353,9 +357,13 @@ symbolic effects, public and provider-derived private bindings, temporaries,
 and backend eligibility. The report
 never exposes storage objects or addresses. Stage dispatch counts are static
 compiled counts; provider temporary bytes are declarations rather than an
-allocation peak. Structured-region timestamps are attached only where the
-backend already measured that region, while ordinary stages keep their duration
-unavailable and retain the whole-ticket timing separately. Calling
+allocation peak. Structured-region timestamps are attached only in timestamp
+mode and where the backend measured that region, while ordinary stages keep
+their duration unavailable and retain the whole-ticket timing separately.
+Vulkan writes these opt-in markers into runtime-owned command lists instead of
+allocating marker-only command lists. Timestamp mode still reports
+`gpu_measurement_path_changed=True`; it is diagnostic timing, not the normal
+execution latency. Calling
 `ticket.pipeline_report()` returns this same ticket-owned object. With
 `telemetry=False`, no pipeline report or telemetry arena is materialized.
 

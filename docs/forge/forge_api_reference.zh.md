@@ -1305,7 +1305,7 @@ host memory，不会再入队第二次 device readback。observation slot 数量
 `TI_GRAPH_COMPLETION_ATTACHED_OBSERVATION=0` 恢复 deferred readback；
 `Graph.execution_stats().memory.observation_readback_mode` 会报告实际 route。
 
-显式 `submit(telemetry=True)` 会额外在 device 上记录每个 while region 的进入
+显式 `submit(telemetry="summary")` 会在 device 上记录每个 while region 的进入
 counter/status 与终态 counter/predicate/status。
 对于 bounded dispatch，它还会为每个 distinct device extent 追加一个双字 tail snapshot，
 并把结果与已编译 task manifest、dispatch label、launch geometry 和 useful/capacity accounting
@@ -1315,8 +1315,10 @@ storage。ordered segmented dispatch 只报告 aggregate extent；除非显式�
 一次 packed snapshot，
 并报告真实停止轮次、encoded/masked 工作、active/skipped chunk、host enqueue 时间与
 queue counter 窗口。由于外部 graphics/interop producer 可能在同一窗口提交，device-wide
-queue delta 会标为 non-exact。compound replay 无法在不改变已资格化路径的前提下插入
-GPU timestamp 时，会明确报告 `unavailable`。
+queue delta 会标为 non-exact。summary 模式的 GPU duration 明确报告
+`disabled_by_mode`。需要 whole-ticket/region GPU timestamp 时使用
+`telemetry="timestamps"`；`telemetry=True` 是兼容别名。timestamp 模式会标为
+measurement-path changed，不能当作正常执行 wall time 发布。
 对于 nested sequence，每个 inner definition 都有自己的停止 snapshot；
 `logical_invocations` 表示它被多少次 outer iteration 调用，`logical_iterations` 则仍表示
 最后一次调用的停止位置。
@@ -1332,7 +1334,7 @@ GPU timestamp 时，会明确报告 `unavailable`。
 | `GraphBuilder.compile(*, workspace_lanes=1, workspace_saturation='wait')` | 后续修改 builder 或原 `Sequential` 不改变已编译 graph。额外 workspace lane 惰性物化，并且只对含独占 Graph-owned internal storage 的 Graph（例如已记录的 SolvePlan）产生作用；`workspace_saturation='raise'` 会在所有合格 lane 都忙时直接失败而不是等待。 |
 | `Graph.run(args, *, trace=False)` | `args` 必须是字典，key 与声明参数完全一致；missing/extra key 会抛 `TaichiRuntimeError`。默认返回 `None`，也不分配 dynamic control-flow trace。 |
 | `Graph.run(args, *, trace=True)` | 同步运行并返回 immutable `GraphControlFlowTrace`。其中有序 invocation 包含 `sequence`、静态 `definition_path`、动态 `invocation_path`、可选 `parent_iteration` 和本次调用的 while/branch report。与 `control_flow_stats()` 不同，它会保留每一次重复 nested invocation。trace 会绕过严格 Vulkan nested replay，改用精确 portable-parent 执行，使每次 invocation 都可观测。 |
-| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait', telemetry=False, workspace_lane=None)` | 与 `run()` 使用相同的精确参数、生命周期、并发和 AD 合同，返回一个 `SubmissionTicket`，并可选择加入共享准入节奏。`lane` 仍表示 pacer lane；`workspace_lane` 可把提交固定到一个 Graph-owned execution/workspace lane。`telemetry=True` 为每个 while 增加 snapshot，并追加去重的 bounded-extent tail snapshot，同时保留 lazy 的优化后 pipeline definition；默认不增加 snapshot kernel/buffer，也不物化 telemetry arena 或 pipeline report。结构化提交接受满足资格的 CUDA `native_required` while/if/switch、Vulkan `native_required` while，以及满足资格的 depth=2 multi-inner sequence。portable 控制与不支持的原生组合会明确失败。 |
+| `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait', telemetry=False, workspace_lane=None)` | 与 `run()` 使用相同的精确参数、生命周期、并发和 AD 合同，返回一个 `SubmissionTicket`，并可选择加入共享准入节奏。`lane` 仍表示 pacer lane；`workspace_lane` 可把提交固定到一个 Graph-owned execution/workspace lane。`telemetry="summary"` 增加 while/bounded snapshot、queue/submission accounting 与 lazy pipeline definition，但不插入 backend timestamp marker；`telemetry="timestamps"` 追加 whole-ticket/region GPU timestamp，`True` 是其兼容别名。默认不增加 telemetry buffer/report。结构化提交接受满足资格的 CUDA `native_required` while/if/switch、Vulkan `native_required` while，以及满足资格的 depth=2 multi-inner sequence。portable 控制与不支持的原生组合会明确失败。 |
 | `SubmissionTicket.telemetry()` | 必要时等待，并在请求遥测时返回 immutable schema-v5 `GraphSubmissionTelemetry`；否则返回 `None`。region 报告包含 terminal counter、停止位置和 nested invocation count，`pipeline` 是 ticket-owned `GraphPipelineReport`。nullable GPU duration 不会从 host wall time 推测。 |
 | `SubmissionTicket.pipeline_report()` | 返回与 `ticket.telemetry().pipeline` 相同的 immutable pipeline 对象，必要时等待；未请求 telemetry 时返回 `None`。 |
 | `Graph._prewarm()` | 预热当前 runtime 的 backend plan；这是内部/高级入口，不改变 graph 参数合同。 |
@@ -1767,13 +1769,13 @@ operator API 另见[LinearOperator 与 SolvePlan](linear_operator.zh.md)。
 | `ti.linalg.experimental.SolvePlan(operator, method=..., preconditioner=..., execution_policy=..., check_interval=..., restart=..., submission_workspace_lanes=1, submission_workspace_saturation="wait")` | 构造 persistent CG、PCG、MINRES、BiCGSTAB、restarted GMRES 或 FGMRES plan。 | CPU GMRES/FGMRES 支持兼容的 `f32/f64` host action；CUDA/Vulkan `f32` 支持 fixed stored 或 compiled provider。FGMRES 消费有限 variable-linear action table，持有 `restart` 个预条件 basis vector，并使用 direct native submission。submission workspace 选项只作用于缓存的 f32 CG/PCG `submit()` Graph。restart 可为 8、16 或 32；完整 provider/policy 矩阵见详细指南。 |
 | `plan.graph_action(rhs_arg, output_arg, initial_guess=..., name=...)` | 将完整 f32 CG/PCG 求解内联为 structured Graph action，并开放 device terminal resource。 | 要求可录制的 A 与可选 fixed-linear M；`action.allocate_terminal()` 提供显式 runtime packet；每个 compiled Graph instance 持有一个由 completion fence 保护的 workspace lane。 |
 | `action.statistics()` / `plan.graph_action_statistics()` | 把外层 Graph submission、已观察 ticket completion 与显式 terminal snapshot 归属到单个 action 或 plan 创建的全部 action。 | 不增加 device dispatch，也不隐式读回 terminal。只有 `terminal.snapshot()` 物化 packet 时才累计 iteration；nested packet 描述其最后一次 action invocation。 |
-| `plan.submit(rhs, initial_guess=None, out=None, pacer=None, lane=None, on_saturation="wait", telemetry=False, workspace_lane=None)` | 提交一次完整 solve 并返回 `SolvePlanSubmission`。 | CUDA/Vulkan 要求 recordable f32 CG/PCG device-convergent plan，复用一个缓存 Graph/ticket，并只在 `result()` 物化 terminal；CPU 同步执行精确 native `solve()`，返回无 Graph telemetry 的 completed lane-0 submission。 |
+| `plan.submit(rhs, initial_guess=None, out=None, pacer=None, lane=None, on_saturation="wait", telemetry=False, workspace_lane=None)` | 提交一次完整 solve 并返回 `SolvePlanSubmission`；GPU 接受与 `Graph.submit()` 相同的 `False`/`"summary"`/`"timestamps"`，`True` 兼容 timestamps。 | CUDA/Vulkan 要求 recordable f32 CG/PCG device-convergent plan，复用一个缓存 Graph/ticket，并只在 `result()` 物化 terminal；CPU 同步执行精确 native `solve()`，返回无 Graph telemetry 的 completed lane-0 submission。 |
 | `plan.submission_statistics()` | 查询缓存 submission variant、lane、bytes、调用、失败、telemetry request 与 terminal materialization。 | 无 initial 与显式 initial variant 是独立 Graph，因此有独立 lane pool。 |
 | `plan.solve(rhs, initial_guess=None, out=None)` | 返回 immutable `SolveResult`，包含 solution、真实 residual terminal state 与结构化 `breakdown_reason`。 | 一维 scalar ndarray 或受支持 dense field/view。满足资格的 recordable Graph Krylov 在 preamble/epilogue 直接绑定 compact/连续 Field operand，不产生独立 pack/unpack submission；其它 Field layout 使用可复用的 device pack/gather 与 unpack/scatter。迭代内部不转换；禁止 RHS/output alias。 |
 | `plan.execution_capabilities()` | 返回 backend/provider 执行策略矩阵、选定的默认 policy、自动 replay primitive 与结构化 unsupported reason。 | CUDA stored f32 CSR/BSR CG/PCG 默认自动升级 `bounded_convergent`。CUDA compiled-kernel f32 CG/PCG 与 compiled-Graph CG 把 `device_convergent` 报告为 `explicit_only`；recordable compiled-Graph PCG 自动选中。Vulkan recordable compiled-kernel CG/PCG 与 compiled-Graph PCG 自动选中，compiled-Graph CG 保持 explicit-only。直接请求不可用时失败且不做 fallback。 |
 | `ti.linalg.experimental.BatchedSolvePlan(operator, batch_size, independent_systems=True, ..., active_system_compaction=False)` | 在连续扁平分区上构造同构、相互独立的 f32 CG/PCG plan。 | CPU/CUDA/Vulkan；逐系统 tolerance、status 与 iteration count。recordable A/M 可显式选择 `device_convergent`；默认仍为 host-check 执行。active compaction 是显式 CUDA device-convergent recurrence-only 能力，不压缩 A/M provider apply。 |
 | `batch_plan.solve(rhs_flat, initial_guess=None, out=None)` | 返回扁平 solution 与逐系统 immutable `BatchedSolveResult` tuple。 | 只表示 independent direct-sum system；不是 multi-RHS 或 block Krylov。 |
-| `batch_plan.submit(rhs_flat, initial_guess=None, out=None, pacer=None, lane=None, on_saturation='wait', telemetry=False)` | 提交一次 solve 并返回 `SolveSubmission`。 | CUDA/Vulkan 的 `fixed_budget_masked` 或满足 recordable A/M 资格的 `device_convergent`；一个 plan-owned slot；可加入共享 `SubmissionPacer`；精确 generation 与 array 保留到 completion。device-convergent 使用一个 Graph ticket，并在 terminal materialization 时公开精确 stop counter。 |
+| `batch_plan.submit(rhs_flat, initial_guess=None, out=None, pacer=None, lane=None, on_saturation='wait', telemetry=False)` | 提交一次 solve 并返回 `SolveSubmission`；GPU device-convergent 提交接受 `False`、`"summary"`、`"timestamps"` 或兼容 `True`。 | CUDA/Vulkan 的 `fixed_budget_masked` 或满足 recordable A/M 资格的 `device_convergent`；一个 plan-owned slot；可加入共享 `SubmissionPacer`；精确 generation 与 array 保留到 completion。device-convergent 使用一个 Graph ticket，并在 terminal materialization 时公开精确 stop counter。 |
 | `SolveSubmission.done()` / `.wait()` / `.result()` / `.telemetry()` / `.workspace_lane` | 观察 completion，物化一次 packed terminal state，并返回结果或 opt-in telemetry。 | `done()` 不释放 slot；`wait()`/`result()` 抛出 backend error 并释放 slot；未请求时 `telemetry()` 返回 `None`，且不会推测缺失的 device counter。 |
 | `batch_plan.clone_workspace()` | 创建具有独立 Krylov state 的等价 plan。 | 并发 submission 必须使用；每个 clone 拥有另一套完整 workspace，应在构造 pool 前检查 `clone_workspace_payload_bytes`。 |
 | `batch_plan.workspace_pool(lanes, workspace_saturation='wait')` | 创建惰性 round-robin 的独立 workspace/Graph lane。 | 每个已物化 lane 拥有完整 payload 与 Graph instance；submit 可固定 `workspace_lane`，饱和时明确等待或失败。pool statistics 报告 materialized/capacity bytes，不承诺物理 GPU 重叠。 |

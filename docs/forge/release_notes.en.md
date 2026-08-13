@@ -86,6 +86,24 @@ grouped under the behavior they shipped.
   resources and a 65k range fill were 1.024x/1.154x/1.104x/0.993x/0.988x;
   paired CV was 1.2%-2.5%. These data qualify fixed launch overhead on that
   machine, not general kernel throughput.
+- Reusable CUDA/Vulkan ordinary-launch plans now refresh all scalar arguments
+  through one typed native patch plan instead of one Python/pybind crossing per
+  scalar. Integer signedness, NumPy scalar acceptance, resource identity, and
+  generation guards are unchanged. A local seven-scalar enqueue probe moved
+  from 42.9 to 34.0 microseconds on CUDA and from 60.6 to 51.4 microseconds on
+  Vulkan over 200 diagnostic samples; these isolated host-path directions are
+  not application throughput claims. SNode-dependent kernels remain excluded:
+  their compiled data, backend handle, and context type retire with the tree.
+- Graph, SolvePlan, and device-convergent batched submissions now distinguish
+  `telemetry="summary"` from `telemetry="timestamps"`; `True` remains the
+  timestamp compatibility alias. Summary mode preserves stop snapshots,
+  queue/submission taxonomy, and pipeline structure without backend timestamp
+  markers. Vulkan timestamp markers are recorded into runtime-owned command
+  lists instead of marker-only command lists, while timestamp reports remain
+  explicitly measurement-path changed. In a local short structured probe the
+  non-exact queue window retained three queue calls while submitted command
+  buffers fell from 12 to 9; timestamp submit/wait/materialization median moved
+  from 1028.8 to 942.0 microseconds over 200 diagnostic samples.
 - Ordinary compact ndarray specializations now keep canonical addressing in
   LLVM/SPIR-V instead of loading affine offset/stride metadata at every access.
   Positive-stride storage views retain a separate runtime-affine

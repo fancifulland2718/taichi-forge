@@ -72,6 +72,20 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
   zero/one/two/four resource 与 65k range fill 的 Forge/vanilla median throughput ratio 分别为
   1.024x/1.154x/1.104x/0.993x/0.988x，成对 CV 为 1.2%-2.5%。该数据只资格化这台机器上的
   fixed launch overhead，不代表通用 kernel throughput。
+- 可复用 CUDA/Vulkan 普通 launch plan 现在通过一次有类型的 native patch 刷新全部 scalar
+  参数，不再让每个 scalar 单独跨越 Python/pybind。整数符号、NumPy scalar 接受范围、资源
+  identity 与 generation guard 均不改变。本地七 scalar enqueue 诊断的 200 样本 median 在
+  CUDA 上从 42.9 降至 34.0 微秒，在 Vulkan 上从 60.6 降至 51.4 微秒；这只是隔离 host
+  path 方向，不是应用吞吐声明。SNode-dependent kernel 仍保持排除，因为 compiled data、
+  backend handle 与 context type 会随 tree 一同退休。
+- Graph、SolvePlan 与 device-convergent batched submission 现在区分
+  `telemetry="summary"` 和 `telemetry="timestamps"`；`True` 保留为 timestamps 的兼容别名。
+  summary 保留停止 snapshot、queue/submission taxonomy 与 pipeline structure，但不插入 backend
+  timestamp marker。Vulkan timestamp marker 会写入 runtime 已拥有的 command list，而不再产生
+  marker-only command list；timestamp report 仍明确标为 measurement-path changed。本地短
+  structured probe 的 non-exact queue window 都观测到三次 queue call，而 submitted command
+  buffer 从 12 降到 9；200 个诊断样本的 timestamp submit/wait/materialization median 从
+  1028.8 降到 942.0 微秒。
 - 普通 compact ndarray specialization 现在在 LLVM/SPIR-V 中保留 canonical addressing，
   不再让每次访问都读取 affine offset/stride metadata。positive-stride storage view 使用独立的
   runtime-affine specialization；symbolic Graph ndarray 因 replay 可能绑定两种 layout，继续按
