@@ -12,6 +12,7 @@
 #include "taichi/util/offline_cache.h"
 #include "taichi/codegen/kernel_compiler.h"
 #include "taichi/codegen/compiled_kernel_data.h"
+#include "taichi/struct/snode_tree.h"
 
 namespace taichi::lang {
 
@@ -28,6 +29,11 @@ struct KernelExecutableLifecycleStatistics {
   std::uint64_t live_handles{0};
   std::uint64_t pinned_handles{0};
   std::uint64_t retired_handles{0};
+  std::uint64_t retired_generation_bound_handles{0};
+  std::uint64_t relocatable_templates{0};
+  std::uint64_t relocatable_template_hits{0};
+  std::uint64_t relocatable_bindings_created{0};
+  std::uint64_t relocatable_template_reclaims{0};
   std::uint64_t handle_inline_bytes{0};
 };
 
@@ -115,7 +121,25 @@ class KernelCompilationManager final {
   // Retire in-memory compiled artifacts that contain a static binding to the
   // specified SNodeTree. Explicit tree destruction is a cold transaction, so
   // this waits for outstanding compilation before removing matching entries.
-  void invalidate_snode_tree(int tree_id);
+  void invalidate_snode_tree(
+      int tree_id,
+      const std::vector<SNodeTreeDependency> &active_dependencies);
+
+  bool has_relocatable_template(const std::string &kernel_key) const;
+
+  bool register_relocatable_template_candidate(
+      const std::string &kernel_key);
+
+  std::shared_ptr<KernelExecutionHandle>
+  instantiate_relocatable_execution_handle(
+      const std::string &kernel_key,
+      const std::vector<SNodeTreeDependency> &current_dependencies);
+
+  std::uint64_t reclaim_relocatable_templates(std::size_t maximum_resident);
+
+  bool relocatable_reuse_enabled() const noexcept {
+    return relocatable_reuse_enabled_;
+  }
 
   void set_executable_lifecycle_telemetry_enabled(bool enabled) noexcept;
 
@@ -202,6 +226,19 @@ class KernelCompilationManager final {
   std::atomic<std::uint64_t> next_execution_handle_identity_{1};
   std::vector<std::weak_ptr<KernelExecutionHandle>> execution_handles_;
 
+  struct RelocatableExecutableTemplate {
+    std::shared_ptr<CompiledKernelData> compiled;
+    std::vector<SNodeTreeDependency> dependencies;
+    std::uint64_t last_used{0};
+  };
+  std::unordered_map<std::string, RelocatableExecutableTemplate>
+      relocatable_templates_;
+  std::unordered_set<std::string> relocatable_candidate_keys_;
+  std::uint64_t relocatable_template_clock_{0};
+  // One process-local rollback decision, sampled when the Program backend is
+  // created. It is consulted only on compile/destroy/rebind cold paths.
+  bool relocatable_reuse_enabled_{true};
+
   struct ExecutableLifecycleTelemetry {
     std::atomic<bool> enabled{false};
     std::atomic<std::uint64_t> memory_cache_hits{0};
@@ -210,6 +247,9 @@ class KernelCompilationManager final {
     std::atomic<std::uint64_t> compiler_invocations{0};
     std::atomic<std::uint64_t> templates_installed{0};
     std::atomic<std::uint64_t> templates_retired{0};
+    std::atomic<std::uint64_t> relocatable_template_hits{0};
+    std::atomic<std::uint64_t> relocatable_bindings_created{0};
+    std::atomic<std::uint64_t> relocatable_template_reclaims{0};
   } executable_lifecycle_telemetry_;
 };
 

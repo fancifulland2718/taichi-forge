@@ -29,7 +29,44 @@ enum class SNodeRelocationState : std::uint8_t {
   sparse_active_list_metadata = 5,
   sparse_allocator_state = 6,
   compiler_embedded_state_unclassified = 7,
+  pointer_allocator_and_list_state = 8,
+  bitmasked_activity_state = 9,
+  dynamic_chunk_and_length_state = 10,
+  hash_bucket_tombstone_and_pool_state = 11,
 };
+
+// Compiler-side inventory of structural SNode state referenced by one
+// executable. This is deliberately a bit mask: a kernel can traverse several
+// sparse trees, and losing one category must never silently promote it to the
+// dense relocation class.
+enum class SNodeRelocationStructure : std::uint32_t {
+  none = 0,
+  pointer = 1u << 0,
+  bitmasked = 1u << 1,
+  dynamic = 1u << 2,
+  hash = 1u << 3,
+};
+
+inline constexpr SNodeRelocationStructure operator|(
+    SNodeRelocationStructure lhs,
+    SNodeRelocationStructure rhs) noexcept {
+  return static_cast<SNodeRelocationStructure>(
+      static_cast<std::uint32_t>(lhs) | static_cast<std::uint32_t>(rhs));
+}
+
+inline SNodeRelocationStructure &operator|=(
+    SNodeRelocationStructure &lhs,
+    SNodeRelocationStructure rhs) noexcept {
+  lhs = lhs | rhs;
+  return lhs;
+}
+
+inline constexpr bool has_snode_relocation_structure(
+    SNodeRelocationStructure value,
+    SNodeRelocationStructure expected) noexcept {
+  return (static_cast<std::uint32_t>(value) &
+          static_cast<std::uint32_t>(expected)) != 0;
+}
 
 enum class SNodeRelocationBlocker : std::uint8_t {
   compiler_embedded_state_unclassified = 0,
@@ -63,6 +100,13 @@ struct SNodeRelocationDescriptor {
   std::vector<SNodeTaskRelocationDescriptor> tasks;
   std::vector<SNodeRelocationBlocker> blockers;
 };
+
+// Conservative promotion applied after compiler codegen has enumerated every
+// task. Dense kernels have no allocator/list contents to relocate. Their code
+// object is therefore reusable when the backend can supply generation-owned
+// roots at registration or launch time; backend registration itself remains
+// a per-generation binding.
+void qualify_dense_snode_relocation(SNodeRelocationDescriptor &descriptor);
 
 inline std::string_view snode_relocation_class_name(
     SNodeRelocationClass value) noexcept {
@@ -98,6 +142,14 @@ inline std::string_view snode_relocation_state_name(
       return "sparse_allocator_or_active_list";
     case SNodeRelocationState::compiler_embedded_state_unclassified:
       return "compiler_embedded_state_unclassified";
+    case SNodeRelocationState::pointer_allocator_and_list_state:
+      return "pointer_allocator_and_list_state";
+    case SNodeRelocationState::bitmasked_activity_state:
+      return "bitmasked_activity_state";
+    case SNodeRelocationState::dynamic_chunk_and_length_state:
+      return "dynamic_chunk_and_length_state";
+    case SNodeRelocationState::hash_bucket_tombstone_and_pool_state:
+      return "hash_bucket_tombstone_and_pool_state";
   }
   return "compiler_embedded_state_unclassified";
 }

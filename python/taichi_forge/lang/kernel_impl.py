@@ -872,6 +872,23 @@ class TaichiCallableTemplateMapper:
                 return ("DataType", value.to_string())
         return value
 
+    def retire_instance_ids(self, instance_ids):
+        """Drop mapper identities whose native specialization retired.
+
+        SNodeTree destruction calls this cold path even when the Python Field
+        wrapper remains alive in a cycle. Warm lookup therefore keeps its
+        original object-identity key and pays no layout fingerprint work.
+        """
+
+        if not instance_ids:
+            return 0
+        retired = [key for key, instance_id in self.mapping.items() if instance_id in instance_ids]
+        for key in retired:
+            del self.mapping[key]
+        if _executable_lifecycle_telemetry_enabled and retired:
+            _executable_lifecycle_telemetry["mapper_retired_keys_pruned"] += len(retired)
+        return len(retired)
+
     def lookup(self, args):
         if len(args) != self.num_args:
             raise TypeError(f"{self.num_args} argument(s) needed but {len(args)} provided.")
@@ -879,11 +896,9 @@ class TaichiCallableTemplateMapper:
         if not self._dynamic_arg_extractors:
             return 0, self._static_arg_features
 
-        # Field/data-oriented template identities are represented by weak
-        # references. Remove dead specialization keys before adding another
-        # one so explicit SNodeTree churn does not retain every historical
-        # Python Field wrapper. IDs remain monotonic to avoid aliasing a still
-        # cached compiled specialization with a newer object.
+        # Template object identities remain weak. Explicit SNode retirement
+        # prunes the corresponding instance id; this fallback handles ordinary
+        # Python wrapper death outside a tree-destroy transaction.
         dead_keys = [key for key in self.mapping if self._cache_key_is_dead(key)]
         for key in dead_keys:
             del self.mapping[key]
@@ -939,6 +954,9 @@ _executable_lifecycle_telemetry = {
     "mapper_hits": 0,
     "mapper_misses": 0,
     "mapper_dead_keys_pruned": 0,
+    "mapper_retired_keys_pruned": 0,
+    "frontend_relocatable_candidate_hits": 0,
+    "frontend_relocatable_candidate_misses": 0,
 }
 
 
@@ -1105,6 +1123,107 @@ class Kernel:
         self._task_launch_policy_manifests = {}
         self._external_grad_accesses = {}
         self._materializing_external_grad_accesses = set()
+        # First-level index for executable templates already validated by the
+        # native compiler. Keys contain no Field object identity or tree
+        # generation, and values are retired, address-stable native shells.
+        # The map is bounded by the runtime specialization limit.
+        self._relocatable_candidates = {}
+        self._relocatable_alias_keys = set()
+
+    def _relocatable_field_template_descriptor(self, args, task_launch_policy, range_one_to_one):
+        """Describe the conservative first product slice for template reuse.
+
+        Only direct ``Field`` template arguments qualify. Captured fields,
+        data-oriented ``self`` objects, gradients and duals intentionally miss;
+        native admission additionally requires the compiled dependency set to
+        equal the tree ids returned here.
+        """
+
+        if args is None or not self.template_slot_locations:
+            return None
+        from taichi_forge.lang.field import Field
+
+        prog = self.runtime.prog
+        if prog is None or not prog._snode_executable_reuse_enabled():
+            return None
+        field_descriptors = []
+        tree_ids = set()
+        fingerprints = {}
+        for slot in self.template_slot_locations:
+            value = args[slot]
+            if not isinstance(value, Field):
+                return None
+            if value.grad is not None or value.dual is not None:
+                return None
+            members = []
+            for member in value._get_field_members():
+                snode = member.ptr.snode()
+                if snode.type != _ti_core.SNodeType.place:
+                    return None
+                tree_id = int(snode.get_snode_tree_id())
+                tree_ids.add(tree_id)
+                if tree_id not in fingerprints:
+                    fingerprints[tree_id] = int(prog._snode_tree_layout_fingerprint(tree_id))
+                members.append(
+                    (
+                        tree_id,
+                        fingerprints[tree_id],
+                        int(snode.runtime_local_id),
+                        member.ptr.get_dt().to_string(),
+                    )
+                )
+            field_descriptors.append(
+                (
+                    slot,
+                    type(value).__module__,
+                    type(value).__qualname__,
+                    tuple(value.shape),
+                    tuple(members),
+                )
+            )
+        policy_key = None if task_launch_policy is None else task_launch_policy._specialization_key
+        descriptor = (
+            self.autodiff_mode,
+            self.opt_level,
+            policy_key,
+            bool(range_one_to_one),
+            tuple(field_descriptors),
+        )
+        return descriptor, tuple(sorted(tree_ids))
+
+    def _try_relocatable_template(self, key, args, task_launch_policy, range_one_to_one):
+        described = self._relocatable_field_template_descriptor(args, task_launch_policy, range_one_to_one)
+        if described is None:
+            return False
+        descriptor, tree_ids = described
+        candidate = self._relocatable_candidates.get(descriptor)
+        if candidate is None or not candidate.definition_retired():
+            if _executable_lifecycle_telemetry_enabled:
+                _executable_lifecycle_telemetry["frontend_relocatable_candidate_misses"] += 1
+            return False
+        if not self.runtime.prog._prepare_relocatable_kernel_template(candidate, tree_ids):
+            self._relocatable_candidates.pop(descriptor, None)
+            if _executable_lifecycle_telemetry_enabled:
+                _executable_lifecycle_telemetry["frontend_relocatable_candidate_misses"] += 1
+            return False
+        self.compiled_kernels[key] = candidate
+        self._relocatable_alias_keys.add(key)
+        if _executable_lifecycle_telemetry_enabled:
+            _executable_lifecycle_telemetry["frontend_relocatable_candidate_hits"] += 1
+        return True
+
+    def _publish_relocatable_candidate(self, key, args, task_launch_policy, range_one_to_one):
+        described = self._relocatable_field_template_descriptor(args, task_launch_policy, range_one_to_one)
+        if described is None:
+            return
+        descriptor, tree_ids = described
+        candidate = self.compiled_kernels[key]
+        if not self.runtime.prog._register_relocatable_kernel_template_candidate(candidate, tree_ids):
+            return
+        self._relocatable_candidates[descriptor] = candidate
+        limit = self.runtime.kernel_specialization_limit
+        while len(self._relocatable_candidates) > limit:
+            del self._relocatable_candidates[next(iter(self._relocatable_candidates))]
 
     def _mark_external_grad_access(self, arg_indices):
         # Called by AnyArray.grad while the Python AST is being materialized.
@@ -1197,17 +1316,29 @@ class Kernel:
         with self.runtime._kernel_compilation_lock:
             if key in self.compiled_kernels:
                 return
+            if self._try_relocatable_template(key, args, task_launch_policy, range_one_to_one):
+                return
             limit = self.runtime.kernel_specialization_limit
+            native_archives = 0
             native_retired_pins = 0
             if self.runtime.prog is not None:
-                native_retired_pins = int(
-                    self.runtime.prog._debug_kernel_executable_lifecycle_stats()[
-                        "retired_handles"
-                    ]
+                native_stats = self.runtime.prog._debug_kernel_executable_lifecycle_stats()
+                native_archives = int(native_stats["relocatable_templates"])
+                native_retired_pins = int(native_stats["retired_generation_bound_handles"])
+            resident = self.runtime._resident_specialization_count + native_archives + native_retired_pins
+            if resident >= limit:
+                allowed_archives = max(
+                    0,
+                    limit - self.runtime._resident_specialization_count - native_retired_pins - 1,
                 )
-            resident = (
-                self.runtime._resident_specialization_count + native_retired_pins
-            )
+                reclaimed = int(self.runtime.prog._reclaim_relocatable_kernel_templates(allowed_archives))
+                self.runtime._specialization_reclaims += reclaimed
+                native_stats = self.runtime.prog._debug_kernel_executable_lifecycle_stats()
+                resident = (
+                    self.runtime._resident_specialization_count
+                    + int(native_stats["relocatable_templates"])
+                    + int(native_stats["retired_generation_bound_handles"])
+                )
             if resident >= limit:
                 self.runtime._specialization_budget_rejections += 1
                 raise TaichiRuntimeError(
@@ -1226,6 +1357,7 @@ class Kernel:
             )
             self.runtime._compiled_specialization_count += 1
             self.runtime._resident_specialization_count += 1
+            self._publish_relocatable_candidate(key, args, task_launch_policy, range_one_to_one)
 
     def _materialize_uncached(
         self,

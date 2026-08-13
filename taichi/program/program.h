@@ -423,6 +423,21 @@ class TI_DLL_EXPORT Program {
   std::vector<SNodeTreeDependency> snapshot_snode_tree_dependencies(
       const std::vector<int> &tree_ids) const;
 
+  std::uint64_t snode_tree_layout_fingerprint_for(int tree_id) const;
+
+  bool prepare_relocatable_kernel_template(
+      const Kernel &kernel_def,
+      const std::vector<int> &direct_template_tree_ids);
+
+  bool register_relocatable_kernel_template_candidate(
+      const Kernel &kernel_def,
+      const std::vector<int> &direct_template_tree_ids);
+
+  std::uint64_t reclaim_relocatable_kernel_templates(
+      std::size_t maximum_resident);
+
+  bool snode_executable_reuse_enabled() const noexcept;
+
   void validate_snode_tree_dependencies(
       const std::vector<SNodeTreeDependency> &dependencies) const;
 
@@ -3216,6 +3231,10 @@ class TI_DLL_EXPORT Program {
   // could store ProgramImpl rather than Program.
 
  private:
+  std::vector<SNodeTreeDependency>
+  snapshot_snode_tree_dependencies_unlocked(
+      const std::vector<int> &tree_ids) const;
+
   class RuntimeSubmissionWriteScope {
    public:
     explicit RuntimeSubmissionWriteScope(Program *program);
@@ -3655,6 +3674,9 @@ class TI_DLL_EXPORT Program {
   bool ordinary_owned_ndarray_fast_path_enabled_{true};
   bool ordinary_snode_guard_elision_enabled_{true};
   float64 total_compilation_time_{0.0};
+  mutable std::mutex relocatable_kernel_candidate_mutex_;
+  std::unordered_map<const Kernel *, std::vector<int>>
+      relocatable_kernel_candidates_;
   static std::atomic<int> num_instances_;
   bool finalized_{false};
   int hash_snode_tree_count_{0};

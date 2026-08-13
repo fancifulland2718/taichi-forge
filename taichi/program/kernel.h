@@ -130,7 +130,7 @@ class TI_DLL_EXPORT Kernel : public Callable {
   // Preserve the Kernel object's address for stale Graph/AOT plans while
   // releasing the frontend/lowered IR and specialization metadata that can no
   // longer be compiled after an explicitly bound SNodeTree is destroyed.
-  void retire_definition();
+  void retire_definition(bool preserve_relocatable_abi = false);
 
  private:
   void init(Program &program,

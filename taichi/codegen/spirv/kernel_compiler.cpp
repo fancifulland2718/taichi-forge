@@ -110,7 +110,8 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
       irpass::analysis::gather_snode_tree_dependencies(chi_ir);
   auto result = std::make_unique<spirv::CompiledKernelData>(
       compile_config.arch, internal_data);
-  result->initialize_generation_bound_snode_relocation_descriptor(true);
+  result->initialize_generation_bound_snode_relocation_descriptor(
+      true, irpass::analysis::gather_snode_relocation_structures(chi_ir));
   return result;
 }
 

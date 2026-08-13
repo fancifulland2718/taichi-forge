@@ -198,10 +198,21 @@ void Kernel::set_snode_tree_dependencies(
       std::memory_order_release);
 }
 
-void Kernel::retire_definition() {
+void Kernel::retire_definition(bool preserve_relocatable_abi) {
   ir.reset();
   context.reset();
   std::vector<SNode *>().swap(no_activate);
+  name.clear();
+  name.shrink_to_fit();
+  offline_cache_body_.reset();
+  if (preserve_relocatable_abi) {
+    // The immutable callable ABI, source cache key and dependency slots are
+    // the frontend half of a verified relocatable template. They contain no
+    // SNode pointer or generation-owned allocation. Keeping them lets a new
+    // structurally equivalent Field specialization reuse the retired shell
+    // without rebuilding Python AST/CHI IR.
+    return;
+  }
   std::vector<Parameter>().swap(parameter_list);
   decltype(nested_parameters)().swap(nested_parameters);
   decltype(argpack_types)().swap(argpack_types);
@@ -210,20 +221,15 @@ void Kernel::retire_definition() {
   args_size = 0;
   ret_type = nullptr;
   ret_size = 0;
-  name.clear();
-  name.shrink_to_fit();
   kernel_key_.clear();
   kernel_key_.shrink_to_fit();
   kernel_key_valid_ = false;
-  offline_cache_body_.reset();
   compile_tier_override_.reset();
   task_launch_policy_.reset();
   snode_tree_dependency_state_.store(SNodeTreeDependencyState::unknown,
                                      std::memory_order_release);
-  {
-    std::lock_guard<std::mutex> lock(snode_tree_dependencies_mutex_);
-    std::vector<int>().swap(snode_tree_dependencies_);
-  }
+  std::lock_guard<std::mutex> lock(snode_tree_dependencies_mutex_);
+  std::vector<int>().swap(snode_tree_dependencies_);
 }
 
 void Kernel::init(Program &program,

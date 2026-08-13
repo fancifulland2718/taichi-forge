@@ -157,7 +157,8 @@ class CompiledKernelData {
   // true; legacy offline-cache payloads reconstructed after load pass false
   // and therefore remain visibly fail closed.
   void initialize_generation_bound_snode_relocation_descriptor(
-      bool compiler_emitted);
+      bool compiler_emitted,
+      SNodeRelocationStructure structures = SNodeRelocationStructure::none);
 
   virtual const GraphKernelMetadata &graph_metadata() const = 0;
   virtual void set_graph_metadata(GraphKernelMetadata metadata) = 0;

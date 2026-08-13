@@ -78,14 +78,38 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
     return ids;
   }
 
+  SNodeRelocationStructure relocation_structures() const {
+    return relocation_structures_;
+  }
+
  private:
   void record(const SNode *snode) {
     if (snode != nullptr) {
       tree_ids_.insert(snode->get_snode_tree_id());
+      for (const SNode *node = snode; node != nullptr; node = node->parent) {
+        switch (node->type) {
+          case SNodeType::pointer:
+            relocation_structures_ |= SNodeRelocationStructure::pointer;
+            break;
+          case SNodeType::bitmasked:
+            relocation_structures_ |= SNodeRelocationStructure::bitmasked;
+            break;
+          case SNodeType::dynamic:
+            relocation_structures_ |= SNodeRelocationStructure::dynamic;
+            break;
+          case SNodeType::hash:
+            relocation_structures_ |= SNodeRelocationStructure::hash;
+            break;
+          default:
+            break;
+        }
+      }
     }
   }
 
   std::unordered_set<int> tree_ids_;
+  SNodeRelocationStructure relocation_structures_{
+      SNodeRelocationStructure::none};
 };
 
 bool tree_contains_non_dense_snode(const SNode &node) {
@@ -109,6 +133,12 @@ std::vector<int> gather_snode_tree_dependencies(IRNode &ir) {
   SNodeTreeDependencyCollector collector;
   ir.accept(&collector);
   return collector.result();
+}
+
+SNodeRelocationStructure gather_snode_relocation_structures(IRNode &ir) {
+  SNodeTreeDependencyCollector collector;
+  ir.accept(&collector);
+  return collector.relocation_structures();
 }
 
 bool has_non_dense_snode_tree_dependency(

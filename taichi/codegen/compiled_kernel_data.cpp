@@ -5,8 +5,41 @@
 
 namespace taichi::lang {
 
+void qualify_dense_snode_relocation(SNodeRelocationDescriptor &descriptor) {
+  if (!descriptor.compiler_emitted ||
+      !descriptor.has_snode_tree_dependencies) {
+    return;
+  }
+  if (!arch_is_cpu(descriptor.backend) && descriptor.backend != Arch::cuda &&
+      descriptor.backend != Arch::vulkan) {
+    return;
+  }
+  const bool has_sparse_state = std::find(
+      descriptor.blockers.begin(), descriptor.blockers.end(),
+      SNodeRelocationBlocker::sparse_state_not_qualified) !=
+      descriptor.blockers.end();
+  if (has_sparse_state) {
+    return;
+  }
+
+  descriptor.compiler_embedded_state_fully_classified = true;
+  descriptor.reuse_admitted = true;
+  descriptor.relocation_class = SNodeRelocationClass::partially_relocatable;
+  descriptor.blockers.clear();
+  for (auto &task : descriptor.tasks) {
+    task.relocation_class = SNodeRelocationClass::partially_relocatable;
+    task.generation_bound_state = {
+        SNodeRelocationState::tree_identity,
+        SNodeRelocationState::root_allocation,
+        SNodeRelocationState::runtime_state,
+        SNodeRelocationState::backend_registration,
+    };
+  }
+}
+
 void CompiledKernelData::initialize_generation_bound_snode_relocation_descriptor(
-    bool compiler_emitted) {
+    bool compiler_emitted,
+    SNodeRelocationStructure structures) {
   SNodeRelocationDescriptor descriptor;
   descriptor.backend = arch();
   descriptor.compiler_emitted = compiler_emitted;
@@ -45,7 +78,9 @@ void CompiledKernelData::initialize_generation_bound_snode_relocation_descriptor
   }
 
   descriptor.tasks.reserve(manifests.size());
-  bool has_sparse_task = false;
+  const bool has_sparse_structure =
+      structures != SNodeRelocationStructure::none;
+  bool has_sparse_task = has_sparse_structure;
   for (const auto &manifest : manifests) {
     SNodeTaskRelocationDescriptor task;
     task.task_index = manifest.task_index;
@@ -64,11 +99,32 @@ void CompiledKernelData::initialize_generation_bound_snode_relocation_descriptor
           SNodeRelocationState::sparse_listgen_state);
       task.generation_bound_state.push_back(
           SNodeRelocationState::sparse_active_list_metadata);
-    } else if (manifest.task_type == OffloadedTaskType::struct_for ||
-               manifest.task_type == OffloadedTaskType::gc) {
+    } else if (manifest.task_type == OffloadedTaskType::gc ||
+               (manifest.task_type == OffloadedTaskType::struct_for &&
+                has_sparse_structure)) {
       has_sparse_task = true;
       task.generation_bound_state.push_back(
           SNodeRelocationState::sparse_allocator_state);
+    }
+    if (has_snode_relocation_structure(
+            structures, SNodeRelocationStructure::pointer)) {
+      task.generation_bound_state.push_back(
+          SNodeRelocationState::pointer_allocator_and_list_state);
+    }
+    if (has_snode_relocation_structure(
+            structures, SNodeRelocationStructure::bitmasked)) {
+      task.generation_bound_state.push_back(
+          SNodeRelocationState::bitmasked_activity_state);
+    }
+    if (has_snode_relocation_structure(
+            structures, SNodeRelocationStructure::dynamic)) {
+      task.generation_bound_state.push_back(
+          SNodeRelocationState::dynamic_chunk_and_length_state);
+    }
+    if (has_snode_relocation_structure(structures,
+                                       SNodeRelocationStructure::hash)) {
+      task.generation_bound_state.push_back(
+          SNodeRelocationState::hash_bucket_tombstone_and_pool_state);
     }
     descriptor.tasks.push_back(std::move(task));
   }
@@ -76,6 +132,7 @@ void CompiledKernelData::initialize_generation_bound_snode_relocation_descriptor
     descriptor.blockers.push_back(
         SNodeRelocationBlocker::sparse_state_not_qualified);
   }
+  qualify_dense_snode_relocation(descriptor);
   set_snode_relocation_descriptor(std::move(descriptor));
 }
 

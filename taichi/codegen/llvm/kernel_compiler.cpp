@@ -64,7 +64,8 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
   data.ret_size = kernel_def.ret_size;
   auto result =
       std::make_unique<LLVM::CompiledKernelData>(compile_config.arch, data);
-  result->initialize_generation_bound_snode_relocation_descriptor(true);
+  result->initialize_generation_bound_snode_relocation_descriptor(
+      true, irpass::analysis::gather_snode_relocation_structures(chi_ir));
   return result;
 }
 

@@ -1368,6 +1368,16 @@ void export_lang(py::module &m) {
              result["live_handles"] = stats.live_handles;
              result["pinned_handles"] = stats.pinned_handles;
              result["retired_handles"] = stats.retired_handles;
+             result["retired_generation_bound_handles"] =
+                 stats.retired_generation_bound_handles;
+             result["relocatable_templates"] =
+                 stats.relocatable_templates;
+             result["relocatable_template_hits"] =
+                 stats.relocatable_template_hits;
+             result["relocatable_bindings_created"] =
+                 stats.relocatable_bindings_created;
+             result["relocatable_template_reclaims"] =
+                 stats.relocatable_template_reclaims;
              result["handle_inline_bytes"] = stats.handle_inline_bytes;
              result["registered_executables"] =
                  program.get_kernel_launcher().debug_registered_kernel_count();
@@ -1377,6 +1387,42 @@ void export_lang(py::module &m) {
       .def("_debug_kernel_registration_count", [](Program &program) {
         return program.get_kernel_launcher().debug_registered_kernel_count();
       })
+      .def("_snode_tree_layout_fingerprint",
+           &Program::snode_tree_layout_fingerprint_for)
+      .def("_snode_executable_reuse_enabled",
+           &Program::snode_executable_reuse_enabled)
+      .def("_debug_snode_executable_reuse_capabilities",
+           [](Program &program) {
+             const Arch backend = program.compile_config().arch;
+             const bool backend_qualified =
+                 arch_is_cpu(backend) || backend == Arch::cuda ||
+                 backend == Arch::vulkan;
+             py::dict result;
+             result["schema_version"] = 1;
+             result["backend"] = arch_name(backend);
+             result["rollback_switch"] =
+                 "TI_ENABLE_SNODE_EXECUTABLE_REUSE";
+             result["enabled"] =
+                 program.snode_executable_reuse_enabled();
+             result["stale_graph_retarget"] = false;
+             result["root_dense"] =
+                 backend_qualified ? "partially_relocatable"
+                                   : "generation_bound";
+             result["pointer"] = "generation_bound";
+             result["bitmasked"] = "generation_bound";
+             result["dynamic"] = "generation_bound";
+             result["hash"] = "generation_bound";
+             return result;
+           })
+      .def("_prepare_relocatable_kernel_template",
+           &Program::prepare_relocatable_kernel_template,
+           py::call_guard<py::gil_scoped_release>())
+      .def("_register_relocatable_kernel_template_candidate",
+           &Program::register_relocatable_kernel_template_candidate,
+           py::call_guard<py::gil_scoped_release>())
+      .def("_reclaim_relocatable_kernel_templates",
+           &Program::reclaim_relocatable_kernel_templates,
+           py::call_guard<py::gil_scoped_release>())
       .def("_debug_snode_field_mapping_count", [](Program &program) {
         return program.get_snode_to_fields()->size();
       })
@@ -3755,6 +3801,7 @@ void export_lang(py::module &m) {
       .def_readwrite("parent", &SNode::parent)
       .def_readonly("type", &SNode::type)
       .def_readonly("id", &SNode::id)
+      .def_readonly("runtime_local_id", &SNode::runtime_local_id)
       .def("get_snode_tree_id", &SNode::get_snode_tree_id)
       .def_readonly("offset", &SNode::index_offsets)
       .def("dense",

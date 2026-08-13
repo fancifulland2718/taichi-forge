@@ -399,7 +399,16 @@ RuntimeCompletion Program::RuntimeSubmissionTransaction::finish() {
 
 std::vector<SNodeTreeDependency> Program::snapshot_snode_tree_dependencies(
     const std::vector<int> &tree_ids) const {
-  std::shared_lock<std::shared_mutex> lock(snode_tree_lifecycle_mutex_);
+  std::optional<std::shared_lock<std::shared_mutex>> lock;
+  if (active_snode_tree_lifecycle_program != this) {
+    lock.emplace(snode_tree_lifecycle_mutex_);
+  }
+  return snapshot_snode_tree_dependencies_unlocked(tree_ids);
+}
+
+std::vector<SNodeTreeDependency>
+Program::snapshot_snode_tree_dependencies_unlocked(
+    const std::vector<int> &tree_ids) const {
   std::vector<SNodeTreeDependency> dependencies;
   dependencies.reserve(tree_ids.size());
   for (const int tree_id : tree_ids) {
@@ -417,6 +426,58 @@ std::vector<SNodeTreeDependency> Program::snapshot_snode_tree_dependencies(
          snode_tree_layout_fingerprint(*snode_trees_[tree_id])});
   }
   return dependencies;
+}
+
+std::uint64_t Program::snode_tree_layout_fingerprint_for(int tree_id) const {
+  return snapshot_snode_tree_dependencies({tree_id})[0].layout_fingerprint;
+}
+
+bool Program::prepare_relocatable_kernel_template(
+    const Kernel &kernel_def,
+    const std::vector<int> &direct_template_tree_ids) {
+  if (!kernel_def.definition_retired() ||
+      kernel_def.get_cached_kernel_key().empty()) {
+    return false;
+  }
+  std::vector<int> normalized = direct_template_tree_ids;
+  std::sort(normalized.begin(), normalized.end());
+  normalized.erase(std::unique(normalized.begin(), normalized.end()),
+                   normalized.end());
+  if (normalized != kernel_def.snode_tree_dependencies()) {
+    return false;
+  }
+  auto lifecycle_guard = acquire_snode_tree_lifecycle_read_guard();
+  auto dependencies =
+      snapshot_snode_tree_dependencies_unlocked(normalized);
+  return program_impl_->get_kernel_compilation_manager()
+             .instantiate_relocatable_execution_handle(
+                 kernel_def.get_cached_kernel_key(), dependencies) != nullptr;
+}
+
+bool Program::register_relocatable_kernel_template_candidate(
+    const Kernel &kernel_def,
+    const std::vector<int> &direct_template_tree_ids) {
+  if (kernel_def.definition_retired()) {
+    return false;
+  }
+  std::vector<int> normalized = direct_template_tree_ids;
+  std::sort(normalized.begin(), normalized.end());
+  normalized.erase(std::unique(normalized.begin(), normalized.end()),
+                   normalized.end());
+  std::lock_guard<std::mutex> lock(relocatable_kernel_candidate_mutex_);
+  relocatable_kernel_candidates_[&kernel_def] = std::move(normalized);
+  return true;
+}
+
+std::uint64_t Program::reclaim_relocatable_kernel_templates(
+    std::size_t maximum_resident) {
+  return program_impl_->get_kernel_compilation_manager()
+      .reclaim_relocatable_templates(maximum_resident);
+}
+
+bool Program::snode_executable_reuse_enabled() const noexcept {
+  return program_impl_->get_kernel_compilation_manager()
+      .relocatable_reuse_enabled();
 }
 
 void Program::validate_snode_tree_dependencies(
@@ -4935,12 +4996,21 @@ const CompiledKernelData &Program::compile_kernel(
     const CompileConfig &compile_config,
     const DeviceCapabilityConfig &caps,
     const Kernel &kernel_def) {
-  TI_ERROR_IF(kernel_def.ir == nullptr,
-              "Cannot compile a kernel whose SNodeTree dependency has been "
-              "destroyed; rebuild the kernel/Graph.");
   auto start_t = Time::get_time();
   TI_AUTO_PROF;
   auto &mgr = program_impl_->get_kernel_compilation_manager();
+  if (kernel_def.ir == nullptr) {
+    auto handle = mgr.instantiate_relocatable_execution_handle(
+        kernel_def.get_cached_kernel_key(),
+        snapshot_snode_tree_dependencies(
+            kernel_def.snode_tree_dependencies()));
+    TI_ERROR_IF(
+        handle == nullptr,
+        "Cannot compile a kernel whose SNodeTree dependency has been "
+        "destroyed; rebuild the kernel/Graph.");
+    total_compilation_time_ += Time::get_time() - start_t;
+    return handle->compiled();
+  }
   const auto effective_config =
       make_effective_kernel_compile_config(compile_config, kernel_def);
   const auto &ckd = mgr.load_or_compile(effective_config, caps, kernel_def);
@@ -4954,12 +5024,21 @@ Program::compile_kernel_execution_handle(
     const CompileConfig &compile_config,
     const DeviceCapabilityConfig &caps,
     const Kernel &kernel_def) {
-  TI_ERROR_IF(kernel_def.ir == nullptr,
-              "Cannot compile a kernel whose SNodeTree dependency has been "
-              "destroyed; rebuild the kernel/Graph.");
   auto start_t = Time::get_time();
   TI_AUTO_PROF;
   auto &mgr = program_impl_->get_kernel_compilation_manager();
+  if (kernel_def.ir == nullptr) {
+    auto handle = mgr.instantiate_relocatable_execution_handle(
+        kernel_def.get_cached_kernel_key(),
+        snapshot_snode_tree_dependencies(
+            kernel_def.snode_tree_dependencies()));
+    TI_ERROR_IF(
+        handle == nullptr,
+        "Cannot compile a kernel whose SNodeTree dependency has been "
+        "destroyed; rebuild the kernel/Graph.");
+    total_compilation_time_ += Time::get_time() - start_t;
+    return handle;
+  }
   const auto effective_config =
       make_effective_kernel_compile_config(compile_config, kernel_def);
   auto handle = mgr.load_or_compile_execution_handle(
@@ -4974,7 +5053,12 @@ const CompiledKernelData *Program::find_cached_kernel(
     const std::string &kernel_key,
     const Kernel &kernel_def) {
   if (kernel_def.ir == nullptr) {
-    return nullptr;
+    auto handle = program_impl_->get_kernel_compilation_manager()
+                      .instantiate_relocatable_execution_handle(
+                          kernel_key,
+                          snapshot_snode_tree_dependencies(
+                              kernel_def.snode_tree_dependencies()));
+    return handle == nullptr ? nullptr : &handle->compiled();
   }
   auto &mgr = program_impl_->get_kernel_compilation_manager();
   const auto *compiled = mgr.find_cached_kernel(
@@ -4992,7 +5076,11 @@ Program::find_cached_kernel_execution_handle(
     const std::string &kernel_key,
     const Kernel &kernel_def) {
   if (kernel_def.ir == nullptr) {
-    return nullptr;
+    return program_impl_->get_kernel_compilation_manager()
+        .instantiate_relocatable_execution_handle(
+            kernel_key,
+            snapshot_snode_tree_dependencies(
+                kernel_def.snode_tree_dependencies()));
   }
   auto &mgr = program_impl_->get_kernel_compilation_manager();
   auto handle = mgr.find_cached_execution_handle(
@@ -5875,6 +5963,18 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
   // cached kernels upon SNodeTree destruction.
   SNode *root = snode_tree->root();
   const bool contains_hash = snode_tree_contains_hash(root);
+  std::vector<int> active_tree_ids;
+  active_tree_ids.reserve(snode_tree_active_.size());
+  for (std::size_t i = 0; i < snode_tree_active_.size(); ++i) {
+    if (snode_tree_active_[i]) {
+      active_tree_ids.push_back(static_cast<int>(i));
+    }
+  }
+  // Snapshot every active layout while the exclusive lifecycle transaction
+  // still owns all roots. Relocatable templates retain only these immutable
+  // fingerprints; no root pointer or generation allocation escapes.
+  auto active_dependencies =
+      snapshot_snode_tree_dependencies_unlocked(active_tree_ids);
 
   std::unordered_set<Kernel *> retired_accessor_kernels;
   // Remove frontend state keyed by SNode pointers before destroying the root.
@@ -5898,8 +5998,33 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
   // lock and device synchronize above make backend module/pipeline unload safe.
   {
     TI_COMPILE_PROFILER("cpp.snode.destroy.executables");
+    // Candidate publication happens at frontend materialization, before a
+    // backend key necessarily exists. Resolve stable Kernel pointers to their
+    // final compiled keys at the destruction boundary, after all launches or
+    // Graph builds have completed compilation and before cache invalidation.
+    {
+      std::lock_guard<std::mutex> candidate_lock(
+          relocatable_kernel_candidate_mutex_);
+      auto &manager =
+          program_impl_->get_kernel_compilation_manager();
+      for (const auto &kernel : kernels) {
+        const auto candidate =
+            relocatable_kernel_candidates_.find(kernel.get());
+        if (candidate == relocatable_kernel_candidates_.end() ||
+            candidate->second != kernel->snode_tree_dependencies() ||
+            kernel->get_cached_kernel_key().empty()) {
+          continue;
+        }
+        const auto &dependencies = kernel->snode_tree_dependencies();
+        if (std::binary_search(dependencies.begin(), dependencies.end(),
+                               tree_id)) {
+          manager.register_relocatable_template_candidate(
+              kernel->get_cached_kernel_key());
+        }
+      }
+    }
     program_impl_->get_kernel_compilation_manager().invalidate_snode_tree(
-        tree_id);
+        tree_id, active_dependencies);
     program_impl_->get_kernel_launcher().retire_snode_tree(tree_id);
   }
 
@@ -5913,6 +6038,11 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
     for (auto iter = kernels.begin(); iter != kernels.end();) {
       auto &kernel = *iter;
       if (retired_accessor_kernels.erase(kernel.get()) != 0) {
+        {
+          std::lock_guard<std::mutex> candidate_lock(
+              relocatable_kernel_candidate_mutex_);
+          relocatable_kernel_candidates_.erase(kernel.get());
+        }
         iter = kernels.erase(iter);
         continue;
       }
@@ -5923,7 +6053,15 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
       const auto &dependencies = kernel->snode_tree_dependencies();
       if (std::binary_search(dependencies.begin(), dependencies.end(),
                              tree_id)) {
-        kernel->retire_definition();
+        const bool preserve_relocatable_abi =
+            program_impl_->get_kernel_compilation_manager()
+                .has_relocatable_template(kernel->get_cached_kernel_key());
+        kernel->retire_definition(preserve_relocatable_abi);
+        if (!preserve_relocatable_abi) {
+          std::lock_guard<std::mutex> candidate_lock(
+              relocatable_kernel_candidate_mutex_);
+          relocatable_kernel_candidates_.erase(kernel.get());
+        }
       }
       ++iter;
     }

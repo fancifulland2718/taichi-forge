@@ -2,6 +2,8 @@
 #include "taichi/system/profiler.h"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -37,6 +39,20 @@ void record_if_enabled(const std::atomic<bool> &enabled,
   if (enabled.load(std::memory_order_relaxed)) {
     counter.fetch_add(value, std::memory_order_relaxed);
   }
+}
+
+bool relocatable_reuse_enabled_from_environment() {
+  const char *value = std::getenv("TI_ENABLE_SNODE_EXECUTABLE_REUSE");
+  if (value == nullptr) {
+    return true;
+  }
+  std::string normalized(value);
+  std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                 [](unsigned char ch) {
+                   return static_cast<char>(std::tolower(ch));
+                 });
+  return normalized != "0" && normalized != "false" &&
+         normalized != "off" && normalized != "no";
 }
 
 }  // namespace
@@ -90,7 +106,9 @@ struct CacheCleanerUtils<CacheData> {
 }  // namespace offline_cache
 
 KernelCompilationManager::KernelCompilationManager(Config config)
-    : config_(std::move(config)) {
+    : config_(std::move(config)),
+      relocatable_reuse_enabled_(
+          relocatable_reuse_enabled_from_environment()) {
   TI_DEBUG("Create KernelCompilationManager with offline_cache_file_path = {}",
            config_.offline_cache_path);
 }
@@ -429,9 +447,51 @@ void KernelCompilationManager::clear() {
   cached_data_.size = 0;
   updated_data_.clear();
   in_progress_keys_.clear();
+  relocatable_templates_.clear();
+  relocatable_candidate_keys_.clear();
 }
 
-void KernelCompilationManager::invalidate_snode_tree(int tree_id) {
+void KernelCompilationManager::invalidate_snode_tree(
+    int tree_id,
+    const std::vector<SNodeTreeDependency> &active_dependencies) {
+  auto dependency_snapshot = [&](const KernelCacheData &kernel) {
+    std::vector<SNodeTreeDependency> result;
+    if (kernel.compiled_kernel_data == nullptr) {
+      return result;
+    }
+    for (int dependency_id : kernel.compiled_kernel_data->snode_tree_ids()) {
+      const auto found = std::find_if(
+          active_dependencies.begin(), active_dependencies.end(),
+          [dependency_id](const auto &dependency) {
+            return dependency.tree_id == dependency_id;
+          });
+      if (found == active_dependencies.end()) {
+        return std::vector<SNodeTreeDependency>{};
+      }
+      result.push_back(*found);
+    }
+    return result;
+  };
+  auto retain_relocatable_template = [&](const std::string &kernel_key,
+                                         KernelCacheData &kernel) {
+    if (!relocatable_reuse_enabled_ ||
+        relocatable_candidate_keys_.find(kernel_key) ==
+            relocatable_candidate_keys_.end() ||
+        kernel.compiled_kernel_data == nullptr ||
+        !kernel.compiled_kernel_data->snode_relocation_descriptor()
+             .reuse_admitted) {
+      return;
+    }
+    auto dependencies = dependency_snapshot(kernel);
+    if (dependencies.size() !=
+        kernel.compiled_kernel_data->snode_tree_ids().size()) {
+      return;
+    }
+    auto &entry = relocatable_templates_[kernel_key];
+    entry.compiled = kernel.compiled_kernel_data;
+    entry.dependencies = std::move(dependencies);
+    entry.last_used = ++relocatable_template_clock_;
+  };
   auto depends_on_tree = [tree_id](const KernelCacheData &kernel) {
     if (!kernel.compiled_kernel_data) {
       return false;
@@ -447,6 +507,7 @@ void KernelCompilationManager::invalidate_snode_tree(int tree_id) {
   for (auto iter = caching_kernels_.begin();
        iter != caching_kernels_.end();) {
     if (depends_on_tree(iter->second)) {
+      retain_relocatable_template(iter->first, iter->second);
       if (iter->second.execution_handle != nullptr) {
         iter->second.execution_handle->retire();
       }
@@ -465,6 +526,7 @@ void KernelCompilationManager::invalidate_snode_tree(int tree_id) {
       continue;
     }
     KernelCacheData *entry = &iter->second;
+    retain_relocatable_template(iter->first, *entry);
     if (entry->execution_handle != nullptr) {
       entry->execution_handle->retire();
     }
@@ -479,6 +541,108 @@ void KernelCompilationManager::invalidate_snode_tree(int tree_id) {
             : cached_data_.size - iter->second.size;
     iter = cached_data_.kernels.erase(iter);
   }
+}
+
+bool KernelCompilationManager::register_relocatable_template_candidate(
+    const std::string &kernel_key) {
+  if (!relocatable_reuse_enabled_ || kernel_key.empty()) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(cache_mutex_);
+  // Frontend materialization precedes backend compilation. Registration only
+  // records that this exact key has a structurally complete direct-Field
+  // consumer; archiving later still requires the compiler-emitted descriptor
+  // to admit reuse.
+  relocatable_candidate_keys_.insert(kernel_key);
+  return true;
+}
+
+bool KernelCompilationManager::has_relocatable_template(
+    const std::string &kernel_key) const {
+  if (!relocatable_reuse_enabled_ || kernel_key.empty()) {
+    return false;
+  }
+  std::lock_guard<std::mutex> lock(cache_mutex_);
+  return relocatable_templates_.find(kernel_key) !=
+         relocatable_templates_.end();
+}
+
+std::shared_ptr<KernelExecutionHandle>
+KernelCompilationManager::instantiate_relocatable_execution_handle(
+    const std::string &kernel_key,
+    const std::vector<SNodeTreeDependency> &current_dependencies) {
+  if (!relocatable_reuse_enabled_) {
+    return nullptr;
+  }
+  std::lock_guard<std::mutex> lock(cache_mutex_);
+  auto found = relocatable_templates_.find(kernel_key);
+  if (found == relocatable_templates_.end()) {
+    return nullptr;
+  }
+  auto &source = found->second;
+  if (source.dependencies.size() != current_dependencies.size()) {
+    return nullptr;
+  }
+  for (std::size_t i = 0; i < source.dependencies.size(); ++i) {
+    if (source.dependencies[i].tree_id != current_dependencies[i].tree_id ||
+        source.dependencies[i].layout_fingerprint !=
+            current_dependencies[i].layout_fingerprint) {
+      return nullptr;
+    }
+  }
+  source.last_used = ++relocatable_template_clock_;
+  auto [active, inserted] = caching_kernels_.try_emplace(kernel_key);
+  auto &binding = active->second;
+  if (inserted) {
+    binding.kernel_key = kernel_key;
+    binding.created_at = binding.last_used_at = std::time(nullptr);
+    binding.cache_mode = CacheData::MemCache;
+    binding.compiled_kernel_data = source.compiled;
+  } else {
+    TI_ASSERT(binding.compiled_kernel_data == source.compiled);
+  }
+  auto handle = ensure_execution_handle_locked(binding);
+  if (inserted) {
+    record_if_enabled(executable_lifecycle_telemetry_.enabled,
+                      executable_lifecycle_telemetry_.relocatable_template_hits);
+    record_if_enabled(
+        executable_lifecycle_telemetry_.enabled,
+        executable_lifecycle_telemetry_.relocatable_bindings_created);
+  }
+  return handle;
+}
+
+std::uint64_t KernelCompilationManager::reclaim_relocatable_templates(
+    std::size_t maximum_resident) {
+  std::lock_guard<std::mutex> lock(cache_mutex_);
+  std::uint64_t reclaimed = 0;
+  while (relocatable_templates_.size() > maximum_resident) {
+    auto victim = relocatable_templates_.end();
+    for (auto iter = relocatable_templates_.begin();
+         iter != relocatable_templates_.end(); ++iter) {
+      // An archive-only payload has exactly one strong owner. A Graph/AOT
+      // lease or active generation binding makes the template pinned; never
+      // erase the accounting owner while such a lease is live.
+      if (iter->second.compiled.use_count() != 1) {
+        continue;
+      }
+      if (victim == relocatable_templates_.end() ||
+          iter->second.last_used < victim->second.last_used) {
+        victim = iter;
+      }
+    }
+    if (victim == relocatable_templates_.end()) {
+      break;
+    }
+    relocatable_candidate_keys_.erase(victim->first);
+    relocatable_templates_.erase(victim);
+    ++reclaimed;
+  }
+  record_if_enabled(
+      executable_lifecycle_telemetry_.enabled,
+      executable_lifecycle_telemetry_.relocatable_template_reclaims,
+      reclaimed);
+  return reclaimed;
 }
 
 void KernelCompilationManager::set_executable_lifecycle_telemetry_enabled(
@@ -507,6 +671,12 @@ KernelCompilationManager::executable_lifecycle_statistics(bool reset) {
       read(executable_lifecycle_telemetry_.templates_installed);
   result.templates_retired =
       read(executable_lifecycle_telemetry_.templates_retired);
+  result.relocatable_template_hits =
+      read(executable_lifecycle_telemetry_.relocatable_template_hits);
+  result.relocatable_bindings_created =
+      read(executable_lifecycle_telemetry_.relocatable_bindings_created);
+  result.relocatable_template_reclaims =
+      read(executable_lifecycle_telemetry_.relocatable_template_reclaims);
   {
     std::lock_guard<std::mutex> guard(cache_mutex_);
     result.resident_templates = caching_kernels_.size();
@@ -515,6 +685,7 @@ KernelCompilationManager::executable_lifecycle_statistics(bool reset) {
           kernel.compiled_kernel_data != nullptr ? 1 : 0;
     }
     result.in_progress_compiles = in_progress_keys_.size();
+    result.relocatable_templates = relocatable_templates_.size();
     for (auto iter = execution_handles_.begin();
          iter != execution_handles_.end();) {
       auto handle = iter->lock();
@@ -526,6 +697,10 @@ KernelCompilationManager::executable_lifecycle_statistics(bool reset) {
         ++result.live_handles;
       } else {
         ++result.retired_handles;
+        if (!handle->compiled().snode_relocation_descriptor()
+                 .reuse_admitted) {
+          ++result.retired_generation_bound_handles;
+        }
       }
       const auto owner_floor = handle->active() ? 2L : 1L;
       if (handle.use_count() > owner_floor) {
