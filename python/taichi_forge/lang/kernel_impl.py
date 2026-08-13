@@ -925,8 +925,11 @@ def _get_global_vars(_func):
     return global_vars
 
 
+_ORDINARY_LAUNCH_PLAN_CACHE_CAPACITY = 4
+
+
 class _OrdinaryLaunchPlan:
-    """One-entry, generation-safe cache for common direct kernel launches.
+    """One generation-safe entry in the bounded direct-launch cache.
 
     GPU plans may keep a reusable launch context with generation-qualified,
     non-owning native resource handles. Weak Python guards keep it from
@@ -969,6 +972,27 @@ class _OrdinaryLaunchPlan:
         self.resource_guards = resource_guards
         self.launch_ctx = launch_ctx
 
+    def is_live(self, runtime):
+        if self.runtime is not runtime:
+            return False
+        for _, resource_ref, grad_ref in self.resource_guards:
+            resource = resource_ref()
+            if resource is None or resource.arr is None:
+                return False
+            grad = resource.grad
+            if grad_ref is None:
+                if grad is not None:
+                    return False
+            else:
+                guarded_grad = grad_ref()
+                if (
+                    guarded_grad is None
+                    or guarded_grad is not grad
+                    or grad.arr is None
+                ):
+                    return False
+        return True
+
     def matches(self, runtime, args):
         if self.runtime is not runtime:
             return False
@@ -984,8 +1008,14 @@ class _OrdinaryLaunchPlan:
             if grad_ref is None:
                 if grad is not None:
                     return False
-            elif grad_ref() is not grad or grad.arr is None:
-                return False
+            else:
+                guarded_grad = grad_ref()
+                if (
+                    guarded_grad is None
+                    or guarded_grad is not grad
+                    or grad.arr is None
+                ):
+                    return False
         return True
 
 
@@ -1038,7 +1068,13 @@ class Kernel:
     def reset(self):
         self.runtime = impl.get_runtime()
         self.compiled_kernels = {}
+        # Four weak-guarded entries cover common ping-pong and triple-buffer
+        # bindings without turning a Kernel into an unbounded resource owner.
+        # Keep the singular attribute as the MRU alias for compatibility with
+        # existing diagnostics and the one-comparison steady-state fast path.
         self._ordinary_launch_plan = None
+        self._ordinary_launch_plans = []
+        self._ordinary_launch_plan_negative_keys = set()
         self._task_launch_policy_manifests = {}
         self._external_grad_accesses = {}
         self._materializing_external_grad_accesses = set()
@@ -1693,10 +1729,12 @@ class Kernel:
                     launch_ctx.set_arg_ndarray_with_grad(indices, primal, grad)
 
     def _build_ordinary_launch_plan(self, key, args):
+        """Return ``(plan, stable_failure)`` for one compiled specialization."""
+
         if self.autodiff_mode != AutodiffMode.NONE or self.template_slot_locations:
-            return None
+            return None, True
         if len(args) > 64:
-            return None
+            return None, True
         bindings = []
         resource_guards = []
         for index, (argument, value) in enumerate(zip(self.arguments, args)):
@@ -1720,20 +1758,26 @@ class Kernel:
                     resource_ref = weakref.ref(value)
                     grad_ref = None if value.grad is None else weakref.ref(value.grad)
                 except TypeError:
-                    return None
+                    # Resource weak-reference support is an object property,
+                    # not a compiled-kernel admission result. Do not poison a
+                    # compatible later binding for the same specialization.
+                    return None, False
                 bindings.append((index, "ndarray", annotation))
                 resource_guards.append((index, resource_ref, grad_ref))
                 continue
-            return None
+            return None, True
         prog = self.runtime.prog
         native_plan = prog._register_kernel_execution_plan(
             prog.config(), prog.get_device_caps(), self.compiled_kernels[key]
         )
         if native_plan is None:
-            return None
+            # Registration depends on the compiled executable (for example,
+            # captured SNode access), so retrying it for every launch cannot
+            # become eligible until this specialization or runtime changes.
+            return None, True
         launch_ctx = None
         # CUDA/Vulkan copy the argument payload during submission, so a
-        # monomorphic plan can safely reuse its validated host-side layout.
+        # resource-signature plan can safely reuse its validated host layout.
         # CPU has a different scheduler/return protocol and remains on fresh
         # contexts; it is not part of this GPU eager-ABI optimization.
         if prog.config().arch in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan):
@@ -1755,17 +1799,67 @@ class Kernel:
                     for binding in scalar_bindings
                 ),
             )
-        return _OrdinaryLaunchPlan(
-            self.runtime,
-            key,
-            self.compiled_kernels[key],
-            native_plan,
-            tuple(bindings),
-            scalar_bindings,
-            scalar_patch_plan,
-            tuple(resource_guards),
-            launch_ctx,
+        return (
+            _OrdinaryLaunchPlan(
+                self.runtime,
+                key,
+                self.compiled_kernels[key],
+                native_plan,
+                tuple(bindings),
+                scalar_bindings,
+                scalar_patch_plan,
+                tuple(resource_guards),
+                launch_ctx,
+            ),
+            False,
         )
+
+    def _find_ordinary_launch_plan_after_mru_miss(self, args):
+        """Search secondary slots after ``__call__`` rejects the MRU alias."""
+
+        plans = self._ordinary_launch_plans
+        if not plans:
+            self._ordinary_launch_plan = None
+            return None
+
+        # __call__ already checked the MRU entry inline so the steady
+        # monomorphic path pays no helper-call or list-search overhead.
+        plan = plans[0]
+        stale = not plan.is_live(self.runtime)
+        for index in range(1, len(plans)):
+            candidate = plans[index]
+            if candidate.matches(self.runtime, args):
+                plans.pop(index)
+                plans.insert(0, candidate)
+                if stale:
+                    plans[:] = [candidate] + [
+                        item
+                        for item in plans[1:]
+                        if item.is_live(self.runtime)
+                    ]
+                self._ordinary_launch_plan = candidate
+                return candidate
+            stale = stale or not candidate.is_live(self.runtime)
+
+        if stale:
+            plans[:] = [
+                candidate
+                for candidate in plans
+                if candidate.is_live(self.runtime)
+            ]
+        self._ordinary_launch_plan = plans[0] if plans else None
+        return None
+
+    def _cache_ordinary_launch_plan(self, plan):
+        plans = self._ordinary_launch_plans
+        plans[:] = [
+            candidate
+            for candidate in plans
+            if candidate is not plan and candidate.is_live(self.runtime)
+        ]
+        plans.insert(0, plan)
+        del plans[_ORDINARY_LAUNCH_PLAN_CACHE_CAPACITY:]
+        self._ordinary_launch_plan = plan
 
     def _launch_with_ordinary_plan(self, plan, args):
         launch_ctx = plan.launch_ctx
@@ -2047,15 +2141,21 @@ class Kernel:
         if self.autodiff_mode != AutodiffMode.NONE and impl.current_cfg().opt_level == 0:
             _logging.warn("""opt_level = 1 is enforced to enable gradient computation.""")
             impl.current_cfg().opt_level = 1
-        ordinary_plan = self._ordinary_launch_plan
         ordinary_fast_eligible = (
             self.autodiff_mode == AutodiffMode.NONE
             and self.runtime.target_tape is None
             and self.runtime.fwd_mode_manager is None
             and not self.runtime.grad_replaced
         )
-        if ordinary_fast_eligible and ordinary_plan is not None and ordinary_plan.matches(self.runtime, args):
-            return self._launch_with_ordinary_plan(ordinary_plan, args)
+        if ordinary_fast_eligible:
+            ordinary_plan = self._ordinary_launch_plan
+            if ordinary_plan is not None and ordinary_plan.matches(
+                self.runtime, args
+            ):
+                return self._launch_with_ordinary_plan(ordinary_plan, args)
+            ordinary_plan = self._find_ordinary_launch_plan_after_mru_miss(args)
+            if ordinary_plan is not None:
+                return self._launch_with_ordinary_plan(ordinary_plan, args)
         key = self.ensure_compiled(*args)
         kernel_cpp = self.compiled_kernels[key]
         allocate_all_external_grad = (
@@ -2069,8 +2169,15 @@ class Kernel:
             _allocate_all_external_grad=allocate_all_external_grad,
             _explicit_external_grad_args=self._external_grad_accesses.get(key, frozenset()),
         )
-        if ordinary_fast_eligible:
-            self._ordinary_launch_plan = self._build_ordinary_launch_plan(key, args)
+        if (
+            ordinary_fast_eligible
+            and key not in self._ordinary_launch_plan_negative_keys
+        ):
+            plan, stable_failure = self._build_ordinary_launch_plan(key, args)
+            if plan is not None:
+                self._cache_ordinary_launch_plan(plan)
+            elif stable_failure:
+                self._ordinary_launch_plan_negative_keys.add(key)
         return result
 
 

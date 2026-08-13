@@ -1714,7 +1714,7 @@ def test_owned_ndarray_launch_uses_stable_slot_and_elides_snode_guard(monkeypatc
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_ordinary_launch_plan_is_monomorphic_and_resource_safe():
+def test_ordinary_launch_plan_lru_handles_ping_pong_resources_safely():
     @ti.kernel
     def assign(
         destination: ti.types.ndarray(dtype=ti.i32, ndim=1), value: ti.i32
@@ -1746,6 +1746,40 @@ def test_ordinary_launch_plan_is_monomorphic_and_resource_safe():
         assert second_plan.launch_ctx is not first_launch_ctx
     assert first.to_numpy()[0] == 7
     assert second.to_numpy()[0] == 11
+
+    # Returning to the first resource must reuse its original plan rather than
+    # rebuilding and replacing the second resource's entry.
+    assert assign(first, 13) == 14
+    assert assign._primal._ordinary_launch_plan is first_plan
+    assert len(assign._primal._ordinary_launch_plans) == 2
+    if gpu_context_reuse:
+        assert first_plan.launch_ctx is first_launch_ctx
+    assert first.to_numpy()[0] == 13
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_ordinary_launch_plan_lru_is_bounded_and_weak_guarded():
+    @ti.kernel
+    def assign(
+        destination: ti.types.ndarray(dtype=ti.i32, ndim=1), value: ti.i32
+    ):
+        destination[0] = value
+
+    arrays = [ti.ndarray(ti.i32, shape=1) for _ in range(5)]
+    for index, array in enumerate(arrays):
+        assign(array, index)
+
+    plans = assign._primal._ordinary_launch_plans
+    assert len(plans) == 4
+    assert all(plan.resource_guards[0][1]() is not arrays[0] for plan in plans)
+
+    retired = arrays[-1]
+    del arrays[-1]
+    del retired
+    gc.collect()
+    assign(arrays[0], 17)
+    assert len(assign._primal._ordinary_launch_plans) <= 4
+    assert arrays[0].to_numpy()[0] == 17
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan])
@@ -1822,6 +1856,37 @@ def test_ordinary_launch_plan_excludes_snode_dependent_kernel():
     assert field[None] == 9
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_ordinary_launch_plan_negative_caches_stable_snode_admission(monkeypatch):
+    field = ti.field(ti.i32, shape=())
+    values = ti.ndarray(ti.i32, shape=1)
+
+    @ti.kernel
+    def update(source: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        field[None] = source[0]
+
+    values[0] = 5
+    build = update._primal._build_ordinary_launch_plan
+    attempts = 0
+
+    def counted_build(key, args):
+        nonlocal attempts
+        attempts += 1
+        return build(key, args)
+
+    monkeypatch.setattr(
+        update._primal, "_build_ordinary_launch_plan", counted_build
+    )
+    update(values)
+    values[0] = 9
+    update(values)
+
+    assert attempts == 1
+    assert len(update._primal._ordinary_launch_plan_negative_keys) == 1
+    assert update._primal._ordinary_launch_plan is None
+    assert field[None] == 9
+
+
 @pytest.mark.run_in_serial
 @test_utils.test(arch=ti.cpu)
 def test_ordinary_launch_plan_is_invalidated_by_runtime_reset():
@@ -1835,6 +1900,8 @@ def test_ordinary_launch_plan_is_invalidated_by_runtime_reset():
 
     ti.reset()
     assert assign._primal._ordinary_launch_plan is None
+    assert assign._primal._ordinary_launch_plans == []
+    assert assign._primal._ordinary_launch_plan_negative_keys == set()
     ti.init(arch=ti.cpu, offline_cache=False)
     second = ti.ndarray(ti.i32, shape=1)
     assign(second)
