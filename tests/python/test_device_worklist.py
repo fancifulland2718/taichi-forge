@@ -59,6 +59,26 @@ def _record_and_recycle_direct(
 
 
 @ti.kernel
+def _record_and_recycle_unique_direct(
+    history: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    history_index: ti.i32,
+    recycled_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    live_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    overflow: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    generation: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    unique_epoch: ti.types.ndarray(dtype=ti.i32, ndim=0),
+):
+    history[history_index] = live_extent[0]
+    ti.algorithms.device_worklist_recycle_unique_direct(
+        recycled_extent,
+        live_extent,
+        overflow,
+        generation,
+        unique_epoch,
+    )
+
+
+@ti.kernel
 def _reset_dense_claim_table(
     claims: ti.types.ndarray(ndim=1),
     overflow: ti.types.ndarray(dtype=ti.i32, ndim=0),
@@ -424,6 +444,64 @@ def test_device_worklist_unique_direct_append_is_generation_scoped():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_worklist_unique_fused_recycle_advances_epoch_and_generation():
+    capacity = 32
+    worklist = ti.algorithms.DeviceWorklist(
+        capacity,
+        ti.i32,
+        telemetry=False,
+        transition_mode="direct",
+        unique_key_capacity=capacity,
+    )
+    history = ti.ndarray(ti.i32, shape=3)
+    candidates = ti.ndarray(ti.i32, shape=4)
+    candidates.from_numpy(np.asarray([3, 3, 4, 5], dtype=np.int32))
+
+    # The first transition needs explicit initialization.  Later transitions
+    # reuse this existing globally ordered boundary kernel.
+    worklist.prepare_next()
+    for level in range(3):
+        _append_unique_candidates_direct(
+            *worklist.unique_append_arguments(), candidates
+        )
+        _record_and_recycle_unique_direct(
+            history,
+            level,
+            *worklist.unique_recycle_arguments(),
+        )
+        worklist.commit_recycled_next()
+
+    np.testing.assert_array_equal(history.to_numpy(), np.asarray([3, 3, 3]))
+    assert worklist.statistics().generation == 4
+    assert worklist.unique_epoch.to_numpy().item() == 4
+    assert not worklist.statistics().overflow
+    assert worklist.next_extent.snapshot().count == 0
+    with pytest.raises(ti.TaichiRuntimeError, match="unique_recycle_arguments"):
+        worklist.recycle_arguments()
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_worklist_unique_fused_recycle_fails_closed_at_epoch_limit():
+    worklist = ti.algorithms.DeviceWorklist(
+        8,
+        ti.i32,
+        telemetry=False,
+        transition_mode="direct",
+        unique_key_capacity=8,
+    )
+    history = ti.ndarray(ti.i32, shape=1)
+    arguments = worklist.unique_recycle_arguments()
+    arguments[3].fill(0x7FFFFFFF)
+    arguments[4].fill(0x7FFFFFFF)
+    _record_and_recycle_unique_direct(history, 0, *arguments)
+    assert arguments[2].to_numpy().item() == 1
+    assert arguments[0].to_numpy()[1] == 1
+    assert arguments[1].to_numpy()[1] == 1
+    assert arguments[3].to_numpy().item() == 0x7FFFFFFF
+    assert arguments[4].to_numpy().item() == 0x7FFFFFFF
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_device_worklist_unique_direct_rejects_invalid_key_and_capacity():
     worklist = ti.algorithms.DeviceWorklist(
         4,
@@ -520,6 +598,179 @@ def test_device_worklist_graph_alternates_incremental_unique_frontiers():
     assert physical["physical_dispatch_count"] == 4
     assert physical["backend_recording_complete"]
     assert not physical["fragmented_native_plan"]
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_worklist_fixed_graph_binding_removes_public_storage_args():
+    capacity = 64
+    worklist = ti.algorithms.DeviceWorklist(
+        capacity,
+        ti.i32,
+        telemetry=False,
+        transition_mode="direct",
+        unique_key_capacity=capacity,
+    )
+    seed = np.asarray([4, 5, 6], dtype=np.int32)
+    worklist.values.from_numpy(
+        np.pad(seed, (0, capacity - seed.size), constant_values=0)
+    )
+    worklist.extent.set(seed.size)
+
+    builder = ti.graph.GraphBuilder()
+    args = worklist.fixed_graph_args(builder, "fixed_active")
+    source0, extent0, target0, target_extent0 = args.transition_arguments(0)
+    source1, extent1, target1, target_extent1 = args.transition_arguments(1)
+    builder.append_native(
+        ti.algorithms.DeviceWorklistSequence(args).prepare(target="next")
+    )
+    builder.dispatch_bounded(
+        _expand_unique_frontier_direct,
+        source0,
+        extent0,
+        target0,
+        target_extent0,
+        args.overflow,
+        args.capacity,
+        args.unique_tags,
+        args.unique_epoch,
+        args.unique_key_capacity,
+        extent=extent0,
+        capacity=capacity,
+        block_dim=32,
+    )
+    builder.append_native(
+        ti.algorithms.DeviceWorklistSequence(args).prepare(target="current")
+    )
+    builder.dispatch_bounded(
+        _expand_unique_frontier_direct,
+        source1,
+        extent1,
+        target1,
+        target_extent1,
+        args.overflow,
+        args.capacity,
+        args.unique_tags,
+        args.unique_epoch,
+        args.unique_key_capacity,
+        extent=extent1,
+        capacity=capacity,
+        block_dim=32,
+    )
+    graph = builder.compile()
+    graph.run({})
+
+    np.testing.assert_array_equal(
+        np.sort(worklist.snapshot().values),
+        np.asarray([4, 5, 6, 7, 8], dtype=np.int32),
+    )
+    definition = graph._spec.execution_definition
+    assert definition["runtime_arg_count"] == 0
+    assert definition["fixed_runtime_arg_count"] >= 9
+
+    ti.sync()
+    runtime_before = impl.get_runtime().prog._runtime_statistics_snapshot()["memory"]
+    host_before = dict(ti_core.get_host_memory_pool_stats())
+    device_before = dict(ti_core.get_device_memory_pool_stats())
+    for _ in range(100):
+        graph.run({})
+    ti.sync()
+    runtime_after = impl.get_runtime().prog._runtime_statistics_snapshot()["memory"]
+    assert runtime_after == runtime_before
+    assert dict(ti_core.get_host_memory_pool_stats()) == host_before
+    assert dict(ti_core.get_device_memory_pool_stats()) == device_before
+
+    with pytest.raises(ti.TaichiRuntimeError, match="workspace_lanes=1"):
+        builder.compile(workspace_lanes=2)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_worklist_fixed_graph_binding_rejects_wrong_front_parity():
+    capacity = 32
+    worklist = ti.algorithms.DeviceWorklist(
+        capacity,
+        ti.i32,
+        telemetry=False,
+        transition_mode="direct",
+        unique_key_capacity=capacity,
+    )
+    builder = ti.graph.GraphBuilder()
+    args = worklist.fixed_graph_args(builder, "fixed_parity")
+    source, source_extent, target, target_extent = args.transition_arguments(0)
+    builder.append_native(
+        ti.algorithms.DeviceWorklistSequence(args).prepare(target="next")
+    )
+    builder.dispatch_bounded(
+        _expand_unique_frontier_direct,
+        source,
+        source_extent,
+        target,
+        target_extent,
+        args.overflow,
+        args.capacity,
+        args.unique_tags,
+        args.unique_epoch,
+        args.unique_key_capacity,
+        extent=source_extent,
+        capacity=capacity,
+        block_dim=32,
+    )
+    graph = builder.compile()
+    graph.run({})
+    worklist.commit_direct_transitions(1)
+    with pytest.raises(ti.TaichiRuntimeError, match="front parity"):
+        graph.run({})
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_worklist_fixed_graph_binding_completion_orders_async_reuse():
+    capacity = 4096
+    worklist = ti.algorithms.DeviceWorklist(
+        capacity,
+        ti.i32,
+        telemetry=False,
+        transition_mode="direct",
+        unique_key_capacity=capacity,
+    )
+    seed = np.arange(64, dtype=np.int32)
+    worklist.values.from_numpy(
+        np.pad(seed, (0, capacity - seed.size), constant_values=0)
+    )
+    worklist.extent.set(seed.size)
+    builder = ti.graph.GraphBuilder()
+    args = worklist.fixed_graph_args(builder, "fixed_async")
+    source, source_extent, target, target_extent = args.transition_arguments(0)
+    builder.append_native(
+        ti.algorithms.DeviceWorklistSequence(args).prepare(target="next")
+    )
+    builder.dispatch_bounded(
+        _expand_unique_frontier_direct,
+        source,
+        source_extent,
+        target,
+        target_extent,
+        args.overflow,
+        args.capacity,
+        args.unique_tags,
+        args.unique_epoch,
+        args.unique_key_capacity,
+        extent=source_extent,
+        capacity=capacity,
+        block_dim=128,
+    )
+    graph = builder.compile()
+    first = graph.submit({})
+    second = graph.submit({})
+    first.wait()
+    second.wait()
+    stats = graph._instance.internal_storage_stats
+    assert stats["exclusive"]
+    snapshot = worklist.next_extent.snapshot()
+    assert not snapshot.overflow
+    assert snapshot.count == seed.size + 1
+    np.testing.assert_array_equal(
+        np.sort(worklist.next_values.to_numpy()[: snapshot.count]),
+        np.arange(seed.size + 1, dtype=np.int32),
+    )
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

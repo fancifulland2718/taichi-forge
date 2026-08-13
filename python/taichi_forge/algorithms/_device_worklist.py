@@ -29,6 +29,7 @@ from taichi_forge.graph._native import (
     DispatchGraphAction,
     NativeGraphExecutable,
     NativeGraphNode,
+    ProviderOwnedNdarrayBinding,
 )
 from taichi_forge.lang import impl, ops
 from taichi_forge.lang._ndarray import ScalarNdarray
@@ -307,6 +308,36 @@ def device_worklist_recycle_direct(
     recycled_extent_state[1] = 0
     overflow[None] = 0
     generation[None] += 1
+
+
+@func
+def device_worklist_recycle_unique_direct(
+    recycled_extent_state: template(),
+    live_extent_state: template(),
+    overflow: template(),
+    generation: template(),
+    unique_epoch: template(),
+):
+    """Recycle a unique worklist at an existing global boundary.
+
+    Call this exactly once after all reads of the consumed front and writes to
+    the live front have completed.  The boundary propagates sticky overflow
+    and advances both generation and the dense unique-tag epoch.  It must not
+    execute inside a parallel producer that lacks a device-wide barrier.
+    """
+
+    inherited_overflow = 1 if live_extent_state[1] != 0 else 0
+    recycled_extent_state[0] = 0
+    recycled_extent_state[1] = inherited_overflow
+    overflow[None] = inherited_overflow
+    if generation[None] < 0x7FFFFFFF and unique_epoch[None] < 0x7FFFFFFF:
+        generation[None] += 1
+        unique_epoch[None] += 1
+    else:
+        # Reusing a wrapped generation or epoch could admit stale tags.
+        overflow[None] = 1
+        recycled_extent_state[1] = 1
+        live_extent_state[1] = 1
 
 
 @func
@@ -1158,6 +1189,25 @@ class DeviceWorklistBinding:
     unique_key_capacity: object = None
     unique_tag_allocation_identity: object = None
     unique_epoch_allocation_identity: object = None
+
+
+class _DeviceWorklistFixedGraphLease:
+    """Generation/front-qualified lifetime for one fixed Graph binding."""
+
+    exclusive_graph_submission = True
+
+    def __init__(self, worklist):
+        worklist._validate_current()
+        self.worklist = worklist
+        self.front = int(worklist._front)
+
+    def validate_graph_lifetime(self):
+        self.worklist._validate_current()
+        if int(self.worklist._front) != self.front:
+            raise TaichiRuntimeError(
+                "DeviceWorklist fixed Graph binding uses another front parity; "
+                "use the Graph compiled for the current front or rebuild it"
+            )
 
 
 @dataclass(frozen=True)
@@ -2641,10 +2691,38 @@ class DeviceWorklist:
         self._validate_current()
         if self._transition_mode != "direct":
             raise TaichiRuntimeError("fused DeviceWorklist recycling requires transition_mode='direct'")
+        if self._unique_epoch is not None:
+            raise TaichiRuntimeError(
+                "unique DeviceWorklist recycling requires "
+                "unique_recycle_arguments()"
+            )
         return (
             self.extent.state,
             self._stats["overflow"],
             self._stats["generation"],
+        )
+
+    def unique_recycle_arguments(self):
+        """Arguments for :func:`device_worklist_recycle_unique_direct`.
+
+        The current front is recycled and the produced next front remains live.
+        The caller must provide a globally ordered boundary kernel and then call
+        :meth:`commit_recycled_next` after that kernel completes or is ordered
+        before subsequent work in the same Graph.
+        """
+
+        self._validate_current()
+        if self._transition_mode != "direct" or self._unique_epoch is None:
+            raise TaichiRuntimeError(
+                "unique fused recycling requires a direct DeviceWorklist "
+                "with unique_key_capacity"
+            )
+        return (
+            self.extent.state,
+            self.next_extent.state,
+            self._stats["overflow"],
+            self._stats["generation"],
+            self._unique_epoch,
         )
 
     def commit_recycled_next(self):
@@ -2973,6 +3051,55 @@ class DeviceWorklist:
             transition_mode=self._transition_mode,
             unique_key_capacity=self._unique_key_capacity,
         )
+
+    def fixed_graph_args(self, builder, name):
+        """Bind address-stable worklist storage privately to one Graph.
+
+        The resulting Graph has no public worklist storage arguments.  The
+        binding is qualified by runtime generation and current front parity.
+        An even-transition Graph can be replayed directly; an odd-transition
+        pipeline must use the separately compiled Graph for the new front on
+        its next invocation.  Replaying a Graph with the wrong parity fails
+        before submission.
+        """
+
+        self._validate_current()
+        if not hasattr(builder, "_bind_internal_runtime_arg") or not hasattr(
+            builder, "_retain_runtime_graph_lease"
+        ):
+            raise TypeError(
+                "DeviceWorklist.fixed_graph_args() expects a GraphBuilder"
+            )
+        args = self.graph_args(name)
+        lease = _DeviceWorklistFixedGraphLease(self)
+        front = lease.front
+
+        def provider_owned(value):
+            return ProviderOwnedNdarrayBinding(value.arr, lease)
+
+        bindings = [
+            (args.current_values, provider_owned(self._values[front])),
+            (args.current_extent, self._extents[front]),
+            (args.next_values, provider_owned(self._values[1 - front])),
+            (args.next_extent, self._extents[1 - front]),
+            (args.capacity, self._capacity),
+        ]
+        for stat in _STATE_NAMES:
+            symbolic = getattr(args, stat)
+            if symbolic is not None:
+                bindings.append((symbolic, provider_owned(self._stats[stat])))
+        if self._unique_tags is not None:
+            bindings.extend(
+                (
+                    (args.unique_tags, provider_owned(self._unique_tags)),
+                    (args.unique_epoch, provider_owned(self._unique_epoch)),
+                    (args.unique_key_capacity, self._unique_key_capacity),
+                )
+            )
+        for symbolic, value in bindings:
+            builder._bind_internal_runtime_arg(symbolic, value)
+        builder._retain_runtime_graph_lease(lease)
+        return args
 
     def runtime_arguments(self, name, *, include_capacity=False):
         """Bind this worklist to :func:`device_worklist_graph_args`."""
@@ -3943,5 +4070,6 @@ __all__ = [
     "device_worklist_append_direct",
     "device_worklist_append_unique_direct",
     "device_worklist_recycle_direct",
+    "device_worklist_recycle_unique_direct",
     "device_worklist_graph_args",
 ]

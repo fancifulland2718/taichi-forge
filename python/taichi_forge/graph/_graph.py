@@ -9116,6 +9116,10 @@ class _GraphSpec:
                     seen_lifetime_leases.add(identity)
                     lifetime_leases.append(lease)
         self.lifetime_leases = tuple(lifetime_leases)
+        self.exclusive_provider_submission = any(
+            bool(getattr(lease, "exclusive_graph_submission", False))
+            for lease in self.lifetime_leases
+        )
         self.native_execution_observer_leases = tuple(
             lease
             for lease in self.lifetime_leases
@@ -9813,7 +9817,7 @@ class _GraphInstance:
         self._exclusive_internal_storage = any(
             isinstance(value, _GraphInternalNdarraySpec) and value.exclusive_submission
             for value in spec.fixed_runtime_args.values()
-        )
+        ) or spec.exclusive_provider_submission
         self._exclusive_internal_completion = None
         self._exclusive_internal_reserved = False
         self._exclusive_internal_waits = 0
@@ -12502,6 +12506,11 @@ class Graph:
         else:
             node = _CompiledCGraphNode(compiled_graph, 0, ())
             self._spec = _GraphSpec([node], aot_compiled_graph=compiled_graph)
+        if self._spec.exclusive_provider_submission and self._workspace_lane_capacity != 1:
+            raise TaichiRuntimeError(
+                "Graphs with exclusive provider-owned fixed storage require "
+                "workspace_lanes=1; use independent providers for concurrency"
+            )
         self._contains_native_nodes_value = self._spec.native_count > 0
         self._contains_structured_control_value = (
             self._spec.structured_control_count > 0

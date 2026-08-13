@@ -344,6 +344,7 @@ user_api[ti.algorithms] = [
     "device_worklist_append_unique_direct",
     "device_worklist_graph_args",
     "device_worklist_recycle_direct",
+    "device_worklist_recycle_unique_direct",
     "experimental_bucket_builder",
     "experimental_compact",
     "experimental_gather",
