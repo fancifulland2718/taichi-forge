@@ -1097,14 +1097,21 @@ class _GraphStructuredTelemetryRecorder:
             time.perf_counter_ns() - self._host_started_ns[index]
         )
 
-    def capture_bounded(self, args):
+    def capture_bounded(self, prepared_args, *, public_args=None):
         from taichi_forge.lang.device_extent import DeviceExtent
 
         device_index = 0
         base_offset = len(self._nodes) * self._VALUES_PER_REGION
         for source in self._bounded_sources:
             key = source["snapshot_key"]
-            value = args[source["count_name"]]
+            count_name = source["count_name"]
+            # Public host counts retain their pre-clamp observation semantics.
+            # Private, temporary, and derived bindings only exist in the
+            # prepared invocation used by the executable.
+            if public_args is not None and count_name in public_args:
+                value = public_args[count_name]
+            else:
+                value = prepared_args[count_name]
             if source["count_source"] == "host_scalar":
                 raw = HostBoundedDispatchHandle._host_count(value)
                 self._host_bounded_snapshots[key] = {
@@ -12994,7 +13001,9 @@ class Graph:
                     if self._contains_native_nodes_value:
                         transaction._mark_submission()
                     if telemetry_recorder is not None:
-                        telemetry_recorder.capture_bounded(args)
+                        telemetry_recorder.capture_bounded(
+                            prepared.arguments, public_args=args
+                        )
                     if observation_lease is not None:
                         observation_lease.enqueue_tail_readback()
                     completion = transaction._finish()

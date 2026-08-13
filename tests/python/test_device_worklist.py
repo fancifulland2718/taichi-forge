@@ -176,6 +176,17 @@ def _expand_unique_frontier_direct(
 
 
 @ti.kernel
+def _copy_fixed_worklist_frontier(
+    source_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    source_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+):
+    for i in range(64):
+        if i < ti.device_extent_count(source_extent):
+            output[i] = source_values[i]
+
+
+@ti.kernel
 def _read_dense_claim_winners(
     claims: ti.types.ndarray(ndim=1),
     source_bits: ti.i32,
@@ -681,6 +692,56 @@ def test_device_worklist_fixed_graph_binding_removes_public_storage_args():
 
     with pytest.raises(ti.TaichiRuntimeError, match="workspace_lanes=1"):
         builder.compile(workspace_lanes=2)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_worklist_fixed_extent_is_visible_to_submission_telemetry():
+    capacity = 64
+    worklist = ti.algorithms.DeviceWorklist(
+        capacity,
+        ti.i32,
+        telemetry=False,
+        transition_mode="direct",
+    )
+    seed = np.asarray([3, 5, 8], dtype=np.int32)
+    worklist.values.from_numpy(
+        np.pad(seed, (0, capacity - seed.size), constant_values=0)
+    )
+    worklist.extent.set(seed.size)
+
+    builder = ti.graph.GraphBuilder()
+    args = worklist.fixed_graph_args(builder, "fixed_probe")
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY,
+        "fixed_probe_output",
+        ti.i32,
+        ndim=1,
+    )
+    builder.dispatch_bounded(
+        _copy_fixed_worklist_frontier,
+        args.current_values,
+        args.current_extent,
+        output_arg,
+        extent=args.current_extent,
+        capacity=capacity,
+        block_dim=32,
+        label="fixed-probe",
+    )
+    graph = builder.compile()
+    output = ti.ndarray(ti.i32, shape=capacity)
+    output.fill(-1)
+
+    report = graph.submit(
+        {"fixed_probe_output": output}, telemetry="summary"
+    ).pipeline_report()
+
+    bounded = report.stages[0].bounded_dispatches[0]
+    assert bounded.count_name == "fixed_probe_current_extent"
+    assert bounded.source_count == seed.size
+    assert bounded.useful_count == seed.size
+    assert not bounded.overflow
+    assert bounded.snapshot_status == "ticket_device_snapshot"
+    np.testing.assert_array_equal(output.to_numpy()[: seed.size], seed)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
