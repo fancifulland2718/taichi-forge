@@ -1,3 +1,4 @@
 from ._algorithms import *
+from ._deterministic_reduce import *
 from ._device_prefix import *
 from ._device_worklist import *
