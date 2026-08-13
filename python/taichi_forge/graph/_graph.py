@@ -4929,7 +4929,8 @@ class _CompiledCGraphNode:
             )
         )
         self.recording_dispatches = tuple(
-            (kernel, tuple(args)) for kernel, args in recording_dispatches
+            _normalize_recording_dispatch(dispatch)
+            for dispatch in recording_dispatches
         )
         self.lifetime_leases = tuple(lifetime_leases)
         self.source_native_count = int(source_native_count)
@@ -8334,6 +8335,33 @@ def _reset_control_flow_reports(control_nodes):
             node._pending_report = None
 
 
+@dataclass(frozen=True)
+class _RecordingDispatch:
+    kernel: object
+    args: tuple
+    dispatch_packet: object = None
+
+
+def _normalize_recording_dispatch(dispatch):
+    if isinstance(dispatch, _RecordingDispatch):
+        return _RecordingDispatch(
+            dispatch.kernel,
+            tuple(dispatch.args),
+            dispatch.dispatch_packet,
+        )
+    if len(dispatch) == 2:
+        kernel, args = dispatch
+        packet = None
+    elif len(dispatch) == 3:
+        kernel, args, packet = dispatch
+    else:
+        raise TaichiRuntimeError(
+            "A Graph recording dispatch must contain kernel/args and an "
+            "optional indirect packet"
+        )
+    return _RecordingDispatch(kernel, tuple(args), packet)
+
+
 def _recordable_backend_dispatches(node, backend):
     if isinstance(node, _CompiledCGraphNode):
         if (
@@ -8347,7 +8375,10 @@ def _recordable_backend_dispatches(node, backend):
     recorder = node.recordable_action
     if recorder is None or not recorder.supports_backend(backend):
         return None
-    dispatches = tuple(recorder.dispatches)
+    dispatches = tuple(
+        _normalize_recording_dispatch(dispatch)
+        for dispatch in recorder.dispatches
+    )
     return dispatches or None
 
 
@@ -8362,12 +8393,23 @@ def _recording_dispatch_ir_nodes(node, dispatch_count):
     return (None,) * dispatch_count
 
 
-def _record_backend_dispatch(builder, backend, kernel, args, ir_node):
+def _record_backend_dispatch(builder, backend, dispatch, ir_node):
+    dispatch = _normalize_recording_dispatch(dispatch)
+    kernel = dispatch.kernel
+    args = dispatch.args
     label = (
         ir_node.dispatch_label
         if isinstance(ir_node, DispatchNode)
         else ""
     )
+    if dispatch.dispatch_packet is not None:
+        builder.dispatch_indirect(
+            kernel,
+            args,
+            dispatch.dispatch_packet,
+            label,
+        )
+        return
     domain = (
         ir_node.bounded_domain
         if isinstance(ir_node, DispatchNode)
@@ -8747,17 +8789,16 @@ def _lower_mixed_backend_regions(nodes):
             dispatch_ir_nodes = _recording_dispatch_ir_nodes(
                 node, len(dispatches)
             )
-            for (kernel, args), dispatch_ir_node in zip(
+            for dispatch, dispatch_ir_node in zip(
                 dispatches, dispatch_ir_nodes
             ):
                 _record_backend_dispatch(
                     builder,
                     backend,
-                    kernel,
-                    args,
+                    dispatch,
                     dispatch_ir_node,
                 )
-                recording_dispatches.append((kernel, tuple(args)))
+                recording_dispatches.append(dispatch)
             runtime_arg_names.update(
                 getattr(
                     node,
@@ -11146,14 +11187,26 @@ class Sequential:
             if item[0] == "dispatch":
                 _, kernel_cpp, args, label = item
                 _record_backend_dispatch(
-                    builder, backend, kernel_cpp, tuple(args), ir_node
+                    builder,
+                    backend,
+                    _RecordingDispatch(kernel_cpp, tuple(args)),
+                    ir_node,
                 )
-                recording_dispatches.append((kernel_cpp, tuple(args)))
+                recording_dispatches.append(
+                    _RecordingDispatch(kernel_cpp, tuple(args))
+                )
                 continue
             elif item[0] == "indirect":
                 _, kernel_cpp, args, dispatch_packet, label = item
                 builder.dispatch_indirect(
                     kernel_cpp, args, dispatch_packet, label
+                )
+                recording_dispatches.append(
+                    _RecordingDispatch(
+                        kernel_cpp,
+                        tuple(args),
+                        dispatch_packet,
+                    )
                 )
                 continue
             elif item[0] == "native":
@@ -11177,7 +11230,9 @@ class Sequential:
                 )
             for kernel_cpp, args in dispatches:
                 builder.dispatch(kernel_cpp, args, label)
-                recording_dispatches.append((kernel_cpp, tuple(args)))
+                recording_dispatches.append(
+                    _RecordingDispatch(kernel_cpp, tuple(args))
+                )
         return tuple(recording_dispatches)
 
 
@@ -11295,6 +11350,13 @@ class GraphBuilder:
                 unzipped_args,
                 dispatch_packet=dispatch_packet,
                 dispatch_label=label,
+            )
+        )
+        self._runtime_graph_dispatches.append(
+            _RecordingDispatch(
+                kernel_cpp,
+                tuple(unzipped_args),
+                dispatch_packet,
             )
         )
         self._dispatch_count += 1
@@ -11917,7 +11979,9 @@ class GraphBuilder:
         self._ensure_runtime_graph_builder().dispatch(
             kernel_cpp, unzipped_args, label
         )
-        self._runtime_graph_dispatches.append((kernel_cpp, tuple(unzipped_args)))
+        self._runtime_graph_dispatches.append(
+            _RecordingDispatch(kernel_cpp, tuple(unzipped_args))
+        )
         self._runtime_graph_arg_names.update(_runtime_arg_names(unzipped_args))
         self._pending_ir_nodes.append(
             _dispatch_ir_node(
@@ -11952,7 +12016,9 @@ class GraphBuilder:
             grouped_update,
             label,
         )
-        self._runtime_graph_dispatches.append((kernel_cpp, tuple(unzipped_args)))
+        self._runtime_graph_dispatches.append(
+            _RecordingDispatch(kernel_cpp, tuple(unzipped_args))
+        )
         self._runtime_graph_arg_names.update(_runtime_arg_names(unzipped_args))
         self._pending_ir_nodes.append(
             _dispatch_ir_node(
@@ -11979,7 +12045,9 @@ class GraphBuilder:
             capacity,
             label,
         )
-        self._runtime_graph_dispatches.append((kernel_cpp, tuple(unzipped_args)))
+        self._runtime_graph_dispatches.append(
+            _RecordingDispatch(kernel_cpp, tuple(unzipped_args))
+        )
         self._runtime_graph_arg_names.update(_runtime_arg_names(unzipped_args))
         self._pending_ir_nodes.append(
             _dispatch_ir_node(
@@ -12004,7 +12072,7 @@ class GraphBuilder:
             )
             return self
         self._aot_graph_plan.append(node)
-        node._dispatch_to(self._runtime_graph_builder)
+        recording_dispatches = node._dispatch_to(self._runtime_graph_builder)
         for binding_name, value in node._fixed_runtime_args.items():
             existing = self._runtime_graph_fixed_args.get(binding_name)
             if existing is not None and existing is not value:
@@ -12022,9 +12090,7 @@ class GraphBuilder:
             self._retain_runtime_graph_lease(lease)
         if node._fixed_runtime_args:
             self._aot_graph_plan.mark_internal_fixed_bindings()
-        self._runtime_graph_dispatches.extend(
-            (kernel, tuple(args)) for kernel, args in node._dispatches
-        )
+        self._runtime_graph_dispatches.extend(recording_dispatches)
         self._runtime_graph_arg_names.update(node._runtime_arg_names)
         self._dispatch_count += node._dispatch_count
         self._pending_ir_nodes.extend(node._ir_nodes)

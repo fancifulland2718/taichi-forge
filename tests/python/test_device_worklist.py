@@ -100,6 +100,62 @@ def _produce_dense_claims(
 
 
 @ti.kernel
+def _append_unique_candidates_direct(
+    values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    extent_state: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    overflow: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    capacity: ti.i32,
+    unique_tags: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    unique_epoch: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    unique_key_capacity: ti.i32,
+    candidates: ti.types.ndarray(dtype=ti.i32, ndim=1),
+):
+    for i in candidates:
+        key = candidates[i]
+        ti.algorithms.device_worklist_append_unique_direct(
+            values,
+            extent_state,
+            overflow,
+            capacity,
+            unique_tags,
+            unique_epoch,
+            unique_key_capacity,
+            key,
+            key,
+        )
+
+
+@ti.kernel
+def _expand_unique_frontier_direct(
+    source_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    source_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    target_values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    target_extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    overflow: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    capacity: ti.i32,
+    unique_tags: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    unique_epoch: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    unique_key_capacity: ti.i32,
+):
+    for i in range(64):
+        if i < ti.device_extent_count(source_extent):
+            key = source_values[i]
+            for offset in ti.static(range(2)):
+                emitted = key + offset
+                ti.algorithms.device_worklist_append_unique_direct(
+                    target_values,
+                    target_extent,
+                    overflow,
+                    capacity,
+                    unique_tags,
+                    unique_epoch,
+                    unique_key_capacity,
+                    emitted,
+                    emitted,
+                )
+
+
+@ti.kernel
 def _read_dense_claim_winners(
     claims: ti.types.ndarray(ndim=1),
     source_bits: ti.i32,
@@ -322,6 +378,195 @@ def test_device_worklist_fused_recycle_removes_per_level_prepare_dispatch():
     # The consumed front was recycled by the boundary kernel and is already
     # ready to receive the following level without prepare_next().
     assert worklist.next_extent.snapshot().count == 0
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_worklist_unique_direct_append_is_generation_scoped():
+    capacity = 32
+    key_capacity = 64
+    worklist = ti.algorithms.DeviceWorklist(
+        capacity,
+        ti.i32,
+        telemetry=False,
+        transition_mode="direct",
+        unique_key_capacity=key_capacity,
+    )
+    candidates = ti.ndarray(ti.i32, shape=9)
+    candidates.from_numpy(np.asarray([3, 3, 4, 7, 4, 7, 9, 9, 11], dtype=np.int32))
+
+    worklist.prepare_next()
+    _append_unique_candidates_direct(
+        *worklist.unique_append_arguments(), candidates
+    )
+    worklist.commit_next()
+    np.testing.assert_array_equal(
+        np.sort(worklist.snapshot().values),
+        np.asarray([3, 4, 7, 9, 11], dtype=np.int32),
+    )
+
+    candidates.from_numpy(np.asarray([4, 4, 5, 5, 7, 8, 8, 11, 11], dtype=np.int32))
+    worklist.prepare_next()
+    _append_unique_candidates_direct(
+        *worklist.unique_append_arguments(), candidates
+    )
+    worklist.commit_next()
+    snapshot = worklist.snapshot()
+    np.testing.assert_array_equal(
+        np.sort(snapshot.values),
+        np.asarray([4, 5, 7, 8, 11], dtype=np.int32),
+    )
+    assert not snapshot.extent.overflow
+    assert worklist.unique_epoch.to_numpy().item() == 2
+    memory = worklist.memory_report()
+    assert memory["unique_enabled"]
+    assert memory["unique_key_capacity"] == key_capacity
+    assert memory["unique_tag_bytes"] == key_capacity * 4 + 4
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_worklist_unique_direct_rejects_invalid_key_and_capacity():
+    worklist = ti.algorithms.DeviceWorklist(
+        4,
+        ti.i32,
+        telemetry=False,
+        transition_mode="direct",
+        unique_key_capacity=8,
+    )
+    candidates = ti.ndarray(ti.i32, shape=6)
+    candidates.from_numpy(np.asarray([0, 1, 2, 3, 4, 9], dtype=np.int32))
+    worklist.prepare_next()
+    _append_unique_candidates_direct(
+        *worklist.unique_append_arguments(), candidates
+    )
+    worklist.commit_next()
+    snapshot = worklist.snapshot()
+    assert snapshot.extent.count == 4
+    assert snapshot.extent.overflow
+    assert snapshot.statistics.overflow
+    worklist.prepare_next()
+    propagated = worklist.next_extent.snapshot()
+    assert propagated.count == 0
+    assert propagated.overflow
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_worklist_graph_alternates_incremental_unique_frontiers():
+    capacity = 64
+    worklist = ti.algorithms.DeviceWorklist(
+        capacity,
+        ti.i32,
+        telemetry=False,
+        transition_mode="direct",
+        unique_key_capacity=capacity,
+    )
+    seed = np.asarray([4, 5, 6], dtype=np.int32)
+    worklist.values.from_numpy(
+        np.pad(seed, (0, capacity - seed.size), constant_values=0)
+    )
+    worklist.extent.set(seed.size)
+
+    args = worklist.graph_args("active")
+    source0, extent0, target0, target_extent0 = args.transition_arguments(0)
+    source1, extent1, target1, target_extent1 = args.transition_arguments(1)
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(
+        ti.algorithms.DeviceWorklistSequence(args).prepare(target="next")
+    )
+    builder.dispatch_bounded(
+        _expand_unique_frontier_direct,
+        source0,
+        extent0,
+        target0,
+        target_extent0,
+        args.overflow,
+        args.capacity,
+        args.unique_tags,
+        args.unique_epoch,
+        args.unique_key_capacity,
+        extent=extent0,
+        capacity=capacity,
+        block_dim=32,
+    )
+    builder.append_native(
+        ti.algorithms.DeviceWorklistSequence(args).prepare(target="current")
+    )
+    builder.dispatch_bounded(
+        _expand_unique_frontier_direct,
+        source1,
+        extent1,
+        target1,
+        target_extent1,
+        args.overflow,
+        args.capacity,
+        args.unique_tags,
+        args.unique_epoch,
+        args.unique_key_capacity,
+        extent=extent1,
+        capacity=capacity,
+        block_dim=32,
+    )
+    graph = builder.compile()
+    graph.run(worklist.runtime_arguments("active", include_capacity=True))
+
+    np.testing.assert_array_equal(
+        np.sort(worklist.snapshot().values),
+        np.asarray([4, 5, 6, 7, 8], dtype=np.int32),
+    )
+    assert worklist.unique_epoch.to_numpy().item() == 2
+    assert not worklist.statistics().overflow
+    physical = graph.physical_plan()
+    assert physical["logical_submission_count"] == 1
+    assert physical["logical_node_count"] == 1
+    assert physical["physical_dispatch_count"] == 4
+    assert physical["backend_recording_complete"]
+    assert not physical["fragmented_native_plan"]
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_device_worklist_graph_unique_transition_propagates_source_overflow():
+    capacity = 64
+    worklist = ti.algorithms.DeviceWorklist(
+        capacity,
+        ti.i32,
+        telemetry=False,
+        transition_mode="direct",
+        unique_key_capacity=capacity,
+    )
+    worklist.values.from_numpy(np.arange(capacity, dtype=np.int32))
+    worklist.extent.set(capacity + 1)
+
+    args = worklist.graph_args("active")
+    source, source_extent, target, target_extent = args.transition_arguments(0)
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(
+        ti.algorithms.DeviceWorklistSequence(args).prepare(target="next")
+    )
+    builder.dispatch_bounded(
+        _expand_unique_frontier_direct,
+        source,
+        source_extent,
+        target,
+        target_extent,
+        args.overflow,
+        args.capacity,
+        args.unique_tags,
+        args.unique_epoch,
+        args.unique_key_capacity,
+        extent=source_extent,
+        capacity=capacity,
+        block_dim=32,
+    )
+    graph = builder.compile()
+    graph.run(worklist.runtime_arguments("active", include_capacity=True))
+
+    assert worklist.extent.snapshot().overflow
+    assert worklist.next_extent.snapshot().count == 0
+    assert worklist.next_extent.snapshot().overflow
+    assert worklist.statistics().overflow
+    physical = graph.physical_plan()
+    assert physical["logical_node_count"] == 1
+    assert physical["physical_dispatch_count"] == 2
+    assert not physical["fragmented_native_plan"]
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

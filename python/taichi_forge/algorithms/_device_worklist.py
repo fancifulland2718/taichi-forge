@@ -36,6 +36,7 @@ from taichi_forge.lang.device_extent import (
     DeviceDispatchState,
     DeviceExtent,
     device_dispatch_state_publish,
+    device_extent_count,
 )
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang.impl import ndarray as ti_ndarray
@@ -137,6 +138,12 @@ def _require_transition_mode(value):
     return value
 
 
+def _require_unique_key_capacity(value):
+    if value is None:
+        return None
+    return _require_capacity(value, "unique_key_capacity")
+
+
 def _require_worklist_array(value, role, capacity, dtype=None):
     if not isinstance(value, ScalarNdarray):
         raise TypeError(f"DeviceWorklist {role} must be a scalar ti.ndarray")
@@ -220,6 +227,62 @@ def device_worklist_append_direct(
             result = slot
         else:
             ops.atomic_min(extent_state[0], capacity)
+            ops.atomic_or(overflow[None], 1)
+            ops.atomic_or(extent_state[1], 1)
+    return result
+
+
+@func
+def device_worklist_append_unique_direct(
+    values: template(),
+    extent_state: template(),
+    overflow: template(),
+    capacity: i32,
+    unique_tags: template(),
+    unique_epoch: template(),
+    unique_key_capacity: i32,
+    key: i32,
+    value: template(),
+):
+    """Append ``value`` once per dense integer ``key`` in this transition.
+
+    The producer owns a monotonically increasing epoch and a dense tag table.
+    ``atomic_max`` elects exactly one producer for each key without clearing the
+    table between transitions.  Output order remains unspecified.  Invalid
+    keys, ABI mismatches, exhausted epochs, and capacity overflow all set the
+    same sticky overflow state used by :class:`DeviceExtent`.
+
+    This helper is intended for incremental active-domain producers: a bounded
+    kernel may visit the current frontier, emit a cell and its halo directly
+    into the next frontier, and feed that extent to another bounded dispatch
+    without a full-domain select pass.
+    """
+
+    result = -1
+    epoch = unique_epoch[None]
+    if (
+        capacity != values.shape[0]
+        or unique_key_capacity != unique_tags.shape[0]
+        or key < 0
+        or key >= unique_key_capacity
+        or epoch <= 0
+        or overflow[None] != 0
+    ):
+        ops.atomic_or(overflow[None], 1)
+        ops.atomic_or(extent_state[1], 1)
+    else:
+        previous = ops.atomic_max(unique_tags[key], epoch)
+        if previous < epoch:
+            result = device_worklist_append_direct(
+                values,
+                extent_state,
+                overflow,
+                capacity,
+                value,
+            )
+        elif previous > epoch:
+            # A future tag means the epoch contract was rewound or wrapped.
+            # Fail closed instead of admitting a partially deduplicated set.
             ops.atomic_or(overflow[None], 1)
             ops.atomic_or(extent_state[1], 1)
     return result
@@ -415,6 +478,137 @@ def _begin_direct_worklist_transition(
     overflow[None] = 0
     if advance_generation != 0:
         generation[None] += 1
+
+
+@kernel
+def _begin_unique_direct_worklist_transition(
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    source_extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    overflow: ndarray_type.ndarray(dtype=i32, ndim=0),
+    generation: ndarray_type.ndarray(dtype=i32, ndim=0),
+    unique_epoch: ndarray_type.ndarray(dtype=i32, ndim=0),
+    advance_generation: i32,
+):
+    """Reset one direct target and publish a fresh unique-append epoch."""
+
+    extent_state[0] = 0
+    inherited_overflow = 1 if source_extent_state[1] != 0 else 0
+    extent_state[1] = inherited_overflow
+    overflow[None] = inherited_overflow
+    if advance_generation != 0:
+        generation[None] += 1
+        if unique_epoch[None] < 0x7FFFFFFF:
+            unique_epoch[None] += 1
+        else:
+            # Reusing a wrapped epoch could silently admit duplicates.  Epoch
+            # exhaustion is practically unreachable, but remains an explicit
+            # fail-closed boundary that can be recovered with clear().
+            overflow[None] = 1
+            extent_state[1] = 1
+
+
+@func
+def _publish_existing_worklist_extent(
+    extent_state: template(),
+    dispatch_packet: template(),
+    capacity: i32,
+    block_dim: i32,
+):
+    """Publish a previously bounded front without losing sticky overflow."""
+
+    count = device_extent_count(extent_state)
+    prior_overflow = 1 if extent_state[1] != 0 else 0
+    dispatch_packet[3] = ops.cast(block_dim, u32)
+    device_dispatch_state_publish(extent_state, dispatch_packet, capacity, count)
+    if prior_overflow != 0:
+        extent_state[1] = 1
+
+
+@kernel
+def _reset_worklist_target_with_dispatch(
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    generated: ndarray_type.ndarray(dtype=i32, ndim=0),
+    accepted: ndarray_type.ndarray(dtype=i32, ndim=0),
+    rejected: ndarray_type.ndarray(dtype=i32, ndim=0),
+    conflicts: ndarray_type.ndarray(dtype=i32, ndim=0),
+    winners: ndarray_type.ndarray(dtype=i32, ndim=0),
+    overflow: ndarray_type.ndarray(dtype=i32, ndim=0),
+    source_extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    dispatch_packet: ndarray_type.ndarray(dtype=u32, ndim=1),
+    capacity: i32,
+    block_dim: i32,
+):
+    extent_state[0] = 0
+    extent_state[1] = 0
+    generated[None] = 0
+    accepted[None] = 0
+    rejected[None] = 0
+    conflicts[None] = 0
+    winners[None] = 0
+    overflow[None] = 0
+    _publish_existing_worklist_extent(source_extent_state, dispatch_packet, capacity, block_dim)
+
+
+@kernel
+def _reset_worklist_target_minimal_with_dispatch(
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    generated: ndarray_type.ndarray(dtype=i32, ndim=0),
+    overflow: ndarray_type.ndarray(dtype=i32, ndim=0),
+    source_extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    dispatch_packet: ndarray_type.ndarray(dtype=u32, ndim=1),
+    capacity: i32,
+    block_dim: i32,
+):
+    extent_state[0] = 0
+    extent_state[1] = 0
+    generated[None] = 0
+    overflow[None] = 0
+    _publish_existing_worklist_extent(source_extent_state, dispatch_packet, capacity, block_dim)
+
+
+@kernel
+def _begin_direct_worklist_transition_with_dispatch(
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    source_extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    overflow: ndarray_type.ndarray(dtype=i32, ndim=0),
+    generation: ndarray_type.ndarray(dtype=i32, ndim=0),
+    advance_generation: i32,
+    dispatch_packet: ndarray_type.ndarray(dtype=u32, ndim=1),
+    capacity: i32,
+    block_dim: i32,
+):
+    extent_state[0] = 0
+    extent_state[1] = 0
+    overflow[None] = 0
+    if advance_generation != 0:
+        generation[None] += 1
+    _publish_existing_worklist_extent(source_extent_state, dispatch_packet, capacity, block_dim)
+
+
+@kernel
+def _begin_unique_direct_worklist_transition_with_dispatch(
+    extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    source_extent_state: ndarray_type.ndarray(dtype=i32, ndim=1),
+    overflow: ndarray_type.ndarray(dtype=i32, ndim=0),
+    generation: ndarray_type.ndarray(dtype=i32, ndim=0),
+    unique_epoch: ndarray_type.ndarray(dtype=i32, ndim=0),
+    advance_generation: i32,
+    dispatch_packet: ndarray_type.ndarray(dtype=u32, ndim=1),
+    capacity: i32,
+    block_dim: i32,
+):
+    extent_state[0] = 0
+    inherited_overflow = 1 if source_extent_state[1] != 0 else 0
+    extent_state[1] = inherited_overflow
+    overflow[None] = inherited_overflow
+    if advance_generation != 0:
+        generation[None] += 1
+        if unique_epoch[None] < 0x7FFFFFFF:
+            unique_epoch[None] += 1
+        else:
+            overflow[None] = 1
+            extent_state[1] = 1
+    _publish_existing_worklist_extent(source_extent_state, dispatch_packet, capacity, block_dim)
 
 
 @kernel
@@ -961,6 +1155,9 @@ class DeviceWorklistBinding:
     value_allocation_identities: tuple
     extent_allocation_identities: tuple
     stat_allocation_identities: tuple
+    unique_key_capacity: object = None
+    unique_tag_allocation_identity: object = None
+    unique_epoch_allocation_identity: object = None
 
 
 @dataclass(frozen=True)
@@ -1290,6 +1487,10 @@ class DeviceWorklistGraphArgs:
     capacity: object
     telemetry: bool = True
     transition_mode: str = "staged"
+    unique_tags: object = None
+    unique_epoch: object = None
+    unique_key_capacity: object = None
+    unique_key_capacity_value: object = None
 
     @property
     def stat_args(self):
@@ -1311,15 +1512,57 @@ class DeviceWorklistGraphArgs:
         return (*self.stat_args, self.generation)
 
     def append_arguments(self, *, target="next"):
-        if target == "next":
-            values, extent = self.next_values, self.next_extent
-        elif target == "current":
-            values, extent = self.current_values, self.current_extent
-        else:
-            raise ValueError("DeviceWorklist append target must be current or next")
+        values, extent = self.target_arguments(target)
         if self.transition_mode == "direct":
             return values, extent, self.overflow, self.capacity
         return values, extent, self.generated, self.overflow, self.capacity
+
+    def target_arguments(self, target):
+        """Return the symbolic ``(values, extent)`` pair for one buffer."""
+
+        if target == "next":
+            return self.next_values, self.next_extent
+        if target == "current":
+            return self.current_values, self.current_extent
+        raise ValueError("DeviceWorklist target must be current or next")
+
+    def transition_arguments(self, step=0):
+        """Return ``(source_values, source_extent, target_values, target_extent)``.
+
+        Consecutive transitions alternate the two fixed buffers.  This helper
+        keeps multi-stage incremental Graphs static while avoiding ambiguous
+        current/next spelling at each stage.
+        """
+
+        if isinstance(step, bool) or not isinstance(step, int) or step < 0:
+            raise ValueError("DeviceWorklist transition step must be a non-negative integer")
+        source = "current" if step % 2 == 0 else "next"
+        target = "next" if step % 2 == 0 else "current"
+        source_values, source_extent = self.target_arguments(source)
+        target_values, target_extent = self.target_arguments(target)
+        return source_values, source_extent, target_values, target_extent
+
+    @property
+    def unique_enabled(self):
+        return self.unique_tags is not None
+
+    def unique_append_arguments(self, *, target="next"):
+        """Arguments for :func:`device_worklist_append_unique_direct`."""
+
+        if not self.unique_enabled:
+            raise TaichiRuntimeError("DeviceWorklist Graph ABI was created without unique_key_capacity")
+        if self.transition_mode != "direct":
+            raise TaichiRuntimeError("unique append requires transition_mode='direct'")
+        values, extent = self.target_arguments(target)
+        return (
+            values,
+            extent,
+            self.overflow,
+            self.capacity,
+            self.unique_tags,
+            self.unique_epoch,
+            self.unique_key_capacity,
+        )
 
     def observe(self, builder, *, name=None):
         """Append completion-attached observation of all worklist counters."""
@@ -1362,6 +1605,7 @@ def device_worklist_graph_args(
     *,
     telemetry=True,
     transition_mode="staged",
+    unique_key_capacity=None,
 ):
     """Create the symbolic argument bundle paired with ``runtime_arguments``."""
 
@@ -1375,6 +1619,9 @@ def device_worklist_graph_args(
     transition_mode = _require_transition_mode(transition_mode)
     if transition_mode == "direct" and telemetry:
         raise ValueError("direct DeviceWorklist transitions require telemetry=False")
+    unique_key_capacity = _require_unique_key_capacity(unique_key_capacity)
+    if unique_key_capacity is not None and transition_mode != "direct":
+        raise ValueError("unique DeviceWorklist Graph ABI requires transition_mode='direct'")
     from taichi_forge import graph  # pylint: disable=import-outside-toplevel
 
     ndarray = graph.ArgKind.NDARRAY
@@ -1397,6 +1644,16 @@ def device_worklist_graph_args(
         capacity=graph.Arg(scalar, f"{name}_capacity", i32),
         telemetry=telemetry,
         transition_mode=transition_mode,
+        unique_tags=(
+            graph.Arg(ndarray, f"{name}_unique_tags", i32, ndim=1) if unique_key_capacity is not None else None
+        ),
+        unique_epoch=(
+            graph.Arg(ndarray, f"{name}_unique_epoch", i32, ndim=0) if unique_key_capacity is not None else None
+        ),
+        unique_key_capacity=(
+            graph.Arg(scalar, f"{name}_unique_key_capacity", i32) if unique_key_capacity is not None else None
+        ),
+        unique_key_capacity_value=unique_key_capacity,
     )
 
 
@@ -2101,7 +2358,14 @@ def _resolve_impl(
 
 
 class DeviceWorklist:
-    """Stable front/back storage for a device-driven fixed-capacity worklist."""
+    """Stable front/back storage for a device-driven fixed-capacity worklist.
+
+    ``unique_key_capacity`` enables generation-stamped unique append for dense
+    integer key domains.  It is intentionally available only with the lean
+    direct transition contract: the producer publishes the next extent while
+    it runs, so an incremental frontier does not need a full-domain compact or
+    a separate finalize dispatch.
+    """
 
     def __init__(
         self,
@@ -2111,6 +2375,7 @@ class DeviceWorklist:
         workspace=None,
         telemetry=True,
         transition_mode="staged",
+        unique_key_capacity=None,
     ):
         capacity = _require_capacity(capacity)
         if dtype not in _WORKLIST_DTYPES:
@@ -2122,6 +2387,9 @@ class DeviceWorklist:
         transition_mode = _require_transition_mode(transition_mode)
         if transition_mode == "direct" and telemetry:
             raise ValueError("direct DeviceWorklist transitions require telemetry=False")
+        unique_key_capacity = _require_unique_key_capacity(unique_key_capacity)
+        if unique_key_capacity is not None and transition_mode != "direct":
+            raise ValueError("unique DeviceWorklist storage requires transition_mode='direct'")
         if workspace is None:
             workspace = DevicePrefixWorkspace(capacity)
         if not isinstance(workspace, DevicePrefixWorkspace):
@@ -2137,6 +2405,12 @@ class DeviceWorklist:
         self._extents = (DeviceExtent(capacity), DeviceExtent(capacity))
         self._telemetry = telemetry
         self._transition_mode = transition_mode
+        self._unique_key_capacity = unique_key_capacity
+        self._unique_tags = ti_ndarray(i32, shape=unique_key_capacity) if unique_key_capacity is not None else None
+        self._unique_epoch = ti_ndarray(i32, shape=()) if unique_key_capacity is not None else None
+        if self._unique_tags is not None:
+            self._unique_tags.fill(0)
+            self._unique_epoch.fill(0)
         state_names = (
             _STATE_NAMES
             if telemetry
@@ -2158,6 +2432,13 @@ class DeviceWorklist:
             extent_allocation_identities=tuple(extent.binding.allocation_identity for extent in self._extents),
             stat_allocation_identities=tuple(
                 int(self._stats[name]._runtime_allocation_identity) for name in state_names
+            ),
+            unique_key_capacity=unique_key_capacity,
+            unique_tag_allocation_identity=(
+                int(self._unique_tags._runtime_allocation_identity) if self._unique_tags is not None else None
+            ),
+            unique_epoch_allocation_identity=(
+                int(self._unique_epoch._runtime_allocation_identity) if self._unique_epoch is not None else None
             ),
         )
         self.clear()
@@ -2212,6 +2493,28 @@ class DeviceWorklist:
         return self._transition_mode
 
     @property
+    def unique_enabled(self):
+        return self._unique_tags is not None
+
+    @property
+    def unique_key_capacity(self):
+        return self._unique_key_capacity
+
+    @property
+    def unique_tags(self):
+        self._validate_current()
+        if self._unique_tags is None:
+            raise TaichiRuntimeError("DeviceWorklist unique append is not enabled")
+        return self._unique_tags
+
+    @property
+    def unique_epoch(self):
+        self._validate_current()
+        if self._unique_epoch is None:
+            raise TaichiRuntimeError("DeviceWorklist unique append is not enabled")
+        return self._unique_epoch
+
+    @property
     def workspace_bytes_current(self):
         self._workspace._refresh_usage()
         return self._workspace.workspace_bytes_current
@@ -2230,11 +2533,23 @@ class DeviceWorklist:
                 raise TaichiRuntimeError("DeviceWorklist storage is no longer valid")
         for extent in self._extents:
             extent._validate_current()
+        if self._unique_tags is not None:
+            if (
+                self._unique_tags.arr is None
+                or int(self._unique_tags._runtime_allocation_identity) != self._binding.unique_tag_allocation_identity
+                or self._unique_epoch.arr is None
+                or int(self._unique_epoch._runtime_allocation_identity)
+                != self._binding.unique_epoch_allocation_identity
+            ):
+                raise TaichiRuntimeError("DeviceWorklist unique storage is no longer valid")
 
     def clear(self):
         """Clear both fronts and all counters without reallocating storage."""
 
         self._validate_current()
+        if self._unique_tags is not None:
+            self._unique_tags.fill(0)
+            self._unique_epoch.fill(0)
         if self._transition_mode == "direct":
             _begin_direct_worklist_transition(
                 self._extents[0].state,
@@ -2249,22 +2564,51 @@ class DeviceWorklist:
         self._next_requires_finalize = False
         return self
 
+    def prepare(self, *, target="next"):
+        """Reset one target before atomic production.
+
+        ``target='current'`` is primarily useful for the second, fourth, ...
+        transition in a static multi-stage Graph.  Ordinary eager code should
+        normally use :meth:`prepare_next` and then :meth:`commit_next`.
+        """
+
+        self._validate_current()
+        if target == "next":
+            extent = self.next_extent
+        elif target == "current":
+            extent = self.extent
+        else:
+            raise ValueError("DeviceWorklist prepare target must be current or next")
+        if self._transition_mode == "direct":
+            if self._unique_epoch is not None:
+                source_extent = self.extent if target == "next" else self.next_extent
+                _begin_unique_direct_worklist_transition(
+                    extent.state,
+                    source_extent.state,
+                    self._stats["overflow"],
+                    self._stats["generation"],
+                    self._unique_epoch,
+                    1,
+                )
+            else:
+                _begin_direct_worklist_transition(
+                    extent.state,
+                    self._stats["overflow"],
+                    self._stats["generation"],
+                    1,
+                )
+            self._next_requires_finalize = False
+        else:
+            if target != "next":
+                raise TaichiRuntimeError("staged DeviceWorklist eager transitions only prepare target='next'")
+            _reset_target(extent, self._stats)
+            self._next_requires_finalize = True
+        return self
+
     def prepare_next(self):
         """Reset the back extent and counters before atomic production."""
 
-        self._validate_current()
-        if self._transition_mode == "direct":
-            _begin_direct_worklist_transition(
-                self.next_extent.state,
-                self._stats["overflow"],
-                self._stats["generation"],
-                1,
-            )
-            self._next_requires_finalize = False
-        else:
-            _reset_target(self.next_extent, self._stats)
-            self._next_requires_finalize = True
-        return self
+        return self.prepare(target="next")
 
     def commit_next(self, *, dispatch_state=None):
         """Swap front/back ownership; this operation does not synchronize."""
@@ -2314,6 +2658,24 @@ class DeviceWorklist:
         self._front = 1 - self._front
         return self
 
+    def commit_direct_transitions(self, steps=1):
+        """Advance Python front ownership after static direct Graph stages.
+
+        The operation performs no synchronization and touches no device state.
+        Runtime ordering and the Graph submission ticket continue to own device
+        lifetime.  An odd number of transitions swaps the front; an even number
+        leaves it unchanged.
+        """
+
+        self._validate_current()
+        if self._transition_mode != "direct":
+            raise TaichiRuntimeError("commit_direct_transitions requires direct mode")
+        if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
+            raise ValueError("DeviceWorklist transition steps must be a non-negative integer")
+        if steps % 2:
+            self._front = 1 - self._front
+        return self
+
     def append_arguments(self, *, target="next"):
         """Return arguments consumed by :func:`device_worklist_append`."""
 
@@ -2332,6 +2694,28 @@ class DeviceWorklist:
             self._stats["generated"],
             self._stats["overflow"],
             self._capacity,
+        )
+
+    def unique_append_arguments(self, *, target="next"):
+        """Return arguments for generation-stamped unique direct append."""
+
+        self._validate_current()
+        if self._unique_tags is None:
+            raise TaichiRuntimeError("DeviceWorklist was created without unique_key_capacity")
+        if target == "next":
+            values, extent = self.next_values, self.next_extent
+        elif target == "current":
+            values, extent = self.values, self.extent
+        else:
+            raise ValueError("DeviceWorklist append target must be current or next")
+        return (
+            values,
+            extent.state,
+            self._stats["overflow"],
+            self._capacity,
+            self._unique_tags,
+            self._unique_epoch,
+            self._unique_key_capacity,
         )
 
     def prefix(self):
@@ -2587,6 +2971,7 @@ class DeviceWorklist:
             self._dtype,
             telemetry=self._telemetry,
             transition_mode=self._transition_mode,
+            unique_key_capacity=self._unique_key_capacity,
         )
 
     def runtime_arguments(self, name, *, include_capacity=False):
@@ -2601,7 +2986,12 @@ class DeviceWorklist:
         }
         if include_capacity:
             result[f"{name}_capacity"] = self._capacity
+            if self._unique_key_capacity is not None:
+                result[f"{name}_unique_key_capacity"] = self._unique_key_capacity
         result.update((f"{name}_{key}", value) for key, value in self._stats.items())
+        if self._unique_tags is not None:
+            result[f"{name}_unique_tags"] = self._unique_tags
+            result[f"{name}_unique_epoch"] = self._unique_epoch
         return result
 
     def memory_report(self):
@@ -2610,6 +3000,7 @@ class DeviceWorklist:
         counter_bytes = len(self._stats) * 4
         mandatory_counter_bytes = 8 if self._transition_mode == "direct" else 12
         owned = front_back + 16 + counter_bytes
+        unique_bytes = self._unique_key_capacity * 4 + 4 if self._unique_key_capacity is not None else 0
         return {
             "schema_version": 1,
             "capacity": self._capacity,
@@ -2620,10 +3011,13 @@ class DeviceWorklist:
             "optional_telemetry_bytes": (counter_bytes - mandatory_counter_bytes),
             "telemetry_enabled": self._telemetry,
             "transition_mode": self._transition_mode,
+            "unique_enabled": self._unique_tags is not None,
+            "unique_key_capacity": self._unique_key_capacity,
+            "unique_tag_bytes": unique_bytes,
             "workspace_bytes_current": self.workspace_bytes_current,
             "workspace_bytes_peak": self.workspace_bytes_peak,
-            "total_bytes_current": owned + self.workspace_bytes_current,
-            "total_bytes_peak": owned + self.workspace_bytes_peak,
+            "total_bytes_current": owned + unique_bytes + self.workspace_bytes_current,
+            "total_bytes_peak": owned + unique_bytes + self.workspace_bytes_peak,
             "fixed_capacity": True,
             "replay_allocation_count": 0,
         }
@@ -2663,6 +3057,14 @@ class DeviceWorklistSequence:
             (args.next_values, "next values", args.dtype, 1),
             (args.next_extent, "next extent", i32, 1),
             *((value, name, i32, 0) for name in _STATE_NAMES if (value := getattr(args, name)) is not None),
+            *(
+                (
+                    (args.unique_tags, "unique tags", i32, 1),
+                    (args.unique_epoch, "unique epoch", i32, 0),
+                )
+                if args.unique_enabled
+                else ()
+            ),
         ):
             self._register(value, role, dtype=dtype, ndim=ndim)
 
@@ -2711,10 +3113,19 @@ class DeviceWorklistSequence:
         self._operation = (kind, tuple(values), dict(options))
         return self
 
-    def prepare_next(self):
-        """Record a reset before a user-defined atomic producer dispatch."""
+    def prepare(self, *, target="next"):
+        """Record a target reset before a user-defined atomic producer."""
 
-        return self._set_operation("reset", (), {})
+        if target not in ("current", "next"):
+            raise ValueError("DeviceWorklist prepare target must be current or next")
+        if target == "current" and self.args.transition_mode != "direct":
+            raise TaichiRuntimeError("staged DeviceWorklist Graph transitions only prepare target='next'")
+        return self._set_operation("reset", (), {"target": target})
+
+    def prepare_next(self):
+        """Record a reset of the next buffer before an atomic producer."""
+
+        return self.prepare(target="next")
 
     def finalize_next(self, *, dispatch_state=None):
         """Record counter/extent publication after an atomic producer."""
@@ -2962,27 +3373,41 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
         from taichi_forge.graph._graph import Arg, ArgKind, gen_cpp_kernel
 
         if kind == "reset":
+            target = options.get("target", "next")
+            target_extent = self._args.next_extent if target == "next" else self._args.current_extent
+            source_extent = self._args.current_extent if target == "next" else self._args.next_extent
             if self._args.transition_mode == "direct":
                 prefix = f"__ti_worklist_transition_{self._recording_id}"
                 advance_arg = Arg(ArgKind.SCALAR, f"{prefix}_advance_generation", i32)
-                symbolic_args = (
-                    self._args.next_extent,
-                    self._args.overflow,
-                    self._args.generation,
-                    advance_arg,
-                )
-                reset_kernel = _begin_direct_worklist_transition
+                if self._args.unique_enabled:
+                    symbolic_args = (
+                        target_extent,
+                        source_extent,
+                        self._args.overflow,
+                        self._args.generation,
+                        self._args.unique_epoch,
+                        advance_arg,
+                    )
+                    reset_kernel = _begin_unique_direct_worklist_transition
+                else:
+                    symbolic_args = (
+                        target_extent,
+                        self._args.overflow,
+                        self._args.generation,
+                        advance_arg,
+                    )
+                    reset_kernel = _begin_direct_worklist_transition
                 fixed_bindings = {advance_arg.name: 1}
             elif self._args.telemetry:
                 symbolic_args = (
-                    self._args.next_extent,
+                    target_extent,
                     *self._args.stat_args,
                 )
                 reset_kernel = _reset_worklist_target
                 fixed_bindings = {}
             else:
                 symbolic_args = (
-                    self._args.next_extent,
+                    target_extent,
                     self._args.generated,
                     self._args.overflow,
                 )
@@ -3078,11 +3503,8 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
     def recordable_bounded_publication(self, target):
         kind, _, options = self._operation
         if (
-            kind != "finalize"
-            or options.get("dispatch_state") is not None
-            or target.backend != "vulkan"
+            target.backend != "vulkan"
             or target.packet_layout != "dispatch_indirect_u32x4"
-            or target.extent_name != self._args.next_extent.name
             or int(target.capacity) != self._args.capacity_value
         ):
             return None
@@ -3091,37 +3513,102 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
         prefix = f"__ti_worklist_transition_{self._recording_id}_publication"
         capacity_arg = Arg(ArgKind.SCALAR, f"{prefix}_capacity", i32)
         block_arg = Arg(ArgKind.SCALAR, f"{prefix}_block", i32)
-        if self._args.telemetry:
-            symbolic_args = (
-                self._args.next_extent,
-                *self._args.stat_args,
-                self._args.generation,
-                target.packet_binding,
-                capacity_arg,
-                block_arg,
-            )
-            finalize_kernel = _finalize_atomic_worklist_with_dispatch
+        fixed_bindings = {
+            target.packet_binding.name: target.packet_storage,
+            capacity_arg.name: int(target.capacity),
+            block_arg.name: int(target.block_dim),
+        }
+        if kind == "finalize":
+            if options.get("dispatch_state") is not None or target.extent_name != self._args.next_extent.name:
+                return None
+            if self._args.telemetry:
+                symbolic_args = (
+                    self._args.next_extent,
+                    *self._args.stat_args,
+                    self._args.generation,
+                    target.packet_binding,
+                    capacity_arg,
+                    block_arg,
+                )
+                publication_kernel = _finalize_atomic_worklist_with_dispatch
+            else:
+                symbolic_args = (
+                    self._args.next_extent,
+                    self._args.generated,
+                    self._args.overflow,
+                    self._args.generation,
+                    target.packet_binding,
+                    capacity_arg,
+                    block_arg,
+                )
+                publication_kernel = _finalize_atomic_worklist_minimal_with_dispatch
+        elif kind == "reset":
+            reset_target = options.get("target", "next")
+            target_extent = self._args.next_extent if reset_target == "next" else self._args.current_extent
+            source_extent = self._args.current_extent if reset_target == "next" else self._args.next_extent
+            if target.extent_name != source_extent.name:
+                return None
+            if self._args.transition_mode == "direct":
+                advance_arg = Arg(
+                    ArgKind.SCALAR,
+                    f"{prefix}_advance_generation",
+                    i32,
+                )
+                fixed_bindings[advance_arg.name] = 1
+                if self._args.unique_enabled:
+                    symbolic_args = (
+                        target_extent,
+                        source_extent,
+                        self._args.overflow,
+                        self._args.generation,
+                        self._args.unique_epoch,
+                        advance_arg,
+                        target.packet_binding,
+                        capacity_arg,
+                        block_arg,
+                    )
+                    publication_kernel = _begin_unique_direct_worklist_transition_with_dispatch
+                else:
+                    symbolic_args = (
+                        target_extent,
+                        source_extent,
+                        self._args.overflow,
+                        self._args.generation,
+                        advance_arg,
+                        target.packet_binding,
+                        capacity_arg,
+                        block_arg,
+                    )
+                    publication_kernel = _begin_direct_worklist_transition_with_dispatch
+            elif self._args.telemetry:
+                symbolic_args = (
+                    target_extent,
+                    *self._args.stat_args,
+                    source_extent,
+                    target.packet_binding,
+                    capacity_arg,
+                    block_arg,
+                )
+                publication_kernel = _reset_worklist_target_with_dispatch
+            else:
+                symbolic_args = (
+                    target_extent,
+                    self._args.generated,
+                    self._args.overflow,
+                    source_extent,
+                    target.packet_binding,
+                    capacity_arg,
+                    block_arg,
+                )
+                publication_kernel = _reset_worklist_target_minimal_with_dispatch
         else:
-            symbolic_args = (
-                self._args.next_extent,
-                self._args.generated,
-                self._args.overflow,
-                self._args.generation,
-                target.packet_binding,
-                capacity_arg,
-                block_arg,
-            )
-            finalize_kernel = _finalize_atomic_worklist_minimal_with_dispatch
-        kernel_cpp = gen_cpp_kernel(finalize_kernel, symbolic_args)
+            return None
+        kernel_cpp = gen_cpp_kernel(publication_kernel, symbolic_args)
         return DispatchGraphAction(
             ((kernel_cpp, symbolic_args),),
             backends=(target.backend,),
             conditional_body_safe=True,
-            fixed_bindings={
-                target.packet_binding.name: target.packet_storage,
-                capacity_arg.name: int(target.capacity),
-                block_arg.name: int(target.block_dim),
-            },
+            fixed_bindings=fixed_bindings,
             allow_unused_public_bindings=True,
             update_policy="immutable",
             synchronization_domain="runtime_ordered",
@@ -3135,24 +3622,37 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
     def _compile_runner(self):
         kind, values, options = self._operation
         if kind == "reset":
+            target = options.get("target", "next")
 
             def reset(
                 _current_values,
-                _current_extent,
+                current_extent,
                 _next_values,
                 next_extent,
                 stats,
                 _runtime_args,
             ):
+                target_extent = next_extent if target == "next" else current_extent
+                source_extent = current_extent if target == "next" else next_extent
                 if self._args.transition_mode == "direct":
-                    _begin_direct_worklist_transition(
-                        next_extent.state,
-                        stats["overflow"],
-                        stats["generation"],
-                        1,
-                    )
+                    if self._args.unique_enabled:
+                        _begin_unique_direct_worklist_transition(
+                            target_extent.state,
+                            source_extent.state,
+                            stats["overflow"],
+                            stats["generation"],
+                            _runtime_args[self._args.unique_epoch.name],
+                            1,
+                        )
+                    else:
+                        _begin_direct_worklist_transition(
+                            target_extent.state,
+                            stats["overflow"],
+                            stats["generation"],
+                            1,
+                        )
                 else:
-                    _reset_target(next_extent, stats)
+                    _reset_target(target_extent, stats)
 
             return reset
         if kind == "finalize":
@@ -3283,15 +3783,28 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
     ):
         kind, values, options = self._operation
         if kind == "reset":
+            target = options.get("target", "next")
+            target_extent = next_extent if target == "next" else current_extent
+            source_extent = current_extent if target == "next" else next_extent
             if self._args.transition_mode == "direct":
-                _begin_direct_worklist_transition(
-                    next_extent.state,
-                    stats["overflow"],
-                    stats["generation"],
-                    1,
-                )
+                if self._args.unique_enabled:
+                    _begin_unique_direct_worklist_transition(
+                        target_extent.state,
+                        source_extent.state,
+                        stats["overflow"],
+                        stats["generation"],
+                        runtime_args[self._args.unique_epoch.name],
+                        1,
+                    )
+                else:
+                    _begin_direct_worklist_transition(
+                        target_extent.state,
+                        stats["overflow"],
+                        stats["generation"],
+                        1,
+                    )
             else:
-                _reset_target(next_extent, stats)
+                _reset_target(target_extent, stats)
         elif kind == "finalize":
             _finalize_atomic_target(
                 next_extent,
@@ -3386,6 +3899,8 @@ class _DeviceWorklistSequenceExecutable(NativeGraphExecutable):
             "telemetry_enabled": self._args.telemetry,
             "transition_mode": self._args.transition_mode,
             "counter_count": len(self._args.state_args),
+            "unique_key_capacity": self._args.unique_key_capacity_value,
+            "target": self._operation[2].get("target"),
         }
         if self._operation[0] in ("resolve", "resolve_dense_table"):
             options = self._operation[2]
@@ -3426,6 +3941,7 @@ __all__ = [
     "device_dense_conflict_winner_source",
     "device_worklist_append",
     "device_worklist_append_direct",
+    "device_worklist_append_unique_direct",
     "device_worklist_recycle_direct",
     "device_worklist_graph_args",
 ]
