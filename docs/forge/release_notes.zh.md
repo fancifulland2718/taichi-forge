@@ -42,6 +42,14 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
 
 ## 待发布 {#unreleased}
 
+- CPU、CUDA 与 Vulkan 上，直接 root-dense Field template kernel 现在可以跨 serial
+  SNodeTree generation 复用经 compiler 资格化的 executable template。frontend 会验证完整
+  direct dependency 集合，compiler 会分类 embedded state，每个新 generation 仍创建独立的
+  root/runtime/backend binding。旧 Graph 继续 stale，绝不自动 retarget。pointer、bitmasked、
+  dynamic、hash SNode、隐藏 capture、grad/dual Field、data-oriented template 以及不匹配的
+  layout/policy 继续走 generation-specific fail-closed 路径。resident specialization 预算按
+  executable template 与被 pin 的 handle 计费，不再按历史 compile 次数计费；生命周期遥测会
+  分别报告 template hit、generation binding、reclaim 与 pinned retired handle。
 - device-count bounded dispatch 新增逐节点的
   `physical_grid="auto|extent|capacity"` 策略。`extent` 选择已通过资格、无 host readback 的
   物理 range 路线（CPU scheduler chunk、CUDA 12.4+ adaptive node update 或 Vulkan
@@ -76,8 +84,9 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
   参数，不再让每个 scalar 单独跨越 Python/pybind。整数符号、NumPy scalar 接受范围、资源
   identity 与 generation guard 均不改变。本地七 scalar enqueue 诊断的 200 样本 median 在
   CUDA 上从 42.9 降至 34.0 微秒，在 Vulkan 上从 60.6 降至 51.4 微秒；这只是隔离 host
-  path 方向，不是应用吞吐声明。SNode-dependent kernel 仍保持排除，因为 compiled data、
-  backend handle 与 context type 会随 tree 一同退休。
+  path 方向，不是应用吞吐声明。SNode-dependent kernel 仍排除在 ordinary launch-plan cache
+  之外，因为 generation binding 与 launch context 会随 tree 退役；上述单独资格化的
+  root-dense executable template 路径只有在新 generation 显式验证并完成 binding 后才复用代码。
 - 普通 launch plan 现在使用每 Kernel 四槽的有界 LRU，不再只替换一个资源槽。常见
   ping-pong 与 triple-buffer ndarray signature 会保留各自 launch context；MRU 稳态仍只做一次
   比较，entry 只持有弱资源 guard，失效 generation 会被清理，`ti.reset()` 会清空整个缓存。

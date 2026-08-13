@@ -269,9 +269,13 @@ host 值；它仍是诊断 snapshot，不是 reset 或 allocator-control API。
 - Python kernel specialization 默认每个 Program generation 最多驻留 1024 个，可通过
   `ti.init(kernel_specialization_limit=...)` 设置正整数预算。达到预算后，已编译路径继续
   可用；只拒绝新的 specialization。`ti.reset()` 建立新的 Program generation 和预算。
-  销毁 SNodeTree 并完成 runtime/backend owner 退役后，未被 pin 的 SNode-dependent
-  specialization 会返还该预算；stale Graph lease 在释放前仍计入预算。预算
-  可回收本身不表示 executable 已可跨 generation 复用。
+  销毁 SNodeTree 并完成 runtime/backend owner 退役后，未被 pin 的 generation binding
+  会返还该预算。CPU/CUDA/Vulkan 上，同一个 Python kernel 的直接 root-dense Field
+  template 在 layout、dtype、runtime-local place、编译策略和 native 依赖集合全部匹配时，
+  可跨 serial tree generation 复用 executable；新代只创建已验证的 binding。
+  pointer/bitmasked/dynamic/hash SNode、隐藏 field capture、grad/dual、data-oriented
+  template 以及不匹配 layout 继续 fail closed 并按 generation 编译。stale Graph lease
+  在释放前 pin 住旧 executable，但绝不自动 retarget 到新 generation。
 - 临时源码 LRU、compile/timeline trace 与 kernel-profiler raw history 都有固定容量；容量
   用尽时采用淘汰、drop 计数或明确错误，不进行无界扩容。需要长期 profiler 时应定期调用
   `ti.profiler.clear_kernel_profiler_info()`。
@@ -279,13 +283,12 @@ host 值；它仍是诊断 snapshot，不是 reset 或 allocator-control API。
   已死亡 wrapper；每周版本检查线程每个 Python 进程最多启动一次。
 
 SNodeTree lifecycle churn 和真正产生 executable 的 kernel churn 是两个独立合同。
-反复 create/destroy 且 peak live topology 有界时，tree slot 会复用，tree metadata 保持有界；
-但对新 tree generation 反复编译 kernel，即使 layout 结构等价，仍可能重复
-frontend/backend 编译；已完成且未被 pin 的 generation 不再消耗 resident 预算。
-短单测覆盖 bounded tree invariant，独立长时 qualification 覆盖 10,000 次
-tree-only generation；两者都不代表已支持跨 generation executable reuse。生命周期
-telemetry 会区分历史 materialization、resident specialization、reclaim、retired/pinned
-handle 和 budget rejection。
+反复 create/destroy 且 peak live topology 有界时，tree slot 会复用，tree metadata 保持有界。
+上述 root-dense 交集还会把编译基数收缩到 unique kernel/layout，而不是历史 generation 数；
+unsupported 交集仍会重复 frontend/backend 编译。短单测覆盖 bounded tree invariant，
+独立长时 qualification 覆盖 10,000 次 tree-only 与 executable-producing generation。
+生命周期 telemetry 会区分历史 materialization、resident specialization、template hit、
+binding create、reclaim、retired/pinned handle 和 budget rejection。
 
 普通 `ti.init()`、kernel、Graph 和 UI runtime 使用进程内 worker thread，不启动持久 helper
 subprocess。`ti` CLI、诊断工具、source builder 或应用显式创建的子进程属于调用方可见的

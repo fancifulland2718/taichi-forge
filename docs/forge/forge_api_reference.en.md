@@ -311,10 +311,15 @@ it owns:
   `ti.init(kernel_specialization_limit=...)`. At the limit, compiled paths keep
   working and only new specializations are rejected. `ti.reset()` establishes a
   new Program generation and budget. Destroying an SNodeTree returns an
-  unpinned SNode-dependent specialization to this budget after its runtime and
-  backend owners retire. A stale Graph lease remains charged until released.
-  Budget reclamation does not by itself imply cross-generation executable
-  reuse.
+  unpinned generation binding to this budget after its runtime and backend
+  owners retire. On CPU/CUDA/Vulkan, a direct root-dense Field template of the
+  same Python kernel can reuse an executable across serial tree generations
+  when layout, dtype, runtime-local places, compile policy, and native
+  dependencies all match; the new generation creates only a validated
+  binding. Pointer/bitmasked/dynamic/hash SNodes, hidden field captures,
+  grad/dual, data-oriented templates, and layout mismatches remain fail-closed
+  and generation-compiled. A stale Graph lease pins its old executable until
+  release but is never retargeted.
 - Temporary-source LRUs, compile/timeline traces, and raw kernel-profiler
   history have fixed capacities. Capacity exhaustion evicts, counts drops, or
   reports a clear error instead of growing without bound. Long-running profiler
@@ -326,14 +331,14 @@ it owns:
 
 SNodeTree lifecycle churn and executable-producing kernel churn are separate
 contracts. Repeated create/destroy cycles with a bounded peak live topology
-reuse tree slots and keep tree metadata bounded. Repeatedly compiling kernels
-against new tree generations can still repeat frontend/backend compilation
-when the layouts are structurally equivalent, although completed unpinned
-generations no longer consume the resident budget. Short unit tests cover the
-bounded tree invariant; longer qualification runs exercise 10,000 tree-only
-generations. Neither result is a claim of cross-generation executable reuse.
-Lifecycle telemetry distinguishes historical materializations, resident
-specializations, reclaims, retired/pinned handles, and budget rejections.
+reuse tree slots and keep tree metadata bounded. The root-dense intersection
+above also makes compile cardinality follow unique kernel/layout identities,
+not historical generation count; unsupported intersections still repeat
+frontend/backend compilation. Short unit tests cover the bounded tree
+invariant, while longer qualification runs exercise 10,000 tree-only and
+executable-producing generations. Lifecycle telemetry distinguishes historical
+materializations, resident specializations, template hits, binding creation,
+reclaims, retired/pinned handles, and budget rejections.
 
 Ordinary `ti.init()`, kernel, Graph, and UI runtime paths use in-process worker
 threads and do not launch persistent helper subprocesses. The `ti` CLI,

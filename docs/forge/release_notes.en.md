@@ -46,6 +46,17 @@ grouped under the behavior they shipped.
 
 ## Unreleased
 
+- Direct root-dense Field template kernels now reuse compiler-qualified
+  executable templates across serial SNodeTree generations on CPU, CUDA, and
+  Vulkan. The frontend validates the complete direct dependency set; the
+  compiler classifies embedded state; and each new generation creates a fresh
+  root/runtime/backend binding. Old Graphs remain stale and are never
+  retargeted. Pointer, bitmasked, dynamic, and hash SNodes, hidden captures,
+  grad/dual Fields, data-oriented templates, and layout/policy mismatches stay
+  on the generation-specific fail-closed path. Resident specialization
+  accounting charges executable templates and pinned handles rather than
+  historical compile count, and lifecycle telemetry reports template hits,
+  generation bindings, reclaims, and pinned retired handles separately.
 - Bounded device-count dispatch now accepts a per-node
   `physical_grid="auto|extent|capacity"` policy. `extent` selects the qualified
   no-readback physical-range route (CPU scheduler chunks, CUDA 12.4+ adaptive
@@ -92,8 +103,11 @@ grouped under the behavior they shipped.
   generation guards are unchanged. A local seven-scalar enqueue probe moved
   from 42.9 to 34.0 microseconds on CUDA and from 60.6 to 51.4 microseconds on
   Vulkan over 200 diagnostic samples; these isolated host-path directions are
-  not application throughput claims. SNode-dependent kernels remain excluded:
-  their compiled data, backend handle, and context type retire with the tree.
+  not application throughput claims. SNode-dependent kernels remain excluded
+  from ordinary launch-plan caching: their generation binding and launch
+  context retire with the tree. The separately qualified root-dense executable
+  template path above reuses code only when a new generation is explicitly
+  validated and bound.
 - Ordinary launch plans now use a four-entry, per-Kernel bounded LRU instead
   of replacing one resource slot. Common ping-pong and triple-buffer ndarray
   signatures retain independent launch contexts; MRU execution keeps the old
