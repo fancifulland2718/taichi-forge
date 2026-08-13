@@ -306,11 +306,15 @@ it owns:
 - An OS mapping is released after every valid request in a non-exclusive host
   allocator chunk has been released. A partially live chunk is not unmapped at
   the cost of invalidating pointers.
-- Python kernel specialization defaults to 1,024 compiled entries per Program
+- Python kernel specialization defaults to 1,024 resident entries per Program
   generation. Set a positive budget with
   `ti.init(kernel_specialization_limit=...)`. At the limit, compiled paths keep
   working and only new specializations are rejected. `ti.reset()` establishes a
-  new Program generation and budget.
+  new Program generation and budget. Destroying an SNodeTree returns an
+  unpinned SNode-dependent specialization to this budget after its runtime and
+  backend owners retire. A stale Graph lease remains charged until released.
+  Budget reclamation does not by itself imply cross-generation executable
+  reuse.
 - Temporary-source LRUs, compile/timeline traces, and raw kernel-profiler
   history have fixed capacities. Capacity exhaustion evicts, counts drops, or
   reports a clear error instead of growing without bound. Long-running profiler
@@ -319,6 +323,17 @@ it owns:
   synchronization boundary, the Python runtime-object registry does not hold
   dead wrappers strongly, and the weekly version-check thread starts at most
   once per Python process.
+
+SNodeTree lifecycle churn and executable-producing kernel churn are separate
+contracts. Repeated create/destroy cycles with a bounded peak live topology
+reuse tree slots and keep tree metadata bounded. Repeatedly compiling kernels
+against new tree generations can still repeat frontend/backend compilation
+when the layouts are structurally equivalent, although completed unpinned
+generations no longer consume the resident budget. Short unit tests cover the
+bounded tree invariant; longer qualification runs exercise 10,000 tree-only
+generations. Neither result is a claim of cross-generation executable reuse.
+Lifecycle telemetry distinguishes historical materializations, resident
+specializations, reclaims, retired/pinned handles, and budget rejections.
 
 Ordinary `ti.init()`, kernel, Graph, and UI runtime paths use in-process worker
 threads and do not launch persistent helper subprocesses. The `ti` CLI,

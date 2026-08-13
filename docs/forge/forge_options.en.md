@@ -51,7 +51,7 @@ All defaults match upstream 1.7.4 unless noted.
 | `unrolling_hard_limit` | `0` (off) | Per-`ti.static(for ...)` unroll iteration cap. Aborts with `TaichiCompilationError` instead of silently consuming compile time. |
 | `unrolling_kernel_hard_limit` | `0` (off) | Total unroll iteration cap across a single kernel. |
 | `func_inline_depth_limit` | upstream default | Hard cap on `@ti.func` inline recursion depth. |
-| `kernel_specialization_limit` | `1024` | Total compiled `@ti.kernel` specialization budget for the current Program generation. Existing specializations keep running at the positive limit, while new cache misses fail clearly. Raise it only for an application with a deliberately finite template-argument set. `ti.reset()` creates a new generation. |
+| `kernel_specialization_limit` | `1024` | Resident `@ti.kernel` specialization budget for the current Program generation. Existing specializations keep running at the positive limit, while new cache misses fail clearly. Destroying an SNodeTree returns unpinned retired entries to the budget; stale Graph leases stay charged. Reclamation does not imply cross-generation executable reuse. `ti.reset()` creates a new generation. |
 | `check_out_of_bound` | `False`; implicitly `True` when `debug=True` and unspecified | Enables generated bounds assertions on backends with assertion support. An explicit `check_out_of_bound=False` (or `TI_CHECK_OUT_OF_BOUND=0`) now overrides the debug default without disabling other debug behavior. |
 
 Bounds checks change generated code and are represented by their effective

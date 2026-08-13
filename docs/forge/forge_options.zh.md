@@ -54,7 +54,7 @@
 | `unrolling_hard_limit` | `0`（关） | 每个 `ti.static(for ...)` 的 unroll 迭代上限；超出抛 `TaichiCompilationError`，避免静默吃编译时间。 |
 | `unrolling_kernel_hard_limit` | `0`（关） | 单 kernel 内 unroll 总迭代上限。 |
 | `func_inline_depth_limit` | 上游默认 | `@ti.func` 内联递归深度硬上限。 |
-| `kernel_specialization_limit` | `1024` | 当前 Program generation 允许编译的 `@ti.kernel` specialization 总预算。达到正整数上限后，已有 specialization 继续运行，新的 cache miss 明确失败；只在应用确实需要且能够约束模板参数集合时调高。`ti.reset()` 会创建新 generation。 |
+| `kernel_specialization_limit` | `1024` | 当前 Program generation 驻留的 `@ti.kernel` specialization 预算。达到正整数上限后，已有 specialization 继续运行，新的 cache miss 明确失败。销毁 SNodeTree 会返还未被 pin 的 retired entry；stale Graph lease 释放前仍计入预算。回收预算不表示 executable 可跨 generation 复用。`ti.reset()` 会创建新 generation。 |
 | `check_out_of_bound` | `False`；未指定且 `debug=True` 时隐式为 `True` | 在支持 assertion 的后端生成越界断言。显式传入 `check_out_of_bound=False`（或 `TI_CHECK_OUT_OF_BOUND=0`）现在会覆盖 debug 默认值，但不会关闭其它 debug 行为。 |
 
 越界检查会改变生成代码，其最终有效布尔值进入 offline-cache key。只有在隔离检查成本，或
