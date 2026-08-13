@@ -733,6 +733,9 @@ class VulkanStream : public Stream {
   StreamSemaphore end_submission_batch() override;
   StreamGpuTiming begin_gpu_timing() override;
   void end_gpu_timing(const StreamGpuTiming &timing) override;
+  StreamGpuTiming begin_gpu_timing_inline(CommandList *cmdlist) override;
+  void end_gpu_timing_inline(const StreamGpuTiming &timing,
+                             CommandList *cmdlist) override;
 
   void command_sync() override;
 

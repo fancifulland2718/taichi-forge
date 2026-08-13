@@ -206,16 +206,21 @@ def test_fixed_layout_block_diagonal_is_a_recordable_solveplan_operator_and_prec
     )
     expected = np.asarray([0.5, -1.0, 2.0, 1.5, -0.25], np.float32)
     rhs = _vector(diagonal * expected)
-    result = plan.submit(rhs).result()
+    gpu = impl.current_cfg().arch in (ti.cuda, ti.vulkan)
+    submission = plan.submit(rhs, telemetry="summary" if gpu else False)
+    result = submission.result()
     assert result.converged
     assert result.iterations == 1
     np.testing.assert_allclose(
         result.solution.to_numpy(), expected, rtol=2e-5, atol=2e-5
     )
     stats = plan.statistics()
-    if impl.current_cfg().arch in (ti.cuda, ti.vulkan):
+    if gpu:
         assert stats["submission"]["execution_path"] == "cached_graph_submission"
         assert stats["submission"]["graphs_materialized"] == 1
+        telemetry = submission.telemetry()
+        assert telemetry.gpu_duration_ns is None
+        assert telemetry.gpu_timestamp_status == "disabled_by_mode"
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

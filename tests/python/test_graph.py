@@ -5694,6 +5694,40 @@ def test_structured_graph_cuda_ticket_reports_opt_in_region_telemetry():
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan])
+def test_structured_graph_summary_telemetry_omits_gpu_markers():
+    capabilities = ti.graph.structured_control_capabilities()["device_control"]
+    if not capabilities["compound_structured_submit"]:
+        pytest.skip(capabilities["structured_submit_reason"])
+
+    graph = _build_structured_while_graph(
+        max_iterations=32,
+        chunk_size=8,
+        lowering_mode="native_required",
+    )
+    ticket = graph.submit(
+        _structured_while_args(target=7), telemetry="summary"
+    )
+    report = ticket.telemetry()
+
+    assert report.gpu_duration_ns is None
+    assert report.gpu_timestamp_scope == "unavailable"
+    assert report.gpu_timestamp_status == "disabled_by_mode"
+    assert not report.gpu_timestamp_exact
+    assert not report.gpu_measurement_path_changed
+    assert len(report.regions) == 1
+    region = report.regions[0]
+    assert region.logical_iterations == 7
+    assert region.gpu_duration_ns is None
+    assert region.gpu_timestamp_status == "disabled_by_mode"
+    assert not region.gpu_timestamp_exact
+    assert not region.gpu_measurement_path_changed
+    assert report.pipeline.gpu_timestamp_scope == "unavailable"
+    assert report.pipeline.gpu_timestamp_status == "disabled_by_mode"
+    assert not ticket._completion._gpu_timing()["available"]
+    assert ticket._completion._gpu_region_timings() == []
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan])
 def test_structured_graph_gpu_timing_is_bounded_and_ticket_owned():
     capabilities = ti.graph.structured_control_capabilities()["device_control"]
     if not capabilities["compound_structured_submit"]:
@@ -5774,7 +5808,21 @@ def test_graph_ticket_reports_whole_gpu_timing_without_structured_regions():
     assert ordinary.telemetry() is None
     assert not graph._instance.structured_telemetry_arena_stats["materialized"]
 
-    report = graph.submit(args, telemetry=True).telemetry()
+    summary = graph.submit(args, telemetry="summary").telemetry()
+    assert summary.regions == ()
+    assert summary.execution.logical_graph_invocations == 1
+    assert not summary.execution.backend_graph_launches_exact
+    assert not summary.execution.stream_graph_enqueue_exact
+    assert summary.gpu_duration_ns is None
+    assert summary.gpu_timestamp_scope == "unavailable"
+    assert summary.gpu_timestamp_status == "disabled_by_mode"
+    assert not summary.gpu_timestamp_exact
+    assert not summary.gpu_measurement_path_changed
+    assert summary.pipeline.gpu_duration_ns is None
+    assert summary.pipeline.gpu_timestamp_scope == "unavailable"
+    assert summary.pipeline.gpu_timestamp_status == "disabled_by_mode"
+
+    report = graph.submit(args, telemetry="timestamps").telemetry()
     assert report.schema_version == 5
     assert report.backend in ("cuda", "vulkan")
     assert report.regions == ()
@@ -5818,6 +5866,12 @@ def test_graph_ticket_reports_whole_gpu_timing_without_structured_regions():
     assert arena["reserved_bytes"] == 0
     assert arena["host_readback_bytes"] == 0
     assert np.allclose(destination.to_numpy(), 9.0)
+
+    with pytest.raises(
+        TaichiRuntimeError,
+        match="telemetry must be False, True, 'summary', or 'timestamps'",
+    ):
+        graph.submit(args, telemetry="full")
 
 
 @test_utils.test(arch=ti.vulkan)

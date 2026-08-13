@@ -34,6 +34,7 @@ from taichi_forge.graph._native import (
     PreparedGraphBindings,
     ProviderOwnedNdarrayBinding,
 )
+from taichi_forge.graph._graph import _normalize_submission_telemetry_mode
 from taichi_forge.lang._ndarray import ScalarNdarray
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang.field import ScalarField
@@ -6617,19 +6618,21 @@ class SolvePlan:
         and delegate admission, workspace-lane ownership, completion, and
         telemetry to :meth:`Graph.submit`. No terminal state is read on that
         path; ``result()`` performs the one terminal-packet materialization.
+        ``telemetry="summary"`` omits backend timestamp markers;
+        ``telemetry="timestamps"`` and compatibility ``True`` request them.
         CPU uses the existing synchronous native solve and returns an already-
         complete lane-0 wrapper without Graph telemetry.
         """
+
+        telemetry = _normalize_submission_telemetry_mode(
+            telemetry, "SolvePlan.submit()"
+        )
 
         with self._submission_lock:
             self._submission_calls += 1
             if telemetry:
                 self._submission_telemetry_requests += 1
         try:
-            if not isinstance(telemetry, bool):
-                raise TaichiRuntimeError(
-                    "SolvePlan.submit() telemetry must be a bool"
-                )
             if self._program.config().arch in (
                 _ti_core.Arch.x64,
                 _ti_core.Arch.arm64,

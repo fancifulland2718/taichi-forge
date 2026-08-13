@@ -11,6 +11,7 @@ import numpy as np
 
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.graph import Arg, ArgKind, GraphBuilder
+from taichi_forge.graph._graph import _normalize_submission_telemetry_mode
 from taichi_forge.graph._submission import (
     _new_submission_lane,
     _reserve_paced_submission,
@@ -1770,12 +1771,12 @@ class BatchedSolvePlan:
         clones may share a ``SubmissionPacer`` with Graph work to bound backend
         backlog and arbitrate complete host submissions across lanes. Host-side
         asynchronous completion does not guarantee concurrent kernel execution
-        on the device.
+        on the device. ``telemetry="summary"`` omits backend timestamp markers;
+        ``telemetry="timestamps"`` and compatibility ``True`` request them.
         """
-        if not isinstance(telemetry, bool):
-            raise TaichiRuntimeError(
-                "BatchedSolvePlan submit telemetry must be a bool"
-            )
+        telemetry = _normalize_submission_telemetry_mode(
+            telemetry, "BatchedSolvePlan.submit()"
+        )
         if telemetry:
             self._telemetry_requests += 1
         arch = self._program.config().arch if self._program is not None else None

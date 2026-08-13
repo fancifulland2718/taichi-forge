@@ -835,6 +835,20 @@ def _queue_submission_delta(before, after):
     )
 
 
+def _normalize_submission_telemetry_mode(telemetry, owner="Graph.submit()"):
+    """Normalize the backwards-compatible submission telemetry contract."""
+
+    if telemetry is False:
+        return False
+    if telemetry is True or telemetry == "timestamps":
+        return "timestamps"
+    if telemetry == "summary":
+        return "summary"
+    raise TaichiRuntimeError(
+        f"{owner} telemetry must be False, True, 'summary', or 'timestamps'"
+    )
+
+
 def _structured_submission_metadata(node):
     arch = impl.current_cfg().arch
     backend = _backend_name(_ti_core.arch_name(arch))
@@ -894,7 +908,7 @@ def _submission_telemetry_region_nodes(node):
 
 
 class _GraphStructuredTelemetryState:
-    def __init__(self, arena, slot, sequence):
+    def __init__(self, arena, slot, sequence, mode):
         self._arena = arena
         self._slot = slot
         self._sequence = sequence
@@ -902,6 +916,7 @@ class _GraphStructuredTelemetryState:
         self._queue = None
         self._submission_statistics = None
         self._host_submit_ns = 0
+        self._mode = mode
         self._result = None
         self._discarded = False
         self._released = False
@@ -953,6 +968,7 @@ class _GraphStructuredTelemetryState:
                 self._host_submit_ns,
                 self._completion,
                 self._submission_statistics,
+                self._mode,
             )
             self._result = result
             self._released = True
@@ -988,6 +1004,7 @@ class _GraphStructuredTelemetryState:
                     self._host_submit_ns,
                     self._completion,
                     self._submission_statistics,
+                    self._mode,
                 )
             self._released = True
             release = True
@@ -1226,7 +1243,7 @@ class _GraphStructuredTelemetryArena:
         self._allocations += 1
         return slot
 
-    def acquire(self):
+    def acquire(self, mode):
         while True:
             with self._lock:
                 allocated = False
@@ -1242,7 +1259,7 @@ class _GraphStructuredTelemetryArena:
                         self._reuses += 1
                     slot["recorder"].reset()
                     state = _GraphStructuredTelemetryState(
-                        self, slot, self._next_sequence
+                        self, slot, self._next_sequence, mode
                     )
                     self._next_sequence += 1
                     slot["state"] = state
@@ -1260,6 +1277,7 @@ class _GraphStructuredTelemetryArena:
         host_submit_ns,
         completion,
         submission_statistics,
+        mode,
     ):
         storage = slot["storage"]
         if storage is None:
@@ -1274,8 +1292,11 @@ class _GraphStructuredTelemetryArena:
             )
         values = host.reshape(-1)
         recorder = slot["recorder"]
+        timing_requested = mode == "timestamps"
         gpu_region_timings = (
-            completion._gpu_region_timings() if completion is not None else []
+            completion._gpu_region_timings()
+            if timing_requested and completion is not None
+            else []
         )
         gpu_region_timings_by_path = {}
         for timing in gpu_region_timings:
@@ -1328,7 +1349,9 @@ class _GraphStructuredTelemetryArena:
                     "exact": False,
                     "measurement_path_changed": False,
                     "stream_id": 0,
-                    "status": "unavailable",
+                    "status": (
+                        "unavailable" if timing_requested else "disabled_by_mode"
+                    ),
                 },
             )
             gpu_region_available = bool(gpu_region["available"])
@@ -1392,7 +1415,7 @@ class _GraphStructuredTelemetryArena:
         )
         gpu_timing = (
             completion._gpu_timing()
-            if completion is not None
+            if timing_requested and completion is not None
             else {
                 "available": False,
                 "duration_ns": 0,
@@ -1401,7 +1424,9 @@ class _GraphStructuredTelemetryArena:
                 "stream_id": 0,
                 "driver_owned_bytes": 0,
                 "driver_owned_bytes_known": False,
-                "status": "unavailable",
+                "status": (
+                    "unavailable" if timing_requested else "disabled_by_mode"
+                ),
             }
         )
         pipeline = _materialize_graph_pipeline_report(
@@ -1433,7 +1458,9 @@ class _GraphStructuredTelemetryArena:
             gpu_duration_ns=(
                 int(gpu_timing["duration_ns"]) if gpu_available else None
             ),
-            gpu_timestamp_scope="whole_ticket",
+            gpu_timestamp_scope=(
+                "whole_ticket" if timing_requested else "unavailable"
+            ),
             gpu_timestamp_exact=bool(gpu_timing["exact"]),
             gpu_measurement_path_changed=bool(
                 gpu_timing["measurement_path_changed"]
@@ -3027,6 +3054,7 @@ def _materialize_graph_submission_execution_telemetry(
     *, backend, regions, queue, submission_statistics
 ):
     statistics = submission_statistics or {}
+    submission_statistics_exact = bool(statistics.get("_exact", True))
     backend_launches = int(statistics.get("backend_graph_launches", 0))
     logical_graph_invocations = int(statistics.get("graph_submissions", 0))
     # A region snapshot represents one invocation of a top-level structured
@@ -3051,9 +3079,11 @@ def _materialize_graph_submission_execution_telemetry(
         kernel_submissions=int(statistics.get("kernel_submissions", 0)),
         native_submissions=int(statistics.get("native_submissions", 0)),
         backend_graph_launches=backend_launches,
-        backend_graph_launches_exact=True,
+        backend_graph_launches_exact=submission_statistics_exact,
         stream_graph_enqueue_calls=stream_graph_enqueue_calls,
-        stream_graph_enqueue_exact=stream_graph_enqueue_exact,
+        stream_graph_enqueue_exact=(
+            stream_graph_enqueue_exact and submission_statistics_exact
+        ),
         physical_queue_submissions=physical_queue_submissions,
         physical_queue_submissions_exact=bool(queue.available and queue.exact),
         physical_queue_scope=str(queue.scope),
@@ -3407,7 +3437,11 @@ def _materialize_graph_pipeline_report(
         gpu_duration_ns=(
             int(gpu_timing["duration_ns"]) if gpu_available else None
         ),
-        gpu_timestamp_scope="whole_ticket",
+        gpu_timestamp_scope=(
+            "unavailable"
+            if gpu_timing["status"] == "disabled_by_mode"
+            else "whole_ticket"
+        ),
         gpu_timestamp_exact=bool(gpu_timing["exact"]),
         gpu_measurement_path_changed=bool(
             gpu_timing["measurement_path_changed"]
@@ -9846,8 +9880,8 @@ class _GraphInstance:
         for node in self._observation_nodes:
             node.clear_snapshot_buffers()
 
-    def acquire_structured_telemetry_lease(self):
-        return self._structured_telemetry_arena.acquire()
+    def acquire_structured_telemetry_lease(self, mode):
+        return self._structured_telemetry_arena.acquire(mode)
 
     @property
     def structured_telemetry_arena_stats(self):
@@ -12686,14 +12720,17 @@ class Graph:
         concurrency, and automatic-differentiation rules are identical to
         ``run()``. A shared ``SubmissionPacer`` can bound backend backlog and
         fairly arbitrate complete host submissions before they enqueue work.
-        ``telemetry=True`` adds ticket-owned GPU timing. Structured while
-        regions additionally receive device snapshots and per-region timing;
-        all results are exposed through ``SubmissionTicket.telemetry()``.
+        ``telemetry=True`` and ``telemetry="timestamps"`` add ticket-owned GPU
+        timing. ``telemetry="summary"`` retains structured device snapshots,
+        queue/submission accounting, and pipeline metadata without inserting
+        backend timestamp markers. All results are exposed through
+        ``SubmissionTicket.telemetry()``.
         Graphs compiled with multiple workspace lanes select a ready lane
         automatically. ``workspace_lane`` pins a submission to one lane.
         """
-        if not isinstance(telemetry, bool):
-            raise TaichiRuntimeError("Graph.submit() telemetry must be a bool")
+        telemetry = _normalize_submission_telemetry_mode(telemetry)
+        telemetry_enabled = telemetry is not False
+        timestamp_telemetry = telemetry == "timestamps"
         if (
             self._contains_structured_control_value
             and not self._spec.supports_native_structured_submission
@@ -12776,8 +12813,10 @@ class Graph:
                 temporary_lease = submission_instance.acquire_temporary_lease()
                 observation_lease = submission_instance.acquire_observation_lease()
                 telemetry_lease = (
-                    submission_instance.acquire_structured_telemetry_lease()
-                    if telemetry
+                    submission_instance.acquire_structured_telemetry_lease(
+                        telemetry
+                    )
+                    if telemetry_enabled
                     else None
                 )
                 temporary_bindings = (
@@ -12791,10 +12830,12 @@ class Graph:
                         if observation_lease is not None
                         else None
                     )
-                    queue_before = _queue_submission_snapshot() if telemetry else None
+                    queue_before = (
+                        _queue_submission_snapshot() if telemetry_enabled else None
+                    )
                     host_submit_start_ns = time.perf_counter_ns()
                     transaction = runtime.prog._begin_runtime_submission_transaction(
-                        telemetry
+                        timestamp_telemetry
                     )
                     runtime.prog._record_runtime_graph_submission()
                     telemetry_recorder = (
@@ -12809,14 +12850,15 @@ class Graph:
                     )
                     if self._contains_structured_control_value:
                         if telemetry_recorder is not None:
-                            telemetry_recorder.attach_gpu_timing(transaction)
+                            if timestamp_telemetry:
+                                telemetry_recorder.attach_gpu_timing(transaction)
                         try:
                             submission_instance.run_for_submission(
                                 prepared,
                                 telemetry_recorder,
                             )
                         finally:
-                            if telemetry_recorder is not None:
+                            if telemetry_recorder is not None and timestamp_telemetry:
                                 telemetry_recorder.detach_gpu_timing()
                         self._latest_control_flow_was_async = True
                     else:
@@ -12833,10 +12875,24 @@ class Graph:
                         observation_lease.enqueue_tail_readback()
                     completion = transaction._finish()
                     submission_statistics = (
-                        transaction._submission_statistics() if telemetry else None
+                        transaction._submission_statistics()
+                        if telemetry_enabled
+                        else None
                     )
+                    if telemetry == "summary":
+                        # The public Graph invocation is exact without backend
+                        # instrumentation. Per-kind backend counters require
+                        # the timestamp transaction's scoped native recorder;
+                        # keep their zero placeholders explicitly inexact
+                        # instead of sampling process-global counters that may
+                        # include concurrent Graphs.
+                        submission_statistics = dict(submission_statistics)
+                        submission_statistics["graph_submissions"] = 1
+                        submission_statistics["_exact"] = False
                     host_submit_ns = time.perf_counter_ns() - host_submit_start_ns
-                    queue_after = _queue_submission_snapshot() if telemetry else None
+                    queue_after = (
+                        _queue_submission_snapshot() if telemetry_enabled else None
+                    )
                     if temporary_lease is not None:
                         temporary_lease.attach(completion)
                         temporary_lease = None

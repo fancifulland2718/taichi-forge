@@ -4439,6 +4439,30 @@ StreamGpuTiming VulkanStream::begin_gpu_timing() {
   return timing;
 }
 
+StreamGpuTiming VulkanStream::begin_gpu_timing_inline(
+    CommandList *cmdlist) {
+  TI_ERROR_IF(submission_batch_depth_ == 0,
+              "Vulkan GPU timing requires an active submission batch");
+  TI_ERROR_IF(cmdlist == nullptr,
+              "Vulkan inline GPU timing requires a command list");
+  const std::uint32_t valid_bits =
+      device_.queue_timestamp_valid_bits(queue_family_index_);
+  if (valid_bits == 0) {
+    return nullptr;
+  }
+  auto timing = std::make_shared<VulkanStreamGpuTimingObject>(
+      &device_, valid_bits,
+      static_cast<double>(
+          device_.get_vk_physical_device_props().limits.timestampPeriod),
+      stream_id_);
+  auto *vulkan_cmdlist = dynamic_cast<VulkanCommandList *>(cmdlist);
+  TI_ERROR_IF(vulkan_cmdlist == nullptr,
+              "Vulkan inline GPU timing requires a Vulkan command list");
+  vulkan_cmdlist->write_runtime_timestamp(
+      timing->query_pool(), 0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, true);
+  return timing;
+}
+
 void VulkanStream::end_gpu_timing(const StreamGpuTiming &timing) {
   if (!timing) {
     return;
@@ -4456,6 +4480,28 @@ void VulkanStream::end_gpu_timing(const StreamGpuTiming &timing) {
       ->write_runtime_timestamp(vulkan_timing->query_pool(), 1,
                                 VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, false);
   submit(cmdlist.get());
+  vulkan_timing->mark_ended();
+}
+
+void VulkanStream::end_gpu_timing_inline(const StreamGpuTiming &timing,
+                                         CommandList *cmdlist) {
+  if (!timing) {
+    return;
+  }
+  TI_ERROR_IF(submission_batch_depth_ == 0,
+              "Vulkan GPU timing requires an active submission batch");
+  TI_ERROR_IF(cmdlist == nullptr,
+              "Vulkan inline GPU timing requires a command list");
+  auto vulkan_timing =
+      std::dynamic_pointer_cast<VulkanStreamGpuTimingObject>(timing);
+  TI_ERROR_IF(!vulkan_timing,
+              "Vulkan stream received a timing object from another backend");
+  auto *vulkan_cmdlist = dynamic_cast<VulkanCommandList *>(cmdlist);
+  TI_ERROR_IF(vulkan_cmdlist == nullptr,
+              "Vulkan inline GPU timing requires a Vulkan command list");
+  vulkan_cmdlist->write_runtime_timestamp(
+      vulkan_timing->query_pool(), 1, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+      false);
   vulkan_timing->mark_ended();
 }
 

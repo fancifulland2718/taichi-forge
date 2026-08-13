@@ -759,6 +759,20 @@ class RHI_DLL_EXPORT Stream {
     (void)timing;
   }
 
+  // Backends may place timestamp markers into a command list already owned by
+  // the enclosing submission. The default preserves the separate-marker
+  // implementation for streams that do not support inline timing.
+  virtual StreamGpuTiming begin_gpu_timing_inline(CommandList *cmdlist) {
+    (void)cmdlist;
+    return begin_gpu_timing();
+  }
+
+  virtual void end_gpu_timing_inline(const StreamGpuTiming &timing,
+                                     CommandList *cmdlist) {
+    (void)cmdlist;
+    end_gpu_timing(timing);
+  }
+
   virtual void command_sync() = 0;
 };
 
