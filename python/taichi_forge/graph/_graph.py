@@ -1270,6 +1270,50 @@ class _GraphStructuredTelemetryArena:
                 )
             oldest.make_reusable()
 
+    def prepare(self, slots=1):
+        """Materialize bounded storage and compile snapshot kernels only."""
+
+        if isinstance(slots, bool) or not isinstance(slots, (int, np.integer)):
+            raise TaichiRuntimeError(
+                "Graph.prepare_telemetry() slots must be an integer"
+            )
+        slots = int(slots)
+        if slots < 1 or slots > self.capacity:
+            raise TaichiRuntimeError(
+                "Graph.prepare_telemetry() slots must be between 1 and "
+                f"{self.capacity}"
+            )
+        with self._lock:
+            while len(self._slots) < slots:
+                self._new_slot()
+            destination = next(
+                (
+                    slot["storage"]
+                    for slot in self._slots
+                    if slot["storage"] is not None
+                ),
+                None,
+            )
+            bounded_sources = self._bounded_sources()
+
+        # Compile the two opt-in snapshot kernels without launching them. The
+        # canonical ndarray specialization is shared by later telemetry slots;
+        # the temporary source only supplies the exact scalar/vector ABI.
+        if destination is not None and self.nodes:
+            source = ScalarNdarray(i32, ())
+            _pack_structured_submission_telemetry._primal.ensure_compiled(
+                source, source, source, destination, 0
+            )
+        if destination is not None and any(
+            item["count_source"] == "device_extent"
+            for item in bounded_sources
+        ):
+            extent_state = ScalarNdarray(i32, (2,))
+            _pack_bounded_pipeline_telemetry._primal.ensure_compiled(
+                extent_state, destination, 0
+            )
+        return self
+
     def _read_slot(
         self,
         slot,
@@ -9883,6 +9927,10 @@ class _GraphInstance:
     def acquire_structured_telemetry_lease(self, mode):
         return self._structured_telemetry_arena.acquire(mode)
 
+    def prepare_structured_telemetry(self, slots=1):
+        self._structured_telemetry_arena.prepare(slots)
+        return self
+
     @property
     def structured_telemetry_arena_stats(self):
         return self._structured_telemetry_arena.stats
@@ -12406,6 +12454,7 @@ class Graph:
         self._workspace_pool = self._workspace_pool_for_current_runtime()
         self._instance = self._workspace_pool.primary
         self._latest_instance = self._instance
+        self._prepared_telemetry_modes = set()
         self._runtime_valid = True
         self._run_impl = self._instance.run_impl
         impl.get_runtime().register_runtime_object(self)
@@ -12950,6 +12999,44 @@ class Graph:
             submission_owners=submission_owners,
             completion_observations=completion_observations,
         )
+
+    def prepare_telemetry(self, mode, *, slots=1):
+        """Move opt-in telemetry allocation and JIT setup off the first sample.
+
+        This method never executes the Graph or reads user resources. It
+        prepares ``slots`` telemetry records for every currently materialized
+        workspace lane. Timestamp mode also performs one empty instrumented
+        runtime transaction so backend event/query initialization occurs at
+        this explicit boundary rather than inside the first measured submit.
+        """
+
+        mode = _normalize_submission_telemetry_mode(
+            mode, "Graph.prepare_telemetry()"
+        )
+        if mode is False:
+            return self
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            for instance in self._workspace_pool.instances:
+                instance.prepare_structured_telemetry(slots)
+
+            if (
+                mode == "timestamps"
+                and "timestamps" not in self._prepared_telemetry_modes
+            ):
+                transaction = (
+                    impl.get_runtime().prog._begin_runtime_submission_transaction(
+                        True
+                    )
+                )
+                for node in self._instance._structured_telemetry_nodes:
+                    transaction._begin_gpu_region_timing(node.region_path)
+                    transaction._end_gpu_region_timing(node.region_path)
+                completion = transaction._finish()
+                completion.wait()
+                self._prepared_telemetry_modes.add("timestamps")
+            self._prepared_telemetry_modes.add("summary")
+        return self
 
     def _workspace_pool_for_current_runtime(self):
         key = self._spec.instance_key()

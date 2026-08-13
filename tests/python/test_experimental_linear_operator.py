@@ -207,6 +207,8 @@ def test_fixed_layout_block_diagonal_is_a_recordable_solveplan_operator_and_prec
     expected = np.asarray([0.5, -1.0, 2.0, 1.5, -0.25], np.float32)
     rhs = _vector(diagonal * expected)
     gpu = impl.current_cfg().arch in (ti.cuda, ti.vulkan)
+    if gpu:
+        assert plan.prepare_telemetry("summary") is plan
     submission = plan.submit(rhs, telemetry="summary" if gpu else False)
     result = submission.result()
     assert result.converged

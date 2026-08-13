@@ -730,6 +730,10 @@ class _BatchedDeviceConvergentReplay:
         self.submissions += 1
         return ticket
 
+    def prepare_telemetry(self, mode):
+        self._graph.prepare_telemetry(mode)
+        return self
+
     def update_control_report(self, logical_iterations, telemetry=None):
         # Asynchronous structured submissions deliberately do not expose the
         # mutable Graph-wide control-flow report. The plan-owned counter is an
@@ -1934,6 +1938,30 @@ class BatchedSolvePlan:
             if admission is not None:
                 admission._cancel()
             raise
+
+    def prepare_telemetry(self, mode):
+        """Prepare telemetry for the device-convergent Graph submission path."""
+
+        mode = _normalize_submission_telemetry_mode(
+            mode, "BatchedSolvePlan.prepare_telemetry()"
+        )
+        if mode is False:
+            return self
+        if self._program is None or self._program.config().arch not in (
+            _ti_core.Arch.cuda,
+            _ti_core.Arch.vulkan,
+        ):
+            raise TaichiRuntimeError(
+                "BatchedSolvePlan.prepare_telemetry() requires CUDA or Vulkan"
+            )
+        if self.execution_policy != "device_convergent":
+            raise TaichiRuntimeError(
+                "BatchedSolvePlan.prepare_telemetry() requires "
+                "execution_policy='device_convergent'"
+            )
+        with self._lifecycle_lock:
+            self._get_device_convergent_replay().prepare_telemetry(mode)
+        return self
 
     def _submit_device_convergent(
         self,

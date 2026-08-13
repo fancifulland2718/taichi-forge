@@ -6703,6 +6703,35 @@ class SolvePlan:
             self._submission_successes += 1
         return submission
 
+    def prepare_telemetry(self, mode, *, with_initial_guess=False):
+        """Prepare one cached GPU submission variant for telemetry sampling.
+
+        The call builds the selected SolvePlan Graph variant and delegates its
+        allocation/JIT/timestamp preparation to ``Graph.prepare_telemetry``.
+        It does not submit a solve or allocate a caller output/terminal packet.
+        """
+
+        mode = _normalize_submission_telemetry_mode(
+            mode, "SolvePlan.prepare_telemetry()"
+        )
+        if mode is False:
+            return self
+        if not isinstance(with_initial_guess, bool):
+            raise TaichiRuntimeError(
+                "SolvePlan.prepare_telemetry() with_initial_guess must be a bool"
+            )
+        if self._program is None or self._program.config().arch not in (
+            _ti_core.Arch.cuda,
+            _ti_core.Arch.vulkan,
+        ):
+            raise TaichiRuntimeError(
+                "SolvePlan.prepare_telemetry() requires a CUDA or Vulkan "
+                "device-convergent submission plan"
+            )
+        cached = self._submission_graph(with_initial_guess)
+        cached["graph"].prepare_telemetry(mode)
+        return self
+
     def solve(self, rhs, *, initial_guess=None, out=None):
         """Solves one RHS with persistent plan-owned workspace."""
         if self.operator is None or self._solver is None:

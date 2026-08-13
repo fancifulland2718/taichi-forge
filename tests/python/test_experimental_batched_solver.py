@@ -747,6 +747,7 @@ def test_independent_batched_device_convergent_pcg_rebinds_a_and_m():
         execution_policy="device_convergent",
     )
     exact = np.linspace(-1.0, 1.0, total_size, dtype=np.float32)
+    assert plan.prepare_telemetry("summary") is plan
     first_submission = plan.submit(
         _vector(diagonal_host * exact), telemetry="summary"
     )

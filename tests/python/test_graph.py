@@ -5728,6 +5728,45 @@ def test_structured_graph_summary_telemetry_omits_gpu_markers():
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan])
+def test_graph_prepare_telemetry_materializes_without_graph_submission():
+    capabilities = ti.graph.structured_control_capabilities()["device_control"]
+    if not capabilities["compound_structured_submit"]:
+        pytest.skip(capabilities["structured_submit_reason"])
+
+    graph = _build_structured_while_graph(
+        max_iterations=32,
+        chunk_size=8,
+        lowering_mode="native_required",
+    )
+    args = _structured_while_args(target=7)
+    assert not graph._instance.structured_telemetry_arena_stats["materialized"]
+
+    assert graph.prepare_telemetry("summary") is graph
+    arena = graph._instance.structured_telemetry_arena_stats
+    assert arena["materialized"]
+    assert arena["slots"] == 1
+    assert arena["allocations"] == 1
+    assert arena["materializations"] == 0
+    assert args["state"].to_numpy()[()] == 0
+    assert args["counter"].to_numpy()[()] == 0
+
+    assert graph.prepare_telemetry("timestamps") is graph
+    assert graph._prepared_telemetry_modes == {"summary", "timestamps"}
+    assert args["state"].to_numpy()[()] == 0
+    assert args["counter"].to_numpy()[()] == 0
+
+    report = graph.submit(args, telemetry="summary").telemetry()
+    assert report.regions[0].logical_iterations == 7
+    assert graph._instance.structured_telemetry_arena_stats["allocations"] == 1
+
+    with pytest.raises(
+        TaichiRuntimeError,
+        match="telemetry must be False, True, 'summary', or 'timestamps'",
+    ):
+        graph.prepare_telemetry("full")
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan])
 def test_structured_graph_gpu_timing_is_bounded_and_ticket_owned():
     capabilities = ti.graph.structured_control_capabilities()["device_control"]
     if not capabilities["compound_structured_submit"]:
