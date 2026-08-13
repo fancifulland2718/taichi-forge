@@ -7,6 +7,10 @@ import threading
 from dataclasses import dataclass
 from typing import Optional
 
+from taichi_forge._lib.utils import (
+    configure_startup_profile as _configure_startup_profile,
+    startup_profile_raw_snapshot,
+)
 from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiRuntimeError
 
@@ -153,6 +157,29 @@ class RuntimeCapabilities:
     backend_lock_telemetry: bool
     device_memory_telemetry: bool
     cuda_mempool_telemetry: bool
+
+
+@dataclass(frozen=True)
+class StartupProfileEvent:
+    name: str
+    offset_ns: int
+
+
+@dataclass(frozen=True)
+class StartupProfilePhase:
+    name: str
+    begin_ns: int
+    end_ns: int
+    duration_ns: int
+
+
+@dataclass(frozen=True)
+class StartupProfile:
+    schema_version: int
+    enabled: bool
+    elapsed_ns: int
+    events: tuple
+    phases: tuple
 
 
 @dataclass(frozen=True)
@@ -316,6 +343,52 @@ def capabilities() -> RuntimeCapabilities:
     )
 
 
+def configure_startup_profile(enabled=True, *, clear=False):
+    """Enable or disable import/init profiling outside execution hot paths.
+
+    Enabling here can profile subsequent ``ti.init()`` calls. Set
+    ``TI_STARTUP_PROFILE=1`` before importing :mod:`taichi_forge` when native
+    loader and Python import attribution is also required.
+    """
+
+    return _configure_startup_profile(enabled, clear=clear)
+
+
+def startup_profile(*, clear=False) -> StartupProfile:
+    """Return import and ``ti.init()`` checkpoints without requiring a Program."""
+
+    raw = startup_profile_raw_snapshot(clear=clear)
+    events = tuple(
+        StartupProfileEvent(name=name, offset_ns=int(offset_ns))
+        for name, offset_ns in raw["events"]
+    )
+    pending = {}
+    phases = []
+    for event in events:
+        if event.name.endswith(".begin"):
+            pending.setdefault(event.name[:-6], []).append(event.offset_ns)
+        elif event.name.endswith(".end"):
+            name = event.name[:-4]
+            starts = pending.get(name)
+            if starts:
+                begin_ns = starts.pop()
+                phases.append(
+                    StartupProfilePhase(
+                        name=name,
+                        begin_ns=begin_ns,
+                        end_ns=event.offset_ns,
+                        duration_ns=max(0, event.offset_ns - begin_ns),
+                    )
+                )
+    return StartupProfile(
+        schema_version=1,
+        enabled=bool(raw["enabled"]),
+        elapsed_ns=int(raw["elapsed_ns"]),
+        events=events,
+        phases=tuple(phases),
+    )
+
+
 _active_trace_lock = threading.Lock()
 _active_trace = None
 
@@ -428,11 +501,16 @@ __all__ = [
     "RuntimeStatistics",
     "RuntimeTrace",
     "RuntimeTraceSession",
+    "StartupProfile",
+    "StartupProfileEvent",
+    "StartupProfilePhase",
     "SubmissionStatistics",
     "SynchronizationStatistics",
     "TraceStatistics",
     "TransferStatistics",
     "capabilities",
+    "configure_startup_profile",
     "stats",
+    "startup_profile",
     "trace",
 ]

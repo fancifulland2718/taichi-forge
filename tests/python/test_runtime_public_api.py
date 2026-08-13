@@ -56,6 +56,29 @@ def test_runtime_public_api_rejects_mismatched_statistics_schema():
         runtime_api._statistics_from_raw({"schema_version": 1})
 
 
+def test_startup_profile_is_opt_in_and_available_before_program_init():
+    ti.reset()
+    ti.runtime.configure_startup_profile(True, clear=True)
+    before = ti.runtime.startup_profile()
+    assert before.enabled
+    assert before.events == ()
+
+    ti.init(arch=ti.cpu, startup_profile=True)
+    snapshot = ti.runtime.startup_profile()
+    phase_names = {phase.name for phase in snapshot.phases}
+    assert snapshot.schema_version == 1
+    assert "ti_init.total" in phase_names
+    assert "ti_init.reset" in phase_names
+    assert "ti_init.program_create" in phase_names
+    assert "ti_init.runtime_materialize" in phase_names
+    assert all(phase.duration_ns >= 0 for phase in snapshot.phases)
+    ti.reset()
+    ti.runtime.configure_startup_profile(False, clear=True)
+    disabled = ti.runtime.startup_profile()
+    assert not disabled.enabled
+    assert disabled.events == ()
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_runtime_stats_and_capabilities_are_immutable_and_exact():
     @ti.kernel

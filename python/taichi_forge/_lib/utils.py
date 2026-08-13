@@ -9,6 +9,75 @@ import glob
 
 from colorama import Fore, Style
 
+_startup_profile_enabled = os.environ.get("TI_STARTUP_PROFILE", "").strip().lower() in (
+    "1",
+    "true",
+    "on",
+    "yes",
+)
+_startup_profile_clock = None
+_startup_profile_origin_ns = None
+_startup_profile_events = []
+
+
+def configure_startup_profile(enabled=True, *, clear=False):
+    """Enable low-frequency import/init timing checkpoints."""
+
+    global _startup_profile_enabled
+    global _startup_profile_clock
+    global _startup_profile_origin_ns
+    if not isinstance(enabled, bool):
+        raise TypeError("startup profile enabled must be bool")
+    if not isinstance(clear, bool):
+        raise TypeError("startup profile clear must be bool")
+    _startup_profile_enabled = enabled
+    if clear:
+        _startup_profile_events.clear()
+        _startup_profile_origin_ns = None
+    if enabled and _startup_profile_clock is None:
+        import time  # pylint: disable=import-outside-toplevel
+
+        _startup_profile_clock = time.perf_counter_ns
+    if enabled and _startup_profile_origin_ns is None:
+        _startup_profile_origin_ns = _startup_profile_clock()
+    return _startup_profile_enabled
+
+
+def startup_profile_mark(name):
+    if not _startup_profile_enabled:
+        return
+    if not isinstance(name, str) or not name:
+        raise ValueError("startup profile event name must be non-empty")
+    now = _startup_profile_clock()
+    _startup_profile_events.append((name, now - _startup_profile_origin_ns))
+
+
+def startup_profile_raw_snapshot(*, clear=False):
+    global _startup_profile_origin_ns
+    if not isinstance(clear, bool):
+        raise TypeError("startup profile clear must be bool")
+    events = tuple(_startup_profile_events)
+    elapsed_ns = (
+        _startup_profile_clock() - _startup_profile_origin_ns
+        if _startup_profile_enabled and _startup_profile_origin_ns is not None
+        else 0
+    )
+    result = {
+        "enabled": _startup_profile_enabled,
+        "elapsed_ns": elapsed_ns,
+        "events": events,
+    }
+    if clear:
+        _startup_profile_events.clear()
+        if _startup_profile_enabled:
+            _startup_profile_origin_ns = _startup_profile_clock()
+    return result
+
+
+if _startup_profile_enabled:
+    configure_startup_profile(True)
+    startup_profile_mark("python_import.total.begin")
+
 if sys.version_info[0] < 3 or sys.version_info[1] <= 5:
     raise RuntimeError(
         "\nPlease restart with Python 3.6+\n" + "Current Python version:",
@@ -223,10 +292,14 @@ def _prepare_native_runtime():
     if _native_runtime_loaded:
         return
 
+    startup_profile_mark("native_runtime.search.begin")
     runtime_dirs = _native_runtime_dirs()
+    startup_profile_mark("native_runtime.search.end")
     _native_load_trace(f"runtime search directories: {runtime_dirs}")
+    startup_profile_mark("native_runtime.cuda_dependency.begin")
     _prepare_bundled_cuda_runtime(runtime_dirs)
     _preload_cuda_runtime_for_native_runtime()
+    startup_profile_mark("native_runtime.cuda_dependency.end")
     if get_os_name() == "win":
         for path in runtime_dirs:
             if hasattr(os, "add_dll_directory"):
@@ -238,6 +311,7 @@ def _prepare_native_runtime():
             if not os.path.exists(lib_path):
                 continue
             _native_load_trace(f"loading native runtime: {lib_path}")
+            startup_profile_mark("native_runtime.load.begin")
             if get_os_name() == "win":
                 handle = ctypes.WinDLL(lib_path)  # pylint: disable=no-member
             else:
@@ -251,6 +325,7 @@ def _prepare_native_runtime():
             # C++ type metadata cannot outlive their defining shared object.
             _native_library_handles.append(handle)
             _native_runtime_loaded = True
+            startup_profile_mark("native_runtime.load.end")
             _native_load_trace("native runtime load passed")
             return
     _native_load_trace("no native runtime candidate was found")
@@ -297,7 +372,9 @@ def import_ti_python_core():
         os.environ["PATH"] += os.pathsep + pyddir
     try:
         _native_load_trace("importing pybind shim")
+        startup_profile_mark("pybind_shim.import.begin")
         from taichi_forge._lib.core import taichi_python as core  # pylint: disable=C0415
+        startup_profile_mark("pybind_shim.import.end")
         _native_load_trace("pybind shim import passed")
     except Exception as e:
         if isinstance(e, ImportError):
@@ -314,7 +391,9 @@ def import_ti_python_core():
         if old_flags is not None:
             sys.setdlopenflags(old_flags)  # pylint: disable=E1101
     lib_dir = _runtime_bitcode_dir()
+    startup_profile_mark("runtime_bitcode.configure.begin")
     core.set_lib_dir(locale_encode(lib_dir))
+    startup_profile_mark("runtime_bitcode.configure.end")
     return core
 
 
@@ -363,6 +442,7 @@ def check_exists(src):
 
 
 ti_python_core = import_ti_python_core()
+startup_profile_mark("python_import.native_core_ready")
 
 ti_python_core.set_python_package_dir(package_root)
 

@@ -1,6 +1,7 @@
 from taichi_forge._funcs import *
 from taichi_forge._lib import core as _ti_core
-from taichi_forge._lib.utils import warn_restricted_version
+from taichi_forge._lib.utils import startup_profile_mark, warn_restricted_version
+startup_profile_mark("python_import.frontend_core_ready")
 from taichi_forge._logging import *
 from taichi_forge._snode import *
 from taichi_forge._contracts import (
@@ -9,6 +10,7 @@ from taichi_forge._contracts import (
 )
 from taichi_forge.lang import *  # pylint: disable=W0622 # TODO(archibate): It's `taichi_forge.lang.core` overriding `taichi_forge.core`
 from taichi_forge.types.annotations import *
+startup_profile_mark("python_import.lang_ready")
 
 # Provide a shortcut to types since they're commonly used.
 from taichi_forge.types.primitive_types import *
@@ -29,6 +31,7 @@ from taichi_forge import (
 )
 from taichi_forge.tools.compile_profile import compile_profile, CompileProfile  # P-Compile-7
 from taichi_forge.ui import GUI, hex_to_rgb, rgb_to_hex, ui
+startup_profile_mark("python_import.public_modules_ready")
 
 # Issue#2223: Do not reorder, or we're busted with partially initialized module
 from taichi_forge import aot  # isort:skip
@@ -61,3 +64,5 @@ del _ti_core
 
 warn_restricted_version()
 del warn_restricted_version
+startup_profile_mark("python_import.total.end")
+del startup_profile_mark

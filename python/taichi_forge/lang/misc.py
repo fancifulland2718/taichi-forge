@@ -8,6 +8,10 @@ import warnings
 from copy import deepcopy as _deepcopy
 
 from taichi_forge._lib import core as _ti_core
+from taichi_forge._lib.utils import (
+    configure_startup_profile,
+    startup_profile_mark,
+)
 from taichi_forge.lang import impl
 from taichi_forge.lang._compile_profile import python_compile_profile_event
 from taichi_forge.lang.expr import Expr
@@ -353,6 +357,7 @@ def init(
     _test_mode=False,
     enable_fallback=True,
     require_version=None,
+    startup_profile=None,
     **kwargs,
 ):
     """Initializes the Taichi runtime.
@@ -376,7 +381,13 @@ def init(
             * ``print_ir`` (bool): Prints the CHI IR of the Taichi kernels.
             *``offline_cache`` (bool): Enables offline cache of the compiled kernels. Default to True. When this is enabled Taichi will cache compiled kernel on your local disk to accelerate future calls.
             *``random_seed`` (int): Sets the seed of the random generator. The default is 0.
+            *``startup_profile`` (bool): Enables or disables low-frequency import/init timing checkpoints. Set ``TI_STARTUP_PROFILE=1`` before import to include native loading.
     """
+    if startup_profile is not None:
+        if not isinstance(startup_profile, bool):
+            raise TypeError("ti.init(startup_profile=...) must be bool or None")
+        configure_startup_profile(startup_profile)
+    startup_profile_mark("ti_init.total.begin")
     # Check version for users every 7 days if not disabled by users.
     _version_check.start_version_check_thread()
 
@@ -396,7 +407,9 @@ def init(
     default_fp = _deepcopy(default_fp)
     default_ip = _deepcopy(default_ip)
     kwargs = _deepcopy(kwargs)
+    startup_profile_mark("ti_init.reset.begin")
     reset()
+    startup_profile_mark("ti_init.reset.end")
 
     cfg = impl.default_cfg()
     cfg.offline_cache = True  # Enable offline cache in frontend instead of C++ side
@@ -476,6 +489,8 @@ def init(
     if len(unexpected_keys):
         raise KeyError(f'Unrecognized keyword argument(s) for ti.init: {", ".join(unexpected_keys)}')
 
+    startup_profile_mark("ti_init.configuration_ready")
+
     # dispatch configurations that are not in ti.cfg:
     if not _test_mode:
         _ti_core.set_core_trigger_gdb_when_crash(spec_cfg.gdb_trigger)
@@ -495,23 +510,31 @@ def init(
         _logging.info(f"Following TI_ARCH setting up for arch={env_arch}")
         arch = _ti_core.arch_from_name(env_arch)
     cfg.arch = adaptive_arch_select(arch, enable_fallback)
+    startup_profile_mark("ti_init.backend_selected")
     print(f"[Taichi] Starting on arch={_ti_core.arch_name(cfg.arch)}")
 
     if _test_mode:
+        startup_profile_mark("ti_init.total.end")
         return spec_cfg
 
     get_default_kernel_profiler().set_kernel_profiler_mode(cfg.kernel_profiler)
 
     # create a new program:
+    startup_profile_mark("ti_init.program_create.begin")
     impl.get_runtime().create_program()
+    startup_profile_mark("ti_init.program_create.end")
 
     _logging.trace("Materializing runtime...")
+    startup_profile_mark("ti_init.runtime_materialize.begin")
     impl.get_runtime().prog.materialize_runtime()
+    startup_profile_mark("ti_init.runtime_materialize.end")
     algorithms_module = sys.modules.get("taichi_forge.algorithms._algorithms")
     if algorithms_module is not None and hasattr(
         algorithms_module, "initialize_native_primitive_dispatch"
     ):
+        startup_profile_mark("ti_init.primitive_capabilities.begin")
         algorithms_module.initialize_native_primitive_dispatch(impl.get_runtime().prog)
+        startup_profile_mark("ti_init.primitive_capabilities.end")
 
     impl._root_fb = _snode.FieldsBuilder()
 
@@ -520,6 +543,7 @@ def init(
 
     # Recover the current working directory (https://github.com/taichi-dev/taichi/issues/4811)
     os.chdir(current_dir)
+    startup_profile_mark("ti_init.total.end")
     return None
 
 
