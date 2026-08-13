@@ -189,7 +189,7 @@ def test_dead_kernel_definition_cannot_reclaim_native_specialization_budget():
 
 
 @test_utils.test(arch=ti.cpu, kernel_specialization_limit=1)
-def test_destroyed_snode_specialization_returns_resident_budget():
+def test_destroyed_dense_snode_specialization_reuses_resident_template():
     @ti.kernel
     def initialize(dst: ti.template(), value: ti.i32):
         for i in dst:
@@ -207,13 +207,14 @@ def test_destroyed_snode_specialization_returns_resident_budget():
         gc.collect()
 
     stats = ti.lang.impl.get_runtime().debug_kernel_executable_lifecycle_stats()
-    assert stats["historical_materializations"] == 2
+    assert stats["historical_materializations"] == 1
     assert stats["resident_specializations"] == 0
-    assert stats["specialization_reclaims"] == 2
+    assert stats["specialization_reclaims"] == 1
+    assert stats["relocatable_templates"] == 1
 
 
 @test_utils.test(arch=ti.cpu, kernel_specialization_limit=1)
-def test_stale_graph_handle_keeps_retired_specialization_charged():
+def test_stale_graph_handle_pins_template_but_allows_same_layout_rebind():
     @ti.kernel
     def initialize(dst: ti.template()):
         for i in dst:
@@ -231,16 +232,236 @@ def test_stale_graph_handle_keeps_retired_specialization_charged():
     del first
     gc.collect()
 
+    with pytest.raises(ti.TaichiRuntimeError, match="stale|destroyed|retired"):
+        graph.run({})
+
     second = ti.field(ti.i32)
     second_builder = ti.FieldsBuilder()
     second_builder.dense(ti.i, 8).place(second)
     second_tree = second_builder.finalize()
-    with pytest.raises(ti.TaichiRuntimeError, match="kernel_specialization_limit=1"):
-        initialize(second)
-
-    del graph
-    del graph_builder
-    gc.collect()
     initialize(second)
     assert second[5] == 5
+
+    stats = ti.lang.impl.get_runtime().debug_kernel_executable_lifecycle_stats()
+    assert stats["historical_materializations"] == 1
+    assert stats["relocatable_templates"] == 1
+
     second_tree.destroy()
+    del graph
+    del graph_builder
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False, kernel_specialization_limit=1)
+def test_dense_snode_template_reuses_code_across_serial_generations():
+    runtime = ti.lang.impl.get_runtime()
+    runtime.set_kernel_executable_lifecycle_telemetry_enabled(True)
+    runtime.debug_kernel_executable_lifecycle_stats(True)
+
+    @ti.kernel
+    def initialize(dst: ti.template(), base: ti.i32) -> ti.i32:
+        for i in dst:
+            dst[i] = base + i
+        return dst[7]
+
+    for generation in range(12):
+        field = ti.field(ti.i32)
+        builder = ti.FieldsBuilder()
+        builder.dense(ti.i, 16).place(field)
+        tree = builder.finalize()
+        assert initialize(field, generation) == generation + 7
+        tree.destroy()
+
+    stats = runtime.debug_kernel_executable_lifecycle_stats()
+    assert stats["compiler_invocations"] == 1
+    assert stats["historical_materializations"] == 1
+    assert stats["relocatable_templates"] == 1
+    assert stats["relocatable_template_hits"] == 11
+    assert stats["relocatable_bindings_created"] == 11
+    assert stats["budget_rejections"] == 0
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False, kernel_specialization_limit=2)
+def test_dense_snode_template_key_distinguishes_layouts_and_reuses_each():
+    runtime = ti.lang.impl.get_runtime()
+    runtime.set_kernel_executable_lifecycle_telemetry_enabled(True)
+    runtime.debug_kernel_executable_lifecycle_stats(True)
+
+    @ti.kernel
+    def initialize(dst: ti.template(), base: ti.i32) -> ti.i32:
+        for i in dst:
+            dst[i] = base + i
+        return dst[0]
+
+    for generation, shape in enumerate((8, 16, 8, 16, 8, 16)):
+        field = ti.field(ti.i32)
+        builder = ti.FieldsBuilder()
+        builder.dense(ti.i, shape).place(field)
+        tree = builder.finalize()
+        assert initialize(field, generation) == generation
+        tree.destroy()
+
+    stats = runtime.debug_kernel_executable_lifecycle_stats()
+    assert stats["compiler_invocations"] == 2
+    assert stats["historical_materializations"] == 2
+    assert stats["relocatable_templates"] == 2
+    assert stats["relocatable_template_hits"] == 4
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False, kernel_specialization_limit=8)
+def test_simultaneously_live_dense_trees_never_share_generation_binding():
+    runtime = ti.lang.impl.get_runtime()
+    runtime.set_kernel_executable_lifecycle_telemetry_enabled(True)
+    runtime.debug_kernel_executable_lifecycle_stats(True)
+
+    @ti.kernel
+    def initialize(dst: ti.template(), base: ti.i32) -> ti.i32:
+        for i in dst:
+            dst[i] = base + i
+        return dst[5]
+
+    first = ti.field(ti.i32)
+    first_builder = ti.FieldsBuilder()
+    first_builder.dense(ti.i, 8).place(first)
+    first_tree = first_builder.finalize()
+
+    second = ti.field(ti.i32)
+    second_builder = ti.FieldsBuilder()
+    second_builder.dense(ti.i, 8).place(second)
+    second_tree = second_builder.finalize()
+
+    assert initialize(first, 10) == 15
+    assert initialize(second, 20) == 25
+    assert initialize(first, 30) == 35
+
+    stats = runtime.debug_kernel_executable_lifecycle_stats()
+    assert stats["compiler_invocations"] == 2
+    assert stats["relocatable_template_hits"] == 0
+
+    first_tree.destroy()
+    second_tree.destroy()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False, kernel_specialization_limit=1)
+def test_dense_graph_rebuild_reuses_template_while_old_graph_stays_stale():
+    runtime = ti.lang.impl.get_runtime()
+    runtime.set_kernel_executable_lifecycle_telemetry_enabled(True)
+    runtime.debug_kernel_executable_lifecycle_stats(True)
+
+    @ti.kernel
+    def initialize(
+        dst: ti.template(),
+        base: ti.i32,
+        out: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        for i in dst:
+            dst[i] = base + i
+        out[None] = dst[7]
+
+    def make_graph(field):
+        base = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "base", ti.i32)
+        out = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=0)
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(initialize, base, out, template_args={"dst": field})
+        return builder, builder.compile()
+
+    previous = None
+    retained_builders = []
+    for generation in range(4):
+        field = ti.field(ti.i32)
+        builder = ti.FieldsBuilder()
+        builder.dense(ti.i, 16).place(field)
+        tree = builder.finalize()
+        graph_builder, graph = make_graph(field)
+        retained_builders.append(graph_builder)
+        out = ti.ndarray(ti.i32, shape=())
+        graph.run({"base": generation, "out": out})
+        ti.sync()
+        assert out.to_numpy().item() == generation + 7
+        if previous is not None:
+            with pytest.raises(ti.TaichiRuntimeError, match="stale|destroyed|retired"):
+                previous.run({"base": generation, "out": out})
+        tree.destroy()
+        previous = graph
+
+    stats = runtime.debug_kernel_executable_lifecycle_stats()
+    assert stats["compiler_invocations"] == 1
+    assert stats["relocatable_template_hits"] == 3
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False, kernel_specialization_limit=8)
+def test_sparse_snode_template_remains_generation_bound():
+    runtime = ti.lang.impl.get_runtime()
+    runtime.set_kernel_executable_lifecycle_telemetry_enabled(True)
+    runtime.debug_kernel_executable_lifecycle_stats(True)
+
+    @ti.kernel
+    def initialize(dst: ti.template(), base: ti.i32) -> ti.i32:
+        index = base & 7
+        dst[index] = base
+        return dst[index]
+
+    for generation in range(3):
+        field = ti.field(ti.i32)
+        builder = ti.FieldsBuilder()
+        builder.pointer(ti.i, 8).dense(ti.i, 4).place(field)
+        tree = builder.finalize()
+        assert initialize(field, generation) == generation
+        tree.destroy()
+
+    stats = runtime.debug_kernel_executable_lifecycle_stats()
+    assert stats["compiler_invocations"] == 3
+    assert stats["relocatable_templates"] == 0
+    assert stats["relocatable_template_hits"] == 0
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False, kernel_specialization_limit=8)
+def test_hidden_captured_field_prevents_direct_template_rebind():
+    captured = ti.field(ti.i32, shape=())
+    captured[None] = 9
+    runtime = ti.lang.impl.get_runtime()
+    runtime.set_kernel_executable_lifecycle_telemetry_enabled(True)
+    runtime.debug_kernel_executable_lifecycle_stats(True)
+
+    @ti.kernel
+    def initialize(dst: ti.template(), base: ti.i32) -> ti.i32:
+        for i in dst:
+            dst[i] = base + captured[None]
+        return dst[3]
+
+    for generation in range(2):
+        field = ti.field(ti.i32)
+        builder = ti.FieldsBuilder()
+        builder.dense(ti.i, 8).place(field)
+        tree = builder.finalize()
+        assert initialize(field, generation) == generation + 9
+        tree.destroy()
+
+    stats = runtime.debug_kernel_executable_lifecycle_stats()
+    assert stats["compiler_invocations"] == 2
+    assert stats["relocatable_template_hits"] == 0
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False, kernel_specialization_limit=1)
+def test_relocatable_template_eviction_falls_back_without_dangling_candidate():
+    @ti.kernel
+    def initialize(dst: ti.template(), base: ti.i32) -> ti.i32:
+        for i in dst:
+            dst[i] = base + i
+        return dst[0]
+
+    field = ti.field(ti.i32)
+    builder = ti.FieldsBuilder()
+    builder.dense(ti.i, 8).place(field)
+    tree = builder.finalize()
+    assert initialize(field, 3) == 3
+    tree.destroy()
+
+    runtime = ti.lang.impl.get_runtime()
+    assert runtime.prog._reclaim_relocatable_kernel_templates(0) == 1
+
+    replacement = ti.field(ti.i32)
+    replacement_builder = ti.FieldsBuilder()
+    replacement_builder.dense(ti.i, 8).place(replacement)
+    replacement_tree = replacement_builder.finalize()
+    assert initialize(replacement, 7) == 7
+    replacement_tree.destroy()

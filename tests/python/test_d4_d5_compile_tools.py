@@ -144,7 +144,7 @@ def test_compile_profile_separates_snode_lifecycle_phases():
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
-def test_snode_relocation_manifest_is_machine_generated_and_fail_closed():
+def test_sparse_snode_relocation_manifest_is_machine_generated_and_fail_closed():
     value = ti.field(ti.i32)
     builder = ti.FieldsBuilder()
     builder.pointer(ti.i, 8).dense(ti.i, 4).place(value)
@@ -182,6 +182,50 @@ def test_snode_relocation_manifest_is_machine_generated_and_fail_closed():
     assert all(not task["embedded_state_audited"] for task in manifest["tasks"])
     assert all(task["relocation_class"] == "generation_bound" for task in manifest["tasks"])
     assert "sparse_list_and_allocator_relocation_not_qualified" in (manifest["blockers"])
+    states = {state for task in manifest["tasks"] for state in task["generation_bound_state"]}
+    assert "pointer_allocator_and_list_state" in states
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_dense_snode_relocation_manifest_admits_generation_rebind():
+    value = ti.field(ti.i32)
+    builder = ti.FieldsBuilder()
+    builder.dense(ti.i, 8).place(value)
+    tree = builder.finalize()
+
+    @ti.kernel
+    def sum_dense() -> ti.i32:
+        total = 0
+        for i in value:
+            total += value[i]
+        return total
+
+    key = sum_dense._primal.ensure_compiled()
+    kernel_cpp = sum_dense._primal.compiled_kernels[key]
+    manifest = dict(ti.lang.impl.get_runtime().prog._debug_snode_relocation_manifest(kernel_cpp))
+
+    assert manifest["coverage"] == "compiler_typed_relocation_contract"
+    assert manifest["compiler_emitted"]
+    assert manifest["relocation_class"] == "partially_relocatable"
+    assert manifest["compiler_embedded_state_fully_classified"]
+    assert manifest["reuse_admitted"]
+    assert manifest["blockers"] == []
+    assert all(task["embedded_state_audited"] for task in manifest["tasks"])
+    assert all(task["relocation_class"] == "partially_relocatable" for task in manifest["tasks"])
+    tree.destroy()
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_snode_executable_reuse_capabilities_are_class_specific():
+    capabilities = dict(ti.lang.impl.get_runtime().prog._debug_snode_executable_reuse_capabilities())
+
+    assert capabilities["schema_version"] == 1
+    assert capabilities["enabled"]
+    assert capabilities["rollback_switch"] == "TI_ENABLE_SNODE_EXECUTABLE_REUSE"
+    assert not capabilities["stale_graph_retarget"]
+    assert capabilities["root_dense"] == "partially_relocatable"
+    for category in ("pointer", "bitmasked", "dynamic", "hash"):
+        assert capabilities[category] == "generation_bound"
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
