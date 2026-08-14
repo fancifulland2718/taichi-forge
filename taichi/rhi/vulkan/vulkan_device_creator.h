@@ -25,6 +25,19 @@ class VulkanDevice;
 
 namespace detail {
 
+uint32_t select_instance_api_version(uint32_t requested_api_version,
+                                     uint32_t loader_api_version);
+
+bool uses_core_physical_device_features2(uint32_t instance_api_version);
+
+bool supports_physical_device_features2(uint32_t instance_api_version,
+                                        bool has_extension);
+
+bool supports_8bit_storage(uint32_t device_api_version, bool has_extension);
+
+bool supports_shader_atomic_int64(uint32_t device_api_version,
+                                  bool has_extension);
+
 void record_shader_atomic_float2_capabilities(
     DeviceCapabilityConfig &caps,
     const VkPhysicalDeviceShaderAtomicFloat2FeaturesEXT &features);
@@ -85,6 +98,10 @@ class TI_DLL_EXPORT VulkanDeviceCreator {
   void setup_debug_messenger();
   void pick_physical_device(VkSurfaceKHR test_surface);
   void create_logical_device(bool manual_create);
+  void query_physical_device_features2(
+      VkPhysicalDeviceFeatures2 *features) const;
+  void query_physical_device_properties2(
+      VkPhysicalDeviceProperties2 *properties) const;
 
   VkInstance instance_{VK_NULL_HANDLE};
   VkDebugUtilsMessengerEXT debug_messenger_{VK_NULL_HANDLE};
@@ -94,6 +111,8 @@ class TI_DLL_EXPORT VulkanDeviceCreator {
 
   VkQueue compute_queue_{VK_NULL_HANDLE};
   VkQueue graphics_queue_{VK_NULL_HANDLE};
+
+  uint32_t instance_api_version_{VK_API_VERSION_1_0};
 
   std::unique_ptr<VulkanDevice> ti_device_{nullptr};
 

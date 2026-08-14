@@ -203,6 +203,40 @@ DONE:
 
 }  // namespace
 
+TEST(VulkanDeviceCapabilityTest, PromotedCoreFeaturesDoNotNeedExtensionNames) {
+  EXPECT_EQ(vulkan::detail::select_instance_api_version(
+                VK_API_VERSION_1_3, VK_API_VERSION_1_1),
+            VK_API_VERSION_1_1);
+  EXPECT_EQ(vulkan::detail::select_instance_api_version(
+                VK_API_VERSION_1_1, VK_API_VERSION_1_3),
+            VK_API_VERSION_1_1);
+  EXPECT_FALSE(vulkan::detail::uses_core_physical_device_features2(
+      VK_API_VERSION_1_0));
+  EXPECT_TRUE(vulkan::detail::uses_core_physical_device_features2(
+      VK_API_VERSION_1_1));
+
+  EXPECT_FALSE(vulkan::detail::supports_physical_device_features2(
+      VK_API_VERSION_1_0, false));
+  EXPECT_TRUE(vulkan::detail::supports_physical_device_features2(
+      VK_API_VERSION_1_0, true));
+  EXPECT_TRUE(vulkan::detail::supports_physical_device_features2(
+      VK_API_VERSION_1_1, false));
+
+  EXPECT_FALSE(
+      vulkan::detail::supports_8bit_storage(VK_API_VERSION_1_1, false));
+  EXPECT_TRUE(
+      vulkan::detail::supports_8bit_storage(VK_API_VERSION_1_1, true));
+  EXPECT_TRUE(
+      vulkan::detail::supports_8bit_storage(VK_API_VERSION_1_2, false));
+
+  EXPECT_FALSE(vulkan::detail::supports_shader_atomic_int64(
+      VK_API_VERSION_1_1, false));
+  EXPECT_TRUE(vulkan::detail::supports_shader_atomic_int64(
+      VK_API_VERSION_1_1, true));
+  EXPECT_TRUE(vulkan::detail::supports_shader_atomic_int64(
+      VK_API_VERSION_1_2, false));
+}
+
 TEST(VulkanDeviceCapabilityTest, AtomicFloat2FeaturesMapIndependently) {
   VkPhysicalDeviceShaderAtomicFloat2FeaturesEXT features{};
   features.sType =
