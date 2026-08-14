@@ -2,7 +2,7 @@
 
 This is the canonical version index for Taichi Forge user-visible changes.
 Version `0.6.2` is the latest published release, with user-visible source
-boundary `7f5cf6a0a`. Packaging-only, test-only, and documentation-only commits
+boundary `b28a2bbae`. Packaging-only, test-only, and documentation-only commits
 after that boundary do not reassign feature history. Version `0.6.1` retains
 its final Python shim/source boundary `b129ad94c` and paired native runtime
 build identity `c268ca5671e8`; `0.4.25` remains the final public `0.4.x`
@@ -18,7 +18,7 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
-| [0.6.2](#062) | latest published release | `7f5cf6a0a` | execution-plan closeout, dynamic-work/Worklist contracts, runtime export control, Graph lifecycle/telemetry, and device-convergent linear algebra |
+| [0.6.2](#062) | latest published release | `b28a2bbae` | execution-plan closeout, dynamic-work/Worklist contracts, runtime export control, Graph lifecycle/telemetry, and device-convergent linear algebra |
 | [0.6.1](#061) | published release | `b129ad94c` | task launch manifests/policies, dynamic LLVM SNode directories, device-resident dynamic worklists, bounded Graph dispatch, and correlated pipeline telemetry |
 | [0.6.0](#060) | published release | `106ad65d25` | structured Graph control/telemetry and Vulkan indirect dispatch, sparse runtime/linear algebra, driver-only CUDA primitives, managed interoperability/display, and bounded runtime lifetimes |
 | [0.1.0](#010) | historical source release; artifact may be removed | `91ad177685` | scikit-build-core migration and Forge distribution rebrand |
@@ -47,10 +47,18 @@ grouped under the behavior they shipped.
 ## 0.6.2
 
 Version `0.6.2` closes the work after `0.6.1` at source boundary
-`7f5cf6a0a`. The entries below are shipped release behavior unless an API or
+`b28a2bbae`. The entries below are shipped release behavior unless an API or
 backend route is explicitly marked experimental, opt-in, diagnostic, or
 source-build-only.
 
+- Vulkan feature discovery now follows the core-promotion contract even when a
+  conformant driver omits legacy promoted extension names. Physical-device
+  Features2 queries use the Vulkan 1.1 core entry point when available and the
+  KHR entry point only for Vulkan 1.0 plus the extension; 8-bit storage and
+  shader int64 atomics become core candidates at Vulkan 1.2, not 1.1. The
+  requested instance version is also clamped to the loader-supported version.
+  This avoids an invalid 8-bit-storage query chain on strict Vulkan 1.1 drivers
+  and restores promoted feature discovery on Vulkan 1.1/1.2 implementations.
 - Direct root-dense Field template kernels now reuse compiler-qualified
   executable templates across serial SNodeTree generations on CPU, CUDA, and
   Vulkan. The frontend validates the complete direct dependency set; the

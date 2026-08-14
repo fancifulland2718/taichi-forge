@@ -1,7 +1,7 @@
 # Taichi Forge 版本更新说明
 
 本文是 Taichi Forge 用户可见更新的唯一版本索引。`0.6.2` 是最新正式发布版本，用户可见
-源码边界为 `7f5cf6a0a`；其后的纯打包、测试或文档提交不会重新归属功能历史。`0.6.1`
+源码边界为 `b28a2bbae`；其后的纯打包、测试或文档提交不会重新归属功能历史。`0.6.1`
 继续保留最终 Python shim/source 边界 `b129ad94c` 和配对 native runtime build identity
 `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.4.x` 基线。
 
@@ -13,7 +13,7 @@
 
 | 版本 | 历史状态 | 源码边界 | 主要范围 |
 | --- | --- | --- | --- |
-| [0.6.2](#062) | 最新正式发布版本 | `7f5cf6a0a` | execution-plan 收口、dynamic-work/Worklist 合同、runtime export 控制、Graph 生命周期/遥测与 device-convergent 线性代数 |
+| [0.6.2](#062) | 最新正式发布版本 | `b28a2bbae` | execution-plan 收口、dynamic-work/Worklist 合同、runtime export 控制、Graph 生命周期/遥测与 device-convergent 线性代数 |
 | [0.6.1](#061) | 已正式发布 | `b129ad94c` | task launch manifest/policy、动态 LLVM SNode directory、设备端 dynamic worklist、有界 Graph dispatch 与关联 pipeline telemetry |
 | [0.6.0](#060) | 已正式发布 | `106ad65d25` | 结构化 Graph 控制/遥测与 Vulkan indirect dispatch、稀疏 runtime/线性代数、driver-only CUDA primitive、受管互操作/显示与 runtime 生命周期有界化 |
 | [0.1.0](#010) | 历史源码版本；发行文件可能已移除 | `91ad177685` | scikit-build-core 迁移与 Forge 发行包重命名 |
@@ -41,10 +41,16 @@
 
 ## 0.6.2 {#062}
 
-`0.6.2` 在源码边界 `7f5cf6a0a` 收口 `0.6.1` 之后的更新。以下条目均属于已发布行为；
+`0.6.2` 在源码边界 `b28a2bbae` 收口 `0.6.1` 之后的更新。以下条目均属于已发布行为；
 只有明确标记为 experimental、opt-in、diagnostic 或 source-build-only 的 API/后端路线
 仍保持相应边界。
 
+- Vulkan feature 探测现在严格遵守 core promotion 合同，即使合规驱动不再枚举已提升的旧
+  extension 名称也能正确工作。physical-device Features2 在 Vulkan 1.1+ 使用 core 入口，
+  只有 Vulkan 1.0 加对应扩展时才使用 KHR 入口；8-bit storage 与 shader int64 atomic
+  均从 Vulkan 1.2 起按 core 候选处理，而不是 Vulkan 1.1。请求的 instance version 还会
+  限制在 loader 实际支持的版本内。这既避免严格 Vulkan 1.1 驱动收到非法的 8-bit-storage
+  查询链，也恢复 Vulkan 1.1/1.2 驱动上不重复枚举旧扩展名时的 promoted feature 探测。
 - CPU、CUDA 与 Vulkan 上，直接 root-dense Field template kernel 现在可以跨 serial
   SNodeTree generation 复用经 compiler 资格化的 executable template。frontend 会验证完整
   direct dependency 集合，compiler 会分类 embedded state，每个新 generation 仍创建独立的

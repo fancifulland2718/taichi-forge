@@ -46,7 +46,7 @@ independent from upstream Taichi version numbers.
 ## Release History
 
 The latest published release is `0.6.2`; its user-visible source boundary is
-`7f5cf6a0a`. `0.4.25` is the final public `0.4.x` baseline. PyPI storage is limited, so some
+`b28a2bbae`. `0.4.25` is the final public `0.4.x` baseline. PyPI storage is limited, so some
 nonessential older distribution files have been removed. The complete version
 index therefore uses durable Git source boundaries instead of treating the
 current PyPI file list as the whole history.
