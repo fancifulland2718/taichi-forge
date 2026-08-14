@@ -12395,6 +12395,7 @@ class SubmissionTicket:
         "_completion",
         "_completion_observations",
         "_observation",
+        "_runtime_owner_retained",
         "_runtime",
         "_submission_owners",
         "_telemetry",
@@ -12411,11 +12412,13 @@ class SubmissionTicket:
         workspace_lane=0,
         submission_owners=(),
         completion_observations=(),
+        runtime_owner_retained=False,
     ):
         self._admission = admission
         self._completion = completion
         self._completion_observations = tuple(completion_observations)
         self._observation = observation
+        self._runtime_owner_retained = bool(runtime_owner_retained)
         self._runtime = runtime
         self._submission_owners = tuple(submission_owners)
         self._telemetry = telemetry
@@ -12436,7 +12439,9 @@ class SubmissionTicket:
             ready = self._admission._completion_done(self._completion)
         if ready:
             self._observe_completion()
-            self._runtime.release_runtime_submission_owner(self._completion)
+            if self._runtime_owner_retained:
+                self._runtime.release_runtime_submission_owner(self._completion)
+                self._runtime_owner_retained = False
             self._submission_owners = ()
         return ready
 
@@ -12446,7 +12451,9 @@ class SubmissionTicket:
         else:
             self._admission._completion_wait(self._completion)
         self._observe_completion()
-        self._runtime.release_runtime_submission_owner(self._completion)
+        if self._runtime_owner_retained:
+            self._runtime.release_runtime_submission_owner(self._completion)
+            self._runtime_owner_retained = False
         self._submission_owners = ()
 
     def observations(self):
@@ -12928,6 +12935,7 @@ class Graph:
         telemetry_state = None
         submission_owners = ()
         completion_observations = ()
+        runtime_owner_retained = False
         submission_instance = self._instance
         workspace_lane_index = 0
         try:
@@ -13084,6 +13092,7 @@ class Graph:
                     runtime.retain_runtime_submission_owner(
                         completion, (self, *submission_owners)
                     )
+                    runtime_owner_retained = True
         except BaseException:
             if observation_lease is not None:
                 observation_lease.cancel()
@@ -13111,6 +13120,7 @@ class Graph:
             workspace_lane=workspace_lane_index,
             submission_owners=submission_owners,
             completion_observations=completion_observations,
+            runtime_owner_retained=runtime_owner_retained,
         )
 
     def prepare_telemetry(self, mode, *, slots=1):

@@ -61,6 +61,50 @@ def test_internal_runtime_completion_contract_and_resource_retirement():
     )
 
 
+@test_utils.test(arch=ti.cuda)
+def test_cuda_runtime_completion_reuses_waited_events():
+    value = ti.ndarray(ti.i32, shape=1)
+
+    @ti.kernel
+    def advance(dst: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        dst[0] += 1
+
+    prog = impl.get_runtime().prog
+    advance(value)
+    ti.sync()
+    baseline = prog._debug_runtime_completion_stats()
+
+    iterations = 32
+    for _ in range(iterations):
+        advance(value)
+        ticket = prog._record_runtime_completion()
+        ticket.wait()
+
+    # Collect the last completed state without publishing another event.
+    assert prog._record_runtime_completion().done()
+    final = prog._debug_runtime_completion_stats()
+    created = (
+        final["cuda_completion_events_created"]
+        - baseline["cuda_completion_events_created"]
+    )
+    reused = (
+        final["cuda_completion_events_reused"]
+        - baseline["cuda_completion_events_reused"]
+    )
+    returned = (
+        final["cuda_completion_events_returned"]
+        - baseline["cuda_completion_events_returned"]
+    )
+
+    assert created == 1
+    assert reused == iterations - 1
+    assert returned == iterations
+    assert final["cuda_completion_events_cached"] == 1
+    assert final["cuda_completion_events_abandoned"] == 0
+    assert final["active"] == 0
+    assert value.to_numpy()[0] == iterations + 1
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_runtime_completion_survives_program_reset_as_completed_token():
     value = ti.field(ti.i32, shape=())

@@ -4790,6 +4790,14 @@ Program::Program(Arch desired_arch)
   ordinary_snode_guard_elision_enabled_ =
       get_environ_config("TI_DEBUG_ORDINARY_FORCE_SNODE_GUARD", 0) == 0;
 
+#ifdef TI_WITH_CUDA
+  if (desired_arch == Arch::cuda) {
+    runtime_completion_cuda_event_pool_ =
+        std::make_shared<RuntimeCompletionCudaEventPool>(
+            runtime_fault_domain_, kMaxTrackedRuntimeCompletions);
+  }
+#endif
+
   auto [staging_result, staging_handle] =
       dense_field_staging_resources_.emplace(
           kDenseFieldStagingResourceKind);
@@ -7763,7 +7771,8 @@ RuntimeCompletion Program::record_runtime_completion(
         // Toolkit-versioned runtime dependency is introduced.
         result = RuntimeCompletion::from_cuda_stream(
             runtime_completion_domain_, sequence, nullptr,
-            runtime_fault_domain_, std::move(gpu_timing),
+            runtime_fault_domain_, runtime_completion_cuda_event_pool_,
+            std::move(gpu_timing),
             std::move(gpu_region_timings));
       } else if (compile_config().arch == Arch::vulkan) {
         // A work epoch exists, so flush() intentionally records a fence even
@@ -7843,8 +7852,6 @@ RuntimeCompletion Program::record_runtime_completion(
     }
   }
 
-  collect_ready_runtime_completions();
-
   RuntimeCompletion oldest;
   {
     std::lock_guard<std::mutex> lock(runtime_completion_mutex_);
@@ -7893,6 +7900,9 @@ Program::debug_runtime_completion_stats() const {
       }
     }
   }
+  const auto cuda_events = runtime_completion_cuda_event_pool_
+                               ? runtime_completion_cuda_event_pool_->snapshot()
+                               : RuntimeCompletionCudaEventPoolSnapshot{};
   return {
       {"domain", runtime_completion_domain_},
       {"submission_epoch",
@@ -7911,6 +7921,12 @@ Program::debug_runtime_completion_stats() const {
        runtime_completion_resource_count(kNdarrayResourceKind)},
       {"retained_textures",
        runtime_completion_resource_count(kTextureResourceKind)},
+      {"cuda_completion_events_created", cuda_events.created},
+      {"cuda_completion_events_reused", cuda_events.reused},
+      {"cuda_completion_events_returned", cuda_events.returned},
+      {"cuda_completion_events_destroyed", cuda_events.destroyed},
+      {"cuda_completion_events_abandoned", cuda_events.abandoned},
+      {"cuda_completion_events_cached", cuda_events.cached},
   };
 }
 
@@ -8555,6 +8571,11 @@ void Program::finalize() {
 #endif
     graph_observation_staging_.cuda_readbacks.clear();
     graph_observation_staging_.cuda_pinned_bytes = 0;
+  });
+  best_effort("clear CUDA completion event cache", [&] {
+    if (runtime_completion_cuda_event_pool_) {
+      runtime_completion_cuda_event_pool_->clear();
+    }
   });
   if (arch_uses_llvm(compile_config().arch) ||
       compile_config().arch == Arch::vulkan) {

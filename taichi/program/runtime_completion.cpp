@@ -19,6 +19,149 @@
 #endif
 
 namespace taichi::lang {
+struct RuntimeCompletionCudaEventPool::Impl {
+  Impl(std::weak_ptr<RuntimeFaultDomain> fault_domain,
+       std::size_t max_cached_events)
+      : fault_domain(std::move(fault_domain)),
+        max_cached_events(max_cached_events) {
+  }
+
+  bool backend_calls_safe() const noexcept {
+    auto domain = fault_domain.lock();
+    return !domain || domain->backend_calls_safe();
+  }
+
+  std::weak_ptr<RuntimeFaultDomain> fault_domain;
+  const std::size_t max_cached_events;
+  mutable std::mutex mutex;
+  std::vector<void *> cached_events;
+  std::atomic<std::uint64_t> created{0};
+  std::atomic<std::uint64_t> reused{0};
+  std::atomic<std::uint64_t> returned{0};
+  std::atomic<std::uint64_t> destroyed{0};
+  std::atomic<std::uint64_t> abandoned{0};
+};
+
+RuntimeCompletionCudaEventPool::RuntimeCompletionCudaEventPool(
+    std::weak_ptr<RuntimeFaultDomain> fault_domain,
+    std::size_t max_cached_events)
+    : impl_(std::make_unique<Impl>(std::move(fault_domain),
+                                   max_cached_events)) {
+}
+
+RuntimeCompletionCudaEventPool::~RuntimeCompletionCudaEventPool() {
+  clear();
+}
+
+void *RuntimeCompletionCudaEventPool::acquire() {
+#ifdef TI_WITH_CUDA
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (!impl_->cached_events.empty()) {
+      void *event = impl_->cached_events.back();
+      impl_->cached_events.pop_back();
+      impl_->reused.fetch_add(1, std::memory_order_relaxed);
+      return event;
+    }
+  }
+  auto context_guard = CUDAContext::get_instance().get_guard();
+  auto &driver = CUDADriver::get_instance();
+  void *event = nullptr;
+  const std::uint32_t result =
+      driver.event_create.call(&event, CU_EVENT_DISABLE_TIMING);
+  if (result != CUDA_SUCCESS) {
+    throw BackendRuntimeError(
+        Arch::cuda, result, "event_create",
+        driver.event_create.get_error_message(result));
+  }
+  impl_->created.fetch_add(1, std::memory_order_relaxed);
+  return event;
+#else
+  TI_ERROR("CUDA event pool requested without CUDA support");
+#endif
+}
+
+void RuntimeCompletionCudaEventPool::release(void *event,
+                                              bool reusable) noexcept {
+  if (event == nullptr) {
+    return;
+  }
+#ifdef TI_WITH_CUDA
+  if (reusable && impl_->backend_calls_safe()) {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->cached_events.size() < impl_->max_cached_events) {
+      impl_->cached_events.push_back(event);
+      impl_->returned.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+  }
+  if (!impl_->backend_calls_safe()) {
+    abandon(event);
+    return;
+  }
+  try {
+    auto context_guard = CUDAContext::get_instance().get_guard();
+    CUDADriver::get_instance().event_destroy.call_with_warning(event);
+    impl_->destroyed.fetch_add(1, std::memory_order_relaxed);
+  } catch (...) {
+    impl_->abandoned.fetch_add(1, std::memory_order_relaxed);
+  }
+#else
+  (void)reusable;
+  impl_->abandoned.fetch_add(1, std::memory_order_relaxed);
+#endif
+}
+
+void RuntimeCompletionCudaEventPool::abandon(void *event) noexcept {
+  if (event != nullptr) {
+    impl_->abandoned.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+
+void RuntimeCompletionCudaEventPool::clear() noexcept {
+  std::vector<void *> events;
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    events.swap(impl_->cached_events);
+  }
+  if (events.empty()) {
+    return;
+  }
+#ifdef TI_WITH_CUDA
+  if (!impl_->backend_calls_safe()) {
+    impl_->abandoned.fetch_add(events.size(), std::memory_order_relaxed);
+    return;
+  }
+  try {
+    auto context_guard = CUDAContext::get_instance().get_guard();
+    auto &driver = CUDADriver::get_instance();
+    for (void *event : events) {
+      driver.event_destroy.call_with_warning(event);
+    }
+    impl_->destroyed.fetch_add(events.size(), std::memory_order_relaxed);
+  } catch (...) {
+    impl_->abandoned.fetch_add(events.size(), std::memory_order_relaxed);
+  }
+#else
+  impl_->abandoned.fetch_add(events.size(), std::memory_order_relaxed);
+#endif
+}
+
+RuntimeCompletionCudaEventPoolSnapshot
+RuntimeCompletionCudaEventPool::snapshot() const noexcept {
+  RuntimeCompletionCudaEventPoolSnapshot result;
+  result.created = impl_->created.load(std::memory_order_relaxed);
+  result.reused = impl_->reused.load(std::memory_order_relaxed);
+  result.returned = impl_->returned.load(std::memory_order_relaxed);
+  result.destroyed = impl_->destroyed.load(std::memory_order_relaxed);
+  result.abandoned = impl_->abandoned.load(std::memory_order_relaxed);
+  {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    result.cached = impl_->cached_events.size();
+  }
+  return result;
+}
+
 namespace {
 
 enum class CompletionStatus : std::uint8_t {
@@ -33,6 +176,8 @@ class CompletionPrimitive {
   virtual ~CompletionPrimitive() = default;
   virtual bool is_ready() = 0;
   virtual void wait() = 0;
+  virtual void mark_backend_completed() noexcept {
+  }
 };
 
 class StreamSemaphoreCompletion final : public CompletionPrimitive {
@@ -56,6 +201,7 @@ class StreamSemaphoreCompletion final : public CompletionPrimitive {
 };
 
 #ifdef TI_WITH_CUDA
+
 class CudaStreamGpuTimingObject final : public StreamGpuTimingObject {
  public:
   CudaStreamGpuTimingObject(
@@ -182,22 +328,36 @@ class CudaStreamGpuTimingObject final : public StreamGpuTimingObject {
 class CudaEventCompletion final : public CompletionPrimitive {
  public:
   CudaEventCompletion(void *stream,
-                      std::weak_ptr<RuntimeFaultDomain> fault_domain)
-      : fault_domain_(std::move(fault_domain)) {
+                      std::weak_ptr<RuntimeFaultDomain> fault_domain,
+                      std::shared_ptr<RuntimeCompletionCudaEventPool>
+                          event_pool)
+      : fault_domain_(std::move(fault_domain)),
+        event_pool_(std::move(event_pool)) {
     auto context_guard = CUDAContext::get_instance().get_guard();
     auto &driver = CUDADriver::get_instance();
-    const std::uint32_t create_result =
-        driver.event_create.call(&event_, CU_EVENT_DISABLE_TIMING);
-    if (create_result != CUDA_SUCCESS) {
-      throw BackendRuntimeError(
-          Arch::cuda, create_result, "event_create",
-          driver.event_create.get_error_message(create_result));
+    if (event_pool_) {
+      event_ = event_pool_->acquire();
+    } else {
+      const std::uint32_t create_result =
+          driver.event_create.call(&event_, CU_EVENT_DISABLE_TIMING);
+      if (create_result != CUDA_SUCCESS) {
+        throw BackendRuntimeError(
+            Arch::cuda, create_result, "event_create",
+            driver.event_create.get_error_message(create_result));
+      }
     }
     const std::uint32_t record_result =
         driver.event_record.call(event_, stream);
     if (record_result != CUDA_SUCCESS) {
-      if (classify_cuda_driver_error(record_result) !=
-          BackendErrorClassification::kFatal) {
+      const bool fatal = classify_cuda_driver_error(record_result) ==
+                         BackendErrorClassification::kFatal;
+      if (event_pool_) {
+        if (fatal) {
+          event_pool_->abandon(event_);
+        } else {
+          event_pool_->release(event_, false);
+        }
+      } else if (!fatal) {
         driver.event_destroy.call_with_warning(event_);
       }
       // A fatal context error owns the unrecoverable handle until process
@@ -217,6 +377,14 @@ class CudaEventCompletion final : public CompletionPrimitive {
         domain && !domain->backend_calls_safe()) {
       // CUDA execution faults can make even event destruction fail. The
       // context owns the handle and will reclaim it at process teardown.
+      if (event_pool_) {
+        event_pool_->abandon(event_);
+      }
+      event_ = nullptr;
+      return;
+    }
+    if (event_pool_) {
+      event_pool_->release(event_, reusable_);
       event_ = nullptr;
       return;
     }
@@ -236,6 +404,7 @@ class CudaEventCompletion final : public CompletionPrimitive {
     auto &driver = CUDADriver::get_instance();
     const std::uint32_t result = driver.event_query.call(event_);
     if (result == CUDA_SUCCESS) {
+      reusable_ = true;
       return true;
     }
     if (result == CUDA_ERROR_NOT_READY) {
@@ -254,11 +423,18 @@ class CudaEventCompletion final : public CompletionPrimitive {
           Arch::cuda, result, "event_synchronize",
           driver.event_synchronize.get_error_message(result));
     }
+    reusable_ = true;
+  }
+
+  void mark_backend_completed() noexcept override {
+    reusable_ = true;
   }
 
  private:
   void *event_{nullptr};
   std::weak_ptr<RuntimeFaultDomain> fault_domain_;
+  std::shared_ptr<RuntimeCompletionCudaEventPool> event_pool_;
+  bool reusable_{false};
 };
 #endif
 
@@ -410,6 +586,9 @@ struct RuntimeCompletion::State {
       if (current != CompletionStatus::failed &&
           current != CompletionStatus::invalidated) {
         status.store(CompletionStatus::completed, std::memory_order_release);
+        if (primitive) {
+          primitive->mark_backend_completed();
+        }
       }
       retired_primitive = std::move(primitive);
       retired_resources = std::move(resources);
@@ -595,12 +774,13 @@ RuntimeCompletion RuntimeCompletion::from_cuda_stream(
     std::uint64_t sequence,
     void *stream,
     std::shared_ptr<RuntimeFaultDomain> fault_domain,
+    std::shared_ptr<RuntimeCompletionCudaEventPool> event_pool,
     StreamGpuTiming gpu_timing,
     std::vector<RuntimeGpuRegionTiming> gpu_region_timings) {
 #ifdef TI_WITH_CUDA
   try {
-    auto primitive =
-        std::make_unique<CudaEventCompletion>(stream, fault_domain);
+    auto primitive = std::make_unique<CudaEventCompletion>(
+        stream, fault_domain, std::move(event_pool));
     auto state = std::make_shared<State>(std::move(primitive), fault_domain,
                                          sequence, std::move(gpu_timing),
                                          std::move(gpu_region_timings));
@@ -618,6 +798,7 @@ RuntimeCompletion RuntimeCompletion::from_cuda_stream(
   (void)sequence;
   (void)stream;
   (void)fault_domain;
+  (void)event_pool;
   (void)gpu_timing;
   (void)gpu_region_timings;
   TI_ERROR("CUDA runtime completion requested without CUDA support");

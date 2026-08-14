@@ -3592,6 +3592,8 @@ class TI_DLL_EXPORT Program {
   const std::uint64_t runtime_completion_domain_;
   std::shared_ptr<RuntimeFaultDomain> runtime_fault_domain_;
   RuntimeTraceRecorder runtime_trace_;
+  std::shared_ptr<RuntimeCompletionCudaEventPool>
+      runtime_completion_cuda_event_pool_;
   PrimitiveWorkspaceArena primitive_workspace_arena_;
   struct RuntimeBackendTelemetryBaseline {
     std::uint64_t backend_waits{0};

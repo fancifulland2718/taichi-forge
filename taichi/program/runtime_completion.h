@@ -15,6 +15,41 @@ namespace taichi::lang {
 
 class RuntimeFaultDomain;
 
+struct RuntimeCompletionCudaEventPoolSnapshot {
+  std::uint64_t created{0};
+  std::uint64_t reused{0};
+  std::uint64_t returned{0};
+  std::uint64_t destroyed{0};
+  std::uint64_t abandoned{0};
+  std::uint64_t cached{0};
+};
+
+// Program-generation-owned cache for untimed CUDA completion events. Events
+// enter the cache only after a successful query, wait, or backend-wide
+// synchronize proves completion. Pending or faulted events are never reused.
+class TI_DLL_EXPORT RuntimeCompletionCudaEventPool {
+ public:
+  RuntimeCompletionCudaEventPool(
+      std::weak_ptr<RuntimeFaultDomain> fault_domain,
+      std::size_t max_cached_events);
+  ~RuntimeCompletionCudaEventPool();
+
+  RuntimeCompletionCudaEventPool(
+      const RuntimeCompletionCudaEventPool &) = delete;
+  RuntimeCompletionCudaEventPool &operator=(
+      const RuntimeCompletionCudaEventPool &) = delete;
+
+  void *acquire();
+  void release(void *event, bool reusable) noexcept;
+  void abandon(void *event) noexcept;
+  void clear() noexcept;
+  RuntimeCompletionCudaEventPoolSnapshot snapshot() const noexcept;
+
+ private:
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
+};
+
 struct RuntimeGpuRegionTiming {
   std::string path_id;
   StreamGpuTiming timing;
@@ -62,6 +97,9 @@ class TI_DLL_EXPORT RuntimeCompletion {
                                             void *stream,
                                             std::shared_ptr<RuntimeFaultDomain>
                                                 fault_domain = nullptr,
+                                            std::shared_ptr<
+                                                RuntimeCompletionCudaEventPool>
+                                                event_pool = nullptr,
                                             StreamGpuTiming gpu_timing = nullptr,
                                             std::vector<RuntimeGpuRegionTiming>
                                                 gpu_region_timings = {});

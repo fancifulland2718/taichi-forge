@@ -6557,6 +6557,21 @@ def test_cuda_cgraph_internal_stats_report_capture_and_replay():
 
 
 @test_utils.test(arch=ti.cuda)
+def test_cuda_cgraph_plain_ticket_avoids_python_owner_registry():
+    graph = _build_repeated_inc_graph()
+    value = ti.ndarray(ti.i32, shape=())
+    value.fill(0)
+    runtime = impl.pytaichi
+    owner_count = len(runtime._runtime_submission_owners)
+
+    ticket = graph.submit({"arr": value})
+    assert len(runtime._runtime_submission_owners) == owner_count
+    ticket.wait()
+    assert len(runtime._runtime_submission_owners) == owner_count
+    assert value.to_numpy()[()] == 4
+
+
+@test_utils.test(arch=ti.cuda)
 def test_cuda_cgraph_scalar_signature_is_stable_across_python_frames():
     @ti.kernel
     def add(value: ti.i32, output: ti.types.ndarray(dtype=ti.i32, ndim=0)):
