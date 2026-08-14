@@ -6557,6 +6557,46 @@ def test_cuda_cgraph_internal_stats_report_capture_and_replay():
 
 
 @test_utils.test(arch=ti.cuda)
+def test_cuda_cgraph_scalar_signature_is_stable_across_python_frames():
+    @ti.kernel
+    def add(value: ti.i32, output: ti.types.ndarray(dtype=ti.i32, ndim=0)):
+        output[None] += value
+
+    sym_value = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "value", ti.i32)
+    sym_output = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=0
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(add, sym_value, sym_output)
+    builder.dispatch(add, sym_value, sym_output)
+    graph = builder.compile()
+    output = ti.ndarray(ti.i32, shape=())
+    output.fill(0)
+    args = {"value": -3, "output": output}
+
+    graph.run(args)
+    ti.sync()
+    graph.execution_stats()
+
+    def run_frame():
+        for _ in range(8):
+            graph.run(args)
+
+    frame_count = 8
+    for _ in range(frame_count):
+        run_frame()
+        ti.sync()
+        output.to_numpy()
+
+    segment = graph.execution_stats().segments[0]
+    assert segment.counters.exact_replays == frame_count * 8
+    assert segment.counters.patched_replays == 0
+    assert segment.replay_attribution.signature_fast_hits == frame_count * 8
+    assert segment.replay_attribution.signature_fast_misses == 0
+    assert output.to_numpy()[()] == -3 * 2 * (1 + frame_count * 8)
+
+
+@test_utils.test(arch=ti.cuda)
 def test_cuda_cgraph_patches_scalar_matrix_and_ndarray_arguments():
     n = 64
 

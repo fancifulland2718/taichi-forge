@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstddef>
+#include <cstring>
+#include <type_traits>
 
 constexpr int taichi_max_num_indices = 12;
 // legacy: only used in opengl backends
@@ -44,12 +46,13 @@ bool taichi_union_cast_with_different_sizes(G g) {
 
 template <typename T, typename G>
 T taichi_union_cast_with_different_sizes(G g) {
-  union {
-    T t;
-    G g;
-  } u;
-  u.g = g;
-  return u.t;
+  static_assert(std::is_trivially_copyable_v<T>);
+  static_assert(std::is_trivially_copyable_v<G>);
+  T result{};
+  constexpr std::size_t copy_bytes =
+      sizeof(T) < sizeof(G) ? sizeof(T) : sizeof(G);
+  std::memcpy(&result, &g, copy_bytes);
+  return result;
 }
 
 template <typename T, typename G>
