@@ -107,6 +107,16 @@ AD boundary, performance evidence, and Linux status are maintained in
 | CUDA | CUDA Driver API capture and executable replay, with patch or recapture when bindings change | Capture/replay and direct submission are serialized at the native host-submission boundary | Captured allocations are generation-qualified and retained until ordered retirement |
 | Vulkan | Runtime-owned command recording and replay | GFX recording and replay registry mutations are protected per host API call | Monotonic graph identity, deferred retirement, fixed eight-slot in-flight ring |
 
+Recurring resource signatures use bounded MRU state rather than an unbounded
+history. Each CGraph retains up to four generation-qualified runtime binding
+plans; CUDA retains two executable resource signatures and Vulkan retains four
+immutable launch signatures. This covers common ping-pong and short ring
+buffers while bounding driver objects and retained allocation leases. CUDA
+scalar or matrix value changes patch the current compatible executable instead
+of consuming another resource slot; Vulkan retains recurring value signatures
+inside its same four-slot bound. Stale generations and `ti.reset()` retire all
+related entries.
+
 ## Task observability without launch control
 
 Forge exposes the final offloaded-task shape through
@@ -122,13 +132,13 @@ compiled-kernel state, so concurrent callers cannot overwrite each other's
 sweep/color/phase identity. Profiler and optional NVTX event names keep the
 original task name and append the task identity and label.
 
-The unlabeled hot path keeps normal backend replay and adds no device
-allocation, transfer, or synchronization. A labeled dispatch deliberately
-remains one physical dispatch and does not use CUDA/Vulkan native replay where
-replay would hide individual events. Use labels for profiling windows rather
-than permanently on throughput-critical graphs. Vulkan device-indirect
-dispatch remains native because it has no correct fixed-dispatch fallback;
-its manifest marks actual geometry as invocation-specific.
+Labels do not change CUDA/Vulkan replay qualification. They remain stable task
+metadata in manifests and explicit telemetry, while production execution stays
+replay-first and adds no device allocation, transfer, or synchronization. A
+capture-time profiler cannot manufacture a fresh host annotation for every
+later replay; use ticket telemetry or an explicit profiler capture when
+per-invocation evidence is required. Vulkan device-indirect dispatch remains
+native and its manifest marks actual geometry as invocation-specific.
 
 The CPU path preserves graph semantics and concurrency safety but does not
 pretend to offer CUDA-style device graph launch. CUDA and Vulkan optimizations
@@ -627,20 +637,20 @@ execution/fallback path, replay eligibility, persistent argument bytes, and
 immutable per-segment counters. Application code should not read the internal
 `Graph._graph_stats` cache.
 
-Each CGraph segment also exposes opt-in `replay_attribution`. It attributes
-host preparation to lifecycle/resource/CUDA/cache lock wait, stable binding
-lookup, resource retention, SNode validation, backend preparation, and
-signature matching, together with cache hit/miss and SNode-guard elision
-counts. The disabled path performs no clock reads or counter updates, and the
-reported GPU nanoseconds exclude payload execution. CPU `backend_ns` includes
-synchronous kernel execution.
+Each CGraph segment also exposes a `replay_attribution` shape. Production
+execution keeps it disabled: no clock reads or counter updates are inserted
+into replay. Per-submission measurements belong to explicit ticket telemetry;
+private debug instrumentation is not an application contract. GPU durations
+from ticket telemetry exclude unmeasured payload work rather than inferring it
+from host wall time.
 
 The report distinguishes capture or record, exact replay, patched replay,
 recapture, ordinary fallback, structural rejection, transient failure, retry
-backoff, capture exceptions, native dispatch, and Vulkan slot saturation. The
-first report opts in to detailed GPU counters for later executions. If work
-ran before opt-in, `counters_complete=False` remains explicit for that runtime
-epoch. Reading a report does not call `ti.sync()`.
+backoff, capture exceptions, native dispatch, and Vulkan slot saturation.
+Reading a report never enables those counters or changes a later execution
+path. Counters that were not collected remain zero with
+`counters_complete=False`; request submission telemetry for a measured
+execution. Reading an ordinary report does not call `ti.sync()`.
 
 Persistent argument bytes are only Forge-visible host/backend argument
 storage. They exclude opaque graph executables, command buffers, descriptor

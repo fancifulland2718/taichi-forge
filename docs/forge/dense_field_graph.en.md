@@ -239,8 +239,9 @@ Graph scheduling, or gradient contracts for Forge-native nodes.
 `Graph.execution_stats()` returns the stable schema-v6 report. Relevant fields
 include segment definitions, compiled task count, generation-qualified static
 dependencies, pointer-free layout fingerprints, replay eligibility,
-execution/fallback path, persistent argument bytes, immutable counters, and
-opt-in host replay attribution.
+execution/fallback path, persistent argument bytes, immutable counter shapes,
+and disabled-by-default host replay attribution. The snapshot is side-effect
+free; use explicit submission telemetry for per-execution measurements.
 
 Do not use private `_graph_stats` storage as an application API. GPU memory,
 host RSS, graph/tree churn, and reset measurements are still needed because a

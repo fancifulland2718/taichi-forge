@@ -1184,9 +1184,9 @@ Contract:
 - `label` is an optional invocation label (for example,
   `"sweep=3/color=red"`). A label is kept on the Graph dispatch rather than
   the shared compiled kernel. It prevents that dispatch from being composed
-  with another dispatch and selects a per-dispatch launch path so profiler
-  and NVTX events remain one-to-one. This is an explicit observability cost;
-  an unlabeled Graph retains its normal native replay path.
+  with another dispatch, but it does not disable CUDA/Vulkan backend replay.
+  Labels remain stable task metadata; per-replay timing or event evidence
+  requires explicit telemetry/profiling rather than an ordinary launch path.
 
 ### Task manifests and dispatch labels
 
@@ -1460,13 +1460,14 @@ persistent node-update calls. A singleton retains the
 per-node updater. Any different or intervening dispatch terminates the group.
 `per_node` remains the conservative A/B route. Per-segment execution reports
 expose actual updater groups, grouped payloads, control bytes, and the last
-driver error. Calling `Graph.execution_stats()` also opts subsequent stateful
-replays into low-overhead counters: `bounded_update_replays`,
+driver error. Explicit submission telemetry can collect the stateful replay
+counters `bounded_update_replays`,
 `bounded_update_state_changes`, `bounded_update_cache_hits`, and
-`bounded_node_api_calls`. `bounded_max_group_size` is static metadata. Reading
-the counters is a synchronization point; ordinary replay does not perform a
-host readback. Rebinding starts a new control epoch, so counters do not combine
-different extent allocations. This changes no public resource ownership.
+`bounded_node_api_calls`. `bounded_max_group_size` is static metadata. Public
+`Graph.execution_stats()` is side-effect free and never enables this path;
+ordinary replay performs no telemetry readback. Rebinding starts a new control
+epoch, so measured counters do not combine different extent allocations. This
+changes no public resource ownership.
 
 The CUDA 12.4+ qualification probe is a setup-only safety gate. It permits at
 most two bounded retries when a freshly uploaded Graph returns a transient
@@ -1688,7 +1689,7 @@ the same execution path and returns a completion ticket.
 | API | Contract |
 | --- | --- |
 | `GraphBuilder.compile(*, workspace_lanes=1, workspace_saturation='wait')` | Later changes to the builder or original `Sequential` do not modify the compiled graph. Additional workspace lanes are materialized lazily and only affect Graphs with eligible exclusive Graph-owned internal storage, such as a recorded SolvePlan. Provider-fixed worklist storage deliberately requires one lane and rejects a larger value. `workspace_saturation='raise'` fails instead of waiting when every eligible lane is busy. |
-| `Graph.run(args, *, trace=False)` | `args` must be a dictionary with exactly the declared keys; missing or extra keys raise `TaichiRuntimeError`. The default returns `None` and does not allocate a dynamic control-flow trace. |
+| `Graph.run(args, *, trace=False)` | `args` must be a dictionary with exactly the declared keys; missing or extra keys raise `TaichiRuntimeError`. The default returns `None` and does not allocate a dynamic control-flow trace. Qualified depth-two CUDA/Vulkan structured Graphs use the same native single-submission path as `submit()` and wait once at terminal completion; they do not retain synchronous control-flow reports. |
 | `Graph.run(args, *, trace=True)` | Run synchronously and return an immutable `GraphControlFlowTrace`. Its ordered invocations contain a `sequence`, static `definition_path`, dynamic `invocation_path`, optional `parent_iteration`, and the invocation's while/branch report. Unlike `control_flow_stats()`, it preserves every repeated nested invocation. Tracing bypasses strict Vulkan nested replay and uses exact portable-parent execution so each invocation is observable. |
 | `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait', telemetry=False, workspace_lane=None)` | Uses the same exact argument, lifecycle, concurrency, and AD contract as `run()`, returns one `SubmissionTicket`, and can opt into shared admission pacing. `lane` remains the pacer lane; `workspace_lane` optionally pins a Graph-owned execution/workspace lane. `telemetry="summary"` adds per-while and bounded-extent snapshots, queue/submission accounting, and the lazy post-optimization pipeline definition without backend timestamp markers. `telemetry="timestamps"` adds whole-ticket/region GPU timestamps; `True` is its compatibility alias. The default adds no telemetry buffers or report. Structured submission accepts qualified CUDA `native_required` while/if/switch regions and qualified Vulkan `native_required` while regions, including multiple ordered regions and qualified depth-two multi-inner sequences. Portable control and unsupported native combinations fail explicitly. |
 | `Graph.prepare_telemetry(mode, *, slots=1)` | Explicitly allocate one to the configured maximum bounded telemetry slots and compile required packed snapshot kernels without executing the Graph or reading user resources. `mode="timestamps"` additionally performs one empty instrumented transaction to move backend event/query initialization outside the first measured submission. Preparation covers currently materialized workspace lanes; later lanes reuse compiled kernels but materialize their own bounded storage. `False` is a no-op. |
@@ -1869,22 +1870,14 @@ CUDA conditional replay additionally reports asynchronous control uploads,
 waits caused by the two-batch deferred-resource bound, and the peak number of
 deferred batches.
 
-Schema v6 adds `segment.replay_attribution`, an opt-in cumulative breakdown of
-cached CGraph host preparation. It separates SNode/resource/CUDA/cache lock
-wait, stable binding-plan lookup, resource retention, SNode validation,
-backend preparation, and argument-signature matching. It also reports binding
-plan and exact-signature hit/miss counts plus SNode lifecycle-guard
-acquisition/elision counts. GPU timers stop after host submission and exclude
-payload duration; CPU `backend_ns` includes synchronous kernel execution.
-
-Detailed GPU counters are opt-in. The first call enables them for later
-executions; if GPU work ran before opt-in, `counters_complete` remains false
-for that runtime epoch instead of pretending the older work was counted.
-`execution_stats()` normally does not synchronize the device. A CUDA Graph
-with device-resident bounded updater control is the explicit exception: the
-call synchronizes before copying driver status and updater counters to produce
-a consistent snapshot. Ordinary Graph replay still performs no telemetry
-readback.
+Schema v6 includes the `segment.replay_attribution` shape, but production
+CGraph replay leaves it disabled and performs no clock reads or cumulative
+counter updates. `execution_stats()` is a side-effect-free snapshot: repeated
+calls cannot change replay qualification, enable backend instrumentation, or
+add a later readback. Uncollected detailed counters remain zero and explicitly
+report `counters_complete=False`. Use `Graph.submit(..., telemetry="summary")`
+or `"timestamps"` when a particular execution must be measured; ordinary
+Graph replay performs no telemetry readback.
 
 ### `GraphBuilder.append_native(node, *, prewarm=False, admission="explicit")`
 

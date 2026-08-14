@@ -1002,9 +1002,9 @@ graph.run({"slot": 3})
 - `kernel` 通常是 decorated primal kernel；也可传入显式 `kernel.grad` 来构造手工管理的
   gradient Graph，但必须在 `ti.ad.Tape()` / `ti.ad.FwdMode()` 之外运行。
 - `label` 是可选调用标签，例如 `"sweep=3/color=red"`。标签保存在 Graph dispatch 上，
-  不会写回共享 compiled kernel。带标签 dispatch 不参与 dispatch composition，并选择逐
-  dispatch launch 路径，使 profiler/NVTX 事件保持一一对应。这是显式启用的可观测成本；
-  未加标签的 Graph 仍使用正常 native replay。
+  不会写回共享 compiled kernel。带标签 dispatch 不参与 dispatch composition，但不会禁用
+  CUDA/Vulkan backend replay。标签作为稳定 task metadata 保留；需要逐 replay timing/event
+  证据时，应显式请求 telemetry/profiling，而不是切换到 ordinary launch。
 
 ### Task manifest 与 dispatch label
 
@@ -1226,12 +1226,13 @@ CUDA 12.4+ adaptive Graph 的 `TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY` 接受 `auto
 extent、capacity、block dimension 完全相同的 payload 共享一个 updater；grid/enabled 未变化时
 在遍历 node array 或调用持久 node-update API 之前直接返回。单个 payload 保持逐节点 updater，任何不同或中间 dispatch 都会
 结束分组。`per_node` 保留为保守 A/B 路线。逐 segment execution report 会暴露实际 updater
-group、grouped payload、control bytes 与 last-driver-error。调用 `Graph.execution_stats()` 还会
-让后续 stateful replay 进入低开销计数：`bounded_update_replays`、
+group、grouped payload、control bytes 与 last-driver-error。显式 submission telemetry 可以
+采集 stateful replay counter：`bounded_update_replays`、
 `bounded_update_state_changes`、`bounded_update_cache_hits` 与
-`bounded_node_api_calls`；`bounded_max_group_size` 是静态元数据。读取 counter 是同步点，普通
-replay 不做 host readback；rebind 会开始新的 control epoch，不混合不同 extent allocation 的
-计数。以上均不改变公共资源所有权。
+`bounded_node_api_calls`；`bounded_max_group_size` 是静态元数据。公开
+`Graph.execution_stats()` 是无副作用 snapshot，绝不启用该路径；普通 replay 不做 telemetry
+readback。rebind 会开始新的 control epoch，不混合不同 extent allocation 的已测量计数。以上
+均不改变公共资源所有权。
 
 CUDA 12.4+ qualification probe 是仅在 setup 执行的安全门。新上传 Graph 在没有 driver error
 时若返回瞬时 device-node status，probe 最多执行两次有界重试，并在每次尝试前恢复 probe
@@ -1405,7 +1406,7 @@ measurement-path changed，不能当作正常执行 wall time 发布。
 | API | 合同 |
 | --- | --- |
 | `GraphBuilder.compile(*, workspace_lanes=1, workspace_saturation='wait')` | 后续修改 builder 或原 `Sequential` 不改变已编译 graph。额外 workspace lane 惰性物化，并且只对含合格独占 Graph-owned internal storage 的 Graph（例如已记录的 SolvePlan）产生作用；provider-fixed worklist storage 明确只允许一个 lane，传入更大值会被拒绝。`workspace_saturation='raise'` 会在所有合格 lane 都忙时直接失败而不是等待。 |
-| `Graph.run(args, *, trace=False)` | `args` 必须是字典，key 与声明参数完全一致；missing/extra key 会抛 `TaichiRuntimeError`。默认返回 `None`，也不分配 dynamic control-flow trace。 |
+| `Graph.run(args, *, trace=False)` | `args` 必须是字典，key 与声明参数完全一致；missing/extra key 会抛 `TaichiRuntimeError`。默认返回 `None`，也不分配 dynamic control-flow trace。满足资格的 depth=2 CUDA/Vulkan structured Graph 与 `submit()` 共用 native 单提交路径，并只在 terminal completion 等待一次；它不保留同步 control-flow report。 |
 | `Graph.run(args, *, trace=True)` | 同步运行并返回 immutable `GraphControlFlowTrace`。其中有序 invocation 包含 `sequence`、静态 `definition_path`、动态 `invocation_path`、可选 `parent_iteration` 和本次调用的 while/branch report。与 `control_flow_stats()` 不同，它会保留每一次重复 nested invocation。trace 会绕过严格 Vulkan nested replay，改用精确 portable-parent 执行，使每次 invocation 都可观测。 |
 | `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait', telemetry=False, workspace_lane=None)` | 与 `run()` 使用相同的精确参数、生命周期、并发和 AD 合同，返回一个 `SubmissionTicket`，并可选择加入共享准入节奏。`lane` 仍表示 pacer lane；`workspace_lane` 可把提交固定到一个 Graph-owned execution/workspace lane。`telemetry="summary"` 增加 while/bounded snapshot、queue/submission accounting 与 lazy pipeline definition，但不插入 backend timestamp marker；`telemetry="timestamps"` 追加 whole-ticket/region GPU timestamp，`True` 是其兼容别名。默认不增加 telemetry buffer/report。结构化提交接受满足资格的 CUDA `native_required` while/if/switch、Vulkan `native_required` while，以及满足资格的 depth=2 multi-inner sequence。portable 控制与不支持的原生组合会明确失败。 |
 | `Graph.prepare_telemetry(mode, *, slots=1)` | 在不执行 Graph、也不读取用户资源的前提下，显式分配一个到配置上限数量的有界 telemetry slot，并编译所需 packed snapshot kernel。`mode="timestamps"` 还会执行一次空 instrumented transaction，把 backend event/query 初始化移出首次测量提交。准备覆盖当前已物化 workspace lane；后续 lane 复用 compiled kernel，但自行物化有界 storage。`False` 不执行操作。 |
@@ -1554,18 +1555,12 @@ replay/recapture、Vulkan record/replay、native dispatch 和 ordinary fallback�
 CUDA conditional replay 还会报告异步 control upload、因两个 deferred batch 上限产生的等待，
 以及 deferred batch 峰值。
 
-schema v6 新增逐 segment 的 `replay_attribution`，以 opt-in 累计方式拆分 cached CGraph 的
-host preparation：SNode/resource/CUDA/cache lock wait、稳定 binding-plan lookup、resource
-retention、SNode validation、backend preparation 与 argument-signature matching。它还会报告
-binding plan/exact signature 的 hit/miss，以及 SNode lifecycle guard 的 acquire/elide 次数。
-GPU 计时在 host submission 后停止，不包含 payload duration；CPU 的 `backend_ns` 包含同步
-kernel execution。
-
-GPU 详细 counter 为 opt-in：第一次调用只为之后的执行启用。若 opt-in 前已有 GPU 工作，
-`counters_complete` 会在该 runtime epoch 保持 false，而不会伪装成已统计旧执行。
-`execution_stats()` 通常不做 device synchronization。显式例外是带 device-resident bounded
-updater control 的 CUDA Graph：为了复制 driver 状态和 updater counter 并形成一致快照，该调用
-会先同步；普通 Graph replay 仍不会读取 telemetry。
+schema v6 保留逐 segment 的 `replay_attribution` 结构，但生产 CGraph replay 固定关闭它，
+不读取时钟，也不更新累计归因 counter。`execution_stats()` 是无副作用 snapshot：重复调用
+不能改变 replay 资格、启用 backend instrumentation 或让后续执行增加 readback。未采集的详细
+counter 保持为零，并明确报告 `counters_complete=False`。需要测量某次执行时，应使用
+`Graph.submit(..., telemetry="summary")` 或 `"timestamps"`；普通 Graph replay 不读取
+telemetry。
 
 ### `GraphBuilder.append_native(node, *, prewarm=False, admission="explicit")`
 

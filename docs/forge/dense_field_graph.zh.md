@@ -209,7 +209,8 @@ Forge-native node 的 gradient 合同。
 `Graph.execution_stats()` 返回稳定的 schema-v6 report。相关字段包括 segment
 definition、compiled task count、带 generation 的 static dependency、不含 pointer 的
 layout fingerprint、replay eligibility、execution/fallback path、
-`persistent_argument_bytes`、immutable counter 与 opt-in host replay attribution。
+`persistent_argument_bytes`、immutable counter 结构与默认关闭的 host replay attribution。
+该 snapshot 无副作用；逐次测量应显式使用 submission telemetry。
 
 应用不应使用私有 `_graph_stats` storage。由于 driver 可能保留 Python 无法枚举的资源，
 仍须同时检查 GPU memory、host RSS、graph/tree churn 与 reset 测量。

@@ -75,8 +75,9 @@
   Graph 不再取得 SNode lifecycle guard；CUDA exact replay 无需重建 allocation vector 即可比较
   稳定 signature；Vulkan 在资源 generation 与 scalar/matrix 值不变时复用 immutable launch
   context。Field/SNode binding 继续使用完整 guarded path，各后端仍保留 submission-scoped
-  resource。公开 `Graph.execution_stats()` 升级为 schema v6，新增默认关闭的 host replay
-  attribution；关闭时不读取时钟或计数，所有路径都不新增 host readback。
+  resource。公开 `Graph.execution_stats()` schema v6 保留关闭的 host attribution 结构，但
+  snapshot 现在严格无副作用：读取不会启用时钟、counter 或让后续执行增加 host readback；
+  逐次测量使用显式 submission telemetry。
 - `ti.profiler` 新增默认关闭的 CPU ThreadPool telemetry。显式窗口报告 job、chunk、worker
   admission/underfill、queue occupancy、nested serial、异常与累计 queue/execution/wait 时间。
   关闭时每次 ThreadPool invocation 只增加一次 relaxed flag load，不读取时钟，也不更新逐
@@ -402,8 +403,9 @@
   资格的 12.4+ driver 上，强制 `device_update` 仍可作为物理优化：updated grid 会钳制到同一个
   saturation grid，并可跳过 zero-count payload；正确性仍由 logical range 保证。capability
   schema v4 会分别报告 logical exactness 与 physical launch kind；`masked_capacity` 保留为显式
-  A/B 基线。同一 runtime 的成对测试覆盖 zero、block 边界、overflow、ndarray rebind、带 label
-  的普通 fallback、两 block saturation cap、并发 replay 和 1,000-2,000 次 replay memory stress。
+  A/B 基线。同一 runtime 的成对测试覆盖 zero、block 边界、overflow、ndarray rebind、当时的
+  带 label 普通诊断基线、两 block saturation cap、并发 replay 和 1,000-2,000 次 replay memory
+  stress。
   在这台 Windows CUDA 机器上，4,194,304 项容量的 full count 与 masked 相差不到 0.4%，10%
   count 快 2.2%；16,777,216 项容量下 zero/1%/full count 分别快 4.9%/4.0%/1.2%。adaptive
   route 存在依 workload 而变的 updater crossover，因此不作为默认路线。最终成对 wheel 的

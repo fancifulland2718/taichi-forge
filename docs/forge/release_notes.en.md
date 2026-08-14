@@ -92,8 +92,10 @@ source-build-only.
   Vulkan reuses immutable launch contexts while resource generations and
   scalar/matrix values remain unchanged. Field/SNode bindings retain the full
   guarded path, and all backends retain submission-scoped resources. Public
-  `Graph.execution_stats()` schema v6 adds default-off host replay attribution;
-  the disabled path reads no clocks or counters and no path adds host readback.
+  `Graph.execution_stats()` schema v6 retains a disabled host-attribution
+  shape but is now strictly side-effect free: reading it cannot enable clocks,
+  counters, or a later host readback. Per-execution measurements use explicit
+  submission telemetry.
 - Added default-off CPU ThreadPool telemetry under `ti.profiler`. An opt-in
   window reports jobs, chunks, worker admission/underfill, queue occupancy,
   nested serial execution, exceptions, and aggregate queue/execution/wait
@@ -570,7 +572,8 @@ source-build-only.
   range. Capabilities now separate logical exactness from physical launch kind
   and report schema v4; `masked_capacity` remains an explicit A/B baseline.
   Paired same-runtime tests covered zero, block boundaries, overflow, ndarray
-  rebinding, labeled ordinary fallback, a two-block saturation cap, concurrent
+  rebinding, the then-current labeled ordinary diagnostic baseline, a
+  two-block saturation cap, concurrent
   replay, and 1,000-2,000 replay memory stress. On this Windows CUDA machine,
   the default exact route was within 0.4% of masked at full count and 2.2%
   faster at 10% of a 4,194,304-item capacity; at a 16,777,216-item capacity it

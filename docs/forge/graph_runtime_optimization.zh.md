@@ -86,6 +86,13 @@ dense-storage 合同。异构应用应在稳定 block 内组织同构 environmen
 | CUDA | CUDA Driver API capture 与 executable replay；binding 变化时 patch 或 recapture | capture/replay 与 direct submission 在 native host-submission 边界串行 | captured allocation 使用带 generation 的身份并持有到有序退役 |
 | Vulkan | runtime-owned command record 与 replay | 每次 host API 调用保护 GFX record 和 replay registry mutation | 单调 graph identity、延迟退役、固定 8-slot 在途 ring |
 
+重复出现的 resource signature 使用有界 MRU，而不是无界历史。每个 CGraph 最多保留四个带
+generation 的 runtime binding plan；CUDA 保留两个 executable resource signature，Vulkan
+保留四个 immutable launch signature。这覆盖常见 ping-pong 和短 ring buffer，同时限制 driver
+object 与 retained allocation lease。CUDA 的 scalar/matrix 值变化只 patch 当前兼容
+executable，不额外占用 resource slot；Vulkan 的重复 value signature 共用同一个四槽上限。
+stale generation 与 `ti.reset()` 会退役全部关联 entry。
+
 ## 不干预 launch 的 task 可观测性
 
 Forge 通过 `kernel.task_manifest(...)` 以及单 segment JIT CGraph 的
@@ -98,11 +105,11 @@ Graph dispatch 可传入 `label=`，普通 kernel 调用可使用
 并发调用者不会互相覆盖 sweep/color/phase identity。profiler 与可选 NVTX event name 会保留原
 task name，再追加 task identity 与 label。
 
-未加标签的热路径保留正常 backend replay，且不增加 device allocation、transfer 或
-synchronization。带标签 dispatch 为保持一个物理 dispatch 对应一个事件，会明确避开会隐藏单次
-事件的 CUDA/Vulkan native replay；应把标签用于 profiling window，而不是永久放在吞吐关键
-Graph 上。Vulkan device-indirect dispatch 没有正确的 fixed-dispatch fallback，因此仍保持
-native；其 manifest 将 actual geometry 标记为 invocation-specific。
+标签不再改变 CUDA/Vulkan replay 资格。它作为稳定 task metadata 保留在 manifest 和显式
+telemetry 中，生产执行始终优先 replay，且不新增 device allocation、transfer 或
+synchronization。capture-time profiler 无法为之后的每次 replay 凭空生成新的 host annotation；
+需要逐次证据时，应使用 ticket telemetry 或显式 profiler capture。Vulkan device-indirect
+dispatch 继续保持 native，其 manifest 将 actual geometry 标记为 invocation-specific。
 
 CPU 路径保持 graph 语义和并发安全，但不伪装成 CUDA 式 device graph launch。CUDA 与
 Vulkan 优化都是同一公开 API 之下的后端实现细节。
@@ -490,16 +497,16 @@ compiled task count、segment-local runtime argument、带 generation 的 static
 persistent argument bytes 与 immutable per-segment counter。应用代码不应读取内部
 `Graph._graph_stats` cache。
 
-每个 CGraph segment 还会公开 opt-in 的 `replay_attribution`，把 host preparation 拆为
-lifecycle/resource/CUDA/cache lock wait、稳定 binding lookup、resource retention、SNode
-validation、backend preparation 和 signature matching，并报告 cache hit/miss 与 SNode guard
-elision 次数。关闭时不读取时钟、不更新计数；GPU 纳秒不包含 payload 执行，CPU 的
-`backend_ns` 包含同步 kernel execution。
+每个 CGraph segment 仍公开 `replay_attribution` 结构，但生产执行固定保持关闭：replay 不读取
+时钟，也不更新逐次归因 counter。逐 submission 测量应使用显式 ticket telemetry；私有 debug
+instrumentation 不属于应用合同。ticket telemetry 不会用 host wall time 推测未测得的 GPU
+payload 时间。
 
 report 可区分 capture/record、exact replay、patched replay、recapture、ordinary
 fallback、结构性拒绝、暂态失败、retry backoff、capture exception、native dispatch 与
-Vulkan slot saturation。第一次读取会为之后的 GPU 执行 opt-in 详细计数；若此前已有工作，
-`counters_complete=False` 会在该 runtime epoch 明确保留。读取 report 不调用 `ti.sync()`。
+Vulkan slot saturation。读取 report 不会启用这些 counter，也不会改变之后的执行路径；未采集
+的 counter 保持为零，并以 `counters_complete=False` 明确表示。需要测量某次执行时，应请求
+submission telemetry。普通 report 读取不调用 `ti.sync()`。
 
 persistent argument bytes 只表示 Forge 可见的 host/backend argument storage，不包含
 不透明 graph executable、command buffer、descriptor pool、allocator high-water mark
