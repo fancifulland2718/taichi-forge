@@ -258,11 +258,29 @@ grouped under the behavior they shipped.
 - Windows split-runtime builds now derive the runtime export closure from the
   pybind object files plus the explicit runtime anchor, generate a deterministic
   ABI manifest, and audit the final DLL after linking. The local MSVC split
-  build reduced the requested export set from 114,235 raw definitions to 1,367;
-  the final DLL exposed 2,575 symbols including explicit source exports, well
-  below the 32,768 safety cap. This fixes the LNK1189 import-library failure by
+  build reduced the requested export set from more than 114,000 raw definitions
+  to 1,378; the final DLL exposed 2,597 symbols including explicit source
+  exports, well below the 32,768 safety cap. The explicit Taichi-owned exports
+  remain because MSVC uses class `dllexport` declarations to emit special
+  members and vtables consumed by the independently compiled shim; the
+  post-link audit rejects third-party definition owners. This fixes the
+  LNK1189 import-library failure by
   controlling the ABI surface rather than deleting compiler or backend
   modules. The runtime remains one package and one DLL in this release.
+- The same package-private ABI manifest now drives Linux ELF export isolation.
+  The final runtime version script keeps only shim-imported Taichi symbols and
+  the ABI anchor visible; bundled LLVM,
+  SPIR-V, UI, logging, and allocator APIs remain local. The shim records an
+  explicit `DT_NEEDED` edge and package-relative `RUNPATH`, while the loader
+  uses `RTLD_LOCAL` for the runtime and optional CUDART. Release validation
+  covers both runtime-first and driver-first collision orderings without
+  duplicating the runtime into each CPython wheel. An import-time, bounded
+  private-ABI probe also fails closed if an incompatible Taichi ABI was already
+  made process-global.
+- Split-runtime macOS source builds use the same schema and an exact Mach-O
+  exported-symbols list with package-relative `@loader_path` lookup. This is a
+  source-build contract only; the public release matrix remains Windows and
+  Linux.
 - Graph cache reset and destruction now avoid constructing the CUDA context
   when a CUDA-enabled runtime has only used CPU or Vulkan Graph state. CUDA
   caches retain submission-lock ordering; the 0.6.1 split-shim compatibility

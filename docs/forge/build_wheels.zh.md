@@ -22,6 +22,31 @@ PyPI 风格的 Windows 或 Ubuntu 构建。
 pybind shim 仍是 per-CPython-minor wheel。`pyproject.toml` 中 `wheel.py-api = ""`，因此
 shim 暂不发布 `abi3` wheel。
 
+### 原生私有 ABI 边界
+
+两类 wheel 之间的原生链接面属于包内私有 ABI，不是公开 C++ SDK ABI。runtime 构建会根据
+shim 的真实引用推导精确符号闭包，并在原生库旁安装 `taichi_runtime.exports.json`。Windows
+通过 `.def` 应用该闭包，Linux 使用 ELF version script，启用 split-runtime 的 macOS 源码构建
+使用 exported-symbols list。Taichi RTTI/ODR identity 只有在 shim 真实 import 时才进入闭包；已经由
+shim 自己定义的 identity 不会被推测性导出。ELF 与 Mach-O 会把其余 definition 全部转为 local。
+Windows 则将生成的闭包与源码显式标记为 `dllexport` 的 Taichi declaration 合并；MSVC 依赖这些声明为
+独立编译的 shim 生成 class special member 与 vtable。链接后审计允许这组有界的 Taichi-owned 导出，
+但拒绝 bundled third-party owner 并强制 export safety cap。公开 wheel workflow 当前只资格化 Windows
+与 Linux，这里不构成发布 macOS wheel 的声明。
+
+Linux shim 显式保留指向 `libtaichi_runtime.so` 的 `DT_NEEDED`，并以包相对 `RUNPATH`
+定位 `taichi-forge-runtime`。loader 将 runtime 和可选的包内 CUDART 保持在
+`RTLD_LOCAL` 作用域，避免 LLVM、SPIR-V、UI、allocator 等实现符号进入进程级查找域，
+同时维持 shim 与其直接依赖所共享的 C++ 类型身份。
+
+runtime 与 shim 的源码 commit 可以不同。shim 会直接链接同一 package version 已发布的 runtime
+wheel；这次链接和 private-ABI manifest 才是兼容性门槛。validator 因此检查 package version、ABI
+revision、规范化 export closure 与最终 binary audit，而不要求两个 Git identity 相同。
+
+POSIX loader 还会在加载 runtime 前检查 manifest 选出的少量 Taichi-owned private ABI 符号。若
+embedder 已把不兼容 Taichi ABI 放入进程全局域，import 会 fail closed，而不是允许全局定义抢占包内
+依赖。该检查只发生在 import，不进入 kernel 或 Graph launch 路径。
+
 ## 通用规则
 
 使用 scikit-build-core 构建路径：
@@ -214,12 +239,24 @@ CMAKE_ARGS="$BASE_CMAKE_ARGS" \
 python -I -m build --wheel --no-isolation -Cinstall.components=python
 ```
 
-workflow 随后对两类 wheel 执行 `auditwheel repair`：
+workflow 随后对两类 wheel 执行 `auditwheel repair`。这里固定使用
+`auditwheel>=6.7,<7`：修复 shim wheel 时明确排除由另一个 distribution 提供的
+`libtaichi_runtime.so`；repair 后的校验仍要求 `DT_NEEDED` 与包相对 `RUNPATH` 存在，
+并拒绝任何重复 runtime payload。runtime wheel 的主 ELF 还必须保留规范路径
+`taichi_forge_runtime/_lib/runtime_native/libtaichi_runtime.so`；只有 grafted dependency 可以使用
+auditwheel hash 名。该版本下限同时覆盖合法附加 RPATH 的保留，以及以非 Python runtime ELF 为主要
+payload 时所需的 dependency traversal 修复。
+
+发行 job 会对两类 wheel validator 都传入 `--strict-binary`。它会重新打开最终上传候选，在 repair
+之后把真实 PE/ELF export 或 dynamic-dependency table 与 manifest 对照；仅搜索二进制字节标记不构成
+发行资格。
 
 ```bash
-python -m pip install auditwheel patchelf
+python -m pip install "auditwheel>=6.7,<7" patchelf
 mkdir -p wheelhouse
-auditwheel repair dist/*.whl -w wheelhouse/ --plat manylinux_2_35_x86_64
+auditwheel repair dist/*.whl -w wheelhouse/ \
+  --plat manylinux_2_35_x86_64 \
+  --exclude libtaichi_runtime.so
 mkdir -p wheelhouse-runtime
 auditwheel repair dist-runtime/*.whl -w wheelhouse-runtime/ --plat manylinux_2_35_x86_64
 ```

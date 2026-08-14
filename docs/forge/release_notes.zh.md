@@ -186,10 +186,21 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
   synchronization/resource release、executable/kernel-definition retirement 与 lifecycle-lock wait。
   这些 scope 只在 compile profiling 开启时产生，不改变普通 launch 路径。
 - Windows split-runtime 构建现在从 pybind object 与显式 runtime anchor 推导 export closure，
-  生成确定性的 ABI manifest，并在链接后审计最终 DLL。本地 MSVC split build 将 requested
-  export 从 114,235 个 raw definition 收窄到 1,367 个；最终 DLL 连同源码显式 export 共暴露
-  2,575 个符号，显著低于 32,768 safety cap。该方案通过控制 ABI surface 修复 LNK1189，
+  生成确定性的 ABI manifest，并在链接后审计最终 DLL。本地 MSVC split build 将超过
+  114,000 个 raw definition 收窄到 1,378 个 requested export；最终 DLL 连同源码显式
+  export 共暴露 2,597 个符号，显著低于 32,768 safety cap。显式 Taichi-owned export 仍然保留，因为
+  MSVC 需要 class `dllexport` declaration 为独立编译的 shim 生成 special member 与 vtable；链接后审计
+  会拒绝 third-party definition owner。该方案通过控制 ABI surface 修复 LNK1189，
   无需删除 compiler/backend module。本版本仍保持一个 runtime 包与一个 DLL。
+- 同一 package-private ABI manifest 现在也驱动 Linux ELF 导出隔离。最终 runtime version
+  script 只保留 shim 实际 import 的 Taichi 符号与 ABI anchor；
+  bundled LLVM、SPIR-V、UI、logging 和 allocator API 保持 local。shim 记录显式
+  `DT_NEEDED` 和包相对 `RUNPATH`，loader 对 runtime 与可选 CUDART 使用 `RTLD_LOCAL`。
+  发行验证覆盖 runtime-first 与 driver-first 两种碰撞顺序，同时不把 runtime 重复打入每个
+  CPython wheel。若不兼容 Taichi ABI 已经被放入进程全局域，import-time 有界 private-ABI probe
+  会 fail closed。
+- split-runtime macOS 源码构建使用同一 schema、精确 Mach-O exported-symbols list 与包相对
+  `@loader_path`。这只是源码构建合同；公开发行矩阵仍为 Windows 与 Linux。
 - CUDA-enabled runtime 只使用过 CPU 或 Vulkan Graph state 时，Graph cache reset/析构不再
   构造 CUDA context；真正的 CUDA cache 继续保持 submission lock 顺序。0.6.1 split shim
   中的兼容 override 已迁移到最终的 native runtime 所有权位置。

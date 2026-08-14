@@ -183,6 +183,8 @@ git push origin forge-v0.6.2
 | driver-only runtime wheel 出现 CUDART 或 manifest | release target 或 auditwheel 意外引入 Toolkit runtime 依赖 | 检查 CMake cache、PE import/ELF `DT_NEEDED` 与 `--dependency-class driver-only` 校验 |
 | 旧 0.5.0 runtime wheel 被 validator 拒绝 | 对历史包错误使用了新发行的严格 dependency class | 兼容/repair 工具使用默认 `either`；只有新上传候选强制 `driver-only` |
 | Linux shim 导入时报 `llvm::DisableABIBreakingChecks` 未定义 | prebuilt shim 只使用 LLVM headers 且不链接 LLVMSupport，却没有关闭 header 的 link sentinel | 保持 runtime/shim 分包边界；确认 Linux shim 定义 `LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1`，并让 `validate_shim_wheel.py` 拒绝残留 sentinel 的 wheel |
+| Linux shim 找不到 `libtaichi_runtime.so`，但 runtime wheel 内存在 `libtaichi_runtime-<hash>.so` | auditwheel 错误地重命名了 wheel-owned 主 runtime；shim 的稳定 `DT_NEEDED` 无法解析该哈希名 | runtime repair 后必须保留 `taichi_forge_runtime/_lib/runtime_native/libtaichi_runtime.so`；仅允许 grafted dependency 使用 hash 名，并运行 `validate_runtime_wheel.py --strict-binary` |
+| Forge 与 Mesa/Intel 或其他原生库同进程时出现错误符号绑定 | Linux shim 缺少直接 runtime 依赖、runtime 被 `RTLD_GLOBAL` 加载，或最终 ELF 未应用私有 ABI version script | 检查 shim 的 `DT_NEEDED`/包相对 `RUNPATH`、runtime export manifest、`forbidden_export_families=[]`，并运行双加载顺序资格脚本；不要用 `LD_PRELOAD` 或调整 import 顺序掩盖问题 |
 
 ## 4. 和 LLVM 20 的关系
 
@@ -200,7 +202,7 @@ git push origin forge-v0.6.2
 ```powershell
 python -m pytest tests/python/test_runtime_packaging_cuda_version.py -q
 python -m pytest tests/python/test_runtime_statistics.py tests/python/test_primitive_plan.py -q
-python -m py_compile scripts/repair_runtime_wheel.py scripts/validate_runtime_wheel.py scripts/validate_shim_wheel.py scripts/validate_installed_runtime.py
+python -m py_compile misc/runtime_export_closure.py misc/generate_windows_runtime_export_closure.py misc/generate_elf_runtime_export_closure.py misc/generate_macho_runtime_export_closure.py scripts/repair_runtime_wheel.py scripts/validate_runtime_wheel.py scripts/validate_shim_wheel.py scripts/validate_installed_runtime.py scripts/validate_runtime_load_order.py
 ```
 
 在各后端可用的 release-equivalent build/安装环境运行至少 30 秒生产尺度 primitive stress；
@@ -219,13 +221,15 @@ stress 输出的 `performance=not_measured` 是预期值；它是正确性/并�
 workflow 产出后，必须对最终上传候选运行：
 
 ```text
-python scripts/validate_runtime_wheel.py --wheel-dir <runtime-wheel-dir> --platform pair --dependency-class driver-only
-python scripts/validate_shim_wheel.py --wheel-dir <one-shim-wheel-dir> --platform <windows-or-manylinux>
+python scripts/validate_runtime_wheel.py --wheel-dir <one-native-platform-runtime-dir> --platform <windows-or-manylinux> --dependency-class driver-only --strict-binary
+python scripts/validate_shim_wheel.py --wheel-dir <one-shim-wheel-dir> --platform <windows-or-manylinux> --strict-binary
 ```
 
 随后让 pip 按 shim wheel 的 `Requires-Dist` 安装其 Python 依赖和本地同版本 runtime wheel，
 运行 `pip check`；不得在最终安装验证中使用 `--no-deps`。再到仓库目录之外运行
-`scripts/validate_installed_runtime.py`，并确认新候选没有 CUDART/manifest；历史 0.5.0
-包内 CUDART wheel 只属于兼容路径。正式发布
+`scripts/validate_installed_runtime.py`；Linux 还要运行
+`scripts/validate_runtime_load_order.py`，确认 runtime-first 与 driver-first 都通过。新候选必须
+包含通过 binary audit 的 `taichi_runtime.exports.json`，同时不得包含 CUDART 或
+`cuda_runtime_major.txt`；历史 0.5.0 包内 CUDART wheel 只属于兼容路径。正式发布
 还必须完成 [Linux 复测清单](../forge/linux_revalidation.zh.md) 中适用于发布环境的 GPU、
 sanitizer、GGUI/interop 和性能稳定性门槛；仅 `import` 或 smoke test 不足以替代这些检查。
