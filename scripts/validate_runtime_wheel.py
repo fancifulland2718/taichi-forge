@@ -10,13 +10,16 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import shutil
+import subprocess
+import tempfile
 from zipfile import ZipFile
 
 
 PROJECT = "taichi-forge-runtime"
 PACKAGE = "taichi_forge_runtime"
 MANIFEST = f"{PACKAGE}/_lib/runtime_native/cuda_runtime_major.txt"
-WINDOWS_EXPORT_MANIFEST = (
+EXPORT_MANIFEST = (
     f"{PACKAGE}/_lib/runtime_native/taichi_runtime.exports.json"
 )
 CUDA_VARIANT = re.compile(r"(?:^|[+_.-])(?:cu|cuda)\d+", re.IGNORECASE)
@@ -39,6 +42,8 @@ def _wheel_platform(wheel: Path) -> str:
         return "manylinux"
     if "linux_x86_64" in name:
         return "linux"
+    if "macosx" in name:
+        return "macos"
     raise RuntimeError(f"Unsupported runtime wheel platform tag: {wheel.name}")
 
 
@@ -60,20 +65,85 @@ def _export_digest(symbols: list[str]) -> str:
     return digest.hexdigest()
 
 
-def _validate_windows_export_manifest(zf: ZipFile, names: list[str]) -> None:
-    manifests = [name for name in names if name == WINDOWS_EXPORT_MANIFEST]
+def _validate_export_manifest(
+    zf: ZipFile, names: list[str], platform: str
+) -> dict:
+    manifests = [name for name in names if name == EXPORT_MANIFEST]
     if len(manifests) != 1:
         raise RuntimeError(
-            f"Expected one {WINDOWS_EXPORT_MANIFEST}, found {manifests}"
+            f"Expected one {EXPORT_MANIFEST}, found {manifests}"
         )
     try:
         payload = json.loads(zf.read(manifests[0]).decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("Invalid Windows runtime export manifest") from exc
-    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
-        raise RuntimeError("Unsupported Windows runtime export manifest schema")
-    if payload.get("dll_audited") is not True:
+        raise RuntimeError("Invalid runtime export manifest") from exc
+    schema = payload.get("schema_version") if isinstance(payload, dict) else None
+    if schema not in {1, 2}:
+        raise RuntimeError("Unsupported runtime export manifest schema")
+    if platform != "windows" and schema != 2:
+        raise RuntimeError("POSIX runtime requires export manifest schema 2")
+    if schema == 2:
+        expected_manifest_platform = {
+            "windows": "windows-msvc",
+            "linux": "linux-elf",
+            "manylinux": "linux-elf",
+            "macos": "macos-macho",
+        }[platform]
+        if payload.get("platform") != expected_manifest_platform:
+            raise RuntimeError(
+                "Runtime export manifest platform mismatch: "
+                f"expected={expected_manifest_platform}, "
+                f"actual={payload.get('platform')}"
+            )
+        if payload.get("abi_revision") != 1:
+            raise RuntimeError("Unsupported runtime private ABI revision")
+        if payload.get("binary_audited") is not True:
+            raise RuntimeError("Runtime export manifest was not binary-audited")
+        if payload.get("forbidden_export_families") != []:
+            raise RuntimeError("Runtime exports bundled third-party APIs")
+        collision_probes = payload.get("private_abi_collision_probe_symbols")
+        if (
+            not isinstance(collision_probes, list)
+            or collision_probes != sorted(set(collision_probes))
+            or not all(
+                isinstance(symbol, str) and symbol
+                for symbol in collision_probes
+            )
+            or "taichi_runtime_anchor" not in collision_probes
+        ):
+            raise RuntimeError(
+                "Runtime private ABI collision probes are not canonical"
+            )
+    if platform == "windows" and payload.get("dll_audited") is not True:
         raise RuntimeError("Windows runtime export manifest was not DLL-audited")
+    if platform in {"linux", "manylinux"}:
+        if payload.get("elf_audited") is not True:
+            raise RuntimeError("ELF runtime export manifest was not audited")
+        if payload.get("unexpected_export_count") != 0:
+            raise RuntimeError("ELF runtime export closure contains unexpected APIs")
+        probes = payload.get("global_scope_probe_symbols")
+        if (
+            not isinstance(probes, list)
+            or probes != sorted(set(probes))
+            or not all(isinstance(symbol, str) and symbol for symbol in probes)
+        ):
+            raise RuntimeError("ELF runtime global-scope probes are not canonical")
+    elif platform == "macos":
+        if payload.get("macho_audited") is not True:
+            raise RuntimeError("Mach-O runtime export manifest was not audited")
+        if payload.get("unexpected_export_count") != 0:
+            raise RuntimeError(
+                "Mach-O runtime export closure contains unexpected APIs"
+            )
+        probes = payload.get("global_scope_probe_symbols")
+        if (
+            not isinstance(probes, list)
+            or probes != sorted(set(probes))
+            or not all(isinstance(symbol, str) and symbol for symbol in probes)
+        ):
+            raise RuntimeError(
+                "Mach-O runtime global-scope probes are not canonical"
+            )
 
     requested = payload.get("exports")
     actual = payload.get("actual_exports")
@@ -85,11 +155,13 @@ def _validate_windows_export_manifest(zf: ZipFile, names: list[str]) -> None:
         or requested != sorted(set(requested))
         or actual != sorted(set(actual))
     ):
-        raise RuntimeError("Windows runtime export sets are not canonical")
+        raise RuntimeError("Runtime export sets are not canonical")
 
     requested_set = set(requested)
     actual_set = set(actual)
     required_count = payload.get("shim_required_runtime_symbol_count")
+    direct_count = payload.get("shim_direct_runtime_symbol_count")
+    odr_count = payload.get("shim_shared_odr_symbol_count")
     raw_count = payload.get("raw_defined_symbol_count")
     limit = payload.get("configured_export_limit")
     counts = (
@@ -102,35 +174,115 @@ def _validate_windows_export_manifest(zf: ZipFile, names: list[str]) -> None:
         payload.get("dropped_raw_symbol_count"),
     )
     if not all(isinstance(value, int) and value >= 0 for value in counts):
-        raise RuntimeError("Windows runtime export counts are invalid")
+        raise RuntimeError("Runtime export counts are invalid")
+    if schema == 2:
+        if not all(
+            isinstance(value, int) and value >= 0
+            for value in (direct_count, odr_count)
+        ):
+            raise RuntimeError("Runtime private ABI closure counts are invalid")
+        if direct_count + odr_count != required_count:
+            raise RuntimeError(
+                "Runtime direct and ODR closure counts are inconsistent"
+            )
     if required_count <= 0 or raw_count < required_count:
-        raise RuntimeError("Windows runtime export closure is empty or inconsistent")
+        raise RuntimeError("Runtime export closure is empty or inconsistent")
     if payload["exported_symbol_count"] != len(requested):
-        raise RuntimeError("Windows requested export count is inconsistent")
+        raise RuntimeError("Runtime requested export count is inconsistent")
     if payload["actual_exported_symbol_count"] != len(actual):
-        raise RuntimeError("Windows actual export count is inconsistent")
+        raise RuntimeError("Runtime actual export count is inconsistent")
     if payload["implicit_exported_symbol_count"] != len(
         actual_set - requested_set
     ):
-        raise RuntimeError("Windows implicit export count is inconsistent")
+        raise RuntimeError("Runtime implicit export count is inconsistent")
     if payload["dropped_raw_symbol_count"] != raw_count - required_count:
-        raise RuntimeError("Windows dropped export count is inconsistent")
+        raise RuntimeError("Runtime dropped export count is inconsistent")
     if not requested_set.issubset(actual_set):
-        raise RuntimeError("Windows runtime DLL is missing requested exports")
-    if "taichi_runtime_anchor" not in requested_set:
-        raise RuntimeError("Windows runtime export manifest is missing its ABI anchor")
+        raise RuntimeError("Runtime binary is missing requested exports")
+    expected_anchor = (
+        "_taichi_runtime_anchor" if platform == "macos" else "taichi_runtime_anchor"
+    )
+    if expected_anchor not in requested_set:
+        raise RuntimeError("Runtime export manifest is missing its ABI anchor")
     if limit <= 0 or limit > 65_535 or len(actual) > limit:
-        raise RuntimeError("Windows runtime export set exceeds its safety limit")
+        raise RuntimeError("Runtime export set exceeds its safety limit")
     if payload.get("export_set_sha256") != _export_digest(requested):
-        raise RuntimeError("Windows requested export digest is inconsistent")
+        raise RuntimeError("Runtime requested export digest is inconsistent")
     if payload.get("actual_export_set_sha256") != _export_digest(actual):
-        raise RuntimeError("Windows actual export digest is inconsistent")
+        raise RuntimeError("Runtime actual export digest is inconsistent")
+    return payload
+
+
+def _strict_binary_exports(
+    zf: ZipFile,
+    member: str,
+    platform: str,
+    expected: list[str],
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="taichi-runtime-export-audit-") as td:
+        binary = Path(td) / Path(member).name
+        binary.write_bytes(zf.read(member))
+        if platform == "windows":
+            tool = shutil.which("dumpbin")
+            if tool is None:
+                raise RuntimeError("strict Windows runtime audit requires dumpbin")
+            command = [tool, "/nologo", "/exports", str(binary)]
+            pattern = re.compile(
+                r"^\s*\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(?P<symbol>\S+)"
+            )
+        elif platform in {"linux", "manylinux"}:
+            tool = shutil.which("nm") or shutil.which("llvm-nm")
+            if tool is None:
+                raise RuntimeError("strict ELF runtime audit requires nm")
+            command = [tool, "-D", "-P", "-g", "--defined-only", str(binary)]
+            pattern = None
+        else:
+            tool = shutil.which("nm") or shutil.which("llvm-nm")
+            if tool is None:
+                raise RuntimeError("strict Mach-O runtime audit requires nm")
+            command = [tool, "-P", "-g", "-U", str(binary)]
+            pattern = None
+        completed = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                "strict runtime binary export audit failed: "
+                f"{completed.stdout.strip()}"
+            )
+        if pattern is not None:
+            actual = {
+                match.group("symbol")
+                for line in completed.stdout.splitlines()
+                if (match := pattern.match(line)) is not None
+            }
+        else:
+            actual = set()
+            for line in completed.stdout.splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and len(parts[1]) == 1:
+                    actual.add(parts[0].split("@", 1)[0])
+        expected_set = set(expected)
+        if actual != expected_set:
+            missing = sorted(expected_set - actual)[:8]
+            unexpected = sorted(actual - expected_set)[:8]
+            raise RuntimeError(
+                "final wheel runtime exports differ from the audited manifest: "
+                f"missing={missing}, unexpected={unexpected}"
+            )
 
 
 def inspect_runtime_wheel(
     wheel: Path,
     expected_cuda_major: int | None = None,
     expected_dependency_class: str = "either",
+    strict_binary: bool = False,
 ) -> RuntimeWheelInfo:
     if expected_dependency_class not in {
         "driver-only",
@@ -242,26 +394,54 @@ def inspect_runtime_wheel(
                 for name in names
                 if name == f"{PACKAGE}/_lib/runtime_native/taichi_runtime.dll"
             ]
+        elif platform == "macos":
+            native_runtimes = [
+                name
+                for name in names
+                if name
+                == f"{PACKAGE}/_lib/runtime_native/libtaichi_runtime.dylib"
+            ]
         else:
+            # The shim has a direct DT_NEEDED entry for the stable SONAME
+            # libtaichi_runtime.so.  auditwheel may hash grafted dependencies,
+            # but it must leave this wheel-owned primary ELF at its canonical
+            # package path.  Accepting a hashed primary runtime here would let
+            # the runtime wheel pass while the independently built shim could
+            # no longer resolve its dependency after installation.
             native_runtimes = [
                 name
                 for name in names
                 if name == f"{PACKAGE}/_lib/runtime_native/libtaichi_runtime.so"
-                or (
-                    platform == "manylinux"
-                    and (
-                        name.startswith(runtime_native_prefix)
-                        or name.startswith(auditwheel_prefix)
-                    )
-                    and re.fullmatch(
-                        r"libtaichi_runtime-[^.]+\.so", Path(name).name
-                    )
+            ]
+            hashed_primary_runtimes = [
+                name
+                for name in names
+                if (
+                    name.startswith(runtime_native_prefix)
+                    or name.startswith(auditwheel_prefix)
+                )
+                and re.fullmatch(
+                    r"libtaichi_runtime-[^.]+\.so", Path(name).name
                 )
             ]
+            if hashed_primary_runtimes:
+                raise RuntimeError(
+                    "The primary Linux runtime must retain its canonical "
+                    "libtaichi_runtime.so name and package path; found "
+                    f"auditwheel-style hashed copies: {hashed_primary_runtimes}"
+                )
         if len(native_runtimes) != 1:
             raise RuntimeError(
                 f"Expected one platform native runtime in {wheel.name}, "
                 f"found {native_runtimes}"
+            )
+        export_manifest = _validate_export_manifest(zf, names, platform)
+        if strict_binary:
+            _strict_binary_exports(
+                zf,
+                native_runtimes[0],
+                platform,
+                export_manifest["actual_exports"],
             )
         if platform == "windows":
             import_library = f"{PACKAGE}/_lib/runtime_native/taichi_runtime.lib"
@@ -269,7 +449,6 @@ def inspect_runtime_wheel(
                 raise RuntimeError(
                     f"Expected one {import_library} in {wheel.name}"
                 )
-            _validate_windows_export_manifest(zf, names)
 
         wrong_entries = [
             name for name in names if name.startswith("taichi_forge/_lib/")
@@ -290,6 +469,7 @@ def validate_runtime_wheels(
     expected_platform: str,
     expected_cuda_major: int | None = None,
     expected_dependency_class: str = "either",
+    strict_binary: bool = False,
 ) -> list[RuntimeWheelInfo]:
     wheels = sorted(wheel_dir.glob("*.whl"))
     expected_count = 2 if expected_platform == "pair" else 1
@@ -303,6 +483,7 @@ def validate_runtime_wheels(
             wheel,
             expected_cuda_major,
             expected_dependency_class,
+            strict_binary,
         )
         for wheel in wheels
     ]
@@ -341,7 +522,7 @@ def main() -> None:
     parser.add_argument("--wheel-dir", type=Path, required=True)
     parser.add_argument(
         "--platform",
-        choices=["windows", "linux", "manylinux", "pair"],
+        choices=["windows", "linux", "manylinux", "macos", "pair"],
         required=True,
     )
     parser.add_argument("--cuda-major", type=int)
@@ -355,6 +536,11 @@ def main() -> None:
             "already-published legacy wheels."
         ),
     )
+    parser.add_argument(
+        "--strict-binary",
+        action="store_true",
+        help="Re-audit the native binary inside the final wheel",
+    )
     args = parser.parse_args()
 
     try:
@@ -363,6 +549,7 @@ def main() -> None:
             args.platform,
             args.cuda_major,
             args.dependency_class,
+            args.strict_binary,
         )
     except (OSError, RuntimeError, UnicodeError) as exc:
         raise SystemExit(str(exc)) from exc

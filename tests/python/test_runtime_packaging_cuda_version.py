@@ -45,13 +45,16 @@ def _write_runtime_wheel(
     auditwheel_layout: bool = False,
     duplicate_raw_cudart: bool = False,
     dependency_class: str = "toolkit-reference",
-    include_windows_export_manifest: bool = True,
+    include_export_manifest: bool = True,
 ) -> None:
     dist_info = f"taichi_forge_runtime-{version}.dist-info"
     native = "taichi_forge_runtime/_lib/runtime_native"
     if platform == "windows":
         runtime_name = "taichi_runtime.dll"
         cudart_name = f"cudart64_{cuda_major}.dll"
+    elif platform == "macos":
+        runtime_name = "libtaichi_runtime.dylib"
+        cudart_name = ""
     else:
         runtime_name = (
             "libtaichi_runtime-deadbeef.so"
@@ -71,6 +74,8 @@ def _write_runtime_wheel(
         zf.writestr(f"{dist_info}/RECORD", "")
         zf.writestr(f"{native}/{runtime_name}", b"runtime")
         if dependency_class == "toolkit-reference":
+            if platform == "macos":
+                raise ValueError("macOS test wheels do not bundle CUDART")
             zf.writestr(f"{native}/cuda_runtime_major.txt", f"{cuda_major}\n")
             if misplaced_cudart:
                 cudart_dir = "unrelated_package"
@@ -88,7 +93,8 @@ def _write_runtime_wheel(
             raise ValueError(f"unknown dependency class: {dependency_class}")
         if platform == "windows":
             zf.writestr(f"{native}/taichi_runtime.lib", b"import library")
-            if include_windows_export_manifest:
+        if include_export_manifest:
+            if platform == "windows":
                 requested = [
                     "?launch@Kernel@lang@taichi@@QEAAXXZ",
                     "taichi_runtime_anchor",
@@ -97,34 +103,82 @@ def _write_runtime_wheel(
                     "?explicit_api@taichi@@YAXXZ",
                     *requested,
                 ]
-                requested.sort()
-                actual.sort()
-                requested_digest = hashlib.sha256(
-                    "\n".join(requested).encode("utf-8")
-                ).hexdigest()
-                actual_digest = hashlib.sha256(
-                    "\n".join(actual).encode("utf-8")
-                ).hexdigest()
-                zf.writestr(
-                    f"{native}/taichi_runtime.exports.json",
-                    json.dumps(
-                        {
-                            "schema_version": 1,
-                            "dll_audited": True,
-                            "raw_defined_symbol_count": 5,
-                            "shim_required_runtime_symbol_count": 1,
-                            "exported_symbol_count": 2,
-                            "actual_exported_symbol_count": 3,
-                            "implicit_exported_symbol_count": 1,
-                            "dropped_raw_symbol_count": 4,
-                            "configured_export_limit": 32_768,
-                            "exports": requested,
-                            "actual_exports": actual,
-                            "export_set_sha256": requested_digest,
-                            "actual_export_set_sha256": actual_digest,
-                        }
-                    ),
+                audit_kind = "pe-coff-dll"
+                platform_name = "windows-msvc"
+            elif platform == "macos":
+                requested = [
+                    "__ZN6taichi4lang7Program4syncEv",
+                    "_taichi_runtime_anchor",
+                ]
+                actual = list(requested)
+                audit_kind = "macho-external-symbol-table"
+                platform_name = "macos-macho"
+            else:
+                requested = [
+                    "_ZN6taichi4lang7Program4syncEv",
+                    "taichi_runtime_anchor",
+                ]
+                actual = [
+                    "TAICHI_FORGE_RUNTIME_PRIVATE_1",
+                    *requested,
+                ]
+                audit_kind = "elf-dynamic-symbol-table"
+                platform_name = "linux-elf"
+            requested.sort()
+            actual.sort()
+            requested_digest = hashlib.sha256(
+                "\n".join(requested).encode("utf-8")
+            ).hexdigest()
+            actual_digest = hashlib.sha256(
+                "\n".join(actual).encode("utf-8")
+            ).hexdigest()
+            manifest = {
+                "schema_version": 2,
+                "abi_revision": 1,
+                "platform": platform_name,
+                "binary_audited": True,
+                "binary_audit_kind": audit_kind,
+                "forbidden_export_families": [],
+                "private_abi_collision_probe_symbols": [
+                    "taichi_runtime_anchor"
+                ],
+                "raw_defined_symbol_count": 5,
+                "shim_direct_runtime_symbol_count": 1,
+                "shim_shared_odr_symbol_count": 0,
+                "shim_required_runtime_symbol_count": 1,
+                "exported_symbol_count": 2,
+                "actual_exported_symbol_count": 3,
+                "implicit_exported_symbol_count": 1,
+                "dropped_raw_symbol_count": 4,
+                "configured_export_limit": 32_768,
+                "exports": requested,
+                "actual_exports": actual,
+                "export_set_sha256": requested_digest,
+                "actual_export_set_sha256": actual_digest,
+            }
+            if platform == "windows":
+                manifest["dll_audited"] = True
+            elif platform == "macos":
+                manifest.update(
+                    {
+                        "macho_audited": True,
+                        "global_scope_probe_symbols": [],
+                        "unexpected_export_count": 0,
+                    }
                 )
+            else:
+                manifest.update(
+                    {
+                        "elf_audited": True,
+                        "forbidden_export_families": [],
+                        "global_scope_probe_symbols": [],
+                        "unexpected_export_count": 0,
+                    }
+                )
+            zf.writestr(
+                f"{native}/taichi_runtime.exports.json",
+                json.dumps(manifest),
+            )
         if extra_cudart_major is not None:
             if platform == "windows":
                 extra_name = f"cudart64_{extra_cudart_major}.dll"
@@ -143,6 +197,8 @@ def _write_shim_wheel(
     missing_dependency: str | None = None,
     llvm_abi_sentinel: bool = False,
     static_cpp_runtime: bool = False,
+    missing_runtime_dependency: bool = False,
+    missing_runtime_rpath: bool = False,
 ) -> None:
     dist_info = f"taichi_forge-{version}.dist-info"
     extension = "taichi_python.pyd" if platform == "windows" else "taichi_python.so"
@@ -175,8 +231,22 @@ def _write_shim_wheel(
         )
         zf.writestr(f"{dist_info}/RECORD", "")
         extension_payload = b"shim"
-        if platform != "windows" and not static_cpp_runtime:
+        if platform == "manylinux" and not static_cpp_runtime:
             extension_payload += b"\0libstdc++.so.6\0libgcc_s.so.1\0"
+        if platform == "manylinux" and not missing_runtime_dependency:
+            extension_payload += b"\0libtaichi_runtime.so\0"
+        elif platform == "macos" and not missing_runtime_dependency:
+            extension_payload += b"\0@rpath/libtaichi_runtime.dylib\0"
+        if platform == "manylinux" and not missing_runtime_rpath:
+            extension_payload += (
+                b"\0$ORIGIN/../../../taichi_forge_runtime/"
+                b"_lib/runtime_native\0"
+            )
+        elif platform == "macos" and not missing_runtime_rpath:
+            extension_payload += (
+                b"\0@loader_path/../../../taichi_forge_runtime/"
+                b"_lib/runtime_native\0"
+            )
         if llvm_abi_sentinel:
             extension_payload += b"\0_ZN4llvm24DisableABIBreakingChecksE\0"
         zf.writestr(f"taichi_forge/_lib/core/{extension}", extension_payload)
@@ -342,7 +412,6 @@ def test_shared_wheel_validator_accepts_windows_and_manylinux_pair(tmp_path):
         platform="manylinux",
         version="0.4.3",
         cuda_major=12,
-        hashed_runtime=True,
         auditwheel_layout=True,
     )
 
@@ -371,7 +440,6 @@ def test_shared_wheel_validator_accepts_driver_only_pair(tmp_path):
         platform="manylinux",
         version="0.5.1",
         cuda_major=0,
-        hashed_runtime=True,
         dependency_class="driver-only",
     )
 
@@ -385,6 +453,24 @@ def test_shared_wheel_validator_accepts_driver_only_pair(tmp_path):
     assert {info.cuda_major for info in infos} == {None}
 
 
+def test_manylinux_runtime_wheel_rejects_hashed_primary_runtime(tmp_path):
+    wheel = (
+        tmp_path
+        / "taichi_forge_runtime-0.6.2-py3-none-manylinux_2_35_x86_64.whl"
+    )
+    _write_runtime_wheel(
+        wheel,
+        platform="manylinux",
+        version="0.6.2",
+        cuda_major=0,
+        hashed_runtime=True,
+        dependency_class="driver-only",
+    )
+
+    with pytest.raises(RuntimeError, match="canonical libtaichi_runtime.so"):
+        validate_runtime_wheel.inspect_runtime_wheel(wheel)
+
+
 def test_windows_runtime_wheel_requires_export_manifest(tmp_path):
     wheel = tmp_path / "taichi_forge_runtime-0.6.2-py3-none-win_amd64.whl"
     _write_runtime_wheel(
@@ -393,11 +479,31 @@ def test_windows_runtime_wheel_requires_export_manifest(tmp_path):
         version="0.6.2",
         cuda_major=0,
         dependency_class="driver-only",
-        include_windows_export_manifest=False,
+        include_export_manifest=False,
     )
 
     with pytest.raises(RuntimeError, match="taichi_runtime.exports.json"):
         validate_runtime_wheel.inspect_runtime_wheel(wheel)
+
+
+def test_macos_runtime_wheel_accepts_private_macho_manifest(tmp_path):
+    wheel = (
+        tmp_path
+        / "taichi_forge_runtime-0.6.2-py3-none-macosx_12_0_arm64.whl"
+    )
+    _write_runtime_wheel(
+        wheel,
+        platform="macos",
+        version="0.6.2",
+        cuda_major=0,
+        dependency_class="driver-only",
+    )
+
+    info = validate_runtime_wheel.inspect_runtime_wheel(
+        wheel, expected_dependency_class="driver-only"
+    )
+
+    assert info.platform == "macos"
 
 
 def test_shared_wheel_validator_rejects_reference_when_driver_only_required(
@@ -536,6 +642,7 @@ def test_shared_wheel_validator_rejects_cuda_versioned_release(tmp_path):
     [
         ("windows", "cp310-cp310-win_amd64"),
         ("manylinux", "cp310-cp310-manylinux_2_35_x86_64"),
+        ("macos", "cp310-cp310-macosx_12_0_arm64"),
     ],
 )
 def test_shim_wheel_validator_accepts_runtime_free_wheel(
@@ -622,6 +729,31 @@ def test_manylinux_shim_rejects_private_static_cpp_runtime(tmp_path):
 
 
 @pytest.mark.parametrize(
+    ("argument", "message"),
+    [
+        ("missing_runtime_dependency", "DT_NEEDED"),
+        ("missing_runtime_rpath", "RUNPATH"),
+    ],
+)
+def test_manylinux_shim_requires_local_runtime_dependency_contract(
+    tmp_path, argument, message
+):
+    wheel = (
+        tmp_path
+        / "taichi_forge-0.4.3-cp310-cp310-manylinux_2_35_x86_64.whl"
+    )
+    _write_shim_wheel(
+        wheel,
+        platform="manylinux",
+        version="0.4.3",
+        **{argument: True},
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        validate_shim_wheel.validate_shim_wheel(wheel, "manylinux")
+
+
+@pytest.mark.parametrize(
     ("system", "library_name", "major"),
     [
         ("win", "cudart64_11.dll", 11),
@@ -697,7 +829,7 @@ def test_shim_retains_explicit_linux_runtime_handle(monkeypatch, tmp_path):
     assert calls == [
         (
             str(runtime),
-            getattr(os, "RTLD_GLOBAL", 0) | getattr(os, "RTLD_NOW", 2),
+            getattr(os, "RTLD_LOCAL", 0) | getattr(os, "RTLD_NOW", 2),
         )
     ]
 
@@ -705,16 +837,44 @@ def test_shim_retains_explicit_linux_runtime_handle(monkeypatch, tmp_path):
 def test_split_runtime_dlopen_flags_omit_deepbind(monkeypatch):
     monkeypatch.setattr(runtime_utils, "_native_runtime_loaded", True)
 
-    assert runtime_utils._python_core_dlopen_flags() == getattr(
-        os, "RTLD_NOW", 2
+    assert runtime_utils._python_core_dlopen_flags() == (
+        getattr(os, "RTLD_LOCAL", 0) | getattr(os, "RTLD_NOW", 2)
     )
+
+
+def test_split_runtime_rejects_an_earlier_global_private_abi(
+    monkeypatch, tmp_path
+):
+    manifest = tmp_path / "taichi_runtime.exports.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "private_abi_collision_probe_symbols": [
+                    "taichi_runtime_anchor"
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class Process:
+        taichi_runtime_anchor = object()
+
+    monkeypatch.setattr(runtime_utils, "get_os_name", lambda: "linux")
+    monkeypatch.setattr(runtime_utils.ctypes, "CDLL", lambda path: Process())
+
+    with pytest.raises(RuntimeError, match="process-global Taichi private ABI"):
+        runtime_utils._reject_global_private_abi_collisions([str(tmp_path)])
 
 
 def test_monolithic_dlopen_flags_keep_deepbind(monkeypatch):
     monkeypatch.setattr(runtime_utils, "_native_runtime_loaded", False)
 
     assert runtime_utils._python_core_dlopen_flags() == (
-        getattr(os, "RTLD_NOW", 2) | getattr(os, "RTLD_DEEPBIND", 8)
+        getattr(os, "RTLD_LOCAL", 0)
+        | getattr(os, "RTLD_NOW", 2)
+        | getattr(os, "RTLD_DEEPBIND", 8)
     )
 
 

@@ -244,7 +244,7 @@ jobs:
           done
 
           python scripts/validate_runtime_wheel.py \
-            --wheel-dir runtime-wheel --platform manylinux
+            --wheel-dir runtime-wheel --platform manylinux --strict-binary
 
           python - <<'PY'
           from pathlib import Path
@@ -257,15 +257,15 @@ jobs:
 
           with ZipFile(wheels[0]) as zf:
               names = zf.namelist()
-              exact = [name for name in names if name.endswith("/libtaichi_runtime.so")]
-              hashed = [
+              members = [
                   name for name in names
-                  if Path(name).name.startswith("libtaichi_runtime-")
-                  and Path(name).suffix == ".so"
+                  if name == "taichi_forge_runtime/_lib/runtime_native/libtaichi_runtime.so"
               ]
-              members = exact or hashed
               if len(members) != 1:
-                  raise SystemExit(f"Expected one Linux runtime SO in {wheels[0]}, found {members}")
+                  raise SystemExit(
+                      "Expected the canonical Linux runtime SO required by the "
+                      f"shim DT_NEEDED contract in {wheels[0]}, found {members}"
+                  )
               target = Path("runtime-link/libtaichi_runtime.so")
               with zf.open(members[0]) as src, target.open("wb") as dst:
                   copyfileobj(src, dst)
@@ -286,7 +286,7 @@ jobs:
       - name: Audit wheel (auditwheel repair)
         run: |
           set -euo pipefail
-          python -m pip install auditwheel patchelf
+          python -m pip install "auditwheel>=6.7,<7" patchelf
           mkdir -p wheelhouse
           # ubuntu-22.04 ships glibc 2.35, so the wheel will reference glibc 2.35
           # symbols.  auditwheel repair --plat manylinux_2_28_x86_64 would fail because
@@ -294,7 +294,9 @@ jobs:
           # To produce a more-compatible manylinux_2_28 wheel, switch the build_linux
           # job to run inside a quay.io/pypa/manylinux_2_28_x86_64 container instead.
           auditwheel show dist/*.whl || true
-          auditwheel repair dist/*.whl -w wheelhouse/ --plat manylinux_2_35_x86_64
+          auditwheel repair dist/*.whl -w wheelhouse/ \
+            --plat manylinux_2_35_x86_64 \
+            --exclude libtaichi_runtime.so
           python - <<'PY'
           from pathlib import Path
 
@@ -313,11 +315,12 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/validate_shim_wheel.py \
-            --wheel-dir wheelhouse --platform manylinux
+            --wheel-dir wheelhouse --platform manylinux --strict-binary
           python -m pip install --force-reinstall --only-binary=:all: runtime-wheel/*.whl wheelhouse/*.whl
           python -m pip check
           cd /tmp
           python -I -u -X faulthandler "$GITHUB_WORKSPACE/scripts/validate_installed_runtime.py"
+          python -I -u -X faulthandler "$GITHUB_WORKSPACE/scripts/validate_runtime_load_order.py"
 
       - name: Upload artifact
         if: always()
@@ -441,7 +444,7 @@ jobs:
           }
 
           python scripts/validate_runtime_wheel.py `
-            --wheel-dir runtime-wheel --platform windows
+            --wheel-dir runtime-wheel --platform windows --strict-binary
 
           @'
           from pathlib import Path
@@ -484,7 +487,7 @@ jobs:
         shell: pwsh
         run: |
           python scripts/validate_shim_wheel.py `
-            --wheel-dir dist --platform windows
+            --wheel-dir dist --platform windows --strict-binary
           $runtimeWheel = (Get-ChildItem runtime-wheel\*.whl | Select-Object -First 1).FullName
           $shimWheel = (Get-ChildItem dist\*.whl | Select-Object -First 1).FullName
           python -m pip install --force-reinstall --only-binary=:all: $runtimeWheel $shimWheel

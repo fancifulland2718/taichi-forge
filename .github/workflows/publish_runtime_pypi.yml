@@ -176,7 +176,7 @@ jobs:
           set -euo pipefail
           python scripts/validate_runtime_wheel.py \
             --wheel-dir dist-runtime --platform linux \
-            --dependency-class driver-only
+            --dependency-class driver-only --strict-binary
 
       - name: Reject implicit CUDA Toolkit shared-library imports
         run: |
@@ -192,7 +192,7 @@ jobs:
       - name: Audit runtime wheel
         run: |
           set -euo pipefail
-          python -m pip install auditwheel patchelf
+          python -m pip install "auditwheel>=6.7,<7" patchelf
           mkdir -p wheelhouse-runtime
           auditwheel show dist-runtime/*.whl || true
           auditwheel repair dist-runtime/*.whl -w wheelhouse-runtime/ --plat manylinux_2_35_x86_64
@@ -201,7 +201,7 @@ jobs:
           auditwheel show wheelhouse-runtime/*.whl
           python scripts/validate_runtime_wheel.py \
             --wheel-dir wheelhouse-runtime --platform manylinux \
-            --dependency-class driver-only
+            --dependency-class driver-only --strict-binary
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -327,7 +327,7 @@ jobs:
         run: |
           python scripts/validate_runtime_wheel.py `
             --wheel-dir dist-runtime --platform windows `
-            --dependency-class driver-only
+            --dependency-class driver-only --strict-binary
 
       - name: Reject implicit CUDA Toolkit DLL imports
         shell: pwsh

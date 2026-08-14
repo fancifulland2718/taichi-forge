@@ -3,6 +3,9 @@
 
 import faulthandler
 import importlib
+import ctypes
+from ctypes.util import find_library
+import json
 import os
 import platform
 import re
@@ -154,6 +157,90 @@ def _validate_packaged_cuda_runtime() -> tuple[Path | None, int | None]:
                 "bundled CUDART manifest/library mismatch: " f"manifest={declared_major_value}, library={path.name}"
             )
     return path, major
+
+
+def _runtime_export_manifest() -> tuple[Path, dict]:
+    manifests = [
+        package_dir / "_lib" / "runtime_native" / "taichi_runtime.exports.json"
+        for package_dir in _runtime_package_dirs()
+    ]
+    manifests = [path for path in manifests if path.is_file()]
+    if len(manifests) != 1:
+        raise RuntimeError(
+            "expected one installed runtime export manifest, found "
+            f"{manifests}"
+        )
+    try:
+        payload = json.loads(manifests[0].read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("installed runtime export manifest is invalid") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("installed runtime export manifest is not an object")
+    return manifests[0], payload
+
+
+def _validate_private_runtime_symbol_scope() -> None:
+    manifest_path, payload = _runtime_export_manifest()
+    system = platform.system()
+    if system not in {"Linux", "Darwin"}:
+        _checkpoint(
+            "private runtime ABI scope: export manifest present "
+            f"({manifest_path.name})"
+        )
+        return
+    expected_platform = "linux-elf" if system == "Linux" else "macos-macho"
+    audit_key = "elf_audited" if system == "Linux" else "macho_audited"
+    if (
+        payload.get("schema_version") != 2
+        or payload.get("platform") != expected_platform
+        or payload.get(audit_key) is not True
+    ):
+        raise RuntimeError(
+            "installed POSIX runtime export contract is unsupported"
+        )
+    probes = payload.get("global_scope_probe_symbols")
+    if not isinstance(probes, list) or not all(
+        isinstance(symbol, str) and symbol for symbol in probes
+    ):
+        raise RuntimeError("installed POSIX runtime scope probes are invalid")
+
+    class DlInfo(ctypes.Structure):
+        _fields_ = [
+            ("dli_fname", ctypes.c_char_p),
+            ("dli_fbase", ctypes.c_void_p),
+            ("dli_sname", ctypes.c_char_p),
+            ("dli_saddr", ctypes.c_void_p),
+        ]
+
+    libdl = ctypes.CDLL(find_library("dl") or None)
+    libdl.dladdr.argtypes = [ctypes.c_void_p, ctypes.POINTER(DlInfo)]
+    libdl.dladdr.restype = ctypes.c_int
+    process = ctypes.CDLL(None)
+    leaked = []
+    for symbol_name in probes:
+        try:
+            symbol = getattr(process, symbol_name)
+        except AttributeError:
+            continue
+        info = DlInfo()
+        if not libdl.dladdr(ctypes.cast(symbol, ctypes.c_void_p), ctypes.byref(info)):
+            continue
+        owner = (
+            info.dli_fname.decode("utf-8", errors="replace")
+            if info.dli_fname
+            else ""
+        )
+        if "libtaichi_runtime" in Path(owner).name:
+            leaked.append((symbol_name, owner))
+    if leaked:
+        raise RuntimeError(
+            "runtime-private symbols entered RTLD_DEFAULT: "
+            + ", ".join(f"{symbol} -> {owner}" for symbol, owner in leaked)
+        )
+    _checkpoint(
+        "private runtime ABI scope: passed "
+        f"({len(probes)} non-global probes)"
+    )
 
 
 def _validate_cpu_native_ad() -> None:
@@ -360,6 +447,7 @@ def main() -> None:
     _checkpoint(f"distribution versions: passed ({version})")
     commit = _validate_build_identity()
     _checkpoint(f"native build identity: passed ({commit})")
+    _validate_private_runtime_symbol_scope()
     _validate_contract_manifest()
     cudart, cudart_major = _validate_packaged_cuda_runtime()
     _checkpoint("packaged CUDA runtime: passed")

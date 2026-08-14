@@ -6,6 +6,7 @@ import warnings
 import ctypes
 import importlib.util
 import glob
+import json
 
 from colorama import Fore, Style
 
@@ -271,10 +272,60 @@ def _prepare_bundled_cuda_runtime(runtime_dirs):
     )
 
 
+def _reject_global_private_abi_collisions(runtime_dirs):
+    if get_os_name() not in {"linux", "osx"}:
+        return
+    manifests = [
+        os.path.join(directory, "taichi_runtime.exports.json")
+        for directory in runtime_dirs
+    ]
+    manifests = [path for path in manifests if os.path.isfile(path)]
+    if not manifests:
+        return
+    if len(manifests) != 1:
+        raise RuntimeError(
+            "Multiple split-runtime private ABI manifests were found: "
+            f"{manifests}"
+        )
+    try:
+        with open(manifests[0], encoding="utf-8") as manifest_file:
+            manifest = json.load(manifest_file)
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "The split-runtime private ABI manifest is invalid"
+        ) from exc
+    probes = manifest.get("private_abi_collision_probe_symbols", [])
+    if not probes:
+        return
+    if (
+        manifest.get("schema_version") != 2
+        or not isinstance(probes, list)
+        or probes != sorted(set(probes))
+        or not all(isinstance(symbol, str) and symbol for symbol in probes)
+    ):
+        raise RuntimeError(
+            "The split-runtime private ABI collision probes are invalid"
+        )
+    process = ctypes.CDLL(None)
+    collisions = []
+    for symbol in probes:
+        try:
+            getattr(process, symbol)
+        except AttributeError:
+            continue
+        collisions.append(symbol)
+    if collisions:
+        raise RuntimeError(
+            "A process-global Taichi private ABI is already loaded; refusing "
+            "unsafe symbol interposition: "
+            + ", ".join(collisions[:8])
+        )
+
+
 def _preload_cuda_runtime_for_native_runtime():
     if get_os_name() != "linux":
         return
-    flags = getattr(os, "RTLD_GLOBAL", 0) | getattr(os, "RTLD_NOW", 2)
+    flags = getattr(os, "RTLD_LOCAL", 0) | getattr(os, "RTLD_NOW", 2)
     candidate = os.environ.get("TI_CUDA_CUB_SORT_BUNDLED_CUDART_PATH", "")
     if not candidate:
         return
@@ -296,6 +347,7 @@ def _prepare_native_runtime():
     runtime_dirs = _native_runtime_dirs()
     startup_profile_mark("native_runtime.search.end")
     _native_load_trace(f"runtime search directories: {runtime_dirs}")
+    _reject_global_private_abi_collisions(runtime_dirs)
     startup_profile_mark("native_runtime.cuda_dependency.begin")
     _prepare_bundled_cuda_runtime(runtime_dirs)
     _preload_cuda_runtime_for_native_runtime()
@@ -315,14 +367,14 @@ def _prepare_native_runtime():
             if get_os_name() == "win":
                 handle = ctypes.WinDLL(lib_path)  # pylint: disable=no-member
             else:
-                flags = getattr(os, "RTLD_GLOBAL", 0) | getattr(
+                flags = getattr(os, "RTLD_LOCAL", 0) | getattr(
                     os, "RTLD_NOW", 2
                 )
                 handle = ctypes.CDLL(lib_path, mode=flags)
-            # Linux shim modules intentionally have no DT_NEEDED edge to the
-            # split runtime. Keep the explicit loader reference alive for the
-            # complete Python process lifetime so native function pointers and
-            # C++ type metadata cannot outlive their defining shared object.
+            # Keep the explicit loader reference alive for the complete Python
+            # process lifetime. On POSIX the shim has a direct dependency edge
+            # to this locally loaded runtime, so its private C++ ABI is
+            # available without entering the process-global symbol scope.
             _native_library_handles.append(handle)
             _native_runtime_loaded = True
             startup_profile_mark("native_runtime.load.end")
@@ -347,7 +399,7 @@ def get_os_name():
 
 
 def _python_core_dlopen_flags():
-    flags = getattr(os, "RTLD_NOW", 2)
+    flags = getattr(os, "RTLD_LOCAL", 0) | getattr(os, "RTLD_NOW", 2)
     if not _native_runtime_loaded:
         flags |= getattr(os, "RTLD_DEEPBIND", 8)
     return flags
@@ -361,11 +413,10 @@ def import_ti_python_core():
         old_flags = sys.getdlopenflags()
         dlopen_flags = _python_core_dlopen_flags()
         _native_load_trace(f"pybind shim dlopen flags: {dlopen_flags}")
-        # A split runtime already provides the process-wide C++ symbol domain
-        # through RTLD_GLOBAL. RTLD_DEEPBIND would instead prefer duplicate
-        # weak/inline definitions from the shim and can split C++ singleton
-        # and type state across the two DSOs. Keep DEEPBIND only for the
-        # historical monolithic import path.
+        # The split runtime is a direct local dependency of the shim.
+        # RTLD_DEEPBIND would prefer duplicate weak/inline definitions from the
+        # shim and can split C++ singleton and type state across the two DSOs.
+        # Keep DEEPBIND only for the historical monolithic import path.
         sys.setdlopenflags(dlopen_flags)
     else:
         pyddir = os.path.dirname(os.path.realpath(__file__))

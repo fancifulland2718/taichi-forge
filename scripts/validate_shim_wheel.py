@@ -7,6 +7,9 @@ import argparse
 from email.parser import Parser
 from pathlib import Path
 import re
+import shutil
+import subprocess
+import tempfile
 from zipfile import ZipFile
 
 
@@ -23,6 +26,9 @@ LINUX_SHARED_CPP_RUNTIME_LIBRARIES = (
     b"libstdc++.so.6",
     b"libgcc_s.so.1",
 )
+LINUX_RUNTIME_DEPENDENCY = b"libtaichi_runtime.so"
+LINUX_RUNTIME_RPATH = b"taichi_forge_runtime/_lib/runtime_native"
+MACOS_RUNTIME_DEPENDENCY = b"libtaichi_runtime.dylib"
 CUDA_VARIANT = re.compile(r"(?:^|[+_.-])(?:cu|cuda)\d+", re.IGNORECASE)
 
 
@@ -39,10 +45,66 @@ def _wheel_platform(wheel: Path) -> str:
         return "windows"
     if "manylinux" in name:
         return "manylinux"
+    if "macosx" in name:
+        return "macos"
     raise RuntimeError(f"Unsupported shim wheel platform tag: {wheel.name}")
 
 
-def validate_shim_wheel(wheel: Path, expected_platform: str) -> str:
+def _strict_dynamic_contract(
+    zf: ZipFile, extension_member: str, platform: str
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="taichi-shim-dynamic-audit-") as td:
+        extension = Path(td) / Path(extension_member).name
+        extension.write_bytes(zf.read(extension_member))
+        if platform == "manylinux":
+            tool = shutil.which("readelf")
+            if tool is None:
+                raise RuntimeError("strict Linux shim audit requires readelf")
+            command = [tool, "-d", str(extension)]
+            required_dependency = "libtaichi_runtime.so"
+            required_path = "taichi_forge_runtime/_lib/runtime_native"
+        elif platform == "windows":
+            tool = shutil.which("dumpbin")
+            if tool is None:
+                raise RuntimeError("strict Windows shim audit requires dumpbin")
+            command = [tool, "/nologo", "/dependents", str(extension)]
+            required_dependency = "taichi_runtime.dll"
+            required_path = None
+        else:
+            tool = shutil.which("otool")
+            if tool is None:
+                raise RuntimeError("strict macOS shim audit requires otool")
+            command = [tool, "-l", str(extension)]
+            required_dependency = "libtaichi_runtime.dylib"
+            required_path = "taichi_forge_runtime/_lib/runtime_native"
+        completed = subprocess.run(
+            command,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                "strict shim dynamic-table audit failed: "
+                f"{completed.stdout.strip()}"
+            )
+        if required_dependency not in completed.stdout:
+            raise RuntimeError(
+                "final shim binary lacks its direct runtime dependency: "
+                f"{required_dependency}"
+            )
+        if required_path is not None and required_path not in completed.stdout:
+            raise RuntimeError(
+                "final shim binary lacks its package-relative runtime search path"
+            )
+
+
+def validate_shim_wheel(
+    wheel: Path, expected_platform: str, strict_binary: bool = False
+) -> str:
     platform = _wheel_platform(wheel)
     if platform != expected_platform:
         raise RuntimeError(
@@ -112,8 +174,19 @@ def validate_shim_wheel(wheel: Path, expected_platform: str) -> str:
             raise RuntimeError(
                 f"Expected one pybind extension in {wheel.name}, found {extensions}"
             )
+        if strict_binary:
+            _strict_dynamic_contract(zf, extensions[0], platform)
         if platform == "manylinux":
             extension = zf.read(extensions[0])
+            if LINUX_RUNTIME_DEPENDENCY not in extension:
+                raise RuntimeError(
+                    "Linux split shim has no DT_NEEDED marker for "
+                    "libtaichi_runtime.so"
+                )
+            if LINUX_RUNTIME_RPATH not in extension:
+                raise RuntimeError(
+                    "Linux split shim has no package-relative runtime RUNPATH"
+                )
             missing_cpp_runtime_libraries = [
                 library.decode("ascii")
                 for library in LINUX_SHARED_CPP_RUNTIME_LIBRARIES
@@ -134,6 +207,17 @@ def validate_shim_wheel(wheel: Path, expected_platform: str) -> str:
                 raise RuntimeError(
                     "Linux shim retains LLVM ABI link sentinels despite its "
                     f"header-only LLVM boundary: {abi_sentinels}"
+                )
+        elif platform == "macos":
+            extension = zf.read(extensions[0])
+            if MACOS_RUNTIME_DEPENDENCY not in extension:
+                raise RuntimeError(
+                    "macOS split shim has no load-command marker for "
+                    "libtaichi_runtime.dylib"
+                )
+            if LINUX_RUNTIME_RPATH not in extension:
+                raise RuntimeError(
+                    "macOS split shim has no package-relative runtime rpath"
                 )
 
         forbidden = []
@@ -159,7 +243,12 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--wheel-dir", type=Path, required=True)
     parser.add_argument(
-        "--platform", choices=["windows", "manylinux"], required=True
+        "--platform", choices=["windows", "manylinux", "macos"], required=True
+    )
+    parser.add_argument(
+        "--strict-binary",
+        action="store_true",
+        help="Inspect the final extension's dynamic dependency table",
     )
     args = parser.parse_args()
 
@@ -170,7 +259,9 @@ def main() -> None:
             f"found {[wheel.name for wheel in wheels]}"
         )
     try:
-        version = validate_shim_wheel(wheels[0], args.platform)
+        version = validate_shim_wheel(
+            wheels[0], args.platform, strict_binary=args.strict_binary
+        )
     except (OSError, RuntimeError, UnicodeError) as exc:
         raise SystemExit(str(exc)) from exc
     print(

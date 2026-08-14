@@ -311,6 +311,23 @@ def normalize_manylinux_wheel(wheel: Path) -> None:
             zf.extractall(root)
 
         native_dir = root / PACKAGE / "_lib" / "runtime_native"
+        primary_runtime = native_dir / "libtaichi_runtime.so"
+        hashed_primary_runtimes = [
+            path
+            for path in sorted(root.rglob("libtaichi_runtime-*.so"))
+            if path.is_file()
+        ]
+        if not primary_runtime.is_file() or hashed_primary_runtimes:
+            hashed_primary_members = [
+                path.relative_to(root) for path in hashed_primary_runtimes
+            ]
+            raise SystemExit(
+                "auditwheel must preserve the wheel-owned primary runtime as "
+                f"{primary_runtime.relative_to(root)}; "
+                "the independently distributed shim has a direct "
+                "DT_NEEDED=libtaichi_runtime.so dependency. "
+                f"hashed copies={hashed_primary_members}"
+            )
         manifest = native_dir / CUDA_RUNTIME_MAJOR_MANIFEST
         if not manifest.is_file():
             cudarts = [
