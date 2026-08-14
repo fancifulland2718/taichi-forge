@@ -1,12 +1,12 @@
 # Taichi Forge Release Notes
 
 This is the canonical version index for Taichi Forge user-visible changes.
-Version `0.6.2` is the latest published release, with user-visible source
-boundary `b28a2bbae`. Packaging-only, test-only, and documentation-only commits
-after that boundary do not reassign feature history. Version `0.6.1` retains
-its final Python shim/source boundary `b129ad94c` and paired native runtime
-build identity `c268ca5671e8`; `0.4.25` remains the final public `0.4.x`
-baseline.
+Version `0.6.2` is the latest published release. Its final user-visible
+implementation boundary is `662affa64`, its published native runtime reports
+build identity `9b38428667e4`, and its CI-only release-validation closeout is
+`8fb5856f9`. Current `master` targets `0.6.3`. Version `0.6.1` retains its final
+Python shim/source boundary `b129ad94c` and paired native runtime build identity
+`c268ca5671e8`; `0.4.25` remains the final public `0.4.x` baseline.
 
 PyPI storage is limited, so some nonessential older distributions have been
 removed. Absence from the current PyPI release list does not mean that a
@@ -18,7 +18,8 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
-| [0.6.2](#062) | latest published release | `b28a2bbae` | execution-plan closeout, dynamic-work/Worklist contracts, runtime export control, Graph lifecycle/telemetry, and device-convergent linear algebra |
+| [Unreleased](#unreleased) | 0.6.3 development | current `master` | no user-visible changes recorded yet |
+| [0.6.2](#062) | latest published release | `662affa64` | execution-plan closeout, dynamic-work/Worklist contracts, production Graph replay, runtime export control, device-convergent linear algebra, and minimal MUSA admission |
 | [0.6.1](#061) | published release | `b129ad94c` | task launch manifests/policies, dynamic LLVM SNode directories, device-resident dynamic worklists, bounded Graph dispatch, and correlated pipeline telemetry |
 | [0.6.0](#060) | published release | `106ad65d25` | structured Graph control/telemetry and Vulkan indirect dispatch, sparse runtime/linear algebra, driver-only CUDA primitives, managed interoperability/display, and bounded runtime lifetimes |
 | [0.1.0](#010) | historical source release; artifact may be removed | `91ad177685` | scikit-build-core migration and Forge distribution rebrand |
@@ -44,10 +45,19 @@ grouped under the behavior they shipped.
 | [0.4.25](#0425) | retained on PyPI; final public 0.4.x baseline | `7dad067ca` | GGUI event-pump and ImGui lifecycle fixes |
 | [0.5.0](#050) | published runtime source boundary | `95626e8036` | async runtime safety, Graph replay/lifetime work, Dense Field Graph |
 
+## Unreleased
+
+No user-visible `0.6.3` changes have been recorded yet.
+
 ## 0.6.2
 
-Version `0.6.2` closes the work after `0.6.1` at source boundary
-`b28a2bbae`. The entries below are shipped release behavior unless an API or
+Version `0.6.2` closes the work after `0.6.1` at the final user-visible
+implementation boundary `662affa64`. The published native runtime was built at
+`9b38428667e4`, which adds only the Windows split-build ordering fix after that
+implementation boundary. The CI-only Python 3.14 load-order validator closeout
+at `8fb5856f9` changes no wheel or runtime behavior. Documentation-only commits
+`40a82bed4` and `f757463f7` are attributed to the Vulkan and Graph behavior they
+describe. The entries below are shipped release behavior unless an API or
 backend route is explicitly marked experimental, opt-in, diagnostic, or
 source-build-only.
 
@@ -90,12 +100,25 @@ source-build-only.
   Pure ndarray/scalar Graphs avoid the SNode lifecycle guard, CUDA exact replay
   compares its stable signature without rebuilding allocation vectors, and
   Vulkan reuses immutable launch contexts while resource generations and
-  scalar/matrix values remain unchanged. Field/SNode bindings retain the full
-  guarded path, and all backends retain submission-scoped resources. Public
-  `Graph.execution_stats()` schema v6 retains a disabled host-attribution
-  shape but is now strictly side-effect free: reading it cannot enable clocks,
-  counters, or a later host readback. Per-execution measurements use explicit
-  submission telemetry.
+  scalar/matrix values remain unchanged. Recurring signatures use bounded MRU
+  state: four runtime binding plans, two CUDA executable resource signatures,
+  and four Vulkan immutable launch signatures per CGraph. Scalar/matrix value
+  updates patch or reuse a compatible slot instead of growing the resource
+  history. Dispatch labels remain task metadata and no longer disable native
+  CUDA/Vulkan replay. Field/SNode bindings retain the full guarded path, and
+  all backends retain submission-scoped resources. Public
+  `Graph.execution_stats()` schema v6 retains a disabled host-attribution shape
+  but is strictly side-effect free: reading it cannot enable clocks, counters,
+  or a later host readback. Per-execution measurements use explicit submission
+  telemetry.
+- Added an experimental minimal MUSA Driver API provider beneath `ti.cuda`.
+  Linux can fall back to `libmusa.so` when NVIDIA CUDA is absent; Windows
+  requires explicit `TI_CUDA_DRIVER_PROVIDER=musa`. The route requires a
+  32-lane warp, separates offline-cache identity from NVIDIA CUDA, reports the
+  selected provider, and enables only basic PTX kernel execution. CUDA-specific
+  libraries, native primitives, Graph paths, asynchronous memory pools, and
+  external interoperability remain deliberately unqualified, so this is a
+  portability admission path rather than a performance claim.
 - Added default-off CPU ThreadPool telemetry under `ti.profiler`. An opt-in
   window reports jobs, chunks, worker admission/underfill, queue occupancy,
   nested serial execution, exceptions, and aggregate queue/execution/wait
@@ -281,7 +304,9 @@ source-build-only.
   post-link audit rejects third-party definition owners. This fixes the
   LNK1189 import-library failure by
   controlling the ABI surface rather than deleting compiler or backend
-  modules. The runtime remains one package and one DLL in this release.
+  modules. An explicit target dependency also guarantees that every pybind shim
+  object exists before the export-closure scanner runs under multi-config
+  MSBuild. The runtime remains one package and one DLL in this release.
 - The same package-private ABI manifest now drives Linux ELF export isolation.
   The final runtime version script keeps only shim-imported Taichi symbols and
   the ABI anchor visible; bundled LLVM,

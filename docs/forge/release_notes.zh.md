@@ -1,9 +1,10 @@
 # Taichi Forge 版本更新说明
 
-本文是 Taichi Forge 用户可见更新的唯一版本索引。`0.6.2` 是最新正式发布版本，用户可见
-源码边界为 `b28a2bbae`；其后的纯打包、测试或文档提交不会重新归属功能历史。`0.6.1`
-继续保留最终 Python shim/source 边界 `b129ad94c` 和配对 native runtime build identity
-`c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.4.x` 基线。
+本文是 Taichi Forge 用户可见更新的唯一版本索引。`0.6.2` 是最新正式发布版本，其最终
+用户可见实现边界是 `662affa64`，已发布 native runtime 的 build identity 是
+`9b38428667e4`，仅涉及 CI 的最终发行验证边界是 `8fb5856f9`。当前 `master` 面向
+`0.6.3` 开发。`0.6.1` 继续保留最终 Python shim/source 边界 `b129ad94c` 和配对 native
+runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.4.x` 基线。
 
 由于 PyPI 项目容量有限，部分不再重要的旧发行文件已经移除。因此，当前 PyPI 列表中
 找不到某个版本，并不表示它从未存在。下表的源码边界是长期历史锚点；仅涉及打包、CI、
@@ -13,7 +14,8 @@
 
 | 版本 | 历史状态 | 源码边界 | 主要范围 |
 | --- | --- | --- | --- |
-| [0.6.2](#062) | 最新正式发布版本 | `b28a2bbae` | execution-plan 收口、dynamic-work/Worklist 合同、runtime export 控制、Graph 生命周期/遥测与 device-convergent 线性代数 |
+| [待发布](#unreleased) | 0.6.3 开发版本 | 当前 `master` | 尚无已记录的用户可见变更 |
+| [0.6.2](#062) | 最新正式发布版本 | `662affa64` | execution-plan 收口、dynamic-work/Worklist 合同、生产 Graph replay、runtime export 控制、device-convergent 线性代数与最小 MUSA 准入 |
 | [0.6.1](#061) | 已正式发布 | `b129ad94c` | task launch manifest/policy、动态 LLVM SNode directory、设备端 dynamic worklist、有界 Graph dispatch 与关联 pipeline telemetry |
 | [0.6.0](#060) | 已正式发布 | `106ad65d25` | 结构化 Graph 控制/遥测与 Vulkan indirect dispatch、稀疏 runtime/线性代数、driver-only CUDA primitive、受管互操作/显示与 runtime 生命周期有界化 |
 | [0.1.0](#010) | 历史源码版本；发行文件可能已移除 | `91ad177685` | scikit-build-core 迁移与 Forge 发行包重命名 |
@@ -39,11 +41,18 @@
 | [0.4.25](#0425) | PyPI 当前保留；最后一个公开 0.4.x 基线 | `7dad067ca` | GGUI 事件泵与 ImGui 生命周期修复 |
 | [0.5.0](#050) | 已发布 runtime 源码边界 | `95626e8036` | 异步 runtime 安全、Graph replay/lifetime、Dense Field Graph |
 
+## 待发布 {#unreleased}
+
+尚无已记录的 `0.6.3` 用户可见变更。
+
 ## 0.6.2 {#062}
 
-`0.6.2` 在源码边界 `b28a2bbae` 收口 `0.6.1` 之后的更新。以下条目均属于已发布行为；
-只有明确标记为 experimental、opt-in、diagnostic 或 source-build-only 的 API/后端路线
-仍保持相应边界。
+`0.6.2` 在最终用户可见实现边界 `662affa64` 收口 `0.6.1` 之后的更新。已发布 native
+runtime 构建于 `9b38428667e4`；该边界晚于实现边界的内容只有 Windows split build 顺序
+修复。`8fb5856f9` 的 Python 3.14 load-order validator 收口仅作用于 CI，不改变 wheel 或
+runtime 行为。纯文档提交 `40a82bed4` 与 `f757463f7` 分别归入其描述的 Vulkan 和 Graph
+行为。以下条目均属于已发布行为；只有明确标记为 experimental、opt-in、diagnostic 或
+source-build-only 的 API/后端路线仍保持相应边界。
 
 - Vulkan feature 探测现在严格遵守 core promotion 合同，即使合规驱动不再枚举已提升的旧
   extension 名称也能正确工作。physical-device Features2 在 Vulkan 1.1+ 使用 core 入口，
@@ -74,10 +83,19 @@
 - cached CGraph replay 现在保留带 generation 的 resource binding plan。纯 ndarray/scalar
   Graph 不再取得 SNode lifecycle guard；CUDA exact replay 无需重建 allocation vector 即可比较
   稳定 signature；Vulkan 在资源 generation 与 scalar/matrix 值不变时复用 immutable launch
-  context。Field/SNode binding 继续使用完整 guarded path，各后端仍保留 submission-scoped
-  resource。公开 `Graph.execution_stats()` schema v6 保留关闭的 host attribution 结构，但
-  snapshot 现在严格无副作用：读取不会启用时钟、counter 或让后续执行增加 host readback；
-  逐次测量使用显式 submission telemetry。
+  context。重复 signature 使用有界 MRU：每个 CGraph 最多保留四个 runtime binding plan、
+  两个 CUDA executable resource signature 与四个 Vulkan immutable launch signature；
+  scalar/matrix 值变化会 patch 或复用兼容 slot，不形成无界资源历史。dispatch label 保持为
+  task metadata，不再禁用 CUDA/Vulkan native replay。Field/SNode binding 继续使用完整
+  guarded path，各后端仍保留 submission-scoped resource。公开
+  `Graph.execution_stats()` schema v6 保留关闭的 host attribution 结构，但 snapshot 严格无
+  副作用：读取不会启用时钟、counter 或让后续执行增加 host readback；逐次测量使用显式
+  submission telemetry。
+- `ti.cuda` 下新增实验性的最小 MUSA Driver API provider。Linux 在没有 NVIDIA CUDA 时可
+  fallback 到 `libmusa.so`；Windows 必须显式设置 `TI_CUDA_DRIVER_PROVIDER=musa`。该路线要求
+  32-lane warp，offline cache identity 与 NVIDIA CUDA 分离，并公开实际 provider；目前只准入
+  基础 PTX kernel 执行。CUDA 专用 library、native primitive、Graph 路径、异步 memory pool
+  与外部互操作均未资格化，因此这是可运行性准入，不是性能承诺。
 - `ti.profiler` 新增默认关闭的 CPU ThreadPool telemetry。显式窗口报告 job、chunk、worker
   admission/underfill、queue occupancy、nested serial、异常与累计 queue/execution/wait 时间。
   关闭时每次 ThreadPool invocation 只增加一次 relaxed flag load，不读取时钟，也不更新逐
@@ -201,7 +219,9 @@
   export 共暴露 2,597 个符号，显著低于 32,768 safety cap。显式 Taichi-owned export 仍然保留，因为
   MSVC 需要 class `dllexport` declaration 为独立编译的 shim 生成 special member 与 vtable；链接后审计
   会拒绝 third-party definition owner。该方案通过控制 ABI surface 修复 LNK1189，
-  无需删除 compiler/backend module。本版本仍保持一个 runtime 包与一个 DLL。
+  无需删除 compiler/backend module。显式 target dependency 还保证 multi-config MSBuild 在
+  export-closure scanner 启动前已生成全部 pybind shim object。本版本仍保持一个 runtime 包与
+  一个 DLL。
 - 同一 package-private ABI manifest 现在也驱动 Linux ELF 导出隔离。最终 runtime version
   script 只保留 shim 实际 import 的 Taichi 符号与 ABI anchor；
   bundled LLVM、SPIR-V、UI、logging 和 allocator API 保持 local。shim 记录显式

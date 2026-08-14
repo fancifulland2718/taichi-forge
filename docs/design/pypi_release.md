@@ -1,7 +1,8 @@
 # PyPI 发行流程与权限排查
 
-> 当前最新正式版本是 `0.6.2`。下文保留 dev、release-candidate 与正式发布命令，作为
-> 后续版本复用的流程模板；它们不表示 `0.6.2` 仍处于候选阶段。
+> 当前最新正式版本是 `0.6.2`，`master` 已进入 `0.6.3` 开发。下文保留 dev、
+> release-candidate 与正式发布命令，作为后续版本复用的流程模板；它们不表示
+> `0.6.2` 仍处于候选阶段。
 
 本项目使用两个独立 workflow 发布 PyPI 包：
 
@@ -14,7 +15,7 @@
 下载同版本的 `taichi-forge-runtime` wheel，解包出 native runtime link artifacts，再构建
 各 Python 版本的 shim wheel。
 
-下文以 `0.6.2` 为发布示例。发布其它版本时必须统一替换 runtime workflow 输入、shim
+下文以 `0.6.3` 为发布示例。发布其它版本时必须统一替换 runtime workflow 输入、shim
 workflow 输入或 tag，以及安装验证命令中的版本。runtime 与 shim 版本必须完全一致。
 `publish_runtime_pypi.yml` 仅由 `workflow_dispatch` 触发；若仓库 `version.txt` 尚未更新，
 正式发布时必须显式填写版本，不能留空依赖旧 fallback。
@@ -109,12 +110,12 @@ PyPI/TestPyPI 下载指定版本的 `taichi-forge-runtime` wheel，解包 link a
 
 ```
 Actions → Publish runtime wheels to PyPI → Run workflow
-  version: 0.6.2.dev20260806
+  version: 0.6.3.dev20260814
   publish: false
   target:  testpypi        (忽略，不会上传)
 
 Actions → Publish wheels to PyPI → Run workflow
-  version: 0.6.2.dev20260806
+  version: 0.6.3.dev20260814
   publish: false
   target:  testpypi        (忽略，不会上传)
 ```
@@ -128,12 +129,12 @@ runtime workflow 会产出 2 个 runtime wheel artifacts（Windows + Linux）。
 
 ```
 Actions → Publish runtime wheels to PyPI → Run workflow
-  version: 0.6.2rc1
+  version: 0.6.3rc1
   publish: true
   target:  testpypi
 
 Actions → Publish wheels to PyPI → Run workflow
-  version: 0.6.2rc1
+  version: 0.6.3rc1
   publish: true
   target:  testpypi
 ```
@@ -144,27 +145,27 @@ tag 触发）。
 
 安装验证：
 ```
-pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ taichi-forge==0.6.2rc1
+pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ taichi-forge==0.6.3rc1
 ```
 
 ### 2.3 生产发行（推 tag）
 
-创建正式 tag 前，tag 所指向的 commit 必须已经把 `version.txt` 更新为 `v0.6.2`，并运行
+创建正式 tag 前，tag 所指向的 commit 必须已经把 `version.txt` 更新为 `v0.6.3`，并运行
 `python scripts/sync_runtime_dependency.py`，使 `pyproject.toml` 精确依赖
-`taichi-forge-runtime==0.6.2`。workflow 会再次同步构建工作区，但不能用这一临时覆盖替代
+`taichi-forge-runtime==0.6.3`。workflow 会再次同步构建工作区，但不能用这一临时覆盖替代
 正式源码 tag 中的版本一致性。
 
 ```
 Actions → Publish runtime wheels to PyPI → Run workflow
-  version: 0.6.2
+  version: 0.6.3
   publish: true
   target:  pypi
 
-git tag forge-v0.6.2
-git push origin forge-v0.6.2
+git tag forge-v0.6.3
+git push origin forge-v0.6.3
 ```
 
-生产发布也要先跑 runtime workflow，确认 `taichi-forge-runtime==0.6.2` 已经在 PyPI
+生产发布也要先跑 runtime workflow，确认 `taichi-forge-runtime==0.6.3` 已经在 PyPI
 可下载；随后推 tag 触发 `publish_pypi.yml` 构建 shim wheels。tag 触发后 shim workflow 会：
 1. 从 PyPI 下载并解包同版本 runtime wheel。
 2. 10 个 shim wheel 并行构建（Windows + Linux × Python 3.10-3.14）。
