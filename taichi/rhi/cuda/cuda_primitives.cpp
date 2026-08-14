@@ -388,9 +388,9 @@ bool cuda_toolkit_driver_compatible_for_cub_sort() {
 #if defined(TI_CUDA_TOOLKIT_VERSION_MAJOR) && \
     defined(TI_CUDA_TOOLKIT_VERSION_MINOR)
   auto &driver = CUDADriver::get_instance_without_context();
-  if (!driver.detected()) {
+  if (!driver.nvidia_extensions_available()) {
     cudart_load_error =
-        "CUDA CUB native primitives require a detectable CUDA driver.";
+        "CUDA CUB native primitives require an NVIDIA CUDA driver.";
     return false;
   }
   constexpr int kToolkitMajor = TI_CUDA_TOOLKIT_VERSION_MAJOR;

@@ -1156,7 +1156,8 @@ void *cuda_scatter_add_function(CudaScatterAddValueType value_type) {
 
 }  // namespace
 bool driver_transform_available() {
-  return CUDADriver::get_instance_without_context().detected();
+  return CUDADriver::get_instance_without_context()
+      .nvidia_extensions_available();
 }
 
 std::size_t driver_transform_affine(void *src,
@@ -1346,7 +1347,8 @@ std::size_t driver_transform_affine_packed_strided(
 }
 
 bool driver_indexed_copy_available() {
-  return CUDADriver::get_instance_without_context().detected();
+  return CUDADriver::get_instance_without_context()
+      .nvidia_extensions_available();
 }
 
 std::size_t driver_indexed_copy(void *src,
@@ -1460,7 +1462,8 @@ std::size_t driver_indexed_copy_strided(void *src,
 }
 
 bool driver_scatter_add_available() {
-  return CUDADriver::get_instance_without_context().detected();
+  return CUDADriver::get_instance_without_context()
+      .nvidia_extensions_available();
 }
 
 std::size_t driver_scatter_add(void *src,
@@ -1502,7 +1505,8 @@ std::size_t driver_scatter_add(void *src,
 }
 
 bool driver_check_count_available() {
-  return CUDADriver::get_instance_without_context().detected();
+  return CUDADriver::get_instance_without_context()
+      .nvidia_extensions_available();
 }
 
 std::size_t driver_check_count(void *values,
@@ -1546,7 +1550,8 @@ std::size_t driver_check_count(void *values,
 }
 
 bool driver_metric_reduce_available() {
-  return CUDADriver::get_instance_without_context().detected();
+  return CUDADriver::get_instance_without_context()
+      .nvidia_extensions_available();
 }
 
 std::size_t driver_metric_reduce(void *values,

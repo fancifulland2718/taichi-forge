@@ -208,6 +208,18 @@ void export_misc(py::module &m) {
     return py::none();
 #endif
   });
+  m.def("cuda_driver_provider", []() -> py::object {
+#if defined(TI_WITH_CUDA)
+    auto &driver = taichi::lang::CUDADriver::get_instance_without_context();
+    if (!driver.detected()) {
+      return py::none();
+    }
+    return py::str(
+        taichi::lang::cuda::detail::driver_provider_name(driver.get_provider()));
+#else
+    return py::none();
+#endif
+  });
   m.def("cuda_conditional_graph_capabilities", []() {
     py::dict result;
 #if defined(TI_WITH_CUDA)

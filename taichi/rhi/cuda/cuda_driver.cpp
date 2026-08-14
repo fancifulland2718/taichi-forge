@@ -12,10 +12,12 @@ namespace taichi::lang {
 std::string get_cuda_error_message(uint32 err) {
   const char *err_name_ptr;
   const char *err_string_ptr;
-  CUDADriver::get_instance_without_context().get_error_name(err, &err_name_ptr);
-  CUDADriver::get_instance_without_context().get_error_string(err,
-                                                              &err_string_ptr);
-  return fmt::format("CUDA Error {}: {}", err_name_ptr, err_string_ptr);
+  auto &driver = CUDADriver::get_instance_without_context();
+  driver.get_error_name(err, &err_name_ptr);
+  driver.get_error_string(err, &err_string_ptr);
+  return fmt::format("{} driver error {}: {}",
+                     cuda::detail::driver_provider_name(driver.get_provider()),
+                     err_name_ptr, err_string_ptr);
 }
 
 CUDADriverBase::CUDADriverBase() {
@@ -160,54 +162,201 @@ bool CUDADriverBase::try_load_lib_any_version(
 }
 
 bool CUDADriver::detected() {
-  return !disabled_by_env_ && cuda_version_valid_ && loader_->loaded();
+  return !disabled_by_env_ && cuda_version_valid_ && loader_ &&
+         loader_->loaded();
 }
 
 CUDADriver::CUDADriver() {
-  if (!load_lib("libcuda.so", "nvcuda.dll"))
-    return;
+  enum class ProviderPreference {
+    automatic,
+    nvidia_cuda,
+    musa,
+  };
 
-  loader_->load_function("cuGetErrorName", get_error_name);
-  loader_->load_function("cuGetErrorString", get_error_string);
-  loader_->load_function("cuDriverGetVersion", driver_get_version);
+  ProviderPreference preference = ProviderPreference::automatic;
+  if (const char *configured = std::getenv("TI_CUDA_DRIVER_PROVIDER")) {
+    const std::string value(configured);
+    if (value == "cuda" || value == "nvidia" || value == "nvidia_cuda") {
+      preference = ProviderPreference::nvidia_cuda;
+    } else if (value == "musa") {
+      preference = ProviderPreference::musa;
+    } else if (value != "auto") {
+      TI_WARN(
+          "Ignoring unsupported TI_CUDA_DRIVER_PROVIDER='{}'. Expected auto, "
+          "cuda, nvidia, nvidia_cuda, or musa.",
+          value);
+    }
+  }
 
-  int version;
-  driver_get_version(&version);
-  TI_TRACE("CUDA driver API (v{}.{}) loaded.", version / 1000,
-           version % 1000 / 10);
+  auto try_load_provider = [&](const char *library,
+                               CUDADriverProvider provider) {
+    auto candidate = std::make_unique<DynamicLoader>(library);
+    if (!candidate->loaded()) {
+      return false;
+    }
+    loader_ = std::move(candidate);
+    provider_ = provider;
+    TI_TRACE("{} loaded as the {} driver provider.", library,
+             cuda::detail::driver_provider_name(provider_));
+    return true;
+  };
 
-  // Set CUDA_MODULE_LOADING=LAZY based on driver version, before any other
-  // cu* call. driver_get_version itself does not require cuInit.
-  maybe_set_cuda_lazy_loading(version);
-
-  // CUDA versions should >= 10.
-  if (version < 10000) {
-    TI_WARN("The Taichi CUDA backend requires at least CUDA 10.0, got v{}.{}.",
-            version / 1000, version % 1000 / 10);
+  bool loaded = false;
+#if defined(TI_PLATFORM_LINUX)
+  if (preference != ProviderPreference::musa) {
+    loaded = try_load_provider("libcuda.so",
+                               CUDADriverProvider::nvidia_cuda);
+  }
+  if (!loaded && preference != ProviderPreference::nvidia_cuda) {
+    loaded = try_load_provider("libmusa.so.1", CUDADriverProvider::musa) ||
+             try_load_provider("libmusa.so", CUDADriverProvider::musa);
+  }
+#elif defined(TI_PLATFORM_WINDOWS)
+  if (preference != ProviderPreference::musa) {
+    loaded =
+        try_load_provider("nvcuda.dll", CUDADriverProvider::nvidia_cuda);
+  }
+  // Windows uses the ordinary DLL search path for these SDK-provided names.
+  // Require an explicit selection so an unrelated musa.dll next to the
+  // application can never become an automatic compute provider.
+  if (!loaded && preference == ProviderPreference::musa) {
+    loaded = try_load_provider("musa.dll", CUDADriverProvider::musa) ||
+             try_load_provider("musa_driver.dll", CUDADriverProvider::musa);
+  }
+#else
+  static_assert(false, "Taichi CUDA driver supports only Windows and Linux.");
+#endif
+  if (!loaded) {
+    TI_WARN(
+        "No compatible CUDA driver library was found (NVIDIA CUDA or MUSA).");
     return;
   }
 
-  cuda_version_valid_ = true;
+  auto load_symbol = [&](const char *cuda_symbol, bool required_for_nvidia) {
+    if (!cuda::detail::driver_symbol_enabled(provider_, cuda_symbol)) {
+      return static_cast<void *>(nullptr);
+    }
+    const auto symbol =
+        cuda::detail::driver_symbol_name(provider_, cuda_symbol);
+    if (provider_ == CUDADriverProvider::nvidia_cuda &&
+        required_for_nvidia) {
+      return loader_->load_function(symbol);
+    }
+    return loader_->load_function_optional(symbol);
+  };
+
+  const auto error_name_symbol =
+      cuda::detail::driver_symbol_name(provider_, "cuGetErrorName");
+  const auto error_string_symbol =
+      cuda::detail::driver_symbol_name(provider_, "cuGetErrorString");
+  const auto version_symbol =
+      cuda::detail::driver_symbol_name(provider_, "cuDriverGetVersion");
+  get_error_name =
+      (decltype(get_error_name))load_symbol("cuGetErrorName", true);
+  get_error_string =
+      (decltype(get_error_string))load_symbol("cuGetErrorString", true);
+  driver_get_version =
+      (decltype(driver_get_version))load_symbol("cuDriverGetVersion", true);
+  if (!get_error_name || !get_error_string || !driver_get_version) {
+    TI_WARN(
+        "The {} provider is missing bootstrap Driver API symbols ({}, {}, "
+        "{}).",
+        cuda::detail::driver_provider_name(provider_), error_name_symbol,
+        error_string_symbol, version_symbol);
+    return;
+  }
+
+  int version = 0;
+  driver_get_version(&version);
+  TI_TRACE("{} driver API (v{}.{}) loaded.",
+           cuda::detail::driver_provider_name(provider_), version / 1000,
+           version % 1000 / 10);
+
+  if (provider_ == CUDADriverProvider::nvidia_cuda) {
+    // Set CUDA_MODULE_LOADING=LAZY based on driver version, before any other
+    // cu* call. driver_get_version itself does not require cuInit.
+    maybe_set_cuda_lazy_loading(version);
+  }
+
+  if (!cuda::detail::driver_version_supported(provider_, version)) {
+    TI_WARN("Unsupported {} driver API version v{}.{}.",
+            cuda::detail::driver_provider_name(provider_), version / 1000,
+            version % 1000 / 10);
+    return;
+  }
+
   version_major_ = version / 1000;
   version_minor_ = version % 1000 / 10;
 
 #define PER_CUDA_FUNCTION(name, symbol_name, ...) \
-  name.set(loader_->load_function(#symbol_name)); \
+  name.set(load_symbol(#symbol_name, true));       \
   name.set_lock(&lock_);                          \
   name.set_lock_telemetry(&lock_telemetry_);      \
   name.set_fault_reporter_slot(&fault_reporter_); \
-  name.set_names(#name, #symbol_name);
+  name.set_names(                                  \
+      #name, cuda::detail::driver_symbol_name(provider_, #symbol_name));
 #include "taichi/rhi/cuda/cuda_driver_functions.inc.h"
 #undef PER_CUDA_FUNCTION
 
 #define PER_CUDA_OPTIONAL_FUNCTION(name, symbol_name, ...) \
-  name.set(loader_->load_function_optional(#symbol_name)); \
+  name.set(load_symbol(#symbol_name, false));               \
   name.set_lock(&lock_);                                   \
   name.set_lock_telemetry(&lock_telemetry_);               \
   name.set_fault_reporter_slot(&fault_reporter_);          \
-  name.set_names(#name, #symbol_name);
+  name.set_names(                                           \
+      #name, cuda::detail::driver_symbol_name(provider_, #symbol_name));
 #include "taichi/rhi/cuda/cuda_optional_driver_functions.inc.h"
 #undef PER_CUDA_OPTIONAL_FUNCTION
+
+  if (provider_ == CUDADriverProvider::musa) {
+    std::string missing;
+    auto require = [&](bool available, const char *cuda_symbol) {
+      if (available) {
+        return;
+      }
+      if (!missing.empty()) {
+        missing += ", ";
+      }
+      missing += cuda::detail::driver_symbol_name(provider_, cuda_symbol);
+    };
+#define REQUIRE_MUSA_FUNCTION(name, symbol_name) \
+  require(name.available(), #symbol_name)
+    REQUIRE_MUSA_FUNCTION(init, cuInit);
+    REQUIRE_MUSA_FUNCTION(device_get_count, cuDeviceGetCount);
+    REQUIRE_MUSA_FUNCTION(device_get, cuDeviceGet);
+    REQUIRE_MUSA_FUNCTION(device_get_name, cuDeviceGetName);
+    REQUIRE_MUSA_FUNCTION(device_get_attribute, cuDeviceGetAttribute);
+    REQUIRE_MUSA_FUNCTION(context_set_current, cuCtxSetCurrent);
+    REQUIRE_MUSA_FUNCTION(context_get_current, cuCtxGetCurrent);
+    REQUIRE_MUSA_FUNCTION(primary_context_retain, cuDevicePrimaryCtxRetain);
+    REQUIRE_MUSA_FUNCTION(context_set_limit, cuCtxSetLimit);
+    REQUIRE_MUSA_FUNCTION(memcpy_host_to_device, cuMemcpyHtoD_v2);
+    REQUIRE_MUSA_FUNCTION(memcpy_device_to_host, cuMemcpyDtoH_v2);
+    REQUIRE_MUSA_FUNCTION(memcpy_device_to_device, cuMemcpyDtoD_v2);
+    REQUIRE_MUSA_FUNCTION(memcpy_host_to_device_async, cuMemcpyHtoDAsync_v2);
+    REQUIRE_MUSA_FUNCTION(memcpy_device_to_host_async, cuMemcpyDtoHAsync_v2);
+    REQUIRE_MUSA_FUNCTION(malloc, cuMemAlloc_v2);
+    REQUIRE_MUSA_FUNCTION(malloc_managed, cuMemAllocManaged);
+    REQUIRE_MUSA_FUNCTION(memset, cuMemsetD8_v2);
+    REQUIRE_MUSA_FUNCTION(memsetd32, cuMemsetD32_v2);
+    REQUIRE_MUSA_FUNCTION(mem_free, cuMemFree_v2);
+    REQUIRE_MUSA_FUNCTION(mem_get_info, cuMemGetInfo_v2);
+    REQUIRE_MUSA_FUNCTION(module_get_function, cuModuleGetFunction);
+    REQUIRE_MUSA_FUNCTION(module_load_data_ex, cuModuleLoadDataEx);
+    REQUIRE_MUSA_FUNCTION(module_unload, cuModuleUnload);
+    REQUIRE_MUSA_FUNCTION(launch_kernel, cuLaunchKernel);
+    REQUIRE_MUSA_FUNCTION(stream_synchronize, cuStreamSynchronize);
+#undef REQUIRE_MUSA_FUNCTION
+    if (!missing.empty()) {
+      TI_WARN(
+          "The MUSA driver is missing Driver API symbols required by the "
+          "basic Taichi CUDA execution path: {}.",
+          missing);
+      return;
+    }
+  }
+
+  cuda_version_valid_ = true;
 
   // Only APIs that can block on device progress contribute backend wait time.
   // The timer starts after acquiring the driver host lock, keeping host-lock

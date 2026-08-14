@@ -160,6 +160,12 @@ static std::vector<std::uint8_t> get_offline_cache_key_of_compile_config(
     serializer(config.cuda_listgen_reuse);
     serializer(config.bitmasked_clear_data_on_deactivate);
 #if defined(TI_WITH_CUDA)
+    // MUSA consumes PTX through its CUDA-compatible Driver API, but its
+    // executable acceptance and device runtime are a distinct provider.
+    // Never reuse an NVIDIA-generated cache entry solely because both expose
+    // the same compute-capability-shaped target.
+    serializer(static_cast<uint8_t>(
+        CUDADriver::get_instance_without_context().get_provider()));
     // The selected LLVM NVPTX target changes emitted PTX. Cache entries must
     // not cross a target fallback boundary when the same cache directory is
     // shared by devices with different compute capabilities.

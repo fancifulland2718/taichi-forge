@@ -343,7 +343,8 @@ void ensure_conditional_module() {
 }  // namespace
 
 bool driver_cg_scalar_available() {
-  return CUDADriver::get_instance_without_context().detected();
+  return CUDADriver::get_instance_without_context()
+      .nvidia_extensions_available();
 }
 
 bool driver_cg_conditional_setter_compiled() {

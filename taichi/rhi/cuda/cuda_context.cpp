@@ -23,7 +23,27 @@ CUDAContext::CUDAContext()
   char name[128];
   driver_.device_get_name(name, 128, device_);
 
-  TI_TRACE("Using CUDA device [id=0]: {}", name);
+  TI_TRACE("Using {} device [id=0]: {}",
+           cuda::detail::driver_provider_name(driver_.get_provider()), name);
+
+  if (driver_.is_musa()) {
+    int warp_size = 0;
+    driver_.device_get_attribute(&warp_size, CU_DEVICE_ATTRIBUTE_WARP_SIZE,
+                                 device_);
+    TI_ERROR_IF(
+        !cuda::detail::driver_warp_size_supported(driver_.get_provider(),
+                                                  warp_size),
+        "The minimal MUSA compatibility path currently requires a 32-lane "
+        "warp, but device '{}' reports {} lanes. Wider MUSA warps require "
+        "runtime reduction and intrinsic lowering changes before they can run "
+        "safely.",
+        name, warp_size);
+    TI_WARN(
+        "Using the experimental MUSA compatibility path through ti.cuda. "
+        "Basic PTX kernel execution is enabled; CUDA-specific libraries, "
+        "native primitives, Graph paths, and external interop are not "
+        "qualified.");
+  }
 
   int cc_major, cc_minor;
   driver_.device_get_attribute(
@@ -32,8 +52,11 @@ CUDAContext::CUDAContext()
       &cc_minor, CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, device_);
 
   int device_supports_mem_pool = 0;
-  if (driver_.get_version_major() > 11 ||
-      (driver_.get_version_major() == 11 && driver_.get_version_minor() >= 2)) {
+  if (driver_.is_musa()) {
+    TI_TRACE("CUDA asynchronous memory pools are disabled for MUSA.");
+  } else if (driver_.get_version_major() > 11 ||
+             (driver_.get_version_major() == 11 &&
+              driver_.get_version_minor() >= 2)) {
     driver_.device_get_attribute(&device_supports_mem_pool,
                                  CU_DEVICE_ATTRIBUTE_MEMORY_POOLS_SUPPORTED,
                                  device_);
@@ -63,7 +86,9 @@ CUDAContext::CUDAContext()
                                    (void *)&kMemPoolReleaseThreshold);
   }
 
-  TI_TRACE("CUDA Device Compute Capability: {}.{}", cc_major, cc_minor);
+  TI_TRACE("{} device compute capability: {}.{}",
+           cuda::detail::driver_provider_name(driver_.get_provider()), cc_major,
+           cc_minor);
   driver_.primary_context_retain(&context_, 0);
   driver_.context_set_current(context_);
 
@@ -79,7 +104,10 @@ CUDAContext::CUDAContext()
 
   driver_.device_get_attribute(
       &max_shared_memory_bytes_,
-      CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, device_);
+      driver_.is_musa()
+          ? CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK
+          : CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+      device_);
 
   mcpu_ = fmt::format("sm_{}", codegen_compute_capability_);
   mattrs_ = fmt::format("+ptx{}", ptx_version_);

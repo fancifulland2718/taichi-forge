@@ -449,7 +449,8 @@ void *byte_offset(void *base, std::size_t offset) {
 }  // namespace
 
 bool driver_hierarchical_available() {
-  return CUDADriver::get_instance_without_context().detected();
+  return CUDADriver::get_instance_without_context()
+      .nvidia_extensions_available();
 }
 
 std::size_t driver_inclusive_scan_strided_for_family(

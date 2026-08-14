@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <string>
+#include <vector>
 
 #include "taichi/common/dynamic_loader.h"
 #include "taichi/common/core.h"
@@ -37,6 +39,8 @@ constexpr uint32 CU_STREAM_NON_BLOCKING = 0x1;
 constexpr uint32 CU_MEM_ATTACH_GLOBAL = 0x1;
 constexpr uint32 CU_MEM_ADVISE_SET_PREFERRED_LOCATION = 3;
 constexpr uint32 CU_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X = 2;
+constexpr uint32 CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK = 8;
+constexpr uint32 CU_DEVICE_ATTRIBUTE_WARP_SIZE = 10;
 constexpr uint32 CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN = 97;
 constexpr uint32 CU_DEVICE_ATTRIBUTE_MAX_BLOCKS_PER_MULTIPROCESSOR = 106;
 constexpr uint32 CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT = 16;
@@ -69,6 +73,56 @@ std::string get_cuda_error_message(uint32 err);
 using CUDASampledLockTelemetry = SampledLockTelemetry<std::mutex>;
 using CUDASampledRecursiveLockTelemetry =
     SampledLockTelemetry<std::recursive_mutex>;
+
+enum class CUDADriverProvider : uint8_t {
+  nvidia_cuda,
+  musa,
+};
+
+namespace cuda::detail {
+
+inline const char *driver_provider_name(CUDADriverProvider provider) {
+  return provider == CUDADriverProvider::musa ? "musa" : "nvidia_cuda";
+}
+
+inline std::string driver_symbol_name(CUDADriverProvider provider,
+                                      const std::string &cuda_symbol) {
+  if (provider == CUDADriverProvider::musa &&
+      cuda_symbol.rfind("cu", 0) == 0) {
+    return "mu" + cuda_symbol.substr(2);
+  }
+  return cuda_symbol;
+}
+
+inline bool driver_symbol_enabled(CUDADriverProvider provider,
+                                  const std::string &cuda_symbol) {
+  if (provider != CUDADriverProvider::musa) {
+    return true;
+  }
+  return cuda_symbol.rfind("cuGraph", 0) != 0 &&
+         cuda_symbol.rfind("cuStreamBeginCapture", 0) != 0 &&
+         cuda_symbol != "cuStreamEndCapture" &&
+         cuda_symbol != "cuLaunchKernelEx" &&
+         cuda_symbol.rfind("cuImportExternal", 0) != 0 &&
+         cuda_symbol.rfind("cuDestroyExternal", 0) != 0 &&
+         cuda_symbol.rfind("cuExternalMemory", 0) != 0 &&
+         cuda_symbol.rfind("cuMipmappedArray", 0) != 0 &&
+         cuda_symbol.rfind("cuSurfObject", 0) != 0 &&
+         cuda_symbol.rfind("cuSignalExternal", 0) != 0 &&
+         cuda_symbol.rfind("cuWaitExternal", 0) != 0;
+}
+
+inline bool driver_version_supported(CUDADriverProvider provider,
+                                     int version) {
+  return provider == CUDADriverProvider::musa ? version > 0 : version >= 10000;
+}
+
+inline bool driver_warp_size_supported(CUDADriverProvider provider,
+                                       int warp_size) {
+  return provider != CUDADriverProvider::musa || warp_size == 32;
+}
+
+}  // namespace cuda::detail
 
 struct CUDADriverTelemetrySnapshot {
   CUDASampledLockTelemetry::Snapshot lock;
@@ -229,6 +283,18 @@ class CUDADriver : protected CUDADriverBase {
     return version_minor_;
   }
 
+  CUDADriverProvider get_provider() const {
+    return provider_;
+  }
+
+  bool is_musa() const {
+    return provider_ == CUDADriverProvider::musa;
+  }
+
+  bool nvidia_extensions_available() {
+    return detected() && !is_musa();
+  }
+
   CUDADriverTelemetrySnapshot get_telemetry_snapshot() const {
     return {lock_telemetry_.snapshot(),
             wait_telemetry_.snapshot(),
@@ -251,6 +317,7 @@ class CUDADriver : protected CUDADriverBase {
   std::atomic<uint64_t> sync_free_fallback_calls_{0};
 
   bool cuda_version_valid_{false};
+  CUDADriverProvider provider_{CUDADriverProvider::nvidia_cuda};
 
   int version_major_{0};
   int version_minor_{0};

@@ -21,6 +21,36 @@ TEST(CUDAVersion, ReportsTheBundledLibdeviceCompatibilityVersion) {
   EXPECT_EQ(version.find_first_not_of("0123456789."), std::string::npos);
 }
 
+TEST(CUDADriverCompatibility, MapsAndGatesMUSADriverSurface) {
+  using cuda::detail::driver_symbol_enabled;
+  using cuda::detail::driver_symbol_name;
+  using cuda::detail::driver_version_supported;
+  using cuda::detail::driver_warp_size_supported;
+
+  EXPECT_EQ(driver_symbol_name(CUDADriverProvider::nvidia_cuda, "cuInit"),
+            "cuInit");
+  EXPECT_EQ(driver_symbol_name(CUDADriverProvider::musa, "cuInit"),
+            "muInit");
+  EXPECT_EQ(driver_symbol_name(CUDADriverProvider::musa, "cuMemAlloc_v2"),
+            "muMemAlloc_v2");
+
+  EXPECT_TRUE(
+      driver_symbol_enabled(CUDADriverProvider::musa, "cuLaunchKernel"));
+  EXPECT_FALSE(driver_symbol_enabled(CUDADriverProvider::musa,
+                                     "cuGraphInstantiateWithFlags"));
+  EXPECT_FALSE(driver_symbol_enabled(CUDADriverProvider::musa,
+                                     "cuImportExternalMemory"));
+
+  EXPECT_FALSE(
+      driver_version_supported(CUDADriverProvider::nvidia_cuda, 9990));
+  EXPECT_TRUE(
+      driver_version_supported(CUDADriverProvider::nvidia_cuda, 10000));
+  EXPECT_TRUE(driver_version_supported(CUDADriverProvider::musa, 5020));
+
+  EXPECT_TRUE(driver_warp_size_supported(CUDADriverProvider::musa, 32));
+  EXPECT_FALSE(driver_warp_size_supported(CUDADriverProvider::musa, 128));
+}
+
 TEST(CUDAContext, MemoryPoolSupportRequiresDriverAndDeviceCapability) {
   using cuda::detail::MemoryAllocationRoute;
   using cuda::detail::memory_allocation_route;
