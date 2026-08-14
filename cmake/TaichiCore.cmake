@@ -1114,6 +1114,14 @@ if(TI_WITH_PYTHON)
                 ${_ti_runtime_native_targets})
 
             if(MSVC)
+                # The runtime export closure scans undefined references from
+                # the pybind shim objects. File-level TARGET_OBJECTS entries in
+                # the custom command do not create a cross-project build edge
+                # with Visual Studio multi-config generators, so a direct
+                # taichi_runtime build could run the scanner before those
+                # objects existed.
+                add_dependencies(${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
+                    ${_ti_pybind_object_target})
                 _ti_collect_windows_runtime_objects(
                     _ti_windows_runtime_export_objects
                     ${CORE_LIBRARY_NAME}
