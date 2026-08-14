@@ -423,9 +423,12 @@ struct CompiledGraphDebugSnapshot {
   CompiledGraphStats stats;
   uint64_t known_compiled_tasks{0};
   uint32_t known_compiled_dispatches{0};
-  // False on the first snapshot request. Detailed counters are opt-in and
-  // cover subsequent executions; path/fallback enums and static metadata are
-  // still available immediately.
+  uint32_t runtime_binding_plan_slots{0};
+  uint32_t backend_replay_signature_slots{0};
+  uint32_t backend_replay_signature_slot_capacity{0};
+  // Public snapshots never enable diagnostics. Detailed counters are complete
+  // only when private debug instrumentation was enabled before execution;
+  // path/fallback enums and static metadata remain available immediately.
   bool diagnostics_previously_enabled{false};
   bool diagnostics_counters_complete{true};
   bool replay_attribution_enabled{false};
@@ -656,15 +659,24 @@ struct CompiledGraphJITCache {
   std::uint64_t validated_snode_tree_epoch{0};
   std::unique_ptr<CompiledGraphCudaState, CompiledGraphCudaStateDeleter>
       cuda_graph_state;
+  // CUDA executable instances are driver-heavy and may pin allocation
+  // generations. Keep one MRU plus one lazy alternate for the common A/B
+  // ping-pong case; larger binding sets fall back to bounded patching.
+  std::vector<
+      std::unique_ptr<CompiledGraphCudaState, CompiledGraphCudaStateDeleter>>
+      cuda_graph_state_alternates;
   std::unique_ptr<CompiledGraphVulkanState, CompiledGraphVulkanStateDeleter>
       vulkan_graph_state;
   // Single-dispatch Vulkan graphs intentionally stay on the ordinary path.
   // Keep their cheap classification in the cache so diagnostics can explain
   // the decision without constructing replay slots or compiling twice.
   CompiledGraphStats vulkan_inline_stats;
-  CompiledGraphRuntimeBindingPlan runtime_binding_plan;
+  // A small generation-qualified MRU covers recurring ping-pong/triple-buffer
+  // bindings without turning Graph into an unbounded resource owner. Entries
+  // contain non-owning identities; every submission reacquires its leases.
+  std::vector<CompiledGraphRuntimeBindingPlan> runtime_binding_plans;
+  uint64_t next_runtime_binding_plan_revision{1};
   std::atomic<bool> stable_replay_optimization_enabled{true};
-  std::atomic<bool> replay_attribution_enabled{false};
   CompiledGraphReplayAttribution replay_attribution;
   // Detailed counters are opt-in. Failure recovery keeps its own bounded
   // backoff state, so ordinary graph replay does not pay for diagnostics until

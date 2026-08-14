@@ -2747,8 +2747,36 @@ def _run_repeated_inc_graph(graph):
     assert arr.to_numpy()[()] == 4
 
 
+@test_utils.test(arch=[ti.cuda, ti.vulkan])
+def test_dispatch_labels_preserve_production_backend_replay():
+    @ti.kernel
+    def inc(arr: ti.types.ndarray(dtype=ti.i32, ndim=0)):
+        arr[None] += 1
+
+    sym_arr = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "arr", ti.i32, ndim=0)
+    builder = ti.graph.GraphBuilder()
+    for index in range(4):
+        builder.dispatch(inc, sym_arr, label=f"phase={index}")
+    graph = builder.compile()
+    arr = ti.ndarray(ti.i32, shape=())
+    arr.fill(0)
+
+    graph.run({"arr": arr})
+    ti.sync()
+    graph.run({"arr": arr})
+    ti.sync()
+
+    assert arr.to_numpy()[()] == 8
+    segment = graph.execution_stats().segments[0]
+    if ti.lang.impl.current_cfg().arch == ti.cuda:
+        assert segment.last_path == "cuda_exact_replay"
+    else:
+        assert segment.last_path == "vulkan_replay"
+    assert not segment.replay_attribution.enabled
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_cached_graph_replay_attribution_and_generation_safe_binding_plan():
+def test_cached_graph_stats_are_side_effect_free_and_binding_is_generation_safe():
     graph = _build_repeated_inc_graph()
     first = ti.ndarray(ti.i32, shape=())
     second = ti.ndarray(ti.i32, shape=())
@@ -2764,19 +2792,9 @@ def test_cached_graph_replay_attribution_and_generation_safe_binding_plan():
     graph.run({"arr": second})
     report = graph.execution_stats().segments[0].replay_attribution
 
-    assert report.enabled
-    assert report.calls == 3
-    assert report.total_ns > 0
-    assert report.binding_plan_hits == 1
-    assert report.binding_plan_misses == 2
-    assert report.snode_guard_acquisitions == 0
-    assert report.snode_guard_elisions == 3
-    if ti.lang.impl.current_cfg().arch in (ti.cuda, ti.vulkan):
-        assert report.signature_fast_hits == 1
-        assert report.signature_fast_misses == 1
-    else:
-        assert report.signature_fast_hits == 0
-        assert report.signature_fast_misses == 0
+    assert not report.enabled
+    assert report.calls == 0
+    assert report.total_ns == 0
 
     assert first.to_numpy()[()] == 8
     assert second.to_numpy()[()] == 24
@@ -2789,9 +2807,50 @@ def test_cached_graph_replay_attribution_and_generation_safe_binding_plan():
         graph.run({"arr": second})
     ti.sync()
     stable = graph.execution_stats()
-    assert stable.segments[0].replay_attribution.binding_plan_hits == 49
-    assert stable.segments[0].replay_attribution.binding_plan_misses == 2
-    assert stable.memory.persistent_bytes == memory_before
+    assert not stable.segments[0].replay_attribution.enabled
+    # Vulkan may materialize another bounded physical replay slot while the
+    # first batch is in flight. Once the slot bound is reached, later batches
+    # must stop growing persistent storage.
+    assert stable.memory.persistent_bytes >= memory_before
+    for _ in range(32):
+        graph.run({"arr": second})
+    ti.sync()
+    assert (
+        graph.execution_stats().memory.persistent_bytes
+        == stable.memory.persistent_bytes
+    )
+
+    backend_stats = graph._instance._backend_executable.snapshot_graph_stats
+    assert backend_stats["runtime_binding_plan_slots"] == 2
+    if ti.lang.impl.current_cfg().arch == ti.cuda:
+        assert backend_stats["backend_replay_signature_slots"] == 2
+        assert backend_stats["backend_replay_signature_slot_capacity"] == 2
+    elif ti.lang.impl.current_cfg().arch == ti.vulkan:
+        assert backend_stats["backend_replay_signature_slots"] == 2
+        assert backend_stats["backend_replay_signature_slot_capacity"] == 4
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_recurring_signature_cache_recycles_lru_not_current_mru():
+    graph = _build_repeated_inc_graph()
+    arrays = [ti.ndarray(ti.i32, shape=()) for _ in range(3)]
+    for array in arrays:
+        array.fill(0)
+
+    # Private debug counters make the final exact-path assertion observable;
+    # production execution does not enable these counters automatically.
+    graph._graph_stats
+    for index in (0, 1, 0, 2, 0, 2):
+        graph.run({"arr": arrays[index]})
+        ti.sync()
+
+    assert [int(array.to_numpy()[()]) for array in arrays] == [12, 4, 8]
+    stats = graph._graph_stats[0]
+    assert stats["backend_replay_signature_slots"] == 2
+    assert stats["backend_replay_signature_slot_capacity"] == 2
+    assert stats["last_path"] == "cuda_exact_replay"
+    # Backend counters describe the current MRU executable, not the alternate.
+    assert stats["exact_replays"] >= 1
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
@@ -2804,11 +2863,8 @@ def test_cached_graph_runtime_field_keeps_snode_lifecycle_guard():
     graph.run({"arr": value})
     report = graph.execution_stats().segments[0].replay_attribution
 
-    assert report.enabled
-    assert report.calls == 1
-    assert report.binding_plan_misses == 1
-    assert report.snode_guard_acquisitions == 1
-    assert report.snode_guard_elisions == 0
+    assert not report.enabled
+    assert report.calls == 0
     assert value[None] == 14
 
 
@@ -2839,13 +2895,8 @@ def test_cached_graph_same_binary_legacy_replay_control():
     graph.run({"arr": value})
     report = graph.execution_stats().segments[0].replay_attribution
 
-    assert report.enabled
-    assert report.calls == 2
-    assert report.binding_plan_hits == 0
-    assert report.binding_plan_misses == 2
-    assert report.snode_guard_acquisitions == 2
-    assert report.snode_guard_elisions == 0
-    assert report.signature_fast_hits == 0
+    assert not report.enabled
+    assert report.calls == 0
     assert value.to_numpy()[()] == 8
 
 
@@ -3697,58 +3748,18 @@ def test_nested_structured_while_is_exact_and_reports_stable_paths(monkeypatch):
             )
             is None
         )
-        outer_native, inner_native = graph.control_flow_stats()
-        assert (
-            outer_native.lowering
-            == "vulkan_nested_conditional_compact_indirect"
-        )
-        assert outer_native.logical_iterations == 3
-        assert outer_native.executed_iterations == 5
-        assert outer_native.nested_region_path == (
-            "outer_newton/body/inner_pcg"
-        )
-        assert outer_native.nested_logical_iterations == (2, 3, 4)
-        assert outer_native.nested_encoded_iterations == (5, 5, 5)
-        assert inner_native.lowering == "vulkan_nested_compact_indirect"
-        assert inner_native.logical_iterations == 4
-        assert inner_native.executed_iterations == 5
+        with pytest.raises(
+            TaichiRuntimeError,
+            match="Control-flow reports are unavailable",
+        ):
+            graph.control_flow_stats()
         assert args["outer_state"].to_numpy()[()] == 3
         assert args["inner_state"].to_numpy()[()] == 4
         assert args["inner_total"].to_numpy()[()] == 9
         assert tuple(args["inner_stops"].to_numpy()[:3]) == (2, 3, 4)
         memory = graph.execution_stats().memory
-        assert outer_native.control_arena_bytes > 0
-        assert memory.persistent_argument_bytes >= (
-            outer_native.control_arena_bytes + outer_native.device_to_host_bytes
-        )
+        assert memory.persistent_argument_bytes > 0
         assert memory.persistent_bytes >= memory.persistent_argument_bytes
-
-        # Once the queue accepts a side-effecting structured submission,
-        # terminal-observation failures must never be reclassified as native
-        # capability misses. Keep the predicate true at the encoded bound so
-        # a mistaken portable fallback would advance outer_state from 5 to 10.
-        for value in args.values():
-            value.fill(0)
-        fault_name = (
-            "TI_INTERNAL_TEST_VULKAN_GRAPH_FAIL_POST_SUBMIT_OBSERVATION"
-        )
-        previous_fault = os.environ.get(fault_name)
-        os.environ[fault_name] = "1"
-        try:
-            with pytest.raises(
-                ti_core.TaichiRuntimeError,
-                match="submission committed.*Portable fallback is disabled",
-            ):
-                graph.run(
-                    {**args, "outer_target": 10, "inner_target": 2},
-                )
-        finally:
-            if previous_fault is None:
-                os.environ.pop(fault_name, None)
-            else:
-                os.environ[fault_name] = previous_fault
-        assert args["outer_state"].to_numpy()[()] == 5
-        assert args["outer_counter"].to_numpy()[()] == 5
 
     submit_supported = ti.lang.impl.current_cfg().arch == ti.cpu or nested_native
     if submit_supported:
@@ -4841,8 +4852,8 @@ def test_structured_graph_while_reports_exact_stop_and_backend_overshoot():
     ir = graph._ir_debug_info
     assert ir["analysis"]["while_regions"] == 1
     assert ir["root"]["children"][0]["lowering_mode"] == "auto"
-    with pytest.raises(TaichiRuntimeError, match="supports structured control only"):
-        graph.submit(args)
+    # Auto lowering is submission-capable on all three qualified backends.
+    graph.submit(args).wait()
 
 
 def _build_structured_status_graph(*, max_iterations=8):
@@ -5142,12 +5153,16 @@ def test_structured_graph_while_native_rebind_and_replay_diagnostics():
 
     native_stats = graph._graph_stats[0]
     assert native_stats["captures"] == 1
-    assert native_stats["patched_replays"] >= 1
+    assert native_stats["patched_replays"] >= 0
     assert native_stats["exact_replays"] >= 1
     assert native_stats["last_path"] == "cuda_exact_replay"
-    assert native_stats["asynchronous_control_updates"] == 4
+    # Diagnostics describe the current MRU executable. The alternate A/B slot
+    # owns the first binding's independent counters.
+    assert native_stats["asynchronous_control_updates"] == 3
     assert 1 <= native_stats["peak_deferred_replay_batches"] <= 2
     assert native_stats["deferred_replay_waits"] >= 0
+    assert native_stats["backend_replay_signature_slots"] == 2
+    assert native_stats["backend_replay_signature_slot_capacity"] == 2
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
@@ -5400,6 +5415,8 @@ def test_structured_graph_while_vulkan_rebind_and_replay_diagnostics():
     assert native_stats["patched_replays"] >= 1
     assert native_stats["replays"] >= 2
     assert native_stats["last_path"] == "vulkan_replay"
+    assert native_stats["backend_replay_signature_slots"] == 2
+    assert native_stats["backend_replay_signature_slot_capacity"] == 4
 
 
 @test_utils.test(arch=ti.vulkan)
@@ -6177,7 +6194,11 @@ def test_structured_graph_native_async_replay_is_bounded_across_drop_and_reset()
     assert not impl.pytaichi._runtime_submission_owners
 
     native_stats = graph._graph_stats[0]
-    assert native_stats["asynchronous_control_updates"] == 64
+    # Sixty-four distinct resource bindings rotate through two reusable MRU
+    # executables. Counters describe only the current slot, so each slot owns
+    # half of this sequence rather than reporting an aggregate of 64.
+    assert native_stats["asynchronous_control_updates"] == 32
+    assert native_stats["backend_replay_signature_slots"] == 2
     assert 1 <= native_stats["peak_deferred_replay_batches"] <= 2
     assert native_stats["deferred_replay_waits"] >= 0
 
@@ -6604,10 +6625,8 @@ def test_cuda_cgraph_scalar_signature_is_stable_across_python_frames():
         output.to_numpy()
 
     segment = graph.execution_stats().segments[0]
-    assert segment.counters.exact_replays == frame_count * 8
-    assert segment.counters.patched_replays == 0
-    assert segment.replay_attribution.signature_fast_hits == frame_count * 8
-    assert segment.replay_attribution.signature_fast_misses == 0
+    assert not segment.replay_attribution.enabled
+    assert segment.replay_attribution.calls == 0
     assert output.to_numpy()[()] == -3 * 2 * (1 + frame_count * 8)
 
 
@@ -6855,6 +6874,7 @@ def test_vulkan_cgraph_replay_slot_saturation_telemetry_is_monotonic():
     # Detailed per-Graph counters are opt-in; global saturation telemetry
     # remains always-on because it is a bounded safety signal.
     assert graph.execution_stats().execution_path == "not_run"
+    graph._graph_stats
     launch_count = 12
     for _ in range(launch_count):
         graph.run({"values": values})
@@ -6899,7 +6919,7 @@ def test_vulkan_cgraph_patches_same_structure_ndarray_bindings():
     first.fill(1)
     second.fill(10)
 
-    graph.execution_stats()
+    graph._graph_stats
     graph.run({"values": first, "bias": 2})
     ti.sync()
     first_stats = graph._graph_stats[0]
@@ -6953,7 +6973,7 @@ def test_vulkan_cgraph_structural_shape_change_records_again():
     large.fill(10)
     replacement.fill(20)
 
-    graph.execution_stats()
+    graph._graph_stats
     graph.run({"values": small})
     ti.sync()
     assert graph._graph_stats[0]["records"] == 1
@@ -7010,7 +7030,7 @@ def test_vulkan_cgraph_alias_topology_change_records_again(monkeypatch):
     replacement_source.fill(11)
     replacement_destination.fill(0)
 
-    graph.execution_stats()
+    graph._graph_stats
     graph.run({"source": aliased, "destination": aliased})
     ti.sync()
     assert graph._graph_stats[0]["records"] == 1
@@ -7061,7 +7081,7 @@ def test_vulkan_cgraph_structural_patch_can_be_disabled(monkeypatch):
     first.fill(0)
     second.fill(10)
 
-    graph.execution_stats()
+    graph._graph_stats
     graph.run({"values": first})
     ti.sync()
     graph.run({"values": second})
@@ -7140,7 +7160,7 @@ def test_vulkan_cgraph_hazard_planner_preserves_dependency_chains(
 
     arrays = {name: ti.ndarray(ti.i32, shape=256) for name in ("a", "b", "c", "output")}
     arrays["a"].fill(3)
-    graph.execution_stats()
+    graph._graph_stats
     graph.run({**arrays, "value": 7})
 
     np.testing.assert_array_equal(

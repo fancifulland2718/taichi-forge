@@ -1737,11 +1737,11 @@ class GraphMemoryReport:
 class GraphExecutionReport:
     """Stable, immutable snapshot returned by Graph.execution_stats().
 
-    Detailed backend counters are intentionally lazy. Calling
-    execution_stats() enables them for later executions; the first report
-    still exposes the latest path, fallback classification, task metadata and
-    resource footprint. counters_complete is false only when GPU executions
-    happened before this opt-in point.
+    Inspection is side-effect free: it never enables clocks, counters, labels,
+    or backend instrumentation for later production replay. Detailed dynamic
+    measurements belong to explicit submission telemetry; this report exposes
+    the execution plan, cold-path state that is already available, and the
+    known resource footprint.
     """
 
     schema_version: int
@@ -4679,6 +4679,10 @@ class _CGraphJITExecutable:
     def debug_graph_stats(self):
         return self._jit_cache._debug_graph_stats()
 
+    @property
+    def snapshot_graph_stats(self):
+        return self._jit_cache._debug_graph_stats(False)
+
 
 class _GraphRunContext:
     _empty_args = {}
@@ -4988,6 +4992,10 @@ class _CompiledCGraphNode:
     @property
     def debug_graph_stats(self):
         return self._jit_cache._debug_graph_stats()
+
+    @property
+    def snapshot_graph_stats(self):
+        return self._jit_cache._debug_graph_stats(False)
 
     @property
     def debug_info(self):
@@ -5764,6 +5772,10 @@ class _CompiledSequentialRegionNode:
     @property
     def debug_graph_stats(self):
         return tuple(node.debug_graph_stats for node in self.nodes)
+
+    @property
+    def snapshot_graph_stats(self):
+        return tuple(node.snapshot_graph_stats for node in self.nodes)
 
     @property
     def debug_info(self):
@@ -7443,6 +7455,26 @@ class _CompiledWhileGraphNode:
         )
 
     @property
+    def snapshot_graph_stats(self):
+        chunk_stats = tuple(
+            node.snapshot_graph_stats for node in self._chunks.values()
+        )
+        condition_stats = (self._condition.snapshot_graph_stats,)
+        if self._vulkan_nested is not None or self._cuda_nested is not None:
+            return (
+                self._native_jit_cache._debug_graph_stats(False),
+                *condition_stats,
+                *chunk_stats,
+            )
+        if not self._native_upgrade_eligible:
+            return (*condition_stats, *chunk_stats)
+        return (
+            self._native_jit_cache._debug_graph_stats(False),
+            *condition_stats,
+            *chunk_stats,
+        )
+
+    @property
     def last_report(self):
         return self._last_report
 
@@ -7845,6 +7877,19 @@ class _CompiledIfGraphNode:
         if not self._native_upgrade_eligible:
             return child_stats
         return (self._native_jit_cache._debug_graph_stats(), *child_stats)
+
+    @property
+    def snapshot_graph_stats(self):
+        nodes = tuple(
+            node for node in (self._condition, self._then, self._else) if node
+        )
+        child_stats = tuple(node.snapshot_graph_stats for node in nodes)
+        if not self._native_upgrade_eligible:
+            return child_stats
+        return (
+            self._native_jit_cache._debug_graph_stats(False),
+            *child_stats,
+        )
 
     @property
     def last_report(self):
@@ -8256,6 +8301,19 @@ class _CompiledSwitchGraphNode:
         if not self._native_upgrade_eligible:
             return child_stats
         return (self._native_jit_cache._debug_graph_stats(), *child_stats)
+
+    @property
+    def snapshot_graph_stats(self):
+        nodes = (self._condition, *self._branches)
+        if self._default is not None:
+            nodes = (*nodes, self._default)
+        child_stats = tuple(node.snapshot_graph_stats for node in nodes)
+        if not self._native_upgrade_eligible:
+            return child_stats
+        return (
+            self._native_jit_cache._debug_graph_stats(False),
+            *child_stats,
+        )
 
     @property
     def last_report(self):
@@ -10108,6 +10166,27 @@ class _GraphInstance:
                 result.extend(node.debug_graph_stats)
             elif isinstance(node, _CompiledSequentialRegionNode):
                 result.extend(node.debug_graph_stats)
+        return result
+
+    @property
+    def snapshot_graph_stats(self):
+        if isinstance(self._backend_executable, _CGraphJITExecutable):
+            return [self._backend_executable.snapshot_graph_stats]
+        result = []
+        for node in self.spec.nodes:
+            if isinstance(node, _CompiledCGraphNode):
+                result.append(node.snapshot_graph_stats)
+            elif isinstance(
+                node,
+                (
+                    _CompiledWhileGraphNode,
+                    _CompiledIfGraphNode,
+                    _CompiledSwitchGraphNode,
+                ),
+            ):
+                result.extend(node.snapshot_graph_stats)
+            elif isinstance(node, _CompiledSequentialRegionNode):
+                result.extend(node.snapshot_graph_stats)
         return result
 
 
@@ -12781,10 +12860,30 @@ class Graph:
         snapshots. ``trace=True`` returns an immutable
         :class:`GraphControlFlowTrace`; reports in
         :meth:`control_flow_stats` remain one last invocation per static
-        definition.
+        definition. On CUDA/Vulkan, a production depth-2 structured Graph uses
+        the same single-submission native lowering as :meth:`submit` and waits
+        only at the terminal completion boundary. Flat structured regions
+        already use their native synchronous lowering and retain their existing
+        report contract. The depth-2 fast path intentionally does not collect
+        host control-flow reports; request ``trace=True`` or explicit submission
+        telemetry when diagnostic observations are required.
         """
         if not isinstance(trace, bool):
             raise TaichiRuntimeError("Graph.run() trace must be a bool")
+        if (
+            not trace
+            and self._contains_structured_control_value
+            and self._spec.max_structured_depth > 1
+            and self._spec.supports_native_structured_submission
+            and impl.current_cfg().arch in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan)
+        ):
+            # Production depth-2 execution is a single backend transaction.
+            # Reusing submit's qualified native path avoids the portable
+            # per-iteration host observations without enabling telemetry or
+            # mutating replay diagnostics. The returned ticket is an internal
+            # completion owner only; Graph.run() waits exactly once.
+            self.submit(args).wait()
+            return None
         trace_recorder = _ControlFlowTraceRecorder() if trace else None
         # A graph invocation is one host-side transaction, including mixed
         # CGraph/native sequences. The lock is per Graph and does not wait for
@@ -13262,16 +13361,19 @@ class Graph:
         """Return the last invocation of each definition in the latest run.
 
         Repeated nested definitions overwrite their prior report. Use
-        ``Graph.run(..., trace=True)`` to retain every invocation.
+        ``Graph.run(..., trace=True)`` to retain every invocation. Production
+        depth-2 native structured execution deliberately does not capture
+        these diagnostics.
         """
         with self._lifecycle_lock:
             self._check_runtime_valid()
             if self._latest_control_flow_was_async:
                 raise TaichiRuntimeError(
                     "Control-flow reports are unavailable after asynchronous "
-                    "structured submission. Use SubmissionTicket.observations() "
-                    "for explicit terminal state, or Graph.run() for a "
-                    "synchronous control-flow report."
+                    "submission or production native structured execution. "
+                    "Use Graph.run(..., trace=True) for a diagnostic trace, "
+                    "or submit with explicit telemetry for ticket-owned "
+                    "terminal observations."
                 )
             control_nodes = self._spec.structured_control_nodes
             for node in control_nodes:
@@ -13293,9 +13395,10 @@ class Graph:
     def execution_stats(self):
         """Return an immutable execution-path and static-Field report.
 
-        The first call enables detailed backend counters for subsequent runs.
-        No per-run report objects or strings are created while diagnostics are
-        disabled.
+        Calling this method never changes subsequent Graph execution. In
+        particular, production replay remains free of timing attribution and
+        per-run diagnostic counters. Use explicit submission telemetry when a
+        measured diagnostic execution is required.
         """
         with self._lifecycle_lock:
             if not self._runtime_valid:
@@ -13309,7 +13412,7 @@ class Graph:
             else:
                 lifecycle_state = "ready"
                 instance_kind = self._latest_instance.debug_info["kind"]
-                backend_stats = self._latest_instance.debug_graph_stats
+                backend_stats = self._latest_instance.snapshot_graph_stats
             temporary_arena_stats = (
                 self._workspace_pool.temporary_arena_stats
                 if lifecycle_state == "ready"

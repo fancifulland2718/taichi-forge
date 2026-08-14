@@ -856,6 +856,14 @@ class GraphReplayRegistry {
     return runtime_->debug_graph_replay_stats(replay_key);
   }
 
+  GraphReplayStats snapshot_stats(uint64_t replay_key) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (runtime_ == nullptr) {
+      return {};
+    }
+    return runtime_->snapshot_graph_replay_stats(replay_key);
+  }
+
  private:
   std::mutex mutex_;
   GfxRuntime *runtime_{nullptr};
@@ -880,6 +888,13 @@ GraphReplayStats GraphReplayRegistration::debug_stats() const {
     return {};
   }
   return registry_->debug_stats(replay_key_);
+}
+
+GraphReplayStats GraphReplayRegistration::snapshot_stats() const {
+  if (registry_ == nullptr) {
+    return {};
+  }
+  return registry_->snapshot_stats(replay_key_);
 }
 
 constexpr size_t kGtmpBufferSize = 1024 * 1024;
@@ -2471,6 +2486,35 @@ GraphReplayStats GfxRuntime::debug_graph_replay_stats(
   };
   state.diagnostics_enabled = true;
   return result;
+}
+
+GraphReplayStats GfxRuntime::snapshot_graph_replay_stats(
+    uint64_t replay_token) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  const auto found = graph_replay_states_.find(replay_token);
+  if (found == graph_replay_states_.end()) {
+    return {};
+  }
+  const GraphReplayState &state = found->second;
+  return GraphReplayStats{
+      state.attempts,
+      state.recorded,
+      state.replayed,
+      state.patched,
+      state.fallbacks,
+      state.structural_fallbacks,
+      state.runtime_mode_fallbacks,
+      state.slot_saturation_fallbacks,
+      state.executable.known_persistent_argument_bytes(),
+      state.effect_reads,
+      state.effect_writes,
+      state.dependency_barriers,
+      state.exit_barriers,
+      state.barrier_deferrals,
+      state.rar_elisions,
+      state.last_path,
+      state.last_fallback_reason,
+  };
 }
 
 bool GfxRuntime::try_launch_graph(

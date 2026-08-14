@@ -4439,10 +4439,8 @@ struct GraphActionExecutionState {
     if (kind == OperatorExecutionKind::compiled_graph ||
         kind == OperatorExecutionKind::runtime_capture) {
       forward_cache = std::make_unique<aot::CompiledGraphJITCache>();
-      forward_cache->debug_graph_stats();
       if (has_adjoint) {
         adjoint_cache = std::make_unique<aot::CompiledGraphJITCache>();
-        adjoint_cache->debug_graph_stats();
       }
     }
   }

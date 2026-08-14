@@ -263,12 +263,12 @@ bool runtime_binding_plan_matches(
 void rebuild_runtime_binding_plan(
     CompiledGraphRuntimeBindingPlan &plan,
     const std::unordered_map<std::string, IValue> &args,
-    Program *program) {
-  const uint64_t next_revision = plan.revision + 1;
+    Program *program,
+    uint64_t revision) {
   plan.clear();
   plan.program = program;
   plan.initialized = true;
-  plan.revision = next_revision == 0 ? 1 : next_revision;
+  plan.revision = revision;
   for (const auto &[name, value] : args) {
     if (value.tag != ArgKind::kNdarray && value.tag != ArgKind::kTexture) {
       continue;
@@ -299,18 +299,40 @@ const CompiledGraphRuntimeBindingPlan &prepare_runtime_binding_plan(
     const std::unordered_map<std::string, IValue> &args,
     Program *program,
     bool attribute) {
-  if (runtime_binding_plan_matches(cache.runtime_binding_plan, args,
-                                   program)) {
+  constexpr std::size_t kBindingPlanCapacity = 4;
+  for (std::size_t index = 0; index < cache.runtime_binding_plans.size();
+       ++index) {
+    if (!runtime_binding_plan_matches(cache.runtime_binding_plans[index], args,
+                                      program)) {
+      continue;
+    }
     if (attribute) {
       ++cache.replay_attribution.binding_plan_hits;
     }
-  } else {
-    rebuild_runtime_binding_plan(cache.runtime_binding_plan, args, program);
-    if (attribute) {
-      ++cache.replay_attribution.binding_plan_misses;
+    if (index != 0) {
+      auto plan = std::move(cache.runtime_binding_plans[index]);
+      cache.runtime_binding_plans.erase(cache.runtime_binding_plans.begin() +
+                                        index);
+      cache.runtime_binding_plans.insert(cache.runtime_binding_plans.begin(),
+                                         std::move(plan));
     }
+    return cache.runtime_binding_plans.front();
   }
-  return cache.runtime_binding_plan;
+  if (attribute) {
+    ++cache.replay_attribution.binding_plan_misses;
+  }
+  uint64_t revision = cache.next_runtime_binding_plan_revision++;
+  if (revision == 0) {
+    revision = cache.next_runtime_binding_plan_revision++;
+  }
+  CompiledGraphRuntimeBindingPlan plan;
+  rebuild_runtime_binding_plan(plan, args, program, revision);
+  cache.runtime_binding_plans.insert(cache.runtime_binding_plans.begin(),
+                                     std::move(plan));
+  if (cache.runtime_binding_plans.size() > kBindingPlanCapacity) {
+    cache.runtime_binding_plans.resize(kBindingPlanCapacity);
+  }
+  return cache.runtime_binding_plans.front();
 }
 
 const CompiledKernelData *get_or_compile_cached_kernel(
@@ -721,6 +743,7 @@ struct CudaGraphArgSignatureEntry {
 
   bool operator==(const CudaGraphArgSignatureEntry &other) const {
     return structurally_equals(other) && alloc_id == other.alloc_id &&
+           byte_offset == other.byte_offset &&
            runtime_signature == other.runtime_signature &&
            value == other.value && value_bytes == other.value_bytes;
   }
@@ -1559,6 +1582,141 @@ bool cuda_graph_arguments_match_cached_signature(
   return true;
 }
 
+bool cuda_graph_signatures_share_replay_binding(
+    const std::vector<CudaGraphArgSignatureEntry> &lhs,
+    const std::vector<CudaGraphArgSignatureEntry> &rhs) {
+  if (lhs.size() != rhs.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < lhs.size(); ++i) {
+    if (!lhs[i].structurally_equals(rhs[i])) {
+      return false;
+    }
+    // Executable slots separate stable resource bindings. Scalar and matrix
+    // values remain patchable launch data and must not consume another heavy
+    // CUgraphExec merely because a coefficient changed.
+    if (lhs[i].tag == ArgKind::kNdarray && !(lhs[i] == rhs[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
+template <typename TopologyMatches>
+CompiledGraphCudaState *select_cuda_graph_replay_slot(
+    CompiledGraphJITCache &cache,
+    const CompiledGraph &graph,
+    Program &program,
+    const std::unordered_map<std::string, IValue> &args,
+    bool &exact_match,
+    TopologyMatches &&topology_matches) {
+  exact_match = false;
+  auto *state = get_cuda_graph_state(cache);
+  if (state->graph_exec && topology_matches(*state)) {
+    try {
+      exact_match = cuda_graph_arguments_match_cached_signature(
+          graph, program, args, state->signature);
+    } catch (...) {
+      state->retire();
+      throw;
+    }
+    if (exact_match) {
+      return state;
+    }
+  }
+  for (std::size_t index = 0;
+       index < cache.cuda_graph_state_alternates.size(); ++index) {
+    auto &candidate = cache.cuda_graph_state_alternates[index];
+    if (!candidate || !candidate->graph_exec ||
+        !topology_matches(*candidate)) {
+      continue;
+    }
+    bool candidate_matches = false;
+    try {
+      candidate_matches = cuda_graph_arguments_match_cached_signature(
+          graph, program, args, candidate->signature);
+    } catch (...) {
+      candidate->retire();
+      throw;
+    }
+    if (!candidate_matches) {
+      continue;
+    }
+    auto selected = std::move(candidate);
+    cache.cuda_graph_state_alternates.erase(
+        cache.cuda_graph_state_alternates.begin() + index);
+    cache.cuda_graph_state_alternates.insert(
+        cache.cuda_graph_state_alternates.begin(),
+        std::move(cache.cuda_graph_state));
+    cache.cuda_graph_state = std::move(selected);
+    exact_match = true;
+    return cache.cuda_graph_state.get();
+  }
+  return state;
+}
+
+CompiledGraphCudaState *allocate_cuda_replay_slot_for_miss(
+    CompiledGraphJITCache &cache,
+    CompiledGraphCudaState *state,
+    const std::vector<CudaGraphArgSignatureEntry> &signature) {
+  constexpr std::size_t kCudaReplaySlotCapacity = 2;
+  if (state == nullptr || !state->graph_exec ||
+      cuda_graph_signatures_share_replay_binding(state->signature, signature)) {
+    return state;
+  }
+  std::unique_ptr<CompiledGraphCudaState, CompiledGraphCudaStateDeleter>
+      reusable;
+  if (1 + cache.cuda_graph_state_alternates.size() >=
+      kCudaReplaySlotCapacity) {
+    // Preserve the current MRU binding and recycle the least-recently-used
+    // executable for the miss. Reusing the LRU state keeps the two-object
+    // driver bound while avoiding the pathological A/C repatch loop that
+    // would result from overwriting the current MRU slot.
+    reusable = std::move(cache.cuda_graph_state_alternates.back());
+    cache.cuda_graph_state_alternates.pop_back();
+  }
+  cache.cuda_graph_state_alternates.insert(
+      cache.cuda_graph_state_alternates.begin(),
+      std::move(cache.cuda_graph_state));
+  cache.cuda_graph_state = std::move(reusable);
+  if (!cache.cuda_graph_state) {
+    cache.cuda_graph_state.reset(new CompiledGraphCudaState());
+  }
+  if (cache.graph_diagnostics_enabled) {
+    cache.cuda_graph_state->diagnostics_enabled = true;
+  }
+  return cache.cuda_graph_state.get();
+}
+
+template <typename TopologyMatches>
+CompiledGraphCudaState *select_cuda_graph_replay_slot_by_signature(
+    CompiledGraphJITCache &cache,
+    const std::vector<CudaGraphArgSignatureEntry> &signature,
+    TopologyMatches &&topology_matches) {
+  auto *state = get_cuda_graph_state(cache);
+  if (state->graph_exec && topology_matches(*state) &&
+      state->signature == signature) {
+    return state;
+  }
+  for (std::size_t index = 0;
+       index < cache.cuda_graph_state_alternates.size(); ++index) {
+    auto &candidate = cache.cuda_graph_state_alternates[index];
+    if (!candidate || !candidate->graph_exec ||
+        !topology_matches(*candidate) || candidate->signature != signature) {
+      continue;
+    }
+    auto selected = std::move(candidate);
+    cache.cuda_graph_state_alternates.erase(
+        cache.cuda_graph_state_alternates.begin() + index);
+    cache.cuda_graph_state_alternates.insert(
+        cache.cuda_graph_state_alternates.begin(),
+        std::move(cache.cuda_graph_state));
+    cache.cuda_graph_state = std::move(selected);
+    return cache.cuda_graph_state.get();
+  }
+  return state;
+}
+
 std::optional<
     std::vector<std::unique_ptr<cuda::CudaDevice::AllocationLease>>>
 acquire_cuda_graph_allocation_leases(
@@ -2037,7 +2195,16 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
                         CompiledGraphJITCache &cache,
                         Program &program,
                         RuntimeStatistics *statistics) {
-  auto *state = get_cuda_graph_state(cache);
+  const bool stable_replay = cache.stable_replay_optimization_enabled.load(
+      std::memory_order_relaxed);
+  bool exact_slot = false;
+  auto *state = select_cuda_graph_replay_slot(
+      cache, graph, program, args, exact_slot,
+      [&](const CompiledGraphCudaState &candidate) {
+        return stable_replay && !candidate.conditional_mode &&
+               !candidate.masked_mode && !candidate.masked_nested_mode &&
+               !candidate.device_update_nested_mode;
+      });
   if (state->diagnostics_enabled) {
     state->stats.backend = CompiledGraphBackend::cuda;
     ++state->stats.attempts;
@@ -2053,21 +2220,14 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
         *state, CompiledGraphFallbackReason::insufficient_dispatches, true);
     return false;
   }
-  const bool attribute = cache.replay_attribution_enabled.load(
-      std::memory_order_relaxed);
-  const bool stable_replay = cache.stable_replay_optimization_enabled.load(
-      std::memory_order_relaxed);
+  // Production replay is deliberately attribution-free. Measured execution
+  // uses the explicit submission-telemetry path instead of turning clocks and
+  // counters on inside the latency-sensitive replay implementation.
+  constexpr bool attribute = false;
   if (state->graph_exec && stable_replay) {
     const auto signature_begin =
         attribute ? ReplayClock::now() : ReplayClock::time_point{};
-    bool exact_match = false;
-    try {
-      exact_match = cuda_graph_arguments_match_cached_signature(
-          graph, program, args, state->signature);
-    } catch (...) {
-      state->retire();
-      throw;
-    }
+    const bool exact_match = exact_slot;
     if (attribute) {
       cache.replay_attribution.signature_ns +=
           replay_elapsed_ns(signature_begin);
@@ -2113,6 +2273,10 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
     mark_cuda_graph_fallback(
         *state, CompiledGraphFallbackReason::unsupported_arguments, true);
     return false;
+  }
+  if (state->graph_exec && state->signature != signature->entries) {
+    state = allocate_cuda_replay_slot_for_miss(cache, state,
+                                               signature->entries);
   }
   CUDAContext::get_instance().make_current();
   if (state->retry.structurally_disabled()) {
@@ -2463,6 +2627,24 @@ bool try_run_cuda_masked_control_graph(
           return lhs_device == rhs_device ? lhs.alloc_id < rhs.alloc_id
                                           : lhs_device < rhs_device;
         });
+  }
+  state = select_cuda_graph_replay_slot_by_signature(
+      cache, signature->entries,
+      [&](const CompiledGraphCudaState &candidate) {
+        return candidate.masked_mode && !candidate.masked_nested_mode &&
+               candidate.masked_control_type == control_type &&
+               candidate.masked_max_iterations ==
+                   (is_while ? max_iterations : 0) &&
+               candidate.masked_continue_while_nonzero ==
+                   continue_while_nonzero &&
+               candidate.masked_default_branch == default_branch &&
+               candidate.masked_branch_dispatch_counts ==
+                   branch_dispatch_counts &&
+               candidate.masked_selector_allocation == selector_allocation;
+      });
+  if (state->graph_exec && state->signature != signature->entries) {
+    state = allocate_cuda_replay_slot_for_miss(cache, state,
+                                               signature->entries);
   }
   CUDAContext::get_instance().make_current();
   state->collect_ready_deferred_resources();
@@ -2878,14 +3060,28 @@ bool try_run_cuda_device_update_nested_control_graph(
         return lhs_device == rhs_device ? lhs.alloc_id < rhs.alloc_id
                                         : lhs_device < rhs_device;
       });
-  CUDAContext::get_instance().make_current();
-  state->collect_ready_deferred_resources();
-
   std::vector<int> inner_max_iterations;
   inner_max_iterations.reserve(inner_controls.size());
   for (const auto &inner : inner_controls) {
     inner_max_iterations.push_back(inner.max_iterations);
   }
+  state = select_cuda_graph_replay_slot_by_signature(
+      cache, signature->entries,
+      [&](const CompiledGraphCudaState &candidate) {
+        return candidate.device_update_nested_mode &&
+               candidate.nested_inner_boundaries == boundaries &&
+               candidate.masked_nested_outer_max_iterations ==
+                   outer_max_iterations &&
+               candidate.nested_inner_max_iterations == inner_max_iterations &&
+               candidate.masked_selector_allocation == outer_allocation &&
+               candidate.nested_inner_selector_allocations == inner_allocations;
+      });
+  if (state->graph_exec && state->signature != signature->entries) {
+    state = allocate_cuda_replay_slot_for_miss(cache, state,
+                                               signature->entries);
+  }
+  CUDAContext::get_instance().make_current();
+  state->collect_ready_deferred_resources();
   const bool topology_matches =
       state->device_update_nested_mode &&
       state->nested_inner_boundaries == boundaries &&
@@ -3395,14 +3591,28 @@ bool try_run_cuda_masked_nested_control_graph(
         return lhs_device == rhs_device ? lhs.alloc_id < rhs.alloc_id
                                         : lhs_device < rhs_device;
       });
-  CUDAContext::get_instance().make_current();
-  state->collect_ready_deferred_resources();
-
   std::vector<int> inner_max_iterations;
   inner_max_iterations.reserve(inner_controls.size());
   for (const auto &inner : inner_controls) {
     inner_max_iterations.push_back(inner.max_iterations);
   }
+  state = select_cuda_graph_replay_slot_by_signature(
+      cache, signature->entries,
+      [&](const CompiledGraphCudaState &candidate) {
+        return candidate.masked_mode && candidate.masked_nested_mode &&
+               candidate.nested_inner_boundaries == boundaries &&
+               candidate.masked_nested_outer_max_iterations ==
+                   outer_max_iterations &&
+               candidate.nested_inner_max_iterations == inner_max_iterations &&
+               candidate.masked_selector_allocation == outer_allocation &&
+               candidate.nested_inner_selector_allocations == inner_allocations;
+      });
+  if (state->graph_exec && state->signature != signature->entries) {
+    state = allocate_cuda_replay_slot_for_miss(cache, state,
+                                               signature->entries);
+  }
+  CUDAContext::get_instance().make_current();
+  state->collect_ready_deferred_resources();
   const bool topology_matches =
       state->masked_mode && state->masked_nested_mode &&
       state->nested_inner_boundaries == boundaries &&
@@ -3716,6 +3926,15 @@ bool try_run_cuda_bounded_graph(
   }
   if (!signature.has_value()) {
     return structural_fallback();
+  }
+  state = select_cuda_graph_replay_slot_by_signature(
+      cache, signature->entries,
+      [](const CompiledGraphCudaState &candidate) {
+        return candidate.conditional_mode && candidate.conditional_type == -1;
+      });
+  if (state->graph_exec && state->signature != signature->entries) {
+    state = allocate_cuda_replay_slot_for_miss(cache, state,
+                                               signature->entries);
   }
   CUDAContext::get_instance().make_current();
   state->collect_ready_deferred_resources();
@@ -4110,6 +4329,19 @@ bool try_run_cuda_conditional_graph(
                            : lhs_device < rhs_device;
               });
   }
+  state = select_cuda_graph_replay_slot_by_signature(
+      cache, signature->entries,
+      [&](const CompiledGraphCudaState &candidate) {
+        return candidate.conditional_mode &&
+               candidate.conditional_type == conditional_type &&
+               candidate.conditional_default_branch == default_branch &&
+               candidate.conditional_branch_dispatch_counts ==
+                   branch_dispatch_counts;
+      });
+  if (state->graph_exec && state->signature != signature->entries) {
+    state = allocate_cuda_replay_slot_for_miss(cache, state,
+                                               signature->entries);
+  }
   CUDAContext::get_instance().make_current();
   state->collect_ready_deferred_resources();
 
@@ -4456,14 +4688,21 @@ struct VulkanGraphArgumentSignatureEntry {
   std::vector<uint8_t> matrix;
 };
 
-struct CompiledGraphVulkanState {
-  std::unique_ptr<gfx::GraphReplayRegistration> registration;
-  gfx::GfxRuntime *runtime{nullptr};
+struct VulkanGraphLaunchSlot {
   uint64_t binding_plan_revision{0};
   std::size_t argument_count{0};
   std::vector<VulkanGraphArgumentSignatureEntry> argument_signature;
   std::vector<std::unique_ptr<LaunchContextBuilder>> launch_contexts;
   std::vector<gfx::GfxRuntime::GraphDispatch> dispatches;
+};
+
+struct CompiledGraphVulkanState {
+  std::unique_ptr<gfx::GraphReplayRegistration> registration;
+  gfx::GfxRuntime *runtime{nullptr};
+  // Host-side launch contexts are much cheaper than backend command slots.
+  // Four lazy entries cover ping-pong and triple-buffer binding sets while
+  // preserving a hard ownership bound.
+  std::vector<VulkanGraphLaunchSlot> launch_slots;
   bool diagnostics_enabled{false};
 };
 
@@ -4586,11 +4825,11 @@ make_vulkan_graph_argument_signature(
 bool vulkan_graph_arguments_match_cached_signature(
     const CompiledGraph &graph,
     const std::unordered_map<std::string, IValue> &args,
-    const CompiledGraphVulkanState &state) {
-  if (args.size() != state.argument_count) {
+    const VulkanGraphLaunchSlot &slot) {
+  if (args.size() != slot.argument_count) {
     return false;
   }
-  for (const auto &entry : state.argument_signature) {
+  for (const auto &entry : slot.argument_signature) {
     const auto value = args.find(entry.name);
     const auto declared = graph.args.find(entry.name);
     if (value == args.end() || declared == graph.args.end() ||
@@ -4642,48 +4881,58 @@ bool prepare_vulkan_graph_launch(
   if (cache.kernels.size() != graph.dispatches.size()) {
     cache.kernels.assign(graph.dispatches.size(), {});
   }
-  const bool attribute = cache.replay_attribution_enabled.load(
-      std::memory_order_relaxed);
+  // Keep signature lookup on the production hot path free of diagnostic
+  // clocks. Explicit submission telemetry owns measured executions.
+  constexpr bool attribute = false;
   auto *existing_state = cache.vulkan_graph_state.get();
   const bool stable_replay = cache.stable_replay_optimization_enabled.load(
       std::memory_order_relaxed);
   Program *graph_program = jit_graph_program(graph);
+  uint64_t binding_plan_revision = 0;
   if (stable_replay && graph_program != nullptr &&
       graph_has_runtime_resource_declarations(args)) {
     // Structured Vulkan callers share this preparation path but do not pass
     // through jit_run_cached(). Keep their resource generation in the same
     // revision domain without double-counting ordinary replay attribution.
-    prepare_runtime_binding_plan(cache, args, graph_program,
-                                 /*attribute=*/false);
+    binding_plan_revision =
+        prepare_runtime_binding_plan(cache, args, graph_program,
+                                     /*attribute=*/false)
+            .revision;
   }
-  if (attribute && stable_replay && existing_state != nullptr &&
-      !existing_state->dispatches.empty() &&
-      existing_state->binding_plan_revision !=
-          cache.runtime_binding_plan.revision) {
-    ++cache.replay_attribution.signature_misses;
-  }
-  if (stable_replay && existing_state != nullptr &&
-      existing_state->binding_plan_revision ==
-          cache.runtime_binding_plan.revision &&
-      !existing_state->dispatches.empty()) {
+  if (stable_replay && existing_state != nullptr) {
     const auto signature_begin =
         attribute ? ReplayClock::now() : ReplayClock::time_point{};
-    const bool signature_match =
-        vulkan_graph_arguments_match_cached_signature(graph, args,
-                                                       *existing_state);
+    std::size_t matching_slot = existing_state->launch_slots.size();
+    for (std::size_t index = 0; index < existing_state->launch_slots.size();
+         ++index) {
+      const auto &slot = existing_state->launch_slots[index];
+      if (slot.binding_plan_revision == binding_plan_revision &&
+          !slot.dispatches.empty() &&
+          vulkan_graph_arguments_match_cached_signature(graph, args, slot)) {
+        matching_slot = index;
+        break;
+      }
+    }
     if (attribute) {
       cache.replay_attribution.signature_ns +=
           replay_elapsed_ns(signature_begin);
-      if (signature_match) {
+      if (matching_slot != existing_state->launch_slots.size()) {
         ++cache.replay_attribution.signature_hits;
       } else {
         ++cache.replay_attribution.signature_misses;
       }
     }
-    if (signature_match) {
+    if (matching_slot != existing_state->launch_slots.size()) {
+      if (matching_slot != 0) {
+        auto slot = std::move(existing_state->launch_slots[matching_slot]);
+        existing_state->launch_slots.erase(
+            existing_state->launch_slots.begin() + matching_slot);
+        existing_state->launch_slots.insert(
+            existing_state->launch_slots.begin(), std::move(slot));
+      }
       prepared.runtime = existing_state->runtime;
       prepared.replay_key = existing_state->registration->replay_key();
-      prepared.dispatch_view = &existing_state->dispatches;
+      prepared.dispatch_view = &existing_state->launch_slots.front().dispatches;
       return true;
     }
   }
@@ -4749,12 +4998,18 @@ bool prepare_vulkan_graph_launch(
           replay_elapsed_ns(signature_begin);
     }
     if (signature.has_value()) {
-      state->binding_plan_revision = cache.runtime_binding_plan.revision;
-      state->argument_count = args.size();
-      state->argument_signature = std::move(*signature);
-      state->launch_contexts = std::move(prepared.launch_contexts);
-      state->dispatches = std::move(prepared.dispatches);
-      prepared.dispatch_view = &state->dispatches;
+      VulkanGraphLaunchSlot slot;
+      slot.binding_plan_revision = binding_plan_revision;
+      slot.argument_count = args.size();
+      slot.argument_signature = std::move(*signature);
+      slot.launch_contexts = std::move(prepared.launch_contexts);
+      slot.dispatches = std::move(prepared.dispatches);
+      state->launch_slots.insert(state->launch_slots.begin(), std::move(slot));
+      constexpr std::size_t kVulkanLaunchSlotCapacity = 4;
+      if (state->launch_slots.size() > kVulkanLaunchSlotCapacity) {
+        state->launch_slots.resize(kVulkanLaunchSlotCapacity);
+      }
+      prepared.dispatch_view = &state->launch_slots.front().dispatches;
       return true;
     }
   }
@@ -4822,17 +5077,20 @@ void CompiledGraphVulkanStateDeleter::operator()(
 CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
   std::lock_guard<std::mutex> lock(run_mutex);
   const bool diagnostics_previously_enabled = graph_diagnostics_enabled;
-  graph_diagnostics_enabled = true;
-  replay_attribution_enabled.store(true, std::memory_order_relaxed);
+  std::uint32_t backend_replay_signature_slots = 0;
+  std::uint32_t backend_replay_signature_slot_capacity = 0;
   auto finalize = [&](CompiledGraphStats result) {
     CompiledGraphDebugSnapshot snapshot;
     snapshot.stats = result;
     snapshot.diagnostics_previously_enabled =
         diagnostics_previously_enabled;
+    const bool execution_observed =
+        result.last_path != CompiledGraphExecutionPath::none ||
+        result.last_fallback_reason != CompiledGraphFallbackReason::none;
     snapshot.diagnostics_counters_complete =
-        graph_diagnostics_counters_complete;
-    snapshot.replay_attribution_enabled =
-        diagnostics_previously_enabled;
+        graph_diagnostics_enabled ? graph_diagnostics_counters_complete
+                                  : !execution_observed;
+    snapshot.replay_attribution_enabled = false;
     snapshot.replay_calls = replay_attribution.calls;
     snapshot.replay_total_ns = replay_attribution.total_ns;
     snapshot.replay_snode_guard_ns = replay_attribution.snode_guard_ns;
@@ -4857,6 +5115,12 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
         replay_attribution.snode_guard_acquisitions;
     snapshot.replay_snode_guard_elisions =
         replay_attribution.snode_guard_elisions;
+    snapshot.runtime_binding_plan_slots =
+        static_cast<std::uint32_t>(runtime_binding_plans.size());
+    snapshot.backend_replay_signature_slots =
+        backend_replay_signature_slots;
+    snapshot.backend_replay_signature_slot_capacity =
+        backend_replay_signature_slot_capacity;
     for (const auto &kernel : kernels) {
       if (kernel.task_count ==
           std::numeric_limits<std::uint32_t>::max()) {
@@ -4869,13 +5133,24 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
   };
 #if defined(TI_WITH_CUDA)
   if (cuda_graph_state) {
-    cuda_graph_state->diagnostics_enabled = true;
+    if (graph_diagnostics_enabled) {
+      cuda_graph_state->diagnostics_enabled = true;
+      for (const auto &alternate : cuda_graph_state_alternates) {
+        if (alternate) {
+          alternate->diagnostics_enabled = true;
+        }
+      }
+    }
+    backend_replay_signature_slots = static_cast<std::uint32_t>(
+        1 + cuda_graph_state_alternates.size());
+    backend_replay_signature_slot_capacity = 2;
     cuda_graph_state->stats.backend = CompiledGraphBackend::cuda;
     CompiledGraphStats result = cuda_graph_state->stats;
-    if (!cuda_graph_state->bounded_dispatch_controls.empty() ||
-        !cuda_graph_state->bounded_dispatch_groups.empty() ||
-        !cuda_graph_state->bounded_dispatch_observations.empty() ||
-        cuda_graph_state->nested_device_controls != nullptr) {
+    if (graph_diagnostics_enabled &&
+        (!cuda_graph_state->bounded_dispatch_controls.empty() ||
+         !cuda_graph_state->bounded_dispatch_groups.empty() ||
+         !cuda_graph_state->bounded_dispatch_observations.empty() ||
+         cuda_graph_state->nested_device_controls != nullptr)) {
       auto &driver = CUDADriver::get_instance();
       driver.stream_synchronize(nullptr);
       result.known_bounded_payloads = static_cast<std::uint32_t>(
@@ -4978,15 +5253,19 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
           std::min(result.bounded_update_replays,
                    result.bounded_update_state_changes);
     }
-    if (!diagnostics_previously_enabled &&
-        (result.last_path != CompiledGraphExecutionPath::none ||
-         result.last_fallback_reason != CompiledGraphFallbackReason::none)) {
-      graph_diagnostics_counters_complete = false;
-    }
     result.known_persistent_argument_bytes =
         cuda_graph_state->known_persistent_argument_bytes();
     result.known_bounded_control_bytes =
         cuda_graph_state->known_bounded_control_bytes();
+    for (const auto &alternate : cuda_graph_state_alternates) {
+      if (alternate == nullptr) {
+        continue;
+      }
+      result.known_persistent_argument_bytes +=
+          alternate->known_persistent_argument_bytes();
+      result.known_bounded_control_bytes +=
+          alternate->known_bounded_control_bytes();
+    }
     const auto per_node_update_count = static_cast<std::uint32_t>(std::count_if(
         cuda_graph_state->bounded_dispatch_controls.begin(),
         cuda_graph_state->bounded_dispatch_controls.end(),
@@ -5035,13 +5314,14 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
 #endif
 #if defined(TI_WITH_VULKAN)
   if (vulkan_graph_state && vulkan_graph_state->registration) {
-    const auto source = vulkan_graph_state->registration->debug_stats();
-    vulkan_graph_state->diagnostics_enabled = true;
+    backend_replay_signature_slots = static_cast<std::uint32_t>(
+        vulkan_graph_state->launch_slots.size());
+    backend_replay_signature_slot_capacity = 4;
+    const auto source = graph_diagnostics_enabled
+                            ? vulkan_graph_state->registration->debug_stats()
+                            : vulkan_graph_state->registration->snapshot_stats();
+    vulkan_graph_state->diagnostics_enabled = graph_diagnostics_enabled;
     CompiledGraphStats result;
-    if (!diagnostics_previously_enabled &&
-        source.last_path != gfx::GraphReplayLastPath::none) {
-      graph_diagnostics_counters_complete = false;
-    }
     result.backend = CompiledGraphBackend::vulkan;
     result.attempts = source.attempts;
     result.ordinary_fallbacks = source.fallbacks;
@@ -5100,15 +5380,9 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
   }
 #endif
   if (vulkan_inline_stats.attempts > 0) {
-    if (!diagnostics_previously_enabled) {
-      graph_diagnostics_counters_complete = false;
-    }
     return finalize(vulkan_inline_stats);
   }
   if (vulkan_inline_stats.backend != CompiledGraphBackend::none) {
-    if (!diagnostics_previously_enabled) {
-      graph_diagnostics_counters_complete = false;
-    }
     return finalize(vulkan_inline_stats);
   }
   return finalize({});
@@ -5139,13 +5413,15 @@ void retain_graph_execution_handles(
 void CompiledGraphJITCache::clear_runtime_state() {
   auto clear_locked = [this]() {
     cuda_graph_state.reset();
+    cuda_graph_state_alternates.clear();
     vulkan_graph_state.reset();
     vulkan_inline_stats = {};
     graph_diagnostics_counters_complete = true;
     kernels.clear();
     retired_execution_handles.clear();
     runtime_arg_plans.clear();
-    runtime_binding_plan.clear();
+    runtime_binding_plans.clear();
+    next_runtime_binding_plan_revision = 1;
     replay_attribution = {};
     validated_snode_tree_program = nullptr;
     validated_snode_tree_epoch = 0;
@@ -5157,7 +5433,7 @@ void CompiledGraphJITCache::clear_runtime_state() {
   // owns CUDA state. Probe under run_mutex, which is also the state-creation
   // lock used by jit_run_cached().
   std::unique_lock<std::mutex> run_lock(run_mutex);
-  if (cuda_graph_state == nullptr) {
+  if (cuda_graph_state == nullptr && cuda_graph_state_alternates.empty()) {
     clear_locked();
     return;
   }
@@ -5181,13 +5457,15 @@ void CompiledGraphJITCache::clear_runtime_state() {
 void CompiledGraphJITCache::retire_snode_tree_runtime_state() {
   auto retire_locked = [this]() {
     cuda_graph_state.reset();
+    cuda_graph_state_alternates.clear();
     vulkan_graph_state.reset();
     vulkan_inline_stats = {};
     graph_diagnostics_counters_complete = true;
     retain_graph_execution_handles(retired_execution_handles, kernels);
     kernels.clear();
     runtime_arg_plans.clear();
-    runtime_binding_plan.clear();
+    runtime_binding_plans.clear();
+    next_runtime_binding_plan_revision = 1;
     replay_attribution = {};
     validated_snode_tree_program = nullptr;
     validated_snode_tree_epoch = 0;
@@ -5195,7 +5473,7 @@ void CompiledGraphJITCache::retire_snode_tree_runtime_state() {
 
 #if defined(TI_WITH_CUDA)
   std::unique_lock<std::mutex> run_lock(run_mutex);
-  if (cuda_graph_state == nullptr) {
+  if (cuda_graph_state == nullptr && cuda_graph_state_alternates.empty()) {
     retire_locked();
     return;
   }
@@ -5353,7 +5631,6 @@ void CompiledGraph::jit_run_cached(
     const std::unordered_map<std::string, IValue> &args,
     CompiledGraphJITCache &cache) const try {
   const bool has_indirect_dispatch = has_indirect_dispatches();
-  const bool labeled_dispatches = has_dispatch_labels();
   TI_ERROR_IF(has_indirect_dispatch &&
                   compile_config.arch != Arch::vulkan,
               "Graph indirect dispatch is currently supported only by the "
@@ -5362,8 +5639,10 @@ void CompiledGraph::jit_run_cached(
   if (program != nullptr) {
     program->ensure_runtime_submission_allowed("cached Graph launch");
   }
-  const bool attribute = cache.replay_attribution_enabled.load(
-      std::memory_order_relaxed);
+  // Replay attribution used to be enabled implicitly by a statistics query.
+  // Statistics are now side-effect free, and opt-in ticket telemetry is the
+  // only measured path, so the production launch is compiled without clocks.
+  constexpr bool attribute = false;
   const bool stable_replay = cache.stable_replay_optimization_enabled.load(
       std::memory_order_relaxed);
   const auto replay_begin =
@@ -5441,11 +5720,13 @@ void CompiledGraph::jit_run_cached(
       // surfacing the rebuild requirement so no backend object keeps an
       // executable containing the old root binding.
       cache.cuda_graph_state.reset();
+      cache.cuda_graph_state_alternates.clear();
       cache.vulkan_graph_state.reset();
       cache.vulkan_inline_stats = {};
       cache.kernels.clear();
       cache.runtime_arg_plans.clear();
-      cache.runtime_binding_plan.clear();
+      cache.runtime_binding_plans.clear();
+      cache.next_runtime_binding_plan_revision = 1;
       cache.validated_snode_tree_program = nullptr;
       cache.validated_snode_tree_epoch = 0;
       throw;
@@ -5522,12 +5803,11 @@ void CompiledGraph::jit_run_cached(
 #if defined(TI_WITH_CUDA)
   if (compile_config.arch == Arch::cuda) {
     TI_ASSERT(program != nullptr);
-    // A dispatch label describes one physical kernel launch. Native CUDA
-    // replay would expose the label only while capturing the graph, not on
-    // every replay, so labeled graphs deliberately use the ordinary cached
-    // launch path below.
-    if (!labeled_dispatches &&
-        try_run_cuda_graph(*this, compile_config, args, cache, *program,
+    // Dispatch labels are static task metadata. Production execution remains
+    // replay-first even though a capture-time profiler cannot manufacture one
+    // fresh host annotation per replay. Per-invocation observation belongs to
+    // explicit ticket telemetry, not to the production launch qualification.
+    if (try_run_cuda_graph(*this, compile_config, args, cache, *program,
                            &program->runtime_statistics())) {
       program->mark_runtime_submission(
           RuntimeSubmissionKind::kGraphBackendSubmission);
@@ -5547,8 +5827,7 @@ void CompiledGraph::jit_run_cached(
   }
 #endif
 #if defined(TI_WITH_VULKAN)
-  if (compile_config.arch == Arch::vulkan &&
-      (!labeled_dispatches || has_indirect_dispatch)) {
+  if (compile_config.arch == Arch::vulkan) {
     if (try_run_vulkan_graph(*this, compile_config, args, cache,
                              program != nullptr
                                  ? &program->runtime_statistics()
@@ -5701,6 +5980,7 @@ bool CompiledGraph::jit_run_bounded_cuda_cached(
       program->validate_snode_tree_dependencies(snode_tree_dependencies);
     } catch (...) {
       cache.cuda_graph_state.reset();
+      cache.cuda_graph_state_alternates.clear();
       cache.kernels.clear();
       cache.runtime_arg_plans.clear();
       cache.validated_snode_tree_program = nullptr;
@@ -5784,6 +6064,7 @@ bool CompiledGraph::jit_run_bounded_cuda_masked_cached(
       program->validate_snode_tree_dependencies(snode_tree_dependencies);
     } catch (...) {
       cache.cuda_graph_state.reset();
+      cache.cuda_graph_state_alternates.clear();
       cache.kernels.clear();
       cache.runtime_arg_plans.clear();
       cache.validated_snode_tree_program = nullptr;
@@ -5924,6 +6205,7 @@ bool CompiledGraph::jit_submit_bounded_cuda_nested_sequence_cached(
       program->validate_snode_tree_dependencies(snode_tree_dependencies);
     } catch (...) {
       cache.cuda_graph_state.reset();
+      cache.cuda_graph_state_alternates.clear();
       cache.kernels.clear();
       cache.runtime_arg_plans.clear();
       cache.validated_snode_tree_program = nullptr;
@@ -6603,6 +6885,7 @@ bool CompiledGraph::jit_run_conditional_cuda_cached(
       program->validate_snode_tree_dependencies(snode_tree_dependencies);
     } catch (...) {
       cache.cuda_graph_state.reset();
+      cache.cuda_graph_state_alternates.clear();
       cache.kernels.clear();
       cache.runtime_arg_plans.clear();
       cache.validated_snode_tree_program = nullptr;
@@ -6687,6 +6970,7 @@ bool CompiledGraph::jit_run_conditional_cuda_masked_cached(
       program->validate_snode_tree_dependencies(snode_tree_dependencies);
     } catch (...) {
       cache.cuda_graph_state.reset();
+      cache.cuda_graph_state_alternates.clear();
       cache.kernels.clear();
       cache.runtime_arg_plans.clear();
       cache.validated_snode_tree_program = nullptr;

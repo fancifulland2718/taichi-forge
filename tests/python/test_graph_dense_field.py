@@ -99,6 +99,7 @@ def test_vulkan_dense_field_single_dispatch_reports_insufficient_dispatches():
     initial = graph.execution_stats()
     assert initial.execution_path == "not_run"
     assert initial.counters_complete
+    graph._graph_stats
     graph.run({})
     graph.run({})
     ti.sync()
@@ -139,6 +140,7 @@ def test_dense_field_graph_report_classifies_debug_mode_fallback():
     builder.dispatch(advance)
     graph = builder.compile()
     assert graph.execution_stats().execution_path == "not_run"
+    graph._graph_stats
     graph.run({})
     graph.run({})
     ti.sync()
@@ -189,6 +191,7 @@ def test_vulkan_dense_field_multi_tree_graph_records_and_replays():
         (second_tree.id, second_tree.generation),
     }
     assert graph.execution_stats().execution_path == "not_run"
+    graph._graph_stats
 
     # Exercise the bounded replay ring, then synchronize and prove that the
     # next launch reuses a recorded command list. Short command lists may
@@ -262,6 +265,10 @@ def test_dense_field_graph_execution_report_explains_backend_path():
     assert initial.segments[0].runtime_arg_count == 0
     with pytest.raises(FrozenInstanceError):
         initial.arch = "mutated"
+
+    # Detailed backend counters are a private, explicit diagnostic mode. The
+    # public report above remains a side-effect-free production snapshot.
+    graph._graph_stats
 
     arch = ti.lang.impl.current_cfg().arch
     run_count = 9 if arch == ti.vulkan else 2
@@ -364,10 +371,17 @@ def test_dense_field_graph_report_marks_pre_opt_in_gpu_counters_incomplete():
     graph.run({})
     ti.sync()
     second = graph.execution_stats()
-    # Lifetime totals remain explicitly incomplete because the first launch
-    # happened before opt-in; later interval deltas are still valid.
+    # Public statistics are a side-effect-free snapshot. Repeated inspection
+    # must not turn counters on inside later production replays.
     assert not second.counters_complete
-    assert second.segments[0].counters.attempts == 1
+    assert second.segments[0].counters.attempts == 0
+
+    graph._graph_stats
+    graph.run({})
+    ti.sync()
+    opted_in = graph.execution_stats()
+    assert not opted_in.counters_complete
+    assert opted_in.segments[0].counters.attempts == 1
 
 
 @test_utils.test(arch=ti.cpu, cpu_max_num_threads=4, offline_cache=False)
@@ -1295,7 +1309,7 @@ def test_dense_field_graph_heterogeneous_blocks_run_on_independent_threads():
                 template_args={"self": block},
             )
         graph = builder.compile()
-        graph.execution_stats()
+        graph._graph_stats
         graph.run({})
         graphs.append(graph)
     ti.sync()

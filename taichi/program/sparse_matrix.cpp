@@ -1006,10 +1006,6 @@ struct CompiledGraphLinearOperator::ExecutionState {
     if (kind == OperatorExecutionKind::compiled_graph ||
         kind == OperatorExecutionKind::runtime_capture) {
       cache = std::make_unique<aot::CompiledGraphJITCache>();
-      // Graph diagnostics are opt-in. Enable them before the first submission
-      // so the plan reports complete capture/replay counters rather than a
-      // best-effort snapshot that starts after the first solve.
-      cache->debug_graph_stats();
     }
   }
 

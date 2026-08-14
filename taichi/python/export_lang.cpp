@@ -4385,7 +4385,21 @@ void export_lang(py::module &m) {
                cache.clear_runtime_state();
              }
            })
-      .def("_debug_graph_stats", [](aot::CompiledGraphJITCache &cache) {
+      .def("_debug_graph_stats", [](aot::CompiledGraphJITCache &cache,
+                                     bool enable_diagnostics) {
+        if (enable_diagnostics && !cache.graph_diagnostics_enabled) {
+          const auto previous = cache.debug_graph_stats();
+          if (previous.stats.last_path !=
+                  aot::CompiledGraphExecutionPath::none ||
+              previous.stats.last_fallback_reason !=
+                  aot::CompiledGraphFallbackReason::none) {
+            cache.graph_diagnostics_counters_complete = false;
+          }
+          // This is a private test/debug opt-in. Public execution_stats()
+          // passes false and therefore cannot mutate the production replay
+          // mode or its future cost.
+          cache.graph_diagnostics_enabled = true;
+        }
         const auto snapshot = cache.debug_graph_stats();
         const auto &stats = snapshot.stats;
         auto backend_name = [](aot::CompiledGraphBackend backend) {
@@ -4532,6 +4546,12 @@ void export_lang(py::module &m) {
             snapshot.known_compiled_tasks;
         result["known_compiled_dispatches"] =
             snapshot.known_compiled_dispatches;
+        result["runtime_binding_plan_slots"] =
+            snapshot.runtime_binding_plan_slots;
+        result["backend_replay_signature_slots"] =
+            snapshot.backend_replay_signature_slots;
+        result["backend_replay_signature_slot_capacity"] =
+            snapshot.backend_replay_signature_slot_capacity;
         result["last_driver_error"] = stats.last_driver_error;
         result["retry_backoff_remaining"] =
             stats.retry_backoff_remaining;
@@ -4579,7 +4599,7 @@ void export_lang(py::module &m) {
         result["replay_snode_guard_elisions"] =
             snapshot.replay_snode_guard_elisions;
         return result;
-      });
+      }, py::arg("enable_diagnostics") = true);
 
   py::class_<aot::CompiledGraph>(m, "CompiledGraph")
       .def_property_readonly(

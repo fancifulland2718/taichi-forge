@@ -98,6 +98,7 @@ class TI_DLL_EXPORT GraphReplayRegistration {
     return replay_key_;
   }
   GraphReplayStats debug_stats() const;
+  GraphReplayStats snapshot_stats() const;
 
  private:
   friend class GfxRuntime;
@@ -603,6 +604,7 @@ class TI_DLL_EXPORT GfxRuntime {
   void synchronize_impl(bool check_hash_overflow);
   void retire_graph_replay(uint64_t replay_token);
   GraphReplayStats debug_graph_replay_stats(uint64_t replay_token);
+  GraphReplayStats snapshot_graph_replay_stats(uint64_t replay_token);
   void collect_ready_graph_replays();
 
   struct HashOverflowWatch {

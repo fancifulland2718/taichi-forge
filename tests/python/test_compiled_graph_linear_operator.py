@@ -189,13 +189,12 @@ def test_compiled_graph_operator_runs_data_dependent_dispatches():
         assert plan_stats["operations"]["operator_compiled_graph_submissions"] == 0
     else:
         assert plan_stats["operations"]["operator_compiled_graph_submissions"] > 0
-        assert (
-            plan_stats["operations"]["operator_backend_captures"]
-            + plan_stats["operations"]["operator_ordinary_fallbacks"]
-            > 0
-        )
-        if plan_stats["operations"]["operator_backend_captures"] > 0:
-            assert plan_stats["operations"]["operator_backend_replays"] > 0
+        # Production operator execution does not enable replay counters as a
+        # construction side effect. The current backend path remains visible,
+        # while per-run measurements require explicit Graph ticket telemetry.
+        assert plan_stats["operations"]["operator_backend_captures"] == 0
+        assert plan_stats["operations"]["operator_backend_replays"] == 0
+        assert plan_stats["operations"]["operator_ordinary_fallbacks"] == 0
     assert plan_stats["operations"]["operator_cache_invalidations"] == 0
 
     stats = operator._debug_runtime_stats()
