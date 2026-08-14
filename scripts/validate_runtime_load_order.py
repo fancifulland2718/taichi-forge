@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Qualify split-runtime symbol isolation in both ELF load orders."""
 
-from __future__ import annotations
-
 import argparse
 import ctypes
 import os
@@ -94,6 +92,15 @@ def _load_driver(path: Path, *, global_scope: bool) -> ctypes.CDLL:
     return driver
 
 
+def _make_fill_kernel(ti):
+    @ti.kernel
+    def fill(output: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in output:
+            output[i] = i + 1
+
+    return fill
+
+
 def _child(
     mode: str,
     driver_path: Path | None,
@@ -138,12 +145,7 @@ def _child(
     # preempt the runtime's localized LLVM implementation.
     ti.init(arch=ti.cpu, offline_cache=False)
     values = ti.ndarray(ti.i32, shape=4)
-
-    @ti.kernel
-    def fill(output: ti.types.ndarray(dtype=ti.i32, ndim=1)):
-        for i in output:
-            output[i] = i + 1
-
+    fill = _make_fill_kernel(ti)
     fill(values)
     if values.to_numpy().tolist() != [1, 2, 3, 4]:
         raise RuntimeError(f"{mode} CPU execution produced incorrect values")
