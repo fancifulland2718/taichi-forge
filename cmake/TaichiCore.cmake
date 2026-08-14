@@ -42,9 +42,10 @@ endif()
 # projects.
 #
 # Split Python runtime builds are different: taichi_python is a CPython-specific
-# shim and must resolve C++ symbols from a separate platform shared library.
-# Keep symbol visibility broad for the first split-runtime stage; once the split
-# is validated, this can be tightened with explicit exports/version scripts.
+# shim and must resolve a generated package-private C++ ABI from a separate
+# platform shared library. Keep definitions available while compiling the
+# closure; the final runtime link restricts the dynamic export table with a
+# PE/COFF .def file or an ELF version script.
 if(TI_WITH_SPLIT_PYTHON_RUNTIME)
     set(CMAKE_CXX_VISIBILITY_PRESET default)
     set(CMAKE_VISIBILITY_INLINES_HIDDEN OFF)
@@ -837,7 +838,7 @@ if(TI_WITH_PYTHON)
             "taichi/python/*.cpp"
             "taichi/python/*.h"
         )
-        if(MSVC AND TI_WITH_SPLIT_PYTHON_RUNTIME AND
+        if(TI_WITH_SPLIT_PYTHON_RUNTIME AND
                 NOT TI_WITH_PREBUILT_PYTHON_RUNTIME)
             set(_ti_pybind_object_target taichi_python_bindings)
             add_library(${_ti_pybind_object_target} OBJECT ${TAICHI_PYBIND_SOURCE})
@@ -979,6 +980,12 @@ if(TI_WITH_PYTHON)
                                     "-Wl,--whole-archive"
                                     ${_ti_runtime_lib}
                                     "-Wl,--no-whole-archive")
+                        elseif(APPLE)
+                            target_link_libraries(${target}
+                                PRIVATE ${_ti_runtime_lib})
+                            target_link_options(${target}
+                                PRIVATE
+                                    "-Wl,-force_load,$<TARGET_FILE:${_ti_runtime_lib}>")
                         else()
                             target_link_libraries(${target}
                                 PRIVATE ${_ti_runtime_lib})
@@ -1004,6 +1011,24 @@ if(TI_WITH_PYTHON)
                 endif()
             endforeach()
             set(${output_var} ${_ti_runtime_objects} PARENT_SCOPE)
+        endfunction()
+
+        function(_ti_collect_runtime_symbol_inputs output_var)
+            set(_ti_runtime_symbol_inputs)
+            foreach(_ti_runtime_lib IN LISTS ARGN)
+                if(TARGET ${_ti_runtime_lib})
+                    get_target_property(_ti_runtime_lib_type
+                        ${_ti_runtime_lib} TYPE)
+                    if(_ti_runtime_lib_type STREQUAL "OBJECT_LIBRARY")
+                        list(APPEND _ti_runtime_symbol_inputs
+                            "$<TARGET_OBJECTS:${_ti_runtime_lib}>")
+                    elseif(_ti_runtime_lib_type STREQUAL "STATIC_LIBRARY")
+                        list(APPEND _ti_runtime_symbol_inputs
+                            "$<TARGET_FILE:${_ti_runtime_lib}>")
+                    endif()
+                endif()
+            endforeach()
+            set(${output_var} ${_ti_runtime_symbol_inputs} PARENT_SCOPE)
         endfunction()
 
         if(TI_PREBUILT_PYTHON_RUNTIME_DIR)
@@ -1127,6 +1152,7 @@ if(TI_WITH_PYTHON)
                         ${_ti_windows_runtime_export_objects}
                         $<TARGET_OBJECTS:${_ti_pybind_object_target}>
                         "${PROJECT_SOURCE_DIR}/misc/generate_windows_runtime_export_closure.py"
+                        "${PROJECT_SOURCE_DIR}/misc/runtime_export_closure.py"
                     VERBATIM)
                 set_source_files_properties("${_ti_runtime_filtered_exports}"
                     PROPERTIES GENERATED TRUE)
@@ -1140,6 +1166,123 @@ if(TI_WITH_PYTHON)
                     COMMAND "${PYTHON_EXECUTABLE}"
                         "${PROJECT_SOURCE_DIR}/misc/generate_windows_runtime_export_closure.py"
                         --audit-dll
+                        "$<TARGET_FILE:${CORE_PYTHON_RUNTIME_LIBRARY_NAME}>"
+                        "${_ti_runtime_export_manifest}"
+                    VERBATIM)
+            elseif(LINUX)
+                _ti_collect_runtime_symbol_inputs(
+                    _ti_runtime_export_symbol_inputs
+                    ${CORE_LIBRARY_NAME}
+                    ${_ti_runtime_native_targets})
+                set(_ti_runtime_export_input_list
+                    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/taichi_runtime.exports.inputs")
+                set(_ti_pybind_export_objlist
+                    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/taichi_python.imports.objs")
+                set(_ti_runtime_filtered_exports
+                    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/taichi_runtime.exports.map")
+                set(_ti_runtime_export_manifest
+                    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/taichi_runtime.exports.json")
+
+                file(GENERATE
+                    OUTPUT "${_ti_runtime_export_input_list}"
+                    CONTENT "$<JOIN:${_ti_runtime_export_symbol_inputs},\n>\n")
+                file(GENERATE
+                    OUTPUT "${_ti_pybind_export_objlist}"
+                    CONTENT "$<JOIN:$<TARGET_OBJECTS:${_ti_pybind_object_target}>,\n>\n")
+                add_custom_command(
+                    OUTPUT
+                        "${_ti_runtime_filtered_exports}"
+                        "${_ti_runtime_export_manifest}"
+                    COMMAND "${PYTHON_EXECUTABLE}"
+                        "${PROJECT_SOURCE_DIR}/misc/generate_elf_runtime_export_closure.py"
+                        "${_ti_runtime_export_input_list}"
+                        "${_ti_pybind_export_objlist}"
+                        "${_ti_runtime_filtered_exports}"
+                        "${_ti_runtime_export_manifest}"
+                    DEPENDS
+                        ${_ti_runtime_export_symbol_inputs}
+                        $<TARGET_OBJECTS:${_ti_pybind_object_target}>
+                        "${PROJECT_SOURCE_DIR}/misc/generate_elf_runtime_export_closure.py"
+                        "${PROJECT_SOURCE_DIR}/misc/runtime_export_closure.py"
+                    VERBATIM)
+                add_custom_target(taichi_runtime_export_closure
+                    DEPENDS
+                        "${_ti_runtime_filtered_exports}"
+                        "${_ti_runtime_export_manifest}")
+                add_dependencies(${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
+                    taichi_runtime_export_closure)
+                target_link_options(${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
+                    PRIVATE
+                        "-Wl,--version-script=${_ti_runtime_filtered_exports}")
+                set_property(TARGET ${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
+                    APPEND PROPERTY LINK_DEPENDS
+                        "${_ti_runtime_filtered_exports}")
+                add_custom_command(
+                    TARGET ${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
+                    POST_BUILD
+                    COMMAND "${PYTHON_EXECUTABLE}"
+                        "${PROJECT_SOURCE_DIR}/misc/generate_elf_runtime_export_closure.py"
+                        --audit-elf
+                        "$<TARGET_FILE:${CORE_PYTHON_RUNTIME_LIBRARY_NAME}>"
+                        "${_ti_runtime_export_manifest}"
+                    VERBATIM)
+            elseif(APPLE)
+                _ti_collect_runtime_symbol_inputs(
+                    _ti_runtime_export_symbol_inputs
+                    ${CORE_LIBRARY_NAME}
+                    ${_ti_runtime_native_targets})
+                set(_ti_runtime_export_input_list
+                    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/taichi_runtime.exports.inputs")
+                set(_ti_pybind_export_objlist
+                    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/taichi_python.imports.objs")
+                set(_ti_runtime_filtered_exports
+                    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/taichi_runtime.exports.list")
+                set(_ti_runtime_export_manifest
+                    "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/taichi_runtime.exports.json")
+
+                file(GENERATE
+                    OUTPUT "${_ti_runtime_export_input_list}"
+                    CONTENT "$<JOIN:${_ti_runtime_export_symbol_inputs},\n>\n")
+                file(GENERATE
+                    OUTPUT "${_ti_pybind_export_objlist}"
+                    CONTENT "$<JOIN:$<TARGET_OBJECTS:${_ti_pybind_object_target}>,\n>\n")
+                add_custom_command(
+                    OUTPUT
+                        "${_ti_runtime_filtered_exports}"
+                        "${_ti_runtime_export_manifest}"
+                    COMMAND "${PYTHON_EXECUTABLE}"
+                        "${PROJECT_SOURCE_DIR}/misc/generate_macho_runtime_export_closure.py"
+                        "${_ti_runtime_export_input_list}"
+                        "${_ti_pybind_export_objlist}"
+                        "${_ti_runtime_filtered_exports}"
+                        "${_ti_runtime_export_manifest}"
+                    DEPENDS
+                        ${_ti_runtime_export_symbol_inputs}
+                        $<TARGET_OBJECTS:${_ti_pybind_object_target}>
+                        "${PROJECT_SOURCE_DIR}/misc/generate_macho_runtime_export_closure.py"
+                        "${PROJECT_SOURCE_DIR}/misc/generate_elf_runtime_export_closure.py"
+                        "${PROJECT_SOURCE_DIR}/misc/runtime_export_closure.py"
+                    VERBATIM)
+                add_custom_target(taichi_runtime_export_closure
+                    DEPENDS
+                        "${_ti_runtime_filtered_exports}"
+                        "${_ti_runtime_export_manifest}")
+                add_dependencies(${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
+                    taichi_runtime_export_closure)
+                target_link_options(${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
+                    PRIVATE
+                        "-Wl,-exported_symbols_list,${_ti_runtime_filtered_exports}")
+                set_property(TARGET ${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
+                    APPEND PROPERTY LINK_DEPENDS
+                        "${_ti_runtime_filtered_exports}")
+                set_target_properties(${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
+                    PROPERTIES INSTALL_NAME_DIR "@rpath")
+                add_custom_command(
+                    TARGET ${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
+                    POST_BUILD
+                    COMMAND "${PYTHON_EXECUTABLE}"
+                        "${PROJECT_SOURCE_DIR}/misc/generate_macho_runtime_export_closure.py"
+                        --audit-macho
                         "$<TARGET_FILE:${CORE_PYTHON_RUNTIME_LIBRARY_NAME}>"
                         "${_ti_runtime_export_manifest}"
                     VERBATIM)
@@ -1169,7 +1312,7 @@ if(TI_WITH_PYTHON)
                     LIBRARY DESTINATION ${INSTALL_LIB_DIR}/runtime_native
                     ARCHIVE DESTINATION ${INSTALL_LIB_DIR}/runtime_native
                     COMPONENT runtime)
-            if(MSVC)
+            if(MSVC OR LINUX OR APPLE)
                 install(FILES "${_ti_runtime_export_manifest}"
                     DESTINATION ${INSTALL_LIB_DIR}/runtime_native
                     RENAME taichi_runtime.exports.json
@@ -1177,15 +1320,20 @@ if(TI_WITH_PYTHON)
             endif()
         endif()
 
-        if(WIN32 OR APPLE)
-            target_link_libraries(${CORE_WITH_PYBIND_LIBRARY_NAME} PRIVATE ${CORE_PYTHON_RUNTIME_LIBRARY_NAME})
-        else()
-            # Keep Linux shim wheels free of a direct DT_NEEDED edge to the
-            # large runtime library. Python preloads the runtime with
-            # RTLD_GLOBAL before importing this module so auditwheel does not
-            # copy the runtime back into every CPython shim wheel. Do not add
-            # a build dependency here: the runtime wheel job builds this target
-            # separately, and the shim wheel job must remain pybind-only.
+        target_link_libraries(${CORE_WITH_PYBIND_LIBRARY_NAME}
+            PRIVATE ${CORE_PYTHON_RUNTIME_LIBRARY_NAME})
+        if(LINUX)
+            # The runtime lives in the sibling taichi-forge-runtime
+            # distribution. An explicit ELF dependency keeps its private C++
+            # ABI in this module's local lookup scope and removes the need for
+            # a process-wide RTLD_GLOBAL preload.
+            set_target_properties(${CORE_WITH_PYBIND_LIBRARY_NAME} PROPERTIES
+                INSTALL_RPATH
+                    "$ORIGIN/../../../taichi_forge_runtime/_lib/runtime_native")
+        elseif(APPLE)
+            set_target_properties(${CORE_WITH_PYBIND_LIBRARY_NAME} PROPERTIES
+                INSTALL_RPATH
+                    "@loader_path/../../../taichi_forge_runtime/_lib/runtime_native")
         endif()
     else()
         target_link_libraries(${CORE_WITH_PYBIND_LIBRARY_NAME} PRIVATE taichi_ui)

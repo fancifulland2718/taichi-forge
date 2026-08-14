@@ -101,3 +101,49 @@ def test_dll_audit_rejects_missing_and_excessive_exports():
         assert "safety limit" in str(exc)
     else:
         raise AssertionError("excessive DLL export set was accepted")
+
+
+def test_forbidden_export_owner_ignores_third_party_signature_types():
+    assert (
+        _MODULE.forbidden_export_family(
+            "?use@lang@taichi@@YAXPEAVType@llvm@@@Z",
+            "void __cdecl taichi::lang::use(class llvm::Type *)",
+        )
+        is None
+    )
+    assert (
+        _MODULE.forbidden_export_family(
+            "?getInt32Ty@Type@llvm@@SAPEAV12@AEAVLLVMContext@2@@Z",
+            "class llvm::Type * __cdecl llvm::Type::getInt32Ty("
+            "class llvm::LLVMContext &)",
+        )
+        == "llvm"
+    )
+
+
+def test_dll_audit_rejects_implicit_third_party_definition_owner(monkeypatch):
+    requested = "?launch@Kernel@lang@taichi@@QEAAXXZ"
+    llvm_owned = "?getInt32Ty@Type@llvm@@SAPEAV12@AEAVLLVMContext@2@@Z"
+    manifest = {
+        "exports": [requested, "taichi_runtime_anchor"],
+        "configured_export_limit": 8,
+    }
+    monkeypatch.setattr(
+        _MODULE,
+        "_undecorate",
+        lambda symbol: (
+            "llvm::Type::getInt32Ty(llvm::LLVMContext&)"
+            if symbol == llvm_owned
+            else symbol
+        ),
+    )
+
+    try:
+        _MODULE.add_dll_audit(
+            manifest,
+            {requested, "taichi_runtime_anchor", llvm_owned},
+        )
+    except RuntimeError as exc:
+        assert "bundled third-party APIs" in str(exc)
+    else:
+        raise AssertionError("implicit third-party export was accepted")

@@ -3,14 +3,34 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import ctypes
 from pathlib import Path
+
+try:
+    from runtime_export_closure import (
+        DEFAULT_EXPORT_LIMIT,
+        EXPLICIT_ABI_SEEDS,
+        add_binary_audit,
+        build_export_closure,
+        select_private_abi_collision_probes,
+    )
+except ModuleNotFoundError:
+    # importlib-based unit tests do not automatically add the script directory
+    # to sys.path, while direct CMake execution does.
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from runtime_export_closure import (  # type: ignore[no-redef]
+        DEFAULT_EXPORT_LIMIT,
+        EXPLICIT_ABI_SEEDS,
+        add_binary_audit,
+        build_export_closure,
+        select_private_abi_collision_probes,
+    )
 
 
 _UNDEFINED_EXTERNAL = re.compile(
@@ -20,8 +40,27 @@ _DLL_EXPORT = re.compile(
     r"^\s*\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]+\s+(?P<symbol>\S+)"
 )
 _PRIVATE_PREFIXES = ("?$TSS", "??_7", "??_R")
-_DEFAULT_EXPORT_LIMIT = 32_768
-_EXPLICIT_ABI_SEEDS = ("taichi_runtime_anchor",)
+_C_FORBIDDEN_PREFIXES = (
+    ("llvm", ("LLVM",)),
+    ("glfw", ("glfw",)),
+    ("vulkan_loader", ("volk", "vk")),
+    ("spirv", ("spv", "SPIRV")),
+    ("allocator", ("mi_",)),
+)
+_CPP_OWNER_NAMESPACES = (
+    ("taichi", "taichi::"),
+    ("llvm", "llvm::"),
+    ("llvm", "clang::"),
+    ("spirv", "glslang::"),
+    ("spirv", "spvtools::"),
+    ("spirv", "spirv_cross::"),
+    ("ui", "ImGui::"),
+    ("logging", "fmt::"),
+    ("logging", "spdlog::"),
+    ("allocator", "mimalloc::"),
+    ("binding", "pybind11::"),
+)
+_UNDECORATE_SYMBOL_NAME = None
 
 
 def parse_def_symbols(text: str) -> set[str]:
@@ -126,67 +165,87 @@ def collect_dll_exports(dll_path: Path, dumpbin: str) -> set[str]:
     return parse_dumpbin_exports(completed.stdout)
 
 
+def _undecorate(symbol: str) -> str:
+    global _UNDECORATE_SYMBOL_NAME
+    if not symbol.startswith("?") or not hasattr(ctypes, "WinDLL"):
+        return symbol
+    if _UNDECORATE_SYMBOL_NAME is None:
+        dbghelp = ctypes.WinDLL("dbghelp")  # type: ignore[attr-defined]
+        _UNDECORATE_SYMBOL_NAME = dbghelp.UnDecorateSymbolName
+        _UNDECORATE_SYMBOL_NAME.argtypes = [
+            ctypes.c_char_p,
+            ctypes.c_char_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+        ]
+        _UNDECORATE_SYMBOL_NAME.restype = ctypes.c_uint32
+    buffer = ctypes.create_string_buffer(max(4096, len(symbol) * 4))
+    if (
+        _UNDECORATE_SYMBOL_NAME(
+            symbol.encode("ascii"), buffer, len(buffer), 0
+        )
+        == 0
+    ):
+        return symbol
+    return buffer.value.decode("utf-8", errors="replace")
+
+
+def forbidden_export_family(symbol: str, undecorated: str) -> str | None:
+    for family, prefixes in _C_FORBIDDEN_PREFIXES:
+        if any(symbol.startswith(prefix) for prefix in prefixes):
+            return family
+    owner_region = undecorated.split("(", 1)[0]
+    owners = [
+        (owner_region.rfind(namespace), family)
+        for family, namespace in _CPP_OWNER_NAMESPACES
+        if namespace in owner_region
+    ]
+    if not owners:
+        return None
+    _, owner = max(owners)
+    return None if owner == "taichi" else owner
+
+
+def audit_forbidden_exports(symbols: set[str]) -> dict[str, list[str]]:
+    result: dict[str, list[str]] = {}
+    for symbol in sorted(symbols):
+        family = forbidden_export_family(symbol, _undecorate(symbol))
+        if family is not None:
+            result.setdefault(family, []).append(symbol)
+    return result
+
+
 def build_closure(
     raw_symbols: set[str],
     undefined_symbols: set[str],
-    seeds: tuple[str, ...] = _EXPLICIT_ABI_SEEDS,
+    seeds: tuple[str, ...] = EXPLICIT_ABI_SEEDS,
 ) -> tuple[list[str], dict]:
-    normalized_undefined = {
-        normalize_import_reference(symbol) for symbol in undefined_symbols
-    }
-    required = raw_symbols.intersection(normalized_undefined)
-    exports = sorted(required.union(seeds))
-    classifications: dict[str, int] = {}
-    for symbol in exports:
-        role = classify(symbol)
-        classifications[role] = classifications.get(role, 0) + 1
-    manifest = {
-        "schema_version": 1,
-        "raw_defined_symbol_count": len(raw_symbols),
-        "shim_undefined_symbol_count": len(undefined_symbols),
-        "shim_required_runtime_symbol_count": len(required),
-        "explicit_abi_seed_count": len(seeds),
-        "exported_symbol_count": len(exports),
-        "dropped_raw_symbol_count": len(raw_symbols - required),
-        "classifications": dict(sorted(classifications.items())),
-        "explicit_abi_seeds": list(seeds),
-        "exports": exports,
-    }
-    digest = hashlib.sha256()
-    digest.update("\n".join(exports).encode("utf-8"))
-    manifest["export_set_sha256"] = digest.hexdigest()
-    return exports, manifest
+    return build_export_closure(
+        raw_symbols,
+        undefined_symbols,
+        platform="windows-msvc",
+        normalize_reference=normalize_import_reference,
+        classify=classify,
+        seeds=seeds,
+    )
 
 
 def add_dll_audit(manifest: dict, actual_symbols: set[str]) -> dict:
-    requested = set(manifest.get("exports", ()))
-    configured_limit = int(manifest["configured_export_limit"])
-    missing = sorted(requested - actual_symbols)
-    if missing:
-        raise RuntimeError(
-            "linked runtime DLL is missing requested exports: "
-            + ", ".join(missing[:8])
-        )
-    if not actual_symbols:
-        raise RuntimeError("linked runtime DLL has no exports")
-    if len(actual_symbols) > configured_limit:
-        raise RuntimeError(
-            f"linked runtime DLL has {len(actual_symbols)} exports, exceeding "
-            f"the safety limit {configured_limit}"
-        )
-    actual_exports = sorted(actual_symbols)
-    digest = hashlib.sha256()
-    digest.update("\n".join(actual_exports).encode("utf-8"))
-    audited = dict(manifest)
-    audited.update(
-        {
-            "dll_audited": True,
-            "actual_exported_symbol_count": len(actual_exports),
-            "implicit_exported_symbol_count": len(actual_symbols - requested),
-            "actual_export_set_sha256": digest.hexdigest(),
-            "actual_exports": actual_exports,
-        }
+    audited = add_binary_audit(
+        manifest, actual_symbols, audit_kind="pe-coff-dll"
     )
+    # Retain the schema-v1 marker while wheel tooling migrates to the common
+    # binary audit fields.
+    audited["dll_audited"] = True
+    forbidden = audit_forbidden_exports(actual_symbols)
+    if forbidden:
+        samples = ", ".join(
+            f"{family}={values[:3]}" for family, values in sorted(forbidden.items())
+        )
+        raise RuntimeError(
+            "Windows runtime exports bundled third-party APIs: " + samples
+        )
+    audited["forbidden_export_families"] = []
     return audited
 
 
@@ -237,7 +296,7 @@ def main(argv: list[str]) -> int:
             "runtime export closure is unexpectedly empty; refusing to link"
         )
     configured_limit = int(
-        os.environ.get("TI_WINDOWS_RUNTIME_EXPORT_LIMIT", _DEFAULT_EXPORT_LIMIT)
+        os.environ.get("TI_WINDOWS_RUNTIME_EXPORT_LIMIT", DEFAULT_EXPORT_LIMIT)
     )
     if len(exports) > configured_limit:
         raise RuntimeError(
@@ -253,6 +312,13 @@ def main(argv: list[str]) -> int:
             "object_count": len(object_paths),
             "configured_export_limit": configured_limit,
             "dumpbin": _dumpbin_path(),
+            "private_abi_collision_probe_symbols": (
+                select_private_abi_collision_probes(
+                    exports,
+                    {symbol: _undecorate(symbol) for symbol in exports},
+                    anchor="taichi_runtime_anchor",
+                )
+            ),
         }
     )
     manifest_path.write_text(
