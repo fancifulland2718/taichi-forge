@@ -46,6 +46,7 @@ def _write_runtime_wheel(
     duplicate_raw_cudart: bool = False,
     dependency_class: str = "toolkit-reference",
     include_export_manifest: bool = True,
+    export_manifest_schema: int = 2,
 ) -> None:
     dist_info = f"taichi_forge_runtime-{version}.dist-info"
     native = "taichi_forge_runtime/_lib/runtime_native"
@@ -133,7 +134,7 @@ def _write_runtime_wheel(
                 "\n".join(actual).encode("utf-8")
             ).hexdigest()
             manifest = {
-                "schema_version": 2,
+                "schema_version": export_manifest_schema,
                 "abi_revision": 1,
                 "platform": platform_name,
                 "binary_audited": True,
@@ -147,8 +148,10 @@ def _write_runtime_wheel(
                 "shim_shared_odr_symbol_count": 0,
                 "shim_required_runtime_symbol_count": 1,
                 "exported_symbol_count": 2,
-                "actual_exported_symbol_count": 3,
-                "implicit_exported_symbol_count": 1,
+                "actual_exported_symbol_count": len(actual),
+                "implicit_exported_symbol_count": len(
+                    set(actual) - set(requested)
+                ),
                 "dropped_raw_symbol_count": 4,
                 "configured_export_limit": 32_768,
                 "exports": requested,
@@ -484,6 +487,25 @@ def test_windows_runtime_wheel_requires_export_manifest(tmp_path):
 
     with pytest.raises(RuntimeError, match="taichi_runtime.exports.json"):
         validate_runtime_wheel.inspect_runtime_wheel(wheel)
+
+
+def test_current_local_runtime_requires_private_abi_manifest_schema(tmp_path):
+    wheel = tmp_path / "taichi_forge_runtime-0.6.2-py3-none-win_amd64.whl"
+    _write_runtime_wheel(
+        wheel,
+        platform="windows",
+        version="0.6.2",
+        cuda_major=0,
+        dependency_class="driver-only",
+        export_manifest_schema=1,
+    )
+
+    with pytest.raises(RuntimeError, match="export manifest schema mismatch"):
+        validate_runtime_wheel.inspect_runtime_wheel(
+            wheel,
+            expected_dependency_class="driver-only",
+            required_export_manifest_schema=2,
+        )
 
 
 def test_macos_runtime_wheel_accepts_private_macho_manifest(tmp_path):

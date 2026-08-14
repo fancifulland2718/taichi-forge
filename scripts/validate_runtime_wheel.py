@@ -283,6 +283,7 @@ def inspect_runtime_wheel(
     expected_cuda_major: int | None = None,
     expected_dependency_class: str = "either",
     strict_binary: bool = False,
+    required_export_manifest_schema: int | None = None,
 ) -> RuntimeWheelInfo:
     if expected_dependency_class not in {
         "driver-only",
@@ -436,6 +437,16 @@ def inspect_runtime_wheel(
                 f"found {native_runtimes}"
             )
         export_manifest = _validate_export_manifest(zf, names, platform)
+        if (
+            required_export_manifest_schema is not None
+            and export_manifest["schema_version"]
+            != required_export_manifest_schema
+        ):
+            raise RuntimeError(
+                "Runtime export manifest schema mismatch in "
+                f"{wheel.name}: expected={required_export_manifest_schema}, "
+                f"actual={export_manifest['schema_version']}"
+            )
         if strict_binary:
             _strict_binary_exports(
                 zf,
@@ -470,6 +481,7 @@ def validate_runtime_wheels(
     expected_cuda_major: int | None = None,
     expected_dependency_class: str = "either",
     strict_binary: bool = False,
+    required_export_manifest_schema: int | None = None,
 ) -> list[RuntimeWheelInfo]:
     wheels = sorted(wheel_dir.glob("*.whl"))
     expected_count = 2 if expected_platform == "pair" else 1
@@ -484,6 +496,7 @@ def validate_runtime_wheels(
             expected_cuda_major,
             expected_dependency_class,
             strict_binary,
+            required_export_manifest_schema,
         )
         for wheel in wheels
     ]
@@ -541,6 +554,16 @@ def main() -> None:
         action="store_true",
         help="Re-audit the native binary inside the final wheel",
     )
+    parser.add_argument(
+        "--export-manifest-schema",
+        type=int,
+        choices=[1, 2],
+        help=(
+            "Require an exact runtime export manifest schema. Local current-"
+            "source consumers should require schema 2; omission preserves "
+            "validation of already-published legacy Windows wheels."
+        ),
+    )
     args = parser.parse_args()
 
     try:
@@ -550,6 +573,7 @@ def main() -> None:
             args.cuda_major,
             args.dependency_class,
             args.strict_binary,
+            args.export_manifest_schema,
         )
     except (OSError, RuntimeError, UnicodeError) as exc:
         raise SystemExit(str(exc)) from exc
