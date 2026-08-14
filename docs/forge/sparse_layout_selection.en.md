@@ -1,6 +1,6 @@
 # Choosing a Sparse Layout in Taichi Forge
 
-> Applies to the current **Taichi Forge 0.6.2 source contract**.
+> Applies to the published **Taichi Forge 0.6.2 release contract**.
 
 [中文版本](sparse_layout_selection.zh.md)
 

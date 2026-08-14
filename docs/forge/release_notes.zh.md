@@ -1,10 +1,9 @@
 # Taichi Forge 版本更新说明
 
-本文是 Taichi Forge 用户可见更新的唯一版本索引。`0.6.1` 已正式发布；其最终 Python
-shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 build identity
-`c268ca5671e8`。当前 `master` 面向 `0.6.2` 开发，源码、shim 与 runtime 包版本元数据已经
-统一为 `0.6.2`。`0.6.0` 保留为上一个已发布 runtime 源码边界，`0.4.25` 是最后一个公开的
-`0.4.x` 基线。
+本文是 Taichi Forge 用户可见更新的唯一版本索引。`0.6.2` 是最新正式发布版本，用户可见
+源码边界为 `7f5cf6a0a`；其后的纯打包、测试或文档提交不会重新归属功能历史。`0.6.1`
+继续保留最终 Python shim/source 边界 `b129ad94c` 和配对 native runtime build identity
+`c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.4.x` 基线。
 
 由于 PyPI 项目容量有限，部分不再重要的旧发行文件已经移除。因此，当前 PyPI 列表中
 找不到某个版本，并不表示它从未存在。下表的源码边界是长期历史锚点；仅涉及打包、CI、
@@ -14,7 +13,7 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
 
 | 版本 | 历史状态 | 源码边界 | 主要范围 |
 | --- | --- | --- | --- |
-| [待发布](#unreleased) | 0.6.2 开发版本 | 当前 `master` | execution-plan 收口、dynamic-work/Worklist 合同、runtime export 控制、Graph 生命周期/遥测与 device-convergent 线性代数 |
+| [0.6.2](#062) | 最新正式发布版本 | `7f5cf6a0a` | execution-plan 收口、dynamic-work/Worklist 合同、runtime export 控制、Graph 生命周期/遥测与 device-convergent 线性代数 |
 | [0.6.1](#061) | 已正式发布 | `b129ad94c` | task launch manifest/policy、动态 LLVM SNode directory、设备端 dynamic worklist、有界 Graph dispatch 与关联 pipeline telemetry |
 | [0.6.0](#060) | 已正式发布 | `106ad65d25` | 结构化 Graph 控制/遥测与 Vulkan indirect dispatch、稀疏 runtime/线性代数、driver-only CUDA primitive、受管互操作/显示与 runtime 生命周期有界化 |
 | [0.1.0](#010) | 历史源码版本；发行文件可能已移除 | `91ad177685` | scikit-build-core 迁移与 Forge 发行包重命名 |
@@ -40,7 +39,11 @@ shim/source 边界是 `b129ad94c`，配对发布的 native runtime wheel 报告 
 | [0.4.25](#0425) | PyPI 当前保留；最后一个公开 0.4.x 基线 | `7dad067ca` | GGUI 事件泵与 ImGui 生命周期修复 |
 | [0.5.0](#050) | 已发布 runtime 源码边界 | `95626e8036` | 异步 runtime 安全、Graph replay/lifetime、Dense Field Graph |
 
-## 待发布 {#unreleased}
+## 0.6.2 {#062}
+
+`0.6.2` 在源码边界 `7f5cf6a0a` 收口 `0.6.1` 之后的更新。以下条目均属于已发布行为；
+只有明确标记为 experimental、opt-in、diagnostic 或 source-build-only 的 API/后端路线
+仍保持相应边界。
 
 - CPU、CUDA 与 Vulkan 上，直接 root-dense Field template kernel 现在可以跨 serial
   SNodeTree generation 复用经 compiler 资格化的 executable template。frontend 会验证完整

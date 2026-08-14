@@ -1,7 +1,7 @@
 # Zero-Copy Dense Storage and Interoperability
 
 > The unified runtime-storage and managed-interop contract first shipped in
-> Taichi Forge `0.6.0`; this page describes the current `0.6.2` source contract.
+> Taichi Forge `0.6.0`; this page describes the published `0.6.2` release contract.
 
 Taichi Forge uses one runtime-storage protocol to describe existing dense memory without introducing another tensor type. The protocol separates five concerns:
 

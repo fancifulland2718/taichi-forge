@@ -1,6 +1,6 @@
 # Taichi Forge 物理稀疏算子与求解器选择指南
 
-> 适用于当前 Taichi Forge **0.6.2 源码合同**。
+> 适用于已发布的 Taichi Forge **0.6.2 发行合同**。
 
 [English version](physics_sparse_solver_selection.en.md)
 

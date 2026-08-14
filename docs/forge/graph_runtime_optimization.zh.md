@@ -6,9 +6,8 @@
 [Forge API 参考](forge_api_reference.zh.md)。
 静态 Field 功能合同单独维护在 [Dense Field Graph](dense_field_graph.zh.md)。
 
-Graph 基础现代化与 native node replay 模型首次发布于 Forge 0.4.1。本文描述当前 0.6.2
-源码（包括待发布 0.6.2 API）的生命周期、后端 replay、结构化控制、诊断与 Dense Field
-Graph 合同；各能力的
+Graph 基础现代化与 native node replay 模型首次发布于 Forge 0.4.1。本文描述已正式发布的
+0.6.2 生命周期、后端 replay、结构化控制、诊断与 Dense Field Graph 合同；各能力的
 首次公开版本见[版本更新说明](release_notes.zh.md)。
 
 ## 范围与不变量

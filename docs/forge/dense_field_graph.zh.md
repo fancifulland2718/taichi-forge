@@ -2,7 +2,7 @@
 
 > 首次公开于 `0.5.0`；版本归属见[版本更新说明](release_notes.zh.md)。
 
-Dense Field Graph 首次公开于 Taichi Forge `0.5.0`，本文描述当前 `0.6.2` 源码合同，用于编译和 replay 闭包引用或通过
+Dense Field Graph 首次公开于 Taichi Forge `0.5.0`，本文描述已发布的 `0.6.2` 发行合同，用于编译和 replay 闭包引用或通过
 runtime 参数接收 dense `ti.field`、vector Field 与 matrix Field 的 kernel。静态 Field
 binding 与 runtime dense-storage binding 使用同一套公开 `ti.graph.GraphBuilder` API，
 且都不复制 Field payload。
@@ -172,7 +172,7 @@ heterogeneous engine
 Forge 不通过 pointer 或 cache-key 技巧合并任意闭包 owner。兼容 owner 可以改用现有 runtime
 dense-Field binding ABI；把任意闭包改写为该 ABI 仍由应用显式决定，不是自动 cache 优化。
 
-### 当前 0.6.2 源码边界
+### 当前 0.6.2 发行边界
 
 当前 Taichi Forge 继续支持上述 block 模型：应用可以持有和调度多张独立编译的 Graph，
 各自使用稳定但不同的 solver、layout、shape 或 feature signature，并在每个 block 内批处理

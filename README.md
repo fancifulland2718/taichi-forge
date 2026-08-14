@@ -45,14 +45,15 @@ independent from upstream Taichi version numbers.
 
 ## Release History
 
-The current published release is `0.6.1`, while `master` targets `0.6.2`;
-`0.4.25` is the final public `0.4.x` baseline. PyPI storage is limited, so some
+The latest published release is `0.6.2`; its user-visible source boundary is
+`7f5cf6a0a`. `0.4.25` is the final public `0.4.x` baseline. PyPI storage is limited, so some
 nonessential older distribution files have been removed. The complete version
 index therefore uses durable Git source boundaries instead of treating the
 current PyPI file list as the whole history.
 
 | Release | User-visible scope |
 | --- | --- |
+| [0.6.2](docs/forge/release_notes.en.md#062) | Execution-plan and launch-cache closeout; active-domain worklists and deterministic reduction routes; generation-safe dense SNode executable reuse; Graph-private storage, bounded physical dispatch, nested telemetry, and SolvePlan/LinearOperator improvements; package-private split-runtime ABI isolation on Windows, Linux, and source-built macOS. |
 | [0.6.1](docs/forge/release_notes.en.md#061) | Dynamic SNode directories and CUDA hot-root binding; task launch policies, labels, and correlated Graph telemetry; exact/bounded and nested Graph execution; device-resident worklists and prefix pipelines; LinearOperator/SolvePlan composition, direct Field bindings, and multi-lane submission; CUDA radix and runtime/JIT lifecycle hardening. The final Python shim/source boundary is `b129ad94c`, paired with native runtime build identity `c268ca5671e8`. |
 | [0.6.0](docs/forge/release_notes.en.md#060) | Structured Graph control/telemetry and Vulkan indirect dispatch; runtime-bound linear operators, sparse runtime, and Krylov tooling; driver-only CUDA primitives; managed dense/external interoperability and CUDA-Vulkan display sharing; edge layouts/font scaling; correctness and lifecycle hardening. |
 | [0.5.0](docs/forge/release_notes.en.md#050) | Post-`0.4.25` async backend/runtime safety and bounded observability; CUDA/Vulkan Graph replay and lifetime hardening; Dense Field Graph, strict argument/AD contracts, and block-level heterogeneous environments. |

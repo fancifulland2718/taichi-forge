@@ -9,9 +9,8 @@ The static-Field feature contract is maintained separately in
 [Dense Field Graph](dense_field_graph.en.md).
 
 The base Graph modernization and native-node replay model first shipped in
-Forge 0.4.1. This page describes the current 0.6.2 source lifetime, backend
-replay, structured-control, diagnostics, and Dense Field Graph contracts,
-including the unreleased 0.6.2 APIs. See the
+Forge 0.4.1. This page describes the published 0.6.2 contracts for lifetime,
+backend replay, structured control, diagnostics, and Dense Field Graph. See the
 [release notes](release_notes.en.md) for the introduction version of each
 capability.
 

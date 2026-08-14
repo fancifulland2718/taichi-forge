@@ -1,8 +1,8 @@
 # Archived Linux 0.6.1 Release Qualification
 
 > Historical qualification plan for the published 0.6.1 release. It is retained
-> as reproducible evidence and is not the active 0.6.2 release gate. Current
-> version status is maintained in [release notes](release_notes.en.md).
+> as reproducible evidence and is not the 0.6.2 release qualification record.
+> Current version status is maintained in [release notes](release_notes.en.md).
 
 This is the Linux release qualification matrix for the feature-complete Taichi
 Forge 0.6.1 source.

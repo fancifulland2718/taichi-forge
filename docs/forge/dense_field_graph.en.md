@@ -3,7 +3,7 @@
 > First available in `0.5.0`; see [release notes](release_notes.en.md).
 
 Dense Field Graph first shipped in Taichi Forge `0.5.0`; this page describes
-the current `0.6.2` source contract for compiling and
+the published `0.6.2` release contract for compiling and
 replaying kernels that either close over or receive dense `ti.field`, vector
 fields, and matrix fields as runtime arguments. Static Field bindings and
 runtime dense-storage bindings use the same public `ti.graph.GraphBuilder` API
@@ -195,7 +195,7 @@ can instead use the runtime dense-Field binding ABI; converting unrelated
 closures into that ABI remains an explicit application choice rather than an
 automatic cache optimization.
 
-### Current 0.6.2 source boundary
+### Current 0.6.2 release boundary
 
 Current Taichi Forge keeps the block model above: applications may own and
 schedule independently compiled Graphs with different stable solver, layout,

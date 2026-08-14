@@ -15,7 +15,7 @@ Additionally, Taichi also has an ahead-of-time (AOT) system for exporting code t
 
 - Python: 3.10--3.14 (64-bit)
 - Published wheel platforms: Windows x86_64 and Ubuntu 22.04 x86_64. Other
-  operating systems require a source build and are outside the published 0.6.1
+  operating systems require a source build and are outside the published 0.6.2
   release-wheel qualification matrix.
 
 ## Installation
@@ -266,12 +266,12 @@ To access the complete list of Taichi examples, run `ti example`. Here are some 
 
 ## Supported systems and backends
 
-Taichi Forge 0.6.1 publishes split shim/runtime wheels for Windows x86_64 and
+Taichi Forge 0.6.2 publishes split shim/runtime wheels for Windows x86_64 and
 Ubuntu 22.04 x86_64 with Python 3.10 through 3.14. CPU, CUDA, and Vulkan are the
 first-class backend targets. Release builds also include OpenGL, but a specific
 device/backend combination must still pass runtime capability detection.
 macOS/Metal and other source-built combinations are not claims of the public
-0.6.1 wheel matrix. See [Building Forge wheels](../../../forge/build_wheels.en.md)
+0.6.2 wheel matrix. See [Building Forge wheels](../../../forge/build_wheels.en.md)
 and the backend-specific topic guides for exact qualification boundaries.
 
 You are now prepared to begin writing your own Taichi programs. The following documents provide more information about how to utilize Taichi in some of its typical application scenarios:

@@ -1,6 +1,6 @@
 # LinearOperator 与实验性 SolvePlan
 
-> 本文说明 Taichi Forge `0.6.2` 开发版本的当前合同；功能归属见
+> 本文说明 Taichi Forge `0.6.2` 正式发行合同；功能归属见
 > [版本更新说明](release_notes.zh.md)。
 
 `ti.linalg.LinearOperator` 提供绑定 runtime 的线性映射抽象，可使用 fixed sparse

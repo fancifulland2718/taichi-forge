@@ -1,6 +1,6 @@
 # Taichi Forge — Compile, Runtime, Architecture & Modernization Options
 
-> Applies to the current **Taichi Forge 0.6.2 source contract**. Every option listed here is **opt-in** unless explicitly noted; defaults preserve upstream Taichi 1.7.4 behaviour wherever a feature is not intentionally enabled by Forge.
+> Applies to the published **Taichi Forge 0.6.2 release contract**. Every option listed here is **opt-in** unless explicitly noted; defaults preserve upstream Taichi 1.7.4 behaviour wherever a feature is not intentionally enabled by Forge.
 > Option introduction versions are indexed in [release notes](release_notes.en.md);
 > this current-contract page does not reclassify older options as `0.5.0` work.
 

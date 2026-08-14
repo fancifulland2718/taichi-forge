@@ -34,13 +34,14 @@ Forge 主要以 vanilla Taichi 1.7.4 的公开 API 作为兼容参考。Forge �
 
 ## 版本历史
 
-当前正式发布版本是 `0.6.1`，`master` 面向 `0.6.2` 开发；`0.4.25` 是最后一个公开的
+最新正式发布版本是 `0.6.2`，用户可见源码边界为 `7f5cf6a0a`；`0.4.25` 是最后一个公开的
 `0.4.x` 基线。由于 PyPI
 项目容量有限，部分不再重要的旧发行文件已经移除。因此，完整版本索引使用长期稳定的
 Git 源码边界，不把当前 PyPI 文件列表误当成全部历史。
 
 | 版本 | 用户可见范围 |
 | --- | --- |
+| [0.6.2](docs/forge/release_notes.zh.md#062) | execution-plan 与 launch cache 收口；active-domain worklist 和确定性 reduction 路线；generation-safe dense SNode executable 复用；Graph 私有存储、有界物理 dispatch、nested telemetry 与 SolvePlan/LinearOperator 改进；Windows、Linux 及源码构建 macOS 上的 package-private split-runtime ABI 隔离。 |
 | [0.6.1](docs/forge/release_notes.zh.md#061) | 动态 SNode directory 与 CUDA 热 root 绑定；task launch policy、label 与关联 Graph telemetry；精确/有界及嵌套 Graph 执行；设备端 worklist 与 prefix pipeline；LinearOperator/SolvePlan composition、直接 Field 绑定与多 lane 提交；CUDA radix 和 runtime/JIT 生命周期加固。最终 Python shim/source 边界为 `b129ad94c`，配对 native runtime build identity 为 `c268ca5671e8`。 |
 | [0.6.0](docs/forge/release_notes.zh.md#060) | 结构化 Graph 控制/遥测与 Vulkan indirect dispatch；runtime-bound linear operator、稀疏 runtime 与 Krylov 工具；driver-only CUDA primitive；受管 dense/external 互操作与 CUDA-Vulkan 显示共享；边缘布局/字体缩放；正确性与生命周期加固。 |
 | [0.5.0](docs/forge/release_notes.zh.md#050) | `0.4.25` 之后的异步 backend/runtime 安全与有界可观测性；CUDA/Vulkan Graph replay 与生命周期加固；Dense Field Graph、严格参数/AD 合同和 block 级异构环境。 |

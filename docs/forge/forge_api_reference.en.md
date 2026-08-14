@@ -1,12 +1,12 @@
 # Taichi Forge API Reference
 
-> Applies to the **current Taichi Forge 0.6.2 source**. This page lists Forge-only public API
+> Applies to the **published Taichi Forge 0.6.2 release contract**. This page lists Forge-only public API
 > entry points. New options added to Taichi-compatible APIs, such as
 > `ti.init(...)` keywords and `@ti.kernel(...)` keyword options, stay in
 > [Forge options](forge_options.en.md).
 > API introduction versions are indexed separately in
-> [release notes](release_notes.en.md). This page includes Unreleased APIs; use
-> the release index to determine which symbols exist in a packaged version.
+> [release notes](release_notes.en.md). The entries on this page are part of
+> 0.6.2; experimental and source-build-only labels continue to limit support.
 
 Taichi Forge keeps the vanilla Taichi DSL model, but adds APIs for compile
 control, native device primitives, graph replay, display submission, sparse

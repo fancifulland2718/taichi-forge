@@ -1,7 +1,7 @@
 # Sparse Runtime and Linear Algebra
 
 > This guide describes sparse storage, assembly, operators, solvers, backend
-> support, and lifecycle rules in the current Taichi Forge 0.6.2 source.
+> support, and lifecycle rules in the published Taichi Forge 0.6.2 release.
 
 [中文版本](sparse_runtime_and_linear_algebra.zh.md)
 

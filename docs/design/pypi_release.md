@@ -1,5 +1,8 @@
 # PyPI 发行流程与权限排查
 
+> 当前最新正式版本是 `0.6.2`。下文保留 dev、release-candidate 与正式发布命令，作为
+> 后续版本复用的流程模板；它们不表示 `0.6.2` 仍处于候选阶段。
+
 本项目使用两个独立 workflow 发布 PyPI 包：
 
 - [`publish_runtime_pypi.yml`](../../.github/workflows/publish_runtime_pypi.yml)

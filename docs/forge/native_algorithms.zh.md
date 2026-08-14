@@ -7,8 +7,7 @@
 按模块整理的 Forge-only API 符号清单见 [Forge API 参考](forge_api_reference.zh.md)。
 
 核心 native 算法族首次发布于 Forge 0.4.0；Graph native replay 与 device-side 检查分别
-在 0.4.1 和 0.4.23 进入公开版本。本文说明当前 0.6.2 源码（包括待发布 0.6.2 API）的
-可移植性与安全合同；各项
+在 0.4.1 和 0.4.23 进入公开版本。本文说明已正式发布的 0.6.2 可移植性与安全合同；各项
 能力的首次公开版本见[发行说明](release_notes.zh.md)。
 
 ## 公开入口

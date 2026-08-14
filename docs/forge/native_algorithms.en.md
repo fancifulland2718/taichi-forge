@@ -10,8 +10,7 @@ For a module-oriented list of all Forge-only API symbols, see
 
 The core native algorithm family first shipped in Forge 0.4.0, with Graph
 native replay and device-side checks following in 0.4.1 and 0.4.23. This page
-documents the current 0.6.2 source portability and safety contract, including
-the unreleased 0.6.2 APIs. See the
+documents the published 0.6.2 portability and safety contract. See the
 [release notes](release_notes.en.md) for the introduction version of each
 capability.
 
